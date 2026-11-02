@@ -502,6 +502,10 @@ impl ImageTables {
                 d.str()?;
             }
             7 | 12 => skip_fnkey(d, 0, &mut no_atoms)?,
+            13 => {
+                skip_fnkey(d, 0, &mut no_atoms)?;
+                for _ in 0..d.u32()? { skip_fnkey(d, 0, &mut no_atoms)?; }
+            }
             8 => {
                 d.u64()?;
                 d.u64()?;
@@ -997,6 +1001,8 @@ pub(crate) struct PrelinkedSlot {
     /// the kind of its key (its encoding's first byte: 0 an instance, 1 a closure, 2 glue), for
     /// what the install decides by it before the identity is decoded
     pub kind: u8,
+    /// an earlier run parked it below O3 (Cache::tier_parked_key): installed with its tier final
+    pub parked: bool,
 }
 
 /// One slot record of a loaded image (ranges into the flat arrays of `Img`).
@@ -1344,9 +1350,9 @@ impl Linker {
             return f.clone();
         }
         let files = (0..im.files.len()).map(|ix| self.cache().dec_file(u, &mut D { b: im.files[ix], p: 0 }).unwrap_or(u32::MAX)).collect();
-        // the pc maps of installed slots hold it: identity state, in the kept heap
+        // the pc maps of installed slots hold it: unit-lifetime state in the slot arena
         let files: Vec<u32> = files;
-        let f = crate::zone_alloc::kept_with(|| std::sync::Arc::new(crate::jit::PcFiles { files: files.clone(), keep: Box::new(KeepMapped(im.store.clone())) }));
+        let f = crate::zone_alloc::slots_with(|| std::sync::Arc::new(crate::jit::PcFiles { files: files.clone(), keep: Box::new(KeepMapped(im.store.clone())) }));
         im.pc_files = Some(f.clone());
         f
     }
@@ -1733,12 +1739,14 @@ impl Linker {
             let s = &im.slots[si];
             let (pcs, tier, inl, entry, key) = (s.pc, s.tier, s.inl, s.entry, s.key);
             let pc = crate::jit::PcMap::mapped(&im.bytes[pcs.0..pcs.1], files);
+            if !u.aux { crate::harness::reach::note(id, im.flat[inl.0..inl.1].iter().filter_map(|&k| im.slot_of(k))); }
             let inlined = (tier == TIER_O3).then(|| im.flat[inl.0..inl.1].iter().filter_map(|&k| im.slot_of(k)).collect());
             let kind = im.keys[key as usize].first().copied().unwrap_or(u8::MAX);
             let c = self.cache();
             c.linked.insert(id);
             c.linked_key.insert(id, entry);
-            out.push(PrelinkedSlot { id, at: at + off as u64, len: n as u32, trailer, pc, inlined, o2: tier == TIER_O2, base: tier == TIER_BASE, kind });
+            let parked = tier != TIER_O3 && c.tier_parked_key(entry);
+            out.push(PrelinkedSlot { id, at: at + off as u64, len: n as u32, trailer, pc, inlined, o2: tier == TIER_O2, base: tier == TIER_BASE, kind, parked });
         }
         out
     }

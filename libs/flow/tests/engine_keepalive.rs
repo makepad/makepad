@@ -309,10 +309,6 @@ fn local_service_keepalive_is_accepted_by_the_real_testpattern_service() {
     });
     let handle = match service {
         Ok(handle) => handle,
-        Err(error) if error.to_string().contains("Operation not permitted") => {
-            eprintln!("skipping real hub service: loopback bind is forbidden by this sandbox");
-            return;
-        }
         Err(error) => panic!("start real hub service: {error}"),
     };
     let provider = LocalService::new(&format!("http://{}", handle.addr));

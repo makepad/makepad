@@ -24,6 +24,7 @@ pub struct Entry {
 pub struct Inbox {
     path: Option<PathBuf>,
     pub entries: Vec<Entry>,
+    hot_cleared: std::collections::HashSet<String>,
 }
 
 fn fold_key(r: &Record) -> (String, u32, String, String) {
@@ -35,14 +36,16 @@ fn fold_key(r: &Record) -> (String, u32, String, String) {
 impl Inbox {
     /// An inbox in memory only (tests).
     pub fn memory() -> Inbox {
-        Inbox { path: None, entries: Vec::new() }
+        Inbox { path: None, entries: Vec::new(), hot_cleared: Default::default() }
     }
 
     /// Loads and compacts `path` (missing: empty).
     pub fn open(path: PathBuf) -> Inbox {
-        let mut inbox = Inbox { path: None, entries: Vec::new() };
+        let mut inbox = Inbox { path: None, entries: Vec::new(), hot_cleared: Default::default() };
         for line in std::fs::read_to_string(&path).unwrap_or_default().lines() {
-            if let Some(id) = line.strip_prefix("clear ") {
+            if let Some(id) = line.strip_prefix("jit-clear ") {
+                inbox.hot_cleared.insert(id.to_string());
+            } else if let Some(id) = line.strip_prefix("clear ") {
                 inbox.clear(id.trim());
             } else if let Some(id) = line.strip_prefix("seen ") {
                 inbox.mark_seen(id.trim());
@@ -68,6 +71,7 @@ impl Inbox {
             let _ = std::fs::create_dir_all(dir);
         }
         let mut text = String::new();
+        for id in &self.hot_cleared { text.push_str(&format!("jit-clear {id}\n")); }
         for e in &self.entries {
             for _ in 0..e.count {
                 text.push_str("rec ");
@@ -89,12 +93,13 @@ impl Inbox {
         if !r.sev.inbox() {
             return false;
         }
+        if self.hot_cleared.contains(&r.id) { return false; }
         if self.entries.iter().any(|e| e.record.id == r.id) {
             return false;
         }
         let key = fold_key(&r);
         self.append(&format!("rec {}", r.to_json()));
-        if let Some(e) = self.entries.iter_mut().rev().find(|e| fold_key(&e.record) == key && r.at_ms.saturating_sub(e.last_ms) < DEDUP_MS) {
+        if let Some(e) = self.entries.iter_mut().rev().find(|e| !matches!(r.kind.as_str(), "patch_failed" | "jit_error") && fold_key(&e.record) == key && r.at_ms.saturating_sub(e.last_ms) < DEDUP_MS) {
             e.count += 1;
             e.last_ms = r.at_ms;
             e.seen = false;
@@ -102,9 +107,9 @@ impl Inbox {
         }
         let at = r.at_ms;
         self.entries.push(Entry { record: r, count: 1, last_ms: at, seen: false });
-        if self.entries.len() > MAX_ENTRIES {
-            let drop = self.entries.len() - MAX_ENTRIES;
-            self.entries.drain(..drop);
+        while self.entries.len() > MAX_ENTRIES {
+            let Some(i) = self.entries.iter().position(|e| !matches!(e.record.kind.as_str(), "patch_failed" | "jit_error")) else { break };
+            self.entries.remove(i);
         }
         true
     }
@@ -127,6 +132,9 @@ impl Inbox {
     /// Clears one entry, or `all`.
     pub fn clear(&mut self, id: &str) -> usize {
         let before = self.entries.len();
+        for e in self.entries.iter().filter(|e| (id == "all" || e.record.id == id) && matches!(e.record.kind.as_str(), "patch_failed" | "jit_error")) {
+            self.hot_cleared.insert(e.record.id.clone());
+        }
         self.entries.retain(|e| !(id == "all" || e.record.id == id));
         let n = before - self.entries.len();
         if n > 0 && self.path.is_some() {

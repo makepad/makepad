@@ -357,6 +357,7 @@ pub fn edge_tool(chain: &EdgeChain, op: EdgeOp, tol: &Tolerance) -> Result<(TriM
             let len = a.distance(*b) + 2.0 * LINE_OVERRUN;
             let mut m = extrude(&[region], len, 0.0, false)?;
             let origin = *a - e * LINE_OVERRUN;
+            m.clear_normals();
             for p in &mut m.vertices {
                 *p = origin + u * p.x + v * p.y + e * p.z;
             }
@@ -388,6 +389,7 @@ pub fn edge_tool(chain: &EdgeChain, op: EdgeOp, tol: &Tolerance) -> Result<(TriM
             // revolve() turns about Y: map (x, y, z) -> centre + radial-plane basis.
             let ref_dir = radial;
             let other = axis.cross(ref_dir);
+            m.clear_normals();
             for p in &mut m.vertices {
                 *p = *center + ref_dir * p.x + *axis * p.y + other * (-p.z);
             }

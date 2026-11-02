@@ -159,6 +159,8 @@ impl Fcx<'_> {
                         if self.eq(element, pointee) {
                             self.commit_from(snapshot);
                             self.set_coerce(x.0, Coerce::RefToRaw(source_mut), target);
+                            // (no reborrow besides: `&mut [T; N] as *const T` is `&raw mut *x`)
+                            return;
                         } else { self.rollback_to(snapshot); }
                     }
                 }

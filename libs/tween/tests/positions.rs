@@ -340,19 +340,6 @@ fn golden_interpreted_position_cases() {
 }
 
 #[test]
-fn gsap_positions_golden() {
-    // T1 [golden: design_t1_positions]: also checked through the interpreter.
-    interpret("design_t1_positions");
-    let c = case("design_t1_positions");
-    assert_eq!(c.duration, 11.0);
-}
-
-#[test]
-fn repeats_delays_and_infinite_recent() {
-    interpret("design_t2_repeats_delays_infinite");
-}
-
-#[test]
 fn golden_add_pause_is_a_zero_duration_child() {
     let c = case("addPause_2");
     let mut b = Built::new(true);

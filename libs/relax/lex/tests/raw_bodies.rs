@@ -1,4 +1,4 @@
-use relax_lex::lexer::{lex, lex_with, register_raw_body, skip_braced, LexOptions, Mode, T};
+use relax_lex::lexer::{lex, register_raw_body, skip_braced, T};
 use relax_lex::tokens::{from_toks, Span};
 
 #[test]
@@ -13,11 +13,6 @@ fn registered_raw_bodies_stay_opaque_in_rust_and_expand_in_token_trees() {
     assert_eq!(skip_braced(src, 8), Some(src.len() - 1));
     let ts = from_toks(src, &toks, &|lo, hi| Span { lo, hi, file: 17, ..Span::DUMMY }).unwrap();
     assert_eq!(ts.to_string(), "opaque ! { r#\"}\"#; { 1 } }");
-    for mode in [Mode::Declarative, Mode::Gpu] {
-        let mut dialect = Vec::new();
-        lex_with(src, &LexOptions { edition: 2021, mode, trivia: true }, &mut dialect).unwrap();
-        assert!(!dialect.iter().any(|t| t.kind == T::RawBody));
-    }
     let mut malformed = Vec::new();
     assert!(lex(b"opaque! {", 2021, &mut malformed).is_err());
     let mut bad_body = Vec::new();

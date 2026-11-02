@@ -359,15 +359,8 @@ mod tests {
 
     fn parse_head(
         request: &[u8],
-    ) -> Option<Result<(HttpServerHeaders, Vec<u8>), HttpHeadError>> {
-        let listener = match TcpListener::bind("127.0.0.1:0") {
-            Ok(listener) => listener,
-            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
-                eprintln!("HTTP parser test skipped: loopback bind denied");
-                return None;
-            }
-            Err(error) => panic!("bind HTTP parser fixture: {error}"),
-        };
+    ) -> Result<(HttpServerHeaders, Vec<u8>), HttpHeadError> {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind HTTP parser fixture");
         let addr = listener.local_addr().unwrap();
         let bytes = request.to_vec();
         let client = std::thread::spawn(move || {
@@ -380,16 +373,14 @@ mod tests {
             Instant::now() + Duration::from_secs(2),
         );
         client.join().unwrap();
-        Some(result)
+        result
     }
 
     #[test]
     fn body_sent_with_the_headers_is_returned_not_swallowed() {
-        let Some(Ok((headers, body))) = parse_head(
+        let (headers, body) = parse_head(
             b"POST /pair HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n\r\nhello",
-        ) else {
-            return;
-        };
+        ).expect("parse request head and body prefix");
         assert_eq!(headers.lines.len(), 3);
         assert_eq!(body, b"hello");
     }
@@ -403,24 +394,18 @@ mod tests {
             &b"GET //example.test/x HTTP/1.1\r\nHost: x\r\n\r\n"[..],
             &b"GET /x HTTP/1.1 extra\r\nHost: x\r\n\r\n"[..],
         ] {
-            let Some(result) = parse_head(bad) else { return };
+            let result = parse_head(bad);
             assert_eq!(result.unwrap_err(), HttpHeadError::BadRequest);
         }
     }
 
     #[test]
     fn duplicate_length_and_transfer_encoding_are_rejected() {
-        let Some(duplicate) =
-            parse_head(b"POST /x HTTP/1.1\r\nContent-Length:5\r\nContent-Length: 5\r\n\r\n")
-        else {
-            return;
-        };
+        let duplicate =
+            parse_head(b"POST /x HTTP/1.1\r\nContent-Length:5\r\nContent-Length: 5\r\n\r\n");
         assert_eq!(duplicate.unwrap_err(), HttpHeadError::BadRequest);
-        let Some(chunked) =
-            parse_head(b"POST /x HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n")
-        else {
-            return;
-        };
+        let chunked =
+            parse_head(b"POST /x HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n");
         assert_eq!(chunked.unwrap_err(), HttpHeadError::BadRequest);
     }
 
@@ -432,11 +417,11 @@ mod tests {
                 .map(|index| format!("X-{index}: x\r\n"))
                 .collect::<String>()
         );
-        let Some(too_many) = parse_head(too_many.as_bytes()) else { return };
+        let too_many = parse_head(too_many.as_bytes());
         assert_eq!(too_many.unwrap_err(), HttpHeadError::TooLarge);
 
         let oversized = format!("GET / HTTP/1.1\r\nX-Large: {}\r\n\r\n", "x".repeat(MAX_HEAD_BYTES));
-        let Some(oversized) = parse_head(oversized.as_bytes()) else { return };
+        let oversized = parse_head(oversized.as_bytes());
         assert_eq!(oversized.unwrap_err(), HttpHeadError::TooLarge);
     }
 

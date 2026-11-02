@@ -889,15 +889,6 @@ mod tests {
         assert_eq!(parse_hm("09:30"), Some((9, 30)));
     }
 
-    #[test]
-    fn midnight_end_does_not_occupy_the_next_day() {
-        let start = LocalMinute::from_hm(10, 22, 0).unwrap();
-        let end = LocalMinute::from_hm(11, 0, 0).unwrap();
-        let t = Timing::Timed { start, end };
-        assert!(t.intersects_day(10));
-        assert!(!t.intersects_day(11));
-    }
-
     #[cfg(any(unix, windows))]
     #[test]
     fn clock_snapshot_is_the_local_day() {

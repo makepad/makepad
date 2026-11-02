@@ -1396,8 +1396,8 @@ mod tests {
 
     #[test]
     fn to_ix_min() {
-        assert_eq!(N128::to_i8(), ::core::i8::MIN);
-        assert_eq!(N32768::to_i16(), ::core::i16::MIN);
+        assert_eq!(N128::to_i8(), i8::MIN);
+        assert_eq!(N32768::to_i16(), i16::MIN);
     }
 
     #[test]

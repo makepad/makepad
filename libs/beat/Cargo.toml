@@ -16,7 +16,3 @@ path = "src/lib.rs"
 eval = []
 
 [dependencies]
-
-[dev-dependencies]
-# Decodes the opt-in local corpus for the accuracy harness.
-makepad-audio-decode = { path = "../audio_decode" }

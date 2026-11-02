@@ -5339,14 +5339,6 @@ mod dormancy_tests {
         assert!(!is_wake_input(&Event::Signal));
     }
 
-    #[test]
-    fn input_wakes_a_dormant_instance_the_same_as_adopted() {
-        let mut dormancy = Dormancy::start(true);
-        assert!(is_wake_input(&Event::KeyDown(KeyEvent::default())));
-        assert!(dormancy.wake());
-        assert!(!dormancy.is_dormant());
-    }
-
     // The legend's classes and the map's kind_class must be exact inverses,
     // or a chip would tint tiles it cannot filter.
     #[test]

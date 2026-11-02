@@ -9503,11 +9503,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn delta_net_chunking_matches_autoregressive_reference_on_metal_when_available() {
-        let _runtime = match MetalRuntime::new() {
-            Ok(runtime) => runtime,
-            Err(_) => return,
-        };
+        let _runtime = MetalRuntime::new().expect("a working Metal device is required");
 
         let s_v = 32_i64;
         let h_k = 2_i64;
@@ -9678,10 +9676,7 @@ mod tests {
             "test.dnet_add_ch_lhs",
             "test.attn_pre_solve",
         ] {
-            let runtime = match MetalRuntime::new() {
-                Ok(runtime) => runtime,
-                Err(_) => return,
-            };
+            let runtime = MetalRuntime::new().expect("a working Metal device is required");
             let checkpoint = checkpoint_root(&mut ctx, checkpoint_name).unwrap();
             let mut graph = Graph::new();
             graph.build_forward_expand(&ctx, checkpoint).unwrap();
@@ -9711,10 +9706,7 @@ mod tests {
             }
         }
 
-        let solve_runtime = match MetalRuntime::new() {
-            Ok(runtime) => runtime,
-            Err(_) => return,
-        };
+        let solve_runtime = MetalRuntime::new().expect("a working Metal device is required");
         let lhs_checkpoint = checkpoint_root(&mut ctx, "test.dnet_add_ch_lhs").unwrap();
         let rhs_checkpoint = checkpoint_root(&mut ctx, "test.attn_pre_solve").unwrap();
         let mut lhs_graph = Graph::new();
@@ -9724,10 +9716,7 @@ mod tests {
         lhs_graph
             .build_forward_expand(&ctx, rhs_checkpoint)
             .unwrap();
-        let lhs_runtime = match MetalRuntime::new() {
-            Ok(runtime) => runtime,
-            Err(_) => return,
-        };
+        let lhs_runtime = MetalRuntime::new().expect("a working Metal device is required");
         let lhs_prepared = prepare_graph(&ctx, &lhs_graph, lhs_runtime.features()).unwrap();
         let lhs_session = MetalGraphSession::from_runtime(
             lhs_runtime,
@@ -9873,10 +9862,7 @@ mod tests {
         let ch_kg_t = view_dim2_slice_2d(&mut ctx, kg_t_checkpoint, 0).unwrap();
         assert_replayed_mul_mat_matches_cpu(&mut ctx, ch_kg_t, v_t_new, "kgv");
 
-        let runtime = match MetalRuntime::new() {
-            Ok(runtime) => runtime,
-            Err(_) => return,
-        };
+        let runtime = MetalRuntime::new().expect("a working Metal device is required");
         let mut graph = Graph::new();
         graph.build_forward_expand(&ctx, output_cont).unwrap();
         graph.build_forward_expand(&ctx, state_cont).unwrap();
@@ -9928,6 +9914,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
     fn cpu_gated_delta_net_f32(
         q: &[f32],
         k: &[f32],
@@ -10017,6 +10004,7 @@ mod tests {
         (attn_out, state_out)
     }
 
+    #[cfg(target_os = "macos")]
     fn execute_tensor_f32(ctx: &mut Context, tensor_id: TensorId) -> Vec<f32> {
         let runtime = match MetalRuntime::new() {
             Ok(runtime) => runtime,
@@ -10038,6 +10026,7 @@ mod tests {
         bytes_to_f32s(execution.outputs.get(&root).unwrap())
     }
 
+    #[cfg(target_os = "macos")]
     fn assert_replayed_mul_mat_matches_cpu(
         ctx: &mut Context,
         lhs: TensorId,
@@ -10083,6 +10072,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
     fn f32s_to_bytes(values: &[f32]) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(values.len() * std::mem::size_of::<f32>());
         for value in values {
@@ -10091,6 +10081,7 @@ mod tests {
         bytes
     }
 
+    #[cfg(target_os = "macos")]
     fn bytes_to_f32s(bytes: &[u8]) -> Vec<f32> {
         bytes
             .chunks_exact(4)
@@ -10098,10 +10089,12 @@ mod tests {
             .collect()
     }
 
+    #[cfg(target_os = "macos")]
     fn patterned_f32s(len: usize, base: f32, step: f32) -> Vec<f32> {
         (0..len).map(|idx| base + step * idx as f32).collect()
     }
 
+    #[cfg(target_os = "macos")]
     fn cpu_solve_tri_f32(a: &[f32], b: &[f32], n: usize, k: usize, batches: usize) -> Vec<f32> {
         let mut out = vec![0.0f32; b.len()];
         for batch in 0..batches {
@@ -10122,6 +10115,7 @@ mod tests {
         out
     }
 
+    #[cfg(target_os = "macos")]
     fn cpu_mul_mat_batched_f32(
         a: &[f32],
         b: &[f32],
@@ -10148,6 +10142,7 @@ mod tests {
         out
     }
 
+    #[cfg(target_os = "macos")]
     fn checkpoint_root(ctx: &mut Context, name: &str) -> std::result::Result<TensorId, String> {
         let tensor_id = ctx
             .get_tensor(name)
@@ -10167,6 +10162,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
     fn checkpoint_root_direct(
         ctx: &mut Context,
         tensor_id: TensorId,

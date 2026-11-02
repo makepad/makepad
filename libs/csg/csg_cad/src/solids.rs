@@ -22,6 +22,7 @@ pub fn signed_volume(m: &TriMesh) -> f64 {
 /// Turn the mesh outward if it came out inside-out.
 pub fn orient_outward(m: &mut TriMesh) {
     if signed_volume(m) < 0.0 {
+        m.clear_normals();
         for t in &mut m.triangles {
             t.swap(1, 2);
         }
@@ -154,6 +155,7 @@ pub fn revolve(regions: &[Region], angle_deg: f64, tol: &Tolerance) -> Result<Tr
 }
 
 fn drop_degenerate(m: &mut TriMesh) {
+    m.clear_normals();
     m.triangles.retain(|t| t[0] != t[1] && t[1] != t[2] && t[0] != t[2]);
 }
 

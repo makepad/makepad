@@ -1127,23 +1127,29 @@ mod penalty_tests {
         // be protected from the loop, and it must be protected by the
         // frequency term rather than the presence one.
         //
-        // Env is process-global and the suite runs threaded, so this reads the
-        // defaults rather than setting anything — a `set_var` here would
-        // change what every other test in this process sees.
-        for key in [
-            "MAKEPAD_ASSET_AI_LLM_PRESENCE_PENALTY",
-            "MAKEPAD_ASSET_AI_LLM_FREQUENCY_PENALTY",
-            "MAKEPAD_ASSET_AI_LLM_PENALTY_WINDOW",
-        ] {
-            if std::env::var(key).is_ok() {
-                return;
-            }
+        // Isolate the defaults from deployment overrides without changing
+        // the environment of other tests running in this process.
+        const CHILD: &str = "MAKEPAD_TEST_SAMPLING_DEFAULTS_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "llm_backend::penalty_tests::the_penalty_knobs_default_frequency_dominant", "--nocapture"])
+                .env(CHILD, "1")
+                .env_remove("MAKEPAD_ASSET_AI_LLM_PRESENCE_PENALTY")
+                .env_remove("MAKEPAD_ASSET_AI_LLM_FREQUENCY_PENALTY")
+                .env_remove("MAKEPAD_ASSET_AI_LLM_PENALTY_WINDOW")
+                .output()
+                .expect("run sampling defaults with a clean environment");
+            assert!(output.status.success(), "sampling defaults child failed: {:?}", output);
+            assert!(String::from_utf8_lossy(&output.stdout).contains("sampling defaults checked"),
+                "sampling defaults child did not run the test: {:?}", output);
+            return;
         }
         let (presence, frequency, window) = sampling_penalties();
         assert_eq!(presence, 0.0, "presence taxes ordinary prose; off by default");
         assert!(frequency > 0.0, "a box that sets nothing is still protected");
         assert!(frequency < 1.0, "and not so hard it rewrites normal English");
         assert!(window >= 32, "a window too short cannot see a loop at all");
+        println!("sampling defaults checked");
     }
 }
 

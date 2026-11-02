@@ -4,7 +4,6 @@
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
-#![cfg_attr(feature = "benchmark", feature(test))]
 #![cfg_attr(feature = "simd", feature(portable_simd))]
 #![cfg_attr(
     feature = "no-stdlib-ffi-binding",

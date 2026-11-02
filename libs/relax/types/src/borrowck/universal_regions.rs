@@ -40,7 +40,7 @@ impl UniversalRegions {
 }
 
 use crate::program::DefId;
-use crate::tcx::{Tcx, outlives::RegionContract};
+use crate::tcx::{Tcx, outlives::{RegionContract, OutlivesPredicate}};
 use crate::types::{TyId, TyKind, RegionId, RegionKind, RegionScope, LateParamKind, BoundVar};
 use crate::types::fold::{BoundVarReplacer, TypeFolder};
 
@@ -294,6 +294,30 @@ fn coroutine_closure_signature(tcx: &Tcx, owner: DefId, expr: u32, signature: Ty
 pub const ENV_ERASED_BASE: u32 = 0x4000_0000;
 
 impl SignatureRegions {
+    /// The signature of an instance of `def` (a body instantiated with the concrete `args` of
+    /// its types and consts, the instance checker's): its types with `args` substituted for the
+    /// parameters (lifetimes stay the declaration's), as BorrowckInferCtxt::new instantiates the
+    /// declaration's environment for the same body.
+    pub fn instantiated(mut self, tcx: &Tcx, prog: &Program, def: DefId, args: &[TyId]) -> Self {
+        use crate::consts::GenericArg;
+        let indices = tcx.generic_indices_of(prog, def);
+        if args.len() != indices.types_consts.len() { return self; }
+        let mut full = indices.identity_args(&tcx.tys);
+        for (i, &ty) in args.iter().enumerate() {
+            full[indices.types_consts[i] as usize] = match tcx.tys.kind(ty) { TyKind::Const(ct) => GenericArg::Const(*ct), _ => GenericArg::Type(ty) };
+        }
+        let s = |ty: TyId| crate::types::fold::EarlyBinder::bind(&tcx.tys, ty).instantiate(&tcx.tys, &indices, &full);
+        let p = |o: &mut OutlivesPredicate| if let OutlivesPredicate::Type(t, _) = o { *t = s(*t); };
+        for t in &mut self.inputs { *t = s(*t); }
+        self.output = s(self.output);
+        if let Some(t) = &mut self.implicit_input { *t = s(*t); }
+        let c = &mut self.contract;
+        c.predicates.iter_mut().for_each(p);
+        c.caller_predicates.iter_mut().for_each(p);
+        for t in c.assumed_wf.iter_mut().chain(c.trait_types.iter_mut()).chain(c.self_ty.iter_mut()) { *t = s(*t); }
+        for cs in &mut c.callable_signatures { cs.signature = s(cs.signature); }
+        self
+    }
     pub fn function(tcx: &Tcx, prog: &Program, owner: DefId) -> Option<Self> { Self::function_signature(tcx,prog,owner,true) }
     /// Calling a C-variadic function does not pass the body's implicit VaList.
     pub fn function_call(tcx: &Tcx, prog: &Program, owner: DefId) -> Option<Self> { Self::function_signature(tcx,prog,owner,false) }

@@ -53,10 +53,6 @@ server_system = [
 name = "wayland_backend"
 path = "src/lib.rs"
 
-[[test]]
-name = "rs_sys_impls"
-path = "tests/rs_sys_impls.rs"
-
 [dependencies.downcast-rs]
 path = "../downcast-rs"
 version = "1.2"
@@ -92,12 +88,6 @@ features = [
 [dependencies.wayland-sys]
 path = "../wayland-sys"
 features = []
-
-[dev-dependencies.concat-idents]
-version = "1.1"
-
-[dev-dependencies.env_logger]
-version = "0.10"
 
 [dev-dependencies.scoped-tls]
 path = "../scoped-tls"

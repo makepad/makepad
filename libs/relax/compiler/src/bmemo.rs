@@ -24,7 +24,7 @@
 //! by the live-patch epoch the front ran under (a patch can change read-only data a body folds),
 //! kept in two generations of MAX_BYTES / 2 (estimated) each: when the newer one fills, the older
 //! one is dropped. Only slots whose body can have siblings take part (instances of generic fns,
-//! their closures, glue, shims and SPEC-V twins; `worthy`). Off with MAKEPAD_RUN_BMEMO=0, and whenever a
+//! their closures, glue, shims and SPEC-V twins; `worthy`). Off whenever a
 //! name-selected code generator option is set (the root body's name is not part of the key).
 
 use super::*;
@@ -194,12 +194,12 @@ pub(crate) struct Memo {
 /// was dropped full
 pub(crate) static STATS: [AtomicU64; 7] = [const { AtomicU64::new(0) }; 7];
 
-/// The memo is used: not MAKEPAD_RUN_BMEMO=0, and no code generator option selects functions by
+/// The memo is used: no code generator option selects functions by
 /// name (the key leaves the name out), no interpreter selection, no web export or back-end bench
 /// capture (they record what the back ends that run see).
 pub(crate) fn on(options: &crate::options::Options) -> bool {
     static ENV: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENV.get_or_init(|| std::env::var("MAKEPAD_RUN_BMEMO").map_or(true, |v| v != "0") && std::env::var_os("MAKEPAD_RUN_INTERP").is_none())
+    *ENV.get_or_init(|| std::env::var_os("MAKEPAD_RUN_INTERP").is_none())
         && options.no_layout_fn.is_none()
         && options.layout_only.is_none()
         && options.unroll_only.is_none()

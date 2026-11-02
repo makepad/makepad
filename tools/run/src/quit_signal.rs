@@ -13,7 +13,7 @@
 //! window closes, the exit write runs). A second signal later than 250 ms forces the exit (one
 //! request delivered twice, as GNU timeout sends it to the child and its group, is one).
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
 mod native {
     use std::ffi::{c_int, c_void};
     use std::io::Read;
@@ -38,13 +38,13 @@ mod native {
         fn write(fd: c_int, bytes: *const c_void, len: usize) -> isize;
         fn _exit(status: c_int) -> !;
         fn clock_gettime(clock: c_int, ts: *mut Timespec) -> c_int;
-        #[cfg_attr(target_os = "macos", link_name = "__error")]
+        #[cfg_attr(target_vendor = "apple", link_name = "__error")]
         #[cfg_attr(target_os = "linux", link_name = "__errno_location")]
         fn errno_location() -> *mut c_int;
     }
     #[cfg(target_os = "linux")]
     const CLOCK_MONOTONIC: c_int = 1;
-    #[cfg(target_os = "macos")]
+    #[cfg(target_vendor = "apple")]
     const CLOCK_MONOTONIC: c_int = 6;
 
     extern "C" fn handle(_: c_int) {
@@ -92,8 +92,8 @@ mod native {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
 pub use native::install;
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_vendor = "apple")))]
 pub fn install(_on_quit: impl FnOnce() + Send + 'static) {}

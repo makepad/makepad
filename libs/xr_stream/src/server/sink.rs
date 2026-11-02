@@ -454,6 +454,7 @@ impl XrPack {
             source.eye = eye;
         }
         self.counts.desktop_now = cx.cx.window_paints();
+        self.counts.frozen += u32::from(shared.interaction.load(Ordering::Acquire));
         self.host_load(cx.cx, &shared);
         self.counts.window(&shared);
         // the stream's AA and render scale: the XR pass renders multisampled, at the supersample
@@ -756,6 +757,7 @@ impl XrPack {
     pub(super) fn wake(&mut self, cx: &mut Cx) {
         // a headset linked or gone: the desktop's mirrors show it (or that none streams)
         let live = self.shared().frames_flowing();
+        if !live { crate::XrDesktopFreeze::clear(cx); }
         if !live && self.load_at.take().is_some() {
             cx.set_pass_load_enabled(false);
             self.shared().host_load.lock().unwrap().clear();
@@ -899,6 +901,8 @@ struct Counts {
     /// The desktop's window paints (`Cx::window_paints`): at the window's start and now.
     desktop_at: u64,
     desktop_now: u64,
+    /// Draws made while the desktop interaction hold was active.
+    frozen: u32,
 }
 
 impl Counts {
@@ -917,7 +921,7 @@ impl Counts {
             Some(l) => format!(" · per frame: draw {:.1} ms, GPU eyes {:.1} desktop {:.1} other {:.1} ms{}", l.draw_ms_s / per, l.eyes_gpu_ms_s / per, l.desktop_gpu_ms_s / per, l.other_gpu_ms_s / per, if l.timed { "" } else { " (untimed)" }),
             None => String::new(),
         };
-        log!("xr serve: draws {:.0}/s · new XR frames {:.0}/s · packed {:.0}/s · handed {:.0}/s · poses asked {:.0}/s · waited for room {} · not streamed (empty) {} · desktop painted {:.1}/s{load}", r(self.draws), r(self.frames), r(self.packed), r(self.handed), r(self.asked), self.waited, if skipped.is_empty() { "0".to_string() } else { skipped.join(", ") }, painted as f64 / secs);
+        log!("xr serve: draws {:.0}/s · new XR frames {:.0}/s · packed {:.0}/s · handed {:.0}/s · poses asked {:.0}/s · waited for room {} · not streamed (empty) {} · desktop painted {:.1}/s · frozen {} ({:.0}/s, active={}){load}", r(self.draws), r(self.frames), r(self.packed), r(self.handed), r(self.asked), self.waited, if skipped.is_empty() { "0".to_string() } else { skipped.join(", ") }, painted as f64 / secs, self.frozen, r(self.frozen), shared.interaction.load(Ordering::Acquire));
         // the app's audio (what the headset hears) stops for good when its callback panics
         {
             use makepad_widgets::makepad_platform::audio_output_fence as fence;

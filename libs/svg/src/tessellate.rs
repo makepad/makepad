@@ -14,36 +14,6 @@ pub struct VVertex {
 }
 
 
-/// Accumulates wall time between laps into the profiler's slots; the web has
-/// no clock, so the laps are simply skipped there.
-struct LapTimer {
-    #[cfg(not(target_arch = "wasm32"))]
-    last: Option<std::time::Instant>,
-}
-
-impl LapTimer {
-    fn new(enabled: bool) -> Self {
-        #[cfg(target_arch = "wasm32")]
-        let _ = enabled;
-        Self {
-            #[cfg(not(target_arch = "wasm32"))]
-            last: enabled.then(std::time::Instant::now),
-        }
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    fn lap(&mut self, slot: &mut u64) {
-        if let Some(t) = self.last {
-            let now = std::time::Instant::now();
-            *slot += (now - t).as_nanos() as u64;
-            self.last = Some(now);
-        }
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    fn lap(&mut self, _slot: &mut u64) {}
-}
-
 impl VVertex {
     fn new(x: f32, y: f32, u: f32, v: f32) -> Self {
         Self {
@@ -103,23 +73,8 @@ pub struct Tessellator {
     /// normalized by the emitter): exterior and hole rings must be
     /// consistently, oppositely wound and non-self-intersecting.
     trust_fill_winding: bool,
-    /// Bench-only escape hatch: disables the (behavior-identical) bbox
-    /// prefilter in the fill-side sign probe so the original cost can be
-    /// measured. Never set in production.
-    disable_probe_bbox: bool,
     /// The flattened path's own fill rule (`VectorPath::fill_rule`).
     path_fill_rule: Option<crate::path::FillRule>,
-}
-
-/// Per-stage timing of a single `fill()` call, in nanoseconds.
-/// Filled in by `fill_impl` when profiling is requested (bench/test only).
-#[derive(Default, Clone, Copy, Debug)]
-struct FillStats {
-    joins_ns: u64,
-    sign_ns: u64,
-    body_emit_ns: u64,
-    sweep_ns: u64,
-    fringe_ns: u64,
 }
 
 #[derive(Debug)]
@@ -1065,37 +1020,10 @@ impl Tessellator {
         verts: &mut Vec<VVertex>,
         indices: &mut Vec<u32>,
     ) {
-        self.fill_impl(aa, line_join, miter_limit, gpu_expand_fill, verts, indices, None)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn fill_impl(
-        &mut self,
-        aa: f32,
-        line_join: LineJoin,
-        miter_limit: f32,
-        gpu_expand_fill: bool,
-        verts: &mut Vec<VVertex>,
-        indices: &mut Vec<u32>,
-        mut stats: Option<&mut FillStats>,
-    ) {
-        // Env-gated fixture capture: append the flattened input of this fill
-        // call to MAKEPAD_TESS_DUMP for offline benchmark replay.
-        #[cfg(not(target_arch = "wasm32"))]
-        fixture_dump::dump_fill(self, aa, line_join, miter_limit, gpu_expand_fill);
-
-        let mut lap_timer = LapTimer::new(stats.is_some());
-        let mut lap = move |slot: &mut u64| {
-            lap_timer.lap(slot);
-        };
-
         let woff = aa * 0.5;
         self.calculate_joins(woff, line_join, miter_limit);
         verts.clear();
         indices.clear();
-        if let Some(stats) = stats.as_deref_mut() {
-            lap(&mut stats.joins_ns);
-        }
 
         // Collect valid subpaths (>= 3 points) with per-contour AA side sign.
         // sign > 0: fill side is along +dmx/+dmy, sign < 0: fill side is along -dmx/-dmy.
@@ -1126,9 +1054,6 @@ impl Tessellator {
         };
 
         self.compute_fill_signs(&mut valid_paths, fill_rule);
-        if let Some(stats) = stats.as_deref_mut() {
-            lap(&mut stats.sign_ns);
-        }
 
         // Emit fill body vertices.
         // In regular mode we inset by woff like NanoVG. In GPU-expand mode
@@ -1158,9 +1083,6 @@ impl Tessellator {
                 }
             }
         }
-        if let Some(stats) = stats.as_deref_mut() {
-            lap(&mut stats.body_emit_ns);
-        }
 
         // Feed edges from ALL subpaths into a single sweep-line tessellator.
         // Regions are classified with the non-zero winding rule.
@@ -1180,9 +1102,6 @@ impl Tessellator {
             }
             tess.tessellate_into(indices);
         }
-        if let Some(stats) = stats.as_deref_mut() {
-            lap(&mut stats.sweep_ns);
-        }
 
         if woff > 0.0 {
             self.emit_fill_fringe(
@@ -1193,9 +1112,6 @@ impl Tessellator {
                 verts,
                 indices,
             );
-        }
-        if let Some(stats) = stats.as_deref_mut() {
-            lap(&mut stats.fringe_ns);
         }
     }
 
@@ -1400,11 +1316,7 @@ impl Tessellator {
                 [min_x, min_y, max_x, max_y]
             })
             .collect();
-        let bboxes_opt = if self.disable_probe_bbox {
-            None
-        } else {
-            Some(bboxes.as_slice())
-        };
+        let bboxes_opt = Some(bboxes.as_slice());
         for i in 0..valid_paths.len() {
             if only_sentinels && valid_paths[i].2 != 0.0 {
                 continue;
@@ -1579,89 +1491,6 @@ fn point_in_fill_rule(
     match fill_rule {
         FillRule::NonZero => winding != 0,
         FillRule::EvenOdd => (winding & 1) != 0,
-    }
-}
-
-/// Env-gated fixture capture for offline tessellation benchmarks.
-/// `MAKEPAD_TESS_DUMP=/path/file.tessfix` appends one length-prefixed binary
-/// record per `fill()` call: the fill parameters plus every flattened contour
-/// (post `flatten`/`prepare_points`, pre `calculate_joins`).
-#[cfg(not(target_arch = "wasm32"))]
-mod fixture_dump {
-    use super::Tessellator;
-    use crate::path::{LineJoin, Winding};
-    use std::io::Write;
-    use std::sync::{Mutex, OnceLock};
-
-    pub(super) const MAGIC: u32 = 0x5445_5346; // "TESF"
-    pub(super) const VERSION: u32 = 1;
-
-    static DUMP: OnceLock<Option<Mutex<std::fs::File>>> = OnceLock::new();
-
-    fn writer() -> Option<&'static Mutex<std::fs::File>> {
-        DUMP.get_or_init(|| {
-            let path = std::env::var("MAKEPAD_TESS_DUMP").ok()?;
-            let file = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&path)
-                .map_err(|e| {
-                    eprintln!("MAKEPAD_TESS_DUMP: cannot open {path}: {e}");
-                    e
-                })
-                .ok()?;
-            Some(Mutex::new(file))
-        })
-        .as_ref()
-    }
-
-    fn push_u32(buf: &mut Vec<u8>, v: u32) {
-        buf.extend_from_slice(&v.to_le_bytes());
-    }
-    fn push_f32(buf: &mut Vec<u8>, v: f32) {
-        buf.extend_from_slice(&v.to_le_bytes());
-    }
-
-    pub(super) fn dump_fill(
-        tess: &Tessellator,
-        aa: f32,
-        line_join: LineJoin,
-        miter_limit: f32,
-        gpu_expand_fill: bool,
-    ) {
-        let Some(file) = writer() else {
-            return;
-        };
-        let mut buf = Vec::with_capacity(64 + tess.points.len() * 12);
-        push_u32(&mut buf, MAGIC);
-        push_u32(&mut buf, VERSION);
-        push_f32(&mut buf, aa);
-        push_u32(
-            &mut buf,
-            match line_join {
-                LineJoin::Miter => 0,
-                LineJoin::Round => 1,
-                LineJoin::Bevel => 2,
-            },
-        );
-        push_f32(&mut buf, miter_limit);
-        push_u32(&mut buf, gpu_expand_fill as u32);
-        push_u32(&mut buf, tess.paths.len() as u32);
-        for sp in &tess.paths {
-            push_u32(&mut buf, sp.count as u32);
-            let flags = (sp.closed as u32)
-                | ((sp.has_explicit_winding as u32) << 1)
-                | ((matches!(sp.winding, Winding::CW) as u32) << 2);
-            push_u32(&mut buf, flags);
-            for pt in &tess.points[sp.first..sp.first + sp.count] {
-                push_f32(&mut buf, pt.x);
-                push_f32(&mut buf, pt.y);
-                push_u32(&mut buf, pt.flags as u32);
-            }
-        }
-        if let Ok(mut file) = file.lock() {
-            let _ = file.write_all(&buf);
-        }
     }
 }
 
@@ -2442,506 +2271,6 @@ mod stroke_tests {
         // carrier remains necessary to place the longitudinal AA ramp.
         assert_eq!(verts.len(), 2 + 4);
         assert!(referenced.into_iter().all(|is_referenced| is_referenced));
-    }
-}
-
-// ---- Fixture replay benchmark ----------------------------------------------
-// Replays fill() inputs captured via MAKEPAD_TESS_DUMP (see fixture_dump).
-// Run:
-//   TESS_FIXTURE=/path/a.tessfix[,b.tessfix...] \
-//   cargo test -p makepad-svg --release fixture_bench -- --ignored --nocapture
-// Env knobs:
-//   TESS_REPS=N          timing repetitions (default 3, best-of for totals)
-//   TESS_TRUST=1         enable trust_fill_winding (map fast path)
-//   TESS_NO_BBOX=1       disable probe bbox prefilter (original baseline)
-//   TESS_GOLDEN_WRITE=p  write per-record output summary to p
-//   TESS_GOLDEN_CHECK=p  compare outputs against a written summary
-#[cfg(test)]
-mod fixture_bench {
-    use super::*;
-
-    struct FixContour {
-        closed: bool,
-        has_explicit_winding: bool,
-        winding: Winding,
-        pts: Vec<(f32, f32, u8)>,
-    }
-
-    struct FixRecord {
-        aa: f32,
-        line_join: LineJoin,
-        miter_limit: f32,
-        gpu_expand_fill: bool,
-        contours: Vec<FixContour>,
-    }
-
-    struct Cursor<'a> {
-        data: &'a [u8],
-        pos: usize,
-    }
-
-    impl<'a> Cursor<'a> {
-        fn u32(&mut self) -> u32 {
-            let v = u32::from_le_bytes(self.data[self.pos..self.pos + 4].try_into().unwrap());
-            self.pos += 4;
-            v
-        }
-        fn f32(&mut self) -> f32 {
-            f32::from_bits(self.u32())
-        }
-        fn done(&self) -> bool {
-            self.pos >= self.data.len()
-        }
-    }
-
-    fn parse_fixture(data: &[u8]) -> Vec<FixRecord> {
-        let mut cur = Cursor { data, pos: 0 };
-        let mut out = Vec::new();
-        while !cur.done() {
-            assert_eq!(cur.u32(), 0x5445_5346, "bad magic at {}", cur.pos - 4);
-            assert_eq!(cur.u32(), 1, "bad version");
-            let aa = cur.f32();
-            let line_join = match cur.u32() {
-                0 => LineJoin::Miter,
-                1 => LineJoin::Round,
-                _ => LineJoin::Bevel,
-            };
-            let miter_limit = cur.f32();
-            let gpu_expand_fill = cur.u32() != 0;
-            let n_paths = cur.u32() as usize;
-            let mut contours = Vec::with_capacity(n_paths);
-            for _ in 0..n_paths {
-                let count = cur.u32() as usize;
-                let flags = cur.u32();
-                let mut pts = Vec::with_capacity(count);
-                for _ in 0..count {
-                    let x = cur.f32();
-                    let y = cur.f32();
-                    let f = cur.u32() as u8;
-                    pts.push((x, y, f));
-                }
-                contours.push(FixContour {
-                    closed: flags & 1 != 0,
-                    has_explicit_winding: flags & 2 != 0,
-                    winding: if flags & 4 != 0 { Winding::CW } else { Winding::CCW },
-                    pts,
-                });
-            }
-            out.push(FixRecord {
-                aa,
-                line_join,
-                miter_limit,
-                gpu_expand_fill,
-                contours,
-            });
-        }
-        out
-    }
-
-    /// Load a record's flattened contours into the tessellator, bit-exact,
-    /// recomputing only dx/dy/len (winding fixup + dedup already happened
-    /// before the dump; re-running them could diverge).
-    fn load_record(tess: &mut Tessellator, rec: &FixRecord) {
-        tess.points.clear();
-        tess.paths.clear();
-        for c in &rec.contours {
-            let first = tess.points.len();
-            tess.paths.push(SubPath {
-                first,
-                count: c.pts.len(),
-                closed: c.closed,
-                winding: c.winding,
-                has_explicit_winding: c.has_explicit_winding,
-                convex: false,
-                nbevel: 0,
-            });
-            for &(x, y, flags) in &c.pts {
-                tess.points.push(VPoint {
-                    x,
-                    y,
-                    flags,
-                    ..Default::default()
-                });
-            }
-        }
-        // Same direction/length pass as prepare_points.
-        for i in 0..tess.paths.len() {
-            let first = tess.paths[i].first;
-            let count = tess.paths[i].count;
-            if count < 2 {
-                continue;
-            }
-            for j in 0..count {
-                let j1 = if j + 1 < count { j + 1 } else { 0 };
-                let p0 = tess.points[first + j];
-                let p1 = tess.points[first + j1];
-                let mut dx = p1.x - p0.x;
-                let mut dy = p1.y - p0.y;
-                let len = (dx * dx + dy * dy).sqrt();
-                if len > 1e-6 {
-                    let il = 1.0 / len;
-                    dx *= il;
-                    dy *= il;
-                }
-                tess.points[first + j].dx = dx;
-                tess.points[first + j].dy = dy;
-                tess.points[first + j].len = len;
-            }
-        }
-    }
-
-    fn fnv1a64(hash: &mut u64, bytes: &[u8]) {
-        for &b in bytes {
-            *hash ^= b as u64;
-            *hash = hash.wrapping_mul(0x100_0000_01b3);
-        }
-    }
-
-    struct RecordResult {
-        n_verts: usize,
-        n_indices: usize,
-        area: f64,
-        hash: u64,
-        nan_verts: usize,
-    }
-
-    fn summarize(verts: &[VVertex], indices: &[u32]) -> RecordResult {
-        let mut hash = 0xcbf2_9ce4_8422_2325u64;
-        let mut nan_verts = 0usize;
-        for v in verts {
-            for f in [v.x, v.y, v.u, v.v, v.stroke_dist] {
-                if !f.is_finite() {
-                    nan_verts += 1;
-                }
-                fnv1a64(&mut hash, &f.to_bits().to_le_bytes());
-            }
-        }
-        for i in indices {
-            fnv1a64(&mut hash, &i.to_le_bytes());
-        }
-        let mut area = 0.0f64;
-        for tri in indices.chunks_exact(3) {
-            let a = &verts[tri[0] as usize];
-            let b = &verts[tri[1] as usize];
-            let c = &verts[tri[2] as usize];
-            area += 0.5
-                * ((b.x as f64 - a.x as f64) * (c.y as f64 - a.y as f64)
-                    - (c.x as f64 - a.x as f64) * (b.y as f64 - a.y as f64));
-        }
-        RecordResult {
-            n_verts: verts.len(),
-            n_indices: indices.len(),
-            area,
-            hash,
-            nan_verts,
-        }
-    }
-
-    /// Recompute the baseline probe's per-contour fill-side signs for a
-    /// record (diagnostics for trusted-winding divergences).
-    fn probe_signs_for(rec: &FixRecord) -> Vec<f32> {
-        let mut tess = Tessellator::default();
-        load_record(&mut tess, rec);
-        let mut valid_paths: Vec<(usize, usize, f32)> = Vec::new();
-        for sp in &tess.paths {
-            if sp.count >= 3 {
-                valid_paths.push((sp.first, sp.count, 1.0));
-            }
-        }
-        let fill_rule = if tess
-            .paths
-            .iter()
-            .any(|sp| sp.count >= 3 && sp.has_explicit_winding)
-        {
-            FillRule::NonZero
-        } else {
-            FillRule::EvenOdd
-        };
-        let mut out = Vec::new();
-        for i in 0..valid_paths.len() {
-            let (first, count, _) = valid_paths[i];
-            let mut sign = 1.0f32;
-            let mut found = false;
-            for j in 0..count {
-                let j1 = (j + 1) % count;
-                let p0 = tess.points[first + j];
-                let p1 = tess.points[first + j1];
-                let mut ex = p1.x - p0.x;
-                let mut ey = p1.y - p0.y;
-                let e2 = ex * ex + ey * ey;
-                if e2 <= 1e-12 {
-                    continue;
-                }
-                let inv_e = 1.0 / e2.sqrt();
-                ex *= inv_e;
-                ey *= inv_e;
-                let nx = ey;
-                let ny = -ex;
-                let mx = (p0.x + p1.x) * 0.5;
-                let my = (p0.y + p1.y) * 0.5;
-                let local_len = p0.len.max(p1.len);
-                let base_eps = (local_len * 1e-3).max(1e-4);
-                for s in [1.0f32, 4.0, 16.0] {
-                    let eps = base_eps * s;
-                    let plus_filled = point_in_fill_rule(
-                        mx + nx * eps,
-                        my + ny * eps,
-                        &tess.points,
-                        &valid_paths,
-                        None,
-                        fill_rule,
-                    );
-                    let minus_filled = point_in_fill_rule(
-                        mx - nx * eps,
-                        my - ny * eps,
-                        &tess.points,
-                        &valid_paths,
-                        None,
-                        fill_rule,
-                    );
-                    if plus_filled != minus_filled {
-                        sign = if plus_filled { 1.0 } else { -1.0 };
-                        found = true;
-                        break;
-                    }
-                }
-                if found {
-                    break;
-                }
-            }
-            if !found {
-                let area = poly_area(&tess.points[first..first + count]);
-                sign = if area >= 0.0 { 1.0 } else { -1.0 };
-            }
-            out.push(sign);
-        }
-        out
-    }
-
-    fn percentile(sorted: &[u64], p: f64) -> u64 {
-        if sorted.is_empty() {
-            return 0;
-        }
-        let idx = ((sorted.len() - 1) as f64 * p).round() as usize;
-        sorted[idx]
-    }
-
-    #[test]
-    #[ignore]
-    fn fixture_bench() {
-        let fixtures = std::env::var("TESS_FIXTURE")
-            .expect("set TESS_FIXTURE=/path/one.tessfix[,two.tessfix...]");
-        let reps: usize = std::env::var("TESS_REPS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(3);
-        let trust = std::env::var("TESS_TRUST").map_or(false, |v| v == "1");
-        let no_bbox = std::env::var("TESS_NO_BBOX").map_or(false, |v| v == "1");
-        let golden_write = std::env::var("TESS_GOLDEN_WRITE").ok();
-        let golden_check = std::env::var("TESS_GOLDEN_CHECK").ok();
-
-        for fixture_path in fixtures.split(',') {
-            let data = std::fs::read(fixture_path).expect(fixture_path);
-            let records = parse_fixture(&data);
-            let n_contours: usize = records.iter().map(|r| r.contours.len()).sum();
-            let n_pts: usize = records
-                .iter()
-                .flat_map(|r| r.contours.iter().map(|c| c.pts.len()))
-                .sum();
-            println!(
-                "\n== {fixture_path}: {} fills, {} contours, {} points (trust={} bbox={})",
-                records.len(),
-                n_contours,
-                n_pts,
-                trust,
-                !no_bbox
-            );
-
-            let mut tess = Tessellator::default();
-            tess.set_trust_fill_winding(trust);
-            tess.disable_probe_bbox = no_bbox;
-            let mut verts = Vec::new();
-            let mut indices = Vec::new();
-
-            // Stage split rep (with stats), then clean timing reps.
-            let mut stats = FillStats::default();
-            let mut results = Vec::with_capacity(records.len());
-            for rec in &records {
-                load_record(&mut tess, rec);
-                tess.fill_impl(
-                    rec.aa,
-                    rec.line_join,
-                    rec.miter_limit,
-                    rec.gpu_expand_fill,
-                    &mut verts,
-                    &mut indices,
-                    Some(&mut stats),
-                );
-                results.push(summarize(&verts, &indices));
-            }
-
-            let mut best_total_ns = u64::MAX;
-            let mut per_fill_ns: Vec<u64> = vec![0; records.len()];
-            for _ in 0..reps.max(1) {
-                let mut total = 0u64;
-                for (ri, rec) in records.iter().enumerate() {
-                    load_record(&mut tess, rec);
-                    let t0 = std::time::Instant::now();
-                    tess.fill_impl(
-                        rec.aa,
-                        rec.line_join,
-                        rec.miter_limit,
-                        rec.gpu_expand_fill,
-                        &mut verts,
-                        &mut indices,
-                        None,
-                    );
-                    let ns = t0.elapsed().as_nanos() as u64;
-                    per_fill_ns[ri] = ns;
-                    total += ns;
-                }
-                best_total_ns = best_total_ns.min(total);
-            }
-
-            let stage_total = (stats.joins_ns
-                + stats.sign_ns
-                + stats.body_emit_ns
-                + stats.sweep_ns
-                + stats.fringe_ns)
-                .max(1);
-            println!(
-                "stage split (1 rep): joins {:.1}ms {:.0}% | sign {:.1}ms {:.0}% | body {:.1}ms {:.0}% | sweep {:.1}ms {:.0}% | fringe {:.1}ms {:.0}%",
-                stats.joins_ns as f64 / 1e6,
-                stats.joins_ns as f64 / stage_total as f64 * 100.0,
-                stats.sign_ns as f64 / 1e6,
-                stats.sign_ns as f64 / stage_total as f64 * 100.0,
-                stats.body_emit_ns as f64 / 1e6,
-                stats.body_emit_ns as f64 / stage_total as f64 * 100.0,
-                stats.sweep_ns as f64 / 1e6,
-                stats.sweep_ns as f64 / stage_total as f64 * 100.0,
-                stats.fringe_ns as f64 / 1e6,
-                stats.fringe_ns as f64 / stage_total as f64 * 100.0,
-            );
-            let mut sorted = per_fill_ns.clone();
-            sorted.sort_unstable();
-            println!(
-                "total {:.1}ms (best of {reps}) | per-fill p50 {:.1}us p95 {:.1}us max {:.1}ms",
-                best_total_ns as f64 / 1e6,
-                percentile(&sorted, 0.50) as f64 / 1e3,
-                percentile(&sorted, 0.95) as f64 / 1e3,
-                percentile(&sorted, 1.0) as f64 / 1e6,
-            );
-            let nan_total: usize = results.iter().map(|r| r.nan_verts).sum();
-            if nan_total > 0 {
-                println!("WARNING: {} non-finite vertex floats", nan_total);
-            }
-
-            let fixture_name = std::path::Path::new(fixture_path)
-                .file_name()
-                .unwrap()
-                .to_string_lossy()
-                .to_string();
-            if let Some(dir) = &golden_write {
-                let mut out = String::new();
-                for (i, r) in results.iter().enumerate() {
-                    out.push_str(&format!(
-                        "{} {} {} {:.9e} {:016x}\n",
-                        i, r.n_verts, r.n_indices, r.area, r.hash
-                    ));
-                }
-                let path = format!("{dir}/{fixture_name}.golden");
-                std::fs::write(&path, out).unwrap();
-                println!("golden written: {path}");
-            }
-            if let Some(dir) = &golden_check {
-                let path = format!("{dir}/{fixture_name}.golden");
-                let golden = std::fs::read_to_string(&path).expect(&path);
-                let mut mismatch_verts = 0usize;
-                let mut mismatch_idx = 0usize;
-                let mut mismatch_area = 0usize;
-                let mut hash_identical = 0usize;
-                let mut checked = 0usize;
-                for (line, r) in golden.lines().zip(&results) {
-                    let mut it = line.split_whitespace();
-                    let _i: usize = it.next().unwrap().parse().unwrap();
-                    let nv: usize = it.next().unwrap().parse().unwrap();
-                    let ni: usize = it.next().unwrap().parse().unwrap();
-                    let area: f64 = it.next().unwrap().parse().unwrap();
-                    let hash = u64::from_str_radix(it.next().unwrap(), 16).unwrap();
-                    checked += 1;
-                    if nv != r.n_verts {
-                        mismatch_verts += 1;
-                        if mismatch_verts <= 5 {
-                            println!(
-                                "  VERTS DIFF at record {}: golden {} got {}",
-                                checked - 1,
-                                nv,
-                                r.n_verts
-                            );
-                        }
-                    }
-                    if ni != r.n_indices {
-                        mismatch_idx += 1;
-                    }
-                    let denom = area.abs().max(1e-6);
-                    if ((area - r.area).abs() / denom) > 1e-3 {
-                        mismatch_area += 1;
-                        if mismatch_area <= 5 {
-                            println!(
-                                "  AREA DIFF at record {}: golden {:.6} got {:.6}",
-                                checked - 1,
-                                area,
-                                r.area
-                            );
-                            let rec = &records[checked - 1];
-                            println!(
-                                "    aa={} join={:?} contours={}",
-                                rec.aa,
-                                rec.line_join,
-                                rec.contours.len()
-                            );
-                            let probe_signs = probe_signs_for(rec);
-                            for (ci, c) in rec.contours.iter().enumerate().take(8) {
-                                let pts: Vec<VPoint> = c
-                                    .pts
-                                    .iter()
-                                    .map(|&(x, y, _)| VPoint {
-                                        x,
-                                        y,
-                                        ..Default::default()
-                                    })
-                                    .collect();
-                                println!(
-                                    "    contour {ci}: {} pts area {:.4} probe_sign {} closed={} first=({:.2},{:.2})",
-                                    c.pts.len(),
-                                    poly_area(&pts),
-                                    probe_signs[ci],
-                                    c.closed,
-                                    c.pts[0].0,
-                                    c.pts[0].1
-                                );
-                            }
-                        }
-                    }
-                    if hash == r.hash {
-                        hash_identical += 1;
-                    }
-                }
-                assert_eq!(checked, results.len(), "golden record count mismatch");
-                println!(
-                    "golden check: {}/{} bit-identical, {} vert-count diffs, {} index-count diffs, {} area diffs",
-                    hash_identical, checked, mismatch_verts, mismatch_idx, mismatch_area
-                );
-                // TESS_STRICT=0 downgrades divergence to a report (used to
-                // survey documented trusted-winding divergences on glitch
-                // geometry without aborting the remaining fixtures).
-                let strict = std::env::var("TESS_STRICT").map_or(true, |v| v != "0");
-                if strict {
-                    assert_eq!(mismatch_verts, 0, "fill body vertex count diverged");
-                    assert_eq!(mismatch_area, 0, "triangle area diverged");
-                }
-            }
-        }
     }
 }
 

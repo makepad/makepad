@@ -1,11 +1,12 @@
 //! This machine's capabilities and health: hardware from the OS (Linux `/proc` + `/sys` +
 //! `nvidia-smi`; macOS `sysctl` + `statfs`), policy from `~/.makepad/devhub/lease.conf`.
 //!
-//! `lease.conf` is `key = value` lines: `role = pool|suite|bench|user-wm|device`, `slots.<kind> = 0|1` (whether it takes the kind; one lease runs at a time),
+//! `lease.conf` is `key = value` lines: `role = pool|hot|suite|bench|user-wm|device`, `slots.<kind> = 0|1` (one write lease and one CI lease, except timed),
 //! `disk_floor_gb`, `disk_warn_gb`, `timed = on|off`, `spec = <text>`, `work = <dir>` (default
 //! `~/devhub`), CPU pinning for leases (`cpus.shared = 8-15,24-31`, `cpus.timed = 0-7,16-23`) and
 //! `user_idle_min` (default 3: minutes without a person's input before a node with our WM
 //! takes work again, [`super::UserSense`]).
+//! `native_trees` (default 3) bounds per-lane native trees and their targets.
 
 use super::{Caps, Kind, Role};
 use std::path::{Path, PathBuf};
@@ -20,8 +21,10 @@ pub struct LeaseConf {
     pub disk_warn_gb: f64,
     pub timed: bool,
     pub spec: String,
-    /// where leases work: `wt/`, `lane/`, `target/`, `tmp/`, `recovered/`
+    /// where leases work: `dev/` for overlays; `native/`, `native-target/`, `ci-tree/`,
+    /// `ci-target/`, `lane/`, `target/`, `tmp/`, `recovered/` for tree leases
     pub work: PathBuf,
+    pub native_trees: u32,
     /// taskset CPU lists for shared kinds and for `timed` (empty: no pinning)
     pub cpus_shared: String,
     pub cpus_timed: String,
@@ -31,6 +34,7 @@ pub struct LeaseConf {
 
 /// `user_idle_min`'s default.
 pub const USER_IDLE_MIN: u32 = 3;
+pub const NATIVE_TREES: u32 = 3;
 
 pub fn home_dir() -> PathBuf {
     crate::os::home_dir()
@@ -55,6 +59,7 @@ impl LeaseConf {
             timed: true,
             spec: String::new(),
             work: home.join("devhub"),
+            native_trees: NATIVE_TREES,
             cpus_shared: String::new(),
             cpus_timed: String::new(),
             user_idle_min: USER_IDLE_MIN,
@@ -70,6 +75,7 @@ impl LeaseConf {
                 "timed" => c.timed = v != "off",
                 "spec" => c.spec = v.to_string(),
                 "work" => c.work = v.strip_prefix("~/").map_or_else(|| PathBuf::from(v), |r| home.join(r)),
+                "native_trees" => c.native_trees = v.parse().unwrap_or(c.native_trees),
                 "cpus.shared" if valid_cpus(v) => c.cpus_shared = v.to_string(),
                 "cpus.timed" if valid_cpus(v) => c.cpus_timed = v.to_string(),
                 "user_idle_min" => c.user_idle_min = v.parse().ok().filter(|m| *m >= 1).unwrap_or(c.user_idle_min),
@@ -84,12 +90,10 @@ impl LeaseConf {
         c
     }
 
-    /// Slots per kind: the conf's, else build 2, test 2, screen 3, long 2, gate 1, gpu = #GPUs,
-    /// timed 1 (0 with `timed = off`). `inspect` is not counted.
+    /// One slot per kind by default; CI stays off user boxes. `inspect` is not counted.
     pub fn slots(&self, gpus: u32) -> Vec<(Kind, u32)> {
-        // one box per lease: a slot only says the node takes the kind (0: never)
-        let defaults = [(Kind::Build, 1), (Kind::Test, 1), (Kind::Screen, 1), (Kind::Long, 1), (Kind::Gate, 1), (Kind::Gpu, gpus.min(1)), (Kind::Timed, self.timed as u32)];
-        defaults.iter().map(|(k, d)| (*k, self.slots.iter().find(|(x, _)| x == k).map_or(*d, |(_, n)| *n))).collect()
+        let defaults = [(Kind::Build, 1), (Kind::Test, 1), (Kind::Screen, 1), (Kind::Long, 1), (Kind::Gate, 1), (Kind::Gpu, gpus.min(1)), (Kind::Timed, self.timed as u32), (Kind::Ci, (!self.role.users()) as u32)];
+        defaults.iter().map(|(k, d)| (*k, if *k == Kind::Ci && self.role.users() { 0 } else { self.slots.iter().find(|(x, _)| x == k).map_or(*d, |(_, n)| *n) })).collect()
     }
 }
 
@@ -98,15 +102,16 @@ impl LeaseConf {
 pub fn settable(key: &str, value: &str) -> Result<(), String> {
     let num = || value.parse::<f64>().map(|_| ()).map_err(|_| format!("{key} takes a number"));
     match key {
-        "role" => Role::parse(value).map(|_| ()).ok_or_else(|| "role = pool|suite|bench|user-wm|device".to_string()),
+        "role" => Role::parse(value).map(|_| ()).ok_or_else(|| "role = pool|hot|suite|bench|user-wm|device".to_string()),
         "disk_floor_gb" | "disk_warn_gb" => num(),
+        "native_trees" => value.parse::<u32>().map(|_| ()).map_err(|_| "native_trees takes a count".to_string()),
         "timed" => matches!(value, "on" | "off").then_some(()).ok_or_else(|| "timed = on|off".to_string()),
         "spec" => (!value.is_empty() && value.len() <= 64 && value.bytes().all(|b| b.is_ascii_graphic())).then_some(()).ok_or_else(|| "spec: one word".to_string()),
         "cpus.shared" | "cpus.timed" => (value.is_empty() || valid_cpus(value)).then_some(()).ok_or_else(|| format!("{key}: a CPU list like 8-15,24-31")),
         "user_idle_min" => value.parse::<u32>().ok().filter(|m| (1..=1440).contains(m)).map(|_| ()).ok_or_else(|| "user_idle_min: whole minutes, 1..1440".to_string()),
         k => match k.strip_prefix("slots.").and_then(Kind::parse) {
             Some(_) => value.parse::<u32>().map(|_| ()).map_err(|_| format!("{key} takes a count")),
-            None => Err(format!("`{key}` is not a lease.conf key the master sets (role, slots.<kind>, disk_floor_gb, disk_warn_gb, timed, spec, cpus.shared, cpus.timed, user_idle_min)")),
+            None => Err(format!("`{key}` is not a lease.conf key the master sets (role, slots.<kind>, native_trees, disk_floor_gb, disk_warn_gb, timed, spec, cpus.shared, cpus.timed, user_idle_min)")),
         },
     }
 }
@@ -134,6 +139,27 @@ fn valid_cpus(v: &str) -> bool {
 }
 
 /// Measures this machine now (`node`: its devhub name; `apply`: DEVHUB2's applier kind).
+/// PATH with the user's rustup toolchain first (`$CARGO_HOME/bin`, else `~/.cargo/bin`) when it has
+/// one: a box whose system Rust sits in /usr/bin builds with the fleet's rustup stable. None: as is.
+pub fn rust_path() -> Option<String> {
+    let bin = std::env::var_os("CARGO_HOME").filter(|h| !h.is_empty()).map(PathBuf::from).or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cargo")))?.join("bin");
+    if !bin.join(if cfg!(windows) { "rustc.exe" } else { "rustc" }).is_file() {
+        return None;
+    }
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let rest: Vec<PathBuf> = std::env::split_paths(&path).filter(|p| *p != bin).collect();
+    std::env::join_paths(std::iter::once(bin).chain(rest)).ok().map(|p| p.to_string_lossy().into_owned())
+}
+
+/// `prog` (cargo, rustc) as a lease's run finds it ([`rust_path`]).
+pub fn rust_command(prog: &str) -> std::process::Command {
+    let mut c = std::process::Command::new(prog);
+    if let Some(p) = rust_path() {
+        c.env("PATH", p);
+    }
+    c
+}
+
 /// The node's `rustc -V` version (`1.97.1`), looked at every 5 min (an update needs no hub restart).
 fn rustc_version() -> String {
     static LAST: std::sync::Mutex<Option<(std::time::Instant, String)>> = std::sync::Mutex::new(None);
@@ -142,9 +168,15 @@ fn rustc_version() -> String {
         let _ = t;
         return v.clone();
     }
-    let v = std::process::Command::new("rustc").arg("-V").output().ok().map(|o| String::from_utf8_lossy(&o.stdout).split_whitespace().nth(1).unwrap_or("").to_string()).unwrap_or_default();
+    let v = rust_command("rustc").arg("-V").output().ok().map(|o| String::from_utf8_lossy(&o.stdout).split_whitespace().nth(1).unwrap_or("").to_string()).unwrap_or_default();
     *g = Some((std::time::Instant::now(), v.clone()));
     v
+}
+
+/// The same live WM display reported in caps, without reprobing the hardware/toolchain.
+#[cfg(target_os = "linux")]
+pub(super) fn display() -> Option<String> {
+    os::display()
 }
 
 pub fn measure(node: &str, conf: &LeaseConf, apply: &str) -> Caps {
@@ -161,9 +193,14 @@ pub fn measure(node: &str, conf: &LeaseConf, apply: &str) -> Caps {
     c.timed = conf.timed;
     c.apply = apply.to_string();
     c.hub_rev = hub_rev().to_string();
+    c.sick = sick();
     c.rustc = rustc_version();
     c.hub_proto = super::HUB_PROTO;
     c.services = services();
+    c.jit_store = Some(std::sync::Arc::new(super::jitstore::Store::new(&conf.work).snapshot()));
+    c.native_trees = conf.native_trees;
+    #[cfg(feature = "checkout")]
+    { c.native = super::tree::natives(&conf.work).into_iter().map(|(lane, _)| lane).collect(); }
     c
 }
 
@@ -183,6 +220,39 @@ pub fn services() -> Vec<(String, u64)> {
         .collect();
     out.sort();
     out
+}
+
+/// Why this box's toolchain cannot link, from its last probe (see [`probe_toolchain`]).
+static SICK: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+pub fn sick() -> String {
+    SICK.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// Links a small program the way a build does, system libraries included (a damaged SDK fails every
+/// lane's job at its last step). The first line that says why, or None. `changed`: the verdict moved.
+pub fn probe_toolchain(dir: &std::path::Path) -> (Option<String>, bool) {
+    let src = dir.join("toolchain-probe.rs");
+    let out = dir.join(if cfg!(windows) { "toolchain-probe.exe" } else { "toolchain-probe" });
+    let text = "#[cfg(target_os = \"macos\")] #[link(name = \"objc\")] #[link(name = \"m\")] #[link(name = \"Foundation\", kind = \"framework\")] #[link(name = \"Metal\", kind = \"framework\")] unsafe extern \"C\" {}\nfn main() {}\n";
+    let why = (|| {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+        std::fs::write(&src, text).map_err(|e| e.to_string())?;
+        let o = makepad_remote::group::command("rustc").envs(rust_path().map(|p| ("PATH", p))).args(["--edition", "2021"]).arg(&src).arg("-o").arg(&out).current_dir(dir).stdin(std::process::Stdio::null()).output().map_err(|e| format!("rustc: {e}"))?;
+        if o.status.success() {
+            return Ok(());
+        }
+        let err = String::from_utf8_lossy(&o.stderr).into_owned();
+        let line = err.lines().find(|l| l.contains("tapi error") || l.contains("ld:") || l.starts_with("error")).unwrap_or("rustc failed").trim().to_string();
+        Err(crate::proto::clean(&line, 200))
+    })()
+    .err();
+    let _ = std::fs::remove_file(&out);
+    let mut s = SICK.lock().unwrap_or_else(|e| e.into_inner());
+    let now = why.clone().unwrap_or_default();
+    let changed = *s != now;
+    *s = now;
+    (why, changed)
 }
 
 /// The commit this hub's checkout held when the hub started (its code; read once, from the files
@@ -310,20 +380,19 @@ mod os {
         }
     }
 
-    /// A live makepad WM socket (`$XDG_RUNTIME_DIR/makepad-wm-<n>` that accepts), else a Wayland one.
-    fn display() -> Option<String> {
+    /// The box's live makepad WM session. An arbitrary Wayland compositor (including a
+    /// headless one) is not a display on which CI may boot apps.
+    pub(super) fn display() -> Option<String> {
         let rt = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(format!("/run/user/{}", uid())));
-        let mut wayland = None;
-        for e in std::fs::read_dir(&rt).ok()?.flatten() {
+        let mut sockets: Vec<_> = std::fs::read_dir(&rt).ok()?.flatten().filter_map(|e| {
             let name = e.file_name().to_string_lossy().into_owned();
-            if name.starts_with("makepad-wm-") && !name.ends_with(".lock") && std::os::unix::net::UnixStream::connect(e.path()).is_ok() {
-                return Some(format!("wm:{name}"));
-            }
-            if name.starts_with("wayland-") && !name.ends_with(".lock") {
-                wayland = Some(format!("wayland:{name}"));
-            }
-        }
-        wayland.or_else(|| std::env::var("WAYLAND_DISPLAY").ok().filter(|w| !w.is_empty()).map(|w| format!("wayland:{w}")))
+            let index = name.strip_prefix("makepad-wm-")?.parse::<u32>().ok()?;
+            Some((index, name, e.path()))
+        }).collect();
+        sockets.sort_by_key(|(index, _, _)| *index);
+        sockets.into_iter().find_map(|(_, name, path)| {
+            std::os::unix::net::UnixStream::connect(path).is_ok().then(|| format!("wm:{name}"))
+        })
     }
 
     fn uid() -> u32 {
@@ -430,11 +499,18 @@ mod os {
         let m = crate::procinfo::machine();
         // CPU use since the previous measure (the master asks every 10 s): what decides "busy", not
         // the 1-minute load average, which stays high for a minute after a lease's build ended
-        static LAST: std::sync::Mutex<Option<(u64, u64)>> = std::sync::Mutex::new(None);
+        // (a measure within the same tick as the last one, from another caller, answers the last
+        // value and keeps its base: the ticks advance at 100 Hz)
+        static LAST: std::sync::Mutex<(Option<(u64, u64)>, Option<f64>)> = std::sync::Mutex::new((None, None));
         let now = cpu_ticks();
-        let cpu_pct = match (LAST.lock().unwrap().replace(now.unwrap_or((0, 0))), now) {
-            (Some(a), Some(b)) if b.1 > a.1 => Some(crate::top::cpu_pct(a, b)),
-            _ => None,
+        let cpu_pct = {
+            let mut last = LAST.lock().unwrap();
+            match (last.0, now) {
+                (Some(a), Some(b)) if b.1 > a.1 => *last = (now, Some(crate::top::cpu_pct(a, b))),
+                (Some(_), Some(_)) => {}
+                _ => *last = (now, None),
+            }
+            last.1
         };
         Caps {
             cpu_pct,
@@ -578,7 +654,7 @@ mod tests {
         let d = LeaseConf::parse("", home);
         assert_eq!((d.role, d.disk_floor_gb, d.disk_warn_gb, d.timed), (Role::Pool, 25.0, 50.0, true));
         assert_eq!(d.work, PathBuf::from("/home/me/devhub"));
-        assert_eq!(d.slots(2), vec![(Kind::Build, 1), (Kind::Test, 1), (Kind::Screen, 1), (Kind::Long, 1), (Kind::Gate, 1), (Kind::Gpu, 1), (Kind::Timed, 1)]);
+        assert_eq!(d.slots(2), vec![(Kind::Build, 1), (Kind::Test, 1), (Kind::Screen, 1), (Kind::Long, 1), (Kind::Gate, 1), (Kind::Gpu, 1), (Kind::Timed, 1), (Kind::Ci, 1)]);
         let c = LeaseConf::parse("# the 166 conf\nrole = user-wm\nslots.build = 1\nslots.nope = 4\nslots.test=6\ndisk_floor_gb = 40\ntimed = off\nspec = CPU-A+GPU-A  # comment\nwork = ~/scratch/dh\ncpus.shared = 8-15,24-31\ncpus.timed = rm -rf\n", home);
         assert_eq!(c.role, Role::UserWm);
         assert_eq!(c.disk_floor_gb, 40.0);

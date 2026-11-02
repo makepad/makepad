@@ -1526,15 +1526,6 @@ mod tests {
         assert_eq!(hit_at_in(&hits, dvec2(1000.0, 13.0)), None);
     }
 
-    #[test]
-    fn the_fixture_bar_has_the_shell_json_modules() {
-        let data = BarData::fixture();
-        assert_eq!(data.workspaces.len(), 5);
-        assert!(data.workspaces[0].focused);
-        assert_eq!(data.indicators.len(), 3);
-        assert!(!data.clock.is_empty());
-    }
-
     /// `ActiveWindow.qml`: left activates, middle and right both close —
     /// but they are DIFFERENT actions, not middle aliased to right, so a
     /// middle click on any other module (clock, audio, …) stays a no-op

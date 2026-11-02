@@ -201,12 +201,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_panel_rests_as_far_down_as_the_offset_says() {
-        let travel = Travel::new(120.0);
-        assert_eq!(travel.margin(0.0), 120.0);
-    }
-
-    #[test]
     fn the_travel_ends_at_the_top_of_the_area() {
         // The old limit was the panel's measured height less the offset, and
         // the measurement was taken on the one frame the panel had not been

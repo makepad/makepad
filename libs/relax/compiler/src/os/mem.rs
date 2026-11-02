@@ -21,7 +21,7 @@ pub fn set_no_codegen() {
     NO_CODEGEN.store(true, std::sync::atomic::Ordering::Release);
 }
 
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg_attr(not(target_vendor = "apple"), allow(dead_code))]
 pub fn no_codegen() -> bool {
     NO_CODEGEN.load(std::sync::atomic::Ordering::Acquire)
 }
@@ -29,7 +29,7 @@ pub fn no_codegen() -> bool {
 /// The process's executable memory that no loaded image backs (macOS): (start, size, prot) per
 /// region. No-codegen mode checks it is empty when the process ends -- generated code anywhere
 /// in the process (the JIT, a kernel compiler, a library) shows up here.
-#[cfg(target_os = "macos")]
+#[cfg(target_vendor = "apple")]
 pub fn anonymous_exec_regions() -> Vec<(u64, u64, i32)> {
     #[repr(C)]
     #[derive(Default)]
@@ -83,7 +83,7 @@ pub fn anonymous_exec_regions() -> Vec<(u64, u64, i32)> {
 
 #[track_caller]
 #[cold]
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg_attr(not(target_vendor = "apple"), allow(dead_code))]
 fn refuse_code(what: &str, addr: u64, len: usize) -> ! {
     panic!("makepad run: no-codegen mode: {} of {} bytes at {:#x} (machine code is not allowed in this mode)", what, len, addr)
 }
@@ -116,11 +116,11 @@ pub fn page_size() -> u64 {
         extern "C" {
             fn sysconf(name: i32) -> i64;
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(target_vendor = "apple")]
         const SC_PAGESIZE: i32 = 29;
         #[cfg(target_os = "android")]
         const SC_PAGESIZE: i32 = 0x27;
-        #[cfg(not(any(target_os = "macos", target_os = "android")))]
+        #[cfg(not(any(target_vendor = "apple", target_os = "android")))]
         const SC_PAGESIZE: i32 = 30;
         let v = unsafe { sysconf(SC_PAGESIZE) };
         if v > 0 { v as u64 } else { 4096 }
@@ -161,7 +161,7 @@ mod unix {
     pub const PROT_RW: i32 = 3;
     #[cfg(any(target_os = "linux", target_os = "android"))]
     pub const MAP_PRIVATE_ANON: i32 = 0x22;
-    #[cfg(target_os = "macos")]
+    #[cfg(target_vendor = "apple")]
     pub const MAP_PRIVATE_ANON: i32 = 0x1002;
 
     /// Zeroed read-write pages.
@@ -188,7 +188,7 @@ mod unix {
     pub fn retire(addr: u64, len: usize) {
         #[cfg(any(target_os = "linux", target_os = "android"))]
         const MAP_FIXED_NORESERVE: i32 = 0x10 | 0x4000;
-        #[cfg(target_os = "macos")]
+        #[cfg(target_vendor = "apple")]
         const MAP_FIXED_NORESERVE: i32 = 0x10 | 0x40;
         unsafe {
             if mmap(addr as *mut u8, len, 0, MAP_PRIVATE_ANON | MAP_FIXED_NORESERVE, -1, 0) as u64 == addr {
@@ -270,7 +270,7 @@ mod imp {
         fn close(fd: i32) -> i32;
         fn lseek(fd: i32, off: i64, whence: i32) -> i64;
         fn pwrite(fd: i32, buf: *const u8, n: usize, off: i64) -> isize;
-        fn write(fd: i32, buf: *const u8, n: usize) -> isize;
+        fn write(fd: i32, buf: *const core::ffi::c_void, n: usize) -> isize;
         fn _exit(code: i32) -> !;
     }
     #[cfg(target_arch = "x86_64")]
@@ -373,7 +373,7 @@ mod imp {
                     && mmap(rw as *mut u8, size as usize, PROT_RW, MAP_SHARED | MAP_FIXED, fd, 0) as u64 == rw;
                 if !ok {
                     let msg = b"makepad run: the forked child has no copy of its code memory, exiting\n";
-                    write(2, msg.as_ptr(), msg.len());
+                    write(2, msg.as_ptr().cast(), msg.len());
                     _exit(134);
                 }
                 close(fdc.swap(fd as i64, Ordering::Relaxed) as i32);
@@ -489,11 +489,7 @@ mod imp {
     /// THP `always` but defrag `madvise` the code region stayed all 4-KB pages. A no-op where THP
     /// is off; costs up to one partly used 2-MB page per touched region in RSS. (A W^X memfd is
     /// shmem: its huge pages follow /sys/kernel/mm/transparent_hugepage/shmem_enabled.)
-    /// MAKEPAD_RUN_HUGE_CODE=0 keeps 4-KB pages (A/B).
     fn huge_code_pages(addr: u64, len: usize) {
-        if std::env::var_os("MAKEPAD_RUN_HUGE_CODE").is_some_and(|v| v == "0") {
-            return;
-        }
         extern "C" {
             fn madvise(addr: *mut u8, len: usize, advice: i32) -> i32;
         }
@@ -627,7 +623,7 @@ mod imp {
 /// `pthread_jit_write_protect_np(0)` (makepad's compute-kernel JIT writing its MAP_JIT pages)
 /// flips every MAP_JIT page of the thread to non-executable, which faulted the JIT code making
 /// that call.
-#[cfg(target_os = "macos")]
+#[cfg(target_vendor = "apple")]
 mod imp {
     pub use super::unix::{alloc_rw, commit, free, guard_page, mem_fns, prefault, CODE_TAIL};
     use super::unix::mprotect;
@@ -640,7 +636,7 @@ mod imp {
         #[allow(clippy::too_many_arguments)]
         fn mach_vm_remap(target: u32, addr: *mut u64, size: u64, mask: u64, flags: i32, src_task: u32, src_addr: u64, copy: i32, cur: *mut i32, max: *mut i32, inherit: u32) -> i32;
         fn pthread_atfork(prepare: Option<extern "C" fn()>, parent: Option<extern "C" fn()>, child: Option<extern "C" fn()>) -> i32;
-        fn write(fd: i32, buf: *const u8, n: usize) -> isize;
+        fn write(fd: i32, buf: *const core::ffi::c_void, n: usize) -> isize;
         fn _exit(code: i32) -> !;
     }
 
@@ -670,7 +666,7 @@ mod imp {
                 let (mut cur, mut max) = (0i32, 0i32);
                 if mach_vm_remap(task, &mut at, size, 0, VM_FLAGS_FIXED, task, rw, 0, &mut cur, &mut max, VM_INHERIT_NONE) != 0 || at != context || mprotect(context as *mut u8, size as usize, 5) != 0 {
                     let msg = b"makepad: forked child cannot map its code memory, exiting\n";
-                    write(2, msg.as_ptr(), msg.len());
+                    write(2, msg.as_ptr().cast(), msg.len());
                     _exit(134);
                 }
             }

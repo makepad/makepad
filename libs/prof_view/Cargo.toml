@@ -1,0 +1,24 @@
+# The profile view: attach to a running makepad app (makepad run or a native build with its
+# remote endpoint on) and look inside it: the profiler's timeline and answers over the app's
+# `prof` / `gpuprof` streams, recordings and their diff, and the app's inspect commands over the
+# same link. The stream format, the profile model and the query engine are makepad-prof-stream.
+
+[package]
+name = "makepad-prof-view"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+name = "makepad_prof_view"
+path = "src/lib.rs"
+
+[[bin]]
+name = "makepad-prof-view"
+path = "src/main.rs"
+
+[dependencies]
+makepad-widgets = { path = "../../widgets", default-features = false }
+makepad-prof-stream = { workspace = true }
+makepad-remote = { workspace = true }

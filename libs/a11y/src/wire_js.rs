@@ -43,11 +43,6 @@ mod tests {
 
     #[test]
     fn javascript_wire_round_trip() {
-        // Optional on hosts without Node; the web lane's gate runs this on a host with Node.
-        if Command::new("node").arg("--version").output().is_err() {
-            eprintln!("JavaScript wire check not run: node is unavailable");
-            return;
-        }
         let id = NodeId::part(0x123456789abc, 0xffff);
         let rect = Rect { x: 10.5, y: -20.0, w: 80.0, h: 24.0 };
         let node = Node {

@@ -72,6 +72,8 @@ pub static UNSTABLE: &[&str] = &[
     "const_for",
     "const_precise_live_drops",
     "const_trait_impl",
+    // Relax's own std items (core::intrinsics_mem): no path of rustc's library
+    "relax_internals",
     "const_try",
     "coroutine_clone",
     "coroutines",

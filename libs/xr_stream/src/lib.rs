@@ -46,6 +46,7 @@ fn set_refresh_mhz(mhz: u32) {
 const HOLD: usize = 6;
 
 mod auto;
+mod desktop;
 mod mirror;
 mod panel;
 #[cfg(not(target_arch = "wasm32"))]
@@ -53,6 +54,7 @@ pub mod server;
 mod settings_types;
 pub mod verdict;
 pub use mirror::{DrawXrMirror, XrMirrorClock, XrMirrorView};
+pub use desktop::{XrDesktopCache, XrDesktopFreeze};
 pub use panel::{XrCaptionButton, XrStreamSettings};
 #[cfg(not(target_arch = "wasm32"))]
 pub use server::{launch_enabled, HostLoad, LiveHeadset, ServerStats, XrServer};

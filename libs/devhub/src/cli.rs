@@ -11,6 +11,7 @@ use std::time::Duration;
 const HELP: &str = "makepad devhub (or observe): the local devhub (start it with `cargo run --release -p makepad-app-devhub`)
   stream [--json] [--all]                 one line per event, live (--all: info lines too)
   ls [machine]                            machines and their JITs, each with what it is up to
+  hot [--json]                            hot failures / hot loads, causes and apps (24h and all time)
   inspect <machine>/<pid|app> <cmd...>    any inspect command on that JIT (master: every node)
   top <node>                              CPU, GPU, RAM, disk and the busiest processes of a node
   log <node>/<pid|app> [n]                the tail of a JIT's log (its session log, or its launch log)
@@ -26,20 +27,36 @@ const HELP: &str = "makepad devhub (or observe): the local devhub (start it with
   serve [--node <conf>]                   run a hub here without its app (master, or a node with that conf)
   land [<branch|-> [<commercial worktree> <commercial branch>]]
                                           hand in for landing (no args: this worktree's branch and its nested
-                                          commercial branch); each pending hand-in is quick-gated on its own node
-                                          on the current tips, the passing ones land in queue order
+                                          commercial branch); merges onto the current tips in queue order;
+                                          timer buckets check the landed tips afterwards
   land [...] --show <app> [--on <device>] [-- <devhub words>]
                                           the chain: when it lands, show the app there, then run the words
-  land status [all|<branch>] [--json]     per hand-in: queued / gating on <node> / passed / failed + error lines /
+  land status [all|<branch>] [--json]     per hand-in: queued / failed + error lines /
                                           conflict + files / waiting / landed <shas>
   land wait <branch>                      until it lands, fails or conflicts; prints its status (exit 0 landed)
   land hold <branch> [reason] | unhold <branch> | retry <branch> | drop <branch>
+  bucket [status]                        the last 10 post-land bucket runs and attributed lanes
   land pause [reason] | resume | paused  the whole train: no new round while paused (the menu bar's Pause landing)";
 
 pub(crate) fn control() -> Result<Client, String> {
     let c = Client::new(Target::Unix(proto::control_socket()), "observe");
-    c.conn().map_err(|_| format!("no devhub runs here ({}): start makepad-app-devhub", proto::control_socket().display()))?;
+    c.conn().map_err(|e| format!("no devhub master at {} (connect: {e})", proto::control_socket().display()))?;
     Ok(c)
+}
+
+/// Submission waits out master restarts; application errors still stand.
+pub(crate) fn retry_master<T>(mut call: impl FnMut() -> Result<T, String>) -> Result<T, String> {
+    let mut said = false;
+    loop {
+        match call() {
+            Ok(v) => return Ok(v),
+            Err(e) if e.starts_with("no devhub master at ") || e.contains("link lost") || e.contains("hub connection ended") => {
+                if !said { eprintln!("master not reachable: waiting"); said = true; }
+                std::thread::sleep(Duration::from_secs(2));
+            }
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 /// Sends one line to a lines service and collects the answer.
@@ -54,7 +71,7 @@ pub fn ask(c: &Client, target: Option<&str>, service: &str, line: &str) -> Resul
         }
         None => {
             let ch = c.open(service, "").map_err(|e| e.to_string())?;
-            ch.send(line.as_bytes().to_vec()).map_err(|e| e.to_string())?;
+            ch.send(line.as_bytes().to_vec()).map_err(|e| format!("link lost: {e}"))?;
             'recv: loop {
                 match ch.recv() {
                     Some(makepad_remote::Event::Data(d)) => {
@@ -66,6 +83,7 @@ pub fn ask(c: &Client, target: Option<&str>, service: &str, line: &str) -> Resul
                         }
                     }
                     Some(makepad_remote::Event::Opened(_)) => {}
+                    Some(makepad_remote::Event::Closed(makepad_remote::conn::CLOSE_LINK_LOST, why)) => return Err(format!("link lost: {why}")),
                     Some(makepad_remote::Event::Closed(_, why)) => return Err(why),
                     None => return Err("the hub connection ended".into()),
                 }
@@ -94,12 +112,19 @@ pub fn render_ps(name: Option<&str>, lines: &[String], out: &mut String) {
     if let Some(n) = name {
         m.name = n.to_string();
     }
+    render_machine(&m, out);
+}
+
+fn render_machine(m: &crate::explorer::MachineRow, out: &mut String) {
     if let Some(e) = &m.err {
         out.push_str(&format!("{}  error: {}\n", m.name, proto::clean(e, 200)));
         return;
     }
     let battery = m.battery.map_or(String::new(), |(level, charging)| format!("  battery {level}%{}", if charging { " charging" } else { "" }));
     out.push_str(&format!("{}  {}  load {:.1}/{}  mem {}/{} GB free{battery}  {} JITs\n", m.name, m.os, m.load1, m.cpus, m.mem_avail_mb / 1024, m.mem_total_mb / 1024, m.jits.iter().filter(|j| j.jit).count()));
+    if let Some(hub) = &m.ai_hub {
+        out.push_str(&format!("  {}\n", hub.line()));
+    }
     for j in &m.jits {
         out.push_str(&format!("  {}\n", j.head()));
         let facts = j.facts();
@@ -112,11 +137,28 @@ pub fn render_ps(name: Option<&str>, lines: &[String], out: &mut String) {
     }
 }
 
+/// Configured hubs that have stopped also count; unconfigured and unknown nodes do not
+/// become false outage reports. Keep the denominator to hubs with a known serving status.
+pub fn ai_hub_summary(machines: &[crate::explorer::MachineRow]) -> Option<String> {
+    let hubs: Vec<_> = machines.iter().filter(|m| m.err.is_none() && m.ai_hub.as_ref().is_some_and(|h| h.serving.is_some())).collect();
+    let down: Vec<_> = hubs.iter().filter(|m| m.ai_hub.as_ref().is_some_and(|h| h.serving == Some(false))).map(|m| proto::clean(&m.name, 64)).collect();
+    if down.is_empty() {
+        None
+    } else {
+        Some(format!("AI hub: {} of {} nodes not serving the fleet: {}", down.len(), hubs.len(), down.join(", ")))
+    }
+}
+
 fn ls(c: &Client, only: Option<&str>) -> i32 {
     let mut out = String::new();
+    let mut machines = Vec::new();
     if only.is_none_or(|o| o == local_name(c)) {
         match ask(c, None, "ps", "ps") {
-            Ok(lines) => render_ps(None, &lines, &mut out),
+            Ok(lines) => {
+                let m = crate::explorer::parse_ps("", &lines);
+                render_machine(&m, &mut out);
+                machines.push(m);
+            }
             Err(e) => out.push_str(&format!("this machine: {e}\n")),
         }
     }
@@ -131,10 +173,32 @@ fn ls(c: &Client, only: Option<&str>) -> i32 {
                 continue;
             }
             match ask(c, Some(&name), "ps", "ps") {
-                Ok(lines) => render_ps(Some(&name), &lines, &mut out),
+                Ok(lines) => {
+                    let mut m = crate::explorer::parse_ps(&name, &lines);
+                    m.name = name;
+                    render_machine(&m, &mut out);
+                    machines.push(m);
+                }
                 Err(e) => out.push_str(&format!("{name}  down: {}\n", proto::clean(&e, 160))),
             }
         }
+        if has(c, "prof") {
+            match ask(c, None, "prof", "prof --summary") {
+                Ok(lines) => for line in lines {
+                    if let Ok(v) = makepad_strict_json::parse(line.as_bytes()) {
+                        if let Some(text) = v.get("text").and_then(|v| v.as_str()) { out.push_str(text); }
+                        if let Some(e) = v.get("err").and_then(|v| v.as_str()) { out.push_str(&format!("last hour: unavailable ({e})\n")); }
+                    }
+                },
+                Err(e) => out.push_str(&format!("last hour: unavailable ({e})\n")),
+            }
+        }
+    }
+    if let Some(summary) = ai_hub_summary(&machines) {
+        println!("{summary}");
+    }
+    if let Ok(lines) = ask(c, None, "hot", "summary") {
+        for line in lines { out.push_str(&crate::hot::render(&line, true)); }
     }
     print!("{out}");
     0
@@ -263,7 +327,16 @@ pub fn main(args: &[String]) -> i32 {
     };
     match a.as_slice() {
         ["land", rest @ ..] => land(&c, rest),
+        #[cfg(feature = "checkout")]
+        ["bucket", rest @ ..] => bucket(&c, rest),
         ["ls", rest @ ..] => ls(&c, rest.first().copied()),
+        ["hot", rest @ ..] if rest.is_empty() || *rest == ["--json"] => match ask(&c, None, "hot", "summary") {
+            Ok(lines) => {
+                for line in lines { if rest.contains(&"--json") { println!("{line}"); } else { print!("{}", crate::hot::render(&line, false)); } }
+                0
+            }
+            Err(e) => { eprintln!("makepad devhub hot: {e}"); 2 }
+        },
         ["stream", rest @ ..] => stream(&c, rest.contains(&"--json"), rest.contains(&"--all")),
         ["inspect", target, cmd @ ..] if !cmd.is_empty() => inspect(&c, target, &args[2..]),
         ["reply", id, status, msg @ ..] => reply(&c, id, status, &msg.join(" ")),
@@ -374,6 +447,7 @@ fn lines_out(r: Result<Vec<String>, String>, text: bool) -> i32 {
 
 /// `serve [--node <conf>]`: the hub core without a window or tray (tests, ssh sessions).
 fn serve(args: &[&str]) -> i32 {
+    crate::procinfo::reap_inherited();
     let log: crate::trust::Log = std::sync::Arc::new(|l: &str| eprintln!("{l}"));
     let trust = |name: &str| -> Option<std::sync::Arc<dyn crate::trust::Trust>> {
         match crate::trust::FleetTrust::load(name) {
@@ -505,6 +579,30 @@ fn cache(args: &[&str]) -> i32 {
     code
 }
 
+#[cfg(feature = "checkout")]
+fn bucket(c: &Client, args: &[&str]) -> i32 {
+    if !matches!(args, [] | ["status"]) {
+        eprintln!("makepad devhub bucket [status]");
+        return 2;
+    }
+    let lines = match ask(c, None, "bucket", "status") {
+        Ok(lines) => lines,
+        Err(e) => { eprintln!("makepad devhub bucket: {e}"); return 2; }
+    };
+    for line in lines {
+        let Ok(v) = makepad_strict_json::parse(line.as_bytes()) else { continue };
+        let text = |v: &Value, k: &str| v.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+        let tip = v.get("tip").map(|p| crate::state::Pair::new(&text(p, "work"), &text(p, "main")).short()).unwrap_or_default();
+        let ok = v.get("ok").and_then(Value::as_bool) == Some(true);
+        let failing = v.get("failing").and_then(Value::as_arr).map(|a| a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")).unwrap_or_default();
+        let labels = v.get("landings").and_then(Value::as_arr).map(|a| a.iter()
+            .filter(|l| l.get("units").and_then(Value::as_arr).is_some_and(|u| !u.is_empty()))
+            .map(|l| text(l, "label")).collect::<Vec<_>>().join(", ")).unwrap_or_default();
+        println!("{} {tip} {} {failing}{}", text(&v, "bucket"), if ok { "ok" } else { "FAILED" }, if labels.is_empty() { String::new() } else { format!(": {labels}") });
+    }
+    0
+}
+
 /// `land …`: the master's landing train ([`crate::land`]).
 fn land(c: &Client, a: &[&str]) -> i32 {
     let show = |lines: &[String], full: bool, json: bool| {
@@ -521,9 +619,6 @@ fn land(c: &Client, a: &[&str]) -> i32 {
             let age = now.saturating_sub(e.changed_ms) / 1000;
             let age = if age >= 3600 { format!("{}h", age / 3600) } else if age >= 60 { format!("{}m", age / 60) } else { format!("{age}s") };
             let mut line = format!("#{} {} {}", e.id, e.label(), e.state.as_str());
-            if !e.node.is_empty() && matches!(e.state, crate::land::St::Gating | crate::land::St::Passed | crate::land::St::Failed) {
-                line += &format!(" on {}", e.node);
-            }
             if !e.landed.is_empty() {
                 line += &format!(" {}", e.landed);
             }
@@ -652,8 +747,13 @@ fn land(c: &Client, a: &[&str]) -> i32 {
                 Ok(l) => {
                     let v = l.first().and_then(|x| makepad_strict_json::parse(x.as_bytes()).ok());
                     let n = |k: &str| v.as_ref().and_then(|v| v.get(k)).and_then(|x| x.as_u64()).unwrap_or(0);
+                    let s = |k: &str| v.as_ref().and_then(|v| v.get(k)).and_then(|x| x.as_str());
                     let key = if args[0] == "-" { args.last().unwrap() } else { &args[0] };
-                    println!("queued #{} {} ({} open; `makepad devhub land wait {key}`)", n("id"), args.join(" "), n("pos"));
+                    let label = s("label").map(str::to_string).unwrap_or_else(|| args.join(" "));
+                    let wait_key = s("label").unwrap_or(key);
+                    let included = s("included").map(|b| format!(" (+ {b} from the lane)")).unwrap_or_default();
+                    println!("queued #{} {label}{included} ({} open; `makepad devhub land wait {wait_key}`)", n("id"), n("pos"));
+                    println!("landed without checks: you must have run the thing you changed (or its test) yourself (`devhub test <lane> <pkg> --live -- <filter>`, `devhub live start <app>`)");
                     let Some(app) = chain_app else { return 0 };
                     let by = std::env::var("DEVHUB_AGENT").ok().filter(|x| !x.is_empty()).unwrap_or_else(|| key.to_string());
                     let j = makepad_remote::json_str;
@@ -692,4 +792,16 @@ fn land(c: &Client, a: &[&str]) -> i32 {
             }
         }
     }
+}
+
+/// How devhub runs its own words as a child: this very binary when it is `makepad-devhub` (the
+/// master, the CLI), else (devhub linked into an app) that binary through cargo in `repo`.
+pub fn own_argv(repo: &std::path::Path) -> Vec<String> {
+    if let Some(exe) = std::env::current_exe().ok().filter(|e| e.file_stem().is_some_and(|s| s == "makepad-devhub")) {
+        return vec![exe.display().to_string()];
+    }
+    let mut v: Vec<String> = ["cargo", "run", "--profile", "host", "-q", "--manifest-path"].iter().map(|s| s.to_string()).collect();
+    v.push(repo.join("Cargo.toml").display().to_string());
+    v.extend(["-p", "makepad-devhub", "--bin", "makepad-devhub", "--"].iter().map(|s| s.to_string()));
+    v
 }

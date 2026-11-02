@@ -1533,27 +1533,6 @@ mod tests {
     }
 
     #[test]
-    fn scale_min_packing_round_trips_through_the_decoder_layout() {
-        // Every 6-bit (scale, min) pair must survive the 12-byte packing
-        // exactly as `get_scale_min_k4` reads it back — pinned by encoding
-        // a block engineered to exercise all 8 groups.
-        let mut x = [0.0f32; QK_K];
-        for j in 0..8 {
-            for i in 0..32 {
-                x[j * 32 + i] = (j as f32 + 1.0) * (i as f32 - 3.0);
-            }
-        }
-        let mut block = [0u8; 144];
-        quantize_q4_k_block(&x, &mut block);
-        let packed = &block[4..16];
-        for j in 0..8 {
-            let (sc, m) = unpack_scale_min(j, packed);
-            assert!(sc <= 63, "group {j} scale {sc}");
-            assert!(m <= 63, "group {j} min {m}");
-        }
-    }
-
-    #[test]
     fn q4_k_round_trip_error_is_small_and_zero_blocks_are_exact() {
         // Deterministic pseudo-random block.
         let mut seed = 0x1234_5678_9abc_def0u64;

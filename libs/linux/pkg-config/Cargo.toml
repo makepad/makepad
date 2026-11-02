@@ -34,10 +34,3 @@ repository = "https://github.com/rust-lang/pkg-config-rs"
 [lib]
 name = "pkg_config"
 path = "src/lib.rs"
-
-[[test]]
-name = "test"
-path = "tests/test.rs"
-
-[dev-dependencies.lazy_static]
-version = "1"

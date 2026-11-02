@@ -1115,7 +1115,7 @@ mod tests {
 
     #[test]
     fn devhub_endpoints_are_named_by_node() {
-        let list = parse_desk_links("quest 192.0.2.85:8790\nphone 192.0.2.32\n\nbroken\n");
-        assert_eq!(list, vec![("quest".to_string(), "192.0.2.85".to_string(), 8790), ("phone".to_string(), "192.0.2.32".to_string(), proto::DEFAULT_PORT)]);
+        let list = parse_desk_links("quest 192.0.2.85:8790\nphone 192.0.2.50\n\nbroken\n");
+        assert_eq!(list, vec![("quest".to_string(), "192.0.2.85".to_string(), 8790), ("phone".to_string(), "192.0.2.50".to_string(), proto::DEFAULT_PORT)]);
     }
 }

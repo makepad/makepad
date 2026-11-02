@@ -1,19 +1,13 @@
-//! `devhub verify`: the rolling full verifier (was tools/run/fixture/verify_tip.py and
-//! verified-tips.txt). The master verifies the newest landed work + main pair, one run at a time,
-//! at the lowest lease priority; its legs ([`legs`]) run on their own boxes at once:
-//! - `full-a`, `full-b`: the two halves of land_gate.sh `full`, timed leases on two x64 pool nodes;
-//! - `arm64`: arm64_leg.sh `--diff-fast`, a timed lease on an arm64 Mac;
-//! - CI ([`super::ci::gate`]): its shards (the `check:` shards cover what the platforms leg did),
-//!   its verdict folded in, so a push of a verified tip has passed CI too.
+//! `devhub verify`: the rolling CI verifier of the newest landed work + main pair. The long JIT
+//! correctness legs (`legs()`) run independently in [`super::jitlegs`]. Full verification also
+//! runs the Mac correctness legs, bypassing arm64 classification.
 //!
-//! The diff leg diffs only when the JIT, platform or diff programs changed since the last verified
-//! tip (`DIFF_SCOPE=affected`), and every program once a day; the fuzzer runs 500 programs (the
-//! script rotates the window with the tip). A passing pair is a verified tip. A failing one is
-//! bisected over the landings since the newest verified tip (first-parent order, landing times
-//! from the reflogs) to the first bad landed commit, kept as a failure and said as an `err` event;
+//! A passing pair is a verified tip. A failing one is bisected over the landings since the newest
+//! verified tip (first-parent order, landing times from the reflogs) to the first bad landed
+//! commit, kept as a failure and said as an `err` event;
 //! that pair is not tried again, newer tips are. A started pair runs to its verdict and only then
 //! the newest tip is picked: a landing never restarts a run, and neither does a master restart (the
-//! run is state, its legs and CI shards go on where they are on their boxes). Incomplete evidence
+//! run is state, its CI shards go on where they are on their boxes). Incomplete evidence
 //! (no verdict, a node lost) goes on a minute later on the same pair, what passed standing, up to
 //! [`TRIES`] times.
 
@@ -34,7 +28,7 @@ pub enum Verdict {
     Incomplete,
 }
 
-/// One leg of a verify run: its own lease on its own box.
+/// One correctness leg, with its own lease.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LegDef {
     pub name: String,
@@ -47,26 +41,40 @@ pub struct LegDef {
     pub argv: Vec<String>,
     /// a preferred node
     pub node: Option<String>,
+    /// its verdict is reported, never the run's: a failure or a missing verdict is an event and the
+    /// leg's state, and the run counts it as passed (a leg on its way to gating)
+    pub report_only: bool,
 }
 
 impl LegDef {
     pub fn new(name: &str, kind: Kind, needs: &str, marker: &str, argv: &[&str]) -> LegDef {
-        LegDef { name: name.into(), kind, needs: needs.into(), marker: marker.into(), argv: argv.iter().map(|a| a.to_string()).collect(), node: None }
+        LegDef { name: name.into(), kind, needs: needs.into(), marker: marker.into(), argv: argv.iter().map(|a| a.to_string()).collect(), node: None, report_only: false }
+    }
+
+    /// The leg reports its verdict without deciding the run's (`report_only`).
+    pub fn report_only(mut self) -> LegDef {
+        self.report_only = true;
+        self
     }
 }
 
-/// The legs of a run (`_full`: the nightly run that diffs every program; legs that differ by it,
-/// such as orch/ci.rs's platform legs, read it).
-pub fn legs(_full: bool) -> Vec<LegDef> {
+/// The long correctness legs; `arm` includes the Mac legs, the environment sets the diff scope.
+pub(crate) fn legs(arm: bool) -> Vec<LegDef> {
     #[cfg(test)]
     if let Ok(cmd) = std::env::var("DEVHUB_TEST_LEG") {
         return vec![LegDef::new("leg", Kind::Test, "", "TESTLEG", &[&cmd])];
     }
-    vec![
+    let mut legs = vec![
         LegDef::new("full-a", Kind::Test, "arch=x64,os=linux,role=pool", "NODEGATE", &["bash", "tools/run/fixture/land_gate.sh", "full-a"]),
         LegDef::new("full-b", Kind::Test, "arch=x64,os=linux,role=pool", "NODEGATE", &["bash", "tools/run/fixture/land_gate.sh", "full-b"]),
         LegDef::new("arm64", Kind::Test, "arch=arm64,os=macos,rustc=1.97", "ARM64", &["bash", "tools/run/fixture/arm64_leg.sh", "--diff-fast"]),
-    ]
+        // makepad run's no-codegen mode (iOS's constraint: every function interpreted) on an arm64
+        // Mac: diff_fast's nocodegen tier, agree.sh, app boots. Report-only until the Macs'
+        // toolchains agree (agree's rustc-side q_object_default_type_relative on rustc 1.97)
+        LegDef::new("nocodegen", Kind::Test, "arch=arm64,os=macos,rustc=1.97", "NOCODEGEN", &["bash", "tools/run/fixture/nocodegen_leg.sh"]).report_only(),
+    ];
+    legs.retain(|d| arm || !d.needs.contains("arch=arm64,os=macos"));
+    legs
 }
 
 /// How many error lines a leg keeps.
@@ -78,8 +86,6 @@ pub const PRIO: i32 = super::leg::BACKGROUND_PRIO;
 pub const OLD_PAIR_PRIO: i32 = PRIO + 1;
 /// The fuzzer's fixed-seed programs per run.
 pub const FUZZ: u32 = 500;
-/// Every program is diffed this often (the nightly full diff).
-pub const FULL_EVERY_MS: u64 = 24 * 3600 * 1000;
 const IDLE: Duration = Duration::from_secs(60);
 /// How often a pair may end incomplete before the newest tip takes its place.
 const TRIES: u32 = 3;
@@ -151,7 +157,38 @@ pub fn steps(base: &Pair, mut events: Vec<(u64, u8, usize, String)>) -> Vec<Pair
     pairs
 }
 
+/// A verify run this old raises an error, again each time this long passes.
+const VERIFY_STALLED_MS: u64 = 2 * 60 * 60 * 1000;
+
+/// Report a stalled regression run and what it waits for.
+fn watch_stall(ctx: Arc<Ctx>) {
+    let mut said = 0u64;
+    loop {
+        std::thread::sleep(Duration::from_secs(60));
+        let line = ctx.store.read(|d| {
+            let r = d.verify.run.as_ref()?;
+            let age = wall_ms().saturating_sub(r.started_ms);
+            if age < VERIFY_STALLED_MS || wall_ms().saturating_sub(said) < VERIFY_STALLED_MS {
+                return None;
+            }
+            let legs: Vec<String> = r.legs.iter().map(|l| format!("{} {}", l.name, l.state)).collect();
+            let ci = d.ci.run.as_ref().filter(|c| c.pair == r.pair).map_or("no CI run of it".to_string(), |c| {
+                let done = c.shards.iter().filter(|s| matches!(s.state.as_str(), "ok" | "fail" | "incomplete")).count();
+                let waits = c.shards.iter().find(|s| s.state == "wait" && !s.summary.is_empty()).map_or("", |s| s.summary.as_str());
+                format!("CI {done} of {} shards, waiting: {waits}", c.shards.len())
+            });
+            Some(format!("verify {}: not concluded after {} min: {}; {ci}", r.pair.short(), age / 60_000, legs.join(", ")))
+        });
+        if let Some(line) = line {
+            said = wall_ms();
+            ctx.store.event("verify", Sev::Err, line, None);
+        }
+    }
+}
+
 pub fn start(ctx: Arc<Ctx>) {
+    let watched = ctx.clone();
+    let _ = std::thread::Builder::new().name("devhub-verify-stall".into()).spawn(move || watch_stall(watched));
     let _ = std::thread::Builder::new().name("devhub-verify".into()).spawn(move || Verifier { ctx }.main());
 }
 
@@ -189,11 +226,13 @@ impl Verifier {
                 continue;
             };
             let mut ask = asked.clone().unwrap_or_default();
+            let weekly = on && started.is_none() && asked.is_none() && self.ctx.store.read(|d| super::arm::weekly_due(wall_ms(), d.verify.last_full_ms));
+            ask.full |= weekly;
             if let Some(r) = &started {
                 ask.dry = r.dry;
             }
             let known = self.ctx.store.read(|d| d.verify.verified.iter().any(|t| t.pair == pair) || d.verify.failures.iter().any(|f| f.pair == pair));
-            if started.is_none() && explicit.is_none() && known {
+            if started.is_none() && explicit.is_none() && known && !ask.full {
                 if asked.is_some() {
                     self.pop_asked();
                     self.ctx.store.event("verify", Sev::Info, format!("verify: {} is already {}", pair.short(), self.ctx.store.read(|d| if d.verify.verified.iter().any(|t| t.pair == pair) { "verified" } else { "failed" })), None);
@@ -207,9 +246,16 @@ impl Verifier {
             }
             let full = match &started {
                 Some(r) => r.diff == "all",
-                None => ask.full || self.ctx.store.read(|d| d.verify.verified.is_empty() || wall_ms().saturating_sub(d.verify.last_full_ms) >= FULL_EVERY_MS),
+                // `--full` sets the diff scope and forces the weekly Mac correctness sweep
+                None => ask.full,
             };
             let (verdict, legs) = self.gate(&pair, full, ask.dry, "tip", asked.is_some(), None);
+            // `verify skip`: this pair is given up, the newest one is next
+            // (the state already says so: `verify skip` dropped the run)
+            if SKIP.swap(false, std::sync::atomic::Ordering::AcqRel) {
+                self.ctx.store.update(|d| d.verify.run = None);
+                continue;
+            }
             // (a run that goes on is still what was asked for)
             if asked.is_some() && self.ctx.store.read(|d| d.verify.run.is_none()) {
                 self.pop_asked();
@@ -217,7 +263,8 @@ impl Verifier {
             match verdict {
                 Verdict::Ok => {
                     self.record_good(&pair, full, ask.dry);
-                    self.ctx.store.event("verify", Sev::Info, format!("verify OK {} {n}/{n} legs and CI (diff {})", pair.short(), if full { "all" } else { "affected" }, n = self::legs(full).len()), None);
+                    let classified = legs.iter().find(|l| l.name == "arm64" && l.summary.starts_with("arm64: skipped (")).map_or(String::new(), |l| format!("; {}", l.summary));
+                    self.ctx.store.event("verify", Sev::Info, format!("verify OK {}: CI (diff {}){classified}", pair.short(), if full { "all" } else { "affected" }), None);
                 }
                 Verdict::Fail => self.failed(&pair, ask.dry, legs),
                 Verdict::Incomplete => {
@@ -264,6 +311,8 @@ impl Verifier {
             });
         }
         self.ctx.store.event("verify", Sev::Err, line, detail);
+        // a skip that gave this bisect up is spent: the next pair's run is not stopped by it
+        SKIP.store(false, std::sync::atomic::Ordering::Release);
     }
 
     /// What failed the pair being bisected and did not fail on the verified pair too.
@@ -280,6 +329,9 @@ impl Verifier {
     fn old_failures(&self, base: &Pair) -> Option<Vec<String>> {
         if let Some(old) = self.ctx.store.read(|d| d.verify.failing.as_ref().and_then(|f| f.old.clone())) {
             return Some(old);
+        }
+        if SKIP.load(std::sync::atomic::Ordering::Acquire) {
+            return None;
         }
         let (verdict, legs) = self.gate(base, false, false, "baseline", false, Some(&self.still_failing()));
         if verdict == Verdict::Incomplete {
@@ -304,6 +356,9 @@ impl Verifier {
         let known = self.ctx.store.read(|d| d.verify.failing.as_ref().and_then(|f| f.gated.iter().find(|(p, _)| p == pair).map(|(_, v)| v.clone())));
         if let Some(v) = known {
             return [Verdict::Ok, Verdict::Fail, Verdict::Incomplete].into_iter().find(|x| word(*x) == v).unwrap_or(Verdict::Incomplete);
+        }
+        if SKIP.load(std::sync::atomic::Ordering::Acquire) {
+            return Verdict::Incomplete;
         }
         let v = self.gate(pair, false, false, purpose, false, Some(&self.still_failing())).0;
         self.ctx.store.update(|d| {
@@ -334,19 +389,18 @@ impl Verifier {
                 d.verify.verified.push(Tip { pair: pair.clone(), at_ms: wall_ms(), diff: if full { "all" } else { "affected" }.into() });
             }
         });
+
     }
 
-    /// The legs of `pair` at once, each on its own box; the run is state while it goes. The run
-    /// of this pair that is in the state (a previous master's, or one that ended incomplete) goes
-    /// on: what passed stands, what runs on a lease that came back is followed, the rest asks again.
-    /// `only`: just the legs and CI shards of these names, on an older pair.
+    /// CI of `pair`; a previous master's run goes on, what passed standing.
+    /// `only`: just the CI shards of these names, on an older pair.
     fn gate(&self, pair: &Pair, full: bool, dry: bool, purpose: &str, asked: bool, only: Option<&[String]>) -> (Verdict, Vec<Leg>) {
         let (prior, stale) = self.ctx.store.update(|d| match d.verify.run.take() {
             Some(r) if r.pair == *pair && r.purpose == purpose => (Some(r), None),
             r => (None, r),
         });
-        // (another run in the state has no one to go on: its leases go with it)
-        for l in stale.iter().flat_map(|r| r.legs.iter()).filter(|l| super::leg::lease_held(&self.ctx, &l.lease)) {
+        // an older master's JIT legs no longer belong to verify
+        for l in stale.iter().chain(prior.iter()).flat_map(|r| r.legs.iter()).filter(|l| super::leg::lease_held(&self.ctx, &l.lease)) {
             let _ = crate::cli::ask(&makepad_remote::link::Client::new(makepad_remote::link::Target::Unix(crate::proto::control_socket()), "devhub-verify"), None, "release", &l.lease);
         }
         let id = prior.as_ref().map_or_else(|| stamp(wall_ms()), |r| r.id.clone());
@@ -354,14 +408,44 @@ impl Verifier {
         let _ = std::fs::create_dir_all(&dir);
         super::prune(&self.ctx.logs("verify"), 60);
         let base = self.ctx.store.read(|d| d.verify.verified.iter().rev().find(|t| &t.pair != pair).map(|t| t.pair.clone()));
+        let macs = full || only.is_some_and(|o| o.iter().any(|n| n == "arm64" || n == "nocodegen"));
+        let arm = prior.as_ref().and_then(|_| super::arm::Decision::read(&dir.join("arm64-classification.log"))).unwrap_or_else(|| super::arm::classify(&self.ctx.repo, base.as_ref(), pair, macs));
+        self.ctx.store.event("verify", Sev::Info, format!("verify {}: {}", pair.short(), arm.summary), None);
+        let _ = std::fs::write(dir.join("arm64-classification.log"), format!("{}\n", arm.summary));
+        if full && prior.is_none() && purpose == "tip" {
+            self.ctx.store.update(|d| {
+                // Record the attempt too: a failed Sunday sweep must not loop all day.
+                if !dry { d.verify.last_full_ms = wall_ms(); }
+            });
+        }
         let mut env = vec!["env".to_string(), "CARGO_INCREMENTAL=0".into(), format!("DIFF_SCOPE={}", if full || base.is_none() { "all" } else { "affected" }), format!("FUZZ_FIXED={FUZZ}")];
+        env.push(format!("DEVHUB_ARM64_VERDICT={}", arm.summary));
         if let Some(b) = &base {
             env.push(format!("VERIFY_BASE={}", b.work));
             env.push(format!("VERIFY_CBASE={}", b.main));
         }
-        let mut defs = legs(full);
+        let mut defs: Vec<LegDef> = if macs { legs(arm.required).into_iter().filter(|d| d.needs.contains("arch=arm64,os=macos")).collect() } else { Vec::new() };
         if let Some(only) = only {
             defs.retain(|d| only.contains(&d.name));
+        }
+        let job_units: Vec<super::ci::Unit> = defs.iter().map(|d| super::ci::Unit { dir: "tools/run".into(), section: format!("job.{}", d.name) }).collect();
+        let job_digests = if job_units.is_empty() { None } else {
+            let lock = prior.as_ref().and_then(|_| std::fs::read_to_string(dir.join("Cargo.lock")).ok()).map(Ok)
+                .unwrap_or_else(|| std::fs::read_to_string(self.ctx.repo.join("Cargo.lock")).map_err(|e| format!("Cargo.lock: {e}")));
+            match lock.and_then(|lock| super::ci::Tree::at(&self.ctx.repo, pair).and_then(|t| super::ci::Digests::with_lock(&t, &job_units, lock))) {
+                Ok(d) => Some(d),
+                Err(e) => {
+                    self.ctx.store.event("verify", Sev::Err, format!("job proofs: {e}"), None);
+                    return (Verdict::Incomplete, Vec::new());
+                }
+            }
+        };
+        if let Some(dg) = &job_digests {
+            let lock = dir.join("Cargo.lock");
+            if let Err(e) = std::fs::write(lock, &dg.lock) {
+                self.ctx.store.event("verify", Sev::Err, format!("job lock snapshot: {e}"), None);
+                return (Verdict::Incomplete, Vec::new());
+            }
         }
         // CI goes along unless what is asked for is all legs
         let with_ci = only.is_none_or(|o| o.iter().any(|n| !defs.iter().any(|d| d.name == *n)));
@@ -372,7 +456,7 @@ impl Verifier {
         let run = Run { id: id.clone(), pair: pair.clone(), started_ms: prior.as_ref().map_or_else(wall_ms, |r| r.started_ms), diff: if full { "all" } else { "affected" }.into(), dry, purpose: purpose.into(), legs: legs.clone(), asked, tries };
         self.ctx.store.update(|d| d.verify.run = Some(run));
         let word = if prior.is_some() { "goes on" } else { "started" };
-        self.ctx.store.event("verify", Sev::Info, format!("verify {purpose} {} {word} (run {id}, diff {})", pair.short(), if full { "all" } else { "affected" }), None);
+        self.ctx.store.event("verify", Sev::Info, format!("verify {purpose} {} {word} (run {id}, diff {}); {}", pair.short(), if full { "all" } else { "affected" }, arm.summary), None);
         let results: Arc<Mutex<Vec<Verdict>>> = Arc::new(Mutex::new(Vec::new()));
         let mut threads = Vec::new();
         for (def, leg) in defs.iter().cloned().zip(legs.iter().cloned()) {
@@ -391,14 +475,14 @@ impl Verifier {
             let (ctx, pair, results, env) = (self.ctx.clone(), pair.clone(), results.clone(), env.clone());
             let log = dir.join(format!("{}.log", def.name));
             threads.push(std::thread::spawn(move || {
-                let spec = Spec { only: false, lane: format!("verify-{}", def.name), agent: "devhub-verify".into(), kind: def.kind, needs: def.needs.clone(), prio: leg_prio, rev: pair.rev(), repo_dir: ctx.repo.to_string_lossy().into_owned(), node: def.node.clone() };
-                let held = super::leg::lease_held(&ctx, &leg.lease);
-                if held && leg.run_n == 0 {
-                    // its lease came back with no run started: asked again
-                    let _ = Held::attach(&leg.lease, &leg.node);
-                }
-                let back = (held && leg.run_n > 0 && leg.state == "run").then_some(leg);
-                let v = run_leg(&ctx, &spec, &pair, &def, &env, &log, back);
+                // (the fleet's toolchain only)
+                let os = def.needs.split(',').find_map(|kv| kv.strip_prefix("os=")).unwrap_or("linux");
+                let needs = match super::fleet_rustc(&ctx, os) {
+                    Some(v) => format!("{}{}rustc_eq={v}", def.needs, if def.needs.is_empty() { "" } else { "," }),
+                    None => def.needs.clone(),
+                };
+                let spec = Spec { since_ms: None, only: false, lane: format!("verify-{}", def.name), agent: "devhub-verify".into(), kind: def.kind, needs, prio: leg_prio, rev: pair.rev(), repo_dir: ctx.repo.to_string_lossy().into_owned(), node: def.node.clone() };
+                let v = run_leg(&ctx, &spec, &pair, &def, &env, &log, Some(leg));
                 results.lock().unwrap().push(v);
             }));
         }
@@ -406,7 +490,7 @@ impl Verifier {
         let ci = with_ci.then(|| {
             let (ctx, pair, only) = (self.ctx.clone(), pair.clone(), only.map(<[String]>::to_vec));
             let c2 = self.ctx.clone();
-            std::thread::spawn(move || super::ci::gate(&ctx, &pair, dry, only.as_deref(), Arc::new(move || !c2.store.read(|d| d.verify.on))))
+            std::thread::spawn(move || super::ci::gate(&ctx, &pair, dry, false, only.as_deref(), Arc::new(move || !c2.store.read(|d| d.verify.on) || SKIP.load(std::sync::atomic::Ordering::Acquire))))
         });
         for t in threads {
             let _ = t.join();
@@ -414,6 +498,20 @@ impl Verifier {
         let (ci_verdict, ci_legs) = ci.map_or((Verdict::Ok, Vec::new()), |ci| ci.join().unwrap_or((Verdict::Incomplete, Vec::new())));
         let mut results = results.lock().unwrap().clone();
         results.push(ci_verdict);
+        if let Some(dg) = job_digests {
+            let mut updates = super::ci::Updates::new();
+            let passed = self.ctx.store.read(|d| d.verify.run.as_ref().map(|r| r.legs.clone()).unwrap_or_default());
+            for (def, unit) in defs.iter().zip(job_units) {
+                if !passed.iter().any(|l| l.name == def.name && l.state == "ok") { continue; }
+                let os = super::ci::Os::of(def.needs.split(',').find_map(|s| s.strip_prefix("os=")).unwrap_or("linux"));
+                if os == super::ci::Os::Any { continue; }
+                updates.insert((unit.clone(), os), super::ci::Proof { digest: dg.of(&unit, os).into(), pair: pair.clone(), capture: String::new(), date: super::ci::date(wall_ms()) });
+            }
+            if let Err(e) = super::ci::commit_proofs(&self.ctx, pair, &updates) {
+                self.ctx.store.event("verify", Sev::Err, format!("job proofs: {e}"), None);
+                results.push(Verdict::Incomplete);
+            }
+        }
         let ok = results.iter().filter(|v| **v == Verdict::Ok).count();
         let verdict = if results.contains(&Verdict::Fail) {
             Verdict::Fail
@@ -440,7 +538,12 @@ impl Verifier {
             Some(legs)
         }).unwrap_or_default();
         legs.extend(ci_legs);
-        let _ = std::fs::write(dir.join("pair"), format!("{} {} {ok}/{} (CI included)\n", pair.work, pair.main, defs.len() + 1));
+        if !arm.required {
+            for name in ["arm64", "nocodegen"] {
+                legs.push(Leg { name: name.into(), state: "ok".into(), summary: arm.summary.clone(), log: dir.join("arm64-classification.log").to_string_lossy().into_owned(), ..Default::default() });
+            }
+        }
+        let _ = std::fs::write(dir.join("pair"), format!("{} {} {ok}/{} (CI included); {}\n", pair.work, pair.main, defs.len() + 1, arm.summary));
         (verdict, legs)
     }
 
@@ -456,7 +559,17 @@ impl Verifier {
                 break;
             }
         }
-        let Some((base, work, commercial)) = found else { return Bisected::Unresolved("no verified first-parent baseline".into()) };
+        let Some((base, work, commercial)) = found else {
+            // work was re-pointed since (`devhub promote`): no landing to blame across it, but the
+            // newest verified pair still says what is an old failure
+            let Some(base) = verified.last().cloned() else { return Bisected::Unresolved("no verified baseline".into()) };
+            let Some(old) = self.old_failures(&base) else { return Bisected::Unresolved(format!("no verdict on the baseline {}", base.short())) };
+            return if self.still_failing().is_empty() && !old.is_empty() {
+                Bisected::OldOnly(base, old)
+            } else {
+                Bisected::Unresolved(format!("no first-parent baseline (work was re-pointed after {})", base.short()))
+            };
+        };
         let events = (|| -> Result<_, String> {
             let wl = git(&repo, &["reflog", "show", "--format=%H %gd", "--date=raw", "work"])?;
             let cl = git(&com, &["reflog", "show", "--format=%H %gd", "--date=raw", "main"])?;
@@ -499,13 +612,47 @@ impl Verifier {
     }
 }
 
+/// `verify skip`: the run going gives up (its CI stops asking for boxes, legs not started do not
+/// start; running steps finish) and the newest landed pair is verified next.
+static SKIP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// A leg's command is its lease's third run, after the two `git rev-parse` of the tree check.
+const LEG_RUN: u64 = 3;
+
+fn active_leg<'a>(d: &'a mut crate::state::Doc, job: &str, pair: &Pair, name: &str) -> Option<&'a mut Leg> {
+    let legs = if job == "jitlegs" {
+        &mut d.jitlegs.runs.last_mut().filter(|r| r.pair == *pair && r.ended_ms == 0)?.legs
+    } else {
+        &mut d.verify.run.as_mut().filter(|r| r.pair == *pair)?.legs
+    };
+    legs.iter_mut().find(|l| l.name == name)
+}
+
 /// One leg: lease, check the tree is at the pair, run, verdict; its state as it goes. `back`: a
 /// previous master's run of it, on the lease this master took back, is followed instead.
-fn run_leg(ctx: &Ctx, spec: &Spec, pair: &Pair, def: &LegDef, env: &[String], log: &Path, mut back: Option<Leg>) -> Verdict {
+pub(crate) fn run_leg(ctx: &Ctx, spec: &Spec, pair: &Pair, def: &LegDef, env: &[String], log: &Path, mut back: Option<Leg>) -> Verdict {
     let (name, marker) = (def.name.as_str(), def.marker.as_str());
+    let job = if spec.agent == "devhub-jitlegs" { "jitlegs" } else { "verify" };
+    back = back.and_then(|mut l| {
+        if !super::leg::lease_held(ctx, &l.lease) {
+            return None;
+        }
+        if l.state == "run" && l.run_n > 0 {
+            return Some(l);
+        }
+        // the node may have started the command before the master noted its run number
+        let h = Held::attach(&l.lease, &l.node);
+        if l.state == "run" && h.has_run(LEG_RUN) == Ok(true) {
+            l.run_n = LEG_RUN;
+            h.keep();
+            Some(l)
+        } else {
+            None
+        }
+    });
     let set = |state: &str, lease: &str, node: &str, summary: &str| {
         ctx.store.update(|d| {
-            if let Some(l) = d.verify.run.as_mut().and_then(|r| r.legs.iter_mut().find(|l| l.name == name)) {
+            if let Some(l) = active_leg(d, job, pair, name) {
                 l.state = state.into();
                 if !lease.is_empty() {
                     l.lease = lease.into();
@@ -521,7 +668,7 @@ fn run_leg(ctx: &Ctx, spec: &Spec, pair: &Pair, def: &LegDef, env: &[String], lo
         if let Some(l) = back.take() {
             let off = std::fs::metadata(log).map_or(0, |m| m.len());
             let held = Held::attach(&l.lease, &l.node);
-            ctx.store.event("verify", Sev::Info, format!("verify leg {name} of {} on {} ({}): the master restarted, its run goes on", pair.short(), l.node, l.lease), None);
+            ctx.store.event(job, Sev::Info, format!("{job} leg {name} of {} on {} ({}): the master restarted, its run goes on", pair.short(), l.node, l.lease), None);
             let r = match std::fs::OpenOptions::new().append(true).create(true).open(log) {
                 Ok(mut f) => held.follow(l.run_n, off, &mut f),
                 Err(e) => Err(format!("{}: {e}", log.display())),
@@ -541,15 +688,20 @@ fn run_leg(ctx: &Ctx, spec: &Spec, pair: &Pair, def: &LegDef, env: &[String], lo
                 return Verdict::Incomplete;
             }
         };
-        let held = match Held::acquire(spec, &mut |l| set("wait", "", "", l), &|| false) {
+        let held = match Held::acquire(spec, &mut |l| set("wait", "", "", l), &|| job == "verify" && SKIP.load(std::sync::atomic::Ordering::Acquire)) {
             Ok(h) => h,
             Err(e) => {
                 set("incomplete", "", "", &e);
                 return Verdict::Incomplete;
             }
         };
+        if let Err(e) = super::ci::ship_lock(&held, log.parent().unwrap_or_else(|| Path::new(".")), false) {
+            held.release(None);
+            set("incomplete", "", "", &e);
+            return Verdict::Incomplete;
+        }
         set("run", &held.id, &held.node, "");
-        ctx.store.event("verify", Sev::Info, format!("verify leg {name} of {} on {} ({})", pair.short(), held.node, held.id), None);
+        ctx.store.event(job, Sev::Info, format!("{job} leg {name} of {} on {} ({})", pair.short(), held.node, held.id), None);
         // the tree must hold the pair before any gate command
         let at = held.output(&["git", "rev-parse", "HEAD"]).and_then(|(_, w)| held.output(&["git", "-C", "apps/commercial", "rev-parse", "HEAD"]).map(|(_, c)| (w, c)));
         match at {
@@ -570,7 +722,7 @@ fn run_leg(ctx: &Ctx, spec: &Spec, pair: &Pair, def: &LegDef, env: &[String], lo
         let id = held.id.clone();
         let r = held.run_noted(&argv, &mut file, &mut |n| {
             ctx.store.update(|d| {
-                if let Some(l) = d.verify.run.as_mut().and_then(|r| r.legs.iter_mut().find(|l| l.name == name)) {
+                if let Some(l) = active_leg(d, job, pair, name) {
                     l.run_n = n;
                 }
             });
@@ -597,12 +749,17 @@ fn run_leg(ctx: &Ctx, spec: &Spec, pair: &Pair, def: &LegDef, env: &[String], lo
     if v != Verdict::Ok {
         let errors: Vec<String> = crate::land::failure_lines(&text).into_iter().take(LEG_ERRORS).collect();
         ctx.store.update(|d| {
-            if let Some(l) = d.verify.run.as_mut().and_then(|r| r.legs.iter_mut().find(|l| l.name == name)) {
+            if let Some(l) = active_leg(d, job, pair, name) {
                 l.errors = errors;
             }
         });
     }
-    ctx.store.event("verify", if v == Verdict::Fail { Sev::Warn } else { Sev::Info }, format!("verify leg {name} {} {}: {summary}", state.to_uppercase(), pair.short()), None);
+    if job == "verify" {
+        ctx.store.event("verify", if v == Verdict::Fail { Sev::Warn } else { Sev::Info }, format!("verify leg {name} {}{} {}: {summary}", state.to_uppercase(), if def.report_only && v != Verdict::Ok { " (report-only)" } else { "" }, pair.short()), None);
+        if def.report_only {
+            return Verdict::Ok;
+        }
+    }
     v
 }
 
@@ -612,11 +769,43 @@ pub fn serve(ctx: &Ctx, line: &str) -> Result<String, String> {
     let full = w.contains(&"--full");
     let dry = w.contains(&"--dry");
     match w.first().copied() {
-        None | Some("status") => Ok(ctx.store.read(|d| d.section(Some("verify"))).unwrap_or_default()),
+        None | Some("status") => Ok(ctx.store.read(|d| {
+            let mut v = d.to_value().get("verify").cloned().unwrap_or(makepad_strict_json::Value::Null);
+            // how far the run's CI is
+            let ci = d.ci.run.as_ref().filter(|c| d.verify.run.as_ref().is_some_and(|r| r.pair == c.pair)).map(|c| {
+                let count = |st: &str| c.shards.iter().filter(|s| s.state == st).count() as u64;
+                makepad_strict_json::Value::Obj(vec![
+                    ("total".into(), makepad_strict_json::Value::Int(c.shards.len() as i64)),
+                    ("ok".into(), makepad_strict_json::Value::Int(count("ok") as i64)),
+                    ("fail".into(), makepad_strict_json::Value::Int(count("fail") as i64)),
+                    ("running".into(), makepad_strict_json::Value::Int(count("run") as i64)),
+                    ("waiting".into(), makepad_strict_json::Value::Int(count("wait") as i64)),
+                ])
+            });
+            if let (makepad_strict_json::Value::Obj(fields), Some(ci)) = (&mut v, ci) {
+                fields.push(("ci".into(), ci));
+            }
+            v.to_json()
+        })),
         Some(on @ ("on" | "off")) => {
             ctx.store.update(|d| d.verify.on = on == "on");
             ctx.store.event("verify", Sev::Info, format!("verify: rolling verification {on}"), None);
             Ok(format!("{{\"on\":{}}}", on == "on"))
+        }
+        Some("skip") => {
+            // in the state at once (a master restart before the run gives up goes to the newest pair)
+            let pair = ctx.store.update(|d| {
+                // (a bisect of a failure is given up too)
+                let failing = d.verify.failing.take().map(|f| f.pair.short());
+                let pair = d.verify.run.take().map(|r| r.pair.short()).or(failing)?;
+                d.verify.asked.clear();
+                d.verify.asked.push(Asked { pair: None, dry: false, full: false });
+                Some(pair)
+            }).ok_or("verify skip: no run is going")?;
+            SKIP.store(true, std::sync::atomic::Ordering::Release);
+            ctx.store.event("verify", Sev::Warn, format!("verify {pair}: skipped by hand; the newest landed pair is next"), None);
+            ctx.store.kick();
+            Ok(format!("{{\"skipping\":{}}}", makepad_remote::json_str(&pair)))
         }
         Some("kick") => {
             let n = ctx.store.update(|d| {
@@ -658,6 +847,10 @@ pub fn render(v: &makepad_strict_json::Value) -> String {
         v.get("asked").and_then(|a| a.as_arr()).map_or(0, |a| a.len()),
         failure.map_or("-".into(), |f| pair(f.get("pair"))),
     );
+    if let Some(c) = v.get("ci").filter(|c| !c.is_null()) {
+        let o = Some(c);
+        out.push_str(&format!("  CI        {} of {} shards ok, {} failed, {} running, {} waiting\n", n(o, "ok"), n(o, "total"), n(o, "fail"), n(o, "running"), n(o, "waiting")));
+    }
     if let Some(r) = run {
         for l in r.get("legs").and_then(|a| a.as_arr()).unwrap_or(&[]) {
             let o = Some(l);

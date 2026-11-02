@@ -3121,7 +3121,7 @@ mod console {
         fn ioctl(fd: i32, request: usize, ...) -> i32;
         fn kill(pid: i32, signal: i32) -> i32;
         fn poll(fds: *mut PollFd, count: NFds, timeout: i32) -> i32;
-        fn read(fd: i32, buffer: *mut u8, count: usize) -> isize;
+        fn read(fd: i32, buffer: *mut core::ffi::c_void, count: usize) -> isize;
     }
     pub fn size() -> (usize, usize) {
         let mut size = Size::default();
@@ -3179,7 +3179,7 @@ mod console {
     }
     fn byte() -> Option<u8> {
         let mut value = 0u8;
-        (unsafe { read(0, &mut value, 1) } == 1).then_some(value)
+        (unsafe { read(0, (&mut value as *mut u8).cast(), 1) } == 1).then_some(value)
     }
     /// Ask the terminal for its background colour (OSC 11) and say whether
     /// it is light; COLORFGBG, then dark, when it does not answer in time.

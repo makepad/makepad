@@ -1,4 +1,4 @@
-//! devhub's workflow state: what `devhub land`, `lanes`, `verify`, `after`, `allapps` and `push`
+//! devhub's workflow state: what `devhub land`, `lanes`, `verify`, `jitlegs`, `after`, `allapps` and `push`
 //! know, in ONE document the master owns (`~/.makepad/devhub/state.json`, rewritten whole on every
 //! change; no .txt ledgers). Every change is also a record on the master's event stream (its kind
 //! is the section's name), so an agent blocks on `devhub watch <kinds>` instead of polling.
@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
-pub type Publish = Arc<dyn Fn(Record) + Send + Sync>;
+pub type Publish = Arc<dyn Fn(Record) -> u64 + Send + Sync>;
 
 /// How many finished entries a list keeps (verified tips, failures, waiters, pushes).
 pub const KEEP: usize = 200;
@@ -40,7 +40,7 @@ impl Pair {
 
     /// The lease `--rev` of the pair: `work@<sha>,main@<sha>`.
     pub fn rev(&self) -> String {
-        format!("work@{},main@{}", self.work, self.main)
+        if self.main.is_empty() { format!("work@{}", self.work) } else { format!("work@{},main@{}", self.work, self.main) }
     }
 
     pub fn valid(&self) -> bool {
@@ -77,7 +77,7 @@ pub struct Verify {
     pub failures: Vec<Failure>,
     /// the run in progress
     pub run: Option<Run>,
-    /// when a run last diffed every program (the nightly full diff)
+    /// when a full sweep was last attempted (also updated on success)
     pub last_full_ms: u64,
     /// runs asked for on the CLI, first first
     pub asked: Vec<Asked>,
@@ -174,6 +174,25 @@ pub struct Asked {
     pub dry: bool,
     /// diff every program
     pub full: bool,
+}
+
+// ---- jitlegs ----
+
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct JitLegs {
+    /// oldest first, including the run in progress
+    pub runs: Vec<JitLegsRun>,
+    /// `devhub jitlegs run`: run the newest landed pair even if its inputs are unchanged
+    pub asked: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct JitLegsRun {
+    pub pair: Pair,
+    pub started_ms: u64,
+    /// zero while running
+    pub ended_ms: u64,
+    pub legs: Vec<Leg>,
 }
 
 // ---- allapps ----
@@ -286,7 +305,7 @@ impl Cond {
 
 // ---- push ----
 
-/// One collapsed push of a verified tip to origin/work (`devhub push`).
+/// One collapsed push of a selected tip to origin/work (`devhub push`).
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct Pushed {
     pub pair: Pair,
@@ -300,12 +319,14 @@ pub struct Pushed {
 // ---- ci ----
 
 /// The CI shards of verify (`devhub ci`, [`crate::orch::ci`]): what each shard took last (for
-/// balancing the boxes), the run in progress and the finished runs.
+/// balancing the boxes), the gate and sweep in progress and the finished runs.
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct Ci {
     /// seconds per shard id (a moving average of its finished runs), for balancing
     pub timings: Vec<(String, f64)>,
     pub run: Option<CiRun>,
+    /// the background sweep, independent of the gate
+    pub sweep_run: Option<CiRun>,
     /// finished runs, oldest first
     pub runs: Vec<CiRun>,
     /// runs started: rotates which OS each app's smoke script runs on
@@ -313,8 +334,24 @@ pub struct Ci {
 }
 
 impl Ci {
+    pub fn slot(&self, sweep: bool) -> &Option<CiRun> {
+        if sweep { &self.sweep_run } else { &self.run }
+    }
+
+    pub fn slot_mut(&mut self, sweep: bool) -> &mut Option<CiRun> {
+        if sweep { &mut self.sweep_run } else { &mut self.run }
+    }
+
     pub fn timing(&self, id: &str) -> Option<f64> {
         self.timings.iter().find(|(k, _)| k == id).map(|(_, s)| *s)
+    }
+
+    /// A mark kept beside the timings (`failing:<package>`: its tests failed when they last ran).
+    pub fn set_mark(&mut self, key: &str, on: bool) {
+        self.timings.retain(|(k, _)| k != key);
+        if on {
+            self.timings.push((key.to_string(), 1.0));
+        }
     }
 
     /// Folds a measured time into the shard's average (new runs weigh half).
@@ -328,6 +365,10 @@ impl Ci {
 
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct CiRun {
+    /// The lock of an in-flight run, for restart identity only.
+    pub lock_digest: String,
+    /// A calling checkout; empty for the rolling verifier.
+    pub checkout: String,
     pub id: String,
     pub pair: Pair,
     /// a CLI run: no verify ledger is written
@@ -345,6 +386,12 @@ pub struct CiRun {
     pub boxes: Vec<String>,
     /// the plan's rotation (a run that goes on keeps its plan)
     pub rotation: u64,
+    /// the timings and marks its plan was made with (a run that goes on keeps its batches)
+    pub plan_timings: Vec<(String, f64)>,
+    /// the sweep (every crate's tests, `devhub ci sweep`), not the gate's app checks
+    pub sweep: bool,
+    /// `ci stop` was asked: a master restart resumes it only to finish its running shards
+    pub stopping: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Default)]
@@ -367,6 +414,8 @@ pub struct CiShard {
     /// the step it is at, and that step's run on its lease
     pub step: u64,
     pub run_n: u64,
+    /// steps that passed on any attempt of this shard
+    pub steps_ok: Vec<u64>,
     /// why the steps before failed
     pub failed: Vec<String>,
     /// the pair a kept result is from
@@ -415,6 +464,7 @@ fn ci_shard_value(c: &CiShard) -> Value {
         ("sig", s(&c.sig)),
         ("step", int(c.step)),
         ("run_n", int(c.run_n)),
+        ("steps_ok", Value::Arr(c.steps_ok.iter().map(|&k| int(k)).collect())),
         ("failed", strs(&c.failed)),
         ("kept", s(&c.kept)),
         ("failed_on", s(&c.failed_on)),
@@ -441,6 +491,7 @@ fn ci_shard_from(v: &Value) -> CiShard {
         sig: text(o, "sig"),
         step: uint(o, "step"),
         run_n: uint(o, "run_n"),
+        steps_ok: arr(o, "steps_ok").iter().filter_map(Value::as_u64).collect(),
         failed: strs_from(o, "failed"),
         kept: text(o, "kept"),
         failed_on: text(o, "failed_on"),
@@ -462,8 +513,10 @@ fn ci_shard_from(v: &Value) -> CiShard {
     }
 }
 
-fn ci_run_value(r: &CiRun) -> Value {
+pub(crate) fn ci_run_value(r: &CiRun) -> Value {
     obj(vec![
+        ("checkout", s(&r.checkout)),
+        ("lock_digest", s(&r.lock_digest)),
         ("id", s(&r.id)),
         ("pair", r.pair.to_value()),
         ("dry", Value::Bool(r.dry)),
@@ -475,12 +528,17 @@ fn ci_run_value(r: &CiRun) -> Value {
         ("fleet", s(&r.fleet)),
         ("boxes", strs(&r.boxes)),
         ("rotation", int(r.rotation)),
+        ("plan_timings", Value::Obj(r.plan_timings.iter().map(|(k, v)| (k.clone(), Value::F64(*v))).collect())),
+        ("sweep", Value::Bool(r.sweep)),
+        ("stopping", Value::Bool(r.stopping)),
     ])
 }
 
 fn ci_run_from(v: &Value) -> CiRun {
     let o = Some(v);
     CiRun {
+        checkout: text(o, "checkout"),
+        lock_digest: text(o, "lock_digest"),
         id: text(o, "id"),
         pair: Pair::from_value(v.get("pair")),
         dry: flag(o, "dry", false),
@@ -492,6 +550,12 @@ fn ci_run_from(v: &Value) -> CiRun {
         fleet: text(o, "fleet"),
         boxes: strs_from(o, "boxes"),
         rotation: uint(o, "rotation"),
+        sweep: flag(o, "sweep", false),
+        stopping: flag(o, "stopping", false),
+        plan_timings: match v.get("plan_timings") {
+            Some(Value::Obj(f)) => f.iter().filter_map(|(k, x)| f64_of(x).map(|s| (k.clone(), s))).collect(),
+            _ => Vec::new(),
+        },
     }
 }
 
@@ -499,6 +563,7 @@ fn ci_value(c: &Ci) -> Value {
     obj(vec![
         ("timings", Value::Obj(c.timings.iter().map(|(k, v)| (k.clone(), Value::F64(*v))).collect())),
         ("run", c.run.as_ref().map_or(Value::Null, ci_run_value)),
+        ("sweep_run", c.sweep_run.as_ref().map_or(Value::Null, ci_run_value)),
         ("runs", Value::Arr(c.runs.iter().map(ci_run_value).collect())),
         ("rotation", int(c.rotation)),
     ])
@@ -512,6 +577,7 @@ fn ci_from(v: Option<&Value>) -> Ci {
     Ci {
         timings,
         run: v.and_then(|x| x.get("run")).filter(|r| !r.is_null()).map(ci_run_from),
+        sweep_run: v.and_then(|x| x.get("sweep_run")).filter(|r| !r.is_null()).map(ci_run_from),
         runs: arr(v, "runs").iter().map(ci_run_from).collect(),
         rotation: uint(v, "rotation"),
     }
@@ -602,10 +668,20 @@ pub struct Live {
     /// `W<n>`
     pub id: String,
     pub app: String,
+    pub test: bool,
+    /// target selection and libtest arguments, including `--`
+    pub test_args: Vec<String>,
     pub lane: String,
+    pub src: String,
+    pub cost: String,
+    pub est_min: Option<f64>,
+    pub class: String,
+    pub priority: String,
+    pub loader: String,
     pub agent: String,
     /// the worktree whose edits stream in
     pub tree: String,
+    pub rev: String,
     pub needs: String,
     pub visible: bool,
     pub lease: String,
@@ -614,6 +690,9 @@ pub struct Live {
     pub pid: u32,
     /// the run in its lease (a new master follows it from there)
     pub run_n: u64,
+    pub run_log_start: u64,
+    /// Content last shipped, including whiteouts (`-`).
+    pub sources: std::collections::BTreeMap<String, String>,
     /// `starting`, `running`, `paused` (a parked panic), then `ended`, `failed`
     pub state: String,
     pub started_ms: u64,
@@ -628,22 +707,79 @@ pub struct Live {
 }
 
 impl Live {
+    pub fn test_code(&self) -> i32 {
+        let x = self;
+        match &x.patch {
+            Some(p) if p.outcome == "jit_error" => 3,
+            Some(p) if matches!(p.outcome.as_str(), "none" | "failed") => 2,
+            Some(p) if x.state != "paused" && p.tests.as_ref().is_some_and(|t| t.failed == 0) => 0,
+            _ => 1,
+        }
+    }
+
+    pub fn test_result(&self, seconds: f64) -> String {
+        let x = self;
+        let Some(p) = &x.patch else { return format!("devhub test: {} {}: {}\n", x.app, x.state, x.note) };
+        if p.outcome == "jit_error" { return jit_error_verdict(p); }
+        let Some(t) = &p.tests else { return format!("{}\n{}", if p.reason.is_empty() { &x.note } else { &p.reason }, p.output) };
+        let mut out = format!("devhub test: {} {}/{} ran ({} skipped, selected {}) in {seconds:.3} s (ship {} ms, patch {:.0} ms, tests {:.0} ms) on {} [live {}]\n", x.app, t.passed, t.ran, t.skipped, if t.selected == "affected" { "affected" } else { "all" }, p.shipped_ms.saturating_sub(p.edit_ms), t.compile_ms, t.ms, x.node, x.id);
+        for name in &t.failures { out.push_str(&format!("  {name}\n")); }
+        out.push_str(&p.output);
+        out
+    }
+
     pub fn active(&self) -> bool {
         matches!(self.state.as_str(), "starting" | "running" | "paused")
     }
 }
 
+/// A live patch that ended in a JIT error: the typed verdict line, else the raw error.
+pub fn jit_error_verdict(p: &LivePatch) -> String {
+    if let Some(verdict) = makepad_remote::hot::Verdict::from_output(makepad_remote::hot::JIT_ERROR_EXIT, &p.reason) { return format!("{}\n", verdict.line()); }
+    format!("JIT error, not your change: {}\n", p.jit_error)
+}
+
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct LivePatch {
     pub files: Vec<String>,
+    /// the JIT's display text for the patch awaiting tests
+    pub edit: String,
+    /// the shared identity of patchverified and its testverdict
+    pub group: Option<u64>,
+    /// last event; an exec can reuse its sequence number with different contents
+    pub seq: u64,
+    pub cursor: String,
     pub edit_ms: u64,
     pub shipped_ms: u64,
-    /// `patched`, `restart` (the JIT needs a restart), `refused`, `reverted`, or empty (waiting)
+    /// Patch state, including `recovering` and terminal `jit_error`.
     pub outcome: String,
     pub outcome_ms: u64,
     pub frame_ms: u64,
+    pub tests: Option<LiveTests>,
+    pub verdict_ms: u64,
+    pub log_start: u64,
+    pub log_end: u64,
+    pub output: String,
+    pub retried: bool,
+    pub jit_error: u64,
     /// why a restart or a refusal
     pub reason: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct LiveTests {
+    pub edit: String,
+    pub group: u64,
+    pub ran: u64,
+    pub passed: u64,
+    pub failed: u64,
+    pub ignored: u64,
+    pub skipped: u64,
+    pub selected: String,
+    pub failures: Vec<String>,
+    pub ms: f64,
+    pub compile_ms: f64,
+    pub restarted: bool,
 }
 
 // ---- job ----
@@ -659,6 +795,15 @@ pub struct Job {
     /// the batch it came in (`B<n>`), or empty
     pub batch: String,
     pub lane: String,
+    pub src: String,
+    pub cost: String,
+    pub est_min: Option<f64>,
+    pub cores: Option<f64>,
+    pub ram_gb: Option<f64>,
+    pub whole: bool,
+    pub class: String,
+    pub priority: String,
+    pub loader: String,
     pub agent: String,
     /// the lease kind (`test`, `build`, `gpu`, ...)
     pub kind: String,
@@ -680,6 +825,16 @@ pub struct Job {
     /// placements so far (a box lost under it places it again)
     pub attempts: u32,
     pub cmd: Vec<String>,
+    pub cwd: String,
+    pub holder: Option<u32>,
+    /// A JIT test's opposite-source shadow pair; retained until its evidence reaches shadow.jsonl.
+    pub shadow: bool,
+    pub shadow_job: String,
+    pub shadow_of: String,
+    pub shadow_recorded: bool,
+    /// a sampled live verdict this native run checks (JSON: live id, group, counts, failures)
+    pub live_sample: String,
+    pub jit_error: String,
     /// jobs that must end ok first
     pub after: Vec<String>,
     /// `queued` (deps), `leasing` (waiting for a box), `running`, `paused` (a parked panic; the box
@@ -687,6 +842,8 @@ pub struct Job {
     /// `lost` (the master restarted under it)
     pub state: String,
     pub submitted_ms: u64,
+    /// when it first asked for a box (its place in the queue)
+    pub asked_ms: u64,
     /// the box granted, the snapshot shipped, the first output byte seen (latency of a job)
     pub granted_ms: u64,
     pub shipped_ms: u64,
@@ -709,7 +866,7 @@ pub struct Job {
 
 impl Job {
     pub fn done(&self) -> bool {
-        matches!(self.state.as_str(), "ok" | "failed" | "panicked" | "cancelled" | "skipped" | "lost")
+        matches!(self.state.as_str(), "ok" | "failed" | "panicked" | "cancelled" | "skipped" | "lost" | "jit-error")
     }
 }
 
@@ -729,7 +886,9 @@ pub struct JobPanic {
 
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct Doc {
+    pub devhub_shadow: bool,
     pub verify: Verify,
+    pub jitlegs: JitLegs,
     pub allapps: Allapps,
     pub after: Vec<Waiter>,
     /// the id number of the next waiter (`A<n>`)
@@ -741,6 +900,8 @@ pub struct Doc {
     pub shows_next: u64,
     pub lives: Vec<Live>,
     pub lives_next: u64,
+    /// the next landing queue number: never reused, even after landed entries are trimmed
+    pub land_next: u64,
     pub jobs: Vec<Job>,
     /// the id numbers of the next job (`J<n>`) and batch (`B<n>`)
     pub jobs_next: u64,
@@ -764,6 +925,7 @@ impl Doc {
         let v = &self.verify;
         let a = &self.allapps;
         obj(vec![
+            ("DEVHUB_SHADOW", Value::Bool(self.devhub_shadow)),
             (
                 "verify",
                 obj(vec![
@@ -776,6 +938,7 @@ impl Doc {
                     ("failing", v.failing.as_ref().map_or(Value::Null, failing_value)),
                 ]),
             ),
+            ("jitlegs", jitlegs_value(&self.jitlegs)),
             (
                 "allapps",
                 obj(vec![
@@ -794,6 +957,7 @@ impl Doc {
             ("shows_next", int(self.shows_next)),
             ("lives", Value::Arr(self.lives.iter().map(live_value).collect())),
             ("lives_next", int(self.lives_next)),
+            ("land_next", int(self.land_next)),
             ("jobs", Value::Arr(self.jobs.iter().map(job_value).collect())),
             ("jobs_next", int(self.jobs_next)),
             ("batches_next", int(self.batches_next)),
@@ -810,6 +974,7 @@ impl Doc {
         let ve = v.get("verify");
         let al = v.get("allapps");
         Doc {
+            devhub_shadow: flag(Some(v), "DEVHUB_SHADOW", false),
             verify: Verify {
                 on: flag(ve, "on", true),
                 verified: arr(ve, "verified").iter().map(|t| Tip { pair: Pair::from_value(t.get("pair")), at_ms: uint(Some(t), "at_ms"), diff: text(Some(t), "diff") }).collect(),
@@ -819,6 +984,7 @@ impl Doc {
                 asked: arr(ve, "asked").iter().map(|q| Asked { pair: q.get("pair").filter(|p| !p.is_null()).map(|p| Pair::from_value(Some(p))), dry: flag(Some(q), "dry", false), full: flag(Some(q), "full", false) }).collect(),
                 failing: ve.and_then(|x| x.get("failing")).filter(|f| !f.is_null()).map(failing_from),
             },
+            jitlegs: jitlegs_from(v.get("jitlegs")),
             allapps: Allapps {
                 on: flag(al, "on", true),
                 last: al.and_then(|x| x.get("last")).filter(|r| !r.is_null()).map(allapps_from),
@@ -837,6 +1003,7 @@ impl Doc {
             shows_next: uint(Some(v), "shows_next"),
             lives: arr(Some(v), "lives").iter().map(live_from).collect(),
             lives_next: uint(Some(v), "lives_next"),
+            land_next: uint(Some(v), "land_next"),
             jobs: arr(Some(v), "jobs").iter().map(job_from).collect(),
             jobs_next: uint(Some(v), "jobs_next"),
             batches_next: uint(Some(v), "batches_next"),
@@ -853,7 +1020,7 @@ impl Doc {
         makepad_strict_json::parse_depth(text.as_bytes(), 16).ok().map(|v| Doc::from_value(&v))
     }
 
-    /// One section's JSON (`verify`, `allapps`, `after`, `pushes`, `lanes`, `shows`, `lives`, `jobs`), or the whole document.
+    /// One section's JSON (`verify`, `jitlegs`, `allapps`, `after`, `pushes`, `lanes`, `shows`, `lives`, `jobs`), or the whole document.
     pub fn section(&self, name: Option<&str>) -> Option<String> {
         let all = self.to_value();
         match name {
@@ -873,6 +1040,9 @@ impl Doc {
         cut(&mut self.verify.failures);
         cut(&mut self.pushes);
         cut(&mut self.ci.runs);
+        if self.jitlegs.runs.len() > 20 {
+            self.jitlegs.runs.drain(..self.jitlegs.runs.len() - 20);
+        }
         let ended = self.lanes.iter().filter(|l| l.state != "live").count();
         if ended > KEEP {
             let mut drop = ended - KEEP;
@@ -909,8 +1079,9 @@ impl Doc {
         let jobs_done = self.jobs.iter().filter(|j| j.done()).count();
         if jobs_done > JOBS_KEEP {
             let mut drop = jobs_done - JOBS_KEEP;
+            let pending: std::collections::HashSet<String> = self.jobs.iter().filter(|j| (j.shadow || !j.live_sample.is_empty()) && !j.shadow_recorded).flat_map(|j| [j.id.clone(), j.shadow_job.clone()]).collect();
             self.jobs.retain(|j| {
-                let old = drop > 0 && j.done();
+                let old = drop > 0 && j.done() && !pending.contains(&j.id);
                 if old {
                     drop -= 1;
                 }
@@ -1021,6 +1192,23 @@ fn run_from(v: &Value) -> Run {
     Run { id: text(o, "id"), pair: Pair::from_value(v.get("pair")), started_ms: uint(o, "started_ms"), diff: text(o, "diff"), dry: flag(o, "dry", false), purpose: text(o, "purpose"), legs: arr(o, "legs").iter().map(leg_from).collect(), asked: flag(o, "asked", false), tries: uint(o, "tries") as u32 }
 }
 
+fn jitlegs_run_value(r: &JitLegsRun) -> Value {
+    obj(vec![("pair", r.pair.to_value()), ("started_ms", int(r.started_ms)), ("ended_ms", int(r.ended_ms)), ("legs", Value::Arr(r.legs.iter().map(leg_value).collect()))])
+}
+
+fn jitlegs_run_from(v: &Value) -> JitLegsRun {
+    let o = Some(v);
+    JitLegsRun { pair: Pair::from_value(v.get("pair")), started_ms: uint(o, "started_ms"), ended_ms: uint(o, "ended_ms"), legs: arr(o, "legs").iter().map(leg_from).collect() }
+}
+
+fn jitlegs_value(j: &JitLegs) -> Value {
+    obj(vec![("runs", Value::Arr(j.runs.iter().map(jitlegs_run_value).collect())), ("asked", Value::Bool(j.asked))])
+}
+
+fn jitlegs_from(v: Option<&Value>) -> JitLegs {
+    JitLegs { runs: arr(v, "runs").iter().map(jitlegs_run_from).collect(), asked: flag(v, "asked", false) }
+}
+
 fn allapps_value(r: &AllappsRun) -> Value {
     obj(vec![
         ("pair", r.pair.to_value()),
@@ -1105,17 +1293,39 @@ fn panic_from(v: Option<&Value>) -> Option<JobPanic> {
     Some(JobPanic { id: text(Some(p), "id"), pid: uint(Some(p), "pid") as u32, message: text(Some(p), "message"), thread: text(Some(p), "thread"), location: text(Some(p), "location"), at_ms: uint(Some(p), "at_ms") })
 }
 
+fn live_tests_value(t: &LiveTests) -> Value {
+    obj(vec![("edit", s(&t.edit)), ("group", int(t.group)), ("ran", int(t.ran)), ("passed", int(t.passed)), ("failed", int(t.failed)), ("ignored", int(t.ignored)), ("skipped", int(t.skipped)), ("selected", s(&t.selected)), ("failures", strs(&t.failures)), ("ms", Value::F64(t.ms)), ("compile_ms", Value::F64(t.compile_ms)), ("restarted", Value::Bool(t.restarted))])
+}
+
+pub fn live_tests_from(v: &Value) -> Option<LiveTests> {
+    let edit = v.get("edit").map(|v| v.as_str().map(str::to_string).unwrap_or_else(|| v.to_json())).unwrap_or_default();
+    // Initial runs and some restarts have no patch compile time.
+    let compile_ms = match v.get("compile_ms") { None | Some(Value::Null) => 0.0, Some(v) => f64_of(v)? };
+    Some(LiveTests { edit, group: v.get("group")?.as_u64()?, ran: v.get("ran")?.as_u64()?, passed: v.get("passed")?.as_u64()?, failed: v.get("failed")?.as_u64()?, ignored: uint(Some(v), "ignored"), skipped: uint(Some(v), "skipped"), selected: text(Some(v), "selected"), failures: strs_from(Some(v), "failures"), ms: v.get("ms").and_then(f64_of)?, compile_ms, restarted: flag(Some(v), "restarted", false) })
+}
+
 pub fn live_value(x: &Live) -> Value {
     let patch = x.patch.as_ref().map_or(Value::Null, |p| {
-        obj(vec![("files", strs(&p.files)), ("edit_ms", int(p.edit_ms)), ("shipped_ms", int(p.shipped_ms)), ("outcome", s(&p.outcome)), ("outcome_ms", int(p.outcome_ms)), ("frame_ms", int(p.frame_ms)), ("reason", s(&p.reason))])
+        obj(vec![("files", strs(&p.files)), ("edit", s(&p.edit)), ("group", p.group.map_or(Value::Null, int)), ("seq", int(p.seq)), ("cursor", s(&p.cursor)), ("edit_ms", int(p.edit_ms)), ("shipped_ms", int(p.shipped_ms)), ("outcome", s(&p.outcome)), ("outcome_ms", int(p.outcome_ms)), ("frame_ms", int(p.frame_ms)), ("tests", p.tests.as_ref().map_or(Value::Null, live_tests_value)), ("verdict_ms", int(p.verdict_ms)), ("reason", s(&p.reason)), ("log_start", int(p.log_start)), ("log_end", int(p.log_end)), ("output", s(&p.output)), ("retried", Value::Bool(p.retried)), ("jit_error", int(p.jit_error))])
     });
     obj(vec![
         ("id", s(&x.id)),
         ("run_n", int(x.run_n)),
+        ("run_log_start", int(x.run_log_start)),
+        ("sources", Value::Obj(x.sources.iter().map(|(k, v)| (k.clone(), s(v))).collect())),
         ("app", s(&x.app)),
+        ("test", Value::Bool(x.test)),
+        ("test_args", strs(&x.test_args)),
         ("lane", s(&x.lane)),
+        ("src", s(&x.src)),
+        ("cost", s(&x.cost)),
+        ("est_min", x.est_min.map_or(Value::Null, Value::F64)),
+        ("class", s(&x.class)),
+        ("priority", s(&x.priority)),
+        ("loader", s(&x.loader)),
         ("agent", s(&x.agent)),
         ("tree", s(&x.tree)),
+        ("rev", s(&x.rev)),
         ("needs", s(&x.needs)),
         ("visible", Value::Bool(x.visible)),
         ("lease", s(&x.lease)),
@@ -1138,10 +1348,21 @@ pub fn live_from(v: &Value) -> Live {
     Live {
         id: text(o, "id"),
         run_n: uint(o, "run_n"),
+        run_log_start: uint(o, "run_log_start"),
+        sources: match v.get("sources") { Some(Value::Obj(fields)) => fields.iter().filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_string()))).collect(), _ => Default::default() },
         app: text(o, "app"),
+        test: flag(o, "test", false),
+        test_args: strs_from(o, "test_args"),
         lane: text(o, "lane"),
+        src: text(o, "src"),
+        cost: text(o, "cost"),
+        est_min: v.get("est_min").and_then(crate::lease::num),
+        class: text(o, "class"),
+        priority: text(o, "priority"),
+        loader: text(o, "loader"),
         agent: text(o, "agent"),
         tree: text(o, "tree"),
+        rev: text(o, "rev"),
         needs: text(o, "needs"),
         visible: flag(o, "visible", false),
         lease: text(o, "lease"),
@@ -1151,7 +1372,7 @@ pub fn live_from(v: &Value) -> Live {
         started_ms: uint(o, "started_ms"),
         touched_ms: uint(o, "touched_ms"),
         ended_ms: uint(o, "ended_ms"),
-        patch: p.map(|p| LivePatch { files: strs_from(Some(p), "files"), edit_ms: uint(Some(p), "edit_ms"), shipped_ms: uint(Some(p), "shipped_ms"), outcome: text(Some(p), "outcome"), outcome_ms: uint(Some(p), "outcome_ms"), frame_ms: uint(Some(p), "frame_ms"), reason: text(Some(p), "reason") }),
+        patch: p.map(|p| LivePatch { files: strs_from(Some(p), "files"), edit: text(Some(p), "edit"), group: p.get("group").and_then(Value::as_u64), seq: uint(Some(p), "seq"), cursor: text(Some(p), "cursor"), edit_ms: uint(Some(p), "edit_ms"), shipped_ms: uint(Some(p), "shipped_ms"), outcome: text(Some(p), "outcome"), outcome_ms: uint(Some(p), "outcome_ms"), frame_ms: uint(Some(p), "frame_ms"), tests: p.get("tests").and_then(live_tests_from), verdict_ms: uint(Some(p), "verdict_ms"), log_start: uint(Some(p), "log_start"), log_end: uint(Some(p), "log_end"), output: text(Some(p), "output"), retried: flag(Some(p), "retried", false), jit_error: uint(Some(p), "jit_error"), reason: text(Some(p), "reason") }),
         panic: panic_from(v.get("panic")),
         log: text(o, "log"),
         note: text(o, "note"),
@@ -1211,6 +1432,15 @@ pub fn job_value(j: &Job) -> Value {
         ("id", s(&j.id)),
         ("batch", s(&j.batch)),
         ("lane", s(&j.lane)),
+        ("src", s(&j.src)),
+        ("cost", s(&j.cost)),
+        ("est_min", j.est_min.map_or(Value::Null, Value::F64)),
+        ("cores", j.cores.map_or(Value::Null, Value::F64)),
+        ("ram_gb", j.ram_gb.map_or(Value::Null, Value::F64)),
+        ("whole", Value::Bool(j.whole)),
+        ("class", s(&j.class)),
+        ("priority", s(&j.priority)),
+        ("loader", s(&j.loader)),
         ("agent", s(&j.agent)),
         ("kind", s(&j.kind)),
         ("needs", s(&j.needs)),
@@ -1227,9 +1457,18 @@ pub fn job_value(j: &Job) -> Value {
         ("shipped_ms", int(j.shipped_ms)),
         ("first_out_ms", int(j.first_out_ms)),
         ("cmd", strs(&j.cmd)),
+        ("cwd", s(&j.cwd)),
+        ("holder", j.holder.map_or(Value::Null, |p| int(p as u64))),
+        ("shadow", Value::Bool(j.shadow)),
+        ("shadow_job", s(&j.shadow_job)),
+        ("shadow_of", s(&j.shadow_of)),
+        ("shadow_recorded", Value::Bool(j.shadow_recorded)),
+        ("live_sample", s(&j.live_sample)),
+        ("jit_error", s(&j.jit_error)),
         ("after", strs(&j.after)),
         ("state", s(&j.state)),
         ("submitted_ms", int(j.submitted_ms)),
+        ("asked_ms", int(j.asked_ms)),
         ("started_ms", int(j.started_ms)),
         ("ended_ms", int(j.ended_ms)),
         ("lease", s(&j.lease)),
@@ -1251,6 +1490,15 @@ pub fn job_from(v: &Value) -> Job {
         id: text(o, "id"),
         batch: text(o, "batch"),
         lane: text(o, "lane"),
+        src: text(o, "src"),
+        cost: text(o, "cost"),
+        est_min: v.get("est_min").and_then(crate::lease::num),
+        cores: v.get("cores").and_then(crate::lease::num),
+        ram_gb: v.get("ram_gb").and_then(crate::lease::num),
+        whole: flag(o, "whole", false),
+        class: text(o, "class"),
+        priority: text(o, "priority"),
+        loader: text(o, "loader"),
         agent: text(o, "agent"),
         kind: text(o, "kind"),
         needs: text(o, "needs"),
@@ -1267,9 +1515,18 @@ pub fn job_from(v: &Value) -> Job {
         shipped_ms: uint(o, "shipped_ms"),
         first_out_ms: uint(o, "first_out_ms"),
         cmd: strs_from(o, "cmd"),
+        cwd: text(o, "cwd"),
+        holder: v.get("holder").and_then(Value::as_u64).and_then(|p| u32::try_from(p).ok()),
+        shadow: flag(o, "shadow", false),
+        shadow_job: text(o, "shadow_job"),
+        shadow_of: text(o, "shadow_of"),
+        shadow_recorded: flag(o, "shadow_recorded", false),
+        live_sample: text(o, "live_sample"),
+        jit_error: text(o, "jit_error"),
         after: strs_from(o, "after"),
         state: text(o, "state"),
         submitted_ms: uint(o, "submitted_ms"),
+        asked_ms: uint(o, "asked_ms"),
         started_ms: uint(o, "started_ms"),
         ended_ms: uint(o, "ended_ms"),
         lease: text(o, "lease"),
@@ -1422,11 +1679,16 @@ impl Store {
     /// A state change on the event stream: `kind` is the section (`verify`, `after`, ...), `line`
     /// the answer-first text, `detail` the changed entry.
     pub fn event(&self, kind: &str, sev: Sev, line: String, detail: Option<String>) {
+        self.event_seq(kind, sev, line, detail);
+    }
+
+    /// Publishes an event and returns its stream sequence.
+    pub fn event_seq(&self, kind: &str, sev: Sev, line: String, detail: Option<String>) -> u64 {
         let p = self.publish.lock().unwrap().clone();
-        if let Some(p) = p {
+        p.map_or(0, |p| {
             let machine = self.machine.lock().unwrap().clone();
-            p(hub_record(&machine, "", 0, kind, sev, line, detail.unwrap_or_default()));
-        }
+            p(hub_record(&machine, "", 0, kind, sev, line, detail.unwrap_or_default()))
+        })
     }
 
     /// Wakes every waiter (a CLI asked for something).
@@ -1455,7 +1717,9 @@ mod tests {
     fn doc_round_trip() {
         let leg = Leg { name: "full-a".into(), state: "fail".into(), lease: "L9".into(), node: "107".into(), summary: "NODEGATE-FAIL: fuzz".into(), errors: vec!["fuzz: seed 7 disagrees".into()], log: "/x/full-a.log".into(), run_n: 4 };
         let doc = Doc {
+            devhub_shadow: false,
             ci: Default::default(),
+            jitlegs: JitLegs { runs: vec![JitLegsRun { pair: pair('b'), started_ms: 3, ended_ms: 6, legs: vec![leg.clone()] }], asked: true },
             verify: Verify {
                 on: false,
                 verified: vec![Tip { pair: pair('a'), at_ms: 5, diff: "all".into() }],
@@ -1489,8 +1753,9 @@ mod tests {
             lanes: vec![LaneRec { name: "x".into(), path: "/w/x".into(), branch: "rc-x".into(), cbranch: "rc-x".into(), created_ms: 1, adopted: true, state: "live".into(), landed_ms: 4, keep: true, waited: true, ended_ms: 0, note: "n".into() }],
             shows: vec![Show { id: "V1".into(), app: "makepad-fab".into(), device: "mac".into(), state: "paused".into(), cond: Cond::Landed { branch: "rc-x".into(), repo: "makepad".into(), sha: String::new() }, pid: 4, sha: "s".into(), exit: Some(0), panic: Some(JobPanic { id: "P2".into(), ..Default::default() }), ..Default::default() }],
             shows_next: 1,
-            lives: vec![Live { id: "W1".into(), app: "makepad-app-calculator".into(), state: "running".into(), visible: true, pid: 7, patch: Some(LivePatch { files: vec!["a.rs".into()], edit_ms: 1, shipped_ms: 2, outcome: "patched".into(), outcome_ms: 3, frame_ms: 4, reason: String::new() }), ..Default::default() }],
+            lives: vec![Live { id: "W1".into(), app: "makepad-app-calculator".into(), state: "running".into(), visible: true, pid: 7, patch: Some(LivePatch { files: vec!["a.rs".into()], edit_ms: 1, shipped_ms: 2, outcome: "patched".into(), outcome_ms: 3, frame_ms: 4, reason: String::new(), ..Default::default() }), ..Default::default() }],
             lives_next: 1,
+            land_next: 1,
             jobs_next: 2,
             batches_next: 1,
             snaps_next: 3,
@@ -1503,15 +1768,16 @@ mod tests {
         let text = doc.to_value().to_json();
         assert_eq!(Doc::parse(&text), Some(doc.clone()));
         assert!(doc.section(Some("verify")).unwrap().starts_with("{\"on\":false"));
+        assert_eq!(makepad_strict_json::parse(doc.section(Some("jitlegs")).unwrap().as_bytes()).unwrap(), jitlegs_value(&doc.jitlegs));
         assert_eq!(Doc::parse("{}"), Some(Doc::default()));
         assert!(Doc::default().verify.on && Doc::default().allapps.on);
     }
 
     #[test]
     fn ci_round_trip_and_timings_average() {
-        let shard = CiShard { id: "smoke:apps/calc".into(), state: "fail".into(), node: "106".into(), lease: "L2".into(), secs: 12.5, summary: "exit 1".into(), errors: vec!["error: x".into()], log: "/l".into(), sig: "ab".into(), step: 1, run_n: 2, failed: vec!["x".into()], kept: "k".into(), failed_on: "101".into(), failed_os: "linux".into(), failed_why: "exit 1".into(), asked_ms: 5, granted_ms: 6, spans: vec![CiSpan { node: "106".into(), asked_ms: 1, granted_ms: 2, ended_ms: 3 }], lost: vec![("104".into(), 1)] };
-        let run = CiRun { id: "R1".into(), pair: pair('a'), dry: true, started_ms: 1, ended_ms: 2, verdict: "fail".into(), shards: vec![shard], critical: "106 ends at 12 s".into(), fleet: "wall 12 s".into(), boxes: vec!["106 12 s busy, 1 shards".into()], rotation: 2 };
-        let mut ci = Ci { timings: vec![("jit:01".into(), 40.0)], run: Some(run.clone()), runs: vec![run], rotation: 3 };
+        let shard = CiShard { id: "smoke:apps/calc".into(), state: "fail".into(), node: "106".into(), lease: "L2".into(), secs: 12.5, summary: "exit 1".into(), errors: vec!["error: x".into()], log: "/l".into(), sig: "ab".into(), step: 1, run_n: 2, steps_ok: vec![0], failed: vec!["x".into()], kept: "k".into(), failed_on: "101".into(), failed_os: "linux".into(), failed_why: "exit 1".into(), asked_ms: 5, granted_ms: 6, spans: vec![CiSpan { node: "106".into(), asked_ms: 1, granted_ms: 2, ended_ms: 3 }], lost: vec![("104".into(), 1)] };
+        let run = CiRun { lock_digest: "lock".into(), checkout: String::new(), id: "R1".into(), pair: pair('a'), dry: true, started_ms: 1, ended_ms: 2, verdict: "fail".into(), shards: vec![shard], critical: "106 ends at 12 s".into(), fleet: "wall 12 s".into(), boxes: vec!["106 12 s busy, 1 shards".into()], rotation: 2, plan_timings: vec![("test:x".into(), 7.0)], sweep: true, stopping: true };
+        let mut ci = Ci { timings: vec![("jit:01".into(), 40.0)], run: None, sweep_run: Some(run.clone()), runs: vec![run], rotation: 3 };
         ci.measured("jit:01", 20.0);
         ci.measured("test:x:lib", 5.0);
         assert_eq!((ci.timing("jit:01"), ci.timing("test:x:lib"), ci.timing("nope")), (Some(30.0), Some(5.0), None));
@@ -1525,14 +1791,14 @@ mod tests {
         let _ = std::fs::create_dir_all(&dir);
         let seen = Arc::new(Mutex::new(Vec::new()));
         let s2 = seen.clone();
-        let store = Store::open(&dir, "mac", Arc::new(move |r: Record| s2.lock().unwrap().push(r.kind.clone())));
+        let store = Store::open(&dir, "mac", Arc::new(move |r: Record| { s2.lock().unwrap().push(r.kind.clone()); 0 }));
         store.update(|d| {
             for i in 0..KEEP + 5 {
                 d.verify.verified.push(Tip { pair: pair('a'), at_ms: i as u64, diff: "affected".into() });
             }
         });
         store.event("verify", Sev::Info, "verify OK".into(), None);
-        let again = Store::open(&dir, "mac", Arc::new(|_| {}));
+        let again = Store::open(&dir, "mac", Arc::new(|_| 0));
         assert_eq!(again.read(|d| (d.verify.verified.len(), d.verify.verified[0].at_ms)), (KEEP, 5));
         assert_eq!(*seen.lock().unwrap(), vec!["verify".to_string()]);
         let _ = std::fs::remove_file(dir.join("state.json"));
@@ -1556,7 +1822,7 @@ mod tests {
             assert_eq!((land, paused.as_str(), merges, prewarm), (2, "user review", 1, 1));
             assert_eq!(held, vec![("rc-h".to_string(), "needs a rebuild".to_string())]);
             // one store per home: a second open is the same document
-            let again = Store::open(&home, "mac", Arc::new(|_| {}));
+            let again = Store::open(&home, "mac", Arc::new(|_| 0));
             assert!(Arc::ptr_eq(&st, &again));
         }
         for f in OLD_FILES {

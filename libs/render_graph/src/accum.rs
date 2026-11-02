@@ -18,7 +18,7 @@
 //! texture a later pass of the same paint writes, and every sub-frame
 //! reuses the host's scene passes). The host drives it:
 //!
-//! ```ignore
+//! ```text
 //! acc.begin(Sampling::Adaptive(AdaptiveSampling::default()));
 //! // every paint:
 //! match acc.step(cx) {

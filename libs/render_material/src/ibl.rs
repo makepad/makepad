@@ -1163,17 +1163,6 @@ mod tests {
     }
 
     #[test]
-    fn prefilter_speed_budget() {
-        let env = EnvMap::procedural(&EnvPreset::Sunset, 512, 1.0, 0.0);
-        let t = std::time::Instant::now();
-        let atlas = prefilter(&env, 256, 6);
-        let ms = t.elapsed().as_secs_f64() * 1000.0;
-        eprintln!("prefilter 256x6 from 512: {ms:.0} ms");
-        assert_eq!(atlas.data.len(), 256 * 128 * 6);
-        assert!(atlas.data.iter().all(|c| c.iter().all(|v| v.is_finite())));
-    }
-
-    #[test]
     fn sh9_constant_env_is_constant_irradiance() {
         let env = EnvMap::constant(64, [0.5, 1.0, 2.0]);
         let c = sh9(&env);

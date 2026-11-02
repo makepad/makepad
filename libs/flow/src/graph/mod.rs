@@ -2080,7 +2080,13 @@ fn extract_node(
     } else {
         None
     };
-    let doc = docs.first().and_then(|level| level.doc().map(str::to_owned));
+    // The node's own doc, else the doc on the `let` that names it (`/** .. */ let id = Type{..}`:
+    // a binding's doc names the binding, not the object literal)
+    let doc = docs.first().and_then(|level| level.doc().map(str::to_owned)).or_else(|| {
+        let level = docs.first()?;
+        let name = LiveId::from_str(id);
+        vm.bx.code_ref().body_let_doc(level.made_at().body, name)
+    });
     Ok(Node {
         id: id.to_string(),
         kind: spec.kind.to_string(),

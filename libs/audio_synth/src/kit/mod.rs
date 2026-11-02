@@ -28,9 +28,12 @@
 //!   and envelope shapes, controller smoothing.
 //! - [`fxs`]: the effects family (one module per effect).
 //! - [`formula`]: Formula LFO scripts compiled to AIR (no interpreter).
+//! - [`analog`]: circuit models of an analog oscillator, filter, amplifier
+//!   and envelope, each selectable next to the others above.
 //!
 //! Nothing in a render path allocates, locks or does I/O.
 
+pub mod analog;
 pub mod arp;
 pub mod core;
 pub mod flt;

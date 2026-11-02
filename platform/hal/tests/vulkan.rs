@@ -15,9 +15,8 @@ const INDEX: Id = Id::new(2, 1);
 const PIPE: Id = Id::new(1, 1);
 const WINDOW: Id = Id::new(1, 1);
 
-fn open() -> Option<(std::sync::Arc<Hal>, HalInfo)> {
-    // Probe availability separately: once a graphics device exists, a HAL open failure is a
-    // test failure, not a skip that could conceal a regression in device initialization.
+fn open() -> (std::sync::Arc<Hal>, HalInfo) {
+    // Require a graphics device and successful HAL initialization.
     // The probe runs once per process: the system loader's first instance creation is not safe
     // against other threads doing the same (it crashed inside vkCreateInstance when the tests'
     // probes raced); the HAL itself creates its instance under Device::shared's lock.
@@ -36,12 +35,12 @@ fn open() -> Option<(std::sync::Arc<Hal>, HalInfo)> {
         unsafe { instance.destroy_instance(None); }
         if found { Ok(()) } else { Err(format!("no Vulkan 1.1 graphics device ({devices:?})")) }
     })());
-    if let Err(reason) = probe { eprintln!("SKIP Vulkan: {reason}"); return None; }
+    probe.as_ref().expect("Vulkan graphics device");
     let hal = Hal::new();
     let info = hal.open(&OpenReq { backend: backend_id::VULKAN, flags: open_flags::OFFSCREEN_WINDOWS, ..Default::default() });
     assert_eq!(info.backend, backend_id::VULKAN, "a Vulkan device exists but HAL initialization failed");
     assert_eq!(info.dialect, dialect::SPIRV);
-    Some((hal, info))
+    (hal, info)
 }
 
 fn until(hal: &Hal, sid: u32, mut accept: impl FnMut(HalEvent<'_>) -> bool) {
@@ -210,12 +209,8 @@ fn sampled_shader() -> Vec<u8> {
 #[cfg(target_os = "linux")]
 #[test]
 fn dmabuf_export_import_second_session_samples_identical_pixels() {
-    let Some((hal, owner)) = open() else { return };
-    if let Err(reason) = hal.dmabuf_supported(owner.session) {
-        eprintln!("SKIP DMA-BUF: {reason}");
-        assert!(hal.close(owner.session));
-        return;
-    }
+    let (hal, owner) = open();
+    hal.dmabuf_supported(owner.session).expect("Vulkan DMA-BUF support");
     let reader = hal.open(&OpenReq { backend: backend_id::VULKAN, ..Default::default() });
     assert_ne!(reader.session, 0);
     let input: Vec<u8> = (0..16u8).flat_map(|i| [i * 11, 255 - i * 13, i * 7, 255]).collect();
@@ -284,7 +279,7 @@ fn dmabuf_export_import_second_session_samples_identical_pixels() {
 
 #[test]
 fn offscreen_two_passes_three_draws_and_timestamp() {
-    let Some((hal, info)) = open() else { return };
+    let (hal, info) = open();
     resources(&hal, info.session);
     let (_, ns) = rendered(&hal, info.session, TEX, target::TEXTURE, [32, 32], 1);
     if info.flags & info_flags::GPU_TIMESTAMPS != 0 { assert!(ns > 0); }
@@ -300,7 +295,7 @@ fn offscreen_two_passes_three_draws_and_timestamp() {
 
 #[test]
 fn cleared_target_readback_is_exact() {
-    let Some((hal, info)) = open() else { return };
+    let (hal, info) = open();
     let mut w = CmdWriter::new(info.session);
     w.texture_create(TEX, usage::RENDER_TARGET | usage::SAMPLED, format::RGBA8, 7, 5, [1, 1], Attr::default());
     w.frame_begin(1, FrameMeta::default());
@@ -317,7 +312,7 @@ fn cleared_target_readback_is_exact() {
 /// without those frees racing the driver's exit handlers -- the test binary exits right after.
 #[test]
 fn closing_the_last_session_with_frames_in_flight() {
-    let Some((hal, info)) = open() else { return };
+    let (hal, info) = open();
     resources(&hal, info.session);
     let (frame, _) = rendered(&hal, info.session, TEX, target::TEXTURE, [32, 32], 1);
     let mut w = CmdWriter::new(info.session);
@@ -342,7 +337,7 @@ fn closing_the_last_session_with_frames_in_flight() {
 /// counts as stale or bad.
 #[test]
 fn device_reset_keeps_ids_and_renders_again() {
-    let Some((hal, info)) = open() else { return };
+    let (hal, info) = open();
     let sid = info.session;
     resources(&hal, sid);
     let mut w = CmdWriter::new(sid);
@@ -420,7 +415,7 @@ fn ledger(hal: &Hal, sid: u32) -> Vec<(Kind, u32, u32, u64)> {
 
 #[test]
 fn session_close_frees_exactly_its_ledger() {
-    let Some((hal, info)) = open() else { return };
+    let (hal, info) = open();
     let other = hal.open(&OpenReq { backend: backend_id::VULKAN, ..Default::default() }).session;
     resources(&hal, info.session); resources(&hal, other);
     let own = ledger(&hal, info.session); let survivor = ledger(&hal, other);
@@ -436,7 +431,7 @@ fn session_close_frees_exactly_its_ledger() {
 
 #[test]
 fn swapchainless_resize_keeps_textures_buffers_and_pipelines() {
-    let Some((hal, info)) = open() else { return };
+    let (hal, info) = open();
     resources(&hal, info.session);
     let mut w = CmdWriter::new(info.session);
     w.window_create(WINDOW, window_kind::NORMAL, Id::NONE, [0.0, 0.0, 32.0, 32.0], false); hal.submit(&w.buf());
@@ -496,7 +491,7 @@ fn check_tail(hal: &Hal, sid: u32, req: u32, size: [u32; 2], expect: &[u8]) {
 /// Reused arenas carry the previous frames' bytes: the readback shows the newest upload.
 #[test]
 fn steady_upload_frames_allocate_no_arenas() {
-    let Some((hal, info)) = open() else { return };
+    let (hal, info) = open();
     let sid = info.session;
     resources(&hal, sid);
     let size = [1024, 512]; // 2 MiB a frame
@@ -520,7 +515,7 @@ fn steady_upload_frames_allocate_no_arenas() {
 /// allocate nothing again.
 #[test]
 fn a_frame_larger_than_the_arena_pool_still_uploads() {
-    let Some((hal, info)) = open() else { return };
+    let (hal, info) = open();
     let sid = info.session;
     resources(&hal, sid);
     let size = [2048, 2048]; // 16 MiB an upload, 80 MiB in the big frame
@@ -544,7 +539,7 @@ fn a_frame_larger_than_the_arena_pool_still_uploads() {
 fn a_child_frame_wakes_the_parent_at_its_completion_without_the_child_pumping() {
     // the WM pumps; the child presents an embedded window frame and then does not pump (it is
     // building its next frame): the completion itself must wake the WM with the ChildFrame
-    let Some((hal, info)) = open() else { return };
+    let (hal, info) = open();
     let parent = info.session;
     let child = hal.open_domain(&OpenReq { backend: backend_id::VULKAN, app_key: 77, flags: open_flags::OFFSCREEN_WINDOWS, dpi_hint: 0.0, parent }, Caps::default()).session;
     assert_ne!(child, 0);
@@ -589,7 +584,7 @@ fn a_shared_program_compile_wakes_every_session_that_waits_for_it() {
     // Programs are shared by shader content: a second session that creates the same pipeline
     // while the first one's compile runs waits on that compile and must be woken by its answer,
     // not only the session that started it.
-    let Some((hal, first)) = open() else { return };
+    let (hal, first) = open();
     let second = hal.open(&OpenReq { backend: backend_id::VULKAN, flags: open_flags::OFFSCREEN_WINDOWS, ..Default::default() });
     assert_ne!(second.session, 0);
     let blob = CmdWriter::pipeline_blob(PipelineDesc { outputs: 1, ..Default::default() }, &shader(),
@@ -621,7 +616,7 @@ fn a_pipeline_on_an_already_compiled_shared_program_is_answered_without_another_
     // Session A compiles program P and hears it is ready; then an otherwise idle session B
     // creates a pipeline on the same P. B must hear PipelineReady from its own pump, with no
     // other session submitting anything.
-    let Some((hal, first)) = open() else { return };
+    let (hal, first) = open();
     let second = hal.open(&OpenReq { backend: backend_id::VULKAN, flags: open_flags::OFFSCREEN_WINDOWS, ..Default::default() });
     assert_ne!(second.session, 0);
     let blob = CmdWriter::pipeline_blob(PipelineDesc { outputs: 1, ..Default::default() }, &shader(),
@@ -656,7 +651,7 @@ fn a_pipeline_on_an_already_compiled_shared_program_is_answered_without_another_
 /// the pass drew nothing every frame (Scope's Glass look and History view on a node).
 #[test]
 fn a_pass_a_pixel_larger_than_its_target_still_draws() {
-    let Some((hal, info)) = open() else { return };
+    let (hal, info) = open();
     let sid = info.session;
     resources(&hal, sid);
     let deadline = Instant::now() + Duration::from_secs(30);

@@ -7,8 +7,9 @@
 //! contouring at the oracle's unprojected offset shell -> QEM decimate
 //! to the game-density target -> xatlas unwrap (same `parametrize` Hunyuan
 //! uses) -> original-surface-snapped PBR atlas bake (base color +
-//! metallic-roughness PNGs embedded in the GLB). Geometry-only jobs still
-//! write TEXCOORD_0 so Hunyuan-Paint can retexture the mesh.
+//! metallic-roughness PNGs embedded in the GLB). Geometry-only jobs skip
+//! the unwrap and write positions and normals only (the paint backend
+//! unwraps a mesh without UVs itself).
 //! Texture lookup still snaps to the original decoded surface. This follows
 //! TRELLIS.2's production postprocess contract. The raw mesh escape hatch
 //! (`remesh_resolution: 0`) carries per-voxel base color as COLOR_0 instead.
@@ -51,8 +52,9 @@ pub struct MeshJob {
     pub remesh_resolution: Option<u32>,
     /// True when the input carries a meaningful alpha matte (pre-segmented
     /// subject — the reference pipeline's rembg contract). False means the
-    /// real generator must run the in-process native BiRefNet CUDA stage
-    /// before conditioning. It is never permission to continue unsegmented.
+    /// real generator must remove a flat background or run the in-process
+    /// native BiRefNet CUDA stage before conditioning. It is never permission
+    /// to continue unsegmented.
     pub segmented: bool,
     /// Run the tex SLAT flow + decode and bake the per-voxel PBR attrs onto
     /// the mesh (UV atlas on retopo'd outputs, COLOR_0 vertex colors on the
@@ -121,8 +123,7 @@ pub fn resolve_remesh(requested: Option<u32>) -> Option<u32> {
 
 /// True when the alpha channel carries a real matte: more than 0.5% of
 /// pixels meaningfully transparent (alpha < 250). Fully opaque photos (or
-/// stray-noise alpha) return false — those are scene shots that require the
-/// native matte stage.
+/// stray-noise alpha) return false — those require background extraction.
 pub fn alpha_is_segmented(rgba: &[u8]) -> bool {
     let total = rgba.len() / 4;
     if total == 0 {
@@ -133,6 +134,188 @@ pub fn alpha_is_segmented(rgba: &[u8]) -> bool {
         .filter(|px| px[3] < 250)
         .count();
     transparent * 200 > total // > 0.5%
+}
+
+/// Foreground measured at alpha >= 128, in input-image pixels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ForegroundStats {
+    pub total_pixels: usize,
+    pub foreground_pixels: usize,
+    /// [min_x, min_y, max_x, max_y], with exclusive maxima.
+    pub bbox: [usize; 4],
+}
+
+/// Check a supplied or generated matte before TRELLIS crops and pads it.
+/// One pass over RGBA8, constant space; only error messages allocate.
+pub fn check_foreground(
+    rgba: &[u8],
+    width: usize,
+    height: usize,
+) -> Result<ForegroundStats, String> {
+    const ADVICE: &str = "give a picture of one subject on a plain or transparent background (PNG with transparency skips the matting), with the subject not touching the frame edges.";
+    let total_pixels = width
+        .checked_mul(height)
+        .filter(|&total| total.checked_mul(4) == Some(rgba.len()))
+        .ok_or_else(|| format!("matting image dimensions do not match the RGBA data; {ADVICE}"))?;
+    if total_pixels == 0 {
+        return Err(format!("matting found no foreground in the picture; {ADVICE}"));
+    }
+
+    let mut foreground_pixels = 0usize;
+    let mut bbox = [width, height, 0, 0];
+    for (y, row) in rgba.chunks_exact(width * 4).enumerate() {
+        for (x, pixel) in row.chunks_exact(4).enumerate() {
+            if pixel[3] >= 128 {
+                foreground_pixels += 1;
+                bbox[0] = bbox[0].min(x);
+                bbox[1] = bbox[1].min(y);
+                bbox[2] = bbox[2].max(x + 1);
+                bbox[3] = bbox[3].max(y + 1);
+            }
+        }
+    }
+
+    // Widen before multiplying so the exact percentage comparisons cannot
+    // overflow, even for dimensions near the address-space limit.
+    let foreground = foreground_pixels as u128;
+    let total = total_pixels as u128;
+    if foreground * 200 < total {
+        return Err(format!("matting found no foreground in the picture (less than 0.5%); {ADVICE}"));
+    }
+    if foreground * 100 >= total * 97 {
+        return Err(format!("matting kept the whole picture as the subject (no background found); {ADVICE}"));
+    }
+    let bbox_pixels = (bbox[2] - bbox[0]) as u128 * (bbox[3] - bbox[1]) as u128;
+    if bbox_pixels * 100 >= total * 40 && foreground * 100 >= bbox_pixels * 98 {
+        return Err(format!("the subject outline is a filled rectangle; {ADVICE}"));
+    }
+    Ok(ForegroundStats {
+        total_pixels,
+        foreground_pixels,
+        bbox,
+    })
+}
+
+/// Key a nearly uniform frame background, preserving enclosed matching colours.
+/// Only alpha changes, and a rejected foreground restores every original byte.
+/// O(pixels) time and space; one flood mask is reused for the one-pixel soft edge.
+pub fn key_flat_background(rgba: &mut [u8], width: usize, height: usize) -> bool {
+    const BORDER_TOLERANCE: u8 = 12;
+    const FLOOD_TOLERANCE: u8 = 24;
+    let Some(total) = width
+        .checked_mul(height)
+        .filter(|&total| total > 0 && total.checked_mul(4) == Some(rgba.len()))
+    else {
+        return false;
+    };
+
+    // Visit the one-pixel frame once, including for single-row/column images.
+    let border_pixels = || {
+        (0..height).flat_map(move |y| {
+            let step = if y == 0 || y == height - 1 {
+                1
+            } else {
+                (width - 1).max(1)
+            };
+            (y * width..(y + 1) * width).step_by(step)
+        })
+    };
+    let mut histograms = [[0usize; 256]; 3];
+    let mut border_count = 0usize;
+    for index in border_pixels() {
+        border_count += 1;
+        for channel in 0..3 {
+            histograms[channel][rgba[index * 4 + channel] as usize] += 1;
+        }
+    }
+    // Per-channel medians tolerate a subject touching a small part of the frame.
+    let mut background = [0u8; 3];
+    for channel in 0..3 {
+        let mut count = 0usize;
+        for (value, &frequency) in histograms[channel].iter().enumerate() {
+            count += frequency;
+            if count > border_count / 2 {
+                background[channel] = value as u8;
+                break;
+            }
+        }
+    }
+    let colour_distance = |pixel: &[u8]| {
+        pixel[0]
+            .abs_diff(background[0])
+            .max(pixel[1].abs_diff(background[1]))
+            .max(pixel[2].abs_diff(background[2]))
+    };
+    let matching_border = border_pixels()
+        .filter(|&index| colour_distance(&rgba[index * 4..index * 4 + 4]) <= BORDER_TOLERANCE)
+        .count();
+    if (matching_border as u128) * 10 < (border_count as u128) * 9 {
+        return false;
+    }
+
+    // Mark on insertion, so each background pixel enters the stack only once.
+    // The looser flood tolerance absorbs noise without crossing the silhouette.
+    let mut background_mask = vec![false; total];
+    let mut stack = Vec::new();
+    for index in border_pixels() {
+        if colour_distance(&rgba[index * 4..index * 4 + 4]) <= FLOOD_TOLERANCE {
+            background_mask[index] = true;
+            stack.push(index);
+        }
+    }
+    while let Some(index) = stack.pop() {
+        let x = index % width;
+        let mut visit = |next: usize| {
+            if !background_mask[next]
+                && colour_distance(&rgba[next * 4..next * 4 + 4]) <= FLOOD_TOLERANCE
+            {
+                background_mask[next] = true;
+                stack.push(next);
+            }
+        };
+        if x > 0 {
+            visit(index - 1);
+        }
+        if x + 1 < width {
+            visit(index + 1);
+        }
+        if index >= width {
+            visit(index - width);
+        }
+        if index < total - width {
+            visit(index + width);
+        }
+    }
+
+    let original_alpha: Vec<u8> = rgba.chunks_exact(4).map(|pixel| pixel[3]).collect();
+    for (index, pixel) in rgba.chunks_exact_mut(4).enumerate() {
+        if background_mask[index] {
+            pixel[3] = 0;
+            continue;
+        }
+        let x = index % width;
+        let touches_background = (x > 0 && background_mask[index - 1])
+            || (x + 1 < width && background_mask[index + 1])
+            || (index >= width && background_mask[index - width])
+            || (index < total - width && background_mask[index + width]);
+        if touches_background {
+            // Fade only this one-pixel rim, from distance 24 to 48. Strong
+            // foreground colours stay opaque; enclosed details are untouched.
+            let opacity = (u16::from(colour_distance(pixel).saturating_sub(FLOOD_TOLERANCE))
+                * 255
+                / u16::from(FLOOD_TOLERANCE))
+            .min(255);
+            pixel[3] = (u16::from(pixel[3]) * opacity / 255) as u8;
+        }
+    }
+    if check_foreground(rgba, width, height).is_ok() {
+        true
+    } else {
+        for (pixel, alpha) in rgba.chunks_exact_mut(4).zip(original_alpha) {
+            pixel[3] = alpha;
+        }
+        false
+    }
 }
 
 /// Reject the characteristic TRELLIS reconstruction-volume sheet failure.
@@ -955,12 +1138,15 @@ mod trellis_gen {
             self.resident = true;
             let cancelled = || cancel.is_cancelled();
 
-            // TRELLIS requires a segmented subject. Opaque inputs are matted
-            // here, in process, on the same Rust/CUDA worker. BiRefNet is
-            // deliberately dropped and its device namespace evicted before
-            // any TRELLIS component loads, keeping the 24 GB path viable.
+            // TRELLIS requires a segmented subject. Key plain backgrounds on
+            // this worker before loading BiRefNet for photos/complex scenes.
+            // BiRefNet is dropped and its device namespace evicted before any
+            // TRELLIS component loads, keeping the 24 GB path viable.
             let mut rgba = job.rgba.clone();
-            if !job.segmented {
+            if !job.segmented && super::key_flat_background(&mut rgba, job.width, job.height) {
+                progress("flat background removed", 0.029);
+                cancel.check()?;
+            } else if !job.segmented {
                 progress("matte load", 0.0205);
                 let matte_result = (|| -> Result<_, DiffusionError> {
                     let weights = BiRefNetWeights::load(&paths.matte)?;
@@ -1004,12 +1190,20 @@ mod trellis_gen {
                 progress("matte complete", 0.029);
                 cancel.check()?;
             }
+            // Validate keyed, native-matted and supplied alpha here. The stub
+            // path deliberately keeps accepting its tiny request fixtures.
+            if let Err(message) = super::check_foreground(&rgba, job.width, job.height) {
+                progress(&message, 0.029);
+                return Err(AssetAiError::Params(message));
+            }
 
             // Mirrors trellis-generate's run(): preprocess -> prepare all
             // models (weight caches are process-global per namespace, so jobs
             // after the first are warm) -> cond -> ss -> lr -> upsample ->
             // hr -> decode -> mesh -> glb.
             let img = T2Image::from_rgba8(&rgba, job.width, job.height).map_err(trellis_err)?;
+            // The shared alpha crop centres the subject in a square without
+            // stretching it, for keyed, native-matted and supplied alpha alike.
             let pre = t2_preprocess_rgba(&img).map_err(trellis_err)?;
             // VisualBruno's TRELLIS.2 workflows pad after the alpha crop so
             // the subject does not sit on the conditioner frame. A fixed
@@ -1104,7 +1298,7 @@ mod trellis_gen {
             };
 
             // DINOv3 cond at 512 + 1024, positive + zero negative. Reaching
-            // this point guarantees either input alpha or a native matte;
+            // this point guarantees input alpha, a flat key or a native matte;
             // opaque/unsegmented fallback is intentionally impossible.
             progress("cond 1/2", 0.095);
             let input_512 = t2_cond_input(&pre, 512).map_err(trellis_err)?;
@@ -1534,7 +1728,9 @@ mod trellis_gen {
             // Keep the exact xatlas input on disk: the unwrap is the one
             // stage that has hung in production, and the mesh is otherwise
             // unrecoverable (it only exists in this stack frame).
-            dump_pre_unwrap_mesh(&paths.scratch, &dp, &di);
+            if voxel_pbr.is_some() {
+                dump_pre_unwrap_mesh(&paths.scratch, &dp, &di);
+            }
             // xatlas on a decimation-mangled mesh can take arbitrarily long
             // (chart merge is quadratic in chart count). Past this budget the
             // unwrap is abandoned and the projection fallbacks bake instead,
@@ -1659,40 +1855,11 @@ mod trellis_gen {
                     }
                 }
                 None => {
-                    // Geometry-only still carries Hunyuan-ready UV0 so a
-                    // later paint stage can retexture without a second remesh.
-                    coarse.emit("unwrap (xatlas)", 0.967);
-                    match makepad_remesh::uv_xatlas_unwrap_ctl(&dp, &di, &mut |frac| {
-                        coarse.emit("unwrap (xatlas)", 0.967 + 0.012 * frac.clamp(0.0, 1.0));
-                        !cancel.is_cancelled() && unwrap_started.elapsed() < unwrap_budget
-                    }) {
-                        Ok((pos, uvs, idx, src)) => {
-                            let pre_normals = makepad_gltf::compute_vertex_normals(&dp, &di);
-                            let normals: Vec<[f32; 3]> = src
-                                .iter()
-                                .map(|&v| to_yup(pre_normals[v as usize]))
-                                .collect();
-                            let exported_positions: Vec<[f32; 3]> =
-                                pos.iter().copied().map(to_yup).collect();
-                            makepad_gltf::write_glb_mesh_unwrapped(
-                                &exported_positions,
-                                Some(&normals),
-                                &uvs,
-                                &idx,
-                            )
-                        }
-                        Err(_) => {
-                            cancel.check()?;
-                            eprintln!(
-                                "trellis: xatlas unwrap abandoned after {:.1}s (budget {}s) - exporting without UVs",
-                                unwrap_started.elapsed().as_secs_f64(),
-                                unwrap_budget.as_secs()
-                            );
-                            let exported_positions: Vec<[f32; 3]> =
-                                dp.iter().copied().map(to_yup).collect();
-                            makepad_gltf::write_glb_mesh(&exported_positions, &di)
-                        }
-                    }
+                    // Geometry only: no UVs. A paint stage unwraps the mesh it is given
+                    // itself, so an unwrap here would only cost time.
+                    let exported_positions: Vec<[f32; 3]> =
+                        dp.iter().copied().map(to_yup).collect();
+                    makepad_gltf::write_glb_mesh(&exported_positions, &di)
                 }
             };
             Ok(glb)
@@ -1917,6 +2084,231 @@ mod tests {
         assert!(!alpha_is_segmented(&noise));
     }
 
+    fn flat_background_cartoon() -> Vec<u8> {
+        let mut rgba = Vec::with_capacity(128 * 128 * 4);
+        for y in 0..128i32 {
+            for x in 0..128i32 {
+                let noise = (x * 17 + y * 31) % 9 - 4;
+                let grey = (232 + noise) as u8;
+                let dx = x - 64;
+                let dy = y - 64;
+                let eye_x = x - 56;
+                let eye_y = y - 48;
+                let pixel = if eye_x * eye_x + eye_y * eye_y <= 6 * 6 {
+                    // White is within the flood tolerance of the background,
+                    // but the red body separates this eye from the frame.
+                    [255, 255, 255, 255]
+                } else if dx * dx * 46 * 46 + dy * dy * 32 * 32 <= 32 * 32 * 46 * 46 {
+                    [200, 32, 40, 255]
+                } else {
+                    [grey, grey, grey, 255]
+                };
+                rgba.extend_from_slice(&pixel);
+            }
+        }
+        rgba
+    }
+
+    #[test]
+    fn flat_background_keys_noisy_cartoon_and_preserves_eye() {
+        let mut rgba = flat_background_cartoon();
+        let original = rgba.clone();
+        assert!(key_flat_background(&mut rgba, 128, 128));
+        for (pixel, before) in rgba.chunks_exact(4).zip(original.chunks_exact(4)) {
+            assert_eq!(&pixel[..3], &before[..3]);
+            let foreground = before[0] == 200 || before[0] == 255;
+            assert_eq!(pixel[3], if foreground { 255 } else { 0 });
+        }
+        assert_eq!(rgba[(48 * 128 + 56) * 4 + 3], 255); // White eye.
+        assert_eq!(rgba[(64 * 128 + 64) * 4 + 3], 255); // Red body.
+    }
+
+    #[test]
+    fn flat_background_rejects_busy_gradient_without_changes() {
+        let mut rgba = Vec::with_capacity(128 * 128 * 4);
+        for y in 0..128 {
+            for x in 0..128 {
+                rgba.extend_from_slice(&[
+                    (x * 2) as u8,
+                    (y * 2) as u8,
+                    ((x * 13 + y * 7) % 256) as u8,
+                    255,
+                ]);
+            }
+        }
+        let original = rgba.clone();
+        assert!(!key_flat_background(&mut rgba, 128, 128));
+        assert_eq!(rgba, original);
+    }
+
+    #[test]
+    fn flat_background_keys_figure_touching_one_side() {
+        let mut rgba = flat_background_cartoon();
+        // A nine-pixel arm reaches the left border: over 98% stays background.
+        for y in 60..69 {
+            for x in 0..64 {
+                let index = (y * 128 + x) * 4;
+                rgba[index..index + 4].copy_from_slice(&[200, 32, 40, 255]);
+            }
+        }
+        assert!(key_flat_background(&mut rgba, 128, 128));
+        assert_eq!(rgba[(64 * 128) * 4 + 3], 255);
+        assert_eq!(rgba[(59 * 128) * 4 + 3], 0);
+        assert_eq!(rgba[(69 * 128) * 4 + 3], 0);
+        assert_eq!(rgba[3], 0);
+        assert_eq!(rgba[(48 * 128 + 56) * 4 + 3], 255);
+    }
+
+    #[test]
+    fn flat_background_rejects_solid_colour_and_restores_alpha() {
+        let mut rgba = [232, 232, 232, 255].repeat(128 * 128);
+        let original = rgba.clone();
+        assert!(!key_flat_background(&mut rgba, 128, 128));
+        assert_eq!(rgba, original);
+
+        // Rollback must restore the actual alpha bytes, not assume opacity.
+        for (index, pixel) in rgba.chunks_exact_mut(4).enumerate() {
+            pixel[3] = (index % 256) as u8;
+        }
+        let original = rgba.clone();
+        assert!(!key_flat_background(&mut rgba, 128, 128));
+        assert_eq!(rgba, original);
+    }
+
+    #[test]
+    fn flat_background_softens_only_exposed_rim() {
+        let mut rgba = flat_background_cartoon();
+        let edge = (64 * 128 + 31) * 4;
+        let interior = (72 * 128 + 64) * 4;
+        // Distance 36 lies between the flood and opaque-edge thresholds.
+        rgba[edge..edge + 4].copy_from_slice(&[196, 196, 196, 200]);
+        rgba[interior..interior + 4].copy_from_slice(&[196, 196, 196, 200]);
+        assert!(key_flat_background(&mut rgba, 128, 128));
+        assert!(rgba[edge + 3] > 0 && rgba[edge + 3] < 200);
+        assert_eq!(rgba[interior + 3], 200);
+        assert_eq!(rgba[(64 * 128 + 30) * 4 + 3], 0);
+        assert_eq!(rgba[(64 * 128 + 32) * 4 + 3], 255);
+    }
+
+    #[test]
+    fn foreground_rejects_opaque_picture() {
+        let rgba = vec![255; 100 * 100 * 4];
+        let error = check_foreground(&rgba, 100, 100).unwrap_err();
+        assert!(error.starts_with("matting kept the whole picture as the subject (no background found)"), "{error}");
+        assert!(error.ends_with("give a picture of one subject on a plain or transparent background (PNG with transparency skips the matting), with the subject not touching the frame edges."), "{error}");
+    }
+
+    #[test]
+    fn foreground_rejects_transparent_picture() {
+        let rgba = vec![0; 100 * 100 * 4];
+        let error = check_foreground(&rgba, 100, 100).unwrap_err();
+        assert!(error.starts_with("matting found no foreground in the picture"), "{error}");
+    }
+
+    #[test]
+    fn foreground_rejects_half_image_rectangle() {
+        let mut rgba = vec![0; 100 * 80 * 4];
+        for y in 15..65 {
+            for x in 10..90 {
+                rgba[(y * 100 + x) * 4 + 3] = 255;
+            }
+        }
+        let error = check_foreground(&rgba, 100, 80).unwrap_err();
+        assert!(error.starts_with("the subject outline is a filled rectangle"), "{error}");
+    }
+
+    #[test]
+    fn foreground_accepts_ellipse() {
+        let mut rgba = vec![0; 100 * 100 * 4];
+        for y in 0..100 {
+            for x in 0..100 {
+                let dx = x as i32 - 50;
+                let dy = y as i32 - 50;
+                // About 31% foreground, in a bbox covering over 40%.
+                if dx * dx * 40 * 40 + dy * dy * 25 * 25 <= 25 * 25 * 40 * 40 {
+                    rgba[(y * 100 + x) * 4 + 3] = 255;
+                }
+            }
+        }
+        let stats = check_foreground(&rgba, 100, 100).unwrap();
+        assert_eq!(stats.total_pixels, 10_000);
+        assert!((3_000..3_200).contains(&stats.foreground_pixels));
+        assert_eq!(stats.bbox, [25, 10, 76, 91]);
+    }
+
+    #[test]
+    fn foreground_accepts_thin_figure_in_tall_bbox() {
+        let mut rgba = vec![0; 100 * 100 * 4];
+        for y in 10..90 {
+            for x in 49..51 {
+                rgba[(y * 100 + x) * 4 + 3] = 255;
+            }
+        }
+        // Outstretched arms make the bbox large without filling it.
+        for y in 30..32 {
+            for x in 20..80 {
+                rgba[(y * 100 + x) * 4 + 3] = 255;
+            }
+        }
+        let stats = check_foreground(&rgba, 100, 100).unwrap();
+        assert_eq!(stats.foreground_pixels, 276);
+        assert_eq!(stats.bbox, [20, 10, 80, 90]);
+    }
+
+    #[test]
+    fn foreground_alpha_and_minimum_coverage_boundaries() {
+        let mut rgba = vec![127; 100 * 100 * 4];
+        for y in 25..75 {
+            rgba[(y * 100 + 50) * 4 + 3] = 128;
+        }
+        let stats = check_foreground(&rgba, 100, 100).unwrap();
+        assert_eq!(stats.foreground_pixels, 50); // Exactly 0.5% passes.
+        assert_eq!(stats.bbox, [50, 25, 51, 75]);
+        rgba[(25 * 100 + 50) * 4 + 3] = 127;
+        let error = check_foreground(&rgba, 100, 100).unwrap_err();
+        assert!(error.starts_with("matting found no foreground in the picture"), "{error}");
+    }
+
+    #[test]
+    fn foreground_whole_picture_boundary() {
+        let mut rgba = vec![255; 100 * 100 * 4];
+        for pixel in rgba.chunks_exact_mut(4).skip(100).take(300) {
+            pixel[3] = 0;
+        }
+        let error = check_foreground(&rgba, 100, 100).unwrap_err();
+        assert!(error.starts_with("matting kept the whole picture as the subject"), "{error}");
+        rgba[400 * 4 + 3] = 0;
+        assert_eq!(check_foreground(&rgba, 100, 100).unwrap().foreground_pixels, 9_699);
+    }
+
+    #[test]
+    fn foreground_rectangle_boundaries() {
+        let mut rgba = vec![0; 100 * 100 * 4];
+        for y in 10..90 {
+            for x in 25..75 {
+                rgba[(y * 100 + x) * 4 + 3] = 255;
+            }
+        }
+        // A bbox of exactly 40%, filled to exactly 98%, is rejected.
+        for y in 10..90 {
+            rgba[(y * 100 + 50) * 4 + 3] = 0;
+        }
+        let error = check_foreground(&rgba, 100, 100).unwrap_err();
+        assert!(error.starts_with("the subject outline is a filled rectangle"), "{error}");
+        rgba[(50 * 100 + 51) * 4 + 3] = 0;
+        assert_eq!(check_foreground(&rgba, 100, 100).unwrap().foreground_pixels, 3_919);
+
+        // A fully filled bbox smaller than 40% is allowed.
+        for y in 10..90 {
+            rgba[(y * 100 + 50) * 4 + 3] = 255;
+        }
+        rgba[(50 * 100 + 51) * 4 + 3] = 255;
+        for x in 25..75 {
+            rgba[(10 * 100 + x) * 4 + 3] = 0;
+        }
+        assert_eq!(check_foreground(&rgba, 100, 100).unwrap().foreground_pixels, 3_950);
+    }
+
     fn append_grid(
         positions: &mut Vec<[f32; 3]>,
         indices: &mut Vec<u32>,
@@ -2127,71 +2519,6 @@ mod tests {
         assert!(error.contains("components=1100"), "{error}");
         assert!(error.contains("faces=4400"), "{error}");
         assert!(error.contains("tiny_components(<= 4 faces)=1100/1100"), "{error}");
-    }
-
-    #[cfg(feature = "mesh")]
-    #[test]
-    fn saved_yoshi_clean_and_floor_regression_match_quality_gate_when_present() {
-        let library = crate::home::test_asset_library_root();
-        let verify = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../local/character_verify");
-        let accepted = [
-            library.join("lib-8.glb"),
-            library.join("lib-12.glb"),
-            library.join("lib-18.glb"),
-        ];
-        let boundary_rejected = [library.join("lib-23.glb"), library.join("lib-29.glb")];
-        let attached_sheet_rejected = [
-            library.join("lib-33.glb"),
-            library.join("lib-38.glb"),
-            verify.join("elf_trellis_quality_gate_seed_5351965101387779242.glb"),
-        ];
-        if accepted
-            .iter()
-            .chain(boundary_rejected.iter())
-            .chain(attached_sheet_rejected.iter())
-            .any(|path| !path.is_file())
-        {
-            // Developer regression corpus: synthetic tests above are the
-            // hermetic CI contract; verify the originating artifacts whenever
-            // the local character library is available.
-            return;
-        }
-
-        fn load_welded(path: &std::path::Path) -> (Vec<[f32; 3]>, Vec<u32>) {
-            let gltf = makepad_gltf::load_gltf_from_path(path).unwrap();
-            let mesh = makepad_gltf::decode_mesh_primitive(&gltf, 0, 0).unwrap();
-            let (mut positions, mut indices) = (mesh.positions, mesh.indices);
-            // Recreate the pre-atlas topology seen by the production gate;
-            // chart splitting duplicates positions along every UV seam.
-            makepad_remesh::weld_vertices(&mut positions, &mut indices, 1.0 / 8192.0);
-            (positions, indices)
-        }
-
-        for path in accepted {
-            let (positions, indices) = load_welded(&path);
-            check_trellis_mesh_quality(&positions, &indices)
-                .unwrap_or_else(|error| panic!("clean corpus {} rejected: {error}", path.display()));
-        }
-        for path in boundary_rejected {
-            let (positions, indices) = load_welded(&path);
-            let error = check_trellis_mesh_quality(&positions, &indices).unwrap_err();
-            assert!(
-                error.contains("reconstruction-boundary")
-                    || error.contains("axis-aligned planar band"),
-                "unexpected boundary regression diagnostic for {}: {error}",
-                path.display(),
-            );
-        }
-        for path in attached_sheet_rejected {
-            let (positions, indices) = load_welded(&path);
-            let error = check_trellis_mesh_quality(&positions, &indices).unwrap_err();
-            assert!(
-                error.contains("excessive axis-aligned planar band"),
-                "connectivity-independent gate missed {}: {error}",
-                path.display(),
-            );
-        }
     }
 
     #[test]

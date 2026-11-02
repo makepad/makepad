@@ -79,6 +79,8 @@ pub(crate) fn unique_test_id() -> u128 {
 
 #[cfg(test)]
 mod lang_item_tests;
+#[cfg(test)]
+mod global_allocator_tests;
 pub mod infer;
 
 #[cfg(test)]

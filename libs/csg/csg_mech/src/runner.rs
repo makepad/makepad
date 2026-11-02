@@ -1,39 +1,59 @@
 //! A live sim on its own thread: steps an assembly's [`MechWorld`] at a fixed
 //! 240 Hz in real time (or slowed down), takes commands (play, pause, reset,
-//! grab, drag, release, shake), and publishes a snapshot of every part's pose
+//! grab, drag, release, pin, dangle, poke, shake), and publishes a snapshot of every part's pose
 //! after each step. The UI reads the latest snapshot without ever waiting on the
 //! sim (a try-lock that falls back to the snapshot it already has), and drains
 //! the events (hard contacts, limit hits) for haptics.
 
 use crate::geom::*;
-use crate::sim::{Assembly, JointKind, MechWorld, Pose};
+use crate::sim::{Assembly, BodyAction, JointKind, MechWorld, Pose};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 pub const HZ: f64 = 240.0;
+/// At most this many steps between two snapshots (two 120 Hz frames' worth). A step that costs more than
+/// real time lets the sim fall behind (slow motion) instead of spending ever longer catching up while the
+/// view waits for a snapshot.
+pub const MAX_CATCH_UP: u64 = 4;
+
+/// A pointer's firm hold (60 Hz against the default 240 Hz * 4 substeps).
+pub const POINTER_HZ: f64 = 60.0;
+/// A hand's hold: firm enough that the part keeps up with the hand (Hz; well under a quarter of
+/// the substep rate, so it stays stable).
+pub const HAND_HZ: f64 = 60.0;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
     Play,
     Pause,
-    /// Back to the print pose, paused.
+    /// Back to the print pose, running; clears grabs and interactive pins.
     Reset,
     /// Sim seconds per wall second (1, 0.25, 0.1).
     Speed(f64),
     /// mm / s^2.
     Gravity(P3),
-    /// Start dragging a part by a model-frame point on it (where it is now).
-    Grab { body: usize, point: P3 },
+    /// Start dragging a part by a model-frame point on it (where it is now), pulled by a spring of
+    /// `hz` ([`POINTER_HZ`] and [`HAND_HZ`] are firm holds).
+    Grab { body: usize, point: P3, hz: f64 },
+    /// Toggle a fixed point anchor on this body (model frame).
+    Pin { body: usize, point: P3 },
+    /// Hold by a soft spring, moved with Drag and ended with Release.
+    Dangle { body: usize, point: P3 },
+    /// Mass-scaled impulse at a model-frame point; `dv` in mm/s.
+    Poke { body: usize, point: P3, dv: P3 },
     /// Move the drag target (model frame).
     Drag { point: P3 },
-    /// Let go: the part keeps its velocity.
-    Release,
+    /// Let go: the part keeps its velocity, or (a throw) the held point leaves at `velocity`
+    /// (model frame, mm/s).
+    Release { velocity: Option<P3> },
     /// Shake the held anchors (on/off).
     Shake(bool),
     /// One step while paused.
     Step,
+    /// Do something to these bodies only.
+    Bodies { bodies: Vec<usize>, action: BodyAction },
 }
 
 /// Something the user should feel or hear.
@@ -57,6 +77,8 @@ pub struct Snapshot {
     /// Joint angles (revolute: angle, ball: cone), radians.
     pub angles: Vec<f64>,
     pub grabbed: Option<usize>,
+    pub pinned: Vec<usize>,
+    pub frozen: Vec<usize>,
 }
 
 impl Snapshot {
@@ -96,6 +118,8 @@ fn snapshot(w: &mut MechWorld, asm: &Assembly, frame: u64, running: bool, speed:
         rest: (0..asm.bodies.len()).map(|i| w.rest_com(i)).collect(),
         angles: w.angles(asm),
         grabbed: w.grabbed(),
+        pinned: w.pinned(),
+        frozen: w.frozen(),
     }
 }
 
@@ -108,8 +132,20 @@ impl Runner {
     /// [`Runner::start`] with a floor across gravity (`MechWorld::new`'s level), for a piece that rests on the bed.
     pub fn start_with_floor(asm: Assembly, gravity: P3, floor: Option<f64>) -> Runner {
         let (tx, rx) = channel();
-        // box3d worlds stay on one thread: this one is only for the first snapshot, the sim builds its own
-        let first = Arc::new(snapshot(&mut MechWorld::new(&asm, gravity, floor), &asm, 0, false, 1.0));
+        // The print pose is known without constructing collision hulls on the caller's UI thread.
+        // The physics world is built once, by its owning worker.
+        let first = Arc::new(Snapshot {
+            frame: 0,
+            time: 0.0,
+            running: false,
+            speed: 1.0,
+            poses: asm.bodies.iter().map(|b| Pose { com: b.mass.com, rot: [0.0, 0.0, 0.0, 1.0] }).collect(),
+            rest: asm.bodies.iter().map(|b| b.mass.com).collect(),
+            angles: vec![0.0; asm.joints.len()],
+            grabbed: None,
+            pinned: Vec::new(),
+            frozen: Vec::new(),
+        });
         let latest = Arc::new(Mutex::new(first.clone()));
         let events = Arc::new(Mutex::new(Vec::new()));
         let stop = Arc::new(AtomicBool::new(false));
@@ -147,9 +183,9 @@ impl Runner {
 impl Drop for Runner {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
-        if let Some(t) = self.thread.take() {
-            let _ = t.join();
-        }
+        // Changing scenes must not wait for hull construction or a solver step. The worker
+        // observes stop and disposes of its world itself; dropping its handle detaches it.
+        drop(self.thread.take());
     }
 }
 
@@ -165,6 +201,8 @@ fn run(asm: Assembly, gravity: P3, floor: Option<f64>, mut w: MechWorld, rx: Rec
     let mut at_limit = vec![false; asm.joints.len()];
     let mut pending: Vec<Event> = Vec::new();
     let mut drag_target: Option<P3> = None;
+    let mut behind = 0.0;
+    let mut behind_logged = Instant::now();
     while !stop.load(Ordering::Relaxed) {
         let mut single = false;
         let mut changed = false;
@@ -175,7 +213,7 @@ fn run(asm: Assembly, gravity: P3, floor: Option<f64>, mut w: MechWorld, rx: Rec
                 Command::Pause => running = false,
                 Command::Reset => {
                     w = MechWorld::new(&asm, gravity, floor);
-                    running = false;
+                    running = true;
                     owed = 0.0;
                     at_limit.iter_mut().for_each(|a| *a = false);
                     shake = false;
@@ -186,19 +224,39 @@ fn run(asm: Assembly, gravity: P3, floor: Option<f64>, mut w: MechWorld, rx: Rec
                     gravity = g;
                     makepad_box3d::physics_world::world_set_gravity(&mut w.world, makepad_box3d::math_functions::vec3(g[0] as f32, g[1] as f32, g[2] as f32));
                 }
-                Command::Grab { body, point } => {
+                Command::Grab { body, point, hz } => {
                     if body < asm.bodies.len() {
-                        w.grab(body, point, 8.0);
+                        w.grab(body, point, hz);
                         drag_target = Some(point);
                     }
                 }
+                Command::Pin { body, point } => {
+                    if body < asm.bodies.len() {
+                        w.pin(body, point);
+                    }
+                }
+                Command::Dangle { body, point } => {
+                    if body < asm.bodies.len() {
+                        w.dangle(body, point);
+                        drag_target = Some(point);
+                    }
+                }
+                Command::Poke { body, point, dv } => {
+                    if body < asm.bodies.len() {
+                        w.poke(body, point, dv);
+                    }
+                }
                 Command::Drag { point } => drag_target = Some(point),
-                Command::Release => {
+                Command::Release { velocity } => {
+                    if let Some(v) = velocity {
+                        w.throw(v);
+                    }
                     w.release();
                     drag_target = None;
                 }
                 Command::Shake(on) => shake = on,
                 Command::Step => single = true,
+                Command::Bodies { bodies, action } => w.apply(&bodies, &action),
             }
         }
         let now = Instant::now();
@@ -209,6 +267,15 @@ fn run(asm: Assembly, gravity: P3, floor: Option<f64>, mut w: MechWorld, rx: Rec
         }
         let mut steps = (owed / dt).floor() as u64;
         owed -= steps as f64 * dt;
+        if steps > MAX_CATCH_UP {
+            behind += (steps - MAX_CATCH_UP) as f64 * dt;
+            steps = MAX_CATCH_UP;
+            if behind_logged.elapsed().as_secs_f64() > 1.0 {
+                eprintln!("mech-sim: steps cost more than real time; {:.0} ms of sim time slowed down", behind * 1e3);
+                behind = 0.0;
+                behind_logged = Instant::now();
+            }
+        }
         if single && !running {
             steps = 1;
         }

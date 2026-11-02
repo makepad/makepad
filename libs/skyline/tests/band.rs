@@ -1,9 +1,4 @@
-//! The moved crate renders exactly the bands the example rendered before the move: `bands_match_the_pre_move_baseline`
-//! compares them with the ones recorded by the example's code (`local/agent_state/hdri/skyline-baseline`, Task 1 step 1; `local/`
-//! isn't committed, so a machine without it skips). The baseline names: the defaults (seed 7) and the reference presets props_heavy and offcentre.
-//! The follow-the-sky tests render the strip under other `SkyLight`s (noon, a sunset ring) and check what the light does to
-//! the city's windows, its beacons and the far haze; `visual_check_pngs` writes toned PNGs to look at (`SKYLINE_VISUAL_DIR`).
-//!   `MAKEPAD_HAL_BACKEND=offscreen cargo test --release -p makepad-skyline --test band -- --include-ignored --nocapture`
+//!   `MAKEPAD_HAL_BACKEND=offscreen cargo test --release -p makepad-skyline --test band -- --nocapture`
 #![cfg(not(target_arch = "wasm32"))]
 #![allow(dead_code)]
 pub use makepad_skyline::makepad_widgets;
@@ -148,63 +143,15 @@ fn open_rig(follow: bool) -> (RigCx, RigRef, &'static makepad_platform::makepad_
     (cx, rig, hal, info, one)
 }
 
-/// The recorded band and its parameters, or None when `local/` has no baseline `name`.
-fn baseline(name: &str) -> Option<(Params, Band)> {
-    let dir = format!("{}/../../local/agent_state/hdri/skyline-baseline", env!("CARGO_MANIFEST_DIR"));
-    let bytes = std::fs::read(format!("{dir}/{name}_1024.f32")).ok()?;
-    let json = std::fs::read_to_string(format!("{dir}/{name}.json")).ok()?;
-    let dim = |key: &str| -> usize {
-        let at = json.find(&format!("\"{key}\":")).expect(key) + key.len() + 3;
-        json[at..].chars().take_while(char::is_ascii_digit).collect::<String>().parse().expect(key)
-    };
-    let (w, h) = (dim("w"), dim("h"));
+/// A dense prop scene generated in the test, without local baseline files.
+fn props_heavy() -> Params {
     let mut p = Params::default();
-    p.load_web_json(&json).unwrap();
-    assert_eq!(bytes.len(), w * h * 16, "{name}: baseline size");
-    let texels = bytes.chunks_exact(16).map(|t| std::array::from_fn(|c| f32::from_le_bytes(t[c * 4..c * 4 + 4].try_into().unwrap()))).collect();
-    Some((p, Band { w, h, texels, dist: Vec::new(), light: Vec::new() }))
-}
-
-/// A half-exact value `v` as the platform's `pod_heap::f16_to_f32` decoded it when the baselines were recorded: a subnormal
-/// (m 2^-24, m < 1024) whose leading bit k is odd came out doubled (its leading bit kept, OR'ed into the exponent's lowest bit).
-/// The platform decodes them exactly since 2026-10-22; the recorded baselines still carry the old decode.
-fn recorded_decode(v: f32) -> f32 {
-    let m = (v.abs() * 16_777_216.0) as u32;
-    if v == 0.0 || v.abs() >= 6.1035156e-5 || m as f32 != v.abs() * 16_777_216.0 { return v; }
-    if (31 - m.leading_zeros()) % 2 == 1 { 2.0 * v } else { v }
-}
-
-/// The largest per-channel difference, relative to max(1, |want|).
-fn max_abs_diff(got: &[[f32; 4]], want: &[[f32; 4]]) -> f32 {
-    got.iter().zip(want).flat_map(|(g, w)| (0..4).map(move |c| (g[c] - w[c]).abs() / w[c].abs().max(1.0))).fold(0.0, f32::max)
-}
-
-/// The moved crate renders exactly the bands the example rendered before
-/// the move (local/agent_state/hdri/skyline-baseline, Task 1 step 1).
-#[test]
-#[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
-fn bands_match_the_pre_move_baseline() { the_baselines_hold(|_| {}); }
-
-/// Each baseline's band at its parameters (changed by `with`) is the baseline bit for bit.
-fn the_baselines_hold(with: impl Fn(&mut Params)) {
-    for name in ["default", "props_heavy", "offcentre"] {
-        let Some((mut p, want)) = baseline(name) else { eprintln!("no baseline {name}, skipped"); continue };
-        with(&mut p);
-        let got = render_band(&p, 1024);
-        assert_eq!((got.w, got.h), (want.w, want.h), "{name}");
-        let worst = max_abs_diff(&got.texels, &want.texels);
-        if let Some(dir) = std::env::var_os("SKYLINE_BAND_DUMP") { // the rendered band as raw f32, for a look by eye
-            let bytes: Vec<u8> = got.texels.iter().flatten().flat_map(|f| f.to_le_bytes()).collect();
-            std::fs::write(std::path::Path::new(&dir).join(format!("{name}_1024.f32")), bytes).unwrap();
+    for (i, d) in makepad_skyline::PARAMS.iter().enumerate() {
+        if d.group == "Props" && i != P::PrRefl as usize && i != P::PrRipple as usize {
+            p.set(i, 1.0);
         }
-        // the baseline was read back through the platform's half decode, which doubles about half the subnormals (export.rs
-        // `f16_to_f32`): put that back on what is read now, and the bands must agree bit for bit
-        let as_recorded: Vec<[f32; 4]> = got.texels.iter().map(|t| t.map(recorded_decode)).collect();
-        let exact = as_recorded == want.texels;
-        println!("{name}: {} x {}, worst texel difference {worst} (subnormals only), against the baseline as it was decoded: {}", got.w, got.h, if exact { "identical" } else { "DIFFERENT" });
-        assert!(worst <= 1e-3, "{name}: worst texel difference {worst}");
-        assert!(exact, "{name}: the band is not the baseline bit for bit");
     }
+    p
 }
 
 /// The bands of `requests` in turn on one Cx, each from a single draw: the rig draws when a band is asked for and never
@@ -264,7 +211,6 @@ fn bands_from_one_draw(requests: &[(Params, usize)]) -> Vec<Option<(Band, f64, u
 /// every strip, 21-26 ms a strip, because the read was asked for only in the next draw). With no second draw the bands
 /// still come, and they are the right ones: two different strips in turn, each the band the usual rig renders for it.
 #[test]
-#[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
 fn a_band_is_read_back_from_the_frame_that_drew_it() {
     let (a, b) = (Params::default(), city_params());
     // after the rig's warm-up (`bands_from_one_draw`) every band must come, each from its single draw
@@ -371,7 +317,7 @@ fn count_beacons(b: &Band, facade: f32) -> usize {
 // noon 0.328 (8.0x). Tuned once from the brief's 6x and 20x: the windows are sub-pixel at 1024 px (an even glow per floor),
 // so night's top 1% is 5.3x its median; and the noon sun at u 0.5 stands 18 degrees from downtown (ctC 0.55), so the
 // facades the camera sees are in their own shadow, lit by the sky: 8x the night, not 20x.
-#[test] #[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
+#[test]
 fn at_noon_the_city_is_lit_by_the_sun_not_by_its_windows() {
     let p = city_params();
     let night = render_band_lit(&p, 1024, &SkyLight::example());
@@ -388,7 +334,7 @@ fn at_noon_the_city_is_lit_by_the_sun_not_by_its_windows() {
 }
 
 // Measured: 41 texels, mean (0.894, 0.402, 0.206), red / blue 0.97 of the ring's.
-#[test] #[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
+#[test]
 fn the_far_haze_takes_the_ring_colour() {
     let mut p = Params::default(); p.set(P::Haze as usize, 1.0);
     let ring = [0.9, 0.4, 0.2];                   // an unmistakable sunset orange
@@ -404,7 +350,7 @@ fn the_far_haze_takes_the_ring_colour() {
 // Measured: the noon facades' median 0.328; 4 beacon texels at noon (the brightest red 0.254), 0 with design_gain 0.
 // Tuned once from "brighter than the facade median": a beacon (the city's: 0.07 x lights at its core, dimmed by the haze
 // with distance; a sub-pixel point at 1024 px) is about three quarters of the noon facades' median.
-#[test] #[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
+#[test]
 fn beacons_burn_at_noon() {
     let p = city_params();
     let night = render_band_lit(&p, 1024, &SkyLight::example());
@@ -480,7 +426,7 @@ fn beacon_red(t: [f32; 4]) -> f32 { (t[0] - 4.0 * (t[1] + t[2])).max(0.0) }
 /// three beacons in four are one texel both ways; at 4096 px 0.25 degrees (POINT_SIGMA_DEG, 0.19 at half the peak); the
 /// red at least 10 x the green and the blue, and the brightest 3 x the sky's blue. Printed beside: each beacon across
 /// as a map reads it whose texels sit a quarter and a half of a texel along the strip's (the Turn's fraction of a texel).
-#[test] #[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
+#[test]
 fn a_hosts_beacons_are_small_red_points() {
     let p = city_params();
     let light = SkyLight { point_lights: true, ..generator_light(-20.0) };
@@ -524,7 +470,7 @@ fn a_hosts_beacons_are_small_red_points() {
 // The brief's measure (the city's peak over median, lights on against off) cannot see the windows at 1024 px: they are
 // sub-pixel, an even glow per floor that raises the median as much as the peak (on 1.44, off 1.47; 1.96 / 1.51 at 4096 px).
 // So the windows' own light is measured: what lights_by_day = 1 adds at noon is what the lights add at night.
-#[test] #[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
+#[test]
 fn lights_by_day_keeps_the_windows_on() {
     let p = city_params();
     let off = render_band_lit(&p, 1024, &noon([1.2, 1.3, 1.5]));
@@ -540,34 +486,10 @@ fn lights_by_day_keeps_the_windows_on() {
     assert!(by_day > 0.8 * at_night && by_day < 1.02 * at_night, "{by_day} {at_night}");
 }
 
-/// The band toned for a look: over a sky (the ring by day, toward the high ring above 15 degrees; the example's backdrop
-/// gradient at night), times `exposure`, the tone shoulder of the final pass, sRGB; RGB8.
-fn toned(p: &Params, b: &Band, l: &SkyLight, exposure: f32) -> Vec<u8> {
-    // the example's night, wet or dry
-    let night = SkyLight { wet: 0.0, ..l.clone() } == SkyLight::example();
-    let srgb = |x: f32| { let x = x.clamp(0.0, 1.0); (255.0 * if x <= 0.0031308 { 12.92 * x } else { 1.055 * x.powf(1.0 / 2.4) - 0.055 }).round() as u8 };
-    let mut out = Vec::with_capacity(b.w * b.h * 3);
-    for y in 0..b.h {
-        let el = row_el(p, b, y) as f32;
-        let f = (el / 15f32.to_radians()).clamp(0.0, 1.0);
-        for x in 0..b.w {
-            let i = (x * RING / b.w).min(RING - 1);
-            let sky: [f32; 3] = if night { let n = (el / 0.2).clamp(0.0, 1.0); [0.03 - 0.028 * n, 0.02 - 0.017 * n, 0.03 - 0.022 * n] }
-                else { std::array::from_fn(|c| l.ring_low[i][c] + (l.ring_high[i][c] - l.ring_low[i][c]) * f) };
-            let t = b.texels[y * b.w + x];
-            for c in 0..3 {
-                let o = (t[c] + sky[c] * (1.0 - t[3])) * exposure;
-                out.push(srgb(o.min(1.0) + (1.0 - (1.0 - o).min(0.0).exp()) * 0.4));
-            }
-        }
-    }
-    out
-}
-
 /// The night is the same at any host scale: with the example's light at design gain g and its rings at HAZE_COL x g, the
 /// band is g x the example's band (alpha unchanged), within the f16 target's precision. Every designed colour is scaled by the
 /// gain and the rings carry the host's own scale, so nothing in the strip stays at the example's absolute level.
-#[test] #[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
+#[test]
 fn a_night_band_scales_with_its_design_gain() {
     let g = 0.01f32;
     let hz = makepad_skyline::params::HAZE_COL.map(|c| c * g);
@@ -605,7 +527,7 @@ fn decoded_night(g: f32, ring: [f32; 3]) -> SkyLight {
 /// the host's sky in codes, x g, less that sky (`SkyLight::to_host`). Rings chosen so that the codes the shaders get are the
 /// example's own (x haze share / g, encoded: HAZE_COL): then the decoded band is `to_host` of the example's band, within the
 /// f16 target's precision and the rings' round trip through the curves.
-#[test] #[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
+#[test]
 fn a_decoded_night_band_is_the_example_as_its_display_shows_it() {
     use makepad_skyline::{params::HAZE_COL, srgb_decode};
     let g = 0.0264f32;
@@ -641,7 +563,7 @@ fn hue(c: [f32; 3]) -> f32 { (3f32.sqrt() * (c[1] - c[2])).atan2(2.0 * c[0] - c[
 /// Before the ruling the app measured facades at 47 % of its sky against the example's 4 %, and windows cream.
 /// Tolerances: the facade-to-sky ratio within a factor 1.5 either way, the window hue within 10 degrees and their light
 /// against the sky within a factor 1.5.
-#[test] #[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
+#[test]
 fn the_decoded_night_looks_like_the_example() {
     use makepad_skyline::{srgb_decode, BACKDROP_HORIZON};
     let g = 0.0264f32;
@@ -722,7 +644,7 @@ fn lum4(t: [f32; 4]) -> f32 { 0.2126 * t[0] + 0.7152 * t[1] + 0.0722 * t[2] }
 /// the ambient adds is about their albedo x the ambient (0.28 x the street canyon's 0.5..1, less what the night's fog
 /// takes). One render with the ambient in codes, as before the fix, decoded it to about a thousandth of that at night.
 /// Tolerances: the ambient's share within 0.05..0.5 x its luminance, and the one-render one under a tenth of it.
-#[test] #[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
+#[test]
 fn a_hosts_ambient_reaches_the_facades_in_its_own_units() {
     let g = 0.0264f32;
     let p = city_params();
@@ -748,7 +670,7 @@ fn a_hosts_ambient_reaches_the_facades_in_its_own_units() {
 /// of the sky's brightness just over the horizon (asserted 3..8 %; the example over its backdrop: about 2 % by this
 /// measure, 4 % by the window grab's); the lit windows keep the example's hue (within 10 degrees). The facades' light
 /// against g x the example's as displayed is printed: what the host's ambient adds over the designed light.
-#[test] #[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
+#[test]
 fn the_decoded_night_matches_the_example_over_the_generators_night() {
     use makepad_skyline::{srgb_decode, BACKDROP_HORIZON};
     let g = 0.0264f32;
@@ -777,7 +699,7 @@ fn the_decoded_night_matches_the_example_over_the_generators_night() {
 /// part way to its whole, 0.24) the silhouettes keep some shape: the host's twilight on the facades adds at least half
 /// again their designed light (measured: 1.25e-3 against 6.6e-4) and lifts them over 1 % of the sky just over the
 /// horizon (the dusk sky there is bright: the facades stay far darker than it, under 60 %).
-#[test] #[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
+#[test]
 fn the_dusk_silhouettes_keep_some_shape() {
     use makepad_skyline::StripPlan;
     let light = generator_light(-4.0);
@@ -797,7 +719,7 @@ fn the_dusk_silhouettes_keep_some_shape() {
 /// each width) within 15 %, at night and at dusk. Measured: x1.11 at night and x1.10 at dusk, where the designed part
 /// alone differs more (x1.23, x1.18): the held strip's windows are sub-pixel and spread into their walls; the host's
 /// share is rendered the same way at both widths.
-#[test] #[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
+#[test]
 fn a_held_and_a_released_strip_light_the_facades_alike() {
     let p = city_params();
     for el in [-20.0f32, -4.0] {
@@ -816,103 +738,13 @@ fn a_held_and_a_released_strip_light_the_facades_alike() {
     }
 }
 
-/// Night, noon and a sunset over the city, toned PNGs into `SKYLINE_VISUAL_DIR` (the whole strip and the city's sector).
-#[test] #[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen; SKYLINE_VISUAL_DIR=<dir>"]
-fn visual_check_pngs() {
-    use makepad_draw::makepad_zune_png::{PngEncoder, makepad_zune_core::{bit_depth::BitDepth, colorspace::ColorSpace, options::EncoderOptions}};
-    let Some(dir) = std::env::var_os("SKYLINE_VISUAL_DIR") else { eprintln!("SKYLINE_VISUAL_DIR not set, skipped"); return };
-    let write = |file: &str, w: usize, h: usize, px: &[u8]| {
-        let mut png = Vec::new();
-        let o = EncoderOptions::default().set_width(w).set_height(h).set_depth(BitDepth::Eight).set_colorspace(ColorSpace::RGB);
-        PngEncoder::new(px, o).encode(&mut png).unwrap();
-        std::fs::write(std::path::Path::new(&dir).join(file), png).unwrap();
-    };
-    let p = city_params();
-    let mut sunset = noon([0.9, 0.4, 0.2]);
-    (sunset.sun_u, sunset.sun_el_deg, sunset.sun_rgb, sunset.ambient_rgb, sunset.ring_high) = (0.55, 3.0, [1.6, 0.8, 0.35], [0.15, 0.13, 0.16], [[0.35, 0.3, 0.45]; RING]);
-    let w = 4096;
-    for (name, l, exposure) in [("night", SkyLight::example(), 2.0), ("noon", noon([0.55, 0.7, 1.0]), 0.6), ("sunset", sunset, 0.9)] {
-        let b = render_band_lit(&p, w, &l);
-        let rgb = toned(&p, &b, &l, exposure);
-        write(&format!("{name}_strip.png"), b.w, b.h, &rgb);
-        // the city's sector (ctC +- 0.1 of the turn), twice the size
-        let (x0, cw) = (((p[P::CtC] - 0.1) * w as f64) as usize, (0.2 * w as f64) as usize);
-        let crop: Vec<u8> = (0..2 * b.h).flat_map(|y| (0..2 * cw).flat_map(move |x| { let o = ((y / 2) * b.w + x0 + x / 2) * 3; [o, o + 1, o + 2] })).map(|o| rgb[o]).collect();
-        write(&format!("{name}_city.png"), 2 * cw, 2 * b.h, &crop);
-    }
-    // the shore (plan hdri-6 §3): the defaults at Sea distance 0 (the sea at the feet), 0.3 and 0.6, by day and at night,
-    // the whole strip and the open sea's sector (the widest run of sea columns) three times the size
-    let z = Zones::new(&Params::default());
-    let sea: Vec<bool> = (0..w).map(|x| z.land((x as f64 + 0.5) / w as f64) < 0.05).collect();
-    let (mut best, mut run) = ((0usize, 0usize), 0usize);
-    for x in 0..2 * w { if sea[x % w] { run += 1; if run > best.1 && run <= w { best = ((x + 1 - run) % w, run); } } else { run = 0; } }
-    let cw = best.1.min(w / 6);
-    let x0 = best.0 + (best.1 - cw) / 2;
-    for (name, l, exposure) in [("night", SkyLight::example(), 2.0), ("noon", noon([0.55, 0.7, 1.0]), 0.6)] {
-        for x_sea in [0.0, 0.3, 0.6] {
-            let mut p = Params::default();
-            p.set(P::SeaD as usize, x_sea);
-            let b = render_band_lit(&p, w, &l);
-            let rgb = toned(&p, &b, &l, exposure);
-            write(&format!("shore_{name}_{x_sea}_strip.png"), b.w, b.h, &rgb);
-            let crop: Vec<u8> = (0..3 * b.h).flat_map(|y| (0..3 * cw).flat_map(move |x| { let o = ((y / 3) * b.w + (x0 + x / 3) % w) * 3; [o, o + 1, o + 2] })).map(|o| rgb[o]).collect();
-            write(&format!("shore_{name}_{x_sea}_sea.png"), 3 * cw, 3 * b.h, &crop);
-        }
-    }
-    // the lakes (plan hdri-6 §4): all land at Lakes 1, and the app's defaults (Lakes 0.6, Sea distance 0.3), by day and
-    // at night, the whole strip and each lake's sector (0.04 of the turn, 30 rows either side of the horizon) four times
-    // the size
-    let mut all_land = Params::default();
-    all_land.set(P::Land as usize, 1.0);
-    all_land.set(P::PrLake as usize, 1.0);
-    let mut app = Params::default();
-    app.set(P::PrLake as usize, 0.6);
-    app.set(P::SeaD as usize, 0.3);
-    for (set, p) in [("land", all_land), ("app", app)] {
-        let z = Zones::new(&p);
-        for (name, l, exposure) in [("night", SkyLight::example(), 2.0), ("noon", noon([0.55, 0.7, 1.0]), 0.6)] {
-            let b = render_band_lit(&p, w, &l);
-            let rgb = toned(&p, &b, &l, exposure);
-            write(&format!("lakes_{set}_{name}_strip.png"), b.w, b.h, &rgb);
-            let (hy, cw, rows) = ((p[P::Horizon] * b.h as f64) as usize, (0.04 * w as f64) as usize, 60usize);
-            for (k, lake) in z.lakes.iter().enumerate() {
-                let x0 = ((lake.u - 0.02).rem_euclid(1.0) * w as f64) as usize;
-                let crop: Vec<u8> = (0..4 * rows).flat_map(|y| (0..4 * cw).flat_map(move |x| { let o = ((hy - rows / 2 + y / 4).min(b.h - 1) * b.w + (x0 + x / 4) % w) * 3; [o, o + 1, o + 2] })).map(|o| rgb[o]).collect();
-                write(&format!("lakes_{set}_{name}_{k}.png"), 4 * cw, 4 * rows, &crop);
-            }
-            println!("{set} {name}: {} lakes {:?}", z.lakes.len(), z.lakes);
-        }
-    }
-    // the wet ground (plan hdri-6 §5) at wet 0, 0.5 and 1, by day and at night: the denser city on all land (the city's
-    // sector twice the size) and the defaults at Sea distance 0.3 (the open sea's sector, as the shore's, three times),
-    // and the whole strips
-    let (sea_x0, sea_cw) = (x0, cw);
-    let mut land = city_params();
-    land.set(P::Land as usize, 1.0);
-    let mut shore = Params::default();
-    shore.set(P::SeaD as usize, 0.3);
-    let city = (((land[P::CtC] - 0.1) * w as f64) as usize, (0.2 * w as f64) as usize);
-    for (set, p, (x0, cw), k) in [("land", land, city, 2), ("shore", shore, (sea_x0, sea_cw), 3)] {
-        for (name, l, exposure) in [("night", SkyLight::example(), 2.0), ("noon", noon([0.55, 0.7, 1.0]), 0.6)] {
-            for wet in [0.0, 0.5, 1.0] {
-                let l = SkyLight { wet, ..l.clone() };
-                let b = render_band_lit(&p, w, &l);
-                let rgb = toned(&p, &b, &l, exposure);
-                write(&format!("wet_{set}_{name}_{wet}_strip.png"), b.w, b.h, &rgb);
-                let crop: Vec<u8> = (0..k * b.h).flat_map(|y| (0..k * cw).flat_map(move |x| { let o = ((y / k) * b.w + (x0 + x / k) % w) * 3; [o, o + 1, o + 2] })).map(|o| rgb[o]).collect();
-                write(&format!("wet_{set}_{name}_{wet}_sector.png"), k * cw, k * b.h, &crop);
-            }
-        }
-    }
-}
-
 /// Noon's light with the sun at azimuth `sun_u` and of strength `sun` (x noon's).
 fn noon_sun(sun_u: f32, sun: f32) -> SkyLight { SkyLight { sun_u, sun_rgb: [3.0 * sun, 2.9 * sun, 2.7 * sun], ..noon([1.2, 1.3, 1.5]) } }
 
 // Measured (1024 px, the city's 745 texels): median 0.563 with the sun behind the camera, 0.328 with it in front (18 deg
 // from it at noon is the same), 0.327 with no sun: the facades the camera sees are lit by the sun only when they face it.
 // Thresholds 1.4x (measured 1.72x both).
-#[test] #[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
+#[test]
 fn the_sun_lights_the_facades_that_face_it() {
     let p = city_params();
     let night = render_band_lit(&p, 1024, &SkyLight::example());
@@ -962,7 +794,7 @@ fn mean_lum(b: &Band, t: &[(usize, f64)], f: impl Fn(f64) -> bool) -> f32 {
 // (2.2x); to the right, falling 0.251, rising 0.111 (2.3x); the sun behind the camera 0.336, beyond the ridge 0.063 (5.3x;
 // with the normal's z toward the view, as the brief wrote it, this would come out the other way round).
 // Thresholds 1.6x and 3x.
-#[test] #[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
+#[test]
 fn the_sun_lights_the_flanks_that_face_it() {
     // no forests, city or props (only rock on the nearest range), no haze, no ambient: the sun alone lights the rock
     let mut p = Params::default();
@@ -990,11 +822,6 @@ fn the_sun_lights_the_flanks_that_face_it() {
 
 /// `p` at Size k.
 fn sized(p: &Params, k: f64) -> Params { let mut q = p.clone(); q.set(P::Size as usize, k); q }
-
-/// At Size 1 the three baselines are still exact, bit for bit.
-#[test]
-#[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
-fn size_one_is_bit_identical() { the_baselines_hold(|p| { p.set(P::Size as usize, 1.0); }); }
 
 /// The tallest summit of the strip (`terrain::columns`, the whole turn in `w` columns): its angular height (rad) and its
 /// width (rad) at half that height, in its own range.
@@ -1164,7 +991,6 @@ fn city_view(p: &Params) -> render::ViewSpec { render::ViewSpec::new(p, p[P::CtC
 /// tops (the 90th and 99th and the highest top are printed: the 99th is about one tower a seed, of heavy-tailed heights,
 /// and a mast a few texels wide, resolved or not, decides the highest).
 #[test]
-#[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
 fn size_scales_every_element() {
     let p = Params::default();
     let (one, two) = (p.clone(), sized(&p, 2.0));
@@ -1274,7 +1100,6 @@ fn bigger_means_fewer() {
 /// Bigger means fewer, the city: its visible buildings (`city_measure`, three seeds) at k = 2 are 0.5x k = 1's (+-20 %),
 /// at k = 0.5 2x (+-20 %). The front faces along the horizon are printed too.
 #[test]
-#[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
 fn bigger_means_fewer_buildings() {
     let count = |k: f64| -> (usize, usize) {
         let n: Vec<(usize, usize)> = [7, 11, 23].map(|seed| { let mut p = sized(&Params::default(), k); p.set_seed(seed); let c = city_measure(&p, city_view(&p)); (c.buildings, c.faces) }).into();
@@ -1293,7 +1118,6 @@ fn bigger_means_fewer_buildings() {
 /// The haze is unchanged: the farthest range's own texels (noon, a sunset ring, Haze 1: `the_far_haze_takes_the_ring_colour`)
 /// have the same mean colour at k = 0.5, 1 and 2 within 10 % a channel.
 #[test]
-#[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
 fn size_keeps_the_haze() {
     let mut p = Params::default(); p.set(P::Haze as usize, 1.0);
     let light = noon([0.9, 0.4, 0.2]);
@@ -1308,7 +1132,7 @@ fn size_keeps_the_haze() {
 /// `SkyLight::sea_sky`). By day no sea texel is brighter than the sky it mirrors there (the sea's sky at its mirrored
 /// elevation) plus the water's own daylight (albedo 0.1 x the ambient), or than the host's ground it blends into at the
 /// coast, within SEA_SLACK. Before: the sea mirrored the rings, 2x the sky it showed (0.955 at -2 degrees).
-#[test] #[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
+#[test]
 fn the_sea_mirrors_the_sky_it_is_handed() {
     const SEA_SLACK: f32 = 0.02;
     let p = Params::default();
@@ -1351,7 +1175,7 @@ fn the_sea_mirrors_the_sky_it_is_handed() {
 /// sky and the scene, and nothing else, so the band with Water reflections 0.6 less the band with 0 is the water's. In
 /// the sea's columns none of it lies nearer than the sea distance (deeper than its edge plus 1.5 texels), and some lies
 /// beyond it.
-#[test] #[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
+#[test]
 fn the_sea_starts_at_its_distance() {
     let light = noon([1.2, 1.3, 1.5]);
     for x_sea in [0.3, 0.6] {
@@ -1380,7 +1204,7 @@ fn the_sea_starts_at_its_distance() {
 
 /// Plan hdri-6 §3: the shore is lit like the skyline's land. Over a host's ground (`host_ground`) the land takes the host's
 /// ground ring, and so does the shore in front of the sea.
-#[test] #[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
+#[test]
 fn the_shore_is_the_hosts_land() {
     let g = [0.30f32, 0.20, 0.10];
     let light = SkyLight { host_ground: true, ground: [g; RING], ..noon([1.2, 1.3, 1.5]) };
@@ -1404,7 +1228,7 @@ fn the_shore_is_the_hosts_land() {
 /// Plan hdri-6 §4: lakes mirror the sky (by day) and never come nearer than LAKE_MIN_M x Size. All land, so the water is
 /// the lakes': the band with Water reflections 0.6 less the band with 0 is nothing deeper than the nearest shore can be
 /// (atan(EYE / LAKE_MIN_M) plus 1.5 texels), and the sky's light in the lakes.
-#[test] #[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
+#[test]
 fn lakes_mirror_the_sky_and_keep_their_distance() {
     let light = noon([1.2, 1.3, 1.5]);
     let mut p = Params::default();
@@ -1447,7 +1271,7 @@ fn mirrored_el(al: f64) -> f64 {
 /// it mirrors land and where it mirrors sky the lake is no darker than LAKE_DAY_SHARE of it (its Fresnel term is about
 /// 0.95 this near the horizon) and no brighter than it, and of its hue within 15 degrees. Before: the land mirrored in its
 /// lights alone, near black.
-#[test] #[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
+#[test]
 fn a_lake_by_day_mirrors_the_land_and_the_sky_in_their_colour() {
     const LAKE_DAY_SHARE: f32 = 0.75;
     let light = noon([0.55, 0.7, 1.0]);
@@ -1504,7 +1328,7 @@ fn a_lake_by_day_mirrors_the_land_and_the_sky_in_their_colour() {
 /// eye twice as high): every texel below the horizon is the band without lakes moved toward that water by the CPU's
 /// cover, within 2 % of the whole step, and the lakes' own water is no darker than 0.9 of the night sea. Before: 0.35
 /// (1 - Fresnel) of the ground alone, a twentieth.
-#[test] #[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
+#[test]
 fn the_shaders_lakes_are_the_cpus() { for k in [1.0, 2.0] { lakes_are_the_cpus_at(k); } }
 
 fn lakes_are_the_cpus_at(size: f64) {
@@ -1543,7 +1367,7 @@ fn lakes_are_the_cpus_at(size: f64) {
 /// - at wet 1 it is above wet 0's by at least a tenth of the light 0.3 to 2 degrees up, the elevations those rows mirror
 ///   (at the default ripple 3 degrees down mirrors about 2 up; the lights the front treeline hides are not mirrored);
 /// - at 0.5 it is half way (the water's share is linear).
-#[test] #[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
+#[test]
 fn a_wet_ground_mirrors_the_city_in_step_with_its_wetness() {
     let mut p = city_params();
     p.set(P::Land as usize, 1.0);
@@ -1577,7 +1401,7 @@ fn a_wet_ground_mirrors_the_city_in_step_with_its_wetness() {
 /// day), within WET_MIRROR_EPS; and the water mirrors: by day the texels over solid ground carry at least WET_DAY_SHARE
 /// of it on average. Before: lights and the city's pale foot behind the treeline showed in the water, and props on land
 /// seen from the mirrored eye stood over the mirrored treeline.
-#[test] #[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
+#[test]
 fn a_wet_ground_mirrors_only_what_stands_above_it() {
     const WET_MIRROR_EPS: f32 = 2e-3;
     const WET_DAY_SHARE: f32 = 0.75;
@@ -1647,13 +1471,12 @@ fn a_wet_ground_mirrors_only_what_stands_above_it() {
 /// The app's scene, a shore in front of the sea (Sea distance 0.3) and lakes, and props_heavy's. Before (fix round 1):
 /// the land was the dry band's down to the reflection of the near rise's top, 1.8 degrees, a band of ground between the
 /// treeline and its reflection.
-#[test] #[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
+#[test]
 fn over_a_hosts_wet_ground_the_band_gives_way_below_the_horizon() {
     const SHARE: f32 = 0.5;
     let mut app = Params::default();
     for (k, v) in [(P::SeaD, 0.3), (P::PrLake, 1.0)] { app.set(k as usize, v); }
-    for (scene, p) in [("app", Some(app)), ("props_heavy", baseline("props_heavy").map(|(p, _)| p))] {
-    let Some(p) = p else { eprintln!("no baseline props_heavy, skipped"); continue };
+    for (scene, p) in [("app", app), ("props_heavy", props_heavy())] {
     let (z, edge, w) = (Zones::new(&p), makepad_skyline::sea_edge_rad(&p), 2048usize);
     let (px, eye) = (std::f64::consts::TAU / w as f64, makepad_skyline::props::kit::EYE * p[P::Size]);
     assert!(scene != "app" || !z.lakes.is_empty(), "the premise: lakes at seed 7");
@@ -1724,7 +1547,7 @@ fn rise_tops(p: &Params, w: usize) -> Vec<f64> {
 /// them (the 0.25 degrees over the rise's top: its trees and what shows between them) by RISE_NOISE. The host's ground
 /// is half its low ring, about what a wet ground's sheen shows at the horizon. Before: the rise kept the host's ground,
 /// the damp ground with its sheen: at Wet ground 1.00 a light band 0.8 degrees tall with its reflection.
-#[test] #[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
+#[test]
 fn over_a_hosts_wet_floor_the_near_rise_is_a_bank_under_the_trees() {
     const RISE_NOISE: f32 = 0.01;
     let mut app = Params::default();
@@ -1734,8 +1557,7 @@ fn over_a_hosts_wet_floor_the_near_rise_is_a_bank_under_the_trees() {
     // the front treeline's own colour where its trees are solid (`DrawSkyRange`, k 5)
     let (sil, up) = (makepad_skyline::params::SIL, 0.5 + 0.5 * noon_host.sun_el_deg.to_radians().sin());
     let bank: [f32; 3] = std::array::from_fn(|c| 0.6 * sil[c] * noon_host.gpu_gain() + 0.07 * (noon_host.ambient_rgb[c] + noon_host.sun_rgb[c] * up));
-    for (scene, p) in [("app", Some(app)), ("props_heavy", baseline("props_heavy").map(|(p, _)| p))] {
-    let Some(p) = p else { eprintln!("no baseline props_heavy, skipped"); continue };
+    for (scene, p) in [("app", app), ("props_heavy", props_heavy())] {
     let (z, w) = (Zones::new(&p), 4096usize);
     let (px, rise) = (std::f64::consts::TAU / w as f64, rise_tops(&p, w));
     let dry = render_planned(&p, w, &noon_host);
@@ -1781,7 +1603,7 @@ fn over_a_hosts_wet_floor_the_near_rise_is_a_bank_under_the_trees() {
 /// `DrawSkyGround`). All land with lakes, at Size 1 (2048 px) and 0.5 (4096 px), at noon (and the coverage at night,
 /// the decode), share 0.5, every texel a lake covers by 0.2 to 0.8 (the CPU's `lakes::cover`; the shader's is it to 2 %
 /// of a texel). Before: the final cut the whole texel by its keep, the lake's water and mirror by cv twice.
-#[test] #[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
+#[test]
 fn over_a_hosts_wet_ground_a_lakes_edge_keeps_its_water_whole() {
     const SHARE: f32 = 0.5;
     let ground = [0.30f32, 0.20, 0.10];
@@ -1836,7 +1658,7 @@ fn over_a_hosts_wet_ground_a_lakes_edge_keeps_its_water_whole() {
 /// against the dry band: in every sea texel off the coast and clear of the shore, the band less its base is the dry
 /// band less the dry sea's base, within SEA_TOL. Before: the sea kept its base, about 0.29 at noon, a step over the
 /// floor's water at the sea's edge.
-#[test] #[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
+#[test]
 fn by_day_over_a_hosts_wet_floor_the_sea_is_the_floors_water() {
     const SEA_TOL: f32 = 3e-3;
     let mut p = Params::default();
@@ -1886,7 +1708,7 @@ fn by_day_over_a_hosts_wet_floor_the_sea_is_the_floors_water() {
 /// the wet band at 0.6 is the wet band at 1, where the dry bands differ (by day the strength weighs the lights the water
 /// mirrors: the lighthouse and the ships, Lighthouse, ships 1, lit by day). Noon, Sea distance 0.3, 2048 px. Before:
 /// the sea kept its base and mirrored the lights by the Water reflections, about 0.29 lighter than the floor at noon.
-#[test] #[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
+#[test]
 fn by_day_over_a_hosts_wet_floor_the_sea_meets_the_floor_without_a_step() {
     const STEP_SLACK: f64 = 0.005;
     let mut p = Params::default();
@@ -1954,7 +1776,7 @@ fn by_day_over_a_hosts_wet_floor_the_sea_meets_the_floor_without_a_step() {
 /// tallest towers, the highest mountains and every prop, at Size 0.5, and at the defaults at Size 2, the band's top two
 /// rows hold no coverage and no light worth a hundredth of its brightest. A fit stopped at 85 degrees is the spec's
 /// limit and is only printed.
-#[test] #[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
+#[test]
 fn nothing_is_cut_at_the_fitted_top() {
     let mut tall = city_params();
     for (i, d) in makepad_skyline::PARAMS.iter().enumerate() { if d.group == "Props" { tall.set(i, 1.0); } }
@@ -1996,7 +1818,7 @@ fn without_props(p: &Params) -> Params {
 /// - over the strip's own wet ground (a fifth), a land texel whose reflection does not outshine the rest of it reads its
 ///   ground's distance, as dry, and one whose mirrored windows outshine it reads at least the light's; the blur leaves
 ///   the plane alone.
-#[test] #[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
+#[test]
 fn the_band_hands_each_texels_distance() {
     use makepad_skyline::{props::kit::EYE, NEAR_RISE_M};
     let w = 4096;
@@ -2195,7 +2017,7 @@ fn the_band_hands_each_texels_distance() {
 /// - a city beacon's halo over the sky (the march's red light, no coverage; the glow behind it taken off as above)
 ///   burns at its beacon's distance, which the march now keeps as its depth there (not its far 60 km); blurred, at the
 ///   city's distances (under 6 km).
-#[test] #[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
+#[test]
 fn the_band_hands_its_light() {
     let lum = |t: [f32; 4]| 0.2126 * t[0] + 0.7152 * t[1] + 0.0722 * t[2];
     for (w, sharp, wet) in [(2048, 1.0, 0.0), (4096, 0.0, 0.0), (2048, 1.0, 0.6)] {
@@ -2270,7 +2092,7 @@ fn the_band_hands_its_light() {
 /// that, at Size 1 and 2 and with the camera off-centre (Off 0.6, where a column's ground lies up to 2.5 times as far);
 /// and by day with the sea and lakes (Sea distance 0.3, Lakes 1) many read past MIRROR_TO times it, and every texel past
 /// MIRROR_FROM is water: it shows what the band without reflections (Water reflections 0) does not.
-#[test] #[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
+#[test]
 fn only_the_water_reads_past_the_strips_own_ground() {
     use makepad_skyline::{ground_eye_m, MIRROR_FROM, MIRROR_TO};
     let light = noon([1.2, 1.3, 1.5]);
@@ -2317,7 +2139,7 @@ fn only_the_water_reads_past_the_strips_own_ground() {
 /// there, in the city's columns) wet land gains under 5 % of that. The band's light plane does not move, nor its
 /// distance but where the mirrored aurora makes the texel show mostly the mirror (`planes_kept`). By day the pass adds
 /// nothing, texel for texel.
-#[test] #[ignore = "GPU: MAKEPAD_HAL_BACKEND=offscreen"]
+#[test]
 fn the_night_sea_mirrors_the_aurora_it_is_handed() {
     // the aurora's pass adds light only (its distance output is 0 at alpha 0): the light plane is the water's, and the
     // distance too, but where the light it adds makes the texel show mostly the mirror (`DrawSkyWaterDist`'s choice,

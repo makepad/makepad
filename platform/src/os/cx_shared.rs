@@ -68,7 +68,14 @@ impl Cx {
         let held = self.xr_offscreen() && !self.window_redrawn && self.screenshot_requests.is_empty() && self.run_view_frame_requests.is_empty();
         for draw_pass_id in self.passes.id_iter() {
             let pass = &self.passes[draw_pass_id];
-            if pass.paint_dirty && !(held && !pass.repaint_requested && self.pass_root_window(draw_pass_id).is_some()) {
+            if !pass.paint_dirty { continue; }
+            let window = self.pass_root_window(draw_pass_id);
+            if window.is_some_and(|window| {
+                self.windows[window].paint_paused && !self.windows[window].paint_once
+            }) {
+                continue;
+            }
+            if !(held && !pass.repaint_requested && window.is_some()) {
                 return true;
             }
         }
@@ -118,6 +125,9 @@ impl Cx {
     /// Explicit `repaint_pass` users are untouched: this gates only the time
     /// repaint, and dirty propagation to parents is unchanged.
     fn pass_live_for_time_repaint(&self, pass_id: DrawPassId) -> bool {
+        if self.pass_root_window(pass_id).is_some_and(|window| self.windows[window].paint_paused) {
+            return false;
+        }
         let pass = &self.passes[pass_id];
         let Some(list_id) = pass.main_draw_list_id else {
             return false;
@@ -310,6 +320,16 @@ impl Cx {
         } else {
             self.window_redrawn = false;
         }
+        // A paused window keeps its drawable and all of its producers. Offscreen work is
+        // independent. Keep dirty bits so resuming cannot lose updates made while paused.
+        passes_todo.retain(|id| self.pass_root_window(*id).is_none_or(|window| {
+            !self.windows[window].paint_paused || self.windows[window].paint_once
+        }));
+        for id in passes_todo.iter() {
+            if let CxDrawPassParent::Window(window) = self.passes[*id].parent {
+                self.windows[window].paint_once = false;
+            }
+        }
         if passes_todo.iter().any(|id| self.pass_root_window(*id).is_some()) {
             self.window_paints += 1;
         }
@@ -485,6 +505,7 @@ impl Cx {
                     self.windows.is_valid(*parent_id)
                         && self.windows[*parent_id].is_created
                         && !self.windows[*parent_id].is_popup
+                        && !self.windows[*parent_id].paint_paused
                 })
                 .and_then(|parent_id| self.windows[parent_id].main_pass_id)
             else {

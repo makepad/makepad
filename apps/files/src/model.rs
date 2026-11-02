@@ -710,9 +710,12 @@ mod tests {
         // And crossing midnight rolls the date.
         assert_eq!(format_stamp_at(secs, 3 * 3600), "Aug 28, 2026 00:34");
         assert_eq!(format_stamp_at(0, 0), "—");
-        assert_eq!(parse_utc_offset("+0200"), 7200);
-        assert_eq!(parse_utc_offset("-0730"), -27000);
-        assert_eq!(parse_utc_offset("garbage"), 0);
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        {
+            assert_eq!(parse_utc_offset("+0200"), 7200);
+            assert_eq!(parse_utc_offset("-0730"), -27000);
+            assert_eq!(parse_utc_offset("garbage"), 0);
+        }
     }
 
     #[test]

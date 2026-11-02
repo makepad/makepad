@@ -519,8 +519,6 @@ impl TerrainShader {
 }
 
 #[cfg(test)]
-// Native CPU benchmark assertions use std deadlines only inside tests.
-#[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 mod tests {
     use super::*;
 
@@ -552,113 +550,5 @@ mod tests {
         assert_eq!(rgba_ptr, scratch.rgba.as_ptr());
         assert_eq!(elevation_ptr, scratch.elevation.as_ptr());
         assert_eq!(terrain_tile_plan((0.25, 0.25, 0.75, 0.75), 32, 24, 0, 0).len(), 1);
-    }
-
-    fn norm_of(lon: f64, lat: f64) -> (f64, f64) {
-        let x = (lon + 180.0) / 360.0;
-        let r = lat.to_radians();
-        let y = (1.0 - (r.tan() + 1.0 / r.cos()).ln() / std::f64::consts::PI) / 2.0;
-        (x, y)
-    }
-
-    #[test]
-    #[ignore]
-    fn probe_elevations() {
-        let Ok(mut shader) =
-            TerrainShader::open(Path::new("../../local/overlays/nl-terrain.mbtiles"))
-        else {
-            return;
-        };
-        for z in [6u32, 8, 10, 12] {
-            for (name, lon, lat) in [
-                ("adam", 4.9f64, 52.37f64),
-                ("polder", 5.4, 52.5),
-                ("veluwe", 5.83, 52.25),
-                ("limburg", 5.97, 50.77),
-                ("sea", 3.5, 53.0),
-                ("germany", 7.8, 52.0),
-            ] {
-                let (nx, ny) = norm_of(lon, lat);
-                let e = shader.elevation_norm(z, nx, ny);
-                print!("z{z} {name}={e:.2} ");
-            }
-            println!();
-        }
-    }
-
-    #[test]
-    #[ignore]
-    fn probe_wide_viewport() {
-        let Ok(mut shader) =
-            TerrainShader::open(Path::new("../../local/overlays/nl-terrain.mbtiles"))
-        else {
-            println!("OPEN FAILED");
-            return;
-        };
-        // Same bbox the app requests at the zoomed-out verification view.
-        let (cx, cy) = norm_of(5.5, 52.2);
-        let (hw, hh) = (0.0432, 0.0324);
-        let (rgba, _, _) = shader.shade_region(cx - hw, cy - hh, cx + hw, cy + hh, 1024, 768);
-        let visible = rgba.chunks_exact(4).filter(|px| px[3] > 0).count();
-        println!("wide probe: {visible} of {} px visible", 1024 * 768);
-    }
-
-    #[test]
-    #[ignore]
-    fn dump_alps_shadow_ab() {
-        let Ok(mut shader) =
-            TerrainShader::open(Path::new("../../local/overlays/nl-terrain.mbtiles"))
-        else {
-            println!("no archive");
-            return;
-        };
-        let (cx, cy) = norm_of(11.4, 47.27);
-        let h = 0.1 / 360.0;
-        for (name, cast) in [("off", false), ("on", true)] {
-            shader.cast_shadows = cast;
-            let start = std::time::Instant::now();
-            let (rgba, _, _) = shader.shade_region(cx - h, cy - h, cx + h, cy + h, 512, 512);
-            println!("alps shadows {name}: {:.0} ms", start.elapsed().as_secs_f64() * 1000.0);
-            let rgb: Vec<u8> = rgba
-                .chunks_exact(4)
-                .flat_map(|px| [px[0], px[1], px[2]])
-                .collect();
-            let png = crate::png::encode(512, 512, crate::png::PngFormat::Rgb8, &rgb);
-            let out = format!(
-                "/private/tmp/claude-501/-Users-admin-makepad-makepad/dc97c21e-85e9-41f6-a8d1-03d180e6bf12/scratchpad/alps_shadow_{name}.png"
-            );
-            std::fs::write(out, png).unwrap();
-        }
-    }
-
-    #[test]
-    #[ignore]
-    fn dump_shade_probes() {
-        let Ok(mut shader) =
-            TerrainShader::open(Path::new("../../local/overlays/nl-terrain.mbtiles"))
-        else {
-            return;
-        };
-        for (name, lon, lat, half_deg) in [
-            ("vaals", 5.97, 50.77, 0.25),
-            ("adam", 4.9, 52.37, 0.25),
-            ("alps", 11.4, 47.27, 0.5),
-            ("paris", 2.35, 48.85, 0.25),
-        ] {
-            let (cx, cy) = norm_of(lon, lat);
-            let h = half_deg / 360.0;
-            let (rgba, _, _) = shader.shade_region(cx - h, cy - h, cx + h, cy + h, 512, 512);
-            let rgb: Vec<u8> = rgba
-                .chunks_exact(4)
-                .flat_map(|px| [px[0], px[1], px[2]])
-                .collect();
-            let png = crate::png::encode(512, 512, crate::png::PngFormat::Rgb8, &rgb);
-            let out = format!(
-                "/private/tmp/claude-501/-Users-admin-makepad-makepad/2360ceda-2c5b-45d8-91f7-072799a0d3d9/scratchpad/terrain_{name}.png"
-            );
-            std::fs::write(out, png).unwrap();
-            let sample = &rgba[(256 * 512 + 256) * 4..(256 * 512 + 256) * 4 + 4];
-            println!("{name}: center px {:?}", sample);
-        }
     }
 }

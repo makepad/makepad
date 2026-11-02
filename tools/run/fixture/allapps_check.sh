@@ -7,7 +7,7 @@ T=${CARGO_TARGET_DIR:-$PWD/target}
 J="cargo run --profile host -q --manifest-path $PWD/Cargo.toml -p makepad-run --bin makepad --"
 B=$J
 export MAKEPAD_RUN_STD=$PWD/libs/relax/compiler/std
-CARGO_INCREMENTAL=0 cargo build --profile host -p makepad-run --bin makepad -j8 > ${TMPDIR:-/tmp}/allapps-build.log 2>&1 || { tail -20 ${TMPDIR:-/tmp}/allapps-build.log; echo "BUILD FAILED"; exit 3; }
+CARGO_INCREMENTAL=0 cargo build --profile host -p makepad-run --bin makepad --bin makepad-launcher -j8 > ${TMPDIR:-/tmp}/allapps-build.log 2>&1 || { tail -20 ${TMPDIR:-/tmp}/allapps-build.log; echo "BUILD FAILED"; exit 3; }
 for toml in apps/*/Cargo.toml apps/*/*/Cargo.toml examples/*/Cargo.toml wm/Cargo.toml wm/*/Cargo.toml; do
   [ -f "$toml" ] || continue
   case "$toml" in apps/commercial/*) continue;; esac

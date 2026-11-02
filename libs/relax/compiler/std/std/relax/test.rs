@@ -7,7 +7,7 @@
 
 use crate::string::String;
 use crate::vec::Vec;
-use crate::sync::{mpsc, Arc, Mutex};
+use crate::sync::{mpsc, Arc};
 use crate::io::Write;
 
 /// One `#[test]` fn (the loader's table; repr(C), filled by the loader).
@@ -29,17 +29,31 @@ pub struct Test {
     pub file_len: usize,
     pub line: u32,
     pub col: u32,
+    /// Last result: 0 unrun/filtered, 1 passed, 2 failed, 3 ignored.
+    pub result: u32,
+    /// Whether this run includes the test; a skipped test keeps its last result.
+    pub selected: u32,
+    /// Included by the libtest filters.
+    pub eligible: u32,
 }
 
 #[repr(C)]
 pub struct Tests {
-    pub tests: *const Test,
+    pub tests: *mut Test,
     pub len: usize,
     /// main's answer: the exit status (0, or 101 when a test failed)
     pub code: i32,
+    /// Host callbacks and context; zero callbacks mean the ordinary one-shot harness.
+    pub next: usize,
+    pub fault: usize,
+    pub reach: usize,
+    pub context: usize,
+    pub revision: u64,
+    pub verbose: u32,
 }
 
 struct Desc {
+    index: usize,
     name: String,
     run: usize,
     start: usize,
@@ -158,9 +172,15 @@ fn calc_result(d: &Desc, panic: Option<&(dyn crate::any::Any + Send)>) -> Outcom
     }
 }
 
-fn run_one(d: &Desc) -> Outcome {
+fn run_one(d: &Desc, fault: usize, reach: usize, verbose: bool) -> Outcome {
+    let record: Option<extern "C" fn(usize, u32)> = if reach == 0 { None } else { Some(unsafe { crate::mem::transmute(reach) }) };
+    if let Some(record) = record { record(d.index, 0); }
     let (run, start) = (d.run, d.start);
-    let r = crate::panic::catch_unwind(move || unsafe {
+    let began = verbose.then(crate::time::Instant::now);
+    let body_begin = crate::cell::Cell::new(None);
+    let body_end = crate::cell::Cell::new(None);
+    let r = crate::panic::catch_unwind(crate::panic::AssertUnwindSafe(|| unsafe {
+        if verbose { body_begin.set(Some(crate::time::Instant::now())); }
         if start == 0 {
             let f: fn() = crate::mem::transmute(run);
             f()
@@ -168,30 +188,65 @@ fn run_one(d: &Desc) -> Outcome {
             let f: fn(usize) = crate::mem::transmute(start);
             f(run)
         }
-    });
-    match r {
+        if verbose { body_end.set(Some(crate::time::Instant::now())); }
+    }));
+    let caught = verbose.then(crate::time::Instant::now);
+    let faulted = if fault != 0 {
+        let fault: extern "C" fn() -> u32 = unsafe { crate::mem::transmute(fault) };
+        fault() != 0
+    } else { false };
+    let result = if faulted { Outcome::Failed(Some(String::from("a hardware fault in test code"))) } else { match r {
         Ok(()) => calc_result(d, None),
         Err(p) => calc_result(d, Some(&*p)),
+    } };
+    if let (Some(began), Some(caught), Some(body_begin)) = (began, caught, body_begin.get()) {
+        let body_end = body_end.get().unwrap_or(caught);
+        let body_ms = body_end.duration_since(body_begin).as_secs_f64() * 1000.0;
+        let catch_ms = body_begin.duration_since(began).as_secs_f64() * 1000.0 + caught.duration_since(body_end).as_secs_f64() * 1000.0;
+        eprintln!("makepad test timing: test={:?} body_unwind_ms={:.3} catch_ms={:.3} result_ms={:.3}",
+            d.name, body_ms, catch_ms, caught.elapsed().as_secs_f64() * 1000.0);
+    }
+    if let Some(record) = record { record(d.index, if faulted { 2 } else { 1 }); }
+    result
+}
+
+/// Runs the table's tests; a live host callback waits for the next verified edit.
+pub fn main(t: &mut Tests) {
+    let setup = crate::time::Instant::now();
+    let opts = match parse_args() {
+        Ok(o) => o,
+        Err(e) => { eprintln!("error: {}", e); t.code = 101; return; }
+    };
+    let (mut descs, mut filtered_out) = prepare(t, &opts);
+    let mut revision = t.revision;
+    if t.verbose != 0 { eprintln!("makepad test timing: harness_setup_ms={:.3} reused=false", setup.elapsed().as_secs_f64() * 1000.0); }
+    if opts.list {
+        for d in descs.iter() { println!("{}: test", d.name); }
+        if !opts.quiet { println!("\n{} tests, 0 benchmarks", descs.len()); }
+        t.code = 0;
+        return;
+    }
+    loop {
+        let started = crate::time::Instant::now();
+        if revision != t.revision {
+            let setup = crate::time::Instant::now();
+            (descs, filtered_out) = prepare(t, &opts);
+            revision = t.revision;
+            if t.verbose != 0 { eprintln!("makepad test timing: harness_setup_ms={:.3} reused=false", setup.elapsed().as_secs_f64() * 1000.0); }
+        }
+        t.code = run(t, &opts, descs.clone(), filtered_out);
+        if t.next == 0 { break; }
+        let next: extern "C" fn(*mut Tests, f64) -> u32 = unsafe { crate::mem::transmute(t.next) };
+        if next(t, started.elapsed().as_secs_f64() * 1000.0) == 0 { break; }
     }
 }
 
-/// Runs the table's tests; the exit status goes to `t.code`.
-pub fn main(t: &mut Tests) {
-    t.code = run(t);
-}
-
-fn run(t: &Tests) -> i32 {
-    let opts = match parse_args() {
-        Ok(o) => o,
-        Err(e) => {
-            eprintln!("error: {}", e);
-            return 101;
-        }
-    };
+fn prepare(t: &Tests, opts: &Opts) -> (Arc<Vec<Desc>>, usize) {
     let mut all: Vec<Desc> = Vec::with_capacity(t.len);
     for i in 0..t.len {
         let x = unsafe { &*t.tests.add(i) };
         all.push(Desc {
+            index: i,
             name: unsafe { text(x.name, x.name_len) },
             run: x.run,
             start: x.start,
@@ -217,27 +272,27 @@ fn run(t: &Tests) -> i32 {
             d.ignore = false;
         }
     }
+    for d in &all { unsafe { (*t.tests.add(d.index)).eligible = 1; } }
     let filtered_out = total - all.len();
     all.sort_by(|a, b| a.name.cmp(&b.name));
-    if opts.list {
-        for d in &all {
-            println!("{}: test", d.name);
-        }
-        if !opts.quiet {
-            println!();
-            println!("{} tests, 0 benchmarks", all.len());
-        }
-        return 0;
+    (Arc::new(all), filtered_out)
+}
+
+fn run(t: &mut Tests, opts: &Opts, descs: Arc<Vec<Desc>>, filtered_out: usize) -> i32 {
+    let selected: Vec<usize> = (0..descs.len()).filter(|&i| unsafe { (*t.tests.add(descs[i].index)).selected != 0 }).collect();
+    if t.verbose != 0 {
+        let names: Vec<&str> = selected.iter().map(|&i| descs[i].name.as_str()).collect();
+        eprintln!("makepad test selection: selected={:?}", names);
     }
     let started = crate::time::Instant::now();
     println!();
-    println!("running {} test{}", all.len(), if all.len() == 1 { "" } else { "s" });
+    println!("running {} test{}", selected.len(), if selected.len() == 1 { "" } else { "s" });
     let mut passed = 0usize;
     let mut ignored = 0usize;
     let mut failures: Vec<(String, Option<String>)> = Vec::new();
     // libtest formatters/terse.rs: the tests reported so far and the characters on this line
     let (mut test_count, mut test_column) = (0usize, 0usize);
-    let total_count = all.len();
+    let total_count = selected.len();
     // libtest's pretty formatter names the mode of a `#[should_panic]` test
     let mut report = |name: &str, should_panic: bool, o: Outcome, failures: &mut Vec<(String, Option<String>)>| {
         let mode = if should_panic { " - should panic" } else { "" };
@@ -280,55 +335,77 @@ fn run(t: &Tests) -> i32 {
         }
     };
     // libtest run_tests: up to `threads` tests at once, each on a thread named after it
-    let descs: Arc<Vec<Desc>> = Arc::new(all);
     let (tx, rx) = mpsc::channel::<(usize, Outcome)>();
-    let next = Arc::new(Mutex::new(0usize));
+    let mut next = 0;
     let mut running = 0usize;
     let mut done = 0usize;
-    let n = descs.len();
-    let spawn = |i: usize, running: &mut usize| {
+    let n = selected.len();
+    let live = t.next != 0;
+    let fault = t.fault;
+    let reach = t.reach;
+    let verbose = t.verbose != 0;
+    let mut threads = Vec::new();
+    let mut spawn_ms = 0.0;
+    let mut report_ms = 0.0;
+    let mut spawn = |i: usize, running: &mut usize| {
         let d = descs.clone();
-        let tx = tx.clone();
+        let thread_tx = tx.clone();
         let name = d[i].name.clone();
+        let launched = verbose.then(crate::time::Instant::now);
         let h = crate::thread::Builder::new().name(name).spawn(move || {
-            let o = run_one(&d[i]);
-            let _ = tx.send((i, o));
+            let run = || {
+                if let Some(launched) = launched {
+                    eprintln!("makepad test timing: test={:?} thread_start_ms={:.3}", d[i].name, launched.elapsed().as_secs_f64() * 1000.0);
+                }
+                run_one(&d[i], fault, reach, verbose)
+            };
+            // A panic before recording must finish the run with unknown reach.
+            let o = if live {
+                match crate::panic::catch_unwind(crate::panic::AssertUnwindSafe(run)) {
+                    Ok(o) => o,
+                    Err(_) => Outcome::Failed(Some(String::from("test thread panicked outside the test body"))),
+                }
+            } else { run() };
+            let _ = thread_tx.send((i, o));
         });
+        if let Some(launched) = launched { spawn_ms += launched.elapsed().as_secs_f64() * 1000.0; }
         match h {
-            Ok(_) => *running += 1,
-            Err(_) => {
-                let o = run_one(&descs[i]);
-                let _ = tx.send((i, o));
+            Ok(h) => { if live { threads.push(h); } *running += 1; }
+            Err(e) => {
+                let _ = tx.send((i, Outcome::Failed(Some(format!("could not spawn test thread: {}", e)))));
                 *running += 1;
             }
         }
     };
     while done < n {
         while running < opts.threads {
-            let i = {
-                let mut g = next.lock().unwrap();
-                if *g >= n {
-                    break;
-                }
-                // ignored tests are reported without running
-                while *g < n && descs[*g].ignore {
-                    let k = *g;
-                    *g += 1;
-                    let _ = tx.send((k, Outcome::Ignored));
-                    running += 1;
-                }
-                if *g >= n {
-                    break;
-                }
-                *g += 1;
-                *g - 1
-            };
+            if next == n { break; }
+            let i = selected[next];
+            next += 1;
+            if descs[i].ignore {
+                let _ = tx.send((i, Outcome::Ignored));
+                running += 1;
+                continue;
+            }
             spawn(i, &mut running);
         }
         let Ok((i, o)) = rx.recv() else { break };
         running -= 1;
         done += 1;
+        if live {
+            unsafe { (*t.tests.add(descs[i].index)).result = match &o { Outcome::Ok => 1, Outcome::Failed(_) => 2, Outcome::Ignored => 3 }; }
+        }
+        let reporting = verbose.then(crate::time::Instant::now);
         report(&descs[i].name, descs[i].should_panic != 0, o, &mut failures);
+        if let Some(reporting) = reporting { report_ms += reporting.elapsed().as_secs_f64() * 1000.0; }
+    }
+    // A live patch must not race the previous run's thread-local destructors.
+    let joined = verbose.then(crate::time::Instant::now);
+    let join_count = threads.len();
+    for thread in threads { let _ = thread.join(); }
+    if let Some(joined) = joined {
+        eprintln!("makepad test timing: tests={} spawn_ms={:.3} report_ms={:.3} joins={} join_ms={:.3} capture=false new_domains=0 isolates=0",
+            selected.len() - ignored, spawn_ms, report_ms, join_count, joined.elapsed().as_secs_f64() * 1000.0);
     }
     // (terse: the line of characters ends with the next section's leading newline)
     let ok = failures.is_empty();

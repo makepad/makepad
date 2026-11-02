@@ -48,7 +48,7 @@ CREATE TABLE search_alias_postings(term TEXT NOT NULL, asset_id BLOB NOT NULL, w
     let out = sqlite3(&path, &format!(".mode quote\n.headers off\n.separator |\n{cli_sql};\n"));
     assert_eq!(
         ours.to_quoted_lines(),
-        out.lines().map(|l| l.to_string()).collect::<Vec<_>>(),
+        quote_mode_lines(&out),
         "the store's search query must return exactly what sqlite3 returns"
     );
     assert_eq!(ours.rows.len(), 2);
@@ -123,10 +123,7 @@ fn inline(sql: &str, literals: &[&str]) -> String {
 }
 
 fn ask_cli(path: &std::path::Path, sql: &str) -> Vec<String> {
-    sqlite3(path, &format!(".mode quote\n.headers off\n.separator |\n{sql};\n"))
-        .lines()
-        .map(|l| l.to_string())
-        .collect()
+    quote_mode_lines(&sqlite3(path, &format!(".mode quote\n.headers off\n.separator |\n{sql};\n")))
 }
 
 #[test]

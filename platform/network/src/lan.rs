@@ -22,6 +22,34 @@
 use std::net::{IpAddr, SocketAddr};
 use std::sync::OnceLock;
 
+#[derive(Clone, Copy)]
+struct ConnectPolicy {
+    host: fn(&str, &str) -> std::io::Result<()>,
+    addr: fn(&str, SocketAddr) -> std::io::Result<()>,
+}
+
+thread_local! {
+    static CONNECT_POLICIES: std::cell::RefCell<Vec<ConnectPolicy>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Apply additional checks to synchronous transports that connect through this module,
+/// including TLS and WebSocket handshakes. Nested policies all apply; none escape the call.
+pub fn with_connect_policy<T>(
+    host: fn(&str, &str) -> std::io::Result<()>,
+    addr: fn(&str, SocketAddr) -> std::io::Result<()>,
+    connect: impl FnOnce() -> T,
+) -> T {
+    struct Restore;
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            CONNECT_POLICIES.with(|policies| { let _ = policies.borrow_mut().pop(); });
+        }
+    }
+    CONNECT_POLICIES.with(|policies| policies.borrow_mut().push(ConnectPolicy { host, addr }));
+    let _restore = Restore;
+    connect()
+}
+
 /// Whether this process may use the local network (see the module rule). Read once.
 pub fn allowed() -> bool {
     static ALLOWED: OnceLock<bool> = OnceLock::new();
@@ -93,6 +121,7 @@ pub fn check(site: &str, addr: SocketAddr) -> std::io::Result<()> {
 /// `TcpStream::connect_timeout` behind [`check`]: THE outgoing TCP connect of any client that
 /// may be pointed at a LAN host (fleet nodes, pinned hubs, the asset server).
 pub fn connect_timeout(site: &str, addr: &SocketAddr, timeout: std::time::Duration) -> std::io::Result<std::net::TcpStream> {
+    connect_policy_addr(site, *addr)?;
     check(site, *addr)?;
     std::net::TcpStream::connect_timeout(addr, timeout)
 }
@@ -100,20 +129,60 @@ pub fn connect_timeout(site: &str, addr: &SocketAddr, timeout: std::time::Durati
 /// Resolve `host:port` and connect to the first address that answers, every address behind
 /// [`check`] (`timeout` per address; `None` = the OS's own).
 pub fn connect_host(site: &str, host: &str, port: u16, timeout: Option<std::time::Duration>) -> std::io::Result<std::net::TcpStream> {
+    connect_host_with(site, host, port, timeout, check_host, check)
+}
+
+fn connect_host_with(
+    site: &str,
+    host: &str,
+    port: u16,
+    timeout: Option<std::time::Duration>,
+    host_check: fn(&str, &str) -> std::io::Result<()>,
+    addr_check: fn(&str, SocketAddr) -> std::io::Result<()>,
+) -> std::io::Result<std::net::TcpStream> {
     use std::net::ToSocketAddrs;
-    check_host(site, host)?;
+    connect_policy_host(site, host)?;
+    host_check(site, host)?;
     let mut last = None;
     for addr in (host.trim_start_matches('[').trim_end_matches(']'), port).to_socket_addrs()? {
-        let attempt = match timeout {
-            Some(timeout) => connect_timeout(site, &addr, timeout),
-            None => check(site, addr).and_then(|_| std::net::TcpStream::connect(addr)),
-        };
+        let attempt = connect_policy_addr(site, addr).and_then(|_| addr_check(site, addr)).and_then(|_| match timeout {
+            Some(timeout) => std::net::TcpStream::connect_timeout(&addr, timeout),
+            None => std::net::TcpStream::connect(addr),
+        });
         match attempt {
             Ok(tcp) => return Ok(tcp),
             Err(e) => last = Some(e),
         }
     }
     Err(last.unwrap_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no address")))
+}
+
+fn connect_policy_host(site: &str, host: &str) -> std::io::Result<()> {
+    CONNECT_POLICIES.with(|policies| {
+        policies.borrow().iter().try_for_each(|policy| (policy.host)(site, host))
+    })
+}
+
+fn connect_policy_addr(site: &str, addr: SocketAddr) -> std::io::Result<()> {
+    CONNECT_POLICIES.with(|policies| {
+        policies.borrow().iter().try_for_each(|policy| (policy.addr)(site, addr))
+    })
+}
+
+/// The Android socket factory owns DNS/TLS on the Java side. Check names before
+/// handing them over, and check resolved destinations against the caller's policy.
+#[cfg(target_os = "android")]
+pub(crate) fn check_platform_connect(site: &str, host: &str, port: &str) -> std::io::Result<()> {
+    use std::net::ToSocketAddrs;
+    connect_policy_host(site, host)?;
+    check_host(site, host)?;
+    let port: u16 = port.parse().map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "bad port"))?;
+    let bare = host.trim_start_matches('[').trim_end_matches(']');
+    for addr in (bare, port).to_socket_addrs()? {
+        connect_policy_addr(site, addr)?;
+        check(site, addr)?;
+    }
+    Ok(())
 }
 
 /// [`check`] for a host name or literal (before resolving it).
@@ -130,6 +199,10 @@ pub fn check_host(site: &str, host: &str) -> std::io::Result<()> {
 /// [`check_host`] for the host of a URL (`scheme://[user@]host[:port]/...`), before a platform
 /// HTTP stack (NSURLSession, WinHTTP) resolves and connects it.
 pub fn check_url(site: &str, url: &str) -> std::io::Result<()> {
+    check_url_with(site, url, check_host)
+}
+
+fn check_url_with(site: &str, url: &str, host_check: fn(&str, &str) -> std::io::Result<()>) -> std::io::Result<()> {
     let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
     let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
     let authority = authority.rsplit_once('@').map_or(authority, |(_, host)| host);
@@ -141,7 +214,7 @@ pub fn check_url(site: &str, url: &str) -> std::io::Result<()> {
     if host.is_empty() {
         return Ok(());
     }
-    check_host(site, host)
+    host_check(site, host)
 }
 
 /// For LAN-only services (discovery listeners, beacons, room directories, voice links): may
@@ -150,6 +223,81 @@ pub fn service(site: &str) -> bool {
     let ok = allowed();
     audit(site, "lan service", true, ok);
     ok
+}
+
+/// A hub's LAN service needs a fleet-server role or the user setting, plus process LAN permission.
+pub fn hub_service(site: &str) -> bool {
+    let on = crate::netconfig::hub_networked();
+    let ok = hub_service_with(on, || service(site));
+    hub_audit(site, "lan service", true, ok, on);
+    ok
+}
+
+fn hub_service_with(on: bool, service: impl FnOnce() -> bool) -> bool {
+    on && service()
+}
+
+/// User-machine hub connections keep loopback and routed addresses available with the setting off.
+pub fn hub_check(site: &str, addr: SocketAddr) -> std::io::Result<()> {
+    let on = crate::netconfig::hub_networked();
+    let local = is_local_network(addr.ip());
+    let result = hub_check_with(site, addr, on, || check(site, addr));
+    hub_audit(site, &addr.to_string(), local, result.is_ok(), on);
+    result
+}
+
+fn hub_check_with(site: &str, addr: SocketAddr, on: bool, check: impl FnOnce() -> std::io::Result<()>) -> std::io::Result<()> {
+    hub_permission(site, &addr.to_string(), is_local_network(addr.ip()), on).and_then(|_| check())
+}
+
+pub fn hub_connect_timeout(site: &str, addr: &SocketAddr, timeout: std::time::Duration) -> std::io::Result<std::net::TcpStream> {
+    hub_check(site, *addr)?;
+    connect_timeout(site, addr, timeout)
+}
+
+pub fn hub_connect_host(site: &str, host: &str, port: u16, timeout: Option<std::time::Duration>) -> std::io::Result<std::net::TcpStream> {
+    connect_host_with(site, host, port, timeout, hub_check_host, hub_check)
+}
+
+/// Check before name resolution, so a `.local` name cannot trigger mDNS while off.
+pub fn hub_check_host(site: &str, host: &str) -> std::io::Result<()> {
+    let on = crate::netconfig::hub_networked();
+    let local = !may_reach_host_when_off(host);
+    let result = hub_permission(site, host, local, on).and_then(|_| check_host(site, host));
+    hub_audit(site, host, local, result.is_ok(), on);
+    result
+}
+
+pub fn hub_check_url(site: &str, url: &str) -> std::io::Result<()> {
+    check_url_with(site, url, hub_check_host)
+}
+
+pub fn hub_may_reach_host(host: &str) -> bool {
+    may_reach_host_when_off(host) || (crate::netconfig::hub_networked() && may_reach_host(host))
+}
+
+/// Wildcard and other non-loopback listeners expose the hub to peers.
+pub fn hub_bind_ok(addr: SocketAddr) -> bool {
+    let on = crate::netconfig::hub_networked();
+    let local = !addr.ip().to_canonical().is_loopback();
+    let ok = hub_bind_ok_with(addr, on);
+    hub_audit("ai-hub bind", &addr.to_string(), local, ok, on);
+    ok
+}
+
+fn hub_bind_ok_with(addr: SocketAddr, on: bool) -> bool {
+    addr.ip().to_canonical().is_loopback() || on
+}
+
+fn hub_permission(site: &str, target: &str, local: bool, on: bool) -> std::io::Result<()> {
+    if local && !on {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("{site}: {target} needs Networked AI hub ({} = on in network.conf) (this is a user machine; toggle in runner Settings or set {} = server for a fleet node)", crate::netconfig::NETWORKED_AI_HUB_KEY, crate::netconfig::AI_HUB_ROLE_KEY),
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 fn refusal(site: &str, target: &str) -> std::io::Error {
@@ -171,16 +319,75 @@ fn may_reach_host_when_off(host: &str) -> bool {
 
 /// `[net-audit] lan allow-lan|refuse|pass <site> <target>`: `pass` = not the local network.
 fn audit(site: &str, target: &str, local: bool, ok: bool) {
+    audit_rule("lan", site, target, local, ok, "");
+}
+
+fn hub_audit(site: &str, target: &str, local: bool, ok: bool, on: bool) {
+    if crate::socket_audit::enabled() {
+        let role = match crate::netconfig::hub_role() {
+            crate::netconfig::HubRole::FleetServer => "fleet-server",
+            crate::netconfig::HubRole::UserMachine => "user",
+        };
+        let setting = if crate::netconfig::networked_ai_hub() { "on" } else { "off" };
+        let networked = if on { "on" } else { "off" };
+        audit_rule("hub", site, target, local, ok, &format!(" networked_ai_hub={setting} role={role} hub_networked={networked}"));
+    }
+}
+
+fn audit_rule(rule: &str, site: &str, target: &str, local: bool, ok: bool, setting: &str) {
     if crate::socket_audit::enabled() {
         crate::socket_audit::start_if_enabled();
         let verdict = if !ok { "refuse" } else if local { "allow-lan" } else { "pass" };
-        eprintln!("[net-audit] lan {verdict} {site} {target}");
+        eprintln!("[net-audit] {rule} {verdict} {site} {target}{setting}");
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hub_roles_with_user_setting_off() {
+        use crate::netconfig::{hub_networked_from, HubRole};
+
+        let wildcard = SocketAddr::from((std::net::Ipv4Addr::UNSPECIFIED, 8123));
+        let loopback = SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 8123));
+        let lan = SocketAddr::from((std::net::Ipv4Addr::BROADCAST, 8123));
+        for role in [HubRole::FleetServer, HubRole::UserMachine] {
+            let server = role == HubRole::FleetServer;
+            let on = hub_networked_from(server, || false);
+            assert_eq!(hub_bind_ok_with(wildcard, on), server);
+            assert_eq!(hub_bind_ok_with(lan, on), server);
+            assert!(hub_bind_ok_with(loopback, on));
+            assert_eq!(hub_service_with(on, || true), server);
+            assert!(!hub_service_with(on, || false));
+            let result = hub_check_with("test", lan, on, || Ok(()));
+            assert_eq!(result.is_ok(), server);
+            if let Err(error) = result {
+                assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+                assert!(error.to_string().contains("this is a user machine"));
+            }
+            assert!(hub_check_with("test", loopback, on, || Ok(())).is_ok());
+            assert!(hub_check_with("test", lan, on, || Err(refusal("test", "LAN"))).is_err());
+        }
+    }
+
+    #[test]
+    fn hub_off_refuses_lan_before_connect_or_resolution() {
+        for host in ["10.77.0.76", "192.168.77.2", "224.0.0.251", "hub.local", "HUB.LOCAL.", "fd00::1", "::ffff:192.168.77.2"] {
+            let error = hub_permission("test", host, !may_reach_host_when_off(host), false).unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+            assert!(error.to_string().contains(crate::netconfig::NETWORKED_AI_HUB_KEY));
+            if let Ok(ip) = host.parse::<IpAddr>() {
+                assert!(hub_permission("test", host, is_local_network(ip), false).is_err());
+            }
+            assert!(hub_permission("test", host, !may_reach_host_when_off(host), true).is_ok());
+        }
+        for host in ["127.0.0.1", "::1", "8.8.8.8", "203.0.113.1"] {
+            assert!(hub_permission("test", host, !may_reach_host_when_off(host), false).is_ok());
+            assert!(hub_permission("test", host, is_local_network(host.parse().unwrap()), false).is_ok());
+        }
+    }
 
     #[test]
     fn hidden_is_off_unless_opted_in_and_zero_forces_off() {
@@ -197,9 +404,9 @@ mod tests {
     fn url_hosts() {
         // the rule's answer for a visible test process: LAN on, so every url passes
         if allowed() {
-            assert!(check_url("t", "https://192.0.2.76:8123/health").is_ok());
+            assert!(check_url("t", "https://10.77.0.76:8123/health").is_ok());
         } else {
-            assert!(check_url("t", "https://192.0.2.76:8123/health").is_err());
+            assert!(check_url("t", "https://10.77.0.76:8123/health").is_err());
             assert!(check_url("t", "http://[fd00::1]:80/").is_err());
             assert!(check_url("t", "http://studio.local/x").is_err());
         }
@@ -210,7 +417,7 @@ mod tests {
 
     #[test]
     fn local_network_addresses() {
-        for ip in ["192.0.2.76", "198.51.100.22", "203.0.113.10", "169.254.1.1", "255.255.255.255", "224.0.0.251", "fd00::1", "fe80::1", "ff02::fb", "::ffff:192.0.2.16"] {
+        for ip in ["10.77.0.76", "192.168.77.2", "172.16.77.1", "169.254.1.1", "255.255.255.255", "224.0.0.251", "fd00::1", "fe80::1", "ff02::fb", "::ffff:10.77.0.1"] {
             assert!(is_local_network(ip.parse().unwrap()), "{ip}");
         }
         for ip in ["127.0.0.1", "::1", "8.8.8.8", "203.0.113.1", "172.32.0.1", "2001:db8::1", "0.0.0.0"] {

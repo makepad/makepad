@@ -4,6 +4,7 @@
 //! before. Virtual files are read-only, unless the run has an edits folder (MAKEPAD_RUN_EDITS, compiler
 //! vfs.rs): then a write into a virtual folder goes to that folder on disk (`edit_target`).
 
+use alloc::borrow::Cow;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -35,9 +36,12 @@ pub(crate) enum Edit {
 /// The disk path a write into the virtual `path` goes to (Some(Err) when it cannot be
 /// written); None when `path` is not virtual (the disk, as given).
 pub(crate) fn edit_target(path: &Path, how: Edit) -> Option<io::Result<PathBuf>> {
-    let abs = absolute(path).unwrap_or_else(|| path.to_path_buf());
-    kind_abs(&abs)?;
-    let b = key(&abs);
+    let abs = match absolute(path) {
+        Some(abs) => Cow::Owned(abs),
+        None => Cow::Borrowed(path),
+    };
+    kind_abs(&*abs)?;
+    let b = key(&*abs);
     let (mut p, mut n) = (core::ptr::null(), 0usize);
     let id = unsafe { relax_vfs_edit(b.as_ptr(), b.len(), how as u32, &mut p, &mut n) };
     Some(match take(id, p, n) {
@@ -94,9 +98,12 @@ fn kind_abs(path: &Path) -> Option<Kind> {
 }
 
 /// None: the disk; Some((absolute path, kind)): a virtual path.
-pub(crate) fn kind(path: &Path) -> Option<(PathBuf, Kind)> {
-    let abs = absolute(path).unwrap_or_else(|| path.to_path_buf());
-    let k = kind_abs(&abs)?;
+pub(crate) fn kind(path: &Path) -> Option<(Cow<'_, Path>, Kind)> {
+    let abs = match absolute(path) {
+        Some(abs) => Cow::Owned(abs),
+        None => Cow::Borrowed(path),
+    };
+    let k = kind_abs(&*abs)?;
     Some((abs, k))
 }
 

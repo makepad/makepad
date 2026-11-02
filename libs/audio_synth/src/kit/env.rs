@@ -3,7 +3,10 @@
 //! Advanced a block at a time (its level is ramped across the block by
 //! whoever reads it).
 
+use super::analog::eg::{Eg, EgBlock, EgStage};
 use super::schema::{Builder, Unit::{self, Percent, Secs}, Values};
+
+pub const MODELS: &[&str] = &["curve", "analog"];
 
 #[derive(Clone, Debug, Default)]
 pub struct EnvIx {
@@ -16,6 +19,9 @@ pub struct EnvIx {
     pub a_curve: usize,
     pub d_curve: usize,
     pub r_curve: usize,
+    pub model: usize,
+    pub drift: usize,
+    pub slow_gate: usize,
 }
 
 /// Declare envelope `n` (1-based): keys `env1_attack` …; `amp` makes the
@@ -33,6 +39,9 @@ pub fn declare(b: &mut Builder, n: usize, amp: bool) -> EnvIx {
         a_curve: b.num(k("a_curve"), "a curve", -1.0, 1.0, 0.0, Unit::None, ""),
         d_curve: b.num(k("d_curve"), "d curve", -1.0, 1.0, -0.6, Unit::None, ""),
         r_curve: b.num(k("r_curve"), "r curve", -1.0, 1.0, -0.6, Unit::None, ""),
+        model: b.choice(k("model"), "model", MODELS, 0, "curve: the times are segment lengths, shaped by the curves. analog: the chip's true RC segments; attack, decay and release are time constants (the attack reaches its peak in 1.47 of its time, charging towards 1.3), delay, hold and curves unused, legato gates rise to the sustain level"),
+        drift: b.num(k("drift"), "drift", 0.0, 1.0, 0.5, Percent, "analog: the part's error, 0 ideal, 0.5 typical, 1 worst"),
+        slow_gate: b.flag(k("slow_gate"), "slow gate", false, "analog: a gate without a trigger rises at the decay rate, not at once"),
     }
 }
 
@@ -69,6 +78,9 @@ pub struct EnvBlock {
     pub sustain: f32,
     pub release: f32,
     pub curves: [f32; 3],
+    pub analog: bool,
+    pub drift: f32,
+    pub slow_gate: bool,
 }
 
 impl EnvBlock {
@@ -82,6 +94,9 @@ impl EnvBlock {
             sustain: v.val(x.sustain).clamp(0.0, 1.0),
             release: v.val(x.release) * scale,
             curves: [v.val(x.a_curve), v.val(x.d_curve), v.val(x.r_curve)],
+            analog: v.index(x.model) == 1,
+            drift: v.val(x.drift),
+            slow_gate: v.on(x.slow_gate),
         }
     }
 }
@@ -92,11 +107,23 @@ pub struct Env {
     t: f32,
     level: f32,
     from: f32,
+    /// The analog model, gated alongside.
+    eg: Eg,
 }
 
 impl Env {
+    /// `seed`: the analog model's part.
+    pub fn new(seed: u32) -> Env {
+        Env { eg: Eg::new(seed), ..Env::default() }
+    }
+
     /// Gate on: from the start, or (`legato`, sounding) where it is.
     pub fn gate_on(&mut self, legato: bool) {
+        // Legato is a gate without a trigger.
+        self.eg.gate_up();
+        if !legato {
+            self.eg.trigger();
+        }
         if legato && self.stage != Stage::Idle && self.stage != Stage::Release {
             return;
         }
@@ -106,6 +133,7 @@ impl Env {
     }
 
     pub fn gate_off(&mut self) {
+        self.eg.gate_down();
         if self.stage != Stage::Idle && self.stage != Stage::Release {
             self.from = self.level;
             self.stage = Stage::Release;
@@ -114,7 +142,7 @@ impl Env {
     }
 
     pub fn kill(&mut self) {
-        *self = Env::default();
+        *self = Env::new(self.eg.seed);
     }
 
     pub fn level(&self) -> f32 {
@@ -131,6 +159,17 @@ impl Env {
 
     /// Move on `dt` seconds; the level at the end.
     pub fn advance(&mut self, e: &EnvBlock, dt: f32) -> f32 {
+        if e.analog {
+            let blk = EgBlock { attack: e.attack, decay: e.decay, release: e.release, sustain: e.sustain, slow_gate: e.slow_gate, drift: e.drift };
+            self.level = self.eg.advance(&blk, dt);
+            self.stage = match self.eg.stage {
+                EgStage::Idle => Stage::Idle,
+                EgStage::Attack => Stage::Attack,
+                EgStage::Settle | EgStage::Lift => Stage::Sustain,
+                EgStage::Release => Stage::Release,
+            };
+            return self.level;
+        }
         let mut dt = dt;
         // Walk through as many stages as the step crosses.
         for _ in 0..6 {

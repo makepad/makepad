@@ -71,6 +71,48 @@ static STATE: Mutex<State> = Mutex::new(State {
     last_end: f64::NEG_INFINITY,
 });
 
+/// Passes a client follows on its own (`watch`), beside the one consumer of
+/// `take_frames`: the name and the per-frame ms not taken yet.
+static WATCHED: Mutex<Vec<(String, Vec<f32>)>> = Mutex::new(Vec::new());
+
+/// Samples kept for a watcher that takes them late; older ones drop.
+const KEEP_WATCHED: usize = 240;
+
+/// Follow pass `name`: each finished frame that ran it adds its ms for
+/// `take_watched`. Turns the timer on.
+pub fn watch(name: &str) {
+    set_enabled(true);
+    if let Ok(mut w) = WATCHED.lock() {
+        if !w.iter().any(|e| e.0 == name) {
+            w.push((name.to_string(), Vec::new()));
+        }
+    }
+}
+
+/// The ms of a watched pass since the last call, oldest first.
+pub fn take_watched(name: &str) -> Vec<f32> {
+    let Ok(mut w) = WATCHED.lock() else { return Vec::new() };
+    w.iter_mut().find(|e| e.0 == name).map_or_else(Vec::new, |e| std::mem::take(&mut e.1))
+}
+
+fn note_watched(timing: &GpuFrameTiming, pass_count: usize) {
+    let Ok(mut w) = WATCHED.lock() else { return };
+    for (name, samples) in w.iter_mut() {
+        let mut sum = None;
+        for (pass, ms) in &timing.passes[..pass_count] {
+            if pass.strip_prefix("unpresented ").unwrap_or(pass) == name {
+                sum = Some(sum.unwrap_or(0.0) + *ms);
+            }
+        }
+        if let Some(ms) = sum {
+            if samples.len() >= KEEP_WATCHED {
+                samples.remove(0);
+            }
+            samples.push(ms);
+        }
+    }
+}
+
 /// Frames kept for a consumer that takes them late; older ones drop.
 const KEEP_FRAMES: usize = 240;
 /// Spans of frames that never finish (a pass outside any window) drop
@@ -157,6 +199,7 @@ pub fn finish_frame(frame: u64) {
         let sp = &open[i];
         (sp.1.as_str(), sp.2, sp.3, sp.0 != frame)
     }), &mut done[index].timing);
+    note_watched(&done[index].timing, done[index].pass_count);
     *last_end = spans.iter().fold(floor, |e, &i| e.max(open[i].3));
     if *done_len == KEEP_FRAMES {
         *done_head = (*done_head + 1) % KEEP_FRAMES;

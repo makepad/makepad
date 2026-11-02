@@ -1,6 +1,6 @@
 //! The platform's web runtime as ONE JavaScript module for a packed app,
 //! taken from the source tree at build time (never a copy kept here): the
-//! wasm bridge, the browser host (`web.js`) and its WebGL backend
+//! wasm bridge, the accessibility tree (`a11y.js`), the browser host (`web.js`) and its WebGL backend
 //! (`web_gl.js`) concatenated with their imports and exports resolved,
 //! minus the marked sections the app does not use (`// @section <name>`
 //! ... `// @end <name>` in those files; [`SECTIONS`]), plus the audio
@@ -12,7 +12,7 @@ use std::path::Path;
 
 /// The platform's JavaScript, in concatenation order (path from the
 /// source root).
-pub const RUNTIME_JS: [&str; 3] = ["libs/wasm_bridge/src/wasm_bridge.js", "platform/src/os/web/web.js", "platform/src/os/web/web_gl.js"];
+pub const RUNTIME_JS: [&str; 4] = ["libs/wasm_bridge/src/wasm_bridge.js", "platform/src/os/web/a11y.js", "platform/src/os/web/web.js", "platform/src/os/web/web_gl.js"];
 pub const AUDIO_WORKLET_JS: &str = "platform/src/os/web/audio_worklet.js";
 /// The worker a threaded build's threads run in (a module without imports).
 pub const WEB_WORKER_JS: &str = "platform/src/os/web/web_worker.js";
@@ -138,6 +138,10 @@ pub fn one_wasm_js(source_root: &Path, stripped: &[&str], wasm_name: &str) -> Re
     let mut stripped = stripped.to_vec();
     stripped.push("threads");
     let mut js = format!("// {wasm_name}.js: Makepad's web runtime and the page's start (one wasm).\n");
+    // The page ships only the code its traced runs reached, and those ran without the semantic
+    // accessibility mirror (the trace host starts the app with `a11y_enabled: false`): a page
+    // that turned it on would call into code the export left out.
+    js.push_str("globalThis.makepadA11yEnabled = false;\n");
     js.push_str(&runtime_body(source_root, &stripped)?);
     js.push_str(&start.replace("__WASM__", wasm_name));
     Ok(js)

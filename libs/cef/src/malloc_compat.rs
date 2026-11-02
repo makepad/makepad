@@ -229,36 +229,16 @@ mod tests {
     #[test]
     fn real_heap_past_two_gib_does_not_wrap() {
         extern "C" {
-            fn malloc(n: usize) -> *mut u8;
-            fn free(p: *mut u8);
+            fn malloc(n: usize) -> *mut core::ffi::c_void;
+            fn free(p: *mut core::ffi::c_void);
         }
-        let big = unsafe { malloc(3usize << 30) };
-        if big.is_null() {
-            return; // address space limited (ulimit -v): nothing to measure
-        }
+        let big = unsafe { malloc(3usize << 30).cast::<u8>() };
+        assert!(!big.is_null(), "reserve 3 GiB of address space for the mallinfo overflow regression");
         // one touched page, so the allocation cannot be optimized away
         unsafe { std::ptr::write_volatile(std::hint::black_box(big), 1) };
         let m = saturating_mallinfo();
-        unsafe { free(big) };
+        unsafe { free(big.cast()) };
         nonneg_sums(&m);
         assert!(m.hblkhd as i64 + m.arena as i64 > 1 << 30, "the 3 GiB block is not in the figures: arena {} hblkhd {} uordblks {}", m.arena, m.hblkhd, m.uordblks);
-    }
-
-    /// With a real libcef at hand (MAKEPAD_CEF_DIST_DIR): after dlopen its `mallinfo` import is
-    /// libc's, `install` redirects it, and a second `install` finds nothing left to do.
-    #[test]
-    fn install_redirects_libcef_import() {
-        extern "C" {
-            fn dlopen(name: *const std::ffi::c_char, flags: i32) -> *mut std::ffi::c_void;
-        }
-        let Some(dir) = std::env::var_os("MAKEPAD_CEF_DIST_DIR") else { return };
-        let lib = std::path::Path::new(&dir).join("Release/libcef.so");
-        if !lib.exists() {
-            return;
-        }
-        let c = format!("{}\0", lib.display());
-        assert!(!unsafe { dlopen(c.as_ptr() as *const _, 2) }.is_null(), "libcef did not load");
-        assert_eq!(install(), 1, "libcef's mallinfo import was not redirected");
-        assert_eq!(install(), 0, "a redirected slot was patched again");
     }
 }

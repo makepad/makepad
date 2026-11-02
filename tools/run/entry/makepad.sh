@@ -1,28 +1,34 @@
 #!/bin/sh
 # Makepad for macOS and Linux: gets Rust, compiles Makepad's loader (makepad run) from its source on
-# this computer and starts it. Read it before you run it; it is this one file.
+# this computer and starts the runner, with one compact JIT build progress line on a terminal
+# (plain progress lines every ten seconds otherwise). Cargo's full output stays in the build log.
+# Read it before you run it; it is this one file. Rust stays in its own folder; no system install.
 #
 #   curl -fsSL https://makepad.nl/runner/unix | sh
 #
-# 1. Rust 1.98.0 (rustc, cargo, rust-std) from static.rust-lang.org, fetched as 25 MB pieces
-#    over parallel connections, checked against the sizes and SHA-256 sums below.
+# 1. Use this folder's Rust if ready, else a suitable installed stable Rust (1.98.0 or newer).
+#    Otherwise get Rust 1.98.0 (rustc, cargo, rust-std) from static.rust-lang.org, fetched as
+#    25 MB pieces over parallel connections, checked against the sizes and SHA-256 sums below.
 # 2. At the same time, the loader's source: a ZIP the service's latest licence-free `runner`
 #    release names (size and SHA-256 checked before unpacking), cut from the same Makepad commit as
 #    the runner, so the two always fit; and, with no arguments, the packs of the runner's git
 #    repositories, which makepad run takes instead of downloading them itself.
-# 3. The loader is compiled for this computer's processor (`cargo build --profile host --offline`:
+# 3. The loader and its tiny app launcher are compiled for this computer's processor (`cargo build --profile host --offline`:
 #    the ZIP holds every crate) the moment Rust and the source are in place, and started with no
 #    arguments: it runs the runner, which downloads the rest. With arguments, the loader runs with
-#    them instead. A new loader release replaces only the files that changed, so only their crates
-#    compile again.
+#    them instead. The loader ZIP's SHA-256 keys .version and, after a successful build,
+#    .loader-sha256; .built also records Rust and the target triple. An unchanged ZIP reuses the
+#    source; matching SHA and Rust stamps reuse the binary. A changed ZIP replaces only the files
+#    that changed, so only their crates compile again. Under cache/loader, current selects src or
+#    a commit folder; pending rolls back to previous if the new runner did not confirm its boot.
 #
 # In its folder it creates rust/ (the toolchain), cache/ (downloads, the loader, its caches and
 # logs), apps/ (what `makepad` and `makepad app <id>` run: the runner's and each app's launch
 # record), runner/ (the runner's own state: licence, catalog, launch logs) and target/ (what makepad
 # run builds for the apps: build scripts, unit graphs, code cache). The folder is this
 # file's own when it holds nothing else (or is an installation already), else ~/makepad-runner
-# (piped into sh, or saved among other downloads); $MAKEPAD_LOADER_ROOT overrides. Run it again at any time: nothing is
-# downloaded or compiled twice. The system needs a C linker (Apple's command line tools; on
+# (piped into sh, or saved among other downloads); $MAKEPAD_LOADER_ROOT overrides. Run it again to
+# update and start, reusing downloads and compiled crates. The system needs a C linker (Apple's command line tools; on
 # Linux cc) and, on Linux, OpenSSL 3's development files; it names the packages when missing.
 set -u
 umask 022
@@ -34,23 +40,11 @@ piece=25000000
 service=${MAKEPAD_LOADER_SERVICE:-https://makepad.nl/api/loader}
 service=${service%/}
 
-# --- The screen ---------------------------------------------------------------------------
-# The Builder's look: header, one row per step, a rule, a status line and a footer, in plain
-# terminal colours (bold title, dim secondary text, orange for work in progress, green checks).
-# Rows are rewritten in place on a terminal; anywhere else each change is one plain line.
-if [ -t 1 ] && [ "${TERM:-dumb}" != dumb ]; then
-    tty=1
-    E=$(printf '\033')
-    B="$E[0;1m" D="$E[0;2m" C="$E[0;38;2;255;92;57m" G="$E[0;32m" Y="$E[0;33m" R="$E[0;31m" N="$E[0m"
-else
-    tty= E= B= D= C= G= Y= R= N=
-fi
-rule='────────────────────────────────────────────────────────────────────────────'
-framed=
+# --- Progress and jobs --------------------------------------------------------------------
 logs=
 jobs=
-shown=
 
+say() { printf '  %s\n' "$1"; }
 now() { date +%s; }
 # stamp NAME appends "NAME HH:MM:SS.cc" to the timing log
 stamp() {
@@ -59,75 +53,30 @@ stamp() {
     case "$t" in *N) t=${t%.N} ;; *) t=$(printf '%s' "$t" | cut -c1-11) ;; esac
     printf '%s %s\n' "$1" "$t" >> "$logs/bootstrap.log"
 }
-# row N NAME TEXT [KEY]: TEXT after the name column on screen row N; off a terminal the line is
-# printed when KEY (default TEXT) changed, so progress shows in steps, not every second
-row() {
-    [ -n "$framed" ] || return 0
-    if [ -n "$tty" ]; then
-        printf '%s[%s;1H%s[2K  %-20s%s' "$E" "$1" "$E" "$2" "$3"
-    else
-        eval "last=\${last_$1:-}"
-        [ "$last" = "${4:-$3}" ] && return 0
-        eval "last_$1=\${4:-\$3}"
-        printf '  %-20s%s\n' "$2" "$3"
-    fi
-}
-status() {
-    [ -n "$framed" ] || return 0
-    if [ -n "$tty" ]; then printf '%s[11;1H%s[2K  %s' "$E" "$E" "$1"
-    elif [ "${last_status:-}" != "$1" ]; then last_status=$1; printf '  %s\n' "$1"; fi
-}
-footer() {
-    [ -n "$framed" ] && [ -n "$tty" ] || return 0
-    printf '%s[13;1H%s[2K  %s%s%s' "$E" "$E" "$D" "$1" "$N"
-}
-frame() {
-    framed=1
-    [ -z "$tty" ] || printf '%s[H%s[2J' "$E" "$E"
-    printf '\n  %sMakepad%s › Getting started\n  %sShipped as source code, so your coding agent can customize everything.%s\n\n' "$B" "$N" "$D" "$N"
-    if [ -n "$need_rust" ]; then row 5 "Rust $rust_version" "${D}○ downloads first$N"; else row 5 "Rust $rust_version" "$G✓$N ready"; fi
-    if [ -n "$need_zip" ]; then row 6 "Loader source" "${D}○ downloads with Rust$N"; else row 6 "Loader source" "$G✓$N here"; fi
-    row 7 "Makepad's loader" "${D}○ compiles once Rust is here$N"
-    row 8 "Makepad" "$D○$N"
-    [ -z "$tty" ] || printf '%s[10;1H%s[2K  %s%s%s' "$E" "$E" "$D" "$rule" "$N"
-    status "Setting up this folder once; nothing outside it changes."
-    footer "working · ctrl+c stops"
-}
-# below the frame, for whatever is printed after it
-leave() { [ -z "$framed" ] || [ -z "$tty" ] || printf '%s[14;1H\n' "$E"; }
-# bar DONE TOTAL sets BAR (24 cells)
-bar() {
-    filled=0
-    [ "$2" -gt 0 ] && filled=$(($1 * 24 / $2))
-    [ "$filled" -le 24 ] || filled=24
-    done_bar= left_bar= i=1
-    while [ $i -le 24 ]; do
-        if [ $i -le "$filled" ]; then done_bar="$done_bar━"; else left_bar="$left_bar─"; fi
-        i=$((i + 1))
-    done
-    BAR="$C$done_bar$D$left_bar$N"
-}
 # the background jobs this script started (by PID), stopped when it fails or is stopped
 stop_jobs() {
     [ -n "$jobs" ] && [ -d "$jobs" ] || return 0
-    for job in fetch build run unpack-rustc unpack-rust-std unpack-cargo; do
-        [ "$job" = run ] && [ -n "$shown" ] && continue
+    for job in fetch build unpack-rustc unpack-rust-std unpack-cargo; do
         [ -f "$jobs/$job.pid" ] && [ ! -f "$jobs/$job.done" ] && kill "$(cat "$jobs/$job.pid")" 2>/dev/null
     done
     return 0
 }
-# fail MESSAGE: one red line, exit 1
+# fail MESSAGE [BUILD_LOG]: error and optional build-log excerpt on stderr, exit 1
 fail() {
     stamp failed
     stop_jobs
-    if [ -n "$framed" ] && [ -n "$tty" ]; then
-        printf '%s[11;1H%s[2K  %s✗%s %s%s[13;1H%s[2K%s[14;1H\n' "$E" "$E" "$R" "$N" "$1" "$E" "$E" "$E"
-    else
-        printf '\n  %s✗%s %s\n\n' "$R" "$N" "$1"
+    printf '  Error: %s\n' "$1" >&2
+    if [ $# -gt 1 ]; then
+        if grep -q '^error' "$2"; then
+            grep -n -B1 -A8 '^error' "$2" | tail -20 >&2
+        else
+            tail -20 "$2" >&2
+        fi
+        printf '  Full log: %s\n' "$2" >&2
     fi
     exit 1
 }
-trap 'stamp stopped; stop_jobs; leave; exit 130' INT TERM
+trap 'stamp stopped; stop_jobs; exit 130' INT TERM
 # job NAME COMMAND...: runs COMMAND in the background; its PID in jobs/NAME.pid, its exit code
 # in jobs/NAME.done when it ends
 job() {
@@ -143,11 +92,65 @@ job() {
     ) &
     while [ ! -f "$jobs/$name.pid" ]; do sleep 0.1 2>/dev/null || sleep 1; done
 }
-nap() { sleep 0.5 2>/dev/null || sleep 1; }
 sha256() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi; }
 size_of() { wc -c < "$1" | tr -d ' '; }
 # a path inside a double-quoted curl config value
 cfgq() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+# One-line pointers and stamps are published only after the whole line is written.
+atomic_line() { printf '%s\n' "$2" > "$1.part" && mv -f "$1.part" "$1"; }
+loader_folder_ready() {
+    case "$1" in
+        src) ;;
+        *[!0123456789abcdef]*) return 1 ;;
+        *) [ "${#1}" -eq 40 ] || return 1 ;;
+    esac
+    [ -f "$loader_root/$1/target/host/makepad" ]
+}
+
+# rust_check --probe MIN: read-only. Prints nothing; sets rust_sysroot, or
+# rust_reason. Only the toolchain's own binaries run, so no rustup proxy can
+# download or switch anything.
+rust_check() {
+    rust_reason= rust_sysroot=
+    rc_toolchain=$(cd / && unset RUSTUP_TOOLCHAIN && RUSTUP_AUTO_INSTALL=0 rustc --print sysroot 2>/dev/null) || { rust_reason='No installed Rust was found on PATH.'; return 1; }
+    [ -n "$rc_toolchain" ] || { rust_reason='No installed Rust was found on PATH.'; return 1; }
+    rc_min=$2
+    case "$rc_toolchain" in /*) ;; *) rust_reason='The recorded Rust location is not an absolute path.'; return 1 ;; esac
+    [ -d "$rc_toolchain" ] || { rust_reason="Rust is no longer installed at $rc_toolchain."; return 1; }
+    rc_toolchain=$(cd -P -- "$rc_toolchain" && pwd)
+    [ -x "$rc_toolchain/bin/rustc" ] || { rust_reason="No rustc in $rc_toolchain/bin."; return 1; }
+    rc_meta=$("$rc_toolchain/bin/rustc" --version --verbose 2>/dev/null) || { rust_reason="rustc in $rc_toolchain/bin does not run."; return 1; }
+    rc_version=$(printf '%s\n' "$rc_meta" | awk '$1 == "release:" { print $2 }')
+    rc_host=$(printf '%s\n' "$rc_meta" | awk '$1 == "host:" { print $2 }')
+    [ "$rc_host" = "$triple" ] || { rust_reason="Installed Rust is built for ${rc_host:-an unknown host}; Makepad needs $triple."; return 1; }
+    rc_status=0
+    version_at_least "$rc_version" "$rc_min" || rc_status=$?
+    case "$rc_status" in
+        0) ;;
+        1) rust_reason="Installed Rust $rc_version is not a stable release; Makepad needs $rc_min or newer."; return 1 ;;
+        *) rust_reason="Installed Rust $rc_version is older than $rc_min."; return 1 ;;
+    esac
+    [ -x "$rc_toolchain/bin/cargo" ] || { rust_reason='Installed Rust has no cargo beside rustc.'; return 1; }
+    rc_cargo=$("$rc_toolchain/bin/cargo" --version 2>/dev/null | awk '$1 == "cargo" { print $2 }') || :
+    version_at_least "${rc_cargo:-none}" "$rc_min" || { rust_reason="Installed cargo ${rc_cargo:-is unusable and} is older than $rc_min."; return 1; }
+    [ -d "$rc_toolchain/lib/rustlib/$triple/lib" ] || { rust_reason="Installed Rust has no standard library for $triple."; return 1; }
+    if [ "$(uname -s)" = Darwin ]; then
+        # Release builds strip through rustc's bundled rust-objcopy; report a
+        # copy that cannot load its LLVM library, never repair it.
+        "$rc_toolchain/lib/rustlib/$triple/bin/rust-objcopy" --version >/dev/null 2>&1 || { rust_reason="Installed Rust's rust-objcopy does not run; release builds could not be stripped."; return 1; }
+    fi
+    rust_sysroot=$rc_toolchain
+}
+# version_at_least ACTUAL MINIMUM: 0 when newer or equal, 1 when not a
+# stable x.y.z, 2 when older. Components compare as numbers.
+version_at_least() {
+    awk -v actual="$1" -v minimum="$2" 'BEGIN {
+        if (actual !~ /^[0-9]+[.][0-9]+[.][0-9]+$/) exit 1
+        split(actual, a, "."); split(minimum, b, ".")
+        for (i = 1; i <= 3; i++) { if (a[i] + 0 > b[i] + 0) exit 0; if (a[i] + 0 < b[i] + 0) exit 2 }
+        exit 0
+    }'
+}
 
 # --- Where, and what this computer has ------------------------------------------------------
 case "$0" in
@@ -164,8 +167,10 @@ fi
 if [ -n "$script_dir" ] && [ -z "${script_dir_other:-}" ]; then default_root=$script_dir; else default_root=$HOME/makepad-runner; fi
 root=${MAKEPAD_LOADER_ROOT:-$default_root}
 mkdir -p "$root" 2>/dev/null && root=$(cd -P -- "$root" && pwd -P) || fail "Cannot create the folder $root"
-rust=$root/rust
+rust_own=$root/rust
+rust=$rust_own
 cache=$root/cache
+loader_root=$cache/loader
 downloads=$cache/downloads
 logs_dir=$cache/logs
 jobs=$cache/jobs
@@ -200,17 +205,16 @@ case "$service" in
     https://*) proto='=https' ;;
     http://127.0.0.1:* | http://localhost:*) proto='=http,https' ;;
     # MAKEPAD_ALLOW_HTTP=1 (tests only): a plain-http release service on another machine
-    http://*) [ "${MAKEPAD_ALLOW_HTTP:-}" = 1 ] && proto='=http,https' || fail "The release service must be an https URL ${D}· $service$N" ;;
-    *) fail "The release service must be an https URL ${D}· $service$N" ;;
+    http://*) [ "${MAKEPAD_ALLOW_HTTP:-}" = 1 ] && proto='=http,https' || fail "The release service must be an https URL - $service" ;;
+    *) fail "The release service must be an https URL - $service" ;;
 esac
-command -v curl >/dev/null 2>&1 || fail "Makepad needs curl ${D}· install it, then run this again$N"
-command -v tar >/dev/null 2>&1 || fail "Makepad needs tar ${D}· install it, then run this again$N"
+command -v curl >/dev/null 2>&1 || fail "Makepad needs curl - install it, then run this again"
+command -v tar >/dev/null 2>&1 || fail "Makepad needs tar - install it, then run this again"
 
 # The system's linker (and on Linux OpenSSL's development files): named, never installed here.
 if [ "$(uname -s)" = Darwin ]; then
     if ! xcode-select -p >/dev/null 2>&1 || ! /usr/bin/xcrun --find ld >/dev/null 2>&1; then
-        xcode-select --install >/dev/null 2>&1 || :
-        fail "Makepad needs Apple's command line tools ${D}· their installer opens now; run this again when it has finished$N"
+        fail "Makepad needs Apple's command line tools - install them, then run this again"
     fi
 else
     missing=
@@ -224,13 +228,32 @@ else
         elif command -v pacman >/dev/null 2>&1; then cmd='sudo pacman -S --needed base-devel openssl'
         elif command -v zypper >/dev/null 2>&1; then cmd='sudo zypper install gcc libopenssl-devel'
         else cmd='a C compiler/linker and the OpenSSL 3 development package'; fi
-        fail "Makepad needs $missing ${D}· install it with: $cmd$N"
+        fail "Makepad needs $missing - install it with: $cmd"
     fi
 fi
-mkdir -p "$downloads" "$logs_dir" "$jobs" "$cache/loader" || fail "Cannot create $cache"
+mkdir -p "$downloads" "$logs_dir" "$jobs" "$loader_root" || fail "Cannot create $cache"
 logs=$logs_dir
 stamp start
 export MAKEPAD_RUN_HOME="$root"
+
+# Restore an unconfirmed switch before any decision about the loader already here.
+if [ -e "$loader_root/pending" ]; then
+    previous=$(cat "$loader_root/previous" 2>/dev/null)
+    loader_folder_ready "$previous" || previous=src
+    if [ "$previous" = src ]; then
+        rm -f "$loader_root/current" || fail "Cannot remove $loader_root/current"
+    else
+        atomic_line "$loader_root/current" "$previous" || fail "Cannot write $loader_root/current"
+    fi
+    atomic_line "$loader_root/rolled-back" 'the new runner did not confirm its first start' \
+        || fail "Cannot write $loader_root/rolled-back"
+    rm -f "$loader_root/pending" || fail "Cannot remove $loader_root/pending"
+    say "JIT: went back to $previous - the new runner did not confirm its first start"
+fi
+active=$(cat "$loader_root/current" 2>/dev/null)
+loader_folder_ready "$active" || active=src
+src=$loader_root/$active
+makepad=$src/target/host/makepad
 
 # --- The runner release, from the start ---------------------------------------------------------
 # The release service's latest licence-free `runner` release names the runner's git repositories
@@ -246,9 +269,9 @@ release_json=
 # With a loader and a runner here already, the release service gets a few seconds: offline or
 # unreachable, the folder's stores and loader start at once (makepad run runs the stored commits).
 meta="--retry 2 -m 60"
-if [ -f "$cache/loader/src/.built" ] && [ -f "$cache/runner/release" ]; then meta="--connect-timeout 3 -m 6"; fi
+if [ -f "$src/.built" ] && [ -f "$cache/runner/release" ]; then meta="--connect-timeout 3 -m 6"; fi
 mkdir -p "$cache/runner" "$cache/incoming"
-if [ $# -eq 0 ] || [ ! -f "$cache/loader/src/.built" ]; then
+if [ $# -eq 0 ] || [ ! -f "$src/.built" ]; then
     release_json=$(curl -fsS --proto "$proto" $meta "$service/public/app/runner/latest" 2>>"$logs/download.log") || release_json=
 fi
 runner_release=$(printf '%s' "$release_json" | sed -n 's/.*"release":"\([A-Za-z0-9_-]*\)".*/\1/p')
@@ -278,37 +301,44 @@ fi
 
 # --- What there is to do --------------------------------------------------------------------
 need_rust=
-[ "$(cat "$rust/.toolchain-version" 2>/dev/null)" = "$rust_version $triple" ] || need_rust=1
-[ -x "$rust/bin/cargo" ] && [ -x "$rust/bin/rustc" ] || need_rust=1
-# The loader for the runner release taken above: its Makepad commit names the version (the source
-# folder and the build follow it). Offline, or with arguments, the one compiled before.
-archive=$(printf '%s' "$release_json" | sed -n 's/.*"loader":{"name":"\([A-Za-z0-9_.-]*\)","bytes":\([0-9]*\),"sha256":"\([0-9a-f]*\)","commit":"\([0-9a-f]\{40\}\)"}.*/\1 \2 \3 \4/p')
-loader_version=$(printf '%s' "$archive" | cut -s -d' ' -f4)
-# One source folder for every version: an update replaces only the files that changed, so cargo
-# recompiles only the crates they belong to (target/ stays inside it: makepad finds its std two
-# levels above itself).
-src=$cache/loader/src
-[ -n "$loader_version" ] || loader_version=$(cat "$src/.version" 2>/dev/null)
-[ -n "$loader_version" ] || fail "Could not reach the release service ${D}($service)$N and no loader is here yet. ${D}Check the connection, then run this again.$N"
-makepad=$src/target/host/makepad
-built="$loader_version $rust_version $triple"
-need_build=
-[ -x "$makepad" ] && [ "$(cat "$src/.built" 2>/dev/null)" = "$built" ] || need_build=1
-# a loader compiled for another Makepad commit than the runner's does not run it: say so, once
-stale=
-if [ -n "$need_build" ] && [ -x "$makepad" ] && [ -f "$src/.built" ] && [ "$(cut -d' ' -f1 "$src/.built")" != "$loader_version" ]; then
-    stale=$(cut -d' ' -f1 "$src/.built" | cut -c1-10)
+rust_release=$rust_version
+if [ "$(cat "$rust_own/.toolchain-version" 2>/dev/null)" = "$rust_version $triple" ] \
+    && [ -x "$rust_own/bin/cargo" ] && [ -x "$rust_own/bin/rustc" ]; then
+    say "Rust: ready"
+elif rust_check --probe "$rust_version"; then
+    rust=$rust_sysroot
+    rust_release=$rc_version
+    say "Rust $rust_release: using the one installed at $rust"
+else
+    need_rust=1
+    [ "$rust_reason" = 'No installed Rust was found on PATH.' ] \
+        || say "Rust: $rust_reason Downloading $rust_version into this folder"
 fi
+# The loader ZIP's SHA-256 names the source version, independent of the runner's commit.
+# Offline, or with arguments, use the version recorded with the source already here.
+archive=$(printf '%s' "$release_json" | sed -n 's/.*"loader":{"name":"\([A-Za-z0-9_.-]*\)","bytes":\([0-9]*\),"sha256":"\([0-9a-f]\{64\}\)"[^}]*}.*/\1 \2 \3/p')
+loader_version=$(printf '%s' "$archive" | cut -s -d' ' -f3)
+# Update the active source folder in place, replacing only changed files so cargo recompiles
+# only their crates (target/ stays inside it: makepad finds its std two levels above itself).
+loader_built_sha256=$(cat "$src/.loader-sha256" 2>/dev/null)
+[ -n "$loader_version" ] || loader_version=$loader_built_sha256
+[ -n "$loader_version" ] || loader_version=$(cat "$src/.version" 2>/dev/null)
+[ -n "$loader_version" ] || fail "Could not reach the release service ($service) and no loader is here yet. Check the connection, then run this again."
+built="$loader_version $rust_release $triple"
+need_build=
+[ -x "$makepad" ] && [ -x "$src/target/host/makepad-launcher" ] && [ "$loader_built_sha256" = "$loader_version" ] \
+    && [ "$(awk 'NR == 1 { print $2, $3 }' "$src/.built" 2>/dev/null)" = "$rust_release $triple" ] || need_build=1
 need_zip=
-[ -n "$need_build" ] && [ "$(cat "$src/.version" 2>/dev/null)" != "$loader_version" ] && need_zip=1
+[ "$(cat "$src/.version" 2>/dev/null)" != "$loader_version" ] \
+    && [ "$loader_built_sha256" != "$loader_version" ] && need_zip=1
 if [ -n "$need_zip" ]; then
-    [ -n "$archive" ] || fail "The release service did not answer; the loader's source is not here yet. ${D}Check the connection, then run this again.$N"
+    [ -n "$archive" ] || fail "The release service did not answer; the loader's source is not here yet. Check the connection, then run this again."
     loader_name=$(printf '%s' "$archive" | cut -d' ' -f1)
     loader_bytes=$(printf '%s' "$archive" | cut -d' ' -f2)
     loader_sha256=$(printf '%s' "$archive" | cut -d' ' -f3)
     zip=$downloads/$loader_name
 fi
-[ -z "$need_rust" ] && [ -z "$need_build" ] || frame
+[ -n "$need_zip" ] || say "Loader source: ready"
 
 # --- 1 + 2. Rust's pieces and the loader's source, all at once ------------------------------
 cfg=$downloads/fetch.curl
@@ -354,38 +384,31 @@ fi
 # the summed size of the Rust pieces here
 pieces_sum() { ls -ln "$downloads" | awk '$9 ~ /\.tar\.gz\.[0-9]+$/ { s += $5 } END { print s + 0 }'; }
 if [ -f "$cfg" ]; then
-    status "Downloading Rust and Makepad's loader; once, into this folder."
+    [ -z "$need_rust" ] || say "Rust $rust_version: downloading (once, into this folder)"
+    [ -z "$need_zip" ] || say "Loader source: downloading"
     job fetch curl -sS -Z --parallel-immediate --parallel-max 16 -K "$cfg" 2>"$logs/download.log"
-    prev_sum=0 prev_t=$(now) speed='0.0 MB/s'
-    while :; do
-        rsum=$((rust_base + $(pieces_sum)))
-        zsum=0
-        [ -z "$need_zip" ] || [ ! -f "$zip.part" ] || zsum=$(size_of "$zip.part")
-        sum=$((rsum + zsum))
-        t=$(now)
-        if [ $((t - prev_t)) -ge 1 ]; then
-            speed=$(awk -v b=$((sum - prev_sum)) -v s=$((t - prev_t)) 'BEGIN { printf "%.1f MB/s", b / s / 1048576 }')
-            prev_sum=$sum prev_t=$t
-        fi
+    fetch_ticks=0
+    while [ ! -f "$jobs/fetch.done" ]; do
+        sleep 1
+        fetch_ticks=$((fetch_ticks + 1))
+        [ "$fetch_ticks" -ge 10 ] || continue
+        fetch_ticks=0
+        [ ! -f "$jobs/fetch.done" ] || break
+        progress=
         if [ -n "$need_rust" ]; then
+            rsum=$((rust_base + $(pieces_sum)))
             pct=$((rsum * 100 / rust_total))
             [ $pct -le 100 ] || pct=100
-            bar $rsum $rust_total
-            row 5 "Rust $rust_version" "$C●$N $BAR $(printf '%3d' $pct)% $D· $((rsum / 1048576)) / $((rust_total / 1048576)) MB · $speed$N" \
-                "downloading · $((pct / 10 * 10))%"
+            progress="Rust: $pct% ($((rsum / 1048576)) / $((rust_total / 1048576)) MB)"
         fi
         if [ -n "$need_zip" ]; then
-            if [ "$zsum" -ge "$loader_bytes" ]; then
-                row 6 "Loader source" "$G✓$N downloaded"
-            else
-                bar $zsum $loader_bytes
-                row 6 "Loader source" "$C●$N $BAR $D· $((zsum / 1024)) / $((loader_bytes / 1024)) KB$N" "downloading"
-            fi
+            zsum=0
+            [ ! -f "$zip.part" ] || zsum=$(size_of "$zip.part")
+            progress="${progress:+$progress. }Loader source: $((zsum / 1024)) / $((loader_bytes / 1024)) KB"
         fi
-        [ -f "$jobs/fetch.done" ] && break
-        nap
+        say "$progress"
     done
-    [ "$(cat "$jobs/fetch.done")" = 0 ] || fail "The download stopped. ${D}Run makepad.sh again to continue it · log: $logs/download.log$N"
+    [ "$(cat "$jobs/fetch.done")" = 0 ] || fail "The download stopped. Run makepad.sh again to continue it - log: $logs/download.log"
     rm -f "$cfg"
     stamp downloaded
 fi
@@ -405,16 +428,17 @@ if [ -n "$need_rust" ]; then
         while [ -f "$archive_file.$idx" ]; do rm -f "$archive_file.$idx"; idx=$((idx + 1)); done
         mv -f "$archive_file.joined" "$archive_file"
     done
-    row 5 "Rust $rust_version" "$C●$N checking $D· SHA-256 of each part$N"
+    say "Rust: checking"
     for part in $part_names; do
         if [ "$(sha256 "$downloads/$part.tar.gz")" != "$(part_field $part 3)" ]; then
             rm -f "$downloads/$part.tar.gz"
-            fail "Checksum mismatch for $part.tar.gz ${D}· downloaded again on the next run$N"
+            fail "Checksum mismatch for $part.tar.gz - downloaded again on the next run"
         fi
     done
     stage=$cache/rust.unpack
     rm -rf "$stage"
     mkdir -p "$stage" || fail "Cannot create $stage"
+    say "Rust: unpacking"
     for part in $part_names; do
         top=$part-$rust_version-$triple
         inner=$part
@@ -426,58 +450,62 @@ if [ -n "$need_rust" ]; then
         unpacked=0
         for part in $part_names; do [ ! -f "$jobs/unpack-$part.done" ] || unpacked=$((unpacked + 1)); done
         [ $unpacked -lt 3 ] || break
-        row 5 "Rust $rust_version" "$C●$N unpacking $D· $unpacked of 3$N" "unpacking"
-        nap
+        sleep 1
     done
     ready=$stage/ready
     mkdir "$ready" || fail "Cannot create $ready"
     for part in $part_names; do
-        [ "$(cat "$jobs/unpack-$part.done")" = 0 ] || fail "Unpacking $part failed. ${D}· log: $logs/unpack-$part.log$N"
+        [ "$(cat "$jobs/unpack-$part.done")" = 0 ] || fail "Unpacking $part failed - log: $logs/unpack-$part.log"
         rm -f "$stage/$part/manifest.in"
         # the parts share bin/, lib/ and share/: move each file into place
-        ( cd "$stage/$part" && find . -type d -exec sh -c 'for d; do mkdir -p "$0/$d"; done' "$ready" {} + \
-            && find . ! -type d -exec sh -c 'for f; do mv -f "$f" "$0/$f"; done' "$ready" {} + ) \
-            2>>"$logs/unpack-$part.log" || fail "Unpacking $part failed. ${D}· log: $logs/unpack-$part.log$N"
+        ( cd "$stage/$part" && find . -type d -print | while IFS= read -r dir; do
+            mkdir -p "$ready/$dir" || exit 1
+        done && find . ! -type d -print | while IFS= read -r file; do
+            mv -f "$file" "$ready/$file" || exit 1
+        done ) \
+            2>>"$logs/unpack-$part.log" || fail "Unpacking $part failed - log: $logs/unpack-$part.log"
     done
     printf '%s %s' "$rust_version" "$triple" > "$ready/.toolchain-version"
-    rm -rf "$rust"
-    mv "$ready" "$rust" || fail "Cannot move Rust into $rust"
+    rm -rf "$rust_own"
+    mv "$ready" "$rust_own" || fail "Cannot move Rust into $rust_own"
     rm -rf "$stage"
     for part in $part_names; do rm -f "$downloads/$part.tar.gz"; done
-    row 5 "Rust $rust_version" "$G✓$N ready $D· in rust/$N"
+    say "Rust: ready"
     stamp rust
 fi
 
 # --- The loader's source: check and unpack --------------------------------------------------
 if [ -n "$need_zip" ]; then
+    say "Loader source: checking"
     if [ "$(size_of "$zip.part" 2>/dev/null)" != "$loader_bytes" ]; then
         rm -f "$zip.part"
-        fail "The loader's source has the wrong size ${D}· downloaded again on the next run$N"
+        fail "The loader's source has the wrong size - downloaded again on the next run"
     fi
     if [ "$(sha256 "$zip.part")" != "$loader_sha256" ]; then
         rm -f "$zip.part"
-        fail "Checksum mismatch for $loader_name ${D}· downloaded again on the next run$N"
+        fail "Checksum mismatch for $loader_name - downloaded again on the next run"
     fi
     unpack=$cache/loader/.unpack
     rm -rf "$unpack"
     mkdir -p "$unpack" || fail "Cannot create $unpack"
-    if command -v unzip >/dev/null 2>&1; then unzip -q "$zip.part" -d "$unpack"
-    elif command -v bsdtar >/dev/null 2>&1; then bsdtar -xf "$zip.part" -C "$unpack"
-    elif command -v python3 >/dev/null 2>&1; then python3 -m zipfile -e "$zip.part" "$unpack"
-    else fail "Makepad needs unzip ${D}· install it, then run this again$N"
-    fi >>"$logs/download.log" 2>&1 || fail "Unpacking the loader's source failed. ${D}Run this again · log: $logs/download.log$N"
+    say "Loader source: unpacking"
+    if command -v unzip >/dev/null 2>&1; then unzip -q "$zip.part" -d "$unpack" >>"$logs/download.log" 2>&1
+    elif command -v bsdtar >/dev/null 2>&1; then bsdtar -xf "$zip.part" -C "$unpack" >>"$logs/download.log" 2>&1
+    elif command -v python3 >/dev/null 2>&1; then python3 -m zipfile -e "$zip.part" "$unpack" >>"$logs/download.log" 2>&1
+    else fail "Makepad needs unzip - install it, then run this again"
+    fi || fail "Unpacking the loader's source failed. Run this again - log: $logs/download.log"
     new=$unpack/$runner_release
-    [ -f "$new/Cargo.toml" ] || fail "The loader's source has no $runner_release/Cargo.toml. ${D}Run this again later; the release service is being updated.$N"
+    [ -f "$new/Cargo.toml" ] || fail "The loader's source has no $runner_release/Cargo.toml. Run this again later; the release service is being updated."
     if [ ! -f "$src/Cargo.toml" ]; then
         rm -rf "$src"
         mv "$new" "$src" || fail "Cannot move the loader's source into $src"
     else
         # an update: files that changed are replaced (with the time of now, so cargo sees them
         # as changed), files the new version no longer has are removed, the rest stay as they are
-        row 7 "Makepad's loader" "$C●$N updating its source $D· $loader_version$N" "updating"
+        say "Loader source: updating - $(printf '%s' "$loader_version" | cut -c1-10)"
         # one `diff -rq` names what differs (one process, not one per file)
-        LC_ALL=C diff -rq -x target -x .version -x .built "$new" "$src" > "$unpack/changes" 2>&1
-        [ $? -le 1 ] || fail "Cannot compare the loader's source with $src ${D}· $(head -1 "$unpack/changes")$N"
+        LC_ALL=C diff -rq -x target -x .version -x .built -x .loader-sha256 "$new" "$src" > "$unpack/changes" 2>&1
+        [ $? -le 1 ] || fail "Cannot compare the loader's source with $src - $(head -1 "$unpack/changes")"
         while IFS= read -r line; do
             case "$line" in
                 "Files $new/"*" differ")
@@ -499,17 +527,30 @@ if [ -n "$need_zip" ]; then
             esac
         done < "$unpack/changes" || fail "Cannot update the loader's source in $src"
     fi
-    printf '%s\n' "$loader_version" > "$src/.version"
+    atomic_line "$src/.version" "$loader_version" || fail "Cannot write $src/.version"
     rm -rf "$unpack"
     rm -f "$zip.part"
+    say "Loader source: ready"
     stamp source
 fi
 
 # --- 3. Compile the loader --------------------------------------------------------------------
 # The compile sees no Rust settings from elsewhere on this computer and writes only into
-# cache/. Cargo's own output goes to the log; the screen shows one progress line.
+# cache/. Cargo's plain output stays in the log. A terminal refreshes one line every second;
+# other output gets a plain line at most every ten seconds, plus the final progress and timing.
 unset RUSTUP_TOOLCHAIN RUSTFLAGS CARGO_ENCODED_RUSTFLAGS CARGO_BUILD_TARGET CARGO_BUILD_RUSTFLAGS CARGO_TARGET_DIR RUSTC_WRAPPER RUSTDOC
 export PATH="$rust/bin:$PATH" CARGO_HOME="$cache/cargo-home" RUSTC="$rust/bin/rustc" CARGO_INCREMENTAL=0
+build_loader() {
+    cd "$src" && CARGO_TERM_COLOR=never CARGO_TERM_PROGRESS_WHEN=never RUSTFLAGS=-Ctarget-cpu=native \
+        exec "$rust/bin/cargo" build --profile host --offline $locked -p makepad-run --bin makepad --bin makepad-launcher
+}
+build_progress() {
+    progress=$(awk -v total="$crates" '
+        $1 == "Compiling" && $3 ~ /^v[0-9]/ { compiled++; current = $2 }
+        END { printf "Building the JIT · %d/%d crates · %s", compiled, total, (current == "" ? "waiting" : current) }
+    ' "$build_log")
+    if [ -n "$build_tty" ]; then printf '\r\033[K  %s' "$progress"; else say "$progress"; fi
+}
 if [ -n "$need_build" ]; then
     build_log=$logs/build.log
     rm -f "$build_log"
@@ -521,31 +562,33 @@ if [ -n "$need_build" ]; then
     [ ! -f "$src/Cargo.lock" ] || locked=--locked
     # room for the build (about 2 GB of target/), said before it starts rather than as a cargo error
     free_kb=$(df -Pk "$cache" | awk 'NR == 2 { print $4 }')
-    [ "${free_kb:-0}" -ge 3000000 ] || fail "Compiling Makepad's loader needs about 3 GB free on this disk. ${D}Free some space, then run this again.$N"
-    if [ -n "$stale" ]; then
-        status "Makepad's loader was compiled for Makepad $stale; compiling it for this runner ($(printf '%s' "$loader_version" | cut -c1-10))."
-    else
-        status "Compiling Makepad's loader; once per version."
-    fi
+    [ "${free_kb:-0}" -ge 3000000 ] || fail "Compiling Makepad's loader needs about 3 GB free on this disk. Free some space, then run this again."
+    build_tty=
+    [ -t 1 ] && build_tty=1
     build_t0=$(now)
     # for this computer's processor ([profile.host]: thin LTO, 16 codegen units, target-cpu=native)
-    job build env RUSTFLAGS=-Ctarget-cpu=native sh -c 'cd "$1" && exec "$2" build --profile host --offline $3 -p makepad-run --bin makepad' \
-        build "$src" "$rust/bin/cargo" "$locked" >"$build_log" 2>&1
+    job build build_loader >"$build_log" 2>&1
+    build_ticks=0
+    build_progress
     while [ ! -f "$jobs/build.done" ]; do
-        compiled=$(grep -c '^ *Compiling ' "$build_log" 2>/dev/null)
-        compiled=${compiled:-0}
-        [ "$compiled" -le $crates ] || compiled=$crates
-        bar "$compiled" $crates
-        row 7 "Makepad's loader" "$C●$N $BAR $D· $compiled of $crates crates · $(($(now) - build_t0)) s$N" "compiling"
-        nap
+        sleep 1
+        build_ticks=$((build_ticks + 1))
+        [ ! -f "$jobs/build.done" ] || break
+        [ -n "$build_tty" ] || [ "$build_ticks" -ge 10 ] || continue
+        build_ticks=0
+        build_progress
     done
+    build_progress
+    [ -z "$build_tty" ] || printf '\n'
     if [ "$(cat "$jobs/build.done")" != 0 ]; then
-        why=$(grep -m1 '^error' "$build_log" | cut -c1-90)
-        fail "Makepad's loader did not compile${why:+: $why}. ${D}Run this again; if it stops the same way, the log says why: $build_log$N"
+        fail "the JIT did not compile." "$build_log"
     fi
-    printf '%s\n' "$built" > "$src/.built"
-    row 7 "Makepad's loader" "$G✓$N compiled $D· $(($(now) - build_t0)) s$N"
+    atomic_line "$src/.built" "$built" || fail "Cannot write $src/.built"
+    atomic_line "$src/.loader-sha256" "$loader_version" || fail "Cannot write $src/.loader-sha256"
+    say "Building the JIT · compiled in $(($(now) - build_t0)) s"
     stamp built
+else
+    say "Building the JIT · up to date"
 fi
 
 # This script stays in the folder for the next start.
@@ -565,14 +608,7 @@ fi
 export MAKEPAD_LOADER_ROOT="$root" MAKEPAD_LOADER_SERVICE="$service"
 if [ $# -gt 0 ]; then
     stamp start-loader
-    leave
     exec "$makepad" "$@"
-fi
-if [ -n "$framed" ]; then
-    row 8 "Makepad" "$C●$N starting"
-    status "Makepad opens in its own window; closing it ends this one."
-else
-    printf '  %sMakepad%s %s· starting · log: %s%s\n' "$B" "$N" "$D" "$logs/makepad.log" "$N"
 fi
 # the runner's packs downloaded alongside the build are complete before makepad run looks for them
 [ -z "$prefetch_pids" ] || wait $prefetch_pids || :
@@ -580,8 +616,8 @@ if [ -n "$runner_release" ]; then
     [ -n "$repos" ] || fail "The runner release names no repositories."
     { printf '%s\n' "$runner_release"; printf '%s\n' "$repos"; } > "$cache/runner/release.next" && mv -f "$cache/runner/release.next" "$cache/runner/release"
 else
-    [ -f "$cache/runner/release" ] || fail "Could not reach the release service ${D}($service)$N and the runner was never fetched."
-    status "The release service did not answer; starting the runner fetched before."
+    [ -f "$cache/runner/release" ] || fail "Could not reach the release service ($service) and the runner was never fetched."
+    say "The release service did not answer; starting the runner fetched before."
     runner_release=$(sed -n 1p "$cache/runner/release")
     repos=$(sed -n '2,$p' "$cache/runner/release")
 fi
@@ -615,24 +651,11 @@ printf 'arg\t%s\n' "$root_repo" >> "$record.part"
 printf 'arg\tmakepad-runner\n' >> "$record.part"
 mv -f "$record.part" "$record" || fail "Cannot write $record"
 stamp start-loader
-# The loader runs as a job; the runner reports its first frame (MAKEPAD_RUN_REPORT_TO), and the row
-# turns to running then. Its own output goes to the log.
-report=$logs/runner.report
-: > "$report"
-export MAKEPAD_RUN_REPORT_TO="$report"
-job run "$makepad" >"$logs/makepad.log" 2>&1
-while [ ! -f "$jobs/run.done" ]; do
-    if [ -z "$shown" ] && grep -q '^present' "$report" 2>/dev/null; then
-        shown=1
-        stamp runner-present
-        row 8 "Makepad" "$G✓$N running"
-        status "Makepad is open in its own window; closing it ends this one."
-        footer "ctrl+c leaves Makepad running"
-    fi
-    nap
-done
-code=$(cat "$jobs/run.done")
+# The loader stays in the foreground until the runner closes; its output is appended to the log.
+say "Makepad: starting - log: $logs/makepad.log"
+say "Makepad is open in its own window; closing it ends this one."
+"$makepad" >>"$logs/makepad.log" 2>&1
+code=$?
 stamp "loader-exit-$code"
-[ "$code" = 0 ] || fail "Makepad stopped with an error (exit $code). ${D}Run this again to start it; the log says why: $logs/makepad.log$N"
-leave
+[ "$code" = 0 ] || fail "Makepad stopped with an error (exit $code). Run this again to start it; the log says why: $logs/makepad.log"
 exit 0

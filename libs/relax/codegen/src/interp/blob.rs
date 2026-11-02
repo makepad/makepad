@@ -546,7 +546,7 @@ pub fn is_blob(code: &[u8]) -> bool {
     code.len() >= 16 && code[..8] == MAGIC.to_le_bytes()
 }
 
-fn deserialize(bytes: &[u8]) -> Option<IFunc> {
+fn deserialize(bytes: &[u8], body_offset: u64) -> Option<IFunc> {
     if bytes.len() % 8 != 0 {
         return None;
     }
@@ -620,7 +620,8 @@ fn deserialize(bytes: &[u8]) -> Option<IFunc> {
             None
         };
         let fw = r.u()? as usize;
-        let d = Box::new(CallDesc { target, args, rets, csig, frame_words: fw, ic: AtomicPtr::new(std::ptr::null_mut()), src });
+        let body = match target { Target::Table(t) if body_offset != 0 => t + body_offset, _ => 0 };
+        let d = Box::new(CallDesc { target, body, args, rets, csig, frame_words: fw, ic: AtomicPtr::new(std::ptr::null_mut()), src });
         descs.push(Box::into_raw(d) as u64);
     }
     let base = code.as_ptr() as u64;
@@ -634,13 +635,13 @@ fn deserialize(bytes: &[u8]) -> Option<IFunc> {
             _ => raw[i],
         };
     }
-    Some(IFunc { code, frame_words, params, cplan, name, align })
+    Some(IFunc { code, frame_words, params, cplan, name, align, entry_mark: AtomicU64::new(0) })
 }
 
 /// A linked blob (its relocated words hold this run's values): the function is registered, and
 /// its entry (a pool thunk: the slot's table word, callable from native code) is returned.
-pub fn install(bytes: &[u8]) -> Result<u64, String> {
-    let f = deserialize(bytes).ok_or("makepad run interp: malformed interpreted code")?;
+pub fn install(bytes: &[u8], body_offset: u64) -> Result<u64, String> {
+    let f = deserialize(bytes, body_offset).ok_or("makepad run interp: malformed interpreted code")?;
     let k = NEXT.fetch_add(1, Ordering::Relaxed);
     if k >= POOL {
         return Err(format!("makepad run interp: more than {} interpreted functions (the entry thunk pool)", POOL));

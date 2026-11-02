@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The WM's portal backend on the session bus (hidden WM, a node): Settings for dark mode.
+"""The WM's portal backend on the session bus (hidden WM, a pool node): Settings for dark mode.
 
     portalcheck.py <checkout> [--out DIR]
 

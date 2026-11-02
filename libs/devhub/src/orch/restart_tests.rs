@@ -11,7 +11,7 @@ use makepad_remote::{lines, Endpoint};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-const NODES: [&str; 6] = ["n1", "n2", "n3", "n4", "n5", "n6"];
+const NODES: [&str; 6] = ["106", "105", "n3", "n4", "n5", "n6"];
 
 fn role_env(name: &str) -> PathBuf {
     PathBuf::from(std::env::var_os(name).unwrap_or_default())
@@ -36,8 +36,9 @@ fn restart_role_nodes() {
         for &word in WORDS {
             let e = x.clone();
             ep.register(word, 1, lines::service(word, Arc::new(move |line, out| {
-                // no checkout here: a lease at a revision runs in its lane's dir
-                let line = if word == "lease-start" { unpinned(line) } else { line.to_string() };
+                // no checkout here: a lease at a revision, an overlay too, runs in its lane's dir
+                if word == "ship-done" { out.push("{\"overlay\":0}".into()); return; }
+                let line = if word == "lease-start" { unpinned(line).replace("\"src\":\"overlay\"", "\"src\":\"tree\"") } else { line.to_string() };
                 out.extend(e.handle(word, &line));
             })));
         }
@@ -90,16 +91,23 @@ fn restart_role_master() {
         let l = leases.clone();
         ep.register(svc, 1, lines::service(svc, Arc::new(move |line, out| l.serve(svc, line, out))));
     }
-    start(&ep, "mac", leases.clone(), Arc::new(|_| {}));
+    start(&ep, "mac", leases.clone(), Arc::new(|_| 0));
+    ep.register("land", 1, lines::service("land", Arc::new(|line, out| {
+        assert!(line.starts_with("land add ci-proof-") && line.ends_with(" proof"));
+        out.push("{\"ok\":1,\"id\":1}".into());
+    })));
     crate::node::listen_control(&ep).unwrap();
     let names: Vec<(String, String)> = hosts.hosts.iter().map(|h| (h.name.clone(), match &h.via { Via::Fleet { addr } => addr.clone(), _ => String::new() })).collect();
     leases.start(Arc::new(move || names.clone()));
     let ctx = ctx().unwrap().clone();
     if let Some(submit) = std::env::var_os("DEVHUB_RESTART_SUBMIT") {
         job::serve(&ctx, &submit.to_string_lossy()).unwrap();
+        // the JIT's legs run in the background job (jitlegs), asked here
+        jitlegs::serve(&ctx, "jitlegs run").unwrap();
     }
     job::start(ctx.clone());
     ci::start(&ctx);
+    jitlegs::start(ctx.clone());
     verify::start(ctx);
     std::thread::sleep(Duration::from_secs(600));
 }
@@ -134,26 +142,35 @@ fn a_master_restart_ends_nothing() {
     let _ = std::fs::remove_dir_all(&base);
     let (bin, tmp, home, ran) = (base.join("bin"), base.join("tmp"), base.join("home"), base.join("ran"));
     let repo = base.join("repo");
-    for d in [&bin, &tmp, &home.join("devhub"), &ran, &repo.join("platform/b/src"), &repo.join("platform/src"), &repo.join("apps/commercial")] {
+    for d in [&bin, &tmp, &home.join("devhub"), &ran, &repo.join("apps/a/src"), &repo.join("apps/b/src"), &repo.join("tools/ci_leg/src"), &repo.join("tools/run"), &repo.join("apps/commercial")] {
         std::fs::create_dir_all(d).unwrap();
     }
-    // the tree: two crates the shards are planned from, and a commercial side
-    std::fs::write(repo.join("Cargo.toml"), "[workspace]\nmembers = [\"platform\", \"platform/b\"]\n").unwrap();
-    std::fs::write(repo.join("platform/Cargo.toml"), "[package]\nname = \"p-a\"\n").unwrap();
-    std::fs::write(repo.join("platform/src/lib.rs"), "").unwrap();
-    std::fs::write(repo.join("platform/b/Cargo.toml"), "[package]\nname = \"p-b\"\n").unwrap();
-    std::fs::write(repo.join("platform/b/src/lib.rs"), "").unwrap();
+    // the tree: two apps the gate boots (each on Linux only), ci-leg, and a commercial side
+    std::fs::write(repo.join("Cargo.toml"), "[workspace]\nmembers = [\"apps/*\", \"tools/ci_leg\"]\n").unwrap();
+    for app in ["a", "b"] {
+        std::fs::write(repo.join(format!("apps/{app}/Cargo.toml")), format!("[package]\nname = \"makepad-app-{app}\"\n")).unwrap();
+        std::fs::write(repo.join(format!("apps/{app}/src/main.rs")), "fn main() {}\n").unwrap();
+        std::fs::write(repo.join(format!("apps/{app}/ci.splash")), "// ci os: linux\nnil\n").unwrap();
+    }
+    std::fs::write(repo.join("tools/ci_leg/Cargo.toml"), "[package]\nname = \"makepad-ci-leg\"\n").unwrap();
+    std::fs::write(repo.join("tools/ci_leg/src/main.rs"), "fn main() {}\n").unwrap();
+    std::fs::write(repo.join("tools/run/Cargo.toml"), "[package]\nname = \"makepad-run\"\n").unwrap();
+    let lock: String = ["makepad-app-a", "makepad-app-b", "makepad-ci-leg", "makepad-run"].iter().map(|name| format!("[[package]]\nname = {name:?}\nversion = \"0.1.0\"\n")).collect();
+    std::fs::write(repo.join("Cargo.lock"), lock).unwrap();
     let com = repo.join("apps/commercial");
     git(&com, &["init", "-q", "-b", "main"]);
     git(&com, &["commit", "-q", "--allow-empty", "-m", "c"]);
-    std::fs::write(repo.join(".gitignore"), "/apps/commercial/\n").unwrap();
+    std::fs::write(repo.join(".gitignore"), "/apps/commercial/\n/Cargo.lock\n").unwrap();
     git(&repo, &["init", "-q", "-b", "work"]);
+    git(&repo, &["config", "user.name", "CI Test"]);
+    git(&repo, &["config", "user.email", "ci@example.invalid"]);
     git(&repo, &["add", "."]);
     git(&repo, &["commit", "-q", "-m", "w"]);
     let (work, main) = (git(&repo, &["rev-parse", "HEAD"]), git(&com, &["rev-parse", "HEAD"]));
-    // the tools on the nodes: each run leaves a line behind, so a run started twice shows
+    // the tools on the nodes: each run leaves a line behind, so a run started twice shows (an empty
+    // CARGO_HOME keeps the box's rustup toolchain from going ahead of them in the runs' PATH)
     let once = |name: &str, body: &str| format!("#!/bin/sh\necho \"$*\" >> {}/{name}\n{body}\n", ran.display());
-    script(&bin.join("cargo"), &once("cargo", "echo before\nsleep 5\necho 0 errors\nexit 0"));
+    script(&bin.join("cargo"), &once("cargo", "echo before\nsleep 15\necho 0 errors\necho \"test result: ok. 1 passed; 0 failed\"\nexit 0"));
     script(&bin.join("git"), &format!("#!/bin/sh\nif [ \"$1\" = -C ]; then echo {main}; else echo {work}; fi\n"));
     script(&bin.join("leg"), &once("leg", "echo before\nsleep 12\necho TESTLEG-OK\nexit 0"));
     script(&bin.join("job"), &once("job", "echo before\nsleep 12\necho after\nexit 7"));
@@ -162,7 +179,7 @@ fn a_master_restart_ends_nothing() {
     let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
     let role = |name: &str, test: &str| {
         let mut c = Command::new(&exe);
-        c.args(["--exact", test, "--nocapture", "--test-threads=1"]).env("DEVHUB_RESTART_ROLE", name).env("DEVHUB_RESTART_BASE", &base).env("TMPDIR", &tmp).env("MAKEPAD_HOME", &home).env("DEVHUB_TEST_REPO", &repo).env("DEVHUB_TEST_LEG", bin.join("leg")).stdin(Stdio::null());
+        c.args(["--exact", test, "--nocapture", "--test-threads=1"]).env("DEVHUB_RESTART_ROLE", name).env("DEVHUB_RESTART_BASE", &base).env("TMPDIR", &tmp).env("MAKEPAD_HOME", &home).env("CARGO_HOME", base.join("no-cargo-home")).env("DEVHUB_TEST_REPO", &repo).env("DEVHUB_TEST_LEG", bin.join("leg")).stdin(Stdio::null());
         c
     };
     let mut roles = Roles(Vec::new());
@@ -197,9 +214,18 @@ fn a_master_restart_ends_nothing() {
         }
     };
     let job0 = |s: &makepad_strict_json::Value| s.get("jobs").and_then(|j| j.as_arr()).and_then(|j| j.first()).cloned();
-    let leg0 = |s: &makepad_strict_json::Value| s.get("verify").and_then(|v| v.get("run")).and_then(|r| r.get("legs")).and_then(|l| l.as_arr()).and_then(|l| l.first()).cloned();
-    let shard_running = |s: &makepad_strict_json::Value| s.get("ci").and_then(|c| c.get("run")).and_then(|r| r.get("shards")).and_then(|x| x.as_arr()).and_then(|x| x.iter().find(|x| num(x, "run_n") > 0).cloned());
-    until("a job, a leg and a shard running", &|s| job0(s).is_some_and(|j| num(&j, "run_n") > 0) && leg0(s).is_some_and(|l| num(&l, "run_n") > 0) && shard_running(s).is_some());
+    let leg0 = |s: &makepad_strict_json::Value| s.get("jitlegs").and_then(|v| v.get("runs")).and_then(|r| r.as_arr()).and_then(|r| r.last()).and_then(|r| r.get("legs")).and_then(|l| l.as_arr()).and_then(|l| l.first()).cloned();
+    let shards_of = |s: &makepad_strict_json::Value| s.get("ci").and_then(|c| c.get("run")).and_then(|r| r.get("shards")).and_then(|x| x.as_arr()).map(|a| a.to_vec()).unwrap_or_default();
+    let shard_running = |s: &makepad_strict_json::Value| shards_of(s).into_iter().find(|x| num(x, "run_n") > 0);
+    // The kill must land on a settled fleet. A shard whose lease is granted but whose run the master
+    // has not recorded yet is mid-start: killed then, the new master starts its command a second
+    // time (the "each command once" count below fails), and how long that window is depends on the
+    // load of the box. So every granted shard of the run is waited for, not just the first one.
+    until("a job, a leg and every shard running", &|s| {
+        let shards = shards_of(s);
+        // (CI runs on two nodes only, so shards past those wait for a lease: the settled ones are the granted)
+        job0(s).is_some_and(|j| num(&j, "run_n") > 0) && leg0(s).is_some_and(|l| num(&l, "run_n") > 0) && shards.iter().any(|x| num(x, "run_n") > 0) && shards.iter().all(|x| text(x, "lease").is_empty() || num(x, "run_n") > 0)
+    });
     let s = state().unwrap();
     let (job_lease, leg_lease, shard) = (text(&job0(&s).unwrap(), "lease"), text(&leg0(&s).unwrap(), "lease"), shard_running(&s).unwrap());
     let (shard_id, shard_lease) = (text(&shard, "id"), text(&shard, "lease"));
@@ -220,6 +246,8 @@ fn a_master_restart_ends_nothing() {
 
     let verified = |s: &makepad_strict_json::Value| s.get("verify").and_then(|v| v.get("verified")).and_then(|v| v.as_arr()).is_some_and(|v| !v.is_empty());
     until("the verdict", &|s| verified(s) || s.get("verify").and_then(|v| v.get("failing")).is_some_and(|f| !f.is_null()));
+    // and the legs' run, which nothing waits for
+    until("the legs' end", &|s| s.get("jitlegs").and_then(|v| v.get("runs")).and_then(|r| r.as_arr()).and_then(|r| r.last()).is_some_and(|r| num(r, "ended_ms") > 0));
     let s = state().unwrap();
     assert!(verified(&s), "{}", s.get("verify").unwrap().to_json());
     let runs = s.get("ci").and_then(|c| c.get("runs")).and_then(|r| r.as_arr()).unwrap();
@@ -231,7 +259,7 @@ fn a_master_restart_ends_nothing() {
     let count = |name: &str| std::fs::read_to_string(ran.join(name)).unwrap_or_default().lines().count();
     assert_eq!(count("job"), 1, "the job ran once");
     assert_eq!(count("leg"), 1, "the leg ran once");
-    let planned: usize = shards.len() + 1; // jit:01 has both crates' checks
+    let planned: usize = shards.len(); // one boot each
     assert_eq!(count("cargo"), planned, "each shard's steps ran once: {}", run.to_json());
     let ended = std::fs::read_to_string(home.join("devhub/leases.jsonl")).unwrap_or_default();
     assert!(ended.lines().any(|l| l.contains(&format!("\"id\":\"{leg_lease}\""))), "the leg kept its lease {leg_lease}: {ended}");

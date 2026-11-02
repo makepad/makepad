@@ -22,10 +22,12 @@ pub fn memory(a: &mut Answer) {
     // who owns the memory: the program's malloc heap, makepad run's arenas and JIT code, the app
     // domains' arenas; resident estimates (an arena's touched pages, not what it reserved)
     let arena_res = sp("compiler_arena_touched_mb") + sp("compiler_arena_large_mb");
+    let slots_res = sp("slots_arena_touched_mb") + sp("slots_arena_large_mb");
     let mut parts: Vec<(String, f64, String)> = vec![
         ("program heap (malloc, in use)".into(), in_use, if tracked > 0.0 { format!("{} tracked by `heap start`", mb(tracked)) } else { "the program's live allocations (`heap start` splits them by stack)".into() }),
         ("malloc: freed, held".into(), held, "freed by the program, kept by malloc".into()),
         ("makepad run: compiler arena".into(), arena_res, format!("touched pages; {} reserved", mb(sp("compiler_arena_committed_mb")))),
+        ("makepad run: slot arena".into(), slots_res, format!("touched pages; {} reserved", mb(sp("slots_arena_committed_mb")))),
         ("makepad run: burst arena".into(), sp("burst_arena_committed_mb"), "committed".into()),
         ("makepad run: JIT code + data".into(), sp("jit_code_mb") + sp("jit_ro_data_mb"), String::new()),
     ];
@@ -46,7 +48,7 @@ pub fn memory(a: &mut Answer) {
         head.push_str(&format!(", {} since the last `memory`", super::num(Some(d)).map(|x| format!("{}{} MB", if x >= 0.0 { "+" } else { "" }, sig(x))).unwrap_or_default()));
     }
     let prog = in_use + held;
-    let runtime = arena_res + sp("burst_arena_committed_mb") + sp("jit_code_mb") + sp("jit_ro_data_mb");
+    let runtime = arena_res + slots_res + sp("burst_arena_committed_mb") + sp("jit_code_mb") + sp("jit_ro_data_mb");
     if let Some(p) = parts.first() {
         head.push_str(&format!(". Largest part: {} {}.", p.0, mb(p.1)));
     }

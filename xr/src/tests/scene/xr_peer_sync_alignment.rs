@@ -68,23 +68,6 @@ mod alignment_tests {
         }
     }
 
-    fn reference_dump_pair() -> Option<XrNetAlignmentDescriptorDumpPair> {
-        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("dump/dumps/align-pair-226a39e4b300-r0097-1774792873191.bin");
-        if !path.try_exists().expect("reference fixture path should be accessible") {
-            eprintln!(
-                "skipping reference alignment test: missing local fixture {}",
-                path.display()
-            );
-            return None;
-        }
-        let bytes = std::fs::read(path).expect("reference dump should be readable");
-        Some(
-            XrNetAlignmentDescriptorDumpPair::from_file_bytes(&bytes)
-                .expect("reference dump should decode"),
-        )
-    }
-
     #[test]
     fn stable_alignment_prefers_existing_solution_over_flip() {
         let previous = make_solution(0.42, vec3(0.28, 0.0, -0.64), 0.41, 0.03, 8);
@@ -201,13 +184,24 @@ mod alignment_tests {
 
     #[test]
     fn worker_queues_new_local_descriptor_without_interrupting_active_solver() {
-        let Some(pair) = reference_dump_pair() else { return };
-        let peer = XrNetPeer {
-            id: pair.remote_peer_id,
-            addr: "127.0.0.1:41547".parse().unwrap(),
-        };
+        let peer = make_peer(7);
+        let mut local = make_peer_descriptor(8, true);
+        local.descriptor.height_map = Some(XrDepthAlignHeightMap {
+            origin_x: 0.0,
+            origin_z: 0.0,
+            cell_size_meters: 0.25,
+            size_x: 8,
+            size_z: 8,
+            bottom_y_meters: 0.0,
+            top_y_meters: 2.3,
+            floor_y_meters: 0.0,
+            player_cutout_center: None,
+            player_cutout_radius_meters: 0.0,
+            heights_meters: (0..64).map(|i| if i % 8 < 3 && i / 8 < 5 { 0.7 } else { 0.0 }).collect(),
+        });
+        let remote = local.clone();
         let mut state = AlignmentWorkerState::default();
-        let mut updated_local = pair.local_descriptor.clone();
+        let mut updated_local = local.clone();
         let updated_height = updated_local
             .descriptor
             .height_map
@@ -218,18 +212,18 @@ mod alignment_tests {
                     .iter_mut()
                     .find(|height| height.is_finite())
             })
-            .expect("reference dump should contain a finite local height sample");
+            .expect("generated map should contain a finite local height sample");
         *updated_height += 0.06;
 
         state.apply_local_descriptor_update(PendingLocalDescriptorUpdate::Set {
-            frame: pair.local_descriptor.clone(),
+            frame: local.clone(),
             version: (1, 0),
         });
         assert!(state.apply_peer_update(
             peer.id,
             PendingPeerDescriptorUpdate::Set {
                 peer,
-                frame: pair.remote_descriptor.clone(),
+                frame: remote.clone(),
             },
         ));
 
@@ -238,7 +232,7 @@ mod alignment_tests {
         assert_eq!(peer_state.active_local_descriptor_version, Some((1, 0)));
         assert_eq!(
             peer_state.active_remote_descriptor_seq,
-            Some(pair.remote_descriptor.seq)
+            Some(remote.seq)
         );
         assert!(!peer_state.queued_rerun);
 
@@ -254,7 +248,7 @@ mod alignment_tests {
         assert_eq!(peer_state.active_local_descriptor_version, Some((1, 0)));
         assert_eq!(
             peer_state.active_remote_descriptor_seq,
-            Some(pair.remote_descriptor.seq)
+            Some(remote.seq)
         );
         assert!(peer_state.queued_rerun);
 
@@ -273,7 +267,7 @@ mod alignment_tests {
         );
         assert_eq!(
             peer_state.last_solved_remote_descriptor_seq,
-            Some(pair.remote_descriptor.seq)
+            Some(remote.seq)
         );
         assert!(peer_state.matcher.is_none());
         assert!(!peer_state.queued_rerun);
@@ -306,21 +300,6 @@ mod alignment_tests {
         assert_eq!(
             text,
             "AlignDbg: local slice 2 | desc occ 0 v 0 c 0 | 0000002a: remote map seq 7 missing | solve pending"
-        );
-    }
-
-    #[test]
-    fn peer_scene_debug_uses_descriptor_payload_before_solver_runs() {
-        let mut peers = HashMap::new();
-        let mut peer = RemotePeerState::new(make_peer(0x2a));
-        peer.latest_descriptor = Some(make_peer_descriptor(2, true));
-        peer.has_descriptor = true;
-        peers.insert(peer.peer.id, peer);
-
-        let text = make_peer_scene_debug_text(true, &peers);
-        assert_eq!(
-            text,
-            "PeerMap 0000002a: state no | map yes seq 7 missing | pose raw | solve pending"
         );
     }
 

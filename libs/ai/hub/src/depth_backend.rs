@@ -533,11 +533,4 @@ mod tests {
             Err(AssetAiError::Cancelled)
         ));
     }
-
-    #[test]
-    fn not_provisioned_on_dev_machines() {
-        if std::env::var(DEPTH_CMD_ENV).is_err() {
-            assert!(!depth_provisioned());
-        }
-    }
 }

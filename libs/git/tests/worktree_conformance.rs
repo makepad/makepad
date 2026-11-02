@@ -3,7 +3,7 @@
 //! the pack writer in `test_support`. No git binary.
 use makepad_git::test_support::{tempdir, write_pack};
 use makepad_git::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -290,63 +290,6 @@ fn two_linked_worktrees_share_store_and_isolate_private_refs() {
 }
 
 #[test]
-fn fresh_handle_diff_trees_loose_root_packed_subtree() {
-    let base = tempdir().unwrap();
-    let main = base.path().join("main");
-    fs::create_dir_all(&main).unwrap();
-    let repo = init_repo(&main);
-
-    let blob = b"inner packed\n".to_vec();
-    let blob_oid = makepad_git::oid::hash_object("blob", &blob);
-    let subtree_bytes = makepad_git::tree::serialize_tree(&Tree {
-        entries: vec![TreeEntry {
-            mode: 0o100644,
-            name: "inner.txt".into(),
-            oid: blob_oid,
-        }],
-    });
-    let ids = write_pack(
-        &main.join(".git"),
-        &[(ObjectKind::Blob, blob), (ObjectKind::Tree, subtree_bytes)],
-    )
-    .unwrap();
-    assert_eq!(ids[0], blob_oid);
-    let subtree_oid = ids[1];
-    let top = repo.write_blob(b"top\n").unwrap();
-    let root = repo
-        .write_tree(&Tree {
-            entries: vec![
-                TreeEntry {
-                    mode: 0o040000,
-                    name: "dir".into(),
-                    oid: subtree_oid,
-                },
-                TreeEntry {
-                    mode: 0o100644,
-                    name: "top.txt".into(),
-                    oid: top,
-                },
-            ],
-        })
-        .unwrap();
-    let empty = repo.write_tree(&Tree { entries: vec![] }).unwrap();
-    drop(repo);
-
-    // Fresh handle: no prior object read.
-    let mut fresh = Repository::open(&main).unwrap();
-    let changes = fresh.diff_trees(&empty, &root).unwrap();
-    let mut paths: Vec<String> = changes
-        .iter()
-        .map(|c| match c {
-            TreeChange::Added { path, .. } => path.clone(),
-            other => panic!("unexpected change {other:?}"),
-        })
-        .collect();
-    paths.sort();
-    assert_eq!(paths, ["dir/inner.txt", "top.txt"]);
-}
-
-#[test]
 fn linked_worktree_missing_index_is_empty_not_error() {
     let base = tempdir().unwrap();
     let main = base.path().join("main");
@@ -490,136 +433,6 @@ fn malformed_pointers_are_errors() {
         assert!(repository_paths(&plain_nested).unwrap().is_none());
         assert!(Repository::open(&plain_nested).is_ok());
     }
-}
-
-#[test]
-fn log_thirty_commits_two_merges() {
-    let dir = tempdir().unwrap();
-    let root = dir.path().join("repo");
-    fs::create_dir_all(&root).unwrap();
-    let mut repo = init_repo(&root);
-
-    let blob = repo.write_blob(b"x\n").unwrap();
-    let tree = repo
-        .write_tree(&Tree {
-            entries: vec![TreeEntry {
-                mode: 0o100644,
-                name: "f".into(),
-                oid: blob,
-            }],
-        })
-        .unwrap();
-
-    let write = |repo: &Repository, parents: Vec<ObjectId>, message: &str| {
-        repo.write_commit(&Commit {
-            tree,
-            parents,
-            author: sig(),
-            committer: sig(),
-            message: message.to_string(),
-        })
-        .unwrap()
-    };
-
-    // 20-commit backbone.
-    let mut ids = Vec::with_capacity(30);
-    ids.push(write(&repo, vec![], "c0\n"));
-    for i in 1..20 {
-        ids.push(write(&repo, vec![ids[i - 1]], &format!("c{i}\n")));
-    }
-    // Side branch from c5: three commits.
-    ids.push(write(&repo, vec![ids[5]], "c20\n")); // 20
-    ids.push(write(&repo, vec![ids[20]], "c21\n"));
-    ids.push(write(&repo, vec![ids[21]], "c22\n"));
-    // Merge 1 of backbone tip and side branch.
-    ids.push(write(&repo, vec![ids[19], ids[22]], "merge1\n")); // 23
-    // Side branch from c10: two commits.
-    ids.push(write(&repo, vec![ids[10]], "c24\n"));
-    ids.push(write(&repo, vec![ids[24]], "c25\n"));
-    // Merge 2.
-    ids.push(write(&repo, vec![ids[23], ids[25]], "merge2\n")); // 26
-    ids.push(write(&repo, vec![ids[26]], "c27\n"));
-    ids.push(write(&repo, vec![ids[27]], "c28\n"));
-    ids.push(write(&repo, vec![ids[28]], "c29\n"));
-    assert_eq!(ids.len(), 30);
-    repo.create_branch("main", ids.last().unwrap()).unwrap();
-
-    let head = *ids.last().unwrap();
-    let log = repo.log(&head, 100).unwrap();
-    assert_eq!(log.len(), 30, "all 30 commits reachable from HEAD");
-    let mut seen = HashSet::new();
-    for (oid, _) in &log {
-        assert!(seen.insert(*oid), "duplicate commit {}", oid.to_hex());
-    }
-    for id in &ids {
-        assert!(seen.contains(id), "missing commit {}", id.to_hex());
-    }
-
-    let merges: Vec<_> = log
-        .iter()
-        .filter(|(_, c)| c.parents.len() == 2)
-        .map(|(_, c)| c.message.as_str())
-        .collect();
-    assert_eq!(merges.len(), 2);
-    assert!(merges.contains(&"merge1\n"));
-    assert!(merges.contains(&"merge2\n"));
-
-    // Linear history is a valid HEAD-first topological order under the
-    // stack DFS in Repository::log. A merge diamond is not: a shared
-    // ancestor reached via one parent is emitted before the other
-    // parent's descendants (libs/git/src/repo.rs Repository::log).
-    let l0 = write(&repo, vec![], "lin0\n");
-    let l1 = write(&repo, vec![l0], "lin1\n");
-    let l2 = write(&repo, vec![l1], "lin2\n");
-    let l3 = write(&repo, vec![l2], "lin3\n");
-    let l4 = write(&repo, vec![l3], "lin4\n");
-    let linear_log = repo.log(&l4, 10).unwrap();
-    assert_eq!(
-        linear_log.iter().map(|(o, _)| *o).collect::<Vec<_>>(),
-        [l4, l3, l2, l1, l0]
-    );
-
-    let c0 = write(&repo, vec![], "d0\n");
-    let c1 = write(&repo, vec![c0], "d1\n");
-    let c2 = write(&repo, vec![c0], "d2\n");
-    let c3 = write(&repo, vec![c1, c2], "d3\n");
-    let diamond = repo.log(&c3, 10).unwrap();
-    let dpos: HashMap<ObjectId, usize> = diamond
-        .iter()
-        .enumerate()
-        .map(|(i, (oid, _))| (*oid, i))
-        .collect();
-    let diamond_topo = diamond.iter().all(|(oid, commit)| {
-        commit.parents.iter().all(|parent| match dpos.get(parent) {
-            Some(&p) => p > dpos[oid],
-            None => true,
-        })
-    });
-    if !diamond_topo {
-        eprintln!(
-            "LIBRARY DEFECT libs/git/src/repo.rs Repository::log: merge diamond is not a topological order. \
-             minimal input: c0; c1 parent c0; c2 parent c0; c3 parents c1,c2. got: {:?}",
-            diamond
-                .iter()
-                .map(|(_, c)| c.message.trim())
-                .collect::<Vec<_>>()
-        );
-    }
-    assert_eq!(diamond.len(), 4);
-    assert_eq!(
-        diamond.iter().map(|(o, _)| *o).collect::<HashSet<_>>().len(),
-        4
-    );
-
-    let clipped = repo.log(&head, 10).unwrap();
-    assert_eq!(clipped.len(), 10, "log must stop at max_count");
-    let mut clipped_seen = HashSet::new();
-    for (oid, _) in &clipped {
-        assert!(clipped_seen.insert(*oid));
-    }
-    let one = repo.log(&head, 1).unwrap();
-    assert_eq!(one.len(), 1);
-    assert_eq!(one[0].0, head);
 }
 
 #[test]

@@ -441,7 +441,7 @@ impl Metal {
         let ids: Vec<_> = self.restores.keys().copied().collect();
         for id in ids {
             let base = self.restores.remove(&id).expect("pending window restore");
-            let native = self.native_windows.composition((HOST, id), s.dpi);
+            let native = self.native_windows.composition((HOST, id), s.window_dpi(id));
             self.native_sync = native.is_some();
             if let Some(dst) = self.window_target(s, HOST, id, base.w, base.h, now) {
                 self.copy_layer(base.tex.obj.as_id(), dst, [0, 0, base.w, base.h]);
@@ -539,7 +539,7 @@ impl Metal {
                 self.copy_layer(base.tex.obj.as_id(), dst, [0, 0, w.min(base.w), h.min(base.h)]);
             }
             if let Some(image) = overlay.image.as_ref().filter(|_| overlay.ready) {
-                let dpi = s.dpi;
+                let dpi = s.window_dpi(window);
                 let x = (overlay.rect[0] * dpi).floor().max(0.0) as u32;
                 let y = (overlay.rect[1] * dpi).floor().max(0.0) as u32;
                 let right = ((overlay.rect[0] + overlay.rect[2]) * dpi).ceil().max(0.0) as u32;
@@ -989,7 +989,7 @@ impl Metal {
             }
         }
         if native.is_none() && is_window && !pick && !replay {
-            native = self.native_windows.composition((owner, physical), s.dpi);
+            native = self.native_windows.composition((owner, physical), s.window_dpi(target));
         }
         self.native_sync = native.is_some();
         let sync_frame = self.native_sync;
@@ -1397,7 +1397,12 @@ impl Metal {
                 }
             }
             if depth.is_some() {
-                let state = if d.flags & Draw::DEPTH_WRITE != 0 { self.dev.depth_write.as_id() } else { self.dev.depth_no_write.as_id() };
+                let state = match (d.flags & Draw::DEPTH_GREATER != 0, d.flags & Draw::DEPTH_WRITE != 0) {
+                    (false, true) => self.dev.depth_write.as_id(),
+                    (false, false) => self.dev.depth_no_write.as_id(),
+                    (true, true) => self.dev.depth_greater_write.as_id(),
+                    (true, false) => self.dev.depth_greater_no_write.as_id(),
+                };
                 if enc.depth_state != state {
                     enc.depth_state = state;
                     unsafe {

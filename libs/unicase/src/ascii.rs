@@ -141,13 +141,6 @@ mod tests {
         assert_eq!(a, String::from("fooBar"));
     }
 
-    #[cfg(feature = "nightly")]
-    #[bench]
-    fn bench_ascii_eq(b: &mut ::test::Bencher) {
-        b.bytes = b"foobar".len() as u64;
-        b.iter(|| assert_eq!(Ascii("foobar"), Ascii("FOOBAR")));
-    }
-
     #[test]
     fn test_case_cmp() {
         assert!(Ascii("foobar") == Ascii("FOOBAR"));

@@ -139,6 +139,7 @@ script_mod! {
         // straight down), empty slots rejected on radius.
         ..mod.draw.ClusteredLighting,
         ..mod.draw.FastGiSampling,
+        ..mod.draw.SceneOutputDither,
 
         dl_term: fn(wp: vec3, n: vec3, lp: vec4, lc: vec4) -> vec3 {
             if lp.w <= 0.0 {

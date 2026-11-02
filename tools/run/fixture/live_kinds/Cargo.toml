@@ -4,6 +4,12 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
+[features]
+window = ["dep:makepad-widgets"]
+
+[dependencies]
+makepad-widgets = { path = "../../../../widgets", default-features = false, optional = true }
+
 # A program tools/run/fixture/live_kinds.py edits while it runs, one edit kind per run: every
 # kind must take visible effect (patched live or restarted in place with its state).
 [[bin]]

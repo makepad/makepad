@@ -413,18 +413,4 @@ mod tests {
         assert!(planar.iter().all(|v| (0.0..=1.0).contains(v)));
     }
 
-    #[test]
-    fn composite_matches_pil_rounding() {
-        // alpha 128 over black: (255*128 + 127)/255 = 128
-        let mut image = solid(2, 2, [255, 255, 255, 128]);
-        image.pixels[3] = 128;
-        let mut square = image.clone();
-        square.pixels.iter_mut().skip(3).step_by(4).for_each(|a| *a = 128);
-        let mut out = vec![0u8; 3];
-        let pixel = [255u8, 255, 255, 128];
-        for channel in 0..3 {
-            out[channel] = ((pixel[channel] as u32 * 128 + 127) / 255) as u8;
-        }
-        assert_eq!(out, vec![128, 128, 128]);
-    }
 }

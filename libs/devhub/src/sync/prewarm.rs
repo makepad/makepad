@@ -408,19 +408,23 @@ mod node {
 
         #[test]
         fn the_plan_is_check_then_present_per_app_through_cargo_run() {
-            let steps = plan(Path::new("/t"), Path::new("/s"));
+            let root = Path::new("/t");
+            let scratch = Path::new("/s");
+            let steps = plan(root, scratch);
+            let manifest = root.join("Cargo.toml").display().to_string();
+            let report = scratch.join("calculator.report").display().to_string();
             assert_eq!(steps.len(), 2 * SMOKE.len());
             assert_eq!(steps.iter().map(|s| s.app.as_str()).collect::<Vec<_>>().chunks(2).map(|c| c[0]).collect::<Vec<_>>(), vec!["stage", "scope", "fab", "sandbox", "synth", "calculator"]);
-            let head = ["run", "--profile", "host", "-q", "--manifest-path", "/t/Cargo.toml", "-p", "makepad-run", "--bin", "makepad", "--"];
+            let head = ["run", "--profile", "host", "-q", "--manifest-path", &manifest, "-p", "makepad-run", "--bin", "makepad", "--"];
             for (i, s) in steps.iter().enumerate() {
                 assert_eq!(&s.argv[..head.len()], head);
                 assert_eq!(s.what, if i % 2 == 0 { "check" } else { "present" });
                 assert_eq!(s.report.is_some(), s.what == "present");
             }
             assert_eq!(steps[0].argv[head.len()..], ["check", "makepad-stage"]);
-            assert_eq!(steps[0].dir, Path::new("/t/apps/commercial"));
+            assert_eq!(steps[0].dir, root.join("apps/commercial"));
             let calc = steps.last().unwrap();
-            assert_eq!(calc.argv[head.len()..], ["run", "--report-to", "/s/calculator.report", "makepad-app-calculator", "--no-default-features", "--features", "standalone", "--", "--remote"]);
+            assert_eq!(calc.argv[head.len()..], ["run", "--report-to", &report, "makepad-app-calculator", "--no-default-features", "--features", "standalone", "--", "--remote"]);
             assert!(calc.env.contains(&("MAKEPAD_HIDE_WINDOWS".into(), "1".into())) && calc.env.contains(&("SANDBOX_MUTE".into(), "1".into())));
         }
 

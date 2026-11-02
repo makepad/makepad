@@ -163,14 +163,6 @@ impl Drop for Guard {
     }
 }
 
-/// The holder of this thread's current wait became known (a latch's runner found after the wait
-/// began).
-pub fn set_holder(holder: u64) {
-    if let Some(r) = row() {
-        r.holder.store(holder, Relaxed);
-    }
-}
-
 /// Starts a wait with no guard (program futex waits enter and leave through two C calls).
 pub fn enter(kind: Kind, object: u64, holder: u64, label: &'static str) {
     if let Some(r) = row() {

@@ -348,8 +348,6 @@ fn cross3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fixture;
-    use crate::weights::BodyWeights;
     use std::f32::consts::FRAC_PI_2;
 
     fn euler_matrix([rx, ry, rz]: [f32; 3]) -> [[f32; 3]; 3] {
@@ -472,83 +470,5 @@ mod tests {
         assert_near(points[0], 350.0);
         assert_near(points[1], 322.5);
         assert_near(depth[0], 10.0);
-    }
-
-    fn max_abs(left: &[f32], right: &[f32]) -> f32 {
-        assert_eq!(left.len(), right.len());
-        left.iter()
-            .zip(right)
-            .map(|(a, b)| (a - b).abs())
-            .fold(0.0, f32::max)
-    }
-
-    #[test]
-    fn oracle_pose_unpack_and_model_assembly() {
-        let Some((_, projected)) = fixture::load("head_pose_proj_out_0") else {
-            eprintln!("SKIP oracle_pose_unpack_and_model_assembly: pose fixture absent");
-            return;
-        };
-        let Some((_, init_pose_fixture)) = fixture::load("init_pose") else {
-            eprintln!("SKIP oracle_pose_unpack_and_model_assembly: init_pose.f32 absent");
-            return;
-        };
-        let Some(weights_path) = fixture::weights_path() else {
-            eprintln!("SKIP oracle_pose_unpack_and_model_assembly: weights absent");
-            return;
-        };
-        let weights = BodyWeights::load(weights_path).expect("oracle weights must load");
-        let init_pose = weights
-            .f32_shaped("init_pose.weight", &[1, 519])
-            .expect("init_pose.weight must load");
-        assert!(
-            max_abs(&init_pose, &init_pose_fixture) <= 1.0e-6,
-            "oracle init_pose differs from weights"
-        );
-        assert_eq!(projected.len(), 519);
-        let pred: Vec<f32> = projected
-            .iter()
-            .zip(&init_pose)
-            .map(|(value, initial)| value + initial)
-            .collect();
-        let pose = unpack_pose(&pred);
-
-        let Some((_, expected_global)) = fixture::load("mhr_in_global_rot_0") else {
-            eprintln!("SKIP oracle_pose_unpack_and_model_assembly: MHR inputs absent");
-            return;
-        };
-        let Some((_, expected_body)) = fixture::load("mhr_in_body_pose_params_0") else {
-            eprintln!("SKIP oracle_pose_unpack_and_model_assembly: MHR inputs absent");
-            return;
-        };
-        let Some((_, expected_scale)) = fixture::load("mhr_in_scale_params_0") else {
-            eprintln!("SKIP oracle_pose_unpack_and_model_assembly: MHR inputs absent");
-            return;
-        };
-        let Some((_, expected_shape)) = fixture::load("mhr_in_shape_params_0") else {
-            eprintln!("SKIP oracle_pose_unpack_and_model_assembly: MHR inputs absent");
-            return;
-        };
-        let Some((_, expected_hands)) = fixture::load("mhr_in_hand_pose_params_0") else {
-            eprintln!("SKIP oracle_pose_unpack_and_model_assembly: MHR inputs absent");
-            return;
-        };
-        let Some((_, expected_params)) = fixture::load("mhrjit_in_params_0") else {
-            eprintln!("SKIP oracle_pose_unpack_and_model_assembly: MHR JIT input absent");
-            return;
-        };
-
-        let global_error = max_abs(&pose.global_rot, &expected_global);
-        eprintln!("pose oracle global rotation max abs error {global_error:.7}");
-        assert!(global_error <= 1.0e-4, "global rotation triple order (see unpack_pose)");
-        assert!(max_abs(&pose.body, &expected_body) <= 1.0e-4);
-        assert!(max_abs(&pose.scale, &expected_scale) <= 1.0e-4);
-        assert!(max_abs(&pose.shape, &expected_shape) <= 1.0e-4);
-        assert!(max_abs(&pose.hands, &expected_hands) <= 1.0e-4);
-
-        let rig = fixture::rig().expect("oracle rig must load after weights check");
-        let model = model_params(&rig, &pose);
-        let model_error = max_abs(&model, &expected_params);
-        eprintln!("pose oracle MHR parameter max abs error {model_error:.7}");
-        assert!(model_error <= 1.0e-4);
     }
 }

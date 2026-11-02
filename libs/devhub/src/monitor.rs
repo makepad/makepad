@@ -235,13 +235,15 @@ impl Monitor {
             }
         }
         // a path that is gone counts only when HEAD has it (an untracked file came and went)
-        if !missing.is_empty() {
+        // (in chunks: a removed build dir can be more paths than one command line takes)
+        let mut tracked = BTreeSet::new();
+        for chunk in missing.chunks(500) {
             let mut args = vec!["ls-tree", "-z", "--name-only", "HEAD", "--"];
-            args.extend(missing.iter().map(String::as_str));
+            args.extend(chunk.iter().map(String::as_str));
             let out = git(&root, &args, None)?;
-            let tracked: BTreeSet<String> = String::from_utf8_lossy(&out).split('\0').filter(|s| !s.is_empty()).map(str::to_string).collect();
-            d.deleted = missing.into_iter().filter(|p| tracked.contains(p)).collect();
+            tracked.extend(String::from_utf8_lossy(&out).split('\0').filter(|s| !s.is_empty()).map(str::to_string));
         }
+        d.deleted = missing.into_iter().filter(|p| tracked.contains(p)).collect();
         Ok(d)
     }
 }

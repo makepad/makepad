@@ -9,15 +9,19 @@
 //! covers the builds finished of those queued since the JIT got busy (when a queue says). Once
 //! nothing has been built for half a second the ring fades out and is gone: nothing static means
 //! idle either. A program stopped on invalidated code (amber) or a panic (red) shows a solid dot
-//! that stays while the program is stopped on it. Hovering it shows a tooltip with the live numbers;
-//! it is display only: a click, a scroll or a drag over it is the app's. Placement follows the
-//! caption the app draws (`WindowCaption`):
+//! that stays while the program is stopped on it, or waits (a failed rebuild or patch, a change
+//! that needs a restart). Hovering it shows a tooltip: the live numbers, or what the dot means and
+//! what a click does. A dot takes a click (the run restarts the app for a waiting change, opens
+//! the inspect view at a failure, or the paused view); a busy ring is display only, and a click,
+//! a scroll or a drag over it is the app's. Placement follows the caption the app draws
+//! (`WindowCaption`):
 //! just left of window buttons at the caption's right (Windows, Linux), else ~12 pt from the
 //! window's right edge (macOS), vertically centred. It is a badge of the window
 //! (`window_kind::BADGE` with `window_style::BADGE_HOVER`): the HAL composes it over the app's
 //! frames, which neither wait for it nor pay for it; session 0 sees the pointer hover over it,
-//! the input itself stays the app's. The tooltip draws in the same badge layer while hovered. Every value
-//! eases on this session's clock; the ring is the boot document's `jit_ring_px` (GPU), one quad.
+//! and a press on it while a dot shows (`window_style::BADGE_PRESS`); other input stays the
+//! app's. The tooltip draws in the same badge layer while hovered. Every value eases on this
+//! session's clock; the ring is the boot document's `jit_ring_px` (GPU), one quad.
 use makepad_hal::{AppCaption, Id};
 use std::time::{Duration, Instant};
 
@@ -60,6 +64,8 @@ pub enum Alert {
     Panic,
     /// rebuilding makepad for a change it cannot patch failed: the app runs the previous code (amber)
     RebuildFailed,
+    /// a live edit was refused: previous code keeps running; the watcher will retry (amber)
+    PatchFailed,
     /// a change waits for a restart: the app runs the previous code; a click restarts it (amber)
     UpdateReady,
 }
@@ -272,7 +278,7 @@ impl Ring {
         // a dot that goes (the stop ended, nothing else to show) fades out as the dot
         let alert = self.alert.or(self.want.is_none().then_some(self.last_alert).filter(|_| self.dot));
         let mode = match alert {
-            Some(Alert::Stale | Alert::RebuildFailed | Alert::UpdateReady) => 2.0,
+            Some(Alert::Stale | Alert::RebuildFailed | Alert::PatchFailed | Alert::UpdateReady) => 2.0,
             Some(Alert::Panic) => 3.0,
             None => self.back,
         };
@@ -296,6 +302,7 @@ pub fn summary(want: Option<Want>, alert: Option<Alert>) -> String {
             Alert::Stale => format!("paused on invalidated code · makepad inspect {} panics", std::process::id()),
             Alert::Panic => format!("paused on a panic · makepad inspect {} panics", std::process::id()),
             Alert::RebuildFailed => "rebuilding makepad failed · the app runs the previous code (see the terminal)".into(),
+            Alert::PatchFailed => "Live patch not applied · previous code is running · retrying when sources settle or change".into(),
             Alert::UpdateReady => "Update ready · click to restart".into(),
         };
     }

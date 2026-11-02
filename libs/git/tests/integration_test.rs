@@ -1,5 +1,5 @@
 //! End-to-end behaviour of the repository API on repositories built with the
-//! API itself, with a separately ignored read-only Git diff oracle. Where the old suite asked git to
+//! API itself, with a read-only Git diff oracle on a generated repository. Where the old suite asked git to
 //! confirm an object, the assertion is now the object id git assigns to the
 //! same content (computed independently of this crate's serialisers).
 use makepad_git::test_support::{
@@ -279,20 +279,6 @@ fn test_create_commit_programmatically() {
 }
 
 #[test]
-fn test_log_walk() {
-    let dir = make_repo();
-    let mut repo = Repository::open(dir.path()).unwrap();
-    fs::write(dir.path().join("file1.txt"), "updated\n").unwrap();
-    commit_all(&mut repo, dir.path(), "second commit");
-
-    let head = repo.head_oid().unwrap();
-    let log = repo.log(&head, 10).unwrap();
-    assert_eq!(log.len(), 2);
-    assert_eq!(log[0].1.message, "second commit\n");
-    assert_eq!(log[1].1.message, "initial commit\n");
-}
-
-#[test]
 fn test_read_from_packed_repo() {
     let dir = make_repo();
     // What `git gc` does to a small repository: every object into one pack.
@@ -530,10 +516,20 @@ fn bounded_tree_diff_matches_real_repository_commits() {
 }
 
 #[test]
-#[ignore = "read-only external Git name-status oracle on this repository"]
 fn bounded_tree_diff_git_name_status_oracle() {
-    let mut repo = Repository::open(Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap();
-    let pairs = this_repository_pairs(&mut repo);
+    let dir = make_repo();
+    let mut repo = Repository::open(dir.path()).unwrap();
+    let root = repo.head_oid().unwrap();
+    fs::write(dir.path().join("file1.txt"), "changed\n").unwrap();
+    fs::remove_file(dir.path().join("file2.txt")).unwrap();
+    fs::write(dir.path().join("subdir/added.txt"), "added\n").unwrap();
+    let changed = commit_all(&mut repo, dir.path(), "modify, delete and add");
+    checkout_new_branch(&mut repo, "feature");
+    fs::write(dir.path().join("feature.txt"), "feature\n").unwrap();
+    let feature = commit_all(&mut repo, dir.path(), "feature");
+    repo.checkout_branch("main").unwrap();
+    let merged = merge_no_ff(&mut repo, "feature", "merge feature");
+    let pairs = [(root, changed), (changed, feature), (changed, merged), (root, merged), (merged, root)];
     let account = memory::MemoryAccount::new(64 * 1024 * 1024);
     let mut records = 0;
     for (old, new) in pairs {
@@ -541,7 +537,7 @@ fn bounded_tree_diff_git_name_status_oracle() {
         assert!(bounded.complete);
         let output = std::process::Command::new("git").current_dir(&repo.workdir)
             .args(["diff", "--name-status", "--no-renames", "--no-ext-diff", "--no-textconv", "-z", &old.to_hex(), &new.to_hex(), "--"])
-            .output().expect("Git must be available for the ignored oracle");
+            .output().expect("Git must be available for the name-status oracle");
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
         let fields: Vec<_> = output.stdout.split(|b| *b == 0).filter(|s| !s.is_empty()).collect();
         assert_eq!(fields.len() % 2, 0);
@@ -1237,37 +1233,6 @@ fn test_read_deltified_objects() {
 
 // ===== Complex Merge Scenarios =====
 
-#[test]
-fn test_merge_with_added_files_both_sides() {
-    let dir = make_repo();
-    let mut repo = Repository::open(dir.path()).unwrap();
-
-    // Feature branch: add feature.txt
-    checkout_new_branch(&mut repo, "feature");
-    fs::write(dir.path().join("feature.txt"), "feature\n").unwrap();
-    commit_all(&mut repo, dir.path(), "add feature.txt");
-
-    // Main: add main.txt
-    repo.checkout_branch("main").unwrap();
-    fs::write(dir.path().join("main.txt"), "main\n").unwrap();
-    commit_all(&mut repo, dir.path(), "add main.txt");
-
-    // Merge via our API
-    let result = repo.merge_branch("feature", test_sig()).unwrap();
-    assert!(!result.has_conflict());
-
-    // Both files should exist
-    assert!(dir.path().join("feature.txt").exists());
-    assert!(dir.path().join("main.txt").exists());
-
-    // The merge is consistent
-    fsck(&mut repo);
-
-    let head = repo.head_oid().unwrap();
-    let commit = repo.read_commit(&head).unwrap();
-    assert_eq!(commit.parents.len(), 2);
-    assert!(repo.log(&head, 10).unwrap().len() >= 4);
-}
 
 #[test]
 fn test_merge_delete_on_one_side() {

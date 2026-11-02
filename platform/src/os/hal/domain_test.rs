@@ -18,7 +18,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// Both tests use the process's one HAL: they run one after the other.
+/// These tests use the process's one HAL: they run one after the other.
 static ONE_HAL: Mutex<()> = Mutex::new(());
 
 /// Takes the process's one HAL for a test, on the headless backend (a unit test has no window
@@ -268,6 +268,59 @@ fn a_panic_is_contained_and_spawned_futures_run() {
     assert_eq!(SPAWNED_RAN.load(Ordering::SeqCst), 1, "the spawned future ran");
     assert!(AFTER_PANIC.load(Ordering::SeqCst) >= 1, "the app went on drawing after the panic");
     thread.join().unwrap();
+}
+
+#[test]
+fn a_redrawing_window_feeds_the_perf_monitor() {
+    use crate::{draw_list::DrawList, draw_pass::DrawPass};
+    let _one = take_headless_hal();
+    let (painted, frames) = std::thread::spawn(|| {
+        let mut scene: Option<(WindowHandle, DrawPass, DrawList)> = None;
+        let mut timeout = Timer::empty();
+        let cx = Rc::new(RefCell::new(Cx::new(Box::new(move |cx: &mut Cx, event: &Event| match event {
+            Event::Startup => {
+                let window = WindowHandle::new(cx);
+                let mut pass = DrawPass::new(cx);
+                let list = DrawList::new(cx);
+                window.set_pass(cx, &pass);
+                pass.set_size(cx, dvec2(16.0, 16.0));
+                pass.set_dpi_factor(cx, 1.0);
+                // An empty window pass still paints through hal_draw_frame and fb_build.
+                cx.passes[pass.draw_pass_id()].main_draw_list_id = Some(list.id());
+                cx.draw_lists[list.id()].draw_pass_id = Some(pass.draw_pass_id());
+                scene = Some((window, pass, list));
+                cx.perf_monitor.set_enabled(true);
+                timeout = cx.start_timeout(30.0);
+                let _ = cx.new_next_frame();
+            }
+            Event::NextFrame(_) => {
+                cx.redraw_all();
+                let _ = cx.new_next_frame();
+                if cx.perf_monitor.frames_painted() > 5 {
+                    cx.quit();
+                }
+            }
+            Event::Draw(_) => {
+                if let Some((_, pass, _)) = &scene {
+                    cx.repaint_pass(pass.draw_pass_id());
+                }
+            }
+            Event::Timer(e) if timeout.is_timer(e).is_some() => cx.quit(),
+            _ => {}
+        }))));
+        cx.borrow_mut().init_cx_os();
+        Cx::event_loop(cx.clone());
+        let mut cx = cx.borrow_mut();
+        let painted = cx.perf_monitor.frames_painted();
+        let mut frames = Vec::new();
+        cx.perf_monitor.read(&mut frames);
+        cx.perf_monitor.set_enabled(false);
+        cx.self_ref = None;
+        (painted, frames)
+    }).join().unwrap();
+    // Assert outside the event handler: the HAL contains handler panics.
+    assert!(painted > 5, "HAL redraws must advance the monitor, got {painted} frames");
+    assert!(frames.iter().any(|frame| frame.gap_ms > 0.0), "HAL frame times must yield positive gaps");
 }
 
 /// What the WM's desk tells a covered domain tile (`HostedVisible` as an app message to the

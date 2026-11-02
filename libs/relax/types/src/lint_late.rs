@@ -36,6 +36,7 @@ pub const SUSPICIOUS_DOUBLE_REF_OP: Lint = lint::lint("suspicious_double_ref_op"
 pub const DEREF_NULLPTR: Lint = lint::lint("deref_nullptr");
 pub const TRIVIAL_CASTS: Lint = lint::lint("trivial_casts");
 pub const TRIVIAL_NUMERIC_CASTS: Lint = lint::lint("trivial_numeric_casts");
+pub const DANGEROUS_IMPLICIT_AUTOREFS: Lint = lint::lint("dangerous_implicit_autorefs");
 
 /// Body-level passes over one typed body owner.
 pub fn check_body(prog: &Program, tcx: &Tcx, body: &Body) {
@@ -413,7 +414,54 @@ impl<'a> Late<'a> {
         }
     }
 
+    /// rustc_lint autorefs.rs ImplicitAutorefs: a deref of a raw pointer, place projections, an
+    /// implicit reference (autoref or overloaded deref, after any number of derefs) and then a place
+    /// projection, a `&raw` of a deref, or a method marked `#[rustc_no_implicit_autorefs]`.
+    fn check_implicit_autorefs(&mut self, e: ExprId) {
+        let ex = *self.ast.expr(e);
+        // the node whose operand adjustments hold the autoderef, and the adjusted operand
+        let (node, inner) = match ex.kind {
+            ExprKind::AddrOf(true, _, x) => {
+                let u = unparen(self.ast, x);
+                match self.ast.expr(u).kind { ExprKind::Unary(UnOp::Deref, y) => (u, y), _ => return }
+            }
+            ExprKind::Index(base, _) => (e, base),
+            ExprKind::MethodCall(recv, _) => (e, recv),
+            ExprKind::Field(x, _) | ExprKind::TupleField(x, _) => (e, x),
+            _ => return,
+        };
+        let steps = self.body.adjustments(node.0).map(|a| &a.operand[..]).unwrap_or(&[]);
+        let last_overloaded = matches!(steps.last().map(|a| a.kind), Some(crate::typeck::adjustments::Adjust::Deref(Some(_))));
+        let adjusted = steps.last().map(|a| a.target).or_else(|| self.expr_ty(inner));
+        let is_array = adjusted.is_some_and(|t| matches!(self.tcx.tys.kind(t), TyKind::Array(..)));
+        // (rustc's trailing Unsize after the borrow: more than one adjustment is left, no lint)
+        let method = self.body.methods.get(&e.0).copied().filter(|_| matches!(ex.kind, ExprKind::MethodCall(..)));
+        let borrow = match ex.kind {
+            ExprKind::Index(..) => (self.body.ov_index.get(&e.0).is_some() || self.body.std_index.get(&e.0).is_some()) && !is_array,
+            ExprKind::MethodCall(..) => method.is_some_and(|m| m.autoref != 0 && !(is_array && self.prog.def(self.prog.def(m.def).parent).kind != DefKind::Trait)),
+            _ => false,
+        };
+        if !borrow && !last_overloaded { return; }
+        let mut place = unparen(self.ast, inner);
+        loop {
+            match self.ast.expr(place).kind {
+                ExprKind::Index(base, _) => place = unparen(self.ast, base),
+                ExprKind::Field(x, _) | ExprKind::TupleField(x, _) => place = unparen(self.ast, x),
+                _ => break,
+            }
+        }
+        let ExprKind::Unary(UnOp::Deref, dereferenced) = self.ast.expr(place).kind else { return };
+        if !self.expr_ty(dereferenced).is_some_and(|t| matches!(self.tcx.tys.kind(t), TyKind::Ptr(..))) { return; }
+        if let Some(m) = method {
+            let d = self.prog.def(m.def);
+            let attrs = self.prog.files[d.file as usize].ast.list(self.prog.files[d.file as usize].ast.item(d.item).attrs);
+            if !lint::has_attr(self.prog, d.file, attrs, "rustc_no_implicit_autorefs") { return; }
+        }
+        self.emit_ext(&DANGEROUS_IMPLICIT_AUTOREFS, ex.lo, "implicit autoref creates a reference to the dereference of a raw pointer");
+    }
+
     fn check_expr(&mut self, e: ExprId) {
+        self.check_implicit_autorefs(e);
         let ex = *self.ast.expr(e);
         match ex.kind {
             ExprKind::Call(f, args) => {
@@ -1642,7 +1690,7 @@ fn is_text_flow_control(c: char) -> bool {
 /// doc comments and string / char literals containing characters that change the visible
 /// direction of text. Reported while lexing, at the crate root's lint level.
 fn text_direction(prog: &Program, own: &[bool]) {
-    use crate::lexer::{LexOptions, Mode, T};
+    use crate::lexer::{LexOptions, T};
     let mut seen = std::collections::HashSet::new();
     for m in &prog.mods {
         if !own.get(m.krate as usize).copied().unwrap_or(false) { continue; }
@@ -1657,7 +1705,7 @@ fn text_direction(prog: &Program, own: &[bool]) {
         if !std::str::from_utf8(src).map_or(false, |s| s.chars().any(is_text_flow_control)) { continue; }
         let root = prog.mods[prog.crates[m.krate as usize].root_mod as usize].def;
         let mut toks = Vec::new();
-        let opts = LexOptions { edition: pf.edition, mode: Mode::Rust, trivia: true };
+        let opts = LexOptions { edition: pf.edition, trivia: true };
         if crate::lexer::lex_with(src, &opts, &mut toks).is_err() { continue; }
         for t in &toks {
             let flow = |s: &[u8]| std::str::from_utf8(s).map_or(false, |s| s.chars().any(is_text_flow_control));

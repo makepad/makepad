@@ -82,6 +82,7 @@ pub fn master_endpoint(name: &str, launch: Vec<String>, local: &Arc<Local>, peer
     let env = vec![("MAKEPAD_HIDE_WINDOWS".to_string(), "1".to_string()), ("SANDBOX_MUTE".to_string(), "1".to_string())];
     let ep = relay::endpoint(relay::Config { name: format!("devhub {name}"), launch, env, ledger: relay::default_ledger() });
     let sink = ep.register_watch();
+    crate::hot::register(&ep);
     let l = local.clone();
     ep.register("ps", 1, lines::service("ps", Arc::new(move |_, out| l.ps(out))));
     let l = local.clone();
@@ -168,6 +169,7 @@ pub fn listen_control(ep: &Endpoint) -> Result<PathBuf, String> {
     if makepad_remote::link::Client::new(makepad_remote::link::Target::Unix(path.clone()), "probe").conn().is_ok() {
         return Err(format!("a devhub already serves {}", path.display()));
     }
+    std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| format!("{}: {e}", path.display()))?;
     makepad_remote::carrier::unix::listen_at(ep, &path).map_err(|e| format!("{}: {e}", path.display()))?;
     Ok(path)
 }
@@ -193,6 +195,7 @@ impl Node {
         );
         let (master_ep, sink) = master_endpoint(&conf.name, conf.launch.clone(), &local, &peers);
         *sink_slot.lock().unwrap() = Some(sink.clone());
+        local.ready();
         let s2 = sink.clone();
         let sync_ctx = Arc::new(crate::sync::NodeCtx { machine: conf.name.clone(), publish: Arc::new(move |r| { s2.emit(&r.to_json()); }) });
         crate::sync::register_master(&master_ep, &sync_ctx);

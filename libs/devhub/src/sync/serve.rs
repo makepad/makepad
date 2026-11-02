@@ -8,10 +8,10 @@
 //!   the order, `git bundle verify`) and fetched into the repo's store; nothing in it runs.
 //! - `launch` (lines): remote launch ([`super::launch`]).
 //!
-//! An apply moves the node's one tree (the synced checkout, which leases also move to their pinned
-//! commits: [`crate::lease::tree`]) forward from the last commit a sync moved it to, never while a
-//! lease holds it, then prebuilds, then restarts what the order asks. Every stage is a `sync` record on the node's stream (pushed, checkout, patched,
-//! built, restarted, refused), so the master's inbox and `devhub stream` show it.
+//! An apply moves the deployment checkout to the landed tips independently of leases, then
+//! prebuilds and follows the order's safe restart rules. An idle work tree catches up too.
+//! Every stage is a `sync` record (pushed, checkout, patched, built, restarted, refused), so the
+//! master's inbox and `devhub stream` show it.
 
 use super::build;
 use super::conf::{Build, SyncConf};
@@ -141,8 +141,8 @@ impl Sync {
         out.push(err_line(&why));
     }
 
-    /// One apply: check every repo can move, wait for the session tick when asked, move the
-    /// checkouts, follow the JITs' patches, prebuild, restart.
+    /// Move the deployment independently of leases, follow live patches, prebuild and apply
+    /// the order's safe restart rules; warm the work tree only when idle.
     fn apply(self: &Arc<Self>, o: &Order, out: &mut Vec<String>) {
         let Ok(_busy) = self.busy.try_lock() else { return out.push(err_line("an apply is running on this node")) };
         // its hub does not restart under it (the build would start over, 10-30)
@@ -170,11 +170,13 @@ impl Sync {
             }
             let dir = self.conf.repo_dir(repo).unwrap();
             let from = self.current(&store, repo);
-            // forward from what the last sync applied (a lease may have moved the tree to any commit since)
+            // forward from what the last sync applied
             let synced = store.rev(SYNCED_REF).or_else(|| from.clone());
             match &from {
                 Some(f) if !store.has(f) => return self.refuse(out, format!("sync: apply refused: the {repo} checkout is at {}, which this node's store does not hold (push a branch that contains it)", short(f))),
-                _ if synced.as_deref().is_some_and(|s| s != to && store.has(s) && !store.is_ancestor(s, to)) => {
+                // `repoint=<repo>`: the master vouches that what this node synced sits on a retired chain
+                // (`devhub promote` re-pointed the branch): the one move across histories
+                _ if !o.get("repoint").is_some_and(|r| r == repo) && synced.as_deref().is_some_and(|s| s != to && store.has(s) && !store.is_ancestor(s, to)) => {
                     return self.refuse(out, format!("sync: apply refused: {repo} {} -> {} is not a fast-forward", short(synced.as_deref().unwrap_or("")), short(to)));
                 }
                 None if dir.read_dir().is_ok_and(|mut d| d.next().is_some()) && !(repo == "makepad" && only_commercial(&dir)) => {
@@ -233,14 +235,8 @@ impl Sync {
             }
         }
 
-        // the tree is the leases' too: it moves only while none holds it (the order is refused, the
-        // next round tries again)
-        // a running pre-warm is for the commits the tree leaves now
+        // a running pre-warm is for the commits the deployment leaves now
         super::prewarm::cancel("a newer sync");
-        let tree = match crate::lease::tree::free() {
-            Ok(t) => t,
-            Err(e) => return self.refuse(out, format!("sync: apply refused: {e}")),
-        };
         let mut moved_lines = Vec::new();
         let mut revs: (Option<String>, Option<String>) = (None, None);
         for (repo, store, from, to) in &plan {
@@ -261,12 +257,35 @@ impl Sync {
                 revs.1 = Some(to.clone());
             }
         }
+        let work = crate::lease::caps::LeaseConf::load().work;
+        for (repo, _, _, to) in &plan {
+            match crate::lease::relaxgit::feed(&work, repo, to, "work") {
+                Ok((objects, bytes)) => self.event(Sev::Info, format!("sync: {repo} RELAXGIT {objects} objects, {bytes} bytes"), String::new()),
+                Err(e) => return self.refuse(out, e),
+            }
+        }
         let mp = revs.0.clone().or_else(|| git::fleet_revision(&self.conf.checkout, "makepad"));
         let cm = revs.1.clone().or_else(|| git::fleet_revision(&self.conf.checkout, "commercial"));
         if let Some(mp) = &mp {
             git::write_fleet_revision(&self.conf.checkout, mp, cm.as_deref());
+            let conf = crate::lease::caps::LeaseConf::load();
+            if conf.slots(0).iter().any(|(k, n)| k.writes() && *n > 0) {
+                let pin = crate::lease::Pin { makepad: mp.clone(), commercial: cm.clone() };
+                match crate::lease::tree::sync(&conf.work, &pin) {
+                    Ok(Some(t)) => {
+                        for b in t.cleared.bundles {
+                            self.event(Sev::Warn, format!("sync: work tree edits recovered to {}", b.display()), String::new());
+                        }
+                        for e in t.cleared.unclean {
+                            self.event(Sev::Err, format!("sync: work tree: {e}"), String::new());
+                        }
+                        self.event(Sev::Info, format!("sync: work tree at {} ({} files)", pin.short(), t.moved.iter().map(|(_, n)| n).sum::<usize>()), String::new());
+                    }
+                    Ok(None) => {}
+                    Err(e) => self.event(Sev::Err, format!("sync: work tree: {e}"), String::new()),
+                }
+            }
         }
-        drop(tree);
         out.extend(moved_lines);
 
         // what the JITs' live patchers did with it: a coordinated patch answers with it (the

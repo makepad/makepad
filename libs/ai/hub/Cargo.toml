@@ -100,6 +100,8 @@ notes-native = ["dep:makepad-ai-notes"]
 
 [dependencies]
 makepad-micro-serde = { path = "../../micro_serde" }
+# A generation's place on the app's jobs board (`board.rs`): words, node, progress, cancel.
+makepad-jobs = { path = "../../jobs" }
 makepad-base64 = { path = "../../base64" }
 makepad-network = { path = "../../../platform/network" }
 makepad-strict-json = { path = "../../strict_json" }

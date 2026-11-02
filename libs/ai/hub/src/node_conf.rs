@@ -43,7 +43,7 @@ use std::path::{Path, PathBuf};
 pub const CONF_ENV: &str = "MAKEPAD_WM_AI_HUB_CONF";
 /// The variable the WM sets for the AI Hub app it starts: this file's path. The app then
 /// serves as this node's hub (`NodeConf`) instead of from its own settings.
-pub const NODE_CONF_ENV: &str = "MAKEPAD_AI_HUB_NODE_CONF";
+pub use makepad_network::netconfig::NODE_CONF_ENV;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct NodeConf {
@@ -335,7 +335,7 @@ mod tests {
         assert!(!d.enabled);
         assert_eq!((d.port, d.compute, d.features.as_str()), (8123, ComputeMode::Automatic, "node"));
         assert!(d.hub_env().iter().all(|(k, _)| k == CUDA_ROOT));
-        assert_eq!(lan_host(" 192.0.2.20 ").as_deref(), Some("192.0.2.20"));
+        assert_eq!(lan_host(" 192.0.2.5 ").as_deref(), Some("192.0.2.5"));
         assert_eq!(lan_host("0.0.0.0"), lan_host(""), "the wildcard is this machine's LAN address");
     }
 

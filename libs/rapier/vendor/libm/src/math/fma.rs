@@ -116,12 +116,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(f128_enabled)]
-    fn spec_test_f128() {
-        spec_test::<f128>(fmaf128);
-    }
-
-    #[test]
     fn issue_263() {
         let a = f32::from_bits(1266679807);
         let b = f32::from_bits(1300234242);

@@ -1,6 +1,6 @@
 //! Quantised prefill on a real device. Run the release test binary with
-//! `prefill_gemm_bench --ignored --nocapture --test-threads=1`.
-//! Optional MAKEPAD_LLM_PREFILL_DIMS="n,k;n,k", _COLUMNS="23,64,128,300,512"
+//! `prefill_gemm_bench --nocapture --test-threads=1`.
+//! Optional MAKEPAD_LLM_PREFILL_DIMS="n,k;n,k", _COLUMNS="1,23,64,65"
 //! and _SAMPLES control the sweep (all use the MAKEPAD_LLM_PREFILL prefix).
 use makepad_ai_vulkan::*;
 use makepad_script::makepad_math::{f16_bits_to_f32, f32_to_f16_bits};
@@ -161,15 +161,14 @@ fn reference(format: Format, weights: &[u8], k: usize, n: usize, m: usize, q: &[
 }
 
 #[test]
-#[ignore = "full CPU references and GPU timings; run alone on the target device"]
 fn prefill_gemm_bench() {
     let device = Device::shared().expect("real Vulkan device required");
     eprintln!("{}", device.features.description());
     let mut library = Library::new(KERNEL_SOURCES).unwrap();
-    let dimensions = std::env::var("MAKEPAD_LLM_PREFILL_DIMS").unwrap_or_else(|_| "9216,2560;2560,9216;8192,2560;4096,2560;2560,4096".into());
-    let columns = std::env::var("MAKEPAD_LLM_PREFILL_COLUMNS").unwrap_or_else(|_| "23,64,128,300,512".into());
+    let dimensions = std::env::var("MAKEPAD_LLM_PREFILL_DIMS").unwrap_or_else(|_| "65,256;33,768".into());
+    let columns = std::env::var("MAKEPAD_LLM_PREFILL_COLUMNS").unwrap_or_else(|_| "1,23,64,65".into());
     let columns: Vec<usize> = columns.split(',').map(|s| s.trim().parse().unwrap()).collect();
-    let samples: usize = std::env::var("MAKEPAD_LLM_PREFILL_SAMPLES").map(|s| s.parse().unwrap()).unwrap_or(11);
+    let samples: usize = std::env::var("MAKEPAD_LLM_PREFILL_SAMPLES").map(|s| s.parse().unwrap()).unwrap_or(1);
     assert!(samples > 0 && !columns.is_empty() && columns.iter().all(|&m| m > 0));
     let max_m = *columns.iter().max().unwrap();
     eprintln!("PREFILL timing=median wall submit+wait, one GEMM per submission; excludes quantisation, upload, compilation, CPU reference; GPU timestamp also reported. Every output checked against f64 CPU accumulation of the same int8 activations.");

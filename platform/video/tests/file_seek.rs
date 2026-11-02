@@ -285,9 +285,3 @@ fn seek_lands_on_the_requested_frame_on_both_clip_kinds() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
-
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-#[test]
-fn seek_is_explicitly_unsupported_elsewhere() {
-    assert!(VideoFileDecoder::open("nonexistent.mp4").is_err());
-}

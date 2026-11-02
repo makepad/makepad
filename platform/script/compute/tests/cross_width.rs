@@ -186,9 +186,7 @@ fn emit_and_divergent_loop_kernels_are_the_same_at_both_widths() {
 /// lanes once it is hot (in the background): before and after, the same bits.
 #[test]
 fn a_hot_kernel_moves_to_eight_lanes_with_the_same_bits() {
-    if std::env::var_os("MAKEPAD_KERNEL_LANES").is_some() {
-        return;
-    }
+    assert!(std::env::var_os("MAKEPAD_KERNEL_LANES").is_none(), "the host-width upgrade test requires MAKEPAD_KERNEL_LANES unset");
     let (_, src) = geometry::GEOMETRY[1];
     let k = compile(src).unwrap();
     assert_eq!(k.vector_lanes(), 4, "installs four-lane code");

@@ -3,7 +3,6 @@
 use crate::cfg::CfgSet;
 use crate::lexer::{Tok, T};
 use crate::rs_index::NameIndex;
-use std::sync::Arc;
 
 /// What declaration discovery keeps of a file: its name index. The tokens it is built from
 /// (the file's lex, its cfg-active tokens) belong to the scan that needs them.
@@ -157,24 +156,4 @@ fn surface(src: &[u8], tokens: &[Tok], ends: &[u32], mut at: usize, hi: usize, o
         out.push(t);
         at += 1;
     }
-}
-
-/// Expand a macro-owned declaration stream in the caller's crate/module scope.
-/// This read-only projection is also useful to embedders comparing a contract
-/// against ordinary macro expansion; it never installs parse-reuse entries.
-pub fn macro_declaration_index(input: &crate::pm::TokenStream, edition: u16,
-    ctx: std::rc::Rc<crate::builtins::FileCtx>, table: Arc<crate::macros::MacroTable>,
-    declaration_contract: bool,
-) -> Result<NameIndex, String> {
-    let input = crate::builtins::Expansion::from_stream(input, edition)?;
-    let surface = if declaration_contract {
-        crate::parser::rs_expand::expand_declarations(&input, edition, ctx, table)
-    } else {
-        let mut toks = crate::parser::lazy_bodies::Toks::from(&input.toks[..]);
-        let end = input.text.len() as u32;
-        toks.push(Tok { kind: T::Eof, lo: end, hi: end });
-        crate::parser::rs_expand::expand(input.text.as_bytes(), toks, edition, ctx, table)
-    };
-    if !surface.unknown.is_empty() { return Err(format!("unsupported macro surface: {:?}", surface.unknown)); }
-    expanded_index(&surface.text(input.text.as_bytes()), &surface.toks).ok_or_else(|| "invalid expanded declaration tokens".into())
 }

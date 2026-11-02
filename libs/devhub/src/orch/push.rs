@@ -1,12 +1,12 @@
-//! `devhub push`: the collapsed push of the newest verified tip to origin/work (was push-tree.sh).
-//! One commit whose tree is the verified work commit's tree and whose parent is origin/work (plus
-//! any merged PR heads named as extra parents, which must be in the tip). It refuses a tip that
-//! verify has not passed, and a delta with credential-like text (said as file:line, never the
-//! text). Only when the manager asks: nothing pushes on its own.
+//! `devhub push`: the collapsed push of the requested commit or newest landed tip to origin/work.
+//! One commit whose tree is the selected work commit's tree and whose parent is origin/work (plus
+//! any merged PR heads named as extra parents, which must be in the tip). CI reports regressions
+//! independently. A delta with credential-like text is refused (said as file:line, never the text).
+//! The standing push follows the landed tip; explicit requests may select a commit.
 
 use super::{git, is_ancestor, Ctx};
 use crate::proto::{wall_ms, Sev};
-use crate::state::{Pushed, Tip};
+use crate::state::{Pair, Pushed};
 use makepad_remote::json_str;
 
 pub const TRAILER: &str = "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>";
@@ -17,6 +17,8 @@ pub struct Hit {
     pub file: String,
     pub line: usize,
     pub what: &'static str,
+    /// The added line itself (never printed).
+    pub text: String,
 }
 
 /// The user's address as a pattern: its local part without trailing digits and the first label of
@@ -93,7 +95,7 @@ pub fn scan(diff: &str, stem: Option<&(String, String)>) -> Vec<Hit> {
                 None
             };
             if let Some(what) = what {
-                hits.push(Hit { file: file.clone(), line, what });
+                hits.push(Hit { file: file.clone(), line, what, text: added.to_string() });
             }
             line += 1;
         } else if l.starts_with(' ') {
@@ -101,6 +103,49 @@ pub fn scan(diff: &str, stem: Option<&(String, String)>) -> Vec<Hit> {
         }
     }
     hits
+}
+
+/// The standing push: when work or main moved (a landing or a proof commit), the newest landed
+/// pair goes to origin/work when origin does not have its tree yet (the credential scan still
+/// refuses). Unmoved tips are not pushed again.
+pub fn start(ctx: std::sync::Arc<Ctx>) {
+    let _ = std::thread::Builder::new().name("devhub-push".into()).spawn(move || {
+        let mut said = String::new();
+        let mut seen: Option<Pair> = None;
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(120));
+            let tip = super::snapshot(&ctx.repo);
+            if tip.is_some() && tip == seen {
+                continue;
+            }
+            seen = tip;
+            let line = match serve(&ctx, "push {}") {
+                Ok(v) if v.contains("\"pushed\":true") => {
+                    ctx.store.event("push", Sev::Info, format!("push: {v}"), None);
+                    String::new()
+                }
+                Ok(_) => String::new(),
+                Err(e) => e,
+            };
+            // (a refusal is said once, until it changes)
+            if !line.is_empty() && line != said {
+                ctx.store.event("push", Sev::Warn, line.clone(), None);
+            }
+            // a push that failed (origin, the scan) is tried again
+            if !line.is_empty() {
+                seen = None;
+            }
+            said = line;
+        }
+    });
+}
+
+/// Select the requested work commit with current commercial main, or the stable landed pair.
+fn push_tip(ctx: &Ctx, requested: Option<&str>) -> Result<Pair, String> {
+    match requested {
+        Some(sha) => Ok(Pair::new(sha, &git(&ctx.commercial(), &["rev-parse", "refs/heads/main"])?)),
+        None => super::snapshot(&ctx.repo).ok_or_else(|| "push: no stable landed pair".into()),
+    }
 }
 
 /// `push {"sha"?,"message"?,"parents"?:[..],"dry"?}`.
@@ -111,16 +156,9 @@ pub fn serve(ctx: &Ctx, line: &str) -> Result<String, String> {
     let dry = v.get("dry").and_then(|x| x.as_bool()).unwrap_or(false);
     let parents: Vec<String> = v.get("parents").and_then(|a| a.as_arr()).unwrap_or(&[]).iter().filter_map(|x| x.as_str().map(str::to_string)).collect();
     let repo = &ctx.repo;
-    // the tip: a verified one, never anything else
-    let verified: Vec<Tip> = ctx.store.read(|d| d.verify.verified.clone());
-    let tip = match st("sha") {
-        Some(r) => {
-            let sha = git(repo, &["rev-parse", "-q", "--verify", &format!("{r}^{{commit}}")]).map_err(|_| format!("push: no commit {r}"))?;
-            verified.iter().rev().find(|t| t.pair.work == sha).cloned().ok_or_else(|| format!("push: {} is not a verified tip (devhub verify)", super::short(&sha)))?
-        }
-        None => verified.last().cloned().ok_or("push: no verified tip yet (devhub verify)")?,
-    };
-    let sha = tip.pair.work.clone();
+    let requested = st("sha").map(|r| git(repo, &["rev-parse", "-q", "--verify", &format!("{r}^{{commit}}")])).transpose()?;
+    let tip = push_tip(ctx, requested.as_deref())?;
+    let sha = tip.work.clone();
     git(repo, &["fetch", "-q", "origin", "work"])?;
     let origin = git(repo, &["rev-parse", "refs/remotes/origin/work"])?;
     let tree = |c: &str| git(repo, &["rev-parse", &format!("{c}^{{tree}}")]);
@@ -130,7 +168,8 @@ pub fn serve(ctx: &Ctx, line: &str) -> Result<String, String> {
     let files = git(repo, &["diff", "--name-only", &origin, &sha])?.lines().count() as u32;
     let diff = git(repo, &["diff", "--unified=0", "--no-color", "--no-ext-diff", &origin, &sha])?;
     let stem = git(repo, &["config", "user.email"]).ok().and_then(|e| email_stem(&e));
-    let hits = scan(&diff, stem.as_ref());
+    // a line that already stands in origin's tree is public, whatever it looks like
+    let hits: Vec<Hit> = scan(&diff, stem.as_ref()).into_iter().filter(|h| !git(repo, &["grep", "-h", "-F", "-e", &h.text, "refs/remotes/origin/work"]).is_ok_and(|found| found.lines().any(|l| l.trim() == h.text.trim()))).collect();
     if !hits.is_empty() {
         let list: Vec<String> = hits.iter().take(20).map(|h| format!("{}:{} ({})", h.file, h.line, h.what)).collect();
         ctx.store.event("push", Sev::Err, format!("push REFUSED {}: credential-like text in the delta: {}", super::short(&sha), list.join(", ")), None);
@@ -141,7 +180,7 @@ pub fn serve(ctx: &Ctx, line: &str) -> Result<String, String> {
             return Err(format!("push: extra parent {p} is not in {}", super::short(&sha)));
         }
     }
-    let message = st("message").unwrap_or_else(|| format!("work: verified tip {} (with commercial {})", super::short(&sha), super::short(&tip.pair.main)));
+    let message = st("message").unwrap_or_else(|| format!("work: tip {} (with commercial {})", super::short(&sha), super::short(&tip.main)));
     if dry {
         return Ok(format!("{{\"pushed\":false,\"dry\":true,\"tip\":{},\"origin\":{},\"files\":{files},\"scan\":\"clean\"}}", json_str(&sha), json_str(&origin)));
     }
@@ -154,9 +193,9 @@ pub fn serve(ctx: &Ctx, line: &str) -> Result<String, String> {
     args.push(format!("{message}\n\n{TRAILER}"));
     let commit = git(repo, &args.iter().map(String::as_str).collect::<Vec<_>>())?;
     git(repo, &["push", "-q", "origin", &format!("{commit}:refs/heads/work")])?;
-    let p = Pushed { pair: tip.pair.clone(), commit: commit.clone(), origin_was: origin.clone(), at_ms: wall_ms(), files };
+    let p = Pushed { pair: tip.clone(), commit: commit.clone(), origin_was: origin.clone(), at_ms: wall_ms(), files };
     ctx.store.update(|d| d.pushes.push(p));
-    ctx.store.event("push", Sev::Info, format!("push: origin/work {} -> {} (tree of verified {}, {files} files)", super::short(&origin), super::short(&commit), tip.pair.short()), None);
+    ctx.store.event("push", Sev::Info, format!("push: origin/work {} -> {} (tree of tip {}, {files} files)", super::short(&origin), super::short(&commit), tip.short()), None);
     Ok(format!("{{\"pushed\":true,\"commit\":{},\"origin_was\":{},\"tip\":{},\"files\":{files}}}", json_str(&commit), json_str(&origin), json_str(&sha)))
 }
 

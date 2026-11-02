@@ -78,6 +78,9 @@ pub(crate) fn color_to_colorimetry(color: VideoColor) -> String {
     format!("{range}:{matrix}:{transfer}:{primaries}")
 }
 
+/// Frames of encoder delay at the start of an AAC-LC stream.
+const AAC_PRIMING: u64 = 1024;
+
 impl LinuxVideoFileEncoder {
     pub fn new(path: &str, options: &VideoFileEncoderOptions) -> Result<Self, VideoFileError> {
         let gst = LibGst::get().ok_or_else(|| {
@@ -288,9 +291,21 @@ impl LinuxVideoFileEncoder {
             return Err(VideoFileError::new("encoder already finalized"));
         }
         let channels = self.audio_channels as u64;
-        let frames = samples.len() as u64 / channels;
+        let mut frames = samples.len() as u64 / channels;
+        // The AAC stream opens with AAC_PRIMING frames of encoder delay that mp4mux declares nowhere
+        // (no edit list), so a decoder plays all sound that much late. A buffer stamped t carries the
+        // sound of t + AAC_PRIMING: the first AAC_PRIMING input frames are dropped (stamping earlier
+        // than zero is impossible) and the rest is stamped that much earlier, which puts every kept
+        // sample at its true time.
+        let drop = AAC_PRIMING.saturating_sub(self.audio_samples_pushed).min(frames);
+        let samples = &samples[(drop * channels) as usize..];
+        self.audio_samples_pushed += drop;
+        frames -= drop;
+        if frames == 0 {
+            return Ok(());
+        }
         // Timestamps follow the running sample count, as the other arms do.
-        let pts_ns = self.audio_samples_pushed * 1_000_000_000 / self.audio_rate as u64;
+        let pts_ns = (self.audio_samples_pushed - AAC_PRIMING) * 1_000_000_000 / self.audio_rate as u64;
         let duration_ns = frames * 1_000_000_000 / self.audio_rate as u64;
         unsafe {
             if let Some(text) = self.gst.bus_error(self.bus) {
@@ -398,9 +413,7 @@ mod tests {
     /// carry both a video and an AAC audio stream (checked with ffprobe when present).
     #[test]
     fn video_and_audio_land_in_one_mp4() {
-        if LibGst::get().is_none() {
-            return;
-        }
+        assert!(LibGst::get().is_some(), "GStreamer runtime");
         let path = std::env::temp_dir().join(format!("linux-enc-av-{}.mp4", std::process::id()));
         let path_text = path.to_string_lossy().into_owned();
         let options = VideoFileEncoderOptions {

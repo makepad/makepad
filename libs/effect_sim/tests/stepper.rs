@@ -8,7 +8,6 @@ use makepad_render_kernels::compute::boundary::{LayoutFieldView, LayoutView};
 use makepad_render_kernels::compute::kernel::FieldTy;
 use makepad_render_kernels::RecordLayout;
 use makepad_render_kernels::{compile, ManualFences};
-use std::sync::Arc;
 
 const LAUNCH: &str = r#"
 let out = output(Body)
@@ -442,35 +441,4 @@ fn instance(i) {
     let mut v = Vec::new();
     st.view(SimTime::ZERO).unwrap().bodies("g", &mut v);
     assert_eq!(v.len(), 7);
-}
-
-#[test]
-fn two_thousand_bodies_step_within_budget() {
-    // 2000 boxes dropped into a pile: the effect-physics budget is <= 1 ms
-    // per 1/120 s of sim (two steps at 1/240) on one worker, including
-    // pose extraction and history upkeep (KERNELS.md §6).
-    let recs: Vec<BodyRecord> = (0..2000)
-        .map(|i| BodyRecord { pos: [(i % 20) as f32 * 0.3 - 3.0, 0.3 + (i / 400) as f32 * 0.3, ((i / 20) % 20) as f32 * 0.3 - 3.0], size: [0.2; 3], ..Default::default() })
-        .collect();
-    let mut d = PhysicsDesc::new(11);
-    d.bodies.push(BodyDesc { name: "floor".into(), group: String::new(), shape: Shape::Plane, motion: Motion::Fixed, record: BodyRecord::default() });
-    d.spawns.push(SpawnDesc { at: SimTime::ZERO, group: "pile".into(), count: 0, shape: Shape::Box, fixed: false, size: [0.2; 3], from: SpawnFrom::Records(Arc::new(recs)) });
-    let mut st = Stepper::new(d, &mut NoDrive);
-    let t0 = std::time::Instant::now();
-    let t = SimTime::from_secs(2.0);
-    st.seek(t, &mut NoDrive);
-    let wall = t0.elapsed();
-    let s = st.stats();
-    let per_120 = s.step_ns as f64 / s.steps as f64 * 2.0 / 1e6;
-    eprintln!(
-        "2000 bodies: {} steps in {:.1} ms wall; {:.3} ms per 1/120 s (extraction {:.3} ms), worst step {:.3} ms, {} checkpoints {:.1} MiB",
-        s.steps,
-        wall.as_secs_f64() * 1e3,
-        per_120,
-        s.extract_ns as f64 / s.steps as f64 * 2.0 / 1e6,
-        s.step_ns_max as f64 / 1e6,
-        s.checkpoints,
-        s.checkpoint_bytes as f64 / (1 << 20) as f64
-    );
-    assert_eq!(s.bodies_live, 2001);
 }

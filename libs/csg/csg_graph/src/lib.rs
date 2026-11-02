@@ -114,6 +114,92 @@ pub enum MirrorPlane {
     Xy,
 }
 
+/// One operation of the exact B-rep engine. Its input bodies are the [`Op::Brep`] node's
+/// `inputs`, in order; frames and units are those of the other ops. Fillets and shells see
+/// the exact edges and faces.
+#[derive(Clone, Debug, PartialEq)]
+pub enum BrepOp {
+    Box { size: P3 },
+    Sphere { radius: f64 },
+    /// Along Y, centred; `top_radius` differs from `radius` for a cone.
+    Cylinder { radius: f64, top_radius: f64, height: f64 },
+    /// In the XZ plane.
+    Torus { radius: f64, tube: f64 },
+    Extrude { sketch: Sketch, plane: Plane, height: f64, both: bool },
+    /// About Y: sketch u is the radius, v the height.
+    Revolve { sketch: Sketch, angle: f64 },
+    /// The sketch carried along a smooth path through `path`.
+    Sweep { sketch: Sketch, path: Vec<P3> },
+    Loft { sections: Vec<LoftSection>, plane: Plane },
+    /// The first input combined with every other in order.
+    Boolean { mode: BoolMode },
+    Fillet { radius: f64, edges: edges::EdgeSel },
+    Chamfer { size: f64, edges: edges::EdgeSel },
+    /// Hollow, walls `thickness` inward.
+    Shell { thickness: f64, open: Open },
+    Offset { distance: f64 },
+    /// Scale, then rotate X, Y, Z (degrees), then move by `at`.
+    Place { at: P3, rotate: P3, scale: P3 },
+}
+
+/// One step of a body's recipe: everything it takes, by key.
+#[derive(Clone, Debug)]
+pub struct BrepStep {
+    pub key: Key,
+    pub op: BrepOp,
+    pub inputs: Vec<Key>,
+}
+
+/// A body's exact properties (mm, mm², mm³).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BrepMeasure {
+    pub volume: f64,
+    pub area: f64,
+    pub centroid: P3,
+    pub min: P3,
+    pub max: P3,
+    pub faces: usize,
+    pub edges: usize,
+}
+
+/// An exact edge or face, for tools that pick them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BrepEntity {
+    pub id: u32,
+    /// `line`, `circle`, `curve`; or a surface kind for a face.
+    pub kind: &'static str,
+    /// Length of an edge, area of a face.
+    pub size: f64,
+    /// An edge's midpoint, a face's centroid.
+    pub at: P3,
+    /// A flat face's outward normal.
+    pub normal: Option<P3>,
+    /// The edge's solid angle is under 180 degrees.
+    pub convex: bool,
+    /// The edge's two faces meet tangent.
+    pub smooth: bool,
+    /// An arc's radius.
+    pub radius: Option<f64>,
+}
+
+/// A step that failed: which one and why.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BrepFailure {
+    /// The failing step's key; `None` when it isn't one step's fault.
+    pub step: Option<Key>,
+    pub message: String,
+}
+
+/// What runs [`Op::Brep`] nodes: a host that wants exact bodies gives the evaluator one, so
+/// this graph (and whoever links it without bodies) never links the kernel.
+pub trait BrepEngine: Send + Sync {
+    /// The mesh of the last step's body within `chord` mm. `cancelled` is polled.
+    fn mesh(&self, steps: Vec<BrepStep>, chord: f64, cancelled: Option<&dyn Fn() -> bool>) -> Result<Arc<TriMesh>, BrepFailure>;
+    fn measure(&self, steps: Vec<BrepStep>) -> Result<BrepMeasure, BrepFailure>;
+    /// Its exact (edges, faces).
+    fn entities(&self, steps: Vec<BrepStep>) -> Result<(Vec<BrepEntity>, Vec<BrepEntity>), BrepFailure>;
+}
+
 /// One operation. Positions of generators are their own frame (centred on the
 /// origin, Y up); [`Op::Transform`] moves any result. Two ops are the same when
 /// their nodes' keys are.
@@ -135,7 +221,9 @@ pub enum Op {
     /// `mesh_with`: beside another gear node (same module), `angle` degrees round it.
     Gear { gear: GearSpec, plane: Plane, mesh_with: Option<(NodeId, f64)> },
     /// An ISO metric threaded rod along +Y.
-    Thread { diameter: f64, pitch: Option<f64>, length: f64, clearance: f64, left: bool },
+    /// `runout`: the length each end fades over (none: one pitch); `internal`: a threaded hole's
+    /// tool, fading out to the major radius instead of the minor.
+    Thread { diameter: f64, pitch: Option<f64>, length: f64, clearance: f64, left: bool, runout: Option<f64>, internal: bool },
     Fillet { source: NodeId, radius: f64, edges: edges::EdgeSel },
     Chamfer { source: NodeId, size: f64, edges: edges::EdgeSel },
     /// Holes drilled from each `at` along `dir` (into the material); depth none: through.
@@ -151,6 +239,8 @@ pub enum Op {
     Field { shape: SdfShape, cell: Option<f64> },
     /// A mesh given as data (an import).
     Mesh { mesh: Arc<TriMesh> },
+    /// A body of the exact engine; as a mesh, its tessellation.
+    Brep { op: BrepOp, inputs: Vec<NodeId> },
     /// Separate links (chains, chainmail) as tubes of `sides` facets round; a link's slot indexes
     /// `materials` as in an [`SdfShape`] (outside the key).
     Links { links: Arc<makepad_csg_sdf::Links>, sides: u32, materials: Vec<makepad_csg_sdf::SdfMaterial> },
@@ -163,6 +253,7 @@ impl Op {
             Op::Fillet { source, .. } | Op::Chamfer { source, .. } | Op::Hole { source, .. } | Op::Mirror { source, .. } | Op::Shell { source, .. } | Op::Transform { source, .. } => vec![*source],
             Op::Boolean { a, b, .. } => std::iter::once(*a).chain(b.iter().copied()).collect(),
             Op::Gear { mesh_with: Some((g, _)), .. } => vec![*g],
+            Op::Brep { inputs, .. } => inputs.clone(),
             _ => Vec::new(),
         }
     }
@@ -192,6 +283,7 @@ impl Op {
             Op::Field { .. } => "sdf",
             Op::Mesh { .. } => "mesh",
             Op::Links { .. } => "links",
+            Op::Brep { .. } => "brep",
         }
     }
 }
@@ -330,12 +422,14 @@ impl Graph {
                     None => h.u(0),
                 }
             }
-            Op::Thread { diameter, pitch, length, clearance, left } => {
+            Op::Thread { diameter, pitch, length, clearance, left, runout, internal } => {
                 h.f(*diameter);
                 h.opt(*pitch);
                 h.f(*length);
                 h.f(*clearance);
                 h.u(*left as u64);
+                h.opt(*runout);
+                h.u(*internal as u64);
             }
             Op::Fillet { source, radius, edges } => {
                 child(&mut h, *source);
@@ -404,6 +498,13 @@ impl Graph {
             Op::Links { links, sides, .. } => {
                 h.bytes(&links.key());
                 h.u(*sides as u64);
+            }
+            // Debug writes every field, floats exactly; the inputs hash by their keys.
+            Op::Brep { op, inputs } => {
+                h.str(&format!("{op:?}"));
+                for i in inputs {
+                    child(&mut h, *i);
+                }
             }
             Op::Mesh { mesh } => {
                 h.u(mesh.vertices.len() as u64);

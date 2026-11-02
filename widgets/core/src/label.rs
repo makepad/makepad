@@ -581,18 +581,33 @@ impl Widget for Label {
         if self.selection.is_some() {
             self.draw_selection.new_draw_call(cx);
         }
-        let (rect, laid) = if self.links.is_empty() {
-            self.draw_text.draw_walk_keep(cx, walk, self.align, shown)
-        } else {
-            // Every glyph gets its colour (a glyph's own colour sticks for the
-            // ones after it), the links' in the link ink.
-            let base = self.draw_text.color;
-            let (links, ink) = (&self.links, self.link_color);
-            let restyle = move |laid: &LaidoutText| Some(recolor_links(laid, links, base, ink));
-            let out = self.draw_text.draw_walk_restyled(cx, walk, self.align, shown, Some(&restyle));
-            self.draw_text.color = base;
-            out
+        let base = self.draw_text.color;
+        let (links, ink) = (&self.links, self.link_color);
+        let restyle = move |laid: &LaidoutText| {
+            // Row alignment is computed before ellipsis truncation, so an
+            // overflowing row can retain a negative origin even after it fits.
+            // Keep the start visible by left-aligning those rows. Use the same
+            // corrected layout for drawing, selection and link hit-testing.
+            let clips_start = laid.rows.iter().any(|row| row.origin_in_lpxs.x < 0.0);
+            let mut out = if !links.is_empty() {
+                // Every glyph gets its colour (a glyph's own colour sticks for
+                // the ones after it), the links' in the link ink.
+                recolor_links(laid, links, base, ink)
+            } else if clips_start {
+                laid.clone()
+            } else {
+                return None;
+            };
+            if clips_start {
+                for row in &mut out.rows {
+                    row.origin_in_lpxs.x = row.origin_in_lpxs.x.max(0.0);
+                }
+            }
+            Some(out)
         };
+        let (rect, laid) =
+            self.draw_text.draw_walk_restyled(cx, walk, self.align, shown, Some(&restyle));
+        self.draw_text.color = base;
         if let Some((a, b)) = self.selection {
             self.draw_selection_rects(cx, rect, &laid, a, b);
         }

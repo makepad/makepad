@@ -628,7 +628,7 @@ mod lease_protocol_tests {
     #[test]
     fn an_old_only_fleet_reports_the_node_and_required_upgrade() {
         let error = route_generation(vec![snapshot("192.0.2.93", "0.2.0", "loaded")], "image", &leased_request("flux1-schnell")).unwrap_err();
-        assert!(error.contains("192.0.2.93"), "{error}");
+        assert!(error.contains("a node"), "{error}");
         assert!(error.contains("0.2.0"), "{error}");
         assert!(error.contains("upgrade AIHub to 0.3.0 or newer"), "{error}");
         assert!(error.contains("keepalive"), "{error}");
@@ -636,13 +636,13 @@ mod lease_protocol_tests {
 
     #[test]
     fn absent_or_unrecognized_health_is_not_assumed_to_support_leases() {
-        let mut absent = snapshot("192.0.2.24", "0.3.0", "loaded");
+        let mut absent = snapshot("192.0.2.10", "0.3.0", "loaded");
         absent.health = None;
-        let unknown = snapshot("192.0.2.25", "development", "loaded");
-        let mut wrong_service = snapshot("192.0.2.26", "0.3.0", "loaded");
+        let unknown = snapshot("192.0.2.11", "development", "loaded");
+        let mut wrong_service = snapshot("192.0.2.12", "0.3.0", "loaded");
         wrong_service.health.as_mut().unwrap().service = "other-service".into();
         let error = route_generation(vec![absent, unknown, wrong_service], "image", &leased_request("flux1-schnell")).unwrap_err();
-        assert!(error.contains("192.0.2.24:8123: cannot verify job leases") || error.contains("192.0.2.24: cannot verify job leases"), "{error}");
+        assert!(error.contains("node 10: cannot verify job leases"), "{error}");
         assert!(error.contains("/health is unavailable"), "{error}");
         assert!(error.contains("development"), "{error}");
         assert!(error.contains("does not identify an AIHub service"), "{error}");
@@ -874,6 +874,113 @@ mod transport_tests {
     }
 }
 
+mod fleet_diagnostics {
+    use super::*;
+    use crate::fleet_report::{diagnose_with, parse_known_nodes, FleetReport, NodeReport, NodeStatus, NETWORKING_OFF};
+
+    fn models(state: &str) -> Vec<ModelInfoJson> {
+        vec![ModelInfoJson::deserialize_json(&format!(
+            r#"{{"id":"trellis-2","domain":"mesh","backend":"mesh","available":true,"gated":false,"state":"{state}"}}"#
+        )).unwrap()]
+    }
+
+    #[test]
+    fn roster_keeps_disabled_build_nodes_and_applies_explicit_skips() {
+        let nodes = parse_known_nodes(
+            "# roster\nalpha addr=192.0.2.1 dev=off # still an AI node\n\
+             beta arch=x64 addr=192.0.2.2\nmissing dev=on\nskipped addr=192.0.2.3\n\
+             duplicate addr=192.0.2.1\n",
+            "192.0.2.2:8123, 192.0.2.4:9000, worker.example:8123, skipped.example",
+            "skipped,skipped.example",
+        );
+        assert_eq!(nodes.iter().map(|n| (n.label.as_str(), n.base_url_or_addr.as_str())).collect::<Vec<_>>(), vec![
+            ("alpha", "192.0.2.1"), ("beta", "192.0.2.2"),
+            ("192.0.2.4:9000", "192.0.2.4:9000"), ("worker.example:8123", "worker.example:8123"),
+        ]);
+        assert!(parse_known_nodes("alpha addr=192.0.2.1", "192.0.2.1:8123", "alpha").is_empty());
+    }
+
+    #[test]
+    fn routing_diagnosis_names_every_missing_node_and_its_remedy() {
+        let roster = parse_known_nodes("heard addr=192.0.2.1\nrefused addr=192.0.2.2\noffline addr=192.0.2.3\ndenied addr=192.0.2.4", "", "");
+        let mut heard = fleet::BoxSnapshot::new("https://192.0.2.1:8123");
+        heard.models = models("absent");
+        let mut probed = Vec::new();
+        let report = diagnose_with("trellis-2", "mesh", &[heard], &roster, None, |node| {
+            probed.push(node.label.clone());
+            Err(match node.label.as_str() {
+                "refused" => NodeStatus::Refusing,
+                "offline" => NodeStatus::Unreachable,
+                "denied" => NodeStatus::NotAuthorised("HTTP 403".into()),
+                _ => panic!("already heard node must not be probed"),
+            })
+        });
+        assert_eq!(probed, ["refused", "offline", "denied"]);
+        let text = report.render("trellis-2");
+        assert!(text.starts_with("no LAN AI Hub node has trellis-2 installed\nHeard 1 of 4 known fleet nodes."), "{text}");
+        for (label, reason, fix) in [
+            ("heard", "not installed", "Install trellis-2 in that node's AI Hub models"),
+            ("refused", "TCP refused", "ai_hub_role = server"),
+            ("offline", "unreachable", "Check the machine is on"),
+            ("denied", "HTTP 403", "fleet credential"),
+        ] {
+            let line = text.lines().find(|line| line.contains(&format!("{label} ("))).unwrap();
+            assert!(line.contains(reason) && line.contains(fix), "{line}");
+            if label != "heard" { assert!(line.starts_with("NOT heard:")); }
+        }
+        assert!(text.contains("networked_ai_hub = on"));
+        assert!(text.contains("restart its hub"));
+        assert!(text.contains("What to do:"));
+    }
+
+    #[test]
+    fn discovery_off_is_the_first_line_and_no_node_is_truncated() {
+        let report = FleetReport {
+            discovery_off: Some(NETWORKING_OFF.into()),
+            unheard: (1..=8).map(|i| NodeReport {
+                label: format!("node-{i}"), base_url_or_addr: format!("192.0.2.{i}"),
+                status: NodeStatus::NoAnswer("/models did not answer".into()), models: vec![],
+            }).collect(),
+            ..Default::default()
+        };
+        let text = report.render("trellis-2");
+        assert_eq!(text.lines().next(), Some(NETWORKING_OFF));
+        assert!(text.contains("Heard 0 of 8 known fleet nodes."));
+        for i in 1..=8 {
+            let line = text.lines().find(|line| line.contains(&format!("node-{i} ("))).unwrap();
+            assert!(line.contains("/models did not answer") && line.contains("restart its hub"), "{line}");
+        }
+    }
+
+    #[test]
+    fn direct_answers_count_as_heard_and_installing_nodes_say_to_wait() {
+        let roster = parse_known_nodes("ready addr=192.0.2.1\ninstalling addr=192.0.2.2", "", "");
+        let report = diagnose_with("trellis-2", "mesh", &[], &roster, None, |node| {
+            Ok(models(if node.label == "ready" { "loaded" } else { "downloading" }))
+        });
+        assert!(report.unheard.is_empty());
+        assert_eq!(report.heard[0].status, NodeStatus::Ready);
+        assert_eq!(report.heard[1].status, NodeStatus::Installing("downloading".into()));
+        let text = report.render("trellis-2");
+        assert!(text.contains("Heard 2 of 2 known fleet nodes."));
+        assert!(text.contains("Wait for trellis-2 to finish installing"));
+        assert!(text.contains("Retry routing"));
+    }
+
+    #[test]
+    fn a_failed_generation_route_keeps_its_reason_and_full_diagnosis() {
+        let mut snapshot = fleet::BoxSnapshot::new("https://192.0.2.1:8123");
+        snapshot.models = models("absent");
+        let request = GenerateRequestJson { model: "trellis-2".into(), input_b64: Some("image".into()), ..Default::default() };
+        let error = FleetRouter::default().route_snapshots_with_diagnosis(vec![snapshot], "mesh", &request,
+            |heard, model| diagnose_with(model, "mesh", heard, &[], None, |_| panic!("no probe needed")).render(model)
+        ).err().unwrap();
+        assert!(error.starts_with("no LAN AI Hub node has trellis-2 installed"), "{error}");
+        assert!(error.contains("Heard 1 of 1 known fleet nodes."), "{error}");
+        assert!(error.contains("Routing reason:"), "{error}");
+    }
+}
+
 mod tables {
     use super::*;
     use crate::registry::request_problem;
@@ -899,8 +1006,10 @@ mod tables {
         assert_eq!(fleet::installed_model(&offers, "image", "kokoro"), None);
         assert_eq!(fleet::installed_model(&[], "image", ""), None);
         // Nothing installed is not routed, and the reason names the model.
-        let error = FleetRouter { installed_only: true }.route_snapshots(offers.clone(), "image",
-            &GenerateRequestJson { model: "flux1-dev".into(), ..Default::default() }).err().unwrap();
+        let error = FleetRouter { installed_only: true }.route_snapshots_with_diagnosis(offers.clone(), "image",
+            &GenerateRequestJson { model: "flux1-dev".into(), ..Default::default() },
+            |snapshots, model| crate::fleet_report::diagnose_with(model, "image", snapshots, &[], None,
+                |_| unreachable!("the supplied snapshots contain model lists")).render(model)).err().unwrap();
         assert!(error.contains("no LAN AI Hub node has flux1-dev installed"), "{error}");
     }
 

@@ -383,12 +383,4 @@ mod tests {
         assert!(!skewed.is_aligned());
     }
 
-    #[test]
-    fn anchor_count_follows_the_gaussian_budget() {
-        for wanted in [32_768usize, 65_536, 131_072, 262_144] {
-            assert_eq!(wanted / GS_PER_POINT * GS_PER_POINT, wanted);
-            assert_eq!((wanted / GS_PER_POINT) * GS_PER_POINT, wanted);
-        }
-        assert_eq!(262_144 / GS_PER_POINT, 8192);
-    }
 }

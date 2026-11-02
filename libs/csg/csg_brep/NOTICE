@@ -1,0 +1,37 @@
+solidcore
+Copyright (c) 2026 The solidcore contributors
+
+This product is a Rust port (a derivative work) of the SMLib and SM_API
+components of USD BRep, https://github.com/NVIDIA-Omniverse/usd-brep
+(v1.0.1, commit 3fd5b95), licensed under the Apache License, Version 2.0.
+See ATTRIBUTION.md for exactly which upstream material is used.
+
+The upstream work carries the following notice:
+
+  USD BRep is Copyright (c) 2020-2026, NVIDIA CORPORATION & AFFILIATES. All
+  rights reserved. NVIDIA-authored portions of this product are licensed under
+  the Apache License, Version 2.0, except where otherwise noted.
+
+The upstream SMLib and SM_API source files carry the SPDX header:
+
+  SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+  SPDX-License-Identifier: Apache-2.0
+
+Upstream third-party notices (THIRD_PARTY_NOTICES.md at the pinned commit) cover
+OpenUSD, oneTBB, hwloc, MaterialX, OpenSubdiv, CPython, HACL*, pybind11, the
+UsdSolid proposals, usd-validation-nvidia, the repo bootstrap scripts and optional
+Python GUI tooling. None of those components is part of SMLib or SM_API, and none
+is used, ported or redistributed by solidcore, so no further third-party notices
+apply.
+
+Modifications: the C++ sources were translated to Rust and restructured (arena
+topology, typed ids, error values instead of status codes, explicit kernel
+state instead of a global context). Each ported Rust file names the upstream
+file(s) it derives from in its header.
+
+makepad-csg-brep
+Derived from solidcore 1.0.1 (revision in Cargo.toml, package.metadata.source).
+Modifications by the Makepad contributors: renamed the crate; replaced the
+thiserror derive with hand-written Error impls; removed tests outside src/, the
+reference harness and all non-source material; removed a feature flag; reworded
+references in comments. Later changes are in this repository's history.

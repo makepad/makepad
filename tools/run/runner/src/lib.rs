@@ -37,6 +37,7 @@ macro_rules! print {
 mod lexer {
     pub use relax_compiler::lexer::*;
 }
+mod cargo;
 pub mod fetch;
 mod help;
 pub mod launch;
@@ -98,25 +99,14 @@ fn provided() {
     (host().provide)()
 }
 
-/// The loader binary. Usually this process's executable; but an app the runner starts runs
-/// from its own macOS bundle (`<runner data>/bundles/<app>.app/Contents/MacOS/<Name>`, a hard
-/// link to the loader, or a copy when it is on another volume) so the Dock shows the app's name
-/// and icon. Then MAKEPAD_RUN_LOADER, inherited from the runner, names the loader itself: it is kept
-/// when it is the same file (same inode) or the same bytes, and everything the loader finds next
-/// to itself (the Builder's folder, the runner's checkout and std) is found next to that one.
+/// The loader binary: current_exe is canonicalised so a macOS bundle's in-bundle symlink
+/// resolves to the real loader. Everything found beside the loader (the runner's checkout,
+/// std and makepad-launcher) is therefore found beside that shared binary.
 pub(crate) fn loader_exe() -> Option<std::path::PathBuf> {
     static EXE: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
     EXE.get_or_init(|| {
         let _kept = relax_compiler::zone_alloc::kept();
-        let exe = plain(std::env::current_exe().and_then(|e| e.canonicalize()).ok()?);
-        if let Some(named) = std::env::var_os("MAKEPAD_RUN_LOADER").map(std::path::PathBuf::from) {
-            if let Ok(named) = named.canonicalize().map(plain) {
-                if named != exe && same_binary(&named, &exe) {
-                    return Some(named);
-                }
-            }
-        }
-        Some(exe)
+        Some(plain(std::env::current_exe().and_then(|e| e.canonicalize()).ok()?))
     })
     .clone()
 }
@@ -136,18 +126,6 @@ fn plain(p: std::path::PathBuf) -> std::path::PathBuf {
         }
     }
     p
-}
-
-fn same_binary(a: &std::path::Path, b: &std::path::Path) -> bool {
-    let (Ok(ma), Ok(mb)) = (std::fs::metadata(a), std::fs::metadata(b)) else { return false };
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        if ma.dev() == mb.dev() && ma.ino() == mb.ino() {
-            return true;
-        }
-    }
-    ma.len() == mb.len() && matches!((std::fs::read(a), std::fs::read(b)), (Ok(x), Ok(y)) if x == y)
 }
 
 /// The runner on this process's command line, with `host` added.
@@ -191,8 +169,8 @@ fn run(raw_args: Vec<Vec<u8>>) {
     // the boot thread compiles: its allocations go to the compiler arena (JIT calls switch back)
     let _phase = relax_compiler::zone_alloc::compiler();
     relax_compiler::clock::mark_process_start();
-    // a build script's RUSTC (Relax itself) asked for its version
-    if relax_compiler::relax_as_rustc() {
+    // A build script's CARGO / RUSTC calls are answered before normal loader commands.
+    if cargo::dispatch(&raw_args) || relax_compiler::relax_as_rustc() {
         return;
     }
     // cargo's RUSTC_WRAPPER of an --allow-c native build, or a stubbed build script of it
@@ -256,9 +234,15 @@ fn run(raw_args: Vec<Vec<u8>>) {
         // the remote hub: `hub [--listen <addr>]`, `remote-relay [--dial ..]`, `remote add|pair|list`
         Some("hub") => std::process::exit(remote::hub(&args[2..])),
         // `devhub` (or `observe`) `stream|ls|inspect|reply|inbox|hubs`: the local devhub (every JIT
-        // on the LAN from the master)
-        #[cfg(unix)]
-        Some("devhub" | "observe") => std::process::exit(makepad_devhub::cli::main(&args[2..])),
+        // on the LAN from the master), its own binary
+        Some("devhub" | "observe") => {
+            if args.get(2).map(String::as_str) == Some("ci") {
+                eprintln!("use `makepad ci`");
+                std::process::exit(2);
+            }
+            std::process::exit(devhub(&args[2..]));
+        }
+        Some("ci") => std::process::exit(devhub(&args[1..])),
         Some("remote-relay") => std::process::exit(remote::relay(&args[2..])),
         Some("remote") => std::process::exit(remote::remote(&args[2..])),
         // `pack-src [--target <triple>] <out.store> <package>...`: the source archive `run --src` runs from
@@ -590,3 +574,34 @@ fn boot_package(opts: Vec<String>, rest: Vec<String>) -> i32 {
     code
 }
 
+
+/// `makepad devhub <words>`: the `makepad-devhub` binary of the checkout this JIT came from (else
+/// the one this folder is in), through cargo: never a stale one. devhub is not linked here, so
+/// its changes never rebuild the JIT. Returns only when it could not start.
+fn devhub(words: &[String]) -> i32 {
+    let exe = std::env::current_exe().ok();
+    let cwd = std::env::current_dir().ok();
+    let is_root = |d: &&std::path::Path| d.join("libs/devhub/Cargo.toml").is_file();
+    let root = exe.iter().flat_map(|e| e.ancestors()).find(is_root).or_else(|| cwd.iter().flat_map(|c| c.ancestors()).find(is_root));
+    let Some(root) = root else {
+        eprintln!("makepad devhub: no makepad checkout above {} or this folder (devhub builds from one)", exe.as_ref().map_or_else(String::new, |e| e.display().to_string()));
+        return 2;
+    };
+    let cargo = std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".cargo/bin/cargo")).filter(|c| c.exists()).unwrap_or_else(|| "cargo".into());
+    // (rustup counts its nested proxies in this one and refuses past 20: cargo -> makepad -> cargo must not count)
+    let mut command = std::process::Command::new(cargo);
+    command.args(["run", "--profile", "host", "-q", "--manifest-path"])
+        .arg(root.join("Cargo.toml"))
+        .args(["-p", "makepad-devhub", "--bin", "makepad-devhub", "--"])
+        .args(words)
+        .env_remove("RUST_RECURSION_COUNT");
+    #[cfg(unix)]
+    let e = std::os::unix::process::CommandExt::exec(&mut command);
+    #[cfg(not(unix))]
+    let e = match command.status() {
+        Ok(status) => return status.code().unwrap_or(1),
+        Err(e) => e,
+    };
+    eprintln!("makepad devhub: cargo: {e}");
+    1
+}

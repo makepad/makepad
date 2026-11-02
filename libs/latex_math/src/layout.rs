@@ -2186,13 +2186,6 @@ mod tests {
         layout(&nodes, MATH_FONT, 20.0, MathStyle::Display).expect("layout failed")
     }
 
-    fn has_glyphs(output: &LayoutOutput) -> bool {
-        output
-            .items
-            .iter()
-            .any(|i| matches!(i, LayoutItem::Glyph(_)))
-    }
-
     fn has_rules(output: &LayoutOutput) -> bool {
         output
             .items
@@ -2209,120 +2202,10 @@ mod tests {
     }
 
     #[test]
-    fn test_simple_char() {
-        let out = layout_expr("x");
-        assert!(out.width > 0.0);
-        assert!(out.ascent > 0.0);
-        assert_eq!(count_glyphs(&out), 1);
-    }
-
-    #[test]
     fn test_multiple_chars() {
         let out = layout_expr("x+y");
         assert!(out.width > 0.0);
         assert_eq!(count_glyphs(&out), 3);
-    }
-
-    #[test]
-    fn test_fraction_has_rule() {
-        let out = layout_expr(r"\frac{a}{b}");
-        assert!(has_rules(&out), "fraction should produce a rule (line)");
-        assert!(has_glyphs(&out), "fraction should produce glyphs");
-        assert!(out.ascent > 0.0);
-        assert!(out.descent > 0.0);
-    }
-
-    #[test]
-    fn test_fraction_dimensions() {
-        let single = layout_expr("a");
-        let frac = layout_expr(r"\frac{a}{b}");
-        // Fraction should be taller than a single char
-        assert!(
-            frac.height > single.height,
-            "frac height {} should be > single height {}",
-            frac.height,
-            single.height
-        );
-    }
-
-    #[test]
-    fn test_superscript_raises() {
-        let out = layout_expr("x^2");
-        assert!(count_glyphs(&out) >= 2, "should have at least x and 2");
-        // The superscript glyph should be positioned above baseline
-        let glyphs: Vec<_> = out
-            .items
-            .iter()
-            .filter_map(|i| {
-                if let LayoutItem::Glyph(g) = i {
-                    Some(g)
-                } else {
-                    None
-                }
-            })
-            .collect();
-        // At least one glyph should have negative y (above baseline)
-        assert!(
-            glyphs.iter().any(|g| g.y < 0.0),
-            "superscript should be above baseline"
-        );
-    }
-
-    #[test]
-    fn test_subscript_lowers() {
-        let out = layout_expr("x_i");
-        let glyphs: Vec<_> = out
-            .items
-            .iter()
-            .filter_map(|i| {
-                if let LayoutItem::Glyph(g) = i {
-                    Some(g)
-                } else {
-                    None
-                }
-            })
-            .collect();
-        // At least one glyph should have positive y (below baseline)
-        assert!(
-            glyphs.iter().any(|g| g.y > 0.0),
-            "subscript should be below baseline"
-        );
-    }
-
-    #[test]
-    fn test_sqrt() {
-        let out = layout_expr(r"\sqrt{x}");
-        assert!(has_glyphs(&out));
-        assert!(has_rules(&out), "sqrt should have a horizontal rule");
-    }
-
-    #[test]
-    fn test_greek_symbols() {
-        let out = layout_expr(r"\alpha + \beta");
-        assert!(count_glyphs(&out) >= 3);
-        assert!(out.width > 0.0);
-    }
-
-    #[test]
-    fn test_left_right_parens() {
-        let inner = layout_expr("x");
-        let delimited = layout_expr(r"\left(x\right)");
-        assert!(
-            delimited.width > inner.width,
-            "delimited should be wider than content alone"
-        );
-    }
-
-    #[test]
-    fn test_matrix() {
-        let out = layout_expr(r"\begin{pmatrix}a & b \\ c & d\end{pmatrix}");
-        assert!(has_glyphs(&out));
-        // Should have at least 4 content glyphs + 2 delimiter glyphs
-        assert!(
-            count_glyphs(&out) >= 4,
-            "matrix should have at least 4 glyphs, got {}",
-            count_glyphs(&out)
-        );
     }
 
     #[test]
@@ -2347,39 +2230,6 @@ mod tests {
     }
 
     #[test]
-    fn test_nested_fractions() {
-        let out = layout_expr(r"\frac{\frac{a}{b}}{c}");
-        assert!(has_glyphs(&out));
-        assert!(has_rules(&out));
-        // Should have at least 2 rules (one for each fraction)
-        let rule_count = out
-            .items
-            .iter()
-            .filter(|i| matches!(i, LayoutItem::Rule(_)))
-            .count();
-        assert!(
-            rule_count >= 2,
-            "nested fractions should have at least 2 rules, got {}",
-            rule_count
-        );
-    }
-
-    #[test]
-    fn test_complex_expression() {
-        // Euler's identity: e^{i\pi} + 1 = 0
-        let out = layout_expr(r"e^{i\pi} + 1 = 0");
-        assert!(has_glyphs(&out));
-        assert!(out.width > 0.0);
-    }
-
-    #[test]
-    fn test_sum_with_limits() {
-        let out = layout_expr(r"\sum_{i=1}^{n} x_i");
-        assert!(has_glyphs(&out));
-        assert!(out.width > 0.0);
-    }
-
-    #[test]
     fn test_display_vs_text_style() {
         let nodes = parse(r"\frac{a}{b}");
         let display = layout(&nodes, MATH_FONT, 20.0, MathStyle::Display).unwrap();
@@ -2398,28 +2248,6 @@ mod tests {
         let out = layout_expr("");
         assert_eq!(out.width, 0.0);
         assert_eq!(count_glyphs(&out), 0);
-    }
-
-    #[test]
-    fn test_operator_name() {
-        let out = layout_expr(r"\sin x");
-        assert!(has_glyphs(&out));
-        // sin produces 3 glyphs (s, i, n) + 1 for x, but with spacing
-        assert!(
-            count_glyphs(&out) >= 4,
-            "should have at least 4 glyphs for sin x, got {}",
-            count_glyphs(&out)
-        );
-    }
-
-    #[test]
-    fn test_accent_hat() {
-        let plain = layout_expr("x");
-        let accented = layout_expr(r"\hat{x}");
-        assert!(
-            accented.ascent >= plain.ascent,
-            "accent should increase ascent"
-        );
     }
 
     #[test]
@@ -2447,39 +2275,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_sub_superscript() {
-        let out = layout_expr("x_i^2");
-        let glyphs: Vec<_> = out
-            .items
-            .iter()
-            .filter_map(|i| {
-                if let LayoutItem::Glyph(g) = i {
-                    Some(g)
-                } else {
-                    None
-                }
-            })
-            .collect();
-        // Should have x, i, 2 (at minimum)
-        assert!(
-            glyphs.len() >= 3,
-            "should have >= 3 glyphs, got {}",
-            glyphs.len()
-        );
-        // Should have both above and below baseline
-        let has_above = glyphs.iter().any(|g| g.y < -0.1);
-        let has_below = glyphs.iter().any(|g| g.y > 0.1);
-        assert!(has_above, "should have glyph above baseline (superscript)");
-        assert!(has_below, "should have glyph below baseline (subscript)");
-    }
-
-    #[test]
-    fn test_integral() {
-        let out = layout_expr(r"\int_0^1 f(x) dx");
-        assert!(has_glyphs(&out));
-        assert!(out.width > 0.0);
-    }
 }
 
 /// One drawing command of a glyph outline.

@@ -75,6 +75,17 @@ pub struct CxA11y {
     announcements: Vec<Notification>,
     pending: Option<(u64, ActionResult)>,
     requested_focus: NodeId,
+    /// Nodes whose path the widget layer could not name while they drew (`path_unknown`).
+    paths_unknown: Vec<(WindowKey, NodeId)>,
+}
+
+/// Names a widget node's path (`Node::path`) after the frame drew, for nodes whose path the
+/// widget layer could not name during the draw: `(cx, widget uid, its window's root uid)`.
+static PATH_RESOLVER: std::sync::OnceLock<fn(&Cx, u64, u64) -> Option<String>> = std::sync::OnceLock::new();
+
+/// The widget layer's path resolver (`PATH_RESOLVER`); the first one set stays.
+pub fn set_path_resolver(resolve: fn(&Cx, u64, u64) -> Option<String>) {
+    let _ = PATH_RESOLVER.set(resolve);
 }
 
 impl CxA11y {
@@ -286,6 +297,25 @@ impl CxA11y {
         rec.owner = f.id;
         rec.part_key = key;
         rec.next = node;
+    }
+    /// The path of the node being built could not be named yet: it is asked again once the
+    /// frame has drawn (`set_path_resolver`), and after every later frame until it is named.
+    pub fn path_unknown(&mut self, token: u32) {
+        let f = self.stack[token as usize];
+        if let Some(w) = f.window {
+            if !self.paths_unknown.contains(&(w, f.id)) {
+                self.paths_unknown.push((w, f.id));
+            }
+        }
+    }
+    /// Whether the node being built still waits for its path (`path_unknown`): its widget names
+    /// it again when it draws.
+    pub fn path_pending(&self, token: u32) -> bool {
+        if self.paths_unknown.is_empty() {
+            return false;
+        }
+        let f = self.stack[token as usize];
+        f.window.is_some_and(|w| self.paths_unknown.contains(&(w, f.id)))
     }
     pub fn is_current_node(&self, uid: u64) -> bool { self.stack.last().is_some_and(|f| f.id == NodeId::widget(uid)) }
     pub fn set_label_for(&mut self, token: u32, target: u64) {
@@ -672,6 +702,26 @@ impl Cx {
     pub(crate) fn a11y_finish_frame(&mut self) {
         if !self.a11y.on {
             return;
+        }
+        if !self.a11y.paths_unknown.is_empty() {
+            // Kept until named: the graph may read a widget made mid-draw only after a later
+            // frame. A node whose window or record went is dropped.
+            let mut unknown = std::mem::take(&mut self.a11y.paths_unknown);
+            if let Some(resolve) = PATH_RESOLVER.get() {
+                unknown.retain(|(w, id)| {
+                    let Some(root) = self.a11y.windows.get(w).filter(|t| t.records.contains_key(id)).map(|t| t.root.uid()) else {
+                        return false;
+                    };
+                    let Some(path) = resolve(self, id.uid(), root) else { return true };
+                    if let Some(rec) = self.a11y.windows.get_mut(w).and_then(|t| t.records.get_mut(id)) {
+                        rec.next.path = path;
+                    }
+                    false
+                });
+            } else {
+                unknown.clear();
+            }
+            self.a11y.paths_unknown = unknown;
         }
         let mut a11y = std::mem::take(&mut self.a11y);
         let mut ops = std::mem::take(&mut self.platform_ops);

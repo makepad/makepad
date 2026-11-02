@@ -48,6 +48,10 @@ pub enum Discovery {
 }
 
 impl Discovery {
+    pub fn nodes_with_age(&self) -> Vec<(DiscoveredNode, std::time::Duration)> {
+        Vec::new()
+    }
+
     pub fn nodes(&self) -> Vec<DiscoveredNode> {
         Vec::new()
     }
@@ -60,7 +64,9 @@ pub fn start_listener() -> Discovery {
 }
 
 /// Nothing listens here: nothing to stop.
-pub fn stop_listener() {}
+pub fn stop_listener() {
+    crate::fleet_report::stop_probe_workers();
+}
 
 #[cfg(test)]
 mod tests {

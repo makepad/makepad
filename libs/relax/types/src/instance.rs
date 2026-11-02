@@ -106,11 +106,15 @@ impl Instance {
     /// storage identity; the FnOnce adapter arguments are the call trait's args.
     pub fn resolve_closure(tcx: &Tcx, prog: &Program, ty: TyId, requested_kind: ClosureKind) -> Self {
         let TyKind::Closure(file, expr, closure_args) = tcx.tys.kind(ty) else { panic!("expected closure") };
-        let node = if *expr & crate::tcx::ASYNC_FN_BODY != 0 {
+        // An async body is named by its owner: file and item both from the def, which a live edit
+        // moves together (the type's file is the version it was interned in, whose item numbers
+        // an edit may have shifted).
+        let key = if *expr & crate::tcx::ASYNC_FN_BODY != 0 {
             let TyKind::FnDef(owner, _, _) = tcx.tys.kind(closure_args.parent_args) else { panic!("coroutine owner") };
-            crate::def_collector::NodeId::AsyncBody(prog.def(*owner).item)
-        } else { crate::def_collector::NodeId::Closure(crate::ast::ExprId(*expr)) };
-        let closure = prog.node_id_to_def_id[&(*file, node)];
+            let owner = prog.def(*owner);
+            (owner.file, crate::def_collector::NodeId::AsyncBody(owner.item))
+        } else { (*file, crate::def_collector::NodeId::Closure(crate::ast::ExprId(*expr))) };
+        let closure = prog.node_id_to_def_id[&key];
         let actual_kind = tcx.tys.to_opt_closure_kind(closure_args.kind_ty()).expect("resolved closure kind");
         match needs_fn_once_adapter_shim(actual_kind, requested_kind) {
             Ok(true) => {

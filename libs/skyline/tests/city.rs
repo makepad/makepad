@@ -1,9 +1,9 @@
 //! Checks of the city:
 //! - `city_shaders_compile_for_every_backend` (no GPU): the march, the blit and a prop-like shader reading the city's
 //!   depth compile for Metal, HLSL and GLSL ES;
-//! - `gpu_march_time` (ignored, needs a GPU): the march's GPU time per view, as the frame time of 2K marches less that
+//! - `gpu_march_time` (needs a GPU): the march's GPU time per view, as the frame time of 2K marches less that
 //!   of K, over K, after a warm-up (the page's own figure is its city program under a timer query).
-//!   `MAKEPAD_HAL_BACKEND=offscreen cargo test --release -p makepad-skyline --test city -- --include-ignored --nocapture`
+//!   `MAKEPAD_HAL_BACKEND=offscreen cargo test --release -p makepad-skyline --test city -- --nocapture`
 #![cfg(not(target_arch = "wasm32"))]
 #![allow(dead_code)]
 pub use makepad_skyline::makepad_widgets;
@@ -83,7 +83,6 @@ impl Bench {
 }
 
 #[test]
-#[ignore = "requires a native HAL GPU release build"]
 fn gpu_march_time() {
     use makepad_platform::makepad_hal::{self as hal_api, open_flags, Hal, OpenReq};
     let mut big = params::Params::default();

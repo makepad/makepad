@@ -201,8 +201,8 @@ pub fn decompress<InputType, OutputType>(r: &mut InputType,
 }
 #[cfg(feature="seccomp")]
 extern {
-  fn calloc(n_elem : usize, el_size : usize) -> *mut u8;
-  fn free(ptr : *mut u8);
+  fn calloc(n_elem : usize, el_size : usize) -> *mut core::ffi::c_void;
+  fn free(ptr : *mut core::ffi::c_void);
   fn syscall(value : i32) -> i32;
   fn prctl(operation : i32, flags : u32) -> i32;
 }

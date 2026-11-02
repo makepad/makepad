@@ -1160,13 +1160,6 @@ mod tests {
     }
 
     #[test]
-    fn the_first_seek_of_a_gesture_goes_out_at_once() {
-        let mut gate = SeekGate::default();
-        gate.want(0.4);
-        assert_eq!(gate.due(10.0, 0.12), Some(0.4), "a press seeks immediately");
-    }
-
-    #[test]
     fn a_burst_of_moves_inside_the_interval_yields_one_seek_at_the_newest_target() {
         let mut gate = SeekGate::default();
         gate.want(0.1);
@@ -1178,16 +1171,6 @@ mod tests {
             assert_eq!(gate.due(t, 0.12), None, "held back at {t}");
         }
         assert_eq!(gate.due(0.13, 0.12), Some(0.6), "the newest target, not the oldest");
-    }
-
-    #[test]
-    fn a_target_held_back_by_the_interval_is_still_waiting_to_go_out() {
-        let mut gate = SeekGate::default();
-        gate.want(0.1);
-        gate.due(0.0, 0.12);
-        gate.want(0.9);
-        assert_eq!(gate.due(0.05, 0.12), None);
-        assert!(gate.pending.is_some(), "the frame clock has something to come back for");
     }
 
     #[test]

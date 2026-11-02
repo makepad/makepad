@@ -3979,6 +3979,13 @@ impl TextInputRef {
         }
     }
 
+    /// Same as [`TextInputRef::take_key_focus`]: a field handed key focus by the app always
+    /// shows its caret and selection, also when it already held the focus (the bare
+    /// `WidgetRef::set_key_focus` leaves them parked off then).
+    pub fn set_key_focus(&self, cx: &mut Cx) {
+        self.take_key_focus(cx);
+    }
+
     /// See [`TextInput::take_key_focus`].
     pub fn take_key_focus(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {

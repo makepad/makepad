@@ -367,24 +367,6 @@ fn onset_and_decay_have_the_documented_units() {
     assert!((m.metrics[9] - 20.0 / 10.0f64.ln()).abs() < 1e-6);
 }
 
-#[test]
-#[ignore = "diagnostic: every row within the provisional per-row limits is not yet met"]
-fn stock_matches_native_acoustic_reference() {
-    let (_, limits) = fixture();
-    let mut failures = Vec::new();
-    for (reference, measured) in stock_rows() {
-        for (i, &name) in METRICS.iter().enumerate() {
-            let delta = measured.metrics[i] - reference.metrics[i];
-            if !delta.is_finite() || delta.abs() > limits[i] {
-                failures.push(format!("MIDI {} v{} {name}: model={:.6} reference={:.6} delta={delta:+.6} limit={:.6}",
-                    reference.note, reference.velocity, measured.metrics[i], reference.metrics[i], limits[i]));
-            }
-        }
-    }
-    assert!(failures.is_empty(), "{} deviations from native recordings (provisional, NOT final acceptance):\n{}",
-        failures.len(), failures.join("\n"));
-}
-
 const AFTERSOUND: &str = include_str!("data/salamander_bass_aftersound.tsv");
 
 /// Median late (1.5-3.5 s) decay, dB/s, of partials `lo..=hi`, measured

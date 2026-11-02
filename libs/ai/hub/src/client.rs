@@ -76,13 +76,21 @@ pub trait ContentProvider {
     /// Downloads one artifact by id (from `JobStatusJson::artifacts`).
     fn fetch_artifact(&self, artifact_id: &str) -> Result<ArtifactBytes, AssetAiError>;
 
-    /// Cancels a QUEUED job (`POST /job/<id>/cancel`). Running jobs are not
-    /// interruptible in v1; providers without cancel report Unavailable.
+    /// Cancels a job (`POST /job/<id>/cancel`): a queued one is dropped, a
+    /// running one unwinds at its next step. Providers without cancel
+    /// report Unavailable.
     fn cancel(&self, job_id: &str) -> Result<JobStatusJson, AssetAiError> {
         let _ = job_id;
         Err(AssetAiError::Unavailable(
             "cancel not supported by this provider".to_string(),
         ))
+    }
+
+    /// A person's cancel: the job stops and, once it has unwound, its model
+    /// leaves the device (`{"free": true}`) unless other work wants it.
+    /// Providers without it cancel plainly.
+    fn cancel_freeing(&self, job_id: &str) -> Result<JobStatusJson, AssetAiError> {
+        self.cancel(job_id)
     }
 
     /// Renews the origin lease for an in-flight job. Providers without
@@ -120,6 +128,14 @@ const MAX_JSON_BODY: usize = 4 * 1024 * 1024;
 const MAX_ARTIFACT_BODY: usize = 1024 * 1024 * 1024;
 
 impl LocalService {
+    fn post_cancel(&self, job_id: &str, body: &[u8]) -> Result<JobStatusJson, AssetAiError> {
+        let url = format!("{}/job/{job_id}/cancel", self.base_url);
+        let response = http_fetch(&self.post_request(&url, "application/json", body))?;
+        let status = response.status;
+        let body = response.read_body_to_vec(MAX_JSON_BODY)?;
+        parse_json_body(status, &body, &url)
+    }
+
     pub fn new(base_url: &str) -> Self {
         let base_url = base_url.trim_end_matches('/').to_string();
         // An https service is a fleet node (discovered, or configured by
@@ -278,12 +294,12 @@ impl ContentProvider for LocalService {
     }
 
     fn cancel(&self, job_id: &str) -> Result<JobStatusJson, AssetAiError> {
-        let url = format!("{}/job/{job_id}/cancel", self.base_url);
         // The in-repo HttpServer 500s on body-less POSTs; send an empty object.
-        let response = http_fetch(&self.post_request(&url, "application/json", b"{}"))?;
-        let status = response.status;
-        let body = response.read_body_to_vec(MAX_JSON_BODY)?;
-        parse_json_body(status, &body, &url)
+        self.post_cancel(job_id, b"{}")
+    }
+
+    fn cancel_freeing(&self, job_id: &str) -> Result<JobStatusJson, AssetAiError> {
+        self.post_cancel(job_id, br#"{"free":true}"#)
     }
 
     fn keepalive(&self, job_id: &str) -> Result<(), AssetAiError> {

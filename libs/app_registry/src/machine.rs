@@ -50,6 +50,14 @@ pub fn settable(name: &str) -> bool {
         && !name.starts_with("RUST")
         && !name.starts_with("DYLD_")
         && !matches!(name, "PATH" | "HOME" | "SHELL" | "MAKEPAD" | "MAKEPAD_HIDE_WINDOWS" | "MAKEPAD_TEST_LANE" | "XDG_RUNTIME_DIR")
+        && !test_hook(name)
+}
+
+/// A test's switch (`MAKEPAD_RUN_TEST_COMPILE_PANIC`, `MAKEPAD_TRAY_SELFTEST`, ...): a name with a
+/// `TEST` word. A test sets it on the one process it runs; a machine file never does, or every
+/// later launch on the machine runs the test (a forced compile panic in the dock's app).
+pub fn test_hook(name: &str) -> bool {
+    name.split('_').any(|word| word.ends_with("TEST"))
 }
 
 /// `NAME=value` lines (`#` comments, blank lines), names checked by [`settable`] (jit.env may
@@ -60,7 +68,11 @@ pub fn parse_env_lines(text: &str) -> Vec<(String, String)> {
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
         .filter_map(|line| line.split_once('='))
         .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
-        .filter(|(k, _)| settable(k))
+        .filter(|(k, _)| {
+            let ok = settable(k);
+            if !ok { eprintln!("makepad: {k} is not a machine setting (a test switch, or a name that changes how code loads): ignored"); }
+            ok
+        })
         .collect()
 }
 

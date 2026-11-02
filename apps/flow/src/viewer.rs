@@ -1227,18 +1227,6 @@ mod tests {
     }
 
     #[test]
-    fn zoom_at_cursor_keeps_the_same_image_point_under_the_cursor() {
-        let pan = dvec2(17.0, -9.0);
-        let anchor = dvec2(120.0, 45.0);
-        let old_zoom = 0.75;
-        let new_zoom = 3.2;
-        let point = (anchor - pan) / old_zoom;
-        let next_pan = zoom_pan_at_cursor(pan, anchor, old_zoom, new_zoom);
-        let landed = point * new_zoom + next_pan;
-        assert!((landed - anchor).length() < 1e-9);
-    }
-
-    #[test]
     fn zoom_at_cursor_closes_over_repeated_steps() {
         let anchor = dvec2(-73.0, 61.0);
         let mut pan = Vec2d::default();

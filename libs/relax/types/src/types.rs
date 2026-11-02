@@ -851,17 +851,6 @@ impl Types {
         self.fl(t) & F_STUCK != 0
     }
 
-    #[allow(dead_code)]
-    fn has_stuck_assoc_walk(&self, t: TyId) -> bool {
-        match self.kind(t) {
-            TyKind::Alias(crate::consts::IsRigid::No, AliasTy { kind: AliasTyKind::Projection { .. }, args: v, regions: _ }) => self.list(*v).iter().all(|x| self.is_concrete(*x)) || self.list(*v).iter().any(|x| self.has_stuck_assoc(*x)),
-            TyKind::Tuple(v) | TyKind::Adt(_, v, _) | TyKind::FnDef(_, v, _) | TyKind::Alias(_, AliasTy { kind: AliasTyKind::Opaque { .. }, args: v, .. }) => self.list(*v).iter().any(|x| self.has_stuck_assoc(*x)),
-            TyKind::Array(e, _) | TyKind::Slice(e) | TyKind::Ref(_, e, _) | TyKind::Ptr(_, e) => self.has_stuck_assoc(*e),
-            TyKind::FnPtr(ps, r, _, _) => self.list(*ps).iter().any(|x| self.has_stuck_assoc(*x)) || self.has_stuck_assoc(*r),
-            _ => false,
-        }
-    }
-
     /// Does the type contain an associated-type projection?
     pub fn has_assoc(&self, t: TyId) -> bool {
         self.fl(t) & F_ASSOC != 0

@@ -48,6 +48,7 @@ pub(crate) fn connect_platform_socket_stream(
     use_tls: bool,
     ignore_ssl_cert: bool,
 ) -> io::Result<Box<dyn PlatformSocketStream>> {
+    crate::lan::check_platform_connect("socket stream", host, port)?;
     let slot = socket_factory_slot().lock().map_err(|_| {
         io::Error::new(
             io::ErrorKind::Other,

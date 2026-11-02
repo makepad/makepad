@@ -52,7 +52,7 @@ pub const HELP: &str = "  sync words (the master; nodes by hub name, `all` = eve
 
 fn control() -> Result<Client, String> {
     let c = Client::new(Target::Unix(proto::control_socket()), "devhub-sync");
-    c.conn().map_err(|_| format!("no devhub runs here ({}): start makepad-app-devhub", proto::control_socket().display()))?;
+    c.conn().map_err(|e| format!("no devhub master at {} (connect: {e})", proto::control_socket().display()))?;
     Ok(c)
 }
 
@@ -426,6 +426,26 @@ fn flag<'a>(args: &'a [&'a str], name: &str) -> Option<&'a str> {
 /// Pushes and applies without a session. An empty node names a run-wide progress line.
 /// Worker output reaches `out` on the calling thread, so the CLI still shows live progress.
 /// `extra`: more order words for the node (` landed=<ms>`: the landing this push follows).
+/// The node refused a move as no fast-forward, and what it synced sits on a retired chain of this
+/// repo (`refs/heads/work-old-*`, kept when `devhub promote` re-points work): the repo to name in
+/// the order sent again. A rewind to anything else stays refused.
+fn retired_refusal(repo: &Path, line: &str) -> Option<&'static str> {
+    let rest = line.split("apply refused: ").nth(1)?;
+    if !rest.contains("is not a fast-forward") {
+        return None;
+    }
+    let mut w = rest.split_whitespace();
+    let name = w.next()?;
+    let from = w.next()?;
+    if name != "makepad" || !from.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let git = |args: &[&str]| std::process::Command::new("git").args(args).current_dir(repo).stdin(std::process::Stdio::null()).output().ok();
+    let refs = git(&["for-each-ref", "--format=%(refname)", "refs/heads/work-old-*"])?;
+    let refs = String::from_utf8_lossy(&refs.stdout).into_owned();
+    refs.lines().any(|r| git(&["merge-base", "--is-ancestor", from, r]).is_some_and(|o| o.status.success())).then_some("makepad")
+}
+
 pub(super) fn push_and_apply(c: &Client, repo: &Path, makepad_branch: &str, commercial: Option<&str>, nodes: &[String], build: &str, restart: &str, prewarm: bool, extra: &str, out: &mut dyn FnMut(&str, &str)) -> i32 {
     let mut pushes = Vec::new();
     for (name, dir, branch) in [("makepad", repo.to_path_buf(), Some(makepad_branch)), ("commercial", repo.join("apps/commercial"), commercial)] {
@@ -479,6 +499,9 @@ pub(super) fn push_and_apply(c: &Client, repo: &Path, makepad_branch: &str, comm
             let words = &words;
             (n, s.spawn(move || {
                 let order = sign::sign(words)?;
+                let answer = ask(c, n, "sync", &format!("apply {order}"))?;
+                let Some(repoint) = answer.iter().find_map(|l| retired_refusal(repo, l)) else { return Ok(answer) };
+                let order = sign::sign(&format!("{words} repoint={repoint}"))?;
                 ask(c, n, "sync", &format!("apply {order}"))
             }))
         }).collect();

@@ -185,7 +185,55 @@ fn is_alive_impl(pid: u32) -> bool {
     win::alive(pid)
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
+fn list_processes_impl() -> io::Result<Vec<Proc>> {
+    extern "C" {
+        fn proc_listallpids(buffer: *mut i32, size: i32) -> i32;
+        fn proc_pidinfo(pid: i32, flavor: i32, arg: u64, buffer: *mut u8, size: i32) -> i32;
+    }
+    const PROC_PIDTBSDINFO: i32 = 3;
+    // The pid list can grow between the size query and the fill, so ask with slack and retry.
+    let mut pids: Vec<i32>;
+    loop {
+        let want = unsafe { proc_listallpids(std::ptr::null_mut(), 0) };
+        if want <= 0 {
+            return Err(io::Error::last_os_error());
+        }
+        pids = vec![0i32; want as usize + 64];
+        let bytes = unsafe { proc_listallpids(pids.as_mut_ptr(), (pids.len() * 4) as i32) };
+        if bytes <= 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let n = bytes as usize / 4;
+        if n < pids.len() {
+            pids.truncate(n);
+            break;
+        }
+    }
+    let mut out = Vec::new();
+    for pid in pids {
+        if pid <= 0 {
+            continue;
+        }
+        // struct proc_bsdinfo: 136 bytes; pbi_pid at 12, pbi_ppid at 16, pbi_comm[16] at 48
+        let mut buf = [0u8; 136];
+        let n = unsafe { proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, buf.as_mut_ptr(), buf.len() as i32) };
+        if n != buf.len() as i32 {
+            continue;
+        }
+        let ppid = u32::from_ne_bytes(buf[16..20].try_into().unwrap());
+        let comm = &buf[48..64];
+        let end = comm.iter().position(|&c| c == 0).unwrap_or(comm.len());
+        out.push(Proc {
+            pid: pid as u32,
+            ppid,
+            name: String::from_utf8_lossy(&comm[..end]).into_owned(),
+        });
+    }
+    Ok(out)
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn list_processes_impl() -> io::Result<Vec<Proc>> {
     let mut out = Vec::new();
     let proc_dir = std::fs::read_dir("/proc")?;
@@ -220,6 +268,11 @@ fn list_processes_impl() -> io::Result<Vec<Proc>> {
         });
     }
     Ok(out)
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "android", target_os = "macos"))))]
+fn list_processes_impl() -> io::Result<Vec<Proc>> {
+    Err(io::Error::new(io::ErrorKind::Unsupported, "no process list on this platform"))
 }
 
 #[cfg(unix)]

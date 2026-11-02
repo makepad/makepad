@@ -1628,32 +1628,38 @@ impl GradientEditor {
                     _ => {}
                 }
             } else if wa.widget_uid == position_uid {
-                if let ValueInputAction::Changed(v) = wa.cast::<ValueInputAction>() {
-                    let moved = self.gradient.move_mark(mark, v / 100.0);
-                    self.select(cx, Some(moved));
-                    changed = true;
-                    ended = true;
+                match wa.cast::<ValueInputAction>() {
+                    ValueInputAction::Changed(v) => {
+                        let moved = self.gradient.move_mark(mark, v / 100.0);
+                        self.select(cx, Some(moved));
+                        changed = true;
+                    }
+                    ValueInputAction::Ended(_) => ended = true,
+                    ValueInputAction::None => {}
                 }
             } else if wa.widget_uid == amount_uid {
-                if let ValueInputAction::Changed(v) = wa.cast::<ValueInputAction>() {
-                    match mark {
-                        GradientMark::Color(i) => self
-                            .gradient
-                            .set_stop_intensity(i, v.min(self.max_intensity.max(1.0)) as f32),
-                        GradientMark::Alpha(i) => self.gradient.set_alpha(i, (v / 100.0) as f32),
+                match wa.cast::<ValueInputAction>() {
+                    ValueInputAction::Changed(v) => {
+                        match mark {
+                            GradientMark::Color(i) => self
+                                .gradient
+                                .set_stop_intensity(i, v.min(self.max_intensity.max(1.0)) as f32),
+                            GradientMark::Alpha(i) => self.gradient.set_alpha(i, (v / 100.0) as f32),
+                        }
+                        changed = true;
                     }
-                    changed = true;
-                    ended = true;
+                    ValueInputAction::Ended(_) => ended = true,
+                    ValueInputAction::None => {}
                 }
             }
         }
         if changed {
             self.changed(cx);
-            if ended {
-                self.ended(cx);
-            }
             self.sync_fields(cx);
             self.draw_bg.redraw(cx);
+        }
+        if ended {
+            self.ended(cx);
         }
     }
 

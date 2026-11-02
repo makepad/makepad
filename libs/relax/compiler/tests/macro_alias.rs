@@ -1,7 +1,7 @@
 // A macro imported under another name: `use std::{eprintln as log_error};` then
 // `crate::log_error!(..)` (rustc: macros are importable items, the use's #[cfg] applies).
 // wayland-backend's logging shim (libs/linux/wayland-backend/src/lib.rs:72-77) -- before:
-// "macro `log_error!` is not supported" (counter on Linux/Wayland, a node).
+// "macro `log_error!` is not supported" (counter on Linux/Wayland, a pool node).
 #[allow(unused_imports)]
 use std::{eprintln as log_error, format as fmt_alias};
 #[cfg(feature = "never_on")]

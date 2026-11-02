@@ -1,6 +1,6 @@
-// T7: target_feature on an entry point; owner: entry-signature/check_attr follow-up.
+// `#[target_feature]` on `main`: under the test harness `main` is no entry point, so rustc --test
+// accepts it on x86_64 (a binary rejects it: check/entry.rs TargetFeatureOnMain).
 #[target_feature(enable = "sse2")]
 fn main() {}
 #[test]
-#[ignore = "T7: target_feature entry signature; check_attr"]
 fn target_feature_entry() { unsafe { main(); } }

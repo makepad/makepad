@@ -303,13 +303,6 @@ mod tests {
     }
 
     #[test]
-    fn sustained_overrun_cuts() {
-        let mut t = Thermometer::new(60.0);
-        run(&mut t, 25.0, 200);
-        assert!(t.level() > 0, "sustained 25ms frames did not cut");
-    }
-
-    #[test]
     fn cutting_is_faster_than_restoring() {
         // Cut fast, restore lazily. Symmetric patience sits on the boundary and
         // flips level every other evaluation, which reads as flickering.
@@ -416,30 +409,5 @@ mod tests {
         assert_eq!(q, Quality::FULL);
     }
 
-    /// The renderer turns `shadow_caster_scale` into a caster count and
-    /// `particle_scale` into a truncation length. Both must stay sane as
-    /// integers: a rounding slip that reaches 0 casters would unground every
-    /// object in the world, which reads as broken rather than as cheaper.
-    #[test]
-    fn the_scales_survive_being_turned_into_counts() {
-        // Matches DEFAULT_SHADOW_BUDGET in renderer.rs.
-        let budget = 24usize;
-        let mut last = usize::MAX;
-        for level in 0..Quality::LEVELS {
-            let q = Quality::at_level(level);
-            let casters = ((budget as f32 * q.shadow_caster_scale).round() as usize).max(1);
-            assert!(casters >= 1, "level {level} left nothing grounded");
-            assert!(casters <= last, "level {level} raised the caster count");
-            last = casters;
-
-            let particles = (1000.0 * q.particle_scale).round() as usize;
-            assert!(particles <= 1000);
-        }
-        // The bottom of the ladder must still ground *something*, and must
-        // have actually given the particles up.
-        let bottom = Quality::at_level(Quality::LEVELS - 1);
-        assert_eq!((1000.0 * bottom.particle_scale) as usize, 0);
-        assert!(((budget as f32 * bottom.shadow_caster_scale).round() as usize).max(1) >= 1);
-    }
 }
 

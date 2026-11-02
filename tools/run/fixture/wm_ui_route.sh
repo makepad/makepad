@@ -4,7 +4,7 @@
 # `makepad_hal::a11y::UI_ROUTERS` is read from JIT-compiled code"). The WM registers a C entry
 # (a11y::ui_router); the HAL calls it and the WM's local route (dispatch_local) goes back to the
 # HAL. Headless, muted, fresh homes. Run from the workspace root.
-cargo build --profile host -p makepad-run --bin makepad || exit 3
+cargo build --profile host -p makepad-run --bin makepad --bin makepad-launcher || exit 3
 T=${CARGO_TARGET_DIR:-target}/host
 dir=$(mktemp -d "${TMPDIR:-/tmp}/wm_ui_route.XXXXXX") || exit 1
 mkdir -p "$dir/home" "$dir/t"

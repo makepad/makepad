@@ -894,6 +894,11 @@ impl Cx {
                     if closes { crate::gpu_frame_timer::finish_frame(group); }
                 }
                 let window_frame = self.hal.frames.frame_done(window, frame);
+                // PerfMonitor "gpu" channel: a presented window frame's GPU time
+                // (a no-op unless the monitor is enabled)
+                if window_frame && gpu_ns > 0 {
+                    crate::perf_monitor::perf_gpu_frame_completed(gpu_ns as f64 * 1e-9);
+                }
                 self.hal_a11y_presented();
                 // a draw item's backing is reusable once the frame that last read it is done
                 self.textures.1.serials.complete(frame);
@@ -905,10 +910,15 @@ impl Cx {
                 self.hal.frames_done += 1;
                 match self.hal.hosted.as_mut().map(|h| h.completed(window, frame)) {
                     Some(crate::os::hal::HostedDone::Publish(draw)) => {
+                        use std::sync::atomic::{AtomicBool, Ordering};
+                        static APP_DRAWN: AtomicBool = AtomicBool::new(false);
                         if window_frame { crate::frame_trace::note_presented(); }
                         #[cfg(target_os = "linux")]
                         self.hal.frames.w.hosted_presented(window, frame);
-                        Self::send_studio_message(crate::studio::AppToStudio::DrawCompleteAndFlip(draw))
+                        Self::send_studio_message(crate::studio::AppToStudio::DrawCompleteAndFlip(draw));
+                        if !APP_DRAWN.swap(true, Ordering::Relaxed) {
+                            Self::send_studio_message(crate::studio::AppToStudio::Custom(makepad_hal::window_controls::HostedAppFrame.to_json()));
+                        }
                     }
                     // a hosted frame the GPU dropped: nothing to publish, paint it again
                     #[cfg(target_os = "linux")]

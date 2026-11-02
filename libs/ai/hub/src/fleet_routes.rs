@@ -19,7 +19,7 @@ use makepad_network::fleet::id::{Peer, Role};
 fn job_route(method: &str, path: &str) -> bool {
     matches!(
         (method, path),
-        ("GET", "/health") | ("GET", "/models") | ("GET", "/voices") | ("POST", "/generate") | ("POST", "/realtime") | ("POST", "/bye")
+        ("GET", "/health") | ("GET", "/fleet") | ("GET", "/models") | ("GET", "/voices") | ("POST", "/generate") | ("POST", "/realtime") | ("POST", "/bye")
     ) || (method == "GET" && (path.starts_with("/job/") || path.starts_with("/artifact/") || path.starts_with("/realtime/")))
         || (method == "POST" && path.starts_with("/job/") && (path.ends_with("/cancel") || path.ends_with("/keepalive")))
 }
@@ -74,9 +74,15 @@ mod tests {
     #[test]
     fn route_policy() {
         let admin = peer(Role::Device, "192.0.2.91", Some("192.0.2.91"));
-        let mac_elsewhere = peer(Role::Device, "192.0.2.32", Some("192.0.2.91"));
+        let mac_elsewhere = peer(Role::Device, "192.0.2.50", Some("192.0.2.91"));
         let node = peer(Role::Node, "192.0.2.89", None);
-        let phone = peer(Role::Paired, "192.0.2.35", None);
+        let phone = peer(Role::Paired, "192.0.2.60", None);
+        for who in [&admin, &mac_elsewhere, &node, &phone] {
+            for edge in [false, true] {
+                assert_eq!(route_allowed(who, edge, "GET", "/fleet"), route_allowed(who, edge, "GET", "/health"));
+                assert!(route_allowed(who, edge, "GET", "/fleet"));
+            }
+        }
         // Admin: control, panel, everything.
         for (m, p) in [("GET", "/control"), ("POST", "/control/model"), ("GET", "/control/watch?since=3"), ("POST", "/llm/context"), ("GET", "/index.html"), ("POST", "/control/yield")] {
             assert!(route_allowed(&admin, false, m, p), "{m} {p}");

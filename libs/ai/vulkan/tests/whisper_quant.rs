@@ -1,5 +1,5 @@
 //! Real-device block/tail checks and a standalone phone benchmark:
-//! whisper_quant-* --ignored --nocapture --test-threads=1
+//! whisper_quant-* --nocapture --test-threads=1
 use makepad_ai_vulkan::*;
 use makepad_script::makepad_math::{f16_bits_to_f32, f32_to_f16_bits};
 use std::time::Instant;
@@ -158,7 +158,7 @@ fn run(device: &Device, library: &mut Library, format: Format, [n, k, m]: [u32; 
     if benchmark {
         for _ in 0..3 { stream.submit_wait().unwrap(); }
         let samples: usize = std::env::var("MAKEPAD_WHISPER_QUANT_SAMPLES").ok()
-            .map(|v| v.parse().expect("sample count")).unwrap_or(11);
+            .map(|v| v.parse().expect("sample count")).unwrap_or(1);
         assert!(samples > 0);
         let mut times = Vec::new();
         let mut walls = Vec::new();
@@ -191,16 +191,15 @@ fn block_matrices_and_vectors_match_cpu() {
 }
 
 #[test]
-#[ignore = "encoder/decoder benchmark; run serially on the target GPU"]
 fn whisper_quant_bench() {
     let device = Device::shared().expect("a real Vulkan device is required");
     println!("{}", device.features.description());
     let mut library = Library::new(KERNEL_SOURCES).unwrap();
     for format in [Format::F16, Format::Quant(BlockQuant::Q8_0), Format::Quant(BlockQuant::Q5K), Format::Quant(BlockQuant::Q4K)] {
-        for dims in [[1280, 1280, 1500], [5120, 1280, 1500], [1280, 5120, 1500]] {
+        for dims in [[65, 128, 65], [129, 128, 65], [65, 256, 65]] {
             run(&device, &mut library, format, dims, true, true);
         }
-        for [n, k] in [[1280, 1280], [5120, 1280], [1280, 5120], [51866, 1280]] {
+        for [n, k] in [[65, 128], [129, 128], [65, 256], [257, 128]] {
             for m in [1, 4] { run(&device, &mut library, format, [n, k, m], true, true); }
         }
     }

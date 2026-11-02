@@ -1,7 +1,7 @@
 // `impl Trait` nested inside a parameter type is an anonymous generic parameter too (rustc:
 // synthetic params, in order of appearance): libs/sdfer esdt::glyph_to_sdf takes
 // `&mut Image2d<Unorm8, impl AsMut<[Unorm8]> + AsRef<[Unorm8]>>`. Before: "unsupported type
-// (dyn/impl/macro)" in the signature -> makepad_draw text SDF on Linux (a node) stopped.
+// (dyn/impl/macro)" in the signature -> makepad_draw text SDF on Linux (a pool node) stopped.
 pub struct Image2d<T, S = Vec<T>> { w: usize, s: S, _p: std::marker::PhantomData<T> }
 fn total(img: &mut Image2d<u8, impl AsMut<[u8]> + AsRef<[u8]>>) -> usize { img.w + img.s.as_ref().len() }
 fn first_some(v: &[Option<impl Fn(u32) -> u32>], x: u32) -> u32 { v.iter().flatten().next().map_or(0, |f| f(x)) }

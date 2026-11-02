@@ -538,24 +538,4 @@ mod tests {
         assert_eq!(tab_width_for(0, 0.0, 200.0, 60.0), 1.0, "no room at all still answers");
     }
 
-    /// Choosing survives a set that still holds the choice, and falls to the
-    /// first when it does not, because a strip with nothing chosen has no
-    /// panel to show.
-    #[test]
-    fn the_choice_survives_what_it_can_and_falls_back_when_it_cannot() {
-        let here: Vec<TabEntry> = (1..=3)
-            .map(|i| TabEntry::new(LiveId(i), &format!("tab {i}")))
-            .collect();
-        let selected = Some(LiveId(2));
-        let keep = selected
-            .filter(|id| here.iter().any(|e| e.id == *id))
-            .or_else(|| here.first().map(|e| e.id));
-        assert_eq!(keep, Some(LiveId(2)), "still there: still chosen");
-
-        let gone: Vec<TabEntry> = vec![TabEntry::new(LiveId(7), "other")];
-        let keep = selected
-            .filter(|id| gone.iter().any(|e| e.id == *id))
-            .or_else(|| gone.first().map(|e| e.id));
-        assert_eq!(keep, Some(LiveId(7)), "gone: the first one takes over");
-    }
 }

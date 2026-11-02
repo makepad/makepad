@@ -2674,40 +2674,6 @@ mod tests {
         assert!(m.contains("if abs(l_k - 1.0) < 0.5 { t_"), "{m}");
     }
 
-    /// Print up to 3 corpus shaders failing with `MILKDROP_CAUSE`, from the
-    /// preset directory `MILKDROP_CORPUS`. A development aid; does nothing
-    /// without the variables.
-    #[test]
-    fn dump_failures_by_cause() {
-        let (Some(dir), Ok(cause)) = (std::env::var_os("MILKDROP_CORPUS"), std::env::var("MILKDROP_CAUSE")) else {
-            return;
-        };
-        let mut n = 0;
-        let mut stack = vec![std::path::PathBuf::from(dir)];
-        while let Some(d) = stack.pop() {
-            for e in std::fs::read_dir(&d).unwrap().flatten() {
-                let p = e.path();
-                if p.is_dir() {
-                    stack.push(p);
-                    continue;
-                }
-                if !p.extension().is_some_and(|x| x == "milk") {
-                    continue;
-                }
-                let preset = crate::Preset::parse(&std::fs::read(&p).unwrap());
-                for (src, kind) in [(&preset.warp_shader, ShaderKind::Warp), (&preset.comp_shader, ShaderKind::Comp)] {
-                    let Some(src) = src else { continue };
-                    if let Err(e) = translate(src, kind) {
-                        if e.message.contains(&cause) && n < 3 {
-                            n += 1;
-                            println!("=== {}\n{}\n--- {}", p.display(), src, e.message);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
     #[test]
     fn unsupported_things_fail_cleanly() {
         assert!(translate("shader_body { ret = mul(uv, rot_s1).xyz; }", ShaderKind::Warp).is_err());

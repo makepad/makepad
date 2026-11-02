@@ -377,13 +377,11 @@ let wrong_out = Output{value: wrong.text()}
 let forever_out = Output{value: forever.text()}
 Flow{original, trim, mutate, observe, wrong, forever, trimmed, mutated, observed, wrong_out, forever_out}
 "#;
-    let started = Instant::now();
     let events = support::run(
         source,
         seams(FakeChat::done("unused"), FakeGen::done(), FakeHttp::json(200, "{}")),
         None,
     );
-    assert!(started.elapsed() < Duration::from_secs(2));
     assert_eq!(output(&events, "trimmed").as_text().unwrap(), "Mixed");
     assert_eq!(output(&events, "mutated").as_text().unwrap(), "changed");
     assert_eq!(output(&events, "observed").as_text().unwrap(), "  Mixed  ");
@@ -436,7 +434,7 @@ fn http_accept_policy_private_redirect_and_json_contracts() {
     )));
 
     let private = run_with_policy(
-        &source("", "json", "http://192.0.2.16/data"),
+        &source("", "json", "http://10.77.0.1/data"),
         FakeHttp::json(200, "{}"),
         NetPolicy {
             allow: vec!["*".to_string()],

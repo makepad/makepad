@@ -1002,11 +1002,14 @@ mod tests {
 
     #[test]
     fn the_shipped_font_loads_when_present() {
-        let font = load_music_font();
-        println!("music font source: {}", font.source());
-        if !font.is_real() {
-            return;
-        }
+        let font = load_from_bytes(
+            include_bytes!("../resources/fonts/bravura.otf"),
+            Some(include_bytes!("../resources/fonts/bravura_metadata.json")),
+            Some(include_bytes!("../resources/fonts/glyphnames.json")),
+            "bundled Bravura",
+        )
+        .expect("the bundled music font loads");
+        assert!(font.is_real());
         let bbox = font.bbox("noteheadBlack");
         assert!((bbox.height() - 1.0).abs() < 0.02, "{bbox:?}");
         assert!((bbox.width() - 1.18).abs() < 0.05, "{bbox:?}");

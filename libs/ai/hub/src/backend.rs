@@ -1660,6 +1660,13 @@ pub trait ContentBackend: Send {
         false
     }
 
+    /// Whether a live step needs an init or anchor image. Image-driven
+    /// backends wait for a source; generators that can cold-start without
+    /// one override this so feedback can begin with both images absent.
+    fn live_requires_image(&self) -> bool {
+        true
+    }
+
     /// One live-session step: given the (optional) init image and the
     /// current config, produce the next output frame. Called at frame rate
     /// by `crate::realtime::run_live` on the single worker thread — it MUST

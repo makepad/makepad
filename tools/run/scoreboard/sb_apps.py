@@ -197,10 +197,7 @@ def stage_prepare(c, name):
     import sb
     if name != 'pdoom':
         raise ValueError('unknown Stage workload: ' + name)
-    cmd, cwd = sb.start_prepare(c, 'story')  # Cut (and the P(DOOM) film) live in Makepad Story since the 10-23 split
-    if c.kind == 'jit':
-        c.env['MAKEPAD_RUN_ZONE_SWAP'] = '0'
-    return cmd, cwd
+    return sb.start_prepare(c, 'story')  # Cut (and the P(DOOM) film) live in Makepad Story since the 10-23 split
 
 
 def film_window(r, end, warmup=False):

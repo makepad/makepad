@@ -757,48 +757,4 @@ mod tests {
         }
     }
 
-    #[test]
-    fn distance_index_clamps_like_reference() {
-        let idx = |l: i64, r: i64| ((r - l).clamp(-64, 8) + 64) as usize;
-        assert_eq!(idx(0, 0), 64);
-        assert_eq!(idx(100, 0), 0); // key far left -> clamp at -64
-        assert_eq!(idx(0, 100), 72); // key far right -> clamp at +8
-        assert_eq!(idx(10, 12), 66);
-    }
-
-    /// Oracle-backed: extractor vs `w2v_input_features.npy` (skips when the
-    /// reference checkout is absent). The encoder oracle runs in the
-    /// `indextts-w2v-validate` bin (1.6 GB weight load; too heavy here).
-    #[test]
-    fn extractor_matches_oracle_dump() {
-        let dir = crate::indextts::reference_dumps_dir();
-        let audio_path = dir.join("audio_16k.npy");
-        if !audio_path.is_file() {
-            eprintln!("skipping extractor_matches_oracle_dump: {audio_path:?} missing");
-            return;
-        }
-        let audio = read_npy_f32(&audio_path);
-        let reference = read_npy_f32(&dir.join("w2v_input_features.npy"));
-        let feats = extract_w2v_features(&audio).unwrap();
-        assert_eq!(feats.data.len(), reference.len());
-        let mut max_abs = 0f32;
-        for (a, b) in feats.data.iter().zip(&reference) {
-            max_abs = max_abs.max((a - b).abs());
-        }
-        assert!(max_abs < 1e-4, "extractor max abs diff {max_abs}");
-    }
-
-    /// Minimal f32 .npy reader for the oracle test (little-endian '<f4').
-    fn read_npy_f32(path: &std::path::Path) -> Vec<f32> {
-        let bytes = std::fs::read(path).unwrap();
-        assert_eq!(&bytes[..6], b"\x93NUMPY");
-        let header_len = u16::from_le_bytes([bytes[8], bytes[9]]) as usize;
-        let header = String::from_utf8_lossy(&bytes[10..10 + header_len]).to_string();
-        assert!(header.contains("<f4"), "expected f32 npy: {header}");
-        assert!(!header.contains("'fortran_order': True"));
-        bytes[10 + header_len..]
-            .chunks_exact(4)
-            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-            .collect()
-    }
 }

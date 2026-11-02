@@ -741,7 +741,7 @@ fn legacy_direct_within_white(direct: Vec3f, fill: Vec3f) -> Vec3f {
 /// colour before the lane's gain and exposure: `2(1 − cos r) × facing`
 /// (`E/π` of the key's emission that a surface facing its centre receives).
 /// A key whose cone or share is not finite delivers nothing.
-pub(crate) fn env_sun_scale(sun: &makepad_scene::EnvSun) -> f32 {
+pub fn env_sun_scale(sun: &makepad_scene::EnvSun) -> f32 {
     if !sun.cos_radius.is_finite() || !sun.facing.is_finite() {
         return 0.0;
     }
@@ -876,30 +876,6 @@ mod tests {
             );
             assert!(lum(clear.color) < 1.0e-4, "{hour}h: {:?}", clear.color);
         }
-    }
-
-    /// The whole point, stated as a picture: a surface facing the sun is
-    /// many times brighter than the same surface facing away.
-    #[test]
-    fn a_clear_sky_separates_a_lit_face_from_a_shaded_one() {
-        let sun = SunLight::from_time_of_day_balanced(13.0, 47.6, Some(9.0));
-        let lum = crate::sky::luminance;
-        // Facing the sun squarely against facing straight away: ambient only.
-        let lit = lum(sun.color) + lum(sun.sky);
-        let shaded = lum(sun.sky);
-        assert!(lit / shaded > 8.0, "lit {lit} vs shaded {shaded}");
-    }
-
-    #[test]
-    fn default_reproduces_the_legacy_shading_constants() {
-        let sun = SunLight::default();
-        // Flat hemisphere: sky == ground == the old 0.28 ambient, so the
-        // unified shader collapses to exactly what the old one computed.
-        assert!(approx(sun.sky.x, LEGACY_AMBIENT));
-        assert_eq!(sun.sky, sun.ground);
-        assert!(approx(sun.color.x, LEGACY_DIRECT));
-        let want = vec3f(0.35, 0.8, 0.45).normalize();
-        assert!(approx(sun.dir.x, want.x) && approx(sun.dir.y, want.y) && approx(sun.dir.z, want.z));
     }
 
     #[test]

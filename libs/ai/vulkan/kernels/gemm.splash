@@ -202,7 +202,9 @@ let Shared = {
     k: shader.uniform(u32)
     m: shader.uniform(u32)
     wt: shader.workgroup(f32, 1056)
-    xt: shader.workgroup(f32, 1056)
+    // Half tile: the store is what rounds an f32 activation to f16 (a bare f32(f16(x)) round trip
+    // in registers can be folded away by a driver).
+    xt: shader.workgroup(f16, 1056)
     main: fn() {
         let lane = local_id().x
         let columns = u32(self.workgroup_size / 16)
@@ -221,13 +223,13 @@ let Shared = {
                 let rr = j / 32
                 let cc = j % 32
                 var a = 0.0
-                var b = 0.0
+                var b = f16(0)
                 if rn + rr < self.n && base + cc < self.k {
                     a = f32(self.w[(rn + rr) * self.k + base + cc])
                 }
                 if base + rr < self.k && cc < columns * 2 && cm + cc < self.m {
-                    if self.half_x == 1 { b = f32(self.xh[(base + rr) * self.m + cm + cc]) }
-                    else { b = f32(f16(self.x[(base + rr) * self.m + cm + cc])) }
+                    if self.half_x == 1 { b = self.xh[(base + rr) * self.m + cm + cc] }
+                    else { b = f16(self.x[(base + rr) * self.m + cm + cc]) }
                 }
                 self.wt[cc * 33 + rr] = a
                 self.xt[rr * 33 + cc] = b
@@ -237,8 +239,8 @@ let Shared = {
             for d in 0..32 {
                 let a0 = self.wt[d * 33 + r]
                 let a1 = self.wt[d * 33 + r + 16]
-                let b0 = self.xt[d * 33 + c]
-                let b1 = self.xt[d * 33 + c + columns]
+                let b0 = f32(self.xt[d * 33 + c])
+                let b1 = f32(self.xt[d * 33 + c + columns])
                 c00 += a0 * b0
                 c01 += a0 * b1
                 c10 += a1 * b0

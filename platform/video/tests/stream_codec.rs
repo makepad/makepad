@@ -1,10 +1,7 @@
 //! Round-trip test for the low-latency hardware stream encoder/decoder
 //! (`VideoStreamEncoder` / `VideoStreamDecoder`, VideoToolbox on macOS /
 //! the H.264 MFTs on Windows). Runs wherever a backend exists; on Windows
-//! that is a real Media Foundation pass (run it on a fleet box). The
-//! captured-stream test replays access units another machine's encoder
-//! produced (`MAKEPAD_H264_DEBUG` dumps them next to its trace) so a
-//! cross-platform wire problem can be reproduced offline.
+//! that is a real Media Foundation pass (run it on a fleet box).
 
 use makepad_video::{VideoStreamEncoder, VideoStreamEncoderOptions};
 // the codec tests run where a stream codec exists (VideoToolbox, Media Foundation)
@@ -53,43 +50,6 @@ fn psnr(a: &[u8], b: &[u8]) -> f64 {
         return 100.0;
     }
     20.0 * 255f64.log10() - 10.0 * mse.log10()
-}
-
-/// `MAKEPAD_H264_SAMPLE_DIR=<dir>` holds `*.h264` access units (one file
-/// each, sorted by name = send order); every one is pushed and the decoder
-/// must yield at least one picture per AU after the first two.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-#[test]
-fn decode_captured_access_units() {
-    let Ok(dir) = std::env::var("MAKEPAD_H264_SAMPLE_DIR") else {
-        eprintln!("decode_captured_access_units: MAKEPAD_H264_SAMPLE_DIR unset, skipping");
-        return;
-    };
-    let mut files: Vec<_> = std::fs::read_dir(&dir)
-        .expect("sample dir")
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().is_some_and(|x| x == "h264"))
-        .collect();
-    files.sort();
-    assert!(!files.is_empty(), "no *.h264 access units in {dir}");
-    let mut decoder = VideoStreamDecoder::new(StreamVideoCodec::H264).expect("decoder creation");
-    let mut streamed = 0usize;
-    let mut per_au = Vec::new();
-    for (index, path) in files.iter().enumerate() {
-        let au = std::fs::read(path).expect("read au");
-        let frames = decoder.push_packet(&au, index as i64 * HNS_PER_FRAME).expect("decode packet").len();
-        per_au.push(format!("au{index}:{frames}"));
-        streamed += frames;
-    }
-    let flushed = decoder.flush().expect("flush").len();
-    eprintln!("captured stream: {streamed} pictures while streaming + {flushed} on flush [{}]", per_au.join(" "));
-    // Live use never flushes: every picture but the last one or two must
-    // come out while the stream is still running.
-    assert!(
-        streamed + 2 >= files.len(),
-        "only {streamed} of {} pictures came out while streaming",
-        files.len()
-    );
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]

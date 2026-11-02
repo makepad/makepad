@@ -40,7 +40,7 @@ script_mod! {
         planting := H2{text: "Planting"}
         P{text: "Sow and plant only once the ground has warmed and the last frost has passed. Seeds put into cold soil sit and rot, and plants set out too early stop growing for weeks even when they survive."}
 
-        spacing := H3{text: "Spacing"}
+        plant_spacing := H3{text: "Spacing"}
         P{text: "The distances on a seed packet look generous when the plants are small. Keep to them anyway: crowded plants compete for water and light, and air that cannot move between the leaves brings mould."}
         P{text: "Paths matter as much as rows. Leave room to kneel beside every part of the bed without stepping on it, because trodden soil packs down and roots struggle to get through it."}
 
@@ -82,7 +82,7 @@ script_mod! {
                     {target: "soil" label: "Soil" level: 2}
                     {target: "soil_test" label: "Testing the soil" level: 3}
                     {target: "planting" label: "Planting" level: 1}
-                    {target: "spacing" label: "Spacing" level: 2}
+                    {target: "plant_spacing" label: "Spacing" level: 2}
                     {target: "watering" label: "Watering" level: 2}
                     {target: "season" label: "Through the season" level: 1}
                     {target: "pests" label: "Pests" level: 2}
@@ -324,7 +324,7 @@ mod tests {
             let views = extent.total.y / extent.visible.y;
             assert!((3.6..=5.0).contains(&views), "at {width}: the article is {views:.2} views tall");
             let margin = 12.0;
-            for id in ["intro", "spot", "sun", "soil", "soil_test", "planting", "spacing", "watering", "season", "pests", "harvest"] {
+            for id in ["intro", "spot", "sun", "soil", "soil_test", "planting", "plant_spacing", "watering", "season", "pests", "harvest"] {
                 assert!(
                     heading(id) - margin <= furthest,
                     "at {width}: {id} at {} cannot reach the top, the page scrolls only {furthest}",

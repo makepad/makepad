@@ -92,7 +92,6 @@ F8 switches sun modes. Finish owned test instances via the printed remote port's
 
 ```sh
 cargo test --release -p makepad-render
-cargo test --release -p makepad-render clustered::tests::benchmark_build_and_pack -- --ignored --nocapture
 ```
 
 Coverage includes more than eight overlapping lights, depth/tile boundaries,

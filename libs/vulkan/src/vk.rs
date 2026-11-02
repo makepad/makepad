@@ -4077,6 +4077,7 @@ pub struct CompareOp(pub i32);
 impl CompareOp {
     pub const fn from_raw(value: i32) -> Self { Self(value) }
     pub const fn as_raw(self) -> i32 { self.0 }
+    pub const GREATER: Self = Self(4 as i32);
     pub const LESS_OR_EQUAL: Self = Self(3 as i32);
 }
 impl core::fmt::Debug for CompareOp { fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -6123,8 +6124,8 @@ impl Format {
     pub const R16G16_SINT: Self = Self(82 as i32);
     pub const R16G16_SNORM: Self = Self(78 as i32);
     pub const R16G16_UINT: Self = Self(81 as i32);
-    pub const R16_SFLOAT: Self = Self(76 as i32);
     pub const R16G16_UNORM: Self = Self(77 as i32);
+    pub const R16_SFLOAT: Self = Self(76 as i32);
     pub const R32G32B32A32_SFLOAT: Self = Self(109 as i32);
     pub const R32G32B32A32_SINT: Self = Self(108 as i32);
     pub const R32G32B32A32_UINT: Self = Self(107 as i32);

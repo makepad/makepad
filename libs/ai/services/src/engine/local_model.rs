@@ -809,14 +809,4 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!((rows[0].label.as_str(), rows[0].unavailable.clone()), ("AI hub · 149 · Qwen3.8 27B", None));
     }
-
-    /// Against the real LAN: `cargo test -- --ignored hub_on_the_lan`.
-    #[test]
-    #[ignore]
-    fn hub_on_the_lan() {
-        let offers = makepad_ai_hub::hub_chat::probe_fleet_inventory(|_| {}).expect("a hub with a chat model on the LAN");
-        for row in offer_rows(&offers, None, false, false) {
-            println!("LAN hub row: {} ({})", row.label, row.choice.slug());
-        }
-    }
 }

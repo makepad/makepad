@@ -573,13 +573,14 @@ fn connect(shared: &'static Shared) -> Result<Box<dyn Shell>, String> {
     let display = std::env::var_os("DISPLAY").filter(|s| !s.is_empty());
     let (backend, reason) = wm_socket::choose(forced, window_manager, wayland_display.is_some() || wayland_socket.is_some(),
         || wm_socket::discovered(makepad_studio_protocol::WIRE).clone());
-    if log_enabled() || matches!(backend, Backend::Wm | Backend::Direct) {
+    if log_enabled() || matches!(backend, Backend::Wm | Backend::Incompatible | Backend::Direct) {
         eprintln!("[hal-linux] backend={backend:?} reason={reason}; WAYLAND_DISPLAY={wayland_display:?} WAYLAND_SOCKET={wayland_socket:?} DISPLAY={display:?}; XDG_RUNTIME_DIR={:?}",
             std::env::var_os("XDG_RUNTIME_DIR"));
     }
     match backend {
         Backend::Direct => direct::App::connect(shared).map(|app| Box::new(app) as Box<dyn Shell>),
         Backend::Wm => wm::App::connect(shared).map(|app| Box::new(app) as Box<dyn Shell>),
+        Backend::Incompatible => Err(format!("a makepad WM is running but cannot host this process: {reason}; not falling back to Wayland or X11")),
         Backend::Wayland => match wayland::App::connect(shared) {
             Ok(app) => Ok(Box::new(app)),
             Err(e) => {
@@ -593,6 +594,8 @@ fn connect(shared: &'static Shared) -> Result<Box<dyn Shell>, String> {
                     .map_err(|x| format!("Wayland failed: {e}; X11 fallback failed: {x}"))
             }
         },
+        // no X server to fall back to: say why no WM hosted this process, never a bare XOpenDisplay error
+        Backend::X11 if display.is_none() => Err(format!("no window system for this process: {reason}")),
         Backend::X11 => x11::App::connect(shared).map(|app| Box::new(app) as Box<dyn Shell>),
     }
 }

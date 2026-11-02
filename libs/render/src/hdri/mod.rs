@@ -2720,19 +2720,6 @@ mod tests {
         assert!(Env::new(&presets::preset("Three-point").unwrap()).sun_dir().is_none());
     }
 
-    /// The engine's key light and the generator's are one type: a
-    /// `hdri::EnvSun` goes straight into `World.environment.sun`.
-    #[test]
-    fn the_env_sun_is_the_scene_type() {
-        fn scene(s: makepad_scene::EnvSun) -> makepad_scene::EnvSun {
-            s
-        }
-        let s = EnvSun { dir: vec3f(0.0, 1.0, 0.0), radiance: vec3f(1.0, 1.0, 1.0), cos_radius: 0.99, facing: 1.0, cos_cover: 0.98 };
-        assert_eq!(scene(s), s);
-        let env = makepad_scene::Environment { sun: Some(s), ..makepad_scene::Environment::default() };
-        assert!(env.validate().is_ok());
-    }
-
     /// Redesign §5 (R5): bloom only thins a caster. Every texel with bloom is at most the map
     /// without the caster and at least the map with bloom off, for a short bloom, a long one,
     /// and one whose threshold the whole sky passes; and the bloom does thin somewhere.
@@ -2953,88 +2940,6 @@ mod tests {
 
     // ---- plan hdri-7: the night's bit-identity across commits ------------------------------------------------------
 
-    /// Where the pre-plan-7 night baselines live (`local/` is not committed; a machine without them skips).
-    fn night_baseline_dir() -> std::path::PathBuf {
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../local/agent_state/hdri/night-baseline")
-    }
-
-    /// The maps the night baselines hold: the three night presets, the moonlit night under rain with clouds 0.5, and a
-    /// studio whose one window is filled with the moonlit night's sky.
-    fn night_baseline_cases() -> Vec<(&'static str, HdriParams)> {
-        use super::presets::preset;
-        let moonlit = preset("Moonlit night").unwrap();
-        let mut rain = moonlit.clone();
-        rain.sky.weather = Some(WeatherParams { kind: "rain".to_string(), ..WeatherParams::default() });
-        rain.sky.clouds.coverage = 0.5;
-        let window = LightParams { gobo: Some(GoboParams { panes_x: 1, panes_y: 1, frame: 0.0, fill_sky: true, ..GoboParams::default() }), ..LightParams::default() };
-        let studio = HdriParams { mode: "studio".to_string(), lights: vec![window], ..moonlit.clone() };
-        vec![("moonlit", moonlit), ("starry", preset("Starry night").unwrap()), ("blue_hour", preset("Blue hour").unwrap()), ("moonlit_rain", rain), ("studio_window", studio)]
-    }
-
-    /// Everything of a map the night baselines pin, as f32s: its 128 bake; its key (a flag, then its nine numbers) and
-    /// the keyless copy when there is one; the strip's light (every field the base has); rows 300..308 of its 2048 bake.
-    fn night_dump(p: &HdriParams) -> Vec<f32> {
-        let env = Env::new(p);
-        let mut out: Vec<f32> = Vec::new();
-        let map = env.bake(128);
-        out.extend(map.data.iter().flatten());
-        match env.sun() {
-            Some(k) => {
-                out.push(1.0);
-                out.extend([k.dir.x, k.dir.y, k.dir.z, k.radiance.x, k.radiance.y, k.radiance.z, k.cos_radius, k.facing, k.cos_cover]);
-                if let Some(keyless) = env.bake_keyless_par(&map, |n, f| (0..n).for_each(f)) {
-                    out.extend(keyless.data.iter().flatten());
-                }
-            }
-            None => out.push(0.0),
-        }
-        let l = env.skyline_light();
-        out.extend([l.sun_u, l.sun_el_deg]);
-        out.extend(l.sun_rgb.iter().chain(&l.ambient_rgb));
-        for ring in [&l.ring_low, &l.ring_high, &l.ground_ring, &l.sea_low, &l.sea_high, &l.ground_damp] {
-            out.extend(ring.iter().flatten());
-        }
-        out.push(l.wet);
-        let rows = env.bake_par(2048, |_, f| (300..308).for_each(f));
-        out.extend(rows.data[300 * 2048..308 * 2048].iter().flatten());
-        out
-    }
-
-    /// Writes the night baselines (plan hdri-7 Task 1a, at the base, before any engine change): `HDRI_NIGHT_RECORD=1`.
-    #[test]
-    #[ignore = "records local/agent_state/hdri/night-baseline: HDRI_NIGHT_RECORD=1"]
-    fn record_night_baseline() {
-        if std::env::var_os("HDRI_NIGHT_RECORD").is_none() {
-            return eprintln!("HDRI_NIGHT_RECORD not set, nothing written");
-        }
-        let dir = night_baseline_dir();
-        std::fs::create_dir_all(&dir).unwrap();
-        for (name, p) in night_baseline_cases() {
-            let bytes: Vec<u8> = night_dump(&p).iter().flat_map(|x| x.to_le_bytes()).collect();
-            std::fs::write(dir.join(format!("{name}.f32")), &bytes).unwrap();
-            println!("night baseline {name}: {} floats", bytes.len() / 4);
-        }
-    }
-
-    /// Plan hdri-7: with no night block every map is the pre-plan-7 base's, bit for bit (the baselines Task 1a recorded;
-    /// skipped where they are missing).
-    #[test]
-    fn night_bakes_match_the_pre_plan7_baseline() {
-        let dir = night_baseline_dir();
-        for (name, p) in night_baseline_cases() {
-            let Ok(bytes) = std::fs::read(dir.join(format!("{name}.f32"))) else {
-                eprintln!("no night baseline {name}, skipped");
-                continue;
-            };
-            let want: Vec<u32> = bytes.chunks_exact(4).map(|b| u32::from_le_bytes(b.try_into().unwrap())).collect();
-            let got: Vec<u32> = night_dump(&p).iter().map(|x| x.to_bits()).collect();
-            assert_eq!(got.len(), want.len(), "{name}: the dump's length");
-            let first = got.iter().zip(&want).position(|(g, w)| g != w);
-            assert!(first.is_none(), "{name}: float {} differs: {} vs {}", first.unwrap(), f32::from_bits(got[first.unwrap()]), f32::from_bits(want[first.unwrap()]));
-            println!("night baseline {name}: identical");
-        }
-    }
-
     /// Plan hdri-7: for a night block set by `set(p, on)`: absent, present but off, and on while the sun is up, every
     /// bake (serial, parallel, an export width), the key, the keyless copy and the strip's light are the base's.
     fn night_block_changes_nothing(set: &dyn Fn(&mut HdriParams, bool)) {
@@ -3068,7 +2973,7 @@ mod tests {
     /// out: they are points read at texel centres, so the star field alone differs by up to 82 % a block between 1024
     /// and 2048, and the light a dust takes off them carries that (the Milky Way's: a 10.5 % block), which is the stars'
     /// sampling, not the layer's. Held against released is 512 against 1024 (`held_and_released_agree`); an export
-    /// width, 1024 against 2048 (each layer's ignored `*_at_export_widths` test).
+    /// width, 1024 against 2048 (each layer's `*_at_export_widths` test).
     ///
     /// The two make the whole layer only if everything that dims the stars goes through `star_transmittance`, so that is
     /// checked first, at every starlit texel centre of the `width` bake: `deep_sky` with the stars on is `deep_sky` with
@@ -3202,68 +3107,6 @@ mod tests {
         assert_eq!(a.night.as_ref().unwrap().ground(down, Vec3f::all(1.0)), b.night.as_ref().unwrap().ground(down, Vec3f::all(1.0)));
     }
 
-    /// Writes `name`.png of `p` at 1024, exposed as the app's Auto would (0.5 log2(0.18 / mean)), into
-    /// HDRI_NIGHT_VISUAL_DIR (plan hdri-7's engine-side looks; nothing without it). The exposure, when written.
-    fn write_look(name: &str, p: &HdriParams) -> Option<f32> {
-        let Some(dir) = std::env::var_os("HDRI_NIGHT_VISUAL_DIR").map(std::path::PathBuf::from) else {
-            eprintln!("HDRI_NIGHT_VISUAL_DIR not set, {name} skipped");
-            return None;
-        };
-        std::fs::create_dir_all(&dir).unwrap();
-        let map = Env::new(p).bake_par(1024, four_threads);
-        let mean = image::mean_luminance(&map).max(1.0e-30);
-        let ev = (0.5 * (0.18 / mean).log2()).clamp(-16.0, 16.0);
-        std::fs::write(dir.join(format!("{name}.png")), export::encode_png(&map, ev).unwrap()).unwrap();
-        println!("look {name}: mean {mean:.3e}, EV {ev:.2}");
-        Some(ev)
-    }
-
-    /// Task 3b's views of `p`'s night, from its 4096 map at exposure `ev`, into HDRI_NIGHT_VISUAL_DIR: `name`-look (90
-    /// degrees toward the galactic centre, raised 15, as Look around shows it), `name`-sky (the whole sky from below,
-    /// north up and east left, the zenith in the middle) and `name`-core (the 4096 map's own texels round the centre,
-    /// 1024 square).
-    fn write_views(name: &str, p: &HdriParams, ev: f32) {
-        let Some(dir) = std::env::var_os("HDRI_NIGHT_VISUAL_DIR").map(std::path::PathBuf::from) else { return };
-        let env = Env::new(p);
-        let map = env.bake_par(4096, four_threads);
-        let centre = env.night_features().and_then(|f| f.galactic_centre).expect("the band draws");
-        let size = 1024usize;
-        let write = |what: &str, rgb: Vec<f32>| {
-            let png = export::encode_face_png(&export::FaceImage { size, rgb }, ev).unwrap();
-            std::fs::write(dir.join(format!("{name}-{what}.png")), png).unwrap();
-        };
-        let view = |look: &dyn Fn(f32, f32) -> Option<Vec3f>| {
-            let mut rgb = Vec::with_capacity(size * size * 3);
-            for i in 0..size * size {
-                let (u, v) = (((i % size) as f32 + 0.5) / size as f32 * 2.0 - 1.0, 1.0 - ((i / size) as f32 + 0.5) / size as f32 * 2.0);
-                let c = look(u, v).map_or([0.0; 4], |d| map.sample([d.x, d.y, d.z]));
-                rgb.extend_from_slice(&c[..3]);
-            }
-            rgb
-        };
-        let (az, el) = az_el_from_dir(centre);
-        let ahead = dir_from_az_el(az, el + 15.0);
-        let right = Vec3f::cross(ahead, vec3f(0.0, 1.0, 0.0)).normalize();
-        let up = Vec3f::cross(right, ahead);
-        write("look", view(&|u, v| Some((ahead + right * u + up * v).normalize())));
-        write("sky", view(&|u, v| {
-            let r = (u * u + v * v).sqrt();
-            (r <= 1.0).then(|| dir_from_az_el((-u).atan2(v).to_degrees(), 90.0 - 90.0 * r))
-        }));
-        let uv = ibl::dir_to_equirect_uv([centre.x, centre.y, centre.z]);
-        let (cx, cy) = ((uv[0] * map.width as f32) as i64, (uv[1] * map.height as f32) as i64);
-        let top = (cy - 700).clamp(0, (map.height - size) as i64);
-        let mut rgb = Vec::with_capacity(size * size * 3);
-        for y in 0..size as i64 {
-            for x in 0..size as i64 {
-                let tx = (cx - size as i64 / 2 + x).rem_euclid(map.width as i64) as usize;
-                rgb.extend_from_slice(&map.data[(top + y) as usize * map.width + tx][..3]);
-            }
-        }
-        write("core", rgb);
-        println!("views {name}: the centre at azimuth {az:.1}, elevation {el:.1}");
-    }
-
     /// The galactic centre of "Starry night" with the Milky Way at its defaults, in the map's frame (about 16 degrees
     /// up in the south at 22 h, 45 N).
     fn starry_centre() -> (HdriParams, Vec3f) {
@@ -3287,10 +3130,8 @@ mod tests {
         held_and_released_agree(&base, &|p| p.sky.night.milky_way = Some(MilkyWayParams { turn_deg: 0.0, ..MilkyWayParams::default() }), 0.10, 0.03, "the Milky Way");
     }
 
-    /// Plan hdri-7 §5 ("in exports at every width", design §7): 1024 against 2048, by the held rule. Ignored: two 2048
-    /// bakes each way, a release run (`cargo test -p makepad-render --release --lib at_export_widths -- --ignored`).
+    /// Plan hdri-7 §5 ("in exports at every width", design §7): 1024 against 2048, by the held rule.
     #[test]
-    #[ignore = "release: 1024 against 2048"]
     fn the_milky_way_agrees_at_export_widths() {
         let base = super::presets::preset("Starry night").unwrap();
         widths_agree(&base, &|p| p.sky.night.milky_way = Some(MilkyWayParams { turn_deg: 0.0, ..MilkyWayParams::default() }), 1024, 0.10, 0.03, "the Milky Way");
@@ -3318,45 +3159,6 @@ mod tests {
         assert_eq!(Env::new(&HdriParams { mode: "studio".to_string(), ..base }).night_features(), None);
     }
 
-    /// Plan hdri-7 D11: where the unlifted twilight sky and the lifted night glow cross at the zenith (recorded, not
-    /// asserted: ASTRO_FADE_DEG is the spec's, not tuned without the owner). A report, so ignored: Step 7 runs it.
-    #[test]
-    #[ignore = "report: the twilight crossover"]
-    fn the_twilight_crossover_is_measured() {
-        for el in [-6.0f32, -8.0, -10.0, -12.0, -14.0, -16.0, -18.0, -20.0] {
-            let mut p = HdriParams::default();
-            p.sky.sun.mode = "manual".to_string();
-            p.sky.sun.elevation_deg = el;
-            p.sky.night.moon = false;
-            let env = Env::new(&p);
-            let up = vec3f(0.0, 1.0, 0.0);
-            let (sky, glow) = (crate::sky::luminance(env.atmo.as_ref().unwrap().sky(up)), crate::sky::luminance(env.night.as_ref().unwrap().glow(up)));
-            println!("sun {el:6.1}: twilight sky {sky:.3e}, night glow {glow:.3e}, ratio {:.2}", sky / glow.max(1.0e-30));
-        }
-    }
-
-    #[test]
-    #[ignore = "writes PNGs: HDRI_NIGHT_VISUAL_DIR"]
-    fn milky_way_looks() {
-        let base = super::presets::preset("Starry night").unwrap();
-        write_look("starry-night", &base);
-        for turn in [0.0f32, 116.0] {
-            let mut p = base.clone();
-            p.sky.night.milky_way = Some(MilkyWayParams { turn_deg: turn, ..MilkyWayParams::default() });
-            write_look(&format!("milky-way-turn{turn:.0}"), &p);
-        }
-        // Task 3b: the band and the nebulas at their defaults, at Realism 0 and 1
-        for realism in [0.0f32, 1.0] {
-            let mut p = base.clone();
-            p.sky.night.milky_way = Some(MilkyWayParams::default());
-            p.sky.night.nebulas = Some(NebulaParams { realism, ..NebulaParams::default() });
-            let name = format!("deep-sky-r{realism:.0}");
-            if let Some(ev) = write_look(&name, &p) {
-                write_views(&name, &p, ev);
-            }
-        }
-    }
-
     #[test]
     fn the_nebulas_off_or_by_day_change_nothing() {
         night_block_changes_nothing(&|p, on| p.sky.night.nebulas = Some(NebulaParams { on, ..NebulaParams::default() }));
@@ -3374,9 +3176,8 @@ mod tests {
         held_and_released_agree(&band, &|p| p.sky.night.nebulas = Some(NebulaParams::default()), 0.20, 0.10, "the nebulas and their knots over the band");
     }
 
-    /// Plan hdri-7 §5 ("in exports at every width"): 1024 against 2048, by the nebulas' held rule (ignored, release).
+    /// Plan hdri-7 §5 ("in exports at every width"): 1024 against 2048, by the nebulas' held rule.
     #[test]
-    #[ignore = "release: 1024 against 2048"]
     fn the_nebulas_agree_at_export_widths() {
         let base = super::presets::preset("Starry night").unwrap();
         widths_agree(&base, &|p| p.sky.night.nebulas = Some(NebulaParams { amount: 1.0, size: 2.0, ..NebulaParams::default() }), 1024, 0.20, 0.10, "the nebulas");
@@ -3426,18 +3227,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "writes PNGs: HDRI_NIGHT_VISUAL_DIR"]
-    fn nebula_looks() {
-        let mut base = super::presets::preset("Starry night").unwrap();
-        base.sky.night.milky_way = Some(MilkyWayParams::default());
-        for realism in [0.0f32, 0.5, 1.0] {
-            let mut p = base.clone();
-            p.sky.night.nebulas = Some(NebulaParams { amount: 0.6, realism, ..NebulaParams::default() });
-            write_look(&format!("nebulas-r{realism:.1}"), &p);
-        }
-    }
-
-    #[test]
     fn the_aurora_off_or_by_day_changes_nothing() {
         night_block_changes_nothing(&|p, on| p.sky.night.aurora = Some(AuroraParams { on, ..AuroraParams::default() }));
     }
@@ -3458,9 +3247,8 @@ mod tests {
         held_and_released_agree(&base, &|p| p.sky.night.aurora = Some(AuroraParams { folds: 0.8, rays: 0.8, ..AuroraParams::default() }), 0.10, 0.03, "the aurora");
     }
 
-    /// Plan hdri-7 §5 ("in exports at every width"): 1024 against 2048, by the held rule (ignored, release).
+    /// Plan hdri-7 §5 ("in exports at every width"): 1024 against 2048, by the held rule.
     #[test]
-    #[ignore = "release: 1024 against 2048"]
     fn the_aurora_agrees_at_export_widths() {
         let base = super::presets::preset("Starry night").unwrap();
         widths_agree(&base, &|p| p.sky.night.aurora = Some(AuroraParams { folds: 0.8, rays: 0.8, ..AuroraParams::default() }), 1024, 0.10, 0.03, "the aurora");
@@ -3580,19 +3368,4 @@ mod tests {
         assert!(lum(below) >= 0.15 * lum(above), "a mirror by Fresnel: {} against {} above", lum(below), lum(above));
     }
 
-    #[test]
-    #[ignore = "writes PNGs: HDRI_NIGHT_VISUAL_DIR"]
-    fn aurora_looks() {
-        let base = super::presets::preset("Starry night").unwrap();
-        for (name, a) in [
-            ("aurora-classic", AuroraParams::default()),
-            ("aurora-magenta-tops", AuroraParams { color: "magenta tops".into(), ..AuroraParams::default() }),
-            ("aurora-storm", AuroraParams { color: "storm".into(), folds: 1.0, rays: 1.0, ..AuroraParams::default() }),
-            ("aurora-high", AuroraParams { height_deg: 45.0, width_deg: 160.0, ..AuroraParams::default() }),
-        ] {
-            let mut p = base.clone();
-            p.sky.night.aurora = Some(a);
-            write_look(name, &p);
-        }
-    }
 }

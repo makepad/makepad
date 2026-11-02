@@ -524,32 +524,6 @@ fn test_page_inherits_media_box_and_resources() {
 }
 
 // ============================================================
-// Stress test
-// ============================================================
-
-#[test]
-fn test_stress_large_pdf() {
-    let pdf_data = generate_test_pdf(50);
-    assert!(pdf_data.len() > 10000, "large PDF should be substantial");
-
-    let mut doc = PdfDocument::parse(&pdf_data).unwrap();
-    assert_eq!(doc.page_count(), 50);
-
-    // Parse every page's content
-    let mut total_ops = 0;
-    for i in 0..50 {
-        let page = doc.page(i).unwrap();
-        let ops = parse_content_stream(&page.content_data).unwrap();
-        total_ops += ops.len();
-    }
-    assert!(
-        total_ops > 1000,
-        "50-page PDF should have many ops, got {}",
-        total_ops
-    );
-}
-
-// ============================================================
 // Object tests
 // ============================================================
 
@@ -718,18 +692,35 @@ fn test_cid_widths_take_priority() {
 }
 
 // ============================================================
-// The acceptance file: local/retourformulier-techpunt-ned.pdf
-// (checked into local/; the test skips silently when absent so
-// the suite stays green on trees without local data).
+// The acceptance form's encoding and text positioning, in a small generated PDF.
 // ============================================================
 
 #[test]
 fn test_retourformulier_fonts_and_text() {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../local/retourformulier-techpunt-ned.pdf");
-    let Ok(data) = std::fs::read(&path) else {
-        return;
-    };
+    let content = "BT /T1_0 1 Tf 20 0 0 20 152.126 737.8154 Tm \
+        (R) Tj 0.533 0 Td (etour) Tj 2.7 0 Td (form) Tj 2.4 0 Td (ulier) Tj \
+        -5.633 -9.342 Td (R) Tj ET";
+    let objects = [
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        "<< /Type /Pages /Count 1 /Kids [3 0 R] >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /T1_0 4 0 R >> >> /Contents 5 0 R >>".to_string(),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding << /BaseEncoding /WinAnsiEncoding /Differences [31 /f_i] >> >>".to_string(),
+        format!("<< /Length {} >>\nstream\n{content}\nendstream", content.len()),
+    ];
+    let mut data = b"%PDF-1.4\n".to_vec();
+    let mut offsets = Vec::new();
+    for (i, body) in objects.iter().enumerate() {
+        offsets.push(data.len());
+        data.extend_from_slice(format!("{} 0 obj\n{body}\nendobj\n", i + 1).as_bytes());
+    }
+    let xref_offset = data.len();
+    data.extend_from_slice(b"xref\n0 6\n0000000000 65535 f \n");
+    for offset in offsets {
+        data.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    data.extend_from_slice(
+        format!("trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n").as_bytes(),
+    );
     let mut doc = PdfDocument::parse(&data).expect("parse");
     assert_eq!(doc.page_count(), 1);
     let page = doc.page(0).expect("page");

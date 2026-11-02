@@ -1812,6 +1812,11 @@ fn merge_stores_on(options: &relax_session::Options) -> bool {
     !options.no_store_merge
 }
 
+fn merge_trace() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("MAKEPAD_RUN_MERGE_TRACE").is_ok())
+}
+
 /// Consecutive narrow stores of one value's bytes become one wide store: in a block, byte stores
 /// `[p + off + j] = x >> 8j` (j = 0.., the shift optionally under a truncating Conv), with no other
 /// memory access between them, become `[p + off] = x` as 8, 4 or 2 bytes (little-endian: byte j
@@ -2034,7 +2039,7 @@ pub fn merge_stores(options: &relax_session::Options, f: &mut Func) -> bool {
         if replace.is_empty() {
             continue;
         }
-        if std::env::var("MAKEPAD_RUN_MERGE_TRACE").is_ok() {
+        if merge_trace() {
             for (_, i) in &replace {
                 eprintln!("merge_stores {}: b{} {:?}", f.name, bi, i);
             }
@@ -2135,6 +2140,14 @@ fn retarget(t: &mut Term, mut m: impl FnMut(u32) -> u32) {
     }
 }
 
+fn unroll_trace() -> Option<&'static str> {
+    static VALUE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    VALUE.get_or_init(|| {
+        let _k = relax_session::phase::kept();
+        std::env::var("MAKEPAD_RUN_UNROLL_TRACE").ok()
+    }).as_deref()
+}
+
 /// Full unrolling of loops with a small constant trip count (`for _ in 0..3`, deflate's hash-chain
 /// probes): an innermost loop with one latch whose counter `c` is set once outside the loop by a
 /// constant and stepped once in the latch by `c = c + s` (c read nowhere outside the loop; calls
@@ -2148,7 +2161,7 @@ pub fn unroll_const_loops(options: &relax_session::Options, f: &mut Func) -> boo
     if !full_unroll_on(options) || f.blocks.len() < 2 {
         return false;
     }
-    let tr = std::env::var("MAKEPAD_RUN_UNROLL_TRACE").map_or(false, |w| f.name.ends_with(w.as_str()));
+    let tr = unroll_trace().is_some_and(|w| f.name.ends_with(w));
     let reach = relax_backend::regalloc::reachable(f);
     let preds = relax_backend::regalloc::preds_of(f, &reach);
     let loops = relax_backend::regalloc::natural_loops(f, &reach, &preds, false);
@@ -2927,6 +2940,22 @@ pub fn set_memset(memset: Sym) {
     let _ = MEMSET.set(memset);
 }
 
+fn zerofill_trace() -> Option<&'static str> {
+    static VALUE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    VALUE.get_or_init(|| {
+        let _k = relax_session::phase::kept();
+        std::env::var("MAKEPAD_RUN_ZEROFILL_TRACE").ok()
+    }).as_deref()
+}
+
+fn zerofill_dump_dir() -> Option<&'static str> {
+    static VALUE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    VALUE.get_or_init(|| {
+        let _k = relax_session::phase::kept();
+        std::env::var("MAKEPAD_RUN_DUMP_DIR").ok()
+    }).as_deref()
+}
+
 /// Counted loops that only store zeros over each element of an array become one memset (LLVM
 /// LoopIdiomRecognize): a header `c = i < N; branch c -> B, X` (N a constant) and one body block
 /// `B: off = i * S; p = a + off; stores of zero at p + k...; i += 1; jump H` whose stores cover
@@ -2947,7 +2976,7 @@ pub fn zero_fill_loops(options: &relax_session::Options, f: &mut Func) -> bool {
     }
     // MAKEPAD_RUN_ZEROFILL_TRACE=<fn name part>: the loops looked at, appended to
     // $MAKEPAD_RUN_DUMP_DIR/zerofill.txt (stderr of compile threads is not kept)
-    let tr = std::env::var("MAKEPAD_RUN_ZEROFILL_TRACE").map_or(false, |w| f.name.contains(w.as_str()));
+    let tr = zerofill_trace().is_some_and(|w| f.name.contains(w));
     let mut log = String::new();
     let reach = relax_backend::regalloc::reachable(f);
     let preds = relax_backend::regalloc::preds_of(f, &reach);
@@ -3136,7 +3165,7 @@ pub fn zero_fill_loops(options: &relax_session::Options, f: &mut Func) -> bool {
         }
     }
     if tr {
-        if let Ok(d) = std::env::var("MAKEPAD_RUN_DUMP_DIR") {
+        if let Some(d) = zerofill_dump_dir() {
             use std::io::Write;
             if let Ok(mut o) = std::fs::OpenOptions::new().create(true).append(true).open(format!("{}/zerofill.txt", d)) {
                 let _ = o.write_all(format!("zero-fill {}: {} loops\n{}", f.name, loops.len(), log).as_bytes());

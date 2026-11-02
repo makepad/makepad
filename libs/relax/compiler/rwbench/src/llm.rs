@@ -6,7 +6,7 @@
 // as a session does. Per iteration: build the decode graph for a key bucket (what a session does
 // once per 256 tokens), then 256 decode tokens, each: layout validation, input writes (token ids,
 // positions, attention mask, state rows), readback shaping of a fixed 1 MB logits vector,
-// single-token collapse and greedy sampling. RW_LLM_GGUF=<path> runs a real GGUF instead (a node:
+// single-token collapse and greedy sampling. RW_LLM_GGUF=<path> runs a real GGUF instead (a pool node:
 // /home/me/.makepad/weights/llm/Qwen3.8-27B-Q4_K_M.gguf).
 // Not covered: the CUDA graph planner (plan_raw_graph), which compiles only with the CUDA kernels.
 use crate::fold;

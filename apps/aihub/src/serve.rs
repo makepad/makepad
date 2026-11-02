@@ -576,17 +576,23 @@ pub fn node_registry(cache_dir: &std::path::Path) -> Vec<makepad_ai_hub::registr
 /// the reason ("" when nothing could serve at all, which reads as Off with its notes).
 fn start(plan: &Plan, local: Vec<ModelSpec>) -> Result<(ServiceHandle, Vec<Backend>, Vec<(Backend, String)>), (String, Vec<(Backend, String)>)> {
     let mut notes = Vec::new();
-    // The setting, else this machine's first private IPv4 address.
-    let Some(host) = makepad_ai_hub::node_conf::lan_host(&plan.host) else {
-        return Err(("this machine has no private LAN address to serve on".to_string(), notes));
+    let networked = makepad_network::lan::hub_bind_ok(SocketAddr::from(([0, 0, 0, 0], plan.port)));
+    let host = if networked {
+        let Some(host) = makepad_ai_hub::node_conf::lan_host(&plan.host) else {
+            return Err(("this machine has no private LAN address to serve on".to_string(), notes));
+        };
+        host
+    } else {
+        "127.0.0.1".to_string()
     };
     let bind: SocketAddr = match format!("{host}:{}", plan.port).parse() {
         Ok(bind) => bind,
         Err(_) => return Err((format!("{host}:{} is not an address", plan.port), notes)),
     };
-    // LAN only: never a public, wildcard or loopback address (the same rule the claude-cli backend applies).
-    if let Err(e) = makepad_network::fleet::lan::check_lan_bind("the AI Hub", bind) {
-        return Err((e, notes));
+    if networked {
+        if let Err(e) = makepad_network::fleet::lan::check_lan_bind("the AI Hub", bind) {
+            return Err((e, notes));
+        }
     }
     let mut models = Vec::new();
     let mut serving = Vec::new();

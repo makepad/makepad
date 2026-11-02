@@ -534,6 +534,9 @@ pub struct Fcx<'a> {
     forced_autoref: Option<u8>,
     /// the expected type of the method call being checked (check_method's expectation)
     method_expected: Option<TyId>,
+    /// where the name of the method being probed is written (its span's edition decides
+    /// `#[rustc_skip_during_method_dispatch]`, probe.rs:2018-2035); u32::MAX: no method name
+    method_name_lo: u32,
     /// coercions to a `dyn` pointer whose source pointee was still open: (expr, actual,
     /// expected, pos), decided in `finish`
     deferred_dyn: Vec<(ExprId, TyId, TyId, u32)>,
@@ -811,6 +814,7 @@ fn check_fn_body(cx: &crate::tcx::EvalCx<'_>, prog: &Program, tcx: &Tcx, def: De
         stalled_coroutine_goals: Vec::new(),
         forced_autoref: None,
         method_expected: None,
+        method_name_lo: u32::MAX,
     };
     fcx.init_body_regions();
     let penv = tcx.param_env_id(prog, def);
@@ -4921,8 +4925,31 @@ impl<'a> Fcx<'a> {
         let ast = self.ast();
         let margs = ast.mac_arg(m.args);
         let Some(spec) = margs.asm else { return self.tcx.tys.error };
-        for op in ast.list(spec.ops) {
+        let mut diverge = spec.options & ASM_NORETURN != 0;
+        let ops = ast.list(spec.ops);
+        // rustc_ast_lowering asm.rs: `asm_goto_with_outputs`
+        if let Some(label) = ops.iter().find(|op| op.dir == AsmDir::Label) {
+            let outputs = ops.iter().any(|op| matches!(op.dir, AsmDir::Out | AsmDir::LateOut | AsmDir::InOut | AsmDir::InLateOut) && op.output.is_some());
+            if outputs && !self.prog.crates[self.prog.def(self.b.def).krate as usize].features(self.prog).has("asm_goto_with_outputs") {
+                let at = label.input.map_or(self.last_lo, |x| ast.expr(x).lo);
+                self.err(at, "E0658: using both label and output operands for inline assembly is unstable".into());
+            }
+        }
+        for op in ops {
             match op.dir {
+                // rustc check_expr_asm: a label block has unit type or diverges; its divergence is
+                // not the asm's unless every path out of it diverges
+                AsmDir::Label => {
+                    let Some(x) = op.input else { continue };
+                    let previous = self.diverges;
+                    let unit = self.tcx.tys.unit;
+                    let t = self.check_expr(x, Some(unit));
+                    if self.shallow(t) != self.tcx.tys.never {
+                        self.coerce_or_unify(t, unit, Some(x), ast.expr(x).lo);
+                        diverge = false;
+                    }
+                    self.diverges = previous;
+                }
                 AsmDir::Sym | AsmDir::Const => {
                     if let Some(x) = op.input {
                         self.check_expr(x, None);
@@ -4943,11 +4970,7 @@ impl<'a> Fcx<'a> {
                 }
             }
         }
-        if spec.options & ASM_NORETURN != 0 {
-            self.tcx.tys.never
-        } else {
-            self.tcx.tys.unit
-        }
+        if diverge { self.tcx.tys.never } else { self.tcx.tys.unit }
     }
 
     pub fn check_expr(&mut self, e: ExprId, expected: Option<TyId>) -> TyId {
@@ -6365,7 +6388,9 @@ impl<'a> Fcx<'a> {
                     self.cur_binop = e.0;
                     return self.check_op_trait(op, sa0, b, lo, false);
                 }
-                let tb0 = self.check_expr(b, Some(ta));
+                // No expectation: the right operand's type is `?R` of `L: Op<?R>` until it is known
+                // (rustc op.rs), so a branch of `len * if c { a } else { b }` may be a `Vec3`.
+                let tb0 = self.check_expr(b, None);
                 let sb0 = self.shallow(tb0);
                 // a primitive left operand with a non-primitive right one is an operator trait
                 // call too (`3u32 * duration`: `impl Mul<Duration> for u32`; rustc is_builtin_binop
@@ -6478,6 +6503,7 @@ impl<'a> Fcx<'a> {
         if matches!(self.tcx.tys.kind(cur), TyKind::Error) { return self.tcx.tys.error; }
         let ts = self.ty_str(t);
         // expr.rs check_expr_field: a method of that name is E0615, a primitive has no fields (E0610)
+        self.method_name_lo = name.lo;
         if !self.tcx.tys.has_error(cur) && matches!(self.pick_all_method(e, t, s, lo), Ok(Some(_))) {
             self.err(lo, format!("E0615: attempted to take value of method `{}` on type `{}`", self.text(name), ts));
         } else if matches!(self.tcx.tys.kind(self.shallow(t)), TyKind::Bool | TyKind::Char | TyKind::Str | TyKind::Int(_) | TyKind::Float(_) | TyKind::IntVar(_) | TyKind::FloatVar(_)) {
@@ -7009,16 +7035,17 @@ impl<'a> Fcx<'a> {
         // this call's expectation only (nested calls in the receiver set their own)
         let method_expected = self.method_expected.take();
         let s = self.sym(name);
-        self.check_method_sym(e, recv, s, turbofish, args, None, lo, method_expected)
+        self.check_method_sym(e, recv, s, name.lo, turbofish, args, None, lo, method_expected)
     }
 
     /// A method call by name; `extra` is the type of one more argument after `args` that has no
     /// expression (built-in macros: `write!(w, ..)` is `w.write_fmt(format_args!(..))`).
-    fn check_method_sym(&mut self, e: ExprId, recv: ExprId, s: Sym, turbofish: GenericArgsId, args: &[ExprId], extra: Option<TyId>, lo: u32, method_expected: Option<TyId>) -> TyId {
+    fn check_method_sym(&mut self, e: ExprId, recv: ExprId, s: Sym, name_lo: u32, turbofish: GenericArgsId, args: &[ExprId], extra: Option<TyId>, lo: u32, method_expected: Option<TyId>) -> TyId {
         self.extra_arg = extra;
         let rt = self.check_expr(recv, None);
         let error = self.tcx.tys.error;
         self.retry_goals(false);
+        self.method_name_lo = name_lo;
         let pick = match self.pick_all_method(e, rt, s, lo) {
             Ok(Some(pick)) => pick,
             Ok(None) => {

@@ -10,7 +10,7 @@
 use super::config::*;
 use super::graph::{build_graph_until, Stage, VocalsGraph};
 use super::weights;
-use crate::config::{ChunkGeometry, AUDIO_CHANNELS, DIM, FEATURES, FREQ_BINS};
+use crate::config::{ChunkGeometry, AUDIO_CHANNELS, FEATURES, FREQ_BINS};
 use crate::demix::ChunkSeparator;
 use crate::model::{
     apply_mask, as_bytes, command_buffer_ops_limit, f32_from_bytes, istft_threads, pack_features,
@@ -118,14 +118,6 @@ impl VocalsModel {
     /// The chunk this model was compiled for.
     pub fn geometry(&self) -> ChunkGeometry {
         self.geometry
-    }
-
-    /// The mask the last [`separate_chunk`](Self::separate_chunk) applied:
-    /// `[4100, frames]` in the spectrum's own feature order, the band masks
-    /// averaged over the bands that cover each bin. All zero before the
-    /// first chunk.
-    pub fn last_mask(&self) -> &[f32] {
-        &self.mask
     }
 
     /// STFT of both channels into the graph's input, then the graph. Returns
@@ -336,65 +328,6 @@ impl ChunkSeparator for DereverbModel {
 /// just "how much reverb".
 pub fn reverb(vocal: &StereoBuf, dry: &StereoBuf) -> StereoBuf {
     instrumental(vocal, dry)
-}
-
-/// A forward built only as far as one [`Stage`], for holding that stage
-/// against a reference. It is a whole separate load and compile, so it costs
-/// the separator nothing; it is a fault-finding tool and no part of a
-/// separation.
-pub struct StageProbe {
-    model: VocalsModel,
-}
-
-impl StageProbe {
-    pub fn load(
-        checkpoint: impl AsRef<Path>,
-        geometry: ChunkGeometry,
-        stage: Stage,
-    ) -> Result<Self> {
-        let runtime = DeviceRuntime::new()?;
-        Ok(Self {
-            model: VocalsModel::build(checkpoint, runtime, geometry, stage)?,
-        })
-    }
-
-    /// Runs one chunk as far as the probe's stage.
-    ///
-    /// The trunk stages come back `[frame][band][384]` whichever layout the
-    /// graph holds them in, so one comparison serves them all;
-    /// [`Stage::Masks`] comes back `[frame][7916]`, the band masks before
-    /// they are averaged.
-    pub fn run(&mut self, chunk: &StereoBuf) -> Result<Vec<f32>> {
-        let frames = self.model.geometry.frames;
-        let bytes = self.model.forward(chunk)?;
-        let values = f32_from_bytes(&bytes)?;
-        let want = match self.model.graph.stage {
-            Stage::Masks => BAND_FEATURES * frames,
-            Stage::BandSplit | Stage::Layer(_) => DIM * NUM_BANDS * frames,
-        };
-        if values.len() != want {
-            return Err(DiffusionError::model(format!(
-                "vocals: stage {:?} returned {} floats, expected {want}",
-                self.model.graph.stage,
-                values.len()
-            )));
-        }
-        match self.model.graph.stage {
-            // TIME layout reads back `[band][frame][384]`.
-            Stage::BandSplit => {
-                let mut out = vec![0.0f32; values.len()];
-                for band in 0..NUM_BANDS {
-                    for frame in 0..frames {
-                        let from = (band * frames + frame) * DIM;
-                        let to = (frame * NUM_BANDS + band) * DIM;
-                        out[to..to + DIM].copy_from_slice(&values[from..from + DIM]);
-                    }
-                }
-                Ok(out)
-            }
-            Stage::Layer(_) | Stage::Masks => Ok(values.to_vec()),
-        }
-    }
 }
 
 #[cfg(test)]

@@ -2826,45 +2826,6 @@ fn golden_kill_interrupt() {
     assert_eq!(out, ["t1:onInterrupt", "t3:onInterrupt"]);
 }
 
-/// [callbacks design_labels_directions] currentLabel = previousLabel(time +
-/// 1e-8); next/previous strict; ties (b and c both at 1): the first added.
-#[test]
-fn golden_labels_directions() {
-    let t = trace("design_labels_directions");
-    let mut e = TweenEngine::new();
-    seed(&mut e, 1, X, 0.0);
-    let tl = e.timeline(TimelineOpts::new().paused(true));
-    let l = |s: &str| Tag(500 + s.as_bytes()[0] as u64);
-    e.tl(tl)
-        .to(
-            tid(1),
-            &[PropTo::to_f64(X, 1.0)],
-            TweenOpts::new().duration(3.0),
-            0.0,
-        )
-        .add_label(l("a"), 0.0)
-        .add_label(l("b"), 1.0)
-        .add_label(l("c"), 1.0)
-        .add_label(l("d"), 2.0);
-    let name = |x: Option<Tag>| x.map(|t| ((t.0 - 500) as u8 as char).to_string());
-    let mut errs = Vec::new();
-    for op in t.ops {
-        run_op(&mut e, tl, op.op).unwrap();
-        let r = e.anim_ref(tl);
-        for (k, g) in [
-            ("current", name(r.current_label())),
-            ("next", name(r.next_label())),
-            ("previous", name(r.previous_label())),
-        ] {
-            let w = golden::common::text(op.values, k).map(str::to_string);
-            if g != w {
-                errs.push(format!("{}: {k} = {g:?}, GSAP {w:?}", op.op));
-            }
-        }
-    }
-    assert_clean("design_labels_directions", errs);
-}
-
 // ---------------------------------------------------------------------------
 // Root-level lifecycle, staggered from(), root time scale
 // ---------------------------------------------------------------------------

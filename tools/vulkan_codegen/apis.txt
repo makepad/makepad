@@ -294,6 +294,7 @@ value VkCommandBufferLevel PRIMARY
 value VkCommandBufferUsageFlags ONE_TIME_SUBMIT
 value VkCommandPoolCreateFlags RESET_COMMAND_BUFFER
 value VkCompareOp LESS_OR_EQUAL
+value VkCompareOp GREATER
 value VkCompositeAlphaFlagsKHR INHERIT
 value VkCompositeAlphaFlagsKHR OPAQUE
 value VkCompositeAlphaFlagsKHR POST_MULTIPLIED

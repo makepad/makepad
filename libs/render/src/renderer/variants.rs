@@ -99,13 +99,15 @@ script_mod! {
     mod.draw.scene_variant = {
         clip: fn() {}
         gi_ambient: fn(wp: vec3, normal: vec3, fallback: vec3) -> vec3 { return fallback }
-        gi_display: fn(color: vec4, wp: vec3, n: vec3) -> vec4 { return color }
+        gi_display: fn(color: vec4, wp: vec3, n: vec3) -> vec4 {
+            if color.w < 0.999 { return color }
+            return vec4(self.output_dither(color.xyz, wp), color.w)
+        }
         // GI on, no debug view: fast_gi's gi_display without its debug
         // branches.
         gi_display_plain: fn(color: vec4, wp: vec3, n: vec3) -> vec4 {
-            if self.gi_on <= 0.0 || color.w < 0.999 { return color }
-            let noise = fract(sin(dot(wp, vec3(127.1, 311.7, 74.7))) * 43758.5453) - 0.5
-            return vec4(max(color.xyz + vec3(noise, noise, noise) * (1.0 / 255.0), vec3(0.0, 0.0, 0.0)), color.w)
+            if color.w < 0.999 { return color }
+            return vec4(self.output_dither(color.xyz, wp), color.w)
         }
         csm_vis: fn(wp: vec3, n: vec3, ndl: float) -> float { return 1.0 }
         csm_debug_view: fn(color: vec4, wp: vec3, n: vec3) -> vec4 { return color }
@@ -192,7 +194,7 @@ impl Renderer {
 /// switched-off stubs. `lit` false: the program composes no light (an unlit
 /// or flat material), so the lighting the lane computes for its compose
 /// hook (cascades, clustered lights and their shadows, GI ambient) is never
-/// read and goes too; its debug views and GI's display dither stay as the
+/// read and goes too; its debug views and output dither stay as the
 /// frame has them.
 pub(crate) fn variant_object(vm: &mut ScriptVm, base: ScriptObject, features: Features, lit: bool) -> Option<ScriptObject> {
     // The stubs, registered once per VM.

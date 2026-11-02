@@ -143,39 +143,3 @@ fn read_limited_file(path: &Path) -> Result<Vec<u8>, GltfError> {
     }
     Ok(bytes)
 }
-
-#[cfg(test)]
-mod tests {
-    use crate::{image::load_image_bytes, loader::load_gltf_from_path};
-    use std::path::PathBuf;
-
-    fn damaged_helmet_path(subpath: &str) -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!(
-            "../../examples/gltf/resources/glTF-Sample-Models/2.0/DamagedHelmet/{subpath}"
-        ))
-    }
-
-    #[test]
-    fn loads_damaged_helmet_external_image_bytes_if_available() {
-        let path = damaged_helmet_path("glTF/DamagedHelmet.gltf");
-        if !path.exists() {
-            return;
-        }
-
-        let loaded = load_gltf_from_path(path).expect("must load");
-        let bytes = load_image_bytes(&loaded, 0).expect("must load image bytes");
-        assert!(!bytes.is_empty());
-    }
-
-    #[test]
-    fn loads_damaged_helmet_glb_image_bytes_if_available() {
-        let path = damaged_helmet_path("glTF-Binary/DamagedHelmet.glb");
-        if !path.exists() {
-            return;
-        }
-
-        let loaded = load_gltf_from_path(path).expect("must load");
-        let bytes = load_image_bytes(&loaded, 0).expect("must load image bytes");
-        assert!(!bytes.is_empty());
-    }
-}

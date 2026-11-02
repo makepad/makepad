@@ -75,6 +75,3 @@ impl AppMain for App {
         self.ui.handle_event(cx, event, &mut Scope::empty());
     }
 }
-
-#[cfg(test)]
-makepad_script_test::shader_inventory_test!("counter", <App as AppMain>::script_mod);

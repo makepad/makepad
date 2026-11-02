@@ -125,6 +125,10 @@ pub struct JobRecord {
     /// Shared cancel flag: raised by POST /job/<id>/cancel, checked by the
     /// backend between steps/tiles/load components.
     pub cancel: CancelToken,
+    /// The cancel asked for the model's memory back too (a person stopping
+    /// the job, not a reroute): once the job unwinds, its model is unloaded
+    /// unless a queued job wants it.
+    pub free_on_cancel: bool,
     interruption: Option<String>,
     /// Lifecycle timestamps (unix ms) surfaced on `/job/<id>`.
     pub queued_ms: u64,
@@ -335,6 +339,7 @@ impl JobStore {
                 params: Some(params),
                 state: JobState::Queued,
                 cancel: CancelToken::new(),
+                free_on_cancel: false,
                 interruption: None,
                 queued_ms: now_ms(),
                 started_ms: None,
@@ -494,6 +499,24 @@ impl JobStore {
                 _ => CancelOutcome::NotCancellable,
             },
         }
+    }
+
+    /// Mark a job's cancel as one that wants the model's memory back.
+    pub fn set_free_on_cancel(&mut self, id: &str) {
+        if let Some(job) = self.jobs.get_mut(id) {
+            job.free_on_cancel = true;
+        }
+    }
+
+    /// The model to unload now that job `id` unwound from a cancel that
+    /// asked for its memory back: none when the cancel did not ask, or a
+    /// queued or running job still wants that model.
+    pub fn model_to_free_after_cancel(&self, id: &str) -> Option<String> {
+        let job = self.jobs.get(id).filter(|job| job.free_on_cancel)?;
+        let model = job.model.clone();
+        let wanted = self.queue.iter().any(|q| self.jobs.get(q).is_some_and(|j| j.model == model))
+            || self.jobs.iter().any(|(other, j)| other != id && j.model == model && matches!(j.state, JobState::Running { .. } | JobState::Live { .. }));
+        (!wanted).then_some(model)
     }
 
     /// The running job's shared cancel flag (for the worker to pass into the

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """asmcmp <kernel> <fn> [options] -- Relax's tier-1 x64 code of one function next to rustc --release's.
 
-Runs on an x86-64 Linux box with the source tree (a node). One command:
+Runs on an x86-64 Linux box with the source tree (a pool node). One command:
     tools/run/tools/asmcmp deflate compress_normal
     tools/run/tools/asmcmp sum_slice relax_bench_rt::sum_slice --makepad ~/cg2/frozen/makepad-t0
 

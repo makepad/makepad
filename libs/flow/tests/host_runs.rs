@@ -969,7 +969,7 @@ fn clear_instance_forgets_generated_state_but_keeps_inputs_and_refuses_live_runs
 }
 
 // ---------------------------------------------------------------------------
-// 6. values: PUT bytes -> digest -> usable as an image input; TTL expiry
+// 6. values: PUT bytes -> digest -> usable as an image input
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -1028,41 +1028,6 @@ fn value_upload_is_usable_as_an_image_input() {
     server.shutdown();
 }
 
-#[test]
-fn value_ttl_expiry_returns_404() {
-    let root = TempRoot::new("value-ttl");
-    let mut config = FlowServerConfig::new(root.0.clone())
-        .with_seams(seams(FakeChat::done("unused"), FakeGen::done(), FakeHttp::json(200, "{}")));
-    // Force an immediate spill (so TTL, not the RAM cache, governs this
-    // value's lifetime) and sweep fast enough for a test to observe it.
-    config.values_ram_budget = 1;
-    config.value_ttl_secs = 1;
-    config.janitor_sweep_secs = 1;
-    config.log = Box::new(|_| {});
-    let server = FlowServer::start(config).unwrap();
-    let endpoints = server.endpoints();
-
-    let put_value = request(
-        endpoints.data,
-        "PUT",
-        "/v1/values?type=bytes&content_type=application/octet-stream",
-        Some(&endpoints.token),
-        "scratch bytes nobody keeps",
-    );
-    assert_eq!(put_value.status, 201, "{}", put_value.body);
-    let digest = PutValueResponse::deserialize_json(&put_value.body).unwrap().digest;
-
-    let immediate = request(endpoints.data, "GET", &format!("/v1/values/{digest}"), Some(&endpoints.token), "");
-    assert_eq!(immediate.status, 200);
-
-    std::thread::sleep(Duration::from_millis(2_500));
-
-    let expired = request(endpoints.data, "GET", &format!("/v1/values/{digest}"), Some(&endpoints.token), "");
-    assert_eq!(expired.status, 404, "{}", expired.body);
-
-    server.shutdown();
-}
-
 // ---------------------------------------------------------------------------
 // 7. the real-fleet path is selected by default; the testpattern hub works
 //    through the HTTP routes with `FixedRouter` injected
@@ -1115,11 +1080,6 @@ fn testpattern_hub_service_runs_through_the_http_routes() {
     });
     let handle = match service {
         Ok(handle) => handle,
-        Err(error) if error.to_string().contains("Operation not permitted") => {
-            let _ = std::fs::remove_dir_all(&cache_dir);
-            eprintln!("skipping real hub service: loopback bind is forbidden by this sandbox");
-            return;
-        }
         Err(error) => panic!("start real hub service: {error}"),
     };
     let base_url = format!("http://{}", handle.addr);

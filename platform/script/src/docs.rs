@@ -516,7 +516,7 @@ impl ScriptCode {
     }
 
     /// The `let` / `var` annotations of one body.
-    pub fn resolve_body_let_docs(&self, body_index: u16) -> Vec<ScriptLetDoc> {
+    pub(crate) fn resolve_body_let_docs(&self, body_index: u16) -> Vec<ScriptLetDoc> {
         let bodies = self.bodies.borrow();
         let Some(body) = bodies.get(body_index as usize) else {
             return Vec::new();

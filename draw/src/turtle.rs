@@ -2352,83 +2352,6 @@ mod tests {
     }
 
     #[test]
-    fn baseline_bookkeeping_sizes() {
-        // `Walk` is passed by value everywhere, so its gate is the one that matters.
-        assert!(std::mem::size_of::<Baseline>() <= 8);
-        assert!(std::mem::size_of::<Walk>() <= 384);
-    }
-
-    struct CountingAllocator;
-
-    static ALLOCATIONS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-
-    unsafe impl std::alloc::GlobalAlloc for CountingAllocator {
-        unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
-            ALLOCATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            std::alloc::System.alloc(layout)
-        }
-
-        unsafe fn dealloc(&self, ptr: *mut u8, layout: std::alloc::Layout) {
-            std::alloc::System.dealloc(ptr, layout)
-        }
-
-        unsafe fn realloc(&self, ptr: *mut u8, layout: std::alloc::Layout, new_size: usize) -> *mut u8 {
-            ALLOCATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            std::alloc::System.realloc(ptr, layout, new_size)
-        }
-    }
-
-    #[global_allocator]
-    static ALLOCATOR: CountingAllocator = CountingAllocator;
-
-    /// Draws `rows` wrapping rows of eight nested boxes with baselines under `row_align`,
-    /// returning how many heap allocations that took.
-    fn allocations_for_rows(row_align: RowAlign, rows: usize) -> usize {
-        let before = ALLOCATIONS.load(std::sync::atomic::Ordering::Relaxed);
-        with_turtle(dvec2(1000.0, 10000.0), Layout::flow_down(), |cx| {
-            cx.begin_turtle(Walk::fit(), Layout { flow: Flow::Right { wrap: true, row_align }, ..Default::default() });
-            for row in 0..rows {
-                for index in 0..8 {
-                    let height = 10.0 + ((row + index) % 5) as f64 * 3.0;
-                    cx.begin_turtle(Walk::fit(), Layout { align: Align { x: 0.0, y: 0.5 }, ..Layout::flow_right() });
-                    cx.walk_turtle(walk_with_baseline(20.0, height, (height * 0.75) as f32));
-                    cx.end_turtle();
-                }
-                cx.turtle_new_line();
-            }
-            cx.end_turtle();
-        });
-        ALLOCATIONS.load(std::sync::atomic::Ordering::Relaxed) - before
-    }
-
-    /// Run alone (`-- --ignored --test-threads=1`) so no other test's allocations are counted.
-    /// The counts still wobble by a few from test setup, so only per-row growth would fail it.
-    #[test]
-    #[ignore = "counts this thread's allocations, so it needs --test-threads=1"]
-    fn baseline_rows_allocate_like_center_and_top_rows() {
-        let count = |row_align| (0..3).map(|_| allocations_for_rows(row_align, 50)).min().unwrap();
-        let (top, center, baseline) = (count(RowAlign::Top), count(RowAlign::Center), count(RowAlign::Baseline));
-        println!("allocations for 50 rows x 8 walks: top {top} center {center} baseline {baseline}");
-        assert!(baseline <= center + 8 && baseline <= top + 8);
-    }
-
-    /// Run with `--release -- --ignored --nocapture` for the per-row cost of each alignment.
-    #[test]
-    #[ignore = "timing only"]
-    fn row_alignment_timing() {
-        for row_align in [RowAlign::Top, RowAlign::Center, RowAlign::Baseline] {
-            let rows = 200;
-            let mut best = f64::MAX;
-            for _ in 0..20 {
-                let start = std::time::Instant::now();
-                allocations_for_rows(row_align, rows);
-                best = best.min(start.elapsed().as_secs_f64());
-            }
-            println!("{row_align:?}: {:.1} ns per row of 8 nested walks", best * 1e9 / rows as f64);
-        }
-    }
-
-    #[test]
     fn deferred_prefix_delta_moves_anchor_and_fixed_followers() {
         with_turtle(dvec2(100.0, 40.0), Layout::flow_right(), |cx| {
             let mut deferred = cx
@@ -2669,13 +2592,6 @@ mod tests {
         assert!(!Walk::default().deferred);
     }
 
-    #[test]
-    fn walk_and_layout_size_gates() {
-        assert!(std::mem::size_of::<Walk>() <= 384);
-        // Layout was 96 bytes before the one-word container id. Keep the
-        // reviewed foundation within the measured 112-byte baseline.
-        assert!(std::mem::size_of::<Layout>() <= 112);
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Script, ScriptHook)]

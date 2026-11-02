@@ -24,7 +24,7 @@ pub(crate) const TILE_COLUMNS: usize = 8;
 
 /// A render mesh copied once and shared by every instance that draws it.
 #[derive(Clone)]
-pub(crate) struct Mesh {
+pub struct Mesh {
     pub vertices: Vec<f32>,
     pub indices: Vec<u32>,
     pub stride: usize,
@@ -95,9 +95,34 @@ pub(crate) fn gi_image(width: usize, height: usize, data: &[u32]) -> Option<(usi
     Some((w, h, out))
 }
 
+/// A solid given by its signed distance instead of triangles, voxelized on
+/// the worker where it is asked. Distances are 1-Lipschitz, in the object
+/// frame, whose `transform` scales uniformly.
+pub trait GiField: Send + Sync {
+    /// The solid's box in the object frame.
+    fn bounds(&self) -> (Vec3f, Vec3f);
+    /// Identity: equal keys, equal fields.
+    fn key(&self) -> u64;
+    /// The distance and material of each point; every point lies inside
+    /// `region` (object frame), and surface farther than a margin from it
+    /// may be left out. `f32::MAX` where nothing is near.
+    fn sample(&self, region: (Vec3f, Vec3f), points: &[[f32; 3]], out: &mut Vec<(f32, u8)>);
+    /// A material's (albedo, encoded like mesh colours; emission; diffuse share).
+    fn material(&self, slot: u8) -> (Vec3f, Vec3f, f32);
+}
+
+/// What an instance is made of.
 #[derive(Clone)]
-pub(crate) struct Instance {
-    pub mesh: Arc<Mesh>,
+pub(crate) enum Solid {
+    Mesh(Arc<Mesh>),
+    Field(Arc<dyn GiField>),
+}
+
+/// One solid of a GI scene: the renderer's own, or one a host passes
+/// (`Renderer::set_gi_scene`).
+#[derive(Clone)]
+pub struct Instance {
+    pub(crate) solid: Solid,
     pub transform: Mat4f,
     pub tint: Vec3f,
     pub emission: Vec3f,
@@ -111,18 +136,35 @@ pub(crate) struct Instance {
 
 impl Instance {
     pub fn new(mesh: Arc<Mesh>, transform: Mat4f, tint: Vec3f, emission: Vec3f, diffuse: f32) -> Option<Self> {
+        let (lo, hi, hash) = (mesh.lo, mesh.hi, mesh.hash);
+        Self::of(Solid::Mesh(mesh), lo, hi, hash, transform, tint, emission, diffuse)
+    }
+
+    /// A field placed by `transform`; its materials give its colours.
+    pub fn field(field: Arc<dyn GiField>, transform: Mat4f) -> Option<Self> {
+        let (lo, hi) = field.bounds();
+        let key = field.key();
+        Self::of(Solid::Field(field), lo, hi, key, transform, vec3f(1.0, 1.0, 1.0), Vec3f::default(), 1.0)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn of(solid: Solid, box_lo: Vec3f, box_hi: Vec3f, identity: u64, transform: Mat4f, tint: Vec3f, emission: Vec3f, diffuse: f32) -> Option<Self> {
         if !transform.v.iter().all(|v| v.is_finite()) || !finite(tint) || !finite(emission) || !diffuse.is_finite() { return None; }
         let (mut lo, mut hi) = (vec3f(f32::MAX, f32::MAX, f32::MAX), vec3f(f32::MIN, f32::MIN, f32::MIN));
-        for z in [mesh.lo.z, mesh.hi.z] { for y in [mesh.lo.y, mesh.hi.y] { for x in [mesh.lo.x, mesh.hi.x] {
+        for z in [box_lo.z, box_hi.z] { for y in [box_lo.y, box_hi.y] { for x in [box_lo.x, box_hi.x] {
             let p = point(&transform, vec3f(x, y, z));
             lo = vec3f(lo.x.min(p.x), lo.y.min(p.y), lo.z.min(p.z));
             hi = vec3f(hi.x.max(p.x), hi.y.max(p.y), hi.z.max(p.z));
         }}}
-        let mut h = 0xcbf2_9ce4_8422_2325u64 ^ mesh.hash;
+        let mut h = 0xcbf2_9ce4_8422_2325u64 ^ identity;
         let mut mix = |v: f32| { h = (h ^ v.to_bits() as u64).wrapping_mul(0x100_0000_01b3); };
         transform.v.iter().for_each(|v| mix(*v));
         [tint.x, tint.y, tint.z, emission.x, emission.y, emission.z, diffuse].into_iter().for_each(&mut mix);
-        Some(Self { mesh, transform, tint, emission, diffuse, lo, hi, key: h })
+        Some(Self { solid, transform, tint, emission, diffuse, lo, hi, key: h })
+    }
+
+    pub(crate) fn triangles(&self) -> usize {
+        match &self.solid { Solid::Mesh(m) => m.indices.len() / 3, Solid::Field(_) => 0 }
     }
 }
 
@@ -138,12 +180,13 @@ pub(crate) struct VoxelLayout {
     pub levels: usize,
     /// Level-0 voxel edge in metres.
     pub voxel: f32,
+    pub home: [f32; 3],
 }
 
 impl VoxelLayout {
     pub fn new(c: GiConfig) -> Self {
         let c = c.clamped();
-        Self { dims: c.grid.map(|g| g * 4), levels: c.cascades, voxel: c.spacing * 0.25 }
+        Self { dims: c.grid.map(|g| g * 4), levels: c.cascades, voxel: c.spacing * 0.25, home: c.home }
     }
     pub fn voxel_size(&self, level: usize) -> f32 { self.voxel * (1u32 << level) as f32 }
     pub fn tile_rows(&self) -> usize { self.dims[2].div_ceil(TILE_COLUMNS) }
@@ -180,6 +223,11 @@ struct Accum { color: Vec3f, normal: Vec3f, emission: Vec3f, weight: f32 }
 pub(crate) struct VoxelUpdate {
     /// Per level: whether its texture rows changed.
     pub levels: Vec<bool>,
+    /// Per level: the first and last changed row of its band.
+    pub rows: Vec<Option<(usize, usize)>>,
+    /// Per level whose voxels changed, in settle mode: the probes a surface
+    /// can read (window-local cells).
+    pub needed: Vec<Option<Vec<bool>>>,
     /// World boxes of instances that changed (edit invalidation).
     pub dirty: Vec<(Vec3f, Vec3f)>,
     pub bricks: usize,
@@ -197,9 +245,12 @@ pub(crate) struct VoxelWorld {
     pub normal: Vec<u32>,
     pub emission: Vec<u32>,
     accum: Vec<Accum>,
+    /// Settle mode: report which probes a surface can read.
+    pub track_needed: bool,
 }
 
 /// Rows of the `level` image band, as (first texel, texel count).
+#[cfg(test)]
 pub(crate) fn level_span(layout: &VoxelLayout, level: usize) -> (usize, usize) {
     let n = layout.width() * layout.level_height();
     (level * n, n)
@@ -215,13 +266,13 @@ impl VoxelWorld {
     pub fn new(layout: VoxelLayout) -> Self {
         let n = layout.width() * layout.height();
         Self { layout, windows: vec![None; layout.levels], scene: None, keys: HashMap::new(),
-            albedo: vec![0; n], normal: vec![0; n], emission: vec![0; n], accum: Vec::new() }
+            albedo: vec![0; n], normal: vec![0; n], emission: vec![0; n], accum: Vec::new(), track_needed: false }
     }
 
     /// Bring the mirror to `scene` (None = unchanged) inside `windows`.
     pub fn update(&mut self, scene: Option<Arc<Snapshot>>, windows: &[[i32; 3]]) -> VoxelUpdate {
         let start = Cx::monotonic_now();
-        let mut out = VoxelUpdate { levels: vec![false; self.layout.levels], ..Default::default() };
+        let mut out = VoxelUpdate { levels: vec![false; self.layout.levels], rows: vec![None; self.layout.levels], needed: vec![None; self.layout.levels], ..Default::default() };
         if let Some(new) = scene {
             // Multiset diff: an instance present in both (same key) is
             // untouched, whatever its position in the list.
@@ -267,11 +318,130 @@ impl VoxelWorld {
                 let (bricks, tris) = self.voxelize(level, win, &flags);
                 out.bricks += bricks; out.triangles += tris;
                 out.levels[level] = true;
+                out.rows[level] = self.flagged_rows(win, &flags);
+                if self.track_needed { out.needed[level] = Some(self.needed_probes(level, win)); }
             }
             self.windows[level] = Some(win);
         }
         out.ms = (Cx::monotonic_now() - start) * 1e3;
         out
+    }
+
+    /// The rows of a level's band the flagged bricks write. A brick's voxels
+    /// land on the rows of its z tiles and its y span, toroidally.
+    fn flagged_rows(&self, win: [i32; 3], flags: &[bool]) -> Option<(usize, usize)> {
+        let d = self.layout.dims;
+        let b = d.map(|d| d / BRICK);
+        let (mut first, mut last) = (usize::MAX, 0);
+        for bz in 0..b[2] { for by in 0..b[1] { for bx in 0..b[0] {
+            if !flags[bx + b[0] * (by + b[1] * bz)] { continue; }
+            let m = [1, 2].map(|a| (win[a] + ([bx, by, bz][a] * BRICK) as i32).rem_euclid(d[a] as i32) as usize);
+            let (tile_lo, tile_hi) = (m[1] / TILE_COLUMNS, (m[1] + BRICK - 1) / TILE_COLUMNS);
+            first = first.min(m[0] + d[1] * tile_lo);
+            last = last.max(m[0] + BRICK - 1 + d[1] * tile_hi);
+        }}}
+        (first != usize::MAX).then_some((first, last))
+    }
+
+    /// The probes of a level's window whose cell a surface voxel touches
+    /// (the receiver's air-side offset and the voxel's half size around it):
+    /// the only ones a receiver, or a bounce through the field, reads.
+    fn needed_probes(&self, level: usize, win: [i32; 3]) -> Vec<bool> {
+        let d = self.layout.dims;
+        let g = d.map(|v| v / 4);
+        let org = win.map(|v| v.div_euclid(4));
+        let mut out = vec![false; g[0] * g[1] * g[2]];
+        for z in 0..d[2] as i32 { for y in 0..d[1] as i32 { for x in 0..d[0] as i32 {
+            let c = [win[0] + x, win[1] + y, win[2] + z];
+            if self.albedo[self.layout.texel(level, c)] >> 24 == 0 { continue; }
+            let r = [0, 1, 2].map(|a| {
+                let l = (c[a] as f32 + 0.5) * 0.25 - self.layout.home[a];
+                let lo = ((l - 0.35).floor() as i32 - org[a]).max(0);
+                let hi = ((l + 0.35).floor() as i32 + 1 - org[a]).min(g[a] as i32 - 1);
+                (lo, hi)
+            });
+            for k in r[2].0..=r[2].1 { for j in r[1].0..=r[1].1 { for i in r[0].0..=r[0].1 {
+                out[i as usize + g[0] * (j as usize + g[1] * k as usize)] = true;
+            }}}
+        }}}
+        out
+    }
+
+    /// Adds a field's voxels in the flagged bricks. A brick its surface is
+    /// far from costs one sample; one inside the solid fills at once.
+    fn voxelize_field(&mut self, inst: &Instance, field: &Arc<dyn GiField>, level: usize, win: [i32; 3], flags: &[bool]) {
+        let layout = self.layout;
+        let d = layout.dims;
+        let b = d.map(|d| d / BRICK);
+        let v = layout.voxel_size(level);
+        let obj = inst.transform.invert();
+        let m = &inst.transform.v;
+        let scale = (m[0] * m[0] + m[1] * m[1] + m[2] * m[2]).sqrt().max(1e-12);
+        // World half diagonals of a voxel and a brick.
+        let hv = v * 0.87;
+        let hb = hv * BRICK as f32;
+        let (cover_lo, cover_hi) = (inst.lo - vec3f(hb, hb, hb), inst.hi + vec3f(hb, hb, hb));
+        let voxel_world = |x: i32, y: i32, z: i32| vec3f((win[0] + x) as f32 + 0.5, (win[1] + y) as f32 + 0.5, (win[2] + z) as f32 + 0.5) * v;
+        let mut samples = Vec::with_capacity(BRICK * BRICK * BRICK);
+        let mut points = Vec::with_capacity(BRICK * BRICK * BRICK);
+        for bz in 0..b[2] { for by in 0..b[1] { for bx in 0..b[0] {
+            if !flags[bx + b[0] * (by + b[1] * bz)] { continue; }
+            let o = [(bx * BRICK) as i32, (by * BRICK) as i32, (bz * BRICK) as i32];
+            let half = BRICK as i32 / 2;
+            let centre = vec3f((win[0] + o[0] + half) as f32, (win[1] + o[1] + half) as f32, (win[2] + o[2] + half) as f32) * v;
+            if centre.x < cover_lo.x || centre.y < cover_lo.y || centre.z < cover_lo.z || centre.x > cover_hi.x || centre.y > cover_hi.y || centre.z > cover_hi.z { continue; }
+            // The brick and every surface a voxel of it can touch, in the
+            // object frame.
+            let local = point(&obj, centre);
+            let reach = (hb + 2.0 * hv) / scale;
+            let region = (local - vec3f(reach, reach, reach), local + vec3f(reach, reach, reach));
+            samples.clear();
+            field.sample(region, &[[local.x, local.y, local.z]], &mut samples);
+            let (d0, slot0) = samples.first().copied().unwrap_or((f32::MAX, 0));
+            if d0 == f32::MAX || d0 * scale > hb + hv { continue; }
+            let brick = BRICK as i32;
+            let cell = |x: i32, y: i32, z: i32| (o[0] + x) as usize + d[0] * ((o[1] + y) as usize + d[1] * (o[2] + z) as usize);
+            if d0 * scale < -(hb + hv) {
+                let (albedo, emission, diffuse) = field.material(slot0);
+                let c = albedo * diffuse;
+                for z in 0..brick { for y in 0..brick { for x in 0..brick {
+                    let a = &mut self.accum[cell(x, y, z)];
+                    a.color = a.color + c; a.weight += 1.0;
+                    a.emission = vec3f(a.emission.x.max(emission.x), a.emission.y.max(emission.y), a.emission.z.max(emission.z));
+                }}}
+                continue;
+            }
+            points.clear();
+            for z in 0..brick { for y in 0..brick { for x in 0..brick {
+                let p = point(&obj, voxel_world(o[0] + x, o[1] + y, o[2] + z));
+                points.push([p.x, p.y, p.z]);
+            }}}
+            samples.clear();
+            field.sample(region, &points, &mut samples);
+            if samples.len() != points.len() { continue; }
+            let at = |x: i32, y: i32, z: i32| samples[(x + brick * (y + brick * z)) as usize];
+            for z in 0..brick { for y in 0..brick { for x in 0..brick {
+                let (dist, slot) = at(x, y, z);
+                if dist == f32::MAX || dist * scale >= hv { continue; }
+                let (albedo, emission, diffuse) = field.material(slot);
+                // The field's gradient, across the brick's own samples.
+                let n = if dist * scale > -hv {
+                    let (xl, xh) = ((x - 1).max(0), (x + 1).min(brick - 1));
+                    let (yl, yh) = ((y - 1).max(0), (y + 1).min(brick - 1));
+                    let (zl, zh) = ((z - 1).max(0), (z + 1).min(brick - 1));
+                    let g = vec3f(at(xh, y, z).0 - at(xl, y, z).0, at(x, yh, z).0 - at(x, yl, z).0, at(x, y, zh).0 - at(x, y, zl).0);
+                    let w = vec3f(m[0] * g.x + m[4] * g.y + m[8] * g.z, m[1] * g.x + m[5] * g.y + m[9] * g.z, m[2] * g.x + m[6] * g.y + m[10] * g.z);
+                    let l = w.length();
+                    if l > 1e-12 { w * (1.0 / l) } else { Vec3f::default() }
+                } else {
+                    Vec3f::default()
+                };
+                let c = albedo * diffuse;
+                let a = &mut self.accum[cell(x, y, z)];
+                a.color = a.color + c; a.normal = a.normal + n; a.weight += 1.0;
+                a.emission = vec3f(a.emission.x.max(emission.x), a.emission.y.max(emission.y), a.emission.z.max(emission.z));
+            }}}
+        }}}
     }
 
     fn voxelize(&mut self, level: usize, win: [i32; 3], flags: &[bool]) -> (usize, usize) {
@@ -297,7 +467,10 @@ impl VoxelWorld {
                     if flags[x as usize + b[0] * (y as usize + b[1] * z as usize)] { touches = true; break 'scan; }
                 }}}
                 if !touches { continue; }
-                let mesh = &inst.mesh;
+                let mesh = match &inst.solid {
+                    Solid::Mesh(mesh) => mesh,
+                    Solid::Field(field) => { self.voxelize_field(inst, field, level, win, flags); continue; }
+                };
                 world.clear(); colors.clear();
                 for vtx in mesh.vertices.chunks_exact(mesh.stride) {
                     world.push(point(&inst.transform, vec3f(vtx[0], vtx[1], vtx[2])));

@@ -32,7 +32,3 @@ repository = "https://github.com/iShape-Rust/iTree"
 [lib]
 name = "i_tree"
 path = "src/lib.rs"
-
-[[test]]
-name = "tree_tests"
-path = "tests/tree_tests.rs"

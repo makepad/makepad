@@ -583,15 +583,6 @@ pub fn from_toks(
         match t.kind {
             T::Comment => {}
             T::DocComment => gap_docs(text, t.lo, span_of, &mut stack.last_mut().unwrap().2),
-            T::AtId => {
-                let mut at = Punct::new('@', Spacing::Alone);
-                at.set_span(span_of(t.lo, t.lo + 1));
-                let top = &mut stack.last_mut().unwrap().2;
-                top.push(TokenTree::Punct(at));
-                top.push(TokenTree::Ident(Ident::new(
-                    std::str::from_utf8(&text[1..]).unwrap_or("?"), span_of(t.lo + 1, t.hi),
-                )));
-            }
             T::OpenParen | T::OpenBracket | T::OpenBrace => {
                 let d = match t.kind {
                     T::OpenParen => Delimiter::Parenthesis,
@@ -655,9 +646,6 @@ pub fn from_toks(
                 // punctuation: one Punct per char; Joint inside, and on the last char when
                 // punctuation follows immediately (rustc's spacing)
                 let next_joint = i + 1 < toks.len() && toks[i + 1].lo == t.hi && is_punct_kind(toks[i + 1].kind);
-                let next_joint = next_joint || (t.kind == T::Apostrophe
-                    && toks.get(i + 1).is_some_and(|next| next.lo == t.hi
-                        && (matches!(next.kind, T::Ident | T::RawIdent) || is_keyword(next.kind))));
                 let n = text.len();
                 let top = &mut stack.last_mut().unwrap().2;
                 for (j, c) in std::str::from_utf8(text).unwrap_or("?").char_indices() {
@@ -692,9 +680,6 @@ fn is_punct_kind(k: T) -> bool {
             | T::RawStr
             | T::Char
             | T::Byte
-            | T::Colour
-            | T::Duration
-            | T::AtId
             | T::Comment
             | T::DocComment
             | T::OpenParen
@@ -711,7 +696,7 @@ fn is_keyword(k: T) -> bool {
 }
 
 fn is_literal(k: T) -> bool {
-    matches!(k, T::Int | T::Float | T::Str | T::ByteStr | T::CStr | T::RawStr | T::Char | T::Byte | T::Colour | T::Duration)
+    matches!(k, T::Int | T::Float | T::Str | T::ByteStr | T::CStr | T::RawStr | T::Char | T::Byte)
 }
 
 /// A doc comment found in a gap between tokens: byte range in the gap, inner (`//!`, `/*!`),

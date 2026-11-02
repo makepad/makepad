@@ -626,10 +626,6 @@ pub mod mesh_worker;
 pub mod synthetic;
 
 #[cfg(test)]
-#[path = "synthetic_bench.rs"]
-mod synthetic_bench;
-
-#[cfg(test)]
 mod tests {
     use super::*;
 

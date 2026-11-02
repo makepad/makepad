@@ -63,6 +63,7 @@ impl fmt::Write for StackBuf {
 #[cold]
 #[track_caller]
 #[cfg_attr(not(relax_check), lang = "panic_fmt")]
+#[rustc_do_not_const_check] // hooked by const-eval
 pub const fn panic_fmt(args: fmt::Arguments<'_>) -> ! {
     panic_at(args, Location::caller())
 }
@@ -70,6 +71,7 @@ pub const fn panic_fmt(args: fmt::Arguments<'_>) -> ! {
 #[inline(never)]
 #[cold]
 #[cfg_attr(relax_web, relax(keep_reachable))]
+#[rustc_do_not_const_check] // panic_fmt's body (hooked by const-eval)
 pub const fn panic_at(args: fmt::Arguments<'_>, loc: &Location<'_>) -> ! {
     unsafe {
         let depth = depth_step(1);
@@ -118,6 +120,7 @@ pub const fn panic_str(msg: &'static str) -> ! {
 
 #[track_caller]
 #[cfg_attr(not(relax_check), lang = "panic_display")]
+#[rustc_do_not_const_check] // hooked by const-eval
 pub const fn panic_display<T: fmt::Display>(x: &T) -> ! {
     panic_fmt(format_args!("{}", x))
 }

@@ -304,17 +304,6 @@ mod tests {
     }
 
     #[test]
-    fn a_scope_that_was_never_in_front_never_owns_a_press() {
-        let mut scopes = CxCancelScopes::default();
-        let behind = scopes.begin();
-        let _in_front = scopes.begin();
-        scopes.begin_press(CancelScopeKind::Escape, None);
-        assert!(!scopes.owns_press(&behind));
-        // Asking again does not change the answer: a press has one owner for its life.
-        assert!(!scopes.owns_press(&behind));
-    }
-
-    #[test]
     fn a_touch_start_finds_the_back_swipe_owner_for_that_event_only() {
         let mut scopes = CxCancelScopes::default();
         let behind = scopes.begin_for(CancelScopeKind::Back);

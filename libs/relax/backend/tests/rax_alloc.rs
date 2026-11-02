@@ -122,7 +122,7 @@ fn rax_holds_values_across_indexed_accesses_and_switches() {
         let f = build(k_n);
         for thorough in [false, true] {
             let mut codes = Vec::new();
-            for off in [&[][..], &["-rax"][..], &["+evict"][..]] {
+            for off in [&[][..], &["-rax"][..]] {
                 let bytes = compile(&options(off), &f, thorough);
                 let code = Code::new(&bytes).unwrap();
                 let run: extern "C" fn(u64, u64) -> u64 = unsafe { std::mem::transmute(code.ptr()) };

@@ -25,6 +25,7 @@ pub mod procinfo;
 pub mod os;
 pub mod embed;
 pub mod inbox;
+pub mod hot;
 pub mod local;
 pub mod node;
 pub mod master;
@@ -38,9 +39,15 @@ pub mod explorer;
 pub mod top;
 pub mod lease;
 pub mod land;
+pub mod ci_merge;
 pub mod jitcache;
+mod jit_misses;
 pub mod state;
 #[cfg(feature = "checkout")]
 pub mod monitor;
 #[cfg(feature = "checkout")]
 pub mod orch;
+#[cfg(feature = "checkout")]
+pub mod gateproof;
+#[cfg(feature = "checkout")]
+pub mod bucket;

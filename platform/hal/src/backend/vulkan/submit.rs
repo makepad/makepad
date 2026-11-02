@@ -816,7 +816,7 @@ impl Batch {
 /// A frame for a presenter: its image, and what reports it shown to its session.
 fn hand_over(scanout: (Arc<dyn super::surface::FramePresenter>, Arc<Image>, Token, Id, Id, u32, u64), prof_key: Option<crate::gpu_prof::FrameKey>, mailbox: Mailbox) {
     let (presenter, image, token, target, native, owner, frame) = scanout;
-    presenter.submit(owner, native, image, Box::new(move |time| {
+    presenter.submit(owner, native, token.sid, image, Box::new(move |time| {
         // the presenter's time is when the frame reached the display
         if let Some(key) = prof_key { crate::gpu_prof::shown(key, time); }
         let sid = token.sid;

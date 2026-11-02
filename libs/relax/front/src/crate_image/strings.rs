@@ -255,33 +255,3 @@ mod tests {
         assert_eq!(read_table(&mut Decode::new(&bytes)).unwrap(), order);
     }
 }
-
-#[cfg(test)]
-mod bench {
-    use super::*;
-    /// `cargo test --release -p relax-front bench_strings_put -- --ignored --nocapture`: ns per put of the
-    /// byte-buffer table against the HashMap<String, usize> + Vec<String> table it replaced.
-    #[test]
-    #[ignore]
-    fn bench_strings_put() {
-        let names: Vec<String> = (0..400_000usize).map(|n| format!("makepad_widgets::view{}::Name{}", n % 977, n * 7919 % 100_003)).collect();
-        let lookups: Vec<&String> = (0..2_000_000usize).map(|n| &names[n * 31 % names.len()]).collect();
-        let t = std::time::Instant::now();
-        let mut new = Strings::default();
-        let mut w = Vec::new();
-        for s in &lookups { new.put(s, &mut w); }
-        let new_ns = t.elapsed().as_nanos() as f64 / lookups.len() as f64;
-        let new_bytes = new.bytes.len() + new.ends.len() * 4 + new.hashes.len() * 4 + new.slots.len() * 4;
-        let t = std::time::Instant::now();
-        let mut ids: HashMap<String, usize> = HashMap::default();
-        let mut values: Vec<String> = Vec::new();
-        let mut w2 = Vec::new();
-        for s in &lookups {
-            let id = if let Some(id) = ids.get(s.as_str()) { *id } else { let id = values.len(); values.push((*s).clone()); ids.insert((*s).clone(), id); id };
-            id.put(&mut w2);
-        }
-        let old_ns = t.elapsed().as_nanos() as f64 / lookups.len() as f64;
-        let old_bytes = values.iter().map(|s| s.len() + 24).sum::<usize>() + ids.iter().map(|(k, _)| k.len() + 24 + 8).sum::<usize>();
-        eprintln!("strings put: new {new_ns:.1} ns/op ({new_bytes} B table), old {old_ns:.1} ns/op (~{old_bytes} B table), {} distinct", values.len());
-    }
-}

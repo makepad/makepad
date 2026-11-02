@@ -803,27 +803,5 @@ mod tests {
             "avx", avx, KernelAvx,
             "sse2", sse2, KernelSse2
         }
-
-        #[test]
-        fn ensure_target_features_tested() {
-            // If enabled, this test ensures that the requested feature actually
-            // was enabled on this configuration, so that it was tested.
-            let should_ensure_feature = !option_env!("MMTEST_ENSUREFEATURE")
-                                                    .unwrap_or("").is_empty();
-            if !should_ensure_feature {
-                // skip
-                return;
-            }
-            let feature_name = option_env!("MMTEST_FEATURE")
-                                          .expect("No MMTEST_FEATURE configured!");
-            let detected = match feature_name {
-                "avx" => is_x86_feature_detected_!("avx"),
-                "fma" => is_x86_feature_detected_!("fma"),
-                "sse2" => is_x86_feature_detected_!("sse2"),
-                _ => false,
-            };
-            assert!(detected, "Feature {:?} was not detected, so it could not be tested",
-                    feature_name);
-        }
     }
 }

@@ -33,41 +33,4 @@ mod tests {
             assert!(peak > 0.02, "{name}: silent ({peak})");
         }
     }
-
-    /// The example pieces (examples/music): each loads, runs every loop
-    /// without an error and sounds, all the way through its first minute.
-    #[test]
-    fn every_example_piece_loads_plays_and_raises_nothing() {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/music");
-        let mut pieces: Vec<_> = std::fs::read_dir(&dir).map(|d| d.filter_map(Result::ok).map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "splash")).collect()).unwrap_or_default();
-        pieces.sort();
-        assert!(pieces.len() >= 12, "the example pieces are missing from {}", dir.display());
-        for path in pieces {
-            let name = path.file_name().unwrap().to_string_lossy().to_string();
-            let source = std::fs::read_to_string(&path).unwrap();
-            let loaded = crate::model::load(&source).unwrap_or_else(|d| panic!("{name}: {d:?}"));
-            // A General MIDI piece needs the GM SoundFont, which a machine
-            // may not have installed (renders refuse without it).
-            if loaded.doc.plays_gm_font() && !crate::gm_font::installed() {
-                eprintln!("{name}: skipped, the General MIDI SoundFont is not installed");
-                continue;
-            }
-            let mut composer = Composer::new(loaded);
-            let mut events = Vec::new();
-            composer.pump(256.0, &mut events);
-            assert!(composer.errors().is_empty(), "{name}: {:?}", composer.errors());
-            // The piece as written (its arrangement and tail), at most a minute.
-            let doc = crate::model::ScoreDoc::load(&source).unwrap();
-            let seconds = crate::render::natural_length(&doc).min(60.0);
-            let r = render(&source, &RenderOpts { seconds: Some(seconds), ..Default::default() }, &crate::NoSamples).unwrap();
-            assert!(r.left.iter().chain(&r.right).all(|x| x.is_finite()), "{name}: not finite");
-            // Every ten seconds has sound in it (nothing goes silent) until
-            // the tail.
-            let music = ((seconds - 2.0).max(1.0) * 48_000.0) as usize;
-            for (k, window) in r.left[..music.min(r.left.len())].chunks(480_000).enumerate() {
-                let peak = window.iter().fold(0.0f32, |a, x| a.max(x.abs()));
-                assert!(peak > 0.01, "{name}: silent from {}s ({peak})", k * 10);
-            }
-        }
-    }
 }

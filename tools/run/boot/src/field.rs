@@ -1,63 +1,71 @@
-//! The Ignition Field: the boot window while the program compiles. A tilted spiral galaxy grows
-//! outward from main(): one arm per crate, one star per four functions installed, the arm being
-//! compiled brightest and a star flashing white as it is born; source files orbit as dust until
-//! their crate is parsed; O3 installs ignite gold stars with a cross flare; the compiler-zone
-//! swap clears the dust with an expanding ring. Every function compiled glints its star (a short
-//! white sparkle), in the boot window and over the running app (the window layer: the warm-up
-//! after the first present, the JIT loader of later sustained JIT waiting).
+//! The Ignition Field: the boot window while the program compiles. A face-on spiral galaxy forms
+//! as the program does: it opens on a field of scattered source dust that, over its first second
+//! and a half, warps in place into the spiral (each grain eases along a short curve to a place on
+//! an arm while the disk starts to turn), the core lighting up as the parse completes; then one
+//! star is born per four functions installed, arriving with a brief brighter twinkle, filling the disk from the
+//! core outward along two logarithmic arms (and two fainter ones) over an exponential falloff, so
+//! the galaxy's reach is the work done. A soft core, arm glow with dust lanes and the stars all
+//! turn slowly, the inner parts faster. O3 installs light gold stars; every function compiled
+//! brightens its star for a moment, in the boot window and over the running app (the window
+//! layer: the warm-up after the first present, the JIT loader of later sustained JIT waiting).
+//! While functions install fast the whole galaxy shimmers a little more (`glitter`, a smoothed
+//! install rate mapped into 0..1, so a burst of thousands raises it, never past its cap).
 //!
-//! Every number is the loader's own (`relax_base::boot_stats`, read once per frame). The picture
-//! is ONE draw of ONE retained instance buffer that only ever grows: the frame appends the
-//! stars and flares born since the last one (one `buffer_update` of the new tail) and the GPU
-//! places everything from the uniforms. No per-star state is kept beyond the log needed to
-//! write the buffer again after a document reload.
-use crate::{
-    gpu::Pipeline,
-    text::Text,
-    document::Line,
-    Card, Layout, State, TextLine,
-};
+//! The HUD shows one status line, without numbers. The picture is ONE draw of ONE retained
+//! instance buffer that only ever grows: the frame appends the stars and flares born since the
+//! last one (one `buffer_update` of the new tail) and the GPU places everything from the
+//! uniforms (boot.splash `ignition`). No per-star state is kept beyond the log needed to write the
+//! buffer again after a document reload.
+use crate::{document::Line, gpu::Pipeline, text::Text, Card, Layout, State, TextLine};
 use makepad_hal::{buffer_kind, Attr, CmdWriter, Id};
 use makepad_script::{id, LiveId};
 use relax_base::{
     boot_stats::{self as stats, ARMS},
     run_state::Phase,
 };
-use std::f32::consts::TAU;
+use std::f32::consts::{PI, TAU};
 
-pub const INSTANCES: Id = Id::new(2, 1);
+const INSTANCES: u32 = 2;
 const DUST: usize = 1200;
 const STAR_CAP: usize = 8192;
 const O3_CAP: usize = 2048;
-/// backdrop, main() glow, swap ring, corner brackets, warm-up arc
+/// backdrop, the disk (core and arm glow), swap ring, corner brackets, warm-up arc
 const FIXED: usize = 5;
+/// the warp's ease into the turn: the disk's spin speeds up from rest over about this (s)
+const SPIN_EASE: f32 = 0.9;
+/// functions installed per second at which the glitter is at 63% of its cap
+const GLITTER_RATE: f32 = 2000.0;
 /// stars glinted in one frame at most (one buffer write each, contiguous ones merged)
 const TWINKLES: usize = 1024;
 const CAPACITY: usize = FIXED + DUST + STAR_CAP + O3_CAP;
 const FNS_PER_STAR: u32 = 4;
-/// arms drawn on the spiral; the last arm (REST) is a scatter
-const SPIRAL: usize = ARMS - 1;
-const TILT: f32 = 0.62;
+
+// the spiral, shared with boot.splash (`arm_phase`): an arm at base angle b runs along
+// a = b - WIND * ln(r / R0), a logarithmic spiral of pitch atan(1 / WIND) (about 23 degrees)
+const WIND: f32 = 2.3;
+const R0: f32 = 0.08;
+/// the disk's reach after the first star and its growth: the reach after `g` stars is
+/// REACH0 + (1 - REACH0) * (1 - exp(-g / REACH_STARS))
+const REACH0: f32 = 0.18;
+const REACH_STARS: f32 = 1400.0;
 
 const KIND_STAR: f32 = 0.0;
 const KIND_DUST: f32 = 1.0;
 const KIND_O3: f32 = 2.0;
-const KIND_GLOW: f32 = 3.0;
+const KIND_DISK: f32 = 3.0;
 const KIND_RING: f32 = 4.0;
 const KIND_BRACKETS: f32 = 5.0;
 const KIND_BACKDROP: f32 = 6.0;
 const KIND_ARC: f32 = 7.0;
 
-// the concept's tokens
+// the concept's ink
 const INK: [f32; 4] = [0.925, 0.902, 1.0, 1.0];
-const DIM: [f32; 4] = [0.431, 0.396, 0.576, 1.0];
-const BASE: [f32; 4] = [0.616, 0.549, 1.0, 1.0];
-const GOLD: [f32; 4] = [1.0, 0.812, 0.416, 1.0];
 
 #[derive(Clone, Copy)]
 struct Born {
     kind: f32,
-    arm: u8,
+    /// a star: its birth order among all stars (its place in the disk); an O3 star: the birth
+    /// order of the star it lights
     rank: u32,
     at: f32,
     /// the last glint of the star (window time; 0: none)
@@ -68,6 +76,8 @@ pub struct Field {
     /// the pipeline the instance buffer was written for (a reload makes a new one)
     pipe: Option<Id>,
     stride: usize,
+    /// the instance buffer
+    instances: Id,
     /// instances in the GPU buffer
     count: usize,
     log: Vec<Born>,
@@ -77,39 +87,31 @@ pub struct Field {
     began_ms: f64,
     time: f32,
     base_fns: [u32; ARMS],
+    /// stars born for each crate (arm of the loader's counters)
     emitted: [u32; ARMS],
+    /// stars born in all
+    born: u32,
     /// functions of each arm glinted so far (counted from `base_fns`)
     glinted: [u32; ARMS],
     /// the log entries of each arm's stars, by rank (a star's instance is FIXED + DUST + entry)
     stars_of: [Vec<u32>; ARMS],
     touched: Vec<u32>,
-    recent: [f32; ARMS],
     o3_base: u32,
     o3_seen: u32,
-    superseded_base: u32,
     p_smooth: f32,
+    /// the disk's reach, eased towards that of the stars born
+    reach: f32,
     /// the galaxy's turn at the last frame that moved
     spin: f32,
-    labels: [String; ARMS],
-    labels_at: f32,
-    hud: Hud,
-    prime: Vec<(std::sync::Arc<crate::text::Shaped>, f32)>,
-}
-
-/// The text the HUD shows, as the loader's numbers left it at the last frame.
-#[derive(Default)]
-struct Hud {
-    fns: u32,
-    o3: u32,
-    superseded: u32,
-    swapped: bool,
-    main: bool,
-    /// the arm most stars were just born in (-1: none)
-    hot: f32,
+    /// functions installed per second, smoothed
+    rate: f32,
+    status: String,
+    status_at: f32,
 }
 
 /// What the frame needs to draw it: the uniforms and the instance count.
 pub struct Frame {
+    pub instances: Id,
     pub count: u32,
     pub view: [f32; 4],
     pub params: [f32; 4],
@@ -126,20 +128,46 @@ fn hash(x: u32, salt: u32) -> f32 {
     (h >> 8) as f32 / (1u32 << 24) as f32
 }
 
-/// The angle, radius (in field radii) and size of star `rank` of `arm`: stars of an arm
-/// spread outward from the middle as the arm grows.
-fn star_at(arm: usize, rank: u32) -> (f32, f32, f32) {
-    let seed = arm as u32 * 100_003 + rank;
-    let n = rank as f32 + 1.0;
-    let f = (1.0 + n / 40.0).ln() / (1.0 + 2500.0 / 40.0_f32).ln();
-    let r = 0.10 + 0.86 * f + (hash(seed, 2) - 0.5) * 0.05;
-    let base = if arm < SPIRAL {
-        arm as f32 / SPIRAL as f32 * TAU
+fn reach_of(stars: f32) -> f32 {
+    REACH0 + (1.0 - REACH0) * (1.0 - (-stars / REACH_STARS).exp())
+}
+
+/// The angle and radius (in disk radii, before the turn), size and seed of the `g`th star born:
+/// a tenth in the bulge, most along the arms (two main, two faint), the rest between them; the
+/// radius falls off exponentially inside the reach the disk had at its birth.
+fn star_at(g: u32) -> (f32, f32, f32, f32) {
+    let h = |salt| hash(g, salt);
+    let reach = reach_of(g as f32);
+    let kind = h(1);
+    let (a, r) = if kind < 0.1 {
+        let r = (0.12 * (-(h(2).max(1e-4)).ln()).sqrt()).min(0.4).min(reach);
+        (h(3) * TAU, r)
     } else {
-        hash(seed, 3) * TAU
+        // a truncated exponential on [0, 1] of scale 0.5
+        let s: f32 = 0.5;
+        let x = -s * (1.0 - h(2) * (1.0 - (-1.0 / s).exp())).ln();
+        let r = 0.03 + x * reach;
+        let (base, spread) = if kind < 0.86 {
+            let arm = h(4);
+            let base = if arm < 0.4 {
+                0.0
+            } else if arm < 0.8 {
+                PI
+            } else if arm < 0.9 {
+                0.5 * PI
+            } else {
+                1.5 * PI
+            };
+            // about Gaussian across the arm, wider outward
+            (base, (h(5) + h(6) - 1.0) * (0.26 + 0.2 * r))
+        } else {
+            (h(5) * TAU, 0.0)
+        };
+        (base + spread - WIND * (r / R0).ln(), r)
     };
-    let a = base + r * 2.2 + (hash(seed, 1) - 0.5) * (0.22 + 0.25 * (1.0 - f));
-    (a, r, 0.6 + hash(seed, 4) * 1.1)
+    // most stars small, a few large
+    let size = 0.5 + 2.3 * h(7).powi(7);
+    (a, r, size, h(8))
 }
 
 impl Field {
@@ -147,6 +175,7 @@ impl Field {
         let mut field = Self {
             pipe: None,
             stride: 0,
+            instances: Id::new(INSTANCES, 1),
             count: 0,
             log: Vec::with_capacity(STAR_CAP + O3_CAP),
             floats: Vec::new(),
@@ -155,19 +184,18 @@ impl Field {
             time: 0.0,
             base_fns: [0; ARMS],
             emitted: [0; ARMS],
+            born: 0,
             glinted: [0; ARMS],
             stars_of: Default::default(),
             touched: Vec::new(),
-            recent: [0.0; ARMS],
             o3_base: 0,
             o3_seen: 0,
-            superseded_base: 0,
             p_smooth: 0.0,
+            reach: REACH0,
             spin: 0.0,
-            labels: Default::default(),
-            labels_at: -1.0,
-            hud: Hud::default(),
-            prime: Vec::new(),
+            rate: 0.0,
+            status: String::new(),
+            status_at: 0.0,
         };
         field.reset();
         field
@@ -182,29 +210,31 @@ impl Field {
             self.emitted[arm] = 0;
             self.glinted[arm] = 0;
             self.stars_of[arm].clear();
-            self.recent[arm] = 0.0;
         }
+        self.born = 0;
         self.o3_base = stats::O3_INSTALLED.load(std::sync::atomic::Ordering::Relaxed);
         self.o3_seen = 0;
-        self.superseded_base = stats::O3_SUPERSEDED.load(std::sync::atomic::Ordering::Relaxed);
         self.p_smooth = 0.0;
-        self.labels_at = -1.0;
+        self.reach = REACH0;
+        self.rate = 0.0;
+        self.status.clear();
+        self.status_at = 0.0;
         self.log.clear();
         // written again by the next frame
         self.pipe = None;
     }
 
-    pub fn create(writer: &mut CmdWriter, stride: usize) {
-        writer.buffer_create(
-            INSTANCES,
-            buffer_kind::INSTANCE,
-            (CAPACITY * stride * 4) as u64,
-            Attr::default(),
-        );
-    }
-
-    pub fn destroy(writer: &mut CmdWriter) {
-        writer.buffer_destroy(INSTANCES);
+    /// The buffer for records of `stride`: one that fits stays (a relaunch only writes it again);
+    /// a new size is a new generation, as the HAL refuses a destroyed id's generation.
+    fn buffer_for(&mut self, writer: &mut CmdWriter, stride: usize) {
+        if self.stride == stride {
+            return;
+        }
+        if self.stride != 0 {
+            writer.buffer_destroy(self.instances);
+            self.instances = Id::new(INSTANCES, self.instances.gen + 1);
+        }
+        writer.buffer_create(self.instances, buffer_kind::INSTANCE, (CAPACITY * stride * 4) as u64, Attr::default());
     }
 
     fn push(&mut self, pipe: &Pipeline, rect: [f32; 4], info: [f32; 4]) {
@@ -212,14 +242,10 @@ impl Field {
             .write(&[(id!(rect), &rect), (id!(info), &info)], &mut self.floats);
     }
 
-    fn born(&mut self, pipe: &Pipeline, b: Born) {
-        let (a, r, size) = star_at(b.arm as usize, b.rank);
-        if b.kind == KIND_O3 {
-            self.push(pipe, [a, r, size, b.at], [KIND_O3, b.arm as f32, 0.0, 0.0]);
-        } else {
-            let twinkle = if b.twinkle > 0.0 { b.twinkle + 1.0 } else { 0.0 };
-            self.push(pipe, [a, r, size, b.at], [KIND_STAR, b.arm as f32, twinkle, 0.0]);
-        }
+    fn write_born(&mut self, pipe: &Pipeline, b: Born) {
+        let (a, r, size, seed) = star_at(b.rank);
+        let twinkle = if b.twinkle > 0.0 { b.twinkle + 1.0 } else { 0.0 };
+        self.push(pipe, [a, r, size, b.at], [b.kind, 0.0, twinkle, seed]);
     }
 
     /// Writes the buffer from nothing: the fixed instances, the dust, and every star born so far.
@@ -227,21 +253,35 @@ impl Field {
         self.stride = pipe.instances.defaults.len();
         self.floats.clear();
         self.floats.reserve(512 * self.stride);
-        for kind in [KIND_BACKDROP, KIND_GLOW, KIND_RING, KIND_BRACKETS, KIND_ARC] {
+        for kind in [KIND_BACKDROP, KIND_DISK, KIND_RING, KIND_BRACKETS, KIND_ARC] {
             self.push(pipe, [0.0; 4], [kind, 0.0, 0.0, 0.0]);
         }
+        // the source dust: scattered over the disk, each grain with the place it warps to (its
+        // radius in rect.w, the turn to it in info.z: the nearest ridge of an arm at about its own
+        // radius, so every path is short) and when it starts (info.y)
         for i in 0..DUST {
-            let a = hash(i as u32, 11) * TAU;
-            let r = 1.05 + hash(i as u32, 12) * 0.35;
-            self.push(
-                pipe,
-                [a, r, 0.0, 0.0],
-                [KIND_DUST, (i as f32 + 0.5) / DUST as f32, 0.0, 0.0],
-            );
+            let i = i as u32;
+            let h = |salt| hash(i, salt);
+            let a = h(11) * TAU;
+            let r = 0.08 + 1.02 * h(12).powf(0.65);
+            let to = (r * (0.9 + 0.1 * h(13))).min(1.0);
+            let kind = h(16);
+            let delta = if kind < 0.86 {
+                // two main arms, a few grains on the faint pair between them
+                let base = if kind < 0.7 { 0.0 } else { 0.5 * PI };
+                let spread = (h(17) + h(18) - 1.0) * (0.26 + 0.2 * to);
+                let ridge = base + spread - WIND * (to / R0).ln();
+                (ridge - a + 0.5 * PI).rem_euclid(PI) - 0.5 * PI
+            } else {
+                // between the arms: a small drift
+                (h(17) - 0.5) * 0.4
+            };
+            let size = 0.8 + 1.0 * h(14).powi(3);
+            self.push(pipe, [a, r, size, to], [KIND_DUST, h(19), delta, h(15)]);
         }
         for i in 0..self.log.len() {
             let b = self.log[i];
-            self.born(pipe, b);
+            self.write_born(pipe, b);
         }
         self.count = self.floats.len() / self.stride;
         self.upload(writer, 0);
@@ -255,13 +295,14 @@ impl Field {
             self.bytes.extend_from_slice(&v.to_le_bytes());
         }
         if !self.bytes.is_empty() {
-            writer.buffer_update(INSTANCES, (first * self.stride * 4) as u64, &self.bytes);
+            writer.buffer_update(self.instances, (first * self.stride * 4) as u64, &self.bytes);
         }
         self.floats.clear();
     }
 
     /// One frame: reads the loader's counters, appends what was born since the last frame,
     /// and answers the uniforms. `time` is the window's clock in seconds.
+    #[allow(clippy::too_many_arguments)]
     pub fn frame(
         &mut self,
         writer: &mut CmdWriter,
@@ -276,11 +317,8 @@ impl Field {
     ) -> Frame {
         use std::sync::atomic::Ordering::Relaxed;
         if self.pipe != Some(pipe.id) {
-            if self.pipe.is_some() || self.stride != 0 {
-                // the document was replaced: its pipeline has its own record layout
-                Self::destroy(writer);
-            }
-            Self::create(writer, pipe.instances.defaults.len());
+            // a replaced document's pipeline has its own record layout
+            self.buffer_for(writer, pipe.instances.defaults.len());
             self.rewrite(writer, pipe);
         }
         let previous = self.time;
@@ -288,40 +326,34 @@ impl Field {
         self.time = time;
         let now_ms = relax_base::clock::ms_since_process_start();
 
-        // ---- stars: one per FNS_PER_STAR functions installed in an arm
+        // ---- stars: one per FNS_PER_STAR functions installed in a crate, placed by birth order
         self.floats.clear();
         let first = self.count;
-        let mut total = 0;
-        let mut best = (0.5, -1.0);
+        let mut installed_now = 0u32;
         for arm in 0..ARMS {
             let fns = stats::fns(arm).saturating_sub(self.base_fns[arm]);
-            total += fns;
+            installed_now += fns.saturating_sub(self.glinted[arm]);
             let want = fns / FNS_PER_STAR;
             let new = want.saturating_sub(self.emitted[arm]);
-            let room = (STAR_CAP as u32).saturating_sub(self.stars());
+            let room = (STAR_CAP as u32).saturating_sub(self.born);
             let new = new.min(room);
-            self.recent[arm] *= (-dt * 2.0).exp();
-            self.recent[arm] += new as f32;
-            if self.recent[arm] > best.0 {
-                best = (self.recent[arm], arm as f32);
-            }
             for i in 0..new {
                 // births spread over the frame interval, not stacked at its end
                 let at = previous + dt * (i + 1) as f32 / new as f32;
                 let b = Born {
                     kind: KIND_STAR,
-                    arm: arm as u8,
-                    rank: self.emitted[arm] + i,
+                    rank: self.born,
                     at,
                     twinkle: 0.0,
                 };
+                self.born += 1;
                 self.stars_of[arm].push(self.log.len() as u32);
                 self.log.push(b);
-                self.born(pipe, b);
+                self.write_born(pipe, b);
             }
             self.emitted[arm] += new;
         }
-        // ---- O3 installs: a gold star on a star of the arm that got the code
+        // ---- O3 installs: a gold star on a star of the crate that got the code
         let installed = stats::O3_INSTALLED.load(Relaxed).wrapping_sub(self.o3_base);
         let behind = installed.wrapping_sub(self.o3_seen);
         if behind > stats::O3_RING as u32 {
@@ -331,55 +363,61 @@ impl Field {
         while self.o3_seen != installed && self.log.len() < STAR_CAP + O3_CAP {
             let (arm, key) = stats::o3_install(self.o3_base.wrapping_add(self.o3_seen));
             self.o3_seen = self.o3_seen.wrapping_add(1);
-            // the star of that arm (any arm that has stars when it has none)
+            // a star of that crate (of any crate that has stars when it has none)
             let mut arm = arm;
-            if self.emitted[arm] == 0 {
-                match (0..ARMS).max_by_key(|a| self.emitted[*a]) {
-                    Some(a) if self.emitted[a] > 0 => arm = a,
+            if self.stars_of[arm].is_empty() {
+                match (0..ARMS).max_by_key(|a| self.stars_of[*a].len()) {
+                    Some(a) if !self.stars_of[a].is_empty() => arm = a,
                     _ => continue,
                 }
             }
-            let rank = key.wrapping_mul(2_654_435_761) % self.emitted[arm].max(1);
+            let stars = &self.stars_of[arm];
+            let entry = stars[(key.wrapping_mul(2_654_435_761) % stars.len() as u32) as usize];
             let b = Born {
                 kind: KIND_O3,
-                arm: arm as u8,
-                rank,
+                rank: self.log[entry as usize].rank,
                 at: time,
                 twinkle: 0.0,
             };
             self.log.push(b);
-            self.born(pipe, b);
+            self.write_born(pipe, b);
         }
         let added = self.floats.len() / self.stride;
         self.count += added;
         self.upload(writer, first);
         self.glint(writer, pipe, time, scatter);
-        self.hud.fns = total;
-        self.hud.hot = best.1;
-        self.hud.o3 = installed;
-        self.hud.superseded = stats::O3_SUPERSEDED
-            .load(Relaxed)
-            .saturating_sub(self.superseded_base);
 
-        // ---- the geometry of the picture, in `region` (the window, or the halted view's part)
+        // ---- the geometry of the picture, in `region` (the window, or the halted view's part):
+        // round at any size, the radius one length in points for both axes
         let [rx, ry, w, h] = region;
         let narrow = w < 600.0;
         let tiny = w < 300.0 || h < 220.0;
         let (radius, cy) = if halted {
-            // the whole galaxy, scatter included, inside the region
-            ((w * 0.42).min(h * 0.70).max(12.0), h * 0.5)
+            ((w * 0.40).min(h * 0.40).max(12.0), h * 0.5)
         } else {
-            let radius = (w * if narrow { 0.40 } else { 0.30 })
-                .min(h * if tiny { 0.30 } else if narrow { 0.34 } else { 0.38 })
+            let radius = (w * if narrow { 0.36 } else { 0.30 })
+                .min(h * if tiny { 0.30 } else { 0.33 })
                 .max(16.0);
-            (radius, if tiny { h * 0.44 } else if narrow { h * 0.47 } else { h * 0.52 })
+            (radius, h * if tiny { 0.46 } else { 0.48 })
         };
-        let view = [rx + w * 0.5, ry + cy, radius, TILT];
+        // the reach follows the stars born, eased over about half a second
+        self.reach += (reach_of(self.born as f32) - self.reach) * (1.0 - (-dt * 4.0).exp());
+        let view = [rx + w * 0.5, ry + cy, radius, self.reach];
         let scale = (radius / 220.0).clamp(0.75, 2.0);
-        // a halted field stands still where it stopped
+        // a halted field stands still where it stopped; the turn eases in from rest with the warp
         if !halted {
-            self.spin = if reduce_motion { 0.0 } else { time * 0.04 };
+            self.spin = if reduce_motion {
+                0.0
+            } else {
+                0.035 * (time - SPIN_EASE * (1.0 - (-time / SPIN_EASE).exp()))
+            };
         }
+        // the glitter: the install rate, smoothed over about 0.4 s, eased into 0..1
+        if dt > 0.0 {
+            let rate = installed_now as f32 / dt.max(1.0 / 240.0);
+            self.rate += (rate - self.rate) * (1.0 - (-dt * 2.5).exp());
+        }
+        let glitter = 1.0 - (-self.rate / GLITTER_RATE).exp();
         let spin = self.spin;
 
         // ---- events on the loader's clock, as ages in the window's
@@ -392,37 +430,41 @@ impl Field {
         };
         let main_age = age(stats::MAIN_AT_MS.load(Relaxed), self.began_ms);
         let swap_age = age(stats::SETTLE_END_MS.load(Relaxed), self.began_ms);
-        self.hud.main = main_age >= 0.0;
-        self.hud.swapped = swap_age >= 0.0;
 
-        // ---- source dust falls in as the crates are parsed
+        // ---- the core lights up as the crates are parsed
         let target = match state.phase {
             Phase::Resolve => 0.0,
             Phase::Parse => match (state.done, state.total) {
-                (Some(done), Some(total)) if total > 0 => 1.03 * done as f32 / total as f32,
+                (Some(done), Some(total)) if total > 0 => done as f32 / total as f32,
                 _ => 0.0,
             },
-            _ => 1.04,
+            _ => 1.0,
         };
-        self.p_smooth += (target - self.p_smooth).max(0.0) * (1.0 - (-dt * 6.0).exp());
+        self.p_smooth += (target - self.p_smooth).max(0.0) * (1.0 - (-dt * 3.0).exp());
+        if target - self.p_smooth < 0.002 {
+            // lands: the shader knows the parse is over (the ring is gone)
+            self.p_smooth = self.p_smooth.max(target);
+        }
         let dust_fade = if swap_age >= 0.0 {
-            1.0 - (swap_age / 0.3).clamp(0.0, 1.0)
+            let x = (swap_age / 0.5).clamp(0.0, 1.0);
+            1.0 - x * x * (3.0 - 2.0 * x)
         } else {
             1.0
         } * if halted { 0.35 } else { 1.0 };
         Frame {
+            instances: self.instances,
             count: self.count as u32,
             view,
             params: [spin, scale, main_age, swap_age.max(-1.0)],
-            fall: [self.p_smooth, dust_fade, best.1, resolve],
+            fall: [self.p_smooth, dust_fade, glitter, resolve],
         }
     }
 
-    /// Every function installed since the last frame glints its star: function `i` of an arm
+    /// Every function installed since the last frame glints its star: function `i` of a crate
     /// belongs to its star `i / FNS_PER_STAR` (the newest star while that one is not born yet),
-    /// or with `scatter` (over the running app) to a star of the arm picked by its hash, so the
-    /// compiles of a tab switch sparkle across the galaxy. The stars' records are written again with
-    /// the glint's time.
+    /// or with `scatter` (over the running app) to a star of the crate picked by its hash, so the
+    /// compiles of a tab switch sparkle across the galaxy. The stars' records are written again
+    /// with the glint's time.
     fn glint(&mut self, writer: &mut CmdWriter, pipe: &Pipeline, time: f32, scatter: bool) {
         self.touched.clear();
         for arm in 0..ARMS {
@@ -465,7 +507,7 @@ impl Field {
                 let b = &mut self.log[entry as usize];
                 b.twinkle = time.max(1e-3);
                 let b = *b;
-                self.born(pipe, b);
+                self.write_born(pipe, b);
             }
             self.upload(writer, FIXED + DUST + touched[run_start] as usize);
             run_start = end;
@@ -473,23 +515,8 @@ impl Field {
         self.touched = touched;
     }
 
-    /// Keeps the glyphs of the numbers that change every frame in the atlas, so no frame waits
-    /// for a digit it shows for the first time.
-    pub fn prime(&mut self, text: &mut Text, dpi: f32, requests: &mut Vec<(u32, f32)>) {
-        for run in &self.prime {
-            for glyph in &run.0.glyphs {
-                text.lookup(glyph.id, run.1, dpi, requests);
-            }
-        }
-    }
-
-    fn stars(&self) -> u32 {
-        self.emitted.iter().sum()
-    }
-
-    /// The HUD (corner brackets are drawn by the field itself) as text lines in window points,
-    /// all fixed to the window, below the caption strip; the caption's title and its window
-    /// buttons' cards.
+    /// One status line, without numbers, changing at most every 0.7 s so it reads calmly; the
+    /// caption's title and its window buttons' cards.
     #[allow(clippy::too_many_arguments)]
     pub fn hud(
         &mut self,
@@ -498,11 +525,8 @@ impl Field {
         hint: &str,
         status: Option<&str>,
         viewport: [f32; 2],
-        view: [f32; 4],
-        spin: f32,
         time: f32,
         caption: &crate::caption::Caption,
-        offscreen: bool,
         layout: &mut Layout,
     ) {
         let [w, h] = viewport;
@@ -516,43 +540,7 @@ impl Field {
         layout.text_ends.clear();
         let tiny = w < 300.0 || h < 220.0;
         let narrow = w < 600.0;
-        let margin = 22.0;
-        let wide = (w - 2.0 * margin).max(1.0);
-        let line = |text: &mut Text, s: &str, size: f32, x: f32, base: f32, align: f32, color: [f32; 4]| -> TextLine {
-            let style = Line {
-                role: crate::document::Role::Status,
-                size,
-                height: size * 1.3,
-                gap: 0.0,
-                color,
-                align,
-            };
-            let run = text.shape(s, size, wide, style.height);
-            let left = match align {
-                a if a >= 1.0 => x - run.width,
-                a if a > 0.0 => x - run.width * a,
-                _ => x,
-            };
-            TextLine {
-                position: [left, base - text.ascender(size)],
-                run,
-                style,
-                fixed: true,
-            }
-        };
-        let dim = DIM;
-        if self.prime.is_empty() {
-            for size in [9.0, 16.0, 18.0, 22.0, 30.0] {
-                self.prime.push((text.shape("0123456789,.", size, 1.0e4, size * 1.3), size));
-            }
-        }
-        let t = if offscreen { time as f64 } else { state.elapsed };
-        let clock = format!("T+{:.3}", t);
-        // the frame (and its brackets) starts below the caption strip
-        let top = caption.height;
         let fixed = &mut layout.fixed_text;
-        let top_size = if narrow { 16.0 } else { 18.0 };
-        fixed.push(line(text, &clock, top_size, w - margin, top + 32.0, 1.0, INK));
         if caption.height > 0.0 {
             let style = Line {
                 role: crate::document::Role::App,
@@ -564,96 +552,47 @@ impl Field {
             };
             let name = caption.title.clone().unwrap_or_else(|| state.app.clone());
             fixed.extend(crate::caption::title(text, caption, w, &[(name, style)]));
-        } else if !tiny {
-            let name = state.app.to_uppercase();
-            fixed.push(line(text, &name, 10.0, margin, 30.0, 0.0, dim));
         }
-        // the item line: the settle's own numbers, then the parse, then the item being compiled
         if !tiny {
-            let s = if self.hud.swapped {
-                format!(
-                    "settled · rss {} → {} MB",
-                    stats::SETTLE_RSS_BEFORE_MB.load(std::sync::atomic::Ordering::Relaxed),
-                    stats::SETTLE_RSS_AFTER_MB.load(std::sync::atomic::Ordering::Relaxed),
-                )
-            } else if !self.hud.main && matches!(state.phase, Phase::Resolve | Phase::Parse) {
-                format!(
-                    "{} files · {} lines parsed",
-                    group(stats::FILES_PARSED.load(std::sync::atomic::Ordering::Relaxed) as u64),
-                    group(stats::LINES_PARSED.load(std::sync::atomic::Ordering::Relaxed)),
-                )
-            } else {
-                cut(&state.current, if narrow { 36 } else { 48 })
-            };
-            let c = if self.hud.swapped || (!self.hud.main && matches!(state.phase, Phase::Resolve | Phase::Parse)) { INK } else { dim };
-            fixed.push(line(text, &s, 9.0, margin, top + 48.0, 0.0, c));
-        }
-        // fns compiled, bottom left
-        let big = if tiny { 16.0 } else if narrow { 22.0 } else { 30.0 };
-        fixed.push(line(text, &group(self.hud.fns as u64), big, margin, h - if narrow { 48.0 } else { 44.0 }, 0.0, INK));
-        if !tiny {
-            let what = if state.warm { "FNS READY" } else { "FNS COMPILED" };
-            fixed.push(line(text, &format!("{what} · 1 STAR = {FNS_PER_STAR} FNS"), 9.0, margin, h - 26.0, 0.0, dim));
-            // bottom right: the hint, the phase, the O3 / parse line
-            let present = state.phase == Phase::FirstFrame;
-            let right = w - margin;
-            fixed.push(line(text, &hint.to_uppercase(), 10.0, right, h - if narrow { 52.0 } else { 50.0 }, 1.0, if present { GOLD } else { BASE }));
-            let phase = status.map_or_else(|| state.phase.name().replace('_', " "), str::to_string);
-            fixed.push(line(text, &phase, 11.0, right, h - 38.0, 1.0, INK));
-            let (s, c) = if self.hud.o3 > 0 {
-                (
-                    format!("O3 {} ignited · {} superseded", self.hud.o3, self.hud.superseded),
-                    GOLD,
-                )
-            } else {
-                let (done, total) = (state.done.unwrap_or(0), state.total.unwrap_or(0));
-                if state.phase == Phase::Parse && total > 0 {
-                    (format!("dust: {} of {} crates unparsed", total - done.min(total), total), dim)
-                } else {
-                    (String::new(), dim)
-                }
-            };
-            if !s.is_empty() {
-                fixed.push(line(text, &s, 9.0, right, h - 24.0, 1.0, c));
-            }
-        }
-        // arm labels at the tips of the arms that have compiled something
-        if self.hud.main && w >= 360.0 && !tiny {
-            if time - self.labels_at > 0.2 || self.labels_at < 0.0 {
-                self.labels_at = time;
-                for arm in 0..SPIRAL {
-                    let n = stats::fns(arm).saturating_sub(self.base_fns[arm]);
-                    self.labels[arm].clear();
-                    if n >= 30 {
-                        let name = stats::arm_name(arm);
-                        let len = name.iter().position(|b| *b == 0).unwrap_or(name.len());
-                        let name = String::from_utf8_lossy(&name[..len]);
-                        if narrow {
-                            let short = name.strip_prefix("makepad_").unwrap_or(&name);
-                            self.labels[arm] = format!("{}  {}", cut(&short.to_uppercase(), 8), group(n as u64));
+            let wanted = match status {
+                Some(s) => s.to_string(),
+                None => match state.phase {
+                    Phase::Resolve => hint.to_string(),
+                    Phase::Parse => {
+                        let current = state.current.trim();
+                        if current.is_empty() {
+                            hint.to_string()
                         } else {
-                            self.labels[arm] = format!("{}  {}", name.replace('_', "-"), group(n as u64));
+                            format!("{hint} {}", cut(current, 40))
                         }
                     }
-                }
+                    Phase::Typecheck | Phase::Codegen | Phase::Link | Phase::FirstFrame => {
+                        let app = caption.title.as_deref().unwrap_or(&state.app);
+                        format!("{hint} {app}")
+                    }
+                },
+            };
+            if wanted != self.status && (self.status.is_empty() || time - self.status_at >= 0.7) {
+                self.status = wanted;
+                self.status_at = time;
             }
-            let size = if narrow { 8.5 } else { 9.5 };
-            for arm in 0..SPIRAL {
-                if self.labels[arm].is_empty() {
-                    continue;
-                }
-                let a = arm as f32 / SPIRAL as f32 * TAU + 0.96 * 2.2 + spin;
-                let x = view[0] + a.cos() * view[2];
-                let y = view[1] + a.sin() * view[2] * view[3];
-                let right = x > view[0];
-                let c = if self.hud.hot == arm as f32 { INK } else { dim };
-                let label = &self.labels[arm];
-                let l = line(text, label, size, x, y + size * 0.35, if right { 0.0 } else { 1.0 }, c);
-                // a label the window cuts off is left out
-                if l.position[0] >= 4.0 && l.position[0] + l.run.width <= w - 4.0 {
-                    fixed.push(l);
-                }
-            }
+            let size = if narrow { 11.0 } else { 12.0 };
+            let style = Line {
+                role: crate::document::Role::Status,
+                size,
+                height: size * 1.3,
+                gap: 0.0,
+                color: [INK[0], INK[1], INK[2], 0.72],
+                align: 0.5,
+            };
+            let run = text.shape(&self.status, size, f32::INFINITY, style.height);
+            let base = h - if narrow { 28.0 } else { 34.0 };
+            fixed.push(TextLine {
+                position: [w * 0.5 - run.width * 0.5, base - text.ascender(size)],
+                run,
+                style,
+                fixed: true,
+            });
         }
         for (action, rect) in &caption.buttons {
             layout.cards.push(Card {
@@ -665,19 +604,6 @@ impl Field {
             });
         }
     }
-}
-
-/// 12345 -> "12,345"
-pub(crate) fn group(n: u64) -> String {
-    let digits = n.to_string();
-    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
-    for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
-            out.push(',');
-        }
-        out.push(c);
-    }
-    out
 }
 
 fn cut(s: &str, n: usize) -> String {

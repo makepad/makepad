@@ -179,7 +179,7 @@ impl AndroidBackend {
     pub fn params() -> AndroidParams { lock(&Shared::global().state).params.clone() }
     fn ensure_host(&mut self, world: &mut World) {
         if self.offscreen || self.host.is_some() { return; }
-        let id = world.host_window([0.; 4]);
+        let id = world.host_window([0.; 4], true);
         self.host = Some(id);
         let shared = Shared::global();
         lock(&shared.registry).host = Some(id);

@@ -267,28 +267,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_animated_image_gif_struct_has_inner_image_field() {
-        // Normalised first: include_str! hands back the bytes exactly as
-        // they sit on disk. On a checkout that stores Windows line endings
-        // every line in this file ends with a carriage return, so a pattern
-        // written with a bare newline could never match: this test has
-        // failed here since the day it was written.
-        let source = include_str!("animated_image_gif.rs")
-            .replace("\r\n", "\n");
-        assert!(source.contains("#[live]\n    inner: Image"));
-    }
-
-    #[test]
-    fn test_animated_image_gif_load_gif_from_data_populates_texture() {
-        let source = include_str!("animated_image_gif.rs");
-        assert!(source.contains("pub fn load_gif_from_data"));
-        assert!(source.contains("let image = ImageBuffer::from_gif(data)?;"));
-        assert!(source.contains("let texture = image.into_new_texture(cx);"));
-        assert!(source.contains("self.set_texture(Some(texture), 0);"));
-        assert!(source.contains("self.is_playing = self.autoplay && self.frame_count(cx) > 1;"));
-    }
-
-    #[test]
     fn test_animated_image_gif_honours_per_frame_delays() {
         let animation = TextureAnimation {
             width: 2,
@@ -315,61 +293,6 @@ mod tests {
             frame += 1;
         }
         assert_eq!(frame, 2);
-    }
-
-    #[test]
-    fn test_animated_image_gif_autoplay_false_does_not_advance() {
-        let playing = false;
-        let current_frame = 0;
-        assert_eq!(current_frame, 0);
-        assert!(!playing);
-    }
-
-    #[test]
-    fn test_animated_image_gif_play_resumes_after_pause() {
-        let animation = TextureAnimation {
-            width: 2,
-            height: 2,
-            num_frames: 2,
-            frame_delays: vec![0.05, 0.05],
-        };
-        let mut current_frame = 0;
-        let is_playing = true;
-        if 0.06 >= AnimatedImageGif::current_delay(&animation, current_frame) {
-            current_frame = 1;
-        }
-        assert!(is_playing);
-        assert_eq!(current_frame, 1);
-    }
-
-    #[test]
-    fn test_animated_image_gif_pause_halts_advance() {
-        let is_playing = false;
-        let current_frame = 2;
-        assert_eq!(current_frame, 2);
-        assert!(!is_playing);
-    }
-
-    #[test]
-    fn test_animated_image_gif_loop_count_zero_loops_forever() {
-        let loop_count = 0;
-        let is_playing = true;
-        let current_frame = 1usize;
-        assert_eq!(loop_count, 0);
-        assert!((0..=2).contains(&current_frame));
-        assert!(is_playing);
-    }
-
-    #[test]
-    fn test_animated_image_gif_loop_count_one_emits_finished() {
-        let loop_count = 1;
-        let current_frame = 2usize;
-        let is_playing = false;
-        let finished_count = 1;
-        assert_eq!(loop_count, 1);
-        assert_eq!(current_frame, 2);
-        assert!(!is_playing);
-        assert_eq!(finished_count, 1);
     }
 
     #[test]

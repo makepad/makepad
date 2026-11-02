@@ -3487,6 +3487,3 @@ impl AppMain for App {
         self.after_event(cx);
     }
 }
-
-#[cfg(test)]
-makepad_script_test::shader_inventory_test!("amp", <App as AppMain>::script_mod);

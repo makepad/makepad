@@ -249,7 +249,13 @@ impl Builder {
         // lifetime erased: the thread is joined before 'a ends (scope) or 'a is 'static
         let main: Box<dyn FnOnce() + Send + 'static> = core::mem::transmute(main);
         let finish: Box<dyn FnOnce(bool) + Send + 'static> = core::mem::transmute(finish);
-        let start = Box::new(ThreadStart { thread: their_thread, main: Some(main), finish: Some(finish) });
+        #[cfg(not(relax_web))]
+        let test = unsafe { __relax_test_inherit() };
+        let start = Box::new(ThreadStart {
+            thread: their_thread, main: Some(main), finish: Some(finish),
+            #[cfg(not(relax_web))]
+            test,
+        });
         match spawn_native(stack_size, start) {
             Ok(native) => Ok(JoinInner { native, thread: my_thread, packet: my_packet }),
             Err(e) => {
@@ -268,12 +274,28 @@ impl Default for Builder {
     }
 }
 
+#[cfg(not(relax_web))]
+extern "C" {
+    fn __relax_test_inherit() -> usize;
+    fn __relax_test_adopt(token: usize);
+    fn __relax_test_cancel(token: usize);
+}
+
 struct ThreadStart {
+    #[cfg(not(relax_web))]
+    test: usize,
     thread: Thread,
     main: Option<Box<dyn FnOnce() + Send + 'static>>,
     /// Runs after main, with whether it panicked: stores the panic's payload, then drops the
     /// thread's packet reference (which tells a scope this thread is done).
     finish: Option<Box<dyn FnOnce(bool) + Send + 'static>>,
+}
+
+impl Drop for ThreadStart {
+    fn drop(&mut self) {
+        #[cfg(not(relax_web))]
+        unsafe { __relax_test_cancel(self.test); }
+    }
 }
 
 /// A raw pointer moved into a thread's main closure (the packet outlives it: `finish` holds it).
@@ -313,6 +335,8 @@ fn run_main(p: *mut u8) {
 
 fn thread_start(arg: *mut u8) {
     let mut start = unsafe { Box::from_raw(arg as *mut ThreadStart) };
+    #[cfg(not(relax_web))]
+    unsafe { __relax_test_adopt(crate::mem::replace(&mut start.test, 0)); }
     if let Some(name) = &start.thread.inner.name {
         sys::os::set_thread_name(name.as_ptr());
         #[cfg(not(relax_web))]

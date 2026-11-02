@@ -301,6 +301,10 @@ fn create(ctx: &Ctx, name: &str, from: &str, commercial: bool) -> Result<LaneRec
     }
     let l = LaneRec { name: name.into(), path: p, branch: branch.clone(), cbranch: if commercial { branch } else { String::new() }, created_ms: wall_ms(), state: "live".into(), ..Default::default() };
     ctx.store.update(|d| d.lanes.push(l.clone()));
+    crate::ci_merge::install_merge_driver(&path, &path)?;
+    if commercial {
+        crate::ci_merge::install_merge_driver(&path.join("apps/commercial"), &path)?;
+    }
     let _ = ctx.monitor.dirty(&path);
     if commercial {
         let _ = ctx.monitor.dirty(&path.join("apps/commercial"));
@@ -361,6 +365,13 @@ fn adopt(ctx: &Ctx) -> Result<String, String> {
     let (mut registered, mut landed) = (Vec::new(), Vec::new());
     for i in infos {
         let p = i.entry.path.to_string_lossy().into_owned();
+        if i.entry.path.join(".git").exists() {
+            crate::ci_merge::install_merge_driver(&i.entry.path, &i.entry.path)?;
+            let nested = i.entry.path.join("apps/commercial");
+            if nested.join(".git").exists() {
+                crate::ci_merge::install_merge_driver(&nested, &i.entry.path)?;
+            }
+        }
         if known.contains(&p) || !i.entry.path.is_dir() {
             continue;
         }
@@ -1015,7 +1026,7 @@ mod tests {
         let home = base.join("home");
         std::fs::create_dir_all(&home).unwrap();
         let leases = Arc::new(LeaseMaster::new("mac", home.clone(), Arc::new(|_: &str, _: &str, _: &str| Err("no nodes".to_string())), Arc::new(|_| {}), Arc::new(|| 1), None, true));
-        let ctx = Ctx { store: Store::open(&home, "mac", Arc::new(|_| {})), leases, machine: "mac".into(), monitor: crate::monitor::Monitor::start(&[base.join("wt.noindex")]), repo: mk.clone(), home: home.clone() };
+        let ctx = Ctx { store: Store::open(&home, "mac", Arc::new(|_| 0)), leases, machine: "mac".into(), monitor: crate::monitor::Monitor::start(&[base.join("wt.noindex")]), repo: mk.clone(), home: home.clone() };
         let r = serve(&ctx, "lane new {\"name\":\"x\",\"from\":\"work\",\"commercial\":true}").unwrap();
         let lane = base.join("wt.noindex/x");
         assert!(r.contains("rc-x") && lane.join("a.txt").exists() && lane.join("apps/commercial/a.txt").exists(), "{r}");

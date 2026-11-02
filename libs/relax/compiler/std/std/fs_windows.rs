@@ -457,12 +457,12 @@ impl OpenOptions {
             if self.write || self.append || self.truncate || self.create || self.create_new {
                 // the run's edits folder, if it has one (else read-only)
                 let how = if self.truncate || (self.create_new && matches!(k, vfs::Kind::Missing)) || (!self.append && matches!(k, vfs::Kind::Missing)) { vfs::Edit::Replace } else { vfs::Edit::Keep };
-                let disk = vfs::edit_target(&abs, how).unwrap_or_else(|| Err(vfs::read_only()))?;
+                let disk = vfs::edit_target(&*abs, how).unwrap_or_else(|| Err(vfs::read_only()))?;
                 return self.open_native(&maybe_verbatim(&disk)?);
             }
             return match k {
                 vfs::Kind::File(_) => {
-                    let data = vfs::read(&abs)?;
+                    let data = vfs::read(&*abs)?;
                     let null: Vec<u16> = "NUL".encode_utf16().chain(core::iter::once(0)).collect();
                     let mut f = OpenOptions::new().read(true).open_native(&null)?;
                     f.mem = Some(Box::new(Mem { data: Arc::new(data), pos: core::sync::atomic::AtomicU64::new(0) }));
@@ -1676,7 +1676,7 @@ pub fn read_dir<P: AsRef<Path>>(path: P) -> io::Result<ReadDir> {
         return match k {
             vfs::Kind::Dir => {
                 let mut virt = Vec::new();
-                for (name, is_dir) in vfs::list(&abs)? {
+                for (name, is_dir) in vfs::list(&*abs)? {
                     let name_s = String::from_utf8_lossy(&name).into_owned();
                     let file_size = if is_dir {
                         0

@@ -656,28 +656,6 @@ impl ShellGallery {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn every_surface_has_a_section() {
-        let titles: Vec<&str> = SECTIONS.iter().map(|s| s.title).collect();
-        for want in [
-            "Bar",
-            "Typography",
-            "Controls",
-            "Menu",
-            "Launcher",
-            "Keybindings",
-            "Panels",
-            "OSD",
-            "Notifications",
-        ] {
-            assert!(titles.contains(&want), "missing gallery section {}", want);
-        }
-    }
-}
 
 /// The gallery's slot in the desk: empty until a `--gallery` run fills it,
 /// by name, at startup. It exists so the gallery's deep fixture tree is

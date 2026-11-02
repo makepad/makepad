@@ -423,13 +423,31 @@ mod tests {
         }
     }
 
+    /// The fixtures need HTTP, while offline mode deliberately forbids every request.
+    /// Give each scenario its own environment without changing parallel tests' settings.
+    fn run_online_child(test: &str) -> bool {
+        if std::env::var("MAKEPAD_RUN_FETCH_TEST").as_deref() == Ok(test) {
+            return false;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test, "--nocapture"])
+            .env("MAKEPAD_RUN_FETCH_TEST", test)
+            .env("CARGO_NET_OFFLINE", "false")
+            .env("MAKEPAD_RUN_OFFLINE", "0")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success(), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
+        assert!(stdout.contains("1 passed"), "child did not run {test}: {stdout}");
+        true
+    }
+
     /// `run <url>` as it fetches: ref advertisement, a depth-1 upload-pack, the pack unpacked into
     /// the store; then a second commit fetched incrementally (`have` = the stored commit, so the
     /// service may send a thin pack whose ref-delta bases come from the store).
     #[test]
     fn fetch_from_loopback_service() {
-        if std::process::Command::new("git").arg("--version").output().is_err() {
-            eprintln!("no git: skipped");
+        if run_online_child("fetch::tests::fetch_from_loopback_service") {
             return;
         }
         let dir = std::env::temp_dir().join(format!("relax-fetch-test-{}", std::process::id()));
@@ -514,8 +532,7 @@ mod tests {
     #[test]
     fn git_dependencies_resolve_from_the_stores() {
         use relax_compiler::resolve::{unit_graph_with, GitPlaces};
-        if std::process::Command::new("git").arg("--version").output().is_err() {
-            eprintln!("no git: skipped");
+        if run_online_child("fetch::tests::git_dependencies_resolve_from_the_stores") {
             return;
         }
         relax_compiler::registry_net::install();

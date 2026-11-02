@@ -828,6 +828,10 @@ pub struct DrawLmSunDepth {
     /// = the whole target (every atlas pass).
     #[live(vec4(1.0, 1.0, 0.0, 0.0))]
     pub tile_a: Vec4f,
+    /// The host's per-element lookup in the cascades: (map width, map height, texels per
+    /// element, enable). See [`crate::Renderer::set_element_lookup`].
+    #[live]
+    pub elem_ctl: Vec4f,
     #[live]
     pub morph_ctl: Vec4f,
     #[live]
@@ -1664,12 +1668,22 @@ mod shader_registration_tests {
                 ("foliage", DrawSceneFoliageLit::script_new_with_default(vm).pbr.skinned.draw_vars.draw_shader_id),
                 ("splat", DrawSceneSplat::script_new_with_default(vm).pbr.skinned.draw_vars.draw_shader_id),
                 ("impostor", DrawSceneImpostor::script_new_with_default(vm).pbr.skinned.draw_vars.draw_shader_id),
+                ("skin", DrawSceneSkinnedGpu::script_new_with_default(vm).draw_vars.draw_shader_id),
+                ("terrain", DrawSceneTerrain::script_new_with_default(vm).draw_vars.draw_shader_id),
             ];
             for (name, id) in lanes {
                 let m = &vm.cx().draw_shaders[id.expect("registered").index].mapping;
                 let n = m.geometries.total_slots.div_ceil(4);
                 let limit = makepad_draw::makepad_platform::draw_shader_layout::MAX_VERTEX_ATTRIBUTES;
                 assert!(n <= limit, "{name}: {n} geometry vertex attributes (the limit is {limit})");
+                // Every family's textures fit a draw call's bindings (one more and the draw list
+                // indexes past them), and all but the vertex-only morph map fit WebGL2's 16
+                // fragment units.
+                let names: Vec<String> = m.textures.iter().map(|t| format!("{:?}", t.id)).collect();
+                let slots = makepad_draw::makepad_platform::DRAW_CALL_TEXTURE_SLOTS;
+                assert!(m.textures.len() <= slots, "{name}: {} textures, a draw call binds {slots}: {names:?}", m.textures.len());
+                let fragment = m.textures.iter().filter(|t| t.id != live_id!(morph_map)).count();
+                assert!(fragment <= 16, "{name}: {fragment} fragment textures (WebGL2 guarantees 16): {names:?}");
             }
         });
     }

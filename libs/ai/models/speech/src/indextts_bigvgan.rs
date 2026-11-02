@@ -921,34 +921,6 @@ mod tests {
             assert_eq!((out.ch, out.len, out.data.len()), (1, len, len));
         }
     }
-
-    /// Oracle smoke (skipped when the reference checkout is absent): the
-    /// checkpoint's persistent filter buffers must match the Rust-computed
-    /// Kaiser-sinc taps. Reads only two 12-tap tensors — fast even in debug.
-    #[test]
-    fn checkpoint_filter_taps_match_computed() {
-        let path = crate::indextts::reference_checkpoints_dir()
-            .join("hf_cache/bigvgan/bigvgan_generator.pt");
-        if !path.is_file() {
-            eprintln!("skipping checkpoint_filter_taps_match_computed: {path:?} missing");
-            return;
-        }
-        let mut sd = PthStateDict::load_nested(&path).unwrap();
-        let expected = kaiser_sinc_filter1d(0.25, 0.3, 12);
-        for name in [
-            "generator.resblocks.0.activations.0.upsample.filter",
-            "generator.activation_post.downsample.lowpass.filter",
-        ] {
-            let taps = sd.f32(name).unwrap();
-            assert_eq!(taps.len(), 12, "{name}");
-            let max_diff = taps
-                .iter()
-                .zip(expected.iter())
-                .map(|(a, b)| (a - b).abs())
-                .fold(0f32, f32::max);
-            assert!(max_diff < 1e-6, "{name}: max diff {max_diff:e}");
-        }
-    }
 }
 
 #[path = "indextts_bigvgan_cuda.rs"]

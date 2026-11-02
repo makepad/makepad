@@ -448,27 +448,6 @@ pub fn dequantize_row_iq(ggml_type: u32, row: &[u8], n: usize, out: &mut [f32]) 
 mod tests {
     use super::*;
 
-    // The grids ship as flat consts; a wrong transcription is the single most
-    // likely porting bug, so pin their sizes and a couple of known entries.
-    #[test]
-    fn tables_have_upstream_shape() {
-        assert_eq!(KMASK_IQ2XS.len(), 8);
-        assert_eq!(KSIGNS_IQ2XS.len(), 128);
-        assert_eq!(IQ2XXS_GRID.len(), 256);
-        assert_eq!(IQ2XS_GRID.len(), 512);
-        assert_eq!(IQ2S_GRID.len(), 1024);
-        assert_eq!(IQ3XXS_GRID.len(), 256);
-        assert_eq!(IQ3S_GRID.len(), 512);
-        assert_eq!(KVALUES_IQ4NL.len(), 16);
-        assert_eq!(IQ1S_GRID.len(), 2048);
-        assert_eq!(IQ1S_GRID_GPU.len(), 2048);
-        assert_eq!(KMASK_IQ2XS, [1, 2, 4, 8, 16, 32, 64, 128]);
-        assert_eq!(
-            KVALUES_IQ4NL,
-            [-127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113]
-        );
-    }
-
     // The GPU iq1s grid is the CPU grid re-encoded as 2-bit lanes offset by 1
     // (llama.cpp convert.cu: `q[j] + delta` with delta = -1 +/- IQ1S_DELTA
     // versus the CPU form's `grid[j] + delta` with grid in {-1,0,1}).

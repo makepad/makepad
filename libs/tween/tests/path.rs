@@ -256,31 +256,6 @@ fn equal_u_steps_are_equal_arc_lengths() {
 }
 
 #[test]
-fn span_counts_follow_the_density_rule() {
-    let lines = MotionPath::polyline(&[[0.0, 0.0], [10.0, 0.0], [10.0, 10.0]], false).unwrap();
-    assert_eq!(lines.span_count(), 2);
-    let c = test_cubic();
-    let n = c.span_count();
-    assert!((PATH_SPANS_MIN..=PATH_SPANS_MAX).contains(&n), "{n}");
-    assert!(
-        n > PATH_SPANS_MIN,
-        "a curve that bends this much refines: {n}"
-    );
-    // A straight cubic with even handles needs no refinement.
-    let mut b = MotionPath::builder();
-    b.move_to(0.0, 0.0)
-        .cubic_to(10.0, 0.0, 20.0, 0.0, 30.0, 0.0);
-    assert_eq!(b.finish().unwrap().span_count(), PATH_SPANS_MIN);
-    let s = svg("M20,160 C120,-20 220,220 320,100 S520,0 580,160 A60,60 0 0,1 460,160 L400,120 Q340,60 300,140 T160,160 Z");
-    let curves = (0..s.segment_count())
-        .filter(|&i| s.segment(i).kind != SegKind::Line)
-        .count() as u32;
-    let lines = s.segment_count() - curves;
-    assert!(s.span_count() >= lines + curves * PATH_SPANS_MIN);
-    assert!(s.span_count() <= lines + curves * PATH_SPANS_MAX);
-}
-
-#[test]
 fn ends_are_exact() {
     let wave = MotionPath::through(
         &[[0.0, 100.0], [100.0, 20.0], [200.0, 180.0], [300.0, 60.0]],

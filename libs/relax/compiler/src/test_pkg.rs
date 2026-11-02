@@ -6,12 +6,37 @@
 //! selection all three run (cargo test's default minus doc tests, which are counted and said).
 //! A `harness = false` target runs as a program of its own (`makepad run --plain-test`), as cargo
 //! runs it: its exit status is its verdict.
+//! `--live` keeps one harness target (default: the lib) running across source edits.
 
 pub fn cmd_test_package(args: &[String]) -> i32 {
-    // options before the package go to each run unchanged
+    // Loader options go before each run's package; feature flags go after it.
     let mut i = 0;
     let mut pre: Vec<String> = Vec::new();
+    let mut flags: Vec<String> = Vec::new();
+    let mut feature_flags: Vec<String> = Vec::new();
+    let mut live = false;
     while i < args.len() && args[i].starts_with('-') && args[i] != "-p" && args[i] != "--package" {
+        if args[i] == "--live" {
+            live = true;
+            i += 1;
+            continue;
+        }
+        if is_feature_flag(&args[i]) {
+            let takes_value = matches!(args[i].as_str(), "--features" | "-F");
+            feature_flags.push(args[i].clone());
+            flags.push(args[i].clone());
+            i += 1;
+            if takes_value {
+                let Some(v) = args.get(i) else {
+                    eprintln!("makepad test: {} needs a value", args[i - 1]);
+                    return 2;
+                };
+                feature_flags.push(v.clone());
+                flags.push(v.clone());
+                i += 1;
+            }
+            continue;
+        }
         if matches!(args[i].as_str(), "--cfg" | "--report-to" | "--run-dir" | "--workspace-dir") && i + 1 < args.len() {
             pre.push(args[i].clone());
             i += 1;
@@ -29,7 +54,9 @@ pub fn cmd_test_package(args: &[String]) -> i32 {
     let mut lib = false;
     let mut bins: Option<Vec<String>> = None;
     let mut tests: Option<Vec<String>> = None;
-    let mut flags: Vec<String> = Vec::new();
+    let mut selections = 0;
+    let mut all_tests = false;
+    let mut extra_package = false;
     let mut prog: Vec<String> = Vec::new();
     let mut words = args[i + 1..].iter();
     while let Some(w) = words.next() {
@@ -38,7 +65,8 @@ pub fn cmd_test_package(args: &[String]) -> i32 {
                 prog.extend(words.by_ref().cloned());
                 break;
             }
-            "--lib" => lib = true,
+            "--live" => live = true,
+            "--lib" => { lib = true; selections += 1; }
             "--bins" => {
                 bins.get_or_insert_with(Vec::new);
             }
@@ -50,10 +78,11 @@ pub fn cmd_test_package(args: &[String]) -> i32 {
                 }
             },
             "--tests" => {
+                all_tests = true;
                 tests.get_or_insert_with(Vec::new);
             }
             "--test" => match words.next() {
-                Some(t) => tests.get_or_insert_with(Vec::new).push(t.clone()),
+                Some(t) => { tests.get_or_insert_with(Vec::new).push(t.clone()); selections += 1; }
                 None => {
                     eprintln!("makepad test: --test needs a target name");
                     return 2;
@@ -62,7 +91,15 @@ pub fn cmd_test_package(args: &[String]) -> i32 {
             // every target runs anyway: one failing says nothing about the next
             "--no-fail-fast" => {}
             "--release" => {}
-            "--features" | "-F" | "--cfg" | "--domain" => {
+            "--features" | "-F" => {
+                let Some(v) = words.next() else {
+                    eprintln!("makepad test: {w} needs a value");
+                    return 2;
+                };
+                feature_flags.extend([w.clone(), v.clone()]);
+                flags.extend([w.clone(), v.clone()]);
+            }
+            "--cfg" | "--domain" => {
                 flags.push(w.clone());
                 if let Some(v) = words.next() {
                     flags.push(v.clone());
@@ -73,18 +110,38 @@ pub fn cmd_test_package(args: &[String]) -> i32 {
             }
             s if s.starts_with("--test=") => {
                 tests.get_or_insert_with(Vec::new).push(s[7..].to_string());
+                selections += 1;
             }
-            _ => flags.push(w.clone()),
+            s if is_feature_flag(s) => {
+                feature_flags.push(w.clone());
+                flags.push(w.clone());
+            }
+            "--verbose" | "--silent" => pre.push(w.clone()),
+            _ => {
+                extra_package |= !w.starts_with('-');
+                flags.push(w.clone());
+            }
         }
     }
+    if live {
+        if package.starts_with('-') || package.ends_with(".rs") || bins.is_some() || all_tests || selections > 1 || extra_package
+            || pre.iter().chain(&flags).any(|s| matches!(s.as_str(), "--tests" | "--bins" | "--bin" | "--test" | "--lib" | "--no-live" | "--workspace" | "--all-targets" | "-p" | "--package")
+                || s.starts_with("--package=") || s.starts_with("--bin=") || s.starts_with("--test=")) {
+            return live_usage();
+        }
+        if tests.is_none() { lib = true; }
+        pre.push("--live".to_string());
+    }
     let sess = std::sync::Arc::new(crate::Session::default());
-    let (has_lib, bin_targets, targets) = match crate::resolve::test_targets(&sess, &crate::run::workspace_dir(), &package) {
+    let (has_lib, bin_targets, targets) = match crate::resolve::test_targets(&sess, &crate::run::workspace_dir(), &package,
+        &feature_flags, bins.as_deref().unwrap_or_default(), tests.as_deref().unwrap_or_default()) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("makepad test: {e}");
             return 101;
         }
     };
+    if live && lib && has_lib.is_none() { return live_usage(); }
     let default_selection = !lib && bins.is_none() && tests.is_none();
     if default_selection {
         lib = has_lib.is_some();
@@ -116,12 +173,10 @@ pub fn cmd_test_package(args: &[String]) -> i32 {
                 return 101;
             }
         };
-        if !h.is_empty() {
-            let mut sel = vec!["--bins".to_string()];
-            if !b.is_empty() {
-                sel.extend(h.iter().flat_map(|n| ["--bin".to_string(), n.clone()]));
-            }
-            runs.push((sel, None));
+        // Each target needs its own process: the harness shares dependency
+        // statics, environment and background threads across a target graph.
+        for n in h {
+            runs.push((vec!["--bins".to_string(), "--bin".to_string(), n], None));
         }
         for (n, path) in p {
             runs.push((vec!["--bins".to_string(), "--bin".to_string(), n], Some(path)));
@@ -135,17 +190,14 @@ pub fn cmd_test_package(args: &[String]) -> i32 {
                 return 101;
             }
         };
-        if !h.is_empty() {
-            if t.is_empty() {
-                runs.push((vec!["--tests".to_string()], None));
-            } else {
-                runs.push((h.iter().flat_map(|n| ["--test".to_string(), n.clone()]).collect(), None));
-            }
+        for n in h {
+            runs.push((vec!["--test".to_string(), n], None));
         }
         for (n, path) in p {
             runs.push((vec!["--test".to_string(), n], Some(path)));
         }
     }
+    if live && (runs.len() != 1 || runs[0].1.is_some()) { return live_usage(); }
     let exe = match std::env::current_exe() {
         Ok(e) => e,
         Err(e) => {
@@ -181,6 +233,7 @@ pub fn cmd_test_package(args: &[String]) -> i32 {
             }
         };
         if c != 0 {
+            if c == makepad_remote::hot::JIT_ERROR_EXIT { return c; }
             if plain.is_some() {
                 eprintln!("error: test failed (harness = false target exited with status {c})");
             }
@@ -198,6 +251,15 @@ pub fn cmd_test_package(args: &[String]) -> i32 {
         }
     }
     code
+}
+
+fn live_usage() -> i32 {
+    eprintln!("usage: makepad test --live <package> [--lib | --test <name>] [-- <test args>] (exactly one harness target)");
+    2
+}
+
+fn is_feature_flag(flag: &str) -> bool {
+    matches!(flag, "--features" | "--all-features" | "--no-default-features") || flag.starts_with("--features=") || flag.starts_with("-F")
 }
 
 /// The fenced code blocks rustdoc would run as doc tests in the doc comments of the lib's

@@ -83,7 +83,7 @@ mod imp {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(target_vendor = "apple")]
 mod imp {
     use std::ffi::c_void;
     extern "C" {
@@ -118,7 +118,7 @@ mod imp {
     }
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_vendor = "apple")))]
 mod imp {
     pub fn state() -> Vec<(String, bool)> {
         Vec::new()

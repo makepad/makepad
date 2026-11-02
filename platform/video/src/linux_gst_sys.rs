@@ -10,10 +10,10 @@
 //! the only calls needed are init, element lookup, state changes, appsrc
 //! push / appsink pull, buffer map/fill, caps-to-string and the bus.
 //!
-//! WRITTEN-UNTESTED FLAG: this arm compiles against public, ABI-stable
-//! GStreamer 1.x structures (`GstBuffer`'s pts field, `GstMessage`'s type
-//! field — both public headers since 1.0) but has not yet run on a Linux
-//! box; the fleet verification pass owns that.
+//! The structures below use the public, ABI-stable GStreamer 1.x layout
+//! (`GstBuffer`'s pts field and `GstMessage`'s type field). The audio decoder's
+//! timed preroll binding has been source-reviewed only; Linux build and
+//! runtime verification are pending.
 
 #![allow(non_camel_case_types)]
 
@@ -171,6 +171,8 @@ gst_fns! {
     gst.gst_bin_get_by_name: fn(*mut GstElement, *const c_char) -> *mut GstElement;
     gst.gst_element_set_state: fn(*mut GstElement, c_uint) -> c_int;
     gst.gst_element_get_state: fn(*mut GstElement, *mut c_uint, *mut c_uint, u64) -> c_int;
+    gst.gst_element_get_static_pad: fn(*mut GstElement, *const c_char) -> *mut c_void;
+    gst.gst_pad_is_linked: fn(*mut c_void) -> c_int;
     gst.gst_element_get_bus: fn(*mut GstElement) -> *mut GstBus;
     gst.gst_bus_timed_pop_filtered: fn(*mut GstBus, u64, c_uint) -> *mut GstMessage;
     gst.gst_message_parse_error: fn(*mut GstMessage, *mut *mut GError, *mut *mut c_char);
@@ -182,6 +184,8 @@ gst_fns! {
     gst.gst_buffer_unmap: fn(*mut GstBuffer, *mut GstMapInfo);
     gst.gst_sample_get_buffer: fn(*mut GstSample) -> *mut GstBuffer;
     gst.gst_sample_get_caps: fn(*mut GstSample) -> *mut GstCaps;
+    gst.gst_sample_get_segment: fn(*mut GstSample) -> *const c_void;
+    gst.gst_segment_to_stream_time: fn(*const c_void, c_int, u64) -> u64;
     gst.gst_caps_to_string: fn(*mut GstCaps) -> *mut c_char;
     gst.gst_element_query_duration: fn(*mut GstElement, c_int, *mut i64) -> c_int;
     gst.gst_element_seek_simple: fn(*mut GstElement, c_int, c_uint, i64) -> c_int;
@@ -189,7 +193,7 @@ gst_fns! {
     gstapp.gst_app_src_push_buffer: fn(*mut GstElement, *mut GstBuffer) -> c_int;
     gstapp.gst_app_src_end_of_stream: fn(*mut GstElement) -> c_int;
     gstapp.gst_app_sink_pull_sample: fn(*mut GstElement) -> *mut GstSample;
-    gstapp.gst_app_sink_pull_preroll: fn(*mut GstElement) -> *mut GstSample;
+    gstapp.gst_app_sink_try_pull_preroll: fn(*mut GstElement, u64) -> *mut GstSample;
     gstapp.gst_app_sink_try_pull_sample: fn(*mut GstElement, u64) -> *mut GstSample;
     gstapp.gst_app_sink_is_eos: fn(*mut GstElement) -> c_int;
     glib.g_free: fn(*mut c_void);

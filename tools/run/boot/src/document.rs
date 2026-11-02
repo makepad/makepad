@@ -35,6 +35,9 @@ pub enum Role {
     Errors,
     Panic,
     Hints,
+    UpdatingTitle,
+    UpdatingStatus,
+    UpdatingDetail,
 }
 
 #[derive(Clone, Copy)]
@@ -186,6 +189,9 @@ impl Program {
                     Some(v) if v == id!(errors) => Role::Errors,
                     Some(v) if v == id!(panic) => Role::Panic,
                     Some(v) if v == id!(hints) => Role::Hints,
+                    Some(v) if v == id!(updating_title) => Role::UpdatingTitle,
+                    Some(v) if v == id!(updating_status) => Role::UpdatingStatus,
+                    Some(v) if v == id!(updating_detail) => Role::UpdatingDetail,
                     _ => return Err("Unknown boot line role".into()),
                 };
                 lines.push(Line {

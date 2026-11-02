@@ -56,7 +56,7 @@ struct Inner {
 #[derive(Clone, Debug, PartialEq)]
 pub enum RegistryUp {
     Result(EndpointId, ToolResult),
-    Progress { endpoint: EndpointId, call_id: String, note: String, permille: u16 },
+    Progress { endpoint: EndpointId, call_id: String, note: String, permille: u16, task: Option<TaskCard> },
     Message { endpoint: EndpointId, sub_id: String, message: Message },
 }
 
@@ -618,8 +618,8 @@ impl ServiceRegistry {
                         }
                     }
                     ServiceUp::Result(r) => out.push(RegistryUp::Result(endpoint.clone(), r)),
-                    ServiceUp::Progress { call_id, note, permille } => {
-                        out.push(RegistryUp::Progress { endpoint: endpoint.clone(), call_id, note, permille })
+                    ServiceUp::Progress { call_id, note, permille, task } => {
+                        out.push(RegistryUp::Progress { endpoint: endpoint.clone(), call_id, note, permille, task })
                     }
                     ServiceUp::Context(c) => {
                         inner.entries.get_mut(&endpoint).unwrap().context = c.text;

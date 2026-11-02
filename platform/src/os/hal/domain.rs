@@ -144,7 +144,8 @@ impl Cx {
         self.platform_ops.push_back(CxOsOp::StopDomain { domain, kill });
     }
 
-    /// Frees the domain's session and starts its app again under the same id.
+    /// Frees the session and starts its app again. If the old run still owns
+    /// threads, `Event::DomainState` carries a fresh id and the original request.
     pub fn hal_relaunch_domain(&mut self, domain: u32) {
         self.platform_ops.push_back(CxOsOp::RelaunchDomain(domain));
     }

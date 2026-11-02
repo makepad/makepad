@@ -106,11 +106,15 @@ Score{label: "Name" clock kit bass kick line pump verb a b arrange: [a b]}
   each @wavetable (a_table: @basic @pwm @harmonic @formant @fm @sync
   @organ @bell @vocal @digital @noisy @growl, or @user with a_frames:
   [[partial amplitudes] ...]; a_pos morphs the frames), @granular,
-  @spectral (partials reshaped: a_shift a_stretch a_tilt a_odd a_formant)
-  or @sample (a_src: asset(id, rev)); two warps each (a_warp1: @sync
+  @spectral (partials reshaped: a_shift a_stretch a_tilt a_odd a_formant),
+  @sample (a_src: asset(id, rev)) or @analog (a circuit model of a classic
+  oscillator chip: a_saw a_tri a_pulse a_pw a_sync a_fm a_drift); two warps each (a_warp1: @sync
   @bend @pwm @mirror @fm @fold @drive ... with a_warp1_amt), unison
   (a_unison a_detune a_blend a_stack), a sub and a noise oscillator, two
-  filters (f1_type f1_cutoff f1_res ...), env1-4 (env1 the amp), lfo1-8
+  filters (f1_type f1_cutoff f1_res ...; @analog_lp and the other analog_
+  types are a chip filter that self-oscillates from res 0.9), env1-4 (env1
+  the amp; env1_model: @analog is true RC segments), amp_type: @analog (a
+  chip gain cell: amp_law amp_idle amp_trim), lfo1-8
   (shapes incl. @drawn @lorenz @rossler and 2D paths @circle @eight with
   a y output lfo1y; lfo1_sync: @n8 ...), macros m1-m8, an arp (arp_on
   arp_pattern arp_rate) and a rack `fx: [@delay @reverb]`. Modulation is

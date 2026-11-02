@@ -18,8 +18,8 @@
 //! bind time, never a wrong call.
 //!
 //! Before binding, every registered crate present in the program must match the loader's
-//! library source closure (srchash.rs). A mismatch is always an error naming changed, added
-//! and removed inputs and feature/version differences; it never selects a second source copy.
+//! library source closure (srchash.rs). A mismatch offers a loader update with the changed
+//! inputs; it never binds the stale library or selects a second source copy.
 
 use crate::lang_items::LangItem;
 use crate::program::{DefId, DefKind, Program};
@@ -168,11 +168,84 @@ fn binding_identity(
 /// (check_sources); only they bind.
 static MATCHED: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
-/// Compares every registered crate present in the program against its embedded library
-/// closure. Any mismatch fails with file and feature/version differences; absent crates skip.
+/// A provided library changed on disk. These are source paths, including removed files, not
+/// a parsed diagnostic. They also identify the landing and the inputs of the loader rebuild.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProvidedChange {
+    pub crate_name: String,
+    pub files: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SourceCheckError {
+    Changed(ProvidedChange),
+    Invalid(String),
+}
+
+impl From<String> for SourceCheckError {
+    fn from(message: String) -> Self { Self::Invalid(message) }
+}
+
+fn check_manifest(name: &str, source: u64, manifest: &[u8], current: &crate::srchash::Manifest, pkgs: &[crate::srchash::SrcPkg]) -> Result<(), SourceCheckError> {
+    if crate::srchash::manifest_hash(current) == source { return Ok(()); }
+    let built = crate::srchash::decode_manifest(manifest)?;
+    let mut files = std::collections::BTreeSet::new();
+    for (package, path) in crate::srchash::diff_entries(&built, current) {
+        let package = package.strip_prefix("host:").unwrap_or(package);
+        let Some((name, _version)) = package.rsplit_once('@') else { continue };
+        for pkg in pkgs.iter().filter(|p| p.name.replace('-', "_") == name) {
+            // A feature/version change has no file entry of its own. Watch its manifest too.
+            let path = if path.starts_with('\0') { "Cargo.toml" } else { path.as_str() };
+            files.insert(crate::vfs::normalize_path(&std::path::Path::new(&pkg.dir).join(path).to_string_lossy()));
+        }
+    }
+    Err(SourceCheckError::Changed(ProvidedChange { crate_name: name.into(), files: files.into_iter().collect() }))
+}
+
+#[cfg(test)]
+mod source_tests {
+    use super::*;
+    use crate::srchash::{encode_manifest, manifest_hash, Manifest, SrcPkg};
+
+    #[test]
+    fn provided_source_outcome_preserves_changed_inputs() {
+        let pkgs = [SrcPkg { name: "fixture-dep".into(), version: "1".into(), dir: "fixture".into(), features: Vec::new(), deps: Vec::new(), proc_macro: false }];
+        let mut built = Manifest::new();
+        // More than the diagnostic's display limit: no input is lost from the typed outcome.
+        for i in 0..24 { built.insert(("fixture_dep@1".into(), format!("src/file{i}.rs")), "old".into()); }
+        built.insert(("fixture_dep@1".into(), "src/removed.rs".into()), "removed".into());
+        built.insert(("fixture_dep@1".into(), "src/unchanged.rs".into()), "same".into());
+        built.insert(("host:fixture_dep@1".into(), "src/file0.rs".into()), "old".into());
+        built.insert(("fixture_dep@1".into(), "\0features".into()), "".into());
+        let source = manifest_hash(&built);
+        let encoded = encode_manifest(&built);
+        assert_eq!(check_manifest("fixture", source, &encoded, &built, &pkgs), Ok(()));
+
+        let mut current = built.clone();
+        for i in 0..24 { current.insert(("fixture_dep@1".into(), format!("src/file{i}.rs")), "new".into()); }
+        current.remove(&("fixture_dep@1".into(), "src/removed.rs".into()));
+        current.insert(("fixture_dep@1".into(), "src/added.rs".into()), "added".into());
+        current.insert(("host:fixture_dep@1".into(), "src/file0.rs".into()), "new".into());
+        current.insert(("fixture_dep@1".into(), "\0features".into()), "enabled".into());
+        let Err(SourceCheckError::Changed(change)) = check_manifest("fixture", source, &encoded, &current, &pkgs) else { panic!("source edits must be an update offer") };
+        assert_eq!(change.crate_name, "fixture");
+        let mut expected: Vec<_> = (0..24).map(|i| format!("fixture/src/file{i}.rs")).collect();
+        expected.extend(["fixture/Cargo.toml".into(), "fixture/src/removed.rs".into(), "fixture/src/added.rs".into()]);
+        expected.sort();
+        assert_eq!(change.files, expected);
+
+        // A feature-only mismatch still needs an update; corrupt embedded data remains an error.
+        let mut features = built.clone();
+        features.insert(("fixture_dep@1".into(), "\0features".into()), "enabled".into());
+        assert_eq!(check_manifest("fixture", source, &encoded, &features, &pkgs), Err(SourceCheckError::Changed(ProvidedChange { crate_name: "fixture".into(), files: vec!["fixture/Cargo.toml".into()] })));
+        assert!(matches!(check_manifest("fixture", source, &[1], &current, &pkgs), Err(SourceCheckError::Invalid(_))));
+    }
+}
+
+/// Compares registered crates against the embedded library closure; absent crates skip.
 const IDENTITY_THREADS: usize = 4;
 
-pub fn check_sources(pkgs: &[crate::srchash::SrcPkg]) -> Result<(), String> {
+pub fn check_sources(pkgs: &[crate::srchash::SrcPkg]) -> Result<(), SourceCheckError> {
     let reg: Vec<_> = REGISTRY.lock().unwrap_or_else(|e| e.into_inner()).iter().map(|p| (p.name.clone(), p.source, p.manifest)).collect();
     let mut verified = Vec::new();
     let mut files = std::collections::HashMap::new();
@@ -204,10 +277,7 @@ pub fn check_sources(pkgs: &[crate::srchash::SrcPkg]) -> Result<(), String> {
     for (name, source, manifest) in &reg {
         for (root, _) in pkgs.iter().enumerate().filter(|(_, k)| k.name.replace('-', "_") == *name) {
             let current = crate::srchash::closure_manifest_with(pkgs, root, &mut files);
-            if crate::srchash::manifest_hash(&current) != *source {
-                let built = crate::srchash::decode_manifest(manifest)?;
-                return Err(crate::srchash::diff_message(name, &built, &current));
-            }
+            check_manifest(name, *source, manifest, &current, pkgs)?;
             if !verified.contains(name) { verified.push(name.clone()); }
         }
     }
@@ -221,7 +291,7 @@ pub fn check_sources(pkgs: &[crate::srchash::SrcPkg]) -> Result<(), String> {
 }
 
 /// The boot's source check, running beside the load (`check_sources_later`).
-static PENDING: Mutex<Option<std::thread::JoinHandle<Result<(), String>>>> = Mutex::new(None);
+static PENDING: Mutex<Option<std::thread::JoinHandle<Result<(), SourceCheckError>>>> = Mutex::new(None);
 
 /// `check_sources`, on a thread of its own. The boot starts it as early as `check_sources` could
 /// run and goes on loading; nothing may bind a provided crate before `finish_sources` has
@@ -238,19 +308,19 @@ pub fn check_sources_later(pkgs: std::sync::Arc<Vec<crate::srchash::SrcPkg>>) {
     });
     match spawned {
         Ok(h) => *PENDING.lock().unwrap_or_else(|e| e.into_inner()) = Some(h),
-        Err(e) => *PENDING.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::thread::spawn(move || Err(format!("provided source check: {e}")))),
+        Err(e) => *VERDICT.lock().unwrap_or_else(|e| e.into_inner()) = Some(Err(SourceCheckError::Invalid(format!("provided source check: {e}")))),
     }
 }
 
 /// The verdict of the check `check_sources_later` started, once it has ended.
-static VERDICT: Mutex<Option<Result<(), String>>> = Mutex::new(None);
+static VERDICT: Mutex<Option<Result<(), SourceCheckError>>> = Mutex::new(None);
 
 /// Waits for the check `check_sources_later` started, if one is running: its verdict (every
 /// caller gets it, the proc-macro world's unit as well as the program's). Ok when none started.
-pub fn finish_sources() -> Result<(), String> {
+pub fn finish_sources() -> Result<(), SourceCheckError> {
     let mut pending = PENDING.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(h) = pending.take() {
-        let verdict = h.join().unwrap_or_else(|_| Err("provided source check: the thread panicked".into()));
+        let verdict = h.join().unwrap_or_else(|_| Err(SourceCheckError::Invalid("provided source check: the thread panicked".into())));
         *VERDICT.lock().unwrap_or_else(|e| e.into_inner()) = Some(crate::zone_alloc::kept_clone(&verdict));
     }
     VERDICT.lock().unwrap_or_else(|e| e.into_inner()).clone().unwrap_or(Ok(()))
@@ -633,21 +703,6 @@ pub fn unbound_reason(prog: &Program, tcx: &Tcx, krate: u32, d: DefId, opaque: &
         return Some("signature not C-shaped");
     }
     None
-}
-
-/// Is ADT `d` of crate `krate` one that may be marked `#[relax_api(handle)]` (rustc's size/align, drop shim):
-/// a public non-generic struct or enum that is not `trusted` by value.
-pub fn opaque_candidate(prog: &Program, tcx: &Tcx, krate: u32, d: DefId) -> bool {
-    let def = prog.def(d);
-    if def.krate != krate || !def.is_pub || !matches!(def.kind, DefKind::Struct | DefKind::Enum) {
-        return false;
-    }
-    match tcx.adts.get(&d) {
-        Some(a) if a.n_generics == 0 && !a.is_union => {}
-        _ => return false,
-    }
-    let t = tcx.tys.intern(TyKind::Adt(d, crate::types::List::EMPTY, crate::types::RegionArgsId::EMPTY));
-    !trusted(prog, tcx, krate, t, 0)
 }
 
 /// The types whose values cross between the provided crates' rustc code and JIT-compiled code:

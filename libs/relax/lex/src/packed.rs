@@ -15,7 +15,7 @@ const BLOCK: usize = 64;
 const ESCAPE: u32 = 0x80;
 
 // the kind shares its byte with the escape bit
-const _: () = assert!((T::OtherPunct as u8) < 0x80);
+const _: () = assert!((T::DocComment as u8) < 0x80);
 
 pub struct PackedToks {
     store: Store,
@@ -168,7 +168,7 @@ mod tests {
             let mut toks = Vec::new();
             let mut pos = 0u32;
             for _ in 0..n {
-                let kind = unsafe { std::mem::transmute::<u8, T>(next(T::OtherPunct as u64 + 1) as u8) };
+                let kind = unsafe { std::mem::transmute::<u8, T>(next(T::DocComment as u64 + 1) as u8) };
                 pos += next(4);
                 let len = match next(20) { 0 => 256 + next(70000), 1 => 255, 2 => 0, _ => next(12) };
                 let lo = match next(30) { 0 => next(1 << 31), 1 => pos.saturating_sub(next(100000)), 2 => pos + 70000, _ => pos };
@@ -190,72 +190,5 @@ mod tests {
             }
         }
         assert!(PackedToks::mapped(Box::leak(vec![5u32, 0].into_boxed_slice())).is_none());
-    }
-
-    /// get(i) against the 9 byte array, sequential and random:
-    /// MAKEPAD_RUN_BENCH_DIR=<dir of .rs files> cargo test --release -p relax-lex bench -- --ignored --nocapture
-    #[test]
-    #[ignore]
-    fn bench_get() {
-        use std::hint::black_box;
-        use std::time::Instant;
-        let dir = std::env::var("MAKEPAD_RUN_BENCH_DIR").expect("MAKEPAD_RUN_BENCH_DIR");
-        let mut toks: Vec<Tok> = Vec::new();
-        let mut stack = vec![std::path::PathBuf::from(dir)];
-        let mut files = Vec::new();
-        while let Some(d) = stack.pop() {
-            for e in std::fs::read_dir(&d).unwrap().flatten() {
-                let p = e.path();
-                if p.is_dir() { stack.push(p) } else if p.extension().is_some_and(|x| x == "rs") { files.push(p) }
-            }
-        }
-        files.sort();
-        // each file's tokens, rebased as consecutive files of one array (as a crate's would be per file)
-        let mut packed: Vec<PackedToks> = Vec::new();
-        let mut all: Vec<Vec<Tok>> = Vec::new();
-        for f in files {
-            let Ok(src) = std::fs::read(&f) else { continue };
-            let mut v = Vec::new();
-            if crate::lexer::lex(&src, 2021, &mut v).is_err() { continue; }
-            toks.extend_from_slice(&v);
-            packed.push(PackedToks::encode(&v));
-            all.push(v);
-        }
-        let n = toks.len();
-        let esc: usize = packed.iter().map(|p| p.words()[1] as usize).sum();
-        let bytes: usize = packed.iter().map(|p| p.words().len() * 4).sum();
-        println!("{} files, {n} tokens, {esc} escapes ({:.3}%), packed {bytes} B ({:.2} B/tok) vs {} B", all.len(), esc as f64 * 100.0 / n as f64, bytes as f64 / n as f64, n * 9);
-        // random indices per file (a fixed pseudo-random walk)
-        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
-        let mut rnd = || { seed ^= seed << 13; seed ^= seed >> 7; seed ^= seed << 17; seed };
-        for round in 0..3 {
-            let t = Instant::now();
-            let mut acc = 0u64;
-            for v in &all { for t in v.iter() { acc += (t.lo ^ t.hi) as u64 + t.kind as u64; } }
-            black_box(acc);
-            let seq9 = t.elapsed().as_nanos() as f64 / n as f64;
-            let t = Instant::now();
-            let mut acc = 0u64;
-            for p in &packed { for i in 0..p.len() { let t = p.at(i); acc += (t.lo ^ t.hi) as u64 + t.kind as u64; } }
-            black_box(acc);
-            let seq4 = t.elapsed().as_nanos() as f64 / n as f64;
-            let t = Instant::now();
-            let mut acc = 0u64;
-            for p in &packed { for t in p.iter() { acc += (t.lo ^ t.hi) as u64 + t.kind as u64; } }
-            black_box(acc);
-            let iter4 = t.elapsed().as_nanos() as f64 / n as f64;
-            let picks: Vec<(usize, usize)> = (0..n).map(|_| { let f = (rnd() % all.len() as u64) as usize; (f, (rnd() % all[f].len() as u64) as usize) }).collect();
-            let t = Instant::now();
-            let mut acc = 0u64;
-            for &(f, i) in &picks { let t = all[f][i]; acc += (t.lo ^ t.hi) as u64 + t.kind as u64; }
-            black_box(acc);
-            let rnd9 = t.elapsed().as_nanos() as f64 / n as f64;
-            let t = Instant::now();
-            let mut acc = 0u64;
-            for &(f, i) in &picks { let t = packed[f].at(i); acc += (t.lo ^ t.hi) as u64 + t.kind as u64; }
-            black_box(acc);
-            let rnd4 = t.elapsed().as_nanos() as f64 / n as f64;
-            println!("round {round}: sequential ns/op 9B {seq9:.2} packed {seq4:.2} (iter {iter4:.2}); random 9B {rnd9:.2} packed {rnd4:.2}");
-        }
     }
 }

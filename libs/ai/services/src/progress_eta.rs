@@ -45,6 +45,37 @@ pub fn friendly_stage(raw: &str) -> String {
     label.to_string()
 }
 
+/// A raw stage as a few plain words for a task card: its own counter kept after a dot
+/// ("shape_hr 0/21" → "shape · 0/21", "texture-flow-1024" → "texture"), a stage
+/// [`friendly_stage`] knows in its words ("queued-for-memory: …" → "Making room on the GPU").
+pub fn plain_stage(raw: &str) -> String {
+    let raw = raw.trim();
+    let mut words: Vec<&str> = raw.split_whitespace().collect();
+    let counter = words.last().filter(|w| w.split_once('/').is_some_and(|(a, b)| !a.is_empty() && !b.is_empty() && a.chars().chain(b.chars()).all(|c| c.is_ascii_digit()))).copied();
+    if counter.is_some() {
+        words.pop();
+    }
+    let friendly = friendly_stage(raw);
+    let mut name = if friendly != capitalise(raw) {
+        friendly
+    } else {
+        let mut name: Vec<String> = words.iter().map(|w| w.to_string()).collect();
+        if let Some(first) = name.first_mut() {
+            if let Some(stem) = first.split(['_', '-']).next().filter(|s| !s.is_empty()) {
+                *first = stem.to_string();
+            }
+        }
+        name.join(" ")
+    };
+    if name.is_empty() {
+        name = "working".into();
+    }
+    match counter {
+        Some(c) => format!("{name} · {c}"),
+        None => name,
+    }
+}
+
 fn capitalise(text: &str) -> String {
     let mut chars = text.chars();
     match chars.next() {
@@ -83,7 +114,8 @@ impl ProgressView {
         format!("{}{}", self.stage, self.time_note())
     }
 
-    fn time_note(&self) -> String {
+    /// ` · about 12 s left` (or ` · 40 s so far`); empty early on.
+    pub fn time_note(&self) -> String {
         let mut line = String::new();
         if let Some(eta) = self.eta {
             line.push_str(&format!(" · about {} left", human(eta)));

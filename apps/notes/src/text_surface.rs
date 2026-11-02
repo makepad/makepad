@@ -907,6 +907,16 @@ impl NotesTextSurface {
 }
 
 impl Widget for NotesTextSurface {
+    fn semantics(&self, _cx: &Cx, node: &mut a11y_tree::Node) {
+        node.role = a11y_tree::Role::TextArea;
+        makepad_platform::a11y::set_string(&mut node.value, &self.projection.text);
+        node.states = a11y_tree::States::FOCUSABLE | a11y_tree::States::MULTILINE;
+        node.states
+            .set(a11y_tree::States::EDITABLE, !self.read_only);
+        node.states
+            .set(a11y_tree::States::READ_ONLY, self.read_only);
+        node.actions = a11y_tree::Actions::FOCUS;
+    }
     fn text(&self) -> String {
         self.projection.text.clone()
     }

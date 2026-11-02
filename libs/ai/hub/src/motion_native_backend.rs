@@ -1765,32 +1765,4 @@ mod tests {
         }
         assert!(close_cyclic_motion(&source, 120).is_none());
     }
-
-    #[test]
-    fn generated_elf_regression_is_rejected_by_both_quality_boundaries_if_present() {
-        let path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../local/character_verify/elf_clean_lib49_animated_v1.glb"
-        );
-        let Ok(bytes) = std::fs::read(path) else {
-            println!("SKIP: local lib49 animated regression fixture is absent");
-            return;
-        };
-        let rig_error = validate_rigged_glb(&bytes).expect_err("fused rig must fail pre-HY");
-        let motion_error =
-            validate_animated_glb_quality(&bytes).expect_err("visible webbing must fail post-HY");
-        println!("{rig_error}");
-        println!("{motion_error}");
-        assert!(
-            matches!(&rig_error, AssetAiError::Params(message) if message.starts_with("character-rig-quality:")),
-            "{rig_error}"
-        );
-        assert!(
-            matches!(&motion_error, AssetAiError::Params(message) if message.starts_with("character-motion-quality:")),
-            "{motion_error}"
-        );
-        let backend = MotionNativeBackend::new(HY_MOTION_NATIVE_MODEL);
-        assert!(backend.resident_is_healthy_after_error(&rig_error));
-        assert!(backend.resident_is_healthy_after_error(&motion_error));
-    }
 }

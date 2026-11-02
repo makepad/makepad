@@ -1,15 +1,16 @@
 #!/bin/bash
 # tools/run/host/build.sh: the `makepad` JIT binary (Relax + makepad run) built for speed on the machine
 # that runs it: Cargo.toml [profile.host] (opt-level 3, thin LTO, codegen-units 16) + -Ctarget-cpu=native,
-# optionally with PGO. The result is installed at target/host/makepad (never over target/release/makepad:
-# release stays the distributable build and the one every gate, A/B and timing series uses).
+# optionally with PGO. The result and its tiny makepad-launcher companion are installed at target/host/.
+# target/release stays the distributable build and the one every gate, A/B and timing series uses.
 #
 #   build.sh plain           host profile + native cpu
 #   build.sh gen  <dir>      instrumented build (-Cprofile-generate=<dir>), for train.sh
 #   build.sh use  <profdata> PGO build from a merged profile
 #   build.sh pgo             gen -> train.sh -> llvm-profdata merge -> use, in one go
 #
-# Env: HOST_OUT       installed binary (default <root>/target/host/makepad; gen: <root>/target/host/makepad-gen)
+# Env: HOST_OUT       installed binary (default <root>/target/host/makepad; gen: <root>/target/host/makepad-gen),
+#                     with makepad-launcher installed in the same directory
 #      HOST_CPU       -Ctarget-cpu (default native; a distributable host build would name a cpu)
 #      HOST_JOBS      cargo -j (default 4)
 #      HOST_TARGET_DIR  cargo target dir (default <root>/target/hostbuild-<mode>: each flavour keeps its own,
@@ -54,10 +55,13 @@ build() {
     echo "build.sh: $flavour -> $out (target dir $td, log $log)"
     local t0=$SECONDS
     if ! ( cd "$root" && RUSTFLAGS="-Ctarget-cpu=$cpu $extra" nice -n 15 cargo build --profile host \
-        --target "$triple" -p makepad-run --bin makepad -j "$jobs" --target-dir "$td" ) > "$log" 2>&1; then
+        --target "$triple" -p makepad-run --bin makepad --bin makepad-launcher -j "$jobs" --target-dir "$td" ) > "$log" 2>&1; then
         grep -E '^(warning|error)' "$log" | head -20; echo "build.sh: $flavour build FAILED (log $log)" >&2; exit 3
     fi
     echo "build.sh: $flavour built in $((SECONDS - t0)) s"
+    local launcher=$(dirname "$out")/makepad-launcher
+    cp "$td/$triple/host/makepad-launcher" "$launcher.new"
+    mv "$launcher.new" "$launcher"
     cp "$td/$triple/host/makepad" "$out.new"
     mv "$out.new" "$out"
 }

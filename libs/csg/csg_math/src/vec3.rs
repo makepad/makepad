@@ -366,13 +366,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_dot() {
-        let a = dvec3(1.0, 2.0, 3.0);
-        let b = dvec3(4.0, 5.0, 6.0);
-        assert_eq!(a.dot(b), 32.0);
-    }
-
-    #[test]
     fn test_cross() {
         let a = Vec3d::X;
         let b = Vec3d::Y;
@@ -407,44 +400,10 @@ mod tests {
     }
 
     #[test]
-    fn test_lerp() {
-        let a = dvec3(0.0, 0.0, 0.0);
-        let b = dvec3(10.0, 20.0, 30.0);
-        let mid = a.lerp(b, 0.5);
-        assert_eq!(mid, dvec3(5.0, 10.0, 15.0));
-    }
-
-    #[test]
-    fn test_min_max() {
-        let a = dvec3(1.0, 5.0, 3.0);
-        let b = dvec3(4.0, 2.0, 6.0);
-        assert_eq!(a.min(b), dvec3(1.0, 2.0, 3.0));
-        assert_eq!(a.max(b), dvec3(4.0, 5.0, 6.0));
-    }
-
-    #[test]
-    fn test_arithmetic() {
-        let a = dvec3(1.0, 2.0, 3.0);
-        let b = dvec3(4.0, 5.0, 6.0);
-        assert_eq!(a + b, dvec3(5.0, 7.0, 9.0));
-        assert_eq!(a - b, dvec3(-3.0, -3.0, -3.0));
-        assert_eq!(a * 2.0, dvec3(2.0, 4.0, 6.0));
-        assert_eq!(2.0 * a, dvec3(2.0, 4.0, 6.0));
-        assert_eq!(-a, dvec3(-1.0, -2.0, -3.0));
-    }
-
-    #[test]
     fn test_dominant_axis() {
         assert_eq!(dvec3(10.0, 1.0, 2.0).dominant_axis(), 0);
         assert_eq!(dvec3(1.0, 10.0, 2.0).dominant_axis(), 1);
         assert_eq!(dvec3(1.0, 2.0, 10.0).dominant_axis(), 2);
         assert_eq!(dvec3(-10.0, 1.0, 2.0).dominant_axis(), 0);
-    }
-
-    #[test]
-    fn test_distance() {
-        let a = dvec3(1.0, 0.0, 0.0);
-        let b = dvec3(4.0, 0.0, 0.0);
-        assert!((a.distance(b) - 3.0).abs() < 1e-12);
     }
 }

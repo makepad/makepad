@@ -31,7 +31,7 @@ pub struct Thread {
     /// Linux: the syscall it blocks in (`/proc/.../syscall`): number, first argument (a futex
     /// wait's address), user sp and pc
     pub syscall: Option<(i64, u64, u64, u64)>,
-    #[cfg(target_os = "macos")]
+    #[cfg(target_vendor = "apple")]
     port: u32,
 }
 
@@ -46,7 +46,7 @@ impl Clone for Thread {
             cpu_ns: self.cpu_ns,
             stack: self.stack,
             syscall: self.syscall,
-            #[cfg(target_os = "macos")]
+            #[cfg(target_vendor = "apple")]
             port: 0,
         }
     }
@@ -158,7 +158,7 @@ pub fn read_mem(addr: u64, len: usize) -> Option<Vec<u8>> {
         let n = unsafe { syscall(SYS, getpid(), local.as_ptr(), 1u64, remote.as_ptr(), 1u64, 0u64) };
         (n == len as i64).then_some(v)
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(target_vendor = "apple")]
     {
         extern "C" {
             static mach_task_self_: u32;
@@ -176,12 +176,12 @@ pub fn read_mem(addr: u64, len: usize) -> Option<Vec<u8>> {
 }
 
 /// Pause: Mach suspend / resume of one thread (macOS; suspends nest); its run state.
-#[cfg(target_os = "macos")]
+#[cfg(target_vendor = "apple")]
 pub use imp::{resume, running, suspend};
 
 /// Walks frame records from `fp` (fp rule: [fp] = caller's fp, [fp+8] = return address), appending
 /// to `raw` until the chain ends, leaves the stack upwards order or `raw` is full.
-#[cfg(target_os = "macos")]
+#[cfg(target_vendor = "apple")]
 fn walk_fp(raw: &mut Raw, mut fp: u64, read: &dyn Fn(u64) -> Option<u64>) {
     while raw.n < MAX_FRAMES && fp != 0 && fp % 8 == 0 {
         let (Some(ra), Some(next)) = (read(fp + 8), read(fp)) else { break };
@@ -198,7 +198,7 @@ fn walk_fp(raw: &mut Raw, mut fp: u64, read: &dyn Fn(u64) -> Option<u64>) {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(target_vendor = "apple")]
 mod imp {
     use super::{Raw, Thread};
 

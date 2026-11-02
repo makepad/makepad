@@ -24,6 +24,15 @@ const FLEET_SECRET: &str = "fleet-transfer-secret-0123456789abcdef";
 const DEAD_HF: &str = "http://127.0.0.1:1";
 
 fn test_dir(name: &str) -> PathBuf {
+    static NETWORK: std::sync::Once = std::sync::Once::new();
+    NETWORK.call_once(|| {
+        let home = std::env::temp_dir().join(format!("makepad-peer-network-{}", std::process::id()));
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("network.conf"), "networked_ai_hub = on\n").unwrap();
+        std::env::set_var("MAKEPAD_HOME", home);
+        std::env::set_var("MAKEPAD_LAN", "1");
+        std::env::set_var("MAKEPAD_AI_NO_BEACON", "1");
+    });
     let dir = std::env::temp_dir().join(format!(
         "makepad-asset-ai-peer-{name}-{}",
         std::process::id()

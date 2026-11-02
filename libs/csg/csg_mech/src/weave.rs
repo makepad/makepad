@@ -1077,7 +1077,7 @@ pub fn assembly(w: &Weave, density: f64, hz: f64) -> crate::sim::Assembly {
         joints: Vec::new(),
         anchors: Vec::new(),
         up: w.frame.up,
-        sleep: 2.0,
+        sleep: crate::sim::SLEEP_SPEED,
         workers: 1,
         contact_margin: margin,
         max_speed: margin * hz,

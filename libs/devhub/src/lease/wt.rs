@@ -1,7 +1,7 @@
 //! Mac lane worktrees: `makepad devhub wt create|list|prune` (local git, no master needed).
 //!
-//! Lane worktrees live in `wt.noindex` next to the repo (`/Users/me/wt.noindex/<lane>` for
-//! `/Users/me/makepad`), on branch `rc-<lane>`, with an optional nested commercial worktree at
+//! Lane worktrees live in `wt.noindex` next to the repo (`~/wt.noindex/<lane>` for
+//! `~/makepad`), on branch `rc-<lane>`, with an optional nested commercial worktree at
 //! `apps/commercial`. `prune` removes only worktrees that are merged into `work`, clean (nested
 //! commercial included, and its commits on a commercial ref), unlocked and idle (no live process
 //! with its cwd inside), with `git worktree remove` + `git branch -d`; it reports what it kept and
@@ -11,7 +11,9 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 /// The user's checkout: where `wt` works unless `--repo` names another.
-pub const DEFAULT_REPO: &str = "/Users/me/makepad";
+pub fn default_repo() -> PathBuf {
+    PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join("makepad")
+}
 
 /// Runs `git <args>` in `cwd` (or with `git_dir` as the repository); stdout on success.
 pub fn git(cwd: Option<&Path>, git_dir: Option<&Path>, args: &[&str]) -> Result<String, String> {
@@ -38,10 +40,24 @@ pub fn git(cwd: Option<&Path>, git_dir: Option<&Path>, args: &[&str]) -> Result<
 /// Whether HEAD of the worktree at `dir` has commits no ref of its repository holds (a worktree's
 /// HEAD is not a ref, so this is "work only this checkout has").
 pub fn unique_commits(dir: &Path) -> bool {
-    let refs = git(Some(dir), None, &["for-each-ref", "--format=%(objectname)"]).unwrap_or_default();
-    let mut args = vec!["rev-list", "-n", "1", "HEAD", "--not"];
-    args.extend(refs.lines().map(str::trim).filter(|s| !s.is_empty()));
-    git(Some(dir), None, &args).map_or(true, |o| !o.trim().is_empty())
+    // every ref by glob (HEAD is not under refs/), not one argument per ref: repos hold thousands
+    git(Some(dir), None, &["rev-list", "-n", "1", "HEAD", "--not", "--glob=refs/*"]).map_or(true, |o| !o.trim().is_empty())
+}
+
+/// Whether everything `rev` holds is in `work`: an ancestor of it, or content-equal (merging `rev` into
+/// `work` changes no file). The merge train leaves lane tips like "Merge work into rc-x" that are no
+/// ancestor of `work` though all their content landed.
+pub fn in_work(repo: &Path, rev: &str) -> bool {
+    if git(Some(repo), None, &["merge-base", "--is-ancestor", rev, "work"]).is_ok() {
+        return true;
+    }
+    let (Ok(m), Ok(w)) = (
+        git(Some(repo), None, &["merge-tree", "--write-tree", "work", rev]),
+        git(Some(repo), None, &["rev-parse", "work^{tree}"]),
+    ) else {
+        return false; // a conflicting merge exits nonzero: content not in work
+    };
+    m.lines().next().map(str::trim) == Some(w.trim())
 }
 
 /// Tracked changes or untracked files (ignored ones do not count), apart from `except`.
@@ -175,7 +191,7 @@ pub fn infos(repo: &Path) -> Result<Vec<Info>, String> {
     let under = |p: &Path| p.starts_with(&root) || std::fs::canonicalize(p).is_ok_and(|c| c.starts_with(&root));
     for e in list.into_iter().filter(|e| under(&e.path)) {
         let lane = e.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        let merged = !e.head.is_empty() && git(Some(repo), None, &["merge-base", "--is-ancestor", &e.head, "work"]).is_ok();
+        let merged = !e.head.is_empty() && in_work(repo, &e.head);
         let (mut ahead, mut behind) = (0, 0);
         if let Ok(c) = git(Some(repo), None, &["rev-list", "--left-right", "--count", &format!("{}...work", e.head)]) {
             let mut w = c.split_whitespace().map(|n| n.parse().unwrap_or(0));
@@ -213,12 +229,18 @@ pub fn create(repo: &Path, lane: &str, from: &str, commercial: bool) -> Result<P
     if path.exists() {
         return Err(format!("{} exists", path.display()));
     }
+    crate::ci_merge::install_merge_driver(repo, repo)?;
+    if commercial {
+        crate::ci_merge::install_merge_driver(&repo.join("apps/commercial"), repo)?;
+    }
     std::fs::create_dir_all(root_of(repo)).map_err(|e| e.to_string())?;
     let p = path.to_string_lossy().into_owned();
     git(Some(repo), None, &["worktree", "add", "-q", "-b", &format!("rc-{lane}"), &p, from])?;
+    crate::ci_merge::install_merge_driver(&path, &path)?;
     if commercial {
         let src = repo.join("apps/commercial");
         git(Some(&src), None, &["worktree", "add", "-q", "--detach", &path.join("apps/commercial").to_string_lossy(), "main"])?;
+        crate::ci_merge::install_merge_driver(&path.join("apps/commercial"), &path)?;
     }
     Ok(path)
 }
@@ -265,7 +287,7 @@ pub fn cli(args: &[&str]) -> Option<i32> {
     if args.first() != Some(&"wt") {
         return None;
     }
-    let mut repo = PathBuf::from(DEFAULT_REPO);
+    let mut repo = default_repo();
     let (mut from, mut commercial, mut size) = ("work".to_string(), false, false);
     let mut pos = Vec::new();
     let mut i = 1;
@@ -372,6 +394,38 @@ mod tests {
         let mut locked = ok.clone();
         locked.entry.locked = true;
         assert!(decide(&locked).is_err());
+    }
+
+    /// A lane tip that is no ancestor of work but whose content landed counts as in work.
+    #[test]
+    fn in_work_compares_content() {
+        let base = std::env::temp_dir().join(format!("devhub-inwork-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let g = |args: &[&str]| git(Some(&base), None, args).unwrap();
+        let c = |m: &str| g(&["-c", "user.name=t", "-c", "user.email=t@localhost", "commit", "-q", "-m", m]);
+        g(&["init", "-q", "-b", "work"]);
+        std::fs::write(base.join("a.txt"), "a").unwrap();
+        g(&["add", "-A"]);
+        c("one");
+        g(&["branch", "same"]);
+        g(&["branch", "other"]);
+        g(&["checkout", "-q", "same"]);
+        std::fs::write(base.join("b.txt"), "b").unwrap();
+        g(&["add", "-A"]);
+        c("same b");
+        g(&["checkout", "-q", "other"]);
+        std::fs::write(base.join("c.txt"), "c").unwrap();
+        g(&["add", "-A"]);
+        c("other c");
+        g(&["checkout", "-q", "work"]);
+        std::fs::write(base.join("b.txt"), "b").unwrap(); // the same content, another commit
+        g(&["add", "-A"]);
+        c("work b");
+        assert!(in_work(&base, "same"));
+        assert!(!in_work(&base, "other"));
+        assert!(in_work(&base, "work"));
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// A throwaway repo in a temp dir: never the user's checkout.

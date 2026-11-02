@@ -3490,19 +3490,6 @@ mod tests {
         });
     }
 
-    /// The enums are written qualified in the DSL: their bare names would
-    /// shadow words other widgets already use.
-    #[test]
-    fn no_enum_is_splatted() {
-        crate::on_test_cx(|| {
-        let source = include_str!("radial_menu.rs");
-        for name in ["RadialLook", "RadialTrigger"] {
-            let needle = format!("splat(mod.widgets.{name})");
-            assert!(!source.contains(&needle), "{name} is splatted");
-        }
-        });
-    }
-
     /// The wedge shader is compiled nowhere else, and an error in it would
     /// only show as rings that never paint.
     #[test]

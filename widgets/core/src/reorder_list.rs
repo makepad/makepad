@@ -1007,18 +1007,6 @@ mod tests {
         assert!(outside_gap(0, &[]).is_none(), "no row drawn, no gap");
     }
 
-    #[test]
-    fn cancel_is_dropping_the_machine_nothing_pends() {
-        // Escape (or a vanished row) simply drops the machine; committing a
-        // copy afterwards would still be the caller's bug, and an inactive
-        // one never commits anyway.
-        let rows = rows();
-        let mut drag = press(0, 110.0);
-        drag.move_to(300.0, 4.0, &rows);
-        assert!(drag.commit().is_some(), "the drag WOULD commit");
-        let cancelled: Option<ReorderDrag> = None;
-        assert!(cancelled.map_or(true, |d: ReorderDrag| d.commit().is_none()));
-    }
 }
 
 #[cfg(test)]

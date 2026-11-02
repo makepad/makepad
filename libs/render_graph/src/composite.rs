@@ -22,17 +22,10 @@ script_mod! {
         bloom_texture: texture_2d(float)
         exposure_texture: texture_2d(float)
 
-        // AgX (ToneCurves' encode, sigmoid and decode) with the game's
-        // contrast (grade.x) as a slope about mid-grey (0.18 encodes to
-        // 0.606) before the sigmoid, which rolls both ends off. Output is
-        // display-encoded (no extra sRGB OETF). A light "punch" restores
-        // the contrast and saturation plain AgX gives up.
+        // ToneCurves' AgX look with the game's contrast (grade.x) and
+        // saturation (grade.y). Output is display-encoded.
         agx_graded: fn(c: vec3) -> vec3 {
-            let e = clamp((self.agx_encode(c) - vec3(0.606, 0.606, 0.606)) * self.grade.x + vec3(0.606, 0.606, 0.606), vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0))
-            let o = self.agx_decode(self.agx_contrast(e))
-            let p = pow(clamp(o, vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0)), vec3(1.1, 1.1, 1.1))
-            let luma = dot(p, vec3(0.2126, 0.7152, 0.0722))
-            return clamp(vec3(luma, luma, luma) + (p - vec3(luma, luma, luma)) * (1.35 * self.grade.y), vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0))
+            return self.agx_look(c, self.grade.x, self.grade.y)
         }
         // One tone-mapped scene texel at exposure `e`, bloom mixed in
         // (energy-conserving: a few percent of the blurred image replaces

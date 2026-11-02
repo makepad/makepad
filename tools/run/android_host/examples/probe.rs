@@ -26,8 +26,8 @@ fn main() {
         .stack_size(64 << 20)
         .spawn(move || {
             let _zone = relax_compiler::zone_alloc::compiler();
-            relax::init_embedded(&std::env::current_exe().expect("current_exe"));
-            let code = relax::run_checkout(
+            relax_runner::init_embedded(&std::env::current_exe().expect("current_exe"), &makepad_run::HOST);
+            let code = relax_runner::run_checkout(
                 vec!["--exports".into(), exports.join(",")],
                 vec![package, "--no-default-features".into()],
             );

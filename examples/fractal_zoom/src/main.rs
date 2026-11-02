@@ -63,6 +63,7 @@ script_mod! {
     load_all_resources() do #(App::script_component(vm)){
         ui: Root{
             main_window := Window{
+                depth_buffer: false
                 window.inner_size: vec2(1440, 900)
                 window.title: "Fractal Zoom"
                 pass.clear_color: #x07080c

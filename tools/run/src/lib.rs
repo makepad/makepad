@@ -30,6 +30,8 @@ macro_rules! print {
 }
 
 mod hal_host;
+#[cfg(target_os = "ios")]
+pub mod ios;
 mod hal_run;
 mod quit_signal;
 mod boot_progress;

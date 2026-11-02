@@ -22,7 +22,7 @@ use current source for API signatures and working examples.
   of every lane's diff, research and design.
 - Grok handles only hyper-mechanical work (bulk renames, repetitive edits,
   transcription, log sweeps) under precise briefs.
-- Codex, Sol and Fable are not used for now.
+- Codex takes mechanical implementation under precise briefs: `codex exec -s workspace-write -C <worktree> -m <model> "<brief>" < /dev/null`, from the normal user environment (its real HOME; a changed HOME or CODEX_HOME fails with 401, an open stdin hangs it). Sol and Fable are not used for now.
 - Resume a finished lane with its context for follow-ups instead of starting
   a fresh one that repays the same input. Idle without polling while waiting.
 - This is the user's current workflow (2026-09-27) and supersedes older role
@@ -77,6 +77,34 @@ in [Change reports](docs/agents/change-report.md); the steps:
 8. Tell the person the report id the Builder (or the server's
    `{"ok":true,"id":N}`) returned.
 
+## Lanes go through devhub
+
+- Create every lane with `makepad devhub lane new <name>` (add `--no-commercial`
+  for a makepad-only lane). It makes the worktrees in both repos, the branches
+  and the devhub record, so builds, leases, landing and cleanup work. Never
+  create lane worktrees with plain `git worktree add`; if one exists already,
+  register it with `makepad devhub lane adopt` before building.
+- Build, test and land through devhub (`devhub run`, leases, `devhub land`), not
+  ad-hoc scripts on nodes.
+- THE way to check a change is
+  `makepad devhub test <lane> <pkg> [--lib|--test T] --live [-- filter]`
+  (a warm JIT test process per lane on a hot box: an edit is patched in and
+  only the tests it reaches rerun; seconds). `--native` (`cargo test --release`)
+  only for full sweeps, perf/bench tests and explicit native checks.
+  App edit loops: `makepad devhub live start <app>`, then
+  `live wait <id> patched` and `live act <id> grab`.
+  A `JIT error, not your change` answer is not the lane's bug: carry on.
+- Pass `--cost small|medium|large` or `--est-min N` to run/job/lease so small jobs
+  go to the hot boxes; devhub corrects bad guesses from measured times.
+- The merge bot keeps each lane merged with the tip, in the lane's own worktree. It waits
+  while a job or live job runs there, and while a `timed` lease of the lane is queued, live,
+  or ended in the last 15 minutes. A timed or bench series with longer gaps between runs, or
+  any other pinned binary you compare against, needs `makepad devhub hold <branch> "why"` before
+  the first run and `devhub unhold <branch>` after the last.
+- A master restart (self-update) keeps every lease and queued request; it happens at most every
+  30 minutes, at a quiet moment (no lease in setup, no landing gate running). Holders just keep
+  beating; `devhub master restart` forces one.
+
 ## Clean up after work
 
 Standing order: once a lane's work is merged (or abandoned by the user's
@@ -122,7 +150,7 @@ it used (this one and any build or bench node):
 ## Commit content and Studio iteration history
 
 - NEVER create or publish additional public branches in `makepad/makepad`.
-  Use only the established `local` → `work` → `dev` workflow. `local` remains
+  Use only the established `local` → `work` → `main` workflow. `local` remains
   private and must never be pushed. Feature, test, release, packaging, and
   distribution work do not authorize another public branch; using a separate
   checkout or worktree does not change this rule.
@@ -141,15 +169,23 @@ it used (this one and any build or bench node):
   fixed with a follow-up delete.
 - Run the existing repository tests for validation. Do not add generated test
   files, inline test code, or test scaffolding unless the user explicitly requests
-  that change. Preserve existing tests; do not remove or weaken them to pass.
-- Studio's source hierarchy is `local` → `work` → `dev`: `local` records every
-  build iteration, `work` contains coherent feature commits, and `dev` contains
-  lower-frequency, validated milestones and incoming external PRs.
+  that change. Never weaken a test to make it pass. Every test in the repo must
+  be useful and pass: fix it, or delete it if it only restates the
+  implementation, duplicates another, pins timings or unchecked golden output,
+  or needs external tools (Node.js, clang, network, credentials, model
+  downloads). No `#[ignore]`d or never-run tests.
+- The source hierarchy is `local` → `work` → `main`: `local` records every
+  build iteration, `work` carries day-to-day landings, and `main` holds validated
+  milestones, one squashed commit per logical block, and incoming external PRs.
+- About every week `work` is squashed onto `main` and then re-pointed at `main`'s
+  tip (`makepad devhub promote`). The old chain stays local as `work-old-<date>`;
+  `work` history is rewritten at each re-point, so a branch off `work` rebases
+  after it (lanes are carried over by devhub). External PRs target `main`.
 - NEVER push `local`, its private flow branches, or checkpoint/archive refs.
   Never merge private checkpoint ancestry into a public branch. Promote only
-  by squash from `local` into `work`, then squash feature groups from `work`
-  into named `dev` milestones. Fetch/sync incoming `work` and `dev` changes
-  without rewriting published history or discarding unrelated work.
+  by squash from `local` into `work`, then squash logical blocks from `work`
+  onto `main`. `main` is never rewritten; fetch incoming `work` and `main`
+  changes without discarding unrelated work.
 - For Studio-managed flow builds, use this order: platform build checks,
   rustfmt on changed Rust, repeat checks if formatting changed the source,
   commit the exact eligible source to `local`, release binary build, existing
@@ -168,7 +204,7 @@ it used (this one and any build or bench node):
   package/target support matrix. Missing SDKs, runners, or required tests are
   blocked coverage, not passes. Do not suppress warnings to obtain a green gate.
 - Validate the exact resulting source for each feature/milestone promotion so
-  `dev` remains useful for bisecting. Public squash/push operations must expose
+  `main` remains useful for bisecting. Public squash/push operations must expose
   their source, destination, included changes, validation, and conflicts.
 - An app with its own `AGENTS.md` (including the private products in the
   commercial repository checked out at `apps/commercial`) adds flow
@@ -189,7 +225,7 @@ it used (this one and any build or bench node):
 - Build profiles live in the root `Cargo.toml`: dev keeps line tables only,
   release is incremental without LTO. cargo-makepad's packaging commands
   build release non-incrementally.
-- The private commercial repository (`makepad/commercial`: Stage with Amp,
+- The private commercial repository (`makepad/commercial`: Stage,
   Scope, Sandbox) is cloned into `apps/commercial` and has no workspace of
   its own: its root `Cargo.toml` is a package whose `cfg(any())` path
   dependencies make Stage's and Scope's crates members of this workspace

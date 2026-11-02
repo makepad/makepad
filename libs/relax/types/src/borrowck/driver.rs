@@ -392,6 +392,10 @@ fn check_group(g: &Group<'_, '_>, owners: &[CheckedBody], anon_const: bool, v: &
     // MoveData, signature regions, inference contexts, MIR type check.
     let mut prepared: Vec<Prepared<'_>> = Vec::new();
     let item_sig = if anon_const { Some(SignatureRegions::anon_const(tcx, prog, typeck.def)) } else { SignatureRegions::function(tcx, prog, typeck.def) };
+    // an instance (MAKEPAD_RUN_BORROWCK_INSTANCES): its signature is substituted as its body and
+    // environment are, or the generic signature meets a concrete environment
+    let instance = !typeck.args.is_empty() && typeck.args[..] != tcx.generic_indices_of(prog, typeck.def).identity_types_consts(&tcx.tys)[..];
+    let item_sig = item_sig.map(|s| if instance && !anon_const { s.instantiated(tcx, prog, typeck.def, &typeck.args) } else { s });
     let Some(item_sig) = item_sig else {
         v.unchecked.push(format!("{name}: no universal regions for the signature"));
         return;
@@ -577,6 +581,32 @@ fn describe_build_error(reason: &crate::mir::build::UnsupportedReason) -> String
     }
 }
 
+/// Where lifetime parameter `name` of the item of `scope` (or of its impl / trait) is declared
+/// (rustc's "lifetime `'a` defined here" points at it).
+fn lifetime_param_span(prog: &Program, scope: crate::types::RegionScope, name: &str) -> Option<Span> {
+    use crate::ast::{GenericParamKind, ItemKind};
+    let crate::types::RegionScope::Item(mut d) = scope else { return None };
+    for _ in 0..2 {
+        if d == crate::program::NO_DEF { return None; }
+        let def = prog.def(d);
+        let pf = &prog.files[def.file as usize];
+        let ast = &pf.ast;
+        let generics = match ast.item(def.item).kind {
+            ItemKind::Fn(sig, _, _) => Some(ast.fn_sig(sig).generics),
+            ItemKind::Impl(r) => Some(ast.row(r).generics),
+            ItemKind::Trait(r) => Some(ast.row(r).generics),
+            _ => None,
+        };
+        if let Some(g) = generics {
+            for p in ast.list(g.params) {
+                if matches!(p.kind, GenericParamKind::Lifetime(_)) && pf.text(p.name) == name { return Some(Span { file: def.file, lo: p.name.lo, hi: p.name.hi }); }
+            }
+        }
+        d = def.parent;
+    }
+    None
+}
+
 /// The universal-region names of a body (DESIGN-C-NLL5 contract 3), from its signature.
 fn universal_names(tcx: &Tcx, prog: &Program, p: &Prepared<'_>) -> UniversalNames {
     let mut names = UniversalNames::default();
@@ -589,9 +619,11 @@ fn universal_names(tcx: &Tcx, prog: &Program, p: &Prepared<'_>) -> UniversalName
             Identity::Region(scope, r) => match tcx.tys.region_kind(r) {
                 crate::types::RegionKind::ReLateParam(_, crate::types::LateParamKind::ClosureEnv) =>
                     ExternalName::ClosureEnv { span: Span::default(), closure_trait: "Fn" },
-                crate::types::RegionKind::ReEarlyParam(_) | crate::types::RegionKind::ReLateParam(_, crate::types::LateParamKind::Named(_)) if u.name != "'_" =>
-                    ExternalName::Named { name: u.name.clone(), span: Span::default(), early: matches!(tcx.tys.region_kind(r), crate::types::RegionKind::ReEarlyParam(_)) },
-                _ => { let _ = scope; ExternalName::Anon }
+                // (a late-bound lifetime is liberated by its bound variable, `Anon(var)`, written
+                // name or not: the signature's name tells them apart)
+                crate::types::RegionKind::ReEarlyParam(_) | crate::types::RegionKind::ReLateParam(_, crate::types::LateParamKind::Named(_) | crate::types::LateParamKind::Anon(_)) if u.name != "'_" =>
+                    ExternalName::Named { name: u.name.clone(), span: lifetime_param_span(prog, scope, &u.name).unwrap_or_default(), early: matches!(tcx.tys.region_kind(r), crate::types::RegionKind::ReEarlyParam(_)) },
+                _ => ExternalName::Anon,
             },
             Identity::FnBody(_) => continue,
         };

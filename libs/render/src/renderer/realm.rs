@@ -352,6 +352,7 @@ impl Renderer {
     /// boundary instead of turning static architecture into a per-frame
     /// "mover" merely to get a shadow.
     pub(super) fn rebuild_csm_static_casters(&mut self) {
+        self.gpu_baker.csm_casters_changed();
         self.csm_static_casters.clear();
         // First entry per id, as the linear find it replaces (a forest is
         // thousands of copies of a few models; every model install rebuilds).
@@ -367,7 +368,7 @@ impl Renderer {
             if model.lm_source.is_some() && self.world_atlas_required() {
                 continue;
             }
-            let (min, max) = crate::lightmap::world_bounds(&inst.transform, (model.min, model.max));
+            let (mut min, mut max) = crate::lightmap::world_bounds(&inst.transform, (model.min, model.max));
             if model.lm_source.is_none() && !casts_as_caster_only(
                 self.model_casts_shadow.get(&inst.model).copied(),
                 model.prelit,
@@ -377,6 +378,10 @@ impl Renderer {
                 continue;
             }
             if self.model_casts_shadow.get(&inst.model) == Some(&false) { continue; }
+            if let Some((lo, hi)) = self.element_reach {
+                min = vec3f(min.x.min(lo.x), min.y.min(lo.y), min.z.min(lo.z));
+                max = vec3f(max.x.max(hi.x), max.y.max(hi.y), max.z.max(hi.z));
+            }
             // A model with a far stand-in casts its own layers into the near
             // cascade and the stand-in into the others
             // (gpu_lightmap::CasterBand). A masked layer (leaf cards, the

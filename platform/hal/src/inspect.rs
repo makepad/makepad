@@ -12,6 +12,11 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
         "GPU bytes by session, kind and owner, reconciled against the device",
     ),
     (
+        "gpu device",
+        "",
+        "the current HAL backend, device name and whether it is a software device",
+    ),
+    (
         "gpu top",
         "[by=bytes|owner|site|churn] [n=15]",
         "largest allocations or allocating owners/sites",
@@ -78,6 +83,26 @@ fn fresh(req: &Req) -> Report {
     crate::Hal::global().report_all(idle)
 }
 
+fn gpu(out: &mut Out) {
+    use crate::{backend_id, device_kind};
+    let Some(info) = crate::Hal::global().backend_info() else {
+        return out.err("GPU backend is not initialized");
+    };
+    let backend = match info.backend {
+        backend_id::METAL => "metal",
+        backend_id::VULKAN => "vulkan",
+        backend_id::D3D11 => "d3d11",
+        backend_id::GL => "gl",
+        backend_id::HEADLESS => "headless",
+        backend_id::NONE => "none",
+        _ => "unknown",
+    };
+    out.line(&format!(
+        "{{\"backend\":{},\"device\":{},\"software\":{}}}",
+        json_str(backend), json_str(&info.device_name()), info.device_kind == device_kind::SOFTWARE
+    ));
+}
+
 /// True when this is a GPU or HAL command. The endpoint thread reads the native ledger directly.
 pub fn dispatch(req: &Req, out: &mut Out) -> bool {
     if crate::framecap::dispatch(req, out) {
@@ -97,6 +122,10 @@ pub fn dispatch(req: &Req, out: &mut Out) -> bool {
         return true;
     }
     let sub = req.pos.first().map(String::as_str).unwrap_or("");
+    if sub == "device" {
+        gpu(out);
+        return true;
+    }
     if sub == "diff" {
         diff(req, out);
         return true;
@@ -109,9 +138,14 @@ pub fn dispatch(req: &Req, out: &mut Out) -> bool {
                 .device_allocated
                 .map(|b| b.to_string())
                 .unwrap_or_else(|| "null".into());
+            let scratch = snap
+                .scratch_allocated
+                .map(|b| b.to_string())
+                .unwrap_or_else(|| "null".into());
             out.line(&format!(
-                "{{\"ledger_bytes\":{},\"device_bytes\":{},\"items\":{}}}",
+                "{{\"ledger_bytes\":{},\"scratch_bytes\":{},\"device_bytes\":{},\"items\":{}}}",
                 snap.total_bytes,
+                scratch,
                 device,
                 snap.items.len()
             ));
@@ -180,7 +214,7 @@ pub fn dispatch(req: &Req, out: &mut Out) -> bool {
             ));
             snaps.push((name.clone(), Arc::new(snap)));
         }
-        _ => out.err("gpu | gpu top | gpu idle | gpu snap | gpu diff | gpu path | gpu prof start|stop|status|frames|frame|lanes|top|util|diff"),
+        _ => out.err("gpu | gpu memory | gpu top | gpu idle | gpu snap | gpu diff | gpu path | gpu prof start|stop|status|frames|frame|lanes|top|util|diff"),
     }
     true
 }

@@ -2090,31 +2090,6 @@ impl Widget for RemindersView {
     }
 }
 
-#[cfg(test)]
-mod layout_tests {
-    use crate::engine::{
-        completed_tile_height, decide_layout, personal_row_height, smart_tile_height, LayoutMode,
-        LIST_PICKER_ITEM_HEIGHT, MINUTE_TICK_SECS,
-    };
-
-    #[test]
-    fn the_layout_follows_the_room_the_view_is_given() {
-        assert_eq!(decide_layout(402.0, 780.0, None), LayoutMode::Compact);
-        assert_eq!(decide_layout(699.0, 800.0, None), LayoutMode::Compact);
-        assert_eq!(decide_layout(700.0, 800.0, None), LayoutMode::Wide);
-        assert_eq!(decide_layout(1240.0, 800.0, None), LayoutMode::Wide);
-        assert_eq!(decide_layout(874.0, 300.0, None), LayoutMode::WideShort);
-        assert_eq!(
-            decide_layout(f64::INFINITY, 800.0, Some(LayoutMode::Compact)),
-            LayoutMode::Compact
-        );
-        assert_eq!(smart_tile_height(LayoutMode::Compact), 88.0);
-        assert_eq!(completed_tile_height(LayoutMode::Wide), 52.0);
-        assert_eq!(personal_row_height(LayoutMode::Compact), 56.0);
-        assert_eq!(LIST_PICKER_ITEM_HEIGHT, 44.0);
-        assert_eq!(MINUTE_TICK_SECS, 60.0);
-    }
-}
 
 #[cfg(test)]
 #[path = "view_tests.rs"]

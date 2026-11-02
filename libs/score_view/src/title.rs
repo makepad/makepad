@@ -431,25 +431,11 @@ mod tests {
         assert!(text_width_sp(BACH, TITLE_SIZE_MAX) > PRINTABLE_WIDTH_SP * 1.7);
     }
 
-    /// The baked table is a copy of the shipped face's own metrics. Where the
-    /// development checkout has the file, prove it still is.
+    /// The baked table is a copy of the shipped face's own metrics.
     #[test]
     fn advance_table_matches_the_shipped_face() {
-        let Some(bytes) = std::env::current_dir()
-            .ok()
-            .into_iter()
-            .flat_map(|current| {
-                current
-                    .ancestors()
-                    .take(6)
-                    .map(|root| root.join("widgets/resources/IBMPlexSans-Text.ttf"))
-                    .collect::<Vec<_>>()
-            })
-            .find_map(|path| std::fs::read(path).ok())
-        else {
-            return;
-        };
-        let face = ttf_parser::Face::parse(&bytes, 0).expect("the shipped face parses");
+        let bytes = include_bytes!("../../../widgets/resources/IBMPlexSans-Text.ttf");
+        let face = ttf_parser::Face::parse(bytes, 0).expect("the shipped face parses");
         let units = f64::from(face.units_per_em());
         for (index, expected) in ASCII_ADVANCE_EM.iter().enumerate() {
             let character = char::from_u32(index as u32 + 32).unwrap();

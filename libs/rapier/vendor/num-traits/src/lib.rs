@@ -466,44 +466,44 @@ fn clamp_test() {
     assert_eq!(-1.0, clamp_min(-2.0, -1.0));
     assert_eq!(-1.0, clamp_max(1.0, -1.0));
     assert_eq!(-2.0, clamp_max(-2.0, -1.0));
-    assert!(clamp(::core::f32::NAN, -1.0, 1.0).is_nan());
-    assert!(clamp_min(::core::f32::NAN, 1.0).is_nan());
-    assert!(clamp_max(::core::f32::NAN, 1.0).is_nan());
+    assert!(clamp(f32::NAN, -1.0, 1.0).is_nan());
+    assert!(clamp_min(f32::NAN, 1.0).is_nan());
+    assert!(clamp_max(f32::NAN, 1.0).is_nan());
 }
 
 #[test]
 #[should_panic]
 #[cfg(debug_assertions)]
 fn clamp_nan_min() {
-    clamp(0., ::core::f32::NAN, 1.);
+    clamp(0., f32::NAN, 1.);
 }
 
 #[test]
 #[should_panic]
 #[cfg(debug_assertions)]
 fn clamp_nan_max() {
-    clamp(0., -1., ::core::f32::NAN);
+    clamp(0., -1., f32::NAN);
 }
 
 #[test]
 #[should_panic]
 #[cfg(debug_assertions)]
 fn clamp_nan_min_max() {
-    clamp(0., ::core::f32::NAN, ::core::f32::NAN);
+    clamp(0., f32::NAN, f32::NAN);
 }
 
 #[test]
 #[should_panic]
 #[cfg(debug_assertions)]
 fn clamp_min_nan_min() {
-    clamp_min(0., ::core::f32::NAN);
+    clamp_min(0., f32::NAN);
 }
 
 #[test]
 #[should_panic]
 #[cfg(debug_assertions)]
 fn clamp_max_nan_max() {
-    clamp_max(0., ::core::f32::NAN);
+    clamp_max(0., f32::NAN);
 }
 
 #[test]
@@ -530,19 +530,19 @@ fn from_str_radix_multi_byte_fail() {
 fn from_str_radix_ignore_case() {
     assert_eq!(
         f32::from_str_radix("InF", 16).unwrap(),
-        ::core::f32::INFINITY
+        f32::INFINITY
     );
     assert_eq!(
         f32::from_str_radix("InfinitY", 16).unwrap(),
-        ::core::f32::INFINITY
+        f32::INFINITY
     );
     assert_eq!(
         f32::from_str_radix("-InF", 8).unwrap(),
-        ::core::f32::NEG_INFINITY
+        f32::NEG_INFINITY
     );
     assert_eq!(
         f32::from_str_radix("-InfinitY", 8).unwrap(),
-        ::core::f32::NEG_INFINITY
+        f32::NEG_INFINITY
     );
     assert!(f32::from_str_radix("nAn", 4).unwrap().is_nan());
     assert!(f32::from_str_radix("-nAn", 4).unwrap().is_nan());

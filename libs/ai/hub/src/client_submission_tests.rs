@@ -300,7 +300,6 @@ fn progress_and_terminal_errors_redact_payloads_and_bound_server_text() {
 // Explicitly run outside restricted sandboxes. Test threads are fixture
 // clients/server only; shipping submission never starts a thread or pool.
 #[test]
-#[ignore = "requires loopback bind; run explicitly with --ignored"]
 fn loopback_six_real_local_services_accept_once_and_poll_error_never_reposts() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("loopback fixture bind");
     listener.set_nonblocking(true).unwrap();

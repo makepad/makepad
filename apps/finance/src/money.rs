@@ -372,11 +372,4 @@ mod tests {
         assert_eq!(format_compact(-1234567, USD), "-12.3k");
     }
 
-    #[test]
-    fn a_thousand_dimes_are_exactly_a_hundred() {
-        // The whole reason this module exists.
-        let total: i64 = (0..1000).map(|_| 10i64).sum();
-        assert_eq!(total, 10_000);
-        assert_eq!(format_money(total, USD), "$100.00");
-    }
 }

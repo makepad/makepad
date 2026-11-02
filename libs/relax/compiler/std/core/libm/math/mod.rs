@@ -66,8 +66,12 @@ use self::support::{CastFrom, CastInto, DFloat, DInt, Float, HFloat, HInt, Int, 
 
 mod acos;
 mod acosf;
+mod acosh;
+mod acoshf;
 mod asin;
 mod asinf;
+mod asinh;
+mod asinhf;
 mod atan;
 mod atan2;
 mod atan2f;
@@ -138,8 +142,12 @@ use self::rem_pio2_large::rem_pio2_large;
 use self::rem_pio2f::rem_pio2f;
 pub use self::acos::acos;
 pub use self::acosf::acosf;
+pub use self::acosh::acosh;
+pub use self::acoshf::acoshf;
 pub use self::asin::asin;
 pub use self::asinf::asinf;
+pub use self::asinh::asinh;
+pub use self::asinhf::asinhf;
 pub use self::atan::atan;
 pub use self::atan2::atan2;
 pub use self::atan2f::atan2f;

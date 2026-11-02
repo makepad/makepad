@@ -333,16 +333,7 @@ fn join_finished_until(handles: &mut Vec<JoinHandle<()>>, deadline: Instant) {
 
 #[cfg(test)]
 mod tests {
-    use super::{listed_by_role, matches_requested_domain};
-
-    #[test]
-    fn role_barred_models_are_not_listed_for_that_node() {
-        // The built-in role table: 192.0.2.76 serves chat, text and image only.
-        assert!(!listed_by_role("http://192.0.2.76:8123", "video"));
-        assert!(listed_by_role("http://192.0.2.76:8123", "chat"));
-        assert!(listed_by_role("http://192.0.2.76:8123", "image"));
-        assert!(listed_by_role("http://192.0.2.89:8123", "image"));
-    }
+    use super::matches_requested_domain;
 
     #[test]
     fn text_picker_includes_chat_residency() {

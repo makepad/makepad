@@ -10,6 +10,7 @@ usage: run.py --makepad <makepad binary> [--warm]   (MAKEPAD_RUN_STD in the envi
 
   1. main.rs: a fn added above `adder` (ids shift), `main` prints with it -> "patched"
   2. the file `go`: the stored v0 handlers run -> "out val <n> <v>" with v0's values, no ICE
+  3. the file `late`: `late`, from the cache, first builds `apply<closure>` -> "out late <n> <v>", no ICE
 """
 import os, shutil, subprocess, sys, tempfile, threading, time
 
@@ -78,6 +79,8 @@ ok = wait(lambda: sum(1 for l in out[n_out:] if l.startswith("out val ")) >= 5)
 vals = [l for l in out[n_out:] if l.startswith("out val ")]
 bad = [l for l in vals if l != expect(int(l.split()[2]))]
 step("the v0 handlers run after the patch (%d values, %d wrong%s)" % (len(vals), len(bad), (": " + bad[0]) if bad else ""), ok and not bad)
+open(os.path.join(pkg, "late"), "w").close()
+step("a fn from before the patch first builds its generic callee after it", wait(lambda: any(l.startswith("out late ") for l in out[n_out:])))
 ice = [l for l in err if "internal compiler error" in l or "is unknown" in l or "panicked" in l]
 step("no internal compiler error%s" % ((": " + ice[0][:300]) if ice else ""), not ice)
 open(os.path.join(pkg, "stop"), "w").close()

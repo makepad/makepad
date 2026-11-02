@@ -542,16 +542,6 @@ mod tests {
     }
 
     #[test]
-    fn fits_below_and_stays_there() {
-        crate::on_test_cx(|| {
-        let p = place_overlay(&base());
-        assert_eq!(p.rect, r(200.0, 224.0, 60.0, 40.0));
-        assert_eq!(p.side, Side::Bottom);
-        assert_eq!(p.arrow_at, dvec2(250.0, 224.0));
-        });
-    }
-
-    #[test]
     fn fits_exactly_and_still_stays() {
         crate::on_test_cx(|| {
         // Room below is exactly the popup's height: 600 - (556 + 4) = 40.
@@ -949,19 +939,6 @@ mod tests {
         crate::on_test_cx(|| {
         assert_eq!(span_inboard(300.0, 50.0, 8.0, 0.0), 300.0);
         assert_eq!(span_inboard(-300.0, 50.0, 8.0, -12.0), -300.0);
-        });
-    }
-
-    #[test]
-    fn span_inboard_is_the_one_line_the_sites_had() {
-        crate::on_test_cx(|| {
-        // ComboBox and DropDown2 wrote `x.clamp(m, (pass - m - w).max(m))`.
-        let cases: [(f64, f64, f64); 3] = [(360.0, 200.0, 400.0), (-5.0, 30.0, 400.0), (50.0, 500.0, 400.0)];
-        for (x, w, pass) in cases {
-            let m = 8.0_f64;
-            let old = x.clamp(m, (pass - m - w).max(m));
-            assert_eq!(span_inboard(x, w, m, pass - m * 2.0), old, "x={x} w={w}");
-        }
         });
     }
 

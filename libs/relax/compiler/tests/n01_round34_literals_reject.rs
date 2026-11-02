@@ -1,4 +1,5 @@
-// T6 overflowing_literals and lint levels; owner: lint ticket. Known failing fixture, deferred by ROUND 35.
+// overflowing_literals (deny by default): consts, a negated literal, a const argument and a
+// `#[deny]` statement inside an `#[allow]` fn. rustc rejects all six literals.
 pub const A: u8 = 256;
 pub const B: i8 = -129;
 pub const C: i8 = 0xff;
@@ -9,7 +10,6 @@ pub fn const_arg() { let _ = U::<300>; }
 pub fn denied_again() { #[deny(overflowing_literals)] let _: u8 = 256; }
 
 #[test]
-#[ignore = "T6: overflowing_literals and lint levels; lint ticket"]
 fn overflowing_literals_regression() {
     let _ = (A, B, C, D);
     const_arg();

@@ -512,8 +512,6 @@ mod tests {
 
     #[test]
     pub fn reverse_bits() {
-        use core::{i16, i32, i64, i8};
-
         assert_eq!(
             PrimInt::reverse_bits(0x0123_4567_89ab_cdefu64),
             0xf7b3_d591_e6a2_c480
@@ -550,8 +548,6 @@ mod tests {
 
     #[test]
     pub fn reverse_bits_i128() {
-        use core::i128;
-
         assert_eq!(PrimInt::reverse_bits(0i128), 0);
         assert_eq!(PrimInt::reverse_bits(-1i128), -1);
         assert_eq!(PrimInt::reverse_bits(1i128), i128::MIN);

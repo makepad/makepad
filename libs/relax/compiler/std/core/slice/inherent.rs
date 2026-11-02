@@ -49,9 +49,11 @@ impl<T> [T] {
         (left, mid, right)
     }
     #[cfg_attr(not(relax_check), lang = "slice_len_fn")]
+    #[rustc_no_implicit_autorefs]
     pub const fn len(&self) -> usize {
         unsafe { im::slice_len(self) }
     }
+    #[rustc_no_implicit_autorefs]
     pub const fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -117,6 +119,7 @@ impl<T> [T] {
             Some((&mut b[0], a))
         }
     }
+    #[rustc_no_implicit_autorefs]
     pub const fn get<I: SliceIndex<[T]>>(&self, index: I) -> Option<&I::Output> {
         index.get(self)
     }
@@ -133,12 +136,15 @@ impl<T> [T] {
     {
         super::get_disjoint_unchecked_mut(self, indices)
     }
+    #[rustc_no_implicit_autorefs]
     pub fn get_mut<I: SliceIndex<[T]>>(&mut self, index: I) -> Option<&mut I::Output> {
         index.get_mut(self)
     }
+    #[rustc_no_implicit_autorefs]
     pub const unsafe fn get_unchecked<I: SliceIndex<[T]>>(&self, index: I) -> &I::Output {
         &*index.get_unchecked(self)
     }
+    #[rustc_no_implicit_autorefs]
     pub const unsafe fn get_unchecked_mut<I: SliceIndex<[T]>>(&mut self, index: I) -> &mut I::Output {
         &mut *index.get_unchecked_mut(self)
     }

@@ -1030,6 +1030,10 @@ impl BoundVarContext<'_> {
         let angle_args = |s: &ast::PathSeg| matches!(ast.gargs(s.args()), Some(GenericArgs::Angle(a)) if !ast.list(*a).is_empty());
         let resolved_len = if ast.qself(path).is_some() || ast.segs(path.segs).iter().any(angle_args) { self.resolved_prefix_len(path) } else { 0 };
         let resolved = ast::Path { segs: path.segs.prefix(resolved_len), ..*path };
+        // rustc visit_qpath, QPath::TypeRelative: the defaults such a path induces would need
+        // type-dependent resolution, so inside it the default is indeterminate (E0228 in an item)
+        let type_relative = resolved_len < path.segs.len();
+        if type_relative { self.scopes.push(Scope::ObjectLifetimeDefault(None)); }
         // an inferred path's segments that elide lifetimes (asked only for a written constraint)
         let mut elided: Option<Vec<(usize, u32)>> = None;
         if let Some(qself) = ast.qself(path) {
@@ -1107,6 +1111,7 @@ impl BoundVarContext<'_> {
             self.visit_ty(qself.ty);
             self.scopes.pop();
         }
+        if type_relative { self.scopes.pop(); }
     }
 
     /// resolve_bound_vars.rs:2000-2094: only the resolved declaration's
@@ -1557,16 +1562,15 @@ mod tests {
         assert_eq!(tcx.dcx.err_count(), 0);
     }
     #[test]
-    fn round33_lifetime_type_relative_paths_take_the_enclosing_object_default() {
-        // resolve_bound_vars.rs:1686-1809 (visit_segment_args runs for resolved paths only):
-        // `X::A<dyn Tr>` (type-relative) pushes no object default scope, so a signature's
-        // `'static` applies (no E0228); `<X as G>::A<dyn Tr>` is resolved and takes A's
+    fn round33_lifetime_type_relative_paths_have_no_object_default() {
+        // resolve_bound_vars.rs visit_qpath: `X::A<dyn Tr>` (type-relative) has an indeterminate
+        // object default (E0228 in a signature); `<X as G>::A<dyn Tr>` is resolved and takes A's
         // declared default.
         let (prog, tcx) = source("#![no_std] trait Tr {} trait G { type A<T: ?Sized>; } fn relative<X: G>(_: X::A<dyn Tr>) {} fn qualified<X: G>(_: <X as G>::A<dyn Tr>) {}", 2021);
-        for name in ["relative", "qualified"] {
-            tcx.fn_sig(&prog, named(&prog, name));
-            assert!(sig_errors(&tcx, &prog, name).is_empty(), "{name}: {:?}", sig_errors(&tcx, &prog, name));
-        }
+        tcx.fn_sig(&prog, named(&prog, "relative"));
+        assert!(sig_errors(&tcx, &prog, "relative").iter().any(|e| e.contains("E0228")), "{:?}", sig_errors(&tcx, &prog, "relative"));
+        tcx.fn_sig(&prog, named(&prog, "qualified"));
+        assert!(sig_errors(&tcx, &prog, "qualified").is_empty(), "{:?}", sig_errors(&tcx, &prog, "qualified"));
         assert_eq!(object_default(&tcx, &prog, named(&prog, "qualified")), [RegionKind::ReStatic]);
     }
     #[test]

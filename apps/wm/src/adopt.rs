@@ -102,7 +102,7 @@ impl Adoptions {
                     tx.send(Adopted { client, pid: request.pid, crate_name: request.crate_name.clone(), launched: launched.is_some(), test_lane: request.test_lane.clone() })
                         .map_err(|_| "the WM is shutting down".to_string())?;
                     SignalToUI::set_ui_signal();
-                    Ok(Admission { port: hub_port, client })
+                    Ok(Admission { port: hub_port, client, version: request.version })
                 }, |app| {
                     if makepad_app_registry::find(app).is_none_or(|e| !e.wm_launchable) {
                         return Err(format!("no dock app {app}"));

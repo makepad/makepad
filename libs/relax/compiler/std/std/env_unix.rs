@@ -290,11 +290,12 @@ pub fn current_dir() -> io::Result<PathBuf> {
 }
 
 pub fn set_current_dir<P: AsRef<Path>>(path: P) -> io::Result<()> {
-    let c = crate::fs::cstr(path.as_ref())?;
-    if unsafe { sys::chdir(c.as_ptr()) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
+    crate::fs::run_path_with_cstr(path.as_ref(), &|c| {
+        if unsafe { sys::chdir(c.as_ptr()) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    })
 }
 
 pub fn current_exe() -> io::Result<PathBuf> {
@@ -302,7 +303,7 @@ pub fn current_exe() -> io::Result<PathBuf> {
     match sys::os::executable_path(&mut buf) {
         Some(n) => {
             let p = PathBuf::from(OsString::from_bytes_vec(buf[..n].to_vec()));
-            if cfg!(target_os = "macos") {
+            if cfg!(target_vendor = "apple") {
                 // real std canonicalizes _NSGetExecutablePath's result on macOS
                 crate::fs::canonicalize(&p)
             } else {
@@ -388,10 +389,10 @@ where
 pub mod consts {
     pub const ARCH: &str = if cfg!(target_arch = "aarch64") { "aarch64" } else { "x86_64" };
     pub const FAMILY: &str = "unix";
-    pub const OS: &str = if cfg!(target_os = "macos") { "macos" } else if cfg!(target_os = "android") { "android" } else { "linux" };
+    pub const OS: &str = if cfg!(target_os = "macos") { "macos" } else if cfg!(target_os = "ios") { "ios" } else if cfg!(target_os = "android") { "android" } else { "linux" };
     pub const DLL_PREFIX: &str = "lib";
-    pub const DLL_SUFFIX: &str = if cfg!(target_os = "macos") { ".dylib" } else { ".so" };
-    pub const DLL_EXTENSION: &str = if cfg!(target_os = "macos") { "dylib" } else { "so" };
+    pub const DLL_SUFFIX: &str = if cfg!(target_vendor = "apple") { ".dylib" } else { ".so" };
+    pub const DLL_EXTENSION: &str = if cfg!(target_vendor = "apple") { "dylib" } else { "so" };
     pub const EXE_SUFFIX: &str = "";
     pub const EXE_EXTENSION: &str = "";
 }

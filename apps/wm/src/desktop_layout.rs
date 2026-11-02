@@ -52,6 +52,24 @@ impl DesktopWindows {
         win.rect = rect;
         changed
     }
+    /// The window takes the size `w` x `h` (its whole window) now: from the rect it is shown
+    /// at, so a maximised or snapped window leaves that state and shrinks from where it was
+    /// drawn (`drawn`); the top-left corner stays and the rect is kept within `area`. A
+    /// parked window keeps its place. True when the window changed.
+    pub fn resize_to(&mut self, client: ClientId, w: f64, h: f64, area: LRect) -> bool {
+        let Some(win) = self.get_mut(client) else { return false };
+        if win.warped || !(w > 0.0 && h > 0.0) {
+            return false;
+        }
+        let shown = if win.maximized { area } else if let Some(zone) = win.snap { zone.bounds(area) } else { win.rect };
+        if (shown.w - w).abs() < 0.5 && (shown.h - h).abs() < 0.5 {
+            return false;
+        }
+        win.maximized = false;
+        win.snap = None;
+        win.rect = fit(LRect::new(shown.x, shown.y, w.max(1.0), h.max(1.0)), area);
+        true
+    }
     pub fn get(&self, client: ClientId) -> Option<&DesktopWindow> {
         self.windows.iter().find(|w| w.client == client)
     }
@@ -115,6 +133,28 @@ mod tests {
         d.get_mut(1).unwrap().maximized = true;
         assert!(!d.request_size(1, 800.0, 600.0, area));
         assert!(!d.request_size(2, 800.0, 600.0, area), "unknown window");
+    }
+    /// A shown window resized by its app (`HostedResize`): it takes the size from where it is,
+    /// a maximised or snapped one leaves that state, asking for the size it has changes nothing.
+    #[test]
+    fn an_apps_resize_of_a_shown_window_releases_maximise_and_keeps_the_corner() {
+        let area = LRect::new(0.0, 26.0, 1969.0, 1100.0);
+        let mut d = DesktopWindows::default();
+        d.enabled = true;
+        d.ensure(1, area);
+        let before = d.get(1).unwrap().rect;
+        assert!(!d.resize_to(1, before.w, before.h, area), "same size, no change");
+        assert!(d.resize_to(1, 640.0, 480.0, area));
+        let r = d.get(1).unwrap().rect;
+        assert_eq!((r.x, r.y, r.w, r.h), (before.x, before.y, 640.0, 480.0));
+        d.get_mut(1).unwrap().maximized = true;
+        assert!(d.resize_to(1, 640.0, 480.0, area));
+        let w = d.get(1).unwrap();
+        assert!(!w.maximized);
+        assert_eq!((w.rect.w, w.rect.h), (640.0, 480.0));
+        d.get_mut(1).unwrap().warped = true;
+        assert!(!d.resize_to(1, 300.0, 300.0, area), "a parked window keeps its place");
+        assert!(!d.resize_to(2, 300.0, 300.0, area), "unknown window");
     }
     #[test]
     fn maximize_and_minimize_keep_restore_rect_and_stack() {

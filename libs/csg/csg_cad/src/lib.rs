@@ -26,7 +26,7 @@ pub mod text;
 pub use bool3::{boolean_in, difference, intersection, union};
 pub use makepad_csg_boolean::{BoolOp, MeshAccel};
 pub use edges::{apply_edges, edge_tool, feature_edges, EdgeChain, EdgeOp, EdgeShape};
-pub use mech::{hole_tool, iso_coarse_pitch, Gear, Hole, Thread};
+pub use mech::{hole_tool, iso_coarse_pitch, metric_names, metric_size, Gear, Hole, MetricSize, Thread};
 pub use region::{regions_from_loops, Loop, Region, P2};
 pub use sketch::{Seg, Shape, Sketch, Tolerance};
 pub use solids::{extrude, helix, loft, revolve, signed_volume, sweep, Section};

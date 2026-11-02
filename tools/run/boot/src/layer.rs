@@ -6,8 +6,8 @@
 //! screen); at the first present a Gaussian-blurred app fades in behind the still-working galaxy
 //! (its stars glinting, the warm-up arc advancing with the functions built ahead); when the app
 //! is ready (the JIT's readiness signal) the arc closes, the sharp app fades in and the galaxy
-//! goes, and the layer with it. (Later JIT work shows in the JIT ring, `ring.rs`, not
-//! here.) The run decides when it shows and goes; a fade is never reversed half-way. Every fade
+//! goes, and the layer with it. Later sustained UI waits show an Updating card over the same
+//! blurred image. Its fade can reverse when the UI responds or waits again. Every fade
 //! runs on this session's clock, never the app's.
 use makepad_hal::Id;
 use std::time::Instant;
@@ -25,6 +25,7 @@ pub const SIGMA: f32 = 4.0;
 
 const FADE_IN: f32 = 0.5;
 const LIFT: f32 = 1.1;
+const UPDATE_FADE: f32 = 0.2;
 
 /// What the run asks the layer to show (hal_run, from the JIT's signals).
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -38,6 +39,8 @@ pub enum Want {
     /// the run's view over a paused app (a parked panic, a halted patch): the app's last frame
     /// dimmed under the view, in the app's own window
     Paused,
+    /// a sustained UI-thread JIT wait; display only, input stays with the app
+    Updating(crate::RingWant),
 }
 
 /// The paused app's darkening under the run's view.
@@ -58,6 +61,8 @@ pub struct Look {
     pub resolve: f32,
     /// the layer has faded out: it can go
     pub done: bool,
+    /// the Updating card and blurred backdrop's opacity (no field while present)
+    pub updating: Option<f32>,
 }
 
 pub struct Layer {
@@ -77,6 +82,9 @@ pub struct Layer {
     pub ahead: u64,
     /// the last frame's look had faded out
     done: bool,
+    update_at: Option<Instant>,
+    update_from: f32,
+    update_out: bool,
 }
 
 fn smooth(e0: f32, e1: f32, x: f32) -> f32 {
@@ -98,6 +106,9 @@ impl Layer {
             app_frames: 0,
             ahead: 0,
             done: false,
+            update_at: None,
+            update_from: 0.0,
+            update_out: false,
         }
     }
 
@@ -116,6 +127,32 @@ impl Layer {
 
     /// The run's wish for this turn. A new boot starts the sequence again.
     pub fn set(&mut self, want: Option<Want>) {
+        // Only the wait card retains the layer on None, for its 200 ms exit. Boot, paused
+        // views and errors replace it immediately. No clock is read on the idle path.
+        if matches!(want, Some(Want::Updating(_))) {
+            if self.update_at.is_none() || self.update_out {
+                let now = Instant::now();
+                self.update_from = self.update_opacity(now);
+                self.update_at = Some(now);
+                self.update_out = false;
+            }
+        } else if want.is_none() && matches!(self.want, Some(Want::Updating(_))) {
+            let now = Instant::now();
+            if !self.update_out {
+                self.update_from = self.update_opacity(now);
+                self.update_at = Some(now);
+                self.update_out = true;
+            }
+            if self.update_opacity(now) > 0.0 {
+                return;
+            }
+            self.update_at = None;
+            self.update_from = 0.0;
+        } else {
+            self.update_at = None;
+            self.update_from = 0.0;
+            self.update_out = false;
+        }
         match want {
             Some(Want::Boot) | None => {
                 self.warm_at = None;
@@ -132,12 +169,18 @@ impl Layer {
             Some(Want::Ready) => {
                 self.ready_at.get_or_insert_with(Instant::now);
             }
-            Some(Want::Paused) => {}
+            Some(Want::Paused | Want::Updating(_)) => {}
         }
         if self.want.as_ref().map(std::mem::discriminant) != want.as_ref().map(std::mem::discriminant) {
             self.done = false;
         }
         self.want = want;
+    }
+
+    fn update_opacity(&self, now: Instant) -> f32 {
+        let Some(at) = self.update_at else { return 0.0 };
+        let target = if self.update_out { 0.0 } else { 1.0 };
+        self.update_from + (target - self.update_from) * smooth(0.0, UPDATE_FADE, now.duration_since(at).as_secs_f32())
     }
 
     /// Whether the last frame drawn had faded out.
@@ -157,9 +200,16 @@ impl Layer {
             progress: -1.0,
             resolve: -1.0,
             done: false,
+            updating: None,
         };
         match self.want {
             None | Some(Want::Boot) | Some(Want::Paused) => {}
+            Some(Want::Updating(_)) => {
+                look.blur = true;
+                look.backdrop = 0.0;
+                look.galaxy = 0.0;
+                look.updating = Some(self.update_opacity(now));
+            }
             Some(Want::WarmUp { .. }) | Some(Want::Ready) => {
                 // the blurred app replaces the deep field behind the galaxy
                 if let Some(t) = since(self.warm_at) {

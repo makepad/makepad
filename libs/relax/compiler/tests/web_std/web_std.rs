@@ -181,7 +181,7 @@ fn atomics_section() {
     let c = AtomicI64::new(-5);
     out!("atomic: {} {} {}", c.fetch_max(3, Ordering::SeqCst), c.fetch_xor(0xff, Ordering::SeqCst), c.load(Ordering::SeqCst));
     let d = AtomicU32::new(0xf0);
-    out!("atomic: {:?} {}", d.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |x| Some(x >> 4)), d.load(Ordering::SeqCst));
+    out!("atomic: {:?} {}", d.try_update(Ordering::SeqCst, Ordering::SeqCst, |x| Some(x >> 4)), d.load(Ordering::SeqCst));
     let mut x = 5u32;
     let ptr = AtomicPtr::new(&mut x as *mut u32);
     out!("atomic: {}", unsafe { *ptr.load(Ordering::SeqCst) });

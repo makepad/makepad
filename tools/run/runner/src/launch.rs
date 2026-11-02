@@ -13,13 +13,13 @@
 //! `makepad app <id>` reads that file, sets MAKEPAD_APP_ID=<id> (the platform names its windows
 //! and its process after it: Linux app_id / WM_CLASS `nl.makepad.<id>`) and MAKEPAD_RUN_HOME, and
 //! runs the words as if they were its own command line. The per-app OS entries the launcher
-//! writes (a macOS bundle, a Windows Start menu shortcut, a Linux .desktop file) all start this
-//! same binary that way, so every app runs the same bytes and shares the warm JIT cache.
+//! writes (a macOS bundle, a Windows Start menu shortcut, a Linux .desktop file) start a tiny
+//! `makepad-launcher` stub. It selects the active loader, sets MAKEPAD_RUN_HOME and passes
+//! `app <id>`, so every app shares the loader and its warm JIT cache.
 //!
-//! `makepad` with no arguments: inside a macOS app bundle whose Info.plist names `MakepadApp`
-//! (and `MakepadRunHome`), that app; otherwise the launch record `runner` (the entry scripts
-//! write it), otherwise the host's default (the `makepad` binary: the runner of the checkout it
-//! was built from).
+//! `makepad` with no arguments: the launch record `runner` (the entry scripts write it),
+//! otherwise the host's default (the `makepad` binary: the runner of the checkout it was built
+//! from). The macOS stub reads MakepadApp and MakepadRunHome from its bundle's Info.plist.
 //!
 //! A launcher that wants to follow a start sets MAKEPAD_RUN_REPORT_TO=<file> in the environment
 //! of the launch (macOS `open --env`): a `run` then reports to it as with `--report-to`, after a
@@ -121,28 +121,6 @@ pub fn write(home: &Path, l: &Launch) -> Result<(), String> {
     std::fs::write(&part, format(l)).and_then(|_| std::fs::rename(&part, &p)).map_err(|e| format!("{}: {e}", p.display()))
 }
 
-/// The value of `<key>NAME</key><string>VALUE</string>` in an Info.plist's text.
-pub fn plist_string(plist: &str, name: &str) -> Option<String> {
-    let key = format!("<key>{name}</key>");
-    let rest = &plist[plist.find(&key)? + key.len()..];
-    let rest = rest.trim_start();
-    let rest = rest.strip_prefix("<string>")?;
-    let value = &rest[..rest.find("</string>")?];
-    Some(value.replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&apos;", "'").replace("&amp;", "&"))
-}
-
-/// macOS: the app this executable's bundle names (`MakepadApp`) and the home it keeps its launch
-/// records in (`MakepadRunHome`), when the executable sits in `<X>.app/Contents/MacOS/`.
-fn bundle_app(exe: &Path) -> Option<(String, Option<PathBuf>)> {
-    let contents = exe.parent()?.parent()?;
-    if exe.parent()?.file_name()? != "MacOS" || contents.file_name()? != "Contents" {
-        return None;
-    }
-    let plist = std::fs::read_to_string(contents.join("Info.plist")).ok()?;
-    let id = plist_string(&plist, "MakepadApp")?;
-    Some((id, plist_string(&plist, "MakepadRunHome").map(PathBuf::from)))
-}
-
 /// What a command line becomes when it names a launch record: `[exe]` (no arguments) or
 /// `[exe, "app", <id>, extra...]`. `default` is the host's own no-argument launch. None: the
 /// command line stays as it is. The launch's environment and folder are applied here.
@@ -150,13 +128,7 @@ pub fn resolve(raw: &[Vec<u8>], default: Option<fn() -> Option<Launch>>) -> Opti
     let exe = raw.first().cloned().unwrap_or_default();
     let launch = match raw.get(1).map(Vec::as_slice) {
         None => {
-            let here = std::env::current_exe().ok();
-            if let Some((id, home)) = here.as_deref().and_then(bundle_app) {
-                if let Some(h) = home {
-                    std::env::set_var("MAKEPAD_RUN_HOME", h);
-                }
-                read(&crate::fetch::home(), &id)
-            } else if path(&crate::fetch::home(), "runner").is_file() {
+            if path(&crate::fetch::home(), "runner").is_file() {
                 read(&crate::fetch::home(), "runner")
             } else {
                 match default.and_then(|f| f()) {
@@ -246,13 +218,5 @@ mod tests {
         assert!(!valid_id("../etc"));
         assert!(!valid_id(""));
         assert!(valid_id("stage_2-x"));
-    }
-
-    #[test]
-    fn plist() {
-        let p = "<dict>\n  <key>MakepadApp</key>\n  <string>scope</string>\n  <key>MakepadRunHome</key><string>/a &amp; b</string>\n</dict>";
-        assert_eq!(plist_string(p, "MakepadApp").as_deref(), Some("scope"));
-        assert_eq!(plist_string(p, "MakepadRunHome").as_deref(), Some("/a & b"));
-        assert_eq!(plist_string(p, "Missing"), None);
     }
 }

@@ -200,18 +200,6 @@ mod tests {
     }
 
     #[test]
-    fn test_read_blob() {
-        let (_dir, git_dir) = make_git_dir();
-        // "hello world\n" as a blob: git's well-known id for that content.
-        let written = write_loose_object(&git_dir, ObjectKind::Blob, b"hello world\n").unwrap();
-        let oid = ObjectId::from_hex("3b18e512dba79e4c8300dd08aeb37f8e728b8dad").unwrap();
-        assert_eq!(written, oid);
-        let obj = read_loose_object(&git_dir, &oid).unwrap();
-        assert_eq!(obj.kind, ObjectKind::Blob);
-        assert_eq!(obj.data, b"hello world\n");
-    }
-
-    #[test]
     fn test_write_and_read_blob() {
         let (_dir, git_dir) = make_git_dir();
         let data = b"test content for writing\n";

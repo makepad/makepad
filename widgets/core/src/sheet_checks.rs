@@ -44,16 +44,6 @@ pub fn evaluates(register: fn(&mut ScriptVm), entry: &SheetEntry) {
     under(register, entry, |_, _| {});
 }
 
-/// A number the sheet leaves in `mod.theme`, read under it.
-pub fn theme_number(register: fn(&mut ScriptVm), entry: &SheetEntry, key: &str) -> Option<f64> {
-    let mut out = None;
-    under(register, entry, |vm, _| {
-        let theme = vm.module(id!(theme));
-        out = vm.value(theme, LiveId::from_str(key)).as_f64();
-    });
-    out
-}
-
 /// The fields a person types or picks a value in that are laid out by a
 /// TURTLE: they are Fit, so the vertical padding IS their height, and two
 /// of them padded differently part company again as soon as the type

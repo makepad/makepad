@@ -64,7 +64,7 @@ The runtime is synchronous and serial-first:
 
 - action timeout: `10s`
 - poll interval: `50ms`
-- artifacts: `<manifest_dir>/target/makepad_test/<package>/<test>/`
+- artifacts: `<manifest_dir>/target/makepad_test/<package>/<test>/` (`$MAKEPAD_TEST_ARTIFACTS/<package>/<test>/` when set; devhub sets it per lease)
 
 The runner serializes app sessions within each test executable. Use
 `--test-threads=1` for predictable suite order. `MAKEPAD_TEST_PARALLEL=1` opts out

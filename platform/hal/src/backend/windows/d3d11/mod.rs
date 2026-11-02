@@ -91,6 +91,8 @@ pub struct D3d11 {
     word_arena: Arena,
     /// one pass's draw lists, reused pass after pass
     scratch: frame::PassScratch,
+    /// the pass being encoded of a frame the GPU profiler records: its draws and attachments
+    prof: Option<frame::ProfRecords>,
     mailbox: Mailbox,
     complete: Completion,
     /// HLSL compiles in parallel (FXC is single-threaded per call; a cold start compiles dozens)
@@ -142,6 +144,15 @@ impl D3d11 {
         crate::gpu_limits::set_gpu_working_set_bytes(info.working_set);
         let mailbox = Mailbox::new(wake);
         let complete = Completion::new(dev.clone(), mailbox.clone())?;
+        crate::gpu_prof::set_device(crate::gpu_prof::DeviceInfo {
+            name: dev.adapter_name.clone(),
+            counter_sets: vec!["timestamp (D3D11 timestamp queries inside a disjoint query per frame)".into()],
+            sampling: vec!["pass boundary".into(), "completion-time clock anchor".into()],
+            notes: vec![
+                "render passes are timed whole with timestamp queries (no vertex / fragment lanes, no per-shader split)".into(),
+                "GPU times are placed on the host clock where each frame's completion event was seen (late by the completion thread's wake-up)".into(),
+            ],
+        });
         if win32::log_enabled() {
             eprintln!("[hal-d3d11] device on \"{}\": formats {:#x} renderable {:#x} offscreen={}", dev.adapter_name, dev.formats, dev.renderable, shell.is_none());
         }
@@ -151,6 +162,7 @@ impl D3d11 {
             cb_arena: Arena::new(&dev, 256 * 1024, true)?,
             word_arena: Arena::new(&dev, 256 * 1024, false)?,
             scratch: Default::default(),
+            prof: None,
             dev,
             info,
             tex: HashMap::new(),

@@ -157,17 +157,17 @@ fn open_link(base_url: &str) -> Result<(Link, Vec<u8>), String> {
     use std::io::{Read, Write};
     let url = crate::http_client::parse_url(&format!("{base_url}/kernel/stream")).map_err(|e| e.to_string())?;
     let host_port = format!("{}:{}", url.host, url.port);
+    makepad_network::lan::hub_check_host("ai-hub kernel stream", &url.host).map_err(|e| e.to_string())?;
     let (mut link, authorization): (Link, Option<String>) = if url.https {
         #[cfg(target_arch = "wasm32")]
         return Err(format!("{host_port}: fleet TLS links are native-only"));
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let (s, _server, auth) = makepad_network::fleet::id::connect(&url.host, &url.port.to_string()).map_err(|e| format!("{host_port}: {e}"))?;
+            let (s, _server, auth) = crate::http_client::with_hub_connect(|| makepad_network::fleet::id::connect(&url.host, &url.port.to_string())).map_err(|e| format!("{host_port}: {e}"))?;
             (Link::Tls(s), Some(auth))
         }
     } else {
-        let addr = std::net::ToSocketAddrs::to_socket_addrs(&host_port).map_err(|e| e.to_string())?.next().ok_or("no address")?;
-        let s = makepad_network::lan::connect_timeout("ai-hub kernel stream", &addr, Duration::from_secs(5)).map_err(|e| format!("{host_port}: {e}"))?;
+        let s = makepad_network::lan::hub_connect_host("ai-hub kernel stream", &url.host, url.port, Some(Duration::from_secs(5))).map_err(|e| format!("{host_port}: {e}"))?;
         let _ = s.set_nodelay(true);
         (Link::Plain(s), None)
     };

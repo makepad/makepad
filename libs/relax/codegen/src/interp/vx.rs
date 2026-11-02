@@ -4,7 +4,7 @@
 //! semantics on Arm.
 
 use super::{c, hist_note, Cx, COUNT, H};
-use relax_backend::rir::{VW, VX};
+use relax_backend::rir::{Cond, NanBits, RoundTo, VW, VX};
 use core::arch::aarch64::*;
 
 #[inline(always)]
@@ -86,6 +86,193 @@ unsafe fn u32x(v: uint8x16_t) -> uint32x4_t {
 #[inline(always)]
 unsafe fn u8x(v: uint32x4_t) -> uint8x16_t {
     vreinterpretq_u8_u32(v)
+}
+
+/// All-ones lanes where `v` is a NaN (lanes of width w: S or D).
+#[inline(always)]
+unsafe fn is_nan(w: VW, v: uint8x16_t) -> uint8x16_t {
+    match w {
+        VW::D => vmvnq_u8(vreinterpretq_u8_u64(vceqq_f64(vreinterpretq_f64_u8(v), vreinterpretq_f64_u8(v)))),
+        _ => vmvnq_u8(vreinterpretq_u8_u32(vceqq_f32(vreinterpretq_f32_u8(v), vreinterpretq_f32_u8(v)))),
+    }
+}
+
+/// SSE's NaN rule for a float lane op (arm64.rs `intel_nan`): a NaN result lane becomes the
+/// negative default NaN, then a NaN lane of `b`, then of `a` (each quieted) takes its place.
+#[inline(always)]
+unsafe fn intel_nan_v(w: VW, r: uint8x16_t, a: uint8x16_t, b: uint8x16_t) -> uint8x16_t {
+    let (dflt, quiet) = match w {
+        VW::D => (vreinterpretq_u8_u64(vdupq_n_u64(0xfff8_0000_0000_0000)), vreinterpretq_u8_u64(vdupq_n_u64(0x0008_0000_0000_0000))),
+        _ => (vreinterpretq_u8_u32(vdupq_n_u32(0xffc0_0000)), vreinterpretq_u8_u32(vdupq_n_u32(0x0040_0000))),
+    };
+    let mut r = vbslq_u8(is_nan(w, r), dflt, r);
+    for input in [b, a] {
+        r = vbslq_u8(is_nan(w, input), vorrq_u8(input, quiet), r);
+    }
+    r
+}
+
+/// The lane-wise float, compare, shift, negate and conversion ops at every width the arm64
+/// back end emits them for (arm64.rs `vx_lanes`), with the instructions it emits, so the bits
+/// match. None: not one of these.
+#[inline(always)]
+unsafe fn lane_op(op: VX, x: uint8x16_t, y: uint8x16_t) -> Option<uint8x16_t> {
+    macro_rules! f2 {
+        ($w:expr, $f32:ident, $f64:ident) => {
+            match $w {
+                VW::D => vreinterpretq_u8_f64($f64(vreinterpretq_f64_u8(x), vreinterpretq_f64_u8(y))),
+                _ => vreinterpretq_u8_f32($f32(vreinterpretq_f32_u8(x), vreinterpretq_f32_u8(y))),
+            }
+        };
+    }
+    macro_rules! fc {
+        ($w:expr, $f32:ident, $f64:ident, $p:expr, $q:expr) => {
+            match $w {
+                VW::D => vreinterpretq_u8_u64($f64(vreinterpretq_f64_u8($p), vreinterpretq_f64_u8($q))),
+                _ => vreinterpretq_u8_u32($f32(vreinterpretq_f32_u8($p), vreinterpretq_f32_u8($q))),
+            }
+        };
+    }
+    macro_rules! f1 {
+        ($w:expr, $f32:ident, $f64:ident) => {
+            match $w {
+                VW::D => vreinterpretq_u8_f64($f64(vreinterpretq_f64_u8(x))),
+                _ => vreinterpretq_u8_f32($f32(vreinterpretq_f32_u8(x))),
+            }
+        };
+    }
+    // integer compares, signed (cmgt/cmge) or unsigned (cmhi/cmhs), of p and q
+    macro_rules! ic {
+        ($w:expr, $p:expr, $q:expr, $s8:ident, $s16:ident, $s32:ident, $s64:ident, $u8:ident, $u16:ident, $u32:ident, $u64:ident, $signed:expr) => {
+            if $signed {
+                match $w {
+                    VW::B => $s8(vreinterpretq_s8_u8($p), vreinterpretq_s8_u8($q)),
+                    VW::H => vreinterpretq_u8_u16($s16(vreinterpretq_s16_u8($p), vreinterpretq_s16_u8($q))),
+                    VW::S => vreinterpretq_u8_u32($s32(vreinterpretq_s32_u8($p), vreinterpretq_s32_u8($q))),
+                    VW::D => vreinterpretq_u8_u64($s64(vreinterpretq_s64_u8($p), vreinterpretq_s64_u8($q))),
+                }
+            } else {
+                match $w {
+                    VW::B => $u8($p, $q),
+                    VW::H => vreinterpretq_u8_u16($u16(vreinterpretq_u16_u8($p), vreinterpretq_u16_u8($q))),
+                    VW::S => vreinterpretq_u8_u32($u32(vreinterpretq_u32_u8($p), vreinterpretq_u32_u8($q))),
+                    VW::D => vreinterpretq_u8_u64($u64(vreinterpretq_u64_u8($p), vreinterpretq_u64_u8($q))),
+                }
+            }
+        };
+    }
+    // ushl / sshl of p by the signed per-lane amounts in q
+    macro_rules! sh {
+        ($w:expr, $p:expr, $q:expr, $signed:expr) => {
+            match ($w, $signed) {
+                (VW::B, false) => vshlq_u8($p, vreinterpretq_s8_u8($q)),
+                (VW::H, false) => vreinterpretq_u8_u16(vshlq_u16(vreinterpretq_u16_u8($p), vreinterpretq_s16_u8($q))),
+                (VW::S, false) => vreinterpretq_u8_u32(vshlq_u32(vreinterpretq_u32_u8($p), vreinterpretq_s32_u8($q))),
+                (VW::D, false) => vreinterpretq_u8_u64(vshlq_u64(vreinterpretq_u64_u8($p), vreinterpretq_s64_u8($q))),
+                (VW::B, true) => vreinterpretq_u8_s8(vshlq_s8(vreinterpretq_s8_u8($p), vreinterpretq_s8_u8($q))),
+                (VW::H, true) => vreinterpretq_u8_s16(vshlq_s16(vreinterpretq_s16_u8($p), vreinterpretq_s16_u8($q))),
+                (VW::S, true) => vreinterpretq_u8_s32(vshlq_s32(vreinterpretq_s32_u8($p), vreinterpretq_s32_u8($q))),
+                (VW::D, true) => vreinterpretq_u8_s64(vshlq_s64(vreinterpretq_s64_u8($p), vreinterpretq_s64_u8($q))),
+            }
+        };
+    }
+    let neg = |w: VW, v: uint8x16_t| match w {
+        VW::B => vreinterpretq_u8_s8(vnegq_s8(vreinterpretq_s8_u8(v))),
+        VW::H => vreinterpretq_u8_s16(vnegq_s16(vreinterpretq_s16_u8(v))),
+        VW::S => vreinterpretq_u8_s32(vnegq_s32(vreinterpretq_s32_u8(v))),
+        VW::D => vreinterpretq_u8_s64(vnegq_s64(vreinterpretq_s64_u8(v))),
+    };
+    let float = |w: VW| matches!(w, VW::S | VW::D);
+    Some(match op {
+        VX::FAdd(w, n) if float(w) => {
+            let r = f2!(w, vaddq_f32, vaddq_f64);
+            if n == NanBits::Intel { intel_nan_v(w, r, x, y) } else { r }
+        }
+        VX::FSub(w, n) if float(w) => {
+            let r = f2!(w, vsubq_f32, vsubq_f64);
+            if n == NanBits::Intel { intel_nan_v(w, r, x, y) } else { r }
+        }
+        VX::FMul(w, n) if float(w) => {
+            let r = f2!(w, vmulq_f32, vmulq_f64);
+            if n == NanBits::Intel { intel_nan_v(w, r, x, y) } else { r }
+        }
+        VX::FDiv(w, n) if float(w) => {
+            let r = f2!(w, vdivq_f32, vdivq_f64);
+            if n == NanBits::Intel { intel_nan_v(w, r, x, y) } else { r }
+        }
+        VX::FMinNeon(w) if float(w) => f2!(w, vminq_f32, vminq_f64),
+        VX::FMaxNeon(w) if float(w) => f2!(w, vmaxq_f32, vmaxq_f64),
+        // b > a (min) / a > b (max), false for NaN lanes: b there
+        VX::FMinLt(w) if float(w) => vbslq_u8(fc!(w, vcgtq_f32, vcgtq_f64, y, x), x, y),
+        VX::FMaxGt(w) if float(w) => vbslq_u8(fc!(w, vcgtq_f32, vcgtq_f64, x, y), x, y),
+        VX::FMinNum(w) | VX::FMaxNum(w) if float(w) => {
+            // both inputs quieted first (fminnm x, x, x), as the back end does
+            let min = matches!(op, VX::FMinNum(_));
+            match w {
+                VW::D => {
+                    let (p, q) = (vreinterpretq_f64_u8(x), vreinterpretq_f64_u8(y));
+                    let (p, q) = (vminnmq_f64(p, p), vminnmq_f64(q, q));
+                    vreinterpretq_u8_f64(if min { vminnmq_f64(p, q) } else { vmaxnmq_f64(p, q) })
+                }
+                _ => {
+                    let (p, q) = (vreinterpretq_f32_u8(x), vreinterpretq_f32_u8(y));
+                    let (p, q) = (vminnmq_f32(p, p), vminnmq_f32(q, q));
+                    vreinterpretq_u8_f32(if min { vminnmq_f32(p, q) } else { vmaxnmq_f32(p, q) })
+                }
+            }
+        }
+        VX::FCmp(c, w) if float(w) => match c {
+            Cond::Lt => fc!(w, vcgtq_f32, vcgtq_f64, y, x),
+            Cond::Le => fc!(w, vcgeq_f32, vcgeq_f64, y, x),
+            Cond::Gt => fc!(w, vcgtq_f32, vcgtq_f64, x, y),
+            Cond::Ge => fc!(w, vcgeq_f32, vcgeq_f64, x, y),
+            Cond::Eq => fc!(w, vceqq_f32, vceqq_f64, x, y),
+            Cond::Ne => vmvnq_u8(fc!(w, vceqq_f32, vceqq_f64, x, y)),
+        },
+        VX::ICmp(c, w) | VX::UCmp(c, w) => {
+            let s = matches!(op, VX::ICmp(..));
+            match c {
+                Cond::Lt => ic!(w, y, x, vcgtq_s8, vcgtq_s16, vcgtq_s32, vcgtq_s64, vcgtq_u8, vcgtq_u16, vcgtq_u32, vcgtq_u64, s),
+                Cond::Le => ic!(w, y, x, vcgeq_s8, vcgeq_s16, vcgeq_s32, vcgeq_s64, vcgeq_u8, vcgeq_u16, vcgeq_u32, vcgeq_u64, s),
+                Cond::Gt => ic!(w, x, y, vcgtq_s8, vcgtq_s16, vcgtq_s32, vcgtq_s64, vcgtq_u8, vcgtq_u16, vcgtq_u32, vcgtq_u64, s),
+                Cond::Ge => ic!(w, x, y, vcgeq_s8, vcgeq_s16, vcgeq_s32, vcgeq_s64, vcgeq_u8, vcgeq_u16, vcgeq_u32, vcgeq_u64, s),
+                Cond::Eq => ic!(w, x, y, vceqq_s8, vceqq_s16, vceqq_s32, vceqq_s64, vceqq_u8, vceqq_u16, vceqq_u32, vceqq_u64, false),
+                Cond::Ne => vmvnq_u8(ic!(w, x, y, vceqq_s8, vceqq_s16, vceqq_s32, vceqq_s64, vceqq_u8, vceqq_u16, vceqq_u32, vceqq_u64, false)),
+            }
+        }
+        VX::ShlV(w) | VX::ArmUShl(w) => sh!(w, x, y, false),
+        VX::ArmSShl(w) => sh!(w, x, y, true),
+        VX::ShrUV(w) => sh!(w, x, neg(w, y), false),
+        VX::ShrSV(w) => sh!(w, x, neg(w, y), true),
+        VX::Neg(w) => neg(w, x),
+        VX::FNeg(w) if float(w) => f1!(w, vnegq_f32, vnegq_f64),
+        VX::FAbs(w) if float(w) => f1!(w, vabsq_f32, vabsq_f64),
+        VX::FSqrt(w, n) if float(w) => {
+            let r = f1!(w, vsqrtq_f32, vsqrtq_f64);
+            if n == NanBits::Intel { intel_nan_v(w, r, x, x) } else { r }
+        }
+        VX::FRound(w, k) if float(w) => match k {
+            RoundTo::Floor => f1!(w, vrndmq_f32, vrndmq_f64),
+            RoundTo::Ceil => f1!(w, vrndpq_f32, vrndpq_f64),
+            RoundTo::Trunc => f1!(w, vrndq_f32, vrndq_f64),
+            RoundTo::Away => f1!(w, vrndaq_f32, vrndaq_f64),
+            RoundTo::Even => f1!(w, vrndnq_f32, vrndnq_f64),
+        },
+        // fcvtzs / scvtf
+        VX::FToI(VW::D) => vreinterpretq_u8_s64(vcvtq_s64_f64(vreinterpretq_f64_u8(x))),
+        VX::FToI(VW::S) => vreinterpretq_u8_s32(vcvtq_s32_f32(vreinterpretq_f32_u8(x))),
+        VX::IToF(VW::D) => vreinterpretq_u8_f64(vcvtq_f64_s64(vreinterpretq_s64_u8(x))),
+        VX::IToF(VW::S) => vreinterpretq_u8_f32(vcvtq_f32_s32(vreinterpretq_s32_u8(x))),
+        // xtn / xtn2 (w: the source lane width)
+        VX::Narrow(VW::H) => vcombine_u8(vmovn_u16(vreinterpretq_u16_u8(x)), vmovn_u16(vreinterpretq_u16_u8(y))),
+        VX::Narrow(VW::S) => vreinterpretq_u8_u16(vcombine_u16(vmovn_u32(vreinterpretq_u32_u8(x)), vmovn_u32(vreinterpretq_u32_u8(y)))),
+        VX::Narrow(VW::D) => vreinterpretq_u8_u32(vcombine_u32(vmovn_u64(vreinterpretq_u64_u8(x)), vmovn_u64(vreinterpretq_u64_u8(y)))),
+        // fcvtn / fcvtn2
+        VX::FCvtNarrow => vreinterpretq_u8_f32(vcombine_f32(vcvt_f32_f64(vreinterpretq_f64_u8(x)), vcvt_f32_f64(vreinterpretq_f64_u8(y)))),
+        // fcvtl .2d, .2s
+        VX::FCvtLo => vreinterpretq_u8_f64(vcvt_f64_f32(vget_low_f32(vreinterpretq_f32_u8(x)))),
+        _ => return None,
+    })
 }
 
 // out of line (inlined, its stack arrays cost the handler its tail jump)
@@ -171,6 +358,9 @@ unsafe fn vx2(op: VX, a: *const u64, b: *const u64, d: *mut u64) {
         _ => {}
     }
     let (x, y) = (ld(a), ld(b));
+    if let Some(r) = lane_op(op, x, y) {
+        return st(d, r);
+    }
     let r = match op {
         VX::Add(w) => by_w!(w, x, y, vaddq_u8, vaddq_u16, vaddq_u32, vaddq_u64),
         VX::Sub(w) => by_w!(w, x, y, vsubq_u8, vsubq_u16, vsubq_u32, vsubq_u64),

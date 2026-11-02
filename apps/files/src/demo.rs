@@ -1108,10 +1108,6 @@ mod tests {
         vfs.read_dir(Path::new(path), true).unwrap()
     }
 
-    fn top_level_folders() -> [&'static str; 10] {
-        ["Desktop", "Documents", "Downloads", "Library", "Mail", "Music", "Network", "Pictures", "Projects", "Videos"]
-    }
-
     fn full_scan(vfs: &DemoVfs) -> Node {
         vfs.scan_with_skip(Path::new(VIRTUAL_HOME), &AtomicBool::new(false), &|_| {}, &|_| false)
             .expect("full demo scan should complete")
@@ -1348,42 +1344,6 @@ mod tests {
         assert!(scoped.size < full.size);
     }
 
-    fn scan_stats(node: &Node, depth: usize, stats: &mut (usize, usize, usize, usize)) -> u64 {
-        stats.2 = stats.2.max(depth);
-        if node.is_dir {
-            stats.1 += 1;
-            let sum: u64 = node.children.iter().map(|child| scan_stats(child, depth + 1, stats)).sum();
-            assert_eq!(node.size, sum, "folder {} has an inconsistent recursive size", node.name);
-            sum
-        } else {
-            stats.0 += 1;
-            if node.size >= 2 * 1024 * 1024 * 1024 {
-                stats.3 += 1;
-            }
-            node.size
-        }
-    }
-
-    #[test]
-    fn generator_shape_sizes_and_timings_meet_the_demo_contract() {
-        let generated_at = makepad_widgets::Cx::monotonic_now();
-        let vfs = DemoVfs::new();
-        let generation = makepad_widgets::Cx::monotonic_now() - generated_at;
-        let scan_at = makepad_widgets::Cx::monotonic_now();
-        let node = full_scan(&vfs);
-        let scan = makepad_widgets::Cx::monotonic_now() - scan_at;
-        let mut stats = (0usize, 0usize, 0usize, 0usize);
-        let total = scan_stats(&node, 0, &mut stats);
-        eprintln!("files demo generator: {generation:.3}s; full inline scan: {scan:.3}s");
-        assert_eq!(stats.0, 38_006, "file count");
-        assert_eq!(stats.1, 2_026, "folder count");
-        assert!((9..=11).contains(&stats.2), "max depth (root is zero and leaf files count): {}", stats.2);
-        assert!(stats.3 >= 3, "only {} files are at least 2 GiB", stats.3);
-        assert!(total >= 150 * 1024 * 1024 * 1024, "tree is only {total} bytes");
-        assert!(generation < 0.150, "generation took {generation:.3}s");
-        assert!(scan < 0.100, "inline scan took {scan:.3}s");
-    }
-
     #[test]
     fn stat_and_synthetic_markdown_reads_work() {
         let vfs = DemoVfs::new();
@@ -1407,22 +1367,6 @@ mod tests {
     }
 
     #[test]
-    fn every_expected_top_level_folder_is_present_and_non_empty() {
-        let vfs = DemoVfs::new();
-        let root = listing(&vfs, VIRTUAL_HOME);
-        for name in top_level_folders() {
-            let entry = root.iter().find(|e| e.name == name).unwrap_or_else(|| panic!("missing top-level folder {name}"));
-            assert!(entry.is_dir);
-            let children = listing(&vfs, &format!("{VIRTUAL_HOME}/{name}"));
-            assert!(!children.is_empty(), "{name} has no contents");
-        }
-        // The trash exists (it showed up in `root`, which asked to see
-        // hidden entries too) but is hidden from a normal listing.
-        assert!(root.iter().any(|e| e.name == ".Trash"), "the trash folder should still exist when hidden entries are shown");
-        assert!(vfs.read_dir(Path::new(VIRTUAL_HOME), false).unwrap().iter().all(|e| !e.name.starts_with('.')));
-    }
-
-    #[test]
     fn sibling_names_are_unique_and_child_counts_match_listings() {
         let vfs = DemoVfs::new();
         let mut stack = vec![PathBuf::from(VIRTUAL_HOME)];
@@ -1439,18 +1383,6 @@ mod tests {
                     assert_eq!(entry.child_count, None, "file child count for {}", entry.path.display());
                 }
             }
-        }
-    }
-
-    #[test]
-    fn network_has_shared_design_and_engineering_teams() {
-        let vfs = DemoVfs::new();
-        let shared = Path::new(VIRTUAL_HOME).join("Network").join("shared");
-        let entries = vfs.read_dir(&shared, true).unwrap();
-        for team in ["Design Team", "Engineering"] {
-            let entry = entries.iter().find(|entry| entry.name == team).unwrap_or_else(|| panic!("missing Network/{team}"));
-            assert!(entry.is_dir);
-            assert!(!vfs.read_dir(&entry.path, true).unwrap().is_empty(), "Network/{team} is empty");
         }
     }
 

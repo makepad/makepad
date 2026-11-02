@@ -1,9 +1,5 @@
-// T12 (conform): pre-existing borrowck false positive, rustc accepts; found by N01 Gandalf audit
-// (round 52 OB, arch-n01-oB.REPORT.md). Known failure: not listed in run_live_regressions.sh;
-// `makepad check` with MAKEPAD_RUN_BORROWCK=full (that script's settings) reports the errors named below,
-// as does the pre-N01 tip (which does not check derived impl bodies, so it misses those). Do not
-// list it until conform fixes the cause.
-// Cause: the makepad-draw rr reflection shape (shader_access.rs 9 sites, reflect.rs 6 sites incl.
+// Borrowck regression found by the N01 Gandalf audit (round 52); run_live_regressions.sh checks it.
+// Regression (rustc accepts; Relax once rejected it): the makepad-draw rr reflection shape (shader_access.rs 9 sites, reflect.rs 6 sites incl.
 // E0499): `ShaderBorrow<'a, T: ?Sized = dyn Any>` (the default's object lifetime is 'static),
 // `fn write(self) -> Option<&'a mut dyn Any>` and nodes rebuilt from a reborrow are reported as
 // "'a must outlive 'static" / "'1 must outlive 'static". rustc accepts the code (cargo check
@@ -50,6 +46,5 @@ fn run() {
     assert_eq!(x, 5);
 }
 #[test]
-#[ignore = "T12 conform: dyn Any default object lifetime through ShaderBorrow"]
 fn dyn_any_default_object_lifetime() { run() }
 fn main() { run() }

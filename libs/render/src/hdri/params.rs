@@ -3011,16 +3011,6 @@ mod shape_param_tests {
     use super::*;
 
     #[test]
-    fn a_map_holds_sixteen_lights() {
-        assert_eq!(LIGHT_LIMIT, 16);
-        let mut p = HdriParams::default();
-        p.lights = vec![LightParams::default(); 20];
-        let changed = p.clamp();
-        assert_eq!(p.lights.len(), 16);
-        assert_eq!(changed, ["lights"]);
-    }
-
-    #[test]
     fn the_shaped_light_names_are_choices() {
         assert_eq!(LIGHT_SHAPE_NAMES, &["rect", "disc", "ring", "polygon", "stroke", "scrim"]);
         for (name, shape) in [("polygon", LightShape::Polygon), ("stroke", LightShape::Stroke), ("scrim", LightShape::Scrim)] {

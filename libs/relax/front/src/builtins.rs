@@ -369,7 +369,7 @@ pub fn override_rules(options: &crate::options::Options, d: crate::macros::Macro
         crate::memo_local! {
             static BF: std::cell::OnceCell<crate::macros::MacroRef>;
         }
-        return BF.with(|b| b.get_or_init(|| std::sync::Arc::new(crate::macros::MacroDef { name: "bitflags".to_string(), krate: "bitflags".to_string(), exported: true, arms: Vec::new(), builtin: Builtin::Bitflags as u16, def_file: String::new(), def_pos: 0, def_mod: String::new(), input: None })).clone());
+        return BF.with(|b| b.get_or_init(|| std::sync::Arc::new(crate::macros::MacroDef { name: "bitflags".to_string(), krate: "bitflags".to_string(), exported: true, arms: Vec::new(), builtin: Builtin::Bitflags as u16, def_file: String::new(), def_pos: 0, def_mod: String::new(), edition: 0, input: None })).clone());
     }
     d
 }
@@ -415,7 +415,7 @@ fn def_for_id(name: &str, id: u16) -> crate::macros::MacroRef {
             d.resize(i + 1, None);
         }
         if d[i].is_none() {
-            d[i] = Some(std::sync::Arc::new(crate::macros::MacroDef { name: name.to_string(), krate: String::new(), exported: true, arms: Vec::new(), builtin: id, def_file: String::new(), def_pos: 0, def_mod: String::new(), input: None }));
+            d[i] = Some(std::sync::Arc::new(crate::macros::MacroDef { name: name.to_string(), krate: String::new(), exported: true, arms: Vec::new(), builtin: id, def_file: String::new(), def_pos: 0, def_mod: String::new(), edition: 0, input: None }));
         }
         d[i].clone().unwrap()
     })
@@ -764,12 +764,7 @@ pub fn expand(p: &crate::parser::Parser, id: u16, lo: usize, hi: usize, call_lo:
         for t in &toks {
             // Proc macros split joint punctuation into smaller source ranges. Lifetimes
             // deliberately keep one full span for both the apostrophe and name, like rustc.
-            if t.kind == T::AtId {
-                origin(t.lo, t.lo + 1);
-                origin(t.lo + 1, t.hi);
-            } else if (T::Semi as u8..=T::LArrow as u8).contains(&(t.kind as u8))
-                || matches!(t.kind, T::ColonEq | T::PlusColon | T::OtherPunct)
-            {
+            if (T::Semi as u8..=T::LArrow as u8).contains(&(t.kind as u8)) {
                 for (i, ch) in text[t.lo as usize..t.hi as usize].char_indices() {
                     origin(t.lo + i as u32, t.lo + (i + ch.len_utf8()) as u32);
                 }
@@ -1966,7 +1961,7 @@ pub fn expand_attr_macro(p: &crate::parser::Parser, attrs: &[crate::ast::Attr], 
     // Doc comments are attributes too, but are absent from the parser's Attr list.
     let prefix = buf.get(item_lo, body_lo);
     let mut leading = Vec::new();
-    let opts = crate::lexer::LexOptions { edition: p.edition, mode: crate::lexer::Mode::Rust, trivia: true };
+    let opts = crate::lexer::LexOptions { edition: p.edition, trivia: true };
     crate::lexer::lex_with(prefix, &opts, &mut leading).map_err(|_| (item_lo, format!("#[{}] input does not lex", name)))?;
     let mut docs = Vec::new();
     let mut depth = 0;
@@ -2548,6 +2543,8 @@ fn prescan_rules(tb: &[u8], krate: &str, cfg: &CfgSet) -> Vec<crate::macros::Mac
             let mt: Vec<crate::macros::MTok> =
                 t2[open + 1..close.min(t2.len())].iter().map(|t| crate::macros::MTok { kind: t.kind, text: String::from_utf8_lossy(&tb[t.lo as usize..t.hi as usize]).into_owned(), pos: u32::MAX }).collect();
             if let Ok(mut def) = crate::macros::parse_def(&mname, krate, 2021, &mt) {
+                // (a proc macro's output: its spans are the call site's, so is the edition)
+                def.edition = 0;
                 def.exported = exported.is_some();
                 if exported.is_some_and(|a| (a.toks.lo..a.toks.hi).any(|k| tx(k as usize) == b"local_inner_macros")) {
                     crate::macros::local_inner_macros(&mut def);

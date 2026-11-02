@@ -597,7 +597,6 @@ mod engine_truth {
     /// shelf and not the model's felt hardness, which the learned engine has
     /// no equivalent of. Measured on each, not assumed.
     #[test]
-    #[cfg_attr(debug_assertions, ignore = "renders four takes; run with --release")]
     fn brightness_reaches_both_instruments_and_is_flat_at_zero() {
         for id in [InstrumentId::Acoustic(0), InstrumentId::Electric(0)] {
             let flat = voice(id, |_| {});
@@ -633,7 +632,6 @@ mod engine_truth {
     /// tone stage that is not bypassed flat, a gain that is not unity —
     /// fails here rather than in someone's ears.
     #[test]
-    #[cfg_attr(debug_assertions, ignore = "renders two takes; run with --release")]
     fn the_default_settings_are_the_bare_instrument() {
         let settings = SoundSettings::default();
         assert_eq!(settings.engine, ScoreEngine::Physical);
@@ -677,7 +675,6 @@ mod engine_truth {
 
     /// The two instruments are two instruments, not one name twice.
     #[test]
-    #[cfg_attr(debug_assertions, ignore = "renders two takes; run with --release")]
     fn the_two_instruments_are_audibly_different() {
         let acoustic = voice(InstrumentId::Acoustic(0), |s| s.room.mix = 0.0);
         let electric = voice(InstrumentId::Electric(0), |s| s.room.mix = 0.0);

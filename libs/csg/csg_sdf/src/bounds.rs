@@ -131,7 +131,33 @@ pub fn node_bounds(n: &SdfNode) -> Option<Bounds> {
             places.iter().map(|pl| map_bounds(&b, |q| pl.out_of(q))).reduce(union)?
         }
         SdfNode::Deform { deform, of, .. } => deform_bounds(deform, &node_bounds(of)?),
+        // raised tubes add to the solid (lowered ones only take away)
+        SdfNode::Sculpt { strokes, of } => {
+            let b = node_bounds(of)?;
+            match strokes.shape_bounds() {
+                Some(s) if strokes.applied().any(|(_, x)| x.tube().is_some_and(|t| t.raise)) => union(b, s),
+                _ => b,
+            }
+        }
     })
+}
+
+/// A sculpt culled to `region`: `of` culled there, then each shape stroke that reaches it, in
+/// order, as a Combine of `of` so far and the stroke's tube (the sharp union of its capsules
+/// there). `None`: no solid reaches the region.
+pub fn sculpt_in(strokes: &crate::strokes::Strokes, of: &SdfNode, region: &Bounds) -> Option<SdfNode> {
+    let mut node = cull(of, region);
+    for (t, caps) in strokes.shape_near(region.0, region.1) {
+        let mut tube: Vec<SdfNode> = caps.into_iter().map(|(a, b)| SdfNode::Capsule { a, b, radius: t.radius }).collect();
+        let tube = if tube.len() == 1 { tube.pop().unwrap() } else { SdfNode::Combine { op: SdfOp::Union, blend: 0.0, of: tube } };
+        node = match (node, t.raise) {
+            (Some(n), true) => Some(SdfNode::Combine { op: SdfOp::Union, blend: t.blend, of: vec![n, tube] }),
+            (None, true) => Some(tube),
+            (Some(n), false) => Some(SdfNode::Combine { op: SdfOp::Difference, blend: t.blend, of: vec![n, tube] }),
+            (None, false) => None,
+        };
+    }
+    node
 }
 
 /// A box holding a warped node whose own box is `b`.
@@ -219,6 +245,7 @@ pub fn cull(n: &SdfNode, region: &Bounds) -> Option<SdfNode> {
             }
             SdfNode::Instance { places: kept, of: of.clone() }
         }
+        SdfNode::Sculpt { strokes, of } => sculpt_in(strokes, of, region)?,
         // A warp's preimage of a box is no box: kept whole.
         leaf => leaf.clone(),
     })
@@ -249,6 +276,7 @@ pub fn same(a: &SdfNode, b: &SdfNode) -> bool {
         (Bone { id: i1, rest: r1, of: x }, Bone { id: i2, rest: r2, of: y }) => i1 == i2 && r1 == r2 && same(x, y),
         (Instance { places: p1, of: x }, Instance { places: p2, of: y }) => p1 == p2 && same(x, y),
         (Deform { deform: d1, lipschitz: l1, of: x }, Deform { deform: d2, lipschitz: l2, of: y }) => d1 == d2 && l1 == l2 && same(x, y),
+        (Sculpt { strokes: s1, of: x }, Sculpt { strokes: s2, of: y }) => s1.shape_key() == s2.shape_key() && same(x, y),
         _ => false,
     }
 }
@@ -286,6 +314,11 @@ pub fn changed(old: &SdfNode, new: &SdfNode) -> Option<Bounds> {
         // A slot change is a material change on the same surface.
         (SdfNode::Material { of: a, .. }, SdfNode::Material { of: b, .. }) | (SdfNode::Id { of: a, .. }, SdfNode::Id { of: b, .. }) => changed(a, b).unwrap_or_else(whole),
         (SdfNode::Bone { id: ia, rest: ra, of: a }, SdfNode::Bone { id: ib, rest: rb, of: b }) if ia == ib && ra == rb => changed(a, b)?,
+        // Only where the strokes moved (one drawn, one undone).
+        (SdfNode::Sculpt { strokes: sa, of: a }, SdfNode::Sculpt { strokes: sb, of: b }) if same(a, b) => {
+            let k = sa.applied().chain(sb.applied()).filter_map(|(_, s)| s.tube()).map(|t| t.blend).fold(0.0, f64::max);
+            sa.changed_boxes(sb, false).into_iter().map(|b| grow(b, k)).reduce(union)?
+        }
         (SdfNode::Instance { places: pa, of: a }, SdfNode::Instance { places: pb, of: b }) if same(a, b) => {
             // Only the moved, added or removed copies.
             let ob = node_bounds(a).unwrap_or(everywhere);

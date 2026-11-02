@@ -30,7 +30,6 @@
 //! the last picked preset (a press that follows a drag is a new grab, never
 //! the second tap); with the canvas focused the arrow keys nudge the
 //! hovered (or last used) handle by 0.01, 0.1 with Shift.
-use crate::event::TouchState;
 use crate::{
     animator::Ease,
     family_api::measure,
@@ -488,24 +487,6 @@ pub fn write_cubic_bezier(out: &mut String, p: [f64; 4]) {
         push_num(out, *v);
     }
     out.push(')');
-}
-
-/// Whether `event` is a pointer move (a ValueInput scrub reports on these).
-fn pointer_moved(event: &Event) -> bool {
-    match event {
-        Event::MouseMove(_) => true,
-        Event::TouchUpdate(te) => te.touches.iter().any(|t| t.state == TouchState::Move),
-        _ => false,
-    }
-}
-
-/// Whether `event` lifts a pointer (the end of a ValueInput scrub).
-fn pointer_released(event: &Event) -> bool {
-    match event {
-        Event::MouseUp(_) => true,
-        Event::TouchUpdate(te) => te.touches.iter().any(|t| t.state == TouchState::Stop),
-        _ => false,
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1110,9 +1091,9 @@ pub struct EaseEditor {
     /// it was set as (`None` when it was set as an [`Easing`] only).
     #[rust]
     custom: Option<(Easing, Option<Ease>)>,
-    /// A field scrub is under way: Committed goes out on the finger up.
+    /// Live field changes await their matching Ended action.
     #[rust]
-    scrubbing: bool,
+    field_changed: bool,
     #[rust]
     labels_set: bool,
     /// The children show the current value.
@@ -1311,10 +1292,6 @@ impl Widget for EaseEditor {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let actions = cx.capture_actions(|cx| self.view.handle_event(cx, event, scope));
-        if self.scrubbing && pointer_released(event) {
-            self.scrubbing = false;
-            self.emit(cx, false, true);
-        }
         if actions.is_empty() {
             return;
         }
@@ -1360,20 +1337,25 @@ impl Widget for EaseEditor {
             let Some(k) = fields.iter().position(|uid| *uid == wa.widget_uid) else {
                 continue;
             };
-            if let ValueInputAction::Changed(v) = wa.cast::<ValueInputAction>() {
-                let mut p = self.pts;
-                p[k] = v;
-                // A field commits whatever it holds, also on a plain Enter
-                // with nothing typed: the same number is no edit (the
-                // preset, and a host's timeline, stay as they are).
-                if self.custom.is_none() && clamp_ease_points(p) == self.pts {
-                    continue;
+            match wa.cast::<ValueInputAction>() {
+                ValueInputAction::Changed(v) => {
+                    let mut p = self.pts;
+                    p[k] = v;
+                    // Committing unchanged text must preserve a named preset.
+                    if self.custom.is_none() && clamp_ease_points(p) == self.pts {
+                        continue;
+                    }
+                    self.take(cx, p);
+                    self.field_changed = true;
+                    self.emit(cx, true, false);
                 }
-                self.take(cx, p);
-                // A scrub reports every pixel; it commits on the finger up.
-                let scrub = pointer_moved(event);
-                self.scrubbing |= scrub;
-                self.emit(cx, true, !scrub);
+                ValueInputAction::Ended(_) => {
+                    if self.field_changed {
+                        self.field_changed = false;
+                        self.emit(cx, false, true);
+                    }
+                }
+                ValueInputAction::None => {}
             }
         }
     }

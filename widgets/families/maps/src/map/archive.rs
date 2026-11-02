@@ -352,9 +352,7 @@ impl ByteSource for FileByteSource {
 
     fn cancel(&mut self, _cx: &mut Cx, token: ReadToken) {
         if let Some(state) = self.token_states.get(&token) {
-            // Keep fetch_update for older stable toolchains without try_update.
-            #[allow(deprecated)]
-            let _ = state.fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| {
+            let _ = state.try_update(Ordering::AcqRel, Ordering::Acquire, |state| {
                 matches!(
                     state,
                     value if value == FileReadState::Queued as u8

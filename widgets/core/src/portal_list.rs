@@ -1020,6 +1020,10 @@ pub struct PortalList {
     /// Enable text selection across items (for TextFlow content)
     #[live(false)]
     pub selectable: bool,
+    /// Select all takes the entry holding the caret first, and the whole list
+    /// when that entry is already selected (a list of messages, not of lines).
+    #[live(false)]
+    pub select_all_entry_first: bool,
     /// Selection anchor point (item_id, char_index)
     #[rust]
     selection_anchor: Option<(usize, usize)>,
@@ -3292,6 +3296,24 @@ impl PortalList {
     /// Every entry of the list, drawn or not: rows drawn later show it, and
     /// a copy asks the owner for the text of rows never drawn
     /// (`selected_text_with`).
+    /// Select the whole of the one entry the selection lies in. False when it spans
+    /// entries, or has that entry whole already.
+    fn select_entry(&mut self, cx: &mut Cx) -> bool {
+        let Some(((item, a), (end, b))) = self.get_selection_range() else {
+            return false;
+        };
+        let Some(len) = self.items.get(&item).map(|i| i.widget.selection_text_len()) else {
+            return false;
+        };
+        if item != end || (a == 0 && b >= len) {
+            return false;
+        }
+        self.selection_anchor = Some((item, 0));
+        self.selection_cursor = Some((item, len));
+        self.update_item_selections(cx);
+        true
+    }
+
     fn select_all(&mut self, cx: &mut Cx) {
         let first = self.range_start;
         let last = if self.range_end == usize::MAX {
@@ -4110,7 +4132,9 @@ impl Widget for PortalList {
                     }
                     KeyCode::KeyA => {
                         if self.selectable && ke.modifiers.is_primary() {
-                            self.select_all(cx);
+                            if !(self.select_all_entry_first && self.select_entry(cx)) {
+                                self.select_all(cx);
+                            }
                             let selection_rect = self.selection_clipboard_rect(cx);
                             cx.show_clipboard_actions(true, selection_rect, cx.keyboard_shift);
                         }

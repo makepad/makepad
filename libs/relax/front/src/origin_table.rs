@@ -87,8 +87,11 @@ fn get_key(prev: u32, sorted: bool, r: &mut Cur) -> u32 {
 }
 
 /// `(lo, hi, call)`-shaped rows keyed by `lo` (`exp_map`: an expansion's text range and its call
-/// site; `rules_exp`: a macro_rules expansion's range and its definition position).
+/// site).
 pub struct Regions;
+/// `rules_exp`: a macro_rules expansion's range, its definition position (u32::MAX: another
+/// file's) and the edition of its definition (rustc ExpnData::edition, hygiene.rs).
+pub struct Rules;
 /// `(position, origin, length)` rows keyed by position (`tok_origin`, `body_origin`).
 pub struct Maps;
 /// A token's whole authored span (`token_origins`), keyed by `lo`.
@@ -109,6 +112,26 @@ impl Kind for Regions {
         let hi = key.wrapping_add(unzz(r.varint()));
         let call = prev.2.wrapping_add(unzz(r.varint()));
         (key, hi, call)
+    }
+}
+
+impl Kind for Rules {
+    type Item = (u32, u32, u32, u16);
+    #[inline]
+    fn key(r: &Self::Item) -> u32 { r.0 }
+    fn put(prev: &Self::Item, c: &Self::Item, first: bool, sorted: bool, out: &mut Vec<u8>) {
+        if !first { put_key(prev.0, c.0, sorted, out); }
+        put_varint(out, zz(c.1.wrapping_sub(c.0)));
+        put_varint(out, zz(c.2.wrapping_sub(prev.2)));
+        put_varint(out, zz((c.3 as u32).wrapping_sub(prev.3 as u32)));
+    }
+    #[inline]
+    fn get(prev: &Self::Item, first_key: Option<u32>, sorted: bool, r: &mut Cur) -> Self::Item {
+        let key = match first_key { Some(k) => k, None => get_key(prev.0, sorted, r) };
+        let hi = key.wrapping_add(unzz(r.varint()));
+        let def = prev.2.wrapping_add(unzz(r.varint()));
+        let edition = (prev.3 as u32).wrapping_add(unzz(r.varint())) as u16;
+        (key, hi, def, edition)
     }
 }
 
@@ -636,16 +659,15 @@ mod tests {
     }
 
     /// ns per lookup, plain rows (the old `origin_at` partition_point) against the table:
-    /// `cargo test --release -p relax-front origin_table::tests::bench -- --ignored --nocapture`
+    /// `cargo test --release -p relax-front origin_table::tests::bench -- --nocapture`
     #[test]
-    #[ignore]
     fn bench_lookup() {
         let mut rng = Rng(99);
         // macro expansion shaped rows: runs of copied fragment tokens, then call-site spans
         let mut rows = Vec::new();
         let mut lo = 0u32;
         let mut slo = 0u32;
-        while rows.len() < 2_000_000 {
+        while rows.len() < 4096 {
             let len = rng.next() % 9 + 1;
             if rng.next() % 5 == 0 { slo = rng.next() % 3_000_000; }
             slo += len + rng.next() % 2;
@@ -654,7 +676,7 @@ mod tests {
         }
         let t = Table::<Origins>::from_rows(&rows);
         println!("rows {} plain {} B encoded {} B ({:.2} B/row)", rows.len(), rows.len() * 20, t.bytes().len(), t.bytes().len() as f64 / rows.len() as f64);
-        let probes: Vec<u32> = (0..2_000_000).map(|_| rng.next() % lo).collect();
+        let probes: Vec<u32> = (0..4096).map(|_| rng.next() % lo).collect();
         let r: OSegRef<Origins> = (&t).into();
         for _ in 0..2 {
             let t0 = std::time::Instant::now();

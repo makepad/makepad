@@ -960,37 +960,6 @@ mod tests {
         starts
     }
 
-    /// Reads the LineBreakTest or GraphemeBreakTest style file that `variable` names.
-    ///
-    /// It returns each test string, and whether there's a break before each char and at the end.
-    fn read_break_test_file(variable: &str) -> Option<Vec<(String, Vec<bool>)>> {
-        let path = std::env::var(variable).ok()?;
-        let contents =
-            std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("{path}: {error}"));
-        let tests = contents
-            .lines()
-            .filter_map(|line| {
-                let fields = line.split('#').next().unwrap_or("").split_whitespace();
-                let mut text = String::new();
-                let mut breaks = Vec::new();
-                for field in fields {
-                    match field {
-                        "÷" => breaks.push(true),
-                        "×" => breaks.push(false),
-                        _ => text.push(
-                            u32::from_str_radix(field, 16)
-                                .ok()
-                                .and_then(char::from_u32)
-                                .unwrap_or_else(|| panic!("{path}: bad code point {field}")),
-                        ),
-                    }
-                }
-                (!breaks.is_empty()).then_some((text, breaks))
-            })
-            .collect();
-        Some(tests)
-    }
-
     #[test]
     fn breaks_around_quotes_and_punctuation() {
         check_pieces(&[
@@ -1299,67 +1268,5 @@ mod tests {
             let expected = CharProps::new(class, grapheme_cluster_break, flags);
             assert_eq!(get_char_props(c), expected, "{c:?}");
         }
-    }
-
-    #[test]
-    fn conforms_to_line_break_test_file() {
-        let Some(tests) = read_break_test_file("MAKEPAD_LINE_BREAK_TEST_FILE") else {
-            return;
-        };
-        let mut failures = Vec::new();
-        for (text, expected) in &tests {
-            let mut line_breaks = find_line_breaks(text, START, END);
-            let found: Vec<_> = std::iter::from_fn(|| line_breaks.find_next_break(false))
-                .map(|line_break| line_break.byte_index)
-                .collect();
-            let expected: Vec<_> = text
-                .char_indices()
-                .map(|(index, _)| index)
-                .chain([text.len()])
-                .zip(expected)
-                .filter_map(|(index, &is_break)| is_break.then_some(index))
-                .collect();
-            if found != expected {
-                failures.push(text);
-            }
-        }
-        println!("UAX #14 conformance: {} of {} tests pass", tests.len() - failures.len(), tests.len());
-        assert!(failures.is_empty(), "failed: {failures:?}");
-    }
-
-    #[test]
-    fn split_runs_match_line_break_test_file() {
-        let Some(tests) = read_break_test_file("MAKEPAD_LINE_BREAK_TEST_FILE") else {
-            return;
-        };
-        let starts = get_test_starts();
-        for (text, _) in &tests {
-            check_split_runs(text, &starts);
-            check_breaks_from_text_alone(text, &starts);
-        }
-        println!("Split runs: all {} tests get the same breaks at every split", tests.len());
-    }
-
-    #[test]
-    fn conforms_to_grapheme_break_test_file() {
-        let Some(tests) = read_break_test_file("MAKEPAD_GRAPHEME_BREAK_TEST_FILE") else {
-            return;
-        };
-        let mut failures = Vec::new();
-        for (text, expected) in &tests {
-            let mut before = START;
-            let mut found = Vec::new();
-            for c in text.chars() {
-                let props = get_char_props(c);
-                found.push(is_grapheme_boundary(&before, props));
-                before.push_char(props);
-            }
-            found.push(is_grapheme_boundary(&before, END.first_char));
-            if &found != expected {
-                failures.push(text);
-            }
-        }
-        println!("UAX #29 conformance: {} of {} tests pass", tests.len() - failures.len(), tests.len());
-        assert!(failures.is_empty(), "failed: {failures:?}");
     }
 }

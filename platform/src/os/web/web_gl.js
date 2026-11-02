@@ -2612,6 +2612,7 @@ export class WasmWebGL extends WasmWebBrowser {
     try {
       gl.useProgram(shader.program);
       gl.depthMask(!!args.depth_write);
+      gl.depthFunc(args.depth_test_greater ? gl.GREATER : gl.LEQUAL);
       // Blending is the pass default (FromWasmSetDefaultDepthAndBlendMode);
       // only an alpha_blend=false call turns it off, and restores it in the
       // finally block, so the default path issues no extra GL calls.

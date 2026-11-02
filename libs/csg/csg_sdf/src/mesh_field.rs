@@ -370,6 +370,60 @@ impl MeshField {
         w
     }
 
+    /// The nearest triangle's distance when it is under `bound` (else `bound`).
+    fn unsigned_under(&self, p: V3, bound: f32) -> f32 {
+        let mut best = bound;
+        let mut stack = Vec::with_capacity(64);
+        stack.push(0u32);
+        while let Some(i) = stack.pop() {
+            let n = &self.nodes[i as usize];
+            if Self::box_dist2(n, p) >= best * best {
+                continue;
+            }
+            if n.leaf {
+                for &t in &self.order[n.left as usize..n.right as usize] {
+                    let (a, b, c) = self.tri(t);
+                    best = best.min(len(sub(p, closest_on_tri(p, a, b, c))));
+                }
+            } else {
+                let (l, r) = (&self.nodes[n.left as usize], &self.nodes[n.right as usize]);
+                if Self::box_dist2(l, p) < Self::box_dist2(r, p) {
+                    stack.push(n.right);
+                    stack.push(n.left);
+                } else {
+                    stack.push(n.left);
+                    stack.push(n.right);
+                }
+            }
+        }
+        best
+    }
+
+    /// [`MeshField::signed`] at many points, nearby points in a row (a brick's samples). Each
+    /// point's distance is at most the previous one's plus the step between them, which bounds
+    /// its search; a point inside the previous point's empty ball has its sign.
+    pub fn signed_many(&self, ps: &[V3]) -> Vec<f32> {
+        if self.nodes.is_empty() {
+            return vec![f32::INFINITY; ps.len()];
+        }
+        let mut out = Vec::with_capacity(ps.len());
+        let mut prev: Option<(V3, f32, bool)> = None;
+        for &p in ps {
+            let (d, inside) = match prev {
+                Some((q, dq, inq)) => {
+                    let step = len(sub(p, q));
+                    // the slack keeps the bound's own triangle inside the search
+                    let d = self.unsigned_under(p, (dq + step) * 1.0001 + 1e-6);
+                    (d, if step < dq { inq } else { self.winding(p) > 0.5 })
+                }
+                None => (self.unsigned(p), self.winding(p) > 0.5),
+            };
+            prev = Some((p, d, inside));
+            out.push(if inside { -d } else { d });
+        }
+        out
+    }
+
     /// The signed distance: negative inside.
     pub fn signed(&self, p: V3) -> f32 {
         let d = self.unsigned(p);
@@ -404,8 +458,15 @@ impl MeshField {
                     best = best.min(f64s::len(f64s::sub(p, q)));
                 }
             } else {
-                stack.push(n.left);
-                stack.push(n.right);
+                // Nearer child first: its triangles shrink `best` before the farther box is tested.
+                let (l, r) = (&self.nodes[n.left as usize], &self.nodes[n.right as usize]);
+                if Self::box_dist2(l, pf) < Self::box_dist2(r, pf) {
+                    stack.push(n.right);
+                    stack.push(n.left);
+                } else {
+                    stack.push(n.left);
+                    stack.push(n.right);
+                }
             }
         }
         best

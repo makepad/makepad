@@ -203,6 +203,8 @@ impl Renderer {
             format!("Paused: {what}")
         } else if errors > 0 {
             plural(errors, "error", "errors")
+        } else if state.mode == Mode::Update {
+            state.domain.clone()
         } else {
             state.app.clone()
         };
@@ -252,13 +254,14 @@ impl Renderer {
 
         // ---- footer (fixed): key hints on desktop, buttons on touch
         let mut buttons = Vec::new();
-        if env.touch {
+        if env.touch || state.mode == Mode::Update {
             if self.input.is_some() {
                 buttons.push((Action::Submit, labels[4].clone()));
                 buttons.push((Action::Cancel, labels[5].clone()));
             } else {
                 if state.can_retry || state.can_restart {
-                    buttons.push((Action::Restart, labels[0].clone()));
+                    let label = if state.mode == Mode::Update { "Restart to update".into() } else { labels[0].clone() };
+                    buttons.push((Action::Restart, label));
                 }
                 if errors > 0 || state.parked.is_some() {
                     buttons.push((Action::Copy, labels[1].clone()));

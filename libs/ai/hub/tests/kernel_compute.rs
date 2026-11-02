@@ -10,11 +10,15 @@ use makepad_ai_hub::kernel_wire::*;
 use makepad_ai_hub::registry::Registry;
 use makepad_ai_hub::server::{start_service, ServiceConfig};
 use makepad_script_compute::Backend;
-use std::sync::OnceLock;
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 /// One node for the whole test binary (the service holds a process lock).
-fn node() -> KernelNode {
+/// Hold it for one test at a time: unrelated tests must not compete for
+/// the HTTP server's per-client upload slots or the kernel job capacity.
+fn node() -> (MutexGuard<'static, ()>, KernelNode) {
+    static TEST: Mutex<()> = Mutex::new(());
+    let guard = TEST.lock().unwrap_or_else(|e| e.into_inner());
     static URL: OnceLock<String> = OnceLock::new();
     let url = URL.get_or_init(|| {
         let dir = std::env::temp_dir().join(format!("makepad-ai-hub-kernel-{}", std::process::id()));
@@ -33,7 +37,7 @@ fn node() -> KernelNode {
         std::mem::forget(handle);
         url
     });
-    KernelNode::new(url)
+    (guard, KernelNode::new(url))
 }
 
 fn local(job: &KernelJobJson, backend: Backend) -> Vec<TileResult> {
@@ -61,7 +65,7 @@ fn same_bits(a: &[TileResult], b: &[TileResult]) {
 
 #[test]
 fn node_fractal_tiles_are_the_local_bits_for_every_kind() {
-    let node = node();
+    let (_guard, node) = node();
     let info = node.info().unwrap();
     assert!(info.cores >= 1);
     for (kind, de, trap) in (0..5).flat_map(|k| [(k, false, false), (k, true, false), (k, false, true), (k, true, true)]).chain([(5, false, false)]) {
@@ -96,7 +100,7 @@ fn node_fractal_tiles_are_the_local_bits_for_every_kind() {
 /// param and the seed, and a reduce. Nothing in the node knows fractals.
 #[test]
 fn any_kernel_runs_maps_and_reduces() {
-    let node = node();
+    let (_guard, node) = node();
     let src: Vec<f32> = (0..1000).map(|i| i as f32 * 0.5).collect();
     let map = KernelJobJson {
         source: "let src = input(f32)\nlet out = output(vec2)\nlet scale = param(1.0, -100, 100)\nfn element(i) { out[i] = vec2(src[i] * scale, float(i + seed)) }".into(),
@@ -139,7 +143,7 @@ fn any_kernel_runs_maps_and_reduces() {
 
 #[test]
 fn cancel_drops_queued_tiles_and_stops_running_ones() {
-    let node = node();
+    let (_guard, node) = node();
     let cores = node.info().unwrap().cores as usize;
     // every texel inside the set at the cap: the slowest tiles there are
     let p = FractalParams { kind: 0, max_iter: 16384, ..FractalParams::default() };
@@ -171,7 +175,7 @@ fn cancel_drops_queued_tiles_and_stops_running_ones() {
 
 #[test]
 fn bad_jobs_are_refused_with_the_reason() {
-    let node = node();
+    let (_guard, node) = node();
     let mut job = fractal_job(&FractalParams::default(), vec![fractal_tile(0, 0.0, 0.0, 1.0, 8, &FractalParams::default())]);
     job.source = "let out = output(u32)\nfn element(i) { out[i] = nope }".into();
     let e = node.submit(&job).unwrap_err().to_string();
@@ -208,7 +212,7 @@ fn bad_jobs_are_refused_with_the_reason() {
 #[test]
 fn the_stream_pushes_the_same_tiles_and_cancels() {
     use makepad_ai_hub::kernel_client::KernelStream;
-    let node = node();
+    let (_guard, node) = node();
     let stream = KernelStream::open(&node).unwrap();
     let p = FractalParams { kind: 2, max_iter: 400, ..FractalParams::default() };
     let job = fractal_job(&p, (0..8u64).map(|k| fractal_tile(k, -2.0 + 0.4 * k as f64, -1.0, 0.5, 48, &p)).collect());
@@ -253,7 +257,7 @@ fn the_fleet_answers_every_tile_once_with_the_local_bits() {
     use makepad_ai_hub::kernel_client::{Batch, KernelFleet};
     use std::collections::{HashMap, VecDeque};
     use std::sync::{Arc, Mutex};
-    let node = node();
+    let (_guard, node) = node();
     let info = node.info().unwrap();
     let p = FractalParams { kind: 0, max_iter: 3000, ..FractalParams::default() };
     // cheap tiles and a few dear ones (inside the set at the cap)
@@ -301,7 +305,7 @@ fn the_fleet_answers_every_tile_once_with_the_local_bits() {
 #[test]
 fn long_iteration_counts_run_in_passes_with_the_same_bits() {
     use makepad_ai_hub::kernel_wire::kernels::FRACTAL_LONG;
-    let node = node();
+    let (_guard, node) = node();
     for (kind, de, trap) in [(0, false, false), (0, true, false), (1, false, true), (2, true, true), (3, false, false)] {
         let p = FractalParams { kind, max_iter: 3000, de, trap, ..FractalParams::default() };
         let tiles: Vec<KernelTileJson> = (0..4u64).map(|k| fractal_tile(k, -1.9 + 0.5 * k as f64, -0.3, 0.6, 32, &p)).collect();

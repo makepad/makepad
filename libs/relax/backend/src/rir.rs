@@ -460,7 +460,7 @@ pub struct RelocAt {
 }
 
 /// Where the function slots live. A slot (u32 id) owns a thunk (its permanent callable
-/// address), a lazy stub, a table word and a tier record; they sit in segments that are
+/// address), a lazy stub, a table word (two when an entry wraps its body) and a tier record; they sit in segments that are
 /// reserved when the ids first reach them, so the number of functions has no fixed bound
 /// (ids are u32; the rest is address space). Segment 0 holds ids `0..2^18`, segment k >= 1 the
 /// ids `2^(17+k)..2^(18+k)`: doubling, so 4G ids take 15 reservations. Nothing needs the
@@ -560,6 +560,10 @@ impl SlotTable {
     pub fn stub(&self, id: u32) -> u64 { self.addr(SK_STUB, id) }
     /// The function table word of a slot.
     pub fn table(&self, id: u32) -> u64 { self.addr(SK_TABLE, id) }
+    /// The replaceable target. With two words per slot, `table` holds a permanent entry
+    /// wrapper and this second word holds its body; with one word they are the same address.
+    pub fn body(&self, id: u32) -> u64 { self.table(id) + self.stride[SK_TABLE] - 8 }
+    pub fn table_stride(&self) -> u64 { self.stride[SK_TABLE] }
     pub fn tier(&self, id: u32) -> u64 { self.addr(SK_TIER, id) }
 
     /// The id whose entry of `kind` (0 thunk, 1 stub, 2 table, 3 tier) starts at or contains

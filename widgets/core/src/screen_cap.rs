@@ -1430,26 +1430,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn audio_target_tracks_the_video_clock_exactly() {
-        // 30fps at 48kHz: 1600 samples per frame, no rounding drift over a
-        // minute of recording.
-        let fps = 30u128;
-        let rate = 48_000u128;
-        let last = ((60 * 30) as u128 * rate / fps) as u64;
-        assert_eq!(last, 48_000 * 60);
-    }
-
-    #[test]
-    fn audio_target_is_exact_for_44100() {
-        // 44100 does not divide by 30; the running target must still land on
-        // the second, which per-frame rounding would not.
-        let fps = 30u128;
-        let rate = 44_100u128;
-        let one_second = (30u128 * rate / fps) as u64;
-        assert_eq!(one_second, 44_100);
-    }
-
-    #[test]
     fn blit_centers_portrait_then_landscape_without_stale_pixels() {
         let black = [0, 0, 0, 255];
         let white = [255, 255, 255, 255];

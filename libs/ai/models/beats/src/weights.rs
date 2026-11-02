@@ -601,52 +601,6 @@ fn bytes_u16(values: &[u16]) -> &[u8] {
 mod tests {
     use super::*;
 
-    const WEIGHTS: &str = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../../../local/models/weights/beat_this"
-    );
-
-    fn census_if_present(name: &str, want: BeatsConfig) {
-        let path = Path::new(WEIGHTS).join(name);
-        if !path.is_file() {
-            eprintln!("beats census: SKIP, {} is not seeded", path.display());
-            return;
-        }
-        let census = checkpoint_census(&path).unwrap();
-        assert_eq!(census.config, want);
-        assert_eq!(census.tensors.len(), 166);
-        assert_eq!(
-            census.tensors["model.frontend.stem.conv2d.weight"],
-            vec![32, 1, 4, 3]
-        );
-        assert_eq!(
-            census.tensors["model.frontend.blocks.2.conv2d.weight"],
-            vec![256, 128, 2, 3]
-        );
-        assert_eq!(
-            census.tensors["model.frontend.linear.weight"],
-            vec![want.transformer_dim, 1024]
-        );
-        assert_eq!(
-            census.tensors["model.transformer_blocks.layers.5.0.to_qkv.weight"],
-            vec![want.transformer_dim * 3, want.transformer_dim]
-        );
-        assert_eq!(
-            census.tensors["model.task_heads.beat_downbeat_lin.weight"],
-            vec![2, want.transformer_dim]
-        );
-    }
-
-    #[test]
-    fn final0_tensor_census_is_exact() {
-        census_if_present("final0.ckpt", BeatsConfig::FINAL);
-    }
-
-    #[test]
-    fn small0_tensor_census_is_exact() {
-        census_if_present("small0.ckpt", BeatsConfig::SMALL);
-    }
-
     #[test]
     fn plans_cover_both_model_widths() {
         for config in [BeatsConfig::FINAL, BeatsConfig::SMALL] {

@@ -1632,32 +1632,3 @@ impl BannerHostRef {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn alert_is_registered_after_its_bases() {
-        let lib = crate::FAMILY_LIB;
-        let calls = crate::widgets_mod_source();
-        let alert = include_str!("alert.rs");
-        assert!(lib.contains("pub mod alert;"));
-        assert!(crate::FRONT_LIB.contains("alert::*"));
-        assert!(calls.contains("crate::alert::script_mod(vm);"));
-        // The action slots default to a Button or a LinkLabel, and the host
-        // template names a Banner, so those must be registered first.
-        let button = calls.find("crate::button::script_mod(vm);").unwrap();
-        let link = calls.find("crate::link_label::script_mod(vm);").unwrap();
-        let here = calls.find("crate::alert::script_mod(vm);").unwrap();
-        assert!(button < here && link < here);
-        // The needles are assembled at run time so this test's own text,
-        // which `include_str!` brings along, cannot satisfy them.
-        let base = format!("mod.widgets.{} = #({}::register_widget(vm))", "AlertBase", "Alert");
-        let flat = format!("mod.widgets.{} = set_type_default() do mod.widgets.{}", "AlertFlat", "AlertBase");
-        let host = format!("mod.widgets.{} = #({}::register_widget(vm))", "BannerHostBase", "BannerHost");
-        assert!(alert.contains(&base));
-        assert!(alert.contains(&flat));
-        assert!(alert.contains(&host));
-        let one = format!("set_type_default() do mod.widgets.{}", "AlertBase");
-        assert_eq!(alert.matches(&one).count(), 1, "one type default per widget");
-    }
-}

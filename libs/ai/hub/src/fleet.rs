@@ -83,7 +83,7 @@ impl FleetConfig {
 /// Roles are DATA. `MAKEPAD_FLEET_ROLES` names them:
 ///
 /// ```text
-/// MAKEPAD_FLEET_ROLES="192.0.2.89=chat,text;192.0.2.23=image,edit"
+/// MAKEPAD_FLEET_ROLES="192.0.2.89=chat,text;192.0.2.9=image,edit"
 /// MAKEPAD_FLEET_ROLES=off      # no box is restricted (tests, one-box rigs)
 /// ```
 ///
@@ -101,16 +101,14 @@ pub struct FleetRoles {
     rules: Vec<(String, Vec<String>)>,
 }
 
-/// The ratified fleet end state: `.76` (GPU-C) carries chat, the
-/// prompt expander and image generation (user's order 2026-09-04: "let the
-/// rtx serve images too" — the GPU-B cannot fit flux2-dev at the default
-/// reserve); every other generative domain lives on the other nodes. Sound
-/// effects fall back to it (user, 2026-09-30: the in-game AI's
-/// `audio.generate` failed while the GPU-As refused or lacked sa3-sfx).
-const DEFAULT_FLEET_ROLES: &str = "192.0.2.76=chat,text,image,audio?";
-
-/// Env var naming the roles; `off` disables the built-in list too.
+/// Env var naming the roles; it wins over the local file. `off` means no rules.
 pub const FLEET_ROLES_ENV: &str = "MAKEPAD_FLEET_ROLES";
+/// The machine's own roles, under the home directory, same text as the env var. No file: no rules.
+#[cfg(not(test))]
+const FLEET_ROLES_FILE: &str = ".makepad/fleet-roles";
+/// What this crate's tests schedule against, whatever the machine they run on has configured.
+#[cfg(test)]
+const TEST_FLEET_ROLES: &str = "192.0.2.76=chat,text,image,audio?";
 
 impl FleetRoles {
     /// Parse `host=domain[,domain][;host=…]`. `off`/`none` = no rules.
@@ -202,7 +200,8 @@ impl FleetRoles {
 }
 
 /// Host part of a base URL, lowercased and without scheme, port or path.
-fn host_of(base_url: &str) -> String {
+pub(crate) fn host_of(base_url: &str) -> String {
+    let base_url = base_url.trim();
     let rest = base_url
         .split_once("://")
         .map_or(base_url, |(_, rest)| rest);
@@ -210,22 +209,31 @@ fn host_of(base_url: &str) -> String {
     // Credentials belong to transport configuration, never to routing labels
     // or user-facing errors.
     let rest = rest.rsplit('@').next().unwrap_or(rest);
-    // IPv6 literals keep their brackets; a trailing :port never does.
+    // IPv6 literals lose their brackets; a bare IPv6 address has no port.
     let host = match rest.strip_prefix('[') {
         Some(inner) => inner.split(']').next().unwrap_or(inner),
+        None if rest.parse::<std::net::Ipv6Addr>().is_ok() => rest,
         None => rest.split(':').next().unwrap_or(rest),
     };
     host.trim().to_ascii_lowercase()
 }
 
-/// A credential-, path-, query-, and port-free node label suitable for logs
-/// and actionable routing errors.
+/// A machine name for people: IP addresses become a node's last octet or hex
+/// group, loopback is "this machine", and host names keep their name. An empty
+/// host is "unknown node".
 pub fn node_label(base_url: &str) -> String {
     let host = host_of(base_url);
     if host.is_empty() {
         "unknown node".to_string()
+    } else if host == "localhost" {
+        "this machine".to_string()
     } else {
-        host
+        match host.parse::<std::net::IpAddr>() {
+            Ok(ip) if ip.is_loopback() => "this machine".to_string(),
+            Ok(std::net::IpAddr::V4(ip)) => format!("node {}", ip.octets()[3]),
+            Ok(std::net::IpAddr::V6(ip)) => format!("node {:x}", ip.segments()[7]),
+            Err(_) => host,
+        }
     }
 }
 
@@ -233,12 +241,19 @@ pub fn node_label(base_url: &str) -> String {
 pub fn fleet_roles() -> &'static FleetRoles {
     static ROLES: std::sync::OnceLock<FleetRoles> = std::sync::OnceLock::new();
     ROLES.get_or_init(|| {
-        let text = std::env::var(FLEET_ROLES_ENV).unwrap_or_default();
-        if text.trim().is_empty() {
-            FleetRoles::parse(DEFAULT_FLEET_ROLES)
-        } else {
-            FleetRoles::parse(&text)
-        }
+        #[cfg(test)]
+        return FleetRoles::parse(TEST_FLEET_ROLES);
+        #[cfg(not(test))]
+        let text = std::env::var(FLEET_ROLES_ENV)
+            .ok()
+            .filter(|text| !text.trim().is_empty())
+            .or_else(|| {
+                let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
+                std::fs::read_to_string(std::path::Path::new(&home).join(FLEET_ROLES_FILE)).ok()
+            })
+            .unwrap_or_default();
+        #[cfg(not(test))]
+        FleetRoles::parse(&text)
     })
 }
 
@@ -1748,6 +1763,9 @@ mod tests {
         let old_json = r#"{"service":"hub","version":"old","models_loaded":[]}"#;
         let old = HealthJson::deserialize_json(old_json).unwrap();
         assert!(old.activity.is_none());
+        assert!(old.serving_fleet.is_none());
+        assert!(old.lan_listening.is_none());
+        assert!(old.role.is_none());
         let mut node = snapshot("http://new", 0, vec![]);
         node.health = Some(old);
         let node = with_activity(node, "unknown", false);
@@ -1762,7 +1780,7 @@ mod tests {
 
     #[test]
     fn a_role_names_the_domains_a_box_may_serve() {
-        let roles = FleetRoles::parse("192.0.2.89=chat,text; 192.0.2.23 = image , edit ");
+        let roles = FleetRoles::parse("192.0.2.89=chat,text; 192.0.2.9 = image , edit ");
         // Named host: exactly its listed domains, nothing else.
         assert!(roles.allows("http://192.0.2.89:8123", "chat"));
         assert!(roles.allows("http://192.0.2.89:8123", "text"));
@@ -1770,8 +1788,8 @@ mod tests {
         assert!(!roles.allows("http://192.0.2.89:8123", "image"));
         // Port and scheme are not identity; the host is.
         assert!(!roles.allows("https://192.0.2.89:9999/", "video"));
-        assert!(roles.allows("192.0.2.23:8123", "edit"));
-        assert!(!roles.allows("192.0.2.23:8123", "video"));
+        assert!(roles.allows("192.0.2.9:8123", "edit"));
+        assert!(!roles.allows("192.0.2.9:8123", "video"));
         // A host nobody named is unrestricted, so adding a box needs no
         // config edit.
         assert!(roles.allows("http://192.0.2.59:8123", "video"));
@@ -1797,7 +1815,7 @@ mod tests {
         // The ratified fleet end state, as data: chat and text live on the
         // Blackwell (82 GB free beside the live model) since the GPU-B was
         // turned over to the live-feed pool on the user's order.
-        let roles = FleetRoles::parse(DEFAULT_FLEET_ROLES);
+        let roles = FleetRoles::parse(TEST_FLEET_ROLES);
         assert!(roles.allows("http://192.0.2.76:8123", "chat"));
         assert!(roles.allows("http://192.0.2.76:8123", "text"));
         assert!(roles.allows("http://192.0.2.76:8123", "image"));
@@ -1828,11 +1846,7 @@ mod tests {
         assert!(!roles.is_fallback("http://192.0.2.76:8785", "chat"));
         assert!(!roles.is_fallback("http://192.0.2.59:8123", "audio"));
         assert!(!roles.allows("http://192.0.2.76:8785", "video"));
-        // The process-wide default names .76 as the audio fallback; a
-        // deployment that overrode the roles has nothing to prove here.
-        if std::env::var(FLEET_ROLES_ENV).is_ok() {
-            return;
-        }
+        // The test roles name .76 as the audio fallback.
         let sfx = |url: &str, state: &str| {
             let mut snapshot = snap(url, 24 * 1024, 24 * 1024);
             snapshot.models = vec![m("sa3-sfx", "audio", state, 4.0)];
@@ -1862,11 +1876,7 @@ mod tests {
 
     #[test]
     fn a_role_excluded_box_is_invisible_to_every_picker() {
-        // The process-wide roles come from the environment; a deployment
-        // that overrode them has nothing to prove here.
-        if std::env::var(FLEET_ROLES_ENV).is_ok() {
-            return;
-        }
+        // fleet_roles() uses the fixed test roles, independent of the environment.
         let chat_box = {
             let mut snapshot = snap("http://192.0.2.76:8123", 32 * 1024, 32 * 1024);
             snapshot.models = vec![
@@ -1992,6 +2002,9 @@ mod tests {
             health: Some(HealthJson {
                 service: "makepad-asset-ai".to_string(),
                 version: "test".to_string(),
+                serving_fleet: None,
+                lan_listening: None,
+                role: None,
                 gpu: None,
                 vram_free_mb: Some(free_mb),
                 vram_total_mb: Some(total_mb),
@@ -2050,6 +2063,9 @@ mod tests {
             health: Some(HealthJson {
                 service: "makepad-asset-ai".to_string(),
                 version: "0".to_string(),
+                serving_fleet: None,
+                lan_listening: None,
+                role: None,
                 gpu: None,
                 vram_free_mb: None,
                 vram_total_mb: None,
@@ -2604,7 +2620,7 @@ mod tests {
                 2 * 1024,
             ),
             with_vram(
-                snapshot("http://192.0.2.36:8767", 0, vec![h3.clone()]),
+                snapshot("http://192.0.2.98:8767", 0, vec![h3.clone()]),
                 24 * 1024,
                 24 * 1024,
                 2 * 1024,
@@ -2926,7 +2942,7 @@ mod tests {
         woosh.vram_gb = Some(3.0);
         let models = vec![flux, moss, sa3, woosh];
         let legacy = with_legacy_vram(
-            snapshot("http://192.0.2.37:8765", 0, models.clone()),
+            snapshot("http://192.0.2.99:8765", 0, models.clone()),
             155,
             32_607,
         );
@@ -2952,7 +2968,7 @@ mod tests {
         // retires moss+sa3 before the job runs (resident fast path), and a
         // cold target earns the reclaim-by-eviction credit.
         let enforcing = with_vram(
-            snapshot("http://192.0.2.37:8765", 0, models),
+            snapshot("http://192.0.2.99:8765", 0, models),
             155,
             32_607,
             2 * 1024,
@@ -3034,7 +3050,7 @@ mod tests {
         let mut synthetic = model("testpattern", "image", MODEL_STATE_READY, true);
         synthetic.backend = "testpattern".to_string();
         let legacy = with_legacy_vram(
-            snapshot("http://192.0.2.37:8765", 0, vec![flux, moss, sa3, synthetic]),
+            snapshot("http://192.0.2.99:8765", 0, vec![flux, moss, sa3, synthetic]),
             155,
             32_607,
         );

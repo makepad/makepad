@@ -9,11 +9,11 @@
 //!   (the first frame comes before an app's worker threads do their work);
 //! - a parked panic anywhere fails the app at once: it would hold the thread for minutes, and a
 //!   request to a parked UI thread never answers ([`watch_parks`] kills the app and its children);
-//! - the vision judge is the fleet's ([`crate::judge`]);
+//! - `ci.accept` saves the grab and its acceptance text; the devhub master judges them on the AI
+//!   fleet after the boot (no lease process uses the LAN);
 //! - the cargo natives (`check_targets`, `build`, `warm`, `cargo`, `test`) are CI's own shards now
 //!   (devhub ci: cross checks, JIT checks, test shards): here they say so and pass.
 
-use crate::judge::Judge;
 use crate::report::Run;
 use makepad_remote::Client;
 use makepad_script::*;
@@ -36,6 +36,8 @@ pub type Result<T> = std::result::Result<T, String>;
 pub const SETTLE: Duration = Duration::from_secs(15);
 /// A cold JIT start of a big app can take minutes; a warm one seconds.
 const STARTUP: Duration = Duration::from_secs(300);
+/// Once the remote is up, a boot without a presented frame is hung.
+const FIRST_FRAME: Duration = Duration::from_secs(60);
 
 /// The lines of an app's output that fail it: panics (parked or not), JIT compile errors, fatal
 /// JIT errors, the app's own `[E]` errors.
@@ -191,6 +193,13 @@ impl AppHandle {
     }
 }
 
+/// A descendant endpoint; its hosting app owns its lifetime.
+struct HostedApp {
+    name: String,
+    pid: u32,
+    remote: Remote,
+}
+
 /// The app a default script launches: `package:binary:cwd`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Target {
@@ -211,8 +220,10 @@ impl Target {
 
 struct Runtime {
     run: Run,
-    judge: Judge,
+    /// acceptances saved so far for the master's judge
+    deferred: usize,
     apps: Vec<AppHandle>,
+    hosted: Vec<HostedApp>,
     images: Vec<PathBuf>,
     group: String,
     step: Option<usize>,
@@ -223,6 +234,24 @@ struct Runtime {
 }
 
 impl Runtime {
+    fn defer_accept(&mut self, image: &Path, prompt: &str, step: &str) -> Result<Value> {
+        let dir = self.run.dir.join("deferred");
+        let n = format!("{:02}", self.deferred + 1);
+        let saved = dir.join(format!("{n}.png"));
+        std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        std::fs::copy(image, &saved).map_err(|e| format!("{}: {e}", saved.display()))?;
+        for (ext, text) in [("txt", prompt), ("step", step)] {
+            let path = dir.join(format!("{n}.{ext}"));
+            std::fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))?;
+        }
+        self.deferred += 1;
+        println!("CI-DEFER {n} {}", step.replace(['\r', '\n'], " "));
+        // The script continues; this is pending evidence, not a model verdict.
+        let pending = json::obj(vec![("yes", Value::Bool(true)), ("deferred", Value::Bool(true))]);
+        self.run.evidence.push(json::obj(vec![("step", json::s(step)), ("prompt", json::s(prompt)), ("image", json::s(saved.display().to_string())), ("verdict", pending.clone())]));
+        Ok(pending)
+    }
+
     fn fail(&mut self, text: &str) {
         self.suppressed = true;
         match self.step {
@@ -239,7 +268,6 @@ impl Runtime {
         if argv.is_empty() || argv.iter().any(|a| a.bytes().any(|b| b.is_ascii_control()) || a.starts_with("if_user_seq")) {
             return Err("invalid command (or attempt to replace the pinned user sequence)".into());
         }
-        let route = argv.join(" ");
         let app = self.apps.get_mut(i).ok_or("invalid app handle")?;
         if app.interrupted {
             return Err("human intervention; app is no longer owned".into());
@@ -273,16 +301,58 @@ impl Runtime {
                 return Err(e);
             }
         };
-        if let Ok(v) = json::parse_depth(text.as_bytes(), 64) {
-            if let Some(e) = v.get("err") {
-                return Err(format!("{route}: {}", e.to_json()));
-            }
-        }
-        Ok(text)
+        check_answer(argv, text)
     }
 
     fn request_json(&mut self, i: usize, argv: &[String], mutate: bool) -> Result<Value> {
         json::parse_depth(self.request(i, argv, mutate)?.as_bytes(), 64).map_err(str::to_string)
+    }
+
+    /// The newest named endpoint in this app's descendants.
+    fn hosted(&mut self, i: usize, name: &str) -> Result<usize> {
+        let app = self.apps.get(i).ok_or("invalid app handle")?;
+        if app.interrupted {
+            return Err("human intervention; app is no longer owned".into());
+        }
+        if app.closed {
+            return Err(format!("{} already closed", app.name));
+        }
+        let root = app.child.child.id();
+        let tree = process_tree(root);
+        let descendants: Vec<_> = makepad_remote::discovery::apps().into_iter().filter(|a| a.pid != root && tree.contains(&a.pid)).collect();
+        let endpoint = descendants.iter().filter(|a| a.app == name).max_by_key(|a| a.started_ms).ok_or_else(|| {
+            let seen = descendants.iter().map(|a| format!("{} pid={} socket={}", a.app, a.pid, a.socket)).collect::<Vec<_>>().join(", ");
+            format!("{}: hosted app {name:?} not found; descendant endpoints: [{seen}]", app.name)
+        })?;
+        let client = Client::connect(&endpoint.socket).map_err(|e| format!("{} remote endpoint {}: {e}", endpoint.app, endpoint.socket))?;
+        let index = self.hosted.len();
+        self.hosted.push(HostedApp { name: endpoint.app.clone(), pid: endpoint.pid, remote: Remote { client, user_seq: None } });
+        let activity = self.hosted_request(index, &argv(&["activity"]), false)?;
+        let activity = json::parse_depth(activity.as_bytes(), 64).map_err(str::to_string)?;
+        let seq = activity.get("user_seq").and_then(Value::as_u64).ok_or("missing activity user_seq")?;
+        self.hosted[index].remote.user_seq = Some(seq);
+        Ok(index)
+    }
+
+    fn hosted_request(&mut self, i: usize, argv: &[String], mutate: bool) -> Result<String> {
+        if argv.is_empty() || argv.iter().any(|a| a.bytes().any(|b| b.is_ascii_control()) || a.starts_with("if_user_seq")) {
+            return Err("invalid command (or attempt to replace the pinned user sequence)".into());
+        }
+        let app = self.hosted.get(i).ok_or("invalid hosted app handle")?;
+        let text = match app.remote.request(argv, mutate) {
+            Ok(t) => t,
+            Err(e) => {
+                let e = match e {
+                    Failure::Interrupted(e) => {
+                        self.fatal = true;
+                        e
+                    }
+                    Failure::Message(e) => e,
+                };
+                return Err(format!("{} pid={}: {e}", app.name, app.pid));
+            }
+        };
+        check_answer(argv, text)
     }
 
     /// The app was killed for a parked panic: Err says so with its error lines. Ends the script.
@@ -319,7 +389,7 @@ impl Runtime {
     }
 
     /// Starts `target` under the JIT, hidden and muted, takes its remote endpoint, waits for a
-    /// window, pins ownership, then the settle window.
+    /// real GPU and first presented frame, a window, ownership, then the settle window.
     fn launch(&mut self, target: &Target, app_env: &[(String, String)]) -> Result<usize> {
         let name = target.binary.clone();
         let cwd = inside(&self.run.root, Path::new(&target.cwd))?;
@@ -327,6 +397,8 @@ impl Runtime {
         let report = self.run.path(&format!("{}-{index}-report", safe_name(&name)));
         let _ = std::fs::remove_file(&report);
         let loader = crate::loader();
+        let config = self.run.path("config");
+        std::fs::create_dir_all(&config).map_err(|e| format!("{}: {e}", config.display()))?;
         let mut command = Command::new(&loader[0]);
         command.args(&loader[1..]).arg("run").arg("--report-to").arg(&report).arg(&target.package);
         if target.binary != target.package {
@@ -341,8 +413,13 @@ impl Runtime {
             .env("MAKEPAD_MUTE", "1")
             .env("MUSIC_MUTE", "1")
             .env_remove("MAKEPAD_FOCUS")
-            // the judge's LAN switch is this process's, not the app's
             .env_remove("MAKEPAD_LAN")
+            // the smoke boots this tree: a WM it starts runs its apps from here, not from the
+            // checkout of a WM session the runner was started in
+            .env_remove("MAKEPAD_WM_ROOT")
+            // nor the box's own desktop settings (a WM applied the node's saved display scale,
+            // 250: its desk was 540x240 points), and nothing it saves reaches the person's
+            .env("XDG_CONFIG_HOME", &config)
             .envs(app_env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
         let log = self.run.path(&format!("{}-{index}-stdout.log", safe_name(&name)));
         let child = ChildLog::spawn(&mut command, log.clone())?;
@@ -369,15 +446,76 @@ impl Runtime {
             }
             std::thread::sleep(Duration::from_millis(100));
         }
+        let remote_up = Instant::now();
+        let first_frame_deadline = remote_up + FIRST_FRAME;
+        // A stuck inspector must not hold the first-frame verdict hostage. This worker only
+        // reads the GPU fact; the launch thread keeps watching the app's report and its log.
+        let gpu_reply = startup_gpu(self.apps[index].remote.as_ref().unwrap().client.clone(), first_frame_deadline);
+        let mut gpu_seen = false;
+        let first_frame_line = format!("makepad: {} first frame at ", target.package);
         loop {
+            if !self.alive(index)? {
+                return Err(format!("app died before its first frame\n{}", tail(&self.apps[index].child.text, 30)));
+            }
+            let report = std::fs::read_to_string(&self.apps[index].report).unwrap_or_default();
+            let presented = report.lines().any(|line| line.trim() == "present")
+                || self.apps[index].child.text.lines().any(|line| line.starts_with(&first_frame_line));
+            if !presented && Instant::now() >= first_frame_deadline {
+                let why = format!("hang: no first frame {} s after its remote came up", remote_up.elapsed().as_secs());
+                println!("CIERR {name}: {why}");
+                return Err(why);
+            }
+            if !gpu_seen {
+                match gpu_reply.try_recv() {
+                    Ok(reply) => {
+                        let v = reply?;
+                        let backend = v.get("backend").and_then(Value::as_str).filter(|s| !s.is_empty()).ok_or("gpu: missing backend")?;
+                        let device = v.get("device").and_then(Value::as_str).ok_or("gpu: missing device")?;
+                        let software = v.get("software").and_then(Value::as_bool).ok_or("gpu: missing software flag")?;
+                        self.run.log(&format!("gpu {name}: {device} ({backend})"));
+                        println!("CI-GPU {name} {device}");
+                        if software {
+                            let why = format!("rendered on a software device ({device}): CI boots only on the box's real GPU");
+                            println!("CIERR {name}: {why}");
+                            return Err(why);
+                        }
+                        if matches!(backend, "headless" | "none" | "unknown") {
+                            let why = format!("no real GPU backend ({backend}): CI boots only on the box's real GPU");
+                            println!("CIERR {name}: {why}");
+                            return Err(why);
+                        }
+                        gpu_seen = true;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => return Err("gpu inspector stopped without an answer".into()),
+                }
+            }
+            if presented && gpu_seen {
+                break;
+            }
+            if Instant::now() >= first_frame_deadline {
+                let why = format!("gpu inspection timed out {} s after its remote came up", remote_up.elapsed().as_secs());
+                println!("CIERR {name}: {why}");
+                return Err(why);
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        // Frame readiness above is independent of status: a window in status is not proof
+        // that the GPU presented anything. Bound status requests too.
+        let deadline = Instant::now() + FIRST_FRAME;
+        loop {
+            // (killed for it: the app dead is not the news)
+            self.parked_panic(index)?;
             if !self.alive(index)? {
                 return Err(format!("app died before ready\n{}", tail(&self.apps[index].child.text, 30)));
             }
+            self.apps[index].remote.as_ref().unwrap().client.set_timeout(Some(deadline.saturating_duration_since(Instant::now())));
             if let Ok(v) = self.request_json(index, &argv(&["status"]), false) {
                 if v.get("w").and_then(Value::as_arr).is_some_and(|w| !w.is_empty()) {
                     break;
                 }
             }
+            self.parked_panic(index)?;
             if self.fatal {
                 return Err("human intervention during startup".into());
             }
@@ -386,6 +524,7 @@ impl Runtime {
             }
             std::thread::sleep(Duration::from_millis(200));
         }
+        self.apps[index].remote.as_ref().unwrap().client.set_timeout(None);
         let activity = self.request_json(index, &argv(&["activity"]), false)?;
         let seq = activity.get("user_seq").and_then(Value::as_u64).ok_or("missing activity user_seq")?;
         self.apps[index].remote.as_mut().unwrap().user_seq = Some(seq);
@@ -473,11 +612,15 @@ impl Runtime {
         }
     }
 
+    /// `secs` without progress: the wait goes on while a JIT of the app's process tree compiles
+    /// (the app itself or what it started, a WM's hosted apps), and ends when that stops.
     fn wait_log(&mut self, i: usize, text: &str, secs: f64) -> Result<()> {
         if !secs.is_finite() || !(0.0..=3600.0).contains(&secs) {
             return Err("invalid log timeout".into());
         }
-        let end = Instant::now() + Duration::from_secs_f64(secs);
+        let quiet = Duration::from_secs_f64(secs);
+        let mut end = Instant::now() + quiet;
+        let mut compiled = Duration::ZERO;
         loop {
             if !self.alive(i)? {
                 return Err("app died while waiting for log".into());
@@ -486,7 +629,17 @@ impl Runtime {
                 return Ok(());
             }
             if Instant::now() >= end {
-                return Err(format!("{}: log did not contain {text:?} within {secs}s", self.apps[i].name));
+                if !tree_jit_busy(self.apps[i].child.child.id()) {
+                    let busy = if compiled.is_zero() { String::new() } else { format!(" (and {:.0} s of JIT compiling)", compiled.as_secs_f64()) };
+                    return Err(format!("{}: log did not contain {text:?} within {secs}s without progress{busy}", self.apps[i].name));
+                }
+                // compiling: look again shortly, the quiet window starts over once it is idle
+                compiled += JIT_LOOK;
+                end = Instant::now() + JIT_LOOK;
+                if compiled.as_secs() % 60 < JIT_LOOK.as_secs() {
+                    self.run.log(&format!("  {}: waiting for {text:?}: a JIT of its process tree compiles", self.apps[i].name));
+                }
+                continue;
             }
             std::thread::sleep(Duration::from_millis(200));
         }
@@ -494,8 +647,12 @@ impl Runtime {
 
     fn grab(&mut self, i: usize, name: &str) -> Result<usize> {
         let value = self.request_json(i, &argv(&["grab"]), false)?;
+        self.save_grab(&value, name)
+    }
+
+    fn save_grab(&mut self, value: &Value, name: &str) -> Result<usize> {
         let mut paths = Vec::new();
-        png_paths(&value, &mut paths);
+        png_paths(value, &mut paths);
         let source = paths.first().ok_or("grab did not return a PNG path")?;
         let bytes = std::fs::read(source).map_err(|e| e.to_string())?;
         if !bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
@@ -575,6 +732,33 @@ impl Runtime {
     }
 }
 
+/// Ask immediately, retrying only while the HAL is not open yet (the JIT's endpoint precedes
+/// it). The caller polls this worker alongside the present report, so an unanswered command
+/// cannot extend the first-frame deadline. No process is stopped here.
+fn startup_gpu(client: Client, deadline: Instant) -> std::sync::mpsc::Receiver<Result<Value>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let remote = Remote { client, user_seq: None };
+        loop {
+            remote.client.set_timeout(Some(deadline.saturating_duration_since(Instant::now())));
+            let reply = remote.request(&argv(&["gpu", "device"]), false)
+                .map_err(|e| match e { Failure::Message(e) | Failure::Interrupted(e) => e })
+                .and_then(|s| json::parse_depth(s.as_bytes(), 64).map_err(str::to_string))
+                .and_then(|v| match v.get("err").and_then(Value::as_str) {
+                    Some(e) => Err(e.to_string()),
+                    None => Ok(v),
+                });
+            if matches!(&reply, Err(e) if e == "GPU backend is not initialized") && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(100));
+                continue;
+            }
+            let _ = tx.send(reply);
+            return;
+        }
+    });
+    rx
+}
+
 /// The remote endpoint of the process this run owns: the platform's `[makepad-remote] pid=<pid>
 /// app=<app> socket=<path>`, or the JIT's `makepad-remote: pid <pid> app <app> socket <path> (...)`.
 fn parse_startup(line: &str, pid: u32) -> Option<String> {
@@ -622,6 +806,15 @@ pub fn safe_name(name: &str) -> String {
 
 fn argv(words: &[&str]) -> Vec<String> {
     words.iter().map(|w| w.to_string()).collect()
+}
+
+fn check_answer(argv: &[String], text: String) -> Result<String> {
+    if let Ok(v) = json::parse_depth(text.as_bytes(), 64) {
+        if let Some(e) = v.get("err") {
+            return Err(format!("{}: {}", argv.join(" "), e.to_json()));
+        }
+    }
+    Ok(text)
 }
 
 fn key_args(kind: &str, code: &str, mods: &[&str]) -> Vec<String> {
@@ -919,32 +1112,35 @@ fn register(vm: &mut ScriptVm, target: Option<&Target>) {
         });
         result(vm, r)
     });
-    for (name, accept) in [(id_lut!(judge), false), (id_lut!(accept), true)] {
-        vm.add_method(ci, name, script_args!(image = NIL, text = NIL), move |vm, args| {
-            if !allow(vm) {
-                return NIL;
-            }
-            let r = (|| {
-                let prompt = str_arg(vm, args, id!(text))?;
-                let index = num_arg(vm, args, id!(image))? as usize;
-                let r = rt(vm);
-                let image = r.images.get(index).ok_or("invalid image handle")?.clone();
-                let verdict = r.judge.judge(&image, &prompt)?;
-                r.run.log(&format!("judge {} on {} in {:.1} s: {}", image.display(), verdict.hub, verdict.secs, verdict.raw.lines().last().unwrap_or("")));
-                let step = r.step.map(|i| r.run.steps[i].name.clone()).unwrap_or_else(|| "judge".into());
-                r.run.evidence.push(json::obj(vec![("step", json::s(step)), ("prompt", json::s(&prompt)), ("image", json::s(image.display().to_string())), ("verdict", verdict.json())]));
-                if accept && !verdict.yes {
-                    return Err(if verdict.parse_error { format!("vision parse failed\n{}", verdict.raw) } else { verdict.raw });
-                }
-                Ok(verdict.json())
-            })();
-            result(vm, r)
-        });
-    }
+    // the grab and its acceptance text are saved; the devhub master judges them after the boot
+    vm.add_method(ci, id_lut!(accept), script_args!(image = NIL, text = NIL), move |vm, args| {
+        if !allow(vm) {
+            return NIL;
+        }
+        let r = (|| {
+            let prompt = str_arg(vm, args, id!(text))?;
+            let index = num_arg(vm, args, id!(image))? as usize;
+            let r = rt(vm);
+            let image = r.images.get(index).ok_or("invalid image handle")?.clone();
+            let step = r.step.map(|i| r.run.steps[i].name.clone()).unwrap_or_else(|| "accept".into());
+            r.defer_accept(&image, &prompt, &step)
+        })();
+        result(vm, r)
+    });
 }
 
 fn app_object(vm: &mut ScriptVm, index: usize) -> ScriptValue {
     let obj = vm.new_object();
+    vm.add_method(obj, id_lut!(hosted), script_args!(name = NIL), move |vm, args| {
+        if !allow(vm) {
+            return NIL;
+        }
+        let r = str_arg(vm, args, id!(name)).and_then(|s| rt(vm).hosted(index, &s));
+        match r {
+            Ok(i) => hosted_object(vm, i),
+            Err(e) => result(vm, Err(e)),
+        }
+    });
     vm.add_method(obj, id_lut!(key), script_args!(code = NIL, options = NIL), move |vm, args| {
         if !allow(vm) {
             return NIL;
@@ -1056,14 +1252,73 @@ fn app_object(vm: &mut ScriptVm, index: usize) -> ScriptValue {
     obj.into()
 }
 
+fn hosted_object(vm: &mut ScriptVm, index: usize) -> ScriptValue {
+    let obj = vm.new_object();
+    vm.add_method(obj, id_lut!(cmd), script_args!(command = NIL), move |vm, args| {
+        if !allow(vm) {
+            return NIL;
+        }
+        let r = str_arg(vm, args, id!(command)).and_then(|s| {
+            let words: Vec<String> = s.split_whitespace().map(str::to_string).collect();
+            rt(vm).hosted_request(index, &words, true).map(json::s)
+        });
+        result(vm, r)
+    });
+    vm.add_method(obj, id_lut!(grab), script_args!(name = NIL), move |vm, args| {
+        if !allow(vm) {
+            return NIL;
+        }
+        let r = (|| {
+            let name = str_arg(vm, args, id!(name))?;
+            let r = rt(vm);
+            let answer = r.hosted_request(index, &argv(&["grab"]), false)?;
+            let value = json::parse_depth(answer.as_bytes(), 64).map_err(str::to_string)?;
+            r.save_grab(&value, &name).map(|i| Value::Int(i as i64))
+        })();
+        result(vm, r)
+    });
+    obj.into()
+}
+
+/// How often a wait past its quiet window asks the JITs whether they still compile.
+const JIT_LOOK: Duration = Duration::from_secs(5);
+
+/// `root` and its descendants, by pid.
+fn process_tree(root: u32) -> Vec<u32> {
+    let mut tree = vec![root];
+    let Ok(procs) = makepad_remote::procs::list_processes() else { return tree };
+    let mut k = 0;
+    while k < tree.len() {
+        let parent = tree[k];
+        tree.extend(procs.iter().filter(|p| p.ppid == parent && p.pid != parent).map(|p| p.pid));
+        k += 1;
+    }
+    tree
+}
+
+/// Whether a JIT endpoint among `root` and its descendants reports compile progress.
+fn tree_jit_busy(root: u32) -> bool {
+    let tree = process_tree(root);
+    makepad_remote::discovery::apps().into_iter().filter(|a| tree.contains(&a.pid)).any(|a| {
+        makepad_remote::Client::connect(&a.socket).ok().is_some_and(|c| makepad_remote::jit::busy(&c).unwrap_or(false))
+    })
+}
+
 /// Runs the script at `path` (relative to `root`) as the tile `dir`; its apps are cleaned up after.
-pub fn run(root: PathBuf, path: &str, dir: &str, target: Option<Target>, judge: Judge) -> i32 {
-    let out = root.join("local/ci-leg").join(safe_name(dir));
-    let _ = std::fs::remove_dir_all(&out);
+pub fn run(root: PathBuf, path: &str, dir: &str, target: Option<Target>) -> i32 {
+    // CI leases have a target outside their source tree. get-ls/get-read resolve the logical
+    // `target/` prefix to CARGO_TARGET_DIR, so advertise that lease-relative path.
+    let out = {
+        let target = std::env::var_os("CARGO_TARGET_DIR").filter(|p| !p.is_empty()).map(|p| root.join(p)).unwrap_or_else(|| root.join("target"));
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
+        let rel = Path::new("ci-leg").join(safe_name(dir)).join(format!("{}-{stamp}", std::process::id()));
+        println!("CI-DEFER-DIR target/{}/deferred", rel.to_string_lossy().replace('\\', "/"));
+        target.join(rel)
+    };
     let run = Run::new(root.clone(), out);
     let source = std::fs::read_to_string(root.join(path));
     let mut host = ScriptVmHost::new(
-        Runtime { run, judge, apps: Vec::new(), images: Vec::new(), group: dir.to_string(), step: None, suppressed: false, fatal: false, warning: String::new(), held_pids: Vec::new() },
+        Runtime { run, deferred: 0, apps: Vec::new(), hosted: Vec::new(), images: Vec::new(), group: dir.to_string(), step: None, suppressed: false, fatal: false, warning: String::new(), held_pids: Vec::new() },
         (),
     );
     match source {

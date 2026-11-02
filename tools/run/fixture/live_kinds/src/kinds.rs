@@ -85,6 +85,103 @@ pub fn use_val() -> u64 { pick(1, 2) }
 pub type Num = u64;
 pub fn alias_val() -> u64 { std::mem::size_of::<Num>() as u64 }
 
+// the construct kinds (live_kinds.py): one item and one probe each
+pub fn apit(it: impl IntoIterator<Item = u64>) -> u64 { it.into_iter().sum() }
+pub fn apit_val() -> u64 { apit([1, 2]) }
+pub fn apit2(a: u64) -> u64 { a }
+pub fn apit2_val() -> u64 { apit2(1) }
+pub fn apit3_val() -> u64 { 0 }
+pub fn gen2<A: Into<u64>>(a: A) -> u64 { a.into() }
+pub fn gen2_val() -> u64 { gen2(1u32) }
+pub struct Arr<const N: usize>;
+impl<const N: usize> Arr<N> { pub fn len() -> u64 { N as u64 } }
+pub fn cgen_val() -> u64 { Arr::<2>::len() }
+pub fn gstruct_val() -> u64 { 0 }
+pub fn tblanket_val() -> u64 { 0 }
+pub trait Gone { fn g(&self) -> u64; }
+impl Gone for u8 { fn g(&self) -> u64 { 6 } }
+pub fn trm_val() -> u64 { 1u8.g() }
+pub trait Def { fn d(&self) -> u64 { 1 } }
+impl Def for u8 {}
+pub fn tdef_val() -> u64 { 1u8.d() }
+pub trait AC { const V: u64; }
+impl AC for u8 { const V: u64 = 1; }
+pub fn aconst_val() -> u64 { <u8 as AC>::V }
+pub trait AT { type Out; }
+impl AT for u8 { type Out = u32; }
+pub fn atype_val() -> u64 { std::mem::size_of::<<u8 as AT>::Out>() as u64 }
+pub fn ccap_val() -> u64 { let a = 1u64; let f = || a; f() }
+pub fn cnest_val() -> u64 { (|| (|| 1u64)())() }
+pub fn rpit() -> impl Iterator<Item = u64> { (0..2u64).map(|x| x) }
+pub fn rpit_val() -> u64 { rpit().count() as u64 }
+pub fn sadd_val() -> u64 { 0 }
+static OLD_S: u64 = 13;
+pub fn srm_val() -> u64 { OLD_S }
+pub fn cadd_val() -> u64 { 0 }
+const OLD_C: u64 = 16;
+pub fn crm_val() -> u64 { OLD_C }
+const LEN: usize = 2;
+pub fn clen_val() -> u64 { [0u8; LEN].len() as u64 }
+pub fn madd_val() -> u64 { 0 }
+macro_rules! m3 { () => { 19 } }
+pub fn mrm_val() -> u64 { m3!() }
+pub fn mfn_val() -> u64 { 0 }
+mod oldm { pub fn v() -> u64 { 22 } }
+pub fn modrm_val() -> u64 { oldm::v() }
+pub enum E2 { A, B }
+pub fn evrm_of(e: E2) -> u64 { match e { E2::A => 1, E2::B => 2 } }
+pub fn evrm_val() -> u64 { evrm_of(E2::A) }
+pub enum E3 { A(u8), B }
+impl E3 { pub fn v(&self) -> u64 { match self { E3::A(x) => *x as u64, E3::B => 0 } } }
+pub fn epay_val() -> u64 { E3::A(1).v() }
+#[derive(Clone, Copy)]
+pub enum E4 { A = 1 }
+pub fn edis_val() -> u64 { E4::A as u64 }
+struct D1;
+pub fn dadd_val() -> u64 { 0 }
+#[derive(Clone)]
+struct D2(u64);
+pub fn drm_val() -> u64 { D2(3).clone().0 }
+#[cfg(any())]
+pub fn cfg_on() -> u64 { 2 }
+#[cfg(not(any()))]
+pub fn cfg_on() -> u64 { 1 }
+pub fn cfg2_val() -> u64 { let mut n = 1; #[cfg(any())] { n = 2; } n }
+pub fn block_on<F: std::future::Future>(f: F) -> F::Output {
+    let mut f = Box::pin(f);
+    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+    loop {
+        if let std::task::Poll::Ready(v) = f.as_mut().poll(&mut cx) {
+            return v;
+        }
+    }
+}
+async fn af() -> u64 { 1 }
+pub fn async1_val() -> u64 { block_on(af()) }
+pub fn async2_val() -> u64 { 0 }
+pub fn dropi_val() -> u64 { 0 }
+pub fn life_of(a: &u64) -> u64 { *a }
+pub fn life_val() -> u64 { life_of(&1) }
+extern "C" fn ec() -> u64 { 1 }
+pub fn ecfn_val() -> u64 { let f: extern "C" fn() -> u64 = ec; f() }
+fn tbl_a() -> u64 { 1 }
+static TABLE: [fn() -> u64; 1] = [tbl_a];
+pub fn fptr_val() -> u64 { TABLE[0]() }
+pub fn mfile_val() -> u64 { 0 }
+#[inline(never)]
+pub fn partial_landing_val() -> u64 { 0 }
+pub fn in_use() -> u64 { 1 }
+pub trait Kept { fn k(&self) -> u64; }
+impl Kept for u16 { fn k(&self) -> u64 { 1 } }
+pub fn rmuse_val() -> u64 { in_use() + 1u16.k() }
+
+pub fn report2() -> String {
+    format!(
+        "apit={} apit2={} apit3={} gen2={} cgen={} gstruct={} tblanket={} trm={} tdef={} aconst={} atype={} ccap={} cnest={} rpit={} sadd={} srm={} cadd={} crm={} clen={} madd={} mrm={} mfn={} modrm={} evrm={} epay={} edis={} dadd={} drm={} cfg1={} cfg2={} async1={} async2={} dropi={} life={} ecfn={} fptr={} mfile={} partial_landing={} rmuse={}",
+        apit_val(), apit2_val(), apit3_val(), gen2_val(), cgen_val(), gstruct_val(), tblanket_val(), trm_val(), tdef_val(), aconst_val(), atype_val(), ccap_val(), cnest_val(), rpit_val(), sadd_val(), srm_val(), cadd_val(), crm_val(), clen_val(), madd_val(), mrm_val(), mfn_val(), modrm_val(), evrm_val(), epay_val(), edis_val(), dadd_val(), drm_val(), cfg_on(), cfg2_val(), async1_val(), async2_val(), dropi_val(), life_val(), ecfn_val(), fptr_val(), mfile_val(), partial_landing_val(), rmuse_val(),
+    )
+}
+
 pub struct State {
     pub rec: Rec,
     pub wide: Wide,

@@ -818,7 +818,8 @@ fn http(url: &str, body: Option<&str>) -> Result<String, String> {
         Some(at) => (&rest[..at], &rest[at..]),
         None => (rest, "/"),
     };
-    let mut stream = std::net::TcpStream::connect(host_port)
+    let endpoint = makepad_ai_hub::http_client::parse_url(url).map_err(|e| e.to_string())?;
+    let mut stream = makepad_network::lan::hub_connect_host("ai-hub chat bench", &endpoint.host, endpoint.port, None)
         .map_err(|e| format!("connect {host_port}: {e}"))?;
     stream
         .set_read_timeout(Some(Duration::from_secs(60)))

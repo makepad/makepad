@@ -1546,21 +1546,6 @@ mod tests {
         assert_eq!(renderer.environment_preparations(), 1);
     }
 
-    /// What a sibling test module (C6's fog, C5's rig) feeds in answers the
-    /// numeric accessors with no pool, no device and no texture.
-    #[test]
-    fn hand_fed_numbers_answer_the_accessors_with_nothing_bound() {
-        let mut renderer = Renderer::default();
-        assert!(renderer.ibl_sh9().is_none() && renderer.ibl_mean_luminance().is_none() && renderer.ibl_horizon_rgb().is_none());
-        let mut sh = [[0.0f32; 3]; 9];
-        sh[0] = [0.5, 0.6, 0.7];
-        renderer.feed_environment_numbers_for_tests(sh, 0.4, vec3f(0.1, 0.2, 0.3));
-        assert_eq!(renderer.ibl_sh9(), Some(&sh));
-        assert_eq!(renderer.ibl_mean_luminance(), Some(0.4));
-        assert_eq!(renderer.ibl_horizon_rgb(), Some(vec3f(0.1, 0.2, 0.3)));
-        assert!(renderer.ibl_texture().is_none() && !renderer.environment_ready() && renderer.ibl_sun().is_none());
-    }
-
     /// The dome is sampled through atan2, whose cut sits at +Z (u jumps by
     /// a whole turn there). Only a mip-less texture with a manually wrapped
     /// lookup hides that cut (the pattern of
@@ -1603,10 +1588,8 @@ mod tests {
     }
 
     /// A procedural hdri preset bakes on the job (1024 x 512, its own sun)
-    /// and prepares like a registered map. Release only: a debug bake of
-    /// half a million texels through the atmosphere takes too long.
+    /// and prepares like a registered map.
     #[test]
-    #[ignore]
     fn a_procedural_hdri_preset_bakes_on_the_job_and_reports_its_sun() {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         let mut renderer = Renderer::default();

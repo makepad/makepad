@@ -162,16 +162,28 @@ fn wheel_follows_setting(id: &InputId) -> bool {
 
 const BUS_VIRTUAL: u16 = 0x06;
 
-/// One device report of a person's input (keys, buttons, motion, touch): noted for the WM's
-/// `activity` (`crate::user_input`); keyboard keys (below the button range 0x100..0x160) are
-/// keys, the rest pointer. Key repeats are the kernel's while a key is held: a person.
-fn note_presence(origin: crate::user_input::Origin, report: &[InputEvent]) {
+/// One device report of a person's deliberate input, noted for the WM's `activity`
+/// (`crate::user_input`): a key (below the button range 0x100..0x160; key repeats are the
+/// kernel's while a key is held), a button press or release, a wheel step, or motion while a
+/// button or touch is down (a drag). Bare pointer motion never counts: a stray move from a
+/// Desk Link viewer or a bumped mouse is not a person needing the box. `down` is the device's
+/// held-button state across reports.
+fn note_presence(origin: crate::user_input::Origin, report: &[InputEvent], down: &mut bool) {
     use crate::user_input::What;
-    let key = report.iter().any(|e| e.ty == InputEventType::EV_KEY && (e.code < 0x100 || e.code >= 0x160));
-    let pointer = report.iter().any(|e| matches!(e.ty, InputEventType::EV_KEY | InputEventType::EV_REL | InputEventType::EV_ABS));
+    let is_button = |e: &InputEvent| e.ty == InputEventType::EV_KEY && (0x100..0x160).contains(&e.code);
+    let key = report.iter().any(|e| e.ty == InputEventType::EV_KEY && !(0x100..0x160).contains(&e.code));
+    let button = report.iter().any(is_button);
+    for e in report.iter().filter(|e| is_button(e)) {
+        *down = e.value != 0;
+    }
+    let wheel = report.iter().any(|e| {
+        e.ty == InputEventType::EV_REL
+            && matches!(e.code, EvRelCodes::REL_WHEEL | EvRelCodes::REL_HWHEEL | EvRelCodes::REL_WHEEL_HI_RES | EvRelCodes::REL_HWHEEL_HI_RES)
+    });
+    let motion = report.iter().any(|e| matches!(e.ty, InputEventType::EV_REL | InputEventType::EV_ABS));
     if key {
         crate::user_input::note(origin, What::Key);
-    } else if pointer {
+    } else if button || wheel || (motion && *down) {
         crate::user_input::note(origin, What::Pointer);
     }
 }
@@ -526,6 +538,8 @@ struct InputDevice {
     /// Its reports are a person's input (`crate::user_input`): a physical device or Desk
     /// Link's; None for other virtual devices and accelerometers.
     presence: Option<crate::user_input::Origin>,
+    /// A button or touch is down on it (presence counts motion only as a drag).
+    button_down: bool,
 }
 
 pub struct RawInput {
@@ -671,7 +685,7 @@ impl RawInput {
                     self.next_device_id += 1;
                     self.devices.push(InputDevice { id: self.next_device_id, path, file,
                         pending: Vec::new(), dropped: false, reported_input: false, touchpad, absolute_axes, absolute_mt,
-                        wheel_natural_setting, presence });
+                        wheel_natural_setting, presence, button_down: false });
                 }
                 Err(error) => {
                     if self.denied.insert(path.clone()) {
@@ -743,7 +757,7 @@ impl RawInput {
                                     device.reported_input = true;
                                 }
                                 if let Some(origin) = device.presence {
-                                    note_presence(origin, &device.pending);
+                                    note_presence(origin, &device.pending, &mut device.button_down);
                                 }
                                 if let Some(pad) = device.touchpad.as_mut() {
                                     device.pending.retain_mut(|event| !pad.consume(event));
@@ -1168,7 +1182,7 @@ mod tests {
         AbsInfo { maximum, resolution: 32, ..Default::default() }
     }
 
-    /// The clickpad on a node: 4762 x 3099 units at 32 units/mm, 5 slots.
+    /// The clickpad on a pool node: 4762 x 3099 units at 32 units/mm, 5 slots.
     fn clickpad() -> Touchpad {
         Touchpad::new([axis(4762), axis(3099)], 5, true, true)
     }
@@ -1471,20 +1485,35 @@ mod wheel_tests {
     }
 
     #[test]
-    fn a_key_report_is_a_key_and_motion_a_pointer() {
+    fn presence_is_deliberate_input_never_bare_motion() {
         use crate::user_input::{last, Origin, What};
         let _turn = crate::user_input::TEST_TURN.lock().unwrap_or_else(|e| e.into_inner());
         let ev = |ty: u16, code: u16, value: i32| super::InputEvent { ty, code, value, ..Default::default() };
-        super::note_presence(Origin::Device, &[ev(1, 30, 1)]);
+        let mut down = false;
+        super::note_presence(Origin::Device, &[ev(1, 30, 1)], &mut down);
         assert_eq!(last().map(|l| (l.origin, l.what)), Some((Origin::Device, What::Key)));
-        super::note_presence(Origin::DeskLink, &[ev(2, 0, 3), ev(2, 1, -2)]);
+        let seq = last().unwrap().seq;
+        // injected or stray motion: unchanged
+        super::note_presence(Origin::DeskLink, &[ev(2, 0, 3), ev(2, 1, -2)], &mut down);
+        super::note_presence(Origin::DeskLink, &[ev(3, 0, 300), ev(3, 1, 200)], &mut down);
+        assert_eq!(last().unwrap().seq, seq);
+        // a click is presence
+        super::note_presence(Origin::DeskLink, &[ev(1, 0x110, 1)], &mut down);
         assert_eq!(last().map(|l| (l.origin, l.what)), Some((Origin::DeskLink, What::Pointer)));
-        // a mouse button is the pointer's
-        super::note_presence(Origin::Device, &[ev(1, 0x110, 1)]);
-        assert_eq!(last().map(|l| l.what), Some(What::Pointer));
+        assert!(down);
+        // a drag: motion while the button is down
+        let seq = last().unwrap().seq;
+        super::note_presence(Origin::DeskLink, &[ev(2, 0, 3)], &mut down);
+        assert_eq!(last().unwrap().seq, seq + 1);
+        super::note_presence(Origin::DeskLink, &[ev(1, 0x110, 0)], &mut down);
+        assert!(!down);
+        // a scroll
+        let seq = last().unwrap().seq;
+        super::note_presence(Origin::DeskLink, &[ev(2, 0x0b, 120)], &mut down);
+        assert_eq!(last().unwrap().seq, seq + 1);
         // a report with no input (a bare sync) notes nothing
         let seq = last().unwrap().seq;
-        super::note_presence(Origin::Device, &[]);
+        super::note_presence(Origin::Device, &[], &mut down);
         assert_eq!(last().unwrap().seq, seq);
     }
 

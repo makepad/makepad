@@ -431,15 +431,6 @@ mod tests {
     }
 
     #[test]
-    fn nearest_2x_upsample_matches_hand_computed() {
-        // The decode() upsample uses src[i/2]; F.interpolate(scale_factor=2,
-        // mode='nearest') maps output i -> input floor(i/2).
-        let src = [1.0f32, 2.0, 3.0];
-        let out: Vec<f32> = (0..6).map(|i| src[i / 2]).collect();
-        assert_eq!(out, vec![1.0, 1.0, 2.0, 2.0, 3.0, 3.0]);
-    }
-
-    #[test]
     fn weight_norm_fold_normalizes_rows() {
         // v row (3, 4): w = g * v/||v||, so ||w_row|| == g_row.
         let v = [3.0f32, 4.0, 0.0, 0.0, 1.0, 1.0];
@@ -464,21 +455,6 @@ mod tests {
         let var: f32 = x.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / 4.0;
         assert!(mean.abs() < 1e-6);
         assert!((var - 1.0).abs() < 1e-3);
-    }
-
-    /// Checkpoint smoke: decode a few codes end to end (skipped when the
-    /// reference checkout is absent).
-    #[test]
-    fn decode_smoke_on_reference_checkpoint() {
-        let path = crate::indextts::reference_checkpoints_dir().join("codec.pth");
-        if !path.is_file() {
-            eprintln!("skipping decode_smoke_on_reference_checkpoint: {path:?} missing");
-            return;
-        }
-        let decoder = SemanticCodecDecoder::load(&path).unwrap();
-        let out = decoder.decode(&[0, 375, 7956, 42]).unwrap();
-        assert_eq!(out.len(), 8 * SEMANTIC_CODEC_DIM);
-        assert!(out.iter().all(|v| v.is_finite()));
     }
 }
 

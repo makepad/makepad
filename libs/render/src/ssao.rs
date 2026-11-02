@@ -33,7 +33,7 @@
 //!    because the bilateral blur behind it is depth-aware and stops at
 //!    silhouettes.
 //! 4. **Distant occluders contribute nothing**: contribution fades to zero
-//!    once the occluder stands more than `2 × radius` in front — a roof
+//!    once the occluder-to-receiver depth gap exceeds `range × radius` (default 2) — a roof
 //!    edge three metres before the lawn is a different object, not a
 //!    crevice in the lawn.
 
@@ -74,8 +74,11 @@ script_mod! {
         //   y = tan(fov_y / 2)   (perspective)   or half height in metres (ortho)
         //   z = 1 for orthographic
         u_proj: uniform(vec4(0.5773, 0.5773, 0.0, 0.0))
-        // x = radius, y = bias floor, z = bias slope per unit of depth
+        // x = radius, y = bias floor, z = bias slope per unit of depth,
+        // w = the rotation pattern's seed (SsaoParams::seed)
         u_ao: uniform(vec4(0.6, 0.03, 0.002, 0.0))
+        // occluder-to-receiver depth range, in radii
+        u_range: uniform(2.0)
         // x = 0 distance mode, 1 matrix mode
         u_mode: uniform(vec4(0.0, 0.0, 0.0, 0.0))
         // Matrix mode: clip from world and its inverse (column-major)
@@ -201,9 +204,15 @@ script_mod! {
                 ddy = p - cu.xyz
             }
             var n = cross(ddy, ddx)
-            if length(n) < 0.0000001 {
-                // A one-pixel sliver: face the camera rather than divide by
-                // zero — its occlusion is meaningless either way.
+            // A one-pixel sliver (the two steps parallel, or one of them
+            // zero): face the camera rather than divide by zero — its
+            // occlusion is meaningless either way. The test is RELATIVE to
+            // the steps: an absolute floor (it was 1e-7 m²) took a surface
+            // seen from a few centimetres, whose steps are a fraction of a
+            // millimetre, for a sliver — every pixel nearer than one depth
+            // turned its hemisphere into the surface and occluded itself
+            // (a printer bed's full-width dark band, deeper as one zoomed).
+            if length(n) <= 0.000001 * length(ddx) * length(ddy) {
                 n = 0.0 - normalize(self.ray_of(p))
             }
             n = normalize(n)
@@ -221,7 +230,9 @@ script_mod! {
             // Hash of the PIXEL coordinate, never of time: a rotation that
             // varies per frame crawls over every surface.
             let pix = floor(uv * self.u_texel.zw)
-            let rot = fract(sin(dot(pix, vec2(12.9898, 78.233))) * 43758.5453) * 6.2831853
+            // A still view's averaged recordings turn it by the golden
+            // angle per seed (u_ao.w).
+            let rot = fract(fract(sin(dot(pix, vec2(12.9898, 78.233))) * 43758.5453) + self.u_ao.w * 0.618034) * 6.2831853
 
             // ---- the hemisphere ----------------------------------------
             let radius = self.u_ao.x
@@ -251,7 +262,7 @@ script_mod! {
                         // exact pair of lines; the tests hold it to the
                         // coincident-plane and range laws.
                         let ahead = self.depth_of(s) - sd
-                        let range = 1.0 - smoothstep(radius, radius * 2.0, abs(d - sd))
+                        let range = 1.0 - smoothstep(radius * self.u_range * 0.5, radius * self.u_range, abs(d - sd))
                         occ = occ + smoothstep(bias, bias * 2.0, ahead) * range
                     }
                 }
@@ -350,6 +361,8 @@ pub struct DrawSsaoBlur {
 pub struct SsaoParams {
     /// Hemisphere radius in metres. A doorstep-scale contact shadow.
     pub radius: f32,
+    /// Occluder-to-receiver depth gap in radii past which a tap contributes nothing.
+    pub range: f32,
     /// Occluder exclusion floor in metres (law 1): surfaces closer together
     /// than this never occlude one another. Keep it well above the
     /// millimetre gaps of coplanar construction layers.
@@ -360,6 +373,11 @@ pub struct SsaoParams {
     /// How dark full occlusion goes at the consumer (0 = off, 1 = black).
     /// The consumers apply it — the pass itself outputs raw visibility.
     pub strength: f32,
+    /// Turns the per-pixel rotation pattern (law 3 holds within a seed): 0
+    /// is the stable pattern; a host averaging several recordings of a
+    /// still view passes each one's sample index, and the taps' noise
+    /// averages out.
+    pub seed: f32,
 }
 
 impl Default for SsaoParams {
@@ -370,9 +388,11 @@ impl Default for SsaoParams {
     fn default() -> Self {
         Self {
             radius: 0.6,
+            range: 2.0,
             bias: 0.03,
             bias_slope: 0.002,
             strength: 0.7,
+            seed: 0.0,
         }
     }
 }
@@ -667,8 +687,9 @@ impl SsaoPass {
             dv.set_uniform(
                 cx.cx,
                 live_id!(u_ao),
-                &[params.radius, params.bias, params.bias_slope, 0.0],
+                &[params.radius, params.bias, params.bias_slope, params.seed],
             );
+            dv.set_uniform(cx.cx, live_id!(u_range), &[params.range]);
             match input {
                 SsaoInput::View(proj) => {
                     dv.set_uniform(
@@ -751,7 +772,7 @@ fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
 /// distance (metres); `center_gap` = |centre depth − occluder depth|.
 pub fn tap_occlusion(ahead: f32, center_gap: f32, params: &SsaoParams, view_dist: f32) -> f32 {
     let bias = params.bias + view_dist * params.bias_slope;
-    let range = 1.0 - smoothstep(params.radius, params.radius * 2.0, center_gap);
+    let range = 1.0 - smoothstep(params.radius * params.range * 0.5, params.radius * params.range, center_gap);
     smoothstep(bias, bias * 2.0, ahead) * range
 }
 

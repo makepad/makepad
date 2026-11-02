@@ -138,12 +138,18 @@ pub fn describe(config: &PrefetchConfig) {
 
 /// The hub's prefetcher: a pass a minute after start, then every ten minutes.
 pub fn start(shared: Arc<ServiceShared>, config: PrefetchConfig) {
+    if !makepad_network::lan::hub_service("ai-hub prefetch") {
+        return;
+    }
     describe(&config);
     let spawned = std::thread::Builder::new().name("ai-hub-prefetch".into()).spawn(move || {
         // Beacons first: the roster fills within a few beacon intervals.
         let _ = crate::discovery::start_listener();
         std::thread::sleep(FIRST_PASS_AFTER);
         loop {
+            if !makepad_network::lan::hub_service("ai-hub prefetch") {
+                return;
+            }
             run_pass(&PrefetchNode::of_service(&shared), &config, &mut |id| crate::server::note_model_files_present(&shared, id));
             std::thread::sleep(PASS_INTERVAL);
         }
@@ -169,6 +175,9 @@ pub(crate) struct Peer {
 }
 
 pub(crate) fn peers(node: &PrefetchNode) -> Vec<Peer> {
+    if !makepad_network::lan::hub_service("ai-hub prefetch peers") {
+        return Vec::new();
+    }
     let listed = PeerPlan::env_sources();
     let mut out = Vec::new();
     for found in crate::discovery::start_listener().nodes() {

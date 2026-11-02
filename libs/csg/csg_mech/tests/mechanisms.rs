@@ -210,7 +210,7 @@ fn runner_publishes_poses_and_takes_a_grab() {
     assert!(moved > 1.0, "moved {moved}");
     // grab the tip and pull it up along the print plane: it follows
     let tip = s1.poses[2].com;
-    r.send(Command::Grab { body: 2, point: tip });
+    r.send(Command::Grab { body: 2, point: tip, hz: makepad_csg_mech::runner::POINTER_HZ });
     let target = [tip[0] + 10.0, tip[1], tip[2] + 30.0];
     r.send(Command::Drag { point: target });
     std::thread::sleep(std::time::Duration::from_millis(800));
@@ -219,10 +219,27 @@ fn runner_publishes_poses_and_takes_a_grab() {
     let off = makepad_csg_mech::geom::len(makepad_csg_mech::geom::sub(s2.poses[2].com, target));
     println!("runner: {} frames in {:.2} s sim, tip {:.1} mm from the drag target", s2.frame, s2.time, off);
     assert!(off < makepad_csg_mech::geom::len(makepad_csg_mech::geom::sub(tip, target)) * 0.5, "tip did not follow: {off}");
-    r.send(Command::Release);
+    r.send(Command::Release { velocity: None });
+    r.send(Command::Pin { body: 2, point: s2.poses[2].com });
+    r.send(Command::Pause);
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let s = r.latest();
+        if !s.running && s.pinned == vec![2] {
+            break;
+        }
+        assert!(std::time::Instant::now() < until, "runner did not publish the pin and pause");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
     r.send(Command::Reset);
-    std::thread::sleep(std::time::Duration::from_millis(50));
-    let s3 = r.latest();
-    assert!(!s3.running);
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let s = r.latest();
+        if s.running && s.grabbed.is_none() && s.pinned.is_empty() {
+            break;
+        }
+        assert!(std::time::Instant::now() < until, "Reset must clear the pin and resume");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
     let _ = r.take_events();
 }

@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1d6b73"/>
+      <stop offset="1" stop-color="#0a2a33"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.10"/>
+      <stop offset="0.5" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <rect x="64" y="64" width="896" height="896" rx="200" fill="url(#bg)"/>
+  <rect x="64" y="64" width="896" height="896" rx="200" fill="url(#sheen)"/>
+  <rect x="66" y="66" width="892" height="892" rx="198" fill="none" stroke="#ffffff" stroke-opacity="0.08" stroke-width="4"/>
+  <!-- flow: three nodes joined by curved links -->
+  <path d="M300 640 C 420 640 420 384 540 384" fill="none" stroke="#bff5f0" stroke-width="44" stroke-linecap="round"/>
+  <path d="M300 640 C 440 640 480 700 700 700" fill="none" stroke="#7fe3d8" stroke-width="44" stroke-linecap="round"/>
+  <path d="M540 384 C 640 384 640 560 724 560" fill="none" stroke="#bff5f0" stroke-width="44" stroke-linecap="round" opacity="0.0"/>
+  <circle cx="300" cy="640" r="88" fill="#e9fffc"/>
+  <circle cx="620" cy="384" r="88" fill="#e9fffc"/>
+  <circle cx="724" cy="700" r="88" fill="#ffb347"/>
+  <path d="M540 384 H 620" stroke="#bff5f0" stroke-width="44" stroke-linecap="round"/>
+
+</svg>

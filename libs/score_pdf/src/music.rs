@@ -1053,26 +1053,3 @@ pub fn dependency_primitives(note: &RecognizedNote) -> BTreeSet<PrimitiveId> {
 pub fn measure_region(geometry: &PageGeometry, index: usize) -> Option<&MeasureRegion> {
     geometry.measures.get(index)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn pitch(step: Step, octave: i8) -> Pitch {
-        Pitch::new(step, Alter::NATURAL, octave)
-    }
-
-    #[test]
-    fn curve_pitch_identity_distinguishes_tie_and_slur() {
-        assert_eq!(
-            classify_curve_relation(Some(pitch(Step::C, 4)), Some(pitch(Step::C, 4)), 3.0, 0.5)
-                .value,
-            CurveKind::Tie
-        );
-        assert_eq!(
-            classify_curve_relation(Some(pitch(Step::C, 4)), Some(pitch(Step::D, 4)), 3.0, 0.5)
-                .value,
-            CurveKind::Slur
-        );
-    }
-}

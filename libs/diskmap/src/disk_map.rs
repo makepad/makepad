@@ -4140,22 +4140,6 @@ mod tests {
         assert!((m.x - r.x).abs() < 1e-9 && (m.w - r.w).abs() < 1e-9);
     }
 
-    // Hit-testing mid-gesture inverts the remap on the pointer; the two
-    // directions must be exact inverses or hover drifts off what is drawn.
-    #[test]
-    fn a_point_round_trips_through_the_remap_and_its_inverse() {
-        let body = Rect {
-            pos: dvec2(1.0, 2.0),
-            size: dvec2(500.0, 300.0),
-        };
-        let (k, b) = remap_params(body, 1.0, dvec2(0.0, 0.0), 5.0, dvec2(700.0, 300.0));
-        for p in [dvec2(3.0, 4.0), dvec2(250.0, 150.0), dvec2(499.0, 299.0)] {
-            let s = dvec2(p.x * k + b.x, p.y * k + b.y);
-            let back = dvec2((s.x - b.x) / k, (s.y - b.y) / k);
-            assert!((back.x - p.x).abs() < 1e-9 && (back.y - p.y).abs() < 1e-9);
-        }
-    }
-
     #[test]
     fn the_kind_tag_survives_the_round_trip_through_a_byte() {
         // The scan stores a FileKind as its discriminant; FILE_KINDS turns it

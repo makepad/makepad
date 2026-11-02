@@ -138,7 +138,7 @@ impl UnixStream {
             crate::sys::fcntl(fds[0], crate::sys::F_SETFD, crate::sys::FD_CLOEXEC);
             crate::sys::fcntl(fds[1], crate::sys::F_SETFD, crate::sys::FD_CLOEXEC);
         }
-        if cfg!(target_os = "macos") {
+        if cfg!(target_vendor = "apple") {
             a.set_int(sn::SOL_SOCKET, sn::SO_NOSIGPIPE, 1)?;
             b.set_int(sn::SOL_SOCKET, sn::SO_NOSIGPIPE, 1)?;
         }
@@ -227,7 +227,7 @@ impl UnixListener {
         let (buf, len) = encode_path(path.as_ref())?;
         let s = Socket::new(sn::AF_UNIX, sn::SOCK_STREAM)?;
         cvt(unsafe { sn::bind(s.raw(), sn::storage_ptr(&buf), len) })?;
-        let backlog = if cfg!(target_os = "macos") { 128 } else { -1 };
+        let backlog = if cfg!(target_vendor = "apple") { 128 } else { -1 };
         cvt(unsafe { sn::listen(s.raw(), backlog) })?;
         Ok(UnixListener { sock: s })
     }
@@ -235,7 +235,7 @@ impl UnixListener {
         let (buf, len) = encode_addr(socket_addr)?;
         let s = Socket::new(sn::AF_UNIX, sn::SOCK_STREAM)?;
         cvt(unsafe { sn::bind(s.raw(), sn::storage_ptr(&buf), len) })?;
-        let backlog = if cfg!(target_os = "macos") { 128 } else { -1 };
+        let backlog = if cfg!(target_vendor = "apple") { 128 } else { -1 };
         cvt(unsafe { sn::listen(s.raw(), backlog) })?;
         Ok(UnixListener { sock: s })
     }
@@ -291,7 +291,7 @@ impl UnixDatagram {
             crate::sys::fcntl(fds[0], crate::sys::F_SETFD, crate::sys::FD_CLOEXEC);
             crate::sys::fcntl(fds[1], crate::sys::F_SETFD, crate::sys::FD_CLOEXEC);
         }
-        if cfg!(target_os = "macos") {
+        if cfg!(target_vendor = "apple") {
             a.set_int(sn::SOL_SOCKET, sn::SO_NOSIGPIPE, 1)?;
             b.set_int(sn::SOL_SOCKET, sn::SO_NOSIGPIPE, 1)?;
         }

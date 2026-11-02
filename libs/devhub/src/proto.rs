@@ -23,9 +23,10 @@ pub fn home() -> PathBuf {
     makepad_network::fleet::makepad_home().join("devhub")
 }
 
-/// The local control socket of the running hub (0600, same user): what `makepad observe` talks to.
+/// The control socket (0600) in devhub's home, not TMPDIR: shells with their own TMPDIR (sandboxed
+/// tools) reach the same master; MAKEPAD_HOME moves it with the rest of devhub's state (tests).
 pub fn control_socket() -> PathBuf {
-    std::env::temp_dir().join("makepad-devhub.sock")
+    home().join("devhub.sock")
 }
 
 /// This machine's first private IPv4 address (the LAN address a node binds), if any.
@@ -167,10 +168,8 @@ impl Record {
     }
 
     pub fn parse(text: &str) -> Option<Record> {
-        if text.len() > MAX_RECORD {
-            return None;
-        }
         let v = makepad_strict_json::parse(text.as_bytes()).ok()?;
+        if text.len() > MAX_RECORD && v.get("detail").and_then(|v| makepad_remote::hot::Record::parse(&v.to_json())).is_none() { return None; }
         let s = |k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_string);
         Some(Record {
             id: s("id")?,
@@ -245,11 +244,9 @@ pub fn from_jit_event(machine: &str, app: &str, pid: u32, json: &str, hitch_ms: 
         }
         "rtstall" => ("rtstall", Sev::Warn, format!("rtstall: {} waited {:.1} ms on the {} queue", text(&v, "thread"), num(&v, "waited_ms").unwrap_or(0.0), text(&v, "class")), false),
         "scripterr" => ("scripterr", Sev::Warn, format!("scripterr: {}", text(&v, "error")), false),
-        "patchrefused" => {
-            let first = v.get("reasons").and_then(|r| r.as_arr()).and_then(|r| r.first()).and_then(|r| r.as_str()).map(|r| clean(r, MAX_FIELD)).unwrap_or_default();
-            ("patch_failed", Sev::Warn, format!("patch_failed: {} {}: {first}", text(&v, "outcome"), text(&v, "edit")), false)
-        }
-        "patchreverted" => ("patch_failed", Sev::Warn, format!("patch_failed: reverted {}: {}", text(&v, "edit"), text(&v, "error")), false),
+        // Hot verdicts use the durable typed JIT channel, including verified loads.
+        // In particular a normal restart-required edit is not a patch failure.
+        "patchrefused" | "patchreverted" | "patchverified" => return None,
         "engine_request" => {
             let game = text(&v, "game");
             let game = if game.is_empty() { String::new() } else { format!(" (game {game})") };
@@ -266,6 +263,18 @@ pub fn from_jit_event(machine: &str, app: &str, pid: u32, json: &str, hitch_ms: 
         _ => format!("{machine}.{pid}.{seq}"),
     };
     Some(Record { id, at_ms: wall_ms(), machine: machine.to_string(), app, pid, kind: kind.to_string(), sev, line, detail: json.to_string(), untrusted })
+}
+
+pub fn from_hot(h: &makepad_remote::hot::Record) -> Record {
+    use makepad_remote::hot::Outcome;
+    let (kind, sev) = match h.outcome {
+        Outcome::RestartFailed => ("jit_error", Sev::Err),
+        o if o.failure() => ("patch_failed", Sev::Warn),
+        _ => ("jit_hot", Sev::Info),
+    };
+    Record { id: h.id.clone(), at_ms: h.at_ms, machine: h.node.clone(), app: h.app.clone(), pid: h.pid,
+        kind: kind.into(), sev, line: format!("{kind}: {} {}: {}", h.app, h.outcome.name(), clean(&h.reason, MAX_FIELD)),
+        detail: h.to_json(), untrusted: false }
 }
 
 /// The hub's own record (link up/down, a JIT that ended, ...).

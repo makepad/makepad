@@ -4,7 +4,7 @@ its caller -- also prelinked, not edited -- calls the new code.
 
 usage: run.py --makepad <makepad binary>   (MAKEPAD_RUN_STD in the environment)
 
-Copies pkg/ to a temporary dir with a fresh disk cache; every run is a live session (MAKEPAD_RUN_LIVE=1):
+Copies pkg/ to a temporary dir with a fresh disk cache; every run is a live session (`makepad run` of a working tree):
   1. fill: run once (PRELINK_ONCE=1): the cold run records the startup manifest and its image
   2. warm: run once again: the start is prelinked (verbose "prelinked N startup slots")
   3. live: run, and while it prints "out tick <n> 11" (caller = value() * 10 + 1, value() = 1):
@@ -24,8 +24,8 @@ helper = os.path.join(pkg, "src", "helper.rs")
 base = open(helper).read()
 # the live driver writes this file once it watches the sources (MAKEPAD_RUN_LIVE_READY)
 ready = os.path.join(tmp, "live-ready")
-env = dict(os.environ, MAKEPAD_RUN_LIVE="1", MAKEPAD_RUN_LIVE_READY=ready, MAKEPAD_RUN_CACHE_DIR=os.path.join(tmp, "cache"))
-for k in ("MAKEPAD_RUN_CACHE", "MAKEPAD_RUN_PRELINK", "MAKEPAD_RUN_HINTS_RECORD"):
+env = dict(os.environ, MAKEPAD_RUN_LIVE_READY=ready, MAKEPAD_RUN_CACHE_DIR=os.path.join(tmp, "cache"))
+for k in ("MAKEPAD_RUN_CACHE", "MAKEPAD_RUN_PRELINK"):
     env.pop(k, None)
 cmd = [relax, "run", "--verbose", "cache-prelink-reload"]
 

@@ -381,13 +381,13 @@ impl Renderer {
             self.append_unbaked_world_casters(cx.cx, world, &mut lm_movers);
         }
         // The camera slice the Realtime cascades fit to: the far-plane
-        // corners of THIS view, unprojected (far = clip z +w in every
-        // backend's convention). Flat stage only — in XR the runtime owns
+        // corners of the host's stable projection or this view, unprojected
+        // (far = clip z +w in every backend). Flat stage only — in XR the runtime owns
         // the eye matrices, and the baker falls back to eye-centered rings.
         let csm_view = (self.stage.mode == StageMode::Flat)
             .then(|| {
                 let clip = Mat4f::mul(
-                    &scene_state.projection,
+                    self.csm_fit_projection.as_ref().unwrap_or(&scene_state.projection),
                     &Mat4f::mul(&scene_state.view, &stage_matrix),
                 );
                 let inv = clip.invert();
@@ -441,6 +441,7 @@ impl Renderer {
             self.clustered.render_shadows(cx.cx, camera_pos, &statics, &lm_movers);
             stats.clustered = self.clustered.stats();
         }
+        self.gi.flush_retired(cx.cx);
         if self.gi.mode()!=crate::GiMode::Off && self.clustered_enabled && cx.gpu_info().float_color_targets {
             self.run_fast_gi(cx, world, camera_pos, &scene_state, skinned.as_ref().map(|b| b.items.as_slice()), &sun, &mut stats);
         }
@@ -692,6 +693,7 @@ impl Renderer {
         for dv in [&mut draws.cube.cube.draw_vars, &mut draws.alpha.cube.cube.draw_vars, &mut draws.terrain.draw_vars] {
             self.clustered.bind(cx.cx, dv, self.clustered_enabled);
             self.gi.bind(cx.cx, dv);
+            self.bind_output_dither(cx.cx, dv);
         }
         // The level draws go through the shader variant for this frame's
         // features while the host keeps their stock programs (variants.rs).

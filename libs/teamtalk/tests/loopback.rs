@@ -171,20 +171,20 @@ fn muting_the_link_sends_silence_but_keeps_presence() {
 
 #[test]
 fn co_located_instances_fall_back_to_the_next_port_and_meet() {
-    // A fixed port (not the real 41531: tests must not squat the LAN port).
-    let port = 42641;
-    let a = VoiceLink::bind(VoiceConfig {
-        port,
-        broadcast: false,
-        hello_ms: 100,
-        ..VoiceConfig::default()
-    });
-    let a = match a {
-        Ok(a) => a,
-        // Something else on this machine owns the test port: nothing to test.
-        Err(_) => return,
+    // Reserve an ephemeral first port, and find a free adjacent fallback.
+    let a = loop {
+        let candidate = VoiceLink::bind(test_config()).expect("bind a");
+        let Some(next) = candidate.local_addr().port().checked_add(1) else { continue };
+        match std::net::UdpSocket::bind(("0.0.0.0", next)) {
+            Ok(probe) => {
+                drop(probe);
+                break candidate;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => continue,
+            Err(error) => panic!("probe fallback port: {error}"),
+        }
     };
-    assert_eq!(a.local_addr().port(), port);
+    let port = a.local_addr().port();
     let b = VoiceLink::bind(VoiceConfig {
         port,
         broadcast: false,

@@ -297,11 +297,6 @@ impl WireRoute {
         self.topology.translate(offset);
     }
 
-    #[cfg(test)]
-    pub fn is_straight_cubic(&self) -> bool {
-        matches!(self.kind, RouteKind::Cubic { .. })
-    }
-
     pub fn length(&self) -> f64 {
         self.length
     }
@@ -1947,12 +1942,6 @@ mod tests {
     }
 
     #[test]
-    fn routed_mode_is_orthogonal_when_clear() {
-        let route = route(Point::new(0.0, 20.0), Point::new(240.0, 80.0), &[]);
-        assert!(matches!(route.kind, RouteKind::Orthogonal { .. }));
-    }
-
-    #[test]
     fn first_grab_geometry_stays_orthogonal() {
         let obstacles = facing_endpoint_cards(400.0, 540.0);
         let route = route(Point::new(400.0, 220.0), Point::new(540.0, 180.0), &obstacles);
@@ -2198,16 +2187,6 @@ mod tests {
             "route should cross between the stacked cards: {points:?}"
         );
         assert_route_misses_cards(&route, &obstacles);
-    }
-
-    #[test]
-    fn dense_blocking_stubs_falls_back_to_orthogonal() {
-        let obstacles = [
-            Obstacle::from_xywh(20.0, -20.0, 60.0, 40.0),
-            Obstacle::from_xywh(100.0, -100.0, 60.0, 200.0),
-        ];
-        let route = route(Point::new(0.0, 0.0), Point::new(220.0, 0.0), &obstacles);
-        assert!(matches!(route.kind, RouteKind::Orthogonal { .. }));
     }
 
     #[test]

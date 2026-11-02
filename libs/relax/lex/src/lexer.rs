@@ -119,16 +119,8 @@ pub enum T {
     /// an already-parsed expression spliced into a built-in macro expansion (fmtmac.rs);
     /// lo/hi are the expression's span, the id is in `Parser::interp`
     Interp,
-    // Append only: Relax stores the discriminants of the preceding variants.
-    Colour,
-    Duration,
-    AtId,
-    ColonEq,
-    PlusColon,
     Comment,
     DocComment,
-    Apostrophe,
-    OtherPunct,
 }
 
 /// 9 bytes, packed (12 with padding): files keep their tokens (attributes, macro bodies,
@@ -147,17 +139,9 @@ pub struct LexError {
     pub msg: std::borrow::Cow<'static, str>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Mode {
-    Rust,
-    Declarative,
-    Gpu,
-}
-
 #[derive(Clone, Copy, Debug)]
 pub struct LexOptions {
     pub edition: u16,
-    pub mode: Mode,
     pub trivia: bool,
 }
 
@@ -169,40 +153,24 @@ pub struct TokenLexError {
     pub msg: String,
 }
 
-/// Append tokens, including a final `Eof`. Rust without trivia is exactly `lex`.
-/// The dialect modes require UTF-8 and preserve shader_ast's boundaries and errors.
+/// Append tokens, including a final `Eof`. Without trivia this is exactly `lex`.
 pub fn lex_with(src: &[u8], opts: &LexOptions, out: &mut Vec<Tok>) -> Result<(), TokenLexError> {
-    if opts.mode == Mode::Rust {
-        let result = if opts.trivia {
-            scan::<false, true, true, LexError>(src, "", opts.edition, out, true)
-        } else {
-            lex(src, opts.edition, out)
-        };
-        return result.map_err(|e| TokenLexError {
-            code: 2,
-            lo: e.pos,
-            hi: if matches!(&*e.msg, "unexpected character" | "bad char literal" | "bad quote") {
-                (e.pos as usize + src.get(e.pos as usize).map_or(0, |&c| utf8_len(c)))
-                    .min(src.len()) as u32
-            } else {
-                src.len() as u32
-            },
-            msg: e.msg.into_owned(),
-        });
-    }
-    let source = std::str::from_utf8(src).map_err(|e| TokenLexError {
-        code: 2,
-        lo: e.valid_up_to() as u32,
-        hi: (e.valid_up_to() + e.error_len().unwrap_or(src.len() - e.valid_up_to())) as u32,
-        msg: "invalid source: expected UTF-8".into(),
-    })?;
-    // shader_ast currently has identical Declarative and Gpu lexical rules,
-    // including durations in both modes. The parsers impose further restrictions.
-    if opts.trivia {
-        scan::<true, true, true, TokenLexError>(src, source, opts.edition, out, true)
+    let result = if opts.trivia {
+        scan::<true>(src, opts.edition, out, true)
     } else {
-        scan::<true, false, true, TokenLexError>(src, source, opts.edition, out, true)
-    }
+        lex(src, opts.edition, out)
+    };
+    result.map_err(|e| TokenLexError {
+        code: 2,
+        lo: e.pos,
+        hi: if matches!(&*e.msg, "unexpected character" | "bad char literal" | "bad quote") {
+            (e.pos as usize + src.get(e.pos as usize).map_or(0, |&c| utf8_len(c)))
+                .min(src.len()) as u32
+        } else {
+            src.len() as u32
+        },
+        msg: e.msg.into_owned(),
+    })
 }
 
 
@@ -219,7 +187,7 @@ impl T {
         matches!(self, Self::Int | Self::Float)
     }
 
-    /// Quoted literals; numbers and dialect atoms have their own classifications.
+    /// Quoted literals; numbers have their own classification.
     #[inline]
     pub fn is_literal(self) -> bool {
         matches!(self, Self::Str | Self::ByteStr | Self::CStr | Self::RawStr | Self::Char | Self::Byte)
@@ -236,60 +204,6 @@ impl Tok {
     #[inline]
     pub fn text<'a>(&self, source: &'a str) -> &'a str {
         &source[self.lo as usize..self.hi as usize]
-    }
-}
-
-/// Scan a declarative item before its opaque Rust islands have been separated.
-/// Uses the same scanner and token kinds as `lex_with`, retaining trivia and EOF,
-/// but leaves ASCII identifier, colour and exponent validation to the parser.
-/// String/comment termination is still checked. Rust islands must subsequently
-/// be lexed in Rust mode; remaining dialect atoms must be validated with lex_with.
-pub fn lex_deferred(src: &[u8], edition: u16, out: &mut Vec<Tok>) -> Result<(), TokenLexError> {
-    let source = std::str::from_utf8(src).map_err(|e| TokenLexError {
-        code: 2,
-        lo: e.valid_up_to() as u32,
-        hi: (e.valid_up_to() + e.error_len().unwrap_or(src.len() - e.valid_up_to())) as u32,
-        msg: "invalid source: expected UTF-8".into(),
-    })?;
-    scan::<true, true, false, TokenLexError>(src, source, edition, out, true)
-}
-
-/// Whether a complete colour atom has a supported width and only hex digits.
-pub fn valid_colour(text: &str) -> bool {
-    let digits = text.strip_prefix('#').unwrap_or(text);
-    let digits = digits.strip_prefix('x').unwrap_or(digits);
-    matches!(digits.len(), 3 | 4 | 6 | 8) && digits.bytes().all(|b| b.is_ascii_hexdigit())
-}
-
-// Specialize the error representation too: Relax's hot path still returns its
-// small, static LexError and never constructs a String or a dialect diagnostic.
-trait ScanError {
-    fn ordinary(lo: usize, hi: usize, msg: &'static str) -> Self;
-    fn dialect(code: u16, lo: usize, hi: usize, msg: String) -> Self;
-}
-
-impl ScanError for LexError {
-    fn ordinary(lo: usize, _hi: usize, msg: &'static str) -> Self {
-        Self { pos: lo as u32, msg: msg.into() }
-    }
-
-    fn dialect(_code: u16, _lo: usize, _hi: usize, _msg: String) -> Self {
-        unreachable!("dialect errors are compiled out of the Rust scanner")
-    }
-}
-
-impl ScanError for TokenLexError {
-    fn ordinary(lo: usize, hi: usize, msg: &'static str) -> Self {
-        let msg = match msg {
-            "unterminated block comment" => "invalid comment: unterminated block comment",
-            "unterminated raw string" => "invalid string: unterminated raw literal",
-            _ => "invalid literal: unterminated quote",
-        };
-        Self::dialect(2, lo, hi, msg.into())
-    }
-
-    fn dialect(code: u16, lo: usize, hi: usize, msg: String) -> Self {
-        Self { code, lo: lo as u32, hi: hi as u32, msg }
     }
 }
 
@@ -536,18 +450,16 @@ pub fn set_validation(on: bool) {
 }
 
 pub fn lex(src: &[u8], edition: u16, out: &mut Vec<Tok>) -> Result<(), LexError> {
-    scan::<false, false, true, LexError>(src, "", edition, out, true)
+    scan::<false>(src, edition, out, true)
 }
 
 /// `lex` for a file `include!`d as an expression or statement: rustc strips a shebang only from the files it
 /// parses as modules (`StripTokens::Nothing`), so a leading `#!` stays tokens there.
 pub fn lex_keep_shebang(src: &[u8], edition: u16, out: &mut Vec<Tok>) -> Result<(), LexError> {
-    scan::<false, false, true, LexError>(src, "", edition, out, false)
+    scan::<false>(src, edition, out, false)
 }
 
-fn scan<const RX: bool, const TRIVIA: bool, const VALIDATE: bool, E: ScanError>(
-    src: &[u8], source: &str, edition: u16, out: &mut Vec<Tok>, strip_shebang: bool,
-) -> Result<(), E> {
+fn scan<const TRIVIA: bool>(src: &[u8], edition: u16, out: &mut Vec<Tok>, strip_shebang: bool) -> Result<(), LexError> {
     let n = src.len();
     let mut i = 0usize;
     // BOM
@@ -556,26 +468,24 @@ fn scan<const RX: bool, const TRIVIA: bool, const VALIDATE: bool, E: ScanError>(
     }
     // shebang (rustc_lexer::strip_shebang: `#!` unless the next token past whitespace and plain
     // comments is `[`)
-    if strip_shebang && (!RX || i == 0) && n >= i + 2 && src[i] == b'#' && src[i + 1] == b'!' {
+    if strip_shebang && n >= i + 2 && src[i] == b'#' && src[i + 1] == b'!' {
         let mut j = i + 2;
-        while !RX && j < n && (src[j] == b' ' || src[j] == b'\t') {
+        while j < n && (src[j] == b' ' || src[j] == b'\t') {
             j += 1;
         }
         // rustc strip_shebang: `#!` starts an inner attribute when the next token after
         // whitespace and plain comments is `[`
-        if !RX {
-            loop {
-                while j < n && matches!(src[j], b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c) { j += 1; }
-                if src[j..].starts_with(b"//") && !((src[j..].starts_with(b"///") && !src[j..].starts_with(b"////")) || src[j..].starts_with(b"//!")) {
-                    while j < n && src[j] != b'\n' { j += 1; }
-                } else if src[j..].starts_with(b"/*") && !((src[j..].starts_with(b"/**") && !src[j..].starts_with(b"/***") && !src[j..].starts_with(b"/**/")) || src[j..].starts_with(b"/*!")) {
-                    let mut depth = 0usize;
-                    while j < n {
-                        if src[j..].starts_with(b"/*") { depth += 1; j += 2; } else if src[j..].starts_with(b"*/") { depth -= 1; j += 2; if depth == 0 { break; } } else { j += 1; }
-                    }
-                } else {
-                    break;
+        loop {
+            while j < n && matches!(src[j], b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c) { j += 1; }
+            if src[j..].starts_with(b"//") && !((src[j..].starts_with(b"///") && !src[j..].starts_with(b"////")) || src[j..].starts_with(b"//!")) {
+                while j < n && src[j] != b'\n' { j += 1; }
+            } else if src[j..].starts_with(b"/*") && !((src[j..].starts_with(b"/**") && !src[j..].starts_with(b"/***") && !src[j..].starts_with(b"/**/")) || src[j..].starts_with(b"/*!")) {
+                let mut depth = 0usize;
+                while j < n {
+                    if src[j..].starts_with(b"/*") { depth += 1; j += 2; } else if src[j..].starts_with(b"*/") { depth -= 1; j += 2; if depth == 0 { break; } } else { j += 1; }
                 }
+            } else {
+                break;
             }
         }
         if j >= n || src[j] != b'[' {
@@ -588,23 +498,19 @@ fn scan<const RX: bool, const TRIVIA: bool, const VALIDATE: bool, E: ScanError>(
             }
         }
     }
-    let err = |pos: usize, msg: &'static str| E::ordinary(pos, n, msg);
+    let err = |pos: usize, msg: &'static str| LexError { pos: pos as u32, msg: msg.into() };
     while i < n {
         let c = src[i];
         let lo = i;
-        if RX && c >= 0x80 && rx_char(source, i).is_some_and(char::is_whitespace) {
-            i += utf8_len(c);
-            continue;
-        }
         let kind = match c {
-            _ if c >= 0x80 && !RX && pattern_whitespace_len(src, i) > 0 => {
+            _ if c >= 0x80 && pattern_whitespace_len(src, i) > 0 => {
                 i += pattern_whitespace_len(src, i);
                 continue;
             }
             b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c => {
                 i += 1;
                 // Indentation and other whitespace runs need no token dispatch
-                // per byte. The accepted bytes are unchanged in every mode.
+                // per byte.
                 loop {
                     i = skip_spaces(src, i);
                     if i < n && matches!(src[i], b'\t' | b'\n' | b'\r' | 0x0b | 0x0c) {
@@ -654,22 +560,13 @@ fn scan<const RX: bool, const TRIVIA: bool, const VALIDATE: bool, E: ScanError>(
                 }
             }
             b'"' => {
-                i = lex_quoted_mode::<RX>(src, i + 1, b'"').ok_or_else(|| err(lo, "unterminated string"))?;
-                if !RX { i = lex_suffix(src, i); }
+                i = lex_quoted(src, i + 1, b'"').ok_or_else(|| err(lo, "unterminated string"))?;
+                i = lex_suffix(src, i);
                 T::Str
             }
             b'\'' => {
                 // char literal or lifetime
-                if RX {
-                    let end = rx_suffix(source, i + 1);
-                    if rx_char(source, i + 1).is_some_and(rx_start) && src.get(end) != Some(&b'\'') {
-                        i += 1;
-                        T::Apostrophe
-                    } else {
-                        i = lex_quoted_mode::<true>(src, i + 1, b'\'').ok_or_else(|| err(lo, "bad char"))?;
-                        T::Char
-                    }
-                } else if i + 1 < n && src[i + 1] == b'\\' {
+                if i + 1 < n && src[i + 1] == b'\\' {
                     i = lex_quoted(src, i + 1, b'\'').ok_or_else(|| err(lo, "bad char"))?;
                     i = lex_suffix(src, i);
                     T::Char
@@ -693,7 +590,7 @@ fn scan<const RX: bool, const TRIVIA: bool, const VALIDATE: bool, E: ScanError>(
                         }
                         j = ident_run_end(src, j);
                         // rustc_parse lexer: the name of a raw lifetime is a valid raw identifier
-                        if let (true, Some(from)) = (VALIDATE, raw_from) {
+                        if let Some(from) = raw_from {
                             match &src[from..j] {
                                 b"_" => return Err(err(lo, "`_` cannot be a raw lifetime")),
                                 b"self" => return Err(err(lo, "`self` cannot be a raw lifetime")),
@@ -704,7 +601,7 @@ fn scan<const RX: bool, const TRIVIA: bool, const VALIDATE: bool, E: ScanError>(
                             }
                         }
                         // rustc_lexer `UnknownPrefixLifetime`: `'foo#` (an error from edition 2021)
-                        if VALIDATE && edition >= 2021 && j < n && src[j] == b'#' {
+                        if edition >= 2021 && j < n && src[j] == b'#' {
                             return Err(err(lo, "prefix is unknown"));
                         }
                         i = j;
@@ -715,11 +612,7 @@ fn scan<const RX: bool, const TRIVIA: bool, const VALIDATE: bool, E: ScanError>(
                 }
             }
             b'0'..=b'9' => {
-                let (j, k) = if RX {
-                    lex_rx_number::<VALIDATE, E>(source, i)?
-                } else {
-                    lex_number(src, i)
-                };
+                let (j, k) = lex_number(src, i);
                 i = j;
                 k
             }
@@ -776,29 +669,14 @@ fn scan<const RX: bool, const TRIVIA: bool, const VALIDATE: bool, E: ScanError>(
                 if i + 1 < n && src[i + 1] == b':' {
                     i += 2;
                     T::PathSep
-                } else if RX && src.get(i + 1) == Some(&b'=') {
-                    i += 2;
-                    T::ColonEq
                 } else {
                     i += 1;
                     T::Colon
                 }
             }
             b'#' => {
-                if RX && src.get(i + 1).is_some_and(|b| b.is_ascii_hexdigit() || *b == b'x') {
-                    i += 1;
-                    if src[i] == b'x' { i += 1; }
-                    let digits = i;
-                    while i < n && src[i].is_ascii_hexdigit() { i += 1; }
-                    if VALIDATE && (!matches!(i - digits, 3 | 4 | 6 | 8) || rx_char(source, i).is_some_and(rx_cont)) {
-                        return Err(E::dialect(2, lo, i, format!("invalid colour: {}", &source[lo..i])));
-                    }
-                    if !VALIDATE { i = rx_suffix(source, i); }
-                    T::Colour
-                } else {
-                    i += 1;
-                    T::Pound
-                }
+                i += 1;
+                T::Pound
             }
             b'$' => {
                 i += 1;
@@ -810,13 +688,7 @@ fn scan<const RX: bool, const TRIVIA: bool, const VALIDATE: bool, E: ScanError>(
             }
             b'@' => {
                 i += 1;
-                if RX && rx_char(source, i).is_some_and(rx_start) {
-                    if source[i..].starts_with("r#") { i += 2; }
-                    i = rx_suffix(source, i);
-                    T::AtId
-                } else {
-                    T::At
-                }
+                T::At
             }
             b'~' => {
                 i += 1;
@@ -855,7 +727,7 @@ fn scan<const RX: bool, const TRIVIA: bool, const VALIDATE: bool, E: ScanError>(
                 } else if i + 1 < n && src[i + 1] == b'=' {
                     i += 2;
                     T::Le
-                } else if !RX && i + 1 < n && src[i + 1] == b'-' {
+                } else if i + 1 < n && src[i + 1] == b'-' {
                     i += 2;
                     T::LArrow
                 } else {
@@ -892,14 +764,7 @@ fn scan<const RX: bool, const TRIVIA: bool, const VALIDATE: bool, E: ScanError>(
                     T::Minus
                 }
             }
-            b'+' => {
-                if RX && src.get(i + 1) == Some(&b':') {
-                    i += 2;
-                    T::PlusColon
-                } else {
-                    op2(src, &mut i, T::Plus, T::PlusEq)
-                }
-            }
+            b'+' => op2(src, &mut i, T::Plus, T::PlusEq),
             b'*' => op2(src, &mut i, T::Star, T::StarEq),
             b'%' => op2(src, &mut i, T::Percent, T::PercentEq),
             b'^' => op2(src, &mut i, T::Caret, T::CaretEq),
@@ -919,15 +784,15 @@ fn scan<const RX: bool, const TRIVIA: bool, const VALIDATE: bool, E: ScanError>(
                     op2(src, &mut i, T::Or, T::OrEq)
                 }
             }
-            _ if if RX { rx_char(source, i).is_some_and(rx_start) } else { is_ident_start(c) } => {
+            _ if is_ident_start(c) => {
                 // prefixed literals
                 if c == b'b' && i + 1 < n && src[i + 1] == b'\'' {
-                    i = lex_quoted_mode::<RX>(src, i + 2, b'\'').ok_or_else(|| err(lo, "bad byte"))?;
-                    if !RX { i = lex_suffix(src, i); }
+                    i = lex_quoted(src, i + 2, b'\'').ok_or_else(|| err(lo, "bad byte"))?;
+                    i = lex_suffix(src, i);
                     T::Byte
                 } else if (c == b'b' || (c == b'c' && edition >= 2021)) && i + 1 < n && src[i + 1] == b'"' {
-                    i = lex_quoted_mode::<RX>(src, i + 2, b'"').ok_or_else(|| err(lo, "bad string"))?;
-                    if !RX { i = lex_suffix(src, i); }
+                    i = lex_quoted(src, i + 2, b'"').ok_or_else(|| err(lo, "bad string"))?;
+                    i = lex_suffix(src, i);
                     if c == b'b' {
                         T::ByteStr
                     } else {
@@ -935,22 +800,13 @@ fn scan<const RX: bool, const TRIVIA: bool, const VALIDATE: bool, E: ScanError>(
                     }
                 } else if let Some(j) = raw_string_start(src, i).filter(|_| c != b'c' || edition >= 2021) {
                     i = lex_raw_string(src, j).ok_or_else(|| err(lo, "unterminated raw string"))?;
-                    if !RX { i = lex_suffix(src, i); }
+                    i = lex_suffix(src, i);
                     // br".." is a raw byte string, cr".." a raw C string
                     match c {
                         b'b' => T::ByteStr,
                         b'c' => T::CStr,
                         _ => T::RawStr,
                     }
-                } else if RX {
-                    let raw = c == b'r' && src.get(i + 1) == Some(&b'#');
-                    if raw { i += 2; }
-                    // shader_ast consumes the first character after r# even if
-                    // it is not an identifier start. At EOF it used to panic;
-                    // retain the available r# as a RawIdent instead.
-                    if i < n { i += utf8_len(src[i]); }
-                    i = rx_suffix(source, i);
-                    if raw { T::RawIdent } else { keyword(&src[lo..i], edition).unwrap_or(T::Ident) }
                 } else if c == b'r' && i + 2 < n && src[i + 1] == b'#' && is_ident_start(src[i + 2]) {
                     let j = ident_run_end(src, i + 2);
                     i = j;
@@ -961,7 +817,7 @@ fn scan<const RX: bool, const TRIVIA: bool, const VALIDATE: bool, E: ScanError>(
                     // rustc_lexer `ident_or_unknown_prefix`: an identifier right before `#`, `"` or
                     // `'` is a reserved prefix, an error from edition 2021 (the known prefixes
                     // `b`, `br`, `c`, `cr`, `r` were taken above)
-                    if VALIDATE && edition >= 2021 && j < n && matches!(src[j], b'#' | b'"' | b'\'') {
+                    if edition >= 2021 && j < n && matches!(src[j], b'#' | b'"' | b'\'') {
                         return Err(err(i, "prefix is unknown"));
                     }
                     if k == T::Ident && is_raw_body(&src[i..j]) {
@@ -991,15 +847,8 @@ fn scan<const RX: bool, const TRIVIA: bool, const VALIDATE: bool, E: ScanError>(
                     k
                 }
             }
-            _ if RX => {
-                i += utf8_len(c);
-                T::OtherPunct
-            }
             _ => return Err(err(lo, "unexpected character")),
         };
-        if RX && VALIDATE && matches!(kind, T::Ident | T::RawIdent | T::AtId) && !src[lo..i].is_ascii() {
-            return Err(E::dialect(15, lo, i, format!("identifier {} must be ASCII", &source[lo..i])));
-        }
         out.push(Tok {
             kind,
             lo: lo as u32,
@@ -1038,11 +887,7 @@ fn utf8_len(c: u8) -> usize {
 }
 
 /// From just after the opening quote; returns index after the closing quote.
-fn lex_quoted(src: &[u8], i: usize, q: u8) -> Option<usize> {
-    lex_quoted_mode::<false>(src, i, q)
-}
-
-fn lex_quoted_mode<const RX: bool>(src: &[u8], mut i: usize, q: u8) -> Option<usize> {
+fn lex_quoted(src: &[u8], mut i: usize, q: u8) -> Option<usize> {
     let n = src.len();
     loop {
         // the body up to the next quote or escape
@@ -1051,7 +896,7 @@ fn lex_quoted_mode<const RX: bool>(src: &[u8], mut i: usize, q: u8) -> Option<us
             return None;
         }
         if src[i] == b'\\' {
-            i += if RX { 1 + src.get(i + 1).map_or(0, |&c| utf8_len(c)) } else { 2 };
+            i += 2;
         } else {
             return Some(i + 1);
         }
@@ -1173,75 +1018,6 @@ fn comment_kind(text: &[u8]) -> T {
     } else {
         T::Comment
     }
-}
-
-fn rx_char(source: &str, i: usize) -> Option<char> {
-    source[i..].chars().next()
-}
-
-fn rx_start(c: char) -> bool {
-    c == '_' || c.is_alphabetic() || (!c.is_ascii() && !c.is_whitespace() && !c.is_control())
-}
-
-fn rx_cont(c: char) -> bool {
-    rx_start(c) || c.is_ascii_digit()
-}
-
-fn rx_suffix(source: &str, mut i: usize) -> usize {
-    while let Some(c) = rx_char(source, i).filter(|&c| rx_cont(c)) {
-        i += c.len_utf8();
-    }
-    i
-}
-
-// The dialect consumes exponents even when they are malformed, validates them,
-// and uses character-based identifier continuations for numeric suffixes.
-fn lex_rx_number<const VALIDATE: bool, E: ScanError>(source: &str, lo: usize) -> Result<(usize, T), E> {
-    let src = source.as_bytes();
-    let mut i = lo + 1;
-    let radix = src[lo] == b'0' && src.get(i).is_some_and(|b| matches!(b, b'x' | b'o' | b'b'));
-    let mut float = false;
-    if radix {
-        i += 1;
-        while src.get(i).is_some_and(|b| b.is_ascii_hexdigit() || *b == b'_') {
-            i += 1;
-        }
-    } else {
-        while src.get(i).is_some_and(|b| b.is_ascii_digit() || *b == b'_') {
-            i += 1;
-        }
-        if src.get(i) == Some(&b'.') && src.get(i + 1) != Some(&b'.')
-            && !rx_char(source, i + 1).is_some_and(rx_start)
-        {
-            float = true;
-            i += 1;
-            while src.get(i).is_some_and(|b| b.is_ascii_digit() || *b == b'_') {
-                i += 1;
-            }
-        }
-        if src.get(i).is_some_and(|b| matches!(b, b'e' | b'E')) {
-            float = true;
-            i += 1;
-            if src.get(i).is_some_and(|b| matches!(b, b'+' | b'-')) { i += 1; }
-            let exponent = i;
-            while src.get(i).is_some_and(|b| b.is_ascii_digit() || *b == b'_') {
-                i += 1;
-            }
-            if VALIDATE && i == exponent {
-                return Err(E::dialect(2, lo, i, "invalid number: missing exponent".into()));
-            }
-        }
-    }
-    let suffix = i;
-    i = rx_suffix(source, i);
-    let kind = if !radix && matches!(&source[suffix..i], "s" | "ms") {
-        T::Duration
-    } else if !radix && (float || src.get(suffix) == Some(&b'f')) {
-        T::Float
-    } else {
-        T::Int
-    };
-    Ok((i, kind))
 }
 
 /// 1-based line and column of a byte position.

@@ -1211,7 +1211,16 @@ impl Program {
     /// Current module versions, one per authored path (excluding deferred macro fragments).
     pub fn current_source_files(&self) -> std::collections::BTreeMap<String, u32> {
         let mut files = std::collections::BTreeMap::new();
+        let mut bound = Vec::with_capacity(self.mods.len());
         for module in &self.mods {
+            // Refused module additions keep their definitions for old compiler
+            // references, but their files are not versions of the running tree.
+            let live = module.parent_mod.is_none_or(|parent| {
+                bound[parent as usize] && (module.lexical_parent.is_some()
+                    || self.mods[parent as usize].types.get(&self.def(module.def).name) == Some(&module.def))
+            });
+            bound.push(live);
+            if !live { continue; }
             if let Some(path) = self.file_paths.get(module.file as usize) {
                 files.insert(path.clone(), module.file);
             }
@@ -2287,7 +2296,10 @@ impl Program {
         let first = self.defs.len();
         for &(iid, at) in items {
             match at {
-                Ok(module) => self.collect_items(file, &[iid], module, "", false)?,
+                Ok(module) => {
+                    let (dir, mod_rs) = self.module_source_directory(module);
+                    self.collect_items(file, &[iid], module, &dir, mod_rs)?;
+                }
                 Err(imp) => {
                     let krate = self.defs[imp.0 as usize].krate;
                     let module = self.defs[imp.0 as usize].scope;
@@ -2308,6 +2320,35 @@ impl Program {
         let visible = self.crates_seeing_files([file].into_iter());
         crate::assoc::collect_in(self, Some(&visible));
         Ok((first as u32..self.defs.len() as u32).map(DefId).collect())
+    }
+
+    /// Derive child-module lookup from the published declarations, including
+    /// when the program was restored from a collected image (mod_dirs is a
+    /// loader cache). Match collect_items' inline and #[path] ownership rules.
+    fn module_source_directory(&self, module: u32) -> (String, bool) {
+        let module = &self.mods[self.mods[module as usize].normal as usize];
+        let path = &self.file_paths[module.file as usize];
+        let Some(parent) = module.parent_mod else { return (dir_of(path).into(), true) };
+        let def = self.def(module.def);
+        let pf = &self.files[def.file as usize];
+        let item = pf.ast.item(def.item);
+        let mut paths = Vec::new();
+        crate::crates::path_attrs_cfg(self.src(def.file), pf.ast.list(item.attrs), &self.crates[module.krate as usize].cfg, &mut paths);
+        if matches!(item.kind, ItemKind::Mod(None)) {
+            let mod_rs = !paths.is_empty() || path.ends_with("/mod.rs");
+            return (if mod_rs { dir_of(path).into() } else { format!("{}/{}", dir_of(path), stem_of(path)) }, mod_rs);
+        }
+        let (mut dir, mod_rs) = self.module_source_directory(parent);
+        if let Some(authored) = pf.authored_path(item.lo).filter(|p| p != &self.file_paths[def.file as usize]) {
+            dir = if mod_rs { dir_of(&authored).into() } else { format!("{}/{}", dir_of(&authored), dir.rsplit('/').next().unwrap_or("")) };
+        }
+        let child = if let Some(relative) = paths.first() {
+            let base = if mod_rs { dir.as_str() } else { dir_of(&self.file_paths[def.file as usize]) };
+            crate::crates::join_path(base, relative)
+        } else {
+            format!("{}/{}", dir, self.syms.str(def.name))
+        };
+        (child, true)
     }
 
     /// Recollect one crate from the checker's current file versions. Other crates' ASTs
@@ -5775,7 +5816,7 @@ fn strip_cfg_stmts(ast: &mut Ast, src: Src, cfg: &CfgSet, b: BlockId) {
                     out.push(Stmt::Expr(expr, semi));
                     // the statement's attributes are kept for the lint passes (lint levels, and the
                     // fact that a value had attributes: `#[cfg(..)] { x }` is not an unused-braces case)
-                    kept_attrs.push((expr, attrs));
+                    kept_attrs.push(AttrsStmt { attrs, expr, semi });
                 }
             }
             Stmt::Let(r) if { let attrs = ast.row(*r).attrs; !attrs.is_empty() && !crate::cfg::active(src, ast.list(attrs), cfg) } => {}
@@ -5784,7 +5825,7 @@ fn strip_cfg_stmts(ast: &mut Ast, src: Src, cfg: &CfgSet, b: BlockId) {
     }
     let l = ast.push_list(out);
     ast.block_mut(b).stmts = l;
-    ast.stmt_attrs.extend(kept_attrs);
+    ast.stmt_attrs.extend_from_slice(&kept_attrs);
 }
 
 /// Closures in an owner's expression ranges, including its lazily materialized body.

@@ -45,10 +45,15 @@ wrist menu, cards, pointing, haptic ticks and grab-to-edit.
   only when the key changes:
   - `row(Height::Fixed(52.0))` or `row(Height::Fill)` (for lists);
   - then cells: `button`, `toggle`, `entry` (pressable text in a `Tone`), `text`,
-    `heading` and `blank`, each with a `Width`.
+    `heading`, `blank` and `slider(id, value, width)` (value in 0..1), each with a `Width`.
+    Update a slider with `panel.set_slider_value(id, value)` without changing the rows' key:
+    its track and knob are geometry and do not repaint the text texture.
 
   `menu.step(state, &buttons, now)` opens the menu, places it and finds the hover. It returns
-  the cell pressed this frame and the hover and press haptics.
+  the cell pressed this frame and the hover and press haptics. `MenuStep::slider` reports
+  `SliderDrag { id, value, ended }`: trigger/index pinch captures a slider until release,
+  following the aim or touching fingertip even outside the cell, clamped to its ends.
+  Release reports `ended: true`; travel ticks every 5% with `haptic::HOVER`.
 
   The menu opens with `MenuOpen::Button(XrController::CLICK_Y)` by default. Apps whose buttons
   all belong to a game use `MenuOpen::WristTurn` instead. With tracked hands, the menu shows
@@ -74,9 +79,34 @@ wrist menu, cards, pointing, haptic ticks and grab-to-edit.
 - **Haptics.** Use `haptic::{HOVER, PRESS, GRAB, SNAP, LIMIT}`. Call `.play(cx, hand)` for one
   tick, or collect a frame's ticks in `Haptics` and call `play` once.
 
-- **Input.** `input::{aim, trigger, grip_pose}` work the same for a controller and a tracked
-  hand. `Buttons` gives each frame's button presses; step one per frame and share it between
-  the menu and the app's own buttons.
+- **Input.** `input::{aim, tip, trigger, grab}` work for controllers and tracked hands.
+  The controller interaction point is its aim pose, with no added offset (see `input`'s
+  OpenXR pose definitions). A hand touches at its index fingertip and grabs at its
+  thumb/index pinch midpoint. Either controller trigger or grip holds a grab, with
+  press/release hysteresis; releasing both drops it. `place_tip` puts synthetic input
+  at exactly the requested point; its illustrative palm spacing affects synthetic data only.
+
+  Keep an `InteractionFilter` and call `apply(state, state.time)` once per input update.
+  Use that copy for pointing, hover and dragging; keep the incoming state for rendering
+  controllers/hands and for navigation. The timestamp follows the display grid, avoiding
+  UI/network arrival jitter in the filter's time step. Tracking loss and jumps reset it.
+
+  Declare `#[live] tips: XrTips`, call `tips.set_input(state)` to distinguish controllers
+  from tracked hands, then `tips.draw(cx3d, input::tips(filtered), touching)` (or `draw_in`).
+  Controllers show a 6 cm tapered stylus with its apex exactly at the interaction point;
+  touching lights and lengthens it toward the controller. A bright 3 mm dot marks the
+  apex. Tracked hands show only that dot at the fingertip.
+
+  Step one `Buttons` per frame. With draggables, use `menu.prepare(state, &buttons, now)`
+  to place/hit-test the menu, let touched draggables claim each hand via `buttons.claim(i)`,
+  then use `menu.interact(state, &buttons, &mut step)`. Existing captures own the hand
+  through release; a new near drag wins over a button or selection from the same press.
+  An existing menu slider reserves its hand before new drags. Advance all edge detectors
+  on the original button values even while claimed; gate actions on `buttons.claimed(i)`.
+  Apps without draggables can keep using `menu.step`. `mask_grab` clears both controller
+  grab controls and the index pinch for downstream consumers that do not track edges.
+  Pass raw grips to navigation except for hands actually captured by edits; empty-space
+  grip navigation is unchanged.
 
 Panel colours come from the system theme: `color_bg_app`, `color_outset`, `color_focus` for
 toggles that are on, `color_text`, and the error, warning, info and success colours for tones.

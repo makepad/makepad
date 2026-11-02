@@ -14,7 +14,7 @@
 use super::{Out, Req};
 
 pub fn cmd_vsnative(req: &Req, out: &mut Out) {
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_vendor = "apple"))]
     if let Some(f) = req.get("file") {
         return stacks::run_file(req, out, f);
     }
@@ -362,7 +362,7 @@ mod imp {
 /// and keyed alike (`Type::fn` without generics), so self and inclusive time per fn compare 1:1 --
 /// the attribution table of a JIT-vs-native gap. `roots=` keeps the samples under those fns (the
 /// part of a frame a meter times) and cuts their stacks at the root.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
 mod stacks {
     use super::{Out, Req};
     use crate::inspect::short;

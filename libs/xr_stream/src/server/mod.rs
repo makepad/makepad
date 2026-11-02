@@ -163,6 +163,8 @@ pub(crate) struct ServerShared {
     pub(crate) render_scale_pct: AtomicU32,
     /// The desktop's mirror repaints from the headset's frames.
     pub(crate) mirror: AtomicBool,
+    /// The app's desktop is held for a live interaction (including the release hold).
+    pub(crate) interaction: AtomicBool,
     /// The headset's per-second reports (`XrClientMsg::Report`), the last minute, oldest first.
     pub(crate) reports: Mutex<VecDeque<Vec<f32>>>,
     pub(crate) headset_settings: Mutex<HeadsetSettings>,
@@ -206,6 +208,7 @@ impl ServerShared {
             aa: AtomicU8::new(3),
             render_scale_pct: AtomicU32::new(100),
             mirror: AtomicBool::new(true),
+            interaction: AtomicBool::new(false),
             reports: Mutex::new(VecDeque::new()),
             headset_settings: Mutex::new(HeadsetSettings::DEFAULT),
             haptics: Mutex::new(Vec::new()),
@@ -344,10 +347,11 @@ pub fn launch_enabled() -> Option<bool> {
 }
 
 impl XrServer {
-    /// Starts this process's XR server for the app `app` (once: later calls return the same
-    /// server; None where none can run: the web, or the LAN not allowed for this instance): on
-    /// a port the OS picks, found by headsets with the pairing probe; the pairing is kept in
-    /// the app's data folder (`xr-pairing`). From then on the app's XR pass frames go to it.
+    /// Installs this process's XR server for the app `app` (once: later calls return the same
+    /// server; None where none can run: the web, or the LAN not allowed for this instance).
+    /// It listens only with the app's kept LAN opt-in or an explicit launch opt-in: on a port
+    /// the OS picks, found by headsets with the pairing probe. The pairing is kept in the
+    /// app's data folder (`xr-pairing`); the app's XR pass frames go to a linked headset.
     pub fn install(cx: &mut Cx, app: &str) -> Option<XrServer> {
         if cx.global::<XrServerSlot>().tried {
             return XrServer::get(cx);
@@ -357,7 +361,7 @@ impl XrServer {
             return None;
         }
         let log: Log = Arc::new(|line: &str| log!("{line}"));
-        if !makepad_widgets::makepad_platform::makepad_network::lan::service("xr host") {
+        if !makepad_widgets::makepad_platform::makepad_network::lan::allowed() {
             log("xr host: local network off for this instance (MAKEPAD_LAN=1 allows it)");
             return None;
         }
@@ -382,7 +386,6 @@ impl XrServer {
             }
         };
         let server = XrServer { shared, host };
-        // on unless the app's kept switch or this launch says off
         let on = launch_enabled().unwrap_or_else(|| crate::panel::XrStreamSettings::load(app).streaming);
         server.set_enabled(on);
         // the app's XR pass frames from now on, and its sound
@@ -399,6 +402,17 @@ impl XrServer {
         cx.global::<XrServerSlot>().server.clone()
     }
 
+    /// Report held grabs, slider drags or navigation each XR frame. The desktop resumes
+    /// once, 0.25 s after release. Bind the desktop area and service events through
+    /// [`crate::XrDesktopFreeze`]; eye passes and the mirror's clock remain live.
+    pub fn set_interaction(&self, cx: &mut Cx, active: bool) {
+        crate::XrDesktopFreeze::set_interaction(cx, active);
+    }
+
+    pub fn interaction_active(&self) -> bool {
+        self.shared.interaction.load(Ordering::Acquire)
+    }
+
     /// The desktop's stream switch: off, nothing of the server runs: it listens on no port,
     /// answers no pairing probe, a linked headset is told and its session ends (its encoders
     /// with it), the desktop paints as always. On: it listens again (on a new port; headsets
@@ -406,6 +420,9 @@ impl XrServer {
     /// kept either way. Also un-pauses ([`Self::set_streaming`]).
     pub fn set_enabled(&self, on: bool) {
         if on {
+            if !makepad_widgets::makepad_platform::makepad_network::lan::service("xr host") {
+                return;
+            }
             self.shared.set_streaming(true);
         }
         if let Err(e) = self.host.set_listening(&self.shared, on) {

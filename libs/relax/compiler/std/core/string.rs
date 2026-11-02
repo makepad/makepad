@@ -344,10 +344,12 @@ impl String {
         &mut self.vec
     }
 
+    #[rustc_no_implicit_autorefs]
     pub const fn len(&self) -> usize {
         self.vec.len()
     }
 
+    #[rustc_no_implicit_autorefs]
     pub const fn is_empty(&self) -> bool {
         self.len() == 0
     }

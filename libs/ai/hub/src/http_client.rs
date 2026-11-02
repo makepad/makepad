@@ -17,7 +17,7 @@ use crate::error::AssetAiError;
 use makepad_network::SocketStream;
 use std::io::{Read, Write};
 #[cfg(not(target_os = "windows"))]
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::TcpStream;
 use std::time::Duration;
 
 const MAX_REDIRECTS: usize = 8;
@@ -240,7 +240,7 @@ impl Write for Transport {
 #[cfg(not(target_os = "windows"))]
 fn connect(url: &ParsedUrl) -> Result<Transport, AssetAiError> {
     if url.https {
-        let stream = SocketStream::connect(&url.host, &url.port.to_string(), true, false)
+        let stream = with_hub_connect(|| SocketStream::connect(&url.host, &url.port.to_string(), true, false))
             .map_err(|e| AssetAiError::Http(format!("tls connect {}:{}: {e}", url.host, url.port)))?;
         let _ = stream.set_read_timeout(Some(IO_TIMEOUT));
         let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
@@ -252,31 +252,21 @@ fn connect(url: &ParsedUrl) -> Result<Transport, AssetAiError> {
         // probe joining nine boxes went dark for minutes because four of
         // them had stopped answering with a reset. Each resolved address
         // gets CONNECT_TIMEOUT; the last error is the one reported.
-        let addrs = (url.host.as_str(), url.port)
-            .to_socket_addrs()
-            .map_err(|e| AssetAiError::Http(format!("resolve {}:{}: {e}", url.host, url.port)))?;
-        let mut last = None;
-        let mut stream = None;
-        for addr in addrs {
-            match makepad_network::lan::connect_timeout("ai-hub http", &addr, CONNECT_TIMEOUT) {
-                Ok(s) => {
-                    stream = Some(s);
-                    break;
-                }
-                Err(e) => last = Some(e),
-            }
-        }
-        let stream = match stream {
-            Some(s) => s,
-            None => {
-                let e = last.map_or_else(|| "no address".to_string(), |e| e.to_string());
-                return Err(AssetAiError::Http(format!("connect {}:{}: {e}", url.host, url.port)));
-            }
-        };
+        let stream = makepad_network::lan::hub_connect_host("ai-hub http", &url.host, url.port, Some(CONNECT_TIMEOUT))
+            .map_err(|e| AssetAiError::Http(format!("connect {}:{}: {e}", url.host, url.port)))?;
         let _ = stream.set_read_timeout(Some(IO_TIMEOUT));
         let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
         Ok(Transport::Plain(stream))
     }
+}
+
+/// Keep the hub rule active down to the resolved address in synchronous TLS/WebSocket opens.
+pub fn with_hub_connect<T>(connect: impl FnOnce() -> T) -> T {
+    makepad_network::lan::with_connect_policy(
+        makepad_network::lan::hub_check_host,
+        makepad_network::lan::hub_check,
+        connect,
+    )
 }
 
 // WinRT StreamSocket's synchronous-looking adapter cannot safely issue a
@@ -290,6 +280,8 @@ const WINHTTP_ACCESS_TYPE_NO_PROXY: u32 = 1;
 const WINHTTP_FLAG_SECURE: u32 = 0x0080_0000;
 #[cfg(target_os = "windows")]
 const WINHTTP_OPTION_DISABLE_FEATURE: u32 = 63;
+#[cfg(target_os = "windows")]
+const WINHTTP_OPTION_RESOLUTION_HOSTNAME: u32 = 165;
 #[cfg(target_os = "windows")]
 const WINHTTP_DISABLE_REDIRECTS: u32 = 0x0000_0002;
 #[cfg(target_os = "windows")]
@@ -430,6 +422,28 @@ fn winhttp_fetch_once(
     body: Option<(&str, &[u8])>,
     send_extra_headers: bool,
 ) -> Result<HttpClientResponse, AssetAiError> {
+    use std::net::ToSocketAddrs;
+    makepad_network::lan::hub_check_host("ai-hub http", &url.host)?;
+    // Pin the DNS result while LAN access is off: WinHTTP must not resolve a second time
+    // to a different, unchecked address. TLS still authenticates the original hostname.
+    let resolution_host = if !makepad_network::netconfig::hub_networked() || !makepad_network::lan::allowed() {
+        let bare = url.host.trim_start_matches('[').trim_end_matches(']');
+        if bare.parse::<std::net::IpAddr>().is_ok() {
+            None
+        } else {
+            let mut last = None;
+            let mut chosen = None;
+            for addr in (bare, url.port).to_socket_addrs()? {
+                match makepad_network::lan::hub_check("ai-hub http", addr) {
+                    Ok(()) => { chosen = Some(wide_null(&addr.ip().to_string())); break; }
+                    Err(e) => last = Some(e),
+                }
+            }
+            Some(chosen.ok_or_else(|| last.unwrap_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no address")))?)
+        }
+    } else {
+        None
+    };
     let user_agent = wide_null(&format!(
         "{}/{}",
         crate::SERVICE_NAME,
@@ -499,6 +513,18 @@ fn winhttp_fetch_once(
     };
     if handles.request.is_null() {
         return Err(winhttp_last_error("WinHttpOpenRequest failed"));
+    }
+    if let Some(mut host) = resolution_host {
+        if unsafe {
+            WinHttpSetOption_raw(
+                handles.request,
+                WINHTTP_OPTION_RESOLUTION_HOSTNAME,
+                host.as_mut_ptr().cast::<std::ffi::c_void>(),
+                (host.len() * std::mem::size_of::<u16>()) as u32,
+            ).0
+        } == 0 {
+            return Err(winhttp_last_error("WinHttpSetOption(RESOLUTION_HOSTNAME) failed"));
+        }
     }
     let mut disabled = WINHTTP_DISABLE_REDIRECTS;
     if unsafe {
@@ -685,7 +711,7 @@ fn fetch_fleet(
     body: Option<(&str, &[u8])>,
     send_extra_headers: bool,
 ) -> Result<HttpClientResponse, AssetAiError> {
-    let (stream, _server, authorization) = makepad_network::fleet::id::connect(&url.host, &url.port.to_string())
+    let (stream, _server, authorization) = with_hub_connect(|| makepad_network::fleet::id::connect(&url.host, &url.port.to_string()))
         .map_err(|e| AssetAiError::Http(format!("fleet tls {}:{}: {e}", url.host, url.port)))?;
     let _ = stream.set_read_timeout(Some(IO_TIMEOUT));
     let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
@@ -717,6 +743,7 @@ fn fetch_once(
     body: Option<(&str, &[u8])>,
     send_extra_headers: bool,
 ) -> Result<HttpClientResponse, AssetAiError> {
+    makepad_network::lan::hub_check_host("ai-hub http", &url.host)?;
     #[cfg(not(target_arch = "wasm32"))]
     if is_fleet(url) {
         return fetch_fleet(url, method, req, body, send_extra_headers);
@@ -741,6 +768,7 @@ fn fetch_once(
     body: Option<(&str, &[u8])>,
     send_extra_headers: bool,
 ) -> Result<HttpClientResponse, AssetAiError> {
+    makepad_network::lan::hub_check_host("ai-hub http", &url.host)?;
     #[cfg(not(target_arch = "wasm32"))]
     if is_fleet(url) {
         return fetch_fleet(url, method, req, body, send_extra_headers);

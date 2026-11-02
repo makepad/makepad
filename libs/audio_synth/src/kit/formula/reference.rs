@@ -192,7 +192,7 @@ pub struct World {
     globals: [HashMap<String, Value>; 3],
     rng: Rng,
     protos: [T; 3],
-    surge: T,
+    host: T,
     init: Option<Rc<Closure>>,
     process: Option<Rc<Closure>>,
 }
@@ -207,7 +207,7 @@ impl Interp<'_> {
         match n {
             "math" => Value::Builtin("@math"),
             "string" => Value::Builtin("@string"),
-            "surge" => Value::Table(self.w.surge.clone()),
+            "synth" | super::compile::PATCH_LIB_NAME => Value::Table(self.w.host.clone()),
             "pi" => Value::Num(std::f64::consts::PI),
             "huge" => Value::Num(f64::INFINITY),
             _ => match MATH.iter().chain(["type", "tonumber", "print", "error", "assert"].iter()).find(|m| **m == n) {
@@ -931,8 +931,8 @@ impl RefRunner {
             mk(&[("a", Value::Num(0.1)), ("h", Value::Num(0.1)), ("d", Value::Num(0.7))]),
         ];
         let m = mk(&[("Slew", Value::Table(protos[0].clone())), ("ClockDivider", Value::Table(protos[1].clone())), ("AHDEnvelope", Value::Table(protos[2].clone()))]);
-        let surge = mk(&[("mod", Value::Table(m))]);
-        let mut w = World { globals: Default::default(), rng: Rng(RNG_START), protos, surge, init: None, process: None };
+        let host = mk(&[("mod", Value::Table(m))]);
+        let mut w = World { globals: Default::default(), rng: Rng(RNG_START), protos, host, init: None, process: None };
         let mut error = None;
         {
             let mut it = Interp { w: &mut w, sb: Sb::Top };

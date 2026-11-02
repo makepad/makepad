@@ -88,6 +88,38 @@ pub fn sqlite3(db: &Path, sql: &str) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
+/// The rows of a `.mode quote` answer, with each blob literal's prefix as `quote()` writes it
+/// (`X'..'`): the CLI's quote mode writes `x'..'` in newer sqlite3 releases and `X'..'` in older
+/// ones, the same value either way. Text (`'..'`, a quote doubled inside) is left as it is.
+pub fn quote_mode_lines(out: &str) -> Vec<String> {
+    out.lines()
+        .map(|line| {
+            let mut text = false;
+            let mut fixed = String::with_capacity(line.len());
+            let mut chars = line.chars().peekable();
+            while let Some(c) = chars.next() {
+                if c == '\'' {
+                    text = !text;
+                }
+                if !text && c == 'x' && chars.peek() == Some(&'\'') {
+                    // a blob literal: its quote is not a text's
+                    fixed.push('X');
+                    fixed.push(chars.next().unwrap());
+                    for h in chars.by_ref() {
+                        fixed.push(h);
+                        if h == '\'' {
+                            break;
+                        }
+                    }
+                    continue;
+                }
+                fixed.push(c);
+            }
+            fixed
+        })
+        .collect()
+}
+
 /// Query one column per row and return the parsed values (uses `quote()` so
 /// blobs, NULLs and text survive the round trip).
 pub fn sqlite3_column(db: &Path, sql: &str) -> Vec<Value> {

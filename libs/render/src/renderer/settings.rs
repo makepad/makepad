@@ -9,6 +9,41 @@ const HDR_GLOW_GAIN: f32 = 3.0;
 /// band around the metered exposure is the grade's, see [`Renderer::set_grade`]).
 const AUTO_EXPOSURE_KEY: f32 = 0.2;
 
+/// Find the star panorama by the standard search order:
+/// the `MAKEPAD_STAR_MAP` env override, then — walking up from the
+/// working directory — the repo-local cache `local/sky/` that
+/// `tools/download_stars.sh` fills (NASA/GSFC SVS "Deep Star Maps
+/// 2020", public domain, credit NASA/GSFC SVS; the ATTRIBUTION.txt
+/// sits beside it), then the sandbox's bundled copy. Without a hit the
+/// analytic point stars stay and one hint is logged. Call from a worker.
+pub fn star_map_path() -> Option<std::path::PathBuf> {
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(path) = std::env::var("MAKEPAD_STAR_MAP") {
+        if !path.is_empty() {
+            candidates.push(path.into());
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        let mut dir = Some(cwd.as_path());
+        while let Some(d) = dir {
+            candidates.push(d.join("local/sky/starmap_2020_4k.png"));
+            candidates
+                .push(d.join("apps/commercial/sandbox/resources/sky/starmap_2020_4k.png"));
+            dir = d.parent();
+        }
+    }
+    for path in candidates {
+        if path.is_file() {
+            log!("star map: {}", path.display());
+            return Some(path);
+        }
+    }
+    log!(
+        "star map: none found — analytic stars only (run tools/download_stars.sh, or set MAKEPAD_STAR_MAP)"
+    );
+    None
+}
+
 impl Renderer {
     /// Opt into the linear HDR lighting convention. The HOST must then
     /// render the scene pass into an RGBA16F colour target
@@ -27,6 +62,39 @@ impl Renderer {
 
     pub fn hdr_output(&self) -> bool {
         self.hdr_output
+    }
+
+    /// Display dither on 8-bit targets (on by default).
+    pub fn set_output_dither(&mut self, on: bool) {
+        self.output_dither = on;
+    }
+
+    /// Bind display dither for a lane or a host's own receiver, inside its colour pass.
+    pub fn bind_output_dither(&self, cx: &mut CxDraw, draw: &mut DrawVars) {
+        let pass_id = cx.current_pass_id();
+        let target = cx.passes[pass_id].color_textures.first().map(|t| t.texture.clone());
+        let size = match target.as_ref().map(|t| t.get_format(cx.cx).clone()) {
+            Some(TextureFormat::RenderBGRAu8 { size, .. }) | Some(TextureFormat::RenderCubeBGRAu8 { size, .. }) => match size {
+                TextureSize::Fixed { width, height } => Some((width, height)),
+                TextureSize::Auto => {
+                    // Raster density can differ from the density used for layout.
+                    let dpi = cx.passes[pass_id].dpi_factor.unwrap_or_else(|| cx.current_dpi_factor());
+                    cx.cx.get_pass_rect(pass_id, dpi).map(|rect| Cx::pass_pixel_size(rect.size, dpi))
+                }
+            },
+            _ => None,
+        };
+        let mut ctl = [1.0, 1.0, 0.0];
+        if let Some((width, height)) = size {
+            ctl[0] = width as f32;
+            ctl[1] = height as f32;
+            if self.output_dither && width > 0 && height > 0 && !self.hdr_output && self.lm_debug <= 0.5
+                && !self.shadow_debug && matches!(self.gi.debug(), crate::fast_gi::GiDebug::Off)
+            {
+                ctl[2] = 1.0;
+            }
+        }
+        draw.set_uniform(cx.cx, live_id!(output_dither_ctl), &ctl);
     }
 
     /// FXAA in the HDR composite (on by default).
@@ -169,94 +237,25 @@ impl Renderer {
         }
     }
 
-    /// Night-sky star panorama: an equirectangular PNG (the NASA SVS Deep
-    /// Star Map ships with the sandbox — see resources/sky/ATTRIBUTION).
-    /// Decoded here once; uploaded on the first sky draw. No call = no
-    /// stars, the night dome stays plain.
-    pub fn set_star_map_png(&mut self, bytes: &[u8]) {
-        match ImageBuffer::from_png(bytes) {
-            Ok(img) => {
-                self.star_map = Some(img);
-                self.star_texture = None;
-            }
-            Err(e) => log!("star map: png decode failed: {e:?}"),
-        }
-    }
-
     /// Install a worker-prepared panorama with its complete mip chain.
     pub fn set_star_map_texture(&mut self, texture: Texture) {
-        self.star_map = Some(ImageBuffer::default());
+        self.star_map_loaded = true;
         self.star_texture = Some(texture);
     }
 
-    /// Find and load the star panorama by the standard search order:
-    /// the `MAKEPAD_STAR_MAP` env override, then — walking up from the
-    /// working directory — the repo-local cache `local/sky/` that
-    /// `tools/download_stars.sh` fills (NASA/GSFC SVS "Deep Star Maps
-    /// 2020", public domain, credit NASA/GSFC SVS; the ATTRIBUTION.txt
-    /// sits beside it), then the sandbox's bundled copy. Without a hit the
-    /// analytic point stars stay and one hint is logged. Returns whether a
-    /// panorama is loaded.
-    pub fn load_star_map(&mut self) -> bool {
-        let mut candidates: Vec<std::path::PathBuf> = Vec::new();
-        if let Ok(path) = std::env::var("MAKEPAD_STAR_MAP") {
-            if !path.is_empty() {
-                candidates.push(path.into());
-            }
-        }
-        if let Ok(cwd) = std::env::current_dir() {
-            let mut dir = Some(cwd.as_path());
-            while let Some(d) = dir {
-                candidates.push(d.join("local/sky/starmap_2020_4k.png"));
-                candidates
-                    .push(d.join("apps/commercial/sandbox/resources/sky/starmap_2020_4k.png"));
-                dir = d.parent();
-            }
-        }
-        for path in &candidates {
-            if !path.is_file() {
-                continue;
-            }
-            match std::fs::read(path) {
-                Ok(bytes) => {
-                    self.set_star_map_png(&bytes);
-                    if self.star_map.is_some() {
-                        log!("star map: {}", path.display());
-                        return true;
-                    }
-                }
-                Err(e) => log!("star map: {}: {e}", path.display()),
-            }
-        }
-        log!(
-            "star map: none found — analytic stars only (run tools/download_stars.sh, or set MAKEPAD_STAR_MAP)"
-        );
-        false
-    }
-
-    /// The bound star texture + gain: the decoded panorama, or a 1x1 black
+    /// The bound star texture + gain: the uploaded panorama, or a 1x1 black
     /// stand-in (gain 0) so the sky shader samples unconditionally.
     pub(super) fn star_binding(&mut self, cx: &mut Cx) -> (Texture, f32) {
         if let Some(tex) = &self.star_texture {
-            return (tex.clone(), if self.star_map.is_some() { 1.0 } else { 0.0 });
+            return (tex.clone(), if self.star_map_loaded { 1.0 } else { 0.0 });
         }
-        let (tex, gain) = match self.star_map.take() {
-            Some(img) => (img.into_new_texture(cx), 1.0),
-            None => {
-                let mut black = ImageBuffer::default();
-                black.width = 1;
-                black.height = 1;
-                black.data = vec![0xFF00_0000];
-                (black.into_new_texture(cx), 0.0)
-            }
-        };
-        // The ImageBuffer moved into the texture; remember which case this
-        // was so the gain answer stays stable on later frames.
+        let mut black = ImageBuffer::default();
+        black.width = 1;
+        black.height = 1;
+        black.data = vec![0xFF00_0000];
+        let tex = black.into_new_texture(cx);
         self.star_texture = Some(tex.clone());
-        if gain > 0.0 {
-            self.star_map = Some(ImageBuffer::default());
-        }
-        (tex, gain)
+        (tex, 0.0)
     }
 
     /// Live GPU-lightmap scheduling policy switch (OnChange <-> Realtime).
@@ -362,11 +361,27 @@ impl Renderer {
         crate::scene::set_pass_camera_origin(cx, pass, scene, self.render_origin_for(scene.camera_pos));
     }
 
+    /// The noise seed of the recordings that follow: 0 (the default) keeps
+    /// every stochastic filter's stable pattern; a host averaging several
+    /// recordings of a still view ([`crate::StillAa`]) passes each one's
+    /// sample index, so the patterns differ and average out (the sun
+    /// cascades' penumbra disk).
+    pub fn set_noise_seed(&mut self, seed: u32) {
+        self.gpu_baker.set_csm_seed(seed as f32);
+    }
+
     /// Stretch the far sun cascade to `metres` (0 = default); see
     /// [`crate::shadow_csm::fit_cascades_reach`]. A streamed city sets this
     /// so distant towers keep their shadows.
     pub fn set_csm_far_reach(&mut self, metres: f32) {
         self.gpu_baker.set_csm_far_reach(metres);
+    }
+
+    /// The region the near sun cascade holds when that is tighter than its own slice (or, in XR,
+    /// its ring around the eye): a work surface whose millimetre parts need fine shadows. World
+    /// bounds; `None`: the ladder alone. See [`crate::shadow_csm::fit_near`].
+    pub fn set_csm_near_bounds(&mut self, bounds: Option<(Vec3f, Vec3f)>) {
+        self.gpu_baker.set_csm_near_bounds(bounds.filter(|(lo, hi)| lo.x.is_finite() && lo.y.is_finite() && lo.z.is_finite() && hi.x.is_finite() && hi.y.is_finite() && hi.z.is_finite() && lo.x <= hi.x && lo.y <= hi.y && lo.z <= hi.z));
     }
 
     /// Spend what `tier` allows (quality_tier.rs): impostor distances,
@@ -406,6 +421,12 @@ impl Renderer {
         self.csm_focus = focus.filter(|d| d.is_finite() && *d > 0.0);
     }
 
+    /// Fit cascades to this projection instead of the pass's. A host averaging
+    /// jittered recordings supplies the unjittered projection; `None` uses the pass's.
+    pub fn set_csm_fit_projection(&mut self, projection: Option<Mat4f>) {
+        self.csm_fit_projection = projection;
+    }
+
     /// Supply the complete caster/receiver bound for Realtime cascade
     /// fitting. This is presentation state and is especially useful for an
     /// imported editor model that is intentionally submitted as a dynamic
@@ -432,9 +453,36 @@ impl Renderer {
 
     /// The per-element lookup the static draw takes (`elem_map`, slot 6, and
     /// `elem_ctl` = (width, height, texels per element: 1 or 4, enable)), applied to the PBR lane too
-    /// so hidden, offset and moved elements agree across lanes. `None` turns it off.
-    pub fn set_element_lookup(&mut self, lookup: Option<(Texture, [f32; 4])>) {
+    /// and the sun cascades' casters so hidden, offset and moved elements agree across lanes and
+    /// shadows. `None` turns it off.
+    ///
+    /// `casters` is the host's key of what the cascades' casters read in it (each element's
+    /// shown or hidden, and its pose), changed whenever that changes. The cascades are drawn
+    /// again only when it, or anything else they draw, changes: a change of the lookup the
+    /// casters do not see (a selection, an element drawn by other means moving) keeps them.
+    pub fn set_element_lookup(&mut self, lookup: Option<(Texture, [f32; 4])>, casters: u64) {
+        self.gpu_baker.set_element_lookup(lookup.clone(), casters);
         self.element_lookup = lookup;
+    }
+
+    /// World bounds the lookup's moved elements reach past their model's own bounds, so a
+    /// cascade does not cull a model whose moved element still casts into it. `None`: at rest.
+    pub fn set_element_reach(&mut self, reach: Option<(Vec3f, Vec3f)>) {
+        if self.element_reach != reach {
+            self.element_reach = reach;
+            self.rebuild_csm_static_casters();
+        }
+    }
+
+    /// Binds the sun cascades to a host's own draw that spreads `mod.draw.SunCascades` and
+    /// declares `csm_map` (a surface the renderer does not draw, receiving its shadows). Valid
+    /// after this frame's `draw_scene_full`.
+    pub fn bind_sun_cascades(&self, cx: &mut Cx, vars: &mut DrawVars) {
+        let slot = vars.draw_shader_id.and_then(|s| cx.draw_shaders[s.index].mapping.textures.iter().position(|t| t.id == live_id!(csm_map)));
+        let binding = self.gpu_baker.csm_binding();
+        if let (Some(slot), Some(fallback)) = (slot, binding.as_ref().map(|b| b.1.clone())) {
+            Self::write_csm_uniforms(cx, vars, &binding, &fallback, slot, false);
+        }
     }
 
     pub fn pbr_materials_enabled(&self) -> bool {

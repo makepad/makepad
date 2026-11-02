@@ -1,0 +1,15 @@
+[package]
+name = "makepad-csg-brep"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Exact NURBS boundary-representation solid modelling kernel: primitives, sweeps, booleans, fillets, chamfers, shells, offsets, healing, mass properties"
+
+[package.metadata.source]
+# The one record of where this source came from. It is ours from here on: no upstream tracking.
+crate = "solidcore 1.0.1 (crates.io)"
+crate-sha256 = "51fbd775ff48a4b0034d1541097f9a3f35b14f53a25bf62a8820c0fe0f6c9823"
+repository = "https://github.com/tangency-labs/solidcore"
+revision = "e83425f7942c10ca806242af220e5a2901a9db60"
+
+[dependencies]

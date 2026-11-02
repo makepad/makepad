@@ -249,12 +249,21 @@ impl AiServicePort {
     /// Silence marks the call "not responding"; it never cancels it. Long
     /// computations should report here at their existing worker boundaries.
     pub fn progress(&self, call_id: &str, note: &str, permille: u16) {
+        self.progress_task(call_id, note, permille, None);
+    }
+
+    /// [`Self::progress`] with the call's task card now: the chat draws the card (input
+    /// picture, bar, stage, where it runs, Stop) in place of the note.
+    pub fn progress_task(&self, call_id: &str, note: &str, permille: u16, mut task: Option<TaskCard>) {
         let mut note = note.to_string();
         if note.len() > MAX_NOTE_BYTES {
             truncate_to_char_boundary(&mut note, MAX_NOTE_BYTES - 3);
             note.push('…');
         }
-        self.send(ServiceUp::Progress { call_id: call_id.to_string(), note, permille: permille.min(1000) });
+        if let Some(task) = &mut task {
+            task.bound();
+        }
+        self.send(ServiceUp::Progress { call_id: call_id.to_string(), note, permille: permille.min(1000), task });
     }
 
     /// The app's volatile state for the model's next turn. Replaces the

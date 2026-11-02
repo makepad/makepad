@@ -951,3 +951,24 @@ format=makepad.font-assets.v1\nset=International\nasset=app/resources/a.ttf\n";
         let _ = fs::remove_dir_all(root);
     }
 }
+
+/// The font asset manifest of a font set (`Latin`, `International`) as makepad-platform's
+/// `font_manifest` example prints it: what an app built with that set packages.
+pub fn font_set_manifest_text(font_set: &str) -> Result<Vec<u8>, String> {
+    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    // stdout only: cargo's own messages are on stderr
+    let out = std::process::Command::new("cargo")
+        .current_dir(&cwd)
+        .args(["run", "--release", "--offline", "-q", "-p", "makepad-platform", "--example", "font_manifest", "--", font_set])
+        .stderr(std::process::Stdio::inherit())
+        .output()
+        .map_err(|e| format!("cargo run font_manifest: {e}"))?;
+    if !out.status.success() {
+        return Err(format!("font_manifest {font_set} failed ({})", out.status));
+    }
+    let mut text = out.stdout;
+    if !text.ends_with(b"\n") {
+        text.push(b'\n');
+    }
+    Ok(text)
+}

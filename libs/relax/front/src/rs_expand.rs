@@ -33,19 +33,6 @@ pub(crate) fn expand<'a>(src: &'a [u8], toks: impl Into<super::lazy_bodies::Toks
     outline(Parser::new(&ctx.cfg.session, src, toks, edition), ctx.clone(), table, reuse)
 }
 
-/// Declaration expansion has a distinct contract and never contributes executable
-/// expansions to parse reuse. The normal parser supplies cfg and macro scope.
-pub(crate) fn expand_declarations(input: &crate::builtins::Expansion, edition: u16,
-    ctx: std::rc::Rc<crate::builtins::FileCtx>, table: Arc<crate::macros::MacroTable>,
-) -> Surface {
-    crate::macro_reg::with_declarations(|| {
-        let mut toks = super::lazy_bodies::Toks::from(&input.toks[..]);
-        let end = input.text.len() as u32;
-        toks.push(Tok { kind: T::Eof, lo: end, hi: end });
-        expand(input.text.as_bytes(), toks, edition, ctx, table)
-    })
-}
-
 fn outline(mut p: Parser<'_>, ctx: std::rc::Rc<crate::builtins::FileCtx>, table: Arc<crate::macros::MacroTable>,
     reuse: crate::parse_work::Session,
 ) -> Surface {

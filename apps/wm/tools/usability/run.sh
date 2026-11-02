@@ -1,5 +1,5 @@
 #!/bin/sh
-# WM usability gate (a node, hidden): ~25 plain user tasks against the real
+# WM usability gate (a pool node, hidden): ~25 plain user tasks against the real
 # WM and real apps, checked by the WM's motion recorder. A few minutes.
 #   apps/wm/tools/usability/run.sh [checkout with a release build] [suite.py args]
 # Needs: cargo build --release -p makepad-app-wm (plus the app binaries) in

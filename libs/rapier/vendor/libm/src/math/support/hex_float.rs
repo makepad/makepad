@@ -494,61 +494,6 @@ mod parse_tests {
 
     use super::*;
 
-    #[cfg(f16_enabled)]
-    fn rounding_properties(s: &str) -> Result<(), HexFloatParseError> {
-        let (xd, s0) = parse_any(s, 16, 10, Round::Negative)?;
-        let (xu, s1) = parse_any(s, 16, 10, Round::Positive)?;
-        let (xz, s2) = parse_any(s, 16, 10, Round::Zero)?;
-        let (xn, s3) = parse_any(s, 16, 10, Round::Nearest)?;
-
-        // FIXME: A value between the least normal and largest subnormal
-        // could have underflow status depend on rounding mode.
-
-        if let Status::OK = s0 {
-            // an exact result is the same for all rounding modes
-            assert_eq!(s0, s1);
-            assert_eq!(s0, s2);
-            assert_eq!(s0, s3);
-
-            assert_eq!(xd, xu);
-            assert_eq!(xd, xz);
-            assert_eq!(xd, xn);
-        } else {
-            assert!([s0, s1, s2, s3].into_iter().all(Status::inexact));
-
-            let xd = f16::from_bits(xd as u16);
-            let xu = f16::from_bits(xu as u16);
-            let xz = f16::from_bits(xz as u16);
-            let xn = f16::from_bits(xn as u16);
-
-            assert_biteq!(xd.next_up(), xu, "s={s}, xd={xd:?}, xu={xu:?}");
-
-            let signs = [xd, xu, xz, xn].map(f16::is_sign_negative);
-
-            if signs == [true; 4] {
-                assert_biteq!(xz, xu);
-            } else {
-                assert_eq!(signs, [false; 4]);
-                assert_biteq!(xz, xd);
-            }
-
-            if xn.to_bits() != xd.to_bits() {
-                assert_biteq!(xn, xu);
-            }
-        }
-        Ok(())
-    }
-    #[test]
-    #[cfg(f16_enabled)]
-    fn test_rounding() {
-        let n = 1_i32 << 14;
-        for i in -n..n {
-            let u = i.rotate_right(11) as u32;
-            let s = format!("{}", Hexf(f32::from_bits(u)));
-            assert!(rounding_properties(&s).is_ok());
-        }
-    }
-
     #[test]
     fn test_parse_any() {
         for k in -149..=127 {
@@ -609,22 +554,6 @@ mod parse_tests {
         }
     }
 
-    // FIXME: this test is causing failures that are likely UB on various platforms
-    #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
-    #[test]
-    #[cfg(f128_enabled)]
-    fn rounding() {
-        let pi = std::f128::consts::PI;
-        let s = format!("{}", Hexf(pi));
-
-        for k in 0..=111 {
-            let (bits, status) = parse_any(&s, 128 - k, 112 - k, Round::Nearest).unwrap();
-            let scale = (1u128 << (112 - k - 1)) as f128;
-            let expected = (pi * scale).round_ties_even() / scale;
-            assert_eq!(bits << k, expected.to_bits(), "k = {k}, s = {s}");
-            assert_eq!(expected != pi, status.inexact());
-        }
-    }
     #[test]
     fn rounding_extreme_underflow() {
         for k in 1..1000 {
@@ -660,61 +589,6 @@ mod parse_tests {
             }
         }
     }
-    // HACK(msrv): 1.63 rejects unknown width float literals at an AST level, so use a macro to
-    // hide them from the AST.
-    #[cfg(f16_enabled)]
-    macro_rules! f16_tests {
-        () => {
-            #[test]
-            fn test_f16() {
-                let checks = [
-                    ("0x.1234p+16", (0x1234 as f16).to_bits()),
-                    ("0x1.234p+12", (0x1234 as f16).to_bits()),
-                    ("0x12.34p+8", (0x1234 as f16).to_bits()),
-                    ("0x123.4p+4", (0x1234 as f16).to_bits()),
-                    ("0x1234p+0", (0x1234 as f16).to_bits()),
-                    ("0x1234.p+0", (0x1234 as f16).to_bits()),
-                    ("0x1234.0p+0", (0x1234 as f16).to_bits()),
-                    ("0x1.ffcp+15", f16::MAX.to_bits()),
-                    ("0x1.0p+1", 2.0f16.to_bits()),
-                    ("0x1.0p+0", 1.0f16.to_bits()),
-                    ("0x1.ffp+8", 0x5ffc),
-                    ("+0x1.ffp+8", 0x5ffc),
-                    ("0x1p+0", 0x3c00),
-                    ("0x1.998p-4", 0x2e66),
-                    ("0x1.9p+6", 0x5640),
-                    ("0x0.0p0", 0.0f16.to_bits()),
-                    ("-0x0.0p0", (-0.0f16).to_bits()),
-                    ("0x1.0p0", 1.0f16.to_bits()),
-                    ("0x1.998p-4", (0.1f16).to_bits()),
-                    ("-0x1.998p-4", (-0.1f16).to_bits()),
-                    ("0x0.123p-12", 0x0123),
-                    ("0x1p-24", 0x0001),
-                    ("nan", f16::NAN.to_bits()),
-                    ("-nan", (-f16::NAN).to_bits()),
-                    ("inf", f16::INFINITY.to_bits()),
-                    ("-inf", f16::NEG_INFINITY.to_bits()),
-                ];
-                for (s, exp) in checks {
-                    println!("parsing {s}");
-                    assert!(rounding_properties(s).is_ok());
-                    let act = hf16(s).to_bits();
-                    assert_eq!(
-                        act, exp,
-                        "parsing {s}: {act:#06x} != {exp:#06x}\nact: {act:#018b}\nexp: {exp:#018b}"
-                    );
-                }
-            }
-
-            #[test]
-            fn test_macros_f16() {
-                assert_eq!(hf16!("0x1.ffp+8").to_bits(), 0x5ffc_u16);
-            }
-        };
-    }
-
-    #[cfg(f16_enabled)]
-    f16_tests!();
 
     #[test]
     fn test_f32() {
@@ -802,61 +676,6 @@ mod parse_tests {
         }
     }
 
-    // HACK(msrv): 1.63 rejects unknown width float literals at an AST level, so use a macro to
-    // hide them from the AST.
-    #[cfg(f128_enabled)]
-    macro_rules! f128_tests {
-        () => {
-            #[test]
-            fn test_f128() {
-                let checks = [
-                    ("0x.1234p+16", (0x1234 as f128).to_bits()),
-                    ("0x1.234p+12", (0x1234 as f128).to_bits()),
-                    ("0x12.34p+8", (0x1234 as f128).to_bits()),
-                    ("0x123.4p+4", (0x1234 as f128).to_bits()),
-                    ("0x1234p+0", (0x1234 as f128).to_bits()),
-                    ("0x1234.p+0", (0x1234 as f128).to_bits()),
-                    ("0x1234.0p+0", (0x1234 as f128).to_bits()),
-                    ("0x1.ffffffffffffffffffffffffffffp+16383", f128::MAX.to_bits()),
-                    ("0x1.0p+1", 2.0f128.to_bits()),
-                    ("0x1.0p+0", 1.0f128.to_bits()),
-                    ("0x1.ffep+8", 0x4007ffe0000000000000000000000000),
-                    ("+0x1.ffep+8", 0x4007ffe0000000000000000000000000),
-                    ("0x1p+0", 0x3fff0000000000000000000000000000),
-                    ("0x1.999999999999999999999999999ap-4", 0x3ffb999999999999999999999999999a),
-                    ("0x1.9p+6", 0x40059000000000000000000000000000),
-                    ("0x0.0p0", 0.0f128.to_bits()),
-                    ("-0x0.0p0", (-0.0f128).to_bits()),
-                    ("0x1.0p0", 1.0f128.to_bits()),
-                    ("0x1.999999999999999999999999999ap-4", (0.1f128).to_bits()),
-                    ("-0x1.999999999999999999999999999ap-4", (-0.1f128).to_bits()),
-                    ("0x0.abcdef0123456789abcdef012345p-16382", 0x0000abcdef0123456789abcdef012345),
-                    ("0x1p-16494", 0x00000000000000000000000000000001),
-                    ("nan", f128::NAN.to_bits()),
-                    ("-nan", (-f128::NAN).to_bits()),
-                    ("inf", f128::INFINITY.to_bits()),
-                    ("-inf", f128::NEG_INFINITY.to_bits()),
-                ];
-                for (s, exp) in checks {
-                    println!("parsing {s}");
-                    let act = hf128(s).to_bits();
-                    assert_eq!(
-                        act, exp,
-                        "parsing {s}: {act:#034x} != {exp:#034x}\nact: {act:#0130b}\nexp: {exp:#0130b}"
-                    );
-                }
-            }
-
-            #[test]
-            fn test_macros_f128() {
-                assert_eq!(hf128!("0x1.ffep+8").to_bits(), 0x4007ffe0000000000000000000000000_u128);
-            }
-        }
-    }
-
-    #[cfg(f128_enabled)]
-    f128_tests!();
-
     #[test]
     fn test_macros() {
         #[cfg(f16_enabled)]
@@ -877,63 +696,6 @@ mod parse_tests {
 mod tests_panicking {
     extern crate std;
     use super::*;
-
-    // HACK(msrv): 1.63 rejects unknown width float literals at an AST level, so use a macro to
-    // hide them from the AST.
-    #[cfg(f16_enabled)]
-    macro_rules! f16_tests {
-        () => {
-            #[test]
-            fn test_f16_almost_extra_precision() {
-                // Exact maximum precision allowed
-                hf16("0x1.ffcp+0");
-            }
-
-            #[test]
-            #[should_panic(expected = "the value is too precise")]
-            fn test_f16_extra_precision() {
-                // One bit more than the above.
-                hf16("0x1.ffdp+0");
-            }
-
-            #[test]
-            #[should_panic(expected = "the value is too huge")]
-            fn test_f16_overflow() {
-                // One bit more than the above.
-                hf16("0x1p+16");
-            }
-
-            #[test]
-            fn test_f16_tiniest() {
-                let x = hf16("0x1.p-24");
-                let y = hf16("0x0.001p-12");
-                let z = hf16("0x0.8p-23");
-                assert_eq!(x, y);
-                assert_eq!(x, z);
-            }
-
-            #[test]
-            #[should_panic(expected = "the value is too tiny")]
-            fn test_f16_too_tiny() {
-                hf16("0x1.p-25");
-            }
-
-            #[test]
-            #[should_panic(expected = "the value is too tiny")]
-            fn test_f16_also_too_tiny() {
-                hf16("0x0.8p-24");
-            }
-
-            #[test]
-            #[should_panic(expected = "the value is too tiny")]
-            fn test_f16_again_too_tiny() {
-                hf16("0x0.001p-13");
-            }
-        };
-    }
-
-    #[cfg(f16_enabled)]
-    f16_tests!();
 
     #[test]
     fn test_f32_almost_extra_precision() {
@@ -1002,68 +764,6 @@ mod tests_panicking {
         hf64("0x1.abcdabcdabcdf8p+0");
     }
 
-    // HACK(msrv): 1.63 rejects unknown width float literals at an AST level, so use a macro to
-    // hide them from the AST.
-    #[cfg(f128_enabled)]
-    macro_rules! f128_tests {
-        () => {
-            #[test]
-            fn test_f128_almost_extra_precision() {
-                // Exact maximum precision allowed
-                hf128("0x1.ffffffffffffffffffffffffffffp+16383");
-            }
-
-            #[test]
-            #[should_panic(expected = "the value is too precise")]
-            fn test_f128_extra_precision() {
-                // Just below the maximum finite.
-                hf128("0x1.fffffffffffffffffffffffffffe8p+16383");
-            }
-            #[test]
-            #[should_panic(expected = "the value is too huge")]
-            fn test_f128_extra_precision_overflow() {
-                // One bit more than the above. Should overflow.
-                hf128("0x1.ffffffffffffffffffffffffffff8p+16383");
-            }
-
-            #[test]
-            #[should_panic(expected = "the value is too huge")]
-            fn test_f128_overflow() {
-                // One bit more than the above.
-                hf128("0x1p+16384");
-            }
-
-            #[test]
-            fn test_f128_tiniest() {
-                let x = hf128("0x1.p-16494");
-                let y = hf128("0x0.0000000000000001p-16430");
-                let z = hf128("0x0.8p-16493");
-                assert_eq!(x, y);
-                assert_eq!(x, z);
-            }
-
-            #[test]
-            #[should_panic(expected = "the value is too tiny")]
-            fn test_f128_too_tiny() {
-                hf128("0x1.p-16495");
-            }
-
-            #[test]
-            #[should_panic(expected = "the value is too tiny")]
-            fn test_f128_again_too_tiny() {
-                hf128("0x0.0000000000000001p-16431");
-            }
-
-            #[test]
-            #[should_panic(expected = "the value is too tiny")]
-            fn test_f128_also_too_tiny() {
-                hf128("0x0.8p-16494");
-            }
-        };
-    }
-
-    #[cfg(f128_enabled)]
-    f128_tests!();
 }
 
 #[cfg(test)]
@@ -1074,68 +774,6 @@ mod print_tests {
     use super::*;
     use crate::support::Float;
 
-    #[test]
-    #[cfg(f16_enabled)]
-    fn test_f16() {
-        use std::format;
-        // Exhaustively check that `f16` roundtrips.
-        for x in 0..=u16::MAX {
-            let f = f16::from_bits(x);
-            let s = format!("{}", Hexf(f));
-            let from_s = hf16(&s);
-
-            if f.is_nan() && from_s.is_nan() {
-                continue;
-            }
-
-            assert_eq!(
-                f.to_bits(),
-                from_s.to_bits(),
-                "{f:?} formatted as {s} but parsed as {from_s:?}"
-            );
-        }
-    }
-
-    #[test]
-    #[cfg(f16_enabled)]
-    fn test_f16_to_f32() {
-        use std::format;
-        // Exhaustively check that these are equivalent for all `f16`:
-        //  - `f16 -> f32`
-        //  - `f16 -> str -> f32`
-        //  - `f16 -> f32 -> str -> f32`
-        //  - `f16 -> f32 -> str -> f16 -> f32`
-        for x in 0..=u16::MAX {
-            let f16 = f16::from_bits(x);
-            let s16 = format!("{}", Hexf(f16));
-            let f32 = f16 as f32;
-            let s32 = format!("{}", Hexf(f32));
-
-            let a = hf32(&s16);
-            let b = hf32(&s32);
-            let c = hf16(&s32);
-
-            if f32.is_nan() && a.is_nan() && b.is_nan() && c.is_nan() {
-                continue;
-            }
-
-            assert_eq!(
-                f32.to_bits(),
-                a.to_bits(),
-                "{f16:?} : f16 formatted as {s16} which parsed as {a:?} : f16"
-            );
-            assert_eq!(
-                f32.to_bits(),
-                b.to_bits(),
-                "{f32:?} : f32 formatted as {s32} which parsed as {b:?} : f32"
-            );
-            assert_eq!(
-                f32.to_bits(),
-                (c as f32).to_bits(),
-                "{f32:?} : f32 formatted as {s32} which parsed as {c:?} : f16"
-            );
-        }
-    }
     #[test]
     fn spot_checks() {
         assert_eq!(Hexf(f32::MAX).to_string(), "0x1.fffffep+127");

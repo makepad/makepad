@@ -2209,20 +2209,6 @@ mod tests {
         });
     }
 
-    /// The tracking rule stays a free function the tests can reach, and both
-    /// presets are declared once.
-    #[test]
-    fn the_tracking_rule_and_the_presets_are_in_the_source() {
-        crate::on_test_cx(|| {
-        let source = include_str!("line_menu.rs");
-        assert!(source.contains(&["pub fn ", "current_section("].concat()));
-        let labeled = ["mod.widgets.LineMenuLabeled = ", "mod.widgets.LineMenu{"].concat();
-        let mirrored = ["mod.widgets.LineMenuMirrored = ", "mod.widgets.LineMenu{"].concat();
-        assert_eq!(source.matches(&labeled).count(), 1);
-        assert_eq!(source.matches(&mirrored).count(), 1);
-        });
-    }
-
     #[test]
     fn nothing_drawn_lights_nothing() {
         crate::on_test_cx(|| {

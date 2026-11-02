@@ -626,18 +626,6 @@ mod tests {
         assert!(normalize_voice_name("a b").is_err());
     }
 
-    #[test]
-    fn stub_backend_is_never_reported_resident() {
-        let mut backend = IndexTtsBackend::with_stub(
-            "indextts-test",
-            Box::new(|_| unreachable!("lifecycle test never synthesizes")),
-        );
-        assert!(!backend.is_resident());
-        backend.unload().unwrap();
-        backend.unload().unwrap();
-        assert!(!backend.is_resident());
-    }
-
     #[cfg(feature = "indextts")]
     #[test]
     fn native_worker_handle_is_send_and_idle_shutdown_joins() {

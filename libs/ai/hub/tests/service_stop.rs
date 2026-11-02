@@ -22,6 +22,7 @@ fn config(dir: &std::path::Path, host: &str, port: u16) -> ServiceConfig {
 }
 
 fn answers(addr: SocketAddr) -> bool {
+    let addr = if addr.ip().is_unspecified() { SocketAddr::from(([127, 0, 0, 1], addr.port())) } else { addr };
     TcpStream::connect_timeout(&addr, Duration::from_millis(500)).is_ok()
 }
 
@@ -58,20 +59,20 @@ fn a_stopped_service_closes_its_ports_and_starts_again() {
     assert!(answers(again.addr));
     again.stop();
 
-    // A fleet node (TLS front + beacon) on this machine's private LAN address, when it has one.
-    let Some(ip) = makepad_ai_hub::discovery::network_addresses().into_iter().find(|ip| ip.is_private()) else {
-        eprintln!("no private LAN address here: the fleet-front half is skipped");
-        return;
-    };
+    // a non-loopback bind is a LAN listener, which the Networked AI hub setting must allow
+    std::env::set_var("MAKEPAD_NETWORKED_AI_HUB", "1");
+    // A non-loopback bind selects the TLS front; dial it over loopback so
+    // this check needs no LAN interface or external fleet node.
+    let host = "0.0.0.0";
     let dir = scratch("stop-fleet");
     install_identity();
-    let handle = start_service(config(&dir, &ip.to_string(), 0)).unwrap();
+    let handle = start_service(config(&dir, host, 0)).unwrap();
     let addr = handle.addr;
     assert!(!addr.ip().is_loopback());
     assert!(answers(addr), "the TLS front listens");
     handle.stop();
     assert!(!answers(addr), "the TLS front is closed after stop");
-    let again = start_service(config(&dir, &ip.to_string(), addr.port())).expect("same port again");
+    let again = start_service(config(&dir, host, addr.port())).expect("same port again");
     assert!(answers(again.addr));
     again.stop();
 }

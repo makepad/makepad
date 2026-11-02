@@ -1,4 +1,9 @@
 # Explicit platform API roots. Transitive metadata dependencies are automatic.
+# Hand-written / additive modules declared by lib.rs.
+module process
+module session
+module composition
+module system_web_view
 Windows.Win32.Devices.FunctionDiscovery.PKEY_Device_FriendlyName
 Windows.Win32.Devices.HumanInterfaceDevice.DI8DEVCLASS_GAMECTRL
 Windows.Win32.Devices.HumanInterfaceDevice.DI8DEVTYPE_DRIVING
@@ -117,6 +122,7 @@ Windows.Win32.Graphics.Direct3D11.D3D11_CLEAR_DEPTH
 Windows.Win32.Graphics.Direct3D11.D3D11_CLEAR_STENCIL
 Windows.Win32.Graphics.Direct3D11.D3D11_COLOR_WRITE_ENABLE_ALL
 Windows.Win32.Graphics.Direct3D11.D3D11_COMPARISON_ALWAYS
+Windows.Win32.Graphics.Direct3D11.D3D11_COMPARISON_GREATER
 Windows.Win32.Graphics.Direct3D11.D3D11_COMPARISON_LESS_EQUAL
 Windows.Win32.Graphics.Direct3D11.D3D11_CPU_ACCESS_READ
 Windows.Win32.Graphics.Direct3D11.D3D11_CPU_ACCESS_WRITE
@@ -1293,19 +1299,6 @@ Windows.Win32.UI.Shell.SHCreateItemFromParsingName
 Windows.Win32.System.Registry.RegGetValueW
 Windows.Win32.System.Registry.HKEY_CURRENT_USER
 Windows.Win32.System.Registry.RRF_RT_REG_DWORD
-
-# Native composition layers (generated additively with apis-composition.txt).
-Windows.Win32.Graphics.DirectComposition.DCompositionCreateDevice2
-Windows.Win32.Graphics.DirectComposition.DCompositionCreateDevice3
-Windows.Win32.Graphics.DirectComposition.IDCompositionDesktopDevice
-Windows.Win32.Graphics.DirectComposition.IDCompositionDevice2
-Windows.Win32.Graphics.DirectComposition.IDCompositionDevice3
-Windows.Win32.Graphics.DirectComposition.IDCompositionTarget
-Windows.Win32.Graphics.DirectComposition.IDCompositionVisual2
-Windows.Win32.Graphics.DirectComposition.IDCompositionVisual3
-Windows.Win32.Graphics.DirectComposition.IDCompositionRectangleClip
-Windows.Win32.Graphics.DirectComposition.IDCompositionEffectGroup
-Windows.Win32.Graphics.DirectComposition.IDCompositionSurface
 Windows.Win32.UI.Input.MOUSE_MOVE_ABSOLUTE
 Windows.Win32.System.Ole.DROPEFFECT_NONE
 Windows.Win32.System.SystemServices.MK_RBUTTON
@@ -1599,20 +1592,3 @@ Windows.Win32.UI.Accessibility.UiaGetReservedNotSupportedValue
 Windows.Win32.UI.Accessibility.UIA_TextPattern2Id
 constants Windows.Win32.UI.Accessibility.UIA_*AttributeId
 Windows.Win32.Foundation.SysStringLen
-# Additive desktop session, computer name and Task Scheduler bindings.
-Windows.Win32.System.RemoteDesktop.ProcessIdToSessionId
-Windows.Win32.System.RemoteDesktop.WTSGetActiveConsoleSessionId
-Windows.Win32.System.RemoteDesktop.WTSQuerySessionInformationW
-Windows.Win32.System.RemoteDesktop.WTSFreeMemory
-Windows.Win32.System.RemoteDesktop.WTSConnectState
-Windows.Win32.System.RemoteDesktop.WTSActive
-Windows.Win32.System.RemoteDesktop.WTSDisconnected
-Windows.Win32.System.SystemInformation.GetComputerNameExW
-Windows.Win32.System.SystemInformation.ComputerNameDnsHostname
-Windows.Win32.System.TaskScheduler.TaskScheduler
-Windows.Win32.System.TaskScheduler.ITaskService
-Windows.Win32.System.Threading.DETACHED_PROCESS
-Windows.Win32.System.Threading.CREATE_BREAKAWAY_FROM_JOB
-Windows.Win32.Foundation.ERROR_FILE_NOT_FOUND
-Windows.Win32.Foundation.ERROR_PATH_NOT_FOUND
-Windows.Win32.Foundation.RPC_E_CHANGED_MODE

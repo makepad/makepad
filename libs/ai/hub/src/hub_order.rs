@@ -28,6 +28,9 @@ pub fn host_of(base: &str) -> &str {
 
 /// This host's primary address (the one a packet off this machine would leave from).
 pub fn own_lan_ip() -> Option<IpAddr> {
+    if !makepad_network::lan::hub_service("ai-hub interface address") {
+        return None;
+    }
     static IP: std::sync::OnceLock<Option<IpAddr>> = std::sync::OnceLock::new();
     *IP.get_or_init(|| {
         let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
@@ -40,11 +43,15 @@ pub fn own_lan_ip() -> Option<IpAddr> {
 }
 
 pub fn is_this_machine(base: &str) -> bool {
+    is_this_machine_with(base, own_lan_ip())
+}
+
+fn is_this_machine_with(base: &str, own_ip: Option<IpAddr>) -> bool {
     let host = host_of(base);
     if host == "localhost" || host.starts_with("127.") || host == "::1" {
         return true;
     }
-    own_lan_ip().is_some_and(|ip| ip.to_string() == host)
+    own_ip.is_some_and(|ip| host.parse::<IpAddr>() == Ok(ip))
 }
 
 fn pinned_entries() -> Vec<String> {
@@ -94,7 +101,11 @@ pub fn tier(base: &str) -> u8 {
 }
 
 fn tier_with(base: &str, pins: &[String]) -> u8 {
-    if is_this_machine(base) {
+    tier_with_ip(base, pins, own_lan_ip())
+}
+
+fn tier_with_ip(base: &str, pins: &[String], own_ip: Option<IpAddr>) -> u8 {
+    if is_this_machine_with(base, own_ip) {
         0
     } else if matches_pin(base, pins) {
         1
@@ -109,7 +120,8 @@ pub fn order(bases: &mut Vec<String>) {
 }
 
 fn order_with(bases: &mut Vec<String>, pins: &[String]) {
-    bases.sort_by(|a, b| tier_with(a, pins).cmp(&tier_with(b, pins)).then_with(|| a.cmp(b)));
+    let own_ip = own_lan_ip();
+    bases.sort_by(|a, b| tier_with_ip(a, pins, own_ip).cmp(&tier_with_ip(b, pins, own_ip)).then_with(|| a.cmp(b)));
     bases.dedup();
 }
 
@@ -121,7 +133,7 @@ mod tests {
     fn hosts_come_out_of_urls() {
         assert_eq!(host_of("https://192.0.2.73:8123"), "192.0.2.73");
         assert_eq!(host_of("http://127.0.0.1:8123/"), "127.0.0.1");
-        assert_eq!(host_of("192.0.2.20:8785"), "192.0.2.20");
+        assert_eq!(host_of("192.0.2.5:8785"), "192.0.2.5");
         assert_eq!(host_of("https://[::1]:8123"), "::1");
     }
 
@@ -168,9 +180,9 @@ mod tests {
 
     #[test]
     fn pins_become_base_urls() {
-        std::env::set_var("MAKEPAD_AI_HUB", "192.0.2.73:8123, 192.0.2.23, https://h:1/");
+        std::env::set_var("MAKEPAD_AI_HUB", "192.0.2.73:8123, 192.0.2.9, https://h:1/");
         let b = pinned_bases();
         std::env::remove_var("MAKEPAD_AI_HUB");
-        assert_eq!(b, vec!["https://192.0.2.73:8123", "https://192.0.2.23:8123", "https://h:1"]);
+        assert_eq!(b, vec!["https://192.0.2.73:8123", "https://192.0.2.9:8123", "https://h:1"]);
     }
 }

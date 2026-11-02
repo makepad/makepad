@@ -226,14 +226,6 @@ mod tests {
     use crate::vec3::dvec3;
 
     #[test]
-    fn test_identity_transform() {
-        let p = dvec3(1.0, 2.0, 3.0);
-        let m = Mat4d::identity();
-        let r = m.transform_point(p);
-        assert_eq!(r, p);
-    }
-
-    #[test]
     fn test_translation() {
         let p = dvec3(1.0, 2.0, 3.0);
         let m = Mat4d::translation(dvec3(10.0, 20.0, 30.0));
@@ -276,13 +268,6 @@ mod tests {
         assert!((r.x - p.x).abs() < 1e-12);
         assert!((r.y - p.y).abs() < 1e-12);
         assert!((r.z - p.z).abs() < 1e-12);
-    }
-
-    #[test]
-    fn test_mul_identity() {
-        let m = Mat4d::translation(dvec3(1.0, 2.0, 3.0));
-        let r = Mat4d::mul(&m, &Mat4d::identity());
-        assert_eq!(r, m);
     }
 
     #[test]

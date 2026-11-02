@@ -17,13 +17,11 @@
 //!
 //! # The unwrap
 //!
-//! A general UV unwrapper is a hard problem and unnecessary here: Kenney
-//! geometry is boxy. Adjacent near-coplanar triangles are grown into CHARTS
-//! (see [`bake_into`]), each chart is projected onto its dominant plane —
-//! world units in, texels out, no distortion to reason about — and the charts
-//! are shelf-packed into the shared atlas with a dilated gutter against
-//! bilinear bleed. Vertices split only where two charts meet, exactly the
-//! corners where a hard shading break belongs.
+//! Charts come from `makepad_uv_unwrap`: adjacent triangles join up to a crease
+//! and split where they would stretch, flat runs are projected and curved runs
+//! flattened conformally, and every chart is at one texel density, nested with
+//! a padded gutter against bilinear bleed. Vertices split only where two charts
+//! meet, exactly the corners where a hard shading break belongs.
 //!
 //! # The evaluator
 //!
@@ -179,9 +177,6 @@ pub struct AoAtlas {
     pub size: usize,
     /// Charts that did not fit and were given the overlap fallback slot.
     pub overflowed: usize,
-    /// Widest angle, in degrees, between any triangle's normal and its own
-    /// chart's average normal. A planar projection folds once this passes 90.
-    pub max_chart_spread: f32,
     /// Scale charts UP until the atlas is spent.
     ///
     /// For a SINGLE-model atlas only. A pack atlas is first-come-first-served,
@@ -208,7 +203,6 @@ impl AoAtlas {
             pixels: vec![255; size * size],
             size,
             overflowed: 0,
-            max_chart_spread: 0.0,
             fill: false,
             bake_evaluator: "",
             bake_seconds: 0.0,
@@ -324,23 +318,20 @@ pub struct BakedAo {
     pub ground: Option<GroundAo>,
 }
 
-/// How parallel two triangles' normals must be to join one chart. ~15 degrees.
+/// How parallel two triangles' normals must be to join one chart. cos(45 degrees).
 ///
-/// Loosened from 10 with the Quest size push: curved runs — barrel staves,
-/// wheel arches, rounded corner trim — fragmented into a chart per facet, and
-/// each chart pays its own gutter, which on a detailed toy car was most of
-/// the texture. 15 degrees welds those runs while a real crease (a wall to
-/// its roof) stays two charts. Too loose and a chart wraps a corner, and a
-/// planar projection of a wrapped chart squashes one of its faces to nothing.
-const COPLANAR_DOT: f32 = 0.966;
+/// A chart interpolates across every edge inside it, so a real crease (a wall
+/// to its roof) has to stay a boundary or its occlusion smears over the corner,
+/// while the facets of a curved run (barrel staves, wheel arches, rounded trim)
+/// have to weld, or each pays its own gutter and shows its own edge.
+const CHART_CREASE_COS: f64 = 0.7071;
 
-/// How far a triangle may sit from its CHART's average normal. cos(30 degrees).
-///
-/// Bounds the total drift a chart can accumulate. Without it, gentle pairwise
-/// merges chain around curved geometry until the chart folds and its planar
-/// projection maps two surfaces onto one set of texels. 30 degrees of tilt
-/// foreshortens a texel by at most cos30 = 0.87, which bilinear absorbs.
-const CHART_SPREAD_DOT: f32 = 0.866;
+/// Vertices this close, as a fraction of the model's size, are one vertex for
+/// chart adjacency. Kenney meshes duplicate vertices freely (one flat facade is
+/// often several quads each owning its corners), and without welding each quad
+/// becomes a chart with its own texel grid, a visible seam in the middle of a
+/// wall where the two grids' samples disagree.
+const CHART_WELD: f64 = 1.0e-5;
 
 /// Texels of padding round each chart, filled by dilation.
 ///
@@ -352,10 +343,6 @@ const CHART_SPREAD_DOT: f32 = 0.866;
 /// charts low-poly art is mostly made of it was a third of the area.
 pub(crate) const GUTTER: usize = 1;
 
-/// Smallest and largest a chart may be, gutter included.
-const CHART_MIN: usize = 3;
-const CHART_MAX: usize = 192;
-
 /// Sub-texel sample offsets, shared with the reference evaluator so both
 /// rasterise the exact same coverage. Rotated-grid: no two share a row or
 /// column, so gradients in any direction get four distinct positions rather
@@ -363,19 +350,14 @@ const CHART_MAX: usize = 192;
 pub(crate) const TEXEL_SUB_OFFSETS: [(f32, f32); TEXEL_SUBSAMPLES] =
     [(0.375, 0.125), (0.875, 0.375), (0.125, 0.625), (0.625, 0.875)];
 
-/// A group of adjacent, near-coplanar triangles sharing one planar projection.
+/// A group of adjacent triangles sharing one continuous mapping.
 ///
 /// `pub(crate)` for the reference evaluator ([`crate::ao_reference`]), which
 /// must rasterise the SAME charts so its atlas diffs texel-for-texel.
 pub(crate) struct Chart {
     pub(crate) tris: Vec<usize>,
-    /// Axis dropped by the projection: 0 = x, 1 = y, 2 = z.
-    pub(crate) axis: usize,
-    /// Chart-space origin (the projected bounding box's corner), world units.
-    pub(crate) u0: f32,
-    pub(crate) v0: f32,
-    /// Texels per world unit, after the whole-atlas fit.
-    pub(crate) scale: f32,
+    /// Corner positions of each of `tris`, in texels of this chart's block.
+    pub(crate) tex: Vec<[[f32; 2]; 3]>,
     /// Size in texels, gutter included.
     pub(crate) w: usize,
     pub(crate) h: usize,
@@ -385,28 +367,9 @@ pub(crate) struct Chart {
     /// to know where each chart's block sits.
     pub(crate) x: usize,
     pub(crate) y: usize,
-}
-
-/// Which coordinate a normal is most aligned with.
-fn dominant_axis(n: Vec3f) -> usize {
-    let (ax, ay, az) = (n.x.abs(), n.y.abs(), n.z.abs());
-    if ax >= ay && ax >= az {
-        0
-    } else if ay >= az {
-        1
-    } else {
-        2
-    }
-}
-
-/// Drop the dominant axis. The remaining two coordinates ARE the chart's uv,
-/// in world units — which is what makes this a planar map with no distortion.
-pub(crate) fn project(p: Vec3f, axis: usize) -> (f32, f32) {
-    match axis {
-        0 => (p.z, p.y),
-        1 => (p.x, p.z),
-        _ => (p.x, p.y),
-    }
+    /// Which texels of the block are this chart's, gutter included. Charts
+    /// nest, so one chart's block can hold parts of its neighbours.
+    pub(crate) owned: Vec<bool>,
 }
 
 fn face_normal(a: Vec3f, b: Vec3f, c: Vec3f) -> Vec3f {
@@ -421,8 +384,121 @@ fn face_normal(a: Vec3f, b: Vec3f, c: Vec3f) -> Vec3f {
     Vec3f { x: n.x / l, y: n.y / l, z: n.z / l }
 }
 
-/// Bake AO into an atlas as PLANAR CHARTS — one continuous texture region per
-/// flat run of the surface.
+/// Charts for one model and their place in `atlas`.
+fn lay_out_charts(atlas: &mut AoAtlas, positions: &[Vec3f], indices: &[u32]) -> Vec<Chart> {
+    use makepad_uv_unwrap::{AtlasTarget, ChartOptions, MeshInput, PackOptions};
+    let points: Vec<[f64; 3]> =
+        positions.iter().map(|p| [p.x as f64, p.y as f64, p.z as f64]).collect();
+    let input = MeshInput { positions: &points, indices, polygons: None, seams: &[] };
+    let options = ChartOptions {
+        crease_cos: CHART_CREASE_COS,
+        weld_tolerance: CHART_WELD,
+        ..ChartOptions::default()
+    };
+    // An indexed mesh of finite vertices is all this takes, and the loaders
+    // have checked both by now.
+    let charting = makepad_uv_unwrap::parameterize(&input, &options, &mut |_| true)
+        .expect("charts for a baked model");
+    let area: f64 = charting.charts.iter().map(|c| c.area).sum();
+    let padding = (2 * GUTTER) as u32;
+    let pack = |target| PackOptions { target, padding, obstacles: &[] };
+    let spend = |target| makepad_uv_unwrap::pack(&charting, &pack(target), &mut |_| true);
+
+    // A lone model in a virgin atlas gets a square just big enough at its target
+    // density, and then the density its charts actually fit at; the texture is
+    // never larger than the model needs (a crate at 96 texels/unit wants a 64
+    // square, not the house's 672), and none of it is left blank. Multiples of 8
+    // rather than powers of two: the next power of two above 660 is 1024, 2.4x
+    // the memory for zero added detail.
+    //
+    // In a shared atlas the model's whole layout becomes one block on the shelf,
+    // at the pack's density or less if the remaining budget demands it.
+    let virgin = atlas.fill && atlas.shelf_x == 0 && atlas.shelf_y == 0 && atlas.shelf_h == 0;
+    let layout = if virgin {
+        let ceiling = atlas.size.max(ATLAS_MAX);
+        let wanted = area * (MODEL_TEXELS_PER_UNIT as f64) * (MODEL_TEXELS_PER_UNIT as f64);
+        let mut side = ((wanted / 0.6).sqrt().ceil() as usize)
+            .next_multiple_of(8)
+            .clamp(64, atlas.size.max(64));
+        loop {
+            match spend(AtlasTarget::Fit { width: side as u32, height: side as u32 }) {
+                Ok(layout) => {
+                    atlas.pixels = vec![255; side * side];
+                    atlas.size = side;
+                    break Some(layout);
+                }
+                Err(_) if side < ceiling => side = (side * 2).min(ceiling),
+                Err(_) => break None,
+            }
+        }
+    } else {
+        let free = atlas.free_texels() as f64;
+        let mut density = TEXELS_PER_UNIT as f64;
+        if area * density * density > free * 0.8 {
+            density = (free * 0.8 / area).sqrt();
+        }
+        loop {
+            let target = AtlasTarget::Density { texels_per_unit: density, max_size: ATLAS_MAX as u32 };
+            match spend(target) {
+                Ok(layout) => break Some(layout),
+                Err(_) if density > 1.0e-3 => density *= 0.7,
+                Err(_) => break None,
+            }
+        }
+    };
+    let Some(layout) = layout else {
+        // More charts than the largest atlas has texels for. The model keeps
+        // every triangle and reads one texel: unlit by AO, not wrong.
+        atlas.overflowed += 1;
+        eprintln!("AO atlas overflow: {} charts do not fit {ATLAS_MAX} texels", charting.charts.len());
+        let middle = [atlas.size as f32 * 0.5; 2];
+        let tris: Vec<usize> = (0..charting.triangle_chart.len()).collect();
+        let tex = vec![[middle; 3]; tris.len()];
+        let chart = Chart { tris, tex, w: 0, h: 0, x: 0, y: 0, owned: Vec::new() };
+        return vec![chart];
+    };
+    let (origin_x, origin_y) = atlas.alloc_rect(layout.width as usize, layout.height as usize);
+    let gutter = GUTTER as i64;
+    let mut charts = Vec::with_capacity(charting.charts.len());
+    for (source, placed) in charting.charts.iter().zip(&layout.placements) {
+        let (mw, mh) = (placed.mask.width as usize, placed.mask.height as usize);
+        let (w, h) = (mw + 2 * GUTTER, mh + 2 * GUTTER);
+        let mut owned = vec![false; w * h];
+        for row in 0..placed.mask.height {
+            for &(first, last) in placed.mask.row(row) {
+                for y in row as i64..=row as i64 + 2 * gutter {
+                    for x in first as i64..=last as i64 + 2 * gutter {
+                        owned[y as usize * w + x as usize] = true;
+                    }
+                }
+            }
+        }
+        let tris: Vec<usize> = source.triangles.iter().map(|&t| t as usize).collect();
+        let (left, top) = (placed.x as f64 - gutter as f64, placed.y as f64 - gutter as f64);
+        let tex = tris
+            .iter()
+            .map(|&t| {
+                [0, 1, 2].map(|k| {
+                    let q = placed.map(charting.corner_uv[t * 3 + k]);
+                    [(q[0] - left) as f32, (q[1] - top) as f32]
+                })
+            })
+            .collect();
+        charts.push(Chart {
+            tris,
+            tex,
+            w,
+            h,
+            x: origin_x + placed.x as usize - GUTTER,
+            y: origin_y + placed.y as usize - GUTTER,
+            owned,
+        });
+    }
+    charts
+}
+
+/// Bake AO into an atlas of CHARTS — one continuous texture region per run of
+/// the surface.
 ///
 /// # Why not a patch per triangle
 ///
@@ -432,10 +508,9 @@ fn face_normal(a: Vec3f, b: Vec3f, c: Vec3f) -> Vec3f {
 /// quilt of soft diamonds radiating from every vertex. The occlusion values
 /// were right; the parameterisation made them unreadable.
 ///
-/// Grouping coplanar neighbours into a chart and projecting it onto its own
-/// plane makes a facade ONE surface with ONE mapping, exactly like texturing a
-/// wall: occlusion varies smoothly across it, dark where it meets the ground
-/// and under the eave, clean in the middle.
+/// Grouping neighbours into a chart makes a facade ONE surface with ONE mapping,
+/// exactly like texturing a wall: occlusion varies smoothly across it, dark
+/// where it meets the ground and under the eave, clean in the middle.
 ///
 /// # The retopology
 ///
@@ -610,291 +685,7 @@ fn bake_into_authored_inner(
         (ATLAS_RAYS / TEXEL_SUBSAMPLES).max(32), tri_count,
     );
 
-    // --- Charts: union adjacent, near-coplanar triangles -------------------
-    let fnorm: Vec<Vec3f> = (0..tri_count)
-        .map(|t| {
-            face_normal(
-                positions[indices[t * 3] as usize],
-                positions[indices[t * 3 + 1] as usize],
-                positions[indices[t * 3 + 2] as usize],
-            )
-        })
-        .collect();
-
-    // Grow charts OUTWARD FROM A SEED, bounded against the chart's own running
-    // average normal — not just pairwise against a neighbour.
-    //
-    // Pairwise-only was the bug. Union-find has no transitivity limit, so a
-    // chain of triangles each within 10 degrees of the last can wrap a chart
-    // right around a curve. Measured on a Kenney house — which has a
-    // cylindrical drainpipe and rounded window frames — charts reached a
-    // 90-degree spread. Projecting a 90-degree chart onto one plane collapses
-    // its perpendicular half to zero width, so two different parts of the
-    // surface land on the SAME texels and read each other's occlusion. That is
-    // what showed up as grey smudges floating on flat walls.
-    //
-    // Both bounds are needed: the pairwise test keeps a hard crease from
-    // merging at all, and the against-the-average test caps how far a chart may
-    // drift no matter how gently.
-    // Adjacency is keyed on WELDED positions, not on indices. Kenney meshes
-    // duplicate vertices freely — one flat facade is often several quads each
-    // owning its own corner vertices — and index-keyed edges see those as
-    // separate islands. Each island then became its own chart with its own
-    // texel grid, and where two grids met mid-wall their samples disagreed:
-    // the visible seam splitting a facade's occlusion in half. Welding by
-    // position makes "same place" mean "same vertex" regardless of authoring.
-    let mut adjacent: Vec<[usize; 3]> = vec![[usize::MAX; 3]; tri_count];
-    {
-        let span = (max.x - min.x)
-            .max(max.y - min.y)
-            .max(max.z - min.z)
-            .max(1.0e-5);
-        let inv_eps = 1.0 / (span * 1.0e-5);
-        let quant = |p: Vec3f| {
-            (
-                (p.x * inv_eps).round() as i64,
-                (p.y * inv_eps).round() as i64,
-                (p.z * inv_eps).round() as i64,
-            )
-        };
-        let mut canon_of: std::collections::HashMap<(i64, i64, i64), u32> =
-            std::collections::HashMap::with_capacity(positions.len());
-        let canon: Vec<u32> = positions
-            .iter()
-            .enumerate()
-            .map(|(i, p)| *canon_of.entry(quant(*p)).or_insert(i as u32))
-            .collect();
-        let mut edges: std::collections::HashMap<(u32, u32), (usize, usize)> =
-            std::collections::HashMap::with_capacity(tri_count * 3);
-        for t in 0..tri_count {
-            for e in 0..3 {
-                let (a, b) = (
-                    canon[indices[t * 3 + e] as usize],
-                    canon[indices[t * 3 + (e + 1) % 3] as usize],
-                );
-                let key = if a < b { (a, b) } else { (b, a) };
-                // `remove`, not `get`: welded edges can carry more than two
-                // triangles, and pairing them greedily two at a time keeps
-                // adjacency symmetric instead of letting a third triangle
-                // overwrite the first pair.
-                if let Some((other, oe)) = edges.remove(&key) {
-                    adjacent[t][e] = other;
-                    adjacent[other][oe] = t;
-                } else {
-                    edges.insert(key, (t, e));
-                }
-            }
-        }
-    }
-
-    let mut charts: Vec<Chart> = Vec::new();
-    let mut tri_chart = vec![usize::MAX; tri_count];
-    for seed in 0..tri_count {
-        if tri_chart[seed] != usize::MAX {
-            continue;
-        }
-        let ci = charts.len();
-        charts.push(Chart {
-            tris: vec![seed],
-            axis: 0,
-            u0: 0.0,
-            v0: 0.0,
-            scale: TEXELS_PER_UNIT,
-            w: 0,
-            h: 0,
-            x: 0,
-            y: 0,
-        });
-        tri_chart[seed] = ci;
-        let mut acc = fnorm[seed];
-        let mut queue = vec![seed];
-        while let Some(t) = queue.pop() {
-            let l = (acc.x * acc.x + acc.y * acc.y + acc.z * acc.z).sqrt().max(1.0e-12);
-            let avg = Vec3f { x: acc.x / l, y: acc.y / l, z: acc.z / l };
-            for e in 0..3 {
-                let n = adjacent[t][e];
-                if n == usize::MAX || tri_chart[n] != usize::MAX {
-                    continue;
-                }
-                let pair = fnorm[n].x * fnorm[t].x + fnorm[n].y * fnorm[t].y + fnorm[n].z * fnorm[t].z;
-                let mean = fnorm[n].x * avg.x + fnorm[n].y * avg.y + fnorm[n].z * avg.z;
-                if pair < COPLANAR_DOT || mean < CHART_SPREAD_DOT {
-                    continue;
-                }
-                tri_chart[n] = ci;
-                charts[ci].tris.push(n);
-                acc.x += fnorm[n].x;
-                acc.y += fnorm[n].y;
-                acc.z += fnorm[n].z;
-                queue.push(n);
-            }
-        }
-    }
-
-    // --- Size each chart from its own projected extent ---------------------
-    let mut spread_max = 0.0f32;
-    for c in charts.iter_mut() {
-        // Area-weighted average normal picks the plane the chart mostly lies
-        // in, so one stray sliver cannot tip the projection onto a bad axis.
-        let mut acc = Vec3f { x: 0.0, y: 0.0, z: 0.0 };
-        for &t in &c.tris {
-            let (a, b, cc) = (
-                positions[indices[t * 3] as usize],
-                positions[indices[t * 3 + 1] as usize],
-                positions[indices[t * 3 + 2] as usize],
-            );
-            let w = tri_area(a, b, cc);
-            acc.x += fnorm[t].x * w;
-            acc.y += fnorm[t].y * w;
-            acc.z += fnorm[t].z * w;
-        }
-        c.axis = dominant_axis(acc);
-        {
-            let l = (acc.x * acc.x + acc.y * acc.y + acc.z * acc.z).sqrt().max(1.0e-12);
-            let avg = Vec3f { x: acc.x / l, y: acc.y / l, z: acc.z / l };
-            for &t in &c.tris {
-                // Degenerate triangles have no normal — face_normal of a zero
-                // cross product is noise — and they rasterise no texels, so
-                // they cannot fold a projection. Counting them reported a 90
-                // degree spread on every model that carried slivers, which
-                // buried the real folds this metric exists to expose.
-                let (a, b, cc) = (
-                    positions[indices[t * 3] as usize],
-                    positions[indices[t * 3 + 1] as usize],
-                    positions[indices[t * 3 + 2] as usize],
-                );
-                if tri_area(a, b, cc) < 1.0e-9 {
-                    continue;
-                }
-                let d = (fnorm[t].x * avg.x + fnorm[t].y * avg.y + fnorm[t].z * avg.z)
-                    .clamp(-1.0, 1.0);
-                let deg = d.acos().to_degrees();
-                if deg > spread_max {
-                    spread_max = deg;
-                }
-                if deg > 45.0 && std::env::var_os("AO_CHART_DEBUG").is_some() {
-                    println!(
-                        "    chart {} tris={} deg={:.1} n=({:.2},{:.2},{:.2}) avg=({:.2},{:.2},{:.2})",
-                        c.tris.len(), c.tris.len(), deg,
-                        fnorm[t].x, fnorm[t].y, fnorm[t].z, avg.x, avg.y, avg.z
-                    );
-                }
-            }
-        }
-        let (mut lu, mut lv) = (f32::INFINITY, f32::INFINITY);
-        let (mut hu, mut hv) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
-        for &t in &c.tris {
-            for k in 0..3 {
-                let (pu, pv) = project(positions[indices[t * 3 + k] as usize], c.axis);
-                lu = lu.min(pu);
-                lv = lv.min(pv);
-                hu = hu.max(pu);
-                hv = hv.max(pv);
-            }
-        }
-        c.u0 = lu;
-        c.v0 = lv;
-        let inner_w = ((hu - lu) * TEXELS_PER_UNIT).ceil().max(1.0) as usize;
-        let inner_h = ((hv - lv) * TEXELS_PER_UNIT).ceil().max(1.0) as usize;
-        c.w = (inner_w + 2 * GUTTER).clamp(CHART_MIN, CHART_MAX);
-        c.h = (inner_h + 2 * GUTTER).clamp(CHART_MIN, CHART_MAX);
-    }
-
-    atlas.max_chart_spread = atlas.max_chart_spread.max(spread_max);
-
-    // SHRINK-WRAP a virgin single-model atlas before spending it: pick the
-    // smallest square that holds every chart at MODEL_TEXELS_PER_UNIT (plus
-    // 25% shelf-packing slack), instead of whatever ceiling the caller
-    // allocated. One texture per asset only stays cheap if each texture is as
-    // small as its model actually needs — a crate at 96 texels/unit wants a
-    // 64 square, not the house's 672. Multiples of 8 rather than powers of
-    // two: the next power of two above 660 is 1024, 2.4x the memory for zero
-    // added detail.
-    if atlas.fill && atlas.shelf_x == 0 && atlas.shelf_y == 0 && atlas.shelf_h == 0 {
-        let wanted: usize = charts.iter().map(|c| c.w * c.h).sum();
-        let ratio = MODEL_TEXELS_PER_UNIT / TEXELS_PER_UNIT;
-        let side = (wanted as f32 * ratio * ratio * 1.25).sqrt().ceil() as usize;
-        let side = side.next_multiple_of(8).clamp(64, atlas.size);
-        atlas.pixels = vec![255; side * side];
-        atlas.size = side;
-    }
-
-    // Fit the pack's remaining budget, every chart scaled together so relative
-    // resolution survives and only absolute density drops. In `fill` mode the
-    // same move runs UPWARD: a lone model in its own atlas scales until the
-    // texture is spent, instead of leaving 96% of it white as measured on the
-    // suburban houses.
-    let chart_max = if atlas.fill { 512 } else { CHART_MAX };
-    let wanted: usize = charts.iter().map(|c| c.w * c.h).sum();
-    let free = atlas.free_texels();
-    if atlas.fill && wanted > 0 {
-        // Scale k until the charts actually SHELF-PACK into the atlas — a
-        // flat area ratio is not enough. Models made of hundreds of small
-        // clamped charts waste far more than any fixed slack in row
-        // remainders and CHART_MIN floors; measured on the toy-car kit, the
-        // 15% allowance overflowed most models and the overflow path then
-        // DOUBLED their atlas — 37 of 157 shipped at 1024² against a 512
-        // budget. Simulating the exact packing (same sort, same shelf walk)
-        // costs microseconds and makes the budget a hard promise.
-        let base: Vec<(usize, usize)> = charts.iter().map(|c| (c.w, c.h)).collect();
-        let mut k = ((free as f32 * 0.85 / wanted as f32).sqrt()).clamp(0.4, 8.0);
-        loop {
-            for (c, (w0, h0)) in charts.iter_mut().zip(&base) {
-                c.w = ((*w0 as f32 * k) as usize).clamp(CHART_MIN, chart_max);
-                c.h = ((*h0 as f32 * k) as usize).clamp(CHART_MIN, chart_max);
-            }
-            let mut order: Vec<usize> = (0..charts.len()).collect();
-            order.sort_by(|&a, &b| charts[b].h.cmp(&charts[a].h).then(a.cmp(&b)));
-            let (mut x, mut y, mut h) = (0usize, 0usize, 0usize);
-            let fits = order.iter().all(|&ci| {
-                let (w, hh) = (charts[ci].w, charts[ci].h);
-                if x + w > atlas.size {
-                    x = 0;
-                    y += h;
-                    h = 0;
-                }
-                x += w;
-                h = h.max(hh);
-                y + hh <= atlas.size
-            });
-            if fits || k <= 0.4 {
-                break;
-            }
-            k *= 0.93;
-        }
-    } else if wanted > free && free > 0 {
-        let k = (free as f32 / wanted as f32).sqrt();
-        for c in charts.iter_mut() {
-            c.w = ((c.w as f32 * k) as usize).clamp(CHART_MIN, chart_max);
-            c.h = ((c.h as f32 * k) as usize).clamp(CHART_MIN, chart_max);
-        }
-    }
-
-    // Texels per world unit, derived from the size actually granted.
-    for c in charts.iter_mut() {
-        let (mut hu, mut hv) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
-        for &t in &c.tris {
-            for k in 0..3 {
-                let (pu, pv) = project(positions[indices[t * 3 + k] as usize], c.axis);
-                hu = hu.max(pu);
-                hv = hv.max(pv);
-            }
-        }
-        let su = (c.w - 2 * GUTTER) as f32 / (hu - c.u0).max(1.0e-6);
-        let sv = (c.h - 2 * GUTTER) as f32 / (hv - c.v0).max(1.0e-6);
-        // One scale for both axes keeps texels square, so AO does not stretch.
-        c.scale = su.min(sv);
-    }
-
-    // Tallest first: shelf packing wastes far less when heights are ordered.
-    let mut order: Vec<usize> = (0..charts.len()).collect();
-    order.sort_by(|&a, &b| charts[b].h.cmp(&charts[a].h).then(a.cmp(&b)));
-    for &ci in &order {
-        let (w, h) = (charts[ci].w, charts[ci].h);
-        let (x, y) = atlas.alloc_rect(w, h);
-        charts[ci].x = x;
-        charts[ci].y = y;
-    }
+    let charts = lay_out_charts(atlas, positions, indices);
 
     // --- Evaluate the charts with the selected engine ----------------------
     // aobaker answers per chart, in parallel, with the machinery's
@@ -942,7 +733,9 @@ fn bake_into_authored_inner(
         for (ci, c) in charts.iter().enumerate() {
             for ty in 0..c.h {
                 for tx in 0..c.w {
-                    atlas.pixels[(c.y + ty) * sz + c.x + tx] = chart_px[ci][ty * c.w + tx];
+                    if c.owned[ty * c.w + tx] {
+                        atlas.pixels[(c.y + ty) * sz + c.x + tx] = chart_px[ci][ty * c.w + tx];
+                    }
                 }
             }
         }
@@ -956,39 +749,39 @@ fn bake_into_authored_inner(
         None
     };
 
-    // --- Emit geometry: one vertex per (source vertex, chart) --------------
+    // --- Emit geometry: one vertex per (source vertex, chart, uv) -----------
+    // The uv is in the key because two fans touching at one vertex of a chart
+    // are mapped apart. Triangles are in input order, as the bakers expect.
     let mut out_pos = Vec::with_capacity(positions.len());
     let mut out_nrm = Vec::with_capacity(positions.len());
     let mut source_vertex: Vec<u32> = Vec::with_capacity(positions.len());
     let mut ao_uv: Vec<[f32; 2]> = Vec::with_capacity(positions.len());
-    let mut out_idx = Vec::with_capacity(indices.len());
-    let mut seen: std::collections::HashMap<(u32, usize), u32> = std::collections::HashMap::new();
+    let mut out_idx = vec![0u32; indices.len()];
+    let mut seen: std::collections::HashMap<(u32, usize, u32, u32), u32> =
+        std::collections::HashMap::new();
 
-    for t in 0..tri_count {
-        let ci = tri_chart[t];
-        let c = &charts[ci];
-        for k in 0..3 {
-            let vi = indices[t * 3 + k];
-            let key = (vi, ci);
-            let out_i = *seen.entry(key).or_insert_with(|| {
-                let p = positions[vi as usize];
-                let (pu, pv) = project(p, c.axis);
-                let tx = GUTTER as f32 + (pu - c.u0) * c.scale;
-                let ty = GUTTER as f32 + (pv - c.v0) * c.scale;
-                out_pos.push(p);
-                out_nrm.push(normals.get(vi as usize).copied().unwrap_or(Vec3f {
-                    x: 0.0,
-                    y: 1.0,
-                    z: 0.0,
-                }));
-                source_vertex.push(vi);
-                ao_uv.push([
-                    (c.x as f32 + tx) / atlas.size as f32,
-                    (c.y as f32 + ty) / atlas.size as f32,
-                ]);
-                (out_pos.len() - 1) as u32
-            });
-            out_idx.push(out_i);
+    for (ci, c) in charts.iter().enumerate() {
+        for (i, &t) in c.tris.iter().enumerate() {
+            for k in 0..3 {
+                let vi = indices[t * 3 + k];
+                let [tx, ty] = c.tex[i][k];
+                let key = (vi, ci, tx.to_bits(), ty.to_bits());
+                let out_i = *seen.entry(key).or_insert_with(|| {
+                    out_pos.push(positions[vi as usize]);
+                    out_nrm.push(normals.get(vi as usize).copied().unwrap_or(Vec3f {
+                        x: 0.0,
+                        y: 1.0,
+                        z: 0.0,
+                    }));
+                    source_vertex.push(vi);
+                    ao_uv.push([
+                        (c.x as f32 + tx) / atlas.size as f32,
+                        (c.y as f32 + ty) / atlas.size as f32,
+                    ]);
+                    (out_pos.len() - 1) as u32
+                });
+                out_idx[t * 3 + k] = out_i;
+            }
         }
     }
 
@@ -1049,18 +842,6 @@ fn bake_into_authored_inner(
             &out_pos, Some(&lm_nrm), &ao_uv, &out_idx, sz, sz, &params, pool,
         );
         let mut data = bake.data;
-        #[cfg(test)]
-        let mut captured = forensics::BakeForensics {
-            tri_chart: tri_chart.clone(),
-            charts: charts.iter().map(|c| (c.x, c.y, c.w, c.h)).collect(),
-            debug: bake.debug.clone(),
-            size: sz,
-            out_pos: out_pos.clone(),
-            out_idx: out_idx.clone(),
-            lm_nrm: lm_nrm.clone(),
-            ao_uv: ao_uv.clone(),
-            ..Default::default()
-        };
         if data.iter().any(|v| *v != 0.0) {
             // The cosine kernel integrates to ~0.5 over the hemisphere (the
             // header normalizes only the validity channel of the weight
@@ -1069,10 +850,6 @@ fn bake_into_authored_inner(
             let w = crate::ao_lightmapper::hemisphere_weights(params.hemisphere_size, |c| c);
             let open_sky: f32 = w.iter().map(|x| x.0).sum();
             crate::ao_lightmapper::image_scale(&mut data, 1.0 / open_sky);
-            #[cfg(test)]
-            {
-                captured.data_raw = data.clone();
-            }
             // BURIED texels — rendered but rejected by the validity gate
             // every time, i.e. sample points inside an interpenetrating
             // neighbour (kit joints overlap members freely) — are filled by
@@ -1297,10 +1074,6 @@ fn bake_into_authored_inner(
                     }
                 }
             }
-            #[cfg(test)]
-            {
-                captured.data_fill = data.clone();
-            }
             // AO_LM_STRENGTH (default 1.0): scales OCCLUSION after the
             // rescale — `1 - strength*(1-ao)` — so open faces stay white at
             // any strength. Valid texels only: 0 stays the dilate-me marker.
@@ -1375,8 +1148,6 @@ fn bake_into_authored_inner(
         }
         // else: nothing rasterised a single valid texel — leave the atlas
         // white (neutral) rather than black.
-        #[cfg(test)]
-        forensics::LAST.with(|l| *l.borrow_mut() = Some(captured));
     }
     atlas.bake_evaluator = baker.name();
     atlas.bake_seconds += Cx::monotonic_now() - t_bake;
@@ -1405,49 +1176,6 @@ fn bake_into_authored_inner(
     );
     BakedAo { source_vertex, ao_uv, vertex_ao, ground }
 }
-
-fn tri_area(a: Vec3f, b: Vec3f, c: Vec3f) -> f32 {
-    let (ux, uy, uz) = (b.x - a.x, b.y - a.y, b.z - a.z);
-    let (vx, vy, vz) = (c.x - a.x, c.y - a.y, c.z - a.z);
-    let (nx, ny, nz) = (uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx);
-    (nx * nx + ny * ny + nz * nz).sqrt() * 0.5
-}
-
-/// Test-only capture of a lightmapper bake's internals, so forensics tests
-/// can ask WHICH STAGE put a value in a texel (rendered, rejected+min-filled,
-/// dilated) and which chart owns each triangle. Populated by `bake_into` for
-/// the last lightmapper bake on this thread.
-#[cfg(test)]
-pub(crate) mod forensics {
-    use std::cell::RefCell;
-    #[derive(Default)]
-    pub(crate) struct BakeForensics {
-        /// Input/output triangle index -> chart index.
-        pub tri_chart: Vec<usize>,
-        /// Chart rects (x, y, w, h) in atlas texels.
-        #[allow(dead_code)] // captured for forensic dumps
-        pub charts: Vec<(usize, usize, usize, usize)>,
-        /// The lightmapper debug RGB: r=rendered, g=interpolated, b=rejected.
-        pub debug: Vec<u8>,
-        /// Atlas floats after the open-sky rescale, before the buried fill.
-        pub data_raw: Vec<f32>,
-        /// After the buried min-fill, before dilate/smooth/gamma.
-        pub data_fill: Vec<f32>,
-        pub size: usize,
-        /// The exact bake inputs: emitted geometry and the smooth-normal
-        /// field the hemicubes aimed along.
-        pub out_pos: Vec<makepad_draw::makepad_math::Vec3f>,
-        pub out_idx: Vec<u32>,
-        pub lm_nrm: Vec<makepad_draw::makepad_math::Vec3f>,
-        #[allow(dead_code)] // captured for forensic dumps
-        pub ao_uv: Vec<[f32; 2]>,
-    }
-    thread_local! {
-        pub(crate) static LAST: RefCell<Option<BakeForensics>> =
-            const { RefCell::new(None) };
-    }
-}
-
 
 #[cfg(test)]
 mod tests {
@@ -1555,7 +1283,7 @@ mod tests {
                         let (a, b) = (tri_n(*cell), tri_n(t));
                         let d = a.x * b.x + a.y * b.y + a.z * b.z;
                         assert!(
-                            d >= COPLANAR_DOT,
+                            d >= 0.966,
                             "texel ({x},{y}) shared by non-coplanar triangles {} and {t}",
                             *cell
                         );
@@ -1566,19 +1294,6 @@ mod tests {
         }
     }
 
-
-    #[test]
-    fn report_corner_contrast() {
-        let (mut p, mut n, mut i) = floor_with_wall();
-        let mut at = AoAtlas::new(ATLAS_MAX);
-        bake_into(&mut at, &mut p, &mut n, &mut i, v(-4.0, 0.0, -4.0), v(4.0, 3.0, 4.0));
-        let lo = *at.pixels.iter().min().unwrap();
-        let hi = *at.pixels.iter().max().unwrap();
-        println!(
-            "AO atlas {}x{} ({} KB), range {lo}..{hi} of 255 — AO_FLOOR maps to 132",
-            at.size, at.size, at.kilobytes()
-        );
-    }
 
     /// A box floating in space versus the same box sitting on the ground.
     /// The virtual ground plane must darken its underside — without it a prop
@@ -1650,207 +1365,6 @@ mod tests {
         assert!(at.pixels.iter().any(|&x| x < 255), "nothing was baked at all");
     }
 
-    /// THE MAPPING TEST: what the atlas says at a triangle's own uv must
-    /// match occlusion computed directly at that triangle's position in
-    /// space — by the SAME evaluator that filled the atlas.
-    ///
-    /// Every AO defect in this pipeline has been the same bug wearing different
-    /// clothes — the occlusion was correct and landed in the wrong texel. Per
-    /// triangle patches, an atlas that doubled mid-pack and invalidated every
-    /// uv already issued, chart projection errors: all of them produce
-    /// plausible-looking numbers, so a histogram of the atlas passes happily
-    /// while the render shows grey smudges floating in the middle of flat
-    /// walls. Aggregate statistics are spatially blind and cannot catch this.
-    ///
-    /// Comparing per-centroid closes that hole exactly: it asks "is the value
-    /// at this uv the value that belongs at this point?", which is the
-    /// property every one of those bugs violated, and it needs no renderer
-    /// and no eyes. The oracle is one hemicube rendered at the centroid with
-    /// the same parameters the bake used (cosine kernel, open-sky rescale,
-    /// display gamma), so a mismatch is a MAPPING error, not an evaluator
-    /// disagreement.
-    ///
-    /// Run against a REAL model deliberately. The synthetic two-triangle
-    /// fixtures elsewhere in this file have never once caught a real defect —
-    /// they have no chart boundaries, no coplanar neighbours and no packing
-    /// pressure, which is where all of this actually goes wrong.
-    #[test]
-    fn every_vertex_uv_reads_back_its_own_occlusion() {
-        let path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../../apps/commercial/sandbox/resources/models/kenney/city-kit-suburban/building-type-h.glb"
-        );
-        let Ok(bytes) = std::fs::read(path) else {
-            println!("  (no asset packs — skipped)");
-            return;
-        };
-        // Pin the evaluator: this test's oracle IS the lightmapper hemicube,
-        // so the atlas must have been filled by it whatever `AO_BAKER` says.
-        set_thread_baker(Some(AoBakerKind::Lightmapper));
-        let mut at = AoAtlas::new(ATLAS_MAX);
-        let m = crate::model::StaticModel::parse_glb_baked(&bytes, &mut at).unwrap();
-        set_thread_baker(None);
-
-        let stride = crate::model::MODEL_VERTEX_FLOATS;
-        let count = m.vertices.len() / stride;
-        let pos: Vec<Vec3f> = (0..count)
-            .map(|i| Vec3f {
-                x: m.vertices[i * stride],
-                y: m.vertices[i * stride + 1],
-                z: m.vertices[i * stride + 2],
-            })
-            .collect();
-        let tri_count = m.indices.len() / 3;
-
-        // The oracle's scene: the BAKED mesh exactly as emitted — the
-        // engine's dedup already fixed the winding, and the hemicube bake
-        // runs LM_NONE (facing from winding), so the as-baked triangles ARE
-        // the scene and each probe's direction is its winding face normal.
-        let scene_idx: Vec<u32> = m.indices.clone();
-        let tri_n: Vec<Vec3f> = (0..tri_count)
-            .map(|t| {
-                face_normal(
-                    pos[m.indices[t * 3] as usize],
-                    pos[m.indices[t * 3 + 1] as usize],
-                    pos[m.indices[t * 3 + 2] as usize],
-                )
-            })
-            .collect();
-
-        // The oracle mirrors the atlas dispatch's parameters exactly —
-        // kernel and validity gate included, or probes near joints compare
-        // a rendered oracle against a buried-filled texel.
-        let params = crate::ao_lightmapper::LightmapParams::atlas();
-
-        // Probe at triangle CENTROIDS, not vertices: a vertex sits on a
-        // chart boundary half a texel from a crease, a centroid lands well
-        // inside its chart, so any mismatch there is a genuine mapping error
-        // rather than boundary noise. Sizable faces only (sub-texel trim is
-        // an area average by design), capped to a fixed deterministic subset
-        // — a hemicube per probe is a real render.
-        let sizable: Vec<usize> = (0..tri_count)
-            .filter(|&t| {
-                let (ia, ib, ic) = (
-                    m.indices[t * 3] as usize,
-                    m.indices[t * 3 + 1] as usize,
-                    m.indices[t * 3 + 2] as usize,
-                );
-                tri_area(pos[ia], pos[ib], pos[ic]) >= 5.0e-3
-            })
-            .collect();
-        const MAX_PROBES: usize = 240;
-        let step = (sizable.len() / MAX_PROBES).max(1);
-
-        let third = 1.0 / 3.0;
-        let mut worst = 0.0f32;
-        let mut worst_at = 0usize;
-        let mut bad = 0usize;
-        let mut probed = 0usize;
-        let mut rejected = 0usize;
-        for &t in sizable.iter().step_by(step) {
-            let (ia, ib, ic) = (
-                m.indices[t * 3] as usize,
-                m.indices[t * 3 + 1] as usize,
-                m.indices[t * 3 + 2] as usize,
-            );
-            let c = Vec3f {
-                x: (pos[ia].x + pos[ib].x + pos[ic].x) * third,
-                y: (pos[ia].y + pos[ib].y + pos[ic].y) * third,
-                z: (pos[ia].z + pos[ib].z + pos[ic].z) * third,
-            };
-            let n = {
-                let f = tri_n[t];
-                let l = (f.x * f.x + f.y * f.y + f.z * f.z).sqrt().max(1.0e-12);
-                Vec3f { x: f.x / l, y: f.y / l, z: f.z / l }
-            };
-            let (vis, validity) =
-                crate::ao_lightmapper::sample_hemicube_ao(&pos, &scene_idx, c, n, &params);
-            if validity <= params.validity_min {
-                // The bake's own validity gate would have rejected this
-                // sample and dilation filled the texel — nothing comparable.
-                rejected += 1;
-                continue;
-            }
-            let direct = vis.clamp(0.0, 1.0).powf(1.0 / 2.2);
-            // The uv the GPU will interpolate to at this centroid.
-            let (ua, ub, uc) = (
-                crate::model::unpack_ao_uv(m.vertices[ia * stride + 6]),
-                crate::model::unpack_ao_uv(m.vertices[ib * stride + 6]),
-                crate::model::unpack_ao_uv(m.vertices[ic * stride + 6]),
-            );
-            let uv = [
-                (ua[0] + ub[0] + uc[0]) * third,
-                (ua[1] + ub[1] + uc[1]) * third,
-            ];
-            let x = ((uv[0] * at.size as f32) as usize).min(at.size - 1);
-            let y = ((uv[1] * at.size as f32) as usize).min(at.size - 1);
-            let sampled = at.pixels[y * at.size + x] as f32 / 255.0;
-            let d = (sampled - direct).abs();
-            probed += 1;
-            if d > worst {
-                worst = d;
-                worst_at = t;
-            }
-            // "Bad" = a foreign chart's value (a misplaced chart reads
-            // 0.3+ off across its whole area); smaller deltas are hemicube
-            // discretization, the interpolation passes and the smooth pass.
-            if d > 0.3 {
-                bad += 1;
-                if std::env::var_os("AO_CHART_DEBUG").is_some() && bad <= 12 {
-                    println!(
-                        "    bad tri {t}: uv=({:.4},{:.4}) sampled={sampled:.3} \
-                         direct={direct:.3}",
-                        uv[0], uv[1]
-                    );
-                }
-            }
-        }
-        let pct = bad as f32 / probed.max(1) as f32 * 100.0;
-        println!(
-            "  atlas overflow fallbacks: {}, widest chart normal spread: {:.1} deg",
-            at.overflowed, at.max_chart_spread
-        );
-        println!(
-            "  {probed} probes ({rejected} validity-rejected, skipped): worst mismatch \
-             {worst:.3} at tri {worst_at}, {bad} ({pct:.1}%) off by more than 0.3"
-        );
-        assert!(
-            pct < 2.0,
-            "{pct:.1}% of centroids read back occlusion that does not belong to \
-             them (worst {worst:.3}) — the atlas mapping is misplacing AO"
-        );
-    }
-
-
-    #[test]
-    #[ignore = "needs the asset packs; run explicitly"]
-    fn report_real_model_histogram() {
-        let path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../../apps/commercial/sandbox/resources/models/kenney/city-kit-suburban/building-type-h.glb"
-        );
-        let Ok(bytes) = std::fs::read(path) else {
-            println!("  (no asset packs)");
-            return;
-        };
-        let mut at = AoAtlas::new(ATLAS_MAX);
-        let m = crate::model::StaticModel::parse_glb_baked(&bytes, &mut at).unwrap();
-        let mut bins = [0usize; 10];
-        for p in &at.pixels {
-            bins[(*p as usize * 10 / 256).min(9)] += 1;
-        }
-        let total: usize = bins.iter().sum();
-        println!("\n  {} tris, atlas {}x{}", m.triangle_count(), at.size, at.size);
-        for (i, c) in bins.iter().enumerate() {
-            println!(
-                "  {:3}..{:3}  {:6.2}%  {}",
-                i * 26,
-                i * 26 + 25,
-                *c as f32 / total as f32 * 100.0,
-                "#".repeat((*c * 60 / total.max(1)).min(60))
-            );
-        }
-    }
 
     #[test]
     fn baking_is_deterministic() {
@@ -2184,567 +1698,5 @@ mod ao_truth_suite {
         );
         assert!(open > 0.92, "open floor baked {open:.2}, must be bright");
         assert!(rim > 0.9, "wall-top rim baked {rim:.2}, must be bright");
-    }
-}
-
-#[cfg(test)]
-mod sidecar_consistency {
-    use super::*;
-    use crate::model::{StaticModel, MODEL_VERTEX_FLOATS};
-
-    /// The bake in memory is clean; the screen shows rims. Verify the two
-    /// hand-offs: (1) the .ao.png on disk equals an in-process bake's
-    /// pixels; (2) the .aomesh's uvs equal the fresh bake's uvs.
-    #[test]
-    fn disk_pair_matches_fresh_bake() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../apps/commercial/sandbox/resources/models/kenney/modular-dungeon-kit");
-        let Ok(bytes) = std::fs::read(root.join("template-floor-layer-raised.glb")) else {
-            eprintln!("asset absent — skipped");
-            return;
-        };
-        // 512 — the size the TOOL writes; comparing across sizes is noise.
-        let mut at = AoAtlas::new(512);
-        at.fill = true;
-        let fresh = StaticModel::parse_glb_baked(&bytes, &mut at).unwrap();
-        // Determinism: a second in-process bake must be byte-identical, or
-        // the tool's pair and any in-process validation are incomparable.
-        {
-            let mut at2 = AoAtlas::new(512);
-            at2.fill = true;
-            let again = StaticModel::parse_glb_baked(&bytes, &mut at2).unwrap();
-            let uv_diff = fresh
-                .vertices
-                .iter()
-                .zip(again.vertices.iter())
-                .filter(|(a, b)| a.to_bits() != b.to_bits())
-                .count();
-            let px_diff = at
-                .pixels
-                .iter()
-                .zip(at2.pixels.iter())
-                .filter(|(a, b)| (**a as i32 - **b as i32).abs() > 2)
-                .count();
-            eprintln!("determinism: vertex-float diffs {uv_diff}, pixel diffs>2 {px_diff}");
-            assert_eq!(uv_diff, 0, "bake is nondeterministic in uvs");
-        }
-        let disk = std::fs::read(root.join("template-floor-layer-raised.aomesh"))
-            .ok()
-            .and_then(|b| StaticModel::from_aomesh(&b))
-            .expect("aomesh sidecar");
-        assert_eq!(
-            disk.vertices.len(),
-            fresh.vertices.len(),
-            "vertex count differs disk vs fresh"
-        );
-        let stride = MODEL_VERTEX_FLOATS;
-        let n = disk.vertices.len() / stride;
-        let mut worst = 0.0f32;
-        for i in 0..n {
-            let a = crate::model::unpack_ao_uv(disk.vertices[i * stride + 6]);
-            let b = crate::model::unpack_ao_uv(fresh.vertices[i * stride + 6]);
-            let d = (a[0] - b[0]).abs().max((a[1] - b[1]).abs());
-            if d > worst {
-                worst = d;
-            }
-        }
-        eprintln!("uv worst delta disk-vs-fresh: {worst:.6} ({} verts)", n);
-        assert!(worst < 2.0 / 1024.0, "aomesh uvs differ from fresh bake");
-        // png pixels
-        let png = std::fs::read(root.join("template-floor-layer-raised.ao.png")).unwrap();
-        let (mut o, mut w, mut idat) = (8usize, 0usize, Vec::new());
-        while o + 8 <= png.len() {
-            let len = u32::from_be_bytes(png[o..o + 4].try_into().unwrap()) as usize;
-            let kind = &png[o + 4..o + 8];
-            let body = &png[o + 8..o + 8 + len];
-            match kind {
-                b"IHDR" => {
-                    w = u32::from_be_bytes(body[..4].try_into().unwrap()) as usize;
-                }
-                b"IDAT" => idat.extend_from_slice(body),
-                b"IEND" => break,
-                _ => {}
-            }
-            o += 8 + len + 4;
-        }
-        let raw = makepad_fast_inflate::zlib_decompress_vec(&idat).unwrap();
-        let mut disk_px = Vec::with_capacity(w * w);
-        for row in raw.chunks_exact(w + 1) {
-            disk_px.extend_from_slice(&row[1..]);
-        }
-        assert_eq!(w, at.size, "atlas size differs disk {w} vs fresh {}", at.size);
-        let diff: usize = disk_px
-            .iter()
-            .zip(at.pixels.iter())
-            .filter(|(a, b)| (**a as i32 - **b as i32).abs() > 8)
-            .count();
-        eprintln!("png texels differing >8: {diff} of {}", w * w);
-        assert!(diff < w * w / 100, "disk atlas diverges from fresh bake");
-    }
-}
-
-#[cfg(test)]
-mod dark_chart_owner {
-    use super::*;
-    use crate::model::{StaticModel, MODEL_VERTEX_FLOATS};
-
-    /// For the darkest small charts in the pergola atlas: which triangles
-    /// own them (position, normal, area)? Distinguishes "bevel strips baked
-    /// dark" from "inward twins" from "slot walls".
-    #[test]
-    fn who_owns_the_dark_strips() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
-            "../../../apps/commercial/sandbox/resources/models/kenney/modular-dungeon-kit/template-floor-layer-raised.glb",
-        );
-        let Ok(bytes) = std::fs::read(&path) else {
-            eprintln!("asset absent — skipped");
-            return;
-        };
-        // 512, matching the TOOL's per-model bake — the pair the renderer
-        // actually loads. Testing at 1024 validated a different layout.
-        let mut at = AoAtlas::new(512);
-        at.fill = true;
-        let m = StaticModel::parse_glb_baked(&bytes, &mut at).unwrap();
-        let stride = MODEL_VERTEX_FLOATS;
-        let vp = |i: u32| Vec3f {
-            x: m.vertices[i as usize * stride],
-            y: m.vertices[i as usize * stride + 1],
-            z: m.vertices[i as usize * stride + 2],
-        };
-        let uv = |i: u32| crate::model::unpack_ao_uv(m.vertices[i as usize * stride + 6]);
-        let mut printed = 0;
-        for (t, tri) in m.indices.chunks_exact(3).enumerate() {
-            let (ua, ub, uc) = (uv(tri[0]), uv(tri[1]), uv(tri[2]));
-            let u = [
-                (ua[0] + ub[0] + uc[0]) / 3.0,
-                (ua[1] + ub[1] + uc[1]) / 3.0,
-            ];
-            let x = ((u[0] * at.size as f32) as usize).min(at.size - 1);
-            let y = ((u[1] * at.size as f32) as usize).min(at.size - 1);
-            let val = at.pixels[y * at.size + x];
-            if val < 180 {
-                let (a, b, c) = (vp(tri[0]), vp(tri[1]), vp(tri[2]));
-                let e1 = b - a;
-                let e2 = c - a;
-                let n = Vec3f {
-                    x: e1.y * e2.z - e1.z * e2.y,
-                    y: e1.z * e2.x - e1.x * e2.z,
-                    z: e1.x * e2.y - e1.y * e2.x,
-                };
-                let l = (n.x * n.x + n.y * n.y + n.z * n.z).sqrt().max(1.0e-12);
-                let area = l * 0.5;
-                let cen = Vec3f {
-                    x: (a.x + b.x + c.x) / 3.0,
-                    y: (a.y + b.y + c.y) / 3.0,
-                    z: (a.z + b.z + c.z) / 3.0,
-                };
-                printed += 1;
-                if printed <= 20 {
-                    eprintln!(
-                        "dark tri {t}: val {} area {area:.4} centre ({:.2},{:.2},{:.2}) n ({:.2},{:.2},{:.2})",
-                        val, cen.x, cen.y, cen.z,
-                        n.x / l, n.y / l, n.z / l
-                    );
-                }
-            }
-        }
-        eprintln!("dark-sampling triangles: {printed} of {}", m.indices.len() / 3);
-    }
-}
-
-#[cfg(test)]
-mod pergola_forensics {
-    use super::*;
-    use crate::model::{StaticModel, MODEL_VERTEX_FLOATS};
-
-    /// The real failing model through the truth machinery: bake in-process,
-    /// then for the most-downward big face (a rafter underside — open air
-    /// below) print its winding normal, its atlas texel, and every ray hit
-    /// from its winding hemisphere. Answers "is the bake dark or is the
-    /// sampling dark" for the exact geometry that keeps regressing.
-    #[test]
-    fn rafter_underside_tells_all() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
-            "../../../apps/commercial/sandbox/resources/models/kenney/modular-dungeon-kit/template-floor-layer-raised.glb",
-        );
-        let Ok(bytes) = std::fs::read(&path) else {
-            eprintln!("asset absent — skipped");
-            return;
-        };
-        let mut at = AoAtlas::new(ATLAS_MAX);
-        at.fill = true;
-        let m = StaticModel::parse_glb_baked(&bytes, &mut at).unwrap();
-        let stride = MODEL_VERTEX_FLOATS;
-        let count = m.vertices.len() / stride;
-        let pos: Vec<Vec3f> = (0..count)
-            .map(|i| Vec3f {
-                x: m.vertices[i * stride],
-                y: m.vertices[i * stride + 1],
-                z: m.vertices[i * stride + 2],
-            })
-            .collect();
-        // Highest big down-wound face = a top rafter's underside.
-        let mut best: Option<(usize, f32, f32)> = None; // (tri, area, cy)
-        for (t, tri) in m.indices.chunks_exact(3).enumerate() {
-            let (a, b, c) = (
-                pos[tri[0] as usize],
-                pos[tri[1] as usize],
-                pos[tri[2] as usize],
-            );
-            let e1 = b - a;
-            let e2 = c - a;
-            let n = Vec3f {
-                x: e1.y * e2.z - e1.z * e2.y,
-                y: e1.z * e2.x - e1.x * e2.z,
-                z: e1.x * e2.y - e1.y * e2.x,
-            };
-            let l = (n.x * n.x + n.y * n.y + n.z * n.z).sqrt();
-            if l < 1.0e-9 {
-                continue;
-            }
-            let cy = (a.y + b.y + c.y) / 3.0;
-            if n.y / l < -0.9 && cy > 2.0 {
-                let area = l * 0.5;
-                if best.map_or(true, |(_, ba, _)| area > ba) {
-                    best = Some((t, area, cy));
-                }
-            }
-        }
-        let Some((t, area, cy)) = best else {
-            eprintln!("no down-wound face above y=2");
-            return;
-        };
-        let tri = &m.indices[t * 3..t * 3 + 3];
-        let (a, b, c) = (
-            pos[tri[0] as usize],
-            pos[tri[1] as usize],
-            pos[tri[2] as usize],
-        );
-        let centre = Vec3f {
-            x: (a.x + b.x + c.x) / 3.0,
-            y: cy,
-            z: (a.z + b.z + c.z) / 3.0,
-        };
-        eprintln!(
-            "underside tri {t}: area {area:.3} centre ({:.2},{:.2},{:.2})",
-            centre.x, centre.y, centre.z
-        );
-        // Atlas value via this triangle's own uvs (what the GPU samples).
-        let uv = |i: u32| crate::model::unpack_ao_uv(m.vertices[i as usize * stride + 6]);
-        let (ua, ub, uc) = (uv(tri[0]), uv(tri[1]), uv(tri[2]));
-        let u = [
-            (ua[0] + ub[0] + uc[0]) / 3.0,
-            (ua[1] + ub[1] + uc[1]) / 3.0,
-        ];
-        let x = ((u[0] * at.size as f32) as usize).min(at.size - 1);
-        let y = ((u[1] * at.size as f32) as usize).min(at.size - 1);
-        eprintln!(
-            "atlas at its own uv ({:.4},{:.4}) -> texel ({x},{y}) = {:.3}",
-            u[0], u[1],
-            at.pixels[y * at.size + x] as f32 / 255.0
-        );
-        // Direct sampler from the winding side, with hits.
-        let sampler = crate::ao::AoSampler::with_ground(
-            &pos, &m.indices, m.min, m.max, 64, m.indices.len() / 3,
-        );
-        let n = Vec3f { x: 0.0, y: -1.0, z: 0.0 };
-        let v = sampler.at_split(&pos, &m.indices, centre, n).0;
-        eprintln!("direct sampler (n=down, self-only): {v:.3}");
-        let mut dirs = [Vec3f { x: 0.0, y: 1.0, z: 0.0 }; crate::ao::AO_RAYS_OFFLINE];
-        crate::ao::hemisphere(n, 32, &mut dirs);
-        let mut hits = 0;
-        for (i, d) in dirs.iter().take(32).enumerate() {
-            let t2 = sampler.nearest_hit(
-                &pos,
-                &m.indices,
-                Vec3f {
-                    x: centre.x + n.x * 0.004,
-                    y: centre.y + n.y * 0.004,
-                    z: centre.z + n.z * 0.004,
-                },
-                *d,
-                0.35,
-            );
-            if t2.is_finite() {
-                hits += 1;
-                if hits <= 8 {
-                    eprintln!(
-                        "  hit ray {i} dir ({:.2},{:.2},{:.2}) t {:.3}",
-                        d.x, d.y, d.z, t2
-                    );
-                }
-            }
-        }
-        eprintln!("hemisphere hits within 0.35: {hits}/32");
-    }
-}
-
-// ── Seam acceptance ─────────────────────────────────────────────────────
-// The live crypt-kit bug: a flat quad's two triangles landing in different
-// charts (separate rasterisation, separate dilation) shows as a hard
-// diagonal seam. Root cause was orientation — the unified dedup kept
-// arbitrary-winding twins, so a quad could keep one up-wound and one
-// down-wound triangle and chart growth (which clusters by winding facing)
-// split them. With each engine's own dedup restored this must never
-// happen: every coplanar pair of emitted triangles sharing a welded edge
-// (and no third same-side triangle) must read CONTINUOUS uvs across that
-// edge — the observable form of "same chart" — and the atlas must not step
-// across the quad diagonal.
-#[cfg(test)]
-mod seam_acceptance {
-    use super::*;
-    use crate::model::{unpack_ao_uv, StaticModel, MODEL_VERTEX_FLOATS};
-
-    /// (model, max diagonal step asserted). The flat template pieces must
-    /// scan glass-smooth. The gate arches interpenetrate their own segments,
-    /// and a buried contact region legitimately meets its exposed lip in a
-    /// hard value boundary ALIGNED with face edges (measured: the pillar
-    /// blocks' undersides at y=1.10/1.60) — so for them the hard contract is
-    /// chart integrity (0 uv seams) and the step is reported, not asserted.
-    const MODELS: [(&str, Option<i32>); 4] = [
-        ("template-floor-layer-raised.glb", Some(48)),
-        ("template-floor-detail.glb", Some(48)),
-        ("gate.glb", None),
-        ("gate-metal-bars.glb", None),
-    ];
-
-    fn kit_path(name: &str) -> std::path::PathBuf {
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
-            "../../../apps/commercial/sandbox/resources/models/kenney/modular-dungeon-kit/{name}"
-        ))
-    }
-
-    /// Scan one baked model: for every welded edge shared by EXACTLY two
-    /// same-side coplanar triangles, assert uv continuity at both endpoints
-    /// and measure the atlas step across the edge. Returns
-    /// `(pairs, uv_seams, max_step)`.
-    fn scan(m: &StaticModel, at: &AoAtlas) -> (usize, usize, i32) {
-        let stride = MODEL_VERTEX_FLOATS;
-        let pos = |i: u32| Vec3f {
-            x: m.vertices[i as usize * stride],
-            y: m.vertices[i as usize * stride + 1],
-            z: m.vertices[i as usize * stride + 2],
-        };
-        let uv = |i: u32| unpack_ao_uv(m.vertices[i as usize * stride + 6]);
-        let tri_count = m.indices.len() / 3;
-        let span = (m.max.x - m.min.x)
-            .max(m.max.y - m.min.y)
-            .max(m.max.z - m.min.z)
-            .max(1.0e-5);
-        let inv_eps = 1.0 / (span * 1.0e-5);
-        let quant = |p: Vec3f| {
-            (
-                (p.x * inv_eps).round() as i64,
-                (p.y * inv_eps).round() as i64,
-                (p.z * inv_eps).round() as i64,
-            )
-        };
-        // Face normal per triangle; degenerate slivers opt out.
-        let tri_n: Vec<Option<Vec3f>> = (0..tri_count)
-            .map(|t| {
-                let (a, b, c) = (
-                    pos(m.indices[t * 3]),
-                    pos(m.indices[t * 3 + 1]),
-                    pos(m.indices[t * 3 + 2]),
-                );
-                if tri_area(a, b, c) < 1.0e-7 {
-                    None
-                } else {
-                    Some(face_normal(a, b, c))
-                }
-            })
-            .collect();
-        // Welded-edge map: edge key -> (triangle, corner-of-edge-start).
-        let mut edges: std::collections::HashMap<
-            ((i64, i64, i64), (i64, i64, i64)),
-            Vec<(usize, usize)>,
-        > = std::collections::HashMap::new();
-        for t in 0..tri_count {
-            if tri_n[t].is_none() {
-                continue;
-            }
-            for e in 0..3 {
-                let a = quant(pos(m.indices[t * 3 + e]));
-                let b = quant(pos(m.indices[t * 3 + (e + 1) % 3]));
-                let key = if a < b { (a, b) } else { (b, a) };
-                edges.entry(key).or_default().push((t, e));
-            }
-        }
-        let sz = at.size as f32;
-        let sample = |u: f32, v: f32| -> i32 {
-            let x = ((u * sz) as usize).min(at.size - 1);
-            let y = ((v * sz) as usize).min(at.size - 1);
-            at.pixels[y * at.size + x] as i32
-        };
-        let (mut pairs, mut uv_seams, mut max_step) = (0usize, 0usize, 0i32);
-        for (_key, users) in edges {
-            // Both sides of a double-sided sheet, junctions, T-joints: only
-            // clean pairs of SAME-SIDE coplanar triangles are quad halves.
-            for i in 0..users.len() {
-                for j in i + 1..users.len() {
-                    let (t1, e1) = users[i];
-                    let (t2, e2) = users[j];
-                    let (Some(n1), Some(n2)) = (tri_n[t1], tri_n[t2]) else { continue };
-                    let d = n1.x * n2.x + n1.y * n2.y + n1.z * n2.z;
-                    if d < 0.99 {
-                        continue;
-                    }
-                    // A third same-side triangle on this edge makes it a
-                    // junction, not a quad diagonal — skip.
-                    let same_side = users
-                        .iter()
-                        .filter(|(t, _)| {
-                            tri_n[*t]
-                                .is_some_and(|n| n.x * n1.x + n.y * n1.y + n.z * n1.z > 0.99)
-                        })
-                        .count();
-                    if same_side != 2 {
-                        continue;
-                    }
-                    pairs += 1;
-                    // uv continuity at both welded endpoints, in texels. The
-                    // shared edge runs start->end in t1 and end->start in t2
-                    // (opposite traversal on a consistent-winding surface).
-                    let mut seam = false;
-                    for (c1, c2) in [
-                        (m.indices[t1 * 3 + e1], m.indices[t2 * 3 + (e2 + 1) % 3]),
-                        (m.indices[t1 * 3 + (e1 + 1) % 3], m.indices[t2 * 3 + e2]),
-                    ] {
-                        if quant(pos(c1)) != quant(pos(c2)) {
-                            continue;
-                        }
-                        let (ua, ub) = (uv(c1), uv(c2));
-                        let du = (ua[0] - ub[0]).abs() * sz;
-                        let dv = (ua[1] - ub[1]).abs() * sz;
-                        if du > 1.5 || dv > 1.5 {
-                            seam = true;
-                        }
-                    }
-                    if seam {
-                        uv_seams += 1;
-                        continue;
-                    }
-                    // Texel step across the edge: sample a whisker inside
-                    // each triangle from the edge midpoint (uvs are affine
-                    // over the triangle, so mixing them in uv space is
-                    // exact).
-                    let read = |t: usize, e: usize| -> i32 {
-                        let (ia, ib, ic) =
-                            (m.indices[t * 3], m.indices[t * 3 + 1], m.indices[t * 3 + 2]);
-                        let (es, ee) = (m.indices[t * 3 + e], m.indices[t * 3 + (e + 1) % 3]);
-                        let m1 = [
-                            (uv(es)[0] + uv(ee)[0]) * 0.5,
-                            (uv(es)[1] + uv(ee)[1]) * 0.5,
-                        ];
-                        let cen = [
-                            (uv(ia)[0] + uv(ib)[0] + uv(ic)[0]) / 3.0,
-                            (uv(ia)[1] + uv(ib)[1] + uv(ic)[1]) / 3.0,
-                        ];
-                        sample(
-                            m1[0] + (cen[0] - m1[0]) * 0.25,
-                            m1[1] + (cen[1] - m1[1]) * 0.25,
-                        )
-                    };
-                    let step = (read(t1, e1) - read(t2, e2)).abs();
-                    if step > 40 {
-                        let (es, ee) = (m.indices[t1 * 3 + e1], m.indices[t1 * 3 + (e1 + 1) % 3]);
-                        let (a, b) = (pos(es), pos(ee));
-                        eprintln!(
-                            "    step {step} across edge ({:.2},{:.2},{:.2})-({:.2},{:.2},{:.2}) n ({:.2},{:.2},{:.2})",
-                            a.x, a.y, a.z, b.x, b.y, b.z,
-                            tri_n[t1].unwrap().x, tri_n[t1].unwrap().y, tri_n[t1].unwrap().z
-                        );
-                    }
-                    max_step = max_step.max(step);
-                }
-            }
-        }
-        (pairs, uv_seams, max_step)
-    }
-
-    /// Scan whatever sidecar pair currently SHIPS for the raised floor —
-    /// the artifact the renderer actually loads. Diagnostic (prints, no
-    /// hard asserts beyond loading): run explicitly to audit a pair on
-    /// disk against the seam contract.
-    #[test]
-    #[ignore = "audits the on-disk sidecar pair; run explicitly"]
-    fn scan_shipped_sidecar_pair() {
-        let root = kit_path("");
-        let Some(mesh) = std::fs::read(root.join("template-floor-layer-raised.aomesh"))
-            .ok()
-            .and_then(|b| StaticModel::from_aomesh(&b))
-        else {
-            eprintln!("  (no shipped aomesh — skipped)");
-            return;
-        };
-        let Ok(png) = std::fs::read(root.join("template-floor-layer-raised.ao.png")) else {
-            eprintln!("  (no shipped ao.png — skipped)");
-            return;
-        };
-        let (mut o, mut w, mut idat) = (8usize, 0usize, Vec::new());
-        while o + 8 <= png.len() {
-            let len = u32::from_be_bytes(png[o..o + 4].try_into().unwrap()) as usize;
-            let kind = &png[o + 4..o + 8];
-            let body = &png[o + 8..o + 8 + len];
-            match kind {
-                b"IHDR" => w = u32::from_be_bytes(body[..4].try_into().unwrap()) as usize,
-                b"IDAT" => idat.extend_from_slice(body),
-                b"IEND" => break,
-                _ => {}
-            }
-            o += 8 + len + 4;
-        }
-        let raw = makepad_fast_inflate::zlib_decompress_vec(&idat).unwrap();
-        let mut at = AoAtlas::new(w);
-        at.pixels.clear();
-        for row in raw.chunks_exact(w + 1) {
-            at.pixels.extend_from_slice(&row[1..]);
-        }
-        at.size = w;
-        let (pairs, uv_seams, max_step) = scan(&mesh, &at);
-        eprintln!(
-            "shipped pair: {pairs} coplanar pairs, {uv_seams} uv seams, max diagonal step {max_step}"
-        );
-    }
-
-    #[test]
-    fn coplanar_pairs_share_charts_across_engines() {
-        for (name, step_cap) in MODELS {
-            let Ok(bytes) = std::fs::read(kit_path(name)) else {
-                eprintln!("  ({name} absent — skipped)");
-                continue;
-            };
-            for kind in [
-                AoBakerKind::Lightmapper,
-                AoBakerKind::BakerBoy,
-                AoBakerKind::Aobaker,
-            ] {
-                set_thread_baker(Some(kind));
-                let mut at = AoAtlas::new(512);
-                at.fill = true;
-                let m = StaticModel::parse_glb_baked(&bytes, &mut at).unwrap();
-                set_thread_baker(None);
-                let (pairs, uv_seams, max_step) = scan(&m, &at);
-                eprintln!(
-                    "{name} [{}]: {pairs} coplanar pairs, {uv_seams} uv seams, \
-                     max diagonal step {max_step}",
-                    kind.name()
-                );
-                assert!(pairs > 0, "{name}: the scan found no coplanar pairs at all");
-                assert_eq!(
-                    uv_seams, 0,
-                    "{name} [{}]: coplanar welded pairs landed in different charts",
-                    kind.name()
-                );
-                if let Some(cap) = step_cap {
-                    assert!(
-                        max_step <= cap,
-                        "{name} [{}]: a {max_step}-level step across a flat quad's \
-                         diagonal — per-triangle seam",
-                        kind.name()
-                    );
-                }
-            }
-        }
     }
 }

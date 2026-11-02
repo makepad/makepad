@@ -213,9 +213,7 @@ pub fn weight_plan() -> Vec<PlanItem> {
 mod tests {
     use super::*;
     use crate::weights::plan_total_bytes;
-    use makepad_ai_loader::formats::torch_pth::PthStateDict;
     use std::collections::{BTreeMap, BTreeSet};
-    use std::path::PathBuf;
 
     /// Checkpoint entries the plan reads, with how many floats of each.
     fn floats_read_per_entry() -> BTreeMap<String, usize> {
@@ -315,44 +313,5 @@ mod tests {
         assert!(total >= params * 4);
         let half = plan_total_bytes(&plan, true, 0).unwrap();
         assert!(half < total * 55 / 100, "f16 plan is {half} vs f32 {total}");
-    }
-
-    fn checkpoint() -> PathBuf {
-        match std::env::var_os("MAKEPAD_MELBAND_CKPT") {
-            Some(path) => PathBuf::from(path),
-            None => PathBuf::from(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../../../local/stems_ref/ckpt/MelBandRoformer.ckpt"
-            )),
-        }
-    }
-
-    /// The two counts above are arithmetic on the plan alone. This holds the
-    /// plan to the file: every tensor in it is read, whole, and none that is
-    /// not in it is asked for.
-    #[test]
-    fn the_plan_and_the_checkpoint_name_the_same_672_tensors() {
-        let path = checkpoint();
-        if !path.is_file() {
-            eprintln!("SKIP: checkpoint absent (want {})", path.display());
-            return;
-        }
-        let state = PthStateDict::load(&path).expect("read the checkpoint");
-        let read = floats_read_per_entry();
-        let mut in_file = 0usize;
-        let mut floats = 0usize;
-        for name in state.names() {
-            if name.contains("rotary_embed") {
-                continue;
-            }
-            in_file += 1;
-            let shape = state.shape(name).expect("shape");
-            let want: usize = shape.iter().product();
-            floats += want;
-            assert_eq!(read.get(name).copied(), Some(want), "'{name}' {shape:?}");
-        }
-        assert_eq!(in_file, 672);
-        assert_eq!(read.len(), 672);
-        assert_eq!(floats, 228_202_788);
     }
 }

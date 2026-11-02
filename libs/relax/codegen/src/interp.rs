@@ -13,7 +13,7 @@
 //! - interpreted -> native: `relax_interp_call`, one precompiled routine that loads x0-x7,
 //!   q0-q7, x8 and the stack arguments from a buffer, calls the target and stores the result
 //!   registers back. It serves every signature.
-//! - native -> interpreted: a fixed pool of precompiled entry thunks (`movz w17, #k; b common`).
+//! - native -> interpreted: a fixed pool of precompiled entry thunks (`adr x17, .; b common`).
 //!   Each interpreted function owns one pool index; the common entry spills the argument
 //!   registers and calls `relax_interp_enter(k, regs, incoming stack args)`. A slot's code is a
 //!   jump to its pool thunk, so native callers, function pointers and vtables reach it unchanged.
@@ -22,8 +22,9 @@
 //!   interpreter stack without leaving the interpreter.
 //!
 //! Selection: `MAKEPAD_RUN_INTERP=all` or a comma list of name substrings (`MAKEPAD_RUN_INTERP_SKIP` for
-//! exclusions). Functions using operations this prototype does not cover stay native (counted:
-//! `MAKEPAD_RUN_INTERP_STATS=1` prints a summary at exit).
+//! exclusions); `MAKEPAD_RUN_NO_CODEGEN=1` interprets everything. With a selection, a function using
+//! an operation the interpreter does not cover stays machine code (counted, with the first
+//! functions of each reason: `MAKEPAD_RUN_INTERP_STATS=1`); in no-codegen mode it is an error.
 //! Unwinding: a panic below an interpreted frame lands in `relax_interp_call` (the runtime's
 //! unwinder treats its return address as a frame with a landing, `unwind_boundary`); the call
 //! returns 1, the interpreter continues at the call's `Invoke` unwind block (the cleanup pad) or
@@ -31,7 +32,7 @@
 //! from native code that ends unwinding re-raises in its native caller through the runtime's
 //! resume (the entry glue restores the caller's frame first). Drop order equals the JIT's and
 //! rustc's (bench_rt/interp/unwind_cmp.py).
-//! Not covered: the lane-typed vector ops (`VX`, `VX3`), x86-only instructions.
+//! Not covered: x86-only instructions (`Cpuid`, `Xgetbv`).
 
 #![allow(clippy::missing_safety_doc)]
 
@@ -41,8 +42,11 @@ use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 
 pub type H = unsafe extern "C" fn(*const u64, *mut u64, *mut Cx);
 
-/// Number of entry thunks in the pool (each 8 bytes of code, in the binary's text).
-pub const POOL: usize = 32768;
+/// Number of entry thunks in the pool (each 8 bytes of code, in the binary's text; the `.rept`
+/// count of the glue below): one per interpreted function the process installs, which no-codegen
+/// mode bounds by the precompiled slot pools anyway (compiler static_glue.rs SLOTS, the same
+/// count). 32,768 ran out in Fab's boot (41,573 functions).
+pub const POOL: usize = 1 << 18;
 
 /// Per-thread interpreter state; its address is the third handler argument.
 #[repr(C)]
@@ -120,6 +124,8 @@ pub struct IFunc {
     pub name: String,
     /// the frame's alignment in bytes (64, or a stack slot's larger alignment)
     pub align: usize,
+    /// Loader metadata, never serialized: TLS offset (high word) and function slot (low word).
+    entry_mark: AtomicU64,
 }
 
 /// `p` rounded up to `align` bytes (a power of two).
@@ -143,21 +149,32 @@ macro_rules! gsym {
     };
 }
 
+/// `x16 = &symbol` (page + offset), in the object format's syntax.
+#[cfg(all(target_arch = "aarch64", target_vendor = "apple"))]
+macro_rules! adrp_add_x16 {
+    ($s:literal) => {
+        concat!("  adrp x16, _", $s, "@PAGE\n  add x16, x16, _", $s, "@PAGEOFF")
+    };
+}
+#[cfg(all(target_arch = "aarch64", not(target_vendor = "apple")))]
+macro_rules! adrp_add_x16 {
+    ($s:literal) => {
+        concat!("  adrp x16, ", $s, "\n  add x16, x16, :lo12:", $s)
+    };
+}
+
 #[cfg(target_arch = "aarch64")]
 std::arch::global_asm!(
     ".text",
+    // common entry: x17 = the entry thunk's own address, made the pool index here. Spill x0-x7, q0-q7, x8; call
+    // relax_interp_enter(k, regs, caller's stack arguments); load the result registers from the
+    // buffer.
     ".p2align 3",
-    concat!(".globl ", gsym!("relax_interp_pool")),
-    concat!(gsym!("relax_interp_pool"), ":"),
-    ".set rip_k, 0",
-    ".rept 32768",
-    "  movz w17, #rip_k",
-    "  b 2f",
-    ".set rip_k, rip_k + 1",
-    ".endr",
-    // common entry: x17 = pool index. Spill x0-x7, q0-q7, x8; call relax_interp_enter(k,
-    // regs, caller's stack arguments); load the result registers from the buffer.
-    "2:",
+    concat!(gsym!("relax_interp_pool_entry"), ":"),
+    // (adrp + add: Mach-O has no relocation for an `adr` to another symbol)
+    adrp_add_x16!("relax_interp_pool"),
+    "  sub x17, x17, x16",
+    "  lsr x17, x17, #3",
     "  stp x29, x30, [sp, #-16]!",
     "  mov x29, sp",
     "  sub sp, sp, #208",
@@ -189,6 +206,15 @@ std::arch::global_asm!(
     "  mov sp, x29",
     "  ldp x29, x30, [sp], #16",
     "  br x16",
+    // the entry thunks: thunk k (8 bytes at pool + 8k) passes its own address to the common
+    // entry (no immediate: the pool may hold more than 16 bits' worth)
+    ".p2align 3",
+    concat!(".globl ", gsym!("relax_interp_pool")),
+    concat!(gsym!("relax_interp_pool"), ":"),
+    ".rept 262144",
+    "  adr x17, .",
+    concat!("  b ", gsym!("relax_interp_pool_entry")),
+    ".endr",
     "",
     // relax_interp_call(target, regs, stack, nstack_words)
     ".p2align 2",
@@ -292,6 +318,65 @@ const RB_WORDS: usize = 26;
 
 static FUNCS: [AtomicPtr<IFunc>; POOL] = [const { AtomicPtr::new(std::ptr::null_mut()) }; POOL];
 static NEXT: AtomicUsize = AtomicUsize::new(0);
+
+/// A count stub's work, for an entry made by `count_entry`: the slot's tier record (its word 0 is
+/// the budget each call's weight comes off), the slot, the weight.
+pub struct CountInfo {
+    rec: *const AtomicU64,
+    slot: u32,
+    weight: u64,
+}
+/// per pool entry: the count stub it is (null: none)
+static COUNTERS: [AtomicPtr<CountInfo>; POOL] = [const { AtomicPtr::new(std::ptr::null_mut()) }; POOL];
+/// the runtime's hot path (jit.rs rt_hot: queues the slot for its O3 build)
+static HOT: AtomicUsize = AtomicUsize::new(0);
+
+/// No-codegen mode's tier-up: the runtime's hot path, called with the slot whose budget ran out.
+pub fn set_hot(f: extern "C" fn(u64) -> u64) {
+    HOT.store(f as usize, Ordering::Release);
+}
+
+/// No-codegen mode's count stub (the arm64 back end's `count_stub`): an entry of its own that runs
+/// the interpreted function at `code` (its entry) after taking `weight` off the budget at `rec`;
+/// at or below zero it calls the hot path with `slot` first. The slot's word holds it while the
+/// slot counts, as it holds a count stub's code.
+pub fn count_entry(rec: u64, slot: u32, code: u64, weight: u32) -> Result<u64, String> {
+    let p = pool_base();
+    if !(code >= p && code < p + 8 * POOL as u64) {
+        return Err(format!("makepad run interp: count stub for slot {} at {:#x}, which is no interpreted function", slot, code));
+    }
+    let f = FUNCS[((code - p) / 8) as usize].load(Ordering::Acquire);
+    let k = NEXT.fetch_add(1, Ordering::Relaxed);
+    if k >= POOL {
+        return Err(format!("makepad run interp: more than {} interpreted entries (the entry thunk pool)", POOL));
+    }
+    let c = Box::new(CountInfo { rec: rec as *const AtomicU64, slot, weight: weight.clamp(1, 4095) as u64 });
+    COUNTERS[k].store(Box::into_raw(c), Ordering::Release);
+    FUNCS[k].store(f, Ordering::Release);
+    Ok(p + 8 * k as u64)
+}
+
+/// A count stub's call: the weight off the budget (as the stub does: not atomically), the hot path
+/// when it runs out.
+#[inline(always)]
+unsafe fn tick(c: *const CountInfo) {
+    let c = &*c;
+    let r = &*c.rec;
+    let b = (r.load(Ordering::Relaxed) as i64).wrapping_sub(c.weight as i64);
+    r.store(b as u64, Ordering::Relaxed);
+    if b <= 0 {
+        hot(c.slot);
+    }
+}
+
+#[inline(never)]
+unsafe fn hot(slot: u32) {
+    let h = HOT.load(Ordering::Acquire);
+    if h != 0 {
+        let f: extern "C" fn(u64) -> u64 = std::mem::transmute(h);
+        f(slot as u64);
+    }
+}
 static TLS_GLUE: AtomicU64 = AtomicU64::new(0);
 /// the runtime's resume (`Env::resume`): continues an unwind from the frame that calls it
 static RESUME: AtomicU64 = AtomicU64::new(0);
@@ -340,12 +425,22 @@ pub fn note_native(ns: u64, bytes: u64, insts: u64) {
 }
 static REFUSALS: relax_session::sync::Mutex<Vec<(String, u64)>> = relax_session::sync::Mutex::new(Vec::new());
 
-fn refuse(why: &str) {
+fn refuse(why: &str, name: &str) {
     N_REFUSED.fetch_add(1, Ordering::Relaxed);
     let mut g = REFUSALS.lock().unwrap_or_else(|e| e.into_inner());
-    match g.iter_mut().find(|x| x.0 == why) {
-        Some(x) => x.1 += 1,
-        None => g.push((why.to_string(), 1)),
+    let n = match g.iter_mut().find(|x| x.0 == why) {
+        Some(x) => {
+            x.1 += 1;
+            x.1
+        }
+        None => {
+            g.push((why.to_string(), 1));
+            1
+        }
+    };
+    // the first functions of each reason, by name (the summary only counts)
+    if n <= 4 && interp_stats() {
+        eprintln!("makepad-run interp refused: {}: `{}`", why, name);
     }
 }
 
@@ -402,7 +497,32 @@ struct Sel {
 /// interpreter cannot run is an error, not a JIT fallback.
 pub fn no_codegen() -> bool {
     static N: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *N.get_or_init(|| std::env::var_os("MAKEPAD_RUN_NO_CODEGEN").is_some_and(|v| !v.is_empty() && v != "0"))
+    *N.get_or_init(|| relax_session::options::no_codegen_env(&|n| std::env::var_os(n)))
+}
+
+fn interp_stats() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("MAKEPAD_RUN_INTERP_STATS").is_some())
+}
+
+fn no_coalesce() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("MAKEPAD_RUN_INTERP_NOCOALESCE").is_some())
+}
+
+fn fold_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("MAKEPAD_RUN_INTERP_NOFOLD").is_none())
+}
+
+fn preload_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("MAKEPAD_RUN_INTERP_NOPRELOAD").is_none())
+}
+
+fn frame_fold_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("MAKEPAD_RUN_INTERP_NOFRAMEFOLD").is_none())
 }
 
 fn selection() -> Option<&'static Sel> {
@@ -411,7 +531,7 @@ fn selection() -> Option<&'static Sel> {
         let v = if no_codegen() { "all".to_string() } else { std::env::var("MAKEPAD_RUN_INTERP").ok().filter(|v| !v.is_empty() && v != "0")? };
         let split = |s: &str| s.split(',').filter(|x| !x.is_empty()).map(|x| x.to_string()).collect::<Vec<_>>();
         let skip = std::env::var("MAKEPAD_RUN_INTERP_SKIP").map(|s| split(&s)).unwrap_or_default();
-        if std::env::var_os("MAKEPAD_RUN_INTERP_STATS").is_some() {
+        if interp_stats() {
             extern "C" {
                 fn atexit(f: extern "C" fn()) -> i32;
             }
@@ -431,7 +551,7 @@ fn selection() -> Option<&'static Sel> {
 
 /// The backends' hook: `Some(code)` when `f` runs in the interpreter -- the slot's code is then
 /// a jump to the function's entry thunk.
-pub fn maybe_compile(f: &Func, slots: SlotsPtr, syms: u64, sym_class: u64, tls_slow: u64, resume: u64) -> Option<(Vec<u8>, Vec<RelocAt>)> {
+pub fn maybe_compile(options: &relax_session::Options, f: &Func, slots: SlotsPtr, syms: u64, sym_class: u64, tls_slow: u64, resume: u64) -> Option<(Vec<u8>, Vec<RelocAt>)> {
     let sel = selection()?;
     // a pattern matches a name containing it; `=name` matches that name only
     let m = |p: &String| match p.strip_prefix('=') {
@@ -445,7 +565,7 @@ pub fn maybe_compile(f: &Func, slots: SlotsPtr, syms: u64, sym_class: u64, tls_s
         return None;
     }
     let t0 = std::time::Instant::now();
-    let lowered = lower(f, slots, syms, sym_class);
+    let lowered = lower(options, f, slots, syms, sym_class);
     LOWER_NS.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
     let (ifunc, persist) = match lowered {
         Ok(x) => x,
@@ -453,13 +573,13 @@ pub fn maybe_compile(f: &Func, slots: SlotsPtr, syms: u64, sym_class: u64, tls_s
             if no_codegen() {
                 panic!("makepad run: no-codegen mode: `{}` cannot run in the interpreter ({})", f.name, why);
             }
-            refuse(why);
+            refuse(why, &f.name);
             return None;
         }
     };
     set_runtime(tls_slow, resume);
     SLOTS.store(slots.0 as usize, Ordering::Relaxed);
-    if N_INTERP.fetch_add(1, Ordering::Relaxed) % 2000 == 1999 && std::env::var_os("MAKEPAD_RUN_INTERP_STATS").is_some() {
+    if N_INTERP.fetch_add(1, Ordering::Relaxed) % 2000 == 1999 && interp_stats() {
         print_stats();
     }
     N_WORDS.fetch_add(ifunc.code.len() as u64, Ordering::Relaxed);
@@ -475,6 +595,14 @@ pub fn maybe_compile(f: &Func, slots: SlotsPtr, syms: u64, sym_class: u64, tls_s
 pub fn is_entry(addr: u64) -> bool {
     let p = pool_base();
     cfg!(target_arch = "aarch64") && addr >= p && addr < p + 8 * POOL as u64
+}
+
+/// Attach an entry mark after linking the ordinary interpreter blob. Calls which stay on the
+/// interpreter stack run it too, without changing the blob or its cache key.
+pub fn set_entry_mark(addr: u64, tls: u32, id: u32) {
+    if !is_entry(addr) { return; }
+    let f = FUNCS[((addr - pool_base()) / 8) as usize].load(Ordering::Acquire);
+    unsafe { (*f).entry_mark.store((tls as u64) << 32 | id as u64, Ordering::Release) };
 }
 
 /// The runtime addresses the interpreter calls (the backends' Env): set before a function runs.
@@ -498,9 +626,10 @@ fn free_lowered(f: IFunc, p: &Persist) {
 
 /// An interpreted function's code as the runtime installs it: a blob whose relocated words the
 /// runtime has written (rir::link). Registers it and returns its entry.
-pub fn install_linked(code: &[u8], tls_slow: u64, resume: u64) -> Result<u64, String> {
+/// `body_offset`: the replaceable body word's offset from the relocated call table word.
+pub fn install_linked(code: &[u8], tls_slow: u64, resume: u64, body_offset: u64) -> Result<u64, String> {
     set_runtime(tls_slow, resume);
-    blob::install(code)
+    blob::install(code, body_offset)
 }
 
 // ---------------------------------------------------------------- thread state
@@ -553,8 +682,20 @@ fn overflow() -> ! {
 
 #[inline(always)]
 unsafe fn run(f: &IFunc, fp: *mut u64, cx: *mut Cx) {
+    mark_entry(f, cx);
     let h: H = std::mem::transmute(f.code[0]);
     h(f.code.as_ptr(), fp, cx)
+}
+
+#[inline(always)]
+unsafe fn mark_entry(f: &IFunc, cx: *mut Cx) {
+    let mark = f.entry_mark.load(Ordering::Acquire);
+    if mark == 0 { return; }
+    let block = tls_block(cx);
+    let table = *((block + (mark >> 32)) as *const u64);
+    let id = mark as u32;
+    let bank = (&*((table + ((id >> 16) * 8) as u64) as *const AtomicU64)).load(Ordering::Acquire);
+    (&*((bank + (id & 65535) as u64) as *const std::sync::atomic::AtomicU8)).store(1, Ordering::Relaxed);
 }
 
 /// Native -> interpreted (the pool's common entry).
@@ -562,6 +703,10 @@ unsafe fn run(f: &IFunc, fp: *mut u64, cx: *mut Cx) {
 /// Returns 0, or 1 when the function ended by unwinding (the entry glue continues the unwind in
 /// the native caller).
 unsafe extern "C" fn relax_interp_enter(k: u32, regs: *mut u64, stack: *const u8) -> u64 {
+    let c = COUNTERS[k as usize].load(Ordering::Acquire);
+    if !c.is_null() {
+        tick(c);
+    }
     let f = &*FUNCS[k as usize].load(Ordering::Acquire);
     let cx = cx_ptr();
     if TRACE.load(Ordering::Relaxed) {
@@ -1521,7 +1666,7 @@ pub fn const_call_entry(target: u64, arg0: u64) -> u64 {
     let code = vec![h_const_call as *const () as usize as u64, target, arg0, h_ret0 as *const () as usize as u64].into_boxed_slice();
     let k = NEXT.fetch_add(1, Ordering::Relaxed);
     assert!(k < POOL, "makepad run interp: entry thunk pool exhausted");
-    let f = IFunc { code, frame_words: 8, params: Vec::new(), cplan: None, name: format!("const_call {:#x}", target), align: 64 };
+    let f = IFunc { code, frame_words: 8, params: Vec::new(), cplan: None, name: format!("const_call {:#x}", target), align: 64, entry_mark: AtomicU64::new(0) };
     FUNCS[k].store(Box::into_raw(Box::new(f)), Ordering::Release);
     pool_base() + 8 * k as u64
 }
@@ -1942,6 +2087,21 @@ unsafe extern "C" fn h_vstore(pc: *const u64, fp: *mut u64, cx: *mut Cx) {
     std::ptr::write_unaligned(a as *mut [u32; 4], vget(c(fp, w, 1)));
     next!(pc.add(2), fp, cx)
 }
+/// [h, d|base|idx|sh<<48, off]: base + (idx << sh) + off
+unsafe extern "C" fn h_vloadx(pc: *const u64, fp: *mut u64, cx: *mut Cx) {
+    let w = *pc.add(1);
+    let a = (*c(fp, w, 1)).wrapping_add((*c(fp, w, 2)) << ((w >> 48) & 63)).wrapping_add(*pc.add(2));
+    let v = std::ptr::read_unaligned(a as *const [u32; 4]);
+    vput(c(fp, w, 0), v);
+    next!(pc.add(3), fp, cx)
+}
+/// [h, base|idx|src|sh<<48, off]
+unsafe extern "C" fn h_vstorex(pc: *const u64, fp: *mut u64, cx: *mut Cx) {
+    let w = *pc.add(1);
+    let a = (*c(fp, w, 0)).wrapping_add((*c(fp, w, 1)) << ((w >> 48) & 63)).wrapping_add(*pc.add(2));
+    std::ptr::write_unaligned(a as *mut [u32; 4], vget(c(fp, w, 2)));
+    next!(pc.add(3), fp, cx)
+}
 unsafe extern "C" fn h_vany(pc: *const u64, fp: *mut u64, cx: *mut Cx) {
     let w = *pc.add(1);
     let v = vget(c(fp, w, 1));
@@ -2021,7 +2181,7 @@ unsafe extern "C" fn h_trap(_pc: *const u64, _fp: *mut u64, _cx: *mut Cx) {
 // ---- calls
 
 enum Target {
-    /// a slot's table word (its current code)
+    /// a slot's call table word (its current code or entry wrapper)
     Table(u64),
     /// a function pointer in a cell
     Cell(u32),
@@ -2033,10 +2193,20 @@ enum Target {
 struct Ic {
     word: u64,
     f: *const IFunc,
+    /// the slot table word the address led through (a slot thunk's), 0 for none, and its value
+    /// then: a function pointer keeps its address while its slot's code changes (compiled after
+    /// a lazy stub, patched), so the entry holds only while that word does
+    via: u64,
+    via_word: u64,
+    /// the entry is a count stub (count_entry): its counting
+    count: *const CountInfo,
 }
 
 struct CallDesc {
     target: Target,
+    /// Loader-only body word behind an entry wrapper (0: target already names the body).
+    /// Interpreted callees mark their own entry; native calls still go through `target`.
+    body: u64,
     /// argument cells and classes (C calls: ABI vregs, result address first)
     args: Vec<(u32, Cls)>,
     rets: Vec<(u32, Cls)>,
@@ -2050,18 +2220,22 @@ struct CallDesc {
 
 /// The interpreted function a native code address leads to: a pool thunk, a jump to one
 /// (the slot's code), or a slot thunk whose table word is one of those.
-unsafe fn decode(mut a: u64) -> *const IFunc {
+/// `via`: the table word's address the address led through (0: none).
+unsafe fn decode(mut a: u64, via: &mut u64, count: &mut *const CountInfo) -> *const IFunc {
     let pool = pool_base();
     let sbase = STATIC_THUNKS[0].load(Ordering::Acquire);
     for _ in 0..3 {
         if a >= pool && a < pool + 8 * POOL as u64 {
-            return FUNCS[((a - pool) / 8) as usize].load(Ordering::Acquire);
+            let k = ((a - pool) / 8) as usize;
+            *count = COUNTERS[k].load(Ordering::Acquire);
+            return FUNCS[k].load(Ordering::Acquire);
         }
         if sbase != 0 {
             let stride = STATIC_THUNKS[1].load(Ordering::Relaxed);
             if a >= sbase && a < sbase + stride * STATIC_THUNKS[2].load(Ordering::Relaxed) {
                 // a precompiled slot thunk: its slot's table word
-                a = *((STATIC_THUNKS[3].load(Ordering::Relaxed) + 8 * ((a - sbase) / stride)) as *const u64);
+                *via = STATIC_THUNKS[3].load(Ordering::Relaxed) + 8 * ((a - sbase) / stride);
+                a = *(*via as *const u64);
                 continue;
             }
         }
@@ -2085,6 +2259,7 @@ unsafe fn decode(mut a: u64) -> *const IFunc {
             a = v;
         } else if w[4] == 0xF940_0210 && w[5] == 0xD61F_0200 {
             // ldr x16, [x16]; br x16: a slot thunk through table word v
+            *via = v;
             a = *(v as *const u64);
         } else {
             return std::ptr::null();
@@ -2094,15 +2269,19 @@ unsafe fn decode(mut a: u64) -> *const IFunc {
 }
 
 #[inline(always)]
-unsafe fn resolve(d: &CallDesc, word: u64) -> *const IFunc {
+unsafe fn resolve(d: &CallDesc, word: u64) -> (*const IFunc, *const CountInfo) {
+    let word = if d.body != 0 { (&*(d.body as *const AtomicU64)).load(Ordering::Acquire) } else { word };
     let ic = d.ic.load(Ordering::Acquire);
-    if !ic.is_null() && (*ic).word == word {
-        return (*ic).f;
+    if !ic.is_null() && (*ic).word == word && ((*ic).via == 0 || *((*ic).via as *const u64) == (*ic).via_word) {
+        return ((*ic).f, (*ic).count);
     }
-    let f = decode(word);
+    let mut via = 0u64;
+    let mut count = std::ptr::null();
+    let f = decode(word, &mut via, &mut count);
+    let via_word = if via != 0 { *(via as *const u64) } else { 0 };
     // the replaced cache entry is leaked (another thread may still read it)
-    d.ic.store(Box::into_raw(Box::new(Ic { word, f })), Ordering::Release);
-    f
+    d.ic.store(Box::into_raw(Box::new(Ic { word, f, via, via_word, count })), Ordering::Release);
+    (f, count)
 }
 
 /// [h, desc, unwind block or 0]
@@ -2119,6 +2298,92 @@ unsafe extern "C" fn h_call(pc: *const u64, fp: *mut u64, cx: *mut Cx) {
         return;
     }
     next!(pc.add(3), fp, cx)
+}
+
+/// [h, desc]: a call in tail position (`tail::sibling_calls`; no cleanup pad). An interpreted
+/// callee takes this frame's place on the interpreter stack and its code is jumped to, so a chain
+/// of tail calls runs in constant interpreter and native stack (its return is this frame's); any
+/// other callee is called, and its results are this frame's return.
+unsafe extern "C" fn h_tailcall(pc: *const u64, fp: *mut u64, cx: *mut Cx) {
+    let d = &*(*pc.add(1) as *const CallDesc);
+    let f = tail_enter(d, fp, cx);
+    if f.is_null() {
+        return;
+    }
+    let f = &*f;
+    next!(f.code.as_ptr(), align_frame(fp, f.align), cx)
+}
+
+/// h_tailcall's work out of line (its argument buffer would cost the handler its tail jump): an
+/// interpreted callee's frame made in place of `fp`'s, its parameters set, returned; else the
+/// call made and its results put where a return puts them (null).
+#[inline(never)]
+unsafe fn tail_enter(d: &CallDesc, fp: *mut u64, cx: *mut Cx) -> *const IFunc {
+    let word = match d.target {
+        Target::Table(t) => *(t as *const u64),
+        Target::Cell(k) => *fp.add(k as usize),
+        Target::Addr(a) => a,
+    };
+    if direct_ok(d) {
+        let (f, count) = resolve(d, word);
+        if !f.is_null() && same_abi(d, &*f) {
+            if !count.is_null() {
+                tick(count);
+            }
+            if COUNT {
+                (*cx).n[1] += 1;
+            }
+            let fr = &*f;
+            // the arguments first (they are read from the frame the callee's overwrites)
+            let mut buf = [0u64; 2 * 48];
+            let mut n = 0;
+            for &(cell, cls) in &d.args {
+                if cls == Cls::V128 {
+                    buf[n] = *fp.add(cell as usize);
+                    buf[n + 1] = *fp.add(cell as usize + 1);
+                    n += 2;
+                } else {
+                    buf[n] = c_scalar(d, n_arg(d, n), arg_word(fp, cell));
+                    n += 1;
+                }
+            }
+            let fp2 = align_frame(fp, fr.align);
+            let top = fp2.add(fr.frame_words);
+            if top > (*cx).limit {
+                overflow();
+            }
+            (*cx).top = top;
+            let mut n = 0;
+            for (k, &(_, cls)) in d.args.iter().enumerate() {
+                let dst = fp2.add(fr.params[k].0 as usize);
+                *dst = buf[n];
+                n += 1;
+                if cls == Cls::V128 {
+                    *dst.add(1) = buf[n];
+                    n += 1;
+                }
+            }
+            mark_entry(fr, cx);
+            return f;
+        }
+    }
+    if do_call(d, fp, cx) {
+        (*cx).unwinding = 1;
+        return std::ptr::null();
+    }
+    let (mut ni, mut nf) = (0usize, 0usize);
+    for &(cell, cls) in &d.rets {
+        let p = fp.add(cell as usize);
+        if cls == Cls::I {
+            (*cx).ret[ni] = *p;
+            ni += 1;
+        } else {
+            (*cx).ret[2 + 2 * nf] = *p;
+            (*cx).ret[3 + 2 * nf] = if cls == Cls::V128 { *p.add(1) } else { 0 };
+            nf += 1;
+        }
+    }
+    std::ptr::null()
 }
 
 /// Term::Resume: the cleanup pad is done; the frame unwinds into its caller
@@ -2140,6 +2405,53 @@ unsafe fn arg_word(fp: *mut u64, x: u32) -> u64 {
     }
 }
 
+/// A call that may run its callee on the interpreter stack when the callee is interpreted: a
+/// Relax-ABI call, or a C call whose arguments are all scalars in registers or on the stack with
+/// no aggregate result (each argument is then the callee's parameter as it is: the C body's entry
+/// would read it back from the register it went in). Calls of fixed addresses (the runtime's
+/// entries) are native.
+#[inline(always)]
+fn direct_ok(d: &CallDesc) -> bool {
+    if matches!(d.target, Target::Addr(_)) {
+        return false;
+    }
+    match &d.csig {
+        None => true,
+        Some((sig, plan)) => sig.ret.is_none() && matches!(plan.ret, RetPlan::Scalar) && plan.args.iter().all(|a| matches!(a, ArgPlan::Scalar(..))),
+    }
+}
+
+/// The interpreted callee takes the call's convention: a Relax-ABI body for a Relax call, a C
+/// body for a C call.
+#[inline(always)]
+fn same_abi(d: &CallDesc, f: &IFunc) -> bool {
+    d.csig.is_some() == f.cplan.is_some()
+}
+
+/// Argument `k`'s value as the C body's entry makes it (relax_interp_enter): a narrow scalar
+/// cut to its size, a signed one sign-extended again. Relax-ABI calls pass it as it is.
+#[inline(always)]
+unsafe fn c_scalar(d: &CallDesc, k: usize, v: u64) -> u64 {
+    let Some((sig, plan)) = &d.csig else { return v };
+    match (&plan.args[k], &sig.args[k]) {
+        (ArgPlan::Scalar(_, size), a) if *size < 8 => {
+            let v = v & ((1u64 << (8 * size)) - 1);
+            match a {
+                CArg::Scalar(Mem::Int(b, true)) => ext(v, b * 8, true),
+                _ => v,
+            }
+        }
+        _ => v,
+    }
+}
+
+/// The argument index of word `n` of a call's argument buffer (V128 arguments take two words;
+/// C calls, the only ones c_scalar changes, have none).
+#[inline(always)]
+fn n_arg(d: &CallDesc, n: usize) -> usize {
+    if d.csig.is_some() { n } else { 0 }
+}
+
 /// true: the callee unwound (results undefined)
 #[inline(never)]
 unsafe fn do_call(d: &CallDesc, fp: *mut u64, cx: *mut Cx) -> bool {
@@ -2150,9 +2462,12 @@ unsafe fn do_call(d: &CallDesc, fp: *mut u64, cx: *mut Cx) -> bool {
     };
     let saved_top = (*cx).top;
     let fp2 = fp.add(d.frame_words);
-    if d.csig.is_none() && !matches!(d.target, Target::Addr(_)) {
-        let f = resolve(d, word);
-        if !f.is_null() {
+    if direct_ok(d) {
+        let (f, count) = resolve(d, word);
+        if !f.is_null() && same_abi(d, &*f) {
+            if !count.is_null() {
+                tick(count);
+            }
             // interpreted -> interpreted: same stack, arguments cell to cell
             if COUNT {
                 (*cx).n[1] += 1;
@@ -2171,7 +2486,7 @@ unsafe fn do_call(d: &CallDesc, fp: *mut u64, cx: *mut Cx) -> bool {
                     *dst = *src;
                     *dst.add(1) = *src.add(1);
                 } else {
-                    *dst = arg_word(fp, cell);
+                    *dst = c_scalar(d, k, arg_word(fp, cell));
                 }
             }
             run(f, fp2, cx);
@@ -2337,6 +2652,8 @@ struct Lw<'a> {
     /// memory base or a call argument read fp + offset; the SlotAddr itself is only lowered when
     /// another use needs the value in a cell)
     frame: Vec<Option<u32>>,
+    /// the call being lowered is in tail position (tail::sibling_calls): it ends the frame
+    tail_call: bool,
 }
 
 fn mem_load_kind(m: Mem) -> u8 {
@@ -2447,7 +2764,7 @@ fn coalesce(f: &Func) -> (Vec<u32>, std::collections::HashSet<(u32, u32)>) {
     let n = f.vregs.len();
     let mut alias: Vec<u32> = (0..n as u32).collect();
     let mut skip = std::collections::HashSet::new();
-    if std::env::var_os("MAKEPAD_RUN_INTERP_NOCOALESCE").is_some() {
+    if no_coalesce() {
         return (alias, skip);
     }
     let (mut defs, mut uses) = (vec![0u32; n], vec![0u32; n]);
@@ -2553,9 +2870,17 @@ fn coalesce(f: &Func) -> (Vec<u32>, std::collections::HashSet<(u32, u32)>) {
     (alias, skip)
 }
 
-fn lower(f: &Func, slots: SlotsPtr, syms: u64, sym_class: u64) -> Result<(IFunc, Persist), &'static str> {
+fn lower(options: &relax_session::Options, f: &Func, slots: SlotsPtr, syms: u64, sym_class: u64) -> Result<(IFunc, Persist), &'static str> {
+    // a naked fn is its asm block alone: machine code only
+    if f.naked {
+        return Err("inline assembly");
+    }
     let covered = relax_backend::passes::lower_coverage(f);
     let f = covered.as_ref().unwrap_or(f);
+    // calls in tail position become jumps, as the arm64 back end makes them (the same analysis:
+    // only moves of the results follow, no frame address escapes), so chains of calls run in
+    // constant interpreter and native stack
+    let tail = relax_backend::tail::sibling_calls(options, f, &relax_backend::regalloc::reachable(f), relax_backend::tail::Arch::Arm64);
     let (alias, skip) = coalesce(f);
     // frame: one cell per vreg (two for V128), then the stack slots, then C ABI buffers; an
     // aliased vreg shares its representative's cell
@@ -2628,7 +2953,7 @@ fn lower(f: &Func, slots: SlotsPtr, syms: u64, sym_class: u64) -> Result<(IFunc,
     let mut konst: Vec<Option<Option<i64>>> = vec![None; f.vregs.len()];
     // where a constant's value comes from (a symbol or a slot: relocated when cached)
     let mut kprov: Vec<Option<Prov>> = vec![None; f.vregs.len()];
-    if std::env::var_os("MAKEPAD_RUN_INTERP_NOFOLD").is_none() {
+    if fold_on() {
         for p in &f.params {
             konst[p.0 as usize] = Some(None);
         }
@@ -2687,7 +3012,7 @@ fn lower(f: &Func, slots: SlotsPtr, syms: u64, sym_class: u64) -> Result<(IFunc,
         }
     }
     let mut hoist = vec![false; f.vregs.len()];
-    if std::env::var_os("MAKEPAD_RUN_INTERP_NOPRELOAD").is_none() {
+    if preload_on() {
         for (bi, b) in f.blocks.iter().enumerate() {
             if !in_loop[bi] {
                 continue;
@@ -2705,7 +3030,7 @@ fn lower(f: &Func, slots: SlotsPtr, syms: u64, sym_class: u64) -> Result<(IFunc,
     // stack slot addresses folded into their uses (see Lw::frame)
     let mut frame_of: Vec<Option<u32>> = vec![None; f.vregs.len()];
     let mut needs_cell = vec![false; f.vregs.len()];
-    if std::env::var_os("MAKEPAD_RUN_INTERP_NOFRAMEFOLD").is_none() {
+    if frame_fold_on() {
         let mut defs = vec![0u32; f.vregs.len()];
         for b in &f.blocks {
             for i in &b.insts {
@@ -2760,7 +3085,7 @@ fn lower(f: &Func, slots: SlotsPtr, syms: u64, sym_class: u64) -> Result<(IFunc,
             }
         }
     }
-    let mut l = Lw { f, code: Vec::new(), fix: Vec::new(), cell, slot_off, frame_words, cur: String::new(), unwind_to: None, frame: frame_of, persist: Persist::default() };
+    let mut l = Lw { f, code: Vec::new(), fix: Vec::new(), cell, slot_off, frame_words, cur: String::new(), unwind_to: None, frame: frame_of, persist: Persist::default(), tail_call: false };
     let mut block_at = vec![0usize; f.blocks.len()];
     if !preload.is_empty() {
         let mut ws = vec![preload.len() as u64];
@@ -2821,7 +3146,15 @@ fn lower(f: &Func, slots: SlotsPtr, syms: u64, sym_class: u64) -> Result<(IFunc,
                 (Term::Invoke(_, u), true) => Some(*u),
                 _ => None,
             };
+            l.tail_call = tail.get(bi).copied().flatten() == Some(k);
             lower_inst(&mut l, i, slots, sym_class, &sym_val)?;
+            if l.tail_call {
+                break;
+            }
+        }
+        // a call in tail position ended the block: the moves and the return after it are its
+        if std::mem::take(&mut l.tail_call) {
+            continue;
         }
         if COUNT {
             l.cur = if fuse { "cmp+Branch (fused)".into() } else { format!("{:?}", b.term).split('(').next().unwrap_or("").to_string() };
@@ -2915,7 +3248,7 @@ fn lower(f: &Func, slots: SlotsPtr, syms: u64, sym_class: u64) -> Result<(IFunc,
         persist.targets.push(at);
     }
     let params = f.params.iter().map(|p| (l.cell[p.0 as usize], f.vregs[p.0 as usize])).collect();
-    Ok((IFunc { code, frame_words, params, cplan, name: f.name.clone(), align }, persist))
+    Ok((IFunc { code, frame_words, params, cplan, name: f.name.clone(), align, entry_mark: AtomicU64::new(0) }, persist))
 }
 
 fn lower_inst(l: &mut Lw, i: &Inst, slots: SlotsPtr, sym_class: u64, sym_val: &dyn Fn(Sym) -> u64) -> Result<(), &'static str> {
@@ -3130,6 +3463,7 @@ fn lower_inst(l: &mut Lw, i: &Inst, slots: SlotsPtr, sym_class: u64, sym_val: &d
             }
             let d = Box::new(CallDesc {
                 target,
+                body: 0,
                 args: args.iter().map(|v| (match l.frame_off(*v) {
                     Some(o) => ARG_FRAME | o,
                     None => l.cell[v.0 as usize],
@@ -3140,6 +3474,12 @@ fn lower_inst(l: &mut Lw, i: &Inst, slots: SlotsPtr, sym_class: u64, sym_val: &d
                 ic: AtomicPtr::new(std::ptr::null_mut()),
                 src,
             });
+            if l.tail_call {
+                l.emit(h_tailcall, &[Box::into_raw(d) as u64]);
+                let at = l.code.len() - 1;
+                l.persist.desc.push(at);
+                return Ok(());
+            }
             l.emit(h_call, &[Box::into_raw(d) as u64]);
             let at = l.code.len() - 1;
             l.persist.desc.push(at);
@@ -3221,8 +3561,14 @@ fn lower_inst(l: &mut Lw, i: &Inst, slots: SlotsPtr, sym_class: u64, sym_val: &d
             let w = l.w2(*base, *src) | (*off as u32 as u64) << 32;
             l.emit(h_vstore, &[w]);
         }
-        // made by addr_modes for native code only
-        Inst::VLoadX(..) | Inst::VStoreX(..) => return Err("indexed vector access"),
+        Inst::VLoadX(d, base, idx, sh, off) => {
+            let w = l.w3(*d, *base, *idx) | (*sh as u64) << 48;
+            l.emit(h_vloadx, &[w, *off as i64 as u64]);
+        }
+        Inst::VStoreX(base, idx, sh, off, src) => {
+            let w = l.w3(*base, *idx, *src) | (*sh as u64) << 48;
+            l.emit(h_vstorex, &[w, *off as i64 as u64]);
+        }
         Inst::VAny(d, v) => {
             let w = l.w2(*d, *v);
             l.emit(h_vany, &[w]);

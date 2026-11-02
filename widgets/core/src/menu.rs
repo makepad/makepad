@@ -115,7 +115,7 @@ impl MenuRow {
     }
 
     pub fn key(mut self, shortcut: &str) -> Self {
-        self.shortcut = shortcut.to_string();
+        self.shortcut = crate::kbd::shortcut_label(shortcut);
         self
     }
 

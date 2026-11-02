@@ -200,7 +200,7 @@ pub fn status_value(d: &Doc, now: u64, tail: &dyn Fn(&str) -> String) -> Value {
     if let Some(f) = v.failures.iter().max_by_key(|f| f.at_ms) {
         done.push(Shown { tip: f.pair.clone(), verdict: "red", finished: f.at_ms / 1000, detail: failure_detail(f), legs: f.legs.clone(), at_ms: f.at_ms });
     }
-    if let Some(r) = d.ci.runs.last() {
+    if let Some(r) = d.ci.runs.iter().rev().find(|r| !r.sweep) {
         let verdict = match r.verdict.as_str() {
             "ok" => "green",
             "fail" => "red",
@@ -213,7 +213,7 @@ pub fn status_value(d: &Doc, now: u64, tail: &dyn Fn(&str) -> String) -> Value {
         .verified
         .iter()
         .map(|t| (t.at_ms, &t.pair.work))
-        .chain(d.ci.runs.iter().filter(|r| r.verdict == "ok").map(|r| (r.ended_ms, &r.pair.work)))
+        .chain(d.ci.runs.iter().filter(|r| !r.sweep && r.verdict == "ok").map(|r| (r.ended_ms, &r.pair.work)))
         .max_by_key(|(at, _)| *at)
         .map_or(Value::Null, |(_, w)| s(w));
     let shown = shown.unwrap_or(Shown { tip: Pair::default(), verdict: "waiting", finished: 0, detail: String::new(), legs: Vec::new(), at_ms: 0 });

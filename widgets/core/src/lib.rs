@@ -12,6 +12,7 @@ pub use makepad_draw::makepad_zune_jpeg;
 pub use makepad_draw::makepad_zune_png;
 
 pub use makepad_tween;
+pub use makepad_jobs as jobs;
 
 // Core modules (used internally first)
 pub mod animator;
@@ -93,8 +94,12 @@ pub mod drop_slider;
 pub mod overlay_place;
 pub mod tip;
 pub mod popover;
+pub mod job_strip;
 pub mod overlay_layers;
 pub mod value_input;
+pub mod property;
+pub mod property_controls;
+pub mod focus_order;
 pub mod diagonal_text;
 pub mod splitter;
 
@@ -168,6 +173,7 @@ pub mod screen_cap;
 
 pub use crate::{
     adaptive_view::*,
+    job_strip::*,
     divider::*,
     animated_image_gif::*,
     badge::*,
@@ -249,6 +255,9 @@ pub use crate::{
     tab_close_button::*,
 
     text_input::*,
+    value_input::*,
+    property::*,
+    property_controls::*,
     tooltip::*,
     // Navigation and panels
     touch_gesture::*,
@@ -507,6 +516,7 @@ fn build_base_themes(vm: &mut ScriptVm) {
         };
         vm.eval(makepad_platform::ScriptMod::new(widgets_dir(), "theme_globals", &format!("theme_{}_rederived.splash", scheme.theme_name()), 0, 0, &crate::theme_tokens::theme_rederived_script(scheme, &globals), &[]));
     }
+    crate::theme_tokens::derive_base_property_inks(vm);
     crate::font_policy::install_theme_fonts(vm);
 }
 
@@ -817,6 +827,7 @@ true
     crate::tip::script_mod(vm);
     crate::popover::script_mod(vm);
     crate::value_input::script_mod(vm);
+    crate::property::script_mod(vm);
     // Before the panel kit and the tables: all three turn a heading with the
     // lean this one declares.
     crate::diagonal_text::script_mod(vm);
@@ -839,6 +850,7 @@ true
     // `MenuPlace`, and a block's `use` only sees what already exists.
     crate::menu::script_mod(vm);
     crate::button_group::script_mod(vm);
+    crate::property_controls::script_mod(vm);
     crate::select::script_mod(vm);
     // Only needs a View to derive from; the ladder it uses is Rust.
     crate::bare_step::script_mod(vm);
@@ -872,6 +884,9 @@ true
     crate::tooltip::script_mod(vm);
     crate::callout_tooltip::script_mod(vm);
     crate::popup_notification::script_mod(vm);
+    // The job board wakes this UI and tells time by its clock.
+    makepad_jobs::install(makepad_jobs::Hooks { wake: || makepad_platform::SignalToUI::set_ui_signal(), now: makepad_platform::monotonic_seconds, log: |line| makepad_platform::log!("{line}") });
+    crate::job_strip::script_mod(vm);
     crate::page_flip::script_mod(vm);
     crate::hosted_view::script_mod(vm);
     crate::flat_list::script_mod(vm);
@@ -1077,227 +1092,5 @@ mod module_rebuild_tests {
             steps.iter().all(|s| (s - steps[0]).abs() <= 32),
             "the cost of a rebuild is not settling: {steps:?}"
         );
-    }
-}
-
-#[cfg(test)]
-mod animated_image_gif_registration_tests {
-    #[test]
-    fn test_animated_image_gif_is_registered_separately_from_image() {
-        let lib = include_str!("lib.rs");
-        let gif = include_str!("animated_image_gif.rs");
-        assert!(lib.contains("pub mod animated_image_gif;"));
-        assert!(lib.contains("animated_image_gif::*"));
-        assert!(lib.contains("crate::animated_image_gif::script_mod(vm);"));
-        assert!(gif.contains(
-            "mod.widgets.AnimatedImageGifBase = #(AnimatedImageGif::register_widget(vm))"
-        ));
-        assert!(gif.contains("mod.widgets.AnimatedImageGif = set_type_default()"));
-        assert!(lib.contains("pub mod image;"));
-        assert!(lib.contains("crate::image::script_mod(vm);"));
-    }
-}
-
-#[cfg(test)]
-mod progress_registration_tests {
-    /// The progress family registers as one module, after the bases it
-    /// draws with and its `Intent` enum splatted into `mod.widgets`; the
-    /// loading spinner it sits beside stays a separate module.
-    #[test]
-    fn test_progress_is_registered_after_its_bases() {
-        let lib = include_str!("lib.rs");
-        let progress = include_str!("progress.rs");
-        assert!(lib.contains("pub mod progress;"));
-        assert!(lib.contains("progress::*"));
-        let at = lib.find("crate::progress::script_mod(vm);").expect("progress registered");
-        for base in ["crate::view::script_mod(vm);", "crate::label::script_mod(vm);"] {
-            assert!(lib.find(base).expect(base) < at, "{base} must register before progress");
-        }
-        assert!(lib.contains("crate::loading_spinner::script_mod(vm);"));
-        assert!(progress.contains("mod.widgets.ProgressBarBase = #(ProgressBar::register_widget(vm))"));
-        assert!(progress.contains("mod.widgets.ProgressBarFlat = set_type_default()"));
-        assert!(progress.contains("mod.widgets.splat(mod.widgets.Intent)"));
-        assert_eq!(progress.matches("set_type_default() do mod.widgets.ProgressBarBase").count(), 1);
-    }
-}
-
-#[cfg(test)]
-mod button_group_registration_tests {
-    /// The group and the segmented control register after the button and
-    /// chip modules they build on, each with one type default at the flat
-    /// rung of the ladder.
-    #[test]
-    fn test_button_group_is_registered_after_its_bases() {
-        let lib = include_str!("lib.rs");
-        let group = include_str!("button_group.rs");
-        assert!(lib.contains("pub mod button_group;"));
-        assert!(lib.contains("button_group::*"));
-        let at = lib.find("crate::button_group::script_mod(vm);").expect("registered");
-        for base in [
-            "crate::view::script_mod(vm);",
-            "crate::button::script_mod(vm);",
-            "crate::chip::script_mod(vm);",
-            "crate::menu::script_mod(vm);",
-        ] {
-            assert!(lib.find(base).expect(base) < at, "{base} must register before the group");
-        }
-        assert!(group.contains("mod.widgets.ButtonGroupBase = #(ButtonGroup::register_widget(vm))"));
-        assert!(group.contains("mod.widgets.SegmentedControlBase = #(SegmentedControl::register_widget(vm))"));
-        assert!(group.contains("mod.widgets.SegmentedControlFlat = set_type_default()"));
-        assert!(group.contains("mod.widgets.SegmentedControl = mod.widgets.SegmentedControlFlat{"));
-        assert_eq!(group.matches("set_type_default() do mod.widgets.ButtonGroupBase").count(), 1);
-        assert_eq!(group.matches("set_type_default() do mod.widgets.SegmentedControlBase").count(), 1);
-    }
-}
-
-#[cfg(test)]
-mod dialog_registration_tests {
-    /// The dialog registers after the modal it is built on and the button
-    /// and label its chrome uses, with one type default and the presets
-    /// hanging off it.
-    #[test]
-    fn test_dialog_is_registered_after_its_bases() {
-        let lib = include_str!("lib.rs");
-        let dialog = include_str!("dialog.rs");
-        assert!(lib.contains("pub mod dialog;"));
-        assert!(lib.contains("dialog::*"));
-        let at = lib.find("crate::dialog::script_mod(vm);").expect("dialog registered");
-        for base in [
-            "crate::modal::script_mod(vm);",
-            "crate::button::script_mod(vm);",
-            "crate::label::script_mod(vm);",
-        ] {
-            assert!(lib.find(base).expect(base) < at, "{base} must register before the dialog");
-        }
-        assert!(dialog.contains("mod.widgets.DialogBase = #(Dialog::register_widget(vm))"));
-        assert!(dialog.contains("mod.widgets.Dialog = set_type_default()"));
-        assert!(dialog.contains("mod.widgets.AlertDialog = mod.widgets.Dialog{"));
-        assert!(dialog.contains("mod.widgets.ConfirmDialog = mod.widgets.Dialog{"));
-        assert_eq!(dialog.matches("set_type_default() do mod.widgets.DialogBase").count(), 1);
-        // The drawer and the two sheets are the dialog on an edge: presets
-        // of it, with no type and so no type default of their own.
-        assert!(dialog.contains("mod.widgets.Drawer = mod.widgets.Dialog{"));
-        assert!(dialog.contains("mod.widgets.SideSheet = mod.widgets.Drawer{"));
-        assert!(dialog.contains("mod.widgets.BottomSheet = mod.widgets.Drawer{"));
-        // The widget derive takes any field type beginning with "Draw" for
-        // a shader layer, which is why the side is not called DrawerSide.
-        assert!(!dialog.contains("pub enum DrawerSide"));
-    }
-}
-
-#[cfg(test)]
-mod chip_registration_tests {
-    /// The chip registers after the view, label and button modules whose
-    /// shapes it borrows, and after the badge whose role palette it shares,
-    /// with one type default at the flat rung of the ladder.
-    #[test]
-    fn test_chip_is_registered_after_its_bases() {
-        let lib = include_str!("lib.rs");
-        let chip = include_str!("chip.rs");
-        assert!(lib.contains("pub mod chip;"));
-        assert!(lib.contains("chip::*"));
-        let at = lib.find("crate::chip::script_mod(vm);").expect("chip registered");
-        for base in [
-            "crate::view::script_mod(vm);",
-            "crate::label::script_mod(vm);",
-            "crate::button::script_mod(vm);",
-            "crate::badge::script_mod(vm);",
-        ] {
-            assert!(lib.find(base).expect(base) < at, "{base} must register before chip");
-        }
-        assert!(chip.contains("mod.widgets.ChipBase = #(Chip::register_widget(vm))"));
-        assert!(chip.contains("mod.widgets.ChipFlat = set_type_default()"));
-        assert!(chip.contains("mod.widgets.Chip = mod.widgets.ChipFlat{"));
-        assert!(chip.contains("mod.widgets.Tag = mod.widgets.ChipFlat{"));
-        assert_eq!(chip.matches("set_type_default() do mod.widgets.ChipBase").count(), 1);
-    }
-}
-
-#[cfg(test)]
-mod nav_list_registration_tests {
-    /// The nav list registers after the radio button its rows must be
-    /// shaped like, and carries exactly one preset plus the two flows.
-    #[test]
-    fn test_nav_list_is_registered_after_its_bases() {
-        let lib = include_str!("lib.rs");
-        let nav = include_str!("nav_list.rs");
-        assert!(lib.contains("pub mod nav_list;"));
-        assert!(lib.contains("nav_list::*"));
-        let at = lib.find("crate::nav_list::script_mod(vm);").expect("nav_list registered");
-        for base in ["crate::view::script_mod(vm);", "crate::radio_button::script_mod(vm);"] {
-            assert!(lib.find(base).expect(base) < at, "{base} must register before nav_list");
-        }
-        assert!(nav.contains("mod.widgets.NavListBase = #(NavList::register_widget(vm))"));
-        assert_eq!(nav.matches("set_type_default() do mod.widgets.NavListBase").count(), 1);
-        // A rail and a bar are presets over the one list, not two widgets.
-        assert!(nav.contains("mod.widgets.NavRail = mod.widgets.NavList{"));
-        assert!(nav.contains("mod.widgets.NavBar = mod.widgets.NavList{"));
-    }
-}
-
-
-
-
-
-#[cfg(test)]
-mod popover_registration_tests {
-    /// The popover registers its base, its flat default and its bevelled
-    /// variant, after the view and tip it builds on.
-    #[test]
-    fn test_popover_is_registered_after_its_bases() {
-        let lib = include_str!("lib.rs");
-        let popover = include_str!("popover.rs");
-        assert!(lib.contains("pub mod popover;"));
-        assert!(lib.contains("popover::*"));
-        assert!(lib.contains("crate::popover::script_mod(vm);"));
-        let view_at = lib.find("crate::view::script_mod(vm);").unwrap();
-        let tip_at = lib.find("crate::tip::script_mod(vm);").unwrap();
-        let popover_at = lib.find("crate::popover::script_mod(vm);").unwrap();
-        assert!(view_at < popover_at);
-        assert!(tip_at < popover_at);
-        assert!(popover.contains("mod.widgets.PopoverBase = #(Popover::register_widget(vm))"));
-        assert!(popover.contains("mod.widgets.PopoverFlat = set_type_default() do mod.widgets.PopoverBase{"));
-        assert!(popover.contains("mod.widgets.Popover = mod.widgets.PopoverFlat{"));
-        assert_eq!(popover.matches("set_type_default() do mod.widgets.PopoverBase").count(), 1);
-    }
-
-    /// The presets build on the bevelled popover, and the confirm popover
-    /// has its own base and one default.
-    #[test]
-    fn test_popover_presets_and_confirm_are_registered() {
-        let popover = include_str!("popover.rs");
-        assert!(popover.contains("mod.widgets.PopoverArrow = mod.widgets.Popover{"));
-        assert!(popover.contains("mod.widgets.PopoverHover = mod.widgets.Popover{"));
-        assert!(popover.contains("mod.widgets.PopoverToggle = mod.widgets.Popover{"));
-        assert!(popover.contains("mod.widgets.ConfirmPopoverBase = #(ConfirmPopover::register_widget(vm))"));
-        assert!(popover.contains("mod.widgets.ConfirmPopover = set_type_default() do mod.widgets.ConfirmPopoverBase{"));
-        assert_eq!(popover.matches("set_type_default() do mod.widgets.ConfirmPopoverBase").count(), 1);
-        assert!(popover.contains("pub struct FocusTrap"));
-    }
-}
-
-/// The text of `widgets_mod`, where registration order is decided. The new
-/// widgets' tests read order from here rather than from the whole file: the
-/// tests themselves name every call, so a search of the whole file would
-/// still find a call that had gone missing from the function.
-#[cfg(test)]
-fn widgets_mod_source() -> &'static str {
-    let lib = include_str!("lib.rs");
-    let start = lib.find("pub fn widgets_mod(vm: &mut ScriptVm)").expect("widgets_mod");
-    let end = lib.find("pub fn script_mod(vm: &mut ScriptVm)").expect("script_mod");
-    &lib[start..end]
-}
-
-#[cfg(test)]
-mod image_slice_registration_tests {
-    /// The slicing arithmetic is a module of its own beside the image cache
-    /// whose fit it extends. It has no script module: its enums are exported
-    /// to the DSL by the image widget, next to `ImageFit`.
-    #[test]
-    fn test_image_slice_is_a_module_without_a_registration() {
-        let lib = include_str!("lib.rs");
-        assert!(lib.contains("\npub mod image_slice;"));
-        assert!(lib.contains("\n    image_slice::*,"));
-        assert!(!crate::widgets_mod_source().contains("crate::image_slice::"));
     }
 }

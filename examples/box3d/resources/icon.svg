@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3b6fd4"/>
+      <stop offset="1" stop-color="#0d1f4a"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.10"/>
+      <stop offset="0.5" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <rect x="64" y="64" width="896" height="896" rx="200" fill="url(#bg)"/>
+  <rect x="64" y="64" width="896" height="896" rx="200" fill="url(#sheen)"/>
+  <rect x="66" y="66" width="892" height="892" rx="198" fill="none" stroke="#ffffff" stroke-opacity="0.08" stroke-width="4"/>
+  <!-- box3d: a lit cube -->
+  <g stroke="#0d1f4a" stroke-width="10" stroke-linejoin="round">
+    <path d="M512 252 L728 372 L512 492 L296 372 Z" fill="#dce9ff"/>
+    <path d="M296 372 L512 492 V 752 L296 632 Z" fill="#7ea6ee"/>
+    <path d="M728 372 L512 492 V 752 L728 632 Z" fill="#4a7ad8"/>
+  </g>
+</svg>

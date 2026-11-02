@@ -172,6 +172,32 @@ pub fn handle_apple(args: &[String]) -> Result<(), String> {
             )?;
             Ok(())
         }
+        // the makepad run host (compile.rs build_host): `<package> [--env=K=V].. [--font-set=System|Latin|International] [cargo flags]`
+        "build-host" | "build-host-sim" | "run-host-sim" => {
+            let package = args.get(1).filter(|a| !a.starts_with('-')).ok_or("build-host / run-host-sim need the app's package")?.clone();
+            let mut env = Vec::new();
+            let mut flags = Vec::new();
+            // the app's `app_main!` font set: which of the crates' font files the bundle carries
+            // (an app that names none is `System` on iOS: the OS draws CJK, emoji, other scripts)
+            let mut font_set = "System".to_string();
+            for a in &args[2..] {
+                if let Some(kv) = a.strip_prefix("--env=") {
+                    env.push(kv.to_string());
+                } else if let Some(s) = a.strip_prefix("--font-set=") {
+                    font_set = s.to_string();
+                } else {
+                    flags.push(a.clone());
+                }
+            }
+            let target = if args[0] == "build-host" { AppleTarget::device_target(apple_os) } else { AppleTarget::sim_target(apple_os) };
+            let org = org.unwrap_or("dev.makepad".to_string());
+            let product = app.unwrap_or_else(|| package.trim_start_matches("makepad-").replace("app-", "").replace('-', ""));
+            if args[0] == "run-host-sim" {
+                compile::run_host_sim(stable, &org, &product, &package, &flags, &font_set, &env, target)
+            } else {
+                compile::build_host(stable, &org, &product, &package, &flags, &font_set, target).map(|_| ())
+            }
+        }
         "run-sim" => {
             compile::run_on_sim(
                 AppleArgs {

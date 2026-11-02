@@ -92,7 +92,7 @@ mod linux {
     extern "C" {
         fn syscall(n: i64, ...) -> i64;
         #[link_name = "read"]
-        fn sys_read(fd: i32, buf: *mut u8, n: usize) -> isize;
+        fn sys_read(fd: i32, buf: *mut core::ffi::c_void, n: usize) -> isize;
     }
     #[cfg(target_arch = "x86_64")]
     const SYS_PERF_EVENT_OPEN: i64 = 298;
@@ -136,7 +136,7 @@ mod linux {
         }
         // { nr, instructions, cycles }
         let mut b = [0u64; 3];
-        let n = unsafe { sys_read(fd, b.as_mut_ptr() as *mut u8, 24) };
+        let n = unsafe { sys_read(fd, b.as_mut_ptr().cast(), 24) };
         (n == 24 && b[0] == 2).then_some((b[1], b[2]))
     }
 }

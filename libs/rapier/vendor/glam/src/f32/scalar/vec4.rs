@@ -9,7 +9,7 @@ use crate::{f32::math, BVec4, Vec2, Vec3, Vec3A};
 
 use core::fmt;
 use core::iter::{Product, Sum};
-use core::{f32, ops::*};
+use core::ops::*;
 
 #[cfg(feature = "zerocopy")]
 use zerocopy_derive::*;

@@ -14,10 +14,3 @@ pub trait SegExpCollection<R, E, V> {
 
     fn clear(&mut self);
 }
-
-#[cfg(test)]
-mod tests {
-
-    #[test]
-    fn test_00() {}
-}

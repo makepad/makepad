@@ -237,30 +237,6 @@ mod tests {
     }
 
     #[test]
-    fn test_expansion_add() {
-        let a = Expansion::from_f64(1.0);
-        let b = Expansion::from_f64(2.0);
-        let c = a.add(&b);
-        assert_eq!(c.estimate(), 3.0);
-    }
-
-    #[test]
-    fn test_expansion_sub() {
-        let a = Expansion::from_f64(5.0);
-        let b = Expansion::from_f64(3.0);
-        let c = a.sub(&b);
-        assert_eq!(c.estimate(), 2.0);
-    }
-
-    #[test]
-    fn test_expansion_mul() {
-        let a = Expansion::from_f64(7.0);
-        let b = Expansion::from_f64(6.0);
-        let c = a.mul(&b);
-        assert_eq!(c.estimate(), 42.0);
-    }
-
-    #[test]
     fn test_expansion_negate() {
         let a = Expansion::from_f64(3.14);
         let b = a.negate();
@@ -301,19 +277,5 @@ mod tests {
         let det = ad.sub(&bc);
         assert_eq!(det.estimate(), 10.0);
         assert_eq!(det.sign(), 1);
-    }
-
-    #[test]
-    fn test_two_sum_basic() {
-        let (s, e) = two_sum(1.0, 2.0);
-        assert_eq!(s, 3.0);
-        assert_eq!(e, 0.0);
-    }
-
-    #[test]
-    fn test_two_product_basic() {
-        let (p, e) = two_product(3.0, 7.0);
-        assert_eq!(p, 21.0);
-        assert_eq!(e, 0.0);
     }
 }

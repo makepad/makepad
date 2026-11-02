@@ -5952,12 +5952,6 @@ pub fn sroa_nocapture(c: &Callee, k: usize) -> bool {
     SROA_NOCAP.try_with(|q| q.borrow().as_ref().map_or(false, |f| f(c, k))).unwrap_or(false)
 }
 
-/// MAKEPAD_RUN_SROA_SUB=0: no sub-word cells (SroaCell::sub) -- bisection
-fn sroa_no_sub() -> bool {
-    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *OFF.get_or_init(|| std::env::var("MAKEPAD_RUN_SROA_SUB").is_ok_and(|v| v == "0"))
-}
-
 pub fn sroa(f: &mut Func) -> bool {
     sroa_with(f, false)
 }
@@ -6304,7 +6298,7 @@ pub fn sroa_inner(f: &mut Func, mut stats: Option<&mut SroaStats>, tile: bool) -
                 && cells[start..end].iter().all(|c| (c.1 == lo && c.2 == SROA_V128) || ((c.1 - lo) % 4 == 0 && matches!(c.2, Mem::F32 | Mem::Int(4, _))));
             // sub: an integer word of 2, 4 or 8 bytes at lo with every access (integer or float)
             // inside it, the word itself among them or not
-            let sub = !pure && !lanes && matches!(size, 2 | 4 | 8) && !sroa_no_sub()
+            let sub = !pure && !lanes && matches!(size, 2 | 4 | 8)
                 && cells[start..end].iter().all(|c| c.2 != SROA_V128 && c.1 >= lo && c.1 + mem_size(c.2) as i64 <= hi);
             if lanes {
                 gcells[g as usize].push(SroaCell { off: lo, mem: SROA_V128, widened: false, lanes: true, sub: false });

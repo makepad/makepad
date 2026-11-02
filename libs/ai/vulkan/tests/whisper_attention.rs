@@ -1,5 +1,4 @@
-//! Real-device encoder attention checks. The ignored benchmark is also a
-//! standalone test binary: --ignored --nocapture --test-threads=1.
+//! Real-device encoder attention checks.
 use makepad_ai_vulkan::*;
 
 fn data(len: usize, mut seed: u32, gain: f32) -> Vec<f32> {
@@ -68,14 +67,10 @@ fn run(
     nk: usize,
     heads: usize,
     gain: f32,
-    bench: bool,
 ) {
     let q = data(nq * heads * 64, 0x13579, gain);
     let k = data(nk * heads * 64, 0x24681, gain);
     let v = data(nk * heads * 64, 0x75319, 1.0);
-    if bench {
-        eprintln!("attention {nq}x{nk} heads={heads} d=64: computing full CPU reference");
-    }
     let want = reference(&q, &k, &v, nq, nk, heads);
     let upload = |values: &[f32]| {
         let b = device.buffer((values.len() * 4) as u64, BufferKind::Device).unwrap();
@@ -128,20 +123,7 @@ fn run(
             assert!(value.is_finite() && error <= tolerance,
                 "{name} {nq}x{nk} h={heads} gain={gain} at {i}: {value} expected {expected}, error={error}");
         }
-        if bench {
-            for _ in 0..3 { stream.submit_wait().unwrap(); }
-            let mut times = Vec::new();
-            for _ in 0..11 {
-                stream.submit_wait().unwrap();
-                times.push(stream.timings().unwrap()[0].1);
-            }
-            times.sort_by(f64::total_cmp);
-            let ms = times[times.len() / 2];
-            let flops = 4.0 * nq as f64 * nk as f64 * heads as f64 * 64.0;
-            println!("{name} nq={nq} nk={nk} heads={heads} d=64 median={ms:.4} ms effective={:.2} GFLOPS max_abs={max_abs:.8}", flops / (ms * 1e6));
-        } else {
-            eprintln!("{name} {nq}x{nk} heads={heads} gain={gain} max_abs={max_abs:.8}");
-        }
+        eprintln!("{name} {nq}x{nk} heads={heads} gain={gain} max_abs={max_abs:.8}");
     }
 }
 
@@ -151,22 +133,10 @@ fn whisper_attention_matches_cpu() {
     let mut library = Library::new(KERNEL_SOURCES).unwrap();
     for (nq, nk, heads) in [(1, 1, 1), (7, 31, 2), (31, 7, 3), (63, 33, 2),
         (65, 65, 3), (67, 97, 2), (129, 129, 20), (600, 600, 1), (1500, 1500, 1)] {
-        run(&device, &mut library, nq, nk, heads, 1.0, false);
+        run(&device, &mut library, nq, nk, heads, 1.0);
     }
     // Sharp logits exercise the online rescaling when a later tile wins.
-    run(&device, &mut library, 65, 97, 3, 8.0, false);
+    run(&device, &mut library, 65, 97, 3, 8.0);
     // Equal scores exercise a zero query and uniform probabilities at tails.
-    run(&device, &mut library, 67, 35, 2, 0.0, false);
-}
-
-#[test]
-#[ignore = "GPU benchmark; run with --ignored --nocapture --test-threads=1"]
-fn whisper_attention_bench() {
-    let device = Device::shared().expect("real Vulkan device");
-    eprintln!("{}", device.features.description());
-    eprintln!("One dispatch includes all 20 heads. GFLOPS counts QK and PV only; no quadratic scratch allocation.");
-    let mut library = Library::new(KERNEL_SOURCES).unwrap();
-    for rows in [1500, 600] {
-        run(&device, &mut library, rows, rows, 20, 1.0, true);
-    }
+    run(&device, &mut library, 67, 35, 2, 0.0);
 }

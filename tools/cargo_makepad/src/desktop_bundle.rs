@@ -25,7 +25,11 @@
 //! plain file in `MacOS` is taken for an unsigned nested code object.
 //!
 //! Name, identifier and icon come from `[package.metadata.makepad.desktop]`
-//! in the app's `Cargo.toml`:
+//! in the app's `Cargo.toml`; `--name=`, `--identifier=` and `--icon=<png>` override them.
+//! The icon override is relative to the command's working directory. The display name stays
+//! intact in metadata and launcher entries; reserved filename characters become `-` on disk.
+//! Cargo arguments, including `--message-format=json-render-diagnostics`, pass through to
+//! the build; `[cargo-makepad] building`, `bundling`, `installing` and `installed:` mark stages.
 //!
 //! ```toml
 //! [package.metadata.makepad.desktop]
@@ -63,11 +67,14 @@ const DEFAULT_INSTALL_DIR: &str = ".makepad/apps";
 struct BundleOptions {
     /// `Some(dir)` installs the finished bundle into `dir`.
     install: Option<PathBuf>,
+    name: Option<String>,
+    identifier: Option<String>,
+    icon: Option<PathBuf>,
     cert: Option<String>,
     adhoc: bool,
 }
 
-/// What the app's manifest says about its bundle.
+/// The app's manifest metadata with any command-line overrides applied.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct BundleMeta {
     name: String,
@@ -103,7 +110,7 @@ pub fn handle_desktop_bundle(args: &[String]) -> Result<(), String> {
         cargo_args.push(binary_name.clone());
     }
     let crate_dir = get_crate_dir(&build_crate)?;
-    let meta = read_bundle_meta(&crate_dir, &build_crate, &binary_name)?;
+    let meta = read_bundle_meta(&crate_dir, &build_crate, &binary_name, &options)?;
     let profile = get_profile_from_args(&cargo_args);
     let target_dir = bundle_target_dir();
 
@@ -127,15 +134,18 @@ pub fn handle_desktop_bundle(args: &[String]) -> Result<(), String> {
     if !built.is_file() {
         return Err(format!("built binary not found at {}", built.display()));
     }
+    println!("[cargo-makepad] bundling {}", meta.name);
+    let file_name = file_title(&meta.name);
     if !cfg!(target_os = "macos") {
         let out_dir = target_dir.join("bundles").join(&profile);
-        let app_dir = out_dir.join(&meta.name);
-        let stage = out_dir.join(format!(".{}.staging", meta.name));
+        let app_dir = out_dir.join(&file_name);
+        let stage = out_dir.join(format!(".{file_name}.staging"));
         remove_dir_if_present(&stage)?;
         assemble_dir(&stage, &built, &exe_name, &binary_name, &build_crate, &crate_dir, &target_dir, &meta)?;
         replace_dir(&stage, &app_dir, &meta.identifier)?;
         println!("[cargo-makepad] app folder: {}", app_dir.display());
         if let Some(dir) = options.install {
+            println!("[cargo-makepad] installing {}", meta.name);
             let installed = install_dir(&app_dir, &dir, &exe_name, &meta)?;
             println!("[cargo-makepad] installed: {}", installed.display());
         }
@@ -143,8 +153,8 @@ pub fn handle_desktop_bundle(args: &[String]) -> Result<(), String> {
     }
 
     let out_dir = target_dir.join("bundles").join(&profile);
-    let app_dir = out_dir.join(format!("{}.app", meta.name));
-    let stage = out_dir.join(format!(".{}.app.staging", meta.name));
+    let app_dir = out_dir.join(format!("{}.app", file_title(&meta.name)));
+    let stage = out_dir.join(format!(".{}.app.staging", file_title(&meta.name)));
     remove_dir_if_present(&stage)?;
     assemble(&stage, &built, &binary_name, &build_crate, &crate_dir, &target_dir, &meta)?;
 
@@ -168,6 +178,7 @@ pub fn handle_desktop_bundle(args: &[String]) -> Result<(), String> {
     println!("[cargo-makepad] signed with: {}", if identity == "-" { "ad hoc" } else { &identity });
 
     if let Some(dir) = options.install {
+        println!("[cargo-makepad] installing {}", meta.name);
         let installed = install(&app_dir, &dir, &meta)?;
         println!("[cargo-makepad] installed: {}", installed.display());
     }
@@ -185,6 +196,17 @@ fn parse_options(args: &[String]) -> Result<(BundleOptions, Vec<String>), String
                 return Err("--install= needs a directory".to_string());
             }
             options.install = Some(expand_home(dir)?);
+        } else if let Some(name) = arg.strip_prefix("--name=") {
+            if name.trim().is_empty() { return Err("--name= needs a display name".to_string()); }
+            options.name = Some(name.to_string());
+        } else if let Some(identifier) = arg.strip_prefix("--identifier=") {
+            if identifier.is_empty() || !identifier.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_')) {
+                return Err("--identifier= needs an identifier containing letters, digits, '.', '-' or '_'".to_string());
+            }
+            options.identifier = Some(identifier.to_string());
+        } else if let Some(icon) = arg.strip_prefix("--icon=") {
+            if icon.is_empty() { return Err("--icon= needs a PNG path".to_string()); }
+            options.icon = Some(expand_home(icon)?);
         } else if let Some(cert) = arg.strip_prefix("--cert=") {
             options.cert = Some(cert.to_string());
         } else if arg == "--adhoc" {
@@ -228,11 +250,26 @@ fn bundle_target_dir() -> PathBuf {
     base.join("makepad-bundle")
 }
 
-fn read_bundle_meta(crate_dir: &Path, build_crate: &str, binary_name: &str) -> Result<BundleMeta, String> {
+fn read_bundle_meta(crate_dir: &Path, build_crate: &str, binary_name: &str, options: &BundleOptions) -> Result<BundleMeta, String> {
     let manifest = crate_dir.join("Cargo.toml");
     let text = fs::read_to_string(&manifest).map_err(|e| format!("cannot read {}: {e}", manifest.display()))?;
     let toml = parse_toml(&text).map_err(|e| format!("cannot parse {}: {}", manifest.display(), e.msg))?;
-    bundle_meta_from(&toml, crate_dir, build_crate, binary_name)
+    let mut meta = bundle_meta_from(&toml, crate_dir, build_crate, binary_name)?;
+    apply_overrides(&mut meta, options, &std::env::current_dir().map_err(|e| e.to_string())?);
+    Ok(meta)
+}
+
+fn apply_overrides(meta: &mut BundleMeta, options: &BundleOptions, cwd: &Path) {
+    if let Some(name) = &options.name { meta.name = name.clone(); }
+    if let Some(identifier) = &options.identifier { meta.identifier = identifier.clone(); }
+    if let Some(icon) = &options.icon { meta.icon = Some(cwd.join(icon)); }
+}
+
+/// Keep the display name intact in metadata and use a single safe component on disk.
+fn file_title(title: &str) -> String {
+    let name: String = title.chars().map(|c| if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') || c.is_control() { '-' } else { c }).collect();
+    let name = name.trim().trim_matches('.');
+    if name.is_empty() { "App".to_string() } else { name.to_string() }
 }
 
 /// `[package.metadata.makepad.desktop]`, then the `packager` names other
@@ -274,9 +311,6 @@ fn bundle_meta_from(toml: &makepad_toml_parser::TomlDocument, crate_dir: &Path, 
 
 /// Build the whole bundle at `stage`.
 fn assemble(stage: &Path, built: &Path, binary_name: &str, build_crate: &str, crate_dir: &Path, target_dir: &Path, meta: &BundleMeta) -> Result<(), String> {
-    if meta.name.contains('/') || meta.name.starts_with('.') {
-        return Err(format!("bundle name {:?} cannot be a file name", meta.name));
-    }
     let contents = stage.join("Contents");
     let macos = contents.join("MacOS");
     let resources = contents.join("Resources");
@@ -355,16 +389,16 @@ fn copy_resources(resources: &Path, built: &Path, binary_name: &str, build_crate
 /// ```
 #[allow(clippy::too_many_arguments)]
 fn assemble_dir(stage: &Path, built: &Path, exe_name: &str, binary_name: &str, build_crate: &str, crate_dir: &Path, target_dir: &Path, meta: &BundleMeta) -> Result<(), String> {
-    if meta.name.contains(['/', '\\']) || meta.name.starts_with('.') {
-        return Err(format!("app name {:?} cannot be a folder name", meta.name));
-    }
     let resources = stage.join("resources");
     fs::create_dir_all(&resources).map_err(|e| format!("cannot create {}: {e}", resources.display()))?;
     let exe = stage.join(exe_name);
     fs::copy(built, &exe).map_err(|e| format!("cannot copy {} into the folder: {e}", built.display()))?;
     let map = copy_resources(&resources, built, binary_name, build_crate, crate_dir, target_dir)?;
     fs::write(stage.join(format!("{exe_name}.makepad-package-paths")), map).map_err(|e| format!("cannot write the package map: {e}"))?;
-    let icon = meta.icon.clone().filter(|p| p.is_file()).or_else(|| {
+    if let Some(icon) = &meta.icon {
+        if !icon.is_file() { return Err(format!("icon {} does not exist", icon.display())); }
+    }
+    let icon = meta.icon.clone().or_else(|| {
         ["icon_1024.png", "icon_512.png", "icon_256.png"].iter().map(|n| crate_dir.join("resources").join(n)).find(|p| p.is_file())
     });
     if let Some(icon) = icon {
@@ -418,8 +452,9 @@ fn copy_tree(from: &Path, to: &Path) -> Result<(), String> {
 /// launcher entry, `~/.local/share/applications/<identifier>.desktop`.
 fn install_dir(app_dir: &Path, dir: &Path, exe_name: &str, meta: &BundleMeta) -> Result<PathBuf, String> {
     fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
-    let dest = dir.join(&meta.name);
-    let stage = dir.join(format!(".{}.staging", meta.name));
+    let file_name = file_title(&meta.name);
+    let dest = dir.join(&file_name);
+    let stage = dir.join(format!(".{file_name}.staging"));
     remove_dir_if_present(&stage)?;
     copy_tree(app_dir, &stage)?;
     replace_dir(&stage, &dest, &meta.identifier)?;
@@ -465,12 +500,12 @@ fn symlink(target: &str, link: &Path) -> Result<(), String> {
     }
 }
 
-/// The icon: the manifest's PNG resampled to an `.icns`, else a ready
+/// The icon: the override or manifest's PNG resampled to an `.icns`, else a ready
 /// `resources/icon.icns`, else cargo-makepad's own icon files.
 fn write_icon(dest: &Path, crate_dir: &Path, meta: &BundleMeta, stage: &Path) -> Result<(), String> {
     if let Some(source) = &meta.icon {
         if !source.is_file() {
-            return Err(format!("icon {} (from [package.metadata.makepad.desktop]) does not exist", source.display()));
+            return Err(format!("icon {} (from --icon or [package.metadata.makepad.desktop]) does not exist", source.display()));
         }
         return icns_from_png(source, dest, stage);
     }
@@ -606,8 +641,8 @@ fn replace_bundle(stage: &Path, dest: &Path, identifier: &str) -> Result<(), Str
 /// modes and signature, then swap it in like a fresh build.
 fn install(app_dir: &Path, dir: &Path, meta: &BundleMeta) -> Result<PathBuf, String> {
     fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
-    let dest = dir.join(format!("{}.app", meta.name));
-    let stage = dir.join(format!(".{}.app.staging", meta.name));
+    let dest = dir.join(format!("{}.app", file_title(&meta.name)));
+    let stage = dir.join(format!(".{}.app.staging", file_title(&meta.name)));
     remove_dir_if_present(&stage)?;
     let cwd = std::env::current_dir().unwrap_or_default();
     shell_env_cap(&[], &cwd, "ditto", &[&app_dir.to_string_lossy(), &stage.to_string_lossy()])?;
@@ -663,6 +698,27 @@ mod tests {
         assert_eq!(cargo, vec!["-p".to_string(), "makepad-app-task".to_string()]);
         let args: Vec<String> = ["--adhoc", "--cert=X"].iter().map(|s| s.to_string()).collect();
         assert!(parse_options(&args).is_err());
+    }
+
+    #[test]
+    fn bundle_overrides_and_cargo_json_option() {
+        let args: Vec<String> = ["--name=Clock / Timer: native", "--identifier=nl.makepad.clock.native", "--icon=icons/clock.png", "--message-format=json-render-diagnostics", "-p", "clock"].iter().map(|s| s.to_string()).collect();
+        let (options, cargo) = parse_options(&args).unwrap();
+        assert_eq!(options.name.as_deref(), Some("Clock / Timer: native"));
+        assert_eq!(options.identifier.as_deref(), Some("nl.makepad.clock.native"));
+        assert_eq!(options.icon, Some(PathBuf::from("icons/clock.png")));
+        assert_eq!(cargo, ["--message-format=json-render-diagnostics", "-p", "clock"]);
+        let mut meta = meta_of("[package.metadata.makepad.desktop]\nname = \"Old\"\nidentifier = \"old.id\"\nicon = \"old.png\"\n");
+        apply_overrides(&mut meta, &options, Path::new("workspace"));
+        assert_eq!(meta.name, "Clock / Timer: native");
+        assert_eq!(meta.identifier, "nl.makepad.clock.native");
+        assert_eq!(meta.icon, Some(PathBuf::from("workspace/icons/clock.png")));
+        assert_eq!(file_title(&meta.name), "Clock - Timer- native");
+        assert!(info_plist("clock", &meta).contains("<string>Clock / Timer: native</string>"));
+        assert!(desktop_entry(Path::new("apps/clock"), "clock", &meta).contains("Name=Clock / Timer: native\n"));
+        for option in ["--name=", "--identifier=", "--identifier=../clock", "--icon="] {
+            assert!(parse_options(&[option.to_string()]).is_err(), "{option}");
+        }
     }
 
     #[test]

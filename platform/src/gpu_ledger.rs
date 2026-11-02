@@ -48,7 +48,7 @@ pub struct GpuOrigin {
     pub scope: String,
     /// an explicit `Texture::label`
     pub label: Option<Arc<str>>,
-    owner_cache: std::cell::OnceCell<String>,
+    owner_cache: std::sync::OnceLock<String>,
 }
 static LABELS: Mutex<Option<HashMap<(usize, usize), Arc<str>>>> = Mutex::new(None);
 

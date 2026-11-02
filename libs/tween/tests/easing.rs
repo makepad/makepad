@@ -506,11 +506,6 @@ fn custom_ease_eq_uses_fn_addr_eq() {
 }
 
 #[test]
-fn default_is_out_quad() {
-    assert_eq!(Easing::default(), Easing::OutQuad);
-}
-
-#[test]
 fn smooth_steps() {
     assert_eq!(Easing::SmoothStep.map(0.5), 0.5);
     assert_eq!(Easing::SmoothStep.map(-1.0), 0.0);

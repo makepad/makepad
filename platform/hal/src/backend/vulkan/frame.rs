@@ -877,7 +877,10 @@ impl Vulkan {
             let stride = p.desc.instance_stride as u64 * 4;
             let max_range = self.dev.properties.limits.max_storage_buffer_range as u64;
             let (instance, offset, range) = if d.inst.kind == Inst::BUFFER {
-                let buffer = buffer(d.inst.id).ok_or("missing instance buffer")?;
+                let buffer = buffer(d.inst.id).ok_or_else(|| {
+                    let held = self.buf.get(&(s.id, d.inst.id.index)).map_or("nothing".to_string(), |b| format!("generation {}", b.gen));
+                    format!("missing instance buffer {}.{} of session {}: the backend holds {held} at that index", d.inst.id.index, d.inst.id.gen, s.id)
+                })?;
                 let end = (d.inst.off as u64 + d.inst.count as u64).checked_mul(stride).ok_or("instance range overflow")?;
                 if stride == 0 || end > buffer.size { return Err("instance range exceeds storage".into()); }
                 if buffer.size > max_range { return Err("instance storage exceeds device range".into()); }

@@ -423,10 +423,6 @@ impl<'a> Module<'a> {
         self.funcs.push((id, f));
     }
 
-    pub fn has_func(&self, id: u32) -> bool {
-        self.fn_ix.contains_key(&id)
-    }
-
     /// Exports function `id` (in the chosen set) as `name`.
     pub fn export_func(&mut self, id: u32, name: &str) {
         self.exports.push((name.to_string(), id));
@@ -452,12 +448,6 @@ impl<'a> Module<'a> {
     pub fn data_at(&mut self, addr: u64, bytes: Vec<u8>) {
         self.data_end = self.data_end.max(addr + bytes.len() as u64);
         self.data.push(DataSeg { addr: Some(addr), bytes });
-    }
-
-    /// A passive segment (copied in with `memory.init` by code that wants it); its index.
-    pub fn data_passive(&mut self, bytes: Vec<u8>) -> u32 {
-        self.data.push(DataSeg { addr: None, bytes });
-        self.data.len() as u32 - 1
     }
 
     /// End of the placed data (the heap starts at the next 16 bytes).

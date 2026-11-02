@@ -97,7 +97,7 @@ pub mod invalid;
 pub mod domain;
 pub(crate) mod domain_threads;
 pub mod jit;
-pub mod guards;
+pub mod program_os;
 pub mod web;
 pub mod web32;
 pub mod coverage;
@@ -116,6 +116,7 @@ pub use relax_types::*;
 // glob above to relax-types' stamp, and the compiler's own source was left out of the identity.
 include!(concat!(env!("OUT_DIR"), "/src_stamp.rs"));
 pub mod run;
+pub mod hot_failure;
 mod harness;
 mod test_pkg;
 pub mod tui;
@@ -143,9 +144,6 @@ pub mod mainprof;
 pub mod inspect;
 pub mod memreport;
 pub mod registry_net;
-
-#[cfg(test)]
-mod parse_work_bench;
 
 /// The system allocator (Relax's own malloc zone once a program swaps the default zone:
 /// zone_alloc.rs), with per-subsystem accounting when MAKEPAD_RUN_MEM_REPORT is set (memstat.rs).
@@ -285,6 +283,7 @@ pub fn print_as_rustc(sess: &std::sync::Arc<crate::Session>, args: &[String], in
                 C::LinuxX64 => crate::cfg::CfgSet::linux_x64(sess, &[]),
                 C::WindowsX64 => crate::cfg::CfgSet::windows_x64(sess, &[]),
                 C::AndroidArm64 => crate::cfg::CfgSet::android_arm64(sess, &[]),
+                C::IosArm64 => crate::cfg::CfgSet::ios_arm64(sess, &[]),
                 C::Web(w) => crate::cfg::CfgSet::web(sess, w, &[]),
                 C::Host => unreachable!("from_triple names a target"),
             }
@@ -303,7 +302,7 @@ pub fn print_as_rustc(sess: &std::sync::Arc<crate::Session>, args: &[String], in
     // rustc_target spec: (dll prefix, dll suffix, exe suffix, staticlib prefix, staticlib suffix,
     // split-debuginfo kinds, only_cdylib)
     let (dll_pre, dll_suf, exe_suf, st_pre, st_suf, split, only_cdylib): (&str, &str, &str, &str, &str, &[&str], bool) = match triple {
-        "aarch64-apple-darwin" => ("lib", ".dylib", "", "lib", ".a", &["off", "packed", "unpacked"], false),
+        "aarch64-apple-darwin" | "aarch64-apple-ios" => ("lib", ".dylib", "", "lib", ".a", &["off", "packed", "unpacked"], false),
         "x86_64-unknown-linux-gnu" | "aarch64-linux-android" => ("lib", ".so", "", "lib", ".a", &["off", "packed", "unpacked"], false),
         "x86_64-pc-windows-gnu" => ("", ".dll", ".exe", "lib", ".a", &["off"], false),
         "wasm32-unknown-unknown" | "wasm64-unknown-unknown" => ("", ".wasm", ".wasm", "lib", ".a", &["off"], true),
@@ -409,9 +408,11 @@ pub fn session_from_env(args: &[String]) -> std::sync::Arc<crate::Session> {
         crate::options::CheckTarget::MacosArm64 => "aarch64-apple-darwin",
         crate::options::CheckTarget::LinuxX64 => "x86_64-unknown-linux-gnu",
         crate::options::CheckTarget::AndroidArm64 => "aarch64-linux-android",
+        crate::options::CheckTarget::IosArm64 => "aarch64-apple-ios",
         crate::options::CheckTarget::Web(w) => crate::options::CheckTarget::web_triple(w),
         _ if cfg!(target_os = "android") => "aarch64-linux-android",
         _ if cfg!(all(target_os = "macos", target_arch = "aarch64")) => "aarch64-apple-darwin",
+        _ if cfg!(target_os = "ios") => "aarch64-apple-ios",
         _ if cfg!(windows) => "x86_64-pc-windows-gnu",
         _ => "x86_64-unknown-linux-gnu",
     }.to_string();
@@ -500,7 +501,8 @@ pub fn cli_main(sess: &std::sync::Arc<crate::Session>) {
         }
         // `makepad test <file.rs>`: one file's tests; `makepad test <package>`: the package's
         // lib and integration tests, each a harness program (run.rs `--harness`)
-        "test" if !args[2..].iter().any(|a| a.ends_with(".rs")) => {
+        "test" if args[2..].iter().take_while(|a| a.as_str() != "--").any(|a| a == "--live")
+            || !args[2..].iter().any(|a| a.ends_with(".rs")) => {
             let code = test_pkg::cmd_test_package(&args[2..]);
             os::proc::exit(code);
         }
@@ -772,7 +774,7 @@ fn census_report(crates: &[crates::CrateUnit], per: &[census::Census], total: &c
 pub mod std_source;
 
 /// std sources: $MAKEPAD_RUN_STD, else <repo>/libs/relax/compiler/std next to the binary's
-/// target dir (<worktree>/<target>/release/makepad; a node's layout keeps the sources under
+/// target dir (<worktree>/<target>/release/makepad; a pool node's layout keeps the sources under
 /// <dir>/src), else the source tree this binary was built from (a CARGO_TARGET_DIR outside the
 /// checkout). None found: the build tree's path, and a hint to set MAKEPAD_RUN_STD, said once.
 pub fn std_dir() -> String {
@@ -976,7 +978,7 @@ fn cmd_test(sess: &std::sync::Arc<crate::Session>, args: &[String]) -> i32 {
     pa.extend(args[1..].iter().filter(|a| a.as_str() != "--").map(|a| a.clone().into_bytes()));
     jit::set_program_args(pa);
     let t0 = Instant::now();
-    let (prog, core, krate) = match load_with_std(sess, root, "test_crate", true) {
+    let (mut prog, core, krate) = match load_with_std(sess, root, "test_crate", true) {
         Ok(x) => x,
         Err(e) => {
             for m in e {
@@ -988,9 +990,20 @@ fn cmd_test(sess: &std::sync::Arc<crate::Session>, args: &[String]) -> i32 {
     // the crate under test is the program's own crate (run.rs): its #![recursion_limit] and
     // #![type_length_limit] govern monomorphization (TypingEnv::fully_monomorphized)
     crate::layout::set_root_crate(krate);
+    // the file is checked whole before any test runs, as `rustc --test` compiles it first (the
+    // package form's up-front check, run.rs test_subjects); marked before collection
+    crate::borrowck::event::set_check_scope();
+    let mut own = vec![false; prog.crates.len()];
+    own[krate as usize] = true;
+    prog.crates[krate as usize].validate = true;
+    prog.own_crates = own.clone();
+    relax_types::lint::enable();
+    prog.run_import_sim(&own);
     let t1 = Instant::now();
     let mut tcx = tcx::Tcx::new();
-    tcx.collect(&prog);
+    // (coherence evaluates the constants of impl headers, which needs the unit's evaluator: it runs
+    // in the up-front check below, as in the package form)
+    tcx.collect_declarations(&prog);
     if !tcx.errors.is_empty() {
         for m in &tcx.errors {
             eprintln!("error: {}", m);
@@ -1004,6 +1017,11 @@ fn cmd_test(sess: &std::sync::Arc<crate::Session>, args: &[String]) -> i32 {
     if !enum_errors.is_empty() {
         for error in enum_errors { eprintln!("error: {}", error); }
         return 1;
+    }
+    let check_errors = run::check_test_subjects(&mut u, krate, &[krate], true);
+    if check_errors > 0 {
+        eprintln!("error: could not compile `{root}` (test) due to {check_errors} previous error{}: no test ran", if check_errors == 1 { "" } else { "s" });
+        return 101;
     }
     jit::enable_pipelining(options);
     println!(

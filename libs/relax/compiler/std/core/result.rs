@@ -391,6 +391,24 @@ impl<'a, A, E, I: Iterator<Item = Result<A, E>>> Iterator for ResultShunt<'a, I,
     }
 }
 
+/// rustc iter/traits/accum.rs: the product of the `Ok` values, or the first `Err`.
+impl<T, U, E> crate::iter::Product<Result<U, E>> for Result<T, E>
+where
+    T: crate::iter::Product<U>,
+{
+    fn product<I: Iterator<Item = Result<U, E>>>(iter: I) -> Result<T, E> {
+        let mut error: Option<E> = None;
+        let v: T = {
+            let shunt = ResultShunt { iter, error: &mut error };
+            T::product(shunt)
+        };
+        match error {
+            Some(e) => Err(e),
+            None => Ok(v),
+        }
+    }
+}
+
 impl<T, U, E> crate::iter::Sum<Result<U, E>> for Result<T, E>
 where
     T: crate::iter::Sum<U>,

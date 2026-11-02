@@ -60,14 +60,20 @@ const RADIUS_STEPS_PER_OCTAVE: f32 = 16.0;
 /// One step moves a 10 m caster's shadow by under 2 cm.
 const SUN_STEP_RAD: f32 = 0.001_745;
 
+/// Metre-sized floors shrink below the outdoor ladder's 10 m detail range.
+fn range_scale(range: f32) -> f32 {
+    (range / 10.0).clamp(f32::EPSILON, 1.0)
+}
+
 /// Split ends as fractions of `reach` (the last is 1).
 pub fn split_fractions(reach: f32) -> [f32; CSM_CASCADES] {
-    let reach = reach.max(SPLIT_NEAR * 2.0);
+    let near = SPLIT_NEAR * range_scale(reach / FAR_REACH);
+    let reach = reach.max(near * 2.0);
     let mut out = [1.0; CSM_CASCADES];
     for (i, f) in out.iter_mut().enumerate().take(CSM_CASCADES - 1) {
         let t = (i + 1) as f32 / CSM_CASCADES as f32;
-        let log = SPLIT_NEAR * (reach / SPLIT_NEAR).powf(t);
-        let uni = SPLIT_NEAR + (reach - SPLIT_NEAR) * t;
+        let log = near * (reach / near).powf(t);
+        let uni = near + (reach - near) * t;
         *f = (SPLIT_LAMBDA * log + (1.0 - SPLIT_LAMBDA) * uni) / reach;
     }
     out
@@ -94,7 +100,7 @@ pub fn csm_tile_clip(i: usize) -> Vec4f {
 
 /// Round a radius up to the quantized ladder.
 fn quantize_radius(r: f32) -> f32 {
-    let steps = (r.max(0.5).log2() * RADIUS_STEPS_PER_OCTAVE).ceil();
+    let steps = (r.log2() * RADIUS_STEPS_PER_OCTAVE).ceil();
     (steps / RADIUS_STEPS_PER_OCTAVE).exp2()
 }
 
@@ -111,14 +117,14 @@ fn quantize_sun(d: Vec3f) -> Vec3f {
 /// One fitted cascade: world -> shadow-map rows, in exactly the sun-depth
 /// shader's convention — `dot(row.xyz, world) + row.w` gives ndc x / ndc y
 /// / z01.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct CsmCascade {
     pub rx: Vec4f,
     pub ry: Vec4f,
     pub rz: Vec4f,
     /// World units one shadow texel covers (receiver-side bias input).
     pub texel_world: f32,
-    /// Depth bias in z01 units: three quarters of a texel plus 2 mm. The
+    /// Depth bias in z01 units: three quarters of a texel plus up to 2 mm. The
     /// receiver shader adds a normal/slope offset at grazing angles; keeping
     /// this base small preserves crisp roof/wall contact without acne.
     pub bias01: f32,
@@ -141,6 +147,10 @@ pub struct CsmFrame {
     pub cascades: [CsmCascade; CSM_CASCADES],
     /// False for the off-tier binding (fallback texture, `csm_vis` = 1).
     pub on: bool,
+    /// The filter's rotation seed (`csm_p.z`): 0 is the stable pattern; a
+    /// host averaging several recordings of a still view turns it per
+    /// recording, so the penumbra's sampling noise averages out.
+    pub seed: f32,
 }
 
 /// The camera slice the cascades cover: eye position plus the four far-plane
@@ -184,28 +194,28 @@ fn slice_sphere(view: &CsmView, f0: f32, f1: f32) -> (Vec3f, f32) {
     for p in &corners {
         r = r.max((*p - c).length());
     }
-    (c, r.max(0.5))
+    (c, r)
 }
 
 /// View-axis far (camera → centre of the far plane). Focus depths are
 /// measured along this axis (orbit `look.distance`), not along a corner ray.
-fn view_far(view: &CsmView) -> f32 {
+fn view_far(view: &CsmView, scale: f32) -> f32 {
     let mut mid = v3(0.0, 0.0, 0.0);
     for fc in &view.far_corners {
         mid = mid + *fc;
     }
     mid = mid * 0.25;
-    (mid - view.cam).length().max(1.0)
+    (mid - view.cam).length().max(scale)
 }
 
 /// Cascade-0 depth window around `focus`, as fractions of the far plane.
 ///
 /// Slack is half the focus so a subject that fills the view stays inside
-/// the tight cascade, with a 0.9 m floor so a close zoom still covers a
-/// fitted Kenney prop (~1.75 units).
-fn focus_window(focus: f32, far: f32) -> (f32, f32) {
-    let slack = (focus * 0.5).max(0.9);
-    let z0 = (focus - slack).max(0.05);
+/// the tight cascade, with a 0.9 m floor at outdoor ranges, scaled down for
+/// smaller scenes.
+fn focus_window(focus: f32, far: f32, scale: f32) -> (f32, f32) {
+    let slack = (focus * 0.5).max(0.9 * scale);
+    let z0 = (focus - slack).max(0.05 * scale);
     let z1 = (focus + slack).min(far);
     ((z0 / far).clamp(0.0, 1.0), (z1 / far).clamp(0.0, 1.0))
 }
@@ -219,6 +229,7 @@ fn fit_cascade(
     sun_dir: Vec3f,
     scene_min: Vec3f,
     scene_max: Vec3f,
+    scale: f32,
     res: f32,
 ) -> CsmCascade {
     // fwd = the direction sunlight TRAVELS (away from the sun) — the same
@@ -235,7 +246,7 @@ fn fit_cascade(
     // edge. The snap quantum must be the FINAL map texel (2*ex/res, pad
     // included) — snapping by any other stride leaves sub-texel phase
     // drift, exactly the shimmer the snap exists to kill.
-    let radius = quantize_radius(radius);
+    let radius = quantize_radius(radius.max(0.5 * scale));
     let ex = radius * (1.0 + 2.0 / res);
     let texel = 2.0 * ex / res;
     // Texel snap: quantize the center's right/up coordinates.
@@ -255,10 +266,10 @@ fn fit_cascade(
         );
         z_min = z_min.min(fwd.dot(p));
     }
-    let z0 = z_min - 0.5;
-    let z1 = cf + radius + 0.5;
-    let zr = (z1 - z0).max(0.01);
-    let bias_world = texel * 0.75 + 0.002;
+    let z0 = z_min - 0.5 * scale;
+    let z1 = cf + radius + 0.5 * scale;
+    let zr = (z1 - z0).max(0.01 * scale);
+    let bias_world = texel * 0.75 + 0.002 * scale;
     CsmCascade {
         rx: Vec4f {
             x: right.x / ex,
@@ -433,6 +444,7 @@ pub fn fit_cascades_reach(
 ) -> CsmFrame {
     let mut frame = CsmFrame::default();
     let sun_dir = quantize_sun(sun_dir);
+    let scale = range_scale(range);
     let base = range * FAR_REACH;
     let reach = if far_reach.is_finite() { far_reach.max(base) } else { base };
     let mut splits = split_fractions(base);
@@ -447,7 +459,7 @@ pub fn fit_cascades_reach(
         for fc in &view.far_corners {
             m = m.max((*fc - view.cam).length());
         }
-        (d / m.max(1.0)).min(1.0)
+        (d / m.max(scale)).min(1.0)
     };
     match view {
         Some(view) if view.focus_distance > 0.0 => {
@@ -456,8 +468,8 @@ pub fn fit_cascades_reach(
             // camera zooms. Cascade 1 is a 2x nest; cascade 2 keeps the
             // configured reach for ground that is still in frame and the
             // far cascade the extended one.
-            let far = view_far(view);
-            let (lo, hi) = focus_window(view.focus_distance, far);
+            let far = view_far(view, scale);
+            let (lo, hi) = focus_window(view.focus_distance, far, scale);
             let mid = (lo + hi) * 0.5;
             let half = (hi - lo) * 0.5;
             let windows = [
@@ -468,7 +480,7 @@ pub fn fit_cascades_reach(
             ];
             for (i, (f0, f1)) in windows.iter().enumerate() {
                 let (c, r) = slice_sphere(view, *f0, *f1);
-                frame.cascades[i] = fit_cascade(c, r, sun_dir, scene_min, scene_max, res);
+                frame.cascades[i] = fit_cascade(c, r, sun_dir, scene_min, scene_max, scale, res);
                 set_view_hull(&mut frame.cascades[i], view);
             }
         }
@@ -480,7 +492,7 @@ pub fn fit_cascades_reach(
             for (i, f1) in splits.iter().enumerate() {
                 let (a, b) = (corner_scale(view, f0 * reach), corner_scale(view, f1 * reach));
                 let (c, r) = slice_sphere(view, a, b);
-                frame.cascades[i] = fit_cascade(c, r, sun_dir, scene_min, scene_max, res);
+                frame.cascades[i] = fit_cascade(c, r, sun_dir, scene_min, scene_max, scale, res);
                 set_view_hull(&mut frame.cascades[i], view);
                 f0 = *f1;
             }
@@ -488,11 +500,35 @@ pub fn fit_cascades_reach(
         None => {
             for (i, f1) in splits.iter().enumerate() {
                 let r = reach * f1 * 0.5;
-                frame.cascades[i] = fit_cascade(eye, r, sun_dir, scene_min, scene_max, res);
+                frame.cascades[i] = fit_cascade(eye, r, sun_dir, scene_min, scene_max, scale, res);
             }
         }
     }
     frame
+}
+
+/// Tighten the near cascade to a region that holds what matters up close (a work surface, a
+/// table): cascade 0 becomes the region's bounding sphere when that is smaller than the slice or
+/// ring it had, so its texels shrink with it. Receivers outside it read the next cascade, as they
+/// would past cascade 0's edge anyway. Its constant depth bias shrinks with its texel (it is 2 mm
+/// at outdoor ranges): millimetre parts lying on the surface keep their contact shadows.
+#[allow(clippy::too_many_arguments)]
+pub fn fit_near(frame: &mut CsmFrame, view: Option<&CsmView>, near_min: Vec3f, near_max: Vec3f, sun_dir: Vec3f, scene_min: Vec3f, scene_max: Vec3f, range: f32, res: f32) {
+    let center = (near_min + near_max) * 0.5;
+    let radius = (near_max - near_min).length() * 0.5;
+    let now = &frame.cascades[0];
+    let now_half = 1.0 / v3(now.rx.x, now.rx.y, now.rx.z).length().max(1e-12);
+    if !(radius > 0.0 && radius * (1.0 + 2.0 / res) < now_half) {
+        return;
+    }
+    let scale = range_scale(range);
+    let mut c = fit_cascade(center, radius, quantize_sun(sun_dir), scene_min, scene_max, scale, res);
+    let bias_world = c.texel_world * 0.75 + (c.texel_world * 4.0).min(0.002 * scale);
+    c.bias01 = bias_world * c.z_per_world;
+    if let Some(view) = view {
+        set_view_hull(&mut c, view);
+    }
+    frame.cascades[0] = c;
 }
 
 /// The clip-space z window the cascade tiles render into:
@@ -635,6 +671,7 @@ mod tests {
             sun_dir,
             scene_min,
             scene_max,
+            1.0,
             2048.0,
         );
         let fwd = (sun_dir * -1.0).normalize();

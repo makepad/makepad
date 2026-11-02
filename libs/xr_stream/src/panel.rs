@@ -7,10 +7,12 @@
 //! stream has (the headset's and the server's lines, the bars, the last seconds frame by frame).
 //!
 //! An app adds it with one line in its caption (`xr := XrCaptionButton{app: "sandbox"}`), which
-//! also installs the app's XR server (headsets find it; one linking gives the app its XR
-//! display). The settings are kept per app (`app`) in its data folder (`home::app_data_dir`,
-//! file `xr-stream`) and applied at start and on every change; the stream switch is on unless
-//! the user turned it off, or the launch says off (`MAKEPAD_XR_STREAM=off`, `--xr-stream=off`).
+//! also installs the app's XR server (once enabled, headsets find it; one linking gives the app
+//! its XR display). The settings are kept per app (`app`) in its data folder (`home::app_data_dir`,
+//! file `xr-stream`) and applied at start and on every change. The stream switch defaults to
+//! off; `stream_lan=on` records the user's LAN opt-in. Legacy `stream` values are ignored because
+//! they were saved without an explicit opt-in. `MAKEPAD_XR_STREAM=off|on` or `--xr-stream=off|on`
+//! overrides the kept switch for this launch.
 //!
 //! For automation and assistive technology the caption button is one switch node ("Stream to
 //! headset", `ui act q='role=switch name="Stream to headset"' toggle`; `set_value v=off|on`;
@@ -369,7 +371,8 @@ const PANEL_WIDTH: f64 = 392.0;
 /// The user's stream settings, kept per app. `None`: the setting is on Auto (`crate::auto`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct XrStreamSettings {
-    /// The stream switch (`XrServer::set_enabled`): off, the server does nothing at all.
+    /// The LAN opt-in (`XrServer::set_enabled`), kept as `stream_lan`: off by default, with no
+    /// listener or pairing probe responder until enabled.
     pub streaming: bool,
     pub room_scan: bool,
     pub kbps: Option<u32>,
@@ -384,7 +387,7 @@ pub struct XrStreamSettings {
 
 impl Default for XrStreamSettings {
     fn default() -> Self {
-        XrStreamSettings { streaming: true, room_scan: true, kbps: None, hz: 90, aa: None, render_scale_pct: None, view: StreamView::App, mirror: true }
+        XrStreamSettings { streaming: false, room_scan: true, kbps: None, hz: 90, aa: None, render_scale_pct: None, view: StreamView::App, mirror: true }
     }
 }
 
@@ -393,16 +396,20 @@ impl XrStreamSettings {
         Some(makepad_widgets::makepad_platform::home::app_data_dir(app)?.join("xr-stream"))
     }
 
-    /// The app's kept settings (defaults where none are kept).
+    /// The app's kept settings (defaults where none are kept). Only `stream_lan=on` opts into
+    /// LAN streaming; the legacy `stream` key never does.
     pub fn load(app: &str) -> Self {
-        let mut s = XrStreamSettings::default();
-        let Some(text) = Self::path(app).and_then(|p| std::fs::read_to_string(p).ok()) else { return s };
+        let Some(text) = Self::path(app).and_then(|p| std::fs::read_to_string(p).ok()) else { return Self::default() };
+        Self::parse(&text)
+    }
+
+    fn parse(text: &str) -> Self {
+        let mut s = Self::default();
         for line in text.lines() {
             let Some((k, v)) = line.trim().split_once('=') else { continue };
             let v = v.trim();
             match k.trim() {
-                // (the switch's own key: an old `streaming=off` was the headset's pause, not an off)
-                "stream" => s.streaming = v != "off",
+                "stream_lan" => s.streaming = v == "on",
                 "room_scan" => s.room_scan = v != "off",
                 "mirror" => s.mirror = v != "off",
                 "kbps" => s.kbps = v.parse().ok(),
@@ -423,7 +430,7 @@ impl XrStreamSettings {
         }
         let on = |b: bool| if b { "on" } else { "off" };
         let auto = |v: Option<String>| v.unwrap_or_else(|| "auto".to_string());
-        let text = format!("stream={}\nroom_scan={}\nkbps={}\nhz={}\naa={}\nrender_scale={}\nview={}\nmirror={}\n", on(self.streaming), on(self.room_scan), auto(self.kbps.map(|k| k.to_string())), self.hz, auto(self.aa.map(|a| a.id.to_string())), auto(self.render_scale_pct.map(|p| p.to_string())), self.view.label(), on(self.mirror));
+        let text = format!("stream_lan={}\nroom_scan={}\nkbps={}\nhz={}\naa={}\nrender_scale={}\nview={}\nmirror={}\n", on(self.streaming), on(self.room_scan), auto(self.kbps.map(|k| k.to_string())), self.hz, auto(self.aa.map(|a| a.id.to_string())), auto(self.render_scale_pct.map(|p| p.to_string())), self.view.label(), on(self.mirror));
         let _ = std::fs::write(path, text);
     }
 
@@ -1209,7 +1216,7 @@ impl XrCaptionButton {
     /// The state line: off, paused, waiting, or streaming with its rate and latency.
     fn status_line(&self, cx: &mut Cx) -> String {
         match self.state {
-            XrLinkState::Off => "Off · nothing listens, encodes or sends".to_string(),
+            XrLinkState::Off => "Off · turn the switch on, then open the headset app (nothing listens until then)".to_string(),
             XrLinkState::Paused => "Paused from the headset · linked, nothing streamed".to_string(),
             XrLinkState::Waiting => "Waiting for a headset · open XR Remote on it".to_string(),
             XrLinkState::Idle => "Linked · the headset is idle (not worn or asleep)".to_string(),
@@ -1644,5 +1651,21 @@ impl Widget for XrCaptionButton {
         self.set_streaming(cx, on);
         self.popover.redraw(cx);
         ActionResult::Handled
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::XrStreamSettings;
+
+    #[test]
+    fn streaming_requires_lan_opt_in() {
+        assert!(!XrStreamSettings::default().streaming);
+        for text in ["", "stream=on\n", "stream=on\nstream_lan=off\n", "stream_lan=off\nstream=on\n", "stream_lan=\n", "stream_lan=invalid\n"] {
+            assert!(!XrStreamSettings::parse(text).streaming, "{text:?}");
+        }
+        for text in ["stream_lan=on\n", "stream=off\nstream_lan=on\n", "stream_lan=on\nstream=off\n"] {
+            assert!(XrStreamSettings::parse(text).streaming, "{text:?}");
+        }
     }
 }

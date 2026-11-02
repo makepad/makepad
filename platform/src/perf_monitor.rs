@@ -198,3 +198,34 @@ impl PerfMonitor {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn enabled_boundaries_fill_the_history_with_gaps_and_channel_time() {
+        let mut m = PerfMonitor::default();
+        let mut out = Vec::new();
+        m.frame_boundary(0.0);
+        m.read(&mut out);
+        assert!(out.is_empty(), "a disabled monitor records nothing");
+
+        m.set_enabled(true);
+        m.frame_boundary(1.000);
+        m.add(PERF_CHANNEL_DRAW, 700);
+        perf_gpu_frame_completed(0.002);
+        m.frame_boundary(1.010);
+        m.frame_boundary(1.030);
+        assert_eq!(m.frames_painted(), 3);
+        m.read(&mut out);
+        assert_eq!(out.len(), PERF_MONITOR_HISTORY);
+        let newest = &out[PERF_MONITOR_HISTORY - 1];
+        let before = &out[PERF_MONITOR_HISTORY - 2];
+        assert!((newest.gap_ms - 20.0).abs() < 0.01, "gap {}", newest.gap_ms);
+        assert!((before.gap_ms - 10.0).abs() < 0.01);
+        assert_eq!(before.channel_us[PERF_CHANNEL_DRAW.0], 700);
+        assert_eq!(before.channel_us[PERF_CHANNEL_GPU.0], 2000);
+        m.set_enabled(false);
+    }
+}

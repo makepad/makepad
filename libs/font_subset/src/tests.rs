@@ -9,16 +9,12 @@ use {
 const SAMPLE: &str = "P(DOOM) 0123456789 %.,:-\u{2014}'\u{2019} ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghijklmnopqrstuvwxyz";
 const CJK_SAMPLE: &str = "\u{5B57}\u{4F53}\u{5B50}\u{96C6}\u{6D4B}\u{8BD5}\u{FF0C}\u{6587}\u{5B57}\u{3002} 2026";
 
-/// The film's fonts, relative to the repository root. The commercial ones
-/// are absent when that repository is not cloned; their checks are skipped.
+/// Bundled fonts, relative to the repository root.
 const FONTS: &[&str] = &[
     "widgets/resources/RobotoFlex.ttf",
     "widgets/resources/jetbrains_mono_variable.ttf",
     "widgets/resources/Inter.ttf",
     "widgets/resources/IBMPlexSans-Text.ttf",
-    "apps/commercial/engine/fonts/resources/fonts/playfair-display/PlayfairDisplay-Variable.ttf",
-    "apps/commercial/engine/fonts/resources/fonts/playfair-display/PlayfairDisplay-Italic-Variable.ttf",
-    "apps/commercial/engine/fonts/resources/fonts/cormorant-garamond/CormorantGaramond-Variable.ttf",
 ];
 const CJK_FONT: &str = "widgets/resources/LXGWWenKaiRegular.ttf";
 
@@ -26,12 +22,8 @@ fn repo_path(relative: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(relative)
 }
 
-fn load(relative: &str) -> Option<Vec<u8>> {
-    let data = std::fs::read(repo_path(relative)).ok();
-    if data.is_none() {
-        eprintln!("skipping {relative}: not present");
-    }
-    data
+fn load(relative: &str) -> Vec<u8> {
+    std::fs::read(repo_path(relative)).unwrap_or_else(|err| panic!("bundled font {relative}: {err}"))
 }
 
 fn run(text: &str) -> ShapeRun {
@@ -136,8 +128,8 @@ fn check_font(relative: &str, text: &str) {
 }
 
 /// [`check_font`] with `opts`; pinned axes stay at their defaults.
-fn check_font_with(relative: &str, text: &str, opts: &SubsetOptions) -> Option<SubsetReport> {
-    let original = load(relative)?;
+fn check_font_with(relative: &str, text: &str, opts: &SubsetOptions) -> SubsetReport {
+    let original = load(relative);
     let (subset, keep, report) = subset_text_with(&original, text, opts);
     let original_face = ttf_parser::Face::parse(&original, 0).unwrap();
     let subset_face = ttf_parser::Face::parse(&subset, 0).expect("subset parses with ttf-parser");
@@ -222,7 +214,7 @@ fn check_font_with(relative: &str, text: &str, opts: &SubsetOptions) -> Option<S
         }
     }
     eprintln!("{relative}: kept {} glyphs, emptied {emptied}\n{report}", keep.len());
-    Some(report)
+    report
 }
 
 #[test]
@@ -239,7 +231,7 @@ fn cjk_font_keeps_its_outlines_and_shaping() {
 
 #[test]
 fn ligatures_and_features_reach_the_closure() {
-    let Some(original) = load("widgets/resources/RobotoFlex.ttf") else { return };
+    let original = load("widgets/resources/RobotoFlex.ttf");
     let tnum = u32::from_be_bytes(*b"tnum");
     let inputs = ClosureInputs {
         runs: vec![ShapeRun {
@@ -275,7 +267,7 @@ fn ligatures_and_features_reach_the_closure() {
 
 #[test]
 fn gsub_chars_keep_every_alternate() {
-    let Some(original) = load("widgets/resources/RobotoFlex.ttf") else { return };
+    let original = load("widgets/resources/RobotoFlex.ttf");
     let digits: BTreeSet<char> = ('0'..='9').collect();
     let shaped_only = closure(&original, &ClosureInputs { runs: vec![run("0123456789")], ..Default::default() }).unwrap();
     let inputs = ClosureInputs { gsub_chars: digits, ..Default::default() };
@@ -299,7 +291,7 @@ fn gsub_chars_keep_every_alternate() {
 
 #[test]
 fn checksums_are_consistent() {
-    let Some(original) = load("widgets/resources/jetbrains_mono_variable.ttf") else { return };
+    let original = load("widgets/resources/jetbrains_mono_variable.ttf");
     let (subset, _, _) = subset_text(&original, SAMPLE);
     let mut sum = 0u32;
     for chunk in subset.chunks(4) {
@@ -320,25 +312,16 @@ fn reserved_font_names_from_licences() {
     assert_eq!(reserved_font_names("Copyright 2010 Adobe, with Reserved Font Names 'Source' and \"Source Sans\", \"Source Code\"."), ["Source", "Source Sans", "Source Code"]);
     assert_eq!(reserved_font_names("Copyright 2011 The X Authors, with Reserved Font Name Fira Sans.\n"), ["Fira Sans"]);
     assert!(reserved_font_names("Copyright 2020 The Archivo Project Authors\n\"Reserved Font Name\" refers to any names specified as such").is_empty());
-    for (licence, expected) in [
-        ("apps/commercial/engine/fonts/resources/fonts/playfair-display/OFL.txt", vec!["Playfair Display"]),
-        ("apps/commercial/engine/fonts/resources/fonts/anton/OFL.txt", vec![]),
-        ("apps/commercial/engine/fonts/src/licences/ibm-plex-mono-OFL.txt", vec!["Plex"]),
-    ] {
-        if let Some(text) = load(licence) {
-            assert_eq!(reserved_font_names(&String::from_utf8(text).unwrap()), expected, "{licence}");
-        }
-    }
 }
 
 #[test]
 fn rename_replaces_the_reserved_family() {
-    let path = "apps/commercial/engine/fonts/resources/fonts/playfair-display/PlayfairDisplay-Variable.ttf";
-    let Some(original) = load(path) else { return };
+    let path = "widgets/resources/IBMPlexSans-Text.ttf";
+    let original = load(path);
     let inputs = ClosureInputs { runs: vec![run("Title")], ..Default::default() };
     let keep = closure(&original, &inputs).unwrap();
     let opts = SubsetOptions {
-        rename: Some(Rename { reserved: vec!["Playfair Display".into()], family: "Film Serif".into() }),
+        rename: Some(Rename { reserved: vec!["IBM Plex Sans".into()], family: "Film Serif".into() }),
         ..Default::default()
     };
     let subset = subset(&original, &keep, &inputs.chars(), &opts).unwrap();
@@ -349,7 +332,7 @@ fn rename_replaces_the_reserved_family() {
         if [0, 7, 13].contains(&name.name_id) {
             continue;
         }
-        assert!(!text.contains("Playfair Display") && !text.contains("PlayfairDisplay"), "name {}: {text}", name.name_id);
+        assert!(!text.contains("IBM Plex Sans") && !text.contains("IBMPlexSans"), "name {}: {text}", name.name_id);
         saw_family |= name.name_id == 1 && text.contains("Film Serif");
         if name.name_id == 6 {
             assert!(text.starts_with("FilmSerif"), "{text}");
@@ -362,15 +345,14 @@ fn rename_replaces_the_reserved_family() {
 fn layout_kept_in_place_when_not_pruned() {
     let opts = SubsetOptions { prune_layout: false, ..Default::default() };
     for font in ["widgets/resources/Inter.ttf", "widgets/resources/RobotoFlex.ttf"] {
-        if let Some(report) = check_font_with(font, SAMPLE, &opts) {
-            assert_eq!(report.glyphs_out, report.glyphs_total, "no trimming without the layout rewrite");
-        }
+        let report = check_font_with(font, SAMPLE, &opts);
+        assert_eq!(report.glyphs_out, report.glyphs_total, "no trimming without the layout rewrite");
     }
 }
 
 #[test]
 fn trimmed_fonts_end_at_the_last_kept_glyph() {
-    let Some(report) = check_font_with("widgets/resources/IBMPlexSans-Text.ttf", SAMPLE, &SubsetOptions::default()) else { return };
+    let report = check_font_with("widgets/resources/IBMPlexSans-Text.ttf", SAMPLE, &SubsetOptions::default());
     assert_eq!(report.glyphs_out, *report.kept.last().unwrap() as usize + 1);
     assert!(report.glyphs_out < report.glyphs_total);
 }
@@ -378,7 +360,7 @@ fn trimmed_fonts_end_at_the_last_kept_glyph() {
 #[test]
 fn pinned_axes_drop_their_variations() {
     let path = "widgets/resources/RobotoFlex.ttf";
-    let Some(original) = load(path) else { return };
+    let original = load(path);
     let wght = u32::from_be_bytes(*b"wght");
     let wdth = u32::from_be_bytes(*b"wdth");
     // The text was laid out at two weights and the default width: every
@@ -386,8 +368,8 @@ fn pinned_axes_drop_their_variations() {
     let unvaried = unvaried_axes(&original, &[vec![(wght, 300.0)], vec![(wght, 800.0), (wdth, 100.0)]]).unwrap();
     assert!(!unvaried.contains(&wght) && unvaried.contains(&wdth) && unvaried.len() > 8, "{unvaried:?}");
     let pin_axes: Vec<u32> = unvaried.into_iter().filter(|&t| t != wdth).collect();
-    let pinned = check_font_with(path, SAMPLE, &SubsetOptions { pin_axes, ..Default::default() }).unwrap();
-    let full = check_font_with(path, SAMPLE, &SubsetOptions::default()).unwrap();
+    let pinned = check_font_with(path, SAMPLE, &SubsetOptions { pin_axes, ..Default::default() });
+    let full = check_font_with(path, SAMPLE, &SubsetOptions::default());
     let gvar = |r: &SubsetReport| r.tables.iter().find(|t| t.tag == "gvar").unwrap().after;
     assert!(gvar(&pinned) * 2 < gvar(&full), "{} vs {}", gvar(&pinned), gvar(&full));
     // At a pinned axis's non-default value the subset no longer varies.
@@ -402,7 +384,7 @@ fn stubs_are_tiny_and_keep_the_metrics() {
     let mut fonts: Vec<&str> = FONTS.to_vec();
     fonts.push(CJK_FONT);
     for path in fonts {
-        let Some(original) = load(path) else { continue };
+        let original = load(path);
         let stub = stub(&original, &SubsetOptions::default()).unwrap();
         assert!(stub.len() < 2048, "{path}: stub of {} bytes", stub.len());
         let a = ttf_parser::Face::parse(&original, 0).unwrap();
@@ -420,7 +402,7 @@ fn stubs_are_tiny_and_keep_the_metrics() {
 
 #[test]
 fn apple_layout_dropped_shapes_the_same() {
-    let Some(original) = load(CJK_FONT) else { return };
+    let original = load(CJK_FONT);
     let opts = SubsetOptions { drop_aat: true, ..Default::default() };
     let (subset, _, report) = subset_text_with(&original, CJK_SAMPLE, &opts);
     let tables = Tables::read(&subset).unwrap();
@@ -431,7 +413,7 @@ fn apple_layout_dropped_shapes_the_same() {
 
 #[test]
 fn verify_finds_a_missing_glyph() {
-    let Some(original) = load("widgets/resources/Inter.ttf") else { return };
+    let original = load("widgets/resources/Inter.ttf");
     let inputs = ClosureInputs { runs: vec![run("Hello")], ..Default::default() };
     let mut keep = closure(&original, &inputs).unwrap();
     let face = ttf_parser::Face::parse(&original, 0).unwrap();
@@ -449,37 +431,4 @@ fn brotli(data: &[u8]) -> usize {
         writer.write_all(data).unwrap();
     }
     out.len()
-}
-
-/// Sizes raw and brotli (quality 11): the original, the default subset,
-/// the subset with every axis but wght and wdth pinned (variable fonts),
-/// with Apple's layout tables dropped (fonts that have them) and the stub.
-/// A measurement, not a check: run with `--ignored --nocapture`.
-#[test]
-#[ignore]
-fn size_report() {
-    let mut fonts: Vec<(&str, &str)> = FONTS.iter().map(|f| (*f, SAMPLE)).collect();
-    fonts.push((CJK_FONT, CJK_SAMPLE));
-    fonts.push(("widgets/resources/LXGWWenKaiBold.ttf", CJK_SAMPLE));
-    for (path, text) in fonts {
-        let Some(original) = load(path) else { continue };
-        let line = |name: &str, data: &[u8]| eprintln!("  {name:<28} {:>9} raw {:>9} br", data.len(), brotli(data));
-        eprintln!("{path}");
-        line("original", &original);
-        line("subset", &subset_text(&original, text).0);
-        let face = ttf_parser::Face::parse(&original, 0).unwrap();
-        if face.is_variable() {
-            let pin_axes = face
-                .variation_axes()
-                .into_iter()
-                .map(|a| a.tag.0)
-                .filter(|t| !matches!(&t.to_be_bytes(), b"wght" | b"wdth"))
-                .collect();
-            line("subset, wght+wdth only", &subset_text_with(&original, text, &SubsetOptions { pin_axes, ..Default::default() }).0);
-        }
-        if Tables::read(&original).unwrap().get(b"morx").is_some() {
-            line("subset, Apple layout dropped", &subset_text_with(&original, text, &SubsetOptions { drop_aat: true, ..Default::default() }).0);
-        }
-        line("stub", &stub(&original, &SubsetOptions::default()).unwrap());
-    }
 }

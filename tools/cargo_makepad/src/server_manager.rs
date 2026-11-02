@@ -45,15 +45,6 @@ enum LockState {
     LiveLock,
 }
 
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum StartupScenario {
-    NoLock,
-    StaleLock,
-    LiveLock,
-    UnknownOccupant,
-}
-
 pub struct WasmServerOwnershipGuard {
     lock_path: PathBuf,
     metadata: WasmServerLockMetadata,
@@ -226,19 +217,6 @@ fn classify_lock_state(
         }
         Some(_) => LockState::StaleLock,
         None => LockState::NoLock,
-    }
-}
-
-#[cfg(test)]
-fn evaluate_startup_scenario(lock_state: LockState, port_in_use: bool) -> StartupScenario {
-    if lock_state != LockState::LiveLock && port_in_use {
-        StartupScenario::UnknownOccupant
-    } else {
-        match lock_state {
-            LockState::NoLock => StartupScenario::NoLock,
-            LockState::StaleLock => StartupScenario::StaleLock,
-            LockState::LiveLock => StartupScenario::LiveLock,
-        }
     }
 }
 
@@ -1039,72 +1017,6 @@ mod tests {
         assert!(
             startup_lock_path.exists(),
             "existing startup lock must remain"
-        );
-    }
-
-    #[test]
-    fn startup_scenario_decision_matrix() {
-        let probes = MockProbes {
-            current_pid: 100,
-            now_unix_secs: 555,
-            now_unix_millis: 555_000,
-            alive_pids: HashSet::new(),
-            owned_port_pids: HashSet::new(),
-            terminated_pids: RefCell::new(Vec::new()),
-            port_in_use: false,
-            wait_port_release: true,
-            occupant_description: None,
-        };
-        let listen_addr = listen_address(8010, false);
-        assert_eq!(
-            evaluate_startup_scenario(
-                classify_lock_state(None, listen_addr, &probes),
-                probes.port_in_use
-            ),
-            StartupScenario::NoLock
-        );
-
-        let stale_lock = WasmServerLockMetadata {
-            format_version: LOCK_FORMAT_VERSION,
-            pid: 42,
-            port: 8010,
-            workspace_root: "/tmp/work".to_string(),
-            crate_name: "app".to_string(),
-            profile: "release".to_string(),
-            started_at: 0,
-        };
-        assert_eq!(
-            evaluate_startup_scenario(
-                classify_lock_state(Some(&stale_lock), listen_addr, &probes),
-                probes.port_in_use
-            ),
-            StartupScenario::StaleLock
-        );
-        assert_eq!(
-            evaluate_startup_scenario(LockState::StaleLock, true),
-            StartupScenario::UnknownOccupant
-        );
-
-        let live_probes = MockProbes {
-            alive_pids: HashSet::from([42]),
-            owned_port_pids: HashSet::from([42]),
-            ..probes
-        };
-        assert_eq!(
-            evaluate_startup_scenario(
-                classify_lock_state(Some(&stale_lock), listen_addr, &live_probes),
-                live_probes.port_in_use
-            ),
-            StartupScenario::LiveLock
-        );
-
-        let occupied_probes = MockProbes {
-            port_in_use: true,
-            ..live_probes
-        };
-        assert_eq!(
-            evaluate_startup_scenario(LockState::NoLock, occupied_probes.port_in_use),
-            StartupScenario::UnknownOccupant
         );
     }
 

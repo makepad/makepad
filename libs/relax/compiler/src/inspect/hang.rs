@@ -218,6 +218,10 @@ pub fn why_hung(req: &Req, out: &mut Out) {
     out.line(&format!("{{\"verdict\":\"{}\",\"why\":{},\"findings\":[{}],\"owner\":{}}}", verdict, json_str(&detail), found.join(","), owner));
     // stacks of the threads involved, one line for the others
     let mut involved: Vec<usize> = chain.clone();
+    // the owner too: what every compile waits behind
+    if let Some(i) = idx_of(crate::owner::owner_tid()).filter(|i| !involved.contains(i)) {
+        involved.push(i);
+    }
     for h in &cycle {
         if let Some(i) = idx_of(*h) {
             if !involved.contains(&i) {

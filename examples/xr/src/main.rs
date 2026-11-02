@@ -6,8 +6,9 @@
 //!   reality, passthrough around them). The shared navigation (makepad-xr-nav) moves, turns and
 //!   scales the table with both grips in empty space.
 //! - The headset UI (makepad-xr-ui): the wrist menu (Y, or the left palm up) with the app's rows,
-//!   a card over the table about the selected block, grab-to-edit (a grip on a block carries it;
-//!   letting go is one edit and one undo step in the app's document) and the standard haptic
+//!   a card over the table about the selected block, grab-to-edit (a trigger/grip, or a hand's pinch, with
+//!   its tip on a block carries it; letting go is one edit and one undo step in the app's
+//!   document), pointed controller styluses, fingertip dots and the standard haptic
 //!   ticks (hover, press, grab, a snap every 5 cm, a limit at the table's edge).
 //! - `XrMirrorView` shows the headset's left eye on the desktop.
 
@@ -16,8 +17,8 @@ pub use makepad_widgets;
 use makepad_widgets::makepad_platform::event::xr::{XrController, XrHand, XrState};
 use makepad_widgets::*;
 use makepad_xr_nav::{ClipBox, XrNav, XrNavConfig, XrNavMode};
-use makepad_xr_ui::input::{grip_pose, Buttons};
-use makepad_xr_ui::{haptic, Card, EditSink, GrabEdits, Haptics, Height, MenuStep, Tone, Width, XrPanel, XrWristMenu};
+use makepad_xr_ui::input::{self, grab, Buttons};
+use makepad_xr_ui::{haptic, Card, EditSink, GrabEdits, Haptics, Height, InteractionFilter, MenuStep, Tone, Width, XrPanel, XrTips, XrWristMenu};
 
 app_main!(App);
 
@@ -50,6 +51,7 @@ script_mod! {
         draw_block +: {depth_write: true light_dir: vec3(0.35, 0.8, 0.45)}
         menu: mod.widgets.XrWristMenu{}
         info: mod.widgets.XrPanel{height: 128.0 meters: 0.14}
+        tips: mod.widgets.XrTips{}
         draw_tick +: {color: #0000}
     }
 
@@ -74,7 +76,7 @@ script_mod! {
                     doc_label := Label{text: "" draw_text +: {text_style +: {font_size: 11}}}
                     Label{
                         width: Fill
-                        text: "Pair a headset from the caption's headset icon. In the headset: grip a block to carry it (one undo step), both grips in empty space move the table, Y or the left palm up opens the wrist menu."
+                        text: "Pair a headset from the caption's headset icon. In the headset: put a controller's tip (or index finger) on a block and trigger or grip to carry it (one undo step), both grips in empty space move the table, Y or the left palm up opens the wrist menu."
                         draw_text +: {color: theme.color_text_meta}
                     }
                     mirror := XrMirrorView{}
@@ -187,6 +189,11 @@ pub struct XrDemo {
     menu: XrWristMenu,
     #[live]
     info: XrPanel,
+    /// A controller stylus or fingertip dot.
+    #[live]
+    tips: XrTips,
+    #[rust]
+    interaction_filter: InteractionFilter,
     #[redraw]
     #[live]
     draw_tick: DrawColor,
@@ -200,6 +207,11 @@ pub struct XrDemo {
     holds: [Option<Hold>; 2],
     #[rust]
     grip_down: [bool; 2],
+    /// This frame's tips and the block each touches (or holds).
+    #[rust]
+    tip_at: [Option<Pose>; 2],
+    #[rust]
+    touch: [Option<usize>; 2],
     /// Where a carried block is shown until the document has its move.
     #[rust]
     shown: Vec<Option<Vec3f>>,
@@ -241,7 +253,7 @@ impl XrDemo {
                 .button(item::REAL_SIZE, "1:1", Width::FILL);
             rows.row(Height::Fixed(52.0)).toggle(item::SNAP, "Snap ticks", self.snap_ticks, Width::FILL);
             rows.row(Height::Fixed(52.0)).heading(format_args!("{} edit(s), {} to redo", doc.undo.len(), doc.redo.len()), Tone::Meta, Width::FILL);
-            rows.row(Height::Fill).text("Grip a block to carry it", Tone::Normal, Width::FILL);
+            rows.row(Height::Fill).text("Trigger or grip a block to carry it", Tone::Normal, Width::FILL);
             rows.row(Height::Fill).text("Both grips: move the table", Tone::Meta, Width::FILL);
         });
     }
@@ -276,30 +288,25 @@ impl XrDemo {
         let view = xr.nav.view();
         let mut haptics = Haptics::default();
 
+        let raw_input = input;
+        let filtered = self.interaction_filter.apply(raw_input, raw_input.time);
+        let input = &filtered;
+        self.tips.set_input(input);
         self.buttons.step(input);
         self.fill_menu(doc);
-        self.menu_step = self.menu.step(input, &self.buttons, now);
-        haptics.merge(self.menu_step.haptics);
-        match self.menu_step.pressed {
-            Some(item::UNDO) => doc.undo(),
-            Some(item::REDO) => doc.redo(),
-            Some(item::REAL_SIZE) => self.xr.as_mut().unwrap().nav.set_scale(1.0),
-            Some(item::SNAP) => self.snap_ticks = !self.snap_ticks,
-            _ => {}
-        }
-        if self.buttons.hit(1, XrController::CLICK_B) {
-            doc.undo();
-        }
-
-        // the grips: a block near the hand is carried; letting go commits its move
+        self.menu_step = self.menu.prepare(input, &self.buttons, now);
+        if self.menu_step.slider.is_some() { self.buttons.claim(1); }
+        // the grabs (a trigger/grip, or a hand's pinch): a block at the tip is carried; letting go
+        // commits its move
         self.shown.resize(doc.blocks.len(), None);
         self.edits.resize(doc.blocks.len());
         let ctrl = [&input.left_controller, &input.right_controller];
         let hand = [&input.left_hand, &input.right_hand];
         for i in 0..2 {
-            let grip = grip_pose(ctrl[i], hand[i], self.grip_down[i]);
+            let grip = grab(ctrl[i], hand[i], self.grip_down[i]);
             let (pressed, released) = (grip.is_some() && !self.grip_down[i], grip.is_none() && self.grip_down[i]);
             self.grip_down[i] = grip.is_some();
+            if self.holds[i].is_some() { self.buttons.claim(i); }
             if released {
                 if let Some(h) = self.holds[i].take() {
                     let to = self.block_at(doc, h.block);
@@ -312,17 +319,23 @@ impl XrDemo {
                     }
                 }
             }
-            if pressed {
-                let at = view.world_from_room(grip.unwrap().position);
-                let other = self.holds[1 - i].map(|h| h.block);
-                let near = (0..doc.blocks.len())
+            self.tip_at[i] = input::tip(ctrl[i], hand[i]);
+            let other = self.holds[1 - i].map(|h| h.block);
+            let near = self.tip_at[i].filter(|_| self.holds[i].is_none()).and_then(|t| {
+                let at = view.world_from_room(t.position);
+                (0..doc.blocks.len())
                     .filter(|&b| Some(b) != other && !self.edits.waiting(b))
                     .map(|b| (b, (self.block_at(doc, b) - at).length()))
                     .filter(|(_, d)| *d <= REACH + BLOCK)
-                    .min_by(|a, b| a.1.total_cmp(&b.1));
+                    .min_by(|a, b| a.1.total_cmp(&b.1))
+            });
+            self.touch[i] = near.map(|(b, _)| b);
+            if pressed && !self.buttons.claimed(i) {
+                let at = view.world_from_room(grip.unwrap().position);
                 if let Some((b, _)) = near {
                     let from = self.block_at(doc, b);
                     self.holds[i] = Some(Hold { block: b, offset: from - at, from, cell: cell_of(from), at_edge: false });
+                    self.buttons.claim(i);
                     self.selected = Some(b);
                     haptics.add(i, haptic::GRAB);
                 }
@@ -345,6 +358,19 @@ impl XrDemo {
                 self.shown[h.block] = Some(to);
             }
         }
+        self.menu.interact(input, &self.buttons, &mut self.menu_step);
+        haptics.merge(self.menu_step.haptics);
+        match self.menu_step.pressed {
+            Some(item::UNDO) => doc.undo(),
+            Some(item::REDO) => doc.redo(),
+            Some(item::REAL_SIZE) => self.xr.as_mut().unwrap().nav.set_scale(1.0),
+            Some(item::SNAP) => self.snap_ticks = !self.snap_ticks,
+            _ => {}
+        }
+        if self.buttons.hit(1, XrController::CLICK_B) {
+            doc.undo();
+        }
+
         // the document has every move up to its version: settled blocks show where it says
         let (holds, shown) = (&self.holds, &mut self.shown);
         self.edits.settle(doc.version, |b| holds.iter().flatten().any(|h| h.block == b), |b| shown[b] = None);
@@ -352,9 +378,9 @@ impl XrDemo {
         // the navigation sees the grips the blocks left
         let xr = self.xr.as_mut().unwrap();
         let nav_in: &XrState = if self.holds.iter().all(|h| h.is_none()) {
-            input
+            raw_input
         } else {
-            *xr.nav_state = input.clone();
+            *xr.nav_state = raw_input.clone();
             let s = &mut *xr.nav_state;
             for (i, (c, h)) in [(&mut s.left_controller, &mut s.left_hand), (&mut s.right_controller, &mut s.right_hand)].into_iter().enumerate() {
                 if self.holds[i].is_some() {
@@ -395,15 +421,21 @@ impl XrDemo {
         self.draw_block.draw(cx3d);
         for i in 0..doc.blocks.len() {
             let held = self.holds.iter().flatten().any(|h| h.block == i);
-            self.draw_block.color = match (held, self.selected == Some(i)) {
-                (true, _) => vec4(0.95, 0.75, 0.3, 1.0),
-                (false, true) => vec4(0.45, 0.65, 0.95, 1.0),
+            let touched = self.touch.contains(&Some(i));
+            self.draw_block.color = match (held, touched, self.selected == Some(i)) {
+                (true, ..) => vec4(0.95, 0.75, 0.3, 1.0),
+                (false, true, _) => vec4(0.92, 0.93, 0.95, 1.0),
+                (false, false, true) => vec4(0.45, 0.65, 0.95, 1.0),
                 _ => vec4(0.75, 0.77, 0.8, 1.0),
             };
             self.draw_block.cube_pos = self.block_at(doc, i);
             self.draw_block.cube_size = vec3f(BLOCK * 2.0, BLOCK * 2.0, BLOCK * 2.0);
             self.draw_block.draw(cx3d);
         }
+        let touching = [0, 1].map(|i| self.touch[i].is_some() || self.holds[i].is_some());
+        // the hand the menu stands on is not pointing: no stylus on it
+        let tips = [self.tip_at[0].filter(|_| self.menu.card().is_none()), self.tip_at[1]];
+        self.tips.draw(cx3d, tips, touching);
         self.menu.draw(cx3d);
         if let Some(card) = &info_card {
             self.info.draw(cx3d, card);
@@ -429,6 +461,12 @@ impl Widget for XrDemo {
         let Some(doc) = scope.data.get_mut::<Doc>() else { return };
         let version = doc.version;
         self.step(cx, &update.state, doc);
+        let interacting = self.buttons.any_held() || self.holds.iter().any(Option::is_some)
+            || self.menu_step.slider.is_some_and(|drag| !drag.ended)
+            || self.xr.as_ref().is_some_and(|xr| xr.nav.grips().into_iter().any(|held| held))
+            || [&update.state.left_controller, &update.state.right_controller].into_iter()
+                .any(|c| makepad_xr_nav::pad_stick(c) != Vec2f::default());
+        makepad_xr_stream::XrDesktopFreeze::set_interaction(cx, interacting);
         if doc.version != version {
             cx.action(XrDemoAction::DocChanged);
         }
@@ -445,6 +483,7 @@ impl Widget for XrDemo {
             }
         }
         self.draw_tick.draw_walk(cx, walk);
+        makepad_xr_stream::XrDesktopFreeze::bind(cx, self.draw_tick.area());
         DrawStep::done()
     }
 }
@@ -498,6 +537,7 @@ impl AppMain for App {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        makepad_xr_stream::XrDesktopFreeze::handle_event(cx, event);
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::with_data(&mut self.doc));
     }

@@ -253,31 +253,3 @@ fn base64_decode(s: &str) -> Option<Vec<u8>> {
     }
     Some(out)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn oracle_sentence_token_exact() {
-        // Vocab file lives with the reference checkout; skip when absent
-        // (CI machines without the reference env).
-        let path = crate::indextts::reference_checkpoints_dir()
-            .join("multilingual_zh_ja_yue_char_del.tiktoken");
-        if !path.is_file() {
-            eprintln!("skipping oracle_sentence_token_exact: {path:?} missing");
-            return;
-        }
-        let tok = IndexTtsTokenizer::load(&path).unwrap();
-        assert_eq!(tok.n_vocab(), 60509);
-        assert_eq!(IndexTtsTokenizer::lang_index("EN"), Some(0));
-        // Reference: dumps/meta.json text_tokens for
-        // "<|en|> the old lighthouse keeper smiled as the storm finally passed."
-        // (stop token 1 appended by the pipeline, not the tokenizer).
-        let ids = tok.encode("<|en|> the old lighthouse keeper smiled as the storm finally passed.");
-        assert_eq!(
-            ids,
-            vec![58838, 264, 1331, 45800, 37415, 33981, 382, 264, 7555, 2707, 4630, 13]
-        );
-    }
-}

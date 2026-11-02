@@ -3,15 +3,16 @@ use super::*;
 use std::path::{Path, PathBuf};
 
 fn splash_files(root: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(read) = std::fs::read_dir(root) else { return };
-    for entry in read.flatten() {
+    let read = std::fs::read_dir(root).unwrap_or_else(|e| panic!("read {}: {e}", root.display()));
+    for entry in read {
+        let entry = entry.expect("read Splash directory entry");
         let path = entry.path();
         let name = entry.file_name();
         let name = name.to_string_lossy();
         if name == "target" || name == ".git" || name.starts_with("target-") {
             continue;
         }
-        let Ok(kind) = entry.file_type() else { continue };
+        let kind = entry.file_type().unwrap_or_else(|e| panic!("file type {}: {e}", path.display()));
         if kind.is_dir() {
             splash_files(&path, out);
         } else if kind.is_file() && path.extension().is_some_and(|e| e == "splash") {
@@ -30,7 +31,7 @@ fn every_splash_file_round_trips() {
     assert!(!files.is_empty(), "no .splash files under {}", root.display());
     let mut failures = Vec::new();
     for path in &files {
-        let Ok(source) = std::fs::read_to_string(path) else { continue };
+        let source = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
         match parse(&source) {
             Err(e) => {
                 let (line, col) = line_col(&source, e.at);
@@ -241,9 +242,10 @@ fn column_zero_lines_begin_top_level_statements() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let mut files = Vec::new();
     splash_files(&root, &mut files);
+    assert!(!files.is_empty(), "no .splash files under {}", root.display());
     let mut bad = Vec::new();
     for path in &files {
-        let Ok(source) = std::fs::read_to_string(path) else { continue };
+        let source = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
         let Ok(syntax) = parse(&source) else { continue };
         // Files that are themselves an object body have entries, not a flat statement list.
         let starts: std::collections::HashSet<usize> = syntax.statements().iter().map(|s| s.span.start).collect();

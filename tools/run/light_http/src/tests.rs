@@ -57,20 +57,3 @@ fn refuses_plain_http_off_loopback() {
     assert!(fetch(&Request::get("http://example.com/")).is_err());
     assert!(fetch(&Request::get("https://user@example.com/")).is_err());
 }
-
-/// The system TLS stack against a real host (run by hand: `cargo test -- --ignored`).
-#[test]
-#[ignore]
-fn https_github_info_refs() {
-    let mut seen = 0;
-    let mut body = Vec::new();
-    let r = send(&Request::get("https://github.com/git/git.git/info/refs?service=git-upload-pack"), &mut body, &mut |n, _| seen = n).unwrap();
-    assert_eq!(r.status, 200);
-    assert!(body.starts_with(b"001e# service=git-upload-pack"), "{:?}", &body[..40.min(body.len())]);
-    assert_eq!(seen, body.len() as u64);
-    // a redirect comes back as it is
-    let (r, _) = fetch(&Request::get("https://github.com/git/git.git")).unwrap();
-    assert!((300..400).contains(&r.status), "{}", r.status);
-    assert!(r.header("location").is_some());
-    assert!(fetch(&Request::get("http://127.0.0.1:1/")).is_err());
-}

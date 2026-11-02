@@ -568,9 +568,7 @@ impl Command {
                 self.cwd = None;
                 self.env("MAKEPAD_RUN_WORKSPACE", abs.as_os_str());
                 self.env("MAKEPAD_RUN_VFS", crate::fs::vfs::mounts());
-                let r = self.spawn_now(default, needs_stdin);
-                self.cwd = Some(dir);
-                r
+                self.spawn_now(default, needs_stdin)
             }
             None => {
                 if crate::env::var_os("MAKEPAD_RUN_WORKSPACE").is_some() {
@@ -579,6 +577,7 @@ impl Command {
                 self.spawn_now(default, needs_stdin)
             }
         };
+        self.cwd = Some(dir);
         self.env = saved_env;
         r
     }

@@ -1382,9 +1382,9 @@ mod test {
         let zero = bf16::from_f32(0.0);
         let neg_zero = bf16::from_f32(-0.0);
         let neg_one = bf16::from_f32(-1.0);
-        let inf = bf16::from_f32(core::f32::INFINITY);
-        let neg_inf = bf16::from_f32(core::f32::NEG_INFINITY);
-        let nan = bf16::from_f32(core::f32::NAN);
+        let inf = bf16::from_f32(f32::INFINITY);
+        let neg_inf = bf16::from_f32(f32::NEG_INFINITY);
+        let nan = bf16::from_f32(f32::NAN);
 
         assert_eq!(bf16::ONE, one);
         assert_eq!(bf16::ZERO, zero);
@@ -1444,9 +1444,9 @@ mod test {
         let one = bf16::from_f64(1.0);
         let zero = bf16::from_f64(0.0);
         let neg_zero = bf16::from_f64(-0.0);
-        let inf = bf16::from_f64(core::f64::INFINITY);
-        let neg_inf = bf16::from_f64(core::f64::NEG_INFINITY);
-        let nan = bf16::from_f64(core::f64::NAN);
+        let inf = bf16::from_f64(f64::INFINITY);
+        let neg_inf = bf16::from_f64(f64::NEG_INFINITY);
+        let nan = bf16::from_f64(f64::NAN);
 
         assert_eq!(bf16::ONE, one);
         assert_eq!(bf16::ZERO, zero);

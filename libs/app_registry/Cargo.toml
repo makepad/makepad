@@ -19,6 +19,9 @@ publish = false
 name = "makepad_app_registry"
 path = "src/lib.rs"
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(relax)"] }
+
 [dependencies]
 makepad-strict-json = { path = "../strict_json" }
 

@@ -65,6 +65,8 @@ pub fn request_json_detailed(
     body: Option<&Value>,
     bearer: Option<&str>,
 ) -> Result<(u16, Value), RequestError> {
+    makepad_network::lan::hub_check_url("ai-hub fleet http", url)
+        .map_err(|e| RequestError::Connection(e.to_string()))?;
     // Fleet nodes speak TLS behind their front: the shared HTTP client pins
     // them and attaches this process's fleet credential.
     if url.starts_with("https://") {
@@ -76,7 +78,7 @@ pub fn request_json_detailed(
         .map_err(|e| RequestError::Connection(format!("resolve {host_port}: {e}")))?
         .next()
         .ok_or_else(|| RequestError::Connection(format!("resolve {host_port}: no address")))?;
-    let stream = makepad_network::lan::connect_timeout("ai-hub fleet http", &addr, Duration::from_millis(CONNECT_TIMEOUT_MS))
+    let stream = makepad_network::lan::hub_connect_timeout("ai-hub fleet http", &addr, Duration::from_millis(CONNECT_TIMEOUT_MS))
         .map_err(|e| RequestError::Connection(format!("connect {host_port}: {e}")))?;
     stream
         .set_read_timeout(Some(Duration::from_millis(IO_TIMEOUT_MS)))

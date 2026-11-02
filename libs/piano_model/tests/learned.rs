@@ -198,37 +198,6 @@ fn engine_wrapper_forwards_and_swaps() {
     }
 }
 
-/// Cost measurement, reported beside the physical engine's numbers:
-///   cargo test -p makepad-piano-model --release --test learned -- --ignored perf_ --nocapture
-#[test]
-#[ignore]
-fn perf_learned_polyphony() {
-    use std::time::Instant;
-    let seconds = 10.0;
-    for (name, scalar) in [("simd", false), ("scalar", true)] {
-        let mut p = LearnedPiano::new(FS);
-        p.set_force_scalar(scalar);
-        let mut script = vec![(0u64, PianoEvent::Sustain { value: 1.0 })];
-        let mut t = 0.0;
-        while t < seconds - 0.1 {
-            for key in 21..=108u8 {
-                script.push((sec(t + (key as f64 - 21.0) * 0.0001), PianoEvent::NoteOn { key, velocity: 110 }));
-            }
-            t += 1.5;
-        }
-        let total = (seconds * FS as f64) as usize;
-        let start = Instant::now();
-        let (l, _) = render(&mut p, &script, total, 512);
-        let wall = start.elapsed().as_secs_f64();
-        assert!(l[total - 1].is_finite());
-        println!(
-            "learned {name}: 88 keys re-struck under pedal (176 slots) + full fx: {wall:.3} s wall for {seconds} s = {:.1}x realtime ({:.1}% of one core)",
-            seconds / wall,
-            100.0 * wall / seconds
-        );
-    }
-}
-
 /// The experimental hybrid hook (Piano::debug_shape_partials) must actually
 /// shape what it claims: a partial's output gain scales its measured level,
 /// and a sigma_scale above 1 shortens its ring. (The learned-hybrid

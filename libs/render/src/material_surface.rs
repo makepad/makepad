@@ -165,8 +165,7 @@ fn srgb_byte_exact(v:f32)->u32{(srgb(v).clamp(0.0,1.0)*255.0+0.5)as u32}
 /// The same byte without a powf: the smallest f32 at which each byte value
 /// starts (the byte only grows with v), found once by bisection over the
 /// float bit patterns with [`srgb_byte_exact`] itself, so every v gets the
-/// byte srgb_byte_exact gives it (checked over every float in 0..1 by the
-/// ignored test `srgb_byte_table_matches_every_float`).
+/// byte srgb_byte_exact gives it.
 fn srgb_byte(v:f32)->u32{
     static STARTS:std::sync::OnceLock<[f32;255]>=std::sync::OnceLock::new();
     let starts=STARTS.get_or_init(||std::array::from_fn(|i|{
@@ -756,13 +755,6 @@ mod tests{
         let start=n*n+32*32+16*16;let level3=cover(&texture.data[start..start+64],0.5);
         assert!(level0>0.2&&level0<0.35,"{level0}");
         assert!((level3-level0).abs()<0.1,"coverage {level0} at level 0 but {level3} at level 3");
-    }
-    #[test]
-    #[ignore]
-    fn srgb_byte_table_matches_every_float(){
-        // Every float from 0 to 1 (about a billion): release, some seconds.
-        let mut bits=0u32;
-        while bits<=1.0f32.to_bits() { let v=f32::from_bits(bits); assert_eq!(srgb_byte(v),srgb_byte_exact(v),"{v}"); bits+=1; }
     }
     #[test]fn srgb_byte_table_matches_at_every_step(){
         for v in [-1.0f32,-0.0,0.0,f32::NAN,1.0,2.0,f32::INFINITY] { assert_eq!(srgb_byte(v),srgb_byte_exact(v),"{v}"); }

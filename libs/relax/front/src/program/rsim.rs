@@ -116,7 +116,7 @@ pub enum MacRes { Def(DefId), Builtin(Sym, bool) }
 /// What a checked module binds in the macro namespace: its own binding (an item or a single import)
 /// and its glob binding, with the glob's ambiguity (0 none, 1 an error, 2 the lint ambiguous_glob_imports).
 #[derive(Clone, Copy, Default, Debug)]
-pub struct MacBinding { pub non_glob: Option<MacRes>, pub glob: Option<MacRes>, pub glob_amb: u8 }
+pub struct MacBinding { pub non_glob: Option<MacRes>, pub glob: Option<MacRes>, pub glob_amb: u8, pub non_glob_vis: BindVis, pub glob_vis: BindVis }
 
 pub struct SimDiag {
     pub file: u32,
@@ -1431,7 +1431,8 @@ impl<'a> Sim<'a> {
         for (&(m, name, ns), r) in &self.res {
             if ns != 2 { continue; }
             let glob_amb = r.glob.map_or(0, |g| { let amb = self.chain_ambiguities(g); if amb.is_empty() { 0 } else if amb.iter().any(|w| w.is_none()) { 1 } else { 2 } });
-            let b = MacBinding { non_glob: r.non_glob.and_then(|d| self.mac_res(d)), glob: r.glob.and_then(|d| self.mac_res(d)), glob_amb };
+            let b = MacBinding { non_glob: r.non_glob.and_then(|d| self.mac_res(d)), glob: r.glob.and_then(|d| self.mac_res(d)), glob_amb,
+                non_glob_vis: r.non_glob.and_then(|d| self.decls[d as usize].vis), glob_vis: r.glob.and_then(|d| self.decls[d as usize].vis) };
             if b.non_glob.is_some() || b.glob.is_some() { t.insert((m, name), b); }
         }
         t
@@ -1543,10 +1544,17 @@ impl<'a> Sim<'a> {
                 if decls[ns].decl().is_none() && self.privacy_errors == 0 { self.cannot_determine.push(i); }
             }
         }
+        // the macro namespace: what the import found there (a textual `macro_rules!` included) counts
+        // when it can see it
+        if !self_only {
+            if let Some((_, source_decl)) = decls[2].decl().and_then(|d| self.decls[d as usize].import) {
+                if self.accessible(self.dvis(source_decl), ps.module) { all_ns_err = false; }
+            }
+        }
         if all_ns_err {
             let mut all_failed = true;
-            for ns in 0..2 {
-                if self_only && ns == 1 { continue; }
+            for ns in 0..3 {
+                if self_only && ns != 0 { continue; }
                 let fin = Fin { imp: None, report_private: true };
                 if self.resolve_ident_in_module(module, source, ns, ps, Some(fin), None, None).is_ok() { all_failed = false; }
             }

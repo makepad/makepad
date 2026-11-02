@@ -307,10 +307,11 @@ fn subscriber_preserves_cursor_and_reports_gap() {
                     assert!(target.contains("cursor=0123456789abcdef-1"));
                     Reply::json(200, event_page(2, false))
                 }
-                _ => {
+                2 => {
                     assert!(target.contains("cursor=0123456789abcdef-2"));
                     Reply::json(200, "{\"events\":[],\"cursor\":\"0123456789abcdef-3\",\"gap\":true}")
                 }
+                _ => Reply::json(200, "{\"events\":[],\"cursor\":\"0123456789abcdef-3\",\"gap\":false}"),
             }
         }
         _ => Reply::json(500, "{}"),

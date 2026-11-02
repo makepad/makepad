@@ -1783,39 +1783,6 @@ mod tests {
         });
     }
 
-    /// Composed of a drawer, which is a dialog on an edge, a popover and a
-    /// nav list, so it must register after all three.
-    #[test]
-    fn it_registers_after_the_dialog() {
-        crate::on_test_cx(|| {
-        let calls = crate::widgets_mod_source();
-        let at = calls
-            .find("crate::hamburger_menu::script_mod(vm);")
-            .expect("the menu is registered");
-        for base in ["dialog", "popover", "nav_list", "button"] {
-            let call = format!("crate::{base}::script_mod(vm);");
-            let base_at = calls.find(&call).unwrap_or_else(|| panic!("{call} is not registered"));
-            assert!(base_at < at, "{call} must register before the menu");
-        }
-        });
-    }
-
-    /// Splatted, the variants would be exported bare, and `Drawer` and
-    /// `Window` are already widgets.
-    #[test]
-    fn no_enum_is_splatted() {
-        crate::on_test_cx(|| {
-        let source = include_str!("hamburger_menu.rs");
-        for name in ["HamburgerSurface", "HamburgerMode", "HamburgerMeasure"] {
-            // Built at run time, so this test's own text does not match.
-            let needle = format!("splat(mod.widgets.{name})");
-            assert!(!source.contains(&needle), "{name} is splatted");
-            let registered = format!("mod.widgets.{name} = set_type_default() do #({name}::script_api(vm))");
-            assert!(source.contains(&registered), "{name} is not registered");
-        }
-        });
-    }
-
     fn cx() -> crate::PooledCx {
         crate::checkout_test_cx()
     }

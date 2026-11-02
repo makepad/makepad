@@ -163,6 +163,12 @@ pub fn run(name: &str, policy: OnPanic, mut body: impl FnMut()) {
             set_state(i, EXITED);
             std::panic::resume_unwind(p);
         }
+        // work that gave way (preempted, the owner busy) and unwound this far: the thread goes on,
+        // nothing went wrong, and it uses up none of its restarts
+        if crate::jit::panic_payload(&*p).1 {
+            crate::inspect::flightrec::event("thread.bail", name, restarts as u64, policy as u64);
+            continue;
+        }
         restarts += 1;
         let line = crate::zone_alloc::kept_with(|| panic_line(&*p));
         {

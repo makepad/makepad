@@ -188,6 +188,7 @@ pub fn feature_edge_chain(positions: &[[f64; 3]], indices: &[u32], at: [f64; 3])
     let mesh = TriMesh {
         vertices: positions.iter().map(|p| xyz(*p)).collect(),
         triangles: indices.chunks_exact(3).map(|t| [t[0], t[1], t[2]]).collect(),
+        corner_normals: Vec::new(),
     };
     crate::feature_edges(&mesh, 20.0).into_iter().map(|edge| {
         let mut points: Vec<_> = edge.points.into_iter().map(array).collect();
@@ -581,6 +582,9 @@ pub struct ThicknessSample {
     pub thickness: f64,
     /// Surface area this sample stands for (mm²).
     pub area: f64,
+    /// The far side faces back within 30 degrees: a wall of this thickness. Otherwise a wedge
+    /// (a thread's ridge, a chamfered edge), which only narrows at its tip.
+    pub wall: bool,
 }
 
 /// Thickness from every triangle's centroid (at most `max` samples, the
@@ -601,8 +605,9 @@ pub fn thickness_samples(mesh: &TriMesh, max: usize) -> Vec<ThicknessSample> {
             continue;
         }
         let at = (a + b + c) / 3.0;
-        if let Some(t) = thickness_at(&bvh, at, n, Some(i as u32)) {
-            out.push(ThicknessSample { at, normal: n, thickness: t, area: area(i) });
+        if let Some((t, far)) = bvh.ray(at - n * 1e-6, n * -1.0, 1e4, Some(i as u32)) {
+            let wall = mesh.triangle_normal(far as usize).dot(n) < -(30f64.to_radians().cos());
+            out.push(ThicknessSample { at, normal: n, thickness: t, area: area(i), wall });
         }
     }
     out

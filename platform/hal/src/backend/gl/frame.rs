@@ -67,6 +67,7 @@ pub(super) struct DrawJob {
     /// Some(max) = blended with MAX instead of ADD
     pub blend: Option<bool>,
     pub depth_write: bool,
+    pub depth_greater: bool,
     pub cull: bool,
     pub scissor: [i32; 4],
     pub draw_buffers: u32,
@@ -412,7 +413,7 @@ impl GlBackend {
             s.ledger.touch(Kind::Buffer, id.index, id.gen, s.frame, now);
         }
         Ok(Some(DrawJob { program, vb, ib, index_u32, index: d.index, blocks, buffers, textures, twins, pick: pick_words, instances, stride,
-            ranges, blend, depth_write: depth.is_some() && d.flags & Draw::DEPTH_WRITE != 0, cull: d.flags & Draw::CULL != 0, scissor, draw_buffers }))
+            ranges, blend, depth_write: depth.is_some() && d.flags & Draw::DEPTH_WRITE != 0, depth_greater: d.flags & Draw::DEPTH_GREATER != 0, cull: d.flags & Draw::CULL != 0, scissor, draw_buffers }))
     }
 }
 
@@ -423,6 +424,7 @@ struct Bound {
     draw_buffers: Option<u32>,
     blend: Option<Option<bool>>,
     depth_write: Option<bool>,
+    depth_greater: Option<bool>,
     cull: Option<bool>,
 }
 
@@ -561,6 +563,10 @@ impl Renderer {
                     None => (gl.glDisable)(sys::BLEND),
                 }
                 bound.blend = Some(d.blend);
+            }
+            if bound.depth_greater != Some(d.depth_greater) {
+                (gl.glDepthFunc)(if d.depth_greater { sys::GREATER } else { sys::LEQUAL });
+                bound.depth_greater = Some(d.depth_greater);
             }
             if bound.depth_write != Some(d.depth_write) {
                 (gl.glDepthMask)(d.depth_write as u8);

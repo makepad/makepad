@@ -56,7 +56,7 @@ pub enum Life {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Home {
     /// A fresh folder of its own (`SANDBOX_HOME`/`MAKEPAD_HOME`), deleted
-    /// after it exits: a demo starts from a clean state.
+    /// after it exits: the child starts from a clean state.
     Scratch,
     /// The person's own home: what the child keeps (a browser profile)
     /// survives it.
@@ -765,7 +765,7 @@ fn clear_folder(folder: &Path) {
 /// is the environment variable (empty when unset), `${NAME:-text}` is the
 /// variable or, when unset or empty, `text`; a leading `~` (alone or before
 /// a `/`), after that, is the home folder. So a host names a folder on any
-/// machine: `["--cwd", "${MAKEPAD_DEMO_REPO:-~/makepad}"]`. A `${` without
+/// machine: `["--cwd", "${WORKSPACE_ROOT:-~/workspace}"]`. A `${` without
 /// its `}` stays as written.
 pub fn expand_home(value: &str) -> String {
     expand_with(value, &|name| std::env::var(name).ok().filter(|value| !value.is_empty()))
@@ -912,7 +912,7 @@ mod tests {
         assert_eq!(expand_with("${REPO}/local", &env), "/srv/repo/local");
         assert_eq!(expand_with("${REPO:-~/makepad}/local", &env), "/srv/repo/local");
         assert_eq!(expand_with("${MISSING:-~/makepad}", &env), "/home/me/makepad");
-        assert_eq!(expand_with("${MISSING:-~/makepad}/local/scope-demo/home", &env), "/home/me/makepad/local/scope-demo/home");
+        assert_eq!(expand_with("${MISSING:-~/workspace}/src", &env), format!("{}/workspace/src", env("HOME").unwrap()));
         assert_eq!(expand_with("a${MISSING}b", &env), "ab");
         assert_eq!(expand_with("${A:-x}-${B:-y}", &env), "x-y");
         assert_eq!(expand_with("${unterminated", &env), "${unterminated");

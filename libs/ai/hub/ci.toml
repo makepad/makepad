@@ -1,0 +1,4 @@
+# CI (devhub ci): [ci] is hand-written settings; the other sections are proofs devhub writes.
+
+[ci]
+test_features = "claude-stub,flux,paint,tts,indextts,video,interpolate,audio,mesh,matte-native,depth-native,segment-native,body-native,upscale-native,motion-native,splat-native,rig-native,beats-native,stems-native,notes-native"

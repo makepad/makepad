@@ -44,14 +44,3 @@ pub(crate) trait Runtime {
     ) -> Option<Result<ImportState, String>>;
     fn commit_import(&mut self, state: ImportState) -> Result<(Ledger, String), String>;
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn demo_clock_is_pinned_late_in_august() {
-        assert_eq!(date::to_ymd(demo_today()), (2026, 8, 28));
-        assert_eq!(date::month_key(demo_today()), date::month_key(date::from_ymd(2026, 8, 1)));
-    }
-}

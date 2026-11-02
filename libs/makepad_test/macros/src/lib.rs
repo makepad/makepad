@@ -1,6 +1,14 @@
 use makepad_micro_proc_macro::{error, TokenBuilder};
 use proc_macro::{Delimiter, Ident, TokenStream, TokenTree};
 
+/// Wraps a test taking one app argument in the current package's test runtime.
+///
+/// Multiple app arguments are rejected:
+/// ```compile_fail
+/// use makepad_test_macros::makepad_test;
+/// #[makepad_test]
+/// fn bad(one: (), two: ()) {}
+/// ```
 #[proc_macro_attribute]
 pub fn makepad_test(attr: TokenStream, item: TokenStream) -> TokenStream {
     expand_makepad_test(attr, item).unwrap_or_else(error)

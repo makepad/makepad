@@ -1654,23 +1654,23 @@ pub(crate) mod test {
     pub const _05_05i: Complex64 = Complex::new(0.5, 0.5);
     pub const all_consts: [Complex64; 5] = [_0_0i, _1_0i, _1_1i, _neg1_1i, _05_05i];
     pub const _4_2i: Complex64 = Complex::new(4.0, 2.0);
-    pub const _1_infi: Complex64 = Complex::new(1.0, f64::INFINITY);
-    pub const _neg1_infi: Complex64 = Complex::new(-1.0, f64::INFINITY);
-    pub const _1_nani: Complex64 = Complex::new(1.0, f64::NAN);
-    pub const _neg1_nani: Complex64 = Complex::new(-1.0, f64::NAN);
-    pub const _inf_0i: Complex64 = Complex::new(f64::INFINITY, 0.0);
-    pub const _neginf_1i: Complex64 = Complex::new(f64::NEG_INFINITY, 1.0);
-    pub const _neginf_neg1i: Complex64 = Complex::new(f64::NEG_INFINITY, -1.0);
-    pub const _inf_1i: Complex64 = Complex::new(f64::INFINITY, 1.0);
-    pub const _inf_neg1i: Complex64 = Complex::new(f64::INFINITY, -1.0);
-    pub const _neginf_infi: Complex64 = Complex::new(f64::NEG_INFINITY, f64::INFINITY);
-    pub const _inf_infi: Complex64 = Complex::new(f64::INFINITY, f64::INFINITY);
-    pub const _neginf_nani: Complex64 = Complex::new(f64::NEG_INFINITY, f64::NAN);
-    pub const _inf_nani: Complex64 = Complex::new(f64::INFINITY, f64::NAN);
-    pub const _nan_0i: Complex64 = Complex::new(f64::NAN, 0.0);
-    pub const _nan_1i: Complex64 = Complex::new(f64::NAN, 1.0);
-    pub const _nan_neg1i: Complex64 = Complex::new(f64::NAN, -1.0);
-    pub const _nan_nani: Complex64 = Complex::new(f64::NAN, f64::NAN);
+    pub const _1_infi: Complex64 = Complex::new(1.0, <f64>::INFINITY);
+    pub const _neg1_infi: Complex64 = Complex::new(-1.0, <f64>::INFINITY);
+    pub const _1_nani: Complex64 = Complex::new(1.0, <f64>::NAN);
+    pub const _neg1_nani: Complex64 = Complex::new(-1.0, <f64>::NAN);
+    pub const _inf_0i: Complex64 = Complex::new(<f64>::INFINITY, 0.0);
+    pub const _neginf_1i: Complex64 = Complex::new(<f64>::NEG_INFINITY, 1.0);
+    pub const _neginf_neg1i: Complex64 = Complex::new(<f64>::NEG_INFINITY, -1.0);
+    pub const _inf_1i: Complex64 = Complex::new(<f64>::INFINITY, 1.0);
+    pub const _inf_neg1i: Complex64 = Complex::new(<f64>::INFINITY, -1.0);
+    pub const _neginf_infi: Complex64 = Complex::new(<f64>::NEG_INFINITY, <f64>::INFINITY);
+    pub const _inf_infi: Complex64 = Complex::new(<f64>::INFINITY, <f64>::INFINITY);
+    pub const _neginf_nani: Complex64 = Complex::new(<f64>::NEG_INFINITY, <f64>::NAN);
+    pub const _inf_nani: Complex64 = Complex::new(<f64>::INFINITY, <f64>::NAN);
+    pub const _nan_0i: Complex64 = Complex::new(<f64>::NAN, 0.0);
+    pub const _nan_1i: Complex64 = Complex::new(<f64>::NAN, 1.0);
+    pub const _nan_neg1i: Complex64 = Complex::new(<f64>::NAN, -1.0);
+    pub const _nan_nani: Complex64 = Complex::new(<f64>::NAN, <f64>::NAN);
 
     #[test]
     fn test_consts() {
@@ -1759,8 +1759,6 @@ pub(crate) mod test {
     #[cfg(any(feature = "std", feature = "libm"))]
     pub(crate) mod float {
 
-        use core::f64::INFINITY;
-
         use super::*;
         use num_traits::{Float, Pow};
 
@@ -1774,7 +1772,6 @@ pub(crate) mod test {
         }
 
         #[test]
-        #[cfg_attr(target_arch = "x86", ignore)]
         // FIXME #7158: (maybe?) currently failing on x86.
         #[allow(clippy::float_cmp)]
         fn test_norm() {
@@ -1909,11 +1906,11 @@ pub(crate) mod test {
             assert!(close_naninf(_neginf_neg1i.exp(), 0.0 * Complex::cis(-1.0)));
             assert!(close_naninf(
                 _inf_1i.exp(),
-                f64::INFINITY * Complex::cis(1.0)
+                <f64>::INFINITY * Complex::cis(1.0)
             ));
             assert!(close_naninf(
                 _inf_neg1i.exp(),
-                f64::INFINITY * Complex::cis(-1.0)
+                <f64>::INFINITY * Complex::cis(-1.0)
             ));
             assert!(close_naninf(_neginf_infi.exp(), _0_0i)); // Note: ±0±0i: signs of zeros are unspecified
             assert!(close_naninf(_inf_infi.exp(), _inf_nani)); // Note: ±∞+NaN*i: sign of the real part is unspecified
@@ -1956,10 +1953,10 @@ pub(crate) mod test {
             ));
             let z = Complex::new(0.0, 0.0);
             assert!(close(z.powc(b), z));
-            assert!(z.powc(Complex64::new(0., INFINITY)).is_nan());
-            assert!(z.powc(Complex64::new(10., INFINITY)).is_nan());
-            assert!(z.powc(Complex64::new(INFINITY, INFINITY)).is_nan());
-            assert!(close(z.powc(Complex64::new(INFINITY, 0.)), z));
+            assert!(z.powc(Complex64::new(0., <f64>::INFINITY)).is_nan());
+            assert!(z.powc(Complex64::new(10., <f64>::INFINITY)).is_nan());
+            assert!(z.powc(Complex64::new(<f64>::INFINITY, <f64>::INFINITY)).is_nan());
+            assert!(close(z.powc(Complex64::new(<f64>::INFINITY, 0.)), z));
             assert!(z.powc(Complex64::new(-1., 0.)).re.is_infinite());
             assert!(z.powc(Complex64::new(-1., 0.)).im.is_nan());
 
@@ -2744,21 +2741,21 @@ pub(crate) mod test {
     #[test]
     fn test_is_nan() {
         assert!(!_1_1i.is_nan());
-        let a = Complex::new(f64::NAN, f64::NAN);
+        let a = Complex::new(<f64>::NAN, <f64>::NAN);
         assert!(a.is_nan());
     }
 
     #[test]
     fn test_is_nan_special_cases() {
-        let a = Complex::new(0f64, f64::NAN);
-        let b = Complex::new(f64::NAN, 0f64);
+        let a = Complex::new(0f64, <f64>::NAN);
+        let b = Complex::new(<f64>::NAN, 0f64);
         assert!(a.is_nan());
         assert!(b.is_nan());
     }
 
     #[test]
     fn test_is_infinite() {
-        let a = Complex::new(2f64, f64::INFINITY);
+        let a = Complex::new(2f64, <f64>::INFINITY);
         assert!(a.is_infinite());
     }
 
@@ -2769,8 +2766,8 @@ pub(crate) mod test {
 
     #[test]
     fn test_is_normal() {
-        let a = Complex::new(0f64, f64::NAN);
-        let b = Complex::new(2f64, f64::INFINITY);
+        let a = Complex::new(0f64, <f64>::NAN);
+        let b = Complex::new(2f64, <f64>::INFINITY);
         assert!(!a.is_normal());
         assert!(!b.is_normal());
         assert!(_1_1i.is_normal());

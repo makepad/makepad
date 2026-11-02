@@ -180,46 +180,6 @@ mod tests {
         }
     }
 
-    fn peak(v: &[f32]) -> f32 {
-        v.iter().fold(0.0f32, |m, x| m.max(x.abs()))
-    }
-
-    fn part(program: &str, notes: &str) -> String {
-        format!("use mod.score.*\nlet clock = Clock{{bpm: 90}}\nlet gm = Instrument{{kind: @soundfont program: @{program}}}\nlet line = Loop{{play: gm beats: 4 code: fn(i) {{ play({notes}, {{dur: 3}}) sleep(4) }}}}\nScore{{clock gm line}}\n")
-    }
-
-    #[test]
-    fn gm_parts_render_with_the_font_or_say_why_not() {
-        use crate::render::{render, RenderOpts};
-        let strings = part("strings", "[@c3 @g3 @e4]");
-        let doc = crate::model::ScoreDoc::load(&strings).unwrap_or_else(|d| panic!("{d:?}"));
-        assert!(doc.plays_gm_font() && doc.files().is_empty());
-        assert!(crate::model::ScoreDoc::load(&part("kazoo", "@c4")).is_err(), "an unknown program name is an error");
-        let opts = RenderOpts { seconds: Some(2.0), ..RenderOpts::default() };
-        if !registered() {
-            // Nowhere to be found: the render fails and says what to do.
-            let saved = std::env::var_os("MAKEPAD_GM_SOUNDFONT");
-            std::env::set_var("MAKEPAD_GM_SOUNDFONT", "/nonexistent/FluidR3_GM.sf2");
-            let error = render(&strings, &opts, &crate::NoSamples).err().expect("a GM score without the font must not render");
-            match saved {
-                Some(saved) => std::env::set_var("MAKEPAD_GM_SOUNDFONT", saved),
-                None => std::env::remove_var("MAKEPAD_GM_SOUNDFONT"),
-            }
-            assert!(error[0].message.contains("not installed") && error[0].message.contains("Install the GM SoundFont"), "{error:?}");
-        }
-        if path().is_none() {
-            eprintln!("gm_font: {} is not installed at {}: the render check needs it", TITLE, install_path().display());
-            return;
-        }
-        // Strings, brass and choir, each on its own: every one sounds.
-        for (program, notes) in [("strings", "[@c3 @g3 @e4]"), ("brass", "[@f3 @c4 @a4]"), ("choir", "[@a3 @e4 @c5]"), ("french_horn", "@f3")] {
-            let r = render(&part(program, notes), &opts, &crate::NoSamples).unwrap_or_else(|d| panic!("{program}: {d:?}"));
-            let level = peak(&r.left).max(peak(&r.right));
-            eprintln!("gm_font: {program} peak {level:.3}");
-            assert!(level > 0.01 && r.left.iter().all(|x| x.is_finite()), "{program} is silent (peak {level})");
-        }
-    }
-
     #[test]
     fn the_font_lives_in_the_weights_folder() {
         assert!(install_path().ends_with("weights/soundfonts/FluidR3_GM.sf2") || std::env::var_os("MAKEPAD_ASSET_AI_CACHE").is_some());

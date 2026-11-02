@@ -233,6 +233,10 @@ pub struct WindowObj {
     pub topmost: bool,
     /// a host window an app may take over (session 0 only)
     pub adoptable: bool,
+    /// An adoptable host window whose geometry is the user's (remembered from an earlier run) or
+    /// a launch size: the app that adopts it keeps it. Otherwise the app's first window gets the
+    /// size it asks for, as it would natively.
+    pub keeps_geom: bool,
     /// An alias entry of an app: the complete host window id it stands for.
     pub alias_of: Option<Id>,
     /// a window of a child domain: no OS window, a render target lent to the parent
@@ -434,7 +438,10 @@ pub const EMBEDDED_FRAME_NS: u64 = 16_666_667;
 pub struct Session {
     pub id: u32,
     pub app_key: u64,
-    /// the dpi factor the backend reported for this session's windows
+    /// the scale a window of this session starts at, until the window system gives the window
+    /// its own (each window keeps its own: `WindowObj::dpi`, read by [`Session::window_dpi`]);
+    /// set when the session opens or adopts a window, never by one window's geometry (a headset's
+    /// XR window at scale 1 beside a retina window at 2)
     pub dpi: f32,
     pub strings: FastMap<StrId, String>,
     pub textures: Table<TextureObj>,
@@ -448,6 +455,9 @@ pub struct Session {
     /// the frame id of the newest frame submitted / finished
     pub frame: u64,
     pub last_frame_done: u64,
+    /// dropped frames `(wait_for_submitted_serial, target, frame, now)` held until the
+    /// preceding submitted frame on this session completes so `FrameDone` stays in order
+    pub dropped_frames: Vec<(u64, Id, u64, u64)>,
     /// Headless inspection: the last frame's layer records. Occluder ranges address
     /// `last_frame_occluders`; draw ranges retain the submitted packet's indices.
     pub last_frame_layers: Vec<Layer>,
@@ -483,6 +493,11 @@ pub struct Session {
 }
 
 impl Session {
+    /// The scale of this session's window `id`: its own, or the session's starting one.
+    pub fn window_dpi(&self, id: Id) -> f32 {
+        self.windows.get(self.id, id).ok().and_then(|w| w.val.dpi).unwrap_or(self.dpi)
+    }
+
     fn new(id: u32, app_key: u64) -> Session {
         Session {
             id,
@@ -509,6 +524,7 @@ impl Session {
             stats: Stats::default(),
             frame: 0,
             last_frame_done: 0,
+            dropped_frames: Vec::new(),
             last_frame_layers: Vec::new(),
             last_frame_occluders: Vec::new(),
             embedded_frames: Vec::new(),
@@ -891,7 +907,24 @@ impl World {
         } else {
             None
         };
-        self.to_session(sid, |q| q.frame_done(target, frame, gpu_ns, present_ns, gpu_span[0], gpu_span[1]));
+        let done = s.last_frame_done;
+        let mut ready = Vec::new();
+        let mut i = 0;
+        while i < s.dropped_frames.len() {
+            if s.dropped_frames[i].0 <= done {
+                let (_, d_target, d_frame, d_now) = s.dropped_frames.remove(i);
+                s.last_frame_done = s.last_frame_done.max(d_frame);
+                ready.push((d_target, d_frame, d_now));
+            } else {
+                i += 1;
+            }
+        }
+        self.to_session(sid, |q| {
+            q.frame_done(target, frame, gpu_ns, present_ns, gpu_span[0], gpu_span[1]);
+            for (d_target, d_frame, d_now) in ready {
+                q.frame_done(d_target, d_frame, 0, d_now, 0.0, 0.0);
+            }
+        });
         if let Some((parent, texture)) = lent {
             self.to_session(parent, |q| q.child_frame(target, sid, texture, frame));
         }
@@ -1065,8 +1098,8 @@ impl World {
             ns.dpi = dpi;
             ns.attached = false;
             self.sessions.insert(id, ns);
-            // the ended session's one quit went to the run that is gone (a stop that timed out
-            // crashed it): the new run under this id must never hear it
+            // The ended session's quit belongs to the run that is gone; the
+            // new run under this id must never hear it.
             self.ended.retain(|e| *e != id);
             self.report_domain(id, domain_state::COMPILING, 0, 0.0, "relaunch");
         }
@@ -1146,7 +1179,6 @@ impl World {
             self.retire_surface(sid, parent, em);
             return None;
         }
-        s.dpi = dpi;
         self.announce_embedded(sid, id);
         Some(px)
     }
@@ -1208,7 +1240,6 @@ impl World {
         let Some(s) = self.sessions.get_mut(&sid) else { return false };
         let Ok(w) = s.windows.get_mut(sid, id) else { return false };
         let Some(old) = w.val.embedded else { return false };
-        s.dpi = dpi;
         w.val.dpi = Some(dpi);
         w.val.geom[2] = size[0];
         w.val.geom[3] = size[1];
@@ -1293,16 +1324,15 @@ impl World {
 
     /// A geometry notification updates the canonical host window too. Its host hears changes
     /// while the window is lent, so persistence never depends on the app surviving a crash.
+    /// The scale is the window's own: a session's windows can sit at different scales.
     pub fn window_geom(&mut self, sid: u32, id: Id, geom: [f32; 4], dpi: f32, state: u32) {
         let Some(s) = self.sessions.get_mut(&sid) else { return };
         let Ok(w) = s.windows.get_mut(sid, id) else { return };
-        s.dpi = dpi;
         w.val.geom = geom;
         w.val.dpi = Some(dpi);
         w.val.state = state;
         let Some(hid) = w.val.alias_of else { return };
         if let Some(host) = self.sessions.get_mut(&HOST) {
-            host.dpi = dpi;
             if let Ok(w) = host.windows.get_mut(HOST, hid) {
                 w.val.geom = geom;
                 w.val.dpi = Some(dpi);
@@ -1320,17 +1350,19 @@ impl World {
         id
     }
 
-    pub fn host_window(&mut self, geom: [f32; 4]) -> Id {
+    /// `keeps_geom`: an app that adopts it keeps `geom` (WindowObj::keeps_geom).
+    pub fn host_window(&mut self, geom: [f32; 4], keeps_geom: bool) -> Id {
         let id = Id::new(self.next_host_window, 1);
         self.next_host_window += 1;
         let host = self.sessions.get_mut(&HOST).expect("host session");
-        let _ = host.windows.insert(HOST, id, HOST, WindowObj { geom, adoptable: true, ..Default::default() });
+        let _ = host.windows.insert(HOST, id, HOST, WindowObj { geom, adoptable: true, keeps_geom, ..Default::default() });
         id
     }
 
     /// Lends the first adoptable, unlent host window to `session` under its own `id`; the
-    /// session's table gets an alias. `None` when there is nothing to adopt.
-    pub fn adopt_window(&mut self, session: u32, id: Id) -> Option<[f32; 4]> {
+    /// session's table gets an alias. `None` when there is nothing to adopt; else the window's
+    /// geometry and whether the app keeps it (WindowObj::keeps_geom).
+    pub fn adopt_window(&mut self, session: u32, id: Id) -> Option<([f32; 4], bool)> {
         if session == HOST || !self.sessions.get(&session)?.windows.can_insert(session, id) {
             return None;
         }
@@ -1342,11 +1374,11 @@ impl World {
         e.val.borrower_frame = false;
         e.val.borrower_presented = false;
         let alias = WindowObj { alias_of: Some(pick), overlay: None, ..e.val.clone() };
-        let geom = e.val.geom;
+        let (geom, keeps) = (e.val.geom, e.val.keeps_geom);
         let s = self.sessions.get_mut(&session)?;
         s.dpi = dpi;
         s.windows.insert(session, id, HOST, alias).ok()?;
-        Some(geom)
+        Some((geom, keeps))
     }
 
     fn unlend(&mut self, id: Id) {

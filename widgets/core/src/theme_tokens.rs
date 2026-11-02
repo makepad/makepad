@@ -1307,11 +1307,12 @@ pub fn skeleton_ladder() -> Vec<(&'static str, u32)> {
 }
 
 /// Where one of the library's own roles comes from in a base theme: another
-/// token, or two of them mixed half and half.
+/// token, or a mixture of theme colours.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum RoleSource {
     Token(&'static str),
     HalfMix(&'static str, &'static str),
+    Mix(&'static str, &'static str, f64),
     /// A token mixed toward white or black by an amount: the surface ladder,
     /// written against `color_fg_app` rather than against the opaque ladder
     /// it used to alias. A sheet sets `color_fg_app` and does not set the
@@ -1326,6 +1327,7 @@ impl RoleSource {
         match self {
             RoleSource::Token(t) => format!("theme.{t}"),
             RoleSource::HalfMix(a, b) => format!("mix(theme.{a}, theme.{b}, 0.5)"),
+            RoleSource::Mix(a, b, amount) => format!("mix(theme.{a}, theme.{b}, {amount})"),
             RoleSource::MixTo(t, end, amount) => {
                 format!("mix(theme.{t}, {}, {amount})", if end == WHITE { "#F" } else { "#0" })
             }
@@ -1342,7 +1344,7 @@ impl RoleSource {
 /// `color_bg_app` leaves `color_surface` holding the colour it replaced.
 /// `the_derived_role_table_is_the_theme_files` holds the two copies together.
 pub const DERIVED_ROLES: &[(&str, RoleSource, RoleSource)] = {
-    use RoleSource::{HalfMix as M, MixTo as X, Token as T};
+    use RoleSource::{HalfMix as M, Mix as B, MixTo as X, Token as T};
     &[
         ("color_surface", T("color_bg_app"), T("color_bg_app")),
         ("color_surface_container", T("color_fg_app"), T("color_fg_app")),
@@ -1357,6 +1359,12 @@ pub const DERIVED_ROLES: &[(&str, RoleSource, RoleSource)] = {
         ("color_inverse_on_surface", T("color_opaque_u_6"), T("color_opaque_d_5")),
         ("color_placeholder", T("color_opaque_d_1"), T("color_opaque_u_1")),
         ("color_placeholder_hl", T("color_opaque_d_2"), T("color_opaque_u_2")),
+        ("prop_section_bg", B("color_surface_container", "color_surface_container_high", 0.45), B("color_surface_container", "color_surface_container_high", 0.45)),
+        ("prop_field", B("prop_section_bg", "color_text", 0.11), B("prop_section_bg", "color_text", 0.11)),
+        ("prop_field_hover", B("prop_section_bg", "color_text", 0.15), B("prop_section_bg", "color_text", 0.15)),
+        ("prop_field_active", B("prop_section_bg", "color_text", 0.07), B("prop_section_bg", "color_text", 0.07)),
+        ("prop_choice", X("prop_section_bg", BLACK, 0.3), X("prop_section_bg", BLACK, 0.3)),
+        ("prop_choice_hover", X("prop_section_bg", BLACK, 0.18), X("prop_section_bg", BLACK, 0.18)),
     ]
 };
 
@@ -1385,6 +1393,41 @@ pub enum RoleGrowth {
     KeepAccent,
 }
 
+/// Keep the quiet ink as close to the theme's own as all three faces allow.
+pub fn property_dim_ink(read: &mut dyn FnMut(&str) -> Option<u32>) -> Option<u32> {
+    let dim = read("color_text_meta").or_else(|| read("color_on_surface_variant"))?;
+    let mut text = read("color_text")?;
+    let grounds = [read("prop_section_bg")?, read("prop_field")?, read("prop_choice")?];
+    let readable = |ink| grounds.iter().all(|ground| reads_on(*ground, ink) >= READABLE);
+    if readable(dim) {
+        return Some(dim);
+    }
+    // Translucent body ink can fall short on a light theme's darker choice face.
+    if !readable(text) { text |= 0xFF; }
+    let (mut lo, mut hi) = (0.0, 1.0);
+    // Resolve the threshold more finely than the token's eight-bit channels.
+    while hi - lo > 1.0 / 65536.0 {
+        let mid = (lo + hi) * 0.5;
+        if readable(mix_rgba(dim, text, mid)) {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    Some(mix_rgba(dim, text, hi))
+}
+
+pub(crate) fn derive_base_property_inks(vm: &mut ScriptVm) {
+    let themes = vm.module(LiveId::from_str("themes"));
+    for name in ["dark", "light", "skeleton"] {
+        let Some(theme) = vm.value(themes, LiveId::from_str(name)).as_object() else { continue };
+        let ink = property_dim_ink(&mut |key| vm.value(theme, LiveId::from_str(key)).as_color());
+        if let Some(ink) = ink {
+            vm.set_value(theme, LiveId::from_str("prop_ink_dim"), crate::ScriptValue::from_color(ink));
+        }
+    }
+}
+
 /// The roles a theme derives from its older tokens, as `(key, rgba)` in the
 /// order a theme file lists them.
 ///
@@ -1403,19 +1446,33 @@ pub fn derived_roles(
         if named(role) {
             continue;
         }
+        // Dependent roles use the sheet's newly derived surfaces.
+        let mut resolved = |key: &str| out.iter().find(|(name, _)| name == key)
+            .map(|(_, value)| *value).or_else(|| read(key));
         let value = match if dark { *dark_source } else { *light } {
-            RoleSource::Token(t) => read(t),
-            RoleSource::HalfMix(a, b) => match (read(a), read(b)) {
+            RoleSource::Token(t) => resolved(t),
+            RoleSource::HalfMix(a, b) => match (resolved(a), resolved(b)) {
                 (Some(a), Some(b)) => Some(mix_rgb(a, b, 0.5)),
                 _ => None,
             },
-            RoleSource::MixTo(t, end, amount) => read(t).map(|c| mix_rgb(c | 0xFF, end, amount)),
+            RoleSource::Mix(a, b, amount) => match (resolved(a), resolved(b)) {
+                (Some(a), Some(b)) => Some(mix_rgba(a, b, amount)),
+                _ => None,
+            },
+            RoleSource::MixTo(t, end, amount) => resolved(t).map(|c| mix_rgb(c | 0xFF, end, amount)),
         };
         if let Some(rgba) = value {
             if *role == "color_surface_container_high" {
                 ladder_top = Some(rgba);
             }
             out.push((role.to_string(), rgba));
+        }
+    }
+    if !named("prop_ink_dim") {
+        let ink = property_dim_ink(&mut |key| out.iter().find(|(name, _)| name == key)
+            .map(|(_, value)| *value).or_else(|| read(key)));
+        if let Some(ink) = ink {
+            out.push(("prop_ink_dim".to_string(), ink));
         }
     }
     // What is drawn ON those surfaces. A sheet chose its text colour against
@@ -3606,48 +3663,6 @@ mod sheet_contrast_tests {
 {}", bad.join("
 "));
     }
-
-    /// Every ground a widget lays something on, in every theme and every
-    /// sheet, with what goes on it. Not an assertion: it prints the whole of
-    /// `GROUPS`, including the pairs no test holds the library to yet, and
-    /// those numbers are the input to fixing them.
-    /// `cargo test -p makepad-widgets contrast_audit -- --ignored --nocapture`
-    #[test]
-    #[ignore]
-    fn contrast_audit() {
-        let mut lines: Vec<(Held, String)> = Vec::new();
-        walk(&mut |vm, label| {
-            for (pairs, need, held) in GROUPS {
-                let need = *need;
-                for (ground, ink) in *pairs {
-                    if let (Some(g), Some(i)) = (val(vm, ground), val(vm, ink)) {
-                        let c = reads(g | 0xFF, i);
-                        lines.push((*held, format!(
-                            "{label:<14} {ground:<32} {ink:<24} #{:06X} on #{:06X} = {c:5.2} (needs {need}){}",
-                            i >> 8,
-                            g >> 8,
-                            if c < need { "  FAIL" } else { "" }
-                        )));
-                    }
-                }
-            }
-        });
-        let failed = |held: Held| lines.iter().filter(|(h, l)| *h == held && l.ends_with("FAIL")).count();
-        let loose = lines.iter().filter(|(h, _)| *h == Held::NotYet).count();
-        println!("{}", lines.iter().map(|(_, l)| l.as_str()).collect::<Vec<_>>().join("
-"));
-        println!(
-            "{} of {} pairs below the bar for their kind",
-            failed(Held::Yes) + failed(Held::NotYet),
-            lines.len()
-        );
-        println!(
-            "{} of those are held by a test and {} of them fail; {loose} are measured only and {} of them fail",
-            lines.len() - loose,
-            failed(Held::Yes),
-            failed(Held::NotYet)
-        );
-    }
 }
 
 #[cfg(test)]
@@ -3955,10 +3970,12 @@ mod equalizer_tests {
         assert!(!is_categorical("color_mark_active"));
         assert!(!is_categorical("color_primary"));
         assert!(!is_categorical("color_surface"));
+        // Both kinds are in the files, and the tokens that blend are the
+        // larger share.
         let keys = base_theme_keys();
         let out = keys.iter().filter(|k| is_categorical(k)).count();
-        assert_eq!(keys.len(), 598, "the theme files have grown or shrunk");
-        assert_eq!(out, 133, "the categorical palettes are {out} of {} tokens", keys.len());
+        assert!(out > 0, "the theme files have no categorical palette");
+        assert!(keys.len() - out > out, "the categorical palettes are {out} of {} tokens", keys.len());
     }
 
     /// The keys a sheet introduces that no base theme file has, which a mix

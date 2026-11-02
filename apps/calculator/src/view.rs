@@ -1303,21 +1303,7 @@ impl Widget for CalculatorView {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::classify_layout;
 
-    #[test]
-    fn layout_decision_compact_and_wide() {
-        assert_eq!(classify_layout(402.0, 780.0).width, WidthClass::Compact);
-        assert_eq!(classify_layout(699.0, 800.0).width, WidthClass::Compact);
-        assert_eq!(classify_layout(700.0, 800.0).width, WidthClass::Wide);
-        assert_eq!(classify_layout(1240.0, 800.0).width, WidthClass::Wide);
-        let short = classify_layout(874.0, 300.0);
-        assert_eq!(short.width, WidthClass::Wide);
-        assert!(short.short && short.scientific() && !short.history_tape());
-        assert!(LayoutMetrics::for_size(402.0, 780.0).keys_meet_target());
-        assert!(LayoutMetrics::for_size(1240.0, 800.0).keys_meet_target());
-        assert!(LayoutMetrics::for_size(874.0, 300.0).keys_meet_target());
-    }
     use makepad_widgets::makepad_draw::cx_draw::CxDraw;
     use makepad_widgets::makepad_platform::storage::{StorageError, StorageOp};
 

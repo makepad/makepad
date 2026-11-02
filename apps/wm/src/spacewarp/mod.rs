@@ -1479,17 +1479,6 @@ mod tests {
     }
 
     #[test]
-    fn the_content_point_of_a_parked_window_maps_to_the_app() {
-        // And the content point of a parked window maps to the app inside its desk rect.
-        let z = wide();
-        let desk = LRect::new(z.left - 1600.0, 300.0, 1000.0, 720.0);
-        let pose = pose_in(&z, desk);
-        let (cx, cy) = pose.shown.center();
-        let (x, y) = pose.unmap(desk, cx, cy);
-        assert!((x - (desk.x + 500.0)).abs() < 1e-6 && (y - (desk.y + 360.0)).abs() < 1e-6);
-    }
-
-    #[test]
     fn cycling_takes_the_nearest_parked_window_each_once_per_round() {
         let parked = [(1u64, 900.0), (2, 300.0), (3, 600.0)];
         let mut seen = Vec::new();

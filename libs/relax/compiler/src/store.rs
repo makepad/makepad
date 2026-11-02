@@ -543,18 +543,6 @@ impl Store {
         self.data.get(e.off as usize..e.off as usize + e.len as usize).is_some_and(|p| sum64(p) == e.sum)
     }
 
-    /// Compare a streamed entry with the checked index, then verify the old payload
-    /// without mapping it in. A damaged old payload must still be replaced.
-    pub fn matches_entry(&self, entry: &impl Entry, len: usize) -> bool {
-        let Ok(i) = self.index.binary_search_by_key(&entry.key(), |e| e.key) else { return false; };
-        let e = &self.index[i];
-        if e.kind != entry.kind() || e.len as usize != len { return false; }
-        let mut sink = std::io::sink();
-        let mut out = PayloadWriter { out: &mut sink, sum: Sum64::new() };
-        entry.write_payload(&mut out).is_ok() && out.sum.len == len as u64
-            && out.sum.finish() == e.sum && self.verify_at(i)
-    }
-
     /// Whether the entry `key` holds exactly a payload of `len` bytes with checksum `sum`
     /// (from `entry_sum`), checked against the payload on disk.
     pub fn matches_sum(&self, key: u128, kind: u32, len: u32, sum: u64) -> bool {

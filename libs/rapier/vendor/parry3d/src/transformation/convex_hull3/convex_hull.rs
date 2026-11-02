@@ -508,23 +508,7 @@ fn attach_and_push_facets(
 
 #[cfg(test)]
 mod test {
-    #[cfg(feature = "dim2")]
-    use crate::math::Vector2;
     use crate::transformation;
-
-    #[cfg(feature = "dim2")]
-    #[test]
-    fn test_simple_convex_hull() {
-        let points = [
-            Vector::new(4.723881f32, 3.597233),
-            Vector::new(3.333363, 3.429991),
-            Vector::new(3.137215, 2.812263),
-        ];
-
-        let chull = transformation::convex_hull(points.as_slice());
-
-        assert!(chull.len() == 3);
-    }
 
     #[cfg(feature = "dim3")]
     #[test]

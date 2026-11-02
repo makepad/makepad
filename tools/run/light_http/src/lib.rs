@@ -10,9 +10,9 @@
 use std::io::Write;
 use std::time::Duration;
 
-#[cfg(target_os = "macos")]
+#[cfg(target_vendor = "apple")]
 mod apple;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
 mod h1;
 #[cfg(target_os = "linux")]
 mod openssl;
@@ -109,7 +109,7 @@ pub fn send(req: &Request, out: &mut dyn Write, progress: &mut dyn FnMut(u64, Op
             return Err(format!("invalid header {n}"));
         }
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(target_vendor = "apple")]
     {
         if url.https {
             return apple::send(req, out, progress);
@@ -124,7 +124,7 @@ pub fn send(req: &Request, out: &mut dyn Write, progress: &mut dyn FnMut(u64, Op
     {
         winhttp::send(req, &url, out, progress)
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+    #[cfg(not(any(target_vendor = "apple", target_os = "linux", windows)))]
     {
         let _ = (url, out, progress);
         Err("no HTTP client on this platform".into())

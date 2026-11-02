@@ -893,6 +893,7 @@ impl Renderer {
         let pbr_lane = draw.is_pbr();
         self.clustered.bind(cx.cx, &mut draw.base().draw_vars, self.clustered_enabled);
         self.gi.bind(cx.cx, &mut draw.base().draw_vars);
+        self.bind_output_dither(cx.cx, &mut draw.base().draw_vars);
         // An IBL program's control of its two lookups: the lane's scale,
         // and for the stock IBL program whether the fill comes from the
         // map (renderer/stock_ibl.rs). After the GI: it reads the gi_on

@@ -15,12 +15,12 @@ fn take_mut<'a, T>(s: &mut &'a mut [T]) -> &'a mut [T] {
 // remaining elements in bytes past `ptr` (the pointer never moves).
 
 #[inline]
-fn zst<T>() -> bool {
+const fn zst<T>() -> bool {
     crate::mem::size_of::<T>() == 0
 }
 
 #[inline]
-fn end_of<T>(p: *const T, len: usize) -> *const T {
+const fn end_of<T>(p: *const T, len: usize) -> *const T {
     if zst::<T>() {
         (p as *const u8).wrapping_add(len) as *const T
     } else {
@@ -50,7 +50,7 @@ pub fn iter<T>(s: &[T]) -> Iter<'_, T> {
 }
 
 impl<'a, T> Iter<'a, T> {
-    pub(crate) fn new(s: &'a [T]) -> Iter<'a, T> {
+    pub(crate) const fn new(s: &'a [T]) -> Iter<'a, T> {
         let ptr = s.as_ptr();
         Iter { ptr, end: end_of(ptr, s.len()), _m: crate::marker::PhantomData }
     }
@@ -201,7 +201,7 @@ pub fn iter_mut<T>(s: &mut [T]) -> IterMut<'_, T> {
 }
 
 impl<'a, T> IterMut<'a, T> {
-    pub(crate) fn new(s: &'a mut [T]) -> IterMut<'a, T> {
+    pub(crate) const fn new(s: &'a mut [T]) -> IterMut<'a, T> {
         let len = s.len();
         let ptr = s.as_mut_ptr();
         IterMut { ptr, end: end_of(ptr as *const T, len) as *mut T, _m: crate::marker::PhantomData }

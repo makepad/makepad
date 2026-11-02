@@ -42,6 +42,8 @@ pub const QUERY_BODY_INITIAL_SCOPE: u32 = 20;
 /// `ip`: the whole source text of the body holding it (text0); `at.line` is the line its
 /// first line has in the file (what [`QUERY_IP_TO_LOC`] lines count from).
 pub const QUERY_BODY_TEXT: u32 = 21;
+/// `index`: the body, `id`: the binding's name; the doc of that `let` / `var` is on text0.
+pub const QUERY_BODY_LET_DOC: u32 = 22;
 
 /// The channels a query writes on.
 pub const CH_TEXT0: u32 = 0;
@@ -224,6 +226,20 @@ impl ScriptVmBase {
 }
 
 impl ScriptCode {
+    /// The doc on the `let` / `var` named `name` in body `body` (JIT-callable: a query, not a field read).
+    #[inline(always)]
+    pub fn body_let_doc(&self, body: u16, name: LiveId) -> Option<String> {
+        let mut text = String::new();
+        let mut out = crate::vm_api::ScriptTextOut::new(&mut text);
+        let mut sink = ScriptQuerySink::new();
+        sink.text0(&mut out);
+        let found = self.query(QUERY_BODY_LET_DOC, &mut sink, |req| {
+            req.index = body as usize;
+            req.id = name;
+        });
+        found.found.then_some(text)
+    }
+
     /// Runs the code query `kind` ([`Self::code_query`]) with `set` filling in the request, its
     /// text and records going to `sink`.
     #[inline(always)]
@@ -354,6 +370,13 @@ impl ScriptCode {
             QUERY_FIELD_LOC => self.field_loc_native(req.ip, req.id, &mut text0, &mut req.at),
             QUERY_IP_LINE_TEXT => self.ip_line_text_native(req.ip, &mut text0),
             QUERY_BODY_TEXT => self.ip_body_text_native(req.ip, &mut text0, &mut req.at),
+            QUERY_BODY_LET_DOC => match self.resolve_body_let_docs(req.index as u16).into_iter().find(|d| d.name == req.id) {
+                Some(d) => {
+                    text0.push(&d.text);
+                    true
+                }
+                None => false,
+            },
             QUERY_BODY_MODULE => {
                 let bodies = self.bodies.borrow();
                 match bodies.get(req.index).map(|b| &b.source) {

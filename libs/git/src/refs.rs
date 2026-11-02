@@ -195,7 +195,7 @@ fn collect_refs_under(
 ) -> Result<(), GitError> {
     let prefix_path = dir.join(prefix);
     if prefix_path.is_dir() {
-        collect_loose_refs(dir, &prefix_path, prefix, result)?;
+        collect_loose_refs(&prefix_path, prefix, result)?;
     } else if prefix_path.is_file() && !prefix.is_empty() {
         let content = fs::read_to_string(&prefix_path)?;
         let content = content.trim_end();
@@ -283,9 +283,8 @@ pub fn list_refs(git_dir: &Path, prefix: &str) -> Result<Vec<Ref>, GitError> {
 }
 
 fn collect_loose_refs(
-    git_dir: &Path,
     dir: &Path,
-    prefix: &str,
+    dir_name: &str,
     result: &mut HashMap<String, RefTarget>,
 ) -> Result<(), GitError> {
     let entries = match fs::read_dir(dir) {
@@ -297,24 +296,26 @@ fn collect_loose_refs(
     for entry in entries {
         let entry = entry?;
         let path = entry.path();
+        // Ref names are `/`-separated on every platform, so the name is
+        // built from the components walked, never from the OS path.
+        let file_name = entry.file_name();
+        let file_name = file_name.to_string_lossy();
+        let name = if dir_name.is_empty() || dir_name.ends_with('/') {
+            format!("{dir_name}{file_name}")
+        } else {
+            format!("{dir_name}/{file_name}")
+        };
         if path.is_dir() {
-            collect_loose_refs(git_dir, &path, prefix, result)?;
+            collect_loose_refs(&path, &name, result)?;
         } else if path.is_file() {
-            // Compute ref name relative to git_dir
-            let rel = path
-                .strip_prefix(git_dir)
-                .map_err(|_| GitError::InvalidRef("cannot strip git_dir prefix".into()))?;
-            let name = rel.to_string_lossy().to_string();
-            if name.starts_with(prefix) {
-                let content = fs::read_to_string(&path)?;
-                let content = content.trim_end();
-                let target = if let Some(rest) = content.strip_prefix("ref: ") {
-                    RefTarget::Symbolic(rest.to_string())
-                } else {
-                    RefTarget::Direct(ObjectId::from_hex(content)?)
-                };
-                result.insert(name, target);
-            }
+            let content = fs::read_to_string(&path)?;
+            let content = content.trim_end();
+            let target = if let Some(rest) = content.strip_prefix("ref: ") {
+                RefTarget::Symbolic(rest.to_string())
+            } else {
+                RefTarget::Direct(ObjectId::from_hex(content)?)
+            };
+            result.insert(name, target);
         }
     }
     Ok(())
@@ -378,6 +379,33 @@ mod tests {
             Some(RefTarget::Direct(read_oid)) => assert_eq!(read_oid, oid),
             other => panic!("expected Direct, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_list_refs_names_use_slashes() {
+        // Loose ref names are `/`-separated on every platform: a nested ref
+        // read back from the file system keeps that spelling (on Windows the
+        // OS path separator must not leak into the name).
+        let dir = crate::test_support::tempdir().unwrap();
+        let git_dir = dir.path();
+        let oid = ObjectId::from_hex("552e2a0e14dd313f5f572118a18fba67ad99699c").unwrap();
+        write_ref(git_dir, "refs/tags/v1", &oid).unwrap();
+        write_ref(git_dir, "refs/heads/main", &oid).unwrap();
+        write_ref(git_dir, "refs/heads/feature/deep/x", &oid).unwrap();
+
+        let names = |prefix: &str| -> Vec<String> {
+            list_refs(git_dir, prefix).unwrap().into_iter().map(|r| r.name).collect()
+        };
+        assert_eq!(names("refs/tags/"), vec!["refs/tags/v1"]);
+        assert_eq!(names("refs/tags"), vec!["refs/tags/v1"]);
+        assert_eq!(
+            names("refs/heads/"),
+            vec!["refs/heads/feature/deep/x", "refs/heads/main"]
+        );
+        assert_eq!(
+            names("refs/"),
+            vec!["refs/heads/feature/deep/x", "refs/heads/main", "refs/tags/v1"]
+        );
     }
 
     #[test]

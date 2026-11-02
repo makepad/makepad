@@ -63,19 +63,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(f16_enabled)]
-    fn sanity_check_f16() {
-        assert_eq!(fabsf16(-1.0f16), 1.0);
-        assert_eq!(fabsf16(2.8f16), 2.8);
-    }
-
-    #[test]
-    #[cfg(f16_enabled)]
-    fn spec_tests_f16() {
-        spec_test::<f16>(fabsf16);
-    }
-
-    #[test]
     fn sanity_check_f32() {
         assert_eq!(fabsf(-1.0f32), 1.0);
         assert_eq!(fabsf(2.8f32), 2.8);
@@ -97,16 +84,4 @@ mod tests {
         spec_test::<f64>(fabs);
     }
 
-    #[test]
-    #[cfg(f128_enabled)]
-    fn sanity_check_f128() {
-        assert_eq!(fabsf128(-1.0f128), 1.0);
-        assert_eq!(fabsf128(2.8f128), 2.8);
-    }
-
-    #[test]
-    #[cfg(f128_enabled)]
-    fn spec_tests_f128() {
-        spec_test::<f128>(fabsf128);
-    }
 }

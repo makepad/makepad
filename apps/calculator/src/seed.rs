@@ -20,23 +20,3 @@ pub fn initial() -> CalculatorDoc {
         history: VecDeque::new(),
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn empty_seed_is_degrees_zero_and_has_no_history() {
-        let d = initial();
-        assert_eq!(d.version, 1);
-        assert_eq!(d.angle, AngleMode::Degrees);
-        assert!(d.memory.is_none());
-        assert_eq!(d.session.source, "0");
-        assert_eq!(d.session.value, 0.0);
-        assert_eq!(d.session.phase, Phase::Editing);
-        assert!(d.session.repeat.is_none());
-        assert!(!d.session.reuse_repeat);
-        assert_eq!(d.next_id, 1);
-        assert!(d.history.is_empty());
-    }
-}

@@ -739,6 +739,60 @@ fn hal_open_takes_the_launch_the_host_gave_the_thread() {
 }
 
 #[test]
+fn relaunch_with_a_retiring_run_uses_a_fresh_session_and_key() {
+    struct RetiringHost {
+        launches: std::sync::mpsc::SyncSender<DomainLaunch>,
+        replacements: Mutex<Vec<(u32, u32)>>,
+    }
+    impl DomainHost for RetiringHost {
+        fn start(&self, launch: DomainLaunch) -> Result<(), String> {
+            self.launches.send(launch).unwrap();
+            Ok(())
+        }
+        fn stop(&self, _: u32, _: u32) {}
+        fn can_reuse_domain(&self, _: u32) -> bool { false }
+        fn domain_replaced(&self, previous: u32, replacement: u32) {
+            self.replacements.lock().unwrap().push((previous, replacement));
+        }
+        fn relaunch(&self, launch: DomainLaunch) -> Result<(), String> { self.start(launch) }
+    }
+    let hal = Hal::new();
+    let (send, receive) = std::sync::mpsc::sync_channel(1);
+    let host = Arc::new(RetiringHost { launches: send, replacements: Mutex::new(Vec::new()) });
+    hal.set_domain_host(host.clone());
+    let parent = hal.open_domain(&open_req(0, 0), Caps { privileged: true }).session;
+    let mut commands = CmdWriter::new(parent);
+    commands.str_def(1, b"teardown-fixture");
+    commands.domain_start(17, 1, 0);
+    hal.submit(&commands.buf());
+    let old = receive.recv().unwrap();
+    let mut commands = CmdWriter::new(parent);
+    commands.domain_relaunch(old.domain);
+    hal.submit(&commands.buf());
+    let next = receive.recv().unwrap();
+    assert_ne!(old.domain, next.domain);
+    assert_ne!(old.app_key, next.app_key);
+    assert_eq!((next.parent, next.req, &next.app, &next.args), (old.parent, old.req, &old.app, &old.args));
+    assert_eq!(*host.replacements.lock().unwrap(), [(old.domain, next.domain)]);
+    hal.with_world(|world| {
+        assert!(world.session(old.domain).is_none());
+        assert!(world.session(next.domain).is_some());
+        assert_eq!(world.domain_waiting(old.app_key, parent), None);
+        assert_eq!(world.domain_waiting(next.app_key, parent), Some(next.domain));
+    });
+    // Late commands and the old run's final observer cannot affect the new session.
+    let mut stale = CmdWriter::new(old.domain);
+    stale.window_create(WIN, window_kind::NORMAL, Id::NONE, [0.0, 0.0, 100.0, 100.0], false);
+    hal.submit(&stale.buf());
+    hal.report_domain(old.domain, domain_state::EXITED, 0, 100.0, "0");
+    hal.with_world(|world| {
+        assert_eq!(world.session(next.domain).unwrap().windows.len(), 0);
+        assert_eq!(world.domain(next.domain).unwrap().state, domain_state::COMPILING);
+    });
+    assert!(hal.close(parent));
+}
+
+#[test]
 fn child_frames_notify_the_parent_and_coalesce_per_window() {
     let hal = Hal::new();
     let parent = hal.open(&open_req(101, 0)).session;
@@ -828,7 +882,8 @@ fn child_scale_follows_the_parent_window_and_child_geom() {
     hal.submit(&cw.buf());
     let check_surface = |dpi, pixels| hal.with_world(|w| {
         let s = w.session(child).unwrap();
-        assert_eq!(s.dpi, dpi);
+        // the window's own scale (a session's windows can sit at different ones)
+        assert_eq!(s.window_dpi(WIN), dpi);
         let em = s.windows.get(child, WIN).unwrap().val.embedded.unwrap();
         assert_eq!(em.dpi, dpi);
         let t = &s.textures.get(child, em.tex).unwrap().val;

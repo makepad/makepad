@@ -1,36 +1,19 @@
 //! Checks of the skyline core against the web page, outside the app:
 //! - `scene_helpers_compile_for_every_backend` (no GPU): the scene helpers' shader code for Metal,
 //!   HLSL and GLSL ES;
-//! - `gpu_hashes_and_views_match_the_cpu` (ignored, needs a GPU): `hcell`, `rnd` and `hb4` drawn by
+//! - `gpu_hashes_and_views_match_the_cpu` (needs a GPU): `hcell`, `rnd` and `hb4` drawn by
 //!   the scene shader helpers and read back as RGBA32F equal `rng.rs` bit for bit, and `pix_view` and
 //!   `city_view` match an f64 reference. `MAKEPAD_HAL_BACKEND=offscreen cargo test --release -p
-//!   makepad-skyline --test checks -- --include-ignored --nocapture`;
-//! - `dump_layout`: with `SKYLINE_DUMP=FILE` (and `SKYLINE_PARAMS=FILE`, the page's saved
-//!   parameters) writes the zones and the strip's columns as JSON for `check_layout.js`.
+//!   makepad-skyline --test checks -- --nocapture`;
 #![cfg(not(target_arch = "wasm32"))]
 #![allow(dead_code)]
 pub use makepad_skyline::makepad_widgets;
 
-use makepad_skyline::{params, render, rng, shaders, terrain, zones};
+use makepad_skyline::{rng, shaders};
 
 use makepad_widgets::makepad_draw::{self, *};
 use rng::{fract, Rng, TAU};
 use std::{cell::RefCell, rc::Rc, sync::{Arc, Mutex}};
-
-#[test]
-fn dump_layout() {
-    let Ok(path) = std::env::var("SKYLINE_DUMP") else { return };
-    let mut p = params::Params::default();
-    if let Ok(file) = std::env::var("SKYLINE_PARAMS") {
-        p.load_web_json(&std::fs::read_to_string(&file).unwrap()).unwrap();
-    }
-    let z = zones::Zones::new(&p);
-    let named: Vec<String> = z.named().iter().map(|(k, v)| format!("\"{k}\":[{},{},{},{}]", v[0], v[1], v[2], v[3])).collect();
-    let view = render::ViewSpec::strip(&p, 1600);
-    let m = terrain::margin(&p, view.span, view.w);
-    let cols: Vec<String> = terrain::columns(&z, &p, view.u0, view.span, view.w, m).iter().map(|c| format!("{},{},{},{}", c[0], c[1], c[2], c[3])).collect();
-    std::fs::write(&path, format!("{{\"zones\":{{{}}},\"m\":{m},\"columns\":[{}]}}", named.join(","), cols.join(","))).unwrap();
-}
 
 /// The check target: N x N texels, the left half drawn at seed 7, the right at 9999999.
 const N: usize = 16;
@@ -173,7 +156,6 @@ impl Check {
 type Texels = Result<Vec<[f32; 4]>, String>;
 
 #[test]
-#[ignore = "requires a native HAL GPU release build"]
 fn gpu_hashes_and_views_match_the_cpu() {
     use makepad_platform::makepad_hal::{self as hal_api, open_flags, Hal, OpenReq};
     let check: Rc<RefCell<Option<Check>>> = Rc::new(RefCell::new(None));

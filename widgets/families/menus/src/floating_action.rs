@@ -4722,33 +4722,6 @@ mod tests {
         });
     }
 
-    /// The source of the DSL between `from` and the first line that closes
-    /// the macro, a brace in the first column.
-    fn block<'a>(source: &'a str, from: &str) -> &'a str {
-        let start = source.find(from).unwrap_or_else(|| panic!("no {from}"));
-        let rest = &source[start..];
-        let end = rest.find("\n}").unwrap_or(rest.len());
-        &rest[..end]
-    }
-
-    /// A splatted variant is exported as a bare name, and TopLeft,
-    /// TopCenter and BottomCenter already are; and the short prefix belongs
-    /// to the property-panel controls. Neither may creep into this DSL or
-    /// into the two faces in button.rs.
-    #[test]
-    fn no_enum_is_splatted_and_no_name_starts_with_fab() {
-        crate::on_test_cx(|| {
-        let own = block(include_str!("floating_action.rs"), "script_mod! {");
-        let faces = block(include_str!("../../../core/src/button.rs"), "mod.widgets.ButtonFloating = ");
-        for (name, text) in [("floating_action.rs", own), ("button.rs", faces)] {
-            assert!(text.contains("mod.widgets."), "{name}: the block was not found");
-            assert!(!text.contains(concat!("splat", "(")), "{name} splats an enum");
-            assert!(!text.contains(concat!("mod.widgets.", "Fab")), "{name} names a widget with the short prefix");
-        }
-        assert!(own.contains("FloatingAnchor.BottomRight"));
-        });
-    }
-
     /// A widget dropped with its set out cannot release its own lock, and
     /// a lock nobody holds turns every press in the window away. The next
     /// floating action to hear an event releases it.

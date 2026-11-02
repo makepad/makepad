@@ -207,14 +207,16 @@ impl Report {
 }
 
 impl Cx {
-    /// The created windows' frames (a restart reopens them there).
+    /// The created windows' frames (a restart reopens them there), as a window is created: its
+    /// size in the window system's points (a `dpi_override` lays out in points of its own). A
+    /// headset's XR window is no frame of the desktop's: the HAL sizes it.
     pub fn restart_window_frames(&self) -> Vec<(usize, Vec2d, Vec2d, bool)> {
         let mut out = Vec::new();
         for id in self.windows.id_iter() {
             let i = id.id();
             let w = &self.windows[id];
-            if w.is_created && !w.is_popup {
-                out.push((i, w.get_position(), w.get_inner_size(), w.window_geom.is_fullscreen));
+            if w.is_created && !w.is_popup && !w.window_geom.xr_is_presenting {
+                out.push((i, w.get_position(), w.layout_vec2d_to_native_points(w.get_inner_size()), w.window_geom.is_fullscreen));
             }
         }
         out
@@ -263,10 +265,11 @@ pub(crate) fn hosted() -> bool {
     }
 }
 
-/// A hosted app ends: its background workers (the logger, the restart watcher, the remote's
-/// grab encoder) end with it.
+/// A hosted app ends: close every pool and cancel every dedicated worker of
+/// its runtime, including handles held in statics, then stop service workers.
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn stop_workers() {
+pub(crate) fn stop_workers(spawner: &crate::thread::ThreadSpawner) {
+    spawner.close_runtime();
     #[cfg(relax)]
     STOP_WAKER.store(true, std::sync::atomic::Ordering::Release);
     #[cfg(not(target_arch = "wasm32"))]

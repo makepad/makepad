@@ -68,6 +68,10 @@ pub struct Device {
     /// that replaced a lost one share it).
     life: Arc<InstanceLife>,
     pub allocated: AtomicU64,
+    /// Persistently mapped scratch buffers (`Buffer::scratch`: upload arenas and readback slots)
+    /// included in `allocated` above, reported separately so `ledger_bytes + scratch_bytes`
+    /// reconciles against `device_bytes`.
+    pub scratch_allocated: AtomicU64,
     /// The driver reported VK_ERROR_DEVICE_LOST (or a simulated loss): the backend replaces
     /// the device. Nothing else marks a device lost; running out of memory never does.
     pub lost: AtomicBool,
@@ -78,6 +82,9 @@ pub struct Device {
     /// An out-of-memory answer at the open-file limit was reported (`refused`); cleared by the
     /// next refusal below the limit, so each episode logs once.
     files_reported: AtomicBool,
+    /// Whether `Buffer::new` has already logged falling back from `DEVICE_LOCAL|HOST_VISIBLE|HOST_COHERENT`
+    /// to host memory on this device, so a non-ReBAR or exhausted BAR heap logs once per device.
+    pub rebar_fallback_logged: AtomicBool,
     /// The last device budget read (`memory_budget`) and when.
     budget: Mutex<Option<(std::time::Instant, MemoryBudget)>>,
     /// Sampler Y'CbCr conversion (core 1.1 `samplerYcbcrConversion`, enabled when the device has
@@ -454,7 +461,7 @@ impl Device {
             physical, family: family as u32, properties, memory, features, formats,
             timestamp_bits: queue.timestamp_valid_bits, calibrated, extensions, present_wait: pacing, multiview: has_multiview, fdm: has_fdm, msaa, life: life.clone(),
             video_encode,
-            allocated: AtomicU64::new(0), lost: AtomicBool::new(false), starved: AtomicBool::new(false), files_reported: AtomicBool::new(false), budget: Mutex::new(None),
+            allocated: AtomicU64::new(0), scratch_allocated: AtomicU64::new(0), lost: AtomicBool::new(false), starved: AtomicBool::new(false), files_reported: AtomicBool::new(false), rebar_fallback_logged: AtomicBool::new(false), budget: Mutex::new(None),
             ycbcr: has_ycbcr, video_samplers: Mutex::new(Default::default()),
         })))
     }
@@ -565,6 +572,14 @@ impl Device {
 
     pub fn charge(&self, bytes: u64) { self.allocated.fetch_add(bytes, Ordering::Relaxed); }
     pub fn uncharge(&self, bytes: u64) { self.allocated.fetch_sub(bytes, Ordering::Relaxed); }
+    pub fn charge_scratch(&self, bytes: u64) {
+        self.charge(bytes);
+        self.scratch_allocated.fetch_add(bytes, Ordering::Relaxed);
+    }
+    pub fn uncharge_scratch(&self, bytes: u64) {
+        self.uncharge(bytes);
+        self.scratch_allocated.fetch_sub(bytes, Ordering::Relaxed);
+    }
 
     /// A display-only peer on another GPU. Rendering remains on the process's compositor
     /// device; this queue only reads imported images and drives that GPU's KMS outputs.
@@ -611,7 +626,7 @@ impl Device {
             raw, physical, queue_lock: Mutex::new(()), family: family as u32, properties, memory, features, formats,
             // a display peer only scans out: the GPU profiler times the rendering device
             timestamp_bits: queue.timestamp_valid_bits, calibrated: false, extensions, present_wait: pacing, multiview: false, fdm: false, msaa: 1, life: owner.life.clone(), video_encode: None,
-            allocated: AtomicU64::new(0), lost: AtomicBool::new(false), starved: AtomicBool::new(false), files_reported: AtomicBool::new(false), budget: Mutex::new(None),
+            allocated: AtomicU64::new(0), scratch_allocated: AtomicU64::new(0), lost: AtomicBool::new(false), starved: AtomicBool::new(false), files_reported: AtomicBool::new(false), rebar_fallback_logged: AtomicBool::new(false), budget: Mutex::new(None),
             ycbcr: false, video_samplers: Mutex::new(Default::default()) }))
     }
 }

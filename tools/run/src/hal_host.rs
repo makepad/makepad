@@ -9,7 +9,7 @@
 //! The primary app of `makepad run` follows the same path as children of a window manager.
 //! Privilege is granted by the host (`--privileged`); JIT code cannot claim it.
 
-use makepad_hal::{domain_state, domain_stop, with_caps, with_launch, Caps, DomainHost, DomainLaunch, Hal};
+use makepad_hal::{domain_state, with_caps, with_launch, Caps, DomainHost, DomainLaunch, Hal};
 use relax_compiler::domain::{self, AppSpec, Around, DomainState};
 use std::sync::Arc;
 use std::time::Duration;
@@ -37,7 +37,17 @@ impl Host {
         // The registry exists before returning to HAL, so stop can cancel the loader even
         // before it is scheduled. Never join the compiling thread ahead of cancellation.
         if let Err(e) = std::thread::Builder::new().name(format!("domain-load-{domain}")).spawn(move || {
-            if let Err(e) = domain::start_prepared_in_run(spec, domain) {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| domain::start_prepared_in_run(spec, domain)));
+            let result = result.unwrap_or_else(|panic| {
+                let reason = panic.downcast_ref::<String>().cloned().or_else(|| panic.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_else(|| "domain loader panicked".into());
+                domain::loading_failed(domain, &reason);
+                Err(vec![reason])
+            });
+            if let Err(e) = result {
+                if relax_compiler::run::app_domain() == Some(domain) {
+                    relax_compiler::hot_failure::restart_failed(&e.join(" | "));
+                    relax_compiler::hot_failure::pump();
+                }
                 if !matches!(domain::state(domain), Some(DomainState::Stopped)) {
                     eprintln!("makepad-run domain: {}: {}", launch.app, e.join(" | "));
                 }
@@ -55,36 +65,27 @@ impl DomainHost for Host {
         self.launch(launch)
     }
 
-    fn stop(&self, domain: u32, mode: u32) {
+    fn stop(&self, domain: u32, _mode: u32) {
         domain::begin_stop(domain);
         relax_compiler::reload::domain_stopping(domain);
         relax_compiler::inspect::stop_domain(domain);
         relax_compiler::inspect::events::release_domain(domain);
-        let how = if mode == domain_stop::KILL { domain::Stop::Kill } else { domain::Stop::Quit };
-        if let Err(e) = domain::stop(domain, how) { eprintln!("makepad-run domain: {domain}: {e}"); }
-        // A stop that timed out (`Leaked`: its threads still alive) waits once more, 5 s
-        // (`MAKEPAD_RUN_RELAUNCH_GRACE_MS`), for threads that end late. The HAL makes a relaunched
-        // domain's session again only after this returns: a late thread of the old run must never
-        // find the new run's session under its id (it took that session's events as its own and
-        // never ended).
-        if matches!(domain::state(domain), Some(DomainState::Leaked { .. })) {
-            let grace = std::env::var("MAKEPAD_RUN_RELAUNCH_GRACE_MS").ok().and_then(|s| s.parse::<u64>().ok()).unwrap_or(5000);
-            domain::wait_thread_done(domain, Duration::from_millis(grace));
-        }
+        if let Err(e) = domain::retire(domain) { eprintln!("makepad-run domain: {domain}: {e}"); }
         report_stop(domain);
     }
 
-    // The HAL stopped the old run (`stop(QUIT)` returned, including its wait for late threads)
-    // and freed its session: start again. Threads that ended late hand the domain over and the
-    // app relaunches in place. A run that still owns its domain, or a start that fails, never
-    // leaves the app dead: the process starts again (same command line, the app's state carried
-    // over), or, where it cannot (a window manager's child, no exec), the domain ends crashed
-    // with the reason.
+    fn can_reuse_domain(&self, domain: u32) -> bool {
+        domain::still_owned(domain).is_none()
+    }
+
+    fn domain_replaced(&self, previous: u32, replacement: u32) {
+        crate::hal_run::domain_replaced(previous, replacement);
+    }
+
+    // The HAL either joined the old incarnation or allocated a fresh id. Old
+    // threads cannot turn this relaunch into an app failure or a process exec.
     fn relaunch(&self, launch: DomainLaunch) -> Result<(), String> {
         let id = launch.domain;
-        if let Some(held) = domain::still_owned(id) {
-            return self.relaunch_failed(id, format!("domain {id} still owns its previous run ({held})"));
-        }
         crate::hal_run::restarting(id);
         match self.launch(launch) {
             Ok(()) => Ok(()),
@@ -98,11 +99,21 @@ impl Host {
         // the run window shows what follows (its relaunch began; the stop is over)
         crate::hal_run::restarting(id);
         if relax_compiler::run::app_domain() == Some(id) {
-            eprintln!("makepad-run domain: {id}: the relaunch in place failed: {why}; restarting the process instead (same command line, the app's state carried over)");
-            match relax_compiler::reload::restart_process(&why) {
+            if relax_compiler::hot_failure::recovering() {
+                relax_compiler::hot_failure::restart_failed(&why);
+                relax_compiler::hot_failure::pump();
+                crate::hal_run::observe(id, &DomainState::Crashed(why.clone()));
+                return Err(why);
+            }
+            relax_compiler::hot_failure::failed(makepad_remote::hot::Outcome::RelaunchFailed, &[why.clone()], None);
+            eprintln!("makepad-run domain: {id}: the relaunch in place failed: {why}; starting a fresh domain on the warm compiler, with the app's saved state");
+            let restart = crate::hal_run::spec(id).ok_or_else(|| "the app's launch specification is unavailable".to_string()).and_then(crate::hal_run::start);
+            match restart {
                 Ok(()) => return Ok(()),
                 Err(e) => {
-                    let message = format!("relaunch failed: {why}; the process restart failed too: {e}; restart the app");
+                    relax_compiler::hot_failure::restart_failed(&e);
+                    relax_compiler::hot_failure::pump();
+                    let message = format!("relaunch failed: {why}; the warm restart failed too: {e}");
                     eprintln!("makepad-run domain: {id}: {message}");
                     crate::hal_run::observe(id, &DomainState::Crashed(message.clone()));
                     return Err(message);
@@ -214,9 +225,6 @@ fn observe(id: domain::DomainId, state: &DomainState) {
         }
         // the HAL freed the session before it asked to stop
         DomainState::Stopped => {}
-        DomainState::Leaked { threads } => {
-            hal.report_domain(id, domain_state::CRASHED, 0, 0.0, &format!("shutdown timed out: {threads} threads still alive; domain memory retained"));
-        }
     }
 }
 

@@ -25,19 +25,24 @@
 //! one `&[u8]` of `w*h*3` per frame at a fixed fps) and optionally a PCM wav
 //! track. The encoder here is the artifact producer:
 //!
-//! ```ignore
-//! let mut enc = VideoFileEncoder::new("out.mp4", VideoFileEncoderOptions {
-//!     codec: VideoFileCodec::H265,
-//!     width, height,
-//!     fps_num: 24, fps_den: 1,
-//!     video_bitrate_bps: 8_000_000,
-//!     audio: Some(PcmAudioTrackOptions { sample_rate: 24_000, channels: 1, aac_bitrate_bps: 128_000 }),
-//! })?;
-//! for frame in frames {
-//!     enc.push_frame_rgb8(&frame, None)?;      // None = timestamps derived from fps
+//! ```no_run
+//! use makepad_video::*;
+//!
+//! fn encode(frames: &[Vec<u8>], wav_samples: &[i16], width: u32, height: u32) -> Result<(), VideoFileError> {
+//!     let mut enc = VideoFileEncoder::new("out.mp4", VideoFileEncoderOptions {
+//!         codec: VideoFileCodec::H265,
+//!         width, height,
+//!         fps_num: 24, fps_den: 1,
+//!         video_bitrate_bps: 8_000_000,
+//!         audio: Some(PcmAudioTrackOptions { sample_rate: 24_000, channels: 1, aac_bitrate_bps: 128_000 }),
+//!         ..Default::default()
+//!     })?;
+//!     for frame in frames {
+//!         enc.push_frame_rgb8(frame, None)?;   // None = timestamps derived from fps
+//!     }
+//!     enc.push_audio_i16(wav_samples)?;        // interleaved i16 PCM, AAC-encoded by the OS
+//!     enc.finish()                             // finalized mp4 on disk
 //! }
-//! enc.push_audio_i16(&wav_samples)?;           // interleaved i16 PCM, AAC-encoded by the OS
-//! enc.finish()?;                               // finalized mp4 on disk
 //! ```
 //!
 //! Frames can also be supplied pre-converted as NV12 (`push_frame_nv12`); the
@@ -1177,7 +1182,7 @@ pub fn encode_intra_frame_mp4(
     Ok(bytes)
 }
 
-#[cfg(test)]
+#[cfg(all(test, any(target_vendor = "apple", target_os = "android", target_os = "linux", target_os = "windows")))]
 mod intra_frame_tests {
     use super::*;
 
@@ -1196,11 +1201,7 @@ mod intra_frame_tests {
         for v in &mut nv12[(w * h) as usize..] {
             *v = 128;
         }
-        let bytes = match encode_intra_frame_mp4(&nv12, w, h, 30, 2_000_000, VideoFileCodec::H265) {
-            Ok(bytes) => bytes,
-            Err(e) if e.context.contains("not implemented") => return,
-            Err(e) => panic!("encode: {e:?}"),
-        };
+        let bytes = encode_intra_frame_mp4(&nv12, w, h, 30, 2_000_000, VideoFileCodec::H265).expect("encode");
         assert!(bytes.len() > 64, "{} bytes", bytes.len());
         assert!(
             bytes.windows(4).any(|b| b == b"ftyp") && bytes.windows(4).any(|b| b == b"moov"),

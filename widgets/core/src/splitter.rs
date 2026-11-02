@@ -559,10 +559,16 @@ pub struct Splitter {
     // framecomponent mode
     #[rust]
     draw_state: DrawStateWrap<DrawState>,
+    // A redraw of the splitter is a redraw of both panes: without them a
+    // `redraw` from above stops at the bar, and anything behind a retained
+    // draw list in a pane (dock tabs, cached views) keeps stale pixels until
+    // something else redraws it.
     #[find]
+    #[redraw]
     #[live]
     a: WidgetRef,
     #[find]
+    #[redraw]
     #[live]
     b: WidgetRef,
 

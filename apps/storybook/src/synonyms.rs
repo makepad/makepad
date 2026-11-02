@@ -119,11 +119,6 @@ mod tests {
     }
 
     #[test]
-    fn the_file_parses() {
-        assert!(!book().components.is_empty());
-    }
-
-    #[test]
     fn every_entry_names_a_component_that_exists() {
         let known: BTreeSet<&str> = registry::all()
             .map(|s| s.component)

@@ -92,7 +92,8 @@ impl EvalCtxt<'_, '_> {
                 }
                 return self.instantiate_normalizes_to_term(env, p, self.rigid_alias_term(&p.alias));
             }
-            self.delegate.errors.delayed_bug(self.delegate.cause, "missing associated item definition".into());
+            // (rustc: `delay_bug("missing item")`, with no span: one per session, whoever hits it first)
+            self.delegate.errors.delayed_bug(Default::default(), "missing associated item definition".into());
             return self.instantiate_normalizes_to_error(env, p);
         }
         let target = if self.solver.prog.def(item).parent == trait_def { args.clone() } else {

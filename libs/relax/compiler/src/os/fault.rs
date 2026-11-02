@@ -77,7 +77,7 @@ mod unix {
     pub const SIGSEGV: i32 = 11;
     #[cfg(any(target_os = "linux", target_os = "android"))]
     pub const SIGBUS: i32 = 7;
-    #[cfg(target_os = "macos")]
+    #[cfg(target_vendor = "apple")]
     pub const SIGBUS: i32 = 10;
 
     pub fn kind(sig: i32) -> super::Kind {
@@ -453,7 +453,7 @@ mod imp {
 
 /// macOS (Apple Silicon): the Darwin arm64 ucontext; handlers a library installed over ours
 /// (Chromium's in CefInitialize) stay chained.
-#[cfg(target_os = "macos")]
+#[cfg(target_vendor = "apple")]
 mod imp {
     use super::unix::{kind, SIGBUS, SIGFPE, SIGILL, SIGSEGV, SIGTRAP};
     use super::{Action, Fault, Hooks};
@@ -469,6 +469,8 @@ mod imp {
     extern "C" {
         fn sigaction(sig: i32, act: *const SigAction, old: *mut SigAction) -> i32;
         fn sigaltstack(ss: *const StackT, old: *mut StackT) -> i32;
+        // macOS only: iOS has no MAP_JIT pages (no executable memory at all)
+        #[cfg(target_os = "macos")]
         fn pthread_jit_write_protect_np(enabled: i32);
     }
 
@@ -628,7 +630,10 @@ mod imp {
             let f = Fault { kind: kind(sig), sig, pc: *reg(SS_PC), sp: *reg(SS_SP), fp: *reg(SS_FP), addr: *(info.add(SI_ADDR) as *const u64), lr: *reg(SS + 240) };
             // the program may fault while it has its own MAP_JIT pages in write mode
             // (pthread_jit_write_protect_np(0)); recovery continues in execute mode
+            #[cfg(target_os = "macos")]
             let prepare = || pthread_jit_write_protect_np(1);
+            #[cfg(not(target_os = "macos"))]
+            let prepare = || {};
             let debug = || fault_regs(uc);
             let chained = CHAINED[sig as usize][0].load(Ordering::SeqCst) > 1;
             match crate::jit::on_fault(&f, &Hooks { prepare: &prepare, chained, debug: &debug }) {
@@ -923,7 +928,7 @@ pub fn stack_bounds_of_self() -> (u64, u64) {
     if let Some((lo, hi)) = crate::stack::program_stack_bounds() {
         return (lo as u64, hi as u64);
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(target_vendor = "apple")]
     unsafe {
         extern "C" {
             fn pthread_self() -> usize;
@@ -967,9 +972,9 @@ pub fn raw_stderr(b: &[u8]) {
     #[cfg(unix)]
     unsafe {
         extern "C" {
-            fn write(fd: i32, buf: *const u8, n: usize) -> isize;
+            fn write(fd: i32, buf: *const core::ffi::c_void, n: usize) -> isize;
         }
-        let _ = write(crate::tui::fault_fd(), b.as_ptr(), b.len());
+        let _ = write(crate::tui::fault_fd(), b.as_ptr().cast(), b.len());
     }
     #[cfg(windows)]
     {

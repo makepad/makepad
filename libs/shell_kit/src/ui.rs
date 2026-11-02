@@ -342,6 +342,7 @@ script_mod! {
             lock +: {svg: crate_resource("self:resources/icons/lock.svg")}
             folder +: {svg: crate_resource("self:resources/icons/folder.svg")}
             file +: {svg: crate_resource("self:resources/icons/file.svg")}
+            person +: {svg: crate_resource("self:resources/icons/person.svg")}
         }
     }
 }
@@ -498,6 +499,8 @@ pub struct ShellIcons {
     pub folder: DrawSvg,
     #[live]
     pub file: DrawSvg,
+    #[live]
+    pub person: DrawSvg,
 }
 
 /// Which glyph a module wants. Named for what it MEANS, so the bar can
@@ -559,6 +562,8 @@ pub enum Ico {
     /// The file picker's folders and files.
     Folder,
     File,
+    /// A person (someone is at the machine).
+    Person,
 }
 
 impl ShellIcons {
@@ -613,6 +618,7 @@ impl ShellIcons {
             Ico::Lock => &mut self.lock,
             Ico::Folder => &mut self.folder,
             Ico::File => &mut self.file,
+            Ico::Person => &mut self.person,
         }
     }
 }

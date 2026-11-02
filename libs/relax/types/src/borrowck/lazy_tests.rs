@@ -181,6 +181,21 @@ fn guard_filters_non_app() {
     unsubscribe(id);
 }
 
+/// A check reports the crates it was asked about, framework or not: a gate or background check
+/// of the same crate keeps quiet (a borrow error in libs/ passed `makepad check` and `makepad test`).
+#[test]
+fn a_check_reports_a_non_app_crate() {
+    if child("a_check_reports_a_non_app_crate") { return; }
+    let (prog, tcx) = fixture("framework", SOURCE); let bad = named(&prog, "bad");
+    assert!(!admit(&prog, 0));
+    let epoch = tcx.collect_epoch.load(Ordering::SeqCst);
+    let error = BorrowError { fn_path: "bad".into(), owner: bad, krate: 0, code: "E0597", message: String::new(), file: String::new(), line: 1, col: 1, end_line: 1, end_col: 1, labels: Vec::new(), notes: Vec::new(), helps: Vec::new(), fv_only: false };
+    for (origin, reported) in [(Origin::Check, 1), (Origin::Serve, 1), (Origin::Gate, 0), (Origin::Background, 0)] {
+        let events = report_checked(&prog, 0, epoch, bad, &[], vec![error.clone()], origin);
+        assert_eq!(events.len(), reported, "{origin:?}");
+    }
+}
+
 #[test]
 fn check_before_run_decides_before_the_background() {
     if child("check_before_run_decides_before_the_background") { return; }
@@ -222,6 +237,23 @@ fn verdict_states() {
     assert_eq!(wait_verdict(&front, clean), FnVerdict::Clean);
     assert!(matches!(wait_verdict(&front, bad), FnVerdict::Errors(_)));
     assert_eq!(wait_verdict(&front, fail), FnVerdict::Unchecked("typeck".into())); stop();
+}
+
+#[test]
+fn an_idle_worker_does_not_keep_its_source_alive() {
+    if child("an_idle_worker_does_not_keep_its_source_alive") { return; }
+    // the worker starts with the first enqueuer's source; once the queue is empty it waits
+    // without it, so a settle rebuild's replaced front state (and what its memos hold) can go
+    let front = TestFront::new(0);
+    let clean = front.enqueue("clean", false);
+    front.ungate();
+    assert_eq!(wait_verdict(&front, clean), FnVerdict::Clean);
+    let weak = Arc::downgrade(&front);
+    drop(front);
+    while weak.strong_count() > 0 {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    stop();
 }
 
 #[test]

@@ -118,6 +118,13 @@ pub fn current() -> *const () {
     compiler::current_domain().cast()
 }
 
+/// The calling thread's domain heap as it accounts itself (`DomainHeap::stats`): (bytes in use,
+/// bytes committed); None on the system heap.
+pub fn current_stats() -> Option<(usize, usize)> {
+    let arena = unsafe { compiler::current_domain().as_ref() }?;
+    Some((arena.requested_bytes(), arena.committed()))
+}
+
 /// Puts the calling thread back in the heap `current` returned.
 pub unsafe fn restore(heap: *const ()) {
     compiler::enter_domain(heap.cast());
@@ -354,12 +361,13 @@ pub unsafe extern "C" fn program_resize(p: *mut u8, old: usize, align: usize, si
 }
 
 extern "C" {
-    fn malloc(size: usize) -> *mut u8;
-    fn calloc(n: usize, size: usize) -> *mut u8;
-    fn realloc(p: *mut u8, size: usize) -> *mut u8;
-    fn free(p: *mut u8);
+    // the C runtime's own signatures (rustc checks them against the symbols std uses)
+    fn malloc(size: usize) -> *mut core::ffi::c_void;
+    fn calloc(n: usize, size: usize) -> *mut core::ffi::c_void;
+    fn realloc(p: *mut core::ffi::c_void, size: usize) -> *mut core::ffi::c_void;
+    fn free(p: *mut core::ffi::c_void);
     #[cfg(unix)]
-    fn posix_memalign(out: *mut *mut u8, align: usize, size: usize) -> i32;
+    fn posix_memalign(out: *mut *mut core::ffi::c_void, align: usize, size: usize) -> i32;
     #[cfg(windows)]
     fn _aligned_malloc(size: usize, align: usize) -> *mut u8;
     #[cfg(windows)]
@@ -368,7 +376,7 @@ extern "C" {
 pub unsafe extern "C" fn program_malloc(size: usize) -> *mut u8 {
     match compiler::domain_here() {
         Some(a) => allocate(a, size, 16, false),
-        None => malloc(size),
+        None => malloc(size).cast(),
     }
 }
 pub unsafe extern "C" fn program_calloc(n: usize, size: usize) -> *mut u8 {
@@ -377,12 +385,12 @@ pub unsafe extern "C" fn program_calloc(n: usize, size: usize) -> *mut u8 {
     };
     match compiler::domain_here() {
         Some(a) => allocate(a, total, 16, true),
-        None => calloc(n, size),
+        None => calloc(n, size).cast(),
     }
 }
 pub unsafe extern "C" fn program_free(p: *mut u8) {
     if !p.is_null() && !dealloc(p) {
-        free(p);
+        free(p.cast());
     }
 }
 pub unsafe extern "C" fn program_realloc(p: *mut u8, size: usize) -> *mut u8 {
@@ -394,7 +402,7 @@ pub unsafe extern "C" fn program_realloc(p: *mut u8, size: usize) -> *mut u8 {
         return std::ptr::null_mut();
     }
     // Shared blocks stay shared even when a domain happens to grow them.
-    realloc_owned(p, size).unwrap_or_else(|| realloc(p, size))
+    realloc_owned(p, size).unwrap_or_else(|| realloc(p.cast(), size).cast())
 }
 pub unsafe extern "C" fn program_memalign(out: *mut *mut u8, align: usize, size: usize) -> i32 {
     if !align.is_power_of_two() || align < std::mem::size_of::<usize>() {
@@ -410,7 +418,7 @@ pub unsafe extern "C" fn program_memalign(out: *mut *mut u8, align: usize, size:
     }
     #[cfg(unix)]
     {
-        posix_memalign(out, align, size)
+        posix_memalign(out.cast(), align, size)
     }
     #[cfg(windows)]
     {
@@ -450,7 +458,7 @@ pub unsafe extern "C" fn program_malloc_trim(pad: usize) -> i32 {
     }
     malloc_trim(pad)
 }
-#[cfg(target_os = "macos")]
+#[cfg(target_vendor = "apple")]
 pub unsafe extern "C" fn program_pressure_relief(zone: *const u8, goal: usize) -> usize {
     extern "C" {
         fn malloc_zone_pressure_relief(zone: *const u8, goal: usize) -> usize;
@@ -476,7 +484,7 @@ pub fn symbol(name: &[u8]) -> Option<usize> {
         b"posix_memalign" => program_memalign as *const () as usize,
         #[cfg(target_os = "linux")]
         b"malloc_trim" => program_malloc_trim as *const () as usize,
-        #[cfg(target_os = "macos")]
+        #[cfg(target_vendor = "apple")]
         b"malloc_zone_pressure_relief" => program_pressure_relief as *const () as usize,
         #[cfg(windows)]
         b"_aligned_malloc" => program_aligned_malloc as *const () as usize,
@@ -848,7 +856,7 @@ mod tests {
     /// `heap_check_child` (the check is read once per process).
     fn heap_check_run(mode: &str) -> std::process::Output {
         std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "zone_alloc::domain::tests::heap_check_child", "--ignored", "--nocapture", "--test-threads=1"])
+            .args(["--exact", "zone_alloc::domain::tests::heap_check_child", "--nocapture", "--test-threads=1"])
             .env("MAKEPAD_RUN_HEAP_CHECK", "1")
             .env("RELAX_HEAP_CHECK_CHILD", mode)
             .output()
@@ -856,7 +864,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "run by heap_check_* in a child process"]
     fn heap_check_child() {
         let Ok(mode) = std::env::var("RELAX_HEAP_CHECK_CHILD") else { return };
         assert!(compiler::heap_check_on());

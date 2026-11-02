@@ -27,6 +27,25 @@ script_mod! {
         vertex: fn() {
             var pos=vec3(self.geom.px,self.geom.py,self.geom.pz)
             if self.morph_ctl.w > 0.5 { pos=pos+self.morph_delta(self.geom.ao_uv,0.0) }
+            // The host's per-element lookup, the table the picture's lanes read
+            // (shaders/skinned.rs has its layout): a hidden element casts nothing and a
+            // moved one casts where it shows, on the frame it shows there.
+            if self.elem_ctl.w > 0.5 {
+                let ao = unpack4u8(self.geom.ao_uv)
+                let lo = (ao.x + ao.y * 256.0) * 255.0
+                let hi = (ao.z + ao.w * 256.0) * 255.0
+                let stride = max(self.elem_ctl.z, 1.0)
+                let base = floor(lo + modf(floor(hi + 0.5), 16.0) * 65536.0 + 0.5) * stride
+                let f = self.elem_texel(base)
+                if f.x < 0.5 {
+                    pos = vec3(0.0, 0.0, 0.0)
+                } else {
+                    if stride > 3.5 {
+                        pos = vec3(dot(self.elem_texel(base + 1.0).xyz, pos), dot(self.elem_texel(base + 2.0).xyz, pos), dot(self.elem_texel(base + 3.0).xyz, pos))
+                    }
+                    pos = pos + f.yzw
+                }
+            }
             let wp = self.transform * vec4(pos, 1.0)
             let nx = dot(self.sun_rx.xyz, wp.xyz) + self.sun_rx.w
             let ny = dot(self.sun_ry.xyz, wp.xyz) + self.sun_ry.w
@@ -69,6 +88,12 @@ script_mod! {
             self.fb0 = self.pixel()
         }
         morph_map: texture_2d(float)
+        elem_map: texture_2d(float)
+        elem_texel: fn(i: float) -> vec4f {
+            let ew = max(self.elem_ctl.x, 1.0)
+            let eh = max(self.elem_ctl.y, 1.0)
+            return self.elem_map.sample_nearest(vec2((modf(i, ew) + 0.5) / ew, (floor(i / ew) + 0.5) / eh), 0.0)
+        }
         // The weight of morph target k (0..31): morph_weights0..7, four each.
         morph_weight: fn(k: float) -> float {
             let i = floor(k / 4.0)

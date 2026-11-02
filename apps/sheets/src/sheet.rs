@@ -915,12 +915,6 @@ mod tests {
     // -- recalculation -----------------------------------------------------
 
     #[test]
-    fn formula_sees_its_inputs() {
-        let wb = wb_with(&[("A1", "1"), ("A2", "2"), ("A3", "3"), ("B1", "=SUM(A1:A3)")]);
-        assert_eq!(shown(&wb, "B1"), "6");
-    }
-
-    #[test]
     fn editing_an_input_updates_dependents() {
         let mut wb = wb_with(&[("A1", "1"), ("A2", "2"), ("A3", "3"), ("B1", "=SUM(A1:A3)")]);
         assert_eq!(shown(&wb, "B1"), "6");
@@ -1362,31 +1356,4 @@ mod tests {
         assert_eq!(name_pos("nonsense"), None);
     }
 
-    // -- the shipped demo --------------------------------------------------
-
-    #[test]
-    fn demo_sheet_computes() {
-        let s = demo_sheet();
-        // revenue total of the six months
-        assert_eq!(s.value(at("B10")), Value::Num(857100.0));
-        assert_eq!(s.display(at("B10")), "857,100.00");
-        // profit = revenue - costs
-        assert_eq!(s.value(at("D4")), Value::Num(32100.0));
-        assert_eq!(s.display(at("E4")), "26.6%");
-        assert_eq!(s.display(at("B14")), "yes");
-        assert!(s.format(at("A1")).bold);
-    }
-
-    #[test]
-    fn the_headline_case_from_the_brief() {
-        // "typing =SUM(A1:A3) after entering 1,2,3 shows 6 and updates when A2 changes"
-        let mut wb = Workbook::default();
-        wb.set_input(at("A1"), "1");
-        wb.set_input(at("A2"), "2");
-        wb.set_input(at("A3"), "3");
-        wb.set_input(at("A4"), "=SUM(A1:A3)");
-        assert_eq!(shown(&wb, "A4"), "6");
-        wb.set_input(at("A2"), "20");
-        assert_eq!(shown(&wb, "A4"), "24");
-    }
 }

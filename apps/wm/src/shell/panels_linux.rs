@@ -1616,19 +1616,6 @@ impl ShellPanel {
 }
 
 
-/// Whether the saved render-on choice (`saved`, `None` for Auto, an
-/// identity `<pci> <vendor>:<device>` otherwise) is not what renders now:
-/// `running` is the renderer's identity, `running_is_display` whether it
-/// is the display GPU (what Auto picks). Unknown means not different, so
-/// a restart is never offered on a guess.
-#[cfg(test)]
-fn next_start_differs(saved: Option<&str>, running: Option<&str>, running_is_display: Option<bool>) -> bool {
-    match saved {
-        None => running_is_display == Some(false),
-        Some(saved) => running.is_some_and(|running| running != saved),
-    }
-}
-
 /// Whether the saved render-on choice can take effect at the next start:
 /// Auto always can; a GPU only while a listed card matches its identity.
 fn saved_gpu_present(saved: Option<&str>, gpus: &[GpuInfo]) -> bool {
@@ -1638,20 +1625,6 @@ fn saved_gpu_present(saved: Option<&str>, gpus: &[GpuInfo]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn next_start_differs_only_when_known_and_different() {
-        let a = "0000:00:02.0 8086:a780";
-        let b = "0000:01:00.0 10de:2b85";
-        assert!(!next_start_differs(Some(a), Some(a), Some(false)));
-        assert!(next_start_differs(Some(b), Some(a), Some(true)));
-        // Auto is the display GPU.
-        assert!(!next_start_differs(None, Some(a), Some(true)));
-        assert!(next_start_differs(None, Some(b), Some(false)));
-        // Nothing known about the renderer: never offer a restart.
-        assert!(!next_start_differs(Some(b), None, None));
-        assert!(!next_start_differs(None, None, None));
-    }
 
     #[test]
     fn restart_only_for_a_saved_gpu_that_is_present() {

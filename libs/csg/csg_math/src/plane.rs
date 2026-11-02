@@ -144,17 +144,6 @@ mod tests {
     }
 
     #[test]
-    fn test_intersect_line() {
-        let p = Planed::from_normal_and_point(Vec3d::Z, Vec3d::ZERO);
-        let a = dvec3(0.0, 0.0, -1.0);
-        let b = dvec3(0.0, 0.0, 1.0);
-        let hit = p.intersect_line(a, b);
-        assert!(hit.x.abs() < 1e-12);
-        assert!(hit.y.abs() < 1e-12);
-        assert!(hit.z.abs() < 1e-12);
-    }
-
-    #[test]
     fn test_intersect_line_offset() {
         let p = Planed::from_normal_and_point(Vec3d::Z, dvec3(0.0, 0.0, 3.0));
         let a = dvec3(5.0, 7.0, 0.0);

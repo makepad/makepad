@@ -10,6 +10,9 @@
 // rustc library/{core,alloc}/src/lib.rs: unsized FnOnce receivers need this
 // semantic feature even though Relax does not enforce nightly feature gates.
 #![feature(unsized_fn_params)]
+// rustc library/core/src/lib.rs: const fns call trait methods and drop values (`[const]` bounds)
+#![feature(const_trait_impl)]
+#![feature(const_destruct)]
 
 #[path = "intrinsics.rs"]
 mod intrinsic_decls;

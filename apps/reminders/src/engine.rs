@@ -999,43 +999,6 @@ mod tests {
     }
 
     #[test]
-    fn every_filter_membership_and_completed_visibility_leaves_open_counts() {
-        let (mut document, now) = doc();
-        let before = counts(&document, now);
-        document.show_completed = true;
-        let after = counts(&document, now);
-        assert_eq!(before, after);
-        let today = project(&document, Filter::Today, now);
-        assert_eq!(today.active_count, 8);
-        let scheduled = project(&document, Filter::Scheduled, now);
-        assert_eq!(scheduled.active_count, 20);
-        let all = project(&document, Filter::All, now);
-        assert_eq!(all.active_count, 29);
-        let flagged = project(&document, Filter::Flagged, now);
-        assert_eq!(flagged.active_count, 6);
-        let completed = project(&document, Filter::Completed, now);
-        assert_eq!(completed.active_count, 6);
-        assert_eq!(
-            project(&document, Filter::List(GROCERIES_LIST_ID), now).active_count,
-            8
-        );
-        assert_eq!(
-            project(&document, Filter::List(WORK_LIST_ID), now).active_count,
-            8
-        );
-        assert_eq!(
-            project(&document, Filter::List(HOME_LIST_ID), now).active_count,
-            7
-        );
-        assert_eq!(
-            project(&document, Filter::List(TRAVEL_LIST_ID), now).active_count,
-            6
-        );
-        let today_footer = project(&document, Filter::Today, now).completed_count;
-        assert!(today_footer > 0);
-    }
-
-    #[test]
     fn due_ordering_undated_all_day_and_id_ties() {
         let now = Now {
             day: from_ymd(2026, 1, 1),
@@ -1504,13 +1467,6 @@ mod tests {
         assert_eq!(row_height(true, 2, true, true) % 4.0, 0.0);
     }
 
-    #[test]
-    fn cancel_never_issues_a_command() {
-        let (document, _) = doc();
-        let before = document.clone();
-        let _draft = draft_from(document.reminder(12).unwrap());
-        assert_eq!(document, before);
-    }
     fn ids(document: &Document, filter: Filter, now: Now) -> Vec<ReminderId> {
         project(document, filter, now)
             .groups

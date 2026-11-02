@@ -22,8 +22,8 @@ fn a01_unsigned() {
     println!("| {:?} {}", w, c.load(Ordering::SeqCst));
     let d = AtomicU64::new(u64::MAX - 1);
     println!("| {} {} {:?}", d.fetch_add(3, Ordering::SeqCst), d.load(Ordering::SeqCst), d);
-    let r = d.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |x| if x < 10 { Some(x * 7) } else { None });
-    let r2 = d.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |x| if x > 100 { Some(x) } else { None });
+    let r = d.try_update(Ordering::SeqCst, Ordering::SeqCst, |x| if x < 10 { Some(x * 7) } else { None });
+    let r2 = d.try_update(Ordering::SeqCst, Ordering::SeqCst, |x| if x > 100 { Some(x) } else { None });
     println!("| {:?} {:?} {}", r, r2, d.into_inner());
     let mut e = AtomicUsize::default();
     *e.get_mut() += 41;
@@ -53,7 +53,7 @@ fn a03_bool_ptr() {
     println!("| {} {} {}", b.fetch_nand(true, Ordering::SeqCst), b.fetch_nand(false, Ordering::SeqCst), b.load(Ordering::SeqCst));
     println!("| {:?} {:?}", b.compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst), b.compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst));
     println!("| {} {:?} {:?}", b.swap(true, Ordering::SeqCst), b, AtomicBool::default());
-    println!("| {:?}", b.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |x| Some(!x)));
+    println!("| {:?}", b.try_update(Ordering::SeqCst, Ordering::SeqCst, |x| Some(!x)));
     FLAG.store(true, Ordering::Release);
     COUNTER.fetch_add(5, Ordering::Relaxed);
     println!("| {} {}", FLAG.load(Ordering::Acquire), COUNTER.load(Ordering::Relaxed));

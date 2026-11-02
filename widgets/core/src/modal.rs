@@ -57,8 +57,10 @@ script_mod! {
             show_bg: true
             draw_bg +: {
                 color: uniform(#000000B3)
+                /** the backdrop's fade, driven by `fade_ms` */
+                fade: instance(1.0)
                 pixel: fn() {
-                    return self.color
+                    return vec4(self.color.x self.color.y self.color.z self.color.w * self.fade)
                 }
             }
         }
@@ -67,6 +69,31 @@ script_mod! {
             width: Fit
             height: Fit
             flow: Down
+        }
+    }
+
+    // A modal over a blurred, slightly dimmed copy of the window behind it: the backdrop fades
+    // in on `open` and out on `close` (`fade_ms`). Everything else is the Modal's: the content
+    // card, Escape and a click outside dismiss, the pointer and keyboard stay in the card.
+    mod.widgets.BlurModal = mod.widgets.Modal{
+        fade_ms: 200
+        bg_view := mod.widgets.GaussRoundedView{
+            width: Fill
+            height: Fill
+            draw_bg +: {
+                corner_radius: 0.0
+                blur_level: 3.0
+                edge_blur_level: 3.0
+                lensing_effect: 0.0
+                lensing_strength: 0.0
+                lensing_width: 0.0
+                tint_color: #000000
+                tint_alpha: 0.2
+                rim_alpha: 0.0
+                border_alpha: 0.0
+                inner_shadow_alpha: 0.0
+                noise_strength: 0.0
+            }
         }
     }
 }
@@ -126,6 +153,23 @@ pub struct Modal {
     /// Where the keyboard was when the modal opened.
     #[rust]
     restore_focus: Area,
+    /// How long the backdrop takes to fade in on `open` and out on `close`, in milliseconds; 0
+    /// (the default) shows and hides it at once. The backdrop's draw reads the fade as the
+    /// `fade` instance of its `draw_bg` (a scrim's alpha) or `layer_opacity` (a glass backdrop).
+    #[live]
+    fade_ms: f64,
+    /// The backdrop's fade, 0..1, and the way it is moving (1 in, -1 out, 0 at rest).
+    #[rust]
+    fade: f32,
+    #[rust]
+    fade_dir: i8,
+    #[rust]
+    fade_last: Option<f64>,
+    #[rust]
+    fade_frame: Option<NextFrame>,
+    /// Closed, but still drawn while the backdrop fades out.
+    #[rust]
+    closing: bool,
     /// Whether the modal holds the sweep lock, on `draw_bg`'s area.
     #[rust]
     locked: bool,
@@ -276,6 +320,7 @@ impl Widget for Modal {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         release_orphaned_scroll_blocks(cx);
+        self.tick_fade(cx, event);
         if !self.is_open {
             return;
         }
@@ -344,9 +389,15 @@ impl Widget for Modal {
 
         // Even an invisible `draw_bg` costs the GPU a full-window pass every frame,
         // so a closed modal leaves its overlay empty.
-        if self.is_open {
+        if self.is_open || self.closing {
             self.draw_bg.begin(cx, Walk::fill(), self.view.layout);
             let bg_view = self.view.widget(cx, ids!(bg_view));
+            // the fade: a scrim's alpha, or a glass backdrop's opacity
+            let fade = self.fade;
+            if let Some(mut v) = bg_view.borrow_mut::<View>() {
+                v.draw_bg.draw_vars.set_dyn_instance(cx, live_id!(fade), &[fade]);
+                v.draw_bg.draw_vars.set_dyn_instance(cx, live_id!(layer_opacity), &[fade]);
+            }
             let _ = bg_view.draw_walk(
                 cx,
                 scope,
@@ -394,6 +445,37 @@ impl Drop for Modal {
 }
 
 impl Modal {
+    fn start_fade_frame(&mut self, cx: &mut Cx) {
+        if self.fade_frame.is_none() {
+            self.fade_last = None;
+            self.fade_frame = Some(cx.new_next_frame());
+        }
+    }
+
+    /// One step of the backdrop fade on its frame; the next frame is asked for while it moves.
+    fn tick_fade(&mut self, cx: &mut Cx, event: &Event) {
+        let Some(frame) = self.fade_frame else { return };
+        let Some(ne) = frame.is_event(event) else { return };
+        self.fade_frame = None;
+        let dt = match self.fade_last {
+            Some(t) => (ne.time - t).clamp(0.0, 0.1),
+            None => 1.0 / 60.0,
+        };
+        self.fade_last = Some(ne.time);
+        let step = (dt * 1000.0 / self.fade_ms.max(1.0)) as f32;
+        self.fade = (self.fade + self.fade_dir as f32 * step).clamp(0.0, 1.0);
+        if (self.fade_dir > 0 && self.fade >= 1.0) || (self.fade_dir < 0 && self.fade <= 0.0) {
+            self.fade_dir = 0;
+            self.closing = false;
+        } else {
+            self.fade_frame = Some(cx.new_next_frame());
+        }
+        if let Some(draw_list) = &self.draw_list {
+            draw_list.redraw(cx);
+        }
+        self.draw_bg.redraw(cx);
+    }
+
     /// Whether the modal is showing. A widget built on one needs this as
     /// much as a caller holding a reference does.
     pub fn is_open(&self) -> bool {
@@ -419,6 +501,14 @@ impl Modal {
             self.restore_focus = cx.key_focus();
         }
         self.is_open = true;
+        self.closing = false;
+        if self.fade_ms > 0.0 {
+            self.fade_dir = 1;
+            self.start_fade_frame(cx);
+        } else {
+            self.fade = 1.0;
+            self.fade_dir = 0;
+        }
         // Assigning drops any previous scope, which matters because `open()` has no
         // already-open guard and callers re-open freely.
         self.cancel_scope = Some(self.begin_cancel_scope(cx));
@@ -537,6 +627,12 @@ impl Modal {
             &mut Scope::empty(),
         );
         self.is_open = false;
+        if self.fade_ms > 0.0 && self.fade > 0.0 {
+            // drawn on, without taking events, until the backdrop has faded out
+            self.closing = true;
+            self.fade_dir = -1;
+            self.start_fade_frame(cx);
+        }
         if let Some(draw_list) = &self.draw_list {
             CxDraw::set_nav_trap(cx, draw_list.id(), false);
         }

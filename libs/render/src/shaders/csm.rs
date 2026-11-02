@@ -4,7 +4,7 @@
 //! slot their binding ABI already fixed, and spread this for the uniforms and
 //! the filter. Realtime cascaded shadow maps (shadow_csm.rs): 4 sun-depth
 //! tiles in a 2x2 grid of one sampled D32 target, read with hardware compare.
-//! csm_p = (tier on, one tile's inverse resolution, 0, 0); csm_r*N are
+//! csm_p = (tier on, one tile's inverse resolution, filter seed, 0); csm_r*N are
 //! cascade N's world->map rows; csm_da/db map a z01 reference to stored
 //! depth per cascade; csm_zw = z01 per world unit; csm_texel = texel size in
 //! world units. When the tier is on, `csm_vis` REPLACES every baked
@@ -138,7 +138,10 @@ script_mod! {
             let v = 0.5 - q.y * 0.5
             let e = self.csm_p.y
             let cell = floor(vec2(u, v) / e * 4.0)
-            let a = 6.2831853 * fract(52.9829189 * fract(dot(cell, vec2(0.06711056, 0.00583715))))
+            // The disk's rotation per cell, turned by the golden angle per
+            // seed (csm_p.z): a still view's averaged recordings smooth the
+            // penumbra's noise out.
+            let a = 6.2831853 * fract(52.9829189 * fract(dot(cell, vec2(0.06711056, 0.00583715))) + self.csm_p.z * 0.618034)
             let cs = vec2(cos(a), sin(a)) * (r * e)
             let sn = vec2(-cs.y, cs.x)
             // The centre and the four taps on the disk's rim first: where

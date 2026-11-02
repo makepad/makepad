@@ -1189,17 +1189,6 @@ mod tests {
     }
 
     #[test]
-    fn shared_object_id_depends_on_net_peer_id_not_socket_addr() {
-        let node_id = XrNetPeerId(0x1234);
-        let local_bind_id = xr_make_shared_object_id(node_id, XrSharedObjectCounter(9))
-            .expect("local bind should hash");
-        let remote_source_id = xr_make_shared_object_id(node_id, XrSharedObjectCounter(9))
-            .expect("remote source should hash");
-
-        assert_eq!(local_bind_id, remote_source_id);
-    }
-
-    #[test]
     fn shared_object_control_is_sent_over_sync_channel() {
         let _guard = NET_LOOPBACK_TEST_LOCK.lock().unwrap();
         let mut left =

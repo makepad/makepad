@@ -41,9 +41,9 @@ mod tests {
   }
 
   #[test]
-  #[cfg_attr(miri, ignore)]
   fn zeroes_long() {
-    assert_eq!(adler32(&[0; 1024 * 1024]), 0x00f00001);
+    // Cross the checksum modulus while processing full chunks and a remainder.
+    assert_eq!(adler32(&[0; 65522]), 0x00010001);
   }
 
   #[test]
@@ -52,9 +52,9 @@ mod tests {
   }
 
   #[test]
-  #[cfg_attr(miri, ignore)]
   fn ones_long() {
-    assert_eq!(adler32(&[0xff; 1024 * 1024]), 0x8e88ef11);
+    // Two full 5552-byte chunks and a remainder exercise repeated reduction.
+    assert_eq!(adler32(&[0xff; 11105]), 0x37a33825);
   }
 
   #[test]
@@ -64,9 +64,9 @@ mod tests {
   }
 
   #[test]
-  #[cfg_attr(miri, ignore)]
   fn mixed_long() {
-    assert_eq!(adler32(&[0xA5; 1024 * 1024]), 0xd5009ab1);
+    // Two full 5552-byte chunks and a remainder exercise repeated reduction.
+    assert_eq!(adler32(&[0xA5; 11105]), 0x607af71b);
   }
 
   /// Example calculation from https://en.wikipedia.org/wiki/Adler-32.

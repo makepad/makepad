@@ -379,6 +379,20 @@ pub struct DrawSegmentedBg {
     border_size: f32,
     #[live]
     radius: f32,
+    #[live]
+    active: f32,
+    #[live]
+    hover: f32,
+    #[live]
+    marked: f32,
+    #[live]
+    first: f32,
+    #[live]
+    last: f32,
+    #[live]
+    vertical: f32,
+    #[live]
+    separator: f32,
 }
 
 /// The chevron on a split button's trailing half. Drawn rather than typed:
@@ -458,6 +472,10 @@ script_mod! {
         selection: Single
         /** every segment as wide as the widest, so the row does not shuffle */
         equal_width: false
+        /** Connected fills each segment; Spaced keeps a sliding pill. */
+        join: Spaced
+        /** space between the face and its segments */
+        inset: 2.0
         /** the row runs down instead of across */
         vertical: false
         /** height of a segment 0..64 step 1 */
@@ -495,14 +513,21 @@ script_mod! {
             border_color: theme.color_outline_variant
             border_size: 0.0
             radius: 6.0
+            active: 1.0
+            first: 1.0
+            last: 1.0
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
-                sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, self.radius * 0.5)
+                if self.vertical > 0.5 {
+                    sdf.box_y(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, self.radius * 0.5 * self.first, self.radius * 0.5 * self.last)
+                } else {
+                    sdf.box_x(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, self.radius * 0.5 * self.first, self.radius * 0.5 * self.last)
+                }
                 sdf.fill_keep(self.color)
                 if self.border_size > 0.0 {
                     sdf.stroke_keep(self.border_color, self.border_size)
                 }
-                return sdf.result
+                return sdf.result * max(self.active, self.hover * 0.15)
             }
         }
         draw_text +: {
@@ -695,6 +720,13 @@ pub struct SegmentedControl {
     /// The answers, in order.
     #[live]
     pub options: Vec<String>,
+    /// Optional accessible names parallel to the visible options.
+    #[live]
+    pub option_names: Vec<String>,
+    #[live]
+    pub radio: bool,
+    #[live]
+    pub mixed: bool,
     /// Which answer is current, as an index into `options`.
     #[live]
     pub selected: usize,
@@ -705,6 +737,12 @@ pub struct SegmentedControl {
     /// when the words change.
     #[live]
     pub equal_width: bool,
+    #[live(GroupJoin::Spaced)]
+    pub join: GroupJoin,
+    #[live(2.0)]
+    pub inset: f64,
+    #[live]
+    pub marked: bool,
     /// The row runs down instead of across.
     #[live]
     pub vertical: bool,
@@ -744,11 +782,14 @@ pub struct SegmentedControl {
     #[rust]
     focused: usize,
     #[rust]
+    hovered: Option<usize>,
+    #[rust]
     last_time: f64,
 }
 
 impl SegmentedControl {
     fn is_on(&self, index: usize) -> bool {
+        if self.mixed { return false; }
         match self.selection {
             ChipSelection::Multi => self.multi.get(index).copied().unwrap_or(false),
             _ => index == self.selected,
@@ -786,6 +827,10 @@ impl SegmentedControl {
         widths
     }
 
+    pub fn required_width(&mut self, cx: &mut Cx2d) -> f64 {
+        self.segment_widths(cx).iter().sum::<f64>() + self.inset * 2.0
+    }
+
     pub fn set_selected(&mut self, cx: &mut Cx, index: usize) {
         if index < self.options.len() && self.selected != index {
             self.selected = index;
@@ -799,6 +844,7 @@ impl SegmentedControl {
 
     /// The word that is current, or the words that are, joined by commas.
     pub fn selected_text(&self) -> String {
+        if self.mixed { return "—".into(); }
         if self.selection == ChipSelection::Multi {
             return self
                 .options
@@ -823,10 +869,11 @@ impl SegmentedControl {
                 self.set_on(index, on);
             }
             _ => {
-                if self.selected == index {
+                if self.selected == index && !self.mixed {
                     return;
                 }
                 self.selected = index;
+                self.mixed = false;
             }
         }
         cx.widget_action(self.uid, SegmentedControlAction::Selected(index));
@@ -835,10 +882,41 @@ impl SegmentedControl {
 }
 
 impl Widget for SegmentedControl {
+    fn semantics_parts(&self, cx: &Cx, out: &mut Vec<(u64, Option<u64>, a11y_tree::Node)>) {
+        let shift = self.draw_bg.area().rect(cx).pos - self.drawn_at;
+        for (i, rect) in self.segments.iter().enumerate() {
+            let mut node = a11y_tree::Node {
+                role: if self.radio { a11y_tree::Role::Radio } else { a11y_tree::Role::Tab },
+                bounds: makepad_platform::a11y::semantic_rect(Rect {pos: rect.pos + shift, ..*rect}),
+                name: self.option_names.get(i).or_else(|| self.options.get(i)).cloned().unwrap_or_default(),
+                actions: a11y_tree::Actions::PRESS | a11y_tree::Actions::SELECT,
+                pos_in_set: i as u32 + 1,
+                set_size: self.options.len() as u32,
+                toggle: if self.is_on(i) { a11y_tree::Toggle::On } else { a11y_tree::Toggle::Off },
+                ..Default::default()
+            };
+            node.states.set(a11y_tree::States::DISABLED, self.disabled);
+            node.states.set(a11y_tree::States::SELECTED, self.is_on(i));
+            out.push((i as u64 + 1, None, node));
+        }
+    }
+
+    fn handle_action(&mut self, cx: &mut Cx, request: &a11y_tree::ActionRequest, _scope: &mut Scope) -> a11y_tree::ActionResult {
+        use a11y_tree::{ActionResult, Actions};
+        if self.disabled { return ActionResult::Disabled; }
+        if request.action != Actions::PRESS && request.action != Actions::SELECT { return ActionResult::Unhandled; }
+        let Some(index) = cx.a11y.action_part_key(request.node).and_then(|k| k.checked_sub(1)) else {
+            return ActionResult::Unhandled;
+        };
+        if index as usize >= self.options.len() { return ActionResult::Unsupported; }
+        self.press(cx, index as usize);
+        ActionResult::Handled
+    }
+
     fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
         let _ = cx;
         node.states.set(a11y_tree::States::DISABLED, self.disabled);
-        node.role = a11y_tree::Role::TabList;
+        node.role = if self.radio { a11y_tree::Role::RadioGroup } else { a11y_tree::Role::TabList };
         makepad_platform::a11y::set_string(&mut node.name, &self.text());
         node.value =
             (|| -> Option<String> { Some(self.selected.to_string()) })().unwrap_or_default();
@@ -856,8 +934,8 @@ impl Widget for SegmentedControl {
         if !self.visible {
             return DrawStep::done();
         }
-        let widths = self.segment_widths(cx);
-        let gap = 2.0;
+        let mut widths = self.segment_widths(cx);
+        let gap = self.inset;
         let (w, h) = if self.vertical {
             let widest = widths.iter().cloned().fold(0.0f64, f64::max);
             (widest + gap * 2.0, self.segment_height * widths.len() as f64 + gap * 2.0)
@@ -875,8 +953,19 @@ impl Widget for SegmentedControl {
             },
             ..walk
         };
+        self.draw_bg.marked = self.marked as u8 as f32;
         let rect = self.draw_bg.draw_walk(cx, walk);
         self.drawn_at = rect.pos;
+
+        if self.equal_width && !self.vertical && !widths.is_empty() {
+            let width = (rect.size.x - gap * 2.0).max(0.0) / widths.len() as f64;
+            widths.fill(width);
+        }
+        let segment_height = if self.vertical {
+            self.segment_height
+        } else {
+            (rect.size.y - gap * 2.0).max(0.0)
+        };
 
         // Where each answer sits, and where the pill should be.
         self.segments.clear();
@@ -889,7 +978,7 @@ impl Widget for SegmentedControl {
                     size: dvec2(rect.size.x - gap * 2.0, self.segment_height),
                 }
             } else {
-                Rect { pos: dvec2(x, rect.pos.y + gap), size: dvec2(*width, self.segment_height) }
+                Rect { pos: dvec2(x, rect.pos.y + gap), size: dvec2(*width, segment_height) }
             };
             self.segments.push(seg);
             let _ = i;
@@ -902,7 +991,25 @@ impl Widget for SegmentedControl {
 
         // The pill glides to the current answer; every other answer that is
         // on gets a still pill, since only one thing can be gliding.
-        if self.selection == ChipSelection::Multi {
+        self.draw_pill.marked = self.marked as u8 as f32;
+        self.draw_pill.active = 1.0;
+        self.draw_pill.hover = 0.0;
+        self.draw_pill.first = 1.0;
+        self.draw_pill.last = 1.0;
+        self.draw_pill.vertical = self.vertical as u8 as f32;
+        self.draw_pill.separator = 0.0;
+        if self.join == GroupJoin::Connected {
+            for i in 0..self.segments.len() {
+                let on = self.is_on(i);
+                self.draw_pill.active = on as u8 as f32;
+                self.draw_pill.hover = (self.hovered == Some(i) && !self.disabled) as u8 as f32;
+                self.draw_pill.first = (i == 0) as u8 as f32;
+                self.draw_pill.last = (i + 1 == self.segments.len()) as u8 as f32;
+                self.draw_pill.vertical = self.vertical as u8 as f32;
+                self.draw_pill.separator = (i > 0 && !on && !self.is_on(i - 1)) as u8 as f32;
+                self.draw_pill.draw_abs(cx, self.segments[i]);
+            }
+        } else if self.selection == ChipSelection::Multi {
             for (i, seg) in self.segments.clone().iter().enumerate() {
                 if self.is_on(i) {
                     self.draw_pill.draw_abs(cx, *seg);
@@ -932,8 +1039,28 @@ impl Widget for SegmentedControl {
             let rest = draw.color;
             draw.color = Vec4f {
                 w: rest.w * alpha,
-                ..if on { family.on_container } else { rest }
+                ..if on && self.join != GroupJoin::Connected { family.on_container } else { rest }
             };
+            if self.join == GroupJoin::Connected {
+                cx.begin_turtle(
+                    Walk::abs_rect(*seg),
+                    Layout { align: Align { x: 0.5, y: 0.5 }, ..Layout::default() },
+                );
+                draw.draw_walk(
+                    cx,
+                    Walk {
+                        width: Size::fill(),
+                        height: Size::fit(),
+                        margin: Inset { left: self.segment_padding, right: self.segment_padding, ..Inset::default() },
+                        ..Walk::default()
+                    },
+                    Align { x: 0.5, y: 0.5 },
+                    &option,
+                );
+                cx.end_turtle();
+                draw.color = rest;
+                continue;
+            }
             let text_w = measure(draw, cx, &option);
             // Centred by the laid-out line (ascender to descender), which is
             // what `draw_abs` places at `pos`: the point size is shorter
@@ -964,13 +1091,29 @@ impl Widget for SegmentedControl {
         if self.disabled {
             return;
         }
+        if matches!(event, Event::ClearHover) && self.hovered.take().is_some() {
+            self.draw_bg.redraw(cx);
+        }
         match event.hits(cx, self.draw_bg.area()) {
-            Hit::FingerHoverIn(_) => cx.set_cursor(MouseCursor::Hand),
-            Hit::FingerHoverOut(_) => cx.set_cursor(MouseCursor::Default),
-            Hit::FingerDown(_) => {
-                cx.set_key_focus(self.draw_bg.area());
+            Hit::FingerHoverIn(fe) | Hit::FingerHoverOver(fe) => {
+                cx.set_cursor(MouseCursor::Hand);
+                if self.join == GroupJoin::Connected {
+                    let at = fe.abs - fe.rect.pos + self.drawn_at;
+                    let hovered = self.segments.iter().position(|seg| seg.contains(at));
+                    if self.hovered != hovered {
+                        self.hovered = hovered;
+                        self.draw_bg.redraw(cx);
+                    }
+                }
             }
-            Hit::FingerUp(fe) if fe.is_primary_hit() && fe.is_over && fe.was_tap() => {
+            Hit::FingerHoverOut(_) => {
+                cx.set_cursor(MouseCursor::Default);
+                if self.hovered.take().is_some() {
+                    self.draw_bg.redraw(cx);
+                }
+            }
+            Hit::FingerDown(fe) if fe.is_primary_hit() => {
+                cx.set_key_focus(self.draw_bg.area());
                 // The segments were placed where the row was first laid
                 // out; a parent that aligns its children (centred, or after
                 // a Fill sibling) moves the row afterwards. Place the press
@@ -1502,9 +1645,4 @@ mod tests {
         assert!(!ladder.measured(200.0), "and settled again");
     }
 
-    /// Multi keeps its own answers; single keeps one.
-    #[test]
-    fn multi_and_single_keep_different_answers() {
-        assert_ne!(ChipSelection::Multi, ChipSelection::Single);
-    }
 }

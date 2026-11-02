@@ -2022,10 +2022,11 @@ warning: unused variable: `x`
         m.stop(id).unwrap();
         assert!(m.snapshot().running.iter().all(|r| r.id != id));
     }
-    /// From a checkout `makepad run` is a release `cargo run` of the tool with
-    /// the app's package and arguments: cargo rebuilds a `makepad` older than
-    /// the checkout (its provided crates), which a prebuilt binary refused
-    /// ("provided crate .. differs from the library built into makepad").
+    /// From a checkout `makepad run` is a `cargo run` of the tool in its own
+    /// release-class `host` profile with the app's package and arguments: cargo
+    /// rebuilds a `makepad` older than the checkout (its provided crates), which
+    /// a prebuilt binary refused ("provided crate .. differs from the library
+    /// built into makepad").
     #[test]
     fn a_makepad_run_from_a_checkout_is_a_release_cargo_run_of_the_tool() {
         let root = Path::new("/checkout");
@@ -2033,7 +2034,7 @@ warning: unused variable: `x`
         let (program, args) = makepad_run_argv(app, root, false).unwrap();
         assert_eq!(program, registry::cargo_bin());
         let manifest = root.join("Cargo.toml");
-        let mut want: Vec<String> = ["run", "--release", "--manifest-path", &manifest.to_string_lossy(), "-p", "makepad-run", "--bin", "makepad", "--", "run", app.package]
+        let mut want: Vec<String> = ["run", "--profile", "host", "--manifest-path", &manifest.to_string_lossy(), "-p", "makepad-run", "--bin", "makepad", "--", "run", app.package]
             .iter()
             .map(|a| a.to_string())
             .collect();

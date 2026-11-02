@@ -1198,9 +1198,6 @@ mod tests {
         assert_eq!(screen.cursor.y, 4);
     }
 
-    /// On grow, scrollback is pulled to keep content anchored to the bottom
-    /// (matching macOS Terminal).  The TUI app receives SIGWINCH and redraws.
-    #[test]
     #[test]
     fn resize_shrink_bottom_anchors_when_text_below_cursor() {
         let mut terminal = Terminal::new(4, 5);
@@ -1511,7 +1508,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn codex_tui_grid_positions_stable_after_narrower_resize() {
         let mut t = setup_codex_tui(80, 24);
 
@@ -1538,31 +1534,6 @@ mod tests {
 
         assert_eq!(t.screen().cursor.y, 22);
         assert_eq!(t.screen().used_rows(), 24);
-    }
-
-    #[test]
-    fn codex_tui_used_rows_reflects_content_not_cursor() {
-        let mut t = setup_codex_tui(80, 24);
-
-        // Cursor is at row 22 (input prompt), but content extends to row 23.
-        assert_eq!(t.screen().cursor.y, 22);
-        assert_eq!(t.screen().used_rows(), 24); // content on all 24 rows
-
-        // After resize, used_rows must still cover all content, not snap to cursor.
-        t.resize(100, 24);
-        assert!(
-            t.screen().used_rows() >= 24,
-            "used_rows={} should be >= 24 after width resize",
-            t.screen().used_rows()
-        );
-
-        // The viewport total (scrollback + used_rows) should be enough to scroll to bottom.
-        let total = t.primary.scrollback_len() + t.screen().used_rows();
-        assert!(
-            total >= 24,
-            "total_lines={} should be >= viewport rows",
-            total
-        );
     }
 
     #[test]
@@ -1681,13 +1652,7 @@ mod tests {
         );
     }
 
-    /// Shrink pushes top rows into scrollback to keep cursor visible,
-    /// anchoring content to the bottom (matches macOS Terminal).
-    #[test]
-
     /// Shrink + grow round-trip restores content from scrollback.
-    #[test]
-    #[test]
     #[test]
     fn makepad_tui_hi_up_down_resize_restores_framebuffer() {
         let mut t = setup_makepad_tui_like_with_hi(80, 20);

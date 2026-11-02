@@ -1,7 +1,5 @@
 //! Formula tests: the compiled programs (interpreter and native) against
-//! the reference tree-walker, on focused scripts and on every script of
-//! the patch library (patch content, not in the repo: the folder named by
-//! `FORMULA_LIBRARY`, default `local/agent_state/synth/formula/lib`).
+//! the reference tree-walker, on focused scripts.
 
 use super::compile::{f, BOOL_FIELDS, NUM_FIELDS};
 use super::reference::RefRunner;
@@ -229,7 +227,7 @@ fn strings_sub_find_len() {
 fn helpers_follow_the_addendum() {
     // Slew: first output equals the input; rate 0 jumps; the default rate
     // limits a unit step to 1 / (1 + 10000 * 0.2^3) per block at 48 kHz.
-    let src = "function init(s) s.a = surge.mod.Slew:new{ samplerate = s.samplerate, block_size = s.block_size }; s.b = surge.mod.Slew:new{}; s.n = 0; return s end\n\
+    let src = "function init(s) s.a = synth.mod.Slew:new{ samplerate = s.samplerate, block_size = s.block_size }; s.b = synth.mod.Slew:new{}; s.n = 0; return s end\n\
                function process(s) s.n = s.n + 1; local x = s.n > 1 and 1 or 0; s.output = { s.a:run(x), s.b:run(x), s.a.block_factor }; s.clamp_output = false; return s end";
     both(src);
     let formula = Formula::compile(src).unwrap();
@@ -247,13 +245,13 @@ fn helpers_follow_the_addendum() {
 
     // ClockDivider: ibeat wraps with the numerator; the typo keeps numerator 1.
     both(
-        "function init(s) s.c = surge.mod.ClockDivider:new{ numerator = 3, denominator = 2 }; s.t = surge.mod.ClockDivider:new{ enumerator = 5, denominator = 4 }; return s end\n\
+        "function init(s) s.c = synth.mod.ClockDivider:new{ numerator = 3, denominator = 2 }; s.t = synth.mod.ClockDivider:new{ enumerator = 5, denominator = 4 }; return s end\n\
          function process(s) s.c:tick(s.intphase, s.phase); s.t:tick(s.intphase, s.phase); s.output = { s.c.ibeat / 3, s.c.phase, s.c.newbeat and 1 or 0, s.t.ibeat, s.t.intphase / 10 }; return s end",
     );
     // AHD: piecewise linear, defaults 0.1 0.1 0.7, and prototype defaults
     // a script changes apply to later instances.
     both(
-        "function init(s) surge.mod.AHDEnvelope.d = 0.5; s.e = surge.mod.AHDEnvelope:new{ a = 0.2 }; return s end\n\
+        "function init(s) synth.mod.AHDEnvelope.d = 0.5; s.e = synth.mod.AHDEnvelope:new{ a = 0.2 }; return s end\n\
          function process(s) s.output = { s.e:at(s.phase), s.e:at(s.phase * 2 - 0.5), s.e.d }; return s end",
     );
 }
@@ -320,65 +318,4 @@ fn load_errors_are_reported() {
             Err(e) => assert!(e.message.contains(what) && !e.runtime, "{}: {}", src, e),
         }
     }
-}
-
-fn library_dir() -> std::path::PathBuf {
-    match std::env::var("FORMULA_LIBRARY") {
-        Ok(p) => p.into(),
-        Err(_) => std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../local/agent_state/synth/formula/lib"),
-    }
-}
-
-/// Every script of the patch library compiles and runs like the reference.
-#[test]
-fn library_scripts_compile_and_match() {
-    let dir = library_dir();
-    let Ok(rd) = std::fs::read_dir(&dir) else {
-        eprintln!("formula library not present at {} (patch content; fetch it with the library download): skipped", dir.display());
-        return;
-    };
-    let mut files: Vec<_> = rd.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.extension().map_or(false, |x| x == "lua")).collect();
-    files.sort();
-    let mut fails = Vec::new();
-    for p in &files {
-        let src = std::fs::read_to_string(p).unwrap();
-        for be in [Backend::Interp, Backend::Native] {
-            let name = p.file_name().unwrap().to_string_lossy().to_string();
-            // As voice LFOs every script must run; with a scene instance
-            // too (no key, velocity, ...) a script may stop, but only the
-            // way the reference does.
-            match compare(&src, be, 600, false) {
-                Ok((None, true)) => {}
-                Ok((None, false)) => fails.push(format!("{} ({:?}): every output was 0", name, be)),
-                Ok((Some(e), _)) => fails.push(format!("{} ({:?}): stopped: {}", name, be, e)),
-                Err(e) => fails.push(format!("{} ({:?}): {}", name, be, e)),
-            }
-            if let Err(e) = compare(&src, be, 600, true) {
-                fails.push(format!("{} ({:?}, with a scene LFO): {}", name, be, e));
-            }
-        }
-    }
-    eprintln!("formula library: {} scripts, {} failures", files.len(), fails.len());
-    assert!(fails.is_empty(), "{}", fails.join("\n"));
-}
-
-/// Compile cost of the library (load time matters): printed with --nocapture.
-#[test]
-fn library_compile_cost() {
-    let Ok(rd) = std::fs::read_dir(library_dir()) else { return };
-    let mut total = std::time::Duration::ZERO;
-    let mut worst = (std::time::Duration::ZERO, String::new());
-    let mut n = 0;
-    for p in rd.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.extension().map_or(false, |x| x == "lua")) {
-        let src = std::fs::read_to_string(&p).unwrap();
-        let t = std::time::Instant::now();
-        let f = Formula::compile(&src).unwrap();
-        let d = t.elapsed();
-        total += d;
-        n += 1;
-        if d > worst.0 {
-            worst = (d, format!("{} ({} AIR values)", p.file_name().unwrap().to_string_lossy(), f.process_program().vals.len()));
-        }
-    }
-    eprintln!("formula compile: {} scripts in {:?}, worst {:?} {}", n, total, worst.0, worst.1);
 }

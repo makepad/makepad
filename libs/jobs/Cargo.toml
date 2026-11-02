@@ -1,0 +1,11 @@
+[package]
+name = "makepad-jobs"
+version = "1.0.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2021"
+description = "One process-wide list of long operations (title, stage, progress, cancel) for a status bar's job strip and any other view of them"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
+
+[dependencies]

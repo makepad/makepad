@@ -366,10 +366,4 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn canonical_backend_has_no_command_configuration() {
-        // Production matting is selected by a compiled native feature and a
-        // pinned registry artifact, never by a runtime command environment.
-        assert_ne!(crate::registry::EMBEDDED_REGISTRY.len(), 0);
-    }
 }

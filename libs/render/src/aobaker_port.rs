@@ -65,7 +65,7 @@
 //! variant, and single-sided packs make it a no-op.
 
 use crate::ao::AoSampler;
-use crate::ao_atlas::{project, Chart, GUTTER, TEXEL_SUBSAMPLES, TEXEL_SUB_OFFSETS};
+use crate::ao_atlas::{Chart, GUTTER, TEXEL_SUBSAMPLES, TEXEL_SUB_OFFSETS};
 use makepad_draw::makepad_math::Vec3f;
 
 /// Rays per texel. aobaker's CLI default is 128; the port contract pins 256,
@@ -340,7 +340,7 @@ pub(crate) fn bake_aobaker_chart(
     let fallback = Vec3f { x: 0.0, y: 1.0, z: 0.0 };
     const SUB: [(f32, f32); TEXEL_SUBSAMPLES] = TEXEL_SUB_OFFSETS;
 
-    for &t in &c.tris {
+    for (chart_tri, &t) in c.tris.iter().enumerate() {
         let (ia, ib, ic) = (
             indices[t * 3] as usize,
             indices[t * 3 + 1] as usize,
@@ -351,16 +351,7 @@ pub(crate) fn bake_aobaker_chart(
         let nb = normals.get(ib).copied().unwrap_or(fallback);
         let nc = normals.get(ic).copied().unwrap_or(fallback);
 
-        let to_tex = |p: Vec3f| {
-            let (pu, pv) = project(p, c.axis);
-            (
-                GUTTER as f32 + (pu - c.u0) * c.scale,
-                GUTTER as f32 + (pv - c.v0) * c.scale,
-            )
-        };
-        let (ax, ay) = to_tex(pa);
-        let (bx, by) = to_tex(pb);
-        let (cx2, cy2) = to_tex(pc);
+        let [[ax, ay], [bx, by], [cx2, cy2]] = c.tex[chart_tri];
 
         let area = (bx - ax) * (cy2 - ay) - (by - ay) * (cx2 - ax);
         if area.abs() < 1.0e-9 {

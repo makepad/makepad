@@ -2,9 +2,10 @@
 //! - [`lane`]: the lane worktree lifecycle (new, adopt, cleanup after landing, drop);
 //! - [`job`]: async jobs: one command run each at a worktree snapshot, placed on a free box, the
 //!   box released when it ends;
-//! - [`verify`]: the rolling full verifier of the newest landed work + main pair;
+//! - [`verify`]: the rolling CI verifier of the newest landed work + main pair;
+//! - [`jitlegs`]: long JIT correctness legs after input changes, outside every gate;
 //! - [`allapps`]: `makepad check` of every app, example and WM package, hourly when idle;
-//! - [`push`]: the collapsed push of the newest verified tip to origin/work, only when asked;
+//! - [`push`]: the collapsed push of a requested commit or newest landed tip to origin/work;
 //! - [`live`]: a long-running app on a box that the worktree's edits hot-patch into;
 //! - [`roll`]: the self-update of the hubs, the WM-supervised services and the master itself;
 //! - [`show`]: the latest landed build of an app on one of the user's display devices, tracked;
@@ -16,18 +17,23 @@
 
 pub mod after;
 pub mod allapps;
+pub mod arm;
 pub mod ci;
 pub mod ci_status;
 pub mod cli;
+pub mod jitlegs;
 pub mod job;
 pub mod lane;
 pub mod live;
+pub mod live_shadow;
+pub mod promote;
 pub mod push;
 pub mod roll;
 pub mod show;
 pub mod leg;
 pub mod verify;
-#[cfg(all(test, unix))]
+// The fake pool advertises this host; the gate requires Linux app boots.
+#[cfg(all(test, target_os = "linux"))]
 mod restart_tests;
 
 use crate::lease::master::LeaseMaster;
@@ -38,7 +44,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// The control services of the jobs (`cli` talks to them).
-pub const SERVICES: [&str; 10] = ["lane", "job", "live", "show", "verify", "after", "allapps", "push", "state", "ci"];
+pub const SERVICES: [&str; 13] = ["overlay-shadow", "lane", "job", "live", "show", "verify", "jitlegs", "after", "allapps", "push", "state", "ci", "master"];
 
 /// What every job has: the state, the leases, the checkout the master serves.
 pub struct Ctx {
@@ -78,6 +84,13 @@ pub fn repo() -> PathBuf {
 pub fn start(ep: &makepad_remote::Endpoint, machine: &str, leases: Arc<LeaseMaster>, publish: crate::state::Publish) {
     let store = crate::state::Store::open(&crate::proto::home(), machine, publish);
     let repo = repo();
+    for dir in [repo.clone(), repo.join("apps/commercial")] {
+        if dir.join(".git").exists() {
+            if let Err(e) = crate::ci_merge::install_merge_driver(&dir, &repo) {
+                store.event("ci", crate::proto::Sev::Err, format!("ci merge driver: {e}"), None);
+            }
+        }
+    }
     let monitor = crate::monitor::Monitor::start(&[crate::lease::wt::root_of(&repo)]);
     if let Some(e) = &monitor.error {
         store.event("lane", crate::proto::Sev::Warn, format!("lane: the file monitor did not start ({e}); dirty sets come from git status"), None);
@@ -111,6 +124,8 @@ pub fn go() {
     live::start(ctx.clone());
     ci::start(&ctx);
     verify::start(ctx.clone());
+    jitlegs::start(ctx.clone());
+    push::start(ctx.clone());
     ci_status::start(ctx.clone());
     after::start(ctx.clone());
     allapps::start(ctx);
@@ -126,6 +141,35 @@ pub fn ctx() -> Option<&'static Arc<Ctx>> {
 /// The master's lease scheduler (None outside a master).
 pub fn leases() -> Option<Arc<LeaseMaster>> {
     CTX.get().map(|c| c.leases.clone())
+}
+
+/// The rustc the boxes of `os` run, when most of them agree (verify and CI take only those: a box
+/// on another toolchain makes the agree fixtures disagree); None: no majority (a tie), nothing is
+/// held back. Every box off the fleet's own version is said once, as an error.
+pub fn fleet_rustc(ctx: &Ctx, os: &str) -> Option<String> {
+    let nodes = ctx.leases.nodes();
+    let versions: Vec<(String, String, String)> = nodes.iter().filter(|n| n.up).filter_map(|n| n.caps.as_ref().map(|c| (n.name.clone(), c.os.to_ascii_lowercase(), c.rustc.clone()))).filter(|(_, _, v)| !v.is_empty()).collect();
+    let majority = |of: &mut dyn Iterator<Item = &String>| -> Option<String> {
+        let mut count: std::collections::BTreeMap<&String, usize> = std::collections::BTreeMap::new();
+        for v in of {
+            *count.entry(v).or_default() += 1;
+        }
+        let best = count.values().copied().max()?;
+        let top: Vec<&&String> = count.iter().filter(|(_, n)| **n == best).map(|(v, _)| v).collect();
+        (top.len() == 1).then(|| (*top[0]).clone())
+    };
+    if let Some(fleet) = majority(&mut versions.iter().map(|(_, _, v)| v)) {
+        static SAID: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
+        let mut said = SAID.lock().unwrap();
+        for (node, _, v) in versions.iter().filter(|(_, _, v)| *v != fleet) {
+            if !said.iter().any(|(n, x)| n == node && x == v) {
+                said.push((node.clone(), v.clone()));
+                ctx.store.event("toolchain", crate::proto::Sev::Err, format!("toolchain: {node} runs rustc {v}, most of the fleet {fleet} (verify and CI hold back a box that is off its own OS's majority; the box's owner updates it)"), None);
+            }
+        }
+    }
+    let os = os.to_ascii_lowercase();
+    majority(&mut versions.iter().filter(|(_, o, _)| *o == os).map(|(_, _, v)| v))
 }
 
 /// Lane work that waited this long takes a box from background work.
@@ -153,23 +197,24 @@ pub(crate) fn fits(needs: &[(String, String)], caps: Option<&crate::lease::Caps>
 pub fn preempt(ctx: &Ctx, last: &mut u64) {
     use crate::lease::sched::State;
     let now = crate::proto::wall_ms();
-    let view = ctx.leases.view();
-    // a show someone waits for does not wait out the 30 s
-    let show = |l: &crate::lease::sched::Lease| l.req.agent.as_deref() == Some("devhub-show");
-    let starved = view.iter().filter(|l| l.state == State::Queued && show(l)).min_by_key(|l| l.asked_ms);
-    let starved = match starved {
-        Some(s) => Some(s),
-        None if now.saturating_sub(*last) < PREEMPT_AFTER_MS => return,
-        None => view.iter().filter(|l| l.state == State::Queued && !leg::is_background(l) && now.saturating_sub(l.asked_ms) > PREEMPT_AFTER_MS).min_by_key(|l| l.asked_ms),
-    };
-    let Some(starved) = starved else { return };
+    let view: Vec<_> = ctx.leases.view().into_iter().filter(|l| l.priority != crate::lease::Priority::Interactive).collect();
+    if now.saturating_sub(*last) < PREEMPT_AFTER_MS { return; }
+    // Interactive work drains successors in the scheduler; only background work uses this path.
+    let mut cands: Vec<_> = view.iter().filter(|l| l.state == State::Queued && crate::lease::sched::owed_verify(l)).collect();
+    cands.extend(view.iter().filter(|l| l.state == State::Queued && !leg::is_background(l) && now.saturating_sub(l.asked_ms) > PREEMPT_AFTER_MS));
+    cands.sort_by_key(|l| (!crate::lease::sched::owed_verify(l), l.asked_ms));
     let nodes = ctx.leases.nodes();
-    let victim = view
-        .iter()
-        .filter(|l| matches!(l.state, State::Granted | State::Starting) && l.req.prio >= leg::BACKGROUND_PRIO)
-        // owed background work (it asked at OWED_PRIO) keeps its box
-        .filter(|l| l.node.as_ref().is_some_and(|n| nodes.iter().any(|x| &x.name == n && fits(&starved.req.needs, x.caps.as_ref()))))
-        .max_by_key(|l| l.granted_ms.unwrap_or(0));
+    let victim_for = |starved: &crate::lease::sched::Lease| {
+        view.iter()
+            .filter(|l| matches!(l.state, State::Granted | State::Starting) && l.req.prio >= leg::BACKGROUND_PRIO)
+            .filter(|l| !matches!(l.req.kind, crate::lease::Kind::Long | crate::lease::Kind::Test | crate::lease::Kind::Screen | crate::lease::Kind::Timed) && starved.req.conflicts(&l.req))
+            // owed background work (it asked at OWED_PRIO) keeps its box
+            .filter(|l| l.node.as_ref().is_some_and(|n| nodes.iter().any(|x| &x.name == n && fits(&starved.req.needs, x.caps.as_ref()))))
+            // (a request pinned to a box frees only that box)
+            .filter(|l| starved.req.node.is_none() || starved.req.node == l.node)
+            .max_by_key(|l| l.granted_ms.unwrap_or(0))
+    };
+    let Some((starved, victim)) = cands.into_iter().find_map(|c| victim_for(c).map(|v| (c, Some(v)))) else { return };
     let Some(v) = victim else { return };
     *last = now;
     leg::mark_preempted(&v.id);
@@ -185,6 +230,8 @@ pub fn preempt(ctx: &Ctx, last: &mut u64) {
 
 /// Every record on the master's stream (a parked panic pauses its job).
 pub fn on_record(r: &crate::proto::Record) {
+    // JIT ownership is independent of the app/lane that happened to expose it.
+    if matches!(r.kind.as_str(), "patch_failed" | "jit_error" | "jit_hot") { return; }
     if let Some(ctx) = CTX.get() {
         job::on_record(ctx, r);
         show::on_record(ctx, r);
@@ -194,18 +241,24 @@ pub fn on_record(r: &crate::proto::Record) {
 
 fn serve(ctx: &Arc<Ctx>, svc: &str, line: &str, out: &mut Vec<String>) {
     let r = match svc {
+        "overlay-shadow" => crate::lease::shadow::serve(ctx, line),
         "lane" => lane::serve(ctx, line),
         "job" => job::serve(ctx, line),
         "show" => show::serve(ctx, line),
         "live" => live::serve(ctx, line),
         "verify" => verify::serve(ctx, line),
+        "jitlegs" => jitlegs::serve(ctx, line),
         "after" => after::serve(ctx, line),
         "allapps" => allapps::serve(ctx, line),
         "push" => push::serve(ctx, line),
         "ci" => ci::serve(ctx, line),
+        "master" if line.trim() == "master restart" => {
+            roll::ask_restart();
+            Ok("{\"restart\":\"asked: the master execs itself on work's tip within 15 s\"}".into())
+        }
         "state" => {
             let name = line.split_whitespace().nth(1);
-            ctx.store.read(|d| d.section(name)).ok_or_else(|| format!("no state section `{}` (verify allapps after pushes lanes jobs)", name.unwrap_or("")))
+            ctx.store.read(|d| d.section(name)).ok_or_else(|| format!("no state section `{}` (verify jitlegs allapps after pushes lanes jobs)", name.unwrap_or("")))
         }
         _ => Err(format!("no service {svc}")),
     };

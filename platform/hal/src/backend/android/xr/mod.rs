@@ -559,7 +559,7 @@ impl Targets {
 
 struct Presenter { frames: Arc<Frames>, stereo: bool }
 impl FramePresenter for Presenter {
-    fn submit(&self, _: u32, _: Id, image: Arc<Image>, presented: Box<dyn FnOnce(u64) + Send>) {
+    fn submit(&self, _: u32, _: Id, _from: u32, image: Arc<Image>, presented: Box<dyn FnOnce(u64) + Send>) {
         let slot = if self.stereo { &self.frames.stereo } else { &self.frames.panel };
         let eyes = if self.stereo { lock(&SCHEDULED_EYES).pop_front().flatten() } else { None };
         if self.stereo {

@@ -12,6 +12,7 @@
 //! `tick` makes one stereo sample and takes the warp source's last sample,
 //! so oscillators can FM, PM, AM and ring-modulate each other.
 
+use super::analog::vco::{self, Edges, VcoBlock, VcoUnit, NO_EDGES};
 use super::fast_tanh;
 use super::schema::{Builder, Unit::{self, Cents, Db, Hz, Ms, Percent, Semis}, Values};
 use super::table::Table;
@@ -25,7 +26,7 @@ pub const SPECTRAL_UNISON: usize = 2;
 pub const MAX_PARTIALS: usize = 128;
 pub const MAX_GRAINS: usize = 24;
 
-pub const MODES: &[&str] = &["wavetable", "granular", "spectral", "sample"];
+pub const MODES: &[&str] = &["wavetable", "granular", "spectral", "sample", "analog"];
 pub const WARPS: &[&str] = &[
     "off", "sync", "bend_up", "bend_down", "bend", "pwm", "asym_up", "asym_down", "flip", "mirror", "remap", "quantize", "resonant",
     "odd_even", "lowpass", "highpass", "fm", "fm_exp", "pm", "am", "rm", "fold", "sine_fold", "drive", "tube", "rectify", "crush",
@@ -138,12 +139,21 @@ pub struct OscIx {
     pub loop_start: usize,
     pub loop_end: usize,
     pub import: usize,
+    pub saw: usize,
+    pub tri: usize,
+    pub pulse: usize,
+    pub pw: usize,
+    pub sync: usize,
+    pub soft: usize,
+    pub fm: usize,
+    pub fm_exp: usize,
+    pub drift: usize,
 }
 
 /// Declare a main oscillator `name` (`a`, `b`, `c`): keys `a_pos`, `a_warp1` …
 pub fn declare(b: &mut Builder, name: &str, tables: &'static [&'static str], on: bool, warp_src: usize) -> OscIx {
     let k = |s: &str| format!("{name}_{s}");
-    b.group(&format!("osc_{name}"), "a main oscillator: wavetable (frames morphed by pos, two warps), granular (grains of the table or the sample), spectral (the frame's partials resynthesised and reshaped) or sample; a unison stack; out picks the filter");
+    b.group(&format!("osc_{name}"), "a main oscillator: wavetable (frames morphed by pos, two warps), granular (grains of the table or the sample), spectral (the frame's partials resynthesised and reshaped) sample, or analog (the chip oscillator's triangle, saw and pulse with its own sync, linear FM and part drift); a unison stack; out picks the filter");
     OscIx {
         on: b.flag(k("on"), "on", on, ""),
         mode: b.choice(k("mode"), "mode", MODES, 0, ""),
@@ -195,6 +205,15 @@ pub fn declare(b: &mut Builder, name: &str, tables: &'static [&'static str], on:
         loop_start: b.num(k("loop_start"), "loop start", 0.0, 1.0, 0.0, Percent, ""),
         loop_end: b.num(k("loop_end"), "loop end", 0.0, 1.0, 1.0, Percent, ""),
         import: b.choice(k("import"), "import", IMPORTS, 0, "table @import: fixed 2048-sample frames, or one pitch period a frame"),
+        saw: b.num(k("saw"), "saw", 0.0, 1.0, 1.0, Percent, "analog: the saw output's level (10 V p-p)"),
+        tri: b.num(k("tri"), "tri", 0.0, 1.0, 0.0, Percent, "analog: the triangle output's level (5 V p-p, half the saw)"),
+        pulse: b.num(k("pulse"), "pulse", 0.0, 1.0, 0.0, Percent, "analog: the pulse output's level (12 V p-p)"),
+        pw: b.num(k("pw"), "pw", 0.0, 1.0, 0.5, Percent, "analog: pulse width, 0 to 100%; mod it for PWM"),
+        sync: b.choice(k("sync"), "sync", vco::SYNCS, 0, "analog: follows warp_src. hard reverses the triangle on the master's pulse edges (hard_rise, hard_fall: one edge), reset is the conventional saw sync, soft lowers the upper threshold so the period locks to a multiple"),
+        soft: b.num(k("soft"), "soft", 0.0, 1.0, 0.5, Percent, "analog, sync @soft: how far the master's pulse lowers the threshold"),
+        fm: b.num(k("fm"), "lin fm", 0.0, 1.0, 0.0, Percent, "analog: linear FM from warp_src, not through zero (at -100% the core stops)"),
+        fm_exp: b.num(k("fm_exp"), "exp fm", 0.0, 4.0, 0.0, Unit::None, "analog: exponential FM from warp_src, octaves per unit"),
+        drift: b.num(k("drift"), "drift", 0.0, 1.0, 0.5, Percent, "analog: the part's errors (scale, tempco, top-octave flatness, symmetry, levels): 0 ideal, 0.5 typical, 1 worst"),
     }
 }
 
@@ -332,6 +351,15 @@ pub struct OscBlock {
     pub loop_mode: u8,
     pub loop_start: f32,
     pub loop_end: f32,
+    pub saw: f32,
+    pub tri: f32,
+    pub pulse: f32,
+    pub pw: f32,
+    pub sync: u8,
+    pub soft: f32,
+    pub fm: f32,
+    pub fm_exp: f32,
+    pub drift: f32,
 }
 
 impl OscBlock {
@@ -386,6 +414,15 @@ impl OscBlock {
             loop_mode: v.index(x.loop_mode) as u8,
             loop_start: v.val(x.loop_start),
             loop_end: v.val(x.loop_end),
+            saw: v.val(x.saw),
+            tri: v.val(x.tri),
+            pulse: v.val(x.pulse),
+            pw: v.val(x.pw),
+            sync: v.index(x.sync) as u8,
+            soft: v.val(x.soft),
+            fm: v.val(x.fm),
+            fm_exp: v.val(x.fm_exp),
+            drift: v.val(x.drift),
         }
     }
 }
@@ -420,6 +457,13 @@ pub struct Osc {
     rng: Rng,
     /// The last mono sample (what another oscillator's warp reads).
     pub last: f32,
+    /// Analog: one core per unison voice, this block's settings for each.
+    vco: Box<[VcoUnit]>,
+    vco_blk: [VcoBlock; MAX_UNISON],
+    /// Its first voice's edges in the last sample (a slave's sync input).
+    pub edges: Edges,
+    /// The master's edges for the next sample.
+    pub sync_in: Edges,
     seed: u32,
     rate: f32,
 }
@@ -449,6 +493,10 @@ impl Osc {
             sdone: false,
             rng: Rng::new(seed.wrapping_mul(2_654_435_761) | 1),
             last: 0.0,
+            vco: (0..MAX_UNISON as u32).map(|u| VcoUnit::new(seed.wrapping_mul(17).wrapping_add(u))).collect(),
+            vco_blk: [VcoBlock::plain(440.0, 48_000.0); MAX_UNISON],
+            edges: NO_EDGES,
+            sync_in: NO_EDGES,
             seed,
             rate: 48_000.0,
         }
@@ -465,7 +513,10 @@ impl Osc {
             self.hold[u] = 0.0;
             self.hold_count[u] = 0.0;
             self.sdir[u] = 1.0;
+            self.vco[u].vco.start(self.phases[u]);
         }
+        self.edges = NO_EDGES;
+        self.sync_in = NO_EDGES;
         let len = src.sample.as_ref().map_or(0, |s| s.data.len()) as f64;
         for p in self.spos.iter_mut() {
             *p = blk.start.clamp(0.0, 1.0) as f64 * len;
@@ -550,6 +601,33 @@ impl Osc {
         if blk.mode == 2 {
             self.prepare_spectral(blk, src, rate, frames);
         }
+        if blk.mode == 4 {
+            self.prepare_analog(blk, rate, frames);
+        }
+    }
+
+    fn prepare_analog(&mut self, blk: &OscBlock, rate: f32, frames: usize) {
+        let dt = frames as f32 / rate;
+        let shared = VcoBlock { inc: 0.0, saw: blk.saw, tri: blk.tri, pulse: blk.pulse, width: blk.pw.clamp(0.0, 1.0), sync: blk.sync, soft: blk.soft, fm: blk.fm, fm_exp: blk.fm_exp, sym: 0.5, fm_coupling: vco::coupling(rate) };
+        for u in 0..self.n {
+            let hz = blk.hz * self.uni[u].ratio;
+            let unit = &mut self.vco[u];
+            let celsius = unit.settle(blk.drift, dt);
+            self.vco_blk[u] = shared.on_part(&unit.part, hz, rate, celsius);
+        }
+    }
+
+    #[inline]
+    fn tick_analog(&mut self, m: f32) -> (f32, f32) {
+        let (mut l, mut r) = (0.0, 0.0);
+        let sync = self.sync_in;
+        for u in 0..self.n {
+            let y = self.vco[u].vco.tick(&self.vco_blk[u], m, &sync);
+            l += y * self.uni[u].gl;
+            r += y * self.uni[u].gr;
+        }
+        self.edges = self.vco[0].vco.edges;
+        (l, r)
     }
 
     fn prepare_spectral(&mut self, blk: &OscBlock, src: &OscSource, rate: f32, frames: usize) {
@@ -617,10 +695,32 @@ impl Osc {
             1 => self.tick_granular(blk, src, rate),
             2 => self.tick_spectral(),
             3 => self.tick_sample(blk, src, m, rate),
-            _ => self.tick_table(blk, &src.table, m),
+            4 => self.tick_analog(m),
+            _ => {
+                let before = self.phases[0];
+                let y = self.tick_table(blk, &src.table, m);
+                self.table_edges(before);
+                y
+            }
         };
         self.last = (l + r) * 0.5;
         (l, r)
+    }
+
+    /// A table oscillator as a sync master: its first voice's wrap.
+    #[inline]
+    fn table_edges(&mut self, before: f32) {
+        let (now, inc) = (self.phases[0], self.incs[0].max(1e-6));
+        let half = before < 0.5 && now >= 0.5;
+        let wrapped = now < before;
+        self.edges = NO_EDGES;
+        if wrapped {
+            let at = (1.0 - now / inc).clamp(0.0, 0.999);
+            self.edges.fall = at;
+            self.edges.wrap = at;
+        } else if half {
+            self.edges.rise = (1.0 - (now - 0.5) / inc).clamp(0.0, 0.999);
+        }
     }
 
     #[inline]

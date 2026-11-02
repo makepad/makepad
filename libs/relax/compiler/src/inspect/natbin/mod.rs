@@ -458,7 +458,7 @@ impl NativeBin {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
     use std::process::Command;
 
     const FIXTURE: &str = "use std::hint::black_box;
@@ -507,17 +507,19 @@ fn main() {
         // the same bytes through the system disassembler's section dump
         #[cfg(target_os = "linux")]
         if let Ok(o) = Command::new("objdump").args(["-s", &format!("--start-address={}", f.addr), &format!("--stop-address={}", f.addr + f.size), bin.to_str().unwrap()]).output() {
+            // " 401120 f30f1efa 4889f8c3 ...  ....H...": a row holds the bytes from its address
+            // up to 16, or up to the end of the range; exactly that many come from its hex
+            // groups (a short row's ASCII column can look like hex)
+            let (lo, end) = (f.addr, f.addr + f.size);
             let mut hex = Vec::new();
             for l in String::from_utf8_lossy(&o.stdout).lines() {
-                // " 401120 f30f1efa 4889f8 ...  text"
                 let mut it = l.split_whitespace();
-                if it.next().map_or(false, |a| u64::from_str_radix(a, 16).is_ok()) {
-                    for w in it.take(4) {
-                        if w.len() % 2 == 0 && w.bytes().all(|c| c.is_ascii_hexdigit()) {
-                            hex.extend((0..w.len() / 2).map(|i| u8::from_str_radix(&w[2 * i..2 * i + 2], 16).unwrap()));
-                        }
-                    }
-                }
+                let Some(a) = it.next().and_then(|a| u64::from_str_radix(a, 16).ok()) else { continue };
+                if a < lo || a >= end || a != lo + hex.len() as u64 { continue; }
+                let want = (end - a).min(16) as usize;
+                let digits: String = it.take(4).collect::<String>().chars().take(2 * want).collect();
+                if digits.len() != 2 * want || !digits.bytes().all(|c| c.is_ascii_hexdigit()) { continue; }
+                hex.extend((0..want).map(|i| u8::from_str_radix(&digits[2 * i..2 * i + 2], 16).unwrap()));
             }
             assert_eq!(&hex[..], nb.code(f), "code bytes differ from the system dump");
         }
@@ -602,64 +604,5 @@ fn main() {
         assert_eq!(strip_generics("<T as X>::m<Y>"), "<T as X>::m");
         assert_eq!(strip_generics("a::f<fn(A) -> B>"), "a::f");
         assert_eq!(strip_generics("a::{closure#0}"), "a::{closure#0}");
-    }
-
-    /// NATBIN_CORPUS=<binary>: compares our line rows with the system disassembler's `-l` listing
-    /// for a sample of the binary's functions.
-    #[test]
-    fn corpus_agreement() {
-        let Ok(path) = std::env::var("NATBIN_CORPUS") else { return };
-        let t0 = std::time::Instant::now();
-        let nb = NativeBin::open(&path).unwrap();
-        eprintln!("corpus: {} fns, debug from {}, open {:?}", nb.fns.len(), nb.debug_from, t0.elapsed());
-        if let Some(f) = nb.fns.iter().find(|f| f.size > 64) {
-            let t1 = std::time::Instant::now();
-            let n = nb.lines(f.addr, f.addr + f.size).len();
-            eprintln!("corpus: first lines() {} rows in {:?} (includes the unit index), second {:?}", n, t1.elapsed(), { let t2 = std::time::Instant::now(); nb.lines(f.addr, f.addr + f.size); t2.elapsed() });
-        }
-        let (mut total, mut same, mut fns_done, mut zero) = (0usize, 0usize, 0usize, 0usize);
-        let step = (nb.fns.len() / 400).max(1);
-        for f in nb.fns.iter().step_by(step) {
-            if fns_done >= 60 || f.size < 24 {
-                continue;
-            }
-            let rows = nb.lines(f.addr, f.addr + f.size);
-            if rows.is_empty() {
-                continue;
-            }
-            let Ok(o) = Command::new("objdump").args(["-d", "-l", "--no-show-raw-insn", &format!("--start-address={}", f.addr), &format!("--stop-address={}", f.addr + f.size), &path]).output() else { return };
-            let mut cur: Option<(String, u32)> = None;
-            fns_done += 1;
-            for l in String::from_utf8_lossy(&o.stdout).lines() {
-                let t = l.trim_end();
-                if let Some((p, rest)) = t.rsplit_once(':') {
-                    let n = rest.split_whitespace().next().unwrap_or("");
-                    if !t.starts_with(' ') && !p.is_empty() && !n.is_empty() && n.bytes().all(|c| c.is_ascii_digit()) {
-                        cur = Some((p.to_string(), n.parse().unwrap()));
-                        continue;
-                    }
-                }
-                let Some((a, _)) = t.trim_start().split_once(":\t") else { continue };
-                let Ok(addr) = u64::from_str_radix(a, 16) else { continue };
-                let Some((file, line)) = &cur else { continue };
-                let i = rows.partition_point(|r| r.addr <= addr);
-                if let Some(r) = i.checked_sub(1).map(|i| &rows[i]) {
-                    if r.line == 0 {
-                        zero += 1; // no source line: the system listing carries the previous line over
-                        continue;
-                    }
-                    total += 1;
-                    let ours = nb.file(r.file);
-                    if r.line == *line && Path::new(&ours).file_name() == Path::new(file).file_name() {
-                        same += 1;
-                    } else if total - same < 25 {
-                        eprintln!("mismatch {:x} {}: ours {}:{} theirs {}:{}", addr, f.name, ours, r.line, file, line);
-                    }
-                }
-            }
-        }
-        eprintln!("corpus: {} instructions in line-0 rows skipped", zero);
-        eprintln!("corpus agreement: {}/{} instructions over {} fns ({:.2}%)", same, total, fns_done, 100.0 * same as f64 / total.max(1) as f64);
-        assert!(total == 0 || same * 100 >= total * 90);
     }
 }

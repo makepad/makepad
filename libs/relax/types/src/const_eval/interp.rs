@@ -305,8 +305,11 @@ impl<'a> Interp<'a> {
         let (prog, tcx) = (self.prog, self.tcx);
         let state = crate::tcx::EvalState::new();
         let cx = crate::tcx::EvalCx::new(prog, tcx, crate::tcx::TypingEnv::fully_monomorphized(prog), &state);
-        let body = if args.is_empty() { (*tcx.typeck(prog, def)).clone() } else {
-            match crate::typeck::try_instantiate_body(&cx, prog, tcx, def, args) { Ok(b) => b, Err(_) => return unsupported("instantiate") }
+        // an inline const's MIR is built from the body that holds it (its typeck root; the
+        // ConstBlock's args are that body's), as rustc's mir_built of a typeck child
+        let typeck_root = crate::type_queries::typeck_root_def_id(prog, def);
+        let body = if args.is_empty() { (*tcx.typeck(prog, typeck_root)).clone() } else {
+            match crate::typeck::try_instantiate_body(&cx, prog, tcx, typeck_root, args) { Ok(b) => b, Err(_) => return unsupported("instantiate") }
         };
         if !body.errors.is_empty() { return unsupported(format!("no typed body for {}", prog.def_path(def))); }
         let env = crate::tcx::TypingEnv { limit: crate::tcx::RecursionLimit::for_item(prog, body.def), param_env: body.param_env.unwrap_or_default(), mode: crate::tcx::TypingMode::borrowck(tcx, prog, body.def) };
@@ -314,6 +317,7 @@ impl<'a> Interp<'a> {
         let root = match BuildRoot::new(BuildCx { prog, tcx, env, eval: &eval }, &body) { Ok(r) => r, Err(e) => return unsupported(format!("build root: {e}")) };
         let owner = match prog.def_id_to_node_id.get(&def) {
             Some((_, relax_front::def_collector::NodeId::AnonConst(expr))) if prog.def(def).kind == DefKind::AnonConst => crate::borrowck::body::CheckedBody { owner: def, kind: crate::borrowck::body::BodyKind::AnonConst(*expr) },
+            Some((_, relax_front::def_collector::NodeId::InlineConst(expr))) => crate::borrowck::body::CheckedBody { owner: typeck_root, kind: crate::borrowck::body::BodyKind::InlineConst(*expr) },
             _ => match crate::borrowck::body::CheckedBody::item(prog, def) { Some(o) => o, None => return unsupported("not a body owner") },
         };
         let mut mir = match build_mir(&root, owner) { Ok(m) => m, Err(e) => return unsupported(format!("build: {:?}", e.reason)) };

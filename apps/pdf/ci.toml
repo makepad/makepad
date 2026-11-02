@@ -1,0 +1,34 @@
+# CI (devhub ci): [ci] is hand-written settings; the other sections are proofs devhub writes.
+
+[app.linux]
+capture = ""
+date = "2026-11-02"
+digest = "261c2ee61a1cc1c44bd28cdda19b7688ae55424d4972a6cd5d4b302b1eb9a79e"
+main = "f74166da6dfdb67f974ba0643cae2eab1c598535"
+work = "887855c1f9abe2cff0add968d8cc4fa6c79fc716"
+
+[app.macos]
+capture = ""
+date = "2026-11-02"
+digest = "c0b521f2896b11af24066b5b2d81536853d9ca248d597b90b1522c3c1fd677a5"
+main = "397b658a8bf5cfbb05644da6c00591325a079101"
+work = "628527fcd4f9b89ec0203bce6b2266b7d8e8fe55"
+
+[app.windows]
+capture = ""
+date = "2026-11-02"
+digest = "46068149912d51882aee510615825eaa178f5e22c47e726153bab441c4b175e2"
+main = "f0744b8fc7cd75133572c6ba67030c9447015d38"
+work = "d0fd6b6d9b762e113168073cc606fb13c1c8be49"
+
+[tests.linux]
+date = "2026-11-02"
+digest = "4ed04bf23aa116419480fc633412e048bd4da916aca2b7a9b29a1323dbdaa311"
+main = "f74166da6dfdb67f974ba0643cae2eab1c598535"
+work = "887855c1f9abe2cff0add968d8cc4fa6c79fc716"
+
+[tests.windows]
+date = "2026-11-02"
+digest = "72ebbfdbfd88e9778c54084eba003dc25d853430d4f07229bbe4f952547d4891"
+main = "f74166da6dfdb67f974ba0643cae2eab1c598535"
+work = "887855c1f9abe2cff0add968d8cc4fa6c79fc716"

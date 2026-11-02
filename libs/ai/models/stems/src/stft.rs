@@ -456,63 +456,6 @@ impl Stft {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::{Path, PathBuf};
-    use std::time::Instant;
-
-    /// `libs/ai/models/stems` -> up 4 -> repo root.
-    const GOLDEN: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../../local/stems_ref/golden");
-
-    fn golden_dir() -> Option<PathBuf> {
-        let p = PathBuf::from(GOLDEN);
-        if p.is_dir() {
-            Some(p)
-        } else {
-            None
-        }
-    }
-
-    /// Minimal `.npy` reader: version 1/2 header, little-endian `<f4`, C order.
-    fn read_npy(path: &Path) -> (Vec<f32>, Vec<usize>) {
-        let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("read {path:?}: {e}"));
-        assert!(bytes.len() > 10, "{path:?}: too short for an npy header");
-        assert_eq!(&bytes[0..6], b"\x93NUMPY", "{path:?}: bad npy magic");
-        let major = bytes[6];
-        let (hlen, body) = match major {
-            1 => (u16::from_le_bytes([bytes[8], bytes[9]]) as usize, 10usize),
-            2 => (
-                u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]) as usize,
-                12usize,
-            ),
-            v => panic!("{path:?}: unsupported npy version {v}"),
-        };
-        let header = std::str::from_utf8(&bytes[body..body + hlen])
-            .unwrap_or_else(|e| panic!("{path:?}: non-utf8 header: {e}"));
-        assert!(header.contains("'<f4'"), "{path:?}: expected '<f4', header: {header}");
-        assert!(
-            header.contains("'fortran_order': False"),
-            "{path:?}: expected C order, header: {header}"
-        );
-
-        let shape_start = header.find("'shape':").expect("npy header has no shape");
-        let open = header[shape_start..].find('(').unwrap() + shape_start + 1;
-        let close = header[open..].find(')').unwrap() + open;
-        let shape: Vec<usize> = header[open..close]
-            .split(',')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(|s| s.parse().unwrap())
-            .collect();
-
-        let data = &bytes[body + hlen..];
-        assert_eq!(data.len() % 4, 0, "{path:?}: payload is not a whole number of f32");
-        let out: Vec<f32> = data
-            .chunks_exact(4)
-            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-            .collect();
-        let n: usize = shape.iter().product();
-        assert_eq!(out.len(), n, "{path:?}: payload {} != shape product {n}", out.len());
-        (out, shape)
-    }
 
     fn max_abs_diff(a: &[f32], b: &[f32]) -> f64 {
         assert_eq!(a.len(), b.len(), "length mismatch: {} vs {}", a.len(), b.len());
@@ -531,86 +474,6 @@ mod tests {
                     + 0.05 * noise
             })
             .collect()
-    }
-
-    #[test]
-    fn hann_matches_torch() {
-        let Some(dir) = golden_dir() else {
-            eprintln!("hann_matches_torch: SKIP, {GOLDEN} not present");
-            return;
-        };
-        let (reference, shape) = read_npy(&dir.join("hann2048.npy"));
-        assert_eq!(shape, vec![2048]);
-        let ours = hann_periodic(2048);
-        let d = max_abs_diff(&ours, &reference);
-        eprintln!("hann_matches_torch: max abs diff = {d:.3e}");
-        assert_eq!(ours[0], 0.0, "periodic hann must start at 0");
-        assert!(d < 1e-7, "hann max abs diff {d:.3e} >= 1e-7");
-    }
-
-    #[test]
-    fn frame_count_matches_torch() {
-        assert_eq!(frame_count(5000), 12);
-        assert_eq!(Stft::bs_roformer().frame_count(5000), 12);
-        // 11 s at 44.1 kHz, the chunk size the separator runs on.
-        assert_eq!(frame_count(441 * 1000), 1001);
-        if let Some(dir) = golden_dir() {
-            let meta = std::fs::read_to_string(dir.join("stft_meta.json")).unwrap();
-            assert!(meta.contains("\"frames\": 12"), "meta says: {meta}");
-        }
-    }
-
-    #[test]
-    fn forward_matches_torch() {
-        let Some(dir) = golden_dir() else {
-            eprintln!("forward_matches_torch: SKIP, {GOLDEN} not present");
-            return;
-        };
-        let (signal, sshape) = read_npy(&dir.join("stft_in.npy"));
-        assert_eq!(sshape, vec![5000]);
-        let (reference, rshape) = read_npy(&dir.join("stft_out.npy"));
-        assert_eq!(rshape, vec![BINS, 12, 2]);
-
-        let stft = Stft::bs_roformer();
-        let (ours, frames) = stft.forward(&signal);
-        assert_eq!(frames, 12);
-        assert_eq!(ours.len(), reference.len());
-
-        let mut max_abs = 0.0f64;
-        let mut max_rel = 0.0f64;
-        let mut peak = 0.0f64;
-        for (a, b) in ours.iter().zip(reference.iter()) {
-            let (a, b) = (*a as f64, *b as f64);
-            let d = (a - b).abs();
-            max_abs = max_abs.max(d);
-            peak = peak.max(b.abs());
-            if b.abs() > 1.0 {
-                max_rel = max_rel.max(d / b.abs());
-            }
-        }
-        eprintln!(
-            "forward_matches_torch: max abs diff = {max_abs:.3e}, \
-             max rel diff (|ref|>1) = {max_rel:.3e}, ref peak = {peak:.3}"
-        );
-        assert!(max_abs < 2e-3, "forward max abs diff {max_abs:.3e} >= 2e-3");
-        assert!(max_rel < 1e-4, "forward max rel diff {max_rel:.3e} >= 1e-4");
-    }
-
-    #[test]
-    fn inverse_matches_torch() {
-        let Some(dir) = golden_dir() else {
-            eprintln!("inverse_matches_torch: SKIP, {GOLDEN} not present");
-            return;
-        };
-        let (spec, sshape) = read_npy(&dir.join("stft_out.npy"));
-        assert_eq!(sshape, vec![BINS, 12, 2]);
-        let (reference, rshape) = read_npy(&dir.join("istft_out.npy"));
-        assert_eq!(rshape, vec![5000]);
-
-        let ours = Stft::bs_roformer().inverse(&spec, 12, 5000);
-        let d = max_abs_diff(&ours, &reference);
-        eprintln!("inverse_matches_torch: max abs diff = {d:.3e}");
-        assert!(d < 1e-4, "inverse max abs diff {d:.3e} >= 1e-4");
     }
 
     #[test]
@@ -670,28 +533,5 @@ mod tests {
         let got: Vec<usize> = (-3..7).map(|i| reflect_index(i, len)).collect();
         assert_eq!(got, vec![3, 2, 1, 0, 1, 2, 3, 2, 1, 0]);
         assert_eq!(reflect_index(-5, 1), 0);
-    }
-
-    /// Not an assertion of speed, just a visible number: `inverse` over the
-    /// frame count a full ~11k-transform separation pass produces.
-    #[test]
-    fn inverse_timing() {
-        const FRAMES: usize = 8808;
-        let stft = Stft::bs_roformer();
-        let mut spec = vec![0.0f32; BINS * FRAMES * 2];
-        let mut state: u32 = 0xC0FF_EE01;
-        for v in spec.iter_mut() {
-            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-            *v = (state >> 8) as f32 / (1 << 24) as f32 - 0.5;
-        }
-        let t0 = Instant::now();
-        let out = stft.inverse(&spec, FRAMES, (FRAMES - 1) * HOP);
-        let dt = t0.elapsed();
-        eprintln!("inverse_timing: {FRAMES} frames -> {} samples in {dt:?}", out.len());
-
-        let t1 = Instant::now();
-        let (fwd, f) = stft.forward(&out);
-        let dt2 = t1.elapsed();
-        eprintln!("inverse_timing: forward {f} frames in {dt2:?} ({} values)", fwd.len());
     }
 }

@@ -176,6 +176,34 @@ impl Running {
     }
 }
 
+/// The hub exits at once again and again: a tree a lease left at a commit it does not build at (from
+/// before its package) would keep it down for good. The tree goes to the shared commits (a thread:
+/// git on the WM's tick would stall it), and the hub, once up, puts a lease still holding it back. A
+/// tree that is at them stays: a hub that fails there is a landed bug, and its log says which.
+fn tree_to_synced() {
+    let Some(root) = registry::repo_root() else { return };
+    let spawned = std::thread::Builder::new().name("wm-devhub-tree".into()).spawn(move || {
+        for dir in [root.clone(), root.join("apps").join("commercial")] {
+            let git = |args: &[&str]| Command::new("git").args(args).current_dir(&dir).stdin(std::process::Stdio::null()).output().ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+            if !dir.join(".git").exists() {
+                continue;
+            }
+            let Some(to) = git(&["rev-parse", "-q", "--verify", "refs/devhub/synced"]) else { continue };
+            if git(&["rev-parse", "-q", "--verify", "HEAD"]).as_deref() == Some(to.as_str()) {
+                continue;
+            }
+            makepad_widgets::log!("wm: devhub does not start in {}: back at the shared {to}", dir.display());
+            let moved = git(&["read-tree", "--reset", "-u", &to]).is_some() && git(&["update-ref", "--no-deref", "HEAD", &to]).is_some() && git(&["update-ref", "refs/devhub/checkout", &to]).is_some();
+            if !moved {
+                makepad_widgets::log!("wm: devhub: moving {} to {to} failed", dir.display());
+            }
+        }
+    });
+    if let Err(e) = spawned {
+        makepad_widgets::log!("wm: devhub: {e}");
+    }
+}
+
 /// What the app was started as: the binary cargo runs (path, size, modification time) and
 /// everything the settings hand it. A WM that finds a live app with the same identity keeps it.
 fn identity<C: ServiceConf>(binary: &Path, conf: &C) -> String {
@@ -708,6 +736,9 @@ impl<C: ServiceConf> Supervised<C> {
                     self.crashes = 0;
                 }
                 self.crashes += 1;
+                if self.kind.file == DEVHUB.file && self.crashes >= 2 {
+                    tree_to_synced();
+                }
                 let wait = backoff_s(self.crashes);
                 makepad_widgets::log!("wm: {label} exited ({}); restart {} in {wait} s", self.exit_reason(&status), self.crashes);
                 self.restart_at = Some(now + wait as f64);
@@ -936,9 +967,6 @@ mod tests {
     fn devhub_starts_and_builds_with_one_cargo_command() {
         // The WM's start and the deploy's build (`makepad-wm-build -- devhub`) are the same
         // cargo invocation with `run` for `build`: a start after the deploy compiles nothing.
-        if registry::repo_root().is_none() {
-            return;
-        }
         let dir = scratch("devhub");
         let conf = makepad_devhub::conf::NodeConf::parse("name = t1\nport = 8797\n");
         let d = DevhubApp::new(&DEVHUB, dir.join("devhub.conf"), conf);

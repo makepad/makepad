@@ -814,43 +814,6 @@ impl ConvexPolyhedron for Triangle {
 }
 */
 
-#[cfg(feature = "dim2")]
-#[cfg(test)]
-mod test {
-    use crate::math::Vector;
-    use crate::shape::Triangle;
-
-    #[test]
-    fn test_triangle_area() {
-        let pa = Vector::new(5.0, 0.0);
-        let pb = Vector::ZERO;
-        let pc = Vector::new(0.0, 4.0);
-
-        assert!(relative_eq!(Triangle::new(pa, pb, pc).area(), 10.0));
-    }
-
-    #[test]
-    fn test_triangle_contains_point() {
-        let tri = Triangle::new(Vector::new(5.0, 0.0), Vector::ZERO, Vector::new(0.0, 4.0));
-
-        assert!(tri.contains_point(Vector::new(1.0, 1.0)));
-        assert!(!tri.contains_point(Vector::new(-1.0, 1.0)));
-    }
-
-    #[test]
-    fn test_obtuse_triangle_contains_point() {
-        let tri = Triangle::new(
-            Vector::new(-10.0, 10.0),
-            Vector::ZERO,
-            Vector::new(20.0, 0.0),
-        );
-
-        assert!(tri.contains_point(Vector::new(-3.0, 5.0)));
-        assert!(tri.contains_point(Vector::new(5.0, 1.0)));
-        assert!(!tri.contains_point(Vector::new(0.0, -1.0)));
-    }
-}
-
 #[cfg(feature = "dim3")]
 #[cfg(test)]
 mod test {

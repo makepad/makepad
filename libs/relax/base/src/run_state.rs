@@ -50,6 +50,8 @@ pub enum Mode {
     #[default]
     Boot,
     Overlay,
+    /// Compilation is waiting for an update to the loader itself.
+    Update,
 }
 
 /// Target-neutral snapshot consumed by native run presenters.
@@ -93,6 +95,11 @@ pub enum Event {
     Diagnostic {
         domain: Option<u32>,
         record: Diagnostic,
+    },
+    /// The loader's own library changed: compilation waits for an explicitly accepted update.
+    UpdateReady {
+        domain: Option<u32>,
+        message: String,
     },
     /// The final outcome of a live edit. Only a completely applied patch clears
     /// the previous error; partial edits and restart requests retain the panel.

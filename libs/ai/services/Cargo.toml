@@ -40,6 +40,7 @@ localai = ["engine", "makepad-ai-hub/localai"]
 [dependencies]
 makepad-platform = { path = "../../../platform", optional = true }
 makepad-micro-serde = { path = "../../micro_serde" }
+makepad-base64 = { path = "../../base64" }
 makepad-strict-json = { path = "../../strict_json" }
 makepad-ai-hub = { path = "../hub", default-features = false, optional = true }
 

@@ -6,7 +6,7 @@
 //! a literal include names them). Unreferenced scripts, tests,
 //! examples and documentation do not count. Registry/git packages use name@version.
 //! Features retain Cargo host-side and host-shims normalization. The loader embeds the hash
-//! and a per-file manifest; any registered crate mismatch is a rebuild error naming inputs.
+//! and a per-file manifest; a registered crate mismatch identifies the inputs of a loader update.
 //! Shared with build scripts through #[path]: std only, with reads through crate::vfs.
 
 /// One package of the graph: `deps` index the same slice.
@@ -349,14 +349,19 @@ pub fn decode_manifest(mut bytes: &[u8]) -> Result<Manifest, String> {
     Ok(out)
 }
 
+/// Every changed manifest entry, including added/removed files and metadata. Shared by the
+/// diagnostic and the loader's typed update offer; presentation limits never limit the diff.
+pub fn diff_entries<'a>(built: &'a Manifest, current: &'a Manifest) -> impl Iterator<Item = &'a (String, String)> {
+    let keys: std::collections::BTreeSet<_> = built.keys().chain(current.keys()).collect();
+    keys.into_iter().filter(move |key| built.get(*key) != current.get(*key))
+}
+
 /// Bound diagnostic output, not the work or the identity: every input still counts.
 pub fn diff_message(name: &str, built: &Manifest, current: &Manifest) -> String {
     let mut files = Vec::new();
     let mut metadata = Vec::new();
-    let keys: std::collections::BTreeSet<_> = built.keys().chain(current.keys()).collect();
-    for key @ (package, path) in keys {
+    for key @ (package, path) in diff_entries(built, current) {
         let old = built.get(key); let new = current.get(key);
-        if old == new { continue; }
         if path.starts_with('\0') {
             metadata.push(format!("  {package} {}: {} -> {}", &path[1..], old.map(String::as_str).unwrap_or("<absent>"), new.map(String::as_str).unwrap_or("<absent>")));
         } else {

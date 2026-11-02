@@ -34,5 +34,3 @@ makepad-app-module = { path = "../../libs/app_module" }
 makepad-strict-json = { path = "../../libs/strict_json" }
 
 
-[dev-dependencies]
-makepad-script-test = { path = "../../platform/script/test" }

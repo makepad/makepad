@@ -11,7 +11,7 @@
 # (cache/items.rs apply_bound), so this edit recompiled nearly the whole program cold.
 # Run from the workspace root after the loader is built. PACKAGE (default Calculator standalone; a
 # `makepad run` argument list with ',' for spaces), WAIT (seconds, default 300), the JIT runs through `cargo
-# run --profile host`, BUILD (default: cargo build --profile host -p makepad-run --bin makepad; give the
+# run --profile host`, BUILD (default: cargo build --profile host -p makepad-run --bin makepad --bin makepad-launcher; give the
 # same -p set as the build that made the binary, or cargo rebuilds for other features).
 # Prints "warm_after_hal: OK ..." or "warm_after_hal: FAIL ..."; exit 1 on failure.
 ROOT=$(pwd)
@@ -20,7 +20,7 @@ J="cargo run --profile host -q --manifest-path $ROOT/Cargo.toml -p makepad-run -
 B=$J
 PACKAGE=${PACKAGE:-makepad-app-calculator,--no-default-features,--features,standalone}
 WAIT=${WAIT:-300}
-BUILD=${BUILD:-cargo build --profile host -p makepad-run --bin makepad}
+BUILD=${BUILD:-cargo build --profile host -p makepad-run --bin makepad --bin makepad-launcher}
 F=platform/hal/src/lib.rs
 grep -q '^    pub fn backend_inits(&self) -> u32 {$' "$F" || { echo "warm_after_hal: FAIL: $F has no Hal::backend_inits to edit"; exit 1; }
 dir=$(mktemp -d "${TMPDIR:-/tmp}/warm_after_hal.XXXXXX") || exit 1

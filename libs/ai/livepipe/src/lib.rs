@@ -728,7 +728,7 @@ fn run(cfg: PipeConfig, mailbox: FrameMailbox, rx: Receiver<Cmd>, out: Sender<Pi
     };
     let ws_url = format!("{}{}", base.replacen("http://", "ws://", 1), ws_path);
     let (ws_tx, mut ws_rx) = mpsc::channel::<WebSocketMessage>();
-    let mut socket = PlainWebSocket::open(LiveId::empty(), HttpRequest::new(ws_url, HttpMethod::GET), ws_tx);
+    let mut socket = makepad_ai_hub::http_client::with_hub_connect(|| PlainWebSocket::open(LiveId::empty(), HttpRequest::new(ws_url, HttpMethod::GET), ws_tx));
     let _ = out.send(PipeEvent::Connected { base: base.clone(), gpu: gpu.clone(), ws_path: ws_path.clone() });
     let _ = out.send(PipeEvent::Status(format!(
         "{tag}: {base} session {ws_path}; the first packet loads the model on the box"
@@ -855,7 +855,7 @@ fn run(cfg: PipeConfig, mailbox: FrameMailbox, rx: Receiver<Cmd>, out: Sender<Pi
                     let ws_url = format!("{}{}", base.replacen("http://", "ws://", 1), ws_path);
                     let (tx, rx) = mpsc::channel::<WebSocketMessage>();
                     ws_rx = rx;
-                    socket = PlainWebSocket::open(LiveId::empty(), HttpRequest::new(ws_url, HttpMethod::GET), tx);
+                    socket = makepad_ai_hub::http_client::with_hub_connect(|| PlainWebSocket::open(LiveId::empty(), HttpRequest::new(ws_url, HttpMethod::GET), tx));
                     let _ = out.send(PipeEvent::Connected {
                         base: base.clone(),
                         gpu: gpu.clone(),
@@ -935,13 +935,6 @@ fn run(cfg: PipeConfig, mailbox: FrameMailbox, rx: Receiver<Cmd>, out: Sender<Pi
 mod tests {
     use super::*;
 
-    /// The oracle's input crop under the checkout (skipped when absent).
-    fn fixture() -> Option<PathBuf> {
-        let p = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../local/agent_state/sam3dbody/oracle/batch_img.f32");
-        p.exists().then_some(p)
-    }
-
     #[test]
     fn an_h264_wire_frame_carries_the_kind_2_header_and_the_nal_verbatim() {
         let nal = [0u8, 0, 0, 1, 0x67, 1, 2, 3];
@@ -967,52 +960,4 @@ mod tests {
         assert_eq!(aux_meta("not json"), None);
     }
 
-    #[test]
-    fn the_fixture_still_decodes_to_a_person_sized_rgb_image() {
-        let Some(path) = fixture() else { return };
-        let (w, h, rgb) = load_still(&path).expect("decodes");
-        assert_eq!((w, h), (512, 512));
-        assert_eq!(rgb.len(), 512 * 512 * 3);
-        let (lo, hi) = rgb.iter().fold((255u8, 0u8), |(lo, hi), &v| (lo.min(v), hi.max(v)));
-        assert!(hi as i32 - lo as i32 > 100, "a picture, not a flat tensor: {lo}..{hi}");
-    }
-
-    #[test]
-    fn a_still_source_feeds_the_mailbox_on_request() {
-        let Some(path) = fixture() else { return };
-        let mailbox = FrameMailbox::default();
-        let alive = Arc::new(AtomicBool::new(true));
-        assert!(spawn_still_source(path, mailbox.clone(), alive.clone()));
-        mailbox.request();
-        let deadline = Instant::now() + Duration::from_secs(3);
-        let frame = loop {
-            if let Some(f) = mailbox.take() {
-                break f;
-            }
-            assert!(Instant::now() < deadline, "the still never arrived");
-            std::thread::sleep(Duration::from_millis(20));
-        };
-        assert_eq!((frame.width, frame.height), (512, 512));
-        assert!(mailbox.live());
-        alive.store(false, Ordering::Relaxed);
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn the_wire_encoder_turns_the_still_into_a_keyframe_first() {
-        let Some(path) = fixture() else { return };
-        let (w, h, rgb) = load_still(&path).expect("decodes");
-        let mut enc = WireEncoder::open(w, h, 15).expect("a VideoToolbox encoder");
-        let mut packets = Vec::new();
-        for i in 0..4 {
-            let frame = RgbFrame { width: w, height: h, rgb: rgb.clone(), taken: Instant::now() };
-            packets.extend(enc.encode(&frame, i));
-        }
-        assert!(!packets.is_empty(), "four frames in, at least one access unit out");
-        let first = &packets[0];
-        assert_eq!(first[4], 2);
-        let payload = &first[FRAME_HEADER_LEN..];
-        let has_sps = payload.windows(5).any(|w| w[..4] == [0, 0, 0, 1] && w[4] & 0x1f == 7);
-        assert!(has_sps, "the first access unit carries the SPS");
-    }
 }

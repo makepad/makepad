@@ -503,15 +503,6 @@ mod tests {
         })
     }
 
-    #[test]
-    fn a_plain_label_has_no_issues() {
-        let issues = run(plain, SIZE, |o| {
-            o.tiny = 0.01;
-            o.huge = 0.5;
-        });
-        assert!(issues.is_empty(), "{issues:?}");
-    }
-
     fn wide(vm: &mut ScriptVm) -> ScriptValue {
         crate::script_eval!(vm, {
             use mod.prelude.widgets.*

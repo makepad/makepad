@@ -334,26 +334,10 @@ pub fn parse_shortcut(text: &str) -> Option<MenuShortcut> {
     Some(out)
 }
 
-/// The chord as a menu prints it: ⌘ / ⇧ / ⌥ / ⌃ for the modifiers, the key
-/// token verbatim, no separators.
+/// The chord as a menu prints it, in the platform's own form (the shared
+/// formatter): ⇧⌘Z on macOS, Ctrl+Shift+Z elsewhere.
 pub fn shortcut_display(text: &str) -> String {
-    let mut out = String::new();
-    for part in text.split('+') {
-        let part = part.trim();
-        if part.is_empty() {
-            continue;
-        }
-        match part.to_ascii_lowercase().as_str() {
-            "cmd" | "command" | "meta" | "super" | "win" => out.push('\u{2318}'),
-            "shift" => out.push('\u{21e7}'),
-            "alt" | "option" | "opt" => out.push('\u{2325}'),
-            "ctrl" | "control" => out.push('\u{2303}'),
-            "plus" => out.push('+'),
-            "minus" => out.push('-'),
-            _ => out.push_str(part),
-        }
-    }
-    out
+    makepad_widgets_core::kbd::shortcut_label(text)
 }
 
 /// `name` arrives lowercased.
@@ -1370,15 +1354,6 @@ mod tests {
         assert!(parse_shortcut("Cmd").is_none());
         assert!(parse_shortcut("").is_none());
         assert!(parse_shortcut("Cmd+N+O").is_none());
-    }
-
-    #[test]
-    fn shortcut_display_maps_the_modifiers() {
-        assert_eq!(shortcut_display("Shift+Cmd+Z"), "\u{21e7}\u{2318}Z");
-        assert_eq!(shortcut_display("Cmd+N"), "\u{2318}N");
-        assert_eq!(shortcut_display("Ctrl+Alt+Delete"), "\u{2303}\u{2325}Delete");
-        assert_eq!(shortcut_display("Cmd+Plus"), "\u{2318}+");
-        assert_eq!(shortcut_display("F1"), "F1");
     }
 
     #[test]

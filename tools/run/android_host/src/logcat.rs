@@ -11,7 +11,7 @@ extern "C" {
 extern "C" {
     fn pipe(fds: *mut c_int) -> c_int;
     fn dup2(old: c_int, new: c_int) -> c_int;
-    fn read(fd: c_int, buf: *mut u8, n: usize) -> isize;
+    fn read(fd: c_int, buf: *mut core::ffi::c_void, n: usize) -> isize;
     fn close(fd: c_int) -> c_int;
 }
 
@@ -55,7 +55,7 @@ pub fn redirect_stdio() {
                     *len = 0;
                 };
                 loop {
-                    let n = read(rd, buf.as_mut_ptr(), buf.len());
+                    let n = read(rd, buf.as_mut_ptr().cast(), buf.len());
                     if n <= 0 {
                         break;
                     }

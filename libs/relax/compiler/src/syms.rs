@@ -966,6 +966,16 @@ pub fn canon_dump(u: &Unit, d: &str) -> String {
     out
 }
 
+fn reloc_sig_code() -> Option<&'static str> {
+    static VALUE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    VALUE.get_or_init(|| crate::zone_alloc::kept_with(|| std::env::var("MAKEPAD_RUN_RELOC_SIG_CODE").ok())).as_deref()
+}
+
+fn reloc_sig_verbose() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("MAKEPAD_RUN_RELOC_SIG_VERBOSE").is_some())
+}
+
 /// MAKEPAD_RUN_RELOC_SIG=<file>: per compiled function, a hash of its machine code with the address
 /// pool zeroed, its relocations by stable description and its pc map by file path. Two runs of
 /// the same program (one with MAKEPAD_RUN_PERTURB) must print the same lines: a difference is a
@@ -1007,8 +1017,8 @@ pub fn reloc_sig(u: &Unit, name: impl FnOnce() -> String, code: &[u8], relocs: &
         h.u32(*pos as u32);
     }
     use std::io::Write;
-    if let Ok(want) = std::env::var("MAKEPAD_RUN_RELOC_SIG_CODE") {
-        if want == "*" || name.contains(want.as_str()) {
+    if let Some(want) = reloc_sig_code() {
+        if want == "*" || name.contains(want) {
             let hex: String = c.iter().map(|b| format!("{:02x}", b)).collect();
             // the pool as compiled (values), for debugging relocations
             let vals: Vec<String> = relocs.iter().map(|rl| {
@@ -1022,7 +1032,7 @@ pub fn reloc_sig(u: &Unit, name: impl FnOnce() -> String, code: &[u8], relocs: &
             let _ = m.lock().unwrap_or_else(|e| e.into_inner()).write_all(format!("CODE\t{}\t{}\t{}\n", name, hex, pcs.join(" ")).as_bytes());
         }
     }
-    let line = if std::env::var_os("MAKEPAD_RUN_RELOC_SIG_VERBOSE").is_some() {
+    let line = if reloc_sig_verbose() {
         format!("{}\t{}\t{:032x}\t{}\n", name, code.len(), h.finish128(), rs.join(" "))
     } else {
         format!("{}\t{}\t{:032x}\n", name, code.len(), h.finish128())

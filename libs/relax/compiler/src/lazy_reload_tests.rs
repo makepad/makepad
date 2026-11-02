@@ -452,18 +452,14 @@ fn specv_aliased_call_from_unverified_body() {
 /// (the Sandbox's frame path: ~550 lazy installs in one 70-560 ms frame). Now they run their twins'
 /// code until their own builds (background) are installed: no lazy compile on the program thread.
 /// The verdicts are held (SPECV_HOLD) so the first run is unverified whatever the checker's speed;
-/// case `off` (MAKEPAD_RUN_SPECV_BORROW=0) is the old behaviour: the repro makes the lazy compiles.
 #[test]
 fn specv_verified_rebuild_runs_twin_code_not_lazy_compiles() {
     const CHILD: &str = "MAKEPAD_RUN_SPECV_BORROW_TEST";
     let Ok(case) = std::env::var(CHILD) else {
-        for case in ["borrow", "off"] {
+        for case in ["borrow"] {
             let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
             cmd.args(["--exact", "lazy_reload_tests::specv_verified_rebuild_runs_twin_code_not_lazy_compiles", "--nocapture", "--test-threads=1", "--format=terse"])
                 .env(CHILD, case).env("MAKEPAD_RUN_GANDALF_ALL", "0");
-            if case == "off" {
-                cmd.env("MAKEPAD_RUN_SPECV_BORROW", "0");
-            }
             let output = cmd.output().unwrap();
             assert!(output.status.success(), "{case}: {}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
         }
@@ -533,15 +529,11 @@ fn specv_verified_rebuild_runs_twin_code_not_lazy_compiles() {
     let lazy0 = crate::jit::LAZY_FRONTS.load(Ordering::Relaxed);
     run("verified");
     let lazy = crate::jit::LAZY_FRONTS.load(Ordering::Relaxed) - lazy0;
-    if case == "off" {
-        assert!(lazy >= 1, "the old behaviour: the base slots compile on the calling thread");
-    } else {
-        assert_eq!(lazy, 0, "no lazy compile on the calling thread: mid runs its twin's code");
-        assert!(u.fns[mid as usize].borrowed || u.fns[mid as usize].compiled, "mid borrows its twin's code (or got its own build)");
-        // a patch-free rerun stays on code
-        run("again");
-        assert_eq!(crate::jit::LAZY_FRONTS.load(Ordering::Relaxed) - lazy0, 0);
-    }
+    assert_eq!(lazy, 0, "no lazy compile on the calling thread: mid runs its twin's code");
+    assert!(u.fns[mid as usize].borrowed || u.fns[mid as usize].compiled, "mid borrows its twin's code (or got its own build)");
+    // a patch-free rerun stays on code
+    run("again");
+    assert_eq!(crate::jit::LAZY_FRONTS.load(Ordering::Relaxed) - lazy0, 0);
     std::mem::forget(u);
     std::fs::remove_dir_all(dir).unwrap();
 }
@@ -878,9 +870,13 @@ fn restored_images_take_live_edits() {
     std::fs::create_dir_all(dir.join("src")).unwrap();
     std::fs::write(dir.join("Cargo.toml"), "[package]\nname = \"restored\"\nversion = \"0.1.0\"\nedition = \"2021\"\n").unwrap();
     let path = dir.join("src/lib.rs").to_string_lossy().into_owned();
-    std::fs::write(&path, "pub struct S { pub a: u32 }\nimpl S { pub fn get(&self) -> u32 { self.a } }\npub fn value(out: &mut u32) { *out = S { a: 11 }.get(); }\n").unwrap();
+    // (a `global_asm!` block: a restore runs no collection, so the image must carry it -- a warm
+    // run of a crate with one could not resolve the labels it defines)
+    const ASM: &str = "std::arch::global_asm!(\".p2align 2\", \"restored_asm_label:\", \"  ret\");\n";
+    std::fs::write(&path, format!("pub struct S {{ pub a: u32 }}\nimpl S {{ pub fn get(&self) -> u32 {{ self.a }} }}\npub fn value(out: &mut u32) {{ *out = S {{ a: 11 }}.get(); }}\n{ASM}")).unwrap();
     let session = Arc::new(crate::Session::default());
     let (mut prog, core, app) = crate::load_with_std(&session, &path, "restored", false).unwrap();
+    assert!(prog.global_asms.iter().any(|g| prog.file_crate[g.0 as usize] == app), "the app's global_asm! block is collected");
     let mut tcx = crate::tcx::Tcx::new();
     tcx.collect(&prog);
     // the store hands out 8-byte aligned payloads
@@ -898,6 +894,7 @@ fn restored_images_take_live_edits() {
     let restored_tcx = crate::tcx::Tcx::restore_collected(types, restored.files.len(), restored.crates.len()).expect("Tcx restore");
     assert_eq!(restored.defs.len(), prog.defs.len());
     assert!(restored.syms.names().eq(prog.syms.names()));
+    assert_eq!(restored.global_asms, prog.global_asms);
     let def = restored.defs.iter().enumerate().find_map(|(i, d)| {
         let id = crate::program::DefId(i as u32);
         (d.krate == app && restored.name(id) == "value").then_some(id)
@@ -917,7 +914,7 @@ fn restored_images_take_live_edits() {
     };
     run(11);
     let edit = |src: &str| unsafe {
-        crate::reload::apply(up, vec![crate::reload::Edit { file: (*up).prog.def(def).file, path: path.clone(), src: src.as_bytes().to_vec() }])
+        crate::reload::apply(up, vec![crate::reload::Edit { file: (*up).prog.def(def).file, path: path.clone(), src: format!("{src}{ASM}").into_bytes() }])
     };
     let body = edit("pub struct S { pub a: u32 }\nimpl S { pub fn get(&self) -> u32 { self.a + 1 } }\npub fn value(out: &mut u32) { *out = S { a: 22 }.get(); }\n");
     assert_eq!(body.rung, crate::reload::Rung::Patch, "{:?}", body.lines);

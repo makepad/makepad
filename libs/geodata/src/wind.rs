@@ -346,28 +346,3 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn decodes_nomads_probe() {
-        let path = concat!(
-            "/private/tmp/claude-501/-Users-admin-makepad-makepad/",
-            "2360ceda-2c5b-45d8-91f7-072799a0d3d9/scratchpad/wind_probe.grib2"
-        );
-        let Ok(data) = std::fs::read(path) else {
-            return;
-        };
-        let field = decode_wind(&data).unwrap();
-        assert_eq!((field.nx, field.ny), (29, 33));
-        assert_eq!((field.west, field.east, field.south, field.north), (2.0, 9.0, 48.0, 56.0));
-        // Reference values from the python decode: u first row starts
-        // -2.15, -2.05... (lat1=48 south, scan +j → row 0 is already south).
-        assert!((field.u[0] - -2.15).abs() < 0.01, "u0 {}", field.u[0]);
-        assert!((field.v[3] - 0.03).abs() < 0.01, "v3 {}", field.v[3]);
-        let amsterdam = field.sample(4.9, 52.37).unwrap();
-        assert!(amsterdam.0.abs() < 30.0 && amsterdam.1.abs() < 30.0);
-    }
-}

@@ -472,3 +472,55 @@ fn only_session_0_has_badge_layers_and_a_badge_has_no_frames() {
     frame(&hal, HOST, BADGE, 30, target::WINDOW);
     assert_eq!(bad(&hal, HOST), before + 1);
 }
+
+/// A headset's XR window (scale 1) beside the app's retina window (scale 2), as the window systems
+/// report them: each window keeps its own scale, so the desktop window's geometry, composition,
+/// overlays and a relaunch's window stay at 2 while the headset streams, across resizes, and a
+/// click on a caption menu title reaches the app where it was made.
+#[test]
+fn a_headset_window_at_scale_1_leaves_the_desktop_window_at_2() {
+    const XR_WINDOW: Id = Id::new(8, 1);
+    let (hal, sid) = setup();
+    let mut app = CmdWriter::new(sid);
+    app.window_create(XR_WINDOW, window_kind::XR, Id::NONE, [0.0; 4], false);
+    hal.submit(&app.buf());
+    let headset = |hal: &Hal| hal.with_world(|w| {
+        w.window_event(sid, RawEvent::display(XR_WINDOW, 1.0, 72.0), &[]);
+        w.window_event(sid, RawEvent::geom(XR_WINDOW, 0.0, 0.0, 3360.0, 1760.0, 1.0, window_state::RESTORE), &[]);
+    });
+    headset(&hal);
+    take(&hal, sid);
+    // the desktop window is resized (the person drags its edge) while the headset streams
+    for (w, h) in [(1500.0, 940.0), (1000.0, 680.0)] {
+        hal.with_world(|world| world.window_event(sid, RawEvent::geom(APP_WINDOW, 0.0, 0.0, w, h, 2.0, window_state::RESTORE), &[]));
+        headset(&hal);
+        hal.with_world(|world| {
+            let s = world.session(sid).unwrap();
+            assert_eq!(s.window_dpi(APP_WINDOW), 2.0, "the desktop window keeps its scale beside the headset's");
+            assert_eq!(s.window_dpi(XR_WINDOW), 1.0);
+            assert_eq!(s.dpi, 2.0, "no window's geometry sets the session's scale");
+            let host = world.session(HOST).unwrap();
+            assert_eq!(host.window_dpi(HOST_WINDOW), 2.0, "the host's window is the desktop window's");
+            assert_eq!(host.dpi, 2.0);
+            assert_eq!(world.domain_dpi(HOST), Some(2.0), "a relaunch starts at the desktop window's scale");
+        });
+        // the window's state changes with no window system to answer: its geometry comes back at
+        // its own scale
+        let mut cmd = CmdWriter::new(sid);
+        cmd.window_state(APP_WINDOW, window_state::RESTORE);
+        hal.submit(&cmd.buf());
+        // a click on a caption menu title, in the window's points
+        hal.with_world(|world| world.window_event(sid, RawEvent::mouse_down(APP_WINDOW, 61.0, 14.0, 0, 0), &[]));
+        let heard = take(&hal, sid);
+        let geoms: Vec<f32> = heard.iter().filter_map(|(e, p)| match e.decode(p) {
+            Some(HalEvent::Geom { window, dpi, .. }) if window == APP_WINDOW => Some(dpi),
+            _ => None,
+        }).collect();
+        assert!(!geoms.is_empty() && geoms.iter().all(|d| *d == 2.0), "the app hears its window at scale 2: {geoms:?}");
+        let click = heard.iter().find_map(|(e, p)| match e.decode(p) {
+            Some(HalEvent::MouseDown { window, x, y, .. }) => Some((window, x, y)),
+            _ => None,
+        });
+        assert_eq!(click, Some((APP_WINDOW, 61.0, 14.0)), "the click reaches the app where it was made");
+    }
+}

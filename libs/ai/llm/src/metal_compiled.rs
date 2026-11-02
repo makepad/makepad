@@ -6125,12 +6125,20 @@ fn bytes_of<T>(value: &T) -> &[u8] {
 mod tests {
     use super::*;
     use crate::context::Context;
-    use crate::core::{InitParams, ScaleMode, SortOrder};
+    use crate::core::InitParams;
+    #[cfg(target_os = "macos")]
+    use crate::core::{ScaleMode, SortOrder};
+    #[cfg(target_os = "macos")]
     use makepad_ai_loader::quant::f16_to_f32;
+    #[cfg(target_os = "macos")]
     use makepad_ai_loader::quant::f32_to_f16;
     use crate::graph::Graph;
-    use crate::op::{GluOp, Op, UnaryOp};
-    use crate::tensor::{ggml_row_size_for_type, BufferUsage, TensorType};
+    use crate::op::{Op, UnaryOp};
+    #[cfg(target_os = "macos")]
+    use crate::op::GluOp;
+    use crate::tensor::{BufferUsage, TensorType};
+    #[cfg(target_os = "macos")]
+    use crate::tensor::ggml_row_size_for_type;
 
     #[test]
     fn prepare_graph_collects_bindings_and_tail_bytes() {
@@ -6303,6 +6311,7 @@ mod tests {
         assert!(prepared.main_buffer_size > resident_used_mem);
     }
 
+    #[cfg(target_os = "macos")]
     fn scale_chain_ctx(
         leaf_view_of_mid: bool,
     ) -> (Context, TensorId, TensorId, TensorId, Option<TensorId>, Graph) {
@@ -6336,11 +6345,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn reclaimed_midgraph_readback_errors_instead_of_returning_clobbered_bytes() {
-        let runtime = match MetalRuntime::new() {
-            Ok(runtime) => runtime,
-            Err(_) => return,
-        };
+        let runtime = MetalRuntime::new().expect("a working Metal device is required");
         let (ctx, input, mid, cur, _, graph) = scale_chain_ctx(false);
         let prepared = prepare_graph(&ctx, &graph, runtime.features()).unwrap();
         assert!(
@@ -6375,11 +6382,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn leaf_view_pins_its_root_for_readback_on_metal_when_available() {
-        let runtime = match MetalRuntime::new() {
-            Ok(runtime) => runtime,
-            Err(_) => return,
-        };
+        let runtime = MetalRuntime::new().expect("a working Metal device is required");
         let (ctx, input, mid, cur, view, graph) = scale_chain_ctx(true);
         let view = view.unwrap();
         let prepared = prepare_graph(&ctx, &graph, runtime.features()).unwrap();
@@ -6417,11 +6422,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn host_read_leaf_inside_fusible_add_chain_is_not_fused_away() {
-        let runtime = match MetalRuntime::new() {
-            Ok(runtime) => runtime,
-            Err(_) => return,
-        };
+        let runtime = MetalRuntime::new().expect("a working Metal device is required");
         let mut ctx = Context::new(InitParams {
             mem_size: 1 << 20,
             mem_buffer: None,
@@ -6498,11 +6501,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn executes_rope_graph_on_metal_when_available() {
-        let runtime = match MetalRuntime::new() {
-            Ok(runtime) => runtime,
-            Err(_) => return,
-        };
+        let runtime = MetalRuntime::new().expect("a working Metal device is required");
 
         let mut ctx = Context::new(InitParams {
             mem_size: 1 << 20,
@@ -6554,11 +6555,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn executes_rope_multi_single_token_consistently_on_metal_when_available() {
-        let runtime = match MetalRuntime::new() {
-            Ok(runtime) => runtime,
-            Err(_) => return,
-        };
+        let runtime = MetalRuntime::new().expect("a working Metal device is required");
 
         let mut full_ctx = Context::new(InitParams {
             mem_size: 1 << 20,
@@ -6628,10 +6627,7 @@ mod tests {
         let token_width = (d * n_head) as usize;
         let full_last_token = full_values[full_values.len() - token_width..].to_vec();
 
-        let runtime = match MetalRuntime::new() {
-            Ok(runtime) => runtime,
-            Err(_) => return,
-        };
+        let runtime = MetalRuntime::new().expect("a working Metal device is required");
         let mut step_ctx = Context::new(InitParams {
             mem_size: 1 << 20,
             mem_buffer: None,
@@ -6706,11 +6702,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn executes_rope_multi_kv_head_shape_consistently_on_metal_when_available() {
-        let runtime = match MetalRuntime::new() {
-            Ok(runtime) => runtime,
-            Err(_) => return,
-        };
+        let runtime = MetalRuntime::new().expect("a working Metal device is required");
 
         let mut full_ctx = Context::new(InitParams {
             mem_size: 1 << 20,
@@ -6780,10 +6774,7 @@ mod tests {
         let token_width = (d * n_head) as usize;
         let full_last_token = full_values[full_values.len() - token_width..].to_vec();
 
-        let runtime = match MetalRuntime::new() {
-            Ok(runtime) => runtime,
-            Err(_) => return,
-        };
+        let runtime = MetalRuntime::new().expect("a working Metal device is required");
         let mut step_ctx = Context::new(InitParams {
             mem_size: 1 << 20,
             mem_buffer: None,
@@ -6858,11 +6849,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn executes_rope_multi_on_interleaved_query_view_matches_contiguous_equivalent() {
-        let runtime = match MetalRuntime::new() {
-            Ok(runtime) => runtime,
-            Err(_) => return,
-        };
+        let runtime = MetalRuntime::new().expect("a working Metal device is required");
 
         let mut ctx = Context::new(InitParams {
             mem_size: 8 << 20,
@@ -6993,11 +6982,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn executes_cont_on_interleaved_query_view_matches_contiguous_equivalent() {
-        let runtime = match MetalRuntime::new() {
-            Ok(runtime) => runtime,
-            Err(_) => return,
-        };
+        let runtime = MetalRuntime::new().expect("a working Metal device is required");
 
         let mut ctx = Context::new(InitParams {
             mem_size: 4 << 20,
@@ -7086,11 +7073,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn executes_flash_attn_vec_on_interleaved_query_rope_matches_contiguous_equivalent() {
-        let runtime = match MetalRuntime::new() {
-            Ok(runtime) => runtime,
-            Err(_) => return,
-        };
+        let runtime = MetalRuntime::new().expect("a working Metal device is required");
 
         let mut ctx = Context::new(InitParams {
             mem_size: 16 << 20,
@@ -7285,11 +7270,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn executes_rms_norm_mul_single_token_consistently_on_metal_when_available() {
-        let runtime = match MetalRuntime::new() {
-            Ok(runtime) => runtime,
-            Err(_) => return,
-        };
+        let runtime = MetalRuntime::new().expect("a working Metal device is required");
 
         let mut full_ctx = Context::new(InitParams {
             mem_size: 1 << 20,
@@ -7351,10 +7334,7 @@ mod tests {
         let token_width = (d * n_head) as usize;
         let full_last_token = full_values[full_values.len() - token_width..].to_vec();
 
-        let runtime = match MetalRuntime::new() {
-            Ok(runtime) => runtime,
-            Err(_) => return,
-        };
+        let runtime = MetalRuntime::new().expect("a working Metal device is required");
         let mut step_ctx = Context::new(InitParams {
             mem_size: 1 << 20,
             mem_buffer: None,
@@ -7419,11 +7399,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn executes_rms_norm_mul_on_interleaved_query_view_single_token_consistently() {
-        let runtime = match MetalRuntime::new() {
-            Ok(runtime) => runtime,
-            Err(_) => return,
-        };
+        let runtime = MetalRuntime::new().expect("a working Metal device is required");
 
         let d = 128_i64;
         let n_head = 8_i64;
@@ -7558,10 +7536,7 @@ mod tests {
         }
         let full_last_token = full_interleaved[full_interleaved.len() - token_width..].to_vec();
 
-        let runtime = match MetalRuntime::new() {
-            Ok(runtime) => runtime,
-            Err(_) => return,
-        };
+        let runtime = MetalRuntime::new().expect("a working Metal device is required");
         let mut step_ctx = Context::new(InitParams {
             mem_size: 4 << 20,
             mem_buffer: None,
@@ -7725,12 +7700,10 @@ mod tests {
     /// unwritten — which corrupted qwen35 batched prefill at n_tokens >= 4
     /// (silu over [8192, n] crosses 32768 elements exactly at n = 4).
     #[test]
+    #[cfg(target_os = "macos")]
     fn executes_unary_large_rows_on_metal_when_available() {
         for (ne0, ne1) in [(8192_i64, 4_i64), (8192, 5), (4096, 16), (511, 65)] {
-            let runtime = match MetalRuntime::new() {
-                Ok(runtime) => runtime,
-                Err(_) => return,
-            };
+            let runtime = MetalRuntime::new().expect("a working Metal device is required");
             let mut ctx = Context::new(InitParams {
                 mem_size: 16 << 20,
                 mem_buffer: None,
@@ -7773,15 +7746,13 @@ mod tests {
     /// states with the transposed projection, then ssm_conv — for a range of
     /// token counts, checked against a direct CPU convolution.
     #[test]
+    #[cfg(target_os = "macos")]
     fn executes_ssm_conv_concat_token_counts_on_metal_when_available() {
         let d_conv = 4_i64;
         let d_inner = 8192_i64;
         let n_seqs = 1_i64;
         for n_tokens in 1..=8_i64 {
-            let runtime = match MetalRuntime::new() {
-                Ok(runtime) => runtime,
-                Err(_) => return,
-            };
+            let runtime = MetalRuntime::new().expect("a working Metal device is required");
             let mut ctx = Context::new(InitParams {
                 mem_size: 64 << 20,
                 mem_buffer: None,
@@ -7891,6 +7862,7 @@ mod tests {
     /// buffer with the read, so ordering and aliasing must hold up at every
     /// token count.
     #[test]
+    #[cfg(target_os = "macos")]
     fn executes_ssm_conv_cache_chain_token_counts_on_metal_when_available() {
         let d_conv = 4_i64;
         let d_inner = 8192_i64;
@@ -7898,10 +7870,7 @@ mod tests {
         let conv_prefix = d_conv - 1;
         let r_width = conv_prefix * d_inner;
         for n_tokens in 1..=8_i64 {
-            let runtime = match MetalRuntime::new() {
-                Ok(runtime) => runtime,
-                Err(_) => return,
-            };
+            let runtime = MetalRuntime::new().expect("a working Metal device is required");
             let mut ctx = Context::new(InitParams {
                 mem_size: 64 << 20,
                 mem_buffer: None,
@@ -8057,11 +8026,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn executes_ssm_conv_multi_token_consistently_on_metal_when_available() {
-        let runtime = match MetalRuntime::new() {
-            Ok(runtime) => runtime,
-            Err(_) => return,
-        };
+        let runtime = MetalRuntime::new().expect("a working Metal device is required");
 
         let d_conv = 4_i64;
         let d_inner = 4096_i64;
@@ -8126,10 +8093,7 @@ mod tests {
         let full_conv_values = bytes_to_f32s(full_execution.outputs.get(&conv_full).unwrap());
         let full_silu_values = bytes_to_f32s(full_execution.outputs.get(&silu_full).unwrap());
 
-        let runtime = match MetalRuntime::new() {
-            Ok(runtime) => runtime,
-            Err(_) => return,
-        };
+        let runtime = MetalRuntime::new().expect("a working Metal device is required");
         let mut step_ctx = Context::new(InitParams {
             mem_size: 32 << 20,
             mem_buffer: None,
@@ -8231,11 +8195,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn executes_concat_with_transposed_source_consistently_on_metal_when_available() {
-        let runtime = match MetalRuntime::new() {
-            Ok(runtime) => runtime,
-            Err(_) => return,
-        };
+        let runtime = MetalRuntime::new().expect("a working Metal device is required");
 
         let prefix_rows = 3_i64;
         let qkv_dim = 512_i64;
@@ -8337,11 +8299,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn executes_get_rows_multi_row_consistently_on_metal_when_available() {
-        let runtime = match MetalRuntime::new() {
-            Ok(runtime) => runtime,
-            Err(_) => return,
-        };
+        let runtime = MetalRuntime::new().expect("a working Metal device is required");
 
         let width = 128_i64;
         let source_rows = 6_i64;
@@ -8396,11 +8356,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn executes_get_rows_multi_row_f16_consistently_on_metal_when_available() {
-        let runtime = match MetalRuntime::new() {
-            Ok(runtime) => runtime,
-            Err(_) => return,
-        };
+        let runtime = MetalRuntime::new().expect("a working Metal device is required");
 
         let width = 128_i64;
         let source_rows = 6_i64;
@@ -8449,10 +8407,7 @@ mod tests {
             .unwrap();
         let full_values = bytes_to_f32s(full_execution.outputs.get(&gathered_full).unwrap());
 
-        let runtime = match MetalRuntime::new() {
-            Ok(runtime) => runtime,
-            Err(_) => return,
-        };
+        let runtime = MetalRuntime::new().expect("a working Metal device is required");
         let mut step_ctx = Context::new(InitParams {
             mem_size: 16 << 20,
             mem_buffer: None,
@@ -8517,11 +8472,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn executes_get_rows_multi_row_q5k_consistently_on_metal_when_available() {
-        let runtime = match MetalRuntime::new() {
-            Ok(runtime) => runtime,
-            Err(_) => return,
-        };
+        let runtime = MetalRuntime::new().expect("a working Metal device is required");
 
         let width = 2048_i64;
         let source_rows = 6_i64;
@@ -8598,10 +8551,7 @@ mod tests {
             &row_values,
         );
 
-        let runtime = match MetalRuntime::new() {
-            Ok(runtime) => runtime,
-            Err(_) => return,
-        };
+        let runtime = MetalRuntime::new().expect("a working Metal device is required");
         let mut step_ctx = Context::new(InitParams {
             mem_size: 16 << 20,
             mem_buffer: None,
@@ -8707,11 +8657,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn executes_get_rows_3d_with_noncontiguous_topk_ids_on_metal_when_available() {
-        let runtime = match MetalRuntime::new() {
-            Ok(runtime) => runtime,
-            Err(_) => return,
-        };
+        let runtime = MetalRuntime::new().expect("a working Metal device is required");
 
         let mut ctx = Context::new(InitParams {
             mem_size: 1 << 22,
@@ -8809,11 +8757,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn executes_mul_mat_q5k_graph_on_metal_when_available() {
-        let runtime = match MetalRuntime::new() {
-            Ok(runtime) => runtime,
-            Err(_) => return,
-        };
+        let runtime = MetalRuntime::new().expect("a working Metal device is required");
 
         let width = 2048_i64;
         let rows = 128_i64;
@@ -8878,11 +8824,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn executes_mul_mat_f32_graph_on_metal_when_available() {
-        let runtime = match MetalRuntime::new() {
-            Ok(runtime) => runtime,
-            Err(_) => return,
-        };
+        let runtime = MetalRuntime::new().expect("a working Metal device is required");
 
         let width = 2048_i64;
         let rows = 256_i64;
@@ -8948,11 +8892,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn executes_mul_mat_f32_graph_with_high_variance_values_on_metal_when_available() {
-        let runtime = match MetalRuntime::new() {
-            Ok(runtime) => runtime,
-            Err(_) => return,
-        };
+        let runtime = MetalRuntime::new().expect("a working Metal device is required");
 
         let width = 2048_i64;
         let rows = 256_i64;
@@ -9025,11 +8967,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn executes_set_inplace_chunk_output_view_consistently_on_metal_when_available() {
-        let runtime = match MetalRuntime::new() {
-            Ok(runtime) => runtime,
-            Err(_) => return,
-        };
+        let runtime = MetalRuntime::new().expect("a working Metal device is required");
 
         let s_v = 32_i64;
         let chunk_size = 16_i64;
@@ -9157,11 +9097,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn executes_solve_tri_graph_on_metal_when_available() {
-        let runtime = match MetalRuntime::new() {
-            Ok(runtime) => runtime,
-            Err(_) => return,
-        };
+        let runtime = MetalRuntime::new().expect("a working Metal device is required");
 
         let n = 64_i64;
         let k = 64_i64;
@@ -9235,11 +9173,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn executes_broadcast_mul_chunking_shapes_on_metal_when_available() {
-        let runtime = match MetalRuntime::new() {
-            Ok(runtime) => runtime,
-            Err(_) => return,
-        };
+        let runtime = MetalRuntime::new().expect("a working Metal device is required");
 
         let s = 64_i64;
         let cs = 64_i64;
@@ -9337,11 +9273,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn executes_flash_attn_vec_graph_on_metal_when_available() {
-        let runtime = match MetalRuntime::new() {
-            Ok(runtime) => runtime,
-            Err(_) => return,
-        };
+        let runtime = MetalRuntime::new().expect("a working Metal device is required");
 
         let mut ctx = Context::new(InitParams {
             mem_size: 1 << 20,
@@ -9418,11 +9352,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn executes_flash_attn_vec_from_strided_cache_view_on_metal_when_available() {
-        let runtime = match MetalRuntime::new() {
-            Ok(runtime) => runtime,
-            Err(_) => return,
-        };
+        let runtime = MetalRuntime::new().expect("a working Metal device is required");
 
         let mut ctx = Context::new(InitParams {
             mem_size: 1 << 20,
@@ -9561,11 +9493,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn executes_flash_attn_vec_from_strided_gqa_cache_view_on_metal_when_available() {
-        let runtime = match MetalRuntime::new() {
-            Ok(runtime) => runtime,
-            Err(_) => return,
-        };
+        let runtime = MetalRuntime::new().expect("a working Metal device is required");
 
         let mut full_ctx = Context::new(InitParams {
             mem_size: 1 << 20,
@@ -9790,10 +9720,7 @@ mod tests {
             .build_forward_expand(&decode_ctx, decode_attn)
             .unwrap();
 
-        let runtime = match MetalRuntime::new() {
-            Ok(runtime) => runtime,
-            Err(_) => return,
-        };
+        let runtime = MetalRuntime::new().expect("a working Metal device is required");
         let decode_prepared =
             prepare_graph(&decode_ctx, &decode_graph, runtime.features()).unwrap();
         let decode_session = MetalGraphSession::from_runtime(
@@ -9821,11 +9748,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn executes_flash_attn_vec_with_causal_mask_matches_last_token_decode() {
-        let runtime = match MetalRuntime::new() {
-            Ok(runtime) => runtime,
-            Err(_) => return,
-        };
+        let runtime = MetalRuntime::new().expect("a working Metal device is required");
 
         let mut full_ctx = Context::new(InitParams {
             mem_size: 1 << 20,
@@ -10061,10 +9986,7 @@ mod tests {
             .build_forward_expand(&decode_ctx, decode_attn)
             .unwrap();
 
-        let runtime = match MetalRuntime::new() {
-            Ok(runtime) => runtime,
-            Err(_) => return,
-        };
+        let runtime = MetalRuntime::new().expect("a working Metal device is required");
         let decode_prepared =
             prepare_graph(&decode_ctx, &decode_graph, runtime.features()).unwrap();
         let decode_session = MetalGraphSession::from_runtime(
@@ -10092,11 +10014,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn executes_set_rows_graph_on_metal_when_available() {
-        let runtime = match MetalRuntime::new() {
-            Ok(runtime) => runtime,
-            Err(_) => return,
-        };
+        let runtime = MetalRuntime::new().expect("a working Metal device is required");
 
         let mut ctx = Context::new(InitParams {
             mem_size: 1 << 20,
@@ -10155,11 +10075,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn executes_add_sigmoid_graph_on_metal_when_available() {
-        let runtime = match MetalRuntime::new() {
-            Ok(runtime) => runtime,
-            Err(_) => return,
-        };
+        let runtime = MetalRuntime::new().expect("a working Metal device is required");
 
         let mut ctx = Context::new(InitParams {
             mem_size: 1 << 20,
@@ -10218,11 +10136,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn executes_swiglu_split_graph_on_metal_when_available() {
-        let runtime = match MetalRuntime::new() {
-            Ok(runtime) => runtime,
-            Err(_) => return,
-        };
+        let runtime = MetalRuntime::new().expect("a working Metal device is required");
 
         let mut ctx = Context::new(InitParams {
             mem_size: 1 << 20,
@@ -10283,11 +10199,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn executes_swiglu_split_single_token_consistently_on_metal_when_available() {
-        let runtime = match MetalRuntime::new() {
-            Ok(runtime) => runtime,
-            Err(_) => return,
-        };
+        let runtime = MetalRuntime::new().expect("a working Metal device is required");
 
         let width = 128_i64;
         let n_tokens = 2_i64;
@@ -10334,10 +10248,7 @@ mod tests {
         let full_values = bytes_to_f32s(full_execution.outputs.get(&out_full).unwrap());
         let full_last_token = full_values[full_values.len() - token_width..].to_vec();
 
-        let runtime = match MetalRuntime::new() {
-            Ok(runtime) => runtime,
-            Err(_) => return,
-        };
+        let runtime = MetalRuntime::new().expect("a working Metal device is required");
         let mut step_ctx = Context::new(InitParams {
             mem_size: 1 << 20,
             mem_buffer: None,
@@ -10390,11 +10301,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn executes_softmax_graph_on_metal_when_available() {
-        let runtime = match MetalRuntime::new() {
-            Ok(runtime) => runtime,
-            Err(_) => return,
-        };
+        let runtime = MetalRuntime::new().expect("a working Metal device is required");
 
         let mut ctx = Context::new(InitParams {
             mem_size: 1 << 20,
@@ -10441,11 +10350,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn executes_sum_rows_graph_on_metal_when_available() {
-        let runtime = match MetalRuntime::new() {
-            Ok(runtime) => runtime,
-            Err(_) => return,
-        };
+        let runtime = MetalRuntime::new().expect("a working Metal device is required");
 
         let mut ctx = Context::new(InitParams {
             mem_size: 1 << 20,
@@ -10493,11 +10400,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn executes_top_k_graph_on_metal_when_available() {
-        let runtime = match MetalRuntime::new() {
-            Ok(runtime) => runtime,
-            Err(_) => return,
-        };
+        let runtime = MetalRuntime::new().expect("a working Metal device is required");
 
         let mut ctx = Context::new(InitParams {
             mem_size: 1 << 20,
@@ -10535,11 +10440,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn executes_argsort_graph_on_metal_when_available() {
-        let runtime = match MetalRuntime::new() {
-            Ok(runtime) => runtime,
-            Err(_) => return,
-        };
+        let runtime = MetalRuntime::new().expect("a working Metal device is required");
 
         let mut ctx = Context::new(InitParams {
             mem_size: 1 << 20,
@@ -10577,11 +10480,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn executes_add_id_graph_on_metal_when_available() {
-        let runtime = match MetalRuntime::new() {
-            Ok(runtime) => runtime,
-            Err(_) => return,
-        };
+        let runtime = MetalRuntime::new().expect("a working Metal device is required");
 
         let mut ctx = Context::new(InitParams {
             mem_size: 1 << 20,
@@ -10651,11 +10552,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn executes_mul_mat_id_graph_on_metal_when_available() {
-        let runtime = match MetalRuntime::new() {
-            Ok(runtime) => runtime,
-            Err(_) => return,
-        };
+        let runtime = MetalRuntime::new().expect("a working Metal device is required");
 
         let mut ctx = Context::new(InitParams {
             mem_size: 1 << 22,
@@ -10719,11 +10618,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn executes_mul_mat_id_with_noncontiguous_topk_ids_on_metal_when_available() {
-        let runtime = match MetalRuntime::new() {
-            Ok(runtime) => runtime,
-            Err(_) => return,
-        };
+        let runtime = MetalRuntime::new().expect("a working Metal device is required");
 
         let mut ctx = Context::new(InitParams {
             mem_size: 1 << 22,
@@ -10836,11 +10733,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn executes_gated_delta_net_graph_on_metal_when_available() {
-        let runtime = match MetalRuntime::new() {
-            Ok(runtime) => runtime,
-            Err(_) => return,
-        };
+        let runtime = MetalRuntime::new().expect("a working Metal device is required");
 
         let mut ctx = Context::new(InitParams {
             mem_size: 1 << 22,
@@ -10963,6 +10858,9 @@ mod tests {
         let mut graph = Graph::new();
         graph.build_forward_expand(&ctx, output).unwrap();
         graph.build_forward_expand(&ctx, new_state).unwrap();
+        // Views are metadata-only (no plan node, no binding of their own): leaf them to read them back.
+        graph.add_leaf(output);
+        graph.add_leaf(new_state);
 
         let prepared = prepare_graph(&ctx, &graph, runtime.features()).unwrap();
         let session = MetalGraphSession::from_runtime(
@@ -11016,6 +10914,7 @@ mod tests {
     /// as views of a packed `[qkv_dim, n_tokens, n_seqs]` tensor, the same
     /// shape the qwen35 runtime carves out of its conv output — the kernel
     /// must honor the per-token strides, not assume contiguity.
+    #[cfg(target_os = "macos")]
     fn run_gated_delta_net_metal_case(
         s_v: i64,
         h_k: i64,
@@ -11024,10 +10923,7 @@ mod tests {
         n_seqs: i64,
         strided_qkv: bool,
     ) {
-        let runtime = match MetalRuntime::new() {
-            Ok(runtime) => runtime,
-            Err(_) => return,
-        };
+        let runtime = MetalRuntime::new().expect("a working Metal device is required");
         let label = format!(
             "s_v={s_v} h_k={h_k} h_v={h_v} n_tokens={n_tokens} n_seqs={n_seqs} strided={strided_qkv}"
         );
@@ -11244,6 +11140,9 @@ mod tests {
         let mut graph = Graph::new();
         graph.build_forward_expand(&ctx, output).unwrap();
         graph.build_forward_expand(&ctx, new_state).unwrap();
+        // Views are metadata-only (no plan node, no binding of their own): leaf them to read them back.
+        graph.add_leaf(output);
+        graph.add_leaf(new_state);
 
         let prepared = prepare_graph(&ctx, &graph, runtime.features()).unwrap();
         let session = MetalGraphSession::from_runtime(
@@ -11295,6 +11194,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn executes_gated_delta_net_multi_token_on_metal_when_available() {
         for n_tokens in [1, 2, 3, 4, 5, 8] {
             run_gated_delta_net_metal_case(32, 1, 2, n_tokens, 1, false);
@@ -11302,6 +11202,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn executes_gated_delta_net_strided_views_on_metal_when_available() {
         for n_tokens in [1, 3, 4, 8] {
             run_gated_delta_net_metal_case(32, 2, 4, n_tokens, 1, true);
@@ -11311,11 +11212,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn executes_conv_2d_graph_on_metal_when_available() {
-        let runtime = match MetalRuntime::new() {
-            Ok(runtime) => runtime,
-            Err(_) => return,
-        };
+        let runtime = MetalRuntime::new().expect("a working Metal device is required");
 
         let mut ctx = Context::new(InitParams {
             mem_size: 1 << 20,
@@ -11385,11 +11284,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn executes_group_norm_graph_on_metal_when_available() {
-        let runtime = match MetalRuntime::new() {
-            Ok(runtime) => runtime,
-            Err(_) => return,
-        };
+        let runtime = MetalRuntime::new().expect("a working Metal device is required");
 
         let mut ctx = Context::new(InitParams {
             mem_size: 1 << 20,
@@ -11436,11 +11333,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn executes_upscale_nearest_graph_on_metal_when_available() {
-        let runtime = match MetalRuntime::new() {
-            Ok(runtime) => runtime,
-            Err(_) => return,
-        };
+        let runtime = MetalRuntime::new().expect("a working Metal device is required");
 
         let mut ctx = Context::new(InitParams {
             mem_size: 1 << 20,
@@ -11494,11 +11389,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn executes_repeat_channel_vector_graph_on_metal_when_available() {
-        let runtime = match MetalRuntime::new() {
-            Ok(runtime) => runtime,
-            Err(_) => return,
-        };
+        let runtime = MetalRuntime::new().expect("a working Metal device is required");
 
         let mut ctx = Context::new(InitParams {
             mem_size: 1 << 20,
@@ -11550,11 +11443,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn executes_channel_affine_graph_on_metal_when_available() {
-        let runtime = match MetalRuntime::new() {
-            Ok(runtime) => runtime,
-            Err(_) => return,
-        };
+        let runtime = MetalRuntime::new().expect("a working Metal device is required");
 
         let mut ctx = Context::new(InitParams {
             mem_size: 1 << 20,
@@ -11632,11 +11523,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn executes_large_upscale_conv_bias_graph_on_metal_when_available() {
-        let runtime = match MetalRuntime::new() {
-            Ok(runtime) => runtime,
-            Err(_) => return,
-        };
+        let runtime = MetalRuntime::new().expect("a working Metal device is required");
 
         let mut ctx = Context::new(InitParams {
             mem_size: 32 << 20,
@@ -11747,11 +11636,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn executes_large_group_norm_graph_on_metal_when_available() {
-        let runtime = match MetalRuntime::new() {
-            Ok(runtime) => runtime,
-            Err(_) => return,
-        };
+        let runtime = MetalRuntime::new().expect("a working Metal device is required");
 
         let mut ctx = Context::new(InitParams {
             mem_size: 96 << 20,
@@ -11816,12 +11703,9 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Metal unary backend still skips large tensor regions; FLUX routes activations via GLU instead"]
+    #[cfg(target_os = "macos")]
     fn executes_large_silu_graph_on_metal_when_available() {
-        let runtime = match MetalRuntime::new() {
-            Ok(runtime) => runtime,
-            Err(_) => return,
-        };
+        let runtime = MetalRuntime::new().expect("a working Metal device is required");
 
         let mut ctx = Context::new(InitParams {
             mem_size: 96 << 20,
@@ -11891,6 +11775,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
     fn cpu_rope_norm_f32(
         src: &[f32],
         positions: &[i32],
@@ -11920,6 +11805,7 @@ mod tests {
         dst
     }
 
+    #[cfg(target_os = "macos")]
     fn cpu_conv_2d_f32(
         weights: &[f32],
         input: &[f32],
@@ -11978,6 +11864,7 @@ mod tests {
         out
     }
 
+    #[cfg(target_os = "macos")]
     fn cpu_group_norm_f32(
         input: &[f32],
         width: usize,
@@ -12035,6 +11922,7 @@ mod tests {
         out
     }
 
+    #[cfg(target_os = "macos")]
     fn cpu_upscale_nearest_f32(
         input: &[f32],
         width: usize,
@@ -12064,6 +11952,7 @@ mod tests {
         out
     }
 
+    #[cfg(target_os = "macos")]
     fn cpu_repeat_f32(
         input: &[f32],
         src_width: usize,
@@ -12096,6 +11985,7 @@ mod tests {
         out
     }
 
+    #[cfg(target_os = "macos")]
     fn cpu_silu_f32(input: &[f32]) -> Vec<f32> {
         input
             .iter()
@@ -12103,6 +11993,7 @@ mod tests {
             .collect()
     }
 
+    #[cfg(target_os = "macos")]
     fn f32s_to_bytes(values: &[f32]) -> Vec<u8> {
         let mut out = Vec::with_capacity(values.len() * std::mem::size_of::<f32>());
         for value in values {
@@ -12111,6 +12002,7 @@ mod tests {
         out
     }
 
+    #[cfg(target_os = "macos")]
     fn interleave_query_gate_values(
         query_values: &[f32],
         gate_values: &[f32],
@@ -12135,6 +12027,7 @@ mod tests {
         out
     }
 
+    #[cfg(target_os = "macos")]
     fn cast_tensor_to_type(
         ctx: &mut Context,
         src: TensorId,
@@ -12156,6 +12049,7 @@ mod tests {
         ctx.cpy(src, dst, BufferUsage::Activations)
     }
 
+    #[cfg(target_os = "macos")]
     fn build_flash_attn_like_mha(
         ctx: &mut Context,
         q: TensorId,
@@ -12197,6 +12091,7 @@ mod tests {
         Ok(attn)
     }
 
+    #[cfg(target_os = "macos")]
     fn i32s_to_bytes(values: &[i32]) -> Vec<u8> {
         let mut out = Vec::with_capacity(values.len() * std::mem::size_of::<i32>());
         for value in values {
@@ -12205,6 +12100,7 @@ mod tests {
         out
     }
 
+    #[cfg(target_os = "macos")]
     fn bytes_to_i32s(bytes: &[u8]) -> Vec<i32> {
         bytes
             .chunks_exact(std::mem::size_of::<i32>())
@@ -12212,6 +12108,7 @@ mod tests {
             .collect()
     }
 
+    #[cfg(target_os = "macos")]
     fn bytes_to_f32s(bytes: &[u8]) -> Vec<f32> {
         bytes
             .chunks_exact(std::mem::size_of::<f32>())
@@ -12219,10 +12116,12 @@ mod tests {
             .collect()
     }
 
+    #[cfg(target_os = "macos")]
     fn patterned_f32s(len: usize, base: f32, step: f32) -> Vec<f32> {
         (0..len).map(|i| base + step * (i as f32)).collect()
     }
 
+    #[cfg(target_os = "macos")]
     fn hashed_f32s(len: usize, seed: u32, scale: f32, bias: f32, harmonic: f32) -> Vec<f32> {
         let mut state = seed;
         let mut out = Vec::with_capacity(len);
@@ -12236,6 +12135,7 @@ mod tests {
         out
     }
 
+    #[cfg(target_os = "macos")]
     fn patterned_q5k_tensor_bytes(rows: usize, width: usize) -> Vec<u8> {
         assert_eq!(width % 256, 0);
         let row_bytes = ggml_row_size_for_type(TensorType::Q5K, width as i64).unwrap();
@@ -12263,6 +12163,7 @@ mod tests {
         out
     }
 
+    #[cfg(target_os = "macos")]
     fn cpu_softmax_rows_f32(values: &[f32], row_len: usize) -> Vec<f32> {
         let mut out = vec![0.0; values.len()];
         for row in 0..(values.len() / row_len) {
@@ -12284,6 +12185,7 @@ mod tests {
         out
     }
 
+    #[cfg(target_os = "macos")]
     fn cpu_get_rows_f32(values: &[f32], width: usize, rows: &[i32]) -> Vec<f32> {
         let mut out = Vec::with_capacity(width * rows.len());
         for &row in rows {
@@ -12295,6 +12197,7 @@ mod tests {
         out
     }
 
+    #[cfg(target_os = "macos")]
     fn cpu_mul_mat_f32(
         weights: &[f32],
         input: &[f32],
@@ -12317,6 +12220,7 @@ mod tests {
         out
     }
 
+    #[cfg(target_os = "macos")]
     fn cpu_get_rows_q5k(src: &[u8], width: usize, n_rows: usize, rows: &[i32]) -> Vec<f32> {
         assert_eq!(width % 256, 0);
         let row_bytes = ggml_row_size_for_type(TensorType::Q5K, width as i64).unwrap();
@@ -12331,6 +12235,7 @@ mod tests {
         out
     }
 
+    #[cfg(target_os = "macos")]
     fn dequantize_row_q5k_bytes(row_src: &[u8], width: usize, out: &mut Vec<f32>) {
         assert_eq!(width % 256, 0);
         let block_bytes = ggml_row_size_for_type(TensorType::Q5K, 256).unwrap();
@@ -12375,6 +12280,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
     fn get_scale_min_k4(j: usize, q: &[u8]) -> (u8, u8) {
         if j < 4 {
             (q[j] & 63, q[j + 4] & 63)
@@ -12386,6 +12292,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
     fn cpu_sum_rows_f32(values: &[f32], row_len: usize) -> Vec<f32> {
         let mut out = vec![0.0; values.len() / row_len];
         for row in 0..out.len() {
@@ -12397,6 +12304,7 @@ mod tests {
         out
     }
 
+    #[cfg(target_os = "macos")]
     fn cpu_top_k_rows_i32(values: &[f32], row_len: usize, k: usize) -> Vec<i32> {
         let mut out = Vec::with_capacity((values.len() / row_len) * k);
         for row in 0..(values.len() / row_len) {
@@ -12408,6 +12316,7 @@ mod tests {
         out
     }
 
+    #[cfg(target_os = "macos")]
     fn cpu_argsort_rows_i32(values: &[f32], row_len: usize) -> Vec<i32> {
         let mut out = Vec::with_capacity(values.len());
         for row in 0..(values.len() / row_len) {
@@ -12419,6 +12328,7 @@ mod tests {
         out
     }
 
+    #[cfg(target_os = "macos")]
     fn cpu_add_id_f32(
         src0: &[f32],
         bias: &[f32],
@@ -12442,6 +12352,7 @@ mod tests {
         out
     }
 
+    #[cfg(target_os = "macos")]
     fn cpu_mul_mat_id_f32(
         experts: &[f32],
         input: &[f32],
@@ -12471,6 +12382,7 @@ mod tests {
         out
     }
 
+    #[cfg(target_os = "macos")]
     fn cpu_mul_mat_q5k_f32(
         weights: &[u8],
         input: &[f32],
@@ -12495,6 +12407,7 @@ mod tests {
         out
     }
 
+    #[cfg(target_os = "macos")]
     fn cpu_get_rows_3d_f32(
         values: &[f32],
         width: usize,
@@ -12517,6 +12430,7 @@ mod tests {
         out
     }
 
+    #[cfg(target_os = "macos")]
     fn cpu_gated_delta_net_f32(
         q: &[f32],
         k: &[f32],
@@ -12606,6 +12520,7 @@ mod tests {
         (attn_out, state_out)
     }
 
+    #[cfg(target_os = "macos")]
     fn cpu_solve_tri_f32(a: &[f32], b: &[f32], n: usize, k: usize, batches: usize) -> Vec<f32> {
         let mut out = vec![0.0f32; b.len()];
         for batch in 0..batches {
@@ -12626,6 +12541,7 @@ mod tests {
         out
     }
 
+    #[cfg(target_os = "macos")]
     fn cpu_broadcast_mul_dim1(a: &[f32], b: &[f32], cs: usize, s: usize, h: usize) -> Vec<f32> {
         let mut out = vec![0.0f32; a.len()];
         for head in 0..h {
@@ -12640,6 +12556,7 @@ mod tests {
         out
     }
 
+    #[cfg(target_os = "macos")]
     fn cpu_broadcast_mul_dim0(a: &[f32], b: &[f32], s: usize, cs: usize, h: usize) -> Vec<f32> {
         let mut out = vec![0.0f32; a.len()];
         for head in 0..h {
@@ -12654,6 +12571,7 @@ mod tests {
         out
     }
 
+    #[cfg(target_os = "macos")]
     fn cpu_flash_attn_f32(
         q: &[f32],
         k: &[f32],

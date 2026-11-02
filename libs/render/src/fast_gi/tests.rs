@@ -11,7 +11,7 @@ fn unit_box(pos: Vec3f, size: Vec3f) -> Instance {
     Instance::new(mesh, t, vec3f(0.5, 0.25, 1.0), Vec3f::default(), 1.0).unwrap()
 }
 fn snapshot(instances: Vec<Instance>) -> Arc<Snapshot> {
-    let triangles = instances.iter().map(|i| i.mesh.indices.len() / 3).sum();
+    let triangles = instances.iter().map(|i| i.triangles()).sum();
     Arc::new(Snapshot { instances, triangles })
 }
 fn small_layout() -> VoxelLayout { VoxelLayout::new(GiConfig { grid: [4, 2, 4], cascades: 2, ..GiConfig::default() }) }
@@ -176,7 +176,7 @@ fn mesh_rejects_bad_layouts_and_instances_reject_nonfinite_transforms() {
 
 #[test]
 fn slots_round_trip_and_scrolling_queues_only_the_exposed_slab() {
-    let mut c = Cascade::new([4, 2, 4], 1.0);
+    let mut c = Cascade::new([4, 2, 4], 1.0, false);
     assert_eq!(c.scroll([0, 0, 0]).len(), 32, "a first window traces everything");
     for s in 0..c.count() { assert_eq!(c.slot(c.cell(s).unwrap()), s); }
     let mut out = schedule(std::slice::from_mut(&mut c), 1000);
@@ -191,7 +191,7 @@ fn slots_round_trip_and_scrolling_queues_only_the_exposed_slab() {
 
 #[test]
 fn edits_queue_nearby_probes_ahead_of_refresh_with_low_hysteresis() {
-    let mut c = Cascade::new([8, 4, 8], 1.0);
+    let mut c = Cascade::new([8, 4, 8], 1.0, false);
     c.scroll([0, 0, 0]);
     let _ = schedule(std::slice::from_mut(&mut c), 10_000);
     let n = c.invalidate([3.0, 1.0, 3.0], [3.5, 1.5, 3.5], [0.43, 0.47, 0.41]);
@@ -205,7 +205,7 @@ fn edits_queue_nearby_probes_ahead_of_refresh_with_low_hysteresis() {
 
 #[test]
 fn refresh_visits_every_probe_once_per_cycle_and_splits_the_budget() {
-    let mut cs = vec![Cascade::new([4, 2, 4], 1.0), Cascade::new([4, 2, 4], 2.0), Cascade::new([4, 2, 4], 4.0)];
+    let mut cs = vec![Cascade::new([4, 2, 4], 1.0, false), Cascade::new([4, 2, 4], 2.0, false), Cascade::new([4, 2, 4], 4.0, false)];
     for c in &mut cs { c.scroll([0, 0, 0]); }
     let _ = schedule(&mut cs, 10_000);
     let mut seen = vec![0; 32];
@@ -259,7 +259,8 @@ fn a_realm_change_keeps_the_field_and_rediffs_the_scene() {
 fn emission_keeps_its_hue_and_intensity() {
     let l = small_layout();
     let mut lamp = unit_box(vec3f(0.1, 0.1, 0.1), vec3f(1.0, 1.0, 1.0));
-    lamp = Instance::new(lamp.mesh.clone(), lamp.transform, lamp.tint, vec3f(3.0, 1.5, 0.0), 1.0).unwrap();
+    let Solid::Mesh(lamp_mesh) = lamp.solid.clone() else { panic!("a mesh") };
+    lamp = Instance::new(lamp_mesh, lamp.transform, lamp.tint, vec3f(3.0, 1.5, 0.0), 1.0).unwrap();
     let mut w = VoxelWorld::new(l);
     w.update(Some(snapshot(vec![lamp])), &[l.window_for(0, Vec3f::default()), l.window_for(1, Vec3f::default())]);
     let px = w.emission[l.texel(0, [2, 1, 0])];

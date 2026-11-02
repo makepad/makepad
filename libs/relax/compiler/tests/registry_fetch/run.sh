@@ -1,5 +1,5 @@
 #!/bin/bash
-# usage: run.sh <makepad binary>: NETWORK TEST (a node only, not in the default test list): a program whose
+# usage: run.sh <makepad binary>: NETWORK TEST (a pool node only, not in the default test list): a program whose
 # crates.io dependencies (fnv, cfg-if) are neither vendored nor in CARGO_HOME, without Cargo.lock --
 # Relax fetches the sparse index entries and the .crate files (SHA-256 checked), unpacks them into a
 # private cache, runs the program; then again with MAKEPAD_RUN_OFFLINE=1 from that cache alone.

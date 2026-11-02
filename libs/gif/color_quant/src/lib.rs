@@ -264,8 +264,6 @@ impl NeuQuant {
     /// for frequently chosen neurons, freq[i] is high and bias[i] is negative
     /// bias[i] = gamma*((1/self.netsize)-freq[i])
     fn contest(&mut self, b: f64, g: f64, r: f64, a: f64) -> i32 {
-        use std::f64;
-
         let mut bestd = f64::MAX;
         let mut bestbiasd: f64 = bestd;
         let mut bestpos = -1;

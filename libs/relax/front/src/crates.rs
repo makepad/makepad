@@ -339,24 +339,6 @@ pub fn path_attrs_cfg(p: crate::cfg::Src, attrs: &[Attr], cfg: &crate::cfg::CfgS
     }
 }
 
-pub fn path_attrs_src(p: crate::cfg::Src, attrs: &[Attr], out: &mut Vec<String>) {
-    for a in attrs {
-        let lo = a.toks.lo as usize;
-        let hi = a.toks.hi as usize;
-        let mut i = lo;
-        while i + 2 < hi {
-            let t = p.tok(i);
-            if t.kind == T::Ident && &p.src[t.lo as usize..t.hi as usize] == b"path" {
-                if p.tok(i + 1).kind == T::Eq && p.tok(i + 2).kind == T::Str {
-                    let s = p.tok(i + 2);
-                    out.push(str_lit(p.src, s.lo, s.hi));
-                }
-            }
-            i += 1;
-        }
-    }
-}
-
 /// Pending module file.
 struct Job {
     crate_idx: u32,

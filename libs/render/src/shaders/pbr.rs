@@ -281,7 +281,8 @@ script_mod! {
             // alpha under 0.5 discards; on the stock lane that case was
             // already discarded above (tex.w < 0.5), so output is unchanged.
             let surf = self.surface(vec4(self.color_adjust(
-                base * self.to_lin(self.v_tint.xyz),
+                // the vertex tint is encoded like a texel: both scene-referred lanes decode it
+                base * self.to_scene(self.v_tint.xyz),
                 self.tint,
                 self.color_adjust_ctl
             ), alpha))
@@ -293,7 +294,7 @@ script_mod! {
                 cut = self.cut_coverage(surf.w, self.alpha_cutoff)
                 if cut<=0.0 {self.clip()}
             }
-            let albedo = surf.xyz
+            let albedo = self.paint_mix(surf.xyz)
             let out = self.shade(albedo, surf.w)
             return vec4(out.xyz, out.w * self.cut_alpha(cut))
         }

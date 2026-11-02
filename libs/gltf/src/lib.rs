@@ -17,8 +17,6 @@ mod soft_body;
 pub use soft_body::*;
 pub use vehicle_visual::VisualWheelMotion;
 pub use pbr_augmentation::*;
-#[cfg(test)]
-mod sample_tests;
 
 pub use crate::buffer::{
     decode_mesh_primitive, read_accessor_f32x2, read_accessor_f32x3, read_accessor_indices_u32,

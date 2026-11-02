@@ -321,6 +321,7 @@ impl Renderer {
         batch.skinned.draw_vars.set_uniform(cx.cx, live_id!(eye), &[eye.x, eye.y, eye.z]);
         self.clustered.bind(cx.cx, &mut batch.skinned.draw_vars, self.clustered_enabled);
         self.gi.bind(cx.cx, &mut batch.skinned.draw_vars);
+        self.bind_output_dither(cx.cx, &mut batch.skinned.draw_vars);
         self.bind_skin_ibl(cx.cx, &mut batch.skinned.draw_vars);
         sun.write_uniforms(cx.cx, &mut batch.skinned.draw_vars);
         batch.skinned.draw_vars.set_uniform(cx.cx, live_id!(light_dir), &[sun.dir.x, sun.dir.y, sun.dir.z]);

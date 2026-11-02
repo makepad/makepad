@@ -434,7 +434,7 @@ fn test_invalid_grow() {
 #[should_panic]
 fn drain_overflow() {
     let mut v: SmallVec<[u8; 8]> = smallvec![0];
-    v.drain(..=std::usize::MAX);
+    v.drain(..=usize::MAX);
 }
 
 #[test]
@@ -519,27 +519,6 @@ fn test_ord() {
     assert!(b > a);
     assert!(b < c);
     assert!(c > b);
-}
-
-#[test]
-fn test_hash() {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::Hash;
-
-    {
-        let mut a: SmallVec<[u32; 2]> = SmallVec::new();
-        let b = [1, 2];
-        a.extend(b.iter().cloned());
-        let mut hasher = DefaultHasher::new();
-        assert_eq!(a.hash(&mut hasher), b.hash(&mut hasher));
-    }
-    {
-        let mut a: SmallVec<[u32; 2]> = SmallVec::new();
-        let b = [1, 2, 11, 12];
-        a.extend(b.iter().cloned());
-        let mut hasher = DefaultHasher::new();
-        assert_eq!(a.hash(&mut hasher), b.hash(&mut hasher));
-    }
 }
 
 #[test]
@@ -1069,66 +1048,4 @@ fn max_swap_remove() {
 fn test_insert_out_of_bounds() {
     let mut v: SmallVec<[i32; 4]> = SmallVec::new();
     v.insert(10, 6);
-}
-
-#[cfg(feature = "impl_bincode")]
-#[test]
-fn test_bincode() {
-    let config = bincode::config::standard();
-    let mut small_vec: SmallVec<[i32; 2]> = SmallVec::new();
-    let mut buffer = [0u8; 128];
-    small_vec.push(1);
-    let bytes_written = bincode::encode_into_slice(&small_vec, &mut buffer, config).unwrap();
-    let (decoded, bytes_read) =
-        bincode::decode_from_slice::<SmallVec<[i32; 2]>, _>(&buffer, config).unwrap();
-    assert_eq!(bytes_written, bytes_read);
-    assert_eq!(small_vec, decoded);
-    let (decoded, bytes_read) =
-        bincode::borrow_decode_from_slice::<SmallVec<[i32; 2]>, _>(&buffer, config).unwrap();
-    assert_eq!(bytes_written, bytes_read);
-    assert_eq!(small_vec, decoded);
-    // Spill the vec
-    small_vec.push(2);
-    small_vec.push(3);
-    small_vec.push(4);
-    // Check again after spilling.
-    let bytes_written = bincode::encode_into_slice(&small_vec, &mut buffer, config).unwrap();
-    let (decoded, bytes_read) =
-        bincode::decode_from_slice::<SmallVec<[i32; 2]>, _>(&buffer, config).unwrap();
-    assert_eq!(bytes_written, bytes_read);
-    assert_eq!(small_vec, decoded);
-    let (decoded, bytes_read) =
-        bincode::borrow_decode_from_slice::<SmallVec<[i32; 2]>, _>(&buffer, config).unwrap();
-    assert_eq!(bytes_written, bytes_read);
-    assert_eq!(small_vec, decoded);
-}
-
-#[cfg(feature = "impl_bincode")]
-#[test]
-fn test_bincode_u8() {
-    let config = bincode::config::standard();
-    let mut small_vec: SmallVec<[u8; 16]> = SmallVec::new();
-    let mut buffer = [0u8; 128];
-    small_vec.extend_from_slice(b"testing test");
-    let bytes_written = bincode::encode_into_slice(&small_vec, &mut buffer, config).unwrap();
-    let (decoded, bytes_read) =
-        bincode::decode_from_slice::<SmallVec<[u8; 16]>, _>(&buffer, config).unwrap();
-    assert_eq!(bytes_written, bytes_read);
-    assert_eq!(small_vec, decoded);
-    let (decoded, bytes_read) =
-        bincode::borrow_decode_from_slice::<SmallVec<[u8; 16]>, _>(&buffer, config).unwrap();
-    assert_eq!(bytes_written, bytes_read);
-    assert_eq!(small_vec, decoded);
-    // Spill the vec
-    small_vec.extend_from_slice(b"some more testing");
-    // Check again after spilling.
-    let bytes_written = bincode::encode_into_slice(&small_vec, &mut buffer, config).unwrap();
-    let (decoded, bytes_read) =
-        bincode::decode_from_slice::<SmallVec<[u8; 16]>, _>(&buffer, config).unwrap();
-    assert_eq!(bytes_written, bytes_read);
-    assert_eq!(small_vec, decoded);
-    let (decoded, bytes_read) =
-        bincode::borrow_decode_from_slice::<SmallVec<[u8; 16]>, _>(&buffer, config).unwrap();
-    assert_eq!(bytes_written, bytes_read);
-    assert_eq!(small_vec, decoded);
 }

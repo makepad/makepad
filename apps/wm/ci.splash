@@ -5,8 +5,9 @@
 // what to send; `ci.accept(image, text)` hands it one grab and one acceptance
 // text, and it answers YES or NO with its reasons. Keep it basic: does the
 // WM come up, switch to macOS, and launch a terminal and a browser.
-// On a Mac a hidden WM never receives its hosted apps' frames (open: no client ever logs "first frame in").
-// ci os: linux
+
+// Any Linux or Mac box. Windows: the terminal step fails (open: the judge sees no terminal on the desk).
+// ci os: any
 
 use mod.std.*
 use mod.ci;
@@ -66,6 +67,10 @@ ci.step("launch the terminal", fn(){
     // a frame of it reached the desk (either may come first).
     wm.wait_log("terminal client * app first frame", 180.0)
     wm.wait_log("terminal client * first frame in", 180.0)
+    // A prompt alone is a blank window at this size: give the judge some lines.
+    ci.sleep(2.0)
+    wm.type_text("ls")
+    wm.key("ReturnKey")
     ci.sleep(2.0)
     let shot = wm.grab("terminal")
     ci.accept(shot, FRAME + "It shows a desktop with app windows on it. A terminal window is a rectangular window whose content area is mostly one dark or one light flat colour with lines of monospace text starting at the left edge, usually with a prompt symbol such as $ or % or > on the last line, and a title bar above it. 1. For each window you can see, say its rough position and what its content looks like. 2. Say whether at least one of them is a terminal as described. YES means at least one terminal window is open." + VERDICT)
@@ -81,6 +86,55 @@ ci.step("launch the browser", fn(){
     ci.sleep(4.0)
     let shot = wm.grab("browser")
     ci.accept(shot, FRAME + "It shows a desktop with app windows on it. A web browser window has an address bar, a wide rounded text field near its top containing a web address or a search field, possibly a row of tabs above it, and a web page below it with headings, paragraphs, images or a search box. 1. For each window you can see, say its rough position and whether it has an address bar near its top. 2. Say whether at least one of them is a web browser as described. YES means at least one browser window is open." + VERDICT)
+})
+
+// A hosted window keeps presenting and answering grabs through maximise, restore and resize,
+// also while a maximised window covers it (it is told it is covered and holds its own frames, but
+// a grab still gets one). The script asks the calculator the WM hosts, through its remote
+// endpoint, for the window's size and for a grab after each step; a grab that times out or a
+// resize that changes nothing fails the step.
+ci.step("a hosted window presents and grabs through maximise, restore and resize", fn(){
+    // a second window the calculator will cover
+    wm.key("Space", {cmd: true})
+    wm.type_text("clock")
+    wm.key("ReturnKey")
+    wm.wait_log("clock client * first frame in", 240.0)
+    wm.key("Space", {cmd: true})
+    wm.type_text("calculator")
+    wm.key("ReturnKey")
+    wm.wait_log("shell menu activate apps.calculator", 20.0)
+    wm.wait_log("calculator client * app first frame", 240.0)
+    wm.wait_log("calculator client * first frame in", 240.0)
+    ci.sleep(2.0)
+    let calc = wm.hosted("makepad-app-calculator")
+    let width = fn(){ calc.cmd("status").parse_json().w[0].sz[0] }
+    let grabs = fn(step){ calc.grab("calculator-" + step) }
+    let normal = width()
+    grabs("normal")
+    calc.cmd("window k=maximize wait=1")
+    ci.sleep(1.5)
+    let big = width()
+    ci.check(big > normal + 50.0, "maximise did not enlarge the window: " + normal + " -> " + big)
+    grabs("maximised")
+    // the clock lies under it now: covered, it still grabs
+    ci.sleep(1.0)
+    wm.hosted("makepad-app-clock").grab("clock-covered")
+    let shot = wm.grab("desktop-calculator-maximised")
+    ci.accept(shot, FRAME + "It shows a desktop with one calculator window enlarged to fill most of the screen: a number display above a grid of round or square buttons with digits and operators. YES means the keypad is visible and large. NO means the screen is a flat colour, or the calculator is small." + VERDICT)
+    calc.cmd("window k=maximize wait=1")
+    ci.sleep(1.5)
+    ci.check(width() < big - 50.0, "restore did not shrink the window")
+    grabs("restored")
+    calc.cmd("resize w=520 h=640 wait=1")
+    ci.sleep(1.5)
+    let resized = width()
+    ci.check(resized < normal - 20.0 || resized > normal + 20.0, "resize changed nothing: " + normal + " -> " + resized)
+    grabs("resized")
+    // maximised again after a resize
+    calc.cmd("window k=maximize wait=1")
+    ci.sleep(1.5)
+    grabs("maximised again")
+    wm.no_errors()
 })
 
 wm.no_errors()

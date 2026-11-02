@@ -987,7 +987,12 @@ fn a_touch_drag_scrolls_instead_of_selecting() {
         (TouchState::Move, end, 0.05),
         (TouchState::Stop, end, 0.1),
     ] {
-        editor.handle_event(&mut cx, &touch(state, abs, time), &mut Scope::empty(), &mut session);
+        let event = touch(state, abs, time);
+        editor.handle_event(&mut cx, &event, &mut Scope::empty(), &mut session);
+        // The platform's bookkeeping after a dispatch: a lifted finger lets go of its drag.
+        if let Event::TouchUpdate(e) = &event {
+            cx.fingers.process_touch_update_end(&e.touches);
+        }
         assert_eq!(session.selections()[0], before);
         assert!(matches!(editor.keep_cursor_in_view, KeepCursorInView::Off));
     }

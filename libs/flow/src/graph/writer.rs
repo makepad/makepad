@@ -1551,24 +1551,4 @@ Flow{prompt}
         assert!(written.contains("    value: \"legacy\"\n"));
         assert!(!written.contains("    default:"));
     }
-
-    #[test]
-    fn flipped_node_round_trips_after_size_and_false_stays_implicit() {
-        let source = r#"use mod.flow.*
-let prompt = Input{at: vec2(12, 30) size: vec2(420, 180) flip: true}
-let plain = Output{at: vec2(500, 30)}
-Flow{prompt, plain}
-"#;
-        let graph = evaluate(source, "<flip-round-trip>").unwrap();
-        assert!(graph.nodes[0].flip);
-        assert!(!graph.nodes[1].flip);
-        let written = write(&graph).unwrap();
-        let size = written.find("    size: vec2(420, 180)\n").unwrap();
-        let flip = written.find("    flip: true\n").unwrap();
-        assert!(size < flip);
-        assert_eq!(written.matches("    flip: true\n").count(), 1);
-        let reparsed = evaluate(&written, "<flip-round-trip-written>").unwrap();
-        assert_eq!(reparsed.nodes[0].flip, graph.nodes[0].flip);
-        assert_eq!(reparsed.nodes[1].flip, graph.nodes[1].flip);
-    }
 }

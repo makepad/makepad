@@ -14,6 +14,11 @@ use makepad_micro_serde::*;
 pub struct HealthJson {
     pub service: String,
     pub version: String,
+    /// Additive fleet visibility; absent on older hubs.
+    pub serving_fleet: Option<bool>,
+    pub lan_listening: Option<bool>,
+    /// `server` or `user`, independent of the user networking toggle.
+    pub role: Option<String>,
     /// GPU name when cheaply obtainable (nvidia-smi), else null.
     pub gpu: Option<String>,
     pub vram_free_mb: Option<u64>,
@@ -937,6 +942,15 @@ pub const JOB_STATE_ERROR: &str = "error";
 /// mid-run (the worker unwinds at the next step/tile boundary, usually
 /// within seconds). Partial artifacts are discarded.
 pub const JOB_STATE_CANCELLED: &str = "cancelled";
+
+/// `POST /job/<id>/cancel` body. `{}` stops the job and keeps its model
+/// warm (a reroute, a superseded request); `{"free": true}` is a person
+/// stopping it: once the job unwinds its model is unloaded and the device
+/// memory freed, unless a queued or running job wants the same model.
+#[derive(Clone, Debug, Default, SerJson, DeJson)]
+pub struct CancelRequestJson {
+    pub free: Option<bool>,
+}
 
 #[derive(Clone, Debug, SerJson, DeJson)]
 pub struct ArtifactRefJson {

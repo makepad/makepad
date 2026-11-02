@@ -798,48 +798,4 @@ mod tests {
         assert_eq!(trimmed.mode_overlay_only, full.mode_overlay_only);
         assert_eq!(trimmed.render_zoom, full.render_zoom);
     }
-
-    #[test]
-    #[ignore = "25 real Amsterdam tiles across three buckets; explicit bake audit"]
-    fn amsterdam_seed_tiles_do_not_panic_in_any_testmap_bucket() {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../seed-files/amsterdam-tiles");
-        let mut files = std::fs::read_dir(&dir)
-            .unwrap()
-            .filter_map(Result::ok)
-            .map(|entry| entry.path())
-            .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("decoded"))
-            .collect::<Vec<_>>();
-        files.sort();
-        assert_eq!(files.len(), 25);
-        let theme = probe_compiled_theme();
-        for path in files {
-            let stem = path.file_stem().unwrap().to_str().unwrap();
-            let mut parts = stem.split('-');
-            let z = parts.next().unwrap().trim_start_matches('z').parse().unwrap();
-            let x = parts.next().unwrap().trim_start_matches('x').parse().unwrap();
-            let y = parts.next().unwrap().trim_start_matches('y').parse().unwrap();
-            let key = TileKey { z, x, y };
-            let pbf = std::fs::read(&path).unwrap();
-            for bucket in DEFAULT_BUCKETS {
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    try_bake_tile_paint_faces(
-                        key,
-                        &pbf,
-                        Some(&pbf),
-                        None,
-                        false,
-                        &theme,
-                        bucket,
-                    )
-                }));
-                assert!(result.is_ok(), "{} bucket {bucket} panicked", path.display());
-                assert!(
-                    result.unwrap().is_ok(),
-                    "{} bucket {bucket} returned an error",
-                    path.display()
-                );
-            }
-        }
-    }
 }

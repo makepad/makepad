@@ -1,0 +1,2 @@
+# Files that must never reach main: a promotion stops while the tree has one. Land their removal first,
+# keeping what is still needed under local/. Exact paths, one per line.

@@ -512,26 +512,3 @@ fn zeros(ctx: &mut Context, name: &str, extents: &[usize]) -> Result<TensorId> {
         .map_err(DiffusionError::model)?;
     Ok(tensor)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::weights::DEFAULT_GRAPH_EXTRA_BYTES;
-    use std::path::Path;
-
-    #[test]
-    fn small_checkpoint_builds_the_complete_graph() {
-        let checkpoint = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../../local/models/weights/beat_this/small0.ckpt");
-        if !checkpoint.is_file() {
-            eprintln!("beats graph build: SKIP, {} is not seeded", checkpoint.display());
-            return;
-        }
-        let mut weights =
-            BeatsWeights::load_with_options(&checkpoint, DEFAULT_GRAPH_EXTRA_BYTES, false).unwrap();
-        let graph = build_graph(&mut weights).unwrap();
-        assert_eq!(weights.ctx.tensor(graph.mel).unwrap().ne, [128, 1500, 1, 1]);
-        assert_eq!(weights.ctx.tensor(graph.logits).unwrap().ne, [2, 1500, 1, 1]);
-        assert!(!graph.graph.nodes.is_empty());
-    }
-}

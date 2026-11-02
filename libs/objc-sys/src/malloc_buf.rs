@@ -58,37 +58,3 @@ impl<T> Deref for MallocBuffer<T> {
         unsafe { slice::from_raw_parts(ptr, self.len) }
     }
 }
-/*
-#[cfg(test)]
-mod tests {
-    use std::ptr;
-    use libc;
-
-    use super::MallocBuffer;
-
-    #[test]
-    fn test_null_buf() {
-        let buf = unsafe {
-            MallocBuffer::<u32>::new(ptr::null_mut(), 0).unwrap()
-        };
-        assert!(&*buf == []);
-        assert!(Some(&*buf) == Some(&[]));
-
-        let buf = unsafe {
-            MallocBuffer::<u32>::new(ptr::null_mut(), 7)
-        };
-        assert!(buf.is_none());
-    }
-
-    #[test]
-    fn test_buf() {
-        let buf = unsafe {
-            let ptr = libc::malloc(12) as *mut u32;
-            *ptr = 1;
-            *ptr.offset(1) = 2;
-            *ptr.offset(2) = 3;
-            MallocBuffer::new(ptr, 3).unwrap()
-        };
-        assert!(&*buf == [1, 2, 3]);
-    }
-}*/

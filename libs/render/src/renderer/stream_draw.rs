@@ -243,6 +243,7 @@ impl Renderer {
         // Keep the worker threads for the next source.
         if let Some(old) = self.stream.take() { if old.workers.is_some() { self.stream_workers = old.workers; } }
         self.stream_casters.clear();
+        self.gpu_baker.csm_casters_changed();
         self.prune_texture_cache();
         let Some(source) = source else { return };
         let chunk_bounds: Vec<_> = (0..source.chunk_count()).map(|i| source.chunk_bounds(i)).collect();
@@ -510,6 +511,7 @@ impl Renderer {
         st.prop_list.sort_by_key(|p| p.0);
         stats.casters = casters.len();
         self.stream_casters = casters;
+        self.gpu_baker.csm_casters_changed();
         st.selection = selection;
         st.raster = raster;
         stats.resident_near = st.near.iter().filter(|s| s.resident()).count();

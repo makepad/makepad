@@ -601,20 +601,6 @@ mod tests {
         assert_eq!(dict.get("b").map(Value::as_strings), Some(vec!["x".to_string(), "y".to_string()]));
     }
 
-    /// Against this login's session bus:
-    /// `cargo test -p makepad-app-amp live_bus -- --ignored`.
-    #[test]
-    #[ignore]
-    fn live_bus_answers() {
-        let mut bus = Bus::session().unwrap();
-        let reply = bus.call("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "ListNames", &[]).unwrap();
-        assert!(reply[0].as_strings().iter().any(|name| name == "org.freedesktop.DBus"));
-        let owned = bus.call("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "NameHasOwner", &[Value::Str("org.freedesktop.DBus".into())]).unwrap();
-        assert_eq!(owned[0].as_bool(), Some(true));
-        let error = bus.call("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "NoSuchMethod", &[]).unwrap_err();
-        assert!(error.starts_with("org.freedesktop.DBus.Error"), "{error}");
-    }
-
     #[test]
     fn addresses_unescape() {
         assert_eq!(unescape("/run/user/1000/bus"), "/run/user/1000/bus");

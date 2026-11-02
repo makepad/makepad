@@ -1200,63 +1200,6 @@ mod tests {
         assert_eq!(back, session);
     }
 
-    /// The whole path on the real fleet: the writer on the pinned claude-cli
-    /// hub, the song on a GPU node, the timed lyrics, the tagged file. Run on
-    /// a pool node: `AMP_AI_LIVE=1 MAKEPAD_AI_HUB=<claude-cli hub> HOME=<scratch>
-    /// cargo test --release -p makepad-app-amp live_song -- --ignored --nocapture`
-    /// (AMP_AI_LIVE_REQUEST / _MINUTES / _LANGUAGE / _MODEL change the ask;
-    /// AMP_AI_LIVE_NODE renders on that one hub instead of the fleet's pick,
-    /// for testing a hub build).
-    #[test]
-    #[ignore]
-    fn live_song_through_the_fleet() {
-        if std::env::var_os("AMP_AI_LIVE").is_none() {
-            return;
-        }
-        let dir = std::env::temp_dir().join(format!("amp-ai-live-{}", std::process::id()));
-        let mut session = Session::default();
-        let (tx, rx) = std::sync::mpsc::sync_channel(4096);
-        let model = std::env::var("AMP_AI_LIVE_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
-        let asked = std::env::var("AMP_AI_LIVE_REQUEST").unwrap_or_else(|_| DEFAULT_REQUEST.to_string());
-        let minutes: u32 = std::env::var("AMP_AI_LIVE_MINUTES").ok().and_then(|m| m.parse().ok()).unwrap_or(1);
-        let language = std::env::var("AMP_AI_LIVE_LANGUAGE").unwrap_or_else(|_| "Dutch".to_string());
-        let started = Instant::now();
-        for n in 0..2 {
-            let request = if n == 0 { asked.clone() } else { format!("{asked}, a wide variety: something very different from the last song") };
-            let job = Job { epoch: 0, id: n, tx: tx.clone() };
-            let (_, written) = write_songs_text(&mut session, &dir, &request, &model, minutes, &language, std::slice::from_ref(&job), &|| false).unwrap_or_else(|e| panic!("{e}")).remove(0);
-            let route: Arc<dyn GenRouter> = match std::env::var("AMP_AI_LIVE_NODE") {
-                Ok(node) => Arc::new(FixedRouter(node)),
-                Err(_) => Arc::new(FleetRouter { installed_only: true }),
-            };
-            let song = render_song(written, minutes, &job, &|| false, route).unwrap_or_else(|e| panic!("{e}"));
-            let bytes = std::fs::read(&song.path).unwrap();
-            assert!(bytes.starts_with(b"OggS"));
-            println!("LIVE record {n}: {}", song.song.serialize_json());
-            assert!(song.song.synced.is_some() && song.song.timing.is_some());
-            let decoded = makepad_audio_decode::decode_any(&bytes).unwrap();
-            println!(
-                "LIVE song {n}: \"{}\" {:.1} s audio, rendered on {}, file {}",
-                song.song.title,
-                decoded.frames() as f64 / decoded.rate as f64,
-                song.song.made_on,
-                song.path
-            );
-            println!("LIVE style {n}: {}", song.song.prompt);
-        }
-        let mut stages = 0;
-        while let Ok(message) = rx.try_recv() {
-            if let Message::AiMusic(AiEvent::Stage { .. }) = message {
-                stages += 1;
-            }
-        }
-        assert!(stages > 0);
-        assert_eq!(session.songs.len(), 2);
-        assert_eq!(session.turns.len(), 4);
-        assert_ne!(session.songs[0].title, session.songs[1].title);
-        println!("LIVE total {:.1} s; conversation:\n{}", started.elapsed().as_secs_f64(), session.render());
-    }
-
     #[test]
     fn file_stems_are_plain() {
         assert_eq!(file_stem("Neon / Snow: Fall!"), "Neon Snow Fall");

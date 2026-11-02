@@ -132,6 +132,13 @@ fn show_help() {
         "    apple <ios|tvos> [options] run-device <cargo args>   Builds and runs on a real device"
     );
     println!(
+        "    apple ios [options] build-host[-sim] <package> [cargo args]   The makepad run host app: the package's source,\n\
+         compiled on the device and run in the interpreter (no-codegen mode)"
+    );
+    println!(
+        "    apple ios [options] run-host-sim <package> [--env=K=V] [cargo args]  Builds the host app, runs it on the booted simulator"
+    );
+    println!(
         " * Note: in order for Makepad to be able to install an ios application on a real device, a provisioning"
     );
     println!(
@@ -235,9 +242,12 @@ fn show_help() {
         "    desktop sign [sign opts] <cargo args>        Sign a built macOS desktop artifact"
     );
     println!(
-        "    desktop bundle [bundle opts] -p <crate>      Build a self-contained, signed macOS .app (see [package.metadata.makepad.desktop])"
+        "    desktop bundle [bundle opts] -p <crate>      Build a self-contained desktop app (.app on macOS; folder on Linux/Windows)"
     );
     println!("    [bundle opts]:");
+    println!("       --name='<DISPLAY NAME>'                    Override the bundle/folder name and launcher display name");
+    println!("       --identifier='<ID>'                        Override the bundle identifier");
+    println!("       --icon='<PNG PATH>'                        Override the manifest icon (relative to the working directory)");
     println!(
         "       --install[=DIR]                            Also install it into DIR (default ~/.makepad/apps), outside target/"
     );

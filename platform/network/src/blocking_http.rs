@@ -2570,16 +2570,6 @@ fn winhttp_read_body(
 mod once_close {
     use super::*;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-    use std::sync::atomic::AtomicPtr;
-
-    #[test]
-    fn second_swap_is_null() {
-        let p = AtomicPtr::new(0x1 as *mut u8);
-        let first = p.swap(std::ptr::null_mut(), Ordering::AcqRel);
-        let second = p.swap(std::ptr::null_mut(), Ordering::AcqRel);
-        assert!(!first.is_null());
-        assert!(second.is_null());
-    }
 
     #[test]
     fn cleartext_requires_resolved_loopback_addrs() {

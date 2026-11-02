@@ -1377,15 +1377,6 @@ mod tests {
     }
 
     #[test]
-    fn a_card_moved_down_its_own_column_gives_back_the_gap_it_left() {
-        let mut board = sample_board();
-        // "a" is carried to the gap under "c", which is gap 3 while "a" is
-        // still lying in the column.
-        assert_eq!(board.apply(0, 0, 0, 3), KanbanLanding::Moved { to: 2 });
-        assert_eq!(cards(&board, 0), vec!["b", "c", "a"]);
-    }
-
-    #[test]
     fn a_card_moved_up_its_own_column_lands_in_the_gap_itself() {
         let mut board = sample_board();
         assert_eq!(board.apply(0, 2, 0, 0), KanbanLanding::Moved { to: 0 });

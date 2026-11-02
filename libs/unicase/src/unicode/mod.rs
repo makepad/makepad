@@ -200,17 +200,4 @@ mod tests {
         assert_eq!(Unicode("Maße").to_folded_case(), "masse");
     }
 
-    #[cfg(feature = "nightly")]
-    #[bench]
-    fn bench_ascii_folding(b: &mut ::test::Bencher) {
-        b.bytes = b"foo bar".len() as u64;
-        b.iter(|| eq!("foo bar", "FoO BAR"));
-    }
-
-    #[cfg(feature = "nightly")]
-    #[bench]
-    fn bench_simple_case_folding(b: &mut ::test::Bencher) {
-        b.bytes = "στιγμας".len() as u64;
-        b.iter(|| eq!("στιγμας", "στιγμασ"));
-    }
 }

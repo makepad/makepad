@@ -11,6 +11,7 @@ use {
     std::cell::RefCell,
     std::rc::Rc,
 };
+use crate::makepad_draw::event::{DigitId, TouchState};
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -527,6 +528,17 @@ pub struct DropDown {
     #[live]
     icon_only: bool,
 
+    /// An override tint, interpreted by the face shader.
+    #[live]
+    marked: bool,
+    #[live]
+    mixed: bool,
+
+    #[rust]
+    pointer_focus: bool,
+    #[rust]
+    opening_digit: Option<DigitId>,
+
     /// Popup rows drawn with the disabled palette while remaining selectable.
     #[rust]
     dimmed_items: Vec<bool>,
@@ -791,6 +803,7 @@ impl DropDown {
     }
 
     pub fn selected_item_label(&self) -> String {
+        if self.mixed { return "—".into(); }
         self.labels
             .get(self.selected_item)
             .cloned()
@@ -810,6 +823,7 @@ impl DropDown {
 
     pub fn set_closed(&mut self, cx: &mut Cx) {
         self.is_active = false;
+        self.opening_digit = None;
         self.draw_bg.redraw(cx);
         cx.sweep_unlock(self.draw_bg.area());
     }
@@ -843,6 +857,10 @@ impl DropDown {
     }
 
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
+        self.draw_bg.set_dyn_instance(cx, id!(marked), &[self.marked as u8 as f32]);
+        self.draw_text.set_dyn_instance(cx, id!(mixed), &[self.mixed as u8 as f32]);
+        let keyboard_focus = cx.has_key_focus(self.draw_bg.area()) && !self.pointer_focus;
+        self.draw_bg.set_dyn_instance(cx, id!(keyboard_focus), &[keyboard_focus as u8 as f32]);
         self.draw_bg.begin(cx, walk, self.layout);
 
         let has_icon = self.seat_icon(self.selected_item);
@@ -865,7 +883,9 @@ impl DropDown {
         // given no icon has nothing to stand in for them, so it keeps them
         // rather than leaving the operator a blank face.
         if !(self.icon_only && has_icon) {
-            if let Some(val) = self.labels.get(self.selected_item) {
+            if self.mixed {
+                self.draw_text.draw_walk(cx, Walk::fit(), Align::default(), "—");
+            } else if let Some(val) = self.labels.get(self.selected_item) {
                 // A label set to ellipsize takes the room the face leaves it
                 // (its padding keeps the chevron clear) and ends in "…".
                 let walk = if self.draw_text.text_overflow == crate::makepad_draw::shader::draw_text::TextOverflow::Ellipsis {
@@ -1137,6 +1157,18 @@ impl Widget for DropDown {
             return;
         }
         let uid = self.widget_uid();
+        let opening_release = self.opening_digit.and_then(|digit| match event {
+            Event::MouseUp(e) if digit == live_id!(mouse).into() && e.button == MouseButton::PRIMARY => {
+                Some((e.abs, false))
+            }
+            Event::TouchUpdate(e) => e.touches.iter().find_map(|touch| {
+                (digit == live_id_num!(touch, touch.uid).into()
+                    && matches!(touch.state, TouchState::Stop | TouchState::Cancel))
+                    .then_some((touch.abs, touch.state == TouchState::Cancel))
+            }),
+            Event::FingerCancel(e) if digit == e.digit_id => Some((e.abs, true)),
+            _ => None,
+        });
 
         // ONE menu instance serves every dropdown on the same template, and
         // it holds the items of whichever dropdown last DREW it
@@ -1163,6 +1195,24 @@ impl Widget for DropDown {
                 .popup_anchor_transform
                 .and_then(|transform| transform_popup_event(event, transform));
             let popup_event = popup_event.as_ref().unwrap_or(event);
+            // The opening release belongs to its final position, even when
+            // no move event reached the popup. Releasing on the face keeps it open.
+            let opening_choice = opening_release.and_then(|(pos, cancelled)| {
+                if cancelled
+                    || self.opening_digit.is_some_and(|digit| cx.fingers.press_taken_away(digit))
+                    || self.draw_bg.area().rect(cx).contains(pos)
+                {
+                    return None;
+                }
+                let pos = self.popup_anchor_transform.map(|t| t.point(pos)).unwrap_or(pos);
+                menu.item_refs().find_map(|(id, item)| {
+                    let index = id.0 as usize;
+                    (index < self.labels.len()
+                        && !self.item_is_disabled(index)
+                        && item.area().clipped_rect(cx).contains(pos))
+                        .then_some(index)
+                })
+            });
             menu.handle_event_with(
                 cx,
                 popup_event,
@@ -1170,6 +1220,9 @@ impl Widget for DropDown {
                 &mut |cx, action| match action {
                     PopupMenuAction::WasSweeped(_node_id) => {}
                     PopupMenuAction::WasSelected(node_id) => {
+                        if opening_release.is_some() {
+                            return;
+                        }
                         let index = node_id.0 .0 as usize;
                         if index >= self.labels.len() || self.item_is_disabled(index) {
                             return;
@@ -1187,6 +1240,12 @@ impl Widget for DropDown {
                     _ => (),
                 },
             );
+            if let Some(index) = opening_choice {
+                self.selected_item = index;
+                cx.widget_action_with_data(&self.action_data, uid, DropDownAction::Select(index));
+                self.emit_change(cx);
+                close = true;
+            }
             if close {
                 self.set_closed(cx);
             }
@@ -1220,8 +1279,13 @@ impl Widget for DropDown {
             }
         }
 
+        if opening_release.is_some() {
+            self.opening_digit = None;
+        }
+
         match event.hits_with_sweep_area(cx, self.draw_bg.area(), self.draw_bg.area()) {
             Hit::KeyFocusLost(_) => {
+                self.pointer_focus = false;
                 self.animator_play(cx, ids!(focus.off));
                 self.set_closed(cx);
                 self.animator_play(cx, ids!(hover.off));
@@ -1230,45 +1294,54 @@ impl Widget for DropDown {
             Hit::KeyFocus(_) => {
                 self.animator_play(cx, ids!(focus.on));
             }
-            Hit::KeyDown(ke) if !self.disabled(cx) => match ke.key_code {
-                KeyCode::ArrowUp => {
-                    if let Some(index) = (0..self.selected_item.min(self.labels.len()))
-                        .rev()
-                        .find(|&index| !self.item_is_disabled(index))
-                    {
-                        self.selected_item = index;
-                        cx.widget_action_with_data(
-                            &self.action_data,
-                            uid,
-                            DropDownAction::Select(self.selected_item),
-                        );
-                        self.emit_change(cx);
-                        self.set_closed(cx);
-                        self.draw_bg.redraw(cx);
+            Hit::KeyDown(ke) if !self.disabled(cx) => {
+                self.pointer_focus = false;
+                self.draw_bg.redraw(cx);
+                match ke.key_code {
+                    KeyCode::ArrowUp => {
+                        if let Some(index) = (0..self.selected_item.min(self.labels.len()))
+                            .rev()
+                            .find(|&index| !self.item_is_disabled(index))
+                        {
+                            self.selected_item = index;
+                            cx.widget_action_with_data(
+                                &self.action_data,
+                                uid,
+                                DropDownAction::Select(self.selected_item),
+                            );
+                            self.emit_change(cx);
+                            self.set_closed(cx);
+                            self.draw_bg.redraw(cx);
+                        }
                     }
-                }
-                KeyCode::ArrowDown => {
-                    if let Some(index) = (self.selected_item.saturating_add(1)..self.labels.len())
-                        .find(|&index| !self.item_is_disabled(index))
-                    {
-                        self.selected_item = index;
-                        cx.widget_action_with_data(
-                            &self.action_data,
-                            uid,
-                            DropDownAction::Select(self.selected_item),
-                        );
-                        self.emit_change(cx);
-                        self.set_closed(cx);
-                        self.draw_bg.redraw(cx);
+                    KeyCode::ArrowDown => {
+                        if let Some(index) = (self.selected_item.saturating_add(1)..self.labels.len())
+                            .find(|&index| !self.item_is_disabled(index))
+                        {
+                            self.selected_item = index;
+                            cx.widget_action_with_data(
+                                &self.action_data,
+                                uid,
+                                DropDownAction::Select(self.selected_item),
+                            );
+                            self.emit_change(cx);
+                            self.set_closed(cx);
+                            self.draw_bg.redraw(cx);
+                        }
                     }
+                    _ => (),
                 }
-                _ => (),
-            },
+            }
             Hit::FingerDown(fe) if fe.is_primary_hit() => {
                 if self.animator_in_state(cx, ids!(disabled.off)) {
+                    self.pointer_focus = true;
+                    self.draw_bg.redraw(cx);
                     cx.set_key_focus(self.draw_bg.area());
                     self.animator_play(cx, ids!(hover.down));
-                    self.set_active(cx);
+                    if !self.is_active {
+                        self.opening_digit = Some(fe.digit_id);
+                        self.set_active(cx);
+                    }
                 }
             }
             Hit::FingerHoverIn(_) => {

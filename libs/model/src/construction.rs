@@ -149,7 +149,7 @@ fn boolean_mesh(a:&Mesh,b:&Mesh,mode:BooleanMode,ctx:&mut Context<'_>)->Result<M
     if pairs.saturating_mul(2048).saturating_add(a.memory_bytes()+b.memory_bytes())>ctx.limits.max_bytes{return Err(Error::Budget("boolean candidate pairs"));}
     ctx.checkpoint(pairs.saturating_mul(64)as u64)?;sources.extend(other);
     let convert=|m:&Mesh,ctx:&mut Context<'_>|->Result<makepad_csg_mesh::TriMesh>{let tri=m.triangulate(ctx)?;let indices=m.vertices().iter().enumerate().map(|(i,v)|(v.id,i as u32)).collect::<BTreeMap<_,_>>();
-        Ok(makepad_csg_mesh::TriMesh{vertices:m.vertices().iter().map(|v|makepad_csg_math::dvec3(v.position[0],v.position[1],v.position[2])).collect(),triangles:tri.triangles.iter().map(|t|t.indices.map(|i|indices[&tri.vertices[i as usize].source_vertex])).collect()})};
+        Ok(makepad_csg_mesh::TriMesh{vertices:m.vertices().iter().map(|v|makepad_csg_math::dvec3(v.position[0],v.position[1],v.position[2])).collect(),triangles:tri.triangles.iter().map(|t|t.indices.map(|i|indices[&tri.vertices[i as usize].source_vertex])).collect(),corner_normals:Vec::new()})};
     let ca=convert(a,ctx)?;let cb=convert(b,ctx)?;
     let output=makepad_csg_math::thread_pool::with_serial(||makepad_csg_boolean::mesh_boolean(&ca,&cb,match mode{BooleanMode::Union=>makepad_csg_boolean::BoolOp::Union,BooleanMode::Difference=>makepad_csg_boolean::BoolOp::Difference,BooleanMode::Intersection=>makepad_csg_boolean::BoolOp::Intersection}));
     ctx.checkpoint(0)?;if makepad_csg_math::thread_pool::cancelled(){return Err(crate::mesh::MeshError::Cancelled.into());}

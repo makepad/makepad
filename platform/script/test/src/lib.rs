@@ -137,26 +137,3 @@ pub fn write_shader_inventory(vm: &mut ScriptVm, label: &str, directory: &Path) 
     assert!(!objects.is_empty(), "startup registration found no shaders");
     Ok(())
 }
-
-/// Opt-in headless test of the application's actual registration entry point.
-/// Run with MAKEPAD_SHADER_INVENTORY_DIR set and --ignored --exact shader_output_inventory.
-#[macro_export]
-macro_rules! shader_inventory_test {
-    ($label:literal, $register:expr) => {
-        #[test]
-        #[ignore = "writes the shader baseline; set MAKEPAD_SHADER_INVENTORY_DIR"]
-        fn shader_output_inventory() {
-            let directory = std::env::var_os("MAKEPAD_SHADER_INVENTORY_DIR")
-                .expect("set MAKEPAD_SHADER_INVENTORY_DIR to the output directory");
-            $crate::prepare_shader_inventory();
-            let mut cx = Cx::new(Box::new(|_, _| {}));
-            cx.with_vm(|vm| {
-                vm.capture_errors();
-                ($register)(vm);
-                let errors = vm.take_errors();
-                assert!(errors.is_empty(), "startup registration failed:\n{}", errors.join("\n"));
-                $crate::write_shader_inventory(vm, $label, std::path::Path::new(&directory)).unwrap();
-            });
-        }
-    };
-}

@@ -645,26 +645,6 @@ mod tests {
         assert_eq!(u32::from_be_bytes(stbl[5].1[8..12].try_into().unwrap()) as usize, top[0].1.len() + 8 + 8);
     }
 
-    /// With `DESKLINK_MP4_IN=<dump.h264> DESKLINK_MP4_OUT=<out.mp4> DESKLINK_MP4_SIZE=<w>x<h>`: the
-    /// dump as an MP4 (for a check with a player); without them nothing happens.
-    #[test]
-    fn mp4_of_a_dump() {
-        let (Ok(input), Ok(out), Ok(size)) = (std::env::var("DESKLINK_MP4_IN"), std::env::var("DESKLINK_MP4_OUT"), std::env::var("DESKLINK_MP4_SIZE")) else { return };
-        let (w, h) = size.split_once('x').unwrap();
-        let data = std::fs::read(input).unwrap();
-        let mut units = Vec::new();
-        let mut unit = Vec::new();
-        for nal in annex_b::split_annex_b(&data) {
-            unit.extend_from_slice(&[0, 0, 0, 1]);
-            unit.extend_from_slice(nal);
-            if matches!(annex_b::nal_unit_type(nal), 1 | 5) {
-                units.push(std::mem::take(&mut unit));
-            }
-        }
-        let timed: Vec<(&[u8], u64)> = units.iter().enumerate().map(|(i, u)| (u.as_slice(), i as u64 * 8_333_333)).collect();
-        std::fs::write(out, mp4(&timed, [w.parse().unwrap(), h.parse().unwrap()], false).unwrap()).unwrap();
-    }
-
     #[test]
     fn stamp_is_a_utc_date() {
         let s = utc_stamp();

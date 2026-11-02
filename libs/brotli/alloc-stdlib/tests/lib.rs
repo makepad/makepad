@@ -26,9 +26,9 @@ declare_stack_allocator_struct!(GlobalAllocatedFreelist, 16, global);
 define_allocator_memory_pool!(16, u8, [0; 1024 * 1024 * 100], global, global_buffer);
 define_allocator_memory_pool!(16, u8, [0; 1024 * 1024 * 100], global, global_buffer2);
 extern "C" {
-  fn calloc(n_elem : usize, el_size : usize) -> *mut u8;
-  fn malloc(len : usize) -> *mut u8;
-  fn free(item : *mut u8);
+  fn calloc(n_elem : usize, el_size : usize) -> *mut core::ffi::c_void;
+  fn malloc(len : usize) -> *mut core::ffi::c_void;
+  fn free(item : *mut core::ffi::c_void);
 }
 #[test]
 fn uninitialized_stack_pool_test() {

@@ -5,7 +5,7 @@
 # switch node ("Stream to headset"):
 #   on      the app listens on a TCP port and answers the pairing probe (xr-host-listen, xr-pair-answer threads)
 #   off     the port is closed (a connect is refused), every xr-host-*/xr-pair-* thread is gone, the switch is
-#           kept (stream=off); on again a new port listens with the same pairing (the server's instance id)
+#           kept (stream_lan=off); on again a new port listens with the same pairing (the server's instance id)
 #   live    with the server's headset on a loop (MAKEPAD_XR_REMOTE_SELFTEST=1: poses, pictures, encodes, reports)
 #           the session's picture and encode threads run; off, they end with the listener
 #   away    a headset that streams, goes idle (no poses) and leaves: the desktop UI answers a UI action
@@ -88,8 +88,8 @@ have_port() { [ -n "$(listen_port)" ]; }
 new_port() { p=$(listen_port); [ -n "$p" ] && [ "$p" != "$port" ]; }
 grab() { "$R" app "$app_pid" grab out="$out/$1.png" > /dev/null 2>&1 && note "grab $out/$1.png"; }
 
-# ---- on by default
-launch on || { echo "XR-OFF-FAIL:$fail"; exit 1; }
+# ---- explicit launch opt-in
+launch on MAKEPAD_XR_STREAM=on || { echo "XR-OFF-FAIL:$fail"; exit 1; }
 wait_for 30 has_thread xr-host-listen || bad on-listen "no listener thread: $(xr_threads)"
 wait_for 20 have_port; port=$(listen_port)
 note "on: port ${port:-?} · tcp [$(tcp_ports)] · udp [$(udp_ports)] · probe port fds [$(probe_fds)] · threads [$(xr_threads)]"
@@ -110,7 +110,7 @@ ui act q="$SWITCH" toggle wait=1 > "$out/act-off.txt" 2>&1
 wait_for 5 port_closed "$port" || bad off-port "port $port still accepts"
 wait_for 5 no_xr_threads || bad off-threads "threads left: $(xr_threads)"
 [ -z "$(probe_fds)" ] || bad off-probe-port "udp $PROBE_PORT still held (fds $(probe_fds))"
-grep -q '^stream=off' "$out"/data-on-$$/makepad/*/xr-stream 2>/dev/null || bad off-kept "the switch was not kept"
+grep -q '^stream_lan=off$' "$out"/data-on-$$/makepad/*/xr-stream 2>/dev/null || bad off-kept "the switch was not kept"
 ui find q="$SWITCH" > "$out/switch-off.txt" 2>&1
 t0=$(cpu_ticks); sleep 3; t1=$(cpu_ticks)
 note "off: tcp [$(tcp_ports)] · udp [$(udp_ports)] · threads [$(xr_threads)] · CPU over 3 s $(( t1 - t0 )) ticks (the app's own UI)"
@@ -128,7 +128,7 @@ note "on again: port $port2 · $instance2"
 stop_app
 
 # ---- a headset streams (the server's headset on a loop: poses, pictures, encodes), then off
-launch live MAKEPAD_XR_REMOTE_SELFTEST=1 || { echo "XR-OFF-FAIL:$fail"; exit 1; }
+launch live MAKEPAD_XR_STREAM=on MAKEPAD_XR_REMOTE_SELFTEST=1 || { echo "XR-OFF-FAIL:$fail"; exit 1; }
 wait_for 30 has_thread xr-host-encode || bad live "no encoder: $(xr_threads)"
 has_thread xr-host-pictur || bad live-pictures "no picture thread: $(xr_threads)"
 port=$(listen_port)
@@ -161,7 +161,7 @@ answers() { # answers <tag>: a UI action answered (after its frame) within 400 m
   [ $(( t1 - t0 )) -lt 400 ] || bad "$1-ui" "the UI took $(( t1 - t0 )) ms"
 }
 state_is() { ui find q="$SWITCH" 2>/dev/null | head -1 | grep -q "$1"; }
-launch away MAKEPAD_XR_REMOTE_SELFTEST=1 MAKEPAD_XR_REMOTE_SELFTEST_POSES_S=14 MAKEPAD_XR_REMOTE_SELFTEST_LINK_S=22 || { echo "XR-OFF-FAIL:$fail"; exit 1; }
+launch away MAKEPAD_XR_STREAM=on MAKEPAD_XR_REMOTE_SELFTEST=1 MAKEPAD_XR_REMOTE_SELFTEST_POSES_S=14 MAKEPAD_XR_REMOTE_SELFTEST_LINK_S=22 || { echo "XR-OFF-FAIL:$fail"; exit 1; }
 wait_for 8 state_is Streaming || bad away-live "not streaming: $(ui find q="$SWITCH" | head -1)"
 # (the panel closed: nothing of the desktop animates)
 # the desktop renders nothing for the headset's frames: its windows paint a few times a second at

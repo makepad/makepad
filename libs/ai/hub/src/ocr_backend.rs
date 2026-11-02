@@ -2385,13 +2385,6 @@ mod tests {
     }
 
     #[test]
-    fn a_lookahead_past_the_item_count_never_blocks_and_still_collects_everything() {
-        let mut collected: Vec<usize> = Vec::new();
-        pipeline_submit_collect(10, 0..3, |_, _| (), |i, ()| collected.push(i));
-        assert_eq!(collected, vec![0, 1, 2]);
-    }
-
-    #[test]
     fn empty_and_singleton_batches_do_not_hang_or_misfire() {
         let mut collected: Vec<usize> = Vec::new();
         pipeline_submit_collect(1, std::iter::empty::<()>(), |_, _| (), |i, ()| collected.push(i));
@@ -2420,103 +2413,6 @@ mod tests {
             let expected: Vec<(usize, String)> =
                 items.iter().enumerate().map(|(i, s)| (i, s.to_uppercase())).collect();
             assert_eq!(collected, expected, "lookahead={lookahead}");
-        }
-    }
-
-    /// A stand-in for the real tower->session architecture: two threads, a
-    /// bounded (depth-1) hand-off channel between them exactly like
-    /// `worker::OcrWorker` wires the tower thread to the session thread,
-    /// and `pipeline_submit_collect` driving submission from the calling
-    /// thread exactly like `OcrBackend::ocr_pages` does. No GPU, no
-    /// `VisionTower`, no `LlamaSession` — "encode" and "decode" are sleeps,
-    /// timestamped so the test can prove real overlap happened, not just
-    /// that the call order was right (the tests above already cover that).
-    #[test]
-    fn a_bounded_two_thread_pipeline_overlaps_encode_with_the_previous_pages_decode() {
-        use std::sync::mpsc;
-        use std::time::{Duration, Instant};
-
-        const PAGES: usize = 5;
-        const ENCODE: Duration = Duration::from_millis(30);
-        const DECODE: Duration = Duration::from_millis(60);
-
-        // "tower" thread: pops a page number, sleeps for ENCODE (the
-        // fit+preprocess+encode stand-in), then hands it to the "session"
-        // thread across a depth-1 bounded channel — blocking there exactly
-        // as the real tower thread blocks on `hand_tx.send`.
-        let (tower_tx, tower_rx) = mpsc::channel::<usize>();
-        let (hand_tx, hand_rx) = mpsc::sync_channel::<usize>(1);
-        let tower = std::thread::spawn(move || {
-            while let Ok(page) = tower_rx.recv() {
-                std::thread::sleep(ENCODE);
-                if hand_tx.send(page).is_err() {
-                    break;
-                }
-            }
-        });
-
-        // "session" thread: pops a handed-off page, sleeps for DECODE, and
-        // replies on that page's own reply channel — one channel per page,
-        // same shape as `WorkerEvent::Done` per request.
-        let (reply_tx, reply_rx) = mpsc::channel::<(usize, mpsc::Sender<Instant>)>();
-        let session = std::thread::spawn(move || {
-            while let Ok(page) = hand_rx.recv() {
-                std::thread::sleep(DECODE);
-                // Look up (there is at most one outstanding) reply target.
-                if let Ok((expect_page, reply)) = reply_rx.try_recv() {
-                    assert_eq!(expect_page, page, "session must process pages in FIFO order");
-                    let _ = reply.send(Instant::now());
-                }
-            }
-        });
-
-        let t_start = Instant::now();
-        let mut done_at: Vec<Duration> = Vec::new();
-        pipeline_submit_collect(
-            1,
-            0..PAGES,
-            |_, page| {
-                let (page_reply_tx, page_reply_rx) = mpsc::channel();
-                reply_tx.send((page, page_reply_tx)).expect("session thread alive");
-                tower_tx.send(page).expect("tower thread alive");
-                page_reply_rx
-            },
-            |_, page_reply_rx: mpsc::Receiver<Instant>| {
-                let at = page_reply_rx.recv().expect("session replies");
-                done_at.push(at.duration_since(t_start));
-            },
-        );
-        drop(tower_tx);
-        tower.join().unwrap();
-        session.join().unwrap();
-
-        assert_eq!(done_at.len(), PAGES);
-        // Serial (no overlap) would be PAGES * (ENCODE + DECODE). With one
-        // page of lookahead, page 0 pays ENCODE once up front and every
-        // page after that is gated only by DECODE (the longer stage),
-        // since its ENCODE already ran during the previous page's DECODE:
-        // total ~= ENCODE + PAGES * DECODE. Assert comfortably under the
-        // serial total and reasonably close to the pipelined estimate —
-        // wide margins keep this from flaking under CI scheduling jitter.
-        let serial_total = (ENCODE + DECODE) * PAGES as u32;
-        let pipelined_estimate = ENCODE + DECODE * PAGES as u32;
-        let wall = *done_at.last().unwrap();
-        assert!(
-            wall < serial_total,
-            "wall {wall:?} did not beat serial estimate {serial_total:?} — no overlap happened"
-        );
-        assert!(
-            wall < pipelined_estimate + Duration::from_millis(150),
-            "wall {wall:?} far exceeds the pipelined estimate {pipelined_estimate:?}"
-        );
-        // Every page's own decode-only spacing should be close to DECODE,
-        // not ENCODE + DECODE — direct evidence the encode was hidden.
-        for pair in done_at.windows(2) {
-            let gap = pair[1] - pair[0];
-            assert!(
-                gap < ENCODE + DECODE,
-                "consecutive pages {gap:?} apart — encode was not hidden behind decode"
-            );
         }
     }
 

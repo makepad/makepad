@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Clipboard through the WM (hidden, a node): a hosted makepad app and Wayland clients.
+"""Clipboard through the WM (hidden, a pool node): a hosted makepad app and Wayland clients.
 
     clipcheck.py <checkout> [--out DIR] [--hold]
 

@@ -11,7 +11,6 @@
 //! An implementation of union-find. See the `unify` module for more
 //! details.
 
-#![cfg_attr(feature = "bench", feature(test))]
 
 #[macro_use]
 extern crate log;

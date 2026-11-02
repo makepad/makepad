@@ -50,9 +50,6 @@ makepad-video = { package = "makepad-platform-video", path = "../../platform/vid
 makepad-font-core = { path = "../../libs/font_core" }
 ab_glyph_rasterizer = { path = "../../libs/ab_glyph_rasterizer" }
 
-[dev-dependencies]
-makepad-script-test = { path = "../../platform/script/test" }
-
 [package.metadata.makepad.desktop]
 name = "Makepad Amp"
 identifier = "nl.makepad.amp"

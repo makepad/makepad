@@ -115,7 +115,7 @@ pub mod rt {
 
     impl<'a> Argument<'a> {
         /// `f` must be the formatting fn of `T`; the value is passed back to it as `&T`.
-        pub fn new<T>(x: &'a T, f: fn(&T, &mut Formatter<'_>) -> Result) -> Argument<'a> {
+        pub const fn new<T>(x: &'a T, f: fn(&T, &mut Formatter<'_>) -> Result) -> Argument<'a> {
             Argument {
                 value: x as *const T as *const u8,
                 formatter: unsafe {

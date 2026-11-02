@@ -106,25 +106,3 @@ fn bc5_normals_rebuild_z_within_a_degree() {
         assert!(mean < get(name).0 && p99 < get(name).1, "BC5 behind {name}");
     }
 }
-
-/// Load-time work per 1024x1024 level (65536 blocks): the stored BC5 goes
-/// to the GPU untouched where BC is sampled; the decode is the fallback of
-/// a GPU without BC. The UASTC remaps are what colour textures pay.
-#[test]
-fn bc5_load_work_per_megatexel() {
-    let (_, rgba, w, h) = normal_map();
-    let u = uastc::encode_image(&rgba, w, h, Quality::Fast, 0).unwrap();
-    let t = std::time::Instant::now();
-    let _ = rgtc::encode_bc5_image(&rgba, w, h, 1);
-    let encode = t.elapsed().as_secs_f64() * 1000.0 * 16.0;
-    let t = std::time::Instant::now();
-    let bc5 = rgtc::encode_bc5_image(&rgba, w, h, 8);
-    let encode8 = t.elapsed().as_secs_f64() * 1000.0 * 16.0;
-    let (u, bc5): (Vec<u8>, Vec<u8>) = (u.iter().copied().cycle().take(u.len() * 16).collect(), bc5.iter().copied().cycle().take(bc5.len() * 16).collect());
-    let best = |f: &dyn Fn() -> usize| (0..3).map(|_| { let t = std::time::Instant::now(); assert!(f() > 0); t.elapsed().as_secs_f64() * 1000.0 }).fold(f64::MAX, f64::min);
-    let astc = best(&|| { let mut out = Vec::new(); transcode::uastc_to_astc_into(&u, &mut out); out.len() });
-    let bc7 = best(&|| { let mut out = Vec::new(); transcode::uastc_to_bc7_into(&u, &mut out); out.len() });
-    let copy = best(&|| bc5.to_vec().len());
-    let decode = best(&|| rgtc::decode_image(&bc5, 1024, 1024, 2).len());
-    println!("per 1024x1024 level: UASTC->ASTC {astc:.1} ms, UASTC->BC7 {bc7:.1} ms, BC5 upload copy {copy:.2} ms, BC5 decode fallback {decode:.1} ms; BC5 build encode {encode:.0} ms on one core, {encode8:.0} ms on 8");
-}

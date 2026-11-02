@@ -4,7 +4,7 @@ use crate::{f32::math, wasm32::*, BVec3, BVec3A, FloatExt, Quat, Vec2, Vec3, Vec
 
 use core::fmt;
 use core::iter::{Product, Sum};
-use core::{f32, ops::*};
+use core::ops::*;
 
 use core::arch::wasm32::*;
 

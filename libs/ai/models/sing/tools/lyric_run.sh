@@ -13,7 +13,7 @@ B=./makepad/target/release
 mkdir -p $L/inbox $L/out prep/lyrics $L/eval runs/lyric
 log() { echo "$(date +%FT%T) $*" >> $L/run.log; }
 stopped() { test -f $L/STOP; }
-NODES=${NODES:-"http://192.0.2.44:8123 http://192.0.2.38:8123"}
+NODES=${NODES:?set NODES to the AI hub URLs, space separated}
 MIN_CLEAN=${MIN_CLEAN:-3600}
 
 log "run start, nodes: $NODES"

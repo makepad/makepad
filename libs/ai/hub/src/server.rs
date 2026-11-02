@@ -41,7 +41,7 @@ fn job_body_size_overrides() -> Vec<(String, u64)> {
 }
 
 pub struct ServiceConfig {
-    /// Bind host, default "0.0.0.0" (the sandbox reaches boxes over LAN).
+    /// Bind host, default "0.0.0.0"; forced to loopback when networked hub access is off.
     pub host: String,
     /// 0 picks a free port (tests); the fleet default is `DEFAULT_PORT`.
     pub port: u16,
@@ -75,6 +75,7 @@ pub struct ServiceHandle {
     /// The TLS fronts and the beacon of a network-reachable node (empty on a
     /// loopback node): what [`ServiceHandle::stop`] closes first.
     fleet_run: FleetRun,
+    fleet_view_thread: JoinHandle<()>,
 }
 
 /// What a fleet node runs on the network: its TLS front(s) and its beacon.
@@ -92,7 +93,7 @@ impl ServiceHandle {
     /// loopback server and every worker thread end, the loaded models are released and the
     /// service locks are dropped. A new [`start_service`] may follow in the same process.
     pub fn stop(self) {
-        let ServiceHandle { activity_monitor, http_thread, route_thread, worker_thread, chat_threads, singleton, shared, mut fleet_run, .. } = self;
+        let ServiceHandle { activity_monitor, http_thread, route_thread, worker_thread, chat_threads, singleton, shared, mut fleet_run, fleet_view_thread, .. } = self;
         drain_for_stop(&shared, Duration::from_secs(3));
         if let Some(beacon) = fleet_run.beacon.as_mut() {
             beacon.stop();
@@ -103,6 +104,9 @@ impl ServiceHandle {
         }
         http_thread.stop();
         shared.stopped.store(true, std::sync::atomic::Ordering::SeqCst);
+        fleet_view_thread.thread().unpark();
+        let _ = fleet_view_thread.join();
+        crate::fleet_report::stop_probe_workers();
         let _ = route_thread.join();
         let _ = worker_thread.join();
         for thread in chat_threads {
@@ -258,6 +262,10 @@ pub struct ServiceShared {
     /// every request it authenticated ([`crate::front`]). None on a
     /// loopback-only node, whose callers are all machine-local.
     front_secret: Option<String>,
+    /// Actual listener state, independent of the role or networking setting.
+    lan_listening: bool,
+    /// Swap an immutable view under a short lock; no network I/O in route_get.
+    fleet_view: Mutex<Arc<crate::fleet_report::FleetView>>,
     /// Which client submitted each job (cancel and leases are owner-only).
     job_owners: Mutex<HashMap<String, String>>,
     /// Random per-start id shared by /health and the discovery beacon.
@@ -310,7 +318,20 @@ pub struct ServiceShared {
     pub stopped: std::sync::atomic::AtomicBool,
 }
 
-pub fn start_service(config: ServiceConfig) -> Result<ServiceHandle, AssetAiError> {
+fn effective_listen_host(configured: &str, bind_ok: bool) -> &str {
+    if bind_ok {
+        configured
+    } else if configured.contains(':') {
+        "[::1]"
+    } else {
+        "127.0.0.1"
+    }
+}
+
+pub fn start_service(mut config: ServiceConfig) -> Result<ServiceHandle, AssetAiError> {
+    let ip = config.host.trim_start_matches('[').trim_end_matches(']').parse()
+        .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+    config.host = effective_listen_host(&config.host, makepad_network::lan::hub_bind_ok(SocketAddr::new(ip, config.port))).to_string();
     fs::create_dir_all(&config.cache_dir)
         .map_err(|e| AssetAiError::Io(format!("cache dir {}: {e}", config.cache_dir.display())))?;
     // The LoRA drop-box: operators copy adapter safetensors in here and
@@ -329,7 +350,7 @@ pub fn start_service(config: ServiceConfig) -> Result<ServiceHandle, AssetAiErro
     // resolved by probing for a free port first (bind/drop; tiny race,
     // acceptable — port 0 is a test convenience).
     let port = if config.port == 0 {
-        let probe = TcpListener::bind((config.host.as_str(), 0))
+        let probe = TcpListener::bind((config.host.trim_start_matches('[').trim_end_matches(']'), 0))
             .map_err(|e| AssetAiError::Http(format!("probe bind {}: {e}", config.host)))?;
         let port = probe
             .local_addr()
@@ -383,7 +404,7 @@ pub fn start_service(config: ServiceConfig) -> Result<ServiceHandle, AssetAiErro
     // A node reachable from the network serves only through its TLS front,
     // with fleet credentials, and refuses to start without them (no open
     // mode). A loopback-only node is machine-local and needs none.
-    let fleet_mode = if addr.ip().is_loopback() {
+    let fleet_mode = if addr.ip().to_canonical().is_loopback() {
         None
     } else {
         Some(FleetMode::load(&config.cache_dir, &node_key, &crate::discovery::normalize_fleet(&config.fleet), addr)?)
@@ -429,6 +450,8 @@ pub fn start_service(config: ServiceConfig) -> Result<ServiceHandle, AssetAiErro
         gpu: GpuCache::new(),
         vram_usable: residency::UsableVram::new(startup_usable_mb),
         front_secret: fleet_mode.as_ref().map(|m| m.front_secret.clone()),
+        lan_listening: fleet_mode.is_some(),
+        fleet_view: Mutex::new(Arc::new(crate::fleet_report::FleetView::default())),
         job_owners: Mutex::new(HashMap::new()),
         node_id,
         node_key,
@@ -473,6 +496,16 @@ pub fn start_service(config: ServiceConfig) -> Result<ServiceHandle, AssetAiErro
         .map_err(|e| AssetAiError::Io(format!("start activity monitor: {e}")))?;
     let route_shared = shared.clone();
     let route_thread = std::thread::spawn(move || route_loop(route_shared, request_rx));
+    let fleet_shared = Arc::downgrade(&shared);
+    let fleet_view_thread = std::thread::Builder::new().name("ai-hub-fleet-view".into()).spawn(move || loop {
+        let Some(shared) = fleet_shared.upgrade() else { break };
+        if shared.stopped.load(std::sync::atomic::Ordering::SeqCst) { break; }
+        let view = Arc::new(crate::fleet_report::FleetView::refresh(&crate::discovery::start_listener()));
+        let previous = std::mem::replace(&mut *shared.fleet_view.lock().unwrap_or_else(|e| e.into_inner()), view);
+        drop(previous);
+        drop(shared);
+        std::thread::park_timeout(Duration::from_secs(5));
+    }).expect("spawn fleet view worker");
     let worker_shared = shared.clone();
     let worker_thread = std::thread::spawn(move || worker_loop(worker_shared));
     let reaper_shared = shared.clone();
@@ -525,6 +558,7 @@ pub fn start_service(config: ServiceConfig) -> Result<ServiceHandle, AssetAiErro
         singleton,
         shared,
         fleet_run,
+        fleet_view_thread,
     })
 }
 
@@ -600,6 +634,11 @@ impl FleetMode {
     /// Starts the TLS front (and the edge, when configured) and the
     /// beacon; returns the public address.
     fn start(self, node_id: u64, inner: SocketAddr, shared: &Arc<ServiceShared>) -> Result<(SocketAddr, FleetRun), AssetAiError> {
+        for addr in std::iter::once(self.listen).chain(self.edge) {
+            if !makepad_network::lan::hub_bind_ok(addr) {
+                return Err(AssetAiError::Io(format!("{addr}: peer listeners need a fleet-server role (ai_hub_role = server) or Networked AI hub on a user machine (networked_ai_hub = on)")));
+            }
+        }
         let mut run = FleetRun::default();
         let server = |identity: makepad_network::tls::TlsIdentity| {
             makepad_network::tls::TlsServer::new(identity).map_err(|e| AssetAiError::Http(format!("TLS server: {e}")))
@@ -1007,6 +1046,13 @@ fn route_get(shared: &Arc<ServiceShared>, path: &str) -> HttpServerResponse {
     // "/" arrives as "/index.html" (the shared http server appends it).
     if path == "/health" || path == "/index.html" {
         return ok_json(health_json_wire(shared));
+    }
+    if path == "/fleet" {
+        let view = shared.fleet_view.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        return ok_json(view.json(
+            makepad_network::netconfig::serves_fleet(), shared.lan_listening,
+            makepad_network::netconfig::networked_ai_hub(),
+        ).serialize_json());
     }
     if path == "/models" {
         return ok_json(models_json(shared).serialize_json());
@@ -1886,6 +1932,13 @@ fn route_post_by(shared: &Arc<ServiceShared>, caller: &makepad_network::fleet::f
         if owner.is_some_and(|owner| owner != caller.client_id) && caller.client_id != "local" {
             return error_json(403, format!("job {job_id} belongs to another client"));
         }
+        // `{"free": true}`: the person wants the GPU back, not only the job
+        // stopped. Marked before the cancel so the worker sees it when the
+        // job unwinds.
+        let free = std::str::from_utf8(body).ok().and_then(|b| crate::protocol::CancelRequestJson::deserialize_json(b).ok()).is_some_and(|r| r.free == Some(true));
+        if free {
+            shared.jobs.with(|store| store.set_free_on_cancel(job_id));
+        }
         let outcome = cancel_job_with_teardown(shared, job_id);
         return match outcome {
             CancelOutcome::Cancelled | CancelOutcome::Cancelling => {
@@ -2180,6 +2233,9 @@ fn health_json(shared: &Arc<ServiceShared>) -> HealthJson {
         activity: Some(shared.activity.snapshot()),
         service: crate::SERVICE_NAME.to_string(),
         version: crate::SERVICE_VERSION.to_string(),
+        serving_fleet: Some(makepad_network::netconfig::serves_fleet()),
+        lan_listening: Some(shared.lan_listening),
+        role: Some(if makepad_network::netconfig::serves_fleet() { "server" } else { "user" }.to_string()),
         gpu: gpu.name,
         vram_free_mb: gpu.vram_free_mb,
         vram_total_mb: gpu.vram_total_mb,
@@ -2409,7 +2465,10 @@ fn chat_worker_loop(shared: Arc<ServiceShared>) {
         };
         match result {
             Ok(artifacts) => shared.jobs.with(|store| store.finish(&job_id, artifacts)),
-            Err(AssetAiError::Cancelled) => shared.jobs.with(|store| store.cancelled(&job_id)),
+            Err(AssetAiError::Cancelled) => {
+                free_after_cancel(&shared, &job_id);
+                shared.jobs.with(|store| store.cancelled(&job_id))
+            }
             Err(e) => shared.jobs.with(|store| store.fail(&job_id, e.to_string())),
         }
         apply_finished_retention(&shared);
@@ -2466,7 +2525,10 @@ fn worker_loop(shared: Arc<ServiceShared>) {
         };
         match result {
             Ok(artifacts) => shared.jobs.with(|store| store.finish(&job_id, artifacts)),
-            Err(AssetAiError::Cancelled) => shared.jobs.with(|store| store.cancelled(&job_id)),
+            Err(AssetAiError::Cancelled) => {
+                free_after_cancel(&shared, &job_id);
+                shared.jobs.with(|store| store.cancelled(&job_id))
+            }
             Err(e) => shared.jobs.with(|store| store.fail(&job_id, e.to_string())),
         }
         apply_finished_retention(&shared);
@@ -2600,6 +2662,24 @@ fn apply_finished_retention(shared: &Arc<ServiceShared>) {
 /// residents that have not served anything for the configured window are
 /// retired so a quiet box returns its VRAM. Pins are exempt — that is what
 /// a pin means.
+/// A job a person cancelled with `{"free": true}` unwound: its model leaves
+/// the device now, unless other work wants it. A plain cancel (a reroute, a
+/// lapsed lease) keeps the model warm for the next job.
+fn free_after_cancel(shared: &Arc<ServiceShared>, job_id: &str) {
+    let Some(model_id) = shared.jobs.with(|store| store.model_to_free_after_cancel(job_id)) else {
+        return;
+    };
+    let started = Instant::now();
+    let result = with_backends(shared, |backends| evict_resident(shared, backends, &model_id, &mut |_| {}));
+    match result {
+        Ok(_) => {
+            set_model_state(shared, &model_id, ModelTrack::Ready);
+            eprintln!("[cancel] {job_id}: unloaded {model_id} in {} ms", started.elapsed().as_millis());
+        }
+        Err(e) => eprintln!("[cancel] {job_id}: unloading {model_id} failed: {e}"),
+    }
+}
+
 fn idle_evict_sweep(shared: &Arc<ServiceShared>) {
     let Some(window) = shared.residency.idle_evict else {
         return;
@@ -3927,6 +4007,14 @@ mod lifecycle_tests {
     use crate::backend::{ArtifactData, CancelToken, ProgressSink};
     use crate::registry::{Domain, FileSpec, ModelSpec};
 
+    #[test]
+    fn networked_hub_off_keeps_the_listener_on_loopback() {
+        assert_eq!(effective_listen_host("0.0.0.0", false), "127.0.0.1");
+        assert_eq!(effective_listen_host("192.0.2.2", false), "127.0.0.1");
+        assert_eq!(effective_listen_host("[::]", false), "[::1]");
+        assert_eq!(effective_listen_host("0.0.0.0", true), "0.0.0.0");
+    }
+
     struct ResidentFixture {
         resident: bool,
         loads: usize,
@@ -4276,6 +4364,8 @@ mod lifecycle_tests {
             gpu: GpuCache::new(),
             vram_usable: residency::UsableVram::new(None),
             front_secret: front_secret.map(str::to_string),
+            lan_listening: front_secret.is_some(),
+            fleet_view: Mutex::new(Arc::new(crate::fleet_report::FleetView::default())),
             job_owners: Mutex::new(HashMap::new()),
             node_id: 1,
             node_key: "f".repeat(32),
@@ -4359,9 +4449,45 @@ mod lifecycle_tests {
         assert!(response.header.starts_with("HTTP/1.1 404"));
 
         let health = route_get_request(&shared, &request_headers("GET", "/health", None));
-        assert!(String::from_utf8(health.body)
-            .unwrap()
-            .contains("\"auth_required\":false"));
+        let health_text = String::from_utf8(health.body).unwrap();
+        assert!(health_text.contains("\"auth_required\":false"));
+        // LocalService uses lenient decoding, so older hubs and additive
+        // fields remain interoperable.
+        let health = HealthJson::deserialize_json_lenient(&health_text).unwrap();
+        assert!(health.serving_fleet.is_some());
+        assert_eq!(health.lan_listening, Some(false));
+        assert!(matches!(health.role.as_deref(), Some("user" | "server")));
+
+        use crate::fleet_report::{FleetJson, FleetModelJson, FleetPeerJson, FleetView};
+        *shared.fleet_view.lock().unwrap() = Arc::new(FleetView {
+            sampled_at: None,
+            peers: vec![FleetPeerJson {
+                name: "peer".into(), addr: "https://192.0.2.8:8123".into(), answers: true,
+                models: vec![FleetModelJson { id: "trellis-2".into(), state: "ready".into() }], heard_s: 7,
+            }, FleetPeerJson {
+                name: "silent".into(), addr: "https://192.0.2.9:8123".into(), answers: false,
+                models: vec![], heard_s: 9,
+            }],
+        });
+        // Repeated GETs read only this injected cache; no listener or probe
+        // is started by a request, even when a peer does not answer.
+        for _ in 0..2 {
+            let response = route_get_request(&shared, &request_headers("GET", "/fleet", None));
+            assert!(response.header.starts_with("HTTP/1.1 200"));
+            let view = FleetJson::deserialize_json(&String::from_utf8(response.body).unwrap()).unwrap();
+            assert_eq!(Some(view.serving_fleet), health.serving_fleet);
+            assert!(!view.lan_listening);
+            assert_eq!(view.networked_ai_hub, makepad_network::netconfig::networked_ai_hub());
+            assert_eq!(view.peers.len(), 2);
+            assert_eq!(view.peers[0].name, "peer");
+            assert_eq!(view.peers[0].addr, "https://192.0.2.8:8123");
+            assert!(view.peers[0].answers);
+            assert_eq!(view.peers[0].models[0].id, "trellis-2");
+            assert_eq!(view.peers[0].models[0].state, "ready");
+            assert_eq!(view.peers[0].heard_s, 7);
+            assert!(!view.peers[1].answers);
+            assert!(view.peers[1].models.is_empty());
+        }
     }
 
     #[test]
@@ -4374,21 +4500,26 @@ mod lifecycle_tests {
         assert!(stems_body_bytes > POST_MAX_SIZE);
         assert!(stems_body_bytes <= MAX_JOB_BODY_BYTES);
 
-        let probe = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let addr = probe.local_addr().unwrap();
-        drop(probe);
-        let (request_tx, request_rx) = mpsc::channel();
-        let _server = start_http_server(HttpServer {
-            listen_address: addr,
-            request: request_tx,
-            post_max_size: POST_MAX_SIZE,
-            post_max_size_overrides: job_body_size_overrides(),
-            pre_admit_posts: true,
-            client_ip_resolver: None,
-            trusted_proxy: None,
-            allowed_methods: None,
-        })
-        .unwrap();
+        // A port probed and released can be taken before the server binds it: try again on a fresh one.
+        let (addr, request_rx, _server) = (0..50)
+            .find_map(|_| {
+                let probe = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+                let addr = probe.local_addr().unwrap();
+                drop(probe);
+                let (request_tx, request_rx) = mpsc::channel();
+                start_http_server(HttpServer {
+                    listen_address: addr,
+                    request: request_tx,
+                    post_max_size: POST_MAX_SIZE,
+                    post_max_size_overrides: job_body_size_overrides(),
+                    pre_admit_posts: true,
+                    client_ip_resolver: None,
+                    trusted_proxy: None,
+                    allowed_methods: None,
+                })
+                .map(|server| (addr, request_rx, server))
+            })
+            .expect("no free port for the test server");
 
         let handler = std::thread::spawn(move || {
             let HttpServerRequest::PostPending { headers, body, .. } = request_rx
@@ -4429,7 +4560,7 @@ mod lifecycle_tests {
         const SECRET: &str = "front-secret";
         let shared = fixture_shared_with_secret(&[], Some(SECRET));
         // Nothing is open: health and blobs included.
-        for path in ["/health", "/jobs"] {
+        for path in ["/health", "/fleet", "/jobs"] {
             let r = route_get_request(&shared, &request_headers("GET", path, None));
             assert!(r.header.starts_with("HTTP/1.1 401 Unauthorized"), "{path}");
         }
@@ -4441,7 +4572,12 @@ mod lifecycle_tests {
         let ok = route_get_request(&shared, &request_headers("GET", "/jobs", Some((SECRET, "rik"))));
         assert!(ok.header.starts_with("HTTP/1.1 200 OK"));
         let health = route_get_request(&shared, &request_headers("GET", "/health", Some((SECRET, "rik"))));
-        assert!(String::from_utf8(health.body).unwrap().contains("\"auth_required\":true"));
+        let health = String::from_utf8(health.body).unwrap();
+        assert!(health.contains("\"auth_required\":true"));
+        assert_eq!(HealthJson::deserialize_json_lenient(&health).unwrap().lan_listening, Some(true));
+        let fleet = route_get_request(&shared, &request_headers("GET", "/fleet", Some((SECRET, "peer-node"))));
+        assert!(fleet.header.starts_with("HTTP/1.1 200 OK"));
+        assert!(crate::fleet_report::FleetJson::deserialize_json(&String::from_utf8(fleet.body).unwrap()).unwrap().lan_listening);
         let post = route_post_request(&shared, &request_headers("POST", "/not-an-endpoint", None), b"{}");
         assert!(post.header.starts_with("HTTP/1.1 401 Unauthorized"));
     }
@@ -4765,7 +4901,6 @@ mod lifecycle_tests {
     }
 
     #[test]
-    #[ignore = "requires loopback bind; run explicitly with --ignored"]
     fn actual_generate_refusals_preserve_typed_reject_results_over_http() {
         use crate::client::{ContentProvider, LocalService};
         use std::io::{Read, Write};

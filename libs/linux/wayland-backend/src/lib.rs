@@ -92,9 +92,6 @@ pub use rs::server;
 #[cfg(feature = "server_system")]
 pub use sys::server;
 
-#[cfg(test)]
-mod test;
-
 mod core_interfaces;
 mod debug;
 pub mod protocol;

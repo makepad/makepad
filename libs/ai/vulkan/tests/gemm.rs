@@ -1,4 +1,4 @@
-//! Real-device correctness and timestamp benchmarks; run tests serially.
+//! Real-device correctness checks; run tests serially.
 use makepad_ai_vulkan::*;
 use makepad_script::makepad_math::{f16_bits_to_f32, f32_to_f16_bits};
 
@@ -163,31 +163,6 @@ fn gemm_matches_cpu() {
     run(&device, &mut library, [35, 33, 37], ActivationType::F16, GemmMode::Auto, None);
 }
 
-#[test]
-#[ignore = "GPU benchmark; run separately from other GPU tests"]
-fn gemm_benchmark() {
-    let device = Device::shared().unwrap();
-    eprintln!("{}", device.features.description());
-    for shape in &device.features.cooperative_matrix_shapes { eprintln!("{shape:?}"); }
-    let mut library = Library::new(KERNEL_SOURCES).unwrap();
-    let variants = supported_variants(&device, true);
-    assert!(!variants.is_empty(), "no supported variants selected");
-    // One phone binary can select names (comma-separated substrings), dimensions
-    // (n,k,m;n,k,m) and sample count without recompiling.
-    let dimensions = std::env::var("MAKEPAD_GEMM_DIMS").unwrap_or_else(|_| "1280,1280,1500;5120,1280,1500;1024,1024,1024;4096,1024,1024;1024,4096,1024;3072,1024,1024".into());
-    let samples = std::env::var("MAKEPAD_GEMM_SAMPLES").map(|v| v.parse::<usize>().unwrap()).unwrap_or(11);
-    assert!(samples > 0);
-    eprintln!("GEMM_DATA normal weights std=1/sqrt(k), normal activations, column 0 has 24x outliers every 97 rows; NT includes bias; errors vs original f32 CPU reference, kernel_abs vs stored/rounded inputs; h8/h16 use f16 arithmetic bounds; median includes quantisation and its barrier, excludes upload/compile/readback");
-    for entry in dimensions.split(';') {
-        let dims: Vec<u32> = entry.split(',').map(|v| v.trim().parse().unwrap()).collect();
-        let dims: [u32; 3] = dims.try_into().expect("dimensions must be n,k,m");
-        let mut case = ExperimentData::new(dims);
-        for variant in &variants {
-            experiment(&device, &mut library, &mut case, variant, samples);
-        }
-    }
-}
-
 #[derive(Clone, Copy)]
 enum ExperimentMode {
     Float(ActivationType, GemmMode),
@@ -197,7 +172,7 @@ enum ExperimentMode {
 
 struct Variant { name: String, mode: ExperimentMode }
 
-fn supported_variants(device: &Device, filter: bool) -> Vec<Variant> {
+fn supported_variants(device: &Device) -> Vec<Variant> {
     let mut all = Vec::new();
     for x in [ActivationType::F32, ActivationType::F16] {
         let xn = if x == ActivationType::F32 { "f32" } else { "f16" };
@@ -226,10 +201,8 @@ fn supported_variants(device: &Device, filter: bool) -> Vec<Variant> {
         all.push(Variant { name: c.nt_name.into(), mode: ExperimentMode::FloatNt(ActivationType::F16, mode) });
         // Exercise both packed half loaders in correctness runs. The phone
         // model-path comparison uses f32 activations and f16 weights.
-        if !filter {
-            all.push(Variant { name: format!("{}_xf16", c.name), mode: ExperimentMode::Float(ActivationType::F16, mode) });
-            all.push(Variant { name: format!("{}_wf32", c.name), mode: ExperimentMode::Float(ActivationType::F32, GemmMode::from_name(c.name, ActivationType::F32).unwrap()) });
-        }
+        all.push(Variant { name: format!("{}_xf16", c.name), mode: ExperimentMode::Float(ActivationType::F16, mode) });
+        all.push(Variant { name: format!("{}_wf32", c.name), mode: ExperimentMode::Float(ActivationType::F32, GemmMode::from_name(c.name, ActivationType::F32).unwrap()) });
     }
     // The depth-32 shape provides a native validation path when a device
     // exposes that integer shape instead of the phone's depth-16 shapes.
@@ -239,13 +212,7 @@ fn supported_variants(device: &Device, filter: bool) -> Vec<Variant> {
             all.push(Variant { name: format!("i8_coop_{r}x{c}x{d}_sg{subgroup}"), mode: ExperimentMode::Integer(Int8GemmMode::Cooperative { shape, subgroup }) });
         }
     }
-    let selected = if filter { std::env::var("MAKEPAD_GEMM_VARIANTS").ok() } else { None };
     all.into_iter().filter(|v| {
-        // Preserve substring selection; =name selects exactly one prototype.
-        if selected.as_ref().is_some_and(|names| !names.split(',').any(|name| {
-            let name = name.trim();
-            if let Some(exact) = name.strip_prefix('=') { v.name == exact } else { v.name.contains(name) }
-        })) { return false; }
         let support = match v.mode {
             ExperimentMode::Float(x, mode) => Gemm::supports(device, x, mode),
             ExperimentMode::FloatNt(_, mode) => Gemm::supports(device, ActivationType::F32, mode),
@@ -413,7 +380,7 @@ fn verify_quantization(device: &Device, gemm: &Int8Gemm, weights: &Int8Weights, 
 
 fn bytes(v: &[f32]) -> Vec<u8> { v.iter().flat_map(|v| v.to_le_bytes()).collect() }
 
-fn experiment(device: &Device, library: &mut Library, case: &mut ExperimentData, variant: &Variant, samples: usize) {
+fn experiment(device: &Device, library: &mut Library, case: &mut ExperimentData, variant: &Variant) {
     let [n, k, m] = case.dims;
     let output_bytes = (n * m) as usize * 4;
     let dst = device.buffer(output_bytes as u64 + 64, BufferKind::Device).unwrap();
@@ -497,53 +464,11 @@ fn experiment(device: &Device, library: &mut Library, case: &mut ExperimentData,
         mode => mode,
     };
     let expected = case.expected(mode);
-    let mut kernel_abs = 0.0f32;
-    let report_only = samples > 0 && std::env::var_os("MAKEPAD_GEMM_REPORT_ONLY").is_some();
     for (at, &v) in output.iter().enumerate() {
         assert!(v.is_finite(), "{} non-finite output at {at}", variant.name);
         let want = expected.values[at] + if nt { bias[at / m as usize] } else { 0.0 };
         let error = (v - want).abs();
-        kernel_abs = kernel_abs.max(error);
-        if !report_only {
-            assert!(error <= expected.tolerance[at], "{} {n},{k},{m} at {at}: {v} expected {} error {error} tolerance {}", variant.name, expected.values[at], expected.tolerance[at]);
-        }
-    }
-    if samples > 0 {
-        for _ in 0..3 { stream.submit_wait().unwrap(); }
-        let mut times = Vec::with_capacity(samples);
-        let mut quants = Vec::with_capacity(samples);
-        let mut kernels = Vec::with_capacity(samples);
-        for _ in 0..samples {
-            stream.submit_wait().unwrap();
-            let timings = stream.timings().unwrap();
-            times.push(timings.iter().map(|v| v.1).sum::<f64>());
-            quants.push(if timings.len() == 2 { timings[0].1 } else { 0.0 });
-            kernels.push(timings.last().unwrap().1);
-        }
-        for values in [&mut times, &mut quants, &mut kernels] { values.sort_by(f64::total_cmp); }
-        let ms = times[samples / 2];
-        let quant = quants[samples / 2];
-        let kernel = kernels[samples / 2];
-        let gflops = 2.0 * n as f64 * k as f64 * m as f64 / (ms * 1e6);
-        let kernel_gflops = 2.0 * n as f64 * k as f64 * m as f64 / (kernel * 1e6);
-        let mut max_abs = 0.0f32;
-        let mut squared = [0.0f64; 2];
-        let mut norm = [0.0f64; 2];
-        for (at, &v) in output.iter().enumerate() {
-            let want = case.original.values[at] + if nt { bias[at / m as usize] } else { 0.0 };
-            let err = (v - want).abs();
-            max_abs = max_abs.max(err);
-            let tail = usize::from(at % m as usize == 0);
-            squared[tail] += f64::from(err).powi(2);
-            norm[tail] += f64::from(want).powi(2);
-        }
-        let random_rel = (squared[0] / norm[0].max(f64::MIN_POSITIVE)).sqrt();
-        let tail_rel = (squared[1] / norm[1].max(f64::MIN_POSITIVE)).sqrt();
-        let rmse = ((squared[0] + squared[1]) / output.len().max(1) as f64).sqrt();
-        let kernel_info = float.as_ref().map(|g| format!(" shader={} wg={} shared_bytes={} subgroup={}", g.kernel.name,
-            g.kernel.workgroup()[0], g.kernel.layout.shared_bytes,
-            g.mode.candidate().and_then(|c| c.subgroup).map_or_else(|| "default".into(), |s| s.to_string()))).unwrap_or_default();
-        eprintln!("GEMM [{n},{k},{m}] {} median={ms:.4}ms {gflops:.1}GFLOPS max_abs={max_abs:.6} rmse={rmse:.6} random_rel_l2={random_rel:.6} tail_rel_l2={tail_rel:.6} quant={quant:.4}ms kernel={kernel:.4}ms kernel_GFLOPS={kernel_gflops:.1} kernel_abs={kernel_abs:.6}{kernel_info}", variant.name);
+        assert!(error <= expected.tolerance[at], "{} {n},{k},{m} at {at}: {v} expected {} error {error} tolerance {}", variant.name, expected.values[at], expected.tolerance[at]);
     }
     drop((float, integer, weights, packed_weights, activations, bias_buffer));
 }
@@ -552,7 +477,7 @@ fn experiment(device: &Device, library: &mut Library, case: &mut ExperimentData,
 fn gemm_variants_match_cpu() {
     let device = Device::shared().expect("real Vulkan device required");
     eprintln!("{}", device.features.description());
-    let variants = supported_variants(&device, false);
+    let variants = supported_variants(&device);
     let mut library = Library::new(KERNEL_SOURCES).unwrap();
     for c in GEMM_CANDIDATES {
         assert_eq!(GemmMode::from_name(c.name, ActivationType::F16).unwrap(), GemmMode::from_name(c.nt_name, ActivationType::F16).unwrap());
@@ -590,7 +515,7 @@ fn gemm_variants_match_cpu() {
     }
     for dims in [[64, 64, 64], [128, 96, 152], [67, 40, 76], [67, 37, 71], [129, 33, 131], [17, 7, 19], [17, 9, 19], [17, 15, 19], [17, 17, 19], [1, 1, 1], [17, 0, 19], [0, 32, 7], [7, 32, 0], [3, 32769, 5]] {
         let mut case = ExperimentData::new(dims);
-        for variant in &variants { experiment(&device, &mut library, &mut case, variant, 0); }
+        for variant in &variants { experiment(&device, &mut library, &mut case, variant); }
     }
     // Dyadic inputs have exact products and exact half-chain sums. Demand
     // the normal f32 tolerance here as an independent indexing/ordering
@@ -601,7 +526,7 @@ fn gemm_variants_match_cpu() {
     exact.original = reference(exact.dims, &exact.w, &exact.x);
     for key in [35, 67] { exact.references.insert(key, reference(exact.dims, &exact.w, &exact.x)); }
     for variant in &variants {
-        if !matches!(variant.mode, ExperimentMode::Integer(_)) { experiment(&device, &mut library, &mut exact, variant, 0); }
+        if !matches!(variant.mode, ExperimentMode::Integer(_)) { experiment(&device, &mut library, &mut exact, variant); }
     }
     // Saturated signed codes stress the raw unsigned dot sum and three
     // ordered spans, including both signs and the padded final span.
@@ -610,7 +535,7 @@ fn gemm_variants_match_cpu() {
     for (at, v) in case.x.iter_mut().enumerate() { *v = if at % 2 == 0 { 1.0 } else { -1.0 }; }
     case.original = reference(case.dims, &case.w, &case.x);
     for variant in &variants {
-        if matches!(variant.mode, ExperimentMode::Integer(_)) { experiment(&device, &mut library, &mut case, variant, 0); }
+        if matches!(variant.mode, ExperimentMode::Integer(_)) { experiment(&device, &mut library, &mut case, variant); }
     }
 }
 

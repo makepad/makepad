@@ -1191,37 +1191,6 @@ mod tests {
         assert_eq!(layer2d_params(&flat), flat);
     }
 
-    #[test]
-    #[ignore = "timing: run with --release -- --ignored --nocapture"]
-    fn building_and_marching_are_fast_enough() {
-        let start = std::time::Instant::now();
-        let noise = NoiseVolume::build(7, SHAPE_SIZE, &|| false).unwrap();
-        let build_ms = start.elapsed().as_secs_f64() * 1000.0;
-        assert_eq!(noise.shape.size, SHAPE_SIZE);
-        let clouds = VolumetricClouds::new(&cover(0.6), &VolumetricParams::default(), 7, sun()).unwrap();
-        // 512 x 256, serial: the upper half is 65536 rays.
-        let (w, h) = (512usize, 256usize);
-        let start = std::time::Instant::now();
-        let mut covered = 0.0f64;
-        for y in 0..h / 2 {
-            for x in 0..w {
-                let d = vec(ibl::equirect_uv_to_dir([(x as f32 + 0.5) / w as f32, (y as f32 + 0.5) / h as f32]));
-                covered += clouds.march(d).alpha as f64;
-            }
-        }
-        let march_ms = start.elapsed().as_secs_f64() * 1000.0;
-        let rays = (w * h / 2) as f64;
-        println!(
-            "noise {}^3: {build_ms:.0} ms; march 512x256: {march_ms:.0} ms ({:.1} us per ray, mean alpha {:.2})",
-            SHAPE_SIZE,
-            march_ms * 1000.0 / rays,
-            covered / rays
-        );
-        // A 4K export marches at 2K: 16 times these rays, spread over the pool. Serial
-        // 512 x 256 under 4 s keeps that under 60 s even on two cores.
-        assert!(build_ms < 5000.0, "the noise volume took {build_ms:.0} ms");
-        assert!(march_ms < 4000.0, "the march took {march_ms:.0} ms");
-    }
 }
 
 #[cfg(test)]

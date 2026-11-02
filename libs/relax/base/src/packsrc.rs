@@ -27,10 +27,15 @@ pub struct Options {
     pub target: Option<String>,
     /// package, then its `check` flags
     pub packages: Vec<(String, Vec<String>)>,
+    /// `--fonts <manifest>`: the font files the apps' font set uses (cargo makepad's font asset
+    /// manifest, `asset=<crate>/resources/<file>` lines): the other font files of the crates'
+    /// `resources/` stay out (a Latin app carries no CJK or emoji fonts it never loads)
+    pub fonts: Option<BTreeSet<String>>,
 }
 
 pub fn parse_args(args: &[String]) -> Result<Options, String> {
     let mut target = None;
+    let mut fonts = None;
     let mut out = None;
     let mut packages: Vec<(String, Vec<String>)> = Vec::new();
     let mut i = 0;
@@ -38,6 +43,11 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
         let a = args[i].as_str();
         if a == "--target" {
             target = Some(args.get(i + 1).ok_or("--target wants a triple")?.clone());
+            i += 2;
+        } else if a == "--fonts" {
+            let f = args.get(i + 1).ok_or("--fonts wants a font asset manifest")?;
+            let text = std::fs::read_to_string(f).map_err(|e| format!("{f}: {e}"))?;
+            fonts = Some(text.lines().filter_map(|l| l.strip_prefix("asset=")).map(str::to_string).collect());
             i += 2;
         } else if a.starts_with("--") {
             let Some(last) = packages.last_mut() else { return Err(format!("{a}: flags follow a package")) };
@@ -55,11 +65,11 @@ pub fn parse_args(args: &[String]) -> Result<Options, String> {
             i += 1;
         }
     }
-    let out = out.ok_or("usage: pack-src [--target <triple>] <out.store> <package> [flags] [<package>...]")?;
+    let out = out.ok_or("usage: pack-src [--target <triple>] [--fonts <manifest>] <out.store> <package> [flags] [<package>...]")?;
     if packages.is_empty() {
         return Err("pack-src needs at least one package".into());
     }
-    Ok(Options { out, target, packages })
+    Ok(Options { out, target, packages, fonts })
 }
 
 /// The workspace root: the nearest folder at or above the current one whose Cargo.toml has a `[workspace]` (or `workspace.` keys).
@@ -334,6 +344,33 @@ pub fn run(opts: Options) -> Result<(), String> {
     }
     let from_listings = files.len() - before_listed;
     files.retain(|f| !excluded(f));
+    // the font set's files only (--fonts): a font file in a crate's resources/ is its asset
+    // `<crate name, _ for ->/resources/<rest>`
+    let mut fonts_left = 0usize;
+    if let Some(fonts) = &opts.fonts {
+        let is_font = |f: &str| f.rsplit_once('.').is_some_and(|(_, e)| matches!(e.to_ascii_lowercase().as_str(), "ttf" | "otf" | "ttc" | "woff" | "woff2"));
+        let crate_name = |dir: &str| -> Option<String> {
+            let manifest = if dir.is_empty() { "Cargo.toml".to_string() } else { format!("{dir}/Cargo.toml") };
+            let t = std::fs::read_to_string(root.join(manifest)).ok()?;
+            let name = t.lines().skip_while(|l| l.trim() != "[package]").skip(1).take_while(|l| !l.trim_start().starts_with('[')).find_map(|l| {
+                l.split_once('=').filter(|(k, _)| k.trim() == "name").map(|(_, v)| v.trim().trim_matches('"').to_string())
+            })?;
+            Some(name.replace('-', "_"))
+        };
+        let before = files.len();
+        files.retain(|f| {
+            // (the check probes a font's path when it registers it as a resource: that is no
+            // read of it; a native bundle of the app carries the font set's files alone too)
+            if !is_font(f) {
+                return true;
+            }
+            let Some(p) = package_of(f, &pkgs) else { return true };
+            let rest = if p.is_empty() { f.as_str() } else { &f[p.len() + 1..] };
+            let Some(rel) = rest.strip_prefix("resources/") else { return true };
+            crate_name(p).is_some_and(|n| fonts.contains(&format!("{n}/resources/{rel}")))
+        });
+        fonts_left = before - files.len();
+    }
 
     // objects
     let mut objects: Vec<(Oid, u8, Vec<u8>)> = Vec::new();
@@ -384,6 +421,9 @@ pub fn run(opts: Options) -> Result<(), String> {
     }
     println!("pack-src: {} -> {} bytes, {} files, {} objects, commit {}", opts.out.display(), total, sizes.len(), objects.len(), store::hex(&commit_oid));
     println!("pack-src: read by the front end: {} files; resources and std added: {}; {} folders listed; {} crates with sources", read_only.len(), files.len().saturating_sub(read_only.len()), listed.len(), graph.len());
+    if opts.fonts.is_some() {
+        println!("pack-src: {fonts_left} font files left out (not in the --fonts set)");
+    }
     println!("pack-src: size per crate (stored bytes, raw bytes, files):");
     let mut rows: Vec<_> = per_crate.iter().collect();
     rows.sort_by(|a, b| b.1 .1.cmp(&a.1 .1).then(a.0.cmp(b.0)));

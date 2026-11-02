@@ -1,7 +1,6 @@
 //! Intonation: sung lines rendered offline and tracked (`tuning`), every
-//! note's pitch against its score in cents. The survey (ignored, run with
-//! `--ignored --nocapture`) prints voices × ranges × note lengths × leaps ×
-//! vibrato on/off; the tests hold the targets: a held note's centre within
+//! note's pitch against its score in cents. The tests hold the targets: a
+//! held note's centre within
 //! ±5 cents, no systematic offset, arrival settled within about 60 ms.
 
 use makepad_score_voice::render::render_line;
@@ -44,42 +43,6 @@ fn sing(profile: &str, style: Style, seed: u32, line: &Lowered) -> Vec<NoteRepor
         })
         .collect();
     tuning::report(&x, RATE, &targets, style.vibrato_depth * 100.0)
-}
-
-/// The pitch the singer was told to sing (its control curve, no audio),
-/// reported the same way: what the synthesis adds is the difference.
-fn commanded(profile: &str, style: Style, seed: u32, line: &Lowered) -> Vec<NoteReport> {
-    let mut singer = Singer::new(Arc::new(VoiceProfile::named(profile).unwrap()), RATE, style, seed);
-    let step = 0.005 * BPM / 60.0;
-    let curve = makepad_score_voice::render::pitch_curve(&mut singer, line, BPM, step);
-    let origin = line.events.iter().map(|e| e.beat).fold(f64::INFINITY, f64::min);
-    let secs = |b: f64| ((b - origin) * 60.0 / BPM) as f32;
-    line.events
-        .iter()
-        .enumerate()
-        .map(|(i, e)| {
-            let target = TargetNote { start: secs(e.vowel_beat), end: secs(line.events.get(i + 1).map_or(e.beat + e.dur, |n| n.beat)), note: e.note };
-            let frames: Vec<(f32, f32)> = curve
-                .iter()
-                .map(|(b, m)| (secs(*b) - target.start, (m - e.note) * 100.0))
-                .filter(|(t, _)| *t >= 0.0 && *t < target.end - target.start)
-                .collect();
-            tuning::note_report(target, &frames, style.vibrato_depth * 100.0)
-        })
-        .collect()
-}
-
-fn show(name: &str, reports: &[NoteReport], detail: bool) {
-    let (mean, mean_abs, worst, drift, settle) = tuning::summary(reports);
-    println!("{name:44} centre mean {mean:+5.1} |mean| {mean_abs:4.1} worst {worst:5.1}  drift {drift:4.1}  settle {:3.0} ms", settle * 1000.0);
-    if detail {
-        for r in reports {
-            println!(
-                "    note {:5.1} {:4.2}s  centre {:+6.1}  drift {:+6.1}  arrival {:+6.1}  settle {:4.0} ms  ({} frames)",
-                r.target.note, r.target.end - r.target.start, r.centre, r.drift, r.arrival, r.settle * 1000.0, r.frames
-            );
-        }
-    }
 }
 
 fn lines() -> Vec<(&'static str, Vec<(f32, f64)>, &'static str)> {
@@ -206,36 +169,3 @@ fn choir_parts_are_centred() {
         }
     }
 }
-
-#[test]
-#[ignore]
-fn survey() {
-    let styles = [
-        ("default", Style::default()),
-        ("no vibrato", Style { vibrato_depth: 0.0, ..Style::default() }),
-        ("no drift/jitter", Style { drift_cents: 0.0, jitter_cents: 0.0, ..Style::default() }),
-        ("straight", Style::straight()),
-    ];
-    for (voice, base) in voices() {
-        for (lname, list, lyrics) in lines() {
-            let list: Vec<(f32, f64)> = list.iter().map(|(p, d)| (base + p, *d)).collect();
-            let line = phrase(&list, lyrics);
-            for (sname, style) in styles {
-                let reports = sing(voice, style, 3, &line);
-                show(&format!("{voice} {lname} [{sname}]"), &reports, voice == "tenor" && sname == "default");
-                if voice == "tenor" {
-                    show(&format!("  (commanded) [{sname}]"), &commanded(voice, style, 3, &line), false);
-                }
-            }
-        }
-    }
-    // Seeds: how far the default voice's held notes wander from singer to singer.
-    let line = phrase(&[(57.0, 4.0), (60.0, 4.0), (64.0, 4.0), (62.0, 4.0)], "ah ah ah ah");
-    let mut all = Vec::new();
-    for seed in 0..24 {
-        all.extend(sing("tenor", Style::default(), seed, &line));
-    }
-    show("tenor held notes, 24 seeds [default]", &all, false);
-}
-
-

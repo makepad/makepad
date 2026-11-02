@@ -1193,35 +1193,4 @@ mod tests {
             .all(|r| r.x.is_finite() && r.y.is_finite() && r.z.is_finite() && r.w.is_finite()));
     }
 
-    #[test]
-    #[ignore = "release-only CPU build+pack benchmark; not a GPU or Quest measurement"]
-    fn benchmark_build_and_pack() {
-        for count in [64, 256, 1024] {
-            let side = (count as f32).sqrt().ceil() as usize;
-            let lights: Vec<_> = (0..count)
-                .map(|i| {
-                    light(
-                        vec3f(
-                            (i % side) as f32 * 3.0 - 30.0,
-                            2.5,
-                            -4.0 - (i / side) as f32 * 3.0,
-                        ),
-                        5.0,
-                    )
-                })
-                .collect();
-            for view in [camera(), None] {
-                let mut c = ClusteredLights::default();
-                let mut data = Vec::new();
-                c.build(&lights, view);
-                c.pack(&mut data);
-                let start = std::time::Instant::now();
-                for _ in 0..200 {
-                    c.build(std::hint::black_box(&lights), view);
-                    c.pack(std::hint::black_box(&mut data));
-                }
-                eprintln!("cluster bench lights={count} world_grid={} mean_us={:.1} refs={} overflow={} upload_bytes={}",view.is_none(),start.elapsed().as_secs_f64()*1e6/200.0,c.stats.references,c.stats.overflow_references,data.len()*4);
-            }
-        }
-    }
 }

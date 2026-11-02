@@ -803,6 +803,38 @@ where
     }
 }
 
+// rustc iter/traits/collect.rs (extend_for_tuple, from_iterator_for_tuple): tuples of one and of
+// three to twelve collections extend and collect element-wise (pairs are above).
+macro_rules! impl_extend_tuple {
+    ($(($ty:ident, $ex:ident, $i:tt)),+) => {
+        impl<$($ty,)+ $($ex: Extend<$ty>,)+> Extend<($($ty,)+)> for ($($ex,)+) {
+            fn extend<T: IntoIterator<Item = ($($ty,)+)>>(&mut self, iter: T) {
+                for item in iter { $(Extend::<$ty>::extend_one(&mut self.$i, item.$i);)+ }
+            }
+            fn extend_one(&mut self, item: ($($ty,)+)) { $(Extend::<$ty>::extend_one(&mut self.$i, item.$i);)+ }
+            fn extend_reserve(&mut self, additional: usize) { $(Extend::<$ty>::extend_reserve(&mut self.$i, additional);)+ }
+        }
+        impl<$($ty,)+ $($ex: Default + Extend<$ty>,)+> FromIterator<($($ty,)+)> for ($($ex,)+) {
+            fn from_iter<I: IntoIterator<Item = ($($ty,)+)>>(iter: I) -> Self {
+                let mut res = ($($ex::default(),)+);
+                res.extend(iter);
+                res
+            }
+        }
+    };
+}
+impl_extend_tuple!((A, ExA, 0));
+impl_extend_tuple!((A, ExA, 0), (B, ExB, 1), (C, ExC, 2));
+impl_extend_tuple!((A, ExA, 0), (B, ExB, 1), (C, ExC, 2), (D, ExD, 3));
+impl_extend_tuple!((A, ExA, 0), (B, ExB, 1), (C, ExC, 2), (D, ExD, 3), (E, ExE, 4));
+impl_extend_tuple!((A, ExA, 0), (B, ExB, 1), (C, ExC, 2), (D, ExD, 3), (E, ExE, 4), (F, ExF, 5));
+impl_extend_tuple!((A, ExA, 0), (B, ExB, 1), (C, ExC, 2), (D, ExD, 3), (E, ExE, 4), (F, ExF, 5), (G, ExG, 6));
+impl_extend_tuple!((A, ExA, 0), (B, ExB, 1), (C, ExC, 2), (D, ExD, 3), (E, ExE, 4), (F, ExF, 5), (G, ExG, 6), (H, ExH, 7));
+impl_extend_tuple!((A, ExA, 0), (B, ExB, 1), (C, ExC, 2), (D, ExD, 3), (E, ExE, 4), (F, ExF, 5), (G, ExG, 6), (H, ExH, 7), (I, ExI, 8));
+impl_extend_tuple!((A, ExA, 0), (B, ExB, 1), (C, ExC, 2), (D, ExD, 3), (E, ExE, 4), (F, ExF, 5), (G, ExG, 6), (H, ExH, 7), (I, ExI, 8), (J, ExJ, 9));
+impl_extend_tuple!((A, ExA, 0), (B, ExB, 1), (C, ExC, 2), (D, ExD, 3), (E, ExE, 4), (F, ExF, 5), (G, ExG, 6), (H, ExH, 7), (I, ExI, 8), (J, ExJ, 9), (K, ExK, 10));
+impl_extend_tuple!((A, ExA, 0), (B, ExB, 1), (C, ExC, 2), (D, ExD, 3), (E, ExE, 4), (F, ExF, 5), (G, ExG, 6), (H, ExH, 7), (I, ExI, 8), (J, ExJ, 9), (K, ExK, 10), (L, ExL, 11));
+
 pub trait Sum<A = Self>: Sized {
     fn sum<I: Iterator<Item = A>>(iter: I) -> Self;
 }

@@ -97,6 +97,7 @@ impl XrMirrorClock {
         }
         let shown = cx.seconds_since_app_start() - self.drawn_at < 3.0 / Self::RATE_HZ;
         if shown && Self::wanted(cx) {
+            crate::XrDesktopFreeze::permit_mirror(cx);
             return true;
         }
         cx.stop_timer(self.timer);

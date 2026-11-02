@@ -231,13 +231,16 @@ impl ScorePrefs {
     }
 
     /// Where the preferences file lives. Per-user configuration, never the
-    /// checkout: `~/Library/Application Support` on macOS, `$XDG_CONFIG_HOME`
-    /// (or `~/.config`) elsewhere.
+    /// checkout: `~/Library/Application Support` on macOS, `%APPDATA%` on
+    /// Windows, `$XDG_CONFIG_HOME` (or `~/.config`) elsewhere.
     pub fn path() -> Option<PathBuf> {
+        #[cfg(not(windows))]
         let home = std::env::var_os("HOME").map(PathBuf::from);
         #[cfg(target_os = "macos")]
         let base = home.map(|home| home.join("Library").join("Application Support"));
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(windows)]
+        let base = std::env::var_os("APPDATA").map(PathBuf::from);
+        #[cfg(not(any(target_os = "macos", windows)))]
         let base = std::env::var_os("XDG_CONFIG_HOME")
             .map(PathBuf::from)
             .or_else(|| home.map(|home| home.join(".config")));
@@ -341,29 +344,21 @@ mod tests {
         assert_eq!(withdrawn.engine(), ScoreEngine::Physical);
     }
 
-    /// Someone who chose pianist mode and another instrument keeps both.
-    #[test]
-    fn a_stored_choice_beats_the_default() {
-        let text = "start_in_editor = 0\ninstrument = Concert Grand\n";
-        let mut prefs = ScorePrefs::default();
-        for line in text.lines() {
-            let Some((key, value)) = line.split_once('=') else { continue };
-            let (key, value) = (key.trim(), value.trim());
-            match key {
-                "start_in_editor" => prefs.start_in_editor = matches!(value, "1" | "true"),
-                "instrument" => prefs.instrument = value.to_string(),
-                _ => {}
-            }
-        }
-        assert!(!prefs.start_in_editor);
-        assert_eq!(prefs.instrument, "Concert Grand");
-    }
-
     #[test]
     fn preferences_never_land_inside_the_checkout() {
         let path = ScorePrefs::path().expect("a home directory");
         assert!(path.ends_with("makepad-score/preferences.conf"));
-        assert!(!path.to_string_lossy().contains("/makepad/makepad"));
+        let checkout = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap();
+        assert!(
+            !path.starts_with(checkout),
+            "{} is inside {}",
+            path.display(),
+            checkout.display()
+        );
     }
 }
 

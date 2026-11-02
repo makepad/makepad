@@ -45,11 +45,15 @@ pub struct Evaluator {
     round: u64,
     /// Meshes built (not found in the cache) since the last `begin`.
     pub built: usize,
+    /// What builds exact bodies; `None` in a host without them.
+    pub brep: Option<Arc<dyn BrepEngine>>,
+    /// Display chord of an exact body (mm), times `draft`.
+    pub brep_chord: f64,
 }
 
 impl Default for Evaluator {
     fn default() -> Self {
-        Evaluator { tolerance: Tolerance::default(), draft: 1.0, finest_cell: 0.25, cache: HashMap::new(), round: 0, built: 0 }
+        Evaluator { tolerance: Tolerance::default(), draft: 1.0, finest_cell: 0.25, cache: HashMap::new(), round: 0, built: 0, brep: None, brep_chord: 0.05 }
     }
 }
 
@@ -85,6 +89,7 @@ pub fn transform_matrix(at: P3, rotate: P3, scale: P3) -> [[f64; 4]; 3] {
 
 fn place(mut m: TriMesh, frame: (Vec3d, Vec3d, Vec3d)) -> TriMesh {
     let (u, v, w) = frame;
+    m.clear_normals();
     for p in &mut m.vertices {
         *p = u * p.x + v * p.y + w * p.z;
     }
@@ -111,11 +116,52 @@ fn gear_of(g: &Graph, id: NodeId) -> Option<&GearSpec> {
     }
 }
 
+/// The recipe of a body: its steps, inputs before what reads them, each once.
+pub fn brep_steps(g: &Graph, id: NodeId) -> Vec<BrepStep> {
+    fn visit(g: &Graph, id: NodeId, seen: &mut Vec<NodeId>, out: &mut Vec<BrepStep>) {
+        if seen.contains(&id) {
+            return;
+        }
+        seen.push(id);
+        let node = g.node(id);
+        if let Op::Brep { op, inputs } = &node.op {
+            for i in inputs {
+                visit(g, *i, seen, out);
+            }
+            out.push(BrepStep { key: node.key, op: op.clone(), inputs: inputs.iter().map(|i| g.node(*i).key).collect() });
+        }
+    }
+    let (mut seen, mut out) = (Vec::new(), Vec::new());
+    visit(g, id, &mut seen, &mut out);
+    out
+}
+
 fn cad_gear(g: &GearSpec) -> cad::Gear {
     cad::Gear { module: g.module, teeth: g.teeth as usize, pressure_deg: g.pressure, backlash: g.backlash, shift: g.shift, bore: g.bore }
 }
 
 impl Evaluator {
+    /// Exact properties of a body node.
+    pub fn brep_measure(&self, g: &Graph, id: NodeId) -> Option<Result<BrepMeasure, BrepFailure>> {
+        matches!(g.node(id).op, Op::Brep { .. }).then(|| match &self.brep {
+            Some(e) => e.measure(brep_steps(g, id)),
+            None => Err(BrepFailure { step: None, message: "this build has no B-rep engine".into() }),
+        })
+    }
+
+    /// Exact (edges, faces) of a body node.
+    pub fn brep_entities(&self, g: &Graph, id: NodeId) -> Option<Result<(Vec<BrepEntity>, Vec<BrepEntity>), BrepFailure>> {
+        matches!(g.node(id).op, Op::Brep { .. }).then(|| match &self.brep {
+            Some(e) => e.entities(brep_steps(g, id)),
+            None => Err(BrepFailure { step: None, message: "this build has no B-rep engine".into() }),
+        })
+    }
+
+    /// An evaluator that builds exact bodies with this engine.
+    pub fn with_brep(engine: Arc<dyn BrepEngine>) -> Evaluator {
+        Evaluator { brep: Some(engine), ..Evaluator::default() }
+    }
+
     pub fn new() -> Evaluator {
         Evaluator::default()
     }
@@ -132,13 +178,27 @@ impl Evaluator {
     /// The mesh of `id` (model frame).
     pub fn mesh(&mut self, g: &Graph, id: NodeId, cancelled: Option<&dyn Fn() -> bool>) -> Result<Arc<TriMesh>, Failure> {
         let node = g.node(id);
-        let draft = if self.drafted(g, id) { self.draft.to_bits() } else { 0 };
+        // An exact body's mesh follows the view's detail too: both make its chord.
+        let draft = if self.drafted(g, id) { (self.draft_scale() * self.brep_chord).to_bits() } else { 0 };
         if let Some((m, used)) = self.cache.get_mut(&(node.key, draft)) {
             *used = self.round;
             return Ok(m.clone());
         }
         if cancelled.is_some_and(|c| c()) {
             return Err(Failure { node: id, op: node.op.name(), message: "cancelled".into() });
+        }
+        if let Op::Brep { .. } = &node.op {
+            // A recipe for the engine: bodies, no meshes of the steps before.
+            let engine = self.brep.clone().ok_or_else(|| Failure { node: id, op: node.op.name(), message: "this build has no B-rep engine".into() })?;
+            let chord = self.brep_chord * self.draft_scale();
+            let m = engine.mesh(brep_steps(g, id), chord, cancelled).map_err(|f| {
+                // The failure belongs at the step's own line, not the last op's.
+                let at = f.step.and_then(|k| g.nodes.iter().position(|n| n.key == k)).map_or(id, |i| NodeId(i as u32));
+                Failure { node: at, op: g.node(at).op.name(), message: f.message }
+            })?;
+            self.built += 1;
+            self.cache.insert((node.key, draft), (m.clone(), self.round));
+            return Ok(m);
         }
         let mut inputs = Vec::new();
         for i in node.op.inputs() {
@@ -166,7 +226,7 @@ impl Evaluator {
     /// Whether the node's mesh depends on the draft (a field or a shell below it).
     fn drafted(&self, g: &Graph, id: NodeId) -> bool {
         match &g.node(id).op {
-            Op::Field { .. } | Op::Shell { .. } => true,
+            Op::Field { .. } | Op::Shell { .. } | Op::Brep { .. } => true,
             op => op.inputs().into_iter().any(|i| self.drafted(g, i)),
         }
     }
@@ -273,6 +333,7 @@ impl Evaluator {
                     let phi = dir - (dir / pitch_o).round() * pitch_o;
                     let turn = std::f64::consts::PI + dir + std::f64::consts::PI / cg.teeth as f64 + phi * og.teeth as f64 / cg.teeth as f64;
                     let (s, c) = turn.sin_cos();
+                    m.clear_normals();
                     for p in &mut m.vertices {
                         let (x, y) = (p.x, p.y);
                         p.x = x * c - y * s;
@@ -280,17 +341,18 @@ impl Evaluator {
                     }
                 }
                 let mut m = place(m, plane_frame(*plane));
+                m.clear_normals();
                 for p in &mut m.vertices {
                     *p = *p + offset;
                 }
                 Ok(m)
             }
-            Op::Thread { diameter, pitch, length, clearance, left } => {
+            Op::Thread { diameter, pitch, length, clearance, left, runout, internal } => {
                 let pitch = match pitch {
                     Some(p) => *p,
                     None => cad::iso_coarse_pitch(*diameter).ok_or_else(|| format!("no ISO coarse pitch for {diameter}: give 'pitch'"))?,
                 };
-                let t = cad::Thread { diameter: *diameter, pitch, length: *length, clearance: *clearance, left: *left };
+                let t = cad::Thread { diameter: *diameter, pitch, length: *length, clearance: *clearance, left: *left, runout: *runout, internal: *internal };
                 // Along +Y.
                 Ok(place(t.solid(&tol)?, (dvec3(1.0, 0.0, 0.0), dvec3(0.0, 0.0, -1.0), dvec3(0.0, 1.0, 0.0))))
             }
@@ -305,6 +367,7 @@ impl Evaluator {
             Op::Mirror { plane, center, keep, .. } => {
                 let source = &inputs[0];
                 let mut m = (**source).clone();
+                m.clear_normals();
                 for p in &mut m.vertices {
                     match plane {
                         MirrorPlane::Yz => p.x = 2.0 * center[0] - p.x,
@@ -336,6 +399,7 @@ impl Evaluator {
             Op::Transform { at, rotate, scale, .. } => {
                 let m = transform_matrix(*at, *rotate, *scale);
                 let mut out = (*inputs[0]).clone();
+                out.clear_normals();
                 for p in &mut out.vertices {
                     let q = [p.x, p.y, p.z];
                     *p = dvec3(
@@ -361,6 +425,8 @@ impl Evaluator {
                 nonempty(makepad_csg_sdf::mesh_field(shape.field(), min, max, cell, shape.lipschitz()), "shape (nothing inside its surface)")
             }
             Op::Mesh { mesh } => Ok((**mesh).clone()),
+            // `mesh` hands these to the engine before it gets here.
+            Op::Brep { .. } => Err("an exact body reached the mesh builder".into()),
             Op::Links { links, sides, .. } => nonempty(links.mesh(*sides), "links (no link has three points)"),
         }
     }
@@ -450,8 +516,9 @@ fn hole(source: &TriMesh, kind: HoleKind, d: f64, depth: Option<f64>, points: &[
                 None => cad::iso_coarse_pitch(d).ok_or_else(|| format!("no ISO coarse pitch for {d}: give 'pitch'"))?,
             };
             let len = depth.min(through) + 1.0;
-            let t = cad::Thread { diameter: d, pitch, length: len, clearance, left: false };
+            let t = cad::Thread { diameter: d, pitch, length: len, clearance, left: false, runout: None, internal: true };
             let mut m = t.solid(tol)?;
+            m.clear_normals();
             // Along +Z from 0: turned half round X (a rotation, so the hand stays) and
             // raised, it runs from 1 above the surface down.
             for p in &mut m.vertices {
@@ -476,6 +543,7 @@ fn hole(source: &TriMesh, kind: HoleKind, d: f64, depth: Option<f64>, points: &[
         }
         let o = v3(*p);
         let mut t = tool.clone();
+        t.clear_normals();
         for q in &mut t.vertices {
             *q = o + u * q.x + vv * q.y + w * q.z;
         }
@@ -523,6 +591,7 @@ fn shell(source: &TriMesh, t: f64, open: Open, cell: Option<f64>, draft: f64) ->
         return Err("the walls fill the object: nothing left to hollow".into());
     }
     if cad::signed_volume(&cavity) < 0.0 {
+        cavity.clear_normals();
         for tri in &mut cavity.triangles {
             tri.swap(1, 2);
         }
@@ -541,6 +610,7 @@ fn shell(source: &TriMesh, t: f64, open: Open, cell: Option<f64>, draft: f64) ->
         }
         let (from, to) = if top { (cut_y - cell, bb.max.y + 1.0) } else { (bb.min.y - 1.0, cut_y + cell) };
         let mut prism = cad::extrude(&regions, to - from, 0.0, false)?;
+        prism.clear_normals();
         // Section (u, v) = model (x, z); extrude +Z = model +Y.
         for p in &mut prism.vertices {
             *p = dvec3(p.x, from + p.z, p.y);

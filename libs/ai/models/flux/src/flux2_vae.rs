@@ -837,21 +837,4 @@ mod tests {
         assert_eq!(banker_u8(2.5 / 255.0), 2);
     }
 
-    #[test]
-    fn local_vae_loads_when_downloaded() {
-        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../local/models/flux2/flux2-vae.safetensors");
-        if !path.is_file() {
-            eprintln!("flux2 vae file missing, skip");
-            return;
-        }
-        let weights = Flux2VaeWeights::load(&path).expect("load vae");
-        assert_eq!(weights.bn_mean().len(), 128);
-        assert!(weights.has_tensor("decoder.conv_in.weight"));
-        assert!(weights.has_tensor("decoder.up.3.block.0.conv1.weight"));
-        assert!(weights.has_tensor("decoder.mid.attn_1.q.weight"));
-        assert!(weights.has_tensor("encoder.quant_conv.weight"));
-        assert!(weights.has_tensor("decoder.post_quant_conv.weight"));
-        assert!(weights.has_tensor("encoder.down.0.downsample.conv.weight"));
-    }
 }

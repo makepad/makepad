@@ -901,24 +901,6 @@ fn impl_f32x8_reduce_add() {
 }
 
 #[test]
-fn impl_f32x8_sum() {
-  let mut p = Vec::with_capacity(250_000);
-  for _ in 0..125_000 {
-    p.push(f32x8::splat(0.001));
-  }
-  let now = std::time::Instant::now();
-  let sum: f32 = p.iter().map(|x| x.reduce_add()).sum();
-  let duration = now.elapsed().as_micros();
-  println!("Time take {} {}us", sum, duration);
-
-  let p = vec![0.001; 1_000_000];
-  let now = std::time::Instant::now();
-  let sum2: f32 = p.iter().sum();
-  let duration = now.elapsed().as_micros();
-  println!("Time take {} {}us", sum2, duration);
-}
-
-#[test]
 fn impl_transpose_for_f32x8() {
   let a = [
     f32x8::new([0.1, 1.1, 2.1, 3.1, 4.1, 5.1, 6.1, 7.1]),

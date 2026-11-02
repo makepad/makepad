@@ -9,5 +9,5 @@ description = "Self-contained Wayland wire server core (no libwayland): wire cod
 [lib]
 name = "wayland_server"
 
-[dependencies]
+[target.'cfg(target_os = "linux")'.dependencies]
 makepad-xkb-keymap = { path = "../xkb_keymap" }

@@ -321,21 +321,4 @@ mod tests {
         assert_eq!(forest.id(1), Some(LiveId(3)));
         assert_eq!(forest.index_of(LiveId(3)), Some(1));
     }
-
-    #[test]
-    fn the_shared_surfaces_register_before_the_three_that_draw_with_them() {
-        // The three merge their colours into a panel and a row whose type
-        // defaults are the shaders registered here, so those have to be
-        // standing first. The order is only a list of calls in lib.rs, and
-        // nothing else says when it has been sorted.
-        let calls = crate::widgets_mod_source();
-        let at = |module: &str| {
-            calls.find(&format!("crate::{module}::script_mod(vm);"))
-                .unwrap_or_else(|| panic!("{module} is not registered"))
-        };
-        let parts = at("picker_parts");
-        for user in ["column_picker", "tree_select", "transfer"] {
-            assert!(parts < at(user), "{user} registers before the surfaces it draws with");
-        }
-    }
 }

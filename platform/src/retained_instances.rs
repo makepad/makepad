@@ -711,6 +711,8 @@ struct InstancePublication {
     // Prefix recordings still own the producer's entire CPU allocation.
     // Preserve its weak accounting receipt until the last view is retired.
     source: Option<Arc<InstancePublication>>,
+    #[cfg(not(target_arch = "wasm32"))]
+    origin: crate::gpu_ledger::GpuOrigin,
 }
 
 pub struct InstanceDataSlices<'a> {
@@ -738,6 +740,7 @@ impl<'a> Iterator for InstanceDataSlices<'a> {
 
 impl RetainedInstances {
     /// Worker-side construction. No UI copy and no mutable alias of the payload.
+    #[track_caller]
     pub fn new(slots: usize, data: Arc<[f32]>) -> Result<Self, &'static str> {
         let result = Self::from_segments(slots, vec![InstanceSegment::new(data.clone())])?;
         // Preserve the original Arc for existing shared-instance publishers,
@@ -747,6 +750,7 @@ impl RetainedInstances {
     }
     /// Publish an ordered segment directory. Only metadata is inspected/copied;
     /// each segment must contain whole instance records of this stride.
+    #[track_caller]
     pub fn from_segments(
         slots: usize,
         mut segments: Vec<InstanceSegment>,
@@ -780,10 +784,16 @@ impl RetainedInstances {
             contiguous,
             append_checkpoints: Arc::from([]),
             source: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            origin: crate::gpu_ledger::GpuOrigin::here(),
         })))
     }
     pub fn id(&self) -> u64 {
         self.0.id
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn origin(&self) -> &crate::gpu_ledger::GpuOrigin {
+        &self.0.origin
     }
     pub fn downgrade(&self) -> WeakRetainedInstances {
         WeakRetainedInstances {

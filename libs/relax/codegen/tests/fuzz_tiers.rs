@@ -25,6 +25,17 @@ impl Rng {
     }
 }
 
+thread_local! {
+    /// The wide-constant programs (wide_constant_programs_agree, or FUZZ_WIDE=1 with FUZZ_SEED):
+    /// immediates and compare constants from the edges of the 32- and 64-bit ranges, some ops in
+    /// place. Off, the generator draws exactly what it always drew (the seeds keep their programs).
+    static WIDE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Constants at the edges of the imm32 forms: a 64-bit op's imm32 is sign-extended, so these
+/// must reach the code whole (`x & 0xffff_ffff` in place was once `and r64, -1`).
+const WIDE_K: [i64; 14] = [0xffff_ffff, 0x8000_0000, 0x7fff_ffff, -0x8000_0000, -0x8000_0001, 0x1_0000_0000, 0x1_0000_00ff, 1 << 40, 0xffff_ffff_0000, -1, i64::MIN, i64::MAX, 0x7fff_ffff_ffff_0000, -0x1_0000_0001];
+
 /// words of the memory buffer: [0, INT_WORDS) integers, [INT_WORDS, WORDS) floats
 const INT_WORDS: usize = 48;
 const WORDS: usize = 64;
@@ -107,6 +118,12 @@ impl Gen<'_> {
         let v = self.int();
         let c = self.f.vreg(Cls::I);
         let k = self.r.below(3) as i64;
+        if WIDE.get() && self.r.chance(30) {
+            let k = WIDE_K[self.r.below(WIDE_K.len() as u64) as usize];
+            let (cc, sg) = (CONDS[self.r.below(6) as usize], self.r.chance(50));
+            self.i(Inst::ICmpI(cc, sg, c, v, k));
+            return c;
+        }
         self.i(Inst::ICmpI(Cond::Gt, false, c, v, k));
         c
     }
@@ -153,7 +170,16 @@ impl Gen<'_> {
                 let (op, ty) = self.op_ty();
                 let a = self.canon(a, ty);
                 // (an immediate in the type's canonical form, as lowering makes them)
-                let k = if matches!(op, IOp::Shl | IOp::Shr) { self.r.below(ty.bits as u64) as i64 } else if op == IOp::Rotl { self.r.below(200) as i64 } else { passes::fold_ibin(IOp::Add, ty, self.r.below(200) as i64 - 60, 0).unwrap() };
+                let mut k = if matches!(op, IOp::Shl | IOp::Shr) { self.r.below(ty.bits as u64) as i64 } else if op == IOp::Rotl { self.r.below(200) as i64 } else { passes::fold_ibin(IOp::Add, ty, self.r.below(200) as i64 - 60, 0).unwrap() };
+                if WIDE.get() && !matches!(op, IOp::Shl | IOp::Shr | IOp::Rotl) && self.r.chance(50) {
+                    // (in the type's canonical form, as lowering makes them)
+                    k = passes::fold_ibin(IOp::Add, ty, WIDE_K[self.r.below(WIDE_K.len() as u64) as usize], 0).unwrap();
+                    if ty.bits == 64 && !self.counters.contains(&a) && self.r.chance(50) {
+                        // in place: the result register is the operand's
+                        self.i(Inst::IBinI(op, ty, a, a, k));
+                        return;
+                    }
+                }
                 let d = self.dst_i();
                 self.i(Inst::IBinI(op, ty, d, a, k));
             }
@@ -787,6 +813,7 @@ fn random_programs_agree_across_tiers() {
         eprintln!("{:#x} agrees everywhere", s);
         return;
     }
+    WIDE.set(std::env::var_os("FUZZ_WIDE").is_some());
     if let Some(s) = std::env::var("FUZZ_SEED").ok().and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok()) {
         eprintln!("{:?}", check(s));
         if let Ok(dump) = std::env::var("FUZZ_DUMP") {
@@ -813,6 +840,21 @@ fn random_programs_agree_across_tiers() {
     }
     eprintln!("fuzz: {} programs, {} native runs, {} disagree", n, runs, fails.len());
     assert!(fails.is_empty(), "programs disagreeing across tiers (rerun with FUZZ_SEED=<hex>): {:x?}", fails);
+}
+
+/// The wide-constant programs: as random_programs_agree_across_tiers, with constants from the
+/// edges of the imm32 range (WIDE_K), some 64-bit ops in place. Rerun one with FUZZ_WIDE=1
+/// FUZZ_SEED=<hex> in random_programs_agree_across_tiers.
+#[test]
+fn wide_constant_programs_agree() {
+    WIDE.set(true);
+    let n: u64 = std::env::var("FUZZ_N").ok().and_then(|v| v.parse().ok()).unwrap_or(150);
+    let first: u64 = std::env::var("FUZZ_FIRST").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
+    let fails: Vec<String> = (first..first + n).filter_map(|k| check(k.wrapping_mul(0x9e37_79b9_7f4a_7c15)).err()).collect();
+    for e in &fails {
+        eprintln!("fuzz: wide {}", e);
+    }
+    assert!(fails.is_empty(), "wide-constant programs disagree (rerun with FUZZ_WIDE=1 FUZZ_SEED=<hex>):\n{}", fails.join("\n"));
 }
 
 /// Seeds the clock-seeded batch found (FUZZ-NEW): they block from then on, in every tier.

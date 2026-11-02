@@ -145,7 +145,7 @@ fn cli_validation_distinguishes_warnings_errors_and_root() {
         String::from_utf8(output.stdout).unwrap(),
         "validation: 0 errors, 0 warnings\n"
     );
-    assert!(output.stderr.is_empty());
+    assert!(output.stderr.is_empty(), "{}", String::from_utf8_lossy(&output.stderr));
     let mut plan = example();
     plan.arch.prompt = "arch/future".into();
     caller.write("plan.toml", &format(&plan));

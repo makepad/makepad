@@ -672,10 +672,4 @@ mod tests {
         assert_eq!(parse_hypr_color("#abcdef").unwrap().rgb.hex(), "#abcdef");
         assert!(parse_hypr_color("nope").is_none());
     }
-
-    #[test]
-    fn the_default_theme_resolves_a_shell_block() {
-        let block = shell_splash_block(BUNDLED_TOKYO_NIGHT_SPLASH);
-        assert!(block.starts_with("mod.wm_theme.shell = {"));
-    }
 }

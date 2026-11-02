@@ -155,22 +155,13 @@ impl SocketStream {
     }
 
     fn capture(host: &str, port: &str, resume: Option<&crate::tls::platform::ServerStream>) -> io::Result<(Self, Vec<u8>)> {
-        use std::net::ToSocketAddrs;
         let port: u16 = port.parse().map_err(|_| io_other("bad port"))?;
-        let mut last = None;
-        for addr in (host, port).to_socket_addrs()? {
-            match std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(5)) {
-                Ok(tcp) => {
-                    let _ = tcp.set_nodelay(true);
-                    tcp.set_read_timeout(Some(Duration::from_secs(20)))?;
-                    let (stream, der) = crate::tls::platform::connect_capture(tcp, host, resume)?;
-                    stream.tcp().set_read_timeout(None)?;
-                    return Ok((Self { socket: None, reader: None, writer: None, schannel: Some(stream) }, der));
-                }
-                Err(e) => last = Some(e),
-            }
-        }
-        Err(last.unwrap_or_else(|| io_other("no address")))
+        let tcp = crate::lan::connect_host("fleet tls", host, port, Some(Duration::from_secs(5)))?;
+        let _ = tcp.set_nodelay(true);
+        tcp.set_read_timeout(Some(Duration::from_secs(20)))?;
+        let (stream, der) = crate::tls::platform::connect_capture(tcp, host, resume)?;
+        stream.tcp().set_read_timeout(None)?;
+        Ok((Self { socket: None, reader: None, writer: None, schannel: Some(stream) }, der))
     }
 
     pub fn connect_capture_chain(host: &str, port: &str) -> io::Result<(Self, Vec<Vec<u8>>)> {

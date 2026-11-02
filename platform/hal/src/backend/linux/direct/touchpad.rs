@@ -528,7 +528,7 @@ fn release_velocity(samples: &[(f64, Vec2d)], lift: f64) -> Vec2d {
 mod tests {
     use super::*;
 
-    /// The ASUS clickpad on a node (ASUF1209:00 2808:0219): 148 x 96 mm.
+    /// The ASUS clickpad on a pool node (ASUF1209:00 2808:0219): 148 x 96 mm.
     const PAD: Vec2d = Vec2d { x: 148.8, y: 96.8 };
     /// Its report period (~7 ms).
     const DT: f64 = 0.007;

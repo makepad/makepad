@@ -29,6 +29,11 @@ static MODULES: relax_session::sync::Mutex<Vec<Module>> = relax_session::sync::M
 static MODULE_CRATES: relax_session::sync::Mutex<Vec<u32>> = relax_session::sync::Mutex::new(Vec::new());
 static ANY_MODULE_CRATE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+fn module_trace() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("MAKEPAD_RUN_MODULE_TRACE").is_some())
+}
+
 fn note_module_crate(krate: u32) {
     let mut v = MODULE_CRATES.lock().unwrap_or_else(|e| e.into_inner());
     if !v.contains(&krate) {
@@ -230,7 +235,7 @@ pub(crate) struct Added {
 /// the declarations are collected whatever the diagnostics.
 pub(crate) unsafe fn add_crates(up: *mut Unit, new: &[NewCrate], tolerant: bool, domain: Option<crate::domain::DomainId>) -> Result<Added, Vec<String>> {
     let u = &mut *up;
-    let tr = std::env::var_os("MAKEPAD_RUN_MODULE_TRACE").is_some();
+    let tr = module_trace();
     let mut marks: Vec<(&str, std::time::Instant)> = vec![("", std::time::Instant::now())];
     let d0 = u.prog.defs.len();
     let i0 = u.prog.imports.len();
@@ -343,7 +348,7 @@ unsafe fn front(up: *mut Unit, name: &str, path: &str, deps: &[String], sandbox:
         }
     }
     let cfg = crate::program_cfg(sess, &[]);
-    let tr = std::env::var_os("MAKEPAD_RUN_MODULE_TRACE").is_some();
+    let tr = module_trace();
     let mut marks: Vec<(&str, std::time::Instant)> = vec![("", std::time::Instant::now())];
     let added = add_crates(up, &[NewCrate { name: name.to_string(), path: path.to_string(), edition: 2021, cfg, deps: dep_list, proc_macro: false }], false, None)?;
     let u = &mut *up;
@@ -900,7 +905,7 @@ unsafe fn load_sandboxed(up: *mut Unit, idx: u32, name: &str, path: &str, deps: 
         return Err(fail(up, &defs, e));
     }
     // MAKEPAD_RUN_MODULE_TRACE=1: where a load's time goes
-    if std::env::var_os("MAKEPAD_RUN_MODULE_TRACE").is_some() {
+    if module_trace() {
         eprintln!(
             "makepad-run module: {} loaded in {:.2} ms: front {:.2} (parse, resolve, typeck, check), wrapper {:.2}, compile {:.2} ({} slots)",
             name,

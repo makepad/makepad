@@ -16,5 +16,4 @@ ttf-parser = { version = "0.24.1", path = "../ttf-parser", features = ["gvar-all
 unicode-segmentation = { version = "1.12.0", path = "../unicode/unicode-segmentation" }
 
 [dev-dependencies]
-# Size report only: the web export serves fonts inside a brotli-compressed wasm.
 brotli = { path = "../brotli/brotli" }

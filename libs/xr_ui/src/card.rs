@@ -69,17 +69,27 @@ impl Card {
 
     /// Where a ray meets the card's front: (u, v) from its top left in 0..1, and the distance.
     pub fn hit(&self, origin: Vec3f, dir: Vec3f) -> Option<(Vec2f, f32)> {
+        let (uv, t) = self.project_ray(origin, dir)?;
+        ((0.0..=1.0).contains(&uv.x) && (0.0..=1.0).contains(&uv.y)).then_some((uv, t))
+    }
+
+    /// A point projected onto the card's plane, including outside its edges (drag capture).
+    pub fn project(&self, point: Vec3f) -> Vec2f {
+        let p = point - self.center;
+        vec2f(p.dot(self.right) / self.size.x + 0.5, 0.5 - p.dot(self.up) / self.size.y)
+    }
+
+    /// A ray projected onto the unbounded card plane (drag capture).
+    pub fn project_ray(&self, origin: Vec3f, dir: Vec3f) -> Option<(Vec2f, f32)> {
         let denom = dir.dot(self.normal);
         if denom.abs() < 1e-5 {
             return None;
         }
         let t = (self.center - origin).dot(self.normal) / denom;
-        if t < 0.0 {
+        if !t.is_finite() || t < 0.0 {
             return None;
         }
-        let p = origin + dir * t - self.center;
-        let (u, v) = (p.dot(self.right) / self.size.x + 0.5, 0.5 - p.dot(self.up) / self.size.y);
-        ((0.0..=1.0).contains(&u) && (0.0..=1.0).contains(&v)).then(|| (vec2f(u, v), t))
+        Some((self.project(origin + dir * t), t))
     }
 
     /// Where a fingertip touches the card (within [`POKE_M`] of its plane).

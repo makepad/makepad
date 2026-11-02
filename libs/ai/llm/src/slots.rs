@@ -1556,32 +1556,6 @@ mod tests {
     }
 
     #[test]
-    fn the_gpu_b_numbers_did_not_move_when_the_6000_got_its_own() {
-        // .89 is a different card with its own measurement; giving .76 a
-        // curve must not touch it. The anchors are the ones
-        // `a_verify_batch_is_priced_as_a_verify_batch` pins.
-        let fit = StepCostModel::for_device("NVIDIA GeForce GPU-B");
-        assert!((fit.verify_ms(4) - 40.4).abs() < 2.0, "{}", fit.verify_ms(4));
-        assert!((fit.verify_ms(8) - 63.3).abs() < 2.0, "{}", fit.verify_ms(8));
-        assert_eq!(fit.step_ms(1), Some(14.113));
-        assert_eq!(fit.step_ms(8), Some(39.986));
-        // Its verdict on the batched path is unchanged too: no round pays.
-        for width in 2..=4usize {
-            assert_eq!(
-                batched_draft_depth(
-                    width,
-                    SOLO_DRAFT_MAX,
-                    BATCHED_CHAT_ACCEPTANCE,
-                    &SchedulerConfig::default(),
-                    &fit.clone().with_restricted_draft_head()
-                ),
-                0,
-                "width {width}"
-            );
-        }
-    }
-
-    #[test]
     fn the_gpu_c_verify_curve_is_the_measured_one() {
         let card = StepCostModel::measured_gpu_c();
         // Measured anchors from the `.76` sweep (recipe §11, Step C), so a

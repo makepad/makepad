@@ -99,7 +99,6 @@ pub const ATTR_XCRATE: u8 = 16;
 pub const ATTR_COLD_SRC: u8 = 32;
 /// size limit of rule 4 (fused chains; the callee may call: its callees were inlined bottom-up)
 pub const INLINE_CHAIN_INSTS: usize = 120;
-pub const INLINE_SINGLE_INSTS: usize = 3000;
 /// ATTR_XCRATE: largest leaf (RIR instructions) taken as rustc's 100-statement cross-crate bound
 pub const XCRATE_LEAF_INSTS: usize = 100;
 const HISTORY_DEPTH_LIMIT: usize = 20;
@@ -148,12 +147,6 @@ pub fn rustc_inline_cost(callee: &Func, _callee_id: u32) -> usize {
         }
     }
     penalty.saturating_sub(bonus)
-}
-
-/// LLVM's single-caller rule is opt-in (`MAKEPAD_RUN_OPT=+single`) until html_parse's regression and
-/// its O3 compile cost are fixed.
-pub fn single_on(options: &relax_session::Options) -> bool {
-    options.opt.iter().any(|t| t.trim() == "+single")
 }
 
 pub fn rustc_inline_threshold(callee: &Func, attrs: u8) -> usize {
@@ -244,11 +237,8 @@ impl InlineLimits {
 /// bodies are small: at most 25 instructions that are not moves or constants): a bottom-up
 /// preparation whose O1 body is already larger rarely optimises down into range, so it is not
 /// prepared and its sites decide on the snapshot body.
-pub fn max_admitted_insts(options: &relax_session::Options, attrs: u8) -> usize {
+pub fn max_admitted_insts(attrs: u8) -> usize {
     let lim = InlineLimits::tier1();
-    if single_on(options) {
-        return INLINE_SINGLE_INSTS;
-    }
     let mut n = lim.leaf_insts.max(lim.hot_insts);
     if attrs & ATTR_ALWAYS != 0 { n = n.max(lim.always_insts); }
     if attrs & ATTR_HINT != 0 { n = n.max(lim.hint_insts); }
@@ -655,9 +645,6 @@ fn site_rule(options: &relax_session::Options, callee: &Func, id: u32, nargs: us
         let unwinds = callee.blocks.iter().any(|b| matches!(b.term, Term::Resume | Term::Invoke(..)));
         return (leaf && !unwinds && n <= XCRATE_LEAF_INSTS && callee.blocks.len() <= lim.leaf_blocks).then_some(RULE_SMALL_LEAF);
     }
-    if single && single_on(options) && attrs & ATTR_COLD == 0 && inline_inst_count(callee) <= INLINE_SINGLE_INSTS {
-        return Some(RULE_SINGLE);
-    }
     if !opt_off(options, "-costmodel") && depth < HISTORY_DEPTH_LIMIT {
         let past_depth = multi_depth > TOP_DOWN_DEPTH_LIMIT;
         let threshold = if past_depth { 30 } else { rustc_inline_threshold(callee, attrs) };
@@ -886,7 +873,7 @@ pub fn inline_calls_ordered(options: &relax_session::Options, f: &mut Func, self
             let free = size <= INLINE_FREE_INSTS && size <= free_budget;
             // A tiny body (no bigger than the call's own argument/return moves, or within the free
             // size) is admitted whatever the caller has grown to: refusing it keeps a call that costs
-            // more than the body (sandbox leap, a node: encode_cascades left core::mem::drop x130,
+            // more than the body (sandbox leap, a pool node: encode_cascades left core::mem::drop x130,
             // rc::header_of x140, slice::iter::next x26 as calls -- "budget" -- once big chains had
             // filled the growth ceiling). Only the raw free allowance is charged for it.
             let tiny = size <= INLINE_FREE_INSTS;
@@ -6374,36 +6361,8 @@ mod inline_priority_tests {
     }
 
     #[test]
-    fn single_caller_500_insts_inlines_but_two_refs_do_not() {
-        let options = &{ let mut o = relax_session::Options::default(); o.opt.push("+single".into()); o };
-        let c = callee(500);
-        let get = |id| (id == 1).then_some((&c as *const Func, 0));
-        for refs in [1, 2] {
-            let single = |owner, id| refs == 1 && owner == 0 && id == 1;
-            let mut f = one_call(1);
-            let mut lim = InlineLimits::tier1();
-            lim.budget = 0;
-            let mut stats = InlineStats::default();
-            let result = inline_calls_ordered(options, &mut f, 0, &get, &|_| None, &single, &|_| false, &lim, Some(&[0.0]), Some(&mut stats));
-            assert_eq!(result, if refs == 1 { vec![(1, RULE_SINGLE)] } else { vec![] });
-            assert_eq!(stats.rules[RULE_SINGLE], usize::from(refs == 1));
-            f.verify().unwrap();
-        }
-    }
-
-    #[test]
-    fn cold_single_caller_stays_a_call() {
-        let options = &{ let mut o = relax_session::Options::default(); o.opt.push("+single".into()); o };
-        let c = callee(500);
-        let get = |id| (id == 1).then_some((&c as *const Func, ATTR_COLD));
-        let mut f = one_call(1);
-        assert!(inline_calls_ordered(options, &mut f, 0, &get, &|_| None, &|_, _| true, &|_| false, &InlineLimits::tier1(), Some(&[1.0]), None).is_empty());
-        assert!(matches!(f.blocks[0].insts[0], Inst::Call(Callee::Fn(1), _, _)));
-    }
-
-    #[test]
-    fn cost_model_and_single_keep_calls_on_cold_paths() {
-        let options = &{ let mut o = relax_session::Options::default(); o.opt.push("+single".into()); o };
+    fn cost_model_keeps_calls_on_cold_paths() {
+        let options = &relax_session::Options::default();
         let c = cheap_callee(30);
         let get = |id| (id == 1).then_some((&c as *const Func, 0));
         for term in [Term::Unreachable, Term::Resume] {
@@ -6414,15 +6373,14 @@ mod inline_priority_tests {
     }
 
     #[test]
-    fn cost_model_and_single_switches_disable_their_rules() {
-        // -costmodel turns the cost model off; the single-caller rule is off unless +single
-        for (toggle, c) in [("-costmodel", cheap_callee(30)), ("", callee(500))] {
-            let mut options = relax_session::Options::default();
-            options.opt.push(toggle.into());
-            let get = |id| (id == 1).then_some((&c as *const Func, 0));
-            let mut f = one_call(1);
-            assert!(inline_calls_ordered(&options, &mut f, 0, &get, &|_| None, &|_, _| toggle.is_empty(), &|_| false, &InlineLimits::tier1(), Some(&[0.0]), None).is_empty());
-        }
+    fn cost_model_switch_disables_its_rule() {
+        // -costmodel turns the cost model off
+        let mut options = relax_session::Options::default();
+        options.opt.push("-costmodel".into());
+        let c = cheap_callee(30);
+        let get = |id| (id == 1).then_some((&c as *const Func, 0));
+        let mut f = one_call(1);
+        assert!(inline_calls_ordered(&options, &mut f, 0, &get, &|_| None, &|_, _| false, &|_| false, &InlineLimits::tier1(), Some(&[0.0]), None).is_empty());
     }
 
     #[test]
@@ -6440,35 +6398,6 @@ mod inline_priority_tests {
         f.verify().unwrap();
         lim.growth_limit = Some(999);
         assert!(inline_calls_ordered(options, &mut one_call(1), 0, &get, &|_| None, &|_, _| false, &|_| false, &lim, None, None).is_empty());
-    }
-
-    #[test]
-    fn single_caller_respects_size_and_growth_caps() {
-        let options = &{ let mut o = relax_session::Options::default(); o.opt.push("+single".into()); o };
-        for (size, ceiling, expected) in [(3000, 3000, 1), (3001, 4001, 0), (500, 499, 0)] {
-            let c = callee(size);
-            let get = |id| (id == 1).then_some((&c as *const Func, 0));
-            let mut lim = InlineLimits::tier1();
-            lim.budget = 0;
-            lim.growth_limit = Some(ceiling);
-            assert_eq!(inline_calls_ordered(options, &mut one_call(1), 0, &get, &|_| None, &|_, _| true, &|_| false, &lim, None, None).len(), expected);
-        }
-    }
-
-    #[test]
-    fn single_caller_ignores_paid_and_free_budgets() {
-        let options = &{ let mut o = relax_session::Options::default(); o.opt.push("+single".into()); o };
-        let c = callee(500);
-        let get = |_: u32| Some((&c as *const Func, 0));
-        let mut f = callee(0);
-        f.blocks[0].insts = (1..=9).map(|id| Inst::Call(Callee::Fn(id), vec![], vec![])).collect();
-        f.blocks[0].pos = vec![0; 9];
-        let mut lim = InlineLimits::tier1();
-        lim.budget = 0;
-        lim.growth_limit = Some(5000);
-        assert_eq!(inline_calls_ordered(options, &mut f, 0, &get, &|_| None, &|owner, _| owner == 0, &|_| false, &lim, None, None).len(), 9);
-        assert_eq!(inline_inst_count(&f), 4500); // exceeds the 4000-instruction free allowance
-        f.verify().unwrap();
     }
 
     #[test]
@@ -6521,26 +6450,6 @@ mod inline_priority_tests {
             let mut f = one_call(1);
             let inlined = inline_calls_ordered(options, &mut f, 0, &get, &|_| None, &|_, _| false, &|_| false, &InlineLimits::tier1(), Some(&[0.0]), None);
             assert_eq!(inlined, (1..=expected).map(|id| (id, RULE_COST)).collect::<Vec<_>>());
-            f.verify().unwrap();
-        }
-    }
-
-    #[test]
-    fn single_caller_requires_the_tier0_reference_owner() {
-        let options = &{ let mut o = relax_session::Options::default(); o.opt.push("+single".into()); o };
-        let mut wrapper = cheap_callee(30);
-        wrapper.blocks[0].insts[29] = Inst::Call(Callee::Fn(2), vec![], vec![]);
-        let body = callee(500);
-        let get = |id| match id {
-            1 => Some((&wrapper as *const Func, 0)),
-            2 => Some((&body as *const Func, 0)),
-            _ => None,
-        };
-        for owner in [0, 1] {
-            let mut f = one_call(1);
-            let single = |caller, callee| caller == owner && callee == 2;
-            let result = inline_calls_ordered(options, &mut f, 0, &get, &|_| None, &single, &|_| false, &InlineLimits::tier1(), Some(&[0.0]), None);
-            assert_eq!(result, if owner == 1 { vec![(1, RULE_COST), (2, RULE_SINGLE)] } else { vec![(1, RULE_COST)] });
             f.verify().unwrap();
         }
     }
@@ -8055,6 +7964,14 @@ fn slotcoal_trace() -> bool {
     *T.get_or_init(|| std::env::var_os("MAKEPAD_RUN_SLOTCOAL_TRACE").is_some())
 }
 
+fn slotcoal_dump() -> Option<&'static str> {
+    static VALUE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    VALUE.get_or_init(|| {
+        let _k = relax_session::phase::kept();
+        std::env::var("MAKEPAD_RUN_SLOTCOAL_DUMP").ok()
+    }).as_deref()
+}
+
 /// Slot coalescing along whole copies (O3): `Copy(C <- B)` of one slot's bytes into an equal slot
 /// (or of the whole of the smaller one into, or out of, the start of a larger one: an `Option<T>`
 /// payload or a tuple's first field moved to a slot of its own -- the smaller slot becomes the
@@ -8077,7 +7994,7 @@ pub fn coalesce_slot_copies(f: &mut Func, prefix: bool) -> bool {
         if ns < 2 {
             return any;
         }
-        if slotcoal_trace() && std::env::var("MAKEPAD_RUN_SLOTCOAL_DUMP").is_ok_and(|n| f.name.contains(&n)) {
+        if slotcoal_trace() && slotcoal_dump().is_some_and(|n| f.name.contains(n)) {
             eprintln!("slotcoal {}: round {} RIR\n{}", f.name, _round, f.dump());
         }
         let sc = slot_scan(f);

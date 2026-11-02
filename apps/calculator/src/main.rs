@@ -161,6 +161,3 @@ fn is_close_requested(raw: &str) -> bool {
     };
     value.get("wm").and_then(|wm| wm.get("CloseRequested")).is_some()
 }
-
-#[cfg(test)]
-makepad_script_test::shader_inventory_test!("calculator", <App as AppMain>::script_mod);

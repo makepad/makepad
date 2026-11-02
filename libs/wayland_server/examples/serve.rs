@@ -1,9 +1,16 @@
 //! Serves the compositor on a socket and prints what clients do; for trying real clients without a window manager.
 //! Usage: serve <runtime dir> [seconds]. Configure requests are answered with a 800x600 window.
+#[cfg(target_os = "linux")]
 use std::time::{Duration, Instant};
+#[cfg(target_os = "linux")]
 use wayland_server::compositor::*;
+#[cfg(target_os = "linux")]
 use wayland_server::host::{Command, Host};
 
+#[cfg(not(target_os = "linux"))]
+fn main() {}
+
+#[cfg(target_os = "linux")]
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let dir = std::path::PathBuf::from(&args[1]);

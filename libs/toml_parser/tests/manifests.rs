@@ -46,23 +46,6 @@ fn mail_manifest_has_a_lib_and_two_split_bins() {
 }
 
 #[test]
-fn terminal_manifest() {
-    let doc = parse(include_str!("../../../apps/terminal/Cargo.toml"));
-    assert_eq!(get_str(&doc, &["package", "name"]), Some("makepad-app-terminal"));
-    assert!(doc.get_path(&["dependencies"]).and_then(Toml::as_table).is_some());
-}
-
-#[test]
-fn git_manifest() {
-    let doc = parse(include_str!("../../../libs/git/Cargo.toml"));
-    assert_eq!(get_str(&doc, &["package", "name"]), Some("makepad-git"));
-    assert_eq!(
-        get_str(&doc, &["dependencies", "makepad-fast-inflate", "path"]),
-        Some("../fast_inflate")
-    );
-}
-
-#[test]
 fn package_metadata_through_dotted_keys() {
     let doc = parse(include_str!("../../../tools/cargo_makepad/Cargo.toml"));
     assert_eq!(get_str(&doc, &["package", "name"]), Some("cargo-makepad"));

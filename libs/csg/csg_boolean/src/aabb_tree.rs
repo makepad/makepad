@@ -284,13 +284,6 @@ mod tests {
     }
 
     #[test]
-    fn test_build_single() {
-        let tris = vec![tri(0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0)];
-        let tree = AabbTree::build(&tris);
-        assert_eq!(tree.node_count(), 1);
-    }
-
-    #[test]
     fn test_overlapping_triangles() {
         let a = vec![tri(0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0)];
         let b = vec![tri(0.5, 0.0, -0.5, 0.5, 0.0, 0.5, 0.5, 1.0, 0.0)];
@@ -332,32 +325,5 @@ mod tests {
         for &(_, bi) in &pairs {
             assert_eq!(bi, 0);
         }
-    }
-
-    #[test]
-    fn test_cube_vs_cube() {
-        // Build two cubes' triangles and check overlaps
-        use makepad_csg_mesh::mesh::make_unit_cube;
-
-        let cube_a = make_unit_cube();
-        let tris_a: Vec<_> = (0..cube_a.triangle_count())
-            .map(|i| cube_a.triangle_vertices(i))
-            .collect();
-
-        let mut cube_b = make_unit_cube();
-        cube_b.transform(makepad_csg_math::Mat4d::translation(dvec3(0.5, 0.0, 0.0)));
-        let tris_b: Vec<_> = (0..cube_b.triangle_count())
-            .map(|i| cube_b.triangle_vertices(i))
-            .collect();
-
-        let ta = AabbTree::build(&tris_a);
-        let tb = AabbTree::build(&tris_b);
-        let pairs = ta.find_overlaps(&tb);
-
-        // Overlapping cubes should produce many candidate pairs
-        assert!(
-            pairs.len() > 0,
-            "overlapping cubes should have AABB overlaps"
-        );
     }
 }

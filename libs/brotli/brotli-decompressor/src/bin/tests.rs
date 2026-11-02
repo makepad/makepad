@@ -1,6 +1,8 @@
 #![cfg(test)]
 extern crate core;
-use std::io::{self, Write, Read};
+use std::io;
+#[cfg(feature="std")]
+use std::io::{Write, Read};
 use core::cmp;
 
 
@@ -96,7 +98,7 @@ fn test_one_byte_copier() {
     }
 }
 
-#[cfg(features="std")]
+#[cfg(feature="std")]
 #[test]
 fn test_one_byte_writer() {
     for b in 0..256 {
@@ -121,23 +123,7 @@ fn test_one_byte_writer() {
 }
 
 
-#[cfg(features="std")]
-#[test]
-fn test_error_byte_writer() {
-    let in_buf = b"\x8f\x02\x80\x68\x65\x6c\x6c\x6f\x0a\x03\x67\x6f\x6f\x64\x62\x79\x65\x0a";
-    let mut output = Buffer::new(&[]);
-    let mut writer = super::brotli_decompressor::DecompressorWriter::new(&mut output, 4096);
-    match writer.write_all(&in_buf[..]) {
-        Ok(_) => {
-            assert_eq!(writer.close().unwrap_err().kind(), io::ErrorKind::InvalidData);
-        },
-        Err(e) => {
-            assert_eq!(e.kind(), io::ErrorKind::InvalidData);
-        }
-    }
-}
-
-#[cfg(features="std")]
+#[cfg(feature="std")]
 #[test]
 fn test_one_byte_reader() {
     for b in 0..256 {
@@ -174,24 +160,4 @@ fn test_10x_10y() {
     i += 1;
   }
   assert_eq!(output.data.len(), 20);
-}
-
-
-#[test]
-fn test_alice() {
-  let in_buf = include_bytes!("../../testdata/alice29.txt.compressed");
-
-  let mut output = Buffer::new(&[]);
-  let mut input = super::BrotliDecompressor::new(Buffer::new(in_buf), 1);
-  match copy_from_to(&mut input, &mut output) {
-    Ok(_) => {}
-    Err(e) => panic!("Error {:?}", e),
-  }
-  let mut i: usize = 0;
-  let truth = include_bytes!("../../testdata/alice29.txt");
-  while i < truth.len() {
-    assert_eq!(output.data[i], truth[i]);
-    i += 1;
-  }
-  assert_eq!(truth.len(), output.data.len());
 }

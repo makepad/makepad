@@ -24,8 +24,6 @@ pub struct CollectedCache {
     pub(super) kept: Option<(usize, usize)>,
 }
 
-fn enabled() -> bool { std::env::var("MAKEPAD_RUN_COLLECTED").map_or(true, |v| v != "0") }
-
 /// MAKEPAD_RUN_COLLECTED_TRACE: the collected encode's parts, timed.
 struct Parts(Option<(std::time::Instant, String)>);
 impl Parts {
@@ -260,7 +258,7 @@ impl FrontImages {
             eprintln!("makepad-run collected: {} at {:.1} ms", name, started.elapsed().as_secs_f64() * 1e3);
         };
         let restored = (|| {
-        if !enabled() || crate::syms::perturb(&session.options) != 0 { return None; }
+        if crate::syms::perturb(&session.options) != 0 { return None; }
         self.begin_load(pre);
         why = "certificate";
         let cert = self.certificate.lock().ok()?;
@@ -536,7 +534,7 @@ impl Cache {
     /// crate stores, the graph certificate and the collected store are still published
     /// by the ordinary post-present/exit writer. Repeated module loads reuse the snapshot.
     pub(crate) fn preserve_collected_boot(&mut self, prog: &Program, tcx: &Tcx) {
-        if self.collected_committed || self.collected_boot.is_some() || !enabled() || self.mode == Mode::ReadOnly { return; }
+        if self.collected_committed || self.collected_boot.is_some() || self.mode == Mode::ReadOnly { return; }
         let started = std::time::Instant::now();
         let mut why = "recipe";
         self.collected_boot = self.encoder().capture_boot(prog, tcx, &|| false, &mut why);
@@ -664,7 +662,7 @@ impl Encoder<'_> {
     }
 
     fn encode_as(&self, prog: &Program, tcx: &Tcx, stop: &dyn Fn() -> bool, fresh: bool) -> CollectedRecord {
-        if !enabled() || self.mode == Mode::ReadOnly { return CollectedRecord::Failed; }
+        if self.mode == Mode::ReadOnly { return CollectedRecord::Failed; }
         if self.committed && !fresh { return CollectedRecord::Current; }
         let mut why = "recipe";
         let mut yielded = false;

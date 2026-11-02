@@ -20,6 +20,10 @@ path = "src/lib.rs"
 name = "makepad"
 path = "src/main.rs"
 
+[[bin]]
+name = "makepad-launcher"
+path = "launcher/main.rs"
+
 [dependencies]
 makepad-relax-api = { workspace = true, features = ["host-shims"] }
 relax-compiler = { workspace = true }

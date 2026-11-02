@@ -28,7 +28,7 @@ fn missing_selector_reports_useful_error(app: TestApp) -> Result<(), TestError> 
         .locator(Selector::id("input_missing"))
         .try_click()
         .unwrap_err();
-    assert!(err.message().contains("matched no visible widgets"));
+    assert!(err.message().contains("matched no visible widgets"), "{}", err.message());
     Ok(())
 }
 
@@ -38,8 +38,8 @@ fn type_selector_reports_multiple_matches(app: TestApp) -> Result<(), TestError>
         .locator(Selector::widget_type("TextInput"))
         .try_click()
         .unwrap_err();
-    assert!(err.message().contains("matched multiple widgets"));
-    assert!(err.message().contains("input_singleline"));
+    assert!(err.message().contains("matched multiple widgets"), "{}", err.message());
+    assert!(err.message().contains("text_field"), "{}", err.message());
     Ok(())
 }
 

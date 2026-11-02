@@ -1708,12 +1708,6 @@ impl Tcx {
                 }
             }
         }
-        // rustc_hir_analysis check_main_fn_ty: the crate's `main` takes no generic parameters
-        if def.kind == DefKind::Fn && prog.name(did) == "main" && prog.item_defs.get(&(def.file, def.item.0)) == Some(&did)
-            && def.parent == prog.mods[prog.crates[def.krate as usize].root_mod as usize].def
-            && !self.generic_indices_of(prog, did).types_consts.is_empty() {
-            errors.push(prog.record_error(def.file, prog.files[def.file as usize].ast.item(def.item).lo, "signature", "E0131: `main` function is not allowed to have generic parameters".into()));
-        }
         if def.kind == DefKind::AssocFn && prog.item_defs.get(&(def.file, def.item.0)) == Some(&did) {
             // rustc_ast_passes ast_validation check_trait_fn_not_const (E0379)
             let ast = &prog.files[def.file as usize].ast;
@@ -2151,7 +2145,11 @@ impl Tcx {
                 errors.push((attr_pos, format!("the target features {} must all be either enabled or disabled together", features.join(", "))));
             }
         }
-        for (pos, message) in errors { self.err(cx, prog, file, pos, message); }
+        // (rustc words these without a code, except the E0658 feature gates)
+        for (pos, message) in errors {
+            let coded = message.len() > 5 && message.starts_with('E') && message[1..5].bytes().all(|b| b.is_ascii_digit());
+            self.err(cx, prog, file, pos, if coded { message } else { format!("{}{}", relax_front::diagnostics::UNCODED_PREFIX, message) });
+        }
         out
     }
 
@@ -2463,8 +2461,9 @@ impl Tcx {
         if expected_ty == self.tys.error { return self.tys.intern_const(ConstKind::Error); }
         // hir_ty_lowering/mod.rs:3083-3118 try_lower_anon_const_lit: a (negated) integer literal
         // whose kind matches the type (ty/consts/lit.rs:50-55 const_lit_matches_ty) is lowered
-        // directly by lit_to_const, truncated to the type (thir/constant.rs:21-33,75-94; rustc's
-        // deny-by-default overflowing_literals lint has no Relax counterpart). Anything else is
+        // directly by lit_to_const, truncated to the type (thir/constant.rs:21-33,75-94; the
+        // deny-by-default overflowing_literals lint runs on the anon const's own typeck: check.rs
+        // body_anon_consts, signature_anon_consts). Anything else is
         // the anon const, whose typeck reports the mismatch (`Foo<3u16>` for a u8 parameter).
         let (literal, neg) = match pf.ast.expr(unwrapped).kind {
             ast::ExprKind::Unary(ast::UnOp::Neg, inner) if matches!(pf.ast.expr(inner).kind, ast::ExprKind::Lit(ast::LitKind::Int)) => (Some(inner), true),

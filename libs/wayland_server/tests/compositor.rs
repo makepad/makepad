@@ -697,11 +697,11 @@ fn dmabuf_buffer_validation_commit_and_release() {
 #[test]
 fn explicit_sync_points_gate_the_commit_and_release_through_the_timeline() {
     use wayland_server::sys::*;
-    let Some(node) = (128..140).map(|n| std::path::PathBuf::from(format!("/dev/dri/renderD{n}"))).find(|p| p.exists()) else { return };
-    let drm = match std::fs::OpenOptions::new().read(true).write(true).open(&node) { Ok(f) => f, Err(_) => return };
+    let node = (128..140).map(|n| std::path::PathBuf::from(format!("/dev/dri/renderD{n}"))).find(|p| p.exists()).expect("DRM render node");
+    let drm = std::fs::OpenOptions::new().read(true).write(true).open(&node).expect("open DRM render node");
     let dfd = drm.as_raw_fd();
     let mut create = drm_syncobj_create { handle: 0, flags: 0 };
-    if unsafe { ioctl(dfd, DRM_IOCTL_SYNCOBJ_CREATE, &mut create as *mut _) } != 0 { return; }
+    assert_eq!(unsafe { ioctl(dfd, DRM_IOCTL_SYNCOBJ_CREATE, &mut create as *mut _) }, 0, "create DRM sync object");
     eprintln!("syncobj test running on {}", node.display());
     let mut export = drm_syncobj_handle { handle: create.handle, flags: 0, fd: -1, pad: 0 };
     assert_eq!(unsafe { ioctl(dfd, DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD, &mut export as *mut _) }, 0);

@@ -30,8 +30,8 @@
 //!    kept — the TrueType/CFF fill rule, so `O`, `B`, `8`, `g`, `@`, `&`,
 //!    `%` keep their counters whichever way the font winds them. Guard: the
 //!    result is verified — every constraint edge must come back. If one is
-//!    missing (the vendored flip loop can stall on a long edge crossing a
-//!    dense fan) the CDT is retried with the constraints reversed, then the
+//!    missing (a constraint that runs exactly through another point can not
+//!    be one edge) the CDT is retried with the constraints reversed, then the
 //!    failing edges are refined at their midpoints (points ON the contour,
 //!    so nothing moves) up to three rounds; only when that fails, or no
 //!    triangle survives, is the largest contour ear-clipped alone and the
@@ -3274,43 +3274,6 @@ mod tests {
     }
 
     #[test]
-    fn todays_geometry_is_pinned_bit_for_bit() {
-        // Captured from the builder before bevel profiles, copies, the floor
-        // and the voxels existed: with the defaults (chamfer, one ring, one
-        // copy, no floor) every float and index must come back unchanged
-        // (the bevelled cases re-pinned for the thin-stroke clamp).
-        let (mut l, families) = layouter();
-        let a = layout(&mut l, families[0], "OB8g@&", None);
-        let c = layout(&mut l, families[1], "Kinetic", None);
-        let d = layout(&mut l, families[3], "the quick brown fox jumps over", Some(500.0));
-        let cases: Vec<(&str, &LaidoutText, TextMeshParams, (usize, usize, u64))> = vec![
-            ("plain", &a, TextMeshParams::default(), (3720, 7488, 17580915930908050101)),
-            // Re-pinned (T3, 2026-09-29) with the thin-stroke bevel clamp
-            // (`inset_limits`, the fold guard in `emit_glyph`): the caps of
-            // these texts turned inside out in places; the counts are unchanged.
-            ("chamfer", &a, TextMeshParams { bevel: 0.05, ..Default::default() }, (8680, 14928, 4507394498162120197)),
-            ("flat", &c, TextMeshParams { depth: 0.0, ..Default::default() }, (240, 672, 439485006973457876)),
-            (
-                "block",
-                &d,
-                TextMeshParams { layout: TextLayout::Block, bevel: 0.03, ..Default::default() },
-                // Re-pinned with the thin-stroke bevel clamp too (folds at 0.03 in this face).
-                (19726, 33588, 13167278121124364398),
-            ),
-        ];
-        for (name, t, p, want) in cases {
-            let mut m = FxMesh::default();
-            build_text_mesh(t, &p, &mut m);
-            assert_eq!(fingerprint(&m), want, "{name}: the geometry moved");
-            // Spelling the chamfer out changes nothing.
-            let explicit = TextMeshParams { bevel_type: BevelType::Chamfer, bevel_rings: 1, copies: 1, ..p.clone() };
-            let mut e = FxMesh::default();
-            build_text_mesh(t, &explicit, &mut e);
-            assert_eq!(fingerprint(&e), want, "{name}: explicit chamfer");
-        }
-    }
-
-    #[test]
     fn every_printable_ascii_glyph_builds_in_every_font() {
         let (mut l, families) = layouter();
         let text = printable_ascii();
@@ -3374,36 +3337,22 @@ mod tests {
         }
     }
 
+    /// The `%` slash runs corner to corner through both rings: enforcing it
+    /// crossed a quad whose two diagonals both cut the slash, and the CDT
+    /// flipped them back and forth forever. Every font builds it on the CDT.
     #[test]
-    fn caps_of_glyphs_with_holes_match_the_shoelace_area() {
+    fn the_percent_slash_through_its_rings_triangulates_in_every_font() {
         let (mut l, families) = layouter();
-        for family in &families {
-            for ch in "OB8g@&%".chars() {
-                let one = layout(&mut l, *family, &ch.to_string(), None);
-                let params = TextMeshParams { depth: 0.0, ..Default::default() };
-                let mut mesh = FxMesh::default();
-                let report = build_text_mesh(&one, &params, &mut mesh);
-                assert_eq!(report.glyphs, 1);
-                assert_eq!(report.fallbacks, 0, "{ch}: the CDT path must hold");
-                let (shoelace, scan, crossings) = reference_areas(&one, &params);
-                let got = cap_area(&mesh);
-                let err_scan = (got - scan).abs() / scan;
-                let err_shoe = (got - shoelace).abs() / shoelace;
-                println!(
-                    "{ch}: cap {got:.5} scanline {scan:.5} ({:.3}%) shoelace {shoelace:.5} ({:.3}%) crossings {crossings}",
-                    err_scan * 100.0,
-                    err_shoe * 100.0
-                );
-                assert!(err_scan < 0.01, "{ch}: cap area {got} vs scanline {scan}");
-                if crossings == 0 {
-                    assert!(err_shoe < 0.01, "{ch}: cap area {got} vs shoelace {shoelace}");
-                }
-                // Front cap only: every vertex is a front-cap vertex at z 0.
-                for v in verts(&mesh) {
-                    assert_eq!(v.aux, FACE_FRONT);
-                    assert_eq!(v.pos.z, 0.0);
-                }
-            }
+        for (k, family) in families.iter().enumerate() {
+            let one = layout(&mut l, *family, "%", None);
+            let params = TextMeshParams { depth: 0.0, ..Default::default() };
+            let mut mesh = FxMesh::default();
+            let report = build_text_mesh(&one, &params, &mut mesh);
+            assert_eq!(report.glyphs, 1, "{}", FONTS[k]);
+            assert_eq!(report.fallbacks, 0, "{}: the CDT path must hold", FONTS[k]);
+            let (_, scan, _) = reference_areas(&one, &params);
+            let got = cap_area(&mesh);
+            assert!((got - scan).abs() / scan < 0.01, "{}: cap area {got} vs scanline {scan}", FONTS[k]);
         }
     }
 

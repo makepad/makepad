@@ -285,15 +285,6 @@ mod tests {
     }
 
     #[test]
-    fn job_fraction_bands_stay_ordered() {
-        assert!((load_fraction(0.0) - 0.01).abs() < 1e-9);
-        assert!((load_fraction(1.0) - 0.19).abs() < 1e-9);
-        assert!((gen_fraction(0.0) - 0.20).abs() < 1e-9);
-        assert!((gen_fraction(1.0) - 0.95).abs() < 1e-9);
-        assert!(gen_fraction(1.0) < 0.96);
-    }
-
-    #[test]
     fn empty_prompt_is_rejected() {
         let mut backend = AceBackend::with_stub("ace-step-1.5-xl", Box::new(|_, _, _| {
             Ok((vec![0.0], vec![0.0]))

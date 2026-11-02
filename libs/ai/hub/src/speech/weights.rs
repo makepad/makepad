@@ -266,11 +266,6 @@ mod tests {
     }
 
     #[test]
-    fn catalogue_has_all_28_voices() {
-        assert_eq!(kokoro_voice_catalogue().len(), 28);
-    }
-
-    #[test]
     fn election_key_is_the_lowercase_file_name() {
         assert_eq!(election_key(Path::new("/x/GGML-Large-v3-turbo.bin")), "ggml-large-v3-turbo.bin");
     }

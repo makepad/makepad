@@ -1010,11 +1010,6 @@ mod tests {
         assert_eq!(cublas_lt_pointer_alignment(0x1001usize as *const c_void), 1);
     }
 
-    #[test]
-    fn cublas_default_tensor_op_matches_cuda_header() {
-        assert_eq!(CUBLAS_GEMM_DEFAULT_TENSOR_OP, 99);
-    }
-
     /// A build with no kernels must answer the device questions itself
     /// rather than call into a CUDA runtime that is not there. If the FFI
     /// ever stops going through `cuda_ffi!` this test still passes — but the

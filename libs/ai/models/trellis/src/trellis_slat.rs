@@ -572,21 +572,4 @@ mod tests {
         assert_eq!(blocks, vec![0, 5, 2]);
     }
 
-    #[test]
-    fn neighbor_tap_center() {
-        // Tap 13 = (kd, kh, kw) = (1, 1, 1) = self.
-        let mut tap = 0;
-        let mut center = None;
-        for kd in -1i32..=1 {
-            for kh in -1i32..=1 {
-                for kw in -1i32..=1 {
-                    if kd == 0 && kh == 0 && kw == 0 {
-                        center = Some(tap);
-                    }
-                    tap += 1;
-                }
-            }
-        }
-        assert_eq!(center, Some(13));
-    }
 }

@@ -149,6 +149,12 @@ pub struct Thread {
     pub clearance: f64,
     /// Left-handed.
     pub left: bool,
+    /// Over this length from each end the thread runs out, so an end finishes as a plain round
+    /// instead of a helical ridge feathered by the flat cut. None: one pitch; 0: cut flat.
+    pub runout: Option<f64>,
+    /// The tool of a threaded hole: it runs out to the major radius (the hole's mouth takes the
+    /// mating thread), a rod to the minor one.
+    pub internal: bool,
 }
 
 /// The coarse ISO pitch for a major diameter, when standard.
@@ -158,6 +164,62 @@ pub fn iso_coarse_pitch(diameter: f64) -> Option<f64> {
         (8.0, 1.25), (10.0, 1.5), (12.0, 1.75), (14.0, 2.0), (16.0, 2.0), (18.0, 2.5), (20.0, 2.5), (24.0, 3.0), (30.0, 3.5), (36.0, 4.0),
     ];
     TABLE.iter().find(|(d, _)| (d - diameter).abs() < 1e-6).map(|(_, p)| *p)
+}
+
+/// A metric size from the public ISO tables: hexagon head (ISO 4017), hexagon nut (ISO 4032),
+/// clearance holes (ISO 273). All mm.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MetricSize {
+    pub diameter: f64,
+    pub across_flats: f64,
+    pub head_height: f64,
+    pub nut_height: f64,
+    /// Clearance hole diameters: close, normal and loose fit.
+    pub hole: [f64; 3],
+}
+
+impl MetricSize {
+    /// The coarse pitch (every size here has one).
+    pub fn pitch(&self) -> f64 {
+        iso_coarse_pitch(self.diameter).unwrap_or(0.0)
+    }
+
+    pub fn across_corners(&self) -> f64 {
+        self.across_flats / (std::f64::consts::PI / 6.0).cos()
+    }
+}
+
+const fn size(diameter: f64, across_flats: f64, head_height: f64, nut_height: f64, hole: [f64; 3]) -> MetricSize {
+    MetricSize { diameter, across_flats, head_height, nut_height, hole }
+}
+
+const METRIC: &[MetricSize] = &[
+    size(1.6, 3.2, 1.1, 1.3, [1.7, 1.8, 2.0]),
+    size(2.0, 4.0, 1.4, 1.6, [2.2, 2.4, 2.6]),
+    size(2.5, 5.0, 1.7, 2.0, [2.7, 2.9, 3.1]),
+    size(3.0, 5.5, 2.0, 2.4, [3.2, 3.4, 3.6]),
+    size(4.0, 7.0, 2.8, 3.2, [4.3, 4.5, 4.8]),
+    size(5.0, 8.0, 3.5, 4.7, [5.3, 5.5, 5.8]),
+    size(6.0, 10.0, 4.0, 5.2, [6.4, 6.6, 7.0]),
+    size(8.0, 13.0, 5.3, 6.8, [8.4, 9.0, 10.0]),
+    size(10.0, 16.0, 6.4, 8.4, [10.5, 11.0, 12.0]),
+    size(12.0, 18.0, 7.5, 10.8, [13.0, 13.5, 14.5]),
+    size(14.0, 21.0, 8.8, 12.8, [15.0, 15.5, 16.5]),
+    size(16.0, 24.0, 10.0, 14.8, [17.0, 17.5, 18.5]),
+    size(20.0, 30.0, 12.5, 18.0, [21.0, 22.0, 24.0]),
+    size(24.0, 36.0, 15.0, 21.5, [25.0, 26.0, 28.0]),
+    size(30.0, 46.0, 18.7, 25.6, [31.0, 33.0, 35.0]),
+    size(36.0, 55.0, 22.5, 31.0, [37.0, 39.0, 42.0]),
+];
+
+/// The table's row for a major diameter (mm).
+pub fn metric_size(diameter: f64) -> Option<&'static MetricSize> {
+    METRIC.iter().find(|m| (m.diameter - diameter).abs() < 1e-6)
+}
+
+/// The sizes the table knows, as `M8` names.
+pub fn metric_names() -> Vec<String> {
+    METRIC.iter().map(|m| format!("M{}", m.diameter)).collect()
 }
 
 impl Thread {
@@ -178,7 +240,7 @@ impl Thread {
 
     /// The radius at axial phase `u` (0..1 of a pitch): crest P/8, flank,
     /// root P/4, flank.
-    fn radius_at(&self, u: f64) -> f64 {
+    fn profile_radius(&self, u: f64) -> f64 {
         let r_major = self.diameter / 2.0 + self.clearance;
         let d = self.depth();
         let u = u.rem_euclid(1.0);
@@ -192,6 +254,21 @@ impl Thread {
         } else {
             r_major - d + d * (u - crest - flank - root) / flank
         }
+    }
+
+    /// The radius at helical station `s` and height `z`: the profile, faded towards the end
+    /// radius inside the run-outs.
+    fn radius_at(&self, s: f64, z: f64) -> f64 {
+        let profile = self.profile_radius(s / self.pitch);
+        let runout = self.runout.unwrap_or(self.pitch).min(self.length / 2.0);
+        if runout <= 0.0 {
+            return profile;
+        }
+        let r_major = self.diameter / 2.0 + self.clearance;
+        let end = if self.internal { r_major } else { r_major - self.depth() };
+        // A quarter pitch of plain round first: the cut end meets no flank.
+        let fade = ((z.min(self.length - z) - self.pitch / 4.0) / runout).clamp(0.0, 1.0);
+        end + (profile - end) * fade
     }
 
     /// A threaded rod along +Z from 0 to `length`: the helical surface over a
@@ -222,10 +299,10 @@ impl Thread {
         // Vertex (i, j): angle i, helical station j; z = s + p * angle / TAU.
         let mut ids = vec![vec![0u32; around]; stations.len()];
         for (j, &s) in stations.iter().enumerate() {
-            let r = self.radius_at(s / p);
             for i in 0..around {
                 let a = TAU * i as f64 / around as f64;
                 let z = s + p * (i as f64 / around as f64);
+                let r = self.radius_at(s, z);
                 ids[j][i] = m.add_vertex(dvec3(r * (hand * a).cos(), r * (hand * a).sin(), z));
             }
         }
@@ -324,6 +401,7 @@ pub fn hole_tool(hole: &Hole, above: f64, tol: &Tolerance) -> Result<TriMesh, St
     let region = Region { outer: profile, holes: Vec::new() };
     let region = Region { outer: crate::region::oriented(region.outer, true), holes: Vec::new() };
     let mut m = revolve(&[region], 360.0, tol)?;
+    m.clear_normals();
     for v in &mut m.vertices {
         *v = dvec3(v.x, -v.z, v.y);
     }

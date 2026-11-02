@@ -445,37 +445,6 @@ mod tests {
         assert!(!grid.cell_still_fits(cell, 45.0, 0.0, 1.0), "distant point re-homes");
     }
 
-    /// The per-frame path does no ranking: a million lookups on the
-    /// 300-light grid complete in well under a second (a brute-force scan
-    /// would be ~300M score evaluations). Generous bound — this guards the
-    /// complexity class, not the constant.
-    #[test]
-    fn block_lookup_is_constant_time() {
-        let mut lights = Vec::new();
-        for i in 0..300 {
-            let t = i as f32 / 300.0 * std::f32::consts::TAU;
-            lights.push(LmLight::omni(
-                vec3f(t.cos() * 100.0, 3.0, t.sin() * 60.0),
-                vec3f(2.0, 1.5, 1.0),
-                8.0,
-            ));
-        }
-        let grid = LightGrid::build(&lights, LIGHT_GRID_CELL);
-        let t0 = std::time::Instant::now();
-        let mut acc = 0usize;
-        for i in 0..1_000_000u32 {
-            let x = (i % 211) as f32 - 105.0;
-            let z = (i % 127) as f32 - 63.0;
-            acc += grid.block_at(x, z).count;
-        }
-        assert!(acc > 0);
-        assert!(
-            t0.elapsed().as_millis() < 1000,
-            "1M lookups took {}ms — lookup is no longer O(1)",
-            t0.elapsed().as_millis()
-        );
-    }
-
     /// Transient merge: a single strength ranking at the instance. A strong
     /// nearby flash earns a leading slot; a weak one loses to stronger
     /// statics instead of displacing them; out-of-radius never lands.

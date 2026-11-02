@@ -196,9 +196,9 @@ mod tests {
     fn off_unless_enabled() {
         assert!(!DeskLinkSettings::parse("").enabled);
         assert!(!DeskLinkSettings::parse("enabled = maybe").enabled);
-        let s = DeskLinkSettings::parse("enabled = on\nhost = 192.0.2.78\nport = 9000\nkbps = 30000 # LAN\nfps = 999");
+        let s = DeskLinkSettings::parse("enabled = on\nhost = 10.77.0.78\nport = 9000\nkbps = 30000 # LAN\nfps = 999");
         assert!(s.enabled);
-        assert_eq!((s.host.as_str(), s.port, s.kbps, s.fps), ("192.0.2.78", 9000, 30000, 120));
+        assert_eq!((s.host.as_str(), s.port, s.kbps, s.fps), ("10.77.0.78", 9000, 30000, 120));
     }
 
     #[test]
@@ -206,13 +206,13 @@ mod tests {
         let at = |host: &str| DeskLinkSettings { host: host.into(), ..Default::default() }.listen_addr();
         assert!(at("0.0.0.0").is_ok());
         assert!(at("127.0.0.1").is_ok());
-        assert!(at("192.0.2.78").is_ok());
-        assert!(at("198.51.100.22").is_ok());
+        assert!(at("10.77.0.78").is_ok());
+        assert!(at("192.168.77.2").is_ok());
         assert!(at("fd00::1").is_ok());
         assert!(at("8.8.8.8").is_err());
         assert!(at("2001:db8::1").is_err());
         assert!(at("lan").is_err());
         assert!(!lan_address("100.64.0.1".parse().unwrap()));
-        assert!(lan_address("::ffff:192.0.2.96".parse().unwrap()));
+        assert!(lan_address("::ffff:10.77.0.3".parse().unwrap()));
     }
 }

@@ -1,4 +1,4 @@
-use relax_lex::lexer::{lex, lex_with, LexOptions, LineIndex, Mode, Tok, T};
+use relax_lex::lexer::{lex, lex_with, LexOptions, LineIndex, Tok, T};
 use relax_lex::tokens::{from_toks, Delimiter, LineColumn, Span, Spacing, TokenStream, TokenTree};
 
 fn span(index: &LineIndex, lo: u32, hi: u32) -> Span {
@@ -11,7 +11,7 @@ fn span(index: &LineIndex, lo: u32, hi: u32) -> Span {
 fn stream(source: &str, trivia: bool) -> TokenStream {
     let index = LineIndex::new(source.as_bytes());
     let mut toks = Vec::new();
-    lex_with(source.as_bytes(), &LexOptions { edition: 2021, mode: Mode::Rust, trivia }, &mut toks).unwrap();
+    lex_with(source.as_bytes(), &LexOptions { edition: 2021, trivia }, &mut toks).unwrap();
     from_toks(source.as_bytes(), &toks, &|lo, hi| span(&index, lo, hi)).unwrap()
 }
 
@@ -107,19 +107,6 @@ fn doc_gaps_are_attributes_and_explicit_trivia_does_not_duplicate_them() {
     // slice-local behavior; opt-in trivia can represent leading/trailing docs.
     assert_eq!(stream("///leading\nx ///trailing", false).to_string(), "x");
     assert_eq!(stream("///leading\nx ///trailing", true).to_string(), "#[doc = \"leading\"] x #[doc = \"trailing\"]");
-}
-
-#[test]
-fn dialect_atoms_and_unicode_punctuation_keep_their_text() {
-    let source = "@r#x #abc 250ms 'a \u{80}";
-    let mut toks = Vec::new();
-    lex_with(source.as_bytes(), &LexOptions { edition: 2021, mode: Mode::Declarative, trivia: false }, &mut toks).unwrap();
-    let index = LineIndex::new(source.as_bytes());
-    let ts = from_toks(source.as_bytes(), &toks, &|lo, hi| span(&index, lo, hi)).unwrap();
-    assert_eq!(ts.to_string(), "@ r#x #abc 250ms 'a \u{80}");
-    let TokenTree::Punct(p) = ts.trees.last().unwrap() else { panic!("punctuation") };
-    assert_eq!(p.as_char(), '\u{80}');
-    assert_eq!(p.span().hi - p.span().lo, 2);
 }
 
 #[test]

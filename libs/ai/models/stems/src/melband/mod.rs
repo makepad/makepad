@@ -50,7 +50,7 @@ pub mod weights;
 
 pub use config::{CHUNK, DEREVERB_LANES, LANES, NUM_TARGETS};
 pub use graph::Stage;
-pub use model::{instrumental, reverb, DereverbModel, StageProbe, VocalsModel};
+pub use model::{instrumental, reverb, DereverbModel, VocalsModel};
 
 use crate::cache::{CacheHeader, ModelIdentity};
 

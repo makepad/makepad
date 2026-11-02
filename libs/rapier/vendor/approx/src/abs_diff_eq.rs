@@ -83,8 +83,8 @@ impl_signed_abs_diff_eq!(i16, 0);
 impl_signed_abs_diff_eq!(i32, 0);
 impl_signed_abs_diff_eq!(i64, 0);
 impl_signed_abs_diff_eq!(isize, 0);
-impl_signed_abs_diff_eq!(f32, core::f32::EPSILON);
-impl_signed_abs_diff_eq!(f64, core::f64::EPSILON);
+impl_signed_abs_diff_eq!(f32, f32::EPSILON);
+impl_signed_abs_diff_eq!(f64, f64::EPSILON);
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 // Derived implementations

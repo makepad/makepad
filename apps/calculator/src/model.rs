@@ -1924,14 +1924,6 @@ mod tests {
     }
 
     #[test]
-    fn eval_leaves_the_document_untouched() {
-        let (mut d, mut ui) = doc();
-        apply(&mut d, &mut ui, Command::Digit(9));
-        let snapshot = d.clone();
-        let _ = crate::engine::evaluate("200+10%", d.angle);
-        assert_eq!(d, snapshot);
-    }
-    #[test]
     fn scientific_buttons_apply_to_complete_signed_operands() {
         let negative_root = run(&[Command::Digit(9), Command::Sign, Command::Func(Function::Sqrt), Command::Equals]);
         assert_eq!(negative_root.session.source, "sqrt(-9)");

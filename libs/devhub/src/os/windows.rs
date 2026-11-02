@@ -87,9 +87,17 @@ impl Hold {
 }
 
 /// The argv a lease run executes: as given (priority is the creation class; no pinning).
-pub fn lease_argv(argv: Vec<String>, _unit: Option<&str>, _cpus: &str) -> Vec<String> {
+pub fn lease_argv(argv: Vec<String>, _unit: Option<&str>, _cpus: &str, _share: Option<crate::lease::Cost>) -> Vec<String> {
     argv
 }
+
+pub fn metered_argv(argv: Vec<String>, _unit: Option<&str>, _usage: &Path) -> Vec<String> { argv }
+
+pub fn scope_usage(_pid: u32, _start: u64, _unit: Option<&str>, _usage: &Path) -> (Option<u64>, Option<f64>) { (None, None) }
+
+pub fn groups_rss(_groups: &[(u32, u64)]) -> Option<u64> { None }
+
+pub fn wait_usage(child: &mut Child) -> std::io::Result<(ExitStatus, Option<f64>)> { child.wait().map(|s| (s, None)) }
 
 /// Resumes the (one) thread of a process created suspended.
 fn resume(pid: u32) -> std::io::Result<()> {
@@ -307,6 +315,10 @@ pub fn raise_fd_limit() -> u64 {
 }
 
 /// The processes that left their run's group: none (see the top of this file).
+pub fn env_values(_prefix: &str) -> Vec<(u32, String)> {
+    Vec::new()
+}
+
 pub fn with_env(_marker: &str) -> Vec<u32> {
     Vec::new()
 }

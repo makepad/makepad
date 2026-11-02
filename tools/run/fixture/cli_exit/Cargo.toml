@@ -1,0 +1,14 @@
+[package]
+name = "relax-cli-exit"
+version = "0.1.0"
+edition = "2021"
+description = "A command-line program that links the HAL and opens no window: under `makepad run` it is hosted in the run window, and its process still ends with the program's code (tools/run/fixture/cli_exit.sh)"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+makepad-hal = { path = "../../../../platform/hal" }
+# the HAL binds to the library built into makepad only with the features its graph has there
+# (makepad-math turns this one on; a program without it is told the HAL differs)
+bytemuck = { path = "../../../../libs/bytemuck", version = "1.25.0", features = ["min_const_generics"] }
+

@@ -496,15 +496,12 @@ impl Command {
             return self.spawn_now(default, exec);
         };
         let saved_env = self.env.clone();
-        let virt = crate::fs::vfs::kind(Path::new(&dir));
-        let r = match virt {
+        let r = match crate::fs::vfs::kind(Path::new(&dir)) {
             Some((abs, _)) => {
                 self.cwd = None;
                 self.env("MAKEPAD_RUN_WORKSPACE", abs.as_os_str());
                 self.env("MAKEPAD_RUN_VFS", crate::fs::vfs::mounts());
-                let r = self.spawn_now(default, exec);
-                self.cwd = Some(dir);
-                r
+                self.spawn_now(default, exec)
             }
             None => {
                 if crate::env::var_os("MAKEPAD_RUN_WORKSPACE").is_some() {
@@ -513,6 +510,7 @@ impl Command {
                 self.spawn_now(default, exec)
             }
         };
+        self.cwd = Some(dir);
         self.env = saved_env;
         r
     }
@@ -641,11 +639,11 @@ impl Command {
             if exec {
                 // Darwin: posix_spawn with POSIX_SPAWN_SETEXEC is execve with the file actions
                 // and attributes applied to this process; it returns only on failure
-                #[cfg(target_os = "macos")]
+                #[cfg(target_vendor = "apple")]
                 {
                     flags |= POSIX_SPAWN_SETEXEC;
                 }
-                #[cfg(not(target_os = "macos"))]
+                #[cfg(not(target_vendor = "apple"))]
                 {
                     posix_spawn_file_actions_destroy(&mut actions as *mut SpawnFileActions);
                     posix_spawnattr_destroy(&mut attr as *mut SpawnAttr);
@@ -851,9 +849,9 @@ struct ForkLoader {
 impl ForkLoader {
     fn get() -> ForkLoader {
         unsafe fn sym(name: &core::ffi::CStr) -> usize {
-            #[cfg(target_os = "macos")]
+            #[cfg(target_vendor = "apple")]
             const RTLD_DEFAULT: *mut c_void = -2isize as *mut c_void;
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(not(target_vendor = "apple"))]
             const RTLD_DEFAULT: *mut c_void = core::ptr::null_mut();
             dlsym(RTLD_DEFAULT, name.as_ptr()) as usize
         }
@@ -883,11 +881,11 @@ unsafe fn child_fail(fd: c_int, e: io::Error) -> ! {
 /// execvp with an explicit environment: execvpe on Linux; on macOS (no execvpe)
 /// posix_spawnp with POSIX_SPAWN_SETEXEC, which is execve after the PATH search.
 unsafe fn exec_path_env(file: *const c_char, argv: *const *const c_char, envp: *const *const c_char) {
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(target_vendor = "apple"))]
     {
         execvpe(file, argv, envp);
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(target_vendor = "apple")]
     {
         let mut attr = SpawnAttr { storage: [0; 64] };
         posix_spawnattr_init(&mut attr as *mut SpawnAttr);
@@ -900,7 +898,7 @@ unsafe fn exec_path_env(file: *const c_char, argv: *const *const c_char, envp: *
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(target_vendor = "apple")]
 unsafe fn set_errno(e: c_int) {
     *__error() = e;
 }
@@ -1038,7 +1036,7 @@ struct SigSet {
 
 const POSIX_SPAWN_SETPGROUP: c_short = 0x02;
 const POSIX_SPAWN_SETSIGDEF: c_short = 0x04;
-#[cfg(target_os = "macos")]
+#[cfg(target_vendor = "apple")]
 const POSIX_SPAWN_SETEXEC: c_short = 0x40;
 const SIGPIPE: c_int = 13;
 
@@ -1064,15 +1062,15 @@ extern "C" {
     fn posix_spawnattr_setpgroup(a: *mut SpawnAttr, pgroup: sys::pid_t) -> c_int;
     fn posix_spawnattr_setsigdefault(a: *mut SpawnAttr, set: *const SigSet) -> c_int;
     fn sigemptyset(set: *mut SigSet) -> c_int;
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(target_vendor = "apple"))]
     fn dup2(fd: c_int, to: c_int) -> c_int;
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(target_vendor = "apple"))]
     fn chdir(path: *const c_char) -> c_int;
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(target_vendor = "apple"))]
     fn setpgid(pid: sys::pid_t, pgid: sys::pid_t) -> c_int;
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(target_vendor = "apple"))]
     fn signal(sig: c_int, handler: usize) -> usize;
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(target_vendor = "apple"))]
     fn execvpe(file: *const c_char, argv: *const *const c_char, envp: *const *const c_char) -> c_int;
     fn sigaddset(set: *mut SigSet, sig: c_int) -> c_int;
     #[cfg(not(target_os = "android"))]
@@ -1085,7 +1083,7 @@ extern "C" {
     #[cfg(not(target_os = "android"))]
     #[link_name = "signal"]
     fn fork_signal(sig: c_int, handler: usize) -> usize;
-    #[cfg(target_os = "macos")]
+    #[cfg(target_vendor = "apple")]
     fn __error() -> *mut c_int;
     fn poll(fds: *mut PollFd, n: u32, timeout: c_int) -> c_int;
 }

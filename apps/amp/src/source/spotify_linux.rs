@@ -260,45 +260,6 @@ mod tests {
         assert_eq!(track_uri(&url), "spotify:track:xyz");
     }
 
-    /// Against the Spotify (or stand-in) player on this session bus:
-    /// `cargo test -p makepad-app-amp live_player -- --ignored --nocapture`.
-    /// Pauses and resumes; leaves the volume where it was.
-    #[test]
-    #[ignore]
-    fn live_player_answers() {
-        let mut source = SpotifyMpris { bus: None, metadata: None };
-        assert!(source.ready().unwrap(), "no {SERVICE} on the session bus");
-        let (now, queue) = source.playback().unwrap();
-        println!("now playing: {now:?}; queue {}", queue.len());
-        let uri = now.as_ref().map(|now| now.uri.clone()).unwrap_or_default();
-        println!("lookup: {:?}", source.lookup(&[uri]).unwrap());
-        let devices = source.devices().unwrap();
-        println!("devices: {devices:?}");
-        source.transport(&Transport::Pause).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(500));
-        println!("after pause: {:?}", source.playback().unwrap().0.map(|now| now.is_playing));
-        source.transport(&Transport::Resume).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(500));
-        println!("after resume: {:?}", source.playback().unwrap().0.map(|now| now.is_playing));
-        source.transport(&Transport::Volume(devices[0].volume)).unwrap();
-        if let Some(now) = &now {
-            source.transport(&Transport::Play(now.uri.clone())).unwrap();
-            source.transport(&Transport::Seek(60_000)).unwrap();
-            std::thread::sleep(std::time::Duration::from_millis(300));
-            source.transport(&Transport::Pause).unwrap();
-            println!("played {} again, sought to 60 s", now.uri);
-        }
-        // Shuffle and repeat are set, not read back: only against a stand-in.
-        if std::env::var_os("MUSIC_LIVE_ALL").is_some() {
-            source.transport(&Transport::Shuffle(true)).unwrap();
-            source.transport(&Transport::Repeat(Repeat::Track)).unwrap();
-            source.transport(&Transport::Next).unwrap();
-            source.transport(&Transport::Previous).unwrap();
-        }
-        println!("search: {:?}", source.search("orb").err());
-        println!("queue add: {:?}", source.transport(&Transport::Enqueue("spotify:track:x".into())).err());
-    }
-
     #[test]
     fn metadata_reads_as_now_playing_and_detail() {
         let metadata = dict(vec![

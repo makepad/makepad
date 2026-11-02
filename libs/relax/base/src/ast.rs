@@ -15,7 +15,7 @@ pub struct PatId(pub u32);
 pub struct TyId(pub u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ItemId(pub u32);
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BlockId(pub u32);
 
 /// ExprKind::Async capture modes: by use, all by value, and an async closure's body (the
@@ -1045,6 +1045,8 @@ pub enum AsmDir {
     InLateOut,
     Const,
     Sym,
+    /// `label <block>`: the block runs when the template jumps to this operand
+    Label,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1500,7 +1502,7 @@ pub struct Ast {
     pub vis_paths: crate::arena::Arena<Path>,
     /// lint-level attributes (`#[allow(..)]` ..) of expression statements: cfg stripping drops the
     /// statement wrapper, this keeps the attributes for the lint passes (expression -> attributes)
-    pub stmt_attrs: Vec<(ExprId, List<Attr>)>,
+    pub stmt_attrs: crate::arena::Arena<AttrsStmt>,
     /// syntax the parser met that a feature gates, wherever it is written (cfg'd-out code and
     /// macro arguments included; rustc ParseSess::gated_spans): (feature, position)
     pub gated_syntax: Vec<(&'static str, u32)>,
@@ -1652,14 +1654,6 @@ impl Ast {
             None => self.part_or_panic("list", l.lo).list(l),
         }
     }
-    /// The `Use` payload of an item kind.
-    #[inline]
-    pub fn as_use(&self, k: &ItemKind) -> Option<&UseItem> {
-        match k {
-            ItemKind::Use(r) => Some(self.row(*r)),
-            _ => None,
-        }
-    }
     /// The `Struct` payload of an item kind.
     #[inline]
     pub fn as_struct(&self, k: &ItemKind) -> Option<&StructItem> {
@@ -1700,27 +1694,11 @@ impl Ast {
             _ => None,
         }
     }
-    /// The `TraitAlias` payload of an item kind.
-    #[inline]
-    pub fn as_trait_alias(&self, k: &ItemKind) -> Option<&TraitAliasItem> {
-        match k {
-            ItemKind::TraitAlias(r) => Some(self.row(*r)),
-            _ => None,
-        }
-    }
     /// The `Impl` payload of an item kind.
     #[inline]
     pub fn as_impl(&self, k: &ItemKind) -> Option<&ImplItem> {
         match k {
             ItemKind::Impl(r) => Some(self.row(*r)),
-            _ => None,
-        }
-    }
-    /// The `ForeignMod` payload of an item kind.
-    #[inline]
-    pub fn as_foreign_mod(&self, k: &ItemKind) -> Option<&ForeignModItem> {
-        match k {
-            ItemKind::ForeignMod(r) => Some(self.row(*r)),
             _ => None,
         }
     }
@@ -1797,7 +1775,7 @@ impl Ast {
     }
     /// The lint-level attributes an expression statement was written with.
     pub fn stmt_attrs(&self, e: ExprId) -> List<Attr> {
-        if let Some((_, l)) = self.stmt_attrs.iter().find(|(x, _)| *x == e) { return *l; }
+        if let Some(s) = self.stmt_attrs.iter().find(|s| s.expr == e) { return s.attrs; }
         match self.part.get() {
             Some(p) => p.stmt_attrs(e),
             None => List::EMPTY,
@@ -1905,6 +1883,7 @@ impl Ast {
         self.ident_lists.shrink_to_fit();
         self.attrs.shrink_to_fit();
         self.asm_ops.shrink_to_fit();
+        self.stmt_attrs.shrink_to_fit();
         self.fn_sigs.shrink_to_fit();
         self.params.shrink_to_fit();
         self.field_defs.shrink_to_fit();

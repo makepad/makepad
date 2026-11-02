@@ -53,7 +53,7 @@ def stream_ttft(base, key, body, timeout=600):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--host", default="192.0.2.89")
+    ap.add_argument("--host", required=True)
     ap.add_argument("--port", default="8090")
     ap.add_argument("--runs", type=int, default=3)
     ap.add_argument("--skip-long", action="store_true")

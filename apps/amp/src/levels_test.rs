@@ -127,16 +127,6 @@ fn levels_flat_is_unity() {
     }
 }
 
-/// The settings on this machine's disk, for the record (no assertion: they
-/// boost the preamp).
-#[test]
-fn levels_saved_settings() {
-    let saved = EqSettings::parse("on 1\nlow 0\nmid 0\nhigh 0\ngain 6\nvolume 0.98094076\n");
-    for (name, input) in signals() {
-        trace(&format!("{name}, saved (preamp {:+} dB, volume {})", saved.gain_db, saved.volume), &saved, &input);
-    }
-}
-
 /// A boost (+6 dB on the 1 kHz slider, a 1 kHz sine at -3 dBFS) turns the
 /// safety limiter on: the peaks bend under full scale instead of clipping.
 #[test]

@@ -105,13 +105,13 @@ macro_rules! impl_real (
             /// The smallest finite positive value representable using this type.
             #[inline]
             fn min_value() -> Option<Self> {
-                Some($M::MIN)
+                Some(<$T>::MIN)
             }
 
             /// The largest finite positive value representable using this type.
             #[inline]
             fn max_value() -> Option<Self> {
-                Some($M::MAX)
+                Some(<$T>::MAX)
             }
 
             /// Archimedes' constant.

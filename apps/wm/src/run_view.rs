@@ -101,7 +101,7 @@ script_mod! {
 /// The arrival crossfade length: the wash fades out while the first
 /// frames fade in, smoothstepped, long enough to read as a resolve
 /// rather than a zap.
-const ARRIVAL_FADE_SECS: f32 = 0.28;
+pub(crate) const ARRIVAL_FADE_SECS: f32 = 0.28;
 
 #[derive(Clone, Debug, Default)]
 pub enum MpRunViewAction {

@@ -135,8 +135,8 @@ static WAKE_R: AtomicI32 = AtomicI32::new(-1);
 #[cfg(unix)]
 extern "C" {
     fn pipe(fds: *mut i32) -> i32;
-    fn write(fd: i32, buf: *const u8, n: usize) -> isize;
-    fn read(fd: i32, buf: *mut u8, n: usize) -> isize;
+    fn write(fd: i32, buf: *const core::ffi::c_void, n: usize) -> isize;
+    fn read(fd: i32, buf: *mut core::ffi::c_void, n: usize) -> isize;
     fn sleep(s: u32) -> u32;
 }
 
@@ -172,7 +172,7 @@ pub unsafe fn on_fault(f: &crate::os::fault::Fault, r: &'static Range, walk: imp
     {
         let w = WAKE_W.load(Ordering::Acquire);
         if w >= 0 {
-            let _ = write(w, b"s".as_ptr(), 1);
+            let _ = write(w, b"s".as_ptr().cast(), 1);
         }
         loop {
             sleep(3600);
@@ -256,7 +256,7 @@ fn wait() {
         let r = WAKE_R.load(Ordering::Acquire);
         if r >= 0 {
             let mut b = [0u8; 16];
-            unsafe { read(r, b.as_mut_ptr(), b.len()) };
+            unsafe { read(r, b.as_mut_ptr().cast(), b.len()) };
             return;
         }
     }
@@ -301,7 +301,7 @@ pub fn park_held(os_id: u64, frames: Vec<u64>, at: usize, what: String, reason: 
     {
         let w = WAKE_W.load(Ordering::Acquire);
         if w >= 0 {
-            let _ = unsafe { write(w, b"h".as_ptr(), 1) };
+            let _ = unsafe { write(w, b"h".as_ptr().cast(), 1) };
         }
     }
 }

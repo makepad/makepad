@@ -816,24 +816,6 @@ fn impl_f32x4_reduce_add() {
 }
 
 #[test]
-fn impl_f32x4_sum() {
-  let mut p = Vec::with_capacity(250_000);
-  for _ in 0..250_000 {
-    p.push(f32x4::splat(0.001));
-  }
-  let now = std::time::Instant::now();
-  let sum: f32 = p.iter().map(|x| x.reduce_add()).sum();
-  let duration = now.elapsed().as_micros();
-  println!("Time take {} {}us", sum, duration);
-
-  let p = vec![0.001; 1_000_000];
-  let now = std::time::Instant::now();
-  let sum2: f32 = p.iter().sum();
-  let duration = now.elapsed().as_micros();
-  println!("Time take {} {}us", sum2, duration);
-}
-
-#[test]
 fn impl_f32x4_transpose() {
   let a = [
     f32x4::from([1.0, 2.0, 3.0, 4.0]),

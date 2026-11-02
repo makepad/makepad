@@ -137,10 +137,10 @@ impl PeerRuntime {
         }
     }
 
-    /// Serving is on only when configured on AND a secret exists (fail
+    /// Serving is on only with networked hub permission, configured on AND a secret (fail
     /// closed: no secret means no authenticated caller can exist).
     pub fn serving_enabled(&self) -> bool {
-        self.serve && self.secret.is_some()
+        self.serve && self.secret.is_some() && makepad_network::lan::hub_service("ai-hub peer serve")
     }
 }
 

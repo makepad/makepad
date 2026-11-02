@@ -148,8 +148,8 @@ fn anonymisation_checklist() {
         ("\"password\": \"hunter2hunter2\"", SECRET),
         ("-----BEGIN OPENSSH PRIVATE KEY-----", SECRET),
         ("fetch(\"https://user:pa55word@example.org/api\")", URL_CREDENTIALS),
-        ("const SERVER: &str = \"http://198.51.100.23:8080/api\";", PRIVATE_HOST),
-        ("ssh arch@192.0.2.76", PRIVATE_HOST),
+        ("const SERVER: &str = \"http://192.168.77.20:8080/api\";", PRIVATE_HOST),
+        ("ssh arch@10.77.0.76", PRIVATE_HOST),
         ("see https://wiki.internal/team/page", PRIVATE_HOST),
         ("ssh me@nas.local", EMAIL),
     ];

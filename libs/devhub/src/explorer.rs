@@ -87,6 +87,67 @@ impl JitRow {
     }
 }
 
+/// Unknown fields stay unknown when an older hub or an incomplete probe cannot report them.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AiHub {
+    pub running: Option<bool>,
+    pub serving: Option<bool>,
+    pub models: Option<Vec<String>>,
+    pub peers: Option<u64>,
+    pub peers_ok: Option<u64>,
+    pub why: String,
+}
+
+impl AiHub {
+    fn parse(v: &Value) -> Option<Self> {
+        if !matches!(v, Value::Obj(_)) {
+            return None;
+        }
+        Some(Self {
+            running: v.get("running").and_then(Value::as_bool),
+            serving: v.get("serving").and_then(Value::as_bool),
+            models: v.get("models").and_then(Value::as_arr).and_then(|a| a.iter().map(|m| m.as_str().map(str::to_string)).collect()),
+            peers: v.get("peers").and_then(Value::as_u64),
+            peers_ok: v.get("peers_ok").and_then(Value::as_u64),
+            why: text(v, "why"),
+        })
+    }
+
+    pub(crate) fn to_json(&self) -> String {
+        let boolean = |v: Option<bool>| v.map_or("null".to_string(), |v| v.to_string());
+        let number = |v: Option<u64>| v.map_or("null".to_string(), |v| v.to_string());
+        let models = self.models.as_ref().map_or("null".to_string(), |models| {
+            format!("[{}]", models.iter().map(|s| makepad_remote::json_str(s)).collect::<Vec<_>>().join(","))
+        });
+        format!("{{\"running\":{},\"serving\":{},\"models\":{models},\"peers\":{},\"peers_ok\":{},\"why\":{}}}",
+            boolean(self.running), boolean(self.serving), number(self.peers), number(self.peers_ok), makepad_remote::json_str(&self.why))
+    }
+
+    /// Shared by the CLI and panel; formatting work is bounded even for a large model catalog.
+    pub fn line(&self) -> String {
+        let mut out = format!("AI hub: serving {}", match self.serving { Some(true) => "yes", Some(false) => "NO", None => "unknown" });
+        if !self.why.is_empty() {
+            out.push_str(&format!(" ({})", crate::proto::clean(&self.why, 200)));
+        }
+        let models = match &self.models {
+            None => "unknown".to_string(),
+            Some(models) if models.is_empty() => "none".to_string(),
+            Some(models) => {
+                let mut listed: Vec<String> = models.iter().take(12).map(|m| crate::proto::clean(m, 120)).collect();
+                if models.len() > 12 {
+                    listed.push(format!("+{} more", models.len() - 12));
+                }
+                listed.join(", ")
+            }
+        };
+        out.push_str(&format!(", models: {models}"));
+        if let Some(peers) = self.peers.filter(|n| *n > 0) {
+            out.push_str(&format!(", peers {}/{peers} answer", self.peers_ok.map_or("?".to_string(), |n| n.to_string())));
+        }
+        out
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct MachineRow {
     pub name: String,
@@ -97,6 +158,7 @@ pub struct MachineRow {
     pub mem_avail_mb: u64,
     /// a battery device: level 0..=100 and charging
     pub battery: Option<(u32, bool)>,
+    pub ai_hub: Option<AiHub>,
     pub jits: Vec<JitRow>,
     /// why it could not be asked (link down, refused)
     pub err: Option<String>,
@@ -134,6 +196,7 @@ pub fn parse_ps(name: &str, lines: &[String]) -> MachineRow {
             m.load1 = num(&v, "load1");
             m.mem_total_mb = num(&v, "mem_total_mb") as u64;
             m.mem_avail_mb = num(&v, "mem_avail_mb") as u64;
+            m.ai_hub = v.get("ai_hub").and_then(AiHub::parse);
             if v.get("battery").is_some() {
                 m.battery = Some((num(&v, "battery") as u32, matches!(v.get("charging"), Some(Value::Bool(true)))));
             }
@@ -226,6 +289,8 @@ pub fn drill(master: &Arc<Master>, machine: &str, pid: u32, cmd: &str) -> Vec<St
 
 #[cfg(test)]
 mod tests {
+    use super::{AiHub, MachineRow};
+
     #[test]
     fn ps_lines_become_rows() {
         let lines = vec![
@@ -239,5 +304,122 @@ mod tests {
         assert_eq!(m.jits[0].cpu_pct, Some(12.5));
         assert_eq!(m.jits[1].cpu_pct, None);
         assert!(m.jits[0].jit && !m.jits[1].jit);
+        assert!(m.ai_hub.is_none());
+    }
+
+    #[test]
+    fn ps_ai_hub_becomes_a_row_and_compact_text() {
+        let lines = vec![r#"{"machine":"101","ai_hub":{"running":true,"serving":true,"models":["trellis-2 ready","qwen installing"],"peers":6,"peers_ok":5,"why":""}}"#.to_string()];
+        let m = super::parse_ps("", &lines);
+        assert_eq!(m.ai_hub, Some(AiHub {
+            running: Some(true), serving: Some(true),
+            models: Some(vec!["trellis-2 ready".into(), "qwen installing".into()]),
+            peers: Some(6), peers_ok: Some(5), why: String::new(),
+        }));
+        let mut out = String::new();
+        crate::cli::render_ps(Some("node"), &lines, &mut out);
+        assert!(out.starts_with("node  "));
+        assert!(out.contains("  AI hub: serving yes, models: trellis-2 ready, qwen installing, peers 5/6 answer\n"));
+    }
+
+    #[test]
+    fn ps_ai_hub_outage_keeps_its_reason() {
+        let lines = vec![r#"{"machine":"102","ai_hub":{"running":true,"serving":false,"models":[],"peers":0,"peers_ok":0,"why":"listening on loopback only (networking off on this node)"}}"#.to_string()];
+        let mut out = String::new();
+        crate::cli::render_ps(None, &lines, &mut out);
+        assert!(out.contains("  AI hub: serving NO (listening on loopback only (networking off on this node)), models: none\n"));
+        assert!(!out.contains("peers"));
+    }
+
+    #[test]
+    fn ps_ai_hub_missing_fields_stay_unknown() {
+        let lines = vec![r#"{"machine":"103","ai_hub":{"running":true,"peers":6}}"#.to_string()];
+        let m = super::parse_ps("", &lines);
+        let h = m.ai_hub.unwrap();
+        assert_eq!(h.serving, None);
+        assert_eq!(h.models, None);
+        assert_eq!(h.peers_ok, None);
+        assert_eq!(h.line(), "AI hub: serving unknown, models: unknown, peers ?/6 answer");
+        let lines = vec![format!("{{\"machine\":\"103\",\"ai_hub\":{}}}", h.to_json())];
+        assert_eq!(super::parse_ps("", &lines).ai_hub, Some(h));
+        assert!(super::parse_ps("", &[r#"{"machine":"104","ai_hub":null}"#.to_string()]).ai_hub.is_none());
+    }
+
+    #[test]
+    fn ps_ai_hub_model_list_is_bounded() {
+        let hub = AiHub {
+            serving: Some(true),
+            models: Some((0..15).map(|i| format!("model-{i} ready")).collect()),
+            ..AiHub::default()
+        };
+        let lines = vec![format!("{{\"machine\":\"101\",\"ai_hub\":{}}}", hub.to_json())];
+        let mut out = String::new();
+        crate::cli::render_ps(None, &lines, &mut out);
+        assert!(out.contains("model-11 ready, +3 more"));
+        assert!(!out.contains("model-12"));
+    }
+
+    #[test]
+    fn ai_hub_summary_counts_known_configured_hubs() {
+        let mut machines: Vec<_> = (101..=106).map(|n| MachineRow {
+            name: n.to_string(),
+            ai_hub: Some(AiHub { running: Some(n != 104), serving: Some(n > 104), ..AiHub::default() }),
+            ..MachineRow::default()
+        }).collect();
+        machines.push(MachineRow { name: "no-hub".into(), ..MachineRow::default() });
+        machines.push(MachineRow { name: "old-hub".into(), ai_hub: Some(AiHub::default()), ..MachineRow::default() });
+        machines.push(MachineRow { name: "unreachable".into(), err: Some("link down".into()), ai_hub: machines[0].ai_hub.clone(), ..MachineRow::default() });
+        assert_eq!(crate::cli::ai_hub_summary(&machines).as_deref(), Some("AI hub: 4 of 6 nodes not serving the fleet: 101, 102, 103, 104"));
+        assert_eq!(crate::cli::ai_hub_summary(&machines[4..]), None);
+        assert_eq!(crate::cli::ai_hub_summary(&[]), None);
+    }
+
+    #[test]
+    fn ai_hub_warns_once_per_loss_of_service() {
+        let mut previous = None;
+        let observed = [Some(false), Some(true), None, Some(false), Some(false), None, Some(false), Some(true), Some(false)];
+        let warnings: Vec<_> = observed.into_iter().map(|serving| crate::local::ai_hub_lost_serving(&mut previous, serving)).collect();
+        assert_eq!(warnings, vec![false, false, false, true, false, false, false, false, true]);
+    }
+
+    #[test]
+    fn ai_hub_http_fields_preserve_unknowns_and_listener_failures() {
+        let parse = |s: &str| makepad_strict_json::parse(s.as_bytes()).unwrap();
+        let health = parse(r#"{"serving_fleet":true,"lan_listening":true,"role":"compute"}"#);
+        let models = parse(r#"[{"id":"trellis-2","state":"ready"},{"id":"qwen","state":"installing"}]"#);
+        let fleet = parse(r#"{"serving_fleet":true,"lan_listening":true,"networked_ai_hub":true,"peers":[{"name":"102","addr":"192.0.2.40:8123","answers":true,"models":[],"heard_s":1},{"name":"103","addr":"192.0.2.41:8123","answers":false,"models":[],"heard_s":2}]}"#);
+        let h = crate::local::ai_hub_status(&health, Some(&models), Some(&fleet));
+        assert_eq!(h.running, Some(true));
+        assert_eq!(h.serving, Some(true));
+        assert_eq!(h.peers, Some(2));
+        assert_eq!(h.peers_ok, Some(1));
+        assert_eq!(h.line(), "AI hub: serving yes, models: trellis-2 ready, qwen installing, peers 1/2 answer");
+
+        let empty = parse("{}");
+        let h = crate::local::ai_hub_status(&empty, None, None);
+        assert_eq!(h.serving, None);
+        assert_eq!(h.models, None);
+        assert_eq!(h.peers, None);
+        assert_eq!(h.peers_ok, None);
+        assert_eq!(h.why, "fleet serving status unknown");
+        // Older /health can still use the additive fields from /fleet.
+        assert_eq!(crate::local::ai_hub_status(&empty, None, Some(&fleet)).serving, Some(true));
+
+        let health = parse(r#"{"serving_fleet":true,"lan_listening":false}"#);
+        let fleet = parse(r#"{"serving_fleet":true,"lan_listening":false,"networked_ai_hub":false,"peers":[]}"#);
+        let h = crate::local::ai_hub_status(&health, Some(&models), Some(&fleet));
+        assert_eq!(h.serving, Some(false));
+        assert_eq!(h.why, "listening on loopback only (networking off on this node)");
+
+        let health = parse(r#"{"serving_fleet":false,"lan_listening":true,"role":"device"}"#);
+        let h = crate::local::ai_hub_status(&health, None, None);
+        assert_eq!(h.serving, Some(false));
+        assert_eq!(h.why, "not serving peers (role: device)");
+        let h = crate::local::ai_hub_status(&empty, Some(&parse("[]")), Some(&parse(r#"{"peers":[{}]}"#)));
+        assert_eq!(h.peers_ok, None);
+        assert!(h.why.contains("no models installed"));
+        let h = crate::local::ai_hub_status(&empty, Some(&parse(r#"[{"id":"qwen"}]"#)), None);
+        assert_eq!(h.models, Some(vec!["qwen unknown".into()]));
+        assert!(!h.why.contains("no models installed"));
     }
 }

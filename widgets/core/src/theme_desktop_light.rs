@@ -26,6 +26,21 @@ script_mod! {
         space_2: 1.0 * theme.space_factor
         space_3: 1.5 * theme.space_factor
 
+        // Property panels: compact rows and a capped label/value/trail grid.
+        prop_row_height: 20.
+        prop_row_gap: 2.
+        prop_join_gap: 1.
+        prop_label_width: 120.
+        prop_label_gap: 6.
+        prop_trail_width: 16.
+        prop_section_height: 24.
+        prop_section_gap: 2.
+        prop_radius: 1.0
+        prop_radius_section: 2.0
+        prop_chevron: 8.
+        prop_arrow_zone: 14.
+        prop_pad: 4.
+
         mspace_1: Inset{top: theme.space_1, right: theme.space_1, bottom: theme.space_1, left: theme.space_1}
         mspace_h_1: Inset{top: 0., right: theme.space_1, bottom: 0., left: theme.space_1}
         mspace_v_1: Inset{top: theme.space_1, right: 0., bottom: theme.space_1, left: 0.}
@@ -527,6 +542,15 @@ script_mod! {
         color_outline_variant: theme.color_d_1
         color_inverse_surface: theme.color_opaque_d_5
         color_inverse_on_surface: theme.color_opaque_u_6
+        // Fields rise toward ink; choice faces sit below the section.
+        prop_section_bg: mix(theme.color_surface_container, theme.color_surface_container_high, 0.45)
+        prop_field: mix(theme.prop_section_bg, theme.color_text, 0.11)
+        prop_field_hover: mix(theme.prop_section_bg, theme.color_text, 0.15)
+        prop_field_active: mix(theme.prop_section_bg, theme.color_text, 0.07)
+        prop_choice: mix(theme.prop_section_bg, #0, 0.3)
+        prop_choice_hover: mix(theme.prop_section_bg, #0, 0.18)
+        prop_ink_dim: theme.color_text_meta // Contrast-fitted at theme load.
+
         // Elevation shadow colours, one per step.
         color_elevation_1: #x00000026
         color_elevation_2: #x00000033

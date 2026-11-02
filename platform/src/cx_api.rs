@@ -2213,6 +2213,33 @@ impl Cx {
         self.get_pass_window_id(draw_pass_id)
     }
 
+    /// Retain a window's last image, holding GPU work for its entire pass tree.
+    /// Input and offscreen passes keep running. Callers should also skip recording expensive
+    /// window content. Resuming requests one full redraw, including child passes.
+    pub fn set_window_paused(&mut self, window: WindowId, paused: bool) {
+        if !self.windows.is_valid(window) || self.windows[window].paint_paused == paused {
+            return;
+        }
+        self.windows[window].paint_paused = paused;
+        self.windows[window].paint_once = false;
+        if !paused {
+            if let Some(pass) = self.windows[window].main_pass_id {
+                self.redraw_pass_and_child_passes(pass);
+            }
+            // Resuming from inside an offscreen update still owes the window its final frame.
+            self.window_redrawn = true;
+        }
+    }
+
+    /// Permit one pending paint of a paused window (for example a low-rate preview).
+    /// This does not record content; the caller requests the relevant area's redraw too.
+    pub fn repaint_window_once(&mut self, window: WindowId) {
+        if self.windows.is_valid(window) {
+            self.windows[window].paint_once = true;
+            self.window_redrawn = true;
+        }
+    }
+
     /// Measure where the frame time goes: every pass's GPU time by what it draws for (the
     /// headset's eyes, a desktop window, offscreen) and the draws' CPU time
     /// ([`crate::pass_load`]); [`Cx::take_pass_load`] reads it.

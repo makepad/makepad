@@ -604,13 +604,4 @@ mod tests {
         )));
     }
 
-    #[test]
-    fn wait_free_returns_current_value_when_target_already_met() {
-        // On machines without nvidia-smi this is None (gating not
-        // applicable); with one, 0 MB is always already met.
-        match wait_free_at_least(0, Duration::from_millis(10)) {
-            None => {}
-            Some(v) => assert!(v < u64::MAX),
-        }
-    }
 }

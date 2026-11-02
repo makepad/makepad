@@ -124,16 +124,18 @@ impl EvalCtxt<'_, '_> {
         // post-analysis environment (a value that needs them is too generic); any other constant
         // with generic parameters or placeholders among its arguments is too generic to evaluate.
         let (args, typing_env) = if matches!(alias.kind, crate::consts::AliasConstKind::Anon { .. }) && prog.repeat_expr_counts.contains(&def) {
-            // (Relax evaluates by running monomorphic code: a count whose body mentions none of its
-            // parameters has the same value under any arguments, so they are instantiated with `()`;
-            // one that mentions them is too generic -- rustc's evaluation fails exactly when the value
-            // needs them)
-            if repeat_count_mentions_params(tcx, prog, def) { return Ok(None); }
-            let args: Arc<[GenericArg]> = tcx.generic_indices_of(prog, def).identity_args(&tcx.tys).into_iter().map(|a| match a {
-                GenericArg::Type(t) if tcx.tys.flags(t).intersects(crate::types::TypeFlags::HAS_TY_PARAM) => GenericArg::Type(tcx.tys.unit),
-                a => a,
-            }).collect();
-            (args, crate::tcx::TypingEnv { limit: self.delegate.recursion_limit, param_env: tcx.param_env_id(prog, def), mode: crate::tcx::TypingMode::PostAnalysis })
+            // (Relax evaluates by running monomorphic code. A count whose body mentions none of its
+            // parameters has the same value under any arguments. One that mentions them is too
+            // generic when its value needs them, as rustc's evaluation fails on the layout of a
+            // parameter: `size_of::<*const T>()` of a sized `T` is a value, `size_of::<T>()` is not.
+            // Two instantiations that share no layout or drop facts tell them apart.)
+            let typing_env = crate::tcx::TypingEnv { limit: self.delegate.recursion_limit, param_env: tcx.param_env_id(prog, def), mode: crate::tcx::TypingMode::PostAnalysis };
+            let args = repeat_count_args(tcx, prog, def, typing_env, 0);
+            if repeat_count_mentions_params(tcx, prog, def) {
+                let (Ok(a), Ok(b)) = (tcx.const_eval_resolve(prog, typing_env, def, &args), tcx.const_eval_resolve(prog, typing_env, def, &repeat_count_args(tcx, prog, def, typing_env, 1))) else { return Ok(None) };
+                if a != b { return Ok(None); }
+            }
+            (args, typing_env)
         } else {
             let generic = alias.args.iter().any(|a| match *a {
                 GenericArg::Type(t) => tcx.tys.flags(t).intersects(crate::types::TypeFlags::HAS_PARAM | crate::types::TypeFlags::HAS_PLACEHOLDER),
@@ -153,6 +155,24 @@ impl EvalCtxt<'_, '_> {
 
 /// Whether the body of the repeat count `def` mentions a generic parameter of its parent: in an expression's or
 /// a pattern's type, or in the arguments of a path or a method it resolves to.
+/// The identity arguments of a repeat count with its parameters instantiated, `probe` 0 or 1 (an
+/// unsized one for a `?Sized` parameter of the second: a pointer to it has another layout). A const
+/// parameter is never used in a repeat count's body (E0401-style generic const operations), any value does.
+fn repeat_count_args(tcx: &crate::tcx::Tcx, prog: &crate::program::Program, def: crate::program::DefId, typing_env: crate::tcx::TypingEnv, probe: usize) -> Arc<[GenericArg]> {
+    use crate::types::TypeFlags;
+    let tys = &tcx.tys;
+    let sized = tcx.lang_items.get(crate::lang_items::LangItem::Sized);
+    tcx.generic_indices_of(prog, def).identity_args(tys).into_iter().map(|a| match a {
+        GenericArg::Type(t) if tys.flags(t).intersects(TypeFlags::HAS_TY_PARAM) => GenericArg::Type(match probe {
+            0 => tys.unit,
+            _ if !sized.is_some_and(|s| tcx.type_implements_trait(prog, typing_env, crate::next_solver::TraitRef { def_id: s, args: vec![GenericArg::Type(t)] }).must_apply_modulo_regions()) => tys.str_,
+            _ => tys.mk_array(tys.prim(crate::program::Prim::U16), crate::consts::Const::from_target_usize(tys, 3)),
+        }),
+        GenericArg::Const(c) if matches!(tys.const_kind(c), ConstKind::Param(_)) => GenericArg::Const(crate::consts::Const::from_target_usize(tys, 0)),
+        a => a,
+    }).collect()
+}
+
 fn repeat_count_mentions_params(tcx: &crate::tcx::Tcx, prog: &crate::program::Program, def: crate::program::DefId) -> bool {
     let body = tcx.typeck(prog, def);
     let param = |t: TyId| tcx.tys.flags(t).intersects(crate::types::TypeFlags::HAS_PARAM);

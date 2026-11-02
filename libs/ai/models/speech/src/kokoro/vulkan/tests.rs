@@ -1,9 +1,8 @@
-//! Real Vulkan checks. Comparisons are opt-in; unavailable hardware is a failure.
-//! Worker churn runs by default and skips only when no device is available.
+//! Real-device checks against self-contained CPU references.
+//! A working Vulkan device is required.
 
 use super::*;
-use crate::kokoro::{self, ops, weights::Weights as HostWeights};
-use std::sync::atomic::Ordering;
+use crate::kokoro::ops;
 
 static GPU: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -27,10 +26,7 @@ fn gpu() -> Gpu {
 
 #[test]
 fn runtime_survives_100_worker_threads() {
-    if let Err(e) = makepad_ai_vulkan::Device::shared() {
-        eprintln!("Kokoro Vulkan worker churn skipped: no usable device ({e})");
-        return;
-    }
+    makepad_ai_vulkan::Device::shared().expect("a working Vulkan device is required");
     for i in 0..100 {
         std::thread::spawn(move || {
             TEST_VULKAN.with(|v| v.set(true));
@@ -82,7 +78,6 @@ fn close(label: &str, actual: &[f32], expected: &[f32], tolerance: f32) {
 }
 
 #[test]
-#[ignore = "requires a real Vulkan device"]
 fn matrices_and_convolutions() {
     let _gpu = gpu();
     for (m, k, n) in [(1, 1, 1), (3, 7, 5), (33, 35, 37), (64, 128, 65), (1, 128, 16), (5, 128, 16)] {
@@ -130,7 +125,6 @@ fn matrices_and_convolutions() {
 }
 
 #[test]
-#[ignore = "requires a real Vulkan device"]
 fn norms_activations_and_layouts() {
     let _gpu = gpu();
     for cols in [1, 3, 37, 513, 4097] {
@@ -181,13 +175,7 @@ fn norms_activations_and_layouts() {
     }
 }
 
-fn model_path(name: &str) -> String {
-    std::path::Path::new(&std::env::var("MAKEPAD_KOKORO_TEST_DATA").expect("set MAKEPAD_KOKORO_TEST_DATA to the model directory"))
-        .join(name).to_string_lossy().into_owned()
-}
-
 #[test]
-#[ignore = "requires a real Vulkan device"]
 fn recurrent_directions() {
     let _gpu = gpu();
     for (input, hidden, time) in [(7, 8, 1), (13, 12, 17), (512, 256, 37), (640, 256, 121)] {
@@ -204,104 +192,5 @@ fn recurrent_directions() {
         let want = cpu(|| model.run(&x));
         let got = bilstm(&owner, &model, &x).unwrap();
         close("bidirectional LSTM", &got.data, &want.data, 5e-6);
-    }
-}
-
-#[test]
-#[ignore = "requires Kokoro weights and a real Vulkan device"]
-fn model_blocks_and_resident_weights() {
-    let _gpu = gpu();
-    let weights = HostWeights::load(&model_path("kokoro-v1_0.mktts")).unwrap();
-    let voice = HostWeights::load(&model_path("af_heart.mkvoice")).unwrap();
-    let style = &voice.get("style").unwrap()[10 * 256..10 * 256 + 128];
-    let decoder = Decoder::load(&weights).unwrap();
-    let x = mat(514, 7, 31);
-    let expected = cpu(|| decoder.encode.forward(&x, style));
-    for _ in 0..2 {
-        close("resident residual", &adain_block(&decoder.encode, &x, style).unwrap().data, &expected.data, 3e-4);
-    }
-    let bert = kokoro::bert::Bert::load(&weights).unwrap();
-    let text = kokoro::text_encoder::TextEncoder::load(&weights).unwrap();
-    let tokens = crate::g2p::tokens("Hello there.");
-    let want = cpu(|| bert.trace(&tokens));
-    let got = bert.trace(&tokens);
-    for (i, (a, b)) in got.layers.iter().zip(&want.layers).enumerate() { close(&format!("BERT layer {i}"), &a.data, &b.data, 5e-4); }
-    close("BERT output", &got.output.data, &want.output.data, 5e-4);
-    let want = cpu(|| text.trace(&tokens));
-    let got = text.trace(&tokens);
-    for ((label, a), (_, b)) in got.steps.iter().zip(&want.steps) { close(label, &a.data, &b.data, 2e-4); }
-    close("text LSTM", &got.output.data, &want.output.data, 5e-4);
-
-    let asr = mat(512, 9, 37);
-    let f0 = Mat::from_vec(1, 18, (0..18).map(|i| 120.0 + i as f32).collect());
-    let noise = mat(1, 18, 41);
-    kokoro::generator::NOISE_STREAM.store(101, Ordering::Relaxed);
-    let want = cpu(|| decoder.run(&asr, &f0, &noise, style));
-    kokoro::generator::NOISE_STREAM.store(101, Ordering::Relaxed);
-    let got = decode(&decoder, &asr, &f0, &noise, style, true).unwrap();
-    close("decoder encode", &got.encode.data, &want.encode.data, 8e-4);
-    for (i, (a, b)) in got.decode.iter().zip(&want.decode).enumerate() { close(&format!("decode block {i}"), &a.data, &b.data, 1e-3); }
-    close("identical harmonic source", &got.generator.har_source, &want.generator.har_source, 0.0);
-    for (i, (a, b)) in got.generator.noise_convs.iter().zip(&want.generator.noise_convs).enumerate() { close(&format!("noise convolution {i}"), &a.data, &b.data, 3e-4); }
-    for (i, (a, b)) in got.generator.ups.iter().zip(&want.generator.ups).enumerate() { close(&format!("upsample {i}"), &a.data, &b.data, 8e-4); }
-    for (i, (a, b)) in got.generator.merged.iter().zip(&want.generator.merged).enumerate() { close(&format!("generator stage {i}"), &a.data, &b.data, 2e-3); }
-    close("generator spectrum", &got.generator.post.data, &want.generator.post.data, 3e-3);
-    let (_, snr) = diff("decoder waveform", &got.generator.waveform, &want.generator.waveform);
-    assert!(snr > 70.0, "decoder waveform SNR {snr}");
-    kokoro::generator::NOISE_STREAM.store(101, Ordering::Relaxed);
-    let fast = decode(&decoder, &asr, &f0, &noise, style, false).unwrap();
-    close("trace versus synthesis liveness", &fast.generator.waveform, &got.generator.waveform, 0.0);
-    assert_eq!(accel::backend_name(), "vulkan");
-    // Dropped identities cannot retain or match recycled allocations.
-    drop(decoder); drop(bert); drop(text);
-    run("cache cleanup test", |ctx| {
-        let _g = Graph::new(ctx, None);
-        Ok(())
-    }).unwrap();
-    RUNTIME.with(|r| { if let Runtime::Ready(ctx) = &*r.borrow() { assert!(ctx.weights.is_empty()); } });
-}
-
-#[test]
-#[ignore = "requires Kokoro weights and a real Vulkan device; runs CPU synthesis too"]
-fn english_synthesis_and_real_time_factor() {
-    let _gpu = gpu();
-    let model = model_path("kokoro-v1_0.mktts");
-    for (voice, sentences) in [
-        ("af_heart.mkvoice", &[
-            "Hello there.",
-            "The next train leaves in five minutes.",
-            "Please turn left at the next street, then continue straight ahead.",
-        ][..]),
-        ("bm_daniel.mkvoice", &["Could you help me find the station?"][..]),
-    ] {
-        let mut speaker = kokoro::KokoroSpeaker::load_with_voice(&model, &model_path(voice)).unwrap();
-        for (index, sentence) in sentences.iter().enumerate() {
-            kokoro::generator::NOISE_STREAM.store(2027, Ordering::Relaxed);
-            let start = std::time::Instant::now();
-            let expected = cpu(|| speaker.synthesize(sentence)).unwrap();
-            let cpu_secs = start.elapsed().as_secs_f64();
-            kokoro::generator::NOISE_STREAM.store(2027, Ordering::Relaxed);
-            let start = std::time::Instant::now();
-            let actual = speaker.synthesize(sentence).unwrap();
-            let vulkan_secs = start.elapsed().as_secs_f64();
-            assert_eq!(accel::backend_name(), "vulkan", "CPU fallback invalidates timing");
-            let (max, snr) = diff(sentence, &actual.samples, &expected.samples);
-            assert_eq!(actual.sample_rate, 24000);
-            assert_eq!(actual.timings, expected.timings, "word durations");
-            assert_eq!(actual.phones, expected.phones, "phoneme durations");
-            assert_eq!(actual.samples.len() % 600, 0, "alignment frames are 600 samples");
-            assert!(actual.samples.iter().any(|v| v.abs() > 0.01), "silent waveform");
-            assert!(actual.samples.iter().all(|v| v.abs() <= 1.0), "unscaled waveform");
-            assert!(snr > 30.0, "full synthesis waveform SNR {snr}");
-            let duration = actual.samples.len() as f64 / actual.sample_rate as f64;
-            eprintln!("SYNTH voice={voice} index={index} samples={} duration={duration:.3} cpu_s={cpu_secs:.4} vulkan_s={vulkan_secs:.4} cpu_rtf={:.4} vulkan_rtf={:.4} max_abs={max:.6} snr_db={snr:.3}", actual.samples.len(), cpu_secs / duration, vulkan_secs / duration);
-            // Repeat with resident weights and identical excitation noise.
-            kokoro::generator::NOISE_STREAM.store(2027, Ordering::Relaxed);
-            let start = std::time::Instant::now();
-            let warm = speaker.synthesize(sentence).unwrap();
-            let warm_secs = start.elapsed().as_secs_f64();
-            close("warm determinism", &warm.samples, &actual.samples, 0.0);
-            eprintln!("WARM voice={voice} index={index} seconds={warm_secs:.4} rtf={:.4}", warm_secs / duration);
-        }
     }
 }

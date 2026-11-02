@@ -377,7 +377,7 @@ pub(crate) struct Deps {
 }
 
 const DEPS_MAGIC: &[u8; 4] = b"DEP2";
-const DEPS_VERSION: u32 = 4;
+const DEPS_VERSION: u32 = 5;
 
 fn bit(set: &[u64], c: u32) -> bool { set.get(c as usize / 64).is_some_and(|w| w >> (c % 64) & 1 == 1) }
 
@@ -628,13 +628,24 @@ fn file_nodes(pf: &ParsedFile, dg: &super::items::FileDigest, path: &str) -> Vec
     // bodies'; Deps::build parses the parts the graph needs first, so the graph never depends on
     // when it is built)
     let regions = file_regions(pf);
-    // what the expansions called from within `segs` (and the expansions called from those) name;
-    // and the invocations in `segs` that have none (their names are unknown: the node is coarse)
-    let expanded = |segs: &[(u32, u32)], invoked: &mut Vec<Name>, at: &mut Vec<u32>, names: &mut Vec<Name>| {
-        for (x, y) in region_closure(&regions, segs) {
-            let t = pf.bytes(x, y);
-            scan(t, &[(0, t.len() as u32)], &[], names, &mut Vec::new());
-        }
+    // what the expansions called from within `segs` (and the expansions called from those) name,
+    // their piece digest, and the invocations in `segs` that have none (their names are unknown:
+    // the node is coarse)
+    let expanded = |segs: &[(u32, u32)], invoked: &mut Vec<Name>, at: &mut Vec<u32>, names: &mut Vec<Name>| -> u128 {
+        let mut exp = region_closure(&regions, segs);
+        let exp_piece = if exp.is_empty() {
+            0
+        } else {
+            exp.sort_unstable();
+            let mut eh = Sip128::new();
+            eh.str("dep-exp");
+            for (x, y) in exp {
+                let t = pf.bytes(x, y);
+                eh.u128(piece_hash(t, 0, &[(0, t.len() as u32)]));
+                scan(t, &[(0, t.len() as u32)], &[], names, &mut Vec::new());
+            }
+            eh.finish128()
+        };
         // an invocation's expansion is called from its path's start (at most a long path before
         // the name the scan saw)
         // an invocation inside the arguments of an expanded one is expanded within that expansion
@@ -652,6 +663,7 @@ fn file_nodes(pf: &ParsedFile, dg: &super::items::FileDigest, path: &str) -> Vec
         }
         *invoked = keep;
         *at = keep_at;
+        exp_piece
     };
     // the tokens of the file, for brace positions
     let brace_at_or_after = |from: u32, to: u32, last: bool| -> Option<u32> {
@@ -672,9 +684,13 @@ fn file_nodes(pf: &ParsedFile, dg: &super::items::FileDigest, path: &str) -> Vec
         let root_attrs: Vec<crate::ast::Attr> = ast.root_attrs.iter().copied().collect();
         attr_segs(pf, &root_attrs, &mut segs);
         if !segs.is_empty() {
-            let (mut names, mut invoked) = (Vec::new(), Vec::new());
-            scan(src, &segs, &[], &mut names, &mut invoked);
-            out.push(Raw { items: Vec::new(), piece: piece_hash(src, 0, &segs), names, keys: Vec::new(), invoked, invoked_at: Vec::new(), always: true, mac: false, rules: false, header: None, trait_name: None, named_head: true });
+            let (mut names, mut invoked, mut at) = (Vec::new(), Vec::new(), Vec::new());
+            scan_at(src, &segs, &[], &mut names, &mut invoked, &mut at);
+            let exp_piece = expanded(&segs, &mut invoked, &mut at, &mut names);
+            let mut ph = Sip128::new();
+            ph.u128(piece_hash(src, 0, &segs));
+            ph.u128(exp_piece);
+            out.push(Raw { items: Vec::new(), piece: ph.finish128(), names, keys: Vec::new(), invoked, invoked_at: at, always: true, mac: false, rules: false, header: None, trait_name: None, named_head: true });
         }
     }
     let items = reached(pf);
@@ -815,7 +831,7 @@ fn file_nodes(pf: &ParsedFile, dg: &super::items::FileDigest, path: &str) -> Vec
         let segs = minus(segs, &mut cut);
         let (mut names, mut invoked, mut at) = (Vec::new(), Vec::new(), Vec::new());
         scan_at(src, &segs, &skip, &mut names, &mut invoked, &mut at);
-        if !rules { expanded(&segs, &mut invoked, &mut at, &mut names); }
+        let exp_piece = if rules { 0 } else { expanded(&segs, &mut invoked, &mut at, &mut names) };
         names.sort_unstable();
         names.dedup();
         keys.sort_unstable();
@@ -823,6 +839,7 @@ fn file_nodes(pf: &ParsedFile, dg: &super::items::FileDigest, path: &str) -> Vec
         let mut ph = Sip128::new();
         ph.u128(ident(i));
         ph.u128(piece_hash(src, kind_code(&it.kind), &segs));
+        ph.u128(exp_piece);
         out.push(Raw { items: members, piece: ph.finish128(), names, keys, invoked, invoked_at: at, always, mac, rules, header, trait_name, named_head });
     }
     out
@@ -950,7 +967,7 @@ impl Deps {
             let needs = pf.ast.items.iter().enumerate().any(|(i, it)| {
                 matches!(it.kind, ItemKind::Fn(sig, None, _) if pf.ast.fn_sig(sig).lazy_body.is_some())
                     && dg.body_span(crate::ast::ItemId(i as u32)).is_none()
-                    && { let (mut n, mut inv) = (Vec::new(), Vec::new()); scan(&pf.src, &[(it.lo, it.hi)], &[], &mut n, &mut inv); inv.iter().any(|m| m & QUIET_BIT == 0) }
+                    && { let (mut n, mut inv) = (Vec::new(), Vec::new()); scan(&pf.src, &[(it.lo, it.hi)], &[], &mut n, &mut inv); inv.iter().any(|&m| m & QUIET_BIT == 0 || late_builtin(m)) }
             });
             if needs {
                 if let Some(&c) = prog.file_crate.get(f) { let _ = pf.part(&prog.crates[c as usize].cfg); }
@@ -1501,20 +1518,30 @@ impl Deps {
     }
 }
 
-/// The names of the expansion text produced by macro invocations inside `[lo, hi)` (a fn body),
-/// followed back to their call sites. None when the file's lazily parsed bodies are not parsed
-/// (their expansions are not known).
-pub(crate) fn exp_names(pf: &ParsedFile, lo: u32, hi: u32, lazy: bool) -> Option<Vec<Name>> {
+/// Whether `m` (a `scan` invocation entry) is a quiet built-in that reads an outside late input.
+pub(crate) fn late_builtin(m: Name) -> bool {
+    let raw = m & !QUIET_BIT;
+    raw == name_of(b"include_str") || raw == name_of(b"include_bytes") || raw == name_of(b"env") || raw == name_of(b"option_env")
+}
+
+/// The expansion text digest and the names of the expansion text produced by macro invocations
+/// inside `[lo, hi)` (a fn body), followed back to their call sites. None when the file's lazily
+/// parsed bodies are not parsed (their expansions are not known).
+pub(crate) fn exp_body(pf: &ParsedFile, lo: u32, hi: u32, lazy: bool) -> Option<(u128, Vec<Name>)> {
     if lazy && pf.part.get().is_none() { return None; }
     let mut names = Vec::new();
+    let mut th = Sip128::new();
+    th.str("exp-text");
     let regions = file_regions(pf);
     for (a, b) in region_closure(&regions, &[(lo, hi)]) {
         let text = pf.bytes(a, b);
+        th.u64(text.len() as u64);
+        th.write(text);
         scan(text, &[(0, text.len() as u32)], &[], &mut names, &mut Vec::new());
     }
     names.sort_unstable();
     names.dedup();
-    Some(names)
+    Some((th.finish128(), names))
 }
 
 /// A file's expansion regions (its own text's and its parsed parts'): (direct call site, start,
@@ -1528,7 +1555,7 @@ fn file_regions(pf: &ParsedFile) -> Vec<(u32, u32, u32)> {
 
 /// The regions (start, end) of the expansions called from within `seeds`, and of those called from
 /// within them, transitively.
-fn region_closure(regions: &[(u32, u32, u32)], seeds: &[(u32, u32)]) -> Vec<(u32, u32)> {
+pub(super) fn region_closure(regions: &[(u32, u32, u32)], seeds: &[(u32, u32)]) -> Vec<(u32, u32)> {
     let mut out: Vec<(u32, u32)> = Vec::new();
     let mut todo: Vec<(u32, u32)> = seeds.to_vec();
     let mut seen = std::collections::HashSet::new();

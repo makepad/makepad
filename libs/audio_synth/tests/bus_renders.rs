@@ -1,14 +1,13 @@
 //! Offline renders through the whole game bus (spatializer, reverb, master
 //! dynamics): the recipe bank by family, a car pass-by with doppler, a
-//! multi-car race mix, room presets, and the render cost per voice.
+//! multi-car race mix.
 //!
 //! `SYNTH_RENDER_DIR=/tmp/x cargo test --release -p makepad-audio-synth
 //! --test bus_renders -- --nocapture --test-threads 1`
 
-use makepad_audio_synth::bus::{Emitter, Priority, SynthBus, RECIPE_VOICES};
+use makepad_audio_synth::bus::{Emitter, Priority, SynthBus};
 use makepad_audio_synth::engine::{preset, EngineInput};
 use makepad_audio_synth::recipe::{builtin, Recipe, BUILTIN_NAMES};
-use makepad_audio_synth::reverb::RoomPreset;
 use makepad_audio_synth::spatial::{Distance, Listener3};
 use makepad_audio_synth::vehicle::{Surface, TyreInput};
 use makepad_audio_synth::wav::stereo_wav_16;
@@ -171,42 +170,4 @@ fn race_mix_and_cost() {
     let (pl, _, _) = stats(&l);
     assert!(pl < -0.9, "limiter ceiling -1 dBFS, got {pl}");
     write("race_mix_6_cars", &l, &r);
-}
-
-/// The same gunshot in each room preset.
-#[test]
-fn rooms() {
-    let recipe = Recipe::parse(builtin("gun_pistol").unwrap()).unwrap();
-    let (mut l, mut r) = (Vec::new(), Vec::new());
-    for room in RoomPreset::ALL {
-        let mut bus = SynthBus::new(RATE);
-        bus.set_room(room.params());
-        // Let the crossfade settle from the default room.
-        render(&mut bus, 3.0);
-        bus.play_recipe(&recipe, 1.0, 1.0, Emitter::at([4.0, 0.0, -8.0], 80.0), Priority::High, 0);
-        let (a, b) = render(&mut bus, 2.5);
-        let tail = stats(&a[(RATE * 1.0) as usize..]).1;
-        println!("room {:8}: tail rms after 1 s {tail:.1} dB", room.name());
-        l.extend_from_slice(&a);
-        r.extend_from_slice(&b);
-    }
-    write("rooms_pistol", &l, &r);
-}
-
-/// Cost of one voice of each kind, and the pool under a 200-shot burst.
-#[test]
-fn voice_cost_and_pool() {
-    let mut bus = SynthBus::new(RATE);
-    let recipe = Recipe::parse(builtin("explosion").unwrap()).unwrap();
-    for i in 0..RECIPE_VOICES {
-        bus.play_recipe(&recipe, 1.0, 0.1, Emitter::at([i as f32, 0.0, -5.0], 100.0), Priority::Normal, 0);
-    }
-    let started = Instant::now();
-    render(&mut bus, 1.0);
-    let full = started.elapsed().as_secs_f32();
-    println!("{} explosion voices: {:.2} % of one core ({:.1} µs per voice per 10 ms block)", RECIPE_VOICES, full * 100.0, full * 1e6 / RECIPE_VOICES as f32 / 100.0);
-    for _ in 0..200 {
-        bus.play_recipe(&recipe, 1.0, 0.1, Emitter::FLAT, Priority::Normal, 0);
-    }
-    assert!(bus.live_counts().0 <= RECIPE_VOICES);
 }

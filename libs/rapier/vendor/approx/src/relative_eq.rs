@@ -1,4 +1,4 @@
-use core::{cell, f32, f64};
+use core::cell;
 #[cfg(feature = "num-complex")]
 use num_complex::Complex;
 use AbsDiffEq;

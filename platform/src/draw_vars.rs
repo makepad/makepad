@@ -125,6 +125,10 @@ impl ScriptHook for DrawVars {
                 self.options.depth_write = v != 0.0;
             }
 
+            if let Some(v) = vm.value(io_self, id!(depth_test_greater)).as_bool() {
+                self.options.depth_test_greater = v;
+            }
+
             let alpha_blend_value = vm.value(io_self, id!(alpha_blend));
             if let Some(v) = alpha_blend_value.as_bool() {
                 self.options.alpha_blend = v;

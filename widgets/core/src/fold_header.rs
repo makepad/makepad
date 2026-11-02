@@ -49,7 +49,7 @@ enum DrawState {
     DrawBody,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)]
 pub enum FoldHeaderAction {
     Opening,
     Closing,

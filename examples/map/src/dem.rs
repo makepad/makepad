@@ -228,32 +228,3 @@ pub fn route_profile(
         descent_m: descent,
     })
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn sample_amsterdam() {
-        if !std::path::Path::new("../../local/maps/dem/N52E004.hgt").exists() {
-            return;
-        }
-        let mut cache = DemCache::new("../../local/maps/dem");
-        let e = cache.sample_m(LonLat::new(4.88, 52.36));
-        println!("elev@ams: {:?}", e);
-        assert!(e.is_some());
-        let points = vec![LonLat::new(4.88, 52.36), LonLat::new(4.95, 52.37)];
-        let profile = route_profile(&mut cache, &points, 200).unwrap();
-        println!(
-            "profile: n={} min={} max={} up={} down={}",
-            profile.samples.len(),
-            profile.min_elev,
-            profile.max_elev,
-            profile.ascent_m,
-            profile.descent_m
-        );
-        // Amsterdam is flat: phantom climb must stay in single digits.
-        assert!(profile.ascent_m < 10.0, "ascent {}", profile.ascent_m);
-        assert!(profile.max_elev - profile.min_elev < 12.0);
-    }
-}

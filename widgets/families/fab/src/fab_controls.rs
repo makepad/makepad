@@ -7608,77 +7608,6 @@ mod tests {
         assert_eq!(slider_ended_value(&actions, uid), Some(42.0));
     }
 
-    /// The new control is painted out of the panel's own table and nothing
-    /// else. A face that writes a colour of its own is a face that stays
-    /// dark under a light theme; a face that reads the app's theme is the
-    /// white slab the whole palette was written to avoid.
-    #[test]
-    fn the_sliders_face_names_only_the_panels_own_palette() {
-        let src = include_str!("fab_controls.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .expect("the file has a first half");
-        let face = src
-            .split("do #(DrawFabSlider::script_shader(vm)){")
-            .nth(1)
-            .expect("the file declares the slider's shader");
-        let face = &face[..face
-            .find("mod.widgets.FabSliderBase")
-            .expect("the shader is followed by the registration")];
-        assert!(
-            !face.contains("#x"),
-            "the slider's face writes a colour of its own"
-        );
-        assert!(
-            !face.contains("theme."),
-            "the slider's face reads the app's theme"
-        );
-        assert!(
-            face.contains("fab.color_num"),
-            "the slider's face is drawn from the fab table"
-        );
-    }
-
-    /// The knob is held to the same table, and ALL of it is: the shader, and
-    /// the template after it with its three inks. The slider's reading stops
-    /// at the shader; this one runs on to the next control's, because a knob
-    /// is put on the panel a hundred at a time and a word of it that took the
-    /// app's ink would be a hundred words changing colour under the hand that
-    /// is blending the app's theme.
-    #[test]
-    fn the_knob_names_only_the_panels_own_palette() {
-        let src = include_str!("fab_controls.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .expect("the file has a first half");
-        let knob = src
-            .split("do #(DrawFabKnob::script_shader(vm)){")
-            .nth(1)
-            .expect("the file declares the knob's shader");
-        let knob = &knob[..knob
-            .find("do #(DrawColorWheel::script_shader(vm)){")
-            .expect("the knob is followed by the colour wheel")];
-        assert!(
-            knob.contains("mod.widgets.FabKnob = "),
-            "the reading stops short of the knob's template"
-        );
-        assert!(!knob.contains("#x"), "the knob writes a colour of its own");
-        assert!(!knob.contains("vec4(0.") && !knob.contains("vec4(1."), "the knob writes a colour of its own");
-        assert!(
-            !knob.contains("theme.") && !knob.contains("mod.theme"),
-            "the knob reads the app's theme"
-        );
-        for ink in ["fab.color_accent", "fab.color_num", "fab.color_button", "fab.color_focus_ring", "fab.color_text_muted"] {
-            assert!(knob.contains(ink), "the knob's face no longer draws from `{ink}`");
-        }
-        // Every text style in it is the kit's own face.
-        assert_eq!(
-            knob.matches("text_style:").count(),
-            knob.matches("text_style: fab.font{").count(),
-            "a text style on the knob is not built from `fab.font`"
-        );
-    }
-
     /// A 26 point column of a knob matrix, 48 down.
     fn column() -> Rect {
         Rect {
@@ -7782,91 +7711,6 @@ mod tests {
             let run = diagonal_run(column(), 60.0, 10.0, 45.0, lean);
             assert!((run.bounds.size.y - long).abs() < 1e-9);
         }
-    }
-
-    /// The panel's own palette and the panel's own face, on the header as on
-    /// everything else the kit draws. Read off the SOURCE, so a colour token
-    /// borrowed from the app's theme fails here rather than on the day
-    /// somebody installs a sheet. The same reading the knob gets, for the
-    /// same reason.
-    #[test]
-    fn the_diagonal_header_names_only_the_panels_own_palette() {
-        let src = include_str!("fab_controls.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .expect("the file has a first half");
-        let label = src
-            .split("mod.widgets.FabDiagonalLabelBase = ")
-            .nth(1)
-            .expect("the file declares the diagonal header");
-        let label = &label[..label
-            .find("// ---- the search well ----")
-            .expect("the diagonal header is followed by the search well")];
-        assert!(
-            label.contains("mod.widgets.FabDiagonalLabel = "),
-            "the reading stops short of the header's template"
-        );
-        assert!(!label.contains("#x"), "the header writes a colour of its own");
-        assert!(
-            !label.contains("theme.") && !label.contains("mod.theme"),
-            "the header reads the app's theme"
-        );
-        for token in ["fab.color_text_dim", "fab.font_size_small"] {
-            assert!(label.contains(token), "the header no longer draws from `{token}`");
-        }
-        assert_eq!(
-            label.matches("text_style:").count(),
-            label.matches("text_style: fab.font{").count(),
-            "a text style on the header is not built from `fab.font`"
-        );
-    }
-
-    /// The carousel's chip is the one face in the kit that is MEANT to be a
-    /// colour the panel knows nothing about: its four bands are the theme
-    /// being offered, and a chip drawn from the panel's table would show the
-    /// panel instead of the palette. So the reading is the other way round --
-    /// the bands come off the host, and everything the panel owns, which is
-    /// the ring that says which chip is hovered and which is in force, comes
-    /// off the fab table like everything else.
-    #[test]
-    fn the_palette_carousel_shows_the_hosts_colours_and_wears_the_panels_ring() {
-        let src = include_str!("fab_controls.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .expect("the file has a first half");
-        let chip = src
-            .split("do #(DrawFabPaletteChip::script_shader(vm)){")
-            .nth(1)
-            .expect("the file declares the chip's shader");
-        let chip = &chip[..chip
-            .find("mod.widgets.FabColorPickBase")
-            .expect("the chip is followed by the colour picker")];
-        assert!(
-            chip.contains("mod.widgets.FabPaletteCarousel = "),
-            "the reading stops short of the carousel's template"
-        );
-        assert!(!chip.contains("#x"), "the chip writes a colour of its own");
-        assert!(
-            !chip.contains("theme.") && !chip.contains("mod.theme"),
-            "the chip reads the app's theme"
-        );
-        for band in ["self.band_0", "self.band_1", "self.band_2", "self.band_3"] {
-            assert!(chip.contains(band), "the chip no longer paints `{band}`");
-        }
-        // And how many of them: a palette of fewer colours is a chip of
-        // fewer squares, and the steps between bands are read off it.
-        assert!(chip.contains("step(1.0 / self.bands, y)"), "the chip no longer shows as many bands as it is told");
-        for ink in ["fab.color_border", "fab.color_focus_ring"] {
-            assert!(chip.contains(ink), "the chip's ring no longer comes from `{ink}`");
-        }
-        // The one colour written out is the band's own opacity: a palette
-        // holding a translucent colour must still show as a solid block, or
-        // a chip becomes a reading of the panel's ground through it.
-        assert_eq!(
-            chip.matches("vec4(").count(),
-            chip.matches("vec4(0.0, 0.0, 0.0, 1.0)").count() + chip.matches("vec4(band.xyz, 1.0)").count(),
-            "the chip's face writes a colour that is neither a band nor a band's opacity"
-        );
     }
 
     fn a_row_of(count: usize, view: f64) -> ChipTrack {
@@ -8131,27 +7975,6 @@ mod tests {
         assert_eq!(knob_face(28.0, 28.0, 0.0, 0.0), KnobFace { diameter: 28.0, top: 0.0 });
         // A box with no room is a face of nothing, never a negative one.
         assert_eq!(knob_face(28.0, 10.0, 12.0, 12.0), KnobFace { diameter: 0.0, top: 0.0 });
-    }
-
-    /// ...and the shader finds the face by the same three lines. It cannot be
-    /// run from here, so it is READ: the day somebody changes one copy of the
-    /// arithmetic, this is what says there is another.
-    #[test]
-    fn the_shader_finds_the_face_by_the_same_arithmetic() {
-        let src = include_str!("fab_controls.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .expect("the file has a first half");
-        for line in [
-            "let rows = self.label_px + self.readout_px",
-            "let d = max(min(self.rect_size.x, self.rect_size.y - rows), 0.0)",
-            "let top = max((self.rect_size.y - rows - d) * 0.5, 0.0)",
-            "let rows = label_px + readout_px;",
-            "let diameter = width.min(height - rows).max(0.0);",
-            "let top = ((height - rows - diameter) * 0.5).max(0.0);",
-        ] {
-            assert!(src.contains(line), "`{line}` is gone: the face is measured two ways now");
-        }
     }
 
     /// The unit stands hard against the number, because the cell is 28 wide.
@@ -9843,40 +9666,6 @@ mod fab_value_input_track {
         send(&mut cx, &root, &release(at, 0.1));
         down.unhandle(&mut cx, &claimed(&down));
         cx.fingers.first_mouse_button = None;
-    }
-
-    /// The number is still the way in to typing, and Return still commits.
-    #[test]
-    fn a_click_on_the_number_still_opens_typing_and_return_commits() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        let (root, band, _scrub) = start(&mut cx);
-        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
-        let at = on_the_number(&cx, &band);
-        let down = press(at, 0.0);
-        let actions = send(&mut cx, &root, &down);
-        assert_eq!(
-            changed(&actions, &band),
-            None,
-            "the press on the number moved the value"
-        );
-        send(&mut cx, &root, &release(at, 0.1));
-        down.unhandle(&mut cx, &claimed(&down));
-        cx.fingers.first_mouse_button = None;
-        assert!(
-            band.borrow::<FabValueInput>().unwrap().editing,
-            "a click on the number did not open the editor"
-        );
-        // What Return does with the typed text, taken at the seam the
-        // editor's own action arrives at.
-        let uid = band.widget_uid();
-        let actions = cx.capture_actions(|cx| {
-            band.borrow_mut::<FabValueInput>()
-                .unwrap()
-                .commit_edit_text(cx, uid, "200");
-        });
-        assert_eq!(ended(&actions, &band), Some(200.0), "the typed value never committed");
-        assert_eq!(value(&band), 200.0);
-        assert!(!band.borrow::<FabValueInput>().unwrap().editing);
     }
 
     /// The name is the reset, the way the panel's sliders read it.

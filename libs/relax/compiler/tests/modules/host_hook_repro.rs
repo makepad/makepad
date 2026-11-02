@@ -1,5 +1,5 @@
 // Standalone Relax regression reproducer, not a Cargo integration test.
-// Run with `makepad test <this file>` on a node; see VALIDATION.md.
+// Run with `makepad test <this file>` on a pool node; see VALIDATION.md.
 // It must load successfully even after a host has used catch_unwind.
 #[test]
 fn load_after_host_catch() {

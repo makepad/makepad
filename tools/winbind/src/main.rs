@@ -1,5 +1,6 @@
 mod generate;
 mod metadata;
+mod sha256;
 use metadata::{fail, File};
 use std::io::Write;
 fn main() {
@@ -12,6 +13,10 @@ fn main() {
     }
     if command == "generate-module" {
         generate::run(args, true);
+        return;
+    }
+    if command == "regenerate" {
+        generate::regenerate(args);
         return;
     }
     if command == "inventory" {

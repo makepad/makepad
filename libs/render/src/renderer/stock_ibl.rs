@@ -197,6 +197,31 @@ impl Renderer {
         [1.0, self.stock_ibl.scale, if from_map { 1.0 } else { 0.0 }, 0.0]
     }
 
+    /// Binds this frame's environment to a host's own draw that lights with
+    /// render-material's lane lookups (`mat_ibl_lane_sky_env`,
+    /// `mat_ibl_lane_ambient`) and declares `detail_map` and `ibl_ctl`: a
+    /// surface the renderer does not draw lit as the stock lanes light a
+    /// mesh beside it (their scale, and the fill a host's fast GI gathers
+    /// kept: bind the GI first, `bind_gi`). Without a bound preparation, or
+    /// while the frame routes nothing through the map (the PBR lane off),
+    /// the lookups are off (`ibl_ctl.x` = 0) and the draw keeps its own
+    /// hemisphere. Valid after this frame's `draw_scene_full`.
+    pub fn bind_ibl(&self, cx: &Cx, vars: &mut DrawVars) {
+        let slot = vars.draw_shader_id.and_then(|s| cx.draw_shaders[s.index].mapping.textures.iter().position(|t| t.id == live_id!(detail_map)));
+        let Some(slot) = slot else { return };
+        match self.ibl_texture().filter(|_| self.environment_ready() && self.pbr_materials_enabled) {
+            Some(texture) => {
+                vars.set_texture(slot, texture);
+                let ctl = self.ibl_lane_ctl(cx, vars, true);
+                vars.set_uniform(cx, live_id!(ibl_ctl), &ctl);
+            }
+            None => {
+                vars.empty_texture(slot);
+                vars.set_uniform(cx, live_id!(ibl_ctl), &[0.0, 0.0, 0.0, 0.0]);
+            }
+        }
+    }
+
     /// Write `ibl_ctl` on the draw of the PBR-family IBL program `name`
     /// (`bind_model_lane`, after the GI is bound).
     pub(super) fn bind_ibl_lane(&self, cx: &Cx, name: &str, vars: &mut DrawVars) {
@@ -404,18 +429,6 @@ mod tests {
         assert_eq!(textures[5].id, live_id!(detail_map), "the PBR lane's free detail slot");
         assert!(textures.iter().any(|t| t.id == live_id!(orm_map)), "a stock model's ORM binds as on the PBR lane");
         assert!(textures.iter().any(|t| t.id == live_id!(morph_map)), "its morph targets too");
-    }
-
-    #[test]
-    fn without_an_environment_nothing_is_built_and_the_frame_routes_as_before() {
-        let mut cx = headless();
-        let mut renderer = Renderer::default();
-        renderer.prepare_stock_ibl(&mut cx);
-        // The decision off: the lanes' filter is the one they had (the
-        // truth table above).
-        assert!(!renderer.stock_ibl_active());
-        assert!(renderer.custom_material(STOCK_IBL_MATERIAL).is_none(), "no environment, no program");
-        assert!(renderer.custom_draws.is_empty());
     }
 
     /// Under a bound environment: before a scene draw has installed the

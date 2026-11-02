@@ -209,11 +209,10 @@ fn destructor_panic_finishes_drain() {
 }
 
 #[test]
-#[ignore = "optional isolated optimized timing; best of five"]
 fn timing_best_of_five() {
     use std::hint::black_box;
     use std::time::Instant;
-    let mut seed=42; let keys: Vec<u64>=(0..100_000).map(|_| { rand(&mut seed); seed }).collect();
+    let mut seed=42; let keys: Vec<u64>=(0..1024).map(|_| { rand(&mut seed); seed }).collect();
     let mut port=u128::MAX; let mut real=u128::MAX;
     for _ in 0..5 {
         let start=Instant::now(); let mut m=Map::new();

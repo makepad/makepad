@@ -94,7 +94,7 @@ fn run(ctx: &Ctx, pair: Pair) {
         d.allapps.running = Some(r.clone());
     });
     ctx.store.event("allapps", Sev::Info, format!("allapps {} started", pair.short()), None);
-    let spec = Spec { only: false, lane: "allapps".into(), agent: "devhub-allapps".into(), kind: Kind::Long, needs: "arch=x64,os=linux,role=pool".into(), prio: super::verify::PRIO, rev: pair.rev(), repo_dir: ctx.repo.to_string_lossy().into_owned(), node: None };
+    let spec = Spec { since_ms: None, only: false, lane: "allapps".into(), agent: "devhub-allapps".into(), kind: Kind::Long, needs: "arch=x64,os=linux,role=pool".into(), prio: super::verify::PRIO, rev: pair.rev(), repo_dir: ctx.repo.to_string_lossy().into_owned(), node: None };
     let outcome = (|| -> Result<(), String> {
         // preempted by lane work, it asks again (a fresh log)
         loop {

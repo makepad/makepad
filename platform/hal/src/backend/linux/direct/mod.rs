@@ -98,7 +98,7 @@ impl State {
 
 struct Presenter(Arc<State>);
 impl FramePresenter for Presenter {
-    fn submit(&self, session: u32, window: Id, image: Arc<Image>, presented: Presented) {
+    fn submit(&self, session: u32, window: Id, _from: u32, image: Arc<Image>, presented: Presented) {
         crate::profile::since(crate::profile::Metric::SubmitToRendered, crate::profile::submitted_at());
         self.0.post(Command::Frame(Frame { key: (session, window), image, presented: Some(presented), generation: 0, arrived: crate::clock_ns(), taken: 0 }));
     }

@@ -106,8 +106,11 @@ pub fn report_checked(prog: &Program, src: usize, epoch: u64, def: DefId, args: 
     let mut admitted = Vec::new();
     let mut all = Vec::new();
     VIOLATIONS.fetch_add(errors.len() as u64, Ordering::Relaxed);
+    // a check names the crates it checks: it reports all of them. Only what runs on its own (a
+    // run's background check, a live edit's gate) keeps to the application's crates.
+    let asked = matches!(origin, Origin::Check | Origin::Serve);
     for error in errors {
-        let allowed = admit(prog, error.krate);
+        let allowed = asked || admit(prog, error.krate);
         let mut ev = GandalfEvent { seq: 0, origin, src, epoch, args: args.to_vec(), error };
         if allowed { publish(&mut ev); admitted.push(ev.clone()); }
         else { WITHHELD.fetch_add(1, Ordering::Relaxed); }
@@ -553,6 +556,26 @@ fn finish_verdict(prog: &Program, src: usize, epoch: u64, def: DefId, args: &[Ty
         Err(message) => { record(key, FnVerdict::Unchecked(format!("checker failure: {}", message))); Vec::new() }
     }
 }
+/// The worker's stand-in for its source while it waits for work (`worker`): the identity only.
+/// Dead, so the next look rehomes it; quiet, so it never holds the worker back.
+struct Parked(usize);
+
+impl FrontSource for Parked {
+    fn with_front(&self, _f: &mut dyn FnMut(&Program, &Tcx, &crate::tcx::EvalCx<'_>)) -> bool {
+        false
+    }
+    fn quiet_ns(&self) -> u64 {
+        u64::MAX
+    }
+    fn alive(&self) -> bool {
+        false
+    }
+    fn lower_priority(&self) {}
+    fn identity(&self) -> usize {
+        self.0
+    }
+}
+
 fn worker(mut src: Arc<dyn FrontSource>, verbose: bool) {
     let _mem = crate::memstat::tag(crate::memstat::Tag::Borrowck);
     src.lower_priority(); src.wait_start();
@@ -580,7 +603,17 @@ fn worker(mut src: Arc<dyn FrontSource>, verbose: bool) {
                         crate::clock::wall_ns() as f64 / 1e6, CHECKED.load(Ordering::Relaxed), VIOLATIONS.load(Ordering::Relaxed),
                         CHECK_NS.load(Ordering::Relaxed) as f64 / 1e6, CHECK_NS.load(Ordering::Relaxed) as f64 / 1e3 / CHECKED.load(Ordering::Relaxed).max(1) as f64, CACHED_CLEAN.load(Ordering::Relaxed));
                 }
+                // The worker waits without holding its source: a settle rebuild that replaces
+                // the front state while the queue is empty must be able to drop the old one (it
+                // kept the old front's memos alive, and with them the cold state's compiler
+                // chunks). Woken, it takes the source back, or the rehomed one of its identity.
+                let parked = Arc::downgrade(&src);
+                let identity = src.identity();
+                src = Arc::new(Parked(identity));
                 guard = WAKE.wait(guard).unwrap_or_else(|e| e.into_inner());
+                if let Some(s) = parked.upgrade().filter(|s| s.alive()).or_else(|| rehomed(&src)) {
+                    src = s;
+                }
                 IDLE_REPORTED.store(false, Ordering::Relaxed);
             }
         };

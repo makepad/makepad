@@ -19,12 +19,22 @@ impl Cx {
             || self.draw_lists.has_pending_instance_retirements()
             || self.passes.0.has_pending_retirements()
             || self.textures.0.has_pending_retirements()
+            || !self.textures.1.post_upload_discard.is_empty()
     }
 
     /// Drain a bounded number of pool slots at an event-loop safe point. A
     /// candidate is produced only by the last owning handle being dropped;
     /// allocation cancels it, so no draw-age heuristic is involved.
     pub(crate) fn retire_webgl_resources(&mut self) {
+        let discard = std::mem::take(&mut self.textures.1.post_upload_discard);
+        for id in discard {
+            if self.textures.0.is_live_generation(id.0, id.generation()) {
+                let tex = &mut self.textures[id];
+                if tex.discard_cpu_after_upload && tex.updated().is_empty() {
+                    tex.format.discard_cpu_data();
+                }
+            }
+        }
         self.draw_lists.1.allocations.collect_for_frame(
             self.repaint_id,
             self.textures
@@ -55,6 +65,8 @@ impl Cx {
             }
             // Keep the numeric ids for same-slot reuse, but force a complete
             // upload before any new generation can draw them.
+            geometry.vertices = Default::default();
+            geometry.indices = Default::default();
             geometry.dirty = true;
             geometry.dirty_vertices = true;
             geometry.dirty_indices = true;
@@ -110,6 +122,10 @@ impl Cx {
             let Some(slot) = self.textures.0.take_free_retirement() else {
                 continue;
             };
+            let tex = &mut self.textures.0.pool[slot].item;
+            tex.format = TextureFormat::Unknown;
+            tex.alloc = None;
+            tex.animation = None;
             texture_ids.push(slot);
         }
 
@@ -565,6 +581,9 @@ impl Cx {
                                 }
                                 _ => continue,
                             }
+                            if self.textures[texture_id].discard_cpu_after_upload {
+                                self.textures.1.post_upload_discard.push(texture_id);
+                            }
                         }
                     }
                 }
@@ -797,6 +816,7 @@ impl Cx {
                     vao_id: draw_item.os.vao.as_ref().unwrap().vao_id,
                     index_width: geometry.index_width as u32,
                     depth_write: draw_call.options.depth_write,
+                    depth_test_greater: draw_call.options.depth_test_greater,
                     alpha_blend: draw_call.options.alpha_blend,
                     blend_max: sh.mapping.blend_op == crate::draw_shader::DrawShaderBlendOp::Max,
                     backface_culling: draw_call.options.backface_culling,

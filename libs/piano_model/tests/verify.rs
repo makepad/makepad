@@ -581,66 +581,6 @@ fn output_levels_are_sane() {
 // Diagnostics: prints a model survey (levels, spectra, decay) — run with
 // cargo test --release -- --ignored diagnostics --nocapture
 // ---------------------------------------------------------------------------
-#[test]
-#[ignore]
-fn diagnostics() {
-    for &key in &[24u8, 36, 48, 60, 72, 84, 96, 105] {
-        let mut p = dry_piano();
-        let info = p.key_info(key).unwrap();
-        let (l, r) = render(&mut p, &[ev(0.0, NoteOn { key, velocity: 100 })], (2 * FS as usize) as usize, 512);
-        let m = mono(&l, &r);
-        let (bin, ps) = power_spectrum(sec(&m, 0.0, 1.0));
-        let centroid = spectral_centroid(bin, &ps, 30.0, 10000.0);
-        let sig = decay_sigma(&m, info.f0 as f64, 0.15, 1.2);
-        println!(
-            "key {key:3} f0 {:7.2} B {:.2e} strings {} partials {:3} | peak {:.3} rms(0-1s) {:.4} centroid {:6.0} Hz sigma1 {:5.2}/s",
-            info.f0, info.b_coeff, info.n_strings, info.n_partials, peak(&m), rms(sec(&m, 0.0, 1.0)), centroid, sig
-        );
-    }
-    for vel in [15u8, 40, 70, 100, 127] {
-        let p = dry_piano();
-        let f = p.debug_hammer_pulse(60, vel);
-        let fpk = f.iter().cloned().fold(0.0f32, f32::max);
-        let over = f.iter().position(|&v| v > fpk * 0.05).unwrap_or(0);
-        let last = f.iter().rposition(|&v| v > fpk * 0.05).unwrap_or(0);
-        let width_ms = (last.saturating_sub(over)) as f64 / FS as f64 * 1000.0;
-        let mut line = format!("C4 vel {vel:3} force peak {fpk:7.1} N width {width_ms:5.2} ms | F^ dB @(262,786,1310,2100,3100):");
-        for fr in [262.0f64, 786.0, 1310.0, 2100.0, 3100.0] {
-            let mag = dft_mag(&f, fr);
-            line += &format!(" {:6.1}", 20.0 * (mag as f64).max(1e-12).log10());
-        }
-        println!("{line}");
-    }
-    for vel in [30u8, 127] {
-        let mut p = dry_piano();
-        let info = p.key_info(60).unwrap();
-        let (l, r) = render(&mut p, &[ev(0.0, NoteOn { key: 60, velocity: vel })], FS as usize / 2, 512);
-        let m = mono(&l, &r);
-        let x = sec(&m, 0.0, 0.25);
-        let mut line = format!("C4 vel {vel:3} partials dB:");
-        for n in 1..=12usize {
-            let f = n as f64 * info.f0 as f64 * (1.0 + info.b_coeff as f64 * (n * n) as f64).sqrt();
-            let (_, mag) = peak_near(x, f, 8.0);
-            line += &format!(" {:5.1}", 20.0 * mag.max(1e-12).log10());
-        }
-        println!("{line}");
-    }
-    for vel in [15u8, 40, 70, 100, 127] {
-        let mut p = dry_piano();
-        let (l, r) = render(&mut p, &[ev(0.0, NoteOn { key: 60, velocity: vel })], FS as usize, 512);
-        let m = mono(&l, &r);
-        let (bin, ps) = power_spectrum(sec(&m, 0.0, 0.7));
-        let (bin_a, ps_a) = power_spectrum(sec(&m, 0.0, 0.18));
-        println!(
-            "C4 vel {vel:3} peak {:.4} centroid {:6.0} Hz attack-centroid {:6.0} Hz",
-            peak(&m),
-            spectral_centroid(bin, &ps, 30.0, 10000.0),
-            spectral_centroid(bin_a, &ps_a, 30.0, 10000.0)
-        );
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Strike-vs-pluck quadrature. The force impulse response of a string mode
 // must START AT ZERO and build as a damped SINE (a strike transfers
 // momentum; displacement follows). Reading the other quadrature — a damped

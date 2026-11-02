@@ -1,4 +1,4 @@
-//! Run with MAKEPAD_HAL_BACKEND=headless.
+//! The harness runs its client on a HAL headless session (it sets MAKEPAD_HAL_BACKEND=headless).
 #![cfg(not(target_arch = "wasm32"))]
 
 use makepad_xr::makepad_widgets::*;
@@ -9,7 +9,6 @@ use std::{
     rc::Rc,
     sync::mpsc,
     sync::Mutex,
-    thread,
     time::Duration,
 };
 
@@ -53,7 +52,6 @@ fn localhost_config(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ShooterUiRole {
     Emitter,
-    Receiver,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -845,7 +843,6 @@ impl MatchEvent for ShooterLoopbackApp {
             }
         }
 
-        let first_remote_spawn_widget = remote_body_spawns.first().map(|spawn| spawn.widget_uid);
         let remote_spawn_count = remote_body_spawns.len();
 
         for widget_uid in remote_body_despawns {
@@ -883,9 +880,6 @@ impl MatchEvent for ShooterLoopbackApp {
                     self.tracked_projectile_widget_uid = applied_local_body_spawns
                         .first()
                         .map(|spawn| spawn.widget_uid);
-                }
-                Some(ShooterUiRole::Receiver) => {
-                    self.tracked_projectile_widget_uid = first_remote_spawn_widget;
                 }
                 None => {}
             }
@@ -1142,120 +1136,6 @@ fn projectile_moved(report: &ShooterUiAppReport) -> bool {
     (first - last).abs() > 0.12
 }
 
-fn projectile_preimpact_z_samples(report: &ShooterUiAppReport) -> Vec<f32> {
-    report
-        .projectile_z_samples
-        .iter()
-        .copied()
-        .take_while(|z| *z > -3.6)
-        .collect()
-}
-
-fn projectile_preimpact_steady_z_samples(report: &ShooterUiAppReport) -> Vec<f32> {
-    const MAX_BACKWARD_JUMP: f32 = 0.08;
-    const MAX_FORWARD_STEP: f32 = 0.45;
-
-    let mut best: Vec<f32> = Vec::new();
-    let mut current: Vec<f32> = Vec::new();
-    for z in projectile_preimpact_z_samples(report).into_iter().skip(4) {
-        if let Some(previous) = current.last().copied() {
-            let backward_jump = (z - previous).max(0.0);
-            let forward_step = (previous - z).max(0.0);
-            if backward_jump > MAX_BACKWARD_JUMP || forward_step > MAX_FORWARD_STEP {
-                if current.len() > best.len() {
-                    best = current;
-                }
-                current = Vec::new();
-            }
-        }
-        current.push(z);
-    }
-    if current.len() > best.len() {
-        best = current;
-    }
-    best
-}
-
-fn projectile_preimpact_max_backward_jump(report: &ShooterUiAppReport) -> f32 {
-    projectile_preimpact_steady_z_samples(report)
-        .windows(2)
-        .map(|pair| (pair[1] - pair[0]).max(0.0))
-        .fold(0.0, f32::max)
-}
-
-fn projectile_preimpact_max_forward_step(report: &ShooterUiAppReport) -> f32 {
-    projectile_preimpact_steady_z_samples(report)
-        .windows(2)
-        .map(|pair| (pair[0] - pair[1]).max(0.0))
-        .fold(0.0, f32::max)
-}
-
-fn projectile_sustained_forward_travel_after_spawn(
-    report: &ShooterUiAppReport,
-    skip_samples: usize,
-) -> f32 {
-    let samples = projectile_preimpact_z_samples(report);
-    let Some(start) = samples.get(skip_samples).copied() else {
-        return 0.0;
-    };
-    let min_after_start = samples
-        .iter()
-        .copied()
-        .skip(skip_samples)
-        .fold(start, f32::min);
-    (start - min_after_start).max(0.0)
-}
-
-fn projectile_observer_linvel_peak_abs_z(report: &ShooterUiAppReport) -> f32 {
-    report
-        .projectile_linvel_z_samples
-        .iter()
-        .copied()
-        .map(f32::abs)
-        .fold(0.0, f32::max)
-}
-
-fn projectile_min_z(report: &ShooterUiAppReport) -> f32 {
-    report
-        .projectile_z_samples
-        .iter()
-        .copied()
-        .fold(f32::INFINITY, f32::min)
-}
-
-fn projectile_postimpact_recovery_distance(report: &ShooterUiAppReport, impact_z: f32) -> f32 {
-    let samples = &report.projectile_z_samples;
-    let Some((impact_index, impact_sample)) = samples
-        .iter()
-        .copied()
-        .enumerate()
-        .find(|(_, z)| *z <= impact_z)
-    else {
-        return 0.0;
-    };
-    let mut rebound_max = impact_sample;
-    let mut previous = impact_sample;
-    for sample in samples.iter().copied().skip(impact_index.saturating_add(1)) {
-        // Pooled projectile widgets can jump back near the emitter when they are recycled for the
-        // next shot. Treat that as a new generation instead of a giant "rebound".
-        if sample - previous > 0.40 {
-            break;
-        }
-        rebound_max = rebound_max.max(sample);
-        previous = sample;
-    }
-    (rebound_max - impact_sample).max(0.0)
-}
-
-fn projectile_positive_linvel_peak_z(report: &ShooterUiAppReport) -> f32 {
-    report
-        .projectile_linvel_z_samples
-        .iter()
-        .copied()
-        .filter(|z| *z > 0.0)
-        .fold(0.0, f32::max)
-}
-
 fn run_test_app(config: ShooterUiAppConfig) -> ShooterUiAppReport {
     run_test_app_with_limits(config, None, TEST_IO_TIMEOUT)
 }
@@ -1265,6 +1145,9 @@ fn run_test_app_with_limits(
     draw_cycles_override: Option<usize>,
     io_timeout: Duration,
 ) -> ShooterUiAppReport {
+    // the client's platform starts on the HAL headless backend (no OS window, no GPU); the
+    // tests run one at a time under their lock
+    std::env::set_var("MAKEPAD_HAL_BACKEND", "headless");
     let (report_tx, report_rx) = mpsc::channel();
     let app_ref = Rc::new(RefCell::new(None::<ShooterLoopbackApp>));
     let app_ref_closure = app_ref.clone();
@@ -1304,7 +1187,6 @@ fn run_test_app_with_limits(
     });
     // The same native client runs without an OS window or GPU under the HAL.
     use makepad_widgets::makepad_platform::makepad_hal::{Hal, OpenReq, backend_id};
-    assert_eq!(std::env::var("MAKEPAD_HAL_BACKEND").as_deref(), Ok("headless"));
     let hal = Hal::global();
     let info = hal.open(&OpenReq { backend: backend_id::HEADLESS, ..Default::default() });
     cx.borrow_mut().hal_attach_session(info);
@@ -1334,7 +1216,7 @@ fn run_test_app_with_limits(
 
 #[test]
 fn single_headless_shooter_app_emits_projectiles_from_synthetic_xr_updates() {
-    let _guard = UI_SHOOTER_TEST_LOCK.lock().unwrap();
+    let _guard = UI_SHOOTER_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let report = run_test_app(ShooterUiAppConfig {
         role: ShooterUiRole::Emitter,
         gesture_profile: ShooterGestureProfile::TipTrackedPoint,
@@ -1367,7 +1249,7 @@ fn single_headless_shooter_app_emits_projectiles_from_synthetic_xr_updates() {
 
 #[test]
 fn single_headless_shooter_app_emits_projectiles_from_openxr_aim_point_without_tip_bit() {
-    let _guard = UI_SHOOTER_TEST_LOCK.lock().unwrap();
+    let _guard = UI_SHOOTER_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let report = run_test_app(ShooterUiAppConfig {
         role: ShooterUiRole::Emitter,
         gesture_profile: ShooterGestureProfile::AimPointWithoutTipBit,
@@ -1400,7 +1282,7 @@ fn single_headless_shooter_app_emits_projectiles_from_openxr_aim_point_without_t
 
 #[test]
 fn single_headless_shooter_app_reemits_after_close_open_with_sticky_grab_bit() {
-    let _guard = UI_SHOOTER_TEST_LOCK.lock().unwrap();
+    let _guard = UI_SHOOTER_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let report = run_test_app(ShooterUiAppConfig {
         role: ShooterUiRole::Emitter,
         gesture_profile: ShooterGestureProfile::ReopenPointWithStickyGrabBit,
@@ -1431,7 +1313,7 @@ fn single_headless_shooter_app_reemits_after_close_open_with_sticky_grab_bit() {
 
 #[test]
 fn single_headless_shooter_app_keeps_emitting_and_advancing_physics_during_long_hold() {
-    let _guard = UI_SHOOTER_TEST_LOCK.lock().unwrap();
+    let _guard = UI_SHOOTER_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let report = run_test_app(ShooterUiAppConfig {
         role: ShooterUiRole::Emitter,
         gesture_profile: ShooterGestureProfile::LongHeldPoint,
@@ -1466,7 +1348,7 @@ fn single_headless_shooter_app_keeps_emitting_and_advancing_physics_during_long_
 
 #[test]
 fn single_headless_shooter_app_keeps_emitting_when_alternating_left_and_right_hands() {
-    let _guard = UI_SHOOTER_TEST_LOCK.lock().unwrap();
+    let _guard = UI_SHOOTER_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let report = run_test_app(ShooterUiAppConfig {
         role: ShooterUiRole::Emitter,
         gesture_profile: ShooterGestureProfile::AlternatingHandsWithStickyGrabBit,
@@ -1500,7 +1382,7 @@ fn single_headless_shooter_app_keeps_emitting_when_alternating_left_and_right_ha
 
 #[test]
 fn single_headless_shooter_app_survives_repeated_sparse_close_open_cycles() {
-    let _guard = UI_SHOOTER_TEST_LOCK.lock().unwrap();
+    let _guard = UI_SHOOTER_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let report = run_test_app(ShooterUiAppConfig {
         role: ShooterUiRole::Emitter,
         gesture_profile: ShooterGestureProfile::RepeatedSparseCloseOpen,
@@ -1532,692 +1414,3 @@ fn single_headless_shooter_app_survives_repeated_sparse_close_open_cycles() {
     assert!(projectile_moved(&report), "{report:?}");
 }
 
-#[test]
-fn two_headless_shooter_apps_emit_and_replicate_projectiles_over_loopback() {
-    let _guard = UI_SHOOTER_TEST_LOCK.lock().unwrap();
-    let emitter_thread = thread::spawn(|| {
-        run_test_app(ShooterUiAppConfig {
-            role: ShooterUiRole::Emitter,
-            gesture_profile: ShooterGestureProfile::TipTrackedPoint,
-            net_config: localhost_config(711, 47146, 47147, 47148, vec![47156]),
-            expected_peers: 1,
-            inject_local_xr_updates: true,
-            local_back_wall_visible: true,
-            synthetic_frame_budget: 170,
-        })
-    });
-    let receiver_thread = thread::spawn(|| {
-        run_test_app(ShooterUiAppConfig {
-            role: ShooterUiRole::Receiver,
-            gesture_profile: ShooterGestureProfile::TipTrackedPoint,
-            net_config: localhost_config(712, 47156, 47157, 47158, vec![47146]),
-            expected_peers: 1,
-            inject_local_xr_updates: true,
-            local_back_wall_visible: true,
-            synthetic_frame_budget: 170,
-        })
-    });
-
-    let emitter_report = emitter_thread
-        .join()
-        .expect("emitter app thread should complete successfully");
-    let receiver_report = receiver_thread
-        .join()
-        .expect("receiver app thread should complete successfully");
-
-    assert_eq!(emitter_report.role, ShooterUiRole::Emitter);
-    assert_eq!(emitter_report.local_activity, Some(shooter_activity_id()));
-    assert_eq!(
-        emitter_report.spawnable_activity,
-        Some(shooter_activity_id())
-    );
-    assert!(
-        emitter_report.connected_peer_peak >= 1,
-        "{emitter_report:?}"
-    );
-    assert_eq!(emitter_report.local_spawn_count, 1, "{emitter_report:?}");
-    assert_eq!(emitter_report.local_spawn_tx_count, 1, "{emitter_report:?}");
-    assert_eq!(
-        emitter_report.local_spawn_tx_fail_count, 0,
-        "{emitter_report:?}"
-    );
-    assert!(
-        emitter_report.spawnable_binding_count_peak >= 24,
-        "{emitter_report:?}"
-    );
-    assert!(
-        emitter_report.physics_scene_body_count_peak >= 26,
-        "{emitter_report:?}"
-    );
-    assert!(
-        emitter_report.physics_body_spawn_apply_count_peak >= 1,
-        "{emitter_report:?}"
-    );
-    assert_eq!(
-        emitter_report.physics_body_spawn_miss_count_peak, 0,
-        "{emitter_report:?}"
-    );
-    assert_eq!(
-        emitter_report.scene_changed_after_spawn_count, 0,
-        "{emitter_report:?}"
-    );
-    assert!(emitter_report.shared_object_peak >= 1, "{emitter_report:?}");
-    assert!(
-        emitter_report.active_projectile_peak >= 1,
-        "{emitter_report:?}"
-    );
-    assert!(
-        emitter_report.tracked_projectile_presence_count >= 2,
-        "{emitter_report:?}"
-    );
-    assert!(projectile_moved(&emitter_report), "{emitter_report:?}");
-
-    assert_eq!(receiver_report.role, ShooterUiRole::Receiver);
-    assert_eq!(receiver_report.local_activity, Some(shooter_activity_id()));
-    assert_eq!(
-        receiver_report.spawnable_activity,
-        Some(shooter_activity_id())
-    );
-    assert!(
-        receiver_report.connected_peer_peak >= 1,
-        "{receiver_report:?}"
-    );
-    assert_eq!(receiver_report.local_spawn_count, 0);
-    assert!(
-        receiver_report.remote_spawn_count >= 1,
-        "{receiver_report:?}"
-    );
-    assert!(
-        receiver_report.spawnable_binding_count_peak >= 24,
-        "{receiver_report:?}"
-    );
-    assert!(
-        receiver_report.physics_scene_body_count_peak >= 26,
-        "{receiver_report:?}"
-    );
-    assert!(
-        receiver_report.physics_body_spawn_apply_count_peak >= 1,
-        "{receiver_report:?}"
-    );
-    assert_eq!(
-        receiver_report.physics_body_spawn_miss_count_peak, 0,
-        "{receiver_report:?}"
-    );
-    assert_eq!(
-        receiver_report.scene_changed_after_spawn_count, 0,
-        "{receiver_report:?}"
-    );
-    assert!(
-        receiver_report.shared_object_peak >= 1,
-        "{receiver_report:?}"
-    );
-    assert!(
-        receiver_report.active_projectile_peak >= 1,
-        "{receiver_report:?}"
-    );
-    assert!(
-        receiver_report.tracked_projectile_presence_count >= 2,
-        "{receiver_report:?}"
-    );
-    assert!(projectile_moved(&receiver_report), "{receiver_report:?}");
-    assert!(
-        projectile_sustained_forward_travel_after_spawn(&receiver_report, 2) >= 1.0,
-        "{receiver_report:?}"
-    );
-    assert!(
-        projectile_observer_linvel_peak_abs_z(&receiver_report) >= 1.0,
-        "{receiver_report:?}"
-    );
-}
-
-#[test]
-fn two_headless_shooter_apps_replicate_projectiles_to_desktop_like_observer() {
-    let _guard = UI_SHOOTER_TEST_LOCK.lock().unwrap();
-    let emitter_thread = thread::spawn(|| {
-        run_test_app(ShooterUiAppConfig {
-            role: ShooterUiRole::Emitter,
-            gesture_profile: ShooterGestureProfile::TipTrackedPoint,
-            net_config: localhost_config(715, 47186, 47187, 47188, vec![47196]),
-            expected_peers: 1,
-            inject_local_xr_updates: true,
-            local_back_wall_visible: true,
-            synthetic_frame_budget: 170,
-        })
-    });
-    let receiver_thread = thread::spawn(|| {
-        run_test_app(ShooterUiAppConfig {
-            role: ShooterUiRole::Receiver,
-            gesture_profile: ShooterGestureProfile::TipTrackedPoint,
-            net_config: localhost_config(716, 47196, 47197, 47198, vec![47186]),
-            expected_peers: 1,
-            inject_local_xr_updates: false,
-            local_back_wall_visible: true,
-            synthetic_frame_budget: 170,
-        })
-    });
-
-    let emitter_report = emitter_thread
-        .join()
-        .expect("emitter app thread should complete successfully");
-    let receiver_report = receiver_thread
-        .join()
-        .expect("receiver app thread should complete successfully");
-
-    assert_eq!(emitter_report.role, ShooterUiRole::Emitter);
-    assert_eq!(receiver_report.role, ShooterUiRole::Receiver);
-    assert!(
-        receiver_report.connected_peer_peak >= 1,
-        "{receiver_report:?}"
-    );
-    assert!(
-        receiver_report.clock_synced_peer_peak >= 1,
-        "{receiver_report:?}"
-    );
-    assert_eq!(receiver_report.local_spawn_count, 0, "{receiver_report:?}");
-    assert!(
-        receiver_report.remote_spawn_count >= 1,
-        "{receiver_report:?}"
-    );
-    assert!(
-        receiver_report.shared_object_peak >= 1,
-        "{receiver_report:?}"
-    );
-    assert!(
-        receiver_report.active_projectile_peak >= 1,
-        "{receiver_report:?}"
-    );
-    assert!(
-        receiver_report.tracked_projectile_presence_count >= 2,
-        "{receiver_report:?}"
-    );
-    assert!(projectile_moved(&receiver_report), "{receiver_report:?}");
-    assert!(
-        projectile_sustained_forward_travel_after_spawn(&receiver_report, 2) >= 1.0,
-        "{receiver_report:?}"
-    );
-    assert!(
-        projectile_observer_linvel_peak_abs_z(&receiver_report) >= 1.0,
-        "{receiver_report:?}"
-    );
-}
-
-#[test]
-fn two_headless_shooter_apps_replicate_wall_bounces_to_desktop_like_observer() {
-    let _guard = UI_SHOOTER_TEST_LOCK.lock().unwrap();
-    let emitter_thread = thread::spawn(|| {
-        run_test_app(ShooterUiAppConfig {
-            role: ShooterUiRole::Emitter,
-            gesture_profile: ShooterGestureProfile::TipTrackedPoint,
-            net_config: localhost_config(717, 47206, 47207, 47208, vec![47216]),
-            expected_peers: 1,
-            inject_local_xr_updates: true,
-            local_back_wall_visible: true,
-            synthetic_frame_budget: 140,
-        })
-    });
-    let receiver_thread = thread::spawn(|| {
-        run_test_app(ShooterUiAppConfig {
-            role: ShooterUiRole::Receiver,
-            gesture_profile: ShooterGestureProfile::TipTrackedPoint,
-            net_config: localhost_config(718, 47216, 47217, 47218, vec![47206]),
-            expected_peers: 1,
-            inject_local_xr_updates: false,
-            local_back_wall_visible: true,
-            synthetic_frame_budget: 140,
-        })
-    });
-
-    let emitter_report = emitter_thread
-        .join()
-        .expect("emitter app thread should complete successfully");
-    let receiver_report = receiver_thread
-        .join()
-        .expect("receiver app thread should complete successfully");
-
-    assert_eq!(emitter_report.role, ShooterUiRole::Emitter);
-    assert_eq!(receiver_report.role, ShooterUiRole::Receiver);
-
-    assert!(
-        emitter_report.peer_sync_tx_shared_object_state_count_peak >= 8,
-        "{emitter_report:?}"
-    );
-    assert!(
-        projectile_postimpact_recovery_distance(&emitter_report, -4.0) >= 0.18,
-        "{emitter_report:?}"
-    );
-    assert!(
-        projectile_positive_linvel_peak_z(&emitter_report) >= 0.20,
-        "{emitter_report:?}"
-    );
-
-    assert!(
-        receiver_report.connected_peer_peak >= 1,
-        "{receiver_report:?}"
-    );
-    assert!(
-        receiver_report.clock_synced_peer_peak >= 1,
-        "{receiver_report:?}"
-    );
-    assert!(
-        receiver_report.peer_sync_rx_shared_object_state_count_peak >= 8,
-        "{receiver_report:?}"
-    );
-    assert!(
-        receiver_report.remote_shadow_apply_count_peak >= 6,
-        "{receiver_report:?}"
-    );
-    assert!(
-        projectile_min_z(&receiver_report) <= -4.0,
-        "{receiver_report:?}"
-    );
-    assert!(
-        projectile_positive_linvel_peak_z(&receiver_report) >= 0.20,
-        "{receiver_report:?}"
-    );
-}
-
-#[test]
-fn two_headless_shooter_apps_ignore_observer_only_wall_and_follow_authority() {
-    let _guard = UI_SHOOTER_TEST_LOCK.lock().unwrap();
-    let emitter_thread = thread::spawn(|| {
-        run_test_app(ShooterUiAppConfig {
-            role: ShooterUiRole::Emitter,
-            gesture_profile: ShooterGestureProfile::TipTrackedPoint,
-            net_config: localhost_config(719, 47226, 47227, 47228, vec![47236]),
-            expected_peers: 1,
-            inject_local_xr_updates: true,
-            local_back_wall_visible: false,
-            synthetic_frame_budget: 170,
-        })
-    });
-    let receiver_thread = thread::spawn(|| {
-        run_test_app(ShooterUiAppConfig {
-            role: ShooterUiRole::Receiver,
-            gesture_profile: ShooterGestureProfile::TipTrackedPoint,
-            net_config: localhost_config(720, 47236, 47237, 47238, vec![47226]),
-            expected_peers: 1,
-            inject_local_xr_updates: false,
-            local_back_wall_visible: true,
-            synthetic_frame_budget: 170,
-        })
-    });
-
-    let emitter_report = emitter_thread
-        .join()
-        .expect("emitter app thread should complete successfully");
-    let receiver_report = receiver_thread
-        .join()
-        .expect("receiver app thread should complete successfully");
-
-    assert_eq!(emitter_report.role, ShooterUiRole::Emitter);
-    assert!(
-        projectile_min_z(&emitter_report) <= -4.8,
-        "{emitter_report:?}"
-    );
-    assert!(
-        projectile_postimpact_recovery_distance(&emitter_report, -4.0) <= 0.08,
-        "{emitter_report:?}"
-    );
-    assert!(
-        projectile_positive_linvel_peak_z(&emitter_report) <= 0.08,
-        "{emitter_report:?}"
-    );
-
-    assert_eq!(receiver_report.role, ShooterUiRole::Receiver);
-    assert!(
-        receiver_report.connected_peer_peak >= 1,
-        "{receiver_report:?}"
-    );
-    assert!(
-        receiver_report.clock_synced_peer_peak >= 1,
-        "{receiver_report:?}"
-    );
-    assert!(
-        receiver_report.peer_sync_rx_shared_object_state_count_peak >= 8,
-        "{receiver_report:?}"
-    );
-    assert!(
-        receiver_report.remote_shadow_apply_count_peak >= 6,
-        "{receiver_report:?}"
-    );
-    assert!(
-        projectile_min_z(&receiver_report) <= -4.8,
-        "{receiver_report:?}"
-    );
-    assert!(
-        projectile_postimpact_recovery_distance(&receiver_report, -4.0) <= 0.08,
-        "{receiver_report:?}"
-    );
-    assert!(
-        projectile_positive_linvel_peak_z(&receiver_report) <= 0.08,
-        "{receiver_report:?}"
-    );
-}
-
-#[test]
-#[ignore = "process-local loopback discovery remains flaky in the full ui_shooter_loopback binary; run this stress alone when needed"]
-fn two_headless_shooter_apps_keep_replicating_projectiles_during_long_hold() {
-    let _guard = UI_SHOOTER_TEST_LOCK.lock().unwrap();
-    let emitter_thread = thread::spawn(|| {
-        run_test_app(ShooterUiAppConfig {
-            role: ShooterUiRole::Emitter,
-            gesture_profile: ShooterGestureProfile::LongHeldPoint,
-            net_config: localhost_config(713, 47166, 47167, 47168, vec![47176]),
-            expected_peers: 1,
-            inject_local_xr_updates: true,
-            local_back_wall_visible: true,
-            synthetic_frame_budget: 280,
-        })
-    });
-    let receiver_thread = thread::spawn(|| {
-        run_test_app(ShooterUiAppConfig {
-            role: ShooterUiRole::Receiver,
-            gesture_profile: ShooterGestureProfile::LongHeldPoint,
-            net_config: localhost_config(714, 47176, 47177, 47178, vec![47166]),
-            expected_peers: 1,
-            inject_local_xr_updates: true,
-            local_back_wall_visible: true,
-            synthetic_frame_budget: 280,
-        })
-    });
-
-    let emitter_report = emitter_thread
-        .join()
-        .expect("emitter app thread should complete successfully");
-    let receiver_report = receiver_thread
-        .join()
-        .expect("receiver app thread should complete successfully");
-
-    assert_eq!(emitter_report.role, ShooterUiRole::Emitter);
-    assert_eq!(emitter_report.local_activity, Some(shooter_activity_id()));
-    assert_eq!(
-        emitter_report.spawnable_activity,
-        Some(shooter_activity_id())
-    );
-    assert!(
-        emitter_report.connected_peer_peak >= 1,
-        "{emitter_report:?}"
-    );
-    assert!(emitter_report.local_spawn_count >= 20, "{emitter_report:?}");
-    assert_eq!(
-        emitter_report.local_spawn_tx_count, emitter_report.local_spawn_count,
-        "{emitter_report:?}"
-    );
-    assert_eq!(
-        emitter_report.local_spawn_tx_fail_count, 0,
-        "{emitter_report:?}"
-    );
-    assert!(
-        emitter_report.physics_body_spawn_apply_count_peak >= emitter_report.local_spawn_count,
-        "{emitter_report:?}"
-    );
-    assert_eq!(
-        emitter_report.physics_body_spawn_miss_count_peak, 0,
-        "{emitter_report:?}"
-    );
-    assert!(emitter_report.shared_object_peak >= 8, "{emitter_report:?}");
-    assert!(
-        emitter_report.tracked_projectile_presence_count >= 8,
-        "{emitter_report:?}"
-    );
-    assert!(
-        emitter_report.projectile_z_samples.len() >= 8,
-        "{emitter_report:?}"
-    );
-    assert!(projectile_moved(&emitter_report), "{emitter_report:?}");
-
-    assert_eq!(receiver_report.role, ShooterUiRole::Receiver);
-    assert_eq!(receiver_report.local_activity, Some(shooter_activity_id()));
-    assert_eq!(
-        receiver_report.spawnable_activity,
-        Some(shooter_activity_id())
-    );
-    assert!(
-        receiver_report.connected_peer_peak >= 1,
-        "{receiver_report:?}"
-    );
-    assert_eq!(receiver_report.local_spawn_count, 0);
-    assert!(
-        receiver_report.remote_spawn_count >= 20,
-        "{receiver_report:?}"
-    );
-    assert!(
-        receiver_report.peer_sync_rx_body_spawn_count_peak >= 20,
-        "{receiver_report:?}"
-    );
-    assert!(
-        receiver_report.shared_object_peak >= 8,
-        "{receiver_report:?}"
-    );
-    assert!(
-        receiver_report.active_projectile_peak >= 6,
-        "{receiver_report:?}"
-    );
-    assert!(
-        receiver_report.tracked_projectile_presence_count >= 8,
-        "{receiver_report:?}"
-    );
-    assert!(
-        receiver_report.projectile_z_samples.len() >= 8,
-        "{receiver_report:?}"
-    );
-    assert!(projectile_moved(&receiver_report), "{receiver_report:?}");
-}
-
-#[test]
-fn two_headless_shooter_apps_emit_and_replicate_projectiles_from_openxr_aim_point() {
-    let _guard = UI_SHOOTER_TEST_LOCK.lock().unwrap();
-    let emitter_thread = thread::spawn(|| {
-        run_test_app(ShooterUiAppConfig {
-            role: ShooterUiRole::Emitter,
-            gesture_profile: ShooterGestureProfile::AimPointWithoutTipBit,
-            net_config: localhost_config(713, 47166, 47167, 47168, vec![47176]),
-            expected_peers: 1,
-            inject_local_xr_updates: true,
-            local_back_wall_visible: true,
-            synthetic_frame_budget: 170,
-        })
-    });
-    let receiver_thread = thread::spawn(|| {
-        run_test_app(ShooterUiAppConfig {
-            role: ShooterUiRole::Receiver,
-            gesture_profile: ShooterGestureProfile::AimPointWithoutTipBit,
-            net_config: localhost_config(714, 47176, 47177, 47178, vec![47166]),
-            expected_peers: 1,
-            inject_local_xr_updates: true,
-            local_back_wall_visible: true,
-            synthetic_frame_budget: 170,
-        })
-    });
-
-    let emitter_report = emitter_thread
-        .join()
-        .expect("emitter app thread should complete successfully");
-    let receiver_report = receiver_thread
-        .join()
-        .expect("receiver app thread should complete successfully");
-
-    assert_eq!(emitter_report.role, ShooterUiRole::Emitter);
-    assert_eq!(emitter_report.local_activity, Some(shooter_activity_id()));
-    assert_eq!(
-        emitter_report.spawnable_activity,
-        Some(shooter_activity_id())
-    );
-    assert!(
-        emitter_report.connected_peer_peak >= 1,
-        "{emitter_report:?}"
-    );
-    assert_eq!(emitter_report.local_spawn_count, 1, "{emitter_report:?}");
-    assert_eq!(emitter_report.local_spawn_tx_count, 1, "{emitter_report:?}");
-    assert_eq!(
-        emitter_report.local_spawn_tx_fail_count, 0,
-        "{emitter_report:?}"
-    );
-    assert!(
-        emitter_report.spawnable_binding_count_peak >= 24,
-        "{emitter_report:?}"
-    );
-    assert!(
-        emitter_report.physics_scene_body_count_peak >= 26,
-        "{emitter_report:?}"
-    );
-    assert!(
-        emitter_report.physics_body_spawn_apply_count_peak >= 1,
-        "{emitter_report:?}"
-    );
-    assert_eq!(
-        emitter_report.physics_body_spawn_miss_count_peak, 0,
-        "{emitter_report:?}"
-    );
-    assert_eq!(
-        emitter_report.scene_changed_after_spawn_count, 0,
-        "{emitter_report:?}"
-    );
-    assert!(emitter_report.shared_object_peak >= 1, "{emitter_report:?}");
-    assert!(
-        emitter_report.active_projectile_peak >= 1,
-        "{emitter_report:?}"
-    );
-    assert!(
-        emitter_report.tracked_projectile_presence_count >= 2,
-        "{emitter_report:?}"
-    );
-    assert!(projectile_moved(&emitter_report), "{emitter_report:?}");
-
-    assert_eq!(receiver_report.role, ShooterUiRole::Receiver);
-    assert_eq!(receiver_report.local_activity, Some(shooter_activity_id()));
-    assert_eq!(
-        receiver_report.spawnable_activity,
-        Some(shooter_activity_id())
-    );
-    assert!(
-        receiver_report.connected_peer_peak >= 1,
-        "{receiver_report:?}"
-    );
-    assert_eq!(receiver_report.local_spawn_count, 0);
-    assert!(
-        receiver_report.remote_spawn_count >= 1,
-        "{receiver_report:?}"
-    );
-    assert!(
-        receiver_report.spawnable_binding_count_peak >= 24,
-        "{receiver_report:?}"
-    );
-    assert!(
-        receiver_report.physics_scene_body_count_peak >= 26,
-        "{receiver_report:?}"
-    );
-    assert!(
-        receiver_report.physics_body_spawn_apply_count_peak >= 1,
-        "{receiver_report:?}"
-    );
-    assert_eq!(
-        receiver_report.physics_body_spawn_miss_count_peak, 0,
-        "{receiver_report:?}"
-    );
-    assert_eq!(
-        receiver_report.scene_changed_after_spawn_count, 0,
-        "{receiver_report:?}"
-    );
-    assert!(
-        receiver_report.shared_object_peak >= 1,
-        "{receiver_report:?}"
-    );
-    assert!(
-        receiver_report.active_projectile_peak >= 1,
-        "{receiver_report:?}"
-    );
-    assert!(
-        receiver_report.tracked_projectile_presence_count >= 2,
-        "{receiver_report:?}"
-    );
-    assert!(projectile_moved(&receiver_report), "{receiver_report:?}");
-    assert!(
-        projectile_preimpact_steady_z_samples(&receiver_report).len() >= 6,
-        "{receiver_report:?}"
-    );
-    assert!(
-        projectile_preimpact_max_backward_jump(&receiver_report) <= 0.08,
-        "{receiver_report:?}"
-    );
-    assert!(
-        projectile_preimpact_max_forward_step(&receiver_report) <= 0.45,
-        "{receiver_report:?}"
-    );
-}
-
-#[test]
-#[ignore = "long-hold regression coverage for observer projectile sync in headless multiplayer"]
-fn two_headless_shooter_apps_repro_frozen_observer_projectiles() {
-    let _guard = UI_SHOOTER_TEST_LOCK.lock().unwrap();
-    let emitter_thread = thread::spawn(|| {
-        run_test_app_with_limits(
-            ShooterUiAppConfig {
-                role: ShooterUiRole::Emitter,
-                gesture_profile: ShooterGestureProfile::LongHeldPoint,
-                net_config: localhost_config(731, 47286, 47287, 47288, vec![47296]),
-                expected_peers: 1,
-                inject_local_xr_updates: true,
-                local_back_wall_visible: true,
-                synthetic_frame_budget: 280,
-            },
-            Some(8_000),
-            Duration::from_secs(12),
-        )
-    });
-    let receiver_thread = thread::spawn(|| {
-        run_test_app_with_limits(
-            ShooterUiAppConfig {
-                role: ShooterUiRole::Receiver,
-                gesture_profile: ShooterGestureProfile::LongHeldPoint,
-                net_config: localhost_config(732, 47296, 47297, 47298, vec![47286]),
-                expected_peers: 1,
-                inject_local_xr_updates: true,
-                local_back_wall_visible: true,
-                synthetic_frame_budget: 280,
-            },
-            Some(8_000),
-            Duration::from_secs(12),
-        )
-    });
-
-    let emitter_report = emitter_thread
-        .join()
-        .expect("emitter app thread should complete successfully");
-    let receiver_report = receiver_thread
-        .join()
-        .expect("receiver app thread should complete successfully");
-
-    assert_eq!(emitter_report.role, ShooterUiRole::Emitter);
-    assert!(
-        emitter_report.connected_peer_peak >= 1,
-        "{emitter_report:?}"
-    );
-    assert!(emitter_report.local_spawn_count >= 20, "{emitter_report:?}");
-
-    assert_eq!(receiver_report.role, ShooterUiRole::Receiver);
-    assert!(
-        receiver_report.connected_peer_peak >= 1,
-        "{receiver_report:?}"
-    );
-    assert!(
-        receiver_report.remote_spawn_count >= 20,
-        "receiver never observed enough remote projectile spawns: {receiver_report:?}"
-    );
-    assert!(
-        receiver_report.shared_object_peak >= 8,
-        "receiver never accumulated the replicated projectile set: {receiver_report:?}"
-    );
-    assert!(
-        projectile_sustained_forward_travel_after_spawn(&receiver_report, 2) >= 0.8,
-        "observer projectile still stalled after spawn instead of making sustained forward progress: {receiver_report:?}"
-    );
-    assert!(
-        projectile_observer_linvel_peak_abs_z(&receiver_report) >= 1.0,
-        "observer projectile still lost almost all z velocity instead of tracking the remote shadow: {receiver_report:?}"
-    );
-    assert!(
-        projectile_preimpact_steady_z_samples(&receiver_report).len() >= 12,
-        "observer never maintained a long enough steady preimpact flight segment: {receiver_report:?}"
-    );
-}

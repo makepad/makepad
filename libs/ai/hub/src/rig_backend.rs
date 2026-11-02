@@ -335,13 +335,4 @@ mod tests {
             Err(AssetAiError::Cancelled)
         ));
     }
-
-    #[test]
-    fn not_provisioned_on_dev_machines() {
-        // The default command points at the box layout; on a machine without
-        // it (and without the env override) the domain must not advertise.
-        if std::env::var(RIG_CMD_ENV).is_err() {
-            assert!(!rig_provisioned());
-        }
-    }
 }

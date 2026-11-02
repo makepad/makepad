@@ -1,39 +1,24 @@
-//! The node's ONE tree: every lease with a revision runs in the node's synced checkout (the tree
-//! its WM and dock apps run from, `sync.conf checkout`, default `~/makepad` + `apps/commercial`),
-//! moved in place to the lease's pinned commits. One tree, one cargo target (`<tree>/target`),
-//! one JIT (the host profile the WM's apps run, always started as `cargo run --profile host -p
-//! makepad-run --bin makepad -- <args>`: cargo rebuilds it only when its own crates changed) and one JIT cache (`<tree>/target/makepad-run`, keyed by the loader build id)
-//! per node.
+//! Each box has a deployment tree, a shared work tree and bounded native lane trees:
+//! - Deployment: the sync checkout and its target. The WM, dock apps, node hub and AI hub run
+//!   from it. Only sync apply moves it, to landed work + commercial main; leases never hold it.
+//!   A sync checkout that is someone's own clone ([`ours`] is false) is not a deployment tree.
+//! - Work: `<work>/ci-tree` + `<work>/ci-target`. CI, gates and user boxes keep this detached
+//!   worktree. Same-pin leases share it; another pin waits for its holders to end.
+//! - Native: `<work>/native/<lane>` + `<work>/native-target/<lane>`. Other pinned lane leases
+//!   hold only their lane's tree. All trees share the bare stores' objects. Native moves use
+//!   `read-tree -m -u`, preserving unchanged files' mtimes. At the configured cap, the oldest
+//!   unheld tree and its target go first; if all are held, the request waits.
 //!
-//! - A lease moves the tree with `read-tree -m -u` ([`Store::move_checkout`]): only files that
-//!   differ between the two commits get new mtimes, so cargo and the JIT stay warm.
-//! - Leases of the same commits share the tree and run at once; a lease for other commits is
-//!   refused here while one holds it (the scheduler does not place it: it waits, or goes to a
-//!   node already at its commits or free).
-//! - When the last holder ends, in the same release step, the tree goes back to exactly the shared
-//!   commits (the landed work + main pair the last sync distributed, [`shared`]): the WM and its
-//!   apps sit on landed code between leases, and the next lease moves only its own diff. Edits a
-//!   lease left in tracked files are committed and bundled to `<work>/recovered/` first, and
-//!   everything untracked goes ([`scrub`]): what it shipped, what its commands wrote, what an
-//!   interrupted ship left. A stray that stayed would stop every later lease the day a landed
-//!   commit adds its path. Ignored files (the target, the JIT cache, `local/`) are never touched:
-//!   results that outlive a lease belong under `target/`. What cannot be cleared is reported
-//!   ([`Released::unclean`]: an error event on the node). A user's box (role user-wm or device) is
-//!   never cleared, not after a crash either: a person may keep work in that tree. What is there
-//!   stays and is reported the same way, and a move it blocks refuses.
-//! - A lease that moves the tree clears it first too, so a stray from anywhere (a hub that died
-//!   mid-lease, a hand copy) cannot fail its start. A lease on a tree already at its pin moves
-//!   nothing and stays one git call.
-//! - A hub that starts with no lease holding the tree puts a stray tree (its previous process
-//!   died mid-lease) back on the shared commits before it takes a lease ([`restore_if_free`]).
-//! - A sync moves the tree only while no lease holds it ([`free`]).
-//! - The WM's JIT apps run from the same tree: they live-reload onto whatever it holds.
-//!
-//! A node whose checkout is a git clone of its own (a `.git` dir: someone's working repo, never
-//! devhub's) runs leases in `<work>/tree` instead, the same way.
+//! The last release scrubs its tree and leaves it at its pin: tracked edits are bundled to
+//! `<work>/recovered/`, untracked files go, ignored files stay. Startup scrubs an unheld tree
+//! without moving it. A sync apply also brings an idle work tree to the tips, warm for the next
+//! lease. The work tree is devhub's on every box; only the deployment has the user-box
+//! never-clear rule.
+//! Overlay JIT leases never enter this module: their pinned stores and lane edits stay
+//! under `<work>/dev`, separate from these trees; CI overlay leases are keyed per pin.
 
 use super::Pin;
-use crate::sync::git::{fleet_revision, Store, CHECKOUT_REF, SYNCED_REF};
+use crate::sync::git::{fleet_revision, run, Store, CHECKOUT_REF, SYNCED_REF};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
@@ -42,34 +27,56 @@ use std::sync::{Mutex, MutexGuard};
 #[derive(Default)]
 pub struct Holders(BTreeMap<String, Pin>);
 
-static TREE: Mutex<Holders> = Mutex::new(Holders(BTreeMap::new()));
+static TREE: Mutex<BTreeMap<PathBuf, Holders>> = Mutex::new(BTreeMap::new());
 
-fn lock() -> MutexGuard<'static, Holders> {
+fn lock() -> MutexGuard<'static, BTreeMap<PathBuf, Holders>> {
     TREE.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 impl Holders {
     /// Why `pin` cannot take the tree now (another pin holds it), if it cannot.
     pub fn conflict(&self, pin: &Pin) -> Option<String> {
-        let other: Vec<&String> = self.0.iter().filter(|(_, p)| !p.fits(pin)).map(|(id, _)| id).collect();
+        self.conflict_with(pin, false)
+    }
+
+    fn conflict_with(&self, pin: &Pin, native: bool) -> Option<String> {
+        let other: Vec<&String> = self.0.iter().filter(|(_, p)| if native { *p != pin } else { !p.fits(pin) }).map(|(id, _)| id).collect();
         let first = other.first()?;
         Some(format!("the tree is at {} for {}", self.0[*first].short(), other.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(" ")))
     }
 }
 
-/// The node's tree: the sync checkout when it is devhub's (synced: a FLEET-REVISION.txt or our
-/// `.git` link; or not there yet), else `<work>/tree` (a Mac's `~/makepad` that is someone's own
-/// clone or build mirror is never touched).
+/// The shared work tree for CI, gates and user boxes.
 pub fn root(work: &Path) -> PathBuf {
-    let sync = crate::sync::SyncConf::load().checkout;
-    if ours(&sync) {
-        sync
-    } else {
-        work.join("tree")
+    work.join("ci-tree")
+}
+
+pub fn native_root(work: &Path, lane: &str) -> PathBuf { work.join("native").join(lane) }
+pub fn native_target(work: &Path, lane: &str) -> PathBuf { work.join("native-target").join(lane) }
+
+/// Native lanes and their last use (unix ms). The marker stays outside the scrubbed tree.
+pub fn natives(work: &Path) -> Vec<(String, u64)> {
+    let mut lanes: Vec<_> = std::fs::read_dir(work.join("native")).into_iter().flatten().flatten().filter_map(|e| {
+        let lane = e.file_name().to_str()?.to_string();
+        if !super::exec::valid_name(&lane) || !e.file_type().ok()?.is_dir() { return None; }
+        let used = std::fs::metadata(e.path().with_file_name(format!(".last-{lane}"))).or_else(|_| e.metadata()).ok().and_then(|m| m.modified().ok()).and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |t| t.as_millis() as u64);
+        Some((lane, used))
+    }).collect();
+    lanes.sort();
+    lanes
+}
+
+fn touch_native(root: &Path) {
+    if root.parent().and_then(Path::file_name).is_some_and(|n| n == "native") {
+        if let Some(lane) = root.file_name() {
+            if let Err(e) = std::fs::write(root.with_file_name(format!(".last-{}", lane.to_string_lossy())), "") { eprintln!("devhub: native tree last use: {e}"); }
+        }
     }
 }
 
-/// Whether `dir` is (or can become) devhub's tree.
+pub fn held(root: &Path) -> bool { lock().get(root).is_some_and(|h| !h.0.is_empty()) }
+
+/// Whether the sync checkout is (or can become) devhub's deployment tree.
 pub fn ours(dir: &Path) -> bool {
     let empty = dir.read_dir().map_or(true, |mut d| d.next().is_none());
     let stores = std::fs::canonicalize(crate::sync::git::stores_dir()).ok();
@@ -77,101 +84,85 @@ pub fn ours(dir: &Path) -> bool {
     empty || linked || (!dir.join(".git").exists() && dir.join("FLEET-REVISION.txt").is_file())
 }
 
-/// The commits the tree holds now (`caps`'s `tree`): None until something moved it or a deploy
-/// recorded it.
-pub fn current(root: &Path) -> Option<Pin> {
-    let at = |repo: &str| Store::open(repo).ok().and_then(|s| s.rev(CHECKOUT_REF)).or_else(|| fleet_revision(&root, repo));
+/// The deployment pin (`caps.deploy`); a user's own clone has no deployment pin.
+pub fn deploy(root: &Path) -> Option<Pin> {
+    if !ours(root) {
+        return None;
+    }
+    let at = |repo: &str| Store::open(repo).ok().and_then(|s| s.rev(CHECKOUT_REF)).or_else(|| fleet_revision(root, repo));
     Some(Pin { makepad: at("makepad")?, commercial: at("commercial") })
 }
 
-/// The shared commits: what the last sync moved the tree to (the landed work + main pair it
-/// distributes), else what the deploy recorded. None: never synced.
+/// The last synced tips, used for a CI lease that names no pin.
 pub fn shared(root: &Path) -> Option<Pin> {
     let at = |repo: &str| Store::open(repo).ok().and_then(|s| s.rev(SYNCED_REF)).or_else(|| fleet_revision(root, repo));
     Some(Pin { makepad: at("makepad")?, commercial: at("commercial") })
 }
 
-/// Moves the tree (no holder) to the shared commits: what it moved to, None when it was there.
-fn to_shared(root: &Path) -> Result<Option<String>, String> {
-    let Some(to) = shared(root) else { return Ok(None) };
-    let mut moved = false;
-    for (repo, sha) in [("makepad", Some(&to.makepad)), ("commercial", to.commercial.as_ref())] {
-        let Some(sha) = sha else { continue };
+fn head(dir: &Path) -> Option<String> {
+    if !dir.join(".git").exists() {
+        return None;
+    }
+    run(Some(dir), None, &[], &["rev-parse", "--verify", "HEAD^{commit}"]).ok().map(|s| s.trim().to_string()).filter(|s| crate::sync::git::valid_sha(s))
+}
+
+/// The work tree's detached HEADs (`caps.tree`).
+pub fn current(root: &Path) -> Option<Pin> {
+    let _h = lock();
+    Some(Pin { makepad: head(root)?, commercial: head(&root.join("apps/commercial")) })
+}
+
+fn prepare(id: &str, pin: &Pin, root: &Path, out: &Path, native: bool) -> Result<Taken, String> {
+    let mut taken = Taken { root: root.to_path_buf(), moved: Vec::new(), cleared: Released::default() };
+    // A makepad-only native pin must not inherit a previous pin's commercial workspace.
+    // Recover its edits and remove the nested worktree before scrubbing the containing tree.
+    let commercial = root.join("apps/commercial");
+    if native && pin.commercial.is_none() && commercial.join(".git").exists() {
+        let store = Store::open("commercial")?;
+        if store.admin_of(&commercial).is_none() { return Err(format!("{} is not this node's worktree", commercial.display())); }
+        scrub("commercial", root, head(&commercial).as_deref(), id, out, &format!("{id}-start"), &mut taken.cleared)?;
+        run(None, Some(&store.git_dir), &[], &["worktree", "remove", "--force", &commercial.to_string_lossy()])?;
+        taken.cleared.removed.push("apps/commercial/".into());
+    }
+    for (repo, to) in [("makepad", Some(&pin.makepad)), ("commercial", pin.commercial.as_ref())] {
+        let Some(to) = to else { continue };
+        let dir = if repo == "makepad" { root.to_path_buf() } else { root.join("apps/commercial") };
         let store = Store::open(repo)?;
-        let dir = if repo == "makepad" { root.to_path_buf() } else { root.join("apps").join("commercial") };
-        let from = store.rev(CHECKOUT_REF).or_else(|| fleet_revision(root, repo)).filter(|f| store.has(f));
-        if from.as_deref() == Some(sha.as_str()) || !store.has(sha) {
+        if dir.join(".git").exists() && store.admin_of(&dir).is_none() {
+            return Err(format!("{} is not this node's worktree", dir.display()));
+        }
+        let from = head(&dir);
+        if from.as_ref() == Some(to) {
+            crate::ci_merge::install_merge_driver(&dir, root)?;
+            taken.moved.push((repo.to_string(), 0));
             continue;
         }
-        store.move_checkout(&dir, from.as_deref(), sha)?;
-        moved = true;
-    }
-    Ok(moved.then(|| to.short()))
-}
-
-/// Leaves `dir` (`repo`'s side of the tree, no lease on it) with tracked and ignored files only,
-/// at `at`: edits in tracked files bundled to `out`, everything untracked removed. Only the node's
-/// tree is touched: a dir that is not this store's worktree is left alone. `user_box`: nothing is
-/// changed, what is there is only reported.
-fn scrub(repo: &str, root: &Path, at: Option<&str>, id: &str, out: &Path, tag: &str, user_box: bool, r: &mut Released) -> Result<(), String> {
-    let store = Store::open(repo)?;
-    let (dir, prefix) = if repo == "makepad" { (root.to_path_buf(), "") } else { (root.join("apps").join("commercial"), "apps/commercial/") };
-    if !dir.join(".git").exists() {
-        return Ok(());
-    }
-    if user_box {
-        let status = crate::sync::git::run(Some(&dir), None, &[], &["status", "--porcelain", "--untracked-files=normal", "--ignore-submodules=all"])?;
-        let left: Vec<&str> = status.lines().map(|l| l.get(3..).unwrap_or(l)).collect();
-        if !left.is_empty() {
-            r.unclean.push(format!("{repo}: a user's box is never cleared, {} changed or untracked path(s) stay: {}{}", left.len(), left[..left.len().min(8)].join(" "), if left.len() > 8 { " .." } else { "" }));
+        if !store.has(to) {
+            return Err(format!("{repo} {} is not in this node's store", to));
         }
-        return Ok(());
+        scrub(repo, root, from.as_deref(), id, out, &format!("{id}-start"), &mut taken.cleared)?;
+        let files = match from {
+            Some(from) => {
+                let files = run(Some(&dir), None, &[], &["diff", "--name-only", "--no-renames", &from, to])?.lines().count();
+                if native {
+                    let _ = run(Some(&dir), None, &[], &["update-index", "-q", "--refresh"]);
+                    run(Some(&dir), None, &[], &["read-tree", "-m", "-u", &from, to])?;
+                    run(Some(&dir), None, &[], &["update-ref", "--no-deref", "HEAD", to])?;
+                } else {
+                    run(Some(&dir), None, &[], &["checkout", "-q", "--detach", to])?;
+                }
+                files
+            }
+            None => {
+                std::fs::create_dir_all(dir.parent().ok_or("work tree has no parent")?).map_err(|e| e.to_string())?;
+                run(None, Some(&store.git_dir), &[], &["worktree", "add", "-q", "--detach", &dir.to_string_lossy(), to])?;
+                run(Some(&dir), None, &[], &["ls-files"])?.lines().count()
+            }
+        };
+        crate::ci_merge::install_merge_driver(&dir, root)?;
+        taken.moved.push((repo.to_string(), files));
     }
-    if let Some(at) = at {
-        if store.tree_dirty(&dir)? {
-            let t = if repo == "makepad" { tag.to_string() } else { format!("{tag}-{repo}") };
-            r.bundles.push(store.recover_tree(&dir, at, id, out, &t)?);
-        }
-    }
-    r.removed.extend(store.clean_tree(&dir)?.into_iter().map(|p| format!("{prefix}{p}")));
-    Ok(())
-}
-
-/// How long a tree handed to a waiting lease ([`release`] with `handoff`) waits for it before it
-/// goes back to the shared commits after all.
-pub const HANDOFF_GRACE: std::time::Duration = std::time::Duration::from_secs(20);
-
-/// With no lease on the tree: a tree left off the shared commits goes back, whatever it left in
-/// the way cleared first (to `out`). A tree at the shared commits is not touched: a node that takes
-/// no leases never gets here with anything to clear, and a `user_box` is never cleared.
-pub fn restore_if_free(root: &Path, out: &Path, user_box: bool) -> Released {
-    let h = lock();
-    let mut r = Released::default();
-    let (Some(now), Some(to)) = (current(root), shared(root)) else { return r };
-    if !h.0.is_empty() || (now.makepad == to.makepad && (to.commercial.is_none() || now.commercial == to.commercial)) {
-        return r;
-    }
-    for repo in ["commercial", "makepad"] {
-        let at = Store::open(repo).ok().and_then(|s| s.rev(CHECKOUT_REF));
-        if let Err(e) = scrub(repo, root, at.as_deref(), "restore", out, &format!("restore-{repo}"), user_box, &mut r) {
-            r.unclean.push(format!("{repo}: {e}"));
-        }
-    }
-    match to_shared(root) {
-        Ok(to) => r.restored = to,
-        Err(e) => r.unclean.push(e),
-    }
-    r
-}
-
-/// A sync may move the tree: no lease holds it. The guard keeps leases off while the sync moves it.
-pub fn free() -> Result<MutexGuard<'static, Holders>, String> {
-    let h = lock();
-    if h.0.is_empty() {
-        return Ok(h);
-    }
-    let ids: Vec<&str> = h.0.keys().map(|s| s.as_str()).collect();
-    Err(format!("leases hold the tree ({}): it moves when they end", ids.join(" ")))
+    Ok(taken)
 }
 
 /// What a lease start did to the tree.
@@ -184,39 +175,136 @@ pub struct Taken {
     pub cleared: Released,
 }
 
-/// Lease `id` takes the tree at `pin`: moved there in place unless it is there already, anything
-/// in the way cleared first (tracked edits bundled to `out`); refused while another pin holds it.
-pub fn take(id: &str, pin: &Pin, root: &Path, out: &Path, user_box: bool) -> Result<Taken, String> {
+/// Takes the work tree at `pin`; another pin's holders refuse the move.
+pub fn take(id: &str, pin: &Pin, root: &Path, out: &Path) -> Result<Taken, String> {
     let mut h = lock();
-    if let Some(why) = h.conflict(pin) {
+    if let Some(why) = h.get(root).and_then(|h| h.conflict(pin)) {
         return Err(why);
     }
-    let root = root.to_path_buf();
-    let mut moved = Vec::new();
+    let t = prepare(id, pin, root, out, false)?;
+    h.entry(root.to_path_buf()).or_default().0.insert(id.to_string(), pin.clone());
+    Ok(t)
+}
+
+/// Take a lane's native tree; capacity and disk pressure are retryable waits, never fallback
+/// to the shared work tree. The same lock protects creation, holds, scrub and disk reclaim.
+pub fn take_native(id: &str, pin: &Pin, work: &Path, lane: &str, limit: usize, floor: u64) -> Result<Taken, String> {
+    if !super::exec::valid_name(lane) { return Err("invalid native lane".into()); }
+    std::fs::create_dir_all(work).map_err(|e| e.to_string())?;
+    let root = native_root(work, lane);
+    let out = work.join("recovered");
+    let mut h = lock();
+    if let Some(why) = h.get(&root).and_then(|h| h.conflict_with(pin, true)) { return Err(why); }
     let mut cleared = Released::default();
-    for (repo, to) in [("makepad", Some(&pin.makepad)), ("commercial", pin.commercial.as_ref())] {
-        let Some(to) = to else { continue };
-        let store = Store::open(repo)?;
-        let dir = if repo == "makepad" { root.clone() } else { root.join("apps").join("commercial") };
-        // warm: the tree is at the pin already
-        if store.holds(&dir, to) {
-            moved.push((repo.to_string(), 0));
-            continue;
+    if !root.exists() {
+        if limit == 0 { return Err("native trees busy: capacity is zero".into()); }
+        let mut lanes = natives(work);
+        lanes.sort_by_key(|(_, used)| *used);
+        while lanes.len() >= limit {
+            let at = lanes.iter().position(|(lane, _)| !h.get(&native_root(work, lane)).is_some_and(|h| !h.0.is_empty()))
+                .ok_or("native trees busy: waiting for a free tree")?;
+            let (old, _) = lanes.remove(at);
+            let r = remove_native_idle(work, &old)?;
+            cleared.bundles.extend(r.bundles);
+            cleared.removed.extend(r.removed);
+            h.remove(&native_root(work, &old));
         }
-        if !store.has(to) {
-            return Err(format!("{repo} {} is not in this node's store", &to[..10]));
-        }
-        let from = store.rev(CHECKOUT_REF).or_else(|| fleet_revision(&root, repo)).filter(|f| store.has(f));
-        if from.is_none() && dir.read_dir().is_ok_and(|mut d| d.next().is_some()) && !(repo == "makepad" && crate::sync::serve::only_commercial(&dir)) {
-            return Err(format!("{} holds files but no known commit: sync it first", dir.display()));
-        }
-        // the conflict check passed and the tree is not at the pin: no holder is on it
-        scrub(repo, &root, from.as_deref(), id, out, &format!("{id}-start"), user_box, &mut cleared)?;
-        let m = store.move_checkout(&dir, from.as_deref(), to)?;
-        moved.push((repo.to_string(), m.files.len()));
     }
-    h.0.insert(id.to_string(), pin.clone());
-    Ok(Taken { root, moved, cleared })
+    if super::caps::disk_space(work).map_or(0, |(free, _)| free) < floor { return Err("native trees busy: disk below its floor".into()); }
+    let mut t = prepare(id, pin, &root, &out, true)?;
+    t.cleared.bundles.extend(cleared.bundles);
+    t.cleared.removed.extend(cleared.removed);
+    if super::caps::disk_space(work).map_or(0, |(free, _)| free) < floor { return Err("native trees busy: disk below its floor after checkout".into()); }
+    h.entry(root.clone()).or_default().0.insert(id.to_string(), pin.clone());
+    touch_native(&root);
+    Ok(t)
+}
+
+fn remove_native_idle(work: &Path, lane: &str) -> Result<Released, String> {
+    let root = native_root(work, lane);
+    let r = scrub_tree(&root, "reclaim", &work.join("recovered"), &format!("{lane}-reclaim-{}", crate::proto::wall_ms()));
+    if !r.unclean.is_empty() { return Err(r.unclean.join("; ")); }
+    // The nested commercial worktree must go before its containing makepad worktree.
+    for (repo, dir) in [("commercial", root.join("apps/commercial")), ("makepad", root.clone())] {
+        if !dir.join(".git").exists() { continue; }
+        let store = Store::open(repo)?;
+        if store.admin_of(&dir).is_none() { return Err(format!("{} is not this node's worktree", dir.display())); }
+        run(None, Some(&store.git_dir), &[], &["worktree", "remove", "--force", &dir.to_string_lossy()])?;
+    }
+    for path in [&root, &native_target(work, lane)] {
+        if path.exists() { super::disk::remove(path).map_err(|e| e.to_string())?; }
+    }
+    let _ = std::fs::remove_file(root.with_file_name(format!(".last-{lane}")));
+    Ok(r)
+}
+
+/// Reclaim a native tree and its target, checking its holds again at deletion time.
+pub fn remove_native(work: &Path, lane: &str) -> Result<Released, String> {
+    if !super::exec::valid_name(lane) { return Err("invalid native lane".into()); }
+    let mut h = lock();
+    let root = native_root(work, lane);
+    if h.get(&root).is_some_and(|h| !h.0.is_empty()) { return Err(format!("native tree {lane} is held")); }
+    let r = remove_native_idle(work, lane)?;
+    h.remove(&root);
+    Ok(r)
+}
+
+/// A sync warms the idle work tree without waiting for a lease's tree operation.
+pub fn sync(work: &Path, pin: &Pin) -> Result<Option<Taken>, String> {
+    let h = match TREE.try_lock() {
+        Ok(h) => h,
+        Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => return Ok(None),
+    };
+    if h.get(&root(work)).is_some_and(|h| !h.0.is_empty()) {
+        return Ok(None);
+    }
+    prepare("sync", pin, &root(work), &work.join("recovered"), false).map(Some)
+}
+
+/// Leaves `dir` (`repo`'s side of the tree, no lease on it) with tracked and ignored files only,
+/// at `at`: edits in tracked files bundled to `out`, everything untracked removed. Only the node's
+/// worktree is touched: a dir that is not this store's worktree is left alone.
+fn scrub(repo: &str, root: &Path, at: Option<&str>, id: &str, out: &Path, tag: &str, r: &mut Released) -> Result<(), String> {
+    let store = Store::open(repo)?;
+    let (dir, prefix) = if repo == "makepad" { (root.to_path_buf(), "") } else { (root.join("apps").join("commercial"), "apps/commercial/") };
+    if !dir.join(".git").exists() {
+        return Ok(());
+    }
+    if store.admin_of(&dir).is_none() {
+        return Err(format!("{} is not this node's worktree", dir.display()));
+    }
+    if let Some(at) = at {
+        if store.tree_dirty(&dir)? {
+            let t = if repo == "makepad" { tag.to_string() } else { format!("{tag}-{repo}") };
+            r.bundles.push(store.recover_tree(&dir, at, id, out, &t)?);
+        }
+    }
+    r.removed.extend(store.clean_tree(&dir)?.into_iter().map(|p| format!("{prefix}{p}")));
+    Ok(())
+}
+
+/// Startup clears an unheld work tree without changing its pin.
+pub fn scrub_if_idle(root: &Path, out: &Path) -> Released {
+    let h = lock();
+    if h.get(root).is_some_and(|h| !h.0.is_empty()) {
+        return Released::default();
+    }
+    let tag = if root.parent().and_then(Path::file_name).is_some_and(|n| n == "native") {
+        format!("startup-{}-{}", root.file_name().unwrap().to_string_lossy(), crate::proto::wall_ms())
+    } else { "startup".into() };
+    scrub_tree(root, "startup", out, &tag)
+}
+
+fn scrub_tree(root: &Path, id: &str, out: &Path, tag: &str) -> Released {
+    let mut r = Released::default();
+    for repo in ["commercial", "makepad"] {
+        let dir = if repo == "makepad" { root.to_path_buf() } else { root.join("apps/commercial") };
+        if let Err(e) = scrub(repo, root, head(&dir).as_deref(), id, out, tag, &mut r) {
+            r.unclean.push(format!("{repo}: {e}"));
+        }
+    }
+    r
 }
 
 /// Undoes what `devhub run` shipped on top of `pin` (`paths` from the tree's root; commercial ones
@@ -281,45 +369,28 @@ fn remove_shipped(dir: &Path, rel: &str) -> bool {
 }
 
 /// A hub that restarted takes its leases' holds back from its ledger (the tree is where they left it).
-pub fn hold(id: &str, pin: &Pin) {
-    lock().0.insert(id.to_string(), pin.clone());
+pub fn hold(id: &str, pin: &Pin, root: &Path) {
+    lock().entry(root.to_path_buf()).or_default().0.insert(id.to_string(), pin.clone());
 }
 
-/// What clearing the tree did: the bundles of tracked edits, the untracked paths removed, the
-/// shared commits the tree went back to (None: it was there, or another lease still holds it), and
-/// why it is not clean, if it is not.
+/// What scrubbing recovered, removed, or could not clear.
 #[derive(Debug, Default)]
 pub struct Released {
     pub bundles: Vec<PathBuf>,
     pub removed: Vec<String>,
-    pub restored: Option<String>,
     pub unclean: Vec<String>,
 }
 
-/// Lease `id` lets go of the tree. When it was the last holder: edits it left in tracked files
-/// are bundled to `out` (`<tag>.bundle`, `<tag>-commercial.bundle`), everything untracked goes,
-/// then the tree goes back to the shared commits, all before this returns (before the node counts
-/// as free). A step that fails does not stop the others: it lands in [`Released::unclean`].
-pub fn release(id: &str, root: &Path, out: &Path, tag: &str, handoff: bool, user_box: bool) -> Released {
+/// The last holder bundles tracked edits and removes untracked files; the pin and target stay.
+pub fn release(id: &str, root: &Path, out: &Path, tag: &str) -> Released {
     let mut h = lock();
-    let mut r = Released::default();
-    let Some(pin) = h.0.remove(id) else { return r };
-    if !h.0.is_empty() {
-        return r;
+    let Some(holders) = h.get_mut(root) else { return Released::default() };
+    if holders.0.remove(id).is_none() || !holders.0.is_empty() {
+        return Released::default();
     }
-    // nested (commercial) first: it lives inside the makepad tree
-    for (repo, at) in [("commercial", pin.commercial.as_deref()), ("makepad", Some(pin.makepad.as_str()))] {
-        if let Err(e) = scrub(repo, root, at, id, out, tag, user_box, &mut r) {
-            r.unclean.push(format!("{repo}: {e}"));
-        }
-    }
-    // handed over: the next lease moves the tree from these commits (its own diff only)
-    if !handoff {
-        match to_shared(root) {
-            Ok(to) => r.restored = to,
-            Err(e) => r.unclean.push(e),
-        }
-    }
+    let r = scrub_tree(root, id, out, tag);
+    h.remove(root);
+    touch_native(root);
     r
 }
 
@@ -347,18 +418,19 @@ mod tests {
         assert!(why.contains("aaaaaaaaaa,cccccccccc") && why.contains("L1"), "{why}");
     }
 
-    /// Two leases at the same commits share the tree, one at other commits is refused until they
-    /// end; a sync is held off while leases hold it; the last one's leftovers are bundled; and no
-    /// tree stays on a lane's commits after its lease ends (released, or a hub that died
-    /// mid-lease): it is back on the shared commits, its target untouched.
+    /// Same-pin leases share; release and startup scrub without moving the pin or its target.
     #[test]
     fn leases_share_the_one_tree_and_leave_it_warm() {
         let _env = crate::sync::git::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let base = std::env::temp_dir().join(format!("devhub-tree-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
-        let (src, root, stores) = (base.join("src"), base.join("makepad"), base.join("stores"));
+        let (src, work, deployment, stores) = (base.join("src"), base.join("work"), base.join("makepad"), base.join("stores"));
+        let root = root(&work);
+        let out = work.join("recovered");
+        let target = work.join("ci-target");
+        assert_eq!(root, work.join("ci-tree"));
         std::fs::create_dir_all(&src).unwrap();
-        let g = |args: &[&str]| crate::sync::git::run(Some(&src), None, &[], &[&["-c", "user.name=t", "-c", "user.email=t@t"], args].concat()).unwrap();
+        let g = |args: &[&str]| run(Some(&src), None, &[], &[&["-c", "user.name=t", "-c", "user.email=t@t"], args].concat()).unwrap();
         g(&["init", "-q", "-b", "work"]);
         std::fs::write(src.join(".gitignore"), "/target/\n").unwrap();
         std::fs::write(src.join("a.rs"), "1").unwrap();
@@ -374,60 +446,76 @@ mod tests {
         let bundle = base.join("b.bundle");
         g(&["bundle", "create", "-q", &bundle.to_string_lossy(), "refs/heads/work"]);
         store.fetch_bundle(&bundle, "work").unwrap();
-        // the node's synced tree at `two` (a fresh one: what a sync distributed), with a warm target
-        store.move_checkout(&root, None, &two).unwrap();
-        store.set_ref(SYNCED_REF, &two).unwrap();
-        std::fs::create_dir_all(root.join("target/release")).unwrap();
-        std::fs::write(root.join("target/release/makepad"), "jit").unwrap();
         let at = |c: &str| Pin { makepad: c.to_string(), commercial: None };
+        store.move_checkout(&deployment, None, &one).unwrap();
+        store.set_ref(SYNCED_REF, &one).unwrap();
+        assert_eq!(deploy(&deployment), Some(at(&one)));
+        assert_eq!(deploy(&src), None, "a user's clone has no deployment pin");
+        sync(&work, &at(&two)).unwrap().unwrap();
         assert_eq!(current(&root), Some(at(&two)));
+        assert_eq!(deploy(&deployment), Some(at(&one)), "work HEAD never moves the deployment ref");
+        std::fs::create_dir_all(target.join("release")).unwrap();
+        std::fs::write(target.join("release/makepad"), "jit").unwrap();
+        std::fs::create_dir_all(root.join("target")).unwrap();
+        std::fs::write(root.join("target/ignored"), "kept").unwrap();
 
-        // two leases at `two`: no file moves; a lease at `one` waits for them
-        let t = take("L1", &at(&two), &root, &base.join("rec"), false).unwrap();
+        // two leases at `two`: no file moves; a lease at `one` waits for both
+        let t = take("L1", &at(&two), &root, &out).unwrap();
         assert_eq!((t.root.clone(), t.moved.clone()), (root.clone(), vec![("makepad".to_string(), 0)]));
-        take("L2", &at(&two), &root, &base.join("rec"), false).unwrap();
-        let why = take("L3", &at(&one), &root, &base.join("rec"), false).unwrap_err();
+        take("L2", &at(&two), &root, &out).unwrap();
+        let why = take("L3", &at(&one), &root, &out).unwrap_err();
         assert!(why.contains("L1 L2"), "{why}");
-        assert!(free().is_err(), "a sync waits while leases hold the tree");
-        // the first one leaves: nothing changes for the second; the second leaves the tree warm
+        assert!(sync(&work, &at(&one)).unwrap().is_none(), "sync leaves a held work tree alone");
+        store.move_checkout(&deployment, Some(&one), &two).unwrap();
+        store.set_ref(SYNCED_REF, &two).unwrap();
+        assert_eq!(deploy(&deployment), Some(at(&two)), "deployment applies while leases hold the work tree");
         std::fs::write(root.join("b.rs"), "edited by L2").unwrap();
         std::fs::write(root.join("scratch.txt"), "left by L2").unwrap();
-        assert!(release("L1", &root, &base.join("rec"), "x-L1", false, false).bundles.is_empty());
+        assert!(release("L1", &root, &out, "x-L1").bundles.is_empty());
         assert_eq!(std::fs::read_to_string(root.join("b.rs")).unwrap(), "edited by L2", "a holder is still on the tree");
-        let b = release("L2", &root, &base.join("rec"), "x-L2", false, false);
-        assert_eq!((b.bundles.len(), b.restored), (1, None), "at the shared commits already");
+        let b = release("L2", &root, &out, "x-L2");
+        assert_eq!(b.bundles.len(), 1);
+        assert!(b.bundles[0].is_file() && b.unclean.is_empty(), "{b:?}");
+        assert_eq!(current(&root), Some(at(&two)));
         assert_eq!(std::fs::read_to_string(root.join("b.rs")).unwrap(), "1");
         assert_eq!(b.removed, ["scratch.txt"], "what a lease leaves untracked goes");
-        assert!(!root.join("scratch.txt").exists() && root.join("target/release/makepad").exists());
-        drop(free().unwrap());
-        // a lane lease at `one` takes it: only a.rs is written; the target stays
+        assert!(!root.join("scratch.txt").exists() && root.join("target/ignored").exists());
+        assert!(target.join("release/makepad").exists());
+
+        // a lane lease moves only its diff; release keeps that pin and the warm target
         let b_time = std::fs::metadata(root.join("b.rs")).unwrap().modified().unwrap();
-        let t = take("L3", &at(&one), &root, &base.join("rec"), false).unwrap();
+        let t = take("L3", &at(&one), &root, &out).unwrap();
         assert_eq!(t.moved, vec![("makepad".to_string(), 1)]);
         assert_eq!(std::fs::read_to_string(root.join("a.rs")).unwrap(), "1");
         assert_eq!(std::fs::metadata(root.join("b.rs")).unwrap().modified().unwrap(), b_time);
-        // its end puts the tree back on the shared commits in the same step: no box stays on a lane rev
-        let r = release("L3", &root, &base.join("rec"), "x-L3", false, false);
-        assert!(r.bundles.is_empty() && r.restored.is_some());
-        assert_eq!(current(&root), Some(at(&two)));
-        assert_eq!(std::fs::read_to_string(root.join("a.rs")).unwrap(), "2");
-        assert_eq!(std::fs::metadata(root.join("b.rs")).unwrap().modified().unwrap(), b_time, "only the lane's diff moves back");
-        assert_eq!(std::fs::read_to_string(root.join("target/release/makepad")).unwrap(), "jit", "the warm target stays");
-        // a restarted hub takes its holds back from the ledger; their end (the watchdog's) restores too
-        take("L4", &at(&one), &root, &base.join("rec"), false).unwrap();
-        hold("L4", &at(&one));
-        assert!(take("L5", &at(&two), &root, &base.join("rec"), false).is_err());
-        assert_eq!(restore_if_free(&root, &base.join("rec"), false).restored, None, "a held tree is the lease's");
-        assert!(release("L4", &root, &base.join("rec"), "x-L4", false, false).restored.is_some());
-        assert_eq!(current(&root), Some(at(&two)));
-        // a hub that died mid-lease with no ledger left the tree on a lane rev: the new hub puts it back
-        store.move_checkout(&root, Some(&two), &one).unwrap();
-        assert!(restore_if_free(&root, &base.join("rec"), false).restored.is_some());
-        assert_eq!(current(&root), Some(at(&two)));
-        assert_eq!(restore_if_free(&root, &base.join("rec"), false).restored, None);
-        // `devhub run` on top of a pin: an edited file, a new file in a new dir, a deleted file;
-        // all undone at the end, then the tree is back on the shared commits
-        take("L6", &at(&one), &root, &base.join("rec"), false).unwrap();
+        let r = release("L3", &root, &out, "x-L3");
+        assert!(r.bundles.is_empty() && r.unclean.is_empty());
+        assert_eq!(current(&root), Some(at(&one)));
+        assert_eq!(deploy(&deployment), Some(at(&two)));
+        assert_eq!(std::fs::read_to_string(root.join("a.rs")).unwrap(), "1");
+        assert_eq!(std::fs::metadata(root.join("b.rs")).unwrap().modified().unwrap(), b_time);
+        assert_eq!(std::fs::read_to_string(target.join("release/makepad")).unwrap(), "jit");
+
+        // ledger holds protect running leases from startup scrub too
+        hold("L4", &at(&one), &root);
+        std::fs::write(root.join("a.rs"), "in flight").unwrap();
+        assert!(take("L5", &at(&two), &root, &out).is_err());
+        assert!(scrub_if_idle(&root, &out).bundles.is_empty());
+        assert_eq!(std::fs::read_to_string(root.join("a.rs")).unwrap(), "in flight");
+        assert_eq!(release("L4", &root, &out, "x-L4").bundles.len(), 1);
+        assert_eq!(current(&root), Some(at(&one)));
+        std::fs::write(root.join("a.rs"), "interrupted lease").unwrap();
+        std::fs::write(root.join("stray.txt"), "stray").unwrap();
+        let r = scrub_if_idle(&root, &out);
+        assert_eq!(r.bundles.len(), 1);
+        assert_eq!(r.removed, ["stray.txt"]);
+        assert!(r.unclean.is_empty() && !root.join("stray.txt").exists());
+        assert_eq!(current(&root), Some(at(&one)));
+        assert_eq!(std::fs::read_to_string(root.join("a.rs")).unwrap(), "1");
+        assert!(scrub_if_idle(&root, &out).bundles.is_empty());
+
+        // an overlay's edited, new and deleted files all return to the lease pin
+        take("L6", &at(&one), &root, &out).unwrap();
         std::fs::write(root.join("a.rs"), "lane edit").unwrap();
         std::fs::create_dir_all(root.join("newcrate/src")).unwrap();
         std::fs::write(root.join("newcrate/src/lib.rs"), "new").unwrap();
@@ -436,37 +524,30 @@ mod tests {
         assert_eq!(undo_overlay(&root, &at(&one), &shipped).unwrap(), 3);
         assert_eq!(std::fs::read_to_string(root.join("a.rs")).unwrap(), "1");
         assert!(root.join("b.rs").exists() && !root.join("newcrate").exists(), "the new dir goes with its file");
-        let r = release("L6", &root, &base.join("rec"), "x-L6", false, false);
+        let r = release("L6", &root, &out, "x-L6");
         assert!(r.bundles.is_empty(), "nothing of the overlay is left to bundle");
-        assert_eq!(current(&root), Some(at(&two)));
-        assert!(root.join("target/release/makepad").exists());
-        // a user's box: an off-shared tree after a crash goes back, its untracked files stay and
-        // are reported; a release keeps them too
-        store.move_checkout(&root, Some(&two), &one).unwrap();
-        std::fs::write(root.join("mine.txt"), "the user's").unwrap();
-        let r = restore_if_free(&root, &base.join("rec"), true);
-        assert!(r.restored.is_some() && r.removed.is_empty() && r.unclean.iter().any(|e| e.contains("mine.txt")), "{r:?}");
-        take("L8", &at(&one), &root, &base.join("rec"), true).unwrap();
-        let r = release("L8", &root, &base.join("rec"), "x-L8", false, true);
-        assert!(r.removed.is_empty() && r.unclean.iter().any(|e| e.contains("mine.txt")), "{r:?}");
-        assert_eq!(std::fs::read_to_string(root.join("mine.txt")).unwrap(), "the user's");
-        std::fs::remove_file(root.join("mine.txt")).unwrap();
-        // the tree cannot be cleared: the release says so and the box still goes back (Unix: a
-        // read-only dir keeps its file)
+        assert_eq!(current(&root), Some(at(&one)));
+        assert!(target.join("release/makepad").exists());
+
+        // a failed scrub is reported; it never changes the pin
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            take("L7", &at(&one), &root, &base.join("rec"), false).unwrap();
+            take("L7", &at(&one), &root, &out).unwrap();
             std::fs::create_dir_all(root.join("locked")).unwrap();
             std::fs::write(root.join("locked/stuck"), "x").unwrap();
             std::fs::set_permissions(root.join("locked"), std::fs::Permissions::from_mode(0o555)).unwrap();
-            let r = release("L7", &root, &base.join("rec"), "x-L7", false, false);
+            let r = release("L7", &root, &out, "x-L7");
             std::fs::set_permissions(root.join("locked"), std::fs::Permissions::from_mode(0o755)).unwrap();
             assert!(r.unclean.iter().any(|e| e.contains("locked")), "{r:?}");
-            assert_eq!(current(&root), Some(at(&two)));
+            assert_eq!(current(&root), Some(at(&one)));
             std::fs::remove_file(root.join("locked/stuck")).unwrap();
             std::fs::remove_dir(root.join("locked")).unwrap();
         }
+        sync(&work, &at(&two)).unwrap().unwrap();
+        assert_eq!(current(&root), Some(at(&two)), "an idle work tree catches up after apply");
+        assert!(target.join("release/makepad").exists());
+        assert!(!work.join("tree").exists());
         let _ = std::fs::remove_dir_all(&base);
     }
 }

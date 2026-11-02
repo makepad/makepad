@@ -247,6 +247,28 @@ script_mod! {
         draw_cell_bg +: {}
         draw_underline +: {}
         draw_cursor +: {}
+        draw_bell +: {
+            bell: instance(0.0)
+            pixel: fn() {
+                let alpha = 0.12 * self.bell
+                return vec4(alpha, alpha, alpha, alpha)
+            }
+        }
+        animator: Animator{
+            bell: {
+                default: @off
+                on: AnimatorState{
+                    from: {all: Forward {duration: 0.04}}
+                    redraw: true
+                    apply: {draw_bell: {bell: 1.0}}
+                }
+                off: AnimatorState{
+                    from: {all: Forward {duration: 0.11}}
+                    redraw: true
+                    apply: {draw_bell: {bell: 0.0}}
+                }
+            }
+        }
     }
 }
 
@@ -369,7 +391,26 @@ pub struct TerminalPresentationFrame {
     pub border_color: Vec4f,
 }
 
-#[derive(Script, Widget)]
+#[derive(Debug, Default, PartialEq, Eq)]
+enum BellFlash {
+    #[default]
+    None,
+    Rising,
+}
+
+impl BellFlash {
+    /// Every bell starts or restarts the single rise timeout.
+    fn ring(&mut self) -> bool {
+        *self = Self::Rising;
+        true
+    }
+
+    fn settle(&mut self) {
+        *self = Self::None;
+    }
+}
+
+#[derive(Script, Widget, Animator)]
 pub struct MpTerm {
     #[uid]
     uid: WidgetUid,
@@ -379,6 +420,8 @@ pub struct MpTerm {
     walk: Walk,
     #[layout]
     layout: Layout,
+    #[apply_default]
+    animator: Animator,
     #[redraw]
     #[live]
     draw_bg: DrawQuad,
@@ -396,6 +439,8 @@ pub struct MpTerm {
     draw_underline: DrawTermUnderline,
     #[live]
     draw_cursor: DrawTermCursor,
+    #[live]
+    draw_bell: DrawQuad,
     #[live(10.0)]
     font_size: f64,
     #[live(6.0)]
@@ -460,7 +505,9 @@ pub struct MpTerm {
     #[rust]
     select_scroll_frame: NextFrame,
     #[rust]
-    bell_frames: u8,
+    bell: BellFlash,
+    #[rust]
+    bell_timer: Timer,
     #[rust]
     last_mouse_cell: Option<(u32, u32, u8)>,
     /// Background alpha (focused, unfocused): Omarchy's window opacity rule
@@ -498,10 +545,14 @@ impl ScriptHook for MpTerm {
     fn on_after_apply(
         &mut self,
         vm: &mut ScriptVm,
-        _apply: &Apply,
+        apply: &Apply,
         _scope: &mut Scope,
         _value: ScriptValue,
     ) {
+        // Bell animation changes only its overlay, not the font or theme.
+        if apply.is_animate() {
+            return;
+        }
         self.glyph_cache.clear();
         let style = desktop_style::current_style(vm);
         let retro = matches!(
@@ -1781,13 +1832,12 @@ impl MpTerm {
             }
         }
 
-        // Bell flash.
-        if self.bell_frames > 0 {
-            self.bell_frames -= 1;
-            self.draw_cell_bg.new_draw_call(cx);
-            self.draw_cell_bg.color = vec4(1.0, 1.0, 1.0, 0.06 * self.bell_frames as f32);
-            self.draw_cell_bg.draw_abs(cx, self.rect);
-            self.draw_bg.redraw(cx);
+        // Layer 5: the bell wash has its own shader above the cells and ink.
+        let mut bell = [0.0];
+        self.draw_bell.draw_vars.get_instance(cx, id!(bell), &mut bell);
+        if self.bell != BellFlash::None || bell[0] != 0.0 {
+            self.draw_bell.new_draw_call(cx);
+            self.draw_bell.draw_abs(cx, self.rect);
         }
 
         // Scrollback position indicator.
@@ -1819,6 +1869,7 @@ impl MpTerm {
     fn pump_session(&mut self, cx: &mut Cx) {
         let mut actions: Vec<MpTermAction> = Vec::new();
         let mut needs_redraw = false;
+        let mut ring_bell = false;
         if let Some(session) = self.session.as_mut() {
             if session.drain() {
                 needs_redraw = true;
@@ -1834,7 +1885,7 @@ impl MpTerm {
                         actions.push(MpTermAction::TitleChanged(title))
                     }
                     TermEvent::Bell => {
-                        self.bell_frames = 6;
+                        ring_bell = self.bell.ring();
                         actions.push(MpTermAction::Bell);
                         needs_redraw = true;
                     }
@@ -1862,6 +1913,13 @@ impl MpTerm {
             if session.exited {
                 actions.push(MpTermAction::Exited);
             }
+        }
+        if ring_bell {
+            cx.stop_timer(self.bell_timer);
+            // Playing the current state is a no-op, so reset before restarting.
+            self.animator_cut(cx, ids!(bell.off));
+            self.animator_play(cx, ids!(bell.on));
+            self.bell_timer = cx.start_timeout(0.04);
         }
         for action in actions {
             cx.widget_action(self.uid, action);
@@ -1927,6 +1985,16 @@ impl Widget for MpTerm {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
+        if self.animator_handle_event(cx, event).must_redraw() {
+            self.draw_bg.redraw(cx);
+        }
+        if self.bell_timer.is_event(event).is_some() {
+            self.bell_timer = Timer::empty();
+            self.bell.settle();
+            self.animator_play(cx, ids!(bell.off));
+            self.draw_bg.redraw(cx);
+        }
+
         if matches!(event, Event::Drag(_) | Event::Drop(_)) && !self.read_only {
             match event.drag_hits(cx, self.area) {
                 DragHit::Drag(drag) => {
@@ -2264,4 +2332,41 @@ fn letter_key(ch: char) -> Option<Key> {
         },
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BellFlash;
+
+    #[test]
+    fn bell_ring_starts_rising() {
+        let mut bell = BellFlash::default();
+        assert!(bell.ring());
+        assert_eq!(bell, BellFlash::Rising);
+    }
+
+    #[test]
+    fn bell_ring_while_rising_requests_restart() {
+        let mut bell = BellFlash::default();
+        assert!(bell.ring());
+        assert!(bell.ring());
+        assert_eq!(bell, BellFlash::Rising);
+    }
+
+    #[test]
+    fn bell_settle_clears_rising() {
+        let mut bell = BellFlash::Rising;
+        bell.settle();
+        assert_eq!(bell, BellFlash::None);
+        bell.settle();
+        assert_eq!(bell, BellFlash::None);
+    }
+
+    #[test]
+    fn bell_ring_then_settle_finishes() {
+        let mut bell = BellFlash::default();
+        assert!(bell.ring());
+        bell.settle();
+        assert_eq!(bell, BellFlash::None);
+    }
 }

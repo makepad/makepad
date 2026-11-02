@@ -1740,28 +1740,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn registration_is_wired() {
-        let lib = include_str!("lib.rs");
-        let badge = include_str!("badge.rs");
-        assert!(lib.contains("pub mod badge;"));
-        assert!(lib.contains("badge::*"));
-        assert!(lib.contains("crate::badge::script_mod(vm);"));
-        assert!(badge.contains("mod.widgets.BadgeBase = #(Badge::register_widget(vm))"));
-        assert!(badge.contains("mod.widgets.BadgeFlat = set_type_default()"));
-        assert!(badge.contains("mod.widgets.StatusDotBase = #(StatusDot::register_widget(vm))"));
-        assert!(badge.contains("mod.widgets.LabelValueBase = #(LabelValue::register_widget(vm))"));
-        assert!(badge.contains("mod.widgets.BadgeAnchorBase = #(BadgeAnchor::register_widget(vm))"));
-        assert!(badge.contains("mod.widgets.MarkerBase = #(Marker::register_widget(vm))"));
-        // The anchor and the marker deref View, which registers first.
-        let view = lib.find("crate::view::script_mod(vm);").unwrap();
-        assert!(view < lib.find("crate::badge::script_mod(vm);").unwrap());
-        // Badge registers after the label module its text draws with.
-        let label = lib.find("crate::label::script_mod(vm);").unwrap();
-        let badge_at = lib.find("crate::badge::script_mod(vm);").unwrap();
-        assert!(label < badge_at);
-    }
-
-    #[test]
     fn counts_cap_at_max() {
         assert_eq!(count_text(0, 99), "0");
         assert_eq!(count_text(99, 99), "99");

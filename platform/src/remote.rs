@@ -277,6 +277,10 @@ mod imp {
                     4,
                 ))
             }
+            "gpu_inventory" => {
+                let n = p.get(&["n"]).and_then(|v| v.parse::<usize>().ok()).unwrap_or(15);
+                reply_to_answer(ask(move |tx| Cmd::GpuInventory { n, tx }, 4))
+            }
             "quit" => reply_to_answer(ask(|tx| Cmd::Quit(tx), 4)),
             // `cap start`, `cap stop`, `cursor`, `midi`, `log`: commands that
             // need platform state are answered by platform.
@@ -1733,6 +1737,7 @@ mod imp {
                     && info.w == geom.inner_size.x
                     && info.h == geom.inner_size.y
                     && info.dpi == geom.dpi_factor
+                    && info.pass_dpi == main_pass_dpi(cx, window_id)
                     && info.x == geom.position.x
                     && info.y == geom.position.y
             });
@@ -1749,11 +1754,17 @@ mod imp {
                     w: geom.inner_size.x,
                     h: geom.inner_size.y,
                     dpi: geom.dpi_factor,
+                    pass_dpi: main_pass_dpi(cx, window_id),
                     x: geom.position.x,
                     y: geom.position.y,
                 }
             })
             .collect();
+    }
+
+    /// The scale the window's main pass last rasterised at; 0 before it has one.
+    fn main_pass_dpi(cx: &Cx, window_id: WindowId) -> f64 {
+        cx.windows[window_id].main_pass_id.and_then(|pass| cx.passes[pass].dpi_factor).unwrap_or(0.0)
     }
 
     fn resolve_window(cx: &Cx, want: Option<usize>) -> Result<WindowId, String> {
@@ -1784,7 +1795,7 @@ mod imp {
                 let _ = tx.send(Reply::Conflict(conflict));
                 return;
             }
-            if Instant::now() >= request.deadline {
+            if request.deadline.expired() {
                 let _ = tx.send(Reply::Err("expired command was not applied".into()));
                 return;
             }
@@ -1923,8 +1934,9 @@ mod imp {
                                 let id = crate::event::hal_intake::hal_window_id(window_id);
                                 let native = cx.windows[window_id].layout_vec2d_to_native_points(dvec2(x, y));
                                 let deadline = request.deadline;
+                                let input_deadline = deadline.clone();
                                 makepad_hal::backend::apple::media::native_click(sid, id, native.x, native.y,
-                                    move || std::time::Instant::now() < deadline && activity::user_seq_now() == user_seq,
+                                    move || !input_deadline.expired() && activity::user_seq_now() == user_seq,
                                     move |result| match result {
                                         Ok(true) => { let _ = tx.send(Reply::Text("{\"ok\":1,\"native\":1}".into())); }
                                         Ok(false) => {
@@ -2394,6 +2406,9 @@ mod imp {
             }
             Cmd::ShaderConsts { shader, tx } => {
                 let _ = tx.send(Reply::Text(shader_consts_json(cx, shader)));
+            }
+            Cmd::GpuInventory { n, tx } => {
+                let _ = tx.send(Reply::Text(cx.gpu_inventory().report_json_lines(n)));
             }
             Cmd::ShaderConstPatch {
                 shader,

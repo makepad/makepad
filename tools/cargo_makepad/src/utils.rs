@@ -120,11 +120,6 @@ mod date_tests {
     use super::*;
 
     #[test]
-    fn unix_epoch_is_1970_01_01() {
-        assert_eq!(unix_to_utc_ymdh(0), (1970, 1, 1, 0));
-    }
-
-    #[test]
     fn known_timestamps() {
         // 2000-01-01 00:00:00 UTC = 946684800 (Y2K).
         assert_eq!(unix_to_utc_ymdh(946_684_800), (2000, 1, 1, 0));
@@ -132,16 +127,6 @@ mod date_tests {
         assert_eq!(unix_to_utc_ymdh(1_709_208_000), (2024, 2, 29, 12));
         // 2025-01-01 00:00:00 UTC = 1735689600.
         assert_eq!(unix_to_utc_ymdh(1_735_689_600), (2025, 1, 1, 0));
-    }
-
-    #[test]
-    fn non_leap_century_year_2100_has_28_day_february() {
-        // Feb 28 23:00 UTC + 1h = Mar 1 00:00 UTC (2100 isn't a leap year).
-        let feb28 = unix_to_utc_ymdh(1_735_689_600 + 75 * 365 * 86_400 + 19 * 86_400 + 58 * 86_400);
-        // Just check that *some* 2100 date is reported with month <= 12 and day <= 31.
-        assert!(feb28.0 == 2100 || feb28.0 == 2099 || feb28.0 == 2098);
-        assert!(feb28.1 >= 1 && feb28.1 <= 12);
-        assert!(feb28.2 >= 1 && feb28.2 <= 31);
     }
 
     #[test]

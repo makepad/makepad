@@ -1,5 +1,3 @@
-use core::f64;
-
 use wide::*;
 
 use bytemuck::*;
@@ -708,24 +706,6 @@ fn impl_f64x4_pow_multiple() {
 fn impl_f64x4_reduce_add() {
   let p = f64x4::splat(0.001);
   assert_eq!(p.reduce_add(), 0.004);
-}
-
-#[test]
-fn impl_f64x4_sum() {
-  let mut p = Vec::with_capacity(250_000);
-  for _ in 0..250_000 {
-    p.push(f64x4::splat(0.001));
-  }
-  let now = std::time::Instant::now();
-  let sum: f64 = p.iter().map(|x| x.reduce_add()).sum();
-  let duration = now.elapsed().as_micros();
-  println!("Time take {} {}us", sum, duration);
-
-  let p = vec![0.001; 1_000_000];
-  let now = std::time::Instant::now();
-  let sum2: f64 = p.iter().sum();
-  let duration = now.elapsed().as_micros();
-  println!("Time take {} {}us", sum2, duration);
 }
 
 #[test]

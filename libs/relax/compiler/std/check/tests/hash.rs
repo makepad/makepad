@@ -189,35 +189,6 @@ fn panic_during_resize_clone_and_rehash_drops_once() {
     assert_eq!(drops.get(),112 + clone_drops);
 }
 
-// Opt-in timing only; does not invoke the shared std/bench lane.
-#[test]
-#[ignore]
-fn quick_timing() {
-    use std::hint::black_box;
-    use std::time::{Duration, Instant};
-    let mut seed = 0x4321fedc9876abcd;
-    let keys: Vec<u64> = (0..1_000_000).map(|_| random(&mut seed)).collect();
-    for mode in [3,4] {
-        let mut ported = Duration::MAX;
-        let mut real = Duration::MAX;
-        for _ in 0..5 {
-            let mut a = HashMap::with_hasher(Builder(mode));
-            let start = Instant::now();
-            for &key in &keys { a.insert(key,key); }
-            for key in &keys { black_box(a.get(black_box(key))); }
-            ported = ported.min(start.elapsed());
-            black_box(a);
-            let mut b = RealMap::with_hasher(Builder(mode));
-            let start = Instant::now();
-            for &key in &keys { b.insert(key,key); }
-            for key in &keys { black_box(b.get(black_box(key))); }
-            real = real.min(start.elapsed());
-            black_box(b);
-        }
-        println!("hash mode {mode}: ported {ported:?}, real {real:?}, ratio {:.3}",ported.as_secs_f64()/real.as_secs_f64());
-    }
-}
-
 #[test]
 fn raw_iteration_mutation_and_drain() {
     let mut t = RawTable::with_capacity(100);

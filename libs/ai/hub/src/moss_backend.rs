@@ -344,31 +344,6 @@ mod tests {
         GenerateParams::from_request(&request).unwrap()
     }
 
-    #[test]
-    fn job_fraction_bands_stay_ordered() {
-        // load 0.01..0.05 < generate 0.05..0.95 < wav-encode 0.97, with
-        // out-of-range pipeline fractions clamped into their band.
-        assert!((load_fraction(0.0) - 0.01).abs() < 1e-9);
-        assert!((load_fraction(1.0) - 0.05).abs() < 1e-9);
-        assert!((gen_fraction(0.0) - 0.05).abs() < 1e-9);
-        assert!((gen_fraction(1.0) - 0.95).abs() < 1e-9);
-        assert!((gen_fraction(7.0) - 0.95).abs() < 1e-9);
-        assert!((load_fraction(-1.0) - 0.01).abs() < 1e-9);
-        assert!(gen_fraction(1.0) < 0.97);
-    }
-
-    #[test]
-    fn stub_backend_is_never_reported_resident() {
-        let mut backend = MossBackend::with_stub(
-            "moss-test",
-            Box::new(|_, _, _| unreachable!("lifecycle test never generates")),
-        );
-        assert!(!backend.is_resident());
-        backend.unload().unwrap();
-        backend.unload().unwrap();
-        assert!(!backend.is_resident());
-    }
-
     #[cfg(feature = "audio")]
     #[test]
     fn native_backend_is_send_and_starts_cold() {

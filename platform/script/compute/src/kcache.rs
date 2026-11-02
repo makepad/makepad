@@ -107,7 +107,7 @@ pub(crate) fn key(back_end: &str, p: &Program, writable: u64) -> Option<u128> {
         h.bytes(t.as_bytes());
         h.bytes(&[0]);
     }
-    h.bytes(&[o.no_avx as u8, o.no_bmi2 as u8, o.no_bitops as u8, o.memconst as u8]);
+    h.bytes(&[o.no_avx as u8, o.no_bmi2 as u8, o.no_bitops as u8]);
     h.bytes(&cpu_features().to_le_bytes());
     // (Debug of the program is a plain tree of vectors: deterministic)
     let _ = write!(h, "{:?}", p);

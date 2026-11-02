@@ -568,26 +568,3 @@ fn read_u64(data: &[u8], le: bool) -> u64 {
         u64::from_be_bytes(bytes)
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    #[ignore] // needs local AHN download
-    fn probe_ahn_bigtiff() {
-        for name in ["M_25GN1", "R_25GN1"] {
-            let path = format!("../../examples/map/local/ahn/{name}.tif");
-            let mut t = Tiff::open(std::path::Path::new(&path)).unwrap();
-            eprintln!(
-                "{name}: {}x{} block {}x{} comp {} pred {} bits {} fmt {} geo {:?} nodata {:?}",
-                t.width, t.height, t.block_w, t.block_h, t.compression, t.predictor,
-                t.bits, t.sample_format, t.geo, t.nodata
-            );
-            // Dam square ~ RD (121350, 487350); Oosterdok water ~ (122400, 487650)
-            eprintln!("  dam {:?} water {:?}",
-                t.sample_geo(121350.0, 487350.0),
-                t.sample_geo(122400.0, 487650.0));
-        }
-    }
-}

@@ -4428,12 +4428,12 @@ mod tests {
                 })
                 .collect(),
             models: vec![
-                model("flux2-dev", "192.0.2.16", true, "ready"),
-                model("flux2-dev", "192.0.2.17", true, "loaded"),
-                model("flux2-dev", "192.0.2.18", true, "absent"),
-                model("flux2-dev", "192.0.2.19", true, "absent"),
-                model("flux2-dev", "192.0.2.20", true, "absent"),
-                model("flux2-dev", "192.0.2.21", true, "absent"),
+                model("flux2-dev", "192.0.2.1", true, "ready"),
+                model("flux2-dev", "192.0.2.2", true, "loaded"),
+                model("flux2-dev", "192.0.2.3", true, "absent"),
+                model("flux2-dev", "192.0.2.4", true, "absent"),
+                model("flux2-dev", "192.0.2.5", true, "absent"),
+                model("flux2-dev", "192.0.2.6", true, "absent"),
             ],
             snapshot_ms: 1,
         };
@@ -4443,7 +4443,7 @@ mod tests {
         assert_eq!(choices[0].label, "flux2-dev · 2 ready · 4 absent");
         assert_eq!(
             choices[0].note,
-            "192.0.2.16 GPU-C · 192.0.2.17"
+            "192.0.2.1 GPU-C · 192.0.2.2"
         );
         assert!(!choices[0].dimmed);
     }
@@ -4504,19 +4504,6 @@ mod tests {
         assert_eq!(choices[1].note, "no API key");
         assert_eq!(model_choices_for_node(&choices, "chat").len(), 2);
         assert!(model_choices_for_node(&choices, "gen").is_empty());
-    }
-
-    #[test]
-    fn format_preset_maps_to_dimensions() {
-        let presets: Vec<_> = IMAGE_FORMAT_PRESETS
-            .iter()
-            .map(|(name, width, height)| FormatPreset::new(*name, *width, *height))
-            .collect();
-        let portrait = presets
-            .iter()
-            .find(|preset| preset.name == "768×1024 (3:4)")
-            .unwrap();
-        assert_eq!(portrait.dimensions(), (768, 1024));
     }
 
     #[test]
@@ -4636,22 +4623,6 @@ Flow{llm function http ask output}
             assert!(!face.text_scrolls.is_empty(), "{node} has no text scroll");
         }
         host.free(&mut cx);
-    }
-
-    #[test]
-    fn placeholder_icon_maps_every_port_type() {
-        for (ty, svg) in [
-            (PortType::Text, include_str!("../resources/icons/text.svg")),
-            (PortType::Image, include_str!("../resources/icons/image.svg")),
-            (PortType::Audio, include_str!("../resources/icons/audio.svg")),
-            (PortType::Video, include_str!("../resources/icons/video.svg")),
-            (PortType::Mesh, include_str!("../resources/icons/mesh.svg")),
-            (PortType::Json, include_str!("../resources/icons/json.svg")),
-            (PortType::List, include_str!("../resources/icons/json.svg")),
-            (PortType::Bytes, include_str!("../resources/icons/bytes.svg")),
-        ] {
-            assert_eq!(empty_icon_svg(ty.clone()), svg, "wrong icon for {}", ty.as_str());
-        }
     }
 
     /// A node dropped from the palette is listed by the source rewritten

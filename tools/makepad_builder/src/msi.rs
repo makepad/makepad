@@ -757,10 +757,4 @@ mod tests {
             "columns"
         );
     }
-
-    #[test]
-    fn sector_offset_4096() {
-        assert_eq!((0u32 as usize + 1) * 4096, 4096);
-        assert_eq!((1u32 as usize + 1) * 4096, 8192);
-    }
 }

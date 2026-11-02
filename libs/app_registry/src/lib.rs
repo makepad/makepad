@@ -137,8 +137,8 @@ pub fn find_by_bin(bin: &str) -> Option<&'static AppEntry> {
 // ----------------------------------------------------------------------
 
 /// The checkout root: `MAKEPAD_WM_ROOT`, else the sources of the Builder
-/// installation this executable belongs to, else the checkout above the
-/// running exe (`target/<profile>/<bin>`), else the checkout at or above the
+/// installation this executable belongs to, else (under the JIT) the checkout this
+/// program's sources are in, else the checkout above the running exe (`target/<profile>/<bin>`), else the checkout at or above the
 /// current directory — started from the repo root with its target dir
 /// elsewhere (CARGO_TARGET_DIR) is still running out of a checkout. None:
 /// an installed layout without sources.
@@ -151,6 +151,12 @@ pub fn repo_root() -> Option<PathBuf> {
     // opened on its own (wm.exe, the Dock, the wm command).
     if let Some(install) = builder_install() {
         return install.checkout();
+    }
+    // Under the JIT the executable is the loader, whose checkout need not be the one this
+    // program was compiled from (a CI tree run by a box's loader): the program's own sources are.
+    #[cfg(relax)]
+    if let Some(root) = checkout_at_or_above(Path::new(env!("CARGO_MANIFEST_DIR"))) {
+        return Some(root);
     }
     let from_exe = std::env::current_exe()
         .ok()

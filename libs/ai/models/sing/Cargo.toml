@@ -49,7 +49,3 @@ required-features = ["eval"]
 name = "cantor_dit"
 path = "src/bin/cantor_dit.rs"
 required-features = ["dit"]
-
-[[test]]
-name = "dit_parity"
-required-features = ["dit"]

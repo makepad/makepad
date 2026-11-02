@@ -115,14 +115,20 @@ pub use session::{AppCaption, CAPTION_BADGE_ROOM, CloseAs, DomainLaunch, ExecRec
 /// [`Hal::set_domain_host`]. Called outside the HAL's lock, on the thread that submitted the
 /// command, so an implementation may call back into the HAL. A started app opens its session with
 /// `OpenReq { parent: launch.parent, app_key: launch.app_key, .. }`; a relaunch first stops the
-/// old app (it was asked to quit with `stop(domain, QUIT)`, which returns once its run has ended,
-/// and its session is freed before `relaunch`) and then starts the new one the same way. `stop`
+/// old app (asked to quit with `stop(domain, QUIT)`, and its session is freed before
+/// `relaunch`) and then starts the new one the same way. `stop`
 /// with `KILL` is called after the session is freed (the app hears one quit request on its next pump)
-/// and likewise returns once the run has ended. Progress and crashes are reported with [`Hal::report_domain`].
+/// may leave a retiring run alive; `can_reuse_domain` then requires a fresh session id.
+/// Progress and crashes are reported with [`Hal::report_domain`].
 pub trait DomainHost: Send + Sync {
     fn start(&self, launch: DomainLaunch) -> Result<(), String>;
     /// `domain_stop::QUIT` (the app was asked to quit) or `KILL` (its session is already freed).
     fn stop(&self, domain: u32, mode: u32);
+    /// Synchronous hosts have already joined in `stop`. An asynchronous host
+    /// returns false until every thread and callback of the old run is gone.
+    fn can_reuse_domain(&self, _domain: u32) -> bool { true }
+    /// Preserve host-owned presentation/state when a relaunch needs a fresh id.
+    fn domain_replaced(&self, _previous: u32, _replacement: u32) {}
     fn relaunch(&self, launch: DomainLaunch) -> Result<(), String>;
 }
 
@@ -594,15 +600,30 @@ impl Hal {
     }
 
     fn run_host_calls(&self, calls: Vec<session::HostCall>) {
-        for call in calls {
-            // a relaunch frees what is left of the old session (the app has stopped by now) and
-            // makes it again, empty, under the same id
-            if let session::HostCall::Relaunch(l) = &call {
-                let mut guard = lock(&self.state);
-                guard.world.relaunch_domain(l.domain);
-                self.finish(guard, &[]);
-            }
+        for mut call in calls {
             let host = lock(&self.domain_host).clone();
+            if let session::HostCall::Relaunch(l) = &mut call {
+                if host.as_ref().is_some_and(|h| !h.can_reuse_domain(l.domain)) {
+                    // Old threads must never pump events or submit commands to
+                    // the replacement. Retire the old session and its key too.
+                    let previous = l.domain;
+                    let mut guard = lock(&self.state);
+                    guard.world.schedule_close(previous, CloseAs::Exit("relaunch".into()));
+                    self.finish(guard, &[]);
+                    let mut guard = lock(&self.state);
+                    if !guard.world.session(l.parent).is_some_and(|parent| !parent.closing) {
+                        self.finish(guard, &[]);
+                        continue;
+                    }
+                    *l = guard.world.start_domain(l.parent, l.req, l.app.clone(), l.args.clone());
+                    self.finish(guard, &[]);
+                    if let Some(h) = &host { h.domain_replaced(previous, l.domain); }
+                } else {
+                    let mut guard = lock(&self.state);
+                    guard.world.relaunch_domain(l.domain);
+                    self.finish(guard, &[]);
+                }
+            }
             let (domain, result) = match (call, host) {
                 (session::HostCall::Stop { domain, mode }, Some(h)) => {
                     h.stop(domain, mode);

@@ -1,6 +1,8 @@
 //! Self-contained Wayland server core. Std plus a few direct libc calls; no libwayland.
-//! The wire codec, schema tables and object map are portable; sockets, fd passing and the
-//! epoll loop are Linux only.
+//! The wire codec, schema tables and object map are available on Unix; sockets, fd passing
+//! and the epoll loop are Linux only.
+#![cfg(unix)]
+
 pub mod proto;
 pub mod schema;
 pub mod wire;

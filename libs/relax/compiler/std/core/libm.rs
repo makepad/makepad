@@ -73,5 +73,5 @@ mod math;
 pub use self::math::cbrt;
 #[cfg(relax_web)]
 pub use self::math::{
-    sin, cos, tan, asin, acos, atan, atan2, sinh, cosh, tanh, exp, exp2, expm1, log, log2, log10, log1p, pow, cbrt, hypot, round, fma, fmod, sinf, cosf, tanf, asinf, acosf, atanf, atan2f, sinhf, coshf, tanhf, expf, exp2f, expm1f, logf, log2f, log10f, log1pf, powf, cbrtf, hypotf, roundf, fmaf, fmodf
+    sin, cos, tan, asin, acos, asinh, acosh, atan, atan2, sinh, cosh, tanh, exp, exp2, expm1, log, log2, log10, log1p, pow, cbrt, hypot, round, fma, fmod, sinf, cosf, tanf, asinf, acosf, asinhf, acoshf, atanf, atan2f, sinhf, coshf, tanhf, expf, exp2f, expm1f, logf, log2f, log10f, log1pf, powf, cbrtf, hypotf, roundf, fmaf, fmodf
 };

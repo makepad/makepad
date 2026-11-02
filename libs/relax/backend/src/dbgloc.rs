@@ -155,7 +155,9 @@ pub fn build(f: &Func, al: &Alloc, fr: &Frame, calls: &[(u32, u32)]) -> Vec<u8> 
     // variables by (context, local); every debug entry is one of them (live-range pieces of a
     // leaf are twins of an entry)
     let mut vars: Vec<Var> = Vec::new();
-    let mut var_of: std::collections::HashMap<(u16, u32), usize> = std::collections::HashMap::new();
+    let mut var_of: Vec<((u16, u32), usize)> = f.dbg.iter().map(|d| ((d.ctx, d.local), usize::MAX)).collect();
+    var_of.sort_unstable_by_key(|x| x.0);
+    var_of.dedup_by_key(|x| x.0);
     let mut of_entry: Vec<u32> = Vec::with_capacity(f.dbg.len());
     let used = used_slots(f);
     for d in &f.dbg {
@@ -185,10 +187,14 @@ pub fn build(f: &Func, al: &Alloc, fr: &Frame, calls: &[(u32, u32)]) -> Vec<u8> 
             DbgLoc::Mem(_, off) => VarKind::Mem(*off),
         };
         // a twin (a live-range piece) is the same variable
-        let k = *var_of.entry((d.ctx, d.local)).or_insert_with(|| {
+        // The sorted keys are only for lookup; variables keep their first eligible entry's order.
+        let entry = var_of.binary_search_by_key(&(d.ctx, d.local), |x| x.0).unwrap();
+        let k = &mut var_of[entry].1;
+        if *k == usize::MAX {
+            *k = vars.len();
             vars.push(Var { ctx: d.ctx, local: d.local, kind, consts: Vec::new() });
-            vars.len() - 1
-        });
+        }
+        let k = *k;
         for &c in &d.k {
             if !vars[k].consts.iter().any(|x| x.0 == c.0) {
                 vars[k].consts.push(c);
@@ -228,7 +234,6 @@ pub fn build(f: &Func, al: &Alloc, fr: &Frame, calls: &[(u32, u32)]) -> Vec<u8> 
             }
         }
     }
-    let mut class: std::collections::HashMap<u32, Vec<u32>> = std::collections::HashMap::new();
     let mut named_reps: Vec<u32> = Vec::new();
     for d in &f.dbg {
         if let DbgLoc::Regs(r) = &d.loc {
@@ -241,10 +246,11 @@ pub fn build(f: &Func, al: &Alloc, fr: &Frame, calls: &[(u32, u32)]) -> Vec<u8> 
     }
     named_reps.sort_unstable();
     named_reps.dedup();
+    let mut class: Vec<Vec<u32>> = vec![Vec::new(); named_reps.len()];
     for v in 0..nv as u32 {
         let r = find(&mut rep, v);
-        if named_reps.binary_search(&r).is_ok() {
-            class.entry(r).or_default().push(v);
+        if let Ok(k) = named_reps.binary_search(&r) {
+            class[k].push(v);
         }
     }
     // the tracked values (Regs leaves and Mem addresses): dense numbers for the liveness sets,
@@ -267,11 +273,11 @@ pub fn build(f: &Func, al: &Alloc, fr: &Frame, calls: &[(u32, u32)]) -> Vec<u8> 
             if *v == DBG_NONE || v.0 as usize >= nv {
                 continue;
             }
-            let members: Vec<u32> = match &d.loc {
-                DbgLoc::Regs(_) => class.get(&find(&mut rep, v.0)).cloned().unwrap_or_else(|| vec![v.0]),
-                _ => vec![v.0],
+            let members: &[u32] = match &d.loc {
+                DbgLoc::Regs(_) => named_reps.binary_search(&find(&mut rep, v.0)).ok().map(|k| class[k].as_slice()).unwrap_or(std::slice::from_ref(&v.0)),
+                _ => std::slice::from_ref(&v.0),
             };
-            for m in members {
+            for &m in members {
                 if idx[m as usize] == NONE {
                     idx[m as usize] = regs_of.len() as u32;
                     regs_of.push(m);
@@ -286,8 +292,19 @@ pub fn build(f: &Func, al: &Alloc, fr: &Frame, calls: &[(u32, u32)]) -> Vec<u8> 
     }
     let mut table = Table { vars, sites: Vec::new() };
     if !regs_of.is_empty() && !calls.is_empty() {
-        let at: std::collections::HashMap<u32, u32> = calls.iter().copied().collect();
-        let skipped: std::collections::HashSet<u32> = al.store_skip.iter().map(|x| x.1).collect();
+        // Stable sorting after reversing keeps the last return offset for a repeated position,
+        // just as collecting the calls into a map did.
+        let mut at = calls.to_vec();
+        at.reverse();
+        at.sort_by_key(|x| x.0);
+        at.dedup_by_key(|x| x.0);
+        let mut skipped: Vec<u32> = al.store_skip.iter().map(|x| x.1).collect();
+        skipped.sort_unstable();
+        skipped.dedup();
+        // Each block starts at its own lower bound; a window need only be marked once as
+        // positions advance, rather than revisited at every instruction after its start.
+        let mut windows: Vec<(u32, u8)> = al.windows.iter().chain(al.chained.iter()).map(|&(_, a, _, r)| (a, r)).collect();
+        windows.sort_unstable_by_key(|x| x.0);
         let words = (regs_of.len() + 63) / 64;
         let nb = f.blocks.len();
         // per block: upward-exposed uses and definitions of the tracked values
@@ -296,6 +313,12 @@ pub fn build(f: &Func, al: &Alloc, fr: &Frame, calls: &[(u32, u32)]) -> Vec<u8> 
         let mut uses = Vec::new();
         let set = |s: &mut [u64], i: u32| s[(i / 64) as usize] |= 1 << (i % 64);
         let clr = |s: &mut [u64], i: u32| s[(i / 64) as usize] &= !(1 << (i % 64));
+        // The targets use registers below 32, but Loc and Frame accept any u8. Cover the
+        // whole type so membership stays exact without growing with the number of calls.
+        let mut call_hits = [0u64; 4];
+        for &r in fr.captured.iter().chain(fr.call_writes) {
+            set(&mut call_hits, r as u32);
+        }
         for (b, blk) in f.blocks.iter().enumerate() {
             let (g, k) = (&mut gen[b * words..(b + 1) * words], &mut kill[b * words..(b + 1) * words]);
             term_uses(&blk.term, &mut uses);
@@ -353,12 +376,19 @@ pub fn build(f: &Func, al: &Alloc, fr: &Frame, calls: &[(u32, u32)]) -> Vec<u8> 
         }
         let has = |s: &[u64], n: usize| s[n / 64] & (1 << (n % 64)) != 0;
         let mut live = vec![0u64; words];
+        let mut after: Vec<u64> = Vec::new();
+        let mut held = vec![0u64; words];
+        let mut hit_mem: Vec<(i32, i32)> = Vec::new();
+        let mut defs_here = Vec::new();
+        let mut int_args: Vec<u32> = Vec::new();
+        let mut row: Vec<(u32, u32, Home)> = Vec::new();
+        let mut cand: Vec<usize> = Vec::new();
         for (b, blk) in f.blocks.iter().enumerate() {
             if !blk.insts.iter().any(|i| matches!(i, Inst::Call(..))) {
                 continue;
             }
             // backward: the tracked values live after each call of the block
-            let mut after: Vec<(usize, Vec<u64>)> = Vec::new();
+            after.clear();
             live.copy_from_slice(&live_out[b * words..(b + 1) * words]);
             term_uses(&blk.term, &mut uses);
             for u in &uses {
@@ -366,9 +396,9 @@ pub fn build(f: &Func, al: &Alloc, fr: &Frame, calls: &[(u32, u32)]) -> Vec<u8> 
                     set(&mut live, i);
                 }
             }
-            for (ii, inst) in blk.insts.iter().enumerate().rev() {
+            for inst in blk.insts.iter().rev() {
                 if matches!(inst, Inst::Call(..)) {
-                    after.push((ii, live.clone()));
+                    after.extend_from_slice(&live);
                 }
                 for_defs(inst, |d| {
                     if let Some(&i) = idx.get(d.0 as usize).filter(|i| **i != NONE) {
@@ -381,64 +411,65 @@ pub fn build(f: &Func, al: &Alloc, fr: &Frame, calls: &[(u32, u32)]) -> Vec<u8> 
                     }
                 });
             }
-            after.reverse();
             // held on entry: live at the end of every predecessor (dead here, but nothing has
             // overwritten its home yet -- checked below)
-            let mut held = vec![0u64; words];
+            held.fill(0);
             if b != 0 && !preds[b].is_empty() {
                 held.iter_mut().for_each(|w| *w = !0);
                 for &pb in &preds[b] {
-                    let mut lo: Vec<u64> = live_out[pb as usize * words..(pb as usize + 1) * words].to_vec();
+                    tmp.copy_from_slice(&live_out[pb as usize * words..(pb as usize + 1) * words]);
                     // reached by unwinding out of an invoked call: its results were never written
                     let pblk = &f.blocks[pb as usize];
                     if matches!(pblk.term, Term::Invoke(_, u) if u as usize == b) {
                         if let Some(last) = pblk.insts.last() {
                             for_defs(last, |d| {
                                 if let Some(&i) = idx.get(d.0 as usize).filter(|i| **i != NONE) {
-                                    clr(&mut lo, i);
+                                    clr(&mut tmp, i);
                                 }
                             });
                         }
                     }
                     for w in 0..words {
-                        held[w] &= lo[w];
+                        held[w] &= tmp[w];
                     }
                 }
             }
             // forward: per call, the located leaves; what the block's code has overwritten so far
-            let mut hit_regs: Vec<u8> = Vec::new();
-            let mut hit_flt: Vec<u8> = Vec::new();
-            let mut hit_mem: Vec<(i32, i32)> = Vec::new();
-            let mut k_after = 0;
+            let mut hit_regs = [0u64; 4];
+            let mut hit_flt = [0u64; 4];
+            hit_mem.clear();
+            let mut k_after = after.len();
             let start_pos = al.inst_pos(b, 0);
+            let mut k_window = windows.partition_point(|x| x.0 < start_pos);
             for (ii, inst) in blk.insts.iter().enumerate() {
                 let pos = al.inst_pos(b, ii);
                 // region windows load spilled values into free registers before their uses
-                for &(_, a, _, r) in al.windows.iter().chain(al.chained.iter()) {
-                    if a >= start_pos && a <= pos && !hit_regs.contains(&r) {
-                        hit_regs.push(r);
+                while let Some(&(a, r)) = windows.get(k_window) {
+                    if a > pos {
+                        break;
                     }
+                    set(&mut hit_regs, r as u32);
+                    k_window += 1;
                 }
                 if let Inst::Call(callee, args, _) = inst {
-                    let live_after = match after.get(k_after) {
-                        Some((i, l)) if *i == ii => {
-                            k_after += 1;
-                            l.as_slice()
-                        }
-                        _ => &[],
-                    };
+                    // Snapshots were appended in reverse call order; read them back from
+                    // the end without allocating a separate liveness vector for each call.
+                    k_after -= words;
+                    let live_after = &after[k_after..k_after + words];
                     let saves = al.saves.get(&pos);
                     // a call's saves are stored before it runs
                     for &(_, off) in saves.map(|x| x.as_slice()).unwrap_or(&[]) {
                         hit_mem.push(((fr.spill_fp)(off), 32));
                     }
-                    if let Some(&ret) = at.get(&pos) {
-                        let mut defs_here = Vec::new();
+                    if let Ok(k) = at.binary_search_by_key(&pos, |x| x.0) {
+                        let ret = at[k].1;
+                        defs_here.clear();
                         for_defs(inst, |d| defs_here.push(d.0));
                         // integer argument k of the call (the Relax ABI's register order), and
                         // the registers the call sequence writes before the call begins
                         let relax_call = matches!(callee, Callee::Fn(_) | Callee::Host(_));
-                        let int_args: Vec<u32> = args.iter().filter(|a| f.vregs[a.0 as usize] == Cls::I).map(|a| a.0).collect();
+                        int_args.clear();
+                        int_args.extend(args.iter().filter(|a| f.vregs[a.0 as usize] == Cls::I).map(|a| a.0));
                         let written = |r: u8| fr.call_writes.contains(&r) || !relax_call || fr.arg_regs.iter().take(int_args.len()).any(|x| *x == r);
                         // the stop's innermost call only: a caller-saved register as the call began
                         let call_reg = |v: u32, dead_ok: bool| -> Option<Home> {
@@ -452,9 +483,9 @@ pub fn build(f: &Func, al: &Alloc, fr: &Frame, calls: &[(u32, u32)]) -> Vec<u8> 
                                 _ => None,
                             }
                         };
-                        let mut row: Vec<(u32, u32, Home)> = Vec::new();
+                        row.clear();
                         // the candidates: live after the call, held on entry, or its operands
-                        let mut cand: Vec<usize> = Vec::new();
+                        cand.clear();
                         for w in 0..words {
                             let mut m = held[w] | live_after.get(w).copied().unwrap_or(0);
                             while m != 0 {
@@ -469,7 +500,7 @@ pub fn build(f: &Func, al: &Alloc, fr: &Frame, calls: &[(u32, u32)]) -> Vec<u8> 
                         }
                         cand.sort_unstable();
                         cand.dedup();
-                        for n in cand {
+                        for &n in &cand {
                             let v = regs_of[n];
                             let across = !live_after.is_empty() && has(live_after, n) && !defs_here.contains(&v);
                             let used = args.contains(&VReg(v)) || matches!(callee, Callee::Indirect(x) if x.0 == v);
@@ -480,8 +511,8 @@ pub fn build(f: &Func, al: &Alloc, fr: &Frame, calls: &[(u32, u32)]) -> Vec<u8> 
                                 // dead here but live into the block: its home still holds it
                                 // unless the block's code before this call wrote there
                                 held_home(f, al, fr, &skipped, v).filter(|h| match *h {
-                                    Home::Reg(r) => !hit_regs.contains(&r),
-                                    Home::Flt(x) => !hit_flt.contains(&x),
+                                    Home::Reg(r) => !has(&hit_regs, r as usize),
+                                    Home::Flt(x) => !has(&hit_flt, x as usize),
                                     Home::Fp(d) => !hit_mem.iter().any(|&(m, n)| m < d + 32 && d < m + n),
                                     _ => true,
                                 })
@@ -489,7 +520,7 @@ pub fn build(f: &Func, al: &Alloc, fr: &Frame, calls: &[(u32, u32)]) -> Vec<u8> 
                                 None
                             };
                             let h = h.or_else(|| {
-                                let still = across || used || held_here && !matches!(al.loc[v as usize], Loc::Reg(r) if hit_regs.contains(&r));
+                                let still = across || used || held_here && !matches!(al.loc[v as usize], Loc::Reg(r) if has(&hit_regs, r as usize));
                                 if across || used || held_here { call_reg(v, still) } else { None }
                             });
                             let Some(h) = h else { continue };
@@ -500,11 +531,13 @@ pub fn build(f: &Func, al: &Alloc, fr: &Frame, calls: &[(u32, u32)]) -> Vec<u8> 
                         // one home per leaf (values of one copy class hold the same value)
                         row.sort_by_key(|r| (r.0, r.1));
                         row.dedup_by_key(|r| (r.0, r.1));
-                        table.sites.push((ret, row));
+                        // Reuse the row's capacity across calls; each site owns only its
+                        // finished leaves, with the same stable choice of home for each leaf.
+                        table.sites.push((ret, row.clone()));
                     }
                     // a call clobbers the caller-saved registers
-                    for &r in fr.captured.iter().chain(fr.call_writes) {
-                        hit_regs.push(r);
+                    for w in 0..hit_regs.len() {
+                        hit_regs[w] |= call_hits[w];
                     }
                 }
                 // what this instruction writes: its results' homes; a value defined is no longer
@@ -514,8 +547,8 @@ pub fn build(f: &Func, al: &Alloc, fr: &Frame, calls: &[(u32, u32)]) -> Vec<u8> 
                         clr(&mut held, i);
                     }
                     match al.loc.get(d.0 as usize) {
-                        Some(Loc::Reg(r)) => hit_regs.push(*r),
-                        Some(Loc::Flt(x)) => hit_flt.push(*x),
+                        Some(Loc::Reg(r)) => set(&mut hit_regs, *r as u32),
+                        Some(Loc::Flt(x)) => set(&mut hit_flt, *x as u32),
                         Some(Loc::Stack(o)) => hit_mem.push(((fr.spill_fp)(*o), 32)),
                         _ => {}
                     }
@@ -553,7 +586,8 @@ pub fn build(f: &Func, al: &Alloc, fr: &Frame, calls: &[(u32, u32)]) -> Vec<u8> 
     if table.vars.is_empty() {
         return Vec::new();
     }
-    if let Ok(w) = std::env::var("MAKEPAD_RUN_VARS_TRACE") {
+    static TRACE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    if let Some(w) = TRACE.get_or_init(|| std::env::var("MAKEPAD_RUN_VARS_TRACE").ok()) {
         if f.name.contains(w.as_str()) {
             eprintln!("=== vars {}\ndbg {:?}\nloc {:?}\ntable {:?}\n{}", f.name, f.dbg, f.dbg.iter().flat_map(|d| match &d.loc { DbgLoc::Regs(r) => r.clone(), _ => Vec::new() }).filter(|v| *v != DBG_NONE).map(|v| (v.0, al.loc[v.0 as usize], al.remat[v.0 as usize])).collect::<Vec<_>>(), table, f.dump());
         }
@@ -566,7 +600,7 @@ pub fn build(f: &Func, al: &Alloc, fr: &Frame, calls: &[(u32, u32)]) -> Vec<u8> 
 /// is its last use and only a callee-saved register still holds it for sure (a spill slot's
 /// storage may go to another value once it is dead).
 #[allow(clippy::too_many_arguments)]
-fn home(f: &Func, al: &Alloc, fr: &Frame, saves: Option<&Vec<(VReg, i32)>>, skipped: &std::collections::HashSet<u32>, v: u32, across: bool) -> Option<Home> {
+fn home(f: &Func, al: &Alloc, fr: &Frame, saves: Option<&Vec<(VReg, i32)>>, skipped: &[u32], v: u32, across: bool) -> Option<Home> {
     if across {
         if let Some(&(_, off)) = saves.and_then(|s| s.iter().find(|x| x.0 .0 == v)) {
             return Some(Home::Fp((fr.spill_fp)(off)));
@@ -576,7 +610,7 @@ fn home(f: &Func, al: &Alloc, fr: &Frame, saves: Option<&Vec<(VReg, i32)>>, skip
     match al.loc[v as usize] {
         Loc::Reg(r) if fr.callee_int.contains(&r) => return Some(Home::Reg(r)),
         Loc::Flt(x) if !vec && fr.callee_flt.contains(&x) => return Some(Home::Flt(x)),
-        Loc::Stack(o) if across && !skipped.contains(&v) => return Some(Home::Fp((fr.spill_fp)(o))),
+        Loc::Stack(o) if across && skipped.binary_search(&v).is_err() => return Some(Home::Fp((fr.spill_fp)(o))),
         _ => {}
     }
     match al.remat.get(v as usize) {
@@ -588,12 +622,12 @@ fn home(f: &Func, al: &Alloc, fr: &Frame, saves: Option<&Vec<(VReg, i32)>>, skip
 
 /// The home of a value held on entry to a block (live at the end of every predecessor), when
 /// it is one a stop can read: a callee-saved register, its spill slot, a recomputed constant.
-fn held_home(f: &Func, al: &Alloc, fr: &Frame, skipped: &std::collections::HashSet<u32>, v: u32) -> Option<Home> {
+fn held_home(f: &Func, al: &Alloc, fr: &Frame, skipped: &[u32], v: u32) -> Option<Home> {
     let vec = f.vregs[v as usize].is_vec();
     match al.loc[v as usize] {
         Loc::Reg(r) if fr.callee_int.contains(&r) => Some(Home::Reg(r)),
         Loc::Flt(x) if !vec && fr.callee_flt.contains(&x) => Some(Home::Flt(x)),
-        Loc::Stack(o) if !skipped.contains(&v) => Some(Home::Fp((fr.spill_fp)(o))),
+        Loc::Stack(o) if skipped.binary_search(&v).is_err() => Some(Home::Fp((fr.spill_fp)(o))),
         _ => match al.remat.get(v as usize) {
             Some(Remat::Const(k)) => Some(Home::Const(*k)),
             Some(Remat::FConst(bits, _)) => Some(Home::Const(*bits as i64)),

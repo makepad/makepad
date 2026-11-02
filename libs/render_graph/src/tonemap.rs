@@ -60,6 +60,36 @@ script_mod! {
                 s.x * -0.052968 + s.y * -0.098043 + s.z * 1.151073
             )
         }
+        // The AgX look the HDR composites share (the Sandbox composite, a
+        // host's own viewport composite): `contrast` as a slope about
+        // mid-grey (0.18 encodes to 0.606) before the sigmoid, which rolls
+        // both ends off, then a light "punch" that restores the contrast and
+        // saturation plain AgX gives up (`saturation` 1: the stock look).
+        // Linear in, display-encoded out (no extra sRGB OETF).
+        agx_look: fn(c: vec3, contrast: float, saturation: float) -> vec3 {
+            let e = clamp((self.agx_encode(c) - vec3(0.606, 0.606, 0.606)) * contrast + vec3(0.606, 0.606, 0.606), vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0))
+            let o = self.agx_decode(self.agx_contrast(e))
+            let p = pow(clamp(o, vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0)), vec3(1.1, 1.1, 1.1))
+            let luma = dot(p, vec3(0.2126, 0.7152, 0.0722))
+            return clamp(vec3(luma, luma, luma) + (p - vec3(luma, luma, luma)) * (1.35 * saturation), vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0))
+        }
+        // agx_look with the punch kept inside the display gamut: the chroma is scaled about
+        // the luma by at most what keeps every channel in 0..1, so a bright saturated colour
+        // (an orange filament under a key) keeps its hue and its faces keep their values
+        // apart, where agx_look clips its strong channel flat on every lit face.
+        agx_look_fit: fn(c: vec3, contrast: float, saturation: float) -> vec3 {
+            let e = clamp((self.agx_encode(c) - vec3(0.606, 0.606, 0.606)) * contrast + vec3(0.606, 0.606, 0.606), vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0))
+            let o = self.agx_decode(self.agx_contrast(e))
+            let p = pow(clamp(o, vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0)), vec3(1.1, 1.1, 1.1))
+            let luma = dot(p, vec3(0.2126, 0.7152, 0.0722))
+            let d = p - vec3(luma, luma, luma)
+            let hi = max(max(d.x, d.y), d.z)
+            let lo = min(min(d.x, d.y), d.z)
+            var k = 1.35 * saturation
+            if hi > 0.000001 { k = min(k, (1.0 - luma) / hi) }
+            if lo < -0.000001 { k = min(k, luma / (0.0 - lo)) }
+            return clamp(vec3(luma, luma, luma) + d * k, vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0))
+        }
         // AgX to linear light again (display-encoded, then 2.2).
         agx: fn(c: vec3) -> vec3 {
             let o = self.agx_decode(self.agx_contrast(self.agx_encode(c)))

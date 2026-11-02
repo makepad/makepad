@@ -7,3 +7,4 @@ description = "Checked polygon mesh authoring with stable identities"
 
 [dependencies]
 makepad-csg-math = { path = "../csg/csg_math" }
+makepad-uv-unwrap = { path = "../uv_unwrap" }

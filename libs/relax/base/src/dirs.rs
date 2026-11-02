@@ -33,6 +33,8 @@ static DEFAULT: OnceLock<PathBuf> = OnceLock::new();
 /// The run dir handed over by a parent run (`makepad run --run-dir`). Set before anything
 /// asks for relax_dir().
 pub fn set_relax_dir(dir: PathBuf) {
+    // OUT_DIR and include! paths must be absolute, as Cargo's are.
+    let dir = std::path::absolute(&dir).unwrap_or(dir);
     let _ = SET.set(crate::zone_alloc::kept_clone(&dir));
 }
 
@@ -69,7 +71,10 @@ pub fn relax_dir() -> PathBuf {
 
 /// MAKEPAD_RUN_CACHE_DIR when set (tests and measurement).
 pub fn override_dir() -> Option<PathBuf> {
-    std::env::var_os("MAKEPAD_RUN_CACHE_DIR").filter(|d| !d.is_empty()).map(PathBuf::from)
+    std::env::var_os("MAKEPAD_RUN_CACHE_DIR").filter(|d| !d.is_empty()).map(|dir| {
+        let dir = PathBuf::from(dir);
+        std::path::absolute(&dir).unwrap_or(dir)
+    })
 }
 
 /// The relax dir of the workspace holding `start` (no override): `<cargo target dir>/makepad-run`; a

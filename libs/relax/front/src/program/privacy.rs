@@ -82,6 +82,11 @@ impl Program {
                     }
                 }
             }
+            // rustc_resolve imports.rs finalize_import: an inaccessible binding is an error only when
+            // no namespace resolves, and the macro namespace is one of them
+            if !visible && last && last_ns.is_none() && self.macro_binding_visible(m, name, from) {
+                return None;
+            }
             if !visible {
                 if let Some((fd, ns)) = hidden {
                     let flags = self.mods[m as usize].import_pub.get(&(name, ns)).copied();
@@ -91,6 +96,12 @@ impl Program {
             cur = next?;
         }
         None
+    }
+
+    /// The replay's macro namespace (rsim.rs) binds `name` in module `m` where `from` can see it.
+    fn macro_binding_visible(&self, m: u32, name: Sym, from: u32) -> bool {
+        let Some(b) = self.sim_macros.as_ref().and_then(|t| t.get(&(m, name))) else { return false };
+        (b.non_glob.is_some() && self.vis_visible(b.non_glob_vis, from)) || (b.glob.is_some() && self.vis_visible(b.glob_vis, from))
     }
 
     /// Whether `name` is found in module `m` only through glob imports that bring different

@@ -11,6 +11,8 @@
 //! elsewhere the fragmented constructor writes one movie and this test
 //! only checks it still finishes.
 
+#![cfg(any(target_vendor = "apple", target_os = "linux", target_os = "windows"))]
+
 use makepad_video::{
     PcmAudioTrackOptions, VideoFileCodec, VideoFileDecoder, VideoFileEncoder,
     VideoFileEncoderOptions,
@@ -64,11 +66,7 @@ fn a_fragmented_recording_opens_before_it_finishes() {
     let path = dir.join("growing.mp4");
     let text = path.to_string_lossy().to_string();
 
-    let mut encoder = match VideoFileEncoder::new_fragmented(&text, options(), 0.5) {
-        Ok(encoder) => encoder,
-        Err(e) if e.context.contains("not implemented") => return,
-        Err(e) => panic!("encoder: {e:?}"),
-    };
+    let mut encoder = VideoFileEncoder::new_fragmented(&text, options(), 0.5).expect("encoder");
     let per_frame_audio: Vec<i16> = (0..(RATE as usize / FPS as usize) * 2)
         .map(|i| ((i / 2) % 100) as i16 * 200 - 10_000)
         .collect();

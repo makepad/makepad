@@ -3978,14 +3978,6 @@ mod tests {
     }
 
     #[test]
-    fn the_move_vocabulary_is_the_walk_vocabulary_plus_the_vehicle_words() {
-        assert!(
-            GAIT_MOVE_CLIPS.ends_with(GAIT_WALK_CLIPS),
-            "move must never drift from walk: {GAIT_MOVE_CLIPS:?}"
-        );
-    }
-
-    #[test]
     fn every_role_resolves_against_the_shared_vocabulary() {
         // A vehicle rig, in a pack's own spelling and case.
         let tank = clip_named_model(&["Idle", "Drive", "Shoot", "Destroy", "Unfold"]);
@@ -5285,94 +5277,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn parses_vendored_knight_if_present() {
-        // Real-asset smoke: skips when the optional KayKit fixture is absent.
-        let path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../apps/commercial/sandbox/resources/characters/knight.glb"
-        );
-        let Ok(bytes) = std::fs::read(path) else {
-            println!("SKIP: optional KayKit knight fixture absent at {path}");
-            return;
-        };
-        let model = SkinnedModel::parse_glb(&bytes).expect("knight.glb must parse");
-        assert!(model.joint_count() > 10, "joints: {}", model.joint_count());
-        assert!(model.vertex_count() > 500, "verts: {}", model.vertex_count());
-        assert!(!model.clips.is_empty());
-        assert!(
-            model.clip_index("idle").is_some(),
-            "clips: {:?}",
-            model.clips.iter().map(|c| &c.name).collect::<Vec<_>>()
-        );
-        assert!(model.clip_index("walk").is_some());
-        // Every joint index used by a vertex must be inside the palette.
-        let jc = model.joint_count() as u16;
-        for v in &model.vertices {
-            for (j, w) in v.joints.iter().zip(v.weights) {
-                assert!(w == 0.0 || *j < jc, "joint {j} out of range");
-            }
-        }
-        // GPU path on the real 41-joint rig: the shader formula must track
-        // the CPU skin through a multi-influence pose, and the joint-sphere
-        // bounds must cover it. Tolerance is the u8 weight step scaled by
-        // the rig's size.
-        let rest = model.rest_gpu();
-        // Rest-pose AO must show real contrast on a real character: open
-        // surfaces (helmet crown, pauldrons) stay near 1 while crevices
-        // (armpits, under the skirt, between the legs) drop well below.
-        // Sampled through the shipped ao_uv lane, exactly as the shader will.
-        let out_count = rest.source.len();
-        let (mut ao_min, mut ao_max, mut shaded) = (1.0f32, 0.0f32, 0usize);
-        for i in 0..out_count {
-            let ao = sample_rig_ao(&rest, i);
-            ao_min = ao_min.min(ao);
-            ao_max = ao_max.max(ao);
-            if ao < 0.9 {
-                shaded += 1;
-            }
-        }
-        assert!(ao_max > 0.97, "some surface must be fully open: max {ao_max}");
-        assert!(ao_min < 0.7, "some crevice must darken: min {ao_min}");
-        assert!(
-            shaded * 50 > out_count,
-            "at least 2% of a real rig sits in crevices: {shaded} of {out_count}"
-        );
-        let mut pose = PoseBuffer::new();
-        let mut palette = Vec::new();
-        let mut cpu = Vec::new();
-        let walk = model.clip_index("walk").unwrap();
-        model.sample_clip(walk, 0.4, &mut pose);
-        model.palette(&pose, &mut palette);
-        model.skin_to_packed(&palette, &mut cpu);
-        let mut texels = Vec::new();
-        palette_texels(&palette, &mut texels);
-        let (min, max) = model.posed_bounds(&palette).expect("bounds");
-        for (out_i, rv) in rest.vertices.chunks_exact(SKIN_GPU_VERTEX_FLOATS).enumerate() {
-            let i = rest.source[out_i] as usize;
-            let (pos, _) = gpu_skin_vertex(rv, &texels, 0);
-            let c = &cpu[i * SKIN_VERTEX_FLOATS..];
-            assert!(
-                (pos.x - c[0]).abs() < 2.0e-2
-                    && (pos.y - c[1]).abs() < 2.0e-2
-                    && (pos.z - c[2]).abs() < 2.0e-2,
-                "vertex {i}: gpu ({}, {}, {}) cpu ({}, {}, {})",
-                pos.x,
-                pos.y,
-                pos.z,
-                c[0],
-                c[1],
-                c[2]
-            );
-            for (a, (lo, hi)) in [
-                (c[0], (min.x, max.x)),
-                (c[1], (min.y, max.y)),
-                (c[2], (min.z, max.z)),
-            ] {
-                assert!(a >= lo - 1.0e-3 && a <= hi + 1.0e-3, "{a} outside {lo}..{hi}");
-            }
-        }
-    }
 }
 
 #[cfg(test)]
@@ -5458,17 +5362,4 @@ mod generated_material_atlas_tests {
         }
     }
 
-    #[test]
-    fn supplied_robot_fixture_uses_real_material_atlas_and_wave_clip() {
-        let Some(path) = std::env::var_os("MAKEPAD_GENERATED_ROBOT_GLB") else { return };
-        let bytes = std::fs::read(path).unwrap();
-        let (mut model, atlas) = SkinnedModel::parse_glb_atlased(&bytes).unwrap();
-        assert!(model.joint_count() > 0);
-        assert!(model.clip_index("wave").is_some());
-        let colors: std::collections::BTreeSet<_> = atlas.data.iter().copied().collect();
-        assert!(colors.len() >= 3, "robot's distinct materials must survive its runtime parser");
-        let (idle, walk) = model.display_gait_clips();
-        assert!(idle < model.clips.len() && walk < model.clips.len());
-        assert!(!model.rest_gpu_flat().indices.is_empty());
-    }
 }

@@ -1,10 +1,8 @@
-//! The master follows work and commercial main so dock apps receive landed changes without
-//! a manual push, and moves a node's one tree back to them after a lease moved it elsewhere.
-//! Each round attempts one node, passing over nodes that hold a lease until it ends (one box per
-//! lease: the node refuses a sync while a lease holds its tree). The node still refuses older
-//! trees and owns its build and safe restart. Settings are reread from autosync.conf;
-//! autosync.state keeps the last successful revisions across master restarts. Repeated skips are
-//! reported once, to the master's stderr.
+//! The master follows work and commercial main so each deployment receives landed changes
+//! independently of leases. A node is behind when `caps.deploy` differs from those tips. Each
+//! round attempts one node; the node owns its build, live patches and safe restart rules.
+//! Settings are reread from autosync.conf; autosync.state records successful applies across
+//! master restarts. Repeated failures are reported once, to the master's stderr.
 //!
 //! A landing kicks the watcher (`makepad devhub sync now`, the landing scripts' hook): the next
 //! round starts at once and reaches every node that needs the new tips, the first listed node
@@ -119,6 +117,23 @@ pub fn prewarm_suits(v: &makepad_strict_json::Value) -> bool {
     b("up") && b("dev") && !b("draining") && !b("user") && leases == 0 && caps.is_some_and(|c| !loaded(&c))
 }
 
+/// Deployments behind the tips, and which nodes can pre-warm after applying.
+fn nodes_to_apply(nodes: &[String], status: &[String], tips: &str) -> (Vec<String>, BTreeMap<String, bool>) {
+    let mut deploys = BTreeMap::<String, String>::new();
+    let mut idle = BTreeMap::<String, bool>::new();
+    for line in status {
+        let Ok(v) = makepad_strict_json::parse(line.as_bytes()) else { continue };
+        if let Some(n) = v.get("node").and_then(|x| x.as_str()) {
+            idle.insert(n.to_string(), prewarm_suits(&v));
+            if let Some(t) = v.get("caps").and_then(|c| c.get("deploy")).and_then(|x| x.as_str()) {
+                deploys.insert(n.to_string(), t.to_string());
+            }
+        }
+    }
+    let todo = nodes.iter().filter(|n| deploys.get(*n).map(String::as_str) != Some(tips)).cloned().collect();
+    (todo, idle)
+}
+
 pub fn start(control_socket: PathBuf) {
     if let Err(e) = std::thread::Builder::new().name("devhub-autosync".into()).spawn(move || {
         let c = Client::new(Target::Unix(control_socket), "devhub-autosync");
@@ -171,58 +186,8 @@ pub fn start(control_socket: PathBuf) {
                 if nodes.is_empty() {
                     return Ok(());
                 }
-                // what each node's one tree holds now (a lease moves it to its own commits)
-                let mut trees = BTreeMap::<String, String>::new();
-                // the nodes a pre-warm suits: dev on, under their load limits
-                let mut idle = BTreeMap::<String, bool>::new();
-                // a person at the node: nothing moves its tree, builds or restarts its WM until
-                // they are idle (the landing reaches it then)
-                let mut present = std::collections::BTreeSet::<String>::new();
-                for line in ask_local(&c, "nodes", "nodes").unwrap_or_default() {
-                    let Ok(v) = makepad_strict_json::parse(line.as_bytes()) else { continue };
-                    if let Some(n) = v.get("node").and_then(|x| x.as_str()) {
-                        idle.insert(n.to_string(), prewarm_suits(&v));
-                        if v.get("user").and_then(|x| x.as_bool()) == Some(true) {
-                            present.insert(n.to_string());
-                        }
-                    }
-                    if let (Some(n), Some(t)) = (v.get("node").and_then(|x| x.as_str()), v.get("caps").and_then(|c| c.get("tree")).and_then(|x| x.as_str())) {
-                        trees.insert(n.to_string(), t.to_string());
-                    }
-                }
-                // the nodes a lease holds: passed over until it ends
-                let mut held = BTreeMap::<String, String>::new();
-                for line in ask_local(&c, "leases", "leases all")? {
-                    let v = makepad_strict_json::parse(line.as_bytes()).map_err(|_| "leases: bad answer")?;
-                    if v.get("err").is_some() {
-                        return Err(format!("leases: {line}"));
-                    }
-                    // every state but these holds the node (granted, starting, setting up)
-                    let state = v.get("state").and_then(|x| x.as_str()).unwrap_or("");
-                    if matches!(state, "queued" | "ended") {
-                        continue;
-                    }
-                    let field = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
-                    let running = v.get("info").and_then(|i| i.get("running")).and_then(|x| x.as_str()).unwrap_or("");
-                    let (kind, lane) = (field("kind"), field("lane"));
-                    // one box per lease: a node runs its lease on its tree undisturbed
-                    if kind != "inspect" {
-                        held.insert(field("node"), format!("skip: {kind} lease held by {lane}{}", if running.is_empty() { String::new() } else { format!(" ({running})") }));
-                    }
-                }
-                // which nodes this round reaches, in batches pushed together
-                let mut todo = Vec::new();
-                for node in &nodes {
-                    let moved_off = trees.get(node).is_some_and(|t| !t.is_empty() && *t != format!("{},{}", shas.0, shas.1));
-                    if applied.get(node) == Some(&shas) && !moved_off {
-                        continue;
-                    }
-                    match held.get(node) {
-                        Some(why) => report(node, why.clone()),
-                        None if present.contains(node) => report(node, "skip: a user is at it".to_string()),
-                        None => todo.push(node.clone()),
-                    }
-                }
+                let status = ask_local(&c, "nodes", "nodes").unwrap_or_default();
+                let (todo, idle) = nodes_to_apply(&nodes, &status, &format!("{},{}", shas.0, shas.1));
                 let suits = |n: &String| conf.prewarm && idle.get(n).copied().unwrap_or(false);
                 let batches: Vec<Vec<String>> = if landed.is_some() {
                     // a landing: the first listed node (the user's) alone, then every other at once
@@ -297,6 +262,23 @@ mod tests {
         assert!(!prewarm_suits(&line(true, true, 0, false, "null".into())), "no caps yet");
         let c = AutoConf::parse("prewarm = off\nlanes = off\nlanes_root = /w\n", Path::new("/r"));
         assert!(!c.prewarm && !c.lanes && c.lanes_root == Path::new("/w"));
+    }
+
+    #[test]
+    fn deployment_follows_tips_while_the_work_tree_is_held() {
+        let tips = format!("{},{}", "a".repeat(40), "c".repeat(40));
+        let old = format!("{},{}", "b".repeat(40), "d".repeat(40));
+        let status = |node: &str, deploy: &str, tree: &str, leases: u32, user: bool| {
+            let caps = crate::lease::Caps { deploy: deploy.into(), tree: tree.into(), cores: 16, ram_gb: 64.0, ram_avail_gb: 40.0, ..Default::default() };
+            format!("{{\"node\":\"{node}\",\"up\":true,\"dev\":true,\"leases\":{leases},\"user\":{user},\"caps\":{}}}", caps.to_json())
+        };
+        let nodes = vec!["busy".into(), "current".into(), "idle".into(), "unknown".into()];
+        let lines = vec![status("busy", &old, &tips, 3, true), status("current", &tips, &old, 2, false), status("idle", &old, &old, 0, false)];
+        let (todo, idle) = nodes_to_apply(&nodes, &lines, &tips);
+        assert_eq!(todo, vec!["busy", "idle", "unknown"]);
+        assert_eq!(idle.get("busy"), Some(&false), "the deployment applies under leases and user input, but pre-warm stays off");
+        assert_eq!(idle.get("current"), Some(&false), "a held work tree at another pin does not trigger an apply");
+        assert_eq!(idle.get("idle"), Some(&true));
     }
 
     #[test]

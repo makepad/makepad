@@ -57,6 +57,9 @@ builds on the same makepad revision and fixed input tree.
 
 Process failures or checksum mismatches make the runner exit nonzero.
 
+Each name's table ends with the stuck count: the runs that ended with hot fns below O3 and nothing pending
+(the JIT's `makepad-run: O3 stuck:` line, `inspect why-tier stuck`). It should be 0.
+
 ## Output
 
 `relax-rwbench <workload>...` prints per workload
@@ -91,7 +94,7 @@ print these tables. The crate resolves offline from `vendor/` (its own `[patch.c
 
 ## Known results
 
-A node (x86-64 Linux, shared, NOT a quiet machine; frozen `relax-t19`):
+A pool node (x86-64 Linux, shared, NOT a quiet machine; frozen `relax-t19`):
 
 | workload | rustc steady ms | Relax steady ms | Relax/rustc | rustc time-to-steady ms | Relax time-to-steady ms | Relax first iter ms | Relax O3 coverage | checksums equal |
 |---|---:|---:|---:|---:|---:|---:|---|---|

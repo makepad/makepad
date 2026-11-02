@@ -226,29 +226,29 @@ fn thread_pointer() -> usize {
 /// thread-local destructors have started) takes the cold path, which reads `DOMAIN` the ordinary
 /// way and fills the slot. `SLOT_GUARD`'s destructor clears the slot in the thread's thread-local
 /// destructor round, before the thread-local storage it points into is released.
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[cfg(all(target_vendor = "apple", target_arch = "aarch64"))]
 static DOMAIN_KEY: AtomicUsize = AtomicUsize::new(0);
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[cfg(all(target_vendor = "apple", target_arch = "aarch64"))]
 extern "C" {
     fn pthread_key_create(key: *mut usize, dtor: Option<extern "C" fn(*mut u8)>) -> i32;
     fn pthread_getspecific(key: usize) -> *mut u8;
     fn pthread_setspecific(key: usize, v: *const u8) -> i32;
 }
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[cfg(all(target_vendor = "apple", target_arch = "aarch64"))]
 struct SlotGuard;
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[cfg(all(target_vendor = "apple", target_arch = "aarch64"))]
 impl Drop for SlotGuard {
     fn drop(&mut self) {
         unsafe { pthread_setspecific(DOMAIN_KEY.load(Ordering::Relaxed), std::ptr::null()) };
     }
 }
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[cfg(all(target_vendor = "apple", target_arch = "aarch64"))]
 thread_local! {
     static SLOT_GUARD: SlotGuard = const { SlotGuard };
 }
 /// The calling thread's TSD slot `key` (macOS: tpidrro_el0 is the slot array, its low 3 bits the
 /// cpu number).
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[cfg(all(target_vendor = "apple", target_arch = "aarch64"))]
 #[inline(always)]
 fn tsd_slot(key: usize) -> usize {
     let v: usize;
@@ -262,7 +262,7 @@ fn tsd_slot(key: usize) -> usize {
 pub fn bind_program_tls() {
     #[cfg(all(target_os = "linux", target_arch = "x86_64", not(relax)))]
     DOMAIN_OFFSET.store((domain_tls() as *const DomainTls as usize).wrapping_sub(thread_pointer()), Ordering::Relaxed);
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(all(target_vendor = "apple", target_arch = "aarch64"))]
     {
         static ONCE: std::sync::Once = std::sync::Once::new();
         ONCE.call_once(|| unsafe {
@@ -288,12 +288,12 @@ fn program_tls() -> Option<&'static DomainTls> {
     unsafe {
         Some(&*(thread_pointer().wrapping_add(DOMAIN_OFFSET.load(Ordering::Relaxed)) as *const DomainTls))
     }
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(all(target_vendor = "apple", target_arch = "aarch64"))]
     {
         let p = tsd_slot(DOMAIN_KEY.load(Ordering::Relaxed));
         if p == 0 { None } else { Some(unsafe { &*(p as *const DomainTls) }) }
     }
-    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", not(relax)), all(target_os = "macos", target_arch = "aarch64"))))]
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64", not(relax)), all(target_vendor = "apple", target_arch = "aarch64"))))]
     Some(domain_tls())
 }
 /// The thread's `DomainTls`, read the ordinary way; fills the fast paths' TSD slot (macOS arm64)
@@ -301,7 +301,7 @@ fn program_tls() -> Option<&'static DomainTls> {
 #[inline(always)]
 fn program_tls_fill() -> &'static DomainTls {
     let t = domain_tls();
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(all(target_vendor = "apple", target_arch = "aarch64"))]
     if SLOT_GUARD.try_with(|_| ()).is_ok() {
         unsafe { pthread_setspecific(DOMAIN_KEY.load(Ordering::Relaxed), t as *const DomainTls as *const u8) };
     }
@@ -354,7 +354,8 @@ impl Drop for ScratchGuard {
 // That recurses when used under a global allocator. These locks never allocate or park.
 struct Mutex<T> {
     held: AtomicBool,
-    id: usize,
+    /// the contention event's label (an atomic: the static arenas set theirs at their first use)
+    id: AtomicUsize,
     value: UnsafeCell<T>,
 }
 unsafe impl<T: Send> Sync for Mutex<T> {}
@@ -365,7 +366,7 @@ impl<T> Mutex<T> {
     const fn with_id(value: T, id: usize) -> Self {
         Self {
             held: AtomicBool::new(false),
-            id,
+            id: AtomicUsize::new(id),
             value: UnsafeCell::new(value),
         }
     }
@@ -398,7 +399,7 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
             return MutexGuard(m, PhantomData);
         }
         if spins == 0 {
-            event(m.id);
+            event(m.id.load(Ordering::Relaxed));
         }
         std::hint::spin_loop();
         spins += 1;
@@ -536,18 +537,6 @@ struct Pool {
     order: [u8; N],
 }
 impl Pool {
-    const fn new() -> Self {
-        let mut heads = [NONE; MAX_ORDER + 1];
-        heads[MAX_ORDER] = 0;
-        let mut order = [u8::MAX; N];
-        order[0] = MAX_ORDER as u8;
-        Self {
-            heads,
-            next: [NONE; N],
-            prev: [NONE; N],
-            order,
-        }
-    }
     fn remove(&mut self, i: usize, order: usize) {
         let (prev, next) = (self.prev[i], self.next[i]);
         if prev == NONE {
@@ -636,10 +625,10 @@ const GRANULE: usize = 4 << 10;
 #[cfg(not(target_arch = "x86_64"))]
 const GRANULE: usize = 16 << 10;
 
-#[cfg(any(target_os = "macos", target_os = "linux", target_os = "android"))]
+#[cfg(any(target_vendor = "apple", target_os = "linux", target_os = "android"))]
 mod os {
     use std::ffi::c_void;
-    #[cfg(target_os = "macos")]
+    #[cfg(target_vendor = "apple")]
     const ANON: i32 = 0x1000;
     #[cfg(any(target_os = "linux", target_os = "android"))]
     const ANON: i32 = 0x20;
@@ -700,7 +689,7 @@ mod os {
         // Linux: MAP_FIXED_NOREPLACE; macOS has none: the hint, kept only when it was honoured
         #[cfg(any(target_os = "linux", target_os = "android"))]
         const FLAGS: i32 = 2 | ANON | 0x100000;
-        #[cfg(target_os = "macos")]
+        #[cfg(target_vendor = "apple")]
         const FLAGS: i32 = 2 | ANON;
         let p = mmap(at as *mut c_void, size, 0, FLAGS, -1, 0);
         if p as isize == -1 {
@@ -736,16 +725,16 @@ mod os {
         n
     }
     fn page_size() -> usize {
-        #[cfg(target_os = "macos")]
+        #[cfg(target_vendor = "apple")]
         return 16 << 10;
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(target_vendor = "apple"))]
         return 4 << 10;
     }
     pub unsafe fn commit(p: *mut u8, size: usize) -> bool {
         if mprotect(p.cast(), size, 1 | 2) != 0 {
             return false;
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(target_vendor = "apple")]
         {
             madvise(p.cast(), size, 8);
         } // MADV_FREE_REUSE, balances FREE_REUSABLE
@@ -756,18 +745,18 @@ mod os {
     /// replaced by a fresh PROT_NONE mapping, which also drops its pages at once).
     /// Returns the pages to the OS and keeps the mapping readable and writable.
     pub unsafe fn release(p: *mut u8, size: usize) -> bool {
-        #[cfg(target_os = "macos")]
+        #[cfg(target_vendor = "apple")]
         const ADVICE: i32 = 7; // MADV_FREE_REUSABLE
         #[cfg(any(target_os = "linux", target_os = "android"))]
         const ADVICE: i32 = 4; // MADV_DONTNEED
         madvise(p.cast(), size, ADVICE) == 0
     }
     pub unsafe fn decommit(p: *mut u8, size: usize, zero: bool) -> bool {
-        #[cfg(target_os = "macos")]
+        #[cfg(target_vendor = "apple")]
         const ADVICE: i32 = 7; // MADV_FREE_REUSABLE: removed from task footprint now
         #[cfg(any(target_os = "linux", target_os = "android"))]
         const ADVICE: i32 = 4; // MADV_DONTNEED
-        #[cfg(target_os = "macos")]
+        #[cfg(target_vendor = "apple")]
         if zero {
             // MAP_PRIVATE | MAP_ANON | MAP_FIXED
             return mmap(p.cast(), size, 0, 2 | ANON | 0x10, -1, 0) as usize == p as usize;
@@ -849,73 +838,29 @@ pub struct Arena {
     /// it, so the free pages of a thread's current chunks are released by the thread.
     trim_epoch: AtomicUsize,
 }
-static DEFAULT: Arena = Arena::new();
+// all zero: in the binary's zero-fill section, not 7 MB of initialised data in it (iOS); `init`
+// sets what is not zero at the first use (`init_zeroed`), as `create` does for a domain arena.
+// SAFETY: every field has a valid all-zero representation (create relies on it too).
+static DEFAULT: Arena = unsafe { std::mem::zeroed() };
 impl Arena {
-    const fn new() -> Self {
-        Self {
-            dynamic: false,
-            id: 0,
-            base: AtomicUsize::new(0),
-            init: Mutex::new(false),
-            committed: AtomicUsize::new(0),
-            chunks: AtomicUsize::new(0),
-            warm: Mutex::with_id(
-                Warm {
-                    runs: [(0, 0); WARM_MAX],
-                    len: 0,
-                    bytes: 0,
-                },
-                2,
-            ),
-            warm_large: Mutex::with_id(
-                WarmLarge {
-                    runs: [(0, 0, 0); WARM_LARGE_MAX],
-                    len: 0,
-                    bytes: 0,
-                },
-                2,
-            ),
-            headers: [const {
-                Chunk {
-                    account: AtomicUsize::new(0),
-                    owned: UnsafeCell::new(Owned { free: 0, bump: AtomicUsize::new(0), stride: 0, live: AtomicUsize::new(0), trim_seen: 0 }),
-                    owner_quiet: AtomicUsize::new(0),
-                    _line: [0; 1],
-                    remote: AtomicUsize::new(NONE),
-                    remote_bytes: AtomicUsize::new(0),
-                    live: AtomicUsize::new(0),
-                    in_part: AtomicBool::new(false),
-                    huge: AtomicBool::new(false),
-                    old: AtomicBool::new(false),
-                    state: Mutex::new(State {
-                        released: true,
-                        generation: 0,
-                        free: 0,
-                        bump: 0,
-                        stride: 0,
-                        class: 0,
-                        attached: false,
-                        committed: 0,
-                        run: 0,
-                        order: 0,
-                        bytes: 0,
-                        dirty: false,
-                    }),
-                }
-            }; N],
-            pool: Mutex::with_id(Pool::new(), 1),
-            partial: Mutex::with_id(
-                Partial {
-                    heads: [0; CLASSES],
-                    next: [0; N],
-                    prev: [0; N],
-                    class: [0; N],
-                },
-                3,
-            ),
-            live_bits: AtomicUsize::new(0),
-            trim_epoch: AtomicUsize::new(0),
+    /// The fields of an all-zero arena that are not zero: free-list and pool links (NONE), the
+    /// chunks released, the pool's one whole-reservation run, the locks' event labels.
+    unsafe fn init_zeroed(&self) {
+        for h in &self.headers {
+            h.remote.store(NONE, Ordering::Relaxed);
+            (*h.state.value.get()).released = true;
         }
+        let pool = &mut *self.pool.value.get();
+        pool.heads.fill(NONE);
+        pool.heads[MAX_ORDER] = 0;
+        pool.next.fill(NONE);
+        pool.prev.fill(NONE);
+        pool.order.fill(u8::MAX);
+        pool.order[0] = MAX_ORDER as u8;
+        self.pool.id.store(1, Ordering::Relaxed);
+        self.warm.id.store(2, Ordering::Relaxed);
+        self.warm_large.id.store(2, Ordering::Relaxed);
+        self.partial.id.store(3, Ordering::Relaxed);
     }
 
     pub fn create() -> Option<Box<Self>> {
@@ -929,17 +874,7 @@ impl Arena {
             let a = &mut *p;
             a.dynamic = true;
             a.id = NEXT_ARENA_ID.fetch_add(1, Ordering::Relaxed);
-            for h in &a.headers {
-                h.remote.store(NONE, Ordering::Relaxed);
-                (*h.state.value.get()).released = true;
-            }
-            let pool = &mut *a.pool.value.get();
-            pool.heads.fill(NONE);
-            pool.heads[MAX_ORDER] = 0;
-            pool.next.fill(NONE);
-            pool.prev.fill(NONE);
-            pool.order.fill(u8::MAX);
-            pool.order[0] = MAX_ORDER as u8;
+            a.init_zeroed();
             if heap_check_on() {
                 a.live_bits.store(os_bits_map(), Ordering::Relaxed);
             }
@@ -1255,6 +1190,10 @@ impl Arena {
             let mut tried = lock(&self.init);
             if !*tried {
                 *tried = true;
+                // the static arena's non-zero state (a domain arena's was set by `create`)
+                if !self.dynamic {
+                    unsafe { self.init_zeroed() };
+                }
                 let base = unsafe {
                     if WEB_AT != 0 {
                         os::reserve_at(WEB_AT, RESERVE, LABEL)
@@ -1440,11 +1379,23 @@ impl Arena {
         let off = (p as usize).wrapping_sub(base);
         base != 0 && off < RESERVE && self.headers[off / CHUNK].old.load(Ordering::Relaxed)
     }
-    /// Every committed chunk is old from now on (`states`' last row; a settle rebuild calls it).
+    /// Every committed chunk is old from now on (`states`' last row; a settle rebuild calls it,
+    /// before it drops the cold state). Old chunks drain: they leave the list of chunks with free
+    /// slots and never join it again, so what is allocated from now on packs into fresh chunks
+    /// instead of filling the holes between the cold state's blocks, and an old chunk is released
+    /// once its last block goes. (Filled holes kept every page of every cold chunk resident: 39 MB
+    /// live held 841 MB on 16 KB pages.) The threads hand their current chunks back at their next
+    /// slow path, so those drain too.
     pub fn mark_old(&self) {
-        for h in self.headers.iter() {
+        for (index, h) in self.headers.iter().enumerate() {
             let s = lock(&h.state);
             h.old.store(s.committed != 0, Ordering::Relaxed);
+            if s.committed != 0 && h.in_part.load(Ordering::Relaxed) {
+                lock(&self.partial).unlink(index, &self.headers);
+            }
+        }
+        if COMPILER && !self.dynamic {
+            HAND_BACK.fetch_add(1, Ordering::Relaxed);
         }
     }
     pub fn states(&self) -> [usize; 28] {
@@ -1543,6 +1494,10 @@ impl Arena {
         bytes
     }
     fn partial_push(&self, i: usize, class: usize) {
+        // an old chunk drains (`mark_old`): its free slots are never handed out again
+        if self.headers[i].old.load(Ordering::Relaxed) {
+            return;
+        }
         let mut p = lock(&self.partial);
         // a chunk that emptied meanwhile is on its way to the pool: never list it
         if p.class[i] != 0 || self.headers[i].live.load(Ordering::Relaxed) == 0 {
@@ -1803,14 +1758,14 @@ impl Arena {
         }
         #[cfg(unix)]
         extern "C" {
-            fn write(fd: i32, buf: *const u8, n: usize) -> isize;
+            fn write(fd: i32, buf: *const core::ffi::c_void, n: usize) -> isize;
         }
         // (stderr without allocation; Windows has no C `write` to link against)
         #[cfg(windows)]
-        unsafe fn write(_fd: i32, buf: *const u8, n: usize) -> isize {
+        unsafe fn write(_fd: i32, buf: *const core::ffi::c_void, n: usize) -> isize {
             use relax_session::win32::{GetStdHandle, WriteFile};
             let mut done = 0u32;
-            WriteFile(GetStdHandle(-12i32 as u32), buf, n as u32, &mut done, std::ptr::null_mut());
+            WriteFile(GetStdHandle(-12i32 as u32), buf.cast(), n as u32, &mut done, std::ptr::null_mut());
             done as isize
         }
         let mut b = [0u8; 900];
@@ -1896,7 +1851,7 @@ impl Arena {
             }
         }
         put(b"\n");
-        unsafe { write(2, b.as_ptr(), k) };
+        unsafe { write(2, b.as_ptr().cast(), k) };
     }
     /// A trim ran since this thread last handed its current chunks back (compiler arena).
     #[inline]
@@ -2456,7 +2411,7 @@ pub fn heap_check_on() -> bool {
             #[cfg(unix)]
             let on = unsafe {
                 extern "C" {
-                    fn getenv(name: *const u8) -> *const u8;
+                    fn getenv(name: *const core::ffi::c_char) -> *mut core::ffi::c_char;
                 }
                 !getenv(c"MAKEPAD_RUN_HEAP_CHECK".as_ptr().cast()).is_null()
             };
@@ -2471,7 +2426,7 @@ pub fn heap_check_on() -> bool {
 /// The live-bit map of one program heap: RESERVE / 16 bits, mapped readable and writable (the OS
 /// backs only the pages that are touched). 0 when the mapping is refused (the check stays off).
 fn os_bits_map() -> usize {
-    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "android"))]
+    #[cfg(any(target_vendor = "apple", target_os = "linux", target_os = "android"))]
     unsafe {
         let b = os::reserve(RESERVE / 128, GRANULE, c"makepad-run heap check");
         if b != 0 && !os::commit(b as *mut u8, RESERVE / 128) {
@@ -2480,7 +2435,7 @@ fn os_bits_map() -> usize {
         }
         b
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "android")))]
+    #[cfg(not(any(target_vendor = "apple", target_os = "linux", target_os = "android")))]
     0
 }
 
@@ -2528,10 +2483,10 @@ fn heap_check_fail(what: &[u8], p: usize, index: usize, stride: usize) -> ! {
     #[cfg(unix)]
     unsafe {
         extern "C" {
-            fn write(fd: i32, buf: *const u8, n: usize) -> isize;
+            fn write(fd: i32, buf: *const core::ffi::c_void, n: usize) -> isize;
             fn abort() -> !;
         }
-        write(2, buf.as_ptr(), n);
+        write(2, buf.as_ptr().cast(), n);
         abort();
     }
     #[cfg(not(unix))]

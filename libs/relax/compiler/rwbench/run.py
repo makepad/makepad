@@ -78,7 +78,8 @@ def one(cmd, e):
     profile = e.get("MAKEPAD_RUN_O3_PROFILE")
     if profile and os.path.isfile(profile + ".replay"):
         replay = Path(profile + ".replay").read_text().splitlines()[0]
-    return dict(replay=replay, steady=float(m.group(2)), tts=float(m.group(4)), sum=m.group(8), o3=int(m.group(7)), tier1="%s hot / %s inst / %s cache" % (t1.group(1), t1.group(2), t1.group(3) or "0") if t1 else "-"), None
+    stuck = re.search(r"^makepad-run: O3 stuck: (\d+) hot fns[^\n]*", out.stderr, re.M)
+    return dict(stuck=int(stuck.group(1)) if stuck else None, stuck_line=stuck.group(0) if stuck else "", replay=replay, steady=float(m.group(2)), tts=float(m.group(4)), sum=m.group(8), o3=int(m.group(7)), tier1="%s hot / %s inst / %s cache" % (t1.group(1), t1.group(2), t1.group(3) or "0") if t1 else "-"), None
 
 # runs[workload]["rustc" | name] = [result per round or None]
 warm = os.environ.get("WARM") == "1"
@@ -96,7 +97,7 @@ def relax_env(n, w=""):
     suffix = n.upper().replace("-", "_")
     nstd = os.environ.get("MAKEPAD_RUN_STD_" + suffix, std)
     # rwbench links the platform (the layout workload), so `makepad run` hosts it through the HAL: with no
-    # display (a bench box, a node) it needs the HAL's headless backend; no window opens on the mini either
+    # display (a bench box, a pool node) it needs the HAL's headless backend; no window opens on the mini either
     e = dict(base, MAKEPAD_RUN_CACHE="0", MAKEPAD_RUN_STD=nstd, MAKEPAD_RUN_CACHE_DIR=os.path.join(target, "relax-" + n))
     e.setdefault("MAKEPAD_HAL_BACKEND", "headless")
     # the timed window starts when the JIT reports its optimised code settled (main.rs RW_O3_PROGRESS)
@@ -182,6 +183,12 @@ for n, _ in bins:
         print("| %s | %.3f [%s] | %.3f [%s] | %s | %.2f | %s | %.0f | %s | %s | %s |" % (w, med([x["steady"] for x in a]), rng([x["steady"] for x in a]), med([x["steady"] for x in b]), rng([x["steady"] for x in b]), "; ".join(dict.fromkeys(x["replay"] for x in b)), med(rt), rng(rt), med([x["tts"] for x in b]), "/".join(str(x["o3"]) for x in b), b[-1]["tier1"], "yes" if len(sums) == 1 else "**NO** %s" % sorted(sums)))
     if gm:
         print("\ngeomean Relax/rustc: %.3f (%d workloads)" % (geo(gm), len(gm)))
+    # hot fns a run ended with below O3 and nothing pending (the JIT's `why-tier stuck`): they should be none
+    stuck = {w: [x for x in runs[w][n] if x and x["stuck"]] for w in names}
+    print("\nstuck below O3: %d runs of %d ended with stuck fns" % (sum(len(v) for v in stuck.values()), sum(len([x for x in runs[w][n] if x]) for w in names)))
+    for w in names:
+        if stuck[w]:
+            print("  %s: %s; %s" % (w, "/".join(str(x["stuck"]) for x in stuck[w]), stuck[w][0]["stuck_line"][:300]))
 
 if len(bins) > 1:
     b0 = bins[0][0]

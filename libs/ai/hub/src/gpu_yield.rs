@@ -525,6 +525,13 @@ mod tests {
         assert_eq!(plan(Some(&qwen()), &[], 0, true), Plan::default());
     }
 
+    /// The tests that note chat-model loads: the accounting is one process-wide list and
+    /// `llm_memory()` is its newest entry, so a parallel test's note would come between.
+    fn llm_memory_tests() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: Mutex<()> = Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     fn mem() -> LlmMemory {
         LlmMemory {
             model: "qwen3.8-27b".into(),
@@ -568,6 +575,7 @@ mod tests {
 
     #[test]
     fn each_chat_model_keeps_its_own_accounting_and_fit() {
+        let _serial = llm_memory_tests();
         let mut small = mem();
         small.model = "qwen3.5-4b".into();
         small.weights_mb = 3000;
@@ -617,6 +625,7 @@ mod tests {
         // 149, 15:00: the 27B cut to 16384 measured 'whole load 19711 MB' while the
         // desktop allocated; the hub then wanted 19439 MB for the floor and refused
         // with 21256 MB free next to a 2048 MB reserve+headroom.
+        let _serial = llm_memory_tests();
         let first = LlmMemory { model: "q27".into(), context: 49152, kv: "q8".into(), weights_mb: 15702, kv_mb: 1632,
             kv_bytes_per_token: 34816, state_mb: 891, activations_mb: 513, load_cost_mb: Some(19178) };
         let polluted = LlmMemory { context: 16384, kv_mb: 544, state_mb: 823, load_cost_mb: Some(19711), ..first.clone() };

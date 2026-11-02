@@ -484,6 +484,11 @@ pub fn dispatch(req: &Req, out: &mut Out) -> bool {
         return false;
     }
     let sub = req.pos.first().map(String::as_str).unwrap_or("frame");
+    // `cap start` / `cap stop` / `cap pause` / `cap resume` record the window to a video: the
+    // platform's commands, answered after this (the GPU capture would refuse them as unknown)
+    if matches!(sub, "start" | "stop" | "pause" | "resume") {
+        return false;
+    }
     let what = format!("cap {sub}");
     let r = match sub {
         "grab" => grab(req).map(|(c, path)| {
@@ -678,7 +683,7 @@ fn draw_text(c: &Arc<Capture>, req: &Req) -> Result<String, String> {
     t.push_str(&format!("| instances | {inst}{} |\n", if d.inst_ranges.is_empty() { String::new() } else { format!(" in {} ranges", d.inst_ranges.len()) }));
     t.push_str(&format!("| indices | {} from {} |\n", d.index[1], d.index[0]));
     let mut flags = Vec::new();
-    for (bit, name) in [(Draw::BLEND, "blend"), (Draw::DEPTH_WRITE, "depth-write"), (Draw::CULL, "cull back faces (front = counter-clockwise in clip space)"), (Draw::INDEX_U32, "u32 indices")] {
+    for (bit, name) in [(Draw::BLEND, "blend"), (Draw::DEPTH_WRITE, "depth-write"), (Draw::DEPTH_GREATER, "depth-greater"), (Draw::CULL, "cull back faces (front = counter-clockwise in clip space)"), (Draw::INDEX_U32, "u32 indices")] {
         if d.flags & bit != 0 {
             flags.push(name);
         }

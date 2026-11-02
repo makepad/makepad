@@ -1,660 +1,842 @@
-//! ValueInput — a scrubbable number field.
-//!
-//! One compact widget, three ways in, exactly the Blender number-field
-//! contract:
-//!
-//! * **Scrub**: click-drag horizontally anywhere on the field bends the
-//!   value continuously (`step` per pixel) — fine control, live actions.
-//! * **Step**: hovering reveals ‹ › arrows at the edges; a click on either
-//!   steps the value ±`step`.
-//! * **Type**: a plain click (no drag) drops into text editing — the
-//!   embedded [`TextInput`] takes focus with the value selected; Enter
-//!   commits, Escape reverts.
-//!
-//! A fifth way in, `track: true`, is off by default and changes what a press
-//! MEANS. A field wide enough to carry a fill reads as a slider, and on a
-//! slider the value belongs under the pointer: the press lands it at the
-//! point it fell on, the drag keeps it there, and the release ends the
-//! gesture once. The scrub above cannot do that — it measures travel from
-//! wherever the press happened, so a press alone moves nothing and crossing
-//! a two-hundred-point row at `step` per pixel takes a range's worth of
-//! travel. The colour picker's channel rows are the case that forced it.
-//!
-//! On a track the two ends of the fill are the two ends of the range, so
-//! there is no room left for a click that means something else: the edge
-//! arrows retire, and the two gestures are told apart in TIME rather than in
-//! space. One press sets the value; a SECOND press on the heels of the first
-//! — the double-click every desktop already teaches — puts back what the
-//! field held before the pair and opens the editor, so "type here" never
-//! leaves a number behind that nobody asked for. Return does the same for a
-//! hand already on the keyboard, and the arrow keys step the field once the
-//! press has left the focus here.
-//!
-//! The widget owns the interaction and the chrome; real text editing is
-//! delegated to the wrapped `TextInput` (the Slider idiom). Configure with
-//! `min`/`max`/`step`/`precision` and an optional `suffix`. Every change —
-//! scrub, arrow, or committed typing — emits [`ValueInputAction::Changed`];
-//! hosts that mirror an external source (a clock, a sensor) push updates
-//! back with [`ValueInput::set_value`], which yields while the operator's
-//! finger or keyboard owns the field.
+//! Compact property numbers: press arms, horizontal travel scrubs, click types.
+//! Shift refines, Ctrl snaps, modifiers and limits re-anchor; Escape restores.
+//! Changed follows live edits; Ended marks each completed gesture. Track mode
+//! retains absolute pointer mapping. Tab opens the next field in draw order.
 
 use crate::{
-    badge::measure, makepad_derive_widget::*, makepad_draw::*, text_input::*, widget::*,
+    badge::advance, focus_order, makepad_derive_widget::*, makepad_draw::{event::TouchState, *},
+    text_input::*, widget::*,
 };
 
 #[derive(Clone, Debug, PartialEq, Default)]
 pub enum ValueInputAction {
-    /// The value changed: a scrub step, an arrow click, or committed
-    /// typing. Carries the new (clamped) value.
     Changed(f64),
-    #[default]
-    None,
-}
-
-/// The end of a gesture on a track field, said once: the release that
-/// finished a drag, a step, or a committed line of typing.
-///
-/// It is an action of its own rather than another arm of [`ValueInputAction`]
-/// because the hosts that never asked for a track read that enum exhaustively
-/// and would rather not learn about a mode they do not use. Followers of a
-/// drag read `Changed`; whoever writes the value down reads this.
-#[derive(Clone, Debug, PartialEq, Default)]
-pub enum ValueInputTrackAction {
     Ended(f64),
     #[default]
     None,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Script, ScriptHook)]
+#[repr(u32)]
+pub enum ValueInputFormat {
+    #[pick]
+    Number = 0,
+    HoursMinutes = 1,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Script, ScriptHook)]
+#[repr(u32)]
+pub enum ValueInputJoin {
+    None = 0,
+    Top = 1,
+    Bottom = 2,
+    #[pick]
+    Both = 3,
+}
+
 script_mod! {
     use mod.prelude.widgets_internal.*
+    mod.widgets.ValueInputJoin = #(ValueInputJoin::script_api(vm))
+    mod.widgets.ValueInputFormat = #(ValueInputFormat::script_api(vm))
     use mod.widgets.*
 
     set_type_default() do #(DrawValueInput::script_shader(vm)){
-        ..mod.draw.DrawQuad // splat in draw quad
+        ..mod.draw.DrawQuad
     }
-
+    set_type_default() do #(DrawValueInputArrows::script_shader(vm)){
+        ..mod.draw.DrawQuad
+    }
     mod.widgets.ValueInputBase = #(ValueInput::register_widget(vm))
     mod.widgets.ValueInput = set_type_default() do mod.widgets.ValueInputBase{
         width: 76
-        height: 22
-        /** the colour of the step marks at either end */
-        arrow_color: #xa9b4bf
-
+        height: theme.prop_row_height
+        arrow_zone: theme.prop_arrow_zone
+        pad: theme.prop_pad
+        arrow_color: theme.prop_ink_dim
         draw_bg +: {
-            hover: uniform(0.0)
-            drag: uniform(0.0)
-            focus: uniform(0.0)
-            color: theme.color_inset
-            border_color: theme.color_bevel
-            // The share of the track the fill covers, or a negative number
-            // on a field that is not one. Rust writes it on every draw, so
-            // it is not a knob anybody can turn.
-            fill: -1.0
-            // A wash of the theme's own lightening overlay, and not the
-            // value accent every other track in the library fills with: the
-            // accent is chosen to be legible AGAINST a track with nothing
-            // written on it, and this field writes its number straight over
-            // the fill. A wash lifts the field's own colour instead, so the
-            // ink over it is the ink that was already there.
-            /** the fill behind the number on a track field */
+            color: uniform(theme.prop_field)
+            color_hover: uniform(theme.prop_field_hover)
+            color_drag: uniform(theme.prop_field_active)
+            color_focus: uniform(theme.color_focus)
+            color_marked: uniform(theme.color_focus)
             fill_color: uniform(theme.color_u_3)
-
+            radius: uniform(theme.prop_radius)
+            vertex: fn() {
+                let dpi = self.draw_pass.dpi_factor
+                let shift = self.draw_list.view_shift
+                let start = floor((self.rect_pos + shift) * dpi + vec2(0.5)) / dpi - shift
+                let end = floor((self.rect_pos + self.rect_size + shift) * dpi + vec2(0.5)) / dpi - shift
+                self.vertex_pos = self.clip_and_transform_vertex(start, end - start)
+            }
             pixel: fn() {
-                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                let sdf = Sdf2d.viewport_px(self.pos * self.rect_size, self.draw_pass.dpi_factor)
                 let w = self.rect_size.x
                 let h = self.rect_size.y
-                sdf.box(0.5, 0.5, w - 1.0, h - 1.0, 4.0)
-                let lift = 0.06 * max(self.hover, self.drag) + 0.05 * self.focus
-                sdf.fill(self.color + vec4(lift, lift, lift, 0.0))
-                // The fill is the whole invitation to press: a field that
-                // takes a press where it lands has to show where the value
-                // stands, or there is nothing on screen to aim at. Negative
-                // is off, which is every field that did not ask for a track.
+                let hairline = 1.0 / self.draw_pass.dpi_factor
+                let inset = hairline * 0.5
+                let top = self.radius * self.round_top
+                let bottom = self.radius * self.round_bottom
+                let base = self.color.mix(self.color_hover, self.hover).mix(self.color_drag, self.drag)
+                sdf.box_y(inset, inset, w - hairline, h - hairline, top, bottom)
+                let reveal = mix(1.0, max(self.hover, max(self.drag, self.focus)), self.flat)
+                sdf.fill_keep(vec4(base.rgb, base.a * reveal))
                 if self.fill >= 0.0 {
-                    sdf.box(1.0, 1.0, max(1.0, (w - 2.0) * self.fill), h - 2.0, 3.5)
-                    sdf.fill(self.fill_color)
-                    sdf.box(0.5, 0.5, w - 1.0, h - 1.0, 4.0)
+                    let fill_x = 1.0 + (w - 2.0) * self.fill
+                    let wash = vec4(self.fill_color.xyz, self.fill_color.w * step(self.pos.x * w, fill_x))
+                    sdf.fill_keep(wash)
                 }
-                sdf.stroke(self.border_color, 1.0)
-                // The step marks are drawn as glyphs by the Rust side.
-                // They were two mirrored SDF paths here and only ever
-                // the second one painted: swapping them changed nothing,
-                // moving the failing one to mid-field changed nothing,
-                // and the same geometry as a filled box painted fine.
+                sdf.fill_keep(vec4(self.color_marked.rgb, self.color_marked.a * self.marked * 0.18))
+                if self.focus > 0.5 {
+                    // SDF strokes take a half-width.
+                    sdf.stroke(self.color_focus, hairline * 0.5)
+                }
+                return sdf.result
+            }
+        }
+        draw_arrows +: {
+            color_hover: uniform(theme.color_text)
+            chevron: uniform(theme.prop_chevron)
+            vertex: fn() {
+                let dpi = self.draw_pass.dpi_factor
+                let shift = self.draw_list.view_shift
+                let start = floor((self.rect_pos + shift) * dpi + vec2(0.5)) / dpi - shift
+                let end = floor((self.rect_pos + self.rect_size + shift) * dpi + vec2(0.5)) / dpi - shift
+                self.vertex_pos = self.clip_and_transform_vertex(start, end - start)
+            }
+            pixel: fn() {
+                let sdf = Sdf2d.viewport_px(self.pos * self.rect_size, self.draw_pass.dpi_factor)
+                let w = self.rect_size.x
+                let cy = self.rect_size.y * 0.5
+                let half = self.chevron * 0.5
+                sdf.move_to(5.0 + half, cy - half)
+                sdf.line_to(5.0, cy)
+                sdf.line_to(5.0 + half, cy + half)
+                sdf.stroke(self.color.mix(self.color_hover, self.left), 1.25 * 0.5)
+                sdf.move_to(w - 5.0 - half, cy - half)
+                sdf.line_to(w - 5.0, cy)
+                sdf.line_to(w - 5.0 - half, cy + half)
+                sdf.stroke(self.color.mix(self.color_hover, self.right), 1.25 * 0.5)
                 return sdf.result
             }
         }
         draw_text +: {
-            color: #xf4f7fa
-            // Line spacing of one, so the line box IS the ink box. With
-            // the theme's leading the line is taller than the digits,
-            // and centring the LINE leaves the digits riding high in a
-            // field this short: a run of digits has no descender to
-            // fill the bottom of the box.
-            text_style: theme.font_bold{font_size: 11, line_spacing: 1.0}
+            color: theme.color_text
+            text_style: theme.font_regular{font_size: theme.font_size_p line_spacing: 1.0}
+        }
+        draw_label +: {
+            color: theme.prop_ink_dim
+            text_style: theme.font_regular{font_size: theme.font_size_p line_spacing: 1.0}
         }
         text_input: TextInput{
-            width: Fill
-            height: Fill
+            width: Fill height: Fill min_height: 0
+            margin: Inset{}
+            padding: Inset{}
+            flow: Right
+            label_align: Align{x: 0.5 y: 0.0}
             empty_text: ""
+            keep_focus_on_submit: true
+            draw_bg +: {
+                color: #0000 color_hover: #0000 color_focus: #0000
+                color_down: #0000 color_empty: #0000 color_disabled: #0000
+                color_2: #0000 color_2_hover: #0000 color_2_focus: #0000
+                color_2_down: #0000 color_2_empty: #0000 color_2_disabled: #0000
+                border_color: #0000 border_color_hover: #0000 border_color_focus: #0000
+                border_color_down: #0000 border_color_empty: #0000 border_color_disabled: #0000
+                border_color_2: #0000 border_color_2_hover: #0000 border_color_2_focus: #0000
+                border_color_2_down: #0000 border_color_2_empty: #0000 border_color_2_disabled: #0000
+                border_size: 0.0 border_radius: 0.0
+                pixel: fn() { return vec4(0.0) }
+            }
+            draw_text +: {
+                ink_centered: false
+                color: theme.color_text
+                color_hover: theme.color_text color_focus: theme.color_text
+                color_down: theme.color_text color_disabled: theme.color_text
+                text_style: theme.font_regular{font_size: theme.font_size_p line_spacing: 1.0}
+                get_color: fn() { return self.color }
+            }
+            draw_selection +: {
+                border_radius: 0.0
+                pixel: fn() {
+                    return vec4(theme.color_selection_focus.rgb * theme.color_selection_focus.a,
+                        theme.color_selection_focus.a)
+                }
+            }
+            draw_cursor +: {
+                border_radius: 0.0
+                pixel: fn() {
+                    let dpi = self.draw_pass.dpi_factor
+                    let shift = self.draw_list.view_shift.x
+                    let origin = self.rect_pos.x + shift
+                    let left = max(self.draw_clip.x + shift, self.draw_list.view_clip.x)
+                    let right = min(self.draw_clip.z + shift, self.draw_list.view_clip.z)
+                    let column = floor((origin + self.rect_size.x * 0.5) * dpi) / dpi
+                    let x = clamp(column, ceil(left * dpi) / dpi, floor(right * dpi) / dpi - 1.0 / dpi) - origin
+                    let sdf = Sdf2d.viewport_px(self.pos * self.rect_size, dpi)
+                    sdf.rect(x, 0.0, 1.0 / dpi, self.rect_size.y)
+                    sdf.fill(vec4(self.color.rgb, self.color.a * (1.0 - self.blink) * self.focus))
+                    return sdf.result
+                }
+            }
         }
     }
 }
 
-/// How far a press may wander (layout points) and still count as a CLICK
-/// (edit mode) on release rather than a scrub.
-const CLICK_SLOP: f64 = 3.0;
-/// The edge band (layout points) where a plain click means STEP, not edit.
-const ARROW_BAND: f64 = 14.0;
-/// The step marks, shown while the pointer is over the field.
-const LEFT_MARK: &str = "\u{2039}";
-const RIGHT_MARK: &str = "\u{203a}";
-/// How far each mark sits in from its edge.
-const MARK_INSET: f64 = 5.0;
-/// Where a glyph's ink begins below the y handed to `draw_abs`, as a
-/// share of the font size. The call takes the top of the LINE box, and
-/// the ink of a digit starts about a third of the way down it. Measured
-/// on this face rather than assumed: without it a number centred by
-/// arithmetic sits low, and one centred by `Align` sits high, because
-/// digits have no descender to fill the bottom of the line.
-const INK_TOP: f64 = 0.30;
-/// How far a track's fill is held off the field's border, in points. The
-/// press reads against the same two numbers the shader paints between, so
-/// the value a point means and the fill the eye sees cannot drift apart.
+const DRAG_THRESHOLD: f64 = 3.0;
 const TRACK_INSET: f64 = 1.0;
 
-/// Where a track's fill begins and ends inside a field `width` points wide.
 pub fn track_span(width: f64) -> (f64, f64) {
     (TRACK_INSET, (width - TRACK_INSET).max(TRACK_INSET + 1.0))
 }
 
-/// The value a press at `x` — measured from the field's left edge — names on
-/// a track whose fill runs from `lo` to `hi` in the same frame.
-///
-/// This is the fill's own arithmetic read backwards, which is the point of
-/// it: press where the fill ends and you get the end of the range, press
-/// half way and you get the middle. Past either end is that end, because a
-/// hand that overshoots meant the limit.
 pub fn track_value_at(x: f64, lo: f64, hi: f64, min: f64, max: f64) -> f64 {
-    let span = (hi - lo).max(1.0);
-    let t = ((x - lo) / span).clamp(0.0, 1.0);
-    min + t * (max - min)
+    min + ((x - lo) / (hi - lo).max(1.0)).clamp(0.0, 1.0) * (max - min)
 }
 
-/// What a press on a track means, from the count of taps the platform hands
-/// it. The two meanings are told apart in TIME because a track has no room
-/// left in SPACE: its two ends are the ends of the range, and a column given
-/// over to typing would put one of them out of reach.
 pub fn track_press_means_typing(tap_count: u32) -> bool {
     tap_count >= 2
 }
 
-/// A widget-side shader with a fill in it, so a track field can show where
-/// its value stands. `fill` is the share of the track covered, or a negative
-/// number on the fields that are not tracks.
+#[derive(Clone, Copy)]
+struct DragParams {
+    min: f64,
+    max: f64,
+    step: f64,
+    wrap: bool,
+    bounded: bool,
+    snap_override: f64,
+}
+
+#[derive(Clone, Copy)]
+struct DragAnchor {
+    x: f64,
+    value: f64,
+}
+
+// The relative drag mapping, shared by bounded and unbounded fields.
+fn drag_rate(p: DragParams, width: f64, shift: bool) -> f64 {
+    if p.bounded && p.max > p.min {
+        (p.max - p.min) / width.max(1.0) * if shift { 0.05 } else { 1.0 }
+    } else {
+        p.step * if shift { 0.1 } else { 1.0 }
+    }
+}
+
+fn snap_increment(p: DragParams, fine: bool) -> f64 {
+    let range = if p.max > p.min { p.max - p.min } else { 21.0 };
+    let base = if p.snap_override > 0.0 { p.snap_override }
+        else if range < 2.1 { 0.1 } else if range < 21.0 { 1.0 } else { 10.0 };
+    base * if fine { 0.1 } else { 1.0 }
+}
+
+fn drag_map(p: DragParams, mut anchor: DragAnchor, x: f64, width: f64, shift: bool, ctrl: bool)
+    -> (f64, DragAnchor)
+{
+    let raw = anchor.value + (x - anchor.x) * drag_rate(p, width, shift);
+    let ranged = if p.max <= p.min { raw } else if p.wrap {
+        p.min + (raw - p.min).rem_euclid(p.max - p.min)
+    } else { raw.clamp(p.min, p.max) };
+    if (ranged - raw).abs() > f64::EPSILON {
+        anchor = DragAnchor { x, value: ranged };
+    }
+    let mut publish = ranged;
+    if ctrl {
+        let inc = snap_increment(p, shift);
+        publish = (ranged / inc).round() * inc;
+        if p.max > p.min && !p.wrap {
+            publish = publish.clamp(p.min, p.max);
+            if ranged <= p.min { publish = p.min; }
+            else if ranged >= p.max { publish = p.max; }
+        }
+    }
+    (publish, anchor)
+}
+
+#[derive(Clone, Copy)]
+struct DragState {
+    press_x: f64,
+    press_value: f64,
+    width: f64,
+    engaged: bool,
+    anchor: DragAnchor,
+    last_x: f64,
+    shift: bool,
+    ctrl: bool,
+    relative_track: bool,
+}
+
 #[derive(Script, ScriptHook)]
 #[repr(C)]
 pub struct DrawValueInput {
-    #[deref]
-    draw_super: DrawQuad,
-    #[live]
-    fill: f32,
+    #[deref] draw_super: DrawQuad,
+    #[live] fill: f32,
+    #[live] hover: f32,
+    #[live] drag: f32,
+    #[live] focus: f32,
+    #[live] marked: f32,
+    #[live] round_top: f32,
+    #[live] round_bottom: f32,
+    #[live] flat: f32,
+}
+
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawValueInputArrows {
+    #[deref] draw_super: DrawQuad,
+    #[live] color: Vec4f,
+    #[live] left: f32,
+    #[live] right: f32,
 }
 
 #[derive(Script, ScriptHook, Widget)]
 pub struct ValueInput {
-    #[uid]
-    uid: WidgetUid,
-    #[source]
-    source: ScriptObjectRef,
-    #[walk]
-    walk: Walk,
-
-    #[live(true)]
-    #[visible]
-    visible: bool,
-    #[layout]
-    layout: Layout,
-    #[redraw]
-    #[live]
-    draw_bg: DrawValueInput,
-    #[live]
-    draw_text: DrawText,
-    #[live]
-    text_input: TextInput,
-
-    #[live(0.0)]
-    pub min: f64,
-    #[live(1.0)]
-    pub max: f64,
-    #[live(0.1)]
-    pub step: f64,
-    /// Decimal places shown (and used for the edit seed).
-    #[live(1.0)]
-    pub precision: f64,
-    /// Drawn after the number ("%", " bpm", …). Not part of the edit text.
-    #[live]
-    pub suffix: String,
-    /// Behave the way a filled row looks: the press lands the value where it
-    /// falls instead of scrubbing from it. Off, and nothing below this line
-    /// happens at all.
-    #[live]
-    pub track: bool,
-
-    #[rust]
-    value: f64,
-    /// The colour of the step marks. On the widget, not on `draw_bg`,
-    /// because the marks are glyphs now and Rust draws them.
-    #[live]
-    pub arrow_color: Vec4f,
-
-    #[rust]
-    editing: bool,
-    /// The editor has been opened and still owes itself the keyboard.
-    #[rust]
-    edit_focus: bool,
-    /// The pointer is over the field, so the marks show.
-    #[rust]
-    hovered: bool,
-    /// A press in flight: (start x, value at press, wandered-past-slop).
-    #[rust]
-    drag: Option<(f64, f64, bool)>,
-    /// A track's press is live from the first frame: the value follows the
-    /// pointer until the release.
-    #[rust]
-    tracking: bool,
-    /// What the field held before the current run of presses, so the second
-    /// press of a double — the one that means "type here" — can put it back.
-    #[rust]
-    track_press_value: f64,
+    #[uid] uid: WidgetUid,
+    #[source] source: ScriptObjectRef,
+    #[walk] walk: Walk,
+    #[live(true)] #[visible] visible: bool,
+    #[layout] layout: Layout,
+    #[redraw] #[live] draw_bg: DrawValueInput,
+    #[live] draw_text: DrawText,
+    #[live] draw_arrows: DrawValueInputArrows,
+    #[live] pub arrow_color: Vec4f,
+    #[live] draw_label: DrawText,
+    #[live] text_input: TextInput,
+    #[live(0.0)] pub min: f64,
+    #[live(1.0)] pub max: f64,
+    #[live(0.1)] pub step: f64,
+    #[live(1.0)] pub precision: f64,
+    #[live] pub label: String,
+    #[live] pub suffix: String,
+    #[live] pub track: bool,
+    #[live] pub show_fill: bool,
+    #[live] pub wrap: bool,
+    #[live] pub snap: f64,
+    #[live] pub read_only: bool,
+    #[live] pub mixed: bool,
+    #[live] pub marked: bool,
+    #[live] pub inherited: bool,
+    #[live] pub placeholder: String,
+    #[live] pub placeholder_value: f64,
+    #[live] pub format: ValueInputFormat,
+    #[live] pub join: ValueInputJoin,
+    #[live] arrow_zone: f64,
+    #[live] pad: f64,
+    #[live] value: f64,
+    #[rust] editing: bool,
+    #[rust] edit_focus: bool,
+    #[rust] hovered: bool,
+    #[rust] hover_zone: i32,
+    #[rust] drag: Option<DragState>,
+    #[rust] track_press_value: f64,
+    #[rust] editor_layout: Option<(f64, f64, f64, f64)>,
 }
 
 impl ValueInput {
+    fn params(&self) -> DragParams {
+        DragParams { min: self.min, max: self.max, step: self.step, wrap: self.wrap,
+            bounded: self.show_fill || self.track, snap_override: self.snap }
+    }
+
+    fn normalize(&self, value: f64) -> f64 {
+        if self.max <= self.min { value }
+        else if self.wrap { self.min + (value - self.min).rem_euclid(self.max - self.min) }
+        else { value.clamp(self.min, self.max) }
+    }
+
     fn format(&self) -> String {
+        if self.mixed { return "—".to_string(); }
+        if self.value == self.placeholder_value && !self.placeholder.is_empty() { return self.placeholder.clone(); }
+        if self.format == ValueInputFormat::HoursMinutes {
+            let minute = (self.value * 60.0).round().rem_euclid(1440.0) as u32;
+            return format!("{:02}:{:02}", minute / 60, minute % 60);
+        }
         format!("{:.*}{}", self.precision.max(0.0) as usize, self.value, self.suffix)
     }
 
-    fn edit_seed(&self) -> String {
-        format!("{:.*}", self.precision.max(0.0) as usize, self.value)
-    }
-
-    pub fn value(&self) -> f64 {
-        self.value
-    }
-
-    /// Push an externally-owned value (a clock repainting its readout).
-    /// Yields while the operator's finger or keyboard owns the field.
-    pub fn set_value(&mut self, cx: &mut Cx, value: f64) {
-        if self.editing || self.drag.is_some() || self.tracking {
-            return;
+    fn parse(&self, text: &str) -> Option<f64> {
+        let text = text.trim();
+        if self.format == ValueInputFormat::HoursMinutes {
+            if let Some((hours, minutes)) = text.split_once(':') {
+                let hours = hours.trim().parse::<u32>().ok()?;
+                let minutes = minutes.trim().parse::<u32>().ok()?;
+                return (minutes < 60).then_some(hours as f64 + minutes as f64 / 60.0);
+            }
         }
-        let value = value.clamp(self.min, self.max);
-        if (value - self.value).abs() > f64::EPSILON {
+        text.strip_suffix(self.suffix.trim()).unwrap_or(text).trim().parse().ok()
+    }
+
+    pub fn value(&self) -> f64 { self.value }
+    pub fn is_editing(&self) -> bool { self.editing }
+    pub fn is_interacting(&self) -> bool { self.editing || self.drag.is_some() }
+
+    pub fn set_read_only(&mut self, cx: &mut Cx, read_only: bool) {
+        if self.read_only != read_only {
+            self.read_only = read_only;
+            self.sync_read_only(cx);
+            self.draw_bg.redraw(cx);
+        }
+    }
+
+    pub fn set_value(&mut self, cx: &mut Cx, value: f64) {
+        if self.is_interacting() || !value.is_finite() { return; }
+        let value = self.normalize(value);
+        if value != self.value {
             self.value = value;
             self.draw_bg.redraw(cx);
         }
     }
 
     fn commit(&mut self, cx: &mut Cx, uid: WidgetUid, value: f64) {
-        let value = value.clamp(self.min, self.max);
-        self.value = value;
-        cx.widget_action(uid, ValueInputAction::Changed(value));
+        if !value.is_finite() { return; }
+        self.value = self.normalize(value);
+        self.mixed = false;
+        cx.widget_action(uid, ValueInputAction::Changed(self.value));
         self.draw_bg.redraw(cx);
     }
 
-    /// Say that a gesture on a track has finished. Every discrete way of
-    /// moving a track field — a step, a wheel notch, a committed line of
-    /// typing — is both the change and the end of it, and says so.
-    fn ended(&mut self, cx: &mut Cx, uid: WidgetUid) {
-        if self.track {
-            cx.widget_action(uid, ValueInputTrackAction::Ended(self.value));
-        }
+    fn ended(&self, cx: &mut Cx, uid: WidgetUid) {
+        cx.widget_action(uid, ValueInputAction::Ended(self.value));
     }
 
-    /// The value a press at `abs_x` names, snapped to `step` so the number
-    /// the field shows is the number it holds. A track with no step of its
-    /// own lands wherever the pointer is.
+    fn step_once(&mut self, cx: &mut Cx, direction: f64, shift: bool) {
+        let step = self.step * if shift { 0.1 } else { 1.0 };
+        self.commit(cx, self.uid, self.value + direction * step);
+        self.ended(cx, self.uid);
+    }
+
     fn track_value(&self, cx: &Cx, abs_x: f64) -> f64 {
         let face = self.draw_bg.area().rect(cx);
         let (lo, hi) = track_span(face.size.x);
         let raw = track_value_at(abs_x - face.pos.x, lo, hi, self.min, self.max);
-        if self.step > 0.0 {
-            ((raw / self.step).round() * self.step).clamp(self.min, self.max)
-        } else {
-            raw
-        }
+        self.normalize(if self.step > 0.0 { (raw / self.step).round() * self.step } else { raw })
     }
 
-    /// Move a track under the pointer: the change is only said when the
-    /// value really moved, so a drag along a row of 255 values does not file
-    /// a report per pixel.
-    fn track_to(&mut self, cx: &mut Cx, uid: WidgetUid, value: f64) {
-        if (value - self.value).abs() > f64::EPSILON {
-            self.value = value;
-            cx.widget_action(uid, ValueInputAction::Changed(value));
-            self.draw_bg.redraw(cx);
-        }
-    }
-
-    /// The second press of a double: the field goes back to what it held
-    /// before the pair began, and the editor opens on it. Without the undo, a
-    /// person reaching for the keyboard would first have to watch the value
-    /// jump to wherever they happened to double-click.
     fn type_here(&mut self, cx: &mut Cx, uid: WidgetUid) {
-        let back = self.track_press_value;
-        self.tracking = false;
-        self.draw_bg.set_uniform(cx, id!(drag), &[0.0]);
-        self.track_to(cx, uid, back);
+        self.drag = None;
+        self.commit(cx, uid, self.track_press_value);
         self.ended(cx, uid);
         self.enter_edit(cx);
     }
 
+    pub fn begin_edit(&mut self, cx: &mut Cx) {
+        if !self.read_only { self.enter_edit(cx); }
+    }
+
     fn enter_edit(&mut self, cx: &mut Cx) {
+        self.drag = None;
         self.editing = true;
         self.edit_focus = true;
-        let seed = self.edit_seed();
-        self.text_input.set_text(cx, &seed);
-        self.text_input.set_key_focus(cx);
+        self.editor_layout = None;
+        let text = if self.format == ValueInputFormat::HoursMinutes { self.format() }
+            else { self.value.to_string() };
+        self.text_input.set_text(cx, &text);
+        self.text_input.take_key_focus(cx);
         self.text_input.select_all(cx);
         self.draw_bg.redraw(cx);
     }
 
     fn exit_edit(&mut self, cx: &mut Cx) {
         self.editing = false;
+        self.edit_focus = false;
         self.draw_bg.redraw(cx);
+    }
+
+    fn commit_edit(&mut self, cx: &mut Cx) {
+        if let Some(value) = self.parse(&self.text_input.text()) {
+            if value.is_finite() {
+                self.commit(cx, self.uid, value);
+                self.ended(cx, self.uid);
+            }
+        }
+        self.exit_edit(cx);
+    }
+
+    fn cancel_drag(&mut self, cx: &mut Cx) {
+        if let Some(drag) = self.drag.take() {
+            if drag.engaged {
+                self.commit(cx, self.uid, drag.press_value);
+                self.ended(cx, self.uid);
+            }
+            self.draw_bg.redraw(cx);
+        }
+    }
+
+    fn zone(&self, x: f64, width: f64) -> i32 {
+        let band = self.arrow_zone.min(width / 3.0);
+        if x < band { -1 } else if x > width - band { 1 } else { 0 }
+    }
+
+    fn hover(&mut self, cx: &mut Cx, abs: Vec2d) {
+        let rect = self.draw_bg.area().rect(cx);
+        let zone = self.zone(abs.x - rect.pos.x, rect.size.x);
+        if !self.hovered || self.hover_zone != zone {
+            self.hovered = true;
+            self.hover_zone = zone;
+            self.draw_bg.redraw(cx);
+        }
+        cx.set_cursor(MouseCursor::Hand);
+    }
+
+    fn sync_read_only(&mut self, cx: &mut Cx) {
+        if self.read_only {
+            if self.key_focus(cx) { cx.set_key_focus(Area::Empty); }
+            self.cancel_drag(cx);
+            if self.editing { self.exit_edit(cx); }
+            self.hovered = false;
+        }
+    }
+
+    fn reanchor_modifiers(&mut self, modifiers: KeyModifiers) {
+        if let Some(drag) = &mut self.drag {
+            let ctrl = modifiers.control || modifiers.logo;
+            if modifiers.shift != drag.shift || ctrl != drag.ctrl {
+                drag.shift = modifiers.shift;
+                drag.ctrl = ctrl;
+                drag.anchor = DragAnchor { x: drag.last_x, value: self.value };
+                drag.relative_track = true;
+            }
+        }
     }
 }
 
 impl Widget for ValueInput {
-    fn handle_action(
-        &mut self,
-        cx: &mut Cx,
-        request: &a11y_tree::ActionRequest,
-        _scope: &mut Scope,
-    ) -> a11y_tree::ActionResult {
+    fn text(&self) -> String { self.format() }
+
+    fn key_focus(&self, cx: &Cx) -> bool {
+        (!self.draw_bg.area().is_empty() && cx.has_key_focus(self.draw_bg.area()))
+            || (self.editing && !self.text_input.area().is_empty() && cx.has_key_focus(self.text_input.area()))
+    }
+
+    fn handle_action(&mut self, cx: &mut Cx, request: &a11y_tree::ActionRequest,
+        _scope: &mut Scope) -> a11y_tree::ActionResult
+    {
         use a11y_tree::{ActionArg, ActionResult, Actions};
+        if self.read_only || self.disabled(cx) { return ActionResult::Disabled; }
         let value = match (request.action, &request.arg) {
             (Actions::SET_VALUE, ActionArg::Number(value)) => *value,
             (Actions::INCREMENT, _) => self.value + self.step,
             (Actions::DECREMENT, _) => self.value - self.step,
             _ => return ActionResult::Unhandled,
         };
-        if self.disabled(cx) {
-            return ActionResult::Disabled;
-        }
-        if !value.is_finite() {
-            return ActionResult::Unsupported;
-        }
-        self.commit(cx, self.widget_uid(), value);
-        self.ended(cx, self.widget_uid());
+        if !value.is_finite() { return ActionResult::Unsupported; }
+        self.commit(cx, self.uid, value);
+        self.ended(cx, self.uid);
         ActionResult::Handled
     }
 
     fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
-        let _ = cx;
         node.role = a11y_tree::Role::SpinButton;
-        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        makepad_platform::a11y::set_string(&mut node.name, &self.label);
+        node.value = self.format();
         node.states = a11y_tree::States::FOCUSABLE;
-        node.states
-            .set(a11y_tree::States::DISABLED, self.disabled(cx));
-        node.actions = a11y_tree::Actions::FOCUS
-            | a11y_tree::Actions::SET_VALUE
-            | a11y_tree::Actions::INCREMENT
-            | a11y_tree::Actions::DECREMENT;
-        node.range = Some(a11y_tree::RangeValue {
-            min: self.min,
-            max: self.max,
-            now: self.value,
-            step: self.step,
-        });
-        node.value = (|| -> Option<String> { Some(self.format()) })().unwrap_or_default();
+        node.states.set(a11y_tree::States::DISABLED, self.disabled(cx));
+        node.states.set(a11y_tree::States::READ_ONLY, self.read_only);
+        if !self.read_only {
+            node.actions = a11y_tree::Actions::FOCUS | a11y_tree::Actions::SET_VALUE
+                | a11y_tree::Actions::INCREMENT | a11y_tree::Actions::DECREMENT;
+        }
+        node.range = Some(a11y_tree::RangeValue { min: self.min, max: self.max,
+            now: self.value, step: self.step });
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        if !self.visible {
-            return DrawStep::done();
+        if !self.visible { return DrawStep::done(); }
+        self.sync_read_only(cx);
+        if !self.read_only && focus_order::take_request(cx, self.draw_bg.area()) {
+            self.enter_edit(cx);
         }
-        // Written before the quad is begun, because that is when its
-        // instance is handed to the shader.
-        self.draw_bg.fill = if self.track && self.max > self.min {
-            (((self.value - self.min) / (self.max - self.min)) as f32).clamp(0.0, 1.0)
-        } else {
-            -1.0
+        cx.begin_turtle(walk, self.layout);
+        let mut face = cx.turtle().rect();
+        let dpi = cx.current_dpi_factor();
+        let end = (face.pos + face.size) * dpi;
+        face.pos = dvec2((face.pos.x * dpi).round(), (face.pos.y * dpi).round()) / dpi;
+        face.size = dvec2(end.x.round(), end.y.round()) / dpi - face.pos;
+        self.draw_bg.fill = if (self.track || self.show_fill) && self.max > self.min {
+            ((self.value - self.min) / (self.max - self.min)).clamp(0.0, 1.0) as f32
+        } else { -1.0 };
+        self.draw_bg.hover = (self.hovered && !self.read_only) as u8 as f32;
+        self.draw_bg.drag = self.drag.is_some_and(|drag| drag.engaged) as u8 as f32;
+        self.draw_bg.focus = self.editing as u8 as f32;
+        self.draw_bg.marked = self.marked as u8 as f32;
+        (self.draw_bg.round_top, self.draw_bg.round_bottom) = match self.join {
+            ValueInputJoin::None => (0.0, 0.0), ValueInputJoin::Top => (1.0, 0.0),
+            ValueInputJoin::Bottom => (0.0, 1.0), ValueInputJoin::Both => (1.0, 1.0),
         };
-        self.draw_bg.begin(cx, walk, self.layout);
+        self.draw_bg.draw_abs(cx, face);
+        let size = self.draw_text.text_style.font_size as f64;
+        // Share DrawText's cap-height centering with labels and choice faces.
+        let line = self.draw_text.layout(cx, 0.0, 0.0, None, false, Align::default(), "0");
+        let scale = self.draw_text.font_scale as f64;
+        let shift = line.ink_center_offset_in_lpxs() as f64 * scale;
+        let y = face.pos.y + (face.size.y - line.size_in_lpxs.height as f64 * scale) * 0.5 + shift;
+        let edge = if self.track { self.pad.min(face.size.x * 0.5) }
+            else { self.arrow_zone.min(face.size.x / 3.0) };
+        let text = self.format();
+        let width = advance(&self.draw_text, cx, &text);
+        let labelled = !self.label.is_empty() && !self.mixed;
+        let left = if labelled {
+            let label_width = (face.size.x - edge * 2.0 - width - self.pad).max(0.0);
+            let line = self.draw_label.layout(cx, 0.0, 0.0, None, false, Align::default(), &self.label);
+            let scale = self.draw_label.font_scale as f64;
+            let label_y = face.pos.y + (face.size.y - line.size_in_lpxs.height as f64 * scale) * 0.5
+                + line.ink_center_offset_in_lpxs() as f64 * scale;
+            cx.push_clip_rect(rect(face.pos.x + edge, face.pos.y, label_width, face.size.y));
+            self.draw_label.draw_abs(cx, dvec2(face.pos.x + edge, label_y), &self.label);
+            cx.pop_clip_rect();
+            edge + label_width + self.pad
+        } else { edge };
+        cx.push_clip_rect(rect(face.pos.x + left, face.pos.y,
+            (face.size.x - left - edge).max(0.0), face.size.y));
         if self.editing {
-            let _ = self.text_input.draw_walk(cx, scope, Walk::fill());
-            // The editor asks for the keyboard the moment it opens, and on
-            // the first edit of its life it has no area yet to ask with: the
-            // request lands on nothing and the typing goes nowhere. It has
-            // one now, so it asks again, once.
+            // Match the display's measured line origin, including selection/caret geometry.
+            // Single-line inputs lay out at intrinsic width; padding carries the alignment.
+            let edit_width = advance(&self.draw_text, cx, &self.text_input.text());
+            let spare = (face.size.x - left - edge - edit_width).max(0.0);
+            let align = if labelled { 1.0 } else { 0.5 };
+            let edit_left = left + spare * align;
+            let edit_right = edge + spare * (1.0 - align);
+            let geometry = (edit_left, edit_right, shift, size);
+            if self.editor_layout != Some(geometry) {
+                self.editor_layout = Some(geometry);
+                let line_spacing = self.draw_text.text_style.line_spacing;
+                let top_drop = self.draw_text.text_style.top_drop;
+                let color = self.draw_text.color;
+                script_apply_eval!(cx, self.text_input, {
+                    padding: mod.turtle.Inset{left: #(edit_left) right: #(edit_right) top: #(shift) bottom: #(-shift)}
+                    label_align: mod.turtle.Align{x: 0.0 y: 0.0}
+                    draw_text +: {
+                        color: #(color)
+                        text_style +: {font_size: #(size) line_spacing: #(line_spacing) top_drop: #(top_drop)}
+                    }
+                });
+            }
+            let _ = self.text_input.draw_walk(cx, scope, Walk {
+                abs_pos: Some(face.pos), width: Size::Fixed(face.size.x),
+                height: Size::Fixed(face.size.y), ..Walk::default()
+            });
             if self.edit_focus && !self.text_input.area().is_empty() {
                 self.edit_focus = false;
-                self.text_input.set_key_focus(cx);
+                self.text_input.take_key_focus(cx);
             }
         } else {
-            let rect = cx.turtle().rect();
-            let size = self.draw_text.text_style.font_size as f64;
-            let y = rect.pos.y + (rect.size.y - size) * 0.5 - size * INK_TOP;
-            let text = self.format();
-            let tw = measure(&self.draw_text, cx, &text);
-            self.draw_text
-                .draw_abs(cx, dvec2(rect.pos.x + (rect.size.x - tw) * 0.5, y), &text);
-            // Not on a track: there the ends of the field are the ends of
-            // the range, and two little buttons sitting on them would take
-            // the very presses that mean "nothing" and "everything".
-            if (self.hovered || self.drag.is_some()) && !self.track {
-                let rest = self.draw_text.color;
-                self.draw_text.color = self.arrow_color;
-                let mw = measure(&self.draw_text, cx, RIGHT_MARK);
-                self.draw_text.draw_abs(cx, dvec2(rect.pos.x + MARK_INSET, y), LEFT_MARK);
-                self.draw_text.draw_abs(
-                    cx,
-                    dvec2(rect.pos.x + rect.size.x - MARK_INSET - mw, y),
-                    RIGHT_MARK,
-                );
-                self.draw_text.color = rest;
-            }
+            let color = self.draw_text.color;
+            if self.mixed || self.inherited || self.read_only || (self.value == self.placeholder_value && !self.placeholder.is_empty()) { self.draw_text.color = self.draw_label.color; }
+            let x = if labelled { face.pos.x + face.size.x - edge - width }
+                else { face.pos.x + (face.size.x - width) * 0.5 };
+            self.draw_text.draw_abs(cx, dvec2(x, y), &text);
+            self.draw_text.color = color;
         }
-        self.draw_bg.end(cx);
+        cx.pop_clip_rect();
+        if self.hovered && !self.editing && !self.read_only && !self.track {
+            self.draw_arrows.color = self.arrow_color;
+            self.draw_arrows.left = (self.hover_zone < 0) as u8 as f32;
+            self.draw_arrows.right = (self.hover_zone > 0) as u8 as f32;
+            self.draw_arrows.draw_abs(cx, face);
+        }
+        cx.end_turtle();
+        if !self.read_only {
+            cx.add_nav_stop(self.draw_bg.area(), NavRole::Slider, Inset::default());
+            focus_order::register(cx, self.draw_bg.area(), id!(property_number));
+        }
         DrawStep::done()
     }
 
-    /// The number as the field shows it (precision and suffix), so
-    /// `ui find` reads what a person reads.
-
-
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        // Hidden: no hits, and the field inside takes no keys.
-        if !self.visible {
+        if !self.visible { return; }
+        self.sync_read_only(cx);
+        if self.read_only { return; }
+        if matches!(event, Event::KeyFocus(_)) && focus_order::take_request(cx, self.draw_bg.area()) {
+            self.enter_edit(cx);
             return;
         }
-        let uid = self.widget_uid();
-
-        if self.editing {
-            for action in
-                cx.capture_actions(|cx| self.text_input.handle_event(cx, event, scope))
+        if self.drag.is_some() {
+            match event {
+                Event::KeyDown(key) if key.key_code == KeyCode::Escape => {
+                    self.cancel_drag(cx); return;
+                }
+                Event::MouseDown(mouse) if mouse.button.is_secondary() => {
+                    self.cancel_drag(cx); return;
+                }
+                Event::KeyDown(key) | Event::KeyUp(key) => {
+                    self.reanchor_modifiers(key.modifiers);
+                    return;
+                }
+                _ => {}
+            }
+        }
+        if let Event::Scroll(e) = event {
+            if self.key_focus(cx) && self.drag.is_none() && !e.handled_y.get()
+                && e.scroll.y != 0.0 && self.draw_bg.area().clipped_rect(cx).contains(e.abs)
             {
+                if self.editing {
+                    if let Some(value) = self.parse(&self.text_input.text()) {
+                        if value.is_finite() { self.value = self.normalize(value); }
+                    }
+                    self.exit_edit(cx);
+                    cx.set_key_focus(self.draw_bg.area());
+                }
+                self.step_once(cx, -e.scroll.y.signum(), e.modifiers.shift);
+                e.handled_y.set(true);
+            }
+            return;
+        }
+        if self.editing {
+            if let Event::KeyDown(key) = event {
+                if self.key_focus(cx) && key.key_code == KeyCode::Tab {
+                    self.commit_edit(cx);
+                    focus_order::advance(cx, self.draw_bg.area(), id!(property_number), key.modifiers.shift);
+                    return;
+                }
+            }
+            for action in cx.capture_actions(|cx| self.text_input.handle_event(cx, event, scope)) {
                 match action.as_widget_action().cast() {
-                    TextInputAction::Returned(text, _) => {
-                        // Garbage reverts by simply not committing.
-                        if let Ok(v) = text.trim().parse::<f64>() {
-                            self.commit(cx, uid, v);
-                            self.ended(cx, uid);
-                        }
-                        self.exit_edit(cx);
+                    TextInputAction::Returned(_, _) => {
+                        self.commit_edit(cx); cx.set_key_focus(self.draw_bg.area());
                     }
-                    TextInputAction::Escaped | TextInputAction::KeyFocusLost => {
-                        self.exit_edit(cx);
+                    TextInputAction::Escaped => {
+                        self.exit_edit(cx); cx.set_key_focus(self.draw_bg.area());
                     }
+                    TextInputAction::KeyFocusLost if self.editing => self.commit_edit(cx),
                     _ => {}
                 }
             }
+            let press = match event {
+                Event::MouseDown(_) => true,
+                Event::TouchUpdate(touches) => touches.touches.iter().any(|touch| touch.state == TouchState::Start),
+                _ => false,
+            };
+            if self.editing && press {
+                if let Hit::FingerDown(finger) = event.hits(cx, self.text_input.area()) {
+                    if finger.device.is_primary_hit() && finger.tap_count >= 2 {
+                        self.text_input.select_all(cx);
+                    }
+                }
+            }
             return;
         }
-
         match event.hits(cx, self.draw_bg.area()) {
-            Hit::FingerHoverIn(_) => {
-                self.hovered = true;
-                self.draw_bg.set_uniform(cx, id!(hover), &[1.0]);
-                self.draw_bg.redraw(cx);
-            }
-            Hit::FingerHoverOver(_) => {
-                // Both say the same thing with the same arrows: what the hand
-                // is about to do here is move a value left and right. A track
-                // used to point with a hand, which says no more than "this
-                // answers a press" — true of every row in the panel.
-                cx.set_cursor(MouseCursor::EwResize);
-            }
-            // The wheel over a number is the cheapest way to nudge one,
-            // and every other numeric control in the library answers to
-            // it. Shift takes ten steps, the way a coarse drag would.
-            Hit::FingerScroll(e) => {
-                if !self.editing {
-                    let notches = -e.scroll.y.signum();
-                    if notches != 0.0 {
-                        let bite = if e.modifiers.shift { 10.0 } else { 1.0 };
-                        self.commit(cx, uid, self.value + notches * self.step * bite);
-                        self.ended(cx, uid);
-                    }
-                }
-            }
+            Hit::FingerHoverIn(fe) | Hit::FingerHoverOver(fe) => self.hover(cx, fe.abs),
             Hit::FingerHoverOut(_) => {
-                self.hovered = false;
-                self.draw_bg.set_uniform(cx, id!(hover), &[0.0]);
-                self.draw_bg.redraw(cx);
+                self.hovered = false; self.draw_bg.redraw(cx);
             }
-            // A track's press is the beginning of the gesture and its first
-            // move at once. The second press of a double is the other
-            // meaning: it puts the field back where the pair found it and
-            // opens the editor, so reaching for the keyboard never leaves a
-            // number behind.
-            Hit::FingerDown(fe) if fe.device.is_primary_hit() && self.track => {
-                cx.set_key_focus(self.draw_bg.area());
-                if track_press_means_typing(fe.tap_count) {
-                    self.type_here(cx, uid);
-                } else {
-                    self.track_press_value = self.value;
-                    self.tracking = true;
-                    self.draw_bg.set_uniform(cx, id!(drag), &[1.0]);
-                    let v = self.track_value(cx, fe.abs.x);
-                    self.track_to(cx, uid, v);
-                }
-            }
-            Hit::FingerMove(fe) if self.tracking => {
-                // Held for the whole pull: a captured area is sent moves and
-                // not hovers, so the arrows from the hover would go stale the
-                // moment the pointer left the row.
-                cx.set_cursor(MouseCursor::EwResize);
-                let v = self.track_value(cx, fe.abs.x);
-                self.track_to(cx, uid, v);
-            }
-            Hit::FingerUp(_) if self.track => {
-                if self.tracking {
-                    self.tracking = false;
-                    self.draw_bg.set_uniform(cx, id!(drag), &[0.0]);
-                    self.ended(cx, uid);
-                    self.draw_bg.redraw(cx);
-                }
-            }
-            // The keyboard, once a press has left the focus here: a step an
-            // arrow, and Return to type a number without reaching for the
-            // pointer at all. This is where the edge arrows went.
-            Hit::KeyDown(ke) if self.track && !self.editing => match ke.key_code {
-                KeyCode::ArrowLeft | KeyCode::ArrowDown => {
-                    self.commit(cx, uid, self.value - self.step);
-                    self.ended(cx, uid);
-                }
-                KeyCode::ArrowRight | KeyCode::ArrowUp => {
-                    self.commit(cx, uid, self.value + self.step);
-                    self.ended(cx, uid);
-                }
-                KeyCode::ReturnKey => {
-                    self.track_press_value = self.value;
-                    self.enter_edit(cx);
-                }
-                _ => {}
-            },
             Hit::FingerDown(fe) if fe.device.is_primary_hit() => {
-                self.drag = Some((fe.abs.x, self.value, false));
+                cx.set_key_focus(self.draw_bg.area());
+                if fe.tap_count >= 2 {
+                    if self.track { self.type_here(cx, self.uid); }
+                    else { self.enter_edit(cx); }
+                    return;
+                }
+                let face = self.draw_bg.area().rect(cx);
+                self.track_press_value = self.value;
+                self.drag = Some(DragState {
+                    press_x: fe.abs.x, press_value: self.value, width: face.size.x,
+                    engaged: self.track, anchor: DragAnchor { x: fe.abs.x, value: self.value },
+                    last_x: fe.abs.x, shift: fe.modifiers.shift,
+                    ctrl: fe.modifiers.control || fe.modifiers.logo,
+                    relative_track: fe.modifiers.shift || fe.modifiers.control || fe.modifiers.logo,
+                });
                 cx.claim_finger_drag(fe.digit_id);
-                cx.set_cursor(MouseCursor::EwResize);
+                if self.track {
+                    let value = self.track_value(cx, fe.abs.x);
+                    self.commit(cx, self.uid, value);
+                    if let Some(drag) = &mut self.drag { drag.anchor.value = self.value; }
+                }
+                self.draw_bg.redraw(cx);
             }
             Hit::FingerMove(fe) => {
-                if let Some((x0, v0, moved)) = self.drag {
-                    let dx = fe.abs.x - x0;
-                    if moved || dx.abs() > CLICK_SLOP {
-                        // SCRUB: step per pixel, live.
-                        self.drag = Some((x0, v0, true));
-                        self.draw_bg.set_uniform(cx, id!(drag), &[1.0]);
-                        self.commit(cx, uid, v0 + dx * self.step);
-                    }
+                let Some(mut drag) = self.drag else { return };
+                cx.set_cursor(MouseCursor::EwResize);
+                let hovered = fe.is_over && fe.device.has_hovers();
+                let face = self.draw_bg.area().rect(cx);
+                let zone = self.zone(fe.abs.x - face.pos.x, face.size.x);
+                if self.hovered != hovered || self.hover_zone != zone {
+                    self.hovered = hovered;
+                    self.hover_zone = zone;
+                    self.draw_bg.redraw(cx);
                 }
-            }
-            Hit::FingerUp(fe) => {
-                let Some((_, _, moved)) = self.drag.take() else { return };
-                self.draw_bg.set_uniform(cx, id!(drag), &[0.0]);
-                if moved || fe.cancelled {
+                if !drag.engaged {
+                    if (fe.abs.x - drag.press_x).abs() < DRAG_THRESHOLD { return; }
+                    drag.engaged = true;
+                    drag.anchor = DragAnchor { x: fe.abs.x, value: self.value };
+                    drag.last_x = fe.abs.x;
+                    self.drag = Some(drag);
                     self.draw_bg.redraw(cx);
                     return;
                 }
-                // A plain CLICK: edge bands step, the middle edits.
-                let rect = self.draw_bg.area().rect(cx);
-                let x = fe.abs.x - rect.pos.x;
-                if x <= ARROW_BAND {
-                    self.commit(cx, uid, self.value - self.step);
-                } else if x >= rect.size.x - ARROW_BAND {
-                    self.commit(cx, uid, self.value + self.step);
-                } else {
-                    self.enter_edit(cx);
+                let ctrl = fe.modifiers.control || fe.modifiers.logo;
+                if drag.shift != fe.modifiers.shift || drag.ctrl != ctrl {
+                    drag.shift = fe.modifiers.shift;
+                    drag.ctrl = ctrl;
+                    drag.anchor = DragAnchor { x: fe.abs.x, value: self.value };
+                    drag.last_x = fe.abs.x;
+                    drag.relative_track = true;
+                    self.drag = Some(drag);
+                    return;
                 }
+                if fe.abs.x == drag.last_x { return; }
+                let value = if self.track && !drag.relative_track {
+                    self.track_value(cx, fe.abs.x)
+                } else {
+                    let (value, anchor) = drag_map(self.params(), drag.anchor, fe.abs.x,
+                        drag.width, drag.shift, drag.ctrl);
+                    drag.anchor = anchor;
+                    value
+                };
+                drag.last_x = fe.abs.x;
+                self.drag = Some(drag);
+                if value != self.value { self.commit(cx, self.uid, value); }
             }
+            Hit::FingerUp(fe) => {
+                if fe.cancelled { self.cancel_drag(cx); return; }
+                let Some(drag) = self.drag.take() else { return };
+                if drag.engaged { self.ended(cx, self.uid); }
+                else if fe.is_over {
+                    let face = self.draw_bg.area().rect(cx);
+                    let zone = self.zone(fe.abs.x - face.pos.x, face.size.x);
+                    if zone == 0 { self.enter_edit(cx); }
+                    else { self.step_once(cx, zone as f64, fe.modifiers.shift); }
+                }
+                self.draw_bg.redraw(cx);
+            }
+            Hit::KeyDown(key) => match key.key_code {
+                KeyCode::ArrowUp => self.step_once(cx, 1.0, key.modifiers.shift),
+                KeyCode::ArrowDown => self.step_once(cx, -1.0, key.modifiers.shift),
+                KeyCode::ArrowRight if self.track => self.step_once(cx, 1.0, key.modifiers.shift),
+                KeyCode::ArrowLeft if self.track => self.step_once(cx, -1.0, key.modifiers.shift),
+                KeyCode::ReturnKey => self.enter_edit(cx),
+                KeyCode::Tab => focus_order::advance(cx, self.draw_bg.area(), id!(property_number), key.modifiers.shift),
+                _ => {}
+            },
             _ => {}
         }
     }
 }
 
 impl ValueInputRef {
-    /// The new value, when this field changed in `actions`.
     pub fn changed(&self, actions: &Actions) -> Option<f64> {
-        if let ValueInputAction::Changed(v) =
-            actions.find_widget_action(self.widget_uid())?.cast()
-        {
-            return Some(v);
-        }
-        None
+        actions.filter_widget_actions_cast::<ValueInputAction>(self.widget_uid())
+            .filter_map(|action| match action { ValueInputAction::Changed(value) => Some(value), _ => None }).last()
     }
 
-    /// The value this field settled on, when a gesture on it ended in
-    /// `actions`. Only a track field says this.
     pub fn ended(&self, actions: &Actions) -> Option<f64> {
-        if let ValueInputTrackAction::Ended(v) =
-            actions.find_widget_action(self.widget_uid())?.cast()
-        {
-            return Some(v);
-        }
-        None
+        actions.filter_widget_actions_cast::<ValueInputAction>(self.widget_uid())
+            .filter_map(|action| match action { ValueInputAction::Ended(value) => Some(value), _ => None }).last()
     }
 
-    pub fn value(&self) -> f64 {
-        self.borrow().map(|inner| inner.value()).unwrap_or(0.0)
-    }
-
+    pub fn value(&self) -> f64 { self.borrow().map_or(0.0, |inner| inner.value()) }
+    pub fn is_editing(&self) -> bool { self.borrow().is_some_and(|inner| inner.is_editing()) }
+    pub fn is_interacting(&self) -> bool { self.borrow().is_some_and(|inner| inner.is_interacting()) }
     pub fn set_value(&self, cx: &mut Cx, value: f64) {
-        if let Some(mut inner) = self.borrow_mut() {
-            inner.set_value(cx, value);
-        }
+        if let Some(mut inner) = self.borrow_mut() { inner.set_value(cx, value); }
+    }
+    pub fn set_read_only(&self, cx: &mut Cx, read_only: bool) {
+        if let Some(mut inner) = self.borrow_mut() { inner.set_read_only(cx, read_only); }
+    }
+    pub fn begin_edit(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() { inner.begin_edit(cx); }
     }
 }
 
-/// A field that LOOKS like a slider, made to behave like one.
-///
-/// The colour picker's channel rows were filled bars wearing a scrub: the
-/// press armed and changed nothing, three points of travel started a relative
-/// drag at `step` per point, and crossing a row of 255 values took 255 points
-/// of it. Pressing the fill at three quarters therefore did nothing visible
-/// at all, which is what "I cannot move the sliders" meant. These say what a
-/// track does instead, and the first two fail on the scrub.
 #[cfg(test)]
 mod track {
     use super::*;
@@ -829,9 +1011,9 @@ mod track {
 
     fn ended(actions: &ActionsBuf, field: &WidgetRef) -> Option<f64> {
         actions
-            .filter_widget_actions_cast::<ValueInputTrackAction>(field.widget_uid())
+            .filter_widget_actions_cast::<ValueInputAction>(field.widget_uid())
             .find_map(|a| match a {
-                ValueInputTrackAction::Ended(v) => Some(v),
+                ValueInputAction::Ended(v) => Some(v),
                 _ => None,
             })
     }
@@ -901,7 +1083,7 @@ mod track {
     /// the press only arms, travel scrubs it at a step per point, a plain
     /// click in the middle opens typing and a click on an end steps it.
     #[test]
-    fn a_field_without_a_track_behaves_exactly_as_it_did() {
+    fn a_scrub_reanchors_at_engagement_and_clicks_still_step_or_type() {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         let (root, _band, scrub) = start(&mut cx);
         cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
@@ -910,12 +1092,14 @@ mod track {
         let actions = send(&mut cx, &root, &down);
         assert_eq!(changed(&actions, &scrub), None, "the press moved a scrub field");
         assert_eq!(value(&scrub), 0.0);
-        // Travel, and only travel, moves it — by the distance travelled.
-        let to = dvec2(at.x + 10.0, at.y);
+        // The threshold arms without moving; subsequent travel scrubs.
+        send(&mut cx, &root, &moved(dvec2(at.x + 3.0, at.y), 0.05));
+        let to = dvec2(at.x + 13.0, at.y);
         let actions = send(&mut cx, &root, &moved(to, 0.1));
         assert_eq!(changed(&actions, &scrub), Some(10.0), "the scrub did not follow the travel");
-        assert_eq!(ended(&actions, &scrub), None, "a scrub field said a track's end");
-        send(&mut cx, &root, &release(to, 0.2));
+        assert_eq!(ended(&actions, &scrub), None, "a scrub ended before release");
+        let actions = send(&mut cx, &root, &release(to, 0.2));
+        assert_eq!(ended(&actions, &scrub), Some(10.0));
         down.unhandle(&mut cx, &claimed(&down));
 
         // A click that did not wander: the middle types, an end steps.
@@ -952,6 +1136,8 @@ mod track {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         let (root, band, _scrub) = start(&mut cx);
         let over = along(&cx, &band, 0.5);
+        cx.set_key_focus(band.area());
+        settle_focus(&mut cx);
         let actions = send(&mut cx, &root, &wheel(over, 1.0));
         assert_eq!(changed(&actions, &band), Some(1.0), "the wheel did not step the field");
         assert_eq!(ended(&actions, &band), Some(1.0), "a step is its own commit");

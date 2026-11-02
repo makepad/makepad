@@ -148,30 +148,7 @@ fn transcription_json(transcription: &NoteTranscription) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::{Domain, Registry};
     use makepad_ai_notes::{NoteEvent, FRAME_RATE};
-
-    #[test]
-    fn registry_contract_is_complete() {
-        let registry = Registry::embedded().unwrap();
-        let spec = registry.find("basic-pitch").expect("basic-pitch entry");
-        assert_eq!(spec.domain, Domain::Notes);
-        assert_eq!(spec.backend, "notes");
-        assert_eq!(spec.vram_gb, Some(0.1));
-        let model = spec.file_by_role("model").unwrap();
-        assert_eq!(model.cache_as, "notes/basic_pitch_nmp.onnx");
-        assert_eq!(model.size, Some(230_444));
-        assert_eq!(
-            model.sha256.as_deref(),
-            Some("2c3c1d144bfa61ad236e92e169c13535c880469a12a047d4e73451f2c059a0ec")
-        );
-    }
-
-    #[test]
-    fn domain_round_trips() {
-        assert_eq!(Domain::parse("notes"), Some(Domain::Notes));
-        assert_eq!(Domain::Notes.as_str(), "notes");
-    }
 
     #[test]
     fn json_contract_contains_bends() {

@@ -1774,8 +1774,12 @@ impl<'a> Lcx<'a> {
                 // the old captures twice)
                 ExprKind::Call(f, _) if matches!(self.kind_ref(b.ty(*f)), TyKind::Closure(..)) => self.mark_root(*f),
                 // overloaded index / deref take `&self` / `&mut self` of the base
-                ExprKind::Index(x, _) if b.ov_index.contains_key(&e.0) => self.mark_root(*x),
+                ExprKind::Index(x, _) if b.ov_index.contains_key(&e.0) || b.ov_deref(e.0, 0).is_some() => self.mark_root(*x),
                 ExprKind::Unary(UnOp::Deref, x) if b.ov_deref(e.0, 0).is_some() => self.mark_root(*x),
+                // a field reached through an overloaded deref of the base (`w.close = true` with
+                // `W: DerefMut`): the deref takes the base's address, and a register copy of it
+                // would take the write
+                ExprKind::Field(x, _) | ExprKind::TupleField(x, _) if b.ov_deref(e.0, 0).is_some() => self.mark_root(*x),
                 // patterns that bind by reference (`ref`, `ref mut`, match ergonomics) take the
                 // scrutinee place's address in place
                 ExprKind::Let(p, x) if self.pat_binds_by_ref(*p) => self.mark_root(*x),
@@ -3350,11 +3354,15 @@ impl<'a> Lcx<'a> {
                             }
                         }
                         None => {
-                            // declared, assigned later
-                            if let Pat::Ident { .. } = ast.pat(*pat) {
-                                if let Some(&li) = self.b.pat_local.get(&pat.0) {
-                                    self.alloc_local(li);
-                                }
+                            // declared, assigned later: every binding's storage begins here
+                            // (rustc: StorageLive at the `let`), so its slot address dominates
+                            // every later assignment and use. `let (a, b);` binds a tuple
+                            // pattern's idents: allocated lazily at the first assignment, one
+                            // branch's SlotAddr would be the address the other branches use.
+                            let mut lis = Vec::new();
+                            self.pat_binding_locals(*pat, &mut lis);
+                            for li in lis {
+                                self.alloc_local(li);
                             }
                         }
                     }
@@ -5777,6 +5785,32 @@ impl<'a> Lcx<'a> {
             ExprKind::Paren(x) => self.promotable(x),
             ExprKind::Unary(UnOp::Neg | UnOp::Not, x) => self.promotable(x) && !self.b.binops.contains_key(&e.0),
             ExprKind::Array(v) | ExprKind::Tuple(v) => ast.list(v).iter().all(|x| self.promotable(*x)),
+            // rustc_mir_transform/src/promote_consts.rs: Validator::validate_rvalue accepts a
+            // primitive BinaryOp of promotable operands (`&[0.0, PSI, -PSI / 4.0]` is a static),
+            // except raw/fn pointer operands and an integer `/` or `%` whose divisor is not a
+            // known non-zero constant (or is -1 with a dividend that may be MIN). `&&` / `||`
+            // are control flow, overloaded operators calls: neither is promoted.
+            ExprKind::Binary(op, a, b) => {
+                if matches!(op, BinOp::And | BinOp::Or) || self.b.binops.contains_key(&e.0) {
+                    return false;
+                }
+                let at = self.body_ty(a);
+                if matches!(self.kind(at), TyKind::Ptr(..) | TyKind::FnPtr(..)) || !self.promotable(a) || !self.promotable(b) {
+                    return false;
+                }
+                if matches!(op, BinOp::Div | BinOp::Rem) && matches!(self.kind(at), TyKind::Int(_)) {
+                    let it = self.int_ty(at);
+                    let Some(d) = self.promoted_int(b) else { return false };
+                    if d == 0 {
+                        return false;
+                    }
+                    if it.signed && d == -1 {
+                        let min = -(1i128 << (it.bits as u32 - 1));
+                        return self.promoted_int(a).is_some_and(|n| n != min);
+                    }
+                }
+                true
+            }
             ExprKind::Path(_) => match self.b.res.get(&e.0) {
                 // rustc_mir_transform/src/promote_consts.rs: Validator::validate_operand
                 // accepts constants, including FnDef operands (`&VTable { f: g::<T> }`).
@@ -5815,6 +5849,20 @@ impl<'a> Lcx<'a> {
     }
 
 
+    /// The value of the promotable integer operand `x` (rustc promote_consts: try_eval_scalar
+    /// of a division's constant operand), sign-extended; None when it cannot be evaluated here.
+    fn promoted_int(&mut self, x: ExprId) -> Option<i128> {
+        let t = self.body_ty(x);
+        let it = self.int_ty(t);
+        let addr = self.u.promoted_addr_shared(self.b, x, t, self.cur_fn).ok()??;
+        let n = (it.bits / 8) as usize;
+        let mut raw = [0u8; 16];
+        raw[..n].copy_from_slice(unsafe { std::slice::from_raw_parts(addr as *const u8, n) });
+        let v = u128::from_le_bytes(raw);
+        let sh = 128 - it.bits as u32;
+        Some(if it.signed { ((v << sh) as i128) >> sh } else { v as i128 })
+    }
+
     /// Constant promotion: the rvalue `x` stored in static memory, its address (None for an
     /// unsized type).
     fn promote_rvalue(&mut self, x: ExprId, shared: bool) -> Option<VReg> {
@@ -5844,10 +5892,16 @@ impl<'a> Lcx<'a> {
         // the initializer; it never runs again in the borrowing function.
         if shared && !self.const_init && self.layout(xt).size > 0 && self.u.tcx.is_freeze(&self.u.prog, crate::tcx::TypingEnv::fully_monomorphized(&self.u.prog), xt) {
             match self.u.promoted_addr_shared(self.b, x, xt, self.cur_fn) {
-                Ok(addr) => {
+                Ok(Some(addr)) => {
                     let s = self.u.data_sym(addr);
                     let p = self.f.vreg(Cls::I);
                     self.emit(Inst::Addr(p, s));
+                    return Some(p);
+                }
+                // a front that goes on to note the body's other values; this lowering is dropped
+                Ok(None) => {
+                    let p = self.f.vreg(Cls::I);
+                    self.emit(Inst::Iconst(p, 1));
                     return Some(p);
                 }
                 Err(e) => {
@@ -6468,15 +6522,16 @@ impl<'a> Lcx<'a> {
                     self.err(self.pos, "unsizing to `dyn` needs a single-pointer value".to_string());
                     return self.unit();
                 }
-                let addr = match self.u.vtable(src, dy) {
-                    Ok(a) => a,
+                let vt = self.f.vreg(Cls::I);
+                match self.u.vtable_shared(src, dy) {
+                    Ok(Some(addr)) => self.emit(Inst::Addr(vt, self.u.data_sym(addr))),
+                    // a front that goes on to note the body's other values; this lowering is dropped
+                    Ok(None) => self.emit(Inst::Iconst(vt, 1)),
                     Err(m) => {
                         self.err(self.pos, m);
                         return self.unit();
                     }
-                };
-                let vt = self.f.vreg(Cls::I);
-                self.emit(Inst::Addr(vt, self.u.data_sym(addr)));
+                }
                 let _ = target;
                 Val::L(vec![p[0], vt])
             }
@@ -10599,6 +10654,13 @@ impl<'a> Lcx<'a> {
             s.to_leaves(v, ty)
         };
         Some(match name {
+            // (a type of 4 GiB or more has its exact size; its values cannot be lowered yet)
+            "size_of" | "align_of" if g0.is_some_and(|g| self.u.is_too_big(g)) => match g0.and_then(|g| self.u.saturated_size(g)) {
+                Some(size) if name == "size_of" => Val::L(vec![self.iconst(size as i64)]),
+                Some(_) => { let g = self.u.tcx.tys.erase_regions(g0.unwrap()); Val::L(vec![self.iconst(self.u.layout_of(g).align as i64)]) }
+                // a SizeOverflow: the layout's error
+                None => { let _ = elem(self); Val::L(vec![self.iconst(0)]) }
+            },
             "size_of" => {
                 let (sz, al) = elem(self);
                 Val::L(vec![self.iconst(crate::layout::round_up(sz, al) as i64)])
@@ -12240,10 +12302,6 @@ fn strip_num(text: &str) -> String {
     s
 }
 
-pub fn closure_map(_b: &Body) -> HashMap<u32, u32> {
-    HashMap::default()
-}
-
 // ---------------------------------------------------------------- glue
 
 /// Compiler-generated helper functions per type. GLUE_DROP: `fn(p: *mut T)` runs T's Drop
@@ -13419,10 +13477,25 @@ fn dense_live_check(f: &Func, c: &Coro, nv: usize, seen: &[bool], known: &[Optio
     }
 }
 
+fn coro_transform_trace() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("MAKEPAD_RUN_TRACE").is_ok_and(|v| v.split(',').any(|x| x == "coro")))
+}
+
+fn coro_trace_level() -> u8 {
+    static ON: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| match std::env::var("MAKEPAD_RUN_CORO_TRACE").as_deref() { Ok("2") => 2, Ok("3") => 3, _ => 0 })
+}
+
+fn coro_trace() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("MAKEPAD_RUN_CORO_TRACE").is_some())
+}
+
 fn coroutine_transform(f: &mut Func, c: &Coro, ptr_bytes: u32) -> Result<(u32, u32, u64), String> {
     use relax_backend::regalloc::{term_uses, uses_defs};
     // MAKEPAD_RUN_TRACE=coro: the transform's sizes and phase times (coro-transform line)
-    let tr = std::env::var("MAKEPAD_RUN_TRACE").is_ok_and(|v| v.split(',').any(|x| x == "coro"));
+    let tr = coro_transform_trace();
     let t_start = std::time::Instant::now();
     let mut t_ph: Vec<(&str, f64)> = Vec::new();
     let mut mark = |name: &'static str| if tr { t_ph.push((name, t_start.elapsed().as_secs_f64() * 1e3)); };
@@ -13979,7 +14052,7 @@ fn coroutine_transform(f: &mut Func, c: &Coro, ptr_bytes: u32) -> Result<(u32, u
     };
     mark("gen/kill");
     // MAKEPAD_RUN_CORO_TRACE=2: why each slot is saved at each point (3: slots of 1 MB and more)
-    let coro_why = match std::env::var("MAKEPAD_RUN_CORO_TRACE").as_deref() { Ok("2") => 2, Ok("3") => 3, _ => 0 };
+    let coro_why = coro_trace_level();
     for (k, &(pend, resume, cancel)) in c.suspends.iter().enumerate() {
         let mut vs = Vec::new();
         let mut sv = vec![0u64; wd];
@@ -14287,7 +14360,7 @@ fn coroutine_transform(f: &mut Func, c: &Coro, ptr_bytes: u32) -> Result<(u32, u
     }
     let size = end;
     // MAKEPAD_RUN_CORO_TRACE: the saved slots and values of each coroutine
-    if std::env::var_os("MAKEPAD_RUN_CORO_TRACE").is_some() {
+    if coro_trace() {
         for s in 0..ns {
             if !saved_at[s].is_empty() {
                 eprintln!("coro {:?} slot {} size {} saved at {:?} variant {:?} offset {:?}", c.ct, s, f.slots[s].size, saved_at[s], variant_of[s], slot_off[s]);

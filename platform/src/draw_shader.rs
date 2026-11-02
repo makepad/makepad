@@ -31,6 +31,8 @@ pub struct CxDrawShaderOptions {
     pub draw_call_group: LiveId,
     pub debug_id: Option<LiveId>,
     pub depth_write: bool,
+    /// Strict greater-than depth test for occluded-surface overlays; default is less-equal.
+    pub depth_test_greater: bool,
     /// Premultiplied source-over blending for this draw call. `false` makes a
     /// fragment replace the destination, alpha included. Honoured per draw
     /// call by every backend: Metal binds a second pipeline state with
@@ -59,6 +61,7 @@ impl Default for CxDrawShaderOptions {
             draw_call_group: LiveId(0),
             debug_id: None,
             depth_write: true,
+            depth_test_greater: false,
             alpha_blend: true,
             backface_culling: false,
             scissor: None,

@@ -1,0 +1,14 @@
+[package]
+name = "makepad-uv-unwrap-corpus"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Measures the UV unwrapper on generated parts and the repository's meshes"
+publish = false
+
+[dependencies]
+makepad-uv-unwrap = { path = "../../libs/uv_unwrap" }
+makepad-gltf = { path = "../../libs/gltf" }
+makepad-csg = { path = "../../libs/csg/csg" }
+makepad-csg-brep-model = { path = "../../libs/csg/csg_brep_model" }
+jpeg-encoder = { path = "../../libs/jpeg-encoder" }

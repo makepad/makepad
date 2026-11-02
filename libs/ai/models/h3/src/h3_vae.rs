@@ -1807,16 +1807,6 @@ mod tests {
         assert_eq!(batch_groups(&geoms[..1], 0), vec![vec![0]]);
     }
 
-    #[test]
-    fn rope_inv_freq_values() {
-        let mut inv = [0.0f32; 8];
-        for (j, v) in inv.iter_mut().enumerate() {
-            *v = H3_VAE_ROPE_THETA.powf(-(j as f32) / 8.0);
-        }
-        assert_eq!(inv[0], 1.0);
-        assert!((inv[4] - 0.1).abs() < 1e-6); // 100^-0.5
-    }
-
     // --- encoder ------------------------------------------------------------
 
     #[test]

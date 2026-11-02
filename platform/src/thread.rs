@@ -39,7 +39,7 @@ use {
                 AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering,
             },
             mpsc::{sync_channel, Receiver, SyncSender, TrySendError},
-            Arc, Condvar, Mutex, OnceLock,
+            Arc, Condvar, Mutex, OnceLock, Weak,
         },
         thread::ThreadId,
         time::Duration,
@@ -546,6 +546,14 @@ pub struct ThreadSpawner {
     ui_thread: ThreadId,
     parallelism: NonZeroUsize,
     runtime_open: Arc<AtomicBool>,
+    workers: Arc<Mutex<RuntimeWorkers>>,
+}
+
+#[derive(Default)]
+struct RuntimeWorkers {
+    // Weak inners do not count as pool handles or keep completed workers alive.
+    pools: Vec<Weak<PoolInner>>,
+    tokens: Vec<Weak<CancellationInner>>,
 }
 
 impl fmt::Debug for ThreadSpawner {
@@ -562,6 +570,7 @@ impl ThreadSpawner {
             ui_thread: std::thread::current().id(),
             parallelism: NonZeroUsize::new(parallelism.max(1)).unwrap(),
             runtime_open: Arc::new(AtomicBool::new(true)),
+            workers: Arc::new(Mutex::new(RuntimeWorkers::default())),
         }
     }
 
@@ -570,6 +579,7 @@ impl ThreadSpawner {
             ui_thread: self.ui_thread,
             parallelism: NonZeroUsize::new(parallelism.max(1)).unwrap(),
             runtime_open: self.runtime_open.clone(),
+            workers: self.workers.clone(),
         }
     }
 
@@ -591,6 +601,14 @@ impl ThreadSpawner {
         }
         validate_stack_size(options.stack_size)?;
         let token = CancellationToken::new();
+        {
+            let mut workers = self.workers.lock().unwrap();
+            if !self.runtime_open.load(Ordering::Acquire) {
+                return Err(SpawnError::RuntimeClosed);
+            }
+            workers.tokens.retain(|token| token.strong_count() != 0);
+            workers.tokens.push(Arc::downgrade(&token.inner));
+        }
         let state = Arc::new(TaskState::default());
         let run_state = state.clone();
         let run_token = token.clone();
@@ -657,7 +675,28 @@ impl ThreadSpawner {
     }
 
     pub(crate) fn close_runtime(&self) {
-        self.runtime_open.store(false, Ordering::Release);
+        let workers = {
+            let mut workers = self.workers.lock().unwrap();
+            self.runtime_open.store(false, Ordering::Release);
+            std::mem::take(&mut *workers)
+        };
+        // No registry lock spans cancellation, job drops or waking a worker.
+        for pool in workers.pools.into_iter().filter_map(|pool| pool.upgrade()) {
+            pool.close(ShutdownMode::CancelPending);
+        }
+        for inner in workers.tokens.into_iter().filter_map(|token| token.upgrade()) {
+            CancellationToken { inner }.cancel();
+        }
+    }
+
+    fn register_pool(&self, pool: &Arc<PoolInner>) -> Result<(), SpawnError> {
+        let mut workers = self.workers.lock().unwrap();
+        if !self.runtime_open.load(Ordering::Acquire) {
+            return Err(SpawnError::RuntimeClosed);
+        }
+        workers.pools.retain(|pool| pool.strong_count() != 0);
+        workers.pools.push(Arc::downgrade(pool));
+        Ok(())
     }
 }
 
@@ -1192,6 +1231,7 @@ struct PoolJob {
     lane: Lane,
     label: &'static str,
     submitted_at: f64,
+    token: CancellationToken,
     run: Option<Box<dyn FnOnce(PriorityStatus) + Send>>,
     cancel: Option<Box<dyn FnOnce() + Send>>,
 }
@@ -1208,6 +1248,7 @@ impl PoolJob {
 impl Drop for PoolJob {
     fn drop(&mut self) {
         if self.run.is_some() {
+            self.token.cancel();
             self.run.take();
             if let Some(cancel) = self.cancel.take() {
                 cancel();
@@ -1219,7 +1260,8 @@ impl Drop for PoolJob {
 struct LaneQueue {
     /// Lock-free bounded hand-over: `try_send` never blocks, on any thread.
     sender: SyncSender<PoolJob>,
-    /// Workers only. The UI thread never touches this mutex.
+    /// Receivers hold this only for try_recv; job execution and cancellation
+    /// drops are outside it. Shutdown may drain it from the closing thread.
     receiver: Mutex<Receiver<PoolJob>>,
     capacity: usize,
     queued: AtomicUsize,
@@ -1309,6 +1351,7 @@ struct WorkerSlot {
     heavy_capable: bool,
     idle: AtomicBool,
     priority_status: AtomicU8,
+    running: Mutex<Option<CancellationToken>>,
 }
 
 const POOL_OPEN: u8 = 0;
@@ -1339,11 +1382,41 @@ struct PoolInner {
 }
 
 impl PoolInner {
+    fn should_exit(&self) -> bool {
+        match self.closed.load(Ordering::SeqCst) {
+            POOL_OPEN => false,
+            // Reservations count as queued until published or returned. A
+            // draining worker must not exit ahead of an admitted submitter.
+            POOL_DRAINING => self.lanes.iter().all(|lane| lane.queued.load(Ordering::Acquire) == 0),
+            _ => true,
+        }
+    }
+
+    fn cancel_queued(&self) {
+        while self.lanes[0].try_take().is_some() {}
+        while self.lanes[1].try_take().is_some() {}
+    }
+
+    fn close(&self, mode: ShutdownMode) {
+        let target = match mode {
+            ShutdownMode::CancelPending => POOL_CANCELLED,
+            ShutdownMode::Drain => POOL_DRAINING,
+        };
+        self.closed.fetch_max(target, Ordering::SeqCst);
+        if target == POOL_CANCELLED {
+            for slot in &self.workers {
+                let token = slot.running.lock().unwrap().clone();
+                if let Some(token) = token { token.cancel(); }
+            }
+            self.cancel_queued();
+        }
+        self.unpark_all();
+    }
+
     fn take_job(&self, heavy_capable: bool) -> Option<PoolJob> {
         if self.closed.load(Ordering::Acquire) == POOL_CANCELLED {
             // Dropping a queued job completes its handle as cancelled.
-            while self.lanes[0].try_take().is_some() {}
-            while self.lanes[1].try_take().is_some() {}
+            self.cancel_queued();
             return None;
         }
         // Reserved Light workers stay available; heavy workers alternate
@@ -1363,7 +1436,16 @@ impl PoolInner {
         }
     }
 
-    fn run_job(&self, job: PoolJob, status: PriorityStatus) {
+    fn run_job(&self, slot: &WorkerSlot, job: PoolJob, status: PriorityStatus) {
+        {
+            let mut running = slot.running.lock().unwrap();
+            if self.closed.load(Ordering::SeqCst) == POOL_CANCELLED {
+                drop(running);
+                drop(job);
+                return;
+            }
+            *running = Some(job.token.clone());
+        }
         let queue = &self.lanes[job.lane.index()];
         let started = Cx::monotonic_now();
         let wait_us = ((started - job.submitted_at).max(0.0) * 1_000_000.0) as u64;
@@ -1375,6 +1457,8 @@ impl PoolInner {
         #[cfg(any(target_vendor = "apple", target_os = "linux"))]
         let traced = ui_hang::relax_timeline::hooks().inspect(|h| (h.begin)(label.as_ptr(), label.len())).is_some();
         job.run(status);
+        let finished_token = slot.running.lock().unwrap().take();
+        drop(finished_token);
         #[cfg(any(target_vendor = "apple", target_os = "linux"))]
         if traced {
             if let Some(h) = ui_hang::relax_timeline::hooks() {
@@ -1572,7 +1656,6 @@ impl PoolInner {
 }
 
 fn pool_worker(inner: Arc<PoolInner>, index: usize) {
-    let _exit = PoolWorkerExit(inner.clone());
     let slot = &inner.workers[index];
     let _ = slot.thread.set(std::thread::current());
     let priority = if slot.heavy_capable {
@@ -1590,20 +1673,20 @@ fn pool_worker(inner: Arc<PoolInner>, index: usize) {
             None
         };
         if let Some(job) = inner.take_job(slot.heavy_capable) {
-            inner.run_job(job, PriorityStatus::load(&slot.priority_status));
+            inner.run_job(slot, job, PriorityStatus::load(&slot.priority_status));
             continue;
         }
-        if inner.closed.load(Ordering::Acquire) != POOL_OPEN {
+        if inner.should_exit() {
             break;
         }
         slot.idle.store(true, Ordering::SeqCst);
         std::sync::atomic::fence(Ordering::SeqCst);
         if let Some(job) = inner.take_job(slot.heavy_capable) {
             slot.idle.store(false, Ordering::SeqCst);
-            inner.run_job(job, PriorityStatus::load(&slot.priority_status));
+            inner.run_job(slot, job, PriorityStatus::load(&slot.priority_status));
             continue;
         }
-        if inner.closed.load(Ordering::SeqCst) != POOL_OPEN {
+        if inner.should_exit() {
             slot.idle.store(false, Ordering::SeqCst);
             continue;
         }
@@ -1620,6 +1703,7 @@ struct PoolWorkerExit(Arc<PoolInner>);
 
 impl Drop for PoolWorkerExit {
     fn drop(&mut self) {
+        self.0.unpark_all();
         let exited = self.0.exited.fetch_add(1, Ordering::AcqRel) + 1;
         if exited == self.0.workers.len() {
             self.0.shutdown_state.complete(Ok(()));
@@ -1724,6 +1808,7 @@ impl TaskPool {
                 heavy_capable: index >= light_reserve,
                 idle: AtomicBool::new(false),
                 priority_status: AtomicU8::new(PriorityStatus::Pending as u8),
+                running: Mutex::new(None),
             })
             .collect();
         let inner = Arc::new(PoolInner {
@@ -1752,8 +1837,12 @@ impl TaskPool {
         let pool = Self {
             inner: inner.clone(),
         };
+        spawner.register_pool(&inner)?;
         for index in 0..worker_len {
             let worker_inner = inner.clone();
+            // Count a worker out even if runtime cancellation skips its closure
+            // before entry, or OS thread creation fails and drops the closure.
+            let exit = PoolWorkerExit(inner.clone());
             let spawned = spawner.spawn_worker(
                 ThreadOptions {
                     name: Some(format!("{}-{index}", options.name).into()),
@@ -1764,14 +1853,17 @@ impl TaskPool {
                     },
                     ..Default::default()
                 },
-                move || pool_worker(worker_inner, index),
+                move || {
+                    let _exit = exit;
+                    pool_worker(worker_inner, index);
+                },
             );
             match spawned {
                 Ok(handle) => handle.detach(),
                 Err(error) => {
                     // The workers that did start exit; the ones that never
                     // will are counted out so shutdown can still complete.
-                    let missing = worker_len - index;
+                    let missing = worker_len - index - 1;
                     let exited = inner.exited.fetch_add(missing, Ordering::AcqRel) + missing;
                     pool.close(ShutdownMode::CancelPending);
                     if exited == worker_len {
@@ -1961,14 +2053,10 @@ impl TaskPool {
 
     /// Stop accepting work and let the workers exit — never waits.
     /// `CancelPending` completes every queued handle as cancelled; `Drain`
-    /// runs what is queued first. Running jobs finish either way.
+    /// runs what is queued first. `CancelPending` also cancels running jobs'
+    /// tokens so cooperative work can return; it never terminates a thread.
     pub fn close(&self, mode: ShutdownMode) {
-        let target = match mode {
-            ShutdownMode::CancelPending => POOL_CANCELLED,
-            ShutdownMode::Drain => POOL_DRAINING,
-        };
-        let _ = self.inner.closed.fetch_max(target, Ordering::SeqCst);
-        self.inner.unpark_all();
+        self.inner.close(mode);
     }
 
     #[cfg(test)]
@@ -2031,6 +2119,7 @@ impl TaskPool {
             running: AtomicUsize::new(0),
             cancelled: AtomicBool::new(false),
             parent: std::thread::current(),
+            priority: self.inner.heavy_priority,
         });
         let helpers = (len - 1).min(self.worker_count());
         let mut handles = Vec::with_capacity(helpers);
@@ -2045,8 +2134,102 @@ impl TaskPool {
             shared: &shared,
             handles,
         };
+        // The caller does not adjust its priority for the compiler, even when it is another fan-out's helper.
+        let _role = FanOutRole::enter(None);
         fan_out_work(&shared);
     }
+}
+
+#[derive(Clone, Copy)]
+struct HelperState {
+    priority: CxThreadPriority,
+    lowered: bool,
+}
+
+thread_local! {
+    /// This thread does a fan-out helper's work now (not a fan-out caller's).
+    static FAN_OUT_HELPER: std::cell::Cell<Option<HelperState>> = const { std::cell::Cell::new(None) };
+}
+
+/// Sets this thread's fan-out role, and puts the previous one back when dropped.
+struct FanOutRole(Option<HelperState>);
+
+impl FanOutRole {
+    fn enter(priority: Option<CxThreadPriority>) -> Self {
+        let state = priority.map(|priority| HelperState {
+            priority,
+            lowered: false,
+        });
+        Self(FAN_OUT_HELPER.with(|h| h.replace(state)))
+    }
+}
+
+impl Drop for FanOutRole {
+    fn drop(&mut self) {
+        FAN_OUT_HELPER.with(|h| {
+            if let Some(state) = h.get() {
+                if state.lowered {
+                    Cx::set_thread_priority(state.priority);
+                }
+            }
+            h.set(self.0);
+        });
+    }
+}
+
+/// The JIT that runs this program (`makepad run`) builds code the program runs, in the
+/// background, now or a moment ago: an optimised build of hot code, or a function ahead of its
+/// call (its loader symbol `relax_compile_pressure`). Always false in a native build.
+pub fn compile_pressure() -> bool {
+    #[cfg(any(target_vendor = "apple", target_os = "linux"))]
+    {
+        static PRESSURE: OnceLock<Option<extern "C" fn() -> bool>> = OnceLock::new();
+        let f = PRESSURE.get_or_init(|| {
+            extern "C" {
+                fn dlsym(handle: *mut std::ffi::c_void, name: *const std::ffi::c_char) -> *mut std::ffi::c_void;
+            }
+            // RTLD_DEFAULT: -2 on Apple targets, null on Linux
+            #[cfg(target_vendor = "apple")]
+            let default = -2isize as *mut std::ffi::c_void;
+            #[cfg(not(target_vendor = "apple"))]
+            let default = std::ptr::null_mut();
+            let f = unsafe { dlsym(default, c"relax_compile_pressure".as_ptr()) };
+            (!f.is_null()).then(|| unsafe { std::mem::transmute::<*mut std::ffi::c_void, extern "C" fn() -> bool>(f) })
+        });
+        if let Some(f) = f {
+            return f();
+        }
+    }
+    false
+}
+
+/// A fan-out helper's checkpoint between two of its items: while the JIT builds the code the
+/// program runs ([`compile_pressure`]), the helper runs at Utility QoS, below the JIT's compile
+/// workers (`QOS_CLASS_DEFAULT` at relative priority -15), unless its pool is already at or below
+/// Utility. On a busy machine the builds get the cores first and the hot code its optimised build
+/// sooner, while idle cores still run the helper. The helper returns to its pool's priority once
+/// the builds are done and never waits. When nothing changes, this costs one atomic load and a
+/// TLS read per call. It is a no-op on every other thread, on non-Apple targets and in native builds.
+/// [`TaskPool::fan_out`] calls it before each index; a helper whose index is a loop over items of
+/// its own calls it between those.
+pub fn yield_to_compiler() {
+    #[cfg(target_vendor = "apple")]
+    FAN_OUT_HELPER.with(|h| {
+        let Some(mut state) = h.get() else {
+            return;
+        };
+        let want = compile_pressure() && lowers(state.priority);
+        if want != state.lowered {
+            Cx::set_thread_priority(if want { CxThreadPriority::Utility } else { state.priority });
+            state.lowered = want;
+            h.set(Some(state));
+        }
+    });
+}
+
+#[cfg(target_vendor = "apple")]
+fn lowers(p: CxThreadPriority) -> bool {
+    matches!(p, CxThreadPriority::Normal | CxThreadPriority::UserInteractive | CxThreadPriority::UserInitiated)
 }
 
 struct FanOutShared {
@@ -2059,6 +2242,7 @@ struct FanOutShared {
     running: AtomicUsize,
     cancelled: AtomicBool,
     parent: std::thread::Thread,
+    priority: CxThreadPriority,
 }
 
 // The erased pointer is only ever used as `&F` where `F: Sync`, so sharing
@@ -2072,6 +2256,7 @@ unsafe fn fan_out_call<F: Fn(usize) + Sync>(f: *const (), index: usize) {
 
 fn fan_out_work(shared: &FanOutShared) {
     loop {
+        yield_to_compiler();
         let index = shared.next.fetch_add(1, Ordering::AcqRel);
         if index >= shared.len {
             break;
@@ -2098,6 +2283,7 @@ fn fan_out_helper(shared: &FanOutShared) {
     if shared.cancelled.load(Ordering::SeqCst) {
         return;
     }
+    let _role = FanOutRole::enter(Some(shared.priority));
     fan_out_work(shared);
 }
 
@@ -2206,14 +2392,30 @@ impl PoolSlot {
             lane: self.lane,
             label,
             submitted_at: Cx::monotonic_now(),
+            token: token.clone(),
             run: Some(Box::new(run)),
             cancel: Some(Box::new(move || {
                 cancel_state.complete(Err(TaskError::Cancelled));
             })),
         };
         queue.submitted.fetch_add(1, Ordering::Relaxed);
+        if inner.closed.load(Ordering::Acquire) != POOL_OPEN {
+            queue.queued.fetch_sub(1, Ordering::AcqRel);
+            drop(job);
+            inner.unpark_all();
+            return TaskHandle {
+                state, token, ui_thread: inner.ui_thread, priority_status,
+                #[cfg(not(target_arch = "wasm32"))]
+                native_join: None,
+            };
+        }
         match queue.sender.try_send(job) {
             Ok(()) => {
+                // A reservation may publish after close drained the queue and
+                // the last worker exited. Its handle must still complete.
+                if inner.closed.load(Ordering::SeqCst) == POOL_CANCELLED {
+                    inner.cancel_queued();
+                }
                 inner.wake_one(self.lane);
                 if let Some(thread) = inner.workers.first().and_then(|w| w.thread.get()) {
                     thread.unpark();
@@ -2244,6 +2446,9 @@ impl Drop for PoolSlot {
             self.pool.inner.lanes[self.lane.index()]
                 .queued
                 .fetch_sub(1, Ordering::AcqRel);
+            if self.pool.inner.closed.load(Ordering::Acquire) != POOL_OPEN {
+                self.pool.inner.unpark_all();
+            }
         }
     }
 }
@@ -3364,6 +3569,7 @@ mod tests {
 
         let shutdown = pool.shutdown(ShutdownMode::CancelPending);
         assert!(!pool.is_open());
+        assert!(running.token().is_cancelled());
         release_tx.send(3).unwrap();
         assert_eq!(worker_join(running).unwrap(), 3);
         assert_eq!(worker_join(queued_light), Err(TaskError::Cancelled));
@@ -3372,6 +3578,56 @@ mod tests {
         assert_eq!(pool.stats().exited, 1);
         assert_eq!(pool.queued(Lane::Light), 0);
         assert_eq!(pool.queued(Lane::Heavy), 0);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn stop_workers_closes_static_pools_and_cancels_dedicated_workers() {
+        static POOLS: OnceLock<(TaskPool, TaskPool)> = OnceLock::new();
+        let spawner = ThreadSpawner::for_current_thread(4);
+        let (idle, busy) = POOLS.get_or_init(|| (
+            TaskPool::new(spawner.clone(), PoolOptions::with_workers(2, 1)).unwrap(),
+            TaskPool::new(spawner.clone(), PoolOptions::with_workers(1, 0)).unwrap(),
+        ));
+        wait_for("idle static workers", || idle.idle_workers() == 2);
+        let (token_tx, token_rx) = mpsc::channel::<CancellationToken>();
+        let (started_tx, started_rx) = mpsc::channel();
+        let running = busy.submit(Lane::Heavy, move || {
+            let token = token_rx.recv().unwrap();
+            started_tx.send(()).unwrap();
+            while !token.is_cancelled() { std::thread::park(); }
+            7
+        }).unwrap();
+        // Closing the pool cancels the token and unparks its running worker.
+        let worker = running.token();
+        token_tx.send(worker.clone()).unwrap();
+        started_rx.recv().unwrap();
+        let queued = busy.submit(Lane::Heavy, || -> () { panic!("queued work ran after stop") }).unwrap();
+        let reserved = busy.reserve(Lane::Light).unwrap();
+        let (token_tx, token_rx) = mpsc::channel::<CancellationToken>();
+        let (began_tx, began_rx) = mpsc::channel();
+        let dedicated = spawner.spawn_worker(ThreadOptions::default(), move || {
+            let token = token_rx.recv().unwrap();
+            began_tx.send(()).unwrap();
+            while !token.is_cancelled() { std::thread::yield_now(); }
+        }).unwrap();
+        token_tx.send(dedicated.token()).unwrap();
+        // running when the runtime closes (a worker cancelled before it starts never runs)
+        began_rx.recv().unwrap();
+
+        crate::restart::stop_workers(&spawner);
+        assert!(!idle.is_open() && !busy.is_open());
+        assert!(worker.is_cancelled());
+        let late = reserved.submit(|| -> () { panic!("reserved work ran after stop") });
+        assert_eq!(worker_join(queued), Err(TaskError::Cancelled));
+        assert_eq!(worker_join(late), Err(TaskError::Cancelled));
+        assert_eq!(worker_join(running), Ok(7));
+        assert_eq!(worker_join(dedicated), Ok(()));
+        worker_join(idle.shutdown_handle_for_test()).unwrap();
+        worker_join(busy.shutdown_handle_for_test()).unwrap();
+        assert_eq!(idle.stats().exited, 2);
+        assert_eq!(busy.stats().exited, 1);
+        assert_eq!(spawner.spawn_worker(ThreadOptions::default(), || ()).unwrap_err(), SpawnError::RuntimeClosed);
     }
 
     #[test]

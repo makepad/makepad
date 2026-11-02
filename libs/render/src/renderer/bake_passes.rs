@@ -749,7 +749,7 @@ impl Renderer {
             da[i] = gs;
             db[i] = go;
         }
-        dv.set_uniform(cx, live_id!(csm_p), &[1.0, *inv_res, 0.0, 0.0]);
+        dv.set_uniform(cx, live_id!(csm_p), &[1.0, *inv_res, frame.seed, 0.0]);
         dv.set_uniform(cx, live_id!(csm_da), &da);
         dv.set_uniform(cx, live_id!(csm_db), &db);
         dv.set_uniform(

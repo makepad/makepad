@@ -77,6 +77,10 @@ impl ContentBackend for TestPatternBackend {
         true
     }
 
+    fn live_requires_image(&self) -> bool {
+        false
+    }
+
     /// Blends the (optional, resized-if-needed) init image with an animated
     /// procedural pattern keyed by prompt+seed (palette/rings) and
     /// frame_index (rotation phase), honoring `strength` (0 = pass-through

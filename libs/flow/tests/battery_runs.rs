@@ -391,7 +391,7 @@ fn put_value(endpoints: &Endpoints, ty: &str, content_type: &str, bytes: &[u8]) 
     (response, digest)
 }
 
-fn start_testpattern(label: &str) -> Option<String> {
+fn start_testpattern(label: &str) -> String {
     let cache = std::env::temp_dir().join(format!(
         "makepad-flow-battery-runs-hub-{}-{label}-{}",
         std::process::id(),
@@ -430,17 +430,13 @@ fn start_testpattern(label: &str) -> Option<String> {
     });
     let handle = match service {
         Ok(handle) => handle,
-        Err(error) if error.to_string().contains("Operation not permitted") => {
-            eprintln!("skipping real testpattern service: loopback bind is forbidden");
-            return None;
-        }
         Err(error) => panic!("start testpattern service: {error}"),
     };
     let url = format!("http://{}", handle.addr);
     // The hub service has no stop message. This integration-test process
     // owns the service threads and tears them down when the binary exits.
     std::mem::forget(handle);
-    Some(url)
+    url
 }
 
 #[derive(Clone, Debug)]
@@ -623,9 +619,7 @@ Flow{concurrency: 2 prompt, expand, result}
 #[test]
 fn contact_sheet_end_to_end_through_http_only() {
     let _socket_test = socket_test();
-    let Some(gen_url) = start_testpattern("contact-sheet") else {
-        return;
-    };
+    let gen_url = start_testpattern("contact-sheet");
     let fixture = FixtureServer::start();
     let root = TempRoot::new("contact-sheet");
     let mut config = base_config(
@@ -1062,9 +1056,7 @@ fn concurrency_queues_parallelizes_and_finishes_twenty_seeded_instances() {
     }
     server.shutdown();
 
-    let Some(gen_url) = start_testpattern("twenty-instances") else {
-        return;
-    };
+    let gen_url = start_testpattern("twenty-instances");
     let root = TempRoot::new("twenty-instances");
     let server = start(
         &root.0,

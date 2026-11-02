@@ -187,10 +187,12 @@ mod tests {
 
     fn fixture() -> Vec<u8> {
         let mut wasm = WASM_HEADER.to_vec();
-        wasm.extend(section(1, &[0]));
-        wasm.extend(section(10, &[1, 2, 3]));
-        wasm.extend(section(0, &[4, b'n', b'a', b'm', b'e', 9, 8]));
-        wasm.extend(section(11, &[4, 5, 6, 7]));
+        wasm.extend(section(1, &[1, 0x60, 0, 0]));
+        wasm.extend(section(3, &[1, 0]));
+        wasm.extend(section(5, &[1, 0, 1]));
+        wasm.extend(section(10, &[1, 2, 0, 0x0b]));
+        wasm.extend(section(0, &[4, b'n', b'a', b'm', b'e']));
+        wasm.extend(section(11, &[1, 0, 0x41, 0, 0x0b, 1, 7]));
         wasm.extend(section(0, &[1, b'x', 1]));
         wasm
     }
@@ -202,10 +204,10 @@ mod tests {
             wasm_section_sizes(&wasm).unwrap(),
             WasmSectionSizes {
                 raw_bytes: wasm.len(),
-                code_bytes: 5,
-                data_bytes: 6,
-                custom_bytes: 14,
-                name_bytes: 9,
+                code_bytes: 6,
+                data_bytes: 9,
+                custom_bytes: 12,
+                name_bytes: 7,
             }
         );
     }

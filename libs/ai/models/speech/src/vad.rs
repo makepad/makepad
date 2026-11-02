@@ -10,7 +10,6 @@
 //!
 //! The model resolves as `silero_vad.onnx` in the working directory.
 //!
-//! Validated against onnxruntime output; see `tests/silero_vad.rs`.
 
 use std::collections::VecDeque;
 

@@ -1,9 +1,8 @@
-//! git, the only tool sync drives on a node: one bare store per repo (`~/devhub/git/<repo>.git`,
-//! DESIGN.md §10.12) that bundles are fetched into, and the node's ONE tree (the synced checkout,
-//! a linked worktree of the store), moved between commits with `read-tree -m -u` by syncs and
-//! leases alike. Only files that differ between the two commits are written (cargo fingerprints
-//! and the JITs' watchers see exactly the change); a file with local edits, or an untracked file
-//! in the way, makes git refuse, and nothing moves.
+//! Git stores shared by the deployment and work trees: one bare store per repo
+//! (`~/devhub/git/<repo>.git`, DESIGN.md §10.12). Sync moves the deployment checkout with
+//! `read-tree -m -u`: only changed files get new mtimes, preserving cargo and JIT caches.
+//! Local edits or untracked files in the way make the move refuse. Leases use detached
+//! worktree HEADs ([`crate::lease::tree`]), independently of the deployment refs.
 //!
 //! Every call is `git` with fixed arguments (never a shell); hooks are off (`core.hooksPath` to
 //! /dev/null), so nothing that arrives in a bundle ever runs.
@@ -11,7 +10,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
-/// The ref that names the commit the node's tree holds now (a sync's or a lease's).
+/// The deployment checkout's commit; lease worktree HEADs never move it.
 pub const CHECKOUT_REF: &str = "refs/devhub/checkout";
 /// The ref that names the last commit a sync moved the tree to: syncs move forward from it only.
 pub const SYNCED_REF: &str = "refs/devhub/synced";
@@ -164,10 +163,11 @@ impl Store {
     /// rewritten), and only tracked files it lacks are written (a tree a deploy script shipped
     /// had no dotfiles; an empty dir gets every file). A `.git` that is not ours: refused.
     pub fn link(&self, work: &Path, at: &str) -> Result<(), String> {
+        let root = if self.name() == "commercial" { work.parent().and_then(Path::parent).unwrap_or(work) } else { work };
         let dotgit = work.join(".git");
         if let Some(admin) = self.admin_of(work) {
             if admin.join("HEAD").exists() {
-                return Ok(());
+                return crate::ci_merge::install_merge_driver(work, root);
             }
         }
         if dotgit.exists() {
@@ -197,7 +197,8 @@ impl Store {
             let _ = std::fs::create_dir_all(self.git_dir.join("info"));
             let _ = std::fs::write(&exclude, format!("{ex}{}/FLEET-REVISION.txt\n", if ex.is_empty() || ex.ends_with('\n') { "" } else { "\n" }));
         }
-        self.read_index(work, at)
+        self.read_index(work, at)?;
+        crate::ci_merge::install_merge_driver(work, root)
     }
 
     /// The tree's index read from `at` and refreshed against the files (none is rewritten), then
@@ -220,31 +221,16 @@ impl Store {
     }
 
     /// The admin dir `work`'s `.git` file names when it is one of this store's worktrees.
-    fn admin_of(&self, work: &Path) -> Option<PathBuf> {
+    pub(crate) fn admin_of(&self, work: &Path) -> Option<PathBuf> {
         let text = std::fs::read_to_string(work.join(".git")).ok()?;
         let dir = PathBuf::from(text.trim().strip_prefix("gitdir:")?.trim());
         let common = std::fs::canonicalize(&self.git_dir).ok()?;
         std::fs::canonicalize(&dir).ok().filter(|d| d.starts_with(common.join("worktrees")))
     }
 
-    /// Whether the tree at `work` is this store's and holds `to` already (its HEAD and the
-    /// checkout ref): a lease on a warm box then moves nothing, with one git call.
-    pub fn holds(&self, work: &Path, to: &str) -> bool {
-        if !valid_sha(to) || !self.admin_of(work).is_some_and(|a| a.join("HEAD").exists()) {
-            return false;
-        }
-        run(Some(work), None, &[], &["rev-parse", "HEAD", CHECKOUT_REF]).is_ok_and(|o| {
-            let l: Vec<&str> = o.lines().map(str::trim).collect();
-            l == [to, to]
-        })
-    }
-
-    /// Moves the tree at `work` from `from` (None: an empty or missing dir) to `to`, in place:
-    /// only files that differ between the two commits are written (cargo fingerprints and the
-    /// JITs' watchers see exactly the change). Any two commits (a lease's pin, then landed work
-    /// again): whether a sync may move forward only is the caller's rule. A file with local edits
-    /// that the move changes, or an untracked file in the way, makes git refuse, and nothing moves
-    /// (leases clear the tree first: [`crate::lease::tree`]; a sync refuses and says so).
+    /// Moves the deployment checkout from `from` (None: empty or missing) to `to`. Only changed
+    /// files are written, keeping cargo and JIT caches warm. The caller checks forward movement;
+    /// local edits or untracked files blocking the move make it refuse.
     pub fn move_checkout(&self, work: &Path, from: Option<&str>, to: &str) -> Result<Moved, String> {
         let g = |args: &[&str]| run(Some(work), None, &[], args);
         let Some(from) = from else {
@@ -288,7 +274,12 @@ impl Store {
             return Ok(Vec::new());
         }
         let out = run(Some(work), None, &[("LC_ALL", Path::new("C"))], &["-c", "core.quotePath=false", "clean", "-fd", "-e", "target/"])?;
-        let kept: Vec<&str> = out.lines().filter_map(|l| l.strip_prefix("Skipping repository ")).collect();
+        // a nested worktree of one of devhub's own stores (the lane tree's apps/commercial) is
+        // part of the tree, not someone's repository: it is cleaned as its own store's tree
+        let ours = |rel: &str| {
+            std::fs::read_to_string(work.join(rel.trim_end_matches('/')).join(".git")).ok().and_then(|t| t.strip_prefix("gitdir: ").map(|g| PathBuf::from(g.trim()))).is_some_and(|g| g.starts_with(stores_dir()))
+        };
+        let kept: Vec<&str> = out.lines().filter_map(|l| l.strip_prefix("Skipping repository ")).filter(|r| !ours(r)).collect();
         if !kept.is_empty() {
             return Err(format!("nested repositories stay: {}", kept.join(" ")));
         }
@@ -306,16 +297,9 @@ impl Store {
         std::fs::create_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;
         let bundle = out.join(format!("{tag}.bundle"));
         let b = bundle.to_string_lossy().into_owned();
-        let refs = g(&["for-each-ref", "--format=%(objectname)"]).unwrap_or_default();
-        let mut args = vec!["bundle", "create", "-q", &b, "HEAD"];
-        let shas: Vec<&str> = refs.lines().map(str::trim).filter(|s| !s.is_empty()).collect();
-        if !shas.is_empty() {
-            args.push("--not");
-            args.extend(shas);
-        }
-        g(&args)?;
+        g(&["bundle", "create", "-q", &b, "HEAD", "--not", "--glob=refs/*"])?;
+        // Recovery moves this worktree's HEAD only, never the main checkout ref.
         g(&["reset", "-q", "--hard", at])?;
-        self.set_ref(CHECKOUT_REF, at)?;
         Ok(bundle)
     }
 }

@@ -67,9 +67,9 @@ the fleet extension). The tool is `fleet-id`
 
 ```sh
 fleet-id init                                    # once: admin/root.key + root.pub
-fleet-id issue n217 node --out /tmp/n217         # a machine's files, to ship over ssh
+fleet-id issue n5 node --out /tmp/n5         # a machine's files, to ship over ssh
 fleet-id sign <name> <role> <point> [--from ip]  # for a key made on its machine (fleet-id keygen there)
-fleet-id revoke n217                             # then ship `revoked` and restart services
+fleet-id revoke n5                             # then ship `revoked` and restart services
 fleet-id show                                    # this machine's credential, valid or not
 ```
 
@@ -88,7 +88,7 @@ the machine's key (SHA-256, raw r||s as 128 hex digits) and send
 The hub on a node can serve an **edge**: a second TLS front with device routes
 only. Set `MAKEPAD_AI_HUB_EDGE=0.0.0.0:8443` in its environment.
 
-**Router (OpenWrt at 192.0.2.16).** Forward WAN tcp/8443 to the hub only:
+**Router (OpenWrt at 192.0.2.1).** Forward WAN tcp/8443 to the hub only:
 
 ```sh
 uci add firewall redirect

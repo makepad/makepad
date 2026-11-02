@@ -428,6 +428,13 @@ pub fn shortcut_caps_for(shortcut: &str, symbols: bool) -> Vec<String> {
                     mods.push(modifier);
                 }
             }
+            None if is_primary_modifier(&token) => {
+                // "Cmd/Ctrl": whichever modifier this platform's shortcuts use.
+                let modifier = if symbols { Modifier::Meta } else { Modifier::Ctrl };
+                if !mods.contains(&modifier) {
+                    mods.push(modifier);
+                }
+            }
             None => keys.push(key_cap(&token)),
         }
     }
@@ -439,6 +446,26 @@ pub fn shortcut_caps_for(shortcut: &str, symbols: bool) -> Vec<String> {
         .collect();
     caps.extend(keys);
     caps
+}
+
+/// `Cmd/Ctrl` and its spellings: the platform's primary shortcut modifier.
+fn is_primary_modifier(token: &str) -> bool {
+    matches!(
+        token.to_ascii_lowercase().as_str(),
+        "cmd/ctrl" | "ctrl/cmd" | "cmdorctrl" | "commandorcontrol" | "mod" | "primary"
+    )
+}
+
+/// A shortcut as one menu label, in the platform's own form: `⇧⌘D` where the
+/// modifiers are symbols, `Ctrl+Shift+D` elsewhere. One place, so every menu
+/// prints a shortcut the way the platform writes it.
+pub fn shortcut_label_for(shortcut: &str, symbols: bool) -> String {
+    shortcut_caps_for(shortcut, symbols).join(if symbols { "" } else { "+" })
+}
+
+/// [`shortcut_label_for`] for the platform this build runs on.
+pub fn shortcut_label(shortcut: &str) -> String {
+    shortcut_label_for(shortcut, modifiers_are_symbols())
 }
 
 /// The caps a shortcut string turns into on the platform this build runs on.
@@ -1208,6 +1235,15 @@ mod tests {
         // A modifier this module does not know is not a modifier: it becomes
         // a cap of its own rather than vanishing.
         assert_eq!(shortcut_caps_for("hyper+k", false), ["hyper", "K"]);
+    }
+
+    #[test]
+    fn a_menu_label_follows_the_platforms_form() {
+        assert_eq!(shortcut_label_for("Cmd/Ctrl+D", true), "\u{2318}D");
+        assert_eq!(shortcut_label_for("Shift+Cmd/Ctrl+D", true), "\u{21e7}\u{2318}D");
+        assert_eq!(shortcut_label_for("Cmd/Ctrl+D", false), "Ctrl+D");
+        assert_eq!(shortcut_label_for("Shift+Cmd/Ctrl+D", false), "Ctrl+Shift+D");
+        assert_eq!(shortcut_label_for("F1", false), "F1");
     }
 
     #[test]

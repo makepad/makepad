@@ -640,33 +640,3 @@ impl ConvexPolyhedron for ConvexPolygon {
     }
 }
 */
-
-#[cfg(feature = "dim2")]
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_dilation() {
-        let polygon = ConvexPolygon::from_convex_polyline(vec![
-            Vector::new(1., 0.),
-            Vector::new(-1., 0.),
-            Vector::new(0., -1.),
-        ])
-        .unwrap();
-
-        let offsetted = polygon.offsetted(0.5);
-        let expected = vec![
-            Vector::new(2.207, 0.5),
-            Vector::new(-2.207, 0.5),
-            Vector::new(0., -1.707),
-        ];
-
-        assert_eq!(offsetted.points().len(), 3);
-        assert!(offsetted
-            .points()
-            .iter()
-            .zip(expected.iter())
-            .all(|(a, b)| (a - b).length() < 0.001));
-    }
-}

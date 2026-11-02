@@ -88,11 +88,6 @@ pub fn fns(arm: usize) -> u32 {
     FNS[arm.min(REST)].load(Relaxed)
 }
 
-/// The arms opened so far (REST included once it is in use).
-pub fn arms_open() -> usize {
-    (ARMS_OPEN.load(Relaxed) as usize).min(ARMS)
-}
-
 pub fn arm_name(arm: usize) -> [u8; NAME_BYTES] {
     let mut out = [0; NAME_BYTES];
     if arm < REST {

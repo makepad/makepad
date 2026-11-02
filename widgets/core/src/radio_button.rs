@@ -415,20 +415,22 @@ impl Widget for RadioButton {
 
     fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
         let _ = cx;
-        node.role = a11y_tree::Role::Radio;
         makepad_platform::a11y::set_string(&mut node.name, &self.text());
         node.states = a11y_tree::States::FOCUSABLE;
         node.states
             .set(a11y_tree::States::DISABLED, self.disabled(cx));
-        node.actions = a11y_tree::Actions::FOCUS | a11y_tree::Actions::SELECT;
-        node.toggle = match (|| -> Option<bool> { Some(self.active(cx)) })() {
-            Some(true) => a11y_tree::Toggle::On,
-            Some(false) => a11y_tree::Toggle::Off,
-            None => a11y_tree::Toggle::None,
-        };
-        node.states
-            .set(a11y_tree::States::SELECTED, self.active(cx));
-        node.actions.insert(a11y_tree::Actions::TOGGLE);
+        node.toggle = if self.active(cx) { a11y_tree::Toggle::On } else { a11y_tree::Toggle::Off };
+        if self.independent {
+            // A boolean of its own that a second press switches off: a toggle button, not
+            // one choice of a group.
+            node.role = a11y_tree::Role::ToggleButton;
+            node.actions = a11y_tree::Actions::FOCUS | a11y_tree::Actions::PRESS | a11y_tree::Actions::TOGGLE;
+        } else {
+            node.role = a11y_tree::Role::Radio;
+            node.actions = a11y_tree::Actions::FOCUS | a11y_tree::Actions::SELECT | a11y_tree::Actions::TOGGLE;
+            node.states
+                .set(a11y_tree::States::SELECTED, self.active(cx));
+        }
     }
 
     /// Its text, laid out (hidden radio buttons draw nothing).

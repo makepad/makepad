@@ -85,3 +85,37 @@ fn decimation_uses_local_candidates_and_preserves_atomic_budget_refusal(){
     let calls=std::cell::Cell::new(0usize);let cancel=||{calls.set(calls.get()+1);calls.get()>20_000};
     assert!(matches!(refused.decimate(1500,0.1,&mut Context::new(Limits::default(),Some(&cancel))),Err(MeshError::Cancelled)));assert_eq!(refused,before);
 }
+#[test]
+fn unwrap_splits_closed_curved_charts_keeps_polygons_whole_and_lays_out_the_unit_square(){
+    // A subdivided cube with its corners pushed in: a closed, gently curved surface the old fallback cut into single polygons.
+    let n=6usize;let size=n+1;let id=|f:usize,a:usize,b:usize|f*size*size+b*size+a;let mut positions=Vec::new();
+    for f in 0..6{for b in 0..size{for a in 0..size{let (u,v)=(2.*a as f64/n as f64-1.,2.*b as f64/n as f64-1.);
+        let p=match f{0=>[1.,v,u],1=>[-1.,u,v],2=>[u,1.,v],3=>[v,-1.,u],4=>[v,u,1.],_=>[u,v,-1.]};let l=(p[0]*p[0]+p[1]*p[1]+p[2]*p[2]).sqrt();positions.push([p[0]/l,p[1]/l,p[2]/l]);
+    }}}
+    let mut polys=Vec::new();for f in 0..6{for b in 0..n{for a in 0..n{let c=[id(f,a,b),id(f,a+1,b),id(f,a+1,b+1),id(f,a,b+1)];polys.push(Polygon{vertices:c.map(|x|x as u32).to_vec(),uvs:vec![[0.,0.],[1.,0.],[1.,1.],[0.,1.]],material:0});}}}
+    let mut m=Mesh::from_polygons(&positions,&polys,&mut ctx()).unwrap();let faces=m.faces().iter().map(|f|f.id).collect::<Vec<_>>();m.unwrap_uv(&faces,&mut ctx()).unwrap();
+    let islands=m.uv_islands(&faces,&mut ctx()).unwrap();assert!(islands.len()<=6*n*n/4,"{} islands",islands.len());assert_eq!(islands.iter().map(|i|i.faces.len()).sum::<usize>(),faces.len());
+    assert!(m.corners().iter().all(|c|(0.0..=1.0).contains(&c.uv[0])&&(0.0..=1.0).contains(&c.uv[1])));
+    assert!(islands.iter().map(|i|i.area).sum::<f64>()>0.4,"the charts leave most of the square empty");
+}
+#[test]
+fn unwrap_respects_authored_seams_and_keeps_pinned_charts_where_they_are(){
+    let mut m=grid(5,0.);let faces=m.faces().iter().map(|f|f.id).collect::<Vec<_>>();m.unwrap_uv(&faces,&mut ctx()).unwrap();assert_eq!(m.uv_islands(&faces,&mut ctx()).unwrap().len(),1);
+    let edges=m.vertices().iter().filter(|v|v.position[0]==0.).map(|v|v.id).collect::<Vec<_>>();
+    let mut seamed=m.clone();let mut ordered=edges.clone();ordered.sort_by(|a,b|seamed.vertex(*a).unwrap().position[2].total_cmp(&seamed.vertex(*b).unwrap().position[2]));
+    for w in ordered.windows(2){seamed.set_edge_attributes(EdgeKey::new(w[0],w[1]),EdgeAttributes{seam:true,..Default::default()},&mut ctx()).unwrap();}seamed.unwrap_uv(&faces,&mut ctx()).unwrap();assert_eq!(seamed.uv_islands(&faces,&mut ctx()).unwrap().len(),2,"a seam is a chart boundary");
+
+    // A cube: one face keeps its pinned layout, the rest pack around it.
+    let mut cube=Mesh::cube([2.;3],&mut ctx()).unwrap();let faces=cube.faces().iter().map(|f|f.id).collect::<Vec<_>>();cube.project_uv_box(&faces,[0.1;2],[0.3;2],&mut ctx()).unwrap();
+    let pinned=cube.face_corners(faces[0]).unwrap().to_vec();cube.pin_uv(&[pinned[0].id],true,&mut ctx()).unwrap();cube.unwrap_uv(&faces,&mut ctx()).unwrap();
+    for c in cube.face_corners(faces[0]).unwrap(){let before=pinned.iter().find(|p|p.id==c.id).unwrap();assert_eq!(c.uv,before.uv,"the pinned chart moved");}
+    let islands=cube.uv_islands(&faces,&mut ctx()).unwrap();let held=islands.iter().find(|i|i.faces.contains(&faces[0])).unwrap();
+    for other in islands.iter().filter(|i|!i.faces.contains(&faces[0])){assert!((0..2).any(|d|other.bounds[1][d]<=held.bounds[0][d]||held.bounds[1][d]<=other.bounds[0][d]),"a chart landed on the pinned one");}
+}
+#[test]
+fn pack_keeps_islands_apart_and_reports_an_impossible_padding(){
+    let mut m=Mesh::cube([2.;3],&mut ctx()).unwrap();let faces=m.faces().iter().map(|f|f.id).collect::<Vec<_>>();m.project_uv_box(&faces,[1.;2],[0.;2],&mut ctx()).unwrap();let before=m.clone();
+    let error=m.pack_uv(&faces,0.49,&mut ctx()).unwrap_err();assert!(error.to_string().contains("atlas"),"{error}");assert_eq!(m,before);
+    m.pack_uv(&faces,0.02,&mut ctx()).unwrap();let islands=m.uv_islands(&faces,&mut ctx()).unwrap();assert_eq!(islands.len(),6);
+    assert!(islands.iter().map(|i|i.area).sum::<f64>()>0.5,"six squares fill most of the square");
+}

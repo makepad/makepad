@@ -365,7 +365,54 @@ fn connect(start: bool) -> Result<PathBuf, String> {
 }
 /// Only the ordinary package invocation auto-connects: flags changing compilation retain
 /// their one-shot meaning. An explicit --serve with such flags is rejected, never ignored.
+/// `-p <package>`: a package like one named plainly. Several: each checked by a process of its own,
+/// all of them whatever one says; the exit is the worst.
+fn check_packages(args: &[String]) -> Result<Vec<String>, i32> {
+    let mut out = Vec::new();
+    let mut packages = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-p" | "--package" => {
+                let Some(p) = args.get(i + 1).filter(|p| !p.starts_with('-')) else {
+                    eprintln!("makepad check: {} needs a package", args[i]);
+                    return Err(2);
+                };
+                packages.push(p.clone());
+                i += 2;
+            }
+            _ => {
+                out.push(args[i].clone());
+                i += 1;
+            }
+        }
+    }
+    if packages.len() < 2 {
+        out.extend(packages);
+        return Ok(out);
+    }
+    let exe = std::env::current_exe().map_err(|e| {
+        eprintln!("makepad check: the loader's own path: {e}");
+        2
+    })?;
+    let mut worst = 0;
+    for p in packages {
+        let status = std::process::Command::new(&exe).arg("check").args(&out).arg(&p).status();
+        let code = status.ok().and_then(|s| s.code()).unwrap_or(2);
+        if code != 0 {
+            eprintln!("makepad check: {p}: exit {code}");
+        }
+        worst = worst.max(code);
+    }
+    Err(worst)
+}
+
 pub fn check(sess: &std::sync::Arc<crate::Session>, args: &[String]) -> i32 {
+    let args = match check_packages(args) {
+        Ok(a) => a,
+        Err(code) => return code,
+    };
+    let args = &args[..];
     let start = args.iter().any(|a|a=="--serve");
     let never = args.iter().any(|a|a=="--no-serve");
     let json = args.iter().any(|a|a=="--json");

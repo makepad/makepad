@@ -1,6 +1,5 @@
 use super::*;
 use crate::vulkan::Detector;
-use makepad_ai_vulkan::Device;
 
 const ACTS: [Act; 6] = [
     Act::None,
@@ -10,16 +9,6 @@ const ACTS: [Act; 6] = [
     Act::HardSwishAffine { scale: 0.8, bias: -0.2 },
     Act::Sigmoid,
 ];
-
-fn available() -> bool {
-    match Device::shared() {
-        Ok(_) => true,
-        Err(why) => {
-            eprintln!("textdet Vulkan comparison skipped: no usable Vulkan device ({why})");
-            false
-        }
-    }
-}
 
 fn graph(ops: Vec<Op>, weights: Vec<Tensor>) -> Graph {
     Graph { ops, weights, pre: Preprocess::default(), post: Postprocess::default() }
@@ -39,7 +28,6 @@ fn compare(label: &str, graph: &Graph, detector: &mut Detector, input: Map) {
 }
 
 fn check(label: &str, graph: Graph, sizes: &[(usize, usize)]) {
-    // Only device discovery can skip. A broken shader or dispatch must fail.
     let mut detector = Detector::new(&graph).unwrap_or_else(|why| panic!("{label}: {why}"));
     for (i, &(h, w)) in sizes.iter().enumerate() {
         compare(label, &graph, &mut detector, synthetic_input(97 + i as u64, h, w));
@@ -48,7 +36,6 @@ fn check(label: &str, graph: Graph, sizes: &[(usize, usize)]) {
 
 #[test]
 fn synthetic_graph_matches_cpu_across_sizes_and_reuse() {
-    if !available() { return; }
     for seed in [1, 17, 93] {
         check(&format!("synthetic seed {seed}"), synthetic_graph(seed),
             &[(32, 48), (64, 64), (96, 160), (32, 48), (96, 160)]);
@@ -57,7 +44,6 @@ fn synthetic_graph_matches_cpu_across_sizes_and_reuse() {
 
 #[test]
 fn single_convolutions_match_cpu() {
-    if !available() { return; }
     let mut r = Rng(211);
     // M crosses a tile boundary; K and the spatial rows have unaligned tails.
     // Asymmetric pads and strides must not fall through the pointwise shortcut.
@@ -88,7 +74,6 @@ fn single_convolutions_match_cpu() {
 
 #[test]
 fn chunked_convolution_matches_cpu_and_bounds_scratch() {
-    if !available() { return; }
     let mut r = Rng(271);
     let g = graph(vec![Op::Conv {
         input: 0, weight: 0, bias: Some(1), out_channels: 35,
@@ -112,7 +97,6 @@ fn chunked_convolution_matches_cpu_and_bounds_scratch() {
 
 #[test]
 fn single_transposed_convolutions_match_cpu() {
-    if !available() { return; }
     let mut r = Rng(317);
     for (a, act) in ACTS.into_iter().enumerate() {
         for (kernel, stride) in [((2, 2), (2, 2)), ((2, 3), (2, 3)), ((3, 2), (2, 1)), ((2, 2), (3, 4)), ((1, 1), (1, 1))] {
@@ -131,7 +115,6 @@ fn single_transposed_convolutions_match_cpu() {
 
 #[test]
 fn single_elementwise_ops_match_cpu() {
-    if !available() { return; }
     for act in ACTS {
         let g = graph(vec![Op::Activate { input: 0, act }], vec![]);
         let mut detector = Detector::new(&g).unwrap();
@@ -148,7 +131,6 @@ fn single_elementwise_ops_match_cpu() {
 
 #[test]
 fn single_pooling_ops_match_cpu() {
-    if !available() { return; }
     for max in [false, true] {
         for (kernel, stride, pad) in [(3, 2, 1), (2, 2, 0), (3, 1, 2), (1, 2, 3)] {
             check(&format!("pool max={max} k{kernel} s{stride} p{pad}"),
@@ -161,7 +143,6 @@ fn single_pooling_ops_match_cpu() {
 
 #[test]
 fn single_resize_and_concat_ops_match_cpu() {
-    if !available() { return; }
     for scale in [1, 2, 3] {
         check(&format!("nearest x{scale}"), graph(vec![Op::Upsample { input: 0, scale }], vec![]), &[(1, 1), (7, 9), (32, 48)]);
     }
@@ -171,7 +152,6 @@ fn single_resize_and_concat_ops_match_cpu() {
 
 #[test]
 fn broadcast_resize_and_branched_lifetimes_match_cpu() {
-    if !available() { return; }
     // Graphs have one external input, so differing binary operand shapes and
     // a non-integer UpsampleLike ratio need a producer before the op under test.
     check("channel broadcast", graph(vec![Op::GlobalAvgPool { input: 0 }, Op::Mul { x: 0, s: 1 }], vec![]),
@@ -197,7 +177,6 @@ fn broadcast_resize_and_branched_lifetimes_match_cpu() {
 
 #[test]
 fn reduction_dispatch_splits_over_two_dimensions() {
-    if !available() { return; }
     // One group per channel crosses the dispatch boundary with little memory.
     let g = graph(vec![Op::GlobalAvgPool { input: 0 }], vec![]);
     let mut detector = Detector::new(&g).unwrap();
@@ -210,7 +189,6 @@ fn reduction_dispatch_splits_over_two_dimensions() {
 /// when its thread-local kernel cache dies on every cycle.
 #[test]
 fn detectors_can_be_made_and_dropped_many_times() {
-    if !available() { return; }
     for i in 0..100 {
         std::thread::spawn(move || {
             let graph = synthetic_graph(1);

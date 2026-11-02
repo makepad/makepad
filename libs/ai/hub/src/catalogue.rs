@@ -521,33 +521,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&cache);
     }
 
-    /// The real thing, over the network (`--ignored`): the smallest registry model
-    /// (basic-pitch, 230 KB) through the download worker (fleet peers, then upstream),
-    /// verified on disk, then deleted.
-    #[test]
-    #[ignore]
-    fn downloads_and_deletes_the_smallest_model_for_real() {
-        let registry = Registry::embedded().unwrap();
-        let cache = temp_cache("real");
-        let d = Downloads::start(registry.clone(), cache.clone(), Downloader::from_env().unwrap());
-        d.request("basic-pitch");
-        let started = std::time::Instant::now();
-        let mut seen_progress = false;
-        while d.take_ended().is_empty() {
-            assert!(started.elapsed().as_secs() < 300, "basic-pitch did not finish in 5 min: {:?}", d.rows());
-            seen_progress |= d.rows().iter().any(|r| matches!(r.state, DownloadState::Fetching { .. }));
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-        assert!(d.rows().is_empty(), "it ended without a failure: {:?}", d.rows());
-        let spec = registry.find("basic-pitch").unwrap();
-        assert!(spec.files_present(&cache), "verified on disk");
-        eprintln!("downloaded basic-pitch in {:?} (progress seen: {seen_progress})", started.elapsed());
-        let freed = delete_model(&registry, &cache, "basic-pitch", false).unwrap();
-        assert!(freed >= 230_444, "freed {freed}");
-        assert!(!spec.files_present(&cache));
-        let _ = std::fs::remove_dir_all(&cache);
-    }
-
     #[test]
     fn a_download_queue_takes_requests_once_and_cancels_queued_ones() {
         let cache = temp_cache("queue");

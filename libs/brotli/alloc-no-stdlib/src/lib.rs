@@ -29,20 +29,20 @@ pub fn uninitialized<T> (_data : &mut[T]) {}
 pub struct CallocBackingStore<'a, T : 'a> {
     pub raw_data : *mut u8,
     pub data : &'a mut[T],
-    free : unsafe extern "C" fn(*mut u8),
+    free : unsafe extern "C" fn(*mut core::ffi::c_void),
 }
 
 pub enum AllocatorC {
-   Calloc(unsafe extern "C" fn(usize, usize) -> *mut u8),
-   Malloc(unsafe extern "C" fn(usize) -> *mut u8),
+   Calloc(unsafe extern "C" fn(usize, usize) -> *mut core::ffi::c_void),
+   Malloc(unsafe extern "C" fn(usize) -> *mut core::ffi::c_void),
    Custom(fn(usize) -> *mut u8),
 }
 impl<'a, T : 'a> CallocBackingStore<'a, T> {
-  pub unsafe fn new(num_elements : usize, alloc : AllocatorC, free : unsafe extern "C" fn (*mut u8), should_free : bool) -> Self{
+  pub unsafe fn new(num_elements : usize, alloc : AllocatorC, free : unsafe extern "C" fn (*mut core::ffi::c_void), should_free : bool) -> Self{
      let retval : *mut u8 = if num_elements == 0 {core::ptr::null_mut()} else {
         match alloc {
-           AllocatorC::Calloc(calloc) => calloc(num_elements, core::mem::size_of::<T>()),
-           AllocatorC::Malloc(malloc) => malloc(num_elements *core::mem::size_of::<T>()),
+           AllocatorC::Calloc(calloc) => calloc(num_elements, core::mem::size_of::<T>()).cast(),
+           AllocatorC::Malloc(malloc) => malloc(num_elements *core::mem::size_of::<T>()).cast(),
            AllocatorC::Custom(malloc) => malloc(num_elements *core::mem::size_of::<T>()),
         }
      };
@@ -77,7 +77,7 @@ impl<'a, T:'a> Drop for CallocBackingStore<'a, T> {
     self.data = &mut [];
     if !self.raw_data.is_null() {
       let local_free = self.free;
-      unsafe {(local_free)(self.raw_data)};
+      unsafe {(local_free)(self.raw_data.cast())};
 
     }
   }

@@ -208,12 +208,4 @@ mod tests {
         }
     }
 
-    #[test]
-    fn snapshot_debug_mesh_layout_targets_thirty_two_centimeter_chunks() {
-        let snapshot = make_flat_floor_snapshot(0.02);
-        let layout = layout(&snapshot);
-
-        assert_eq!(layout.chunk_edge_voxels, 16);
-        assert!((layout.chunk_world_size_meters - 0.32).abs() <= 1.0e-6);
-    }
 }

@@ -454,7 +454,7 @@ impl<'a> Lcx<'a> {
         let mut used: u64 = 0;
         let mut regs: Vec<Option<(PReg, Option<Class>)>> = vec![None; ops.len()];
         for (k, op) in ops.iter().enumerate() {
-            if !op.explicit || matches!(op.dir, AsmDir::Const | AsmDir::Sym) {
+            if !op.explicit || matches!(op.dir, AsmDir::Const | AsmDir::Sym | AsmDir::Label) {
                 continue;
             }
             let name = crate::lit::unescape_str(&self.src_text(op.reg.lo, op.reg.hi));
@@ -466,7 +466,7 @@ impl<'a> Lcx<'a> {
             regs[k] = Some((r, None));
         }
         for (k, op) in ops.iter().enumerate() {
-            if op.explicit || matches!(op.dir, AsmDir::Const | AsmDir::Sym) {
+            if op.explicit || matches!(op.dir, AsmDir::Const | AsmDir::Sym | AsmDir::Label) {
                 continue;
             }
             let c = Class::parse(arch, &self.src_text(op.reg.lo, op.reg.hi))?;
@@ -480,8 +480,19 @@ impl<'a> Lcx<'a> {
         let mut outs: Vec<(VReg, (Place, TyId), Rep, bool)> = Vec::new();
         let mut writes: u64 = clobber_abi_mask(arch, spec.options);
         let mut args: Vec<Arg> = Vec::with_capacity(ops.len());
+        let mut labels: Vec<(String, ExprId)> = Vec::new();
         for (k, op) in ops.iter().enumerate() {
             match op.dir {
+                AsmDir::Label => {
+                    if naked {
+                        return Err("the `label` operand is not allowed in `naked_asm!`".to_string());
+                    }
+                    let name = format!(".Lrelax_asm_goto_{k}");
+                    // (its place in the template is the label's name, a label of the block's own stubs)
+                    args.push(Arg::Const(0));
+                    labels.push((name, op.input.ok_or("label operand without a block")?));
+                    continue;
+                }
                 AsmDir::Sym => {
                     let s = self.asm_sym(op.input.ok_or("sym operand without a path")?)?;
                     args.push(Arg::Sym(rasm::SymRef::Sym(s)));
@@ -553,11 +564,44 @@ impl<'a> Lcx<'a> {
                         Some(x) if !c.modifiers().contains(x) => return Err(format!("invalid asm template modifier `{}` for this register class", x)),
                         Some(_) => {}
                     },
-                    None if m.is_some() && matches!(op.dir, AsmDir::Const | AsmDir::Sym) => return Err("asm template modifiers are not allowed for `const` or `sym` arguments".to_string()),
+                    None if m.is_some() && matches!(op.dir, AsmDir::Const | AsmDir::Sym | AsmDir::Label) => return Err("asm template modifiers are not allowed for `const` or `sym` arguments".to_string()),
                     None => {}
                 }
             }
         }
+        for p in &mut pieces {
+            if let Piece::Op(k, _) = p {
+                if ops[*k as usize].dir == AsmDir::Label { *p = Piece::Text(format!(".Lrelax_asm_goto_{k}")); }
+            }
+        }
+        // `label` operands: RIR has no multi-successor asm, so the block ends in a stub that says how it
+        // was left. Falling through sets a free register to 0, the stub of label k sets it to k + 1, and
+        // a plain branch on that output reaches the label's block.
+        let selector = if labels.is_empty() { None } else {
+            let c = Class::parse(arch, "reg")?;
+            let r = c.candidates().into_iter().find(|r| used & (1 << r.bit()) == 0).ok_or("inline assembly requires more registers than available")?;
+            used |= 1 << r.bit();
+            writes |= 1 << r.bit();
+            let at = args.len() as u32;
+            args.push(Arg::Reg(r));
+            let att = spec.options & ASM_ATT_SYNTAX != 0;
+            let set = |pieces: &mut Vec<Piece>, value: usize| {
+                match arch {
+                    Arch::X64 if att => { pieces.push(Piece::Text(format!("\nmov ${value}, "))); pieces.push(Piece::Op(at, Some(c.default_modifier()))); }
+                    Arch::X64 => { pieces.push(Piece::Text("\nmov ".to_string())); pieces.push(Piece::Op(at, Some(c.default_modifier()))); pieces.push(Piece::Text(format!(", {value}"))); }
+                    Arch::Arm64 => { pieces.push(Piece::Text("\nmov ".to_string())); pieces.push(Piece::Op(at, Some(c.default_modifier()))); pieces.push(Piece::Text(format!(", #{value}"))); }
+                }
+                let jump = if arch == Arch::X64 { "jmp" } else { "b" };
+                pieces.push(Piece::Text(format!("\n{jump} .Lrelax_asm_goto_end\n")));
+            };
+            set(&mut pieces, 0);
+            for (i, (name, _)) in labels.iter().enumerate() {
+                pieces.push(Piece::Text(format!("{name}:")));
+                set(&mut pieces, i + 1);
+            }
+            pieces.push(Piece::Text(".Lrelax_asm_goto_end:\n".to_string()));
+            Some((r, self.f.vreg(Cls::I)))
+        };
         let out = rasm::assemble(arch, rasm::Format::host(), rasm::Kind::Inline, &pieces, &args, spec.options & ASM_ATT_SYNTAX != 0).map_err(|e| format!("asm!: {}", e))?;
         if out.sections.len() != 1 {
             return Err("asm!: an inline block has one section".to_string());
@@ -592,22 +636,52 @@ impl<'a> Lcx<'a> {
         if naked {
             opts |= R_NORETURN;
         }
-        if opts & R_NORETURN != 0 && !outs.is_empty() {
+        if opts & R_NORETURN != 0 && !outs.is_empty() && labels.is_empty() {
             return Err("asm outputs are not allowed with the `noreturn` option".to_string());
         }
-        let block = AsmBlock { code, fixups, ins: in_regs, outs: outs.iter().map(|o| regs_of(&ops, &regs, o.0, &outs)).collect(), regs: used | writes, writes, opts };
-        let rets: Vec<VReg> = outs.iter().map(|o| o.0).collect();
+        // (the stubs return through the selector: the block as RIR sees it falls through)
+        let noreturn = opts & R_NORETURN != 0;
+        if selector.is_some() { opts &= !R_NORETURN; }
+        let mut out_regs: Vec<PReg> = outs.iter().map(|o| regs_of(&ops, &regs, o.0, &outs)).collect();
+        let mut rets: Vec<VReg> = outs.iter().map(|o| o.0).collect();
+        if let Some((r, d)) = selector {
+            out_regs.push(r);
+            rets.push(d);
+        }
+        let block = AsmBlock { code, fixups, ins: in_regs, outs: out_regs, regs: used | writes, writes, opts };
         self.emit(Inst::Call(Callee::Asm(Box::new(block)), ins, rets));
         if naked {
             self.f.naked = true;
         }
-        if opts & R_NORETURN != 0 {
+        if noreturn && selector.is_none() {
             self.term(Term::Unreachable);
             self.dead();
             return Ok(self.unit());
         }
         for (d, place, rep, vec) in outs {
             self.asm_out(&place, d, rep, vec);
+        }
+        if let Some((_, selector)) = selector {
+            let join = self.f.block();
+            for (i, (_, block)) in labels.iter().enumerate() {
+                let value = self.iconst(i as i64 + 1);
+                let taken = self.icmp(Cond::Eq, false, selector, value);
+                let (yes, next) = (self.f.block(), self.f.block());
+                self.term(Term::Branch(taken, yes, next));
+                self.switch(yes);
+                let mark = self.stmt_temps.len();
+                self.lower_expr(*block);
+                self.drop_stmt_temps_from(mark);
+                self.goto(join);
+                self.switch(next);
+            }
+            if noreturn {
+                self.term(Term::Unreachable);
+                self.dead();
+            } else {
+                self.goto(join);
+            }
+            self.switch(join);
         }
         Ok(self.unit())
     }

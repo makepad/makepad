@@ -9,7 +9,11 @@
 //! older than the node's build artifacts made its cargo keep them, and build loaders from old
 //! sources). The node remembers the source's size and mtime of what it wrote, and the stat of the
 //! file it wrote, so `ship-have` still knows a file it holds as the source has it; and symlinks to `ship-link` (Unix nodes); then `ship-done` names
-//! what was shipped and deleted (the node undoes it at the lease's end). Up to [`WINDOW`] requests
+//! the complete shipped set, deletions and pinned base blobs. Tree leases undo these paths at
+//! release. Overlay leases keep exactly that set under the lane's edits folder: stale files go,
+//! each lease stages its transfer before publishing (equal-pin leases can ship concurrently);
+//! deletions become `.makepad-run-deleted`, and `.makepad-run-edits` records base blobs (`new`
+//! for additions). Live saves use the same complete set. Up to [`WINDOW`] requests
 //! are in flight on one routed channel per service.
 
 use makepad_remote::conn::Event;
@@ -109,9 +113,29 @@ fn manifest_line(e: &Entry) -> String {
 // ---- the node side (the lease executor calls these with the lease's work dir)
 
 /// A relative path that stays inside its root.
-fn inside(rel: &str) -> bool {
+pub(crate) fn inside(rel: &str) -> bool {
     let p = Path::new(rel);
-    !rel.is_empty() && !p.is_absolute() && !rel.contains('\\') && p.components().all(|c| matches!(c, std::path::Component::Normal(_)))
+    !rel.is_empty() && !p.is_absolute() && !rel.contains(['\\', '\t', '\n', '\r']) && rel.split('/').all(|c| !matches!(c, "" | "." | "..")) && p.components().all(|c| matches!(c, std::path::Component::Normal(_)))
+}
+
+/// Clear cached staging paths whose file/directory shape changed since the previous save.
+pub fn stage(work: &Path, manifest_b64: &str) -> Result<(), String> {
+    let raw = unb64(manifest_b64).ok_or("ship-have: manifest is not base64")?;
+    for line in String::from_utf8_lossy(&raw).lines() {
+        let rel = line.split('\t').next().filter(|p| inside(p)).ok_or("ship-have: bad path")?;
+        let mut path = work.to_path_buf();
+        let mut parts = Path::new(rel).components().peekable();
+        while let Some(part) = parts.next() {
+            path.push(part.as_os_str());
+            match std::fs::symlink_metadata(&path) {
+                Ok(m) if parts.peek().is_some() && !m.is_dir() => std::fs::remove_file(&path).map_err(|e| e.to_string())?,
+                Ok(m) if parts.peek().is_none() && m.is_dir() => std::fs::remove_dir_all(&path).map_err(|e| e.to_string())?,
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.to_string()),
+                _ => {}
+            }
+        }
+    }
+    Ok(())
 }
 
 /// `ship-have <b64 manifest>` (after the lease id): the indexes of the entries this work dir
@@ -494,4 +518,43 @@ mod tests {
         assert_eq!(have(&work, &man).unwrap(), r#"{"need":[0]}"#);
         let _ = std::fs::remove_dir_all(&base);
     }
+}
+
+/// Base blobs come from the pin, including staged edits whose index already differs from HEAD.
+pub fn bases_json(root: &Path, pin: &super::Pin, paths: &[String]) -> Result<String, String> {
+    let mut index = std::collections::BTreeMap::new();
+    for (dir, sha, prefix) in std::iter::once((root.to_path_buf(), pin.makepad.as_str(), "")).chain(pin.commercial.as_deref().map(|s| (root.join("apps/commercial"), s, "apps/commercial/"))) {
+        let text = super::wt::git(Some(&dir), None, &["ls-tree", "-r", "-z", sha])?;
+        for entry in text.split('\0') {
+            let Some((meta, path)) = entry.split_once('\t') else { continue };
+            if prefix.is_empty() && pin.commercial.is_some() && path.starts_with("apps/commercial/") { continue; }
+            let mut words = meta.split_whitespace();
+            let _mode = words.next();
+            if words.next() == Some("commit") { continue; }
+            if let Some(blob) = words.next() { index.insert(format!("{prefix}{path}"), blob.to_string()); }
+        }
+    }
+    Ok(format!("{{{}}}", paths.iter().map(|p| format!("{}:{}", makepad_remote::json_str(p), makepad_remote::json_str(index.get(p).map_or("new", String::as_str)))).collect::<Vec<_>>().join(",")))
+}
+
+/// Current files and deletions against a fixed pin; a live run keeps that pin across saves.
+pub fn uncommitted(root: &Path, pin: &super::Pin) -> Result<(Vec<String>, Vec<String>), String> {
+    let (mut changed, mut deleted) = (Vec::new(), Vec::new());
+    for (dir, sha, prefix) in std::iter::once((root.to_path_buf(), pin.makepad.as_str(), "")).chain(pin.commercial.as_deref().map(|s| (root.join("apps/commercial"), s, "apps/commercial/"))) {
+        let tracked = super::wt::git(Some(&dir), None, &["diff", "--name-only", "--no-renames", "-z", "--ignore-submodules=all", sha, "--"])?;
+        let untracked = super::wt::git(Some(&dir), None, &["ls-files", "--others", "--exclude-standard", "-z"])?;
+        for p in tracked.split('\0').chain(untracked.split('\0')).filter(|p| !p.is_empty()) {
+            let p = format!("{prefix}{p}");
+            if never_ships(&p) || (prefix.is_empty() && pin.commercial.is_some() && p.starts_with("apps/commercial/")) { continue; }
+            match std::fs::symlink_metadata(root.join(&p)) {
+                Ok(m) if !m.is_dir() => changed.push(p),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => deleted.push(p),
+                Err(e) => return Err(format!("{p}: {e}")),
+                _ => {}
+            }
+        }
+    }
+    changed.sort(); changed.dedup();
+    deleted.sort(); deleted.dedup();
+    Ok((changed, deleted))
 }

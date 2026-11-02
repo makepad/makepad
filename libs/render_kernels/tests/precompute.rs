@@ -3,7 +3,6 @@
 use makepad_render_kernels::dispatch::sched::{InlineExecutor, Job, Priority};
 use makepad_render_kernels::precompute::precompute;
 use makepad_render_kernels::{compile, engine};
-use std::time::Instant;
 
 // `math: portable`: the kernels promise the host loop's f32 bits (a fast
 // kernel fuses multiply-adds).
@@ -26,13 +25,6 @@ fn a_one_kilohertz_spring_over_ten_seconds() {
         x = x + v * 0.001;
         assert_eq!(h.table[s * 2], x.to_bits(), "step {s}");
     }
-    let mut best = f64::MAX;
-    for _ in 0..5 {
-        let t = Instant::now();
-        std::hint::black_box(run());
-        best = best.min(t.elapsed().as_secs_f64() * 1e3);
-    }
-    println!("10k steps of a one-element stepper: {best:.3} ms");
     // Sampled in a kernel by t, exactly as the host samples it.
     let sample = compile("let math = portable\nuse std.anim.*\nlet table = input(f32)\nlet out = output(f32)\nlet steps = param(2)\nfn element(i) { out[i] = history_at(table, 1, 2, 0, 0, 0.0, 0.001, int(steps), float(i) * 0.0137 - 0.5) }", &[], &[]).unwrap();
     let n = 1000;

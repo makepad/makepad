@@ -192,13 +192,19 @@ mod unix {
         0
     }
 
-    /// exit(): the main thread's pthread key destructors do not run (the program's thread locals
-    /// are left as they are, as in a rustc build).
-    pub fn exit(code: i32) -> ! {
-        // last registered first; one a handler registers runs too
+    /// Runs (and empties) the program's atexit handlers, last registered first; one a handler
+    /// registers runs too. exit() runs them, and so does the exit of the run's app domain, which
+    /// ends the process from the host (domain.rs exit_current).
+    pub fn run_program_atexit() {
         while let Some(f) = { let mut g = PROGRAM_ATEXIT.lock().unwrap_or_else(|e| e.into_inner()); g.pop() } {
             f();
         }
+    }
+
+    /// exit(): the main thread's pthread key destructors do not run (the program's thread locals
+    /// are left as they are, as in a rustc build).
+    pub fn exit(code: i32) -> ! {
+        run_program_atexit();
         // An embedded run (the Android host: its library handle is named) failed: exit() would run the
         // process's atexit/static destructors on this thread while the host's UI thread still locks
         // the mutexes they destroy (FORTIFY abort, no message). The host owns the process: the failure
@@ -224,7 +230,7 @@ mod unix {
             #[cfg(target_os = "android")]
             #[link_name = "__errno"]
             fn __errno_location() -> *mut i32;
-            #[cfg(target_os = "macos")]
+            #[cfg(target_vendor = "apple")]
             #[link_name = "__error"]
             fn __errno_location() -> *mut i32;
         }
@@ -267,7 +273,7 @@ mod unix {
 
 #[cfg(target_os = "linux")]
 mod imp {
-    pub use super::unix::{program_atexit, os_args_bytes, create_private, ensure_private_dir, exit, last_error, lookup, set_last_error};
+    pub use super::unix::{program_atexit, run_program_atexit, os_args_bytes, create_private, ensure_private_dir, exit, last_error, lookup, set_last_error};
     use super::unix::{dlopen, dlsym};
 
     #[cfg(target_env = "gnu")]
@@ -370,7 +376,7 @@ mod imp {
 
 #[cfg(target_os = "android")]
 mod imp {
-    pub use super::unix::{program_atexit, os_args_bytes, create_private, ensure_private_dir, exit, last_error, set_last_error};
+    pub use super::unix::{program_atexit, run_program_atexit, os_args_bytes, create_private, ensure_private_dir, exit, last_error, set_last_error};
     use super::unix::{dlopen, dlsym};
 
     /// The library Relax itself is (libmakepad.so): System.loadLibrary loads it into a scope of its
@@ -525,9 +531,9 @@ mod imp {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(target_vendor = "apple")]
 mod imp {
-    pub use super::unix::{program_atexit, os_args_bytes, create_private, ensure_private_dir, exit, last_error, lookup, set_last_error};
+    pub use super::unix::{program_atexit, run_program_atexit, os_args_bytes, create_private, ensure_private_dir, exit, last_error, lookup, set_last_error};
     use super::unix::{dlopen, dlsym};
 
     /// Symbol in any loaded image (RTLD_DEFAULT). libm lives in libSystem, always loaded.
@@ -555,6 +561,13 @@ mod imp {
         false
     }
 
+    /// iOS and tvOS: a phone or tablet runs on its battery (IOKit's power sources are macOS's)
+    #[cfg(not(target_os = "macos"))]
+    pub fn on_battery() -> bool {
+        true
+    }
+
+    #[cfg(target_os = "macos")]
     pub fn on_battery() -> bool {
         #[link(name = "IOKit", kind = "framework")]
         extern "C" {

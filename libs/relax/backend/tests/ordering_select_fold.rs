@@ -6,6 +6,7 @@
 use relax_backend::passes;
 use relax_backend::rir::*;
 
+#[cfg(all(target_arch = "x86_64", unix))]
 const CONDS: [Cond; 6] = [Cond::Lt, Cond::Le, Cond::Gt, Cond::Ge, Cond::Eq, Cond::Ne];
 const U64: IntTy = IntTy { bits: 64, signed: false };
 
@@ -50,6 +51,7 @@ fn build(cc: Cond, signed: bool, k: i64, narrow: u8) -> Func {
     f
 }
 
+#[cfg(all(target_arch = "x86_64", unix))]
 fn want(cc: Cond, signed: bool, k: i64, narrow: u8, a: u64, b: u64) -> u64 {
     let ord: i64 = if a < b { -1 } else { (a != b) as i64 };
     let x = match narrow {

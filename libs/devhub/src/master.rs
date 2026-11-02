@@ -94,7 +94,7 @@ pub struct Heard {
 /// The machines the master dials: every `nodes.conf` seed, then each heard node that is not one
 /// of them. Machines are matched by fleet identity (a seed's identity is what its certificate
 /// proved when it was dialled: `identity(addr)`), and by address before a seed was reached, so
-/// `n100` in nodes.conf and the node announcing itself as `100` are one machine.
+/// `n1` in nodes.conf and the node announcing itself as `100` are one machine.
 pub fn merge(seeds: &Hosts, heard: &[Heard], identity: &dyn Fn(&str) -> Option<String>) -> Hosts {
     let mut out = seeds.clone();
     let seed_ids: Vec<String> = seeds.hosts.iter().filter_map(|h| identity(fleet_addr(h))).collect();
@@ -126,6 +126,9 @@ impl Master {
         let board = Arc::new(crate::sync::prewarm::Board::new(proto::home()));
         let pw = board.clone();
         let on_record: OnRecord = Arc::new(move |r| {
+            if let Some(hot) = makepad_remote::hot::Record::parse(&r.detail) {
+                if let Err(e) = crate::hot::ingest(hot) { eprintln!("devhub hot: {e}"); }
+            }
             #[cfg(feature = "checkout")]
             crate::orch::on_record(r);
             pw.see(&r);
@@ -163,6 +166,7 @@ impl Master {
         // the control socket: route + hosts (the hub's), `watch` with every machine's records,
         // and `ps` / `reply` for this Mac's JITs (local inspect stays `makepad inspect`)
         let ep = hub.client_endpoint();
+        crate::hot::register(&ep);
         let sink = ep.register_watch();
         let l = local.clone();
         ep.register("ps", 1, makepad_remote::lines::service("ps", Arc::new(move |_, out| l.ps(out))));
@@ -208,8 +212,9 @@ impl Master {
         {
             let (s, o) = (sink.clone(), on_record.clone());
             crate::orch::start(&ep, name, leases.clone(), Arc::new(move |r: Record| {
-                s.emit(&r.to_json());
+                let seq = s.emit(&r.to_json());
                 o(&r);
+                seq
             }));
         }
         // the landing train: `land` (DESIGN: devhub land), its records on the same feed
@@ -218,6 +223,22 @@ impl Master {
             s.emit(&r.to_json());
             o(&r);
         }));
+        #[cfg(feature = "checkout")]
+        {
+            let home = proto::home();
+            let repo = crate::lease::wt::default_repo();
+            let proofs = Arc::new(crate::gateproof::Store::open(&home));
+            let run = crate::bucket::fast(repo.clone(), proofs);
+            let (s, o) = (sink.clone(), on_record.clone());
+            let timing = crate::bucket::Timing { every: Duration::ZERO, quiet: Duration::from_secs(60), cap: Duration::from_secs(10 * 60) };
+            crate::bucket::spawn("fast", timing, repo, home.clone(), Arc::new(move |r: Record| {
+                s.emit(&r.to_json());
+                o(&r);
+            }), run);
+            ep.register("bucket", 1, makepad_remote::lines::service("bucket", Arc::new(move |_, out| {
+                out.extend(crate::bucket::ledger(&home, 10));
+            })));
+        }
         // `jitcache plan|clear`: this Mac's JIT caches (a node's through `route <node> jitcache`)
         let (s, o, me) = (sink.clone(), on_record.clone(), name.to_string());
         ep.register(
@@ -246,6 +267,7 @@ impl Master {
         crate::orch::go();
         let _ = std::fs::write(pid_file(), format!("{}\n", std::process::id()));
         *slot.lock().unwrap() = Some((sink.clone(), on_record.clone()));
+        local.ready();
         let m = Arc::new(Master { name: name.to_string(), local, hub, sink, followed: Mutex::new(HashSet::new()), heard, on_record, inbox, leases, recent, flow, land });
         let m2 = m.clone();
         let _ = std::thread::Builder::new().name("devhub-master".into()).spawn(move || m2.follow_loop());
@@ -317,12 +339,32 @@ impl Master {
         let me = Client::new(Target::Unix(proto::control_socket()), "devhub-master");
         let mut feed = Client::routed(&me, &host).watch();
         let mut up = false;
+        let mut hot_cursor = 0usize;
         loop {
             if !self.hosts().hosts.iter().any(|h| h.name == host) {
                 // another name of a machine followed under its nodes.conf name
                 self.followed.lock().unwrap().remove(&host);
                 return;
             }
+            // The durable JIT channel is independent of the lossy event ring.
+            // Replay after reconnect/start; identical record ids are idempotent.
+            let mut next_cursor = hot_cursor;
+            let mut imported = true;
+            let replay = makepad_remote::hub::ask(&me, &host, "hot", "", &format!("records {hot_cursor}"), &mut |line| {
+                if let Some(mut hot) = makepad_remote::hot::Record::parse(line) {
+                    hot.node = host.clone();
+                    match crate::hot::ingest(hot.clone()) {
+                        Ok(true) => self.publish(crate::proto::from_hot(&hot)),
+                        Ok(false) => {},
+                        Err(e) => { eprintln!("devhub hot: {e}"); imported = false; },
+                    }
+                } else if let Ok(v) = makepad_strict_json::parse(line.as_bytes()) {
+                    if let Some(cursor) = v.get("cursor").and_then(|v| v.as_u64()) { next_cursor = cursor as usize; }
+                    if v.get("err").is_some() { imported = false; }
+                }
+                true
+            });
+            if replay.is_ok() && imported { hot_cursor = next_cursor; }
             match feed.next(Duration::from_secs(2), 1) {
                 Ok(Some((_, line))) => {
                     if !up {
@@ -383,9 +425,9 @@ mod tests {
 
     #[test]
     fn one_machine_one_host_by_fleet_identity() {
-        let seeds = Hosts { hosts: vec![Host { name: "n100".into(), via: Via::Fleet { addr: "192.0.2.38:8797".into() } }, Host { name: "mac-b".into(), via: Via::Fleet { addr: "192.0.2.92:8797".into() } }] };
+        let seeds = Hosts { hosts: vec![Host { name: "n1".into(), via: Via::Fleet { addr: "192.0.2.38:8797".into() } }, Host { name: "mini".into(), via: Via::Fleet { addr: "192.0.2.92:8797".into() } }] };
         let heard = vec![
-            // n100 announcing under its default name: same address
+            // n1 announcing under its default name: same address
             Heard { name: "100".into(), addr: "192.0.2.38:8797".into(), fleet: "a node".into() },
             // the mini on its Wi-Fi address: same fleet identity as the dialled seed
             Heard { name: "mini".into(), addr: "192.0.2.75:8797".into(), fleet: "mini".into() },
@@ -399,7 +441,7 @@ mod tests {
             _ => None,
         };
         let names: Vec<String> = merge(&seeds, &heard, &identity).hosts.into_iter().map(|h| h.name).collect();
-        assert_eq!(names, vec!["n100", "mac-b", "217"]);
+        assert_eq!(names, vec!["n1", "mini", "217"]);
     }
 
     /// The open fds of this process.

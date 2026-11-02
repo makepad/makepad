@@ -1,3 +1,4 @@
+#![feature(default_field_values)]
 // Default field values (rustc's default_field_values syntax): `S { c: 1, .. }` takes the omitted
 // fields from their declared defaults -- anonymous consts, evaluated as consts. `.rx` structs give
 // every field a default.

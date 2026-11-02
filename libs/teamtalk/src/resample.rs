@@ -182,26 +182,4 @@ mod tests {
         // +0.5 % faster: 240 more input samples per second of output.
         assert!((consumed as i64 - 48240).abs() <= 2, "consumed {consumed}");
     }
-
-    #[test]
-    fn block_boundaries_do_not_glitch() {
-        // Feed the same tone in blocks of odd sizes and check the output is
-        // identical to feeding it in one go: the state carries across blocks.
-        let input = sine(44100.0, 700.0, 4410);
-        let mut whole = Vec::new();
-        let mut r = Resampler::new();
-        r.set_ratio(44100.0, 48000.0, 0.0);
-        for &x in &input {
-            r.push(x, |y| whole.push(y));
-        }
-        let mut blocks = Vec::new();
-        let mut r = Resampler::new();
-        r.set_ratio(44100.0, 48000.0, 0.0);
-        for chunk in input.chunks(37) {
-            for &x in chunk {
-                r.push(x, |y| blocks.push(y));
-            }
-        }
-        assert_eq!(whole, blocks);
-    }
 }

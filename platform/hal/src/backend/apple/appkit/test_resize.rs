@@ -22,8 +22,19 @@ const SETTLE: std::time::Duration = std::time::Duration::from_millis(1500);
 
 fn enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("MAKEPAD_TEST_LIVE_RESIZE").is_ok_and(|v| v == "1"))
+    *ON.get_or_init(|| std::env::var("MAKEPAD_TEST_LIVE_RESIZE").is_ok_and(|v| v == "1" || v == "repeat"))
 }
+
+/// `MAKEPAD_TEST_LIVE_RESIZE=repeat`: drag again every few seconds, growing and shrinking in turn
+/// (a run that changes the app in between sees the live resize before and after the change).
+fn repeat() -> bool {
+    std::env::var("MAKEPAD_TEST_LIVE_RESIZE").is_ok_and(|v| v == "repeat")
+}
+
+/// Drags made so far: an odd one shrinks the window back.
+static DRAGS: AtomicU32 = AtomicU32::new(0);
+/// The pause between repeated drags.
+const REPEAT_EVERY: std::time::Duration = std::time::Duration::from_millis(4000);
 
 fn frame(window: ObjcId) -> NSRect {
     unsafe { msg_send![window, frame] }
@@ -122,15 +133,21 @@ fn drag(number: isize, w: f64) {
     // window coordinates: origin bottom-left; the corner is the frame's bottom-right
     let (x0, y0) = (w - 2.0, 2.0);
     let steps = 60;
+    let sign = if DRAGS.fetch_add(1, Ordering::Relaxed) % 2 == 1 { -1.0 } else { 1.0 };
     post(NSEventType::NSLeftMouseDown, x0, y0, number, 1, 1.0);
     for i in 1..=steps {
         std::thread::sleep(std::time::Duration::from_millis(16));
         let t = i as f64 / steps as f64;
-        post(NSEventType::NSLeftMouseDragged, x0 + 120.0 * t, y0 - 80.0 * t, number, 1 + i, 1.0);
+        post(NSEventType::NSLeftMouseDragged, x0 + sign * 120.0 * t, y0 - sign * 80.0 * t, number, 1 + i, 1.0);
     }
-    post(NSEventType::NSLeftMouseUp, x0 + 120.0, y0 - 80.0, number, 2 + steps, 0.0);
+    post(NSEventType::NSLeftMouseUp, x0 + sign * 120.0, y0 - sign * 80.0, number, 2 + steps, 0.0);
     std::thread::sleep(std::time::Duration::from_millis(1500));
     if STATE.load(Ordering::Relaxed) == POSTED {
         eprintln!("live_resize: no live resize loop was entered");
+    }
+    if repeat() {
+        std::thread::sleep(REPEAT_EVERY);
+        STATE.store(POSTED, Ordering::Relaxed);
+        start_drag();
     }
 }

@@ -61,9 +61,7 @@ impl MemoryAccount {
         Reservation(Arc::new(Reserved { account: self.clone(), bytes }))
     }
     pub fn try_reserve(&self, bytes: usize) -> Option<Reservation> {
-        // Keep fetch_update for older stable toolchains without try_update.
-        #[allow(deprecated)]
-        let old = self.0.reserved.fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+        let old = self.0.reserved.try_update(Ordering::AcqRel, Ordering::Acquire, |used| {
             used.checked_add(bytes).filter(|next| *next <= self.capacity())
         }).ok()?;
         self.0.peak.fetch_max(old + bytes, Ordering::Relaxed);

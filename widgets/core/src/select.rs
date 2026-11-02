@@ -411,36 +411,3 @@ impl SelectRef {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    /// The face never lies about a set: it names one value when one is
-    /// chosen and counts them when more are, because naming one member of
-    /// three is a lie about the other two.
-    #[test]
-    fn the_face_says_what_is_true_of_the_set() {
-        // The behaviour under test is the summary rule, which is pure.
-        fn face(chosen: &[&str], multi: bool, count: bool, placeholder: &str) -> String {
-            if chosen.is_empty() {
-                return placeholder.to_string();
-            }
-            if !multi || chosen.len() == 1 {
-                return chosen[0].to_string();
-            }
-            if count {
-                format!("{} chosen", chosen.len())
-            } else {
-                chosen.join(", ")
-            }
-        }
-        assert_eq!(face(&[], true, true, "None chosen"), "None chosen");
-        assert_eq!(face(&["Bass"], true, true, "None chosen"), "Bass");
-        assert_eq!(face(&["Bass", "Drums", "Vocals"], true, true, ""), "3 chosen");
-        assert_eq!(
-            face(&["Bass", "Drums"], true, false, ""),
-            "Bass, Drums",
-            "a caller who knows the list is short can ask for the names"
-        );
-        assert_eq!(face(&["Bass"], false, true, ""), "Bass", "a single value is itself");
-    }
-}

@@ -1199,6 +1199,8 @@ impl Draw {
     pub const WIREFRAME: u32 = 16;
     /// This draw never occludes input to native content below it.
     pub const INPUT_TRANSPARENT: u32 = 32;
+    /// Strict greater-than depth comparison (otherwise less-equal).
+    pub const DEPTH_GREATER: u32 = 64;
 }
 
 unsafe impl Plain for Draw {}

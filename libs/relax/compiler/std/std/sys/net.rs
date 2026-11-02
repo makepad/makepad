@@ -47,7 +47,7 @@ fn get(buf: &SockaddrStorage, off: usize) -> u8 {
 }
 
 fn put_family(buf: &mut SockaddrStorage, family: c_int, len: u8) {
-    if cfg!(target_os = "macos") {
+    if cfg!(target_vendor = "apple") {
         put(buf, 0, len);
         put(buf, 1, family as u8);
     } else {
@@ -57,7 +57,7 @@ fn put_family(buf: &mut SockaddrStorage, family: c_int, len: u8) {
 }
 
 pub fn family(buf: &SockaddrStorage) -> c_int {
-    if cfg!(target_os = "macos") {
+    if cfg!(target_vendor = "apple") {
         get(buf, 1) as c_int
     } else {
         (get(buf, 0) as c_int) | ((get(buf, 1) as c_int) << 8)

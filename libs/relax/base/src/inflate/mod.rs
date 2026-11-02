@@ -73,18 +73,6 @@ pub fn deflate_compress(input: &[u8], level: u32) -> Vec<u8> {
     miniz_deflate::compress_to_vec(input, level as u8)
 }
 
-/// Compress data with a gzip header/trailer (RFC 1952).
-pub fn gzip_compress(input: &[u8], level: u32) -> Vec<u8> {
-    let body = deflate_compress(input, level);
-    let mut out = Vec::with_capacity(18 + body.len());
-    // ID1 ID2 CM FLG MTIME[4] XFL OS=unknown
-    out.extend_from_slice(&[0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff]);
-    out.extend_from_slice(&body);
-    out.extend_from_slice(&crc32(input).to_le_bytes());
-    out.extend_from_slice(&(input.len() as u32).to_le_bytes());
-    out
-}
-
 /// miniz_oxide-compatible inflate (decompression) API.
 pub mod inflate {
     use crate::inflate::decompress::DecompressError;
@@ -92,11 +80,6 @@ pub mod inflate {
     /// Decompress raw DEFLATE data (no zlib/gzip wrapper) to a Vec.
     pub fn decompress_to_vec(input: &[u8]) -> Result<Vec<u8>, DecompressError> {
         crate::inflate::decompress::deflate_decompress_vec(input)
-    }
-
-    /// Decompress zlib-wrapped data to a Vec.
-    pub fn decompress_to_vec_zlib(input: &[u8]) -> Result<Vec<u8>, DecompressError> {
-        crate::inflate::decompress::zlib_decompress_vec(input)
     }
 
     /// Decompress gzip-wrapped data (header fields, CRC-32 and size checked) to a Vec.

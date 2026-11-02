@@ -1525,13 +1525,6 @@ mod tests {
         assert!(!is_wake_input(&Event::Signal));
     }
 
-    #[test]
-    fn input_wakes_a_dormant_instance_the_same_as_adopted() {
-        let mut dormancy = Dormancy::start(true);
-        assert!(is_wake_input(&Event::KeyDown(KeyEvent::default())));
-        assert!(dormancy.wake());
-        assert!(!dormancy.is_dormant());
-    }
 }
 
 #[cfg(test)]

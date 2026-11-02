@@ -112,6 +112,7 @@ impl MouseInput {
 pub struct RemoteClient {
     socket: PathBuf,
     client: Client,
+    pub(crate) jit: bool,
 }
 
 impl std::fmt::Debug for RemoteClient {
@@ -130,7 +131,12 @@ impl RemoteClient {
                 socket.display()
             ))
         })?;
-        Ok(Self { socket, client })
+        Ok(Self { socket, client, jit: false })
+    }
+
+    pub(crate) fn jit_busy(&self) -> TestResult<bool> {
+        makepad_remote::jit::busy(&self.client)
+            .map_err(|err| TestError::new(format!("app remote JIT state: {err}")))
     }
 
     /// The socket path this client dials, for diagnostics.
@@ -304,8 +310,20 @@ impl RemoteClient {
             .map_err(|err| fail(format!("link lost: {err}")))?;
         let mut pending = String::new();
         let mut lines = Vec::new();
+        let mut jit_wait = makepad_remote::jit::Wait::default();
         loop {
-            match channel.recv_timeout(RESPONSE_TIMEOUT) {
+            let event = match channel.recv_timeout(RESPONSE_TIMEOUT) {
+                Err(true) if self.jit => {
+                    let wait = jit_wait.keep_waiting(&self.client).map_err(|err| fail(err.to_string()))?;
+                    // The app may have answered while inspect sampled the JIT.
+                    match channel.try_recv() {
+                        Err(true) if wait => continue,
+                        event => event,
+                    }
+                }
+                event => event,
+            };
+            match event {
                 Ok(Event::Data(data)) => {
                     pending.push_str(&String::from_utf8_lossy(&data));
                     let mut ended = false;

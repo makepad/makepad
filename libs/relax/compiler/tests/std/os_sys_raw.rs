@@ -48,9 +48,9 @@ struct Dirent {
 extern "C" {
     fn clock_gettime(clock: u32, tp: *mut Timespec) -> i32;
     fn nanosleep(req: *const Timespec, rem: *mut Timespec) -> i32;
-    fn open(path: *const u8, flags: i32, ...) -> i32;
-    fn write(fd: i32, buf: *const u8, n: usize) -> isize;
-    fn read(fd: i32, buf: *mut u8, n: usize) -> isize;
+    fn open(path: *const core::ffi::c_char, flags: i32, ...) -> i32;
+    fn write(fd: i32, buf: *const core::ffi::c_void, n: usize) -> isize;
+    fn read(fd: i32, buf: *mut core::ffi::c_void, n: usize) -> isize;
     fn close(fd: i32) -> i32;
     fn unlink(path: *const u8) -> i32;
     fn stat(path: *const u8, buf: *mut Stat) -> i32;
@@ -63,7 +63,7 @@ extern "C" {
     fn __error() -> *mut i32;
     fn strerror_r(code: i32, buf: *mut u8, len: usize) -> i32;
     fn strlen(s: *const i8) -> usize;
-    fn getenv(name: *const u8) -> *const u8;
+    fn getenv(name: *const core::ffi::c_char) -> *mut core::ffi::c_char;
     fn setenv(name: *const u8, value: *const u8, overwrite: i32) -> i32;
     fn os_sync_wait_on_address_with_timeout(addr: *mut u8, value: u64, size: usize, flags: u32, clockid: u32, timeout_ns: u64) -> i32;
     fn os_sync_wake_by_address_any(addr: *mut u8, size: usize, flags: u32) -> i32;
@@ -157,17 +157,17 @@ fn a02_files() {
     let path = b"/tmp/hr_os_sys_raw.txt\0" as *const [u8; 23] as *const u8;
     unsafe {
         // O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC, mode passed as a variadic argument
-        let fd = open(path, 0x1 | 0x200 | 0x400 | 0x1000000, 0o640u32);
+        let fd = open(path.cast(), 0x1 | 0x200 | 0x400 | 0x1000000, 0o640u32);
         println!("| open {}", fd > 2);
         let msg = b"hello sys layer" as *const [u8; 15] as *const u8;
-        println!("| write {}", write(fd, msg, 15));
+        println!("| write {}", write(fd, msg.cast(), 15));
         let mut st = Stat { st_dev: 0, st_mode: 0, st_nlink: 0, st_ino: 0, st_uid: 0, st_gid: 0, st_rdev: 0, st_atime: 0, st_atime_nsec: 0, st_mtime: 0, st_mtime_nsec: 0, st_ctime: 0, st_ctime_nsec: 0, st_birthtime: 0, st_birthtime_nsec: 0, st_size: 0, st_blocks: 0, st_blksize: 0, st_flags: 0, st_gen: 0, st_lspare: 0, st_qspare: [0; 2] };
         println!("| fstat {} size {} mode {:o} nlink {}", fstat(fd, &mut st as *mut Stat), st.st_size, st.st_mode & 0o777, st.st_nlink);
         println!("| fcntl getfd {}", fcntl(fd, 1));
         close(fd);
-        let fd = open(path, 0);
+        let fd = open(path.cast(), 0);
         let mut buf = [0u8; 64];
-        let n = read(fd, &mut buf as *mut [u8; 64] as *mut u8, 64);
+        let n = read(fd, &mut buf as *mut [u8; 64] as *mut _, 64);
         println!("| read {} {} {} {}", n, buf[0], buf[1], buf[4]);
         close(fd);
         println!("| stat {} {}", stat(path, &mut st as *mut Stat), st.st_size);
@@ -186,7 +186,7 @@ fn a03_dirs() {
     unsafe {
         mkdir(dir, 0o755);
         let f = b"/tmp/hr_os_sys_raw_dir/entry_name\0" as *const [u8; 34] as *const u8;
-        let fd = open(f, 0x1 | 0x200, 0o644u32);
+        let fd = open(f.cast(), 0x1 | 0x200, 0o644u32);
         close(fd);
         let d = opendir(dir);
         let mut names = 0;
@@ -230,8 +230,8 @@ fn a04_futex_tls_env() {
         pthread_threadid_np(0, &mut tid as *mut u64);
         println!("| tid {} self {}", tid > 0, pthread_self() != 0);
         setenv(b"HR_SYS_RAW\0" as *const [u8; 11] as *const u8, b"yes\0" as *const [u8; 4] as *const u8, 1);
-        let v = getenv(b"HR_SYS_RAW\0" as *const [u8; 11] as *const u8);
-        println!("| env {}", c_text(v));
+        let v = getenv(b"HR_SYS_RAW\0" as *const [u8; 11] as *const _);
+        println!("| env {}", c_text(v.cast()));
         println!("| cpus {} pid {}", sysconf(58) >= 1, getpid() > 0);
         println!("| dtor runs so far {}", DTOR_RUNS);
     }

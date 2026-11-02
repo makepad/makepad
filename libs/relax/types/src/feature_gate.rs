@@ -1197,6 +1197,8 @@ fn unstable_of(prog: &Program, d: crate::program::DefId) -> Option<(String, Opti
 /// The library's table entry for a path as written (`std::intrinsics::copy`): a re-export has
 /// its own stability, so the key is the written path, not the defining one.
 fn table_entry(names: &[&str]) -> Option<(String, Option<String>)> {
+    // (Relax's own intrinsics: no path of rustc's library, whose E0432 this rejection stands for)
+    if matches!(names, ["core" | "std", "intrinsics_mem", ..]) { return Some(("relax_internals".to_string(), None)); }
     // a stable re-export of a module or item is the definition it names (rustc checks the
     // stability of the path's final definition): rewrite the longest re-exported prefix
     let mut key: Vec<String> = names.iter().map(|s| s.to_string()).collect();

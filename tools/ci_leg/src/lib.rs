@@ -2,16 +2,16 @@
 //! under the JIT (`makepad run makepad-ci-leg -- ...`) in the lease's tree:
 //! - `smoke <ci.splash> --dir <dir> [--target <package>:<binary>:<cwd>]`: one app's smoke script
 //!   (the CI box's ci.splash runner, ported from tools/ci): its apps launch hidden and muted under
-//!   the JIT, are driven over makepad-remote, grabbed, and every grab is judged by the vision model on
-//!   the fastest AI fleet hub that has or can load it ([`judge`]);
+//!   the JIT, are driven over makepad-remote and grabbed; each acceptance (grab + text) is saved in
+//!   the lease target, and devhub judges them on the master with makepad-ci-judge;
 //! - `slice <app> <root,...>`: a licensed slice of the commercial repository, cut into a clean
 //!   checkout of the tree's commit, linted and checked ([`slice`]).
 //!
 //! Each prints its steps (`STEP <state> <name> (<s> s)`), the lines that say why one failed
 //! (`CIERR ...`, what devhub's status shows) and one verdict line, `CI-OK ...` or `CI-FAIL ...`;
-//! the exit code is the verdict.
+//! the exit code is the verdict. A smoke's zero exit covers the script's flow; devhub judges the
+//! saved acceptances before it passes the shard.
 
-pub mod judge;
 pub mod report;
 pub mod slice;
 pub mod smoke;

@@ -309,3 +309,24 @@ macro_rules! saturating_impl {
 }
 
 saturating_impl! { usize u8 u16 u32 u64 u128 isize i8 i16 i32 i64 i128 }
+
+// rustc iter/traits/accum.rs integer_sum_product!(Wrapping<$a>) and
+// saturating_integer_sum_product!(Saturating<unsigned>)
+macro_rules! wrapping_sum_product {
+    ($w:ident, $($t:ty)*) => ($(
+        impl crate::iter::Sum for $w<$t> {
+            fn sum<I: Iterator<Item = Self>>(iter: I) -> Self { iter.fold($w(0), |a, b| a + b) }
+        }
+        impl crate::iter::Product for $w<$t> {
+            fn product<I: Iterator<Item = Self>>(iter: I) -> Self { iter.fold($w(1), |a, b| a * b) }
+        }
+        impl<'a> crate::iter::Sum<&'a $w<$t>> for $w<$t> {
+            fn sum<I: Iterator<Item = &'a Self>>(iter: I) -> Self { iter.fold($w(0), |a, b| a + *b) }
+        }
+        impl<'a> crate::iter::Product<&'a $w<$t>> for $w<$t> {
+            fn product<I: Iterator<Item = &'a Self>>(iter: I) -> Self { iter.fold($w(1), |a, b| a * *b) }
+        }
+    )*)
+}
+wrapping_sum_product! { Wrapping, i8 i16 i32 i64 i128 isize u8 u16 u32 u64 u128 usize }
+wrapping_sum_product! { Saturating, u8 u16 u32 u64 u128 usize }

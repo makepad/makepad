@@ -159,13 +159,14 @@ impl Fcx<'_> {
         (inherent, extension)
     }
 
-    /// :2087-2105: #[rustc_skip_during_method_dispatch] applies to the trait,
-    /// independent of the spelling of any method in it.
+    /// :2018-2035: #[rustc_skip_during_method_dispatch] applies to the trait,
+    /// independent of the spelling of any method in it, by the edition of the method name's span.
     fn skip_during_method_dispatch(&self, td: DefId, receiver: TyId) -> bool {
-        let ed = self.prog.crates[self.prog.mods[self.module as usize].krate as usize].edition;
-        let array = matches!(self.tcx.tys.kind(receiver), TyKind::Array(..)) && ed < 2021;
+        let ed = || if self.method_name_lo == u32::MAX { self.prog.crates[self.prog.mods[self.module as usize].krate as usize].edition }
+            else { self.prog.files[self.file as usize].edition_at(self.method_name_lo) };
+        let array = matches!(self.tcx.tys.kind(receiver), TyKind::Array(..)) && ed() < 2021;
         let boxed_slice = match self.tcx.tys.kind(receiver) {
-            TyKind::Adt(d, args, _) if self.tcx.lang_items.get(crate::lang_items::LangItem::OwnedBox) == Some(*d) => ed < 2024 && self.tcx.tys.list(*args).first().is_some_and(|t| matches!(self.tcx.tys.kind(*t), TyKind::Slice(_))),
+            TyKind::Adt(d, args, _) if self.tcx.lang_items.get(crate::lang_items::LangItem::OwnedBox) == Some(*d) => self.tcx.tys.list(*args).first().is_some_and(|t| matches!(self.tcx.tys.kind(*t), TyKind::Slice(_))) && ed() < 2024,
             _ => false,
         };
         if !array && !boxed_slice { return false; }

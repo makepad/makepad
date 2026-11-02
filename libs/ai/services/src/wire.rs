@@ -66,6 +66,8 @@ pub const MAX_RESULT_IMAGE_BYTES: usize = 900 * 1024;
 pub const MAX_DATA_BYTES: usize = 16 * 1024;
 /// Bytes of a result's transcript note.
 pub const MAX_NOTE_BYTES: usize = 256;
+/// Bytes of a task card's text together ([`TaskCard::bytes`]).
+pub const MAX_TASK_BYTES: usize = 4 * 1024;
 /// Bytes of a service's volatile per-turn context.
 pub const MAX_CONTEXT_BYTES: usize = 2 * 1024;
 /// Bytes of a call's argument JSON.
@@ -604,6 +606,71 @@ pub struct ToolResult {
     pub disposition: Disposition,
     /// Streams this successful result asks the conversation to join.
     pub subscribe: Vec<SubscriptionRequest>,
+    /// The call's task card as it ended (what was made, its picture, what to do
+    /// with it); `None` for a call that showed none.
+    pub task: Option<TaskCard>,
+}
+
+/// A long task a tool runs (an AI hub job: a picture made into a part, a picture, a song),
+/// as the chat draws it: one card per call with the input picture, a bar, the stage and
+/// Stop, instead of status lines. The service sends it with its progress
+/// ([`ServiceUp::Progress`]) and its result ([`ToolResult::task`]); the share and the
+/// time left come from the progress itself. Bounded at [`MAX_TASK_BYTES`].
+#[derive(Clone, Debug, PartialEq, Default, SerJson, DeJson)]
+pub struct TaskCard {
+    /// What is made, short: "Making a part".
+    pub title: String,
+    /// What it is made from (a file or picture name); the card shortens it, never widens.
+    pub source: String,
+    /// The input picture: the name of a picture sent in this chat, or a PNG file on this
+    /// machine; empty for none.
+    pub picture: String,
+    /// The stage now, in plain words ("shape · 0/21", "meshing").
+    pub stage: String,
+    /// Where it runs, as a machine name ("a node"); never an address.
+    pub host: String,
+    /// The stages so far, oldest first, for the card's tooltip.
+    pub stages: Vec<String>,
+    /// Once done: one line on what came of it ("on the plate as figure").
+    pub result: String,
+    /// Once done: a PNG file of what was made, on this machine; empty for none.
+    pub result_picture: String,
+    /// Once done: what the person can do with it. A click comes back to the panel's host
+    /// with the action's id.
+    pub actions: Vec<TaskAction>,
+}
+
+/// A button on a finished task card.
+#[derive(Clone, Debug, PartialEq, Default, SerJson, DeJson)]
+pub struct TaskAction {
+    /// The service's own id for it, handed back on a click.
+    pub id: String,
+    pub label: String,
+}
+
+impl TaskCard {
+    /// Its text bytes together.
+    pub fn bytes(&self) -> usize {
+        [&self.title, &self.source, &self.picture, &self.stage, &self.host, &self.result, &self.result_picture].iter().map(|t| t.len()).sum::<usize>()
+            + self.stages.iter().map(String::len).sum::<usize>()
+            + self.actions.iter().map(|a| a.id.len() + a.label.len()).sum::<usize>()
+    }
+
+    /// Keep it within [`MAX_TASK_BYTES`]: the oldest stages go first, then the actions.
+    pub fn bound(&mut self) {
+        while self.bytes() > MAX_TASK_BYTES && !self.stages.is_empty() {
+            self.stages.remove(0);
+        }
+        if self.bytes() > MAX_TASK_BYTES {
+            self.actions.clear();
+        }
+        for text in [&mut self.title, &mut self.source, &mut self.picture, &mut self.stage, &mut self.host, &mut self.result, &mut self.result_picture] {
+            if text.len() > MAX_NOTE_BYTES * 2 {
+                truncate_to_char_boundary(text, MAX_NOTE_BYTES * 2 - 3);
+                text.push('…');
+            }
+        }
+    }
 }
 
 impl ToolResult {
@@ -618,6 +685,7 @@ impl ToolResult {
             preview: false,
             disposition: Disposition::Continue,
             subscribe: Vec::new(),
+            task: None,
         }
     }
 
@@ -701,6 +769,9 @@ impl ToolResult {
             truncate_to_char_boundary(&mut self.note, MAX_NOTE_BYTES - 3);
             self.note.push('…');
         }
+        if let Some(task) = &mut self.task {
+            task.bound();
+        }
     }
 }
 
@@ -720,8 +791,11 @@ pub enum ServiceUp {
     /// after a reload is fine).
     Register { manifest: ServiceManifest, port_tag: u32 },
     Result(ToolResult),
-    /// A long call is still alive. Resets the router's deadline.
-    Progress { call_id: String, note: String, permille: u16 },
+    /// A long call is still alive. Resets the router's deadline. `task`: the
+    /// call's task card now (the chat draws it in place of the note). It is not
+    /// the variant's last field: the JSON writer leaves a comma after a last
+    /// absent Option of an enum variant.
+    Progress { call_id: String, task: Option<TaskCard>, note: String, permille: u16 },
     Context(ServiceContext),
     /// A publication for a subscription the engine created.
     Message {
@@ -777,6 +851,9 @@ impl ServiceUp {
                 if r.note.len() > MAX_NOTE_BYTES + 4 {
                     return Err("result: note over cap".into());
                 }
+                if r.task.as_ref().is_some_and(|t| t.bytes() > MAX_TASK_BYTES + 64) {
+                    return Err("result: task over cap".into());
+                }
                 if r.subscribe.len() > MAX_TOPICS {
                     return Err("result: subscriptions over cap".into());
                 }
@@ -785,11 +862,11 @@ impl ServiceUp {
                 }
                 Ok(())
             }
-            ServiceUp::Progress { call_id, note, permille } => {
+            ServiceUp::Progress { call_id, note, permille, task } => {
                 if !is_opaque_id(call_id) {
                     return Err("progress: bad call id".into());
                 }
-                if note.len() > MAX_NOTE_BYTES + 4 || *permille > 1000 {
+                if note.len() > MAX_NOTE_BYTES + 4 || *permille > 1000 || task.as_ref().is_some_and(|t| t.bytes() > MAX_TASK_BYTES + 64) {
                     return Err("progress: over cap".into());
                 }
                 Ok(())
@@ -1099,7 +1176,7 @@ mod tests {
             ServiceUp::Result(ToolResult::unavailable("c5", "loading")),
             ServiceUp::Result(ToolResult::cancelled("c6")),
             ServiceUp::Result(ToolResult::timed_out("c7", "60 s").with_disposition(Disposition::EndTurn)),
-            ServiceUp::Progress { call_id: "c1".into(), note: "routing".into(), permille: 500 },
+            ServiceUp::Progress { call_id: "c1".into(), note: "routing".into(), permille: 500, task: None },
             ServiceUp::Context(ServiceContext { text: "[route] gps=…".into() }),
             ServiceUp::Message {
                 sub_id: "s1".into(),

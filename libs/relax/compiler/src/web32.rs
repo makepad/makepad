@@ -94,6 +94,7 @@ pub fn reserve_unit(code: usize, rest: usize) -> u64 {
     }
     MISC_NEXT.store(BASE + MISC_AT, Ordering::Release);
     ON.store(true, Ordering::Release);
+    crate::jit::window_tls_block();
     at
 }
 
@@ -140,6 +141,11 @@ fn map_rw(at: u64, len: usize) -> u64 {
     }
     crate::memstat::name_mapping(at as usize, len, c"makepad-run-web32-misc");
     at
+}
+
+/// Whether native address `a` is in the window's misc region (where `alloc` places blocks).
+pub fn in_misc(a: u64) -> bool {
+    a >= BASE + MISC_AT && a < BASE + MISC_END
 }
 
 /// Zeroed read-write memory in the window's misc region (native address; page granular).

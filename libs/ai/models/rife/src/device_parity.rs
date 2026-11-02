@@ -3,7 +3,7 @@
 //! on random tensors — no checkpoint required, so this gate runs anywhere
 //! a device backend exists.
 
-#[cfg(test)]
+#[cfg(all(test, any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 mod tests {
     use crate::backend::{
         gpu_conv2d_planar_strided, gpu_download, gpu_pixel_shuffle_planar,

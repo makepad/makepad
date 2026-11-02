@@ -12,9 +12,7 @@ struct Parsed<'a> {
 
 fn parse(source: &str, edition: u16) -> Option<Parsed<'_>> {
     let mut lexed = Vec::new();
-    crate::lexer::lex_with(source.as_bytes(), &crate::lexer::LexOptions {
-        edition, mode: crate::lexer::Mode::Rust, trivia: false,
-    }, &mut lexed).ok()?;
+    crate::lexer::lex(source.as_bytes(), edition, &mut lexed).ok()?;
     lexed.pop();
     let tokens: Vec<_> = lexed.iter().map(|t| t.text(source)).collect();
     // Attributes/macros can replace main or establish a different entrypoint.

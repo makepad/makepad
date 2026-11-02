@@ -135,7 +135,6 @@ fn merge_diamond_c3_first_c0_last() {
     assert!(pos[&c2] < pos[&c0], "c2 before c0; order {:?}", messages(&log));
 }
 
-/// Same 30-commit, two-merge graph as `log_thirty_commits_two_merges`.
 fn thirty_commits_two_merges(repo: &Repository, tree: ObjectId, timestamp: impl Fn(usize) -> i64) -> Vec<ObjectId> {
     let mut ids = Vec::with_capacity(30);
     ids.push(write(repo, tree, vec![], "c0\n", timestamp(0)));
@@ -606,11 +605,11 @@ const HOUR: i64 = 3600;
 const SKEW_23H: i64 = 23 * HOUR;
 const SKEW_72H: i64 = 72 * HOUR;
 const RANDOM_DAG_COUNT: u64 = 200;
-const LOG_TIMEOUT: Duration = Duration::from_millis(1500);
+const LOG_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// `Repository::log` can fail to return on some skewed DAGs (promotion with
 /// `i64::MAX` leaves the newest pending commit at the heap top). Bound the wait
-/// so the suite reports the seed instead of hanging.
+/// so the suite reports the seed instead of hanging (a hang guard, not a speed pin).
 fn log_or_timeout(
     workdir: &Path,
     tip: ObjectId,

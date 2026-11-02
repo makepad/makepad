@@ -45,15 +45,4 @@ mod tests {
         apply(&mut doc,"repair",flip);
         assert!(review(&doc).is_valid_solid);
     }
-    #[test]
-    fn summary_mode_preserves_exact_commit_and_replay_without_id_chatter() {
-        let mut doc=Document::new(Limits::default()).unwrap();
-        let args=Transaction{request_id:"box".into(),expected:doc.head(),
-            operations:vec![Operation::cylinder("tire",1.,1.,64,true,doc.limits()).unwrap()]};
-        let result=doc.apply(args.clone(),None).unwrap();
-        let replay=doc.apply(args,None).unwrap();
-        assert_eq!(result.current,replay.current);
-        assert_eq!(result.committed,replay.committed);
-        assert!(replay.replayed);
-    }
 }

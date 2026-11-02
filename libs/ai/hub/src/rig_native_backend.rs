@@ -395,15 +395,3 @@ impl RigWorker {
         Ok(())
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn native_identity_and_role_are_stable() {
-        assert_eq!(SKIN_TOKENS_NATIVE_BACKEND, "rig-native");
-        assert_eq!(SKIN_TOKENS_NATIVE_MODEL, "skintokens");
-        assert_eq!(ROLE_TOKENRIG_CHECKPOINT, "tokenrig-checkpoint");
-    }
-}

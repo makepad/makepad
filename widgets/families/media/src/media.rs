@@ -915,28 +915,4 @@ mod tests {
             "the picture was left square in a rounded box"
         );
     }
-
-    #[test]
-    fn registration_is_wired() {
-        let lib = crate::FAMILY_LIB;
-        let calls = crate::widgets_mod_source();
-        let media = include_str!("media.rs");
-        assert!(lib.contains("pub mod media;"));
-        assert!(crate::FRONT_LIB.contains("media::*"));
-        assert!(calls.contains("crate::media::script_mod(vm);"));
-        assert!(media.contains("mod.widgets.MediaBase = #(Media::register_widget(vm))"));
-        assert!(media.contains("mod.widgets.MediaFigureBase = #(MediaFigure::register_widget(vm))"));
-        // Every name this module's DSL reaches for has to already exist
-        // when its block runs: a block's `use` only sees what is there,
-        // and a qualified name is no better off than a bare one.
-        let at = calls.find("crate::media::script_mod(vm);").unwrap();
-        for earlier in [
-            "crate::view::script_mod(vm);",
-            "crate::label::script_mod(vm);",
-            "crate::image::script_mod(vm);",
-            "crate::placeholder::script_mod(vm);",
-        ] {
-            assert!(calls.find(earlier).unwrap() < at, "media registers before {earlier}");
-        }
-    }
 }

@@ -185,6 +185,7 @@ impl Program {
         self.impls.truncate(s.impls); self.traits.truncate(s.traits); self.imports.truncate(s.imports);
         self.files.truncate(s.files); self.file_paths.truncate(s.files);
         self.file_crate.truncate(s.files); self.file_blocks.truncate(s.files);
+        self.global_asms.retain(|&(f, _, m)| (f as usize) < s.files && (m as usize) < s.mods);
         self.lines_loaded = s.lines;
         self.reload = OnceLock::new();
         self.block_mods.retain(|(f, _), m| (*f as usize) < s.files && (*m as usize) < s.mods);
@@ -234,6 +235,7 @@ impl Program {
         assert!(self.syms.names().eq(rebuilt.syms.names()), "collected symbols differ");
         compare!(file_paths, file_crate, defs, mods, variants, impls, traits, imports,
             block_mods, block_owner, item_defs, prim_defs, prelude_crate, imports_of_module, file_blocks, node_id_to_def_id, legacy_const_args, legacy_const_attrs, def_id_to_node_id, impl_trait_in_trait_data, associated_types_for_impl_traits, opaque_to_rpitit, opaque_types_defined_by, trait_item_def_id, repeat_expr_counts, collected_definitions, def_disambiguators, child_definitions);
+        assert!(self.global_asms == rebuilt.global_asms, "collected Program global_asms differ");
         assert_eq!(self.crates.len(), rebuilt.crates.len(), "collected crate count");
         for (a, b) in self.crates.iter().zip(&rebuilt.crates) {
             assert_eq!((a.name, a.root_mod, a.edition, &a.deps, &a.cfg.set, a.proc_macro, &a.root_path),
@@ -270,7 +272,7 @@ impl Program {
                 || d.scope as usize >= self.mods.len() || d.file as usize >= self.files.len()
                 || (d.parent != NO_DEF && d.parent.0 as usize >= self.defs.len())) { return None; }
         let mut w = Vec::new();
-        4u32.put(&mut w);
+        5u32.put(&mut w);
         let late = self.syms.late.lock().unwrap_or_else(|e| e.into_inner());
         late.1.len().put(&mut w);
         for s in &late.1 { s.to_string().put(&mut w); }
@@ -292,6 +294,9 @@ impl Program {
         let skipped: Vec<(u32, (String, (String, bool)))> = self.skipped_files.iter()
             .map(|(m, (path, dir, mod_rs))| (*m, (path.clone(), (dir.clone(), *mod_rs)))).collect();
         skipped.put(&mut w);
+        // the `global_asm!` items: collection found them, a restore runs no collection
+        let asms: Vec<(u32, (crate::ast::ItemId, u32))> = self.global_asms.iter().map(|&(f, i, m)| (f, (i, m))).collect();
+        asms.put(&mut w);
         self.files.len().put(&mut w);
         for (i, f) in self.files.iter().enumerate() {
             if i % 256 == 255 && stop() { return None; }
@@ -370,7 +375,7 @@ impl Program {
         };
         let image = crate::image::Reader::new(bytes)?;
         let mut r = Decode::new(image.bytes(0, 0)?);
-        if u32::get(&mut r)? != 4 { return None; }
+        if u32::get(&mut r)? != 5 { return None; }
         let mut p = Program::new(session);
         p.syms = Interner::from_image(&image, 3, 3)?;
         for s in Vec::<String>::get(&mut r)? { p.syms.intern_late(&s); }
@@ -402,6 +407,7 @@ impl Program {
             part_interned, deferred_imports, deferred_waits, deferred_binds, legacy_const_attrs);
         p.skipped_files = Vec::<(u32, (String, (String, bool)))>::get(&mut r)?.into_iter()
             .map(|(m, (path, (dir, mod_rs)))| (m, (path, dir, mod_rs))).collect();
+        p.global_asms = Vec::<(u32, (crate::ast::ItemId, u32))>::get(&mut r)?.into_iter().map(|(f, (i, m))| (f, i, m)).collect();
         let (mut k, mut id) = (6, 6);
         macro_rules! table { ($($f:ident),+) => { $(p.$f = crate::collected::ImageMap::read_image(&image, &mut k, &mut id)?;)+ }; }
         tables!(table);

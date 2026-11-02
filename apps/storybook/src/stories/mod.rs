@@ -439,15 +439,6 @@ pub fn evaluated_count(cx: &mut Cx) -> usize {
     cx.global::<Evaluated>().flags.iter().filter(|on| **on).count()
 }
 
-/// Evaluate every story file, which is what the catalogue used to do on every
-/// reload. Only the cost test wants this.
-#[cfg(test)]
-fn evaluate_all(vm: &mut ScriptVm) {
-    for index in 0..modules().len() {
-        evaluate(vm, index);
-    }
-}
-
 static COUNTERS: Mutex<Option<HashMap<LiveId, usize>>> = Mutex::new(None);
 
 /// A per-story counter for demos that count their own clicks; returns the
@@ -640,87 +631,5 @@ mod lazy_evaluation {
             1,
             "and the switch still paid for only the one page on screen"
         );
-    }
-}
-
-#[cfg(test)]
-mod cost_of_a_switch {
-    //! A theme switch re-runs every module that read a theme token. This says
-    //! where that time goes.
-    //!
-    //! Each measurement gets a FRESH `Cx`. Measured one after another in one
-    //! context they are meaningless: every reload inherits what the last one
-    //! left behind, so whichever ran first looks cheap and the rest look
-    //! ruinous. The first attempt at this put the library at 0.9 s and the
-    //! stories at 59 s that way, against a switch that really takes about 0.8 s.
-    use crate::makepad_widgets::*;
-    use std::time::Instant;
-
-    /// How much of the catalogue a reload evaluates.
-    #[derive(Clone, Copy)]
-    enum Stories {
-        /// The widget library alone.
-        None,
-        /// The one page the canvas is showing, which is what a switch costs
-        /// now.
-        Shown,
-        /// Every story file, which is what a switch cost before they were
-        /// evaluated lazily.
-        All,
-    }
-
-    fn one_reload(stories: Stories) -> f64 {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        let mut ms = 0.0;
-        cx.with_vm(|vm| {
-            crate::makepad_widgets::script_mod(vm);
-            warm(vm, stories);
-            let t = Instant::now();
-            vm.with_reload(|vm| {
-                crate::makepad_widgets::script_mod(vm);
-                // Throws the record away; evaluates nothing itself.
-                super::script_mod(vm);
-                warm(vm, stories);
-            });
-            ms = t.elapsed().as_secs_f64() * 1000.0;
-        });
-        ms
-    }
-
-    fn warm(vm: &mut ScriptVm, stories: Stories) {
-        match stories {
-            Stories::None => {}
-            Stories::Shown => {
-                super::evaluate_for(vm, "DropControlsOverview");
-            }
-            Stories::All => super::evaluate_all(vm),
-        }
-    }
-
-    /// Slow (minutes) and its ABSOLUTE numbers do not reconcile with a live
-    /// switch -- in the app the same reload reports about 0.8 s, here about
-    /// 50 s -- so read it for the RATIO only, which holds across every shape
-    /// this was measured in: every story file is ~99% of a reload, the whole
-    /// widget library is the other 1%, and the one page on the canvas is a
-    /// fraction of one file.
-    /// `cargo test -p makepad-app-storybook where_a_theme_switch -- --ignored --nocapture`
-    #[test]
-    #[ignore]
-    fn where_a_theme_switch_spends_its_time() {
-        let lib = one_reload(Stories::None);
-        let all = one_reload(Stories::All);
-        let shown = one_reload(Stories::Shown);
-        let share = |total: f64| if total > 0.0 { (total - lib) / total * 100.0 } else { 0.0 };
-        println!("COST library alone            {lib:>9.1} ms");
-        println!(
-            "COST library + all {} files {all:>9.1} ms | the stories' share {:>6.1} %",
-            super::modules().len(),
-            share(all)
-        );
-        println!(
-            "COST library + the page shown {shown:>9.1} ms | the story's share  {:>6.1} %",
-            share(shown)
-        );
-        println!("COST a switch is now {:>6.1}x cheaper", if shown > 0.0 { all / shown } else { 0.0 });
     }
 }

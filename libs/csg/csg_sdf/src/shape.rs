@@ -92,6 +92,13 @@ pub enum SdfNode {
     /// The picking id of one source part: the low 32 bits of the sha256 of
     /// its source id (`bolts[2]`, `left.body`), see [`part_id`].
     Id { id: u32, of: Box<SdfNode> },
+    /// `of` sculpted by the shape strokes of a strokes log in `of`'s frame
+    /// ([`crate::strokes`]): each applied one in order, its tube smooth-unioned
+    /// (raise) or smooth-subtracted (lower, crease). A point reads only the
+    /// strokes indexed to its brick; culled to a region it is the plain
+    /// Combines of the capsules there ([`crate::bounds::cull`]), so the engines
+    /// draw it with the nodes they have.
+    Sculpt { strokes: Arc<crate::strokes::Strokes>, of: Box<SdfNode> },
 }
 
 /// A rigid placement with a uniform scale: scaled, then turned by the unit
@@ -428,6 +435,11 @@ impl Out {
                 self.u8(18);
                 l.key().iter().for_each(|b| self.u8(*b));
             }
+            SdfNode::Sculpt { strokes, of } => {
+                self.u8(19);
+                self.u64(strokes.shape_key());
+                self.node(of);
+            }
         }
     }
 }
@@ -519,6 +531,12 @@ pub fn distance_many(n: &SdfNode, ps: &[Vec3d], out: &mut [f64]) {
             distance_many(of, &q, out);
             out.iter_mut().for_each(|d| *d /= lipschitz);
         }
+        SdfNode::Sculpt { strokes, of } => {
+            distance_many(of, ps, out);
+            for (p, d) in ps.iter().zip(out.iter_mut()) {
+                *d = strokes.sculpt([p.x, p.y, p.z], *d, smin);
+            }
+        }
         other => {
             for (p, o) in ps.iter().zip(out.iter_mut()) {
                 *o = distance(other, *p);
@@ -606,6 +624,10 @@ fn id_in(n: &SdfNode, p: Vec3d, inherit: Option<u32>) -> (f64, Option<u32>) {
             let (d, i) = id_in(of, deform.warp(p), inherit);
             (d / lipschitz, i)
         }
+        SdfNode::Sculpt { strokes, of } => {
+            let (d, i) = id_in(of, p, inherit);
+            (strokes.sculpt([p.x, p.y, p.z], d, smin), i)
+        }
         SdfNode::Material { of, .. } | SdfNode::Bone { of, .. } => id_in(of, p, inherit),
         leaf => (distance(leaf, p), inherit),
     }
@@ -666,6 +688,10 @@ fn slot_in(n: &SdfNode, p: Vec3d, inherit: u8) -> (f64, u8) {
             let (d, s) = slot_in(of, deform.warp(p), inherit);
             (d / lipschitz, s)
         }
+        SdfNode::Sculpt { strokes, of } => {
+            let (d, s) = slot_in(of, p, inherit);
+            (strokes.sculpt([p.x, p.y, p.z], d, smin), s)
+        }
         SdfNode::Bone { of, .. } | SdfNode::Id { of, .. } => slot_in(of, p, inherit),
         SdfNode::Links(l) => {
             let (d, s) = l.distance_slot(p);
@@ -675,7 +701,8 @@ fn slot_in(n: &SdfNode, p: Vec3d, inherit: u8) -> (f64, u8) {
     }
 }
 
-fn transform_into(at: P3, rotate: P3, scale: f64, p: Vec3d) -> Vec3d {
+/// A point of the outer frame into a [`SdfNode::Transform`] (rotation in degrees).
+pub fn transform_into(at: P3, rotate: P3, scale: f64, p: Vec3d) -> Vec3d {
     let r = rot(rotate);
     let d = p - Vec3d::new(at[0], at[1], at[2]);
     // The inverse rotation is the transpose.
@@ -774,6 +801,7 @@ pub fn distance(n: &SdfNode, p: Vec3d) -> f64 {
         SdfNode::Material { of, .. } | SdfNode::Bone { of, .. } | SdfNode::Id { of, .. } => distance(of, p),
         SdfNode::Instance { places, of } => places.iter().map(|pl| distance(of, v3(pl.into([p.x, p.y, p.z]))) * pl.scale).fold(f64::INFINITY, f64::min),
         SdfNode::Deform { deform, lipschitz, of } => distance(of, deform.warp(p)) / lipschitz,
+        SdfNode::Sculpt { strokes, of } => strokes.sculpt([p.x, p.y, p.z], distance(of, p), smin),
     }
 }
 

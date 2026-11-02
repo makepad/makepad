@@ -2224,11 +2224,4 @@ mod tests {
         draw_list.end(&mut cx2d);
         cx2d.end_pass(&pass);
     }
-
-    #[test]
-    fn walk_and_layout_size_gates_and_cell_default_remain_stable() {
-        assert!(std::mem::size_of::<Walk>() <= 384);
-        assert!(std::mem::size_of::<Layout>() <= 112);
-        assert_eq!(Walk::default().cell, None);
-    }
 }

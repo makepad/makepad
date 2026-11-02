@@ -17,14 +17,54 @@
 //! direct-display and Android/OpenXR backends, not the entire Vulkan registry.
 pub mod vk;
 pub mod commands;
-use core::ffi::{c_char, c_int, c_void, CStr};
+use core::ffi::{c_char, c_void, CStr};
+#[cfg(unix)]
+use core::ffi::c_int;
 use std::sync::Arc;
 
+#[cfg(unix)]
 #[link(name = "dl")]
 extern "C" {
     fn dlopen(name: *const c_char, flags: c_int) -> *mut c_void;
     fn dlsym(handle: *mut c_void, name: *const c_char) -> *mut c_void;
     fn dlerror() -> *const c_char;
+}
+#[cfg(windows)]
+#[link(name = "kernel32")]
+extern "system" {
+    fn LoadLibraryA(name: *const c_char) -> *mut c_void;
+    fn GetProcAddress(module: *mut c_void, name: *const c_char) -> *mut c_void;
+    fn GetLastError() -> u32;
+}
+/// The system's Vulkan loader, opened once.
+unsafe fn open_loader(name: &CStr) -> Result<*mut c_void, String> {
+    #[cfg(unix)]
+    {
+        let raw = dlopen(name.as_ptr(), 1); // RTLD_LAZY | RTLD_LOCAL
+        if raw.is_null() {
+            let error = dlerror();
+            return Err(if error.is_null() { "could not load Vulkan".into() } else { CStr::from_ptr(error).to_string_lossy().into_owned() });
+        }
+        Ok(raw)
+    }
+    #[cfg(windows)]
+    {
+        let raw = LoadLibraryA(name.as_ptr());
+        if raw.is_null() {
+            return Err(format!("could not load {} (error {})", name.to_string_lossy(), GetLastError()));
+        }
+        Ok(raw)
+    }
+}
+unsafe fn loader_symbol(raw: *mut c_void, name: &CStr) -> *mut c_void {
+    #[cfg(unix)]
+    {
+        dlsym(raw, name.as_ptr())
+    }
+    #[cfg(windows)]
+    {
+        GetProcAddress(raw, name.as_ptr())
+    }
 }
 struct Library(*mut c_void);
 // The loader's handle is immutable and its symbol lookup is thread-safe. It is never closed:
@@ -59,7 +99,9 @@ impl Entry {
     pub unsafe fn load() -> Result<Self, String> {
         #[cfg(target_os = "android")]
         let name = c"libvulkan.so";
-        #[cfg(not(target_os = "android"))]
+        #[cfg(windows)]
+        let name = c"vulkan-1.dll";
+        #[cfg(not(any(target_os = "android", windows)))]
         let name = c"libvulkan.so.1";
         static LIBRARY: std::sync::Mutex<Option<Arc<Library>>> = std::sync::Mutex::new(None);
         let library = {
@@ -67,12 +109,7 @@ impl Entry {
             match shared.as_ref() {
                 Some(library) => library.clone(),
                 None => {
-                    let raw = dlopen(name.as_ptr(), 1); // RTLD_LAZY | RTLD_LOCAL
-                    if raw.is_null() {
-                        let error = dlerror();
-                        return Err(if error.is_null() { "could not load Vulkan".into() }
-                            else { CStr::from_ptr(error).to_string_lossy().into_owned() });
-                    }
+                    let raw = open_loader(name)?;
                     let library = Arc::new(Library(raw));
                     *shared = Some(library.clone());
                     library
@@ -80,7 +117,7 @@ impl Entry {
             }
         };
         let raw = library.0;
-        let symbol = dlsym(raw, c"vkGetInstanceProcAddr".as_ptr());
+        let symbol = loader_symbol(raw, c"vkGetInstanceProcAddr");
         if symbol.is_null() { return Err("Vulkan loader lacks vkGetInstanceProcAddr".into()); }
         let get: commands::PfnGetInstanceProcAddr = core::mem::transmute(symbol);
         let mut table = commands::EntryTable::load(get);

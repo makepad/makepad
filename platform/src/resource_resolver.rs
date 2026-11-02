@@ -183,10 +183,12 @@ impl ResourceResolver {
         let canonical = path.canonicalize().map_err(|e| ResourceError::Io(format!("{shown}: {e}")))?;
         for root in roots {
             if let Ok(rest) = canonical.strip_prefix(&root.root) {
-                let rest = rest
-                    .to_str()
-                    .ok_or_else(|| ResourceError::InvalidPath(format!("{:?}: not UTF-8", truncate(&shown))))?;
-                return root.read(rest, max_bytes);
+                // the name grammar has one separator, `/`, on every platform
+                let mut parts = Vec::new();
+                for c in rest.components() {
+                    parts.push(c.as_os_str().to_str().ok_or_else(|| ResourceError::InvalidPath(format!("{:?}: not UTF-8", truncate(&shown))))?);
+                }
+                return root.read(&parts.join("/"), max_bytes);
             }
         }
         Err(ResourceError::Escape(shown))

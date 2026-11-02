@@ -663,9 +663,9 @@ fn raw_now_ns() -> u64 {
         extern "C" {
             fn clock_gettime(id: i32, ts: *mut Ts) -> i32;
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(target_vendor = "apple")]
         let id = 8; // CLOCK_UPTIME_RAW
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(target_vendor = "apple"))]
         let id = 1; // CLOCK_MONOTONIC
         let mut ts = Ts { s: 0, ns: 0 };
         unsafe { clock_gettime(id, &mut ts) };

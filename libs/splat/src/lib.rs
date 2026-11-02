@@ -68,41 +68,7 @@ fn detect_format(
 
 #[cfg(test)]
 mod tests {
-    use super::{load_splat_from_bytes, load_splat_from_path};
-    use std::path::PathBuf;
-
-    fn local_sample(name: &str) -> Option<PathBuf> {
-        // `local/` lives in the main checkout; worktrees reach it four levels up.
-        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let mut candidates = Vec::new();
-        if let Ok(dir) = std::env::var("MAKEPAD_LOCAL_DIR") {
-            candidates.push(PathBuf::from(dir));
-        }
-        candidates.push(manifest.join("../../local"));
-        candidates.push(manifest.join("../../../../../local"));
-        candidates
-            .into_iter()
-            .map(|dir| dir.join(name))
-            .find(|path| path.exists())
-    }
-
-    #[test]
-    fn loads_sample_ply_if_available() {
-        let Some(path) = local_sample("biker.ply") else {
-            return;
-        };
-        let scene = load_splat_from_path(&path).expect("sample ply should load");
-        assert!(!scene.splats.is_empty());
-    }
-
-    #[test]
-    fn loads_sample_sog_if_available() {
-        let Some(path) = local_sample("toy-cat.sog") else {
-            return;
-        };
-        let scene = load_splat_from_path(&path).expect("sample sog should load");
-        assert!(!scene.splats.is_empty());
-    }
+    use super::load_splat_from_bytes;
 
     /// Binary rows with mixed scalar types, extra (skipped) properties and a
     /// property order that differs from the field order decode to the same
@@ -167,32 +133,4 @@ mod tests {
         assert!(load_splat_from_bytes(&bytes, None).is_err());
     }
 
-    /// cargo test -p makepad-splat --release loader_bench -- --ignored --nocapture
-    #[test]
-    #[ignore]
-    fn loader_bench() {
-        for name in ["biker.ply", "coastal_world.ply", "toy-cat.sog"] {
-            let Some(path) = local_sample(name) else {
-                println!("{name}: not present, skipped");
-                continue;
-            };
-            let bytes = std::fs::read(&path).expect("read sample");
-            // Warm once, then time.
-            let _ = load_splat_from_bytes(&bytes, Some(&path));
-            let runs = 3;
-            let started = std::time::Instant::now();
-            let mut count = 0;
-            for _ in 0..runs {
-                count = load_splat_from_bytes(&bytes, Some(&path))
-                    .expect("load")
-                    .splats
-                    .len();
-            }
-            println!(
-                "LOADER_BENCH {name}: splats={count} load_ms={:.1} ({:.1} MB)",
-                started.elapsed().as_secs_f64() * 1000.0 / runs as f64,
-                bytes.len() as f64 / 1e6
-            );
-        }
-    }
 }

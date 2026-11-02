@@ -4,7 +4,7 @@ use crate::{f32::math, sse2::*, BVec4, BVec4A, Vec2, Vec3, Vec3A};
 
 use core::fmt;
 use core::iter::{Product, Sum};
-use core::{f32, ops::*};
+use core::ops::*;
 
 #[cfg(target_arch = "x86")]
 use core::arch::x86::*;

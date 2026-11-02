@@ -727,6 +727,11 @@ pub struct App {
     client_windows: ClientWindows,
     #[rust]
     tick: Timer,
+    /// While a first frame fades in: the scene's cached content follows (`note_arrival_fade`).
+    #[rust]
+    arrival_tick: Timer,
+    #[rust]
+    arrival_until: f64,
     /// Module instances whose root panicked, with when: their tiles show
     /// "crashed" for [`CRASH_HOLD_SECS`] before the WM closes them, so the
     /// person sees what happened instead of an app that just vanished.
@@ -1539,17 +1544,36 @@ impl App {
 
     /// The pool's honest measurement: how long from the launch gesture to
     /// this window's first frame ON THE DESK, and by which path.
+    fn note_arrival_fade(&mut self, cx: &mut Cx, client: ClientId) {
+        let fading = self.desk(cx).borrow_mut::<WmDesk>().and_then(|mut d| d.with_run_view(cx, client, |_, v| v.arrival_fade() < 1.0));
+        if fading == Some(true) {
+            self.arrival_until = host::now() + run_view::ARRIVAL_FADE_SECS as f64 + 0.05;
+            if self.arrival_tick.is_empty() {
+                self.arrival_tick = cx.start_interval(1.0 / 60.0);
+            }
+        }
+    }
+
+    fn note_app_frame(&mut self, client: ClientId) {
+        if let Some(slot) = self.state_mut().clients.get_mut(&client) {
+            if !slot.app_drawn {
+                slot.app_drawn = true;
+                slot.starting = false;
+                log!("wm: {} client {} app first frame", slot.app, client);
+            }
+        }
+    }
+
     fn note_first_frame(&mut self, client: ClientId) {
         let Some(slot) = self.state_mut().clients.get_mut(&client) else {
             return;
         };
-        if !slot.launch.as_ref().is_some_and(|l| l.runner() == makepad_app_registry::Runner::Jit) {
-            slot.starting = false;
-        }
-        let Some(at) = slot.open_at.take() else {
+        let app_frame = !slot.app_drawn && !slot.launch.as_ref().is_some_and(|l| l.runner() == makepad_app_registry::Runner::Jit);
+        let arrival = slot.open_at.take().map(|at| (at, slot.app.clone(), slot.opened_warm));
+        if app_frame { self.note_app_frame(client); }
+        let Some((at, app, warm)) = arrival else {
             return;
         };
-        let (app, warm) = (slot.app.clone(), slot.opened_warm);
         log!(
             "wm: {} client {} first frame in {} ms ({})",
             app,
@@ -1575,14 +1599,6 @@ impl App {
         let mut latest: Vec<(ClientId, String, bool)> = Vec::new();
         if let Some(lines) = self.client_lines.as_ref() {
             while let Ok(line) = lines.rx.try_recv() {
-                // The app's own first frame: under the JIT the client's first frames are its
-                // load screen's (`note_first_frame`).
-                if matches!(&line.output, makepad_app_registry::ProcessOutput::Line(text) if text.contains(" first frame at ")) {
-                    if let Some(slot) = self.state.as_mut().and_then(|state| state.clients.get_mut(&line.client)) {
-                        slot.starting = false;
-                        log!("wm: {} client {} app first frame", slot.app, line.client);
-                    }
-                }
                 let Some(launch) = self.state.as_mut()
                     .and_then(|state| state.clients.get_mut(&line.client))
                     .and_then(|slot| slot.launch.as_mut()) else { continue };
@@ -3491,6 +3507,26 @@ impl App {
         }
     }
 
+    /// An app resizing its window while it is shown (`HostedResize`): on a floating desktop the
+    /// window takes the inner size (plus the desk's title bar) at its top-left corner, kept
+    /// within the usable area; a maximised or snapped window is released for it. Tiled layouts
+    /// own the size, so there it changes nothing.
+    fn apply_requested_resize(&mut self, cx: &mut Cx, tile: ClientId, w: f64, h: f64) {
+        if !self.state_mut().style.target.floating() || self.is_warm(tile) {
+            return;
+        }
+        let Some(screen) = self.state_mut().screens.screen_of(tile) else { return };
+        let mut area = self.screen_area(cx, screen);
+        let state = self.state_mut();
+        let reserve = state.layout_of(tile).desktop.shelf_reserve;
+        area.h = (area.h - reserve).max(1.0);
+        let title = state.style.title_height();
+        if state.layout_of_mut(tile).desktop.resize_to(tile, w, h + title, area) {
+            log!("wm: client {tile} resized to the {w}x{h} it asked for (within {:.0}x{:.0})", area.w, area.h);
+            self.redraw_all(cx);
+        }
+    }
+
     /// Put a later window on the screen at `at`, a point in the app's coordinates (those of
     /// the screens it was told: relative to its first window's tile).
     fn move_later_window(&mut self, cx: &mut Cx, client: ClientId, tile: ClientId, at: Vec2d) {
@@ -3620,6 +3656,7 @@ impl App {
                 // The hosted frame is produced in a separate capture pass;
                 // invalidate the outer cached scene explicitly.
                 self.redraw_scene_content(cx);
+                self.note_arrival_fade(cx, client);
                 self.note_first_frame(client);
                 // A focus that couldn't land at launch (tile not yet
                 // drawn) lands now that the client has a frame.
@@ -3766,6 +3803,10 @@ impl App {
                 self.send_relays(answers);
             }
             AppToStudio::Custom(json) => {
+                if makepad_hal::window_controls::HostedAppFrame::parse(&json).is_some() {
+                    self.note_app_frame(client);
+                    return;
+                }
                 // A tray app's dropdown window: shown under its tray item, or hidden (dropdown.rs).
                 if let Some(dropdown) = makepad_widgets::makepad_platform::studio::HostedDropdown::parse(&json) {
                     self.dropdown_message(cx, client, dropdown);
@@ -3796,6 +3837,11 @@ impl App {
                             d.with_run_view(cx, tile, |_, v| v.hosted.set_pointer_caps(caps.clone()));
                         }
                     }
+                    return;
+                }
+                // The app resizes its tile's window.
+                if let Some(ask) = makepad_hal::window_controls::HostedResize::parse(&json) {
+                    self.apply_requested_resize(cx, client, ask.w, ask.h);
                     return;
                 }
                 // One of the app's later windows: closed by the app, or what it asked of it.
@@ -7308,6 +7354,15 @@ impl AppMain for App {
             }
         }
         if let Event::Timer(te) = event {
+            // A tile's own redraw does not reach the scene's cached content: without this, an app
+            // that draws nothing after its first frame (an idle terminal) stays under its starting card.
+            if self.arrival_tick.is_timer(te).is_some() {
+                self.redraw_scene_content(cx);
+                if host::now() >= self.arrival_until {
+                    cx.stop_timer(self.arrival_tick);
+                    self.arrival_tick = Timer::empty();
+                }
+            }
             if self.tick.is_timer(te).is_some() && self.state.is_some() {
                 self.wayland_tick(cx);
                 self.hub_poll(cx);

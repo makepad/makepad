@@ -294,11 +294,11 @@ impl PulseInputStream {
         );
 
         let buffer_attr = pa_buffer_attr {
-            maxlength: std::u32::MAX,
+            maxlength: u32::MAX,
             tlength: (8 * pulse.buffer_frames) as u32,
             prebuf: 0,
-            minreq: std::u32::MAX,
-            fragsize: std::u32::MAX,
+            minreq: u32::MAX,
+            fragsize: u32::MAX,
         };
         let flags = PA_STREAM_ADJUST_LATENCY;
 
@@ -481,11 +481,11 @@ impl PulseOutputStream {
         );
 
         let buffer_attr = pa_buffer_attr {
-            maxlength: std::u32::MAX,
+            maxlength: u32::MAX,
             tlength: (8 * pulse.buffer_frames) as u32,
             prebuf: 0,
-            minreq: std::u32::MAX,
-            fragsize: std::u32::MAX,
+            minreq: u32::MAX,
+            fragsize: u32::MAX,
         };
         let flags = PA_STREAM_ADJUST_LATENCY | PA_STREAM_START_CORKED | PA_STREAM_START_UNMUTED;
 

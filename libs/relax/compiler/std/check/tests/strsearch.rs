@@ -120,27 +120,3 @@ fn rejection_steps_and_independent_cursors() {
     assert_eq!(s.next(), Done);
     assert_eq!(s.next_back(), Done);
 }
-
-#[test]
-#[ignore]
-fn quick_timing() {
-    use std::hint::black_box;
-    use std::time::Instant;
-    for (label, h, n) in [
-        ("prose", format!("{}needle", "some ordinary text with spaces ".repeat(2000)), "needle".to_string()),
-        ("periodic", format!("{}b", "a".repeat(64000)), format!("{}b", "a".repeat(80))),
-        ("short", "small haystack with a needle".to_string(), "needle".to_string()),
-    ] {
-        let mut real_best = u128::MAX;
-        let mut port_best = u128::MAX;
-        for _ in 0..5 {
-            let start = Instant::now();
-            for _ in 0..2000 { black_box(black_box(h.as_str()).find(black_box(n.as_str()))); }
-            real_best = real_best.min(start.elapsed().as_nanos());
-            let start = Instant::now();
-            for _ in 0..2000 { black_box(port::find(black_box(h.as_str()), black_box(n.as_str()))); }
-            port_best = port_best.min(start.elapsed().as_nanos());
-        }
-        println!("{label}: real {} ns/find, port {} ns/find", real_best / 2000, port_best / 2000);
-    }
-}

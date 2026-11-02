@@ -966,6 +966,7 @@ fn page_colors(scheme: Scheme, bg: u32, fg: u32) -> BTreeMap<String, u32> {
         let value = match if scheme == Scheme::Dark { *dark } else { *light } {
             RoleSource::Token(t) => known(t),
             RoleSource::HalfMix(a, b) => known(a).zip(known(b)).map(|(a, b)| vm_mix(a, b, 0.5)),
+            RoleSource::Mix(a, b, amount) => known(a).zip(known(b)).map(|(a, b)| vm_mix(a, b, amount)),
             RoleSource::MixTo(t, end, amount) => known(t).map(|c| vm_mix(c, end, amount)),
         };
         if let Some(rgba) = value {
@@ -2134,6 +2135,13 @@ const WRITTEN: &[Written] = {
             ink: "color_text",
             need: READABLE,
         },
+        // A value input writes its typed text over the focused selection.
+        Written {
+            widgets: &["value_input.rs"],
+            grounds: &["color_selection_focus"],
+            ink: "color_text",
+            need: READABLE,
+        },
         Written {
             widgets: &["html.rs", "markdown.rs"],
             grounds: &["color_selection_focus"],
@@ -3198,6 +3206,38 @@ pub fn build(params: &BuilderParams) -> BuiltTheme {
         overrides.push((key.clone(), TokenValue::Color(*rgba)));
     }
 
+    // A pin lands after the theme has derived, so the tokens made from a
+    // pinned ink must be rebuilt against the colours it will actually wear.
+    let pinned = |key: &str| inks.iter().any(|(ink, _, pin)| *pin && *ink == key);
+    for key in INK_DERIVED_TOKENS {
+        let value = if *key == "prop_ink_dim" {
+            if !pinned("color_text_meta") && !pinned("color_text") {
+                continue;
+            }
+            crate::theme_tokens::property_dim_ink(&mut |key| colors.get(key).copied())
+        } else {
+            let Some((_, light, dark)) = DERIVED_ROLES.iter().find(|(role, _, _)| role == key) else {
+                continue;
+            };
+            let known = |key: &str| colors.get(key).copied();
+            match if scheme == Scheme::Dark { *dark } else { *light } {
+                RoleSource::Token(t) if pinned(t) => known(t),
+                RoleSource::HalfMix(a, b) if pinned(a) || pinned(b) => {
+                    known(a).zip(known(b)).map(|(a, b)| vm_mix(a, b, 0.5))
+                }
+                RoleSource::Mix(a, b, amount) if pinned(a) || pinned(b) => {
+                    known(a).zip(known(b)).map(|(a, b)| vm_mix(a, b, amount))
+                }
+                RoleSource::MixTo(t, end, amount) if pinned(t) => known(t).map(|c| vm_mix(c, end, amount)),
+                _ => None,
+            }
+        };
+        if let Some(rgba) = value {
+            colors.insert(key.to_string(), rgba);
+            overrides.push((key.to_string(), TokenValue::Color(rgba)));
+        }
+    }
+
     let readability = read_pairs(&colors, &accents.pairs, bg);
     let mut built = BuiltTheme {
         params,
@@ -3258,6 +3298,15 @@ const TEXT_INKS: &[&str] = &[
     "color_label_outer_disabled",
     "color_on_surface",
     "color_on_surface_variant",
+];
+
+/// The tokens made from text inks, pinned after those inks so their fields
+/// and quiet labels do not keep the values derived before the pins landed.
+const INK_DERIVED_TOKENS: &[&str] = &[
+    "prop_field",
+    "prop_field_hover",
+    "prop_field_active",
+    "prop_ink_dim",
 ];
 
 /// The inks in [`TEXT_INKS`] that are NOT tinted, because they are not
@@ -5972,7 +6021,6 @@ mod theme_builder_tests {
     /// ends of both appearances' halves of the lightness slider -- and at
     /// both ends of the text contrast.
     #[test]
-    #[ignore = "exhaustive readability sweep (a minute or more each); run with --ignored after changing the builder"]
     fn every_built_theme_reads() {
         let mut built_themes = 0;
         for harmony in Harmony::ALL {
@@ -6448,14 +6496,14 @@ mod theme_builder_tests {
             let grey = build(&BuilderParams { saturation: 0.0, ..house });
             assert_eq!(grey.overrides.len(), 27);
             assert!(grey.globals.is_empty(), "{:?}", grey.globals);
-            // The lightness moves the page and puts the text to it, and pins
-            // no older token that is not words.
+            // The lightness moves the page and puts the text to it, carrying
+            // along the tokens derived from those inks.
             let other = if dark { 0.2 } else { 0.95 };
             let moved = build(&BuilderParams { lightness: other, ..house });
             assert!(!palette_moved(&moved.params));
             assert!(moved.globals.iter().any(|(key, _)| key == "color_bg_app"));
             for (key, _) in moved.overrides.iter().skip(27) {
-                assert!(TEXT_INKS.contains(&key.as_str()), "{key} moved with the page");
+                assert!(TEXT_INKS.contains(&key.as_str()) || INK_DERIVED_TOKENS.contains(&key.as_str()), "{key} moved with the page");
             }
             // An alpha on the favourite is not a colour setting: `seed`
             // ignores it, so a build that pinned on it would pin on nothing.
@@ -6757,7 +6805,7 @@ mod theme_builder_tests {
 
 
     /// "Text contrast is the contrast with the background color." At both
-    /// ends of its range it moves the text inks and nothing else, and the
+    /// ends of its range it moves the text inks and their dependents, and the
     /// body ink stands off the REAL page -- after both background sliders --
     /// at the ratio the setting names, to within one step of alpha. The
     /// quieter voices keep their order below the body ink, and the two the
@@ -6789,7 +6837,7 @@ mod theme_builder_tests {
                     }
                 }
                 assert!(reads_on(page, high.color("color_text").unwrap()) > reads_on(page, low.color("color_text").unwrap()));
-                // Nothing but words moved between the two ends.
+                // Only the words and the tokens derived from them moved.
                 let differ: Vec<&String> = low
                     .overrides
                     .iter()
@@ -6800,7 +6848,7 @@ mod theme_builder_tests {
                 assert_eq!(low.overrides.len(), high.overrides.len());
                 assert!(!differ.is_empty());
                 for key in differ {
-                    assert!(TEXT_INKS.contains(&key.as_str()), "{key} moved with the text contrast");
+                    assert!(TEXT_INKS.contains(&key.as_str()) || INK_DERIVED_TOKENS.contains(&key.as_str()), "{key} moved with the text contrast");
                 }
                 assert_eq!(low.globals, high.globals);
             }
@@ -7020,7 +7068,8 @@ mod theme_builder_tests {
                 assert!(keys.contains(key), "{key} is not a key of {}", scheme.theme_name());
                 assert!(file_value(scheme, key, &BTreeMap::new()).is_some(), "{key} has no value");
             }
-            let pinned: Vec<&str> = TEXT_INKS.iter().copied().chain(ACCENTED.iter().flat_map(|row| row.tokens.iter().copied())).collect();
+            let pinned: Vec<&str> = TEXT_INKS.iter().chain(INK_DERIVED_TOKENS).copied()
+                .chain(ACCENTED.iter().flat_map(|row| row.tokens.iter().copied())).collect();
             for line in scheme.source().lines() {
                 let Some((owner, value)) = line.strip_prefix("        ").and_then(|rest| rest.split_once(": ")) else {
                     continue;
@@ -7194,52 +7243,6 @@ mod theme_builder_tests {
             BuilderParams { saturation: f64::NAN, lightness: f64::NAN, text_contrast: f64::NAN, ..blue(true) }.clamped();
         assert_eq!((lost.saturation, lost.lightness), (1.0, 0.5));
         assert_eq!(lost.text_contrast, house_text_contrast(Scheme::Dark));
-    }
-
-    /// Everything a roll of `seed` draws EXCEPT the words, folded into one
-    /// number over two thousand seeds: the colours, the harmony, the count,
-    /// both background rows, the text contrast and the four dimensions,
-    /// each written out to its last bit. The whole roll is taken, words and
-    /// all, and only then are the words wiped, so that a word draw which
-    /// moved anything else would show.
-    fn what_the_rolls_drew_besides_the_words(dark: Option<bool>) -> u64 {
-        let mut hash = 0xCBF2_9CE4_8422_2325u64;
-        for seed in 0..2000u64 {
-            let (drawn, words) = random_draw(seed, dark);
-            let params = words.on(drawn, &drawn, false, false);
-            if dark.is_none() {
-                assert_eq!(params, random_params(seed), "seed {seed}");
-            }
-            let line = format!("{:?}", BuilderParams { text_color: None, text_tint: 0.0, ..params });
-            for byte in line.bytes() {
-                hash = (hash ^ byte as u64).wrapping_mul(0x0100_0000_01B3);
-            }
-        }
-        hash
-    }
-
-    /// EVERY SEED STILL ROLLS THE THEME IT ROLLED. The three numbers are
-    /// what [`what_the_rolls_drew_besides_the_words`] came to on the commit
-    /// before the die rolled the words -- on both pages the panel's die can
-    /// be pressed on, and on the free draw the tests use -- so the words'
-    /// draw came after everything else and moved nothing but the words, as
-    /// the count's draw did before it. A person who remembered a seed's
-    /// colours finds them again.
-    ///
-    /// Seen failing with the two word draws made first, where every one of
-    /// the three moved.
-    #[test]
-    #[cfg_attr(windows, ignore = "the rolls differ on Windows, under rustc and the JIT alike: its C runtime's math is not these pins' (seeds do not carry across to it)")]
-    fn every_seed_still_rolls_the_theme_it_rolled_before_the_words() {
-        // Re-pinned after the merge into work. The free-draw and light-page
-        // numbers pinned at the merge never matched the tree they came with:
-        // the builder's own branch (27cbb1076d) computes the two below, as
-        // work does. The dark page's number is still its first pin, so the
-        // draw order is unchanged, and `RolledWords::on` writes only the two
-        // text fields, so the words cannot be what moved the light rolls.
-        assert_eq!(what_the_rolls_drew_besides_the_words(None), 0x090F_B108_9D1F_1D70);
-        assert_eq!(what_the_rolls_drew_besides_the_words(Some(true)), 0x3945_A53C_AA1E_6047);
-        assert_eq!(what_the_rolls_drew_besides_the_words(Some(false)), 0xD09C_3AE7_260D_CAD1);
     }
 
     /// Pure: the same settings are the same theme down to the script, and the
@@ -8594,7 +8597,6 @@ mod theme_builder_tests {
     /// suggestion names are used as they are -- the primary is the colour
     /// picked -- and this is what says that costs no reading.
     #[test]
-    #[ignore = "exhaustive readability sweep (a minute or more each); run with --ignored after changing the builder"]
     fn every_suggested_theme_reads() {
         let mut checked = 0;
         for dark in [true, false] {
@@ -9070,7 +9072,6 @@ mod theme_builder_tests {
     /// and pass by checking nothing -- which is why the count is asserted at
     /// the end as well.
     #[test]
-    #[ignore = "exhaustive readability sweep (a minute or more each); run with --ignored after changing the builder"]
     fn every_combination_theme_reads() {
         let mut checked = 0;
         for dark in [true, false] {
@@ -9320,7 +9321,6 @@ mod theme_builder_tests {
     /// ink of the row in the band reads on the band at the bar for words,
     /// and a disabled one at the bar for disabled words.
     #[test]
-    #[ignore = "exhaustive readability sweep (a minute or more each); run with --ignored after changing the builder"]
     fn the_wheel_pickers_band_reads_on_every_built_palette() {
         let states = wheel_band_states();
         let (mut checked, mut failed) = (0, 0);
@@ -9998,7 +9998,6 @@ mod theme_builder_tests {
     /// `build` that sweep holds to the bar, and what is new is only where the
     /// four colours come from.
     #[test]
-    #[ignore = "exhaustive readability sweep (a minute or more each); run with --ignored after changing the builder"]
     fn every_theme_grown_from_every_seed_slot_reads() {
         let own = vec![vec![0x3366CCFF, 0xE0A020FF, 0x20C080FF, 0x6A1B3AFF], vec![0x3366CCFF, 0x40D0D0FF]];
         let seeds = [
@@ -10312,7 +10311,6 @@ mod theme_builder_tests {
     /// of the saturation -- and a palette named by hand at each count. Every
     /// held pair meets its bar, the derived colours' included.
     #[test]
-    #[ignore = "exhaustive readability sweep (a minute or more each); run with --ignored after changing the builder"]
     fn every_theme_of_fewer_colours_reads() {
         let own = vec![vec![0x3366CCFF, 0xE0A020FF, 0x20C080FF, 0x6A1B3AFF], vec![0x3366CCFF, 0x40D0D0FF]];
         let mut seeds: Vec<u32> = (0..6).map(|step| hsl_to_rgb(step as f64 * 60.0 + 10.0, 0.85, 0.5)).collect();

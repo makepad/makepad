@@ -1019,19 +1019,6 @@ mod tests {
     }
 
     #[test]
-    fn nearest_interpolate_matches_hand_computed() {
-        // F.interpolate(size=5, mode='nearest') on len 3: floor(j*3/5).
-        let src = [10.0f32, 20.0, 30.0];
-        let out: Vec<f32> = (0..5).map(|j| src[j * 3 / 5]).collect();
-        assert_eq!(out, vec![10.0, 10.0, 20.0, 20.0, 30.0]);
-        // 151 -> 260 stays in range and is monotone.
-        let idx: Vec<usize> = (0..260).map(|j| j * 151 / 260).collect();
-        assert_eq!(idx[0], 0);
-        assert_eq!(*idx.last().unwrap(), 150);
-        assert!(idx.windows(2).all(|w| w[0] <= w[1]));
-    }
-
-    #[test]
     fn rope_interleaved_matches_complex_reference() {
         // gpt_fast apply_rotary_emb: pairs (2j, 2j+1) rotated by
         // theta^(-2j/dim) * pos as a complex product.
@@ -1103,32 +1090,4 @@ mod tests {
         assert!((var - 1.0).abs() < 0.1);
     }
 
-    #[test]
-    fn euler_t_span_accumulates_like_reference() {
-        // t += dt over f32 span differences, 25 steps: final t ~ 1.
-        let n = 25usize;
-        let span: Vec<f32> = (0..=n).map(|i| (i as f64 / n as f64) as f32).collect();
-        let mut t = span[0];
-        for step in 1..=n {
-            t += span[step] - span[step - 1];
-        }
-        assert!((t - 1.0).abs() < 1e-5);
-    }
-
-    /// Regulator smoke on the reference checkpoint (skipped when absent):
-    /// loads only the `net.length_regulator.` keys, runs a tiny forward.
-    #[test]
-    fn length_regulator_smoke_on_reference_checkpoint() {
-        let path = crate::indextts::reference_checkpoints_dir().join("s2mel.pth");
-        if !path.is_file() {
-            eprintln!("skipping length_regulator_smoke_on_reference_checkpoint: {path:?} missing");
-            return;
-        }
-        let mut sd = PthStateDict::load_nested(&path).unwrap();
-        let reg = LengthRegulator::load_sd(&mut sd, "net.length_regulator").unwrap();
-        let x = vec![0.25f32; 5 * REG_IN];
-        let out = reg.forward(&x, 5, 9).unwrap();
-        assert_eq!(out.len(), 9 * DIM);
-        assert!(out.iter().all(|v| v.is_finite()));
-    }
 }

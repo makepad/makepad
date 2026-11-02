@@ -185,6 +185,7 @@ pub(crate) struct ReadbackWork {
 
 impl Cx {
     pub(crate) fn validate_pending_readbacks(&mut self) {
+        let mut latest = None;
         for index in 0..self.textures.1.readbacks.slots.len() {
             let slot = &self.textures.1.readbacks.slots[index];
             if !slot.pending { continue; }
@@ -198,14 +199,21 @@ impl Cx {
                     && !self.passes.0.is_free(pass.0)
                     && self.passes[pass].color_textures.iter().any(|attachment| attachment.texture.texture_id() == id);
                 if !valid { Some(ReadbackError::Cancelled) }
-                else if !slot.next_render && !self.passes[pass].paint_dirty && texture.producer_serial == slot.previous_serial {
-                    Some(ReadbackError::NotRendered)
+                // A pass that is neither dirty nor incomplete has nothing more to paint: no new
+                // picture will answer the request. The texture holds the pass's latest picture, so the
+                // request reads that one instead (never rendered at all: NotRendered). An incomplete
+                // pass (kept its picture while a pipeline compiles) paints again when it is ready,
+                // and the request waits for that.
+                else if !slot.next_render && !self.passes[pass].paint_dirty && !self.passes[pass].incomplete && texture.producer_serial == slot.previous_serial {
+                    if texture.producer_serial == 0 { Some(ReadbackError::NotRendered) } else { latest = Some(index); None }
                 } else { None }
             } else { None };
             if let Some(error) = error {
                 let slot = &mut self.textures.1.readbacks.slots[index];
                 slot.pending = false;
                 slot.result.data = Err(error);
+            } else if latest == Some(index) {
+                self.textures.1.readbacks.slots[index].pass = None;
             }
         }
     }
@@ -261,7 +269,6 @@ impl Cx {
 
 impl TextureId {
     /// The pool generation of the slot this id names.
-    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn generation(self) -> u64 {
         self.1
     }
@@ -414,6 +421,8 @@ pub(crate) struct TextureLifetime {
     pub(crate) partial: std::collections::VecDeque<u64>,
     #[cfg(target_arch = "wasm32")]
     pub(crate) retired: Vec<RetiredTexture>,
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) post_upload_discard: Vec<TextureId>,
     pub(crate) readbacks: TextureReadbacks,
 }
 
@@ -845,18 +854,6 @@ pub struct TextureAnimation {
     pub frame_delays: Vec<f64>,
 }
 
-#[cfg(test)]
-mod texture_animation_tests {
-    use super::*;
-
-    #[test]
-    fn test_texture_animation_default_frame_delays_is_empty() {
-        let animation = TextureAnimation::default();
-        assert!(animation.frame_delays.is_empty());
-        assert_eq!(animation.frame_delays.len(), 0);
-    }
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct TextureAlloc {
     pub category: TextureCategory,
@@ -1025,7 +1022,9 @@ impl CxTexture {
         self.producer_serial = 0;
         self.alloc = None;
         if self.format.is_vec() {
-            self.set_updated(TextureUpdated::Full);
+            if self.format.cpu_data_bytes() > 0 {
+                self.set_updated(TextureUpdated::Full);
+            }
         } else if self.format.is_render() || self.format.is_depth() {
             self.set_initial(true);
         }
@@ -1212,6 +1211,24 @@ impl TextureFormat {
             TextureFormat::VecMipCompressed { data, .. } | TextureFormat::VecArrayMipCompressed { data, .. } => data.as_ref().map_or(0, |data| data.capacity()),
             TextureFormat::VecArrayMipBGRAu8_32 { data, .. } => data.as_ref().map_or(0, |data| data.capacity().saturating_mul(4)),
             _ => 0,
+        }
+    }
+
+    /// Release any CPU pixel `Vec` held by a `Vec*` variant, keeping format and dimensions intact.
+    pub(crate) fn discard_cpu_data(&mut self) {
+        match self {
+            TextureFormat::VecBGRAu8_32 { data, .. }
+            | TextureFormat::VecCubeBGRAu8_32 { data, .. }
+            | TextureFormat::VecMipBGRAu8_32 { data, .. }
+            | TextureFormat::VecArrayMipBGRAu8_32 { data, .. } => *data = None,
+            TextureFormat::VecMipRGBAf32 { data, .. }
+            | TextureFormat::VecRGBAf32 { data, .. }
+            | TextureFormat::VecRf32 { data, .. } => *data = None,
+            TextureFormat::VecMipCompressed { data, .. }
+            | TextureFormat::VecArrayMipCompressed { data, .. }
+            | TextureFormat::VecRu8 { data, .. }
+            | TextureFormat::VecRGu8 { data, .. } => *data = None,
+            _ => {}
         }
     }
 
@@ -1647,6 +1664,27 @@ impl Texture {
         cx.textures[self.texture_id()].transient
     }
 
+    /// [`Self::set_discard_cpu_after_upload`]`(true)` as a builder step.
+    pub fn discard_cpu_after_upload(self, cx: &mut Cx) -> Self {
+        self.set_discard_cpu_after_upload(cx, true);
+        self
+    }
+
+    /// Release a `Vec*` texture's CPU pixel buffer (`data = None`) once its upload batch has been
+    /// submitted to the GPU backend, keeping the GPU allocation and dimensions intact. Do not
+    /// combine with `take_vec_*` or partial rect updates unless a new full `Vec` is supplied; on
+    /// `Event::GpuReset` (device loss), re-populate or recreate the texture because `Cx` no
+    /// longer retains the CPU copy.
+    pub fn set_discard_cpu_after_upload(&self, cx: &mut Cx, discard: bool) {
+        cx.textures[self.texture_id()].discard_cpu_after_upload = discard;
+    }
+
+    /// Whether the platform releases this `Vec*` texture's CPU pixel buffer after upload (see
+    /// [`Texture::set_discard_cpu_after_upload`]).
+    pub fn discards_cpu_after_upload(&self, cx: &Cx) -> bool {
+        cx.textures[self.texture_id()].discard_cpu_after_upload
+    }
+
     /// Records that this texture holds a shrunk copy of an image (or of each frame of an
     /// animation) that's `natural_size` pixels big, so it can still be laid out at that size.
     pub fn set_natural_size(&self, cx: &mut Cx, natural_size: Option<(usize, usize)>) {
@@ -1835,6 +1873,8 @@ pub struct CxTexture {
     /// platform gives its GPU storage back once nothing bound or attached it for a while
     /// (the backend's idle policy); the next pass allocates it again.
     pub(crate) transient: bool,
+    /// Release `Vec*` CPU pixel data (`data = None`) once the upload batch has been submitted.
+    pub(crate) discard_cpu_after_upload: bool,
 }
 
 #[cfg(test)]

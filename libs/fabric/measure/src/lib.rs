@@ -1673,16 +1673,4 @@ mod tests {
             Err(MeasureError::NotAStandingBody(_))
         ));
     }
-
-    #[test]
-    #[ignore = "release-only performance smoke test"]
-    fn synthetic_measurement_performance() {
-        let mesh = synthetic_body(SyntheticSpec::default());
-        let start = std::time::Instant::now();
-        let measured = measure(&mesh, &MeasureOptions::default()).unwrap();
-        std::hint::black_box(measured);
-        let elapsed = start.elapsed();
-        eprintln!("synthetic measure: {elapsed:?}, faces={}", mesh.faces.len());
-        assert!(elapsed.as_millis() < 300, "elapsed {elapsed:?}");
-    }
 }

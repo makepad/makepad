@@ -8,19 +8,30 @@
 //! Uses $WAYLAND_DISPLAY in $XDG_RUNTIME_DIR. Prints `ready` once the selection is set / the
 //! window is mapped. `--log=<file>` also appends every printed line to the file (for a client
 //! started by a compositor with its output closed).
+#[cfg(target_os = "linux")]
 use std::collections::{HashMap, VecDeque};
+#[cfg(target_os = "linux")]
 use std::io::{Read, Write};
+#[cfg(target_os = "linux")]
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+#[cfg(target_os = "linux")]
 use std::os::unix::net::UnixStream;
+#[cfg(target_os = "linux")]
 use wayland_server::proto::*;
+#[cfg(target_os = "linux")]
 use wayland_server::schema::{ArgType, Interface};
+#[cfg(target_os = "linux")]
 use wayland_server::sys::*;
+#[cfg(target_os = "linux")]
 use wayland_server::wire::*;
 
+#[cfg(target_os = "linux")]
 struct Ev { id: u32, name: &'static str, args: Vec<Value> }
 
+#[cfg(target_os = "linux")]
 struct Conn { s: UnixStream, buf: Vec<u8>, fds: VecDeque<OwnedFd>, ifaces: HashMap<u32, &'static Interface>, next: u32 }
 
+#[cfg(target_os = "linux")]
 impl Conn {
     fn connect() -> Conn {
         let dir = std::env::var("XDG_RUNTIME_DIR").expect("XDG_RUNTIME_DIR");
@@ -116,7 +127,9 @@ impl Conn {
     }
 }
 
+#[cfg(target_os = "linux")]
 static LOG: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+#[cfg(target_os = "linux")]
 fn say(line: &str) {
     println!("{line}");
     let _ = std::io::stdout().flush();
@@ -125,8 +138,13 @@ fn say(line: &str) {
     }
 }
 
+#[cfg(target_os = "linux")]
 const MIMES: [&str; 5] = ["text/plain;charset=utf-8", "text/plain", "UTF8_STRING", "TEXT", "STRING"];
 
+#[cfg(not(target_os = "linux"))]
+fn main() {}
+
+#[cfg(target_os = "linux")]
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let primary = args.iter().any(|a| a == "--primary");

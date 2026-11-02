@@ -27,6 +27,10 @@ pub fn program_stack_bounds() -> Option<(usize, usize)> {
     PROGRAM_STACK.try_with(|c| c.get()).ok().filter(|b| b.1 != 0)
 }
 
+/// The no-access guard below a program stack (`program_stack_bounds`' lo), in bytes.
+#[cfg(any(unix, windows))]
+pub const PROGRAM_STACK_GUARD: usize = imp::PROGRAM_GUARD;
+
 /// Size of a program thread's stack reservation: a quarter of physical memory, 1..64 GiB
 /// (MAKEPAD_RUN_STACK_GB overrides). Pages are committed as the stack grows into them, so the size
 /// costs address space only; the bound keeps a runaway recursion from paging the machine to death
@@ -170,7 +174,7 @@ fn stack_lo() -> usize {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(target_vendor = "apple")]
 fn stack_lo() -> usize {
     extern "C" {
         fn pthread_self() -> usize;
@@ -236,7 +240,7 @@ mod imp {
 
     /// Guard bytes below a program stack (big frames probe every page, so any access below the
     /// stack's end lands here first).
-    const PROGRAM_GUARD: usize = 1 << 20;
+    pub(super) const PROGRAM_GUARD: usize = 1 << 20;
     #[cfg(any(target_os = "linux", target_os = "android"))]
     const MAP_NORESERVE: i32 = 0x4000;
     #[cfg(not(any(target_os = "linux", target_os = "android")))]
@@ -328,7 +332,7 @@ mod imp {
     /// committed at first: the top of a program stack, then its guard page
     const INITIAL: usize = 1 << 20;
     /// kept reserved (never committed) above the reservation's base: the stack overflows here
-    const PROGRAM_GUARD: usize = 1 << 20;
+    pub(super) const PROGRAM_GUARD: usize = 1 << 20;
 
     /// A program stack as a fiber's: reserved, its top committed with a guard page below that
     /// the system moves down as the stack grows (TEB StackLimit; call_on_segment sets the

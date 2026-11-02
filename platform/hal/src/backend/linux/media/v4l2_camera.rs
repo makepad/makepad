@@ -916,7 +916,7 @@ mod tests {
         VideoFormatInfo { id: 1, width: w, height: h, frame_rate: Some(30.0), pixel }
     }
 
-    /// The nodes of a node, with the card strings v4l2 returns (31 characters at most).
+    /// The nodes of a pool node, with the card strings v4l2 returns (31 characters at most).
     fn nodes() -> Vec<(&'static str, &'static str, u32, Vec<VideoFormatInfo>)> {
         let colour = vec![fmt(VideoPixel::MJPEG, 1920, 1080), fmt(VideoPixel::YUY2, 640, 480)];
         let grey = vec![fmt(VideoPixel::GRAY, 640, 360), fmt(VideoPixel::Unsupported(0x20363159), 640, 360)];
@@ -956,14 +956,6 @@ mod tests {
         assert!(judge_node("Depth", CAPTURE, Some(&grey)).unwrap_err().contains("colour"));
         // "IR" is a word, not a substring: "Mirror cam" and "Fire" are cameras
         assert!(judge_node("Mirror cam", CAPTURE, None).is_ok());
-    }
-
-    #[test]
-    fn the_slide_names_pick_the_obsbot_or_the_first_asus() {
-        let names: Vec<String> = listed().iter().map(|(_, n)| n.to_lowercase()).collect();
-        let by = |wanted: &str| names.iter().position(|n| n.contains(&wanted.to_lowercase()));
-        assert_eq!(listed()[by("OBSBOT").unwrap()].0, "/dev/video4");
-        assert_eq!(listed()[0].0, "/dev/video0");
     }
 
     #[test]

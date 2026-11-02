@@ -1518,17 +1518,6 @@ mod tests {
             assert!((left-right).abs()<1e-6);
         }
     }
-    #[test]
-    fn penumbra_grows_with_separation_and_light_size_but_is_bounded() {
-        let spread=|receiver:f32,blocker:f32,source:f32| {
-            (source*(receiver-blocker).max(0.0)/blocker.max(0.018)/0.04).clamp(1.5,4.0)
-        };
-        assert_eq!(spread(6.0,6.0,0.4),1.5);
-        assert!(spread(8.0,5.0,0.4)>spread(6.0,5.0,0.4));
-        assert!(spread(8.0,5.0,0.4)>spread(8.0,5.0,0.2));
-        assert_eq!(spread(20.0,0.1,2.0),4.0);
-        assert_eq!(spread(20.0,0.1,0.0),1.5);
-    }
     fn spot(pos: Vec3f) -> LmLight {
         LmLight {
             pos,

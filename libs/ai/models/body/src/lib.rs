@@ -38,9 +38,6 @@ pub mod pose;
 pub mod preprocess;
 pub mod weights;
 
-#[cfg(test)]
-pub mod fixture;
-
 /// Model input: the person crop the backbone sees.
 pub const IMAGE_SIZE: usize = 512;
 /// Backbone patch size; `IMAGE_SIZE / PATCH` = 32 patches a side.

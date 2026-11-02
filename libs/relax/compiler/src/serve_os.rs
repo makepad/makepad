@@ -4,7 +4,7 @@ pub static STOP: AtomicBool = AtomicBool::new(false);
 
 pub fn token() -> std::io::Result<String> {
     let mut bytes = [0u8; 32];
-    #[cfg(target_os = "macos")]
+    #[cfg(target_vendor = "apple")]
     {
         extern "C" { fn getentropy(p: *mut u8, n: usize) -> i32; }
         if unsafe { getentropy(bytes.as_mut_ptr(), bytes.len()) } != 0 { return Err(std::io::Error::last_os_error()); }

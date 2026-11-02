@@ -12,6 +12,8 @@ pub mod http_server;
 // May this process touch the local network (macOS Local Network privacy): the one rule.
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 pub mod lan;
+#[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+pub mod netconfig;
 // MAKEPAD_NET_AUDIT=1: every socket this process holds, logged (lan.rs).
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 pub mod socket_audit;

@@ -491,7 +491,6 @@ mod tests {
     // ---- cross-arch bit-parity goldens ------------------------------------
     // These hashes were recorded on aarch64; the SAME constants must hold on
     // x86_64 and every other target — that equality IS the determinism claim.
-    // If a kernel changes intentionally, re-record with `print_parity_hashes`.
 
     const FNV_OFFSET: u64 = 0xcbf29ce484222325;
 
@@ -533,14 +532,6 @@ mod tests {
             ("pow", hash_binary(|x, y| pow(x.abs() + 0.01, y), 0.0, 40.0, -8.0, 8.0)),
             ("hypot", hash_binary(hypot, -100.0, 100.0, -100.0, 100.0)),
         ]
-    }
-
-    #[test]
-    #[ignore = "run manually to (re)record the golden hashes below"]
-    fn print_parity_hashes() {
-        for (name, h) in parity_hashes() {
-            println!("(\"{name}\", 0x{h:016x}),");
-        }
     }
 
     #[test]

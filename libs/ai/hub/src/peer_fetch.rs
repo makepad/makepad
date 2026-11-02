@@ -57,6 +57,9 @@ pub fn try_fetch_via_peers(
     cancel: &CancelToken,
     heartbeat: &dyn Fn() -> Result<(), AssetAiError>,
 ) -> Result<Option<String>, AssetAiError> {
+    if !makepad_network::lan::hub_service("ai-hub peer fetch") {
+        return Ok(None);
+    }
     let (Some(digest), Some(total)) = (file.sha256.as_deref(), file.size) else {
         // Unpinned legacy entries have no digest to verify a peer against.
         return Ok(None);
@@ -450,13 +453,14 @@ fn restore_part_prefix(part: &Path, len: u64) -> Result<(), AssetAiError> {
 /// durable `node_key` (the ticket source scope). `None` = skip this peer.
 fn source_node_key(base: &str) -> Option<String> {
     let url = parse_url(base).ok()?;
+    makepad_network::lan::hub_check_host("ai-hub peer preflight", &url.host).ok()?;
     if !url.https {
         use std::net::ToSocketAddrs;
         let addr = (url.host.as_str(), url.port)
             .to_socket_addrs()
             .ok()?
             .next()?;
-        makepad_network::lan::connect_timeout("ai-hub peer preflight", &addr, PREFLIGHT_TIMEOUT).ok()?;
+        makepad_network::lan::hub_connect_timeout("ai-hub peer preflight", &addr, PREFLIGHT_TIMEOUT).ok()?;
     }
     let health_url = format!("{base}/health");
     let response = http_fetch_no_redirect(&HttpClientRequest::get(&health_url)).ok()?;

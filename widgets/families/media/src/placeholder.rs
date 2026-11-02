@@ -559,36 +559,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn registration_is_wired() {
-        let lib = crate::FAMILY_LIB;
-        let calls = crate::widgets_mod_source();
-        let placeholder = include_str!("placeholder.rs");
-        assert!(lib.contains("pub mod placeholder;"));
-        assert!(crate::FRONT_LIB.contains("placeholder::*"));
-        assert!(calls.contains("crate::placeholder::script_mod(vm);"));
-        assert!(placeholder.contains(
-            "mod.widgets.ContentPlaceholderBase = #(ContentPlaceholder::register_widget(vm))"
-        ));
-        assert!(placeholder.contains("mod.widgets.ContentPlaceholder = set_type_default()"));
-        for preset in [
-            "PlaceholderText",
-            "PlaceholderCircle",
-            "PlaceholderImage",
-            "PlaceholderButton",
-            "PlaceholderInput",
-            "PlaceholderParagraph",
-            "PlaceholderRow",
-            "PlaceholderCard",
-            "PlaceholderTable",
-        ] {
-            assert!(placeholder.contains(&format!("mod.widgets.{preset} = ")), "{preset}");
-        }
-        // The presets compose View and RoundedView, which register first.
-        let view_ui = calls.find("crate::view_ui::script_mod(vm);").unwrap();
-        assert!(view_ui < calls.find("crate::placeholder::script_mod(vm);").unwrap());
-    }
-
-    #[test]
     fn a_stack_of_lines_is_rows_plus_gaps() {
         assert_eq!(lines_height(1, 10.0, 6.0), 10.0);
         assert_eq!(lines_height(3, 10.0, 6.0), 42.0);

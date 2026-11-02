@@ -101,7 +101,7 @@ pub mod detect {
         }
     }
 
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(all(target_vendor = "apple", target_arch = "aarch64"))]
     fn sysctl(name: &[u8]) -> bool {
         // NUL-terminated byte strings (Relax has no c".." literals yet)
         extern "C" {
@@ -113,7 +113,7 @@ pub mod detect {
         ret == 0 && enabled != 0
     }
 
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(all(target_vendor = "apple", target_arch = "aarch64"))]
     fn detect_features() -> u64 {
         // std_detect os/darwin/aarch64.rs (same names and compositions)
         let fp = sysctl(b"hw.optional.floatingpoint\0");
@@ -264,7 +264,7 @@ pub mod detect {
         }
     }
 
-    #[cfg(not(any(target_arch = "x86_64", all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux", target_os = "android", target_os = "windows")))))]
+    #[cfg(not(any(target_arch = "x86_64", all(target_arch = "aarch64", any(target_vendor = "apple", target_os = "linux", target_os = "android", target_os = "windows")))))]
     fn detect_features() -> u64 { 0 }
 
 }

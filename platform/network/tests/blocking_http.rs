@@ -651,7 +651,7 @@ fn trailer_count_cap_is_enforced() {
 fn timed_out_connect_does_not_wedge_later_loopback() {
     let mut limits = Limits::default();
     limits.connect_timeout = Duration::from_millis(150);
-    let first = request_no_redirect(Request::get("https://203.0.113.11:1/").limits(limits));
+    let first = request_no_redirect(Request::get("https://172.16.77.4:1/").limits(limits));
     assert!(
         matches!(first, Err(Error::Timeout) | Err(Error::Connect) | Err(Error::Cancelled)),
         "{first:?}"

@@ -15,13 +15,16 @@ use std::path::{Path, PathBuf};
 /// The data-relative path an archive entry unpacks to, if it is taken:
 /// `<top>/resources/data/<dir>/…` (source archive) or `<top>/<dir>/…`
 /// (content archive).
+/// The folder the upstream content archive keeps its data in.
+const CONTENT_ARCHIVE_DIR: &str = "SurgeXTData";
+
 fn take(entry: &str) -> Option<String> {
     let parts: Vec<&str> = entry.split('/').filter(|p| !p.is_empty() && *p != ".").collect();
     let at = parts.iter().position(|p| UNPACK_DIRS.contains(p))?;
     // The data sits under resources/data (source archive) or the content
-    // archive's data folder (`…/SurgeXTData/`), or at the top.
+    // archive's data folder, or at the top.
     let under_data = at >= 2 && parts[at - 2] == "resources" && parts[at - 1] == "data";
-    let under_content = at >= 1 && parts[at - 1] == "SurgeXTData";
+    let under_content = at >= 1 && parts[at - 1] == CONTENT_ARCHIVE_DIR;
     if at >= 1 && !under_data && !under_content {
         return None;
     }
@@ -170,12 +173,12 @@ mod tests {
 
     #[test]
     fn takes_only_the_data_folders() {
-        assert_eq!(take("surge-abc/resources/data/patches_factory/Leads/A.fxp").as_deref(), Some("patches_factory/Leads/A.fxp"));
-        assert_eq!(take("surge-abc/src/common/patches_factory/x.cpp"), None);
-        assert_eq!(take("surge-abc/resources/data/skins/a.png"), None);
-        assert_eq!(take("surge-abc/resources/data/wavetables/Waldorf/x.wt"), None);
-        assert_eq!(take("surge-abc/resources/data/impulses_3rdparty/Voxengo/a.wav"), None);
-        assert_eq!(take("SurgeXTData/patches_3rdparty/qb/B.fxp").as_deref(), Some("patches_3rdparty/qb/B.fxp"));
-        assert_eq!(take("./Surge Synth Team/SurgeXTData/patches_factory/Leads/A.fxp").as_deref(), Some("patches_factory/Leads/A.fxp"));
+        assert_eq!(take("archive-abc/resources/data/patches_factory/Leads/A.fxp").as_deref(), Some("patches_factory/Leads/A.fxp"));
+        assert_eq!(take("archive-abc/src/common/patches_factory/x.cpp"), None);
+        assert_eq!(take("archive-abc/resources/data/skins/a.png"), None);
+        assert_eq!(take("archive-abc/resources/data/wavetables/Waldorf/x.wt"), None);
+        assert_eq!(take("archive-abc/resources/data/impulses_3rdparty/Voxengo/a.wav"), None);
+        assert_eq!(take(&format!("{}/patches_3rdparty/qb/B.fxp", super::CONTENT_ARCHIVE_DIR)).as_deref(), Some("patches_3rdparty/qb/B.fxp"));
+        assert_eq!(take(&format!("./Upstream Team/{}/patches_factory/Leads/A.fxp", super::CONTENT_ARCHIVE_DIR)).as_deref(), Some("patches_factory/Leads/A.fxp"));
     }
 }

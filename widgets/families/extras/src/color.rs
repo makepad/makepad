@@ -2854,7 +2854,7 @@ impl Widget for ColorPicker {
                         self.hsva = channel_hsva(self.hsva, which, v);
                         changed = true;
                     }
-                    if let ValueInputTrackAction::Ended(v) = wa.cast::<ValueInputTrackAction>() {
+                    if let ValueInputAction::Ended(v) = wa.cast::<ValueInputAction>() {
                         self.hsva = channel_hsva(self.hsva, which, v);
                         changed = true;
                         ended = true;

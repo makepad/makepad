@@ -207,10 +207,10 @@ fn reserve() {
         assert_eq!(map.capacity(), capacity);
         assert_eq!(map.get(&i), Some(&(i * i)));
     }
-    map.insert(capacity, std::usize::MAX);
+    map.insert(capacity, usize::MAX);
     assert_eq!(map.len(), capacity + 1);
     assert!(map.capacity() > capacity);
-    assert_eq!(map.get(&capacity), Some(&std::usize::MAX));
+    assert_eq!(map.get(&capacity), Some(&usize::MAX));
 }
 
 #[test]

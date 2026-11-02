@@ -1653,7 +1653,13 @@ impl ScoreTracker {
                     // Where a rest starts (or the view's top): it says so.
                     let l = c.local(song);
                     if (starts_pattern || r == first) && vertical && c.range(l, l + rb).is_empty() {
-                        let at = rest.pos + dvec2(4.0, 2.0);
+                        // The view's top row: the label stays pinned at the top
+                        // while the view scrolls under it (drawn with the row it
+                        // would scroll up and snap down every row).
+                        let mut at = rest.pos + dvec2(4.0, 2.0);
+                        if r == first {
+                            at.y = grid.pos.y + 2.0;
+                        }
                         put(&mut self.draw_text, cx, at, "rests in", rgba(p.wave_label, 0.8));
                         if let Some((pi, _)) = pattern {
                             put(&mut self.draw_text, cx, at + dvec2(40.0, 0.0), &self.model.patterns[pi].name, rgba(p.wave_label, 0.8));

@@ -196,6 +196,30 @@ script_mod! {
         // emission axis fixed straight DOWN — the street-lamp convention.
         ..mod.draw.ClusteredLighting,
         ..mod.draw.FastGiSampling,
+        ..mod.draw.SceneOutputDither,
+        // ---- material paint (libs/paint_field), OFF by default ----
+        // A CAD host's paint atlas sits in the element lookup's texture, after its table: an
+        // element's texel 1 `.w` is its volume's header texel + 1 (0: unpainted). The vertex
+        // stage keeps the position before the element move and the element index, so paint stays
+        // on a part while it is dragged. Off with the lookup (every game path).
+        v_paint: varying(vec4f),
+        ..mod.draw.PaintLookup,
+
+        paint_texel: fn(i: f32) -> vec4 {
+            let ew = max(self.elem_ctl.x, 1.0)
+            let eh = max(self.elem_ctl.y, 1.0)
+            return self.elem_map.sample_nearest(vec2((modf(i, ew) + 0.5) / ew, (floor(i / ew) + 0.5) / eh))
+        }
+
+        // `albedo` with the element's paint at this fragment, edges a pixel wide.
+        paint_mix: fn(albedo: vec3) -> vec3 {
+            let dw = length(dFdx(self.v_paint.xyz)) + length(dFdy(self.v_paint.xyz))
+            if self.elem_ctl.w < 0.5 || self.elem_ctl.z < 3.5 || self.v_paint.w < 0.0 { return albedo }
+            let hdr = self.paint_texel(self.v_paint.w * self.elem_ctl.z + 1.0).w - 1.0
+            if hdr < 0.0 { return albedo }
+            let s = length(self.paint_texel(hdr + 3.0).xyz)
+            return self.paint_albedo(hdr, self.paint_frame(hdr, self.v_paint.xyz), dw * s, albedo)
+        }
 
         dl_term: fn(wp: vec3, n: vec3, lp: vec4, lc: vec4) -> vec3 {
             if lp.w <= 0.0 {
@@ -382,12 +406,14 @@ script_mod! {
             var er0 = vec3(1.0, 0.0, 0.0)
             var er1 = vec3(0.0, 1.0, 0.0)
             var er2 = vec3(0.0, 0.0, 1.0)
+            self.v_paint = vec4(pos, 0.0 - 1.0)
             if self.elem_ctl.w > 0.5 {
                 let lo = (ao_uv_b.x + ao_uv_b.y * 256.0) * 255.0
                 let hi = (ao_uv_b.z + ao_uv_b.w * 256.0) * 255.0
                 // The lane's low 20 bits are the element; the top 12 a host's render priority
                 // (Fab's coplanar part rank), which must not move the index.
                 let ei = floor(lo + modf(floor(hi + 0.5), 16.0) * 65536.0 + 0.5)
+                self.v_paint = vec4(pos, ei)
                 let stride = max(self.elem_ctl.z, 1.0)
                 let base = ei * stride
                 let f = self.elem_texel(base)
@@ -584,10 +610,12 @@ script_mod! {
             }
             let base = self.to_scene(vec3(tex.x, tex.y, tex.z))
             var albedo = self.color_adjust(
-                base * self.to_lin(self.v_tint.xyz),
+                // the vertex tint is encoded like a texel: both scene-referred lanes decode it
+                base * self.to_scene(self.v_tint.xyz),
                 self.tint,
                 self.color_adjust_ctl
             )
+            albedo = self.paint_mix(albedo)
             // Detail: blendFunc GL_DST_COLOR GL_SRC_COLOR = 2 * dest * src.
             // Mean-127 overlay is identity; far mips go gray and drop out.
             if self.detail_st.x > 0.001 {

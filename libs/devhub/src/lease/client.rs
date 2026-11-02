@@ -6,8 +6,8 @@
 
 use super::master::b64_decode;
 use super::sched::{ordinal, parse_needs, Req};
-use super::Kind;
-use crate::cli::{ask, control, has, local_name};
+use super::{CostClass, Kind, Priority, Src};
+use crate::cli::{ask, control, has, local_name, retry_master};
 use makepad_remote::link::Client;
 use makepad_strict_json::Value;
 use std::io::Write;
@@ -15,18 +15,32 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 pub const HELP: &str = "  lease <kind> [--node N|--only N|--needs k=v,..] [--lane L] [--prio P] [--rev <branch>[@sha][,<commercial>[@sha]]]
-        [--repo-dir D] [--watch-pid P] [-- cmd...]
-                                          hold a lease (kinds: build test screen long timed gpu inspect gate;
+        [--repo-dir D] [--watch-pid P] [--cost small|medium|large] [--est-min N] [--cores N] [--ram-gb N] [--whole]
+        [--class name] [--priority interactive|background] [--jit key] [-- cmd...]
+                                          hold a lease (kinds: build test screen long timed gpu inspect gate ci;
+                                          ci: its own tree and target, beside ordinary work, never timed or user boxes;
                                           --needs gui=1: a test that opens windows, only nodes that take screen leases);
                                           with a cmd: run it there and exit with its code. --node N: N when it can
                                           take it, else (after 2 min, or at once when N is held/busy/off) a node of
                                           the same arch and os (the grant line names it); --only N: N or wait
-                                          (timed, screen and inspect leases always wait for the named node)
-  run <lane> <kind> [--node N|--needs ..] [--with-uncommitted] -- cmd...   a lease at this worktree's HEAD (the node's one tree moves
-                                          there), its uncommitted changes shipped on top (from a main checkout only with
-                                          --with-uncommitted; .claude and local/ never), the cmd run there;
-                                          run the JIT as `cargo run --profile host -p makepad-run --bin
-                                          makepad -- <args>` (the node's one JIT; a ~0.2 s no-op when warm)
+                                          (timed, screen, ci and inspect leases always wait for the named node)
+  run <lane> <kind> [--node N|--needs ..] [--with-uncommitted] [--tree]
+        [--cost small|medium|large] [--est-min N] [--cores N] [--ram-gb N] [--whole]
+        [--class name] [--priority interactive|background] [--jit key] -- cmd...
+                                          JIT commands of kinds test, screen, gpu, long and build use overlays by default;
+                                          --tree uses the work tree. CI, gates, timed and non-JIT commands always use trees.
+                                          Main checkout edits need --with-uncommitted.
+  overlay status <lane> [--node N]        pinned commits, overlay hashes, whiteouts and diff vs work
+  overlay why <lane> <path> [--node N]     serving layer and content hash
+  overlay selftest [--node N] [--case NAME]
+                                          compare real checkouts with overlay runs on a test lease
+  overlay shadow on|off|status           background tree/overlay comparisons of JIT tests; last 24 h of evidence
+  test <lane> <pkg> [--lib|--test T|--tests] [--features F] [--needs k=v,..] [--node N] [--cost small|medium|large] [--est-min N] [--class name] [--priority interactive|background] [--jit key] [--native|--live] [--tree] [-- args...]
+                                          --live: THE lane check; one warm process per lane, package, target and args,
+                                          small cost on a hot box; overlay by default, --tree opts out; only affected tests rerun.
+                                          --native: cargo test --release (always a tree), for full sweeps, perf and explicit native checks.
+                                          compile/resolve misses fall back to cargo on a pool box; open misses skip the JIT.
+                                          Other JIT errors: a separate event, exit 3; carry on
   get <lane> <rel> <local-dir> [--node N] [--lease L]
                                           copy results back from the lane's dir on its node (`src/..`: the tree
                                           `run` ships, which holds only tracked and ignored files once
@@ -38,10 +52,17 @@ pub const HELP: &str = "  lease <kind> [--node N|--only N|--needs k=v,..] [--lan
   override <node> [--to <lane>]           take the node now: its leases end; to the user (dev off) or a lane
   evict <lane|agent>                      end every lease of it, clean up, block new ones; unblock <lane|agent>
   blocked                                 the lanes and agents the user blocked
+  jit stats [--day]                      JIT builds per id/arch and box/day (UTC), store hits/misses
+  jit misses [--all]                     open compile/resolve misses (--all includes closed entries)
+  jit misses close <id>                  close M<n>; the next test tries the JIT again
+  prof [--hour|--day] [--lane L] [--kind K]
+                                          workflow minutes: phases, blockers, run classes and box idle budget
+  stats queue [--hour]                   live counts and last hour's average/max queue wait, per class
   queue | leases [--all]                  live and waiting leases, positions and reasons
+  why-queued <lease>                     each candidate box's start blocker and reservation expiry
   nodes                                   capabilities, dev switch and leases per node
   node <n> dev on|off                     the node's dev switch (the user's decision)
-  node <n> [role pool|suite|bench|user-wm|device] [set slots.screen=0 disk_floor_gb=40 ...]
+  node <n> [role pool|hot|suite|bench|user-wm|device] [set slots.screen=0 disk_floor_gb=40 ...]
                                           the node's role and budgets (its lease.conf, kept on the node)
   disk <node> [--dry-run]                 the node's disk categories and reclaim
   desk <node> [on|off]                    the Desk Link endpoint of a JIT host (its own render, app input)
@@ -57,8 +78,7 @@ fn cancelled_notice(id: &str, node: &str) -> String {
 }
 
 const BEAT: Duration = Duration::from_secs(2);
-/// How long a holder waits out an unreachable master (a restart: it takes its granted leases back
-/// from `leases.live`, and the nodes keep running them) before it gives up.
+/// How long a holder waits for its node hub to reattach after a restart.
 const REATTACH_FOR: Duration = Duration::from_secs(900);
 /// After the master is back, how long its errors may still be its node links coming up.
 const SETTLE_FOR: Duration = Duration::from_secs(60);
@@ -70,8 +90,8 @@ fn node_restarting(e: &str) -> bool {
 }
 
 /// Calls `f` with the master's control client, through master restarts: while the master is not
-/// reachable (`up` fails) the call is tried again with backoff (0.5 s to 2 s; the master expires a
-/// silent holder after 10 s), and once it is back with a fresh client, re-attaching by the lease
+/// reachable (`up` fails), retry every 2 s without a time cap. Once it is back, a fresh client
+/// reattaches by the lease
 /// id. A live master's answer stands, except while its node links come back (`SETTLE_FOR`) or the
 /// lease's node hub restarts for its self-update ([`node_restarting`], up to `REATTACH_FOR`: the
 /// new hub takes the lease back from its ledger); "no lease" always stands. Said once each way on
@@ -96,6 +116,11 @@ fn through_restarts<T>(id: &str, c: &mut Client, mut f: impl FnMut(&Client) -> R
         match up() {
             Ok(fresh) => {
                 *c = fresh;
+                if down.is_some() && back.is_none() {
+                    down = Some(Instant::now());
+                    back = Some(Instant::now());
+                    continue;
+                }
                 match (down, back) {
                     (None, _) if node_restarting(&e) => {
                         eprintln!("{id}: its node does not answer ({e}); its hub restarts? re-attaching when it is back");
@@ -114,15 +139,12 @@ fn through_restarts<T>(id: &str, c: &mut Client, mut f: impl FnMut(&Client) -> R
                     _ => {}
                 }
             }
-            Err(why) => {
+            Err(_) => {
                 back = None;
-                match down {
-                    None => {
-                        eprintln!("{id}: the master is not reachable ({why}); re-attaching when it is back");
-                        down = Some(Instant::now());
-                    }
-                    Some(t) if t.elapsed() > REATTACH_FOR => return Err(format!("{e} (the master stayed unreachable for {} s)", REATTACH_FOR.as_secs())),
-                    _ => {}
+                wait = BEAT;
+                if down.is_none() {
+                    eprintln!("master not reachable: waiting");
+                    down = Some(Instant::now());
                 }
             }
         }
@@ -204,6 +226,7 @@ struct Opts {
     req: Req,
     watch: Option<i32>,
     cmd: Vec<String>,
+    tree: bool,
 }
 
 /// The flags shared by `lease` and `run`.
@@ -211,6 +234,7 @@ fn parse(kind: &str, lane: Option<&str>, args: &[&str]) -> Result<Opts, String> 
     let kind = Kind::parse(kind).ok_or_else(|| format!("unknown kind `{kind}`"))?;
     let mut req = Req::new(lane.unwrap_or(""), kind);
     let mut watch = None;
+    let mut tree = false;
     let mut i = 0;
     let mut cmd = Vec::new();
     while i < args.len() {
@@ -220,6 +244,13 @@ fn parse(kind: &str, lane: Option<&str>, args: &[&str]) -> Result<Opts, String> 
                 cmd = args[i + 1..].iter().map(|a| a.to_string()).collect();
                 break;
             }
+            "--tree" => { tree = true; i += 1; continue; }
+            "--whole" => { req.whole = true; i += 1; continue; }
+            "--cost" => { req.cost = CostClass::parse(val(i)?).ok_or("--cost is small, medium or large")?; req.cost_asked = true; }
+            "--est-min" => req.est_min = Some(val(i)?.parse::<f64>().ok().filter(|n| n.is_finite() && *n >= 0.0).ok_or("--est-min is a nonnegative number")?),
+            "--cores" => req.cores = Some(val(i)?.parse::<f64>().ok().filter(|n| n.is_finite() && *n > 0.0).ok_or("--cores is a positive number")?),
+            "--ram-gb" => req.ram_gb = Some(val(i)?.parse::<f64>().ok().filter(|n| n.is_finite() && *n > 0.0).ok_or("--ram-gb is a positive number")?),
+            "--class" => req.class = val(i)?.to_string(),
             "--node" => req.node = Some(val(i)?.to_string()),
             "--only" => {
                 req.node = Some(val(i)?.to_string());
@@ -227,11 +258,12 @@ fn parse(kind: &str, lane: Option<&str>, args: &[&str]) -> Result<Opts, String> 
             }
             "--needs" => req.needs = parse_needs(val(i)?),
             "--lane" => req.lane = val(i)?.to_string(),
+            "--priority" => req.priority = Priority::parse(val(i)?).ok_or("--priority is interactive or background")?,
             "--prio" => req.prio = val(i)?.parse().map_err(|_| "--prio takes a number")?,
             "--rev" => req.rev = Some(val(i)?.to_string()),
             "--repo-dir" => req.repo_dir = Some(val(i)?.to_string()),
             "--watch-pid" => watch = Some(val(i)?.parse().map_err(|_| "--watch-pid takes a pid")?),
-            "--jit" => req.jit = Some(val(i)?.to_string()),
+            "--jit" => req.loader = Some(val(i)?.to_string()),
             a => return Err(format!("unknown flag `{a}`")),
         }
         i += 2;
@@ -249,7 +281,17 @@ fn parse(kind: &str, lane: Option<&str>, args: &[&str]) -> Result<Opts, String> 
         let dir = req.repo_dir.as_deref().ok_or("--rev needs a git repo (--repo-dir)")?;
         req.rev = Some(super::pin_revs(Path::new(dir), spec)?);
     }
-    Ok(Opts { req, watch, cmd })
+    if req.class.is_empty() && !cmd.is_empty() { req.class = super::run_class(kind, &cmd); }
+    Ok(Opts { req, watch, cmd, tree })
+}
+
+/// Missing or older caps leave placement unhinted.
+pub(crate) fn jit_hint(c: &Client, root: &Path) -> Option<String> {
+    let nodes: Vec<_> = ask(c, None, "nodes", "nodes").ok()?.iter().filter_map(|line| {
+        let v = json(line)?;
+        Some(super::sched::NodeView { caps: super::Caps::parse(&v.get("caps")?.to_json()), ..Default::default() })
+    }).collect();
+    super::jit::head_id(root, &nodes)
 }
 
 /// A granted lease as the holder knows it.
@@ -265,29 +307,36 @@ fn acquire(c: &Client, req: &Req) -> Result<Held, i32> {
     // this process holds it: the master ends the lease as soon as this pid is gone
     let mut req = req.clone();
     req.holder = Some(std::process::id());
+    req.since_ms.get_or_insert_with(crate::proto::wall_ms);
     if req.agent.is_none() {
         req.agent = std::env::var("DEVHUB_AGENT").ok().filter(|a| crate::trust::valid_name(a));
     }
     let req = &req;
-    let mut v = one(c, "lease", &req.to_json()).map_err(|e| {
+    let wire = req.to_json();
+    let mut v = retry_master(|| one(c, "lease", &wire)).map_err(|e| {
         eprintln!("makepad devhub lease: {e}");
         2
     })?;
     let mut id = s(&v, "id");
     let mut client = c.clone();
     let mut last = String::new();
+    let mut class_notified = false;
     let t0 = Instant::now();
     loop {
         let state = s(&v, "state");
+        let note = s(&v, "class_note");
+        let note = if class_notified || note.is_empty() { String::new() } else { format!("; {note}") };
         let line = match state.as_str() {
             "queued" => format!("{id} {}: {} in queue ({})", req.kind.as_str(), ordinal(n(&v, "pos") as usize), s(&v, "reason")),
             "starting" => format!("{id} {}@{}: granted, setting up", req.kind.as_str(), s(&v, "node")),
             "granted" => {
+                if !note.is_empty() { eprintln!("{id} {}@{}: granted{note}", req.kind.as_str(), s(&v, "node")); }
                 let start = v.get("start");
                 let env = match start.and_then(|st| st.get("env")) {
                     Some(Value::Obj(pairs)) => pairs.iter().map(|(k, x)| (k.clone(), x.as_str().unwrap_or("").to_string())).collect(),
                     _ => Vec::new(),
                 };
+                if !s(&v, "reason").is_empty() { eprintln!("{id}: {}", s(&v, "reason")); }
                 return Ok(Held { id, node: s(&v, "node"), work: start.map(|st| s(st, "work")).unwrap_or_default(), env });
             }
             _ => {
@@ -301,18 +350,19 @@ fn acquire(c: &Client, req: &Req) -> Result<Held, i32> {
                 return Err(if how == "denied" { 2 } else { 1 });
             }
         };
-        if line != last {
-            eprintln!("{line}");
+        if line != last || !note.is_empty() {
+            eprintln!("{line}{note}");
             last = line;
+            class_notified |= !note.is_empty();
         }
         std::thread::sleep(BEAT);
         match through_restarts(&id, &mut client, |c| one(c, "beat", &id), &master) {
             Ok(x) => v = x,
-            // a restarted master keeps only granted leases: a queued one asks again
-            Err(e) if e.starts_with("no lease") && state == "queued" => match one(&client, "lease", &req.to_json()) {
+            // a restarted master keeps only granted leases: a queued one asks again, with when it first asked
+            Err(e) if e.starts_with("no lease") && state == "queued" => match retry_master(|| one(&client, "lease", &wire)) {
                 Ok(x) => {
                     let new_id = s(&x, "id");
-                    eprintln!("{id}: the master restarted and lost the queue; asked again as {new_id}");
+                    eprintln!("{id}: the master restarted; asked again as {new_id}, in the same place");
                     id = new_id;
                     v = x;
                 }
@@ -339,13 +389,42 @@ fn release(c: &Client, id: &str, exit: Option<i32>) -> Option<Value> {
 
 /// Runs `cmd` on the node under the lease (relative to its work dir), streams its output.
 fn run_there(c: &Client, held: &Held, rel: &str, cmd: &[String]) -> Result<i32, String> {
+    run_there_into(c, held, rel, cmd, &mut std::io::stdout())
+}
+
+fn run_there_into(c: &Client, held: &Held, rel: &str, cmd: &[String], out: &mut dyn Write) -> Result<i32, String> {
     let argv = makepad_network::digest::base64_encode(cmd.join("\0").as_bytes());
     let mut c = c.clone();
-    let v = through_restarts(&held.id, &mut c, |c| node_one(c, &held.node, "lease-run", &format!("lease-run {} {rel} {argv}", held.id)), &master)?;
+    let v = start_there(&mut c, held, "lease-run", &format!("lease-run {} {rel} {argv}", held.id))?;
     let run = v.get("n").and_then(super::num).map_or(1, |x| x as u64);
+    follow_there(&c, held, run, out)
+}
+
+/// Keep the lease alive while admission, resolution or a hub restart delays its run.
+fn start_there(c: &mut Client, held: &Held, service: &str, line: &str) -> Result<Value, String> {
+    let (mut last, mut beat) = (String::new(), Instant::now());
+    loop {
+        let v = through_restarts(&held.id, c, |c| {
+            if beat.elapsed() >= BEAT {
+                let st = one(c, "beat", &held.id)?;
+                if s(&st, "state") == "ended" { return Err(format!("{} ended ({})", held.id, s(&st, "how"))); }
+                beat = Instant::now();
+            }
+            node_one(c, &held.node, service, line)
+        }, &master)?;
+        let Some(pending) = v.get("pending").and_then(Value::as_str) else { return Ok(v) };
+        if pending != last {
+            eprintln!("{} {}: {pending}", held.id, held.node);
+            last = pending.to_string();
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+}
+
+fn follow_there(c: &Client, held: &Held, run: u64, out: &mut dyn Write) -> Result<i32, String> {
+    let mut c = c.clone();
     let mut off = 0u64;
     let mut beat = Instant::now();
-    let mut out = std::io::stdout();
     loop {
         let v = through_restarts(&held.id, &mut c, |c| node_one(c, &held.node, "lease-log", &format!("lease-log {} {run} {off}", held.id)), &master)?;
         let data = b64_decode(&s(&v, "data")).ok_or("lease-log: bad data")?;
@@ -374,7 +453,7 @@ fn lease(args: &[&str]) -> i32 {
         eprintln!("makepad devhub lease <kind> [--node N|--needs ..] [-- cmd...]");
         return 2;
     };
-    let o = match parse(kind, None, rest) {
+    let mut o = match parse(kind, None, rest) {
         Ok(o) => o,
         Err(e) => {
             eprintln!("makepad devhub lease: {e}");
@@ -385,6 +464,9 @@ fn lease(args: &[&str]) -> i32 {
         Ok(c) => c,
         Err(e) => return fail(e),
     };
+    if o.req.loader.is_none() && super::loaders::cargo_run_args(&o.cmd).is_some() {
+        o.req.loader = o.req.repo_dir.as_deref().and_then(|d| jit_hint(&c, Path::new(d)));
+    }
     let held = match acquire(&c, &o.req) {
         Ok(h) => h,
         Err(code) => return code,
@@ -500,50 +582,12 @@ fn head_rev(root: &Path, lane: &str) -> Result<String, String> {
     super::pin_revs(root, &spec)
 }
 
-/// What the worktree holds on top of its HEAD: (files to ship, tracked files deleted), as paths
-/// from the root (commercial ones under `apps/commercial/`). Untracked files that are not ignored
-/// count; ignored ones (target, local) do not.
-fn overlay(root: &Path) -> Result<(Vec<String>, Vec<String>), String> {
-    let (mut ship, mut deleted) = (Vec::new(), Vec::new());
-    let mut side = |dir: &Path, prefix: &str| -> Result<(), String> {
-        let out = super::wt::git(Some(dir), None, &["status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all", "--ignore-submodules=all"])?;
-        for e in out.split('\0').filter(|e| e.len() > 3) {
-            let (xy, path) = e.split_at(3);
-            let path = format!("{prefix}{path}");
-            if prefix.is_empty() && path.starts_with("apps/commercial/") {
-                continue;
-            }
-            if super::ship::never_ships(&path) {
-                continue;
-            }
-            if xy.contains('D') {
-                deleted.push(path);
-            } else if std::fs::symlink_metadata(root.join(&path)).is_ok_and(|m| !m.is_dir()) {
-                ship.push(path);
-            }
-        }
-        Ok(())
-    };
-    side(root, "")?;
-    if root.join("apps/commercial/.git").exists() {
-        side(&root.join("apps/commercial"), "apps/commercial/")?;
-    }
-    ship.sort();
-    ship.dedup();
-    deleted.sort();
-    deleted.dedup();
-    Ok((ship, deleted))
-}
-
-/// Ships what the worktree holds on top of its HEAD (+ DEVHUB_ALSO) into the lease's tree, which
-/// the node moved to that HEAD already ([`super::ship`]: a file goes when its size, mtime or
-/// executable bit differ there); then `ship-done` names every shipped and deleted path, so the
-/// node removes the deleted ones now and undoes all of them when the lease ends.
-fn ship(c: &Client, root: &Path, held: &Held, uncommitted: bool) -> Result<(), String> {
+/// Ships the complete uncommitted set and base blobs into the lease's source layer.
+fn ship(c: &Client, root: &Path, held: &Held, pin: &super::Pin, uncommitted: bool) -> Result<(), String> {
     if held.work.is_empty() {
         return Err(format!("{}: no work dir to ship to", held.id));
     }
-    let (files, deleted) = overlay(root)?;
+    let (files, deleted) = super::ship::uncommitted(root, pin)?;
     let (mut files, deleted) = if uncommitted || !super::ship::is_main_checkout(root) {
         (files, deleted)
     } else {
@@ -587,23 +631,22 @@ fn ship(c: &Client, root: &Path, held: &Held, uncommitted: bool) -> Result<(), S
     let sent = sent?;
     let paths: Vec<String> = entries.iter().map(|e| e.path.clone()).collect();
     let list = |v: &[String]| v.iter().map(|p| makepad_remote::json_str(p)).collect::<Vec<_>>().join(",");
-    let body = format!("{{\"shipped\":[{}],\"deleted\":[{}]}}", list(&paths), list(&deleted));
+    let bases = super::ship::bases_json(root, pin, &paths.iter().chain(&deleted).cloned().collect::<Vec<_>>())?;
+    let body = format!("{{\"shipped\":[{}],\"deleted\":[{}],\"bases\":{bases}}}", list(&paths), list(&deleted));
     node_one(c, &held.node, "ship-done", &format!("ship-done {} {}", held.id, makepad_network::digest::base64_encode(body.as_bytes())))?;
-    eprintln!("{} {}: tree at the worktree's HEAD; shipped {} changed file(s) ({} KB, {} sent) and {} deletion(s) on top in {:.1} s", held.id, held.node, paths.len(), sent.bytes >> 10, sent.sent, deleted.len(), t.elapsed().as_secs_f64());
+    eprintln!("{} {}: sources at the worktree's HEAD; shipped {} changed file(s) ({} KB, {} sent) and {} deletion(s) on top in {:.1} s", held.id, held.node, paths.len(), sent.bytes >> 10, sent.sent, deleted.len(), t.elapsed().as_secs_f64());
     Ok(())
 }
 
-/// `run <lane> <kind> … -- cmd`: a lease at the worktree's HEAD (the node moves its one tree
-/// there), the worktree's uncommitted changes shipped on top, the cmd run, the lease released (the
-/// node undoes the shipped changes and puts its tree back on the shared commits).
+/// `run <lane> <kind> … -- cmd`: pin HEAD, select the source layer, ship, run and release.
 fn run(lane: &str, kind: &str, rest: &[&str]) -> i32 {
     let flags = rest.iter().position(|a| *a == "--").unwrap_or(rest.len());
     let uncommitted = rest[..flags].contains(&"--with-uncommitted");
     let rest: Vec<&str> = rest.iter().enumerate().filter(|(i, a)| *i >= flags || **a != "--with-uncommitted").map(|(_, a)| *a).collect();
-    let mut o = match parse(kind, Some(lane), &rest) {
+    let o = match parse(kind, Some(lane), &rest) {
         Ok(o) if !o.cmd.is_empty() => o,
         Ok(_) => {
-            eprintln!("makepad devhub run <lane> <kind> [--node N|--needs ..] -- cmd...");
+            eprintln!("makepad devhub run <lane> <kind> [--node N|--needs ..] [--tree] -- cmd...");
             return 2;
         }
         Err(e) => {
@@ -611,35 +654,387 @@ fn run(lane: &str, kind: &str, rest: &[&str]) -> i32 {
             return 2;
         }
     };
+    run_worktree(o, uncommitted, None)
+}
+
+/// Runs at HEAD with the same overlay as `run`.
+fn run_worktree(mut o: Opts, uncommitted: bool, test: Option<&str>) -> i32 {
+    run_worktree_into(&mut o, uncommitted, test, &mut std::io::stdout()).0
+}
+
+/// The second result says whether the command ended, as opposed to a setup/link failure.
+fn run_worktree_into(o: &mut Opts, uncommitted: bool, test: Option<&str>, out: &mut dyn Write) -> (i32, bool) {
+    let t = Instant::now();
+    let word = if test.is_some() { "test" } else { "run" };
     let Some(root) = git(&cwd(), &["rev-parse", "--show-toplevel"]).map(PathBuf::from) else {
-        eprintln!("makepad devhub run: run it from inside the lane's worktree");
-        return 2;
+        eprintln!("makepad devhub {word}: run it from inside the lane's worktree");
+        return (2, false);
     };
     let rel = git(&cwd(), &["rev-parse", "--show-prefix"]).filter(|p| !p.is_empty()).unwrap_or_else(|| ".".into());
-    match head_rev(&root, lane) {
+    match o.req.rev.clone().map_or_else(|| head_rev(&root, &o.req.lane), Ok) {
         Ok(rev) => {
             o.req.rev = Some(rev);
             o.req.repo_dir = Some(root.to_string_lossy().into_owned());
         }
         Err(e) => {
-            eprintln!("makepad devhub run: {e}");
-            return 2;
+            eprintln!("makepad devhub {word}: {e}");
+            return (2, false);
         }
     }
-    let c = match master() {
+    o.req.src = Src::for_run(o.req.kind, &o.cmd, o.tree);
+    let c = match retry_master(master) {
         Ok(c) => c,
-        Err(e) => return fail(e),
+        Err(e) => return (fail(e), false),
     };
+    if o.req.loader.is_none() && super::loaders::cargo_run_args(&o.cmd).is_some() { o.req.loader = jit_hint(&c, &root); }
+    let queued = Instant::now();
     let held = match acquire(&c, &o.req) {
         Ok(h) => h,
-        Err(code) => return code,
+        Err(code) => return (code, false),
     };
-    if let Err(e) = ship(&c, &root, &held, uncommitted) {
-        release(&c, &held.id, None);
-        return fail(e);
+    let queue = queued.elapsed();
+    let shipping = Instant::now();
+    let pin = o.req.rev.as_deref().and_then(super::Pin::of_rev).unwrap();
+    let shipped = ship(&c, &root, &held, &pin, uncommitted);
+    let ship = shipping.elapsed();
+    let running = Instant::now();
+    let r = shipped.and_then(|_| run_there_into(&c, &held, rel.trim_end_matches('/'), &o.cmd, out));
+    let run = running.elapsed();
+    let completed = r.is_ok();
+    let code = finish(&c, &held, r);
+    if let Some(pkg) = test {
+        let verdict = match code { 0 => "passed", CANCELLED_EXIT => "cancelled", _ => "failed" };
+        let _ = writeln!(out, "devhub test: {pkg} {verdict} in {:.3}s (queue {:.3}s, ship {:.3}s, run {:.3}s) on {}", t.elapsed().as_secs_f64(), queue.as_secs_f64(), ship.as_secs_f64(), run.as_secs_f64(), held.node);
     }
-    let r = run_there(&c, &held, rel.trim_end_matches('/'), &o.cmd);
+    (code, completed)
+}
+
+fn test_miss(o: &Opts, pkg: &str, args: &[String], verb: &str, errors: &[String]) -> Result<Value, String> {
+    let req = format!("{{\"pkg\":{},\"target\":{},\"lane\":{},\"rev\":{},\"error\":[{}]}}", makepad_remote::json_str(pkg), makepad_remote::json_str(&crate::jit_misses::target(args)), makepad_remote::json_str(&o.req.lane), makepad_remote::json_str(o.req.rev.as_deref().unwrap_or("")), errors.iter().take(5).map(|e| makepad_remote::json_str(e)).collect::<Vec<_>>().join(","));
+    retry_master(|| master().and_then(|c| one(&c, "jit", &format!("jit misses {verb} {req}"))))
+}
+
+/// Cargo's build-finished event distinguishes a compile error from a test binary's failure,
+/// including harness=false targets and filters selecting zero tests. Keep human diagnostics.
+fn cargo_output(log: &str) -> (Option<bool>, String) {
+    let (mut built, mut out) = (None, String::new());
+    for line in log.split_inclusive('\n') {
+        // Once compilation ended, these bytes belong to the test program, even if it prints
+        // JSON that happens to look like a cargo message.
+        if built.is_some() { out.push_str(line); continue; }
+        if let Ok(v) = makepad_strict_json::parse_depth(line.trim().as_bytes(), 16) {
+            match s(&v, "reason").as_str() {
+                "build-finished" => { built = v.get("success").and_then(Value::as_bool); continue; }
+                "compiler-artifact" | "build-script-executed" => continue,
+                "compiler-message" => {
+                    if let Some(message) = v.get("message").and_then(|m| m.get("rendered")).and_then(Value::as_str) {
+                        out.push_str(message);
+                    }
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        out.push_str(line);
+    }
+    (built, out)
+}
+
+fn cargo_test(mut o: Opts, pkg: &str, args: &[String], errors: &[String], known: Option<Value>) -> i32 {
+    if let Some(miss) = &known { println!("{}", crate::jit_misses::notice(miss)); }
+    else { eprintln!("devhub test: JIT compile/resolve failure on {pkg} {}; checking with cargo on a pool box", crate::jit_misses::target(args)); }
+    let _ = std::io::stdout().flush();
+    o.cmd = ["cargo", "test", "--release", "--message-format=json-render-diagnostics", "-p", pkg].iter().map(|s| s.to_string()).chain(args.iter().cloned()).collect();
+    o.tree = true;
+    o.req.needs.retain(|(k, _)| k != "role");
+    o.req.needs.push(("role".into(), "pool".into()));
+    o.req.node = None;
+    o.req.only = false;
+    o.req.loader = None;
+    o.req.class = format!("native:{}", o.req.class);
+    o.req.cost = CostClass::Medium;
+    o.req.cost_asked = true;
+    o.req.est_min = None;
+    let mut output = Vec::new();
+    let (code, completed) = run_worktree_into(&mut o, false, None, &mut output);
+    let (built, output) = cargo_output(&String::from_utf8_lossy(&output));
+    // Cancellation and transport/setup failures never become evidence of a JIT miss.
+    if code == CANCELLED_EXIT { print!("{output}"); return code; }
+    if !completed {
+        print!("{output}");
+        eprintln!("devhub test: cargo fallback did not finish; no JIT-miss verdict recorded");
+        return code;
+    }
+    if built == Some(false) {
+        eprintln!("devhub test: {pkg} also fails to compile with cargo; this is the lane's error. JIT diagnostics:");
+        for error in errors { eprintln!("{error}"); }
+        print!("{output}");
+        return 1;
+    }
+    if built != Some(true) {
+        print!("{output}");
+        eprintln!("devhub test: cargo did not report a completed build; no JIT-miss verdict recorded");
+        return if code == 0 { 2 } else { code };
+    }
+    if known.is_none() {
+        match test_miss(&o, pkg, args, "record", errors) {
+            Ok(miss) => println!("{}", crate::jit_misses::notice(&miss)),
+            Err(e) => eprintln!("devhub test: JIT miss on {pkg} {} (recording failed: {e}): {}; this verdict is cargo's", crate::jit_misses::target(args), errors.first().map_or("", String::as_str)),
+        }
+    }
+    print!("{output}");
+    code
+}
+
+fn test(lane: &str, pkg: &str, rest: &[&str]) -> i32 {
+    let parsed = (|| -> Result<_, String> {
+        if pkg.is_empty() || pkg.starts_with('-') || !pkg.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_')) {
+            return Err(format!("`{pkg}` is not a package name"));
+        }
+        let (mut flags, mut select, mut args) = (Vec::new(), Vec::new(), Vec::new());
+        let (mut native, mut live, mut target) = (false, false, None);
+        let mut i = 0;
+        while i < rest.len() {
+            let val = || rest.get(i + 1).copied().filter(|v| !v.is_empty() && !v.starts_with('-')).ok_or_else(|| format!("{} needs a value", rest[i]));
+            match rest[i] {
+                "--" => { args.extend_from_slice(&rest[i..]); break; }
+                "--native" => native = true,
+                "--live" => live = true,
+                "--tree" => flags.push("--tree"),
+                "--needs" | "--node" | "--priority" | "--jit" | "--cost" | "--est-min" | "--class" => { flags.extend([rest[i], val()?]); i += 1; }
+                "--features" => { select.extend([rest[i], val()?]); i += 1; }
+                "--lib" | "--tests" | "--test" => {
+                    if target.is_some() { return Err("select only one of --lib, --test T or --tests".into()); }
+                    select.push(rest[i]);
+                    target = Some(match rest[i] {
+                        "--test" => { let t = val()?; select.push(t); i += 1; t }
+                        "--lib" => "lib",
+                        _ => "tests",
+                    });
+                }
+                f => return Err(format!("unknown flag `{f}`")),
+            }
+            i += 1;
+        }
+        // makepad test --live defaults to --lib; cargo's default also selects other targets.
+        if live && target.is_none() { select.push("--lib"); target = Some("lib"); }
+        let mut o = parse("test", Some(lane), &flags)?;
+        if live && (native || target == Some("tests") || select.contains(&"--features")) {
+            return Err("--live selects one target (--lib or --test T); --native, --tests and --features cannot be combined with it".into());
+        }
+        if live && (o.req.node.is_some() || o.req.cost != CostClass::Small || o.req.est_min.is_some()) {
+            return Err("--live uses small cost and hot-box routing; omit --node, --cost and --est-min".into());
+        }
+        if live && !flags.contains(&"--priority") { o.req.priority = Priority::Interactive; }
+        let mut test_args = select.clone();
+        test_args.extend(args.iter().copied());
+        let mut cmd = if native { vec!["cargo", "test", "--release", "-p", pkg] } else { vec!["cargo", "run", "--profile", "host", "-q", "-p", "makepad-run", "--bin", "makepad", "--", "test", pkg] };
+        cmd.extend(select);
+        cmd.extend(args);
+        o.cmd = cmd.into_iter().map(str::to_string).collect();
+        if o.req.class.is_empty() { o.req.class = target.map_or_else(|| format!("test:{pkg}"), |t| format!("test:{pkg}:{t}")); }
+        o.tree |= native;
+        Ok((o, native, live, test_args.into_iter().map(str::to_string).collect::<Vec<_>>()))
+    })();
+    let (mut o, native, live, test_args) = match parsed {
+        Ok(v) => v,
+        Err(e) => { eprintln!("test: {e}"); return 2; }
+    };
+    if native { return run_worktree(o, false, Some(pkg)); }
+    let root = o.req.repo_dir.as_deref().map(PathBuf::from).unwrap_or_else(cwd);
+    o.req.rev = match head_rev(&root, &o.req.lane) { Ok(rev) => Some(rev), Err(e) => return fail(e) };
+    match test_miss(&o, pkg, &test_args, "lookup", &[]) {
+        Ok(miss) if !miss.is_null() => {
+            let errors = miss.get("error").and_then(Value::as_arr).unwrap_or(&[]).iter().filter_map(Value::as_str).map(str::to_string).collect::<Vec<_>>();
+            return cargo_test(o, pkg, &test_args, &errors, Some(miss));
+        }
+        Ok(_) => {}
+        Err(e) => return fail(e),
+    }
+    if live { return live_test(o, pkg, &test_args); }
+    let c = match retry_master(master) { Ok(c) => c, Err(e) => return fail(e) };
+    let shadow = match one(&c, "overlay-shadow", "overlay-shadow enabled") {
+        Ok(v) => v.get("on").and_then(Value::as_bool) == Some(true),
+        Err(e) => return fail(e),
+    };
+    let mut output = Vec::new();
+    let (code, completed) = if shadow {
+        shadow_test(&c, &mut o, pkg, &mut output)
+    } else {
+        run_worktree_into(&mut o, false, Some(pkg), &mut output)
+    };
+    let log = String::from_utf8_lossy(&output);
+    let errors = crate::jit_misses::compile_errors(&log);
+    if completed && code != CANCELLED_EXIT && !errors.is_empty() { return cargo_test(o, pkg, &test_args, &errors, None); }
+    print!("{log}");
+    code
+}
+
+/// Submit the requested source mode; the master snapshots once and owns the opposite-mode shadow.
+/// Capture only the requested run; the second result distinguishes completion from setup/link failure.
+fn shadow_test(c: &Client, o: &mut Opts, pkg: &str, output: &mut Vec<u8>) -> (i32, bool) {
+    let mut run = || -> Result<(i32, bool), String> {
+        use makepad_remote::json_str;
+        let root = git(&cwd(), &["rev-parse", "--show-toplevel"]).ok_or("test: run inside the lane's worktree")?;
+        let rel = git(&cwd(), &["rev-parse", "--show-prefix"]).filter(|p| !p.is_empty()).unwrap_or_else(|| ".".into());
+        if o.req.loader.is_none() { o.req.loader = jit_hint(c, Path::new(&root)); }
+        let optional = |n: Option<f64>| n.map_or("null".into(), |n| n.to_string());
+        let body = format!("{{\"tree\":{},\"also\":[{}],\"jobs\":[{{\"kind\":\"test\",\"holder\":{},\"lane\":{},\"agent\":{},\"cmd\":[{}],\"cwd\":{},\"shadow\":true,\"tree\":{},\"cost\":{},\"est_min\":{},\"cores\":{},\"ram_gb\":{},\"whole\":{},\"class\":{},\"priority\":{},\"loader\":{},\"needs\":{},\"node\":{},\"prio\":{}}}]}}",
+            json_str(&root), std::env::var("DEVHUB_ALSO").unwrap_or_default().split_whitespace().map(json_str).collect::<Vec<_>>().join(","), std::process::id(), json_str(&o.req.lane), json_str(o.req.agent.as_deref().unwrap_or("devhub-test")), o.cmd.iter().map(|s| json_str(s)).collect::<Vec<_>>().join(","), json_str(rel.trim_end_matches('/')),
+            o.tree, json_str(if o.req.cost_asked { o.req.cost.as_str() } else { "" }), optional(o.req.est_min), optional(o.req.cores), optional(o.req.ram_gb), o.req.whole, json_str(&o.req.class), json_str(o.req.priority.as_str()), json_str(o.req.loader.as_deref().unwrap_or("")),
+            json_str(&o.req.needs.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(",")), json_str(o.req.node.as_deref().unwrap_or("")), o.req.prio);
+        let v = one(c, "job", &format!("job submit {body}"))?;
+        let id = v.get("jobs").and_then(Value::as_arr).and_then(|a| a.first()).and_then(Value::as_str).ok_or("test: no job")?;
+        let (mut off, mut generation) = (0, (String::new(), 0));
+        loop {
+            let v = retry_master(|| one(c, "job", &format!("job output {id} {off}")))?;
+            let j = crate::state::job_from(v.get("job").ok_or("test: missing job")?);
+            let current = (j.lease.clone(), j.run_n);
+            if generation != current && j.run_n > 0 {
+                generation = current;
+                output.clear();
+                if off != 0 { off = 0; continue; }
+            }
+            let bytes = b64_decode(&s(&v, "data")).ok_or("test: bad job output")?;
+            output.extend_from_slice(&bytes);
+            off = v.get("off").and_then(Value::as_u64).ok_or("test: missing output offset")?;
+            if bytes.is_empty() && j.done() {
+                let code = if j.state == "cancelled" { CANCELLED_EXIT } else { j.exit.unwrap_or(1) };
+                if j.exit.is_none() && !j.note.is_empty() { eprintln!("test: {}", j.note); }
+                let seconds = |a: u64, b: u64| b.saturating_sub(a) as f64 / 1000.0;
+                let _ = writeln!(output, "devhub test: {pkg} {} in {:.3}s (queue {:.3}s, ship {:.3}s, run {:.3}s) on {}", if code == 0 { "passed" } else if code == CANCELLED_EXIT { "cancelled" } else { "failed" }, seconds(j.submitted_ms, j.ended_ms), seconds(j.submitted_ms, j.granted_ms), seconds(j.granted_ms, j.shipped_ms), seconds(j.shipped_ms, j.ended_ms), j.node);
+                o.req.rev = Some(j.rev.clone());
+                return Ok((code, j.exit.is_some()));
+            }
+            if bytes.is_empty() { std::thread::sleep(Duration::from_millis(300)); }
+        }
+    };
+    match run() { Ok(result) => result, Err(e) => (fail(e), false) }
+}
+
+fn overlay_selftest(args: &[&str]) -> i32 {
+    let mut req = Req::new("overlay-selftest", Kind::Test);
+    req.cost = CostClass::Medium;
+    req.cost_asked = true;
+    req.class = "overlay-selftest".into();
+    let mut case = "";
+    let mut words = args.iter();
+    while let Some(word) = words.next() {
+        match (*word, words.next()) {
+            ("--node", Some(n)) => req.node = Some(n.to_string()),
+            ("--case", Some(n)) => case = n,
+            _ => { eprintln!("devhub overlay selftest [--node N] [--case NAME]"); return 2; }
+        }
+    }
+    let mut c = match master() { Ok(c) => c, Err(e) => return fail(e) };
+    let held = match acquire(&c, &req) { Ok(h) => h, Err(code) => return code };
+    let r = start_there(&mut c, &held, "overlay-selftest", &format!("overlay-selftest {} {case}", held.id))
+        .and_then(|v| v.get("n").and_then(Value::as_u64).ok_or("selftest: missing run".into()))
+        .and_then(|n| follow_there(&c, &held, n, &mut std::io::stdout()));
     finish(&c, &held, r)
+}
+
+fn live_test(mut o: Opts, pkg: &str, args: &[String]) -> i32 {
+    let started = Instant::now();
+    let mut said = false;
+    let result = (|| -> Result<crate::state::Live, String> {
+        let root = git(&cwd(), &["rev-parse", "--show-toplevel"]).map(PathBuf::from).ok_or("test --live: run it inside the lane's worktree")?;
+        let c = retry_master(master)?;
+        let loader = o.req.loader.clone().or_else(|| jit_hint(&c, &root)).unwrap_or_default();
+        let needs = o.req.needs.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(",");
+        let req = format!("{{\"app\":{},\"repo_dir\":{},\"tree\":{},\"lane\":{},\"agent\":{},\"needs\":{},\"priority\":{},\"loader\":{},\"cost\":\"small\",\"class\":{},\"test_args\":[{}]}}", makepad_remote::json_str(pkg), makepad_remote::json_str(&root.to_string_lossy()), o.tree, makepad_remote::json_str(&o.req.lane), makepad_remote::json_str(o.req.agent.as_deref().unwrap_or("")), makepad_remote::json_str(&needs), makepad_remote::json_str(o.req.priority.as_str()), makepad_remote::json_str(&loader), makepad_remote::json_str(&o.req.class), args.iter().map(|a| makepad_remote::json_str(a)).collect::<Vec<_>>().join(","));
+        let selected = if args.last().is_some_and(|a| a == "--") { &args[..args.len() - 1] } else { args };
+        let status = || -> Option<crate::state::Live> {
+            let v = one(&c, "live", "live list").ok()?;
+            v.as_arr()?.iter().map(crate::state::live_from).find(|x| x.test && x.lane == o.req.lane && x.app == pkg && x.test_args == selected)
+        };
+        let measured_ms = status().and_then(|x| x.patch).and_then(|p| p.tests).map_or(0, |t| t.ms.max(0.0) as u64);
+        let notice_after = Duration::from_millis(measured_ms.saturating_add(120_000));
+        let v = retry_master(|| {
+            // Keep the request open without a deadline. A separate channel reads its phase
+            // once it exceeds the previous test time plus two minutes.
+            let ch = c.open("live", "").map_err(|e| e.to_string())?;
+            ch.send(format!("live test {req}").into_bytes()).map_err(|e| format!("link lost: {e}"))?;
+            let mut answer = None;
+            loop {
+                match ch.recv_timeout(Duration::from_secs(1)) {
+                    Ok(makepad_remote::Event::Data(d)) => {
+                        for l in String::from_utf8_lossy(&d).lines().filter(|l| !l.is_empty()) {
+                            let v = json(l).ok_or("live: bad answer")?;
+                            if v.get("end").is_some() { return answer.ok_or_else(|| "live: no answer".to_string()); }
+                            if let Some(e) = v.get("err").and_then(Value::as_str) { return Err(e.to_string()); }
+                            if answer.is_none() { answer = Some(v); }
+                        }
+                    }
+                    Ok(makepad_remote::Event::Opened(_)) | Err(true) => {}
+                    Ok(makepad_remote::Event::Closed(makepad_remote::conn::CLOSE_LINK_LOST, why)) => return Err(format!("link lost: {why}")),
+                    Ok(makepad_remote::Event::Closed(_, why)) => return Err(why),
+                    Err(false) => return Err("the hub connection ended".into()),
+                }
+                if !said && started.elapsed() > notice_after {
+                    let x = status();
+                    let phase = match x.as_ref() {
+                        None => "waiting for a live job",
+                        Some(x) if x.state != "running" => x.state.as_str(),
+                        Some(x) if x.pid == 0 => "starting JIT",
+                        Some(x) => match x.patch.as_ref() {
+                            Some(p) if p.tests.is_some() => "finishing the current call",
+                            Some(p) if matches!(p.outcome.as_str(), "recovering" | "restart") => "restarting JIT",
+                            Some(p) if matches!(p.outcome.as_str(), "initial" | "patched") => "tests",
+                            Some(p) if p.shipped_ms == 0 => "shipping",
+                            _ => "patching",
+                        },
+                    };
+                    eprintln!("still running: {phase}");
+                    said = true;
+                }
+            }
+        })?;
+        Ok(crate::state::live_from(&v))
+    })();
+    match result {
+        Ok(x) => {
+            if let Some(p) = &x.patch {
+                let errors = crate::jit_misses::compile_errors(&format!("{}\n{}", p.reason, p.output));
+                if makepad_remote::hot::Verdict::from_output(makepad_remote::hot::JIT_ERROR_EXIT, &p.reason).is_none() && x.state != "paused" && p.tests.is_none() && matches!(p.outcome.as_str(), "compile_error" | "refused" | "jit_error" | "failed") && !errors.is_empty() {
+                    // A refused warm job must release its hot box before the cargo check, and
+                    // closing the ledger later must create a fresh JIT rather than reuse it.
+                    if let Err(e) = retry_master(|| master().and_then(|c| one(&c, "live", &format!("live release {}", x.id)))) { return fail(e); }
+                    o.req.rev = Some(x.rev.clone());
+                    return cargo_test(o, pkg, args, &errors, None);
+                }
+            }
+            print!("{}", x.test_result(started.elapsed().as_secs_f64()));
+            x.test_code()
+        }
+        Err(e) => fail(e),
+    }
+}
+
+fn overlay_inspect(word: &str, lane: &str, args: &[&str]) -> i32 {
+    let mut node = None;
+    let mut path = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i] {
+            "--node" if i + 1 < args.len() => { node = Some(args[i + 1].to_string()); i += 2; }
+            p if word == "why" && path.is_none() && !p.starts_with("--") => { path = Some(p); i += 1; }
+            _ => return fail("overlay: status <lane> | why <lane> <path> [--node N]"),
+        }
+    }
+    if word == "why" && path.is_none() { return fail("overlay why needs a relative path"); }
+    let result = (|| -> Result<(), String> {
+        let c = master()?;
+        let node = match node { Some(n) => n, None => lane_node(&c, lane, None)? };
+        let service = format!("overlay-{word}");
+        let line = format!("{service} {lane}{}", path.map_or(String::new(), |p| format!(" {p}")));
+        for line in ask(&c, Some(&node), &service, &line)? {
+            if let Some(e) = json(&line).and_then(|v| v.get("err").and_then(|e| e.as_str()).map(str::to_string)) { return Err(e); }
+            println!("{line}");
+        }
+        Ok(())
+    })();
+    match result { Ok(()) => 0, Err(e) => fail(e) }
 }
 
 /// The node a lane's dir lives on: the node of its newest lease (the scheduler keeps a lane on
@@ -654,7 +1049,7 @@ fn lane_node(c: &Client, lane: &str, lease: Option<&str>) -> Result<String, Stri
         let (id, node) = (s(&v, "id"), s(&v, "node"));
         let hit = match lease {
             Some(want) => id == want,
-            None => s(&v, "lane") == lane && s(&v, "kind") != "inspect",
+            None => s(&v, "lane") == lane && (s(&v, "kind") != "inspect" || s(&v, "src") == "overlay"),
         };
         let num = id.trim_start_matches('L').parse::<u64>().unwrap_or(0);
         if hit && !node.is_empty() && best.as_ref().is_none_or(|(b, _)| num > *b) {
@@ -772,7 +1167,9 @@ fn queue(c: &Client, all: bool) -> i32 {
             }
         };
         let jit = s(&v, "jit");
-        println!("{:<6} {:<8} {:<10} {}{}: {tail}", s(&v, "id"), s(&v, "lane"), format!("{}{at}", s(&v, "kind")), if jit.is_empty() { "" } else { "jit " }, jit);
+        let loader = s(&v, "loader");
+        let target = if loader.is_empty() { jit } else { loader };
+        println!("{:<6} {:<8} {:<10} {} {} ({}) {} {}{}: {tail}", s(&v, "id"), s(&v, "lane"), format!("{}{at}", s(&v, "kind")), s(&v, "priority"), s(&v, "cost"), s(&v, "cost_source"), s(&v, "src"), if target.is_empty() { "" } else { "jit " }, target);
     }
     0
 }
@@ -904,7 +1301,7 @@ fn landed(c: &Client, lane: &str) -> i32 {
     let mut code = 0;
     let repo = cwd();
     let branch = format!("rc-{lane}");
-    let merged = git(&repo, &["merge-base", "--is-ancestor", &branch, "work"]).is_some();
+    let merged = crate::lease::wt::in_work(&repo, &branch);
     let exists = git(&repo, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")]).is_some();
     if exists && !merged {
         eprintln!("{branch} is not merged into work: nothing deleted");
@@ -945,7 +1342,9 @@ fn landed(c: &Client, lane: &str) -> i32 {
             }
         }
     }
-    if makepad_remote::group::command("git").arg("-C").arg(&repo).args(["branch", "-d", &branch]).status().is_ok_and(|s| s.success()) {
+    // `-D`: the content check above (`in_work`) already proved the branch is in work; `-d` would
+    // refuse a tip that is only a merge-train "Merge work into rc-x" commit
+    if makepad_remote::group::command("git").arg("-C").arg(&repo).args(["branch", "-D", &branch]).status().is_ok_and(|s| s.success()) {
         println!("branch {branch}: deleted");
     } else {
         code = 1;
@@ -985,13 +1384,18 @@ pub fn cli(args: &[&str]) -> Option<i32> {
         }
         return inspect(args.get(1)?, &args[2..]);
     }
-    if !matches!(word, "lease" | "run" | "get" | "release" | "cancel" | "queue" | "leases" | "nodes" | "node" | "disk" | "desk" | "landed" | "clean" | "evict" | "unblock" | "override" | "blocked") {
+    if !matches!(word, "prof" | "stats" | "jit" | "overlay" | "lease" | "run" | "test" | "get" | "release" | "cancel" | "queue" | "leases" | "why-queued" | "nodes" | "node" | "disk" | "desk" | "landed" | "clean" | "evict" | "unblock" | "override" | "blocked") {
         return None;
     }
     match args {
+        ["prof", rest @ ..] => if let Err(e) = super::prof::Query::parse(rest) { eprintln!("makepad devhub {e}"); return Some(2); },
         ["lease", id, "cancel"] | ["cancel", id] => return Some(cancel(id)),
         ["lease", rest @ ..] => return Some(lease(rest)),
+        ["overlay", "selftest", rest @ ..] => return Some(overlay_selftest(rest)),
+        ["overlay", word @ ("status" | "why"), lane, rest @ ..] => return Some(overlay_inspect(word, lane, rest)),
         ["run", lane, kind, rest @ ..] => return Some(run(lane, kind, rest)),
+        ["test", lane, pkg, rest @ ..] => return Some(test(lane, pkg, rest)),
+        ["test", ..] => { eprintln!("makepad devhub test <lane> <pkg> [--lib|--test T|--tests] [--features F] [--needs k=v,..] [--node N] [--cost small|medium|large] [--est-min N] [--class name] [--priority interactive|background] [--jit key] [--native|--live] [--tree] [-- args...]"); return Some(2); }
         ["get", lane, rel, dst, rest @ ..] => return Some(get(lane, rel, dst, rest)),
         _ => {}
     }
@@ -1000,6 +1404,32 @@ pub fn cli(args: &[&str]) -> Option<i32> {
         Err(e) => return Some(fail(e)),
     };
     Some(match args {
+        ["prof", rest @ ..] => match one(&c, "prof", &format!("prof {}", rest.join(" "))) {
+            Ok(v) => { print!("{}", s(&v, "text")); 0 }
+            Err(e) => fail(e),
+        },
+        ["overlay", "shadow", word @ ("on" | "off" | "status")] => match one(&c, "overlay-shadow", &format!("overlay-shadow {word}")) {
+            Ok(v) => { print!("{}", s(&v, "text")); 0 }
+            Err(e) => fail(e),
+        },
+        ["stats", "queue", rest @ ..] if rest.is_empty() || rest == ["--hour"] => match one(&c, "stats", "stats queue") {
+            Ok(v) => { print!("{}", s(&v, "text")); 0 }
+            Err(e) => fail(e),
+        },
+        ["stats", ..] => { eprintln!("makepad devhub stats queue [--hour]"); 2 },
+        ["jit", "stats", rest @ ..] if rest.is_empty() || rest == ["--day"] => match one(&c, "jit", &format!("jit stats {}", rest.join(" "))) {
+            Ok(v) => { print!("{}", s(&v, "text")); 0 }
+            Err(e) => fail(e),
+        },
+        ["jit", "misses"] | ["jit", "misses", "--all"] => match one(&c, "jit", &args.join(" ")) {
+            Ok(v) => { print!("{}", s(&v, "text")); 0 }
+            Err(e) => fail(e),
+        },
+        ["jit", "misses", "close", id] => match one(&c, "jit", &format!("jit misses close {id}")) {
+            Ok(_) => { println!("JIT miss {id} closed; the next devhub test tries the JIT again"); 0 }
+            Err(e) => fail(e),
+        },
+        ["jit", ..] => { eprintln!("makepad devhub jit stats [--day] | misses [--all] | misses close <id>"); 2 },
         ["release", id] => match one(&c, "release", id) {
             Ok(v) => {
                 println!("{}", released_line(&v));
@@ -1008,6 +1438,19 @@ pub fn cli(args: &[&str]) -> Option<i32> {
             Err(e) => fail(e),
         },
         ["queue" | "leases", rest @ ..] => queue(&c, rest.contains(&"--all")),
+        ["why-queued", id] => match ask(&c, None, "why-queued", id) {
+            Ok(lines) => {
+                for line in lines {
+                    let Some(v) = json(&line) else { continue };
+                    if let Some(e) = v.get("err").and_then(|v| v.as_str()) { return Some(fail(e)); }
+                    let blockers: Vec<_> = v.get("blockers").and_then(|v| v.as_arr()).into_iter().flatten().filter_map(|v| v.as_str()).collect();
+                    println!("{:<8} {}{}{}", s(&v, "node"), s(&v, "reason"), if blockers.is_empty() { String::new() } else { format!("; blockers {}", blockers.join(", ")) }, v.get("allocation").and_then(|v| v.as_str()).map_or(String::new(), |s| format!("; {s}")));
+                }
+                0
+            }
+            Err(e) => fail(e),
+        },
+        ["why-queued", ..] => { eprintln!("makepad devhub why-queued <lease>"); 2 },
         ["evict", who] => match one(&c, "evict", who) {
             Ok(v) => {
                 let n = match v.get("ended") {

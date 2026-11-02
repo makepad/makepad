@@ -51,23 +51,6 @@ mod coretext_gate_tests {
             "the gate must settle the cache without building a CoreTextFace"
         );
     }
-
-    /// PingFangUI.ttc on macOS 26+ is the face the fallback exists for.
-    #[test]
-    fn an_hvgl_only_system_face_passes_the_gate() {
-        const PINGFANG: &str = "/System/Library/PrivateFrameworks/FontServices.framework/Resources/Reserved/PingFangUI.ttc";
-        let Ok(data) = FontData::from_file_mmap_or_read(PINGFANG) else {
-            eprintln!("PingFangUI.ttc not present, skipping");
-            return;
-        };
-        let face = FontFace::from_data_and_index(data, 0).unwrap();
-        let has_glyf = face.with_ttf_parser_face(|f| f.tables().glyf.is_some());
-        if has_glyf {
-            eprintln!("this macOS still ships a glyf PingFang, skipping");
-            return;
-        }
-        assert!(face.outlines_live_only_in_hvgl());
-    }
 }
 
 #[cfg(test)]

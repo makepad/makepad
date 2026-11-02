@@ -10,7 +10,7 @@ pub static PASS_NS: [std::sync::atomic::AtomicU64; 16] = [const { std::sync::ato
 /// Per-pass timing is opt-in (MAKEPAD_RUN_PASS_TIMES): the thread CPU clock is a syscall.
 /// MAKEPAD_RUN_OPT diagnostic toggles beyond OptCfg's fields: `-freecap` (no size allowance for
 /// O3 free inlines: R13's 1.9 MB functions, to exercise arm64 branch relaxation),
-/// `-costmodel` (rustc MIR cost admission); `+single` turns the single-caller admission on;
+/// `-costmodel` (rustc MIR cost admission);
 /// `-ic` disables the InstCombine subset (nonnull, phi compares, convs, niches, sinking).
 pub fn opt_off(options: &relax_session::Options, tok: &str) -> bool {
     options.opt.iter().any(|t| t.trim() == tok)

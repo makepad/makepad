@@ -660,50 +660,19 @@ unsafe fn variation_descriptor(variations: &[rustybuzz::Variation]) -> Option<*c
 mod tests {
     use super::*;
 
-    pub(super) const PINGFANG: &str = "/System/Library/PrivateFrameworks/FontServices.framework/Resources/Reserved/PingFangUI.ttc";
-
-    #[test]
-    fn coretext_outlines_hvgl_pingfang() {
-        let Ok(data) = std::fs::read(PINGFANG) else {
-            eprintln!("PingFangUI.ttc not present, skipping");
-            return;
-        };
-        let face = ttf_parser::Face::parse(&data, 0).expect("face 0 should parse");
-        let upem = face.units_per_em() as f32;
-        let glyph = face.glyph_index('性').expect("性 should map").0;
-
-        let ct =
-            CoreTextFace::new(&data, 0, upem, &[]).expect("CoreText should load PingFang face 0");
-        let outline = ct
-            .glyph_outline(glyph, upem)
-            .expect("CoreText should outline an hvgl glyph");
-        assert!(
-            !outline.commands().is_empty(),
-            "outline should carry path commands"
-        );
-        let bounds = outline.bounds_in_ems();
-        assert!(
-            bounds.size.width > 0.1 && bounds.size.height > 0.1,
-            "CJK glyph bounds should be roughly em-sized, got {bounds:?}"
-        );
-    }
-
     #[test]
     fn coretext_weight_variation_changes_outline() {
-        let Ok(data) = std::fs::read(PINGFANG) else {
-            eprintln!("PingFangUI.ttc not present, skipping");
-            return;
-        };
-        let face = ttf_parser::Face::parse(&data, 0).expect("face 0 should parse");
+        let data = include_bytes!("../../../widgets/resources/RobotoFlex.ttf");
+        let face = ttf_parser::Face::parse(data, 0).expect("face 0 should parse");
         let upem = face.units_per_em() as f32;
-        let glyph = face.glyph_index('性').expect("性 should map").0;
+        let glyph = face.glyph_index('B').expect("B should map").0;
 
-        let regular = CoreTextFace::new(&data, 0, upem, &[]).unwrap();
+        let regular = CoreTextFace::new(data, 0, upem, &[]).unwrap();
         let bold_variation = [rustybuzz::Variation {
             tag: ttf_parser::Tag::from_bytes(b"wght"),
             value: 700.0,
         }];
-        let bold = CoreTextFace::new(&data, 0, upem, &bold_variation).unwrap();
+        let bold = CoreTextFace::new(data, 0, upem, &bold_variation).unwrap();
 
         let fmt = |o: &GlyphOutline| format!("{:?}", o.commands());
         let regular_outline = regular.glyph_outline(glyph, upem).unwrap();

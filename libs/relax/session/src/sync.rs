@@ -2,12 +2,12 @@
 //! could otherwise outlive the compiler generation in which its first lock allocated it.
 pub use std::sync::{LockResult, PoisonError, TryLockError, TryLockResult};
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(target_vendor = "apple"))]
 pub use std::sync::{Condvar, Mutex, MutexGuard, WaitTimeoutResult};
-#[cfg(target_os = "macos")]
+#[cfg(target_vendor = "apple")]
 pub use macos::{Condvar, Mutex, MutexGuard, WaitTimeoutResult};
 
-#[cfg(target_os = "macos")]
+#[cfg(target_vendor = "apple")]
 mod macos {
     use super::{LockResult, PoisonError, TryLockError, TryLockResult};
     use std::cell::UnsafeCell;

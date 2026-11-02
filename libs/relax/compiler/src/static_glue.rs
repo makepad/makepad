@@ -5,16 +5,18 @@
 // it names the runtime entries it jumps to directly.
 //
 // Slot thunks and lazy stubs are pools sized at build time: segment 0 of the slot table
-// (SlotTable::seg_slots(0) = 262,144 slots), 16 bytes each. Thunk k loads slot k's word from
-// the static table (`ldr`, then `br`); stub k passes k in x16 to the lazy entry. Both only use
-// x16/x17, the registers AAPCS64 leaves to veneers, as the generated ones do.
+// (SlotTable::seg_slots(0) = 262,144 slots), 8 bytes each: `adr x16, .` (its own address) and a
+// branch to the pool's common code, which makes the slot from the address. Thunk k then loads slot
+// k's word from the static table (`ldr`, then `br`); stub k passes k in x16 to the lazy entry. Both
+// only use x16/x17, the registers AAPCS64 leaves to veneers, as the generated ones do. (16-byte
+// entries with the slot as immediates were 8 MB of the iOS binary's text; these are 4 MB.)
 
-use super::{rt_compile, rt_hot, rt_panic_bounds, rt_panic_impl, rt_panic_site, rt_resume_unwind};
+use super::{rt_compile_global, rt_hot, rt_panic_bounds, rt_panic_impl, rt_panic_site, rt_resume_unwind};
 
 /// Slots the pools cover (segment 0 of the slot table).
 pub(super) const SLOTS: usize = 1 << 18;
 /// Bytes per thunk and per stub (jit.rs NC_STRIDE).
-const _: () = assert!(super::NC_STRIDE == 16);
+const _: () = assert!(super::NC_STRIDE == 8);
 
 /// The function table of segment 0 (one word per slot: its current code).
 #[no_mangle]
@@ -22,36 +24,41 @@ static mut MAKEPAD_RUN_SG_TABLE: [u64; SLOTS] = [0; SLOTS];
 
 std::arch::global_asm!(
     ".text",
-    // ---- slot thunks: x16 = k; table[k] -> x16; br
-    ".p2align 4",
-    ".globl _makepad_run_sg_thunks",
-    "_makepad_run_sg_thunks:",
-    ".set sgk, 0",
-    ".rept 262144",
-    "  movz w16, #(sgk & 0xffff)",
-    "  movk w16, #(sgk >> 16), lsl #16",
-    "  b Lmakepad_run_sg_thunk_common",
-    "  udf #0",
-    ".set sgk, sgk + 1",
-    ".endr",
-    "Lmakepad_run_sg_thunk_common:",
+    // ---- slot thunks: x16 = the thunk's address; x16 - thunks = 8k = table[k]'s offset; br
+    ".p2align 3",
+    "_makepad_run_sg_thunk_common:",
+    "  adrp x17, _makepad_run_sg_thunks@PAGE",
+    "  add x17, x17, _makepad_run_sg_thunks@PAGEOFF",
+    "  sub x16, x16, x17",
     "  adrp x17, {table}@PAGE",
     "  add x17, x17, {table}@PAGEOFF",
-    "  ldr x16, [x17, x16, lsl #3]",
+    "  ldr x16, [x17, x16]",
     "  br x16",
-    // ---- lazy stubs: x16 = k; the lazy entry compiles slot k and continues in its code
-    ".p2align 4",
+    ".p2align 3",
+    ".globl _makepad_run_sg_thunks",
+    "_makepad_run_sg_thunks:",
+    ".rept 262144",
+    "  adr x16, .",
+    "  b _makepad_run_sg_thunk_common",
+    ".endr",
+    // ---- lazy stubs: x16 = k ((address - stubs) / 8); the lazy entry compiles slot k and
+    // continues in its code
+    ".p2align 3",
+    "_makepad_run_sg_stub_common:",
+    "  adrp x17, _makepad_run_sg_stubs@PAGE",
+    "  add x17, x17, _makepad_run_sg_stubs@PAGEOFF",
+    "  sub x16, x16, x17",
+    "  lsr x16, x16, #3",
+    "  b _makepad_run_sg_lazy_entry",
+    ".p2align 3",
     ".globl _makepad_run_sg_stubs",
     "_makepad_run_sg_stubs:",
-    ".set sgk, 0",
     ".rept 262144",
-    "  movz w16, #(sgk & 0xffff)",
-    "  movk w16, #(sgk >> 16), lsl #16",
-    "  b _makepad_run_sg_lazy_entry",
-    "  udf #0",
-    ".set sgk, sgk + 1",
+    "  adr x16, .",
+    "  b _makepad_run_sg_stub_common",
     ".endr",
-    // ---- lazy entry (x16 = slot): saves the argument registers (q0-q7 whole), x8; rt_compile
+    // ---- lazy entry (x16 = global slot: the window it is in names the unit, jit.rs
+    // nc_window_of): saves the argument registers (q0-q7 whole), x8; rt_compile_global
     // returns the address to continue at
     ".p2align 2",
     ".globl _makepad_run_sg_lazy_entry",
@@ -83,7 +90,8 @@ std::arch::global_asm!(
     "  mov sp, x29",
     "  ldp x29, x30, [sp], #16",
     "  br x16",
-    // ---- hot entry: the same with rt_hot (tier-up; no-codegen mode has no O3, kept complete)
+    // ---- hot entry: the same with rt_hot (generated count stubs' path; the interpreter's count
+    // stubs call rt_hot themselves: interp::count_entry)
     ".p2align 2",
     ".globl _makepad_run_sg_hot_entry",
     "_makepad_run_sg_hot_entry:",
@@ -209,7 +217,7 @@ std::arch::global_asm!(
     "  mov sp, x2",
     "  br x3",
     table = sym MAKEPAD_RUN_SG_TABLE,
-    rt_compile = sym rt_compile,
+    rt_compile = sym rt_compile_global,
     rt_hot = sym rt_hot,
     panic_site = sym rt_panic_site,
     panic_bounds = sym rt_panic_bounds,

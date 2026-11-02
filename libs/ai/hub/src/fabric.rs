@@ -182,6 +182,10 @@ pub fn spawn_dedicated_beacon(
     node: DedicatedNode,
     facts: Box<dyn BeaconFacts>,
 ) -> io::Result<(mpsc::Sender<()>, std::thread::JoinHandle<()>)> {
+    if !makepad_network::lan::hub_service("ai-hub fabric beacon") {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied,
+            "Fabric beacons need a fleet-server role (ai_hub_role = server) or Networked AI hub on a user machine (networked_ai_hub = on), plus process LAN permission"));
+    }
     let socket = UdpSocket::bind(("0.0.0.0", 0))?;
     socket.set_broadcast(true)?;
     let fleet_hash = fleet_hash(&node.fleet);
@@ -189,6 +193,9 @@ pub fn spawn_dedicated_beacon(
     let handle = std::thread::Builder::new()
         .name("ai-hub-fabric-beacon".into())
         .spawn(move || loop {
+            if !makepad_network::lan::hub_service("ai-hub fabric beacon") {
+                return;
+            }
             let beacon = Beacon {
                 protocol_version: PROTOCOL_VERSION,
                 node_id: node.node_id,

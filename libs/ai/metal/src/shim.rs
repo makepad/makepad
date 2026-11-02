@@ -661,7 +661,13 @@ pub fn try_silu_f32(a: &[f32]) -> Option<Vec<f32>> {
     out
 }
 
-#[cfg(test)]
+#[cfg(all(
+    test,
+    any(
+        target_os = "macos",
+        all(any(target_os = "linux", target_os = "windows"), makepad_ai_cuda_kernels)
+    )
+))]
 mod tests {
     use super::{
         try_add_f32, try_attention_softmax_weighted_sum_f32, try_gelu_f32, try_mul_f32,
@@ -694,9 +700,7 @@ mod tests {
             .zip(b.iter())
             .map(|(lhs, rhs)| lhs + rhs)
             .collect::<Vec<_>>();
-        let Some(actual) = try_add_f32(&a, &[2, 3], &b, &[2, 3]) else {
-            return;
-        };
+        let actual = try_add_f32(&a, &[2, 3], &b, &[2, 3]).expect("a working device backend is required");
         assert_eq!(actual, expected);
     }
 
@@ -709,9 +713,7 @@ mod tests {
             .zip(b.iter())
             .map(|(lhs, rhs)| lhs * rhs)
             .collect::<Vec<_>>();
-        let Some(actual) = try_mul_f32(&a, &[2, 3], &b, &[2, 3]) else {
-            return;
-        };
+        let actual = try_mul_f32(&a, &[2, 3], &b, &[2, 3]).expect("a working device backend is required");
         assert_close(&actual, &expected, RMS_NORM_TOLERANCE);
     }
 
@@ -719,9 +721,7 @@ mod tests {
     fn gelu_f32_matches_cpu_when_backend_available() {
         let input = vec![-2.0, -0.5, 0.0, 0.5, 1.5, 3.0];
         let expected = input.iter().copied().map(cpu_gelu).collect::<Vec<_>>();
-        let Some(actual) = try_gelu_f32(&input, &[2, 3]) else {
-            return;
-        };
+        let actual = try_gelu_f32(&input, &[2, 3]).expect("a working device backend is required");
         assert_close(&actual, &expected, RMS_NORM_TOLERANCE);
     }
 
@@ -738,9 +738,7 @@ mod tests {
                 row.iter().map(move |value| value * inv_rms)
             })
             .collect::<Vec<_>>();
-        let Some(actual) = try_rms_norm_f32(&x, &[2, 3], eps) else {
-            return;
-        };
+        let actual = try_rms_norm_f32(&x, &[2, 3], eps).expect("a working device backend is required");
         assert_close(&actual, &expected, RMS_NORM_TOLERANCE);
     }
 
@@ -760,9 +758,7 @@ mod tests {
                     .map(move |(value, scale)| value * inv_rms * scale)
             })
             .collect::<Vec<_>>();
-        let Some(actual) = try_rms_norm_mul_f32(&x, &[2, 3], &mul, &[3], eps) else {
-            return;
-        };
+        let actual = try_rms_norm_mul_f32(&x, &[2, 3], &mul, &[3], eps).expect("a working device backend is required");
         assert_close(&actual, &expected, RMS_NORM_TOLERANCE);
     }
 
@@ -778,9 +774,7 @@ mod tests {
             0.75, -1.5,
         ];
         let expected = cpu_attention_softmax_weighted_sum(&logits, &values, 2, 3, 2);
-        let Some(actual) = try_attention_softmax_weighted_sum_f32(&logits, &values, 2, 3, 2) else {
-            return;
-        };
+        let actual = try_attention_softmax_weighted_sum_f32(&logits, &values, 2, 3, 2).expect("a working device backend is required");
         assert_close(&actual, &expected, RMS_NORM_TOLERANCE);
     }
 

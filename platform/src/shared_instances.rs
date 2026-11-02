@@ -209,6 +209,8 @@ struct Publication {
     /// publication for its lifetime, so the old attach path never mistakes
     /// a re-record for a replacement.
     adapter: OnceLock<crate::retained_instances::RetainedInstances>,
+    #[cfg(not(target_arch = "wasm32"))]
+    origin: crate::gpu_ledger::GpuOrigin,
 }
 
 impl Drop for Publication {
@@ -254,6 +256,13 @@ impl std::fmt::Debug for SharedInstances {
             .field("byte_len", &self.byte_len())
             .field("phase", &self.receipt().phase())
             .finish()
+    }
+}
+
+impl SharedInstances {
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn origin(&self) -> &crate::gpu_ledger::GpuOrigin {
+        &self.0.origin
     }
 }
 
@@ -706,6 +715,7 @@ impl Publications {
     /// fit), and returns the block whose receipt starts `Pending`. The
     /// charge is taken with one `fetch_add` and rolled back on refusal, so
     /// two publishers racing under the envelope never both pass.
+    #[track_caller]
     pub fn publish(
         &self,
         slots: usize,
@@ -751,12 +761,15 @@ impl Publications {
             }),
             serials: self.serials.clone(),
             adapter: OnceLock::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            origin: crate::gpu_ledger::GpuOrigin::here(),
         })))
     }
     /// Publish a block and mark it ready at once: the facility for a caller
     /// whose backend copies synchronously inside its upload phase. In the
     /// DL-1 freeze no backend copy exists yet, so this is `publish` +
     /// `mark_ready()` and nothing more (contract §4).
+    #[track_caller]
     pub fn publish_ready(
         &self,
         slots: usize,

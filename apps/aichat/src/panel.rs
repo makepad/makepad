@@ -25,9 +25,10 @@ use makepad_ai_services::provider::{CLAUDE_DESKTOP, PROVIDER_ENV};
 use makepad_ai_services::card::{Card, CardValues, Field, MAX_FIELDS};
 use makepad_ai_services::state::*;
 use makepad_ai_services::progress_eta::ProgressTracker;
-use makepad_ai_services::wire::{api_name, split_name, Risk, ToolDef};
+use makepad_ai_services::wire::{api_name, split_name, Risk, ToolDef, ToolOutcome};
 use makepad_widgets::makepad_platform::file_dialogs::{FileDialog, FileDialogAction};
-use std::collections::HashMap;
+use makepad_widgets::tip::TipWidgetRefExt;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 use makepad_widgets::ai_slot::AiSlotRequests;
@@ -336,6 +337,7 @@ script_mod! {
             height: Fill
             auto_tail: true
             selectable: true
+            select_all_entry_first: true
 
             UserRow := Row{
                 padding: Inset{left: 12 right: 12 top: 12 bottom: 4}
@@ -380,6 +382,8 @@ script_mod! {
                 assistant_md := Markdown{
                     width: Fill
                     height: Fit
+                    // Lays out what the list's selection asks of it.
+                    selectable: true
                     body: ""
                 }
             }
@@ -442,6 +446,76 @@ script_mod! {
                         draw_text +: {
                             color: theme.color_text_meta
                             text_style: theme.font_code{font_size: 7.5}
+                        }
+                    }
+                }
+            }
+            TaskRow := Row{
+                padding: Inset{left: 12 right: 12 top: 4 bottom: 4}
+                task_tip := Tip{
+                    RoundedView{
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 8
+                        align: Align{y: 0.5}
+                        cursor: MouseCursor.Default
+                        padding: Inset{left: 8 right: 8 top: 8 bottom: 8}
+                        draw_bg +: { color: theme.color_u_1 border_color: theme.color_outline_variant border_size: 1.0 border_radius: 6.0 }
+                        task_pic := Image{visible: false width: 44 height: 44 fit: ImageFit.Smallest}
+                        View{
+                            width: Fill
+                            height: Fit
+                            flow: Down
+                            spacing: 3
+                            task_title := Label{
+                                width: Fill
+                                max_lines: 1
+                                text_overflow: TextOverflow.Ellipsis
+                                draw_text +: {
+                                    color: theme.color_text
+                                    text_style: theme.font_regular{font_size: 9.0}
+                                }
+                            }
+                            task_bar_row := View{
+                                width: Fill
+                                height: Fit
+                                task_bar := ProgressBarFlat{
+                                    width: Fill
+                                    height: 4
+                                    value: -1.0
+                                    draw_bg +: { thickness: 2.0 }
+                                }
+                            }
+                            task_meta := Label{
+                                width: Fill
+                                max_lines: 1
+                                text_overflow: TextOverflow.Ellipsis
+                                draw_text +: {
+                                    color: theme.color_text_meta
+                                    text_style: theme.font_regular{font_size: 8.0}
+                                }
+                            }
+                            task_problem := Label{
+                                visible: false
+                                width: Fill
+                                max_lines: 1
+                                text_overflow: TextOverflow.Ellipsis
+                                draw_text +: {
+                                    color: mix(theme.color_error, theme.color_text_meta, 0.35)
+                                    text_style: theme.font_regular{font_size: 8.0}
+                                }
+                            }
+                        }
+                        task_buttons := View{
+                            width: Fit
+                            height: Fit
+                            flow: Down
+                            spacing: 3
+                            task_stop := ButtonFlat{visible: false text: "Stop" width: 60 height: 24}
+                            task_retry := ButtonFlat{visible: false text: "Retry" width: 60 height: 24}
+                            task_act0 := ButtonFlat{visible: false width: 60 height: 24}
+                            task_act1 := ButtonFlat{visible: false width: 60 height: 24}
                         }
                     }
                 }
@@ -757,6 +831,8 @@ script_mod! {
 pub enum AiChatPanelAction {
     /// A native tool's whole JSON prefix, for the host's live preview.
     ToolCallPartial { call_id: String, name: String, partial_json: String },
+    /// A finished task card's action button: the service's action id, for the host to carry out.
+    TaskAction { call_id: String, action: String },
     /// Esc with an empty composer and no turn in flight: the host may hide
     /// the pane.
     Close,
@@ -765,6 +841,20 @@ pub enum AiChatPanelAction {
     SelectionCleared,
     #[default]
     None,
+}
+
+/// The pictures the person sent in this conversation (PNG, as the model got them), by name:
+/// an app's tool reads one as its input (`ChatPictures::get`).
+#[derive(Default)]
+pub struct ChatPictures {
+    pub pictures: Vec<(String, Arc<[u8]>)>,
+}
+
+impl ChatPictures {
+    /// The newest picture of that name, or with no name the newest.
+    pub fn get(&self, name: Option<&str>) -> Option<&(String, Arc<[u8]>)> {
+        self.pictures.iter().rev().find(|(n, _)| name.is_none_or(|want| n == want))
+    }
 }
 
 #[derive(Script, ScriptHook, Widget)]
@@ -778,6 +868,9 @@ pub struct AiChatPanel {
     /// `MAKEPAD_AI_PROVIDER` overrides both.
     #[live]
     provider: String,
+    /// The window's F10 overlay made this panel; any other is the app's own chat.
+    #[live(false)]
+    in_overlay: bool,
     /// Pictures waiting for the next line.
     #[rust]
     attachments: Vec<Attachment>,
@@ -801,6 +894,21 @@ pub struct AiChatPanel {
     /// The entry whose pictures each transcript row last loaded.
     #[rust]
     pics_filled: HashMap<WidgetUid, usize>,
+    /// Sent pictures by name, using the small copy for task cards.
+    #[rust]
+    pic_thumbs: HashMap<String, Arc<[u8]>>,
+    /// Result PNGs read once per path, including missing files.
+    #[rust]
+    result_pics: HashMap<String, Option<Arc<[u8]>>>,
+    /// The picture each recycled task row last loaded (input/result keys are distinct).
+    #[rust]
+    task_pics_filled: HashMap<WidgetUid, String>,
+    /// Avoid rebuilding labels and the stage-history tooltip on animation-only redraws.
+    #[rust]
+    task_rows_filled: HashMap<WidgetUid, (String, u64)>,
+    /// Stage + ETA per live task, including calls scrolled out of view.
+    #[rust]
+    task_tracks: HashMap<String, ProgressTracker>,
     /// Stage + ETA of the model's current load (None unless loading).
     #[rust]
     load_track: ProgressTracker,
@@ -1217,9 +1325,18 @@ impl AiChatPanel {
             let pictures = std::mem::take(&mut self.attachments);
             let names: Vec<String> = pictures.iter().map(|p| p.name.clone()).collect();
             thumbs = pictures.iter().map(|p| p.thumb.clone().unwrap_or_else(|| p.png.clone())).collect();
+            let sent: Vec<(String, Arc<[u8]>)> = pictures.iter().map(|p| (p.name.clone(), p.png.clone())).collect();
             let images = pictures.into_iter().map(|p| ModelImage { label: format!("reference: {}", p.name), png: p.png }).collect();
             match self.ensure_engine().model_mut().attach_images(images) {
                 Ok(()) => {
+                    // The app's tools can take what the person showed (by name).
+                    cx.global::<ChatPictures>().pictures.extend(sent);
+                    for (name, thumb) in names.iter().zip(&thumbs) {
+                        if self.pic_thumbs.insert(name.clone(), thumb.clone()).is_some() {
+                            // A newly sent picture may reuse an earlier name.
+                            self.task_pics_filled.retain(|_, key| key.strip_prefix("input:") != Some(name.as_str()));
+                        }
+                    }
                     if text.trim().is_empty() {
                         text = "Use the attached picture as the reference.".into();
                     }
@@ -1306,6 +1423,157 @@ impl AiChatPanel {
         }
     }
 
+    /// Observe live tasks once per state change, even when their rows are off screen.
+    fn sync_task_tracks(&mut self, state: &EngineState) {
+        let mut running = HashSet::new();
+        let now = std::time::Instant::now();
+        for entry in &state.entries {
+            let Entry::Tool(t) = entry else { continue };
+            let Some(task) = &t.task else { continue };
+            let (note, permille) = match &t.status {
+                ToolStatus::Running { note, permille } | ToolStatus::NotResponding { note, permille } => (note, *permille),
+                _ => continue,
+            };
+            running.insert(t.call_id.as_str());
+            let stage = if task.stage.is_empty() { note.as_str() } else { &task.stage };
+            // A step counter is progress within a stage, not a new ETA clock on every step.
+            // It also distinguishes a known zero share from an indeterminate stage.
+            let counter = stage.rsplit_once(' ').filter(|(_, count)| {
+                count.split_once('/').is_some_and(|(step, total)| step.parse::<u64>().is_ok() && total.parse::<u64>().is_ok_and(|n| n > 0))
+            });
+            let phase = counter.map(|(phase, _)| phase.trim_end_matches([' ', '·'])).unwrap_or(stage);
+            let fraction = if permille > 0 || counter.is_some() { permille as f64 / 1000.0 } else { -1.0 };
+            self.task_tracks.entry(t.call_id.clone()).or_default().observe(phase, fraction, now);
+        }
+        self.task_tracks.retain(|call_id, _| running.contains(call_id.as_str()));
+    }
+
+    /// Fill one compact task card; only a changed picture is decoded for a recycled row.
+    fn draw_task(&mut self, cx: &mut Cx2d, row: &WidgetRef, t: &ToolEntry) {
+        let Some(task) = &t.task else { return };
+        let uid = row.widget_uid();
+        if self.task_rows_filled.get(&uid).is_some_and(|(call_id, generation)| call_id == &t.call_id && *generation == self.drawn_generation) {
+            return;
+        }
+        let progress = self.task_tracks.get(&t.call_id).and_then(ProgressTracker::current);
+        let running = matches!(t.status, ToolStatus::Running { .. } | ToolStatus::NotResponding { .. });
+        let done_ok = matches!(t.status, ToolStatus::Done { outcome: ToolOutcome::Ok, .. });
+        let stopped = matches!(t.status, ToolStatus::Done { outcome: ToolOutcome::Cancelled, .. });
+        let failed = matches!(t.status, ToolStatus::Done { .. }) && !done_ok && !stopped;
+        let title = if task.source.is_empty() || (done_ok && !task.result.is_empty()) {
+            task.title.clone()
+        } else {
+            format!("{} · {}", task.title, task.source)
+        };
+        row.label(cx, ids!(task_title)).set_text(cx, &title);
+        // Running: "shape · 7/21 · 18% · a node · about 4 min left" (the time last, so a
+        // narrow card cuts the least useful part).
+        let mut time = String::new();
+        let mut meta = match &t.status {
+            ToolStatus::Running { note, permille } => {
+                let stage = if task.stage.is_empty() { note } else { &task.stage };
+                let mut line = if stage.is_empty() { progress.as_ref().map(|shown| shown.stage.clone()).unwrap_or_default() } else { stage.clone() };
+                if *permille > 0 {
+                    line.push_str(&format!(" · {}%", permille / 10));
+                }
+                if let Some(shown) = &progress {
+                    time = shown.time_note();
+                }
+                line
+            }
+            ToolStatus::NotResponding { note, .. } => {
+                let stage = if task.stage.is_empty() { note } else { &task.stage };
+                if stage.is_empty() { "not responding".into() } else { format!("{stage} · not responding") }
+            }
+            ToolStatus::Done { outcome: ToolOutcome::Cancelled, .. } => "Stopped".into(),
+            ToolStatus::Done { note, .. } if done_ok => if task.result.is_empty() { note.clone() } else { task.result.clone() },
+            // A failure: the card's own reason when the service gave one.
+            ToolStatus::Done { .. } if !task.result.is_empty() => task.result.clone(),
+            ToolStatus::Done { outcome, note, text } => {
+                let reason = if note.is_empty() { text } else { note };
+                reason.lines().next().filter(|line| !line.is_empty()).unwrap_or(outcome.slug()).to_string()
+            }
+            ToolStatus::Confirm => String::new(),
+        };
+        if !task.host.is_empty() && (running || done_ok) {
+            if !meta.is_empty() {
+                meta.push_str(" · ");
+            }
+            meta.push_str(&task.host);
+        }
+        meta.push_str(&time);
+        let meta_label = row.label(cx, ids!(task_meta));
+        meta_label.set_visible(cx, !failed);
+        meta_label.set_text(cx, if failed { "" } else { &meta });
+        let problem = row.label(cx, ids!(task_problem));
+        problem.set_visible(cx, failed);
+        problem.set_text(cx, if failed { &meta } else { "" });
+        let bar = row.progress_bar(cx, ids!(task_bar));
+        row.view(cx, ids!(task_bar_row)).set_visible(cx, running);
+        if running {
+            let value = progress.and_then(|shown| shown.fraction).unwrap_or(-1.0);
+            if bar.value() != value {
+                bar.set_value(cx, value);
+            }
+        }
+        row.button(cx, ids!(task_stop)).set_visible(cx, running);
+        row.button(cx, ids!(task_retry)).set_visible(cx, failed);
+        for (slot, id) in [id!(task_act0), id!(task_act1)].iter().enumerate() {
+            let button = row.button(cx, &[*id]);
+            let action = task.actions.get(slot).filter(|_| done_ok);
+            button.set_visible(cx, action.is_some());
+            button.set_text(cx, action.map(|action| action.label.as_str()).unwrap_or(""));
+        }
+        row.view(cx, ids!(task_buttons)).set_visible(cx, running || failed || (done_ok && !task.actions.is_empty()));
+
+        let mut tip = task.source.clone();
+        if !task.stages.is_empty() {
+            if !tip.is_empty() {
+                tip.push('\n');
+            }
+            tip.push_str(&task.stages.join(" → "));
+        }
+        if !task.host.is_empty() {
+            if !tip.is_empty() {
+                tip.push('\n');
+            }
+            tip.push_str("on ");
+            tip.push_str(&task.host);
+        }
+        row.tip(cx, ids!(task_tip)).set_text(&tip);
+
+        // The input: a picture sent in this chat by name, else a picture file (read once).
+        if !task.picture.is_empty() && !self.pic_thumbs.contains_key(&task.picture) && !self.result_pics.contains_key(&task.picture) {
+            let png = Path::new(&task.picture).is_file().then(|| std::fs::read(&task.picture).ok()).flatten().map(Arc::<[u8]>::from);
+            self.result_pics.insert(task.picture.clone(), png);
+        }
+        // A missing result is remembered too, and falls back to the input picture.
+        if done_ok && !task.result_picture.is_empty() && !self.result_pics.contains_key(&task.result_picture) {
+            let png = std::fs::read(&task.result_picture).ok().map(Arc::<[u8]>::from);
+            self.result_pics.insert(task.result_picture.clone(), png);
+        }
+        let result = if done_ok && !task.result_picture.is_empty() {
+            self.result_pics.get(&task.result_picture).and_then(Option::as_ref)
+        } else {
+            None
+        };
+        let input = self.pic_thumbs.get(&task.picture).or_else(|| self.result_pics.get(&task.picture).and_then(Option::as_ref));
+        let picture = result.map(|png| ("result:", task.result_picture.as_str(), png)).or_else(|| {
+            input.filter(|_| !task.picture.is_empty()).map(|png| ("input:", task.picture.as_str(), png))
+        });
+        let image = row.image(cx, ids!(task_pic));
+        image.set_visible(cx, picture.is_some());
+        if let Some((prefix, key, png)) = picture {
+            if self.task_pics_filled.get(&uid).and_then(|last| last.strip_prefix(prefix)) != Some(key) {
+                let _ = image.load_png_from_data(cx, png);
+                self.task_pics_filled.insert(uid, format!("{prefix}{key}"));
+            }
+        } else {
+            self.task_pics_filled.remove(&uid);
+        }
+        self.task_rows_filled.insert(uid, (t.call_id.clone(), self.drawn_generation));
+    }
+
     /// While the model loads, the status row reads "Loading weights · 42% ·
     /// about 12 s left" and a bar under it fills (a sweep when the stage
     /// reports no progress). Any other state hides the bar and clears the clock.
@@ -1353,18 +1621,38 @@ impl AiChatPanel {
             Status::Streaming => Some(format!("Writing{rate}")),
             Status::WaitingForTool => state.entries.iter().rev().find_map(|entry| match entry {
                 Entry::Tool(t) => match t.status {
-                    ToolStatus::Running { .. } | ToolStatus::NotResponding { .. } => Some(format!("Running {}…", t.tool)),
-                    ToolStatus::Confirm => Some(format!("{} waits for your answer", t.tool)),
+                    // Stop at the newest active call, even when its card replaces the line.
+                    ToolStatus::Running { .. } | ToolStatus::NotResponding { .. } => Some(t.task.is_none().then(|| format!("Running {}…", t.tool))),
+                    ToolStatus::Confirm => Some(Some(format!("{} waits for your answer", t.tool))),
                     _ => None,
                 },
                 _ => None,
-            }),
+            }).flatten(),
         }
     }
 
     /// A tool card's one line: the call without the service's name (the
     /// context line already says where it runs), its arguments as plain
     /// `key: value` text.
+    /// An entry as plain text, for a copy of a row that is not drawn.
+    fn entry_text(entry: &Entry) -> String {
+        match entry {
+            Entry::User { text } | Entry::Assistant { text, .. } | Entry::System { text } => text.clone(),
+            Entry::Event(e) => e.text.clone(),
+            Entry::Tool(t) => match &t.task {
+                Some(task) => {
+                    let detail = match &t.status {
+                        ToolStatus::Done { note, .. } => if task.result.is_empty() { note } else { &task.result },
+                        ToolStatus::Running { note, .. } | ToolStatus::NotResponding { note, .. } => if task.stage.is_empty() { note } else { &task.stage },
+                        ToolStatus::Confirm => &task.stage,
+                    };
+                    format!("{} · {} — {detail}", task.title, task.source)
+                }
+                None => Self::tool_line(t),
+            },
+        }
+    }
+
     fn tool_line(t: &ToolEntry) -> String {
         let prefix = format!("{} · ", t.service_label);
         let title = t.title.strip_prefix(prefix.as_str()).unwrap_or(&t.title);
@@ -1414,6 +1702,19 @@ impl Widget for AiChatPanel {
                 self.paste_request = Some(cx.read_clipboard());
             }
         }
+        // A copy takes what is selected, rows scrolled away included.
+        if let Event::TextCopy(copy) = event {
+            let list = self.view.portal_list(cx, ids!(transcript));
+            if list.has_selection() && cx.has_key_focus(list.area()) && copy.response.borrow().is_none() {
+                if let Some(engine) = &self.engine {
+                    let state = engine.state();
+                    let text = list.selected_text_with(&|i| state.entries.get(i).map(Self::entry_text));
+                    if !text.is_empty() {
+                        *copy.response.borrow_mut() = Some(text);
+                    }
+                }
+            }
+        }
         if let Event::Clipboard(reply) = event {
             if self.paste_request == Some(reply.request) {
                 self.paste_request = None;
@@ -1445,6 +1746,11 @@ impl Widget for AiChatPanel {
         }
         // An app started for Claude Desktop runs its engine from the start,
         // with the pane closed.
+        // A panel the app placed itself is the app's one chat: the window's F10 slot makes
+        // no second one (two engines would answer one window).
+        if !self.in_overlay && !cx.global::<AiSlotRequests>().docked {
+            cx.global::<AiSlotRequests>().docked = true;
+        }
         if self.engine.is_none() && cx.global::<AiSlotRequests>().engine_at_start {
             self.ensure_engine();
         }
@@ -1502,6 +1808,9 @@ impl Widget for AiChatPanel {
         // The engine exists once the panel is on screen.
         let _ = self.ensure_engine();
         let state = self.engine.as_ref().unwrap().state().clone();
+        if self.drawn_generation != state.generation {
+            self.sync_task_tracks(&state);
+        }
         self.drawn_generation = state.generation;
         let mcp_row = self.view.view(cx, ids!(mcp_row));
         mcp_row.set_visible(cx, state.provider.slug() == CLAUDE_DESKTOP);
@@ -1715,6 +2024,11 @@ impl Widget for AiChatPanel {
                     Entry::Tool(t) if matches!(t.status, ToolStatus::Confirm) => {
                         let row = list.item(cx, index, id!(ConfirmRow));
                         row.label(cx, ids!(confirm_title)).set_text(cx, &format!("{} changes things outside the app. Run it?", Self::tool_line(t)));
+                        row
+                    }
+                    Entry::Tool(t) if t.task.is_some() && !matches!(t.status, ToolStatus::Confirm) => {
+                        let row = list.item(cx, index, id!(TaskRow));
+                        self.draw_task(cx, &row, t);
                         row
                     }
                     Entry::Tool(t) => {
@@ -1945,6 +2259,14 @@ impl WidgetMatchEvent for AiChatPanel {
             let now = Self::now(cx);
             self.notice = None;
             self.ensure_engine().clear(now);
+            cx.global::<ChatPictures>().pictures.clear();
+            self.sent_thumbs.clear();
+            self.pics_filled.clear();
+            self.pic_thumbs.clear();
+            self.result_pics.clear();
+            self.task_pics_filled.clear();
+            self.task_rows_filled.clear();
+            self.task_tracks.clear();
             self.view.redraw(cx);
         }
         // Cards: confirm buttons and click-to-expand.
@@ -1966,9 +2288,21 @@ impl WidgetMatchEvent for AiChatPanel {
                 let Some(call_id) = call_id else { continue };
                 if self.card_actions(cx, item, actions, &call_id, now) {
                     self.view.redraw(cx);
-                } else if item.button(cx, ids!(tool_stop)).clicked(actions) {
+                } else if item.button(cx, ids!(tool_stop)).clicked(actions) || item.button(cx, ids!(task_stop)).clicked(actions) {
                     self.ensure_engine().stop_call(&call_id);
                     self.view.redraw(cx);
+                } else if item.button(cx, ids!(task_retry)).clicked(actions) {
+                    let _ = self.ensure_engine().retry(&call_id, now);
+                    self.view.redraw(cx);
+                } else if let Some(slot) = [id!(task_act0), id!(task_act1)].iter().position(|id| item.button(cx, &[*id]).clicked(actions)) {
+                    let action = self.ensure_engine().state().tool(&call_id)
+                        .filter(|t| matches!(t.status, ToolStatus::Done { outcome: ToolOutcome::Ok, .. }))
+                        .and_then(|t| t.task.as_ref())
+                        .and_then(|task| task.actions.get(slot))
+                        .map(|action| action.id.clone());
+                    if let Some(action) = action {
+                        cx.widget_action(self.widget_uid(), AiChatPanelAction::TaskAction { call_id, action });
+                    }
                 } else if item.button(cx, ids!(run_button)).clicked(actions) {
                     self.ensure_engine().confirm(&call_id, true, now);
                     self.view.redraw(cx);

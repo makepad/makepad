@@ -17,7 +17,7 @@
 
 // Sampling interposers exist on Linux x86-64 and macOS arm64. Other native targets bind the
 // same program allocator directly, so ownership does not depend on sampling support.
-#![cfg_attr(not(any(all(target_os = "linux", target_arch = "x86_64"), all(target_os = "macos", target_arch = "aarch64"))), allow(dead_code))]
+#![cfg_attr(not(any(all(target_os = "linux", target_arch = "x86_64"), all(target_vendor = "apple", target_arch = "aarch64"))), allow(dead_code))]
 
 use super::{json_str, now_ms, Out, Req};
 use std::cell::Cell;
@@ -48,7 +48,7 @@ fn targets() -> [&'static AtomicUsize; 9] {
 /// its veneer, with the word set to the program allocator on first use. Targets without
 /// sampling veneers bind that allocator directly. None: not an allocator symbol.
 pub fn veneer(name: &[u8]) -> Option<usize> {
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64"), all(target_vendor = "apple", target_arch = "aarch64")))]
     {
         let k = NAMES.iter().position(|n| n.as_bytes() == name)?;
         init_real();
@@ -65,7 +65,7 @@ pub fn veneer(name: &[u8]) -> Option<usize> {
         ];
         Some(v[k])
     }
-    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64"), all(target_os = "macos", target_arch = "aarch64"))))]
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64"), all(target_vendor = "apple", target_arch = "aarch64"))))]
     {
         crate::zone_alloc::domain::symbol(name)
     }
@@ -189,7 +189,7 @@ mod imp {
     }
 }
 
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[cfg(all(target_vendor = "apple", target_arch = "aarch64"))]
 mod imp {
     use super::*;
     #[unsafe(naked)]
@@ -509,7 +509,7 @@ pub(crate) fn stack_changed() {
 /// progress may hold the loader lock and be allocating). Return addresses only.
 #[inline(never)]
 pub(crate) fn capture_host(out: &mut [u64; DEPTH]) -> u8 {
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(all(target_vendor = "apple", target_arch = "aarch64"))]
     {
         let mut f: u64;
         unsafe { std::arch::asm!("mov {}, x29", out(reg) f) };
@@ -553,7 +553,7 @@ pub(crate) fn capture_host(out: &mut [u64; DEPTH]) -> u8 {
         out[..n].copy_from_slice(&buf[1..1 + n]);
         n as u8
     }
-    #[cfg(not(any(all(target_os = "macos", target_arch = "aarch64"), all(target_os = "linux", target_arch = "x86_64"))))]
+    #[cfg(not(any(all(target_vendor = "apple", target_arch = "aarch64"), all(target_os = "linux", target_arch = "x86_64"))))]
     {
         let _ = out;
         0
@@ -942,7 +942,7 @@ fn start(host: bool, rate: u64) -> Result<(), &'static str> {
 }
 
 fn start_life(host: bool, rate: u64, life: Option<u64>) -> Result<(), &'static str> {
-    let supported = cfg!(any(all(target_os = "linux", target_arch = "x86_64"), all(target_os = "macos", target_arch = "aarch64")));
+    let supported = cfg!(any(all(target_os = "linux", target_arch = "x86_64"), all(target_vendor = "apple", target_arch = "aarch64")));
     if !supported {
         return Err("heap tracking needs macOS arm64 or Linux x86_64");
     }
@@ -955,7 +955,7 @@ fn start_life(host: bool, rate: u64, life: Option<u64>) -> Result<(), &'static s
         crate::memstat::set_tracker(Some((host_alloc, host_free)));
         return Ok(());
     }
-    #[cfg(any(all(target_os = "linux", target_arch = "x86_64"), all(target_os = "macos", target_arch = "aarch64")))]
+    #[cfg(any(all(target_os = "linux", target_arch = "x86_64"), all(target_vendor = "apple", target_arch = "aarch64")))]
     {
         if REAL[0].load(Relaxed) == 0 {
             return Err("the program has not called the allocator through makepad run yet: ask again in a second (it hooks the allocator on its first call)");
@@ -1026,7 +1026,7 @@ fn rows(t: &Tables) -> Vec<Row> {
         .collect()
 }
 
-/// The live samples whose block lies in one arena (`heap top host=1 zone=burst|compiler|old|new`), per
+/// The live samples whose block lies in one arena (`heap top host=1 zone=burst|compiler|slots|old|new`), per
 /// stack: what survives there (a few surviving blocks pin a whole chunk of the burst arena).
 fn zone_rows(t: &Tables, zone: &str) -> Vec<Row> {
     let mut r: Vec<Row> = rows(t).into_iter().map(|x| (x.0, 0, 0, x.3, x.4, x.5, x.6)).collect();
@@ -1038,10 +1038,11 @@ fn zone_rows(t: &Tables, zone: &str) -> Vec<Row> {
         let inside = match zone {
             "burst" => crate::zone_alloc::burst_owns(a as *const u8),
             "compiler" => crate::zone_alloc::compiler_owns(a as *const u8),
+            "slots" => crate::zone_alloc::slots_owns(a as *const u8),
             // the compiler arena's chunks from before the last settle rebuild, and those after
             "old" | "cold" => crate::zone_alloc::placement(a as *const u8) == 0,
             "new" => crate::zone_alloc::placement(a as *const u8) == 1,
-            _ => !crate::zone_alloc::burst_owns(a as *const u8) && !crate::zone_alloc::compiler_owns(a as *const u8),
+            _ => crate::zone_alloc::placement(a as *const u8) == 3,
         };
         if !inside {
             continue;
@@ -1123,7 +1124,7 @@ fn tag_name(t: &Tables, id: usize) -> &'static str {
 }
 
 /// `heap start [host=1] [rate=65536] [ttl_s=600]` | `heap stop [host=1]` | `heap status` |
-/// `heap top [host=1] [by=live|alloc|freed|peak] [n=15] [depth=5] [group=stack|tag] [zone=burst|compiler|old|cold|new|other]` (cold: in old chunks, sampled before the settle rebuild) |
+/// `heap top [host=1] [by=live|alloc|freed|peak] [n=15] [depth=5] [group=stack|tag] [zone=burst|compiler|slots|old|cold|new|other]` (cold: in old chunks, sampled before the settle rebuild) |
 /// `heap snap <name> [host=1]` | `heap diff <a> <b|now>` | `heap path H<id> [host=1]`
 pub fn cmd_heap(req: &Req, out: &mut Out) {
     let host = req.get("host") == Some("1");

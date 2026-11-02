@@ -23,7 +23,7 @@ pub struct Sample {
     pub weight: u32,
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(target_vendor = "apple")]
 mod imp {
     use crate::jit::SAMPLE_CALLERS;
     /// the thread's Mach port, its stack bounds (for the frame-pointer walk) and its CPU time at

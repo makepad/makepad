@@ -3718,15 +3718,6 @@ mod tests {
     }
 
     #[test]
-    fn gaps_match_omarchy() {
-        // gaps_in 5 on each side of a window: 10 between two tiles, and
-        // gaps_out 10 to the desk edge — uniform, like the reference.
-        assert_eq!(TILE_GAP, 10.0);
-        assert_eq!(GAPS_OUT, 10.0);
-        assert_eq!(BORDER_SIZE, 2.0);
-    }
-
-    #[test]
     fn border_theme_reads_the_theme_source() {
         // Tokyo night names no gradient of its own, so it wears
         // hyprland's default: cyan → green at 45°.

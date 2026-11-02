@@ -1,12 +1,20 @@
 #!/bin/bash
 # arm64_leg.sh [--diff-fast]: the landing gate's arm64 leg, run from the root of the tree under test on the Mac mini
-# under a devhub lease (land.sh: `makepad devhub lease build --node mac-b --rev <branch>,<commercial> -- bash
+# under a devhub lease (land.sh: `makepad devhub lease build --node mini --rev <branch>,<commercial> -- bash
 # tools/run/fixture/arm64_leg.sh --diff-fast`; CARGO_TARGET_DIR, offline cargo and the scratch dir come from the lease).
 #   1. cargo test --release -p relax-codegen -p relax-backend --no-fail-fast
 #   2. --diff-fast: build makepad-run and run diff_fast at o1 / base / o3 / counted
 # Prints "ARM64-OK" (nothing fails but the known asm::tests_arm64::oracle_mem) or "ARM64-FAIL: <what>", and with
 # --diff-fast a "DIFF: ..." line; exit 0 / 1.
 set -u
+# A classification pass is also a successful leg verdict. Normally the planner omits this
+# lease altogether; keep direct/replayed invocations from doing work after a recorded skip.
+if [ -n "${DEVHUB_ARM64_VERDICT:-}" ]; then
+  echo "$DEVHUB_ARM64_VERDICT"
+  case "$DEVHUB_ARM64_VERDICT" in
+    'arm64: skipped ('*) echo "ARM64-OK $DEVHUB_ARM64_VERDICT"; exit 0;;
+  esac
+fi
 export PATH=$HOME/.cargo/bin:$PATH CARGO_INCREMENTAL=0 MAKEPAD_GGML_NO_CUDA=1
 KNOWN="asm::tests_arm64::oracle_mem"
 T=${CARGO_TARGET_DIR:-$PWD/target}
@@ -29,7 +37,7 @@ fail=""
 [ "$rc" != 0 ] && [ -z "$fail" ] && [ -z "$(sed -n 's/^test \(.*\) \.\.\. FAILED$/\1/p' "$log/test")" ] && fail="$fail cargo-rc-$rc"
 grep -E '^test .* FAILED$' "$log/test" | head -20
 if [ "${1:-}" = --diff-fast ]; then
-  if cargo build --profile host -j 8 -p makepad-run --bin makepad > "$log/build" 2>&1; then
+  if cargo build --profile host -j 8 -p makepad-run --bin makepad --bin makepad-launcher > "$log/build" 2>&1; then
     DIFF_PKG_TARGET=$T DIFF_CACHE=${ARM64_DIFF_CACHE:-$HOME/devhub/cache/diff_fast} DIFF_TIERS="o1 base o3 counted" \
       tools/run/fixture/diff_fast.sh > "$log/diff" 2>&1
     tail -20 "$log/diff"

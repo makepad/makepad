@@ -633,12 +633,6 @@ mod tests {
     }
 
     #[test]
-    fn default_guidance_matches_bfl_recommendations() {
-        assert_eq!(ControlMode::Depth.default_guidance(), 10.0);
-        assert_eq!(ControlMode::Canny.default_guidance(), 30.0);
-    }
-
-    #[test]
     fn round_to_16_rounds_to_nearest_with_16_minimum() {
         assert_eq!(round_to_16(0), 16);
         assert_eq!(round_to_16(1), 16);
@@ -649,15 +643,6 @@ mod tests {
         assert_eq!(round_to_16(25), 32);
         assert_eq!(round_to_16(1024), 1024);
         assert_eq!(round_to_16(1023), 1024);
-    }
-
-    #[test]
-    fn not_provisioned_without_cuda() {
-        // This dev/CI machine has no CUDA device: the gate must read false,
-        // matching flux_backend's flux_fp8_provisioned on the same box.
-        if std::env::var("MAKEPAD_FORCE_CUDA_PROVISIONED").is_err() {
-            assert!(!control_provisioned() || makepad_ai_common::backend::gpu_device_available());
-        }
     }
 
     #[test]

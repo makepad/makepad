@@ -82,7 +82,7 @@ impl Renderer {
         self.gi.meshes.evict();
         if omitted>0&&omitted!=self.gi_snapshot_omitted&&std::env::var_os("MAKEPAD_GI_STATS").is_some(){log!("fast GI: {omitted} instance(s) outside the GI region around the camera");}
         self.gi_snapshot_omitted=omitted;self.gi.stats.omitted_instances=omitted;
-        let triangles=out.iter().map(|i|i.mesh.indices.len()/3).sum();
+        let triangles=out.iter().map(|i|i.triangles()).sum();
         Snapshot{instances:out,triangles}
     }
 }

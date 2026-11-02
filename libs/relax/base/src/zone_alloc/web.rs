@@ -6,7 +6,7 @@ use std::ffi::c_void;
 
 #[cfg(target_os = "linux")]
 pub const BASE: usize = 0;
-#[cfg(target_os = "macos")]
+#[cfg(target_vendor = "apple")]
 pub const BASE: usize = 0x3000_0000_0000;
 pub const ARENA_OFFSET: usize = 0x8000_0000;
 const PAGE: usize = 65536;
@@ -24,7 +24,7 @@ pub fn activate() -> bool {
     if end.is_some() { return true; }
     #[cfg(target_os = "linux")]
     const FLAGS: i32 = 0x22 | 0x100000;
-    #[cfg(target_os = "macos")]
+    #[cfg(target_vendor = "apple")]
     const FLAGS: i32 = 0x1002;
     let at = BASE + ARENA_OFFSET;
     let len = END - ARENA_OFFSET;

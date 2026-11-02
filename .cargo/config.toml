@@ -33,3 +33,7 @@ rustflags = ["-C", "target-cpu=native"]
 
 [target.aarch64-pc-windows-msvc]
 rustflags = ["-C", "target-cpu=native"]
+
+# `cargo devhub <words>`: devhub's own small binary, without building or looking at the JIT
+[alias]
+devhub = "run --profile host -q -p makepad-devhub --bin makepad-devhub --"

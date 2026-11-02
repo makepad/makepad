@@ -100,7 +100,11 @@ impl<'a> Checker<'a> {
             return;
         }
 
-        self.visit_body_blocks(body);
+        // rustc check_consts/check.rs:217: `#[rustc_do_not_const_check]` (a body const-eval hooks,
+        // such as the panic entry points) is not visited
+        if !super::do_not_const_check(self.ccx.prog, body) {
+            self.visit_body_blocks(body);
+        }
 
         // If we got through const-checking without emitting any "primary" errors, emit any
         // "secondary" errors if they occurred. Otherwise, cancel the "secondary" errors.
@@ -403,7 +407,7 @@ impl Checker<'_> {
         let non_const = if through_trait {
             !ccx.features.const_traits
         } else {
-            def.kind == DefKind::ForeignFn || !tcx.fn_sig(prog, callee).map_or(true, |s| s.is_const)
+            if def.kind == DefKind::ForeignFn { !super::const_intrinsic(prog, callee) } else { !tcx.fn_sig(prog, callee).map_or(true, |s| s.is_const) }
         };
         if non_const {
             self.check_op(ops::fn_call_non_const(ccx, callee, span, call_source));

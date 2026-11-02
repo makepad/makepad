@@ -1,22 +1,57 @@
 use makepad_drumkit::{DrumKit, DrumVoice, SampleBank};
-use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
-fn corpus_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../local/score-corpus/drums/OH")
-}
-
-fn bank() -> Option<Arc<SampleBank>> {
-    static BANK: OnceLock<Result<Arc<SampleBank>, String>> = OnceLock::new();
-    let dir = corpus_dir();
-    if !dir.is_dir() {
-        eprintln!("skipping Salamander corpus test: {} is absent", dir.display());
-        return None;
-    }
-    match BANK.get_or_init(|| SampleBank::load(&dir).map(Arc::new)) {
-        Ok(bank) => Some(bank.clone()),
-        Err(error) => panic!("load local Salamander corpus: {error}"),
-    }
+fn bank() -> Arc<SampleBank> {
+    static BANK: OnceLock<Arc<SampleBank>> = OnceLock::new();
+    BANK.get_or_init(|| {
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let dir = std::env::temp_dir().join(format!("drumkit-sample-kit-{}-{stamp}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        // Half a second keeps voices overlapping through stealing and fades.
+        // The loader still reads every layer and round-robin of the sample kit.
+        let frames = 24_000u32;
+        let mut wav = b"RIFF".to_vec();
+        wav.extend_from_slice(&(36 + frames * 2).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        wav.extend_from_slice(&1u16.to_le_bytes()); // mono
+        wav.extend_from_slice(&48_000u32.to_le_bytes());
+        wav.extend_from_slice(&96_000u32.to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(frames * 2).to_le_bytes());
+        for i in 0..frames {
+            let envelope = 1.0 - i as f32 / frames as f32;
+            let sample = ((std::f32::consts::TAU * 440.0 * i as f32 / 48_000.0).sin()
+                * envelope * 16_000.0) as i16;
+            wav.extend_from_slice(&sample.to_le_bytes());
+        }
+        for (voice, layers, takes) in [
+            ("kick", &["P", "F", "FF"][..], 2),
+            ("snare", &["Ghost", "MP", "F", "FF"][..], 3),
+            ("snareStick", &["F"][..], 1),
+            ("hihatClosed", &["P", "F"][..], 1),
+            ("hihatOpen", &["P", "F", "FF"][..], 1),
+            ("hihatFoot", &["MP"][..], 1),
+            ("hiTom", &["P", "F", "FF"][..], 1),
+            ("loTom", &["PP", "MP", "FF"][..], 1),
+            ("crash1", &["P", "FF"][..], 1),
+            ("crash2", &["FF"][..], 1),
+            ("ride1", &["MP", "FF"][..], 1),
+            ("ride1Bell", &["F"][..], 1),
+        ] {
+            for layer in layers {
+                for take in 1..=takes {
+                    std::fs::write(dir.join(format!("{voice}_OH_{layer}_{take}.wav")), &wav).unwrap();
+                }
+            }
+        }
+        let loaded = SampleBank::load(&dir);
+        std::fs::remove_dir_all(&dir).unwrap();
+        Arc::new(loaded.expect("load generated drum samples"))
+    }).clone()
 }
 
 fn render_hit(bank: &Arc<SampleBank>, voice: DrumVoice, velocity: f32, frames: usize) -> (f64, bool) {
@@ -41,7 +76,7 @@ fn render_hit(bank: &Arc<SampleBank>, voice: DrumVoice, velocity: f32, frames: u
 
 #[test]
 fn bank_loads_and_reports_every_voice() {
-    let Some(bank) = bank() else { return };
+    let bank = bank();
     let summary = bank.summary();
     for voice in DrumVoice::ALL {
         assert!(summary.contains(&format!("{voice:?}:")), "{voice:?} absent from {summary}");
@@ -52,7 +87,7 @@ fn bank_loads_and_reports_every_voice() {
 
 #[test]
 fn every_voice_sounds_and_decays() {
-    let Some(bank) = bank() else { return };
+    let bank = bank();
     for voice in DrumVoice::ALL {
         let (energy, active) = render_hit(&bank, voice, 0.9, 48_000 * 12);
         assert!(energy > 1.0e-8, "{voice:?} was silent");
@@ -62,7 +97,7 @@ fn every_voice_sounds_and_decays() {
 
 #[test]
 fn velocity_gain_is_monotonic() {
-    let Some(bank) = bank() else { return };
+    let bank = bank();
     // Stay within the same kick layer so this isolates the v^1.6 gain curve
     // from the deliberately preserved dynamics between recorded layers.
     let quiet = render_hit(&bank, DrumVoice::Kick, 0.10, 48_000).0;
@@ -101,7 +136,7 @@ fn render_pattern(bank: &Arc<SampleBank>, block_size: usize) -> Vec<[f32; 2]> {
 
 #[test]
 fn output_is_block_size_independent() {
-    let Some(bank) = bank() else { return };
+    let bank = bank();
     let reference = render_pattern(&bank, 1);
     for block in [7, 64, 257, 1024] {
         let candidate = render_pattern(&bank, block);
@@ -113,7 +148,7 @@ fn output_is_block_size_independent() {
 
 #[test]
 fn all_off_is_a_twenty_ms_fade() {
-    let Some(bank) = bank() else { return };
+    let bank = bank();
     let mut kit = DrumKit::new(48_000.0);
     kit.set_bank(bank);
     kit.trigger(DrumVoice::Crash, 1.0);

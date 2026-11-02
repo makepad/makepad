@@ -137,6 +137,21 @@ pub fn find_app(name: &str) -> Option<&'static makepad_app_registry::AppEntry> {
         .or_else(|| makepad_app_registry::find_by_bin(name))
 }
 
+/// A launch's environment is built, not inherited: the hub's own variables pass only when they
+/// are on a lease's allowlist (`base_env` of a screen lease: user, locale, toolchain, display,
+/// WM); what the registry set on the command (cargo, machine settings) and the launch's own
+/// words come on top. Whatever the hub was started with (a test switch exported in a shell that
+/// restarted it) never reaches an app.
+fn allowlisted(cmd: &mut std::process::Command) {
+    let set: std::collections::HashSet<std::ffi::OsString> = cmd.get_envs().map(|(k, _)| k.to_owned()).collect();
+    let keep: std::collections::HashSet<String> = crate::lease::exec::base_env(crate::lease::Kind::Screen, std::env::vars()).into_iter().map(|(k, _)| k).collect();
+    for (k, _) in std::env::vars_os() {
+        if !set.contains(&k) && !k.to_str().is_some_and(|k| keep.contains(k)) {
+            cmd.env_remove(&k);
+        }
+    }
+}
+
 /// Starts `s` from the checkout; returns the pid (the JIT's) and its log.
 pub fn start(conf: &SyncConf, s: &Spec, publish: &crate::local::Publish, machine: &str) -> Result<(u32, PathBuf), String> {
     let app = find_app(&s.app).ok_or_else(|| format!("no app `{}` in the registry (a registry name like `calculator` or a package like `makepad-app-calculator`)", s.app))?;
@@ -148,6 +163,7 @@ pub fn start(conf: &SyncConf, s: &Spec, publish: &crate::local::Publish, machine
     let lane = s.lease.as_deref().map(|id| crate::lease::exec::lease_lane(id).unwrap_or_else(|| format!("lease-{id}")));
     let mut files = Some((file, file2));
     let (_launch, mut child) = AppLaunch::start(app, Runner::Jit, Some(conf.checkout.clone()), s.args.clone(), BuildPolicy::IfMissing, false, move |mut cmd, _kind| {
+        allowlisted(&mut cmd);
         if visible {
             // as the WM's spawn_jit: the window becomes the WM's tile through its socket
             cmd.env("MAKEPAD_WM_CAPTION_CONTENT", "1");

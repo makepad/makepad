@@ -60,12 +60,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(f16_enabled)]
-    fn spec_test_f16() {
-        spec_test::<f16>(scalbnf16);
-    }
-
-    #[test]
     fn spec_test_f32() {
         spec_test::<f32>(scalbnf);
     }
@@ -75,9 +69,4 @@ mod tests {
         spec_test::<f64>(scalbn);
     }
 
-    #[test]
-    #[cfg(f128_enabled)]
-    fn spec_test_f128() {
-        spec_test::<f128>(scalbnf128);
-    }
 }

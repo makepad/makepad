@@ -1,0 +1,13 @@
+# CI (devhub ci): [ci] is hand-written settings; the other sections are proofs devhub writes.
+
+[tests.linux]
+date = "2026-11-02"
+digest = "ff5da740bde83b1efba02d5a359465ba682d0c8626eabfa0234a608e6d9d9831"
+main = "f74166da6dfdb67f974ba0643cae2eab1c598535"
+work = "887855c1f9abe2cff0add968d8cc4fa6c79fc716"
+
+[tests.windows]
+date = "2026-11-02"
+digest = "7e15826113d8b3be0f3b14fbbcbfaca53381a61ff077a5289ea71a530bcec13f"
+main = "33faf7a5efece94b84cad8f82a9e16fa387d4f79"
+work = "62ce1926fd9fa9d40da8b052528f9fbf2b473f73"

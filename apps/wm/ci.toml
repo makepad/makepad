@@ -1,0 +1,17 @@
+# CI (devhub ci): [ci] is hand-written settings; the other sections are proofs devhub writes.
+
+[app.linux]
+capture = ""
+date = "2026-11-02"
+digest = "e7e6b9a7356f197ea5f5f73034427811078f0cfcb7a4e1b3dcd0b74ab9c7b7b2"
+main = "f0744b8fc7cd75133572c6ba67030c9447015d38"
+work = "d0fd6b6d9b762e113168073cc606fb13c1c8be49"
+
+[ci]
+box = "whole"
+
+[tests.linux]
+date = "2026-11-02"
+digest = "a8866afe52639266418d64efda654dd20f47a769bf635fd8d89cd13212b92402"
+main = "f74166da6dfdb67f974ba0643cae2eab1c598535"
+work = "887855c1f9abe2cff0add968d8cc4fa6c79fc716"

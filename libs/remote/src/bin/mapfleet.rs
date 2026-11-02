@@ -734,7 +734,7 @@ fn remote_worker(host: &str, shared: &Shared, config: &Config) {
 fn requeue(shared: &Shared, index: usize) {
     let _ = shared
         .next
-        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+        .try_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
             (current > index).then_some(index)
         });
 }

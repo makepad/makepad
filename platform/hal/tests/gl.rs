@@ -63,16 +63,12 @@ layout(location = 0) out vec4 color;
 void main() { color = texture(tex_image, uv); }
 ";
 
-fn open() -> Option<(std::sync::Arc<Hal>, HalInfo)> {
+fn open() -> (std::sync::Arc<Hal>, HalInfo) {
     let hal = Hal::new();
     let info = hal.open(&OpenReq { backend: backend_id::GL, flags: open_flags::OFFSCREEN_WINDOWS, ..Default::default() });
-    if info.backend == backend_id::NONE {
-        eprintln!("SKIP GLES: no EGL surfaceless GLES 3 context on this machine");
-        return None;
-    }
-    assert_eq!(info.backend, backend_id::GL);
+    assert_eq!(info.backend, backend_id::GL, "GLES HAL initialization failed");
     assert_eq!(info.dialect, dialect::GLSL);
-    Some((hal, info))
+    (hal, info)
 }
 
 fn until(hal: &Hal, sid: u32, mut accept: impl FnMut(HalEvent<'_>) -> bool) {
@@ -192,7 +188,7 @@ fn pixels(hal: &Hal, sid: u32, req: u32) -> Vec<u8> {
 
 #[test]
 fn offscreen_two_passes_three_draws() {
-    let Some((hal, info)) = open() else { return };
+    let (hal, info) = open();
     resources(&hal, info.session);
     rendered(&hal, info.session, TEX, target::TEXTURE, [32, 32], 1);
     let mut w = CmdWriter::new(info.session);
@@ -211,7 +207,7 @@ fn offscreen_two_passes_three_draws() {
 
 #[test]
 fn cleared_target_readback_is_exact() {
-    let Some((hal, info)) = open() else { return };
+    let (hal, info) = open();
     let mut w = CmdWriter::new(info.session);
     w.texture_create(TEX, usage::RENDER_TARGET | usage::SAMPLED, format::RGBA8, 7, 5, [1, 1], Attr::default());
     w.frame_begin(1, FrameMeta::default());
@@ -230,7 +226,7 @@ fn cleared_target_readback_is_exact() {
 /// as the same colours, top row first; a BGRA8 render target reads back as RGBA too.
 #[test]
 fn sampled_bgra_upload_round_trips() {
-    let Some((hal, info)) = open() else { return };
+    let (hal, info) = open();
     let sid = info.session;
     let mut w = CmdWriter::new(sid);
     // BGRA bytes of red, green / blue, white
@@ -282,7 +278,7 @@ fn ledger(hal: &Hal, sid: u32) -> Vec<(Kind, u32, u32, u64)> {
 
 #[test]
 fn session_close_frees_exactly_its_ledger() {
-    let Some((hal, info)) = open() else { return };
+    let (hal, info) = open();
     let other = hal.open(&OpenReq { backend: backend_id::GL, flags: open_flags::OFFSCREEN_WINDOWS, ..Default::default() }).session;
     resources(&hal, info.session);
     resources(&hal, other);
@@ -301,7 +297,7 @@ fn session_close_frees_exactly_its_ledger() {
 
 #[test]
 fn offscreen_window_resize_keeps_resources() {
-    let Some((hal, info)) = open() else { return };
+    let (hal, info) = open();
     resources(&hal, info.session);
     let mut w = CmdWriter::new(info.session);
     w.window_create(WINDOW, window_kind::NORMAL, Id::NONE, [0.0, 0.0, 32.0, 32.0], false);
@@ -327,7 +323,7 @@ fn offscreen_window_resize_keeps_resources() {
 
 #[test]
 fn pick_frame_answers_the_draw_id() {
-    let Some((hal, info)) = open() else { return };
+    let (hal, info) = open();
     let sid = info.session;
     resources(&hal, sid);
     let mut w = CmdWriter::new(sid);
@@ -363,7 +359,7 @@ fn pick_frame_answers_the_draw_id() {
 /// event) is adopted by name and sampled after the app's fence.
 #[test]
 fn adopted_app_texture_is_sampled_after_its_fence() {
-    let Some((hal, info)) = open() else { return };
+    let (hal, info) = open();
     let sid = info.session;
     let mut share = None;
     until(&hal, sid, |e| match e {
@@ -433,7 +429,7 @@ fn adopted_app_texture_is_sampled_after_its_fence() {
 /// the pass drew nothing every frame (Scope's Glass look on a node; GLES too).
 #[test]
 fn a_pass_a_pixel_larger_than_its_target_still_draws() {
-    let Some((hal, info)) = open() else { return };
+    let (hal, info) = open();
     let sid = info.session;
     resources(&hal, sid);
     let before = hal.with_world(|w| w.session(sid).unwrap().stats);

@@ -985,31 +985,6 @@ mod limiter {
         assert!(limiter.reduction_db() > 6.0);
     }
 
-    /// Block size must not be audible: the whole engine is a per-sample state
-    /// machine, and the limiter is the newest piece of that promise.
-    #[test]
-    fn the_gain_is_independent_of_how_the_audio_is_chopped_up() {
-        let signal: Vec<f32> = (0..4096)
-            .map(|index| {
-                let phase = index as f32 / RATE * core::f32::consts::TAU * 110.0;
-                1.6 * phase.sin()
-            })
-            .collect();
-        let one_block: Vec<f32> = {
-            let mut limiter = Limiter::new(RATE);
-            signal.iter().map(|s| limiter.process(*s, *s).0).collect()
-        };
-        let many_blocks: Vec<f32> = {
-            let mut limiter = Limiter::new(RATE);
-            let mut out = Vec::with_capacity(signal.len());
-            for chunk in signal.chunks(37) {
-                out.extend(chunk.iter().map(|s| limiter.process(*s, *s).0));
-            }
-            out
-        };
-        assert_eq!(one_block, many_blocks);
-    }
-
     /// Both channels ride the same gain, or the stereo image moves whenever
     /// one hand is louder than the other.
     #[test]

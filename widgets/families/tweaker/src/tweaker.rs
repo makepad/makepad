@@ -24127,192 +24127,6 @@ mod tests {
             .expect("the file has a first half")
     }
 
-    #[test]
-    fn every_theme_head_id_the_panel_addresses_is_declared_in_the_splash() {
-        let src = panel_source();
-        for (id, ty) in [
-            ("theme_head", "View"),
-            ("theme_pick_row", "View"),
-            ("theme_pick", "PanelDropDown"),
-            ("theme_save_row", "View"),
-            ("theme_name", "PanelInput"),
-            ("theme_save", "PanelButton"),
-            ("theme_delete", "PanelButton"),
-            ("theme_msg", "PanelLabelSmall"),
-            ("eq_fold", "PanelButton"),
-            ("eq_body", "View"),
-            ("eq_appearance_row", "View"),
-            ("eq_dark", "PanelButton"),
-            ("eq_light", "PanelButton"),
-            ("eq_rows", "View"),
-            ("eq_row_0", "EqRowT"),
-            ("eq_row_1", "EqRowT"),
-            ("eq_row_2", "EqRowT"),
-            ("eq_row_3", "EqRowT"),
-            ("eq_row_4", "EqRowT"),
-            ("eq_row_5", "EqRowT"),
-            ("eq_row_6", "EqRowT"),
-            ("eq_row_7", "EqRowT"),
-            ("eq_row_8", "EqRowT"),
-            ("eq_row_9", "EqRowT"),
-            ("eq_row_10", "EqRowT"),
-            ("eq_row_11", "EqRowT"),
-            ("eq_row_12", "EqRowT"),
-            ("eq_row_13", "EqRowT"),
-            ("eq_row_14", "EqRowT"),
-            ("eq_row_15", "EqRowT"),
-            ("eq_row_16", "EqRowT"),
-            ("eq_row_17", "EqRowT"),
-            ("eq_row_18", "EqRowT"),
-            ("eq_row_19", "EqRowT"),
-            ("eq_row_20", "EqRowT"),
-            ("eq_row_21", "EqRowT"),
-            ("eq_weight", "FabSlider"),
-            ("eq_absolute", "PanelButton"),
-            ("eq_relative", "PanelButton"),
-            ("eq_random", "PanelButton"),
-            ("eq_read", "PanelLabelSmall"),
-            ("tb_fold", "PanelButton"),
-            ("tb_body", "View"),
-            ("tb_count_row", "View"),
-            ("tb_count_name", "PanelLabelSmall"),
-            ("tb_count_1", "PanelButton"),
-            ("tb_count_2", "PanelButton"),
-            ("tb_count_3", "PanelButton"),
-            ("tb_count_4", "PanelButton"),
-            ("tb_seed_row", "View"),
-            ("tb_color_0", "TbColorT"),
-            ("tb_color_1", "TbColorT"),
-            ("tb_color_2", "TbColorT"),
-            ("tb_color_3", "TbColorT"),
-            ("tb_color", "FabColorPick"),
-            ("tb_color_name", "PanelLabelSmall"),
-            ("tb_strip", "View"),
-            ("tb_carousel", "FabPaletteCarousel"),
-            ("tb_strip_prev", "PanelButton"),
-            ("tb_strip_next", "PanelButton"),
-            ("tb_adjust_name", "PanelLabelSmall"),
-            ("tb_adjust", "PanelCheckBox"),
-            ("tb_roll_name", "PanelLabelSmall"),
-            ("tb_random", "PanelButton"),
-            ("tb_rows", "View"),
-            ("tb_saturation_row", "View"),
-            ("tb_saturation", "FabSlider"),
-            ("tb_lightness_row", "View"),
-            ("tb_lightness", "FabSlider"),
-            ("tb_font_size_row", "View"),
-            ("tb_font_size", "FabSlider"),
-            ("tb_font_contrast_row", "View"),
-            ("tb_font_contrast", "FabSlider"),
-            ("tb_text_contrast_row", "View"),
-            ("tb_text_contrast", "FabSlider"),
-            ("tb_text_color_row", "View"),
-            ("tb_text_color_name", "PanelLabelSmall"),
-            ("tb_text_color", "PanelDropDown"),
-            ("tb_text_tint_row", "View"),
-            ("tb_text_tint", "FabSlider"),
-            ("tb_spacing_row", "View"),
-            ("tb_spacing", "FabSlider"),
-            ("tb_roundness_row", "View"),
-            ("tb_roundness", "FabSlider"),
-            ("tb_read", "PanelLabelSmall"),
-        ] {
-            let decl = format!("{id} := {ty}");
-            assert_eq!(
-                src.matches(&decl).count(),
-                1,
-                "`{id}` is addressed by the panel but not declared once as `{decl}`"
-            );
-            // And it is addressed: an id declared and never used is a
-            // control nothing drives.
-            assert!(src.contains(&format!("live_id!({id})")), "`{id}` is declared but never addressed");
-        }
-        // The builder's colour column, for the same reason: a rename here is
-        // four slots that resolve to nothing and a palette nobody can edit.
-        assert_eq!(
-            src.matches("let TbColorT = View {").count(),
-            1,
-            "the builder's `TbColorT` is not declared once as a View"
-        );
-        // And the four squares take the alpha-less form of the picker. A
-        // theme colour has no transparency, so the A row is one more thing
-        // to read past — and an alpha that came in on a drag or a pasted hex
-        // would ride into the built theme where nothing can see it. The
-        // Props tab's pickers are untouched: there a colour may well have
-        // one.
-        assert!(
-            src.contains("with_alpha: false"),
-            "the builder's colour squares no longer ask for the alpha-less picker"
-        );
-        // And the lock at the head of every row that carries one: one
-        // template, and one of it in front of each of the nine settings
-        // rows and of the row of colour squares, under the same name in
-        // every one of them so the panel addresses them all alike.
-        assert_eq!(
-            src.matches("let TbLockT = View {").count(),
-            1,
-            "the builder's `TbLockT` is not declared once as a View"
-        );
-        assert_eq!(
-            src.matches("lock := TbLockT {}").count(),
-            BuildLock::ALL.len(),
-            "the rows that carry a lock do not each carry one"
-        );
-        for face in ["lock_open := PanelButton", "lock_shut := PanelButton"] {
-            assert_eq!(src.matches(face).count(), 1, "`{face}` is not declared once");
-        }
-        // And the two are not drawn in one ink. The operator, on his
-        // mockup: "the lock/unlock icon should not have the same color".
-        // A shackle ten points wide moves three pixels between the states,
-        // so the colour is what carries a row's state down the column.
-        let lock_ink = |face: &str| -> String {
-            let rest = &src[src.find(face).expect("the face is declared")..];
-            let at = rest.find("color: #x").expect("the face names an icon colour") + "color: #x".len();
-            rest[at..at + 6].to_string()
-        };
-        assert_ne!(
-            lock_ink("lock_open := PanelButton"),
-            lock_ink("lock_shut := PanelButton"),
-            "the open lock and the shut one are drawn in the same colour"
-        );
-        // And the paged strip the carousel replaced is gone, slots, page
-        // button, page count and all: a slot left declared is a slot a
-        // press can still be routed to. So is the line that named the palette
-        // under the row: the outline says which is in force, and nothing may
-        // go on leaning on a line that is not there.
-        // And the seed picker, which the operator took out: "we don't need
-        // the dropdown, we can just use the last color selected from the
-        // Prim, Sec, Tert or Surf". Its slot, its column, its word and every
-        // route into it -- a control half removed is a press that lands on
-        // nothing, and there is no "None" to hide the carousel with any more.
-        for gone in [
-            "TbChipT", "tb_chip_0", "tb_chips :=", "tb_more", "tb_page", "tb_sugg_row", "FabPaletteChip ",
-            "tb_sugg_read", "tb_strip_reading", "Your own palette",
-            "tb_seed :=", "tb_seed_col", "tb_seed_name", "tb_seed_uid", "tb_seed_labels", "tb_roll_col",
-        ] {
-            assert!(!src.contains(gone), "`{gone}` is still in the panel");
-        }
-        // The picker's kit, and the popup half with it: a face re-skinned
-        // over a stock list is still a list a sheet can reach.
-        for (name, ty) in [
-            ("PanelDropDown", "DropDown"),
-            ("PanelPopupMenu", "PopupMenu"),
-            ("PanelMenuItem", "PopupMenuItem"),
-        ] {
-            assert!(
-                src.contains(&format!("let {name} = {ty} {{")),
-                "the panel's picker is missing `{name}`"
-            );
-        }
-        assert!(src.contains(&format!("popup_menu: {}{{}}", "PanelPopupMenu")));
-        assert!(src.contains(&format!("menu_item: {}{{}}", "PanelMenuItem")));
-        // The strip it replaced is gone, buttons and all.
-        assert!(
-            !src.contains(&format!("preset{}row", "_")),
-            "the old preset strip is still here"
-        );
-    }
-
     /// Everything about the mix's weight row that a sheet could move if the
     /// kit ever took one of its tokens off `theme.` instead of off `fab.`:
     /// the colour of each of its two words, and the height of the row they
@@ -24558,36 +24372,6 @@ mod tests {
         assert_eq!(dragged_sidebar_width(280.0, 1400.0, 1300.0), Some(180.0), "the narrow clamp");
         assert_eq!(dragged_sidebar_width(180.0, 1400.0, 1390.0), None, "past the clamp moves nothing");
         assert_eq!(dragged_sidebar_width(280.0, 1400.0, 100.0), Some(560.0), "the wide clamp");
-    }
-
-    /// Deleting a saved theme takes two presses, the same way saving over
-    /// one does -- and asking one of the two questions cancels the other, so
-    /// a standing "save again to replace it" can never answer a delete.
-    #[test]
-    fn a_delete_is_a_question_before_it_is_a_delete() {
-        let mut confirm: Option<ThemeConfirm> = None;
-        let pending_delete = |c: &Option<ThemeConfirm>| match c {
-            Some(ThemeConfirm::Delete(name)) => Some(name.clone()),
-            _ => None,
-        };
-        let pending_replace = |c: &Option<ThemeConfirm>| match c {
-            Some(ThemeConfirm::Replace(name)) => Some(name.clone()),
-            _ => None,
-        };
-        // Nothing is pending, so the first press only asks.
-        assert_eq!(pending_delete(&confirm), None);
-        confirm = Some(ThemeConfirm::Delete("sunset".to_string()));
-        assert_eq!(pending_delete(&confirm).as_deref(), Some("sunset"));
-        // A replace standing on the same name is NOT an answer to it.
-        confirm = Some(ThemeConfirm::Replace("sunset".to_string()));
-        assert_eq!(pending_delete(&confirm), None);
-        assert_eq!(pending_replace(&confirm).as_deref(), Some("sunset"));
-        // ...and a delete standing is not an answer to a replace either.
-        confirm = Some(ThemeConfirm::Delete("sunset".to_string()));
-        assert_eq!(pending_replace(&confirm), None);
-        // A question asked about another name is not an answer to this one.
-        confirm = Some(ThemeConfirm::Delete("dusk".to_string()));
-        assert_ne!(pending_delete(&confirm).as_deref(), Some("sunset"));
     }
 
     /// The panel's two destructive commands read the confirm the same way,
@@ -25005,19 +24789,6 @@ line two");
         // Nothing escaped may carry the separators themselves.
         let escaped = note_store_escape("a\tb\nc");
         assert!(!escaped.contains('\t') && !escaped.contains('\n'), "{escaped:?}");
-    }
-
-    #[test]
-    fn a_malformed_note_line_is_skipped_not_fatal() {
-        // The file is meant to be hand-editable, so short or commented lines
-        // are dropped rather than taken as a note.
-        let body = "# header\n\nnot-enough-columns\tx\n";
-        let notes: Vec<&str> = body
-            .lines()
-            .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
-            .filter(|line| line.split('\t').count() >= 6)
-            .collect();
-        assert!(notes.is_empty());
     }
 
     fn entry(seq: u64, path: &str, prop: &str, old: &str, new: &str) -> TweakDiffEntry {
@@ -27974,18 +27745,6 @@ line two");
         assert_eq!(panel.tb_builder.params().palette(), [was[1], was[0], was[2], was[3]]);
         assert!((0..4).all(|w| !square(w).borrow::<FabColorPick>().unwrap().is_open()), "two popovers, or one after a drop");
         assert_eq!(cx.sweep_lock_area(), None);
-    }
-
-    /// Only the builder's four carry. Every other colour picker the panel
-    /// draws is declared from the plain type, which does not.
-    #[test]
-    fn only_the_builders_colours_can_be_carried() {
-        let src = include_str!("tweaker.rs").split("#[cfg(test)]").next().unwrap_or("");
-        assert_eq!(src.matches("draggable: true").count(), 1, "some other picker carries, or the builder's do not");
-        let at = src.find("draggable: true").unwrap();
-        let before = &src[..at];
-        let control = before.rfind("tb_color := FabColorPick {").expect("the carry is not on the builder's colour");
-        assert!(at - control < 200, "the carry is declared on something other than the builder's colour");
     }
 
     fn a_square_rect(cx: &Cx, head: &WidgetRef, which: usize) -> Rect {

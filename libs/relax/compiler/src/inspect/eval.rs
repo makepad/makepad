@@ -315,7 +315,7 @@ fn describe_addr(u: &Unit, a: u64) -> (String, Option<(u64, u64)>) {
     if let Some(id) = u.find_fn(a) {
         return (format!("code of {}", u.fns[id as usize].name), None);
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(target_vendor = "apple")]
     {
         extern "C" {
             fn malloc_size(p: *const u8) -> usize;

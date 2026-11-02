@@ -5,7 +5,7 @@
 # little-endian tensors + meta.json that the native port compares against
 # (`yue2_render --check <dir>`). Nothing in the product imports or runs it.
 #
-# Usage (a node):
+# Usage (a pool node):
 #   ~/ref/yue2-venv/bin/python yue2_oracle_dump.py \
 #     --model-dir ~/.makepad/weights/music/YuE2-3B \
 #     --vae-dir ~/.makepad/weights/music/YuE2-Vae \

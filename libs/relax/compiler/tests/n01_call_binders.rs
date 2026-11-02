@@ -1,3 +1,4 @@
+#![feature(fn_static)]
 // rustc_hir_typeck/src/callee.rs:610-615: each call instantiates the binder.
 fn call<F: for<'a> Fn(&'a u32) -> &'a u32>(f: F, x: &u32) -> u32 { *f(x) }
 fn identity(x: &u32) -> &u32 { x }

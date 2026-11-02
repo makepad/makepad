@@ -27,7 +27,7 @@ DEVHUB=libs/devhub/src/cli.rs
 PASS=libs/relax/codegen/src/version.rs
 dir=$(mktemp -d "${TMPDIR:-/tmp}/codegen_id.XXXXXX") || exit 1
 cp "$DEVHUB" "$dir/devhub.orig"; cp "$PASS" "$dir/pass.orig"
-build() { CARGO_INCREMENTAL=0 cargo build --profile host -p makepad-run --bin makepad -j8 > "$dir/build.log" 2>&1 || { tail -20 "$dir/build.log"; echo "codegen_id: FAIL build"; exit 1; }; }
+build() { CARGO_INCREMENTAL=0 cargo build --profile host -p makepad-run --bin makepad --bin makepad-launcher -j8 > "$dir/build.log" 2>&1 || { tail -20 "$dir/build.log"; echo "codegen_id: FAIL build"; exit 1; }; }
 restore() {
     cmp -s "$dir/devhub.orig" "$DEVHUB" || cp "$dir/devhub.orig" "$DEVHUB"
     cmp -s "$dir/pass.orig" "$PASS" || { cp "$dir/pass.orig" "$PASS"; build; }

@@ -59,7 +59,7 @@ pub fn parked_events(domain: u32) -> Option<Vec<std::sync::Arc<str>>> {
         .map(|p| p.event.clone()).collect())
 }
 
-pub const KINDS: &[&str] = &["panic", "hang", "deadlock", "mem", "spike", "hitch", "rtstall", "scripterr", "patchrefused", "patchverified", "patchreverted", "engine_request", "engine_reply", "engine_code_update"];
+pub const KINDS: &[&str] = &["panic", "hang", "deadlock", "mem", "spike", "hitch", "rtstall", "scripterr", "patchrefused", "patchverified", "patchreverted", "patchfailed", "patchrestarted", "jiterror", "engine_request", "engine_reply", "engine_code_update"];
 
 /// Records an event (`fields`: the kind-specific JSON members, without braces). Returns its seq,
 /// or 0 when it repeated one sent in the last 30 s.
@@ -153,6 +153,12 @@ fn kinds(req: &Req) -> Option<Vec<String>> {
 /// panic parked now always counts), as one line.
 pub fn cmd_watch(req: &Req, out: &mut Out) {
     let on = kinds(req);
+    // A run that does not watch its sources never emits a patch event: say so now, not after
+    // the caller's timeout.
+    if on.as_ref().is_some_and(|v| v.iter().any(|k| k.starts_with("patch"))) && !crate::layout::LIVE_SESSION.load(Relaxed) {
+        out.line("{\"err\":\"not a live session: this run does not watch its sources, so no edit patches in (a run from a store is live with MAKEPAD_RUN_STORE_LIVE=1 and an edits folder)\"}");
+        return;
+    }
     let parked_since = PARKED.lock().unwrap_or_else(|e| e.into_inner()).iter().map(|p| p.seq).min().map_or(u64::MAX, |s| s - 1);
     let since = req.get("since").and_then(|s| s.parse().ok()).unwrap_or_else(|| SEQ.load(SeqCst).min(parked_since));
     let timeout = req.num("timeout_s", 0);
@@ -342,12 +348,20 @@ pub fn release_domain(domain: crate::domain::DomainId) {
 pub fn on_panic(info: &crate::jit::PanicInfo, regs: *const u64) {
     let unwinds = !regs.is_null();
     let _k = crate::zone_alloc::kept();
-    if !super::STARTED.load(Relaxed) || crate::owner::is_owner() || super::probes::in_probe() || super::eval::in_eval() {
+    if !super::STARTED.load(Relaxed) || super::TEST_RUN.load(Relaxed) || crate::owner::is_owner() || super::probes::in_probe() || super::eval::in_eval() {
         return;
     }
     let domain = crate::domain::current_app_domain();
+    if crate::hot_failure::recovering() && crate::hot_failure::replacement_running() && domain == crate::run::app_domain() {
+        // Recovery is an infrastructure attempt. Publish its failure to the
+        // watcher and unwind; parking it would ask the agent to repair the JIT.
+        crate::hot_failure::restart_failed(&format!("{}: {} at {}", info.kind, info.message, info.location));
+        return;
+    }
+    // the run window shows the app's parked panic (resume, restart) in a live session; a run that
+    // is none (a test's child) ends as its panic ends it
     let watched = WATCHERS.load(SeqCst) > 0 || super::AGENT.load(Relaxed)
-        || (RUN_STATE_AVAILABLE.load(SeqCst) && domain.is_some() && domain == crate::run::app_domain());
+        || (RUN_STATE_AVAILABLE.load(SeqCst) && domain.is_some() && domain == crate::run::app_domain() && crate::run::live_session());
     let key = format!("{}|{}|{}", info.site, info.location, info.message);
     super::flightrec::panic(&super::short(&info.message, 120), if info.location.is_empty() { "?" } else { &info.location });
     if !watched {
@@ -412,16 +426,15 @@ pub fn on_panic(info: &crate::jit::PanicInfo, regs: *const u64) {
     let p = std::sync::Arc::new(Parked { id, seq, os_id: super::threads::self_os_id(), domain, decision: AtomicU32::new(0), words: Mutex::new(Vec::new()), event, what: (thread.clone(), info.message.clone(), location.clone()), frames: info.frames.iter().copied().take(64).collect(), regs: if unwinds { unsafe { std::slice::from_raw_parts(regs, crate::jit::REG_WORDS) }.to_vec() } else { Vec::new() }, stale: false });
     list.push(p.clone());
     parked_changed();
-    if !watched {
-        eprintln!(
-            "makepad: panic parked on thread {} ({}) for {} s -- attach: makepad inspect {} panics (resume P{} panic)",
-            thread,
-            super::short(&info.message, 120),
-            wait_s,
-            std::process::id(),
-            id
-        );
-    }
+    // said watched or not: what reads the app's output (a CI smoke) is no watcher of the event stream
+    eprintln!(
+        "makepad: panic parked on thread {} ({}) for {} s -- attach: makepad inspect {} panics (resume P{} panic)",
+        thread,
+        super::short(&info.message, 120),
+        wait_s,
+        std::process::id(),
+        id
+    );
     let t0 = std::time::Instant::now();
     while p.decision.load(SeqCst) == 0 && t0.elapsed().as_secs() < wait_s {
         // an unwatched park ends early once nobody could still attach in time

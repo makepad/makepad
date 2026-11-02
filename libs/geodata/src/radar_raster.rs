@@ -241,26 +241,3 @@ pub fn rgba_to_bgra_texels(rgba: &[u8]) -> Vec<u32> {
         })
         .collect()
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn projects_cached_forecast_frame() {
-        let path = "../../local/overlays/radar/forecast/RAD_NL25_PCP_FM_202607280900.h5";
-        let Ok(data) = std::fs::read(path) else {
-            return;
-        };
-        let frames = crate::knmi_hdf5::decode_frames(&data).unwrap();
-        let projection = RadarProjection::new(512, 640);
-        let rgba = projection.frame_to_rgba(&frames[0]);
-        let visible = rgba.chunks(4).filter(|px| px[3] > 0).count();
-        // Frame 1 has 5068 wet source pixels; the mercator resample of the
-        // NL bbox should land in the same order of magnitude.
-        assert!(visible > 500, "visible rain pixels: {visible}");
-        let mapped = projection.src_col.iter().filter(|c| !c.is_nan()).count();
-        // Most of the output bbox lies inside the radar grid.
-        assert!(mapped > 512 * 640 / 2, "mapped: {mapped}");
-    }
-}

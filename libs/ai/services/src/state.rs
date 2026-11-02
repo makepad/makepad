@@ -5,7 +5,7 @@
 //! panel a reference to its state each frame.
 
 use crate::card::Card;
-use crate::wire::ToolOutcome;
+use crate::wire::{TaskCard, ToolOutcome};
 
 /// Where the conversation is right now.
 #[derive(Clone, Debug, PartialEq, Default)]
@@ -158,6 +158,9 @@ pub struct ToolEntry {
     /// The settings card of a parked request: its fields, filled from the
     /// call's arguments. `None` for every other call.
     pub card: Option<Card>,
+    /// The call's task card (an AI hub job's picture, stage, host and, once done, what
+    /// came of it): drawn in place of the one-line row. `None` for a plain call.
+    pub task: Option<TaskCard>,
 }
 
 /// A one-click starting point in the empty conversation: clicking it opens
@@ -344,6 +347,7 @@ mod tests {
                 preview: true,
                 expanded: false,
                 card: None,
+                task: None,
             })
         };
         s.push(card("a"));

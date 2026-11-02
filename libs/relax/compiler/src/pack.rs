@@ -100,7 +100,7 @@ static MAPPINGS: relax_session::sync::Mutex<Vec<Mapping>> = relax_session::sync:
 struct Mapping {
     start: usize,
     len: usize,
-    #[cfg(target_os = "macos")]
+    #[cfg(target_vendor = "apple")]
     again: Option<(std::path::PathBuf, u64, u64, u64)>,
 }
 
@@ -108,7 +108,7 @@ struct Mapping {
 fn note_mapping(start: usize, len: usize, file: &std::fs::File, off: u64) {
     // kept heap: the list outlives every compiler generation
     let _k = crate::zone_alloc::kept();
-    #[cfg(target_os = "macos")]
+    #[cfg(target_vendor = "apple")]
     let again = {
         use std::os::unix::fs::MetadataExt;
         extern "C" {
@@ -124,12 +124,12 @@ fn note_mapping(start: usize, len: usize, file: &std::fs::File, off: u64) {
             _ => None,
         }
     };
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(target_vendor = "apple"))]
     let _ = (file, off);
     MAPPINGS.lock().unwrap_or_else(|e| e.into_inner()).push(Mapping {
         start,
         len,
-        #[cfg(target_os = "macos")]
+        #[cfg(target_vendor = "apple")]
         again,
     });
 }
@@ -167,7 +167,7 @@ pub fn release_resident() -> usize {
         }
         return n;
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(target_vendor = "apple")]
     {
         use std::os::unix::fs::MetadataExt;
         use std::os::unix::io::AsRawFd;

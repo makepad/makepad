@@ -1,4 +1,7 @@
 workspace.members = [
+    "tools/ci_merge",
+    "tools/private_check",
+    "tools/uv_unwrap_corpus",
     # === app ===
     "apps/browser",
     "apps/browser_host",
@@ -99,6 +102,8 @@ workspace.members = [
     "libs/ai/livepipe",
     # Constructive solid geometry.
     "libs/csg/csg",
+    "libs/csg/csg_brep",
+    "libs/csg/csg_brep_model",
     "libs/csg/csg_cad",
     "libs/csg/csg_graph",
     "libs/csg/csg_boolean",
@@ -140,6 +145,7 @@ workspace.members = [
     "libs/xatlas",
     # Editable polygon topology and worker-owned model documents.
     "libs/mesh_edit",
+    "libs/uv_unwrap",
     "libs/model",
     # === examples ===
     "examples/teamtalk",
@@ -282,6 +288,7 @@ workspace.members = [
     "tools/agents",
     "tools/ci",
     "tools/ci_leg",
+    "libs/ci_judge",
     # === makepad run: the app-VM host (tools/run, package makepad-run, binary makepad)
     # and its host crates; Relax's Rust JIT library crates live in libs/relax ===
     "tools/run",
@@ -289,11 +296,13 @@ workspace.members = [
     "tools/run/boot",
     "tools/run/fixture/diffpkg",
     "tools/run/fixture/diffpkg/tables",
+    "tools/run/fixture/cli_exit",
     "tools/run/android_host",
     "tools/run/android_exe",
     "tools/run/android_host/fixture",
     "libs/gpu_trace",
     "libs/prof_stream",
+    "libs/prof_view",
     "libs/relax/compiler",
     "libs/relax/base",
     "libs/relax/backend",
@@ -309,8 +318,6 @@ workspace.members = [
     "libs/system_speech",
     # Relax run-time benchmark: real-world workloads (rustc --release vs makepad run)
     "libs/relax/compiler/rwbench",
-    # Relax data-structure microbenchmarks (Vec, iterators, HashMap, BTreeMap, sort, strings, bounds loops)
-    "libs/relax/compiler/dsbench",
     # Send feedback: caption icon + panel (Amp, Scope)
     "widgets/feedback",
     # === tests ===
@@ -365,6 +372,9 @@ workspace.exclude = [
     "libs/relax/compiler/tests",
     "libs/relax/types/tests",
     "libs/relax/attr",
+    # The vendored brotli crates (and their allocators): dependencies, not members, so their
+    # own test suites (which read upstream test corpora not vendored here) are not ours to run
+    "libs/brotli",
     # Private repositories cloned into apps/<name> are members through
     # apps/*/src/.. above: Source Library, and the commercial products at
     # apps/commercial (a members package at its root naming Stage's and
@@ -487,6 +497,7 @@ makepad-remote = { path = "libs/remote", version = "0.1.0" }
 makepad-strict-json = { path = "libs/strict_json", version = "0.1.0" }
 makepad-gpu-trace = { path = "libs/gpu_trace", version = "1.0.0" }
 makepad-prof-stream = { path = "libs/prof_stream", version = "1.0.0" }
+makepad-prof-view = { path = "libs/prof_view", version = "0.1.0" }
 makepad-relax-api = { path = "libs/relax_api", version = "1.0.0" }
 makepad-relax-api-macro-impl = { path = "libs/relax_api/macro_impl", version = "1.0.0" }
 makepad-live-id-macros-impl = { path = "libs/live_id/id_macros_impl", version = "1.0.0" }

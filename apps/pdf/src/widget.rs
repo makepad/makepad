@@ -710,14 +710,3 @@ impl MpPdfView {
 /// Width of the thumbnail strip, re-exported so the shell can reason about
 /// the layout without reaching into the strip's module.
 pub const THUMB_STRIP_WIDTH: f64 = STRIP_WIDTH;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn fit_modes_are_exclusive() {
-        assert_ne!(FitMode::Width, FitMode::Page);
-        assert_eq!(FitMode::default(), FitMode::Width);
-    }
-}

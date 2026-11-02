@@ -14,6 +14,7 @@ use makepad_windows_sys::Win32::Graphics::Direct3D11::*;
 use makepad_windows_sys::Win32::Graphics::Dxgi::Common::*;
 use makepad_windows_sys::Win32::Graphics::Dxgi::*;
 use std::collections::HashMap;
+
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -114,8 +115,8 @@ pub fn dxgi(format: u32) -> Option<Fmt> {
 /// Fixed-function states, made once per device.
 pub struct States {
     pub raster: [ID3D11RasterizerState; 2],
-    /// [no depth test, test + write, test without write]
-    pub depth: [ID3D11DepthStencilState; 3],
+    /// No test; LessEqual with/without writes; Greater with/without writes.
+    pub depth: [ID3D11DepthStencilState; 5],
     /// blend states by (per-attachment mode bits, max): made on first use
     pub blend: Mutex<HashMap<u32, ID3D11BlendState>>,
 }
@@ -202,7 +203,7 @@ impl Device {
                 device.CreateRasterizerState(&desc, Some(&mut out)).map_err(|e| hr("CreateRasterizerState", e))?;
                 out.ok_or_else(|| "CreateRasterizerState returned nothing".into())
             };
-            let depth = |enable: bool, write| -> Result<ID3D11DepthStencilState, String> {
+            let depth = |enable: bool, write, compare| -> Result<ID3D11DepthStencilState, String> {
                 let op = D3D11_DEPTH_STENCILOP_DESC {
                     StencilFailOp: D3D11_STENCIL_OP_KEEP,
                     StencilDepthFailOp: D3D11_STENCIL_OP_KEEP,
@@ -212,7 +213,7 @@ impl Device {
                 let desc = D3D11_DEPTH_STENCIL_DESC {
                     DepthEnable: b(enable),
                     DepthWriteMask: write,
-                    DepthFunc: D3D11_COMPARISON_LESS_EQUAL,
+                    DepthFunc: compare,
                     StencilEnable: b(false),
                     StencilReadMask: 0xff,
                     StencilWriteMask: 0xff,
@@ -225,7 +226,13 @@ impl Device {
             };
             let states = States {
                 raster: [raster(D3D11_CULL_NONE)?, raster(D3D11_CULL_BACK)?],
-                depth: [depth(false, D3D11_DEPTH_WRITE_MASK_ZERO)?, depth(true, D3D11_DEPTH_WRITE_MASK_ALL)?, depth(true, D3D11_DEPTH_WRITE_MASK_ZERO)?],
+                depth: [
+                    depth(false, D3D11_DEPTH_WRITE_MASK_ZERO, D3D11_COMPARISON_LESS_EQUAL)?,
+                    depth(true, D3D11_DEPTH_WRITE_MASK_ALL, D3D11_COMPARISON_LESS_EQUAL)?,
+                    depth(true, D3D11_DEPTH_WRITE_MASK_ZERO, D3D11_COMPARISON_LESS_EQUAL)?,
+                    depth(true, D3D11_DEPTH_WRITE_MASK_ALL, D3D11_COMPARISON_GREATER)?,
+                    depth(true, D3D11_DEPTH_WRITE_MASK_ZERO, D3D11_COMPARISON_GREATER)?,
+                ],
                 blend: Mutex::new(HashMap::new()),
             };
 

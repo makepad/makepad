@@ -14,7 +14,7 @@ use crate::sys::net as sn;
 pub(crate) const RAW_FIELD: &str = "fd";
 
 /// listen(2) backlog.
-pub(crate) const BACKLOG: c_int = if cfg!(target_os = "macos") { 128 } else { -1 };
+pub(crate) const BACKLOG: c_int = if cfg!(target_vendor = "apple") { 128 } else { -1 };
 
 /// A socket fd with the helpers TcpStream/TcpListener/UnixStream share.
 pub(crate) struct Socket {
@@ -36,7 +36,7 @@ impl Socket {
         unsafe {
             sys::fcntl(fd, sys::F_SETFD, sys::FD_CLOEXEC);
         }
-        if cfg!(target_os = "macos") {
+        if cfg!(target_vendor = "apple") {
             s.set_int(sn::SOL_SOCKET, sn::SO_NOSIGPIPE, 1)?;
         }
         Ok(s)

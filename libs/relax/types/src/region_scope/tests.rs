@@ -257,7 +257,6 @@ fn region_scope_builtin_matches_and_assert() {
 }
 
 #[test]
-#[ignore = "per-span edition: frontend expansion contexts"]
 fn region_scope_cross_edition_macro_and_forwarded_fragment() {
     // The definition's block gets its definition edition; a substituted block keeps
     // its caller edition (rustc_span/src/hygiene.rs:912; check/region.rs:146).

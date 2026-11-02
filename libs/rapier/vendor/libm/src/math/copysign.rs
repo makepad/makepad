@@ -69,12 +69,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(f16_enabled)]
-    fn spec_tests_f16() {
-        spec_test::<f16>(copysignf16);
-    }
-
-    #[test]
     fn spec_tests_f32() {
         spec_test::<f32>(copysignf);
     }
@@ -84,9 +78,4 @@ mod tests {
         spec_test::<f64>(copysign);
     }
 
-    #[test]
-    #[cfg(f128_enabled)]
-    fn spec_tests_f128() {
-        spec_test::<f128>(copysignf128);
-    }
 }

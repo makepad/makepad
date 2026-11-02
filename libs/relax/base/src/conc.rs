@@ -379,8 +379,26 @@ pub struct AppendVec<T> {
     chunks: Box<[std::sync::atomic::AtomicPtr<T>]>,
     len: std::sync::atomic::AtomicUsize,
     grow: relax_session::sync::Mutex<()>,
-    /// its chunk table and chunks live in the kept heap (zone_alloc::kept)
-    kept: bool,
+    /// Allocation lifetime of the chunk table and every chunk.
+    heap: AppendHeap,
+}
+
+#[derive(Clone, Copy)]
+enum AppendHeap {
+    Current,
+    Kept,
+    Slots,
+}
+
+impl AppendHeap {
+    #[inline]
+    fn enter(self) -> Option<crate::zone_alloc::PhaseGuard> {
+        match self {
+            Self::Current => None,
+            Self::Kept => Some(crate::zone_alloc::kept()),
+            Self::Slots => Some(crate::zone_alloc::slots()),
+        }
+    }
 }
 
 const AV_BITS: u32 = 12;
@@ -392,21 +410,26 @@ unsafe impl<T: Send + Sync> Sync for AppendVec<T> {}
 impl<T> AppendVec<T> {
     /// Room for `cap` entries (rounded up to whole chunks).
     pub fn with_capacity(cap: usize) -> Self {
-        Self::build(cap, false)
+        Self::build(cap, AppendHeap::Current)
     }
 
     /// `with_capacity` for state that must outlive the compiler arena: the chunk table and
     /// every chunk are allocated in the kept heap. Heap data the entries own is the pusher's to
     /// build in the kept phase.
     pub fn new_kept(cap: usize) -> Self {
-        Self::build(cap, true)
+        Self::build(cap, AppendHeap::Kept)
     }
 
-    fn build(cap: usize, kept: bool) -> Self {
-        let _k = if kept { Some(crate::zone_alloc::kept()) } else { None };
+    /// Unit-lifetime entries: the chunk table and growth share the slot arena.
+    pub fn new_slots(cap: usize) -> Self {
+        Self::build(cap, AppendHeap::Slots)
+    }
+
+    fn build(cap: usize, heap: AppendHeap) -> Self {
+        let _k = heap.enter();
         let n = (cap + AV_CHUNK - 1) / AV_CHUNK;
         // zeroed pages (null pointers) straight from the allocator: a table for every u32 index stays virtual until chunks are used
-        AppendVec { chunks: unsafe { Box::<[std::sync::atomic::AtomicPtr<T>]>::new_zeroed_slice(n).assume_init() }, len: Default::default(), grow: Default::default(), kept }
+        AppendVec { chunks: unsafe { Box::<[std::sync::atomic::AtomicPtr<T>]>::new_zeroed_slice(n).assume_init() }, len: Default::default(), grow: Default::default(), heap }
     }
 
     #[inline]
@@ -419,7 +442,7 @@ impl<T> AppendVec<T> {
     pub fn reserve(&self, upto: usize, fresh: impl Fn(*mut u8, usize)) {
         use std::sync::atomic::Ordering;
         let _g = self.grow.lock().unwrap_or_else(|e| e.into_inner());
-        let _k = if self.kept { Some(crate::zone_alloc::kept()) } else { None };
+        let _k = self.heap.enter();
         let last = upto.saturating_sub(1) >> AV_BITS;
         for ci in (self.len.load(Ordering::Relaxed) >> AV_BITS)..=last.min(self.chunks.len().saturating_sub(1)) {
             if self.chunks[ci].load(Ordering::Relaxed).is_null() {
@@ -441,7 +464,7 @@ impl<T> AppendVec<T> {
         assert!(ci < self.chunks.len(), "AppendVec full");
         let mut c = self.chunks[ci].load(Ordering::Relaxed);
         if c.is_null() {
-            let _k = if self.kept { Some(crate::zone_alloc::kept()) } else { None };
+            let _k = self.heap.enter();
             let mut v: Vec<std::mem::MaybeUninit<T>> = Vec::with_capacity(AV_CHUNK);
             unsafe { v.set_len(AV_CHUNK) };
             c = Box::into_raw(v.into_boxed_slice()) as *mut T;

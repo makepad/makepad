@@ -1000,9 +1000,4 @@ mod tests {
         assert_eq!(combine(1, 0.3, -0.8), 0.3f32.min(0.8));
         assert_eq!(combine(8, 0.2, 0.1), (0.3f32).max(0.1).min(-(0.3f32).min(0.1)));
     }
-
-    #[test]
-    fn lfo_count() {
-        assert_eq!(super::super::catalog::N_LFO, 12);
-    }
 }

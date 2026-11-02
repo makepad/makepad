@@ -43,6 +43,7 @@ impl UniformBuffer {
         buffer.generation = 0;
         Some(std::mem::take(&mut buffer.data))
     }
+    #[track_caller]
     pub fn new(cx: &mut Cx) -> Self {
         cx.uniform_buffers.alloc()
     }
@@ -97,10 +98,16 @@ impl ScriptNew for UniformBuffer {
 pub struct CxUniformBufferPool(pub(crate) IdPool<CxUniformBuffer>);
 
 impl CxUniformBufferPool {
+    #[track_caller]
     pub fn alloc(&mut self) -> UniformBuffer {
+        let item = CxUniformBuffer {
+            #[cfg(not(target_arch = "wasm32"))]
+            origin: crate::gpu_ledger::GpuOrigin::here(),
+            ..Default::default()
+        };
         let (new_id, _previous_item) = self
             .0
-            .alloc_with_reuse_filter(|_| true, CxUniformBuffer::default());
+            .alloc_with_reuse_filter(|_| true, item);
         #[cfg(target_arch = "wasm32")]
         if let Some(previous_item) = _previous_item {
             self.0.pool[new_id.id].item.os = previous_item.os;
@@ -140,6 +147,8 @@ impl std::ops::IndexMut<UniformBufferId> for CxUniformBufferPool {
 pub struct CxUniformBuffer {
     pub generation: u64,
     pub data: Vec<u8>,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) origin: crate::gpu_ledger::GpuOrigin,
     #[cfg(target_arch = "wasm32")]
     pub os: CxOsUniformBuffer,
 }

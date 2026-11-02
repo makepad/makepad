@@ -446,6 +446,11 @@ impl Encoder {
             // granularity
             let unit = match codec { Codec::H264 => 16, Codec::H265 => 8 };
             let align = |v: u32, g: u32| (v.div_ceil(unit) * unit).div_ceil(g.max(1)) * g.max(1);
+            // Below the encoder's minimum coded extent the picture would be padded into a larger coded
+            // picture; that fails (an encode error, or a lost device) on NVIDIA's encoder, so such a size is refused.
+            if size[0] < caps.min_coded_extent.width || size[1] < caps.min_coded_extent.height {
+                return Err(format!("stream size {}x{} is below the encoder's minimum {}x{}", size[0], size[1], caps.min_coded_extent.width, caps.min_coded_extent.height));
+            }
             let coded = [align(size[0], gran.width).max(caps.min_coded_extent.width), align(size[1], gran.height).max(caps.min_coded_extent.height)];
             if coded[0] > caps.max_coded_extent.width || coded[1] > caps.max_coded_extent.height {
                 return Err(format!("stream size {}x{} exceeds the encoder's {}x{}", size[0], size[1], caps.max_coded_extent.width, caps.max_coded_extent.height));
@@ -1342,7 +1347,11 @@ impl StreamEncoder {
     /// An encoder on engine `engine` (its queue; an engine the GPU does not have is engine 0),
     /// 4:4:4 when `full_chroma`.
     pub fn open(width: u32, height: u32, fps: u32, kbps: u32, engine: usize, full_chroma: bool, codec: Codec, tuning: Tuning) -> Result<StreamEncoder, String> {
-        let dev = Device::existing().ok_or("the HAL has no Vulkan device yet (no window rendered)")?;
+        // A process that encodes without any window (a headless service) gets the device offscreen.
+        if !Self::offscreen_device() {
+            return Err("the HAL has no Vulkan device (no window rendered, and none could be made offscreen)".into());
+        }
+        let dev = Device::existing().ok_or("the HAL has no Vulkan device")?;
         let fps = fps.clamp(1, 240);
         let mut enc = Encoder::new(dev.clone(), [width, height], fps, full_chroma, codec, tuning)?;
         enc.queue_index = engine;

@@ -1,5 +1,5 @@
 #!/bin/sh
-# diff_full.sh: the Relax-vs-rustc differential net, FULL tier. On demand or nightly on a node (Linux) only;
+# diff_full.sh: the Relax-vs-rustc differential net, FULL tier. On demand or nightly on a pool node (Linux) only;
 # never in the landing gate (use diff_fast.sh there). Hidden, headless runs; every run has its own deleted home.
 #   corpus   every libs/relax/compiler/tests/*.rs (the files that rustc --test -O builds) runs natively and under
 #            `makepad test` at the baseline and O3 tiers; stdout (minus harness lines, sorted: test order differs) must match. Tests that
@@ -13,7 +13,7 @@
 # Env: the JIT runs through `cargo run --profile host`, DIFF_CORPUS (dir of *.rs tests, default libs/relax/compiler/tests), DIFF_CACHE, DIFF_JOBS (default 8), DIFF_NATIVE_CALC (prebuilt native calculator;
 #      else cargo build --profile host -p makepad-app-calculator -j4 runs first), DIFF_FULL_ANYWAY=1 (allow a non-Linux host).
 # Output (replay alone: `full: replay equal|DIFFERS`): `full: corpus E/N equal (A allowed, S skipped), replay equal|DIFFERS`; the diffs follow; exit 1 on any difference.
-if [ "$(uname)" != Linux ] && [ -z "$DIFF_FULL_ANYWAY" ]; then echo "full: a node (Linux) only; DIFF_FULL_ANYWAY=1 overrides"; exit 2; fi
+if [ "$(uname)" != Linux ] && [ -z "$DIFF_FULL_ANYWAY" ]; then echo "full: a pool node (Linux) only; DIFF_FULL_ANYWAY=1 overrides"; exit 2; fi
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../../.." && pwd)
 # the JIT through cargo: rebuilt when its sources changed, a ~0.2 s no-op otherwise (no binary path)

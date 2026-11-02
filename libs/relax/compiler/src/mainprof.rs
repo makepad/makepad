@@ -7,7 +7,7 @@
 //! link on the main thread), wait (blocked in the compiler for another thread), jit (program
 //! code), host (runtime / system code called by program code).
 
-#[cfg(target_os = "macos")]
+#[cfg(target_vendor = "apple")]
 use std::sync::atomic::{AtomicBool, Ordering};
 use relax_session::sync::Mutex;
 
@@ -20,7 +20,7 @@ struct Sample {
 }
 
 static SAMPLES: Mutex<Vec<Sample>> = Mutex::new(Vec::new());
-#[cfg(target_os = "macos")]
+#[cfg(target_vendor = "apple")]
 static STARTED: AtomicBool = AtomicBool::new(false);
 
 pub fn enabled() -> bool {
@@ -29,7 +29,7 @@ pub fn enabled() -> bool {
 }
 
 /// Called on the main thread right before main runs.
-#[cfg(target_os = "macos")]
+#[cfg(target_vendor = "apple")]
 pub fn start() {
     if !enabled() || STARTED.swap(true, Ordering::SeqCst) {
         return;
@@ -92,7 +92,7 @@ pub fn start() {
     });
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(target_vendor = "apple"))]
 pub fn start() {}
 
 #[cfg(windows)]

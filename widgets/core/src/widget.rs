@@ -2493,11 +2493,24 @@ fn semantic_draw(widget: &mut (dyn Widget + 'static), source: Option<&ScriptObje
     node.states.remove(a11y_tree::States::HIDDEN);
     widget.semantics(cx, &mut node);
     if needs_metadata {
-        let registry = cx.components.get::<WidgetRegistry>();
-        if let Some((info, _)) = registry.map.get(&widget.script_type_id()) {
-            node.class = crate::widget_tree::live_id_token(info.name);
+        {
+            let registry = cx.components.get::<WidgetRegistry>();
+            if let Some((info, _)) = registry.map.get(&widget.script_type_id()) {
+                node.class = crate::widget_tree::live_id_token(info.name);
+            }
         }
-        node.path = cx.widget_tree().semantic_path(widget.widget_uid(), WidgetUid(cx.a11y.window_root(token)));
+    }
+    // A widget made inside its parent's draw is not in the widget tree's graph yet: its path
+    // is named once a frame has drawn (CxA11y::path_unknown), or by itself on a later draw.
+    if needs_metadata || cx.a11y.path_pending(token) {
+        let path = cx.widget_tree().semantic_path(widget.widget_uid(), WidgetUid(cx.a11y.window_root(token)));
+        match path {
+            Ok(path) => node.path = path,
+            Err(part) => {
+                node.path = part;
+                cx.a11y.path_unknown(token);
+            }
+        }
     }
     if let Some(rect) = makepad_platform::a11y::snapshot_rect(&widget.area(), cx) {
         node.bounds = makepad_platform::a11y::semantic_rect(rect);

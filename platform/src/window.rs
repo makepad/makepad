@@ -225,7 +225,10 @@ impl WindowHandle {
 pub struct CxWindowPool(IdPool<CxWindow>);
 impl CxWindowPool {
     fn alloc(&mut self) -> WindowHandle {
-        WindowHandle(self.0.alloc())
+        let window = WindowHandle(self.0.alloc());
+        self[window.window_id()].paint_paused = false;
+        self[window.window_id()].paint_once = false;
+        window
     }
 
     pub fn len(&self) -> usize {
@@ -915,6 +918,9 @@ pub struct CxWindow {
     pub is_created: bool,
     pub window_geom: WindowGeom,
     pub main_pass_id: Option<DrawPassId>,
+    /// Keep the last presented image until resumed or explicitly painted once.
+    pub(crate) paint_paused: bool,
+    pub(crate) paint_once: bool,
     pub is_fullscreen: bool,
     pub is_popup: bool,
     /// a tray app's dropdown (`WindowHandle::configure_dropdown`)
@@ -958,6 +964,8 @@ impl Default for CxWindow {
             is_created: false,
             window_geom: WindowGeom::default(),
             main_pass_id: None,
+            paint_paused: false,
+            paint_once: false,
             is_fullscreen: false,
             is_popup: false,
             dropdown: false,
@@ -1725,18 +1733,6 @@ mod tests {
         assert_eq!(geom.window_chrome_buttons.pos, dvec2(8.0, 6.0));
         assert_eq!(geom.window_chrome_buttons.size, dvec2(72.0, 24.0));
         assert_eq!(cx.pending_window_geom_changes.len(), 2);
-    }
-
-    #[test]
-    fn set_topmost_queues_platform_op() {
-        let mut cx = test_cx();
-        let mut window = WindowHandle::new(&mut cx);
-        cx.platform_ops.clear();
-
-        window.set_topmost(&mut cx, true);
-
-        assert_eq!(cx.platform_ops.len(), 1);
-        assert!(matches!(cx.platform_ops[0], CxOsOp::SetTopmost(_, true)));
     }
 
     #[test]

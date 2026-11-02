@@ -727,6 +727,12 @@ impl ScriptHook for TipLayer {
 }
 
 impl TipLayer {
+    /// The text of the tip pending or on screen.
+    #[cfg(test)]
+    pub(crate) fn held_text(&self) -> Option<String> {
+        self.pending.as_ref().or(self.showing.as_ref()).map(|tip| tip.text.clone())
+    }
+
     fn show_pending(&mut self, cx: &mut Cx) {
         if let Some(tip) = self.pending.take() {
             self.showing = Some(tip);

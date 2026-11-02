@@ -1,6 +1,5 @@
 #![cfg_attr(test, deny(missing_docs))]
 #![cfg_attr(test, deny(warnings))]
-#![cfg_attr(feature = "nightly", feature(test))]
 #![no_std]
 
 //! # UniCase
@@ -44,8 +43,6 @@
 
 #[cfg(test)]
 extern crate std;
-#[cfg(feature = "nightly")]
-extern crate test;
 
 extern crate alloc;
 use alloc::string::String;
@@ -394,38 +391,6 @@ mod tests {
 
         assert!(a != b);
         assert!(b != a);
-    }
-
-    #[cfg(feature = "nightly")]
-    #[bench]
-    fn bench_unicase_ascii(b: &mut ::test::Bencher) {
-        b.bytes = b"foobar".len() as u64;
-        let x = UniCase::new("foobar");
-        let y = UniCase::new("FOOBAR");
-        b.iter(|| assert_eq!(x, y));
-    }
-
-    #[cfg(feature = "nightly")]
-    static SUBJECT: &'static [u8] = b"ffoo bar baz foo bar baz foo bar baz foo bar baz foo bar baz foo bar baz foo bar baz foo bar baz foo bar baz foo bar baz foo bar baz foo bar baz foo bar baz foo bar baz foo bar baz foo bar baz foo bar baz foo bar baz foo bar baz foo bar baz foo bar baz foo bar baz foo bar baz foo bar baz foo bar baz foo bar baz foo bar baz foo bar baz foo bar baz foo bar baz foo bar baz foo bar baz foo bar baz foo bar baz foo bar baz foo bar baz foo bar baz foo bar baz foo bar baz foo bar baz foo bar baz foo bar baz foo bar baz foo bar baz foo bar baz foo bar baz foo bar baz foo bar baz foo bar baz foo bar baz foo bar baz foo bar baz foo bar baz foo bar baz foo bar baz foo bar baz foo bar baz oo bar baz quux herp derp";
-
-    #[cfg(feature = "nightly")]
-    #[inline(never)]
-    fn is_ascii(bytes: &[u8]) -> bool {
-        #[allow(unused, deprecated)]
-        use std::ascii::AsciiExt;
-        bytes.is_ascii()
-    }
-
-    #[cfg(feature = "nightly")]
-    #[bench]
-    fn bench_is_ascii(b: &mut ::test::Bencher) {
-        b.iter(|| assert!(is_ascii(SUBJECT)));
-    }
-
-    #[cfg(feature = "nightly")]
-    #[bench]
-    fn bench_is_utf8(b: &mut ::test::Bencher) {
-        b.iter(|| assert!(::std::str::from_utf8(SUBJECT).is_ok()));
     }
 
     #[test]

@@ -16,6 +16,10 @@ use std::collections::VecDeque;
 pub(crate) const REFRESH_HYSTERESIS: f32 = 0.85;
 /// History weight right after an edit near the probe: show it quickly.
 pub(crate) const DIRTY_HYSTERESIS: f32 = 0.2;
+/// Settle mode: updates per probe, each a rotated ray set averaged equally
+/// with the ones before it; then the probe stops. Enough for the noise to
+/// go and for the bounces to come through the field.
+pub(crate) const SETTLE_UPDATES: u8 = 6;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct BatchItem {
@@ -39,6 +43,11 @@ pub(crate) struct Cascade {
     /// Frame stamp of each slot's last scheduling: one update per frame.
     stamp: Vec<u32>,
     frame: u32,
+    /// Settle mode: updates each slot had since it last changed, and whether
+    /// a surface can read it (no surface near: never traced).
+    settle: bool,
+    updates: Vec<u8>,
+    needed: Vec<bool>,
 }
 
 /// Visits every slot once per `count` steps, spread through the volume so
@@ -52,10 +61,27 @@ fn refresh_slot(step: usize, count: usize) -> usize {
 fn gcd(a: usize, b: usize) -> usize { if b == 0 { a } else { gcd(b, a % b) } }
 
 impl Cascade {
-    pub fn new(grid: [usize; 3], spacing: f32) -> Self {
+    pub fn new(grid: [usize; 3], spacing: f32, settle: bool) -> Self {
         let count = grid.iter().product();
-        Self { grid, spacing, origin: None, queued: vec![Queued::No; count], queue: VecDeque::new(), cursor: 0, stamp: vec![0; count], frame: 0 }
+        Self { grid, spacing, origin: None, queued: vec![Queued::No; count], queue: VecDeque::new(), cursor: 0, stamp: vec![0; count], frame: 0, settle, updates: vec![0; count], needed: vec![!settle; count] }
     }
+    /// Which probes of the window a surface can read (window-local cells,
+    /// x + grid.x (y + grid.y z)). A probe newly needed is traced.
+    pub fn set_needed(&mut self, local: &[bool]) {
+        let Some(o) = self.origin else { return };
+        let (gx, gy) = (self.grid[0], self.grid[1]);
+        for (i, &now) in local.iter().enumerate() {
+            let (x, y, z) = (i % gx, (i / gx) % gy, i / (gx * gy));
+            let slot = self.slot([o[0] + x as i32, o[1] + y as i32, o[2] + z as i32]);
+            if now && !self.needed[slot] { self.enqueue(slot, Queued::Dirty); }
+            self.needed[slot] = now;
+        }
+    }
+    /// Settle mode: every needed probe settles again from what it holds.
+    pub fn restart(&mut self) {
+        if self.settle { self.updates.iter_mut().for_each(|u| *u = (*u).min(1)); }
+    }
+
     pub fn count(&self) -> usize { self.queued.len() }
     pub fn pending(&self) -> usize { self.queue.len() }
     pub fn slot(&self, cell: [i32; 3]) -> usize {
@@ -84,7 +110,7 @@ impl Cascade {
         for slot in 0..self.count() {
             let c = self.cell(slot).unwrap();
             let kept = old.is_some_and(|o| (0..3).all(|a| c[a] >= o[a] && c[a] < o[a] + self.grid[a] as i32));
-            if !kept { self.enqueue(slot, Queued::New); exposed.push(slot); }
+            if !kept { self.updates[slot] = 0; self.enqueue(slot, Queued::New); exposed.push(slot); }
         }
         exposed
     }
@@ -110,9 +136,11 @@ impl Cascade {
             let Some(slot) = self.queue.pop_front() else { break };
             let slot = slot as usize;
             let why = std::mem::replace(&mut self.queued[slot], Queued::No);
+            if !self.needed[slot] { continue; }
             let Some(cell) = self.cell(slot) else { continue };
             let hysteresis = if why == Queued::Dirty { DIRTY_HYSTERESIS } else { 0.0 };
             self.stamp[slot] = self.frame;
+            self.updates[slot] = 1;
             out.push(BatchItem { cascade: index, slot, cell, hysteresis });
             taken += 1;
         }
@@ -121,13 +149,24 @@ impl Cascade {
     fn take_refresh(&mut self, index: usize, n: usize, out: &mut Vec<BatchItem>) -> usize {
         let count = self.count();
         let mut taken = 0;
-        for _ in 0..n.min(count) {
+        // Settle mode looks past the probes that are done for ones that are not.
+        for _ in 0..if self.settle { count } else { n.min(count) } {
+            if taken == n { break; }
             let slot = refresh_slot(self.cursor, count);
             self.cursor = (self.cursor + 1) % count;
             if self.queued[slot] != Queued::No || self.stamp[slot] == self.frame { continue; }
+            let hysteresis = if self.settle {
+                let done = self.updates[slot];
+                if !self.needed[slot] || done >= SETTLE_UPDATES { continue; }
+                self.updates[slot] = done + 1;
+                // an equal average of this probe's updates so far
+                (done as f32 / (done as f32 + 1.0)).min(REFRESH_HYSTERESIS)
+            } else {
+                REFRESH_HYSTERESIS
+            };
             self.stamp[slot] = self.frame;
             let Some(cell) = self.cell(slot) else { break };
-            out.push(BatchItem { cascade: index, slot, cell, hysteresis: REFRESH_HYSTERESIS });
+            out.push(BatchItem { cascade: index, slot, cell, hysteresis });
             taken += 1;
         }
         taken
@@ -162,7 +201,13 @@ pub(crate) fn schedule(cascades: &mut [Cascade], budget: usize) -> Vec<BatchItem
         if taken == 0 { break; }
         left -= taken;
     }
-    let s = shares(left, ready.len());
-    for (k, &i) in ready.iter().enumerate() { cascades[i].take_refresh(i, s[k], &mut out); }
+    // What a settled cascade leaves goes to those that are not.
+    while left > 0 {
+        let s = shares(left, ready.len());
+        let mut taken = 0;
+        for (k, &i) in ready.iter().enumerate() { taken += cascades[i].take_refresh(i, s[k], &mut out); }
+        if taken == 0 || !cascades[ready[0]].settle { break; }
+        left -= taken;
+    }
     out
 }

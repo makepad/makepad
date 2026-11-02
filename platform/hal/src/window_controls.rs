@@ -165,4 +165,49 @@ mod tests {
         assert_eq!(sheet_family(r#"{"family":"windows"}"#), Some("windows"));
         assert_eq!(sheet_family(r#"{"makepad_style":{"name":"windows"}}"#), None);
     }
+
+    #[test]
+    fn hosted_resize_round_trips_and_rejects_invalid_messages() {
+        let resize = HostedResize { w: 640.5, h: 480.0 };
+        assert_eq!(HostedResize::parse(&resize.to_json()), Some(resize));
+        assert_eq!(HostedResize::parse(r#"{"w":640.5,"h":480.0}"#), None);
+        assert_eq!(HostedResize::parse(r#"{"makepad_resize":{"w":1}}"#), None);
+        assert_eq!(HostedAppFrame.to_json(), r#"{"makepad_app_frame":{}}"#);
+        assert_eq!(HostedAppFrame::parse(&HostedAppFrame.to_json()), Some(HostedAppFrame));
+        assert_eq!(HostedAppFrame::parse(r#"{"makepad_resize":{}}"#), None);
+        assert_eq!(HostedAppFrame::parse(r#"{"message":"makepad_app_frame"}"#), None);
+    }
+}
+
+/// A hosted app resizes its tile's window (`Window::resize`, the remote `resize`): the inner
+/// size `w` by `h` in the app's layout points, as JSON in a `Custom` message to the host. The
+/// host owns the tile, so it applies it (leaving maximised or snapped states) or declines; a
+/// request for the size it has. Lives here, not in the studio protocol, so that it does not
+/// change the hosted wire's fingerprint: a host that does not know it ignores it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct HostedResize { pub w: f64, pub h: f64 }
+impl HostedResize {
+    pub fn to_json(&self) -> String { format!("{{\"makepad_resize\":{{\"w\":{},\"h\":{}}}}}", self.w, self.h) }
+    pub fn parse(json: &str) -> Option<Self> {
+        let rest = json.split("\"makepad_resize\"").nth(1)?;
+        let number = |key: &str| -> Option<f64> {
+            let after = rest.split(key).nth(1)?.trim_start().strip_prefix(':')?.trim_start();
+            let end = after.find(|c: char| !(c.is_ascii_digit() || matches!(c, '.' | '-' | '+' | 'e' | 'E'))).unwrap_or(after.len());
+            after[..end].parse().ok().filter(|v: &f64| v.is_finite())
+        };
+        Some(Self { w: number("\"w\"")?, h: number("\"h\"")? })
+    }
+}
+
+/// A hosted process tells its host that the app's own first frame (not a loader's load screen)
+/// reached the host, once per process. A `Custom` message so it does not change the hosted
+/// wire's fingerprint: a host that does not know it ignores it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct HostedAppFrame;
+impl HostedAppFrame {
+    pub fn to_json(&self) -> String { "{\"makepad_app_frame\":{}}".into() }
+    pub fn parse(json: &str) -> Option<Self> {
+        json.split("\"makepad_app_frame\"").nth(1)?.trim_start().strip_prefix(':')?;
+        Some(Self)
+    }
 }

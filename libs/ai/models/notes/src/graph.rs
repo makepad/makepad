@@ -457,13 +457,4 @@ mod tests {
         let out = conv2d(&input, &layer, 1, 1, 0, 0).unwrap();
         assert_eq!(out.data, vec![32.5, 44.5]);
     }
-
-    #[test]
-    #[ignore = "requires an available Metal or CUDA device; CPU graph is the test oracle"]
-    fn device_graph_builds() {
-        let checkpoint = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../../local/models/weights/basic_pitch/nmp.onnx");
-        let weights = NotesWeights::load(checkpoint).unwrap();
-        let _ = DeviceNotesGraph::load(&weights).unwrap();
-    }
 }

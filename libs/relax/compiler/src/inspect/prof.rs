@@ -446,13 +446,13 @@ mod imp {
     }
 }
 
-#[cfg(any(target_os = "macos", target_os = "android"))]
+#[cfg(any(target_vendor = "apple", target_os = "android"))]
 mod imp {
     use super::{Run, Sample};
 
     /// On a CPU right now (macOS: the Mach run state; Android: /proc's `R`).
     fn on_cpu(t: &crate::inspect::threads::Thread) -> bool {
-        #[cfg(target_os = "macos")]
+        #[cfg(target_vendor = "apple")]
         { crate::inspect::threads::running(t) }
         #[cfg(target_os = "android")]
         { t.state == "running" }
@@ -471,7 +471,7 @@ mod imp {
         if ev != super::Ev::Cpu {
             notes.push(format!("{} cannot be sampled in an Android app (perf_event is closed to apps); CPU time instead", ev.name()));
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(target_vendor = "apple")]
         if ev != super::Ev::Cpu {
             notes.push(format!("{} cannot be sampled on macOS without root (per-thread hardware sampling is privileged); CPU time instead -- `counters` gives this process's total instructions and cycles", ev.name()));
         }

@@ -35,12 +35,6 @@ thread_local! {
     static DECLARATIONS: Cell<bool> = const { Cell::new(false) };
 }
 pub(crate) fn declaring() -> bool { DECLARATIONS.with(Cell::get) }
-pub(crate) fn with_declarations<T>(f: impl FnOnce() -> T) -> T {
-    struct Restore(bool);
-    impl Drop for Restore { fn drop(&mut self) { DECLARATIONS.with(|v| v.set(self.0)); } }
-    let _restore = Restore(DECLARATIONS.with(|v| v.replace(true)));
-    f()
-}
 
 static RUNNER: std::sync::OnceLock<&'static dyn MacroRunner> = std::sync::OnceLock::new();
 
@@ -418,10 +412,6 @@ pub fn run_bang_in(sess: &std::sync::Arc<crate::Session>, krate: &str, i: usize,
     }
 }
 
-/// Runs function-like proc macro `i` (bang_index) on `input`.
-pub fn run_bang(sess: &std::sync::Arc<crate::Session>, i: usize, input: TokenStream, call_span: Span) -> Result<TokenStream, String> {
-    run_bang_in(sess, "", i, input, call_span)
-}
 pub fn trace() -> bool {
     crate::preload::relax_trace().map_or(false, |t| t.split(',').any(|x| x == "pmhost"))
 }
@@ -1003,9 +993,4 @@ pub fn run_derive_in(sess: &std::sync::Arc<crate::Session>, krate: &str, name: &
         Some(r) => r.call(sess, &e, item, call_span),
         None => Err(no_runner(&e)),
     })
-}
-
-/// Runs derive `name` on `item` (any thread).
-pub fn run_derive(sess: &std::sync::Arc<crate::Session>, name: &str, item: &TokenStream, call_span: Span) -> Option<Result<TokenStream, String>> {
-    run_derive_in(sess, "", name, item, call_span)
 }

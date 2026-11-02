@@ -26,8 +26,9 @@ pub enum Runner {
     Native,
     /// The JIT: `makepad run <package>` (tools/run). From a checkout that is `cargo run --release -p
     /// makepad-run --bin makepad -- run <package>`, so the tool is never older than its sources.
-    /// It is not a `--stdin-loop` child: on Linux its HAL asks the WM's socket for its window
-    /// (`makepad_hal::wm_socket`), and the WM pairs that request with this launch by pid.
+    /// On Linux it is not a `--stdin-loop` child: its HAL asks the WM's socket for its window
+    /// (`makepad_hal::wm_socket`), and the WM pairs that request with this launch by pid. Elsewhere
+    /// it is one, under the tool.
     Jit,
 }
 
@@ -203,7 +204,10 @@ impl AppLaunch {
         match self.runner {
             Runner::Native => std::iter::once("--stdin-loop".to_string()).chain(app_args).collect(),
             Runner::Jit => {
-                let app_args: Vec<String> = app_args.collect();
+                // only Linux's HAL finds the window manager by its socket: elsewhere the app is hosted
+                // the way a native child is, over the host's wire
+                let hosted = (!cfg!(target_os = "linux")).then(|| "--stdin-loop".to_string());
+                let app_args: Vec<String> = hosted.into_iter().chain(app_args).collect();
                 let mut args = vec!["run".to_string(), self.app.package.to_string()];
                 if !app_args.is_empty() {
                     args.push("--".to_string());
@@ -216,7 +220,14 @@ impl AppLaunch {
 
     fn command(&self) -> Result<Command, String> {
         let target = Self::target_of(self.app, self.runner);
-        let (program, args) = if self.run {
+        // a host that runs under the JIT loader starts JIT apps with that loader (`$MAKEPAD_RUN_LOADER
+        // run ...`, the runner's convention), never a cargo build of another one: a CI tree's cargo
+        // (no CARGO_TARGET_DIR once scrubbed) built a whole host makepad on every launch
+        let loader = (self.run && self.runner == Runner::Jit).then(|| std::env::var_os("MAKEPAD_RUN_LOADER").map(PathBuf::from)).flatten().filter(|l| l.is_file());
+        let (program, args) = if let Some(loader) = &loader {
+            self.root.as_deref().ok_or("no checkout to run from")?;
+            (loader.clone(), self.process_args())
+        } else if self.run {
             let root = self.root.as_deref().ok_or("no checkout to run from")?;
             run_argv(&target, root, &self.process_args())
         } else if self.building {
@@ -234,7 +245,7 @@ impl AppLaunch {
         let mut command = Command::new(program);
         command.args(args);
         crate::child_env::scrub(&mut command);
-        if self.building || self.run {
+        if (self.building || self.run) && loader.is_none() {
             crate::cargo_env(&mut command);
         }
         // The registry's launch, whatever its launcher's environment: a lane shell's target dir
@@ -425,15 +436,22 @@ mod tests {
         seen.expect("start spawned")
     }
 
-    /// Under the JIT a checkout launch is `cargo run` of the makepad tool with `run <package>`, the
-    /// app's arguments after `--`, and no `--stdin-loop` (the HAL finds the WM by its socket).
+    /// Under the JIT a checkout launch is `run <package>` with the app's arguments after `--` (on
+    /// Linux no `--stdin-loop`: the HAL finds the WM by its socket), given to the loader this host
+    /// runs under (`MAKEPAD_RUN_LOADER`), else to `cargo run` of the makepad tool.
     #[test]
     fn a_jit_launch_runs_the_package_under_the_makepad_tool() {
         let root = crate::checkout_at_or_above(Path::new(env!("CARGO_MANIFEST_DIR"))).expect("tests run in a checkout");
         let (args, kind) = started("terminal", Runner::Jit, &root);
         assert_eq!(kind, LaunchKind::Run);
-        let tail: Vec<&str> = args.iter().map(String::as_str).skip_while(|a| *a != "-p").collect();
-        assert_eq!(tail, ["-p", "makepad-run", "--bin", "makepad", "--", "run", "makepad-app-terminal", "--", "--x"]);
+        let hosted: &[&str] = if cfg!(target_os = "linux") { &[] } else { &["--stdin-loop"] };
+        let run = [&["run", "makepad-app-terminal", "--"], hosted, &["--x"]].concat();
+        if std::env::var_os("MAKEPAD_RUN_LOADER").is_some_and(|l| Path::new(&l).is_file()) {
+            assert_eq!(args, run);
+        } else {
+            let tail: Vec<&str> = args.iter().map(String::as_str).skip_while(|a| *a != "-p").collect();
+            assert_eq!(tail, [&["-p", "makepad-run", "--bin", "makepad", "--"][..], &run[..]].concat());
+        }
         let (native, _) = started("terminal", Runner::Native, &root);
         assert!(native.iter().any(|a| a == "--stdin-loop"), "{native:?}");
         assert!(native.iter().any(|a| a == "makepad-app-terminal"));
@@ -479,8 +497,10 @@ mod tests {
             let run = run.unwrap();
             let build = AppLaunch::build_command(entry, runner, root.clone()).unwrap();
             let args = |c: &Command| c.get_args().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>();
-            // what this machine sets for the app at run time is not a build input
-            let machine: Vec<String> = crate::machine::launch_env(id, runner == Runner::Jit).into_iter().map(|(k, _)| k).collect();
+            // what this machine sets for the app at run time is not a build input, nor is the
+            // dock gate a JIT launch from a devhub-synced checkout carries (read by the running JIT)
+            let mut machine: Vec<String> = crate::machine::launch_env(id, runner == Runner::Jit).into_iter().map(|(k, _)| k).collect();
+            machine.push("MAKEPAD_RUN_DOCK_REVISION".to_string());
             let envs = |c: &Command| {
                 let mut v: Vec<_> = c.get_envs().filter(|(k, _)| !machine.iter().any(|m| k.to_str() == Some(m.as_str()))).map(|(k, v)| (k.to_os_string(), v.map(|v| v.to_os_string()))).collect();
                 v.sort();

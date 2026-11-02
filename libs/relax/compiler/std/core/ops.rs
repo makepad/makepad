@@ -77,11 +77,13 @@ impl<'a, T: ?Sized> DerefMut for &'a mut T {
 pub trait Index<Idx: ?Sized> {
     type Output: ?Sized;
     #[track_caller]
+    #[rustc_no_implicit_autorefs]
     fn index(&self, index: Idx) -> &Self::Output;
 }
 #[cfg_attr(not(relax_check), lang = "index_mut")]
 pub trait IndexMut<Idx: ?Sized>: Index<Idx> {
     #[track_caller]
+    #[rustc_no_implicit_autorefs]
     fn index_mut(&mut self, index: Idx) -> &mut Self::Output;
 }
 

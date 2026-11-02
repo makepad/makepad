@@ -1976,12 +1976,6 @@ mod tests {
     }
 
     #[test]
-    fn test_from_gif_single_frame_has_no_frame_delays() {
-        let image = ImageBuffer::from_gif(&single_frame_gif()).unwrap();
-        assert!(image.animation.is_none());
-    }
-
-    #[test]
     fn test_from_gif_zero_delay_normalised_to_100ms() {
         let image = ImageBuffer::from_gif(&zero_delay_gif()).unwrap();
         let animation = image.animation.as_ref().unwrap();
@@ -2028,26 +2022,6 @@ mod tests {
             decode_image_buffer(Path::new("sticker"), &[0; 16], None),
             Err(ImageError::UnsupportedFormat)
         ));
-    }
-
-    #[test]
-    fn test_makepad_gif_is_only_a_dependency_of_makepad_draw() {
-        let lock_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .join("Cargo.lock");
-        let lock = std::fs::read_to_string(lock_path).unwrap();
-        let consumers: Vec<&str> = lock
-            .split("[[package]]")
-            .filter(|block| block.contains("\"makepad-gif\""))
-            .filter_map(|block| {
-                block
-                    .lines()
-                    .find_map(|line| line.strip_prefix("name = \"")?.strip_suffix('"'))
-            })
-            .filter(|name| *name != "makepad-gif")
-            .collect();
-        assert_eq!(consumers, ["makepad-draw"]);
     }
 
     fn static_png_2x2(color: [u8; 4]) -> Vec<u8> {

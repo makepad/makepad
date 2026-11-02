@@ -680,45 +680,6 @@ fn spilled_task_reads_preserve_order_and_deduplicate() {
 }
 
 #[test]
-#[ignore = "micro-benchmark; run once with --ignored --nocapture"]
-fn micro_benchmark() {
-    use std::hint::black_box;
-    let mut cx = Cx::new();
-    cx.leaf(0).unwrap();
-    let n = 100_000;
-    let start = Instant::now();
-    for _ in 0..n {
-        black_box(cx.leaf(black_box(0)).unwrap());
-    }
-    let hit = start.elapsed().as_nanos() as f64 / n as f64;
-
-    let mut execute_ns = 0;
-    for value in 100..10_100 {
-        cx.edit(0, value);
-        let start = Instant::now();
-        black_box(cx.leaf(0).unwrap());
-        execute_ns += start.elapsed().as_nanos();
-    }
-    cx.sum(4).unwrap();
-    let mut green_ns = 0;
-    for value in 100..10_100 {
-        cx.edit(15, value);
-        // Time just the ten-dependency validation, with its dependencies current.
-        for key in 0..10 {
-            cx.leaf(key).unwrap();
-        }
-        let start = Instant::now();
-        black_box(cx.sum(4).unwrap());
-        green_ns += start.elapsed().as_nanos();
-    }
-    println!(
-        "query benchmark: hit {hit:.1} ns; tracked trivial execution {:.1} ns; try_mark_green 10 deps {:.1} ns",
-        execute_ns as f64 / 10_000.0,
-        green_ns as f64 / 10_000.0
-    );
-}
-
-#[test]
 fn independent_context_restores_enclosing_query_after_unwind() {
     let outer = Cx::new();
     let inner = Cx::new();

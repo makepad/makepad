@@ -274,7 +274,7 @@ fn candidate_urls(reach: SpeechReach) -> Vec<String> {
         // Give a brand-new listener one beacon interval to hear the fleet,
         // once per process; afterwards the live set is whatever it is.
         static WAITED: OnceLock<()> = OnceLock::new();
-        if discovered.nodes().is_empty() && WAITED.get().is_none() {
+        if matches!(&discovered, crate::discovery::Discovery::Available(_)) && discovered.nodes().is_empty() && WAITED.get().is_none() {
             let deadline = Instant::now() + FIRST_BEACON_WAIT;
             while discovered.nodes().is_empty() && Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(100));

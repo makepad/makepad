@@ -28,6 +28,17 @@ fn design() {
     d.push(Box::new(move |n| scaled(n % 3)(extra)));
 }
 
+#[inline(never)]
+fn apply<F: FnOnce() -> u64>(f: F) -> u64 {
+    f()
+}
+
+// Runs on every tick, so the disk cache holds it; its callee `apply<closure>` first runs after the
+// patch: nothing has built that closure's owner body in this process.
+fn late(run: bool, n: u64) -> u64 {
+    if run { apply(move || n + 1) } else { 0 }
+}
+
 fn main() {
     design();
     let t0 = std::time::Instant::now();
@@ -37,6 +48,12 @@ fn main() {
         if std::path::Path::new("go").exists() {
             let v: u64 = DESIGN.lock().unwrap().iter().map(|h| h(n)).sum();
             println!("out val {} {}", n, v);
+        }
+        // (its own file: the warm-up run opens `go`, which would put `apply<closure>` in the cache)
+        if std::path::Path::new("late").exists() {
+            println!("out late {} {}", n, late(true, n));
+        } else {
+            late(false, n);
         }
         if std::path::Path::new("stop").exists() || t0.elapsed().as_secs() > 90 {
             break;

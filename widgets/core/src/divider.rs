@@ -460,23 +460,3 @@ impl DividerRef {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn divider_is_registered_after_the_views() {
-        let lib = include_str!("lib.rs");
-        let divider = include_str!("divider.rs");
-        assert!(lib.contains("pub mod divider;"));
-        assert!(lib.contains("divider::*"));
-        assert!(lib.contains("crate::divider::script_mod(vm);"));
-        let views = lib.find("crate::view_ui::script_mod(vm);").unwrap();
-        let here = lib.find("crate::divider::script_mod(vm);").unwrap();
-        assert!(views < here, "Hr and Vr stay untouched and registered first");
-        // Assembled at run time so this test's own text cannot satisfy them.
-        let base = format!("mod.widgets.{} = #({}::register_widget(vm))", "DividerBase", "Divider");
-        let one = format!("set_type_default() do mod.widgets.{}", "DividerBase");
-        assert!(divider.contains(&base));
-        assert_eq!(divider.matches(&one).count(), 1, "one type default per widget");
-    }
-}

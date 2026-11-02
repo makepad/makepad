@@ -1,3 +1,4 @@
+#![feature(relax_internals)]
 // A type's TypeId must not move when an edit shifts the text before it: the TypeId is folded
 // into code as a constant, and code built before the edit (a stored value's vtable `type_id`)
 // and after it (a rebuilt or O3 caller of `TypeId::of`) must agree, else `downcast` of a

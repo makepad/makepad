@@ -3,15 +3,14 @@
 //! ParsedFile::part publishes it), into the run's image store (cache/front_run.rs), and from
 //! then on read through the mapping -- clean file pages instead of heap. Warm runs map the same
 //! images (crate stores refer to them) and read them through the same functions (restore,
-//! apply_part). MAKEPAD_RUN_FRONT=0 disables front images; MAKEPAD_RUN_FRONT_VERIFY=1 compares every
-//! section with the parse it replaces.
+//! apply_part). MAKEPAD_RUN_FRONT_VERIFY=1 compares every section with the parse it replaces.
 
 use crate::arena::Arena;
 use crate::image::{Reader, Writer};
 use crate::packed::PackedToks;
 use crate::parser::ParsedFile;
 use crate::source::SourceRegistry;
-use crate::origin_table::{Table, Regions, Maps, Origins};
+use crate::origin_table::{Table, Regions, Rules, Maps, Origins};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const S_SRC: u32 = 1;
@@ -28,7 +27,7 @@ const S_AST: u32 = 100;
 /// The tree's arrays (every Ast arena), in section order.
 macro_rules! ast_arrays {
     ($m:ident) => {
-        $m!(exprs: Expr, pats: Pat, tys: Ty, blocks: Block, root_attrs: Attr, root_items: ItemId, mac_args: MacArgs, path_segs: PathSeg, stmts: Stmt, expr_lists: ExprId, pat_lists: PatId, ty_lists: TyId, field_exprs: FieldExpr, arms: Arm, closure_params: ClosureParam, field_pats: FieldPat, qselfs: QSelf, generic_args: GenericArgs, fn_ptrs: FnPtr, generic_arg_lists: GenericArg, bounds: Bound, generic_params: GenericParam, ident_lists: Ident, attrs: Attr, asm_ops: AsmOp, items: Item, fn_sigs: FnSig, params: Param, field_defs: FieldDef, variants: Variant, use_trees: UseTree, item_lists: ItemId, where_preds: WherePred, method_calls: MethodCallRow, for_exprs: ForRow, closure_exprs: ClosureRow, struct_exprs: StructRow, mac_calls: MacCall, while_exprs: WhileRow, let_stmts: LetStmt, attrs_stmts: AttrsStmt, use_items: UseItem, struct_items: StructItem, union_items: UnionItem, enum_items: EnumItem, alias_items: TypeAliasItem, trait_items: TraitItem, trait_alias_items: TraitAliasItem, impl_items: ImplItem, foreign_mods: ForeignModItem, vis_paths: Path)
+        $m!(exprs: Expr, pats: Pat, tys: Ty, blocks: Block, root_attrs: Attr, root_items: ItemId, mac_args: MacArgs, path_segs: PathSeg, stmts: Stmt, expr_lists: ExprId, pat_lists: PatId, ty_lists: TyId, field_exprs: FieldExpr, arms: Arm, closure_params: ClosureParam, field_pats: FieldPat, qselfs: QSelf, generic_args: GenericArgs, fn_ptrs: FnPtr, generic_arg_lists: GenericArg, bounds: Bound, generic_params: GenericParam, ident_lists: Ident, attrs: Attr, asm_ops: AsmOp, items: Item, fn_sigs: FnSig, params: Param, field_defs: FieldDef, variants: Variant, use_trees: UseTree, item_lists: ItemId, where_preds: WherePred, method_calls: MethodCallRow, for_exprs: ForRow, closure_exprs: ClosureRow, struct_exprs: StructRow, mac_calls: MacCall, while_exprs: WhileRow, let_stmts: LetStmt, attrs_stmts: AttrsStmt, use_items: UseItem, struct_items: StructItem, union_items: UnionItem, enum_items: EnumItem, stmt_attrs: AttrsStmt, alias_items: TypeAliasItem, trait_items: TraitItem, trait_alias_items: TraitAliasItem, impl_items: ImplItem, foreign_mods: ForeignModItem, vis_paths: Path)
     };
 }
 
@@ -45,11 +44,6 @@ fn mismatch(path: &str, section: &str) -> bool {
         eprintln!("makepad-run front mismatch: {} {}", path, section);
     }
     false
-}
-
-pub fn enabled() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("MAKEPAD_RUN_FRONT").map_or(true, |v| v != "0"))
 }
 
 pub fn verify() -> bool {
@@ -111,7 +105,7 @@ pub fn apply(path: &str, pf: &mut ParsedFile, img: &'static [u8]) -> bool {
     let Some(toks) = PackedToks::mapped(read!(u32, 1, S_TOKS, "toks")) else { return mismatch(path, "toks") };
     let Some(em) = Table::<Regions>::mapped(read!(u8, 2, S_EXP_MAP, "exp_map")) else { return mismatch(path, "exp_map") };
     let Some(to) = Table::<Maps>::mapped(read!(u8, 3, S_TOK_ORIGIN, "tok_origin")) else { return mismatch(path, "tok_origin") };
-    let Some(re) = Table::<Regions>::mapped(read!(u8, 4, S_RULES_EXP, "rules_exp")) else { return mismatch(path, "rules_exp") };
+    let Some(re) = Table::<Rules>::mapped(read!(u8, 4, S_RULES_EXP, "rules_exp")) else { return mismatch(path, "rules_exp") };
     let Some(bo) = Table::<Maps>::mapped(read!(u8, 5, S_BODY_ORIGIN, "body_origin")) else { return mismatch(path, "body_origin") };
     let origins = read!(u8, 6, S_TOKEN_ORIGINS, "token_origins");
     let sources = read!(u8, 7, S_SOURCES, "sources");
@@ -259,7 +253,7 @@ fn part_from_image(path: &str, ends: [u32; crate::ast::ARENAS], (src, toks, rule
         };
     }
     ast_arrays!(get);
-    let (Some(rules_exp), Some(body_origin)) = (r.slice::<u8>(8 + k, P_RULES_EXP).and_then(Table::<Regions>::mapped), r.slice::<u8>(9 + k, P_BODY_ORIGIN).and_then(Table::<Maps>::mapped)) else {
+    let (Some(rules_exp), Some(body_origin)) = (r.slice::<u8>(8 + k, P_RULES_EXP).and_then(Table::<Rules>::mapped), r.slice::<u8>(9 + k, P_BODY_ORIGIN).and_then(Table::<Maps>::mapped)) else {
         mismatch(path, "part.rules");
         return None;
     };

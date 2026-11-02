@@ -509,7 +509,21 @@ impl V<'_> {
                 let m = *self.ast.row(m);
                 if m.args == NO_MAC_ARGS { return; }
                 let args = *self.ast.mac_arg(m.args);
-                self.exprs(args.exprs);
+                // rustc check_unsafety: a label block of `asm!` is a safe context of its own
+                let labels: Vec<ExprId> = args.asm.map_or(Vec::new(), |asm| self.ast.list(asm.ops).iter().filter(|op| op.dir == AsmDir::Label).filter_map(|op| op.input).collect());
+                if labels.is_empty() {
+                    self.exprs(args.exprs);
+                } else {
+                    for &x in self.ast.list(args.exprs) {
+                        if labels.contains(&x) {
+                            let saved = std::mem::replace(&mut self.ctx, Ctx::Safe);
+                            self.expr(x);
+                            self.ctx = saved;
+                        } else {
+                            self.expr(x);
+                        }
+                    }
+                }
                 if let Some(p) = args.pat { self.pat(p, lo); }
                 if let Some(g) = args.guard { self.expr(g); }
                 // format strings' inline `{NAME}` arguments naming a static

@@ -97,7 +97,7 @@ impl Component {
         // Never past the whole: a payload larger than its manifest size must
         // not push the bar over 100 %.
         let total = self.units.load(Ordering::Relaxed);
-        let _ = self.done.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |d| Some(d.saturating_add(units).min(total)));
+        let _ = self.done.try_update(Ordering::Relaxed, Ordering::Relaxed, |d| Some(d.saturating_add(units).min(total)));
     }
 }
 

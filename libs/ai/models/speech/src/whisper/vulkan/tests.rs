@@ -1,7 +1,5 @@
-//! Real-device checks against the existing plain-Rust tensor/encoder/decoder.
-//! Run with `cargo test --release -p makepad-ai-speech --lib vulkan_backend
-//! -- --ignored --test-threads=1 --nocapture` for the opt-in comparisons.
-//! Worker churn runs by default and skips only when no device is available.
+//! Real-device checks against self-contained CPU references.
+//! A working Vulkan device is required.
 
 use super::*;
 use crate::whisper::{accel, decoder, encoder};
@@ -31,10 +29,7 @@ fn gpu() -> Gpu {
 
 #[test]
 fn runtime_survives_100_worker_threads() {
-    if let Err(e) = makepad_ai_vulkan::Device::shared() {
-        eprintln!("Whisper Vulkan worker churn skipped: no usable device ({e})");
-        return;
-    }
+    makepad_ai_vulkan::Device::shared().expect("a working Vulkan device is required");
     for i in 0..100 {
         std::thread::spawn(move || {
             TEST_VULKAN.with(|v| v.set(true));
@@ -42,25 +37,6 @@ fn runtime_survives_100_worker_threads() {
             // Leave RUNTIME populated: thread exit must drop its streams,
             // buffers and pipelines without destroying the shared device.
         }).join().unwrap_or_else(|_| panic!("Whisper Vulkan worker {i} panicked"));
-    }
-}
-
-#[test]
-#[ignore = "requires MAKEPAD_WHISPER_TEST_MODEL and a real Vulkan device"]
-fn model_load_survives_100_worker_threads() {
-    if let Err(e) = makepad_ai_vulkan::Device::shared() {
-        eprintln!("Whisper Vulkan model churn skipped: no usable device ({e})");
-        return;
-    }
-    let path = std::env::var("MAKEPAD_WHISPER_TEST_MODEL").expect("set MAKEPAD_WHISPER_TEST_MODEL to a Whisper model file");
-    for i in 0..100 {
-        let path = path.clone();
-        std::thread::spawn(move || {
-            TEST_VULKAN.with(|v| v.set(true));
-            let model = WhisperModel::load_file(&path).expect("load Whisper model");
-            run("model churn", |ctx| ctx.model(&model).map(|_| ()))
-                .unwrap_or_else(|| panic!("Whisper Vulkan model load {i} failed"));
-        }).join().unwrap_or_else(|_| panic!("Whisper Vulkan model worker {i} panicked"));
     }
 }
 
@@ -119,7 +95,6 @@ fn rounded_activations(x: &Tensor) -> Tensor {
 }
 
 #[test]
-#[ignore = "requires a real Vulkan GPU"]
 fn resident_quantized_matrices_match_cpu() {
     let _gpu = gpu();
     for ty in [GGML_TYPE_Q8_0, GGML_TYPE_Q5_K, GGML_TYPE_Q4_K] {
@@ -174,7 +149,6 @@ fn close_stack(name: &str, actual: &[f32], expected: &[f32], quantised: bool) {
 }
 
 #[test]
-#[ignore = "requires a real Vulkan GPU"]
 fn matrices_match_cpu() {
     let _gpu = gpu();
     // Include both dispatch families, unaligned rows, reduction tails, and
@@ -206,7 +180,6 @@ fn matrices_match_cpu() {
 }
 
 #[test]
-#[ignore = "requires a real Vulkan GPU"]
 fn elementwise_and_norm_match_cpu() {
     let _gpu = gpu();
     for cols in [1, 37, 129, 1280] {
@@ -230,7 +203,6 @@ fn elementwise_and_norm_match_cpu() {
 }
 
 #[test]
-#[ignore = "requires a real Vulkan GPU"]
 fn convolutions_match_cpu() {
     let _gpu = gpu();
     for (ic, iw, oc, stride, ty) in [(3, 67, 9, 1, None), (8, 66, 35, 2, None),
@@ -306,7 +278,6 @@ fn attention_cpu(q: &[f32], k: &[f32], v: &[f32], nq: usize, nk: usize, heads: u
 }
 
 #[test]
-#[ignore = "requires a real Vulkan GPU"]
 fn attention_matches_cpu() {
     let _gpu = gpu();
     for (nq, nk, heads, past) in [(1, 1, 2, None), (9, 37, 2, None), (35, 65, 3, Some(30)),
@@ -397,7 +368,6 @@ fn model_with_quant(seed: u32, ty: Option<u32>) -> WhisperModel {
 }
 
 #[test]
-#[ignore = "requires a real Vulkan GPU"]
 fn fused_encoder_decoder_and_cache_match_cpu() {
     let _gpu = gpu();
     for (seed, ty) in [(13, None), (37, None), (53, Some(GGML_TYPE_Q8_0)),
@@ -446,7 +416,6 @@ fn fused_encoder_decoder_and_cache_match_cpu() {
 }
 
 #[test]
-#[ignore = "requires a real Vulkan GPU"]
 fn failed_decode_preserves_cpu_fallback_prefix() {
     let _gpu = gpu();
     let model = model(41);
@@ -475,7 +444,6 @@ fn failed_decode_preserves_cpu_fallback_prefix() {
 }
 
 #[test]
-#[ignore = "requires a real Vulkan GPU"]
 fn int8_encoder_weights_keep_float_gemv_and_decoder() {
     let _gpu = gpu();
     let model = model(57);

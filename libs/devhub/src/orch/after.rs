@@ -167,13 +167,13 @@ fn act(ctx: &Ctx, w: &Waiter) {
     ctx.store.event("after", sev, format!("after {} {state}: {} (exit {}){}", w.id, w.cmd.join(" "), exit.map_or("-".into(), |c| c.to_string()), if note.is_empty() { String::new() } else { format!(": {note}") }), None);
 }
 
-/// `makepad devhub <words>` with the master's own binary, in the checkout.
+/// devhub's words with the master's own binary, in the checkout.
 fn devhub(ctx: &Ctx, words: &[String], id: &str, log: &std::path::Path) -> Result<(i32, String), String> {
-    let exe = std::env::current_exe().map_err(|e| format!("this binary: {e}"))?;
+    let own = crate::cli::own_argv(&ctx.repo);
     let out = std::fs::File::create(log).map_err(|e| format!("{}: {e}", log.display()))?;
     let err = out.try_clone().map_err(|e| e.to_string())?;
-    let st = makepad_remote::group::command(exe)
-        .arg("devhub")
+    let st = makepad_remote::group::command(&own[0])
+        .args(&own[1..])
         .args(words)
         .current_dir(&ctx.repo)
         .env("DEVHUB_AGENT", format!("after-{}", id.to_lowercase()))
@@ -282,7 +282,7 @@ mod tests {
         let home = std::env::temp_dir().join(format!("devhub-after-test-{name}-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&home);
         let leases = Arc::new(LeaseMaster::new("mac", home.clone(), Arc::new(|_: &str, _: &str, _: &str| Err("no nodes".to_string())), Arc::new(|_| {}), Arc::new(|| 1), None, true));
-        Ctx { store: Store::open(&home, "mac", Arc::new(|_| {})), leases, machine: "mac".into(), monitor: crate::monitor::Monitor::start(&[]), repo: home.clone(), home }
+        Ctx { store: Store::open(&home, "mac", Arc::new(|_| 0)), leases, machine: "mac".into(), monitor: crate::monitor::Monitor::start(&[]), repo: home.clone(), home }
     }
 
     #[test]

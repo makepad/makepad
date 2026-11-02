@@ -245,8 +245,8 @@ mod unix {
         fn dup(fd: i32) -> i32;
         fn dup2(a: i32, b: i32) -> i32;
         fn close(fd: i32) -> i32;
-        fn read(fd: i32, buf: *mut u8, n: usize) -> isize;
-        fn write(fd: i32, buf: *const u8, n: usize) -> isize;
+        fn read(fd: i32, buf: *mut core::ffi::c_void, n: usize) -> isize;
+        fn write(fd: i32, buf: *const core::ffi::c_void, n: usize) -> isize;
         fn atexit(f: extern "C" fn()) -> i32;
         fn pipe(fds: *mut i32) -> i32;
         fn fcntl(fd: i32, cmd: i32, ...) -> i32;
@@ -312,7 +312,7 @@ mod unix {
         use std::io::Write;
         let mut buf = [0u8; 16384];
         loop {
-            let n = unsafe { read(r.fd, buf.as_mut_ptr(), buf.len()) };
+            let n = unsafe { read(r.fd, buf.as_mut_ptr().cast(), buf.len()) };
             if n > 0 {
                 let chunk = &buf[..n as usize];
                 if let Some(f) = r.file.as_mut() {
@@ -372,7 +372,7 @@ mod unix {
 
     fn out_all(fd: i32, mut b: &[u8]) {
         while !b.is_empty() {
-            let n = unsafe { write(fd, b.as_ptr(), b.len()) };
+            let n = unsafe { write(fd, b.as_ptr().cast(), b.len()) };
             if n <= 0 {
                 return;
             }

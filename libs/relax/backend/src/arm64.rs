@@ -96,7 +96,6 @@ pub fn reg_config() -> RegConfig {
         sym_class: 0,
         store_imm: |k| k == 0,
         fconst_remat: true,
-        mem_operands: false,
         remat_cost: arm64_remat_cost,
         float_windows: true,
         defers: arm64_defers,
@@ -827,8 +826,6 @@ struct Gen<'a> {
     /// loads to emit before the instruction at a position
     win: std::collections::HashMap<u32, Vec<(u32, u32, u8)>>,
     win_start: std::collections::HashMap<u32, Vec<(u32, u8)>>,
-    /// block-local evictions (Alloc::evicts / prestores): transfers before the instruction at a position
-    evict_at: std::collections::HashMap<u32, Vec<regalloc::EvOp>>,
     /// passes::low_bits_only: narrow results whose re-extension nobody reads
     low_only: Vec<bool>,
     /// passes::zero_above: values whose register is zero above that many bits
@@ -981,27 +978,11 @@ impl<'a> Gen<'a> {
         }
         (base, off)
     }
-    /// Eviction stores / reloads before an instruction (regalloc::evict_ops); flags untouched.
-    fn evict_transfers(&mut self, ops: &[regalloc::EvOp]) {
-        for op in ops {
-            match *op {
-                regalloc::EvOp::Store(r, o) => {
-                    let off = self.spill_sp(o);
-                    self.a.ldst(STRX, 8, r, SP, off);
-                }
-                regalloc::EvOp::Load(r, o) => {
-                    let off = self.spill_sp(o);
-                    self.a.ldst(LDRX, 8, r, SP, off);
-                }
-                regalloc::EvOp::Remat(r, k) => self.remat_kind_into(r, k),
-            }
-        }
-    }
     /// Recomputes a value without a location (Alloc::remat) into r.
     fn remat_into(&mut self, r: u8, v: VReg) {
         self.remat_kind_into(r, self.al.remat[v.0 as usize]);
     }
-    /// remat_into for a recomputation kind (also an evicted constant's reload, Alloc::evicts).
+    /// remat_into for a recomputation kind.
     fn remat_kind_into(&mut self, r: u8, k: Remat) {
         match k {
             // never xzr for 0: register 31 is sp in add-immediate and address operands
@@ -1382,9 +1363,6 @@ impl<'a> Gen<'a> {
                     self.rir_map.push(((self.a.pos() * 4) as u32, bi as u32, ii as u32));
                 }
                 self.cur_pos = self.al.inst_pos(bi, ii);
-                if let Some(ops) = self.evict_at.get(&self.cur_pos).cloned() {
-                    self.evict_transfers(&ops);
-                }
                 if let Some(ls) = self.win_start.get(&self.cur_pos).cloned() {
                     for (v, r) in ls {
                         match (self.cls(VReg(v)), self.al.loc[v as usize]) {
@@ -1518,9 +1496,6 @@ impl<'a> Gen<'a> {
             // region windows entered from here: loaded before the terminator (regalloc edge loads)
             if matches!(b.term, Term::Jump(_) | Term::Branch(..) | Term::Switch(..)) {
                 let tp = self.al.block_end[bi] - 1;
-                if let Some(ops) = self.evict_at.get(&tp).cloned() {
-                    self.evict_transfers(&ops);
-                }
                 if let Some(ls) = self.win_start.get(&tp).cloned() {
                     for (v, r) in ls {
                         if let Loc::Stack(o) = self.al.loc[v as usize] {
@@ -3464,7 +3439,7 @@ impl<'a> Gen<'a> {
     /// windows), distinct, the loads' destinations not the base, the lower offset a multiple of w
     /// within the signed 7-bit scaled range. None: no match.
     fn pair_access(&mut self, options: &relax_session::Options, i1: &Inst, i2: &Inst, pos2: u32) -> Option<()> {
-        if isel_flags(options) & A64_FUSE == 0 || self.win_start.contains_key(&pos2) || self.evict_at.contains_key(&pos2) {
+        if isel_flags(options) & A64_FUSE == 0 || self.win_start.contains_key(&pos2) {
             return None;
         }
         let (load, m1, v1, b1, o1, m2, v2, b2, o2) = match (i1, i2) {
@@ -5474,7 +5449,6 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
         zero_above: Vec::new(),
         switch_in_range: Vec::new(),
         copy_reg: std::collections::HashMap::new(),
-        evict_at: regalloc::evict_ops(&al),
         win_start: {
             let mut ws: std::collections::HashMap<u32, Vec<(u32, u8)>> = std::collections::HashMap::new();
             for &(v, a, _, r) in &al.windows {
@@ -5632,6 +5606,33 @@ pub fn thunk(slot_addr: u64) -> Vec<u8> {
     while a.w.len() * 4 < THUNK_SIZE {
         a.udf();
     }
+    words_to_bytes(&a.w)
+}
+
+/// Loader-only entry mark, followed by a jump through the replaceable body word. Only the
+/// veneer scratch registers x16/x17 change; the slow TLS allocation preserves the arguments.
+pub fn entry_thunk(id: u32, tls: u32, key: u64, slow: u64, body: u64) -> Vec<u8> {
+    let mut a = Asm { w: Vec::new() };
+    a.e(MRS_SLOT_BASE | IP0 as u32);
+    a.e(0x9243_F000 | (IP0 as u32) << 5 | IP0 as u32);
+    a.mov_imm(IP1, (key * 8) as i64);
+    a.e(0xF860_6800 | (IP1 as u32) << 16 | (IP0 as u32) << 5 | IP0 as u32);
+    let ready = a.cbnz(IP0);
+    a.stp_pre(FP, LR, SP, -16);
+    a.mov_imm64_fixed(IP1, slow);
+    a.blr(IP1);
+    a.ldp_post(FP, LR, SP, 16);
+    let at = a.pos();
+    a.patch(ready, at);
+    a.ldst(LDRX, 8, IP0, IP0, tls as i64);
+    a.add_any(IP0, IP0, ((id >> 16) * 8) as i64);
+    a.e(0xC8DF_FC00 | (IP0 as u32) << 5 | IP0 as u32); // ldar x16, [x16]
+    a.add_any(IP0, IP0, (id & 65535) as i64);
+    a.mov_imm(IP1, 1);
+    a.e(0x3900_0000 | (IP0 as u32) << 5 | IP1 as u32); // strb w17, [x16]
+    a.mov_imm64_fixed(IP0, body);
+    a.ldst(LDRX, 8, IP0, IP0, 0);
+    a.br(IP0);
     words_to_bytes(&a.w)
 }
 
@@ -5834,7 +5835,7 @@ pub fn jump_with_arg0(arg: u64, target: u64) -> Vec<u8> {
 }
 
 /// This thread's thread-local block in x16, preserving every other register JIT code may hold
-/// (x0-x15, d0-d7, d16-d29): the fast path `tls_addr` inlines (slot `key` of the thread's slot
+/// (x0-x15, q0-q31): the fast path `tls_addr` inlines (slot `key` of the thread's slot
 /// array), and when the slot is still null `host() -> block`. `tls_addr` calls it after its own
 /// fast path found null; a prologue that needs the domain base calls it directly.
 pub fn tls_slow(host: u64, key: u64) -> Vec<u8> {
@@ -5849,15 +5850,13 @@ pub fn tls_slow(host: u64, key: u64) -> Vec<u8> {
     a.ret();
     a.stp_pre(FP, LR, SP, -16);
     a.mov_sp(FP, SP);
-    a.sub_imm(SP, SP, 320);
+    a.sub_imm(SP, SP, 640);
     for k in 0..8u8 {
         a.stp(false, 2 * k, 2 * k + 1, SP, 16 * k as i32);
     }
-    for k in 0..4u8 {
-        a.stp(true, 2 * k, 2 * k + 1, SP, 128 + 16 * k as i32);
-    }
-    for k in 0..7u8 {
-        a.stp(true, 16 + 2 * k, 17 + 2 * k, SP, 192 + 16 * k as i32);
+    // Full vector arguments survive the first entry mark and its host allocation.
+    for k in 0..32u8 {
+        a.ldst(0x3D80_0000, 16, k, SP, 128 + 16 * k as i64); // str qK
     }
     a.mov_imm64_fixed(IP1, host);
     a.blr(IP1);
@@ -5865,11 +5864,8 @@ pub fn tls_slow(host: u64, key: u64) -> Vec<u8> {
     for k in 0..8u8 {
         a.ldp(false, 2 * k, 2 * k + 1, SP, 16 * k as i32);
     }
-    for k in 0..4u8 {
-        a.ldp(true, 2 * k, 2 * k + 1, SP, 128 + 16 * k as i32);
-    }
-    for k in 0..7u8 {
-        a.ldp(true, 16 + 2 * k, 17 + 2 * k, SP, 192 + 16 * k as i32);
+    for k in 0..32u8 {
+        a.ldst(0x3DC0_0000, 16, k, SP, 128 + 16 * k as i64); // ldr qK
     }
     a.mov_sp(SP, FP);
     a.ldp_post(FP, LR, SP, 16);

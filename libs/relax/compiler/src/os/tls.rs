@@ -227,7 +227,7 @@ mod imp {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(target_vendor = "apple")]
 mod imp {
     pub use super::unix::{get, key_create};
     use super::unix::pthread_setspecific;

@@ -77,7 +77,14 @@ impl ScoreEditor {
             self.draw_label.draw_abs(cx, dvec2(body.pos.x, body.pos.y + body.size.y * 0.5 - 6.0), "no settings to show: the browser picks what it plays");
             return false;
         }
-        let titles: Vec<f64> = modules.iter().map(|m| advance(&self.draw_caps, cx, &m.title) + 4.0).collect();
+        // A title and its chips, the least a module takes across.
+        let titles: Vec<f64> = modules
+            .iter()
+            .map(|m| {
+                let chips: f64 = m.picks.iter().map(|c| (advance(&self.draw_label, cx, &c.label) + 10.0).max(17.0) + 3.0).sum();
+                advance(&self.draw_caps, cx, &m.title) + 4.0 + if chips > 0.0 { chips + 3.0 } else { 0.0 }
+            })
+            .collect();
         let more_w = 26.0;
         let (placed, dropped) = layout(modules, &titles, body.pos.x, body.size.x - more_w);
         let gy = body.pos.y + HEAD;
@@ -87,6 +94,13 @@ impl ScoreEditor {
             let knobs = self.live_knobs(&lens.node, &m.knobs);
             let w = module_w(m, *gw, *shown, titles[*i]);
             self.module_head(cx, p, &m.title, *x, body.pos.y, w, body.size.y, n == 0, &m.tip);
+            let mut chip_x = *x + advance(&self.draw_caps, cx, &m.title) + 7.0;
+            for pick in &m.picks {
+                let r = self.chip(cx, p, dvec2(chip_x, body.pos.y - 3.0), &pick.label, false, lens.hue);
+                self.hots.push((r, Hot::Set { node: lens.node.clone(), field: pick.field, value: pick.value.clone() }));
+                self.tip(r, format!("{}\nA click sets it to {}.", pick.tip, pick.value.trim_start_matches('@')));
+                chip_x += r.size.x + 3.0;
+            }
             let mut kx = *x;
             if !matches!(m.graph, Graph::None) {
                 let g = Rect { pos: dvec2(*x, gy + 1.0), size: dvec2(*gw, gh - 2.0) };
@@ -212,7 +226,7 @@ impl ScoreEditor {
                     let f = ph.fract();
                     let saw = 1.0 - 2.0 * f;
                     let sine = (ph * std::f64::consts::TAU).sin();
-                    let v = match shape {
+                    let v = match *shape % 10 {
                         0 => sine,
                         1 => 1.0 - 4.0 * (f - 0.5).abs(),
                         2 => saw,

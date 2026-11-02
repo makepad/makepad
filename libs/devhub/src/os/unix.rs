@@ -2,7 +2,7 @@
 //! when there is a user bus, at `nice -n 10`, optionally pinned with taskset; it is ended through
 //! its process group.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus};
 
 /// What keeps a run's processes together beyond its pid: nothing on Unix (the process group is
@@ -17,11 +17,14 @@ impl Hold {
 }
 
 /// The argv a lease run executes: the scope, nice and pinning wrappers, then `argv`.
-pub fn lease_argv(argv: Vec<String>, unit: Option<&str>, cpus: &str) -> Vec<String> {
+pub fn lease_argv(argv: Vec<String>, unit: Option<&str>, cpus: &str, share: Option<crate::lease::Cost>) -> Vec<String> {
     let mut full: Vec<String> = Vec::new();
     if let Some(u) = unit {
         full.extend(["systemd-run", "--user", "--scope", "--quiet"].map(String::from));
         full.push(format!("--unit={u}"));
+        if let Some(cost) = share.filter(|_| cfg!(target_os = "linux")) {
+            full.extend(["-p".into(), format!("CPUQuota={:.2}%", cost.cores * 100.0), "-p".into(), format!("MemoryMax={}G", cost.ram_gb * 1.5)]);
+        }
         full.push("--".into());
     }
     full.extend(["nice", "-n", "10"].map(String::from));
@@ -30,6 +33,97 @@ pub fn lease_argv(argv: Vec<String>, unit: Option<&str>, cpus: &str) -> Vec<Stri
     }
     full.extend(argv);
     full
+}
+
+/// Keep the scope alive until its final counters are saved, including runs shorter than a
+/// heartbeat. Arguments are positional shell parameters, never interpolated shell source.
+pub fn metered_argv(argv: Vec<String>, unit: Option<&str>, usage: &Path) -> Vec<String> {
+    if !cfg!(target_os = "linux") || unit.is_none() { return argv; }
+    let script = r#"usage=$1
+shift
+group=
+while IFS=: read -r hierarchy controllers path; do
+    if [ "$hierarchy" = 0 ]; then group=/sys/fs/cgroup$path; fi
+done < /proc/self/cgroup
+printf '%s\n' "$group" > "$usage.cgroup"
+record() {
+    if [ -n "$group" ]; then
+        if [ -r "$group/memory.peak" ] && read -r peak < "$group/memory.peak"; then printf 'peak %s\n' "$peak"; fi
+        if [ -r "$group/cpu.stat" ]; then
+            while read -r key value; do
+                if [ "$key" = usage_usec ]; then printf 'cpu %s\n' "$value"; fi
+            done < "$group/cpu.stat"
+        fi
+    fi
+}
+trap 'record > "$usage"' 0
+trap 'exit 143' TERM
+"$@" &
+child=$!
+printf '%s\n' "$child" > "$usage.pid"
+wait "$child"
+status=$?
+exit "$status"
+"#;
+    let mut full = vec!["sh".into(), "-c".into(), script.into(), "devhub-usage".into(), usage.to_string_lossy().into_owned()];
+    full.extend(argv);
+    full
+}
+
+/// Current scope high-water mark and cumulative CPU. The in-scope wrapper saves these again
+/// at exit because systemd removes an empty scope before its parent can read the cgroup.
+pub fn scope_usage(pid: u32, start: u64, unit: Option<&str>, usage: &Path) -> (Option<u64>, Option<f64>) {
+    if !cfg!(target_os = "linux") { return (None, None); }
+    let Some(unit) = unit else { return (None, None) };
+    let group = std::fs::read_to_string(usage.with_extension("usage.cgroup")).ok().map(|s| PathBuf::from(s.trim())).or_else(|| {
+        if proc_start(pid) != Some(start) { return None; }
+        std::fs::read_to_string(format!("/proc/{pid}/cgroup")).ok().and_then(|s| s.lines().find_map(|s| s.strip_prefix("0::").map(|s| Path::new("/sys/fs/cgroup").join(s.trim_start_matches('/')))))
+    });
+    let Some(group) = group.filter(|g| g.starts_with("/sys/fs/cgroup") && g.file_name().is_some_and(|n| n == format!("{unit}.scope").as_str())) else { return (None, None) };
+    let peak = std::fs::read_to_string(group.join("memory.peak")).ok().and_then(|s| s.trim().parse().ok());
+    let cpu = std::fs::read_to_string(group.join("cpu.stat")).ok().and_then(|s| s.lines().find_map(|s| s.strip_prefix("usage_usec ").and_then(|s| s.parse::<f64>().ok()))).map(|us| us / 1_000_000.0);
+    (peak, cpu)
+}
+
+/// RSS in bytes across recorded process groups (ps reports KiB), in one process-table
+/// snapshot per lease. A departed leader can still have children; a reused pid is excluded.
+pub fn groups_rss(groups: &[(u32, u64)]) -> Option<u64> {
+    let groups: Vec<_> = groups.iter().filter(|(pid, start)| *pid != 0 && proc_start(*pid).is_none_or(|s| s == *start)).map(|(pid, _)| pid.to_string()).collect();
+    if groups.is_empty() { return None; }
+    let out = Command::new("ps").args(["-o", "rss=", "-g", &groups.join(",")]).output().ok()?;
+    if !out.status.success() { return None; }
+    let rss: Vec<u64> = String::from_utf8_lossy(&out.stdout).split_whitespace().map(str::parse).collect::<Result<_, _>>().ok()?;
+    (!rss.is_empty()).then(|| rss.iter().sum::<u64>() * 1024)
+}
+
+/// Reap just this child, retaining user + system CPU including its waited-for descendants.
+/// `Child::wait` discards rusage; a process-wide RUSAGE_CHILDREN delta would mix leases.
+pub fn wait_usage(child: &mut Child) -> std::io::Result<(ExitStatus, Option<f64>)> {
+    use std::os::raw::c_long;
+    use std::os::unix::process::ExitStatusExt;
+    #[repr(C)]
+    #[derive(Default)]
+    struct Timeval {
+        sec: c_long,
+        #[cfg(target_os = "macos")]
+        usec: i32,
+        #[cfg(not(target_os = "macos"))]
+        usec: c_long,
+    }
+    #[repr(C)]
+    #[derive(Default)]
+    struct RUsage { user: Timeval, system: Timeval, rest: [c_long; 14] }
+    extern "C" { fn wait4(pid: i32, status: *mut i32, options: i32, usage: *mut RUsage) -> i32; }
+    let mut status = 0;
+    let mut usage = RUsage::default();
+    loop {
+        if unsafe { wait4(child.id() as i32, &mut status, 0, &mut usage) } >= 0 {
+            let cpu = (usage.user.sec + usage.system.sec) as f64 + (usage.user.usec + usage.system.usec) as f64 / 1_000_000.0;
+            return Ok((ExitStatus::from_raw(status), Some(cpu)));
+        }
+        let e = std::io::Error::last_os_error();
+        if e.kind() != std::io::ErrorKind::Interrupted { return Err(e); }
+    }
 }
 
 /// Starts a lease run in its own session and process group (the group is what end signals).
@@ -197,11 +291,20 @@ pub fn signal_one(pid: u32, hard: bool) {
 /// or process group they moved to.
 #[cfg(target_os = "linux")]
 pub fn with_env(marker: &str) -> Vec<u32> {
+    env_values(marker).into_iter().filter(|(_, v)| v.is_empty()).map(|(p, _)| p).collect()
+}
+
+/// The live processes of this user with an environment entry starting `prefix` (`NAME=`), and
+/// what follows it.
+#[cfg(target_os = "linux")]
+pub fn env_values(prefix: &str) -> Vec<(u32, String)> {
     let mut out = Vec::new();
     for e in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
         let Ok(pid) = e.file_name().to_string_lossy().parse::<u32>() else { continue };
-        if std::fs::read(e.path().join("environ")).is_ok_and(|env| env.split(|b| *b == 0).any(|v| v == marker.as_bytes())) {
-            out.push(pid);
+        if let Ok(env) = std::fs::read(e.path().join("environ")) {
+            if let Some(v) = env.split(|b| *b == 0).find_map(|v| v.strip_prefix(prefix.as_bytes())) {
+                out.push((pid, String::from_utf8_lossy(v).into_owned()));
+            }
         }
     }
     out
@@ -210,6 +313,11 @@ pub fn with_env(marker: &str) -> Vec<u32> {
 /// As on Linux: the environment comes with a process's arguments (KERN_PROCARGS2).
 #[cfg(target_os = "macos")]
 pub fn with_env(marker: &str) -> Vec<u32> {
+    env_values(marker).into_iter().filter(|(_, v)| v.is_empty()).map(|(p, _)| p).collect()
+}
+
+#[cfg(target_os = "macos")]
+pub fn env_values(prefix: &str) -> Vec<(u32, String)> {
     extern "C" {
         fn proc_listallpids(buffer: *mut core::ffi::c_void, size: i32) -> i32;
         fn sysctl(name: *const i32, namelen: u32, oldp: *mut u8, oldlenp: *mut usize, newp: *const u8, newlen: usize) -> i32;
@@ -223,8 +331,10 @@ pub fn with_env(marker: &str) -> Vec<u32> {
     for &pid in pids.iter().take(n.max(0) as usize).filter(|p| **p > 0) {
         let mib = [CTL_KERN, KERN_PROCARGS2, pid];
         let mut len = buf.len();
-        if unsafe { sysctl(mib.as_ptr(), 3, buf.as_mut_ptr(), &mut len, std::ptr::null(), 0) } == 0 && buf[..len].split(|b| *b == 0).any(|v| v == marker.as_bytes()) {
-            out.push(pid as u32);
+        if unsafe { sysctl(mib.as_ptr(), 3, buf.as_mut_ptr(), &mut len, std::ptr::null(), 0) } == 0 {
+            if let Some(v) = buf[..len].split(|b| *b == 0).find_map(|v| v.strip_prefix(prefix.as_bytes())) {
+                out.push((pid as u32, String::from_utf8_lossy(v).into_owned()));
+            }
         }
     }
     out
@@ -232,6 +342,11 @@ pub fn with_env(marker: &str) -> Vec<u32> {
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub fn with_env(_marker: &str) -> Vec<u32> {
+    Vec::new()
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub fn env_values(_prefix: &str) -> Vec<(u32, String)> {
     Vec::new()
 }
 

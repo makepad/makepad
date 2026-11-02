@@ -60,5 +60,3 @@ makepad-app-aichat = { path = "../aichat", default-features = false, features = 
 makepad-ai-services = { path = "../../libs/ai/services" }
 makepad-ai-hub = { path = "../../libs/ai/hub", default-features = false }
 
-[dev-dependencies]
-makepad-script-test = { path = "../../platform/script/test" }

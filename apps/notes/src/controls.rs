@@ -135,6 +135,13 @@ impl NotesTap {
     }
 }
 impl Widget for NotesTap {
+    fn semantics(&self, _cx: &Cx, node: &mut a11y_tree::Node) {
+        node.role = a11y_tree::Role::Button;
+        makepad_platform::a11y::set_string(&mut node.name, &self.nav_name);
+        node.states = a11y_tree::States::FOCUSABLE;
+        node.states
+            .set(a11y_tree::States::DISABLED, !self.enabled);
+    }
     fn text(&self) -> String {
         self.nav_name.clone()
     }

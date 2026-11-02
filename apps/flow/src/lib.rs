@@ -9292,6 +9292,3 @@ fn input_value_json(ty: PortType, text: String) -> makepad_strict_json::Value {
 mod desktop_style_tests {
     include!("../../../widgets/tests/support/app_style.rs");
 }
-
-#[cfg(test)]
-makepad_script_test::shader_inventory_test!("flow", <App as AppMain>::script_mod);

@@ -39,12 +39,20 @@ fn peer_off() -> makepad_ai_hub::peer_serve::PeerOptions {
     }
 }
 
+/// The shipped registry and the test-pattern model (crate-internal: the shipped one does not
+/// advertise it).
+fn test_registry() -> Registry {
+    let mut r = Registry::embedded().unwrap();
+    r.models.extend(Registry::parse(r#"{"models":[{"id":"testpattern","domain":"image","backend":"testpattern","available":true,"gated":false,"vram_gb":0.0,"files":[]}]}"#).unwrap().models);
+    r
+}
+
 fn start_test_service(name: &str) -> LocalService {
     let handle = start_service(ServiceConfig {
         host: "127.0.0.1".to_string(),
         port: 0,
         cache_dir: test_dir(name),
-        registry: Registry::embedded().unwrap(),
+        registry: test_registry(),
         downloader: Downloader::new("http://127.0.0.1:1", None).unwrap(),
         peer: peer_off(),
         fleet: makepad_ai_hub::discovery::DEFAULT_FLEET.to_string(),
@@ -111,8 +119,13 @@ fn health_and_models() {
     // still list flux unavailable, fail-closed.
     let expect_flux =
         cfg!(feature = "flux") && makepad_ai_hub::backend::backend_provisioned("flux");
+    // On a card too small for it (the box's own GPU), the hub says that instead.
     let schnell = models.iter().find(|m| m.id == "flux1-schnell").unwrap();
-    assert_eq!(schnell.state, "absent");
+    if schnell.state == "too_small" {
+        assert!(schnell.note.as_deref().is_some_and(|n| n.contains("this card can free")), "{:?}", schnell.note);
+    } else {
+        assert_eq!(schnell.state, "absent");
+    }
     assert_eq!(schnell.available, expect_flux);
 
     let dev = models.iter().find(|m| m.id == "flux1-dev").unwrap();
@@ -475,7 +488,7 @@ fn node_identity_is_durable_and_capabilities_are_honest() {
             host: "127.0.0.1".to_string(),
             port: 0,
             cache_dir: dir.clone(),
-            registry: Registry::embedded().unwrap(),
+            registry: test_registry(),
             downloader: Downloader::new("http://127.0.0.1:1", None).unwrap(),
             peer: peer_off(),
             fleet: makepad_ai_hub::discovery::DEFAULT_FLEET.to_string(),
@@ -810,8 +823,9 @@ fn realtime_post_admission_errors_match_generate_semantics() {
 fn realtime_h264_round_trip_input_and_output() {
     use makepad_video::{StreamVideoCodec, VideoStreamDecoder, VideoStreamEncoder, VideoStreamEncoderOptions};
 
-    const WIDTH: u32 = 64;
-    const HEIGHT: u32 = 64;
+    // At least the Linux hardware encoder's minimum coded extent (160 px wide).
+    const WIDTH: u32 = 192;
+    const HEIGHT: u32 = 128;
 
     let provider = start_test_service("realtime-h264");
     let base_url = provider.base_url().to_string();
@@ -917,4 +931,71 @@ fn realtime_h264_round_trip_input_and_output() {
     assert_eq!(state, "done");
     assert!(wait_for_socket_close(&rx, Duration::from_secs(10)), "socket never closed after stop");
     socket.close();
+}
+
+/// The person's cancel on the app's jobs board reaches the node: the tracked generation
+/// sends the freeing cancel at its next poll, the node unwinds the job, and the board's job
+/// ends as cancelled. Prints the latency from the press to the node's `cancelled`.
+#[test]
+fn a_board_cancel_stops_the_hub_job_on_its_node() {
+    use makepad_ai_hub::board::BoardGen;
+    use makepad_ai_hub::job::{process_origin, FixedRouter, GenJob, JobPoll, Want};
+    // Its own registry: the test-pattern model alone (it needs no files and no GPU).
+    let registry = Registry::parse(r#"{"models":[{"id":"testpattern","domain":"image","backend":"testpattern","available":true,"gated":false,"vram_gb":0.0,"files":[]}]}"#).unwrap();
+    let handle = start_service(ServiceConfig {
+        host: "127.0.0.1".to_string(),
+        port: 0,
+        cache_dir: test_dir("board-cancel"),
+        registry,
+        downloader: Downloader::new("http://127.0.0.1:1", None).unwrap(),
+        peer: peer_off(),
+        fleet: makepad_ai_hub::discovery::DEFAULT_FLEET.to_string(),
+    })
+    .unwrap();
+    let base = format!("http://{}", handle.addr);
+    let provider = LocalService::new(&base);
+    std::mem::forget(handle);
+    let mut gen = GenJob::new(std::sync::Arc::new(FixedRouter(base)), process_origin("board-cancel"));
+    let request = GenerateRequestJson {
+        model: "testpattern".to_string(),
+        prompt: Some("slow".into()),
+        width: Some(16),
+        height: Some(16),
+        delay_ms: Some(10_000),
+        ..Default::default()
+    };
+    gen.start(Domain::Image, request, Want::All).unwrap();
+    let mut tracked = BoardGen::start("Generating a test pattern");
+    let board_id = tracked.handle().unwrap().id();
+    let job_id = gen.job_id().expect("submitted").to_string();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while provider.poll(&job_id).unwrap().state != "running" {
+        let _ = tracked.poll(&mut gen);
+        assert!(Instant::now() < deadline, "the job never ran");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let _ = tracked.poll(&mut gen);
+    let shown = makepad_jobs::board().get(board_id).unwrap();
+    // A machine name ("this machine" for this loopback hub), never an address.
+    assert_eq!(shown.machine, "this machine", "the board does not say where it runs: {}", shown.machine);
+    let pressed = Instant::now();
+    assert!(makepad_jobs::board().cancel(board_id));
+    // The worker polls on its own cadence; the cancel goes out at the next poll.
+    let stopped = loop {
+        if let JobPoll::Failed(why) = tracked.poll(&mut gen) {
+            break why;
+        }
+        assert!(pressed.elapsed() < Duration::from_secs(5), "the tracker never sent the cancel");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert_eq!(stopped, "cancelled");
+    tracked.fail(stopped);
+    let state = poll_until_terminal(&provider, &job_id);
+    println!("board cancel: node says {state} {:.0} ms after the press", pressed.elapsed().as_secs_f64() * 1000.0);
+    assert_eq!(state, "cancelled");
+    let ended = makepad_jobs::board().get(board_id).unwrap();
+    assert_eq!(ended.end, makepad_jobs::JobEnd::Cancelled);
+    // A freeing cancel leaves the model off the device.
+    let models = provider.list_models().unwrap();
+    assert_ne!(models.iter().find(|m| m.id == "testpattern").unwrap().state, "loaded");
 }

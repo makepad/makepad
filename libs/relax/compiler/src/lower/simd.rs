@@ -77,7 +77,7 @@ impl<'a> Lcx<'a> {
         if matches!(l, Lane::F(_)) || !matches!(self.kind(t), TyKind::Adt(..)) {
             return None;
         }
-        let bytes = self.u.const_block_shared(self.b, bl, t)?;
+        let bytes = self.u.const_block_shared(self.b, bl, t, self.cur_fn)?;
         let w = (l.w().bits() / 8) as usize;
         if bytes.len() < n as usize * w {
             return None;

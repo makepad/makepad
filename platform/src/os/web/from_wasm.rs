@@ -540,6 +540,7 @@ pub struct FromWasmDrawCall {
     pub shader_id: usize,
     pub index_width: u32,
     pub depth_write: bool,
+    pub depth_test_greater: bool,
     pub alpha_blend: bool,
     /// The shader's `blend_op: @Max`: blend by per-channel max.
     pub blend_max: bool,

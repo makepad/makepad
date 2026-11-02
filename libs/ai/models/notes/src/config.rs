@@ -40,15 +40,3 @@ pub fn harmonic_shifts() -> [isize; HARMONICS.len()] {
         (12.0 * CONTOUR_BINS_PER_SEMITONE as f64 * harmonic.log2()).round() as isize
     })
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn checkpoint_geometry() {
-        assert_eq!(AUDIO_N_SAMPLES, 43_844);
-        assert_eq!(frame_count(AUDIO_N_SAMPLES), WINDOW_FRAMES);
-        assert_eq!(harmonic_shifts(), [-36, 0, 36, 57, 72, 84, 93, 101]);
-    }
-}

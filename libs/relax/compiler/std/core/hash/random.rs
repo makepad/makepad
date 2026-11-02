@@ -124,7 +124,7 @@ fn hashmap_random_keys() -> (u64, u64) {
 }
 
 // sys/random/apple.rs: CCRandomGenerateBytes
-#[cfg(all(not(relax_check), not(relax_web), target_os = "macos"))]
+#[cfg(all(not(relax_check), not(relax_web), target_vendor = "apple"))]
 fn hashmap_random_keys() -> (u64, u64) {
     use crate::ffi::{c_int, c_void};
     extern "C" {

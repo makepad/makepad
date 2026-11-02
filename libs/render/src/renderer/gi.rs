@@ -32,6 +32,34 @@ impl Renderer {
         self.set_ssao(out.map(|t| (t, strength.min(1.0))));
     }
 
+    /// A host's own GI scene, replacing what the renderer would take from the
+    /// world and its models: its solids (meshes or distance fields, in the
+    /// pass's world frame) under the key that identifies them. A changed key
+    /// is the next snapshot; the voxel worker re-voxelizes only the bricks of
+    /// the instances that differ. `None`: the renderer's own scene.
+    pub fn set_gi_scene(&mut self, scene: Option<(u64, Vec<crate::fast_gi::GiInstance>)>) {
+        self.gi_host_scene = scene;
+    }
+
+    /// The GI's work is not done: draw again (a settling host stops drawing
+    /// when this goes false).
+    pub fn gi_wants_frames(&self) -> bool { self.gi.wants_frames() }
+
+    /// Binds what a host's own shader needs to sample the GI
+    /// (`mod.draw.FastGiSampling`); `gi_shading` says whether it reads anything.
+    pub fn bind_gi(&self, cx: &Cx, draw: &mut DrawVars) { self.gi.bind(cx, draw); }
+
+    /// A host's screen cache of the field: the host's receivers that sample
+    /// it (`mod.draw.FastGiScreen`, bound through `bind_gi`) read it where it
+    /// answers instead of gathering per pixel (`mod.draw.FastGiSampling`'s
+    /// `gi_screen_value` fills it, at the view the scene pass draws with;
+    /// `size` its pixels). None: they gather. The renderer's own scene
+    /// shaders always gather (their families have no texture slot for it).
+    pub fn set_gi_screen(&mut self, screen: Option<(Texture, [f32; 2])>) { self.gi.set_screen(screen); }
+
+    /// Whether the GI has something to sample this frame.
+    pub fn gi_shading(&self) -> bool { self.gi.shader_features().0 }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) fn run_fast_gi(
         &mut self,
@@ -59,12 +87,18 @@ impl Renderer {
         // probes near them relight; nothing else is re-traced.
         let key=[world.render_rev,world.paint_rev,terrain_rev,voxel_rev,self.models_rev];
         let center=self.gi.config().anchor.unwrap_or(center);
+        // A host's scene has its own key: nothing of the world's enters it.
+        let key=self.gi_host_scene.as_ref().map_or(key,|(host,_)|[*host,0,0,0,0]);
         if self.gi.wants_scene(key,center) {
             let start=Cx::monotonic_now();
-            let snapshot=self.gi_snapshot(cx.cx,world,self.gi.region(center));
+            let snapshot=match &self.gi_host_scene {
+                Some((_,instances))=>{let triangles=instances.iter().map(|i|i.triangles()).sum();crate::fast_gi::Snapshot{instances:instances.clone(),triangles}},
+                None=>self.gi_snapshot(cx.cx,world,self.gi.region(center)),
+            };
             self.gi.submit_scene(key,center,snapshot);
             self.gi.stats.snapshot_us=((Cx::monotonic_now()-start)*1e6)as u64;
         }
+        self.gi.set_scene_stale(!self.gi.scene_is(key));
         self.gi.set_emission_gain(self.lin_ctl()[3]);
         self.gi.run(cx.cx,center,sun,&self.clustered);
         if self.gi.stats.batch>0 {if let Some(parent)=self.gi.relight_pass(){self.clustered.parent_shadows(cx.cx,parent);}}

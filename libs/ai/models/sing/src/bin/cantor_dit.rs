@@ -8,8 +8,7 @@
 //! `voice` adds a sung clip (its wav and its score) as a voice. `render`
 //! sings each `NN.score.tsv` (sing_eval / voice_eval `--dump` files: notes
 //! with the word each sings, the words) into `NN.wav` (24 kHz, time 0 at
-//! the score start) and prints the real-time factor. The device path's
-//! numeric check against the reference is `tests/dit_parity.rs`.
+//! the score start) and prints the real-time factor.
 
 use makepad_ai_sing::dit::front::{self, ScoreNote, Tokens};
 use makepad_ai_sing::dit::{self, CantorDit, DitOpts, Voice};

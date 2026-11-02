@@ -756,11 +756,10 @@ pub use sqlite_reader::MbtilesReader;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
-    use std::io::Write;
-    use std::process::{Command, Stdio};
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use makepad_sqlite::{Connection, Value as SqlValue};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-    fn sqlite_fixture(tag: &str, sql: &[u8]) -> Option<std::path::PathBuf> {
+    fn sqlite_fixture(tag: &str, sql: &str) -> (std::path::PathBuf, Connection) {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -769,39 +768,22 @@ mod tests {
             "makepad-mbtiles-{tag}-{}-{nonce}.mbtiles",
             std::process::id()
         ));
-        let mut child = match Command::new("sqlite3")
-            .arg(&path)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-        {
-            Ok(child) => child,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return None,
-            Err(err) => panic!("start sqlite3: {err}"),
-        };
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(sql)
-            .expect("write sqlite fixture");
-        let output = child.wait_with_output().expect("wait for sqlite3");
-        assert!(
-            output.status.success(),
-            "sqlite3 fixture failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        Some(path)
+        makepad_sqlite::write::create_empty_database(&path).unwrap();
+        // Keep the small-page B-tree fixture: page one is still an empty leaf.
+        let mut page = std::fs::read(&path).unwrap();
+        page.truncate(512);
+        page[16..18].copy_from_slice(&512_u16.to_be_bytes());
+        page[105..107].copy_from_slice(&512_u16.to_be_bytes());
+        std::fs::write(&path, page).unwrap();
+        let mut db = Connection::open(&path, Duration::from_secs(5)).unwrap();
+        db.execute_batch(sql).unwrap();
+        (path, db)
     }
 
     #[test]
     fn direct_lookup_through_standard_tile_index() {
-        // Build this interoperability fixture with the system SQLite when it
-        // is available. The library itself has no native SQLite dependency.
-        let sql = br#"
-PRAGMA page_size=512;
-VACUUM;
+        // Exercise the conventional composite index, including interior pages.
+        let sql = r#"
 CREATE TABLE tiles (
     zoom_level INTEGER,
     tile_column INTEGER,
@@ -812,18 +794,17 @@ CREATE UNIQUE INDEX tile_index
     ON tiles (zoom_level, tile_column, tile_row);
 CREATE TABLE metadata (name TEXT, value TEXT);
 INSERT INTO metadata VALUES ('format', 'pbf');
-WITH RECURSIVE sequence(i) AS (
-    VALUES(0)
-    UNION ALL
-    SELECT i + 1 FROM sequence WHERE i < 4999
-)
-INSERT INTO tiles
-SELECT 14, i, 100000 - i, CAST(printf('tile-%d', i) AS BLOB)
-FROM sequence;
 "#;
-        let Some(path) = sqlite_fixture("index", sql) else {
-            return;
-        };
+        let (path, mut db) = sqlite_fixture("index", sql);
+        db.execute("BEGIN", &[]).unwrap();
+        for i in 0..5000 {
+            db.execute(
+                "INSERT INTO tiles VALUES (?, ?, ?, ?)",
+                &[SqlValue::Integer(14), SqlValue::Integer(i), SqlValue::Integer(100000 - i), SqlValue::Blob(format!("tile-{i}").into_bytes())],
+            ).unwrap();
+        }
+        db.execute("COMMIT", &[]).unwrap();
+        drop(db);
         let mut reader = MbtilesReader::open(&path).unwrap();
         assert!(reader.supports_direct_tile_lookup());
         assert_eq!(
@@ -837,7 +818,7 @@ FROM sequence;
 
     #[test]
     fn scan_fallback_without_an_index() {
-        let sql = br#"
+        let sql = r#"
 CREATE TABLE tiles (
     zoom_level INTEGER,
     tile_column INTEGER,
@@ -845,12 +826,15 @@ CREATE TABLE tiles (
     tile_data BLOB
 );
 CREATE TABLE metadata (name TEXT, value TEXT);
-INSERT INTO tiles VALUES (3, 1, 2, CAST('hello' AS BLOB));
-INSERT INTO tiles VALUES (3, 1, 3, randomblob(20000));
 "#;
-        let Some(path) = sqlite_fixture("scan", sql) else {
-            return;
-        };
+        let (path, mut db) = sqlite_fixture("scan", sql);
+        for (row, bytes) in [(2, b"hello".to_vec()), (3, vec![42; 20000])] {
+            db.execute(
+                "INSERT INTO tiles VALUES (3, 1, ?, ?)",
+                &[SqlValue::Integer(row), SqlValue::Blob(bytes)],
+            ).unwrap();
+        }
+        drop(db);
         let mut reader = MbtilesReader::open(&path).unwrap();
         assert!(!reader.supports_direct_tile_lookup());
         assert_eq!(reader.get_tile(3, 1, 2).unwrap().unwrap(), b"hello");
@@ -862,15 +846,14 @@ INSERT INTO tiles VALUES (3, 1, 3, randomblob(20000));
 
     #[test]
     fn generic_table_access() {
-        let sql = br#"
+        let sql = r#"
 CREATE TABLE features (id INTEGER PRIMARY KEY, name TEXT, geom BLOB);
 INSERT INTO features VALUES (10, 'a', x'01');
 INSERT INTO features VALUES (20, 'b', x'02');
 INSERT INTO features VALUES (30, 'c', x'03');
 "#;
-        let Some(path) = sqlite_fixture("generic", sql) else {
-            return;
-        };
+        let (path, db) = sqlite_fixture("generic", sql);
+        drop(db);
         let mut db = MbtilesReader::open_sqlite(&path).unwrap();
         let entries = db.schema_entries().unwrap();
         assert!(entries.iter().any(|e| e.name == "features"));

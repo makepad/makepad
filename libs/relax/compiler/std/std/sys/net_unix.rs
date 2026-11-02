@@ -9,7 +9,7 @@ use crate::io;
 pub type socklen_t = u32;
 
 pub const AF_UNIX: c_int = 1;
-#[cfg(target_os = "macos")]
+#[cfg(target_vendor = "apple")]
 pub const AF_INET6: c_int = 30;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 pub const AF_INET6: c_int = 10;
@@ -18,7 +18,7 @@ pub const SHUT_WR: c_int = 1;
 pub const SHUT_RDWR: c_int = 2;
 pub const POLLOUT: i16 = 4;
 
-#[cfg(target_os = "macos")]
+#[cfg(target_vendor = "apple")]
 mod k {
     use core::ffi::c_int;
     pub const SOL_SOCKET: c_int = 0xffff;
@@ -107,7 +107,7 @@ impl AddrInfo {
         AddrInfo { ai_flags: 0, ai_family: 0, ai_socktype: socktype, ai_protocol: 0, ai_addrlen: 0, ai_p1: core::ptr::null_mut(), ai_p2: core::ptr::null_mut(), ai_next: core::ptr::null_mut() }
     }
     pub fn addr(&self) -> *const u8 {
-        if cfg!(any(target_os = "macos", target_os = "android")) {
+        if cfg!(any(target_vendor = "apple", target_os = "android")) {
             self.ai_p2 as *const u8
         } else {
             self.ai_p1 as *const u8

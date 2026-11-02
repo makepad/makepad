@@ -799,8 +799,6 @@ mod test {
         RigidBodySet,
     };
     use crate::geometry::{BroadPhaseBvh, ColliderBuilder, ColliderSet, NarrowPhase};
-    #[cfg(feature = "dim2")]
-    use crate::math::Rotation;
     use crate::math::Vector;
     use crate::pipeline::PhysicsPipeline;
     use crate::prelude::{MultibodyJointSet, RevoluteJointBuilder, RigidBodyType};
@@ -1133,100 +1131,5 @@ mod test {
             assert!(rotation.z.is_finite());
             assert!(rotation.w.is_finite());
         }
-    }
-
-    #[test]
-    #[cfg(feature = "dim2")]
-    fn test_multi_sap_disable_body() {
-        let mut rigid_body_set = RigidBodySet::new();
-        let mut collider_set = ColliderSet::new();
-
-        /* Create the ground. */
-        let collider = ColliderBuilder::cuboid(100.0, 0.1);
-        collider_set.insert(collider);
-
-        /* Create the bouncing ball. */
-        let rigid_body = RigidBodyBuilder::dynamic().translation(Vector::new(0.0, 10.0));
-        let collider = ColliderBuilder::ball(0.5).restitution(0.7);
-        let ball_body_handle = rigid_body_set.insert(rigid_body);
-        collider_set.insert_with_parent(collider, ball_body_handle, &mut rigid_body_set);
-
-        /* Create other structures necessary for the simulation. */
-        let gravity = Vector::new(0.0, -9.81);
-        let integration_parameters = IntegrationParameters::default();
-        let mut physics_pipeline = PhysicsPipeline::new();
-        let mut island_manager = IslandManager::new();
-        let mut broad_phase = BroadPhaseBvh::new();
-        let mut narrow_phase = NarrowPhase::new();
-        let mut impulse_joint_set = ImpulseJointSet::new();
-        let mut multibody_joint_set = MultibodyJointSet::new();
-        let mut ccd_solver = CCDSolver::new();
-        let physics_hooks = ();
-        let event_handler = ();
-
-        physics_pipeline.step(
-            gravity,
-            &integration_parameters,
-            &mut island_manager,
-            &mut broad_phase,
-            &mut narrow_phase,
-            &mut rigid_body_set,
-            &mut collider_set,
-            &mut impulse_joint_set,
-            &mut multibody_joint_set,
-            &mut ccd_solver,
-            &physics_hooks,
-            &event_handler,
-        );
-
-        // Test RigidBodyChanges::POSITION and disable
-        {
-            let ball_body = &mut rigid_body_set[ball_body_handle];
-
-            // Also, change the translation and rotation to different values
-            ball_body.set_translation(Vector::new(1.0, 1.0), true);
-            ball_body.set_rotation(Rotation::from_angle(1.0), true);
-            ball_body.set_enabled(false);
-        }
-
-        physics_pipeline.step(
-            gravity,
-            &integration_parameters,
-            &mut island_manager,
-            &mut broad_phase,
-            &mut narrow_phase,
-            &mut rigid_body_set,
-            &mut collider_set,
-            &mut impulse_joint_set,
-            &mut multibody_joint_set,
-            &mut ccd_solver,
-            &physics_hooks,
-            &event_handler,
-        );
-
-        // Test RigidBodyChanges::POSITION and enable
-        {
-            let ball_body = &mut rigid_body_set[ball_body_handle];
-
-            // Also, change the translation and rotation to different values
-            ball_body.set_translation(Vector::new(0.0, 0.0), true);
-            ball_body.set_rotation(Rotation::from_angle(0.0), true);
-            ball_body.set_enabled(true);
-        }
-
-        physics_pipeline.step(
-            gravity,
-            &integration_parameters,
-            &mut island_manager,
-            &mut broad_phase,
-            &mut narrow_phase,
-            &mut rigid_body_set,
-            &mut collider_set,
-            &mut impulse_joint_set,
-            &mut multibody_joint_set,
-            &mut ccd_solver,
-            &physics_hooks,
-            &event_handler,
-        );
     }
 }

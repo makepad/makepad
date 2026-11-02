@@ -1,9 +1,5 @@
-// T12 (conform): pre-existing borrowck false positive, rustc accepts; found by N01 Gandalf audit
-// (round 52 OB, arch-n01-oB.REPORT.md). Known failure: not listed in run_live_regressions.sh;
-// `makepad check` with MAKEPAD_RUN_BORROWCK=full (that script's settings) reports the errors named below,
-// as does the pre-N01 tip (which does not check derived impl bodies, so it misses those). Do not
-// list it until conform fixes the cause.
-// Cause: a struct's inferred outlives predicates (rustc inferred_outlives_of: `K: 'a` from a
+// Borrowck regression found by the N01 Gandalf audit (round 52); run_live_regressions.sh checks it.
+// Regression (rustc accepts; Relax once rejected it): a struct's inferred outlives predicates (rustc inferred_outlives_of: `K: 'a` from a
 // `&'a mut Table<(K, V)>` field, `'a: 'b` from `&'b Line<'a>`) are missing from the implied
 // bounds of bodies whose signature or impl self type mentions the struct. Relax reports
 // E0309 "K may not live long enough" (std hash_map.rs/btree_map.rs entries) and "'a must outlive
@@ -34,6 +30,5 @@ fn run() {
     Stops2 { line: &line }.annotated();
 }
 #[test]
-#[ignore = "T12 conform: struct inferred-outlives implied bounds"]
 fn adt_implied_outlives() { run() }
 fn main() { run() }

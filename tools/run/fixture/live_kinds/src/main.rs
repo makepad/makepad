@@ -4,6 +4,18 @@
 // "out restored <tick>" and continues from that tick. Stops after LIVE_KINDS_SECS (default 120).
 mod kinds;
 
+#[cfg(feature = "window")]
+pub use makepad_widgets;
+#[cfg(feature = "window")]
+use makepad_widgets::*;
+#[cfg(feature = "window")]
+mod window;
+#[cfg(feature = "window")]
+use window::App;
+#[cfg(feature = "window")]
+app_main!(App);
+
+#[cfg(not(feature = "window"))]
 fn main() {
     let t0 = std::time::Instant::now();
     let secs: u64 = std::env::var("LIVE_KINDS_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(120);
@@ -22,7 +34,7 @@ fn main() {
             std::relax::restart_now(&n.to_string());
         }
         let line = kinds::report(&mut st);
-        println!("out {} main_loop={} inlined={} {}", n, 1, kinds::tiny(), line);
+        println!("out {} main_loop={} inlined={} {} {}", n, 1, kinds::tiny(), line, kinds::report2());
         if t0.elapsed().as_secs() > secs {
             break;
         }

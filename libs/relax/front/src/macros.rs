@@ -70,6 +70,10 @@ pub struct MacroDef {
     /// the module (path as `module_path!` prints it) the `macro_rules!` is written in; empty:
     /// unknown (made by an expansion, a built-in), visible wherever the crate is
     pub def_mod: String,
+    /// the edition of the crate the definition is written in (rustc SyntaxExtension::edition:
+    /// a token of its expansion has it, a substituted fragment keeps its own); 0: none of its
+    /// own (a built-in), the invoking file's
+    pub edition: u16,
     /// Exact definition input, for prescan/outline/parser reuse. Images already
     /// contain parsed arms and need not persist this cold-parse acceleration.
     pub(crate) input: Option<std::sync::Arc<RuleInput>>,
@@ -2433,7 +2437,16 @@ pub fn forwarding_def(alias: &str, krate: &str, target: &str) -> Option<MacroRef
         .filter(|t| t.kind != T::Eof)
         .map(|t| MTok { kind: t.kind, text: String::from_utf8_lossy(&text.as_bytes()[t.lo as usize..t.hi as usize]).into_owned(), pos: u32::MAX })
         .collect();
-    parse_def(alias, krate, 2021, &mt).ok().map(std::sync::Arc::new)
+    // (a forwarder has no edition of its own: its tokens are the caller's)
+    parse_def(alias, krate, 2021, &mt).ok().map(|mut d| { d.edition = 0; std::sync::Arc::new(d) })
+}
+
+/// The edition the expansions of a `macro_rules!` of crate `krate` (written in `edition`) carry.
+/// Relax's std crates stand in for rustc's library, which is edition 2024
+/// (library/{core,alloc,std}/Cargo.toml): their macros' expansions are 2024 code, as rustc's
+/// are, though Relax's std source is written in 2021.
+fn expansion_edition(krate: &str, edition: u16) -> u16 {
+    if matches!(krate, "core" | "alloc" | "std") { 2024 } else { edition }
 }
 
 pub fn parse_def(name: &str, krate: &str, edition: u16, toks: &[MTok]) -> Result<MacroDef, String> {
@@ -2463,7 +2476,7 @@ pub fn parse_def(name: &str, krate: &str, edition: u16, toks: &[MTok]) -> Result
         arms.push((matcher, body));
     }
     Ok(MacroDef { name: name.to_string(), krate: krate.to_string(), exported: false, arms, builtin: 0, def_file: String::new(), def_pos: 0, def_mod: String::new(),
-        input: Some(std::sync::Arc::new(RuleInput { tokens: toks.to_vec(), local_inner: false })) })
+        edition: expansion_edition(krate, edition), input: Some(std::sync::Arc::new(RuleInput { tokens: toks.to_vec(), local_inner: false })) })
 }
 
 /// What can come after a matcher fragment (rustc_expand mbe macro_rules.rs `check_matcher`).
@@ -3118,9 +3131,10 @@ impl Transcript {
 /// part of): what lexing that text gives.
 fn lexed_kind(part: &[u8]) -> T {
     let mut v = Vec::new();
+    // a part of `>>`/`>>=` always lexes
     match crate::lexer::lex(part, 2021, &mut v) {
-        Ok(()) => v.first().map_or(T::OtherPunct, |t| t.kind),
-        Err(_) => T::OtherPunct,
+        Ok(()) => v.first().map_or(T::Gt, |t| t.kind),
+        Err(_) => T::Gt,
     }
 }
 

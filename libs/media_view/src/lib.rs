@@ -114,15 +114,6 @@ pub fn script_mod(vm: &mut ScriptVm) {
 }
 
 #[cfg(test)]
-pub(crate) fn repo_path(relative: &str) -> String {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../../..")
-        .join(relative)
-        .to_string_lossy()
-        .into_owned()
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
 

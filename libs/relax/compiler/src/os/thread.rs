@@ -171,7 +171,7 @@ mod imp {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(target_vendor = "apple")]
 mod imp {
     pub use super::unix::{current, exit_now, fork, kick, name, note_current};
     use super::unix::pthread_self;

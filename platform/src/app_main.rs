@@ -176,6 +176,11 @@ pub fn is_window_manager() -> bool {
     WINDOW_MANAGER.load(std::sync::atomic::Ordering::Acquire)
 }
 
+/// Whether this app is a service that outlives the window manager ([`set_outlives_window_manager`]).
+pub fn outlives_window_manager() -> bool {
+    OUTLIVES_WINDOW_MANAGER.load(std::sync::atomic::Ordering::Acquire)
+}
+
 static HAL_WINDOW_MANAGER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -217,8 +222,9 @@ pub fn admitted_by_window_manager() -> Option<WmAdmission> {
 /// Linux: a UI process looks for a makepad window manager before any display server. Unless
 /// the launch forced a backend (`--linux-backend=`, a backend token in `MAKEPAD`), its host
 /// launched it, it runs hidden or headless, or it is a window manager itself, a live WM that
-/// speaks this build's hosted wire adopts it: its windows become WM windows over the same
-/// hosted path as the apps the WM launches. Otherwise the HAL picks Wayland, then X11.
+/// speaks a common hosted-protocol version adopts it: its windows become WM windows over the
+/// same hosted path as the apps the WM launches. An incompatible WM stops discovery; with no
+/// live WM the HAL picks Wayland, then X11.
 /// Under Relax the HAL shell does this for the whole `makepad run` process.
 pub fn discover_window_manager(crate_name: &'static str) {
     // The name this process gives a WM that hosts it (also the HAL's own WM shell and its
@@ -751,7 +757,11 @@ macro_rules! app_main {
     ( $app:ident, configure: $configure:expr ) => {
         #[cfg(target_arch = "wasm32")]
         $crate::app_main!(@impl $app, $crate::FontSet::Latin, $crate::FontSet::Latin, $crate::LATIN_FONT_ASSET_PACKAGE_MANIFEST, [], $configure);
-        #[cfg(not(target_arch = "wasm32"))]
+        // iOS and tvOS draw CJK, emoji and the other scripts with the OS's fonts: an app bundle
+        // there carries the Latin faces alone
+        #[cfg(any(target_os = "ios", target_os = "tvos"))]
+        $crate::app_main!(@impl $app, $crate::FontSet::System, $crate::FontSet::Latin, $crate::SYSTEM_FONT_ASSET_MANIFEST, [], $configure);
+        #[cfg(not(any(target_arch = "wasm32", target_os = "ios", target_os = "tvos")))]
         $crate::app_main!(@impl $app, $crate::FontSet::International, $crate::FontSet::Latin, $crate::INTERNATIONAL_FONT_ASSET_MANIFEST, [], $configure);
     };
     ( $app:ident, font_assets: [$($asset:expr),* $(,)?] ) => {
@@ -760,7 +770,11 @@ macro_rules! app_main {
     ( $app:ident, font_assets: [$($asset:expr),* $(,)?], configure: $configure:expr ) => {
         #[cfg(target_arch = "wasm32")]
         $crate::app_main!(@impl $app, $crate::FontSet::Latin, $crate::FontSet::Latin, $crate::LATIN_FONT_ASSET_PACKAGE_MANIFEST, [$($asset),*], $configure);
-        #[cfg(not(target_arch = "wasm32"))]
+        // iOS and tvOS draw CJK, emoji and the other scripts with the OS's fonts: an app bundle
+        // there carries the Latin faces alone
+        #[cfg(any(target_os = "ios", target_os = "tvos"))]
+        $crate::app_main!(@impl $app, $crate::FontSet::System, $crate::FontSet::Latin, $crate::SYSTEM_FONT_ASSET_MANIFEST, [$($asset),*], $configure);
+        #[cfg(not(any(target_arch = "wasm32", target_os = "ios", target_os = "tvos")))]
         $crate::app_main!(@impl $app, $crate::FontSet::International, $crate::FontSet::Latin, $crate::INTERNATIONAL_FONT_ASSET_MANIFEST, [$($asset),*], $configure);
     };
     ( $app:ident, font_set: Latin ) => {

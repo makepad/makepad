@@ -77,10 +77,7 @@ fn frame(w: &mut CmdWriter, n: u64) {
 fn a_captured_vulkan_frame_replays_to_the_same_pixels() {
     let hal = Hal::new();
     let info = hal.open(&OpenReq { backend: backend_id::VULKAN, flags: open_flags::OFFSCREEN_WINDOWS, ..Default::default() });
-    if info.backend != backend_id::VULKAN {
-        eprintln!("SKIP: no Vulkan device");
-        return;
-    }
+    assert_eq!(info.backend, backend_id::VULKAN, "Vulkan HAL initialization failed");
     let sid = info.session;
     let mut store = EventStore::new(sid, 128, 1 << 22);
     let mut w = CmdWriter::new(sid);

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The user's scenarios, frame by frame (a node, hidden).
+"""The user's scenarios, frame by frame (a pool node, hidden).
 
     scenarios.py <root> <scenario> [--autohide left,right] [--tag T]
 

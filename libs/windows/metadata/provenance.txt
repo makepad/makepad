@@ -8,6 +8,18 @@ The package includes sdk_license.txt, preserved verbatim. The upstream generator
 WinRT inputs: copied from DESKTOP-1 C:\Windows\System32\WinMetadata (Windows installation). The OS-provided WinRT inputs retain their original applicable terms; sdk_license.txt is the license shipped with the Win32Metadata package, not a relicensing of those OS files.
 Format specification: ECMA-335, Partition II, https://ecma-international.org/publications-and-standards/standards/ecma-335/
 
+Regeneration (the one command, which reproduces every generated file in libs/windows/sys):
+Put the nine pinned inputs (the eight .winmd files and WebView2.tlb, listed with their SHA-256
+below and in tools/winbind/inputs.sha256) in one directory <input-dir>. Then, from the repository
+root:
+cargo build --release --manifest-path tools/winbind/Cargo.toml && tools/winbind/target/release/makepad-winbind regenerate <input-dir>
+It refuses to run if an input differs from its pin, then writes lib.rs and core.rs (roots in
+tools/winbind/apis.txt, including the `module` lines for the other files) and the additive
+session.rs, composition.rs and system_web_view.rs (apis-session.txt, apis-composition.txt,
+apis-web-view.txt), in that order. Roots belong in exactly one list: the additive lists hold only
+what lib.rs lacks. With unchanged lists and inputs the working tree stays clean. The per-file
+commands below are what regenerate runs.
+
 Input SHA-256 (phase 2):
 4f6c0e4c98ad3e795ce25e712b17d5a12fab1bbb65c5d144105d06c51c846b6f  Windows.Devices.winmd
 d8c071caaf83d619898dc579218fb933037182c884c4c3816fcba8e2413cb990  Windows.Foundation.winmd
@@ -19,7 +31,7 @@ d8c071caaf83d619898dc579218fb933037182c884c4c3816fcba8e2413cb990  Windows.Founda
 0c0e5f11543fd654f9fad44c1952494bf407d6b067d93c2e5eef4fcf5d42edde  Windows.Win32.winmd
 
 Additive composition and system web view generation (M4a):
-The main lib.rs/core.rs output is not regenerated. Its existing public types are
+The main lib.rs/core.rs output is generated first (see Regeneration); its existing public types are
 referenced through their existing crate paths; missing types are emitted only in
 composition.rs or system_web_view.rs. No WinRT metadata inputs are used.
 
@@ -53,14 +65,11 @@ cargo build --release --manifest-path tools/winbind/Cargo.toml
 tools/winbind/target/release/makepad-winbind generate-module <input-dir> tools/winbind/apis-composition.txt libs/windows/sys/src/composition.rs composition libs/windows/sys/src/lib.rs
 tools/winbind/target/release/makepad-winbind generate-module <input-dir> tools/winbind/apis-web-view.txt libs/windows/sys/src/system_web_view.rs system_web_view libs/windows/sys/src/lib.rs
 When CARGO_TARGET_DIR is set (e.g. a devhub lease), the executable is instead
-<CARGO_TARGET_DIR>/release/makepad-winbind. Add only the two pub mod declarations
-to the existing main lib.rs; do not regenerate it or its core.rs support file.
+<CARGO_TARGET_DIR>/release/makepad-winbind. The pub mod declarations come from the `module` lines in apis.txt.
 
 Additive session / Task Scheduler generation (M4d):
 Uses only the same verified Windows.Win32.winmd (SHA-256 above); no WinRT
-metadata or new SDK is required. Existing main lib.rs/core.rs are retained,
-following the additive composition path, since the original WinRT inputs are
-not available here. API roots are in apis.txt and the additive subset in
+metadata or new SDK is required. The additive subset (only what lib.rs lacks) is in
 apis-session.txt. Run from the root with the repository's release-built tool:
 <CARGO_TARGET_DIR>/release/makepad-winbind generate-module <input-dir> tools/winbind/apis-session.txt libs/windows/sys/src/session.rs session libs/windows/sys/src/lib.rs
 The main lib.rs exports session and process; process.rs is handwritten std

@@ -36,6 +36,7 @@ mod layer;
 mod layout;
 mod ring;
 mod text;
+mod updating;
 
 use document::{Program, ERROR_BAND, FIELD, GLYPH, ICON, PIPE_BANK_SIZE};
 pub use groups::order as order_diagnostics;
@@ -126,8 +127,9 @@ pub enum Event {
     Text(String),
     Input(RawEvent, Vec<u8>),
     DocumentErrors(Vec<Diagnostic>),
-    /// A click on the JIT ring's Update ready notice.
-    RestartAsked,
+    /// A click on the JIT ring's dot (what the program is stopped on, or waits for): the run acts
+    /// on the alert it shows.
+    RingPressed,
 }
 
 pub fn diagnostic_text(diagnostic: &Diagnostic) -> String {
@@ -243,7 +245,7 @@ pub struct Boot {
     badges: bool,
     /// the JIT ring in the running app's caption
     ring: ring::Ring,
-    /// the ring's badge takes a click (`window_style::BADGE_PRESS`)
+    /// the ring's badge takes a click (`window_style::BADGE_PRESS`): while it shows a dot
     ring_button: bool,
     /// the window's chrome as the platform reports it: the caption strip follows it
     chrome: caption::Chrome,
@@ -257,13 +259,16 @@ pub struct Boot {
 
 impl Boot {
     /// `exact`: `geometry` is a launch size (`MAKEPAD_WINDOW`) the window system keeps as it
-    /// is, not fitted to the displays.
+    /// is, not fitted to the displays. `remembered`: `geometry` is the user's from an earlier
+    /// run. Either way the app that adopts the window keeps it; otherwise the app's first window
+    /// gets the size it asks for, as natively.
     pub fn new(
         info: HalInfo,
         document: Document,
         state: State,
         geometry: [f32; 4],
         exact: bool,
+        remembered: bool,
     ) -> Result<Self, String> {
         let mut boot = Self {
             window: None,
@@ -330,7 +335,7 @@ impl Boot {
                 }
             };
         let hal = Hal::global();
-        let window = hal.with_world(|world| world.host_window(geometry));
+        let window = hal.with_world(|world| world.host_window(geometry, exact || remembered));
         let mut writer = CmdWriter::new(HOST);
         let style = if exact { window_style::EXACT_SIZE } else { 0 };
         writer.window_create(window, window_kind::NORMAL | style, Id::NONE, geometry, false);
@@ -800,7 +805,7 @@ impl Boot {
                     self.events.push(Event::Input(raw, payload.to_vec()));
                 }
                 HalEvent::MouseDown { window, .. } if Some(window) == self.ring.window => {
-                    self.events.push(Event::RestartAsked)
+                    self.events.push(Event::RingPressed)
                 }
                 HalEvent::MouseMove { window, .. } | HalEvent::MouseLeave { window, .. }
                     if Some(window) == self.ring.window =>
@@ -1184,7 +1189,7 @@ impl Boot {
         } else {
             program.pipes[FIELD].draw_buffer(
                 &mut writer,
-                field::INSTANCES,
+                field.instances,
                 field.count,
                 &uniforms[FIELD],
                 scissor,
@@ -1255,7 +1260,7 @@ impl Boot {
         }
     }
 
-    /// Whether the window layer is on (the field over the running app).
+    /// Whether the window layer is on (the field, wait card or paused view over the app).
     pub fn layer_on(&self) -> bool {
         self.renderer.as_ref().is_some_and(|r| r.layer.on)
     }
@@ -1271,7 +1276,7 @@ impl Boot {
     }
 
     /// The run's wish for the window layer this turn, and the app's presented frames so far (a
-    /// new one is blurred again). `None` takes the layer away at once.
+    /// new one is blurred again). `None` fades an Updating card out; other layers go at once.
     pub fn layer(&mut self, want: Option<LayerWant>, app_frames: u64) {
         // the paused view replaces a panel (the HAL keeps one overlay per window); the boot
         // field's layer never does
@@ -1295,6 +1300,7 @@ impl Boot {
             renderer.dirty = true;
         }
         renderer.layer.set(want);
+        let want = renderer.layer.want();
         renderer.layer.app_frames = app_frames;
         let mut writer = CmdWriter::new(HOST);
         if paused {
@@ -1382,7 +1388,7 @@ impl Boot {
     /// fades out, then goes) and what the program is stopped on. Draws the ring's frame (and the
     /// tooltip's while the pointer rests on it) when one is due; returns how long until the next
     /// (`None`: no ring).
-    pub fn ring(&mut self, want: Option<RingWant>, alert: Option<RingAlert>) -> Option<Duration> {
+    pub fn ring(&mut self, want: Option<RingWant>, alert: Option<RingAlert>, detail: Option<&str>) -> Option<Duration> {
         let shows = self.badges();
         let window = self.window?;
         // a dump may show the dot and the tooltip (a hidden run has no stop or pointer to show)
@@ -1391,9 +1397,12 @@ impl Boot {
             self.ring.hovered.get_or_insert_with(|| Instant::now() - Duration::from_secs(1));
         }
         self.ring.set(want.filter(|_| shows), alert.filter(|_| shows));
-        // the notice takes a click, any other ring leaves input with the app: its badge is made anew
-        let button = alert == Some(RingAlert::UpdateReady) && shows;
-        if let Some(badge) = self.ring.window.filter(|_| self.ring_button != button) {
+        // a dot takes a click (the run acts on what it shows), a busy ring leaves input with the
+        // app: its badge is made anew, and the ring goes on in the new one (a dot that goes fades
+        // out in it; its layer is cleared once faded, never left drawn without a badge)
+        let button = alert.is_some() && shows;
+        let remade = self.ring.window.is_some() && self.ring_button != button;
+        if let Some(badge) = self.ring.window.filter(|_| remade) {
             let mut writer = CmdWriter::new(HOST);
             writer.window_close(badge);
             Hal::global().submit(&writer.buf());
@@ -1430,19 +1439,38 @@ impl Boot {
                     self.ring.placed = place;
                 }
             }
-            None if self.ring.wanted() => {
+            None if shows && (self.ring.wanted() || (remade && !self.ring.done())) => {
                 // the ring's place for the pointer's hover; its pixels are the window's badge layer
                 let badge = next_badge(&mut self.ring.slot);
                 writer.window_create(badge, window_kind::BADGE | window_style::BADGE_HOVER | if button { window_style::BADGE_PRESS } else { 0 }, window, place, false);
                 self.ring.window = Some(badge);
                 self.ring.placed = place;
             }
-            None => return None,
+            None => {
+                // the badge went above with the ring's last frame in the window's badge layer
+                // (a dot that went while the run stopped showing rings): that frame goes too
+                if remade {
+                    if self.badges {
+                        badge_frame(&mut writer, &mut self.frame, self.dump.as_mut(), window, self.dpi, size, |_| {});
+                        Hal::global().submit(&writer.buf());
+                    }
+                    if std::mem::take(&mut self.ring.tip) {
+                        if let Some(renderer) = &mut self.renderer {
+                            renderer.text.unpin();
+                        }
+                    }
+                }
+                return None;
+            }
         }
         // the tooltip while the pointer rests on the ring
         let tip = match (self.ring.tip_shown(), self.renderer.as_mut()) {
             (true, Some(renderer)) => {
-                let run = renderer.text.shape(&self.ring.tip_text(), ring::TIP_FONT, 1.0e4, ring::TIP_H);
+                let text = match (alert, detail) {
+                    (Some(_), Some(detail)) => detail.to_string(),
+                    _ => self.ring.tip_text(),
+                };
+                let run = renderer.text.shape(&text, ring::TIP_FONT, 1.0e4, ring::TIP_H);
                 self.ring.tip_placed = ring::Ring::place_tip(place, run.width, size);
                 self.ring.tip = true;
                 Some(run)
@@ -1468,8 +1496,9 @@ impl Boot {
         Some(self.ring.tip_due().map_or(wait, |due| wait.min(due)))
     }
 
-    /// The pointer hovering the ring's badge (session 0 sees its moves over it and its leave;
-    /// a press, a scroll or a drag there is the app's): the tooltip's hover.
+    /// The pointer hovering the ring's badge (session 0 sees its moves over it and its leave; a
+    /// press there is the run's while a dot shows, else the app's, as a scroll or a drag): the
+    /// tooltip's hover.
     fn ring_pointer(&mut self, event: &HalEvent) {
         let rect = [0.0, 0.0, ring::SIDE, ring::SIDE];
         let placed = self.ring.placed;
@@ -1574,7 +1603,7 @@ impl Boot {
             .is_some_and(|r| r.layer.on && r.layer.peek_done())
     }
 
-    /// The Ignition Field: the boot window, or the window layer over the running app.
+    /// The boot field or the display-only Updating card over the running app.
     fn present_field(&mut self) {
         let Some(window) = self.window else { return };
         let viewport = [self.geometry[2], self.geometry[3]];
@@ -1591,42 +1620,53 @@ impl Boot {
         let look = layered.then(|| renderer.layer.look(reduce_motion));
         let region = [0.0, 0.0, viewport[0], viewport[1]];
         renderer.text.begin_layout();
-        let frame = renderer.field.frame(
-            &mut writer,
-            &program.pipes[FIELD],
-            &self.state,
-            time,
-            region,
-            reduce_motion,
-            false,
-            look.map_or(-1.0, |l| l.resolve),
-            renderer.layer.on && !matches!(renderer.layer.want(), None | Some(LayerWant::Boot)),
-        );
-        let mut hint = program.label(layout::phase_key(self.state.phase));
-        let mut status = None;
-        if let Some(look) = look.filter(|l| l.progress >= 0.0) {
-            hint = format!("warming up · {} functions", field::group(renderer.layer.ahead));
-            status = Some(if look.resolve >= 0.0 { "ready" } else { "warming up" });
+        let updating = look.and_then(|l| l.updating);
+        let frame = updating.is_none().then(|| {
+            renderer.field.frame(
+                &mut writer,
+                &program.pipes[FIELD],
+                &self.state,
+                time,
+                region,
+                reduce_motion,
+                false,
+                look.map_or(-1.0, |l| l.resolve),
+                renderer.layer.on && !matches!(renderer.layer.want(), None | Some(LayerWant::Boot)),
+            )
+        });
+        let card = if let Some(LayerWant::Updating(work)) = renderer.layer.want().filter(|_| layered) {
+            Some(updating::layout(&mut renderer.text, program, work, viewport, &mut renderer.layout))
+        } else {
+            None
+        };
+        if frame.is_some() {
+            let hint = program.label(layout::phase_key(self.state.phase));
+            let mut status = None;
+            if let Some(look) = look.filter(|l| l.progress >= 0.0) {
+                status = Some(if look.resolve >= 0.0 {
+                    "Ready".to_string()
+                } else {
+                    let app = caption.title.as_deref().unwrap_or(&self.state.app);
+                    format!("Warming up {app}")
+                });
+            }
+            renderer.field.hud(
+                &mut renderer.text,
+                &self.state,
+                &hint,
+                status.as_deref(),
+                viewport,
+                time,
+                &caption,
+                &mut renderer.layout,
+            );
         }
-        renderer.field.hud(
-            &mut renderer.text,
-            &self.state,
-            &hint,
-            status,
-            viewport,
-            frame.view,
-            frame.params[0],
-            time,
-            &caption,
-            self.offscreen,
-            &mut renderer.layout,
-        );
         renderer.text.end_layout();
         renderer.text.begin_frame();
         let mut requests = Vec::new();
         let mut glyphs = Vec::new();
         let bounds = [0.0, 0.0, viewport[0], viewport[1]];
-        let fade = look.map_or(1.0, |l| l.galaxy);
+        let fade = updating.unwrap_or_else(|| look.map_or(1.0, |l| l.galaxy));
         for line in &mut renderer.layout.fixed_text {
             let y = line.position[1];
             let mut line = TextLine {
@@ -1646,7 +1686,6 @@ impl Boot {
                 &mut glyphs,
             );
         }
-        renderer.field.prime(&mut renderer.text, dpi, &mut requests);
         let ready = renderer.text.finish_frame(&mut writer, &requests);
         if !ready {
             Hal::global().submit(&writer.buf());
@@ -1663,9 +1702,9 @@ impl Boot {
                     (id!(dark), &[1.0]),
                     (id!(reduce_motion), &[reduce_motion as u8 as f32]),
                     (id!(time), &[time]),
-                    (id!(view), &frame.view),
-                    (id!(field_params), &frame.params),
-                    (id!(field_fall), &frame.fall),
+                    (id!(view), &frame.as_ref().map_or([0.0; 4], |f| f.view)),
+                    (id!(field_params), &frame.as_ref().map_or([0.0; 4], |f| f.params)),
+                    (id!(field_fall), &frame.as_ref().map_or([0.0; 4], |f| f.fall)),
                     (id!(field_layer), &field_layer),
                     (id!(field_fault), &field_fault),
                     (id!(radius), &[sdf.radius]),
@@ -1680,7 +1719,7 @@ impl Boot {
         common(&program.pipes[GLYPH], &mut glyph_uniforms);
         // the caption's window buttons (the field's only cards)
         let mut buttons = Vec::new();
-        if let Some(ground) = caption.ground.filter(|_| caption.height > 0.0) {
+        if let Some(ground) = caption.ground.filter(|_| caption.height > 0.0 && updating.is_none()) {
             program.pipes[ERROR_BAND].instances.write(
                 &[(id!(rect), &[0.0, 0.0, viewport[0], caption.height]), (id!(accent), &[CAPTION_GROUND]), (id!(tint), &ground)],
                 &mut buttons,
@@ -1700,6 +1739,20 @@ impl Boot {
                 ],
                 &mut buttons,
             );
+        }
+        if let Some(card) = card {
+            // The shadow extends 16 points around the face, offset down by 6 (Dialog's
+            // elevation_4). These are draw instances only, never entries in layout.cards.
+            let [x, y, w, h] = card.rect;
+            for (rect, accent) in [
+                ([x - 16.0, y - 16.0, w + 32.0, h + 38.0], 8.0),
+                (card.track, 9.0),
+            ] {
+                program.pipes[ERROR_BAND].instances.write(
+                    &[(id!(rect), &rect), (id!(accent), &[accent]), (id!(pressed), &[fade]), (id!(selected), &[card.progress])],
+                    &mut buttons,
+                );
+            }
         }
         let mut band_uniforms = Vec::new();
         common(&program.pipes[ERROR_BAND], &mut band_uniforms);
@@ -1777,7 +1830,7 @@ impl Boot {
             ..Default::default()
         });
         let scissor = [0.0, 0.0, viewport[0] * dpi, viewport[1] * dpi];
-        let mut app = |writer: &mut CmdWriter, texture: u32, opacity: f32, dim: f32| {
+        let mut app = |writer: &mut CmdWriter, texture: u32, opacity: f32, dim: f32, updating: bool| {
             if let Some(pipe) = layer_pipe.filter(|_| opacity > 0.0) {
                 let mut uniforms = Vec::new();
                 pipe.uniforms
@@ -1788,6 +1841,7 @@ impl Boot {
                         (id!(rect), &[0.0, 0.0, viewport[0], viewport[1]]),
                         (id!(opacity), &[opacity]),
                         (id!(dim), &[dim]),
+                        (id!(updating), &[updating as u8 as f32]),
                     ],
                     &mut data,
                 );
@@ -1796,13 +1850,16 @@ impl Boot {
                 kept.push(uniforms);
             }
         };
-        if look.is_some_and(|l| l.blur) {
-            app(&mut writer, layer::QUARTER, 1.0, layer::BLUR_DIM);
+        if let Some(opacity) = updating {
+            app(&mut writer, layer::APP, 1.0, 0.0, false);
+            app(&mut writer, layer::QUARTER, opacity, 0.0, true);
+        } else if look.is_some_and(|l| l.blur) {
+            app(&mut writer, layer::QUARTER, 1.0, layer::BLUR_DIM, false);
         }
-        if fade > 0.0 || look.is_some_and(|l| l.backdrop > 0.0) {
+        if let Some(frame) = frame.filter(|_| fade > 0.0 || look.is_some_and(|l| l.backdrop > 0.0)) {
             program.pipes[FIELD].draw_buffer(
                 &mut writer,
-                field::INSTANCES,
+                frame.instances,
                 frame.count,
                 &field_uniforms,
                 scissor,
@@ -1825,7 +1882,7 @@ impl Boot {
             scissor,
         );
         if let Some(look) = look {
-            app(&mut writer, layer::APP, look.sharp, 0.0);
+            app(&mut writer, layer::APP, look.sharp, 0.0, false);
         }
         writer.frame_set_build_end(makepad_hal::clock_ns());
         let snapshot = self.dump.as_mut().and_then(|d| d.due());

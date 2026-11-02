@@ -16,9 +16,11 @@ impl str {
         let p = crate::boxed::Box::into_raw(self) as *mut u8;
         unsafe { crate::boxed::Box::from_raw(crate::ptr::slice_from_raw_parts_mut(p, len)) }
     }
+    #[rustc_no_implicit_autorefs]
     pub const fn len(&self) -> usize {
         unsafe { crate::intrinsics_mem::slice_len(crate::intrinsics_mem::str_as_bytes(self)) }
     }
+    #[rustc_no_implicit_autorefs]
     pub const fn is_empty(&self) -> bool {
         self.len() == 0
     }

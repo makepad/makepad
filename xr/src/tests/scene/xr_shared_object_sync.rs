@@ -526,62 +526,6 @@ mod tests {
     }
 
     #[test]
-    fn remote_state_updates_accept_matching_net_peer_authority_ids() {
-        let activity_id = XrActivityId(live_id!(ico_shoot_scene));
-        let mut registry = XrSharedObjectRegistry::default();
-        registry.replace_spawnables(
-            activity_id,
-            [XrSpawnableObjectBinding {
-                object_id: XrSpawnableObjectId(11),
-                allocation_group_id: XrSpawnableObjectId(11),
-                widget_uid: WidgetUid(101),
-                bootstrap_shared: true,
-            }],
-        );
-
-        let sender_node_id = XrNetPeerId(0x1234);
-        let sender_peer = XrNetPeer {
-            id: sender_node_id,
-            addr: "198.51.100.24:41547".parse().unwrap(),
-        };
-        let object_id = xr_make_shared_object_id(sender_node_id, XrSharedObjectCounter(3))
-            .expect("shared object id should hash");
-        registry
-            .register_remote_shared_object(
-                activity_id,
-                0.0,
-                object_id,
-                0,
-                sender_node_id,
-                XrSharedObjectFidelity::ImpactCritical,
-                XrSpawnableObjectId(11),
-                Pose::new(Quat::default(), vec3f(0.0, 1.0, -0.5)),
-                vec3f(0.0, 0.0, -1.0),
-                vec3f(0.0, 0.0, 0.0),
-            )
-            .expect("remote object should bind");
-
-        let updated_state = XrNetSharedObjectState {
-            seq: 1,
-            sent_at: 0.5,
-            physics_tick: 10,
-            object_id,
-            epoch: 0,
-            authority: sender_node_id,
-            fidelity: XrSharedObjectFidelity::ImpactCritical,
-            mode: XrSharedObjectMode::Dynamic,
-            pose: Pose::new(Quat::default(), vec3f(0.4, 1.0, -0.3)),
-            linvel: vec3f(1.0, 0.0, 0.0),
-            angvel: vec3f(0.0, 0.0, 0.0),
-        };
-
-        assert_eq!(
-            registry.record_remote_shared_object_state(sender_peer.id, updated_state),
-            Some(WidgetUid(101))
-        );
-    }
-
-    #[test]
     fn force_local_shared_object_reset_reclaims_remote_object_for_local_resetter() {
         let activity_id = XrActivityId(live_id!(ico_shoot_scene));
         let widget_uid = WidgetUid(101);

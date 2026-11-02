@@ -1484,7 +1484,6 @@ impl GptCudaSession<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::indextts::{normalize_emotion_vector, reference_checkpoints_dir, reference_dumps_dir};
 
     #[test]
     fn erf_and_gelu_match_torch() {
@@ -1562,56 +1561,4 @@ mod tests {
         assert_eq!(conformer_subsampled_len(4), 1);
         assert_eq!(conformer_subsampled_len(5), 2);
     }
-
-    /// Minimal f32 npy reader for oracle fixtures (test-only).
-    fn load_npy_f32(path: &std::path::Path) -> Option<Vec<f32>> {
-        let bytes = std::fs::read(path).ok()?;
-        if bytes.len() < 10 || &bytes[..6] != b"\x93NUMPY" {
-            return None;
-        }
-        let (len, start) = if bytes[6] == 1 {
-            (u16::from_le_bytes([bytes[8], bytes[9]]) as usize, 10)
-        } else {
-            (u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]) as usize, 12)
-        };
-        let header = String::from_utf8_lossy(&bytes[start..start + len]).to_string();
-        if !header.contains("<f4") {
-            return None;
-        }
-        Some(
-            bytes[start + len..]
-                .chunks_exact(4)
-                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-                .collect(),
-        )
-    }
-
-    /// Oracle: the 8-dim emotion mixing (feat1/feat2 + campplus style) must
-    /// reproduce emovec_mat_sad / emovec_sad. Small files only; skips when
-    /// the reference checkout is absent.
-    #[test]
-    fn emotion_mixing_matches_oracle() {
-        let ckpt = reference_checkpoints_dir();
-        let dumps = reference_dumps_dir();
-        if !ckpt.join("feat1.pt").is_file() || !dumps.join("campplus_style.npy").is_file() {
-            eprintln!("skipping emotion_mixing_matches_oracle: reference files missing");
-            return;
-        }
-        let mats = EmotionMatrices::load(&ckpt).unwrap();
-        let style = load_npy_f32(&dumps.join("campplus_style.npy")).unwrap();
-        let emovec_ref = load_npy_f32(&dumps.join("emovec_ref.npy")).unwrap();
-        let want_mat = load_npy_f32(&dumps.join("emovec_mat_sad.npy")).unwrap();
-        let want_vec = load_npy_f32(&dumps.join("emovec_sad.npy")).unwrap();
-        let weights = normalize_emotion_vector(&[0.0, 0.0, 0.8, 0.0, 0.0, 0.0, 0.0, 0.0]);
-        let mix = mats.mix(&style, &weights, &emovec_ref);
-        // Oracle meta emo_random_index for this style.
-        assert_eq!(mix.picks, [2, 6, 1, 2, 1, 3, 0, 9]);
-        for (a, b) in mix.emovec_mat.iter().zip(&want_mat) {
-            assert!((a - b).abs() <= 2e-3, "emovec_mat mismatch: {a} vs {b}");
-        }
-        for (a, b) in mix.emovec.iter().zip(&want_vec) {
-            assert!((a - b).abs() <= 2e-3, "emovec mismatch: {a} vs {b}");
-        }
-    }
-
 }

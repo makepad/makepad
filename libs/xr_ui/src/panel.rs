@@ -23,7 +23,8 @@ script_mod! {
             let pos = self.get_size() * self.geom.geom_pos + self.get_pos()
             let model_view = self.draw_list.view_transform * self.transform
             self.world = model_view * vec4(pos.x, pos.y, pos.z, 1.0)
-            self.v_uv = self.geom.geom_uv
+            // the texture's rows run down from its top; the cube face's v runs up
+            self.v_uv = vec2(self.geom.geom_uv.x, 1.0 - self.geom.geom_uv.y)
             self.v_front = step(0.5, self.geom.geom_normal.z)
             self.lit_color = self.color
             self.vertex_pos = self.draw_pass.camera_projection * (self.draw_pass.camera_view * self.world)
@@ -39,6 +40,7 @@ script_mod! {
 
     mod.widgets.XrPanel = set_type_default() do #(XrPanel::script_component(vm)){
         draw_card: mod.draw.DrawXrCard{color: theme.color_bg_app}
+        draw_slider +: {pixel: fn() { return self.color }}
         draw_bg +: {color: theme.color_bg_app}
         draw_text +: {color: theme.color_text text_style: theme.font_regular{font_size: 22.0}}
         color_bg: theme.color_bg_app
@@ -97,6 +99,8 @@ pub enum CellKind {
     Button,
     /// A pressable cell that shows a state (on: the accent).
     Toggle(bool),
+    /// A captured horizontal control, with its value in 0..1.
+    Slider(f32),
     /// Text, left aligned, not pressable.
     Text,
     /// Text centred in its cell, not pressable.
@@ -107,7 +111,7 @@ pub enum CellKind {
 
 impl CellKind {
     fn pressable(self) -> bool {
-        matches!(self, CellKind::Button | CellKind::Toggle(_) | CellKind::Blank)
+        matches!(self, CellKind::Button | CellKind::Toggle(_) | CellKind::Slider(_) | CellKind::Blank)
     }
 }
 
@@ -168,6 +172,10 @@ impl Rows {
         self.cell(id, CellKind::Toggle(on), width, Tone::Normal, label)
     }
 
+    pub fn slider(&mut self, id: u32, value: f32, width: Width) -> &mut Self {
+        self.cell(id, CellKind::Slider(value.clamp(0.0, 1.0)), width, Tone::Normal, "")
+    }
+
     /// A pressable row of text in a tone (a list entry).
     pub fn entry(&mut self, id: u32, label: impl Display, tone: Tone, width: Width) -> &mut Self {
         self.cell(id, CellKind::Button, width, tone, label)
@@ -204,6 +212,8 @@ pub struct XrPanel {
     pub list_gap: f64,
     #[live]
     draw_card: DrawXrCard,
+    #[live]
+    draw_slider: DrawCube,
     #[live]
     draw_bg: DrawColor,
     #[live]
@@ -265,6 +275,11 @@ impl XrPanel {
         self.dirty = true;
     }
 
+    /// The panel's picture, once rendered.
+    pub fn texture(&self) -> Option<&Texture> {
+        self.tex.as_ref().map(|t| &t.texture)
+    }
+
     /// The pressable cell under the hover (shown lit).
     pub fn set_hover(&mut self, hover: Option<u32>) {
         if self.hover != hover {
@@ -275,6 +290,23 @@ impl XrPanel {
 
     pub fn hover(&self) -> Option<u32> {
         self.hover
+    }
+
+    /// Move a slider without rewriting rows or repainting the text texture. Its track and
+    /// knob are geometry on the card's front, drawn at the current value each frame.
+    pub fn set_slider_value(&mut self, id: u32, value: f32) {
+        if let Some(c) = self.rows.cells.iter_mut().find(|c| c.id == id) {
+            if matches!(c.kind, CellKind::Slider(_)) && value.is_finite() {
+                c.kind = CellKind::Slider(value.clamp(0.0, 1.0));
+            }
+        }
+    }
+
+    /// Project an unbounded card coordinate onto a slider's track (clamped at its ends).
+    pub fn slider_at(&self, id: u32, uv: Vec2f) -> Option<f32> {
+        let c = self.rows.cells.iter().find(|c| c.id == id && matches!(c.kind, CellKind::Slider(_)))?;
+        let (left, width) = slider_track(c.rect);
+        Some(((uv.x as f64 * self.width - left) / width.max(1.0)).clamp(0.0, 1.0) as f32)
     }
 
     fn layout(&mut self) {
@@ -313,6 +345,25 @@ impl XrPanel {
             }
             y += rh;
         }
+    }
+
+    /// Where a cell's centre is on the card: (u, v) in 0..1.
+    pub fn cell_uv(&self, id: u32) -> Option<Vec2f> {
+        let c = self.rows.cells.iter().find(|c| c.id == id)?;
+        let at = c.rect.pos + c.rect.size * 0.5;
+        Some(vec2f((at.x / self.width) as f32, (at.y / self.height) as f32))
+    }
+
+    /// Where the lit cells (toggles that are on) sit on the card, down from its top: their mean
+    /// v, weighted by area (what a picture of the card shows in the accent).
+    pub fn lit_v(&self) -> Option<f32> {
+        let (mut sum, mut area) = (0.0f64, 0.0f64);
+        for c in self.rows.cells.iter().filter(|c| c.kind == CellKind::Toggle(true)) {
+            let a = c.rect.size.x * c.rect.size.y;
+            sum += (c.rect.pos.y + c.rect.size.y * 0.5) / self.height * a;
+            area += a;
+        }
+        (area > 0.0).then(|| (sum / area) as f32)
     }
 
     /// The pressable cell at (u, v) in 0..1 of the card.
@@ -362,7 +413,8 @@ impl XrPanel {
         cx.make_child_pass(&tex.pass);
         cx.begin_pass(&tex.pass, Some(1.0));
         tex.list.begin_always(cx);
-        cx.begin_turtle(Walk::fixed(self.width, self.height), Layout::default());
+        // the pass's own root turtle: it is no part of the layout around the pass that holds it
+        cx.begin_root_turtle(dvec2(self.width, self.height), Layout::default());
         self.draw_bg.color = self.color_bg;
         self.draw_bg.draw_abs(cx, Rect { pos: dvec2(0.0, 0.0), size: dvec2(self.width, self.height) });
         let font = self.draw_text.text_style.font_size as f64;
@@ -381,6 +433,9 @@ impl XrPanel {
                 };
                 self.draw_bg.draw_abs(cx, rect);
             }
+            if matches!(kind, CellKind::Slider(_)) {
+                continue;
+            }
             // what fits the cell (an estimate of the glyphs' advance)
             let text = &self.rows.text[range];
             let fits = (((rect.size.x - 24.0).max(0.0) / (font * 0.62)) as usize).max(1);
@@ -390,7 +445,7 @@ impl XrPanel {
             self.draw_text.color = self.tone(tone);
             self.draw_text.draw_abs(cx, dvec2(x, rect.pos.y + rect.size.y * 0.5 - font * 0.64), text);
         }
-        cx.end_turtle();
+        cx.end_pass_sized_turtle();
         let tex = self.tex.as_mut().unwrap();
         tex.list.end(cx);
         cx.end_pass(&tex.pass);
@@ -398,12 +453,7 @@ impl XrPanel {
 
     /// The card with this panel's picture, in a 3D scene.
     pub fn draw(&mut self, cx: &mut Cx3d, card: &Card) {
-        let Some(tex) = &self.tex else { return };
-        self.draw_card.draw_vars.set_texture(0, &tex.texture);
-        self.draw_card.transform = card.matrix();
-        self.draw_card.cube_pos = vec3f(0.0, 0.0, 0.0);
-        self.draw_card.cube_size = vec3f(card.size.x, card.size.y, 0.003);
-        self.draw_card.draw(cx);
+        self.draw_in(cx, card, &Mat4f::identity());
     }
 
     /// As [`XrPanel::draw`], the card's room pose taken through `room_to_scene` first (a pass
@@ -415,5 +465,27 @@ impl XrPanel {
         self.draw_card.cube_pos = vec3f(0.0, 0.0, 0.0);
         self.draw_card.cube_size = vec3f(card.size.x, card.size.y, 0.003);
         self.draw_card.draw(cx);
+        let draw = &mut self.draw_slider;
+        draw.transform = self.draw_card.transform;
+        let scale = vec2f(card.size.x / self.width as f32, card.size.y / self.height as f32);
+        for c in &self.rows.cells {
+            let CellKind::Slider(value) = c.kind else { continue };
+            let (left, width) = slider_track(c.rect);
+            let mid = c.rect.pos.y + c.rect.size.y * 0.5;
+            for (x, w, h, z, color) in [
+                (left + width * 0.5, width, 4.0, 0.002, self.color_meta),
+                (left + width * value as f64, 16.0, c.rect.size.y.min(28.0), 0.003, self.color_on),
+            ] {
+                draw.color = color;
+                draw.cube_pos = vec3f((x as f32 - self.width as f32 * 0.5) * scale.x, (self.height as f32 * 0.5 - mid as f32) * scale.y, z);
+                draw.cube_size = vec3f(w as f32 * scale.x, h as f32 * scale.y, 0.001);
+                draw.draw(cx);
+            }
+        }
     }
+}
+
+fn slider_track(rect: Rect) -> (f64, f64) {
+    let inset = 12.0f64.min(rect.size.x * 0.5);
+    (rect.pos.x + inset, (rect.size.x - 2.0 * inset).max(0.0))
 }

@@ -5762,3 +5762,4 @@ std::u64		reexport core::u64
 std::u8		reexport core::u8
 std::unsafe_binder	unsafe_binders	
 std::usize		reexport core::usize
+core::ops::FnPtr	fn_static	

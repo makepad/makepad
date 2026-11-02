@@ -808,35 +808,4 @@ mod tests {
             assert!(!covers(&ranges, 0x1f610));
         }
     }
-
-    /// Printed only: what a cold index of this machine's fonts costs.
-    #[test]
-    fn print_cold_prewarm_cost() {
-        let started = std::time::Instant::now();
-        prewarm();
-        let (faces, bytes) = with_faces(|faces| {
-            let names: usize = faces.iter().flat_map(|f| f.families.iter().chain(&f.full_names)).map(|n| n.len() + 24).sum();
-            let ranges: usize = faces.iter().map(|f| f.coverage().len() * 8).sum();
-            (faces.len(), names + ranges + faces.len() * std::mem::size_of::<FaceInfo>())
-        });
-        let warm = std::time::Instant::now();
-        let _ = with_faces(|faces| faces.len());
-        println!(
-            "font index: {faces} faces, ~{} KB, cold prewarm (names + coverage) {:.1} ms, re-stat query {:.2} ms",
-            bytes / 1024,
-            (warm - started).as_secs_f64() * 1000.0,
-            warm.elapsed().as_secs_f64() * 1000.0
-        );
-    }
-
-    /// Printed only: installed font sets differ between build nodes.
-    #[test]
-    fn print_installed_matches() {
-        for (name, weight, italic) in [
-            ("DejaVu Sans", 400, false), ("DejaVu Sans", 700, true),
-            ("Noto Sans", 400, false), ("Segoe UI", 400, false), ("Roboto", 700, false),
-        ] {
-            println!("{name} {weight} italic={italic}: {:?}", find(name, weight, italic));
-        }
-    }
 }

@@ -14,11 +14,12 @@
 use super::leg::{Held, Spec};
 use super::{age, Ctx};
 use crate::cli::ask;
-use crate::lease::Kind;
+use crate::lease::{CostClass, Kind, Priority, Src};
 use crate::proto::{wall_ms, Record, Sev};
 use crate::state::{Job, JobPanic};
 use makepad_remote::json_str;
 use makepad_remote::link::{Client, Target};
+use makepad_strict_json::Value;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -87,6 +88,7 @@ pub fn start(ctx: Arc<Ctx>) {
         let _ = std::thread::Builder::new().name("devhub-job".into()).spawn(move || reattach(&c, &j));
     }
     prune_logs(&ctx);
+    crate::lease::shadow::start(ctx.clone());
     let _ = std::thread::Builder::new().name("devhub-jobs".into()).spawn(move || loop {
         dispatch(&ctx);
         idle(&ctx);
@@ -123,7 +125,7 @@ fn dispatch(ctx: &Arc<Ctx>) {
         let (mut go, mut skip) = (Vec::new(), Vec::new());
         for j in d.jobs.iter().filter(|j| j.state == "queued") {
             let deps: Vec<(String, Option<String>)> = j.after.iter().map(|a| (a.clone(), state(a))).collect();
-            if let Some((a, s)) = deps.iter().find(|(_, s)| s.as_deref().is_none_or(|s| matches!(s, "failed" | "panicked" | "cancelled" | "skipped" | "lost"))) {
+            if let Some((a, s)) = deps.iter().find(|(_, s)| s.as_deref().is_none_or(|s| matches!(s, "failed" | "panicked" | "cancelled" | "skipped" | "lost" | "jit-error"))) {
                 skip.push((j.id.clone(), format!("{a} {}", s.as_deref().unwrap_or("is unknown"))));
             } else if deps.iter().all(|(_, s)| s.as_deref() == Some("ok")) {
                 go.push(j.id.clone());
@@ -221,7 +223,7 @@ fn snap_paths(ctx: &Ctx, snap: &str) -> Result<(Vec<String>, Vec<String>), Strin
 /// Ships the snapshot into the lease's tree (already at the snapshot's base commits): only the
 /// files the box lacks as they are go; then `ship-done` names them and the deletions.
 pub(super) fn ship_snap(ctx: &Ctx, held: &Held, snap: &str) -> Result<usize, String> {
-    let (changed, deleted) = snap_paths(ctx, snap)?;
+    let (changed, deleted) = if snap.is_empty() { (Vec::new(), Vec::new()) } else { snap_paths(ctx, snap)? };
     let files = snap_dir(ctx, snap).join("files");
     let mut entries = Vec::new();
     for p in &changed {
@@ -229,7 +231,12 @@ pub(super) fn ship_snap(ctx: &Ctx, held: &Held, snap: &str) -> Result<usize, Str
     }
     let sent = if entries.is_empty() { 0 } else { crate::lease::ship::send(held.client(), &held.node, &held.id, &files, &entries)?.sent };
     let list = |v: &[String]| v.iter().map(|p| json_str(p)).collect::<Vec<_>>().join(",");
-    let body = format!("{{\"shipped\":[{}],\"deleted\":[{}]}}", list(&changed), list(&deleted));
+    let bases = if snap.is_empty() { "{}".to_string() } else {
+        let text = std::fs::read_to_string(snap_dir(ctx, snap).join("manifest.json")).map_err(|e| e.to_string())?;
+        let v = makepad_strict_json::parse(text.as_bytes()).map_err(|e| format!("snapshot {snap}: {e:?}"))?;
+        v.get("bases").ok_or("snapshot lacks pinned base blobs")?.to_json()
+    };
+    let body = format!("{{\"shipped\":[{}],\"deleted\":[{}],\"bases\":{bases}}}", list(&changed), list(&deleted));
     let r = ask(held.client(), Some(&held.node), "ship-done", &format!("ship-done {} {}", held.id, makepad_network::digest::base64_encode(body.as_bytes())))?;
     if let Some(e) = r.first().filter(|l| l.starts_with("{\"err\":")) {
         return Err(format!("{}: {e}", held.node));
@@ -247,14 +254,32 @@ fn run(ctx: &Arc<Ctx>, id: &str) {
     let _ = std::fs::create_dir_all(&dir);
     let log = dir.join(format!("{id}.log"));
     let kind = Kind::parse(&j.kind).unwrap_or(Kind::Test);
-    let spec = Spec { only: j.only, lane: j.lane.clone(), agent: j.agent.clone(), kind, needs: j.needs.clone(), prio: j.prio, rev: j.rev.clone(), repo_dir: j.repo_dir.clone(), node: (!j.node_pref.is_empty()).then(|| j.node_pref.clone()) };
+    // its place in the queue from its first ask on: a master's restart or a lost box keeps it
+    let asked = set(ctx, id, |j| {
+        if j.asked_ms == 0 {
+            j.asked_ms = wall_ms();
+        }
+    }).map_or(0, |j| j.asked_ms);
+    let spec = Spec { since_ms: (asked > 0).then_some(asked), only: j.only, lane: if j.shadow_of.is_empty() { j.lane.clone() } else { format!("shadow-{}", j.id) }, agent: j.agent.clone(), kind, needs: j.needs.clone(), prio: j.prio, rev: j.rev.clone(), repo_dir: j.repo_dir.clone(), node: (!j.node_pref.is_empty()).then(|| j.node_pref.clone()) };
     let cancelled = || get(ctx, id).is_none_or(|j| j.state == "cancelled");
-    let held = match Held::acquire(&spec, &mut |_| {}, &cancelled) {
+    let configure = |r: &mut crate::lease::sched::Req| {
+        r.run_options(Src::parse(&j.src).unwrap_or(Src::Tree), CostClass::parse(&j.cost), j.est_min, &j.class, &j.cmd);
+        r.priority = Priority::parse(&j.priority).unwrap_or_default();
+        r.loader = (!j.loader.is_empty()).then(|| j.loader.clone());
+        r.cores = j.cores;
+        r.ram_gb = j.ram_gb;
+        r.whole = j.whole;
+        r.holder = j.holder;
+    };
+    let held = match Held::acquire_with(&spec, &configure, &mut |_| {}, &cancelled) {
         Ok(h) => h,
         // the master's socket or a box's link went away: no verdict on the job
         Err(e) if crate::lease::master::unreachable(&e) && again(ctx, id, &format!("no lease ({})", crate::proto::clean(&e, 160))) => return,
         Err(e) => return finish(ctx, id, Err(e), &log),
     };
+    let class = j.shadow.then(|| ctx.leases.nodes().into_iter().find(|n| n.name == held.node)).flatten().and_then(|n| {
+        n.caps.as_ref().map(|c| [("arch".to_string(), c.arch.clone()), ("os".into(), c.os.clone()), ("role".into(), n.role().as_str().into())])
+    });
     let j = set(ctx, id, |j| {
         if j.state == "leasing" {
             j.state = "running".into();
@@ -262,6 +287,12 @@ fn run(ctx: &Arc<Ctx>, id: &str) {
             j.node = held.node.clone();
             j.granted_ms = wall_ms();
             j.started_ms = j.granted_ms;
+            if let Some(class) = &class {
+                let mut needs = crate::lease::sched::parse_needs(&j.needs);
+                needs.retain(|(k, _)| !matches!(k.as_str(), "arch" | "os" | "role"));
+                needs.extend(class.iter().cloned());
+                j.needs = needs.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(",");
+            }
         }
     });
     // a soft pin that fell to a twin says so: the job's artifacts and timing are that box's
@@ -273,7 +304,7 @@ fn run(ctx: &Arc<Ctx>, id: &str) {
         held.release(None);
         return finish(ctx, id, Err("cancelled".into()), &log);
     };
-    if !j.snap.is_empty() {
+    if !j.snap.is_empty() || j.src == "overlay" {
         if let Err(e) = ship_snap(ctx, &held, &j.snap) {
             held.release(None);
             if crate::lease::master::unreachable(&e) && again(ctx, id, &format!("shipping to {} failed ({})", j.node, crate::proto::clean(&e, 160))) {
@@ -295,7 +326,7 @@ fn run(ctx: &Arc<Ctx>, id: &str) {
     let mut out = Out { file, first: Some(Box::new(|| {
         set(ctx, id, |j| j.first_out_ms = wall_ms());
     })) };
-    let r = held.run_noted(&j.cmd, &mut out, &mut |n| {
+    let r = held.run_at(if j.cwd.is_empty() { "." } else { &j.cwd }, &j.cmd, &mut out, &mut |n| {
         set(ctx, id, |j| j.run_n = n);
     });
     drop(out);
@@ -330,7 +361,15 @@ fn reattach(ctx: &Arc<Ctx>, j: &Job) {
 /// A job's run is over: its lease goes, and it has its result, or (the box lost under it, no exit)
 /// it is placed again from its snapshot.
 fn ended(ctx: &Ctx, id: &str, held: Held, r: Result<i32, String>, log: &std::path::Path) {
+    let node = held.node.clone();
     held.release(r.as_ref().ok().copied());
+    if get(ctx, id).is_some_and(|j| !j.shadow_of.is_empty()) {
+        let lane = format!("shadow-{id}");
+        let cleaned = ask(&ctl(), Some(&node), "disk", &format!("disk clean {lane}"));
+        if let Err(e) = cleaned.and_then(|lines| match lines.iter().find(|l| l.starts_with("{\"err\":")) { Some(e) => Err(e.clone()), None => Ok(()) }) {
+            ctx.store.event("shadow", Sev::Warn, format!("shadow {id} cleanup on {node}: {e}"), None);
+        }
+    }
     if let Err(e) = &r {
         let node = get(ctx, id).map_or(String::new(), |j| j.node);
         if again(ctx, id, &format!("box {node} lost ({})", crate::proto::clean(e, 160))) {
@@ -343,7 +382,7 @@ fn ended(ctx: &Ctx, id: &str, held: Held, r: Result<i32, String>, log: &std::pat
 /// Back to the queue, with what happened as its note, if it has placements left; whether it went.
 fn again(ctx: &Ctx, id: &str, why: &str) -> bool {
     let j = set(ctx, id, |j| {
-        if matches!(j.state.as_str(), "leasing" | "running") && j.attempts < ATTEMPTS {
+        if matches!(j.state.as_str(), "leasing" | "running") && j.attempts < ATTEMPTS && j.holder.is_none_or(crate::os::pid_alive) {
             j.state = "queued".into();
             j.note = format!("{why}; placed again");
             j.lease.clear();
@@ -371,10 +410,16 @@ fn finish(ctx: &Ctx, id: &str, r: Result<i32, String>, log: &std::path::Path) {
     let j = set(ctx, id, |j| {
         j.ended_ms = wall_ms();
         j.errors = errors;
+        if matches!(r, Ok(makepad_remote::hot::JIT_ERROR_EXIT)) {
+            j.errors.clear();
+            j.note = makepad_remote::hot::Verdict::from_output(makepad_remote::hot::JIT_ERROR_EXIT, &text)
+                .map(|v| v.line()).unwrap_or_else(|| "JIT infrastructure error; its verdict record was not received".into());
+        }
         j.tail = tail;
         j.log = log.to_string_lossy().into_owned();
         j.state = match (j.state.as_str(), &r) {
             ("cancelled", _) => "cancelled".into(),
+            (_, Ok(makepad_remote::hot::JIT_ERROR_EXIT)) => "jit-error".into(),
             ("paused", _) => "panicked".into(),
             (_, Ok(0)) => "ok".into(),
             (_, Ok(_)) => "failed".into(),
@@ -394,10 +439,11 @@ fn finish(ctx: &Ctx, id: &str, r: Result<i32, String>, log: &std::path::Path) {
         "ok" => format!("job {id} ok in {secs} s on {}", j.node),
         "panicked" => format!("job {id} panicked: {}", j.panic.as_ref().map_or(String::new(), |p| format!("{} at {}", p.message, p.location))),
         "cancelled" => format!("job {id} cancelled"),
+        "jit-error" => j.note.clone(),
         _ => format!("job {id} failed{} in {secs} s on {}: {}", j.exit.map_or(String::new(), |e| format!(" exit={e}")), j.node, j.errors.first().cloned().unwrap_or_else(|| j.note.clone())),
     };
     let sev = match j.state.as_str() {
-        "ok" | "cancelled" => Sev::Info,
+        "ok" | "cancelled" | "jit-error" => Sev::Info,
         _ => Sev::Warn,
     };
     event(ctx, sev, what, Some(&j));
@@ -422,15 +468,17 @@ fn end_lease(lease: &str) {
 
 /// A record on the master's stream: a panic parked on a running job's box pauses that job.
 pub fn on_record(ctx: &Arc<Ctx>, r: &Record) {
-    if r.kind != "panic" || r.pid == 0 {
+    if !matches!(r.kind.as_str(), "panic" | "patchrefused" | "patchreverted") || r.pid == 0 {
         return;
     }
-    let Some(j) = ctx.store.read(|d| d.jobs.iter().find(|j| j.state == "running" && j.node == r.machine).cloned()) else { return };
+    let candidates: Vec<Job> = ctx.store.read(|d| d.jobs.iter().filter(|j| j.state == "running" && j.node == r.machine).cloned().collect());
+    if candidates.is_empty() { return; }
     let (ctx, r) = (ctx.clone(), r.clone());
     // the node says whether the panicking process is one of the job's (never on the record path)
     let _ = std::thread::Builder::new().name("devhub-job-panic".into()).spawn(move || {
-        let owns = ask(&ctl(), Some(&j.node), "lease-owns", &format!("lease-owns {} {}", j.lease, r.pid)).ok().and_then(|l| l.first().cloned()).is_some_and(|l| l.contains("\"owns\":true"));
-        if !owns {
+        let Some(j) = candidates.into_iter().find(|j| ask(&ctl(), Some(&j.node), "lease-owns", &format!("lease-owns {} {}", j.lease, r.pid)).ok().and_then(|l| l.first().cloned()).is_some_and(|l| l.contains("\"owns\":true"))) else { return };
+        if r.kind != "panic" {
+            set(&ctx, &j.id, |j| j.jit_error = format!("{}: {}", r.kind, crate::proto::clean(&r.detail, 300)));
             return;
         }
         let d = makepad_strict_json::parse(r.detail.as_bytes()).ok();
@@ -440,12 +488,14 @@ pub fn on_record(ctx: &Arc<Ctx>, r: &Record) {
             if j.state == "running" {
                 j.state = "paused".into();
                 j.panic = Some(p.clone());
+                j.jit_error = format!("JIT panic: {}", p.message);
                 j.touched_ms = wall_ms();
             }
         }) else { return };
         if j.state != "paused" {
             return;
         }
+        if !j.shadow_of.is_empty() { end_lease(&j.lease); return; }
         let pid = if p.id.is_empty() { "P?".to_string() } else { p.id.clone() };
         event(
             &ctx,
@@ -478,6 +528,23 @@ pub fn serve(ctx: &Ctx, line: &str) -> Result<String, String> {
     let ids = || -> Vec<String> { rest.split([' ', ',']).filter(|s| !s.is_empty()).map(str::to_string).collect() };
     match verb {
         "submit" => submit(ctx, rest),
+        "output" => {
+            use std::io::{Read, Seek};
+            let (id, offset) = rest.split_once(' ').ok_or("job output <id> <offset>")?;
+            let off: u64 = offset.parse().map_err(|_| "job output: invalid offset")?;
+            let j = get(ctx, id).ok_or_else(|| format!("no job {id}"))?;
+            let path = ctx.logs("jobs").join(format!("{id}.log"));
+            let mut bytes = Vec::new();
+            match std::fs::File::open(&path) {
+                Ok(mut f) => {
+                    f.seek(std::io::SeekFrom::Start(off)).map_err(|e| e.to_string())?;
+                    f.take(64 << 10).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.to_string()),
+            }
+            Ok(format!("{{\"job\":{},\"data\":{},\"off\":{}}}", crate::state::job_value(&j).to_json(), json_str(&makepad_network::digest::base64_encode(&bytes)), off + bytes.len() as u64))
+        }
         "list" => {
             let all = rest == "all";
             let list: Vec<String> = ctx.store.read(|d| d.jobs.iter().filter(|j| all || !j.done()).cloned().collect::<Vec<_>>()).iter().map(|j| live(ctx, j)).collect();
@@ -599,13 +666,14 @@ fn dirty_set(ctx: &Ctx, tree: &std::path::Path, lane: &str) -> Result<(String, V
     Ok((rev, changed, deleted))
 }
 
-fn copy_snapshot(ctx: &Ctx, tree: &std::path::Path, rev: String, changed: Vec<String>, deleted: Vec<String>) -> Result<(String, String, u32), String> {
+pub(super) fn copy_snapshot(ctx: &Ctx, tree: &std::path::Path, rev: String, changed: Vec<String>, deleted: Vec<String>) -> Result<(String, String, u32), String> {
     let snap = ctx.store.update(|d| {
         d.snaps_next += 1;
         format!("S{}", d.snaps_next)
     });
     let dir = snap_dir(ctx, &snap);
     let files = dir.join("files");
+    std::fs::create_dir_all(&files).map_err(|e| e.to_string())?;
     let mut man = Vec::new();
     for rel in &changed {
         let (src, dst) = (tree.join(rel), files.join(rel));
@@ -629,7 +697,9 @@ fn copy_snapshot(ctx: &Ctx, tree: &std::path::Path, rev: String, changed: Vec<St
         };
         man.push(format!("{{\"path\":{},\"hash\":\"{hash}\",\"size\":{}}}", json_str(rel), m.len()));
     }
-    let manifest = format!("{{\"rev\":{},\"tree\":{},\"changed\":[{}],\"deleted\":[{}]}}", json_str(&rev), json_str(&tree.to_string_lossy()), man.join(","), deleted.iter().map(|p| json_str(p)).collect::<Vec<_>>().join(","));
+    let pin = crate::lease::Pin::of_rev(&rev).ok_or("snapshot: no pin")?;
+    let bases = crate::lease::ship::bases_json(tree, &pin, &changed.iter().chain(&deleted).cloned().collect::<Vec<_>>())?;
+    let manifest = format!("{{\"bases\":{bases},\"rev\":{},\"tree\":{},\"changed\":[{}],\"deleted\":[{}]}}", json_str(&rev), json_str(&tree.to_string_lossy()), man.join(","), deleted.iter().map(|p| json_str(p)).collect::<Vec<_>>().join(","));
     std::fs::write(dir.join("manifest.json"), manifest).map_err(|e| e.to_string())?;
     Ok((rev, snap, (changed.len() + deleted.len()) as u32))
 }
@@ -667,13 +737,38 @@ fn submit(ctx: &Ctx, json: &str) -> Result<String, String> {
             return Err(format!("job {}: lane `{lane}` is not a name", i + 1));
         }
         let prio = r.get("prio").and_then(|p| p.as_i64()).unwrap_or(crate::lease::sched::DEFAULT_PRIO as i64) as i32;
-        jobs.push(Job { kind, needs: s(r, "needs"), node_pref: s(r, "node"), only: r.get("only").and_then(|o| o.as_bool()).unwrap_or(false), prio, repo_dir: tree.to_string_lossy().into_owned(), lane, agent: s(r, "agent"), cmd, after: list(r, "after"), state: "queued".into(), ..Default::default() });
+        let src = Src::for_run(Kind::parse(&kind).unwrap(), &cmd, r.get("tree").and_then(|v| v.as_bool()).unwrap_or(false));
+        let cwd = s(r, "cwd");
+        if !cwd.is_empty() && (std::path::Path::new(&cwd).is_absolute() || cwd.contains(char::is_whitespace) || std::path::Path::new(&cwd).components().any(|c| matches!(c, std::path::Component::ParentDir))) { return Err("job cwd must be a relative directory without spaces".into()); }
+        let shadow = r.get("shadow").and_then(|v| v.as_bool()).unwrap_or(false) && kind == "test" && crate::lease::loaders::cargo_run_args(&cmd).is_some_and(|a| a.first().is_some_and(|a| a == "test")) && ctx.store.read(|d| d.devhub_shadow);
+        let holder = r.get("holder").and_then(Value::as_u64).and_then(|p| u32::try_from(p).ok()).filter(|p| *p > 1);
+        let cost = s(r, "cost");
+        if !cost.is_empty() && CostClass::parse(&cost).is_none() { return Err("cost is small, medium or large".into()); }
+        let est_min = r.get("est_min").filter(|v| !v.is_null()).map(|v| crate::lease::num(v).filter(|m| m.is_finite() && *m >= 0.0).ok_or("est_min is a nonnegative number")).transpose()?;
+        let cores = r.get("cores").filter(|v| !v.is_null()).map(|v| crate::lease::num(v).filter(|n| n.is_finite() && *n > 0.0).ok_or("cores is a positive number")).transpose()?;
+        let ram_gb = r.get("ram_gb").filter(|v| !v.is_null()).map(|v| crate::lease::num(v).filter(|n| n.is_finite() && *n > 0.0).ok_or("ram_gb is a positive number")).transpose()?;
+        let whole = r.get("whole").and_then(|v| v.as_bool()).unwrap_or(false);
+        let priority = match s(r, "priority").as_str() { "" => Priority::Background, p => Priority::parse(p).ok_or("priority is interactive or background")? };
+        jobs.push(Job { cwd, holder, shadow, priority: priority.as_str().into(), loader: s(r, "loader"), src: src.as_str().into(), cost: cost.as_str().into(), est_min, cores, ram_gb, whole, class: s(r, "class"), kind, needs: s(r, "needs"), node_pref: s(r, "node"), only: r.get("only").and_then(|o| o.as_bool()).unwrap_or(false), prio, repo_dir: tree.to_string_lossy().into_owned(), lane, agent: s(r, "agent"), cmd, after: list(r, "after"), state: "queued".into(), ..Default::default() });
     }
     // the base and the snapshot: one for the whole request
     let lane = jobs[0].lane.clone();
     let main_checkout = crate::lease::ship::is_main_checkout(&tree);
     let mut left_out = 0;
     let (rev, snap, files) = match s(&v, "rev") {
+        r if r.is_empty() && !list(&v, "also").is_empty() => {
+            let (rev, mut changed, mut deleted) = dirty_set(ctx, &tree, &lane)?;
+            if main_checkout && !v.get("with_uncommitted").and_then(Value::as_bool).unwrap_or(false) { left_out = changed.len() + deleted.len(); changed.clear(); deleted.clear(); }
+            for p in list(&v, "also") {
+                if !crate::lease::ship::inside(&p) { return Err(format!("DEVHUB_ALSO needs a repository-relative path: {p}")); }
+                if crate::lease::ship::never_ships(&p) { return Err(format!("DEVHUB_ALSO path never ships: {p}")); }
+                let mut entries = Vec::new();
+                crate::lease::ship::entries(&tree, &p, &mut entries)?;
+                changed.extend(entries.into_iter().map(|e| e.path).filter(|p| !crate::lease::ship::never_ships(p)));
+            }
+            changed.sort(); changed.dedup();
+            copy_snapshot(ctx, &tree, rev, changed, deleted)?
+        }
         r if r.is_empty() && main_checkout && !v.get("with_uncommitted").and_then(|b| b.as_bool()).unwrap_or(false) => {
             let (rev, changed, deleted) = dirty_set(ctx, &tree, &lane)?;
             left_out = changed.len() + deleted.len();
@@ -698,6 +793,7 @@ fn submit(ctx: &Ctx, json: &str) -> Result<String, String> {
             j.snap = snap.clone();
             j.snap_files = files;
             j.submitted_ms = wall_ms();
+            j.asked_ms = 0;
             for a in j.after.iter_mut() {
                 if let Some(n) = a.strip_prefix('@') {
                     let n: usize = n.parse().map_err(|_| format!("job {}: --after {a}", i + 1))?;
@@ -737,7 +833,7 @@ fn rerun(ctx: &Ctx, id: &str) -> Result<String, String> {
     }
     let n = ctx.store.update(|d| {
         d.jobs_next += 1;
-        let n = Job { id: format!("J{}", d.jobs_next), kind: j.kind.clone(), needs: j.needs.clone(), node_pref: j.node_pref.clone(), only: j.only, prio: j.prio, rev: j.rev.clone(), repo_dir: j.repo_dir.clone(), snap: j.snap.clone(), snap_files: j.snap_files, lane: j.lane.clone(), agent: j.agent.clone(), cmd: j.cmd.clone(), state: "queued".into(), submitted_ms: wall_ms(), note: format!("rerun of {id}"), ..Default::default() };
+        let n = Job { id: format!("J{}", d.jobs_next), cwd: j.cwd.clone(), priority: j.priority.clone(), loader: j.loader.clone(), src: j.src.clone(), cost: j.cost.clone(), est_min: j.est_min, cores: j.cores, ram_gb: j.ram_gb, whole: j.whole, class: j.class.clone(), kind: j.kind.clone(), needs: j.needs.clone(), node_pref: j.node_pref.clone(), only: j.only, prio: j.prio, rev: j.rev.clone(), repo_dir: j.repo_dir.clone(), snap: j.snap.clone(), snap_files: j.snap_files, lane: j.lane.clone(), agent: j.agent.clone(), cmd: j.cmd.clone(), state: "queued".into(), submitted_ms: wall_ms(), note: format!("rerun of {id}"), ..Default::default() };
         d.jobs.push(n.clone());
         n
     });
@@ -810,7 +906,7 @@ mod tests {
         repo(&home.join("tree"), "rc-t");
         repo(&home.join("tree/apps/commercial"), "rc-t");
         let leases = Arc::new(LeaseMaster::new("mac", home.clone(), Arc::new(|_: &str, _: &str, _: &str| Err("no nodes".to_string())), Arc::new(|_| {}), Arc::new(|| 1), None, true));
-        Ctx { store: Store::open(&home, "mac", Arc::new(|_| {})), leases, machine: "mac".into(), monitor: crate::monitor::Monitor::start(&[]), repo: home.join("tree"), home }
+        Ctx { store: Store::open(&home, "mac", Arc::new(|_| 0)), leases, machine: "mac".into(), monitor: crate::monitor::Monitor::start(&[]), repo: home.join("tree"), home }
     }
 
     fn req(cmd: &str, after: &[&str]) -> String {

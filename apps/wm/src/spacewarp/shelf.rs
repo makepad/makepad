@@ -32,23 +32,6 @@ pub fn press_is_drag(start: (f64, f64), at: (f64, f64)) -> bool {
     (at.0 - start.0).hypot(at.1 - start.1) >= CLICK_SLOP
 }
 
-/// What a press on a tiny tile came to, from the pointer samples between the
-/// press and the release: a click (unfold) unless any sample went past the
-/// slop, from the press point, which is a drag (pull-out, at that sample).
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum PressOutcome {
-    Click,
-    /// Index of the sample that began the drag.
-    Drag(usize),
-}
-
-pub fn classify_press(start: (f64, f64), samples: &[(f64, f64)]) -> PressOutcome {
-    match samples.iter().position(|s| press_is_drag(start, *s)) {
-        Some(i) => PressOutcome::Drag(i),
-        None => PressOutcome::Click,
-    }
-}
-
 /// The inner edge of a shelf: the shown x of the innermost item's inner
 /// side (the shelf lies between the screen edge and it), none when empty.
 pub fn inner_edge(side: i8, shown: impl IntoIterator<Item = LRect>) -> Option<f64> {
@@ -503,25 +486,6 @@ mod tests {
         assert!(first > 0.8 && second < first && second > 0.4, "{first} {second}");
         assert!((0.0..=1.0).contains(&pulse_alpha(0.3)));
         assert!(pulse_alpha(0.5) < 1e-9);
-    }
-
-    #[test]
-    fn press_sequences_on_a_tile_are_clicks_or_drags_by_the_slop_alone() {
-        let p = (100.0, 100.0);
-        // No movement, and a wobble inside the slop: a click.
-        assert_eq!(classify_press(p, &[]), PressOutcome::Click);
-        assert_eq!(classify_press(p, &[(101.0, 100.0), (99.0, 102.0), (103.0, 103.0)]), PressOutcome::Click);
-        // A slow drag in any direction starts the pull-out at the first sample past the slop.
-        for (dx, dy) in [(1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0), (0.8, 0.8)] {
-            let samples: Vec<(f64, f64)> = (1..30).map(|i| (p.0 + dx * i as f64, p.1 + dy * i as f64)).collect();
-            assert_eq!(classify_press(p, &samples), PressOutcome::Drag(4), "{dx},{dy}");
-        }
-        // A flick: one big jump is a drag at once, never a click.
-        assert_eq!(classify_press(p, &[(300.0, 100.0)]), PressOutcome::Drag(0));
-        // A wobble first, then a move: still a drag, at the move.
-        assert_eq!(classify_press(p, &[(102.0, 100.0), (101.0, 101.0), (160.0, 100.0)]), PressOutcome::Drag(2));
-        // A drag that returns to the start before the release is still a drag.
-        assert_eq!(classify_press(p, &[(130.0, 100.0), (100.0, 100.0)]), PressOutcome::Drag(0));
     }
 
     #[test]

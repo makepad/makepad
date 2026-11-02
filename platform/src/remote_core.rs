@@ -152,6 +152,9 @@ pub struct WinInfo {
     pub w: f64,
     pub h: f64,
     pub dpi: f64,
+    /// the scale the window's main pass last rasterised at (0 before its first frame): a pass
+    /// at another scale than `dpi` draws stretched and takes input offset
+    pub pass_dpi: f64,
     pub x: f64,
     pub y: f64,
 }
@@ -280,10 +283,8 @@ pub fn submit_encode(mut job: EncodeJob, raw: bool) {
     // loses nothing, since the encoder would have scaled down anyway.
     let len = loop {
         let len = job.pixels.len();
-        // Keep fetch_update for older stable toolchains without try_update.
-        #[allow(deprecated)]
         let fits = GRAB_BYTES
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
                 used.checked_add(len)
                     .filter(|total| *total <= MAX_GRAB_BYTES)
             })
@@ -318,7 +319,44 @@ pub fn submit_encode(mut job: EncodeJob, raw: bool) {
 pub struct QueuedCmd {
     pub cmd: Cmd,
     pub user_seq: Option<u64>,
-    pub deadline: Instant,
+    pub deadline: CommandDeadline,
+}
+
+/// Native commands expire at their deadline. A JIT command stays live while its requester
+/// waits through compilation, then expires when that wait ends (including on unwind).
+#[derive(Clone)]
+pub struct CommandDeadline {
+    at: Instant,
+    #[cfg(relax)]
+    pending: Option<Arc<AtomicBool>>,
+}
+
+impl CommandDeadline {
+    fn at(at: Instant) -> Self {
+        Self {
+            at,
+            #[cfg(relax)]
+            pending: None,
+        }
+    }
+
+    pub fn expired(&self) -> bool {
+        #[cfg(relax)]
+        if let Some(pending) = &self.pending {
+            return !pending.load(Ordering::Relaxed);
+        }
+        Instant::now() >= self.at
+    }
+}
+
+#[cfg(relax)]
+struct PendingReply(Arc<AtomicBool>);
+
+#[cfg(relax)]
+impl Drop for PendingReply {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Relaxed);
+    }
 }
 
 pub enum Cmd {
@@ -410,6 +448,12 @@ pub enum Cmd {
         shader: usize,
         index: usize,
         value: Option<f32>,
+        tx: Sender<Reply>,
+    },
+    /// `Cx::gpu_inventory()`: GPU + CPU-retained graphics memory across
+    /// textures (including free pool slots), draw-list instances, and geometries.
+    GpuInventory {
+        n: usize,
         tx: Sender<Reply>,
     },
 }
@@ -712,7 +756,7 @@ pub fn err(msg: &str) -> Answer {
 /// (`cap pause`, `tweak apply`); `design <op>` takes the designer op as its second word.
 /// `grab`, `gseq`, `gq` and `tweak grab` are client side: they open the `frames` service.
 pub const COMMANDS: &[Command] = &[
-    Command { words: "status", args: "[w=ID]", answers: "{\"app\",\"pid\",\"w\":[{\"i\":id,\"t\":title,\"sz\":[w,h],\"px\":[w,h],\"dpi\",\"pos\":[x,y]}],\"activity\"}", service: "ui", risk: CmdRisk::Read, params: "\"w\":{\"type\":\"integer\",\"description\":\"window id (status lists them)\"}", required: &[], positional: &[] },
+    Command { words: "status", args: "[w=ID]", answers: "{\"app\",\"pid\",\"w\":[{\"i\":id,\"t\":title,\"sz\":[w,h],\"px\":[w,h],\"dpi\",\"pass_dpi\",\"pos\":[x,y]}],\"activity\"}", service: "ui", risk: CmdRisk::Read, params: "\"w\":{\"type\":\"integer\",\"description\":\"window id (status lists them)\"}", required: &[], positional: &[] },
     Command { words: "gamepads", args: "", answers: "connected controllers and their current input states", service: "ui", risk: CmdRisk::Read, params: "", required: &[], positional: &[] },
     Command { words: "activity", args: "", answers: "native user activity: user_active, user_seq, idle_ms, quiet_ms, held, last_input, window (also in status)", service: "ui", risk: CmdRisk::Read, params: "", required: &[], positional: &[] },
     Command { words: "grab", args: "[w=ID] [scale=1] [out=FILE]", answers: "client side (frames service): the window as a PNG file; prints {\"png\":path,\"w\",\"sz\",\"capture_ms\",\"encode_ms\",\"capture_kind\"}", service: "ui", risk: CmdRisk::Read, params: "\"w\":{\"type\":\"integer\"},\"scale\":{\"type\":\"number\"},\"out\":{\"type\":\"string\"}", required: &[], positional: &[] },
@@ -757,6 +801,7 @@ pub const COMMANDS: &[Command] = &[
     Command { words: "design", args: "<op> ...", answers: "structural edits to the Splash source under design (open state palette insert move delete duplicate wrap up down out rename set bake undo redo reset patch commit verify close)", service: "edit", risk: CmdRisk::Act, params: "\"op\":{\"type\":\"string\",\"enum\":[\"open\",\"state\",\"palette\",\"insert\",\"move\",\"delete\",\"duplicate\",\"wrap\",\"up\",\"down\",\"out\",\"rename\",\"set\",\"bake\",\"undo\",\"redo\",\"reset\",\"patch\",\"commit\",\"verify\",\"close\"]},\"path\":{\"type\":\"string\"}", required: &["op"], positional: &["op"] },
     Command { words: "shader consts", args: "[shader=ID]", answers: "the compiled shaders' hot-patchable constants", service: "edit", risk: CmdRisk::Read, params: "\"shader\":{\"type\":\"integer\"}", required: &[], positional: &[] },
     Command { words: "shader const", args: "shader=ID i=N v=VALUE | reset=1", answers: "patch one constant on the GPU (no recompile)", service: "edit", risk: CmdRisk::Act, params: "\"shader\":{\"type\":\"integer\"},\"i\":{\"type\":\"integer\"},\"v\":{\"type\":\"number\"},\"reset\":{\"type\":\"boolean\"}", required: &[], positional: &[] },
+    Command { words: "gpu_inventory", args: "[n=15]", answers: "Cx GPU and CPU-retained graphics memory (textures, free pool slots, draw-list instances, geometries)", service: "inspect", risk: CmdRisk::Read, params: "\"n\":{\"type\":\"integer\"}", required: &[], positional: &[] },
     Command { words: "quit", args: "", answers: "shut the app down gracefully (no final grab)", service: "ui", risk: CmdRisk::Destructive, params: "", required: &[], positional: &[] },
 ];
 
@@ -890,7 +935,7 @@ pub fn route_status(p: &Params) -> Answer {
         }
         index += 1;
         out.push_str(&format!(
-            "{{\"i\":{},\"t\":{},\"sz\":[{},{}],\"px\":[{},{}],\"dpi\":{},\"pos\":[{},{}]}}",
+            "{{\"i\":{},\"t\":{},\"sz\":[{},{}],\"px\":[{},{}],\"dpi\":{},\"pass_dpi\":{},\"pos\":[{},{}]}}",
             window.id,
             json_str(&window.title),
             num(window.w),
@@ -898,6 +943,7 @@ pub fn route_status(p: &Params) -> Answer {
             num((window.w * window.dpi).round()),
             num((window.h * window.dpi).round()),
             num(window.dpi),
+            num(window.pass_dpi),
             num(window.x),
             num(window.y),
         ));
@@ -1282,7 +1328,7 @@ impl Drop for PendingGrabs {
             .push(QueuedCmd {
                 cmd: Cmd::CancelGrabs(self.ids.clone()),
                 user_seq: None,
-                deadline: Instant::now(),
+                deadline: CommandDeadline::at(Instant::now()),
             });
         wake();
     }
@@ -1307,10 +1353,8 @@ pub fn arm_grabs(
             .or_else(|| status_cell().lock().unwrap().windows.first().map(|w| w.id))
             .ok_or("no windows")?,
     );
-    // Keep fetch_update for older stable toolchains without try_update.
-    #[allow(deprecated)]
     PENDING_GRABS
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
             used.checked_add(n)
                 .filter(|total| *total <= MAX_PENDING_GRABS)
         })
@@ -1360,9 +1404,12 @@ pub fn arm_grabs(
 }
 
 pub fn receive_grab(pending: &PendingGrabs, index: usize) -> Result<Grabbed, String> {
-    pending.replies[index]
-        .recv_timeout(pending.deadline.saturating_duration_since(Instant::now()))
-        .map_err(|_| "grab timeout (is this backend rendering?)".to_string())?
+    receive_reply(
+        &pending.replies[index],
+        pending.deadline.saturating_duration_since(Instant::now()),
+        Duration::from_secs(10),
+        "grab timeout (is this backend rendering?)",
+    )?
 }
 
 pub fn encode_grab(job: &EncodeJob) -> Result<(u32, u32, Vec<u8>), String> {
@@ -1711,20 +1758,61 @@ pub fn frames_service() -> makepad_remote::endpoint::Factory {
 /// wedged app from pinning the command thread forever.
 pub const ACTIVITY_WAIT_SECS: u64 = 600;
 
+/// Wait again on the same reply when compilation consumed its timeout. Only command/service
+/// threads do this; the UI thread merely checks the command's pending bit before applying it.
+fn receive_reply<T>(rx: &Receiver<T>, timeout: Duration, idle_timeout: Duration, message: &str) -> Result<T, String> {
+    #[cfg(not(relax))]
+    {
+        let _ = idle_timeout;
+        rx.recv_timeout(timeout).map_err(|_| message.to_string())
+    }
+    #[cfg(relax)]
+    {
+        use std::sync::mpsc::RecvTimeoutError;
+        let mut timeout = timeout;
+        let mut inspect = None;
+        let mut wait = makepad_remote::jit::Wait::default();
+        loop {
+            match rx.recv_timeout(timeout) {
+                Ok(reply) => return Ok(reply),
+                Err(RecvTimeoutError::Disconnected) => return Err(message.to_string()),
+                Err(RecvTimeoutError::Timeout) => {
+                    if inspect.is_none() {
+                        inspect = Some(makepad_remote::Client::connect(&std::process::id().to_string())
+                            .map_err(|err| format!("JIT state: {err}"))?);
+                    }
+                    if !wait.keep_waiting(inspect.as_ref().unwrap()).map_err(|err| format!("JIT state: {err}"))? {
+                        // A reply may have arrived while inspect sampled the JIT.
+                        return rx.try_recv().map_err(|_| message.to_string());
+                    }
+                    timeout = idle_timeout;
+                }
+            }
+        }
+    }
+}
+
 pub fn ask<F>(make: F, timeout_secs: u64) -> Reply
 where
     F: FnOnce(Sender<Reply>) -> Cmd,
 {
     let (tx, rx) = channel();
+    let timeout = Duration::from_secs(timeout_secs);
+    #[cfg(relax)]
+    let pending = PendingReply(Arc::new(AtomicBool::new(true)));
     queue().lock().unwrap().push(QueuedCmd {
         cmd: make(tx),
         user_seq: REQUEST_USER_SEQ.get(),
-        deadline: Instant::now() + Duration::from_secs(timeout_secs),
+        deadline: CommandDeadline {
+            at: Instant::now() + timeout,
+            #[cfg(relax)]
+            pending: Some(pending.0.clone()),
+        },
     });
     wake();
-    match rx.recv_timeout(Duration::from_secs(timeout_secs)) {
+    match receive_reply(&rx, timeout, timeout, "timeout (app busy or not running its event loop)") {
         Ok(reply) => reply,
-        Err(_) => Reply::Err("timeout (app busy or not running its event loop)".to_string()),
+        Err(message) => Reply::Err(message),
     }
 }
 
@@ -1930,6 +2018,7 @@ mod tests {
             ("tweak op", 2),
             ("shader consts", 2),
             ("shader const", 2),
+            ("gpu_inventory", 1),
             ("quit", 1),
             ("log", 1),
             ("net", 1),

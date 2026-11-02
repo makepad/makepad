@@ -50,11 +50,6 @@ fn fixed_gen_runs_real_testpattern_service_and_is_deterministic() {
     });
     let handle = match service {
         Ok(handle) => handle,
-        Err(error) if error.to_string().contains("Operation not permitted") => {
-            let _ = std::fs::remove_dir_all(&cache_dir);
-            eprintln!("skipping real hub service: loopback bind is forbidden by this sandbox");
-            return;
-        }
         Err(error) => panic!("start real hub service: {error}"),
     };
     let base_url = format!("http://{}", handle.addr);

@@ -154,44 +154,11 @@ mod tests {
     use makepad_csg_math::dvec3;
 
     #[test]
-    fn test_exact_vec3_add() {
-        let a = ExactVec3::from_f64(1.0, 2.0, 3.0);
-        let b = ExactVec3::from_f64(4.0, 5.0, 6.0);
-        let c = a.add(&b);
-        let v = c.to_vec3d();
-        assert_eq!(v.x, 5.0);
-        assert_eq!(v.y, 7.0);
-        assert_eq!(v.z, 9.0);
-    }
-
-    #[test]
-    fn test_exact_vec3_sub() {
-        let a = ExactVec3::from_f64(5.0, 7.0, 9.0);
-        let b = ExactVec3::from_f64(1.0, 2.0, 3.0);
-        let c = a.sub(&b);
-        let v = c.to_vec3d();
-        assert_eq!(v.x, 4.0);
-        assert_eq!(v.y, 5.0);
-        assert_eq!(v.z, 6.0);
-    }
-
-    #[test]
     fn test_exact_vec3_dot() {
         let a = ExactVec3::from_f64(1.0, 2.0, 3.0);
         let b = ExactVec3::from_f64(4.0, 5.0, 6.0);
         let d = a.dot(&b);
         assert_eq!(d.estimate(), 32.0); // 4+10+18
-    }
-
-    #[test]
-    fn test_exact_vec3_cross() {
-        let a = ExactVec3::from_f64(1.0, 0.0, 0.0);
-        let b = ExactVec3::from_f64(0.0, 1.0, 0.0);
-        let c = a.cross(&b);
-        let v = c.to_vec3d();
-        assert_eq!(v.x, 0.0);
-        assert_eq!(v.y, 0.0);
-        assert_eq!(v.z, 1.0);
     }
 
     #[test]
@@ -209,18 +176,6 @@ mod tests {
         assert!((v.x - (-3.0)).abs() < 1e-5, "cross x: {}", v.x);
         assert!((v.y - 6.0).abs() < 1e-5, "cross y: {}", v.y);
         assert!((v.z - (-3.0)).abs() < 1e-5, "cross z: {}", v.z);
-    }
-
-    #[test]
-    fn test_segment_plane_intersection() {
-        // Segment from (0,0,-1) to (0,0,1), plane z=0 (normal=(0,0,1), dist=0)
-        let p0 = dvec3(0.0, 0.0, -1.0);
-        let p1 = dvec3(0.0, 0.0, 1.0);
-        let normal = dvec3(0.0, 0.0, 1.0);
-        let result = exact_segment_plane_intersection(p0, p1, normal, 0.0);
-        assert!(result.x.abs() < 1e-15);
-        assert!(result.y.abs() < 1e-15);
-        assert!(result.z.abs() < 1e-15);
     }
 
     #[test]

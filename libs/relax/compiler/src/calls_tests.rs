@@ -72,7 +72,12 @@ fn patched_callee_while_callers_run() {
     std::fs::write(dir.join("app/Cargo.toml"), "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n").unwrap();
     std::fs::write(dir.join("app/src/lib.rs"), APP).unwrap();
     let app = dir.join("app/src/lib.rs").to_string_lossy().into_owned();
-    let session = Arc::new(crate::Session::default());
+    // no O3 tier-up: while a slot counts its calls toward O3 its table word (and so its thunk
+    // head) is the count stub, not its code, and the O3 install is a second writer of leaf's
+    // slot that this test does not drive (under the JIT, leaf was still counting when it looked)
+    let mut session = crate::Session::default();
+    session.options.tier1 = false;
+    let session = Arc::new(session);
     let (prog, core, app_crate) = crate::load_with_std(&session, &app, "calls_app", false).unwrap();
     let def = |name: &str| prog.defs.iter().enumerate().find_map(|(i, d)| {
         let id = crate::program::DefId(i as u32);

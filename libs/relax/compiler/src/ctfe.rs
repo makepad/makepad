@@ -34,6 +34,11 @@ struct Ctx<'a> {
     reason: Option<String>,
 }
 
+pub(crate) fn trace_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("MAKEPAD_RUN_CTFE_TRACE").is_some())
+}
+
 /// Evaluates const/static `d` (instance `args`) into `buf` (its layout's size). Returns false
 /// (nothing reliable written) when the initializer is outside the subset.
 pub fn eval_into(u: &mut Unit, d: crate::program::DefId, args: &[TyId], buf: u64) -> bool {
@@ -54,7 +59,7 @@ pub fn eval_into(u: &mut Unit, d: crate::program::DefId, args: &[TyId], buf: u64
     };
     let epoch = Some(epoch);
     if let Some(f) = u.prog.exec_profile_file(body.file) { f.note(crate::exec_profile::CTFE); }
-    let mut cx = Ctx { u, steps: 0, depth: 0, trace: std::env::var_os("MAKEPAD_RUN_CTFE_TRACE").is_some(), reason: None };
+    let mut cx = Ctx { u, steps: 0, depth: 0, trace: trace_on(), reason: None };
     let mut env: Vec<Option<Vec<u8>>> = Vec::new();
     let v = match cx.eval(&body, &mut env, init) {
         Some(v) => v,
@@ -1451,6 +1456,8 @@ impl<'a> Ctx<'a> {
                 return Some(args[0].clone());
             }
             let value = match self.u.prog.name(d) {
+                // (a type of 4 GiB or more: its exact size; a SizeOverflow is the JIT path's error)
+                "size_of" if args.is_empty() && self.u.is_too_big(*gargs.first()?) => self.u.saturated_size(*gargs.first()?)?,
                 "size_of" if args.is_empty() => {
                     let l = self.layout(*gargs.first()?);
                     crate::layout::round_up(l.size, l.align) as u64

@@ -2434,6 +2434,12 @@ impl Event {
                             //let any_captured = cx.fingers.get_digit_for_captured_area(area);
                             cx.fingers.new_hover_area(digit_id, area);
                             e.handled.set(area);
+                            // A cursor never outlives the widget that set it: the area
+                            // that now owns the pointer starts from the arrow and sets
+                            // its own (the widget handles this hit after we return).
+                            if cx.mouse_cursor() != crate::cursor::MouseCursor::Default {
+                                cx.set_cursor(crate::cursor::MouseCursor::Default);
+                            }
                             return Hit::FingerHoverIn(fhe);
                         }
                     }

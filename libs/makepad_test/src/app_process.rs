@@ -1,4 +1,4 @@
-//! The owned app process: release build, `--remote` launch, and shutdown.
+//! The owned app process: native release build or JIT run, `--remote` launch, and shutdown.
 //!
 //! Everything here blocks on the test runner's thread only. The child's
 //! stdout/stderr go to files in the artifact directory, so no reader threads
@@ -280,18 +280,56 @@ fn package_id_matches(package_id: &str, package_name: &str) -> bool {
     false
 }
 
+/// Run through the harness's loader and VFS under the JIT; otherwise build
+/// and launch the package's native release binary.
+pub fn launch_package(
+    spec: &LaunchSpec,
+    package_name: &str,
+    bin_name: Option<&str>,
+) -> TestResult<OwnedApp> {
+    if let Some(loader) = std::env::var_os("MAKEPAD_RUN_LOADER") {
+        let loader = PathBuf::from(loader);
+        let mut command = Command::new(&loader);
+        command.arg("run").arg(package_name);
+        if let Some(bin_name) = bin_name {
+            command.arg("--bin").arg(bin_name);
+        }
+        command.args(["--release", "--", "--remote"]).args(&spec.args);
+        // Keep the same environment and package cwd. JIT std's Command
+        // carries a virtual cwd and its mounts to the child without chdir.
+        launch_command(spec, &loader, command, true)
+    } else {
+        let executable = build_release_binary(
+            &spec.manifest_dir,
+            package_name,
+            bin_name,
+            &spec.artifacts_dir,
+            spec.env.get("CARGO_TARGET_DIR").map(String::as_str),
+        )?;
+        launch(spec, &executable)
+    }
+}
+
 /// Spawn `executable --remote` and wait for its listening line.
 pub fn launch(spec: &LaunchSpec, executable: &Path) -> TestResult<OwnedApp> {
+    let mut command = Command::new(executable);
+    command.arg("--remote").args(&spec.args);
+    launch_command(spec, executable, command, false)
+}
+
+fn launch_command(
+    spec: &LaunchSpec,
+    executable: &Path,
+    mut command: Command,
+    jit: bool,
+) -> TestResult<OwnedApp> {
     fs::create_dir_all(&spec.artifacts_dir)?;
     let stdout_path = spec.artifacts_dir.join("app-stdout.txt");
     let stderr_path = spec.artifacts_dir.join("app-stderr.txt");
     let stdout_file = File::create(&stdout_path)?;
     let stderr_file = File::create(&stderr_path)?;
 
-    let mut command = Command::new(executable);
     command
-        .arg("--remote")
-        .args(&spec.args)
         .current_dir(&spec.manifest_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout_file))
@@ -315,7 +353,15 @@ pub fn launch(spec: &LaunchSpec, executable: &Path) -> TestResult<OwnedApp> {
     })?;
     let pid = child.id();
 
-    let deadline = Instant::now() + spec.startup_timeout;
+    // Native compilation has no deadline. JIT compilation happens inside
+    // startup, including lazy calls through the first window, so it must
+    // remain uncapped too. Child exits still fail every readiness loop.
+    let deadline = if jit {
+        None
+    } else {
+        Some(Instant::now() + spec.startup_timeout)
+    };
+    let discovery_path = makepad_remote::carrier::unix::paths(pid).1;
     let listening = loop {
         let stdout = fs::read_to_string(&stdout_path).unwrap_or_default();
         if let Some(line) = stdout.lines().find(|line| line.starts_with(LISTENING_PREFIX)) {
@@ -342,7 +388,22 @@ pub fn launch(spec: &LaunchSpec, executable: &Path) -> TestResult<OwnedApp> {
                 file_tail(&stderr_path)
             )));
         }
-        if Instant::now() >= deadline {
+        // A JIT app registers with the loader's endpoint instead of
+        // printing the native listening line. Read only our child's record.
+        if jit {
+            if let Some(app) = fs::read_to_string(&discovery_path)
+                .ok()
+                .and_then(|text| makepad_remote::discovery::parse(&text))
+                .filter(|app| !app.app.is_empty() && !app.socket.is_empty())
+            {
+                break ListeningLine {
+                    pid: app.pid,
+                    app: app.app,
+                    socket: PathBuf::from(app.socket),
+                };
+            }
+        }
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             let _ = child.kill();
             let _ = child.wait();
             return Err(TestError::new(format!(
@@ -357,14 +418,14 @@ pub fn launch(spec: &LaunchSpec, executable: &Path) -> TestResult<OwnedApp> {
         let _ = child.kill();
         let _ = child.wait();
         return Err(TestError::new(format!(
-            "remote listening line names pid {} but the owned process is {pid}",
+            "remote endpoint names pid {} but the owned process is {pid}",
             listening.pid
         )));
     }
 
     // The socket is bound before the line is printed, but a dial can still
-    // race the first accept: retry until the deadline.
-    let client = loop {
+    // race the first accept: retry until the deadline, if any.
+    let mut client = loop {
         match RemoteClient::connect(&listening.socket) {
             Ok(client) => break client,
             Err(err) => {
@@ -375,7 +436,7 @@ pub fn launch(spec: &LaunchSpec, executable: &Path) -> TestResult<OwnedApp> {
                         file_tail(&stderr_path)
                     )));
                 }
-                if Instant::now() >= deadline {
+                if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                     let _ = child.kill();
                     let _ = child.wait();
                     return Err(err);
@@ -384,6 +445,7 @@ pub fn launch(spec: &LaunchSpec, executable: &Path) -> TestResult<OwnedApp> {
             }
         }
     };
+    client.jit = jit;
     let mut app = OwnedApp {
         child,
         pid,
@@ -398,7 +460,9 @@ pub fn launch(spec: &LaunchSpec, executable: &Path) -> TestResult<OwnedApp> {
 
     // The service is up once `help` answers; a window follows on the first
     // frame. Waiting here keeps `snap` from answering an empty tree to the
-    // test's first locator.
+    // test's first locator. Under the JIT, the first window still has lazy
+    // compiles ahead of it: wait for the host's compile queues and owner too,
+    // without applying the native startup deadline.
     let mut help_seen = false;
     loop {
         if let Some(status) = app.poll_exit() {
@@ -412,9 +476,11 @@ pub fn launch(spec: &LaunchSpec, executable: &Path) -> TestResult<OwnedApp> {
             help_seen = app.client.help().is_ok();
         }
         if help_seen && app.client.windows().is_ok_and(|windows| !windows.is_empty()) {
-            return Ok(app);
+            if !jit || !app.client.jit_busy()? {
+                return Ok(app);
+            }
         }
-        if Instant::now() >= deadline {
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             let _ = app.shutdown(spec.poll_interval);
             return Err(TestError::new(format!(
                 "timed out waiting for {} to open a window on {}",
@@ -567,8 +633,8 @@ mod tests {
         path
     }
 
-    fn launch_error(spec: &LaunchSpec, script: &Path) -> TestError {
-        match launch(spec, script) {
+    fn launch_error(result: TestResult<OwnedApp>) -> TestError {
+        match result {
             Ok(mut app) => {
                 let _ = app.shutdown(Duration::from_millis(20));
                 panic!("launch unexpectedly succeeded");
@@ -667,16 +733,19 @@ mod tests {
 
     #[test]
     fn early_exit_before_the_listening_line_is_an_error_with_stderr() {
-        let dir = scratch_dir("early-exit");
-        let script = dir.join("fake-app.sh");
-        fs::write(&script, "#!/bin/sh\necho boom >&2\nexit 3\n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        const CHILD_MODE: &str = "MAKEPAD_TEST_EARLY_EXIT_CHILD";
+        if std::env::var_os(CHILD_MODE).is_some() {
+            eprintln!("boom");
+            std::process::exit(3);
         }
+        let dir = scratch_dir("early-exit");
         let spec = fake_app_spec(dir.clone());
-        let err = launch_error(&spec, &script);
+        let executable = std::env::current_exe().unwrap();
+        let mut command = Command::new(&executable);
+        command
+            .args(["--exact", "app_process::tests::early_exit_before_the_listening_line_is_an_error_with_stderr", "--nocapture"])
+            .env(CHILD_MODE, "1");
+        let err = launch_error(launch_command(&spec, &executable, command, false));
         assert!(err.message().contains("exited"), "{}", err.message());
         assert!(err.message().contains("boom"), "{}", err.message());
         let _ = fs::remove_dir_all(&dir);
@@ -702,7 +771,7 @@ mod tests {
             fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
         }
         let spec = fake_app_spec(dir.clone());
-        let err = launch_error(&spec, &script);
+        let err = launch_error(launch(&spec, &script));
         assert!(err.message().contains("pid 1"), "{}", err.message());
         let _ = fs::remove_dir_all(&dir);
     }

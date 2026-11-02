@@ -23,7 +23,7 @@ fn unsizing() {
     let t: &Tail<[i32]> = &Tail { head: 1, tail: [1, 2, 3] };
     assert_eq!((t.head, t.tail.len()), (1, 3));
     let raw: *const [i32] = &[1, 2];
-    assert_eq!(unsafe { (*raw).len() }, 2);
+    assert_eq!(unsafe { (&*raw).len() }, 2);
     let d: &dyn Tr = &7;
     let up: &dyn Tr = d;
     assert_eq!(up.f(), 7);

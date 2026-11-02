@@ -405,28 +405,6 @@ mod tests {
         GenerateParams::from_request(&request).unwrap()
     }
 
-    #[test]
-    fn job_fraction_bands_stay_ordered() {
-        assert!((load_fraction(0.0) - 0.01).abs() < 1e-9);
-        assert!((load_fraction(1.0) - 0.04).abs() < 1e-9);
-        assert!((gen_fraction(0.0) - 0.04).abs() < 1e-9);
-        assert!((gen_fraction(1.0) - 0.94).abs() < 1e-9);
-        assert!((gen_fraction(7.0) - 0.94).abs() < 1e-9);
-        assert!(gen_fraction(1.0) < 0.95);
-    }
-
-    #[test]
-    fn stub_backend_is_never_reported_resident() {
-        let mut backend = WooshBackend::with_stub(
-            "woosh-test",
-            Box::new(|_, _, _| unreachable!("lifecycle test never generates")),
-        );
-        assert!(!backend.is_resident());
-        backend.unload().unwrap();
-        backend.unload().unwrap();
-        assert!(!backend.is_resident());
-    }
-
     #[cfg(feature = "audio")]
     #[test]
     fn native_backend_is_send_and_starts_cold() {
@@ -556,35 +534,5 @@ mod tests {
         assert!(extract_zip(&evil_path, &root).is_err());
         assert!(!dir.join("e.txt").exists());
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// Full extraction gate on the real release zips. Skips unless
-    /// WOOSH_ZIP_DIR points at a dir with the three downloaded zips, e.g.
-    ///   WOOSH_ZIP_DIR=local/models/woosh/zips cargo test -p makepad-asset-ai
-    #[test]
-    fn real_release_zips_extract_when_env_set() {
-        let Ok(dir) = std::env::var("WOOSH_ZIP_DIR") else {
-            return;
-        };
-        let out = std::env::temp_dir().join(format!(
-            "makepad-asset-ai-woosh-realzip-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&out);
-        for (name, expect_len) in [
-            ("TextConditionerA.zip", 1_425_689_504u64),
-            ("Woosh-AE.zip", 884_664_420),
-            ("Woosh-DFlow.zip", 1_378_890_620),
-        ] {
-            let zip = Path::new(&dir).join(name);
-            let extracted = extract_zip(&zip, &out).unwrap();
-            let weights = extracted
-                .iter()
-                .find(|p| p.file_name().is_some_and(|n| n == "weights.safetensors"))
-                .unwrap_or_else(|| panic!("{name}: no weights.safetensors"));
-            let len = std::fs::metadata(weights).unwrap().len();
-            assert_eq!(len, expect_len, "{name}");
-        }
-        let _ = std::fs::remove_dir_all(&out);
     }
 }

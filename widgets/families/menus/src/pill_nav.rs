@@ -3721,21 +3721,6 @@ mod tests {
     }
 
     #[test]
-    fn both_presets_are_declared_once() {
-        crate::on_test_cx(|| {
-        let source = include_str!("pill_nav.rs");
-        // Spelled in pieces, so this test's own text is not what it finds.
-        let click = ["mod.widgets.PillNavClick = ", "mod.widgets.PillNav{"].concat();
-        let compact = ["mod.widgets.PillNavCompact = ", "mod.widgets.PillNav{"].concat();
-        assert_eq!(source.matches(&click).count(), 1);
-        assert_eq!(source.matches(&compact).count(), 1);
-        // The trigger and placement words are the popover's; an enum of
-        // look-alikes splatted here would overwrite them in the module.
-        assert!(!source.contains(&["mod.widgets.", "splat("].concat()));
-        });
-    }
-
-    #[test]
     fn stepping_items_skips_disabled_and_wraps() {
         crate::on_test_cx(|| {
         let enabled = [true, false, true, true];

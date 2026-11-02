@@ -490,6 +490,30 @@ impl<A, V: FromIterator<A>> FromIterator<Option<A>> for Option<V> {
     }
 }
 
+/// rustc iter/traits/accum.rs: the sum of the `Some` values, or `None` at the first `None`.
+impl<T, U> crate::iter::Sum<Option<U>> for Option<T>
+where
+    T: crate::iter::Sum<U>,
+{
+    fn sum<I: Iterator<Item = Option<U>>>(iter: I) -> Option<T> {
+        let mut failed = false;
+        let v: T = T::sum(OptionShunt { iter, failed: &mut failed });
+        if failed { None } else { Some(v) }
+    }
+}
+
+/// rustc iter/traits/accum.rs: the product of the `Some` values, or `None` at the first `None`.
+impl<T, U> crate::iter::Product<Option<U>> for Option<T>
+where
+    T: crate::iter::Product<U>,
+{
+    fn product<I: Iterator<Item = Option<U>>>(iter: I) -> Option<T> {
+        let mut failed = false;
+        let v: T = T::product(OptionShunt { iter, failed: &mut failed });
+        if failed { None } else { Some(v) }
+    }
+}
+
 struct OptionShunt<'a, I> {
     iter: I,
     failed: &'a mut bool,

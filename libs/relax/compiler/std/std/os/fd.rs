@@ -37,7 +37,7 @@ pub struct BorrowedFd<'fd> {
     _phantom: PhantomData<&'fd OwnedFd>,
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(target_vendor = "apple")]
 const F_DUPFD_CLOEXEC: core::ffi::c_int = 67;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 const F_DUPFD_CLOEXEC: core::ffi::c_int = 1030;

@@ -59,6 +59,34 @@ pub fn mesh_mass(vertices: &[P3], triangles: &[[u32; 3]], density: f64, fill: f6
     MassProps { volume: vol, mass, com, inertia }
 }
 
+/// Mass properties of a solid given as equal cubic cells (their centres, each of volume `voxel`).
+pub fn voxel_mass(centres: &[P3], voxel: f64, density: f64, fill: f64) -> MassProps {
+    let vol = voxel * centres.len() as f64;
+    let mut first = [0.0; 3];
+    for c in centres {
+        for k in 0..3 {
+            first[k] += voxel * c[k];
+        }
+    }
+    let com = if vol.abs() > 1e-12 { scale(first, 1.0 / vol) } else { [0.0; 3] };
+    // second moments about the centre of mass, with each cell's own extent
+    let edge2 = voxel.cbrt().powi(2);
+    let mut cov = [[0.0f64; 3]; 3];
+    for c in centres {
+        let d = sub(*c, com);
+        for i in 0..3 {
+            for j in 0..3 {
+                cov[i][j] += voxel * d[i] * d[j];
+            }
+            cov[i][i] += voxel * edge2 / 12.0;
+        }
+    }
+    let rho = density * fill;
+    let tr = rho * (cov[0][0] + cov[1][1] + cov[2][2]);
+    let inertia = std::array::from_fn(|i| std::array::from_fn(|j| if i == j { tr - rho * cov[i][j] } else { -rho * cov[i][j] }));
+    MassProps { volume: vol, mass: vol * rho, com, inertia }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

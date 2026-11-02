@@ -867,21 +867,6 @@ mod tests {
         assert!(disc > 5.0e3 && disc < 5.0e4, "disc centre / SUN_IRRADIANCE {disc}");
     }
 
-    /// Release-only timing: `cargo test -p makepad-render --release --lib
-    /// hdri::atmosphere::tests::building_the_atmosphere_is_fast -- --ignored --nocapture`.
-    #[test]
-    #[ignore]
-    #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
-    fn building_the_atmosphere_is_fast() {
-        let start = std::time::Instant::now();
-        let runs = 10;
-        for i in 0..runs {
-            let _ = atmo_at(5.0 + i as f32, 180.0);
-        }
-        let ms = start.elapsed().as_secs_f64() * 1000.0 / runs as f64;
-        println!("Atmosphere::new: {ms:.2} ms");
-        assert!(ms < 30.0, "Atmosphere::new took {ms:.2} ms");
-    }
 }
 
 #[cfg(test)]

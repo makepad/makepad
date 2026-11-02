@@ -725,10 +725,21 @@ impl Providers<'_> {
     }
 }
 
+/// rustc_middle ty/util.rs typeck_root_def_id (is_typeck_child): a closure or an inline const
+/// (`const { .. }`) is type-checked with the body that holds it, never on its own: an inline
+/// const's type is that body's, never fed, so its own typeck failed `anonymous const type`.
+pub fn typeck_root_def_id(prog: &Program, mut def: DefId) -> DefId {
+    while prog.def(def).kind == crate::program::DefKind::Closure
+        || matches!(prog.def_id_to_node_id.get(&def), Some((_, relax_front::def_collector::NodeId::InlineConst(_)))) {
+        def = prog.def(def).parent;
+    }
+    def
+}
+
 impl Tcx {
     /// rustc_hir_typeck/src/lib.rs:84-101: closures share their typeck root.
-    pub fn typeck(&self, prog: &Program, mut def: DefId) -> std::sync::Arc<crate::typeck::Body> {
-        while prog.def(def).kind == crate::program::DefKind::Closure { def = prog.def(def).parent; }
+    pub fn typeck(&self, prog: &Program, def: DefId) -> std::sync::Arc<crate::typeck::Body> {
+        let def = typeck_root_def_id(prog, def);
         match (Providers { tcx: self, prog }).typeck(def) {
             Ok(body) => body,
             // rustc_query_system cycle_error: E0391, the query's error value

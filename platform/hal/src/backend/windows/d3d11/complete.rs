@@ -71,6 +71,33 @@ pub struct Timer {
     pub disjoint: ID3D11Query,
     pub begin: ID3D11Query,
     pub end: ID3D11Query,
+    /// Timestamp pairs around the passes of a frame the GPU profiler records (`crate::gpu_prof`),
+    /// kept with the timer for its next frames; the first `used` are this frame's.
+    stamps: Vec<ID3D11Query>,
+    used: usize,
+    /// The profiled frame and its timed passes: (the pass's index in it, its first stamp).
+    pub prof: Option<(crate::gpu_prof::FrameKey, Vec<(u16, usize)>)>,
+}
+
+impl Timer {
+    /// The first of a free pair of timestamps for one pass (`None` when the device makes none).
+    pub fn stamp_pair(&mut self, dev: &Device) -> Option<usize> {
+        while self.stamps.len() < self.used + 2 {
+            self.stamps.push(make_query(dev, D3D11_QUERY_TIMESTAMP)?);
+        }
+        self.used += 2;
+        Some(self.used - 2)
+    }
+
+    pub fn stamp(&self, i: usize) -> &ID3D11Query {
+        &self.stamps[i]
+    }
+}
+
+fn make_query(dev: &Device, q: D3D11_QUERY) -> Option<ID3D11Query> {
+    let mut out = None;
+    unsafe { dev.device.CreateQuery(&D3D11_QUERY_DESC { Query: q, MiscFlags: 0 }, Some(&mut out)) }.ok()?;
+    out
 }
 
 /// Timing query sets coming back from the completion thread for reuse.
@@ -82,36 +109,56 @@ impl Timers {
         if let Some(t) = lock(&self.0).pop() {
             return Some(t);
         }
-        let make = |q| {
-            let mut out = None;
-            unsafe { dev.device.CreateQuery(&D3D11_QUERY_DESC { Query: q, MiscFlags: 0 }, Some(&mut out)) }.ok()?;
-            out
-        };
-        Some(Timer { disjoint: make(D3D11_QUERY_TIMESTAMP_DISJOINT)?, begin: make(D3D11_QUERY_TIMESTAMP)?, end: make(D3D11_QUERY_TIMESTAMP)? })
+        let make = |q| make_query(dev, q);
+        Some(Timer { disjoint: make(D3D11_QUERY_TIMESTAMP_DISJOINT)?, begin: make(D3D11_QUERY_TIMESTAMP)?, end: make(D3D11_QUERY_TIMESTAMP)?, stamps: Vec::new(), used: 0, prof: None })
     }
-    fn give(&self, t: Timer) {
+    fn give(&self, mut t: Timer) {
+        t.used = 0;
+        t.prof = None;
         lock(&self.0).push(t);
     }
 }
 
+/// The frame's GPU clock: ticks per second and its two timestamps (`None` when unknown or
+/// disjoint). The frame is complete, so the data is there: read without flushing.
+fn clock(dev: &Device, t: &Timer) -> Option<(u64, u64, u64)> {
+    let mut dj = D3D11_QUERY_DATA_TIMESTAMP_DISJOINT::default();
+    if !get_data(dev, &t.disjoint, &mut dj) || dj.Disjoint.as_bool() || dj.Frequency == 0 {
+        return None;
+    }
+    let (mut b, mut e) = (0u64, 0u64);
+    (get_data(dev, &t.begin, &mut b) && get_data(dev, &t.end, &mut e) && e >= b).then_some((dj.Frequency, b, e))
+}
+
+fn get_data<T>(dev: &Device, q: &ID3D11Query, out: &mut T) -> bool {
+    unsafe { (dev.ctx.vtable().GetData)(dev.ctx.as_raw(), q.as_raw(), out as *mut T as *mut _, std::mem::size_of::<T>() as u32, D3D11_ASYNC_GETDATA_DONOTFLUSH.0 as u32).0 == 0 }
+}
+
 /// The GPU nanoseconds between a frame's two timestamps and their span in seconds of the GPU's
-/// clock ((0, [0, 0]) when unknown or disjoint). The frame is complete, so the data is there:
-/// read without flushing.
-fn gpu_ns(dev: &Device, t: &Timer) -> (u64, [f64; 2]) {
-    unsafe {
-        let get = |q: &ID3D11Query, data: *mut std::ffi::c_void, size: usize| {
-            (dev.ctx.vtable().GetData)(dev.ctx.as_raw(), q.as_raw(), data, size as u32, D3D11_ASYNC_GETDATA_DONOTFLUSH.0 as u32).0 == 0
-        };
-        let mut dj = D3D11_QUERY_DATA_TIMESTAMP_DISJOINT::default();
-        let (mut b, mut e) = (0u64, 0u64);
-        if !get(&t.disjoint, &mut dj as *mut _ as *mut _, std::mem::size_of_val(&dj)) || dj.Disjoint.as_bool() || dj.Frequency == 0 {
-            return (0, [0.0; 2]);
+/// clock ((0, [0, 0]) when unknown or disjoint).
+fn gpu_ns(clock: Option<(u64, u64, u64)>) -> (u64, [f64; 2]) {
+    let Some((freq, b, e)) = clock else { return (0, [0.0; 2]) };
+    let f = freq as f64;
+    (((e - b) as u128 * 1_000_000_000 / freq as u128) as u64, [b as f64 / f, e as f64 / f])
+}
+
+/// A profiled frame's timed passes to the GPU profiler, on the host clock: the frame's last
+/// timestamp is placed where its completion was seen (late by this thread's wake-up), every
+/// other one before it by its distance in ticks.
+fn prof_passes(dev: &Device, t: &Timer, clock: Option<(u64, u64, u64)>, key: crate::gpu_prof::FrameKey, passes: &[(u16, usize)]) {
+    let Some((freq, _, end)) = clock else {
+        passes.iter().for_each(|_| crate::gpu_prof::gpu_none(key));
+        return;
+    };
+    let now = crate::clock_ns();
+    let host = |ticks: u64| now.saturating_sub((end.saturating_sub(ticks) as u128 * 1_000_000_000 / freq as u128) as u64);
+    for (pass, q) in passes {
+        let (mut a, mut b) = (0u64, 0u64);
+        if get_data(dev, t.stamp(*q), &mut a) && get_data(dev, t.stamp(*q + 1), &mut b) && b >= a {
+            crate::gpu_prof::gpu_pass(key, *pass, crate::gpu_prof::PassGpu { start: host(a), end: host(b), ..Default::default() });
+        } else {
+            crate::gpu_prof::gpu_none(key);
         }
-        if !get(&t.begin, &mut b as *mut _ as *mut _, 8) || !get(&t.end, &mut e as *mut _ as *mut _, 8) || e < b {
-            return (0, [0.0; 2]);
-        }
-        let f = dj.Frequency as f64;
-        (((e - b) as u128 * 1_000_000_000 / dj.Frequency as u128) as u64, [b as f64 / f, e as f64 / f])
     }
 }
 
@@ -290,9 +337,12 @@ fn complete(dev: &Device, mut batch: Batch, lost: bool, mailbox: &Mailbox, timer
                 token.incarnation.done(frame);
                 let (gpu_ns, gpu_span) = match timer {
                     Some(t) => {
-                        let ns = if lost { (0, [0.0; 2]) } else { gpu_ns(dev, &t) };
+                        let clock = if lost { None } else { clock(dev, &t) };
+                        if let Some((key, passes)) = &t.prof {
+                            prof_passes(dev, &t, clock, *key, passes);
+                        }
                         timers.give(t);
-                        ns
+                        gpu_ns(clock)
                     }
                     None => (0, [0.0; 2]),
                 };

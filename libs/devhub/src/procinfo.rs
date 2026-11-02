@@ -49,6 +49,12 @@ pub fn exited(pid: u32) -> Option<Option<i32>> {
     if pid == 0 {
         return None;
     }
+    // one the inherited-children reaper took: its exit as it was
+    if let Some((code, _)) = REAPED.lock().unwrap().remove(&pid) {
+        return Some(code);
+    }
+    #[cfg(unix)]
+    INHERITED.lock().unwrap().retain(|p| *p != pid);
     #[cfg(unix)]
     {
         extern "C" {
@@ -61,6 +67,62 @@ pub fn exited(pid: u32) -> Option<Option<i32>> {
         }
     }
     (!alive(pid)).then_some(Some(0))
+}
+
+/// Children of an earlier image of this process (an exec restart keeps the pid and its children,
+/// but not the `Child` handles that would have waited for them).
+static INHERITED: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());
+/// Exits of inherited children the reaper took, for [`exited`] to answer from (for 10 min: then
+/// the pid may be another process's).
+static REAPED: std::sync::LazyLock<std::sync::Mutex<HashMap<u32, (Option<i32>, Instant)>>> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+/// Reaps the children this process inherited from the image before its last exec as they end
+/// (each ended one was a zombie for the process's life: the git, cargo and lease children that
+/// ran when the master restarted). Called first thing, before this image starts any child: only
+/// the pids listed now are ever waited for, so a `Child` of this image is never reaped here.
+pub fn reap_inherited() {
+    #[cfg(unix)]
+    {
+        let me = std::process::id();
+        let Ok(child) = std::process::Command::new("ps").args(["-axo", "pid=,ppid="]).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null()).spawn() else { return };
+        let ps = child.id();
+        let Ok(out) = child.wait_with_output() else { return };
+        let pids: Vec<u32> = String::from_utf8_lossy(&out.stdout).lines().filter_map(|l| {
+            let mut w = l.split_whitespace();
+            let (pid, ppid) = (w.next()?.parse::<u32>().ok()?, w.next()?.parse::<u32>().ok()?);
+            (ppid == me && pid != ps).then_some(pid)
+        }).collect();
+        if pids.is_empty() {
+            return;
+        }
+        *INHERITED.lock().unwrap() = pids;
+        let _ = std::thread::Builder::new().name("devhub-reap".into()).spawn(|| loop {
+            extern "C" {
+                fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
+            }
+            const WNOHANG: i32 = 1;
+            {
+                let mut inherited = INHERITED.lock().unwrap();
+                inherited.retain(|&pid| {
+                    let mut st = 0i32;
+                    match unsafe { waitpid(pid as i32, &mut st, WNOHANG) } {
+                        0 => true,
+                        r if r == pid as i32 => {
+                            REAPED.lock().unwrap().insert(pid, ((st & 0x7f == 0).then_some((st >> 8) & 0xff), Instant::now()));
+                            false
+                        }
+                        // not (or no longer) a child: someone else reaped it
+                        _ => false,
+                    }
+                });
+                REAPED.lock().unwrap().retain(|_, (_, at)| at.elapsed() < std::time::Duration::from_secs(600));
+                if inherited.is_empty() && REAPED.lock().unwrap().is_empty() {
+                    return;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_secs(10));
+        });
+    }
 }
 
 pub fn alive(pid: u32) -> bool {

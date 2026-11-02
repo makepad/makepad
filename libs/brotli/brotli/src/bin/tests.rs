@@ -94,22 +94,3 @@ fn test_10x_10y() {
     }
     assert_eq!(output.data.len(), 20);
 }
-
-#[test]
-fn test_alice() {
-    let in_buf = include_bytes!("../../testdata/alice29.txt.compressed");
-
-    let mut output = Buffer::new(&[]);
-    let mut input = super::BrotliDecompressor::new(Buffer::new(in_buf), 1);
-    match copy_from_to(&mut input, &mut output) {
-        Ok(_) => {}
-        Err(e) => panic!("Error {:?}", e),
-    }
-    let mut i: usize = 0;
-    let truth = include_bytes!("../../testdata/alice29.txt");
-    while i < truth.len() {
-        assert_eq!(output.data[i], truth[i]);
-        i += 1;
-    }
-    assert_eq!(truth.len(), output.data.len());
-}

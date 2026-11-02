@@ -16,7 +16,7 @@
 //!
 //! Runs for real on the two desktop platforms with a decoder behind this
 //! facade.
-#![cfg(any(target_os = "windows", target_os = "macos"))]
+#![cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 
 use makepad_video::{
     PcmAudioTrackOptions, VideoFileCodec, VideoFileDecoder, VideoFileEncoder,

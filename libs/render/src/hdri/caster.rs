@@ -54,8 +54,7 @@ const SOFT_SUBSAMPLES: usize = 2;
 /// bake. A slight blur on a large caster would ask for far more; it then gets
 /// coarser cells (about two thirds of a degree on a 90 x 60 degree caster at
 /// softness 0.05, whose blur is 0.4 degrees), so it reads a little softer
-/// than asked. `hdri_perf`'s `a_soft_casters_raster_stays_well_under_a_held_bake`
-/// measures the cost.
+/// than asked.
 const SOFT_SAMPLE_BUDGET: usize = 1 << 16;
 /// `cell_value`'s jitter seed: fixed, so the same caster always rasters the same.
 const SOFT_JITTER_SEED: u32 = 0x6361_7374;

@@ -118,7 +118,7 @@ mod tests {
             id::Me::new(key, cred).unwrap()
         };
         let master = mk("mac", Role::Device, Some([10, 0, 0, 222].into()));
-        let node = mk("n217", Role::Node, None);
+        let node = mk("n5", Role::Node, None);
         let seen = Seen::default();
         let order = hex(&master.announce(SERVICE, b"apply makepad=abc nonce=01").unwrap());
         let o = seen.check_with(&fleet, &order, now).unwrap();

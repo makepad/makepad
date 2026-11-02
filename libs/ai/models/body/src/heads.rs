@@ -150,18 +150,6 @@ pub(crate) struct DecoderHeads {
 }
 
 impl DecoderHeads {
-    #[cfg(test)]
-    pub(crate) fn load(weights: &BodyWeights) -> Result<Self> {
-        Self::load_named(
-            weights,
-            "head_pose.proj",
-            "head_camera.proj",
-            "keypoint_posemb_linear",
-            "keypoint3d_posemb_linear",
-            "keypoint_feat_linear",
-        )
-    }
-
     pub(crate) fn load_named(
         weights: &BodyWeights,
         pose: &str,

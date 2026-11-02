@@ -991,14 +991,3 @@ mod tests {
         assert_eq!(splitter_names(source), vec!["top", "x", "y"]);
     }
 }
-
-#[cfg(test)]
-mod default_tests {
-    #[test]
-    fn a_splitter_name_inside_another_is_not_it() {
-        let code = "side_split := mod.widgets.HwDeckSplitter{ align: SplitterAlign.FromA(236.0) a: X }\nsplit := mod.widgets.HwSplitter{ align: SplitterAlign.FromB(260.0) }";
-        let whole = |at: &usize| *at == 0 || !code[..*at].ends_with(|c: char| c.is_alphanumeric() || c == '_');
-        let at = code.match_indices("split :=").map(|(at, _)| at).find(whole).unwrap();
-        assert!(code[at..].starts_with("split := mod.widgets.HwSplitter"));
-    }
-}

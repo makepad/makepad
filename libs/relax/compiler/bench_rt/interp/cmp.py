@@ -17,7 +17,8 @@ modes = {
     "jit-o3": dict(BENCH_WARM_MS="2500"),
     "interp": dict(MAKEPAD_RUN_INTERP="all", MAKEPAD_RUN_INTERP_STATS="1", MAKEPAD_RUN_O3="0", MAKEPAD_RUN_O1="0"),
     # no machine code at all: precompiled glue, every function interpreted
-    "nocodegen": dict(MAKEPAD_RUN_NO_CODEGEN="1", MAKEPAD_RUN_INTERP_STATS="1"),
+    # (it tiers up as the JIT does: O3 builds as threaded code, so it warms up as jit-o3 does)
+    "nocodegen": dict(MAKEPAD_RUN_NO_CODEGEN="1", MAKEPAD_RUN_INTERP_STATS="1", BENCH_WARM_MS="2500"),
     # A/B of the lowering's own clean-ups: no constant-branch folding and no loop-constant preload
     "interp-plain": dict(MAKEPAD_RUN_INTERP="all", MAKEPAD_RUN_INTERP_STATS="1", MAKEPAD_RUN_O3="0", MAKEPAD_RUN_O1="0", MAKEPAD_RUN_INTERP_NOFOLD="1"),
 }
@@ -56,7 +57,9 @@ for r in range(rounds):
                 res[k] = (t, ck, note)
         print("# round", r, n, {m: res.get((n, m), (None,))[0] for m in modes}, flush=True)
 cols = list(modes)
-print("| kernel | " + " | ".join(c + " ms" for c in cols) + " | interp/jit-o1 | interp/jit-o3 | interp/rustc | sums | interp coverage |")
+# the interpreted column: interp (beside the JIT) or nocodegen (no machine code at all)
+iv = "interp" if "interp" in cols else "nocodegen"
+print("| kernel | " + " | ".join(c + " ms" for c in cols) + " | %s/jit-o1 | %s/jit-o3 | %s/rustc | sums | interp coverage |" % (iv, iv, iv))
 print("|---" * (len(cols) + 6) + "|")
 for n in names:
     row = [res.get((n, c), (None, None, ""))for c in cols]
@@ -64,6 +67,12 @@ for n in names:
     def ratio(a, b):
         return "%.2f" % (t[a] / t[b]) if t.get(a) and t.get(b) else "-"
     sums = {r[1] for r in row if r[1]}
-    cov = res.get((n, "interp"), (None, None, ""))[2]
+    cov = res.get((n, iv), (None, None, ""))[2]
     cov = re.sub(r"makepad-run interp: ", "", cov or "")[:160]
-    print("| %s | %s | %s | %s | %s | %s | %s |" % (n, " | ".join("%.3f" % x[0] if x[0] else "FAIL" for x in row), ratio("interp", "jit-o1"), ratio("interp", "jit-o3"), ratio("interp", "rustc"), "ok" if len(sums) == 1 else "DIFF", cov))
+    print("| %s | %s | %s | %s | %s | %s | %s |" % (n, " | ".join("%.3f" % x[0] if x[0] else "FAIL" for x in row), ratio(iv, "jit-o1"), ratio(iv, "jit-o3"), ratio(iv, "rustc"), "ok" if len(sums) == 1 else "DIFF", cov))
+# geometric means of the interpreted column's ratios
+import math
+for b in ("jit-o1", "jit-o3", "rustc"):
+    rs = [res[(n, iv)][0] / res[(n, b)][0] for n in names if res.get((n, iv), (None,))[0] and res.get((n, b), (None,))[0]]
+    if rs:
+        print("geomean %s/%s: %.2f over %d kernels" % (iv, b, math.exp(sum(math.log(r) for r in rs) / len(rs)), len(rs)))

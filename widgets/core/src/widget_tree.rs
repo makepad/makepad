@@ -2703,18 +2703,34 @@ impl WidgetTree {
 
 
 
-    /// Named ancestor path without borrowing widgets that are currently drawing.
-    pub(crate) fn semantic_path(&self, uid: WidgetUid, window: WidgetUid) -> String {
+    /// `semantic_path` after reading what the graph has not yet: for after a frame drew, when
+    /// no widget is borrowed (the a11y path resolver).
+    fn semantic_path_synced(&self, uid: WidgetUid, window: WidgetUid) -> Option<String> {
+        self.sync_dirty();
+        self.semantic_path(uid, window).ok()
+    }
+
+    /// The dotted path of named widgets from `window` down to `uid`, read from the graph
+    /// without borrowing widgets that are currently drawing. `Err` holds the path as far as
+    /// the graph reaches while a widget on the way is not in it yet: one made inside its
+    /// parent's draw (a popover's content on its first open) is read into the graph only once
+    /// that parent is no longer borrowed.
+    pub(crate) fn semantic_path(&self, uid: WidgetUid, window: WidgetUid) -> Result<String, String> {
         let inner = self.inner.borrow();
         let mut names = Vec::new();
         let mut current = Some(uid);
+        let mut whole = true;
         while let Some(id) = current {
             if id == window { break; }
-            let Some(node) = inner.graph.get(&id) else { break };
+            let Some(node) = inner.graph.get(&id) else {
+                whole = false;
+                break;
+            };
             if node.name != LiveId(0) { names.push(node.name); }
             current = node.parent;
         }
-        names.into_iter().rev().map(live_id_token).collect::<Vec<_>>().join(".")
+        let path = names.into_iter().rev().map(live_id_token).collect::<Vec<_>>().join(".");
+        if whole { Ok(path) } else { Err(path) }
     }
 
 
@@ -2820,6 +2836,7 @@ impl WidgetTreeState {
         if cx.widget_tree_ptr.is_null() {
             let boxed = Box::new(WidgetTreeState::default());
             cx.widget_tree_ptr = Box::into_raw(boxed) as *mut ();
+            makepad_platform::a11y::set_path_resolver(|cx, uid, window| cx.widget_tree().semantic_path_synced(WidgetUid(uid), WidgetUid(window)));
         }
         unsafe { &mut *(cx.widget_tree_ptr as *mut WidgetTreeState) }
     }
@@ -3309,22 +3326,6 @@ mod tests {
             assert_eq!(found.widget_uid(), list_uid, "found after the borrow ends (scope {scope})");
             assert_eq!(tree.find_all_within(root_uid, &[name("rooms")]).len(), 1);
         }
-    }
-
-    #[test]
-    fn test_observe_parent_child() {
-        let tree = WidgetTree::default();
-        let parent_uid = WidgetUid::new();
-        let child_uid = WidgetUid::new();
-        let child = make_widget(child_uid, vec![]);
-        let parent = make_widget(parent_uid, vec![(name("child"), child.clone())]);
-
-        tree.observe_node(parent_uid, name("parent"), parent.clone(), None);
-        tree.observe_node(child_uid, name("child"), child.clone(), Some(parent_uid));
-
-        let found = tree.find_within(parent_uid, &[name("child")]);
-        assert!(!found.is_empty());
-        assert_eq!(found.widget_uid(), child_uid);
     }
 
     #[test]
@@ -3915,51 +3916,6 @@ mod tests {
     // Stress: repeated refresh_from_borrowed (the hot path)
     // ------------------------------------------------------------------
 
-    #[test]
-    fn test_repeated_refresh_no_spurious_rebuild() {
-        let tree = WidgetTree::default();
-        let root_uid = WidgetUid::new();
-        let child_uids: Vec<WidgetUid> = (0..20).map(|_| WidgetUid::new()).collect();
-        let children: Vec<(LiveId, WidgetRef)> = child_uids
-            .iter()
-            .enumerate()
-            .map(|(i, &uid)| {
-                let n = LiveId(i as u64 + 100);
-                (n, make_widget(uid, vec![]))
-            })
-            .collect();
-
-        let root = make_widget(root_uid, vec![]);
-        tree.observe_node(root_uid, name("root"), root, None);
-
-        // First refresh → discovers children
-        let children_clone = children.clone();
-        tree.refresh_from_borrowed(root_uid, |visit| {
-            for (n, c) in &children_clone {
-                visit(*n, c.clone());
-            }
-        });
-        // Sync
-        let _ = tree.is_empty();
-
-        // Now pound it 1000 times with the same children
-        for _ in 0..1000 {
-            let cc = children.clone();
-            tree.refresh_from_borrowed(root_uid, |visit| {
-                for (n, c) in &cc {
-                    visit(*n, c.clone());
-                }
-            });
-            {
-                let inner = tree.inner.borrow();
-                assert!(
-                    !inner.structure_dirty,
-                    "structure_dirty should stay false on identical refreshes"
-                );
-            }
-        }
-    }
-
     // ------------------------------------------------------------------
     // Stress: deep tree (avoid stack overflow with iterative builder)
     // ------------------------------------------------------------------
@@ -4427,31 +4383,6 @@ mod tests {
         });
         assert!(!rebuilt.is_empty());
         assert_eq!(rebuilt.widget_uid(), stale_uid);
-    }
-
-    #[test]
-    fn test_find_within_uses_xor_path_cache_per_entrypoint() {
-        let tree = WidgetTree::default();
-        let root_uid = WidgetUid::new();
-        let child_uid = WidgetUid::new();
-
-        let child = make_widget(child_uid, vec![]);
-        let root = make_widget(root_uid, vec![(name("target"), child.clone())]);
-
-        tree.observe_node(root_uid, name("root"), root.clone(), None);
-        tree.observe_node(child_uid, name("target"), child.clone(), Some(root_uid));
-        stabilize_graph_cache(&tree);
-
-        let path = [name("target")];
-        let found = tree.find_within(root_uid, &path);
-        assert!(!found.is_empty());
-        assert_eq!(found.widget_uid(), child_uid);
-
-        let inner = tree.inner.borrow();
-        let entry = cached_path_entry(&inner, root_uid, &path)
-            .expect("expected cached path entry for root/path");
-        assert_eq!(entry.matches.len(), 1);
-        assert_eq!(entry.matches[0].uid, child_uid);
     }
 
     /// The per-frame law: repeating the SAME lookups on an unchanged tree

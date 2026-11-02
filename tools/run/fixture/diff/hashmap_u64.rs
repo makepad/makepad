@@ -1,5 +1,5 @@
 // diff_fast corpus program: HashMap<u64, u32> filled from seeded keys, then every key looked up
-// (dsbench hash_u64: Relax returned None for an inserted key). rustc --test -O and `makepad test`
+// (a hash_u64 microbenchmark: Relax returned None for an inserted key). rustc --test -O and `makepad test`
 // (all tiers) must print identical D lines.
 use std::collections::{HashMap, HashSet};
 use std::hash::{BuildHasher, DefaultHasher, Hash, Hasher};
@@ -17,7 +17,7 @@ fn run() {
     closure_rounds();
 }
 
-/// dsbench hash_u64's iteration, verbatim shape: x64 O3 hashed one way in the closure (a spilled
+/// That benchmark's iteration, verbatim shape: x64 O3 hashed one way in the closure (a spilled
 /// operand loaded over its window register) and the table was filled with the other.
 fn lookups_closure() -> Box<dyn FnMut() -> u64> {
     let keys: Vec<u64> = { let mut r = 10u64; (0..8192).map(|_| next(&mut r) >> 20).collect() };
@@ -99,7 +99,7 @@ fn work() {
     let first = FIRST.get_or_init(|| (now.clone(), via_build.clone(), mixed));
     d!("hash consistent across rounds {} {} {}", first.0 == now, first.1 == via_build, first.2 == mixed);
     d!("hash distinct {}", { let mut v = now.clone(); v.sort_unstable(); v.dedup(); v.len() });
-    // a set grown from empty, removes, re-inserts (dsbench hashset_grow)
+    // a set grown from empty, removes, re-inserts (its hashset_grow)
     let mut r = 13u64;
     let keys: Vec<u32> = (0..30_000).map(|_| next(&mut r) as u32).collect();
     let mut set: HashSet<u32> = HashSet::new();

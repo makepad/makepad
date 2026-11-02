@@ -4,7 +4,7 @@ use makepad_ai_hub::download::Downloader;
 use makepad_ai_hub::registry::{Domain, ModelSpec, Registry};
 use makepad_ai_hub::server::{start_service, ServiceConfig, ServiceHandle};
 use makepad_flow::client::{Endpoints, FlowClient};
-use makepad_flow::host::{FlowServer, FlowServerConfig, ServerError};
+use makepad_flow::host::{FlowServer, FlowServerConfig};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -39,7 +39,7 @@ fn peer_off() -> makepad_ai_hub::peer_serve::PeerOptions {
     }
 }
 
-fn start_hub(root: &Path) -> Option<ServiceHandle> {
+fn start_hub(root: &Path) -> ServiceHandle {
     let service = start_service(ServiceConfig {
         host: "127.0.0.1".to_string(),
         port: 0,
@@ -79,29 +79,18 @@ fn start_hub(root: &Path) -> Option<ServiceHandle> {
         fleet: makepad_ai_hub::discovery::DEFAULT_FLEET.to_string(),
     });
     match service {
-        Ok(handle) => Some(handle),
-        Err(error) if error.to_string().contains("Operation not permitted") => {
-            eprintln!("skipping host model test: loopback bind is forbidden by this sandbox");
-            None
-        }
+        Ok(handle) => handle,
         Err(error) => panic!("start test hub: {error}"),
     }
 }
 
-fn start_flow(root: &Path, fleet_hint: Vec<String>) -> Option<FlowServer> {
+fn start_flow(root: &Path, fleet_hint: Vec<String>) -> FlowServer {
     let mut config = FlowServerConfig::new(root.join("flow"));
     config.watch_interval_ms = 25;
     config.fleet_hint = fleet_hint;
     config.log = Box::new(|_| {});
     match FlowServer::start(config) {
-        Ok(server) => Some(server),
-        Err(ServerError::Io {
-            kind: std::io::ErrorKind::PermissionDenied,
-            ..
-        }) => {
-            eprintln!("skipping host model test: loopback bind is forbidden by this sandbox");
-            None
-        }
+        Ok(server) => server,
         Err(error) => panic!("start flow server: {error}"),
     }
 }
@@ -122,13 +111,9 @@ fn client(server: &FlowServer) -> FlowClient {
 #[test]
 fn models_lists_testpattern_and_filters_by_domain() {
     let root = TempRoot::new("live");
-    let Some(hub) = start_hub(&root.0) else {
-        return;
-    };
+    let hub = start_hub(&root.0);
     let base_url = format!("http://{}", hub.addr);
-    let Some(server) = start_flow(&root.0, vec![base_url.clone()]) else {
-        return;
-    };
+    let server = start_flow(&root.0, vec![base_url.clone()]);
     let client = client(&server);
 
     let response = client.models(None).unwrap();
@@ -173,9 +158,7 @@ fn dead_hint_is_reported_unhealthy_without_failing_the_route() {
     let root = TempRoot::new("dead");
     let dead_url = "http://127.0.0.1:1".to_string();
 
-    let Some(server) = start_flow(&root.0, vec![dead_url.clone()]) else {
-        return;
-    };
+    let server = start_flow(&root.0, vec![dead_url.clone()]);
     let response = client(&server).models(None).unwrap();
     let node = response
         .nodes

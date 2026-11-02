@@ -1,4 +1,4 @@
-//! Shared scene-shader mixins: fur shells and the colour-adjust law.
+//! Shared scene-shader mixins: fur shells, colour adjustment and output dither.
 
 use super::*;
 
@@ -6,6 +6,20 @@ script_mod! {
     use mod.prelude.widgets_internal.*
     use mod.widgets.*
     use mod.geom
+
+    mod.draw.SceneOutputDither = {
+        // Physical target size; z enables dither only for display UNORM output.
+        output_dither_ctl: uniform(vec3(1.0, 1.0, 0.0))
+        output_dither: fn(color: vec3, wp: vec3) -> vec3 {
+            if self.output_dither_ctl.z < 0.5 { return color }
+            let clip = self.draw_pass.camera_projection * (self.draw_pass.camera_view * vec4(wp, 1.0))
+            let p = floor(vec2(clip.x / clip.w * 0.5 + 0.5, 0.5 - clip.y / clip.w * 0.5) * self.output_dither_ctl.xy)
+            let a = fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715))))
+            let b = fract(52.9829189 * fract(dot(p + vec2(47.0, 17.0), vec2(0.06711056, 0.00583715))))
+            let noise = (a + b - 1.0) / 255.0
+            return max(color + vec3(noise, noise, noise), vec3(0.0, 0.0, 0.0))
+        }
+    }
 
     // The same root-space pattern follows both static and skinned surfaces.
     // Each extra shell reuses the base mesh; strand count never becomes CPU

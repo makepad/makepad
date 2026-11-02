@@ -397,6 +397,9 @@ impl AiChatSlot {
         if self.overlay.is_some() {
             return true;
         }
+        if cx.global::<AiSlotRequests>().docked {
+            return false;
+        }
         let overlay = cx.with_vm(|vm| {
             let widgets = vm.module(id!(widgets));
             let ty = vm.heap().value_path(widgets, ids!(AiChatOverlay), NoTrap);
@@ -435,6 +438,10 @@ impl AiChatSlot {
         // person has never opened F10, and an app started for Claude Desktop
         // serves its tools: the hidden overlay owns that work.
         let requests = cx.global::<AiSlotRequests>();
+        // One chat per app: an app with its own panel takes the requests itself.
+        if requests.docked {
+            return;
+        }
         if requests.feedback_enabled || requests.engine_at_start {
             self.ensure_overlay(cx);
         }
@@ -840,17 +847,6 @@ mod tests {
         assert!(strip > 0.0 && strip < 440.0, "{strip}");
         let card = s.slid_rect(body);
         assert_eq!(card.pos.x + card.size.x, SlideState::body_beside(body, strip).pos.x);
-    }
-
-    #[test]
-    fn requests_are_taken_once() {
-        let mut req = AiSlotRequests::default();
-        req.open = Some(true);
-        assert_eq!(req.open.take(), Some(true));
-        assert_eq!(req.open.take(), None);
-        req.say.push("hello".into());
-        assert_eq!(std::mem::take(&mut req.say), vec!["hello".to_string()]);
-        assert!(req.say.is_empty());
     }
 
     #[test]

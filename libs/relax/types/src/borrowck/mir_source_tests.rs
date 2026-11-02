@@ -405,15 +405,39 @@ fn a_turbofish_on_a_tuple_struct_constructor_is_a_user_type_annotation() {
     assert!(errors[0].starts_with("E0597"), "{errors:?}");
 }
 
-/// Probe: `UI_FILES=a.rs:b.rs cargo test zz_probe_files -- --nocapture` prints what the pipeline says about each.
+/// rustc_hir_analysis check/region.rs `resolve_block`: a tail expression is a terminating scope from
+/// edition 2024. Before it, its temporaries outlive the block's locals, so one with drop glue that
+/// still holds a borrow of a local is E0597 (`role_of` of makepad-score-live, whose
+/// `FlatMap<_, array::IntoIter<&str, 2>, _>` is such a temporary).
 #[test]
-fn zz_probe_files() {
-    let Some(files) = std::env::var_os("UI_FILES") else { return };
-    for f in files.to_string_lossy().split(':') {
-        let src = std::fs::read_to_string(f).unwrap();
-        let r = std::panic::catch_unwind(|| borrowck_source(&src));
-        match r { Ok((e, u)) => eprintln!("PROBE {f}: errors {} {:?} unchecked {:?}", e.len(), e.iter().map(|x| x.chars().take(std::env::var("PROBE_W").ok().and_then(|w| w.parse().ok()).unwrap_or(60)).collect::<String>()).collect::<Vec<_>>(), u),
-                  Err(_) => eprintln!("PROBE {f}: harness panic (typeck/front errors?)") }
+fn a_tail_temporary_outlives_the_locals_before_edition_2024() {
+    const D: &str = "struct D<'a>(&'a str);
+        impl Drop for D<'_> { fn drop(&mut self) {} }
+        impl D<'_> { fn len(&self) -> usize { self.0.len() } }";
+    for source in [
+        "pub fn f(n: &str) -> Option<usize> { let n = n.to_lowercase(); n.split(' ').flat_map(|w| [w, w.trim_end()]).find_map(|w| Some(w.len())) }".to_string(),
+        "pub fn f(n: &str) -> Option<usize> { let n = n.to_lowercase(); [n.as_str()].into_iter().next().map(|s| s.len()) }".to_string(),
+        "pub fn f() -> i32 { let m = std::sync::Mutex::new(1); *m.lock().unwrap() }".to_string(),
+        format!("{D} pub fn f(n: &str) -> usize {{ let n = n.to_lowercase(); D(&n).len() }}"),
+        format!("{D} pub fn f(n: &str) -> usize {{ let r = {{ let n = n.to_lowercase(); D(&n).len() }}; r }}"),
+        format!("{D} pub fn f(n: &str) -> usize {{ let g = || {{ let n = n.to_lowercase(); D(&n).len() }}; g() }}"),
+    ] {
+        let (errors, unchecked) = borrowck_source_in(&source, 2021);
+        assert!(unchecked.is_empty() && errors.len() == 1 && errors[0].starts_with("E0597"), "2021: {source}: {errors:?} {unchecked:?}");
+        let (errors, unchecked) = borrowck_source_in(&source, 2024);
+        assert!(unchecked.is_empty() && errors.is_empty(), "2024: {source}: {errors:?} {unchecked:?}");
+    }
+    // no drop glue that uses the borrow, the iterator consumed by value, an inner block's scope: both accept
+    for source in [
+        "pub fn f(n: &str) -> usize { let n = n.to_lowercase(); n.split(' ').count() }".to_string(),
+        "pub fn f(n: &str) -> usize { let n = n.to_lowercase(); n.split(' ').flat_map(|w| [w]).count() }".to_string(),
+        "pub fn f(n: &str) -> usize { let n = n.to_lowercase(); n.split(' ').collect::<Vec<_>>().len() }".to_string(),
+        format!("{D} pub fn f(n: &str, b: bool) -> usize {{ let n = n.to_lowercase(); if b {{ D(&n).len() }} else {{ 0 }} }}"),
+    ] {
+        for edition in [2021, 2024] {
+            let (errors, unchecked) = borrowck_source_in(&source, edition);
+            assert!(unchecked.is_empty() && errors.is_empty(), "{edition}: {source}: {errors:?} {unchecked:?}");
+        }
     }
 }
 

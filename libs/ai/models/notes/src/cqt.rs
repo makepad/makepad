@@ -187,13 +187,6 @@ fn normalized_log(values: &mut [f32]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::weights::NotesWeights;
-    use std::path::Path;
-
-    fn checkpoint() -> std::path::PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../../local/models/weights/basic_pitch/nmp.onnx")
-    }
 
     #[test]
     fn frame_count_matches_checkpoint_and_arbitrary_lengths() {
@@ -201,35 +194,5 @@ mod tests {
         assert_eq!(frame_count(22_050), 87);
         assert_eq!(frame_count(256), 2);
         assert_eq!(frame_count(257), 2);
-    }
-
-    #[test]
-    fn sine_440_lights_a4_and_harmonic_stack_alignment() {
-        let weights = NotesWeights::load(checkpoint()).unwrap();
-        let cqt = Cqt::new(weights.cqt);
-        let audio: Vec<f32> = (0..AUDIO_N_SAMPLES)
-            .map(|i| (std::f64::consts::TAU * 440.0 * i as f64 / SAMPLE_RATE as f64).sin() as f32)
-            .collect();
-        let spectrum = cqt.spectrogram(&audio).unwrap();
-        assert_eq!(spectrum.frames, WINDOW_FRAMES);
-        let mut energy = vec![0.0f32; CQT_BINS];
-        for frame in 8..spectrum.frames - 8 {
-            for bin in 0..CQT_BINS {
-                energy[bin] += spectrum.data[frame * CQT_BINS + bin];
-            }
-        }
-        let peak = energy
-            .iter()
-            .enumerate()
-            .max_by(|a, b| a.1.total_cmp(b.1))
-            .unwrap()
-            .0;
-        assert!((peak as isize - 144).abs() <= 1, "A4 CQT peak was bin {peak}");
-
-        let stacked = cqt.transform(&audio).unwrap();
-        let frame = WINDOW_FRAMES / 2;
-        let fundamental = stacked.data[(WINDOW_FRAMES + frame) * CONTOUR_BINS + 144];
-        let h2_at_a3 = stacked.data[(2 * WINDOW_FRAMES + frame) * CONTOUR_BINS + 108];
-        assert!((fundamental - h2_at_a3).abs() < 1e-6);
     }
 }

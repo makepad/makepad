@@ -78,6 +78,8 @@ static UI_WAIT_ARMED: AtomicBool = AtomicBool::new(false);
 /// long lazy compile, or a load's thousands of short ones; never a short hiccup). The JIT ring
 /// shows only past one.
 const BLOCK_AFTER: Duration = Duration::from_nanos(relax_compiler::postframe::BLOCK_SHOW_NS);
+/// The centre card is reserved for a sustained wait, beyond the ring's earlier notice.
+const WAIT_CARD_AFTER: Duration = Duration::from_millis(500);
 /// The UI has not been blocked on the JIT for this long: the warm-up is over.
 const READY_QUIET_NS: u64 = 300_000_000;
 
@@ -99,6 +101,13 @@ const WATCH_EVERY: Duration = Duration::from_millis(100);
 /// how often the run looks at the JIT while the app runs and no ring shows (new work is seen
 /// within this; a UI wait wakes it at once)
 const RING_LOOK: Duration = Duration::from_millis(500);
+
+/// Whether nobody sees the run window: MAKEPAD_HIDE_WINDOWS (set, any value, as the HAL's
+/// `OpenReq::from_env` reads it) keeps it off every screen. Such a run takes no retry from
+/// its window: a failure ends it.
+fn unseen() -> bool {
+    std::env::var_os("MAKEPAD_HIDE_WINDOWS").is_some()
+}
 
 /// Whether this run shows the JIT ring: `MAKEPAD_RUN_SETTLE_HUD=0` never, `=1` always, else not
 /// in hidden or benchmark runs (MAKEPAD_HIDE_WINDOWS, MAKEPAD_RUN_O3_PROGRESS,
@@ -266,6 +275,73 @@ impl Watch {
     }
 }
 
+/// The ring dot's tooltip: what `alert` means, the first thing behind it, and what a click does.
+fn ring_tip(alert: Option<RingAlert>, data: &State, diagnostics: &[Diagnostic], update_message: Option<&str>) -> Option<String> {
+    let first_error = || diagnostics.iter().find(|d| d.severity == relax_compiler::diag::Severity::Error).map(|d| tip_line(&d.message, 70));
+    let text = match alert? {
+        RingAlert::UpdateReady => {
+            let pending = relax_compiler::reload::restart_pending();
+            let what = pending.first().map(|p| tip_line(restart_item(p), 70)).or_else(|| update_message.map(|m| tip_line(m, 70)))?;
+            let n = pending.len().max(1);
+            let more = if n > 1 { format!(" (+{} more)", n - 1) } else { String::new() };
+            let keeps = if relax_compiler::reload::restart_keeps_state() { ", the app keeps its state" } else { "" };
+            format!("{n} change{} need{} a restart: {what}{more} · click to restart{keeps}", if n > 1 { "s" } else { "" }, if n > 1 { "" } else { "s" })
+        }
+        RingAlert::PatchFailed => match first_error() {
+            Some(error) => format!("Live patch not applied, the previous code runs: {error} · click for details"),
+            None => "Live patch not applied, the previous code runs · click for details".into(),
+        },
+        RingAlert::RebuildFailed => {
+            let failure = relax_compiler::reload::host::failure();
+            let error = failure.lines().map(str::trim).find(|l| l.starts_with("error")).map(|l| tip_line(l, 70));
+            match error {
+                Some(error) => format!("Rebuilding makepad failed, the previous code runs: {error} · click for details"),
+                None => "Rebuilding makepad failed, the previous code runs · click for details".into(),
+            }
+        }
+        RingAlert::Panic => match &data.parked {
+            Some(p) => format!("Paused on a panic: {} · click to see it", tip_line(&p.message, 70)),
+            None => "Paused on a panic · click to see it".into(),
+        },
+        RingAlert::Stale => "Paused on code a live edit replaced · click to see it".into(),
+    };
+    Some(text)
+}
+
+/// A restart-pending entry without the batch's file list in front (`a.rs, b.rs: <what>`).
+fn restart_item(entry: &str) -> &str {
+    match entry.split_once(": ") {
+        Some((files, what)) if files.split(", ").all(|f| !f.is_empty() && !f.contains(' ')) => what,
+        _ => entry,
+    }
+}
+
+/// One short line of a message for the ring's tooltip: its first line, paths cut to their file
+/// names, without the advice after ` -- ` or `; `, at most `max` chars.
+fn tip_line(text: &str, max: usize) -> String {
+    let line = text.lines().next().unwrap_or("");
+    let line = line.split(" -- ").next().unwrap_or(line);
+    let line = line.split("; ").next().unwrap_or(line);
+    let words: Vec<String> = line
+        .split(' ')
+        .map(|w| match (w.find('/'), w.rfind('/')) {
+            (Some(first), Some(last)) => {
+                let lead = &w[..first];
+                let lead = &lead[..lead.len() - lead.trim_start_matches(|c: char| !c.is_alphanumeric()).len()];
+                format!("{lead}{}", &w[last + 1..])
+            }
+            _ => w.to_string(),
+        })
+        .collect();
+    let line = words.join(" ");
+    if line.chars().count() <= max {
+        return line;
+    }
+    let mut cut: String = line.chars().take(max.saturating_sub(1)).collect();
+    cut.push('…');
+    cut
+}
+
 /// A rebuild of makepad failed (its dot shows in the ring until the next rebuild).
 fn rebuild_failed() -> bool {
     use relax_compiler::reload::host::{status, Phase};
@@ -275,7 +351,7 @@ fn rebuild_failed() -> bool {
 /// Where the window layer over the app is in its sequence.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Stage {
-    /// no layer (the JIT ring may show)
+    /// the app is running (the JIT ring or a sustained-wait card may show)
     Running,
     /// the boot field, the app's first frames going under it
     Boot,
@@ -378,8 +454,13 @@ pub fn run(mut compile: Box<dyn FnMut() -> i32 + Send>) -> i32 {
                     return;
                 }
                 EXIT.store(code, Ordering::Release);
-                if run.window.is_none() {
-                    // No native window backend: there is no run UI to retry from.
+                if run.window.is_none() || !relax_compiler::run::live_session() || unseen() {
+                    // No native window backend: there is no run UI to retry from. A run that is
+                    // no live session takes no edit that could fix the build: it ends with the
+                    // code (a test's child under CARGO_BIN_EXE_* is waited for by its parent).
+                    // A hidden window (MAKEPAD_HIDE_WINDOWS) shows the failure to nobody and nobody
+                    // retries from it: the run ends with the code instead of waiting for a retry
+                    // forever (a hidden Sandbox boot whose provided crates differed sat idle 4.6 h).
                     QUIT.store(true, Ordering::Release);
                     Hal::global().wake_session(HOST);
                     if PUMP.lock().unwrap_or_else(|e| e.into_inner()).is_none() {
@@ -389,11 +470,16 @@ pub fn run(mut compile: Box<dyn FnMut() -> i32 + Send>) -> i32 {
                 }
                 {
                     // With a unit already installed, retries go through domain relaunch.
-                    run.initial_failed = run.spec.is_none();
-                    post(Update::Failure(match &panicked {
-                        Some(line) => format!("Compilation failed: the compiler panicked: {line}"),
-                        None => format!("Compilation failed (exit {code})"),
-                    }));
+                    // A typed source mismatch has already posted UpdateReady. It is neither
+                    // a compiler failure nor a retry of compilation against the stale loader.
+                    let update_ready = code == 0 && panicked.is_none() && relax_compiler::reload::host::update_message().is_some();
+                    run.initial_failed = !update_ready && run.spec.is_none();
+                    if !update_ready {
+                        post(Update::Failure(match &panicked {
+                            Some(line) => format!("Compilation failed: the compiler panicked: {line}"),
+                            None => format!("Compilation failed (exit {code})"),
+                        }));
+                    }
                     if run.spec.is_some() {
                         return;
                     }
@@ -563,7 +649,7 @@ pub fn open(package: &str, package_dir: &str) -> Result<(), String> {
     let state_path = relax_compiler::dirs::relax_dir()
         .join("windows")
         .join(format!("{key:016x}.geom"));
-    let geometry = std::fs::read_to_string(&state_path)
+    let remembered = std::fs::read_to_string(&state_path)
         .ok()
         .and_then(|s| {
             let values: Vec<f32> = s
@@ -573,8 +659,8 @@ pub fn open(package: &str, package_dir: &str) -> Result<(), String> {
                 .ok()?;
             let g: [f32; 4] = values.try_into().ok()?;
             (g.iter().all(|v| v.is_finite()) && g[2] > 0.0 && g[3] > 0.0).then_some(g)
-        })
-        .unwrap_or([f32::NAN, f32::NAN, 1280.0, 800.0]);
+        });
+    let geometry = remembered.unwrap_or([f32::NAN, f32::NAN, 1280.0, 800.0]);
     // `MAKEPAD_WINDOW=WxH@scale` sizes the app's first window, which adopts this one: it is made
     // at that size from the start, exactly, and the size is not kept for the next run
     let launch = launch_window(info.dpi);
@@ -628,7 +714,7 @@ pub fn open(package: &str, package_dir: &str) -> Result<(), String> {
                 }
                 let _stop = StopLoop;
                 let _kept = relax_compiler::zone_alloc::kept();
-                let mut host = match HostWindow::new(info, document, initial.clone(), geometry, launch.is_some()) {
+                let mut host = match HostWindow::new(info, document, initial.clone(), geometry, launch.is_some(), remembered.is_some()) {
                     Ok(host) => host,
                     Err(error) => {
                         let _ = ready.try_send(Err(error));
@@ -713,6 +799,13 @@ pub fn relaunch() -> Result<(), String> {
     Ok(())
 }
 
+pub fn domain_replaced(previous: u32, replacement: u32) {
+    if let Some(r) = state().as_mut().filter(|r| r.domain == previous) {
+        r.domain = replacement;
+        relax_compiler::run::set_app_domain(replacement);
+    }
+}
+
 pub fn restarting(id: u32) {
     let window = state()
         .as_ref()
@@ -737,7 +830,7 @@ pub fn restarting(id: u32) {
 pub fn observe(id: u32, next: &DomainState) {
     let guard = state();
     if let Some(r) = guard.as_ref().filter(|r| r.domain == id) {
-        if !r.stopping || matches!(next, DomainState::Leaked { .. }) {
+        if !r.stopping {
             post(Update::Domain(next.clone()));
         }
     }
@@ -841,10 +934,13 @@ fn work(rx: std::sync::mpsc::Receiver<Work>, package_dir: PathBuf, document: Doc
                     eprintln!("makepad: cannot remember {}: {e}", path.display());
                 }
             }
-            Work::Relaunch => match relax_compiler::reload::relaunch_pending() {
-                Ok(_) => relax_compiler::reload::clear_restart_pending(),
-                Err(e) => post(Update::Message(e)),
-            },
+            // the waiting edits stay noted until a run loads them (`domain_loaded`, or the new
+            // process): the app may postpone the restart (unsaved work), a rebuild may come first
+            Work::Relaunch => {
+                if let Err(e) = relax_compiler::reload::relaunch_pending() {
+                    post(Update::Message(e));
+                }
+            }
             Work::OpenFile { file, line, col } => {
                 if let Err(error) = editor.open_file(file, line, col) {
                     post(Update::Message(error));
@@ -978,6 +1074,7 @@ fn pump(
     let mut work_pending = VecDeque::new();
     let mut work_full = false;
     let has_window = host.window().is_some();
+    let unseen = unseen();
     let mut probe = crate::boot_probe::Probe::from_env();
     if probe.is_some() {
         host.measure_input();
@@ -993,12 +1090,12 @@ fn pump(
     let mut return_entry: Option<(String, String)> = None;
     let mut progress = Progress::new(history);
     let mut failed = false;
-    let mut patch_failed = false;
+    let mut patch_notice: Option<String> = None;
     let mut action_failed = false;
+    let mut update_ready = false;
     let mut overlay_dismissed = false;
     let mut active = true;
     let mut relaunched = false;
-    let mut restartable = true;
     let mut diagnostics = Vec::new();
     let mut diagnostic_keys = HashSet::new();
     let mut diagnostics_dirty = true;
@@ -1012,6 +1109,16 @@ fn pump(
     let mut dirty = true;
     let mut stage = Stage::Running;
     let ring = ring_on();
+    // A dump-only preview: after the running app's first half second, show the card for
+    // three seconds and fade it out. No synthetic JIT wait or input change. Works hidden
+    // even with the ring disabled: MAKEPAD_RUN_WAIT_CARD=update|rebuild.
+    let wait_preview = host.dumping().then(|| std::env::var("MAKEPAD_RUN_WAIT_CARD").ok()).flatten();
+    let wait_preview = match wait_preview.as_deref() {
+        Some("update") => Some(0),
+        Some("rebuild") => Some(1),
+        _ => None,
+    };
+    let mut wait_preview_at: Option<Instant> = None;
     // the run's inspect view (the halted view over the app without a stop): opened by
     // `makepad inspect <app> session view open` (the JIT ring is display only)
     let mut inspect_open = false;
@@ -1036,6 +1143,10 @@ fn pump(
                 r.initial_failed,
             )
         };
+        if (unseen || !has_window) && relax_compiler::hot_failure::has_error() {
+            EXIT.store(makepad_remote::hot::JIT_ERROR_EXIT, Ordering::Release);
+            QUIT.store(true, Ordering::Release);
+        }
         if let Some(probe) = &mut probe {
             probe.turn(active, &data);
         }
@@ -1071,19 +1182,25 @@ fn pump(
                     diagnostic_keys.clear();
                     diagnostics_dirty = true;
                     failed = false;
-                    patch_failed = false;
+                    patch_notice = None;
                     action_failed = false;
+                    update_ready = false;
                     overlay_dismissed = false;
                     active = true;
                     relaunched |= warm;
-                    restartable = true;
                 }
-                Update::Failure(message) if !has_window => {
+                Update::Failure(message) if !has_window || unseen => {
+                    if relax_compiler::hot_failure::recovering() {
+                        relax_compiler::hot_failure::restart_failed(&message);
+                        continue;
+                    }
                     // No window shows this failure and nobody can retry from it (a backend without
-                    // a shader dialect: headless, a plain program): the run ends with it. A program
-                    // that panicked in main used to leave the process running until it was killed.
+                    // a shader dialect: headless, a plain program; or a hidden window, which nobody
+                    // sees (MAKEPAD_HIDE_WINDOWS)): the run ends with it. A program that panicked
+                    // in main used to leave the process running until it was killed.
                     eprintln!("makepad: {message}");
-                    let _ = EXIT.compare_exchange(0, 101, Ordering::AcqRel, Ordering::Acquire);
+                    let code = relax_compiler::hot_failure::verdict(101).code();
+                    let _ = EXIT.compare_exchange(0, code, Ordering::AcqRel, Ordering::Acquire);
                     QUIT.store(true, Ordering::Release);
                 }
                 Update::Failure(message) => {
@@ -1106,7 +1223,7 @@ fn pump(
                 Update::Document(document) => host.reload(document),
                 Update::Environment(environment) => host.environment(environment),
                 Update::SourcesChanged => {
-                    if failed && !stopping && restartable {
+                    if failed && !stopping {
                         match retry() {
                             Ok(()) => failed = false,
                             Err(e) => post(Update::Message(e)),
@@ -1136,23 +1253,38 @@ fn pump(
                         data.done = None;
                         data.total = None;
                     }
-                    DomainState::Exited(code) if code == 0 || !has_window => {
+                    // main returned or the program called exit: the process ends with its code,
+                    // as a rustc build's does (a program that runs another as a child waits for
+                    // that code); a crash is what the run window stays up for
+                    DomainState::Exited(code) => {
                         EXIT.store(code, Ordering::Release);
                         QUIT.store(true, Ordering::Release);
                     }
-                    DomainState::Exited(code) => {
-                        post(Update::Failure(format!("App exited with status {code}")))
+                    // a run that is no live session takes no fix: it ends as a rustc build's
+                    // panic does (101), with the message on stderr
+                    DomainState::Crashed(message) if !relax_compiler::run::live_session() => {
+                        eprintln!("makepad: {message}");
+                        EXIT.store(relax_compiler::hot_failure::verdict(101).code(), Ordering::Release);
+                        QUIT.store(true, Ordering::Release);
                     }
                     DomainState::Crashed(message) => post(Update::Failure(message)),
-                    DomainState::Leaked { threads } => {
-                        post(Update::Failure(format!(
-                            "Shutdown timed out: {threads} threads remain"
-                        )));
-                        restartable = false;
-                    }
                     DomainState::Stopped => {}
                 },
                 Update::Compiler(event) => match event {
+                    run_state::Event::UpdateReady { domain: id, message }
+                        if id.is_none() || id == Some(domain) =>
+                    {
+                        active = false;
+                        update_ready = true;
+                        overlay_dismissed = false;
+                        data.domain = message;
+                        data.current.clear();
+                        if let Some(r) = state().as_mut() {
+                            r.relaunch = None;
+                            r.stopping = false;
+                            r.initial_failed = false;
+                        }
+                    }
                     run_state::Event::Progress {
                         domain: id,
                         phase,
@@ -1176,9 +1308,8 @@ fn pump(
                     {
                         if diagnostic_keys.insert(record.to_json()) {
                             if !active && record.severity == relax_compiler::diag::Severity::Error {
-                                patch_failed = true;
-                                overlay_dismissed = false;
-                                data.domain = "Patch not applied · previous code is running".into();
+                                patch_notice = Some(format!("{}: {}", relax_boot::ring_summary(None, Some(RingAlert::PatchFailed)), record.message));
+                                if !update_ready { data.domain = "Patch not applied · previous code is running".into(); }
                             }
                             diagnostics.push(record);
                             diagnostics_dirty = true;
@@ -1189,12 +1320,9 @@ fn pump(
                         applied,
                         records,
                     } if id.is_none() || id == Some(domain) => {
-                        patch_failed = !applied;
+                        patch_notice = (!applied).then(|| format!("{}: {}", relax_boot::ring_summary(None, Some(RingAlert::PatchFailed)), records.iter().map(|r| r.message.as_str()).collect::<Vec<_>>().join("; ")));
                         action_failed = false;
-                        if !applied {
-                            overlay_dismissed = false;
-                        }
-                        if !active {
+                        if !active && !update_ready {
                             data.domain = if applied {
                                 "Running"
                             } else {
@@ -1325,14 +1453,14 @@ fn pump(
             }
             None => {}
         }
-        // Errors reveal immediately. Otherwise a warm relaunch preserves the last app
-        // image for 300 ms, then uses exactly the same document/context as cold boot.
+        // A refused patch is a ring notice: it never covers the running app.
+        // A warm relaunch preserves the last app image for 300 ms.
         let overlay = has_window
             && app_frame
             && !overlay_dismissed
-            && (patch_failed
-                || action_failed
+            && (action_failed
                 || failed
+                || update_ready
                 || inspect_open
                 || !document_errors.is_empty()
                 || data.parked.is_some());
@@ -1344,8 +1472,8 @@ fn pump(
                 "paused on a panic"
             } else if failed {
                 "the app stopped"
-            } else if patch_failed {
-                "a live patch failed"
+            } else if update_ready {
+                "the JIT itself changed"
             } else if action_failed {
                 "a run action failed"
             } else if !document_errors.is_empty() {
@@ -1367,13 +1495,15 @@ fn pump(
         });
         let drawn = if !overlay { "null" } else if host.layers() { "\"layer\"" } else { "\"panel\"" };
         let shown = format!(
-            "\"over_app\":{},\"why\":{},\"dismissed\":{},\"drawn\":{}{},\"pid\":{}",
+            "\"over_app\":{},\"why\":{},\"dismissed\":{},\"drawn\":{}{},\"pid\":{},\"patch_failed\":{},\"patch_notice\":{}",
             overlay,
             why.map_or("null".to_string(), |w| format!("\"{w}\"")),
             overlay_dismissed,
             drawn,
             paused,
-            std::process::id()
+            std::process::id(),
+            patch_notice.is_some(),
+            patch_notice.as_deref().map_or_else(|| "null".into(), makepad_remote::json_str)
         );
         if view_shown.as_deref() != Some(shown.as_str()) {
             let was_over = view_shown.as_deref().is_some_and(|v| v.starts_with("\"over_app\":true"));
@@ -1394,7 +1524,7 @@ fn pump(
             relax_compiler::inspect::run_view::publish(shown.clone());
             view_shown = Some(shown);
         }
-        let mode = if overlay { Mode::Overlay } else { Mode::Boot };
+        let mode = if update_ready { Mode::Update } else if overlay { Mode::Overlay } else { Mode::Boot };
         if data.mode != mode {
             data.mode = mode;
             dirty = true;
@@ -1403,15 +1533,16 @@ fn pump(
             || (has_window
                 && may_present
                 && (failed
+                    || update_ready
                     || data.parked.is_some()
                     || (active
                         && relaunch.is_none_or(|t| t.elapsed() >= Duration::from_millis(300)))));
         // the window layer (Metal): the boot field the app's first frames go under, the warm-up
         // after its first present (until the JIT's readiness signal). An opaque overlay, a failure
-        // or a stop takes it away. (Later JIT work shows in the JIT ring, below.)
+        // or a stop takes it away. Later UI waits get the Updating card, below.
         // the boot stage begins before the app has the window, once the field has presented
         // (its first frame then never reaches the window before the layer)
-        let layers = host.layers() && !overlay && !failed && data.parked.is_none() && !stopping && !pending;
+        let layers = host.layers() && !overlay && !failed && !update_ready && data.parked.is_none() && !stopping && !pending;
         if !layers || (stage != Stage::Boot && !lent_to_app) {
             stage = Stage::Running;
         }
@@ -1450,31 +1581,76 @@ fn pump(
         };
         // the view over a paused app: in the app's own window, over its dimmed last frame, where
         // the backend composes window layers (else the opaque panel `overlay` asks for)
-        let want = if overlay && host.layers() { Some(LayerWant::Paused) } else { want };
-        host.layer(want, app_frames);
+        let mut want = if overlay && host.layers() { Some(LayerWant::Paused) } else { want };
         // the JIT ring while the app runs: the JIT's work in flight, a UI block, what the program
         // is stopped on (while it is)
-        let running = ring && stage == Stage::Running && lent_to_app && !active && !failed;
+        let running = stage == Stage::Running && lent_to_app && !active && !failed;
+        let update_message = relax_compiler::reload::host::update_message();
         let alert = data
             .parked
             .as_ref()
             .map(|p| if p.stale { RingAlert::Stale } else { RingAlert::Panic })
             .or_else(|| rebuild_failed().then_some(RingAlert::RebuildFailed))
-            .or_else(|| (!relax_compiler::reload::restart_pending().is_empty()).then_some(RingAlert::UpdateReady));
-        if running && host.badges() {
-            let want = watch.look(host.dump_ms()).filter(|_| data.parked.is_none());
+            .or_else(|| (update_message.is_some() || !relax_compiler::reload::restart_pending().is_empty()).then_some(RingAlert::UpdateReady))
+            .or_else(|| patch_notice.is_some().then_some(RingAlert::PatchFailed));
+        let ring_detail = match alert {
+            Some(RingAlert::UpdateReady) => update_message.as_deref(),
+            Some(RingAlert::PatchFailed) => patch_notice.as_deref(),
+            _ => None,
+        };
+        // the dot's tooltip: what it means and what a click on it does (only while it shows)
+        let ring_tip = (running && ring && alert.is_some()).then(|| ring_tip(alert, &data, &diagnostics, update_message.as_deref())).flatten();
+        // The existing wait hook is the only idle check. No card work (queue sampling,
+        // layout or drawing) until it is armed. An app present (or an episode gap without
+        // a wait) ends the episode, and with it the card.
+        let can_wait = running && layers && !update_ready && patch_notice.is_none() && !action_failed
+            && document_errors.is_empty() && !matches!(alert, Some(RingAlert::RebuildFailed | RingAlert::UpdateReady));
+        // ui_blocked_ns is the episode's: a load's thousands of short waits count as one wait
+        // until the UI thread has been free for an episode gap (it drew a frame), so the card
+        // holds through the gaps between them instead of flickering
+        let waiting = can_wait && UI_WAIT_ARMED.load(Ordering::Acquire)
+            && relax_compiler::postframe::ui_blocked_ns() > WAIT_CARD_AFTER.as_nanos() as u64;
+        let ring_work = if (running && ring && host.badges()) || waiting {
+            watch.look(host.dump_ms()).filter(|_| data.parked.is_none())
+        } else {
+            None
+        };
+        if waiting {
+            want = ring_work.map(LayerWant::Updating);
+        }
+        if can_wait {
+            if let Some(rebuild) = wait_preview {
+                let elapsed = wait_preview_at.get_or_insert_with(Instant::now).elapsed();
+                if elapsed >= WAIT_CARD_AFTER && elapsed < Duration::from_millis(3500) {
+                    want = Some(LayerWant::Updating(RingWant {
+                        done: 1769, pending: 7543, o2: 3071, o3: 4472,
+                        lazy: true, block: true, rate: 44.0, busy: elapsed, rebuild,
+                        ..Default::default()
+                    }));
+                } else if elapsed < WAIT_CARD_AFTER {
+                    wake_in = Some(WAIT_CARD_AFTER - elapsed);
+                }
+            }
+            if let Some(wait) = watch.block_wake() {
+                wake_in = Some(wake_in.map_or(wait, |w: Duration| w.min(wait)));
+            }
+        }
+        host.layer(want, app_frames);
+        if running && ring && host.badges() {
+            let want = ring_work;
             if inspect_open {
-                let summary = format!("JIT · {}", relax_boot::ring_summary(want, None));
+                let summary = ring_detail.map(str::to_owned)
+                    .unwrap_or_else(|| format!("JIT · {}", relax_boot::ring_summary(want, alert)));
                 if data.domain != summary && data.parked.is_none() && data.diagnostics.is_empty() {
                     data.domain = summary;
                     dirty = true;
                 }
             }
-            let shown = host.ring(want, alert);
+            let shown = host.ring(want, alert, ring_tip.as_deref());
             for wait in [shown, watch.block_wake(), Some(RING_LOOK)].into_iter().flatten() {
                 wake_in = Some(wake_in.map_or(wait, |w: Duration| w.min(wait)));
             }
-        } else if let Some(wait) = host.ring(None, None) {
+        } else if let Some(wait) = host.ring(None, None, None) {
             // a ring fading out
             wake_in = Some(wake_in.map_or(wait, |w: Duration| w.min(wait)));
         }
@@ -1511,8 +1687,8 @@ fn pump(
             host.select(selected);
         }
         if dirty {
-            data.can_retry = restartable && (initial_failed || (failed && domain != 0));
-            data.can_restart = restartable && domain != 0 && !stopping;
+            data.can_retry = !update_ready && (initial_failed || (failed && domain != 0));
+            data.can_restart = update_ready || (domain != 0 && !stopping);
             host.update(data.clone());
             dirty = false;
         }
@@ -1571,8 +1747,30 @@ fn pump(
         let mut close = false;
         for event in host.events() {
             let action = match event {
-                BootEvent::RestartAsked => {
-                    enqueue(&mut work_pending, Work::Relaunch);
+                // a click on the ring's dot acts on what it shows
+                BootEvent::RingPressed => {
+                    match alert {
+                        // the restart a waiting change asks for (the paused view's Restart):
+                        // with the app's state where it restarts with it, never without the click
+                        Some(RingAlert::UpdateReady) => enqueue(&mut work_pending, Work::Relaunch),
+                        // the inspect view, its first error selected
+                        Some(RingAlert::RebuildFailed | RingAlert::PatchFailed) => {
+                            inspect_open = true;
+                            overlay_dismissed = false;
+                            let first = data.diagnostics.iter().position(|d| d.severity == relax_compiler::diag::Severity::Error);
+                            if let Some(index) = first {
+                                selected = index;
+                                host.select(selected);
+                            }
+                            dirty = true;
+                        }
+                        // the paused view
+                        Some(RingAlert::Stale | RingAlert::Panic) => {
+                            overlay_dismissed = false;
+                            dirty = true;
+                        }
+                        None => {}
+                    }
                     None
                 }
                 BootEvent::DocumentErrors(errors) => {
@@ -1672,6 +1870,9 @@ fn pump(
             };
             // Both input paths use these checks and the existing action worker.
             match action {
+                Some(Action::Restart) if update_ready => {
+                    enqueue(&mut work_pending, Work::Relaunch);
+                }
                 Some(Action::Restart) if data.can_retry || data.can_restart => match retry() {
                     Ok(()) => failed = false,
                     Err(error) => post(Update::Message(error)),
@@ -1817,7 +2018,7 @@ fn pump(
     // The HAL runs the app's stop on a thread of its own (Hal::run_host_calls) and nobody waited
     // for it: the process exited while the app's threads still ran JIT code and drew, its heap
     // was being torn down and its HAL session freed (crashes at every quit). The run ends after
-    // the stop: the app quit (or was given up as leaked), its threads joined, its heap gone.
+    // the stop: the app quit, its registered threads and TLS ended, its heap gone.
     // Waited for here, while the main loop still serves the window system.
     if domain != 0 {
         quit_trace("waiting for the app's stop");

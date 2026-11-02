@@ -1,0 +1,15 @@
+# CI (devhub ci): [ci] is hand-written settings; the other sections are proofs devhub writes.
+
+[app.linux]
+capture = ""
+date = "2026-11-02"
+digest = "5bd4907df96e4c2a5ebe995c7cb3049d7d05ed60c691a9118c20e427275efe3c"
+main = "f74166da6dfdb67f974ba0643cae2eab1c598535"
+work = "887855c1f9abe2cff0add968d8cc4fa6c79fc716"
+
+[app.windows]
+capture = ""
+date = "2026-11-02"
+digest = "43bda71e4985a7c487dd8f316f3f0c5eef80c9d42051362a69ebbd7461f00d2e"
+main = "397b658a8bf5cfbb05644da6c00591325a079101"
+work = "628527fcd4f9b89ec0203bce6b2266b7d8e8fe55"

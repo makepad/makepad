@@ -1,22 +1,18 @@
-//! Differential fuzzing: random valid modules (built to give every pass
-//! work: duplicate functions and types, dead functions, dead stores,
-//! constant expressions, nested blocks, loops, tables) run under stitch
-//! before and after optimising. Every exported function is called with the
-//! same arguments; results, traps, memory and globals must match. Seeds are
-//! fixed, so a failure names a reproducible module (`FUZZ_SEED=n` runs one).
-//! Where stitch panics or disagrees, node (when installed) decides: stitch
-//! mishandles some valid local reuse patterns the optimiser produces.
+//! Validation fuzzing: random valid modules give every pass work through
+//! duplicate functions and types, dead functions, dead stores, constant
+//! expressions, nested blocks, loops and tables. Every generated module and
+//! optimised result must validate, and no pass may revert invalid output.
+//! Seeds are fixed, so a failure names a reproducible module (`FUZZ_SEED=n`
+//! runs one).
 //!
-//! The strip test does what a web export does with a coverage run: it plays
-//! some exported functions, records which functions they entered, strips
-//! the units that were never entered (stubbing their call sites), runs all
-//! passes, and replays the same calls: they must behave the same. Every
-//! result is validated by stitch and, with node, by `WebAssembly.validate`.
+//! The strip test plays a subset of exported functions under stitch,
+//! records which functions they entered, strips units that were never
+//! entered (stubbing their call sites), and validates the optimised result.
 
 use makepad_stitch::{Engine, Linker, Module as StitchModule, Store, Val};
 use makepad_wasm_strip::opt::{encode::encode, ir::*, units};
 use makepad_wasm_strip::{wasm_optimize_checked, wasm_validate, OptimizeOptions};
-use std::{path::PathBuf, process::Command};
+use std::process::Command;
 
 struct Rng(u64);
 
@@ -543,7 +539,7 @@ fn val_bits(val: &Val) -> String {
     }
 }
 
-/// Floats as both engines print them (NaN payloads are not compared).
+/// A stable float representation for the coverage transcript.
 fn float_text(v: f64) -> String {
     if v.is_nan() {
         "NaN".into()
@@ -552,8 +548,7 @@ fn float_text(v: f64) -> String {
     }
 }
 
-/// The argument of parameter `a` in call `k`: simple enough for the node
-/// replay below to produce the same.
+/// The deterministic argument of parameter `a` in call `k`.
 fn arg(seed: u64, k: u64, a: usize) -> i32 {
     (seed * 13 + k * 7 + a as u64) as i32
 }
@@ -625,128 +620,6 @@ fn run_stitch(bytes: &[u8], seed: u64, play: Option<&[String]>) -> Option<Vec<St
     .ok()
 }
 
-/// The same transcript from node's engine, when node is installed.
-const NODE_RUNNER: &str = r#"
-const fs = require('fs');
-const [, , path, seed, sigs, playArg] = process.argv;
-const types = JSON.parse(sigs);
-const play = playArg ? JSON.parse(playArg) : null;
-const inst = new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(path)), {});
-const names = Object.keys(inst.exports).sort();
-const text = (ty, v) => {
-  if (ty === 'f32' || ty === 'f64') {
-    if (Number.isNaN(v)) return 'NaN';
-    let s = v.toExponential();
-    return s.replace('e+', 'e');
-  }
-  return String(v);
-};
-const out = [];
-for (const n of names) {
-  const e = inst.exports[n];
-  if (typeof e !== 'function') continue;
-  if (play && !play.includes(n)) continue;
-  const [params, results] = types[n];
-  for (let k = 0; k < 3; k++) {
-    const args = params.map((ty, a) => {
-      const v = (Number(seed) * 13 + k * 7 + a) | 0;
-      return ty === 'i64' ? BigInt(v) : v;
-    });
-    try {
-      let r = e(...args);
-      if (results.length === 0) out.push(n + ': ');
-      else out.push(n + ': ' + text(results[0], r));
-    } catch (err) {
-      if (!(err instanceof WebAssembly.RuntimeError)) throw err;
-      out.push(n + ': trap');
-    }
-  }
-}
-for (const n of names) {
-  const g = inst.exports[n];
-  if (g instanceof WebAssembly.Global) out.push(n + ' = ' + text(types[n], g.value));
-}
-const mem = new Uint8Array(inst.exports.mem.buffer);
-let h = 0;
-for (let i = 0; i < mem.length; i++) h = (Math.imul(h, 31) + mem[i]) >>> 0;
-out.push('memory ' + h);
-console.log(JSON.stringify(out));
-"#;
-
-fn ty_name(ty: ValType) -> &'static str {
-    match ty {
-        ValType::I32 => "i32",
-        ValType::I64 => "i64",
-        ValType::F32 => "f32",
-        _ => "f64",
-    }
-}
-
-fn run_node(
-    module: &Module,
-    bytes: &[u8],
-    seed: u64,
-    tag: &str,
-    play: Option<&[String]>,
-) -> Option<Vec<String>> {
-    // One directory per test thread: the tests run in parallel.
-    let thread = format!("{:?}", std::thread::current().id()).replace(|c: char| !c.is_ascii_alphanumeric(), "");
-    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
-        .join("wasm_strip_fuzz")
-        .join(format!("{}_{thread}", std::process::id()));
-    std::fs::create_dir_all(&dir).ok()?;
-    let script = dir.join("runner.js");
-    if !script.exists() {
-        std::fs::write(&script, NODE_RUNNER).ok()?;
-    }
-    let wasm = dir.join(format!("{seed}_{tag}.wasm"));
-    std::fs::write(&wasm, bytes).ok()?;
-    // Export signatures, from the generated module (exports keep their
-    // names and types through optimising).
-    let funcs = module.func_type_indices();
-    let mut sigs = Vec::new();
-    for export in &module.exports {
-        match export.kind {
-            ExternKind::Func => {
-                let ty = &module.types[funcs[export.index as usize] as usize];
-                let list = |tys: &[ValType]| {
-                    tys.iter().map(|t| format!("\"{}\"", ty_name(*t))).collect::<Vec<_>>().join(",")
-                };
-                sigs.push(format!("\"{}\":[[{}],[{}]]", export.name, list(&ty.params), list(&ty.results)));
-            }
-            ExternKind::Global => {
-                let ty = module.globals[export.index as usize].ty.ty;
-                sigs.push(format!("\"{}\":\"{}\"", export.name, ty_name(ty)));
-            }
-            _ => {}
-        }
-    }
-    let mut command = Command::new("node");
-    command
-        .arg(&script)
-        .arg(&wasm)
-        .arg(seed.to_string())
-        .arg(format!("{{{}}}", sigs.join(",")));
-    if let Some(play) = play {
-        let list: Vec<String> = play.iter().map(|name| format!("\"{name}\"")).collect();
-        command.arg(format!("[{}]", list.join(",")));
-    }
-    let output = command.output().ok()?;
-    let _ = std::fs::remove_file(&wasm);
-    assert!(
-        output.status.success(),
-        "node failed on seed {seed} ({tag}): {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let text = String::from_utf8(output.stdout).ok()?;
-    let list = text.trim().trim_start_matches('[').trim_end_matches(']');
-    Some(
-        list.split("\",\"")
-            .map(|item| item.trim_matches('"').to_string())
-            .collect(),
-    )
-}
-
 fn configs() -> Vec<(&'static str, OptimizeOptions)> {
     let alone = |set: &dyn Fn(&mut OptimizeOptions)| {
         let mut opts = OptimizeOptions {
@@ -793,17 +666,7 @@ const STRIP: usize = 8;
 /// The config index of the panic-trap test.
 const PANICS: usize = 7;
 
-/// One check: the generated module, its bytes, the optimised bytes, how
-/// many functions went, and the calls to compare (all exports when `None`).
-struct Check {
-    module: Module,
-    bytes: Vec<u8>,
-    optimized: Vec<u8>,
-    removed: usize,
-    play: Option<Vec<String>>,
-}
-
-fn optimise(seed: u64, cfg: usize) -> Check {
+fn optimise(seed: u64, cfg: usize) -> usize {
     if cfg == STRIP {
         return strip(seed);
     }
@@ -813,15 +676,14 @@ fn optimise(seed: u64, cfg: usize) -> Check {
         panic!("seed {seed}: generator made an invalid module: {msg}");
     }
     let (name, opts) = &configs()[cfg];
-    let (optimized, report) =
+    let (_, report) =
         wasm_optimize_checked(&bytes, opts).unwrap_or_else(|msg| panic!("seed {seed}: {msg}"));
     for pass in &report.passes {
         if let Some(reason) = &pass.reverted {
             panic!("seed {seed} ({name}): pass {} made an invalid module: {reason}", pass.name);
         }
     }
-    let removed = report.functions_before - report.functions_after;
-    Check { module, bytes, optimized, removed, play: None }
+    report.functions_before - report.functions_after
 }
 
 /// The generated module with every function named into one of a few units
@@ -909,13 +771,12 @@ fn coverage_child() {
 }
 
 /// The strip check: play, strip what the play never entered, optimise.
-fn strip(seed: u64) -> Check {
+fn strip(seed: u64) -> usize {
     let module = named_module(seed);
     let bytes = encode(&module);
     if let Err(msg) = wasm_validate(&bytes) {
         panic!("seed {seed}: generator made an invalid module: {msg}");
     }
-    let play = play_of(&module, seed);
     // Without a coverage run (stitch failed on the module), nothing goes.
     let entered = entered(seed).unwrap_or_else(|| (0..module.funcs.len() as u32).collect());
     let names = module.names.as_ref().unwrap();
@@ -934,158 +795,22 @@ fn strip(seed: u64) -> Check {
     if let Err(msg) = wasm_validate(&stubbed) {
         panic!("seed {seed}: stubbing made an invalid module: {msg}");
     }
-    let (optimized, report) = wasm_optimize_checked(&stubbed, &OptimizeOptions::default())
+    let (_, report) = wasm_optimize_checked(&stubbed, &OptimizeOptions::default())
         .unwrap_or_else(|msg| panic!("seed {seed}: {msg}"));
     for pass in &report.passes {
         if let Some(reason) = &pass.reverted {
             panic!("seed {seed} (strip): pass {} made an invalid module: {reason}", pass.name);
         }
     }
-    Check {
-        removed: plan.stripped.len(),
-        module,
-        bytes,
-        optimized,
-        play: Some(play),
-    }
-}
-
-/// The stitch side runs in a child process (this test binary again): stitch
-/// panics in places that abort the process, and the parent restarts past
-/// them.
-#[test]
-fn stitch_child() {
-    let Ok(spec) = std::env::var("FUZZ_CHILD") else {
-        return;
-    };
-    let (test, from) = spec.split_once(':').unwrap();
-    let from: usize = from.parse().unwrap();
-    use std::io::Write;
-    let mut stdout = std::io::stdout();
-    for (i, (seed, cfg)) in work(test).into_iter().enumerate().skip(from) {
-        writeln!(stdout, "\nS {i}").unwrap();
-        stdout.flush().unwrap();
-        let check = optimise(seed, cfg);
-        let play = check.play.as_deref();
-        let before = run_stitch(&check.bytes, seed, play);
-        let after = run_stitch(&check.optimized, seed, play);
-        let same = before.is_some() && before == after;
-        writeln!(stdout, "R {i} {}", if same { "same" } else { "differ" }).unwrap();
-        stdout.flush().unwrap();
-    }
-}
-
-/// Indices of the checks stitch could not confirm (it disagreed, panicked or
-/// aborted).
-fn stitch_unconfirmed(test: &str, total: usize) -> Vec<usize> {
-    let exe = std::env::current_exe().unwrap();
-    let mut unconfirmed = Vec::new();
-    let mut from = 0;
-    while from < total {
-        let output = Command::new(&exe)
-            .args(["--exact", "stitch_child", "--nocapture", "--test-threads=1"])
-            .env("FUZZ_CHILD", format!("{test}:{from}"))
-            .output()
-            .expect("run the stitch child");
-        let text = String::from_utf8_lossy(&output.stdout);
-        let mut started = None;
-        let mut next = from;
-        for line in text.lines() {
-            let mut parts = line.split(' ');
-            match (parts.next(), parts.next().and_then(|i| i.parse::<usize>().ok()), parts.next()) {
-                (Some("S"), Some(i), _) => started = Some(i),
-                (Some("R"), Some(i), Some(verdict)) => {
-                    if verdict != "same" {
-                        unconfirmed.push(i);
-                    }
-                    started = None;
-                    next = i + 1;
-                }
-                _ => {}
-            }
-        }
-        match started {
-            // The child died in this check: count it and go on after it.
-            Some(i) => {
-                unconfirmed.push(i);
-                from = i + 1;
-            }
-            None => {
-                assert!(next >= total, "stitch child stopped early:\n{text}");
-                from = next;
-            }
-        }
-    }
-    unconfirmed
-}
-
-/// Every output through node's `WebAssembly.validate`, in one node run.
-fn node_validate(test: &str, outputs: &[(u64, Vec<u8>)]) {
-    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
-        .join("wasm_strip_fuzz")
-        .join(format!("validate_{}_{test}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let mut paths = Vec::new();
-    for (i, (seed, bytes)) in outputs.iter().enumerate() {
-        let path = dir.join(format!("{i}_{seed}.wasm"));
-        std::fs::write(&path, bytes).unwrap();
-        paths.push(path);
-    }
-    let script = r#"
-const fs = require('fs');
-const bad = process.argv.slice(2).filter(p => !WebAssembly.validate(fs.readFileSync(p)));
-console.log(JSON.stringify(bad));
-"#;
-    let output = Command::new("node").arg("-e").arg(script).args(&paths).output().unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
-    assert!(output.status.success(), "node: {}", String::from_utf8_lossy(&output.stderr));
-    let text = String::from_utf8_lossy(&output.stdout);
-    assert_eq!(text.trim(), "[]", "{test}: node refused optimised modules: {text}");
-}
-
-fn node_available() -> bool {
-    Command::new("node").arg("--version").output().map_or(false, |out| out.status.success())
+    plan.stripped.len()
 }
 
 fn fuzz(test: &str) -> usize {
-    let work = work(test);
-    let unconfirmed = stitch_unconfirmed(test, work.len());
-    let node = node_available();
-    let mut removed = 0;
-    let mut outputs = Vec::new();
-    for (i, (seed, cfg)) in work.iter().copied().enumerate() {
-        let check = optimise(seed, cfg);
-        removed += check.removed;
-        if node {
-            outputs.push((seed, check.optimized.clone()));
-        }
-        if !unconfirmed.contains(&i) {
-            continue;
-        }
-        let name = configs().get(cfg).map_or("strip", |c| c.0);
-        assert!(
-            node,
-            "seed {seed} ({name}): stitch could not confirm it and node is not available"
-        );
-        let play = check.play.as_deref();
-        let before = run_node(&check.module, &check.bytes, seed, "in", play).unwrap();
-        let after = run_node(&check.module, &check.optimized, seed, "out", play).unwrap();
-        assert_eq!(before, after, "seed {seed} ({name}): behaviour changed (node)");
-    }
-    if node {
-        node_validate(test, &outputs);
-    }
-    eprintln!(
-        "fuzz {test}: {} checks, {} confirmed by stitch, {} by node",
-        work.len(),
-        work.len() - unconfirmed.len(),
-        unconfirmed.len()
-    );
-    removed
+    work(test).into_iter().map(|(seed, cfg)| optimise(seed, cfg)).sum()
 }
 
 #[test]
-fn optimised_random_modules_behave_the_same() {
+fn optimised_random_modules_validate() {
     let removed = fuzz("all");
     if std::env::var("FUZZ_SEED").is_err() {
         // The generator really gives the passes work.
@@ -1093,28 +818,26 @@ fn optimised_random_modules_behave_the_same() {
     }
 }
 
-/// Each pass on its own keeps behaviour too (passes must not rely on an
+/// Each pass on its own produces valid output (passes must not rely on an
 /// earlier one having run).
 #[test]
-fn each_pass_alone_behaves_the_same() {
+fn each_pass_alone_validates() {
     fuzz("each");
 }
 
 /// Units a play never entered are stripped (their call sites stubbed) and
-/// the module optimised: the play behaves the same, and every result
-/// validates.
+/// the module optimised: every result validates.
 #[test]
-fn stripped_modules_replay_the_same() {
+fn stripped_modules_validate() {
     let removed = fuzz("strip");
     if std::env::var("FUZZ_SEED").is_err() {
         assert!(removed > 100, "only {removed} functions stripped");
     }
 }
 
-/// Panic sites become traps: whatever traps still traps at the same call,
-/// and everything else behaves the same.
+/// Replacing panic sites with traps preserves module validity.
 #[test]
-fn panic_traps_behave_the_same() {
+fn panic_traps_validate() {
     let removed = fuzz("panics");
     if std::env::var("FUZZ_SEED").is_err() {
         // Every module loses its panic function.

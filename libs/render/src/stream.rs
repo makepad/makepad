@@ -619,35 +619,6 @@ mod tests {
         assert_eq!(Dither::FULL.encode(), 0.0);
     }
 
-    /// How far from the origin an f32 world stays sub-pixel: a point 2 m in
-    /// front of a camera at distance `x`, transformed world -> clip in f32
-    /// (what the GPU does) vs f64, as screen pixels at 1920 px / 60 deg.
-    /// A camera moving 1 mm per frame is jitter only when this error is a
-    /// visible fraction of a pixel.
-    #[test]
-    fn f32_world_precision_budget() {
-        let err_px = |x: f64| -> f64 {
-            let mut worst: f64 = 0.0;
-            for k in 0..64 {
-                let o = x + k as f64 * 0.013;
-                let eye = [o, 1.7, o * 0.5];
-                let p = [o + 2.0 * 0.6, 1.2, o * 0.5 - 2.0 * 0.8];
-                // f64 truth, relative.
-                let rel64 = [p[0] - eye[0], p[1] - eye[1], p[2] - eye[2]];
-                // f32 path: world position and view translation each rounded.
-                let rel32 = [(p[0] as f32 - eye[0] as f32) as f64, (p[1] as f32 - eye[1] as f32) as f64, (p[2] as f32 - eye[2] as f32) as f64];
-                let d = (rel64[0] * rel64[0] + rel64[1] * rel64[1] + rel64[2] * rel64[2]).sqrt();
-                let e = ((rel32[0] - rel64[0]).powi(2) + (rel32[1] - rel64[1]).powi(2) + (rel32[2] - rel64[2]).powi(2)).sqrt();
-                let px_per_rad = 1920.0 / (60f64.to_radians());
-                worst = worst.max(e / d * px_per_rad);
-            }
-            worst
-        };
-        let (a, b, c) = (err_px(1500.0), err_px(5000.0), err_px(10000.0));
-        eprintln!("f32 screen error for a subject 2 m away: 1.5 km {a:.3} px, 5 km {b:.3} px, 10 km {c:.3} px");
-        assert!(a < 0.2, "a 3 km city centred on the origin must be sub-pixel: {a}");
-    }
-
     fn look(eye: Vec3f, target: Vec3f) -> Mat4f {
         let view = Mat4f::look_at(eye, target, vec3f(0.0, 1.0, 0.0));
         let proj = Mat4f::perspective(60.0, 16.0 / 9.0, 0.5, 5000.0);

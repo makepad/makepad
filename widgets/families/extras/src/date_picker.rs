@@ -1403,25 +1403,4 @@ mod tests {
             Some((day(2026, 9, 7), day(2026, 9, 7)))
         );
     }
-
-    #[test]
-    fn a_range_is_a_template_of_the_one_picker() {
-        let source = include_str!("date_picker.rs");
-        // Assembled at run time so this test's own text cannot satisfy them.
-        let preset = format!("mod.widgets.{} = mod.widgets.{}{{", "DateRangePicker", "DatePicker");
-        assert!(source.contains(&preset), "the range form derives from the picker");
-        let own_type = format!("{}::register_widget", "DateRangePicker");
-        assert!(!source.contains(&own_type), "and has no Rust type of its own");
-        // The flag is what the template is for, and its default is what
-        // keeps every picker written before it a picker of one date.
-        let on = format!("{}: true", "range");
-        let off = format!("{}: false", "range");
-        let body = &source[source.find(&preset).unwrap()..];
-        assert!(body.contains(&on), "the range template sets the flag");
-        assert_eq!(source.matches(&off).count(), 1, "and the picker declares it off");
-        // A second type default on one Rust type silently replaces the
-        // first, and the one that would win here is the range.
-        let default = format!("set_type_default() do mod.widgets.{}", "DatePickerBase");
-        assert_eq!(source.matches(&default).count(), 1, "one type default per widget");
-    }
 }

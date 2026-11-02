@@ -3,13 +3,31 @@
 //! A lease is a share of a node (or all of it) for one lane and one kind of work. The master
 //! schedules ([`sched`], [`master`]); the node starts, watches and cleans up what runs under a
 //! lease ([`exec`]), measures what it has ([`caps`]) and guards its disk ([`disk`]). Leases end
-//! on release or when their holder stops beating, never for running long.
+//! on release or when their holder stops beating, never for running long. Native lane leases
+//! use bounded per-lane trees; CI, gates and user boxes share the work tree per pin.
+//! Overlay JITs mount pinned stores and lane edits without moving a tree.
+//! Dev stores, overlays, run home, build tree and target live in `<work>/dev`, separate
+//! from deployment. [`jitstore`] owns dev binaries and coalesces builds of pinned inputs.
+//! Timed leases exclude both. Concurrent leases share cores, RAM, GPUs and disk headroom;
+//! small jobs prefer hot boxes, with measured class durations correcting their placement.
 
+pub mod loaders;
+pub mod jitstore;
+#[cfg(feature = "checkout")]
+pub mod overlay_compare;
+#[cfg(feature = "checkout")]
+pub mod overlay_selftest;
+#[cfg(feature = "checkout")]
+pub mod shadow;
+#[cfg(feature = "checkout")]
+pub mod relaxgit;
 pub mod caps;
 pub mod client;
+pub mod jit;
 pub mod disk;
 pub mod exec;
 pub mod master;
+pub mod prof;
 pub mod sched;
 pub mod ship;
 #[cfg(feature = "checkout")]
@@ -30,9 +48,10 @@ pub enum Kind {
     Gpu,
     Inspect,
     Gate,
+    Ci,
 }
 
-pub const KINDS: [Kind; 8] = [Kind::Build, Kind::Test, Kind::Screen, Kind::Long, Kind::Timed, Kind::Gpu, Kind::Inspect, Kind::Gate];
+pub const KINDS: [Kind; 9] = [Kind::Build, Kind::Test, Kind::Screen, Kind::Long, Kind::Timed, Kind::Gpu, Kind::Inspect, Kind::Gate, Kind::Ci];
 
 impl Kind {
     pub fn as_str(self) -> &'static str {
@@ -45,6 +64,7 @@ impl Kind {
             Kind::Gpu => "gpu",
             Kind::Inspect => "inspect",
             Kind::Gate => "gate",
+            Kind::Ci => "ci",
         }
     }
 
@@ -60,12 +80,59 @@ impl Kind {
 
     /// Shares the node with other leases, counted against its slots.
     pub fn shared(self) -> bool {
-        matches!(self, Kind::Build | Kind::Test | Kind::Screen | Kind::Long | Kind::Gate)
+        matches!(self, Kind::Build | Kind::Test | Kind::Screen | Kind::Long | Kind::Gate | Kind::Ci)
+    }
+
+    /// Overlays contend only with timed work; ordinary tree writes and CI use separate slots.
+    pub fn conflicts(self, src: Src, other: Kind, other_src: Src) -> bool {
+        if src == Src::Overlay || other_src == Src::Overlay { return self == Kind::Timed || other == Kind::Timed; }
+        self.writes() && other.writes() && (self == Kind::Timed || other == Kind::Timed || (self == Kind::Ci) == (other == Kind::Ci))
     }
 }
 
-/// What a lease needs of a node (it gets the whole node: one box per lease): cores, RAM and disk
-/// in GB, GPUs. A node that has less never takes it.
+/// The source layer a lease runs from.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Src { #[default] Tree, Overlay }
+
+impl Src {
+    pub fn as_str(self) -> &'static str { match self { Self::Tree => "tree", Self::Overlay => "overlay" } }
+    pub fn parse(s: &str) -> Option<Self> { match s { "tree" => Some(Self::Tree), "overlay" => Some(Self::Overlay), _ => None } }
+    /// Lane JIT commands default to overlays; CI gate overlays are selected separately and keyed per pin.
+    pub fn for_run(kind: Kind, argv: &[String], tree: bool) -> Self {
+        if !tree && matches!(kind, Kind::Test | Kind::Screen | Kind::Gpu | Kind::Long | Kind::Build) && loaders::cargo_run_args(argv).is_some() { Self::Overlay } else { Self::Tree }
+    }
+}
+
+/// Interactive work goes ahead of background requests without stopping running work.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Priority { #[default] Background, Interactive }
+
+impl Priority {
+    pub fn as_str(self) -> &'static str { match self { Self::Background => "background", Self::Interactive => "interactive" } }
+    pub fn parse(s: &str) -> Option<Self> { match s { "background" => Some(Self::Background), "interactive" => Some(Self::Interactive), _ => None } }
+}
+
+/// Placement class from measured walls, estimates or kind defaults.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum CostClass { Small, Medium, Large }
+
+impl CostClass {
+    pub fn as_str(self) -> &'static str { match self { Self::Small => "small", Self::Medium => "medium", Self::Large => "large" } }
+    pub fn parse(s: &str) -> Option<Self> { match s { "small" => Some(Self::Small), "medium" => Some(Self::Medium), "large" => Some(Self::Large), _ => None } }
+    pub fn default_for(kind: Kind) -> Self {
+        match kind { Kind::Test | Kind::Screen | Kind::Gpu | Kind::Inspect => Self::Small, Kind::Ci => Self::Medium, _ => Self::Large }
+    }
+    pub fn from_wall(ms: u64, cores: f64) -> Self {
+        if ms < 90_000 && cores <= 4.0 { Self::Small } else if ms < 1_200_000 { Self::Medium } else { Self::Large }
+    }
+}
+
+/// Default measurement class: kind and three command words, with paths stripped.
+pub fn run_class(kind: Kind, argv: &[String]) -> String {
+    std::iter::once(kind.as_str().to_string()).chain(argv.iter().take(3).map(|s| s.rsplit(['/', '\\']).next().unwrap_or(s).to_string())).collect::<Vec<_>>().join(" ")
+}
+
+/// Reserved cores, RAM and disk in GB, and GPUs. Concurrent leases sum these costs.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Cost {
     pub cores: f64,
@@ -82,7 +149,7 @@ impl Cost {
             Kind::Build => c(8.0, 12.0, if warm { 2.0 } else { 20.0 }, 0),
             Kind::Gate => c(8.0, 12.0, if warm { 2.0 } else { 20.0 }, 0),
             Kind::Test => c(4.0, 6.0, 2.0, 0),
-            Kind::Screen => c(2.0, 4.0, 1.0, 0),
+            Kind::Screen | Kind::Ci => c(2.0, 4.0, 1.0, 0),
             Kind::Long => c(4.0, 8.0, 5.0, 0),
             Kind::Gpu => c(2.0, 4.0, 1.0, 1),
             Kind::Inspect => c(0.0, 0.0, 0.0, 0),
@@ -95,6 +162,9 @@ impl Cost {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Role {
     Pool,
+    /// long-cycle pool box: native tree leases (land gates, native builds) go here, CI never
+    Long,
+    Hot,
     Suite,
     Bench,
     UserWm,
@@ -105,6 +175,8 @@ impl Role {
     pub fn as_str(self) -> &'static str {
         match self {
             Role::Pool => "pool",
+            Role::Long => "long",
+            Role::Hot => "hot",
             Role::Suite => "suite",
             Role::Bench => "bench",
             Role::UserWm => "user-wm",
@@ -113,13 +185,18 @@ impl Role {
     }
 
     pub fn parse(s: &str) -> Option<Role> {
-        [Role::Pool, Role::Suite, Role::Bench, Role::UserWm, Role::Device].into_iter().find(|r| r.as_str() == s)
+        [Role::Pool, Role::Long, Role::Hot, Role::Suite, Role::Bench, Role::UserWm, Role::Device].into_iter().find(|r| r.as_str() == s)
     }
 
-    /// The user's machines: dev off until the user switches the node on.
+    /// User machines take named jobs only, with no CI slots.
     pub fn users(self) -> bool {
         matches!(self, Role::UserWm | Role::Device)
     }
+}
+
+/// Pinned lane work gets its own native tree on work boxes; CI and landings keep the shared tree.
+pub fn native_lane(lane: &str, kind: Kind, role: Role) -> bool {
+    kind.writes() && !matches!(kind, Kind::Ci | Kind::Gate) && !matches!(lane, sched::CI_LANE | sched::LANDING_LANE) && !role.users()
 }
 
 /// A node's capabilities and health, as its hub measures them (`caps` service).
@@ -159,15 +236,24 @@ pub struct Caps {
     /// A dev switch flip made on the node itself (its tray / task view), not yet taken by the
     /// master: the master adopts it (saves, pushes), and the push clears it here.
     pub dev_req: Option<bool>,
-    /// the commits the node's one tree holds (`<makepad sha>[,<commercial sha>]`, [`tree::Pin`];
+    /// the commits the node's work tree holds (`<makepad sha>[,<commercial sha>]`, [`tree::Pin`];
     /// empty: unknown): the scheduler prefers a node already there for a lease of those commits
     pub tree: String,
+    /// Lanes with native trees (and warm targets) on this box; the configured capacity.
+    pub native: Vec<String>,
+    pub native_trees: u32,
+    /// the deployment checkout's commits, in the same form as `tree`; empty: no deployment
+    pub deploy: String,
     /// the commit the node's hub was started from (empty: a hub from before it said so)
     pub hub_rev: String,
+    /// why this box cannot link a program (its toolchain probe); empty: it can
+    pub sick: String,
     /// the node's rustc (`1.97.1`; empty: not known)
     pub rustc: String,
     /// the master-node protocol the hub speaks ([`HUB_PROTO`]; 0: an older hub)
     pub hub_proto: u32,
+    /// Optional per-box dev JIT store report.
+    pub jit_store: Option<std::sync::Arc<jitstore::Snapshot>>,
     /// the services the node's WM supervises (`~/.makepad/wm/<name>.state`): name, start wall ms
     pub services: Vec<(String, u64)>,
     /// a person at the node, as its WM saw their input ([`UserSense`]); None: no WM of ours
@@ -221,9 +307,10 @@ impl UserSense {
 }
 
 /// The master-node protocol this build speaks: raised when the master starts sending a node word
-/// older hubs lack (ship-done, lease-owns, hub-restart: 1). A hub that reports an older one gets
-/// no leases until the self-update restarts it.
-pub const HUB_PROTO: u32 = 1;
+/// older hubs lack (2: overlay sources and base blobs; 3: per-lane native trees; 4: detachable
+/// live runs). Only requests needing a newer facility wait for its self-update; other leases
+/// keep using the hub.
+pub const HUB_PROTO: u32 = 4;
 
 impl Caps {
     pub fn role(&self) -> Role {
@@ -246,7 +333,7 @@ impl Caps {
             .collect();
         let slots: Vec<String> = self.slots.iter().map(|(k, n)| format!("\"{}\":{n}", k.as_str())).collect();
         format!(
-            "{{\"rustc\":{},\"node\":{},\"arch\":{},\"os\":{},\"cpu\":{},\"cores\":{},\"cpu_pct\":{},\"load1\":{:.2},\"ram_gb\":{:.1},\"ram_avail_gb\":{:.1},\"disk_free_gb\":{:.1},\"disk_total_gb\":{:.1},\"gpus\":[{}],\"display\":{},\"battery\":{},\"role\":\"{}\",\"spec\":{},\"slots\":{{{}}},\"disk_floor_gb\":{:.0},\"disk_warn_gb\":{:.0},\"timed\":{},\"apply\":{},\"desk_link\":{},\"dev_req\":{},\"tree\":{},\"hub_rev\":{},\"hub_proto\":{},\"services\":{{{}}},\"user\":{}}}",
+            "{{\"rustc\":{},\"node\":{},\"arch\":{},\"os\":{},\"cpu\":{},\"cores\":{},\"cpu_pct\":{},\"load1\":{:.2},\"ram_gb\":{:.1},\"ram_avail_gb\":{:.1},\"disk_free_gb\":{:.1},\"disk_total_gb\":{:.1},\"gpus\":[{}],\"display\":{},\"battery\":{},\"role\":\"{}\",\"spec\":{},\"slots\":{{{}}},\"disk_floor_gb\":{:.0},\"disk_warn_gb\":{:.0},\"timed\":{},\"apply\":{},\"desk_link\":{},\"dev_req\":{},\"tree\":{},\"deploy\":{},\"sick\":{},\"hub_rev\":{},\"hub_proto\":{}{},\"services\":{{{}}},\"user\":{}}}",
             json_str(&self.rustc),
             json_str(&self.node),
             json_str(&self.arch),
@@ -272,8 +359,11 @@ impl Caps {
             self.desk_link.as_ref().map_or("null".to_string(), |d| d.to_json()),
             match self.dev_req { Some(true) => "true", Some(false) => "false", None => "null" },
             json_str(&self.tree),
+            json_str(&self.deploy),
+            json_str(&self.sick),
             json_str(&self.hub_rev),
             self.hub_proto,
+            format!(",\"native\":[{}],\"native_trees\":{}{}", self.native.iter().map(|l| json_str(l)).collect::<Vec<_>>().join(","), self.native_trees, self.jit_store.as_ref().map_or(String::new(), |v| format!(",\"jit_store\":{}", v.to_json()))),
             self.services.iter().map(|(n, t)| format!("{}:{t}", json_str(n))).collect::<Vec<_>>().join(","),
             self.user.as_ref().map_or("null".to_string(), |u| u.to_json()),
         )
@@ -305,9 +395,14 @@ impl Caps {
             desk_link: v.get("desk_link").and_then(crate::embed::DeskLinkState::parse),
             dev_req: v.get("dev_req").and_then(|x| x.as_bool()),
             tree: s("tree"),
+            native: v.get("native").and_then(|v| v.as_arr()).unwrap_or(&[]).iter().filter_map(|v| v.as_str().map(str::to_string)).collect(),
+            native_trees: v.get("native_trees").and_then(num).map_or(caps::NATIVE_TREES, |n| n as u32),
+            deploy: s("deploy"),
             hub_rev: s("hub_rev"),
+            sick: s("sick"),
             rustc: s("rustc"),
             hub_proto: f("hub_proto") as u32,
+            jit_store: v.get("jit_store").filter(|v| !v.is_null()).map(|v| std::sync::Arc::new(jitstore::Snapshot::parse(v))),
             services: match v.get("services") {
                 Some(makepad_strict_json::Value::Obj(o)) => o.iter().filter_map(|(k, x)| num(x).map(|t| (k.clone(), t as u64))).collect(),
                 _ => Vec::new(),
@@ -500,9 +595,14 @@ mod tests {
             desk_link: Some(crate::embed::DeskLinkState { on: true, port: 8790, note: "listens on 192.0.2.85:8790".into() }),
             dev_req: Some(true),
             tree: format!("{},{}", "a".repeat(40), "c".repeat(40)),
+            native: vec!["lane-a".into()],
+            native_trees: caps::NATIVE_TREES,
+            deploy: format!("{},{}", "b".repeat(40), "d".repeat(40)),
             rustc: "1.97.1".into(),
             hub_rev: "b".repeat(40),
+            sick: String::new(),
             hub_proto: HUB_PROTO,
+            jit_store: None,
             services: vec![("ai-hub".into(), 1_700_000_000_000)],
             user: Some(UserSense { present: true, idle_ms: Some(42_000), what: "key from its device".into(), idle_min: 3 }),
         };

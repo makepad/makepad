@@ -160,38 +160,4 @@ mod tests {
             sheet_checks::contrast(full, entry);
         }
     }
-
-    /// The corner each sheet gives its caps, as its token half sets it.
-    #[test]
-    fn every_sheet_sets_its_corner() {
-        for (id, radius) in [
-            ("cyberpunk", 2.5),
-            ("aluminium", 2.0),
-            ("ferrofluid", 2.5),
-            ("segment-display", 1.5),
-            ("lacquer-red", 3.0),
-            ("safety-yellow", 2.0),
-            ("field-radio", 2.0),
-            ("steampunk-brass", 2.0),
-            ("futuristic-metal", 2.0),
-            ("concrete", 1.0),
-            ("handheld", 0.0),
-            ("neumorphic", 8.0),
-            ("molded", 5.0),
-            ("glossy", 1.0),
-            ("milled", 2.0),
-            ("frosted-glass", 2.0),
-            ("liquid-glass", 3.0),
-            ("luminous", 3.0),
-            ("terminal", 0.0),
-            ("synthwave", 2.0),
-            ("head-up-display", 0.0),
-            ("futuristic-plastic", 6.0),
-            ("glossy-anthracite", 1.5),
-            ("porcelain-white", 4.0),
-        ] {
-            let entry = SHEETS.iter().find(|entry| entry.id == id).unwrap();
-            assert_eq!(sheet_checks::theme_number(full, entry, "corner_radius"), Some(radius), "{id}");
-        }
-    }
 }

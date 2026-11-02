@@ -359,7 +359,7 @@ unsafe fn rebuild(up: *mut crate::jit::Unit, id: u32, edits: &[(Owner, Edit)], u
     let uninline = edits.iter().any(|e| matches!(e.1, Edit::Uninline));
     // the tier of the code under inspection: an inspect build keeps it (an O3 fn gets an O3
     // instrumented build) unless the agent asked for the lower tier (`tier=o1`)
-    let o3_under = under.is_some_and(|k| k.tier == crate::jit::tier::O3 || k.tier == crate::jit::tier::GUARDED || k.tier == crate::jit::tier::INSTRUMENTED_O3);
+    let o3_under = under.is_some_and(|k| k.tier == crate::jit::tier::O3 || k.tier == crate::jit::tier::INSTRUMENTED_O3);
     let baseline_under = under.is_some_and(|k| k.tier == crate::jit::tier::BASELINE);
     let low = LOW_TIER.try_with(|c| c.get()).unwrap_or(false);
     // an inliner at O1 / O3 keeps its tier: its RIR is built again without the instrumented fn

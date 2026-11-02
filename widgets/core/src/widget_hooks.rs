@@ -127,6 +127,9 @@ pub struct AiSlotRequests {
     pub open: Option<bool>,
     /// Lines to send as if typed, in order; taken by the overlay.
     pub say: Vec<String>,
+    /// The app shows a chat panel of its own: the slot makes no second chat, and `open`,
+    /// `say` and `confirm` are the app's to take.
+    pub docked: bool,
     /// Answers for the chat's parked cards, as if clicked: `run`, `always`
     /// (run, and allow that tool for the rest of the chat) or `cancel`.
     pub confirm: Vec<String>,

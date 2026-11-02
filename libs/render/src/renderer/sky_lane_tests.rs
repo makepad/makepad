@@ -1,59 +1,6 @@
 use super::*;
 use crate::model::tests::room_and_sky_glb;
 
-/// The Asset Store keeps the real E1M1 payload outside the source tree's
-/// normal test fixtures. When it is present, pin the whole parsed upload
-/// hand-off: the embedded SKY1 PNG must become the resident sky texture,
-/// not the renderer's black null texture. A clean checkout simply skips
-/// this real-asset diagnostic, like the kit tests in model.rs.
-#[test]
-fn real_e1m1_parsed_upload_keeps_the_embedded_sky1_pixels() {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
-        "../../local/asset-library/store/cas/objects/92/e2/\
-         92e29a55fc78fc51fa84022536634f01dad5af350f734b772ad168b0f005f264",
-    );
-    let Ok(glb) = std::fs::read(&path) else {
-        eprintln!("real E1M1 store payload absent — skipped");
-        return;
-    };
-    let model = StaticModel::parse_glb(&glb).expect("parse real E1M1");
-    let sky = model.sky.as_ref().expect("tagged E1M1 sky node");
-    assert_eq!(sky.texture.as_deref(), Some("sky1"));
-    assert_eq!(sky.images.len(), 1, "one embedded SKY1 image");
-    let decoded = ImageBuffer::from_png(&sky.images[0]).expect("decode embedded SKY1");
-    assert_eq!((decoded.width, decoded.height), (256, 128));
-    assert!(
-        decoded.data.iter().any(|pixel| pixel & 0x00ff_ffff != 0),
-        "SKY1 itself must not decode as black"
-    );
-    let expected = decoded.data;
-
-    let mut cx = Cx::new(Box::new(|_, _| {}));
-    let mut renderer = Renderer::default();
-    renderer
-        .load_model_parsed(&mut cx, "doom/e1m1", model, None, None)
-        .expect("upload parsed E1M1");
-    let loaded = renderer
-        .static_models
-        .iter()
-        .find(|(id, _)| id == "doom/e1m1")
-        .and_then(|(_, model)| model.sky.as_ref())
-        .expect("resident E1M1 sky");
-    assert_ne!(loaded.tex0.texture_id(), cx.null_texture.texture_id());
-    match loaded.tex0.get_format(&mut cx) {
-        TextureFormat::VecBGRAu8_32 {
-            width,
-            height,
-            data,
-            ..
-        } => {
-            assert_eq!((*width, *height), (256, 128));
-            assert_eq!(data.as_deref(), Some(expected.as_slice()));
-        }
-        other => panic!("Doom sky must be a one-level texture, got {other:?}"),
-    }
-}
-
 #[test]
 /// Which sky gets a mip chain, and why. A cylinder strip must NOT: it is
 /// magnified in every view that exists, and the chain is what turns

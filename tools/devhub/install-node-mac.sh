@@ -2,7 +2,7 @@
 # The devhub NODE on a macOS box (the Mac mini), run as its desktop user in its login session (the Desk Host
 # pattern: a LaunchAgent, started at login and restarted when it dies). Never on the user's Mac: that one is
 # the master (the devhub Dock app: `makepad run makepad-app-devhub`, its "Open at login" LaunchAgent).
-#   tools/devhub/install-node-mac.sh [--tree <dir>] [--name mac-b] [--host <LAN address>]
+#   tools/devhub/install-node-mac.sh [--tree <dir>] [--name mini] [--host <LAN address>]
 # 1. writes ~/.makepad/devhub/node-start.sh: `cargo run --release -p makepad-app-devhub` in the node's one tree
 #    (--tree; default ~/devhub/tree when it exists, the tree the leases run in, else this checkout), so every
 #    restart runs the tree's current code (no installed copy goes stale);
@@ -13,7 +13,8 @@
 #    every exit (a clean one too: a restart for new code is a clean exit).
 # The node proves itself with the machine's fleet identity (~/.makepad/fleet, tools/fleet-identity.md);
 # without one it serves this machine's JITs locally only, and its log says so.
-# Role and budgets are the master's: `makepad devhub node mac-b role bench` (kept in lease.conf here).
+# Role and budgets are the master's: `makepad devhub node mini role bench` (kept in lease.conf here).
+# --script-only: rewrites the start script alone (a lease can run this: the hub it runs under keeps running).
 # Undo: launchctl bootout gui/$(id -u)/nl.makepad.devhub-node; delete ~/Library/LaunchAgents/nl.makepad.devhub-node.plist
 # and ~/.makepad/devhub/node-start.sh.
 set -u
@@ -24,12 +25,13 @@ START=$H/devhub/node-start.sh
 CONF=$H/devhub/node.conf
 AGENT=$HOME/Library/LaunchAgents/$ID.plist
 LOG=$H/devhub/node.log
-tree=; name=; host=
+tree=; name=; host=; script_only=
 while [ $# -gt 0 ]; do
   case $1 in
     --tree) tree=$2; shift 2;;
     --name) name=$2; shift 2;;
     --host) host=$2; shift 2;;
+    --script-only) script_only=1; shift;;
     *) echo "unknown argument $1" >&2; exit 2;;
   esac
 done
@@ -49,12 +51,25 @@ cat > "$START.new" <<START
 # code; launchd restarts it on every exit
 cd "$tree" || exit 1
 echo "---- \$(date) devhub node start in $tree"
-# a tree a lease left at a commit from before this package has no hub to start, and this would loop for good
-grep -q '"apps/devhub"' Cargo.toml || git checkout -q --detach "\$(sed -n 's/^makepad //p' FLEET-REVISION.txt)"
 export CARGO_INCREMENTAL=0 CARGO_NET_OFFLINE=true
+# this box's own settings (lines NAME=value, e.g. DEVELOPER_DIR for the toolchain its builds use)
+[ -f "$H/devhub/node.env" ] && { set -a; . "$H/devhub/node.env"; set +a; }
+# a tree a lease left at a commit the hub does not build at (from before its package) would loop for
+# good: it goes to the shared commits, and the hub, once up, puts a lease still holding it back
+to_synced() {
+  to=\$(git rev-parse -q --verify refs/devhub/synced) || return 0
+  [ "\$(git rev-parse -q --verify HEAD)" = "\$to" ] && return 0
+  echo "the hub does not build at \$(git rev-parse --short HEAD) in \$PWD: back at the shared \$to"
+  git read-tree --reset -u "\$to" && git update-ref --no-deref HEAD "\$to" && git update-ref refs/devhub/checkout "\$to"
+}
+if ! cargo build --release -p makepad-app-devhub; then
+  to_synced
+  [ -e apps/commercial/.git ] && (cd apps/commercial && to_synced)
+fi
 exec cargo run --release -p makepad-app-devhub
 START
 chmod 755 "$START.new" && mv "$START.new" "$START" || fail "write $START"
+if [ -n "$script_only" ]; then echo "DEVHUB-NODE-INSTALL-OK"; exit 0; fi
 
 # 2. the node's conf (kept when it exists)
 if [ ! -s "$CONF" ]; then

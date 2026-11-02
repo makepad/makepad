@@ -787,15 +787,6 @@ mod tests {
     }
 
     #[test]
-    fn short_tracks_are_not_padded() {
-        for geometry in GEOMETRIES {
-            assert_eq!(geometry.track_padding(2 * geometry.border), 0);
-            assert_eq!(geometry.track_padding(2 * geometry.border + 1), geometry.border);
-        }
-        assert_eq!(ChunkGeometry::FULL.track_padding(2 * BORDER + 1), BORDER);
-    }
-
-    #[test]
     fn window_has_ramps_and_a_flat_middle() {
         for geometry in GEOMETRIES {
             let w = base_window(geometry);

@@ -123,9 +123,102 @@ struct State {
     again: bool,
     /// the failure's message
     failed: String,
+    /// A source-check mismatch waits for the same rebuild/restart action as a watched edit.
+    provided: Option<crate::provided::ProvidedChange>,
+    update_message: Option<std::sync::Arc<str>>,
 }
 
-static STATE: Mutex<State> = Mutex::new(State { phase: Phase::Idle, since: None, why: String::new(), paths: Vec::new(), again: false, failed: String::new() });
+static STATE: Mutex<State> = Mutex::new(State { phase: Phase::Idle, since: None, why: String::new(), paths: Vec::new(), again: false, failed: String::new(), provided: None, update_message: None });
+
+/// Best effort, once on the compiler worker when the mismatch is found. Group paths by their
+/// repository (a worktree's .git may be a file); removed inputs still name a commit in git log.
+fn landed_change(files: &[String]) -> Option<String> {
+    let mut repos = std::collections::BTreeMap::<PathBuf, Vec<&Path>>::new();
+    for file in files {
+        let path = Path::new(file);
+        let Some(root) = path.ancestors().skip(1).find(|p| p.join(".git").exists()) else { continue };
+        repos.entry(root.to_path_buf()).or_default().push(path.strip_prefix(root).ok()?);
+    }
+    repos.into_iter().filter_map(|(root, paths)| {
+        let out = std::process::Command::new("git").current_dir(root)
+            .args(["--literal-pathspecs", "log", "-1", "--format=%ct%x00%h %s", "--"])
+            .args(paths).stdin(std::process::Stdio::null()).output().ok()?;
+        if !out.status.success() { return None; }
+        let text = String::from_utf8(out.stdout).ok()?;
+        let (time, subject) = text.trim().split_once('\0')?;
+        Some((time.parse::<u64>().ok()?, subject.to_string()))
+    }).max_by_key(|(time, _)| *time).map(|(_, subject)| subject)
+}
+
+pub(crate) fn offer_provided(change: crate::provided::ProvidedChange, domain: Option<u32>) {
+    let _k = crate::zone_alloc::kept();
+    let mut message = format!("The JIT itself changed ({}) -- Restart to update", change.crate_name);
+    if let Some(landed) = landed_change(&change.files) { message.push_str(&format!(" · {landed}")); }
+    let paths = change.files.clone();
+    let provided = Some(change.clone());
+    let update_message = Some(std::sync::Arc::<str>::from(message.as_str()));
+    let why = message.clone();
+    {
+        let mut st = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        st.paths = paths;
+        st.why = why;
+        st.provided = provided;
+        st.update_message = update_message;
+        if st.phase == Phase::Building { st.again = true; }
+    }
+    super::offer_restart(&message);
+    crate::run::report("update", &message);
+    crate::run_state::emit(crate::run_state::Event::UpdateReady { domain, message });
+}
+
+/// Cached text only: no manifest scan or git process on the UI thread.
+pub fn update_message() -> Option<std::sync::Arc<str>> {
+    STATE.lock().unwrap_or_else(|e| e.into_inner()).update_message.clone()
+}
+
+/// The ring button and `session relaunch` both arrive here. A source-check offer starts the
+/// existing background build; a build already running finishes before requesting a safe point.
+pub(super) fn relaunch() -> Option<Result<&'static str, String>> {
+    let (phase, why, paths) = {
+        let st = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        if st.phase == Phase::Idle && st.provided.is_none() { return None; }
+        if st.phase == Phase::Building {
+            RESTART_AFTER_BUILD.store(true, std::sync::atomic::Ordering::SeqCst);
+            return Some(Ok("rebuild makepad, then restart with the program's state"));
+        }
+        (st.phase, st.why.clone(), st.paths.clone())
+    };
+    if phase == Phase::Restarting { return Some(apply_ready(why)); }
+    RESTART_AFTER_BUILD.store(true, std::sync::atomic::Ordering::SeqCst);
+    Some(request(why, paths).map(|()| "rebuild makepad, then restart with the program's state").map_err(|e| {
+        RESTART_AFTER_BUILD.store(false, std::sync::atomic::Ordering::SeqCst);
+        fail(e.clone());
+        e
+    }))
+}
+
+fn apply_ready(why: String) -> Result<&'static str, String> {
+    {
+        let st = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        // Another landing can supersede the ready binary between the click and this call.
+        if st.phase == Phase::Building {
+            RESTART_AFTER_BUILD.store(true, std::sync::atomic::Ordering::SeqCst);
+            return Ok("rebuild makepad, then restart with the program's state");
+        }
+    }
+    super::RESTART_CONFIRMED.store(true, std::sync::atomic::Ordering::SeqCst);
+    *super::RESTART_REASON.lock().unwrap_or_else(|e| e.into_inner()) = why.clone();
+    if super::pinned() { return Ok("restart waits until unpinned"); }
+    if super::RESTART_SUPPORTED.load(std::sync::atomic::Ordering::SeqCst) {
+        // This asks AppMain::can_restart and the unsaved registry at the next app event.
+        return super::restart_in_place(why);
+    }
+    let h = take().ok_or("the rebuilt makepad is not ready")?;
+    // A domain may already have saved its state and stopped before discovering the mismatch.
+    let state = super::DOMAIN_SNAPSHOT.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    restart(h, state.as_deref().map(str::as_bytes));
+    Ok("restart into the rebuilt makepad")
+}
 
 /// A built binary waiting for the program's safe point: the stamps it was built against.
 struct Handover {
@@ -181,13 +274,21 @@ pub(super) fn request(why: String, paths: Vec<String>) -> Result<(), String> {
 }
 
 fn fail(message: String) {
+    RESTART_AFTER_BUILD.store(false, std::sync::atomic::Ordering::SeqCst);
     eprintln!("makepad live: {message}");
     super::note_restart_pending(&message);
     super::live_log(&format!("{{\"event\":\"host_rebuild\",\"ok\":false,\"message\":{}}}", super::json_str(&message)));
     let mut st = STATE.lock().unwrap_or_else(|e| e.into_inner());
     st.phase = Phase::Failed;
     st.since = Some(Instant::now());
-    st.failed = message;
+    st.failed = message.clone();
+    let update = st.provided.is_some();
+    drop(st);
+    // A boot waiting for this update has no running app's ring yet. Show a genuine rebuild
+    // failure in its run view too, retaining the update button so the person can retry.
+    if update {
+        crate::run_state::diagnostic(crate::run::app_domain(), crate::diag::Diagnostic::new("host rebuild", "", 0, 0, message));
+    }
 }
 
 /// The error lines of cargo's output (else its last lines).
@@ -235,44 +336,37 @@ fn build_loop() {
         let secs = t0.elapsed().as_secs_f64();
         // the same binary as this process runs: the change did not reach makepad (a no-op
         // build), so there is nothing to restart into
-        if LOADED.get().copied().flatten().is_some_and(|id| identity(&loader).is_some_and(|now| now == id)) {
+        if STATE.lock().unwrap_or_else(|e| e.into_inner()).provided.is_none()
+            && LOADED.get().copied().flatten().is_some_and(|id| identity(&loader).is_some_and(|now| now == id)) {
             eprintln!("makepad live: {why}: makepad is unchanged (built in {secs:.0} s); no restart");
+            super::patch_verified_event(&why, 0, &[]);
             super::live_log(&format!("{{\"event\":\"host_rebuild\",\"ok\":true,\"s\":{secs:.1},\"unchanged\":true}}"));
             let mut st = STATE.lock().unwrap_or_else(|e| e.into_inner());
             if st.again { drop(st); continue; }
             st.phase = Phase::Idle;
             st.since = Some(Instant::now());
+            RESTART_AFTER_BUILD.store(false, std::sync::atomic::Ordering::SeqCst);
             return;
         }
         super::live_log(&format!("{{\"event\":\"host_rebuild\",\"ok\":true,\"s\":{secs:.1}}}"));
-        {
+        let asked = {
             let mut st = STATE.lock().unwrap_or_else(|e| e.into_inner());
             if st.again { drop(st); continue; }
+            *HANDOVER.lock().unwrap_or_else(|e| e.into_inner()) = Some(Handover { loader, stamps: before });
             st.phase = Phase::Restarting;
             st.since = Some(Instant::now());
-        }
-        *HANDOVER.lock().unwrap_or_else(|e| e.into_inner()) = Some(Handover { loader, stamps: before });
+            RESTART_AFTER_BUILD.swap(false, std::sync::atomic::Ordering::SeqCst)
+        };
         let reason = format!("makepad was rebuilt ({why})");
-        let asked = RESTART_AFTER_BUILD.swap(false, std::sync::atomic::Ordering::SeqCst);
-        if asked {
-            super::RESTART_CONFIRMED.store(true, std::sync::atomic::Ordering::SeqCst);
-        }
         if !asked {
             // a running app restarts into it when the person says so (`session relaunch`)
             *super::RESTART_REASON.lock().unwrap_or_else(|e| e.into_inner()) = reason.clone();
             super::offer_restart(&reason);
+            super::patch_refused_event(&reason, false, std::slice::from_ref(&reason));
             return;
         }
-        if super::RESTART_SUPPORTED.load(std::sync::atomic::Ordering::SeqCst) {
-            eprintln!("makepad live: makepad rebuilt in {secs:.0} s; restarting into it at the app's next safe point, with its state");
-            *super::RESTART_REASON.lock().unwrap_or_else(|e| e.into_inner()) = reason;
-            super::RESTART_REQUESTED.store(true, std::sync::atomic::Ordering::SeqCst);
-            super::wake_program();
-        } else {
-            eprintln!("makepad live: makepad rebuilt in {secs:.0} s; restarting into it");
-            *super::RESTART_REASON.lock().unwrap_or_else(|e| e.into_inner()) = reason;
-            if let Some(h) = take() { restart(h, None); }
-        }
+        eprintln!("makepad live: makepad rebuilt in {secs:.0} s; applying the requested restart");
+        if let Err(e) = apply_ready(reason) { fail(e); }
         return;
     }
 }
@@ -283,18 +377,31 @@ fn take() -> Option<Handover> {
 }
 
 /// The program's safe point (std::relax::restart_now): with a rebuilt binary waiting, the process
-/// restarts into it with `state`, and does not return. False: no binary waits (the caller
-/// restarts as before), or the restart did not happen (said why; the app keeps running).
+/// restarts into it with `state`, and does not return. False: no binary waits. A pinned or
+/// unconfirmed handover consumes the request too: it must never fall through to a domain
+/// relaunch against the stale provided libraries.
 pub(super) fn restart_now(state: &[u8]) -> bool {
-    if super::pinned() {
-        return false;
-    }
-    match take() {
-        Some(h) if !super::RESTART_CONFIRMED.swap(false, std::sync::atomic::Ordering::SeqCst) => {
+    let handover = {
+        let st = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let handover = take();
+        if handover.is_none() && (st.phase == Phase::Building || st.provided.is_some()) {
+            // A newer landing may have started another build after the app was asked. Keep
+            // its running domain and ask for a fresh snapshot only when that build finishes.
+            if st.phase == Phase::Building && super::RESTART_CONFIRMED.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                RESTART_AFTER_BUILD.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            super::RESTART_REQUESTED.store(false, std::sync::atomic::Ordering::SeqCst);
+            return true;
+        }
+        handover
+    };
+    match handover {
+        Some(h) if super::pinned() || !super::RESTART_CONFIRMED.swap(false, std::sync::atomic::Ordering::SeqCst) => {
             // a restart into a rebuilt makepad waits for the person (`session relaunch`)
             *HANDOVER.lock().unwrap_or_else(|e| e.into_inner()) = Some(h);
+            super::RESTART_REQUESTED.store(false, std::sync::atomic::Ordering::SeqCst);
             eprintln!("makepad live: the app reached a restart point; the rebuilt makepad waits for `session relaunch`");
-            false
+            true
         }
         Some(h) => { restart(h, Some(state)); true }
         None => false,
@@ -306,9 +413,9 @@ pub(super) fn unpinned() {
     if !super::RESTART_CONFIRMED.swap(false, std::sync::atomic::Ordering::SeqCst) {
         return;
     }
-    if let Some(h) = take() {
-        restart(h, None);
-    }
+    if HANDOVER.lock().unwrap_or_else(|e| e.into_inner()).is_none() { return; }
+    let why = super::RESTART_REASON.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    if let Err(e) = apply_ready(why) { fail(e); }
 }
 
 fn restart(h: Handover, state: Option<&[u8]>) {

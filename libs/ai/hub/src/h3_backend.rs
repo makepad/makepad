@@ -1643,29 +1643,6 @@ mod tests {
         assert_eq!(GenerateParams::from_request(&off).unwrap().interpolate, None);
     }
 
-    /// Off by default: the mux still gets H3's native 24 fps.
-    #[test]
-    fn no_interpolation_keeps_the_native_frame_rate() {
-        let mut backend = H3Backend::with_stubs(
-            "minimax-h3",
-            Box::new(|job: &VideoJob, _p: ProgressSink, _c: &CancelToken| Ok(stub_clip(job))),
-            Box::new(|input: &MuxInput| {
-                assert_eq!(input.fps, H3_FPS);
-                assert_eq!(input.frames_rgb8.len(), 3 * 32 * 16 * 3);
-                Ok(vec![1])
-            }),
-        );
-        let params = video_params(GenerateRequestJson {
-            model: "minimax-h3".to_string(),
-            prompt: Some("p".to_string()),
-            width: Some(32),
-            height: Some(16),
-            ..GenerateRequestJson::default()
-        });
-        let mut sink = |_: &str, _: f64| {};
-        backend.generate(&params, &mut sink, &CancelToken::new()).unwrap();
-    }
-
     /// An interpolated job on a backend whose manifest carries no
     /// [`ROLE_INTERPOLATE`] file fails loudly instead of quietly muxing
     /// 24 fps — the whole point of the request would be lost otherwise.
@@ -2080,15 +2057,12 @@ mod tests {
         assert_eq!(snap_dim(352), 352);
     }
 
-    /// Real platform encode smoke (feature video + H3_MUX_SMOKE=1): drives the
+    /// Real platform encode smoke (feature video): drives the
     /// actual `VideoFileEncoder` (AVFoundation on macOS, Media Foundation on
     /// Windows) with a tiny synthetic clip + tone and checks we get an mp4.
     #[cfg(feature = "video")]
     #[test]
     fn real_mux_smoke() {
-        if std::env::var("H3_MUX_SMOKE").map(|v| v != "1").unwrap_or(true) {
-            return;
-        }
         let (w, h, f) = (64usize, 64usize, 24usize);
         let mut frames = Vec::with_capacity(f * h * w * 3);
         for frame in 0..f {

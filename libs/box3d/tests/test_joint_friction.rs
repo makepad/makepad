@@ -59,7 +59,7 @@ fn settle(world: &mut World, seconds: f32) {
 
 fn angle_from_down(world: &World, body: BodyId) -> f32 {
     let p = body_get_position(world, body);
-    p.x.atan2(-p.y)
+    p.x.atan2(-p.y) as f32
 }
 
 #[test]
@@ -143,7 +143,7 @@ fn spherical_friction_dead_band() {
     create_spherical_joint(&mut world, &sd);
     settle(&mut world, 10.0);
     let p = body_get_position(&world, body);
-    let a = (p.x * p.x + p.z * p.z).sqrt().atan2(-p.y).to_degrees();
+    let a = (p.x * p.x + p.z * p.z).sqrt().atan2(-p.y).to_degrees() as f32;
     assert!(a <= band + 1.0 && a < 39.0, "spherical settled at {a} deg, band {band}");
 }
 

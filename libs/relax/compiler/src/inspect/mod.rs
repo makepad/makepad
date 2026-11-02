@@ -78,6 +78,61 @@ fn server_thread_exit() {
     SERVER_TIDS.lock().unwrap().retain(|t| *t != me);
 }
 
+/// A test harness's endpoint: there to answer when the run hangs. A test's panic is the test's
+/// (nothing parks), and its output says nothing about the endpoint.
+static TEST_RUN: AtomicBool = AtomicBool::new(false);
+
+/// [`start`] for a test run.
+pub fn start_for_test(app: &str) {
+    TEST_RUN.store(true, Relaxed);
+    start(app);
+}
+
+/// `why-hung` on stderr: for a wait that should not last, whether or not anyone can attach.
+pub fn say_why_hung(what: &str) {
+    fn answer(req: &Req, out: &mut Out) {
+        hang::why_hung(req, out);
+    }
+    let _k = crate::zone_alloc::kept();
+    let (bytes, _) = makepad_remote::cmd::answer(answer, "why-hung");
+    eprintln!("makepad: {what}: where the threads wait:\n{}", String::from_utf8_lossy(&bytes));
+}
+
+/// A retiring domain's outstanding threads, using the same wait registry and
+/// stack capture as `why-hung`. No timed probe decides their lifetime.
+pub fn say_teardown_threads(domain: u32, pending: &[(String, u64)]) {
+    let _kept = crate::zone_alloc::kept();
+    let captures = match capture_all(&|t| pending.iter().any(|(_, id)| *id != 0 && *id == t.os_id)) {
+        Ok(captures) => captures,
+        Err(error) => {
+            eprintln!("makepad-run domain: {domain}: teardown stacks unavailable: {error}");
+            return;
+        }
+    };
+    let waits = crate::waits::snapshot();
+    let threads: Vec<_> = captures.iter().map(|c| c.t.clone()).collect();
+    let frames: Vec<_> = captures.iter().map(|c| c.frames.clone()).collect();
+    let mut partial = Vec::new();
+    let symbols = symbolise_within(&frames, &mut partial, 300);
+    for (name, id) in pending {
+        let Some(index) = captures.iter().position(|c| *id != 0 && c.t.os_id == *id) else {
+            eprintln!("makepad-run domain: {domain}: thread {name}: {}", if *id == 0 { "reserved, not entered yet" } else { "exited during capture" });
+            continue;
+        };
+        let c = &captures[index];
+        let blocked = waits.iter().find(|w| w.thread == c.t.handle && w.kind != crate::waits::Kind::None)
+            .map(|w| wait_text(w, &threads)).unwrap_or_else(|| c.t.state.to_string());
+        eprintln!("makepad-run domain: {domain}: thread {name} ({}): {blocked}", c.t.os_id);
+        if let Some(error) = c.err {
+            eprintln!("  stack unavailable: {error}");
+        }
+        for frame in &symbols[index] {
+            eprintln!("  {} {}", frame.name, frame.at);
+        }
+    }
+    for note in partial { eprintln!("makepad-run domain: {domain}: {note}"); }
+}
+
 /// Starts the inspect thread for program `app` (once per process; MAKEPAD_RUN_INSPECT=0: off).
 pub fn start(app: &str) {
     if std::env::var("MAKEPAD_RUN_INSPECT").map_or(false, |v| v == "0") || STARTED.swap(true, Relaxed) {
@@ -112,7 +167,10 @@ pub fn start(app: &str) {
             return;
         }
     };
-    eprintln!("makepad-remote: pid {} app {} socket {} (makepad inspect {} help)", pid, app, sock.display(), pid);
+    // (a `--silent` run's stderr is the program's: a test reading it sees only the program)
+    if crate::harness::live::enabled() || !TEST_RUN.load(Relaxed) && !crate::run::silent() {
+        eprintln!("makepad-remote: pid {} app {} socket {} (makepad inspect {} help)", pid, app, sock.display(), pid);
+    }
     events::start();
     timeline::hitch_init();
     flightrec::init();
@@ -126,6 +184,7 @@ pub fn start(app: &str) {
 pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("session", "view [open|dismiss]", "the run's view over the app (compile errors, a parked panic, the JIT's state): what it shows, or open / dismiss it (the caption's JIT ring is display only)"),
     ("pin", "[on|off]", "pin the running app while an operation runs: no edit or landing reaches it and it does not restart; off: it catches up"),
+    ("inputs", "[match=<path substring>]", "the live session's reload source files, workspace-relative, one path per line and a count; unloaded sources are excluded"),
     ("session", "relaunch", "apply the edits waiting for a restart: a hosted app relaunches its domain in this process (host window and GPU device kept); a program that restarts itself (std::relax::restart_supported) restarts with its state"),
     ("why-hung", "[probe_ms=200]", "is it stuck and why: verdict (deadlock / blocked / busy / idle), the wait chain or cycle, stacks of the threads in it"),
     ("why-slow", "[s=3]", "where the time goes: ranked findings -- the main thread's CPU split (program / compiles / makepad run runtime / system), its hot fns, the owner's service, other busy threads"),
@@ -142,7 +201,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("memory", "[compiler=1] [n=24]", "where the memory is and why: RSS by mapping kind, malloc in use vs held free, makepad run's own parts, findings, growth since the last `memory`"),
     ("diff", "<snap a> <snap b|now>", "memory growth between two snapshots, largest first"),
     ("mem", "snap <name> | timeline [from_ms= to_ms=] | trim", "keep a named memory snapshot; resident size over time with phase markers and the peak's phase; trim: return the allocators' free pages now (RSS before/after)"),
-    ("heap", "start [rate=65536] [ttl_s=600] | top [by=live|alloc|freed|peak] [zone=burst|compiler|other] | frame [s=2] [n=12] | snap <name> | diff <a> <b|now> | path H<id> | stop | status", "program heap by allocation stack (JIT-patched allocator hooks, byte-sampled): live, allocated, freed; growth and leaks between snapshots"),
+    ("heap", "start [rate=65536] [ttl_s=600] | top [by=live|alloc|freed|peak] [zone=burst|compiler|slots|other] | frame [s=2] [n=12] | snap <name> | diff <a> <b|now> | path H<id> | stop | status", "program heap by allocation stack (JIT-patched allocator hooks, byte-sampled): live, allocated, freed; growth and leaks between snapshots"),
     ("top", "by=time|alloc|bytes|live [s=3] [n=15]", "the top functions by CPU time (prof) or allocation sites by allocated / live bytes (heap)"),
     ("frame", "<n|slowest>", "one frame of the last timeline: UI phases, critical path, waits and who ended them (alias of timeline frame)"),
     ("path", "<H<n>|R<n>>", "the full stack of a heap site id"),
@@ -156,7 +215,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("cache", "", "where this session's code came from: the warm cache's lookups (hits; misses by reason: no entry for the key, invalidated, did not link, not storable), the startup image (placed / stale / failed), stores opened, entries recorded, and the installed code by tier and origin (fresh / warm-cache / warm-image / live-patch / inspect)"),
     ("code", "[n=<top>]", "JIT code growth (code is append-only, never freed): bytes and installs by source (first, tier-up, re-optimize, patch, module) and the fns with the most versions"),
     ("versions", "<fn|file:line>", "every code version of the fn: per slot its installed, replaced and retired code (tier baseline/O1/O2/O3/O3-guarded/instrumented, origin fresh/warm-cache/warm-image/live-patch/inspect, address, patch generation, cache key and build), which threads run in which, and the slots whose code holds an inlined copy of it"),
-    ("why-tier", "<fn|file:line|@slot>", "why a fn is (not) at O3, answer first: per slot its count stub (armed, call weight, re-arms), its decayed cost against the threshold, the loop counter, cost checks by code version, the O3 queue (position, reason, age), the counted (PGO) window, the verdict, O3 builds installed / dropped / refused with reasons, retiers left, pins, and its last tier-up decisions"),
+    ("why-tier", "<fn|file:line|@slot> | stuck [n=20] | uncounted [n=20]", "`stuck`: how many hot fns ended below O3 with nothing pending, by reason. Else why a fn is (not) at O3, answer first: per slot its count stub (armed, call weight, re-arms), its decayed cost against the threshold, the loop counter, cost checks by code version, the O3 queue (position, reason, age), the counted (PGO) window, the verdict, O3 builds installed / dropped / refused with reasons, retiers left, pins, and its last tier-up decisions"),
     ("tier", "<fn|file:line> o1|o3|auto [fresh=1] | (none: the pins)", "pins the fn and every slot that inlined it to a tier in the live process (A/B a suspected miscompile): o1 = O1 code generation, kept until `tier <fn> auto`; o3 = the o1 pin goes and they get O3 builds now (fresh=1: rebuild O3 code even where it runs, e.g. warm-cache code)"),
     ("break", "<fn>|<file>:<line> [tier=o1]", "breakpoint: a hit parks the thread at the call (stack intact) and raises a `break` event K<n>"),
     ("restartable", "<fn>", "a panic through the fn can be resumed with `restart` (the fn runs again from its entry with its original arguments) or `return <value>` (the call returns the value; integer-class returns)"),
@@ -197,8 +256,8 @@ fn dispatch_command(req: &Req, out: &mut Out) {
     match req.cmd.as_str() {
         "session" => match req.pos.first().map(String::as_str) {
             Some("relaunch") => match crate::reload::relaunch_pending() {
+                // the waiting edits stay noted until a run loads them (the app may postpone it)
                 Ok(how) => {
-                    crate::reload::clear_restart_pending();
                     out.line(&format!("{{\"relaunch\":\"queued\",\"as\":\"{}\",\"pid\":{}}}", how, std::process::id()))
                 }
                 Err(e) => out.err(&e),
@@ -240,6 +299,18 @@ fn dispatch_command(req: &Req, out: &mut Out) {
             out.line(&format!("{{\"pinned\":{on}}}"));
         }
         "help" => help(req, out),
+        "inputs" => match crate::reload::input_paths() {
+            Ok(paths) => {
+                let paths: Vec<_> = paths.into_iter().filter(|p| p.contains(req.get("match").unwrap_or(""))).collect();
+                // Callers use absence to skip a patch wait: never truncate this source list.
+                out.always(&format!("{{\"count\":{}}}", paths.len()));
+                for path in paths {
+                    if out.cancelled() { break; }
+                    out.always(&format!("{{\"path\":{}}}", json_str(&path)));
+                }
+            }
+            Err(e) => out.err(&e),
+        },
         "pf" => out.err("pf is answered by the client: makepad inspect <app> pf <query> (it attaches to the app's prof stream)"),
         "ping" => out.line(&format!("{{\"pid\":{},\"app\":{},\"ms\":{}}}", std::process::id(), json_str(&APP.lock().unwrap()), now_ms())),
         "threads" => cmd_threads(out),

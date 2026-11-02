@@ -1,6 +1,6 @@
 # Relax std comparison
 
-Run `./libs/relax/compiler/std/bench/run.sh mac` from this checkout. On a node,
+Run `./libs/relax/compiler/std/bench/run.sh mac` from this checkout. On a pool node,
 after the usual std_gate.sh source sync, run
 `~/fastrust-std/src/libs/relax/compiler/std/bench/run.sh 165` there. The runner does
 not sync, install software, build Relax, or alter its dependencies.

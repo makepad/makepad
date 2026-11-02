@@ -4,9 +4,8 @@
 
 use makepad_csg_math::portable as pm;
 use makepad_render_kernels::anim::{ease_id, pack_track, TrackEase, CURVES};
-use makepad_render_kernels::dispatch::sched::{InlineExecutor, Job, Priority};
+use makepad_render_kernels::dispatch::sched::{Job, Priority};
 use makepad_render_kernels::engine;
-use std::time::Instant;
 
 fn ease_in(c: usize, u: f64) -> f64 {
     let pi = std::f64::consts::PI;
@@ -145,44 +144,4 @@ fn a_motion_track_evaluates_to_its_bits_per_element() {
             assert_eq!(got.to_bits(), want.to_bits(), "comp {comp} t {t}: {got} vs {want}");
         }
     }
-}
-
-#[test]
-fn a_hundred_thousand_track_evaluations() {
-    // The AK1 target: 100k evaluations <= 0.5 ms on 8 threads. f32 tracks
-    // through std.anim.keys with a named ease run four-wide; the f64
-    // Motion track (track_d) runs scalar.
-    let keys_src = "use std.anim.*\nlet times = input(f32)\nlet values = input(f32)\nlet out = output(f32)\nlet dt = param(0.0001)\nfn element(i) { let t = float(i % 1000) * dt * 1000.0\n out[i] = keys(times, values, 16, t) }";
-    let k = makepad_render_kernels::compile(keys_src, &[], &[]).unwrap_or_else(|e| panic!("{:?}", e));
-    let times: Vec<u32> = (0..16).map(|k| (k as f32 * 0.07).to_bits()).collect();
-    let n = 100_000;
-    let mut best = f64::MAX;
-    for _ in 0..20 {
-        let mut job = Job::new(k.clone(), n);
-        job.input_vec_u32("times", times.clone()).unwrap();
-        job.input_vec_u32("values", times.clone()).unwrap();
-        job.output_u32("out", vec![0; n]).unwrap();
-        let t = Instant::now();
-        let _ = engine().run(job, Priority::MustComplete).unwrap_or_else(|(_, e)| panic!("{}", e));
-        best = best.min(t.elapsed().as_secs_f64() * 1e3);
-    }
-    let kd = makepad_render_kernels::compile(SRC, &[], &[]).unwrap();
-    let keys: Vec<(f64, &[f64], TrackEase)> = vec![(0.0, &[0.0][..], TrackEase::Id(0)), (1.0, &[1.0][..], TrackEase::Id(ease_id("ease_out_cubic").unwrap())), (2.0, &[0.0][..], TrackEase::Spring { k: 170.0, d: 26.0 })];
-    let packed = pack_track(&keys);
-    let mut best_d = f64::MAX;
-    for _ in 0..10 {
-        let mut job = Job::new(kd.clone(), n);
-        job.input_vec_u32("times", packed.times.clone()).unwrap();
-        job.input_vec_u32("values", packed.values.clone()).unwrap();
-        job.input_vec_u32("eases", packed.eases.clone()).unwrap();
-        job.input_vec_u32("eparams", packed.eparams.clone()).unwrap();
-        job.output_u32("out", vec![0; n * 2]).unwrap();
-        job.set_param("n", 3.0);
-        job.set_param("dt", 2.0 / n as f32);
-        let t = Instant::now();
-        let _ = engine().run(job, Priority::MustComplete).unwrap_or_else(|(_, e)| panic!("{}", e));
-        best_d = best_d.min(t.elapsed().as_secs_f64() * 1e3);
-    }
-    println!("100k evaluations: f32 keys {best:.3} ms, f64 Motion track {best_d:.3} ms on {} threads", engine().threads());
-    let _ = InlineExecutor;
 }

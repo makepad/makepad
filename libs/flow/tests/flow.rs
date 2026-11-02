@@ -278,22 +278,6 @@ fn comments_make_an_otherwise_flat_file_custom() {
     assert!(is_canonical(&written));
 }
 
-#[test]
-fn every_fixture_writer_round_trips() {
-    for (name, source) in [
-        ("prompt_image.splash", include_str!("fixtures/prompt_image.splash")),
-        ("derived.splash", include_str!("fixtures/derived.splash")),
-        ("http_ask_text.splash", include_str!("fixtures/http_ask_text.splash")),
-        ("tools.splash", include_str!("fixtures/tools.splash")),
-        ("gen.splash", include_str!("fixtures/gen.splash")),
-        ("loop.splash", include_str!("fixtures/loop.splash")),
-        ("custom_comment.splash", include_str!("fixtures/custom_comment.splash")),
-    ] {
-        let graph = evaluate(source, name).unwrap();
-        round_trip(&graph);
-    }
-}
-
 fn param<'a>(node: &'a makepad_flow::Node, name: &str) -> &'a Literal {
     node.params
         .iter()

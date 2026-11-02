@@ -294,31 +294,6 @@ fn as_bytes(values: &[f32]) -> &[u8] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::f64::consts::PI;
-    use std::path::{Path, PathBuf};
-
-    const WEIGHTS: &str = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../../../local/models/weights/beat_this/final0.ckpt"
-    );
-
-    fn checkpoint() -> PathBuf {
-        Path::new(WEIGHTS).to_path_buf()
-    }
-
-    fn click_track(seconds: usize, bpm: f64) -> Vec<f32> {
-        let mut audio = vec![0.0f32; seconds * SAMPLE_RATE as usize];
-        let beat_samples = (60.0 / bpm * SAMPLE_RATE as f64).round() as usize;
-        for (beat, at) in (0..audio.len()).step_by(beat_samples).enumerate() {
-            let amplitude = if beat % 4 == 0 { 1.0 } else { 0.55 };
-            for offset in 0..220usize.min(audio.len() - at) {
-                let envelope = (-(offset as f64) / 45.0).exp();
-                audio[at + offset] +=
-                    (amplitude * envelope * (2.0 * PI * 1000.0 * offset as f64 / SAMPLE_RATE as f64).sin()) as f32;
-            }
-        }
-        audio
-    }
 
     #[test]
     fn chunk_starts_match_reference_shifted_tail() {
@@ -353,60 +328,5 @@ mod tests {
         assert!(analysis.downbeats_secs.is_empty());
         assert_eq!(analysis.bpm, 0.0);
         assert_eq!(analysis.confidence, 0.0);
-    }
-
-    #[test]
-    #[ignore = "requires seeded final0.ckpt and Metal/CUDA graph execution"]
-    fn synthetic_120_bpm_click_track_tracks_beats_and_downbeats() {
-        let expected: Vec<f64> = (0..40).map(|beat| beat as f64 * 0.5).collect();
-        let analysis = BeatsModel::load(checkpoint())
-            .unwrap()
-            .analyze(&click_track(20, 120.0))
-            .unwrap();
-        let matched = expected
-            .iter()
-            .filter(|&&time| {
-                analysis
-                    .beats_secs
-                    .iter()
-                    .any(|beat| (beat - time).abs() <= 0.03)
-            })
-            .count();
-        assert!(matched >= expected.len() * 3 / 4, "matched {matched}/{}", expected.len());
-        assert!((analysis.bpm - 120.0).abs() <= 1.0);
-        let downbeats: Vec<f64> = expected.iter().step_by(4).copied().collect();
-        let precise = analysis
-            .downbeats_secs
-            .iter()
-            .filter(|&&time| downbeats.iter().any(|want| (time - want).abs() <= 0.03))
-            .count();
-        assert!(analysis.downbeats_secs.is_empty() || precise * 4 >= analysis.downbeats_secs.len() * 3);
-    }
-
-    #[test]
-    #[ignore = "requires seeded final0.ckpt and Metal/CUDA graph execution"]
-    fn model_silence_has_no_beats() {
-        let analysis = BeatsModel::load(checkpoint())
-            .unwrap()
-            .analyze(&vec![0.0; SAMPLE_RATE as usize * 20])
-            .unwrap();
-        assert!(analysis.beats_secs.is_empty());
-        assert!(analysis.downbeats_secs.is_empty());
-    }
-
-    #[test]
-    #[ignore = "requires seeded final0.ckpt and Metal/CUDA graph execution"]
-    fn ninety_seconds_is_continuous_across_chunk_seams() {
-        let analysis = BeatsModel::load(checkpoint())
-            .unwrap()
-            .analyze(&click_track(90, 120.0))
-            .unwrap();
-        assert!(analysis
-            .beats_secs
-            .windows(2)
-            .all(|pair| pair[1] - pair[0] > 0.03 && pair[1] - pair[0] < 0.8));
-        for seam in [1488.0 / 50.0, 2976.0 / 50.0] {
-            assert!(analysis.beats_secs.iter().any(|beat| (beat - seam).abs() < 0.55));
-        }
     }
 }

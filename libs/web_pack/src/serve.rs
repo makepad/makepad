@@ -108,7 +108,7 @@ fn respond(root: &Path, headers: &makepad_network::HttpServerHeaders) -> HttpSer
 fn lan_ip() -> Option<IpAddr> {
     // No packet is sent: connecting a UDP socket only picks the route.
     let s = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
-    s.connect("198.51.100.11:9").ok()?;
+    s.connect("192.0.2.1:9").ok()?;
     let ip = s.local_addr().ok()?.ip();
     (!ip.is_loopback() && !ip.is_unspecified()).then_some(ip)
 }

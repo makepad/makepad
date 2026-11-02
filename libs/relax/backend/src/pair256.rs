@@ -213,6 +213,11 @@ impl Cx {
     }
 }
 
+fn pair256_trace() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("MAKEPAD_RUN_PAIR256_TRACE").is_some())
+}
+
 /// Fuses V128 pairs into V256 instructions; returns whether `f` changed. `f.halves` (vreg
 /// pairs a front end made as the (low, high) halves of one 256-bit value: compute's eight-lane
 /// kernels) seed the pairs: an instruction pair defining a seed pair is a candidate like one
@@ -529,7 +534,7 @@ pub fn pair256(f: &mut Func, caps: Caps) -> bool {
         }
     }
     let on: Vec<IPair> = pairs.iter().copied().filter(|p| p.on).collect();
-    let trace = std::env::var_os("MAKEPAD_RUN_PAIR256_TRACE").is_some();
+    let trace = pair256_trace();
     if trace {
         eprintln!("pair256 {}: {} candidate pairs, {} kept", f.name, pairs.len(), on.len());
         for p in pairs.iter().filter(|p| !p.on) {

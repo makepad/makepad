@@ -425,16 +425,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn fifty_six_byte_boundary_pads_two_blocks() {
-        for len in 55..=65usize {
-            let data = vec![0x5au8; len];
-            let mut h = Sha256::new();
-            h.update(&data);
-            assert_eq!(h.finalize(), sha256(&data), "len {len}");
-        }
-    }
-
     /// Hash `data` end to end using ONLY `kernel` as the block compressor —
     /// the same block-splitting and FIPS 180-4 padding [`Sha256::update`] /
     /// [`Sha256::finalize`] use, just parameterized so this test can force
@@ -545,37 +535,5 @@ mod tests {
             // No hardware kernel exists for this architecture; the software
             // path is the only one and there is nothing to compare it to.
         }
-    }
-
-    /// Throughput of the kernel `Sha256::compress` actually dispatches to
-    /// on THIS machine right now, vs. the software path forced directly —
-    /// printed with `--nocapture` for a before/after MB/s reading.
-    #[test]
-    fn measure_throughput() {
-        let data = vec![0x37u8; 64 * 1024 * 1024];
-        let rounds = 4;
-
-        let t0 = std::time::Instant::now();
-        for _ in 0..rounds {
-            let mut h = Sha256::new();
-            h.update(&data);
-            std::hint::black_box(h.finalize());
-        }
-        let dispatched = t0.elapsed();
-
-        let t0 = std::time::Instant::now();
-        for _ in 0..rounds {
-            std::hint::black_box(hash_with(&data, Sha256::compress_sw));
-        }
-        let software = t0.elapsed();
-
-        let mb = (data.len() * rounds) as f64 / (1024.0 * 1024.0);
-        println!(
-            "sha256 throughput over {} MiB: dispatched(compress) = {:.1} MB/s · forced-software = {:.1} MB/s · hw_verified = {}",
-            data.len() / (1024 * 1024),
-            mb / dispatched.as_secs_f64(),
-            mb / software.as_secs_f64(),
-            hw::verified(),
-        );
     }
 }

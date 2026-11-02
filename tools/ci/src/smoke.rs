@@ -36,7 +36,7 @@ pub const SLICE_SCRIPT: &str = "tools/ci/slice.ci.splash";
 /// The features a slice is cut, linted and checked with. A release builds
 /// its package with `--no-default-features` and the release's features, and
 /// no release names any (the server's `source.json` has none), so a root's
-/// optional dependencies behind its default features (Scope's `internal`)
+/// optional dependencies behind its default features (Scope's `tweaker`)
 /// are not in the slice.
 pub const SLICE_FEATURES: &[String] = &[];
 

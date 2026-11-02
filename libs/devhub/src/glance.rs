@@ -58,6 +58,7 @@ fn clip(s: &str) -> String {
 }
 
 /// Whole minutes since `ms`.
+#[cfg(feature = "checkout")]
 fn minutes(ms: u64) -> u64 {
     crate::proto::wall_ms().saturating_sub(ms) / 60_000
 }
@@ -121,7 +122,7 @@ impl Glance {
             Glyph::Off
         } else if self.land.failed > 0 || matches!(self.verify, Verify::Fail { .. }) || self.unseen_err > 0 {
             Glyph::Attention
-        } else if self.land.gating > 0 || self.verifying.is_some() || self.leases_running > 0 {
+        } else if self.verifying.is_some() || self.leases_running > 0 {
             Glyph::Busy
         } else {
             Glyph::Quiet
@@ -151,7 +152,7 @@ impl Glance {
         ));
         let l = &self.land;
         let mut land = Vec::new();
-        for (n, w) in [(l.queued, "queued"), (l.gating, "gating"), (l.failed, "failed"), (l.held, "held")] {
+        for (n, w) in [(l.queued, "queued"), (l.failed, "failed"), (l.held, "held")] {
             if n > 0 {
                 land.push(format!("{n} {w}"));
             }
@@ -206,7 +207,7 @@ mod tests {
             nodes: 7,
             leases_running: 3,
             leases_waiting: 1,
-            land: crate::land::Counts { queued: 2, gating: 1, failed: 0, held: 0 },
+            land: crate::land::Counts { queued: 2, failed: 0, held: 0 },
             land_paused: Some("user review".into()),
             verify: Verify::Ok { pair: "aaaa,bbbb".into(), min: 12 },
             verifying: Some("cccc,dddd".into()),
@@ -219,7 +220,7 @@ mod tests {
             g.lines(),
             vec![
                 "Nodes 6/7 up \u{b7} leases 3 running, 1 waiting".to_string(),
-                "Land: 2 queued \u{b7} 1 gating \u{b7} PAUSED (user review)".into(),
+                "Land: 2 queued \u{b7} PAUSED (user review)".into(),
                 "Verify: OK aaaa,bbbb 12 min ago \u{b7} running cccc,dddd".into(),
                 "Lanes: 9".into(),
             ]

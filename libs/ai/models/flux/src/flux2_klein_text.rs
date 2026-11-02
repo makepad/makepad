@@ -488,17 +488,4 @@ mod tests {
         assert!(rendered.contains("<|im_start|>assistant\n<think>\n\n</think>\n\n"));
     }
 
-    #[test]
-    fn klein_tokenizer_loads_when_present() {
-        let dir = std::path::PathBuf::from("/tmp/flux2-klein-tok");
-        if !dir.join("tokenizer.json").is_file() {
-            eprintln!("klein tokenizer missing, skip");
-            return;
-        }
-        let tok = H3Tokenizer::load(&dir).expect("load qwen3 tokenizer");
-        let prompt = flux2_klein_tokenize(&tok, "change the sky to sunset orange").expect("tok");
-        assert_eq!(prompt.token_ids.len(), 512);
-        assert!(prompt.real_len > 8 && prompt.real_len < 64);
-        assert_eq!(prompt.token_ids[prompt.real_len], FLUX2_KLEIN_PAD_TOKEN);
-    }
 }

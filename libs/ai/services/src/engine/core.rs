@@ -13,7 +13,7 @@
 
 use crate::card::Card;
 use crate::engine::registry::{RegistryUp, ServiceRegistry};
-use crate::engine::{Model, ModelEvent, ToolDefinition};
+use crate::engine::{Model, ModelEvent, ModelImage, ToolDefinition};
 use crate::state::*;
 use crate::wire::*;
 use makepad_micro_serde::*;
@@ -554,6 +554,17 @@ impl EngineCore {
         }
     }
 
+    /// Run a finished call again as the person's own (a task card's Retry): the same tool
+    /// with the same arguments, as a new card, with no model turn. Returns the new call id;
+    /// `None` when the call is not in the transcript or still running.
+    pub fn retry(&mut self, call_id: &str, now: f64) -> Option<String> {
+        let t = self.state.tool(call_id).filter(|t| t.status.is_done())?;
+        let (name, args) = (canonical_name(&t.service, &t.tool), t.args.clone());
+        let id = self.mint_call_id();
+        self.dispatch(id.clone(), &name, &args, true, now);
+        Some(id)
+    }
+
     /// A new conversation: same services, same provider, empty transcript.
     pub fn clear(&mut self, now: f64) {
         self.cancel(now);
@@ -681,12 +692,15 @@ impl EngineCore {
         for up in self.registry.pump() {
             match up {
                 RegistryUp::Result(endpoint, result) => self.on_result(&endpoint, result, now),
-                RegistryUp::Progress { endpoint, call_id, note, permille } => {
+                RegistryUp::Progress { endpoint, call_id, note, permille, task } => {
                     if let Some(p) = self.pending.get_mut(&call_id) {
                         if p.endpoint == endpoint {
                             p.activity.progress(now);
                             if let Some(t) = self.state.tool_mut(&call_id) {
                                 t.status = ToolStatus::Running { note, permille };
+                                if task.is_some() {
+                                    t.task = task;
+                                }
                                 self.state.touch();
                             }
                         }
@@ -924,6 +938,7 @@ impl EngineCore {
             preview: false,
             expanded: false,
             card: None,
+            task: None,
         }
     }
 
@@ -1397,6 +1412,9 @@ impl EngineCore {
         }
         if let Some(t) = self.state.tool_mut(call_id) {
             t.status = ToolStatus::Done { outcome: result.outcome, note: result.note.clone(), text: result.text.clone() };
+            if result.task.is_some() {
+                t.task = result.task.clone();
+            }
             if !result.outcome.is_ok() {
                 t.preview = false;
             } else if result.preview {
@@ -1422,7 +1440,21 @@ impl EngineCore {
             return;
         }
         let body = if result.text.trim().is_empty() { result.note.clone() } else { result.text.clone() };
-        let text = if result.outcome.is_ok() { body } else { format!("[{}] {body}", result.outcome.slug()) };
+        let mut text = if result.outcome.is_ok() { body } else { format!("[{}] {body}", result.outcome.slug()) };
+        // The result's pictures go to the model that made the call, with the result: the one
+        // place that knows which conversation asked.
+        if !result.images.is_empty() {
+            let images: Vec<ModelImage> = result
+                .images
+                .iter()
+                .filter_map(|b64| makepad_base64::base64_decode(b64.trim().as_bytes()).ok())
+                .enumerate()
+                .map(|(i, png)| ModelImage { label: format!("picture {} of this result", i + 1), png: std::sync::Arc::from(png) })
+                .collect();
+            if let Err(why) = self.model.attach_images(images) {
+                text.push_str(&format!("\n[the pictures of this result did not reach you: {why}]"));
+            }
+        }
         self.model.send_tool_result(call_id, &text, !result.outcome.is_ok());
         match result.disposition {
             Disposition::Continue => {}

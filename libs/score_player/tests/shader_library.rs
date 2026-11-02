@@ -182,32 +182,6 @@ fn echo_lands_on_the_beat_division() {
     assert!((at as i64 - expect as i64).abs() <= 3, "first echo at {} expected {}", at, expect);
 }
 
-#[test]
-fn cpu_against_the_native_voices() {
-    // Supersaw: the shader (7 drifting saws + 2 SVFs, stereo) against the
-    // native recipe supersaw (5 saw layers, each with its own low-pass).
-    let recipe = Recipe::parse("saw freq=440 detune=5 a=0.01 d=0.5 s=0.8 r=0.35 gain=0.11 lp=8000; saw freq=440 detune=-5 a=0.01 d=0.5 s=0.8 r=0.35 gain=0.11 lp=8000; saw freq=440 detune=12 a=0.01 d=0.5 s=0.8 r=0.35 gain=0.1 lp=8000 pan=0.4; saw freq=440 detune=-12 a=0.01 d=0.5 s=0.8 r=0.35 gain=0.1 lp=8000 pan=-0.4; saw freq=440 detune=22 a=0.01 d=0.5 s=0.8 r=0.35 gain=0.08 lp=8000 pan=0.7; saw freq=440 detune=-22 a=0.01 d=0.5 s=0.8 r=0.35 gain=0.08 lp=8000 pan=-0.7").unwrap();
-    let shader = compile_with(library("supersaw").unwrap(), Backend::Native).unwrap();
-    let secs = 2.0;
-    let n = (secs * RATE) as usize;
-    let t0 = std::time::Instant::now();
-    let mut v = RecipeVoice::new(&recipe, 1.0, Some(220.0), true, 1);
-    let mut buf = vec![0.0f32; 256];
-    for _ in 0..n / 256 {
-        v.render(&mut buf, RATE, 1.0);
-    }
-    let native_ns = t0.elapsed().as_secs_f64() * 1e9 / n as f64;
-    let mut inst = ShaderInst::new(shader, RATE);
-    inst.note_on(57.0, 0.8, 0);
-    let (mut l, mut r) = (vec![0.0f32; 256], vec![0.0f32; 256]);
-    let t0 = std::time::Instant::now();
-    for _ in 0..n / 256 {
-        inst.render(&mut l, &mut r);
-    }
-    let shader_ns = t0.elapsed().as_secs_f64() * 1e9 / n as f64;
-    eprintln!("supersaw: native recipe (5 saws, mono) {:.1} ns/frame, shader (7 drifting saws, stereo) {:.1} ns/frame", native_ns, shader_ns);
-}
-
 /// The gated reverb gives each hit a burst of room, then silence: loud
 /// while the gate holds, more than 30 dB down after it closes.
 #[test]

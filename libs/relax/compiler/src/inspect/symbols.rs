@@ -100,7 +100,7 @@ fn enumerate() -> Vec<Image> {
     v
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(target_vendor = "apple")]
 fn enumerate() -> Vec<Image> {
     extern "C" {
         fn _dyld_image_count() -> u32;

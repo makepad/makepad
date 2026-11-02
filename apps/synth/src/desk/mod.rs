@@ -117,7 +117,7 @@ script_mod! {
                 Tip{text: "Tempo: drag sideways to change it, click to type (writes the score's clock)"
                     score_bpm := ValueInput{width: 64 height: 18 min: 20 max: 400 step: 0.5 precision: 0 suffix: " bpm"
                         arrow_color: stage.faint
-                        draw_bg +: {color: #0000 border_color: #0000}
+                        draw_bg +: {color: #0000}
                         draw_text +: {color: stage.secondary text_style: theme.font_code{font_size: 8 line_spacing: 1.0}}
                         text_input +: {draw_bg +: {border_size: 0.0} draw_text +: {text_style: theme.font_code{font_size: 8}}}}}
             }

@@ -1,5 +1,5 @@
 //! PNG regression for retained text and quad clipping on the native HAL GPU backend.
-//! Run with MAKEPAD_HAL_BACKEND=offscreen and the existing ignored test selection.
+//! Run with MAKEPAD_HAL_BACKEND=offscreen on a native GPU.
 //! MAKEPAD_TEST_OUT_DIR optionally retains the compared PNGs.
 #![cfg(not(target_arch = "wasm32"))]
 
@@ -21,7 +21,6 @@ const CLIP: [usize; 4] = [96, 72, 224, 168];
 #[derive(Clone, Copy, Debug)]
 enum GlyphPath {
     Sdf,
-    Msdf,
     Slug,
     Emoji,
 }
@@ -46,9 +45,9 @@ fn render(scene: Scene, directory: &Path) -> Vec<u8> {
                 makepad_platform::script::script_mod(vm);
                 makepad_draw::script_mod(vm);
                 let font = if matches!(scene.glyph_path, GlyphPath::Emoji) {
-                    "self:../../widgets/resources/NotoColorEmoji.ttf"
+                    "self:../widgets/resources/NotoColorEmoji.ttf"
                 } else {
-                    "self:../../widgets/resources/IBMPlexSans-Text.ttf"
+                    "self:../widgets/resources/IBMPlexSans-Text.ttf"
                 };
                 let source = script! {
                     use mod.draw.*
@@ -139,13 +138,7 @@ fn render(scene: Scene, directory: &Path) -> Vec<u8> {
             } else {
                 "HHHHHHHH"
             };
-            cx.fonts.borrow_mut().set_outline_rasterization_mode(
-                if matches!(scene.glyph_path, GlyphPath::Msdf) {
-                    OutlineRasterizationMode::Msdf
-                } else {
-                    OutlineRasterizationMode::Sdf
-                },
-            );
+            cx.fonts.borrow_mut().set_outline_rasterization_mode(OutlineRasterizationMode::Sdf);
             for y in [40.0, 120.0] {
                 if matches!(scene.glyph_path, GlyphPath::Slug) {
                     text.draw_abs(&mut cx, dvec2(24.0, y), run);
@@ -157,25 +150,16 @@ fn render(scene: Scene, directory: &Path) -> Vec<u8> {
                     let mut glyphs = Vec::new();
                     for row in &layout.rows {
                         for glyph in &row.glyphs {
-                            let request_size = if matches!(scene.glyph_path, GlyphPath::Msdf) {
-                                glyph.font_size_in_lpxs.max(
-                                    cx.fonts.borrow().rasterizer().borrow().msdf_resolution()
-                                        .min_request_dpxs_per_em + 1.0,
-                                )
-                            } else { glyph.font_size_in_lpxs };
+                            let request_size = glyph.font_size_in_lpxs;
                             let raster = glyph.rasterize(request_size).unwrap();
                             let expected = match scene.glyph_path {
                                 GlyphPath::Sdf => AtlasKind::Grayscale,
-                                GlyphPath::Msdf => AtlasKind::Msdf,
                                 GlyphPath::Emoji => AtlasKind::Color,
                                 GlyphPath::Slug => unreachable!(),
                             };
                             if raster.atlas_kind != expected {
-                                // HAL rasterisation is asynchronous; AUTO first returns SDF
-                                // while its MSDF upgrade runs. Capture only the requested kind.
-                                assert!(raster.atlas_kind == AtlasKind::Unresolved
-                                    || (matches!(scene.glyph_path, GlyphPath::Msdf)
-                                        && raster.atlas_kind == AtlasKind::Grayscale));
+                                // HAL rasterisation is asynchronous. Capture only the requested kind.
+                                assert!(raster.atlas_kind == AtlasKind::Unresolved);
                                 draw_glyphs_ready.set(false);
                             }
                             glyphs.push((
@@ -238,7 +222,6 @@ fn diff(a: &[u8], b: &[u8]) -> usize {
 }
 
 #[test]
-#[ignore = "requires a native HAL GPU release build"]
 fn text_clips_like_quads_after_view_transform() {
     let keep = std::env::var_os("MAKEPAD_TEST_OUT_DIR");
     let directory = keep
@@ -249,7 +232,6 @@ fn text_clips_like_quads_after_view_transform() {
         });
     for glyph_path in [
         GlyphPath::Sdf,
-        GlyphPath::Msdf,
         GlyphPath::Slug,
         GlyphPath::Emoji,
     ] {

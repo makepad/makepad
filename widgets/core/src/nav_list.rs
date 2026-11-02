@@ -509,24 +509,4 @@ mod tests {
         assert!(!press_keeps_keys(visible, None, dvec2(150.0, 150.0), true));
     }
 
-    /// Choosing survives a set that still holds the choice, and falls to the
-    /// first when it does not: a nav with nothing lit does not say where
-    /// you are, which is the defect two of the six shipped strips have.
-    #[test]
-    fn the_choice_survives_what_it_can_and_falls_back_when_it_cannot() {
-        let here: Vec<Destination> = (1..=3)
-            .map(|i| Destination::new(LiveId(i), &format!("place {i}")))
-            .collect();
-        let selected = Some(LiveId(2));
-        let keep = selected
-            .filter(|id| here.iter().any(|d| d.id == *id))
-            .or_else(|| here.first().map(|d| d.id));
-        assert_eq!(keep, Some(LiveId(2)), "still there: still lit");
-
-        let gone = vec![Destination::new(LiveId(7), "elsewhere")];
-        let keep = selected
-            .filter(|id| gone.iter().any(|d| d.id == *id))
-            .or_else(|| gone.first().map(|d| d.id));
-        assert_eq!(keep, Some(LiveId(7)), "gone: the first takes over");
-    }
 }

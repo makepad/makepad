@@ -18,12 +18,14 @@
 //! `scratch()` routes Rust compile working sets through a reserved-address burst arena.
 //! Arena pointers must come back through this allocator, never directly through C `free`.
 //!
-//! One arena implementation (arena.rs): two static instances and runtime-created domain heaps.
+//! One arena implementation (arena.rs): three static instances and runtime-created domain heaps.
 //! - the **burst** arena: scratch for one compile, emptied chunks go straight back;
 //! - the **compiler** arena: everything the compiler allocates and keeps -- the program's tables,
 //!   the caches, the parse trees -- so the system heap holds only the program (JIT code's
 //!   malloc, provided crates, runtime helpers). Same size-class chunks as burst, plus a list of
 //!   chunks with free slots so a long-lived heap reuses what it frees.
+//! - the **slot** arena: unit-lifetime slot data, segregated from disposable front-end state.
+//!   Its blocks stay here when reallocated, whatever phase the caller is in.
 //!
 //! The compiler arena (and a domain heap) allocates through thread-owned chunks: a chunk is the
 //! current chunk of at most one thread per size class, and that thread allocates from it and
@@ -47,7 +49,7 @@
 //! Native shims and runtime helpers use this global allocator and stay shared. Domain frees
 //! and reallocs find the owning range, including calls from native code and other threads.
 
-#[cfg(any(target_os = "macos", target_os = "linux", target_os = "android", windows))]
+#[cfg(any(target_vendor = "apple", target_os = "linux", target_os = "android", windows))]
 #[allow(dead_code)]
 mod burst {
     pub const COMPILER: bool = false;
@@ -57,7 +59,7 @@ mod burst {
     #[cfg(test)]
     include!("zone_alloc/arena_tests.rs");
 }
-#[cfg(any(target_os = "macos", target_os = "linux", target_os = "android", windows))]
+#[cfg(any(target_vendor = "apple", target_os = "linux", target_os = "android", windows))]
 #[allow(dead_code)]
 mod compiler {
     pub const COMPILER: bool = true;
@@ -65,11 +67,19 @@ mod compiler {
     const WEB_AT: usize = 0;
     include!("zone_alloc/arena.rs");
 }
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_vendor = "apple", target_os = "linux", target_os = "android", windows))]
+#[allow(dead_code)]
+mod slots {
+    pub const COMPILER: bool = true;
+    pub const LABEL: &std::ffi::CStr = c"makepad-run-slots";
+    const WEB_AT: usize = 0;
+    include!("zone_alloc/arena.rs");
+}
+#[cfg(any(target_vendor = "apple", target_os = "linux"))]
 pub mod web;
 
 // No TLS, reservation, environment read, or routing on wasm/unsupported targets.
-#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "android", windows)))]
+#[cfg(not(any(target_vendor = "apple", target_os = "linux", target_os = "android", windows)))]
 #[allow(dead_code)]
 mod disabled {
     use std::alloc::Layout;
@@ -114,6 +124,12 @@ mod disabled {
     pub fn states() -> [usize; 28] {
         [0; 28]
     }
+    pub fn detail() -> (usize, usize, usize, usize) {
+        (0, 0, 0, 0)
+    }
+    pub fn events() -> [usize; 9] {
+        [0; 9]
+    }
     pub fn mark_old() {}
     pub fn is_old(_: *const u8) -> bool {
         false
@@ -133,10 +149,12 @@ mod disabled {
         unreachable!()
     }
 }
-#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "android", windows)))]
+#[cfg(not(any(target_vendor = "apple", target_os = "linux", target_os = "android", windows)))]
 use disabled as burst;
-#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "android", windows)))]
+#[cfg(not(any(target_vendor = "apple", target_os = "linux", target_os = "android", windows)))]
 use disabled as compiler;
+#[cfg(not(any(target_vendor = "apple", target_os = "linux", target_os = "android", windows)))]
+use disabled as slots;
 
 pub use burst::{copy_out, stats as burst_stats, trim as burst_trim, ScratchGuard};
 
@@ -168,9 +186,9 @@ fn env_flag(name: &std::ffi::CStr, cell: &std::sync::atomic::AtomicU8, default: 
     #[cfg(unix)]
     let v = unsafe {
         extern "C" {
-            fn getenv(name: *const u8) -> *const u8;
+            fn getenv(name: *const core::ffi::c_char) -> *mut core::ffi::c_char;
         }
-        let p = getenv(name.as_ptr().cast());
+        let p = getenv(name.as_ptr()).cast::<u8>();
         if p.is_null() || *p.add(1) != 0 {
             default
         } else {
@@ -262,17 +280,34 @@ impl Drop for JobScope {
 pub fn job_stats() -> (usize, usize, usize) {
     (JOBS.load(Ordering::Relaxed), SURVIVOR_JOBS.load(Ordering::Relaxed), SURVIVOR_BYTES.load(Ordering::Relaxed))
 }
-pub use relax_session::phase::{in_compiler, PhaseGuard};
+pub use relax_session::phase::{in_compiler, in_slots, PhaseGuard};
 
 use relax_session::phase::ROUTING as MODE;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
-#[cfg(target_os = "macos")]
+#[cfg(target_vendor = "apple")]
 use std::sync::atomic::AtomicBool;
 
 /// (committed bytes, live requested bytes, committed 2 MB chunk equivalents) of the compiler arena.
 pub fn compiler_stats() -> (usize, usize, usize) {
     compiler::stats()
+}
+
+/// (committed bytes, live requested bytes, committed 2 MB chunk equivalents) of the slot arena.
+pub fn slots_stats() -> (usize, usize, usize) {
+    slots::stats()
+}
+
+pub fn slots_census() -> [usize; 11] {
+    slots::census()
+}
+
+pub fn slots_states() -> [usize; 28] {
+    slots::states()
+}
+
+pub fn slots_detail() -> (usize, usize, usize, usize) {
+    slots::detail()
 }
 
 /// (touched bytes of small chunks, bytes in their live slots, bytes of large blocks, chunks listed for reuse).
@@ -300,12 +335,14 @@ pub fn compiler_old_marks() -> usize {
 }
 
 /// Where block `p` lives: 0 a compiler-arena chunk marked old, 1 another compiler-arena chunk,
-/// 2 the burst arena, 3 any other heap (diagnostics: `memory compiler=1` placement rows).
+/// 2 the burst arena, 3 any other heap, 4 the slot arena (diagnostic placement rows).
 pub fn placement(p: *const u8) -> usize {
     if compiler::owns(p as *mut u8) {
         if compiler::is_old(p) { 0 } else { 1 }
     } else if burst::owns(p as *mut u8) {
         2
+    } else if slots::owns(p as *mut u8) {
+        4
     } else {
         3
     }
@@ -321,11 +358,12 @@ pub fn compiler_events() -> [usize; 9] {
     compiler::events()
 }
 
-/// The calling thread gives its current compiler-arena chunks back to the shared lists (a worker
+/// The calling thread gives its current compiler and slot chunks back to their shared lists (a worker
 /// that stays alive between tasks: what it left free is then reusable by any thread, and a chunk
 /// it emptied is released, as when a thread ends).
 pub fn compiler_hand_back() {
-    compiler::detach_thread()
+    compiler::detach_thread();
+    slots::detach_thread();
 }
 
 /// Compiler-arena blocks of the calling thread come from fresh chunks only until the guard drops
@@ -342,12 +380,17 @@ pub fn compiler_fresh() -> impl Drop {
 /// released. A thread with no current chunk (it allocated nothing since) pays one pass over its
 /// class table.
 pub fn compiler_hand_back_idle() {
-    compiler::detach_thread();
+    compiler_hand_back();
 }
 
-/// Decommits the compiler arena's warm chunks (settle's heap trim).
+/// Decommits the compiler and slot arenas' warm chunks (settle's heap trim).
 pub fn compiler_trim() {
-    compiler::trim()
+    compiler::trim();
+    slots::trim();
+}
+
+pub fn slots_trim() {
+    slots::trim();
 }
 
 /// Whether compiler-phase routing is on in this process (`MAKEPAD_RUN_COMPILER_ARENA=0` turns it off).
@@ -360,15 +403,16 @@ fn decide() -> bool {
     #[cfg(unix)]
     let off = unsafe {
         extern "C" {
-            fn getenv(name: *const u8) -> *const u8;
+            fn getenv(name: *const core::ffi::c_char) -> *mut core::ffi::c_char;
         }
         // std::env would allocate, and this runs inside the allocator's first routed call
-        let p = getenv(c"MAKEPAD_RUN_COMPILER_ARENA".as_ptr().cast());
+        let p = getenv(c"MAKEPAD_RUN_COMPILER_ARENA".as_ptr()).cast::<u8>();
         !p.is_null() && *p == b'0' && *p.add(1) == 0
     };
     #[cfg(not(unix))]
     let off = false;
-    let on = !off && compiler::init();
+    // the slot arena is reserved with the compiler arena: routing is on only with both
+    let on = !off && compiler::init() && slots::init();
     MODE.store(if on { 1 } else { 2 }, Ordering::Relaxed);
     on
 }
@@ -396,7 +440,7 @@ pub struct ThreadGuard(#[allow(dead_code)] PhaseGuard);
 
 impl Drop for ThreadGuard {
     fn drop(&mut self) {
-        compiler::detach_thread();
+        compiler_hand_back();
     }
 }
 
@@ -411,6 +455,19 @@ pub fn compiler_thread() -> ThreadGuard {
 pub fn kept() -> PhaseGuard {
     enabled();
     relax_session::phase::kept()
+}
+
+/// Allocations go to the unit-lifetime slot arena until the guard drops, even inside a job.
+#[inline]
+pub fn slots() -> PhaseGuard {
+    enabled();
+    relax_session::phase::slots()
+}
+
+#[inline]
+pub fn slots_with<R>(f: impl FnOnce() -> R) -> R {
+    let _s = slots();
+    f()
 }
 
 /// Runs `f` in the kept phase (the system heap): what it allocates and returns is the program's.
@@ -434,24 +491,89 @@ pub fn compiler_owns(p: *const u8) -> bool {
     compiler::owns(p as *mut u8)
 }
 
+#[inline]
+pub fn slots_owns(p: *const u8) -> bool {
+    slots::owns(p as *mut u8)
+}
+
 /// Does `p` lie in the burst (scratch) arena?
 #[inline]
 pub fn burst_owns(p: *const u8) -> bool {
     burst::owns(p as *mut u8)
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux", target_os = "android", windows))]
+#[cfg(any(target_vendor = "apple", target_os = "linux", target_os = "android", windows))]
 pub mod domain;
 
 pub struct RelaxAlloc;
 
+/// glibc: the bytes of the system heap this allocator holds (the loader's own kept blocks, and the
+/// native code's it serves), as malloc counts its chunks. A JIT program's own allocations never
+/// come through here (the program allocator ABI goes to the program's allocator or its domain
+/// heap), so the system heap minus these is the program's (program_os.rs mallinfo2). Sharded by
+/// stack address (one cache line per shard), so threads do not contend; a shard may go negative
+/// (a block freed on another thread's shard), the sum may not.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+pub mod system_held {
+    use std::sync::atomic::{AtomicIsize, Ordering::Relaxed};
+
+    #[repr(align(64))]
+    struct Shard(AtomicIsize);
+    static SHARDS: [Shard; 32] = [const { Shard(AtomicIsize::new(0)) }; 32];
+
+    extern "C" {
+        fn malloc_usable_size(p: *mut u8) -> usize;
+    }
+
+    #[inline]
+    fn shard() -> &'static AtomicIsize {
+        let here = 0u8;
+        &SHARDS[(std::ptr::addr_of!(here) as usize >> 16) % SHARDS.len()].0
+    }
+
+    /// malloc's chunk of `p`: its usable size and the chunk header
+    #[inline]
+    unsafe fn chunk(p: *mut u8) -> isize {
+        (malloc_usable_size(p) + std::mem::size_of::<usize>()) as isize
+    }
+
+    #[inline]
+    pub(super) unsafe fn add(p: *mut u8) {
+        if !p.is_null() {
+            shard().fetch_add(chunk(p), Relaxed);
+        }
+    }
+
+    #[inline]
+    pub(super) unsafe fn sub(p: *mut u8) {
+        shard().fetch_sub(chunk(p), Relaxed);
+    }
+
+    /// A block's chunk before a realloc
+    #[inline]
+    pub(super) unsafe fn chunk_of(p: *mut u8) -> isize {
+        chunk(p)
+    }
+
+    /// A realloc moved (or resized) a block of chunk `old` to `q`
+    #[inline]
+    pub(super) unsafe fn moved(old: isize, q: *mut u8) {
+        shard().fetch_add(chunk(q) - old, Relaxed);
+    }
+
+    /// The bytes held now.
+    pub fn bytes() -> usize {
+        SHARDS.iter().map(|s| s.0.load(Relaxed)).sum::<isize>().max(0) as usize
+    }
+}
+
 /// Set when the program announces a malloc-zone swap (before it happens).
-#[cfg(target_os = "macos")]
+#[cfg(target_vendor = "apple")]
 static OWN_ZONE: AtomicBool = AtomicBool::new(false);
 
 /// From now on allocate from Relax's own zone (jit.rs allocator_swap, phase 0).
 pub fn use_own_zone() {
-    #[cfg(target_os = "macos")]
+    #[cfg(target_vendor = "apple")]
     {
         zone::get();
         OWN_ZONE.store(true, Ordering::Release);
@@ -460,14 +582,14 @@ pub fn use_own_zone() {
 
 /// Returns the free pages of Relax's own malloc zone to the system (macOS; nothing elsewhere).
 pub fn zone_relief() {
-    #[cfg(target_os = "macos")]
+    #[cfg(target_vendor = "apple")]
     if OWN_ZONE.load(Ordering::Relaxed) {
         extern "C" { fn malloc_zone_pressure_relief(zone: *const u8, goal: usize) -> usize; }
         unsafe { malloc_zone_pressure_relief(zone::get(), 0) };
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(target_vendor = "apple")]
 mod zone {
     use std::sync::atomic::{AtomicPtr, Ordering};
 
@@ -479,7 +601,7 @@ mod zone {
         fn malloc_zone_realloc(zone: *mut u8, p: *mut u8, size: usize) -> *mut u8;
         fn malloc_zone_memalign(zone: *mut u8, align: usize, size: usize) -> *mut u8;
         fn malloc_zone_free(zone: *mut u8, p: *mut u8);
-        fn free(p: *mut u8);
+        fn free(p: *mut core::ffi::c_void);
     }
 
     /// The head of libmalloc's `malloc_zone_t` (stable ABI): `size` answers 0 for a pointer the
@@ -531,7 +653,7 @@ mod zone {
         if owns(p) {
             malloc_zone_free(get(), p)
         } else {
-            free(p)
+            free(p.cast())
         }
     }
 
@@ -552,6 +674,12 @@ mod zone {
 unsafe impl GlobalAlloc for RelaxAlloc {
     #[inline]
     unsafe fn alloc(&self, l: Layout) -> *mut u8 {
+        if in_slots() {
+            let p = slots::alloc(l);
+            if !p.is_null() {
+                return p;
+            }
+        }
         // the job arena takes only compiler-phase blocks: kept state and JIT code's allocations
         // (kept phase) never land in it, whatever scope the thread is in
         if burst::active() && in_compiler() {
@@ -567,14 +695,23 @@ unsafe impl GlobalAlloc for RelaxAlloc {
                 return p;
             }
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(target_vendor = "apple")]
         if OWN_ZONE.load(Ordering::Relaxed) {
             return zone::alloc(l.size(), l.align());
         }
-        System.alloc(l)
+        let p = System.alloc(l);
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        system_held::add(p);
+        p
     }
     #[inline]
     unsafe fn alloc_zeroed(&self, l: Layout) -> *mut u8 {
+        if in_slots() {
+            let p = slots::alloc_zeroed(l);
+            if !p.is_null() {
+                return p;
+            }
+        }
         // the job arena takes only compiler-phase blocks: kept state and JIT code's allocations
         // (kept phase) never land in it, whatever scope the thread is in
         if burst::active() && in_compiler() {
@@ -591,11 +728,14 @@ unsafe impl GlobalAlloc for RelaxAlloc {
                 return p;
             }
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(target_vendor = "apple")]
         if OWN_ZONE.load(Ordering::Relaxed) {
             return zone::alloc_zeroed(l.size(), l.align());
         }
-        System.alloc_zeroed(l)
+        let p = System.alloc_zeroed(l);
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        system_held::add(p);
+        p
     }
     #[inline]
     unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
@@ -605,22 +745,42 @@ unsafe impl GlobalAlloc for RelaxAlloc {
             zap(p, l);
             return compiler::dealloc(p, l);
         }
-        #[cfg(any(target_os = "macos", target_os = "linux", target_os = "android", windows))]
+        if slots::owns(p) {
+            zap(p, l);
+            return slots::dealloc(p, l);
+        }
+        #[cfg(any(target_vendor = "apple", target_os = "linux", target_os = "android", windows))]
         if domain::dealloc_layout(p, l) { return; }
         if burst::owns(p) {
             zap(p, l);
             job_count(-(l.size() as isize));
             return burst::dealloc(p, l);
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(target_vendor = "apple")]
         if OWN_ZONE.load(Ordering::Relaxed) {
             return zone::dealloc(p);
         }
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        system_held::sub(p);
         System.dealloc(p, l)
     }
     #[inline]
     unsafe fn realloc(&self, p: *mut u8, l: Layout, size: usize) -> *mut u8 {
-        #[cfg(any(target_os = "macos", target_os = "linux", target_os = "android", windows))]
+        // Slot data keeps its arena even when a history grows in a compile job or kept phase.
+        // On allocation failure, return null and leave the original block intact.
+        if slots::owns(p) {
+            if slots::resize_in_place(p, l, size) {
+                return p;
+            }
+            let n = slots::alloc(Layout::from_size_align_unchecked(size, l.align()));
+            if !n.is_null() {
+                std::ptr::copy_nonoverlapping(p, n, l.size().min(size));
+                zap(p, l);
+                slots::dealloc(p, l);
+            }
+            return n;
+        }
+        #[cfg(any(target_vendor = "apple", target_os = "linux", target_os = "android", windows))]
         if let Some(q) = domain::realloc_layout(p, l, size) { return q; }
         let in_burst = burst::owns(p);
         // A job-arena block moves to wherever the scope and phase send it now. A block of another
@@ -647,10 +807,20 @@ unsafe impl GlobalAlloc for RelaxAlloc {
             }
             return n;
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(target_vendor = "apple")]
         if OWN_ZONE.load(Ordering::Relaxed) {
             return zone::realloc(p, l.size(), l.align(), size);
         }
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        {
+            let old = system_held::chunk_of(p);
+            let q = System.realloc(p, l, size);
+            if !q.is_null() {
+                system_held::moved(old, q);
+            }
+            q
+        }
+        #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
         System.realloc(p, l, size)
     }
 }
@@ -664,7 +834,7 @@ pub(crate) fn test_serial() -> relax_session::sync::MutexGuard<'static, ()> {
     SERIAL.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-#[cfg(all(test, any(target_os = "macos", target_os = "linux", target_os = "android", windows)))]
+#[cfg(all(test, any(target_vendor = "apple", target_os = "linux", target_os = "android", windows)))]
 mod routing_tests {
     use super::*;
 
@@ -718,6 +888,140 @@ mod routing_tests {
     }
 
     include!("zone_alloc/stress_tests.rs");
+
+    #[test]
+    fn slots_segregate_interleaved_lifetimes_and_release_compiler_chunks() {
+        let _s = serial();
+        let _k = kept();
+        compiler_hand_back();
+        compiler_trim();
+        let baseline = compiler_stats().0;
+        let mut short = Vec::new();
+        let mut long = Vec::new();
+        let mut short_chunks = std::collections::BTreeSet::new();
+        unsafe {
+            for i in 0..8192 {
+                let size = [40, 100, 1000, 4096][i % 4];
+                let a = {
+                    let _c = compiler();
+                    assert!(in_compiler() && !in_slots());
+                    put(size, 8, 0xcc)
+                };
+                short_chunks.insert(a.0 as usize & !(compiler::CHUNK - 1));
+                assert!(compiler::owns(a.0) && !slots::owns(a.0));
+                short.push(a);
+                let _c = compiler();
+                let _job = job("slot routing test", true);
+                let b = {
+                    let _slot = slots();
+                    assert!(in_slots() && !in_compiler());
+                    let l = Layout::from_size_align(size, 8).unwrap();
+                    let p = RelaxAlloc.alloc_zeroed(l);
+                    assert!(!p.is_null() && all_eq(p, size, 0));
+                    std::ptr::write_bytes(p, (i % 251) as u8, size);
+                    (p, l)
+                };
+                assert!(in_compiler() && !in_slots(), "restore the outer phase");
+                assert!(slots::owns(b.0) && !burst::owns(b.0));
+                assert_eq!(placement(b.0), 4);
+                long.push(b);
+            }
+            assert!(compiler_stats().0 > baseline);
+            for &(p, _) in &long {
+                assert!(!short_chunks.contains(&(p as usize & !(slots::CHUNK - 1))));
+            }
+            for (p, l) in short {
+                RelaxAlloc.dealloc(p, l);
+            }
+            compiler_hand_back_idle();
+            compiler_trim();
+            assert_eq!(compiler_stats().0, baseline, "slot survivors must not pin compiler chunks");
+            for (i, (p, l)) in long.into_iter().enumerate() {
+                assert!(all_eq(p, l.size(), (i % 251) as u8), "slot {i} damaged by compiler trim");
+                RelaxAlloc.dealloc(p, l);
+            }
+        }
+        compiler_hand_back();
+        compiler_trim();
+    }
+
+    #[test]
+    fn old_chunks_drain_after_mark_old() {
+        let _s = serial();
+        let _k = kept();
+        compiler_hand_back();
+        compiler_trim();
+        let (baseline, _, baseline_chunks) = compiler_stats();
+        unsafe {
+            // the cold state: every other block survives, so each chunk keeps free holes
+            let mut cold = Vec::new();
+            let mut survivors = Vec::new();
+            {
+                let _c = compiler();
+                for i in 0..16384 {
+                    let b = put(48, 8, 0x11);
+                    if i % 2 == 0 { cold.push(b) } else { survivors.push(b) }
+                }
+            }
+            for (p, l) in cold {
+                RelaxAlloc.dealloc(p, l);
+            }
+            compiler_hand_back();
+            compiler_mark_old();
+            // what is allocated now never fills the old chunks' holes
+            let mut fresh = Vec::new();
+            {
+                let _c = compiler();
+                for _ in 0..8192 {
+                    let b = put(48, 8, 0x22);
+                    assert_eq!(placement(b.0), 1, "an allocation after mark_old took an old chunk's free slot");
+                    fresh.push(b);
+                }
+            }
+            // the survivors go: every old chunk empties and is released
+            for (p, l) in survivors {
+                assert!(all_eq(p, 48, 0x11));
+                RelaxAlloc.dealloc(p, l);
+            }
+            compiler_hand_back();
+            compiler_trim();
+            // (chunks committed before this test may hold other tests' blocks and stay old)
+            assert!(arena_states().0[21] <= baseline_chunks, "an emptied old chunk was not released");
+            for (p, l) in fresh {
+                assert!(all_eq(p, 48, 0x22));
+                RelaxAlloc.dealloc(p, l);
+            }
+        }
+        compiler_hand_back();
+        compiler_trim();
+        // (a chunk committed before this test may have drained and gone too)
+        assert!(compiler_stats().0 <= baseline, "the test's chunks were not all released");
+    }
+
+    #[test]
+    fn slot_realloc_stays_in_slots_in_every_phase() {
+        let _s = serial();
+        unsafe {
+            for phase in 0..3 {
+                let (mut p, mut l) = slots_with(|| put(40, 8, 0x5a));
+                let _phase = match phase { 0 => kept(), 1 => compiler(), _ => slots() };
+                let _job = job("slot realloc test", true);
+                for size in [47, 5000, 300 << 10, 5 << 20, 64] {
+                    let q = RelaxAlloc.realloc(p, l, size);
+                    assert!(!q.is_null() && slots::owns(q));
+                    assert!(!compiler::owns(q) && !burst::owns(q));
+                    if size == 47 { assert_eq!(p, q, "same size class"); }
+                    assert!(all_eq(q, l.size().min(size), 0x5a));
+                    std::ptr::write_bytes(q, 0x5a, size);
+                    p = q;
+                    l = Layout::from_size_align(size, 8).unwrap();
+                }
+                RelaxAlloc.dealloc(p, l);
+            }
+        }
+        compiler_hand_back();
+        compiler_trim();
+    }
 
     #[test]
     fn realloc_stays_in_place_in_a_class_and_moves_to_the_phase_heap() {

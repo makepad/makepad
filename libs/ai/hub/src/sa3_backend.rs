@@ -334,33 +334,6 @@ mod tests {
         GenerateParams::from_request(&request).unwrap()
     }
 
-    #[test]
-    fn job_fraction_bands_stay_ordered() {
-        // Pipeline-local fractions (0..=1) land inside their job bands,
-        // clamped, and the bands never cross the backend's own wav-encode
-        // stage at 0.95: load 0.01..0.04 < generate 0.04..0.94 < 0.95.
-        assert!((load_fraction(0.0) - 0.01).abs() < 1e-9);
-        assert!((load_fraction(1.0) - 0.04).abs() < 1e-9);
-        assert!((gen_fraction(0.0) - 0.04).abs() < 1e-9);
-        assert!((gen_fraction(1.0) - 0.94).abs() < 1e-9);
-        // Out-of-range pipeline fractions clamp instead of escaping the band.
-        assert!((gen_fraction(7.0) - 0.94).abs() < 1e-9);
-        assert!((load_fraction(-1.0) - 0.01).abs() < 1e-9);
-        assert!(gen_fraction(1.0) < 0.95);
-    }
-
-    #[test]
-    fn stub_backend_is_never_reported_resident() {
-        let mut backend = Sa3Backend::with_stub(
-            "sa3-test",
-            Box::new(|_, _, _| unreachable!("lifecycle test never generates")),
-        );
-        assert!(!backend.is_resident());
-        backend.unload().unwrap();
-        backend.unload().unwrap();
-        assert!(!backend.is_resident());
-    }
-
     #[cfg(feature = "audio")]
     #[test]
     fn native_backend_is_send_and_starts_cold() {

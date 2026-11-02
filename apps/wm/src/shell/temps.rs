@@ -943,20 +943,6 @@ mod linux {
             v.unwrap_or(f32::NAN)
         }
     }
-
-    /// What this machine reports, for a look on a node:
-    /// `cargo test --release -p makepad-app-wm temps_here -- --ignored --nocapture`.
-    #[test]
-    #[ignore]
-    fn temps_here() {
-        let mut r = Reader::open();
-        let _ = r.read(0.0);
-        std::thread::sleep(std::time::Duration::from_millis(1000));
-        let v = r.read(1.0);
-        for (s, v) in r.sensors().iter().zip(v) {
-            println!("{:?}/{:?} {} [{}] = {} limit {:?} crit {:?} ({})", s.group, s.kind, s.name(true), s.device, s.unit.format(v), s.limit, s.crit, s.key);
-        }
-    }
 }
 
 #[cfg(test)]

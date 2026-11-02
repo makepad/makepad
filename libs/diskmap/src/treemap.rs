@@ -2283,42 +2283,6 @@ mod tests {
         assert!(compared > 20, "only {compared} cells survived both layouts — the test is not biting");
     }
 
-    // The cost canary the bundle floor used to be for: a quarter-million
-    // files in one folder must cost the layout what its pixels cost, not
-    // what its listing costs. Run by hand with
-    // `cargo test -p files --release -- --ignored --nocapture`.
-    #[test]
-    #[ignore]
-    fn packing_cost_canary_200k() {
-        let mut crowd = Vec::new();
-        for i in 0..200_000u64 {
-            let size = ((i.wrapping_mul(2_654_435_761)) % 9973 + 1) * 4096;
-            crowd.push(leaf(&format!("f{i}.bin"), size));
-        }
-        let tree = dir(
-            "root",
-            vec![leaf("huge.mov", 900_000_000_000), dir("crowd", crowd)],
-        );
-        let style = MapStyle::default();
-        let viewport = Rect { x: 0.0, y: 0.0, w: 1200.0, h: 800.0 };
-        // Far: the crowd is a small tile, its files all in the tail plate.
-        let far = Rect { x: 0.0, y: 0.0, w: 1200.0, h: 800.0 };
-        // Near: 64x in, anchored inside the crowd so its files fill the panel.
-        let near = Rect { x: -20_000.0, y: -20_000.0, w: 1200.0 * 64.0, h: 800.0 * 64.0 };
-        for (name, area) in [("far", far), ("near", near)] {
-            let t = Cx::monotonic_now();
-            let mut cells = 0usize;
-            const RUNS: u32 = 20;
-            for _ in 0..RUNS {
-                cells = layout(&tree, Path::new("/root"), area, viewport, &style, None).len();
-            }
-            println!(
-                "200k-folder {name}: {:.2}ms per layout, {cells} cells",
-                (Cx::monotonic_now() - t) * 1000.0 / RUNS as f64
-            );
-        }
-    }
-
     /// The rules a test walks under: everything is generic, nothing is
     /// skipped. The app's own policy is tested where the app defines it.
     fn open_rules<'a>() -> ScanRules<'a> {

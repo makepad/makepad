@@ -232,11 +232,6 @@ mod tests {
         let started = std::time::Instant::now();
         match (promise.produce)(&part) {
             Ok(()) => {}
-            // Linux / Windows nodes without an H.264 + AAC encoder: nothing to check there
-            Err(e) if !cfg!(target_vendor = "apple") && e.starts_with("video encoder") => {
-                eprintln!("DROP-MP4: skipped, {e}");
-                return;
-            }
             Err(e) => panic!("making the video: {e}"),
         }
         let made_ms = started.elapsed().as_millis();
@@ -429,10 +424,6 @@ mod tests {
         let dest = dir.join("out.mp4");
         let made = match drop_video::write_song_video(&src, &dest, "Alea Iacta Lux Est", &kit) {
             Ok(made) => made,
-            Err(e) if !cfg!(target_vendor = "apple") && e.starts_with("video encoder") => {
-                eprintln!("LYRIC-MP4: skipped, {e}");
-                return;
-            }
             Err(e) => panic!("making the video: {e}"),
         };
         assert!(!made.cached && made.lyric_lines == 3, "{made:?}");
@@ -471,44 +462,6 @@ mod tests {
             }
         }
         std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    /// The sample for the report: a real AI song (`AMP_LYRIC_SONG`, a path from this crate) made
-    /// cold and then from the cache, its tracks checked, frames at `AMP_LYRIC_AT` (s, comma
-    /// separated) kept as PNGs with the MP4 in `AMP_DROP_TEST_OUT`. Without the song: nothing.
-    #[test]
-    fn sample_lyric_video_of_a_real_song() {
-        let Ok(song) = std::env::var("AMP_LYRIC_SONG") else { return };
-        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join(song);
-        let out = std::path::PathBuf::from(std::env::var("AMP_DROP_TEST_OUT").unwrap_or_else(|_| std::env::temp_dir().join("amp-lyric-sample").to_string_lossy().into_owned()));
-        std::fs::create_dir_all(&out).unwrap();
-        let _ = std::fs::remove_dir_all(drop_video::cache_dir());
-        let name = display_name(&src.to_string_lossy());
-        let dest = out.join(format!("{name}.mp4"));
-        let kit = test_kit();
-        let cold = drop_video::write_song_video(&src, &dest, &name, &kit).expect("the video");
-        let warm = drop_video::write_song_video(&src, &out.join("cached.mp4"), &name, &kit).expect("the cached video");
-        assert!(!cold.cached && warm.cached);
-        let _ = std::fs::remove_file(out.join("cached.mp4"));
-        let video = makepad_video::VideoFileDecoder::open(&dest.to_string_lossy()).unwrap();
-        let info = video.info().clone();
-        drop(video);
-        let size = std::fs::metadata(&dest).unwrap().len();
-        let mut audio_frames = 0usize;
-        if let Ok(mut audio) = makepad_video::VideoFileDecoder::open_audio(&dest.to_string_lossy()) {
-            while let Ok(Some(chunk)) = audio.next_audio() {
-                audio_frames += chunk.samples.len() / chunk.channels as usize;
-            }
-        }
-        eprintln!(
-            "LYRIC-SAMPLE: {name}: {size} bytes, {:.2} s, {:?} {}x{}, audio {} Hz x{} ({:.2} s decoded); cold {cold:?}; cached {:.1} ms",
-            info.duration_100ns as f64 / 1e7, info.video_codec, info.width, info.height, info.audio_sample_rate, info.audio_channels,
-            audio_frames as f64 / info.audio_sample_rate.max(1) as f64, warm.total_ms
-        );
-        let times: Vec<f64> = std::env::var("AMP_LYRIC_AT").unwrap_or_else(|_| "1,20,40,60".into()).split(',').filter_map(|t| t.trim().parse().ok()).collect();
-        for (t, shot) in times.iter().zip(frames_at(&dest, &times)) {
-            save_png(&out, &format!("frame-{t:05.1}s.png"), &shot.1, shot.2, shot.3);
-        }
     }
 
     /// The painter alone (no encoder): its scenes as PNGs in `AMP_DROP_TEST_OUT`, for a look.

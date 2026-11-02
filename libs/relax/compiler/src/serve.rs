@@ -275,7 +275,7 @@ impl Session {
         let sess = &self.unit.prog.session.clone();
         let options = &sess.options;
         let start = Instant::now();
-        let trace = std::env::var_os("MAKEPAD_RUN_RELOAD_TRACE").is_some();
+        let trace = crate::reload::reload_trace();
         if trace { crate::parse_work::begin(); }
         if crate::diag::enabled() {
             // Retained front-end errors still need their structured spans/suggestions

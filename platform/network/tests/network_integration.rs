@@ -156,10 +156,8 @@ fn native_http_enforces_body_cap_and_preserves_methods() {
     // the first byte over the cap and closes the request. The peer-side disconnect
     // proves the backend did not buffer the rest of the response.
     let oversized = b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n".to_vec();
-    let Some((address, capture, server)) = one_shot_http_response(oversized, true) else {
-        eprintln!("native HTTP body-cap test skipped: cannot bind local fixture");
-        return;
-    };
+    let (address, capture, server) =
+        one_shot_http_response(oversized, true).expect("bind oversized HTTP fixture");
     let event = run_http_request(
         &runtime,
         LiveId::from_str("native.http.cap.exceeded"),
@@ -592,13 +590,10 @@ fn pre_admission_can_reject_without_waiting_for_or_allocating_body() {
 #[cfg(not(target_arch = "wasm32"))]
 fn websocket_roundtrip_via_http_server(transport: WebSocketTransport) {
     let runtime = NetworkRuntime::new(NetworkConfig::default());
-    let Some(port) = find_free_port() else {
-        eprintln!("websocket integration test skipped: cannot allocate local test port");
-        return;
-    };
+    let port = find_free_port().expect("allocate local test port");
     let listen_address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
     let (request_sender, request_receiver) = mpsc::channel::<HttpServerRequest>();
-    let Some(_http_thread) = runtime.start_http_server(HttpServer {
+    let _http_thread = runtime.start_http_server(HttpServer {
         listen_address,
         request: request_sender,
         post_max_size: 1024 * 1024,
@@ -607,10 +602,7 @@ fn websocket_roundtrip_via_http_server(transport: WebSocketTransport) {
         client_ip_resolver: None,
         trusted_proxy: None,
         allowed_methods: None,
-    }) else {
-        eprintln!("websocket integration test skipped: failed to start http server");
-        return;
-    };
+    }).expect("start local HTTP server");
 
     let server_thread = std::thread::spawn(move || {
         let deadline = Instant::now() + Duration::from_secs(8);
@@ -687,63 +679,11 @@ fn platform_websocket_roundtrip_via_http_server() {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
-fn https_google_request_exercises_https_path() {
-    let _guard = test_guard();
-    let runtime = NetworkRuntime::new(NetworkConfig::default());
-    let request_id = LiveId::from_str("https.makepad.test");
-    let mut request = HttpRequest::new("https://makepad.nl/".to_string(), HttpMethod::GET);
-    request.set_header("User-Agent".to_string(), "makepad-network-test".to_string());
-    runtime
-        .http_start(request_id, request)
-        .expect("http_start should succeed");
-
-    let event = wait_for_event(&runtime, Duration::from_secs(30), |event| {
-        matches!(
-            event,
-            NetworkResponse::HttpResponse {
-                request_id: id,
-                ..
-            } if *id == request_id
-        ) || matches!(
-            event,
-            NetworkResponse::HttpError {
-                request_id: id,
-                ..
-            } if *id == request_id
-        )
-    })
-    .expect("no http result event received");
-
-    match event {
-        NetworkResponse::HttpResponse { response, .. } => {
-            assert!(
-                response.status_code >= 100 && response.status_code < 600,
-                "unexpected status code: {}",
-                response.status_code
-            );
-        }
-        NetworkResponse::HttpError { error, .. } => {
-            let msg = error.message.to_ascii_lowercase();
-            assert!(
-                !msg.contains("unsupported"),
-                "https path reported unsupported transport: {}",
-                error.message
-            );
-        }
-        other => panic!("unexpected network event: {other:?}"),
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-#[test]
 fn http_post_body_roundtrip_preserves_json_payload() {
     let _guard = test_guard();
     let runtime = NetworkRuntime::new(NetworkConfig::default());
 
-    let Some(port) = find_free_port() else {
-        eprintln!("http post body test skipped: cannot allocate local test port");
-        return;
-    };
+    let port = find_free_port().expect("allocate local test port");
 
     let (capture_tx, capture_rx) = mpsc::channel::<(String, Vec<u8>)>();
     let listener = TcpListener::bind(("127.0.0.1", port)).expect("bind local tcp listener");
@@ -842,10 +782,7 @@ fn http_post_body_roundtrip_preserves_json_payload() {
 fn http_get_range_header_is_sent_and_206_body_is_the_slice() {
     let _guard = test_guard();
     let runtime = NetworkRuntime::new(NetworkConfig::default());
-    let Some(port) = find_free_port() else {
-        eprintln!("http range test skipped: cannot allocate local test port");
-        return;
-    };
+    let port = find_free_port().expect("allocate local test port");
 
     let (capture_tx, capture_rx) = mpsc::channel::<String>();
     let listener = TcpListener::bind(("127.0.0.1", port)).expect("bind local tcp listener");
@@ -916,10 +853,7 @@ fn http_get_range_header_is_sent_and_206_body_is_the_slice() {
 #[test]
 fn socket_stream_plain_tcp_large_roundtrip() {
     let _guard = test_guard();
-    let Some(port) = find_free_port() else {
-        eprintln!("socket stream test skipped: cannot allocate local test port");
-        return;
-    };
+    let port = find_free_port().expect("allocate local test port");
 
     let listener = TcpListener::bind(("127.0.0.1", port)).expect("bind local tcp listener");
     let server = std::thread::spawn(move || {

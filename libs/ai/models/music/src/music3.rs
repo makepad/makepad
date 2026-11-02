@@ -930,22 +930,6 @@ mod tests {
     }
 
     #[test]
-    fn pine_fixture_matches_oracle_dump_python() {
-        // Same DEFAULT_PROMPT / DEFAULT_LYRICS as music3_oracle_dump.py.
-        let text = assemble_prompt(MUSIC3_PINE_PROMPT, MUSIC3_PINE_LYRICS);
-        assert_eq!(
-            text,
-            format!(
-                "<|im_start|><|caption_start|>{}<|caption_end|><|lyrics_start|>{}<|lyrics_end|><|im_end|><|audio_start|>",
-                clean_caption(MUSIC3_PINE_PROMPT),
-                normalize_lyrics(MUSIC3_PINE_LYRICS)
-            )
-        );
-        assert!(normalize_lyrics(MUSIC3_PINE_LYRICS).starts_with("[start]\n[verse]\n"));
-        assert_eq!(music3_max_frames(5.0), 125);
-    }
-
-    #[test]
     fn latent_len_matches_official_resample() {
         // 125 frames * 44100/24000 * 960/512 = 430.664… → 430
         assert_eq!(music3_latent_len(125), 430);

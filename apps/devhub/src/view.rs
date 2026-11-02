@@ -55,6 +55,8 @@ pub enum JitDo {
     Lease,
     /// clear its app's JIT cache on its machine (confirmed first)
     ClearCache,
+    /// open the profile window on it (this machine's JITs)
+    Profile,
 }
 
 /// A user action that is confirmed in the panel first.
@@ -380,11 +382,20 @@ impl DevhubView {
         if let Some(n) = &node {
             let dev_hit = Hit::Dev(mi);
             let r = rect(row.pos.x + row.size.x - 166.0, row.pos.y + 3.0, 84.0, 22.0);
-            self.d.button(cx, r, &tok, self.ctrl(&dev_hit, n.dev), None, if n.dev && n.user().is_some() { "user" } else if n.dev { "dev on" } else { "dev off" }, tok.font.caption, fg, true);
+            self.d.button(cx, r, &tok, self.ctrl(&dev_hit, n.dev), None, if n.dev { "dev on" } else { "dev off" }, tok.font.caption, fg, true);
             self.hits.push((dev_hit, r));
+            if n.user().is_some() {
+                // someone is at it: no new leases until it is idle (the switch keeps its own state)
+                self.d.icon_centered(cx, Ico::Person, rect(r.pos.x - 20.0, r.pos.y + 2.0, 18.0, 18.0), 14.0, fg);
+            }
             if n.leases > 0 || n.dev {
                 self.small_button(cx, rect(row.pos.x, row.pos.y + 2.0, row.size.x, 24.0), 0.0, 76.0, Hit::Override(mi), "Take it");
             }
+        }
+        if let Some(hub) = &m.ai_hub {
+            let (row, r2) = cut_top(rest, 20.0);
+            rest = r2;
+            self.d.label_elided(cx, rect(row.pos.x + 36.0, row.pos.y, row.size.x - 36.0, row.size.y), false, tok.font.caption, if hub.serving == Some(true) { dim } else { WARN }, HAlign::Left, &hub.line());
         }
         // meters: CPU, GPU(s), RAM, disk
         if let Some(c) = node.as_ref().and_then(|n| n.caps.clone()).filter(|_| up) {
@@ -508,7 +519,7 @@ impl DevhubView {
         let held = st.selected.as_ref().and_then(|s| st.user_leases.iter().find(|u| u.0 == *s));
         let (row, r2) = cut_top(rest, 28.0);
         rest = r2;
-        let acts: [(JitDo, &str); 5] = [(JitDo::Restart, "Restart"), (JitDo::Stop, "Stop"), (JitDo::Log, "Log"), (JitDo::Lease, if held.is_some() { "Let go" } else { "Hold it" }), (JitDo::ClearCache, "Clear cache")];
+        let acts: [(JitDo, &str); 6] = [(JitDo::Profile, "Profile"), (JitDo::Restart, "Restart"), (JitDo::Stop, "Stop"), (JitDo::Log, "Log"), (JitDo::Lease, if held.is_some() { "Let go" } else { "Hold it" }), (JitDo::ClearCache, "Clear cache")];
         for (i, (a, label)) in acts.iter().enumerate() {
             let r = rect(x0 + i as f64 * 82.0, row.pos.y + 3.0, 78.0, 22.0);
             let hit = Hit::JitDo(*a);

@@ -2271,8 +2271,8 @@ mod test {
     pub const U48_MAX: u64 = 281_474_976_710_655;
     pub const I48_MAX: i64 = 140_737_488_355_327;
 
-    pub const U64_MAX: u64 = ::core::u64::MAX;
-    pub const I64_MAX: u64 = ::core::i64::MAX as u64;
+    pub const U64_MAX: u64 = u64::MAX;
+    pub const I64_MAX: u64 = i64::MAX as u64;
 
     macro_rules! calc_max {
         ($max:expr, $bytes:expr) => {
@@ -2300,7 +2300,7 @@ mod test {
 
     impl Arbitrary for Wi128<u128> {
         fn arbitrary<G: Gen>(gen: &mut G) -> Wi128<u128> {
-            let max = calc_max!(::core::u128::MAX, gen.size(), 16);
+            let max = calc_max!(u128::MAX, gen.size(), 16);
             let output = (gen.gen::<u64>() as u128) | ((gen.gen::<u64>() as u128) << 64);
             Wi128(output & (max - 1))
         }
@@ -2308,7 +2308,7 @@ mod test {
 
     impl Arbitrary for Wi128<i128> {
         fn arbitrary<G: Gen>(gen: &mut G) -> Wi128<i128> {
-            let max = calc_max!(::core::i128::MAX, gen.size(), 16);
+            let max = calc_max!(i128::MAX, gen.size(), 16);
             let output = (gen.gen::<i64>() as i128) | ((gen.gen::<i64>() as i128) << 64);
             Wi128(output & (max - 1))
         }
@@ -2407,8 +2407,8 @@ mod test {
         };
     }
 
-    qc_byte_order!(prop_u16, u16, ::core::u16::MAX as u64, read_u16, write_u16);
-    qc_byte_order!(prop_i16, i16, ::core::i16::MAX as u64, read_i16, write_i16);
+    qc_byte_order!(prop_u16, u16, u16::MAX as u64, read_u16, write_u16);
+    qc_byte_order!(prop_i16, i16, i16::MAX as u64, read_i16, write_i16);
     qc_byte_order!(
         prop_u24,
         u32,
@@ -2423,8 +2423,8 @@ mod test {
         read_i24,
         write_i24
     );
-    qc_byte_order!(prop_u32, u32, ::core::u32::MAX as u64, read_u32, write_u32);
-    qc_byte_order!(prop_i32, i32, ::core::i32::MAX as u64, read_i32, write_i32);
+    qc_byte_order!(prop_u32, u32, u32::MAX as u64, read_u32, write_u32);
+    qc_byte_order!(prop_i32, i32, i32::MAX as u64, read_i32, write_i32);
     qc_byte_order!(
         prop_u48,
         u64,
@@ -2439,10 +2439,10 @@ mod test {
         read_i48,
         write_i48
     );
-    qc_byte_order!(prop_u64, u64, ::core::u64::MAX as u64, read_u64, write_u64);
-    qc_byte_order!(prop_i64, i64, ::core::i64::MAX as u64, read_i64, write_i64);
-    qc_byte_order!(prop_f32, f32, ::core::u64::MAX as u64, read_f32, write_f32);
-    qc_byte_order!(prop_f64, f64, ::core::i64::MAX as u64, read_f64, write_f64);
+    qc_byte_order!(prop_u64, u64, u64::MAX as u64, read_u64, write_u64);
+    qc_byte_order!(prop_i64, i64, i64::MAX as u64, read_i64, write_i64);
+    qc_byte_order!(prop_f32, f32, u64::MAX as u64, read_f32, write_f32);
+    qc_byte_order!(prop_f64, f64, i64::MAX as u64, read_f64, write_f64);
 
     qc_byte_order!(prop_u128, Wi128<u128>, 16 + 1, read_u128, write_u128);
     qc_byte_order!(prop_i128, Wi128<i128>, 16 + 1, read_i128, write_i128);
@@ -3256,56 +3256,56 @@ mod stdtests {
     qc_bytes_ext!(
         prop_ext_u16,
         u16,
-        ::std::u16::MAX as u64,
+        u16::MAX as u64,
         read_u16,
         write_u16
     );
     qc_bytes_ext!(
         prop_ext_i16,
         i16,
-        ::std::i16::MAX as u64,
+        i16::MAX as u64,
         read_i16,
         write_i16
     );
     qc_bytes_ext!(
         prop_ext_u32,
         u32,
-        ::std::u32::MAX as u64,
+        u32::MAX as u64,
         read_u32,
         write_u32
     );
     qc_bytes_ext!(
         prop_ext_i32,
         i32,
-        ::std::i32::MAX as u64,
+        i32::MAX as u64,
         read_i32,
         write_i32
     );
     qc_bytes_ext!(
         prop_ext_u64,
         u64,
-        ::std::u64::MAX as u64,
+        u64::MAX as u64,
         read_u64,
         write_u64
     );
     qc_bytes_ext!(
         prop_ext_i64,
         i64,
-        ::std::i64::MAX as u64,
+        i64::MAX as u64,
         read_i64,
         write_i64
     );
     qc_bytes_ext!(
         prop_ext_f32,
         f32,
-        ::std::u64::MAX as u64,
+        u64::MAX as u64,
         read_f32,
         write_f32
     );
     qc_bytes_ext!(
         prop_ext_f64,
         f64,
-        ::std::i64::MAX as u64,
+        i64::MAX as u64,
         read_f64,
         write_f64
     );

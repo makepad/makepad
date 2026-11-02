@@ -155,7 +155,9 @@ mod tests {
         let mut modifiers = KeyModifiers::default();
         modifiers.shift = shift;
         if primary {
+            // the platform's primary modifier: ⌘ on Apple, Ctrl elsewhere
             modifiers.logo = true;
+            modifiers.control = true;
         }
         KeyEvent {
             key_code,

@@ -94,6 +94,7 @@ pub fn palette_atlas(cx: &mut Cx) -> Texture {
             updated: TextureUpdated::Full,
         },
     )
+    .discard_cpu_after_upload(cx)
 }
 
 script_mod! {

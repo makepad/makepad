@@ -96,6 +96,7 @@ impl Transport for HttpTransport {
         remaining: Duration) -> Result<Reply, AssetAiError> {
         let deadline = Instant::now() + remaining;
         let parsed = parse_url(url)?;
+        makepad_network::lan::hub_check_host("ai-hub submission", &parsed.host)?;
         if parsed.https {
             // Keep the platform TLS implementation. Its normalized headers
             // cannot prove the exact transport gate, so HTTPS stays one-shot.
@@ -109,7 +110,7 @@ impl Transport for HttpTransport {
             .next().ok_or_else(|| failure("no address for submission endpoint"))?;
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() { return Err(failure("submission deadline elapsed resolving endpoint")); }
-        let stream = makepad_network::lan::connect_timeout("ai-hub submission", &addr, remaining.min(Duration::from_secs(3)))?;
+        let stream = makepad_network::lan::hub_connect_timeout("ai-hub submission", &addr, remaining.min(Duration::from_secs(3)))?;
         let mut stream = DeadlineStream { stream, deadline };
         let mut head = format!("POST {} HTTP/1.1\r\nHost: {}:{}\r\nConnection: close\r\nAccept: application/json\r\nContent-Type: application/json\r\nContent-Length: {}\r\n",
             parsed.target, parsed.host, parsed.port, body.len());

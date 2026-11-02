@@ -221,12 +221,6 @@ pub fn history(id: u32) -> (Option<Hist>, u64, u64) {
     }
 }
 
-/// Every tracked slot's counts of kind `k` (why-tier over many slots; `top` lists).
-pub fn count_of(id: u32, k: u8) -> u32 {
-    let g = STORE.lock().unwrap_or_else(|e| e.into_inner());
-    g.as_ref().and_then(|st| st.by.get(&id)).map_or(0, |h| h.n[k as usize])
-}
-
 /// The words the inspect answer prints for one event (`code` names a code address: tier origin).
 pub fn describe(e: &Ev, code: &dyn Fn(u64) -> String) -> String {
     let ms = |ns: u64| format!("{:.1} ms", ns as f64 / 1e6);
@@ -253,6 +247,42 @@ pub fn describe(e: &Ev, code: &dyn Fn(u64) -> String) -> String {
 
 /// `why-tier uncounted`: the slots whose count stub is out of the slot while they still count
 /// (other code was installed over it): their calls are not counted.
+/// `why-tier stuck`: how many hot fns ended below O3 with nothing pending, by reason.
+fn cmd_stuck(req: &super::Req, out: &mut super::Out) {
+    let n = req.num("n", 20) as usize;
+    let up = crate::jit::current_unit();
+    if up.is_null() {
+        return out.err("no running unit");
+    }
+    let r = crate::owner::call_within(crate::owner::Class::Job, 10_000, move || {
+        let u = unsafe { &*up };
+        let stuck = crate::jit::tier_stuck(u);
+        let mut rows = vec![format!("{} hot fns are stuck below O3: their calls stopped being counted, and no queue, build, counted window or verdict is pending", stuck.len())];
+        for (why, ids) in crate::jit::tier_stuck_reasons(&stuck) {
+            rows.push(format!("{} x {}", ids.len(), why));
+            rows.push("| slot | fn | code |".into());
+            rows.push("|---|---|---|".into());
+            for id in ids.iter().take(n) {
+                let f = &u.fns[*id as usize];
+                rows.push(format!("| S{} | `{}` | {} |", id, super::short(&super::display_name(u, *id, 0), 80), super::codever::label(super::codever::kind_at(u, f.code))));
+            }
+            if ids.len() > n {
+                rows.push(format!("+{} more (n=)", ids.len() - n));
+            }
+        }
+        rows
+    });
+    match r {
+        Some(rows) => {
+            for l in rows {
+                out.line(&l);
+            }
+            out.always("more: why-tier @<slot>");
+        }
+        None => out.err("the owner did not answer in 10 s"),
+    }
+}
+
 fn cmd_uncounted(req: &super::Req, out: &mut super::Out) {
     let n = req.num("n", 20) as usize;
     let up = crate::jit::current_unit();
@@ -297,10 +327,13 @@ pub fn at_s(t_ns: u64) -> String {
 /// tier-up state now and its decision history (counts by kind, the last events).
 pub fn cmd_why_tier(req: &super::Req, out: &mut super::Out) {
     let Some(q) = req.pos.first().cloned() else {
-        return out.err("usage: why-tier <fn|file:line|@slot> | why-tier uncounted [n=20]");
+        return out.err("usage: why-tier <fn|file:line|@slot> | why-tier stuck [n=20] | why-tier uncounted [n=20]");
     };
     if q == "uncounted" {
         return cmd_uncounted(req, out);
+    }
+    if q == "stuck" {
+        return cmd_stuck(req, out);
     }
     let q2 = q.clone();
     let up = crate::jit::current_unit();

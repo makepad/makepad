@@ -20,6 +20,7 @@
 //!
 //! HTTP API summary (JSON via makepad-micro-serde):
 //! - `GET  /health`          -> service name, version, GPU name, VRAM, loaded models
+//! - `GET  /fleet`           -> cached peer answers/models and hub network state
 //! - `GET  /models`          -> registry list + per-model state
 //!                              (absent / downloading{progress} / ready / loaded / error)
 //! - `POST /generate`        -> `{model, prompt, width, height, seed, steps, ...}` -> `{job_id}`
@@ -52,11 +53,13 @@ mod disk_volume;
 pub mod error;
 pub mod fabric;
 pub mod fleet;
+pub mod fleet_report;
 // Which hub routes each fleet role reaches (the front itself is
 // makepad_network::fleet).
 #[cfg(not(target_arch = "wasm32"))]
 pub mod fleet_routes;
 pub mod job;
+pub mod board;
 // Splash compute kernels on fleet CPUs: the wire and the client are
 // featureless; the node side is the `kernel` feature.
 pub mod kernel_wire;

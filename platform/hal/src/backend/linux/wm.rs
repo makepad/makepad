@@ -18,11 +18,12 @@ use crate::backend::vulkan::{Device, Image};
 use crate::dmabuf::DmaBuf;
 use crate::hosted_ipc::{self, ClientEndpoint};
 use crate::types::*;
+use crate::window_controls::{HostedAppFrame, HostedResize};
 use crate::{session, wm_socket, Id};
 use makepad_micro_serde::SerBin;
 use makepad_studio_protocol::{
     AppToStudio, AppToStudioVec, ChildRelay, HostRelay, MouseCursor, PinchPhase, PresentableDraw, PresentableImageId, RelayTray, RelayTrayItem, RemoteKeyModifiers, ScrollPhase,
-    drag_answer, drag_double, window_op, HostedAppearance, HostedCaption, HostedDragAnswer, HostedDragQuery, HostedDropdown, HostedVisible, HostedWindowOp, dropdown_op, SharedSwapchain, StudioToApp, StudioToAppVec, WIRE,
+    drag_answer, drag_double, window_op, HostedAppearance, HostedCaption, HostedDragAnswer, HostedDragQuery, HostedDropdown, HostedWindowOp, dropdown_op, SharedSwapchain, StudioToApp, StudioToAppVec, WIRE,
 };
 use std::collections::{HashMap, VecDeque};
 use std::ffi::CStr;
@@ -45,8 +46,8 @@ struct State {
     detached: AtomicBool,
     /// Each window's ring of shared images (the WM's swapchain for it), keyed by the host window.
     rings: Mutex<HashMap<Key, Ring>>,
-    /// Frames the GPU finished (or that missed the ring), for the shell thread to announce.
-    finished: Mutex<Vec<(Key, Option<PresentableDraw>)>>,
+    /// Frames the GPU finished (or that missed the ring), with their originating session.
+    finished: Mutex<Vec<(Key, Option<PresentableDraw>, u32)>>,
     /// Frames of each window encoded and not finished yet (`FramePresenter::scheduled`, ended by
     /// their `finished` entry): a Tick grants a window no frame while it has MAX_IN_FLIGHT.
     in_flight: Mutex<HashMap<Key, u32>>,
@@ -174,7 +175,7 @@ impl VkSurfaceSource for Source {
 
 struct Presenter(Arc<State>);
 impl FramePresenter for Presenter {
-    fn submit(&self, session: u32, window: Id, image: Arc<Image>, presented: Box<dyn FnOnce(u64) + Send>) {
+    fn submit(&self, session: u32, window: Id, from: u32, image: Arc<Image>, presented: Box<dyn FnOnce(u64) + Send>) {
         let draw = lock(&self.0.rings).get(&(session, window)).and_then(|ring| {
             let slot = ring.images.iter().find(|s| s.image.as_ref().is_some_and(|i| Arc::ptr_eq(i, &image)))?;
             Some(PresentableDraw { window_id: ring.window_id, target_id: slot.id, width: ring.pixels[0], height: ring.pixels[1],
@@ -182,7 +183,7 @@ impl FramePresenter for Presenter {
         });
         if log_enabled() { eprintln!("[hal-wm] frame done {:?}: {draw:?}", (session, window)); }
         let shown = draw.is_some();
-        lock(&self.0.finished).push(((session, window), draw));
+        lock(&self.0.finished).push(((session, window), draw, from));
         self.0.shared.signal();
         if shown { presented(crate::clock_ns()); }
     }
@@ -191,7 +192,7 @@ impl FramePresenter for Presenter {
     }
     fn dropped(&self, session: u32, window: Id) {
         if log_enabled() { eprintln!("[hal-wm] frame dropped {:?}: its batch did not run", (session, window)); }
-        lock(&self.0.finished).push(((session, window), None));
+        lock(&self.0.finished).push(((session, window), None, session));
         self.0.shared.signal();
     }
 }
@@ -444,10 +445,10 @@ pub(super) struct App {
     /// A Tick is being answered: TickDone goes out with its frame (or at once without one).
     ticking: bool,
     asked_frame: bool,
-    /// The WM shows none of the tile (`HostedVisible`: minimised, on another space, covered by
-    /// the windows above it): no frames are asked for or granted until it shows again, as a
-    /// compositor holds a covered window's frame callbacks. The sessions' timers, signals and
-    /// input go on.
+    /// An app session's first frame reached the WM; replayed when a new WM hosts this process.
+    app_drawn: bool,
+    /// The WM is gone (detached): no frames are asked for or granted until the next one. Whether
+    /// the WM shows the tile (`HostedVisible`) is the app's pacing, not this flag's.
     hidden: bool,
     /// The clipboard is the WM's (shared with every app and the Wayland clients): reads go to the
     /// WM as relays; relay id -> (session, its request id).
@@ -488,16 +489,17 @@ impl App {
         STATE.set(state.clone()).map_err(|_| "WM-hosted shell already connected")?;
         // a restart of this process (exec) handed its WM connection over: the same client, tile
         // and window, without asking the socket
-        let resumed = Hub::resume(state.clone());
-        let (hub, admission) = match resumed.clone() {
+        let (hub, port, client) = match Hub::resume(state.clone()) {
             Some((hub, port, client)) => {
                 eprintln!("[hal-wm] resumed the WM connection of this process's previous image as client {client} ({name})");
-                (hub, wm_socket::Admission { port, client })
+                (hub, port, client)
             }
             None => {
                 let admission = wm_socket::adopt(&path, WIRE, std::process::id(), &name)
                     .map_err(|probe| format!("the makepad WM at {} did not adopt this process: {probe:?}", path.display()))?;
-                (Hub::connect(admission.port, admission.client, &name, state.clone())?, admission)
+                let hub = Hub::connect(admission.port, admission.client, &name, state.clone())?;
+                eprintln!("[hal-wm] the makepad WM at {} hosts this process as client {} ({name}, hosted protocol {})", path.display(), admission.client, admission.version);
+                (hub, admission.port, admission.client)
             }
         };
         a11y::start(hub.clone());
@@ -506,11 +508,8 @@ impl App {
         // compositor without server decorations. Its caption's drag query and its window
         // buttons go to the WM through this shell (`HostedDragQuery`, `HostedWindowOp`).
         shared.client_chrome.store(true, Ordering::Release);
-        if resumed.is_none() {
-            eprintln!("[hal-wm] the makepad WM at {} hosts this process as client {} ({name})", path.display(), admission.client);
-        }
-        Ok(Self { state, hub, aux_path: hosted_ipc::aux_path(admission.port, &admission.client.to_string()), aux: None,
-            pending: Vec::new(), windows: HashMap::new(), early: HashMap::new(), next_window: 0, ticking: false, asked_frame: false, hidden: false,
+        Ok(Self { state, hub, aux_path: hosted_ipc::aux_path(port, &client.to_string()), aux: None,
+            pending: Vec::new(), windows: HashMap::new(), early: HashMap::new(), next_window: 0, ticking: false, asked_frame: false, app_drawn: false, hidden: false,
             clip_reads: HashMap::new(), next_clip_read: 0, selection: Default::default(), drag_queries: VecDeque::new(), wm_state: Vec::new(), wm_focus: HashMap::new(), trays: HashMap::new(),
             hidden_windows: Default::default(), detached_at: None, reattach_error: None, quit_sent: false, stopping: false })
     }
@@ -691,15 +690,9 @@ impl App {
                     }
                     return;
                 }
-                // The tile's visibility is this shell's pacing (no frames while nothing shows).
-                if let Some(shown) = HostedVisible::parse(&json) {
-                    self.hidden = !shown.visible;
-                    // Frames asked for meanwhile are owed now.
-                    if !self.hidden && self.windows.values().any(|w| w.requested) {
-                        self.ask_frame();
-                    }
-                    return;
-                }
+                // The tile's visibility is the app's pacing, not this shell's: the app holds its
+                // frames while nothing shows, except those a remote request (a grab, a step) needs,
+                // so a covered window still answers a grab. It goes on to the app below.
                 // The WM's dark/light: what draws without a stylesheet (the run's load screen)
                 // reads it (`host_dark`) on its next turn, which this wakes. The app hears it too.
                 if let Some(appearance) = HostedAppearance::parse(&json) {
@@ -925,7 +918,7 @@ impl App {
                 return;
             }
         };
-        eprintln!("[hal-wm] the makepad WM at {} hosts this process again as client {} ({name})", path.display(), admission.client);
+        eprintln!("[hal-wm] the makepad WM at {} hosts this process again as client {} ({name}, hosted protocol {})", path.display(), admission.client, admission.version);
         a11y::start(hub.clone());
         self.hub = hub;
         self.aux_path = hosted_ipc::aux_path(admission.port, &admission.client.to_string());
@@ -943,6 +936,7 @@ impl App {
         }
         let trays: Vec<AppToStudio> = self.trays.values().map(|(_, t)| AppToStudio::Relay(ChildRelay::SetTray(t.clone()))).collect();
         self.hub.send(trays);
+        if self.app_drawn { self.hub.send(vec![AppToStudio::Custom(HostedAppFrame.to_json())]); }
         self.ask_frame();
     }
 }
@@ -1058,6 +1052,14 @@ impl Shell for App {
                     if spent { self.finish_tick(); }
                     self.ask_frame();
                 }
+                // The app resizes its window (`Window::resize`, the remote `resize`): the WM owns
+                // the tile's size, so the request goes to it.
+                OsCmd::WindowGeom { id, geom } => {
+                    let Some(key) = self.resolve((sid, id)) else { return };
+                    if self.windows.get(&key).is_some_and(|w| !w.dropdown) && self.tile_window() == Some(key) && geom[2] >= 1.0 && geom[3] >= 1.0 {
+                        self.hub.send(vec![AppToStudio::Custom(HostedResize { w: geom[2] as f64, h: geom[3] as f64 }.to_json())]);
+                    }
+                }
                 OsCmd::Cursor { cursor, .. } => self.hub.send(vec![AppToStudio::SetCursor(mouse_cursor(cursor))]),
                 OsCmd::ClipSet { text } => self.hub.send(vec![AppToStudio::SetClipboard(text)]),
                 // A drag out of the window: the WM carries the files from here (`StartFileDrag`),
@@ -1145,7 +1147,7 @@ impl Shell for App {
         let finished = std::mem::take(&mut *lock(&self.state.finished));
         let mut flips = Vec::new();
         let mut redraw = false;
-        for (key, draw) in finished {
+        for (key, draw, from) in finished {
             if let Some(n) = lock(&self.state.in_flight).get_mut(&key) { *n = n.saturating_sub(1); }
             if let Some(w) = self.windows.get_mut(&key) {
                 // an earlier frame's completion leaves the granted frame awaited
@@ -1154,7 +1156,13 @@ impl Shell for App {
                 if draw.is_none() { w.requested = true; }
             }
             match draw {
-                Some(draw) => flips.push(AppToStudio::DrawCompleteAndFlip(draw)),
+                Some(draw) => {
+                    flips.push(AppToStudio::DrawCompleteAndFlip(draw));
+                    if !self.app_drawn && from != session::HOST {
+                        self.app_drawn = true;
+                        flips.push(AppToStudio::Custom(HostedAppFrame.to_json()));
+                    }
+                }
                 None => redraw = true,
             }
         }
@@ -1189,6 +1197,7 @@ impl Shell for App {
 mod tests {
     use super::*;
     use makepad_micro_serde::DeBin;
+    use makepad_studio_protocol::HostedVisible;
     use std::net::TcpListener;
 
     /// One frame as the hub reads it: unmasks a client frame.
@@ -1255,7 +1264,7 @@ mod tests {
     }
 
     #[test]
-    fn a_hidden_tile_asks_for_no_frames_and_is_granted_none() {
+    fn a_covered_tile_still_gets_the_frames_its_app_asks_for() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let server = std::thread::spawn(move || {
@@ -1264,29 +1273,58 @@ mod tests {
             let mut byte = [0u8];
             while !request.ends_with(b"\r\n\r\n") { stream.read_exact(&mut byte).unwrap(); request.push(byte[0]); }
             stream.write_all(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n").unwrap();
-            (0..2).map(|_| AppToStudioVec::deserialize_bin(&read_client_frame(&mut stream).1).unwrap().0).collect::<Vec<_>>()
+            (0..1).map(|_| AppToStudioVec::deserialize_bin(&read_client_frame(&mut stream).1).unwrap().0).collect::<Vec<_>>()
         });
         let state = Arc::new(State { shared: Shared::global(), inbox: Default::default(), hung_up: AtomicBool::new(false), detached: AtomicBool::new(false),
             rings: Default::default(), finished: Default::default(), in_flight: Default::default(), device: Default::default() });
         let hub = Hub::connect(port, 78, "makepad-app-hidden", state.clone()).unwrap();
         let mut app = App { state, hub, aux_path: Default::default(), aux: None, pending: Vec::new(), windows: HashMap::new(),
-            early: HashMap::new(), next_window: 1, ticking: false, asked_frame: false, hidden: false, clip_reads: HashMap::new(),
+            early: HashMap::new(), next_window: 1, ticking: false, asked_frame: false, app_drawn: false, hidden: false, clip_reads: HashMap::new(),
             next_clip_read: 0, selection: Default::default(), drag_queries: VecDeque::new(), wm_state: Vec::new(), wm_focus: HashMap::new(),
             trays: HashMap::new(), hidden_windows: Default::default(), detached_at: None, reattach_error: None, quit_sent: false, stopping: false };
         let key = (9_001, Id::new(1, 1));
         app.windows.insert(key, Win { window_id: 0, recipient: key, requested: false, awaiting: false, ahead: 0, geom: None, dropdown: false });
-        // covered: the app's frame request is held, a Tick grants nothing and is answered at once
+        // covered: the app holds its own frames, but one it asks for anyway (a grab's) is asked of
+        // the WM and granted at the next Tick
         app.message(StudioToApp::Custom(HostedVisible { visible: false }.to_json()));
         app.command(Op::Cmd(key.0, OsCmd::FrameRequest { id: key.1 }));
         app.message(StudioToApp::Tick);
-        assert!(app.windows[&key].requested && !app.windows[&key].awaiting, "no frame while hidden");
-        // shown again: the held request is asked for, and the next Tick grants it
-        app.message(StudioToApp::Custom(HostedVisible { visible: true }.to_json()));
-        app.message(StudioToApp::Tick);
-        assert!(!app.windows[&key].requested && app.windows[&key].awaiting, "the owed frame once shown");
+        assert!(!app.windows[&key].requested && app.windows[&key].awaiting, "the frame a covered app asked for");
         let sent = server.join().unwrap();
-        assert!(matches!(sent[0].as_slice(), [AppToStudio::TickDone]), "{:?}", sent[0]);
-        assert!(matches!(sent[1].as_slice(), [AppToStudio::RequestAnimationFrame]), "{:?}", sent[1]);
+        assert!(matches!(sent[0].as_slice(), [AppToStudio::RequestAnimationFrame]), "{:?}", sent[0]);
+    }
+
+    #[test]
+    fn an_apps_resize_goes_to_the_wm_for_its_tile_only() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut byte = [0u8];
+            while !request.ends_with(b"\r\n\r\n") { stream.read_exact(&mut byte).unwrap(); request.push(byte[0]); }
+            stream.write_all(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n").unwrap();
+            AppToStudioVec::deserialize_bin(&read_client_frame(&mut stream).1).unwrap().0
+        });
+        let state = Arc::new(State { shared: Shared::global(), inbox: Default::default(), hung_up: AtomicBool::new(false), detached: AtomicBool::new(false),
+            rings: Default::default(), finished: Default::default(), in_flight: Default::default(), device: Default::default() });
+        let hub = Hub::connect(port, 79, "makepad-app-resize", state.clone()).unwrap();
+        let mut app = App { state, hub, aux_path: Default::default(), aux: None, pending: Vec::new(), windows: HashMap::new(),
+            early: HashMap::new(), next_window: 1, ticking: false, asked_frame: false, app_drawn: false, hidden: false, clip_reads: HashMap::new(),
+            next_clip_read: 0, selection: Default::default(), drag_queries: VecDeque::new(), wm_state: Vec::new(), wm_focus: HashMap::new(),
+            trays: HashMap::new(), hidden_windows: Default::default(), detached_at: None, reattach_error: None, quit_sent: false, stopping: false };
+        let (tile, later) = ((9_002, Id::new(1, 1)), (9_002, Id::new(2, 1)));
+        app.windows.insert(tile, Win { window_id: 0, recipient: tile, requested: false, awaiting: false, ahead: 0, geom: None, dropdown: false });
+        app.windows.insert(later, Win { window_id: 1, recipient: later, requested: false, awaiting: false, ahead: 0, geom: None, dropdown: false });
+        // a later window is the app's own business; the tile's size is the WM's
+        app.command(Op::Cmd(later.0, OsCmd::WindowGeom { id: later.1, geom: [0.0, 0.0, 300.0, 200.0] }));
+        app.command(Op::Cmd(tile.0, OsCmd::WindowGeom { id: tile.1, geom: [0.0, 0.0, 640.0, 480.0] }));
+        let sent = server.join().unwrap();
+        assert_eq!(sent.len(), 1, "{sent:?}");
+        match &sent[0] {
+            AppToStudio::Custom(json) => assert_eq!(HostedResize::parse(json), Some(HostedResize { w: 640.0, h: 480.0 })),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
@@ -1309,7 +1347,7 @@ mod tests {
             rings: Default::default(), finished: Default::default(), in_flight: Default::default(), device: Default::default() });
         let hub = Hub::connect(port, 79, "makepad-app-aihub", state.clone()).unwrap();
         let mut app = App { state, hub, aux_path: Default::default(), aux: None, pending: Vec::new(), windows: HashMap::new(),
-            early: HashMap::new(), next_window: 1, ticking: false, asked_frame: false, hidden: false, clip_reads: HashMap::new(),
+            early: HashMap::new(), next_window: 1, ticking: false, asked_frame: false, app_drawn: false, hidden: false, clip_reads: HashMap::new(),
             next_clip_read: 0, selection: Default::default(), drag_queries: VecDeque::new(), wm_state: Vec::new(), wm_focus: HashMap::new(),
             trays: HashMap::new(), hidden_windows: Default::default(), detached_at: None, reattach_error: None, quit_sent: false, stopping: false };
         let item = |kind, cmd| MenuItem { parent: 0, kind, cmd, key: 0, str: Default::default() };
@@ -1363,7 +1401,7 @@ mod tests {
             rings: Default::default(), finished: Default::default(), in_flight: Default::default(), device: Default::default() });
         let hub = Hub::connect(port, 81, "makepad-app-aihub", state.clone()).unwrap();
         let mut app = App { state, hub, aux_path: Default::default(), aux: None, pending: Vec::new(), windows: HashMap::new(),
-            early: HashMap::new(), next_window: 0, ticking: false, asked_frame: false, hidden: false, clip_reads: HashMap::new(),
+            early: HashMap::new(), next_window: 0, ticking: false, asked_frame: false, app_drawn: false, hidden: false, clip_reads: HashMap::new(),
             next_clip_read: 0, selection: Default::default(), drag_queries: VecDeque::new(), wm_state: Vec::new(), wm_focus: HashMap::new(),
             trays: HashMap::new(), hidden_windows: Default::default(), detached_at: None, reattach_error: None, quit_sent: false, stopping: false };
         let id = Id::new(5, 1);
@@ -1406,7 +1444,7 @@ mod tests {
             rings: Default::default(), finished: Default::default(), in_flight: Default::default(), device: Default::default() });
         let hub = Hub::connect(port, 80, "makepad-app-game", state.clone()).unwrap();
         let mut app = App { state: state.clone(), hub, aux_path: Default::default(), aux: None, pending: Vec::new(), windows: HashMap::new(),
-            early: HashMap::new(), next_window: 1, ticking: false, asked_frame: false, hidden: false, clip_reads: HashMap::new(),
+            early: HashMap::new(), next_window: 1, ticking: false, asked_frame: false, app_drawn: false, hidden: false, clip_reads: HashMap::new(),
             next_clip_read: 0, selection: Default::default(), drag_queries: VecDeque::new(), wm_state: Vec::new(), wm_focus: HashMap::new(),
             trays: HashMap::new(), hidden_windows: Default::default(), detached_at: None, reattach_error: None, quit_sent: false, stopping: false };
         let key = (9_003, Id::new(1, 1));
@@ -1453,7 +1491,7 @@ mod tests {
             rings: Default::default(), finished: Default::default(), in_flight: Default::default(), device: Default::default() });
         let hub = Hub::connect(port, 79, "makepad-app-game", state.clone()).unwrap();
         let mut app = App { state: state.clone(), hub, aux_path: Default::default(), aux: None, pending: Vec::new(), windows: HashMap::new(),
-            early: HashMap::new(), next_window: 1, ticking: false, asked_frame: false, hidden: false, clip_reads: HashMap::new(),
+            early: HashMap::new(), next_window: 1, ticking: false, asked_frame: false, app_drawn: false, hidden: false, clip_reads: HashMap::new(),
             next_clip_read: 0, selection: Default::default(), drag_queries: VecDeque::new(), wm_state: Vec::new(), wm_focus: HashMap::new(),
             trays: HashMap::new(), hidden_windows: Default::default(), detached_at: None, reattach_error: None, quit_sent: false, stopping: false };
         let key = (9_002, Id::new(1, 1));
@@ -1498,7 +1536,7 @@ mod tests {
             rings: Default::default(), finished: Default::default(), in_flight: Default::default(), device: Default::default() });
         let hub = Hub::connect(port, 79, "makepad-app-clock", state.clone()).unwrap();
         let mut app = App { state, hub, aux_path: Default::default(), aux: None, pending: Vec::new(), windows: HashMap::new(),
-            early: HashMap::new(), next_window: 1, ticking: false, asked_frame: false, hidden: false, clip_reads: HashMap::new(),
+            early: HashMap::new(), next_window: 1, ticking: false, asked_frame: false, app_drawn: false, hidden: false, clip_reads: HashMap::new(),
             next_clip_read: 0, selection: Default::default(), drag_queries: VecDeque::new(), wm_state: Vec::new(), wm_focus: HashMap::new(),
             trays: HashMap::new(), hidden_windows: Default::default(), detached_at: None, reattach_error: None, quit_sent: false, stopping: false };
         let host = (session::HOST, Id::new(1, 1));
@@ -1565,7 +1603,7 @@ mod tests {
         let hub = Hub::connect(port, 80, "makepad-app-lend", state.clone()).unwrap();
         server.join().unwrap();
         let mut app = App { state, hub, aux_path: Default::default(), aux: None, pending: Vec::new(), windows: HashMap::new(),
-            early: HashMap::new(), next_window: 1, ticking: false, asked_frame: false, hidden: false, clip_reads: HashMap::new(),
+            early: HashMap::new(), next_window: 1, ticking: false, asked_frame: false, app_drawn: false, hidden: false, clip_reads: HashMap::new(),
             next_clip_read: 0, selection: Default::default(), drag_queries: VecDeque::new(), wm_state: Vec::new(), wm_focus: HashMap::new(),
             trays: HashMap::new(), hidden_windows: Default::default(), detached_at: None, reattach_error: None, quit_sent: false, stopping: false };
         let host = (session::HOST, Id::new(77, 1));

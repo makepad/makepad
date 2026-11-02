@@ -28,6 +28,7 @@ script_mod! {
         panel := AiChatPanel{
             width: Fill
             height: Fill
+            in_overlay: true
         }
         studio_feedback := StudioAppFeedback{}
     }
@@ -224,6 +225,7 @@ mod tests {
             preview: false,
             expanded: false,
             card: None,
+            task: None,
         }));
         state.generation = 7;
         let json = transcript_json(&state);

@@ -10,6 +10,10 @@
 //! the outermost mount, on top of the store: a file there is read instead of the store's. Only
 //! edited files exist there. `.makepad-run-edits` in it records, per edited file, the store blob it
 //! was edited from (`new` for a file the store lacks), and `.makepad-run-base/<path>` keeps that blob.
+//! `.makepad-run-deleted` lists whiteouts, one relative path per line: those store files are absent
+//! through every VFS read and probe. Their base blobs are recorded in `.makepad-run-edits` too.
+//! A whiteout carries over only while the store still holds its base blob; otherwise reconciliation
+//! removes it and reports the change.
 //! At a run's start (`reconcile_edits`) edits whose store file is unchanged carry over to the
 //! release being run; when the release changed the file too, the edit moves to
 //! `.makepad-run-conflicts/<commit>/<path>` (beside it `<path>.base`) and the run reports it -- an edit
@@ -22,7 +26,7 @@
 //! bytes still are that blob is not an edit; `reconcile_edits` brings it to the release being run.
 //! One whose bytes changed becomes an edit (recorded in `.makepad-run-edits` from that blob).
 use crate::gitstore::{self as store, Entry, Oid, Store};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
@@ -260,6 +264,40 @@ fn edited_file(path: &str) -> Option<std::path::PathBuf> {
     p.is_file().then_some(p)
 }
 
+/// The whiteout list changes on disk during a live run; stat it, parse only when it changes.
+static WHITEOUTS: RwLock<Option<(std::path::PathBuf, Option<FileStat>, Arc<BTreeSet<String>>)>> = RwLock::new(None);
+
+fn load_deleted(dir: &std::path::Path) -> BTreeSet<String> {
+    std::fs::read_to_string(dir.join(".makepad-run-deleted")).unwrap_or_default().lines()
+        .filter(|p| !p.is_empty()).map(str::to_string).collect()
+}
+
+fn save_deleted(dir: &std::path::Path, deleted: &BTreeSet<String>) -> io::Result<()> {
+    let tmp = dir.join(".makepad-run-deleted.tmp");
+    std::fs::write(&tmp, deleted.iter().map(|p| format!("{p}\n")).collect::<String>())?;
+    std::fs::rename(tmp, dir.join(".makepad-run-deleted"))
+}
+
+fn deleted_paths(dir: &std::path::Path) -> Arc<BTreeSet<String>> {
+    let stat = disk_stat(&dir.join(".makepad-run-deleted").to_string_lossy());
+    let cache = WHITEOUTS.read().unwrap();
+    if let Some((_, _, paths)) = cache.as_ref().filter(|(at, held, _)| at == dir && *held == stat) {
+        return paths.clone();
+    }
+    drop(cache);
+    let _k = crate::zone_alloc::kept();
+    let paths = Arc::new(load_deleted(dir));
+    *WHITEOUTS.write().unwrap() = Some((dir.to_path_buf(), stat, paths.clone()));
+    paths
+}
+
+fn whiteout(path: &str) -> bool {
+    if !ANY.load(Ordering::Acquire) { return false; }
+    let Some((_, rel)) = edit_path(path) else { return false };
+    let Some(dir) = EDITS.read().unwrap().clone() else { return false };
+    deleted_paths(&dir).contains(&rel)
+}
+
 /// Whether virtual files are writable (an edits folder is set).
 pub fn edits_enabled() -> bool {
     EDITS.read().unwrap().is_some()
@@ -270,6 +308,7 @@ pub fn set_edits(dir: Option<std::path::PathBuf>) {
     // process state: built in the kept heap
     let _k = crate::zone_alloc::kept();
     *EDITS.write().unwrap() = dir;
+    *WHITEOUTS.write().unwrap() = None;
 }
 
 impl Mount {
@@ -417,6 +456,7 @@ fn read_disk(path: &std::path::Path, entry: Option<&ReadEntry>) -> io::Result<Ve
 /// that keep authored sources need not copy the snapshot into another Arc.
 pub fn read_shared(path: impl AsRef<std::path::Path>) -> io::Result<Arc<[u8]>> {
     let path = path.as_ref();
+    if whiteout(&path.to_string_lossy()) { return Err(not_found(&path.to_string_lossy())); }
     let result = if let Some(snapshot) = read_snapshot() {
         snapshot.read_shared(path)
     } else {
@@ -429,6 +469,7 @@ pub fn read_shared(path: impl AsRef<std::path::Path>) -> io::Result<Arc<[u8]>> {
 /// The file's bytes.
 pub fn read(path: impl AsRef<std::path::Path>) -> io::Result<Vec<u8>> {
     let path = path.as_ref();
+    if whiteout(&path.to_string_lossy()) { return Err(not_found(&path.to_string_lossy())); }
     let result = if let Some(snapshot) = read_snapshot() { snapshot.read_shared(path).map(|bytes| bytes.to_vec()) } else { read_uncached(path, None) };
     if result.is_ok() { crate::why::read(path); }
     result
@@ -447,6 +488,7 @@ fn read_uncached_inner(path: &std::path::Path, entry: Option<&ReadEntry>) -> io:
         return read_disk(path, entry);
     }
     let s = path.to_string_lossy();
+    if whiteout(&s) { return Err(not_found(&s)); }
     match find(&s) {
         None => read_disk(path, entry),
         Some(_) if edited_file(&s).is_some() => read_disk(&edited_file(&s).unwrap(), entry),
@@ -489,6 +531,7 @@ pub fn metadata(path: impl AsRef<std::path::Path>) -> io::Result<Metadata> {
 
 fn metadata_inner(path: &std::path::Path) -> io::Result<Metadata> {
     let s = path.to_string_lossy();
+    if whiteout(&s) { return Err(not_found(&s)); }
     if let Some((mount, rel)) = ANY.load(Ordering::Acquire).then(|| find(&s)).flatten() {
         if let Some(edited) = edited_file(&s) { return metadata(edited); }
         let is_dir = mount.is_dir(&rel);
@@ -552,6 +595,7 @@ pub fn exists(path: impl AsRef<std::path::Path>) -> bool {
 }
 
 fn exists_inner(path: &std::path::Path) -> bool {
+    if whiteout(&path.to_string_lossy()) { return false; }
     if !ANY.load(Ordering::Acquire) {
         return path.exists();
     }
@@ -571,6 +615,7 @@ pub fn is_file(path: impl AsRef<std::path::Path>) -> bool {
 }
 
 fn is_file_inner(path: &std::path::Path) -> bool {
+    if whiteout(&path.to_string_lossy()) { return false; }
     if !ANY.load(Ordering::Acquire) {
         return path.is_file();
     }
@@ -590,6 +635,7 @@ pub fn is_dir(path: impl AsRef<std::path::Path>) -> bool {
 }
 
 fn is_dir_inner(path: &std::path::Path) -> bool {
+    if whiteout(&path.to_string_lossy()) { return false; }
     if !ANY.load(Ordering::Acquire) {
         return path.is_dir();
     }
@@ -610,6 +656,7 @@ pub fn read_dir(path: impl AsRef<std::path::Path>) -> io::Result<Vec<(String, bo
 }
 
 fn read_dir_inner(path: &std::path::Path) -> io::Result<Vec<(String, bool)>> {
+    if whiteout(&path.to_string_lossy()) { return Err(not_found(&path.to_string_lossy())); }
     let disk = || -> io::Result<Vec<(String, bool)>> {
         let mut v: Vec<(String, bool)> = std::fs::read_dir(path)?
             .flatten()
@@ -652,6 +699,12 @@ fn read_dir_inner(path: &std::path::Path) -> io::Result<Vec<(String, bool)>> {
                     if !name.is_empty() && !name.contains('/') && !v.iter().any(|e| e.0 == name) {
                         v.push((name.to_string(), true));
                     }
+                }
+            }
+            if let Some((_, rel)) = edit_path(&here) {
+                if let Some(dir) = EDITS.read().unwrap().clone() {
+                    let deleted = deleted_paths(&dir);
+                    v.retain(|(name, _)| !deleted.contains(&if rel.is_empty() { name.clone() } else { format!("{rel}/{name}") }));
                 }
             }
             v.sort();
@@ -723,6 +776,10 @@ pub fn file_stat(path: &str) -> Option<FileStat> {
     if ANY.load(Ordering::Acquire) && find(path).is_some() {
         return None;
     }
+    disk_stat(path)
+}
+
+fn disk_stat(path: &str) -> Option<FileStat> {
     let m = std::fs::metadata(path).ok()?;
     let ns = |t: std::io::Result<std::time::SystemTime>| t.ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_nanos() as u64);
     #[cfg(unix)]
@@ -752,7 +809,7 @@ pub fn identity(path: &str) -> Option<String> {
         return None;
     }
     let (m, _) = find(path)?;
-    if edited_file(path).is_some() {
+    if whiteout(path) || edited_file(path).is_some() {
         return None;
     }
     Some(match m.store.range {
@@ -1013,10 +1070,12 @@ pub fn prepare_edit(path: &str, keep: bool) -> io::Result<std::path::PathBuf> {
         return Err(io::Error::new(io::ErrorKind::PermissionDenied, "not an editable path"));
     }
     let _g = EDIT_LOCK.lock().unwrap();
+    let dir = EDITS.read().unwrap().clone().unwrap();
+    let mut deleted = load_deleted(&dir);
+    if deleted.remove(&rel) { save_deleted(&dir, &deleted)?; }
     if disk.is_file() {
         return Ok(disk);
     }
-    let dir = EDITS.read().unwrap().clone().unwrap();
     if let Some(parent) = disk.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -1054,6 +1113,19 @@ pub fn edited_disk_path(path: &str) -> Option<std::path::PathBuf> {
     (!rel.starts_with(".makepad-run-") && p.exists()).then_some(p)
 }
 
+/// Where an edit of `path` lives on disk (whether or not there is one yet): what a file watcher
+/// watches for a virtual file. None for a disk path or without an edits folder.
+pub fn edit_location(path: &str) -> Option<std::path::PathBuf> {
+    if !is_virtual(path) { return None; }
+    let (p, rel) = edit_path(path)?;
+    (!rel.is_empty() && !rel.starts_with(".makepad-run-")).then_some(p)
+}
+
+/// The edits folder's record file (`.makepad-run-edits`): replaced whenever an edit is added.
+pub fn edits_record() -> Option<std::path::PathBuf> {
+    EDITS.read().unwrap().as_ref().map(|d| d.join(".makepad-run-edits"))
+}
+
 /// A folder made in a virtual folder: made in the edits folder.
 pub fn prepare_edit_dir(path: &str) -> io::Result<std::path::PathBuf> {
     let (disk, rel) = edit_path(path).ok_or_else(|| io::Error::new(io::ErrorKind::PermissionDenied, "read-only (no MAKEPAD_RUN_EDITS)"))?;
@@ -1075,6 +1147,7 @@ pub fn reconcile_edits() -> Vec<String> {
     }
     let _g = EDIT_LOCK.lock().unwrap();
     let mut records = load_records(&dir);
+    let mut deleted = load_deleted(&dir);
     let mut out = Vec::new();
     let mut changed = false;
     let roots: Vec<String> = {
@@ -1085,7 +1158,7 @@ pub fn reconcile_edits() -> Vec<String> {
     let Some(outer) = roots.first().cloned() else { return Vec::new() };
     for (rel, base) in records.clone() {
         let disk = dir.join(&rel);
-        if !disk.is_file() {
+        if !disk.is_file() && !deleted.contains(&rel) {
             records.remove(&rel);
             changed = true;
             continue;
@@ -1093,6 +1166,14 @@ pub fn reconcile_edits() -> Vec<String> {
         let vpath = format!("{outer}/{rel}");
         let Some((m, mrel)) = find(&vpath) else { continue };
         let now = m.file(&mrel).filter(|e| e.mode != 0o160000).map(|e| e.oid);
+        if deleted.contains(&rel) {
+            if now.is_some() && now == base { continue; }
+            deleted.remove(&rel);
+            records.remove(&rel);
+            changed = true;
+            out.push(format!("{rel}: whiteout removed; {}", if now.is_none() { "absent in this release" } else { "changed in this release too" }));
+            continue;
+        }
         if now == base {
             continue;
         }
@@ -1129,6 +1210,7 @@ pub fn reconcile_edits() -> Vec<String> {
         }
     }
     if changed {
+        if let Err(e) = save_deleted(&dir, &deleted) { out.push(format!("whiteouts: {e}")); }
         let _ = save_records(&dir, &records);
     }
     out

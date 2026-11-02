@@ -350,6 +350,7 @@ pub(crate) fn run(up: *mut Unit, patient: bool) -> Outcome {
 
     // 4. the old state goes by value, off the owner (on this, the monitor's, thread)
     let t = Instant::now();
+    note_replaced_front(&old._front);
     drop(old);
     // the process-wide memos that only grow go too (made again on demand)
     drop_compile_memos();
@@ -363,6 +364,22 @@ pub(crate) fn run(up: *mut Unit, patient: bool) -> Outcome {
     if crate::run::VERBOSE.load(Ordering::Relaxed) || crate::memstat::enabled() { eprintln!("makepad-run settle rebuild at t={:.0} ms: encode {:.1} ms, restore {:.1} ms, replace on the owner {:.1} ms, old state dropped in {:.1} ms; total {:.1} ms; rss {:.0} -> {:.0} MB",
         crate::clock::ms_since_start(), encode_ms, restore_ms, replace_ms, drop_ms, ms(t_all), rss0 as f64 / 1048576.0, rss1 as f64 / 1048576.0); }
     Outcome::Done
+}
+
+/// The front states settle rebuilds replaced, weakly: once the rebuild's in-flight builds end,
+/// nothing may hold one (a holder keeps its memos, and with them the cold state's compiler
+/// chunks, alive). `memory compiler=1` reports what the ones still alive hold (`replaced_fronts_alive`).
+static REPLACED_FRONTS: relax_session::sync::Mutex<Vec<std::sync::Weak<FrontShared>>> = relax_session::sync::Mutex::new(Vec::new());
+
+fn note_replaced_front(f: &std::sync::Arc<FrontShared>) {
+    let mut r = REPLACED_FRONTS.lock().unwrap_or_else(|e| e.into_inner());
+    r.retain(|w| w.strong_count() > 0);
+    r.push(std::sync::Arc::downgrade(f));
+}
+
+/// Replaced front states something still holds (`note_replaced_front`), for the memory report.
+pub(crate) fn replaced_fronts_alive() -> Vec<std::sync::Arc<FrontShared>> {
+    REPLACED_FRONTS.lock().unwrap_or_else(|e| e.into_inner()).iter().filter_map(|w| w.upgrade()).collect()
 }
 
 /// Owner request under a front write: checks the program against the encode, finishes the new
@@ -434,10 +451,6 @@ unsafe fn replace(up: *mut Unit, sess: &std::sync::Arc<crate::Session>, mode: cr
             rir.push(r);
         }
         e.build_err = None;
-        // the slots' call lists stay; made during the cold start, they are scattered over the
-        // old state's chunks (a few bytes each, 200k slots): copied into the fresh chunks, the old
-        // ones go with the rest (only the owner reads a slot's fields: this runs on it)
-        e.rehome_lists();
     }
     let old = Old {
         _prog: std::mem::replace(&mut u.prog, prog),

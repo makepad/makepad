@@ -270,6 +270,7 @@ script_mod! {
     mod.widgets.WindowBase = #(Window::register_widget(vm))
     mod.widgets.Window = set_type_default() do mod.widgets.WindowBase{
         demo: false
+        depth_buffer: true
         show_caption_bar: true
         fullscreen_caption: true
         // The window chrome the theme declares (`WindowChrome`): the host's (follow), traffic
@@ -636,6 +637,15 @@ pub struct Window {
     main_draw_list: DrawList2d,
     #[live]
     pass: ScriptDrawPass,
+    /// Allocate and attach a `DepthD32` buffer on the window's root pass.
+    /// Defaults to `true` for widgets that layer ink with `draw_depth`
+    /// (`TabBar`, `Dock`, `Chart`, `MapView`); windows whose root pass only
+    /// composites offscreen viewports and flat painter's-order UI can set
+    /// `depth_buffer: false` to omit the window-sized depth attachment.
+    #[live(true)]
+    depth_buffer: bool,
+    #[rust]
+    depth_buffer_attached: Option<bool>,
     #[new]
     depth_texture: Texture,
     #[live]
@@ -1793,30 +1803,44 @@ impl Window {
         self.sync_system_bar_appearance(cx);
 
         if self.initialized {
+            self.sync_depth_buffer(cx);
             return;
         }
         self.initialized = true;
 
         self.window.handle.set_pass(cx, &self.pass.handle);
         //self.pass.set_window_clear_color(cx, vec4(0.0,0.0,0.0,0.0));
-        self.depth_texture = Texture::new_with_format(
-            cx,
-            TextureFormat::DepthD32 {
-                size: TextureSize::Auto,
-                initial: true,
-            },
-        );
-        self.pass.handle.set_depth_texture(
-            cx,
-            &self.depth_texture,
-            DrawPassClearDepth::ClearWith(1.0),
-        );
+        self.sync_depth_buffer(cx);
 
         if self.demo {
             self.demo_next_frame = cx.new_next_frame();
         }
         self.screen_cap.set_window_id(self.window.window_id().id());
         self.screen_cap.start_managed_once(cx);
+    }
+
+    fn sync_depth_buffer(&mut self, cx: &mut Cx) {
+        if self.depth_buffer_attached == Some(self.depth_buffer) {
+            return;
+        }
+        self.depth_buffer_attached = Some(self.depth_buffer);
+        if self.depth_buffer {
+            self.depth_texture = Texture::new_with_format(
+                cx,
+                TextureFormat::DepthD32 {
+                    size: TextureSize::Auto,
+                    initial: true,
+                },
+            );
+            self.pass.handle.set_depth_texture(
+                cx,
+                &self.depth_texture,
+                DrawPassClearDepth::ClearWith(1.0),
+            );
+        } else {
+            self.pass.handle.clear_depth_texture(cx);
+            self.depth_texture = Texture::new(cx);
+        }
     }
 
     pub fn begin(&mut self, cx: &mut Cx2d) -> Redrawing {

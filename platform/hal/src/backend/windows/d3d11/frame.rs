@@ -14,6 +14,7 @@ use crate::backend::exec::{self, LentState};
 use super::chain::Layered;
 use super::dcomp::{self, Item, Segment};
 use crate::buffers::{id_at, read_ids, read_pairs, read_rects, CmdView};
+use crate::gpu_prof::{self, ShaderFacts};
 use crate::ledger::Kind;
 use crate::session::{LentRef, Session, TextureObj, HOST};
 use crate::types::*;
@@ -112,6 +113,14 @@ struct Prepared {
     scissor: RECT,
     index_first: u32,
     index_count: u32,
+}
+
+/// What the GPU profiler records of the pass being encoded ([`gpu_prof::record_pass`]).
+#[derive(Default)]
+pub(super) struct ProfRecords {
+    records: Vec<gpu_prof::DrawRecord>,
+    attach: String,
+    bytes: u64,
 }
 
 /// The target of an upper segment's pass: its image and the window pixel of its top left.
@@ -458,7 +467,15 @@ impl D3d11 {
         let mut window_image = None;
         let mut batch = std::mem::take(&mut self.batch);
         // the frame's GPU span: a disjoint query around two timestamps
-        let timer = if replay { None } else { self.complete.timers.take(&self.dev) };
+        let mut timer = if replay { None } else { self.complete.timers.take(&self.dev) };
+        // a frame the GPU profiler records times each pass between two more timestamps
+        let prof_key = gpu_prof::current(sid);
+        if let Some(key) = prof_key {
+            gpu_prof::with_frame(key, |b| b.packet(packet.frame, is_window && !pick, &packet.meta));
+            if let Some(t) = timer.as_mut() {
+                t.prof = Some((key, Vec::new()));
+            }
+        }
         if let Some(t) = &timer {
             unsafe {
                 self.dev.ctx.Begin(t.disjoint.as_ID3D11Asynchronous());
@@ -493,11 +510,35 @@ impl D3d11 {
             let before = s.stats.skipped_draws;
             let missing = pick && draws.iter().any(|d| read_ids(view.arena, d.pick_tex).any(|t| self.pick_pending.contains(&(sid, t))));
             let mut failed = false;
+            let stamps = match (prof_key, timer.as_mut()) {
+                (Some(_), Some(t)) => t.stamp_pair(&self.dev),
+                _ => None,
+            };
+            if prof_key.is_some() {
+                self.prof = Some(ProfRecords::default());
+            }
+            if let (Some(q), Some(t)) = (stamps, &timer) {
+                unsafe { self.dev.ctx.End(t.stamp(q).as_ID3D11Asynchronous()) };
+            }
             let encoded = if split_pass == Some(pass_index) {
                 self.encode_split(s, target, pass, records, view, now, &mut deps).map(|(image, sp)| { split = Some(sp); image })
             } else {
                 self.encode_pass(s, target, is_window, pick, pass, draws, view, now, &mut deps)
             };
+            if let (Some(q), Some(t)) = (stamps, &timer) {
+                unsafe { self.dev.ctx.End(t.stamp(q + 1).as_ID3D11Asynchronous()) };
+            }
+            if let (Some(key), Some(rec)) = (prof_key, self.prof.take()) {
+                let timed = stamps.is_some() && encoded.is_ok();
+                let v = pass.viewport;
+                let (pipes, session): (_, &Session) = (&self.pipe, s);
+                let pi = gpu_prof::record_pass(key, session, sid, pass.name, pick, v[2] as u32, v[3] as u32, &rec.attach, rec.bytes, &rec.records, timed, |pipeline| {
+                    pipes.get(&(sid, pipeline.index)).map(|p| ShaderFacts { name: gpu_prof::shader_name(session, &p.state.src.desc), stats: None, source: None })
+                });
+                if let (Some(pi), Some(q), Some((_, passes))) = (pi.filter(|_| timed), stamps, timer.as_mut().and_then(|t| t.prof.as_mut())) {
+                    passes.push((pi, q));
+                }
+            }
             // whatever happened, no shared image stays held past its pass
             self.give_back_shared();
             match encoded {
@@ -568,6 +609,9 @@ impl D3d11 {
                     self.capture(s, target, &image);
                 }
             }
+        }
+        if let Some(key) = prof_key.filter(|_| presented && !pick) {
+            gpu_prof::with_frame(key, |b| b.present(crate::clock_ns()));
         }
         if let Some(t) = &timer {
             unsafe {
@@ -665,6 +709,22 @@ impl D3d11 {
         let target_size = [colors.iter().map(|(i, c)| plane_size(c, pass.layer[*i])[0]).chain(depth.iter().map(|d| d.desc.w)).min().unwrap(),
             colors.iter().map(|(i, c)| plane_size(c, pass.layer[*i])[1]).chain(depth.iter().map(|d| d.desc.h)).min().unwrap()];
 
+        if let Some(rec) = self.prof.as_mut() {
+            let pixels = v[2] as u64 * v[3] as u64;
+            let load = |l: u8| match l { pass_load::LOAD => "load", pass_load::CLEAR => "clear", _ => "dontcare" };
+            let mut parts = Vec::new();
+            for (i, c) in &colors {
+                let l = pass.load[*i];
+                rec.bytes += pixels * format::texel_bytes(c.desc.format) * ((l == pass_load::LOAD) as u64 + 1);
+                parts.push(format!("{} {}/store", format::name(c.desc.format).to_lowercase(), load(l)));
+            }
+            if let Some(d) = &depth {
+                let l = pass.load[4];
+                rec.bytes += pixels * format::texel_bytes(d.desc.format) * ((l == pass_load::LOAD) as u64 + 1);
+                parts.push(format!("{} {}/store", format::name(d.desc.format).to_lowercase(), load(l)));
+            }
+            rec.attach = parts.join(", ");
+        }
         // ---- lay out the draws' transient bytes
         let mut sc = std::mem::take(&mut self.scratch);
         sc.clear();
@@ -674,7 +734,14 @@ impl D3d11 {
                 continue;
             }
             match self.prepare(s, pass, d, view.arena, pick, &colors, &depth, target_size, &mut sc, now, deps) {
-                Ok(Some(p)) => sc.prepared.push(p),
+                Ok(Some(p)) => {
+                    if let Some(rec) = self.prof.as_mut() {
+                        let size = |id: Id| self.buf.get(&(s.id, id.index)).filter(|b| b.gen == id.gen).map_or(0, |b| b.buf.size);
+                        let geo = size(d.vb) + size(d.ib);
+                        rec.records.push(gpu_prof::DrawRecord::new(s, d, view.arena, v[2], v[3], depth.is_some(), p.program.desc.instance_stride as u64 * 4, geo, p.program.textures.len()));
+                    }
+                    sc.prepared.push(p)
+                }
                 Ok(None) => s.stats.skipped_draws += 1,
                 Err(e) => {
                     eprintln!("[hal-d3d11] draw: {e}");
@@ -954,7 +1021,7 @@ impl D3d11 {
             }
         }
         let blend = self.dev.blend_state(modes, program.desc.blend & pipeline_blend::MAX != 0);
-        let depth_state = if depth.is_none() { 0 } else if d.flags & Draw::DEPTH_WRITE != 0 { 1 } else { 2 };
+        let depth_state = if depth.is_none() { 0 } else { (if d.flags & Draw::DEPTH_WRITE != 0 { 1 } else { 2 }) + if d.flags & Draw::DEPTH_GREATER != 0 { 2 } else { 0 } };
         let cull = if d.flags & Draw::CULL != 0 { 1 } else { 0 };
         let scissor = if d.scissor.iter().any(|n| n.is_nan()) {
             RECT { left: 0, top: 0, right: target_size[0] as i32, bottom: target_size[1] as i32 }

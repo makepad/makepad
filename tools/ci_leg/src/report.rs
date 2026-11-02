@@ -16,7 +16,7 @@ pub struct Step {
 pub struct Run {
     /// the tree under test (the lease's tree)
     pub root: PathBuf,
-    /// where grabs and app logs go (`local/ci-leg/<shard>/` in the tree)
+    /// where grabs and app logs go (`local/ci-leg/<shard>/`, or the lease target when deferred)
     pub dir: PathBuf,
     pub steps: Vec<Step>,
     started: Vec<Instant>,

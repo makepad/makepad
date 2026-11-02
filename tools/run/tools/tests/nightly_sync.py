@@ -1,4 +1,4 @@
-"""Targeted nightly_sync checks; run on a node with Python's standard library.
+"""Targeted nightly_sync checks; run on a pool node with Python's standard library.
 
 The fake git records read-only commands without creating or modifying a repository.
 """

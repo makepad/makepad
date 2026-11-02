@@ -14,6 +14,7 @@ pub(crate) struct Domains {
 }
 
 struct DomainClient {
+    request: u32,
     domain: Option<u32>,
     window: Option<LentId>,
     status: DomainStatus,
@@ -61,12 +62,13 @@ impl App {
         let request = cx.hal_start_domain(&app.package, &args);
         self.domains.pending.insert(request, client);
         self.domains.clients.insert(client, DomainClient {
-            domain: None, window: None, status: DomainStatus::Compiling,
+            request, domain: None, window: None, status: DomainStatus::Compiling,
             closing: false, relaunching: false,
         });
         let mut slot = clients::ClientSlot::module(client, &app.id, &app.label);
         slot.ready = false;
         slot.starting = true;
+        slot.app_drawn = false;
         slot.pane = pane;
         slot.status = "compiling…".into();
         self.state_mut().clients.insert(client, slot);
@@ -181,6 +183,15 @@ impl App {
                         record.domain = Some(e.domain);
                     }
                 }
+                // A retiring run may still own threads. The HAL then starts
+                // its replacement under a fresh id with the original request.
+                let replaced: Vec<_> = self.domains.clients.iter()
+                    .filter(|(_, r)| r.relaunching && r.request == e.request
+                        && r.domain != Some(e.domain) && e.status == DomainStatus::Compiling)
+                    .map(|(client, _)| *client).collect();
+                for client in &replaced {
+                    self.domains.clients.get_mut(client).unwrap().domain = Some(e.domain);
+                }
                 let clients: Vec<_> = self.domains.clients.iter()
                     .filter(|(_, r)| r.domain == Some(e.domain)).map(|(c, _)| *c).collect();
                 for client in clients {
@@ -194,7 +205,7 @@ impl App {
                         record.window = None;
                         self.domains.windows.retain(|_, c| *c != client);
                     }
-                    if pending == Some(client) && closing { cx.hal_stop_domain(e.domain, false); }
+                    if (pending == Some(client) || replaced.contains(&client)) && closing { cx.hal_stop_domain(e.domain, false); }
                     if closing {
                         if ended { self.remove_client(cx, client); }
                         continue;
@@ -209,7 +220,7 @@ impl App {
                     if let Some(slot) = self.state_mut().clients.get_mut(&client) {
                         slot.status = text.clone();
                         if ended { slot.starting = false; }
-                        if e.status == DomainStatus::Compiling { slot.starting = true; }
+                        if e.status == DomainStatus::Compiling { slot.starting = true; slot.app_drawn = false; }
                     }
                     if !self.state_mut().clients[&client].pane {
                         // A crashed or exited app draws nothing: its card gets the desk's title bar to
@@ -237,7 +248,8 @@ impl App {
                         let client = self.next_id;
                         self.next_id += 1;
                         self.state_mut().clients.insert(client, clients::ClientSlot::module(client, &app, &e.title));
-                        self.domains.clients.insert(client, DomainClient { domain: Some(e.child), window: None,
+                        let request = self.domains.clients[&owner].request;
+                        self.domains.clients.insert(client, DomainClient { request, domain: Some(e.child), window: None,
                             status: DomainStatus::Running, closing: false, relaunching: false });
                         if let Some(mut desk) = self.desk(cx).borrow_mut::<WmDesk>() { desk.mark_domain(client); }
                         self.seat_domain(cx, client);

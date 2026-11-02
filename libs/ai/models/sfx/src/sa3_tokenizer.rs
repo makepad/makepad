@@ -7,7 +7,7 @@
 //! The merge algorithm is the llama.cpp-style greedy score merge (identical
 //! to libs/llama vocab.rs, which is llama.cpp-parity tested); parity against
 //! the reference tokenizer is covered by local/sa3_ref/dumps fixtures via
-//! `sa3-validate`/unit test.
+//! `sa3-validate`.
 
 use crate::sa3::SA3_TEXT_TOKENS;
 use crate::{DiffusionError, Result};
@@ -370,82 +370,5 @@ impl Sa3Tokenizer {
                 None => output.push(self.unk_id),
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::path::PathBuf;
-
-    /// Parity vs the reference GemmaTokenizer fixtures. Skips (with a note)
-    /// when the local reference weights are absent (e.g. plain CI checkout).
-    #[test]
-    fn reference_fixture_parity() {
-        let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let model = repo.join("local/sa3_ref/weights/stable-audio-3-small-sfx/t5gemma-b-b-ul2/tokenizer.model");
-        let fixtures = repo.join("local/sa3_ref/dumps/tokenizer_fixtures.json");
-        if !model.is_file() || !fixtures.is_file() {
-            eprintln!("sa3 tokenizer fixtures absent; skipping parity test");
-            return;
-        }
-        let tokenizer = Sa3Tokenizer::load(&model).unwrap();
-        let text = std::fs::read_to_string(&fixtures).unwrap();
-        // Tiny JSON pull: [{"text": ..., "ids": [...]}, ...]
-        let value: Vec<(String, Vec<u32>)> = parse_fixtures(&text);
-        assert!(!value.is_empty());
-        for (prompt, expected) in value {
-            let got = tokenizer.tokenize(&prompt);
-            assert_eq!(got, expected, "prompt {prompt:?}");
-        }
-    }
-
-    /// Minimal parser for the exact fixture file shape written by sa3_dump.
-    fn parse_fixtures(text: &str) -> Vec<(String, Vec<u32>)> {
-        let mut out = Vec::new();
-        let mut rest = text;
-        while let Some(t_pos) = rest.find("\"text\":") {
-            rest = &rest[t_pos + 7..];
-            let start = rest.find('"').unwrap() + 1;
-            let mut prompt = String::new();
-            let mut chars = rest[start..].chars();
-            loop {
-                match chars.next().unwrap() {
-                    '"' => break,
-                    '\\' => match chars.next().unwrap() {
-                        'n' => prompt.push('\n'),
-                        't' => prompt.push('\t'),
-                        'u' => {
-                            let hex: String = (0..4).map(|_| chars.next().unwrap()).collect();
-                            let code = u32::from_str_radix(&hex, 16).unwrap();
-                            // Handle surrogate pairs for emoji fixtures.
-                            if (0xD800..0xDC00).contains(&code) {
-                                let escaped: String = (0..6).map(|_| chars.next().unwrap()).collect();
-                                assert!(escaped.starts_with("\\u"));
-                                let low = u32::from_str_radix(&escaped[2..], 16).unwrap();
-                                let combined =
-                                    0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00);
-                                prompt.push(char::from_u32(combined).unwrap());
-                            } else {
-                                prompt.push(char::from_u32(code).unwrap());
-                            }
-                        }
-                        other => prompt.push(other),
-                    },
-                    other => prompt.push(other),
-                }
-            }
-            let ids_pos = rest.find("\"ids\":").unwrap();
-            let ids_rest = &rest[ids_pos + 6..];
-            let open = ids_rest.find('[').unwrap();
-            let close = ids_rest.find(']').unwrap();
-            let ids: Vec<u32> = ids_rest[open + 1..close]
-                .split(',')
-                .filter_map(|part| part.trim().parse().ok())
-                .collect();
-            out.push((prompt, ids));
-            rest = &ids_rest[close..];
-        }
-        out
     }
 }

@@ -376,7 +376,18 @@ impl ImpliedBounds {
                     let inferred = match self.provisional.get(&d) { Some(p) => p.clone(), None => self.inferred_outlives_of(tcx, prog, d, visiting) };
                     for p in explicit.into_iter().chain(inferred) {
                         let p = instantiate(tcx, p, tys.list(args), &params, &tys.region_args(rs));
-                        if !matches!(p, OutlivesPredicate::Type(t, _) if tys.has_vars_bound_at_or_above(t, 0)) { push(p, out); }
+                        match p {
+                            OutlivesPredicate::Type(t, _) if tys.has_vars_bound_at_or_above(t, 0) => {}
+                            // `Iter<'a, Option<T>>` asks `Option<T>: 'a`: that is `T: 'a`, its components
+                            // (rustc_hir_analysis outlives/utils.rs insert_outlives_predicate).
+                            OutlivesPredicate::Type(t, r) => {
+                                let mut components = ImpliedBounds::default();
+                                components.components(tcx, t, r);
+                                for (a, b) in components.outlives { push(OutlivesPredicate::Region(a, b), out); }
+                                for (t, r) in components.type_outlives { push(OutlivesPredicate::Type(t, r), out); }
+                            }
+                            p => push(p, out),
+                        }
                     }
                 }
                 for t in tys.list(args).to_vec() { self.required_to_be_wf(tcx, prog, t, visiting, out); }

@@ -4,7 +4,7 @@ use crate::{coresimd::*, f32::math, BVec3, BVec3A, FloatExt, Quat, Vec2, Vec3, V
 
 use core::fmt;
 use core::iter::{Product, Sum};
-use core::{f32, ops::*};
+use core::ops::*;
 
 use core::simd::{cmp::SimdPartialEq, cmp::SimdPartialOrd, num::SimdFloat, *};
 use std::simd::StdFloat;

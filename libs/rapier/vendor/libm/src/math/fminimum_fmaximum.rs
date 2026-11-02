@@ -140,12 +140,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(f16_enabled)]
-    fn fminimum_spec_tests_f16() {
-        fminimum_spec_test::<f16>(fminimumf16);
-    }
-
-    #[test]
     fn fminimum_spec_tests_f32() {
         fminimum_spec_test::<f32>(fminimumf);
     }
@@ -153,12 +147,6 @@ mod tests {
     #[test]
     fn fminimum_spec_tests_f64() {
         fminimum_spec_test::<f64>(fminimum);
-    }
-
-    #[test]
-    #[cfg(f128_enabled)]
-    fn fminimum_spec_tests_f128() {
-        fminimum_spec_test::<f128>(fminimumf128);
     }
 
     fn fmaximum_spec_test<F: Float>(f: impl Fn(F, F) -> F) {
@@ -238,12 +226,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(f16_enabled)]
-    fn fmaximum_spec_tests_f16() {
-        fmaximum_spec_test::<f16>(fmaximumf16);
-    }
-
-    #[test]
     fn fmaximum_spec_tests_f32() {
         fmaximum_spec_test::<f32>(fmaximumf);
     }
@@ -253,9 +235,4 @@ mod tests {
         fmaximum_spec_test::<f64>(fmaximum);
     }
 
-    #[test]
-    #[cfg(f128_enabled)]
-    fn fmaximum_spec_tests_f128() {
-        fmaximum_spec_test::<f128>(fmaximumf128);
-    }
 }

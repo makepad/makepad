@@ -49,21 +49,22 @@ impl Mesh {
         }install_uv(self,values,ctx)
     }
 
-    /// Deterministic square-grid packing using one common scale for every
-    /// island (preserving relative texel density). Padding is in output UV units.
+    /// Nests islands into the unit square at one common scale, preserving
+    /// relative texel density; islands may turn but keep their shape. Padding
+    /// is in output UV units, around each island and at the square's edge.
     /// Pinned islands are refused because a pack necessarily changes placement.
     pub fn pack_uv(&mut self,faces:&[FaceId],padding:f64,ctx:&mut Context<'_>)->Result<ChangeSet>{
         if !padding.is_finite()||padding<0.||padding>=0.5{return Err(invalid("UV padding must be in [0,0.5)"));}
         let islands=self.uv_islands(faces,ctx)?;if islands.is_empty(){return Err(invalid("empty UV pack selection"));}
         if islands.iter().any(|i|i.pinned>0){return Err(invalid("unpin islands before packing"));}
-        let columns=(islands.len()as f64).sqrt().ceil()as usize;let rows=islands.len().div_ceil(columns);let cell=[1./columns as f64,1./rows as f64];
-        if cell.iter().any(|s|*s<=2.*padding){return Err(invalid("UV padding exceeds available island cell"));}
-        let mut maximum=[0f64;2];for island in &islands{for d in 0..2{let extent=island.bounds[1][d]-island.bounds[0][d];if extent<=0.{return Err(invalid("cannot pack a collapsed UV island"));}maximum[d]=maximum[d].max(extent);}}
-        let scale=((cell[0]-2.*padding)/maximum[0]).min((cell[1]-2.*padding)/maximum[1]);let mut transforms=BTreeMap::new();
-        for (i,island) in islands.iter().enumerate(){let extent=std::array::from_fn::<_,2,_>(|d|island.bounds[1][d]-island.bounds[0][d]);let origin=[(i%columns)as f64*cell[0],(i/columns)as f64*cell[1]];
-            let offset=std::array::from_fn(|d|origin[d]+(cell[d]-extent[d]*scale)*0.5-island.bounds[0][d]*scale);for &corner in &island.corners{transforms.insert(corner,offset);}
-        }
-        let values=self.corners.iter().filter_map(|c|transforms.get(&c.id).map(|offset:&[f64;2]|(c.id,std::array::from_fn(|d|c.uv[d]*scale+offset[d])))).collect();install_uv(self,values,ctx)
+        for island in &islands{for d in 0..2{if island.bounds[1][d]-island.bounds[0][d]<=0.{return Err(invalid("cannot pack a collapsed UV island"));}}}
+        let island_of=islands.iter().enumerate().flat_map(|(i,island)|island.faces.iter().map(move |&f|(f,i))).collect::<BTreeMap<_,_>>();
+        let triangulated=self.triangulate(ctx)?;let mut items=vec![Vec::new();islands.len()];
+        for t in &triangulated.triangles{ctx.checkpoint(1)?;if let Some(&i)=island_of.get(&t.source_face){items[i].push(t.indices.map(|v|triangulated.vertices[v as usize].uv));}}
+        let options=crate::unwrap::layout_options(crate::unwrap::layout_padding(padding),&[]);
+        let atlas=crate::unwrap::with_budget(ctx,|cp|makepad_uv_unwrap::pack_items(items,&options,cp))?;
+        let mut values=BTreeMap::new();for (island,placement) in islands.iter().zip(&atlas.placements){for &face in &island.faces{for c in self.face_corners(face)?{ctx.checkpoint(1)?;values.insert(c.id,crate::unwrap::to_unit(placement.map(c.uv)));}}}
+        install_uv(self,values,ctx)
     }
 
     /// Uniform harmonic UV relaxation. Continuous corner groups move together;

@@ -6,7 +6,7 @@
 //! getrusage when available.
 //!
 //! Run:
-//!   cargo test --release -p makepad-workspace --test document_worker_latency -- --ignored --nocapture
+//!   cargo test --release -p makepad-workspace --test document_worker_latency -- --nocapture
 
 use makepad_workspace::document_worker::{DocumentWorker, FileSnapshot, MAX_DOCUMENTS};
 use makepad_workspace::makepad_widgets_core::makepad_platform::makepad_network::install_ui_waker;
@@ -382,7 +382,6 @@ fn print_stage_breakdown(row: &BurstRow) {
 }
 
 #[test]
-#[ignore = "timing probe; run with --ignored --nocapture"]
 fn notify_burst_latency_table_and_breakdown() {
     let dir = TempDir::new();
     const FILE_COUNT: usize = 200;

@@ -321,7 +321,6 @@ mod test {
         test::{_0_0i, _0_1i, _1_0i, _1_1i, float::close},
         Complex,
     };
-    use std::f64; // for constants before Rust 1.43.
 
     fn closef(a: f64, b: f64) -> bool {
         close_to_tolf(a, b, 1e-10)

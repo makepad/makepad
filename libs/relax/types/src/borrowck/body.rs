@@ -58,6 +58,27 @@ pub fn owners(prog: &Program) -> impl Iterator<Item = CheckedBody> + '_ {
 /// (rustc_interface passes.rs analysis type-checks every body owner). Those inside a body
 /// (repeat counts) are checked with that body.
 pub fn signature_anon_consts(prog: &Program, tcx: &Tcx, krate: u32) -> Vec<DefId> {
+    anon_consts(prog, tcx, krate, false)
+}
+
+/// The anonymous constants written inside a body (const arguments of its paths, repeat counts),
+/// with the item owner whose body holds them: nested bodies of their own in rustc, whose late
+/// lints run on them (rustc_lint late.rs visit_nested_body). The owner's typeck has fed their types.
+pub fn body_anon_consts(prog: &Program, tcx: &Tcx, krate: u32) -> Vec<(DefId, DefId, ExprId)> {
+    use crate::def_collector::NodeId;
+    anon_consts(prog, tcx, krate, true).into_iter().filter_map(|def| {
+        let (_, NodeId::AnonConst(e)) = *prog.def_id_to_node_id.get(&def)? else { return None };
+        Some((def, root_owner(prog, def), e))
+    }).collect()
+}
+
+fn root_owner(prog: &Program, def: DefId) -> DefId {
+    let mut owner = prog.def(def).parent;
+    while matches!(prog.def(owner).kind, DefKind::Closure | DefKind::AnonConst | DefKind::OpaqueTy) { owner = prog.def(owner).parent; }
+    owner
+}
+
+fn anon_consts(prog: &Program, tcx: &Tcx, krate: u32, inside: bool) -> Vec<DefId> {
     use crate::def_collector::NodeId;
     let mut out = Vec::new();
     for (&def, &(file, node)) in &prog.def_id_to_node_id {
@@ -68,9 +89,7 @@ pub fn signature_anon_consts(prog: &Program, tcx: &Tcx, krate: u32) -> Vec<DefId
         // lowers directly to Param, so it has no anonymous body to type-check.
         if tcx.const_ty(prog, def).is_none() { continue; }
         let lo = prog.files[file as usize].ast.expr(e).lo;
-        let mut owner = d.parent;
-        while matches!(prog.def(owner).kind, DefKind::Closure | DefKind::AnonConst | DefKind::OpaqueTy) { owner = prog.def(owner).parent; }
-        if !in_body(prog, owner, file, lo) { out.push(def); }
+        if in_body(prog, root_owner(prog, def), file, lo) == inside { out.push(def); }
     }
     out.sort_unstable_by_key(|d| d.0);
     out

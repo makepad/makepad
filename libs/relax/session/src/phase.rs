@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 
 const KEPT: u8 = 0;
 const COMPILER: u8 = 1;
+const SLOTS: u8 = 2;
 const OFF: u8 = 0xff;
 
 thread_local! {
@@ -22,6 +23,12 @@ pub fn in_compiler() -> bool {
     // `try_with` of a const TLS without a destructor never fails and compiles to one
     // thread-pointer-relative load; `with` stays a call (it carries a panic path)
     PHASE.try_with(|p| p.get()).map_or(false, |p| p == COMPILER)
+}
+
+/// Whether this thread's allocations belong to the unit-lifetime slot arena.
+#[inline]
+pub fn in_slots() -> bool {
+    PHASE.try_with(|p| p.get()).map_or(false, |p| p == SLOTS)
 }
 
 /// Puts the calling thread in a phase until dropped. !Send: it restores this thread's TLS.
@@ -49,6 +56,12 @@ fn enter(phase: u8) -> PhaseGuard {
 #[inline]
 pub fn compiler() -> PhaseGuard {
     enter(COMPILER)
+}
+
+/// Allocations go to the slot arena until the guard drops, once routing is enabled.
+#[inline]
+pub fn slots() -> PhaseGuard {
+    enter(SLOTS)
 }
 
 /// Allocations go to the system heap (the program's) until the guard drops.

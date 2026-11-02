@@ -131,24 +131,38 @@ impl FleetRouter {
     /// Route over snapshots the caller already probed.
     pub fn route_snapshots(
         &self,
+        snapshots: Vec<fleet::BoxSnapshot>,
+        domain: &str,
+        request: &GenerateRequestJson,
+    ) -> Result<GenPick, String> {
+        self.route_snapshots_with_diagnosis(snapshots, domain, request, |snapshots, model| {
+            crate::fleet_report::diagnose(model, domain, snapshots, &discovery::start_listener())
+                .render(&if model.is_empty() { format!("a {domain} model") } else { model.to_string() })
+        })
+    }
+
+    fn route_snapshots_with_diagnosis(
+        &self,
         mut snapshots: Vec<fleet::BoxSnapshot>,
         domain: &str,
         request: &GenerateRequestJson,
+        diagnosis: impl FnOnce(&[fleet::BoxSnapshot], &str) -> String,
     ) -> Result<GenPick, String> {
         let domain_id = Domain::parse(domain).ok_or_else(|| format!("unknown generation domain `{domain}`"))?;
         if let Some(problem) = crate::registry::request_problem(domain_id, request) {
             return Err(problem);
         }
+        let heard = snapshots.clone();
         let mut routed = request.clone();
         if self.installed_only {
-            let (model, without) = fleet::installed_model(&snapshots, domain, &request.model).ok_or_else(|| {
-                if request.model.is_empty() { format!("no LAN AI Hub node has a {domain} model installed") }
-                else { format!("no LAN AI Hub node has {} installed", request.model) }
-            })?;
+            let Some((model, without)) = fleet::installed_model(&snapshots, domain, &request.model) else {
+                return Err(diagnosis(&heard, &request.model));
+            };
             snapshots.retain(|snapshot| !without.contains(&snapshot.base_url));
             routed.model = model;
         }
-        let (snapshot, model) = route_generation(snapshots, domain, &routed)?;
+        let (snapshot, model) = route_generation(snapshots, domain, &routed)
+            .map_err(|reason| format!("{}\nRouting reason: {reason}", diagnosis(&heard, &routed.model)))?;
         let model_state = snapshot.models.iter().find(|candidate| candidate.id == model).map(|candidate| candidate.state.clone());
         let base_url = snapshot.base_url;
         Ok(GenPick { provider: Box::new(LocalService::new(&base_url)), base_url, model, model_state })
@@ -217,7 +231,7 @@ impl GenRouter for FixedRouter {
     fn route(&self, domain: &str, request: &GenerateRequestJson, excluded: &[String]) -> Result<GenPick, String> {
         let domain_id = Domain::parse(domain).ok_or_else(|| format!("unknown generation domain `{domain}`"))?;
         if excluded.iter().any(|url| url == &self.0) {
-            return Err(format!("fixed generation node {} was excluded", fleet::node_label(&self.0)));
+            return Err(format!("{} was excluded from fixed generation", fleet::node_label(&self.0)));
         }
         if let Some(problem) = crate::registry::request_problem(domain_id, request) {
             return Err(problem);
@@ -372,10 +386,8 @@ pub fn transient_transport_error(error: &AssetAiError) -> bool {
 fn lease_origin(origin: (String, u64)) -> (String, u64) {
     use crate::sha256::{to_hex, Sha256};
     static NEXT_LEASE: AtomicU64 = AtomicU64::new(0);
-    // Keep fetch_update for older stable toolchains without try_update.
-    #[allow(deprecated)]
     let nonce = NEXT_LEASE
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| value.checked_add(1))
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |value| value.checked_add(1))
         .expect("generation lease identity exhausted");
     let mut digest = Sha256::new();
     digest.update(b"makepad-flow-generation-lease-v1\0");
@@ -476,6 +488,11 @@ impl GenJob {
     /// The job's lease key, as it goes on the wire.
     pub fn origin(&self) -> &(String, u64) {
         &self.origin
+    }
+
+    /// The node the job was submitted to (its label), once it is.
+    pub fn node(&self) -> Option<String> {
+        self.provider_url.as_deref().map(fleet::node_label)
     }
 
     /// Route and submit. The request's origin becomes this job's lease.
@@ -846,11 +863,26 @@ impl GenJob {
         }
     }
 
+    /// The job's id on its node, once submitted.
+    pub fn job_id(&self) -> Option<&str> {
+        self.job_id.as_deref()
+    }
+
     /// Stop the job on its node and release its lease. Later polls are
-    /// `Pending`.
+    /// `Pending`. The node keeps the model warm for the next job.
     pub fn cancel(&mut self) {
+        self.stop(false);
+    }
+
+    /// A person's cancel: the job stops and its model leaves the node's
+    /// device once it has unwound, unless other work wants it.
+    pub fn cancel_freeing(&mut self) {
+        self.stop(true);
+    }
+
+    fn stop(&mut self, free: bool) {
         if let (Some(provider), Some(job_id)) = (self.provider.as_ref(), self.job_id.as_deref()) {
-            let _ = provider.provider.cancel(job_id);
+            let _ = if free { provider.provider.cancel_freeing(job_id) } else { provider.provider.cancel(job_id) };
             provider.bye();
         }
         self.provider = None;

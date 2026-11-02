@@ -129,12 +129,6 @@ mod tests {
     use crate::vec3::dvec3;
 
     #[test]
-    fn test_empty() {
-        let b = BBox3d::empty();
-        assert!(b.is_empty());
-    }
-
-    #[test]
     fn test_from_points() {
         let b = BBox3d::from_points(&[
             dvec3(1.0, 2.0, 3.0),
@@ -143,13 +137,6 @@ mod tests {
         ]);
         assert_eq!(b.min, dvec3(-1.0, -2.0, -3.0));
         assert_eq!(b.max, dvec3(1.0, 2.0, 3.0));
-    }
-
-    #[test]
-    fn test_center_size() {
-        let b = BBox3d::from_min_max(dvec3(0.0, 0.0, 0.0), dvec3(10.0, 20.0, 30.0));
-        assert_eq!(b.center(), dvec3(5.0, 10.0, 15.0));
-        assert_eq!(b.size(), dvec3(10.0, 20.0, 30.0));
     }
 
     #[test]

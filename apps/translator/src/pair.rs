@@ -108,9 +108,7 @@ impl Invite {
 /// This machine's address on the LAN, as the route to a private address
 /// would use it. No packet is sent.
 pub fn lan_address() -> Option<String> {
-    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
-    socket.connect("192.0.2.115:9").ok()?;
-    let ip = socket.local_addr().ok()?.ip();
+    let ip = makepad_ai_hub::hub_order::own_lan_ip()?;
     (!ip.is_loopback() && !ip.is_unspecified()).then(|| ip.to_string())
 }
 
@@ -197,10 +195,10 @@ mod tests {
         let key = id::generate_key().unwrap();
         std::fs::create_dir_all(&node_dir).unwrap();
         id::write_key(&node_dir.join(id::ID_KEY), &key).unwrap();
-        let cred = root.issue("n217", Role::Node, id::now_secs() + 60, None, &id::point_of(&key)).unwrap();
+        let cred = root.issue("n5", Role::Node, id::now_secs() + 60, None, &id::point_of(&key)).unwrap();
         std::fs::write(node_dir.join(id::ID_CRED), cred.text()).unwrap();
-        assert!(invite.install(&node_dir).unwrap_err().contains("n217"));
-        assert_eq!(Me::load(&node_dir).unwrap().cred.name, "n217");
+        assert!(invite.install(&node_dir).unwrap_err().contains("n5"));
+        assert_eq!(Me::load(&node_dir).unwrap().cred.name, "n5");
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&node_dir);
     }

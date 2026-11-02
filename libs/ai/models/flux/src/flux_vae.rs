@@ -3108,6 +3108,7 @@ mod encoder_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "macos")]
     use crate::backend::{
         create_graph_session, new_runtime, prepare_graph, BufferStorageMode, GraphTensorWrite,
     };
@@ -3138,11 +3139,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn conv_2d_im2col_mm_matches_conv_2d_values_on_metal_when_available() {
-        let runtime = match new_runtime() {
-            Ok(runtime) => runtime,
-            Err(_) => return,
-        };
+        let runtime = new_runtime().expect("a working Metal device is required");
 
         let mut ctx = Context::new(InitParams {
             mem_size: 4 << 20,
@@ -3194,11 +3193,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn spatial_token_roundtrip_matches_original_on_metal_when_available() {
-        let runtime = match new_runtime() {
-            Ok(runtime) => runtime,
-            Err(_) => return,
-        };
+        let runtime = new_runtime().expect("a working Metal device is required");
 
         let width = 3_i64;
         let height = 2_i64;
@@ -3252,11 +3249,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn vae_attention_output_matches_cpu_reference_on_metal_when_available() {
-        let runtime = match new_runtime() {
-            Ok(runtime) => runtime,
-            Err(_) => return,
-        };
+        let runtime = new_runtime().expect("a working Metal device is required");
 
         let head_dim = 8_i64;
         let token_count = 6_i64;
@@ -3349,6 +3344,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
     fn patterned_f32s(len: usize, start: f32, step: f32) -> Vec<f32> {
         (0..len).map(|index| start + index as f32 * step).collect()
     }
@@ -3464,6 +3460,7 @@ mod tests {
         assert!(matches!(err, DiffusionError::Workflow(_)));
     }
 
+    #[cfg(target_os = "macos")]
     fn cpu_attention_f32(
         q: &[f32],
         k: &[f32],

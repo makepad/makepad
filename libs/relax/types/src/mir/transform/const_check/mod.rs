@@ -133,6 +133,29 @@ impl<'a> ConstCx<'a> {
     }
 }
 
+/// rustc `find_attr!(tcx, def_id, RustcDoNotConstCheck)` of the body's own definition (an inline or
+/// anonymous constant is a definition without attributes).
+pub(crate) fn do_not_const_check(prog: &Program, body: &Body) -> bool {
+    if matches!(body.source.kind, BodyKind::InlineConst | BodyKind::AnonConst) { return false; }
+    let d = prog.def(body.source.owner);
+    let ast = &prog.files[d.file as usize].ast;
+    let src = prog.src(d.file);
+    ast.list(ast.item(d.item).attrs).iter().any(|a| a.toks.hi > a.toks.lo && crate::cfg::tok_str(src, a.toks.lo as usize) == b"rustc_do_not_const_check")
+}
+
+/// A Relax intrinsic (an `extern "relax-intrinsic"` item, which cannot be written `const`) that
+/// stands for one of rustc's `const fn` intrinsics: it carries the const-stability attribute rustc
+/// puts on that intrinsic (`rustc_const_stable`, `rustc_const_unstable`,
+/// `rustc_intrinsic_const_stable_indirect`: rustc accepts them on const fns only). Any other
+/// foreign fn is not const.
+pub(crate) fn const_intrinsic(prog: &Program, d: DefId) -> bool {
+    let def = prog.def(d);
+    let ast = &prog.files[def.file as usize].ast;
+    let src = prog.src(def.file);
+    ast.list(ast.item(def.item).attrs).iter().any(|a| a.toks.hi > a.toks.lo
+        && matches!(crate::cfg::tok_str(src, a.toks.lo as usize), b"rustc_const_stable" | b"rustc_const_unstable" | b"rustc_intrinsic_const_stable_indirect"))
+}
+
 fn is_live_default(prog: &Program, d: DefId) -> bool {
     let def = prog.def(d);
     let ast = &prog.files[def.file as usize].ast;

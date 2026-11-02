@@ -6,7 +6,8 @@
 // Algorithm:
 // 1. Super-triangle containing all points.
 // 2. Bowyer-Watson incremental insertion (cavity-based).
-// 3. Constraint enforcement via iterative edge flipping.
+// 3. Constraint enforcement: the triangles a constraint crosses are retriangulated on both
+//    sides of it (constrained Delaunay pseudo-polygons).
 // 4. Remove super-triangle vertices.
 //
 // Adjacency: adj[3*t+e] stores the HALF-EDGE index (3*t2+e2) of the twin,
@@ -31,6 +32,13 @@ pub struct CDT {
     constrained: Vec<bool>, // constrained[3*t+e] = edge is a constraint
     constraints: Vec<(u32, u32)>,
     num_super: u32,
+    /// A live triangle at each point, while constraints go in.
+    vert_tri: Vec<u32>,
+    /// Per triangle, the insertion that last visited it / found it in the cavity (`gen`):
+    /// marks reused across insertions instead of two cleared arrays per point (O(n) each).
+    seen: Vec<u32>,
+    bad_at: Vec<u32>,
+    gen: u32,
 }
 
 impl CDT {
@@ -61,6 +69,10 @@ impl CDT {
             constrained: vec![false, false, false],
             constraints: Vec::new(),
             num_super: 3,
+            vert_tri: Vec::new(),
+            seen: Vec::new(),
+            bad_at: Vec::new(),
+            gen: 0,
         }
     }
 
@@ -83,6 +95,8 @@ impl CDT {
     pub fn insert_point(&mut self, x: f64, y: f64) -> u32 {
         let idx = self.points.len() as u32;
         self.points.push(Point2 { x, y });
+        // (cancellation is looked at once per point and once per constraint: each is bounded
+        // work, and the thread-local read per walk or flood step was the inner loop's cost)
         if !thread_pool::cancelled() {
             self.bowyer_watson_insert(idx);
         }
@@ -109,6 +123,14 @@ impl CDT {
     }
 
     pub fn finalize(&mut self) {
+        self.vert_tri = vec![NONE; self.points.len()];
+        for t in 0..self.num_tris() {
+            if !self.is_deleted(t) {
+                for v in self.tri_verts(t) {
+                    self.vert_tri[v as usize] = t as u32;
+                }
+            }
+        }
         for i in 0..self.constraints.len() {
             if thread_pool::cancelled() {
                 return;
@@ -141,17 +163,26 @@ impl CDT {
 
         // Flood-fill to find all "bad" triangles whose circumcircle contains p
         let mut bad = Vec::new();
-        let mut visited = vec![false; self.num_tris()];
+        self.gen = self.gen.wrapping_add(1);
+        if self.gen == 0 {
+            // (after 2^32 insertions: start the marks over)
+            self.seen.iter_mut().for_each(|m| *m = 0);
+            self.bad_at.iter_mut().for_each(|m| *m = 0);
+            self.gen = 1;
+        }
+        let gen = self.gen;
+        let n = self.num_tris();
+        if self.seen.len() < n {
+            self.seen.resize(n, 0);
+            self.bad_at.resize(n, 0);
+        }
         let mut stack = vec![start];
 
         while let Some(t) = stack.pop() {
-            if thread_pool::cancelled() {
-                return;
-            }
-            if visited[t] {
+            if self.seen[t] == gen {
                 continue;
             }
-            visited[t] = true;
+            self.seen[t] = gen;
 
             if self.is_deleted(t) {
                 continue;
@@ -164,7 +195,7 @@ impl CDT {
                     let tw = self.adj[t * 3 + e];
                     if tw != NONE {
                         let nb = (tw / 3) as usize;
-                        if !visited[nb] {
+                        if self.seen[nb] != gen {
                             stack.push(nb);
                         }
                     }
@@ -177,9 +208,8 @@ impl CDT {
         }
 
         // Find boundary edges of the cavity
-        let mut bad_set = vec![false; self.num_tris()];
         for &t in &bad {
-            bad_set[t] = true;
+            self.bad_at[t] = gen;
         }
 
         // (from, to, outside_half_edge_or_NONE)
@@ -188,7 +218,7 @@ impl CDT {
             let verts = self.tri_verts(t);
             for e in 0..3usize {
                 let tw = self.adj[t * 3 + e];
-                let nb_is_bad = tw != NONE && bad_set[(tw / 3) as usize];
+                let nb_is_bad = tw != NONE && self.bad_at[(tw / 3) as usize] == gen;
                 if !nb_is_bad {
                     let from = verts[(e + 1) % 3];
                     let to = verts[(e + 2) % 3];
@@ -291,18 +321,18 @@ impl CDT {
         // Walk towards p using adjacency. O(sqrt(n)) expected vs O(n) scan.
         // Find any non-deleted triangle to start from.
         let mut t = 0;
-        while t < self.num_tris() && self.is_deleted(t) {
-            t += 1;
+        // Start at the newest triangle: it is alive, and points tend to come in order. The
+        // older ones are mostly deleted, and walking past them grows with every insert.
+        t = t.max(self.num_tris().saturating_sub(1));
+        while t > 0 && self.is_deleted(t) {
+            t -= 1;
         }
-        if t >= self.num_tris() {
+        if self.is_deleted(t) {
             return None;
         }
 
         let max_steps = self.num_tris() * 2;
         for _ in 0..max_steps {
-            if thread_pool::cancelled() {
-                return None;
-            }
             if self.is_deleted(t) {
                 // Fallback to linear scan if walk hits deleted triangle
                 return self.find_containing_triangle_linear(p);
@@ -323,14 +353,15 @@ impl CDT {
                 return Some(t);
             }
 
-            // Walk towards the most negative edge
-            let ds = [d0, d1, d2];
-            let min_edge = if ds[0] <= ds[1] && ds[0] <= ds[2] {
-                0
-            } else if ds[1] <= ds[2] {
-                1
-            } else {
+            // Walk across the edge p is furthest outside of. Edge e is the one opposite corner
+            // e (adj's layout): d0 is a-b (edge 2), d1 b-c (edge 0), d2 c-a (edge 1). Crossing
+            // the wrong one wandered until the walk gave up into the linear scan.
+            let min_edge = if d0 <= d1 && d0 <= d2 {
                 2
+            } else if d1 <= d2 {
+                0
+            } else {
+                1
             };
 
             let twin = self.adj[t * 3 + min_edge];
@@ -370,175 +401,184 @@ impl CDT {
     // Constraint enforcement
     // =========================================================================
 
+    /// The triangles round point `a`, each with `a`'s corner in it.
+    fn fan(&self, a: u32, out: &mut Vec<(usize, usize)>) {
+        out.clear();
+        let start = self.vert_tri[a as usize];
+        if start == NONE {
+            return; // a duplicate point: it never joined the triangulation
+        }
+        let corner = |t: usize| self.tri_verts(t).iter().position(|v| *v == a);
+        let Some(i) = corner(start as usize) else { return };
+        out.push((start as usize, i));
+        let mut next = 0;
+        while next < out.len() {
+            let (t, i) = out[next];
+            next += 1;
+            // Over the two edges that meet at `a`.
+            for e in [(i + 1) % 3, (i + 2) % 3] {
+                let twin = self.adj[t * 3 + e];
+                if twin == NONE {
+                    continue;
+                }
+                let t2 = (twin / 3) as usize;
+                if !out.iter().any(|(s, _)| *s == t2) {
+                    if let Some(j) = corner(t2) {
+                        out.push((t2, j));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Makes `a`-`b` an edge. The triangles the segment crosses are taken out and the two
+    /// pseudo-polygons either side of it are triangulated again, each constrained Delaunay
+    /// (Anglada's pseudo-polygon triangulation). No flip sequence is involved, so nothing can
+    /// cycle: flipping each crossed edge in turn, walking again from `a` after every flip,
+    /// flipped one quad's two diagonals back and forth forever when both crossed the segment
+    /// (the `%` slash through its rings). The work is the crossed triangles alone. A segment
+    /// that runs through a vertex or across another constraint can not be one edge and is left
+    /// out (the caller finds it missing).
     fn enforce_constraint(&mut self, a: u32, b: u32) {
         if a == b {
             return;
         }
-
-        if self.mark_constraint(a, b) {
+        let mut fan = Vec::new();
+        self.fan(a, &mut fan);
+        // Already an edge.
+        let found = fan.iter().find_map(|&(t, i)| {
+            let v = self.tri_verts(t);
+            [(i + 1) % 3, (i + 2) % 3].into_iter().find(|&j| v[j] == b).map(|j| (t, 3 - i - j))
+        });
+        if let Some((t, e)) = found {
+            self.constrained[t * 3 + e] = true;
+            let twin = self.adj[t * 3 + e];
+            if twin != NONE {
+                self.constrained[twin as usize] = true;
+            }
             return;
         }
-
-        let max_iters = self.num_tris() * self.num_tris() + 100;
-        for _ in 0..max_iters {
-            if thread_pool::cancelled() {
+        let (pa, pb) = (self.pt(a), self.pt(b));
+        let side = |cdt: &CDT, v: u32| {
+            let p = cdt.pt(v);
+            orient2d(pa.x, pa.y, pb.x, pb.y, p.x, p.y)
+        };
+        // The triangle at `a` whose far edge the segment leaves through.
+        let Some((t0, i0)) = fan.iter().find_map(|&(t, i)| {
+            let v = self.tri_verts(t);
+            edges_cross(pa, pb, self.pt(v[(i + 1) % 3]), self.pt(v[(i + 2) % 3])).then_some((t, i))
+        }) else {
+            return;
+        };
+        // Walk the crossed triangles, gathering the vertices left and right of a->b in order.
+        let v0 = self.tri_verts(t0);
+        let (x, y) = (v0[(i0 + 1) % 3], v0[(i0 + 2) % 3]);
+        let (mut l, mut r) = if side(self, x) > 0.0 { (x, y) } else { (y, x) };
+        let mut left = vec![a, l];
+        let mut right = vec![a, r];
+        let mut cavity = vec![t0];
+        let (mut t, mut e) = (t0, i0);
+        loop {
+            // Every step crosses the segment further along, so a cavity larger than the
+            // triangulation means broken adjacency, not a long segment.
+            if self.constrained[t * 3 + e] || cavity.len() > self.num_tris() {
                 return;
             }
-            if self.mark_constraint(a, b) {
+            let twin = self.adj[t * 3 + e];
+            if twin == NONE {
                 return;
             }
-
-            let pa = self.pt(a);
-            let pb = self.pt(b);
-            let mut flipped = false;
-
-            'outer: for t in 0..self.num_tris() {
-                if self.is_deleted(t) {
-                    continue;
-                }
-                let verts = self.tri_verts(t);
-
-                for e in 0..3usize {
-                    if self.constrained[t * 3 + e] {
-                        continue;
-                    }
-                    let e0 = verts[(e + 1) % 3];
-                    let e1 = verts[(e + 2) % 3];
-                    if e0 == a || e0 == b || e1 == a || e1 == b {
-                        continue;
-                    }
-
-                    let pe0 = self.pt(e0);
-                    let pe1 = self.pt(e1);
-                    if !edges_cross(pa, pb, pe0, pe1) {
-                        continue;
-                    }
-
-                    let tw = self.adj[t * 3 + e];
-                    if tw == NONE {
-                        continue;
-                    }
-                    let t2 = (tw / 3) as usize;
-                    let e2 = (tw % 3) as usize;
-                    if self.is_deleted(t2) {
-                        continue;
-                    }
-
-                    let v2 = self.tri_verts(t2);
-                    let opp1 = verts[e];
-                    let opp2 = v2[e2];
-                    let p1 = self.pt(opp1);
-                    let p2 = self.pt(opp2);
-                    let d1 = orient2d(p1.x, p1.y, p2.x, p2.y, pe0.x, pe0.y);
-                    let d2 = orient2d(p1.x, p1.y, p2.x, p2.y, pe1.x, pe1.y);
-                    if d1 * d2 >= 0.0 {
-                        continue;
-                    } // not convex
-
-                    self.flip_edge(t, e, t2, e2);
-                    flipped = true;
-                    break 'outer;
-                }
-            }
-
-            if !flipped {
+            let (t2, e2) = ((twin / 3) as usize, (twin % 3) as usize);
+            cavity.push(t2);
+            let v2 = self.tri_verts(t2);
+            let w = v2[e2];
+            if w == b {
                 break;
             }
-        }
-
-        self.mark_constraint(a, b);
-    }
-
-    fn mark_constraint(&mut self, a: u32, b: u32) -> bool {
-        for t in 0..self.num_tris() {
-            if self.is_deleted(t) {
-                continue;
+            let s = side(self, w);
+            if s == 0.0 {
+                return; // through a vertex
             }
-            let verts = self.tri_verts(t);
-            for e in 0..3usize {
-                let s = verts[(e + 1) % 3];
-                let d = verts[(e + 2) % 3];
-                if (s == a && d == b) || (s == b && d == a) {
-                    self.constrained[t * 3 + e] = true;
-                    let tw = self.adj[t * 3 + e];
-                    if tw != NONE {
-                        self.constrained[tw as usize] = true;
+            let replaced = if s > 0.0 {
+                left.push(w);
+                std::mem::replace(&mut l, w)
+            } else {
+                right.push(w);
+                std::mem::replace(&mut r, w)
+            };
+            // On through the edge from `w` to the side it did not replace.
+            let Some(j) = v2.iter().position(|&v| v == replaced) else { return };
+            (t, e) = (t2, j);
+        }
+        left.push(b);
+        right.push(b);
+        // The cavity's outer edges, by their direction in the cavity's (CCW) triangles.
+        let mut outer: HashMap<(u32, u32), (u32, bool)> = HashMap::with_capacity_and_hasher(cavity.len() * 3, Default::default());
+        for &t in &cavity {
+            let v = self.tri_verts(t);
+            for e in 0..3 {
+                outer.insert((v[(e + 1) % 3], v[(e + 2) % 3]), (self.adj[t * 3 + e], self.constrained[t * 3 + e]));
+            }
+        }
+        // (an edge between two cavity triangles is there both ways round)
+        let shared: Vec<(u32, u32)> = outer.keys().filter(|&&(f, to)| outer.contains_key(&(to, f))).copied().collect();
+        for k in shared {
+            outer.remove(&k);
+        }
+        // Both sides, each as a chain from its base edge's start to its end: the triangle on
+        // the base is (start, end, apex), CCW. Left of a->b the base runs a->b, right b->a.
+        right.reverse();
+        let mut new_tris: Vec<[u32; 3]> = Vec::with_capacity(cavity.len());
+        let mut ranges = Vec::new();
+        for chain in [&left, &right] {
+            ranges.push((0, chain.len() - 1));
+            while let Some((lo, hi)) = ranges.pop() {
+                if hi - lo < 2 {
+                    continue;
+                }
+                // The apex whose circle with the base holds no other vertex of the polygon.
+                let mut c = lo + 1;
+                for i in lo + 2..hi {
+                    if self.in_circumcircle_test(chain[lo], chain[hi], chain[c], self.pt(chain[i])) {
+                        c = i;
                     }
-                    return true;
+                }
+                new_tris.push([chain[lo], chain[hi], chain[c]]);
+                ranges.push((lo, c));
+                ranges.push((c, hi));
+            }
+        }
+        if new_tris.len() != cavity.len() {
+            return; // (cannot happen: a polygon of n vertices takes n - 2 triangles)
+        }
+        // Into the cavity's slots, joined to each other and to the outer edges.
+        let mut inner: HashMap<(u32, u32), u32> = HashMap::with_capacity_and_hasher(new_tris.len() * 3, Default::default());
+        for (&t, v) in cavity.iter().zip(&new_tris) {
+            self.tri[t * 3..t * 3 + 3].copy_from_slice(v);
+            for e in 0..3 {
+                let h = (t * 3 + e) as u32;
+                let (f, to) = (v[(e + 1) % 3], v[(e + 2) % 3]);
+                if let Some(&(twin, constrained)) = outer.get(&(f, to)) {
+                    self.adj[h as usize] = twin;
+                    self.constrained[h as usize] = constrained;
+                    if twin != NONE {
+                        self.adj[twin as usize] = h;
+                    }
+                } else {
+                    let constrained = (f == a && to == b) || (f == b && to == a);
+                    self.constrained[h as usize] = constrained;
+                    self.adj[h as usize] = NONE;
+                    if let Some(&twin) = inner.get(&(to, f)) {
+                        self.adj[h as usize] = twin;
+                        self.adj[twin as usize] = h;
+                    } else {
+                        inner.insert((f, to), h);
+                    }
                 }
             }
-        }
-        false
-    }
-
-    fn flip_edge(&mut self, t1: usize, e1: usize, t2: usize, e2: usize) {
-        let v1 = self.tri_verts(t1);
-        let v2 = self.tri_verts(t2);
-        let opp1 = v1[e1];
-        let opp2 = v2[e2];
-        let sa = v1[(e1 + 1) % 3]; // shared vertex a (= v2[(e2+2)%3])
-        let sb = v1[(e1 + 2) % 3]; // shared vertex b (= v2[(e2+1)%3])
-
-        // Get external adjacency before modifying
-        // t1's edge (e1+1)%3: goes from sb to opp1. Twin = ext_t1_next
-        // t1's edge (e1+2)%3: goes from opp1 to sa. Twin = ext_t1_prev
-        // t2's edge (e2+1)%3: goes from sa to opp2. Twin = ext_t2_next
-        // t2's edge (e2+2)%3: goes from opp2 to sb. Twin = ext_t2_prev
-        let ext_t1_next = self.adj[t1 * 3 + (e1 + 1) % 3]; // sb->opp1
-        let ext_t1_prev = self.adj[t1 * 3 + (e1 + 2) % 3]; // opp1->sa
-        let ext_t2_next = self.adj[t2 * 3 + (e2 + 1) % 3]; // sa->opp2
-        let ext_t2_prev = self.adj[t2 * 3 + (e2 + 2) % 3]; // opp2->sb
-        let c_t1_next = self.constrained[t1 * 3 + (e1 + 1) % 3];
-        let c_t1_prev = self.constrained[t1 * 3 + (e1 + 2) % 3];
-        let c_t2_next = self.constrained[t2 * 3 + (e2 + 1) % 3];
-        let c_t2_prev = self.constrained[t2 * 3 + (e2 + 2) % 3];
-
-        // After flip: new edge is opp1-opp2
-        // t1 = (opp1, opp2, sb):
-        //   edge 0 (opp opp1): opp2->sb = was t2's opp2->sb => ext_t2_prev
-        //   edge 1 (opp opp2): sb->opp1 = was t1's sb->opp1 => ext_t1_next
-        //   edge 2 (opp sb):   opp1->opp2 = diagonal => t2
-        // t2 = (opp2, opp1, sa):
-        //   edge 0 (opp opp2): opp1->sa = was t1's opp1->sa => ext_t1_prev
-        //   edge 1 (opp opp1): sa->opp2 = was t2's sa->opp2 => ext_t2_next
-        //   edge 2 (opp sa):   opp2->opp1 = diagonal => t1
-
-        self.tri[t1 * 3] = opp1;
-        self.tri[t1 * 3 + 1] = opp2;
-        self.tri[t1 * 3 + 2] = sb;
-
-        self.tri[t2 * 3] = opp2;
-        self.tri[t2 * 3 + 1] = opp1;
-        self.tri[t2 * 3 + 2] = sa;
-
-        // t1 adjacency
-        self.adj[t1 * 3] = ext_t2_prev; // edge 0: opp2->sb
-        self.adj[t1 * 3 + 1] = ext_t1_next; // edge 1: sb->opp1
-        self.adj[t1 * 3 + 2] = (t2 * 3 + 2) as u32; // edge 2: diagonal
-        self.constrained[t1 * 3] = c_t2_prev;
-        self.constrained[t1 * 3 + 1] = c_t1_next;
-        self.constrained[t1 * 3 + 2] = false;
-
-        // t2 adjacency
-        self.adj[t2 * 3] = ext_t1_prev; // edge 0: opp1->sa
-        self.adj[t2 * 3 + 1] = ext_t2_next; // edge 1: sa->opp2
-        self.adj[t2 * 3 + 2] = (t1 * 3 + 2) as u32; // edge 2: diagonal
-        self.constrained[t2 * 3] = c_t1_prev;
-        self.constrained[t2 * 3 + 1] = c_t2_next;
-        self.constrained[t2 * 3 + 2] = false;
-
-        // Fix external twins pointing back
-        if ext_t2_prev != NONE {
-            self.adj[ext_t2_prev as usize] = (t1 * 3) as u32;
-        }
-        if ext_t1_next != NONE {
-            self.adj[ext_t1_next as usize] = (t1 * 3 + 1) as u32;
-        }
-        if ext_t1_prev != NONE {
-            self.adj[ext_t1_prev as usize] = (t2 * 3) as u32;
-        }
-        if ext_t2_next != NONE {
-            self.adj[ext_t2_next as usize] = (t2 * 3 + 1) as u32;
+            for &p in v {
+                self.vert_tri[p as usize] = t as u32;
+            }
         }
     }
 }
@@ -644,27 +684,6 @@ mod tests {
     }
 
     #[test]
-    fn test_5_points() {
-        let mut cdt = CDT::new(Point2 { x: -1.0, y: -1.0 }, Point2 { x: 3.0, y: 3.0 });
-        cdt.insert_point(0.0, 0.0);
-        cdt.insert_point(2.0, 0.0);
-        cdt.insert_point(1.0, 2.0);
-        cdt.insert_point(0.5, 1.0);
-        cdt.insert_point(1.5, 1.0);
-        check_adj(&cdt);
-        cdt.finalize();
-        let tris = cdt.get_triangles();
-        // Note: super-triangle removal may eat convex hull boundary triangles.
-        // In the corefinement use case, boundary constraints + centroid filter
-        // compensate for this. Standalone, we get interior triangles only.
-        assert!(
-            tris.len() >= 3,
-            "5 points => >= 3 interior triangles, got {}",
-            tris.len()
-        );
-    }
-
-    #[test]
     fn test_constraint() {
         let mut cdt = CDT::new(Point2 { x: -1.0, y: -1.0 }, Point2 { x: 2.0, y: 2.0 });
         let a = cdt.insert_point(0.0, 0.0);
@@ -681,27 +700,6 @@ mod tests {
                 .any(|&(u, v)| (u == 0 && v == 2) || (u == 2 && v == 0))
         });
         assert!(has_ac, "constraint edge should exist");
-    }
-
-    #[test]
-    fn test_constrained_split() {
-        let mut cdt = CDT::new(Point2 { x: -1.0, y: -1.0 }, Point2 { x: 3.0, y: 3.0 });
-        cdt.insert_point(0.0, 0.0);
-        cdt.insert_point(2.0, 0.0);
-        cdt.insert_point(1.0, 2.0);
-        let d = cdt.insert_point(0.5, 1.0);
-        let e = cdt.insert_point(1.5, 1.0);
-        cdt.add_constraint(d, e);
-        cdt.finalize();
-        check_adj(&cdt);
-        let tris = cdt.get_triangles();
-        // Interior triangles: super-tri boundary removal reduces count.
-        // The constraint edge d-e should still exist in the output.
-        assert!(
-            tris.len() >= 3,
-            "constrained split => >= 3 interior, got {}",
-            tris.len()
-        );
     }
 
     #[test]
@@ -729,6 +727,68 @@ mod tests {
             "area should be 4.0, got {}",
             area
         );
+    }
+
+    /// Long constraints through a dense cloud: each comes back as one edge, the
+    /// adjacency stays consistent and the triangles still tile the hull.
+    #[test]
+    fn long_constraints_through_a_dense_cloud_come_back() {
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut rnd = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let mut cdt = CDT::new(Point2 { x: 0.0, y: 0.0 }, Point2 { x: 1.0, y: 1.0 });
+        let mut pts = Vec::new();
+        for (x, y) in [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)] {
+            pts.push((x, y));
+            cdt.insert_point(x, y);
+        }
+        for _ in 0..600 {
+            let (x, y) = (0.01 + 0.98 * rnd(), 0.01 + 0.98 * rnd());
+            pts.push((x, y));
+            cdt.insert_point(x, y);
+        }
+        // Parallel slanted segments (they never cross each other) and the hull.
+        let mut want = Vec::new();
+        for k in 0..6 {
+            let y = 0.08 + 0.15 * k as f64;
+            let (a, b) = (pts.len(), pts.len() + 1);
+            pts.push((0.02, y));
+            pts.push((0.98, y + 0.05));
+            let ra = cdt.insert_point(0.02, y);
+            let rb = cdt.insert_point(0.98, y + 0.05);
+            cdt.add_constraint(ra, rb);
+            want.push((a, b));
+        }
+        for i in 0..4 {
+            cdt.add_constraint(3 + i as u32, 3 + ((i + 1) % 4) as u32);
+            want.push((i, (i + 1) % 4));
+        }
+        cdt.finalize();
+        check_adj(&cdt);
+        let tris = cdt.get_triangles();
+        let has = |a: usize, b: usize| {
+            tris.iter().any(|t| (0..3).any(|e| {
+                let (u, v) = (t[e] as usize, t[(e + 1) % 3] as usize);
+                (u, v) == (a, b) || (u, v) == (b, a)
+            }))
+        };
+        for (a, b) in want {
+            assert!(has(a, b), "constraint {a}-{b} missing");
+        }
+        let area: f64 = tris
+            .iter()
+            .map(|t| {
+                let (ax, ay) = pts[t[0] as usize];
+                let (bx, by) = pts[t[1] as usize];
+                let (cx, cy) = pts[t[2] as usize];
+                ((bx - ax) * (cy - ay) - (cx - ax) * (by - ay)).abs() / 2.0
+            })
+            .sum();
+        assert!((area - 1.0).abs() < 1e-9, "the triangles tile the unit square: {area}");
     }
 
     /// Test CDT with a point on an edge (3 collinear points).

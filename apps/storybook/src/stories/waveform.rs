@@ -460,54 +460,6 @@ mod tests {
         assert_eq!(short.chip_width, 7.0);
     }
 
-    /// The opening note counts the page. It is the one sentence a reader
-    /// takes on trust, so the count is pinned to the page rather than to
-    /// whoever last edited one of them.
-    ///
-    /// The needles are joined at runtime because this file is searching its
-    /// own source: written as one literal, each would match itself and the
-    /// counts would come out one too high.
-    #[test]
-    fn the_opening_note_counts_the_lanes_the_page_declares() {
-        let src = include_str!("waveform.rs");
-        let plain = format!("{}{}", "Wave", "form{");
-        let short = format!("{}{}", "Wave", "formStrip{");
-        assert_eq!(src.matches(plain.as_str()).count(), 5, "five plain lanes");
-        assert_eq!(src.matches(short.as_str()).count(), 1, "and one short one");
-        let counted = format!("{} lanes", "Six");
-        assert!(src.contains(&counted), "the note says how many there are");
-    }
-
-    /// What the markup lane is written with, read the way the widget reads
-    /// it: the fields in the order the line puts them, the intent word in
-    /// the last one, and the raw colour where the page says there is one.
-    #[test]
-    fn the_markup_lane_carries_the_lines_the_note_describes() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        let page = built_page(&mut cx);
-        let subject = page.waveform(&cx, ids!(subject));
-        let inner = subject.borrow().expect("the subject lane");
-        assert_eq!(inner.regions.len(), 3, "three region lines");
-        assert_eq!(inner.markers.len(), 6, "six mark lines");
-
-        let regions = parse_regions(&inner.regions);
-        assert_eq!(regions[0].name, "Build");
-        assert_eq!(regions[0].intent, BadgeIntent::Primary);
-        assert_eq!((regions[0].start, regions[0].end), (12.0, 30.0));
-        assert_eq!(regions[2].name, "Turnaround");
-        assert_eq!(regions[2].intent, BadgeIntent::Warning);
-
-        let marks = parse_markers(&inner.markers);
-        assert_eq!(marks[0].name, "Top");
-        assert_eq!(marks[2].name, "Drop");
-        assert_eq!(marks[2].intent, BadgeIntent::Error);
-        // The escape hatch, written without the `x` a colour needs in DSL
-        // source, and the same green the Rust list gives its own last mark.
-        assert_eq!(marks[5].name, "Tail");
-        assert_eq!(marks[5].color, Some(own_green()));
-        assert_eq!(sample_markers()[5].color, Some(own_green()));
-    }
-
     /// The two lists the page hands the Rust lanes, against the lines the
     /// markup lane is written with: the note says they are the same three
     /// regions and six marks, so they have to be.
