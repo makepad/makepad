@@ -106,7 +106,7 @@ mod tests {
         assert_eq!(GraphicsTier::for_gpu("Intel", "Intel(R) UHD Graphics 620", None), GraphicsTier::Low);
         assert_eq!(GraphicsTier::for_gpu("Mesa", "llvmpipe (LLVM 17.0.6, 256 bits)", None), GraphicsTier::Low);
         assert_eq!(GraphicsTier::for_gpu("apple", "Apple M4", Some(false)), GraphicsTier::Medium);
-        assert_eq!(GraphicsTier::for_gpu("apple", "Apple M-series", Some(false)), GraphicsTier::High);
+        assert_eq!(GraphicsTier::for_gpu("apple", "Apple M9 Max", Some(false)), GraphicsTier::High);
         assert_eq!(GraphicsTier::for_gpu("nvidia", "NVIDIA GeForce GPU-A", Some(true)), GraphicsTier::High);
         assert_eq!(GraphicsTier::for_gpu("amd", "AMD Radeon Graphics (RADV REMBRANDT)", Some(false)), GraphicsTier::Medium);
         assert_eq!(GraphicsTier::for_gpu("intel", "Intel(R) Arc(tm) A770 Graphics (DG2)", Some(true)), GraphicsTier::High);

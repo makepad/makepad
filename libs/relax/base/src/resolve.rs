@@ -1091,7 +1091,10 @@ impl Resolver {
                 }
             }
         }
-        Err(format!("package `{}` is not a member of the workspace at {}", package, self.ws.root))
+        Err(format!(
+            "package `{}` is not a member of the workspace at {}: no member or path dependency there has that name (check the name; a private repository's package needs that repository checked out under apps/, e.g. apps/commercial)",
+            package, self.ws.root
+        ))
     }
 }
 
@@ -1723,6 +1726,9 @@ pub struct GraphUnit {
     pub host: bool,
     /// build | run-custom-build
     pub mode: String,
+    /// built with rustc's `--test`: libtest's generated main replaces the crate's own
+    /// (a lib's or bin's unit tests, an integration test without `harness = false`)
+    pub harness: bool,
     pub features: Vec<String>,
     /// (unit index, extern crate name)
     pub deps: Vec<(usize, String)>,
@@ -1759,6 +1765,7 @@ impl Units {
                     edition: s(t.and_then(|t| t.get("edition"))),
                     host: u.get("profile").and_then(|p| p.get("opt_level")).map(|o| o.str() == "0").unwrap_or(false) || matches!(u.get("relax_host"), Some(crate::json::Json::Bool(true))),
                     mode: s(u.get("mode")),
+                    harness: u.get("mode").is_some_and(|m| m.str() == "test"),
                     features: list(u.get("features")),
                     deps: u.get("dependencies").map(|d| d.arr().iter().filter_map(|dep| Some((dep.get("index")?.num() as usize, s(dep.get("extern_crate_name"))))).collect()).unwrap_or_default(),
                 }
@@ -2061,6 +2068,12 @@ fn emit(r: &Resolver, nodes: &HashMap<(usize, bool), Node>, order: &[(usize, boo
         if m.lib.is_some() {
             if k == (root, false) && o.test == Some(TestSel::Lib) {
                 roots.push(add(k, UKind::LibTest, &mut units));
+                // Dependencies link the plain library, not its test harness.
+                if nodes.iter().any(|(other, node)| *other != k && node.edges.iter().any(|(di, target)| {
+                    *target == k && !r.manifests[other.0].deps[*di].build
+                })) {
+                    add(k, UKind::Lib, &mut units);
+                }
             } else {
                 let i = add(k, UKind::Lib, &mut units);
                 if k == (root, false) && o.test.is_none() {
@@ -2234,6 +2247,11 @@ fn emit(r: &Resolver, nodes: &HashMap<(usize, bool), Node>, order: &[(usize, boo
             edition,
             host,
             mode: mode.to_string(),
+            harness: match u {
+                UKind::LibTest | UKind::BinTest(_) => true,
+                UKind::Test(ti) => m.tests[*ti].harness,
+                _ => false,
+            },
             features: node.features.iter().cloned().collect(),
             deps,
         });

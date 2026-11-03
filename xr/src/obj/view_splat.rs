@@ -1252,7 +1252,7 @@ impl Widget for ViewSplat {
         }
 
         self.set_draw_uniforms(cx, &scene_state, node_matrix);
-        if let Some(mut instances) = cx.begin_many_instances(&self.draw_splat.draw_vars) {
+        if let Some(mut instances) = cx.begin_many_instances(&mut self.draw_splat.draw_vars) {
             instances.instances.extend_from_slice(&self.instance_order);
             let area = cx.end_many_instances(instances);
             self.draw_splat.draw_vars.area =

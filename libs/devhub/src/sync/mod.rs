@@ -111,6 +111,8 @@ pub fn store_dir(repo: &str) -> std::path::PathBuf {
 pub fn register_peer(_ep: &Endpoint, _ctx: &std::sync::Arc<NodeCtx>) {}
 
 pub fn register_control(ep: &Endpoint, _hub: &makepad_remote::hub::Hub) {
+    // how many git processes this hub started, and from where (a loop must start none)
+    ep.register("gitexecs", 1, makepad_remote::lines::service("gitexecs", std::sync::Arc::new(|_line, out| out.push(crate::git_exec::answer()))));
     #[cfg(feature = "checkout")]
     ep.register(
         "autosync",

@@ -601,9 +601,11 @@ pub fn define_shader_builtins(
     native.add_method(heap, math, id_lut!(unpack_half2), script_args!(u = 0.0), |_vm, _args| ScriptValue::NIL);
     native.add_method(heap, math, id_lut!(extract_bits), script_args!(x = 0.0, offset = 0.0, count = 0.0), |_vm, _args| ScriptValue::from(0u32));
     native.add_method(heap, math, id_lut!(dot4_u8), script_args!(a = 0.0, b = 0.0), |_vm, _args| ScriptValue::from(0u32));
-    native.add_method(heap, math, id_lut!(atomic_add), script_args!(x = 0.0, v = 0.0), |vm, args| {
-        vm.bx.heap.value(args, id!(x).into(), vm.bx.threads.cur_ref().trap.pass())
-    });
+    for name in [id_lut!(atomic_add), id_lut!(atomic_min), id_lut!(atomic_max)] {
+        native.add_method(heap, math, name, script_args!(x = 0.0, v = 0.0), |vm, args| {
+            vm.bx.heap.value(args, id!(x).into(), vm.bx.threads.cur_ref().trap.pass())
+        });
+    }
 
     // Draw-local retained-instance ordinal; no instance-buffer storage.
     native.add_method(
@@ -1306,12 +1308,12 @@ pub fn type_table_builtin(
             }
             return u32_t;
         }
-        id!(atomic_add) => {
+        id!(atomic_add) | id!(atomic_min) | id!(atomic_max) => {
             if !want(2) {
                 return builtins.pod_void;
             }
             if !is_int(args[0]) {
-                script_err_type_mismatch!(trap, "atomic_add takes a u32 or i32 element, got {}", fmt_ty(args[0]));
+                script_err_type_mismatch!(trap, "atomic_add, atomic_min and atomic_max take a u32 or i32 element, got {}", fmt_ty(args[0]));
             }
             return args[0];
         }

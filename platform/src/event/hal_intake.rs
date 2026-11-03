@@ -840,7 +840,7 @@ impl Cx {
             // ---- GPU
             HalEvent::GpuBudget { epoch, device_bytes, used_bytes } => {
                 if self.gpu_admission.update(epoch, device_bytes, used_bytes) {
-                    self.hal_repaint_all();
+                    crate::thread::SignalToUI::set_ui_signal();
                 }
             }
             HalEvent::XrFrame { window: _, display_ns, frame } => {
@@ -885,6 +885,9 @@ impl Cx {
                     }
                 }
             }
+            HalEvent::DispatchTime { name, gpu_ns } => {
+                if let Ok(name) = std::str::from_utf8(name) { crate::gpu_frame_timer::record_dispatch(name, gpu_ns); }
+            }
             HalEvent::FrameDone { window, frame, gpu_ns, present_ns: _, gpu_start, gpu_end } => {
                 self.pass_load.done(frame, gpu_ns);
                 if let Some((group, name, closes)) = self.hal.frames.timings.remove(&frame) {
@@ -905,7 +908,7 @@ impl Cx {
                 let pool = self.task_pool();
                 // a freed draw item's retained buffer goes with it
                 let frames = &mut self.hal.frames;
-                self.draw_lists.retire_free_items_with_ids(&pool, frame, |list, item, _| frames.inst_destroy((list.index(), item)));
+                self.draw_lists.retire_free_items_with_ids(&pool, frame, |list, item, _| frames.inst_release((list.index(), item)));
                 self.poll_texture_lifetimes();
                 self.hal.frames_done += 1;
                 match self.hal.hosted.as_mut().map(|h| h.completed(window, frame)) {
@@ -951,7 +954,8 @@ impl Cx {
                 }
             }
             HalEvent::BufferEvicted { buffer } => {
-                if let Some((list, item)) = self.hal.frames.buffer_evicted(buffer) {
+                let evicted = self.hal.frames.buffer_evicted(buffer);
+                for &(list, item) in &evicted {
                     if list < self.draw_lists.0.pool.len() && !self.draw_lists.is_slot_freed(list) {
                         let items = &mut self.draw_lists.0.pool[list].item.draw_items;
                         if item < items.len() {
@@ -962,6 +966,8 @@ impl Cx {
                             }
                         }
                     }
+                }
+                if !evicted.is_empty() {
                     self.hal_repaint_all();
                 }
             }
@@ -977,11 +983,13 @@ impl Cx {
                     }
                 }
             }
-            HalEvent::DeviceLost { generation } => {
+            HalEvent::DeviceLost { generation, dispatches } => {
                 // Nothing is drawn until DeviceReset: the event loop waits on the HAL's events
                 // (no frames are built or asked of a host meanwhile), so this is said once.
                 if !std::mem::replace(&mut self.hal.device_lost, true) {
-                    crate::error!("hal: GPU device {generation} was lost; waiting for the HAL to replace it");
+                    crate::error!("hal: GPU device {generation} was lost; pending compute=[{}]; waiting for the HAL to replace it", String::from_utf8_lossy(dispatches));
+                    self.hal_fail_device_readbacks();
+                    self.call_event_handler(&Event::GpuLost);
                 }
                 // frames sent to the lost device are never published to a host; its shared
                 // images are imported again after the reset
@@ -1060,11 +1068,12 @@ impl Cx {
     pub(crate) fn hal_device_reset(&mut self, generation: u32) {
         crate::log!("hal: GPU device {generation} is up; uploading and painting again");
         self.hal.device_lost = false;
+        self.hal.device_generation += 1;
         let serial = self.frame_submission_serial();
         self.textures.1.serials.complete(serial);
         let pool = self.task_pool();
         let frames = &mut self.hal.frames;
-        self.draw_lists.retire_free_items_with_ids(&pool, serial, |list, item, _| frames.inst_destroy((list.index(), item)));
+        self.draw_lists.retire_free_items_with_ids(&pool, serial, |list, item, _| frames.inst_release((list.index(), item)));
         self.poll_texture_lifetimes();
         let textures = &self.textures;
         let reupload = |slot: usize, gen: u64| {

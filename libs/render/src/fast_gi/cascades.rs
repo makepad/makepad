@@ -40,6 +40,8 @@ pub(crate) struct Cascade {
     queued: Vec<Queued>,
     queue: VecDeque<u32>,
     cursor: usize,
+    /// The refresh's step through the slots (see [`refresh_stride`]).
+    stride: usize,
     /// Frame stamp of each slot's last scheduling: one update per frame.
     stamp: Vec<u32>,
     frame: u32,
@@ -50,20 +52,20 @@ pub(crate) struct Cascade {
     needed: Vec<bool>,
 }
 
-/// Visits every slot once per `count` steps, spread through the volume so
-/// a refresh wave never sweeps visibly through space.
-fn refresh_slot(step: usize, count: usize) -> usize {
-    let stride = (count * 5 / 8) | 1;
-    let mut s = stride;
+/// The round-robin refresh's step: slot `(step * stride) % count` visits every slot once per
+/// `count` steps (stride and count coprime), spread through the volume so a refresh wave never
+/// sweeps visibly through space.
+fn refresh_stride(count: usize) -> usize {
+    let mut s = (count * 5 / 8) | 1;
     while gcd(s, count) != 1 { s += 2; }
-    (step * s) % count
+    s
 }
 fn gcd(a: usize, b: usize) -> usize { if b == 0 { a } else { gcd(b, a % b) } }
 
 impl Cascade {
     pub fn new(grid: [usize; 3], spacing: f32, settle: bool) -> Self {
         let count = grid.iter().product();
-        Self { grid, spacing, origin: None, queued: vec![Queued::No; count], queue: VecDeque::new(), cursor: 0, stamp: vec![0; count], frame: 0, settle, updates: vec![0; count], needed: vec![!settle; count] }
+        Self { grid, spacing, origin: None, queued: vec![Queued::No; count], queue: VecDeque::new(), cursor: 0, stride: refresh_stride(count), stamp: vec![0; count], frame: 0, settle, updates: vec![0; count], needed: vec![!settle; count] }
     }
     /// Which probes of the window a surface can read (window-local cells,
     /// x + grid.x (y + grid.y z)). A probe newly needed is traced.
@@ -152,7 +154,7 @@ impl Cascade {
         // Settle mode looks past the probes that are done for ones that are not.
         for _ in 0..if self.settle { count } else { n.min(count) } {
             if taken == n { break; }
-            let slot = refresh_slot(self.cursor, count);
+            let slot = (self.cursor * self.stride) % count;
             self.cursor = (self.cursor + 1) % count;
             if self.queued[slot] != Queued::No || self.stamp[slot] == self.frame { continue; }
             let hysteresis = if self.settle {

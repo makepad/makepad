@@ -58,9 +58,9 @@ fn remember(package: &str, state: &str, ms: u64) -> std::io::Result<()> {
     file.sync_data()
 }
 
-pub(crate) fn arm(package: &str) {
-    let _kept = crate::zone_alloc::kept();
-    let state = if std::env::var("MAKEPAD_RUN_CACHE_STATE").as_deref() == Ok("warm") { "warm" } else { "cold" };
+/// The deadline of a start in `state` (warm / cold): 3x the median of its measured first frames,
+/// at least the state's floor; and its basis in words.
+fn deadline(package: &str, state: &str) -> (u64, String) {
     let floor = if state == "warm" { 30u64 } else { 180 };
     let mut runs: Vec<_> = measured().unwrap_or_else(|e| {
         eprintln!("makepad: cannot read first-frame history {}: {e}", history().display());
@@ -76,6 +76,28 @@ pub(crate) fn arm(package: &str) {
         Some(ms) => format!("{state}: 3x median {:.1} s of {} runs, floor {floor} s", ms as f64 / 1000.0, runs.len()),
         None => format!("{state}: no measured runs, floor {floor} s"),
     };
+    (secs, basis)
+}
+
+/// A start counted warm (its cache holds a startup manifest) that compiled most of its code
+/// fresh instead of linking it: an edit reached most of the program (a field of a type almost
+/// every fn touches), or the entries are gone. It runs as a cold start does and is judged as one.
+/// (slots that took cached code: placed by the startup image or linked by a lookup; lookups that
+/// missed)
+fn links() -> (u64, u64) {
+    use crate::cache::warm_count::*;
+    (get(IMG_PLACED) + get(HIT), get(NO_ENTRY) + get(INVALIDATED) + get(LINK_FAIL))
+}
+
+fn cold_like() -> bool {
+    let (linked, miss) = links();
+    miss > linked
+}
+
+pub(crate) fn arm(package: &str) {
+    let _kept = crate::zone_alloc::kept();
+    let state = if std::env::var("MAKEPAD_RUN_CACHE_STATE").as_deref() == Ok("warm") { "warm" } else { "cold" };
+    let (secs, basis) = deadline(package, state);
     if !crate::run::silent() { eprintln!("makepad: first-frame timeout {secs} s ({basis})"); }
     let package = package.to_string();
     if let Err(e) = std::thread::Builder::new().name("first-frame-watch".into()).spawn(move || {
@@ -89,7 +111,8 @@ pub(crate) fn arm(package: &str) {
 }
 
 fn watch(package: &str, state: &str, secs: u64, basis: &str) {
-    let deadline_ms = secs as f64 * 1000.0;
+    let (mut state, mut secs, mut basis) = (state, secs, basis.to_string());
+    let mut deadline_ms = secs as f64 * 1000.0;
     let mut wm = false;
     loop {
         if let Some(ms) = snapshot::first_present_ms().filter(|ms| *ms <= deadline_ms) {
@@ -97,13 +120,25 @@ fn watch(package: &str, state: &str, secs: u64, basis: &str) {
             wm |= shell.as_ref().is_some_and(|s| s.get("backend").and_then(Value::as_str) == Some("wm"));
             let shown = shell.as_ref().is_some_and(|s| s.get("app_frame_shown").and_then(Value::as_bool) == Some(true));
             if !wm || shown {
+                // a warm start that compiled its code fresh is a cold start's sample
+                let state = if state == "warm" && cold_like() { "cold" } else { state };
                 if let Err(e) = remember(package, state, ms.round() as u64) {
                     eprintln!("makepad: cannot write first-frame history {}: {e}", history().display());
                 }
                 return;
             }
         }
-        let left = deadline_ms - crate::clock::ms_since_process_start();
+        let mut left = deadline_ms - crate::clock::ms_since_process_start();
+        if left <= 0.0 && state == "warm" && cold_like() {
+            // judged by what the start does: it compiles what a warm one links
+            let (linked, miss) = links();
+            (state, (secs, basis)) = ("cold", deadline(package, "cold"));
+            deadline_ms = secs as f64 * 1000.0;
+            left = deadline_ms - crate::clock::ms_since_process_start();
+            if !crate::run::silent() {
+                eprintln!("makepad: first-frame: the warm start took cached code for {linked} slots and missed {miss} lookups (an edit reached most of the program, or its entries are gone): it starts cold, timeout {secs} s ({basis})");
+            }
+        }
         if left <= 0.0 { break; }
         if crate::jit::first_present_seen() {
             std::thread::sleep(Duration::from_secs_f64((left / 1000.0).min(0.1)));

@@ -666,7 +666,7 @@ mod tests {
         use crate::text::{font::{Font, FontId}, font_face::FontFace, layouter, loader::FontData, rasterizer::Rasterizer};
         use std::{cell::RefCell, rc::Rc};
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../widgets/resources/NotoSans-Regular.ttf");
-        let data: FontData = makepad_platform::SharedBytes::from_file_mmap_or_read(path).expect("font bytes");
+        let data: FontData = makepad_platform::HostBuf::from_file_mmap_or_read(path).expect("font bytes");
         let font = Rc::new(Font::new(
             FontId::from(0xE0E3_u64),
             Rc::new(RefCell::new(Rasterizer::new(layouter::Settings::default().loader.rasterizer))),

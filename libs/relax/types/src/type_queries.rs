@@ -853,9 +853,19 @@ impl Tcx {
     /// rustc_middle/src/ty/normalize_erasing_regions.rs:140-149. `value` is
     /// one function binder's payload; nested binders keep their own regions.
     pub fn normalize_erasing_late_bound_regions(&self, prog: &Program, env: TypingEnv, value: TyId) -> TyId {
+        self.normalize_erasing_regions(prog, env, self.instantiate_fn_bound_regions_with_erased(value))
+    }
+
+    /// The fallible form, with the function's region binder instantiated first.
+    pub fn try_normalize_erasing_late_bound_regions(&self, prog: &Program, env: TypingEnv, value: TyId) -> Result<TyId, crate::next_solver::NoSolution> {
+        self.try_normalize_erasing_regions(prog, env, self.instantiate_fn_bound_regions_with_erased(value))
+    }
+
+    /// Erase one function region binder without normalizing its declared types.
+    pub(crate) fn instantiate_fn_bound_regions_with_erased(&self, value: TyId) -> TyId {
         let mut replacer = crate::types::fold::BoundVarReplacer::new(
             |_| crate::types::RegionId::ERASED, |_| panic!("bound type in a function region binder"));
-        self.normalize_erasing_regions(prog, env, replacer.instantiate(&self.tys, value))
+        replacer.instantiate(&self.tys, value)
     }
 
     /// normalize_erasing_regions.rs:95-120: erase before keying; alias-free types bypass

@@ -1150,7 +1150,7 @@ impl DrawTreeBranches {
         self.draw_vars.options.depth_write = true;
         self.depth_clip = 1.0;
         self.apply_uniforms(cx, camera_pos);
-        let mi = cx.begin_many_instances(&self.draw_vars);
+        let mi = cx.begin_many_instances(&mut self.draw_vars);
         if let Some(mut mi) = mi {
             for instance in instances {
                 self.origin = instance.origin;
@@ -1246,7 +1246,7 @@ impl DrawTreeLeaves {
         self.draw_vars.options.depth_write = true;
         self.depth_clip = 1.0;
         self.apply_uniforms(cx, camera_pos);
-        let mi = cx.begin_many_instances(&self.draw_vars);
+        let mi = cx.begin_many_instances(&mut self.draw_vars);
         if let Some(mut mi) = mi {
             for instance in instances {
                 self.origin = instance.origin;

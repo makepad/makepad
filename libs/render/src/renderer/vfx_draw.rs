@@ -104,7 +104,7 @@ impl Renderer {
             d.d_color = vec4(m.color.x, m.color.y, m.color.z, m.color.w * m.fade());
             d.d_extra = vec4(m.seed, 0.0, 0.0, 0.0);
             if d.draw_vars.can_instance() {
-                let new_area = cx.add_instance(&d.draw_vars);
+                let new_area = cx.add_instance(&mut d.draw_vars);
                 d.draw_vars.area = cx.update_area_refs(d.draw_vars.area, new_area);
             }
         }
@@ -191,7 +191,7 @@ impl Renderer {
                 let c = &batch[i as usize].1;
                 draw.set_record(c);
                 if draw.draw_vars.can_instance() {
-                    let new_area = cx.add_instance(&draw.draw_vars);
+                    let new_area = cx.add_instance(&mut draw.draw_vars);
                     draw.draw_vars.area = cx.update_area_refs(draw.draw_vars.area, new_area);
                 }
             }

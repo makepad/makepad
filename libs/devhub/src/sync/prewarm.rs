@@ -43,7 +43,7 @@ pub struct Board {
 
 impl Board {
     pub fn new(home: PathBuf) -> Board {
-        let store = crate::state::Store::open_quiet(&home, "");
+        let store = crate::state::Store::open_quiet(&home, "").expect("workflow state must open before services start");
         let mut last = BTreeMap::new();
         for v in store.read(|d| d.prewarm.clone()) {
             let s = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
@@ -64,7 +64,7 @@ impl Board {
             l.insert(r.machine.clone(), (r.sev.as_str().to_string(), r.line.clone(), r.at_ms));
             l.iter().filter_map(|(n, (s, line, at))| makepad_strict_json::parse(Self::json(n, s, line, *at).as_bytes()).ok()).collect::<Vec<_>>()
         };
-        self.store.update(|d| d.prewarm = text);
+        self.store.update(|d| d.prewarm = text).unwrap_or_else(|e| { eprintln!("devhub state: {e}"); Default::default() });
     }
 
     fn json(node: &str, sev: &str, line: &str, at: u64) -> String {
@@ -255,7 +255,7 @@ mod node {
         if cancel.load(Ordering::Acquire) {
             return Err("cancelled".into());
         }
-        let (mut child, hold) = crate::os::lease_spawn(&mut cmd, None).map_err(|e| format!("{} {}: {e}", step.app, step.what))?;
+        let (mut child, hold) = crate::os::lease_spawn(&mut cmd).map_err(|e| format!("{} {}: {e}", step.app, step.what))?;
         let pid = child.id();
         let t0 = Instant::now();
         let stop = |child: &mut std::process::Child| {

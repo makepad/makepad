@@ -479,11 +479,11 @@ impl DrawList2d {
 }
 
 impl<'a> CxDraw<'a> {
-    pub fn new_draw_call(&mut self, draw_vars: &DrawVars) -> Option<&mut CxDrawItem> {
+    pub fn new_draw_call(&mut self, draw_vars: &mut DrawVars) -> Option<&mut CxDrawItem> {
         self.get_draw_call(false, draw_vars)
     }
 
-    pub fn append_to_draw_call(&mut self, draw_vars: &DrawVars) -> Option<&mut CxDrawItem> {
+    pub fn append_to_draw_call(&mut self, draw_vars: &mut DrawVars) -> Option<&mut CxDrawItem> {
         self.get_draw_call(true, draw_vars)
     }
 
@@ -491,7 +491,15 @@ impl<'a> CxDraw<'a> {
         self.draw_list_stack.last().cloned()
     }
 
-    pub fn get_draw_call(&mut self, append: bool, draw_vars: &DrawVars) -> Option<&mut CxDrawItem> {
+    /// The draw call `draw_vars` adds to: the current one when `append` and it takes these
+    /// vars, else a new one. A draw object kept outside the reloaded tree takes its type's new
+    /// shader here first (`DrawVars::refresh_after_reload`).
+    pub fn get_draw_call(&mut self, append: bool, draw_vars: &mut DrawVars) -> Option<&mut CxDrawItem> {
+        draw_vars.refresh_after_reload(self.cx);
+        self.draw_call_for(append, draw_vars)
+    }
+
+    fn draw_call_for(&mut self, append: bool, draw_vars: &DrawVars) -> Option<&mut CxDrawItem> {
         draw_vars.draw_shader_id?;
         let draw_shader = draw_vars.draw_shader_id.unwrap();
 
@@ -538,7 +546,7 @@ impl<'a> CxDraw<'a> {
         Some(&mut self.cx.draw_lists[current_draw_list_id].draw_items[item_id])
     }
 
-    pub fn begin_many_instances(&mut self, draw_vars: &DrawVars) -> Option<ManyInstances> {
+    pub fn begin_many_instances(&mut self, draw_vars: &mut DrawVars) -> Option<ManyInstances> {
         let draw_list_id = self.get_current_draw_list_id().unwrap();
         let draw_item = self.append_to_draw_call(draw_vars);
         draw_item.as_ref()?;
@@ -564,7 +572,7 @@ impl<'a> CxDraw<'a> {
     /// Re-recording the same resource changes uniforms but does not upload it.
     pub fn add_retained_instances(
         &mut self,
-        draw_vars: &DrawVars,
+        draw_vars: &mut DrawVars,
         resource: &makepad_platform::retained_instances::RetainedInstances,
     ) -> Area {
         self.add_retained_instances_count(draw_vars, resource, resource.count())
@@ -574,7 +582,7 @@ impl<'a> CxDraw<'a> {
     /// Reactivation never copies or reallocates the publication's GPU prefix.
     pub fn add_retained_instances_count(
         &mut self,
-        draw_vars: &DrawVars,
+        draw_vars: &mut DrawVars,
         resource: &makepad_platform::retained_instances::RetainedInstances,
         count: usize,
     ) -> Area {
@@ -615,10 +623,12 @@ impl<'a> CxDraw<'a> {
         ia.into()
     }
 
-    pub fn add_instance(&mut self, draw_vars: &DrawVars) -> Area {
+    pub fn add_instance(&mut self, draw_vars: &mut DrawVars) -> Area {
+        draw_vars.refresh_after_reload(self.cx);
+        let draw_vars: &DrawVars = draw_vars;
         let data = draw_vars.as_slice();
         let draw_list_id = self.get_current_draw_list_id().unwrap();
-        let draw_item = self.append_to_draw_call(draw_vars);
+        let draw_item = self.draw_call_for(true, draw_vars);
         if draw_item.is_none() {
             return Area::Empty;
         }
@@ -653,7 +663,7 @@ impl<'a> CxDraw<'a> {
 }
 
 impl<'a, 'b> Cx2d<'a, 'b> {
-    pub fn begin_many_aligned_instances(&mut self, draw_vars: &DrawVars) -> Option<ManyInstances> {
+    pub fn begin_many_aligned_instances(&mut self, draw_vars: &mut DrawVars) -> Option<ManyInstances> {
         let mut li = self.begin_many_instances(draw_vars);
         li.as_ref()?;
         li.as_mut().unwrap().aligned = Some(self.align_list.len());
@@ -682,10 +692,12 @@ impl<'a, 'b> Cx2d<'a, 'b> {
         area
     }
 
-    pub fn add_aligned_instance(&mut self, draw_vars: &DrawVars) -> Area {
+    pub fn add_aligned_instance(&mut self, draw_vars: &mut DrawVars) -> Area {
+        draw_vars.refresh_after_reload(self.cx);
+        let draw_vars: &DrawVars = draw_vars;
         let data = draw_vars.as_slice();
         let draw_list_id = self.get_current_draw_list_id().unwrap();
-        let draw_item = self.append_to_draw_call(draw_vars);
+        let draw_item = self.draw_call_for(true, draw_vars);
         if draw_item.is_none() {
             return Area::Empty;
         }

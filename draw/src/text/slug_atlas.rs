@@ -365,7 +365,7 @@ pub use makepad_font_core::slug::prepare_code_curves;
 mod tests {
     use super::{SlugAtlas, SlugGlyphCacheResult};
     use crate::{
-        makepad_platform::{Cx, SharedBytes},
+        makepad_platform::{Cx, HostBuf},
         text::{
             font::FontId,
             layouter,
@@ -506,7 +506,7 @@ mod tests {
     fn load_test_font() -> std::rc::Rc<crate::text::font::Font> {
         let mut loader = Loader::new(layouter::Settings::default().loader);
         let font_id: FontId = 0x5151_0001_u64.into();
-        let font_data = SharedBytes::from_file_mmap_or_read(bundled_font_path())
+        let font_data = HostBuf::from_file_mmap_or_read(bundled_font_path())
             .expect("font bytes should load");
         loader.define_font(
             font_id,

@@ -28,6 +28,7 @@ pub struct Token {
 pub enum Event {
     /// `gpu_span`: the frame's first and last timestamps in seconds of the GPU's clock (one
     /// clock for every frame of the device: the frame timer orders passes by it).
+    DispatchTime { name: String, gpu_ns: u64 },
     Frame { target: Id, kind: u32, frame: u64, window: bool, gpu_ns: u64, gpu_span: [f64; 2] },
     Readback { req: u32, status: u32, rect: [u32; 4], pixels: Vec<u8> },
     Pick { req: u32, ids: Vec<u32> },
@@ -77,6 +78,7 @@ pub struct Timer {
     used: usize,
     /// The profiled frame and its timed passes: (the pass's index in it, its first stamp).
     pub prof: Option<(crate::gpu_prof::FrameKey, Vec<(u16, usize)>)>,
+    pub dispatches: Vec<(String, usize)>,
 }
 
 impl Timer {
@@ -110,11 +112,12 @@ impl Timers {
             return Some(t);
         }
         let make = |q| make_query(dev, q);
-        Some(Timer { disjoint: make(D3D11_QUERY_TIMESTAMP_DISJOINT)?, begin: make(D3D11_QUERY_TIMESTAMP)?, end: make(D3D11_QUERY_TIMESTAMP)?, stamps: Vec::new(), used: 0, prof: None })
+        Some(Timer { disjoint: make(D3D11_QUERY_TIMESTAMP_DISJOINT)?, begin: make(D3D11_QUERY_TIMESTAMP)?, end: make(D3D11_QUERY_TIMESTAMP)?, stamps: Vec::new(), used: 0, prof: None, dispatches: Vec::new() })
     }
     fn give(&self, mut t: Timer) {
         t.used = 0;
         t.prof = None;
+        t.dispatches.clear();
         lock(&self.0).push(t);
     }
 }
@@ -351,6 +354,14 @@ fn complete(dev: &Device, mut batch: Batch, lost: bool, mailbox: &Mailbox, timer
                         let clock = if lost { None } else { clock(dev, &t) };
                         if let Some((key, passes)) = &t.prof {
                             prof_passes(dev, &t, clock, *key, passes);
+                        }
+                        if let Some((frequency, _, _)) = clock {
+                            for (name, q) in &t.dispatches {
+                                let (mut begin, mut end) = (0u64, 0u64);
+                                if get_data(dev, t.stamp(*q), &mut begin) && get_data(dev, t.stamp(*q + 1), &mut end) && end >= begin {
+                                    out.push((token.clone(), Event::DispatchTime { name: name.clone(), gpu_ns: ((end - begin) as f64 * 1e9 / frequency as f64) as u64 }));
+                                }
+                            }
                         }
                         timers.give(t);
                         gpu_ns(clock)

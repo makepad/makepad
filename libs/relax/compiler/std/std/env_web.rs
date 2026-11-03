@@ -43,13 +43,17 @@ pub fn var<K: AsRef<OsStr>>(key: K) -> Result<String, VarError> {
     }
 }
 
-pub fn set_var<K: AsRef<OsStr>, V: AsRef<OsStr>>(key: K, value: V) {
+/// Unsafe as real std's: a call needs no unsafe block before edition 2024 (`deprecated_safe_2024`).
+#[rustc_deprecated_safe_2024(audit_that = "the environment access only happens in single-threaded code")]
+pub unsafe fn set_var<K: AsRef<OsStr>, V: AsRef<OsStr>>(key: K, value: V) {
     let (key, value) = (key.as_ref(), value.as_ref());
     let e = io::const_error!(io::ErrorKind::Unsupported, "cannot set env vars on this platform");
     panic!("failed to set environment variable `{:?}` to `{:?}`: {}", key, value, e);
 }
 
-pub fn remove_var<K: AsRef<OsStr>>(key: K) {
+/// Unsafe as real std's: a call needs no unsafe block before edition 2024 (`deprecated_safe_2024`).
+#[rustc_deprecated_safe_2024(audit_that = "the environment access only happens in single-threaded code")]
+pub unsafe fn remove_var<K: AsRef<OsStr>>(key: K) {
     let key = key.as_ref();
     let e = io::const_error!(io::ErrorKind::Unsupported, "cannot unset env vars on this platform");
     panic!("failed to remove environment variable `{:?}`: {}", key, e);

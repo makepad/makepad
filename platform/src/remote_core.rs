@@ -89,6 +89,8 @@ pub fn note_injected_input() {
 
 /// The fields the endpoint adds to the end line of every answer: the user sequence as the answer
 /// leaves and as the request started, so a driver can tell that the person used the app during it.
+/// The app's own endpoint only: under the JIT its host owns the endpoint and its end fields.
+#[cfg(not(relax))]
 pub fn end_fields(out: &mut String) {
     use std::fmt::Write as _;
     let _ = write!(out, ",\"user_seq\":{},\"user_seq_start\":{}", super::activity::user_seq_now(), REQUEST_START_USER_SEQ.get());
@@ -1722,6 +1724,8 @@ fn box_down(w: u32, h: u32, rgba: &[u8], k: usize) -> (u32, u32, Vec<u8>) {
 }
 
 /// The `frames` service of the endpoint: each OPEN becomes a producer thread ([`run_frames`]).
+/// The app's own endpoint only: under the JIT the host serves it (remote.rs `host_frames_open`).
+#[cfg(not(relax))]
 pub fn frames_service() -> makepad_remote::endpoint::Factory {
     use makepad_remote::conn::{Event, SendError, CLOSE_REFUSED};
     Arc::new(|_conn, open| {

@@ -68,8 +68,7 @@ fn until(hal: &Hal, _sid: u32, store: &mut EventStore, mut accept: impl FnMut(Ha
     }
 }
 
-/// The instance data of the three draws (red quarter, textured right half, green middle): it is
-/// the writer's borrowed memory until the submit, so it lives in a static.
+/// The instance data of the three draws (red quarter, textured right half, green middle).
 static INSTANCES: [[f32; 8]; 3] = [
     [0.0, 0.0, 0.5, 0.5, 1.0, 0.0, 0.0, 1.0],
     [0.5, 0.0, 0.5, 1.0, 0.0, 0.0, 0.0, 0.0],
@@ -83,7 +82,8 @@ fn frame(w: &mut CmdWriter, n: u64) {
     let base = Draw { vb: QUAD, ib: INDEX, index: [0, 6], scissor: [f32::NAN; 4], bounds: [f32::NAN; 4], ..Default::default() };
     let ids = w.put_ids(&[TEX]);
     for (i, (pipe, tex)) in [(SOLID, Range::default()), (SAMPLED, ids), (SOLID, Range::default())].into_iter().enumerate() {
-        w.draw(Draw { pipeline: pipe, inst: Inst::inline(Slice::of(&INSTANCES[i][..]), 1), tex, ..base });
+        let inst = Inst::inline(w.keep(&INSTANCES[i][..]), 1);
+        w.draw(Draw { pipeline: pipe, inst, tex, ..base });
     }
     w.frame_end(WIN, target::WINDOW);
 }
@@ -212,12 +212,14 @@ fn a_captured_frame_replays_to_the_same_pixels() {
         w.frame_begin(n, FrameMeta::default());
         w.pass(Pass { color: [RT, Id::NONE, Id::NONE, Id::NONE], depth: Id::NONE, load: [pass_load::CLEAR; 5], clear: [[0.0, 0.0, 1.0, 1.0]; 4], viewport: [0.0, 0.0, 32.0, 32.0], dpi: 1.0, ..Default::default() });
         let base = Draw { vb: QUAD, ib: INDEX, index: [0, 6], scissor: [f32::NAN; 4], bounds: [f32::NAN; 4], ..Default::default() };
-        w.draw(Draw { pipeline: SOLID, inst: Inst::inline(Slice::of(&INSTANCES[0][..]), 1), ..base });
+        let inst = Inst::inline(w.keep(&INSTANCES[0][..]), 1);
+        w.draw(Draw { pipeline: SOLID, inst, ..base });
         w.frame_end(RT, target::TEXTURE);
         w.frame_begin(n + 1, FrameMeta::default());
         w.pass(Pass { color: [Id::NONE; 4], depth: Id::NONE, load: [pass_load::CLEAR; 5], clear: [[0.0, 0.0, 0.0, 1.0]; 4], viewport: [0.0, 0.0, W as f32, H as f32], dpi: 1.0, ..Default::default() });
         let ids = w.put_ids(&[RT]);
-        w.draw(Draw { pipeline: SAMPLED, inst: Inst::inline(Slice::of(&INSTANCES[1][..]), 1), tex: ids, ..base });
+        let inst = Inst::inline(w.keep(&INSTANCES[1][..]), 1);
+        w.draw(Draw { pipeline: SAMPLED, inst, tex: ids, ..base });
         w.frame_end(WIN, target::WINDOW);
     };
     let mut n = n + 10;

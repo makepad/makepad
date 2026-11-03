@@ -1,15 +1,16 @@
 //! `devhub ci`: independent regression and sweep runs, each planned from its pair's tree. One worker
-//! per allowed CI box pulls shards longest first (Linux node, Windows node), behind lane work.
+//! per allowed CI box (a lease.conf with `slots.ci`: a Linux and a Windows box) pulls shards
+//! longest first, behind lane work.
 //! Smoke boots use the separate CI tree;
 //! sweep shards use their own lease kinds at background priority, with the background cap and
 //! preemption. A sweep never holds the gate's run slot or takes priority over lane work.
 //!
 //! The shards (everything under the JIT, `makepad check|test|run`, except where it cannot be yet):
 //! - `jit:<n>`: `makepad check` of the workspace members, in groups (Linux); `mjit:<n>` the apps'
-//!   macOS check (a Mac), `wjit:<n>` their Windows check (105);
+//!   macOS check (a Mac), `wjit:<n>` their Windows check (the Windows CI box);
 //! - `test:<pkg>:<target>`: one test binary of the platform, draw and widgets crates (`makepad test
 //!   <pkg> --lib|--test <t>`);
-//! - `wtest:<pkg>:<target>`: a rotating third of them natively on Windows (105);
+//! - `wtest:<pkg>:<target>`: a rotating third of them natively on Windows (the Windows CI box);
 //! - `check:<target>`: cargo's `check --release --target` of every app the scripts check there:
 //!   the cross targets the JIT does not build (Apple-SDK targets on a Mac, the rest on Linux);
 //! - `slice:<app>`: a licensed commercial slice, cut, linted and checked (`ci-leg slice`);
@@ -218,7 +219,7 @@ impl Tree {
 }
 
 fn ls_tree(dir: &Path, sha: &str) -> Result<BTreeMap<String, String>, String> {
-    let o = makepad_remote::group::command("git")
+    let o = crate::git_exec::command()
         .arg("-C")
         .arg(dir)
         .args(["ls-tree", "-r", "-z", sha])
@@ -242,7 +243,7 @@ struct Batch {
 
 impl Batch {
     fn start(dir: &Path) -> Result<Batch, String> {
-        let mut child = makepad_remote::group::command("git")
+        let mut child = crate::git_exec::command()
             .arg("-C")
             .arg(dir)
             .args(["cat-file", "--batch"])
@@ -586,7 +587,8 @@ pub enum Judge {
     Tests,
     /// cargo `--message-format short`: a compiler warning fails it too (0 warnings)
     Cargo,
-    /// `makepad check`: its `N errors` line too
+    /// `makepad check`: its `N errors` line too, and a warning fails it (0 warnings: two dead-code
+    /// warnings of the JIT build stood from 10-31 while only errors counted)
     Check,
     /// a measurement: its `pass rate` line is the result and a miss (exit 3) does not fail the run;
     /// any other exit does (it could not measure)
@@ -1323,6 +1325,10 @@ pub fn sweep_plan(tree: &Tree, timing: &dyn Fn(&str) -> Option<f64>, rotation: u
     if tree.has("tools/run/fixture/live_kinds.py") {
         push("live:kinds".to_string(), Kind::Screen, Os::Linux, true, vec![argv(&["python3", "tools/run/fixture/live_kinds.py", "--jobs", "6"])], Judge::Exit, 300.0, None);
     }
+    // a restart-rung edit is the exec restart: one process, the app's state kept, no leftover threads
+    if tree.has("tools/run/fixture/restart_exec.py") {
+        push("live:restart".to_string(), Kind::Screen, Os::Linux, true, vec![argv(&["python3", "tools/run/fixture/restart_exec.py"])], Judge::Exit, 240.0, None);
+    }
     if tree.has("tools/run/fixture/live_replay.py") {
         // the apps in turn: the newest landings as live edits, measured (old landings' bugs are no
         // new landing's to clear, so a miss reports and does not fail the run), and a landing into
@@ -1509,9 +1515,10 @@ pub fn judge(judge: Judge, step: &str, exit: i32, log: &str) -> (bool, String) {
                 (false, format!("{step}: {} warning{}", w.len(), if w.len() == 1 { "" } else { "s" }))
             }
         }
-        Judge::Check => match check_errors(log) {
-            Some(0) | None => (true, String::new()),
-            Some(n) => (false, format!("{step}: {n} errors")),
+        Judge::Check => match (check_errors(log), cargo_warnings(log).len()) {
+            (Some(n), _) if n > 0 => (false, format!("{step}: {n} errors")),
+            (_, 0) => (true, String::new()),
+            (_, w) => (false, format!("{step}: {w} warning{}", if w == 1 { "" } else { "s" })),
         },
     }
 }
@@ -1568,12 +1575,17 @@ impl BoxInfo {
     }
 }
 
+/// A CI box: its lease.conf opts in (`slots.ci`).
+fn takes_ci(n: &crate::lease::sched::NodeView) -> bool {
+    n.caps.as_ref().is_some_and(|c| crate::lease::sched::slots(c, crate::lease::Kind::Ci) > 0)
+}
+
 /// The allowed CI boxes that are up, dev on, with capabilities.
 pub fn boxes(ctx: &Ctx) -> Vec<BoxInfo> {
     ctx.leases
         .nodes()
         .into_iter()
-        .filter(|n| n.up && n.dev && crate::lease::sched::CI_NODES.contains(&n.name.as_str()))
+        .filter(|n| n.up && n.dev && takes_ci(n))
         .filter_map(|n| {
             let c = n.caps?;
             if c.role().users() {
@@ -1732,6 +1744,17 @@ fn publish(ci: &mut Ci, pool: &Pool) {
     }
 }
 
+fn publish_changed(ctx: &Ctx, pool: &Pool) {
+    let changed = ctx.store.read(|d| {
+        d.ci.slot(pool.sweep).as_ref().filter(|r| r.id == pool.run_id)
+            .or_else(|| d.ci.runs.iter().rev().find(|r| r.id == pool.run_id && r.sweep == pool.sweep))
+            .is_some_and(|r| r.shards != pool.state)
+    });
+    if changed {
+        if let Err(e) = ctx.store.update(|d| publish(&mut d.ci, pool)) { eprintln!("devhub CI state: {e}"); }
+    }
+}
+
 /// The run's critical path (the box that finished last, its shards in order), per-box load, and
 /// where the wall went, all from the attempts the shards keep (a master restart loses none of them).
 pub fn critical(state: &[CiShard], started_ms: u64, ended_ms: u64) -> (String, Vec<String>, String) {
@@ -1881,17 +1904,57 @@ pub fn start(ctx: &Arc<Ctx>) {
         slots.push(slot);
     }
     for slot in slots { let _ = slot.recv(); }
+    RESUMED.store(true, std::sync::atomic::Ordering::Release);
 }
 
-/// One full CI run on the bucket's tip, waiting for any manual or resumed run first.
+/// Set once [`start`] has the runs of a previous master in their slots: a bucket run waits for it,
+/// or it would take the slot of the run it adopts.
+static RESUMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The rolling runs: neither the sweep nor a calling checkout's run.
+fn rolling(r: &CiRun) -> bool {
+    !r.sweep && !r.dry && r.checkout.is_empty()
+}
+
+/// The newest rolling run's start and pair: the CI bucket's last run when its ledger has none
+/// newer (the bucket that asked for it ended with a master; the run went on).
+pub fn last_rolling(d: &crate::state::Doc) -> Option<(u64, Pair)> {
+    d.ci.run.iter().chain(&d.ci.runs).filter(|r| rolling(r)).max_by_key(|r| r.started_ms).map(|r| (r.started_ms, r.pair.clone()))
+}
+
+/// A finished rolling run of `tip` with a verdict that started at or after `since`.
+fn judged<'a>(ci: &'a Ci, tip: &Pair, since: u64) -> Option<&'a CiRun> {
+    ci.runs.iter().rev().find(|r| rolling(r) && r.pair == *tip && r.started_ms >= since && matches!(r.verdict.as_str(), "ok" | "fail"))
+}
+
+/// One full CI run on the bucket's tip, waiting for any manual or resumed run first. A bucket run
+/// a previous master started (adopted from its `.log.run`) answers from that run's verdict: the
+/// run itself outlived the master and went on in its slot.
 pub fn ci(repo: PathBuf) -> crate::bucket::Run {
-    Arc::new(move |_, tip, log| {
+    Arc::new(move |base, tip, log| {
         let Some(ctx) = super::ctx() else {
-            return crate::bucket::Outcome { ok: false, failing: vec!["CI: master not started".into()], log: String::new(), summary: "CI incomplete: master not started".into() };
+            return crate::bucket::Outcome { ok: false, failing: vec!["CI: master not started".into()], log: String::new(), summary: "CI incomplete: master not started".into(), lost: false };
         };
         let ctx = calling_ctx(ctx, repo.clone());
+        while !RESUMED.load(std::sync::atomic::Ordering::Acquire) { std::thread::sleep(Duration::from_millis(200)); }
+        // the bucket's start, its log's name (none: a run asked outside a bucket)
+        let since = crate::bucket::log_started(log);
+        if let (Some(since), Some(base)) = (since, base) {
+            if let Err(e) = crate::bucket::save_run(log, std::process::id(), since, base, tip) {
+                ctx.store.event("ci", Sev::Warn, format!("ci bucket {}: noting its run: {e}", tip.short()), None);
+            }
+        }
         // The shared slot stays locked through the verdict and proof publication.
-        let (verdict, legs) = gate_for(&ctx, tip, false, false, false);
+        let (verdict, legs) = {
+            let one = run_slot(false).lock().unwrap_or_else(|e| e.into_inner());
+            match since.and_then(|since| ctx.store.read(|d| judged(&d.ci, tip, since).map(|r| (if r.verdict == "ok" { Verdict::Ok } else { Verdict::Fail }, r.shards.iter().map(CiShard::leg).collect::<Vec<_>>())))) {
+                Some(judged) => judged,
+                None => {
+                    run_stop(false).store(false, std::sync::atomic::Ordering::SeqCst);
+                    gate_held(one, &ctx, tip, false, false, false)
+                }
+            }
+        };
         let ok = legs.iter().filter(|l| l.state == "ok").count();
         let fail = legs.iter().filter(|l| l.state == "fail").count();
         let word = match verdict { Verdict::Ok => "ok", Verdict::Fail => "fail", Verdict::Incomplete => "incomplete" };
@@ -1908,7 +1971,7 @@ pub fn ci(repo: PathBuf) -> crate::bucket::Run {
         if let Err(e) = std::fs::write(log, text) {
             summary.push_str(&format!("; log: {e}"));
         }
-        crate::bucket::Outcome { ok: verdict == Verdict::Ok, failing, log: log.display().to_string(), summary }
+        crate::bucket::Outcome { ok: verdict == Verdict::Ok, failing, log: log.display().to_string(), summary, lost: false }
     })
 }
 
@@ -1950,13 +2013,19 @@ fn gate_held(_one: std::sync::MutexGuard<'static, ()>, ctx: &Arc<Ctx>, pair: &Pa
         return (Verdict::Incomplete, Vec::new());
     };
     let lock_digest = hex_digest(lock.as_bytes());
-    let going = ctx.store.update(|d| resume_run(&mut d.ci, pair, dry, sweep, &lock_digest, &checkout));
+    let going = ctx.store.read(|d| d.ci.slot(sweep).as_ref().filter(|r| r.lock_digest == lock_digest && r.pair == *pair && r.dry == dry && r.sweep == sweep && Path::new(&r.checkout) == Path::new(&checkout)).cloned());
+    if going.is_none() {
+        if let Err(e) = ctx.store.update(|d| resume_run(&mut d.ci, pair, dry, sweep, &lock_digest, &checkout)) {
+            ctx.store.event("ci", Sev::Err, e, None);
+            return (Verdict::Incomplete, Vec::new());
+        }
+    }
     let rotation = match &going {
         Some(r) => r.rotation,
-        None => ctx.store.update(|d| {
-            d.ci.rotation += 1;
-            d.ci.rotation
-        }),
+        None => match ctx.store.update(|d| { d.ci.rotation += 1; d.ci.rotation }) {
+            Ok(rotation) => rotation,
+            Err(e) => { ctx.store.event("ci", Sev::Err, e, None); return (Verdict::Incomplete, Vec::new()); }
+        },
     };
     let id = going.as_ref().map_or_else(|| format!("{}-{rotation}", stamp(wall_ms())), |r| r.id.clone());
     let dir = ctx.logs("ci").join(&id);
@@ -2072,7 +2141,9 @@ fn gate_held(_one: std::sync::MutexGuard<'static, ()>, ctx: &Arc<Ctx>, pair: &Pa
                 Some(p) if matches!(p.state.as_str(), "ok" | "fail") => *s = p.clone(),
                 // (also with no run noted: the node may have started the step's run as the
                 // master died, and it is followed then, not started twice; see `run_steps`)
-                Some(p) if p.state == "run" && crate::lease::sched::CI_NODES.contains(&p.node.as_str()) && super::leg::lease_held(ctx, &p.lease) => {
+                // (its held lease is the proof it is on a CI box: a restarted master knows the
+                // boxes' lease.conf only once they report in)
+                Some(p) if p.state == "run" && super::leg::lease_held(ctx, &p.lease) => {
                     *s = p.clone();
                     back.push(i);
                 }
@@ -2103,7 +2174,7 @@ fn gate_held(_one: std::sync::MutexGuard<'static, ()>, ctx: &Arc<Ctx>, pair: &Pa
     }
     let n = shards.len();
     let started = going.as_ref().map_or_else(wall_ms, |r| r.started_ms);
-    ctx.store.update(|d| *d.ci.slot_mut(sweep) = Some(CiRun { lock_digest, checkout, id: id.clone(), pair: pair.clone(), dry, started_ms: started, verdict: "running".into(), shards: state.clone(), rotation, plan_timings: timings.clone(), sweep, stopping: going.as_ref().is_some_and(|r| r.stopping), ..Default::default() }));
+    ctx.store.update(|d| *d.ci.slot_mut(sweep) = Some(CiRun { lock_digest, checkout, id: id.clone(), pair: pair.clone(), dry, started_ms: started, verdict: "running".into(), shards: state.clone(), rotation, plan_timings: timings.clone(), sweep, stopping: going.as_ref().is_some_and(|r| r.stopping), ..Default::default() })).unwrap_or_else(|e| { eprintln!("devhub state: {e}"); Default::default() });
     for l in stray {
         let _ = crate::cli::ask(&makepad_remote::link::Client::new(makepad_remote::link::Target::Unix(crate::proto::control_socket()), "devhub-ci"), None, "release", &l);
     }
@@ -2219,7 +2290,7 @@ fn gate_held(_one: std::sync::MutexGuard<'static, ()>, ctx: &Arc<Ctx>, pair: &Pa
         let g = p.lock().unwrap();
         let _ = cv.wait_timeout(g, Duration::from_secs(5));
         let g = pool.0.lock().unwrap();
-        ctx.store.update(|d| publish(&mut d.ci, &g));
+        publish_changed(ctx, &g);
         if last_batch.elapsed() >= PROOF_BATCH {
             last_batch = Instant::now();
             let fresh: Updates = passed_units(ctx, pair, &digests, &g.shards, &g.state, wall_ms()).into_iter().filter(|(k, _)| !published.contains(k)).collect();
@@ -2304,7 +2375,7 @@ fn gate_held(_one: std::sync::MutexGuard<'static, ()>, ctx: &Arc<Ctx>, pair: &Pa
             r.boxes = boxes.clone();
             d.ci.runs.push(r);
         }
-    });
+    }).unwrap_or_else(|e| { eprintln!("devhub state: {e}"); Default::default() });
     let line = format!(
         "ci {} {word}: {n} shards, {fleet}{}{}; critical path {crit}; {}",
         pair.short(),
@@ -2407,7 +2478,7 @@ fn worker(ctx: &Arc<Ctx>, pool: &Arc<(Mutex<Pool>, Condvar)>, pair: &Pair, dir: 
             s.step = 0;
             s.run_n = 0;
             s.failed.clear();
-            ctx.store.update(|d| publish(&mut d.ci, &g));
+            publish_changed(ctx, &g);
         }
         if run_shard(ctx, pool, i, held) {
             idle_until = Some(Instant::now() + BACKOFF);
@@ -2447,7 +2518,7 @@ fn run_shard(ctx: &Ctx, pool: &(Mutex<Pool>, Condvar), i: usize, held: Held) -> 
         if let Some(&(k, _, true)) = took.last() {
             if !s.steps_ok.contains(&(k as u64)) { s.steps_ok.push(k as u64); }
         }
-        ctx.store.update(|d| publish(&mut d.ci, &g));
+        publish_changed(ctx, &g);
     }, &mut took);
     // a crate's own time, for the batches of the next plan
     // and whether it failed: a failing crate runs in a batch of its own (its old failure must not
@@ -2459,7 +2530,7 @@ fn run_shard(ctx: &Ctx, pool: &(Mutex<Pool>, Condvar), i: usize, held: Held) -> 
                 ctx.store.update(|d| {
                     d.ci.measured(&format!("test:{pkg}"), secs);
                     d.ci.set_mark(&format!("failing:{pkg}"), !ok);
-                });
+                }).unwrap_or_else(|e| { eprintln!("devhub state: {e}"); Default::default() });
             }
         }
     }
@@ -2496,7 +2567,7 @@ fn run_shard(ctx: &Ctx, pool: &(Mutex<Pool>, Condvar), i: usize, held: Held) -> 
             let mut g = p.lock().unwrap();
             g.state[i].lease.clear();
             g.state[i].summary = format!("vision judge on the master: judging {} grabs", grabs.len());
-            ctx.store.update(|d| publish(&mut d.ci, &g));
+            publish_changed(ctx, &g);
             cv.notify_all();
         }
         let started = Instant::now();
@@ -2522,7 +2593,7 @@ fn run_shard(ctx: &Ctx, pool: &(Mutex<Pool>, Condvar), i: usize, held: Held) -> 
         g.reserved[i] = None;
         g.state[i].state = "wait".into();
         g.state[i].summary = format!("preempted on {node} by lane work; asks again");
-        ctx.store.update(|d| publish(&mut d.ci, &g));
+        publish_changed(ctx, &g);
         cv.notify_all();
         return true;
     }
@@ -2538,9 +2609,9 @@ fn run_shard(ctx: &Ctx, pool: &(Mutex<Pool>, Condvar), i: usize, held: Held) -> 
         g.state[i].errors = errors;
         let id = g.state[i].id.clone();
         if state != "incomplete" {
-            ctx.store.update(|d| d.ci.measured(&id, secs));
+            ctx.store.update(|d| d.ci.measured(&id, secs)).unwrap_or_else(|e| { eprintln!("devhub state: {e}"); Default::default() });
         }
-        ctx.store.update(|d| publish(&mut d.ci, &g));
+        publish_changed(ctx, &g);
         cv.notify_all();
         let late = g.proofs_collected && units_of(&shard).iter().enumerate().any(|(k, _)| unit_passed(&shard, &g.state[i], k));
         let (shards, states, run_id, sweep) = (g.shards.clone(), g.state.clone(), g.run_id.clone(), g.sweep);
@@ -2566,7 +2637,7 @@ fn run_shard(ctx: &Ctx, pool: &(Mutex<Pool>, Condvar), i: usize, held: Held) -> 
         if evidence.exists() {
             let _ = std::fs::rename(&evidence, evidence.with_file_name(format!("{}.{}", safe(&shard.id), safe(&node))));
         }
-        ctx.store.update(|d| publish(&mut d.ci, &g));
+        publish_changed(ctx, &g);
         cv.notify_all();
         return false;
     }
@@ -2603,10 +2674,10 @@ fn run_shard(ctx: &Ctx, pool: &(Mutex<Pool>, Condvar), i: usize, held: Held) -> 
         }
         if state != "incomplete" {
             let id = g.state[i].id.clone();
-            ctx.store.update(|d| d.ci.measured(&id, secs));
+            ctx.store.update(|d| d.ci.measured(&id, secs)).unwrap_or_else(|e| { eprintln!("devhub state: {e}"); Default::default() });
         }
     }
-    ctx.store.update(|d| publish(&mut d.ci, &g));
+    publish_changed(ctx, &g);
     cv.notify_all();
     false
 }
@@ -3241,7 +3312,7 @@ pub fn serve(ctx: &Arc<Ctx>, line: &str) -> Result<String, String> {
             if w[1..].iter().any(|w| *w != "--sweep") { return Err("ci stop [--sweep]".into()); }
             let sweep = w.contains(&"--sweep");
             run_stop(sweep).store(true, std::sync::atomic::Ordering::SeqCst);
-            ctx.store.update(|d| if let Some(r) = d.ci.slot_mut(sweep) { r.stopping = true; });
+            ctx.store.update(|d| if let Some(r) = d.ci.slot_mut(sweep) { r.stopping = true; })?;
             Ok(obj(vec![("stopping", Value::Bool(run_slot(sweep).try_lock().is_err()))]).to_json())
         }
         Some(x) => Err(format!("ci: unknown word {x} (ci status | run | seed | sweep | plan | stop)")),
@@ -3659,6 +3730,8 @@ mod tests {
         assert!(!judge(Judge::Cargo, "x", 0, "src/a.rs:3:9: warning: unused variable: `x`\n").0);
         assert!(!judge(Judge::Check, "x", 0, "makepad check: 1193 body owners of the checked crates, 9 compiled in all, 2 errors\n").0);
         assert!(judge(Judge::Check, "x", 0, "makepad check: 1193 body owners, 9 compiled in all, 0 errors\n").0);
+        let warned = "/t/platform/src/remote_core.rs:92:8: warning: function `end_fields` is never used [dead_code]\nmakepad check: 6435 body owners of the checked crates, 204 compiled in all, 0 errors\n";
+        assert_eq!(judge(Judge::Check, "check makepad-platform", 0, warned), (false, "check makepad-platform: 1 warning".to_string()));
     }
 
     #[test]
@@ -3670,7 +3743,7 @@ mod tests {
         let shard = |id: &str, spans: Vec<(&str, u64, u64, u64)>| CiShard { id: id.into(), spans: spans.into_iter().map(|(n, a, g, e)| CiSpan { node: n.into(), asked_ms: a, granted_ms: g, ended_ms: e }).collect(), ..Default::default() };
         let state = vec![
             shard("s0", vec![("101", 1000, 1000, 31_000)]),
-            // asked on a node, never granted: it went to 106
+            // asked on one box, never granted: it went to another
             shard("s1", vec![("101", 31_000, 0, 41_000), ("101", 41_000, 41_000, 61_000)]),
             shard("s2", vec![("106", 0, 0, 5000), ("106", 5000, 11_000, 71_000)]),
             shard("kept", Vec::new()),
@@ -3717,5 +3790,31 @@ mod tests {
         let t = Tree::mem(vec![("Cargo.toml", "[workspace]\nmembers = [\"apps/*\"]\n"), ("apps/calc/Cargo.toml", "[package]\nname = \"makepad-app-calc\"\n"), ("apps/calc/src/main.rs", ""), ("apps/calc/ci.splash", "nil\n")]);
         assert!(plan(&t, &|_| None, 0).iter().all(|s| !s.gui));
         assert!(plan(&tree(), &|_| None, 0).iter().any(|s| s.gui));
+    }
+
+    #[test]
+    fn the_ci_buckets_last_run_and_an_adopted_verdict_come_from_its_rolling_runs() {
+        let pair = |c: &str| Pair::new(&c.repeat(40), &"c".repeat(40));
+        let run = |id: &str, p: &Pair, started_ms: u64, verdict: &str| CiRun { id: id.into(), pair: p.clone(), started_ms, ended_ms: started_ms + 10, verdict: verdict.into(), ..Default::default() };
+        let mut d = crate::state::Doc::default();
+        assert_eq!(last_rolling(&d), None);
+        d.ci.runs.push(run("128", &pair("a"), 100, "ok"));
+        // a calling checkout's run and the sweep are not the bucket's
+        d.ci.runs.push(CiRun { dry: true, checkout: "/co".into(), ..run("dry", &pair("b"), 200, "fail") });
+        d.ci.runs.push(CiRun { sweep: true, ..run("sweep", &pair("b"), 300, "ok") });
+        assert_eq!(last_rolling(&d), Some((100, pair("a"))));
+        // one in flight (resumed after a master restart) is the newest
+        d.ci.run = Some(run("129", &pair("d"), 400, "running"));
+        assert_eq!(last_rolling(&d), Some((400, pair("d"))));
+        // adopted: the run of the tip that started since the bucket asked, once it has a verdict
+        assert!(judged(&d.ci, &pair("d"), 390).is_none(), "still running");
+        let mut done = d.ci.run.take().unwrap();
+        done.verdict = "fail".into();
+        d.ci.runs.push(done);
+        assert_eq!(judged(&d.ci, &pair("d"), 390).map(|r| r.id.as_str()), Some("129"));
+        assert!(judged(&d.ci, &pair("d"), 401).is_none(), "a run before the bucket's ask is not its");
+        assert!(judged(&d.ci, &pair("a"), 0).is_some() && judged(&d.ci, &pair("b"), 0).is_none());
+        d.ci.runs.push(run("130", &pair("e"), 500, "incomplete"));
+        assert!(judged(&d.ci, &pair("e"), 0).is_none(), "incomplete is no verdict: the bucket runs it");
     }
 }

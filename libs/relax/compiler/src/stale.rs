@@ -7,8 +7,8 @@
 //!   frame unwinds, no recovery point is used even inside a guard);
 //! - the `run-stale` watcher reports it (stderr, the flight recorder, an inspect event that the Run
 //!   panel shows like a parked panic), pauses the program's threads so the state stays inspectable,
-//!   and waits for a decision: `restart` (the app domain is relaunched, window kept) or `stop` (the
-//!   process ends by the fault's signal). With nobody who could decide (no Run panel, no inspect
+//!   and waits for a decision: `restart` (the process starts again) or `stop` (the process ends by
+//!   the fault's signal). With nobody who could decide (no Run panel, no inspect
 //!   watcher or agent; MAKEPAD_RUN_STALE_PARK=1 forces the park) the report is followed by `stop`.
 //!
 //! Ranges are registered by whoever retires the memory (sandbox::free_arena; code invalidation).
@@ -342,7 +342,6 @@ fn handle_held(h: Held) {
     crate::inspect::start("stale-access");
     let paused = crate::inspect::instrument::pause_program();
     eprintln!("makepad: the app is paused ({} threads held) -- decide: makepad inspect {} resume <id> restart | stop (the Run panel offers both)", paused, std::process::id());
-    // (no app domain: the held thread's domain is not known, so `restart` restarts the process)
     let decision = crate::inspect::events::park_stale(h.os_id, None, &message, &frames);
     if decision == crate::inspect::events::StaleDecision::Stop {
         eprintln!("makepad: stale access on a stack: stopped");
@@ -407,12 +406,7 @@ fn handle(rec: &Rec) {
         eprintln!("makepad: stale access: stopped");
         crate::os::fault::die_by(sig);
     }
-    if decision == crate::inspect::events::StaleDecision::RestartProcess {
-        restart_process();
-    }
-    // restarted (the domain relaunched): the program runs again; the faulting thread stays parked
-    crate::inspect::instrument::resume_program();
-    rec.state.store(0, Ordering::Release);
+    restart_process();
 }
 
 /// What the watcher told, for `makepad inspect <pid> stale`: (verdict line, report JSON).
@@ -446,20 +440,15 @@ fn where_in(r: &Range, addr: u64) -> String {
 
 /// `resume <id> restart` of a program that runs in no app domain: the process starts again with
 /// its own command line (the current sources; its state is not carried over). Never returns.
-fn restart_process() {
-    eprintln!("makepad: stale access: restarting the process (its sources as they are now)");
-    // (the inspect reply goes out first)
+/// The process starts again (its sources as they are now) after the inspect reply went out. The
+/// paused threads run again first (the restart's run summary waits for the compiles they may be
+/// in); the faulting thread stays parked. Returns never: on a failed restart the process ends by
+/// the fault's signal.
+fn restart_process() -> ! {
     std::thread::sleep(std::time::Duration::from_millis(200));
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        // fd 2 back to where it went before the session log took it (its forwarder ends with exec)
-        crate::tui::finish(false);
-        let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
-        if let Ok(exe) = std::env::current_exe() {
-            let e = std::process::Command::new(exe).args(&args[1..]).exec();
-            eprintln!("makepad: stale access: restart failed: {}", e);
-        }
+    crate::inspect::instrument::resume_program();
+    if let Err(e) = crate::reload::restart_process("stale access") {
+        eprintln!("makepad: stale access: {e}");
     }
     crate::os::fault::die_by(11);
 }

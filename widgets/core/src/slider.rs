@@ -3183,7 +3183,7 @@ impl Slider {
         self.draw_bg.rect_size = rect.size.into();
         self.draw_bg.draw_vars.append_group_id = cx.draw_call_group_background().0;
         if self.draw_bg.draw_vars.can_instance() {
-            let new_area = cx.add_aligned_instance(&self.draw_bg.draw_vars);
+            let new_area = cx.add_aligned_instance(&mut self.draw_bg.draw_vars);
             self.backdrop_area = cx.update_area_refs(self.backdrop_area, new_area);
         }
         if own_list {

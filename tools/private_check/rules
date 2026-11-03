@@ -1,0 +1,27 @@
+# Generic private-data rules (tools/private_check/scan.sh reads this file and ~/.makepad/private_patterns).
+#
+# <rule> <ERE>         a line the POSIX extended regex matches, case-insensitively, breaks <rule>
+# except <rule> <ERE>  a match of <rule> this regex matches in full is fine (placeholders)
+#
+# Only the ERE subset grep, git grep and awk share: no \b \d \s \w, no {m,n}, no backreferences.
+# Always fine: the documentation ranges 192.0.2/24, 198.51.100/24 and 203.0.113/24, the hotspot subnet
+# 192.168.77/24 with the test ranges 10.77.0/24 and 172.16.77/24, and loopback: no rule matches them.
+
+# RFC 1918 addresses
+lan-address (^|[^0-9.])10\.(([0-9]|[0-689][0-9]|7[0-689]|[0-9][0-9][0-9])\.[0-9][0-9]?[0-9]?|77\.[1-9][0-9]?[0-9]?)\.[0-9][0-9]?[0-9]?([^0-9.]|\.[^0-9]|\.?$)
+lan-address (^|[^0-9.])192\.168\.([0-9]|[0-689][0-9]|7[0-689]|[0-9][0-9][0-9])\.[0-9][0-9]?[0-9]?([^0-9.]|\.[^0-9]|\.?$)
+lan-address (^|[^0-9.])172\.((1[7-9]|2[0-9]|3[01])\.[0-9][0-9]?[0-9]?|16\.([0-9]|[0-689][0-9]|7[0-689]|[0-9][0-9][0-9]))\.[0-9][0-9]?[0-9]?([^0-9.]|\.[^0-9]|\.?$)
+
+# a home directory under its owner's name: write repo-relative paths, ~ or $HOME
+home-path (^|[^a-z0-9_.-])/users/[a-z0-9_.-]+
+home-path (^|[^a-z0-9_.-])/home/[a-z0-9_.-]+
+home-path [a-z]:(\\|/)+users(\\|/)+[a-z0-9_.-]+
+home-path (^|[^a-z0-9_.-])/[a-z]/users/[a-z0-9_.-]+
+except home-path .?/users/(me|you|[a-z]|name|user|username|someone|someone-backup|someone-else|someone_else|owner|shared|public|runner|janedoe)[.]*
+except home-path .?/home/(me|you|[a-z]|name|user|username|someone|owner|runner|\.[a-z0-9_.-]+)[.]*
+except home-path [a-z]:(\\|/)+users(\\|/)+(me|you|[a-z]|name|user|username|someone|public|default|runneradmin)[.]*
+except home-path .?/[a-z]/users/(me|you|[a-z]|name|user|username|someone|public)[.]*
+
+# a GPU model on the same line as an address or a node: a machine's inventory
+gpu-near-host (rtx|gtx|quadro|titan)[ -]?(pro[ -]?)?[0-9][0-9][0-9]|radeon[ -](rx|pro)|geforce|apple m[1-9]|(^|[^a-z0-9])m[1-9] (pro|max|ultra)
+and gpu-near-host [0-9][0-9]?[0-9]?\.[0-9][0-9]?[0-9]?\.[0-9][0-9]?[0-9]?\.[0-9][0-9]?[0-9]?|(node|box|host|machine)[ #-]?[0-9]

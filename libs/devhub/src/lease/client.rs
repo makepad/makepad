@@ -2,7 +2,8 @@
 //! 2 s while it holds one; a holder that dies lets its lease expire), `run` (ship the worktree,
 //! run under a lease, stream the output, exit with its code), and the views and switches.
 //!
-//! Exit codes: 0 ok, 1 the command failed, 2 usage or denied.
+//! Exit codes: 0 ok, 1 the command failed, 2 usage or denied, 3 the user cancelled the lease
+//! ([`CANCELLED_EXIT`]), 4 the lease was lost under the command: no verdict ([`LOST_EXIT`]).
 
 use super::master::b64_decode;
 use super::sched::{ordinal, parse_needs, Req};
@@ -94,6 +95,22 @@ pub const HELP: &str = "  lease <kind> [--node N|--only N|--needs k=v,..] [--lan
 /// reads that as: choose another node and retry, and not retry on this one unless asked.
 pub const CANCELLED_EXIT: i32 = 3;
 
+/// Exit code of a `run`/`lease` whose lease was lost under its command (it expired, the master
+/// lost it, or its node lost it or stayed unreachable): the command has no verdict, the code is
+/// not to blame; run it again (a landing bucket does, once).
+pub const LOST_EXIT: i32 = 4;
+
+/// How the master ends a lease that infrastructure lost, never a person or the command.
+fn lost_how(how: &str) -> bool {
+    matches!(how, "expired" | "lost")
+}
+
+/// A node call's error that means the lease is gone there: its hub no longer has it, or it stayed
+/// unreachable past [`REATTACH_FOR`].
+fn lost_error(e: &str) -> bool {
+    e.contains("no lease ") || e.contains("stayed unreachable")
+}
+
 fn cancelled_notice(id: &str, node: &str) -> String {
     format!("LEASE CANCELLED by user on {node} ({id}): pick another node (devhub nodes) and retry; don't retry on {node} unless asked. Exit code {CANCELLED_EXIT}.")
 }
@@ -115,8 +132,8 @@ fn node_restarting(e: &str) -> bool {
 /// reattaches by the lease
 /// id. A live master's answer stands, except while its node links come back (`SETTLE_FOR`) or the
 /// lease's node hub restarts for its self-update ([`node_restarting`], up to `REATTACH_FOR`: the
-/// new hub takes the lease back from its ledger); "no lease" always stands. Said once each way on
-/// stderr.
+/// new hub takes the lease back from its ledger); "no lease" and the lease's end ([`Beat::check`])
+/// always stand. Said once each way on stderr.
 fn through_restarts<T>(id: &str, c: &mut Client, mut f: impl FnMut(&Client) -> Result<T, String>, up: &dyn Fn() -> Result<Client, String>) -> Result<T, String> {
     let mut down: Option<Instant> = None;
     let mut back: Option<Instant> = None;
@@ -131,7 +148,7 @@ fn through_restarts<T>(id: &str, c: &mut Client, mut f: impl FnMut(&Client) -> R
             }
             Err(e) => e,
         };
-        if e.starts_with("no lease") {
+        if e.starts_with("no lease") || e.starts_with(&format!("{id} ended (")) {
             return Err(e);
         }
         match up() {
@@ -222,8 +239,9 @@ fn master() -> Result<Client, String> {
     Ok(c)
 }
 
+#[track_caller]
 fn git(dir: &Path, args: &[&str]) -> Option<String> {
-    let o = makepad_remote::group::command("git").arg("-C").arg(dir).args(args).output().ok()?;
+    let o = crate::git_exec::command().arg("-C").arg(dir).args(args).output().ok()?;
     o.status.success().then(|| String::from_utf8_lossy(&o.stdout).trim().to_string())
 }
 
@@ -304,7 +322,7 @@ fn parse(kind: &str, lane: Option<&str>, args: &[&str]) -> Result<Opts, String> 
     // lease queues and whatever other landings do to the branches meanwhile
     if let Some(spec) = &req.rev {
         let dir = req.repo_dir.as_deref().ok_or("--rev needs a git repo (--repo-dir)")?;
-        req.rev = Some(super::pin_revs(Path::new(dir), spec)?);
+        req.rev = Some(pin_lane_rev(Path::new(dir), spec, &req.lane)?);
     }
     if req.class.is_empty() && !cmd.is_empty() { req.class = super::run_class(kind, &cmd); }
     Ok(Opts { req, watch, cmd, tree, native })
@@ -316,6 +334,82 @@ struct Held {
     node: String,
     work: String,
     env: Vec<(String, String)>,
+    beat: Beat,
+}
+
+/// The holder's beat: a thread of its own beats the master every [`BEAT`] while the lease is
+/// held, whatever the node calls wait on. Beats in the loop of the node calls stopped for as long
+/// as one call waited: a `lease-log` OPEN a busy node left unanswered for 10 s (the expiry) let
+/// a landing's lease expire (L243081, 11-03). Through master restarts it keeps trying; it stops
+/// once the master says the lease ended ([`Beat::ended`]) or the holder drops it.
+struct Beat {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ended: std::sync::Arc<std::sync::Mutex<Option<(String, String)>>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Beat {
+    fn start(id: &str) -> Beat {
+        use std::sync::atomic::Ordering;
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let ended = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let (halt, end, id) = (stop.clone(), ended.clone(), id.to_string());
+        let thread = std::thread::Builder::new().name("devhub-beat".into()).spawn(move || {
+            let mut client: Option<Client> = None;
+            let mut lost = false;
+            loop {
+                let t = Instant::now();
+                while t.elapsed() < BEAT {
+                    if halt.load(Ordering::Acquire) { return; }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                let answer = match client.as_ref().map_or_else(master, |c| Ok(c.clone())) {
+                    Ok(c) => { let a = one(&c, "beat", &id); client = Some(c); a }
+                    Err(e) => Err(e),
+                };
+                match answer {
+                    Ok(v) if s(&v, "state") == "ended" => {
+                        *end.lock().unwrap() = Some((s(&v, "how"), s(&v, "reason")));
+                        return;
+                    }
+                    Ok(_) => {
+                        if std::mem::take(&mut lost) { eprintln!("{id}: the master is back; still held"); }
+                    }
+                    // a restarting master keeps its granted leases (leases.live): only "no lease" ends it
+                    Err(e) if e.starts_with("no lease") => {
+                        *end.lock().unwrap() = Some(("lost".into(), e));
+                        return;
+                    }
+                    Err(e) => {
+                        client = None;
+                        if !lost { eprintln!("{id}: the master does not answer ({e}); still holding, retrying"); }
+                        lost = true;
+                    }
+                }
+            }
+        }).ok();
+        Beat { stop, ended, thread }
+    }
+
+    /// How and why the lease ended, once a beat heard it.
+    fn ended(&self) -> Option<(String, String)> {
+        self.ended.lock().unwrap().clone()
+    }
+
+    /// Err once the lease ended: what a node call loop returns then.
+    fn check(&self, id: &str) -> Result<(), String> {
+        match self.ended() {
+            Some((how, _)) => Err(format!("{id} ended ({how})")),
+            None => Ok(()),
+        }
+    }
+}
+
+impl Drop for Beat {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Release);
+        if let Some(t) = self.thread.take() { let _ = t.join(); }
+    }
 }
 
 /// Asks for the lease and waits for it (one stderr line per change); Err(exit code).
@@ -353,7 +447,8 @@ fn acquire(c: &Client, req: &Req) -> Result<Held, i32> {
                     _ => Vec::new(),
                 };
                 if !s(&v, "reason").is_empty() { eprintln!("{id}: {}", s(&v, "reason")); }
-                return Ok(Held { id, node: s(&v, "node"), work: start.map(|st| s(st, "work")).unwrap_or_default(), env });
+                let beat = Beat::start(&id);
+                return Ok(Held { id, node: s(&v, "node"), work: start.map(|st| s(st, "work")).unwrap_or_default(), env, beat });
             }
             _ => {
                 let how = s(&v, "how");
@@ -411,21 +506,19 @@ fn run_there(c: &Client, held: &Held, rel: &str, cmd: &[String]) -> Result<i32, 
 fn run_there_into(c: &Client, held: &Held, rel: &str, cmd: &[String], out: &mut dyn Write) -> Result<i32, String> {
     let argv = makepad_network::digest::base64_encode(cmd.join("\0").as_bytes());
     let mut c = c.clone();
-    let v = start_there(&mut c, held, "lease-run", &format!("lease-run {} {rel} {argv}", held.id))?;
+    let request = crate::proto::request_id();
+    let v = start_there(&mut c, held, "lease-run", &format!("lease-run {} {rel} {argv} {{\"request_id\":\"{request}\"}}", held.id))?;
     let run = v.get("n").and_then(super::num).map_or(1, |x| x as u64);
     follow_there(&c, held, run, out)
 }
 
-/// Keep the lease alive while admission, resolution or a hub restart delays its run.
+/// Asks for the run while admission, resolution or a hub restart delays it (the lease's own
+/// thread beats meanwhile: [`Beat`]).
 fn start_there(c: &mut Client, held: &Held, service: &str, line: &str) -> Result<Value, String> {
-    let (mut last, mut beat) = (String::new(), Instant::now());
+    let mut last = String::new();
     loop {
         let v = through_restarts(&held.id, c, |c| {
-            if beat.elapsed() >= BEAT {
-                let st = one(c, "beat", &held.id)?;
-                if s(&st, "state") == "ended" { return Err(format!("{} ended ({})", held.id, s(&st, "how"))); }
-                beat = Instant::now();
-            }
+            held.beat.check(&held.id)?;
             node_one(c, &held.node, service, line)
         }, &master)?;
         let Some(pending) = v.get("pending").and_then(Value::as_str) else { return Ok(v) };
@@ -440,9 +533,11 @@ fn start_there(c: &mut Client, held: &Held, service: &str, line: &str) -> Result
 fn follow_there(c: &Client, held: &Held, run: u64, out: &mut dyn Write) -> Result<i32, String> {
     let mut c = c.clone();
     let mut off = 0u64;
-    let mut beat = Instant::now();
     loop {
-        let v = through_restarts(&held.id, &mut c, |c| node_one(c, &held.node, "lease-log", &format!("lease-log {} {run} {off}", held.id)), &master)?;
+        let v = through_restarts(&held.id, &mut c, |c| {
+            held.beat.check(&held.id)?;
+            node_one(c, &held.node, "lease-log", &format!("lease-log {} {run} {off}", held.id))
+        }, &master)?;
         let data = b64_decode(&s(&v, "data")).ok_or("lease-log: bad data")?;
         let _ = out.write_all(&data);
         let _ = out.flush();
@@ -452,13 +547,6 @@ fn follow_there(c: &Client, held: &Held, run: u64, out: &mut dyn Write) -> Resul
                 return Ok(code as i32);
             }
             std::thread::sleep(Duration::from_millis(300));
-        }
-        if beat.elapsed() >= BEAT {
-            beat = Instant::now();
-            let st = through_restarts(&held.id, &mut c, |c| one(c, "beat", &held.id), &master)?;
-            if s(&st, "state") == "ended" {
-                return Err(format!("{} ended ({})", held.id, s(&st, "how")));
-            }
         }
     }
 }
@@ -510,6 +598,11 @@ fn lease(args: &[&str]) -> i32 {
         Err(code) => return code,
     };
     if !o.cmd.is_empty() {
+        // a lease ships nothing: its command runs on what earlier ships left in the lane's dir (a
+        // script only the worktree had was "No such file" on the box, and looked like a lost tree)
+        if o.req.rev.is_none() && o.req.repo_dir.is_some() {
+            eprintln!("{}: runs in lane {}'s dir on {} as earlier ships left it (a lease ships nothing; `devhub run {} {} [--with-uncommitted] -- ..` ships this worktree)", held.id, o.req.lane, held.node, o.req.lane, o.req.kind.as_str());
+        }
         let r = run_there(&c, &held, ".", &o.cmd);
         return finish(&c, &held, r);
     }
@@ -519,50 +612,43 @@ fn lease(args: &[&str]) -> i32 {
         println!("export {k}={}", shell_quote(v));
     }
     let _ = std::io::stdout().flush();
-    // the holder: beat until the lease ends, its watch pid dies, or this process is killed
-    let mut lost: Option<()> = None;
+    // the holder: its beat runs until the lease ends, its watch pid dies, or this process is killed
     loop {
-        std::thread::sleep(BEAT);
+        std::thread::sleep(Duration::from_millis(500));
         if o.watch.is_some_and(|p| !pid_alive(p)) {
             release(&c, &held.id, None);
             eprintln!("{}: watched pid ended; released", held.id);
             return 0;
         }
-        match master().and_then(|c| one(&c, "beat", &held.id)) {
-            Ok(v) if s(&v, "state") == "ended" => {
-                if s(&v, "how") == "cancelled" {
-                    eprintln!("{}", cancelled_notice(&held.id, &held.node));
-                    return CANCELLED_EXIT;
-                }
-                let why = s(&v, "reason");
-                eprintln!("{}: ended ({}){}", held.id, s(&v, "how"), if why.is_empty() { String::new() } else { format!(": {why}") });
+        match held.beat.ended() {
+            Some((how, _)) if how == "cancelled" => {
+                eprintln!("{}", cancelled_notice(&held.id, &held.node));
+                return CANCELLED_EXIT;
+            }
+            Some((how, why)) if how == "lost" && why.starts_with("no lease") => return fail(format!("beat {}: {why}", held.id)),
+            Some((how, why)) => {
+                eprintln!("{}: ended ({how}){}", held.id, if why.is_empty() { String::new() } else { format!(": {why}") });
                 return 0;
             }
-            Ok(_) => {
-                if lost.take().is_some() {
-                    eprintln!("{}: the master is back; still held", held.id);
-                }
-            }
-            // a restarting master keeps its granted leases (leases.live): keep beating
-            Err(e) if e.starts_with("no lease") => return fail(format!("beat {}: {e}", held.id)),
-            Err(e) => {
-                if lost.is_none() {
-                    eprintln!("{}: the master does not answer ({e}); still holding, retrying", held.id);
-                    lost = Some(());
-                }
-            }
+            None => {}
         }
     }
 }
 
 fn finish(c: &Client, held: &Held, r: Result<i32, String>) -> i32 {
+    let ended = one(c, "beat", &held.id).ok().filter(|v| s(v, "state") == "ended").map(|v| s(&v, "how"));
     // the user cancelled it: its processes were stopped, so the run's own result is just the fallout
-    if one(c, "beat", &held.id).is_ok_and(|v| s(&v, "state") == "ended" && s(&v, "how") == "cancelled") {
+    if ended.as_deref() == Some("cancelled") {
         eprintln!("{}", cancelled_notice(&held.id, &held.node));
         return CANCELLED_EXIT;
     }
     let (exit, code) = match r {
         Ok(code) => (Some(code), code),
+        // the lease went under the command (not a person, not the command): no verdict at all
+        Err(e) if ended.as_deref().is_some_and(lost_how) || lost_error(&e) => {
+            eprintln!("LEASE LOST on {} ({}): {e}; the command has no verdict, the code is not to blame: run it again. Exit code {LOST_EXIT}.", held.node, held.id);
+            (None, LOST_EXIT)
+        }
         Err(e) => (None, fail(e)),
     };
     let mut c = c.clone();
@@ -586,10 +672,13 @@ fn released_line(v: &Value) -> String {
         how => format!("ended ({how})"),
     });
     let Some(c) = v.get("cleanup") else { return head };
-    match s(c, "cleanup").as_str() {
+    let ended = s(c, "ended");
+    let ended = if ended.is_empty() { ended } else { format!("\n{ended}") };
+    let line = match s(c, "cleanup").as_str() {
         "ok" => format!("{head}; {} cleaned up: {} stopped, {} MB freed{}", s(c, "node"), super::master::plural(n(c, "stopped") as usize, "process", "processes"), n(c, "freed_mb"), if n(c, "leak") > 0.0 { format!(", {} LEFT (see the inbox)", super::master::plural(n(c, "leak") as usize, "process", "processes")) } else { String::new() }),
         other => format!("{head}; {other}"),
-    }
+    };
+    format!("{line}{ended}")
 }
 
 fn shell_quote(v: &str) -> String {
@@ -605,19 +694,27 @@ fn valid_label(s: &str) -> bool {
     !s.is_empty() && s.len() <= 128 && !s.starts_with(['-', '/', '.']) && !s.ends_with(['/', '.']) && !s.contains("..") && !s.contains("//") && !s.ends_with(".lock") && s.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'/'))
 }
 
+/// One checkout's HEAD as a side of a pinned `--rev`: `<branch>@<sha>` (a detached HEAD is
+/// labelled `run-<lane>`).
+fn head_side(dir: &Path, lane: &str) -> Result<String, String> {
+    let sha = git(dir, &["rev-parse", "HEAD"]).ok_or_else(|| format!("{}: no HEAD", dir.display()))?;
+    let branch = git(dir, &["symbolic-ref", "-q", "--short", "HEAD"]).filter(|b| valid_label(b)).unwrap_or_else(|| format!("run-{lane}"));
+    Ok(format!("{branch}@{sha}"))
+}
+
 /// The worktree's revision for `run`: its HEAD (+ the nested commercial's), as a pinned `--rev`
-/// (`<branch>@<sha>[,<branch>@<sha>]`; a detached HEAD is labelled `run-<lane>`).
+/// (`<branch>@<sha>[,<branch>@<sha>]`).
 fn head_rev(root: &Path, lane: &str) -> Result<String, String> {
-    let side = |dir: &Path| -> Result<String, String> {
-        let sha = git(dir, &["rev-parse", "HEAD"]).ok_or_else(|| format!("{}: no HEAD", dir.display()))?;
-        let branch = git(dir, &["symbolic-ref", "-q", "--short", "HEAD"]).filter(|b| valid_label(b)).unwrap_or_else(|| format!("run-{lane}"));
-        Ok(format!("{branch}@{sha}"))
-    };
-    let mut spec = side(root)?;
-    if root.join("apps/commercial/.git").exists() {
-        spec = format!("{spec},{}", side(&root.join("apps/commercial"))?);
-    }
-    super::pin_revs(root, &spec)
+    pin_lane_rev(root, &head_side(root, lane)?, lane)
+}
+
+/// A `--rev` given for a lane worktree, pinned whole: one that names only the makepad side also
+/// pins the nested commercial checkout's HEAD, so the commercial packages are in the lease's tree
+/// (a makepad-only pin left them out of the overlay: `package .. is not a member of the workspace`).
+pub fn pin_lane_rev(root: &Path, spec: &str, lane: &str) -> Result<String, String> {
+    let nested = root.join("apps/commercial");
+    if spec.contains(',') || !nested.join(".git").exists() { return super::pin_revs(root, spec); }
+    super::pin_revs(root, &format!("{spec},{}", head_side(&nested, lane)?))
 }
 
 /// Ships the complete uncommitted set and base blobs into the lease's source layer.
@@ -655,23 +752,7 @@ fn ship(c: &Client, root: &Path, held: &Held, pin: &super::Pin, uncommitted: boo
     entries.sort_by(|a, b| a.path.cmp(&b.path));
     entries.dedup_by(|a, b| a.path == b.path);
     let t = Instant::now();
-    // the lease is beaten while the files go
-    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let (bc, bd, bid) = (c.clone(), done.clone(), held.id.clone());
-    let beater = std::thread::spawn(move || {
-        while !bd.load(std::sync::atomic::Ordering::Relaxed) {
-            let t = Instant::now();
-            while t.elapsed() < BEAT && !bd.load(std::sync::atomic::Ordering::Relaxed) {
-                std::thread::sleep(Duration::from_millis(100));
-            }
-            if !bd.load(std::sync::atomic::Ordering::Relaxed) {
-                let _ = one(&bc, "beat", &bid);
-            }
-        }
-    });
     let sent = if entries.is_empty() { Ok(super::ship::Shipped::default()) } else { super::ship::send(c, &held.node, &held.id, root, &entries) };
-    done.store(true, std::sync::atomic::Ordering::Relaxed);
-    let _ = beater.join();
     let sent = sent?;
     let paths: Vec<String> = entries.iter().map(|e| e.path.clone()).collect();
     let list = |v: &[String]| v.iter().map(|p| makepad_remote::json_str(p)).collect::<Vec<_>>().join(",");
@@ -749,7 +830,7 @@ fn run_worktree_into(o: &mut Opts, uncommitted: bool, test: Option<&str>, out: &
     let completed = r.is_ok();
     let code = finish(&c, &held, r);
     if let Some(pkg) = test {
-        let verdict = match code { 0 => "passed", CANCELLED_EXIT => "cancelled", _ => "failed" };
+        let verdict = match code { 0 => "passed", CANCELLED_EXIT => "cancelled", LOST_EXIT => "had no verdict (its lease was lost)", _ => "failed" };
         let _ = writeln!(out, "devhub test: {pkg} {verdict} in {:.3}s (queue {:.3}s, ship {:.3}s, run {:.3}s) on {}", t.elapsed().as_secs_f64(), queue.as_secs_f64(), ship.as_secs_f64(), run.as_secs_f64(), held.node);
     }
     (code, completed)
@@ -823,7 +904,12 @@ fn cargo_test(mut o: Opts, pkg: &str, args: &[String], errors: &[String], known:
         eprintln!("devhub test: cargo did not report a completed build; no JIT-miss verdict recorded");
         return if code == 0 { 2 } else { code };
     }
-    if known.is_none() {
+    // a lane whose JIT is older than work's: its own code, not the JIT, until it runs on work's
+    let repo = o.req.repo_dir.clone().unwrap_or_else(|| ".".into());
+    let behind = o.req.rev.as_deref().and_then(super::Pin::of_rev).and_then(|pin| crate::jit_misses::behind_work_jit(Path::new(&repo), &crate::state::Pair::new(&pin.makepad, pin.commercial.as_deref().unwrap_or(""))));
+    if let (None, Some(base)) = (&known, &behind) {
+        eprintln!("devhub test: not a JIT miss: this lane's JIT is older than work's (work changed the JIT since the lane's base {}), and its code may use what landed since: merge work and run it again; this verdict is cargo's: {}", &base[..base.len().min(10)], errors.first().map_or("", String::as_str));
+    } else if known.is_none() {
         match test_miss(&o, pkg, args, "record", errors) {
             Ok(miss) => println!("{}", crate::jit_misses::notice(&miss)),
             Err(e) => eprintln!("devhub test: JIT miss on {pkg} {} (recording failed: {e}): {}; this verdict is cargo's", crate::jit_misses::target(args), errors.first().map_or("", String::as_str)),
@@ -862,6 +948,22 @@ pub fn test_route(own: bool, jit: Option<u64>, cargo: Option<u64>) -> (bool, Str
 }
 
 pub(crate) const ALL_TESTS: &str = "tests:*";
+
+/// A `devhub test`'s filter (libtest's words after `--`, without its output and thread flags) as
+/// one class word: `test:<pkg>[:<target>]?<filter>` is measured apart from the whole suite.
+fn filter_key(args: &[&str]) -> String {
+    let mut out = Vec::new();
+    let mut words = args.iter().skip_while(|a| **a == "--");
+    while let Some(w) = words.next() {
+        match *w {
+            "--nocapture" | "--show-output" | "-q" | "--quiet" => {}
+            "--test-threads" | "--color" | "--format" => { words.next(); }
+            w if ["--test-threads=", "--color=", "--format="].iter().any(|p| w.starts_with(p)) => {}
+            w => out.push(w.split_whitespace().collect::<Vec<_>>().join("_")),
+        }
+    }
+    out.join(",")
+}
 
 fn test(lane: &str, pkg: &str, rest: &[&str]) -> i32 {
     let parsed = (|| -> Result<_, String> {
@@ -910,7 +1012,8 @@ fn test(lane: &str, pkg: &str, rest: &[&str]) -> i32 {
         if live && (o.req.node.is_some() || o.req.cost != CostClass::Small || o.req.est_min.is_some()) {
             return Err("--live uses small cost and hot-box routing; omit --node, --cost and --est-min".into());
         }
-        if o.req.class.is_empty() {
+        let default_class = o.req.class.is_empty();
+        if default_class {
             o.req.class = target.map_or_else(|| format!("test:{pkg}"), |t| format!("test:{pkg}:{t}"));
             if live { o.req.class = format!("live:{}", o.req.class); }
         }
@@ -924,6 +1027,9 @@ fn test(lane: &str, pkg: &str, rest: &[&str]) -> i32 {
             eprintln!("devhub test: {}: {reason}", o.req.class);
             if !use_jit { native = true; }
         }
+        // a filtered run is measured apart from its whole suite (routing above reads the suite's)
+        let filter = filter_key(&args);
+        if default_class && !filter.is_empty() { o.req.class = format!("{}?{filter}", o.req.class); }
         if live && !flags.contains(&"--priority") { o.req.priority = Priority::Interactive; }
         let mut test_args = select.clone();
         test_args.extend(args.iter().copied());
@@ -982,7 +1088,9 @@ fn shadow_test(c: &Client, o: &mut Opts, pkg: &str, output: &mut Vec<u8>) -> (i3
             json_str(&root), std::env::var("DEVHUB_ALSO").unwrap_or_default().split_whitespace().map(json_str).collect::<Vec<_>>().join(","), std::process::id(), json_str(&o.req.lane), json_str(o.req.agent.as_deref().unwrap_or("devhub-test")), o.cmd.iter().map(|s| json_str(s)).collect::<Vec<_>>().join(","), json_str(rel.trim_end_matches('/')),
             o.tree, json_str(if o.req.cost_asked { o.req.cost.as_str() } else { "" }), optional(o.req.est_min), optional(o.req.cores), optional(o.req.ram_gb), o.req.whole, json_str(&o.req.class), json_str(o.req.priority.as_str()), json_str(o.req.loader.as_deref().unwrap_or("")),
             json_str(&o.req.needs.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(",")), json_str(o.req.node.as_deref().unwrap_or("")), o.req.prio);
-        let v = one(c, "job", &format!("job submit {body}"))?;
+        let request = crate::proto::request_id();
+        let line = format!("job submit {{\"request_id\":\"{request}\",{}", &body[1..]);
+        let v = retry_master(|| one(c, "job", &line))?;
         let id = v.get("jobs").and_then(Value::as_arr).and_then(|a| a.first()).and_then(Value::as_str).ok_or("test: no job")?;
         let (mut off, mut generation) = (0, (String::new(), 0));
         loop {
@@ -1439,7 +1547,7 @@ fn landed(c: &Client, lane: &str) -> i32 {
         }
     }
     if let Some(p) = path {
-        match makepad_remote::group::command("git").arg("-C").arg(&repo).args(["worktree", "remove", &p]).status() {
+        match crate::git_exec::command().arg("-C").arg(&repo).args(["worktree", "remove", &p]).status() {
             Ok(st) if st.success() => println!("worktree {p}: removed"),
             _ => {
                 println!("worktree {p}: kept (git refused: local changes or nested checkouts)");
@@ -1449,7 +1557,7 @@ fn landed(c: &Client, lane: &str) -> i32 {
     }
     // `-D`: the content check above (`in_work`) already proved the branch is in work; `-d` would
     // refuse a tip that is only a merge-train "Merge work into rc-x" commit
-    if makepad_remote::group::command("git").arg("-C").arg(&repo).args(["branch", "-D", &branch]).status().is_ok_and(|s| s.success()) {
+    if crate::git_exec::command().arg("-C").arg(&repo).args(["branch", "-D", &branch]).status().is_ok_and(|s| s.success()) {
         println!("branch {branch}: deleted");
     } else {
         code = 1;
@@ -1491,6 +1599,12 @@ pub fn cli(args: &[&str]) -> Option<i32> {
     }
     if !matches!(word, "prof" | "stats" | "jit" | "overlay" | "lease" | "run" | "test" | "get" | "release" | "cancel" | "queue" | "leases" | "why-queued" | "nodes" | "node" | "disk" | "desk" | "landed" | "clean" | "evict" | "unblock" | "override" | "blocked") {
         return None;
+    }
+    if matches!(args, ["run", _, _, ..] | ["test", _, _, ..]) {
+        if let Err(e) = crate::proto::agent() {
+            eprintln!("makepad devhub {word}: {e}");
+            return Some(2);
+        }
     }
     match args {
         ["prof", rest @ ..] => if let Err(e) = super::prof::Query::parse(rest) { eprintln!("makepad devhub {e}"); return Some(2); },
@@ -1702,5 +1816,10 @@ mod restart_tests {
         // a live master's other error stands at once when there was no outage
         let r: Result<(), String> = through_restarts("L1", &mut c, |_| Err("103: lease-log: bad".into()), &up);
         assert!(r.is_err());
+        // the lease's end (its beat heard it) stands at once, even while its node does not answer
+        let mut n = 0;
+        let r: Result<(), String> = through_restarts("L1", &mut c, |_| { n += 1; Err(if n == 1 { "103: link lost: no answer to OPEN" } else { "L1 ended (expired)" }.into()) }, &up);
+        assert_eq!((r, n), (Err("L1 ended (expired)".to_string()), 2));
+        assert!(lost_how("expired") && lost_how("lost") && !lost_how("cancelled") && lost_error("103: no lease L1 on a node") && !lost_error("103: lease-log: bad"));
     }
 }

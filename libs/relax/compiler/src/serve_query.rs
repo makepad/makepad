@@ -259,7 +259,8 @@ pub fn position(s: &mut Session,path: &str,params: &Json,only: bool) -> Result<S
                                     let Some((method,args)) = &body.ov_deref(id.0,step) else { break; };
                                     let Some(sig) = s.unit.tcx.fn_sig(&s.unit.prog, *method) else { break; };
                                     let ret = s.unit.tcx.tys.subst(sig.ret,s.unit.tcx.tys.list(*args));
-                                    match s.unit.tcx.tys.kind(ret) { TyKind::Ref(_,inner, _) => s.unit.tcx.try_normalize_erasing_regions(p,cx.typing_env,*inner).unwrap_or(*inner), _ => break }
+                                    let ret = s.unit.tcx.try_normalize_erasing_late_bound_regions(p,cx.typing_env,ret).unwrap_or(ret);
+                                    match s.unit.tcx.tys.kind(ret) { TyKind::Ref(_,inner, _) => *inner, _ => break }
                                 }
                             };
                         }

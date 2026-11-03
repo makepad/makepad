@@ -65,8 +65,9 @@ pub fn var<K: AsRef<OsStr>>(key: K) -> Result<String, VarError> {
     }
 }
 
-/// Safe to call in edition 2021 code (real std marks it `unsafe` only from edition 2024).
-pub fn set_var<K: AsRef<OsStr>, V: AsRef<OsStr>>(key: K, value: V) {
+/// Unsafe as real std's: a call needs no unsafe block before edition 2024 (`deprecated_safe_2024`).
+#[rustc_deprecated_safe_2024(audit_that = "the environment access only happens in single-threaded code")]
+pub unsafe fn set_var<K: AsRef<OsStr>, V: AsRef<OsStr>>(key: K, value: V) {
     let (key, value) = (key.as_ref(), value.as_ref());
     let r = crate::fs::run_with_cstr(key.as_encoded_bytes(), &|k| {
         crate::fs::run_with_cstr(value.as_encoded_bytes(), &|v| {
@@ -83,7 +84,9 @@ pub fn set_var<K: AsRef<OsStr>, V: AsRef<OsStr>>(key: K, value: V) {
     }
 }
 
-pub fn remove_var<K: AsRef<OsStr>>(key: K) {
+/// Unsafe as real std's: a call needs no unsafe block before edition 2024 (`deprecated_safe_2024`).
+#[rustc_deprecated_safe_2024(audit_that = "the environment access only happens in single-threaded code")]
+pub unsafe fn remove_var<K: AsRef<OsStr>>(key: K) {
     let key = key.as_ref();
     let r = crate::fs::run_with_cstr(key.as_encoded_bytes(), &|k| {
         let _guard = ENV_LOCK.write();

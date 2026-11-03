@@ -135,9 +135,17 @@ impl CostClass {
     }
 }
 
+/// A run class without its test filter (`test:<pkg>[:<target>][?<filter>]`): a filtered run and
+/// the whole suite are measured apart; what reads the package or target reads this.
+pub fn base_class(class: &str) -> &str {
+    class.split_once('?').map_or(class, |(base, _)| base)
+}
+
 /// Default measurement class: kind and three command words, with paths stripped.
 pub fn run_class(kind: Kind, argv: &[String]) -> String {
-    std::iter::once(kind.as_str().to_string()).chain(argv.iter().take(3).map(|s| s.rsplit(['/', '\\']).next().unwrap_or(s).to_string())).collect::<Vec<_>>().join(" ")
+    // an `env [-u K] K=V ..` prefix only sets the run's environment: the class is its command (a
+    // fast gate's GATE_PROVEN list made every gate a class of its own, never measured)
+    std::iter::once(kind.as_str().to_string()).chain(loaders::command_of(argv).iter().take(3).map(|s| s.rsplit(['/', '\\']).next().unwrap_or(s).to_string())).collect::<Vec<_>>().join(" ")
 }
 
 /// Reserved cores, RAM and disk in GB, and GPUs. Concurrent leases sum these costs.
@@ -546,7 +554,13 @@ pub fn pin_revs(repo_dir: &std::path::Path, spec: &str) -> Result<String, String
             Some(s) => return Err(format!("--rev `{spec}`: `{s}` is not a commit id")),
             None => format!("refs/heads/{branch}^{{commit}}"),
         };
-        let o = makepad_remote::group::command("git")
+        // a branch or a full id: read in-process; only an abbreviated id asks git to expand it
+        if sha.is_none_or(|s| s.len() == 40) {
+            let full = crate::gitread::rev(&dir, &what).ok_or_else(|| format!("--rev: {} has no {}", dir.display(), sha.map_or(format!("branch {branch}"), |s| format!("commit {s}"))))?;
+            out.push(format!("{branch}@{full}"));
+            continue;
+        }
+        let o = crate::git_exec::command()
             .arg("-C")
             .arg(&dir)
             .args(["rev-parse", "-q", "--verify", &what])
@@ -583,6 +597,19 @@ pub fn parse_pinned(spec: &str) -> Result<(RevPin, Option<RevPin>), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_runs_class_is_its_command_past_an_env_prefix() {
+        let argv = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let gate = |proven: &str| run_class(Kind::Gate, &argv(&["env", proven, "-u", "X", "bash", "tools/run/fixture/land_gate.sh", "fast", "a1"]));
+        assert_eq!(gate("GATE_PROVEN=check a"), "gate bash land_gate.sh fast");
+        assert_eq!(gate("GATE_PROVEN=check a"), gate("GATE_PROVEN=check b;suite c"), "one class whatever is proven");
+        assert_eq!(run_class(Kind::Test, &argv(&["cargo", "run", "--profile"])), "test cargo run --profile");
+        // and the JIT past an env prefix runs on the overlay, never a native checkout's build
+        let jit = argv(&["env", "MAKEPAD_RUN_O3=1", "cargo", "run", "--profile", "host", "-q", "-p", "makepad-run", "--bin", "makepad", "--", "live", "a"]);
+        assert_eq!(Src::for_run(Kind::Test, &jit, false), Src::Overlay);
+        assert_eq!(Src::for_run(Kind::Test, &jit, true), Src::Tree);
+    }
 
     #[test]
     fn caps_round_trip() {

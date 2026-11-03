@@ -621,7 +621,7 @@ impl IrFnCompiler {
         let Some(op) = Builtin::from_name(name) else {
             return self.push(ShaderType::Pod(ret), NO_EXPR);
         };
-        if op == Builtin::AtomicAdd && !exprs.is_empty() {
+        if matches!(op, Builtin::AtomicAdd | Builtin::AtomicMin | Builtin::AtomicMax) && !exprs.is_empty() {
             let mut place = exprs[0];
             if place == NO_EXPR { return self.void_nop(vm); }
             loop {
@@ -629,7 +629,7 @@ impl IrFnCompiler {
                     ExprKind::Index(base, _) | ExprKind::Swizzle(base, _, _) => place = base,
                     ExprKind::Global(g) if output.compiled.ir.globals[g as usize].kind == IrGlobalKind::Io(IrIo::Storage(true)) => break,
                     _ => {
-                        output.push_error("atomic_add requires an element of a writable device buffer".into());
+                        output.push_error("atomic_add, atomic_min and atomic_max require an element of a writable device buffer".into());
                         return self.void_nop(vm);
                     }
                 }
@@ -1125,5 +1125,7 @@ fn is_compute_builtin(op: Builtin) -> bool {
             | Builtin::SubgroupFirst
             | Builtin::Dot4U8
             | Builtin::AtomicAdd
+            | Builtin::AtomicMin
+            | Builtin::AtomicMax
     )
 }

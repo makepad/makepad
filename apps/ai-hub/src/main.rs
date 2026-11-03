@@ -243,7 +243,7 @@ fn run() -> Result<(), AssetAiError> {
     }
     println!("  lora dir  {}", cache_dir.join("loras").display());
     println!(
-        "  endpoints: /health /models /jobs /loras POST:/generate /job/<id> POST:/job/<id>/cancel /artifact/<id> /v1/model_inventory /v1/model_blob/<sha256> POST:/realtime GET(ws):/realtime/<id> /kernel POST:/kernel/jobs /kernel/job/<id>/tiles POST:/kernel/job/<id>/cancel"
+        "  endpoints: /health /models /jobs /loras POST:/generate /job/<id> POST:/job/<id>/cancel /artifact/<id> /v1/model_inventory /v1/model_blob/<sha256> POST:/realtime GET(ws):/realtime/<id> /kernel GET(ws):/kernel/stream"
     );
 
     if machine {

@@ -102,6 +102,26 @@ fn validate(k: &CompiledKernel) {
     validate_spirv(k.code.as_spirv().unwrap());
 }
 
+#[test]
+fn short_circuit_tail_kernel() {
+    let mut host = ScriptVmHost::new(0i32, ());
+    let mut vm = ScriptVm { host: host.host_context(), bx: Box::new(ScriptVmBase::new()) };
+    vm.capture_errors();
+    let value = vm.eval(ScriptMod::new("", "", "short_circuit", 0, 0, include_str!("support/short_circuit.splash"), &[]));
+    assert!(vm.take_errors().is_empty());
+    for target in [ComputeTarget::Spirv, ComputeTarget::Hlsl, ComputeTarget::Msl] {
+        let k = compile_compute_kernel(&mut vm, value.as_object().unwrap(), target).unwrap();
+        assert!(vm.take_errors().is_empty());
+        if target == ComputeTarget::Spirv { validate(&k); }
+        else { validate_text(&k, "short-circuit"); }
+        if target == ComputeTarget::Hlsl {
+            let text = k.code.as_text().unwrap();
+            assert!(text.contains("[branch] if"), "{text}");
+            assert!(!text.lines().any(|line| (line.contains("||") || line.contains("&&")) && line.contains("src")), "{text}");
+        }
+    }
+}
+
 fn validate_spirv(words: &[u32]) {
     let mut bytes = Vec::new();
     for w in words {
@@ -141,6 +161,8 @@ fn text_targets_resources_params_and_precise() {
         assert_eq!(k.layout.shared_bytes, 128);
         if target == ComputeTarget::Hlsl { assert_eq!(k.layout.group_count_offset, Some(16)); }
         if target == ComputeTarget::Spirv { validate(&k); } else { validate_text(&k, "atomic-barrier"); }
+        let k = kernel_target("u: shader.buffer_rw(u32)\n s: shader.buffer_rw(i32)\n main: fn() { let i = global_id().x\n let a = atomic_min(self.u[0], i)\n let b = atomic_max(self.u[1], a)\n let c = atomic_min(self.s[0], i32(b) - 7)\n self.s[1] = atomic_max(self.s[2], c) }", target).unwrap();
+        if target == ComputeTarget::Spirv { validate(&k); } else { validate_text(&k, "atomic-min-max"); }
         let k = kernel_target("precise_math: true\n a: shader.texture_2d_rw(@r16f)\n b: shader.texture_2d_rw(@r8unorm)\n c: shader.texture_2d_rw(@r32f)\n d: shader.texture_2d_rw(@r32uint)\n e: shader.texture_2d_rw(@rgba8unorm)\n f: shader.texture_2d_rw(@rgba16f)\n main: fn() { let p = global_id().xy\n self.a.write(p, f32(0.5))\n self.b.write(p, f32(0.25))\n self.c.write(p, f32(1.0) / sqrt(f32(2.0)))\n self.d.write(p, u32(9))\n self.e.write(p, vec4f(1.0))\n self.f.write(p, vec4f(0.5)) }", target).unwrap();
         assert_eq!(k.layout.storage_textures.len(), 6);
         if target == ComputeTarget::Spirv { validate(&k); } else { validate_text(&k, "storage-textures"); }
@@ -154,6 +176,8 @@ fn invalid_kernel_resources_are_rejected() {
             "a: shader.texture_2d_rw(@r16f)\n main: fn() { let x = self.a.read(vec2u(0)) }",
             "a: shader.texture_2d_rw(@r16f)\n main: fn() { self.a.write(vec2u(0), vec4f(1.0)) }",
             "a: shader.buffer(u32)\n main: fn() { let x = atomic_add(self.a[0], u32(1)) }",
+            "a: shader.buffer(u32)\n main: fn() { let x = atomic_min(self.a[0], u32(1)) }",
+            "a: shader.buffer_rw(f32)\n main: fn() { let x = atomic_max(self.a[0], 1.0) }",
             "a: shader.buffer(vec4f)\n main: fn() { self.a[0].x = 1.0 }",
             "a: shader.buffer(vec4f)\n main: fn() { self.a[0].xy += vec2f(1.0) }",
         ] { assert!(kernel_target(body, target).is_err()); }

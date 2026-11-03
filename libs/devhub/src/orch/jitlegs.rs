@@ -60,7 +60,7 @@ pub fn start(ctx: Arc<Ctx>) {
                     d.jitlegs.asked = false;
                 }
                 d.jitlegs.runs.push(r.clone());
-            });
+            }).unwrap_or_else(|e| { eprintln!("devhub state: {e}"); Default::default() });
             ctx.store.event("jitlegs", Sev::Info, format!("jitlegs {} started; {}", r.pair.short(), arm.summary), None);
             run(&ctx, r);
         }
@@ -110,7 +110,7 @@ fn run(ctx: &Ctx, r: JitLegsRun) {
         if let Some(last) = d.jitlegs.runs.last_mut().filter(|last| last.pair == r.pair && last.started_ms == r.started_ms) {
             last.ended_ms = ended_ms;
         }
-    });
+    }).unwrap_or_else(|e| { eprintln!("devhub state: {e}"); Default::default() });
     let classified = r.legs.iter().find(|l| l.name == "arm64" && l.summary.starts_with("arm64: skipped (")).map_or(String::new(), |l| format!("; {}", l.summary));
     ctx.store.event("jitlegs", Sev::Info, format!("jitlegs {} ended (wall {}s){classified}", r.pair.short(), ended_ms.saturating_sub(r.started_ms) / 1000), None);
 }
@@ -121,7 +121,7 @@ pub fn serve(ctx: &Ctx, line: &str) -> Result<String, String> {
     match words.as_slice() {
         [] | ["status"] => Ok(ctx.store.read(|d| d.section(Some("jitlegs")).unwrap_or_default())),
         ["run"] => {
-            ctx.store.update(|d| d.jitlegs.asked = true);
+            ctx.store.update(|d| d.jitlegs.asked = true)?;
             ctx.store.event("jitlegs", Sev::Info, "jitlegs: asked for the newest landed pair".into(), None);
             Ok("{\"queued\":true}".into())
         }

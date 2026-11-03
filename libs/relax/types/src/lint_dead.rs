@@ -4,10 +4,10 @@
 //! the resolved paths, method calls, field reads, patterns, types it mentions); the signatures'
 //! and fields' references are read from the syntax (`TypeWalker`). `finish` then runs rustc's
 //! worklist: seeds are `main`, the effectively public items (`#[allow(dead_code)]` items,
-//! `#[no_mangle]` / `#[used]` / lang items, `const _`), and whatever a live item mentions is
-//! live; trait impls and their items are live when the trait (item) and the implementing type
-//! are. What stays dead is reported per module as rustc's `check_mod_deathness` does, grouped
-//! by parent and lint level.
+//! `#[no_mangle]` / `#[used]` / lang items, `const _`, a test build's `#[test]` fns), and
+//! whatever a live item mentions is live; trait impls and their items are live when the trait
+//! (item) and the implementing type are. What stays dead is reported per module as rustc's
+//! `check_mod_deathness` does, grouped by parent and lint level.
 //!
 //! Check-only (reports through the lint sink); `makepad run` never calls this.
 
@@ -507,6 +507,7 @@ impl<'a> BodyRefs<'a> {
         // a field of with this index and name
         let name = match self.ast.expr(e).kind {
             ExprKind::Field(_, n) => Some(self.prog.files[self.body.file as usize].text(n).to_string()),
+            // a tuple field: the body's uses of that index (typeck records them as check_field does)
             _ => None,
         };
         for &(adt, fi) in self.body.field_uses.iter() {
@@ -985,7 +986,12 @@ impl<'a> Dead<'a> {
                 let n = lint::attr_path(self.prog, def.file, a);
                 n == b"no_mangle" || n == b"export_name" || n == b"used"
             });
-        if used_like || lint::has_attr(self.prog, def.file, attrs, "lang") { Some(false) } else { None }
+        // rustc_builtin_macros global_allocator.rs: the expansion's allocator shims read the static
+        let allocator = def.kind == DefKind::Static && lint::has_attr(self.prog, def.file, attrs, "global_allocator");
+        // rustc_builtin_macros test_harness.rs: a test build's generated `main` names every `#[test]`
+        // fn (outside a test build the front end has removed them)
+        let test = def.kind == DefKind::Fn && lint::has_attr(self.prog, def.file, attrs, "test");
+        if used_like || allocator || test || lint::has_attr(self.prog, def.file, attrs, "lang") { Some(false) } else { None }
     }
 
     fn own_allow(&self, d: DefId) -> bool {
@@ -1152,10 +1158,15 @@ pub fn finish(prog: &Program, tcx: &Tcx, own: &[bool], root: u32) {
     let executable = is_executable(prog, root);
     let mut deferred: Vec<Work> = Vec::new();
     let mut unsolved: Vec<DefId> = Vec::new();
-    if executable {
-        let rm = prog.crates[root as usize].root_mod;
-        let main = prog.syms.intern_late("main");
-        if let Some(m) = prog.lookup_in_container(prog.mods[rm as usize].def, main, false) {
+    // rustc_passes dead.rs create_and_seed_worklist: a binary's `main` is live. Cargo checks each
+    // target as a crate of its own, so every binary of the check seeds its entry: a package's
+    // `src/bin/*.rs` and `[[bin]]` targets beside the one the check is rooted at.
+    let main = prog.syms.intern_late("main");
+    for (k, c) in prog.crates.iter().enumerate() {
+        if !own.get(k).copied().unwrap_or(false) { continue; }
+        let entry = if k as u32 == root { executable } else { c.is_bin && !c.harness && is_executable(prog, k as u32) };
+        if !entry { continue; }
+        if let Some(m) = prog.lookup_in_container(prog.mods[c.root_mod as usize].def, main, false) {
             if prog.def(m).kind == DefKind::Fn { s.worklist.push(Work { id: m, propagated: false, own: false }); }
         }
     }

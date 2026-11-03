@@ -65,7 +65,7 @@ fn dispatch(w: &mut CmdWriter, k: &CompiledKernel, pipeline: Id, groups: [u32; 3
             params[slot.offset as usize..slot.offset as usize + 4].copy_from_slice(&10u32.to_le_bytes());
         }
     }
-    Dispatch { pipeline, groups, indirect_buffer: if indirect { ARGS } else { Id::NONE }, indirect_offset: 0,
+    Dispatch { pipeline, timer: 0, groups, indirect_buffer: if indirect { ARGS } else { Id::NONE }, indirect_offset: 0,
         params: w.put_bytes(&params), buffers: Range { off: b.off * 8, len: b.len * 8 }, textures: Range { off: t.off * 8, len: t.len * 8 } }
 }
 fn draw_pipeline(vm: &mut ScriptVm, dialect: u32) -> (Vec<u8>, Vec<Id>, Vec<Id>) {

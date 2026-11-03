@@ -55,7 +55,7 @@ impl D3d11 {
         self.dev.ctx.CSSetUnorderedAccessViews(0, 8, Some(empty.as_ptr()), None);
         self.dev.ctx.CSSetShaderResources(0, Some(&[const { None }; 128]));
     } }
-    pub(super) fn encode_compute(&mut self, s: &mut Session, pass: &Pass, view: &CmdView) -> Result<(), String> {
+    pub(super) fn encode_compute(&mut self, s: &mut Session, pass: &Pass, view: &CmdView, mut timer: Option<&mut super::complete::Timer>) -> Result<(), String> {
         let dispatches = compute::records::<Dispatch>(view.arena, pass.dispatches).ok_or("invalid dispatch records")?;
         // Explicitly remove previous read and output bindings before binding UAVs. D3D11
         // silently nulls conflicting views, so implicit conflict handling is never used.
@@ -113,6 +113,10 @@ impl D3d11 {
                     }
                     unsafe { self.dev.ctx.CSSetConstantBuffers(0, Some(&[Some(constant.buf.clone())])); }
                 }
+                let stamps = if d.timer != 0 { timer.as_mut().and_then(|t| t.stamp_pair(&self.dev)) } else { None };
+                if let (Some(q), Some(t)) = (stamps, timer.as_ref()) {
+                    unsafe { self.dev.ctx.End(t.stamp(q).as_ID3D11Asynchronous()); }
+                }
                 unsafe {
                     self.dev.ctx.CSSetShader(Some(&p.shader), None);
                     self.dev.ctx.CSSetUnorderedAccessViews(0, 8, Some(uavs.as_ptr()), None);
@@ -122,6 +126,10 @@ impl D3d11 {
                 // The immediate context orders dispatches and copies. Unbinding all UAVs
                 // here makes writes visible to later SRV/indirect/copy operations.
                 self.unbind_compute();
+                if let (Some(q), Some(t)) = (stamps, timer.as_mut()) {
+                    unsafe { self.dev.ctx.End(t.stamp(q + 1).as_ID3D11Asynchronous()); }
+                    t.dispatches.push((s.string(d.timer).unwrap_or("compute").to_string(), q));
+                }
             }
             Ok(())
         })();

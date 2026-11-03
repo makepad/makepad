@@ -2,7 +2,7 @@ use crate::error::GitError;
 use crate::sha1::Sha1;
 use std::fmt;
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ObjectId([u8; 20]);
 
 impl ObjectId {

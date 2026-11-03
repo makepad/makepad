@@ -324,7 +324,10 @@ impl IrFnCompiler {
     pub(crate) fn handle_logic_test(&mut self, vm: &mut ScriptVm, output: &mut ShaderOutput, opargs: OpcodeArgs, op: BinOp) {
         let (first_type, first) = self.pop_resolved(vm, output);
         let target_ip = self.trap.ip.index + opargs.to_u32();
-        self.mes.push(IrMe::LogicOp { target_ip, op, first, first_type });
+        // Receiver temporaries and statement-valued RHS expressions belong to
+        // the guarded operand, not to the surrounding statement block.
+        self.blocks.push(Vec::new());
+        self.mes.push(IrMe::LogicOp { target_ip, block_depth: self.blocks.len(), op, first, first_type });
     }
 
     pub(crate) fn handle_logic_phi(&mut self, vm: &mut ScriptVm, output: &mut ShaderOutput) {
@@ -335,7 +338,7 @@ impl IrFnCompiler {
                 i -= 1;
                 match &self.mes[i] {
                     IrMe::FnBody { .. } | IrMe::ForLoop { .. } | IrMe::LoopBody { .. } | IrMe::IfBody { .. } => continue,
-                    IrMe::LogicOp { target_ip, .. } if self.trap.ip.index >= *target_ip => {
+                    IrMe::LogicOp { target_ip, block_depth, .. } if self.trap.ip.index >= *target_ip && self.blocks.len() == *block_depth => {
                         ready = Some(i);
                         break;
                     }
@@ -348,6 +351,18 @@ impl IrFnCompiler {
             if let IrMe::LogicOp { op, first, first_type, .. } = self.mes.remove(index) {
                 let (second_type, second) = self.pop_resolved(vm, output);
                 let ty = type_table_logic(&first_type, &second_type, self.trap.pass(), &vm.bx.code.builtins.pod);
+                let mut rhs = self.blocks.pop().unwrap_or_default();
+                if !rhs.is_empty() && first != NO_EXPR && self.f.ty_of(first) == TY_BOOL {
+                    let local = self.f.local(id!(_mp_logic), 0, TY_BOOL, true, LocalKind::Temp);
+                    self.emit(Stmt::Local(local, first));
+                    let result = self.expr(ExprKind::Local(local), TY_BOOL);
+                    rhs.push(Stmt::Assign(result, second));
+                    let (yes, no) = if op == BinOp::LogicAnd { (rhs, Vec::new()) } else { (Vec::new(), rhs) };
+                    self.emit(Stmt::If(result, yes, no));
+                    self.push(ty, result);
+                    continue;
+                }
+                for stmt in rhs { self.emit(stmt); }
                 let e = self.expr(ExprKind::Binary(op, first, second), TY_BOOL);
                 self.push(ty, e);
             }

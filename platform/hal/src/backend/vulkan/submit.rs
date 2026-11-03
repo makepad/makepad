@@ -22,6 +22,7 @@ pub(super) enum Event {
     /// `gpu_span`: the frame's first and last timestamps in seconds of the device's clock (the
     /// frame timer orders a frame's passes by it).
     Frame { target: Id, kind: u32, frame: u64, window: bool, gpu_ns: u64, gpu_span: [f64; 2] },
+    DispatchTime { name: String, gpu_ns: u64 },
     Readback { req: u32, status: u32, rect: [u32; 4], pixels: Vec<u8> },
     Pick { req: u32, ids: Vec<u32> },
     Shared { id: Id, handle: u64 },
@@ -194,6 +195,8 @@ pub(super) struct Batch {
     pub prof: Option<super::prof::BatchProf>,
     /// The recorded frame this batch presents (its display time goes to the profiler).
     pub prof_key: Option<crate::gpu_prof::FrameKey>,
+    pub dispatch_query: u32,
+    pub dispatch_times: Vec<(Token, String, u32)>,
     pub images: Vec<Arc<Image>>,
     pub buffers: Vec<Arc<Buffer>>,
     pub pipelines: Vec<Arc<Pipeline>>,
@@ -292,7 +295,7 @@ impl Batch {
         let spare = lock(&spares.slots).pop();
         if spare.is_none() { crate::profile::count("vk batch slot made"); }
         let mut b = Self { dev, spares: spares.clone(), reusable: false, pool: vk::CommandPool::null(), cb: vk::CommandBuffer::null(), fence: vk::Fence::null(),
-            query: (vk::QueryPool::null(), 0), idle_query: (vk::QueryPool::null(), 0), prof: None, prof_key: None,
+            query: (vk::QueryPool::null(), 0), idle_query: (vk::QueryPool::null(), 0), prof: None, prof_key: None, dispatch_query: 2, dispatch_times: Vec::new(),
             images: Vec::new(), buffers: Vec::new(), pipelines: Vec::new(), compute_pipelines: Vec::new(), compute_descriptors: Vec::new(), passes: Vec::new(), framebuffers: Vec::new(),
             descriptors: FastMap::default(), tickets: Vec::new(), scanout: None, present: None, tap: None, arena: None, arenas: Vec::new(), reserve, allocs: 0, draw_counts: FastMap::default(),
             #[cfg(target_os = "android")] native_frame: None,
@@ -726,6 +729,13 @@ impl Batch {
         // calls of this worker, whose ICD exit handlers run concurrently with exit().
         let mut out: Vec<(Token, Event)> = Vec::new();
         let mut push = |token: Token, event: Event| out.push((token, event));
+        for (token, name, query) in self.dispatch_times.drain(..) {
+            let mut span = [0u64; 2];
+            if timed && unsafe { self.dev.raw.get_query_pool_results(self.query.0, query, &mut span, vk::QueryResultFlags::TYPE_64) }.is_ok() {
+                let gpu_ns = ((span[1].wrapping_sub(span[0]) & mask) as f64 * period) as u64;
+                push(token, Event::DispatchTime { name, gpu_ns });
+            }
+        }
         for ticket in self.tickets.drain(..) {
             match ticket {
                 #[cfg(target_os = "linux")]

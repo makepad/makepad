@@ -7,8 +7,8 @@
 //! `<work>/target/*` + legacy `~/rc/pool/*/target`;
 //! native trees `<work>/native/<lane>` and their `<work>/native-target/<lane>` are one
 //! reclaimable item per lane, ordered by last lease use, never reclaimed while held.
-//! Dev caches `<work>/dev/target` and `<work>/dev/run-home/*` are lease-owned and reclaimable
-//! when idle. Dev git stores, overlays, committed tree and JIT binaries have their own owners.
+//! Dev caches `<work>/dev/target`, `<work>/dev/run-home/*` and the lanes' own JIT builds
+//! `<work>/dev/lane-jit/*` are lease-owned and reclaimable when idle. Dev git stores, overlays, committed tree and JIT binaries have their own owners.
 //! jit-cache `<run home>/target/*` (the newest is current) + `cache` + `flightrec`; weights
 //! `~/.makepad/weights`; desk-link `~/.makepad/wm/desk-link`; screencaps
 //! `~/makepad/local/screencap`; logs `~/.makepad/{devhub,wm}/*.log` and their rotations
@@ -221,6 +221,7 @@ pub fn list(r: &Roots, live: &Live) -> Vec<Item> {
     }
     let dev = r.work.join("dev");
     add(Cat::Targets, dev.join("target"), Some(1), false, "dev Cargo target");
+    for p in children(&dev.join("lane-jit")) { add(Cat::Targets, p, Some(1), false, "a lane's own JIT build tree and target"); }
     for p in children(&dev.join("run-home")) {
         if p.file_name().is_some_and(|n| n == "target") {
             for p in children(&p) { add(Cat::JitCache, p, Some(2), false, "dev JIT cache"); }
@@ -458,7 +459,7 @@ impl Guard {
                 continue;
             }
             let dev = self.roots.work.join("dev");
-            let _cache = if i.path.starts_with(dev.join("target")) || i.path.starts_with(dev.join("run-home")) {
+            let _cache = if i.path.starts_with(dev.join("target")) || i.path.starts_with(dev.join("run-home")) || i.path.starts_with(dev.join("lane-jit")) {
                 let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(dev.join("cache.lock"));
                 match lock {
                     Ok(f) if f.try_lock().is_ok() => Some(f),

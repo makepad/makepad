@@ -917,12 +917,18 @@ impl Metal {
         // The batch's command buffer, or a new one when this frame must be timed alone (no
         // counter sampling), the buffer's samples are full, or it has been encoding for a while.
         let clock = self.dev.pass_clock();
-        let wanted = passes.len();
+        let wanted = view.passes[passes.clone()].iter().map(|p| {
+            if p.kind == crate::types::pass_kind::COMPUTE { crate::compute::records::<Dispatch>(view.arena, p.dispatches).map_or(0, |d| d.len()) }
+            else { 1 }
+        }).sum();
         let full = self.batch.as_ref().and_then(|b| b.samples.as_ref()).is_some_and(|x| x.full() || x.reserve_room() < wanted);
         let slow = self.batch.as_ref().is_some_and(|b| b.opened.elapsed() >= ENCODE_SLICE);
         if clock.is_none() || full || slow {
             self.commit_batch();
         }
+        // nextDrawable may block. Earlier independent compute and readback
+        // blits must already be committed before a window frame acquires it.
+        if kind & !target::FLAGS == target::WINDOW { self.commit_batch(); }
         let (cb, seq) = self.ensure_batch();
         if let Some(clock) = &clock {
             let batch = self.batch.as_mut().expect("batch");
@@ -999,7 +1005,7 @@ impl Metal {
                 let pending = self.pending_draws;
                 match self.encode_compute(s, pass, view, cb, seq) {
                     Ok(index) => {
-                        if let Some(index) = index { indices.push(index); }
+                        indices.extend(index);
                         s.stats.passes += 1;
                         if let Some(b) = self.batch.as_mut() { b.passes.push((s.string(pass.name).unwrap_or("compute").to_string(), Vec::new())); }
                     }

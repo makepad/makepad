@@ -155,7 +155,7 @@ const KIND_EXP_NAMES: u32 = 17;
 /// the program's item graph (cache/deps.rs Deps::encode), one per program (its root crate's code
 /// store, under a key of the program's view: replaced when the program changes)
 const KIND_DEPS: u32 = 18;
-/// a program's last load order (cache.rs load_order): its crates (name, root), in order, keyed by
+/// a program's last load order (cache.rs load_order): its crates (name, root, test), keyed by
 /// the graph's crate set (GraphRecipe::set)
 const KIND_FRONT_ORDER: u32 = 19;
 const KIND_CONST: u32 = 9;
@@ -216,8 +216,10 @@ const LEDGER_KEY: u128 = 0;
 // N01 types and closure arguments with baseline tiers and closure fingerprints; 26: a writable block
 // symbol names which block of its entry it is (its ordinal), so two relocations to different
 // offsets of one block link to one block. 29: image symbol and closure-parent key spans (image.rs
-// skip_*) follow the encoding again; images written before cut keys short.
-const ENTRY_VERSION: u32 = 29;
+// skip_*) follow the encoding again; images written before cut keys short. 30: a code entry ended
+// with the trait-object types its code calls through; 31: it no longer does (jit.rs realtime reach
+// follows the trait objects its roots are passed, not every one its code calls through).
+const ENTRY_VERSION: u32 = 31;
 /// the level of a code entry's code (its tier byte)
 const TIER_O1: u8 = 0;
 const TIER_O3: u8 = 1;
@@ -255,6 +257,9 @@ pub fn mode_from_env(options: &crate::options::Options) -> Option<Mode> {
         _ => Some(Mode::On),
     }
 }
+
+/// Missed lookups after which a start that links little is judged a cold one (cold_linked_start).
+const LINKED_START_MISSES: u64 = 512;
 
 /// This process's warm-cache outcomes, readable without the unit (`makepad inspect cache`, flight
 /// recordings' `jit.cache` event): code lookups by outcome, the startup image, the stores opened.
@@ -868,6 +873,7 @@ impl Cache {
             h.str(prog.syms.str(prog.crates[c].name));
             let root_file = prog.mods.get(prog.crates[c].root_mod as usize).map(|m| m.file);
             h.str(root_file.and_then(|f| prog.file_paths.get(f as usize)).map_or("", |p| p.as_str()));
+            h.u8(prog.crates[c].cfg.holds("test") as u8);
             let id = h.finish128();
             crate_ident.push(id);
             crate_by_ident.insert(id, c as u32);
@@ -2052,34 +2058,59 @@ impl Cache {
         }
     }
 
-    /// The key encodings of the slots real-time threads of the program rooted at crate `root`
-    /// reached in earlier runs (jit.rs realtime; resolve them with slot_for_bytes_unit): compiled
-    /// ahead when the program marks its real-time code.
-    pub fn rt_set_keys(&self, u: &Unit, root: u32) -> Vec<Vec<u8>> {
-        let Ok(b) = std::fs::read(self.rt_set_path(u, root)) else { return Vec::new() };
+    /// What real-time threads of the program rooted at crate `root` reached in earlier runs (jit.rs
+    /// realtime), compiled ahead when the program marks its real-time code: the key encodings of
+    /// the slots (resolve them with slot_for_bytes_unit) and the trait-object types whose vtables
+    /// it followed (a type that no longer decodes is left out).
+    pub fn rt_set_load(&mut self, u: &Unit, root: u32) -> (Vec<Vec<u8>>, Vec<TyId>) {
+        let Ok(b) = std::fs::read(self.rt_set_path(u, root)) else { return Default::default() };
         let mut d = D { b: &b, p: 0 };
-        let mut out = Vec::new();
-        while let Some(k) = d.bytes() {
-            out.push(k.to_vec());
+        let (mut keys, mut dyns) = (Vec::new(), Vec::new());
+        if d.u32() != Some(ENTRY_VERSION) {
+            return (keys, dyns);
         }
-        out
+        for _ in 0..d.u32().unwrap_or(0) {
+            let Some(k) = d.bytes() else { break };
+            keys.push(k.to_vec());
+        }
+        for _ in 0..d.u32().unwrap_or(0) {
+            let Some(t) = d.bytes() else { break };
+            dyns.extend(self.dec_ty(u, &mut D { b: t, p: 0 }, 0));
+        }
+        (keys, dyns)
     }
 
-    /// Writes the real-time set (see rt_set_keys).
-    pub fn rt_set_store(&mut self, u: &Unit, root: u32, ids: &[u32]) {
+    /// Writes the real-time set (see rt_set_load): slots `ids`, trait-object types `dyns`.
+    pub fn rt_set_store(&mut self, u: &Unit, root: u32, ids: &[u32], dyns: &[TyId]) {
         if self.mode == Mode::ReadOnly {
             return;
         }
-        let mut e = E::default();
+        let mut keys = E::default();
         let mut n = 0;
         for &id in ids {
             if let Some(b) = self.slot_bytes(u, id) {
-                e.bytes(&b);
+                keys.bytes(&b);
                 n += 1;
             }
         }
+        let mut types = E::default();
+        let mut nd = 0;
+        let mut crates = Vec::new();
+        for &t in dyns {
+            let mut one = E::default();
+            if self.enc_ty(u, t, &mut one, &mut crates, 0).is_some() {
+                types.bytes(&one.0);
+                nd += 1;
+            }
+        }
+        let mut e = E::default();
+        e.u32(ENTRY_VERSION);
+        e.u32(n);
+        e.0.extend_from_slice(&keys.0);
+        e.u32(nd);
+        e.0.extend_from_slice(&types.0);
         if crate::jit::rt_trace() {
-            eprintln!("makepad-run rt: recorded {} of {} slots", n, ids.len());
+            eprintln!("makepad-run rt: recorded {} of {} slots, {} of {} trait-object types", n, ids.len(), nd, dyns.len());
         }
         let path = self.rt_set_path(u, root);
         let tmp = path.with_extension("new");
@@ -2090,7 +2121,7 @@ impl Cache {
 
     fn rt_set_path(&self, u: &Unit, root: u32) -> PathBuf {
         let name = u.prog.crates.get(root as usize).map_or("program", |c| u.prog.syms.str(c.name));
-        self.dir.join(format!("rt-{}.keys", name))
+        self.dir.join(format!("rt-{}.set", name))
     }
 
     /// memory report (MAKEPAD_RUN_MEM_REPORT): the recorder's and linker's tables (capacity based)
@@ -2661,7 +2692,8 @@ impl Cache {
     /// A whole-crate check's clean verdict for crate `c`: `mode` 0, `makepad run`'s type check of
     /// its every body (run.rs up front for the app's crates, typeck_bg.rs after the first present
     /// for the others); 1 and 2, `makepad test`'s up-front check of a test subject (check.rs
-    /// subjects_mode: a plain program, a libtest harness; run.rs check_test_subjects). The key:
+    /// subjects_mode: a plain program, a libtest harness; run.rs check_test_subjects). The test
+    /// dependency check keys by its dependencies' interfaces instead (`dep_check_key`). The key:
     /// the Relax build and options (cfg), the crate's fingerprint, which covers its loaded files
     /// and its dependencies' fingerprints, as the code keys rest on, and `skipped`, the text of
     /// its files the boot's selection did not load (check.rs skipped_text_hash): every file of
@@ -2675,6 +2707,33 @@ impl Cache {
         h.u128(self.cfg);
         h.u128(fp);
         h.u128(skipped);
+        let k = h.finish128();
+        self.key_crate.insert(k, c);
+        Some(k)
+    }
+
+    /// The test dependency check's clean verdict for crate `c` (every body type- and
+    /// borrow-checked, errors only: check.rs start_test_deps). What its bodies' verdicts rest on:
+    /// the Relax build and options (cfg), the crate's own text (`own`: as rustc is invoked on it
+    /// and the files the boot loaded, check.rs own_text_hashes; `skipped`: the files the boot
+    /// skipped) and, of each crate of its dependency `closure` (crate, its skipped files' text),
+    /// the interface (items.rs: its items outside the fn bodies that are holes -- a const fn's,
+    /// an `impl Trait` return's or an async fn's body is interface, a proc-macro crate's whole
+    /// text is) and the text of the files the boot skipped (they have no digest without a parse).
+    /// So a body edit in a dependency checks that dependency again, not every crate above it
+    /// (M51). Not covered: an include_str!/include_bytes! input of a dependency read by a const
+    /// that a type names. A borrowck-kind entry (record_borrowck). None: an interface unknown.
+    pub fn dep_check_key(&mut self, c: u32, own: u128, skipped: u128, closure: impl Iterator<Item = (u32, u128)>) -> Option<u128> {
+        let mut h = Sip128::new();
+        h.str("test-deps-check-crate");
+        h.u32(CHECK_BODY_VERSION);
+        h.u128(self.cfg);
+        h.u128(own);
+        h.u128(skipped);
+        for (d, text) in closure {
+            h.u128(*self.iface.get(d as usize)?);
+            h.u128(text);
+        }
         let k = h.finish128();
         self.key_crate.insert(k, c);
         Some(k)
@@ -3397,6 +3456,18 @@ impl Cache {
         self.has_startup_manifest() && self.manifest_missing == 0
     }
 
+    /// A start that links cached code checks nothing ahead (slot_ahead's rule: its few misses
+    /// check their own bodies). Whether it does is known from its links, not at the open: once
+    /// LINKED_START_MISSES lookups missed and more missed than slots linked (from the startup image
+    /// or a lookup; an edit reached most of the program, as a field of a type almost every fn
+    /// touches does), it is a cold start, and the ahead checks go back on.
+    fn cold_linked_start(&self, u: &Unit) {
+        let (linked, missed) = (self.stats.prelinked + self.stats.hits, self.stats.misses);
+        if missed >= LINKED_START_MISSES && missed > linked && u.front.linked_start.swap(false, std::sync::atomic::Ordering::Relaxed) && self.verbose {
+            eprintln!("makepad-run cache: the start links little ({linked} slots linked, {missed} lookups missed): ahead checks on");
+        }
+    }
+
     // ------------------------------------------------------------ writing
 
     /// Writes the entries recorded this run as one new pack (with this run's late macro inputs),
@@ -4036,7 +4107,7 @@ pub fn app_store_files(dir: &std::path::Path, krate: &str) -> Vec<PathBuf> {
             if kind != KIND_FRONT_GRAPH { continue; }
             let Some((_, bytes)) = st.get_at(i, key) else { continue };
             let Some(graph) = crate::crate_image::decode::<crate::crate_image::GraphImage>(bytes) else { continue };
-            if graph.crates.iter().any(|((name, _), _)| name == krate) {
+            if graph.crates.iter().any(|((name, _, _), _)| name == krate) {
                 bases.push(g.clone());
                 bases.push(collected::path(dir, graph.identity));
             }
@@ -4782,7 +4853,7 @@ fn front_order_path(dir: &std::path::Path, set: u128) -> PathBuf {
     dir.join(format!("front_order-{:016x}.rcs", front_order_key(set) as u64))
 }
 /// The load order the last collected image of a program with these crates was recorded in.
-fn read_front_order(dir: &std::path::Path, set: u128) -> Option<Vec<(String, String)>> {
+fn read_front_order(dir: &std::path::Path, set: u128) -> Option<Vec<crate::preload::CrateKey>> {
     let store = Store::open(&front_order_path(dir, set))?;
     let (kind, bytes) = store.get(front_order_key(set))?;
     if kind != KIND_FRONT_ORDER { return None; }
@@ -4840,7 +4911,7 @@ impl FrontGraphWrite {
     fn capture(prog: &crate::program::Program, dir: &std::path::Path, fps: &[Option<u128>]) -> Option<Self> {
         let recipe = prog.front_graph.as_ref()?;
         if recipe.crates.len() != prog.crates.len() || recipe.crates.iter().zip(&prog.crates)
-            .any(|(key, c)| prog.syms.str(c.name) != key.0 || c.root_path() != key.1) { return None; }
+            .any(|(key, c)| crate::preload::crate_key(prog.syms.str(c.name), c.root_path(), &c.cfg) != *key) { return None; }
         Some(Self { dir: dir.to_owned(), options: prog.session.options.clone(), recipe: recipe.clone(),
             fps: fps.to_vec(), demand: prog.demand_plan.clone(), profile: prog.session.runtime.profile })
     }
@@ -5042,7 +5113,7 @@ pub struct FrontImages {
     /// inputs whose contents this handle read and hashed to validate (an unchanged warm start: 0)
     content_hashes: std::sync::atomic::AtomicU64,
     probes: relax_session::sync::Mutex<Option<HashMap<String, bool>>>,
-    stores: relax_session::sync::Mutex<HashMap<(String, String), PathBuf>>,
+    stores: relax_session::sync::Mutex<HashMap<crate::preload::CrateKey, PathBuf>>,
     certificate: relax_session::sync::Mutex<Option<std::sync::Arc<crate::crate_image::GraphImage>>>,
     /// the begun load's graph as read from its store (begin_load), certified or not: the restore and
     /// the demand plan's lookups read it once
@@ -5404,7 +5475,7 @@ impl FrontImages {
     fn selected_image(&self, c: &crate::preload::PreCrate, deps: &[u128], selection: Option<(u128, &[String])>) -> Option<crate::crate_image::CrateImage> {
         let deps = &self.full_deps(c, deps)?;
         let options = &c.cfg.session.options;
-        let certified = self.stores.lock().unwrap().get(&(c.name.clone(), c.root.clone())).cloned();
+        let certified = self.stores.lock().unwrap().get(&c.key()).cloned();
         if let Some(path) = certified {
             if let Some(image) = self.candidate(options, c, deps, &path, &std::cell::Cell::new(""), selection) { return Some(image); }
         }
@@ -5570,7 +5641,7 @@ impl crate::crate_image::CrateImages for FrontImages {
         let Some(saved) = self.front_graph(identity) else { return None; };
         if saved.identity != identity || saved.crates.len() != crates.len() { return None; }
         // this load's crate k is the stored graph's crate from[k]
-        let at: HashMap<&(String, String), usize> = saved.crates.iter().enumerate().map(|(j, (key, _))| (key, j)).collect();
+        let at: HashMap<_, usize> = saved.crates.iter().enumerate().map(|(j, (key, _))| (key, j)).collect();
         let from: Vec<usize> = recipe.crates.iter().map(|key| at.get(key).copied()).collect::<Option<_>>()?;
         if !reordered && from.iter().enumerate().any(|(k, &j)| k != j) { return None; }
         let Some(image) = saved.demand_image.clone().filter(|image| image.graph == graph && image.parts.len() == crates.len()) else { return None; };
@@ -8175,6 +8246,7 @@ impl Linker {
                 warm_count::add(warm_count::NO_ENTRY, 1);
             }
             trace_lookup(u, id, "miss");
+            self.cache().cold_linked_start(u);
             return None;
         }
         self.cache().stats.link_ns += crate::jit::wall_ns() - t0;
@@ -8601,7 +8673,7 @@ mod prune_tests {
             p
         };
         let graph = |identity: u128, app: &str| crate::crate_image::encode(&crate::crate_image::GraphImage {
-            identity, crates: vec![(("core".into(), "/s/core/lib.rs".into()), 1), ((app.into(), format!("/w/{app}/main.rs")), 2)], inputs: Vec::new(), stamps: Vec::new(), probes: Vec::new(), demand_image: None,
+            identity, crates: vec![(("core".into(), "/s/core/lib.rs".into(), false), 1), ((app.into(), format!("/w/{app}/main.rs"), false), 2)], inputs: Vec::new(), stamps: Vec::new(), probes: Vec::new(), demand_image: None,
         });
         let own = put("calc_app-0000000000000001.rcs", KIND_DATA, vec![1]);
         let own_gen = crate::store::gen_path(&own, 1);

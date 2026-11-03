@@ -2,10 +2,10 @@
 
 [app.linux]
 capture = ""
-date = "2026-11-02"
-digest = "f32dcab304ff6b8d5e0e7522eb7c6358b2e31c6ab14e30d996b0a0631d137cc6"
-main = "e9402925c83c1a3331b42758ffc16e0c0983d98a"
-work = "2832b1fa2882006b5c2c5a22eabc04ba83662d39"
+date = "2026-11-03"
+digest = "d88d9cc12a80edf16dfdac994a97f343937df23ef4b02c3840becd0fb63b3346"
+main = "19f51e11f550a7350a096a33669c713308d2d8a5"
+work = "699beed5cba1931f3164b4dc8fdc57e884bc09f0"
 
 [app.macos]
 capture = ""
@@ -16,10 +16,10 @@ work = "628527fcd4f9b89ec0203bce6b2266b7d8e8fe55"
 
 [app.windows]
 capture = ""
-date = "2026-11-02"
-digest = "d81b7959ea1484a4fa4546e88e89ce08ba10ff27a05a036a1e0c0dd2419eafe3"
-main = "f0744b8fc7cd75133572c6ba67030c9447015d38"
-work = "d0fd6b6d9b762e113168073cc606fb13c1c8be49"
+date = "2026-11-03"
+digest = "6c79e7ec2689c60226b23eec5ca758e48002caf927d8057271455213a8fdc033"
+main = "3514cd6f8a9c6c0ce8c7f0fb2289cd47dbd720e2"
+work = "056c349d41c58b1eb1d4e8bfc7080a940dc0ed18"
 
 [tests.linux]
 date = "2026-11-02"

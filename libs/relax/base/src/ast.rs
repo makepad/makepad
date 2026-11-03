@@ -1405,6 +1405,9 @@ const _: () = assert!(std::mem::size_of::<ItemKind>() == 16);
 /// Number of id ranges a tree has (Ast::base / Ast::ends).
 pub const ARENAS: usize = 49;
 
+/// The features whose syntax the parser records in `Ast::gated_syntax`.
+pub const GATED_SYNTAX: &[&str] = &["default_field_values", "async_trait_bounds", "stmt_expr_attributes", "closure_track_caller", "coroutines"];
+
 /// Ast::base (an array of more than 32 entries has no Default).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Bases(pub [u32; ARENAS]);
@@ -1504,7 +1507,8 @@ pub struct Ast {
     /// statement wrapper, this keeps the attributes for the lint passes (expression -> attributes)
     pub stmt_attrs: crate::arena::Arena<AttrsStmt>,
     /// syntax the parser met that a feature gates, wherever it is written (cfg'd-out code and
-    /// macro arguments included; rustc ParseSess::gated_spans): (feature, position)
+    /// macro arguments included; rustc ParseSess::gated_spans): (feature, position). The
+    /// feature is one of `GATED_SYNTAX` (a front image stores its index).
     pub gated_syntax: Vec<(&'static str, u32)>,
     /// first id of each arena (in `ends` order): 0 for a file's tree; a file's lazily parsed
     /// fn bodies (`part`) continue its ids

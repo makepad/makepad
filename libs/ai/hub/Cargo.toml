@@ -11,9 +11,12 @@ license = "MIT OR Apache-2.0"
 # they use; the standalone service (apps/ai-hub) lists every backend in its
 # own default feature set.
 default = ["localai", "stt", "kernel"]
-# The `kernel` job domain: Splash compute kernels from fleet clients run on
-# this node's CPUs (src/kernel_compute.rs). CPU only, no model weights.
-kernel = ["dep:makepad-script-compute", "dep:makepad-script-compute-sched"]
+# The `kernel` domain's node side: Splash compute programs from fleet clients run on this
+# node's CPUs (src/program_serve.rs). CPU only, no model weights.
+kernel = ["program", "dep:makepad-script-compute-sched"]
+# Compute program sessions on a node (src/kernel_client.rs, src/program_client.rs): the
+# client side. The node side (src/program_serve.rs) comes with `kernel`.
+program = ["dep:makepad-compute-program"]
 # The local model runtime an app's chat runs on (the local chat session,
 # prompt expansion, vision, OCR): `llm`, under the name every AI crate
 # and app uses for it (makepad-ai-services / makepad-app-aichat `localai`).
@@ -114,10 +117,8 @@ makepad-zune-png = { path = "../../zune/zune-png" }
 # Vision-domain request images arrive as PNG or JPEG.
 makepad-zune-jpeg = { path = "../../zune/zune-jpeg" }
 makepad-zip-file = { path = "../../zip_file" }
-# Kernel tiles travel delta-deflated (src/kernel_wire.rs).
-makepad-fast-inflate = { path = "../../fast_inflate" }
-makepad-script-compute = { path = "../../../platform/script/compute", optional = true }
 makepad-script-compute-sched = { path = "../../../platform/script/compute_sched", optional = true }
+makepad-compute-program = { path = "../../compute_program", optional = true }
 # Music reference clips arrive as any audio file the in-repo decoders read
 # (MP3 / FLAC / Ogg Vorbis here, WAV in crate::wav). No deps, no unsafe.
 makepad-audio-decode = { path = "../../audio_decode" }
@@ -226,16 +227,15 @@ name = "hub-install"
 path = "src/bin/hub_install.rs"
 required-features = ["local"]
 
-# The kernel domain's render gate and perf table: one fractal frame on this
-# machine's threads, on each kernel node alone and on all of them together,
-# every tile bit-compared with the local render.
+# Compute programs on nodes: steering latency per class, with the cores busy or not, every
+# tile bit-compared with the same program in-process.
 [[bin]]
-name = "kernel-bench"
-path = "src/bin/kernel_bench.rs"
+name = "program-bench"
+path = "src/bin/program_bench.rs"
 required-features = ["kernel"]
 
 [[test]]
-name = "kernel_compute"
+name = "program_remote"
 required-features = ["kernel"]
 
 [target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]

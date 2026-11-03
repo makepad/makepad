@@ -110,3 +110,23 @@ fn thread_pools_fold_into_one_row() {
     assert!(r.contains("| T2..T5 | makepad-pool* (4 threads) | program | 0 running | 0.04 |"), "{}", r);
     assert!(r.starts_with("6 threads: 5 of the program, 1 of makepad run."), "{}", r);
 }
+
+#[test]
+fn the_owner_answer_says_mains_waits_then_tables_the_holds() {
+    let r = render(
+        "owner since=2",
+        &lines(r#"{"measured":"owner thread","at_ms":1,"source":"x","partial":[]}
+{"seq":3,"since":2,"s":1.5,"serving":"idle","queued":{"total":0,"foreground":0,"main":0},"main_requests":{"n":120,"wait_ms":40.5,"queue_ms":12.1,"wake_ms":1.2,"by_wait":{"<20us":[10,0.1],"<200us":[90,5],"<2ms":[18,20],">=2ms":[2,15.4]}},"main_queued_behind":{"job":[0,0],"publish":[30,2.5],"program":[12,9.1],"idle":[60,0.4]},"pure_census":{}}
+{"holds":"per request site","sites":1,"shown":1}
+{"site":"run.rs:2963","class":"program","n":40,"ms":12.5,"over_1ms":0,"hist_ms":{"<0.1":10,"0.1-0.5":30},"waiting_ms":2.5,"main_behind":[3,0.9]}
+{"waits":"the owner's waits inside requests","sites":1,"shown":1}
+{"wait":"jit.rs:10579","in":"jit.rs:7815","n":4,"ms":8.25,"serving_ms":1.5}
+{"next":"owner since=3"}"#),
+    );
+    assert!(r.contains("Snapshot 3: the 1.5 s since snapshot 2."), "{r}");
+    assert!(r.contains("main's program requests: 120 waited 40.5 ms") && r.contains(">=2ms 2x 15.4 ms"), "{r}");
+    assert!(r.contains("behind: job 0x 0 ms, publish 30x 2.5 ms, program 12x 9.1 ms, idle 60x 0.4 ms."), "{r}");
+    assert!(r.contains("| run.rs:2963 | program | 40 | 12.5 | - | <0.1: 10, 0.1-0.5: 30 | 2.5 | 3x 0.9 ms |"), "{r}");
+    assert!(r.contains("| jit.rs:10579 | jit.rs:7815 | 4 | 8.25 | 1.5 | - |"), "{r}");
+    assert!(r.contains("owner since=3") && !r.contains("pure_census"), "{r}");
+}

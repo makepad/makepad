@@ -1,1 +1,1 @@
-pub use makepad_shared_bytes::{MappedBytes, SharedBytes, SharedBytesStats};
+pub use makepad_shared_bytes::{MappedBytes, HostBuf, HostBufStats, Scalar};

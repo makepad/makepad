@@ -257,3 +257,5 @@ mod type_check_tests;
 mod root_cx_tests;
 #[cfg(test)]
 mod mir_source_tests;
+#[cfg(test)]
+mod lint_scope_tests;

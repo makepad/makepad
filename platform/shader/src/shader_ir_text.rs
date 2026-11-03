@@ -1515,6 +1515,12 @@ impl<'a> TextCx<'a> {
     // ---- statements ----
 
     pub fn stmts(&mut self, f: &IrFunction, stmts: &[Stmt], indent: usize, out: &mut String) {
+        if self.hlsl() && crate::shader_ir_short_circuit::needed(f, stmts) {
+            let mut lowered = f.clone();
+            let stmts = crate::shader_ir_short_circuit::lower(&mut lowered, stmts);
+            self.stmts(&lowered, &stmts, indent, out);
+            return;
+        }
         for s in stmts {
             self.stmt(f, s, indent, out);
         }
@@ -1658,13 +1664,16 @@ impl<'a> TextCx<'a> {
                 }
             }
             Stmt::If(c, a, b) => {
+                // FXC may flatten ordinary conditionals, evaluating guarded loads.
+                let branch = if self.hlsl() && matches!(f.exprs[*c as usize].kind,
+                    ExprKind::Local(l) if f.locals[l as usize].kind == LocalKind::Temp) { "[branch] " } else { "" };
                 let c = self.expr(f, *c);
                 Self::pad(out, indent);
                 if b.is_empty() && a.len() == 1 && matches!(a[0], Stmt::Break) {
                     writeln!(out, "if ({}) {{ break; }}", c).ok();
                     return;
                 }
-                writeln!(out, "if ({}) {{", c).ok();
+                writeln!(out, "{}if ({}) {{", branch, c).ok();
                 self.stmts(f, a, indent + 1, out);
                 if !b.is_empty() {
                     Self::pad(out, indent);
@@ -1894,15 +1903,17 @@ impl<'a> TextCx<'a> {
             return Some(if metal { "threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup)" }
                 else { "AllMemoryBarrierWithGroupSync()" }.into());
         }
-        if op == Builtin::AtomicAdd {
+        if matches!(op, Builtin::AtomicAdd | Builtin::AtomicMin | Builtin::AtomicMax) {
             let value = self.expr(f, args[1]);
             let (g, off) = self.raw_buffer_place(f, args[0]).expect("atomic buffer place");
+            let name = match op { Builtin::AtomicMin => "min", Builtin::AtomicMax => "max", _ => "add" };
             if metal {
                 let scalar = if ty == TY_I32 { "int" } else { "uint" };
                 let buffer = self.global_name(g);
-                return Some(format!("atomic_fetch_add_explicit(reinterpret_cast<device atomic_{scalar}*>({buffer}) + (({off}) / 4u), {value}, memory_order_relaxed)"));
+                return Some(format!("atomic_fetch_{name}_explicit(reinterpret_cast<device atomic_{scalar}*>({buffer}) + (({off}) / 4u), {value}, memory_order_relaxed)"));
             }
-            return Some(format!("_mp_atomic_{}({off}, {value})", self.plain_global_name(g)));
+            let suffix = if name == "add" { String::new() } else { format!("{name}_") };
+            return Some(format!("_mp_atomic_{suffix}{}({off}, {value})", self.plain_global_name(g)));
         }
         let name = match op {
             Builtin::SubgroupAdd => "simd_sum", Builtin::SubgroupMin => "simd_min",

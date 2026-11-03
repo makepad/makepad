@@ -21,6 +21,8 @@ const S_RULES_EXP: u32 = 5;
 const S_BODY_ORIGIN: u32 = 6;
 const S_TOKEN_ORIGINS: u32 = 7;
 const S_SOURCES: u32 = 8;
+/// `Ast::gated_syntax` as (index in `GATED_SYNTAX`, position) pairs, after the tree's arrays
+const S_GATED: u32 = 9;
 /// tree arrays: 100 + index in AST_ARRAYS order
 const S_AST: u32 = 100;
 
@@ -76,6 +78,11 @@ pub fn image(pf: &ParsedFile) -> Writer<'_> {
     }
     ast_arrays!(put);
     let _ = k;
+    let gated: Vec<u32> = a.gated_syntax.iter().flat_map(|&(f, pos)| {
+        let i = crate::ast::GATED_SYNTAX.iter().position(|g| *g == f).expect("a gated syntax feature of GATED_SYNTAX");
+        [i as u32, pos]
+    }).collect();
+    w.add_owned(S_GATED, &gated);
     w
 }
 
@@ -472,7 +479,9 @@ fn restore_inner(meta: &mut crate::crate_image::FileMeta, img: &'static [u8], ce
     let mut k = 0usize;
     macro_rules! get { ($($f:ident: $t:ident),*) => { $(ast.$f=Arena::Mapped(r.slice::<$t>(8+k,S_AST+k as u32)?);k+=1;)* }; }
     ast_arrays!(get);
-    let _ = k;
+    // the gated syntax, which `makepad check` reports (E0658) from the restored tree too
+    let gated = r.slice::<u32>(8 + k, S_GATED)?;
+    ast.gated_syntax = gated.chunks_exact(2).map(|p| Some((*crate::ast::GATED_SYNTAX.get(p[0] as usize)?, p[1]))).collect::<Option<_>>()?;
     let mut sources = None;
     let origins = restore_origins(r.slice(6, S_TOKEN_ORIGINS)?, r.slice(7, S_SOURCES)?, &mut sources, certified)?;
     if meta.token_input {
@@ -503,6 +512,7 @@ fn restore_inner(meta: &mut crate::crate_image::FileMeta, img: &'static [u8], ce
 
 fn verify_ast(a: &crate::ast::Ast, b: &crate::ast::Ast) {
     assert_eq!(a.base, b.base, "front AST base");
+    assert_eq!(a.gated_syntax, b.gated_syntax, "front AST gated syntax");
     macro_rules! cmp { ($($f:ident: $t:ident),*) => { $(assert_eq!(format!("{:?}",&a.$f[..]),format!("{:?}",&b.$f[..]),"front AST {}",stringify!($f));)* }; }
     ast_arrays!(cmp);
 }
@@ -593,6 +603,30 @@ mod tests {
         assert_eq!(loc.source.path(), "/fake/image-import.rs");
         assert_eq!((loc.span.lo, loc.span.hi), (span.lo, span.hi));
         assert_eq!(loc.source.bytes(), source.as_bytes());
+    }
+
+    /// agree.sh's warm rerun: `makepad check` reported E0658 for `pub a: u32 = 7` only cold.
+    /// A file restored from its front image had no gated syntax (the parser's record, not one of
+    /// the tree's arrays), so the warm check found nothing to gate.
+    #[test]
+    fn a_restored_file_keeps_the_gated_syntax_of_its_parse() {
+        let sess = &std::sync::Arc::new(crate::Session::default());
+        let cfg = crate::cfg::CfgSet::host(sess, &[]);
+        let path = "gated.rs";
+        let ctx = std::rc::Rc::new(crate::builtins::FileCtx::new("test", path, "test", &cfg));
+        let table = std::sync::Arc::new(crate::macros::MacroTable::default());
+        let (mut f, used) = crate::parser::parse_owned_ctx(sess,
+            b"pub struct S { pub a: u32 = 7 }\npub fn f() -> u32 { let x = #[allow(unused)] 3; x }\n".to_vec(), None, 2021,
+            Some(crate::macros::MacroScope::new(table)), "test", Some(ctx), false,
+        ).unwrap();
+        let prep = crate::program::prepare_file(&mut f, &cfg);
+        let gates: Vec<&str> = f.ast.gated_syntax.iter().map(|g| g.0).collect();
+        assert_eq!(gates, ["default_field_values", "stmt_expr_attributes"]);
+        let metadata = crate::crate_image::file_meta(path, "test", &f, &used.unwrap(), &prep, false);
+        let mut meta = crate::crate_image::decode(&metadata).unwrap();
+        let restored = restore(&mut meta, image(encode(&f))).unwrap();
+        assert_eq!(restored.ast.gated_syntax, f.ast.gated_syntax);
+        verify_file(&restored, &f);
     }
 
     fn lazy_file(sess: &std::sync::Arc<crate::Session>) -> (ParsedFile, crate::cfg::CfgSet) {

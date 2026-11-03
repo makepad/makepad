@@ -96,7 +96,7 @@ pub fn extract_tupled_inputs_and_output_from_callable(ecx: &EvalCtxt<'_, '_>, ty
             let full = tcx.complete_args(ecx.solver.prog, *def, tcx.tys.list(*args), *rs);
             tcx.instantiate_ty(ecx.solver.prog, *def, &full, tcx.tys.intern(TyKind::FnPtr(tcx.tys.mk_list(&sig.params), sig.ret, sig.header, sig.bound_regions)))
         }
-        TyKind::Closure(file, expr, crate::types::ClosureArgs { parent_args: owner, closure_kind_ty, closure_sig_as_fn_ptr_ty: sig, .. }) if !tcx.is_coroutine(ty) => {
+        TyKind::Closure(_, _, crate::types::ClosureArgs { closure_kind_ty, closure_sig_as_fn_ptr_ty: sig, .. }) if !tcx.is_coroutine(ty) => {
             let kind = ecx.delegate.shallow_resolve(*closure_kind_ty);
             match tcx.tys.to_opt_closure_kind(kind) {
                 Some(kind) if kind > goal_kind => return Err(NoSolution),

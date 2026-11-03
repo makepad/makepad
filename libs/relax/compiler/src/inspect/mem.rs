@@ -253,27 +253,147 @@ fn os_regions(s: &mut Snap) {
     }
 }
 
-/// A macOS VM region tag (mach/vm_statistics.h VM_MEMORY_*) as a category.
-#[cfg(target_vendor = "apple")]
+/// The macOS VM region tags (mach/vm_statistics.h `VM_MEMORY_*`, macOS 26 SDK), each by its
+/// own name, so no large owner hides in one bucket. The numbers are the header's: tags 80/81
+/// once read as GPU and IOSurface here, which are CORPSEINFO and ASL; the GPU's own are
+/// IOACCELERATOR 100 and IOSURFACE 88.
+#[cfg(any(target_vendor = "apple", test))]
+const VM_TAGS: &[(u32, &str)] = &[
+    (0, "untagged (makepad run JIT code/data, burst arena, mapped files)"),
+    (1, "malloc"),
+    (2, "malloc small"),
+    (3, "malloc large"),
+    (4, "malloc huge"),
+    (5, "sbrk"),
+    (6, "realloc"),
+    (7, "malloc tiny"),
+    (8, "malloc large reusable"),
+    (9, "malloc large reused"),
+    (10, "analysis tool"),
+    (11, "malloc nano"),
+    (12, "malloc medium"),
+    (13, "malloc probabilistic guard"),
+    (20, "mach msg"),
+    (21, "IOKit"),
+    (30, "stacks"),
+    (31, "guard"),
+    (32, "shared pmap"),
+    (33, "dylib"),
+    (34, "Objective-C dispatchers"),
+    (35, "unshared pmap"),
+    (36, "libchannel"),
+    (40, "AppKit"),
+    (41, "Foundation"),
+    (42, "CoreGraphics"),
+    (43, "CoreServices"),
+    (44, "Java"),
+    (45, "CoreData"),
+    (46, "CoreData object ids"),
+    (50, "ATS (fonts)"),
+    (51, "layer kit (Core Animation)"),
+    (52, "CGImage"),
+    (53, "tcmalloc"),
+    (54, "CoreGraphics data"),
+    (55, "CoreGraphics shared"),
+    (56, "CoreGraphics framebuffers"),
+    (57, "CoreGraphics backing stores"),
+    (58, "CoreGraphics xalloc"),
+    (60, "dyld"),
+    (61, "dyld malloc"),
+    (62, "SQLite"),
+    (63, "JavaScriptCore"),
+    (64, "JavaScriptCore JIT"),
+    (65, "JavaScriptCore register file"),
+    (66, "GLSL"),
+    (67, "OpenCL"),
+    (68, "CoreImage"),
+    (69, "WebCore purgeable buffers"),
+    (70, "ImageIO"),
+    (71, "CoreProfile"),
+    (72, "assetsd"),
+    (73, "os_alloc_once"),
+    (74, "libdispatch"),
+    (75, "Accelerate"),
+    (76, "CoreUI"),
+    (77, "CoreUI file"),
+    (78, "genealogy"),
+    (79, "RawCamera"),
+    (80, "corpse info"),
+    (81, "ASL"),
+    (82, "Swift runtime"),
+    (83, "Swift metadata"),
+    (84, "DHMM"),
+    (85, "DFR"),
+    (86, "SceneKit"),
+    (87, "Skywalk"),
+    (88, "IOSurface"),
+    (89, "libnetwork"),
+    (90, "audio"),
+    (91, "video bitstream"),
+    (92, "CoreMedia XPC"),
+    (93, "CoreMedia RPC"),
+    (94, "CoreMedia memory pool"),
+    (95, "CoreMedia read cache"),
+    (96, "CoreMedia crabs"),
+    (97, "QuickLook thumbnails"),
+    (98, "accounts"),
+    (99, "sanitizer"),
+    (100, "GPU (IOAccelerator)"),
+    (101, "CoreMedia regwarp"),
+    (102, "EAR decoder"),
+    (103, "CoreUI cached image data"),
+    (104, "ColorSync"),
+    (105, "backtrace info"),
+    (106, "CoreMedia HLS"),
+    (107, "compositor services"),
+    (230, "Rosetta"),
+    (231, "Rosetta thread context"),
+    (232, "Rosetta indirect branch map"),
+    (233, "Rosetta return stack"),
+    (234, "Rosetta executable heap"),
+    (235, "Rosetta user LDT"),
+    (236, "Rosetta arena"),
+    (239, "Rosetta 10"),
+    (240, "application specific 1"),
+    (241, "application specific 2"),
+    (242, "application specific 3"),
+    (243, "application specific 4"),
+    (244, "application specific 5"),
+    (245, "application specific 6"),
+    (246, "application specific 7"),
+    (247, "application specific 8"),
+    (248, "application specific 9"),
+    (249, "application specific 10"),
+    (250, "application specific 11"),
+    (251, "application specific 12"),
+    (252, "application specific 13"),
+    (253, "application specific 14"),
+    (254, "application specific 15"),
+    (255, "application specific 16"),
+];
+
+/// A macOS VM region tag as its category (`VM_TAGS`).
+#[cfg(any(target_vendor = "apple", test))]
 fn tag_name(t: u32) -> &'static str {
-    match t {
-        0 => "untagged (makepad run JIT code/data, burst arena, mapped files)",
-        1 | 2 | 3 | 4 | 6 | 7 | 8 | 9 | 11 | 12 => "malloc",
-        5 => "sbrk",
-        20 => "mach msg",
-        21 => "IOKit",
-        30 => "stacks",
-        31 => "guard",
-        32 => "shared pmap",
-        33 | 60..=62 => "dylibs / dyld",
-        34 => "Objective-C",
-        35..=39 => "Foundation / CoreServices",
-        40..=49 => "CoreGraphics / CoreImage",
-        50..=59 => "CoreAudio / CoreMedia / JS",
-        63..=69 => "image IO / layer kit",
-        80 => "GPU (IOAccelerator)",
-        81 => "IOSurface",
-        _ => "other tagged",
+    VM_TAGS.iter().find(|(tag, _)| *tag == t).map_or("tag not in vm_statistics.h", |(_, name)| name)
+}
+
+#[cfg(test)]
+mod vm_tag_tests {
+    /// The tags a GPU-heavy app shows, pinned to the SDK header's numbers.
+    #[test]
+    fn vm_tags_follow_the_sdk_header() {
+        use super::tag_name;
+        assert_eq!(tag_name(100), "GPU (IOAccelerator)");
+        assert_eq!(tag_name(88), "IOSurface");
+        assert_eq!(tag_name(75), "Accelerate");
+        assert_eq!(tag_name(76), "CoreUI");
+        assert_eq!(tag_name(80), "corpse info");
+        assert_eq!(tag_name(81), "ASL");
+        assert_eq!(tag_name(30), "stacks");
+        assert_eq!(tag_name(7), "malloc tiny");
+        assert_eq!(tag_name(120), "tag not in vm_statistics.h");
+        assert!(super::VM_TAGS.windows(2).all(|w| w[0].0 < w[1].0), "one name per tag, in order");
     }
 }
 
@@ -449,11 +569,11 @@ pub fn cmd_memory(req: &Req, out: &mut Out) {
             d.thread_names.iter().map(|s| json_str(s)).collect::<Vec<_>>().join(",")));
     }
     // chunk states with resident bytes (MB): attached / listed / released / full, then large, then sparse
-    let st = |a: &[usize; 28]| {
+    let st = |a: &[usize; 29]| {
         let mb = |b: usize| format!("{:.1}", b as f64 / 1048576.0);
         let row = |r: usize| format!("{{\"chunks\":{},\"touched_mb\":{},\"live_slots_mb\":{},\"resident_mb\":{}}}", a[r * 4], mb(a[r * 4 + 1]), mb(a[r * 4 + 2]), mb(a[r * 4 + 3]));
-        format!("\"attached\":{},\"listed\":{},\"released\":{},\"full\":{},\"large\":{{\"runs\":{},\"committed_mb\":{},\"resident_mb\":{}}},\"sparse\":{{\"chunks\":{},\"resident_mb\":{}}},\"old\":{{\"chunks\":{},\"live_slots_mb\":{},\"resident_mb\":{}}},\"free_granules\":{{\"attached_mb\":{},\"listed_mb\":{}}},\"attached_use\":{{\"requested_mb\":{},\"remote_pending_mb\":{}}}",
-            row(0), row(1), row(2), row(3), a[16], mb(a[17]), mb(a[18]), a[19], mb(a[20]), a[21], mb(a[22]), mb(a[23]), mb(a[24]), mb(a[25]), mb(a[26]), mb(a[27]))
+        format!("\"attached\":{},\"listed\":{},\"released\":{},\"full\":{},\"large\":{{\"runs\":{},\"committed_mb\":{},\"resident_mb\":{},\"requested_mb\":{}}},\"sparse\":{{\"chunks\":{},\"resident_mb\":{}}},\"old\":{{\"chunks\":{},\"live_slots_mb\":{},\"resident_mb\":{}}},\"free_granules\":{{\"attached_mb\":{},\"listed_mb\":{}}},\"attached_use\":{{\"requested_mb\":{},\"remote_pending_mb\":{}}}",
+            row(0), row(1), row(2), row(3), a[16], mb(a[17]), mb(a[18]), mb(a[28]), a[19], mb(a[20]), a[21], mb(a[22]), mb(a[23]), mb(a[24]), mb(a[25]), mb(a[26]), mb(a[27]))
     };
     for (id, a) in crate::domain::heap_states() {
         out.line(&format!("{{\"arena_states\":\"domain {id:?}\",{}}}", st(&a)));

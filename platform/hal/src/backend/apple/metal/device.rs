@@ -15,6 +15,7 @@ use std::time::Instant;
 /// Metal's threads: they push here and wake the pump; `Metal::step` turns them into events.
 pub(crate) enum Done {
     Frame { sid: u32, target: crate::Id, frame: u64, gpu_ns: u64, present_ns: u64, gpu_span: [f64; 2], failed: bool, partial: bool, window: bool, kind: u32, incarnation: Arc<crate::font::FrameProgress> },
+    DispatchTime { sid: u32, incarnation: Arc<crate::font::FrameProgress>, name: String, gpu_ns: u64 },
     Readback { sid: u32, incarnation: Arc<crate::font::FrameProgress>, req: u32, status: u32, rect: [u32; 4], pixels: Vec<u8> },
     Pick { sid: u32, incarnation: Arc<crate::font::FrameProgress>, req: u32, ids: Vec<u32> },
     PipelineReady { sid: u32, incarnation: Arc<crate::font::FrameProgress>, id: crate::Id },
@@ -26,7 +27,7 @@ pub(crate) enum Done {
 impl Done {
     fn sid(&self) -> u32 {
         match self {
-            Done::Frame { sid, .. } | Done::Readback { sid, .. } | Done::Pick { sid, .. } | Done::PipelineReady { sid, .. }
+            Done::Frame { sid, .. } | Done::DispatchTime { sid, .. } | Done::Readback { sid, .. } | Done::Pick { sid, .. } | Done::PipelineReady { sid, .. }
             | Done::PipelineFailed { sid, .. } | Done::Surface { sid, .. } => *sid,
         }
     }

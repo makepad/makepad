@@ -268,6 +268,30 @@ fn badge_moved(world: &mut World, id: Id, geom: Option<[f32; 4]>) {
     }
 }
 
+/// A frame's compute passes used the buffers and storage textures they bind: the ledger's last use
+/// (the backends mark what draws bind), so a resource only kernels read or write is not reported
+/// as never used.
+fn touch_compute(s: &mut Session, packet: u32, view: &CmdView, frame: u64, now: u64) {
+    let Some(passes) = view.frames.get(packet as usize).and_then(|p| {
+        let start = p.passes.off as usize;
+        view.passes.get(start..start.checked_add(p.passes.len as usize)?)
+    }) else { return };
+    for pass in passes.iter().filter(|p| p.kind == pass_kind::COMPUTE) {
+        for d in crate::compute::records::<Dispatch>(view.arena, pass.dispatches).unwrap_or_default() {
+            let kernel = s.pipelines.get(s.id, d.pipeline).map_or(pass.name, |p| p.val.desc.name);
+            s.compute_in_flight.push_back(InFlightDispatch { frame, kernel, groups: d.groups,
+                indirect_buffer: d.indirect_buffer, indirect_offset: d.indirect_offset });
+            let buffers = crate::compute::ids(view.arena, d.buffers).unwrap_or_default();
+            for id in buffers.into_iter().chain(Some(d.indirect_buffer).filter(|i| !i.is_none())) {
+                s.ledger.touch(Kind::Buffer, id.index, id.gen, frame, now);
+            }
+            for id in crate::compute::ids(view.arena, d.textures).unwrap_or_default() {
+                s.ledger.touch(Kind::Texture, id.index, id.gen, frame, now);
+            }
+        }
+    }
+}
+
 /// Retires a frame command that the executor or backend drops before GPU submission so the
 /// session's completion serial (`last_frame_done` and `HalEvent::FrameDone`) always advances
 /// without recording a presentation or notifying a parent of a `ChildFrame`. If an earlier
@@ -484,7 +508,20 @@ pub trait DeviceReset: Gpu {
 pub fn device_lost(world: &mut World) -> u32 {
     let generation = world.device_generation;
     for sid in world.session_ids() {
-        world.to_session(sid, |q| q.device_lost(generation));
+        let dispatches = world.session(sid).map_or_else(String::new, |s| {
+            let mut text = String::new();
+            for d in &s.compute_in_flight {
+                if !text.is_empty() { text.push_str("; "); }
+                let kernel = s.strings.get(&d.kernel).map_or("unknown", String::as_str);
+                if d.indirect_buffer.is_none() {
+                    text.push_str(&format!("frame={} kernel={kernel:?} groups={:?}", d.frame, d.groups));
+                } else {
+                    text.push_str(&format!("frame={} kernel={kernel:?} groups=indirect buffer={:?} offset={}", d.frame, d.indirect_buffer, d.indirect_offset));
+                }
+            }
+            text
+        });
+        world.to_session(sid, |q| q.device_lost(generation, dispatches.as_bytes()));
     }
     generation
 }
@@ -544,6 +581,7 @@ pub fn device_reset(b: &mut dyn DeviceReset, world: &mut World) -> bool {
         if let Some(s) = world.session_mut(sid) {
             s.device_generation = generation;
             s.last_frame_done = s.last_frame_done.max(s.frame);
+            s.compute_in_flight.clear();
             for (_, d_target, d_frame, d_now) in s.dropped_frames.drain(..) {
                 s.last_frame_done = s.last_frame_done.max(d_frame);
                 pending.push((d_target, d_frame, d_now));
@@ -582,6 +620,14 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
     if matches!(c, HalCmd::NativeLayerCreate { .. } | HalCmd::NativeLayerOp { .. } | HalCmd::NativeLayerDestroy { .. }) && gpu.native_layer(world, sid, &c) { return; }
     // window commands that move objects between sessions work on the world
     match c {
+        HalCmd::GpuReclaim { bytes } => {
+            let (budget, used) = gpu.gpu_budget().unwrap_or((0, 0));
+            let mb = |n: u64| n.div_ceil(1 << 20).min(u32::MAX as u64) as u32;
+            for id in world.session_ids() {
+                world.to_session(id, |q| q.gpu_pressure(mb(bytes), mb(budget.saturating_sub(used)), mb(budget), 0, false));
+            }
+            return;
+        }
         HalCmd::GpuBudget { epoch } => {
             let (device_bytes, used_bytes) = gpu.gpu_budget().unwrap_or_else(|| {
                 let used = world.session_ids().into_iter().filter_map(|id| world.session(id))
@@ -888,6 +934,17 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
                 .and_then(|s| s.windows.get(HOST, p).ok())
                 .is_some_and(|w| w.val.overlay.as_ref().is_some_and(|o| o.composed)));
             let Some(s) = world.session_mut(sid) else { return };
+            let nonempty_compute = s.drop_next_compute && view.frames.get(packet as usize).and_then(|p| {
+                let start = p.passes.off as usize;
+                view.passes.get(start..start.checked_add(p.passes.len as usize)?)
+            }).is_some_and(|passes| passes.iter().filter(|p| p.kind == pass_kind::COMPUTE).any(|p|
+                crate::compute::records::<Dispatch>(view.arena, p.dispatches).unwrap_or_default().iter()
+                    .any(|d| !d.indirect_buffer.is_none() || d.groups.iter().all(|&n| n != 0))));
+            if kind & !target::FLAGS == target::COMPUTE && nonempty_compute {
+                s.drop_next_compute = false;
+                drop_frame(world, sid, target, packet, view, now);
+                return;
+            }
             // Only the executor selects this target: clients cannot bypass lending.
             if kind & (target::OVERLAY | target::REPLAY) != 0 {
                 s.bad();
@@ -979,6 +1036,7 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
             let host = submitted.window.then(||
                 s.windows.get(sid, target).ok().and_then(|w| w.val.alias_of)).flatten();
             let frame = s.frame;
+            touch_compute(s, packet, view, frame, now);
             let trace = world.trace_exec;
             let mut layers = Vec::new();
             let mut shown = Vec::new();
@@ -1134,17 +1192,15 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
         | HalCmd::DomainStop { .. }
         | HalCmd::DomainRelaunch { .. }
         | HalCmd::DomainList { .. }
+        | HalCmd::GpuReclaim { .. }
         | HalCmd::GpuBudget { .. }
         | HalCmd::FontOpen { .. }
         | HalCmd::GlyphRequest { .. }
         | HalCmd::GlyphRelease { .. }
         | HalCmd::GlyphTouch { .. } => unreachable!("handled above"),
         HalCmd::GpuProfQuery { keep_s } => {
-            if !crate::gpu_prof::recording() {
-                crate::gpu_prof::start(crate::gpu_prof::StartOptions { keep_s: keep_s as u64, split_every: 0, ..Default::default() });
-            } else if let Some(rec) = crate::gpu_prof::recording_of(None) {
-                let bytes = rec.encode();
-                s.events.gpu_prof_recording(&bytes);
+            if let Some(rec) = crate::gpu_prof::app_query(sid, keep_s) {
+                s.events.gpu_prof_recording(&rec.encode());
             }
         }
         HalCmd::WindowScreenOrigin { id, origin, has } => {
@@ -1541,6 +1597,7 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
                             }
                         }
                     } else {
+                        eprintln!("[hal] buffer upload rejected: session={sid} buffer={id:?} offset={off} bytes={} size={}", data.len(), e.val.size);
                         s.stats.bad_args += 1;
                     }
                 }

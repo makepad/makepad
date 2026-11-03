@@ -65,6 +65,6 @@ pub(crate) fn map(path: &str) -> std::io::Result<std::sync::Arc<makepad_font_cor
     let fd = range(path, &mut span);
     if fd < 0 { return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "no stored APK asset")); }
     let fd = unsafe { OwnedFd::from_raw_fd(fd as i32) };
-    let bytes = makepad_font_core::SharedBytes::map_fd_range_named(fd.as_raw_fd(), span[0] as u64, span[1] as usize, path)?;
+    let bytes = makepad_font_core::HostBuf::map_fd_range_named(fd.as_raw_fd(), span[0] as u64, span[1] as usize, path)?;
     bytes.mapped().cloned().ok_or_else(|| std::io::Error::other("asset not mapped"))
 }

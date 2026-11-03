@@ -896,8 +896,7 @@ impl Renderer {
         self.bind_output_dither(cx.cx, &mut draw.base().draw_vars);
         // An IBL program's control of its two lookups: the lane's scale,
         // and for the stock IBL program whether the fill comes from the
-        // map (renderer/stock_ibl.rs). After the GI: it reads the gi_on
-        // just bound.
+        // map (renderer/stock_ibl.rs).
         if let ModelDraw::Custom(name, m) = draw {
             if m.ibl {
                 self.bind_ibl_lane(cx.cx, name, &mut m.draw.draw_vars);
@@ -1221,7 +1220,7 @@ impl Renderer {
                 sky.draw_trace |= 2;
             }
             if shader_ready {
-                let new_area = cx.add_instance(&draw.draw_vars);
+                let new_area = cx.add_instance(&mut draw.draw_vars);
                 draw.draw_vars.area = cx.update_area_refs(draw.draw_vars.area, new_area);
             }
             stats.model_draws += 1;
@@ -1309,7 +1308,7 @@ impl Renderer {
                 draw.draw_vars.set_texture(0, texture);
                 Self::bind_view_model_material(cx, draw, material);
                 if draw.draw_vars.can_instance() {
-                    let new_area = cx.add_instance(&draw.draw_vars);
+                    let new_area = cx.add_instance(&mut draw.draw_vars);
                     draw.draw_vars.area = cx.update_area_refs(draw.draw_vars.area, new_area);
                 }
             }

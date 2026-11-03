@@ -82,3 +82,44 @@ fn streaming_eval_surfaces_parse_errors() {
         "streaming parse error missing from captured sink: {errors:?}"
     );
 }
+
+#[test]
+fn unconsumable_loop_body_is_rejected_before_execution() {
+    let mut vm = test_vm();
+    // Recovery used to emit an empty infinite loop for this missing body.
+    let code = "loop + :\n;";
+    for streaming in [false, true] {
+        for _ in 0..2 {
+            vm.bx.captured_errors = Some(Vec::new());
+            let value = vm.with_instruction_limit(100, |vm| {
+                if streaming {
+                    vm.eval_with_append_source(
+                        ScriptMod::new("", "", "malformed_stream.splash", 0, 0, "", &[]),
+                        code,
+                        NIL.into(),
+                    )
+                } else {
+                    vm.eval(ScriptMod::new("", "", "malformed.splash", 0, 0, code, &[]))
+                }
+            });
+            assert!(value.is_err(), "malformed body must return an error");
+            assert_eq!(value, ScriptValue::script_err_unexpected(value.as_err().unwrap().ip));
+            let errors = vm.take_error_records();
+            if !streaming {
+                assert!(errors.iter().any(|error| {
+                    error.message.contains("Expected expression")
+                        // The tokenizer's diagnostic cursor is just after ':'.
+                        && error.loc.as_ref().is_some_and(|loc| loc.line == 0 && loc.col == 8)
+                }), "parse error must retain its source position: {errors:?}");
+            }
+            assert!(errors.iter().all(|error| !error.message.contains("instruction limit")),
+                "recovery bytecode must never execute: {errors:?}");
+        }
+    }
+    // The rejection must also apply without a diagnostics sink.
+    let value = vm.with_instruction_limit(100, |vm| {
+        vm.eval(ScriptMod::new("", "", "malformed.splash", 0, 0, code, &[]))
+    });
+    assert_eq!(value, ScriptValue::script_err_unexpected(value.as_err().unwrap().ip));
+    assert_eq!(vm.eval(ScriptMod::new("", "", "recovered.splash", 0, 0, "2 + 3", &[])).as_number(), Some(5.0));
+}

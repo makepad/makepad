@@ -738,7 +738,7 @@ fn route_loop(shared: Arc<ServiceShared>, request_rx: mpsc::Receiver<HttpServerR
                 // Blob chunks go through their own bounded worker pool so a
                 // 32 MiB read never stalls /health, job polling or submits.
                 if headers.path.starts_with("/kernel") {
-                    route_kernel(&shared, &headers, "GET", Vec::new(), response_sender);
+                    route_kernel(&shared, &headers, response_sender);
                 } else if headers.path.split('?').next() == Some("/control/watch") {
                     if caller_of(&shared, &headers).is_none() {
                         let _ = response_sender.send(unauthorized_response());
@@ -762,7 +762,7 @@ fn route_loop(shared: Arc<ServiceShared>, request_rx: mpsc::Receiver<HttpServerR
                 response,
             } => {
                 if headers.path.starts_with("/kernel") {
-                    route_kernel(&shared, &headers, "POST", body, response);
+                    let _ = response.send(error_json(404, "no such kernel route".into()));
                     continue;
                 }
                 let out = route_post_request(&shared, &headers, &body);
@@ -813,8 +813,8 @@ fn route_loop(shared: Arc<ServiceShared>, request_rx: mpsc::Receiver<HttpServerR
                 data,
             } => {
                 #[cfg(feature = "kernel")]
-                if crate::kernel_compute::facility().is_stream(web_socket_id) {
-                    crate::kernel_compute::facility().stream_frame(web_socket_id, &data);
+                if crate::program_serve::service().is_stream(web_socket_id) {
+                    crate::program_serve::service().stream_frame(web_socket_id, &data);
                     continue;
                 }
                 if let Some(session) = realtime_session_for_socket(&shared, web_socket_id) {
@@ -838,7 +838,7 @@ fn route_loop(shared: Arc<ServiceShared>, request_rx: mpsc::Receiver<HttpServerR
             }
             HttpServerRequest::DisconnectWebSocket { web_socket_id } => {
                 #[cfg(feature = "kernel")]
-                crate::kernel_compute::facility().stream_closed(web_socket_id);
+                crate::program_serve::service().stream_closed(web_socket_id);
                 if let Some(job_id) = shared.ws_sessions.lock().unwrap().remove(&web_socket_id) {
                     if let Some(session) = shared.realtime_sessions.lock().unwrap().get(&job_id).cloned() {
                         session.remove_socket(web_socket_id);
@@ -851,77 +851,41 @@ fn route_loop(shared: Arc<ServiceShared>, request_rx: mpsc::Receiver<HttpServerR
 
 
 
-/// The `kernel` domain (`crate::kernel_wire`): Splash compute kernels on
-/// this node's CPUs, for LAN-role credentials only. Submits and polls answer
-/// from the facility's threads, never blocking this routing thread.
-fn route_kernel(
-    shared: &Arc<ServiceShared>,
-    headers: &HttpServerHeaders,
-    method: &str,
-    body: Vec<u8>,
-    response_sender: mpsc::Sender<HttpServerResponse>,
-) {
+/// The `kernel` domain (`crate::kernel_wire`): compute programs on this node, for fleet
+/// machine credentials only. `GET /kernel` is the node's info; the programs run over the stream.
+fn route_kernel(shared: &Arc<ServiceShared>, headers: &HttpServerHeaders, response_sender: mpsc::Sender<HttpServerResponse>) {
     let Some(caller) = caller_of(shared, headers) else {
         let _ = response_sender.send(unauthorized_response());
         return;
     };
     if !(caller.admin || caller.role != makepad_network::fleet::id::Role::Paired) {
-        let _ = response_sender.send(error_json(403, "kernel jobs need a fleet machine credential".into()));
+        let _ = response_sender.send(error_json(403, "compute programs need a fleet machine credential".into()));
         return;
     }
-    let (path, query) = headers.path.split_once('?').unwrap_or((headers.path.as_str(), ""));
+    let path = headers.path.split('?').next().unwrap_or_default();
     #[cfg(feature = "kernel")]
-    {
-        let facility = crate::kernel_compute::facility();
-        let reply = move |result: Result<Vec<u8>, (u16, String)>, content_type: &str| {
-            let response = match result {
-                Ok(body) => {
-                    let header = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nCache-Control: no-cache\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                        body.len()
-                    );
-                    HttpServerResponse::new(header, body)
-                }
-                Err((status, message)) => error_json(status, message),
-            };
-            let _ = response_sender.send(response);
-        };
-        let job_route = |suffix: &str| path.strip_prefix("/kernel/job/").and_then(|r| r.strip_suffix(suffix)).and_then(|id| id.parse::<u64>().ok());
-        match method {
-            "GET" if path == "/kernel" => reply(Ok(facility.info().serialize_json().into_bytes()), "application/json"),
-            "GET" => match job_route("/tiles") {
-                Some(id) => {
-                    let timeout = query
-                        .split('&')
-                        .find_map(|kv| kv.strip_prefix("timeout_ms=").and_then(|v| v.parse::<u64>().ok()))
-                        .unwrap_or(2000);
-                    facility.poll(&caller.client_id, id, Duration::from_millis(timeout), Box::new(move |r| reply(r, "application/octet-stream")));
-                }
-                None => reply(Err((404, "no such kernel route".into())), ""),
-            },
-            "POST" if path == "/kernel/jobs" => facility.submit(&caller.client_id, body, Box::new(move |r| reply(r, "application/json"))),
-            "POST" => match job_route("/cancel") {
-                Some(id) if facility.cancel(&caller.client_id, id) => reply(Ok(b"{\"cancelled\":true}".to_vec()), "application/json"),
-                Some(_) => reply(Err((404, "no such kernel job".into())), ""),
-                None => reply(Err((404, "no such kernel route".into())), ""),
-            },
-            _ => reply(Err((404, "no such kernel route".into())), ""),
-        }
-    }
+    let response = if path == "/kernel" {
+        let body = crate::program_serve::service().info().serialize_json().into_bytes();
+        let header = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nCache-Control: no-cache\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+        HttpServerResponse::new(header, body)
+    } else {
+        error_json(404, "no such kernel route".into())
+    };
     #[cfg(not(feature = "kernel"))]
-    {
-        let _ = (method, body, path, query);
-        let _ = response_sender.send(error_json(404, "this node does not serve kernel jobs".into()));
-    }
+    let response = {
+        let _ = path;
+        error_json(404, "this node does not serve compute programs".into())
+    };
+    let _ = response_sender.send(response);
 }
 
-/// `GET /kernel/stream` (websocket): one long-lived stream per client and
-/// node for kernel jobs (frames: `crate::kernel_wire`). LAN credentials only.
+/// `GET /kernel/stream` (websocket): one long-lived stream per client and node for compute
+/// programs (frames: `crate::kernel_wire`). Fleet machine credentials only.
 fn route_kernel_stream(shared: &Arc<ServiceShared>, headers: &HttpServerHeaders, web_socket_id: u64, response_sender: mpsc::Sender<Vec<u8>>) {
     let caller = caller_of(shared, headers).filter(|c| c.admin || c.role != makepad_network::fleet::id::Role::Paired);
     #[cfg(feature = "kernel")]
     if let Some(caller) = caller {
-        crate::kernel_compute::facility().stream_open(web_socket_id, &caller.client_id, response_sender);
+        crate::program_serve::service().stream_open(web_socket_id, &caller.client_id, response_sender);
         return;
     }
     #[cfg(not(feature = "kernel"))]

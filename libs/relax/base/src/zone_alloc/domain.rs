@@ -67,7 +67,7 @@ impl DomainHeap {
         self.inner.arena.detail()
     }
     /// Chunk states with resident bytes (arena.rs `states`).
-    pub fn states(&self) -> [usize; 28] {
+    pub fn states(&self) -> [usize; 29] {
         self.inner.arena.states()
     }
     pub fn range(&self) -> (usize, usize) {
@@ -213,8 +213,9 @@ pub fn trim_all() {
     }
 }
 
-/// Every live domain heap gives its dense chunks huge pages and takes them from sparse ones
-/// (arena.rs `densify`); at most `budget` collapses per heap. Returns the collapses done.
+/// Every live domain heap's once-a-second pass (arena.rs `densify`): its next trim epoch, the
+/// waiting threads' current chunks settled, and (Linux) huge pages for dense chunks, taken from
+/// sparse ones; at most `budget` collapses per heap. Returns the collapses done.
 pub fn densify_all(budget: usize) -> usize {
     lease().iter().flatten().map(|h| h.arena.densify(budget)).sum()
 }
@@ -550,6 +551,44 @@ mod tests {
         }
     }
 
+    /// A free that leaves a detached chunk sparse gives its whole free pages back at once, with no
+    /// trim (a program at rest gets none); the blocks still live keep their bytes.
+    #[test]
+    fn a_sparse_detached_chunk_gives_its_free_pages_back_on_free() {
+        symbol(b"relax_alloc");
+        let heap = DomainHeap::new().unwrap();
+        unsafe {
+            enter(&*heap);
+            // 1 KB blocks: the first chunk (2048 of them) is carved whole and left behind
+            let blocks: Vec<*mut u8> = (0..3000).map(|i| {
+                let p = program_alloc(1024, 8);
+                std::ptr::write_bytes(p, (i % 251) as u8, 1024);
+                p
+            }).collect();
+            let resident = || {
+                let c = heap.inner.arena.states();
+                c[3] + c[7] + c[15]
+            };
+            let before = resident();
+            let kept = |i: usize| i >= 2048 || i % 64 == 0;
+            for (i, p) in blocks.iter().enumerate() {
+                if !kept(i) {
+                    program_dealloc(*p, 1024, 8);
+                }
+            }
+            let after = resident();
+            assert!(after + (1 << 20) < before, "the sparse chunk's free pages go back as it is freed: {before} -> {after} bytes");
+            for (i, p) in blocks.iter().enumerate() {
+                if kept(i) {
+                    assert!(std::slice::from_raw_parts(*p, 1024).iter().all(|b| *b == (i % 251) as u8), "live block {i} damaged");
+                    program_dealloc(*p, 1024, 8);
+                }
+            }
+            assert_eq!(heap.stats().0, 0);
+            enter(std::ptr::null());
+        }
+    }
+
     #[test]
     fn large_runs_stay_warm_and_zeroed_allocs_stay_zero() {
         symbol(b"relax_alloc");
@@ -566,6 +605,7 @@ mod tests {
             assert_eq!(heap.stats().1, committed, "the run stays committed (warm)");
             let q = program_alloc(500_000, 8);
             assert_eq!(q, p, "the warm run serves the next large block of its order");
+            assert!(heap.stats().1 < committed, "a smaller block gives back the run's pages beyond it");
             program_dealloc(q, 500_000, 8);
             // a zeroed large block out of the warm list is zero (the run holds 0xAB)
             let z = program_alloc_zeroed(600_000, 8);

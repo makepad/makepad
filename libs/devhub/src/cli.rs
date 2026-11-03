@@ -9,6 +9,7 @@ use std::io::Write;
 use std::time::Duration;
 
 const HELP: &str = "makepad devhub (or observe): the local devhub (start it with `cargo run --release -p makepad-app-devhub`)
+call $DH; a landing's CLI goes live when its rebuild finishes
   stream [--json] [--all]                 one line per event, live (--all: info lines too)
   ls [machine]                            machines and their JITs, each with what it is up to
   hot [--json]                            hot failures / hot loads, causes and apps (24h and all time)
@@ -45,14 +46,18 @@ pub(crate) fn control() -> Result<Client, String> {
 }
 
 /// Submission waits out master restarts; application errors still stand.
-pub(crate) fn retry_master<T>(mut call: impl FnMut() -> Result<T, String>) -> Result<T, String> {
+pub(crate) fn retry_master<T>(call: impl FnMut() -> Result<T, String>) -> Result<T, String> {
+    retry_master_wait(call, || std::thread::sleep(Duration::from_secs(2)))
+}
+
+pub(crate) fn retry_master_wait<T>(mut call: impl FnMut() -> Result<T, String>, mut wait: impl FnMut()) -> Result<T, String> {
     let mut said = false;
     loop {
         match call() {
             Ok(v) => return Ok(v),
             Err(e) if e.starts_with("no devhub master at ") || e.contains("link lost") || e.contains("hub connection ended") => {
                 if !said { eprintln!("master not reachable: waiting"); said = true; }
-                std::thread::sleep(Duration::from_secs(2));
+                wait();
             }
             Err(e) => return Err(e),
         }
@@ -738,7 +743,7 @@ fn land(c: &Client, a: &[&str]) -> i32 {
             let a = plain.as_slice();
             // a hand-in: given, or this worktree's branch (+ its nested commercial branch when it is on one)
             let args: Vec<String> = if a.is_empty() {
-                let g = |dir: &str, args: &[&str]| std::process::Command::new("git").arg("-C").arg(dir).args(args).output().ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+                let g = |dir: &str, args: &[&str]| crate::git_exec::command().arg("-C").arg(dir).args(args).output().ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
                 let Some(top) = g(".", &["rev-parse", "--show-toplevel"]) else {
                     eprintln!("makepad devhub land: run it in a lane worktree, or name the branch");
                     return 2;
@@ -811,10 +816,15 @@ fn land(c: &Client, a: &[&str]) -> i32 {
 }
 
 /// How devhub runs its own words as a child: this very binary when it is `makepad-devhub` (the
-/// master, the CLI), else (devhub linked into an app) that binary through cargo in `repo`.
+/// master, the CLI), else (devhub linked into an app) the built one in `repo` (the master swaps a
+/// landing's in when its rebuild finishes); cargo only builds it when there is none yet.
 pub fn own_argv(repo: &std::path::Path) -> Vec<String> {
     if let Some(exe) = std::env::current_exe().ok().filter(|e| e.file_stem().is_some_and(|s| s == "makepad-devhub")) {
         return vec![exe.display().to_string()];
+    }
+    let built = repo.join("target/host").join(format!("makepad-devhub{}", std::env::consts::EXE_SUFFIX));
+    if built.is_file() {
+        return vec![built.display().to_string()];
     }
     let mut v: Vec<String> = ["cargo", "run", "--profile", "host", "-q", "--manifest-path"].iter().map(|s| s.to_string()).collect();
     v.push(repo.join("Cargo.toml").display().to_string());

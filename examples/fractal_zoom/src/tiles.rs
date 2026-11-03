@@ -60,6 +60,8 @@ struct Shared {
     quit: AtomicBool,
     /// Jobs of layers below this are stale: whoever holds one drops it.
     min_layer: AtomicU64,
+    /// Pushes so far (a runner that waits elsewhere knows jobs came).
+    pushed: AtomicU64,
 }
 
 /// The tile queue as other job runners (remote nodes) see it: they pop jobs
@@ -81,8 +83,9 @@ impl QueueHandle {
         q.remove(at)
     }
 
-    pub fn min_layer(&self) -> u64 {
-        self.shared.min_layer.load(Ordering::SeqCst)
+    /// Counts the pushes: changed when jobs came.
+    pub fn pushed(&self) -> u64 {
+        self.shared.pushed.load(Ordering::SeqCst)
     }
 
     pub fn is_quitting(&self) -> bool {
@@ -109,6 +112,7 @@ impl TilePool {
             wake: Condvar::new(),
             quit: AtomicBool::new(false),
             min_layer: AtomicU64::new(0),
+            pushed: AtomicU64::new(0),
         });
         let (done_tx, done_rx) = channel::<Done>();
         let threads = (0..threads.max(1))
@@ -136,6 +140,7 @@ impl TilePool {
         let mut q = self.shared.queue.lock().unwrap();
         q.extend(jobs);
         drop(q);
+        self.shared.pushed.fetch_add(1, Ordering::SeqCst);
         self.shared.wake.notify_all();
     }
 

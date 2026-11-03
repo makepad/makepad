@@ -365,7 +365,7 @@ fn device_reset_keeps_ids_and_renders_again() {
         let n = hal.pump(10_000_000, &mut buf);
         for (_, event) in store.reader(n, buf.arena_len) {
             match event {
-                HalEvent::DeviceLost { generation } => {
+                HalEvent::DeviceLost { generation, .. } => {
                     assert!(reset.is_none(), "DeviceLost after DeviceReset");
                     lost.push(generation);
                 }
@@ -680,5 +680,83 @@ fn a_pass_a_pixel_larger_than_its_target_still_draws() {
     // the clear in the top corners, the triangle's base along the bottom
     for x in [0, 31] { assert_eq!(&image[x * 4..][..4], &[17, 34, 51, 255]); }
     for x in [6, 16, 26] { assert_eq!(&image[(29 * 32 + x) * 4..][..4], &[255; 4], "x {x}"); }
+    assert!(hal.close(sid));
+}
+
+/// A retained buffer reads as zeros wherever the app has not written: never written, written in
+/// part, filled in order by its first updates (those are not zeroed first: it would write the
+/// bytes twice), or written in order only up to a point. The reads are in the batch that made
+/// the buffers, so the zeroing the backend defers to the submission is in place before the GPU
+/// copies them. The memory of a destroyed buffer full of 0xee goes back first, for the driver to
+/// hand out again.
+#[test]
+fn a_retained_buffer_reads_zero_where_it_was_not_written() {
+    let (hal, info) = open();
+    let sid = info.session;
+    let (old, never, part, whole, prefix) = (Id::new(4, 1), Id::new(5, 1), Id::new(6, 1), Id::new(7, 1), Id::new(8, 1));
+    let mut w = CmdWriter::new(sid);
+    w.buffer_create(old, buffer_kind::INSTANCE, 4096, Attr::default());
+    w.buffer_update(old, 0, &[0xee; 4096]);
+    w.buffer_destroy(old);
+    hal.submit(&w.buf());
+    let mut w = CmdWriter::new(sid);
+    for id in [never, part, whole, prefix] { w.buffer_create(id, buffer_kind::INSTANCE, 4096, Attr::default()); }
+    w.buffer_update(part, 64, &[0xab; 32]);
+    w.buffer_update(whole, 0, &[0xcd; 1024]);
+    w.buffer_update(whole, 1024, &[0xcd; 3072]);
+    w.buffer_update(whole, 16, &[0x01; 16]);
+    w.buffer_update(prefix, 0, &[0x77; 1000]);
+    w.buffer_update(prefix, 1000, &[0x78; 24]);
+    for (req, id) in [(1, never), (2, part), (3, whole), (4, prefix)] { w.buffer_readback(id, req, 0, 4096); }
+    hal.submit(&w.buf());
+    let mut got: [Vec<u8>; 4] = Default::default();
+    until(&hal, sid, |e| {
+        if let HalEvent::Readback { req: req @ 1..=4, status, pixels, .. } = e {
+            assert_eq!(status, readback::OK);
+            got[req as usize - 1] = pixels.to_vec();
+        }
+        got.iter().all(|g| !g.is_empty())
+    });
+    assert!(got[0].iter().all(|&b| b == 0), "a buffer never written reads zero");
+    let want_part: Vec<u8> = (0..4096).map(|i| if (64..96).contains(&i) { 0xab } else { 0 }).collect();
+    assert!(got[1] == want_part, "a buffer written in part reads zero around the write");
+    let want_whole: Vec<u8> = (0..4096).map(|i| if (16..32).contains(&i) { 0x01 } else { 0xcd }).collect();
+    assert!(got[2] == want_whole, "a buffer written whole reads its writes");
+    let want_prefix: Vec<u8> = (0..4096).map(|i| if i < 1000 { 0x77 } else if i < 1024 { 0x78 } else { 0 }).collect();
+    assert!(got[3] == want_prefix, "a buffer written in order up to a point reads zero after it");
+    assert_eq!(hal.with_world(|w| w.session(sid).unwrap().stats.bad_args), 0);
+    assert!(hal.close(sid));
+}
+
+/// An upload from a temporary (`&vec![..]`: freed at the end of its statement, its block handed
+/// out again before the submit) lands the bytes of the call: the writer copied them at the call.
+#[test]
+fn uploads_from_freed_temporaries_land_the_bytes_of_the_call() {
+    let (hal, info) = open();
+    let sid = info.session;
+    let (buffer, texture) = (Id::new(9, 1), Id::new(9, 1));
+    let want_buffer: Vec<u8> = (0..4096u32).map(|i| (i * 7 + 3) as u8).collect();
+    let want_texels: Vec<u8> = (0..16 * 16 * 4u32).map(|i| (i * 13 + 5) as u8).collect();
+    let mut w = CmdWriter::new(sid);
+    w.buffer_create(buffer, buffer_kind::INSTANCE, 4096, Attr::default());
+    w.texture_create(texture, usage::SAMPLED | usage::RENDER_TARGET, format::RGBA8, 16, 16, [1, 1], Attr::default());
+    w.buffer_update(buffer, 0, &want_buffer.clone());
+    w.texture_update(texture, 0, [0, 0, 16, 16], 0, &want_texels.clone());
+    let scribble = [vec![0xeeu8; 4096], vec![0xee; 1024]];
+    w.buffer_readback(buffer, 1, 0, 4096);
+    w.texture_readback(texture, 2, [0, 0, 16, 16]);
+    hal.submit(&w.buf());
+    drop(scribble);
+    let mut got: [Vec<u8>; 2] = Default::default();
+    until(&hal, sid, |e| {
+        if let HalEvent::Readback { req: req @ 1..=2, status, pixels, .. } = e {
+            assert_eq!(status, readback::OK);
+            got[req as usize - 1] = pixels.to_vec();
+        }
+        got.iter().all(|g| !g.is_empty())
+    });
+    assert!(got[0] == want_buffer, "the buffer holds other bytes than its upload's");
+    assert!(got[1] == want_texels, "the texture holds other bytes than its upload's");
+    assert_eq!(hal.with_world(|w| w.session(sid).unwrap().stats.bad_args), 0);
     assert!(hal.close(sid));
 }

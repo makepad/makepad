@@ -31,14 +31,14 @@ fn every_command_round_trips() {
     // TrayRemove, WindowAtTray tag 154), 3 XR frame (XrFrameEyes 155, XrPoseLead 156, XrRefreshRate 157),
     // 2 accessibility (A11yUpdate 158, A11yActionDone 159), 1 XR haptic (XrHaptic 163), 4 hosted (WindowScreenOrigin 28,
     // HostedPresented 29, HostedNativeBridge 33, HostedNativeIn 34), 1 GPU profiler readout (GpuProfQuery 35),
-    // 1 hosted focus for accessibility (WindowA11yActive 36), 1 refresh rate (FrameRateBoost 165).
+    // 1 hosted focus for accessibility (WindowA11yActive 36), 1 refresh rate (FrameRateBoost 165), 1 working-set reclaim (GpuReclaim 166).
     // The media section (tags 120-129, backend/apple/media) has its own budget.
     let media = CMD_TABLE.iter().filter(|t| (120..130).contains(&t.0)).count();
     let fonts = CMD_TABLE.iter().filter(|t| (130..133).contains(&t.0)).count();
     assert_eq!(media, 9);
     assert_eq!(fonts, 3);
     assert!(media <= 15, "the media section is budgeted at 15 commands, it has {media}");
-    assert_eq!(CMD_TABLE.len(), 58 + 6 + 4 + media + fonts + 9 + 2 + 4 + 1 + 3 + 3 + 2 + 3 + 1 + 4 + 1 + 1 + 1 + 1);
+    assert_eq!(CMD_TABLE.len(), 58 + 6 + 4 + media + fonts + 9 + 2 + 4 + 1 + 3 + 3 + 2 + 3 + 1 + 4 + 1 + 1 + 1 + 1 + 1);
     for ((cmd, want), (tag, name, _)) in w.cmds().iter().zip(&expected).zip(CMD_TABLE) {
         assert_eq!(cmd.tag, *tag, "{name}");
         let got = cmd.decode(w.arena()).unwrap_or_else(|| panic!("{name} does not decode"));
@@ -55,7 +55,7 @@ fn every_event_round_trips() {
     q.set_time(77);
     let expected = sample_events(&mut q);
     assert_eq!(expected.len(), EVENT_TABLE.len());
-    assert_eq!(EVENT_TABLE.len(), 104, "55 core (incl. Clipboard, GpuBudget, PayloadSize, MouseCancel, AppMessage, DeviceReset, GpuPressure, Redraw), 6 parent/child (85-90), 13 media, 4 font, 4 direct display/input 1 GL interop and 9 mobile (LongPress, ImeState, ImeAction, ImeResize, PhysicalKeyboard, SelectionHandle, TouchCancel, SafeArea, ImeAnimate) and 2 system back (BackGesture, BackPressed) and 2 tray (TrayMenu, TrayClick) and 2 XR (XrFrame, XrDepth) and 2 accessibility (A11yState, A11yAction) and 1 native layer events and 1 hosted native relay (HostedNativeOut) and 1 GPU profiler readout (GpuProfRecording)");
+    assert_eq!(EVENT_TABLE.len(), 105, "56 core (incl. Clipboard, GpuBudget, PayloadSize, MouseCancel, AppMessage, DeviceReset, GpuPressure, Redraw, DispatchTime), 6 parent/child (85-90), 13 media, 4 font, 4 direct display/input 1 GL interop and 9 mobile (LongPress, ImeState, ImeAction, ImeResize, PhysicalKeyboard, SelectionHandle, TouchCancel, SafeArea, ImeAnimate) and 2 system back (BackGesture, BackPressed) and 2 tray (TrayMenu, TrayClick) and 2 XR (XrFrame, XrDepth) and 2 accessibility (A11yState, A11yAction) and 1 native layer events and 1 hosted native relay (HostedNativeOut) and 1 GPU profiler readout (GpuProfRecording)");
     assert_eq!(EVENT_TABLE.iter().filter(|t| (120..133).contains(&t.0)).count(), 13);
     assert_eq!(EVENT_TABLE.iter().filter(|t| (100..104).contains(&t.0)).count(), 4);
     let tags: std::collections::HashSet<u16> = EVENT_TABLE.iter().map(|t| t.0).collect();
@@ -69,6 +69,35 @@ fn every_event_round_trips() {
         assert_eq!(g, want, "{name}");
         assert_eq!(*t, 77);
     }
+}
+
+#[test]
+fn device_loss_reports_only_unfinished_compute() {
+    use makepad_hal::session::InFlightDispatch;
+    let mut world = World::new();
+    let sid = world.open(71);
+    let session = world.session_mut(sid).unwrap();
+    session.strings.insert(11, "completed_kernel".into());
+    session.strings.insert(12, "pending_kernel".into());
+    for (frame, kernel, indirect_buffer) in [(1, 11, Id::NONE), (2, 12, Id::NONE), (3, 12, Id::new(4, 1))] {
+        session.compute_in_flight.push_back(InFlightDispatch { frame, kernel, groups: [3, 2, 1], indirect_buffer, indirect_offset: 16 });
+    }
+    world.frame_done(sid, Id::NONE, target::COMPUTE, 1, 10, 20, [0.0; 2]);
+    makepad_hal::backend::exec::device_lost(&mut world);
+    let mut store = EventStore::new(sid, 32, 4096);
+    let mut buf = store.buf();
+    let count = world.session_mut(sid).unwrap().events.drain_into(&mut buf);
+    let mut losses = 0;
+    for (_, event) in store.reader(count, buf.arena_len) {
+        if let HalEvent::DeviceLost { dispatches, .. } = event {
+            losses += 1;
+            let text = std::str::from_utf8(dispatches).unwrap();
+            assert!(!text.contains("completed_kernel"), "completed work is not blamed: {text}");
+            assert!(text.contains("kernel=\"pending_kernel\" groups=[3, 2, 1]"), "direct dimensions: {text}");
+            assert!(text.contains("groups=indirect") && text.contains("offset=16"), "indirect provenance: {text}");
+        }
+    }
+    assert_eq!(losses, 1, "one loss event includes all pending dispatches");
 }
 
 #[test]
@@ -186,6 +215,41 @@ fn native_layer_occluders_merge_without_losing_coverage_or_growing_steady_state(
         if let Some(cap) = capacities { assert_eq!(w.capacities(), cap); }
         capacities = Some(w.capacities());
     }
+}
+
+/// An upload is the writer's copy from the call on: the caller's memory may be freed and handed
+/// out again before the submit (a `&vec![..]` temporary was read after it was gone). Earlier
+/// runs stay put while later ones spill into new chunks; a chunk a turn leaves unused is freed,
+/// so a one-off upload does not stay resident.
+#[test]
+fn an_upload_is_the_writers_copy_from_the_call_on() {
+    let mut w = CmdWriter::new(1);
+    let runs: Vec<Vec<u8>> = (0..24u32).map(|n| (0..(n * 40_009) % 200_000 + 1).map(|i| (i ^ n * 31) as u8).collect()).collect();
+    for (n, run) in runs.iter().enumerate() {
+        let id = Id::new(n as u32, 1);
+        // each clone is a temporary, freed at the end of its statement
+        if n % 2 == 0 { w.buffer_update(id, 0, &run.clone()); } else { w.texture_update(id, 0, [0, 0, 1, 1], 0, &run.clone()); }
+    }
+    let kept = w.keep(&[1.5f32, -2.0]);
+    // the temporaries' blocks go back to the allocator: take them again and scribble over them
+    let scribble: Vec<Vec<u8>> = runs.iter().map(|r| vec![0xee; r.len()]).collect();
+    for (n, (cmd, run)) in w.cmds().iter().zip(&runs).enumerate() {
+        let bytes = match cmd.decode(w.arena()) {
+            Some(HalCmd::BufferUpdate { bytes, .. } | HalCmd::TextureUpdate { bytes, .. }) => bytes,
+            other => panic!("{other:?}"),
+        };
+        // SAFETY: the writer is alive and unchanged since it encoded the command
+        assert!(unsafe { bytes.as_bytes() } == &run[..], "upload {n} is not the bytes of its call");
+    }
+    // SAFETY: as above
+    assert_eq!(unsafe { kept.as_slice::<f32>() }, Some(&[1.5f32, -2.0][..]));
+    drop(scribble);
+    assert!(w.capacities()[6] >= runs.iter().map(Vec::len).sum::<usize>());
+    // the next turn uploads a little: only the first chunk stays
+    w.clear();
+    w.buffer_update(Id::new(0, 1), 0, &[7; 16]);
+    w.clear();
+    assert!(w.capacities()[6] <= 256 << 10, "{} bytes of upload memory stayed after a small turn", w.capacities()[6]);
 }
 
 #[test]
@@ -482,7 +546,10 @@ fn frame_packet_with_two_passes_three_draws_yields_frame_done() {
     let ranges = w.put_items(&[[0u32, 3]]);
     w.frame_begin(7, FrameMeta { input_ns: 1, ..Default::default() });
     w.pass(Pass { color: [Id::new(0, 1), Id::NONE, Id::NONE, Id::NONE], depth: Id::NONE, viewport: [0.0, 0.0, 64.0, 64.0], ..Default::default() });
-    let draw = Draw { pipeline: Id::new(0, 1), vb: Id::new(0, 1), ib: Id::NONE, inst: Inst::inline(Slice::of(&[0.0f32; 8]), 2), inst_ranges: ranges, ubufs: [Id::NONE; 4], ..Default::default() };
+    // the frames below reuse this draw after `clear`: its instances live in a static
+    static INSTANCES: [f32; 8] = [0.0; 8];
+    // SAFETY: a static outlives every submit
+    let draw = Draw { pipeline: Id::new(0, 1), vb: Id::new(0, 1), ib: Id::NONE, inst: Inst::inline(unsafe { Slice::of(&INSTANCES) }, 2), inst_ranges: ranges, ubufs: [Id::NONE; 4], ..Default::default() };
     w.draw(draw);
     w.draw(draw);
     w.pass(Pass { color: [Id::NONE; 4], depth: Id::NONE, ..Default::default() });
@@ -632,7 +699,8 @@ fn the_four_ops_work_through_the_global_hal() {
     assert!(evs.iter().any(|e| e.starts_with("FrameDone")) && evs.iter().any(|e| e.starts_with("Wake")), "{evs:?}");
     // a corrupt batch (misaligned element slice) is rejected whole and counted
     let bytes = [0u8; 13];
-    let bad = CmdBuf { session: info.session, cmds: Slice::from_bytes(&bytes), ..Default::default() };
+    // SAFETY: `bytes` outlives the submit
+    let bad = CmdBuf { session: info.session, cmds: unsafe { Slice::from_bytes(&bytes) }, ..Default::default() };
     hal_submit(&bad);
     assert_eq!(Hal::global().with_world(|w| w.session(info.session).unwrap().stats.bad_bufs), 1);
 }

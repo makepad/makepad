@@ -2,7 +2,7 @@
 //! the prepared IBL's SH9, mean luminance and horizon band read into a
 //! `sun::EnvLighting` and applied at the sun sites in frame.rs and
 //! bake_passes.rs. The arithmetic lives in sun.rs, Cx-free, so
-//! tests/one_sun.rs pins it without a device; this file only knows where
+//! renderer/sun_tests.rs pins it without a device; this file only knows where
 //! the renderer keeps the preparation (renderer/ibl.rs).
 //!
 //! Every function here is keyed on the WORLD's own environment first (an
@@ -20,8 +20,7 @@ impl Renderer {
     /// one preparation behind the world — and so is the dome, which is the
     /// point: light and sky always come from the same preparation. The key
     /// light is the bound preparation's own (`ibl_sun`: the sun the world
-    /// declared when it was submitted, else a procedural hdri preset's
-    /// baked sun), never the key the world declares meanwhile: a key lit
+    /// declared when it was submitted), never the key the world declares meanwhile: a key lit
     /// before its preparation lands would be lit twice (its light is still
     /// in the bound lighting copy) and metered against the wrong map. In
     /// the map's frame; `sun::env_sun_dir_with` turns it by

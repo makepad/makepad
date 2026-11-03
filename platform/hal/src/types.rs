@@ -44,17 +44,29 @@ pub struct Range {
 /// A borrowed run of memory: `len` is in BYTES. The pointer is valid for the duration of the
 /// call that receives it (`hal_submit`), never longer: the HAL copies whatever it keeps before
 /// that call returns. Nothing may be stored from it.
+///
+/// Safe code gets one only from the writer, whose own memory it points into
+/// ([`CmdWriter::keep`](crate::buffers::CmdWriter::keep), the upload commands, `CmdWriter::buf`);
+/// a Slice over the caller's memory is [`Slice::of`] / [`Slice::from_bytes`], which are unsafe:
+/// that memory must outlive the submit.
 #[relax_api(plain)]
 #[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Slice {
-    pub ptr: *const u8,
-    pub len: usize,
+    pub(crate) ptr: *const u8,
+    pub(crate) len: usize,
 }
 
 impl Default for Slice {
     fn default() -> Slice {
         Slice::EMPTY
+    }
+}
+
+/// The length only: the address says nothing and differs between a copy and its source.
+impl std::fmt::Debug for Slice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Slice").field("len", &self.len).finish()
     }
 }
 
@@ -70,17 +82,46 @@ unsafe impl Plain for u64 {}
 unsafe impl Plain for u32 {}
 unsafe impl Plain for f32 {}
 
+/// A number: [`Plain`] without padding, so every byte of it is initialized and it may be copied
+/// as its bytes ([`CmdWriter::keep`](crate::buffers::CmdWriter::keep)).
+///
+/// # Safety
+/// `Self` must be `Plain` and have no padding bytes.
+pub unsafe trait Scalar: Plain {}
+
+unsafe impl Scalar for u8 {}
+unsafe impl Scalar for u64 {}
+unsafe impl Scalar for u32 {}
+unsafe impl Scalar for f32 {}
+
 impl Slice {
     pub const EMPTY: Slice = Slice { ptr: std::ptr::null(), len: 0 };
 
-    /// Borrows `b`; the result is only meaningful while `b` is.
-    pub fn from_bytes(b: &[u8]) -> Slice {
+    /// Borrows `b` without copying it.
+    ///
+    /// # Safety
+    /// `b` must stay alive and unchanged until the batch carrying the Slice has been submitted
+    /// (`hal_submit` returned). [`CmdWriter::keep`](crate::buffers::CmdWriter::keep) is the safe
+    /// form: it copies.
+    pub unsafe fn from_bytes(b: &[u8]) -> Slice {
         Slice { ptr: b.as_ptr(), len: b.len() }
     }
 
-    /// Borrows the elements of `v` (len in bytes).
-    pub fn of<T: Plain>(v: &[T]) -> Slice {
+    /// Borrows the elements of `v` (len in bytes) without copying them.
+    ///
+    /// # Safety
+    /// As [`Slice::from_bytes`].
+    pub unsafe fn of<T: Plain>(v: &[T]) -> Slice {
         Slice { ptr: v.as_ptr() as *const u8, len: std::mem::size_of_val(v) }
+    }
+
+    /// Length in bytes.
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
     }
 
     /// The borrowed bytes.
@@ -249,10 +290,13 @@ pub mod info_flags {
     pub const XR_OFFSCREEN: u32 = 2048;
     pub const COMPUTE: u32 = 4096;
     pub const DRAW_STORAGE_BUFFERS: u32 = 8192;
+    /// The backend replaces a lost device: `DeviceReset` follows `DeviceLost`. Without it a lost
+    /// device stays lost for the rest of the session.
+    pub const DEVICE_RESET: u32 = 16384;
 
     #[test]
     fn the_flags_are_distinct_bits() {
-        let all = [PRIVILEGED, EMBEDDED, DISPLAY_CLOCK, GPU_TIMESTAMPS, CLIENT_CHROME, DIRECT_DISPLAY, WINDOW_LAYERS, WINDOW_BADGES, WM_HOSTED, XR, MULTIVIEW, XR_OFFSCREEN, COMPUTE, DRAW_STORAGE_BUFFERS];
+        let all = [PRIVILEGED, EMBEDDED, DISPLAY_CLOCK, GPU_TIMESTAMPS, CLIENT_CHROME, DIRECT_DISPLAY, WINDOW_LAYERS, WINDOW_BADGES, WM_HOSTED, XR, MULTIVIEW, XR_OFFSCREEN, COMPUTE, DRAW_STORAGE_BUFFERS, DEVICE_RESET];
         for (i, a) in all.iter().enumerate() {
             assert!(a.is_power_of_two());
             assert!(all[i + 1..].iter().all(|b| a & b == 0), "flag {a} shares a bit");
@@ -1443,6 +1487,8 @@ pub struct ComputeDesc {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Dispatch {
     pub pipeline: Id,
+    /// Optional timestamp label (zero disables the per-dispatch sample).
+    pub timer: StrId,
     pub groups: [u32; 3],
     pub indirect_buffer: Id,
     pub indirect_offset: u64,

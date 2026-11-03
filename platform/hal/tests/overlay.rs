@@ -421,7 +421,7 @@ fn badges(hal: &Hal, serial: u64, draws: bool) {
     let uniforms: Vec<u8> = (0..32).collect();
     if draws {
         let mut d = Draw::default();
-        d.uniforms[0] = Slice::from_bytes(&uniforms);
+        d.uniforms[0] = cmd.keep(&uniforms);
         cmd.draw(d);
     }
     cmd.frame_end(HOST_WINDOW, target::WINDOW | target::BADGES);

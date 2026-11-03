@@ -2382,7 +2382,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     use super::BorrowedLayoutParams;
-    use crate::makepad_platform::SharedBytes;
+    use crate::makepad_platform::HostBuf;
     use crate::text::font::FontId;
     use crate::text::{font_family::FontDiagnostics, loader::{FontDefinition, FontFamilyDefinition}};
     use std::path::PathBuf;
@@ -2398,7 +2398,7 @@ mod tests {
         let resources =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../widgets/resources");
         let mut layouter = Layouter::new(Settings::default());
-        let primary = SharedBytes::from_file_mmap_or_read(resources.join("IBMPlexSans-Text.ttf"))
+        let primary = HostBuf::from_file_mmap_or_read(resources.join("IBMPlexSans-Text.ttf"))
             .expect("primary font bytes should load");
         layouter.define_font(
             primary_id,
@@ -2436,7 +2436,7 @@ mod tests {
         let before = layouter.get_or_layout(params.clone());
         assert!(before.rows.iter().flat_map(|row| &row.glyphs).any(|glyph| glyph.id == 0));
 
-        let fallback = SharedBytes::from_file_mmap_or_read(
+        let fallback = HostBuf::from_file_mmap_or_read(
             resources.join("jetbrains_mono_variable.ttf"),
         )
         .expect("fallback font bytes should arrive");
@@ -2519,7 +2519,7 @@ mod tests {
             (LATIN_FAMILY, 0xE111_0001_u64, "IBMPlexSans-Text.ttf"),
             (CJK_FAMILY, 0xE111_0002_u64, "LXGWWenKaiRegular.ttf"),
         ] {
-            let data = SharedBytes::from_file_mmap_or_read(resources.join(file))
+            let data = HostBuf::from_file_mmap_or_read(resources.join(file))
                 .expect("bundled font bytes should load");
             let font_id: FontId = font_id.into();
             layouter.define_font(

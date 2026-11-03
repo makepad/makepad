@@ -148,7 +148,7 @@ impl LabelCache {
                             layouter.define_font(
                                 f.id,
                                 FontDefinition {
-                                    data: SharedBytes::from_vec(f.data),
+                                    data: HostBuf::from_vec(f.data),
                                     index: f.index,
                                     ascender_fudge_in_ems: f.ascender_fudge,
                                     descender_fudge_in_ems: f.descender_fudge,
@@ -617,7 +617,7 @@ mod tests {
         reference.define_font(
             font,
             FontDefinition {
-                data: SharedBytes::from_vec(bytes.to_vec()),
+                data: HostBuf::from_vec(bytes.to_vec()),
                 index: 0,
                 variations: Vec::new(),
                 weight: None,

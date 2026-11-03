@@ -924,6 +924,33 @@ fn sessions() -> Vec<(u32, usize)> {
     v
 }
 
+/// Session `sid` ended (it exits, or relaunches empty under the same id): its frames, the ones
+/// still on the GPU and the backend names it gave leave the recording. The default session
+/// (the busiest) and an app's own readout follow the sessions that draw now, never a closed one.
+pub fn session_closed(sid: u32) {
+    let mut g = lock();
+    let Some(st) = g.as_mut() else { return };
+    st.rings.remove(&sid);
+    st.names.retain(|k, _| k.0 != sid);
+    st.building.remove(&sid);
+    let building: Vec<(u32, FrameKey)> = st.building.iter().map(|(s, i)| (*s, st.open[*i].key)).collect();
+    st.open.retain(|o| o.key.sid != sid);
+    st.building = building.into_iter().filter_map(|(s, k)| st.find(k).map(|i| (s, i))).collect();
+}
+
+/// An app's own readout (`GpuProfQuery` of session `sid`): the first query starts a recording
+/// kept `keep_s` seconds; later ones answer with that session's frames (None while it has none).
+pub fn app_query(sid: u32, keep_s: u32) -> Option<Recording> {
+    if !recording() {
+        start(StartOptions { keep_s: keep_s as u64, split_every: 0, ..Default::default() });
+        return None;
+    }
+    let g = lock();
+    let st = g.as_ref()?;
+    st.rings.get(&sid).filter(|r| !r.frames.is_empty())?;
+    Some(st.snapshot(sid))
+}
+
 /// The recording of session `sid` (default: the one with the most frames).
 pub fn recording_of(sid: Option<u32>) -> Option<Recording> {
     let sid = sid.or_else(|| sessions().first().map(|s| s.0))?;
@@ -1093,6 +1120,49 @@ mod tests {
             if list.is_empty() { String::new() } else { format!(" ({list})") },
             source.lines().count()
         )
+    }
+
+    /// A relaunch closes the app's session: the app's readout and the busiest default follow the
+    /// session that draws now (before, Fab's readout stayed on the closed one).
+    #[test]
+    fn closed_session_leaves_the_recording() {
+        use super::*;
+        // session ids no other test draws with
+        const OLD: u32 = 0x7e57_0001;
+        const NEW: u32 = 0x7e57_0002;
+        // one drawn frame whose pipeline 7 the backend names `shader`; `timed`: its GPU answer
+        // is still to come
+        let frame = |sid: u32, shader: &str, timed: bool| {
+            let key = submit_begin(sid).expect("recording");
+            with_frame(key, |b| {
+                b.pass("main", 0, 1, 1, "", 0);
+                b.cached((sid, 0, 7), || shader.to_string());
+                b.expect(timed as usize);
+            });
+            submit_end(Some(key));
+            key
+        };
+        let frames = |sid: u32| app_query(sid, 20).map_or(0, |r| r.frames.len());
+        let name = |sid: u32| lock().as_ref().and_then(|st| st.names.get(&(sid, 0, 7)).map(|id| st.interner.strings[*id as usize].clone()));
+        start(StartOptions { keep_s: 20, split_every: 0, ..Default::default() });
+        for _ in 0..3 {
+            frame(OLD, "old", false);
+        }
+        frame(NEW, "new", false);
+        let in_flight = frame(OLD, "old", true);
+        assert_eq!((frames(OLD), frames(NEW)), (3, 1));
+        assert_eq!(sessions().iter().find(|s| s.0 == OLD || s.0 == NEW).map(|s| s.0), Some(OLD));
+        session_closed(OLD);
+        // the closed session's frame the GPU answers late does not join the recording either
+        gpu_pass(in_flight, 0, PassGpu::default());
+        assert_eq!((frames(OLD), frames(NEW)), (0, 1));
+        assert!(sessions().iter().all(|s| s.0 != OLD), "a closed session stays the busiest default");
+        // relaunched under the same id: its own frames only, its pipelines named afresh
+        frame(OLD, "relaunched", false);
+        assert_eq!((frames(OLD), frames(NEW)), (1, 1));
+        assert_eq!(name(OLD).as_deref(), Some("relaunched"));
+        assert_eq!(name(NEW).as_deref(), Some("new"));
+        stop();
     }
 
     #[test]

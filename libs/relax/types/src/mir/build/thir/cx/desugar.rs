@@ -33,7 +33,7 @@ impl Cx<'_> {
         self.mk_at(e, span, ExprKind::NonHirLiteral { lit, user_ty: None }, self.bool_ty())
     }
 
-    /// `ty` with its projections normalized (the result type of a trait method).
+    /// `ty` with its projections normalized (a field type).
     fn normalize(&self, ty: TyId) -> TyId {
         self.tcx().try_normalize_erasing_regions(self.prog(), self.root.cx.env, ty).unwrap_or(ty)
     }
@@ -42,7 +42,9 @@ impl Cx<'_> {
     fn method_output(&self, def: DefId, args: &[TyId], span: Span) -> BuildResult<TyId> {
         let tcx = self.tcx();
         let Some(sig) = tcx.fn_sig(self.prog(), def) else { return self.unresolved(span, "method signature") };
-        Ok(tcx.tys.erase_regions(self.normalize(tcx.tys.subst(sig.ret, args))))
+        // (the signature's late-bound regions are erased first: the normalizer takes no escaping bound vars)
+        let ret = tcx.tys.subst(sig.ret, args);
+        Ok(tcx.try_normalize_erasing_late_bound_regions(self.prog(), self.root.cx.env, ret).unwrap_or_else(|_| tcx.tys.erase_regions(ret)))
     }
 
     /// The index of an enum's variant that is the lang item `item`.
@@ -532,8 +534,14 @@ impl Cx<'_> {
         let span = self.espan(e);
         let name = ast.segs(m.path.segs).last().map(|s| file.text(s.name)).unwrap_or("");
         if name == "cfg" {
-            // MIR building does not prune on the value (borrowck sees both branches)
-            return Ok(self.lit_bool(e, false, span));
+            // rustc_builtin_macros cfg.rs expand_cfg: the literal the crate's cfg gives. Const
+            // evaluation runs this body (array lengths, `const _: () = assert!(cfg!(..))`); MIR
+            // building keeps both arms of an `if` on it, so borrowck still sees both.
+            let prog = self.prog();
+            let file = self.tb().file;
+            let cfg = &prog.crates[prog.file_crate[file as usize] as usize].cfg;
+            let on = crate::cfg::eval_tokens(prog.src(file), m.toks.lo as usize, m.toks.hi as usize, cfg);
+            return Ok(self.lit_bool(e, on, span));
         }
         if m.args == ast::NO_MAC_ARGS {
             return self.unresolved(span, "macro without parsed arguments");
@@ -578,7 +586,10 @@ impl Cx<'_> {
         let unit = self.unit_ty();
         let branch = self.synthetic_scope(e, Synthetic::DebugBranch, ScopeData::Destruction, span)?;
         let branch_block = self.synthetic_scope(e, Synthetic::DebugBranch, ScopeData::Node, span)?;
-        let cond = self.push(self.lit_bool(e, true, span));
+        // `cfg!(debug_assertions)`: the crate's value, so a release const skips the assertion
+        let prog = self.prog();
+        let on = prog.crates[prog.file_crate[self.tb().file as usize] as usize].cfg.holds("debug_assertions");
+        let cond = self.push(self.lit_bool(e, on, span));
         let inner = self.push(inner);
         let block = self.thir.alloc_block(Block { targeted_by_break: false, region_scope: branch_block, span, stmts: Box::new([]), expr: Some(inner), safety_mode: BlockSafety::Safe });
         let then = self.push(self.mk(e, ExprKind::Block { block }, unit));

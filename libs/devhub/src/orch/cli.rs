@@ -16,7 +16,8 @@ pub const HELP: &str = "  job submit [--kind test] [--needs k=v,..] [--node N|--
         [--class name] [--priority interactive|background] [--jit key] [--native <reason>] -- cmd...
                                           an async job (prefer it to holding a lease): returns its id at once; it runs
                                           at this worktree's snapshot (HEAD + its uncommitted files, as they are now;
-                                          --rev: those commits alone) on the first free box that fits, and the box is
+                                          --rev: those commits alone; one naming only the makepad side
+                                          gets the nested commercial checkout's HEAD) on the first free box that fits, and the box is
                                           released when the command ends. Submit lists the files it ships: never .claude
                                           or local/, and a main checkout's only with --with-uncommitted. The box
                                           ends exactly at the shared commits: whatever a job leaves outside ignored
@@ -70,6 +71,8 @@ pub const HELP: &str = "  job submit [--kind test] [--needs k=v,..] [--node N|--
                                           fast path (clean merge + check of the changed app, ahead of the queue; the
                                           boot at `devhub show`, the tests after landing)
   lane adopt                              register the existing live worktrees; list the landed ones (removes nothing)
+  lane audit [--json]                     every worktree under the lanes root: landed (or on a retired chain),
+                                          unlanded commits, uncommitted and untracked files, by class (removes nothing)
   lane dormant                            lanes with no commits, leases or jobs in 24 h (the merge bot leaves them
                                           alone), with their commits not in the tip: for the user to decide (removes nothing)
   lane remove <name>                      remove a landed lane now (adopt's list, once agreed)
@@ -106,6 +109,8 @@ pub const HELP: &str = "  job submit [--kind test] [--needs k=v,..] [--node N|--
   master restart                          the master builds work's tip and execs itself in place into it (as its
                                           self-update: same pid, its launches and leases go on); a build that
                                           fails is the answer (exit 1, also in the inbox) and the master keeps running
+  master rollback                         the master execs back into the build its last restart replaced (kept
+                                          beside it): a deploy rollback when a new build misbehaves
   promote --dry | --go                    work onto main as one commit per logical block
                                           (tools/devhub/promote_blocks.txt), then work re-points at main's tip;
                                           --dry prints the blocks and the scan, --go validates, pushes and moves";
@@ -187,6 +192,12 @@ pub fn main(args: &[&str]) -> Option<i32> {
     let flags = rest.iter().position(|a| *a == "--").unwrap_or(rest.len());
     let json = rest[..flags].contains(&"--json");
     let submitting = verb == "job" && rest.first() == Some(&"submit") || verb == "live" && rest.first() == Some(&"start");
+    if submitting {
+        if let Err(e) = crate::proto::agent() {
+            eprintln!("makepad devhub {verb}: {e}");
+            return Some(2);
+        }
+    }
     let c = match if submitting { retry_master(master) } else { master() } {
         Ok(c) => c,
         Err(e) => {
@@ -231,8 +242,9 @@ pub fn main(args: &[&str]) -> Option<i32> {
         "shows" => shows(&c, words.contains(&"--all"), json),
         "master" => match words.as_slice() {
             ["restart"] => done(one(&c, "master", "master restart"), json, &|v: &Value| format!("{}\n", v.get("restart").and_then(|r| r.as_str()).unwrap_or(""))),
+            ["rollback"] => done(one(&c, "master", "master rollback"), json, &|v: &Value| format!("{}\n", v.get("restart").and_then(|r| r.as_str()).unwrap_or(""))),
             _ => {
-                eprintln!("makepad devhub master restart");
+                eprintln!("makepad devhub master restart | master rollback");
                 2
             }
         },
@@ -471,7 +483,7 @@ fn job(c: &Client, words: &[&str], json: bool) -> i32 {
                     return 2;
                 }
             };
-            let line = format!("job submit {{\"tree\":{},\"rev\":{},\"batch\":{},\"with_uncommitted\":{uncommitted},\"jobs\":[{}]}}", json_str(&tree.to_string_lossy()), json_str(&rev), batch.is_some(), reqs.join(","));
+            let line = format!("job submit {{\"request_id\":{},\"tree\":{},\"rev\":{},\"batch\":{},\"with_uncommitted\":{uncommitted},\"jobs\":[{}]}}", json_str(&crate::proto::request_id()), json_str(&tree.to_string_lossy()), json_str(&rev), batch.is_some(), reqs.join(","));
             done(retry_master(|| one(c, "job", &line)), json, &|v| {
                 let ids: Vec<&str> = v.get("jobs").and_then(|a| a.as_arr()).unwrap_or(&[]).iter().filter_map(|x| x.as_str()).collect();
                 let s = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
@@ -484,11 +496,12 @@ fn job(c: &Client, words: &[&str], json: bool) -> i32 {
         ["wait", rest @ ..] if !rest.is_empty() => {
             let any = rest.contains(&"--any");
             let ids: Vec<&str> = rest.iter().copied().filter(|a| *a != "--any").collect();
-            // follow the stream first, so no change between the ask and the follow is missed
-            let mut feed = c.watch();
+            if let Err(e) = retry_master(|| one(c, "job", &format!("job waiting {}", ids.join(" ")))) {
+                eprintln!("makepad devhub job wait: {e}"); return 1;
+            }
             loop {
                 // a master restart (its self-update) is waited out: the jobs go on under it
-                let list = match retry_master(|| one(c, "job", &format!("job get --wait {}", ids.join(" ")))) {
+                let list = match retry_master(|| one(c, "job", &format!("job wait {}{}", if any { "--any " } else { "" }, ids.join(" ")))) {
                     Ok(v) => jobs_of(&v),
                     Err(e) => {
                         eprintln!("makepad devhub job wait: {e}");
@@ -512,24 +525,7 @@ fn job(c: &Client, words: &[&str], json: bool) -> i32 {
                     }
                     return if shown.iter().all(|j| j.state == "ok") { 0 } else { 1 };
                 }
-                // until a job event (or 30 s)
-                let t = std::time::Instant::now();
-                while t.elapsed() < Duration::from_secs(30) {
-                    match feed.next(Duration::from_secs(5), 30) {
-                        Ok(Some((_, l))) => {
-                            if Record::parse(&String::from_utf8_lossy(&l)).is_some_and(|r| r.kind == "job") {
-                                break;
-                            }
-                        }
-                        Ok(None) => {}
-                        // the stream ended with its master: follow the next one
-                        Err(_) => {
-                            std::thread::sleep(Duration::from_secs(2));
-                            feed = c.watch();
-                            break;
-                        }
-                    }
-                }
+
             }
         }
         ["result", id, rest @ ..] => match one(c, "job", &format!("job get {id}")) {
@@ -863,6 +859,20 @@ fn lane(c: &Client, words: &[&str], json: bool) -> i32 {
         ["sweep", rest @ ..] if rest.is_empty() || rest == ["--dry"] => done(one(c, "lane", &format!("lane sweep {}", rest.first().unwrap_or(&""))), json, &|v| {
             format!("sweep started{}: `devhub lane sweep status` (report {})\n", if v.get("dry").and_then(|d| d.as_bool()).unwrap_or(false) { " (dry run, nothing deleted)" } else { "" }, v.get("report").and_then(|r| r.as_str()).unwrap_or(""))
         }),
+        // read here, in process (no master, no git): the master's view would hold its control thread
+        ["audit"] => match super::lane::audit(&super::repo(), json) {
+            Ok(text) => {
+                print!("{text}");
+                if json {
+                    println!();
+                }
+                0
+            }
+            Err(e) => {
+                eprintln!("makepad devhub lane audit: {e}");
+                1
+            }
+        },
         ["adopt"] => done(one(c, "lane", "lane adopt"), json, &|v| {
             let s = |x: &Value, k: &str| x.get(k).and_then(|y| y.as_str()).unwrap_or("").to_string();
             let reg: Vec<String> = v.get("registered").and_then(|a| a.as_arr()).unwrap_or(&[]).iter().filter_map(|x| x.as_str().map(str::to_string)).collect();

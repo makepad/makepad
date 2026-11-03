@@ -170,17 +170,17 @@ impl Local {
 
     /// The AI hub's health, on its own thread: three fleet TLS requests never stall the JIT scan.
     fn ai_probe_loop(self: Arc<Self>) {
-        let mut ai_serving = None;
+        let mut watch = AiHubWatch::default();
         while !self.stop.load(Ordering::Acquire) {
             let hub = ai_hub_endpoint().map(probe_ai_hub);
             let json = hub.as_ref().map(AiHub::to_json);
             *self.ai_hub.lock().unwrap() = json;
             if let Some(hub) = hub {
-                if ai_hub_lost_serving(&mut ai_serving, hub.serving) {
-                    self.emit(hub_record(&self.machine, "", 0, "ai_hub", Sev::Warn, hub.line(), String::new()));
+                if let Some((down, usual)) = watch.observe(hub.serving, proto::wall_ms()) {
+                    self.emit(hub_record(&self.machine, "", 0, "ai_hub", Sev::Warn, format!("{} for {} s, past its usual start ({} s)", hub.line(), down / 1000, usual / 1000), String::new()));
                 }
             } else {
-                ai_serving = None;
+                watch = AiHubWatch::default();
             }
             std::thread::sleep(AI_HUB_TTL);
         }
@@ -318,7 +318,12 @@ impl Local {
             st.crashed.remove(&jit.pid) || registry_file(jit.pid).exists()
         };
         let up = proto::wall_ms().saturating_sub(jit.started_ms) / 1000;
-        let rec = if crashed {
+        // its lease ended and the hub stopped it: no exit cleanup, and no crash either
+        let stopped = crashed.then(|| crate::lease::exec::stopped_with(&jit.socket)).flatten();
+        let rec = if let Some(lease) = stopped {
+            let _ = std::fs::remove_file(registry_file(jit.pid));
+            hub_record(&self.machine, &jit.app, jit.pid, "exit", Sev::Info, format!("stopped with its lease {lease} after {up} s"), String::new())
+        } else if crashed {
             let _ = std::fs::remove_file(registry_file(jit.pid));
             let tail = jit.session_log.as_deref().map(log_tail).unwrap_or_default();
             let last = tail.lines().rev().find(|l| !l.trim().is_empty()).map(|l| proto::clean(l, 200)).unwrap_or_default();
@@ -535,6 +540,11 @@ fn ai_hub_get<S: Read + Write>(
     makepad_strict_json::parse(payload).map_err(|_| invalid())
 }
 
+/// Whether this node's AI hub answers its /health now (None: no AI hub is set up here).
+pub fn ai_hub_answers() -> Option<bool> {
+    ai_hub_endpoint().map(|e| probe_ai_hub(e).running == Some(true))
+}
+
 /// Reach the TLS front as a fleet peer. Only a refused front connection permits plain
 /// loopback HTTP (networking off); only two refused connections mean the hub is stopped.
 fn probe_ai_hub(endpoint: AiHubEndpoint) -> AiHub {
@@ -642,12 +652,54 @@ pub(crate) fn ai_hub_status(health: &Value, models: Option<&Value>, fleet: Optio
 }
 
 /// Unknown probes neither invent a transition nor rearm a warning; recovery does.
-pub(crate) fn ai_hub_lost_serving(previous: &mut Option<bool>, serving: Option<bool>) -> bool {
-    let lost = *previous == Some(true) && serving == Some(false);
-    if serving.is_some() {
-        *previous = serving;
+/// The AI hub's service as the probe sees it. A loss of service warns once, and only when it
+/// outlasts the hub's usual start: a planned restart (a roll's, a WM replacing it) is back within
+/// it and says nothing.
+#[derive(Default)]
+pub(crate) struct AiHubWatch {
+    serving: Option<bool>,
+    down_since: Option<u64>,
+    warned: bool,
+    /// the hub's recent starts here (down until serving again), ms
+    starts: std::collections::VecDeque<u64>,
+}
+
+/// The shortest usual start: a build and a CUDA kernel build before its models load.
+const AI_HUB_START_MS: u64 = 3 * 60 * 1000;
+const AI_HUB_STARTS: usize = 8;
+
+impl AiHubWatch {
+    /// What the probe saw at `now_ms`: (down for, its usual start) once a loss outlasts that.
+    pub(crate) fn observe(&mut self, serving: Option<bool>, now_ms: u64) -> Option<(u64, u64)> {
+        let mut warn = None;
+        match serving {
+            Some(true) => {
+                if let Some(since) = self.down_since.take() {
+                    // an outage that warned was no start
+                    if !std::mem::take(&mut self.warned) {
+                        if self.starts.len() == AI_HUB_STARTS { self.starts.pop_front(); }
+                        self.starts.push_back(now_ms.saturating_sub(since));
+                    }
+                }
+            }
+            Some(false) if self.serving == Some(true) || self.down_since.is_some() => {
+                let down = now_ms.saturating_sub(*self.down_since.get_or_insert(now_ms));
+                let usual = self.usual_start();
+                if !self.warned && down > usual {
+                    self.warned = true;
+                    warn = Some((down, usual));
+                }
+            }
+            _ => {}
+        }
+        if serving.is_some() { self.serving = serving; }
+        warn
     }
-    lost
+
+    /// Half again its longest recent start, never under [`AI_HUB_START_MS`].
+    fn usual_start(&self) -> u64 {
+        self.starts.iter().max().map_or(0, |m| m * 3 / 2).max(AI_HUB_START_MS)
+    }
 }
 
 /// The program's binary was replaced on disk since it started (a rebuild it has not restarted

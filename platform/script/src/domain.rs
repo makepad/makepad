@@ -77,5 +77,15 @@ pub const SCENE3D: ScriptDomain = ScriptDomain {
     lazy: &[],
 };
 
+/// Compute programs: a long-running driver (`fn run(s)`) with CPU and GPU kernels, in-process
+/// or on an AI hub. A sandbox: no fs, net, host or cx, only the core, kernels and the session.
+pub const COMPUTE: ScriptDomain = ScriptDomain {
+    name: "compute",
+    what: "compute programs (a driver with CPU and GPU kernels)",
+    default_uses: &[],
+    modules: &["kernel", "compute"],
+    lazy: &[],
+};
+
 /// Every domain, for docs, the AI references and tests.
-pub const DOMAINS: &[&ScriptDomain] = &[&UI, &MOTION, &CUT, &SCORE, &FLOW, &SCENE3D];
+pub const DOMAINS: &[&ScriptDomain] = &[&UI, &MOTION, &CUT, &SCORE, &FLOW, &SCENE3D, &COMPUTE];

@@ -371,7 +371,7 @@ fn image_request_shape(request: &GenerateRequestJson) -> (u64, u64, u64) {
 }
 
 /// Normalized execution demand for one generation request, in milliseconds
-/// on the baseline GPU-A. Image-like work scales with sampler steps and
+/// on a 24 GB card. Image-like work scales with sampler steps and
 /// the square of its pixel-count ratio; the first cut keeps other domains at
 /// fixed calibrated costs. Missing and zero image fields use the calibration
 /// defaults, and extreme dimensions saturate instead of producing non-finite
@@ -721,73 +721,60 @@ pub fn affinity_reason(score: u32) -> &'static str {
     }
 }
 
-/// Relative speed of the GPUs this fleet runs on, fastest first.
+/// GPU classes by the card's total VRAM, fastest first: (minimum total MiB,
+/// speed rank, ETA throughput relative to a 24 GB card).
 ///
-/// Matched as a lowercase SUBSTRING of the `/health` `gpu` name, first hit
-/// wins — a new card is ONE LINE here and nothing else changes. Unknown
-/// stays 0: a card nobody listed is never preferred, and never excluded
-/// (an unknown GPU still runs everything it is admitted for).
+/// The class is read from the `/health` `vram_total_mb` of a box that names
+/// its GPU, first class the card reaches wins. A card below every class, or a
+/// box that names no GPU, ranks 0: it is never preferred, and never excluded
+/// (an unranked GPU still runs everything it is admitted for).
 ///
-/// This is a TIEBREAK and nothing more. It never moves work to a box that
+/// The rank is a TIEBREAK and nothing more. It never moves work to a box that
 /// would have to download the weights, never past an idle box onto a busy
 /// one, and never past a role: those rules are decided before it is read.
-const GPU_SPEED_RANK: &[(&str, u32)] = &[
-    ("gpu-c", 3),
-    ("gpu-b", 2),
-    ("gpu-a", 1),
+const GPU_CLASSES: &[(u64, u32, f64)] = &[
+    (80_000, 3, 1.6), // a 96 GB workstation card
+    (28_000, 2, 1.3), // a 32 GB card
+    (20_000, 1, 1.0), // a 24 GB card
 ];
 
-/// Relative execution throughput used by the ETA model, normalized to the
-/// GPU-A. Matching follows [`GPU_SPEED_RANK`]: lowercase substring, first
-/// hit wins. Unknown cards use [`UNKNOWN_GPU_RELATIVE_THROUGHPUT`].
-const GPU_RELATIVE_THROUGHPUT: &[(&str, f64)] = &[
-    ("gpu-c", 1.6),
-    ("gpu-b", 1.3),
-    ("gpu-a", 1.0),
-];
-
-/// Conservative ETA throughput for an unlisted or unreported GPU. It stays
-/// schedulable, but cannot look faster than any card in the table.
+/// Conservative ETA throughput for an unranked or unreported GPU. It stays
+/// schedulable, but cannot look faster than any class in [`GPU_CLASSES`].
 const UNKNOWN_GPU_RELATIVE_THROUGHPUT: f64 = 0.7;
 
-/// Speed rank of a GPU by its reported name (see [`GPU_SPEED_RANK`]).
-pub fn gpu_speed(name: &str) -> u32 {
-    let name = name.to_ascii_lowercase();
-    GPU_SPEED_RANK
-        .iter()
-        .find(|(needle, _)| name.contains(needle))
-        .map(|(_, rank)| *rank)
-        .unwrap_or(0)
+fn gpu_class(total_mb: u64) -> Option<&'static (u64, u32, f64)> {
+    GPU_CLASSES.iter().find(|(min_mb, _, _)| total_mb >= *min_mb)
+}
+
+/// Total VRAM of the GPU a box names, if it names one.
+fn reported_gpu_total_mb(snapshot: &BoxSnapshot) -> Option<u64> {
+    let health = snapshot.health.as_ref()?;
+    health.gpu.as_ref()?;
+    health.vram_total_mb
+}
+
+/// Speed rank of a GPU by its total VRAM (see [`GPU_CLASSES`]).
+pub fn gpu_speed(total_mb: u64) -> u32 {
+    gpu_class(total_mb).map(|(_, rank, _)| *rank).unwrap_or(0)
 }
 
 /// Speed rank of the GPU a box reports. A box that names no GPU (an older
 /// service, or a machine where the probe is not cheap) ranks 0.
 pub fn gpu_rank(snapshot: &BoxSnapshot) -> u32 {
-    snapshot
-        .health
-        .as_ref()
-        .and_then(|health| health.gpu.as_deref())
-        .map(gpu_speed)
-        .unwrap_or(0)
+    reported_gpu_total_mb(snapshot).map(gpu_speed).unwrap_or(0)
 }
 
-/// Relative ETA throughput of a GPU by its reported name.
-pub fn gpu_throughput(name: &str) -> f64 {
-    let name = name.to_ascii_lowercase();
-    GPU_RELATIVE_THROUGHPUT
-        .iter()
-        .find(|(needle, _)| name.contains(needle))
-        .map(|(_, throughput)| *throughput)
+/// Relative ETA throughput of a GPU by its total VRAM.
+pub fn gpu_throughput(total_mb: u64) -> f64 {
+    gpu_class(total_mb)
+        .map(|(_, _, throughput)| *throughput)
         .unwrap_or(UNKNOWN_GPU_RELATIVE_THROUGHPUT)
 }
 
 /// Relative ETA throughput of the GPU reported by a box. Missing GPU data
-/// uses the same conservative floor as an unlisted card.
+/// uses the same conservative floor as an unranked card.
 pub fn gpu_throughput_of(snapshot: &BoxSnapshot) -> f64 {
-    snapshot
-        .health
-        .as_ref()
-        .and_then(|health| health.gpu.as_deref())
+    reported_gpu_total_mb(snapshot)
         .map(gpu_throughput)
         .unwrap_or(UNKNOWN_GPU_RELATIVE_THROUGHPUT)
 }
@@ -1813,7 +1800,7 @@ mod tests {
     #[test]
     fn the_default_role_list_keeps_the_chat_box_on_chat() {
         // The ratified fleet end state, as data: chat and text live on the
-        // Blackwell (82 GB free beside the live model) since the GPU-B was
+        // workstation card (82 GB free beside the live model) since the 32 GB card was
         // turned over to the live-feed pool on the user's order.
         let roles = FleetRoles::parse(TEST_FLEET_ROLES);
         assert!(roles.allows("http://192.0.2.76:8123", "chat"));
@@ -2117,8 +2104,11 @@ mod tests {
         snapshot
     }
 
-    fn with_gpu(mut snapshot: BoxSnapshot, gpu: &str) -> BoxSnapshot {
-        snapshot.health.as_mut().unwrap().gpu = Some(gpu.to_string());
+    /// A box that names its GPU, with the card's total VRAM.
+    fn with_gpu(mut snapshot: BoxSnapshot, gpu: &str, total_mb: u64) -> BoxSnapshot {
+        let health = snapshot.health.as_mut().unwrap();
+        health.gpu = Some(gpu.to_string());
+        health.vram_total_mb = Some(total_mb);
         snapshot
     }
 
@@ -2132,38 +2122,37 @@ mod tests {
     }
 
     /// The GPU rank is a TIEBREAK: same weights, same queue, faster card.
-    /// It is read from the name the box reports, so a new card is one line
-    /// in the table — and a card nobody listed is never PREFERRED, which is
+    /// It is read from the card's total VRAM, so a new card needs no line
+    /// anywhere — and a card below every class is never PREFERRED, which is
     /// a different thing from being excluded.
     #[test]
-    fn a_faster_gpu_breaks_a_tie_and_an_unlisted_card_never_wins_one() {
-        assert_eq!(gpu_speed("NVIDIA GPU-C"), 3);
-        assert_eq!(gpu_speed("NVIDIA GeForce GPU-B"), 2);
-        assert_eq!(gpu_speed("NVIDIA GeForce GPU-A"), 1);
-        // Case is not a signal, and a name that merely LOOKS like one on
-        // the list (a different, older card) is not on the list.
-        assert_eq!(gpu_speed("nvidia geforce gpu-b"), 2);
-        assert_eq!(gpu_speed("NVIDIA RTX 6000 Ada Generation"), 0);
-        assert_eq!(gpu_speed(""), 0);
-        // A box that names no GPU ranks with the unknowns.
+    fn a_faster_gpu_breaks_a_tie_and_an_unranked_card_never_wins_one() {
+        assert_eq!(gpu_speed(97_887), 3);
+        assert_eq!(gpu_speed(32_607), 2);
+        assert_eq!(gpu_speed(24_564), 1);
+        assert_eq!(gpu_speed(12_288), 0);
+        assert_eq!(gpu_speed(0), 0);
+        // A box that names no GPU ranks with the unranked, whatever memory it reports.
         assert_eq!(gpu_rank(&snapshot("http://quiet", 0, Vec::new())), 0);
+        assert_eq!(gpu_rank(&with_vram(snapshot("http://quiet", 0, Vec::new()), 90_000, 97_887, 0)), 0);
 
         let ready = || vec![model("m", "image", MODEL_STATE_READY, true)];
         let fleet = vec![
-            with_gpu(snapshot("http://a", 0, ready()), "NVIDIA GeForce GPU-A"),
-            with_gpu(snapshot("http://b", 0, ready()), "NVIDIA GPU-C"),
-            with_gpu(snapshot("http://c", 0, ready()), "NVIDIA GeForce GPU-B"),
+            with_gpu(snapshot("http://a", 0, ready()), "NVIDIA GeForce Test 24 GB", 24_564),
+            with_gpu(snapshot("http://b", 0, ready()), "NVIDIA RTX PRO Test Workstation Edition", 97_887),
+            with_gpu(snapshot("http://c", 0, ready()), "NVIDIA GeForce Test 32 GB", 32_607),
         ];
-        assert_eq!(pick_box(&fleet, "m"), Some(1), "6000 > GPU-B > GPU-A");
+        assert_eq!(pick_box(&fleet, "m"), Some(1), "96 GB > 32 GB > 24 GB");
         assert_eq!(pick_for_domain(&fleet, "image"), Some((1, "m".to_string())));
 
-        // But it never outranks the weights: the GPU-A HOLDS the model and
-        // the 6000 would have to fetch it.
+        // But it never outranks the weights: the 24 GB card HOLDS the model
+        // and the workstation card would have to fetch it.
         let cold_fast = vec![
-            with_gpu(snapshot("http://a", 0, ready()), "NVIDIA GeForce GPU-A"),
+            with_gpu(snapshot("http://a", 0, ready()), "NVIDIA GeForce Test 24 GB", 24_564),
             with_gpu(
                 snapshot("http://b", 0, vec![model("m", "image", MODEL_STATE_ABSENT, true)]),
-                "NVIDIA GPU-C",
+                "NVIDIA RTX PRO Test Workstation Edition",
+                97_887,
             ),
         ];
         assert_eq!(pick_box(&cold_fast, "m"), Some(0));
@@ -2174,14 +2163,10 @@ mod tests {
 
     #[test]
     fn gpu_eta_throughput_has_a_conservative_unknown_floor() {
-        assert_eq!(
-            gpu_throughput("NVIDIA GPU-C"),
-            1.6
-        );
-        assert_eq!(gpu_throughput("NVIDIA GeForce GPU-B"), 1.3);
-        assert_eq!(gpu_throughput("NVIDIA GeForce GPU-A"), 1.0);
-        assert_eq!(gpu_throughput("NVIDIA RTX 6000 Ada Generation"), 0.7);
-        assert_eq!(gpu_throughput(""), 0.7);
+        assert_eq!(gpu_throughput(97_887), 1.6);
+        assert_eq!(gpu_throughput(32_607), 1.3);
+        assert_eq!(gpu_throughput(24_564), 1.0);
+        assert_eq!(gpu_throughput(12_288), 0.7);
         assert_eq!(
             gpu_throughput_of(&snapshot("http://quiet", 0, Vec::new())),
             0.7
@@ -2189,7 +2174,8 @@ mod tests {
         assert_eq!(
             gpu_throughput_of(&with_gpu(
                 snapshot("http://fast", 0, Vec::new()),
-                "NVIDIA GeForce GPU-B",
+                "NVIDIA GeForce Test 32 GB",
+                32_607,
             )),
             1.3
         );
@@ -2387,7 +2373,8 @@ mod tests {
         let fleet = vec![
             with_gpu(
                 snapshot("http://ready-fast", 0, vec![ready]),
-                "NVIDIA GPU-C",
+                "NVIDIA RTX PRO Test Workstation Edition",
+                97_887,
             ),
             with_gpu(
                 snapshot(
@@ -2395,7 +2382,8 @@ mod tests {
                     0,
                     vec![model("m", "image", MODEL_STATE_LOADED, true)],
                 ),
-                "unlisted slow GPU",
+                "NVIDIA Test 16 GB",
+                16_384,
             ),
         ];
 
@@ -2611,7 +2599,7 @@ mod tests {
         h3.vram_gb = Some(90.0);
         let mut snaps = vec![
             // Required admission = 90 GiB estimate + 2 GiB reserve = 94,208
-            // MiB. The GPU-C can fit it in total, but not while only 24
+            // MiB. The 96 GB card can fit it in total, but not while only 24
             // GiB is free.
             with_vram(
                 snapshot("http://192.0.2.80:8123", 0, vec![h3.clone()]),
@@ -2656,7 +2644,7 @@ mod tests {
             pick_for_domain_scored(&snaps, "video"),
             Some((0, "minimax-h3".to_string(), 3))
         );
-        // Dispatch selection refuses every node until .80 has enough free.
+        // Dispatch selection refuses every node until the 96 GiB one has enough free.
         assert_eq!(pick_box_admitted(&snaps, "minimax-h3"), None);
         assert_eq!(pick_for_domain_admitted(&snaps, "video"), None);
 
@@ -2673,36 +2661,36 @@ mod tests {
     }
 
     #[test]
-    fn usable_vram_excludes_gpu_b_for_flux2_but_admits_gpu_c() {
+    fn usable_vram_excludes_a_32gb_card_for_flux2_but_admits_a_96gb_card() {
         let mut flux2 = model("flux2-dev", "image", MODEL_STATE_READY, true);
         flux2.vram_gb = Some(29.0);
-        let mut gpub = with_vram(
+        let mut card32 = with_vram(
             snapshot("http://192.0.2.89", 0, vec![flux2.clone()]),
             29_785,
             32_607,
             2_048,
         );
-        gpub.health.as_mut().unwrap().vram_usable_mb = Some(30_603);
-        let mut gpuc = with_vram(
-            snapshot("http://gpu-c", 0, vec![flux2]),
+        card32.health.as_mut().unwrap().vram_usable_mb = Some(30_603);
+        let mut card96 = with_vram(
+            snapshot("http://card-96", 0, vec![flux2]),
             36_535,
             97_887,
             2_048,
         );
-        gpuc.health.as_mut().unwrap().vram_usable_mb = Some(36_535);
+        card96.health.as_mut().unwrap().vram_usable_mb = Some(36_535);
 
         assert_eq!(
-            model_admission(&gpub, "flux2-dev"),
+            model_admission(&card32, "flux2-dev"),
             Some(VramAdmission::Incompatible {
                 required_total_mb: 31_744,
                 total_mb: 30_603,
             })
         );
         assert_eq!(
-            model_admission(&gpuc, "flux2-dev"),
+            model_admission(&card96, "flux2-dev"),
             Some(VramAdmission::Admitted)
         );
-        assert_eq!(pick_box_admitted(&[gpub, gpuc], "flux2-dev"), Some(1));
+        assert_eq!(pick_box_admitted(&[card32, card96], "flux2-dev"), Some(1));
     }
 
     #[test]
@@ -2792,7 +2780,8 @@ mod tests {
         let fleet = vec![
             with_gpu(
                 snapshot("http://ready-fast.example", 0, vec![ready]),
-                "NVIDIA GPU-C",
+                "NVIDIA RTX PRO Test Workstation Edition",
+                97_887,
             ),
             with_gpu(
                 snapshot(
@@ -2800,7 +2789,8 @@ mod tests {
                     0,
                     vec![model("same-model", "image", MODEL_STATE_LOADED, true)],
                 ),
-                "unlisted slow GPU",
+                "NVIDIA Test 16 GB",
+                16_384,
             ),
         ];
 
@@ -2885,7 +2875,7 @@ mod tests {
         let mut sa3 = model("sa3-sfx", "audio", MODEL_STATE_LOADED, true);
         sa3.vram_gb = Some(3.0);
         let snap = with_vram(
-            snapshot("http://gpub", 0, vec![target, flux, moss, sa3]),
+            snapshot("http://card32", 0, vec![target, flux, moss, sa3]),
             166,
             32 * 1024,
             2 * 1024,
@@ -2908,7 +2898,7 @@ mod tests {
         let mut resident = model("small", "audio", MODEL_STATE_LOADED, true);
         resident.vram_gb = Some(3.0);
         let snap = with_vram(
-            snapshot("http://gpub", 0, vec![target, resident]),
+            snapshot("http://card32", 0, vec![target, resident]),
             512,
             32 * 1024,
             2 * 1024,
@@ -3011,7 +3001,7 @@ mod tests {
         let mut flux = model("flux1-schnell", "image", MODEL_STATE_LOADED, true);
         flux.vram_gb = Some(24.0);
         let enforcing = with_vram(
-            snapshot("http://gpub", 0, vec![flux.clone()]),
+            snapshot("http://card32", 0, vec![flux.clone()]),
             1_500,
             32_607,
             2 * 1024,
@@ -3025,7 +3015,7 @@ mod tests {
         // The identical shape on a legacy node fails closed: the set fits by
         // estimate, but 1,500 MB free is under the workspace reserve and no
         // service-side gate exists to defend the job.
-        let legacy = with_legacy_vram(snapshot("http://gpub", 0, vec![flux]), 1_500, 32_607);
+        let legacy = with_legacy_vram(snapshot("http://card32", 0, vec![flux]), 1_500, 32_607);
         assert_eq!(
             model_admission(&legacy, "flux1-schnell"),
             Some(VramAdmission::Waiting {

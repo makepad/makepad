@@ -26,12 +26,15 @@ mod drag_out;
 mod ime;
 mod keys;
 mod main_lag;
+mod restack;
 mod screen;
 mod test_resize;
 mod tray;
 mod window;
 
 pub use app::{host_dark, run_main_loop, stop_main_loop};
+/// The exec restart's stacking handover (restack.rs).
+pub use restack::handover as restack_handover;
 /// `crate::set_menu_bar_app`.
 pub static MENU_BAR_APP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 pub(crate) use app::wake_idle_main;

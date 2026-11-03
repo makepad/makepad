@@ -524,7 +524,7 @@ impl D3d11 {
                 unsafe { self.dev.ctx.End(t.stamp(q).as_ID3D11Asynchronous()) };
             }
             let encoded = if pass.kind == crate::types::pass_kind::COMPUTE {
-                self.encode_compute(s, pass, view).map(|_| None)
+                self.encode_compute(s, pass, view, timer.as_mut()).map(|_| None)
             } else if split_pass == Some(pass_index) {
                 self.encode_split(s, target, pass, records, view, now, &mut deps).map(|(image, sp)| { split = Some(sp); image })
             } else {

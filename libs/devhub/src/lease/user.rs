@@ -13,8 +13,8 @@
 //! A Desk Link viewer showing the node ([`UserTrack::watched`]: its tab selected in a visible
 //! window, which the WM counts as an unpaused viewer) holds back what a person watching would see
 //! (a WM restart) while its input is under [`VIEWER_HOLDS_MIN`] old; it takes no box out of the
-//! pool. A tab merely connected holds nothing: the viewer keeps tabs on many nodes (102's and
-//! 103's WM restarts waited on one for good, 11-02).
+//! pool. A tab merely connected holds nothing: the viewer keeps tabs on many nodes (two nodes'
+//! WM restarts waited on one for good, 11-02).
 
 use super::UserSense;
 

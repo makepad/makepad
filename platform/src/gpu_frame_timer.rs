@@ -95,6 +95,17 @@ pub fn take_watched(name: &str) -> Vec<f32> {
     w.iter_mut().find(|e| e.0 == name).map_or_else(Vec::new, |e| std::mem::take(&mut e.1))
 }
 
+/// An individual dispatch's GPU duration, independent of frame aggregation.
+pub(crate) fn record_dispatch(name: &str, ns: u64) {
+    let Ok(mut watched) = WATCHED.lock() else { return };
+    if let Some((_, samples)) = watched.iter_mut().find(|e| e.0 == name) {
+        if samples.len() >= KEEP_WATCHED {
+            samples.remove(0);
+        }
+        samples.push(ns as f32 * 0.000001);
+    }
+}
+
 fn note_watched(timing: &GpuFrameTiming, pass_count: usize) {
     let Ok(mut w) = WATCHED.lock() else { return };
     for (name, samples) in w.iter_mut() {

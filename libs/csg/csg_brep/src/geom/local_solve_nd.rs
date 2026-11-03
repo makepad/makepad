@@ -416,7 +416,6 @@ impl<'a, E: EvalNFunctions + ?Sized> LocalSolveNd<'a, E> {
         let mut jacobian = Matrix::try_new(n, n)?;
         let mut equation_values = vec![0.0; n];
         let mut next_guess = vec![0.0; n];
-        let mut step_unclamped = vec![0.0; n];
 
         // for function evaluators that want to look at the current intervals
         if self.evaluator.has_intervals() {
@@ -478,15 +477,15 @@ impl<'a, E: EvalNFunctions + ?Sized> LocalSolveNd<'a, E> {
             }
 
             // parameter steps from the Jacobian system J * deltas = -F
-            match jacobian.solve_linear_system(&equation_values) {
-                Ok(s) => step_unclamped = s.x,
+            let step_unclamped = match jacobian.solve_linear_system(&equation_values) {
+                Ok(s) => s.x,
                 Err(SolidError::Upstream { code: SM_ERR, .. }) => {
                     // exit case - the Jacobian system is not solvable
                     self.termination_reason = TerminationReason::BadJacobian;
                     break;
                 }
                 Err(e) => return Err(e),
-            }
+            };
 
             // line search: find a next guess that reduces the sum of |F|
             let mut have_good_step = false;

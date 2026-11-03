@@ -37,8 +37,8 @@ pub const CHUNK_TOKENS: usize = 24;
 /// 512 rather than a smaller number because a prefill chunk's cost is very
 /// far from proportional to the tokens in it: the attention kernel walks the
 /// lane's whole key span once per chunk, and the FFN of a 27B model at 64
-/// columns is latency-bound rather than compute-bound. Measured on a GPU-B,
-/// 4096 tokens into one lane (.89, `llama-slot-probe --prefill-rate`):
+/// columns is latency-bound rather than compute-bound. Measured on a 32 GB card,
+/// 4096 tokens into one lane (`llama-slot-probe --prefill-rate`):
 ///
 /// | chunk | lane 0 | lane 1 (base 65536) |
 /// |---|---|---|
@@ -987,7 +987,7 @@ pub struct LaneExecutor {
     /// slot 0 through the slot path — a prefill chunk or a batched step — since
     /// from then on the session's list is a stale copy of someone's past.
     ///
-    /// Without it, LIVE on .76: a cold multi-chunk prompt sent its FIRST chunk
+    /// Without it, LIVE on the chat node: a cold multi-chunk prompt sent its FIRST chunk
     /// through the slot path (the session was dirty from the previous
     /// conversation) and every LATER chunk through the session — appended at
     /// the old conversation's length, onto the old conversation's rows. The
@@ -1088,8 +1088,8 @@ impl LaneExecutor {
         let scheduler = scheduler.with_stop_tokens(session.stop_tokens());
         // Priced for the card this session is on. The verify curve is the term
         // that decides whether a deeper batched round pays, and it is a
-        // per-card measurement: the GPU-C verifies a column for ~3.2 ms
-        // where the GPU-B fit charges 5.7, and an allocator running the GPU-B
+        // per-card measurement: the workstation card verifies a column for ~3.2 ms
+        // where the consumer fit charges 5.7, and an allocator running the consumer
         // numbers there refuses rounds the box would win.
         let costs = crate::slots::StepCostModel::for_device(&session.device_name());
         let costs = if session.has_restricted_draft_head() {
@@ -1124,7 +1124,7 @@ impl LaneExecutor {
     }
 
     /// Which card's step-cost measurements the depth decision is priced with
-    /// (`"GPU-B"`, `"gpu-c"`), for the worker's boot line.
+    /// (`"consumer"`, `"workstation"`), for the worker's boot line.
     pub fn cost_calibration(&self) -> &'static str {
         self.costs.calibration()
     }
@@ -1203,7 +1203,7 @@ impl LaneExecutor {
     /// `plan.draft_depth` is the ladder's wall — what the column budget and the
     /// session's allocation allow at this width. This narrows it to what the
     /// measured cost curve says actually PAYS at this width, which at 3 and 4
-    /// lanes on a GPU-B with the full draft head is nothing: an extra draft
+    /// lanes on a 32 GB card with the full draft head is nothing: an extra draft
     /// column there buys fewer tokens than the wider verify batch costs.
     ///
     /// Clamped by every lane's remaining context too. A round writes
@@ -1946,7 +1946,7 @@ mod tests {
         ));
     }
 
-    /// REGRESSION, 2026-08-21. Live `.76` chat: a user said "hi" and the
+    /// REGRESSION, 2026-08-21. Live chat: a user said "hi" and the
     /// reply never ended.
     ///
     /// The batched path ended a lane at `max_new` and nowhere else, so a reply
@@ -2695,7 +2695,7 @@ mod tests {
         }
     }
 
-    /// LIVE on .76, 2026-08-25: every cold turn after the first went through
+    /// LIVE on the chat node, 2026-08-25: every cold turn after the first went through
     /// the slot path because the session still held the previous
     /// conversation, and a lone slot-path lane does not speculate — the box
     /// served single-chunk prompts at the plain 65 tok/s against a solo path

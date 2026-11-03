@@ -11,7 +11,7 @@ pub enum Outcome {
     Refused,
     Reverted,
     Panic,
-    RelaunchFailed,
+    StaleFrame,
     Restarted,
     RestartFailed,
     FirstFrameTimeout,
@@ -25,7 +25,7 @@ impl Outcome {
             Self::Refused => "refused",
             Self::Reverted => "reverted",
             Self::Panic => "panic",
-            Self::RelaunchFailed => "relaunch_failed",
+            Self::StaleFrame => "stale_frame",
             Self::Restarted => "restarted",
             Self::RestartFailed => "restart_failed",
             Self::FirstFrameTimeout => "first_frame_timeout",
@@ -39,7 +39,7 @@ impl Outcome {
             "refused" => Self::Refused,
             "reverted" => Self::Reverted,
             "panic" => Self::Panic,
-            "relaunch_failed" => Self::RelaunchFailed,
+            "stale_frame" => Self::StaleFrame,
             "restarted" => Self::Restarted,
             "restart_failed" => Self::RestartFailed,
             "first_frame_timeout" => Self::FirstFrameTimeout,
@@ -49,7 +49,7 @@ impl Outcome {
     }
 
     pub fn failure(self) -> bool {
-        matches!(self, Self::Refused | Self::Reverted | Self::Panic | Self::RelaunchFailed)
+        matches!(self, Self::Refused | Self::Reverted | Self::Panic | Self::StaleFrame)
     }
 }
 

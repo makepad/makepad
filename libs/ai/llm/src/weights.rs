@@ -144,7 +144,7 @@ impl GgufWeightLayout {
 
         // Lazy page-in makes the load look instant and hands the bill to
         // whoever touches the weights first — the first forward pass —
-        // where it is paid at demand-fault speed. Measured on an M-series:
+        // where it is paid at demand-fault speed. Measured on an M-series Mac:
         // faulting a cold mapping runs ~0.8 GB/s, while prefaulting the
         // same file runs ~6.3 GB/s, so the bytes cost ~7.7x more when they
         // arrive one fault at a time. `prefault` pulls that work forward

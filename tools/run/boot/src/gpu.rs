@@ -407,13 +407,14 @@ impl Pipeline {
         if count == 0 {
             return;
         }
+        let uniforms = [Slice::EMPTY, Slice::EMPTY, writer.keep(uniforms), writer.keep(&self.scope)];
         writer.draw(Draw {
             pipeline: self.id,
             vb: VERTICES,
             ib: INDICES,
             index: [0, 6],
             inst: Inst::buffer(buffer, 0, count),
-            uniforms: [Slice::EMPTY, Slice::EMPTY, Slice::of(uniforms), Slice::of(&self.scope)],
+            uniforms,
             tex: Default::default(),
             scissor,
             bounds: [f32::NAN; 4],
@@ -434,21 +435,15 @@ impl Pipeline {
             return;
         }
         let textures = if self.textures != 0 { writer.put_ids(&[atlas]) } else { Default::default() };
+        let inst = Inst::inline(writer.keep(data), (data.len() / self.instances.defaults.len()) as u32);
+        let uniforms = [Slice::EMPTY, Slice::EMPTY, writer.keep(uniforms), writer.keep(&self.scope)];
         writer.draw(Draw {
             pipeline: self.id,
             vb: VERTICES,
             ib: INDICES,
             index: [0, 6],
-            inst: Inst::inline(
-                Slice::of(data),
-                (data.len() / self.instances.defaults.len()) as u32,
-            ),
-            uniforms: [
-                Slice::EMPTY,
-                Slice::EMPTY,
-                Slice::of(uniforms),
-                Slice::of(&self.scope),
-            ],
+            inst,
+            uniforms,
             tex: textures,
             scissor,
             bounds: [f32::NAN; 4],

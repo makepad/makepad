@@ -111,6 +111,7 @@ pub const TYPE_REGISTERED: u32 = 0;
 pub const TYPE_DEFAULT_FOR_ID: u32 = 1;
 pub const TYPE_OBJECT_ID: u32 = 2;
 pub const TYPE_NAME_IN_CHAIN: u32 = 3;
+pub const TYPE_NAME_BY_ID: u32 = 4;
 
 /// What type_info answers (by its mode).
 #[relax_api(plain)]
@@ -484,6 +485,7 @@ impl ScriptHeap {
     /// retained capacity of script strings, arrays, objects, slots, and intern
     /// tables; it intentionally cannot account for opaque host handles,
     /// adapter-owned Rust allocations, or the process allocator's metadata.
+    #[relax_api]
     pub fn set_max_heap_bytes(&mut self, maximum_bytes: Option<usize>) {
         self.max_heap_bytes = maximum_bytes;
         self.heap_limit_exceeded = false;
@@ -540,6 +542,7 @@ impl ScriptHeap {
     /// allocation path. Clearing also re-opens the cap for later charges; a
     /// host that wants the refusal to persist re-checks `accounted_heap_bytes`
     /// against its limit before running more script.
+    #[relax_api]
     pub fn take_heap_limit_exceeded(&mut self) -> bool {
         let exceeded = std::mem::take(&mut self.heap_limit_exceeded);
         if let Some(cap) = self.heap_cap.as_mut() {
@@ -751,7 +754,8 @@ impl ScriptHeap {
     /// Reads the type table by `mode`: TYPE_REGISTERED the check registered for `id` (`check`);
     /// TYPE_DEFAULT_FOR_ID the default object of the type `id` (`object`, `found`); TYPE_OBJECT_ID
     /// the id of the type of `obj` (`type_id`, `found`); TYPE_NAME_IN_CHAIN the registered name of
-    /// `obj` or of its nearest typed prototype (`name`, `found`).
+    /// `obj` or of its nearest typed prototype (`name`, `found`); TYPE_NAME_BY_ID the script name
+    /// the type `id` is registered under (`name`, `found`).
     #[relax_api]
     pub fn type_info(&self, mode: u32, id: ScriptTypeId, obj: ScriptObject) -> TypeInfo {
         let mut r = TypeInfo { check: std::ptr::null(), object: ScriptObject::ZERO, type_id: id, name: LiveId(0), found: false, has_object: false, proto: NIL, name_ptr: std::ptr::null(), name_len: 0 };
@@ -779,6 +783,12 @@ impl ScriptHeap {
                     r.found = true;
                 }
             }
+            TYPE_NAME_BY_ID => {
+                if let Some(name) = self.type_name_of(id) {
+                    r.name = name;
+                    r.found = true;
+                }
+            }
             TYPE_OBJECT_ID => {
                 if let Some(ti) = self.objects[obj].tag.as_type_index() {
                     if let Some(object) = &self.type_check[ti.0 as usize].object {
@@ -791,7 +801,7 @@ impl ScriptHeap {
                 let mut cur = Some(obj);
                 while let Some(obj) = cur {
                     if let Some(type_id) = self.object_type_id(obj) {
-                        if let Some(name) = self.type_name_by_id(type_id) {
+                        if let Some(name) = self.type_name_of(type_id) {
                             r.name = name;
                             r.found = true;
                             break;
@@ -1009,7 +1019,14 @@ impl ScriptHeap {
     }
 
     /// Returns the registered script name for a given TypeId, if any.
+    #[inline]
     pub fn type_name_by_id(&self, type_id: ScriptTypeId) -> Option<LiveId> {
+        let r = self.type_info(TYPE_NAME_BY_ID, type_id, ScriptObject::ZERO);
+        r.found.then_some(r.name)
+    }
+
+    /// type_name_by_id inside the type table's op (it reads rustc's tables)
+    fn type_name_of(&self, type_id: ScriptTypeId) -> Option<LiveId> {
         if let Some(index) = self.type_index.get(&type_id) {
             if let Some(object) = &self.type_check[index.0 as usize].object {
                 return object.name;

@@ -129,17 +129,17 @@ impl PendingPlan {
     pub fn on_early_publish(&self, notify: impl Fn() + Send + Sync + 'static) {
         let _ = self.early.notify.set(Box::new(notify));
     }
-    pub fn skips(&self, root: &str, path: &str) -> bool {
+    pub fn skips(&self, root: &str, test: bool, path: &str) -> bool {
         // MAKEPAD_RUN_LAZY_DEFER=<path suffix>,..: these files are skipped whatever the
         // closure says; the post-boot loader brings them in when code needs them (its test)
         if self.pending_crates.first().is_some_and(|c| c.cfg.session.options.rs_lazy) && forced_deferral(path) {
             return true;
         }
-        if self.pending_crates.iter().position(|c| c.root == root).is_some_and(|ci| self.eagerly_selected(ci)) {
+        if self.pending_crates.iter().position(|c| c.root == root && c.cfg.holds("test") == test).is_some_and(|ci| self.eagerly_selected(ci)) {
             return false;
         }
         self.pending_crates.first().is_some_and(|c| c.cfg.session.options.rs_lazy)
-            && std::ops::Deref::deref(self).skips(root, path)
+            && std::ops::Deref::deref(self).skips(root, test, path)
     }
 }
 impl std::ops::Deref for PendingPlan {
@@ -876,8 +876,8 @@ impl Plan {
             .filter(|k| !self.reached.contains(*k)).map(|k| k.1.clone()).collect()
     }
 
-    pub fn skips(&self, root: &str, path: &str) -> bool {
-        self.crates.iter().position(|c| c.root == root).is_some_and(|ci| {
+    pub fn skips(&self, root: &str, test: bool, path: &str) -> bool {
+        self.crates.iter().position(|c| c.root == root && c.cfg.holds("test") == test).is_some_and(|ci| {
             let key = (ci, path.to_owned());
             ci >= self.image.eager_prefix && self.indexed.contains(&key) && !self.reached.contains(&key)
         })

@@ -40,6 +40,7 @@ use crate::ledger::{Kind, LedgerEntry};
 use crate::session::*;
 use crate::types::*;
 pub(crate) use device::Worker;
+use device::{compile_rank, Compilers};
 use pipeline::{PassKey, RenderPass, State};
 pub(crate) use resources::{buffer_usage, Buffer};
 use submit::{Batch, Event, Mailbox, Token};
@@ -49,7 +50,10 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Weak};
 
 struct Texture { gen: u32, image: Arc<Image> }
-struct Retained { gen: u32, buffer: Arc<Buffer>, evictable: bool }
+/// `written`: made unzeroed, and the bytes its updates wrote from offset 0 on, in order; the
+/// rest is zeroed before the next submission ([`Vulkan::pay_zeroes`]) or before an update that
+/// does not continue them. None: no zeroing owed.
+struct Retained { gen: u32, buffer: Arc<Buffer>, evictable: bool, written: Option<u64> }
 /// A session's pipeline. `desc` is its own create's: the program may be shared with an identical
 /// shader of another session, whose names (string ids) are that session's; the GPU profiler names
 /// the pipeline by this one.
@@ -82,6 +86,8 @@ pub struct Vulkan {
     info: HalInfo,
     tex: FastMap<(u32, u32), Texture>,
     buf: FastMap<(u32, u32), Retained>,
+    /// the retained buffers made since the last submission that may still owe zeroing
+    zero_owed: Vec<(u32, u32)>,
     pipe: FastMap<(u32, u32), Pipe>,
     compute: FastMap<(u32, u32), compute::Pipe>,
     programs: FastMap<Vec<u8>, Weak<State>>,
@@ -127,7 +133,7 @@ pub struct Vulkan {
     mailbox: Mailbox,
     queue: Option<Worker>,
     complete: Arc<Worker>,
-    compiler: Worker,
+    compiler: Compilers,
     /// The UI's memory reserve and the creates waiting for room (`crate::gpu_pressure`).
     pressure: crate::gpu_pressure::Pressure,
     /// The instance extensions the device was made with (a replacement device gets the same).
@@ -201,7 +207,7 @@ impl Vulkan {
         let unified = dev.properties.device_type == makepad_vulkan::vk::PhysicalDeviceType::INTEGRATED_GPU;
         let working_set = if unified { heap_bytes / 2 } else { heap_bytes };
         let info = HalInfo { backend: backend_id::VULKAN, dialect: dialect::SPIRV, formats, msaa: dev.msaa, dpi: 1.0,
-            flags: if dev.timestamp_bits > 0 { info_flags::GPU_TIMESTAMPS } else { 0 } | if dev.multiview { info_flags::MULTIVIEW } else { 0 },
+            flags: info_flags::DEVICE_RESET | if dev.timestamp_bits > 0 { info_flags::GPU_TIMESTAMPS } else { 0 } | if dev.multiview { info_flags::MULTIVIEW } else { 0 },
             max_texture: dev.properties.limits.max_image_dimension2_d,
             max_window: [dev.properties.limits.max_framebuffer_width, dev.properties.limits.max_framebuffer_height],
             max_buffer: dev.properties.limits.max_storage_buffer_range as u64, working_set,
@@ -224,14 +230,14 @@ impl Vulkan {
         info.set_device_name(&unsafe { std::ffi::CStr::from_ptr(dev.properties.device_name.as_ptr()) }.to_string_lossy());
         crate::gpu_limits::set_max_gpu_buffer_bytes(info.max_buffer);
         crate::gpu_limits::set_gpu_working_set_bytes(info.working_set);
-        Ok(Self { #[cfg(target_os = "linux")] native_apps: Default::default(), #[cfg(any(target_os = "linux", target_os = "android"))] media: Default::default(), #[cfg(target_os = "linux")] capture_pool: FastMap::default(), #[cfg(any(target_os = "linux", target_os = "android"))] shell: None, dev, info, tex: FastMap::default(), buf: FastMap::default(), pipe: FastMap::default(), compute: FastMap::default(), programs: FastMap::default(), draw_bins: Vec::new(), draw_images: Vec::new(),
+        Ok(Self { #[cfg(target_os = "linux")] native_apps: Default::default(), #[cfg(any(target_os = "linux", target_os = "android"))] media: Default::default(), #[cfg(target_os = "linux")] capture_pool: FastMap::default(), #[cfg(any(target_os = "linux", target_os = "android"))] shell: None, dev, info, tex: FastMap::default(), buf: FastMap::default(), zero_owed: Vec::new(), pipe: FastMap::default(), compute: FastMap::default(), programs: FastMap::default(), draw_bins: Vec::new(), draw_images: Vec::new(),
             #[cfg(target_os = "android")] native_layers: Default::default(),
             passes: FastMap::default(), msaa: FastMap::default(), win: FastMap::default(), hosted_sizes: FastMap::default(), scanout_images: FastMap::default(), #[cfg(target_os = "linux")] stamp: None, #[cfg(target_os = "linux")] window_px: [0, 0], badged: FastMap::default(), retained_stale: Default::default(), direct_frame: FastMap::default(), compose: None, aliases: FastMap::default(), pick_ids: FastMap::default(), pick_pending: HashSet::new(),
             fallback: FastMap::default(), windows: surface::Windows::new(source), sharing,
             #[cfg(target_os = "linux")] foreign_support,
             batch: None, spares: Default::default(), mailbox: Mailbox::new(sessions),
             queue: Some(Worker::new("makepad-vulkan-submit")?), complete: Arc::new(Worker::new("makepad-vulkan-complete")?),
-            compiler: Worker::new("makepad-vulkan-compile")?, pressure: Default::default(),
+            compiler: Compilers::new(), pressure: Default::default(),
             instance_extensions, lost_posted: false, retry_ns: 0, reset_failures: 0, simulate: false,
             simulate_at_ns: super::simulated_loss_at() })
     }
@@ -248,7 +254,20 @@ impl Vulkan {
         Ok(self.batch.as_mut().unwrap())
     }
 
+    /// Zeroes what the updates of the retained buffers made since the last submission left
+    /// unwritten: the GPU reads them only once a batch is submitted, so every submission pays
+    /// first. A buffer its updates filled in order owes nothing.
+    fn pay_zeroes(&mut self) {
+        for key in std::mem::take(&mut self.zero_owed) {
+            let Some(r) = self.buf.get_mut(&key) else { continue };
+            if let Some(from) = r.written.take() {
+                if let Err(e) = r.buffer.zero(from) { eprintln!("[hal-vulkan] buffer zero: {e}"); }
+            }
+        }
+    }
+
     fn flush(&mut self) {
+        self.pay_zeroes();
         if let Some(batch) = self.batch.take() { batch.finish(self.queue.as_ref().unwrap(), self.complete.clone(), self.mailbox.clone()); }
     }
 
@@ -295,6 +314,7 @@ impl Vulkan {
                     #[cfg(target_os = "linux")]
                     if let Some(shell) = self.shell { shell.presented(self.window_key(sid, target)); }
                 }
+                Event::DispatchTime { name, gpu_ns } => world.to_session(sid, |q| q.dispatch_time(name.as_bytes(), gpu_ns)),
                 Event::Frame { target, kind, frame, window, gpu_ns, gpu_span } => {
                     if let Some(s) = world.session_mut(sid) {
                         s.stats.frames += 1;
@@ -510,8 +530,12 @@ impl Backend for Vulkan {
     }
     fn host_gpu(&mut self) -> Option<&mut dyn Gpu> { Some(self) }
     fn step(&mut self, world: &mut World, sid: u32) {
-        self.flush(); self.drain(world);
+        self.flush();
+        // Report a detected loss before retiring its completion records. Failed
+        // batches also return FrameDone; draining them first erases the kernel
+        // attribution that every session needs in its DeviceLost event.
         self.recover(world);
+        self.drain(world);
         #[cfg(target_os = "linux")] self.native_drain(world);
         #[cfg(target_os = "linux")]
         if let Some(shell) = self.shell {
@@ -617,11 +641,11 @@ impl Backend for Vulkan {
 }
 
 impl Vulkan {
-    /// Compiles `state`'s program on the compile worker; its answer wakes the pumps of every
+    /// Compiles `state`'s program on a compile thread; its answer wakes the pumps of every
     /// session waiting on it (`State::wait`).
     fn compile(&self, state: &Arc<State>) {
         let job = Arc::downgrade(state); let dev = self.dev.clone(); let notify = self.mailbox.notify.clone();
-        self.compiler.push(move || {
+        self.compiler.push(state.rank.clone(), move || {
             // the pipelines that wanted it are gone (their session closed, they were
             // destroyed): no compile. A quit while an app's first pipelines were queued
             // compiled them all before the last session's close could settle the worker.
@@ -692,7 +716,7 @@ impl exec::DeviceReset for Vulkan {
         self.flush();
         let queue = Worker::new("makepad-vulkan-submit")?;
         let complete = Arc::new(Worker::new("makepad-vulkan-complete")?);
-        let compiler = Worker::new("makepad-vulkan-compile")?;
+        let compiler = Compilers::new();
         let old_queue = self.queue.replace(queue).expect("live submit worker");
         let old_complete = std::mem::replace(&mut self.complete, complete);
         let old_compiler = std::mem::replace(&mut self.compiler, compiler);
@@ -897,14 +921,26 @@ impl Gpu for Vulkan {
         Some(desc)
     }
     fn buffer_create(&mut self, s: &mut Session, id: Id, b: &mut BufferObj) -> Result<(), String> {
-        let buffer = Buffer::new(self.dev.clone(), b.size, compute::usage(b.kind, self.dev.compute))?; b.bytes = buffer.bytes;
-        self.buf.insert((s.id, id.index), Retained { gen: id.gen, buffer, evictable: b.evictable }); Ok(())
+        let buffer = Arc::new(Buffer::unzeroed(self.dev.clone(), b.size, compute::usage(b.kind, self.dev.compute))?); b.bytes = buffer.bytes;
+        self.buf.insert((s.id, id.index), Retained { gen: id.gen, buffer, evictable: b.evictable, written: Some(0) });
+        self.zero_owed.push((s.id, id.index)); Ok(())
     }
     fn buffer_update(&mut self, s: &mut Session, id: Id, b: &mut BufferObj, off: u64, data: &[u8]) {
         let result = (|| {
             let end = off.checked_add(data.len() as u64).filter(|&end| end <= b.size).ok_or("buffer write exceeds storage")?;
             let copy = {
                 let retained = self.buf.get_mut(&(s.id, id.index)).filter(|r| r.gen == id.gen).ok_or("missing retained buffer")?;
+                if let Some(from) = retained.written {
+                    // updates that continue from offset 0 leave nothing behind them to zero; any
+                    // other, or a recorded command that reads the buffer first (it is replaced
+                    // below), has the rest zeroed now
+                    if off == from && Arc::strong_count(&retained.buffer) == 1 {
+                        retained.written = (end < b.size).then_some(end);
+                    } else {
+                        retained.written = None;
+                        retained.buffer.zero(from)?;
+                    }
+                }
                 if Arc::strong_count(&retained.buffer) > 1 {
                     let old = retained.buffer.clone();
                     let fresh = Buffer::new(self.dev.clone(), b.size, compute::usage(b.kind, self.dev.compute))?;

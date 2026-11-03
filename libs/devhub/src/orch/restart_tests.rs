@@ -12,7 +12,8 @@ use makepad_remote::{lines, Endpoint};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-const NODES: [&str; 6] = ["106", "105", "n3", "n4", "n5", "n6"];
+/// The first two are the CI boxes (their lease.conf opts in).
+const NODES: [&str; 6] = ["c1", "c2", "n3", "n4", "n5", "n6"];
 
 fn role_env(name: &str) -> PathBuf {
     PathBuf::from(std::env::var_os(name).unwrap_or_default())
@@ -25,7 +26,7 @@ fn restart_role_nodes() {
         return;
     }
     let base = role_env("DEVHUB_RESTART_BASE");
-    // The boots need a gui box, independent of the host's WM (102 has none on today's wire).
+    // The boots need a gui box, independent of the host's WM (a node's may speak another wire).
     let wm = std::os::unix::net::UnixListener::bind(role_env("XDG_RUNTIME_DIR").join("makepad-wm-0")).unwrap();
     let _ = std::thread::spawn(move || {
         use std::io::{BufRead, Write};
@@ -40,7 +41,8 @@ fn restart_role_nodes() {
         std::fs::create_dir_all(&dir).unwrap();
         // (beside the test binary: a build lease asks for more disk than /tmp may hold)
         let work = work_dir(&base, name);
-        let conf = crate::lease::caps::LeaseConf::parse(&format!("work = {}\nrole = pool\ndisk_floor_gb = 0\ndisk_warn_gb = 0\n", work.display()), &dir);
+        let ci = if NODES[..2].contains(&name) { "slots.ci = 1\n" } else { "" };
+        let conf = crate::lease::caps::LeaseConf::parse(&format!("work = {}\nrole = pool\ndisk_floor_gb = 0\ndisk_warn_gb = 0\n{ci}", work.display()), &dir);
         let x = Exec::new(name, conf, dir.join("leases"), Opts { scopes: Some(false), ..Opts::default() }, Arc::new(|_| {}));
         let ep = Endpoint::new(name);
         for &word in WORDS {
@@ -208,15 +210,16 @@ fn a_master_restart_ends_nothing() {
         assert!(t.elapsed() < Duration::from_secs(30), "the nodes did not come up");
         std::thread::sleep(Duration::from_millis(50));
     }
-    let submit = format!("job submit {{\"tree\":{},\"rev\":{},\"jobs\":[{{\"kind\":\"test\",\"lane\":\"proof\",\"cmd\":[{}]}}]}}", json(&repo), makepad_remote::json_str(&format!("work@{work}")), json(&bin.join("job")));
+    let submit = format!("job submit {{\"tree\":{},\"rev\":{},\"jobs\":[{{\"kind\":\"test\",\"lane\":\"proof\",\"cmd\":[{}]}},{{\"kind\":\"test\",\"lane\":\"refused\",\"cmd\":[\"env\"]}}]}}", json(&repo), makepad_remote::json_str(&format!("work@{work}")), json(&bin.join("job")));
     let mut first = role("master", "orch::restart_tests::restart_role_master");
     first.env("DEVHUB_RESTART_SUBMIT", submit);
     let mut master = first.spawn().unwrap();
 
     // everything is on its box, running
     let state = || {
-        let text = std::fs::read(home.join("devhub/state.json")).unwrap_or_default();
-        makepad_strict_json::parse_depth(&text, 32).ok()
+        // Decode the durable document, including its file-backed completed records.
+        // The assertions below still check the same run/lease identities and exact output.
+        crate::state::Store::open_quiet(&home.join("devhub"), "").ok().map(|store| store.read(crate::state::Doc::to_value))
     };
     let num = |v: &makepad_strict_json::Value, k: &str| v.get(k).and_then(crate::lease::num).unwrap_or(0.0) as u64;
     let text = |v: &makepad_strict_json::Value, k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
@@ -266,6 +269,12 @@ fn a_master_restart_ends_nothing() {
     assert_eq!((text(&j, "state").as_str(), num(&j, "exit"), text(&j, "lease"), num(&j, "attempts")), ("failed", 7, job_lease, 1), "{}", j.to_json());
     let log = std::fs::read_to_string(home.join("devhub/jobs/J1.log")).unwrap();
     assert_eq!(log, "before\nafter\n", "the job's whole output, once");
+    // a run its node refuses is the job's result on its first box, not a lost box placed again
+    let refused = |s: &makepad_strict_json::Value| s.get("jobs").and_then(|j| j.as_arr()).and_then(|j| j.iter().find(|j| text(j, "lane") == "refused").cloned());
+    until("the refused job's result", &|s| refused(s).is_some_and(|j| !matches!(text(&j, "state").as_str(), "queued" | "leasing" | "running")));
+    let refused = refused(&state().unwrap()).unwrap();
+    assert_eq!((text(&refused, "state").as_str(), num(&refused, "attempts")), ("failed", 1), "{}", refused.to_json());
+    assert!(text(&refused, "note").contains("env needs a command"), "{}", refused.to_json());
 
     let verified = |s: &makepad_strict_json::Value| s.get("verify").and_then(|v| v.get("verified")).and_then(|v| v.as_arr()).is_some_and(|v| !v.is_empty());
     until("the verdict", &|s| (verified(s) || s.get("verify").and_then(|v| v.get("failing")).is_some_and(|f| !f.is_null()))

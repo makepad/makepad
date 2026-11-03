@@ -11,7 +11,9 @@ pub static PASS_NS: [std::sync::atomic::AtomicU64; 16] = [const { std::sync::ato
 /// MAKEPAD_RUN_OPT diagnostic toggles beyond OptCfg's fields: `-freecap` (no size allowance for
 /// O3 free inlines: R13's 1.9 MB functions, to exercise arm64 branch relaxation),
 /// `-costmodel` (rustc MIR cost admission);
-/// `-ic` disables the InstCombine subset (nonnull, phi compares, convs, niches, sinking).
+/// `-ic` disables the InstCombine subset (nonnull, phi compares, convs, niches, sinking);
+/// `-guard` inlines a live session's patchable callees unguarded (`Func::patch_flag`: the guard's
+/// cost, A/B; a patch then misses the copies inlined before it).
 pub fn opt_off(options: &relax_session::Options, tok: &str) -> bool {
     options.opt.iter().any(|t| t.trim() == tok)
 }

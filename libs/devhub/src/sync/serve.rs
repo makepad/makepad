@@ -40,6 +40,8 @@ pub struct Sync {
     seen: Seen,
     busy: Mutex<()>,
     last: Mutex<String>,
+    /// the JITs already told to restart onto the new binary: said once each, not every sync
+    stale_said: Mutex<std::collections::BTreeSet<(u32, String)>>,
 }
 
 fn short(sha: &str) -> &str {
@@ -52,7 +54,7 @@ fn err_line(e: &str) -> String {
 
 impl Sync {
     pub fn new(ctx: Arc<NodeCtx>, conf: SyncConf) -> Arc<Sync> {
-        Arc::new(Sync { ctx, conf: Arc::new(conf), seen: Seen::default(), busy: Mutex::new(()), last: Mutex::new("null".into()) })
+        Arc::new(Sync { ctx, conf: Arc::new(conf), seen: Seen::default(), busy: Mutex::new(()), last: Mutex::new("null".into()), stale_said: Mutex::new(Default::default()) })
     }
 
     fn event(&self, sev: Sev, line: String, detail: String) {
@@ -141,6 +143,19 @@ impl Sync {
                 Ok(_) => out.push(err_line("not an apply order")),
                 Err(e) => self.refuse(out, format!("sync: apply refused: {e}")),
             },
+            ["prune", order] => match self.seen.check(order) {
+                Ok(o) => match o.words.as_slice() {
+                    [w, repo, branches @ ..] if w == "prune" && git::valid_repo(repo) && branches.iter().all(|b| git::valid_branch(b)) => {
+                        let branches: Vec<&str> = branches.iter().map(String::as_str).collect();
+                        match Store::open(repo).and_then(|s| s.prune_pushed(&branches)) {
+                            Ok(()) => out.push(format!("{{\"pruned\":{}}}", branches.len())),
+                            Err(e) => out.push(err_line(&e)),
+                        }
+                    }
+                    _ => out.push(err_line("not a prune order")),
+                },
+                Err(e) => self.refuse(out, format!("sync: prune refused: {e}")),
+            },
             ["wm-restart", order] => match self.seen.check(order) {
                 Ok(o) if o.words.first().map(String::as_str) == Some("wm-restart") => {
                     let _busy = self.busy.lock().unwrap();
@@ -159,7 +174,7 @@ impl Sync {
                     Err(e) => out.push(err_line(&e)),
                 }
             }
-            _ => out.push(err_line("sync status | apply <order> | wm-restart <order> | tick <pid> <hex inspect line>")),
+            _ => out.push(err_line("sync status | apply <order> | prune <order> | wm-restart <order> | tick <pid> <hex inspect line>")),
         }
     }
 
@@ -178,9 +193,17 @@ impl Sync {
         impl Drop for Applying {
             fn drop(&mut self) {
                 APPLYING.store(false, std::sync::atomic::Ordering::Release);
+                *BUILDING_JIT.lock().unwrap_or_else(|e| e.into_inner()) = None;
             }
         }
         let _applying = Applying;
+        // the commits this apply builds the box's JIT of: a gate of exactly them waits for it
+        if self.conf.jit_app().is_some() && o.get("build") != Some("off") {
+            let at = |repo| o.get(repo).map(str::to_string).or_else(|| git::fleet_revision(&self.conf.checkout, repo));
+            if let Some(mp) = at("makepad") {
+                *BUILDING_JIT.lock().unwrap_or_else(|e| e.into_inner()) = Some((mp, at("commercial")));
+            }
+        }
         let t0 = Instant::now();
         let mut plan: Vec<(&str, Store, Option<String>, String)> = Vec::new();
         for repo in ["makepad", "commercial"] {
@@ -333,7 +356,21 @@ impl Sync {
         let mut built_ok = true;
         if o.get("build") != Some("off") && self.conf.build != Build::Off {
             self.event(Sev::Info, format!("sync: building ({:?})", self.conf.build).to_lowercase(), String::new());
-            let b = build::prebuild(&self.conf);
+            // the JIT it builds is kept by content: the work tree's leases (a gate) run on it
+            let target = self.conf.checkout.join("target");
+            let jit = self.conf.jit_app().is_some() && std::fs::create_dir_all(target.join("host")).and_then(|_| std::fs::write(target.join(crate::lease::loaders::MARK), "")).is_ok();
+            let jit_built = || {
+                if jit {
+                    match crate::lease::loaders::publish(&self.conf.checkout, &target) {
+                        Ok(Some(k)) => self.event(Sev::Info, format!("sync: kept the JIT binary {k} for this box's tree leases"), String::new()),
+                        Ok(None) => {}
+                        Err(e) => self.event(Sev::Info, format!("sync: the deployment's JIT is not kept: {e}"), String::new()),
+                    }
+                }
+                *BUILDING_JIT.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            };
+            let b = build::prebuild(&self.conf, &jit_built);
+            *BUILDING_JIT.lock().unwrap_or_else(|e| e.into_inner()) = None;
             let n = b.compiled.len();
             built_ok = b.ok;
             if b.ok {
@@ -364,8 +401,16 @@ impl Sync {
             }
             _ => {}
         }
-        for j in stale.iter().filter(|j| restart != "apps" || super::launch::ledger(j.pid).is_none()) {
-            self.jit_event(Sev::Warn, &j.app, j.pid, format!("sync: {}#{} runs a makepad binary the build replaced: restart it to run the new JIT", j.app, j.pid), String::new());
+        {
+            // once per process: every sync after a landing found the same ones again (several
+            // lines per box per 5 min, 11-02); one that ended leaves the set
+            let mut said = self.stale_said.lock().unwrap();
+            said.retain(|(pid, app)| stale.iter().any(|j| j.pid == *pid && j.app == *app));
+            for j in stale.iter().filter(|j| restart != "apps" || super::launch::ledger(j.pid).is_none()) {
+                if said.insert((j.pid, j.app.clone())) {
+                    self.jit_event(Sev::Warn, &j.app, j.pid, format!("sync: {}#{} runs a makepad binary the build replaced: restart it to run the new JIT", j.app, j.pid), String::new());
+                }
+            }
         }
         let summary = format!(
             "{{\"applied\":{{\"makepad\":{},\"commercial\":{},\"session\":{},\"wm_replaced\":{wm_replaced},\"stale_jits\":{},\"ms\":{}}}}}",
@@ -578,7 +623,7 @@ impl Sync {
         }
         let svc = self.conf.wm_service.clone().ok_or("this node has no WM service (wm_service = none)")?;
         // The new WM starts this hub again when the deployment moved its binary: built first, that
-        // start is a no-op `cargo run` (102's compiled 13 s behind a package-cache lock while its
+        // start is a no-op `cargo run` (a node's compiled 13 s behind a package-cache lock while its
         // hub refused connections, 11-02). A hub that does not build keeps the WM and this hub.
         #[cfg(feature = "checkout")]
         crate::lease::exec::build_hub(&self.conf.checkout).map_err(|e| format!("the hub does not build at this deployment ({e}): the WM is not restarted, this hub keeps running"))?;
@@ -669,6 +714,15 @@ pub fn applying() -> bool {
     APPLYING.load(std::sync::atomic::Ordering::Acquire)
 }
 
+/// The commits (makepad, commercial) whose JIT this node's apply is building now.
+static BUILDING_JIT: std::sync::Mutex<Option<(String, Option<String>)>> = std::sync::Mutex::new(None);
+
+/// This node's apply is building the JIT of exactly these commits (kept for its tree leases
+/// once built: a lease of them waits for it rather than build it again).
+pub fn building_jit(makepad: &str, commercial: Option<&str>) -> bool {
+    BUILDING_JIT.lock().unwrap_or_else(|e| e.into_inner()).as_ref().is_some_and(|(m, c)| m == makepad && c.as_deref() == commercial)
+}
+
 /// A WM restart is waiting on this node (`Sync::wm_restart`).
 static WM_RESTART_WAITING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -681,7 +735,7 @@ fn restart_blockers() -> Vec<String> {
         out.push("a Desk Link viewer shows this node (input within 10 min)".to_string());
     }
     // a WM restart ends every app in its session: it never takes a user's app with it (it
-    // killed Fab on a node, 3 min after the last input, 2026-10-30)
+    // killed Fab on a pool box, 3 min after the last input, 2026-10-30)
     // (a headless lease's JIT runs on through it: its lease is not on the WM)
     out.extend(super::jits::list().into_iter().filter(|j| !WM_SERVICES.iter().any(|s| j.app == *s || j.app == format!("makepad-app-{s}")) && !crate::lease::exec::in_headless_lease(j.pid)).map(|j| format!("{} runs (pid {}): close it to let the WM update", j.app, j.pid)));
     out

@@ -2,10 +2,10 @@
 
 [app.linux]
 capture = ""
-date = "2026-11-02"
-digest = "b54ee0af986f5657eb7dce5595df22b0288947b400770cb6d99eed5644ccda81"
-main = "e9402925c83c1a3331b42758ffc16e0c0983d98a"
-work = "2832b1fa2882006b5c2c5a22eabc04ba83662d39"
+date = "2026-11-03"
+digest = "a3df4c782acf0caca02e69ef3a52f85f9659792ca94d8d1498c3ed59e5a74035"
+main = "19f51e11f550a7350a096a33669c713308d2d8a5"
+work = "699beed5cba1931f3164b4dc8fdc57e884bc09f0"
 
 [ci]
 box = "whole"

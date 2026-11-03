@@ -62,7 +62,7 @@ pub fn serve(ctx: &Ctx, line: &str) -> Result<String, String> {
     let word = line.strip_prefix("overlay-shadow ").unwrap_or(line).trim();
     match word {
         "on" | "off" => {
-            ctx.store.update(|d| d.devhub_shadow = word == "on");
+            ctx.store.update(|d| d.devhub_shadow = word == "on")?;
             Ok(format!("{{\"text\":\"DEVHUB_SHADOW {word}\\n\"}}"))
         }
         "enabled" => Ok(format!("{{\"on\":{}}}", ctx.store.read(|d| d.devhub_shadow))),
@@ -125,7 +125,7 @@ impl Recorder {
                 };
                 d.jobs.iter_mut().find(|j| j.id == primary.id).unwrap().shadow_job = id;
                 d.jobs.push(copy);
-            });
+            })?;
         }
         for sample in jobs.iter().filter(|j| !j.live_sample.is_empty() && !j.shadow_recorded && j.done()) {
             if !self.recorded.contains(&sample.id) {
@@ -138,11 +138,11 @@ impl Recorder {
                 }
                 self.recorded.insert(sample.id.clone());
             }
-            ctx.store.update(|d| { if let Some(j) = d.jobs.iter_mut().find(|j| j.id == sample.id) { j.shadow_recorded = true; } });
+            ctx.store.update(|d| { if let Some(j) = d.jobs.iter_mut().find(|j| j.id == sample.id) { j.shadow_recorded = true; } })?;
         }
         for primary in jobs.iter().filter(|j| j.shadow && !j.shadow_recorded && j.done()) {
             if primary.granted_ms == 0 && primary.shadow_job.is_empty() {
-                ctx.store.update(|d| { if let Some(j) = d.jobs.iter_mut().find(|j| j.id == primary.id) { j.shadow_recorded = true; } });
+                ctx.store.update(|d| { if let Some(j) = d.jobs.iter_mut().find(|j| j.id == primary.id) { j.shadow_recorded = true; } })?;
                 continue;
             }
             let Some(shadow) = jobs.iter().find(|j| j.id == primary.shadow_job && j.done()) else { continue };
@@ -154,7 +154,7 @@ impl Recorder {
                 file.write_all(format!("{entry}\n").as_bytes()).and_then(|_| file.sync_data()).map_err(|e| e.to_string())?;
                 self.recorded.insert(overlay.id.clone());
             }
-            ctx.store.update(|d| { for j in d.jobs.iter_mut().filter(|j| j.id == primary.id || j.id == shadow.id) { j.shadow_recorded = true; } });
+            ctx.store.update(|d| { for j in d.jobs.iter_mut().filter(|j| j.id == primary.id || j.id == shadow.id) { j.shadow_recorded = true; } })?;
         }
         Ok(())
     }

@@ -111,7 +111,7 @@ pub struct DeviceBudget {
 
 pub const DEV_24G_GPU_A: DeviceBudget = DeviceBudget { name: "gpua-24g", free_mib: 23_425 };
 pub const DEV_32G_GPU_B: DeviceBudget = DeviceBudget { name: "gpub-32g", free_mib: 31_984 };
-pub const DEV_96G_GPUC: DeviceBudget = DeviceBudget { name: "gpuc-96g", free_mib: 96_141 };
+pub const DEV_96G_GPU_C: DeviceBudget = DeviceBudget { name: "gpuc-96g", free_mib: 96_141 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ResidencyMode {
@@ -757,7 +757,7 @@ mod tests {
         let resident = residency_plan(ResidencyMode::AllResident);
         // Numerical sketches fit, but VAE/DINO weight values and every
         // activation envelope remain explicitly unverified estimates.
-        for budget in [DEV_24G_GPU_A, DEV_32G_GPU_B, DEV_96G_GPUC] {
+        for budget in [DEV_24G_GPU_A, DEV_32G_GPU_B, DEV_96G_GPU_C] {
             assert!(
                 estimated_fits(budget, &staged),
                 "staged estimate must fit {}",

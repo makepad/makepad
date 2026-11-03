@@ -2,8 +2,9 @@
 # Regression test: `makepad check` and `makepad test` (package and single file) give rustc's verdict.
 # accept/: rustc --test builds it and every form accepts. reject/: rustc --test rejects it and every
 # form rejects, naming the text of its `// rejects: <text>` line. reject_bin/: the same as a binary
-# (src/main.rs), checked by `makepad check` and rustc without --test. Extra accepted files come as arguments;
-# AGREE_SKIP="asm_*" leaves out the cases whose file names match (no-codegen mode: inline assembly).
+# (src/main.rs), checked by `makepad check` and rustc without --test. Extra accepted files come as arguments.
+# A case with a `// needs-native: <why>` line runs only as machine code: in no-codegen mode
+# (MAKEPAD_RUN_NO_CODEGEN=1) its runs (the test forms) are skipped and listed; rustc and check still answer.
 # (A const fn that overflows when a constant calls it is the one verdict that depends on the profile:
 # rustc rejects it with overflow checks, accepts it without, as compiler/tests/n01_round30_overflow.rs relies on;
 # `makepad check` answers as `rustc`, `makepad test` as `rustc -O`.)
@@ -14,6 +15,7 @@ fx=tools/run/fixture/agree
 W=${AGREE_DIR:-$root/target/agree}
 mkdir -p "$W"
 fail=""
+skipped=""
 package() { # package <name> <file> <src file>: a one-crate package holding the case
   mkdir -p "$W/$1/src"
   printf '[package]\nname = "%s"\nversion = "0.1.0"\nedition = "2021"\n\n[workspace]\n' "$1" > "$W/$1/Cargo.toml"
@@ -28,15 +30,17 @@ verdict() { # verdict <label> <expected 0|1> <text or empty> <rc> <output>
 }
 case_of() { # case_of <file> <expected 0|1>
   n=q_$(basename "$1" .rs)
-  # AGREE_SKIP: cases (by file name, shell patterns) the run's mode cannot hold (no-codegen mode: inline assembly)
-  set -f # (the patterns are not file names here)
-  for s in ${AGREE_SKIP:-}; do case $(basename "$1" .rs) in $s) set +f; return ;; esac; done
-  set +f
   text=$(sed -n 's,^// rejects: ,,p' "$1" | head -1)
+  native=$(sed -n 's,^// needs-native: ,,p' "$1" | head -1)
   package "$n" "$1" lib.rs
   out=$(rustc --edition 2021 --test --emit=metadata -o "$W/$n.rmeta" "$1" 2>&1); verdict "rustc:$n" "$2" "" $? "$out"
   [ "$2" = 1 ] && { out=$(cd "$W/$n" && $J check --no-serve "$n" 2>&1); verdict "check:$n" 1 "$text" $? "$out"; }
   [ "$2" = 0 ] && { out=$(cd "$W/$n" && $J check --no-serve "$n" 2>&1); verdict "check:$n" 0 "" $? "$out"; }
+  if [ -n "$native" ] && [ "${MAKEPAD_RUN_NO_CODEGEN:-}" = 1 ]; then
+    echo "agree: skipped test:$n file:$n (no-codegen mode cannot run it: $native)"
+    skipped="$skipped $n"
+    return
+  fi
   out=$(cd "$W/$n" && $J test "$n" 2>&1); verdict "test:$n" "$2" "$text" $? "$out"
   out=$($J test "$1" 2>&1); verdict "file:$n" "$2" "$text" $? "$out"
 }
@@ -53,5 +57,6 @@ for f in "$fx"/reject_bin/*.rs; do
   out=$(rustc --edition 2021 --emit=metadata -o "$W/$n.rmeta" "$f" 2>&1); verdict "rustc:$n" 1 "" $? "$out"
   out=$(cd "$W/$n" && $J check --no-serve "$n" 2>&1); verdict "check:$n" 1 "$text" $? "$out"
 done
-if [ -n "$fail" ]; then echo "agree FAILED:$fail"; exit 1; fi
-echo "agree: ok"
+skips=${skipped:+ (runs skipped, needing native code:$skipped)}
+if [ -n "$fail" ]; then echo "agree FAILED:$fail$skips"; exit 1; fi
+echo "agree: ok$skips"

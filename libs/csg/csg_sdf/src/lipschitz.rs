@@ -61,6 +61,8 @@ fn has_kernel(n: &SdfNode) -> bool {
         SdfNode::Combine { of, .. } => of.iter().any(has_kernel),
         SdfNode::Material { within, of, .. } => has_kernel(of) || within.as_deref().is_some_and(has_kernel),
         SdfNode::Shell { of, .. } | SdfNode::Round { of, .. } | SdfNode::Transform { of, .. } | SdfNode::Instance { of, .. } | SdfNode::Bone { of, .. } | SdfNode::Deform { of, .. } | SdfNode::Id { of, .. } | SdfNode::Sculpt { of, .. } => has_kernel(of),
+        // its own bound keeps it 1-Lipschitz: its pattern kernel is no distance
+        SdfNode::Texture { of, .. } => has_kernel(of),
         _ => false,
     }
 }

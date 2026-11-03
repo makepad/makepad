@@ -115,6 +115,10 @@ impl<'a> Reader<'a> {
 /// the event queue).
 pub trait ArenaSink {
     fn put_bytes(&mut self, bytes: &[u8]) -> Range;
+    /// Copies `bytes` into memory the sink owns and that does not move until the batch has been
+    /// submitted, for the [`k::slice`] kinds (uploads). Only the command writer has such memory:
+    /// the event table asserts it has no upload field.
+    fn keep_bytes(&mut self, bytes: &[u8]) -> Slice;
 }
 
 /// One field kind of a table.
@@ -129,6 +133,8 @@ pub trait Field {
     const UW: usize;
     /// f64 used.
     const FW: usize;
+    /// The writer copies the field's bytes into its upload memory (the [`k::slice`] kinds).
+    const UPLOAD: bool = false;
     fn pack(v: Self::T, p: &mut Packer);
     fn lower<'a, S: ArenaSink>(s: &mut S, v: Self::In<'a>) -> Self::T;
     fn read<'a>(r: &mut Reader<'a>) -> Self::Out<'a>;
@@ -270,23 +276,25 @@ impl Field for k::rng {
     }
 }
 
-/// A borrowed run of memory in the words (ptr, len): the writer points at the caller's bytes
-/// instead of copying them (texture and buffer uploads). It decodes to the raw [`Slice`]: the
-/// consumer reads it with `Slice::as_bytes` inside the `hal_submit` call, never later.
+/// An upload's bytes in the words (ptr, len): the writer copies the caller's bytes into its own
+/// upload memory at the call ([`ArenaSink::keep_bytes`]), so the caller's may change or go away
+/// before the submit. It decodes to the raw [`Slice`] over that copy: the consumer reads it with
+/// `Slice::as_bytes` inside the `hal_submit` call, never later.
 impl Field for k::slice {
     type T = Slice;
     type In<'a> = &'a [u8];
     type Out<'a> = Slice;
     const UW: usize = 4;
     const FW: usize = 0;
+    const UPLOAD: bool = true;
     #[inline]
     fn pack(v: Slice, p: &mut Packer) {
         p.put_u64(v.ptr as usize as u64);
         p.put_u64(v.len as u64);
     }
     #[inline]
-    fn lower<'a, S: ArenaSink>(_s: &mut S, v: &'a [u8]) -> Slice {
-        Slice::from_bytes(v)
+    fn lower<'a, S: ArenaSink>(s: &mut S, v: &'a [u8]) -> Slice {
+        s.keep_bytes(v)
     }
     #[inline]
     fn read<'a>(r: &mut Reader<'a>) -> Slice {
@@ -294,7 +302,7 @@ impl Field for k::slice {
         Slice { ptr, len: r.get_u64() as usize }
     }
     fn expect<'a>(v: Self::In<'a>) -> Self::Out<'a> {
-        Slice::from_bytes(v)
+        Slice { ptr: v.as_ptr(), len: v.len() }
     }
     fn sample(_n: u32) -> &'static [u8] {
         b"sample slice"
@@ -309,14 +317,15 @@ impl Field for k::slice32 {
     type Out<'a> = Slice;
     const UW: usize = 3;
     const FW: usize = 0;
+    const UPLOAD: bool = true;
     #[inline]
     fn pack(v: Slice, p: &mut Packer) {
         p.put_u64(v.ptr as usize as u64);
         p.put_u32(v.len.min(u32::MAX as usize) as u32);
     }
     #[inline]
-    fn lower<'a, S: ArenaSink>(_s: &mut S, v: &'a [u8]) -> Slice {
-        Slice::from_bytes(v)
+    fn lower<'a, S: ArenaSink>(s: &mut S, v: &'a [u8]) -> Slice {
+        s.keep_bytes(&v[..v.len().min(u32::MAX as usize)])
     }
     #[inline]
     fn read<'a>(r: &mut Reader<'a>) -> Slice {
@@ -324,7 +333,7 @@ impl Field for k::slice32 {
         Slice { ptr, len: r.get_u32() as usize }
     }
     fn expect<'a>(v: Self::In<'a>) -> Self::Out<'a> {
-        Slice::from_bytes(v)
+        Slice { ptr: v.as_ptr(), len: v.len() }
     }
     fn sample(_n: u32) -> &'static [u8] {
         b"sample slice"

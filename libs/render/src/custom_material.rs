@@ -60,7 +60,7 @@ script_mod! {
         // renderer/stock_ibl.rs): y = the lane's scale on the map (1 under
         // HDR output, the map's own exposure in the legacy lane, as the
         // rig's fill carries it), z = 1 while the fill comes from the map
-        // (0: the stock IBL program keeps an authored or a gathered fill).
+        // (0: the stock IBL program keeps an authored fill).
         // x is the skin lane's switch (shaders/skinned_gpu.rs has the same
         // uniform); a program here is IBL by construction. The default is
         // the lookups as they are without a lane: the map's own scale, its
@@ -533,7 +533,7 @@ mod tests {
     /// `ibl_ctl.y` (the lane's scale, so the lookups carry the exposure the
     /// rig's fill carries), and the fill from the map only while
     /// `ibl_ctl.z` is set, else the fill the lane passes in (an authored
-    /// ambient, the gathered GI). Never written, the control is neutral:
+    /// ambient). Never written, the control is neutral:
     /// the raw lookups. The stock PBR lane's own program has no control.
     #[test]
     fn an_ibl_program_takes_its_lookups_through_the_lanes_control() {

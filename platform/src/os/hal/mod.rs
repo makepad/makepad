@@ -167,6 +167,8 @@ pub struct HalClient {
     pub(crate) beat_phases: [[u64; 2]; 6],
     /// the HAL said the GPU device is lost and has not reset it yet: no frames are built
     pub(crate) device_lost: bool,
+    /// device replacements so far: GPU contents made on an older generation are gone
+    pub(crate) device_generation: u64,
     /// another thread woke the loop (`Wake`)
     pub(crate) wake: bool,
     /// the window that has the keyboard focus, for the ops that name no window
@@ -212,7 +214,7 @@ pub struct HalClient {
     pub(crate) safe_area: crate::event::SafeAreaInsets,
     /// APK font files already mapped (see `Cx::get_resource_font_asset_bytes_by_path`)
     #[cfg(target_os = "android")]
-    pub(crate) mapped_font_assets: std::cell::RefCell<HashMap<String, Option<crate::shared_bytes::SharedBytes>>>,
+    pub(crate) mapped_font_assets: std::cell::RefCell<HashMap<String, Option<crate::shared_bytes::HostBuf>>>,
 }
 
 impl Default for HalClient {
@@ -248,6 +250,7 @@ impl Default for HalClient {
             profile_input_ns: 0,
             beat_phases: [[0; 2]; 6],
             device_lost: false,
+            device_generation: 0,
             wake: false,
             focused: None,
             frames_done: 0,
@@ -588,7 +591,7 @@ pub(crate) fn read_asset(path: &str) -> Option<Vec<u8>> {
 /// Maps a stored APK asset without a heap copy; compressed or missing assets return None. The
 /// mapping is named `apk:<asset>` so the HAL's font service maps the same asset by that name.
 #[cfg(target_os = "android")]
-pub(crate) fn map_asset(path: &str) -> Option<crate::shared_bytes::SharedBytes> {
+pub(crate) fn map_asset(path: &str) -> Option<crate::shared_bytes::HostBuf> {
     use std::os::fd::{FromRawFd, OwnedFd, AsRawFd};
     let mut range = [0i64; 2];
     let mut name = path.to_string();
@@ -601,5 +604,5 @@ pub(crate) fn map_asset(path: &str) -> Option<crate::shared_bytes::SharedBytes> 
         return None;
     }
     let fd = unsafe { OwnedFd::from_raw_fd(fd as i32) };
-    crate::shared_bytes::SharedBytes::map_fd_range_named(fd.as_raw_fd(), u64::try_from(range[0]).ok()?, usize::try_from(range[1]).ok()?, &format!("{}{name}", makepad_hal::APK_ASSET_PREFIX)).ok()
+    crate::shared_bytes::HostBuf::map_fd_range_named(fd.as_raw_fd(), u64::try_from(range[0]).ok()?, usize::try_from(range[1]).ok()?, &format!("{}{name}", makepad_hal::APK_ASSET_PREFIX)).ok()
 }

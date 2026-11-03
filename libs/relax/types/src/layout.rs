@@ -413,10 +413,16 @@ impl Layouts {
     /// version: a recorded storage that differs (the owner was checked again) is replaced.
     pub fn note_closure_storages<'a>(&self, prog: &crate::program::Program, tcx: &Tcx, body: &crate::typeck::Body, storages: impl Iterator<Item = (u32, &'a ClosureStorage)>) {
         for (ce, storage) in storages {
-            if ce & crate::tcx::ASYNC_FN_BODY != 0 || !body.has_expr(crate::ast::ExprId(ce)) {
+            // an async fn's body is its coroutine, the fn's return type (the hidden type of its
+            // opaque `impl Future`); any other closure is the type of its expression
+            let ty = if ce & crate::tcx::ASYNC_FN_BODY != 0 {
+                body.ret
+            } else if body.has_expr(crate::ast::ExprId(ce)) {
+                body.ty(crate::ast::ExprId(ce))
+            } else {
                 continue;
-            }
-            let ty = tcx.tys.erase_regions(tcx.normalize_erasing_regions(prog, crate::tcx::TypingEnv::fully_monomorphized(prog), body.ty(crate::ast::ExprId(ce))));
+            };
+            let ty = tcx.tys.erase_regions(tcx.normalize_erasing_regions(prog, crate::tcx::TypingEnv::fully_monomorphized(prog), ty));
             if !matches!(tcx.tys.kind(ty), TyKind::Closure(f, e, _) if *f == body.file && *e == ce) {
                 continue;
             }

@@ -63,6 +63,10 @@ fn failed(ctx: &Ctx, x: &Show, what: String) {
 }
 
 fn set(ctx: &Ctx, id: &str, f: impl FnOnce(&mut Show)) -> Option<Show> {
+    try_set(ctx, id, f).unwrap_or_else(|e| { eprintln!("devhub state: {e}"); None })
+}
+
+fn try_set(ctx: &Ctx, id: &str, f: impl FnOnce(&mut Show)) -> Result<Option<Show>, String> {
     ctx.store.update(|d| {
         let x = d.shows.iter_mut().find(|x| x.id == id)?;
         f(x);
@@ -108,7 +112,7 @@ pub fn start(ctx: Arc<Ctx>) {
             }
         }
         out
-    });
+    }).unwrap_or_else(|e| { eprintln!("devhub state: {e}"); Default::default() });
     for x in lost {
         event(&ctx, Sev::Info, format!("show {} on mac ended while the master was down", x.app), Some(&x));
     }
@@ -120,14 +124,14 @@ pub fn start(ctx: Arc<Ctx>) {
             x.stages.clear();
             x.clone()
         }).collect()
-    });
+    }).unwrap_or_else(|e| { eprintln!("devhub state: {e}"); Default::default() });
     for x in again {
         event(&ctx, Sev::Info, format!("show {} on {}: the master restarted during its launch; starting again", x.app, x.device), Some(&x));
         let c = ctx.clone();
         let _ = std::thread::Builder::new().name("devhub-show".into()).spawn(move || launch(&c, &x));
     }
     let _ = std::thread::Builder::new().name("devhub-shows".into()).spawn(move || {
-        let mut work = git(&ctx.repo, &["rev-parse", "refs/heads/work"]).unwrap_or_default();
+        let mut work = crate::gitread::rev(&ctx.repo, "refs/heads/work").unwrap_or_default();
         loop {
             tick(&ctx, &mut work);
             ctx.store.wait(TICK);
@@ -136,10 +140,11 @@ pub fn start(ctx: Arc<Ctx>) {
 }
 
 fn tick(ctx: &Arc<Ctx>, work: &mut String) {
+    let mut pass = crate::gitread::Pass::default();
     let shows: Vec<Show> = ctx.store.read(|d| d.shows.iter().filter(|x| x.active()).cloned().collect());
     reap(&shows);
     // a landing while a show runs: the JIT patches it live; said once per landing
-    let now_work = git(&ctx.repo, &["rev-parse", "refs/heads/work"]).unwrap_or_default();
+    let now_work = pass.rev(&ctx.repo, "refs/heads/work").unwrap_or_default();
     let landed = !now_work.is_empty() && now_work != *work;
     if landed {
         *work = now_work.clone();
@@ -149,7 +154,7 @@ fn tick(ctx: &Arc<Ctx>, work: &mut String) {
     for x in shows {
         match x.state.as_str() {
             "waiting" => {
-                let (met, cond) = super::after::cond_met(ctx, &x.cond, x.added_ms);
+                let (met, cond) = super::after::cond_met_in(ctx, &x.cond, x.added_ms, &mut pass);
                 if cond != x.cond {
                     set(ctx, &x.id, |s| s.cond = cond.clone());
                 }
@@ -314,8 +319,8 @@ fn keep_previous(dir: &std::path::Path, name: &str, path: &std::path::Path) {
 /// Starts the show on its device.
 fn launch(ctx: &Arc<Ctx>, x: &Show) {
     set(ctx, &x.id, |s| s.launch_ms = wall_ms());
-    let sha = git(&ctx.repo, &["rev-parse", "refs/heads/work"]).unwrap_or_default();
-    let main = git(&ctx.commercial(), &["rev-parse", "refs/heads/main"]).unwrap_or_default();
+    let sha = crate::gitread::rev(&ctx.repo, "refs/heads/work").unwrap_or_default();
+    let main = crate::gitread::rev(&ctx.commercial(), "refs/heads/main").unwrap_or_default();
     let r = match x.device.as_str() {
         "mac" => mac_launch(ctx, x),
         "quest" => quest_launch(ctx, x),
@@ -358,16 +363,24 @@ fn launch(ctx: &Arc<Ctx>, x: &Show) {
 /// commercial repo), and of the workspace's Cargo inputs.
 fn inputs_key(ctx: &Ctx, dirs: &std::collections::BTreeSet<String>, work: &str, main: &str) -> String {
     let mut text = String::new();
-    let tree = |dir: &std::path::Path, at: &str, p: &str| git(dir, &["rev-parse", &format!("{at}:{p}")]).unwrap_or_default();
-    for p in ["Cargo.toml", "Cargo.lock", ".cargo/config.toml"] {
-        text.push_str(&tree(&ctx.repo, work, p));
+    // `git rev-parse <at>:<p>` of each, read in-process
+    let mut mk_paths: Vec<&str> = vec!["Cargo.toml", "Cargo.lock", ".cargo/config.toml"];
+    let mut com_paths: Vec<&str> = Vec::new();
+    for d in dirs {
+        match d.strip_prefix("apps/commercial/") {
+            Some(c) => com_paths.push(c),
+            None => mk_paths.push(d),
+        }
+    }
+    let mk = crate::gitread::entries_at(&ctx.repo, work, &mk_paths).unwrap_or_default();
+    let com = crate::gitread::entries_at(&ctx.commercial(), main, &com_paths).unwrap_or_default();
+    let (mut mk, mut com) = (mk.into_iter(), com.into_iter());
+    for _ in 0..3 {
+        text.push_str(&mk.next().unwrap_or_default());
     }
     for d in dirs {
         text.push_str(d);
-        text.push_str(&match d.strip_prefix("apps/commercial/") {
-            Some(c) => tree(&ctx.commercial(), main, c),
-            None => tree(&ctx.repo, work, d),
-        });
+        text.push_str(&if d.starts_with("apps/commercial/") { com.next() } else { mk.next() }.unwrap_or_default());
     }
     let mut h: u64 = 0xcbf29ce484222325;
     for b in text.bytes() {
@@ -388,8 +401,9 @@ fn package_dir(ctx: &Ctx, app: &str, work: &str, main: &str) -> Option<String> {
 
 /// Boots `x.app` at `work`,`main` headless under the JIT on a macOS devbox and keeps it up until
 /// it settled: Ok when nothing failed on any thread and it did not exit early. The app's crates
-/// and the JIT's unchanged since a passed boot: that pass counts. The JIT's sources unchanged since
-/// a box built them: its stashed binary runs, no build. Each stage's time goes to `devhub shows`.
+/// and the JIT's unchanged since a passed boot: that pass counts. The box's dev JIT of the pin runs
+/// (its store builds one per JIT id, shared with the landing's prebuild). Each stage's time goes to
+/// `devhub shows`.
 /// The pre-boot of a show already open on the Mac: its failure is an error on the running show.
 fn preboot_alongside(ctx: &Arc<Ctx>, x: Show, work: String, main: String) {
     let ctx = ctx.clone();
@@ -429,7 +443,7 @@ pub fn stop_mac_prewarm() -> bool {
 /// A landing that changes the JIT's sources: built here and on each Mac devbox now, in the
 /// background, so that a show finds it ready. A box that is busy gets it when it is free.
 fn prewarm_jit(ctx: &Arc<Ctx>, work: &str) {
-    let main = git(&ctx.commercial(), &["rev-parse", "refs/heads/main"]).unwrap_or_default();
+    let main = crate::gitread::rev(&ctx.commercial(), "refs/heads/main").unwrap_or_default();
     let key = inputs_key(ctx, &super::roll::crate_dirs(&ctx.repo, "tools/run"), work, &main);
     if std::mem::replace(&mut *PREWARMED.lock().unwrap(), key.clone()) == key {
         return;
@@ -478,39 +492,36 @@ fn prewarm_jit(ctx: &Arc<Ctx>, work: &str) {
         let (ctx, rev, key) = (ctx.clone(), rev.clone(), key.clone());
         let _ = std::thread::Builder::new().name("devhub-show-prewarm".into()).spawn(move || {
             let spec = super::leg::Spec { since_ms: None, only: true, lane: "show-prewarm".into(), agent: "devhub-show".into(), kind: crate::lease::Kind::Build, needs: "os=macos".into(), prio: super::leg::BACKGROUND_PRIO, rev, repo_dir: ctx.repo.to_string_lossy().into_owned(), node: Some(node.clone()) };
-            // (a newer landing's prewarm takes over)
+            // (a newer landing's prewarm takes over; a master restart's drain: the next landing's)
             let stale = || *PREWARMED.lock().unwrap() != key;
-            let Ok(held) = super::leg::Held::acquire(&spec, &mut |_| {}, &stale) else { return };
+            let _drain = super::roll::holding();
+            let Ok(held) = super::leg::Held::acquire_with(&spec, &|r| r.src = crate::lease::Src::Overlay, &mut |_| {}, &|| stale() || super::roll::draining()) else { return };
             let t = std::time::Instant::now();
             let log = ctx.logs("show").join(format!("prewarm-{node}.log"));
-            let r = std::fs::File::create(&log).map_err(|e| e.to_string()).and_then(|mut f| ensure_jit(&held, &format!("target/host/makepad.jit-{key}"), &mut f));
+            let r = std::fs::File::create(&log).map_err(|e| e.to_string()).and_then(|mut f| ensure_jit(&held, &mut f));
             let _ = crate::cli::ask(&ctl(), None, "release", &held.id);
             match r {
-                Ok(true) => {}
-                Ok(false) => event(&ctx, Sev::Info, format!("show: the JIT is prewarmed on {node} in {} s", t.elapsed().as_secs()), None),
+                Ok(()) => event(&ctx, Sev::Info, format!("show: the JIT is prewarmed on {node} in {} s", t.elapsed().as_secs()), None),
                 Err(e) => event(&ctx, Sev::Warn, format!("show: the JIT's prewarm on {node}: {e}"), None),
             }
         });
     }
 }
 
-/// The JIT of these sources at `stash` on the box: true when it was there already (a tree that
-/// moved away and back has new mtimes, and cargo builds 16 crates again).
-fn ensure_jit(held: &super::leg::Held, stash: &str, out: &mut std::fs::File) -> Result<bool, String> {
-    if held.output(&["test", "-x", stash]).is_ok_and(|(c, _)| c == 0) {
-        return Ok(true);
+/// The box's dev JIT of the lease's pin, from its store: built once per (box, JIT id), so the
+/// prebuild of the same landing and this share one build (the second waits for the first's, two
+/// a landing on a Mac devbox, 11-02).
+fn ensure_jit(held: &super::leg::Held, out: &mut std::fs::File) -> Result<(), String> {
+    held.ship_nothing()?;
+    match held.run(&JIT_VERSION.map(String::from), out) {
+        Ok(0) => Ok(()),
+        Ok(c) => Err(format!("the dev JIT on {} failed (exit {c})", held.node)),
+        Err(e) => Err(format!("the dev JIT on {}: {e}", held.node)),
     }
-    let build: Vec<String> = ["cargo", "build", "--profile", "host", "-p", "makepad-run", "--bin", "makepad"].iter().map(|s| s.to_string()).collect();
-    match held.run(&build, out) {
-        Ok(0) => {}
-        Ok(c) => return Err(format!("the JIT's build on {} failed (exit {c})", held.node)),
-        Err(e) => return Err(format!("the JIT's build on {}: {e}", held.node)),
-    }
-    // one stash per box: this one replaces the last
-    let _ = held.output(&["find", "target/host", "-maxdepth", "1", "-name", "makepad.jit-*", "-delete"]);
-    let _ = held.output(&["cp", "-p", "target/host/makepad", stash]);
-    Ok(false)
 }
+
+/// A run of the box's dev JIT (the node selects it for the lease's pin) that only says its version.
+const JIT_VERSION: [&str; 10] = ["cargo", "run", "--profile", "host", "-p", "makepad-run", "--bin", "makepad", "--", "--version"];
 
 fn preboot(ctx: &Ctx, x: &Show, work: &str, main: &str) -> Result<(), String> {
     let began = std::time::Instant::now();
@@ -525,7 +536,7 @@ fn preboot(ctx: &Ctx, x: &Show, work: &str, main: &str) -> Result<(), String> {
         stage("pre-boot reused (the app's and the JIT's sources are unchanged since a pass)".into());
         return Ok(());
     }
-    set(ctx, &x.id, |s| s.note = format!("pre-boot at {},{} on a macOS devbox", super::short(work), super::short(main)));
+    try_set(ctx, &x.id, |s| s.note = format!("pre-boot at {},{} on a macOS devbox", super::short(work), super::short(main)))?;
     event(ctx, Sev::Info, format!("show {} on mac: pre-boot at {},{} on a macOS devbox first", x.app, super::short(work), super::short(main)), Some(x));
     let rev = if main.is_empty() { format!("work@{work}") } else { format!("work@{work},main@{main}") };
     let spec = super::leg::Spec { since_ms: None, only: false, lane: "show-preboot".into(), agent: "devhub-show".into(), kind: crate::lease::Kind::Test, needs: "os=macos".into(), prio: SHOW_PRIO, rev, repo_dir: ctx.repo.to_string_lossy().into_owned(), node: None };
@@ -533,7 +544,7 @@ fn preboot(ctx: &Ctx, x: &Show, work: &str, main: &str) -> Result<(), String> {
     // app: ask again (another box, or the same once it is free)
     let mut tries = 0;
     let held = loop {
-        match super::leg::Held::acquire(&spec, &mut |_| {}, &|| false) {
+        match super::leg::Held::acquire_with(&spec, &|r| r.src = crate::lease::Src::Overlay, &mut |_| {}, &|| false) {
             Ok(h) => break h,
             Err(e) if e.contains("refused") && tries < 5 => {
                 tries += 1;
@@ -549,19 +560,17 @@ fn preboot(ctx: &Ctx, x: &Show, work: &str, main: &str) -> Result<(), String> {
     let log = ctx.logs("show").join(format!("{}-preboot.log", x.id));
     let _ = std::fs::create_dir_all(ctx.logs("show"));
     let file = std::fs::File::create(&log).map_err(|e| e.to_string())?;
-    let stash = format!("target/host/makepad.jit-{jit_key}");
     let t = std::time::Instant::now();
     let mut out = file.try_clone().map_err(|e| e.to_string())?;
-    match ensure_jit(&held, &stash, &mut out) {
-        Ok(true) => stage("jit reused".into()),
-        Ok(false) => stage(format!("jit build {} s", t.elapsed().as_secs())),
+    match ensure_jit(&held, &mut out) {
+        Ok(()) => stage(format!("jit {} s", t.elapsed().as_secs())),
         Err(e) => {
             let _ = crate::cli::ask(&ctl(), None, "release", &held.id);
             return Err(format!("{e}; {}", log.display()));
         }
     }
     let boot = std::time::Instant::now();
-    let argv: Vec<String> = ["env", "MAKEPAD_HIDE_WINDOWS=1", &stash, "run", &x.app].iter().map(|s| s.to_string()).collect();
+    let argv: Vec<String> = ["env", "MAKEPAD_HIDE_WINDOWS=1"].into_iter().chain(JIT_VERSION[..9].iter().copied()).chain(["run", x.app.as_str()]).map(str::to_string).collect();
     // the run on its own thread; this one watches the JIT come up and settle
     struct Out {
         file: std::fs::File,
@@ -732,7 +741,7 @@ fn quest_launch(ctx: &Ctx, x: &Show) -> Result<(u32, String), String> {
             Err(format!("{what} failed (log {})", path.display()))
         }
     };
-    set(ctx, &x.id, |s| s.note = "building the Quest JIT host on the Mac".into());
+    try_set(ctx, &x.id, |s| s.note = "building the Quest JIT host on the Mac".into())?;
     let mut build = makepad_remote::group::command("nice");
     build.args(["-n", "10"]).arg(cargo()).args(["run", "--release", "-p", "cargo-makepad", "--", "android", "--abi=aarch64", "build-host", "--app", &x.app, "--devhub-name=quest", "--quest"]).current_dir(&ctx.repo).env("CARGO_INCREMENTAL", "0").env("CARGO_BUILD_JOBS", "4");
     run(&mut build, "the Quest build")?;
@@ -848,17 +857,17 @@ pub fn serve(ctx: &Arc<Ctx>, line: &str) -> Result<String, String> {
                 if matches!(old.state.as_str(), "running" | "paused") {
                     stop(&old)?;
                 }
-                set(ctx, &old.id, |s| {
+                try_set(ctx, &old.id, |s| {
                     s.state = "replaced".into();
                     s.ended_ms = wall_ms();
-                });
+                })?;
             }
             let x = ctx.store.update(|d| {
                 d.shows_next += 1;
                 let x = Show { id: format!("V{}", d.shows_next), app: app.clone(), device: dev.clone(), state: if cond == Cond::None { "starting" } else { "waiting" }.into(), cond: cond.clone(), added_ms: wall_ms(), by: s("by"), pinned: pin, ..Default::default() };
                 d.shows.push(x.clone());
                 x
-            });
+            })?;
             ctx.store.kick();
             if x.state == "starting" {
                 event(ctx, Sev::Info, format!("show {app} on {dev}: starting"), Some(&x));
@@ -878,10 +887,10 @@ pub fn serve(ctx: &Arc<Ctx>, line: &str) -> Result<String, String> {
             if matches!(x.state.as_str(), "running" | "paused") {
                 stop(&x)?;
             }
-            let x = set(ctx, &x.id, |s| {
+            let x = try_set(ctx, &x.id, |s| {
                 s.state = if s.state == "waiting" { "cancelled" } else { "stopped" }.into();
                 s.ended_ms = wall_ms();
-            });
+            })?;
             event(ctx, Sev::Info, format!("show {app} on {dev} stopped"), x.as_ref());
             Ok(format!("{{\"app\":{},\"device\":{},\"state\":\"stopped\"}}", json_str(app), json_str(&dev)))
         }
@@ -894,7 +903,7 @@ pub fn serve(ctx: &Arc<Ctx>, line: &str) -> Result<String, String> {
             if x.pid > 0 {
                 pin_jit(ctx, &x, on)?;
             }
-            let x = set(ctx, &x.id, |s| s.pinned = on);
+            let x = try_set(ctx, &x.id, |s| s.pinned = on)?;
             event(ctx, Sev::Info, format!("show {app} on {dev}: {}", if on { "pinned: landings go on, it stays as it is until the unpin" } else { "unpinned: it catches up" }), x.as_ref());
             Ok(format!("{{\"app\":{},\"device\":{},\"pinned\":{on}}}", json_str(app), json_str(&dev)))
         }
@@ -949,7 +958,7 @@ mod tests {
         g(&["add", "-A"]);
         g(&["commit", "-q", "-m", "fab"]);
         let leases = Arc::new(LeaseMaster::new("mac", home.clone(), Arc::new(|_: &str, _: &str, _: &str| Err("no nodes".to_string())), Arc::new(|_| {}), Arc::new(|| 1), None, true));
-        let ctx = Arc::new(Ctx { store: Store::open(&home, "mac", Arc::new(|_| 0)), leases, machine: "mymac".into(), monitor: crate::monitor::Monitor::start(&[]), repo: repo.clone(), home: home.clone() });
+        let ctx = Arc::new(Ctx { store: Store::open(&home, "mac", Arc::new(|_| 0)).unwrap(), leases, machine: "mymac".into(), monitor: crate::monitor::Monitor::start(&[]), repo: repo.clone(), home: home.clone() });
         let add = |on: &str| serve(&ctx, &format!("show add {{\"app\":\"makepad-fab\",\"on\":\"{on}\",\"after\":[\"landed\",\"rc-x\"],\"by\":\"t\"}}"));
         // a name no Cargo.toml has starts nothing (`devhub show 518`)
         assert!(serve(&ctx, "show add {\"app\":\"518\",\"on\":\"mac\",\"by\":\"t\"}").unwrap_err().contains("no package `518`"));
@@ -964,12 +973,12 @@ mod tests {
         ctx.store.update(|d| {
             d.shows[1].state = "running".into();
             d.shows[1].pid = std::process::id();
-        });
+        }).unwrap_or_else(|e| { eprintln!("devhub state: {e}"); Default::default() });
         assert!(add("mac").unwrap_err().contains("--replace"));
         ctx.store.update(|d| {
             d.shows[1].state = "waiting".into();
             d.shows[1].pid = 0;
-        });
+        }).unwrap_or_else(|e| { eprintln!("devhub state: {e}"); Default::default() });
         assert!(serve(&ctx, "show stop makepad-fab mac").unwrap().contains("stopped"));
         assert_eq!(ctx.store.read(|d| d.shows[1].state.clone()), "cancelled");
         // what became of the recent ones stays listed (its outcome), not only the running ones
@@ -978,7 +987,7 @@ mod tests {
         ctx.store.update(|d| d.shows.iter_mut().for_each(|x| {
             x.ended_ms = 1;
             x.added_ms = 1;
-        }));
+        })).unwrap_or_else(|e| { eprintln!("devhub state: {e}"); Default::default() });
         assert_eq!(serve(&ctx, "show list").unwrap(), "[]");
         let _ = std::fs::remove_dir_all(&home);
     }

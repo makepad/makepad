@@ -163,7 +163,7 @@ pub struct SunConfig {
 ///   as it arrives after dusk, the cover along it and what stands in front of
 ///   it, as for the sun;
 /// - the sun of a base image that is the whole base: the sun found in the
-///   photograph (`hdri::detect_sun`) at the image's exposure, times what the
+///   photograph (`env_map::detect_sun`) at the image's exposure, times what the
 ///   lights in front of it leave of it, weighed by the photograph;
 /// - a studio key: its whole emission as the map draws it, integrated once
 ///   per map, when the engine first asks for it: its shape, corner, ring,
@@ -182,7 +182,7 @@ pub struct SunConfig {
 ///   carries the sky it lets in, measured against that sky, not its own
 ///   colour. A stroke that spreads wider round its middle than an 85 degree
 ///   key is never the key (the generator's D2);
-/// - a detected sun (`hdri::detect_sun`): the energy it gathered over the
+/// - a detected sun (`env_map::detect_sun`): the energy it gathered over the
 ///   cone's solid angle.
 ///
 /// `cos_radius` is an f32: for the 0.53 degree sun `1 − cos_radius` keeps
@@ -296,7 +296,7 @@ pub struct Environment {
     /// TOWARD it (y-up, in the map's own frame like `sun.dir`, turned with
     /// the map by `Ibl.rotation_deg`), also when it is below the horizon. A
     /// generated sky reports it whatever its key is: the sun itself, the
-    /// moon, or no key at all at twilight (`hdri::Env::sun_dir`). Its
+    /// moon, or no key at all at twilight. Its
     /// elevation is what the renderer's "is it day?" switches read (the
     /// street lamps' photocell, a streamed city's night factor and its lit
     /// windows and headlights, the analytic sky), while `sun` lights the

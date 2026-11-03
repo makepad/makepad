@@ -1,10 +1,10 @@
-use makepad_shared_bytes::SharedBytes;
+use makepad_shared_bytes::HostBuf;
 use std::{cell::RefCell, fmt, rc::Rc};
 use {rustybuzz, rustybuzz::ttf_parser};
 
 /// The bytes of a font file: file-mapped where it came from a file, so that its pages are the
 /// OS page cache's and every holder of the file shares them.
-pub type FontData = SharedBytes;
+pub type FontData = HostBuf;
 
 pub struct FontFace {
     parsed: Rc<ParsedFontFace>,
@@ -196,10 +196,11 @@ impl FontFace {
             data,
             index,
             // SAFETY: `ttf_parser::Face` only borrows the bytes inside `data`.
-            // `ParsedFontFace` owns `data`, which is backed by heap/mmap storage
-            // (via `Rc` inside `SharedBytes`) whose address remains stable even if
+            // `ParsedFontFace` owns `data`, which is backed by heap/mmap/leased storage
+            // (via `Arc` inside `HostBuf`) whose address remains stable even if
             // `ParsedFontFace` itself moves. The transmuted face never outlives the
             // owned bytes because both are stored in the same `Rc<ParsedFontFace>`.
+            // This owner never mutates data; other HostBuf clones copy before writing.
             face: unsafe {
                 std::mem::transmute::<ttf_parser::Face<'_>, ttf_parser::Face<'static>>(face)
             },

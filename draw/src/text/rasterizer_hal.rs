@@ -695,14 +695,14 @@ impl Rasterizer {
 mod tests {
     use super::*;
     use crate::{
-        makepad_platform::SharedBytes,
+        makepad_platform::HostBuf,
         text::{font::FontId as Fid, font_face::FontFace, layouter, rasterizer::Rasterizer as Rz},
     };
     use std::{cell::RefCell, rc::Rc};
 
     fn instance(id: u64, wght: f32) -> Font {
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../widgets/resources/RobotoFlex.ttf");
-        let data = SharedBytes::from_file_mmap_or_read(path).expect("font");
+        let data = HostBuf::from_file_mmap_or_read(path).expect("font");
         let mut face = FontFace::from_data_and_index(data, 0).expect("face");
         face.set_variations(&[(u32::from_be_bytes(*b"wght"), wght)]);
         Font::new(Fid::from(id), Rc::new(RefCell::new(Rz::new(layouter::Settings::default().loader.rasterizer))), face, 0.0, 0.0)

@@ -131,6 +131,7 @@ pub(crate) enum IrMe {
     },
     LogicOp {
         target_ip: u32,
+        block_depth: usize,
         op: BinOp,
         first: ExprId,
         first_type: ShaderType,

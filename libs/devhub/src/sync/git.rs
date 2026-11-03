@@ -44,13 +44,20 @@ pub fn stores_dir() -> PathBuf {
 }
 
 /// Runs `git <args>` in `dir` (or with the store as GIT_DIR); stdout on success.
+#[track_caller]
 pub fn run(dir: Option<&Path>, git_dir: Option<&Path>, env: &[(&str, &Path)], args: &[&str]) -> Result<String, String> {
-    let mut cmd = makepad_remote::group::command("git");
+    run_with(dir, git_dir, env, args, None)
+}
+
+/// [`run`] with `input` on git's stdin.
+#[track_caller]
+fn run_with(dir: Option<&Path>, git_dir: Option<&Path>, env: &[(&str, &Path)], args: &[&str], input: Option<&[u8]>) -> Result<String, String> {
+    let mut cmd = crate::git_exec::command();
     cmd.arg("-c").arg("core.hooksPath=/dev/null").arg("-c").arg("advice.detachedHead=false");
     if let Some(g) = git_dir {
         cmd.arg("--git-dir").arg(g);
     }
-    cmd.args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    cmd.args(args).stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::piped()).stderr(Stdio::piped());
     if let Some(d) = dir {
         cmd.current_dir(d);
     }
@@ -59,7 +66,17 @@ pub fn run(dir: Option<&Path>, git_dir: Option<&Path>, env: &[(&str, &Path)], ar
     for (k, v) in env {
         cmd.env(k, v);
     }
-    let out = cmd.output().map_err(|e| format!("git: {e}"))?;
+    let out = match input {
+        None => cmd.output(),
+        Some(input) => cmd.spawn().and_then(|mut child| {
+            use std::io::Write;
+            // small inputs (ref edits): written whole before git's output is read
+            let wrote = child.stdin.take().map_or(Ok(()), |mut i| i.write_all(input));
+            let out = child.wait_with_output();
+            wrote.and(out)
+        }),
+    }
+    .map_err(|e| format!("git: {e}"))?;
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     } else {
@@ -145,6 +162,13 @@ impl Store {
         let dst = format!("{PUSHED}{branch}");
         self.git(&["fetch", "-q", "--no-tags", "--no-write-fetch-head", &b, &format!("+refs/heads/{branch}:{dst}")])?;
         self.rev(&dst).ok_or_else(|| format!("the bundle holds no branch {branch}"))
+    }
+
+    /// Drops `refs/devhub/pushed/<branch>` of each branch, in one git process: the master's word
+    /// for branches that landed or went away (a node holds no state of its own).
+    pub fn prune_pushed(&self, branches: &[&str]) -> Result<(), String> {
+        let input: String = branches.iter().map(|b| format!("delete {PUSHED}{b}\n")).collect();
+        run_with(None, Some(&self.git_dir), &[], &["update-ref", "--stdin"], Some(input.as_bytes())).map(|_| ())
     }
 
     pub fn set_ref(&self, r: &str, sha: &str) -> Result<(), String> {
@@ -381,6 +405,10 @@ mod tests {
         let bundle = base.join("x.bundle");
         sh(&src, &["bundle", "create", "-q", &bundle.to_string_lossy(), "refs/heads/work", "refs/heads/rc-x"]);
         assert_eq!(store.fetch_bundle(&bundle, "work").unwrap(), two);
+        assert_eq!(store.fetch_bundle(&bundle, "rc-x").unwrap(), lane);
+        // a landed lane's ref goes (a name the store never had is no error); work's stays
+        store.prune_pushed(&["rc-x", "rc-never"]).unwrap();
+        assert_eq!(store.refs().iter().map(|(r, _)| r.as_str()).collect::<Vec<_>>(), vec!["refs/devhub/pushed/work"]);
         assert_eq!(store.fetch_bundle(&bundle, "rc-x").unwrap(), lane);
 
         // a tree shipped at `one` by a deploy script: no .git, no dotfiles, a target and FLEET-REVISION

@@ -517,12 +517,14 @@ pub fn cli_main(sess: &std::sync::Arc<crate::Session>) {
             std::process::exit(code);
         }
         "lex" => {
-            let code = source_context::cmd_lex(&args[2..]);
+            let mut a = args[2..].to_vec();
+            a[0] = workspace_file_path(&a[0]);
+            let code = source_context::cmd_lex(&a);
             std::process::exit(code);
         }
         "file" => {
             let ed = if args.len() > 3 { args[3].parse::<u16>().unwrap_or(2021) } else { 2021 };
-            let src = std::fs::read(&args[2]).expect("read");
+            let src = crate::vfs::read(workspace_file_path(&args[2])).expect("read");
             match parser::parse_source(sess, &src, ed) {
                 Ok(p) => println!("ok: {} items, {} exprs", p.ast.items.len(), p.ast.exprs.len()),
                 Err((pos, msg)) => {
@@ -598,7 +600,9 @@ fn cmd_parse(sess: &std::sync::Arc<crate::Session>, units_path: &str, threads: u
     let t0 = Instant::now();
     let mut cfgs = Vec::new();
     for c in &crates {
-        cfgs.push(cfg::CfgSet::host(sess, &c.features));
+        let mut cs = cfg::CfgSet::host(sess, &c.features);
+        if c.harness { cs.set.push("test".into()); }
+        cfgs.push(cs);
     }
     let (files, missing, errors) = crates::discover(sess, &crates, &cfgs, threads);
     let discover_s = t0.elapsed().as_secs_f64();
@@ -941,7 +945,7 @@ pub fn load_with_std(sess: &std::sync::Arc<crate::Session>, root: &str, name: &s
     }
     // a single file is edition 2021 unless its header says otherwise (`//@ edition: 2024`,
     // the compiletest directive; rustc takes it as --edition)
-    let edition = std::fs::read_to_string(root).ok().and_then(|src| {
+    let edition = crate::vfs::read_to_string(root).ok().and_then(|src| {
         src.lines().take_while(|l| l.starts_with("//")).find_map(|l| l.strip_prefix("//@ edition:").and_then(|e| e.trim().parse::<u16>().ok()))
     });
     let krate = match prog.load_crate_deferred(name, root, edition.unwrap_or(2021), cfgset, deps) {
@@ -954,6 +958,15 @@ pub fn load_with_std(sess: &std::sync::Arc<crate::Session>, root: &str, name: &s
         return Err(prog.errors.clone());
     }
     Ok((prog, core, krate))
+}
+
+/// Resolve file arguments against the program's workspace, including virtual workspaces.
+fn workspace_file_path(path: &str) -> String {
+    if std::path::Path::new(path).is_absolute() {
+        path.to_string()
+    } else {
+        std::path::Path::new(&crate::run::workspace_dir()).join(path).to_string_lossy().into_owned()
+    }
 }
 
 fn cmd_test(sess: &std::sync::Arc<crate::Session>, args: &[String]) -> i32 {
@@ -980,7 +993,8 @@ fn cmd_test(sess: &std::sync::Arc<crate::Session>, args: &[String]) -> i32 {
     pa.extend(args[1..].iter().filter(|a| a.as_str() != "--").map(|a| a.clone().into_bytes()));
     jit::set_program_args(pa);
     let t0 = Instant::now();
-    let (mut prog, core, krate) = match load_with_std(sess, root, "test_crate", true) {
+    let path = workspace_file_path(root);
+    let (mut prog, core, krate) = match load_with_std(sess, &path, "test_crate", true) {
         Ok(x) => x,
         Err(e) => {
             for m in e {
@@ -1167,11 +1181,13 @@ fn cmd_resolve(sess: &std::sync::Arc<crate::Session>, units_path: &str) {
             let s = prog.syms.intern(n);
             deps.push((s, crate_of[*i]));
         }
-        let cs = program_cfg(sess, &c.features);
+        let mut cs = program_cfg(sess, &c.features);
+        if c.harness { cs.set.push("test".into()); }
         match prog.load_crate_deferred(&c.name, &c.src_path, c.edition, cs, deps) {
             Ok(k) => {
                 prog.crates[k as usize].proc_macro = c.proc_macro;
                 prog.crates[k as usize].is_bin = c.bin;
+                prog.crates[k as usize].harness = c.harness;
                 crate_of[ci] = k;
             }
             Err(e) => {
@@ -1252,6 +1268,12 @@ mod lazy_reload_tests;
 
 #[cfg(test)]
 mod calls_tests;
+
+#[cfg(test)]
+mod value_tests;
+
+#[cfg(test)]
+mod check_lint_tests;
 
 #[cfg(test)]
 #[test]

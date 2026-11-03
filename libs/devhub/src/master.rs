@@ -122,6 +122,8 @@ impl Master {
         if Client::new(Target::Unix(proto::control_socket()), "probe").conn().is_ok() {
             return Err(format!("a devhub already serves {}", proto::control_socket().display()));
         }
+        // Validate and retain the shared state before starting any master services.
+        let _state = crate::state::Store::open_quiet(&proto::home(), name)?;
         crate::os::raise_fd_limit();
         let inbox = Arc::new(Mutex::new(Inbox::open(proto::home().join("inbox.jsonl"))));
         let (ib, user) = (inbox.clone(), on_record);
@@ -238,21 +240,21 @@ impl Master {
             crate::bucket::spawn("fast", timing, repo.clone(), home.clone(), Arc::new(move |r: Record| {
                 s.emit(&r.to_json());
                 o(&r);
-            }), run);
+            }), run, |_| None);
             let run = crate::bucket::hot(repo.clone());
             let (s, o) = (sink.clone(), on_record.clone());
             let timing = crate::bucket::Timing { every: Duration::ZERO, quiet: Duration::ZERO, cap: Duration::ZERO };
             crate::bucket::spawn("hot", timing, repo.clone(), home.clone(), Arc::new(move |r: Record| {
                 s.emit(&r.to_json());
                 o(&r);
-            }), run);
+            }), run, |_| None);
             let run = crate::orch::ci::ci(repo.clone());
             let (s, o) = (sink.clone(), on_record.clone());
             let timing = crate::bucket::Timing { every: Duration::ZERO, quiet: Duration::from_secs(15 * 60), cap: Duration::from_secs(3 * 3600) };
             crate::bucket::spawn("ci", timing, repo, home.clone(), Arc::new(move |r: Record| {
                 s.emit(&r.to_json());
                 o(&r);
-            }), run);
+            }), run, crate::orch::ci::last_rolling);
             ep.register("bucket", 1, makepad_remote::lines::service("bucket", Arc::new(move |_, out| {
                 out.extend(crate::bucket::ledger(&home, 10));
             })));
@@ -461,13 +463,13 @@ mod tests {
         let seeds = Hosts { hosts: vec![Host { name: "n1".into(), via: Via::Fleet { addr: "192.0.2.38:8797".into() } }, Host { name: "mini".into(), via: Via::Fleet { addr: "192.0.2.92:8797".into() } }] };
         let heard = vec![
             // n1 announcing under its default name: same address
-            Heard { name: "100".into(), addr: "192.0.2.38:8797".into(), fleet: "a node".into() },
+            Heard { name: "100".into(), addr: "192.0.2.38:8797".into(), fleet: "fleet-a".into() },
             // the mini on its Wi-Fi address: same fleet identity as the dialled seed
             Heard { name: "mini".into(), addr: "192.0.2.75:8797".into(), fleet: "mini".into() },
             // a machine nodes.conf lacks
-            Heard { name: "217".into(), addr: "192.0.2.89:8797".into(), fleet: "a node".into() },
+            Heard { name: "217".into(), addr: "192.0.2.89:8797".into(), fleet: "fleet-b".into() },
             // the same machine heard twice
-            Heard { name: "217b".into(), addr: "192.0.2.90:8797".into(), fleet: "a node".into() },
+            Heard { name: "217b".into(), addr: "192.0.2.90:8797".into(), fleet: "fleet-b".into() },
         ];
         let identity = |addr: &str| match addr {
             "192.0.2.92:8797" => Some("mini".to_string()),
@@ -515,14 +517,17 @@ mod tests {
         for _ in 0..300 {
             call();
         }
-        // the server side sees the last closes a moment later
+        // the server side sees the last closes a moment later. The count is the whole test
+        // process's: tests running beside this one open files and pipes meanwhile (a bound of 12
+        // failed on that noise), while a leak of even one fd per call leaves 300 or more
+        const BOUND: usize = 75;
         let t = std::time::Instant::now();
-        while fds() > before + 12 && t.elapsed() < std::time::Duration::from_secs(10) {
+        while fds() > before + BOUND && t.elapsed() < std::time::Duration::from_secs(10) {
             std::thread::sleep(std::time::Duration::from_millis(20));
             call();
         }
         let after = fds();
         let _ = std::fs::remove_file(&sock);
-        assert!(after <= before + 12, "300 CLI calls left {} fds open ({before} -> {after})", after.saturating_sub(before));
+        assert!(after <= before + BOUND, "300 CLI calls left {} fds open ({before} -> {after})", after.saturating_sub(before));
     }
 }

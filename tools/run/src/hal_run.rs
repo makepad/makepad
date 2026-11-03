@@ -27,10 +27,6 @@ struct Run {
     window: Id,
     spec: Option<AppSpec>,
     domain: u32,
-    pending: bool,
-    stopping: bool,
-    relaunch: Option<Instant>,
-    baseline: u64,
     initial_failed: bool,
     retry: bool,
 }
@@ -39,7 +35,8 @@ struct Run {
 enum Update {
     Compiler(run_state::Event),
     Domain(DomainState),
-    Begin { warm: bool },
+    /// a build that failed before the app started compiles again (retry)
+    Begin,
     Failure(String),
     Message(String),
     SourcesChanged,
@@ -469,7 +466,7 @@ pub fn run(mut compile: Box<dyn FnMut() -> i32 + Send>) -> i32 {
                     return;
                 }
                 {
-                    // With a unit already installed, retries go through domain relaunch.
+                    // With a unit already installed, a retry starts the process again (retry).
                     // A typed source mismatch has already posted UpdateReady. It is neither
                     // a compiler failure nor a retry of compilation against the stale loader.
                     let update_ready = code == 0 && panicked.is_none() && relax_compiler::reload::host::update_message().is_some();
@@ -495,7 +492,7 @@ pub fn run(mut compile: Box<dyn FnMut() -> i32 + Send>) -> i32 {
                         run.initial_failed = false;
                     }
                     drop(guard);
-                    post(Update::Begin { warm: false });
+                    post(Update::Begin);
                 }
             }
         })
@@ -678,10 +675,6 @@ pub fn open(package: &str, package_dir: &str) -> Result<(), String> {
         window: Id::NONE,
         spec: None,
         domain: 0,
-        pending: false,
-        stopping: false,
-        relaunch: None,
-        baseline: 0,
         initial_failed: false,
         retry: false,
     });
@@ -724,6 +717,9 @@ pub fn open(package: &str, package_dir: &str) -> Result<(), String> {
                 let environment = ENVIRONMENT.lock().unwrap_or_else(|e| e.into_inner()).unwrap_or_default();
                 host.environment(environment);
                 if let Some(icon) = icon { host.icon(icon); }
+                if launch.is_none() {
+                    let _ = GEOMETRY.set(state_path.clone());
+                }
                 pump(
                     host,
                     initial,
@@ -778,65 +774,52 @@ pub fn spec(id: u32) -> Option<AppSpec> {
         .and_then(|r| r.spec.clone())
 }
 
-pub fn relaunch() -> Result<(), String> {
-    let _kept = relax_compiler::zone_alloc::kept();
-    let mut guard = state();
-    let r = guard
-        .as_mut()
-        .filter(|r| r.domain != 0)
-        .ok_or("the app has not started yet")?;
-    if QUIT.load(Ordering::Acquire) {
-        return Err("the run is closing".into());
-    }
-    if r.relaunch.is_none() {
-        r.relaunch = Some(Instant::now());
-        r.pending = true;
-        r.stopping = true;
-        post(Update::Begin { warm: true });
-    }
-    drop(guard);
-    Hal::global().wake_session(HOST);
-    Ok(())
-}
+/// Where the run window's geometry is remembered (the app's next run, and a restart, opens there);
+/// unset for a launch size (`MAKEPAD_WINDOW`).
+static GEOMETRY: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 
-pub fn domain_replaced(previous: u32, replacement: u32) {
-    if let Some(r) = state().as_mut().filter(|r| r.domain == previous) {
-        r.domain = replacement;
-        relax_compiler::run::set_app_domain(replacement);
-    }
-}
-
-pub fn restarting(id: u32) {
-    let window = state()
-        .as_ref()
-        .filter(|r| r.domain == id)
-        .map(|r| r.window);
-    let Some(window) = window else { return };
-    let baseline = Hal::global().with_world(|w| {
-        w.session(HOST)
-            .and_then(|s| s.windows.get(HOST, window).ok())
-            .map_or(0, |w| w.val.presentations)
-    });
-    if let Some(r) = state().as_mut().filter(|r| r.domain == id) {
-        if r.relaunch.is_none() {
-            r.relaunch = Some(Instant::now());
-            post(Update::Begin { warm: true });
+/// Right before the exec restart (relax_compiler::reload::set_before_exec): the restarted run
+/// opens its window exactly where this one is -- the geometry is written now, not once it held
+/// still -- and keeps the window manager's window (Linux) or its place in the window stacking
+/// and the focus (macOS, makepad_hal::restack_handover). Returns the environment for the new
+/// image.
+#[cfg(unix)]
+pub fn prepare_exec() -> Vec<(String, String)> {
+    let window = state().as_ref().map(|r| r.window).filter(|w| !w.is_none());
+    if let (Some(window), Some(path)) = (window, GEOMETRY.get()) {
+        let geom = Hal::global().with_world(|w| w.session(HOST).and_then(|s| s.windows.get(HOST, window).ok()).map(|w| w.val.geom));
+        if let Some(g) = geom.filter(|g| g.iter().all(|v| v.is_finite()) && g[2] > 0.0 && g[3] > 0.0) {
+            if let Err(e) = crate::boot_progress::save(path, &format!("{} {} {} {}\n", g[0], g[1], g[2], g[3])) {
+                eprintln!("makepad: cannot remember {}: {e}", path.display());
+            }
         }
-        r.stopping = false;
-        r.baseline = baseline;
     }
+    #[allow(unused_mut)]
+    let mut env = Vec::new();
+    #[cfg(target_os = "linux")]
+    env.extend(makepad_hal::wm_prepare_exec());
+    #[cfg(target_os = "macos")]
+    env.extend(makepad_hal::restack_handover());
+    env
+}
+
+/// The exec after [`prepare_exec`] failed: the window manager's connection is this process's again.
+#[cfg(unix)]
+pub fn undo_exec() {
+    #[cfg(target_os = "linux")]
+    makepad_hal::wm_undo_exec();
 }
 
 pub fn observe(id: u32, next: &DomainState) {
-    let guard = state();
-    if let Some(r) = guard.as_ref().filter(|r| r.domain == id) {
-        if !r.stopping {
-            post(Update::Domain(next.clone()));
-        }
+    if state().as_ref().is_some_and(|r| r.domain == id) {
+        post(Update::Domain(next.clone()));
     }
 }
 
-fn retry() -> Result<(), String> {
+/// The run window's Restart (and a crashed app's saved fix): a build that failed before the app
+/// started compiles again in this process; a crashed app's process starts again; a running app
+/// restarts as `session relaunch` does (with its state when it restarts itself).
+fn retry(crashed: bool) -> Result<(), String> {
     {
         let mut guard = state();
         let r = guard.as_mut().ok_or("no run window")?;
@@ -845,8 +828,14 @@ fn retry() -> Result<(), String> {
             RETRY.notify_one();
             return Ok(());
         }
+        if r.domain == 0 {
+            return Err("the app has not started yet".into());
+        }
     }
-    relaunch()
+    if crashed {
+        return relax_compiler::reload::restart_process("restart after the app crashed");
+    }
+    relax_compiler::reload::relaunch_pending().map(|_| ())
 }
 
 fn work(rx: std::sync::mpsc::Receiver<Work>, package_dir: PathBuf, document: Document) {
@@ -1079,7 +1068,14 @@ fn pump(
     if probe.is_some() {
         host.measure_input();
     }
-    let mut ready = if has_window {
+    // A restarted process (the exec restart, reload.rs exec_restart) draws nothing of its own
+    // while it compiles: its window shows with the app's first frame (HIDDEN_UNTIL_PRESENT), never
+    // with the boot field first -- no flash of another picture, and in a window manager that kept
+    // the window across the exec, the app's last frame stays until the new one replaces it. A
+    // failure, a parked thread or an offered update still shows. So its compile does not wait for
+    // the window's first present (there is none before the app's): the window is open now.
+    let restarted = std::env::var_os("MAKEPAD_RUN_RESTART_T0").is_some();
+    let mut ready = if has_window && !restarted {
         Some(ready)
     } else {
         let _ = ready.try_send(Ok(()));
@@ -1095,7 +1091,6 @@ fn pump(
     let mut update_ready = false;
     let mut overlay_dismissed = false;
     let mut active = true;
-    let mut relaunched = false;
     let mut diagnostics = Vec::new();
     let mut diagnostic_keys = HashSet::new();
     let mut diagnostics_dirty = true;
@@ -1130,18 +1125,10 @@ fn pump(
     let mut watch = Watch::new(std::env::var_os("MAKEPAD_RUN_POSTFRAME_LOG").is_some());
     relax_compiler::postframe::on_ui_wait(ui_wait_began);
     loop {
-        let (domain, window, relaunch, baseline, pending, stopping, initial_failed) = {
-            let mut guard = state();
-            let r = guard.as_mut().expect("host run");
-            (
-                r.domain,
-                r.window,
-                r.relaunch,
-                r.baseline,
-                std::mem::take(&mut r.pending),
-                r.stopping,
-                r.initial_failed,
-            )
+        let (domain, window, initial_failed) = {
+            let guard = state();
+            let r = guard.as_ref().expect("host run");
+            (r.domain, r.window, r.initial_failed)
         };
         if (unseen || !has_window) && relax_compiler::hot_failure::has_error() {
             EXIT.store(makepad_remote::hot::JIT_ERROR_EXIT, Ordering::Release);
@@ -1153,26 +1140,18 @@ fn pump(
         if QUIT.load(Ordering::Acquire) {
             break;
         }
-        if pending {
-            let mut cmd = CmdWriter::new(HOST);
-            if !window.is_none() {
-                cmd.window_overlay(window, false, [0.0; 4], Id::NONE, false);
-            }
-            cmd.domain_relaunch(domain);
-            hal.submit(&cmd.buf());
-        }
         let updates = std::mem::take(&mut *UPDATES.lock().unwrap_or_else(|e| e.into_inner()));
         for update in updates {
             dirty = true;
             match update {
-                Update::Begin { warm } => {
+                Update::Begin => {
                     stage = Stage::Running;
                     progress.reset();
                     data.phase = Phase::Resolve;
                     data.done = None;
                     data.total = None;
                     data.current.clear();
-                    data.warm = warm;
+                    data.warm = false;
                     data.elapsed = 0.0;
                     data.completed_weight = 0.0;
                     data.phase_elapsed = 0.0;
@@ -1187,7 +1166,6 @@ fn pump(
                     update_ready = false;
                     overlay_dismissed = false;
                     active = true;
-                    relaunched |= warm;
                 }
                 Update::Failure(message) if !has_window || unseen => {
                     if relax_compiler::hot_failure::recovering() {
@@ -1209,10 +1187,6 @@ fn pump(
                     failed = true;
                     active = false;
                     data.domain = "Boot failed".into();
-                    if let Some(r) = state().as_mut() {
-                        r.relaunch = None;
-                        r.stopping = false;
-                    }
                 }
                 Update::Message(message) => {
                     diagnostics.push(Diagnostic::new("run", "", 0, 0, message));
@@ -1223,8 +1197,8 @@ fn pump(
                 Update::Document(document) => host.reload(document),
                 Update::Environment(environment) => host.environment(environment),
                 Update::SourcesChanged => {
-                    if failed && !stopping {
-                        match retry() {
+                    if failed {
+                        match retry(true) {
                             Ok(()) => failed = false,
                             Err(e) => post(Update::Message(e)),
                         }
@@ -1280,8 +1254,6 @@ fn pump(
                         data.domain = message;
                         data.current.clear();
                         if let Some(r) = state().as_mut() {
-                            r.relaunch = None;
-                            r.stopping = false;
                             r.initial_failed = false;
                         }
                     }
@@ -1298,8 +1270,7 @@ fn pump(
                         data.total = total;
                         data.current = item;
                     }
-                    run_state::Event::Warm { domain: id, warm }
-                        if id.is_none() || (id == Some(domain) && relaunched) =>
+                    run_state::Event::Warm { domain: None, warm } =>
                     {
                         data.warm = warm
                     }
@@ -1381,8 +1352,8 @@ fn pump(
         let first_present = active;
         if let Some((geom, borrower_frame, presentations, presenter, lent)) = physical {
             app_frames = presentations;
-            lent_to_app = lent == domain && domain != 0 && !stopping && !pending;
-            app_frame = borrower_frame && lent == domain && domain != 0 && !stopping && !pending;
+            lent_to_app = lent == domain && domain != 0;
+            app_frame = borrower_frame && lent == domain && domain != 0;
             may_present = !borrower_frame || lent == 0;
             if settling_geometry.is_none_or(|(g, _)| g != geom) {
                 settling_geometry = Some((geom, Instant::now()));
@@ -1412,11 +1383,9 @@ fn pump(
             if active
                 && borrower_frame
                 && lent == domain
-                && !pending
-                && !stopping
                 && domain != 0
                 && presenter == domain
-                && presentations > baseline
+                && presentations > 0
             {
                 active = false;
                 failed = false;
@@ -1424,14 +1393,6 @@ fn pump(
                 EXIT.store(0, Ordering::Release);
                 let (path, contents) = progress.finish(data.warm);
                 enqueue(&mut work_pending, Work::Save(path, contents));
-                if let Some(r) = state().as_mut() {
-                    if let Some(t) = r.relaunch.take() {
-                        eprintln!(
-                            "relaunch: {:.1} ms to first frame (window kept)",
-                            t.elapsed().as_secs_f64() * 1000.0
-                        );
-                    }
-                }
                 dirty = true;
             }
         }
@@ -1454,7 +1415,6 @@ fn pump(
             None => {}
         }
         // A refused patch is a ring notice: it never covers the running app.
-        // A warm relaunch preserves the last app image for 300 ms.
         let overlay = has_window
             && app_frame
             && !overlay_dismissed
@@ -1535,14 +1495,13 @@ fn pump(
                 && (failed
                     || update_ready
                     || data.parked.is_some()
-                    || (active
-                        && relaunch.is_none_or(|t| t.elapsed() >= Duration::from_millis(300)))));
+                    || (active && !restarted)));
         // the window layer (Metal): the boot field the app's first frames go under, the warm-up
         // after its first present (until the JIT's readiness signal). An opaque overlay, a failure
         // or a stop takes it away. Later UI waits get the Updating card, below.
         // the boot stage begins before the app has the window, once the field has presented
         // (its first frame then never reaches the window before the layer)
-        let layers = host.layers() && !overlay && !failed && !update_ready && data.parked.is_none() && !stopping && !pending;
+        let layers = host.layers() && !overlay && !failed && !update_ready && data.parked.is_none();
         if !layers || (stage != Stage::Boot && !lent_to_app) {
             stage = Stage::Running;
         }
@@ -1688,7 +1647,7 @@ fn pump(
         }
         if dirty {
             data.can_retry = !update_ready && (initial_failed || (failed && domain != 0));
-            data.can_restart = update_ready || (domain != 0 && !stopping);
+            data.can_restart = update_ready || domain != 0;
             host.update(data.clone());
             dirty = false;
         }
@@ -1873,7 +1832,7 @@ fn pump(
                 Some(Action::Restart) if update_ready => {
                     enqueue(&mut work_pending, Work::Relaunch);
                 }
-                Some(Action::Restart) if data.can_retry || data.can_restart => match retry() {
+                Some(Action::Restart) if data.can_retry || data.can_restart => match retry(failed) {
                     Ok(()) => failed = false,
                     Err(error) => post(Update::Message(error)),
                 },

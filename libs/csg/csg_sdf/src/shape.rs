@@ -41,6 +41,18 @@ impl SdfKernel {
         let field = Arc::new(field);
         SdfKernel { key: field.key(), field: field.clone(), splash: Some(field), bounds }
     }
+
+    /// The kernel as points in `region` (its frame) read it: a gridded field with the piece of
+    /// its grid they read, any other the same.
+    pub fn cropped(&self, region: &crate::bounds::Bounds) -> SdfKernel {
+        let Some(s) = &self.splash else { return self.clone() };
+        let Some(g) = s.grid() else { return self.clone() };
+        let piece = g.crop(region);
+        if piece.hash() == g.hash() {
+            return self.clone();
+        }
+        SdfKernel::splash(s.with_grid(piece), self.bounds)
+    }
 }
 
 impl std::fmt::Debug for SdfKernel {
@@ -99,6 +111,8 @@ pub enum SdfNode {
     /// Combines of the capsules there ([`crate::bounds::cull`]), so the engines
     /// draw it with the nodes they have.
     Sculpt { strokes: Arc<crate::strokes::Strokes>, of: Box<SdfNode> },
+    /// `of` displaced by a pattern ([`crate::texture`]): a knurl, a hex grip, noise.
+    Texture { tex: Arc<crate::texture::SdfTexture>, of: Box<SdfNode> },
 }
 
 /// A rigid placement with a uniform scale: scaled, then turned by the unit
@@ -440,6 +454,23 @@ impl Out {
                 self.u64(strokes.shape_key());
                 self.node(of);
             }
+            SdfNode::Texture { tex, of } => {
+                self.u8(20);
+                self.u64(tex.kernel.key);
+                match tex.project {
+                    crate::texture::TexProject::Axis(a) => self.u8(a),
+                    crate::texture::TexProject::Triplanar => self.u8(3),
+                }
+                for v in [tex.kscale, tex.depth, tex.lipschitz, tex.step] {
+                    self.f(v);
+                }
+                for m in [tex.top, tex.bottom] {
+                    let (lo, hi) = m.unwrap_or((2.0, 2.0));
+                    self.f(lo);
+                    self.f(hi);
+                }
+                self.node(of);
+            }
         }
     }
 }
@@ -537,6 +568,7 @@ pub fn distance_many(n: &SdfNode, ps: &[Vec3d], out: &mut [f64]) {
                 *d = strokes.sculpt([p.x, p.y, p.z], *d, smin);
             }
         }
+        SdfNode::Texture { tex, of } => tex.eval_many(ps, out, |q, o| distance_many(of, q, o)),
         other => {
             for (p, o) in ps.iter().zip(out.iter_mut()) {
                 *o = distance(other, *p);
@@ -628,6 +660,7 @@ fn id_in(n: &SdfNode, p: Vec3d, inherit: Option<u32>) -> (f64, Option<u32>) {
             let (d, i) = id_in(of, p, inherit);
             (strokes.sculpt([p.x, p.y, p.z], d, smin), i)
         }
+        SdfNode::Texture { tex, of } => (tex.eval(p, |q| distance(of, q)), id_in(of, p, inherit).1),
         SdfNode::Material { of, .. } | SdfNode::Bone { of, .. } => id_in(of, p, inherit),
         leaf => (distance(leaf, p), inherit),
     }
@@ -692,6 +725,7 @@ fn slot_in(n: &SdfNode, p: Vec3d, inherit: u8) -> (f64, u8) {
             let (d, s) = slot_in(of, p, inherit);
             (strokes.sculpt([p.x, p.y, p.z], d, smin), s)
         }
+        SdfNode::Texture { tex, of } => (tex.eval(p, |q| distance(of, q)), slot_in(of, p, inherit).1),
         SdfNode::Bone { of, .. } | SdfNode::Id { of, .. } => slot_in(of, p, inherit),
         SdfNode::Links(l) => {
             let (d, s) = l.distance_slot(p);
@@ -802,6 +836,7 @@ pub fn distance(n: &SdfNode, p: Vec3d) -> f64 {
         SdfNode::Instance { places, of } => places.iter().map(|pl| distance(of, v3(pl.into([p.x, p.y, p.z]))) * pl.scale).fold(f64::INFINITY, f64::min),
         SdfNode::Deform { deform, lipschitz, of } => distance(of, deform.warp(p)) / lipschitz,
         SdfNode::Sculpt { strokes, of } => strokes.sculpt([p.x, p.y, p.z], distance(of, p), smin),
+        SdfNode::Texture { tex, of } => tex.eval(p, |q| distance(of, q)),
     }
 }
 

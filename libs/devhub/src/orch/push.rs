@@ -113,6 +113,16 @@ fn push_tip(ctx: &Ctx, requested: Option<&str>) -> Result<Pair, String> {
     }
 }
 
+/// Freeze an extra parent to a commit already reachable from origin's public refs.
+fn public_parent(repo: &std::path::Path, parent: &str) -> Result<String, String> {
+    let oid = git(repo, &["rev-parse", "--verify", &format!("{parent}^{{commit}}")])?;
+    let refs = git(repo, &["for-each-ref", "--format=%(refname)", &format!("--contains={oid}"), "refs/remotes/origin/"])?;
+    if refs.trim().is_empty() {
+        return Err(format!("push: extra parent {parent} is private: not reachable from any refs/remotes/origin/* ref"));
+    }
+    Ok(oid)
+}
+
 /// `push {"sha"?,"message"?,"parents"?:[..],"dry"?}`.
 pub fn serve(ctx: &Ctx, line: &str) -> Result<String, String> {
     let json = line.split_once(' ').map_or("{}", |(_, j)| j.trim());
@@ -121,6 +131,7 @@ pub fn serve(ctx: &Ctx, line: &str) -> Result<String, String> {
     let dry = v.get("dry").and_then(|x| x.as_bool()).unwrap_or(false);
     let parents: Vec<String> = v.get("parents").and_then(|a| a.as_arr()).unwrap_or(&[]).iter().filter_map(|x| x.as_str().map(str::to_string)).collect();
     let repo = &ctx.repo;
+    let parents = parents.iter().map(|p| public_parent(repo, p)).collect::<Result<Vec<_>, _>>()?;
     let requested = st("sha").map(|r| git(repo, &["rev-parse", "-q", "--verify", &format!("{r}^{{commit}}")])).transpose()?;
     let tip = push_tip(ctx, requested.as_deref())?;
     let sha = tip.work.clone();
@@ -159,7 +170,7 @@ pub fn serve(ctx: &Ctx, line: &str) -> Result<String, String> {
     let commit = git(repo, &args.iter().map(String::as_str).collect::<Vec<_>>())?;
     git(repo, &["push", "-q", "origin", &format!("{commit}:refs/heads/work")])?;
     let p = Pushed { pair: tip.clone(), commit: commit.clone(), origin_was: origin.clone(), at_ms: wall_ms(), files };
-    ctx.store.update(|d| d.pushes.push(p));
+    ctx.store.update(|d| d.pushes.push(p))?;
     ctx.store.event("push", Sev::Info, format!("push: origin/work {} -> {} (tree of tip {}, {files} files)", super::short(&origin), super::short(&commit), tip.short()), None);
     Ok(format!("{{\"pushed\":true,\"commit\":{},\"origin_was\":{},\"tip\":{},\"files\":{files}}}", json_str(&commit), json_str(&origin), json_str(&sha)))
 }
@@ -167,6 +178,28 @@ pub fn serve(ctx: &Ctx, line: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn safety_extra_parents_must_be_reachable_from_origin() {
+        use makepad_git::object::{write_loose_object, ObjectKind};
+        let dir = std::env::temp_dir().join(format!("devhub-public-parent-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        git(&dir, &["init", "-q"]).unwrap();
+        let objects = dir.join(".git");
+        let tree = write_loose_object(&objects, ObjectKind::Tree, b"").unwrap();
+        let commit = |parent: &str, message: &str| write_loose_object(&objects, ObjectKind::Commit,
+            format!("tree {tree}\n{parent}author test <> 1 +0000\ncommitter test <> 1 +0000\n\n{message}\n").as_bytes()).unwrap().to_hex();
+        let base = commit("", "public");
+        let public = commit(&format!("parent {base}\n"), "public child");
+        let private = commit(&format!("parent {public}\n"), "private");
+        git(&dir, &["update-ref", "refs/remotes/origin/main", &public]).unwrap();
+        git(&dir, &["update-ref", "refs/heads/local", &private]).unwrap();
+        assert_eq!(public_parent(&dir, &base).unwrap(), base, "public ancestors are allowed");
+        assert_eq!(public_parent(&dir, "origin/main").unwrap(), public);
+        assert!(public_parent(&dir, "local").unwrap_err().contains("private"));
+        assert!(public_parent(&dir, &private).is_err(), "a raw private oid is also refused");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn scan_finds_credentials_by_place_only() {

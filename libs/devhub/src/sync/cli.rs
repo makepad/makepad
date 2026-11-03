@@ -8,7 +8,8 @@ use super::sign;
 use crate::proto;
 use makepad_remote::hub;
 use makepad_remote::link::{Client, Target};
-use std::collections::HashMap;
+use makepad_git::{ObjectId, Repository};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -28,6 +29,8 @@ pub const HELP: &str = "  sync words (the master; nodes by hub name, `all` = eve
   lanes [--json]                                the open lane branches the master keeps merged with work/main:
                                                 branch, worktree, tip, last merge result, conflicts
   hold <branch> [why...] | unhold <branch>      keep the master's merge bot off a lane branch (held)
+  gitexecs                                      git processes the master started (since start, last minute)
+                                                and its busiest call sites: a loop must start none
   prewarm                                       per node, the last pre-warm after a landing (JIT built, cache
                                                 warm for the smoke apps; a lease preempts it)
   prewarm run [--cancel-after <s>]              the pre-warm of this tree, here, in the foreground (a dry run;
@@ -122,8 +125,9 @@ pub(super) fn ask_local(c: &Client, service: &str, line: &str) -> Result<Vec<Str
 
 // ---------------------------------------------------------------- git, read-only, in the user's repo
 
+#[track_caller]
 fn git(repo: &Path, args: &[&str]) -> Result<String, String> {
-    let out = makepad_remote::group::command("git").arg("-C").arg(repo).args(args).stdin(Stdio::null()).output().map_err(|e| format!("git: {e}"))?;
+    let out = crate::git_exec::command().arg("-C").arg(repo).args(args).stdin(Stdio::null()).output().map_err(|e| format!("git: {e}"))?;
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
     } else {
@@ -133,21 +137,18 @@ fn git(repo: &Path, args: &[&str]) -> Result<String, String> {
 
 /// What a failed `rev-parse` of a branch means: `git: <spawn error>` is git not starting, anything else
 /// is git saying the branch is not there.
-fn branch_error(repo: &Path, branch: &str, e: &str) -> String {
-    if e.starts_with("git: ") {
-        format!("{}: {e}", repo.display())
-    } else {
-        format!("{}: no branch {branch}", repo.display())
-    }
-}
-
 pub(super) fn branch_sha(repo: &Path, branch: &str) -> Result<String, String> {
     if !valid_branch(branch) {
         return Err(format!("`{branch}` is not a branch name"));
     }
-    // only a git that ran and said no means "no such branch"; a git that could not start (EMFILE: too
-    // many open files, ENOMEM, a missing binary) is reported as that, never as a missing branch
-    git(repo, &["rev-parse", "-q", "--verify", &format!("refs/heads/{branch}^{{commit}}")]).map_err(|e| branch_error(repo, branch, &e))
+    // read from the refs (makepad-git, no git process): only a ref that is not there means "no such
+    // branch"; a repository that cannot be read (EMFILE: too many open files) is reported as that
+    let p = makepad_git::repository_paths(repo).map_err(|e| format!("{}: {e}", repo.display()))?.ok_or_else(|| format!("{}: not a git checkout", repo.display()))?;
+    match makepad_git::refs::resolve_ref_in(&p.git_dir, &p.common_dir, &format!("refs/heads/{branch}")) {
+        Ok(oid) => Ok(oid.to_hex()),
+        Err(makepad_git::GitError::RefNotFound(_)) => Err(format!("{}: no branch {branch}", repo.display())),
+        Err(e) => Err(format!("{}: {e}", repo.display())),
+    }
 }
 
 /// One repo to push: where it is, the branch, its commit.
@@ -171,6 +172,109 @@ fn node_has(status: &str, repo: &str) -> Vec<String> {
     out.sort();
     out.dedup();
     out
+}
+
+/// What the user's repos say about the commits nodes report, answered in-process (makepad-git, no
+/// git process) and remembered per repo: whether a commit is here and when it was made never
+/// change, nor whether one fixed commit reaches another. Every node reports its store's refs on
+/// every push, the same few hundred again and again: after the first push they cost lookups.
+#[derive(Default)]
+struct Known {
+    /// commit -> its committer time (None: no commit here)
+    commits: HashMap<ObjectId, Option<i64>>,
+    /// the last commits pushed, each with the bases that do or do not reach it
+    reaches: std::collections::VecDeque<(ObjectId, HashMap<ObjectId, bool>)>,
+}
+
+impl Known {
+    /// Runs `f` with the memo of the repo at `dir` and its shared repository ([`crate::gitread`]).
+    fn with<T>(dir: &Path, f: impl FnOnce(&mut Known, &mut Repository) -> T) -> Result<T, String> {
+        static KNOWN: Mutex<BTreeMap<PathBuf, Known>> = Mutex::new(BTreeMap::new());
+        crate::gitread::with(dir, |paths, repo| {
+            let mut all = KNOWN.lock().unwrap_or_else(|e| e.into_inner());
+            let known = all.entry(paths.common_dir.clone()).or_default();
+            if known.commits.len() > 50_000 {
+                // refs nodes stopped reporting: forget them all at once, the live ones come back
+                known.commits.clear();
+            }
+            f(known, repo)
+        })
+        .ok_or_else(|| format!("{}: not a git checkout", dir.display()))
+    }
+
+    /// When `oid` was committed, if it is a commit here. Only a definite answer is remembered.
+    fn time(&mut self, repo: &mut Repository, oid: &ObjectId) -> Option<i64> {
+        if let Some(t) = self.commits.get(oid) {
+            return *t;
+        }
+        let t = match repo.read_commit(oid) {
+            Ok(c) => Some(c.committer.timestamp),
+            Err(makepad_git::GitError::ObjectNotFound(_) | makepad_git::GitError::InvalidObject(_)) => None,
+            // a read that failed for another reason (a pack repacked away meanwhile) says nothing
+            Err(_) => return None,
+        };
+        self.commits.insert(*oid, t);
+        t
+    }
+
+    /// Whether `base` reaches `sha` (made at `at`). The walk goes down `base`'s history to
+    /// commits made an hour before `sha` only: a commit made later than its parents' clock says
+    /// (an hour off) reads as "not there", which costs a bundle and never skips one.
+    fn reaches(&mut self, repo: &mut Repository, base: ObjectId, sha: ObjectId, at: i64) -> bool {
+        let slot = match self.reaches.iter().position(|(s, _)| *s == sha) {
+            Some(i) => i,
+            None => {
+                if self.reaches.len() == 16 {
+                    self.reaches.pop_front();
+                }
+                self.reaches.push_back((sha, HashMap::new()));
+                self.reaches.len() - 1
+            }
+        };
+        if let Some(r) = self.reaches[slot].1.get(&base) {
+            return *r;
+        }
+        let floor = at - 3600;
+        let mut seen = std::collections::HashSet::new();
+        let mut stack = vec![base];
+        let mut found = false;
+        while let Some(oid) = stack.pop() {
+            if oid == sha {
+                found = true;
+                break;
+            }
+            if !seen.insert(oid) {
+                continue;
+            }
+            // a commit this repo cannot read (a shallow end) ends that line
+            let Ok(c) = repo.read_commit(&oid) else { continue };
+            if c.committer.timestamp >= floor {
+                stack.extend(c.parents);
+            }
+        }
+        self.reaches[slot].1.insert(base, found);
+        found
+    }
+}
+
+/// Of the commits a node holds (`has`), those this repo has too (the bases a bundle for `p` can
+/// leave out), and whether one of them holds `p`'s commit already. No git process.
+fn bases_for(p: &Push, has: &[String]) -> Result<(Vec<String>, bool), String> {
+    let sha = ObjectId::from_hex(&p.sha).map_err(|e| format!("{}: {e}", p.sha))?;
+    Known::with(&p.dir, |k, repo| {
+        let at = k.time(repo, &sha);
+        let mut bases = Vec::new();
+        let mut there = false;
+        for b in has {
+            let Ok(oid) = ObjectId::from_hex(b) else { continue };
+            if k.time(repo, &oid).is_none() {
+                continue;
+            }
+            there = there || oid == sha || at.is_some_and(|at| k.reaches(repo, oid, sha, at));
+            bases.push(b.clone());
+        }
+        (bases, there)
+    })
 }
 
 /// Bundles made for this run, by repo and base set (nodes with the same history share one).
@@ -278,11 +382,11 @@ fn push_to(c: &Client, node: &str, pushes: &[Push], bundles: &Bundles, out: &mut
         }
         return Ok(true);
     }
+    prune_stale(c, node, &status, pushes, out);
     for p in pushes {
-        let has = node_has(&status, p.repo);
         // bases this repo knows; a node that holds the commit (or a descendant) needs no bundle
-        let bases: Vec<String> = has.iter().filter(|b| git(&p.dir, &["cat-file", "-e", &format!("{b}^{{commit}}")]).is_ok()).cloned().collect();
-        if bases.iter().any(|b| *b == p.sha || git(&p.dir, &["merge-base", "--is-ancestor", &p.sha, b]).is_ok()) {
+        let (bases, there) = bases_for(p, &node_has(&status, p.repo))?;
+        if there {
             out(node, &format!("{} {} {}: already there", p.repo, p.branch, &p.sha[..10]));
             continue;
         }
@@ -292,6 +396,38 @@ fn push_to(c: &Client, node: &str, pushes: &[Push], bundles: &Bundles, out: &mut
         out(node, &format!("{} {} {}: pushed {:.1} MB in {:.1} s {r}", p.repo, p.branch, &p.sha[..10], size as f64 / 1048576.0, t.elapsed().as_secs_f64()));
     }
     Ok(false)
+}
+
+/// The branches whose `refs/devhub/pushed/<branch>` a node keeps no longer: every pushed ref of
+/// `repo` but work, main, the branches pushed now and the open lanes (`open`: the lanes round's).
+fn stale_pushed(status: &str, repo: &str, open: &HashSet<String>, pushes: &[Push]) -> Vec<String> {
+    let Ok(v) = makepad_strict_json::parse(status.as_bytes()) else { return Vec::new() };
+    let Some(refs) = v.get("repos").and_then(|r| r.get(repo)).and_then(|r| r.get("refs")).and_then(|a| a.as_arr()) else { return Vec::new() };
+    refs.iter()
+        .filter_map(|r| r.get("ref")?.as_str()?.strip_prefix(super::git::PUSHED).map(str::to_string))
+        .filter(|b| valid_branch(b) && b != "work" && b != "main" && !open.contains(b) && !pushes.iter().any(|p| p.repo == repo && p.branch == *b))
+        .collect()
+}
+
+/// Has `node` drop the pushed refs of lanes that landed or went away (once the lanes round of this
+/// process knows which are open): a store's ref list is read on every push and holds no state of
+/// its own. A node that does not know the word yet keeps its refs until it is synced.
+fn prune_stale(c: &Client, node: &str, status: &str, pushes: &[Push], out: &mut dyn FnMut(&str, &str)) {
+    for repo in ["makepad", "commercial"] {
+        let Some(open) = super::lanes::open_branches(repo) else { return };
+        let stale = stale_pushed(status, repo, &open, pushes);
+        // orders stay short lines
+        for chunk in stale.chunks(64) {
+            let r = sign::sign(&format!("prune {repo} {}", chunk.join(" "))).and_then(|o| ask(c, node, "sync", &format!("prune {o}")));
+            match r.map(|l| l.into_iter().find(|l| is_err(l))) {
+                Ok(None) => out(node, &format!("{repo}: dropped {} pushed ref(s) of landed or gone lanes", chunk.len())),
+                Ok(Some(e)) | Err(e) => {
+                    out(node, &format!("{repo}: pushed refs kept: {e}"));
+                    return;
+                }
+            }
+        }
+    }
 }
 
 /// A device's store: the files that differ from its rev (all files under its prefixes on a first
@@ -344,7 +480,7 @@ pub(super) fn tree_changes(repo: &Path, from: Option<&str>, to: &str, prefixes: 
     };
     args.push("--".into());
     args.extend(prefixes.iter().cloned());
-    let out = makepad_remote::group::command("git").arg("-C").arg(repo).args(&args).stdin(Stdio::null()).output().map_err(|e| format!("git: {e}"))?;
+    let out = crate::git_exec::command().arg("-C").arg(repo).args(&args).stdin(Stdio::null()).output().map_err(|e| format!("git: {e}"))?;
     if !out.status.success() {
         return Err(format!("git {}: {}", args[0], proto::clean(String::from_utf8_lossy(&out.stderr).trim(), 300)));
     }
@@ -360,7 +496,7 @@ pub(super) fn tree_changes(repo: &Path, from: Option<&str>, to: &str, prefixes: 
         wanted.extend(fields.into_iter().map(|p| (p, false)));
     }
     // the contents of every written file through one `cat-file --batch`
-    let mut child = makepad_remote::group::command("git").arg("-C").arg(repo).args(["cat-file", "--batch"]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().map_err(|e| format!("git: {e}"))?;
+    let mut child = crate::git_exec::command().arg("-C").arg(repo).args(["cat-file", "--batch"]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().map_err(|e| format!("git: {e}"))?;
     let mut input = String::new();
     for (path, deleted) in &wanted {
         if !deleted {
@@ -411,7 +547,10 @@ pub fn ensure_rev(control: &Client, node: &str, repo: &str, dir: &Path, branch: 
     if !valid_branch(branch) || !valid_sha(sha) {
         return Err(format!("`{branch}@{sha}` is not branch@sha"));
     }
-    git(dir, &["cat-file", "-e", &format!("{sha}^{{commit}}")]).map_err(|_| format!("{}: no commit {sha}", dir.display()))?;
+    let oid = ObjectId::from_hex(sha).map_err(|e| format!("{sha}: {e}"))?;
+    if Known::with(dir, |k, repo| k.time(repo, &oid))?.is_none() {
+        return Err(format!("{}: no commit {sha}", dir.display()));
+    }
     let p = Push { repo, dir: dir.to_path_buf(), branch: branch.to_string(), sha: sha.to_string() };
     let bundles = Bundles::default();
     let r = push_to(control, node, std::slice::from_ref(&p), &bundles, &mut |n, l| println!("{n} {l}"));
@@ -440,10 +579,7 @@ fn retired_refusal(repo: &Path, line: &str) -> Option<&'static str> {
     if name != "makepad" || !from.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
-    let git = |args: &[&str]| std::process::Command::new("git").args(args).current_dir(repo).stdin(std::process::Stdio::null()).output().ok();
-    let refs = git(&["for-each-ref", "--format=%(refname)", "refs/heads/work-old-*"])?;
-    let refs = String::from_utf8_lossy(&refs.stdout).into_owned();
-    refs.lines().any(|r| git(&["merge-base", "--is-ancestor", from, r]).is_some_and(|o| o.status.success())).then_some("makepad")
+    (crate::gitread::Pass::default().retired_holds(repo, from) == Some(true)).then_some("makepad")
 }
 
 pub(super) fn push_and_apply(c: &Client, repo: &Path, makepad_branch: &str, commercial: Option<&str>, nodes: &[String], build: &str, restart: &str, prewarm: bool, extra: &str, out: &mut dyn FnMut(&str, &str)) -> i32 {
@@ -937,6 +1073,45 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    /// The bases a node reports are checked in-process: which ones this repo has, and whether one
+    /// holds the pushed commit; asking again (the next node, the next push) reads nothing.
+    #[test]
+    fn node_bases_are_checked_without_git() {
+        let d = std::env::temp_dir().join(format!("devhub-sync-bases-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let g = |args: &[&str]| super::git(&d, &[&["-c", "user.name=t", "-c", "user.email=t@t"], args].concat()).unwrap();
+        g(&["init", "-q", "-b", "work"]);
+        g(&["commit", "-q", "--allow-empty", "-m", "1"]);
+        let one = g(&["rev-parse", "HEAD"]);
+        g(&["commit", "-q", "--allow-empty", "-m", "2"]);
+        let two = g(&["rev-parse", "HEAD"]);
+        g(&["commit", "-q", "--allow-empty", "-m", "3"]);
+        let three = g(&["rev-parse", "HEAD"]);
+        g(&["checkout", "-q", "-b", "side", &one]);
+        g(&["commit", "-q", "--allow-empty", "-m", "s"]);
+        let side = g(&["rev-parse", "HEAD"]);
+        let missing = "ab".repeat(20);
+        let p = super::Push { repo: "makepad", dir: d.clone(), branch: "work".into(), sha: two.clone() };
+        let before = crate::git_exec::on_this_thread();
+        for _ in 0..2 {
+            assert_eq!(super::bases_for(&p, &[three.clone(), side.clone(), missing.clone()]).unwrap(), (vec![three.clone(), side.clone()], true));
+            assert_eq!(super::bases_for(&p, &[side.clone(), one.clone(), missing.clone()]).unwrap(), (vec![side.clone(), one.clone()], false));
+            assert_eq!(super::bases_for(&p, std::slice::from_ref(&two)).unwrap(), (vec![two.clone()], true));
+        }
+        assert_eq!(crate::git_exec::on_this_thread(), before, "a node's bases spawned git");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn stale_pushed_refs_are_the_landed_and_gone_lanes() {
+        let st = r#"{"repos":{"makepad":{"checkout":null,"refs":[{"ref":"refs/devhub/checkout","sha":"x"},{"ref":"refs/devhub/pushed/work","sha":"x"},{"ref":"refs/devhub/pushed/rc-open","sha":"x"},{"ref":"refs/devhub/pushed/rc-landed","sha":"x"},{"ref":"refs/devhub/pushed/rc-now","sha":"x"},{"ref":"refs/devhub/pushed/rc-gone","sha":"x"}]}}}"#;
+        let open: std::collections::HashSet<String> = ["rc-open".to_string()].into();
+        let now = super::Push { repo: "makepad", dir: std::path::PathBuf::new(), branch: "rc-now".into(), sha: String::new() };
+        assert_eq!(super::stale_pushed(st, "makepad", &open, &[now]), vec!["rc-landed".to_string(), "rc-gone".to_string()]);
+        assert!(super::stale_pushed(st, "commercial", &open, &[]).is_empty());
+    }
+
     #[test]
     fn node_store_listing() {
         let st = r#"{"machine":"217","repos":{"makepad":{"checkout":"d8cb46d6c1a69041cd12c5822fc2f89a46fedc81","refs":[{"ref":"refs/devhub/pushed/work","sha":"374efe9d7f0000000000000000000000000000aa"}]},"commercial":{"checkout":null,"refs":[]}}}"#;
@@ -949,11 +1124,9 @@ mod tests {
     }
 
     #[test]
-    fn a_git_that_cannot_start_is_not_a_missing_branch() {
-        let repo = std::path::Path::new("/r");
-        assert_eq!(super::branch_error(repo, "work", "git: Too many open files (os error 24)"), "/r: git: Too many open files (os error 24)");
-        assert_eq!(super::branch_error(repo, "work", "git rev-parse: "), "/r: no branch work");
-        // a real repo without the branch still says so
+    fn a_missing_branch_is_said_as_one() {
+        // a repo without the branch says so; one that is no checkout says that
+        assert!(super::branch_sha(std::path::Path::new("/nonexistent-devhub-repo"), "work").unwrap_err().ends_with("not a git checkout"));
         let d = std::env::temp_dir().join(format!("devhub-branch-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();

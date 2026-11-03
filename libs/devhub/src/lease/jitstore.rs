@@ -95,23 +95,23 @@ impl Waiters {
 }
 
 pub fn lock(path: &Path) -> Result<File, String> {
-    std::fs::create_dir_all(path.parent().ok_or("JIT lock has no parent")?).map_err(|e| e.to_string())?;
-    let f = OpenOptions::new().create(true).truncate(false).write(true).open(path).map_err(|e| e.to_string())?;
-    f.lock().map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(path.parent().ok_or("JIT lock has no parent")?).map_err(|e| format!("{}: {e}", path.display()))?;
+    let f = OpenOptions::new().create(true).truncate(false).write(true).open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    f.lock().map_err(|e| format!("{}: {e}", path.display()))?;
     Ok(f)
 }
 
 /// Lease-owned waits must let go when their lease ends, including behind another build.
 pub fn lock_while(path: &Path, shared: bool, active: &dyn Fn() -> Result<(), String>, waiting: &dyn Fn()) -> Result<File, String> {
-    std::fs::create_dir_all(path.parent().ok_or("JIT lock has no parent")?).map_err(|e| e.to_string())?;
-    let f = OpenOptions::new().create(true).truncate(false).read(true).write(true).open(path).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(path.parent().ok_or("JIT lock has no parent")?).map_err(|e| format!("{}: {e}", path.display()))?;
+    let f = OpenOptions::new().create(true).truncate(false).read(true).write(true).open(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let mut waited = false;
     loop {
         active()?;
         match if shared { f.try_lock_shared() } else { f.try_lock() } {
             Ok(()) => return Ok(f),
             Err(std::fs::TryLockError::WouldBlock) => { if !waited { waiting(); waited = true; } }
-            Err(std::fs::TryLockError::Error(e)) => return Err(e.to_string()),
+            Err(std::fs::TryLockError::Error(e)) => return Err(format!("{}: {e}", path.display())),
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
@@ -126,7 +126,7 @@ impl Store {
     fn save(&self, s: &Stats) -> Result<(), String> {
         let p = self.root.join(format!("{}.json", s.id));
         let tmp = p.with_extension("part");
-        std::fs::write(&tmp, s.json()).and_then(|_| std::fs::rename(&tmp, &p)).map_err(|e| e.to_string())
+        std::fs::write(&tmp, s.json()).and_then(|_| std::fs::rename(&tmp, &p)).map_err(|e| format!("{}: {e}", p.display()))
     }
     fn valid(id: &str) -> bool { id.len() == 24 && id.bytes().all(|b| b.is_ascii_hexdigit()) }
 
@@ -135,14 +135,14 @@ impl Store {
         if !Self::valid(id) || !super::exec::valid_name(lease) { return Err(format!("invalid JIT key or lease: {id} {lease}")); }
         let _lock = lock(&self.root.join("store.lock"))?;
         let dir = self.root.join("leases").join(lease);
-        std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(dir.join(id), "")).map_err(|e| e.to_string())
+        std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(dir.join(id), "")).map_err(|e| format!("{}: {e}", dir.join(id).display()))
     }
 
     pub fn release(&self, lease: &str) -> Result<(), String> {
         if !super::exec::valid_name(lease) { return Err("invalid JIT lease".into()); }
         let _lock = lock(&self.root.join("store.lock"))?;
         let p = self.root.join("leases").join(lease);
-        if p.exists() { std::fs::remove_dir_all(p).map_err(|e| e.to_string())?; }
+        if p.exists() { std::fs::remove_dir_all(&p).map_err(|e| format!("{}: {e}", p.display()))?; }
         self.prune();
         Ok(())
     }

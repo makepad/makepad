@@ -16,8 +16,9 @@ pub fn default_repo() -> PathBuf {
 }
 
 /// Runs `git <args>` in `cwd` (or with `git_dir` as the repository); stdout on success.
+#[track_caller]
 pub fn git(cwd: Option<&Path>, git_dir: Option<&Path>, args: &[&str]) -> Result<String, String> {
-    let mut cmd = makepad_remote::group::command("git");
+    let mut cmd = crate::git_exec::command();
     cmd.arg("-c").arg("core.hooksPath=/dev/null").arg("-c").arg("advice.detachedHead=false");
     if let Some(g) = git_dir {
         cmd.arg("--git-dir").arg(g);
@@ -230,8 +231,11 @@ pub fn create(repo: &Path, lane: &str, from: &str, commercial: bool) -> Result<P
         return Err(format!("{} exists", path.display()));
     }
     crate::ci_merge::install_merge_driver(repo, repo)?;
+    let scan = crate::private_check::scan_in(repo);
+    crate::private_check::install_message_check(repo, &scan)?;
     if commercial {
         crate::ci_merge::install_merge_driver(&repo.join("apps/commercial"), repo)?;
+        crate::private_check::install_message_check(&repo.join("apps/commercial"), &scan)?;
     }
     std::fs::create_dir_all(root_of(repo)).map_err(|e| e.to_string())?;
     let p = path.to_string_lossy().into_owned();

@@ -21,35 +21,21 @@ struct IdxTables {
     sorted_offsets: Vec<u64>,
 }
 
-/// Parsed indexes still in use, by .idx path (with its length and mtime).
-type SharedTables = std::collections::HashMap<PathBuf, (u64, Option<std::time::SystemTime>, std::sync::Weak<IdxTables>)>;
+/// Parsed indexes survive reader closes, by canonical .idx path, length and
+/// mtime. A new index retires entries whose files have been removed by repack.
+type SharedTables = std::collections::HashMap<PathBuf, (u64, Option<std::time::SystemTime>, std::sync::Arc<IdxTables>)>;
 static SHARED_TABLES: std::sync::Mutex<Option<SharedTables>> = std::sync::Mutex::new(None);
 
-/// Resolved delta bases a bounded reader keeps: consecutive versions of a
-/// tree are deltas against each other, so a history walk resolves the same
-/// bases again and again.
-const DELTA_BASE_CACHE: usize = 8 << 20;
-
-#[derive(Default)]
-struct DeltaBases {
-    entries: std::collections::HashMap<u64, (ObjectKind, std::sync::Arc<[u8]>, Option<crate::memory::Reservation>)>,
-    order: std::collections::VecDeque<u64>,
-    used: usize,
-}
-
-/// In-memory representation of a pack index (.idx v2) with cached pack data.
+/// In-memory representation of a pack index (.idx v2) with positional object reads.
 pub struct PackIndex {
     pub pack_path: PathBuf,
     tables: std::sync::Arc<IdxTables>,
-    /// Cached pack file data — loaded once on first read.
-    pack_data: std::cell::RefCell<Option<Vec<u8>>>,
-    read_account: Option<crate::memory::MemoryAccount>,
-    read_budget: usize,
+    read_account: crate::memory::MemoryAccount,
     metadata_lease: Option<crate::memory::Reservation>,
     stats: std::cell::Cell<ReadPhases>,
     /// The pack file kept open for bounded reads and `object_size`.
     header_file: std::cell::RefCell<Option<fs::File>>,
-    delta_bases: std::cell::RefCell<DeltaBases>,
+    delta_bases: std::cell::RefCell<crate::memory::ReadLru<u64, (ObjectKind, std::sync::Arc<[u8]>)>>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -80,30 +66,30 @@ impl PackLookup for PackIndex {
 /// Read and parse a v2 pack index file (or share the tables of a reader
 /// that already has).
 pub fn read_pack_index(idx_path: &Path) -> Result<PackIndex, GitError> {
+    let path = idx_path.canonicalize()?;
+    let idx_path = path.as_path();
     let meta = fs::metadata(idx_path)?;
     let key = (meta.len(), meta.modified().ok());
     // Held while parsing, so readers opening together parse once.
     let mut shared = SHARED_TABLES.lock().unwrap_or_else(|e| e.into_inner());
     let shared = shared.get_or_insert_with(Default::default);
-    let tables = match shared.get(idx_path).filter(|(len, time, _)| (*len, *time) == key).and_then(|(_, _, t)| t.upgrade()) {
+    let tables = match shared.get(idx_path).filter(|(len, time, _)| (*len, *time) == key).map(|(_, _, t)| t.clone()) {
         Some(tables) => tables,
         None => {
             let tables = std::sync::Arc::new(parse_pack_index(idx_path)?);
-            shared.retain(|_, (_, _, t)| t.strong_count() > 0);
-            shared.insert(idx_path.to_path_buf(), (key.0, key.1, std::sync::Arc::downgrade(&tables)));
+            shared.retain(|path, _| path.exists());
+            shared.insert(idx_path.to_path_buf(), (key.0, key.1, tables.clone()));
             tables
         }
     };
     Ok(PackIndex {
         pack_path: idx_path.with_extension("pack"),
         tables,
-        pack_data: std::cell::RefCell::new(None),
-        read_account: None,
-        read_budget: usize::MAX,
+        read_account: crate::memory::read_account(),
         metadata_lease: None,
         stats: std::cell::Cell::new(ReadPhases::default()),
         header_file: std::cell::RefCell::new(None),
-        delta_bases: Default::default(),
+        delta_bases: std::cell::RefCell::new(crate::memory::ReadLru::new(crate::memory::READ_CACHE_BYTES)),
     })
 }
 
@@ -111,7 +97,7 @@ fn parse_pack_index(idx_path: &Path) -> Result<IdxTables, GitError> {
     let data = fs::read(idx_path)?;
 
     // Check v2 magic: ff744f63
-    if data.len() < 8 {
+    if data.len() < 8 + 1024 + 40 {
         return Err(GitError::CorruptPack("index too small".into()));
     }
     let magic = &data[0..4];
@@ -146,6 +132,7 @@ fn parse_pack_index(idx_path: &Path) -> Result<IdxTables, GitError> {
     // Offset table: total_objects x 4 bytes
     let mut offsets = Vec::with_capacity(total_objects);
     let large_offset_start = pos + total_objects * 4;
+    if large_offset_start + 40 > data.len() { return Err(GitError::CorruptPack("truncated offset table".into())); }
     for _ in 0..total_objects {
         let off = read_u32(&data, pos);
         pos += 4;
@@ -201,155 +188,147 @@ fn reverse_index(idx_path: &Path, idx: &[u8], offsets: &[u64]) -> Option<Vec<u64
 impl PackIndex {
     pub fn retained_bytes(&self) -> usize {
         let t = &self.tables;
-        t.oids.capacity() * std::mem::size_of::<ObjectId>() + (t.offsets.capacity() + t.sorted_offsets.capacity()) * 8 + self.pack_data.borrow().as_ref().map_or(0, Vec::capacity)
+        t.oids.capacity() * std::mem::size_of::<ObjectId>() + (t.offsets.capacity() + t.sorted_offsets.capacity()) * 8
     }
     pub fn read_phases(&self) -> ReadPhases { self.stats.get() }
-    /// Historical readers retain the index, and read one compressed object
-    /// range at a time. No whole-pack residency outside the history account.
+    /// Bind optional retention to the caller's existing history account.
+    /// Metadata and active objects must remain readable even above its budget;
+    /// optional cache entries use `try_reserve` and simply cease being retained.
     pub fn set_read_budget(&mut self, account: crate::memory::MemoryAccount, bytes: usize) -> Result<(), GitError> {
-        *self.pack_data.borrow_mut() = None;
-        let needed = self.retained_bytes();
-        self.metadata_lease = Some(account.try_reserve(needed).ok_or_else(|| GitError::InvalidObject(format!("reader budget exceeded: needed {needed}, available {}", account.available())))?);
-        self.read_account = Some(account);
-        self.read_budget = bytes;
+        self.delta_bases.borrow_mut().clear();
+        self.delta_bases.borrow_mut().resize(bytes.min(crate::memory::READ_CACHE_BYTES));
+        self.metadata_lease = None;
+        self.metadata_lease = Some(account.reserve(self.retained_bytes()));
+        self.read_account = account;
         Ok(())
     }
-    /// Ensure pack data is loaded into memory (read once, cached).
+
+    /// Open the pack handle without reading the pack into memory.
     pub fn ensure_loaded(&self) -> Result<(), GitError> {
-        if self.read_account.is_some() { return Err(GitError::InvalidObject("whole-pack loading is disabled for a bounded reader".into())); }
-        let mut cache = self.pack_data.borrow_mut();
-        if cache.is_none() {
-            let start = crate::clock::Stopwatch::start();
-            *cache = Some(fs::read(&self.pack_path)?);
-            let mut stats = self.stats.get();
-            stats.pack_load_ms += start.elapsed_ms();
-            stats.pack_bytes_read += cache.as_ref().unwrap().len() as u64;
-            self.stats.set(stats);
-        }
-        Ok(())
-    }
-
-    /// Read an object at the given offset, using cached pack data.
-    pub fn read_object(&self, offset: u64) -> Result<Object, GitError> {
-        if self.read_account.is_some() { return self.read_window(offset, 0); }
-        self.ensure_loaded()?;
-        let cache = self.pack_data.borrow();
-        let data = cache.as_ref().unwrap();
-        let start = crate::clock::Stopwatch::start();
-        let result = read_pack_object_at(data, offset as usize, self, data);
-        let mut stats = self.stats.get();
-        stats.inflate_ms += start.elapsed_ms();
-        stats.objects_inflated += 1;
-        self.stats.set(stats);
-        result
-    }
-
-    fn read_window(&self, offset: u64, depth: usize) -> Result<Object, GitError> {
-        use std::io::{Read, Seek, SeekFrom};
-        if depth > 128 { return Err(GitError::CorruptPack("delta chain exceeds 128".into())); }
-        let account = self.read_account.as_ref().unwrap();
-        let start = crate::clock::Stopwatch::start();
         let mut slot = self.header_file.borrow_mut();
         if slot.is_none() { *slot = Some(fs::File::open(&self.pack_path)?); }
-        let file = slot.as_mut().unwrap();
+        Ok(())
+    }
+
+    /// An independent bounded reader sharing only immutable parsed tables.
+    pub(crate) fn reader(&self) -> Self {
+        Self {
+            pack_path: self.pack_path.clone(), tables: self.tables.clone(),
+            read_account: self.read_account.clone(), metadata_lease: None,
+            stats: Default::default(), header_file: Default::default(),
+            delta_bases: std::cell::RefCell::new(crate::memory::ReadLru::new(crate::memory::READ_CACHE_BYTES)),
+        }
+    }
+
+    /// Resolve iteratively: long delta chains do not consume the call stack.
+    pub fn read_object(&self, offset: u64) -> Result<Object, GitError> {
+        let mut at = offset;
+        let mut chain = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let (kind, mut data) = loop {
+            if !seen.insert(at) { return Err(GitError::CorruptPack("cyclic delta chain".into())); }
+            if let Some(hit) = self.delta_bases.borrow_mut().get(&at).cloned() { break hit; }
+            if let Some(base) = self.delta_parent(at)? {
+                // Keep only offsets while finding the base. Retaining inflated
+                // delta programs here makes memory scale with chain depth.
+                chain.push(at);
+                at = base;
+            } else {
+                let (kind, bytes, _) = self.read_window(at)?;
+                let kind = ObjectKind::from_type_num(kind)?;
+                let data: std::sync::Arc<[u8]> = bytes.into();
+                self.cache_base(at, kind, &data);
+                break (kind, data);
+            }
+        };
+        let mut _base = self.read_account.reserve(data.len());
+        while let Some(at) = chain.pop() {
+            let (_, delta, _) = self.read_window(at)?;
+            let _delta = self.read_account.reserve(delta.len());
+            let (_, n) = read_delta_size(&delta, 0)?;
+            let (size, _) = read_delta_size(&delta, n)?;
+            let result_lease = self.read_account.reserve(usize::try_from(size).map_err(|_| GitError::CorruptPack("delta result too large".into()))?);
+            data = apply_delta(&data, &delta)?.into();
+            _base = result_lease;
+            self.cache_base(at, kind, &data);
+        }
+        Ok(Object { kind, data: data.to_vec() })
+    }
+
+    fn cache_base(&self, at: u64, kind: ObjectKind, data: &std::sync::Arc<[u8]>) {
+        self.delta_bases.borrow_mut().insert(at, data.len().saturating_add(128), &self.read_account, || (kind, data.clone()));
+    }
+
+    fn range_end(&self, offset: u64, file: &fs::File) -> Result<u64, GitError> {
+        if self.tables.sorted_offsets.binary_search(&offset).is_err() {
+            return Err(GitError::CorruptPack("offset absent from index".into()));
+        }
         let i = self.tables.sorted_offsets.partition_point(|o| *o <= offset);
-        let end = match self.tables.sorted_offsets.get(i) { Some(end) => *end, None => file.metadata()?.len().saturating_sub(20) };
+        Ok(match self.tables.sorted_offsets.get(i) {
+            Some(end) => *end,
+            None => file.metadata()?.len().saturating_sub(20),
+        })
+    }
+
+    /// The largest valid size + delta-base header fits in 30 bytes. Reading
+    /// this prefix lets us walk arbitrarily long chains without retaining any
+    /// compressed or inflated delta programs from the walk.
+    fn delta_parent(&self, offset: u64) -> Result<Option<u64>, GitError> {
+        let start = crate::clock::Stopwatch::start();
+        self.ensure_loaded()?;
+        let slot = self.header_file.borrow();
+        let file = slot.as_ref().unwrap();
+        let end = self.range_end(offset, file)?;
+        let len = end.checked_sub(offset).ok_or_else(|| GitError::CorruptPack("invalid object range".into()))?.min(32) as usize;
+        let mut prefix = [0; 32];
+        read_exact_at(file, &mut prefix[..len], offset)?;
+        let mut stats = self.stats.get();
+        stats.pack_load_ms += start.elapsed_ms();
+        stats.pack_bytes_read += len as u64;
+        self.stats.set(stats);
+        Ok(entry_header(&prefix[..len], offset, self)?.2)
+    }
+
+    fn read_window(&self, offset: u64) -> Result<(u8, Vec<u8>, Option<u64>), GitError> {
+        let account = &self.read_account;
+        let start = crate::clock::Stopwatch::start();
+        self.ensure_loaded()?;
+        let slot = self.header_file.borrow();
+        let file = slot.as_ref().unwrap();
+        let end = self.range_end(offset, file)?;
         let length = usize::try_from(end.checked_sub(offset).ok_or_else(|| GitError::CorruptPack("invalid object range".into()))?).map_err(|_| GitError::CorruptPack("object too large".into()))?;
-        if length > self.read_budget { return Err(GitError::InvalidObject(format!("compressed object exceeds reader budget: {length}"))); }
-        let _compressed = account.try_reserve(length).ok_or_else(|| GitError::InvalidObject("history account cannot admit compressed object".into()))?;
+        let _compressed = account.reserve(length);
         let mut data = vec![0; length];
-        file.seek(SeekFrom::Start(offset))?; file.read_exact(&mut data)?;
+        read_exact_at(file, &mut data, offset)?;
         drop(slot);
         let mut stats = self.stats.get(); stats.pack_load_ms += start.elapsed_ms(); stats.pack_bytes_read += length as u64; self.stats.set(stats);
-        let mut pos = 0;
-        let next = |pos: &mut usize| -> Result<u8, GitError> { let b = data.get(*pos).copied().ok_or_else(|| GitError::CorruptPack("truncated object header".into()))?; *pos += 1; Ok(b) };
-        let first = next(&mut pos)?;
-        let kind = (first >> 4) & 7;
-        let mut size = (first & 15) as usize;
-        let mut byte = first; let mut shift = 4;
-        while byte & 128 != 0 { byte = next(&mut pos)?; if shift >= usize::BITS { return Err(GitError::CorruptPack("object size overflow".into())); } size |= ((byte & 127) as usize) << shift; shift += 7; }
-        if size > self.read_budget { return Err(GitError::InvalidObject(format!("inflated object exceeds reader budget: {size}"))); }
-        let _inflated = account.try_reserve(size).ok_or_else(|| GitError::InvalidObject("history account cannot admit inflated object".into()))?;
-        let base_offset = match kind {
-            6 => { let mut byte = next(&mut pos)?; let mut back = (byte & 127) as u64; while byte & 128 != 0 { byte = next(&mut pos)?; back = back.checked_add(1).and_then(|b| b.checked_mul(128)).and_then(|b| b.checked_add((byte & 127) as u64)).ok_or_else(|| GitError::CorruptPack("delta offset overflow".into()))?; } Some(offset.checked_sub(back).ok_or_else(|| GitError::CorruptPack("delta before pack".into()))?) }
-            7 => { let end = pos + 20; let oid = ObjectId::from_slice(data.get(pos..end).ok_or_else(|| GitError::CorruptPack("truncated delta oid".into()))?)?; pos = end; Some(self.find_offset(&oid).ok_or_else(|| GitError::CorruptPack("delta base absent".into()))?) }
-            _ => None,
-        };
+        let (kind, size, base_offset, pos) = entry_header(&data, offset, self)?;
+        let _inflated = account.reserve(size);
         let start = crate::clock::Stopwatch::start();
         let inflated = zlib_decompress(&data[pos..], size)?;
         let mut stats = self.stats.get(); stats.inflate_ms += start.elapsed_ms(); stats.objects_inflated += 1; self.stats.set(stats);
-        if let Some(base_offset) = base_offset {
-            let (_, n) = read_delta_size(&inflated, 0)?;
-            let (result_size, _) = read_delta_size(&inflated, n)?;
-            if result_size > self.read_budget as u64 { return Err(GitError::InvalidObject("delta result exceeds reader budget".into())); }
-            let _result = account.try_reserve(result_size as usize).ok_or_else(|| GitError::InvalidObject("history account cannot admit delta result".into()))?;
-            let (kind, base) = self.delta_base(base_offset, depth + 1)?;
-            let _base = account.try_reserve(base.len()).ok_or_else(|| GitError::InvalidObject("history account cannot retain delta base".into()))?;
-            let result = apply_delta(&base, &inflated)?;
-            Ok(Object { kind, data: result })
-        } else {
-            Ok(Object { kind: ObjectKind::from_type_num(kind)?, data: inflated })
-        }
-    }
-
-    /// The resolved object at `offset` as a delta base, from the reader's
-    /// small cache of recent bases when it is there. Cached bytes reserve
-    /// from the reader's account; a base the account cannot admit is not
-    /// kept.
-    fn delta_base(&self, offset: u64, depth: usize) -> Result<(ObjectKind, std::sync::Arc<[u8]>), GitError> {
-        if let Some((kind, data, _)) = self.delta_bases.borrow().entries.get(&offset) {
-            return Ok((*kind, data.clone()));
-        }
-        let base = self.read_window(offset, depth)?;
-        let data: std::sync::Arc<[u8]> = base.data.into();
-        let bytes = data.len();
-        if bytes <= DELTA_BASE_CACHE / 4 {
-            let mut cache = self.delta_bases.borrow_mut();
-            while cache.used + bytes > DELTA_BASE_CACHE {
-                let Some(old) = cache.order.pop_front() else { break };
-                if let Some((_, old, _)) = cache.entries.remove(&old) { cache.used -= old.len(); }
-            }
-            let lease = self.read_account.as_ref().and_then(|a| a.try_reserve(bytes));
-            if lease.is_some() || self.read_account.is_none() {
-                cache.entries.insert(offset, (base.kind, data.clone(), lease));
-                cache.order.push_back(offset);
-                cache.used += bytes;
-            }
-        }
-        Ok((base.kind, data))
+        Ok((kind, inflated, base_offset))
     }
 
     /// The inflated size of the object at `offset`, from its pack entry
     /// header, without reading its content or any delta base. A base
     /// object's size is the header varint. A delta's result size is the
     /// second varint of the delta payload, so the (small) delta payload is
-    /// inflated; its base chain is never touched. Reads through the loaded
-    /// pack data when present, else through one kept-open file handle.
+    /// inflated; its base chain is never touched. Uses positional reads from
+    /// the same kept-open handle as object reads.
     pub fn object_size(&self, offset: u64) -> Result<u64, GitError> {
-        use std::io::{Read, Seek, SeekFrom};
-        let loaded = self.pack_data.borrow();
-        let mut owned = Vec::new();
-        let entry: &[u8] = if let Some(data) = loaded.as_ref() {
-            data.get(offset as usize..).ok_or_else(|| GitError::CorruptPack("offset beyond pack data".into()))?
-        } else {
-            let mut slot = self.header_file.borrow_mut();
-            if slot.is_none() { *slot = Some(fs::File::open(&self.pack_path)?); }
-            let file = slot.as_mut().unwrap();
-            let pack_end = file.metadata()?.len().saturating_sub(20);
-            let i = self.tables.sorted_offsets.partition_point(|o| *o <= offset);
-            let end = self.tables.sorted_offsets.get(i).copied().unwrap_or(pack_end);
-            // A base entry needs only its header; read a short prefix first.
-            let prefix = end.checked_sub(offset).ok_or_else(|| GitError::CorruptPack("invalid object range".into()))?.min(32);
-            owned.resize(prefix as usize, 0);
-            file.seek(SeekFrom::Start(offset))?;
-            file.read_exact(&mut owned)?;
-            if (owned.first().copied().unwrap_or(0) >> 4) & 7 >= 6 {
-                owned.resize((end - offset) as usize, 0);
-                file.seek(SeekFrom::Start(offset))?;
-                file.read_exact(&mut owned)?;
-            }
-            &owned
-        };
+        self.ensure_loaded()?;
+        let slot = self.header_file.borrow();
+        let file = slot.as_ref().unwrap();
+        let end = self.range_end(offset, file)?;
+        let length = end.checked_sub(offset).ok_or_else(|| GitError::CorruptPack("invalid object range".into()))?;
+        let mut owned = vec![0; length.min(32) as usize];
+        read_exact_at(file, &mut owned, offset)?;
+        if (owned.first().copied().unwrap_or(0) >> 4) & 7 >= 6 {
+            owned.resize(usize::try_from(length).map_err(|_| GitError::CorruptPack("object too large".into()))?, 0);
+            read_exact_at(file, &mut owned, offset)?;
+        }
+        let entry = owned.as_slice();
         let mut pos = 0;
         let mut next = || -> Result<u8, GitError> { let b = *entry.get(pos).ok_or_else(|| GitError::CorruptPack("truncated object header".into()))?; pos += 1; Ok(b) };
         let first = next()?;
@@ -374,130 +353,46 @@ impl PackIndex {
         }
     }
 
-    /// Get a clone of the cached pack data (for thread-safe sharing).
-    pub fn get_cached_data(&self) -> Option<Vec<u8>> {
-        self.pack_data.borrow().clone()
-    }
-
-    /// Get copies of index metadata for thread-safe use.
-    pub fn fanout_copy(&self) -> [u32; 256] {
-        self.tables.fanout
-    }
-
-    pub fn oids_copy(&self) -> Vec<ObjectId> {
-        self.tables.oids.clone()
-    }
-
-    pub fn offsets_copy(&self) -> Vec<u64> {
-        self.tables.offsets.clone()
-    }
 }
 
-/// Read an object from a pack file at the given offset.
-/// Uses the PackIndex's cached pack data (loaded once on first call).
-pub fn read_pack_object(
-    _pack_path: &Path,
-    offset: u64,
-    idx: &PackIndex,
-) -> Result<Object, GitError> {
-    idx.read_object(offset)
+fn entry_header(data: &[u8], offset: u64, lookup: &dyn PackLookup) -> Result<(u8, usize, Option<u64>, usize), GitError> {
+    let mut pos = 0;
+    let next = |pos: &mut usize| -> Result<u8, GitError> { let b = data.get(*pos).copied().ok_or_else(|| GitError::CorruptPack("truncated object header".into()))?; *pos += 1; Ok(b) };
+    let first = next(&mut pos)?;
+    let kind = (first >> 4) & 7;
+    let mut size = (first & 15) as usize;
+    let mut byte = first; let mut shift = 4;
+    while byte & 128 != 0 { byte = next(&mut pos)?; if shift >= usize::BITS { return Err(GitError::CorruptPack("object size overflow".into())); } size |= ((byte & 127) as usize) << shift; shift += 7; }
+    let base_offset = match kind {
+        6 => { let mut byte = next(&mut pos)?; let mut back = (byte & 127) as u64; while byte & 128 != 0 { byte = next(&mut pos)?; back = back.checked_add(1).and_then(|b| b.checked_mul(128)).and_then(|b| b.checked_add((byte & 127) as u64)).ok_or_else(|| GitError::CorruptPack("delta offset overflow".into()))?; } Some(offset.checked_sub(back).ok_or_else(|| GitError::CorruptPack("delta before pack".into()))?) }
+        7 => { let end = pos + 20; let oid = ObjectId::from_slice(data.get(pos..end).ok_or_else(|| GitError::CorruptPack("truncated delta oid".into()))?)?; pos = end; Some(lookup.find_offset(&oid).ok_or_else(|| GitError::CorruptPack("delta base absent".into()))?) }
+        _ => None,
+    };
+    Ok((kind, size, base_offset, pos))
 }
 
-/// Read an object from raw pack data with a PackLookup for delta resolution.
-/// This is the thread-safe entry point used by the parallel clone.
-pub fn read_pack_object_from_data(
-    pack_data: &[u8],
-    offset: usize,
-    lookup: &dyn PackLookup,
-) -> Result<Object, GitError> {
-    read_pack_object_at(pack_data, offset, lookup, pack_data)
-}
-
-fn read_pack_object_at(
-    pack_data: &[u8],
-    offset: usize,
-    lookup: &dyn PackLookup,
-    full_pack: &[u8],
-) -> Result<Object, GitError> {
-    let mut pos = offset;
-
-    if pos >= pack_data.len() {
-        return Err(GitError::CorruptPack("offset beyond pack data".into()));
+/// Positional I/O does not mutate a shared file cursor.
+fn read_exact_at(file: &fs::File, mut data: &mut [u8], mut offset: u64) -> std::io::Result<()> {
+    while !data.is_empty() {
+        #[cfg(unix)]
+        let result = { use std::os::unix::fs::FileExt; file.read_at(data, offset) };
+        #[cfg(windows)]
+        let result = { use std::os::windows::fs::FileExt; file.seek_read(data, offset) };
+        #[cfg(not(any(unix, windows)))]
+        let result = {
+            use std::io::{Read, Seek, SeekFrom};
+            let mut file = file.try_clone()?;
+            file.seek(SeekFrom::Start(offset))?;
+            file.read(data)
+        };
+        match result {
+            Ok(0) => return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof)),
+            Ok(n) => { offset += n as u64; data = &mut data[n..]; }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
     }
-
-    let first = pack_data[pos];
-    pos += 1;
-    let type_num = (first >> 4) & 0x7;
-    let mut size: u64 = (first & 0x0F) as u64;
-    let mut shift = 4;
-
-    let mut byte = first;
-    while byte & 0x80 != 0 {
-        if pos >= pack_data.len() {
-            return Err(GitError::CorruptPack("truncated size header".into()));
-        }
-        byte = pack_data[pos];
-        pos += 1;
-        size |= ((byte & 0x7F) as u64) << shift;
-        shift += 7;
-    }
-
-    match type_num {
-        1 | 2 | 3 | 4 => {
-            let kind = ObjectKind::from_type_num(type_num)?;
-            let decompressed = zlib_decompress(&pack_data[pos..], size as usize)?;
-            Ok(Object {
-                kind,
-                data: decompressed,
-            })
-        }
-        6 => {
-            // OFS_DELTA
-            let mut byte = pack_data[pos];
-            pos += 1;
-            let mut delta_offset: u64 = (byte & 0x7F) as u64;
-            while byte & 0x80 != 0 {
-                if pos >= pack_data.len() {
-                    return Err(GitError::CorruptPack("truncated ofs-delta offset".into()));
-                }
-                byte = pack_data[pos];
-                pos += 1;
-                delta_offset = ((delta_offset + 1) << 7) | (byte & 0x7F) as u64;
-            }
-
-            let base_offset = offset as u64 - delta_offset;
-            let base = read_pack_object_at(full_pack, base_offset as usize, lookup, full_pack)?;
-            let delta_data = zlib_decompress(&pack_data[pos..], size as usize)?;
-            let patched = apply_delta(&base.data, &delta_data)?;
-            Ok(Object {
-                kind: base.kind,
-                data: patched,
-            })
-        }
-        7 => {
-            // REF_DELTA
-            if pos + 20 > pack_data.len() {
-                return Err(GitError::CorruptPack("truncated ref-delta base oid".into()));
-            }
-            let base_oid = ObjectId::from_slice(&pack_data[pos..pos + 20])?;
-            pos += 20;
-
-            let base_offset = lookup.find_offset(&base_oid).ok_or_else(|| {
-                GitError::CorruptPack(format!("ref-delta base not in pack: {}", base_oid))
-            })?;
-            let base = read_pack_object_at(full_pack, base_offset as usize, lookup, full_pack)?;
-            let delta_data = zlib_decompress(&pack_data[pos..], size as usize)?;
-            let patched = apply_delta(&base.data, &delta_data)?;
-            Ok(Object {
-                kind: base.kind,
-                data: patched,
-            })
-        }
-        _ => Err(GitError::CorruptPack(format!(
-            "unknown pack object type: {}",
-            type_num
-        ))),
-    }
+    Ok(())
 }
 
 /// Apply a git delta to a base object.
@@ -653,6 +548,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn indexes_survive_closed_readers_and_refresh_after_replacement() {
+        let dir = crate::test_support::tempdir().unwrap();
+        crate::test_support::write_pack(dir.path(), &[(ObjectKind::Blob, b"one".to_vec())]).unwrap();
+        let pack = find_packs(dir.path()).unwrap().pop().unwrap();
+        let path = pack.pack_path.with_extension("idx");
+        let tables = std::sync::Arc::downgrade(&pack.tables);
+        drop(pack);
+        let reopened = read_pack_index(&path).unwrap();
+        assert!(std::sync::Arc::ptr_eq(&tables.upgrade().unwrap(), &reopened.tables), "closing readers must not trigger another parse");
+        let other = crate::test_support::tempdir().unwrap();
+        crate::test_support::write_pack(other.path(), &[(ObjectKind::Blob, b"two".to_vec()), (ObjectKind::Blob, b"three".to_vec())]).unwrap();
+        let replacement = find_packs(other.path()).unwrap().pop().unwrap();
+        fs::copy(replacement.pack_path.with_extension("idx"), &path).unwrap();
+        let changed = read_pack_index(&path).unwrap();
+        assert!(!std::sync::Arc::ptr_eq(&reopened.tables, &changed.tables), "changed size/mtime must invalidate parsed tables");
+        assert_eq!(changed.tables.oids.len(), 2);
+    }
+
+    #[test]
     fn test_read_from_pack() {
         let dir = crate::test_support::tempdir().unwrap();
         let git_dir = dir.path().join(".git");
@@ -672,7 +586,7 @@ mod tests {
 
         let pack = &packs[0];
         let offset = pack.find_offset(&blob_oid).expect("blob should be in pack");
-        let obj = read_pack_object(&pack.pack_path, offset, pack).unwrap();
+        let obj = pack.read_object(offset).unwrap();
         assert_eq!(obj.kind, ObjectKind::Blob);
         assert_eq!(obj.data, b"packed content\n");
     }

@@ -14,7 +14,7 @@ use makepad_font_core::{
     raster::{plan_color, plan_outline_msdf, plan_outline_sdf, render_msdf, OutlineRasterizationMode, Settings},
     sdfer::Sdfer,
     slug::slug_curves,
-    MappedBytes, SharedBytes,
+    MappedBytes, HostBuf,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -254,8 +254,8 @@ fn font_for<'a>(fonts: &'a mut HashMap<u32, Option<Font>>, host: &HostFont) -> O
         .entry(host.id)
         .or_insert_with(|| {
             let data = match &host.source {
-                HostSource::Mapped(m) => SharedBytes::from_mapped(m.clone()),
-                HostSource::Inline(v) => SharedBytes::from_vec(v.as_slice().to_vec()),
+                HostSource::Mapped(m) => HostBuf::from_mapped(m.clone()),
+                HostSource::Inline(v) => HostBuf::from_vec(v.as_slice().to_vec()),
             };
             let mut face = FontFace::from_data_and_index(data, host.index)?;
             if !host.vars.is_empty() {

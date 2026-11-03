@@ -34,6 +34,17 @@ pub struct PreCrate {
     pub image_dep_names: Vec<(String, String)>,
 }
 
+/// Test and build crates can share both their name and root file.
+pub type CrateKey = (String, String, bool);
+
+pub fn crate_key(name: &str, root: &str, cfg: &CfgSet) -> CrateKey {
+    (name.to_string(), root.to_string(), cfg.holds("test"))
+}
+
+impl PreCrate {
+    pub fn key(&self) -> CrateKey { crate_key(&self.name, &self.root, &self.cfg) }
+}
+
 /// `crates` in the load order `order` (positions in `crates`, each once), the dependency indices
 /// renumbered; None when that order puts a crate before one of its dependencies.
 pub fn reorder(crates: &[PreCrate], order: &[usize]) -> Option<Vec<PreCrate>> {
@@ -582,7 +593,7 @@ impl Pool {
             }
             // Stack traversal must publish sibling definitions in source order.
             stack.extend(s.children.into_iter().rev());
-            if !self.demand_plan.as_ref().is_some_and(|p| p.skips(&c.root, &path)) {
+            if !self.demand_plan.as_ref().is_some_and(|p| p.skips(&c.root, c.cfg.holds("test"), &path)) {
                 lexed.push((path, s.src[..s.src_len].to_vec(), s.toks.into_vec()));
             }
         }

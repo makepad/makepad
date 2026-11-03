@@ -353,10 +353,19 @@ pub(crate) struct Buffer {
 
 impl Buffer {
     /// A zeroed buffer: a retained buffer is read where the app has not written yet.
-    /// Prefers `DEVICE_LOCAL | HOST_VISIBLE | HOST_COHERENT` (ReBAR / heap 0), falling back to
-    /// host-visible memory with a diagnostic log naming the memory type obtained, and unmaps
-    /// immediately after initialization and after each [`Self::write`].
     pub fn new(dev: Arc<Device>, size: u64, usage: vk::BufferUsageFlags) -> Result<Arc<Self>, String> {
+        let out = Self::unzeroed(dev, size, usage)?;
+        out.zero(0)?;
+        Ok(Arc::new(out))
+    }
+
+    /// A buffer whose bytes are undefined until [`Self::zero`] or writes of all of them: a
+    /// retained buffer its first updates fill whole is not written twice (zeroing a 38 MB
+    /// instance buffer took as long as its upload).
+    /// Prefers `DEVICE_LOCAL | HOST_VISIBLE | HOST_COHERENT` (ReBAR / heap 0), falling back to
+    /// host-visible memory with a diagnostic log naming the memory type obtained; it is mapped
+    /// only inside [`Self::zero`] and each [`Self::write`].
+    pub fn unzeroed(dev: Arc<Device>, size: u64, usage: vk::BufferUsageFlags) -> Result<Self, String> {
         let logical_size = size;
         let alloc_size = size.max(16);
         let buffer = unsafe { dev.raw.create_buffer(&vk::BufferCreateInfo::default().size(alloc_size).usage(usage)
@@ -410,15 +419,21 @@ impl Buffer {
         dev.charge(req.size);
         let coherent = dev.memory.memory_types[ty as usize].property_flags.contains(vk::MemoryPropertyFlags::HOST_COHERENT);
         let out = Self { dev, buffer, memory, size: logical_size, bytes: req.size, mapped: 0, coherent, scratch: false };
+        unsafe { out.dev.raw.bind_buffer_memory(buffer, memory, 0).map_err(error)?; }
+        Ok(out)
+    }
+
+    /// Zeroes an unmapped buffer's bytes from `from` on.
+    pub fn zero(&self, from: u64) -> Result<(), String> {
+        let len = self.size.max(16).saturating_sub(from);
+        if len == 0 { return Ok(()); }
         unsafe {
-            out.dev.raw.bind_buffer_memory(buffer, memory, 0).map_err(error)?;
-            let ptr = out.dev.raw.map_memory(memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty()).map_err(error)? as *mut u8;
-            std::ptr::write_bytes(ptr, 0, out.size.max(16) as usize);
-            let res = out.flush();
-            out.dev.raw.unmap_memory(memory);
-            res?;
+            let ptr = self.dev.raw.map_memory(self.memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty()).map_err(error)? as *mut u8;
+            std::ptr::write_bytes(ptr.add(from as usize), 0, len as usize);
+            let res = self.flush();
+            self.dev.raw.unmap_memory(self.memory);
+            res
         }
-        Ok(Arc::new(out))
     }
 
     /// A buffer whose bytes are undefined until written: upload arenas and readback staging,
@@ -461,7 +476,7 @@ impl Buffer {
             self.write_unflushed(offset, data)?;
             return self.flush();
         }
-        if offset.checked_add(data.len() as u64).is_none_or(|end| end > self.size) { return Err("buffer write exceeds storage".into()); }
+        if offset.checked_add(data.len() as u64).is_none_or(|end| end > self.size) { return Err(format!("Vulkan buffer upload offset={offset} bytes={} exceeds mapped buffer size={}", data.len(), self.size)); }
         if data.is_empty() { return Ok(()); }
         let ptr = unsafe { self.dev.raw.map_memory(self.memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty()) }.map_err(error)? as *mut u8;
         unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), ptr.add(offset as usize), data.len()); }
@@ -472,7 +487,7 @@ impl Buffer {
 
     pub(super) fn write_unflushed(&self, offset: u64, data: &[u8]) -> Result<(), String> {
         if self.mapped == 0 { return Err("cannot write_unflushed to unmapped buffer".into()); }
-        if offset.checked_add(data.len() as u64).is_none_or(|end| end > self.size) { return Err("buffer write exceeds storage".into()); }
+        if offset.checked_add(data.len() as u64).is_none_or(|end| end > self.size) { return Err(format!("Vulkan buffer upload offset={offset} bytes={} exceeds mapped buffer size={}", data.len(), self.size)); }
         unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), (self.mapped as *mut u8).add(offset as usize), data.len()); }
         Ok(())
     }

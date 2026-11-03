@@ -8,8 +8,8 @@
 //! The job is also the run's resource envelope (Linux gets it from its systemd scope): at most
 //! [`RUN_RAM_SHARE`] of the node's RAM may be committed by the whole tree of the run, so a build
 //! or test sweep that fans out can fail its own allocations but never leaves the hub and the OS
-//! without memory; a shared run (a lease with a cost) also runs on as many logical processors
-//! as its cost has cores, the highest-numbered ones.
+//! without memory. Its processors are never capped: a run uses the whole box when it is idle,
+//! and BELOW_NORMAL keeps the hub and the desktop ahead of it under contention.
 //!
 //! Also the machine's numbers (memory, CPU times, processes, disk, CPU name, battery) through the
 //! generated bindings (makepad-windows-sys).
@@ -52,24 +52,15 @@ unsafe impl Sync for Owned {}
 /// that reaches it fails its allocations (its own tests and compiles fail); the node does not.
 pub const RUN_RAM_SHARE: f64 = 0.75;
 
-// winnt.h JOB_OBJECT_LIMIT_AFFINITY / JOB_OBJECT_LIMIT_JOB_MEMORY (the generated bindings carry
-// only the kill-on-close flag of the set)
-const LIMIT_AFFINITY: JOB_OBJECT_LIMIT = JOB_OBJECT_LIMIT(0x0000_0010);
+// winnt.h JOB_OBJECT_LIMIT_JOB_MEMORY (the generated bindings carry only the kill-on-close
+// flag of the set)
 const LIMIT_JOB_MEMORY: JOB_OBJECT_LIMIT = JOB_OBJECT_LIMIT(0x0000_0200);
 
 /// A run's Job Object.
 pub struct Job(Owned);
 
-/// The affinity mask of `cores` logical processors out of `total`: the highest-numbered ones,
-/// the lowest keep serving interrupts and the hub. None: no restriction (one group of at most 64
-/// processors, and fewer than all of them).
-fn affinity_mask(cores: f64, total: usize) -> Option<usize> {
-    let n = (cores.ceil() as usize).max(1);
-    (total > 1 && total <= 64 && n < total).then(|| (((1u128 << n) - 1) << (total - n)) as usize)
-}
-
 impl Job {
-    fn new(share: Option<crate::lease::Cost>) -> std::io::Result<Job> {
+    fn new() -> std::io::Result<Job> {
         let h = unsafe { CreateJobObjectW(None, None) }.map_err(|_| std::io::Error::last_os_error())?;
         let job = Job(Owned(h));
         let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
@@ -78,11 +69,6 @@ impl Job {
         if ram > 0 {
             info.BasicLimitInformation.LimitFlags = info.BasicLimitInformation.LimitFlags | LIMIT_JOB_MEMORY;
             info.JobMemoryLimit = (ram as f64 * RUN_RAM_SHARE) as usize;
-        }
-        let total = std::thread::available_parallelism().map_or(0, |n| n.get());
-        if let Some(mask) = share.and_then(|c| affinity_mask(c.cores, total)) {
-            info.BasicLimitInformation.LimitFlags = info.BasicLimitInformation.LimitFlags | LIMIT_AFFINITY;
-            info.BasicLimitInformation.Affinity = mask;
         }
         unsafe { SetInformationJobObject(job.0 .0, JobObjectExtendedLimitInformation, &info as *const _ as *const _, std::mem::size_of_val(&info) as u32) }.map_err(|_| std::io::Error::last_os_error())?;
         Ok(job)
@@ -121,7 +107,7 @@ impl Hold {
 }
 
 /// The argv a lease run executes: as given (priority is the creation class; no pinning).
-pub fn lease_argv(argv: Vec<String>, _unit: Option<&str>, _cpus: &str, _share: Option<crate::lease::Cost>) -> Vec<String> {
+pub fn lease_argv(argv: Vec<String>, _unit: Option<&str>, _cpus: &str, _share: Option<crate::lease::Cost>, _ram_max_gb: Option<f64>) -> Vec<String> {
     argv
 }
 
@@ -155,13 +141,12 @@ fn resume(pid: u32) -> std::io::Result<()> {
     if resumed { Ok(()) } else { Err(std::io::Error::other(format!("pid {pid}: no thread to resume"))) }
 }
 
-/// Starts a lease run in a job of its own (see the module doc); `share`: the cost it was
-/// granted (a shared lease), which sets the processors it may use.
-pub fn lease_spawn(cmd: &mut Command, share: Option<crate::lease::Cost>) -> std::io::Result<(Child, Hold)> {
+/// Starts a lease run in a job of its own (see the module doc).
+pub fn lease_spawn(cmd: &mut Command) -> std::io::Result<(Child, Hold)> {
     windows::process::no_window(cmd, CREATE_SUSPENDED.0 | BELOW_NORMAL_PRIORITY_CLASS.0 | CREATE_NEW_PROCESS_GROUP.0);
     let mut child = cmd.spawn()?;
     let pid = child.id();
-    let job = Job::new(share).and_then(|j| j.assign(pid).map(|_| j)).and_then(|j| resume(pid).map(|_| j));
+    let job = Job::new().and_then(|j| j.assign(pid).map(|_| j)).and_then(|j| resume(pid).map(|_| j));
     match job {
         Ok(j) => Ok((child, Hold(Some(j)))),
         Err(e) => {

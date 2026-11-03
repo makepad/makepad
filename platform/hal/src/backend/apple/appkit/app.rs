@@ -701,6 +701,11 @@ impl App {
     /// The first pointer motion of a window brings the app to the front, as a launch from a
     /// terminal or by an agent otherwise stays behind: activation goes through the Dock, which
     /// macOS lets take the focus from another app. A no-focus process never does.
+    /// A restarted run whose old window was not key: no pointer motion takes the focus.
+    pub fn focus_hack_done(&self) {
+        self.focus_hack_ran.set(true);
+    }
+
     pub fn startup_focus_hack(&self) {
         if self.focus_hack_ran.replace(true) || !focus_allowed() {
             return;

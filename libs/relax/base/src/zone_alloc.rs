@@ -121,8 +121,8 @@ mod disabled {
     pub fn census() -> [usize; 11] {
         [0; 11]
     }
-    pub fn states() -> [usize; 28] {
-        [0; 28]
+    pub fn states() -> [usize; 29] {
+        [0; 29]
     }
     pub fn detail() -> (usize, usize, usize, usize) {
         (0, 0, 0, 0)
@@ -302,7 +302,7 @@ pub fn slots_census() -> [usize; 11] {
     slots::census()
 }
 
-pub fn slots_states() -> [usize; 28] {
+pub fn slots_states() -> [usize; 29] {
     slots::states()
 }
 
@@ -317,7 +317,7 @@ pub fn arena_census() -> ([usize; 11], [usize; 11]) {
 }
 
 /// The compiler and burst arenas' chunk states with resident bytes (arena.rs `states`).
-pub fn arena_states() -> ([usize; 28], [usize; 28]) {
+pub fn arena_states() -> ([usize; 29], [usize; 29]) {
     (compiler::states(), burst::states())
 }
 

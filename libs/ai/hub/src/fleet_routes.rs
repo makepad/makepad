@@ -94,7 +94,7 @@ mod tests {
         for who in [&node, &mac_elsewhere] {
             assert!(route_allowed(who, false, "POST", "/generate"));
             assert!(route_allowed(who, false, "GET", "/job/abc"));
-            assert!(route_allowed(who, false, "POST", "/kernel/jobs"));
+            assert!(route_allowed(who, false, "GET", "/kernel/stream"));
             assert!(route_allowed(who, false, "GET", "/v1/model_blob/00"));
             assert!(route_allowed(who, false, "GET", "/v1/model_inventory"));
             assert!(!route_allowed(who, false, "POST", "/v1/model_blob/00"));
@@ -117,7 +117,7 @@ mod tests {
         assert!(route_allowed(&phone, false, "POST", "/generate"));
         assert!(route_allowed(&phone, false, "GET", "/v1/model_blob/00"));
         assert!(!route_allowed(&phone, false, "GET", "/v1/model_inventory"));
-        assert!(!route_allowed(&phone, false, "POST", "/kernel/jobs"));
+        assert!(!route_allowed(&phone, false, "GET", "/kernel/stream"));
         assert!(!route_allowed(&phone, false, "GET", "/jobs"));
         // The edge narrows even the admin to the job API.
         assert!(!route_allowed(&admin, true, "GET", "/control"));

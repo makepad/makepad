@@ -1,0 +1,6 @@
+#!/bin/sh
+# The private-data check on the staged diff (AGENTS.md). Install: copy this directory's hooks
+# into `git rev-parse --git-common-dir`/hooks. Never commit with --no-verify.
+scan="$(git rev-parse --path-format=absolute --git-common-dir)/../tools/private_check/scan.sh"
+[ -f "$scan" ] || { echo "pre-commit: no private check at $scan" >&2; exit 1; }
+exec sh "$scan" staged

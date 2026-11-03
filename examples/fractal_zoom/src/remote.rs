@@ -1,32 +1,36 @@
-//! Network rendering: tiles from the kernel nodes of the AI hub fleet (the
-//! hub's `kernel` domain, `makepad_ai_hub::kernel_client`).
+//! Network rendering: tiles from compute program sessions on the AI hub fleet's nodes (the hub's
+//! `kernel` domain: `makepad_ai_hub::program_client`), each node running the fractal program
+//! (`makepad_compute_program::programs::FRACTAL`) for this app.
 //!
-//! Remote nodes pull jobs off the same queue as the local workers, in the
-//! same spiral order, and answer on the same channel, so the view never
-//! knows who rendered a tile except by `Done.node`. A node runs the fractal
-//! as a Splash compute kernel (`makepad_ai_hub::kernel_wire::kernels`) in
-//! f64: total, bounded and bit-identical on every node, so tiles from an
-//! x64 box and an arm64 box are the same tile. Jobs a node cannot do (Newton,
-//! iteration counts over the kernel's cap) stay for the local workers.
+//! A node's session is opened at the interactive class: a person zooms and watches, so on the
+//! node it runs ahead of builds and background work. Its thread pulls jobs off the same queue as
+//! the local workers, in the same spiral order (from the far end: the tiles the local workers
+//! reach last), and answers on the same channel, so the view never knows who rendered a tile
+//! except by `Done.node`. Two tiles are out per node: one rendering, the next waiting in the
+//! program's inbox (sent once the program took the one before: its `took` value), so a node
+//! never waits on the network between tiles. The program renders in f64: total, bounded and
+//! bit-identical on every node and to the local f64 path (src/parity.rs). Jobs a node cannot do
+//! (deep layers, f32 tiles, hedged twins, iteration counts past `FRACTAL_MAX_ITER`) stay for the
+//! local workers.
 //!
-//! Every job taken off the queue comes back as exactly one `Done`: a tile a
-//! node finished, or `res == 0` for one it dropped (cancelled after a zoom,
-//! or a node that failed). Jobs of stale layers (`min_layer`) are cancelled
-//! on the nodes as soon as the queue says so.
+//! Every job taken off the queue comes back as exactly one `Done`: a tile a node finished, or
+//! `res == 0` for one a node dropped (a node that failed or left).
 //!
-//! Nodes: `MAKEPAD_AI_KERNEL_NODES` (`host:port,...` fleet endpoints) and
-//! the fleet beacon (`MAKEPAD_AI_FLEET`), with this machine's fleet
-//! identity (`~/.makepad/fleet`: tools/fleet-identity.md). The set is looked at
-//! again every few seconds; a node that appears joins, one that fails drops
-//! its tiles back as lost and is retried after a pause.
+//! Nodes: `MAKEPAD_AI_KERNEL_NODES` (`host:port,...` fleet endpoints) and the fleet beacon, with
+//! this machine's fleet identity (`~/.makepad/fleet`: tools/fleet-identity.md). Both are the
+//! local network: only with networked AI hub on (`~/.makepad/network.conf`, the runner's
+//! Settings). The set is looked at again every few seconds; a node that appears joins, one that
+//! fails gives its tiles back as dropped and is retried after a pause.
 
-use crate::kernels::FractalKind;
+use crate::kernels::{FractalKind, Params};
 use crate::tiles::{Done, Job, QueueHandle};
+use makepad_ai_hub::kernel_client::{KernelNode, KernelStream};
+use makepad_ai_hub::kernel_wire::KernelInfoJson;
+use makepad_ai_hub::program_client::{RemoteConfig, RemoteSession};
+use makepad_compute_program::programs::{FRACTAL, FRACTAL_MAX_ITER};
+use makepad_compute_program::{Class, Limits, OutputData, Program, Value};
 use makepad_network::fleet;
-use makepad_ai_hub::kernel_client::{Batch, KernelFleet, KernelNode};
-use makepad_ai_hub::kernel_wire::kernels::{fractal_job, fractal_tile, FractalParams, MAX_ITER};
-use makepad_ai_hub::kernel_wire::{KernelInfoJson, STATUS_OK};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -55,9 +59,14 @@ fn probe_nodes() -> (Vec<(KernelNode, KernelInfoJson)>, Vec<NodeStatus>) {
         }
         Err(_) => status.push(NodeStatus { addr: "MAKEPAD_AI_KERNEL_NODES".into(), state: "not set (fleet beacon only)".into() }),
     }
-    for node in makepad_ai_hub::discovery::start_listener().nodes() {
-        if !urls.contains(&node.base_url) {
-            urls.push(node.base_url);
+    match makepad_ai_hub::discovery::start_listener() {
+        makepad_ai_hub::discovery::Discovery::Unavailable { reason } => status.push(NodeStatus { addr: "fleet beacon".into(), state: reason.into() }),
+        discovery => {
+            for node in discovery.nodes() {
+                if !urls.contains(&node.base_url) {
+                    urls.push(node.base_url);
+                }
+            }
         }
     }
     if urls.is_empty() {
@@ -101,10 +110,14 @@ fn classify(err: &str) -> String {
     // macOS answers EHOSTUNREACH (65) for LAN hosts while the app lacks the Local Network permission
     let why = if cfg!(target_os = "macos") && e.contains("os error 65") {
         "blocked: allow Local Network for this app (System Settings > Privacy & Security > Local Network)"
+    } else if e.contains("local network") {
+        "the local network is off for this app (networked AI hub, in the runner's Settings)"
     } else if e.contains(": 401") || e.contains(": 403") || e.contains("unauthor") || e.contains("forbidden") {
         "auth refused (credential not of this fleet, expired, revoked, or not allowed kernels)"
     } else if e.contains("not a fleet server") || e.contains("certificate") {
         "TLS: the node's certificate is not of this fleet"
+    } else if e.contains("kernel api") || e.contains("not a program node") {
+        "an older hub (no compute programs): update the node"
     } else if e.contains("refused") || e.contains("timed out") || e.contains("timeout") || e.contains("unreachable") || e.contains("no route") || e.contains("connect") {
         "unreachable"
     } else if e.contains(": 404") {
@@ -124,23 +137,44 @@ pub struct NodeInfo {
     pub cores: u32,
 }
 
-/// A job in flight on a node: what its `Done` needs.
-#[derive(Clone)]
-struct Tag {
-    layer: u64,
-    index: usize,
-    res: usize,
-    buffer: Arc<Mutex<Vec<u32>>>,
+/// One node's link: its thread and what stops or wakes it.
+struct Link {
+    info: NodeInfo,
+    url: String,
+    stop: Arc<AtomicBool>,
+    /// Whether the thread waits with nothing out, and the queue's push count when it last
+    /// looked for jobs: the watcher wakes it when jobs came since.
+    idle: Arc<AtomicBool>,
+    looked: Arc<AtomicU64>,
+    session: Arc<Mutex<Option<Arc<RemoteSession>>>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Link {
+    fn wake(&self) {
+        if let Some(s) = self.session.lock().unwrap().as_ref() {
+            s.wake();
+        }
+    }
+
+    fn stop(mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        self.wake();
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
 }
 
 pub struct NetworkPool {
-    nodes: Arc<Mutex<Vec<(NodeInfo, String)>>>,
-    fleet: Arc<Mutex<Option<KernelFleet<Tag>>>>,
+    links: Arc<Mutex<Vec<Link>>>,
     quit: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
 const RESCAN: Duration = Duration::from_secs(5);
+/// A node that failed is tried again after this.
+const RETRY: Duration = Duration::from_secs(5);
 
 impl NetworkPool {
     /// Finds the kernel nodes (blocks up to ~2.5 s for the beacon: call it
@@ -161,19 +195,18 @@ impl NetworkPool {
         if found.is_empty() {
             return None;
         }
-        let nodes = Arc::new(Mutex::new(Vec::new()));
-        let fleet = Arc::new(Mutex::new(None));
+        let links = Arc::new(Mutex::new(Vec::new()));
         let quit = Arc::new(AtomicBool::new(false));
-        restart(&q, &nodes, &fleet, found);
+        restart(&q, &links, &quit, found);
         let thread = {
-            let (q, nodes, fleet, quit) = (q.clone(), nodes.clone(), fleet.clone(), quit.clone());
-            std::thread::Builder::new().name("fractal-network".into()).spawn(move || watch(q, nodes, fleet, quit)).ok()
+            let (q, links, quit) = (q.clone(), links.clone(), quit.clone());
+            std::thread::Builder::new().name("fractal-network".into()).spawn(move || watch(q, links, quit)).ok()
         };
-        Some(NetworkPool { nodes, fleet, quit, thread })
+        Some(NetworkPool { links, quit, thread })
     }
 
     pub fn nodes(&self) -> Vec<NodeInfo> {
-        self.nodes.lock().unwrap().iter().map(|(n, _)| n.clone()).collect()
+        self.links.lock().unwrap().iter().map(|l| l.info.clone()).collect()
     }
 }
 
@@ -183,18 +216,18 @@ impl Drop for NetworkPool {
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
-        // the fleet's drop waits for its in-flight polls; every tile still
-        // comes back through the done channel
-        self.fleet.lock().unwrap().take();
+        // each node gives its tiles in flight back through the done channel
+        for link in std::mem::take(&mut *self.links.lock().unwrap()) {
+            link.stop();
+        }
     }
 }
 
-/// Whether a node can render `job`: the kernels have no Newton and cap the
-/// iteration count (their loops are bounded by construction).
+/// Whether a node can render `job`: deep (perturbation) layers need the reference orbit,
+/// hedged twins are for the local workers, f32 tiles are local only (nodes render f64, the
+/// local f64 path's bits), and the program caps the iteration count.
 fn remote_can(job: &Job) -> bool {
-    // deep (perturbation) layers need the reference orbit, hedged twins are for the local workers
-    // f32 tiles are local only: the nodes render f64 (bit-identical to the local f64 path)
-    !(job.deep.is_some() || job.local_only) && job.precision == crate::kernels::Precision::F64 && job.params.max_iter <= MAX_ITER
+    !(job.deep.is_some() || job.local_only) && job.precision == crate::kernels::Precision::F64 && job.params.max_iter <= FRACTAL_MAX_ITER
 }
 
 fn kind_of(kind: FractalKind) -> u32 {
@@ -208,95 +241,175 @@ fn kind_of(kind: FractalKind) -> u32 {
     }
 }
 
-fn fractal_params(job: &Job) -> FractalParams {
-    node_params(&job.params)
+/// The fractal program's message for a tile of `p` with top-left corner (x, y) and edge `size`
+/// at `res` texels, published in output slot `slot`.
+pub(crate) fn tile_message(slot: usize, p: &Params, x: f64, y: f64, size: f64, res: usize) -> Value {
+    let n = |v: f64| Value::Number(v);
+    Value::object(&[
+        ("slot", n(slot as f64)),
+        ("x", n(x)),
+        ("y", n(y)),
+        ("step", n(size / res as f64)),
+        ("res", n(res as f64)),
+        ("kind", n(kind_of(p.kind) as f64)),
+        ("power", n(p.power.clamp(2, 8) as f64)),
+        ("max_iter", n(p.max_iter as f64)),
+        ("de", n(p.de as u32 as f64)),
+        ("trap", n(p.trap as u32 as f64)),
+        ("julia", Value::Array(vec![n(p.julia.0), n(p.julia.1)])),
+    ])
 }
 
-/// The node kernel's parameters for a tile of `p`.
-pub(crate) fn node_params(p: &crate::kernels::Params) -> FractalParams {
-    FractalParams { kind: kind_of(p.kind), power: p.power.clamp(2, 8), max_iter: p.max_iter, julia: p.julia, de: p.de, trap: p.trap }
-}
+/// The output slot a program output is.
+pub(crate) const SLOTS: [&str; 2] = ["tile0", "tile1"];
 
-/// (Re)starts the fleet over `found` (the old one, if any, finishes first).
-fn restart(q: &QueueHandle, nodes: &Mutex<Vec<(NodeInfo, String)>>, fleet: &Mutex<Option<KernelFleet<Tag>>>, found: Vec<(KernelNode, KernelInfoJson)>) {
-    let infos: Vec<(NodeInfo, String)> = found
-        .iter()
+/// (Re)starts a link per node of `found` (the old ones give their tiles back first).
+fn restart(q: &QueueHandle, links: &Mutex<Vec<Link>>, quit: &Arc<AtomicBool>, found: Vec<(KernelNode, KernelInfoJson)>) {
+    for link in std::mem::take(&mut *links.lock().unwrap()) {
+        link.stop();
+    }
+    let started = found
+        .into_iter()
         .enumerate()
         .map(|(k, (node, info))| {
             let name = node.base_url.trim_start_matches("https://").trim_start_matches("http://").to_string();
-            (NodeInfo { id: k as u16 + 1, name, cores: info.cores }, node.base_url.clone())
+            let info = NodeInfo { id: k as u16 + 1, name, cores: info.cores };
+            let stop = Arc::new(AtomicBool::new(false));
+            let idle = Arc::new(AtomicBool::new(false));
+            let looked = Arc::new(AtomicU64::new(0));
+            let session = Arc::new(Mutex::new(None));
+            let thread = {
+                let (q, node, id, session, quit) = (q.clone(), node.clone(), info.id, session.clone(), quit.clone());
+                let (stop, idle, looked) = (stop.clone(), idle.clone(), looked.clone());
+                std::thread::Builder::new().name(format!("fractal-node-{id}")).spawn(move || drive(&q, &node, id, &stop, &quit, (&idle, &looked), &session)).ok()
+            };
+            Link { info, url: node.base_url, stop, idle, looked, session, thread }
         })
         .collect();
-    let source = {
-        let q = q.clone();
-        Arc::new(move |max: usize| {
-            // jobs of one kind of params per batch (one kernel call setup)
-            let first = q.pop_back_where(remote_can)?;
-            let p = fractal_params(&first);
-            let mut jobs = vec![first];
-            while jobs.len() < max {
-                let Some(job) = q.pop_back_where(|j| remote_can(j) && fractal_params(j) == p) else { break };
-                jobs.push(job);
-            }
-            let mut tiles = Vec::with_capacity(jobs.len());
-            let mut tags = Vec::with_capacity(jobs.len());
-            for (k, job) in jobs.into_iter().enumerate() {
-                // tiles are offsets from the view origin; nodes take absolute coordinates
-                tiles.push(fractal_tile(k as u64, job.origin.0 + job.rect.x, job.origin.1 + job.rect.y, job.rect.size, job.res as u32, &p));
-                tags.push(Tag { layer: job.layer, index: job.index, res: job.res, buffer: Arc::new(Mutex::new(job.buffer)) });
-            }
-            Some(Batch { job: fractal_job(&p, tiles), tags })
-        })
-    };
-    let sink = {
-        let done = Mutex::new(q.done_sender());
-        Arc::new(move |node: usize, tag: Tag, r: makepad_ai_hub::kernel_wire::TileResult| {
-            let mut buffer = std::mem::take(&mut *tag.buffer.lock().unwrap());
-            let texels = r.output("out").filter(|w| r.status == STATUS_OK && w.len() == tag.res * tag.res);
-            let res = match texels {
-                Some(words) => {
-                    buffer.clear();
-                    buffer.extend_from_slice(words);
-                    tag.res
-                }
-                None => 0,
-            };
-            let micros = r.nanos / 1000;
-            let _ = done.lock().unwrap().send(Done { layer: tag.layer, index: tag.index, res, buffer, micros, node: node as u16 + 1, worker: 0, at: Instant::now() });
-        })
-    };
-    let old = fleet.lock().unwrap().take();
-    drop(old);
-    *nodes.lock().unwrap() = infos;
-    *fleet.lock().unwrap() = Some(KernelFleet::start(found, source, sink));
+    *links.lock().unwrap() = started;
 }
 
-/// Cancels stale layers on the nodes as soon as the queue moves on, and
-/// looks for nodes that came or went.
-fn watch(q: QueueHandle, nodes: Arc<Mutex<Vec<(NodeInfo, String)>>>, fleet: Arc<Mutex<Option<KernelFleet<Tag>>>>, quit: Arc<AtomicBool>) {
-    let mut seen_min = q.min_layer();
+/// A tile out on a node.
+struct Out {
+    rev: u64,
+    layer: u64,
+    index: usize,
+    res: usize,
+    buffer: Vec<u32>,
+    sent: Instant,
+}
+
+/// A node's thread: a session at a time, retried after a pause when one fails.
+fn drive(q: &QueueHandle, node: &KernelNode, id: u16, stop: &AtomicBool, quit: &AtomicBool, idle: (&AtomicBool, &AtomicU64), slot: &Mutex<Option<Arc<RemoteSession>>>) {
+    let done = q.done_sender();
+    let program = Program::new("fractal.splash", FRACTAL);
+    let running = || !stop.load(Ordering::SeqCst) && !quit.load(Ordering::SeqCst) && !q.is_quitting();
+    while running() {
+        let opened = KernelStream::open(node).map_err(|e| format!("{e:?}")).and_then(|stream| {
+            // The node caps these at its own ceilings: a long zoom is one session.
+            let limits = Limits { fuel: usize::MAX, work: u64::MAX, ..Limits::default() };
+            RemoteSession::open(&Arc::new(stream), &program, RemoteConfig { limits, class: Class::Interactive, ..RemoteConfig::default() }).map_err(|e| format!("{e:?}"))
+        });
+        match opened {
+            Ok(session) => {
+                let session = Arc::new(session);
+                *slot.lock().unwrap() = Some(session.clone());
+                let why = serve(q, &session, id, &done, &running, idle);
+                *slot.lock().unwrap() = None;
+                if let Some(why) = why {
+                    makepad_widgets::log!("fractal network: node {} {why}", node.base_url);
+                }
+            }
+            Err(e) => makepad_widgets::log!("fractal network: node {} {e}", node.base_url),
+        }
+        // a pause before the next try (a stop ends it early)
+        let until = Instant::now() + RETRY;
+        while running() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+}
+
+/// Keeps two tiles out on the session until it ends or the link stops; every tile out comes
+/// back on `done`. Why the session ended, if it did.
+fn serve(q: &QueueHandle, session: &RemoteSession, node: u16, done: &std::sync::mpsc::Sender<Done>, running: &dyn Fn() -> bool, (idle, looked): (&AtomicBool, &AtomicU64)) -> Option<String> {
+    let mut out: [Option<Out>; 2] = [None, None];
+    let mut sent = 0u64;
+    let mut taken = 0u64;
+    let give_back = |t: Out, res: usize| {
+        let micros = t.sent.elapsed().as_micros() as u64;
+        let _ = done.send(Done { layer: t.layer, index: t.index, res, buffer: t.buffer, micros, node, worker: 0, at: Instant::now() });
+    };
+    let why = loop {
+        if !running() {
+            break None;
+        }
+        // The next tile waits in the program's inbox only once it took the one before.
+        looked.store(q.pushed(), Ordering::SeqCst);
+        while sent == taken {
+            let Some(free) = out.iter().position(Option::is_none) else { break };
+            let Some(job) = q.pop_back_where(remote_can) else { break };
+            let (x, y) = (job.origin.0 + job.rect.x, job.origin.1 + job.rect.y);
+            sent = session.send("tile", tile_message(free, &job.params, x, y, job.rect.size, job.res));
+            out[free] = Some(Out { rev: sent, layer: job.layer, index: job.index, res: job.res, buffer: job.buffer, sent: Instant::now() });
+        }
+        idle.store(out.iter().all(Option::is_none), Ordering::SeqCst);
+        let u = session.wait();
+        idle.store(false, Ordering::SeqCst);
+        if let Some(Value::Number(rev)) = u.value("took") {
+            taken = taken.max(*rev as u64);
+        }
+        for o in u.outputs {
+            let Some(k) = SLOTS.iter().position(|s| *s == o.name) else { continue };
+            if !out[k].as_ref().is_some_and(|t| t.rev == o.rev) {
+                continue;
+            }
+            let mut t = out[k].take().unwrap();
+            let res = match &o.data {
+                OutputData::Words(words) if words.len() == t.res * t.res => {
+                    t.buffer.clear();
+                    t.buffer.extend_from_slice(words);
+                    t.res
+                }
+                _ => 0,
+            };
+            give_back(t, res);
+        }
+        if let Some(end) = u.end {
+            break Some(match end {
+                Ok(_) => "the program ended".to_string(),
+                Err(e) => e.to_string(),
+            });
+        }
+    };
+    // what is still out comes back unrendered
+    for t in out.into_iter().flatten() {
+        give_back(t, 0);
+    }
+    why
+}
+
+/// Wakes nodes waiting with nothing out when jobs came since they looked, and looks for nodes
+/// that came or went.
+fn watch(q: QueueHandle, links: Arc<Mutex<Vec<Link>>>, quit: Arc<AtomicBool>) {
     let mut last_scan = Instant::now();
     while !quit.load(Ordering::SeqCst) && !q.is_quitting() {
         std::thread::sleep(Duration::from_millis(15));
-        let min = q.min_layer();
-        if min != seen_min {
-            seen_min = min;
-            if let Some(f) = fleet.lock().unwrap().as_ref() {
-                f.cancel(|tag| tag.layer < min);
+        let pushed = q.pushed();
+        for link in links.lock().unwrap().iter() {
+            if link.idle.load(Ordering::SeqCst) && link.looked.load(Ordering::SeqCst) != pushed {
+                link.wake();
             }
-        }
-        if let Some(f) = fleet.lock().unwrap().as_ref() {
-            f.notify();
         }
         if last_scan.elapsed() >= RESCAN {
             last_scan = Instant::now();
             let (found, _) = probe_nodes();
             let mut urls: Vec<&str> = found.iter().map(|(n, _)| n.base_url.as_str()).collect();
             urls.sort();
-            let mut have: Vec<String> = nodes.lock().unwrap().iter().map(|(_, u)| u.clone()).collect();
+            let mut have: Vec<String> = links.lock().unwrap().iter().map(|l| l.url.clone()).collect();
             have.sort();
             if !found.is_empty() && urls != have.iter().map(|s| s.as_str()).collect::<Vec<_>>() {
-                restart(&q, &nodes, &fleet, found);
+                restart(&q, &links, &quit, found);
             }
         }
     }

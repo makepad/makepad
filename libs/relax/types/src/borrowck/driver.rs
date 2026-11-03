@@ -714,7 +714,9 @@ fn lint_unused_mut(prog: &Program, owner: DefId, mir: &Body, used: &crate::mir::
         let LocalInfo::User(BindingForm::Var(VarBindingForm { binding_mode: crate::mir::BindingMode(ByRef::No, Mutability::Mut), pat_span, .. })) = &decl.local_info else { continue };
         let Some(name) = mir.var_debug_info.iter().find(|v| v.place.local.0 as usize == i && v.place.projection.is_empty()).map(|v| v.name.as_str()) else { continue };
         if name.starts_with('_') || crate::lint::external(prog, pat_span.file, pat_span.lo) { continue; }
-        crate::lint::emit(prog, owner, &crate::lint::UNUSED_MUT, pat_span.file, pat_span.lo,
+        // (under the attributes of the binding's statement, arm or parameter: its name is in the span)
+        let around = crate::lint::attrs_at(prog, owner, pat_span.file, pat_span.lo, pat_span.hi);
+        crate::lint::emit_in(prog, owner, &around, &crate::lint::UNUSED_MUT, pat_span.file, pat_span.lo,
             &format!("variable does not need to be mutable -- help: remove this `mut` (`{}`)", name));
     }
 }

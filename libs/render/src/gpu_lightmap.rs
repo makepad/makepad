@@ -615,7 +615,7 @@ fn zero_rect(cx: &mut CxDraw, d: &mut DrawLmZero, rect: LmRect, size: usize, fil
     d.quad_a = rect.uv_remap(size);
     d.fill_a = fill;
     if d.draw_vars.can_instance() {
-        cx.add_instance(&d.draw_vars);
+        cx.add_instance(&mut d.draw_vars);
     }
 }
 
@@ -2173,7 +2173,7 @@ impl GpuLightmapBaker {
                         d.draw_vars.set_texture(0, &state.tex.lamp_depth);
                         d.draw_vars.geometry_id = Some(m.geometry);
                         if d.draw_vars.can_instance() {
-                            cx.add_instance(&d.draw_vars);
+                            cx.add_instance(&mut d.draw_vars);
                         }
                     }
                     RegionKind::Ground => {
@@ -2191,7 +2191,7 @@ impl GpuLightmapBaker {
                         d.draw_vars.set_texture(0, &state.tex.lamp_depth);
                         d.draw_vars.set_texture(1, &g.heights_tex);
                         if d.draw_vars.can_instance() {
-                            cx.add_instance(&d.draw_vars);
+                            cx.add_instance(&mut d.draw_vars);
                         }
                     }
                 }
@@ -2244,14 +2244,14 @@ impl GpuLightmapBaker {
                     d.transform = m.transform;
                     d.draw_vars.geometry_id = Some(m.geometry);
                     if d.draw_vars.can_instance() {
-                        cx.add_instance(&d.draw_vars);
+                        cx.add_instance(&mut d.draw_vars);
                     }
                 }
                 if let Some(g) = &state.box_geometry {
                     d.transform = Mat4f::identity();
                     d.draw_vars.geometry_id = Some(g.geometry_id());
                     if d.draw_vars.can_instance() {
-                        cx.add_instance(&d.draw_vars);
+                        cx.add_instance(&mut d.draw_vars);
                     }
                 }
                 seq.close(cx, idx);
@@ -2297,7 +2297,7 @@ impl GpuLightmapBaker {
                         d.draw_vars.set_texture(0, &state.tex.sun_depth);
                         d.draw_vars.geometry_id = Some(m.geometry);
                         if d.draw_vars.can_instance() {
-                            cx.add_instance(&d.draw_vars);
+                            cx.add_instance(&mut d.draw_vars);
                         }
                     }
                     RegionKind::Ground => {
@@ -2324,7 +2324,7 @@ impl GpuLightmapBaker {
                         d.draw_vars.set_texture(0, &state.tex.sun_depth);
                         d.draw_vars.set_texture(1, &g.heights_tex);
                         if d.draw_vars.can_instance() {
-                            cx.add_instance(&d.draw_vars);
+                            cx.add_instance(&mut d.draw_vars);
                         }
                     }
                 }
@@ -2350,7 +2350,7 @@ impl GpuLightmapBaker {
                 };
                 d.draw_vars.set_texture(0, &state.tex.mask_a);
                 if d.draw_vars.can_instance() {
-                    cx.add_instance(&d.draw_vars);
+                    cx.add_instance(&mut d.draw_vars);
                 }
                 seq.close(cx, idx);
             }
@@ -2386,7 +2386,7 @@ impl GpuLightmapBaker {
                 };
                 d.draw_vars.set_texture(0, &state.tex.mask_b);
                 if d.draw_vars.can_instance() {
-                    cx.add_instance(&d.draw_vars);
+                    cx.add_instance(&mut d.draw_vars);
                 }
                 seq.close(cx, idx);
             }
@@ -2435,14 +2435,14 @@ impl GpuLightmapBaker {
                         d.transform = m.transform;
                         d.draw_vars.geometry_id = Some(m.geometry);
                         if d.draw_vars.can_instance() {
-                            cx.add_instance(&d.draw_vars);
+                            cx.add_instance(&mut d.draw_vars);
                         }
                     }
                     if let Some(g) = &state.box_geometry {
                         d.transform = Mat4f::identity();
                         d.draw_vars.geometry_id = Some(g.geometry_id());
                         if d.draw_vars.can_instance() {
-                            cx.add_instance(&d.draw_vars);
+                            cx.add_instance(&mut d.draw_vars);
                         }
                     }
                 }
@@ -2499,7 +2499,7 @@ impl GpuLightmapBaker {
                             d.draw_vars.set_texture(0, &state.tex.lamp_depth);
                             d.draw_vars.geometry_id = Some(m.geometry);
                             if d.draw_vars.can_instance() {
-                                cx.add_instance(&d.draw_vars);
+                                cx.add_instance(&mut d.draw_vars);
                             }
                         }
                         RegionKind::Ground => {
@@ -2515,7 +2515,7 @@ impl GpuLightmapBaker {
                             d.draw_vars.set_texture(0, &state.tex.lamp_depth);
                             d.draw_vars.set_texture(1, &g.heights_tex);
                             if d.draw_vars.can_instance() {
-                                cx.add_instance(&d.draw_vars);
+                                cx.add_instance(&mut d.draw_vars);
                             }
                         }
                     }
@@ -2562,7 +2562,7 @@ impl GpuLightmapBaker {
                 // the interior — see DrawLmLampDilate.
                 d.draw_vars.set_texture(1, &state.tex.cov);
                 if d.draw_vars.can_instance() {
-                    cx.add_instance(&d.draw_vars);
+                    cx.add_instance(&mut d.draw_vars);
                 }
             }
             seq.close(cx, idx);
@@ -2603,7 +2603,7 @@ impl GpuLightmapBaker {
                 d.draw_vars.set_texture(0, &state.tex.cov);
                 d.draw_vars.set_texture(1, src);
                 if d.draw_vars.can_instance() {
-                    cx.add_instance(&d.draw_vars);
+                    cx.add_instance(&mut d.draw_vars);
                 }
             }
             seq.close(cx, idx);
@@ -2666,7 +2666,7 @@ impl GpuLightmapBaker {
                 d.draw_vars.set_texture(1, &state.tex.cov);
                 d.draw_vars.set_texture(2, &state.tex.lamp_b);
                 if d.draw_vars.can_instance() {
-                    cx.add_instance(&d.draw_vars);
+                    cx.add_instance(&mut d.draw_vars);
                 }
             }
             seq.close(cx, idx);
@@ -2727,14 +2727,14 @@ impl GpuLightmapBaker {
                         d.transform = m.transform;
                         d.draw_vars.geometry_id = Some(m.geometry);
                         if d.draw_vars.can_instance() {
-                            cx.add_instance(&d.draw_vars);
+                            cx.add_instance(&mut d.draw_vars);
                         }
                     }
                     if let Some(gb) = &state.box_geometry {
                         d.transform = Mat4f::identity();
                         d.draw_vars.geometry_id = Some(gb.geometry_id());
                         if d.draw_vars.can_instance() {
-                            cx.add_instance(&d.draw_vars);
+                            cx.add_instance(&mut d.draw_vars);
                         }
                     }
                     seq.close(cx, idx);
@@ -2776,7 +2776,7 @@ impl GpuLightmapBaker {
                     d.draw_vars.set_texture(1, &state.tex.sun_far);
                     d.draw_vars.set_texture(2, &g.heights_tex);
                     if d.draw_vars.can_instance() {
-                        cx.add_instance(&d.draw_vars);
+                        cx.add_instance(&mut d.draw_vars);
                     }
                     seq.close(cx, idx);
                 }
@@ -2810,7 +2810,7 @@ impl GpuLightmapBaker {
                     };
                     d.draw_vars.set_texture(0, src);
                     if d.draw_vars.can_instance() {
-                        cx.add_instance(&d.draw_vars);
+                        cx.add_instance(&mut d.draw_vars);
                     }
                     seq.close(cx, idx);
                 }
@@ -2967,14 +2967,14 @@ impl GpuLightmapBaker {
                     d.transform = m.transform;
                     d.draw_vars.geometry_id = Some(m.geometry);
                     if d.draw_vars.can_instance() {
-                        cx.add_instance(&d.draw_vars);
+                        cx.add_instance(&mut d.draw_vars);
                     }
                 }
                 if let Some(g) = &state.box_geometry {
                     d.transform = Mat4f::identity();
                     d.draw_vars.geometry_id = Some(g.geometry_id());
                     if d.draw_vars.can_instance() {
-                        cx.add_instance(&d.draw_vars);
+                        cx.add_instance(&mut d.draw_vars);
                     }
                 }
             }
@@ -3018,7 +3018,7 @@ impl GpuLightmapBaker {
                 di.transform = m.transform;
                 di.draw_vars.geometry_id = Some(m.geometry);
                 if di.draw_vars.can_instance() {
-                    cx.add_instance(&di.draw_vars);
+                    cx.add_instance(&mut di.draw_vars);
                 }
             }
             let d = &mut draws.sun_depth;
@@ -3026,7 +3026,7 @@ impl GpuLightmapBaker {
                 d.transform = m.transform;
                 d.draw_vars.geometry_id = Some(m.geometry);
                 if d.draw_vars.can_instance() {
-                    cx.add_instance(&d.draw_vars);
+                    cx.add_instance(&mut d.draw_vars);
                 }
             }
             // Cut-out layers after every opaque caster: their pipeline
@@ -3058,7 +3058,7 @@ impl GpuLightmapBaker {
                 d.depth.draw_vars.geometry_id = Some(m.geometry);
                 if let (Some(t), Some(slot)) = (&m.cutout, slot) { d.depth.draw_vars.set_texture(slot, t); }
                 if d.depth.draw_vars.can_instance() {
-                    cx.add_instance(&d.depth.draw_vars);
+                    cx.add_instance(&mut d.depth.draw_vars);
                 }
             }
             let d = &mut draws.sun_depth;
@@ -3094,7 +3094,7 @@ impl GpuLightmapBaker {
                             dm.draw_vars.set_texture(slot, &mat.texture);
                         }
                         if dm.draw_vars.can_instance() {
-                            cx.add_instance(&dm.draw_vars);
+                            cx.add_instance(&mut dm.draw_vars);
                         }
                         continue;
                     }
@@ -3103,7 +3103,7 @@ impl GpuLightmapBaker {
                     di.transform = mv.transform;
                     di.draw_vars.geometry_id = Some(mv.geometry);
                     if di.draw_vars.can_instance() {
-                        cx.add_instance(&di.draw_vars);
+                        cx.add_instance(&mut di.draw_vars);
                     }
                     continue;
                 }
@@ -3111,7 +3111,7 @@ impl GpuLightmapBaker {
                 d.transform = mv.transform;
                 d.draw_vars.geometry_id = Some(mv.geometry);
                 if d.draw_vars.can_instance() {
-                    cx.add_instance(&d.draw_vars);
+                    cx.add_instance(&mut d.draw_vars);
                 }
             }
             for (mv, (lo, hi)) in movers.iter().zip(&self.csm_mover_bounds) {
@@ -3143,7 +3143,7 @@ impl GpuLightmapBaker {
                 ds.draw_vars.set_texture(0, &skin.joint_tex);
                 ds.draw_vars.geometry_id = Some(mv.geometry);
                 if ds.draw_vars.can_instance() {
-                    cx.add_instance(&ds.draw_vars);
+                    cx.add_instance(&mut ds.draw_vars);
                 }
             }
         }

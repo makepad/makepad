@@ -147,3 +147,61 @@ mod tests {
         assert_eq!(account.overcommitted(), 16, "the excess is remembered as a peak");
     }
 }
+
+/// Byte-budgeted decoded-object LRU. Admission is optional: oversized objects
+/// are returned to the caller without being retained. Hits and eviction are
+/// O(log n), with no scan of the cache on each history read.
+pub struct ReadLru<K, V> {
+    entries: std::collections::HashMap<K, (V, Reservation, u64)>,
+    order: std::collections::BTreeMap<u64, K>,
+    clock: u64,
+    pub used: usize,
+    pub budget: usize,
+}
+
+impl<K: Eq + std::hash::Hash + Copy, V> ReadLru<K, V> {
+    pub fn new(budget: usize) -> Self {
+        Self { entries: Default::default(), order: Default::default(), clock: 0, used: 0, budget }
+    }
+    pub fn get(&mut self, key: &K) -> Option<&V> {
+        let (value, _, age) = self.entries.get_mut(key)?;
+        self.order.remove(age);
+        self.clock += 1;
+        *age = self.clock;
+        self.order.insert(*age, *key);
+        Some(value)
+    }
+    fn evict(&mut self) -> bool {
+        let Some((_, key)) = self.order.pop_first() else { return false };
+        if let Some((_, lease, _)) = self.entries.remove(&key) { self.used -= lease.bytes(); }
+        true
+    }
+    pub fn resize(&mut self, budget: usize) {
+        self.budget = budget;
+        while self.used > budget && self.evict() {}
+    }
+    pub fn insert(&mut self, key: K, bytes: usize, account: &MemoryAccount, value: impl FnOnce() -> V) {
+        if bytes > self.budget { return; }
+        if let Some((_, lease, age)) = self.entries.remove(&key) {
+            self.order.remove(&age);
+            self.used -= lease.bytes();
+        }
+        while (self.used.saturating_add(bytes) > self.budget || account.available() < bytes) && self.evict() {}
+        if let Some(lease) = account.try_reserve(bytes) {
+            self.clock += 1;
+            self.entries.insert(key, (value(), lease, self.clock));
+            self.order.insert(self.clock, key);
+            self.used += bytes;
+        }
+    }
+    pub fn clear(&mut self) { *self = Self::new(self.budget); }
+}
+
+pub(crate) const READ_CACHE_BYTES: usize = 8 << 20;
+
+/// Defaults bound retained objects across all ordinary readers in the process.
+/// Explicit history accounts still override this through the existing API.
+pub(crate) fn read_account() -> MemoryAccount {
+    static ACCOUNT: std::sync::OnceLock<MemoryAccount> = std::sync::OnceLock::new();
+    ACCOUNT.get_or_init(|| MemoryAccount::new(64 << 20)).clone()
+}

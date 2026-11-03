@@ -195,7 +195,7 @@ fn pair_of(repo_dir: &Path, rev: &str) -> Result<crate::state::Pair, String> {
     if let Some(pin) = super::Pin::of_rev(rev) {
         return Ok(crate::state::Pair::new(&pin.makepad, pin.commercial.as_deref().unwrap_or("")));
     }
-    let o = std::process::Command::new("git").args(["rev-parse", "HEAD"]).current_dir(repo_dir).output().map_err(|e| format!("git: {e}"))?;
+    let o = crate::git_exec::command().args(["rev-parse", "HEAD"]).current_dir(repo_dir).output().map_err(|e| format!("git: {e}"))?;
     Ok(crate::state::Pair::new(String::from_utf8_lossy(&o.stdout).trim(), ""))
 }
 
@@ -246,7 +246,7 @@ fn verdict(home: &Path, a: &Ask, gated: &[Built], elsewhere: &[Built], now: u64)
         let list = pkgs.join(", ");
         miss = pkgs.iter().find_map(|p| crate::jit_misses::open(home, p).map(|id| (p.clone(), id)));
         // the class names the package it measures: `test:<pkg>[:<target>]`
-        let routed = a.class.strip_prefix("native:").filter(|c| a.kind == Kind::Test && c.split(':').nth(1).is_some_and(|p| pkgs.iter().all(|q| q == p))).and_then(|c| (a.route)(c));
+        let routed = a.class.strip_prefix("native:").map(super::base_class).filter(|c| a.kind == Kind::Test && c.split(':').nth(1).is_some_and(|p| pkgs.iter().all(|q| q == p))).and_then(|c| (a.route)(c));
         let (word, answer) = if let Some((pkg, id)) = &miss {
             ("miss", Ok(format!("devhub: native build of {list}: {pkg} has the open JIT miss {id}, so cargo is the way until it closes")))
         } else if let Some(why) = &routed {
@@ -296,18 +296,18 @@ mod tests {
     fn refused_unless_a_miss_a_route_a_reason_or_no_jit() {
         let home = std::env::temp_dir().join(format!("devhub-native-{}", std::process::id()));
         std::fs::create_dir_all(&home).unwrap();
-        let cmd = argv("cargo test --release -p fab-model");
-        let route = |class: &str| (class == "test:fab-model:lib").then(|| "cargo (cargo 2m, JIT 4m)".to_string());
+        let cmd = argv("cargo test --release -p demo-model");
+        let route = |class: &str| (class == "test:demo-model:lib").then(|| "cargo (cargo 2m, JIT 4m)".to_string());
         let ask = |reason, class, os| Ask { lane: "l1", agent: "", kind: Kind::Test, cmd: &cmd, repo_dir: &home, cwd: ".", rev: "", reason, class, route: &route, os, arch: "x64" };
-        let test = [built("fab-model", "test", "")];
+        let test = [built("demo-model", "test", "")];
         let refused = verdict(&home, &ask("", "", "linux"), &test, &[], 1).unwrap_err();
-        assert!(refused.contains("`devhub test l1 fab-model --live`") && refused.contains("--native"), "{refused}");
+        assert!(refused.contains("`devhub test l1 demo-model --live`") && refused.contains("--native"), "{refused}");
         assert!(verdict(&home, &ask("perf baseline", "", "linux"), &test, &[], 2).unwrap().contains("perf baseline"));
         assert!(verdict(&home, &ask("", "native:test:other:lib", "linux"), &test, &[], 3).is_err(), "another package's class routes nothing");
-        assert!(verdict(&home, &ask("", "native:test:fab-model:lib", "linux"), &test, &[], 3).unwrap().contains("cargo 2m, JIT 4m"));
+        assert!(verdict(&home, &ask("", "native:test:demo-model:lib", "linux"), &test, &[], 3).unwrap().contains("cargo 2m, JIT 4m"));
         assert!(verdict(&home, &ask("", "", "windows"), &[], &test, 4).unwrap().contains("for windows x64: no JIT runs there"));
         assert!(verdict(&home, &ask("", "", "linux"), &[], &[built("app", "build", "wasm32-unknown-unknown")], 5).unwrap().contains("for wasm32-unknown-unknown: no JIT runs there"));
-        std::fs::write(home.join("jit_misses.jsonl"), "{\"id\":\"M7\",\"pkg\":\"fab-model\",\"target\":\"--lib\",\"error\":[\"e\"],\"closed_ms\":0}\n").unwrap();
+        std::fs::write(home.join("jit_misses.jsonl"), "{\"id\":\"M7\",\"pkg\":\"demo-model\",\"target\":\"--lib\",\"error\":[\"e\"],\"closed_ms\":0}\n").unwrap();
         assert!(verdict(&home, &ask("", "", "linux"), &test, &[], 6).unwrap().contains("open JIT miss M7"));
         let ledger = std::fs::read_to_string(home.join(LEDGER)).unwrap();
         let verdicts: Vec<&str> = ledger.lines().map(|l| l.split("\"verdict\":\"").nth(1).unwrap().split('"').next().unwrap()).collect();
@@ -331,13 +331,13 @@ mod tests {
     fn builds_reads_words_texts_and_scripts() {
         let none = |_: &str| None;
         let b = |cmd: &str| builds(&argv(cmd), &none);
-        assert_eq!(b("cargo run --release -p makepad-example-fab -- --flag -p x"), vec![built("makepad-example-fab", "run", "")]);
+        assert_eq!(b("cargo run --release -p makepad-example-demo -- --flag -p x"), vec![built("makepad-example-demo", "run", "")]);
         assert_eq!(b("env A=1 nice -n 10 cargo +nightly -q test --release --package=a -pb"), vec![built("a", "test", ""), built("b", "test", "")]);
         assert!(b("cargo check --release -p a").is_empty());
         assert_eq!(b("cargo build --release --target wasm32-unknown-unknown"), vec![built("*", "build", "wasm32-unknown-unknown")]);
         let script = |p: &str| (p == "drive.sh").then(|| "#!/bin/bash\n# cargo build -p commented\ncargo build --release \\\n  -q -p makepad-run --bin makepad || exit 1\nM=x; cargo run -p app; ./x -p y\n".to_string());
         assert_eq!(builds(&argv("bash drive.sh"), &script), vec![built("makepad-run", "build", ""), built("app", "run", "")]);
-        let py = |_: &str| Some("subprocess.run([\"cargo\", \"test\", \"--release\", \"-p\", \"fab-model\"], check=True)".to_string());
-        assert_eq!(builds(&argv("python3 t.py"), &py), vec![built("fab-model", "test", "")]);
+        let py = |_: &str| Some("subprocess.run([\"cargo\", \"test\", \"--release\", \"-p\", \"demo-model\"], check=True)".to_string());
+        assert_eq!(builds(&argv("python3 t.py"), &py), vec![built("demo-model", "test", "")]);
     }
 }

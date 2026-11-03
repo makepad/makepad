@@ -876,9 +876,9 @@ impl DrawVector {
         self.draw_vars.geometry_id = Some(geometry_id);
         self.draw_vars.texture_slots[1] = self.feather_textures.curves.clone();
         self.draw_vars.texture_slots[2] = self.feather_textures.bands.clone();
-        cx.new_draw_call(&self.draw_vars);
+        cx.new_draw_call(&mut self.draw_vars);
         if self.draw_vars.can_instance() {
-            let new_area = cx.add_aligned_instance(&self.draw_vars);
+            let new_area = cx.add_aligned_instance(&mut self.draw_vars);
             self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
         }
     }

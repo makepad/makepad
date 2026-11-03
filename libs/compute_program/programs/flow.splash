@@ -1,0 +1,176 @@
+// Lattice Boltzmann D3Q19 flow past a sphere, with its drag.
+//
+// A periodic box driven by a body force along x, a solid sphere in it, BGK collisions and
+// half-way bounce-back on the solid. The populations are 19 planes (f[q * n + cell]) in two
+// buffers, ping-ponged. A step is two element-local passes:
+//   1. per cell: pull the 19 populations (a solid neighbour bounces the cell's own opposite one
+//      back), their moments (rho, u) and the drag the bounced links carry (momentum exchange);
+//   2. per (direction, cell): pull again and relax toward the equilibrium of the cell's moments.
+// The drag is summed on the device every `report` steps and published as a value.
+//
+// p: {nx, ny, nz, tau, force, radius, steps, report}
+use mod.pod.*
+use mod.kernel.*
+
+let CX = table(i32, [0, 1, -1, 0, 0, 0, 0, 1, -1, 1, -1, 1, -1, 1, -1, 0, 0, 0, 0])
+let CY = table(i32, [0, 0, 0, 1, -1, 0, 0, 1, -1, -1, 1, 0, 0, 0, 0, 1, -1, 1, -1])
+let CZ = table(i32, [0, 0, 0, 0, 0, 1, -1, 0, 0, 0, 0, 1, -1, -1, 1, 1, -1, -1, 1])
+let W = table(f32, [0.3333333333333333,
+    0.05555555555555555, 0.05555555555555555, 0.05555555555555555, 0.05555555555555555, 0.05555555555555555, 0.05555555555555555,
+    0.027777777777777776, 0.027777777777777776, 0.027777777777777776, 0.027777777777777776, 0.027777777777777776, 0.027777777777777776,
+    0.027777777777777776, 0.027777777777777776, 0.027777777777777776, 0.027777777777777776, 0.027777777777777776, 0.027777777777777776])
+
+// Rest populations: rho = 1, u = 0.
+let rest = {
+    label: "lbm_rest"
+    out: output(f32)
+    w: W
+    cells: param(1, 1, 1073741824)
+    element: fn(j) { out[j] = w[j / int(cells)] }
+}
+
+let sphere = {
+    label: "lbm_sphere"
+    solid: output(f32)
+    nx: param(1, 1, 4096)
+    ny: param(1, 1, 4096)
+    radius: param(1.0, 0.0, 4096.0)
+    element: fn(i) {
+        let ex = int(nx)
+        let ey = int(ny)
+        let x = float(i % ex) + 0.5 - float(ex) * 0.25
+        let y = float((i / ex) % ey) + 0.5 - float(ey) * 0.5
+        let z = float(i / (ex * ey)) + 0.5 - float(ey) * 0.5
+        solid[i] = if x * x + y * y + z * z <= radius * radius { 1.0 } else { 0.0 }
+    }
+}
+
+let moments = {
+    label: "lbm_moments"
+    f: input(f32)
+    solid: input(f32)
+    mom: output(vec4)
+    drag: output(f32)
+    cx: CX
+    cy: CY
+    cz: CZ
+    nx: param(1, 1, 4096)
+    ny: param(1, 1, 4096)
+    nz: param(1, 1, 4096)
+    tau: param(0.6, 0.5, 4.0)
+    force: param(0.0, -1.0, 1.0)
+    element: fn(i) {
+        let ex = int(nx)
+        let ey = int(ny)
+        let ez = int(nz)
+        let n = ex * ey * ez
+        let x = i % ex
+        let y = (i / ex) % ey
+        let z = i / (ex * ey)
+        var rho = 0.0
+        var mx = 0.0
+        var my = 0.0
+        var mz = 0.0
+        var d = 0.0
+        if solid[i] < 0.5 {
+            for q in 0..19 {
+                let src = (((z - cz[q] + ez) % ez) * ey + (y - cy[q] + ey) % ey) * ex + (x - cx[q] + ex) % ex
+                var v = 0.0
+                if solid[src] > 0.5 {
+                    let o = if q == 0 { 0 } else if q % 2 == 1 { q + 1 } else { q - 1 }
+                    v = f[o * n + i]
+                    d = d - 2.0 * v * float(cx[q])
+                } else {
+                    v = f[q * n + src]
+                }
+                rho = rho + v
+                mx = mx + v * float(cx[q])
+                my = my + v * float(cy[q])
+                mz = mz + v * float(cz[q])
+            }
+            mom[i] = vec4(rho, mx / rho + tau * force, my / rho, mz / rho)
+        } else {
+            mom[i] = vec4(1.0, 0.0, 0.0, 0.0)
+        }
+        drag[i] = d
+    }
+}
+
+let collide = {
+    label: "lbm_collide"
+    f: input(f32)
+    solid: input(f32)
+    mom: input(vec4)
+    out: output(f32)
+    cx: CX
+    cy: CY
+    cz: CZ
+    w: W
+    nx: param(1, 1, 4096)
+    ny: param(1, 1, 4096)
+    nz: param(1, 1, 4096)
+    tau: param(0.6, 0.5, 4.0)
+    element: fn(j) {
+        let ex = int(nx)
+        let ey = int(ny)
+        let ez = int(nz)
+        let n = ex * ey * ez
+        let q = j / n
+        let i = j % n
+        if solid[i] > 0.5 {
+            out[j] = f[j]
+        } else {
+            let x = i % ex
+            let y = (i / ex) % ey
+            let z = i / (ex * ey)
+            let src = (((z - cz[q] + ez) % ez) * ey + (y - cy[q] + ey) % ey) * ex + (x - cx[q] + ex) % ex
+            var v = 0.0
+            if solid[src] > 0.5 {
+                let o = if q == 0 { 0 } else if q % 2 == 1 { q + 1 } else { q - 1 }
+                v = f[o * n + i]
+            } else {
+                v = f[q * n + src]
+            }
+            let m = mom[i]
+            let cu = float(cx[q]) * m.y + float(cy[q]) * m.z + float(cz[q]) * m.w
+            let uu = m.y * m.y + m.z * m.z + m.w * m.w
+            let feq = w[q] * m.x * (1.0 + 3.0 * cu + 4.5 * cu * cu - 1.5 * uu)
+            out[j] = v - (v - feq) / tau
+        }
+    }
+}
+
+{run: fn(s, p) {
+    let n = p.nx * p.ny * p.nz
+    let grid = {nx: p.nx, ny: p.ny, nz: p.nz, tau: p.tau}
+    var fa = s.buffer(f32, 19 * n)
+    var fb = s.buffer(f32, 19 * n)
+    let solid = s.buffer(f32, n)
+    let mom = s.buffer(vec4, n)
+    let drag = s.buffer(f32, n)
+    let block = s.buffer(f32, 2)
+    s.run(rest, 19 * n, {cells: n}, {out: fa})
+    s.run(sphere, n, {nx: p.nx, ny: p.ny, radius: p.radius}, {solid: solid})
+    s.sum(fa, block, 1)
+    let mass0 = s.read(block, 1, 1)[0]
+    var drags = []
+    var step = 0
+    loop {
+        if step >= p.steps {
+            s.sum(fa, block, 1)
+            return {mass0: mass0, mass: s.read(block, 1, 1)[0], drags: drags, steps: step}
+        }
+        s.run(moments, n, {nx: p.nx, ny: p.ny, nz: p.nz, tau: p.tau, force: p.force}, {f: fa, solid: solid, mom: mom, drag: drag})
+        s.run(collide, 19 * n, grid, {f: fa, solid: solid, mom: mom, out: fb})
+        let t = fa
+        fa = fb
+        fb = t
+        step = step + 1
+        if step % p.report == 0 {
+            s.sum(drag, block, 0)
+            let dv = s.read(block, 0, 1)[0]
+            drags.push(dv)
+            s.value("drag", {step: step, drag: dv})
+        }
+    }
+}}

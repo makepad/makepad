@@ -1526,7 +1526,7 @@ fn select_kernel(
                     // and belongs on cuBLAS' tensor cores. The fallback below
                     // is a dot-product-per-output-element kernel: one warp per
                     // (row, column) re-reading both operands with no reuse
-                    // beyond L2, which measured 3.1 TFLOPS on a GPU-A — 62% of
+                    // beyond L2, which measured 3.1 TFLOPS on a 24 GB card — 62% of
                     // the whole Qwen3-VL vision encode. Casting the
                     // activations to f16 (the weight already is) and handing
                     // the pair to cublasGemmEx is the same arithmetic the
@@ -1907,7 +1907,7 @@ fn fuse_unary_mul(tensors: &[Tensor], graph_nodes: &[TensorId], nodes: &mut [Pla
 // llama.cpp ggml-cuda.cu:3413-3423 / 4006-4009: SSM_CONV + SILU.
 //
 // DEFAULT-OFF: with this fusion enabled the Qwen3.8-27B forward pass is
-// run-to-run NONDETERMINISTIC on sm120a (.80 hammer census: 20 identical
+// run-to-run NONDETERMINISTIC on sm120a (a 96 GB card's hammer census: 20 identical
 // temp-0 prefills produced 5 distinct first tokens, ~45% instant-EOS — the
 // qwen-chat empty-reply bug). With it disabled the same census is 20/20
 // identical and the first token is sane. Kernel + dispatch wiring have been

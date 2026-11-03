@@ -15,7 +15,9 @@
 //! Exact by construction: the key is the whole preparation with every slot id replaced by its
 //! index of first occurrence (the slot being built is index 0), compared in full (the hash only
 //! picks the bucket); every other field -- constants, symbols (data, vtables, thunks named by
-//! symbol), positions, layout facts, flags -- stays as it is. A result naming a slot the input
+//! symbol), positions, layout facts, flags -- stays as it is. An inline candidate's patch flag (a
+//! live session's guard symbol, `Func::patch_flag`) is compared as it is too; the root's is not
+//! (its own code does not read it). A result naming a slot the input
 //! does not name (none is known to exist) is not stored. Each slot keeps its own code copy, its
 //! own thunk and its own RIR: function pointers stay distinct, tier-ups, patches and the disk
 //! cache see an ordinary build.
@@ -132,14 +134,14 @@ fn same(p: &Prep, cp: &Canon, s: &SPrep, cs: &Canon) -> bool {
     let (mut mp, mut ms) = (cp.map(), cs.map());
     p.func.same_body_mapped(&mut mp, &s.func, &mut ms)
         && p.callees.len() == s.callees.len()
-        && p.callees.iter().zip(&s.callees).all(|(a, b)| mp(a.0) == ms(b.0) && a.2 == b.2 && a.1.same_body_mapped(&mut mp, &b.1, &mut ms))
+        && p.callees.iter().zip(&s.callees).all(|(a, b)| mp(a.0) == ms(b.0) && a.2 == b.2 && a.1.patch_flag == b.1.patch_flag && a.1.same_body_mapped(&mut mp, &b.1, &mut ms))
         && p.facts.len() == s.facts.len()
         && p.facts.iter().zip(&s.facts).all(|(a, b)| mp(a.0) == ms(b.0) && a.1 == b.1)
         && p.cfg == s.cfg
         && p.ro.as_ref().map(|r| (r.read as usize, r.ctx)) == s.ro
         && p.relayout == s.relayout
         && p.deferred.len() == s.deferred.len()
-        && p.deferred.iter().zip(&s.deferred).all(|(a, b)| mp(a.0) == ms(b.0) && a.1 == b.1 && same(&a.2, cp, &b.2, cs))
+        && p.deferred.iter().zip(&s.deferred).all(|(a, b)| mp(a.0) == ms(b.0) && a.1 == b.1 && a.2.func.patch_flag == b.2.func.patch_flag && same(&a.2, cp, &b.2, cs))
 }
 
 /// What the back end got: the preparation's hash and slot numbering, and the code generator's

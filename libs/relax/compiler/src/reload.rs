@@ -1139,10 +1139,64 @@ fn added_expanded_derives(old: &crate::parser::ParsedFile, a: &crate::ast::Item,
     ak == bk && ae.iter().all(|n| be.contains(n)) && be.iter().any(|n| !ae.contains(n))
 }
 
+/// The files the program's own code included (include_str!/include_bytes!) so far: not Rust
+/// sources (a file include! reads is a source file of its own).
+fn included_files(std_dir: &str) -> Vec<String> {
+    crate::sip::late_files().into_iter().filter(|p| !p.ends_with(".rs") && own_source(p, std_dir)).collect()
+}
+
+/// The files fn, const or static item `it` includes with include_str!/include_bytes! (`pf` is
+/// file `path`'s text). Its whole text: what `classify` compares as the item.
+fn item_includes(pf: &crate::parser::ParsedFile, path: &str, it: &crate::ast::Item) -> Vec<String> {
+    use crate::ast::ItemKind;
+    if !matches!(it.kind, ItemKind::Fn(..) | ItemKind::Const(..) | ItemKind::Static(..)) { return Vec::new(); }
+    // (most code includes nothing: one look for the macro name first)
+    if !pf.bytes(it.lo, it.hi).windows(8).any(|w| w == b"include_") { return Vec::new(); }
+    crate::builtins::include_literals(&toks(pf, it.lo, it.hi, &[])).iter().map(|rel| crate::builtins::include_path(Some(path), rel)).collect()
+}
+
+/// The content hashes each included file was read with by the running code (one per crate that
+/// read it), as a live transaction found them before its parse read the files again.
+pub(crate) type IncludeBase = std::collections::HashMap<String, Vec<u128>>;
+
+fn include_base(records: &[(String, String, u128)]) -> IncludeBase {
+    let mut base = IncludeBase::new();
+    for (_, path, hash) in records { base.entry(path.clone()).or_default().push(*hash); }
+    base
+}
+
+/// Whether item `it`'s code includes a file whose content is not what the running code read
+/// (`base`; a file it never read is no part of running code).
+fn includes_moved(pf: &crate::parser::ParsedFile, path: &str, it: &crate::ast::Item, base: &IncludeBase) -> bool {
+    if base.is_empty() { return false; }
+    item_includes(pf, path, it).iter().any(|p| base.get(p).is_some_and(|seen| {
+        let now = crate::sip::late_hash(crate::vfs::read(p).ok().as_deref());
+        seen.iter().any(|h| *h != now)
+    }))
+}
+
+/// A live session's edits for files the program's code includes (include_str!/include_bytes!)
+/// that were saved (`changed`): each own source file whose code includes one, with its running
+/// text (`classify` finds the items whose included content moved). `skip`: the source files the
+/// batch edits already.
+pub(crate) fn include_edits(prog: &crate::program::Program, changed: &[String], skip: &[String]) -> Vec<Edit> {
+    let mut out = Vec::new();
+    for (path, file) in prog.current_source_files() {
+        if skip.contains(&path) || !own_source_file(prog, file) { continue; }
+        let pf = &prog.files[file as usize];
+        let src = &pf.src[..pf.src_len as usize];
+        if !src.windows(8).any(|w| w == b"include_") { continue; }
+        if pf.ast.items.iter().any(|it| item_includes(pf, &path, it).iter().any(|p| changed.contains(p))) {
+            out.push(Edit { file, path, src: src.to_vec() });
+        }
+    }
+    out
+}
+
 /// Classifies the items of one file version against the running one.
 /// Ok: the item pairing (old item -> new item) and the changes that apply live.
 /// Err: the restart reasons (one line each).
-pub(crate) fn classify(prog: &crate::program::Program, old_file: u32, new: &crate::parser::ParsedFile, path: &str) -> Result<Plan, Vec<String>> {
+pub(crate) fn classify(prog: &crate::program::Program, old_file: u32, new: &crate::parser::ParsedFile, path: &str, base: &IncludeBase) -> Result<Plan, Vec<String>> {
     let _timing = crate::parse_work::time(6);
     use crate::ast::ItemKind;
     let old = &prog.files[old_file as usize];
@@ -1324,7 +1378,9 @@ pub(crate) fn classify(prog: &crate::program::Program, old_file: u32, new: &crat
         let (la, lb) = (skip_name(old, a), skip_name(new, b));
         // Placeholder IDs describe declarations, not body contents. An edited lazy file
         // produces a new provider; schedule its generated bodies without lowering them here.
-        if attrs_same && same_toks(old, la, a.hi, &ha, new, lb, b.hi, &hb) {
+        // The same text whose code includes a file that changed since the running code read it
+        // changed too (include_str!: its body or initializer is classified as edited below).
+        if attrs_same && same_toks(old, la, a.hi, &ha, new, lb, b.hi, &hb) && !includes_moved(old, &prog.file_paths[old_file as usize], a, base) {
             continue;
         }
         // derive output is expansion text: an authored item is never one
@@ -2067,7 +2123,7 @@ pub unsafe fn apply_update(up: *mut Unit, edits: Vec<Edit>) -> Outcome {
     // A disk save/checkout is one transaction, including on retry. Never install
     // a parseable subset of a tree that is still being written.
     let out = apply_mode(up, edits, &sources, 0, false);
-    crate::hot_failure::classified(&out.lines, out.rung == Rung::Restart && out.failure.is_none());
+    crate::hot_failure::classified(&out.lines);
     if out.rung == Rung::Patch { crate::hot_failure::applied(out.group); }
     out
 }
@@ -2093,9 +2149,20 @@ unsafe fn apply_mode(up: *mut Unit, edits: Vec<Edit>, sources: &[Edit], partial:
     let edits: Vec<_> = edits.into_iter().filter(|e| !crate::native_macros::owns_path(&e.path)).collect();
     if edits.is_empty() { return idle_outcome(None, "no loaded source items changed"); }
     let sources: Vec<_> = sources.iter().map(|source| (source.path.as_str(), std::sync::Arc::<[u8]>::from(source.src.as_slice()))).collect();
-    // an internal compiler panic in the transaction refuses the edit with its message (the app
-    // keeps running the code it had; a half-applied state is not installed)
     let files: Vec<u32> = edits.iter().map(|e| e.file).collect();
+    // the included files' contents the running code read, before this transaction's parse reads
+    // them again (`classify`: an item whose include moved changed); restored unless it applies
+    let late = crate::sip::late_file_records();
+    let base = include_base(&late);
+    // an earlier transaction panicked: the program's tables may be half-way through it, and no
+    // edit applies to them again -- the process restart that recovery asks for applies this one
+    if let Some(why) = unit_suspect() {
+        return Outcome { failure: Some(makepad_remote::hot::Outcome::Panic), kept: 0, pending: false, rung: Rung::Restart, files, lines: vec![format!("not applied to a program an earlier edit left half-made ({why}): a process restart applies it")], names: Vec::new(), changed: 0, test_changes: None, group: 0, ms: [0.0; 4], undo: None, work: [0; 5] };
+    }
+    // an internal compiler panic in the transaction refuses the edit with its message. Nothing
+    // undoes what the transaction had changed of the program by then (its file versions, defs,
+    // query inputs), so the unit is marked suspect: no edit applies to it again, and the
+    // recovery is a fresh process (mark_unit_suspect).
     let r = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         // takes the parse snapshots of the edits (under the unit call)
         let snap = |edits: &[Edit]| {
@@ -2131,14 +2198,20 @@ unsafe fn apply_mode(up: *mut Unit, edits: Vec<Edit>, sources: &[Edit], partial:
             // under the lock, before the parse snapshot and the pairing against the running version.
             let edits: Vec<Edit> = {
                 let prog = &(*up).prog;
-                let current = (!module).then(|| prog.current_source_files());
-                edits.into_iter().map(|mut e| {
-                    if let Some(current) = &current {
-                        let path = &prog.file_paths[e.file as usize];
-                        if let Some(&file) = current.get(path) { e.file = file; }
+                let current = (!module).then(|| prog.current_source_file_sets());
+                // every crate's copy of the file takes the edit: a --lib test root's harness crate
+                // and the plain library its dev-dependencies link (M50). The other copies follow
+                // the edits as given, whose outcome files stay at their positions.
+                let mut twins = Vec::new();
+                let mut out: Vec<Edit> = edits.into_iter().map(|mut e| {
+                    if let Some((&last, others)) = current.as_ref().and_then(|c| c.get(&prog.file_paths[e.file as usize])).and_then(|f| f.split_last()) {
+                        e.file = last;
+                        twins.extend(others.iter().map(|&file| Edit { file, path: e.path.clone(), src: e.src.clone() }));
                     }
                     e
-                }).collect()
+                }).collect();
+                out.append(&mut twins);
+                out
             };
             let cur = snap(&edits);
             (edits, cur)
@@ -2157,7 +2230,7 @@ unsafe fn apply_mode(up: *mut Unit, edits: Vec<Edit>, sources: &[Edit], partial:
                 // epoch. Neither may make this snapshot stale while the parser runs off the unit.
                 if std::sync::Arc::ptr_eq(&macro_table, &(*up).prog.macros) && epoch == (*up).tcx.collect_epoch.load(std::sync::atomic::Ordering::Acquire) {
                     drop(macro_table); // allow commit's Arc::make_mut to update an unshared table
-                    return Ok(apply_locked(up, edits, pre, t0, partial, 8, module));
+                    return Ok(apply_locked(up, edits, pre, t0, partial, 8, module, &base));
                 }
                 stale += 1;
                 if stale == 3 {
@@ -2176,13 +2249,15 @@ unsafe fn apply_mode(up: *mut Unit, edits: Vec<Edit>, sources: &[Edit], partial:
         Err(p) => {
             // the message and where the compiler panicked: the report names the spot
             let msg = crate::lifeline::panic_line(&*p);
-            Outcome { failure: Some(makepad_remote::hot::Outcome::Panic), kept: 0, pending: false, rung: Rung::Restart, files, lines: vec![format!("internal compiler error applying the edit: {} -- makepad run bug, report it; restart the app", msg)], names: Vec::new(), changed: 0, test_changes: None, group: 0, ms: [0.0; 4], undo: None, work: [0; 5] }
+            mark_unit_suspect(&format!("internal compiler error applying an edit: {msg}"));
+            Outcome { failure: Some(makepad_remote::hot::Outcome::Panic), kept: 0, pending: false, rung: Rung::Restart, files, lines: vec![format!("internal compiler error applying the edit: {} -- makepad run bug, report it; the app restarts (a fresh process)", msg)], names: Vec::new(), changed: 0, test_changes: None, group: 0, ms: [0.0; 4], undo: None, work: [0; 5] }
         }
     };
     crate::owner::call(crate::owner::Class::Program, || {
         (*up).reload_rir = None;
         jit::close_patch();
     });
+    if r.rung != Rung::Patch { crate::sip::restore_late_files(&late); }
     transaction.finish(&r);
     r
 }
@@ -2205,7 +2280,7 @@ fn fv_session_keep(transaction: u64, cx: std::rc::Rc<crate::borrowck::field_view
     FV_SESSION.with(|s| *s.borrow_mut() = Some((transaction, cx)));
 }
 
-unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Result<crate::program::FileVersion, String>>>, t0: Instant, partial: u8, retries: usize, module: bool) -> Outcome {
+unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Result<crate::program::FileVersion, String>>>, t0: Instant, partial: u8, retries: usize, module: bool, base: &IncludeBase) -> Outcome {
     let transaction = TRANSACTIONS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
     let session = unsafe { crate::jit::unit_session(up) };
     let options = &session.options;
@@ -2239,7 +2314,7 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
             Err(m) => out.lines.push(m),
             Ok(v) => {
                 trace_count("classify_items", v.pf.ast.items.len() + u.prog.files[e.file as usize].ast.items.len());
-                match classify(&u.prog, e.file, &v.pf, &e.path) {
+                match classify(&u.prog, e.file, &v.pf, &e.path, base) {
                     Ok(plan) if module && (plan.removed.iter().any(|d| u.prog.defs[d.0 as usize].is_pub) || plan.changes.iter().any(|c| matches!(c, Change::Layout(_)))) => {
                         // the host holds typed pointers to a module's pub items (exports): one
                         // removed or re-signatured (remove + add) needs a fresh module, and its
@@ -2382,7 +2457,10 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
                         continue;
                     }
                     named += 1;
-                    let uses = crate::borrowck::identity_args(&u.tcx, &u.prog, *fd).map(|a| crate::typeck::instantiate_body(&crate::tcx::EvalCx::new(&u.prog, &u.tcx, crate::tcx::TypingEnv::fully_monomorphized(&u.prog), &crate::tcx::EvalState::new()), &u.prog, &u.tcx, *fd, &a).field_uses).unwrap_or_default();
+                    // typeck resolves a field use (rustc: no field is reached through a generic);
+                    // its body as typeck left it, never instantiated: a generic fn at its own
+                    // parameters has no codegen answer (`<impl IntoIterator>::IntoIter`: NoSolution)
+                    let uses = u.tcx.typeck(&u.prog, *fd).field_uses.clone();
                     if uses.iter().any(|(ud, k)| *ud == d && gone.contains(k)) {
                         body_defs.push(*fd);
                         field_deps += 1;
@@ -2532,16 +2610,20 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
     // Callers that inlined a rebuilt slot (also one only ever inlined, never called),
     // and twins built from that slot's RIR. Expand both dependencies here so every
     // affected RIR/speculation is invalidated before any member of the group rebuilds.
-    // Compiled callers rebuilt because they inlined changed code: a call of one already
-    // running finishes in its old code (hotreload.md 3.1/3.4), as an edited fn's own running
-    // frame does; reported below, since a loop that never returns there never picks it up.
+    // The slots whose own body changes (these and their twins) get their patch flags set at the
+    // install: a frame running a copy inlined before calls the new body at the copy's next run
+    // (jit::set_patched); the callers that only inlined them are rebuilt for their next call.
+    let mut flagged: Vec<u32> = slots.iter().chain(fresh.iter()).copied().collect();
     let mut inlining_callers: Vec<u32> = Vec::new();
-    let mut work: Vec<u32> = slots.iter().chain(fresh.iter()).copied().collect();
+    let mut work: Vec<u32> = flagged.clone();
     while let Some(s) = work.pop() {
         let inl = u.fns[s as usize].history().inlined_into.len();
         let mut deps = u.fns[s as usize].history().inlined_into.clone();
         deps.extend(crate::sandbox::twin_of(s));
         for (k, d) in deps.into_iter().enumerate() {
+            if k >= inl && flagged.contains(&s) && !flagged.contains(&d) {
+                flagged.push(d);
+            }
             if slots.contains(&d) || fresh.contains(&d) {
                 continue;
             }
@@ -2556,6 +2638,13 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
     }
     trace_count("selected_slots", slots.len() + fresh.len());
     trace_stage("dependencies");
+    // an armed real-time root's code is not replaced under it: the edit waits for the disarm
+    // (realtime_disarmed retries it), nothing of it is installed now
+    if let Some(line) = jit::realtime_frozen(u, &slots.iter().chain(fresh.iter()).copied().collect::<Vec<u32>>()) {
+        out.rung = Rung::Refuse;
+        out.lines.push(line);
+        return out;
+    }
     // Settle can evict a current closure owner's typeck result. Restore it before its
     // source version is replaced, including owners of already compiled closures: O3
     // and closure matching may need those old bodies long after this edit.
@@ -2903,6 +2992,15 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
             carry_gandalf(u, from, &visible_crates, if full_inputs { None } else { Some(&files) });
         }
         trace_sub("publish_collected");
+        // the added items' signatures, types and impl tables: before the layout edits, whose
+        // checks of an added field's type (its Default, its drop) ask about the items the edit
+        // adds (a field of a struct a new module declares: its ADT was not collected yet, an ICE)
+        trace_count("added_defs", added_defs.len());
+        if !added_defs.is_empty() {
+            let e = u.tcx.collect_added_in(&u.prog, &added_defs, false, scope.as_deref());
+            add_errs.extend(e);
+        }
+        trace_sub("collect_added");
         // struct field-list edits (M10): reconciled with the running layout, or the restart rung
 
         for &d in &layout_defs {
@@ -2970,13 +3068,6 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
             }
         }
         trace_sub("layout");
-        // the added items' signatures, types and impl tables
-        trace_count("added_defs", added_defs.len());
-        if !added_defs.is_empty() {
-            let e = u.tcx.collect_added_in(&u.prog, &added_defs, false, scope.as_deref());
-            add_errs.extend(e);
-        }
-        trace_sub("collect_added");
         unsafe {
             u.prog.reclaim_caches();
         }
@@ -3101,13 +3192,35 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
     // has real errors (those alone refuse it).
     if errs.is_empty() {
         let mut default_restart = Vec::new();
+        let mut default_errs = Vec::new();
         for (d, name, c) in added_defaults {
-            if (&*up).const_addr_shared(c, Vec::new()).is_none() {
+            // The derive runs the initial value where its `vm` is bound; the const the front makes
+            // of it binds nothing. One that names `vm` is never evaluated here (its build fails), and
+            // any other error in it is the edit's own.
+            let checked = {
                 let u = &*up;
-                default_restart.push(format!("struct `{}`: field `{}` added; its `#[rust(..)]` initial value is its derive's code (it may name the derive's `vm`), running values cannot take it -- restart the app", u.prog.def_path(d), u.prog.syms.str(name)));
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| crate::typeck::checked_body(&crate::tcx::EvalCx::new(&u.prog, &u.tcx, crate::tcx::TypingEnv::fully_monomorphized(&u.prog), &crate::tcx::EvalState::new()), &u.prog, &u.tcx, c, &[])))
+            };
+            let names_vm = match &checked {
+                Ok(b) if !b.errors.is_empty() && b.errors.iter().all(|e| e.contains("E0425: cannot find value `vm` in this scope")) => true,
+                Ok(b) if !b.errors.is_empty() => {
+                    default_errs.extend(b.errors.iter().cloned());
+                    continue;
+                }
+                Ok(_) => false,
+                Err(p) => {
+                    default_errs.push(format!("internal compiler error type-checking {} ({}) -- makepad run bug, report it", (&*up).prog.def_path(c), crate::lifeline::panic_line(&*p)));
+                    continue;
+                }
+            };
+            if names_vm || (&*up).const_addr_shared(c, Vec::new()).is_none() {
+                let u = &*up;
+                default_restart.push(format!("struct `{}`: field `{}` added; its `#[rust(..)]` initial value is its derive's code ({}), running values cannot take it -- restart the app", u.prog.def_path(d), u.prog.syms.str(name), if names_vm { "it names the derive's `vm`" } else { "not a constant" }));
             }
         }
-        if !default_restart.is_empty() {
+        if !default_errs.is_empty() {
+            errs = default_errs;
+        } else if !default_restart.is_empty() {
             errs = default_restart;
             as_restart = true;
         }
@@ -3270,7 +3383,8 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
     // closures stored by the running version (handlers, callbacks): an old closure whose parent
     // was rebuilt runs the new version of itself when the new parent has a closure at the same
     // place with the same signature and captures (same environment layout); otherwise it keeps
-    // its own code (memory-safe; reported)
+    // its own code (memory-safe; reported). The new code is built now if the edit's precompile
+    // did not reach it.
     let mut rebind: Vec<(u32, u32)> = Vec::new();
     if errs.is_empty() {
         let u = &*up;
@@ -3286,7 +3400,18 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
                 else if f.compiled { olds_c.push(id); }
             }
         }
+        // a new closure's identity is read from its parent's checked body, which the parent's
+        // build may have dropped already (the closure was lowered with it)
+        if !olds_c.is_empty() {
+            for &n in &news_c {
+                if let FnKey::Closure(file, _, parent) = (&*up).fns[n as usize].key {
+                    let _ = jit::ensure_parent_body(up, parent, file, 0);
+                }
+            }
+        }
+        let u = &*up;
         let new_ids: Vec<(u32, Option<(u32, TyId, Vec<TyId>, TyId)>)> = news_c.iter().map(|&n| (n, closure_ident(u, n))).collect();
+        let mut pairs = Vec::new();
         for o in olds_c {
             let oi = closure_ident(u, o);
             let parent = match &u.fns[o as usize].key {
@@ -3297,13 +3422,27 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
                 matches!(&u.fns[*n as usize].key, FnKey::Closure(_, _, p) if *p == parent) && ni.is_some() && *ni == oi
             });
             match hit {
-                Some((n, _)) => rebind.push((o, *n)),
+                Some((n, _)) => pairs.push((o, *n)),
                 None => {
                     if oi.is_some() && new_ids.iter().any(|(n, ni)| matches!(&u.fns[*n as usize].key, FnKey::Closure(_, _, p) if *p == parent) && ni.as_ref().map(|x| x.0) == oi.as_ref().map(|x| x.0)) {
                         out.lines.push(format!("kept: stored values of closure {} keep its old code (its captures or signature changed)", u.fns[o as usize].name));
                     }
                 }
             }
+        }
+        for (o, n) in pairs {
+            let built = pre.iter().any(|(id, r)| *id == n && r.is_ok()) || staged.iter().any(|(id, _)| *id == n);
+            if !built {
+                match compile_guarded(up, n) {
+                    Ok(c) => pre.push((n, Ok(c))),
+                    Err(_) => {
+                        let u = &*up;
+                        out.lines.push(format!("kept: stored values of closure {} keep its old code (its new code did not build)", u.fns[o as usize].name));
+                        continue;
+                    }
+                }
+            }
+            rebind.push((o, n));
         }
     }
     // suspended async fn bodies (M5): an old poll whose parent was rebuilt resumes in the new
@@ -3363,6 +3502,8 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
             }
         }
     }
+    // a rebound poll fn's slot runs the new body too
+    flagged.extend(rebind.iter().map(|&(o, _)| o));
     trace_count("compiled_slots", staged.len() + pre.len());
     trace_stage("compile");
     let t3 = Instant::now();
@@ -3388,6 +3529,19 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
             carry_gandalf(u, from, &visible_crates, if full_inputs { None } else { Some(&files) });
         }
         unsafe { u.prog.reclaim_caches(); }
+        // the running enum variants and struct layouts come back with the versions, under the
+        // same write: a background type check reads them (and the declarations they publish)
+        for (d, n) in saved_variants {
+            u.prog.truncate_variants(d, n);
+        }
+        if !saved_adts.is_empty() {
+            for (d, a) in saved_adts {
+                u.tcx.adts.insert(d, a);
+            }
+            u.tcx.publish_collected();
+            u.lay.clear();
+            out.lines.retain(|l| !l.starts_with("field `"));
+        }
         drop(fw);
         jit::bump_patch_epoch();
         let mut invalidated = u.reload_rir.take().unwrap_or_default();
@@ -3418,17 +3572,6 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
         }
         for k in saved_failed {
             u.const_failed.insert(k);
-        }
-        for (d, n) in saved_variants {
-            u.prog.truncate_variants(d, n);
-        }
-        if !saved_adts.is_empty() {
-            for (d, a) in saved_adts {
-                u.tcx.adts.insert(d, a);
-            }
-            u.tcx.publish_collected();
-            u.lay.clear();
-            out.lines.retain(|l| !l.starts_with("field `"));
         }
         out.rung = if as_restart { Rung::Restart } else { Rung::Refuse };
         out.lines.extend(errs);
@@ -3471,7 +3614,7 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
                 retry.push(Edit { file, path, src });
             }
             if dropped {
-                let mut r = apply_locked(up, retry, Vec::new(), t0, 2, retries - 1, module);
+                let mut r = apply_locked(up, retry, Vec::new(), t0, 2, retries - 1, module, base);
                 if r.rung == Rung::Patch {
                     r.kept = n_kept.max(r.kept);
                     r.lines.retain(|l| !l.starts_with("incomplete:"));
@@ -3531,6 +3674,10 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
             Err(e) => out.lines.push(format!("link error in {}: {}", (&*up).fns[id as usize].name, e)),
         }
     }
+    // the new bodies are installed: the guards of their copies inlined before call them now
+    for &id in &flagged {
+        jit::set_patched(&*up, id);
+    }
     let u = &mut *up;
     // the patch event (flight recorder `reload.patch`; inspect `stale` names it)
     let layout_names: Vec<String> = saved_adts.iter().map(|(d, _)| def_name(&u.prog, *d)).collect();
@@ -3575,14 +3722,6 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
     out.rung = Rung::Patch;
     if let Some(fv_cx) = fv_cx { fv_session_keep(transaction, fv_cx); }
     trace_count("inlining_callers", inlining_callers.len());
-    if !inlining_callers.is_empty() {
-        let mut names: Vec<&str> = inlining_callers.iter().take(3).map(|&d| u.fns[d as usize].name.as_ref()).collect();
-        if inlining_callers.len() > 3 { names.push("..."); }
-        out.lines.push(format!(
-            "kept: {} fn(s) that inlined the edited code ({}) are rebuilt for their next call; a call of them already running finishes in the old code (one that keeps running it restarts the app: the landing check)",
-            inlining_callers.len(), names.join(", ")
-        ));
-    }
     if let Some(n) = kept {
         out.lines.push(format!("incomplete: {} item(s) kept at their running version", n));
     }
@@ -3604,12 +3743,35 @@ fn ms(t0: Instant) -> f64 {
 
 /// The program announced it can restart with its state (std::relax::restart_supported).
 static RESTART_SUPPORTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Why this process's unit cannot be trusted (None: it can): a compiler panic inside an edit's
+/// transaction, or an internal compiler error at a call after edits. No edit applies to it again:
+/// the recovery is a fresh process (exec_restart: the same sources, the warm cache, the app's
+/// state when it left one).
+static UNIT_SUSPECT: relax_session::sync::Mutex<Option<String>> = relax_session::sync::Mutex::new(None);
+
+pub(crate) fn mark_unit_suspect(why: &str) {
+    let _k = crate::zone_alloc::kept();
+    let mut s = UNIT_SUSPECT.lock().unwrap_or_else(|e| e.into_inner());
+    if s.is_none() { *s = Some(why.lines().next().unwrap_or("").to_string()); }
+}
+
+pub(crate) fn unit_suspect() -> Option<String> {
+    UNIT_SUSPECT.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
 /// A restart is due (an edit needs one); the program polls this at its safe point.
 static RESTART_REQUESTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// The app is pinned: the live watch stands still and a rebuilt makepad waits.
 static PINNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// Unpinned: the watch's next round looks at every file.
 static CATCH_UP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// The last armed real-time root was disarmed: the watch retries the edits it held now.
+static RETRY_NOW: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// std::relax::Realtime::arm's last guard went: edits refused as frozen apply now.
+pub(crate) fn realtime_disarmed() {
+    RETRY_NOW.store(true, std::sync::atomic::Ordering::Release);
+    watch_events::kick();
+}
 
 /// `inspect pin on|off`: while on, no edit or landing reaches the running app and it does not
 /// restart; off, it catches up (patches, or the rebuilt makepad that waited). Returns the state.
@@ -3630,7 +3792,6 @@ static RESTART_REASON: relax_session::sync::Mutex<String> = relax_session::sync:
 /// measures save -> back on screen from it (MAKEPAD_RUN_RESTART_T0).
 static RESTART_SAVED_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static DOMAIN_RESTORED: relax_session::sync::Mutex<Option<String>> = relax_session::sync::Mutex::new(None);
-static DOMAIN_SNAPSHOT: relax_session::sync::Mutex<Option<String>> = relax_session::sync::Mutex::new(None);
 static DOMAIN_LOADING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static DOMAIN_INPUTS: relax_session::sync::Mutex<Option<Inputs>> = relax_session::sync::Mutex::new(None);
 /// The watcher's reload inputs, also readable while it waits for a live test verdict.
@@ -3647,14 +3808,14 @@ pub fn domain_stopping(id: u32) {
 }
 
 pub(crate) fn domain_loaded(inputs: Option<Inputs>) {
-    // the first domain of a process that restarted into a rebuilt makepad gets the state the
-    // previous process left (MAKEPAD_RUN_RESTORE, read once)
+    // the first domain of a restarted process gets the state the previous process left
+    // (MAKEPAD_RUN_RESTORE, read once)
     static FIRST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
     // this run loads the sources as they are: no edit waits for a restart any more
     SOURCES_WAIT.store(false, Ordering::Release);
     clear_restart_pending();
-    let mut restored = DOMAIN_SNAPSHOT.lock().unwrap_or_else(|e| e.into_inner()).take();
-    if FIRST.swap(false, std::sync::atomic::Ordering::AcqRel) && restored.is_none() {
+    let mut restored = None;
+    if FIRST.swap(false, std::sync::atomic::Ordering::AcqRel) {
         if let Some(path) = std::env::var_os("MAKEPAD_RUN_RESTORE") {
             let _k = crate::zone_alloc::kept();
             restored = std::fs::read_to_string(&path).ok();
@@ -3859,23 +4020,24 @@ pub extern "C" fn __relax_restored_state(buf: *mut u8, cap: usize) -> usize {
     })
 }
 
-/// A hosted app queues a fresh domain with this state and returns for cooperative shutdown.
-/// A directly running program writes MAKEPAD_RUN_RESTORE and replaces its process as before.
+/// The program found that part of a live edit did not reach it (std::relax::hot_load_failed: a
+/// value it built from the old code cannot take the new one). A failed hot load like a stale
+/// patch: recorded, and the restart with the app's state applies it.
+pub extern "C" fn __relax_hot_load_failed(why: *const u8, len: usize) {
+    crate::jit::host_boundary("__relax_hot_load_failed", move || {
+        let why = unsafe { if why.is_null() { String::new() } else { String::from_utf8_lossy(std::slice::from_raw_parts(why, len)).into_owned() } };
+        eprintln!("makepad live:   {why}");
+        recover_hot_failure(makepad_remote::hot::Outcome::StaleFrame, &[why], None);
+    })
+}
+
+/// The app's restart with its state: the process starts again with it (MAKEPAD_RUN_RESTORE).
+/// Returns only when replacing the process failed.
 pub extern "C" fn __relax_restart_now(state: *const u8, len: usize) {
     crate::jit::host_boundary("__relax_restart_now", move || {
         let st = unsafe { if state.is_null() { &[][..] } else { std::slice::from_raw_parts(state, len) } };
         // a rebuilt makepad waits: the process restarts into it (or this returns, said why)
         if host::restart_now(st) { return; }
-        if crate::domain::current_app_domain().is_some() && crate::domain::current_app_domain() == crate::run::app_domain() {
-            *DOMAIN_SNAPSHOT.lock().unwrap_or_else(|e| e.into_inner()) = Some(String::from_utf8_lossy(st).into_owned());
-            RESTART_REQUESTED.store(false, std::sync::atomic::Ordering::SeqCst);
-            if let Err(e) = crate::run::relaunch() {
-                crate::hot_failure::restart_failed(&e);
-                eprintln!("makepad live: relaunch: {e}");
-            }
-            // The queued HAL quit runs the app's normal cleanup after this event returns.
-            return;
-        }
         RESTART_REQUESTED.store(false, std::sync::atomic::Ordering::SeqCst);
         if let Err(e) = exec_restart(Some(st)) {
             crate::hot_failure::restart_failed(&e);
@@ -4059,13 +4221,12 @@ fn running_old_code(u: &Unit, gen: u32) -> Option<String> {
     None
 }
 
-/// Restarts the program in place to apply `why`: a program that restarts with its state
-/// (std::relax::restart_supported) is asked to at its next safe point (a hosted app then
-/// relaunches its domain, window kept; a direct program starts its process again with the state),
-/// a hosted app that does not relaunches its domain, any other program's process starts again
-/// (same binary and command line). The program's sources are compiled by the new run; the loader
-/// itself is current (a change of its own inputs goes through host::request), so nothing is
-/// rebuilt. Returns how, or why it cannot.
+/// Restarts the program to apply `why`: a program that restarts with its state
+/// (std::relax::restart_supported) is asked to at its next safe point and its process starts
+/// again with the state; any other program's process starts again right away (same binary and
+/// command line). The program's sources are compiled by the new run; the loader itself is current
+/// (a change of its own inputs goes through host::request), so nothing is rebuilt. Returns how,
+/// or why it cannot.
 fn restart_in_place(why: String) -> Result<&'static str, String> {
     if crate::harness::live::enabled() {
         return restart_process(&why).map(|_| "test process restart");
@@ -4077,20 +4238,15 @@ fn restart_in_place(why: String) -> Result<&'static str, String> {
         wake_program();
         return Ok("restart with the program's state");
     }
-    if crate::run::app_domain().is_some() {
-        crate::run::relaunch()?;
-        return Ok("domain relaunch");
-    }
     exec_restart(None).map(|_| "process restart")
 }
 
-/// The process starts again, same binary and command line, with the state the app left for the
-/// relaunch (std::relax::restart_now) when it left one (`makepad test --live`'s restart of its
-/// test process). Returns only on failure.
+/// The process starts again now, same binary and command line, without the app's state (the
+/// app is not asked: a test process of `makepad test --live`, an app stopped at a parked panic or
+/// at an internal compiler error in a call). Returns only on failure.
 pub fn restart_process(why: &str) -> Result<(), String> {
-    let state = DOMAIN_SNAPSHOT.lock().unwrap_or_else(|e| e.into_inner()).take();
     *RESTART_REASON.lock().unwrap_or_else(|e| e.into_inner()) = why.to_string();
-    exec_restart(state.as_deref().map(str::as_bytes))
+    exec_restart(None)
 }
 
 /// Failures alone automatically request the same restart as `session relaunch`.
@@ -4108,6 +4264,26 @@ pub fn recover_hot_failure(kind: makepad_remote::hot::Outcome, lines: &[String],
     }
 }
 
+/// An internal compiler error at a program thread's call (jit.rs compile_ice): after live edits
+/// it is a failed hot load like any other -- recorded, the unit suspect, a fresh process asked
+/// for at the app's next event (`on_main`: not asked; that thread is in the call, the caller
+/// restarts the process itself). False: no recovery started (no edit ran in this process, or a
+/// recovery runs already) or asking for the restart failed.
+pub(crate) fn recover_compile_ice(message: &str, on_main: bool) -> bool {
+    if !crate::hot_failure::failed(makepad_remote::hot::Outcome::Panic, &[message.to_string()], None) { return false; }
+    mark_unit_suspect(message);
+    note_restart_pending(message);
+    if on_main { return true; }
+    match restart_in_place(message.to_string()) {
+        Ok(_) => true,
+        Err(e) => {
+            crate::hot_failure::restart_failed(&e);
+            crate::hot_failure::pump();
+            false
+        }
+    }
+}
+
 /// What the host keeps across an exec of this process (the HAL's WM connection: the new image
 /// resumes on it, so the WM keeps the app's window): `prepare`, right before exec, readies what
 /// it hands over (no CLOEXEC) and returns the environment that names it to the new image;
@@ -4121,6 +4297,8 @@ pub fn set_before_exec(prepare: fn() -> Vec<(String, String)>, undo: fn()) {
 }
 
 /// Readies the host's handover for `cmd`, which execs next (its environment is added).
+/// (live-rebuild handover is unix-only: the restart is an exec in place)
+#[cfg(unix)]
 pub(crate) fn hand_over(cmd: &mut std::process::Command) {
     let f = *BEFORE_EXEC.lock().unwrap_or_else(|e| e.into_inner());
     if let Some((prepare, _)) = f {
@@ -4131,6 +4309,7 @@ pub(crate) fn hand_over(cmd: &mut std::process::Command) {
 }
 
 /// The exec after [`hand_over`] failed: the host takes its handover back.
+#[cfg(unix)]
 pub(crate) fn hand_back() {
     let f = *BEFORE_EXEC.lock().unwrap_or_else(|e| e.into_inner());
     if let Some((_, undo)) = f {
@@ -4427,6 +4606,7 @@ pub fn restart_symbol(name: &[u8]) -> Option<usize> {
         b"__relax_restart_reason" => __relax_restart_reason as *const () as usize,
         b"__relax_restored_state" => __relax_restored_state as *const () as usize,
         b"__relax_restart_now" => __relax_restart_now as *const () as usize,
+        b"__relax_hot_load_failed" => __relax_hot_load_failed as *const () as usize,
         b"__relax_live_stream" => __relax_live_stream as *const () as usize,
         b"__relax_live_log" => __relax_live_log as *const () as usize,
         _ => return crate::inspect::engine_req::symbol(name),
@@ -4677,6 +4857,13 @@ pub(crate) fn input_paths() -> Result<Vec<String>, String> {
     Ok(inputs.source_paths(loaded.into_iter()))
 }
 
+/// A source file a live session watches and patches (`own_source`).
+pub(crate) fn own_source_file(prog: &crate::program::Program, file: u32) -> bool {
+    static STD: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let std_dir = STD.get_or_init(|| std::env::var("MAKEPAD_RUN_STD").unwrap_or_default());
+    prog.file_paths.get(file as usize).is_some_and(|p| own_source(p, std_dir))
+}
+
 fn own_source(path: &str, std_dir: &str) -> bool {
     !(path.is_empty() || (!std_dir.is_empty() && crate::vfs::relative_path(path, std_dir).is_some()) || path.contains("/.cargo/registry/") || path.contains("/.cargo/git/") || path.contains("/rustlib/"))
 }
@@ -4832,6 +5019,18 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
     for path in crate::native_macros::paths() {
         if !files.iter().any(|f| f.0 == path) { let s = stamp(&path); files.push((path, u32::MAX, s)); }
     }
+    // the files the program's own code includes (include_str!/include_bytes!): a save of one is
+    // an edit of the files that include it (`include_edits`). Bodies read more as they compile:
+    // each is watched from its read (late_count moves).
+    let add_included = |files: &mut Vec<(String, u32, Option<(std::time::SystemTime, u64)>)>| -> bool {
+        let mut added = false;
+        for path in included_files(&std_dir) {
+            if !files.iter().any(|f| f.0 == path) { let s = stamp(&path); files.push((path, u32::MAX, s)); added = true; }
+        }
+        added
+    };
+    let mut late_seen = crate::sip::late_count();
+    add_included(&mut files);
     // the post-boot loader adds files after boot; each is watched from its load (an
     // edit made before it is simply what the load read)
     let mut loads_seen = jit::DEFERRED_LOADS.load(std::sync::atomic::Ordering::Relaxed);
@@ -4874,7 +5073,12 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
     let mut dock = DockGate::from_env();
     let mut startup_scan = true;
     let mut restart_required = false;
+    let mut restart_message = String::new();
+    // the files of the edit a rebuild of makepad is for (a live test session's restart names them)
+    let mut host_edit: Vec<String> = Vec::new();
     let mut revision = 0;
+    // the last two path parts say which crate and file
+    let short = |p: &str| -> String { let v: Vec<&str> = p.rsplit('/').take(2).collect(); v.into_iter().rev().collect::<Vec<_>>().join("/") };
     crate::harness::live::wait_initial();
     loop {
         crate::hot_failure::pump();
@@ -4917,6 +5121,8 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
                 if let Some(f) = files.iter_mut().find(|f| f.0 == path) { f.1 = file; }
                 else { let s = stamp(&path); files.push((path, file, s)); }
             }
+            late_seen = crate::sip::late_count();
+            add_included(&mut files);
             events = LiveWatch::new(files.iter().map(|f| f.0.as_str()));
             repositories = git::Repositories::default();
             repositories.include(files.iter().map(|f| f.0.as_str()));
@@ -4925,6 +5131,7 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
             retry_at = None;
             undos.clear();
             restart_required = false;
+            restart_message.clear();
             landing.clear();
             startup_scan = true;
         }
@@ -4932,9 +5139,38 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
         // finishes. In particular, do not acquire Reloading or drain streamed edits:
         // either can compete with the cold compiler before the first frame.
         if !crate::harness::live::enabled() && !jit::live_startup_done() { gate_note(2); continue; }
+        // a live test session's rebuilt makepad: the tests restart into it now, between runs
+        if let Some(why) = host::take_harness_restart() {
+            let group = crate::owner::call(crate::owner::Class::Program, || (*up).begin_patch());
+            crate::harness::live::restart(crate::harness::live::Edit {
+                paths: std::mem::take(&mut host_edit), group, compile_ms: None, restarted: true, changed: None,
+            }, &why);
+        }
         // Once the tree no longer matches this session, later saves must not patch a
         // mixture of revisions into the old process. A fresh run restores live editing.
-        if restart_required { gate_note(3); continue; }
+        if restart_required {
+            gate_note(3);
+            let notifications = events.as_mut().and_then(|w| w.changed());
+            let lost = events.is_some() && notifications.is_none();
+            if lost { events = LiveWatch::new(files.iter().map(|f| f.0.as_str())); }
+            let ids = if lost || last_scan.elapsed() >= if events.is_some() { LIVE_IDLE } else { LIVE_QUIET } {
+                last_scan = Instant::now();
+                (0..files.len()).collect()
+            } else { notifications.unwrap_or_else(|| hot.clone()) };
+            let changed: Vec<_> = ids.into_iter().filter_map(|k| {
+                let f = &files[k];
+                let current = stamp(&f.0);
+                (current != f.2).then_some((k, current))
+            }).collect();
+            if !changed.is_empty() {
+                let names: Vec<String> = changed.iter().take(3).map(|&(k, _)| short(&files[k].0)).collect();
+                let message = format!("{}{}: restart pending ({restart_message}); this edit applies with it", names.join(", "), if changed.len() > 3 { ", ..." } else { "" });
+                // (a live test session's restart would not apply it either: refused there)
+                patch_refused_event(&message, crate::harness::live::enabled(), std::slice::from_ref(&message));
+                for (k, current) in changed { files[k].2 = current; }
+            }
+            continue;
+        }
         // the startup's file scan (own_files: an owner request of 10-15 ms on Sandbox) waits until
         // the UI thread's first frames after the present are done: run right at the present, the
         // UI thread's first lazy links queued behind it (36 ms of a first post-present episode)
@@ -4944,8 +5180,10 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
         // a new watch set drops the events the old one had not delivered yet (a save made
         // while the post-boot loader loads was never seen): stat every file once instead
         let mut rewatched = std::mem::take(&mut startup_scan);
-        if loads != loads_seen || rewatched {
+        let late = crate::sip::late_count();
+        if loads != loads_seen || rewatched || late != late_seen {
             loads_seen = loads;
+            late_seen = late;
             let t_own = Instant::now();
             let loaded = crate::owner::call(crate::owner::Class::Program, || own_files(&*up));
             if live_trace() { eprintln!("makepad live: rewatch (loads {loads}, startup scan {rewatched}): own files in {:.1} ms at t={:.0} ms", t_own.elapsed().as_secs_f64() * 1e3, crate::clock::ms_since_start()); }
@@ -4955,9 +5193,12 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
                 if let Some(&i) = known.get(&path) { files[i].1 = file; }
                 else { added.push((path, file)); }
             }
-            if !added.is_empty() {
+            let loaded_more = !added.is_empty();
+            if loaded_more {
                 if jit::deferred_trace() { eprintln!("makepad live: watching {} more file(s) the post-boot loader loaded", added.len()); }
                 for (p, i) in added { let st = stamp(&p); files.push((p, i, st)); }
+            }
+            if add_included(&mut files) || loaded_more {
                 repositories.include(files.iter().map(|f| f.0.as_str()));
                 events = LiveWatch::new(files.iter().map(|f| f.0.as_str()));
                 rewatched = true;
@@ -5000,7 +5241,7 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
         // a sync moved the dock app's checkout: every file is compared with what runs
         let synced = dock.as_mut().is_some_and(DockGate::synced);
         let caught_up = CATCH_UP.swap(false, std::sync::atomic::Ordering::AcqRel);
-        let retry_due = retry_at.is_some_and(|t| t <= Instant::now());
+        let retry_due = retry_at.is_some_and(|t| t <= Instant::now()) || RETRY_NOW.swap(false, std::sync::atomic::Ordering::AcqRel);
         let all = lost || rewatched || synced || caught_up || retry_due
             || last_scan.elapsed() >= if events.is_some() { LIVE_IDLE } else { LIVE_QUIET };
         let backstop_only = all && !(lost || rewatched || synced || caught_up || retry_due);
@@ -5112,6 +5353,8 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
                 continue;
             }
         }
+        // included files are no sources of their own: their includers take the edit (below)
+        let included = included_files(&std_dir);
         if synced {
             // A devhub sync of landed work: one whole tree, so no part of it is a half-done
             // checkout. What makepad itself is built from (provided crates, std, the Cargo graph,
@@ -5131,7 +5374,7 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
                 }
                 for &k in &host_side { files[k].2 = settled_stamps[k]; }
             }
-            let (unloaded, rest): (Vec<usize>, Vec<usize>) = rest.into_iter().partition(|&k| files[k].1 == u32::MAX && !files[k].0.ends_with(".rs") && !crate::native_macros::owns_path(&files[k].0));
+            let (unloaded, rest): (Vec<usize>, Vec<usize>) = rest.into_iter().partition(|&k| files[k].1 == u32::MAX && !files[k].0.ends_with(".rs") && !crate::native_macros::owns_path(&files[k].0) && !included.contains(&files[k].0));
             for &k in &unloaded { files[k].2 = settled_stamps[k]; }
             changed = rest;
             if changed.is_empty() {
@@ -5141,10 +5384,21 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
         // Directory identities only trigger collection. Unloaded Rust sources
         // accompany the batch so new module declarations read its exact texts.
         if !synced {
-            let (unloaded, rest): (Vec<usize>, Vec<usize>) = changed.iter().partition(|&&k| files[k].1 == u32::MAX && !files[k].0.ends_with(".rs") && !inputs.process_input(&files[k].0) && !inputs.is_manifest(&files[k].0) && !crate::native_macros::owns_path(&files[k].0));
+            let (unloaded, rest): (Vec<usize>, Vec<usize>) = changed.iter().partition(|&&k| files[k].1 == u32::MAX && !files[k].0.ends_with(".rs") && !inputs.process_input(&files[k].0) && !inputs.is_manifest(&files[k].0) && !crate::native_macros::owns_path(&files[k].0) && !included.contains(&files[k].0));
             for &k in &unloaded { files[k].2 = settled_stamps[k]; }
             changed = rest;
             if changed.is_empty() {
+                let unloaded: Vec<_> = unloaded.into_iter().filter(|&k| !std::path::Path::new(&files[k].0).is_dir()).collect();
+                if !unloaded.is_empty() {
+                    let names: Vec<String> = unloaded.iter().take(3).map(|&k| short(&files[k].0)).collect();
+                    let what = format!("{}{}: not loaded by the app (nothing to patch)", names.join(", "), if unloaded.len() > 3 { ", ..." } else { "" });
+                    // a live test session's verdict is its tests' run: they run again as they are
+                    if crate::harness::live::enabled() {
+                        let mut o = idle_outcome(None, &what);
+                        let back = test_edit(up, unloaded.iter().map(|&k| files[k].0.clone()).collect(), &mut o, &mut undos);
+                        for (old, new) in back { for f in &mut files { if f.1 == new { f.1 = old; } } }
+                    } else { patch_verified_event(&what, 0, &[]); }
+                }
                 continue;
             }
         }
@@ -5166,12 +5420,14 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
             // a change the running process cannot take: makepad rebuilds itself in the background
             // and restarts into the new binary; the app keeps running (and patching) meanwhile
             let what = if changed.iter().any(|&k| std::path::Path::new(&files[k].0).is_dir()) { "source inputs" } else { "files" };
-            // the last two path parts say which crate and file
-            let short = |p: &str| -> String { let v: Vec<&str> = p.rsplit('/').take(2).collect(); v.into_iter().rev().collect::<Vec<_>>().join("/") };
             let names: Vec<String> = changed.iter().take(3).map(|&k| short(&files[k].0)).collect();
             let why = format!("{} {what} changed ({}{}): {reason}", changed.len(), names.join(", "), if changed.len() > 3 { ", ..." } else { "" });
-            match host::request(why, inputs.process_paths()) {
+            match host::request(why.clone(), inputs.process_paths()) {
                 Ok(()) => {
+                    // answered at once (a restart follows the build); the build's end answers
+                    // again: refused with its errors, no change, or the restart into it
+                    patch_refused_event(&why, false, std::slice::from_ref(&why));
+                    host_edit = changed.iter().map(|&k| files[k].0.clone()).collect();
                     for &k in &changed { files[k].2 = settled_stamps[k]; }
                     continue;
                 }
@@ -5181,7 +5437,7 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
             let what = if changed.iter().any(|&k| std::path::Path::new(&files[k].0).is_dir()) { "source inputs" } else { "files" };
             // provided crates and std are built into this binary: cargo rebuilds it on the way
             let restart = if inputs.host_restart_required(changed.iter().map(|&k| files[k].0.as_str())) {
-                format!("restart it through cargo (which rebuilds makepad): {}", crate::srchash::rebuild_command(&std::env::args().skip(1).collect::<Vec<_>>()))
+                format!("needs a JIT rebuild: restart it through cargo (which rebuilds makepad): {}", crate::srchash::rebuild_command(&std::env::args().skip(1).collect::<Vec<_>>()))
             } else {
                 format!("restart `makepad run {package}`")
             };
@@ -5189,6 +5445,11 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
             note_restart_pending(&message);
             eprintln!("makepad live: {message}");
             live_log(&format!("{{\"restart_required\":true,\"message\":{}}}", json_str(&message)));
+            // The edit's one verdict, at once. A live test session cannot restart into it (the
+            // restarted tests would run this binary again): there it is refused.
+            patch_refused_event(&message, crate::harness::live::enabled(), std::slice::from_ref(&message));
+            for &k in &changed { files[k].2 = settled_stamps[k]; }
+            restart_message = message;
             restart_required = true;
             continue;
         }
@@ -5197,6 +5458,10 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
         if let Err(error) = crate::native_macros::reload(&macro_changes, (&(*up).prog.session).runtime.profile) {
             eprintln!("makepad live: {error}");
             live_log(&error);
+            if !synced && !crate::harness::live::enabled() {
+                patch_refused_event(&error, true, std::slice::from_ref(&error));
+                for &k in &changed { files[k].2 = settled_stamps[k]; }
+            }
             continue;
         }
         let saved = changed.iter().filter_map(|&k| stamp(&files[k].0).map(|s| s.0)).max();
@@ -5205,10 +5470,18 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
         let mut edits = Vec::new();
         let mut which = Vec::new();
         let mut read_failed = false;
+        // the included files saved
+        let mut moved = Vec::new();
         for &k in &changed {
             let f = &mut files[k];
             let current = settled_stamps[k];
             if crate::native_macros::owns_path(&f.0) { f.2 = current; continue; }
+            if f.1 == u32::MAX && included.contains(&f.0) {
+                f.2 = current;
+                stalled.remove(&k);
+                moved.push(k);
+                continue;
+            }
             let src = match stalled.get(&k).filter(|_| current == f.2).map(|(src, _)| Ok(src.clone())).unwrap_or_else(|| crate::vfs::read(&f.0)) {
                 Ok(s) => s,
                 Err(_) => {
@@ -5241,6 +5514,18 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
         if read_failed {
             retry_at = Some(Instant::now() + LIVE_IDLE);
             continue;
+        }
+        if !moved.is_empty() {
+            // each own file whose code includes a saved file: its running text again, whose items
+            // that include it `classify` finds changed
+            let paths: Vec<String> = moved.iter().map(|&k| files[k].0.clone()).collect();
+            let skip: Vec<String> = edits.iter().map(|e| e.path.clone()).collect();
+            for e in crate::owner::call(crate::owner::Class::Program, || include_edits(&(*up).prog, &paths, &skip)) {
+                if let Some(k) = files.iter().position(|f| f.0 == e.path) {
+                    edits.push(e);
+                    which.push(k);
+                }
+            }
         }
         if edits.is_empty() {
             // saved back to the running text (e.g. the fix after a refused edit): the program
@@ -5285,6 +5570,7 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
             for (&k, src) in which.iter().zip(originals) {
                 stalled.insert(k, (src, o.lines.clone()));
             }
+            for &k in &moved { stalled.insert(k, (Vec::new(), o.lines.clone())); }
             if quiet_retry && only_previous_errors && internal_failure(&o.lines) {
                 failure = Some(makepad_remote::hot::Outcome::Refused);
             }
@@ -5674,7 +5960,7 @@ pub fn revision() -> u32 { 0 }
             assert!(added.is_empty(), "patch {patch}, text view: added {added:?}");
             assert_eq!(pairs, text_pairs);
             version.pf.toks = tokens;
-            let plan = classify(&prog, file, &version.pf, path_text)
+            let plan = classify(&prog, file, &version.pf, path_text, &Default::default())
                 .unwrap_or_else(|why| panic!("patch {patch}: unexpected restart reasons: {why:?}"));
             assert!(plan.removed.is_empty());
             assert!(plan.added.is_empty());
@@ -5700,7 +5986,7 @@ pub fn revision() -> u32 { 0 }
         let old = &prog.files[file as usize];
         let removed_debug = String::from_utf8(old.src[..old.src_len as usize].to_vec()).unwrap().replace("Clone, Debug, Default", "Clone, Default");
         let version = prog.parse_version(file, path_text, removed_debug.into_bytes()).unwrap();
-        let why = classify(&prog, file, &version.pf, path_text).err().expect("removing Debug must require a restart");
+        let why = classify(&prog, file, &version.pf, path_text, &Default::default()).err().expect("removing Debug must require a restart");
         assert!(why.iter().any(|line| line.contains("fn `fmt` removed")), "{why:?}");
         std::fs::remove_file(path).unwrap();
     }
@@ -5784,7 +6070,7 @@ mod round52_scope_tests {
     /// scoped publication. Returns the new version, its pairs and the visible crates.
     fn item_edit(prog: &mut Program, tcx: &mut crate::tcx::Tcx, file: u32, path: &str, src: String) -> (u32, Vec<(u32, u32)>, Vec<bool>, usize) {
         let version = prog.parse_version(file, path, src.into_bytes()).unwrap();
-        let plan = classify(prog, file, &version.pf, path).unwrap();
+        let plan = classify(prog, file, &version.pf, path, &Default::default()).unwrap();
         assert!(!plan.added.is_empty(), "the edit adds an item");
         let visible = crates_seeing_edit(prog, [file].into_iter());
         let new = prog.commit_version_in(version, &plan.pairs, &visible).unwrap();

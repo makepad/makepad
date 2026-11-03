@@ -9,6 +9,11 @@
 //! with the same IEEE meaning (min/max as selects, integer ops wrapping,
 //! saturating conversions written out).
 //!
+//! A field kernel may read a grid: the f32 input `sdf_grid`, whose words the
+//! host keeps in its `program` storage buffer (vec4 texels) from the texel
+//! that parameter `sdf_grid_at` names. Its word 13 is the grid's word count; a
+//! read is clamped to it as the CPU clamps a buffer read to the buffer.
+//!
 //! SHADER LAW: unary minus has the lowest precedence in the script shader
 //! parser; write `(0.0 - a) - b`, never `-a - b`.
 use crate::boundary::KernelRef;
@@ -19,6 +24,13 @@ use makepad_script::shader_ir::*;
 use makepad_script::*;
 use std::rc::Rc;
 use std::sync::Arc;
+
+/// Worst-case ops a grid read counts on the GPU route (a dependent load from
+/// the program buffer), and the header read once per call that bounds them.
+pub const GRID_LOAD_OPS: u64 = 8;
+pub const GRID_CALL_OPS: u64 = 4;
+/// The grid's word count: word 13 of its header (texel 3, lane y).
+const GRID_LEN_WORD: u32 = 13;
 
 /// One kernel's GPU route, or why it has none. A handle: it clones and drops
 /// through the compiler's code.
@@ -119,7 +131,17 @@ impl ShaderIrFn for Dispatch {
 
 impl KernelAir {
     fn new(kernel: &KernelRef, key: u64, max_cost: u64, max_params: usize, max_frame_words: u32) -> Result<KernelAir, String> {
-        let cost = kernel.cost;
+        let program = air::flat(kernel.program()).into_owned();
+        let grid = match (kernel.buffer_index("sdf_grid"), kernel.param_index("sdf_grid_at")) {
+            (Some(b), Some(at)) => Some((b as u8, at)),
+            (None, _) => None,
+            (Some(_), None) => return Err("a grid without its parameter `sdf_grid_at`".into()),
+        };
+        // a grid read costs its load on the GPU, and the bound's header read once a call
+        let cost = match grid {
+            Some((b, _)) => kernel.cost.saturating_add(grid_loads(&program.body, b, 0).saturating_mul(GRID_LOAD_OPS - 1)).saturating_add(GRID_CALL_OPS),
+            None => kernel.cost,
+        };
         if cost > max_cost {
             return Err(format!("{cost} ops per sample (at most {max_cost} run on the GPU)"));
         }
@@ -130,12 +152,11 @@ impl KernelAir {
         let (Some(points), Some(dist)) = (kernel.buffer_index("sdf_points"), kernel.buffer_index("sdf_dist")) else {
             return Err("not a field kernel (sdf_points in, sdf_dist out)".into());
         };
-        let program = air::flat(kernel.program()).into_owned();
         if program.frame_words > max_frame_words {
             return Err(format!("{} words of local arrays (at most {max_frame_words})", program.frame_words));
         }
         let control = kernel.buffer_index(crate::lower::kernel::CONTROL_BUFFER).map(|c| c as u8);
-        let k = KernelAir { key, program, points: points as u8, dist: dist as u8, control, params, cost };
+        let k = KernelAir { key, program, points: points as u8, dist: dist as u8, control, grid, params, cost };
         // A dry run of the translation: what the shader would refuse, refused now.
         let mut ir = IrModule::new();
         k.function(&mut ir, "check".into())?;
@@ -153,6 +174,8 @@ struct KernelAir {
     dist: u8,
     /// The compiler's control word buffer (the cancel token): reads 0.
     control: Option<u8>,
+    /// The grid input's buffer and the parameter holding its first texel.
+    grid: Option<(u8, usize)>,
     params: usize,
     /// Worst-case AIR ops per sample.
     cost: u64,
@@ -171,8 +194,35 @@ impl KernelAir {
         }
         f.cost = self.cost;
         let frame_ty = (self.program.frame_words > 0).then(|| ir.ty(IrTy::Array(TY_I32, self.program.frame_words)));
-        let mut t = Tr { k: self, f, vals: Vec::new(), vars: Vec::new(), frame: None, result: 0, jump: None };
+        let program = match self.grid {
+            Some(_) => {
+                let texels = ir.ty(IrTy::Array(v4, 0));
+                Some(ir.global(IrGlobalKind::Io(IrIo::Storage(false)), id!(program), texels))
+            }
+            None => None,
+        };
+        let v4u = ir.vec_ty(4, IrScalar::U32);
+        let mut t = Tr { k: self, f, vals: Vec::new(), vars: Vec::new(), frame: None, result: 0, jump: None, grid: None, v4, v4u };
         let mut body = Vec::new();
+        if let (Some(g), Some((_, at))) = (program, self.grid) {
+            // the grid's first texel and its word count, once a call
+            let a = t.param(at);
+            let first = t.e(ExprKind::Convert(a), TY_U32);
+            let fl = t.f.local(id!(k), 0, TY_U32, true, LocalKind::Temp);
+            body.push(Stmt::Local(fl, first));
+            let fe = t.local(fl, TY_U32);
+            let off = t.lit_u(GRID_LEN_WORD / 4);
+            let i = t.bin(BinOp::Add, fe, off, TY_U32);
+            let buf = t.e(ExprKind::Global(g), ir.ty(IrTy::Array(v4, 0)));
+            let tx = t.e(ExprKind::Index(buf, i), v4);
+            let w = t.e(ExprKind::Swizzle(tx, [(GRID_LEN_WORD % 4) as u8, 0, 0, 0], 1), TY_F32);
+            let len = t.e(ExprKind::Convert(w), TY_U32);
+            let one = t.lit_u(1);
+            let last = t.bin(BinOp::Sub, len, one, TY_U32);
+            let ll = t.f.local(id!(k), 0, TY_U32, true, LocalKind::Temp);
+            body.push(Stmt::Local(ll, last));
+            t.grid = Some((g, ir.ty(IrTy::Array(v4, 0)), fl, ll));
+        }
         for ty in self.program.vals.clone() {
             let (l, s) = t.declare(ty)?;
             t.vals.push(l);
@@ -231,6 +281,26 @@ struct Tr<'a> {
     result: LocalId,
     /// Multi-level breaks: 2 d (+1 for a continue) of the loop to leave.
     jump: Option<LocalId>,
+    /// A gridded kernel: the program buffer (and its type), and locals holding the grid's
+    /// first texel and its last word.
+    grid: Option<(GlobalId, TyId, LocalId, LocalId)>,
+    v4: TyId,
+    v4u: TyId,
+}
+
+/// The grid reads of a block, each loop at its cap (the outermost, the element loop, once):
+/// how [`air::Program::cost`] counts them.
+fn grid_loads(b: &air::Block, grid: u8, depth: u32) -> u64 {
+    let mut n = 0u64;
+    for s in b {
+        n = n.saturating_add(match s {
+            air::Stmt::Def(_, Op::Load { region: Region::Buf(g), .. }) if *g == grid => 1,
+            air::Stmt::If(_, t, e) => grid_loads(t, grid, depth).max(grid_loads(e, grid, depth)),
+            air::Stmt::Loop { cap, body } => (if depth == 0 { 1 } else { *cap as u64 }).saturating_mul(grid_loads(body, grid, depth + 1)),
+            _ => 0,
+        });
+    }
+    n
 }
 
 fn ir_ty(t: Ty) -> Result<TyId, String> {
@@ -354,6 +424,47 @@ impl Tr<'_> {
                 self.as_i(s)
             }
         }
+    }
+    /// Word `min(base + off, last)` of the grid (as the CPU's buf_index clamps a read: off as
+    /// u32, no wrap), as i32 bits: its texel's lanes as u32 bits, then the lane.
+    fn grid_word(&mut self, base: u32, off: Option<air::Val>) -> Result<ExprId, String> {
+        let Some((g, gty, first, last)) = self.grid else { return Err("a grid read without the program buffer".into()) };
+        let lm1 = self.local(last, TY_U32);
+        let b = self.lit_u(base);
+        let over = self.bin(BinOp::Gt, b, lm1, TY_BOOL);
+        let lm1b = self.local(last, TY_U32);
+        let b2 = self.lit_u(base);
+        let bb = self.sel(over, lm1b, b2, TY_U32);
+        let w = match off {
+            None => bb,
+            Some(o) => {
+                let o = self.val(o);
+                let ou = self.as_u(o);
+                let lm1c = self.local(last, TY_U32);
+                let room = self.bin(BinOp::Sub, lm1c, bb, TY_U32);
+                let big = self.bin(BinOp::Gt, ou, room, TY_BOOL);
+                let room2 = self.bin(BinOp::Sub, lm1c, bb, TY_U32);
+                let c = self.sel(big, room2, ou, TY_U32);
+                self.bin(BinOp::Add, bb, c, TY_U32)
+            }
+        };
+        let two = self.lit_u(2);
+        let q = self.bin(BinOp::Shr, w, two, TY_U32);
+        let fe = self.local(first, TY_U32);
+        let i = self.bin(BinOp::Add, fe, q, TY_U32);
+        let buf = self.e(ExprKind::Global(g), gty);
+        let tx = self.e(ExprKind::Index(buf, i), self.v4);
+        let lanes: Vec<ExprId> = (0..4u8)
+            .map(|c| {
+                let x = self.e(ExprKind::Swizzle(tx, [c, 0, 0, 0], 1), TY_F32);
+                self.as_u(x)
+            })
+            .collect();
+        let bits = self.e(ExprKind::Construct(lanes), self.v4u);
+        let three = self.lit_u(3);
+        let lane = self.bin(BinOp::BitAnd, w, three, TY_U32);
+        let word = self.e(ExprKind::Index(bits, lane), TY_U32);
+        Ok(self.as_i(word))
     }
     /// Signed division by a divisor known to be neither 0 nor -1.
     fn safe_div(&mut self, a: ExprId, b: ExprId) -> (ExprId, ExprId, ExprId) {
@@ -503,6 +614,12 @@ impl Tr<'_> {
                 let (cc, a, b) = (self.val(c), self.val(x), self.val(y));
                 self.sel(cc, a, b, ty)
             }
+            // the exact integer multiply-add every kernel gets: a wrapping product and sum
+            Op::Fma(air::Fma::MulAddI, a, b, c) => {
+                let (x, y, z) = (self.val(a), self.val(b), self.val(c));
+                let m = self.wrapping(BinOp::Mul, x, y);
+                self.wrapping(BinOp::Add, m, z)
+            }
             Op::Fma(..) => return Err("fused multiply-add (fast math)".into()),
             Op::Wrap(x, len) => {
                 let a = self.val(x);
@@ -560,6 +677,10 @@ impl Tr<'_> {
                 };
                 self.word_as(w, true, ty)
             }
+            Op::Load { region: Region::Buf(b), base, off, .. } if Some(b) == k.grid.map(|g| g.0) => {
+                let w = self.grid_word(base, off)?;
+                self.word_as(w, false, ty)
+            }
             Op::Load { region: Region::Buf(b), .. } if Some(b) == k.control => {
                 // never cancelled
                 let z = self.lit_i(0);
@@ -576,6 +697,13 @@ impl Tr<'_> {
             Op::Load { region, .. } => return Err(format!("a read of {region:?} memory")),
             Op::In { .. } => return Err("an audio input".into()),
             Op::FrameCount => self.lit_i(1),
+            Op::BufLen(b) if Some(b) == k.grid.map(|g| g.0) => {
+                let Some((_, _, _, last)) = self.grid else { return Err("a grid length without the program buffer".into()) };
+                let l = self.local(last, TY_U32);
+                let one = self.lit_u(1);
+                let n = self.bin(BinOp::Add, l, one, TY_U32);
+                self.as_i(n)
+            }
             Op::BufLen(b) => self.lit_i(if b == k.points { 3 } else { 1 }),
         })
     }

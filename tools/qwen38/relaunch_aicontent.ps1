@@ -1,6 +1,6 @@
 # Relaunch makepad-asset-ai exactly as it was, WMI-detached (survives tunnel teardown)
 $ErrorActionPreference = 'Stop'
-$exe = 'C:\users\me\makepad\local\sa3build\libs\ai_content\target\release\makepad-asset-ai.exe'
+$exe = 'C:\Users\me\makepad\local\sa3build\libs\ai_content\target\release\makepad-asset-ai.exe'
 $cmd = 'cmd /c ""' + $exe + '" --port 8767 --cache-dir C:\ai\sa3\cache >> C:\ai\svc8767.log 2>&1"'
 $r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $cmd }
 Write-Output ("AICONTENT_RELAUNCH pid=" + $r.ProcessId + " rc=" + $r.ReturnValue)

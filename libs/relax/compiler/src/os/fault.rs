@@ -73,12 +73,33 @@ pub struct Hooks<'a> {
 mod unix {
     pub const SIGILL: i32 = 4;
     pub const SIGTRAP: i32 = 5;
+    #[cfg(any(target_os = "linux", target_vendor = "apple"))]
+    pub const SIGABRT: i32 = 6;
     pub const SIGFPE: i32 = 8;
     pub const SIGSEGV: i32 = 11;
     #[cfg(any(target_os = "linux", target_os = "android"))]
     pub const SIGBUS: i32 = 7;
     #[cfg(target_vendor = "apple")]
     pub const SIGBUS: i32 = 10;
+
+    /// Reports SIGABRT before the handler restores the default action.
+    #[cfg(any(target_os = "linux", target_vendor = "apple"))]
+    pub unsafe fn report_abort(pc: u64, fp: u64) {
+        use crate::jit::{collect_frames, cur_unit, PanicInfo};
+        let tname = crate::os::thread::name(crate::os::thread::current());
+        if cur_unit().is_null() {
+            eprintln!("makepad: SIGABRT on thread '{}' (no JIT unit)", tname);
+            return;
+        }
+        let frames = collect_frames(fp, pc, false);
+        let info = PanicInfo { kind: "abort".to_string(), message: format!("SIGABRT (abort() called) on thread '{}'", tname), site: u64::MAX, frames, fault_addr: 0, location: String::new() };
+        let unit_here = cur_unit() as usize; // the calling thread's unit; the closure runs on the owner
+        // 0 allows 2 ms for the owner to start; owner-thread calls run inline.
+        match crate::owner::call_within(crate::owner::Class::Job, 0, || (&*(unit_here as *mut crate::jit::Unit)).report(&info)) {
+            Some(r) => eprintln!("makepad: abort on thread '{}'\n  report: {}", tname, r),
+            None => eprintln!("makepad: SIGABRT on thread '{}' while the compiler is busy", tname),
+        }
+    }
 
     pub fn kind(sig: i32) -> super::Kind {
         use super::Kind;
@@ -96,7 +117,7 @@ mod unix {
 
 #[cfg(target_os = "linux")]
 mod imp {
-    use super::unix::{kind, SIGBUS, SIGFPE, SIGILL, SIGSEGV};
+    use super::unix::{kind, report_abort, SIGABRT, SIGBUS, SIGFPE, SIGILL, SIGSEGV};
     use super::{Action, Fault, Hooks};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -139,6 +160,11 @@ mod imp {
             // the handler allocates: in the system heap, never in the faulting thread's arena (the fault may be inside its allocator)
             let _kept = crate::zone_alloc::kept();
             let gregs = uc.add(40) as *mut u64;
+            if sig == SIGABRT {
+                report_abort(*gregs.add(16), *gregs.add(10));
+                default_action(SIGABRT);
+                return;
+            }
             // MAKEPAD_RUN_COMPILE_WATCH: the watcher asks a thread stuck in one step where it is
             if sig == SIG_WATCHDOG && crate::jit::WATCH_DUMP.load(std::sync::atomic::Ordering::Relaxed) {
                 let (pc, fp) = (*gregs.add(16), *gregs.add(10));
@@ -191,7 +217,7 @@ mod imp {
         }
     }
 
-    const OUR_SIGNALS: [i32; 5] = [SIGILL, SIGBUS, SIGFPE, SIG_WATCHDOG, SIGSEGV];
+    const OUR_SIGNALS: [i32; 6] = [SIGILL, SIGBUS, SIGFPE, SIG_WATCHDOG, SIGSEGV, SIGABRT];
     const SA_SIGINFO: i32 = 4;
     /// SA_SIGINFO | SA_ONSTACK. No SA_NODEFER: the signal stays blocked while its handler runs,
     /// so a fault inside the handler is not handled again (the kernel kills the process).
@@ -455,16 +481,15 @@ mod imp {
 /// (Chromium's in CefInitialize) stay chained.
 #[cfg(target_vendor = "apple")]
 mod imp {
-    use super::unix::{kind, SIGBUS, SIGFPE, SIGILL, SIGSEGV, SIGTRAP};
+    use super::unix::{kind, report_abort, SIGABRT, SIGBUS, SIGFPE, SIGILL, SIGSEGV, SIGTRAP};
     use super::{Action, Fault, Hooks};
-    use crate::jit::{collect_frames, cur_unit, PanicInfo};
+    use crate::jit::cur_unit;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// SIGUSR1 (Darwin numbering): the hang watchdog's signal
     pub const SIG_WATCHDOG: i32 = 30;
     /// the watchdog's signal handler runs on the looping thread itself
     pub const NEEDS_HANG_TRAMP: bool = false;
-    const SIGABRT: i32 = 6;
 
     extern "C" {
         fn sigaction(sig: i32, act: *const SigAction, old: *mut SigAction) -> i32;
@@ -508,29 +533,6 @@ mod imp {
         let act = SigAction { handler: 0, mask: 0, flags: 0 };
         unsafe {
             sigaction(sig, &act, std::ptr::null_mut());
-        }
-    }
-
-    /// SIGABRT (libc abort(): malloc's heap checks, Foundation/ObjC fatal errors, an assertion in
-    /// a framework, std::process::abort) is not recoverable: report the thread and the JIT frames
-    /// that led there, then let the abort proceed (default action re-raised).
-    unsafe fn report_abort(uc: *mut u8) {
-        let mc = *(uc.add(UC_MCONTEXT) as *const *mut u8);
-        let reg = |off: usize| -> *mut u64 { mc.add(off) as *mut u64 };
-        let (pc, fp) = (*reg(SS_PC), *reg(SS_FP));
-        let tname = crate::os::thread::name(crate::os::thread::current());
-        if cur_unit().is_null() {
-            eprintln!("makepad: SIGABRT on thread '{}' (no JIT unit)", tname);
-            return;
-        }
-        let frames = collect_frames(fp, pc, false);
-        let info = PanicInfo { kind: "abort".to_string(), message: format!("SIGABRT (abort() called) on thread '{}'", tname), site: u64::MAX, frames, fault_addr: 0, location: String::new() };
-        // the report is a unit call: none when the compiler is busy (this very thread may be
-        // the one aborting inside it)
-        let unit_here = cur_unit() as usize; // the calling thread's unit (the closure runs on the owner)
-        match crate::owner::call_within(crate::owner::Class::Job, 0, || (&*(unit_here as *mut crate::jit::Unit)).report(&info)) {
-            Some(r) => eprintln!("makepad: abort on thread '{}'\n  report: {}", tname, r),
-            None => eprintln!("makepad: SIGABRT on thread '{}' while the compiler is busy", tname),
         }
     }
 
@@ -616,7 +618,9 @@ mod imp {
             // the handler allocates: in the system heap, never in the faulting thread's arena (the fault may be inside its allocator)
             let _kept = crate::zone_alloc::kept();
             if sig == SIGABRT {
-                report_abort(uc);
+                let mc = *(uc.add(UC_MCONTEXT) as *const *mut u8);
+                let reg = |off: usize| -> *mut u64 { mc.add(off) as *mut u64 };
+                report_abort(*reg(SS_PC), *reg(SS_FP));
                 // back to the default action: abort() raises again and the process ends
                 default_action(SIGABRT);
                 return;

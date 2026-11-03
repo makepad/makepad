@@ -110,9 +110,9 @@ fn background_reserves_two_visible_slots_and_visible_reserves_one() {
 }
 
 #[test]
-fn warming_allows_one_background_across_clients_and_off_wakes_waiters() {
+fn warmup_ends_once_and_restores_background_width() {
     let (b, changed) = budget(6);
-    b.set_warming(true);
+    b.begin_warmup();
     let p = b.admit(BACKGROUND, APP, "warm seed");
     let (tx, rx) = mpsc::channel();
     let w = worker(&b, BACKGROUND, JIT, 1, &tx);
@@ -121,10 +121,14 @@ fn warming_allows_one_background_across_clients_and_off_wakes_waiters() {
     assert!(!b.should_yield(p));
     let v = b.admit(VISIBLE, HAL, "visible during warmup");
     b.release(v);
-    b.set_warming(false);
+    b.end_warmup();
     assert_eq!(rx.recv().unwrap(), 1);
-    b.set_warming(true);
-    assert!(b.should_yield(p));
+    b.begin_warmup();
+    assert!(!b.warming(), "a later compile burst cannot restart warm-up");
+    assert!(!b.should_yield(p));
+    let full = b.admit(BACKGROUND, APP, "restored third slot");
+    assert_eq!(b.state.lock().unwrap().background, 3);
+    b.release(full);
     finish(w);
     assert!(!b.should_yield(p));
     b.release(p);

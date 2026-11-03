@@ -130,8 +130,9 @@ pub fn logs_dir() -> PathBuf {
     crate::proto::home().join("sync").join("logs")
 }
 
-/// Builds what the conf asks for in the checkout.
-pub fn prebuild(conf: &SyncConf) -> Built {
+/// Builds what the conf asks for in the checkout; `jit_built` hears when the JIT is (step 0,
+/// before the WM: a waiting gate goes on while the rest builds).
+pub fn prebuild(conf: &SyncConf, jit_built: &dyn Fn()) -> Built {
     let t = Instant::now();
     let dir = logs_dir();
     let _ = std::fs::create_dir_all(&dir);
@@ -142,6 +143,27 @@ pub fn prebuild(conf: &SyncConf) -> Built {
     let r = match conf.build {
         Build::Off => Ok(()),
         Build::Wm => (|| {
+            // 0. the JIT, first: a gate on this box runs on it (it waits for this build rather than
+            // build it again beside it: lease/exec.rs). The very command makepad-wm-build runs for
+            // its JIT apps, in the same environment, so that step compiles nothing.
+            if let Some(id) = conf.jit_app() {
+                let app = makepad_app_registry::find(&id).ok_or_else(|| format!("prebuild: no app `{id}` in the registry"))?;
+                let cmd = AppLaunch::build_command(app, Runner::Jit, root.clone())?;
+                let mut jit = niced(Path::new(cmd.get_program()), &cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>());
+                // what makepad-wm-build inherits (step 2), then the launch's own environment over it
+                clear_build_env(&mut jit);
+                jit.current_dir(cmd.get_current_dir().unwrap_or(root)).envs(wm_env()).env("MAKEPAD", "linux_direct").env("MAKEPAD_WM_ROOT", root).env("CARGO_NET_OFFLINE", "true").env("CARGO_BUILD_JOBS", conf.jobs.to_string());
+                for (k, v) in cmd.get_envs() {
+                    match v {
+                        Some(v) => jit.env(k, v),
+                        None => jit.env_remove(k),
+                    };
+                }
+                jit.env("CARGO_TERM_PROGRESS_WHEN", "never");
+                let built = step(jit, "the JIT (makepad-run)", &log, &mut b.compiled);
+                jit_built();
+                built?;
+            }
             // 1. the WM, with its session's environment
             let jobs = conf.jobs.to_string();
             let wm_args: Vec<String> = ["build", "--offline", "--release", "-j", jobs.as_str(), "-p", "makepad-app-wm"].iter().map(|s| s.to_string()).collect();
@@ -176,6 +198,7 @@ pub fn prebuild(conf: &SyncConf) -> Built {
                 n.current_dir(cmd.get_current_dir().unwrap_or(root)).env("CARGO_NET_OFFLINE", "true").env("CARGO_BUILD_JOBS", conf.jobs.to_string());
                 step(n, id, &log, &mut b.compiled)?;
             }
+            jit_built();
             Ok(())
         })(),
     };

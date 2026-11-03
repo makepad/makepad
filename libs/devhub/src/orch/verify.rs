@@ -248,7 +248,7 @@ impl Verifier {
             // `verify skip`: this pair is given up, the newest one is next
             // (the state already says so: `verify skip` dropped the run)
             if SKIP.swap(false, std::sync::atomic::Ordering::AcqRel) {
-                self.ctx.store.update(|d| d.verify.run = None);
+                self.ctx.store.update(|d| d.verify.run = None).unwrap_or_else(|e| { eprintln!("devhub state: {e}"); Default::default() });
                 continue;
             }
             // (a run that goes on is still what was asked for)
@@ -281,11 +281,11 @@ impl Verifier {
         } else {
             let known = self.ctx.store.read(|d| d.verify.failing.clone().filter(|f| f.pair == *pair));
             let failing = crate::state::Failing { pair: pair.clone(), legs: legs.clone(), gated: known.as_ref().map_or(Vec::new(), |f| f.gated.clone()), old: known.and_then(|f| f.old) };
-            self.ctx.store.update(|d| d.verify.failing = Some(failing));
+            self.ctx.store.update(|d| d.verify.failing = Some(failing)).unwrap_or_else(|e| { eprintln!("devhub state: {e}"); Default::default() });
             match self.bisect(pair) {
                 Bisected::OldOnly(base, old) => {
                     self.record_good(pair, false, false);
-                    self.ctx.store.update(|d| d.verify.failing = None);
+                    self.ctx.store.update(|d| d.verify.failing = None).unwrap_or_else(|e| { eprintln!("devhub state: {e}"); Default::default() });
                     self.ctx.store.event("verify", Sev::Warn, format!("verify OK {} with old failures, they fail on {} too: {}", pair.short(), base.short(), old.join(" ")), None);
                     return;
                 }
@@ -303,7 +303,7 @@ impl Verifier {
             self.ctx.store.update(|d| {
                 d.verify.failures.push(failure);
                 d.verify.failing = None;
-            });
+            }).unwrap_or_else(|e| { eprintln!("devhub state: {e}"); Default::default() });
         }
         self.ctx.store.event("verify", Sev::Err, line, detail);
         // a skip that gave this bisect up is spent: the next pair's run is not stopped by it
@@ -337,7 +337,7 @@ impl Verifier {
             if let Some(f) = d.verify.failing.as_mut() {
                 f.old = Some(old.clone());
             }
-        });
+        }).unwrap_or_else(|e| { eprintln!("devhub state: {e}"); Default::default() });
         Some(old)
     }
 
@@ -360,7 +360,7 @@ impl Verifier {
             if let Some(f) = d.verify.failing.as_mut() {
                 f.gated.push((pair.clone(), word(v).to_string()));
             }
-        });
+        }).unwrap_or_else(|e| { eprintln!("devhub state: {e}"); Default::default() });
         v
     }
 
@@ -369,7 +369,7 @@ impl Verifier {
             if !d.verify.asked.is_empty() {
                 d.verify.asked.remove(0);
             }
-        });
+        }).unwrap_or_else(|e| { eprintln!("devhub state: {e}"); Default::default() });
     }
 
     fn record_good(&self, pair: &Pair, full: bool, dry: bool) {
@@ -383,7 +383,7 @@ impl Verifier {
             if !d.verify.verified.iter().any(|t| &t.pair == pair) {
                 d.verify.verified.push(Tip { pair: pair.clone(), at_ms: wall_ms(), diff: if full { "all" } else { "affected" }.into() });
             }
-        });
+        }).unwrap_or_else(|e| { eprintln!("devhub state: {e}"); Default::default() });
 
     }
 
@@ -393,7 +393,7 @@ impl Verifier {
         let (prior, stale) = self.ctx.store.update(|d| match d.verify.run.take() {
             Some(r) if r.pair == *pair && r.purpose == purpose => (Some(r), None),
             r => (None, r),
-        });
+        }).unwrap_or_else(|e| { eprintln!("devhub state: {e}"); Default::default() });
         // an older master's JIT legs no longer belong to verify
         for l in stale.iter().chain(prior.iter()).flat_map(|r| r.legs.iter()).filter(|l| super::leg::lease_held(&self.ctx, &l.lease)) {
             let _ = crate::cli::ask(&makepad_remote::link::Client::new(makepad_remote::link::Target::Unix(crate::proto::control_socket()), "devhub-verify"), None, "release", &l.lease);
@@ -411,7 +411,7 @@ impl Verifier {
             self.ctx.store.update(|d| {
                 // Record the attempt too: a failed Sunday sweep must not loop all day.
                 if !dry { d.verify.last_full_ms = wall_ms(); }
-            });
+            }).unwrap_or_else(|e| { eprintln!("devhub state: {e}"); Default::default() });
         }
         let mut env = vec!["env".to_string(), "CARGO_INCREMENTAL=0".into(), format!("DIFF_SCOPE={}", if full || base.is_none() { "all" } else { "affected" }), format!("FUZZ_FIXED={FUZZ}")];
         env.push(format!("DEVHUB_ARM64_VERDICT={}", arm.summary));
@@ -447,7 +447,7 @@ impl Verifier {
         let legs: Vec<Leg> = defs.iter().map(|d| &d.name).map(|name| earlier(name).unwrap_or_else(|| Leg { name: name.to_string(), state: "wait".into(), log: dir.join(format!("{name}.log")).to_string_lossy().into_owned(), ..Default::default() })).collect();
         let tries = prior.as_ref().map_or(0, |r| r.tries);
         let run = Run { id: id.clone(), pair: pair.clone(), started_ms: prior.as_ref().map_or_else(wall_ms, |r| r.started_ms), diff: if full { "all" } else { "affected" }.into(), dry, purpose: purpose.into(), legs: legs.clone(), asked, tries };
-        self.ctx.store.update(|d| d.verify.run = Some(run));
+        self.ctx.store.update(|d| d.verify.run = Some(run)).unwrap_or_else(|e| { eprintln!("devhub state: {e}"); Default::default() });
         let word = if prior.is_some() { "goes on" } else { "started" };
         self.ctx.store.event("verify", Sev::Info, format!("verify {purpose} {} {word} (run {id}, diff {}); {}", pair.short(), if full { "all" } else { "affected" }, arm.summary), None);
         let results: Arc<Mutex<Vec<Verdict>>> = Arc::new(Mutex::new(Vec::new()));
@@ -521,7 +521,7 @@ impl Verifier {
                 l.run_n = 0;
             }
             Some(legs)
-        }).unwrap_or_default();
+        }).unwrap_or_else(|e| { eprintln!("devhub state: {e}"); Default::default() }).unwrap_or_default();
         if !arm.required {
             for name in ["arm64", "nocodegen"] {
                 legs.push(Leg { name: name.into(), state: "ok".into(), summary: arm.summary.clone(), log: dir.join("arm64-classification.log").to_string_lossy().into_owned(), ..Default::default() });
@@ -645,7 +645,7 @@ pub(crate) fn run_leg(ctx: &Ctx, spec: &Spec, pair: &Pair, def: &LegDef, env: &[
                 }
                 l.summary = summary.into();
             }
-        })
+        }).unwrap_or_else(|e| { eprintln!("devhub state: {e}"); Default::default() })
     };
     // a background leg: preempted by lane work, it asks again (a fresh log)
     let (r, exit) = loop {
@@ -709,7 +709,7 @@ pub(crate) fn run_leg(ctx: &Ctx, spec: &Spec, pair: &Pair, def: &LegDef, env: &[
                 if let Some(l) = active_leg(d, job, pair, name) {
                     l.run_n = n;
                 }
-            });
+            }).unwrap_or_else(|e| { eprintln!("devhub state: {e}"); Default::default() });
         });
         let exit = r.as_ref().ok().copied();
         held.release(exit);
@@ -736,7 +736,7 @@ pub(crate) fn run_leg(ctx: &Ctx, spec: &Spec, pair: &Pair, def: &LegDef, env: &[
             if let Some(l) = active_leg(d, job, pair, name) {
                 l.errors = errors;
             }
-        });
+        }).unwrap_or_else(|e| { eprintln!("devhub state: {e}"); Default::default() });
     }
     if job == "verify" {
         ctx.store.event("verify", if v == Verdict::Fail { Sev::Warn } else { Sev::Info }, format!("verify leg {name} {}{} {}: {summary}", state.to_uppercase(), if def.report_only && v != Verdict::Ok { " (report-only)" } else { "" }, pair.short()), None);
@@ -755,7 +755,7 @@ pub fn serve(ctx: &Ctx, line: &str) -> Result<String, String> {
     match w.first().copied() {
         None | Some("status") => Ok(ctx.store.read(|d| d.to_value().get("verify").cloned().unwrap_or(makepad_strict_json::Value::Null).to_json())),
         Some(on @ ("on" | "off")) => {
-            ctx.store.update(|d| d.verify.on = on == "on");
+            ctx.store.update(|d| d.verify.on = on == "on")?;
             ctx.store.event("verify", Sev::Info, format!("verify: rolling verification {on}"), None);
             Ok(format!("{{\"on\":{}}}", on == "on"))
         }
@@ -768,7 +768,7 @@ pub fn serve(ctx: &Ctx, line: &str) -> Result<String, String> {
                 d.verify.asked.clear();
                 d.verify.asked.push(Asked { pair: None, dry: false, full: false });
                 Some(pair)
-            }).ok_or("verify skip: no run is going")?;
+            })?.ok_or("verify skip: no run is going")?;
             SKIP.store(true, std::sync::atomic::Ordering::Release);
             ctx.store.event("verify", Sev::Warn, format!("verify {pair}: skipped by hand; the newest landed pair is next"), None);
             ctx.store.kick();
@@ -778,7 +778,7 @@ pub fn serve(ctx: &Ctx, line: &str) -> Result<String, String> {
             let n = ctx.store.update(|d| {
                 d.verify.asked.push(Asked { pair: None, dry: false, full });
                 d.verify.asked.len()
-            });
+            })?;
             ctx.store.event("verify", Sev::Info, format!("verify: asked for the newest landed pair{}", if full { " (full diff)" } else { "" }), None);
             Ok(format!("{{\"queued\":{n}}}"))
         }
@@ -789,7 +789,7 @@ pub fn serve(ctx: &Ctx, line: &str) -> Result<String, String> {
             let n = ctx.store.update(|d| {
                 d.verify.asked.push(Asked { pair: Some(pair.clone()), dry, full });
                 d.verify.asked.len()
-            });
+            })?;
             ctx.store.event("verify", Sev::Info, format!("verify: asked for {}{}", pair.short(), if dry { " (dry)" } else { "" }), None);
             Ok(format!("{{\"queued\":{n},\"pair\":{}}}", makepad_remote::json_str(&pair.short())))
         }

@@ -439,7 +439,8 @@ script_mod! {
             // radiance * BRDF * N.L. Shadowed exactly like the diffuse sun:
             // a highlight surviving inside a shadow is the classic tell.
             let surface_direct=mix(self.v_direct,self.sun_color*ndl,self.surface_on)
-            let surface_ambient=self.mat_ambient(n,self.gi_ambient(self.v_csm.xyz,n,mix(self.v_ambient,mix(self.sun_ground,self.sun_sky,clamp(n.y*0.5+0.5,0.0,1.0)),self.surface_on)))
+            // GI occludes the material's fill (an environment map's) and adds its bounce.
+            let surface_ambient=self.gi_ambient(self.v_csm.xyz,n,self.mat_ambient(n,mix(self.v_ambient,mix(self.sun_ground,self.sun_sky,clamp(n.y*0.5+0.5,0.0,1.0)),self.surface_on)))
             // Light arrives as irradiance/pi units (the diffuse lobe carries
             // no 1/pi), so the HDR lane lifts the lobe by pi to match.
             let sun_spec = surface_direct * (dist * geo / max(4.0 * ndv * ndl, 0.0001)) * mix(1.0, 3.14159265, self.lin_ctl.x)

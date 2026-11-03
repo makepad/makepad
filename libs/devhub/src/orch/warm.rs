@@ -1,8 +1,9 @@
 //! Warm native targets, dev JIT stores and shared overlay code caches, without copying between
-//! boxes. A new landed JIT id plans the most lane-active boxes per OS/arch, with one lane-priority
-//! leg per box using four cores, never held back by background admission or preemption. After
-//! building it, each box lists (never runs) tests for its four most-used package/target pairs
-//! in the same held lease. Every 20 s,
+//! boxes. A new landed JIT id plans every dev box per OS/arch that lacks it, the most lane-active
+//! first, with one lane-priority leg per box using four cores, never held back by background
+//! admission or preemption: a box left out made the first live session there build the JIT itself
+//! (3-5 min, a fifth of all live starts, 11-03). After building it, each box lists (never runs)
+//! tests for its four most-used package/target pairs in the same held lease. Every 20 s,
 //! agent lanes with grants in the last hour keep one extra box warm at their newest pin, unless
 //! they already used two up boxes in that group; a landed lane whose branch is deleted keeps
 //! no spare. Live/show job lanes only count toward their box's plan. Overlay spares list the
@@ -53,6 +54,7 @@ enum Harness {
 impl Package {
     fn from_class(class: &str) -> Option<Self> {
         // `devhub test` classes; cargo-routed ones carry `native:`, live jobs `live:`
+        let class = crate::lease::base_class(class);
         let class = class.strip_prefix("native:").unwrap_or(class);
         let live = class.starts_with("live:");
         let class = class.strip_prefix("live:").unwrap_or(class).strip_prefix("test:")?;
@@ -175,6 +177,17 @@ struct Progress {
 impl Progress {
     fn waiting(id: &str, now: u64) -> Self {
         Self { state: "waiting".into(), note: String::new(), id: id.into(), lease: None, started_ms: now, ended_ms: 0 }
+    }
+
+    /// A failure its box outgrew: the JIT it failed on is in the box's store now, however it got
+    /// there (a warm, a JIT run, a lane build). 105's failure stayed in the health report after a
+    /// job built that JIT (11-03).
+    fn clear_if_stored(&mut self, stored: &[String], now: u64) -> bool {
+        if self.state != "failed" || self.id.is_empty() || !stored.contains(&self.id) { return false; }
+        self.state = "stored".into();
+        self.note = "the box's store holds it (another run built it)".into();
+        self.ended_ms = now;
+        true
     }
 
     fn fields(&self, now: u64) -> Vec<(&str, Value)> {
@@ -365,9 +378,19 @@ fn tick(ctx: &Arc<Ctx>, seen: &mut Option<(String, Vec<String>)>) {
     let now = wall_ms();
     let activity = activity(ctx, now.saturating_sub(ACTIVE_MS));
     let compilers = ctx.leases.jit_compilers();
+    clear_stored(&nodes, now);
     // Spares follow lane pins even while the landed tip is unchanged or unavailable.
     spare_tick(ctx, &nodes, &compilers, &activity, now);
     plan_tick(ctx, seen, &nodes, &compilers, &activity, now);
+}
+
+/// Clears the plan's and the overlay spares' failures whose JIT their box's store holds now.
+fn clear_stored(nodes: &[NodeView], now: u64) {
+    let stored = |name: &str| nodes.iter().find(|n| n.name == name).and_then(|n| n.caps.as_ref()?.jit_store.as_ref().map(|s| s.ids.clone())).unwrap_or_default();
+    if let Some(p) = PLAN.lock().unwrap().as_mut() {
+        for n in &mut p.nodes { n.progress.clear_if_stored(&stored(&n.name), now); }
+    }
+    for s in SPARES.lock().unwrap().lanes.values_mut().filter(|s| !s.native) { s.progress.clear_if_stored(&stored(&s.node), now); }
 }
 
 fn plan_tick(ctx: &Arc<Ctx>, seen: &mut Option<(String, Vec<String>)>, nodes: &[NodeView], compilers: &[String], activity: &Activity, started_ms: u64) {
@@ -386,23 +409,7 @@ fn plan_tick(ctx: &Arc<Ctx>, seen: &mut Option<(String, Vec<String>)>, nodes: &[
     let by_compiler: BTreeMap<_, _> = compilers.iter().cloned().zip(ids.iter().cloned()).collect();
     let ids: Vec<_> = ids.into_iter().collect::<BTreeSet<_>>().into_iter().collect();
     if PLAN.lock().unwrap().as_ref().is_some_and(|p| p.ids == ids) { return; }
-    let mut groups: BTreeMap<(String, String), (BTreeSet<String>, Vec<Node>)> = BTreeMap::new();
-    for n in nodes.iter().filter(|n| n.up && n.dev && !n.role().users()) {
-        let Some(caps) = &n.caps else { continue };
-        let Some(store) = &caps.jit_store else { continue };
-        let Some(id) = by_compiler.get(&store.compiler) else { continue };
-        if store.ids.contains(id) { continue; }
-        let Some(b) = activity.boxes.get(&n.name).filter(|b| !b.lanes.is_empty()) else { continue };
-        let (active, candidates) = groups.entry((caps.os.clone(), caps.arch.clone())).or_default();
-        active.extend(b.lanes.iter().cloned());
-        candidates.push(Node { name: n.name.clone(), os: caps.os.clone(), activity: b.lanes.len(), key: Key { id: id.clone(), rev: pair.rev(), packages: b.packages() }, progress: Progress::waiting(id, started_ms) });
-    }
-    let mut nodes = Vec::new();
-    for (_, (lanes, mut candidates)) in groups {
-        candidates.sort_by(|a, b| b.activity.cmp(&a.activity).then_with(|| a.name.cmp(&b.name)));
-        candidates.truncate(lanes.len().max(1));
-        nodes.extend(candidates);
-    }
+    let nodes = plan_nodes(nodes, &by_compiler, activity, &pair.rev(), started_ms);
     let (plan, previous) = {
         let mut p = PLAN.lock().unwrap();
         let generation = p.as_ref().map_or(1, |p| p.generation + 1);
@@ -422,6 +429,28 @@ fn plan_tick(ctx: &Arc<Ctx>, seen: &mut Option<(String, Vec<String>)>, nodes: &[
     }
 }
 
+/// The boxes a new JIT id is built on: every up dev box that lacks it, per OS/arch group the most
+/// lane-active first. A box no lane used lately builds it too (the next session may come to it),
+/// listing no tests.
+fn plan_nodes(nodes: &[NodeView], by_compiler: &BTreeMap<String, String>, activity: &Activity, rev: &str, started_ms: u64) -> Vec<Node> {
+    let mut groups: BTreeMap<(String, String), Vec<Node>> = BTreeMap::new();
+    for n in nodes.iter().filter(|n| n.up && n.dev && !n.role().users()) {
+        let Some(caps) = &n.caps else { continue };
+        let Some(store) = &caps.jit_store else { continue };
+        let Some(id) = by_compiler.get(&store.compiler) else { continue };
+        if store.ids.contains(id) { continue; }
+        let b = activity.boxes.get(&n.name);
+        let packages = b.map(BoxActivity::packages).unwrap_or_default();
+        groups.entry((caps.os.clone(), caps.arch.clone())).or_default().push(Node { name: n.name.clone(), os: caps.os.clone(), activity: b.map_or(0, |b| b.lanes.len()), key: Key { id: id.clone(), rev: rev.to_string(), packages }, progress: Progress::waiting(id, started_ms) });
+    }
+    let mut out = Vec::new();
+    for (_, mut candidates) in groups {
+        candidates.sort_by(|a, b| b.activity.cmp(&a.activity).then_with(|| a.name.cmp(&b.name)));
+        out.extend(candidates);
+    }
+    out
+}
+
 fn same_group(a: &Caps, b: &Caps) -> bool { a.os == b.os && a.arch == b.arch }
 
 fn spare_ok(n: &NodeView, l: &LaneActivity, group: &Caps) -> bool {
@@ -439,12 +468,12 @@ fn agent_lane(lane: &str) -> bool {
 }
 
 fn spare_tick(ctx: &Arc<Ctx>, nodes: &[NodeView], compilers: &[String], activity: &Activity, now: u64) {
-    // Check branches once per tick, before taking SPARES: git spawns a process.
+    // Check branches once per tick, before taking SPARES (refs read in-process).
     let mut done = BTreeMap::new();
     let needing: BTreeMap<_, _> = activity.lanes.iter().filter_map(|(lane, l)| {
         if !agent_lane(lane) { return None; }
         if let Some((branch, _)) = l.rev.split(',').next().unwrap_or("").split_once('@') {
-            if !matches!(branch, "" | "work" | "main") && *done.entry(branch).or_insert_with(|| super::git(&ctx.repo, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")]).is_err()) { return None; }
+            if !matches!(branch, "" | "work" | "main") && *done.entry(branch).or_insert_with(|| crate::gitread::rev(&ctx.repo, &format!("refs/heads/{branch}")).is_none()) { return None; }
         }
         let group = nodes.iter().find(|n| n.name == l.node)?.caps.as_ref()?;
         let used = nodes.iter().filter(|n| n.up && l.boxes.contains(&n.name) && n.caps.as_ref().is_some_and(|c| same_group(c, group))).count();
@@ -562,8 +591,12 @@ fn run_leg(ctx: &Ctx, run: &Run) {
         if run.native { return native_leg(run, &spec, &packages, &mut log); }
         // A JIT appearing in caps is no longer completion: the code cache still needs warming.
         let stale = || !set(run, |_| {});
+        // a request still queued gives way to a master restart's drain and asks again after it
+        let give_up = || stale() || super::roll::draining();
         loop {
             if stale() { return Ok(String::new()); }
+            // counted while it asks and runs; waits out a drain (the exec ends this thread)
+            let _drain = super::roll::holding();
             let mut on_wait = |line: &str| {
                 let _ = writeln!(log, "{line}");
                 set(run, |p| p.note = line.into());
@@ -571,12 +604,14 @@ fn run_leg(ctx: &Ctx, run: &Run) {
             let held = match Held::acquire_with(&spec, &|r| {
                 r.src = Src::Overlay;
                 r.cores = Some(if run.lane.is_none() { 4.0 } else { 2.0 });
-                r.ram_gb = Some(8.0);
+                // RAM as measured (a dev JIT build and a test listing peak at 2.4 GB): an 8 GB ask
+                // kept prebuilds off the 16 GB boxes beside a live session for minutes (11-02)
                 if run.lane.is_none() { r.priority = crate::lease::Priority::Interactive; }
                 if run.os == "macos" { r.needs.push(("os".into(), "macos".into())); }
-            }, &mut on_wait, &stale) {
+            }, &mut on_wait, &give_up) {
                 Ok(held) => held,
                 Err(_) if stale() => return Ok(String::new()),
+                Err(_) if super::roll::draining() => continue,
                 Err(e) if e.split_whitespace().next().is_some_and(leg::was_preempted) => continue,
                 Err(e) if missing_commit(&e) => {
                     let _ = writeln!(log, "{e}; retrying in {} s", RETRY.as_secs());
@@ -631,21 +666,32 @@ fn run_leg(ctx: &Ctx, run: &Run) {
 
 fn native_leg(run: &Run, spec: &Spec, packages: &[Package], log: &mut dyn Write) -> Result<String, String> {
     let stale = || !set(run, |_| {});
-    if stale() { return Ok(String::new()); }
+    // a request still queued gives way to a master restart's drain and asks again after it
+    let give_up = || stale() || super::roll::draining();
     let mut on_wait = |line: &str| {
         let _ = writeln!(log, "{line}");
         set(run, |p| p.note = line.into());
     };
-    let held = match Held::acquire_with(spec, &|r| {
-        r.warms = run.lane.clone();
-        r.cores = Some(4.0);
-        r.ram_gb = Some(8.0);
-        if run.os == "macos" { r.needs.push(("os".into(), "macos".into())); }
-    }, &mut on_wait, &stale) {
-        Ok(held) => held,
-        Err(e) => {
-            if let Some(id) = e.split_whitespace().next() { let _ = leg::was_preempted(id); }
-            return Err(e);
+    // counted while it asks and runs; waits out a drain (the exec ends this thread)
+    let _drain;
+    let held = loop {
+        if stale() { return Ok(String::new()); }
+        let drain = super::roll::holding();
+        match Held::acquire_with(spec, &|r| {
+            r.warms = run.lane.clone();
+            r.cores = Some(4.0);
+            r.ram_gb = Some(8.0);
+            if run.os == "macos" { r.needs.push(("os".into(), "macos".into())); }
+        }, &mut on_wait, &give_up) {
+            Ok(held) => {
+                _drain = drain;
+                break held;
+            }
+            Err(_) if !stale() && super::roll::draining() => continue,
+            Err(e) => {
+                if let Some(id) = e.split_whitespace().next() { let _ = leg::was_preempted(id); }
+                return Err(e);
+            }
         }
     };
     if !set(run, |p| { p.state = "held".into(); p.note.clear(); p.lease = Some(held.id.clone()); }) { return Ok(String::new()); }
@@ -752,4 +798,47 @@ pub fn render(v: &Value) -> String {
         out.push_str(&format!("  {} spare {} {native}{:<8} {}s {} {}\n", s(n, "lane"), s(n, "node"), s(n, "state"), n.get("seconds").and_then(Value::as_u64).unwrap_or(0), s(n, "id"), s(n, "note")));
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Progress;
+
+    /// Every dev box that lacks the new JIT builds it, the lane-active ones first; one that has it,
+    /// one with another compiler, a box down or with dev off is left alone.
+    #[test]
+    fn a_new_jit_is_planned_on_every_box_that_lacks_it() {
+        use crate::lease::sched::NodeView;
+        let node = |name: &str, up: bool, dev: bool, compiler: &str, ids: &[&str]| NodeView {
+            name: name.into(), up, dev,
+            caps: Some(crate::lease::Caps { os: "linux".into(), arch: "x86_64".into(), jit_store: Some(std::sync::Arc::new(crate::lease::jitstore::Snapshot { compiler: compiler.into(), ids: ids.iter().map(|s| s.to_string()).collect(), ..Default::default() })), ..Default::default() }),
+            ..Default::default()
+        };
+        let nodes = [node("idle", true, true, "c", &[]), node("busy", true, true, "c", &[]), node("has", true, true, "c", &["new"]), node("other", true, true, "d", &[]), node("down", false, true, "c", &[]), node("off", true, false, "c", &[])];
+        let mut activity = super::Activity::default();
+        activity.boxes.insert("busy".into(), super::BoxActivity { lanes: ["rc-a".to_string()].into(), packages: Default::default() });
+        let by_compiler = std::collections::BTreeMap::from([("c".to_string(), "new".to_string())]);
+        let plan = super::plan_nodes(&nodes, &by_compiler, &activity, "work@x", 1);
+        assert_eq!(plan.iter().map(|n| n.name.as_str()).collect::<Vec<_>>(), vec!["busy", "idle"]);
+        assert!(plan.iter().all(|n| n.key.id == "new"));
+    }
+
+    #[test]
+    fn a_failure_clears_once_its_boxs_store_holds_the_jit() {
+        let id = "66f764de1aae36f89242ec4f";
+        let mut p = Progress { state: "failed".into(), note: "refused: 105: x".into(), ..Progress::waiting(id, 1) };
+        assert!(!p.clear_if_stored(&["0".repeat(24)], 5), "another JIT in the store is no fix");
+        assert_eq!(p.state, "failed");
+        assert!(p.clear_if_stored(&["0".repeat(24), id.into()], 5));
+        assert_eq!((p.state.as_str(), p.ended_ms), ("stored", 5));
+        assert!(!p.note.contains("refused"));
+        // only a failure clears: a warm in flight or done stays what it is
+        for state in ["waiting", "building", "done", "warm"] {
+            let mut p = Progress { state: state.into(), ..Progress::waiting(id, 1) };
+            assert!(!p.clear_if_stored(&[id.into()], 5) && p.state == state);
+        }
+        // a failure before any JIT was named never clears
+        let mut p = Progress { state: "failed".into(), ..Progress::waiting("", 1) };
+        assert!(!p.clear_if_stored(&[String::new()], 5));
+    }
 }

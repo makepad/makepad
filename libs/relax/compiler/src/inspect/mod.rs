@@ -186,7 +186,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("session", "view [open|dismiss]", "the run's view over the app (compile errors, a parked panic, the JIT's state): what it shows, or open / dismiss it (the caption's JIT ring is display only)"),
     ("pin", "[on|off]", "pin the running app while an operation runs: no edit or landing reaches it and it does not restart; off: it catches up"),
     ("inputs", "[match=<path substring>]", "the live session's reload source files, workspace-relative, one path per line and a count; unloaded sources are excluded"),
-    ("session", "relaunch", "apply the edits waiting for a restart: a hosted app relaunches its domain in this process (host window and GPU device kept); a program that restarts itself (std::relax::restart_supported) restarts with its state"),
+    ("session", "relaunch", "apply the edits waiting for a restart: the process starts again (an app that restarts itself, std::relax::restart_supported, with its state and window frames)"),
     ("why-hung", "[probe_ms=200]", "is it stuck and why: verdict (deadlock / blocked / busy / idle), the wait chain or cycle, stacks of the threads in it"),
     ("capture", "[why=<text>]", "capture the JIT's state and flight recording; answers the likely cause and report path"),
     ("why-slow", "[s=3]", "where the time goes: ranked findings -- the main thread's CPU split (program / compiles / makepad run runtime / system), its hot fns, the owner's service, other busy threads"),
@@ -242,7 +242,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("threads", "", "every thread: name, role, state, CPU time, what it waits on; JIT threads: alive/restarting/dead, panics, heartbeat"),
     ("stacks", "[thread=<name|tid|main|owner|all>] [depth=12]", "symbolised stacks (identical stacks folded)"),
     ("waits", "", "the wait registry: who waits for what, held by whom"),
-    ("owner", "", "the owner thread: what it serves, for whom, queue"),
+    ("owner", "[n=10] [since=<seq>]", "the owner thread: what it serves, for whom, its queue, the main thread's waits for it and what they queued behind; then per request site how long its services held the owner (a histogram) and main's queue time behind it, most first; each answer is snapshot <seq>: since=<seq> gives the change since then (a drag's window)"),
     ("help", "[<cmd>|schema]", "this list; `help schema`: a JSON tool definition for agents"),
 ];
 
@@ -331,7 +331,7 @@ fn dispatch_command(req: &Req, out: &mut Out) {
         "live" => cmd_live(req, out),
         "stacks" => cmd_stacks(req, out),
         "waits" => cmd_waits(out),
-        "owner" => cmd_owner(out),
+        "owner" => cmd_owner(req, out),
         "why-hung" | "hang" => hang::why_hung(req, out),
         "capture" => {
             let s = snapshot::capture(req.get("why").unwrap_or("inspect capture"));
@@ -1255,9 +1255,128 @@ fn jit_line(a: &crate::postframe::Activity, b: &crate::postframe::Activity, ms: 
     parts.join(" · ")
 }
 
-fn cmd_owner(out: &mut Out) {
+/// One `owner` answer's counters (`owner since=<seq>` reports the change since one).
+struct OwnerSnap {
+    seq: u64,
+    wall: u64,
+    sites: Vec<(*const std::panic::Location<'static>, u8, Vec<u64>)>,
+    pumps: Vec<(*const std::panic::Location<'static>, *const std::panic::Location<'static>, [u64; 4])>,
+    main: [u64; 12],
+    behind: [[u64; 2]; crate::owner::CLASSES + 1],
+}
+// SAFETY: the site pointers are &'static Locations
+unsafe impl Send for OwnerSnap {}
+
+static OWNER_SNAPS: Mutex<Vec<OwnerSnap>> = Mutex::new(Vec::new());
+static OWNER_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn owner_snap() -> OwnerSnap {
+    use crate::owner::{CLASSES, MAIN_ACC, MAIN_BEHIND};
+    let mut behind = [[0u64; 2]; CLASSES + 1];
+    for (c, b) in behind.iter_mut().enumerate() {
+        *b = [MAIN_BEHIND[c][0].load(Relaxed), MAIN_BEHIND[c][1].load(Relaxed)];
+    }
+    OwnerSnap {
+        seq: OWNER_SEQ.fetch_add(1, Relaxed) + 1,
+        wall: crate::clock::wall_ns(),
+        sites: crate::owner::site_rows().into_iter().map(|(s, c, a)| (s, c, a.to_vec())).collect(),
+        pumps: crate::owner::pump_rows(),
+        main: std::array::from_fn(|i| MAIN_ACC[i].load(Relaxed)),
+        behind,
+    }
+}
+
+/// `file.rs:line` of a request or wait site.
+fn loc_name(site: *const std::panic::Location<'static>) -> String {
+    // SAFETY: only &'static Locations are stored
+    unsafe { site.as_ref() }.map_or("other".to_string(), |l| format!("{}:{}", l.file().rsplit('/').next().unwrap_or(""), l.line()))
+}
+
+/// `owner [n=10] [since=<seq>]`: what the owner serves now and its queue, then how long its
+/// requests held it, by request site (a hold histogram), most main-thread queue time behind it
+/// first. Atomics only: it answers while the owner is busy.
+fn cmd_owner(req: &Req, out: &mut Out) {
+    use crate::owner::{CLASSES, CLASS_NAMES, HOLD_BUCKETS, HOLD_EDGES_US, SITE_BEHIND_N, SITE_BEHIND_NS, SITE_HIST, SITE_LONG_N, SITE_MAX_NS, SITE_NS, SITE_PUMP_NS, SITE_REQS};
     out.measured("owner thread", "owner counters (no owner)", &[]);
-    out.line(&format!("{{\"serving\":{},\"queued\":{},\"pure_census\":{}}}", json_str(&crate::owner::serving_note()), crate::owner::queued_note(), crate::owner::pure_note_json()));
+    let now = owner_snap();
+    let mut snaps = OWNER_SNAPS.lock().unwrap_or_else(|e| e.into_inner());
+    let base = match req.get("since") {
+        Some(s) => match s.parse::<u64>().ok().and_then(|q| snaps.iter().position(|x| x.seq == q)) {
+            Some(i) => Some(i),
+            None => return out.err(&format!("owner since={s}: no such snapshot (the last 16 answers are kept)")),
+        },
+        None => None,
+    };
+    let was = base.map(|i| &snaps[i]);
+    let ms = |ns: u64| (ns as f64 / 1e4).round() / 100.0;
+    let d = |a: u64, b: Option<u64>| a.saturating_sub(b.unwrap_or(0));
+    let m = |i: usize| d(now.main[i], was.map(|w| w.main[i]));
+    let pair = |n: u64, ns: u64| format!("[{},{}]", n, ms(ns));
+    let behind: Vec<String> = (0..=CLASSES)
+        .map(|c| format!("\"{}\":{}", if c == CLASSES { "idle" } else { CLASS_NAMES[c] }, pair(d(now.behind[c][0], was.map(|w| w.behind[c][0])), d(now.behind[c][1], was.map(|w| w.behind[c][1])))))
+        .collect();
+    out.line(&format!(
+        "{{\"seq\":{},{}\"serving\":{},\"queued\":{},\"main_requests\":{{\"n\":{},\"wait_ms\":{},\"queue_ms\":{},\"wake_ms\":{},\"by_wait\":{{\"<20us\":{},\"<200us\":{},\"<2ms\":{},\">=2ms\":{}}}}},\"main_queued_behind\":{{{}}},\"pure_census\":{}}}",
+        now.seq,
+        was.map_or(String::new(), |w| format!("\"since\":{},\"s\":{:.1},", w.seq, now.wall.saturating_sub(w.wall) as f64 / 1e9)),
+        json_str(&crate::owner::serving_note()),
+        crate::owner::queued_note(),
+        m(0), ms(m(1)), ms(m(2)), ms(m(3)),
+        pair(m(4), m(5)), pair(m(6), m(7)), pair(m(8), m(9)), pair(m(10), m(11)),
+        behind.join(","),
+        crate::owner::pure_note_json()
+    ));
+    // the sites' changes (since): the longest service is not a sum, the histogram says it
+    let mut rows: Vec<(u64, u64, String)> = Vec::new();
+    for (site, class, a) in &now.sites {
+        let old = was.and_then(|w| w.sites.iter().find(|x| x.0 == *site)).map(|x| &x.2);
+        let f = |i: usize| d(a[i], old.map(|o| o[i]));
+        if f(SITE_REQS) == 0 {
+            continue;
+        }
+        let name = loc_name(*site);
+        let label = |b: usize| {
+            let us = |v: u64| if v < 1000 { format!("{}", v as f64 / 1000.0) } else { format!("{}", v / 1000) };
+            match b {
+                0 => format!("<{}", us(HOLD_EDGES_US[0])),
+                b if b == HOLD_EDGES_US.len() => format!(">={}", us(HOLD_EDGES_US[b - 1])),
+                b => format!("{}-{}", us(HOLD_EDGES_US[b - 1]), us(HOLD_EDGES_US[b])),
+            }
+        };
+        let hist: Vec<String> = (0..HOLD_BUCKETS).filter(|&b| f(SITE_HIST + b) > 0).map(|b| format!("\"{}\":{}", label(b), f(SITE_HIST + b))).collect();
+        let max = if was.is_none() { format!(",\"max_ms\":{}", ms(a[SITE_MAX_NS])) } else { String::new() };
+        rows.push((f(SITE_BEHIND_NS), f(SITE_NS), format!(
+            "{{\"site\":{},\"class\":\"{}\",\"n\":{},\"ms\":{}{},\"over_1ms\":{},\"hist_ms\":{{{}}},\"waiting_ms\":{},\"main_behind\":{}}}",
+            json_str(&name), CLASS_NAMES[*class as usize % CLASSES], f(SITE_REQS), ms(f(SITE_NS)), max, f(SITE_LONG_N), hist.join(","), ms(f(SITE_PUMP_NS)), pair(f(SITE_BEHIND_N), f(SITE_BEHIND_NS))
+        )));
+    }
+    rows.sort_by(|a, b| (b.0, b.1).cmp(&(a.0, a.1)));
+    let n = req.num("n", 10) as usize;
+    out.line(&format!("{{\"holds\":\"per request site: services n, owner ms, services by length in ms (hist_ms), main's program/publish requests queued behind it after the first present [n, ms]; most main_behind first, then owner ms\",\"sites\":{},\"shown\":{}}}", rows.len(), rows.len().min(n)));
+    for r in rows.into_iter().take(n) {
+        out.line(&r.2);
+    }
+    // the owner's waits inside requests (a request holds the owner while it waits; main's program
+    // requests are not served meanwhile)
+    let mut pumps: Vec<(u64, String)> = Vec::new();
+    for (site, rs, a) in &now.pumps {
+        let old = was.and_then(|w| w.pumps.iter().find(|x| x.0 == *site && x.1 == *rs)).map(|x| x.2);
+        let f = |i: usize| d(a[i], old.map(|o| o[i]));
+        if f(0) == 0 {
+            continue;
+        }
+        let max = if was.is_none() { format!(",\"max_ms\":{}", ms(a[3])) } else { String::new() };
+        pumps.push((f(1), format!("{{\"wait\":{},\"in\":{},\"n\":{},\"ms\":{},\"serving_ms\":{}{}}}", json_str(&loc_name(*site)), json_str(&if rs.is_null() { "between requests".to_string() } else { loc_name(*rs) }), f(0), ms(f(1)), ms(f(2)), max)));
+    }
+    pumps.sort_by(|a, b| b.0.cmp(&a.0));
+    out.line(&format!("{{\"waits\":\"the owner's waits inside requests by wait site and request site: n, ms, of it serving Job/Publish requests (serving_ms)\",\"sites\":{},\"shown\":{}}}", pumps.len(), pumps.len().min(n)));
+    for r in pumps.into_iter().take(n) {
+        out.line(&r.1);
+    }
+    let old = snaps.len().saturating_sub(15);
+    snaps.drain(..old);
+    snaps.push(now);
+    out.line(&format!("{{\"next\":\"owner since={}\"}}", OWNER_SEQ.load(Relaxed)));
 }
 
 // ------------------------------------------------------------------ Splash VMs

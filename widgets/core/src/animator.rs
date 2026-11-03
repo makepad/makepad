@@ -146,6 +146,15 @@ pub trait AnimatorImpl: ScriptApply + Sized {
     fn animator_field_mut(&mut self) -> &mut Animator;
 
     fn animator_cut_scoped(&mut self, cx: &mut Cx, state: &[LiveId; 2], scope: &mut Scope) {
+        // Already in `state`, with nothing on its way: a cut applies and redraws nothing (a
+        // widget that sets its state as it draws, every draw, costs no apply or redraw then).
+        // Its cursor is still set, as a cut sets it.
+        if self.animator_field().settled_in(state) {
+            if let Some(cursor) = self.animator_field().state_cursor(state) {
+                cx.set_cursor(cursor);
+            }
+            return;
+        }
         // If the VM is already held (we're inside an apply walk's cx.with_vm),
         // cut() -> cx.with_vm would re-enter and panic; defer instead.
         if cx.is_script_vm_held() {
@@ -1002,6 +1011,14 @@ impl Animator {
     /// Check if the animator is in a specific state
     pub fn in_state(&self, _cx: &Cx, state: &[LiveId; 2]) -> bool {
         self.current_state_matches(state)
+    }
+
+    /// `state` is its group's current state, reached: no track of the group runs and no
+    /// deferred cut or play waits. A cut to it would apply what its values already are.
+    pub fn settled_in(&self, state: &[LiveId; 2]) -> bool {
+        self.deferred.is_empty()
+            && self.current_states.get(&state[0]) == Some(&state[1])
+            && !self.tracks.iter().any(|t| t.group_id == state[0])
     }
 
     /// Returns the cursor that `state` sets when it is played, if any.

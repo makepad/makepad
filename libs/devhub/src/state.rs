@@ -1,6 +1,6 @@
 //! devhub's workflow state: what `devhub land`, `lanes`, `verify`, `jitlegs`, `after`, `allapps` and `push`
-//! know, in ONE document the master owns (`~/.makepad/devhub/state.json`, rewritten whole on every
-//! change; no .txt ledgers). Every change is also a record on the master's event stream (its kind
+//! know, in one master-owned document (`~/.makepad/devhub/state.json`). Large output and completed
+//! records live in append-only files referenced by byte slices; unchanged updates write nothing. Every change is also a record on the master's event stream (its kind
 //! is the section's name), so an agent blocks on `devhub watch <kinds>` instead of polling.
 //!
 //! The sections are typed. A command that keeps state adds its struct here, a field on [`Doc`] and
@@ -10,8 +10,37 @@
 use crate::proto::{hub_record, Record, Sev};
 use makepad_strict_json::{obj, s, Value};
 use std::path::{Path, PathBuf};
+use std::io::{Read, Seek, Write};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
+
+/// Copy-on-write history: taking a transaction snapshot shares the immutable completed
+/// runs. Only a mutation of that history clones it; ordinary job updates never do.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SharedVec<T: Clone>(Arc<Vec<T>>);
+impl<T: Clone> std::ops::Deref for SharedVec<T> {
+    type Target = Vec<T>;
+    fn deref(&self) -> &Vec<T> { &self.0 }
+}
+impl<T: Clone> std::ops::DerefMut for SharedVec<T> {
+    fn deref_mut(&mut self) -> &mut Vec<T> { Arc::make_mut(&mut self.0) }
+}
+impl<T: Clone> From<Vec<T>> for SharedVec<T> {
+    fn from(v: Vec<T>) -> Self { Self(Arc::new(v)) }
+}
+impl<T: Clone> FromIterator<T> for SharedVec<T> {
+    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self { Self::from(Vec::from_iter(iter)) }
+}
+impl<T: Clone> IntoIterator for SharedVec<T> {
+    type Item = T;
+    type IntoIter = std::vec::IntoIter<T>;
+    fn into_iter(self) -> Self::IntoIter { Arc::unwrap_or_clone(self.0).into_iter() }
+}
+impl<'a, T: Clone> IntoIterator for &'a SharedVec<T> {
+    type Item = &'a T;
+    type IntoIter = std::slice::Iter<'a, T>;
+    fn into_iter(self) -> Self::IntoIter { self.iter() }
+}
 
 pub type Publish = Arc<dyn Fn(Record) -> u64 + Send + Sync>;
 
@@ -328,7 +357,7 @@ pub struct Ci {
     /// the background sweep, independent of the gate
     pub sweep_run: Option<CiRun>,
     /// finished runs, oldest first
-    pub runs: Vec<CiRun>,
+    pub runs: SharedVec<CiRun>,
     /// runs started: rotates which OS each app's smoke script runs on
     pub rotation: u64,
 }
@@ -721,7 +750,9 @@ impl Live {
     }
 
     pub fn test_result(&self, seconds: f64) -> String {
-        let x = self;
+        let mut loaded = self.clone();
+        if let Err(e) = loaded.load_text() { return format!("live log: {e}\n"); }
+        let x = &loaded;
         let Some(p) = &x.patch else { return format!("devhub test: {} {}: {}\n", x.app, x.state, x.note) };
         if p.outcome == "jit_error" { return jit_error_verdict(p); }
         let Some(t) = &p.tests else { return format!("{}\n{}", if p.reason.is_empty() { &x.note } else { &p.reason }, p.output) };
@@ -766,10 +797,190 @@ pub struct LivePatch {
     pub log_start: u64,
     pub log_end: u64,
     pub output: String,
+    pub output_ref: TextRef,
+    pub reason_ref: TextRef,
     pub retried: bool,
     pub jit_error: u64,
     /// why a restart or a refusal
     pub reason: String,
+}
+
+/// A master-owned append-only log slice, never embedded in the state document.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct TextRef {
+    pub path: String,
+    pub offset: u64,
+    pub len: u64,
+}
+impl TextRef {
+    fn to_value(&self) -> Value { obj(vec![("path", s(&self.path)), ("offset", int(self.offset)), ("len", int(self.len))]) }
+    fn from_value(v: Option<&Value>) -> Self { Self { path: text(v, "path"), offset: uint(v, "offset"), len: uint(v, "len") } }
+    pub fn read(&self) -> Result<String, String> {
+        if self.len == 0 { return Ok(String::new()); }
+        let mut file = std::fs::File::open(&self.path).map_err(|e| e.to_string())?;
+        file.seek(std::io::SeekFrom::Start(self.offset)).map_err(|e| e.to_string())?;
+        let mut text = String::new();
+        file.take(self.len).read_to_string(&mut text).map_err(|e| e.to_string())?;
+        if text.len() as u64 != self.len { return Err("truncated live log slice".into()); }
+        Ok(text)
+    }
+    fn spill(&mut self, path: &Path, text: &mut String) -> Result<(), String> {
+        if text.is_empty() { return Ok(()); }
+        if self.len == text.len() as u64 && self.read()? == *text { text.clear(); return Ok(()); }
+        std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
+        let mut file = std::fs::OpenOptions::new().create(true).append(true).open(path).map_err(|e| e.to_string())?;
+        let offset = file.metadata().map_err(|e| e.to_string())?.len();
+        file.write_all(text.as_bytes()).map_err(|e| e.to_string())?;
+        file.sync_all().map_err(|e| e.to_string())?;
+        #[cfg(unix)]
+        std::fs::File::open(path.parent().unwrap()).and_then(|dir| dir.sync_all()).map_err(|e| e.to_string())?;
+        *self = Self { path: path.to_string_lossy().into_owned(), offset, len: text.len() as u64 };
+        text.clear();
+        Ok(())
+    }
+}
+impl Live {
+    pub fn load_text(&mut self) -> Result<(), String> {
+        if let Some(p) = &mut self.patch {
+            if p.output.is_empty() { p.output = p.output_ref.read()?; }
+            if p.reason.is_empty() { p.reason = p.reason_ref.read()?; }
+        }
+        Ok(())
+    }
+}
+impl Doc {
+    fn spill(&mut self, home: &Path) -> Result<(), String> {
+        for live in &mut self.lives {
+            if let Some(patch) = &mut live.patch {
+                // IDs are generated by the master; encode before using one as a file name.
+                let id: String = live.id.bytes().map(|b| format!("{b:02x}")).collect();
+                let path = home.join("live-logs").join(format!("{id}.log"));
+                patch.output_ref.spill(&path, &mut patch.output)?;
+                patch.reason_ref.spill(&path, &mut patch.reason)?;
+            }
+        }
+        Ok(())
+    }
+}
+// Finished records retain their existing in-memory representation for callers. Their durable
+// representation is an immutable file slice, so a job event never serializes CI history or
+// another job's output. This is the document's storage layout, not a second mutable cache.
+impl Doc {
+    fn disk_value(&self, old: &Doc, previous: &std::collections::BTreeMap<String, TextRef>, home: &Path) -> Result<(Value, std::collections::BTreeMap<String, TextRef>), String> {
+        let mut compact = self.clone();
+        let mut records = std::collections::BTreeMap::new();
+        let mut order = Vec::new();
+        let mut save = |key: String, unchanged: bool, value: &dyn Fn() -> Value| -> Result<(), String> {
+            let reference = if unchanged { previous.get(&key).cloned() } else { None };
+            let reference = match reference {
+                Some(r) => r,
+                None => {
+                    let mut r = TextRef::default();
+                    r.spill(&home.join("records.jsonl"), &mut format!("{}\n", value().to_json()))?;
+                    r
+                }
+            };
+            order.push(key.clone());
+            records.insert(key, reference);
+            Ok(())
+        };
+        for run in &self.ci.runs {
+            save(format!("ci/{}", run.id), old.ci.runs.iter().find(|r| r.id == run.id).is_some_and(|r| std::ptr::eq(r, run) || r == run), &|| ci_run_value(run))?;
+        }
+        compact.ci.runs = self.ci.runs.iter().map(|r| CiRun {
+            id: r.id.clone(), pair: r.pair.clone(), dry: r.dry, checkout: r.checkout.clone(), lock_digest: r.lock_digest.clone(),
+            started_ms: r.started_ms, ended_ms: r.ended_ms, verdict: r.verdict.clone(), critical: r.critical.clone(), fleet: r.fleet.clone(),
+            rotation: r.rotation, sweep: r.sweep, stopping: r.stopping, ..Default::default()
+        }).collect();
+        for job in self.jobs.iter().filter(|j| j.done()) {
+            save(format!("jobs/{}", job.id), old.jobs.iter().find(|j| j.id == job.id) == Some(job), &|| job_value(job))?;
+        }
+        for job in compact.jobs.iter_mut().filter(|j| j.done()) { job.errors.clear(); job.tail.clear(); }
+        for live in self.lives.iter().filter(|x| !x.active()) {
+            save(format!("lives/{}", live.id), old.lives.iter().find(|x| x.id == live.id) == Some(live), &|| live_state_value(live))?;
+        }
+        for live in compact.lives.iter_mut().filter(|x| !x.active()) { live.sources.clear(); }
+        for (i, failure) in self.verify.failures.iter().enumerate() {
+            save(format!("failures/{i}"), old.verify.failures.get(i) == Some(failure), &|| failure_value(failure))?;
+        }
+        for failure in &mut compact.verify.failures { failure.legs.clear(); }
+        for (i, run) in self.jitlegs.runs.iter().enumerate().filter(|(_, r)| r.ended_ms > 0) {
+            save(format!("jitlegs/{i}"), old.jitlegs.runs.get(i) == Some(run), &|| jitlegs_run_value(run))?;
+        }
+        for run in compact.jitlegs.runs.iter_mut().filter(|r| r.ended_ms > 0) { run.legs.clear(); }
+        let mut value = compact.to_value();
+        if let Value::Obj(fields) = &mut value {
+            for (key, value) in fields.iter_mut() {
+                if key == "jobs" {
+                    *value = Value::Arr(self.jobs.iter().map(|j| if j.done() { obj(vec![("id", s(&j.id)), ("state", s(&j.state)), ("lane", s(&j.lane)), ("submitted_ms", int(j.submitted_ms)), ("ended_ms", int(j.ended_ms))]) } else { job_value(j) }).collect());
+                }
+                if key == "lives" {
+                    *value = Value::Arr(self.lives.iter().map(|x| if !x.active() { obj(vec![("id", s(&x.id)), ("state", s(&x.state)), ("app", s(&x.app)), ("lane", s(&x.lane)), ("started_ms", int(x.started_ms))]) } else { live_state_value(x) }).collect());
+                }
+            }
+            fields.push(("records".into(), Value::Arr(order.iter().map(|key| obj(vec![("key", s(key)), ("slice", records[key].to_value())])).collect())));
+        }
+        Ok((value, records))
+    }
+
+    fn from_disk(mut value: Value, records: &mut std::collections::BTreeMap<String, TextRef>) -> Result<Doc, String> {
+        // Metadata keeps the same schema. Embedded diagnostic/history payload fields
+        // are not read; file slices supply them. No old payload is migrated or imported.
+        fn remove(v: &mut Value, key: &str) {
+            if let Value::Obj(fields) = v { fields.retain(|(k, _)| k != key); }
+        }
+        fn list_mut(v: &mut Value, key: &str, f: impl Fn(&mut Value)) {
+            if let Value::Obj(fields) = v {
+                if let Some((_, Value::Arr(items))) = fields.iter_mut().find(|(k, _)| k == key) {
+                    for item in items { f(item); }
+                }
+            }
+        }
+        if let Value::Obj(fields) = &mut value {
+            for (key, v) in fields {
+                match key.as_str() {
+                    "ci" => list_mut(v, "runs", |run| { remove(run, "shards"); remove(run, "boxes"); remove(run, "plan_timings"); }),
+                    "jitlegs" => list_mut(v, "runs", |run| if uint(Some(run), "ended_ms") > 0 { remove(run, "legs"); }),
+                    "verify" => list_mut(v, "failures", |failure| remove(failure, "legs")),
+                    "jobs" => if let Value::Arr(jobs) = v { for job in jobs { remove(job, "errors"); remove(job, "tail"); } },
+                    _ => {}
+                }
+            }
+        }
+        let mut doc = Doc::from_value(&value);
+        for record in arr(Some(&value), "records") {
+            let key = text(Some(record), "key");
+            let reference = TextRef::from_value(record.get("slice"));
+            let text = reference.read().map_err(|e| format!("read workflow record {key}: {e}; state kept"))?;
+            let v = makepad_strict_json::parse_depth(text.as_bytes(), 16).map_err(|e| format!("invalid workflow record {key}: {e:?}; state kept"))?;
+            match key.split('/').next().unwrap_or("") {
+                "ci" => { let run = ci_run_from(&v); if let Some(old) = doc.ci.runs.iter_mut().find(|r| r.id == run.id) { *old = run; } else { doc.ci.runs.push(run); } },
+                "jobs" => { let job = job_from(&v); if let Some(old) = doc.jobs.iter_mut().find(|j| j.id == job.id) { *old = job; } else { doc.jobs.push(job); } },
+                "lives" => { let live = live_state_from(&v); if let Some(old) = doc.lives.iter_mut().find(|x| x.id == live.id) { *old = live; } else { doc.lives.push(live); } },
+                "failures" => { let failure = failure_from(&v); if let Some(old) = doc.verify.failures.iter_mut().find(|x| x.pair == failure.pair && x.at_ms == failure.at_ms) { *old = failure; } else { doc.verify.failures.push(failure); } },
+                "jitlegs" => { let run = jitlegs_run_from(&v); if let Some(old) = doc.jitlegs.runs.iter_mut().find(|x| x.pair == run.pair && x.started_ms == run.started_ms) { *old = run; } else { doc.jitlegs.runs.push(run); } },
+                _ => return Err(format!("unknown workflow record {key}; state kept")),
+            }
+            records.insert(key, reference);
+        }
+        doc.jobs.sort_by_key(|j| j.id.strip_prefix('J').and_then(|id| id.parse::<u64>().ok()).unwrap_or(0));
+        doc.lives.sort_by_key(|x| x.id.strip_prefix('W').and_then(|id| id.parse::<u64>().ok()).unwrap_or(0));
+        Ok(doc)
+    }
+}
+
+fn archive_history(doc: &mut Doc) -> Vec<(&'static str, Value)> {
+    let mut archive = Vec::new();
+    for (section, entries, field, terminal) in [("land", &mut doc.land, "state", "landed"), ("merges", &mut doc.merges, "result", "landed")] {
+        let ended = entries.iter().filter(|v| v.get(field).and_then(Value::as_str) == Some(terminal)).count();
+        let mut excess = ended.saturating_sub(KEEP);
+        entries.retain(|v| {
+            if excess > 0 && v.get(field).and_then(Value::as_str) == Some(terminal) {
+                archive.push((section, v.clone())); excess -= 1; false
+            } else { true }
+        });
+    }
+    archive
 }
 
 #[derive(Clone, Debug, PartialEq, Default)]
@@ -915,6 +1126,8 @@ pub struct Doc {
     /// the next landing queue number: never reused, even after landed entries are trimmed
     pub land_next: u64,
     pub jobs: Vec<Job>,
+    /// Durable submission receipts, independent of trimmed job display history.
+    pub submissions: std::collections::BTreeMap<String, String>,
     /// the id numbers of the next job (`J<n>`) and batch (`B<n>`)
     pub jobs_next: u64,
     pub batches_next: u64,
@@ -967,10 +1180,11 @@ impl Doc {
             ("lanes", Value::Arr(self.lanes.iter().map(lane_value).collect())),
             ("shows", Value::Arr(self.shows.iter().map(show_value).collect())),
             ("shows_next", int(self.shows_next)),
-            ("lives", Value::Arr(self.lives.iter().map(live_value).collect())),
+            ("lives", Value::Arr(self.lives.iter().map(live_state_value).collect())),
             ("lives_next", int(self.lives_next)),
             ("land_next", int(self.land_next)),
             ("jobs", Value::Arr(self.jobs.iter().map(job_value).collect())),
+            ("submissions", Value::Arr(self.submissions.iter().map(|(id, result)| obj(vec![("id", s(id)), ("result", s(result))])).collect())),
             ("jobs_next", int(self.jobs_next)),
             ("batches_next", int(self.batches_next)),
             ("snaps_next", int(self.snaps_next)),
@@ -1013,10 +1227,11 @@ impl Doc {
             }).collect(),
             shows: arr(Some(v), "shows").iter().map(show_from).collect(),
             shows_next: uint(Some(v), "shows_next"),
-            lives: arr(Some(v), "lives").iter().map(live_from).collect(),
+            lives: arr(Some(v), "lives").iter().map(live_state_from).collect(),
             lives_next: uint(Some(v), "lives_next"),
             land_next: uint(Some(v), "land_next"),
             jobs: arr(Some(v), "jobs").iter().map(job_from).collect(),
+            submissions: arr(Some(v), "submissions").iter().map(|r| (text(Some(r), "id"), text(Some(r), "result"))).collect(),
             jobs_next: uint(Some(v), "jobs_next"),
             batches_next: uint(Some(v), "batches_next"),
             snaps_next: uint(Some(v), "snaps_next"),
@@ -1029,7 +1244,7 @@ impl Doc {
     }
 
     pub fn parse(text: &str) -> Option<Doc> {
-        makepad_strict_json::parse_depth(text.as_bytes(), 16).ok().map(|v| Doc::from_value(&v))
+        makepad_strict_json::parse_depth(text.as_bytes(), 16).ok().filter(|v| matches!(v, Value::Obj(_))).map(|v| Doc::from_value(&v))
     }
 
     /// One section's JSON (`verify`, `jitlegs`, `allapps`, `after`, `pushes`, `lanes`, `shows`, `lives`, `jobs`), or the whole document.
@@ -1050,8 +1265,15 @@ impl Doc {
         }
         cut(&mut self.verify.verified);
         cut(&mut self.verify.failures);
+        // a retry comes within minutes: the newest receipts answer it (ids start with their time)
+        while self.submissions.len() > JOBS_KEEP {
+            self.submissions.pop_first();
+        }
         cut(&mut self.pushes);
-        cut(&mut self.ci.runs);
+        if self.ci.runs.len() > KEEP {
+            let excess = self.ci.runs.len() - KEEP;
+            self.ci.runs.drain(..excess);
+        }
         if self.jitlegs.runs.len() > 20 {
             self.jitlegs.runs.drain(..self.jitlegs.runs.len() - 20);
         }
@@ -1317,8 +1539,21 @@ pub fn live_tests_from(v: &Value) -> Option<LiveTests> {
 }
 
 pub fn live_value(x: &Live) -> Value {
+    let mut value = live_state_value(x);
+    if let Some(patch) = &x.patch {
+        if let Value::Obj(fields) = &mut value {
+            if let Some((_, Value::Obj(fields))) = fields.iter_mut().find(|(k, _)| k == "patch") {
+                fields.push(("output".into(), s(if patch.output.is_empty() { patch.output_ref.read().unwrap_or_else(|e| format!("live log: {e}")) } else { patch.output.clone() })));
+                fields.push(("reason".into(), s(if patch.reason.is_empty() { patch.reason_ref.read().unwrap_or_else(|e| format!("live log: {e}")) } else { patch.reason.clone() })));
+            }
+        }
+    }
+    value
+}
+
+fn live_state_value(x: &Live) -> Value {
     let patch = x.patch.as_ref().map_or(Value::Null, |p| {
-        obj(vec![("files", strs(&p.files)), ("edit", s(&p.edit)), ("group", p.group.map_or(Value::Null, int)), ("seq", int(p.seq)), ("cursor", s(&p.cursor)), ("edit_ms", int(p.edit_ms)), ("called_ms", int(p.called_ms)), ("shipped_ms", int(p.shipped_ms)), ("outcome", s(&p.outcome)), ("outcome_ms", int(p.outcome_ms)), ("frame_ms", int(p.frame_ms)), ("tests", p.tests.as_ref().map_or(Value::Null, live_tests_value)), ("verdict_ms", int(p.verdict_ms)), ("reason", s(&p.reason)), ("log_start", int(p.log_start)), ("log_end", int(p.log_end)), ("output", s(&p.output)), ("retried", Value::Bool(p.retried)), ("jit_error", int(p.jit_error))])
+        obj(vec![("files", strs(&p.files)), ("edit", s(&p.edit)), ("group", p.group.map_or(Value::Null, int)), ("seq", int(p.seq)), ("cursor", s(&p.cursor)), ("edit_ms", int(p.edit_ms)), ("called_ms", int(p.called_ms)), ("shipped_ms", int(p.shipped_ms)), ("outcome", s(&p.outcome)), ("outcome_ms", int(p.outcome_ms)), ("frame_ms", int(p.frame_ms)), ("tests", p.tests.as_ref().map_or(Value::Null, live_tests_value)), ("verdict_ms", int(p.verdict_ms)),  ("log_start", int(p.log_start)), ("log_end", int(p.log_end)), ("output_ref", p.output_ref.to_value()), ("reason_ref", p.reason_ref.to_value()), ("retried", Value::Bool(p.retried)), ("jit_error", int(p.jit_error))])
     });
     obj(vec![
         ("id", s(&x.id)),
@@ -1357,6 +1592,15 @@ pub fn live_value(x: &Live) -> Value {
 }
 
 pub fn live_from(v: &Value) -> Live {
+    let mut live = live_state_from(v);
+    if let Some(p) = &mut live.patch {
+        p.output = text(v.get("patch"), "output");
+        p.reason = text(v.get("patch"), "reason");
+    }
+    live
+}
+
+fn live_state_from(v: &Value) -> Live {
     let o = Some(v);
     let p = v.get("patch").filter(|p| !p.is_null());
     Live {
@@ -1391,7 +1635,7 @@ pub fn live_from(v: &Value) -> Live {
         started_ms: uint(o, "started_ms"),
         touched_ms: uint(o, "touched_ms"),
         ended_ms: uint(o, "ended_ms"),
-        patch: p.map(|p| LivePatch { files: strs_from(Some(p), "files"), edit: text(Some(p), "edit"), group: p.get("group").and_then(Value::as_u64), seq: uint(Some(p), "seq"), cursor: text(Some(p), "cursor"), edit_ms: uint(Some(p), "edit_ms"), called_ms: uint(Some(p), "called_ms"), shipped_ms: uint(Some(p), "shipped_ms"), outcome: text(Some(p), "outcome"), outcome_ms: uint(Some(p), "outcome_ms"), frame_ms: uint(Some(p), "frame_ms"), tests: p.get("tests").and_then(live_tests_from), verdict_ms: uint(Some(p), "verdict_ms"), log_start: uint(Some(p), "log_start"), log_end: uint(Some(p), "log_end"), output: text(Some(p), "output"), retried: flag(Some(p), "retried", false), jit_error: uint(Some(p), "jit_error"), reason: text(Some(p), "reason") }),
+        patch: p.map(|p| LivePatch { files: strs_from(Some(p), "files"), edit: text(Some(p), "edit"), group: p.get("group").and_then(Value::as_u64), seq: uint(Some(p), "seq"), cursor: text(Some(p), "cursor"), edit_ms: uint(Some(p), "edit_ms"), called_ms: uint(Some(p), "called_ms"), shipped_ms: uint(Some(p), "shipped_ms"), outcome: text(Some(p), "outcome"), outcome_ms: uint(Some(p), "outcome_ms"), frame_ms: uint(Some(p), "frame_ms"), tests: p.get("tests").and_then(live_tests_from), verdict_ms: uint(Some(p), "verdict_ms"), log_start: uint(Some(p), "log_start"), log_end: uint(Some(p), "log_end"), output: String::new(), output_ref: TextRef::from_value(p.get("output_ref")), reason_ref: TextRef::from_value(p.get("reason_ref")), retried: flag(Some(p), "retried", false), jit_error: uint(Some(p), "jit_error"), reason: String::new() }),
         panic: panic_from(v.get("panic")),
         log: text(o, "log"),
         note: text(o, "note"),
@@ -1574,7 +1818,8 @@ pub struct Store {
     /// the machine its events name (the first open that knows it: the pre-warm board opens first
     /// and does not)
     machine: Mutex<String>,
-    doc: Mutex<Doc>,
+    doc: Mutex<Versioned>,
+    signals: Mutex<std::collections::HashMap<String, Vec<std::sync::Weak<Signal>>>>,
     /// where [`Store::event`] goes: the master's stream (set by the first [`Store::open`]; a
     /// [`Store::open_quiet`] module that writes its section publishes its own records)
     publish: Mutex<Option<Publish>>,
@@ -1583,26 +1828,68 @@ pub struct Store {
     generation: Mutex<u64>,
 }
 
+struct Versioned {
+    doc: Doc,
+    revision: u64,
+    records: std::collections::BTreeMap<String, TextRef>,
+    history_len: u64,
+}
+
+/// A subscription belongs only to the requested job/session ids. Subscribe before reading.
+#[derive(Default)]
+pub struct Signal {
+    generation: Mutex<u64>,
+    changed: Condvar,
+}
+impl Signal {
+    pub fn generation(&self) -> u64 { *self.generation.lock().unwrap() }
+    pub fn wait(&self, seen: u64, duration: Duration) {
+        let g = self.generation.lock().unwrap();
+        let _ = self.changed.wait_timeout_while(g, duration, |g| *g == seen);
+    }
+    fn notify(&self) {
+        *self.generation.lock().unwrap() += 1;
+        self.changed.notify_all();
+    }
+}
+
+/// Replace a durable file. Callers serialize snapshot creation and this write with one lock.
+pub(crate) fn durable_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let write = || -> std::io::Result<()> {
+        let parent = path.parent().ok_or_else(|| std::io::Error::other("state path has no parent"))?;
+        std::fs::create_dir_all(parent)?;
+        let tmp = path.with_extension("new");
+        let mut file = std::fs::File::create(&tmp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        std::fs::rename(tmp, path)?;
+        #[cfg(unix)]
+        std::fs::File::open(parent)?.sync_all()?;
+        Ok(())
+    };
+    write().map_err(|e| format!("persist {}: {e}", path.display()))
+}
+
 /// The state files of before the one document; [`Store::open`] moves them in once, then deletes them.
 pub const OLD_FILES: [&str; 5] = ["land.jsonl", "land.paused", "lanes.state", "lanes.held", "prewarm.state"];
 
 impl Store {
-    /// `<home>/state.json` (a missing or unreadable file is an empty document). ONE store per
+    /// `<home>/state.json`: only a missing file starts empty; corrupt or unreadable state fails. ONE store per
     /// home in the process: the jobs, the landing train, the merge bot and the pre-warm board all
     /// write their sections into the same document (two stores on one file would undo each
     /// other's writes). The first open moves the old per-module files in ([`OLD_FILES`]) and
     /// deletes them.
-    pub fn open(home: &Path, machine: &str, publish: Publish) -> Arc<Store> {
+    pub fn open(home: &Path, machine: &str, publish: Publish) -> Result<Arc<Store>, String> {
         Self::open_with(home, machine, Some(publish))
     }
 
     /// The same store for a module that only keeps its section (the landing train, the merge
     /// bot, the pre-warm board): the stream stays the one the master's open gave.
-    pub fn open_quiet(home: &Path, machine: &str) -> Arc<Store> {
+    pub fn open_quiet(home: &Path, machine: &str) -> Result<Arc<Store>, String> {
         Self::open_with(home, machine, None)
     }
 
-    fn open_with(home: &Path, machine: &str, publish: Option<Publish>) -> Arc<Store> {
+    fn open_with(home: &Path, machine: &str, publish: Option<Publish>) -> Result<Arc<Store>, String> {
         static OPEN: Mutex<Vec<(PathBuf, std::sync::Weak<Store>)>> = Mutex::new(Vec::new());
         let path = home.join("state.json");
         let mut open = OPEN.lock().unwrap();
@@ -1620,22 +1907,39 @@ impl Store {
                     *mine = Some(p);
                 }
             }
-            return s;
+            return Ok(s);
         }
-        let doc = std::fs::read_to_string(&path).ok().and_then(|t| Doc::parse(&t)).unwrap_or_default();
-        let store = Arc::new(Store { path: path.clone(), machine: Mutex::new(machine.to_string()), doc: Mutex::new(doc), publish: Mutex::new(publish), changed: Condvar::new(), generation: Mutex::new(0) });
-        store.migrate(home);
+        let mut revision = 0;
+        let mut history_len = 0;
+        let mut records = std::collections::BTreeMap::new();
+        let doc = match std::fs::read_to_string(&path) {
+            Ok(text) => {
+                let value = makepad_strict_json::parse_depth(text.as_bytes(), 16).map_err(|e| format!("invalid workflow state {}; file kept: {e:?}", path.display()))?;
+                if !matches!(value, Value::Obj(_)) { return Err(format!("invalid workflow state {}; expected object; file kept", path.display())); }
+                revision = uint(Some(&value), "revision");
+                history_len = uint(Some(&value), "history_len");
+                Doc::from_disk(value, &mut records)?
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Doc::default(),
+            Err(e) => return Err(format!("read workflow state {}: {e}; file kept", path.display())),
+        };
+        if history_len > 0 {
+            let len = std::fs::metadata(home.join("history.jsonl")).map_err(|e| format!("workflow history: {e}; state kept"))?.len();
+            if len < history_len { return Err("truncated workflow history; state kept".into()); }
+        }
+        let store = Arc::new(Store { path: path.clone(), machine: Mutex::new(machine.to_string()), doc: Mutex::new(Versioned { doc, revision, records, history_len }), signals: Mutex::new(Default::default()), publish: Mutex::new(publish), changed: Condvar::new(), generation: Mutex::new(0) });
+        store.migrate(home)?;
         open.push((path, Arc::downgrade(&store)));
-        store
+        Ok(store)
     }
 
     /// The one-time move of the old state files into the document; each goes once it is in.
-    fn migrate(&self, home: &Path) {
+    fn migrate(&self, home: &Path) -> Result<(), String> {
         let read = |f: &str| std::fs::read_to_string(home.join(f)).ok();
         let lines = |t: &str| -> Vec<Value> { t.lines().filter_map(|l| makepad_strict_json::parse_depth(l.as_bytes(), 16).ok()).collect() };
         let (land, paused, merges, held, prewarm) = (read(OLD_FILES[0]), read(OLD_FILES[1]), read(OLD_FILES[2]), read(OLD_FILES[3]), read(OLD_FILES[4]));
         if land.is_none() && paused.is_none() && merges.is_none() && held.is_none() && prewarm.is_none() {
-            return;
+            return Ok(());
         }
         self.update(|d| {
             if let Some(t) = &land {
@@ -1667,7 +1971,7 @@ impl Store {
                     d.prewarm = lines(t);
                 }
             }
-        });
+        })?;
         // in the document (saved by the update): the old files go
         if self.path.exists() {
             for f in OLD_FILES {
@@ -1675,28 +1979,105 @@ impl Store {
                 let _ = std::fs::remove_file(home.join(format!("{f}.new")));
             }
         }
+        Ok(())
     }
 
     pub fn read<T>(&self, f: impl FnOnce(&Doc) -> T) -> T {
-        f(&self.doc.lock().unwrap())
+        f(&self.doc.lock().unwrap().doc)
     }
 
-    /// Changes the document and saves it (whole, through a rename).
-    pub fn update<T>(&self, f: impl FnOnce(&mut Doc) -> T) -> T {
-        let mut doc = self.doc.lock().unwrap();
-        let out = f(&mut doc);
-        doc.trim();
-        // written under the lock: the file never goes back to an older document
-        if let Some(dir) = self.path.parent() {
-            let _ = std::fs::create_dir_all(dir);
+    /// The candidate is published only after persistence succeeds. Equality detects actual
+    /// mutations without JSON serialization; only committed mutations advance the revision.
+    pub fn update<T>(&self, f: impl FnOnce(&mut Doc) -> T) -> Result<T, String> {
+        self.try_update(|d| Ok(f(d)))
+    }
+
+    pub fn try_update<T>(&self, f: impl FnOnce(&mut Doc) -> Result<T, String>) -> Result<T, String> {
+        let mut state = self.doc.lock().unwrap();
+        let mut next = state.doc.clone();
+        let out = f(&mut next)?;
+        if next == state.doc { return Ok(out); }
+        next.spill(self.path.parent().unwrap())?;
+        if next == state.doc { return Ok(out); }
+        next.trim();
+        let revision = state.revision + 1;
+        let archived = archive_history(&mut next);
+        let mut history_len = state.history_len;
+        if !archived.is_empty() {
+            std::fs::create_dir_all(self.path.parent().unwrap()).map_err(|e| e.to_string())?;
+            let mut file = std::fs::OpenOptions::new().create(true).append(true)
+                .open(self.path.with_file_name("history.jsonl")).map_err(|e| e.to_string())?;
+            // Discard only an uncommitted tail from an interrupted attempt. Committed
+            // history is append-only; state.json records its durable byte boundary.
+            file.set_len(history_len).map_err(|e| e.to_string())?;
+            for (section, value) in archived {
+                writeln!(file, "{}", obj(vec![("revision", int(revision)), ("section", s(section)), ("record", value)]).to_json()).map_err(|e| e.to_string())?;
+            }
+            file.sync_all().map_err(|e| e.to_string())?;
+            history_len = file.metadata().map_err(|e| e.to_string())?.len();
         }
-        let tmp = self.path.with_extension("json.new");
-        if std::fs::write(&tmp, doc.to_value().to_json()).is_ok() {
-            let _ = std::fs::rename(&tmp, &self.path);
+        let (mut value, records) = next.disk_value(&state.doc, &state.records, self.path.parent().unwrap())?;
+        if let Value::Obj(fields) = &mut value { fields.push(("revision".into(), int(revision))); fields.push(("history_len".into(), int(history_len))); }
+        durable_write(&self.path, value.to_json().as_bytes())?;
+        let mut signals = self.signals.lock().unwrap();
+        signals.retain(|_, subscribers| { subscribers.retain(|w| w.strong_count() > 0); !subscribers.is_empty() });
+        for (key, subscribers) in signals.iter() {
+            let changed = if let Some(id) = key.strip_prefix("job:") {
+                state.doc.jobs.iter().find(|j| j.id == id) != next.jobs.iter().find(|j| j.id == id)
+            } else if let Some(id) = key.strip_prefix("live:") {
+                state.doc.lives.iter().find(|j| j.id == id) != next.lives.iter().find(|j| j.id == id)
+            } else { false };
+            if changed { for signal in subscribers.iter().filter_map(std::sync::Weak::upgrade) { signal.notify(); } }
         }
-        drop(doc);
+        state.doc = next;
+        state.revision = revision;
+        state.records = records;
+        state.history_len = history_len;
+        drop(signals);
+        drop(state);
         self.kick();
-        out
+        Ok(out)
+    }
+
+    /// Historical lookups stream archived records only when requested, outside the document lock.
+    pub fn history(&self, section: &str) -> Result<Vec<Value>, String> {
+        use std::io::BufRead;
+        let (history_len, current) = {
+            let state = self.doc.lock().unwrap();
+            (state.history_len, if section == "land" { state.doc.land.clone() } else { state.doc.merges.clone() })
+        };
+        let mut entries = std::collections::BTreeMap::new();
+        let key = |v: &Value| if section == "land" { uint(Some(v), "id").to_string() } else { format!("{}/{}", text(Some(v), "repo"), text(Some(v), "branch")) };
+        match std::fs::File::open(self.path.with_file_name("history.jsonl")) {
+            Ok(file) => for line in std::io::BufReader::new(file.take(history_len)).lines() {
+                let line = line.map_err(|e| e.to_string())?;
+                let v = makepad_strict_json::parse_depth(line.as_bytes(), 16).map_err(|e| format!("invalid workflow history: {e:?}"))?;
+                if v.get("section").and_then(Value::as_str) == Some(section) {
+                    if let Some(record) = v.get("record") { entries.insert(key(record), record.clone()); }
+                }
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && history_len == 0 => {},
+            Err(e) => return Err(e.to_string()),
+        }
+        for v in &current { entries.insert(key(v), v.clone()); }
+        let mut values: Vec<Value> = entries.into_values().collect();
+        values.sort_by_key(|v| uint(Some(v), if section == "land" { "id" } else { "at_ms" }));
+        Ok(values)
+    }
+
+    /// A session's process-local admission/ship state changed without a document mutation.
+    pub fn notify(&self, kind: &str, id: &str) {
+        if let Some(subscribers) = self.signals.lock().unwrap().get(&format!("{kind}:{id}")) {
+            for signal in subscribers.iter().filter_map(std::sync::Weak::upgrade) { signal.notify(); }
+        }
+    }
+
+    pub fn subscribe(&self, kind: &str, ids: &[&str]) -> Arc<Signal> {
+        let signal = Arc::new(Signal::default());
+        let mut signals = self.signals.lock().unwrap();
+        signals.retain(|_, subscribers| { subscribers.retain(|w| w.strong_count() > 0); !subscribers.is_empty() });
+        for id in ids { signals.entry(format!("{kind}:{id}")).or_default().push(Arc::downgrade(&signal)); }
+        signal
     }
 
     /// A state change on the event stream: `kind` is the section (`verify`, `after`, ...), `line`
@@ -1731,6 +2112,143 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct Scratch(PathBuf);
+    impl Scratch {
+        fn new(label: &str) -> Self {
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!("devhub-store-{label}-{}-{n}", std::process::id()));
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+        fn store(&self) -> Arc<Store> { Store::open_quiet(&self.0, "").unwrap() }
+    }
+    impl Drop for Scratch {
+        fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+    }
+
+    #[test]
+    fn no_op_update_writes_nothing() {
+        let dir = Scratch::new("noop");
+        let store = dir.store();
+        store.update(|_| ()).unwrap();
+        assert!(!dir.0.join("state.json").exists(), "fresh read/no-op creates no state file");
+        store.update(|d| d.jobs_next = 1).unwrap();
+        let old = std::fs::metadata(dir.0.join("state.json")).unwrap().modified().unwrap();
+        store.update(|d| d.jobs_next = 1).unwrap();
+        assert_eq!(store.doc.lock().unwrap().revision, 1, "equal assignment is not a revision");
+        assert_eq!(old, std::fs::metadata(dir.0.join("state.json")).unwrap().modified().unwrap(), "no rewrite");
+        assert!(!dir.0.join("state.new").exists(), "no temporary write");
+    }
+
+    #[test]
+    fn failed_write_is_reported_without_publishing_the_mutation() {
+        let dir = Scratch::new("failed");
+        let store = dir.store();
+        std::fs::create_dir(dir.0.join("state.new")).unwrap();
+        let signal = store.subscribe("job", &["J1"]);
+        let error = store.update(|d| d.jobs.push(Job { id: "J1".into(), ..Default::default() })).unwrap_err();
+        assert!(error.contains("persist"));
+        assert!(store.read(|d| d.jobs.is_empty()), "failed work is not accepted in memory");
+        assert_eq!(signal.generation(), 0, "failed writes never wake waiters");
+        assert_eq!(store.doc.lock().unwrap().revision, 0);
+    }
+
+    #[test]
+    fn corrupt_or_unreadable_state_refuses_open_and_is_preserved() {
+        let dir = Scratch::new("corrupt");
+        let path = dir.0.join("state.json");
+        for text in ["{broken", "[]", "null"] {
+            std::fs::write(&path, text).unwrap();
+            assert!(Store::open_quiet(&dir.0, "").is_err());
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), text, "corrupt file kept");
+        }
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(Store::open_quiet(&dir.0, "").is_err(), "unreadable existing file is not a fresh install");
+        assert!(path.is_dir());
+    }
+
+    #[test]
+    fn large_live_output_and_finished_records_are_file_slices() {
+        let dir = Scratch::new("output");
+        let store = dir.store();
+        let output = "failure output\n".repeat(100_000);
+        store.update(|d| {
+            d.lives.push(Live { id: "W1".into(), state: "running".into(), patch: Some(LivePatch { output: output.clone(), reason: "compile failed".into(), ..Default::default() }), ..Default::default() });
+            d.jobs.push(Job { id: "J1".into(), state: "failed".into(), tail: vec![output.clone()], ..Default::default() });
+            d.ci.runs.push(CiRun { id: "C1".into(), shards: vec![CiShard { errors: vec![output.clone()], ..Default::default() }], ..Default::default() });
+        }).unwrap();
+        let text = std::fs::read_to_string(dir.0.join("state.json")).unwrap();
+        assert!(text.len() < 10_000, "large diagnostics never enter state.json: {}", text.len());
+        assert!(!text.contains("failure output"));
+        let live = store.read(|d| d.lives[0].clone());
+        let patch = live.patch.as_ref().unwrap();
+        assert!(patch.output.is_empty() && patch.reason.is_empty());
+        assert_eq!(patch.output_ref.read().unwrap(), output);
+        assert_eq!(patch.reason_ref.read().unwrap(), "compile failed");
+        assert!(Path::new(&patch.output_ref.path).starts_with(dir.0.join("live-logs")));
+        assert!(live_value(&live).to_json().contains("failure output"), "wire response retains output");
+        drop(store);
+        let reopened = dir.store();
+        assert_eq!(reopened.read(|d| d.jobs[0].tail[0].clone()), output);
+        assert_eq!(reopened.read(|d| d.ci.runs[0].shards[0].errors[0].clone()), output);
+        assert_eq!(reopened.read(|d| d.lives[0].patch.as_ref().unwrap().output_ref.clone()).read().unwrap(), output);
+    }
+
+    #[test]
+    fn concurrent_persists_cannot_regress_the_file() {
+        let dir = Scratch::new("ordered");
+        let store = dir.store();
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let handles: Vec<_> = (0..2).map(|_| {
+            let (store, barrier) = (store.clone(), barrier.clone());
+            std::thread::spawn(move || { barrier.wait(); store.update(|d| d.jobs_next += 1).unwrap(); })
+        }).collect();
+        barrier.wait();
+        for h in handles { h.join().unwrap(); }
+        let value = makepad_strict_json::parse(std::fs::read(dir.0.join("state.json")).unwrap().as_slice()).unwrap();
+        assert_eq!(value.get("jobs_next").and_then(Value::as_u64), Some(2));
+        assert_eq!(value.get("revision").and_then(Value::as_u64), Some(2));
+    }
+
+    #[test]
+    fn waiter_only_wakes_for_its_jobs_or_session() {
+        let dir = Scratch::new("wait");
+        let store = dir.store();
+        let jobs = store.subscribe("job", &["J1", "J2"]);
+        let session = store.subscribe("live", &["W1"]);
+        let unrelated = store.subscribe("job", &["J3"]);
+        store.update(|d| d.jobs.push(Job { id: "J3".into(), ..Default::default() })).unwrap();
+        assert_eq!(jobs.generation(), 0, "unrelated job does not signal waiter");
+        assert_eq!(session.generation(), 0, "job never signals live waiter");
+        assert_eq!(unrelated.generation(), 1);
+        store.update(|d| d.jobs.push(Job { id: "J2".into(), ..Default::default() })).unwrap();
+        assert_eq!(jobs.generation(), 1, "any subscribed job signals waiter");
+        jobs.wait(0, Duration::from_secs(10)); // already signalled: no lost wake before wait
+        store.update(|d| d.lives.push(Live { id: "W1".into(), ..Default::default() })).unwrap();
+        assert_eq!(session.generation(), 1);
+        assert_eq!(jobs.generation(), 1);
+    }
+
+    #[test]
+    fn archived_history_retains_attribution() {
+        let dir = Scratch::new("history");
+        let store = dir.store();
+        store.update(|d| {
+            for id in 1..=KEEP + 2 {
+                d.land.push(obj(vec![("id", int(id as u64)), ("state", s("landed")), ("pre", s("parent")), ("landed", s("child"))]));
+                d.merges.push(obj(vec![("branch", s(format!("lane-{id}"))), ("result", s("landed"))]));
+            }
+        }).unwrap();
+        assert_eq!(store.read(|d| (d.land.len(), d.merges.len())), (KEEP, KEEP));
+        assert_eq!(store.history("land").unwrap().len(), KEEP + 2);
+        assert_eq!(store.history("merges").unwrap().len(), KEEP + 2);
+        assert_eq!(store.history("land").unwrap()[0].get("pre").and_then(Value::as_str), Some("parent"));
+        std::fs::remove_file(dir.0.join("history.jsonl")).unwrap();
+        assert!(store.history("land").is_err(), "missing committed history is reported");
+    }
 
     fn pair(c: char) -> Pair {
         Pair { work: c.to_string().repeat(40), main: "c".repeat(40) }
@@ -1779,6 +2297,7 @@ mod tests {
             lives: vec![Live { id: "W1".into(), app: "makepad-app-calculator".into(), state: "running".into(), visible: true, pid: 7, patch: Some(LivePatch { files: vec!["a.rs".into()], edit_ms: 1, shipped_ms: 2, outcome: "patched".into(), outcome_ms: 3, frame_ms: 4, reason: String::new(), ..Default::default() }), ..Default::default() }],
             lives_next: 1,
             land_next: 1,
+            submissions: std::collections::BTreeMap::from([("request-one".into(), "{\"jobs\":[\"J1\"]}".into())]),
             jobs_next: 2,
             batches_next: 1,
             snaps_next: 3,
@@ -1800,7 +2319,7 @@ mod tests {
     fn ci_round_trip_and_timings_average() {
         let shard = CiShard { id: "smoke:apps/calc".into(), state: "fail".into(), node: "106".into(), lease: "L2".into(), secs: 12.5, summary: "exit 1".into(), errors: vec!["error: x".into()], log: "/l".into(), sig: "ab".into(), step: 1, run_n: 2, steps_ok: vec![0], failed: vec!["x".into()], kept: "k".into(), failed_on: "101".into(), failed_os: "linux".into(), failed_why: "exit 1".into(), asked_ms: 5, granted_ms: 6, spans: vec![CiSpan { node: "106".into(), asked_ms: 1, granted_ms: 2, ended_ms: 3 }], lost: vec![("104".into(), 1)] };
         let run = CiRun { lock_digest: "lock".into(), checkout: String::new(), id: "R1".into(), pair: pair('a'), dry: true, started_ms: 1, ended_ms: 2, verdict: "fail".into(), shards: vec![shard], critical: "106 ends at 12 s".into(), fleet: "wall 12 s".into(), boxes: vec!["106 12 s busy, 1 shards".into()], rotation: 2, plan_timings: vec![("test:x".into(), 7.0)], sweep: true, stopping: true };
-        let mut ci = Ci { timings: vec![("jit:01".into(), 40.0)], run: None, sweep_run: Some(run.clone()), runs: vec![run], rotation: 3 };
+        let mut ci = Ci { timings: vec![("jit:01".into(), 40.0)], run: None, sweep_run: Some(run.clone()), runs: vec![run].into(), rotation: 3 };
         ci.measured("jit:01", 20.0);
         ci.measured("test:x:lib", 5.0);
         assert_eq!((ci.timing("jit:01"), ci.timing("test:x:lib"), ci.timing("nope")), (Some(30.0), Some(5.0), None));
@@ -1814,14 +2333,14 @@ mod tests {
         let _ = std::fs::create_dir_all(&dir);
         let seen = Arc::new(Mutex::new(Vec::new()));
         let s2 = seen.clone();
-        let store = Store::open(&dir, "mac", Arc::new(move |r: Record| { s2.lock().unwrap().push(r.kind.clone()); 0 }));
+        let store = Store::open(&dir, "mac", Arc::new(move |r: Record| { s2.lock().unwrap().push(r.kind.clone()); 0 })).expect("workflow state must open before services start");
         store.update(|d| {
             for i in 0..KEEP + 5 {
                 d.verify.verified.push(Tip { pair: pair('a'), at_ms: i as u64, diff: "affected".into() });
             }
-        });
+        }).unwrap();
         store.event("verify", Sev::Info, "verify OK".into(), None);
-        let again = Store::open(&dir, "mac", Arc::new(|_| 0));
+        let again = Store::open(&dir, "mac", Arc::new(|_| 0)).expect("workflow state must open before services start");
         assert_eq!(again.read(|d| (d.verify.verified.len(), d.verify.verified[0].at_ms)), (KEEP, 5));
         assert_eq!(*seen.lock().unwrap(), vec!["verify".to_string()]);
         let _ = std::fs::remove_file(dir.join("state.json"));
@@ -1840,19 +2359,19 @@ mod tests {
         std::fs::write(home.join("lanes.held"), "rc-h needs a rebuild\n").unwrap();
         std::fs::write(home.join("prewarm.state"), "{\"node\":\"101\",\"sev\":\"info\",\"line\":\"prewarm: done\",\"at_ms\":5}\n").unwrap();
         {
-            let st = Store::open_quiet(&home, "mac");
+            let st = Store::open_quiet(&home, "mac").expect("workflow state must open before services start");
             let (land, paused, merges, held, prewarm) = st.read(|d| (d.land.len(), d.land_paused.clone(), d.merges.len(), d.held.clone(), d.prewarm.len()));
             assert_eq!((land, paused.as_str(), merges, prewarm), (2, "user review", 1, 1));
             assert_eq!(held, vec![("rc-h".to_string(), "needs a rebuild".to_string())]);
             // one store per home: a second open is the same document
-            let again = Store::open(&home, "mac", Arc::new(|_| 0));
+            let again = Store::open(&home, "mac", Arc::new(|_| 0)).expect("workflow state must open before services start");
             assert!(Arc::ptr_eq(&st, &again));
         }
         for f in OLD_FILES {
             assert!(!home.join(f).exists(), "{f} is still there");
         }
         // a later start reads it from the document alone
-        let st = Store::open_quiet(&home, "mac");
+        let st = Store::open_quiet(&home, "mac").expect("workflow state must open before services start");
         assert_eq!(st.read(|d| d.land.len()), 2);
         drop(st);
         let _ = std::fs::remove_dir_all(&home);

@@ -138,6 +138,7 @@ pub fn target_bytes(
 struct DocEntry {
     label: String,
     held: u64,
+    working: bool,
 }
 
 #[derive(Debug)]
@@ -147,6 +148,7 @@ struct LedgerState {
     docs: BTreeMap<u64, DocEntry>,
     reserved: u64,
     device_used: u64,
+    reclaim: u64,
     epoch: u64,
     #[cfg(not(target_arch = "wasm32"))]
     submitted_epoch: u64,
@@ -205,6 +207,7 @@ impl GpuLedger {
                 docs: BTreeMap::new(),
                 reserved: 0,
                 device_used: 0,
+                reclaim: 0,
                 epoch: 0,
                 pending: BTreeMap::new(),
                 pending_bytes: 0,
@@ -269,14 +272,29 @@ impl GpuLedger {
 
     /// Register a document under `label` (shown in refusals and snapshots).
     pub fn register(&self, label: impl Into<String>) -> GpuDocument {
+        self.register_kind(label.into(), false)
+    }
+
+    /// Transient working memory is bounded by the device envelope, not the
+    /// persistent per-document allowance. Pressure asks other clients to yield.
+    pub fn register_working_set(&self, label: impl Into<String>) -> GpuDocument {
+        self.register_kind(label.into(), true)
+    }
+
+    pub(crate) fn take_reclaim(&self) -> u64 {
+        std::mem::take(&mut self.state.borrow_mut().reclaim)
+    }
+
+    fn register_kind(&self, label: String, working: bool) -> GpuDocument {
         let mut state = self.state.borrow_mut();
         let id = state.next_id;
         state.next_id += 1;
         state.docs.insert(
             id,
             DocEntry {
-                label: label.into(),
+                label,
                 held: 0,
+                working,
             },
         );
         GpuDocument {
@@ -322,18 +340,21 @@ impl GpuDocument {
         let mut state = self.state.borrow_mut();
         let budget = state.budget;
         let in_use = state.in_use();
-        let doc = state.docs.get(&self.id).expect("registered document");
+        let doc = state.docs.get_mut(&self.id).expect("registered document");
+        let working = doc.working;
         let held = doc.held;
+        let limit = if working { budget.device_bytes } else { budget.document_bytes };
         let over_doc = held
             .checked_add(bytes)
-            .is_none_or(|t| t > budget.document_bytes);
+            .is_none_or(|t| t > limit);
         if over_doc {
-            return Err(GpuRefusal::Document {
+            let refusal = GpuRefusal::Document {
                 document: doc.label.clone(),
                 wanted: bytes,
                 held,
-                limit: budget.document_bytes,
-            });
+                limit,
+            };
+            return Err(refusal);
         }
         let over_device = in_use
             .checked_add(bytes)
@@ -345,6 +366,7 @@ impl GpuDocument {
                 in_use,
                 limit: budget.device_bytes,
             };
+            if working { state.reclaim = state.reclaim.max(bytes); }
             #[cfg(not(target_arch = "wasm32"))]
             {
                 state.refused = true;
@@ -402,6 +424,7 @@ impl Drop for GpuReservation {
         if let Some(doc) = state.docs.get_mut(&self.doc) {
             doc.held -= self.bytes;
             state.reserved -= self.bytes;
+            crate::thread::SignalToUI::set_ui_signal();
         }
         if let Some((_, bytes)) = state.pending.remove(&self.epoch) {
             state.pending_bytes -= bytes;

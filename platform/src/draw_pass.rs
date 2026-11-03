@@ -524,12 +524,24 @@ impl DrawPass {
     /// the next step; until then it keeps the pass attached without recording it again, and
     /// the same recording is painted when the pipelines are ready.
     pub fn painted_whole_since(&self, cx: &Cx, repaint: u64) -> bool {
+        !cx.draw_shaders_pending() && !cx.passes[self.draw_pass_id()].paint_dirty && self.holds_whole_paint_since(cx, repaint, u64::MAX)
+    }
+
+    /// Whether a read of the pass's targets asked once frame `asked` had been submitted
+    /// (`Cx::frame_submission_serial` then; `u64::MAX`: a read asked now) returns a whole paint of
+    /// a recording made at or after `repaint` (`Cx::repaint_id` read right after recording it),
+    /// complete on the GPU: the read follows the frames submitted before it, so the paint it
+    /// shows is the latest of those; one made after it (a paint put off while a pipeline
+    /// compiled) is not what the read returned. Unlike [`Self::painted_whole_since`] it does not
+    /// ask whether the pass would paint again (marked dirty since, shaders still compiling
+    /// elsewhere): a producer that reads each recording back once asks this when the read has
+    /// come back.
+    pub fn holds_whole_paint_since(&self, cx: &Cx, repaint: u64, asked: u64) -> bool {
         let p = &cx.passes[self.draw_pass_id()];
-        !cx.draw_shaders_pending()
-            && !p.paint_dirty
-            && !p.incomplete
+        !p.incomplete
             && p.painted_serial >= repaint
             && p.painted_frame != 0
+            && p.painted_frame <= asked
             && cx.textures.1.serials.completed.load(std::sync::atomic::Ordering::Acquire) >= p.painted_frame
             && !cx.frames_partial(p.painted_frame, p.painted_frame)
     }

@@ -96,6 +96,19 @@ impl SyncConf {
         Self::parse(&std::fs::read_to_string(path()).unwrap_or_default())
     }
 
+    /// The apply's prebuild builds the AI Hub the WM runs (`build = wm` with `hub`): after it, the
+    /// checkout's binary is the deployment's.
+    pub fn builds_hub(&self) -> bool {
+        self.build == Build::Wm && self.prebuild.iter().any(|p| p == "hub")
+    }
+
+    /// The JIT app the prebuild builds the JIT for (`--jit` of the WM's flags in the prebuild
+    /// list): its build is the box's JIT of the deployed commits.
+    pub fn jit_app(&self) -> Option<String> {
+        let jit = super::build::jit_apps(&self.wm_flags);
+        (self.build != Build::Off).then(|| self.prebuild.iter().find(|p| jit.contains(p)).cloned()).flatten()
+    }
+
     /// The nested commercial checkout.
     pub fn commercial(&self) -> PathBuf {
         self.checkout.join("apps").join("commercial")
@@ -125,6 +138,9 @@ mod tests {
         assert_eq!(c.jobs, 4);
         assert_eq!(c.wm_service, None);
         assert_eq!(c.repo_dir("commercial"), Some(PathBuf::from("/x/makepad/apps/commercial")));
+        assert_eq!(c.jit_app().as_deref(), Some("sandbox"), "the prebuild builds the JIT for its first JIT app");
+        assert_eq!(SyncConf::parse("build = off\nprebuild = sandbox\nwm_flags = --jit sandbox\n").jit_app(), None);
+        assert_eq!(SyncConf::parse("prebuild = hub terminal\nwm_flags = --jit sandbox\n").jit_app(), None, "no JIT app in the prebuild");
     }
 
     #[test]

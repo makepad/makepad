@@ -309,7 +309,7 @@ const NONE: u32 = u32::MAX;
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CrateRow {
-    /// its name and root file (crate_ident)
+    /// its name, root file and test cfg (crate_ident)
     ident: [u64; 2],
     /// its graph files: their places among its own, paths and item counts (the rows name items by
     /// file and item; a build over the graph renumbers a clean crate's files by their places)
@@ -877,6 +877,7 @@ impl Deps {
             ident.str("crate-ident");
             ident.str(prog.syms.str(ci.name));
             ident.str(prog.mods.get(ci.root_mod as usize).and_then(|m| prog.file_paths.get(m.file as usize)).map_or("", |p| p.as_str()));
+            ident.u8(ci.cfg.holds("test") as u8);
             CrateRow { ident: h2(ident.finish128()), files: h2(files.finish128()),
                 iface: h2(iface.get(c).copied().unwrap_or(0)), always: [0; 2], always_at: [0; 2], aliases_at: [0; 2], macros_at: [0; 2],
                 atomic: atomic.get(c).copied().unwrap_or(true) as u32, _pad: 0 }

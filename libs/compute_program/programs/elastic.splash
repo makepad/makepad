@@ -1,0 +1,506 @@
+// Linear elasticity on a voxel grid of unit hex8 elements, matrix-free.
+//
+// A solve (p.design_its = 0) is the cantilever proof: K u = f by Jacobi-preconditioned CG, the
+// operator applied node by node (each node gathers from its up to 8 elements: E_e x K0), the CG
+// scalars kept in a block on the device. With p.design_its > 0 the solve sits in SIMP
+// compliance design: penalised stiffness, the density filter and its transpose, and an optimality
+// criteria update under a volume constraint, each iteration warm-started from the last u.
+//
+// The kernels know nothing of the case: the load (`load`, vec3 per node) and the fixed nodes
+// (`fixed`, 1 per fixed node) are inputs, as a passive mask would be.
+//
+// p: {nx, ny, nz (elements), nu, tol, max_its,
+//     design_its, volfrac, penal, rmin, emin, move, lockstep}
+// lockstep: after each design iteration the program waits for a message ({go}, or {load: [..]}
+//           to change the load and go on from the current design).
+// Nodes are x-fastest: (z * (ny + 1) + y) * (nx + 1) + x; element e likewise over nx, ny, nz.
+use mod.pod.*
+use mod.kernel.*
+
+// d N_k / d axis at (xi, eta, zeta) for the unit element (d/dx = 2 d/dxi).
+fn dshape(k, axis, xi, eta, zeta) {
+    let sx = float(2 * (k % 2) - 1)
+    let sy = float(2 * ((k / 2) % 2) - 1)
+    let sz = float(2 * (k / 4) - 1)
+    if axis == 0 {
+        0.25 * sx * (1.0 + eta * sy) * (1.0 + zeta * sz)
+    } else if axis == 1 {
+        0.25 * (1.0 + xi * sx) * sy * (1.0 + zeta * sz)
+    } else {
+        0.25 * (1.0 + xi * sx) * (1.0 + eta * sy) * sz
+    }
+}
+
+// Engineering strain component c (xx, yy, zz, xy, yz, zx) of a unit displacement of dof d of a
+// node whose shape gradient is (gx, gy, gz).
+fn strain(d, c, gx, gy, gz) {
+    var e = 0.0
+    if d == 0 {
+        if c == 0 { e = gx }
+        if c == 3 { e = gy }
+        if c == 5 { e = gz }
+    } else if d == 1 {
+        if c == 1 { e = gy }
+        if c == 3 { e = gx }
+        if c == 4 { e = gz }
+    } else {
+        if c == 2 { e = gz }
+        if c == 4 { e = gy }
+        if c == 5 { e = gx }
+    }
+    e
+}
+
+// The unit element's stiffness for E = 1: K0[a][b], a = node * 3 + dof, by 2x2x2 Gauss.
+let element_stiffness = {
+    label: "element_stiffness"
+    k0: output(f32)
+    nu: param(0.3, 0.0, 0.49)
+    element: fn(i) {
+        let a = i / 24
+        let b = i % 24
+        let an = a / 3
+        let ad = a % 3
+        let bn = b / 3
+        let bd = b % 3
+        let lam = nu / ((1.0 + nu) * (1.0 - 2.0 * nu))
+        let mu = 1.0 / (2.0 * (1.0 + nu))
+        let g = 0.5773502691896258
+        var acc = 0.0
+        for q in 0..8 {
+            let xi = g * float(2 * (q % 2) - 1)
+            let eta = g * float(2 * ((q / 2) % 2) - 1)
+            let zeta = g * float(2 * (q / 4) - 1)
+            let ax = dshape(an, 0, xi, eta, zeta)
+            let ay = dshape(an, 1, xi, eta, zeta)
+            let az = dshape(an, 2, xi, eta, zeta)
+            let bx = dshape(bn, 0, xi, eta, zeta)
+            let by = dshape(bn, 1, xi, eta, zeta)
+            let bz = dshape(bn, 2, xi, eta, zeta)
+            let b0 = strain(bd, 0, bx, by, bz)
+            let b1 = strain(bd, 1, bx, by, bz)
+            let b2 = strain(bd, 2, bx, by, bz)
+            let tr = lam * (b0 + b1 + b2)
+            acc = acc + strain(ad, 0, ax, ay, az) * (tr + 2.0 * mu * b0)
+            acc = acc + strain(ad, 1, ax, ay, az) * (tr + 2.0 * mu * b1)
+            acc = acc + strain(ad, 2, ax, ay, az) * (tr + 2.0 * mu * b2)
+            acc = acc + strain(ad, 3, ax, ay, az) * mu * strain(bd, 3, bx, by, bz)
+            acc = acc + strain(ad, 4, ax, ay, az) * mu * strain(bd, 4, bx, by, bz)
+            acc = acc + strain(ad, 5, ax, ay, az) * mu * strain(bd, 5, bx, by, bz)
+        }
+        // detJ = 1/8, Gauss weights 1.
+        k0[i] = acc * 0.125
+    }
+}
+
+// y = A u, A = K with the fixed nodes' rows and columns replaced by the identity.
+let apply = {
+    label: "apply"
+    u: input(vec3)
+    k0: input(f32)
+    ee: input(f32)
+    fixed: input(f32)
+    y: output(vec3)
+    nx: param(1, 1, 4096)
+    ny: param(1, 1, 4096)
+    nz: param(1, 1, 4096)
+    element: fn(i) {
+        let ex = int(nx)
+        let ey = int(ny)
+        let ez = int(nz)
+        let px = ex + 1
+        let py = ey + 1
+        let x = i % px
+        let y0 = (i / px) % py
+        let z = i / (px * py)
+        var a0 = 0.0
+        var a1 = 0.0
+        var a2 = 0.0
+        if fixed[i] > 0.5 {
+            let v = u[i]
+            a0 = v.x
+            a1 = v.y
+            a2 = v.z
+        } else {
+            for c in 0..8 {
+                let e0 = x - c % 2
+                let e1 = y0 - (c / 2) % 2
+                let e2 = z - c / 4
+                if e0 >= 0 && e0 < ex && e1 >= 0 && e1 < ey && e2 >= 0 && e2 < ez {
+                    let e = ee[(e2 * ey + e1) * ex + e0]
+                    let r0 = (c * 3) * 24
+                    let r1 = r0 + 24
+                    let r2 = r1 + 24
+                    for b in 0..8 {
+                        let m = ((e2 + b / 4) * py + e1 + (b / 2) % 2) * px + e0 + b % 2
+                        let v = u[m] * (1.0 - fixed[m])
+                        let cb = b * 3
+                        a0 = a0 + e * (k0[r0 + cb] * v.x + k0[r0 + cb + 1] * v.y + k0[r0 + cb + 2] * v.z)
+                        a1 = a1 + e * (k0[r1 + cb] * v.x + k0[r1 + cb + 1] * v.y + k0[r1 + cb + 2] * v.z)
+                        a2 = a2 + e * (k0[r2 + cb] * v.x + k0[r2 + cb + 1] * v.y + k0[r2 + cb + 2] * v.z)
+                    }
+                }
+            }
+        }
+        y[i] = vec3(a0, a1, a2)
+    }
+}
+
+// The diagonal of A (the Jacobi preconditioner).
+let diagonal = {
+    label: "diagonal"
+    k0: input(f32)
+    ee: input(f32)
+    fixed: input(f32)
+    dg: output(vec3)
+    nx: param(1, 1, 4096)
+    ny: param(1, 1, 4096)
+    nz: param(1, 1, 4096)
+    element: fn(i) {
+        let ex = int(nx)
+        let ey = int(ny)
+        let ez = int(nz)
+        let px = ex + 1
+        let py = ey + 1
+        let x = i % px
+        let y0 = (i / px) % py
+        let z = i / (px * py)
+        var a0 = 0.0
+        var a1 = 0.0
+        var a2 = 0.0
+        if fixed[i] > 0.5 {
+            a0 = 1.0
+            a1 = 1.0
+            a2 = 1.0
+        } else {
+            for c in 0..8 {
+                let e0 = x - c % 2
+                let e1 = y0 - (c / 2) % 2
+                let e2 = z - c / 4
+                if e0 >= 0 && e0 < ex && e1 >= 0 && e1 < ey && e2 >= 0 && e2 < ez {
+                    let e = ee[(e2 * ey + e1) * ex + e0]
+                    let d = c * 3 * 25
+                    a0 = a0 + e * k0[d]
+                    a1 = a1 + e * k0[d + 25]
+                    a2 = a2 + e * k0[d + 50]
+                }
+            }
+        }
+        dg[i] = vec3(a0, a1, a2)
+    }
+}
+
+// r = f - q
+let residual = {
+    label: "residual"
+    f: input(vec3)
+    q: input(vec3)
+    r: output(vec3)
+    element: fn(i) { r[i] = f[i] - q[i] }
+}
+
+// z = r / diag
+let precondition = {
+    label: "precondition"
+    r: input(vec3)
+    dg: input(vec3)
+    z: output(vec3)
+    element: fn(i) { z[i] = r[i] / dg[i] }
+}
+
+// The CG scalars live in sc: [r.z, p.q, r.z new, r.r].
+let cg_step = {
+    label: "cg_step"
+    sc: input(f32)
+    p: input(vec3)
+    q: input(vec3)
+    x: output(vec3)
+    r: output(vec3)
+    element: fn(i) {
+        let alpha = sc[0] / sc[1]
+        x[i] = x[i] + p[i] * alpha
+        r[i] = r[i] - q[i] * alpha
+    }
+}
+
+let cg_direction = {
+    label: "cg_direction"
+    sc: input(f32)
+    z: input(vec3)
+    p: output(vec3)
+    element: fn(i) { p[i] = z[i] + p[i] * (sc[2] / sc[0]) }
+}
+
+let cg_shift = {
+    label: "cg_shift"
+    sc: output(f32)
+    element: fn(i) { sc[0] = sc[2] }
+}
+
+// SIMP: E_e = emin + x^penal (1 - emin).
+let stiffness = {
+    label: "stiffness"
+    xp: input(f32)
+    ee: output(f32)
+    penal: param(3.0, 1.0, 8.0)
+    emin: param(0.000000001, 0.0, 1.0)
+    element: fn(i) { ee[i] = emin + pow(xp[i], penal) * (1.0 - emin) }
+}
+
+// Per element u_e^T K0 u_e, and its sensitivity -penal x^(penal - 1) (1 - emin) u_e^T K0 u_e.
+let energy = {
+    label: "energy"
+    u: input(vec3)
+    k0: input(f32)
+    xp: input(f32)
+    dc: output(f32)
+    nx: param(1, 1, 4096)
+    ny: param(1, 1, 4096)
+    penal: param(3.0, 1.0, 8.0)
+    emin: param(0.000000001, 0.0, 1.0)
+    element: fn(i) {
+        let ex = int(nx)
+        let ey = int(ny)
+        let px = ex + 1
+        let py = ey + 1
+        let e0 = i % ex
+        let e1 = (i / ex) % ey
+        let e2 = i / (ex * ey)
+        var acc = 0.0
+        for an in 0..8 {
+            let ma = ((e2 + an / 4) * py + e1 + (an / 2) % 2) * px + e0 + an % 2
+            let va = u[ma]
+            var r0 = 0.0
+            var r1 = 0.0
+            var r2 = 0.0
+            for bn in 0..8 {
+                let mb = ((e2 + bn / 4) * py + e1 + (bn / 2) % 2) * px + e0 + bn % 2
+                let vb = u[mb]
+                let k = an * 72 + bn * 3
+                r0 = r0 + k0[k] * vb.x + k0[k + 1] * vb.y + k0[k + 2] * vb.z
+                r1 = r1 + k0[k + 24] * vb.x + k0[k + 25] * vb.y + k0[k + 26] * vb.z
+                r2 = r2 + k0[k + 48] * vb.x + k0[k + 49] * vb.y + k0[k + 50] * vb.z
+            }
+            acc = acc + va.x * r0 + va.y * r1 + va.z * r2
+        }
+        dc[i] = -penal * pow(xp[i], penal - 1.0) * (1.0 - emin) * acc
+    }
+}
+
+// The density filter over the elements within rmin (a 5^3 window: rmin <= 3):
+// out_e = sum_j w_ej v_j s_j / sum_j w_ej t_j, w = max(0, rmin - |e - j|). With s = t = 1 it is
+// the filter (x -> x phys); with s = 1 / the weight sums it is its transpose (the chain rule).
+let density_filter = {
+    label: "density_filter"
+    v: input(f32)
+    scale: input(f32)
+    out: output(f32)
+    nx: param(1, 1, 4096)
+    ny: param(1, 1, 4096)
+    nz: param(1, 1, 4096)
+    rmin: param(1.5, 0.0, 3.0)
+    by_sums: param(0, 0, 1)
+    element: fn(i) {
+        let ex = int(nx)
+        let ey = int(ny)
+        let ez = int(nz)
+        let e0 = i % ex
+        let e1 = (i / ex) % ey
+        let e2 = i / (ex * ey)
+        var acc = 0.0
+        var sum = 0.0
+        for dz in 0..5 {
+            for dy in 0..5 {
+                for dx in 0..5 {
+                    let j0 = e0 + dx - 2
+                    let j1 = e1 + dy - 2
+                    let j2 = e2 + dz - 2
+                    if j0 >= 0 && j0 < ex && j1 >= 0 && j1 < ey && j2 >= 0 && j2 < ez {
+                        let fx = float(dx - 2)
+                        let fy = float(dy - 2)
+                        let fz = float(dz - 2)
+                        let w = max(0.0, rmin - sqrt(fx * fx + fy * fy + fz * fz))
+                        let j = (j2 * ey + j1) * ex + j0
+                        acc = acc + w * v[j] * scale[j]
+                        sum = sum + w
+                    }
+                }
+            }
+        }
+        out[i] = if int(by_sums) == 1 { acc } else { acc / sum }
+    }
+}
+
+// The filter's normalisers, for its transpose: hs_e = 1 / sum_j w_ej.
+let weight_sums = {
+    label: "weight_sums"
+    hs: output(f32)
+    nx: param(1, 1, 4096)
+    ny: param(1, 1, 4096)
+    nz: param(1, 1, 4096)
+    rmin: param(1.5, 0.0, 3.0)
+    element: fn(i) {
+        let ex = int(nx)
+        let ey = int(ny)
+        let ez = int(nz)
+        let e0 = i % ex
+        let e1 = (i / ex) % ey
+        let e2 = i / (ex * ey)
+        var sum = 0.0
+        for dz in 0..5 {
+            for dy in 0..5 {
+                for dx in 0..5 {
+                    let j0 = e0 + dx - 2
+                    let j1 = e1 + dy - 2
+                    let j2 = e2 + dz - 2
+                    if j0 >= 0 && j0 < ex && j1 >= 0 && j1 < ey && j2 >= 0 && j2 < ez {
+                        let fx = float(dx - 2)
+                        let fy = float(dy - 2)
+                        let fz = float(dz - 2)
+                        sum = sum + max(0.0, rmin - sqrt(fx * fx + fy * fy + fz * fz))
+                    }
+                }
+            }
+        }
+        hs[i] = 1.0 / sum
+    }
+}
+
+// The optimality criteria candidate for multiplier lmid.
+let oc = {
+    label: "oc"
+    x: input(f32)
+    dc: input(f32)
+    dv: input(f32)
+    xn: output(f32)
+    lmid: param(1.0, 0.0, 1000000000000.0)
+    limit: param(0.2, 0.0, 1.0)
+    element: fn(i) {
+        let b = sqrt(max(0.0, -dc[i]) / (dv[i] * lmid))
+        let xi = x[i]
+        xn[i] = clamp(xi * b, max(0.0, xi - limit), min(1.0, xi + limit))
+    }
+}
+
+{run: fn(s, p) {
+    let nodes = (p.nx + 1) * (p.ny + 1) * (p.nz + 1)
+    let elems = p.nx * p.ny * p.nz
+    let grid = {nx: p.nx, ny: p.ny, nz: p.nz}
+    let k0 = s.buffer(f32, 576)
+    s.run(element_stiffness, 576, {nu: p.nu}, {k0: k0})
+    let fixed = s.input("fixed")
+    let f = s.buffer(vec3, nodes)
+    s.copy(s.input("load"), f)
+    let ee = s.buffer(f32, elems)
+    s.fill(ee, 1.0)
+    let x = s.buffer(vec3, nodes)
+    let r = s.buffer(vec3, nodes)
+    let z = s.buffer(vec3, nodes)
+    let dir = s.buffer(vec3, nodes)
+    let q = s.buffer(vec3, nodes)
+    let dg = s.buffer(vec3, nodes)
+    let sc = s.buffer(f32, 4)
+
+    // K u = f from the current u (in x), to |r| <= tol |r0|.
+    let solve = fn() {
+        s.run(diagonal, nodes, grid, {k0: k0, ee: ee, fixed: fixed, dg: dg})
+        s.run(apply, nodes, grid, {u: x, k0: k0, ee: ee, fixed: fixed, y: q})
+        s.run(residual, nodes, {}, {f: f, q: q, r: r})
+        s.run(precondition, nodes, {}, {r: r, dg: dg, z: z})
+        s.copy(z, dir)
+        s.dot(r, z, sc, 0)
+        s.dot(f, f, sc, 3)
+        let ff = s.read(sc, 3, 1)[0]
+        var its = 0
+        loop {
+            s.run(apply, nodes, grid, {u: dir, k0: k0, ee: ee, fixed: fixed, y: q})
+            s.dot(dir, q, sc, 1)
+            s.run(cg_step, nodes, {}, {sc: sc, p: dir, q: q, x: x, r: r})
+            s.run(precondition, nodes, {}, {r: r, dg: dg, z: z})
+            s.dot(r, z, sc, 2)
+            s.dot(r, r, sc, 3)
+            s.run(cg_direction, nodes, {}, {sc: sc, z: z, p: dir})
+            s.run(cg_shift, 1, {}, {sc: sc})
+            its = its + 1
+            // The residual is looked at every 4th iteration (a fixed cadence: the same result on
+            // every device and job size).
+            if its % 4 == 0 || its >= p.max_its {
+                let rr = s.read(sc, 3, 1)
+                if rr == nil {
+                    return nil
+                }
+                if rr[0] <= p.tol * p.tol * ff || its >= p.max_its {
+                    return its
+                }
+            }
+        }
+    }
+
+    if p.design_its == 0 {
+        let its = solve()
+        return {its: its, u: s.read(x)}
+    }
+
+    let simp = {penal: p.penal, emin: p.emin}
+    let xd = s.buffer(f32, elems)
+    let xp = s.buffer(f32, elems)
+    let xn = s.buffer(f32, elems)
+    let dc = s.buffer(f32, elems)
+    let dcf = s.buffer(f32, elems)
+    let dv = s.buffer(f32, elems)
+    let ones = s.buffer(f32, elems)
+    let hs = s.buffer(f32, elems)
+    let total = s.buffer(f32, 2)
+    let fgrid = {nx: p.nx, ny: p.ny, nz: p.nz, rmin: p.rmin}
+    let tgrid = {nx: p.nx, ny: p.ny, nz: p.nz, rmin: p.rmin, by_sums: 1}
+    s.fill(xd, p.volfrac)
+    s.fill(ones, 1.0)
+    s.run(weight_sums, elems, fgrid, {hs: hs})
+    s.run(density_filter, elems, fgrid, {v: xd, scale: ones, out: xp})
+    // The volume's sensitivity through the filter: H^T (1 / hs).
+    s.run(density_filter, elems, tgrid, {v: ones, scale: hs, out: dv})
+    var history = []
+    var it = 0
+    loop {
+        if it >= p.design_its {
+            return {its: it, history: history}
+        }
+        s.run(stiffness, elems, simp, {xp: xp, ee: ee})
+        let cg = solve()
+        s.dot(f, x, total, 0)
+        s.run(energy, elems, {nx: p.nx, ny: p.ny, penal: p.penal, emin: p.emin}, {u: x, k0: k0, xp: xp, dc: dc})
+        s.run(density_filter, elems, tgrid, {v: dc, scale: hs, out: dcf})
+        // Bisect the volume multiplier.
+        var l1 = 0.0
+        var l2 = 1000000000.0
+        var vol = 0.0
+        var lmid = 0.0
+        loop {
+            lmid = 0.5 * (l1 + l2)
+            s.run(oc, elems, {lmid: lmid, limit: p.move}, {x: xd, dc: dcf, dv: dv, xn: xn})
+            s.run(density_filter, elems, fgrid, {v: xn, scale: ones, out: xp})
+            s.sum(xp, total, 1)
+            vol = s.read(total, 1, 1)[0] / elems
+            if vol > p.volfrac {
+                l1 = lmid
+            } else {
+                l2 = lmid
+            }
+            if (l2 - l1) <= 0.000001 * (l1 + l2) {
+                break
+            }
+        }
+        s.copy(xn, xd)
+        let c = s.read(total, 0, 1)[0]
+        it = it + 1
+        history.push({it: it, compliance: c, volume: vol, cg: cg, multiplier: lmid})
+        s.value("iteration", {it: it, compliance: c, volume: vol, multiplier: lmid})
+        s.publish("density", xp, {precision: "u8", range: [0.0, 1.0]})
+        if p.lockstep {
+            let m = s.wait_inbox({load: nil})
+            if m.msgs.load != nil {
+                s.write(f, m.msgs.load)
+            }
+        }
+    }
+}}

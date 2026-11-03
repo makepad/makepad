@@ -43,6 +43,19 @@ pub fn clean(s: &str, max: usize) -> String {
     out
 }
 
+/// One submission identity, generated before entering any transport retry loop.
+pub fn request_id() -> String {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
+    format!("{now:x}-{:x}-{:x}", std::process::id(), NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+}
+
+/// The agent a box-taking command names (`DEVHUB_AGENT`), required: every lease and job says who
+/// holds it, for the user and the lanes.
+pub fn agent() -> Result<String, String> {
+    std::env::var("DEVHUB_AGENT").ok().filter(|a| makepad_devhub_conf::valid_name(a)).ok_or_else(|| "set DEVHUB_AGENT=<your agent name>: every lease and job names the agent that holds it".to_string())
+}
+
 pub fn wall_ms() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
 }

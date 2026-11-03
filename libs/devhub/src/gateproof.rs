@@ -7,7 +7,7 @@ use makepad_strict_json::Value;
 use std::collections::{BTreeMap, HashMap};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::Mutex;
 
 #[derive(Default)]
@@ -190,7 +190,7 @@ fn key_digest(tree: &Tree, dir: &str, unit: &str, digest: &str) -> Option<String
 
 fn same_config(repo: &Path, tree: &Tree, work: &str) -> bool {
     for path in ["Cargo.toml", ".cargo/config.toml"] {
-        let Ok(out) = Command::new("git").arg("-C").arg(repo).args(["rev-parse", "--verify", &format!("{work}:{path}")])
+        let Ok(out) = crate::git_exec::command().arg("-C").arg(repo).args(["rev-parse", "--verify", &format!("{work}:{path}")])
             .env_remove("GIT_DIR").env_remove("GIT_WORK_TREE").env_remove("GIT_INDEX_FILE")
             .stdin(Stdio::null()).stderr(Stdio::null()).output() else { return false };
         if out.status.success() {

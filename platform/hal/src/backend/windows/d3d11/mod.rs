@@ -131,7 +131,7 @@ impl D3d11 {
             msaa: 1,
             dpi: shell.map_or_else(win32::system_dpi, |s| s.dpi()),
             // offscreen too: a badge layer is composed into the retained image's copy either way
-            flags: info_flags::GPU_TIMESTAMPS | info_flags::WINDOW_BADGES | info_flags::COMPUTE | info_flags::DRAW_STORAGE_BUFFERS,
+            flags: info_flags::GPU_TIMESTAMPS | info_flags::WINDOW_BADGES | info_flags::COMPUTE | info_flags::DRAW_STORAGE_BUFFERS | info_flags::DEVICE_RESET,
             max_workgroup_size: [1024, 1024, 64],
             max_workgroup_invocations: 1024,
             storage_formats: (0..format::COUNT).filter(|f| device::dxgi(*f).is_some_and(|fmt| unsafe { dev.device.CheckFormatSupport(fmt.resource) }.unwrap_or(0) & 0x02000000 != 0)).fold(0, |bits, f| bits | (1u64 << f)),
@@ -295,6 +295,7 @@ impl D3d11 {
                 continue;
             }
             match done.event {
+                Event::DispatchTime { name, gpu_ns } => world.to_session(sid, |q| q.dispatch_time(name.as_bytes(), gpu_ns)),
                 Event::Frame { target, kind, frame, window, gpu_ns, gpu_span } => {
                     if let Some(s) = world.session_mut(sid) {
                         s.stats.frames += 1;

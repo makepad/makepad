@@ -628,7 +628,7 @@ mod lease_protocol_tests {
     #[test]
     fn an_old_only_fleet_reports_the_node_and_required_upgrade() {
         let error = route_generation(vec![snapshot("192.0.2.93", "0.2.0", "loaded")], "image", &leased_request("flux1-schnell")).unwrap_err();
-        assert!(error.contains("a node"), "{error}");
+        assert!(error.contains("node 93"), "{error}");
         assert!(error.contains("0.2.0"), "{error}");
         assert!(error.contains("upgrade AIHub to 0.3.0 or newer"), "{error}");
         assert!(error.contains("keepalive"), "{error}");

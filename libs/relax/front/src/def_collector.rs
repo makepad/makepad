@@ -388,8 +388,7 @@ impl DefCollector<'_> {
 
     // rustc_resolve/src/late.rs:5224-5283 and ident.rs:1609-1780.
     // Generic and constant ribs share the lexical stack with legacy-call resolution.
-    fn push_item_generics(&mut self, owner: DefId) {
-        let item = self.prog.def(owner).item;
+    fn push_item_generics(&mut self, item: ItemId) {
         let kind = self.ast.item(item).kind;
         let g = match kind {
             ItemKind::Trait(r) => { self.bindings.push(ValueRib::SelfParam); self.ast.row(r).generics }
@@ -447,13 +446,35 @@ impl DefCollector<'_> {
         }
     }
 
+    /// The impl or trait item that lists `child` in this collector's file version: `parent`'s own
+    /// item when its def is in that version. A live edit moves the defs of the items it pairs to
+    /// the new version; an item the edit removed keeps its def in the old one, so its parent's
+    /// item is the old version's impl or trait that lists it -- never the new version's item
+    /// number read in the old version's tree.
+    fn container_item(&self, parent: DefId, child: ItemId) -> ItemId {
+        let p = self.prog.def(parent);
+        if p.file == self.file { return p.item; }
+        // (an impl in a fn body is in the file's lazily parsed part, whose ids follow the tree's)
+        let trees = std::iter::once(self.ast).chain(self.ast.part.get().map(|p| &**p));
+        let found = trees.flat_map(|t| t.items.iter().enumerate().map(move |(i, it)| (ItemId(t.base[23] + i as u32), it.kind))).find(|&(_, kind)| match kind {
+            ItemKind::Impl(r) => self.ast.list(self.ast.row(r).items).contains(&child),
+            ItemKind::Trait(r) => self.ast.list(self.ast.row(r).items).contains(&child),
+            _ => false,
+        });
+        match found {
+            Some((id, _)) => id,
+            None => panic!("item {} of `{}` is listed by no impl or trait of its file version", child.0, self.prog.def_path(parent)),
+        }
+    }
+
     fn visit_item(&mut self, owner: DefId) -> Result<(), String> {
         if self.legacy {
-            let parent = self.prog.def(owner).parent;
+            let (parent, own) = (self.prog.def(owner).parent, self.prog.def(owner).item);
             if parent != crate::program::NO_DEF && matches!(self.prog.def(parent).kind, DefKind::Trait | DefKind::Impl) {
-                self.push_item_generics(parent);
+                let container = self.container_item(parent, own);
+                self.push_item_generics(container);
             }
-            self.push_item_generics(owner);
+            self.push_item_generics(own);
         }
         let item = self.prog.def(owner).item;
         match self.ast.item(item).kind {

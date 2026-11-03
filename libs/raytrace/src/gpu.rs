@@ -2833,9 +2833,9 @@ impl RayTracer {
             draw_gbuf.draw_vars.geometry_id = Some(geom_id);
             run_stage!(&gbuf, Some(&depth), clear_g, |cx: &mut Cx2d, _r| {
                 if gbuf_drawn {
-                    cx.new_draw_call(&draw_gbuf.draw_vars);
+                    cx.new_draw_call(&mut draw_gbuf.draw_vars);
                     if draw_gbuf.draw_vars.can_instance() {
-                        let area = cx.add_instance(&draw_gbuf.draw_vars);
+                        let area = cx.add_instance(&mut draw_gbuf.draw_vars);
                         draw_gbuf.draw_vars.area = cx.update_area_refs(draw_gbuf.draw_vars.area, area);
                     }
                 }

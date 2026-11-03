@@ -38,38 +38,85 @@ impl Metal {
         let mailbox = self.dev.mailbox.clone();
         let sid = s.id;
         let incarnation = s.font_frames.clone();
-        self.dev.compile(Box::new(move || {
-            let _pool = super::Pool::new();
-            let result = (|| {
-                let options = super::pipeline::compile_options(precise);
-                let mut error: ObjcId = nil;
-                let library: ObjcId = unsafe { msg_send![device.as_id(), newLibraryWithSource: str_to_nsstring(&source) options: options.as_id() error: &mut error] };
-                let library = NonNull::new(library).map(RcObjcId::from_owned).ok_or_else(|| super::pipeline::describe_error(error, "no compute library"))?;
-                let function: ObjcId = unsafe { msg_send![library.as_id(), newFunctionWithName: str_to_nsstring("kernel_main")] };
-                let function = NonNull::new(function).map(RcObjcId::from_owned).ok_or("missing kernel_main")?;
-                let pipe: ObjcId = unsafe { msg_send![device.as_id(), newComputePipelineStateWithFunction: function.as_id() error: &mut error] };
-                let pipe = NonNull::new(pipe).map(RcObjcId::from_owned).ok_or_else(|| super::pipeline::describe_error(error, "no compute pipeline"))?;
-                let limit: u64 = unsafe { msg_send![pipe.as_id(), maxTotalThreadsPerThreadgroup] };
-                if invocations > limit { return Err(format!("compute workgroup has {invocations} threads; pipeline supports {limit}")); }
-                Ok(pipe)
-            })();
+        // the answer, from the completion handler that ends the compile
+        let answer: Arc<dyn Fn(Result<RcObjcId, String>) + Send + Sync> = Arc::new(move |result| {
             let error = result.as_ref().err().cloned();
             let _ = state.0.set(result);
             mailbox.push(match error {
-                Some(log) => Done::PipelineFailed { sid, incarnation, id, log },
-                None => Done::PipelineReady { sid, incarnation, id },
+                Some(log) => Done::PipelineFailed { sid, incarnation: incarnation.clone(), id, log },
+                None => Done::PipelineReady { sid, incarnation: incarnation.clone(), id },
             });
+        });
+        // Asynchronous, as the render pipelines are: Metal compiles the libraries and pipelines
+        // of every pending kernel at once (its compiler service), and the allocator thread is
+        // not held for seconds per kernel (it queued the kernels one after another, behind the
+        // allocations).
+        self.dev.compile(Box::new(move || {
+            let _pool = super::Pool::new();
+            let options = super::pipeline::compile_options(precise);
+            let callback_device = device.clone();
+            let completion = objc_block!(move |library: ObjcId, error: ObjcId| {
+                let Some(library) = NonNull::new(library) else { return answer(Err(super::pipeline::describe_error(error, "no compute library"))) };
+                let _pool = super::Pool::new();
+                let function: ObjcId = unsafe { msg_send![library.as_ptr(), newFunctionWithName: str_to_nsstring("kernel_main")] };
+                let Some(function) = NonNull::new(function).map(RcObjcId::from_owned) else { return answer(Err("missing kernel_main".into())) };
+                let answer = answer.clone();
+                // the function, held until its pipeline is made
+                let kept = function.clone();
+                let made = objc_block!(move |pipe: ObjcId, error: ObjcId| {
+                    let _ = &kept;
+                    let result = match NonNull::new(pipe) {
+                        None => Err(super::pipeline::describe_error(error, "no compute pipeline")),
+                        Some(pipe) => {
+                            let pipe = RcObjcId::from_unowned(pipe);
+                            let limit: u64 = unsafe { msg_send![pipe.as_id(), maxTotalThreadsPerThreadgroup] };
+                            if invocations > limit { Err(format!("compute workgroup has {invocations} threads; pipeline supports {limit}")) } else { Ok(pipe) }
+                        }
+                    };
+                    answer(result);
+                });
+                unsafe { let _: () = msg_send![callback_device.as_id(), newComputePipelineStateWithFunction: function.as_id() completionHandler: &made]; }
+            });
+            unsafe { let _: () = msg_send![device.as_id(), newLibraryWithSource: str_to_nsstring(&source) options: options.as_id() completionHandler: &completion]; }
         }));
         PipeStatus::Pending
     }
 
-    pub(super) fn encode_compute(&mut self, s: &mut Session, pass: &Pass, view: &CmdView, cb: ObjcId, seq: u64) -> Result<Option<usize>, String> {
+    pub(super) fn encode_compute(&mut self, s: &mut Session, pass: &Pass, view: &CmdView, cb: ObjcId, seq: u64) -> Result<Vec<usize>, String> {
         let dispatches = compute::records::<Dispatch>(view.arena, pass.dispatches).ok_or("invalid dispatch records")?;
         // Preflight the whole pass: never run only a prefix while a later kernel compiles.
         for d in &dispatches {
             let p = self.compute.get(&(s.id, d.pipeline.index)).filter(|p| p.gen == d.pipeline.gen).ok_or("stale compute pipeline")?;
             match p.state.0.get() { Some(Ok(_)) => {}, Some(Err(e)) => return Err(e.clone()), None => { self.pending_draws += 1; return Err("compute pipeline pending".into()); } }
         }
+        let mut indices = Vec::new();
+        // Stage-counter devices require encoder boundaries for timestamps. The
+        // encoders still belong to this one pass and command-buffer submission.
+        for d in &dispatches {
+            let index = self.encode_dispatch(s, pass, view, cb, seq, d)?;
+            if let Some(i) = index { indices.push(i); }
+            if d.timer != 0 {
+                if let (Some(samples), Some(index)) = (self.batch.as_ref().and_then(|b| b.samples.clone()), index) {
+                    let time = super::timing::PassTime::Counters(samples, vec![index]);
+                    let name = s.string(d.timer).unwrap_or("compute").to_string();
+                    let sid = s.id;
+                    let incarnation = s.font_frames.clone();
+                    let mailbox = self.dev.mailbox.clone();
+                    unsafe { let _: () = msg_send![cb, addCompletedHandler: &objc_block!(move |cb: ObjcId| {
+                        let status: u64 = unsafe { msg_send![cb, status] };
+                        if status == 4 {
+                            if let Some((busy, _, _)) = time.span(cb) {
+                                mailbox.push(Done::DispatchTime { sid, incarnation: incarnation.clone(), name: name.clone(), gpu_ns: (busy.max(0.0) * 1e9) as u64 });
+                            }
+                        }
+                    })]; }
+                }
+            }
+        }
+        Ok(indices)
+    }
+
+    fn encode_dispatch(&mut self, s: &mut Session, pass: &Pass, view: &CmdView, cb: ObjcId, seq: u64, dispatch: &Dispatch) -> Result<Option<usize>, String> {
         let dispatch_sampling: bool = self.batch.as_ref().is_some_and(|b| b.samples.is_some()) && unsafe { msg_send![self.dev.device, supportsCounterSampling: 2u64] };
         let samples = self.batch.as_ref().and_then(|b| b.samples.clone()).filter(|x| x.clock.stage || dispatch_sampling);
         let sample = samples.as_ref().and_then(|x| x.reserve());
@@ -99,7 +146,7 @@ impl Metal {
         }
         let result = (|| {
             unsafe { let _: () = msg_send![encoder, setLabel: str_to_nsstring(s.string(pass.name).unwrap_or("compute"))]; }
-            for d in &dispatches {
+            for d in std::iter::once(dispatch) {
                 let p = &self.compute[&(s.id, d.pipeline.index)];
                 let pipeline = p.state.0.get().unwrap().as_ref().unwrap();
                 p.layout.validate_dispatch(s, d, view.arena)?;

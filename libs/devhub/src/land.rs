@@ -131,8 +131,9 @@ impl Entry {
 }
 
 /// `git -C <dir> <args>`: (success, stdout), hooks off, never a prompt.
+#[track_caller]
 fn git(dir: &Path, args: &[&str]) -> (bool, String) {
-    let o = Command::new("git")
+    let o = crate::git_exec::command()
         .arg("-C")
         .arg(dir)
         .args(["-c", "core.hooksPath=/dev/null"])
@@ -151,23 +152,18 @@ fn git(dir: &Path, args: &[&str]) -> (bool, String) {
 }
 
 fn rev(dir: &Path, what: &str) -> Option<String> {
-    let (ok, out) = git(dir, &["rev-parse", "-q", "--verify", &format!("{what}^{{commit}}")]);
-    (ok && out.len() == 40).then_some(out)
+    crate::gitread::rev(dir, what)
 }
 
 fn is_ancestor(dir: &Path, a: &str, b: &str) -> bool {
-    git(dir, &["merge-base", "--is-ancestor", a, b]).0
+    crate::gitread::is_ancestor(dir, a, b)
 }
 
 /// Where a branch left a retired work chain (`refs/heads/work-old-*`, kept when work moves onto
 /// main's squashed tip): its merge base with that chain, when `tip` doesn't hold it. Such a branch
 /// carries its own changes over as one commit on the tip, so the old history stays out of work.
 pub fn retired_base(dir: &Path, branch: &str, tip: &str) -> Option<String> {
-    let (_, refs) = git(dir, &["for-each-ref", "--format=%(refname)", "refs/heads/work-old-*"]);
-    refs.lines().find_map(|retired| {
-        let (ok, mb) = git(dir, &["merge-base", branch, retired]);
-        (ok && mb.len() == 40 && !is_ancestor(dir, &mb, tip)).then_some(mb)
-    })
+    crate::gitread::Pass::default().retired_base(dir, branch, tip)
 }
 
 struct Merge {
@@ -216,6 +212,8 @@ fn finish_merge(dir: &Path, m: &Merge, msg: &str) -> Result<String, Vec<String>>
 fn merge_pair(root: &Path, w: &str, ms: &str, m: &str, cs: &str, branch: &str, cbranch: &str) -> Result<(String, String), Vec<String>> {
     let com = root.join("apps/commercial");
     let work = prepare_merge(root, w, ms)?;
+    // commit-tree runs no hook: the private check the hooks run, on what this merge adds
+    if !work.unchanged { crate::private_check::merge_gate(root, w, ms, &work.tree)?; }
     let main = prepare_merge(&com, m, cs)?;
     Ok((finish_merge(root, &work, &format!("Merge branch '{branch}' into work (devhub land)"))?, finish_merge(&com, &main, &format!("Merge branch '{cbranch}' into main (devhub land)"))?))
 }
@@ -261,7 +259,7 @@ pub fn failure_lines(log: &str) -> Vec<String> {
 
 pub struct Train {
     machine: String,
-    home: PathBuf,
+    store: Arc<crate::state::Store>,
     repo: PathBuf,
     /// devhub's own words as a child ([`crate::cli::own_argv`]; a test: its stand-in)
     own: Vec<String>,
@@ -287,7 +285,7 @@ pub struct Counts {
 impl Train {
     /// The master's one state document (its `land` and `land_paused` sections).
     fn store(&self) -> Arc<crate::state::Store> {
-        crate::state::Store::open_quiet(&self.home, &self.machine)
+        self.store.clone()
     }
     fn load(&self) {
         let (list, paused) = self.store().read(|d| (d.land.iter().filter_map(|v| Entry::parse(&v.to_json())).collect::<Vec<_>>(), d.land_paused.clone()));
@@ -301,13 +299,16 @@ impl Train {
     }
 
     /// Pauses the train (`Some(reason)`) or resumes it (`None`); kept across master restarts.
-    pub fn set_paused(&self, reason: Option<&str>) {
+    pub fn set_paused(&self, reason: Option<&str>) -> Result<(), String> {
         let reason = reason.map(|r| if r.trim().is_empty() { "paused" } else { r.trim() });
-        let was = std::mem::replace(&mut *self.paused.lock().unwrap(), reason.unwrap_or("").to_string());
-        self.store().update(|d| d.land_paused = reason.unwrap_or("").to_string());
+        let mut paused = self.paused.lock().unwrap();
+        self.store.update(|d| d.land_paused = reason.unwrap_or("").to_string())?;
+        let was = std::mem::replace(&mut *paused, reason.unwrap_or("").to_string());
+        drop(paused);
         if was.is_empty() != reason.is_none() {
             self.event(Sev::Info, reason.map_or("land resumed".into(), |r| format!("land paused ({r})")), &[]);
         }
+        Ok(())
     }
 
     /// The open entries by state.
@@ -325,10 +326,13 @@ impl Train {
         }
         c
     }
-    fn save(&self, list: &[Entry]) {
+    fn save(&self, list: &mut Vec<Entry>) -> Result<(), String> {
         let vals: Vec<makepad_strict_json::Value> = list.iter().filter_map(|e| makepad_strict_json::parse_depth(e.to_json().as_bytes(), 16).ok()).collect();
         let next = list.iter().map(|e| e.id).max().unwrap_or(0) + 1;
-        self.store().update(|d| { d.land = vals; d.land_next = d.land_next.max(next); });
+        let result = self.store().update(|d| { d.land = vals; d.land_next = d.land_next.max(next); });
+        // Retain exactly the durable live view; older completed entries are in history.jsonl.
+        *list = self.store.read(|d| d.land.iter().filter_map(|v| Entry::parse(&v.to_json())).collect());
+        result
     }
     fn event(&self, sev: Sev, line: String, detail: &[String]) {
         (self.publish)(hub_record(&self.machine, "", 0, "land", sev, line, detail.join("\n")));
@@ -341,7 +345,7 @@ impl Train {
         f(e);
         e.changed_ms = now;
         let detail = e.detail.clone();
-        self.save(&list);
+        if let Err(e) = self.save(&mut list) { eprintln!("devhub land state: {e}"); return; }
         drop(list);
         if let Some((sev, line)) = ev {
             self.event(sev, line, if sev == Sev::Info { &[] } else { &detail });
@@ -390,17 +394,17 @@ impl Train {
                         list.remove(i);
                     }
                 }
-                self.save(&list);
+                if let Err(e) = self.save(&mut list) { out.push(format!("{{\"err\":{}}}", makepad_remote::json_str(&e))); return; }
                 drop(list);
                 self.event(Sev::Info, format!("land {verb} {b}"), &[]);
                 out.push(format!("{{\"ok\":1,\"{verb}\":{}}}", makepad_remote::json_str(b)));
             }
             ["pause", reason @ ..] => {
-                self.set_paused(Some(&reason.join(" ")));
+                if let Err(e) = self.set_paused(Some(&reason.join(" "))) { err(out, &e); return; }
                 out.push(format!("{{\"paused\":{}}}", makepad_remote::json_str(&self.paused().unwrap_or_default())));
             }
             ["resume"] => {
-                self.set_paused(None);
+                if let Err(e) = self.set_paused(None) { err(out, &e); return; }
                 out.push("{\"paused\":\"\"}".into());
             }
             ["paused"] => out.push(format!("{{\"paused\":{}}}", makepad_remote::json_str(&self.paused().unwrap_or_default()))),
@@ -493,7 +497,7 @@ impl Train {
             }
         };
         let pos = list.iter().filter(|e| e.state != St::Landed && e.id <= id).count();
-        self.save(&list);
+        self.save(&mut list)?;
         let label = list.iter().find(|e| e.id == id).map(Entry::label).unwrap_or_default();
         drop(list);
         self.event(Sev::Info, format!("land queued {label} (#{id}, {pos} open)"), &[]);
@@ -531,7 +535,7 @@ impl Train {
                     e.held = h.split_once("HELD:").map_or("held", |x| x.1.trim()).to_string();
                 }
             }
-            self.save(&list);
+            self.save(&mut list)?;
         }
         Ok(n)
     }
@@ -709,7 +713,7 @@ impl Train {
             for e in list.iter_mut().filter(|e| e.state == St::Waiting) {
                 e.state = St::Queued;
             }
-            self.save(&list);
+            if let Err(e) = self.save(&mut list) { eprintln!("devhub land state: {e}"); }
         }
         let mut looked = std::time::Instant::now() - IDLE;
         loop {
@@ -729,7 +733,7 @@ pub fn register(ep: &makepad_remote::Endpoint, machine: &str, publish: Publish) 
     let home = crate::proto::home();
     let t = Arc::new(Train {
         machine: machine.to_string(),
-        home,
+        store: crate::state::Store::open_quiet(&home, machine).expect("workflow state must open before services start"),
         repo: crate::lease::wt::default_repo(),
         own: crate::cli::own_argv(&crate::lease::wt::default_repo()),
         publish,
@@ -830,7 +834,7 @@ mod tests {
     fn train(home: &Path, repo: &Path, exe: &Path, events: Arc<Mutex<Vec<String>>>) -> Arc<Train> {
         Arc::new(Train {
             machine: "mac".into(),
-            home: home.to_path_buf(),
+            store: crate::state::Store::open_quiet(home, "").unwrap(),
             repo: repo.to_path_buf(),
             own: vec![exe.display().to_string()],
             publish: Arc::new(move |r: Record| events.lock().unwrap().push(r.line.clone())),
@@ -916,7 +920,7 @@ mod tests {
         assert_eq!(t2.st.lock().unwrap().len(), 5);
         // numbers are never reused: the newest entry gone (dropped or trimmed), the next is still new
         t2.st.lock().unwrap().retain(|e| e.id != 5);
-        t2.save(&t2.st.lock().unwrap().clone());
+        t2.save(&mut t2.st.lock().unwrap()).unwrap();
         let t3 = train(&home, &r, exe, events.clone());
         t3.load();
         assert_eq!(t3.st.lock().unwrap().iter().map(|e| e.id).max(), Some(4));

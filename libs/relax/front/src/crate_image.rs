@@ -10,8 +10,8 @@ use crate::{
 };
 use std::sync::Arc;
 
-// Demand certificates belong to the graph; crate records keep only their own selection.
-pub const VERSION: u32 = 22;
+// Crate keys distinguish test and build modes of the same root.
+pub const VERSION: u32 = 23;
 
 pub(crate) mod strings;
 
@@ -671,7 +671,7 @@ pub struct GraphRecipe {
     /// the same crates in any load order (each crate's recipe with its dependencies by name):
     /// the key of the graph's last load order (cache.rs load_order)
     pub set: u128,
-    pub crates: Vec<(String, String)>,
+    pub crates: Vec<crate::preload::CrateKey>,
     /// a reordered load's base graph (cache.rs load_order): the graph store its retained demand
     /// parts are read from when this graph is recorded
     pub base: Option<u128>,
@@ -710,7 +710,7 @@ impl GraphRecipe {
         s.u8(crate::parser::lazy_auto() as u8);
         s.u32(set.len() as u32);
         for k in set { s.u128(k); }
-        Self { identity: h.finish128(), set: s.finish128(), crates: crates.iter().map(|c| (c.name.clone(), c.root.clone())).collect(), base: None }
+        Self { identity: h.finish128(), set: s.finish128(), crates: crates.iter().map(|c| c.key()).collect(), base: None }
     }
 }
 
@@ -718,7 +718,7 @@ impl GraphRecipe {
 /// ASTs stay in per-file images in the named crate stores; no name index is needed.
 pub struct GraphImage {
     pub identity: u128,
-    pub crates: Vec<((String, String), u128)>,
+    pub crates: Vec<(crate::preload::CrateKey, u128)>,
     pub inputs: Vec<(String, u128)>,
     /// per input (same order): the stat the recorded hash was taken under; None when the input
     /// has none (virtual) or changed too close to `recorded_ns` to trust a stat ("racy")

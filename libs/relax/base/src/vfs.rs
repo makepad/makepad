@@ -672,23 +672,21 @@ fn read_dir_inner(path: &std::path::Path) -> io::Result<Vec<(String, bool)>> {
     match find(&path.to_string_lossy()) {
         None => disk(),
         Some((m, rel)) => {
-            let edited: Vec<(String, bool)> = match edit_path(&path.to_string_lossy()) {
-                Some((p, _)) => std::fs::read_dir(p)
-                    .map(|d| {
-                        d.flatten()
-                            .map(|e| (e.file_name().to_string_lossy().into_owned(), e.file_type().map(|t| t.is_dir()).unwrap_or(false)))
-                            .filter(|(n, _)| !n.starts_with(".makepad-run-"))
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-                None => Vec::new(),
-            };
+            // the run's edits copy of the folder, when there is one (empty: a folder the run made)
+            let edited: Option<Vec<(String, bool)>> = edit_path(&path.to_string_lossy()).and_then(|(p, _)| {
+                std::fs::read_dir(p).ok().map(|d| {
+                    d.flatten()
+                        .map(|e| (e.file_name().to_string_lossy().into_owned(), e.file_type().map(|t| t.is_dir()).unwrap_or(false)))
+                        .filter(|(n, _)| !n.starts_with(".makepad-run-"))
+                        .collect()
+                })
+            });
             let mut v = match m.folders().get(&rel) {
                 Some(v) => v.clone(),
-                None if !edited.is_empty() => Vec::new(),
+                None if edited.is_some() => Vec::new(),
                 None => return Err(not_found(&path.to_string_lossy())),
             };
-            for e in edited {
+            for e in edited.unwrap_or_default() {
                 if !v.iter().any(|x| x.0 == e.0) {
                     v.push(e);
                 }
@@ -1325,6 +1323,29 @@ mod tests {
         assert_eq!(conflicts.len(), 1, "{conflicts:?}");
         assert!(conflicts[0].starts_with("app/b.rs"));
         assert_eq!(load_seeded(&edits).len(), 4);
+        set_edits(None);
+        MOUNTS.write().unwrap().retain(|m| m.root != normalize_path(root));
+        let _ = std::fs::remove_dir_all(&edits);
+    }
+
+    /// Sandbox game_store (asset client cache.rs open: create_dir_all(tmp), then read_dir(tmp)): a
+    /// folder the run made in a virtual folder lists, empty, as the disk's new folder does; it
+    /// was NotFound while it had no entries.
+    #[test]
+    fn a_folder_made_in_a_virtual_folder_lists_while_empty() {
+        let _one = EDITS_TEST.lock().unwrap_or_else(|e| e.into_inner());
+        let fixture = test_store::Fixture::new(&[("app/a.rs", b"a")]);
+        let root = "/empty-dir-test/vfs/m";
+        let edits = fixture.store.path.with_extension("empty-dir-edits");
+        mount(root, fixture.store.clone(), &fixture.commit).unwrap();
+        set_edits(Some(edits.clone()));
+        let made = format!("{root}/app/cache/tmp");
+        std::fs::create_dir_all(prepare_edit_dir(&made).unwrap()).unwrap();
+        assert!(is_dir(&made));
+        assert_eq!(read_dir(&made).unwrap(), Vec::<(String, bool)>::new());
+        assert_eq!(read_dir(format!("{root}/app/cache")).unwrap(), vec![("tmp".to_string(), true)]);
+        assert_eq!(read_dir(format!("{root}/app")).unwrap(), vec![("a.rs".to_string(), false), ("cache".to_string(), true)]);
+        assert_eq!(read_dir(format!("{root}/app/none")).unwrap_err().kind(), io::ErrorKind::NotFound);
         set_edits(None);
         MOUNTS.write().unwrap().retain(|m| m.root != normalize_path(root));
         let _ = std::fs::remove_dir_all(&edits);

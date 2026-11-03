@@ -102,14 +102,15 @@ if [ -n "$stats" ]; then
 fi
 fail=
 # inline assembly runs only as machine code: in this mode a function with an asm! block is a
-# compile error naming it, so the programs and cases that exercise asm are left out
+# compile error naming it, so the programs that exercise asm are left out (agree.sh skips the runs of
+# the cases that declare `// needs-native:`, and lists them)
 progs=$(cd tools/run/fixture/diff && ls *.rs | sed 's/\.rs$//' | grep -v '^asm_')
 DIFF_PROGRAMS="$progs" DIFF_TIERS=nocodegen DIFF_PKG_DIRS=none tools/run/fixture/diff_fast.sh > "$work/diff" 2>&1
 grep -a -A4 'at tier nocodegen\|HARNESS' "$work/diff" | cut -c1-240 | head -80
 d=$(grep '^diff: ' "$work/diff" | tail -1)
 echo "DIFF: $d"
 echo "$d" | grep -qE '^diff: ([0-9]+)/\1 equal' || fail="$fail diff_fast"
-AGREE_SKIP="asm_*" MAKEPAD_RUN_NO_CODEGEN=1 AGREE_DIR=$work/agree bash tools/run/fixture/agree.sh > "$work/agree.log" 2>&1 || fail="$fail agree"
+MAKEPAD_RUN_NO_CODEGEN=1 bash tools/run/fixture/agree.sh > "$work/agree.log" 2>&1 || fail="$fail agree"
 grep -a -B12 'agree FAILED\|agree: ok' "$work/agree.log" | cut -c1-240
 for pkg in $apps; do
     boot "$pkg" nc MAKEPAD_RUN_NO_CODEGEN=1

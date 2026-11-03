@@ -10,7 +10,8 @@
 //! query the requester is running is the parent of the ones the request starts, so a real cycle
 //! through a request is the query engine's cycle error. A request served nested inside an
 //! earlier request's wait that reaches something only that earlier request can finish (a query
-//! or a build it has open, a load) is cancelled (`OwnerBusy`) and its requester posts it again.
+//! or a build it has open, a load, a constant it is evaluating) is cancelled (`OwnerBusy`) and
+//! its requester posts it again.
 
 use std::any::Any;
 use std::cell::Cell;
@@ -81,6 +82,10 @@ const RELEASED: u8 = 3;
 ///   posted between the owner's check and its wait is either seen by the check or notifies.
 const REQUESTER_SPIN_US: u32 = 60;
 const OWNER_SPIN_US: u32 = 60;
+/// The owner's spin after a request of the main thread: a lazy compile on the UI thread asks again
+/// once its back end has built a fn (a cold Fab's first drag: 60-140 UI round trips in a frame,
+/// each paying the owner's futex wake, 0.15-0.3 ms on a busy box)
+const OWNER_MAIN_SPIN_US: u32 = 1000;
 /// spin iterations per microsecond (0: not measured yet, nobody spins)
 static SPIN_PER_US: AtomicU32 = AtomicU32::new(0);
 
@@ -121,11 +126,17 @@ struct Req {
     rec: *const (),
     state: AtomicU8,
     panic: Cell<Option<Box<dyn Any + Send>>>,
+    /// where it panicked on the owner (lifeline's record there): the requester's own record when
+    /// it resumes the panic, so a caught compiler panic names its position (lifeline::panic_line)
+    panic_at: Cell<crate::lifeline::PanicAt>,
     /// false: posted (heap, nobody waits); the owner frees it
     waited: bool,
     /// main-thread request accounting (0: not a main-thread request): wall ns at the push, and at
     /// the owner's completion
     t_push: u64,
+    /// a main-thread program or publish request after the first present: wall ns at the push (0:
+    /// another): what it queued behind is charged to that request's site (`owner` answer)
+    t_main: u64,
     t_serve: AtomicU64,
     t_done: AtomicU64,
     /// the requester sleeps on these until Done (no thread handle: a thread's TLS destructors
@@ -198,12 +209,13 @@ pub struct SiteAcc {
     site: std::sync::atomic::AtomicPtr<std::panic::Location<'static>>,
     class: AtomicU8,
     /// [requests, owner ns, O1 optimisation ns on the owner, main's queue ns behind it, main waits behind it,
-    /// services of 1 ms or more, the longest service ns]
-    pub acc: [AtomicU64; 7],
+    /// services of 1 ms or more, the longest service ns, the services by length (HOLD_EDGES_US), then
+    /// the ns its services spent in owner waits (`pump_wait`: waiting, and serving what they let in)]
+    pub acc: [AtomicU64; SITE_FIELDS],
 }
 
 const SITES_N: usize = 96;
-pub static SITES: [SiteAcc; SITES_N] = [const { SiteAcc { site: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()), class: AtomicU8::new(0), acc: [const { AtomicU64::new(0) }; 7] } }; SITES_N];
+pub static SITES: [SiteAcc; SITES_N] = [const { SiteAcc { site: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()), class: AtomicU8::new(0), acc: [const { AtomicU64::new(0) }; SITE_FIELDS] } }; SITES_N];
 pub const SITE_REQS: usize = 0;
 pub const SITE_NS: usize = 1;
 pub const SITE_OPT_NS: usize = 2;
@@ -211,6 +223,94 @@ pub const SITE_BEHIND_NS: usize = 3;
 pub const SITE_BEHIND_N: usize = 4;
 pub const SITE_LONG_N: usize = 5;
 pub const SITE_MAX_NS: usize = 6;
+/// The hold histogram's bucket bounds (µs; the last bucket is open): how long one service of a site
+/// held the owner (`makepad inspect <pid> owner`)
+pub const HOLD_EDGES_US: [u64; 8] = [100, 500, 1_000, 2_000, 5_000, 10_000, 20_000, 50_000];
+pub const HOLD_BUCKETS: usize = HOLD_EDGES_US.len() + 1;
+/// the first of the hold histogram's fields
+pub const SITE_HIST: usize = 7;
+/// ns of the site's services in owner waits (`pump_wait`, the outermost of each service)
+pub const SITE_PUMP_NS: usize = SITE_HIST + HOLD_BUCKETS;
+const SITE_FIELDS: usize = SITE_PUMP_NS + 1;
+
+/// The owner's waits inside requests by (wait site, request site): what a request held the owner
+/// for without running (a back end in flight, a query another thread runs, the front lock), and the
+/// requests the wait served meanwhile (Job and Publish only: never main's program requests).
+pub struct PumpAcc {
+    site: std::sync::atomic::AtomicPtr<std::panic::Location<'static>>,
+    req: std::sync::atomic::AtomicPtr<std::panic::Location<'static>>,
+    /// [waits, ns, ns serving requests inside them, the longest ns]
+    pub acc: [AtomicU64; 4],
+}
+const PUMPS_N: usize = 64;
+static PUMPS: [PumpAcc; PUMPS_N] = [const { PumpAcc { site: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()), req: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()), acc: [const { AtomicU64::new(0) }; 4] } }; PUMPS_N];
+
+/// The request site of a wait outside every request (the owner loop's own work: constants it
+/// drains): rows name a request site, never null (a claimed row's null request means "not named
+/// yet"). A marker address, never read through.
+static BETWEEN_REQUESTS: u8 = 0;
+fn between_requests() -> *const std::panic::Location<'static> {
+    &BETWEEN_REQUESTS as *const u8 as *const std::panic::Location<'static>
+}
+
+fn pump_acc(site: *const std::panic::Location<'static>, req: *const std::panic::Location<'static>) -> &'static PumpAcc {
+    let req = if req.is_null() { between_requests() } else { req };
+    let h = ((site as usize >> 3) ^ (req as usize >> 5)).wrapping_mul(0x9e37_79b9) % (PUMPS_N - 1);
+    for k in 0..PUMPS_N - 1 {
+        let row = &PUMPS[(h + k) % (PUMPS_N - 1)];
+        // a row is claimed by its site, then names its request site (readers skip a half-made row)
+        match row.site.compare_exchange(std::ptr::null_mut(), site as *mut _, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => {
+                row.req.store(req as *mut _, Ordering::Release);
+                return row;
+            }
+            Err(c) if c as *const _ == site => {
+                let mut r = row.req.load(Ordering::Acquire);
+                while r.is_null() {
+                    std::hint::spin_loop();
+                    r = row.req.load(Ordering::Acquire);
+                }
+                if r as *const _ == req {
+                    return row;
+                }
+            }
+            Err(_) => {}
+        }
+    }
+    &PUMPS[PUMPS_N - 1]
+}
+
+/// The owner-wait table as (wait site, request site, [waits, ns, serving ns, longest ns]) rows; a
+/// wait outside every request has a null request site.
+pub fn pump_rows() -> Vec<(*const std::panic::Location<'static>, *const std::panic::Location<'static>, [u64; 4])> {
+    let none = between_requests();
+    PUMPS.iter().filter(|r| r.acc[0].load(Ordering::Relaxed) > 0).map(|r| {
+        let req = r.req.load(Ordering::Acquire) as *const std::panic::Location<'static>;
+        (r.site.load(Ordering::Acquire) as *const _, if req == none { std::ptr::null() } else { req }, std::array::from_fn(|i| r.acc[i].load(Ordering::Relaxed)))
+    }).collect()
+}
+
+/// The hold histogram's bucket of a service of `ns`.
+pub fn hold_bucket(ns: u64) -> usize {
+    HOLD_EDGES_US.iter().position(|&us| ns < us * 1000).unwrap_or(HOLD_EDGES_US.len())
+}
+
+/// The site table as (site, class, counters) rows, for the `owner` answer (atomics only).
+pub fn site_rows() -> Vec<(*const std::panic::Location<'static>, u8, [u64; SITE_FIELDS])> {
+    let mut out = Vec::new();
+    for row in SITES.iter() {
+        let n = row.acc[SITE_REQS].load(Ordering::Relaxed);
+        if n == 0 {
+            continue;
+        }
+        let mut a = [0u64; SITE_FIELDS];
+        for (i, v) in row.acc.iter().enumerate() {
+            a[i] = v.load(Ordering::Relaxed);
+        }
+        out.push((row.site.load(Ordering::Acquire) as *const _, row.class.load(Ordering::Relaxed), a));
+    }
+    out
+}
 /// main's queue delay (after the first present) by what the owner served when it asked: per class,
 /// and the owner idle (last row): [waits, ns]
 pub static MAIN_BEHIND: [[AtomicU64; 2]; CLASSES + 1] = [const { [const { AtomicU64::new(0) }; 2] }; CLASSES + 1];
@@ -425,9 +525,17 @@ impl Drop for NoWait {
 
 thread_local! {
     static IS_OWNER: Cell<bool> = const { Cell::new(false) };
+    /// owner: ns the request being served spent in owner waits so far (SITE_PUMP_NS)
+    static PUMPED: Cell<u64> = const { Cell::new(0) };
+    /// owner: the threads whose requests are open on its stack, outermost first (each waits for
+    /// its request: `stack_blocks`)
+    static OPEN_FOR: std::cell::RefCell<Vec<u64>> = const { std::cell::RefCell::new(Vec::new()) };
     /// owner: the request being served (class, requester) and how many are open on its stack
     static SERVING: Cell<(Class, u64)> = const { Cell::new((Class::Program, 0)) };
     static DEPTH: Cell<u32> = const { Cell::new(0) };
+    /// owner: its own work between two requests runs (the drains, `owner_loop`): a request a wait
+    /// of it serves is nested, as one served inside an earlier request's wait
+    static OWN_WORK: Cell<bool> = const { Cell::new(false) };
     /// leaf locks this thread holds (`Leaf`)
     static LEAVES: Cell<u32> = const { Cell::new(0) };
     /// owner: the request being served is background work (Req::bg)
@@ -726,9 +834,19 @@ pub fn serving() -> (Class, u64) {
     SERVING.with(|s| s.get())
 }
 
-/// A request served inside an earlier request's wait (owner only).
+/// (tests) work the owner runs once between two requests, beside its drains (`owner_loop`)
+#[cfg(test)]
+pub(crate) static OWN_WORK_TEST: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>> = std::sync::Mutex::new(None);
+
+/// A request served inside an earlier request's wait, or inside a wait of the owner's own work
+/// between requests (owner only).
 pub fn nested() -> bool {
-    DEPTH.with(|d| d.get()) > 1
+    DEPTH.with(|d| d.get()) + OWN_WORK.with(|w| w.get()) as u32 > 1
+}
+
+/// The owner's request depth on this thread, zero off the owner or outside a request.
+pub fn depth() -> u32 {
+    DEPTH.try_with(|d| d.get()).unwrap_or(0)
 }
 
 /// Is the main thread the one this work is for (it runs on main, or the owner serves main)?
@@ -737,9 +855,10 @@ pub fn for_main() -> bool {
     main != 0 && if is_owner() { serving().1 == main } else { me() == main }
 }
 
-/// The main thread waits for a request now.
+/// The main thread waits for a request now: a program request, or the publish that finishes its
+/// lazy compile (long work on the owner stops for either).
 pub fn main_waiting() -> bool {
-    MAIN_QUEUED.load(Ordering::Relaxed) > 0
+    MAIN_QUEUED.load(Ordering::Relaxed) + MAIN_PUBLISH.load(Ordering::Relaxed) > 0
 }
 
 /// What the owner serves now (diagnostics): "idle", or the class and its requester's name.
@@ -778,7 +897,9 @@ pub fn queued_detail() -> String {
 pub fn main_wait_behind() -> String {
     match MAIN_WAIT_BEHIND.load(Ordering::Relaxed) {
         u64::MAX => "-".to_string(),
-        c => CLASS_NAMES[c as usize & 7].to_string(),
+        // (u8::MAX: the owner was idle when main's request was queued)
+        0xff => "idle".to_string(),
+        c => CLASS_NAMES[c as usize].to_string(),
     }
 }
 
@@ -863,7 +984,8 @@ fn request<R>(site: &'static std::panic::Location<'static>, class: Class, deadli
     // closure only between this push and the Done store
     let run: *mut (dyn FnMut() + 'static) = unsafe { std::mem::transmute(run) };
     let on_main = crate::jit::MAIN_TID.load(Ordering::Relaxed) == me();
-    let main_wait = on_main && class == Class::Program && crate::jit::FIRST_PRESENT.load(Ordering::Acquire) && !crate::jit::QUIT_SEEN.load(Ordering::Relaxed);
+    let main_after = on_main && matches!(class, Class::Program | Class::Publish) && crate::jit::FIRST_PRESENT.load(Ordering::Acquire) && !crate::jit::QUIT_SEEN.load(Ordering::Relaxed);
+    let main_wait = main_after && class == Class::Program;
     // a thread waiting for its work on the owner is not a compile job meanwhile (an allocator
     // swap or fork waits for the jobs running; its work runs on the owner, which serves the
     // pauser): pure jobs (Job class) are, they hold front guards and queries
@@ -878,8 +1000,10 @@ fn request<R>(site: &'static std::panic::Location<'static>, class: Class, deadli
         rec: crate::jit::main_rec_target(),
         state: AtomicU8::new(QUEUED),
         panic: Cell::new(None),
+        panic_at: Cell::new(crate::lifeline::NO_PANIC_AT),
         waited: true,
         t_push: if class == Class::Program && on_main { crate::jit::wall_ns().max(1) } else { 0 },
+        t_main: if main_after { crate::jit::wall_ns().max(1) } else { 0 },
         t_serve: AtomicU64::new(0),
         t_done: AtomicU64::new(0),
         done: Mutex::new(false),
@@ -916,18 +1040,22 @@ fn request<R>(site: &'static std::panic::Location<'static>, class: Class, deadli
         if served != 0 {
             let q = served.saturating_sub(req.t_push);
             crate::jit::main_rec_behind(q, behind, behind_from, behind_site);
-            if main_wait {
-                let c = if behind == u8::MAX { CLASSES } else { (behind as usize).min(CLASSES - 1) };
-                MAIN_BEHIND[c][0].fetch_add(1, Ordering::Relaxed);
-                MAIN_BEHIND[c][1].fetch_add(q, Ordering::Relaxed);
-                if let Some(site) = behind_site {
-                    let row = site_acc(site, CLASS_OF[c.min(CLASSES - 1)]);
-                    row.acc[SITE_BEHIND_N].fetch_add(1, Ordering::Relaxed);
-                    row.acc[SITE_BEHIND_NS].fetch_add(q, Ordering::Relaxed);
-                }
-            }
         }
         crate::postframe::main_owner_wait(req.t_push, w);
+    }
+    // what main's program or publish request queued behind after the present: the class, and the
+    // site of the request the owner was serving when it asked
+    let served = req.t_serve.load(Ordering::Relaxed);
+    if req.t_main != 0 && served != 0 {
+        let q = served.saturating_sub(req.t_main);
+        let c = if behind == u8::MAX { CLASSES } else { (behind as usize).min(CLASSES - 1) };
+        MAIN_BEHIND[c][0].fetch_add(1, Ordering::Relaxed);
+        MAIN_BEHIND[c][1].fetch_add(q, Ordering::Relaxed);
+        if let Some(site) = behind_site {
+            let row = site_acc(site, CLASS_OF[c.min(CLASSES - 1)]);
+            row.acc[SITE_BEHIND_N].fetch_add(1, Ordering::Relaxed);
+            row.acc[SITE_BEHIND_NS].fetch_add(q, Ordering::Relaxed);
+        }
     }
     // makepad inspect: a real-time thread (an audio callback) that waited for the compiler
     if crate::inspect::events::watched() {
@@ -963,7 +1091,10 @@ fn request<R>(site: &'static std::panic::Location<'static>, class: Class, deadli
         Some(p) if p.is::<crate::preempt::OwnerBusy>() => {
             std::panic::resume_unwind(Box::new(crate::preempt::Preempted));
         }
-        Some(p) => resume_said(p),
+        Some(p) => {
+            crate::lifeline::set_panic_at_raw(req.panic_at.get());
+            resume_said(p)
+        }
         None => Some(out.unwrap()),
     }
 }
@@ -999,8 +1130,10 @@ pub fn post_queued(class: Class, f: impl FnOnce() + Send + 'static) {
         rec: std::ptr::null(),
         state: AtomicU8::new(QUEUED),
         panic: Cell::new(None),
+        panic_at: Cell::new(crate::lifeline::NO_PANIC_AT),
         waited: false,
         t_push: 0,
+        t_main: 0,
         t_serve: AtomicU64::new(0),
         t_done: AtomicU64::new(0),
         done: Mutex::new(false),
@@ -1022,6 +1155,8 @@ fn push(r: usize, class: Class) {
         MAIN_PUBLISH.fetch_add(1, Ordering::Relaxed);
     }
     QUEUED_N.fetch_add(1, Ordering::SeqCst);
+    // makepad inspect's timeline: this thread ends the owner's idle wait, spinning or asleep (owner_loop)
+    crate::inspect::timeline::relax_wake(&WAKE as *const Condvar as usize);
     if OWNER_ASLEEP.load(Ordering::SeqCst) {
         WAKE.notify_all();
     }
@@ -1176,6 +1311,8 @@ fn serve(r: usize) {
     let t0 = crate::jit::wall_ns();
     if req.t_push != 0 {
         MAIN_ACC[2].fetch_add(t0.saturating_sub(req.t_push), Ordering::Relaxed);
+    }
+    if req.t_push != 0 || req.t_main != 0 {
         req.t_serve.store(t0.max(1), Ordering::Relaxed);
     }
     let prev_ctx = unsafe { crate::query::swap_context(req.ctx) };
@@ -1189,6 +1326,10 @@ fn serve(r: usize) {
     let prev_t0 = NOW_T0.swap(t0.max(1), Ordering::Relaxed);
     DEPTH.with(|d| d.set(d.get() + 1));
     let frame = crate::jit::frame_enter(req.rec);
+    let prev_pumped = PUMPED.with(|p| p.replace(0));
+    if req.waited {
+        OPEN_FOR.with(|o| o.borrow_mut().push(req.from));
+    }
     // makepad inspect's timeline: the owner's service of this request is a span
     let traced = crate::inspect::timeline::recording();
     if traced {
@@ -1198,6 +1339,9 @@ fn serve(r: usize) {
         unsafe { (*req.run)() }
     }));
     let busy = crate::jit::frame_leave(frame);
+    if req.waited {
+        OPEN_FOR.with(|o| o.borrow_mut().pop());
+    }
     if traced {
         crate::inspect::timeline::push(crate::inspect::timeline::Kind::SpanEnd, SERVE_NAMES[req.class as usize], req.from, 0);
     }
@@ -1233,6 +1377,11 @@ fn serve(r: usize) {
         row.acc[SITE_LONG_N].fetch_add(1, Ordering::Relaxed);
     }
     row.acc[SITE_MAX_NS].fetch_max(t1.saturating_sub(t0), Ordering::Relaxed);
+    row.acc[SITE_HIST + hold_bucket(t1.saturating_sub(t0))].fetch_add(1, Ordering::Relaxed);
+    let pumped = PUMPED.with(|p| p.replace(prev_pumped));
+    if pumped != 0 {
+        row.acc[SITE_PUMP_NS].fetch_add(pumped, Ordering::Relaxed);
+    }
     note_served(req.class, req.from, req.site, t0, t1);
     crate::postframe::owner_served(req.class as usize, req.site, req.from, t0, t1, FOREGROUND.load(Ordering::Relaxed));
     // the process is ending on another thread: this request is never answered (its requester
@@ -1243,6 +1392,7 @@ fn serve(r: usize) {
     match req.waited {
         true => {
             if let Err(p) = res {
+                req.panic_at.set(crate::lifeline::panic_at_raw());
                 req.panic.set(Some(p));
             }
             if traced {
@@ -1276,14 +1426,18 @@ fn serve(r: usize) {
 
 fn owner_loop() -> ! {
     calibrate();
+    let mut main_last = false;
     loop {
-        // idle: a short spin catches the next request of a burst without a sleep and wake
-        for _ in 0..spin_iters(OWNER_SPIN_US) {
+        // idle: a short spin catches the next request of a burst without a sleep and wake (a wait of
+        // makepad inspect's timeline, as the sleep below)
+        let spin = crate::inspect::timeline::wait("idle", &WAKE as *const Condvar as u64);
+        for _ in 0..spin_iters(if main_last { OWNER_MAIN_SPIN_US } else { OWNER_SPIN_US }) {
             if QUEUED_N.load(Ordering::Relaxed) != 0 || FORK.load(Ordering::Relaxed) == 1 {
                 break;
             }
             std::hint::spin_loop();
         }
+        drop(spin);
         let r = {
             let mut q = Q.lock().unwrap_or_else(|e| e.into_inner());
             loop {
@@ -1302,15 +1456,24 @@ fn owner_loop() -> ! {
                 }
                 OWNER_ASLEEP.store(true, Ordering::SeqCst);
                 crate::zone_alloc::compiler_hand_back_idle();
+                // a wait of makepad inspect's timeline, ended by the thread that posts the next
+                // request (push): unrecorded, a frame's critical path counted the owner's idle
+                // time before a UI request as the owner running
+                let _idle = crate::inspect::timeline::wait("idle", &WAKE as *const Condvar as u64);
                 q = WAKE.wait(q).unwrap_or_else(|e| e.into_inner());
+                drop(_idle);
                 OWNER_ASLEEP.store(false, Ordering::SeqCst);
             }
         };
+        main_last = from_main(r);
         serve(r);
         crate::lifeline::beat();
         // between top-level requests: the vtables made for real-time trait-object types
-        // (a panic in either is printed by the panic hook: the owner is not serving a request)
+        // (a panic in either is printed by the panic hook: the owner is not serving a request).
+        // Own work: a request one of their waits serves is nested (a build they opened is lower
+        // on the owner's stack: that request is cancelled and posted again, as inside a request)
         let frame = crate::jit::frame_enter(std::ptr::null());
+        OWN_WORK.with(|w| w.set(true));
         if std::panic::catch_unwind(crate::jit::realtime_drain).is_err() {
             eprintln!("makepad-run: the owner's real-time vtable drain panicked ({}); the owner goes on", crate::lifeline::panic_at());
         }
@@ -1318,6 +1481,14 @@ fn owner_loop() -> ! {
         if std::panic::catch_unwind(crate::jit::const_drain).is_err() {
             eprintln!("makepad-run: the owner's constant drain panicked ({}); the owner goes on", crate::lifeline::panic_at());
         }
+        #[cfg(test)]
+        {
+            let work = OWN_WORK_TEST.lock().unwrap_or_else(|e| e.into_inner()).take();
+            if let Some(work) = work {
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work));
+            }
+        }
+        OWN_WORK.with(|w| w.set(false));
         crate::jit::frame_leave(frame);
     }
 }
@@ -1325,12 +1496,20 @@ fn owner_loop() -> ! {
 /// The owner waits for `done`, serving meanwhile what may be holding it up: Job and Finish
 /// requests (a type check's constant, a back end's finish). On another thread it waits
 /// plainly. `done` only reads state or takes leaf locks.
+#[track_caller]
 pub fn pump_wait(done: &dyn Fn() -> bool) {
     pump_wait_for(0, done)
 }
 
 /// `pump_wait` for a wait on thread `runner` (0: unknown), as the wait registry records it.
+#[track_caller]
 pub(crate) fn pump_wait_for(runner: u64, done: &dyn Fn() -> bool) {
+    pump_wait_at(std::panic::Location::caller(), runner, done, &|| false)
+}
+
+/// `pump_wait_for`, which also gives up (`blocked`: the owner's own stack holds the wait up) at its
+/// start and whenever it found nothing to serve.
+fn pump_wait_at(site: &'static std::panic::Location<'static>, runner: u64, done: &dyn Fn() -> bool, blocked: &dyn Fn() -> bool) {
     if done() {
         return;
     }
@@ -1350,9 +1529,26 @@ pub(crate) fn pump_wait_for(runner: u64, done: &dyn Fn() -> bool) {
         }
         return;
     }
+    // the wait's time, by its site and the request's (`makepad inspect <pid> owner`: pumps)
+    struct Pumping { site: &'static std::panic::Location<'static>, t0: u64, serving: u64 }
+    impl Drop for Pumping {
+        fn drop(&mut self) {
+            let ns = crate::jit::wall_ns().saturating_sub(self.t0);
+            PUMPED.with(|p| p.set(p.get() + ns));
+            let row = pump_acc(self.site, NOW_SITE.load(Ordering::Relaxed));
+            row.acc[0].fetch_add(1, Ordering::Relaxed);
+            row.acc[1].fetch_add(ns, Ordering::Relaxed);
+            row.acc[2].fetch_add(self.serving, Ordering::Relaxed);
+            row.acc[3].fetch_max(ns, Ordering::Relaxed);
+        }
+    }
+    let mut pumping = Pumping { site, t0: crate::jit::wall_ns(), serving: 0 };
     loop {
         if done() {
             return;
+        }
+        if blocked() {
+            stack_blocked();
         }
         let r = {
             let mut q = Q.lock().unwrap_or_else(|e| e.into_inner());
@@ -1369,7 +1565,9 @@ pub(crate) fn pump_wait_for(runner: u64, done: &dyn Fn() -> bool) {
             }
         };
         if let Some(r) = r {
+            let t = crate::jit::wall_ns();
             serve(r);
+            pumping.serving += crate::jit::wall_ns().saturating_sub(t);
         }
     }
 }
@@ -1377,14 +1575,54 @@ pub(crate) fn pump_wait_for(runner: u64, done: &dyn Fn() -> bool) {
 /// The query engine's wait for a query another thread runs (or, nested, a lower frame of this
 /// one): on the owner a pump; a query running lower on the owner's own stack cannot finish
 /// before this request does, so a nested request is cancelled instead.
+///
+/// The same holds for a query whose runner waits for a request open on the owner's stack, directly
+/// or through the queries it waits for in turn (`stack_blocks`): served nested inside an earlier
+/// request's wait, a type check's constant (a Job) waited for a constant an ahead checker ran, whose
+/// own constant request was that earlier request (makepad-fab-slice's tests with the dependency check
+/// beside them hung 650 s, 2026-11-03).
+///
+/// That chain is the nested request's alone. It is read from the wait registry, whose rows lag: a
+/// waiter whose query finished keeps its row until it runs again, so a runner that is about to go
+/// on can look as if it waited for the owner. Served nested, a chain read wrongly costs a retry.
+/// Outermost there is nothing lower to cancel and nothing the query engine does not see (the
+/// requester's queries are the request's context: a cycle through them is the engine's cycle
+/// error), so there only the owner's own query is a cycle; a chain is waited out (four cold Fab,
+/// synth and arm-lab starts at once stopped on an internal compiler error, 2026-11-03).
 fn pump_latch(runner: u64, done: &dyn Fn() -> bool) {
-    if runner != 0 && runner == OWNER_TID.load(Ordering::Relaxed) && !done() {
-        if nested() {
-            std::panic::resume_unwind(Box::new(crate::preempt::OwnerBusy));
-        }
-        panic!("makepad: a query waits for itself on the compiler's owner thread (a query cycle the engine did not see)");
+    if runner == 0 {
+        return pump_wait_for(runner, done);
     }
-    pump_wait_for(runner, done);
+    let owner = OWNER_TID.load(Ordering::Relaxed);
+    pump_wait_at(std::panic::Location::caller(), runner, done, &|| runner == owner || nested() && stack_blocks(runner));
+}
+
+/// Whether thread `t` cannot go on before a request open on the owner's stack ends: it is the owner
+/// (a query run lower on its stack), it waits for one of those requests, or it waits for a query or
+/// build of a thread that cannot (the wait registry's chain, a few hops).
+fn stack_blocks(mut t: u64) -> bool {
+    let owner = OWNER_TID.load(Ordering::Relaxed);
+    for _ in 0..8 {
+        if t == owner || OPEN_FOR.with(|o| o.borrow().contains(&t)) {
+            return true;
+        }
+        match crate::waits::of(t) {
+            Some(w) if matches!(w.kind, crate::waits::Kind::Query | crate::waits::Kind::Build) && w.holder != 0 => t = w.holder,
+            _ => return false,
+        }
+    }
+    false
+}
+
+/// A wait the owner's own stack holds up: a request served nested is cancelled (its requester
+/// posts it again once the earlier request has ended); the outermost one is a cycle.
+fn stack_blocked() -> ! {
+    if nested() {
+        std::panic::resume_unwind(Box::new(crate::preempt::OwnerBusy));
+    }
+    let (class, from) = serving();
+    panic!("makepad: a query waits for itself on the compiler's owner thread (a query cycle the engine did not see; serving a {} request of {}, own work {})",
+        CLASS_NAMES[class as usize], crate::os::thread::name(from), OWN_WORK.with(|w| w.get()));
 }
 
 /// A request served nested cannot do what only the owner's earlier request may finish (a load,
@@ -1517,6 +1755,176 @@ mod tests {
         // the owner's top loop serves it once the request ended
         call(Class::Program, || {});
         assert!(APP_RAN.load(Ordering::SeqCst));
+    }
+
+    /// M55 (makepad-sdf-engine's thin-wall tests on the Vulkan HAL, 2026-11-03): the owner,
+    /// computing the layout of `OnceLock<Result<Arc<Program>, String>>` for one request, waited in
+    /// a query and served a Job there that needed the same layout. The type layer's cycle guard is
+    /// per thread: the Job met the layout in progress, reported E0391 and got a zero-size one. A
+    /// served request has its own computations in progress (its frame); the request below keeps
+    /// its own.
+    #[test]
+    fn a_request_served_inside_a_wait_has_its_own_cycle_guards() {
+        isolated_test!(a_request_served_inside_a_wait_has_its_own_cycle_guards);
+        use relax_types::cycle::{enter, Kind};
+        // 0: not served yet, 1: the layout was free for it, 2: it was refused as a cycle
+        static JOB: AtomicU8 = AtomicU8::new(0);
+        call(Class::Program, || {
+            let _layout = enter(Kind::Layout, 7, 2).expect("nothing in progress yet");
+            let job = std::thread::spawn(|| {
+                while !OWNER_ASLEEP.load(Ordering::SeqCst) {
+                    std::thread::yield_now();
+                }
+                call(Class::Job, || JOB.store(if enter(Kind::Layout, 7, 2).is_ok() { 1 } else { 2 }, Ordering::SeqCst));
+            });
+            pump_wait(&|| JOB.load(Ordering::SeqCst) != 0);
+            job.join().unwrap();
+            // this request's own re-entry is still a cycle
+            assert!(enter(Kind::Layout, 7, 2).is_err());
+        });
+        assert_eq!(JOB.load(Ordering::SeqCst), 1, "the served Job was refused the layout the request below was computing");
+        // and every guard ended with its request
+        assert!(call(Class::Program, || enter(Kind::Layout, 7, 2).is_ok()));
+    }
+
+    /// makepad-fab-slice's tests with the dependency check beside them (2026-11-03): an ahead
+    /// checker's constant (a Job) pumped on the owner, which served a dependency check's constant
+    /// (a Job) inside it; that one waited for a query the ahead checker ran -- whose runner waited for
+    /// the Job lower on the owner's stack. 650 s, every thread waiting. The nested Job is cancelled
+    /// (its requester sees a preemption and asks again), directly and through a thread that waits
+    /// for the ahead checker's query.
+    fn nested_wait_on_the_stack(via_waiter: bool) {
+        static AHEAD: AtomicU64 = AtomicU64::new(0);
+        static WAITER: AtomicU64 = AtomicU64::new(0);
+        static OPEN: AtomicBool = AtomicBool::new(false);
+        // the ahead checker's query, and the second checker's (which waits for it)
+        static AHEAD_DONE: AtomicBool = AtomicBool::new(false);
+        static WAITER_DONE: AtomicBool = AtomicBool::new(false);
+        static CANCELLED: AtomicU32 = AtomicU32::new(0);
+        static TIMED_OUT: AtomicBool = AtomicBool::new(false);
+        let t0 = std::time::Instant::now();
+        let late = move || t0.elapsed().as_secs() >= 5 && !TIMED_OUT.swap(true, Ordering::SeqCst) || TIMED_OUT.load(Ordering::SeqCst);
+        // the ahead checker: running its query, it asks for a constant; the owner's service of it
+        // waits (a pump) until the dependency check's constant came and went
+        let ahead = std::thread::spawn(move || {
+            AHEAD.store(me(), Ordering::SeqCst);
+            call(Class::Job, || {
+                OPEN.store(true, Ordering::SeqCst);
+                pump_wait(&|| CANCELLED.load(Ordering::SeqCst) > 0 || late());
+            });
+            AHEAD_DONE.store(true, Ordering::SeqCst);
+        });
+        // a second checker, waiting for the ahead checker's query while it runs its own
+        let waiter = via_waiter.then(|| std::thread::spawn(move || {
+            while AHEAD.load(Ordering::SeqCst) == 0 {
+                std::thread::yield_now();
+            }
+            WAITER.store(me(), Ordering::SeqCst);
+            {
+                let _w = crate::waits::begin(crate::waits::Kind::Query, 0, AHEAD.load(Ordering::SeqCst), "query");
+                while !AHEAD_DONE.load(Ordering::SeqCst) && !late() {
+                    std::thread::sleep(std::time::Duration::from_micros(200));
+                }
+            }
+            WAITER_DONE.store(true, Ordering::SeqCst);
+        }));
+        // the dependency check (the test thread): its constant needs the ahead checker's query (or
+        // the second checker's); cancelled, it asks again
+        while !OPEN.load(Ordering::SeqCst) || via_waiter && WAITER.load(Ordering::SeqCst) == 0 {
+            std::thread::yield_now();
+        }
+        let (runner, latch): (u64, &'static AtomicBool) = if via_waiter { (WAITER.load(Ordering::SeqCst), &WAITER_DONE) } else { (AHEAD.load(Ordering::SeqCst), &AHEAD_DONE) };
+        loop {
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| call(Class::Job, || pump_latch(runner, &|| latch.load(Ordering::SeqCst) || late()))));
+            match r {
+                Ok(_) => break,
+                Err(p) if crate::preempt::is_preempted(&*p) => {
+                    CANCELLED.fetch_add(1, Ordering::SeqCst);
+                }
+                Err(p) => std::panic::resume_unwind(p),
+            }
+        }
+        ahead.join().unwrap();
+        if let Some(w) = waiter {
+            w.join().unwrap();
+        }
+        assert!(!TIMED_OUT.load(Ordering::SeqCst), "the nested constant waited for a query held up by the owner's own stack");
+        assert!(CANCELLED.load(Ordering::SeqCst) >= 1);
+        assert!(t0.elapsed().as_millis() < 1000, "{:?}", t0.elapsed());
+    }
+
+    /// The owner-wait table's rows: a wait outside every request (the owner loop draining constants)
+    /// has a row of its own, found again (a row named no request site spun forever on its second use
+    /// and hung the owner: a cold Fab drew no frame).
+    #[test]
+    fn owner_wait_rows_outside_requests() {
+        let a = std::panic::Location::caller();
+        let b = between_requests();
+        let x = pump_acc(a, std::ptr::null()) as *const PumpAcc;
+        assert_eq!(pump_acc(a, std::ptr::null()) as *const PumpAcc, x);
+        let y = pump_acc(a, b) as *const PumpAcc;
+        assert_eq!(x, y, "outside a request is between_requests");
+        let z = pump_acc(a, a) as *const PumpAcc;
+        assert_ne!(x, z);
+        unsafe { (*x).acc[0].fetch_add(1, Ordering::Relaxed) };
+        let rows = pump_rows();
+        assert!(rows.iter().any(|r| r.0 == a as *const _ && r.1.is_null()), "the row outside requests reads back with no request site");
+    }
+
+    #[test]
+    fn a_nested_job_waiting_for_a_query_whose_runner_waits_for_the_stack_is_cancelled() {
+        isolated_test!(a_nested_job_waiting_for_a_query_whose_runner_waits_for_the_stack_is_cancelled);
+        nested_wait_on_the_stack(false);
+    }
+
+    #[test]
+    fn a_nested_job_waiting_through_another_checker_for_the_stack_is_cancelled() {
+        isolated_test!(a_nested_job_waiting_through_another_checker_for_the_stack_is_cancelled);
+        nested_wait_on_the_stack(true);
+    }
+
+    /// Four cold starts at once (Fab, synth, arm-lab; 2026-11-03): the owner, serving an outermost
+    /// request, waited for a query a type-check thread ran, and that thread's wait-registry row still
+    /// named a query the owner (or the request's requester) had finished: the waiter had not run
+    /// since its latch completed. The chain read "the runner waits for the owner's stack", an
+    /// internal compiler error, where the runner went on a few ms later. Outermost, the wait is
+    /// waited out; only the owner's own query is a cycle there.
+    fn outermost_wait_on_a_lagging_row(names_requester: bool) {
+        static RUNNER: AtomicU64 = AtomicU64::new(0);
+        static ROW: AtomicBool = AtomicBool::new(false);
+        static DONE: AtomicBool = AtomicBool::new(false);
+        call(Class::Program, || {});
+        let holder = if names_requester { me() } else { OWNER_TID.load(Ordering::SeqCst) };
+        let runner = std::thread::spawn(move || {
+            RUNNER.store(me(), Ordering::SeqCst);
+            {
+                let _w = crate::waits::begin(crate::waits::Kind::Query, 0, holder, "query");
+                ROW.store(true, Ordering::SeqCst);
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            DONE.store(true, Ordering::SeqCst);
+        });
+        while !ROW.load(Ordering::SeqCst) {
+            std::thread::yield_now();
+        }
+        let t0 = std::time::Instant::now();
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| call(Class::Program, || pump_latch(RUNNER.load(Ordering::SeqCst), &|| DONE.load(Ordering::SeqCst)))));
+        runner.join().unwrap();
+        let msg = r.as_ref().err().map(|p| p.downcast_ref::<String>().cloned().or_else(|| p.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_default());
+        assert!(r.is_ok(), "the outermost request stopped: {msg:?}");
+        assert!(t0.elapsed().as_millis() < 1000, "{:?}", t0.elapsed());
+    }
+
+    #[test]
+    fn an_outermost_wait_through_a_row_naming_the_owner_is_waited_out() {
+        isolated_test!(an_outermost_wait_through_a_row_naming_the_owner_is_waited_out);
+        outermost_wait_on_a_lagging_row(false);
+    }
+
+    #[test]
+    fn an_outermost_wait_through_a_row_naming_the_requester_is_waited_out() {
+        isolated_test!(an_outermost_wait_through_a_row_naming_the_requester_is_waited_out);
+        outermost_wait_on_a_lagging_row(true);
     }
 
     /// Rule I-PUB: a publish that asks the owner (or pumps) is a bug and panics; under

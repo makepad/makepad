@@ -2912,6 +2912,7 @@ pub fn set_ui_root(cx: &mut Cx, ui: &WidgetRef) {
     *cx.global::<UiRoot>() = UiRoot { widget: ui.downgrade(), ..Default::default() };
     cx.cancel_scope_resolver = Some(cancel_scope_resolver);
     cx.widget_uid_paths_callback = Some(widget_uid_paths_callback);
+    crate::draw_times::register();
     if let Some(tweaker) = WidgetHooks::tweaker(cx) {
         cx.tweak_callback = Some(tweaker.tweak_callback);
     }

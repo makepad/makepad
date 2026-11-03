@@ -1,7 +1,7 @@
 //! Native compute resources and per-frame recording. GPU compilation and readback are asynchronous.
 use crate::{Cx, Texture, TextureFormat, DrawPassId, makepad_live_id::LiveId, makepad_script::{ScriptVm, ScriptObject}, script::vm::ScriptVmCx};
 use crate::makepad_script::shader_ir_compute::{self as compiler, ComputeLayout, ComputeTarget, ComputeSlotKind, CompiledKernel};
-use makepad_hal::{self as hal, Id, CmdWriter, Attr, StorageBinding, StorageImageBinding};
+use makepad_hal::{self as hal, Id, CmdWriter, StorageBinding, StorageImageBinding};
 use hal::codec::ArenaSink;
 use std::{cell::Cell, rc::{Rc, Weak}};
 
@@ -14,11 +14,15 @@ struct BufferInner { id: Id, size: u64, flags: GpuBufferFlags, alive: Cell<bool>
 pub struct GpuBuffer(Rc<BufferInner>);
 impl PartialEq for GpuBuffer { fn eq(&self, other: &Self) -> bool { Rc::ptr_eq(&self.0, &other.0) } }
 impl GpuBuffer {
+    /// The ledger names the caller as the buffer's creation site (and the open `gpu_owner` scopes
+    /// as its owner), as it does for textures.
+    #[track_caller]
     pub fn new(cx: &mut Cx, size: u64, flags: GpuBufferFlags) -> Result<Self, String> {
         if !cx.compute_supported() { return Err("compute is unavailable on this backend".into()); }
         if size == 0 || size % 4 != 0 { return Err("storage buffer size must be a nonzero multiple of four".into()); }
         let kind = hal::buffer_kind::STORAGE | if flags.indirect { hal::buffer_kind::INDIRECT } else { 0 } | if flags.readback { hal::buffer_kind::READBACK } else { 0 };
-        let id = cx.hal.frames.buffer_create(kind, size, Attr::default());
+        let attr = cx.hal.frames.attr(&crate::gpu_ledger::GpuOrigin::here(), 0);
+        let id = cx.hal.frames.buffer_create(kind, size, attr);
         let inner = Rc::new(BufferInner { id, size, flags, alive: Cell::new(true) });
         cx.hal.compute.buffers.push((id, Rc::downgrade(&inner)));
         Ok(Self(inner))
@@ -26,9 +30,22 @@ impl GpuBuffer {
     pub fn size(&self) -> u64 { self.0.size }
     pub(crate) fn hal_id(&self) -> Id { if self.0.alive.get() { self.0.id } else { Id::NONE } }
     pub fn update(&self, cx: &mut Cx, offset: u64, bytes: &[u8]) -> Result<(), String> {
-        if !self.0.alive.get() || offset.checked_add(bytes.len() as u64).is_none_or(|n| n > self.size()) { return Err("invalid storage buffer update range".into()); }
-        cx.hal.frames.owned_buffer_update(self.0.id, offset, bytes.to_vec());
+        self.check_update(offset, bytes.len())?;
+        self.update_owned(cx, offset, bytes.to_vec())
+    }
+    /// [`GpuBuffer::update`] with bytes it keeps as they are: an upload laid out on another
+    /// thread moves in without a copy on this one.
+    pub fn update_owned(&self, cx: &mut Cx, offset: u64, bytes: Vec<u8>) -> Result<(), String> {
+        self.check_update(offset, bytes.len())?;
+        cx.hal.frames.owned_buffer_update(self.0.id, offset, bytes);
         crate::thread::SignalToUI::set_internal_signal();
+        Ok(())
+    }
+    fn check_update(&self, offset: u64, bytes: usize) -> Result<(), String> {
+        if !self.0.alive.get() { return Err("GPU buffer upload targets a destroyed buffer".into()); }
+        if offset.checked_add(bytes as u64).is_none_or(|end| end > self.size()) {
+            return Err(format!("GPU buffer {:?} upload offset={offset} bytes={bytes} exceeds buffer size={}", self.0.id, self.size()));
+        }
         Ok(())
     }
     pub fn destroy(&self, cx: &mut Cx) {
@@ -88,8 +105,8 @@ impl ComputeParams {
     pub fn set_u32(&mut self, name: LiveId, value: u32) -> Result<&mut Self, String> { self.set(name, &value.to_le_bytes()) }
     pub fn set_f32(&mut self, name: LiveId, value: f32) -> Result<&mut Self, String> { self.set(name, &value.to_le_bytes()) }
 }
-struct Recorded { kernel: ComputeKernel, groups: [u32; 3], indirect: Option<(GpuBuffer, u64)>, params: ComputeParams, buffers: Vec<GpuBuffer>, textures: Vec<Texture> }
-/// Submit once each frame. `before` attaches it to a draw dependency; None runs first.
+struct Recorded { kernel: ComputeKernel, timer: Option<String>, groups: [u32; 3], indirect: Option<(GpuBuffer, u64)>, params: ComputeParams, buffers: Vec<GpuBuffer>, textures: Vec<Texture> }
+/// `before` attaches compute to a draw dependency; None progresses independently of paint.
 pub struct ComputePass { name: String, before: Option<DrawPassId>, dispatches: Vec<Recorded> }
 impl ComputePass {
     pub fn new(name: impl Into<String>, before: Option<DrawPassId>) -> Self { Self { name: name.into(), before, dispatches: Vec::new() } }
@@ -98,7 +115,14 @@ impl ComputePass {
         for (buffer, binding) in buffers.iter().zip(&kernel.layout().buffers) {
             if buffer.hal_id().is_none() || buffer.size() % binding.alignment as u64 != 0 { return Err("invalid storage buffer binding".into()); }
         }
-        self.dispatches.push(Recorded { kernel: kernel.clone(), groups, indirect: None, params: params.clone(), buffers: buffers.to_vec(), textures: textures.to_vec() });
+        self.dispatches.push(Recorded { kernel: kernel.clone(), timer: None, groups, indirect: None, params: params.clone(), buffers: buffers.to_vec(), textures: textures.to_vec() });
+        Ok(())
+    }
+    /// Measure this dispatch without splitting the pass or its submission.
+    pub fn dispatch_timed(&mut self, name: &str, kernel: &ComputeKernel, groups: [u32; 3], params: &ComputeParams, buffers: &[GpuBuffer], textures: &[Texture]) -> Result<(), String> {
+        self.dispatch(kernel, groups, params, buffers, textures)?;
+        self.dispatches.last_mut().unwrap().timer = Some(name.to_string());
+        crate::gpu_frame_timer::watch(name);
         Ok(())
     }
     pub fn dispatch_indirect(&mut self, kernel: &ComputeKernel, args: &GpuBuffer, offset: u64, params: &ComputeParams, buffers: &[GpuBuffer], textures: &[Texture]) -> Result<(), String> {
@@ -107,13 +131,29 @@ impl ComputePass {
         self.dispatches.last_mut().unwrap().indirect = Some((args.clone(), offset));
         Ok(())
     }
+    /// Timestamp an indirect job in the same pass as its producer jobs.
+    pub fn dispatch_indirect_timed(&mut self, name: &str, kernel: &ComputeKernel, args: &GpuBuffer, offset: u64, params: &ComputeParams, buffers: &[GpuBuffer], textures: &[Texture]) -> Result<(), String> {
+        self.dispatch_indirect(kernel, args, offset, params, buffers, textures)?;
+        self.dispatches.last_mut().unwrap().timer = Some(name.to_string());
+        crate::gpu_frame_timer::watch(name);
+        Ok(())
+    }
+    /// Queue compute independently of paint, or before its attached draw pass.
     pub fn submit(self, cx: &mut Cx) {
+        match self.before {
+            Some(pass) => cx.repaint_pass(pass),
+            None => {
+                cx.hal.compute.beat = true;
+                crate::thread::SignalToUI::set_internal_signal();
+            },
+        }
         cx.hal.compute.passes.push(self);
-        cx.redraw_all();
     }
 }
 #[derive(Default)]
 pub(crate) struct ComputeState {
+    /// Unattached compute was submitted since the last HAL turn.
+    pub(crate) beat: bool,
     buffers: Vec<(Id, Weak<BufferInner>)>,
     passes: Vec<ComputePass>,
     retained: Vec<ComputePass>,
@@ -138,11 +178,29 @@ impl Cx {
         Ok(())
     }
 
+    /// Device replacements so far (`Event::GpuReset`): what was uploaded on an older
+    /// generation is gone, and caches keyed by it upload again.
+    pub fn gpu_device_generation(&self) -> u64 { self.hal.device_generation }
+    /// The device is lost and not replaced yet: nothing submitted now runs.
+    pub fn gpu_device_lost(&self) -> bool { self.hal.device_lost }
+    /// The backend replaces a lost device (`Event::GpuReset` follows `Event::GpuLost`). False:
+    /// a lost device stays lost, and work waiting for it is to be answered as failed.
+    pub fn gpu_device_recovers(&self) -> bool { self.hal.info.is_some_and(|i| i.flags & hal::info_flags::DEVICE_RESET != 0) }
     pub fn compute_supported(&self) -> bool { self.hal.info.is_some_and(|i| i.flags & hal::info_flags::COMPUTE != 0) }
     pub fn storage_texture_supported(&self, format: compiler::StorageTextureFormat) -> bool { self.hal.info.is_some_and(|i| i.storage_formats & (1 << storage_format(format)) != 0) }
+    /// Whether the compute passes encoded before `before` (None: the unattached ones, ahead of
+    /// every draw pass) have their pipelines. Unattached passes still queued when a draw pass
+    /// prepares were held for a pipeline: a pass attached behind one of them waits too, so
+    /// compute keeps its submission order.
     pub(crate) fn compute_prepare(&mut self, fb: &mut crate::frame_build::FrameBuilder, before: Option<DrawPassId>) -> bool {
         let mut ready = true;
-        for pass in self.hal.compute.passes.iter().filter(|p| p.before == before) {
+        let mut held_before = false;
+        for pass in &self.hal.compute.passes {
+            if pass.before != before {
+                held_before |= pass.before.is_none();
+                continue;
+            }
+            ready &= !held_before;
             for d in &pass.dispatches {
                 let id = d.kernel.pipeline(fb);
                 if fb.pipeline_waited_for(id.index as usize) { ready = false; }
@@ -170,7 +228,8 @@ impl Cx {
                 let buffers: Vec<_> = d.buffers.iter().map(GpuBuffer::hal_id).collect();
                 let b = fb.w.put_ids(&buffers); let t = fb.w.put_ids(&textures);
                 let params = fb.w.put_bytes(&d.params.bytes);
-                dispatches.push(hal::Dispatch { pipeline: d.kernel.0.pipeline.get(), groups: d.groups, indirect_buffer: d.indirect.as_ref().map_or(Id::NONE, |a| a.0.hal_id()), indirect_offset: d.indirect.as_ref().map_or(0, |a| a.1), params, buffers: hal::Range { off: b.off * 8, len: b.len * 8 }, textures: hal::Range { off: t.off * 8, len: t.len * 8 } });
+                let timer = d.timer.as_ref().map_or(0, |name| fb.intern(name));
+                dispatches.push(hal::Dispatch { pipeline: d.kernel.0.pipeline.get(), timer, groups: d.groups, indirect_buffer: d.indirect.as_ref().map_or(Id::NONE, |a| a.0.hal_id()), indirect_offset: d.indirect.as_ref().map_or(0, |a| a.1), params, buffers: hal::Range { off: b.off * 8, len: b.len * 8 }, textures: hal::Range { off: t.off * 8, len: t.len * 8 } });
             }
             let name = fb.intern(&pass.name);
             fb.w.compute_pass(name, name, &dispatches);
@@ -203,5 +262,14 @@ impl Cx {
     }
 }
 
-impl ComputeState { pub(crate) fn has_pending(&self) -> bool { !self.passes.is_empty() }
-    pub(crate) fn has_unattached(&self) -> bool { self.passes.iter().any(|p| p.before.is_none()) } }
+impl ComputeState {
+    pub(crate) fn has_unattached(&self) -> bool { self.passes.iter().any(|p| p.before.is_none()) }
+    /// A queued pass binds this buffer: a read of it follows that pass, and only such a pass.
+    pub(crate) fn binds_buffer(&self, id: Id) -> bool {
+        self.passes.iter().flat_map(|p| &p.dispatches).any(|d| d.buffers.iter().chain(d.indirect.as_ref().map(|i| &i.0)).any(|b| b.hal_id() == id))
+    }
+    /// A queued pass binds this storage texture.
+    pub(crate) fn binds_texture(&self, id: crate::TextureId) -> bool {
+        self.passes.iter().flat_map(|p| &p.dispatches).any(|d| d.textures.iter().any(|t| t.texture_id() == id))
+    }
+}

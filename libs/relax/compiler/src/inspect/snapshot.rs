@@ -226,6 +226,28 @@ fn prune(dir: &Path) {
     }
 }
 
+/// A copy of `src` (a session's log) in the captures directory, `<stamp>-<app>-<pid>-<what>.log`,
+/// where it outlives the run's temporary directory (a devhub lease's, deleted when the lease
+/// ends); the newest 20 of each kind are kept.
+pub(crate) fn keep_file(src: &Path, what: &str) -> std::io::Result<PathBuf> {
+    let dir = makepad_remote::hot::home().join("captures");
+    std::fs::create_dir_all(&dir)?;
+    let at = stamp(SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs());
+    let safe_app: String = app().chars().map(|c| if c.is_ascii_alphanumeric() || matches!(c, '-' | '_') { c } else { '_' }).collect();
+    let suffix = format!("-{what}.log");
+    let path = dir.join(format!("{at}-{safe_app}-{}{suffix}", std::process::id()));
+    std::fs::copy(src, &path)?;
+    if let Ok(files) = std::fs::read_dir(&dir) {
+        let mut kept: Vec<_> = files.flatten().map(|f| f.path()).filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.ends_with(&suffix))).collect();
+        kept.sort();
+        let old = kept.len().saturating_sub(20);
+        for p in kept.into_iter().take(old) {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+    Ok(path)
+}
+
 #[cfg(unix)]
 fn hostname() -> String {
     extern "C" { fn gethostname(name: *mut u8, len: usize) -> i32; }

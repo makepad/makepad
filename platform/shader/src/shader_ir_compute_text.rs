@@ -125,5 +125,10 @@ pub fn hlsl_buffer_declaration(cx: &TextCx, b: &ComputeBufferBinding, out: &mut 
         let ty = if b.scalar == IrScalar::I32 { "int" } else { "uint" };
         let result = if b.scalar == IrScalar::I32 { "asint(old)" } else { "old" };
         writeln!(out, "{ty} _mp_atomic_{name}(uint off, {ty} value) {{ uint old; {name}.InterlockedAdd(off, asuint(value), old); return {result}; }}").ok();
+        // Typed values pick the signed or unsigned compare.
+        for op in ["Min", "Max"] {
+            let lower = op.to_lowercase();
+            writeln!(out, "{ty} _mp_atomic_{lower}_{name}(uint off, {ty} value) {{ {ty} old; {name}.Interlocked{op}(off, value, old); return old; }}").ok();
+        }
     }
 }

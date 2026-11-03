@@ -4,8 +4,9 @@
 A gate checks and presents what the diff reaches (user 2026-10-30, landing design):
 a change inside one app gates that app. The SMOKE apps all go when the diff reaches
 the JIT itself (makepad-run's dependencies) or a workspace-wide input; the other
-GATE_PACKAGES are checked when the diff reaches them. A diff that reaches no gate
-package gates Calculator, the one canary; a diff only in devhub's own crate gates
+GATE_PACKAGES are checked when the diff reaches them, along with every changed
+package with a lib or bin target. A diff that reaches no gate package gates
+Calculator, the one canary; a diff only in devhub's own crate gates
 its build alone. Prints `jit yes|no`: whether the diff touches what the JIT binary
 is built from; `devhub yes|no`: whether it touches devhub's own binary. A `check` line may end in
 `--also=<libs>`: libs checked as that build compiles them (feature flips, below).
@@ -174,8 +175,8 @@ def main():
     # #472). A gate check of an app checks only the app's own crates, so the changed libs are
     # checked twice: alone (`check X`, their own features) and inside the cheapest affected
     # build that unifies the flip (`check B --also=X`: X's crates as B compiles them).
-    def has_lib(d):
-        return any(k in ("lib", "rlib", "dylib") for t in packages[d]["targets"] for k in t["kind"])
+    def has_target(d, kinds=("lib", "rlib", "dylib")):
+        return any(k in kinds for t in packages[d]["targets"] for k in t["kind"])
 
     def path_deps(d):
         # `cfg(any())` never holds: the commercial root's member list is never built or
@@ -193,7 +194,7 @@ def main():
             if crate in reached:
                 features = frozenset(f for f in dep.get("features") or () if (crate, f) not in own)
                 if features:
-                    users = {t for t in touched if has_lib(t) and crate in closure({t}, built)}
+                    users = {t for t in touched if has_target(t) and crate in closure({t}, built)}
                     entry = flips.setdefault((crate, features), (set(), set()))
                     entry[0].add(directory)
                     entry[1].update(users)
@@ -212,7 +213,7 @@ def main():
         for crate, dep in path_deps(t):
             features = frozenset(dep.get("features") or ()) - before.get(crate, frozenset())
             if features and crate in packages:
-                users = {d for d in packages if d != t and has_lib(d)
+                users = {d for d in packages if d != t and has_target(d)
                          and any(c == crate for c, _ in path_deps(d))}
                 if users:
                     entry = flips.setdefault((crate, features), (set(), set()))
@@ -232,6 +233,12 @@ def main():
             also.setdefault(pick, set()).add(packages[user]["name"])
             if user in touched:
                 alone.add(packages[user]["name"])
+
+    # Every changed package is checked itself too: an app's check covers only its own
+    # crates, so a changed lib outside the gate packages would go unchecked
+    # (makepad-sdf-engine's E0505 reached work, M47).
+    alone.update(packages[d]["name"] for d in touched
+                 if has_target(d, ("lib", "rlib", "dylib", "proc-macro", "bin")))
 
     def where(name):
         # Launch from the actual package directory; works for nested workspaces.

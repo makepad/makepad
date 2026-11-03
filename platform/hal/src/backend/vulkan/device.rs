@@ -762,6 +762,145 @@ impl Drop for Worker {
     }
 }
 
+/// A pipeline compile's place in the queue (`Compilers`): lower goes first.
+pub(crate) mod compile_rank {
+    /// a submitted frame or compute pass waits for it
+    pub const WAITED: u8 = 0;
+    /// a draw program: the first frame is held until every one is ready
+    pub const DRAW: u8 = 1;
+    /// a compute kernel: the platform makes it for the first pass that dispatches it and holds
+    /// that pass until it is ready, so the pass never reaches `compute_ready` to lower this
+    pub const KERNEL: u8 = 2;
+}
+
+/// The pipeline compiles, on up to `Compilers::threads()` threads sharing one queue: Vulkan
+/// creates pipelines on any thread at once, and the driver compiles on the calling thread
+/// (NVIDIA with a cold shader cache: a cold Fab's first frame waited 19.8 s for 183 pipelines on
+/// one thread, 7.7 s on eight). Each job carries its rank (`compile_rank`), which a waiting frame lowers
+/// (`Compilers::waited`); a free thread takes the lowest-ranked job, the oldest first. A job runs
+/// inside the process CPU budget, so compiles and the JIT do not oversubscribe the cores, and in
+/// its interactive class: something waits for every compile (a frame for its draw programs, a
+/// held pass for its kernel), and none is made ahead of need.
+pub(crate) struct Compilers {
+    shared: Arc<CompileShared>,
+    threads: Mutex<Vec<std::thread::JoinHandle<()>>>,
+}
+
+struct CompileShared {
+    queue: Mutex<CompileQueue>,
+    /// a job was queued, or the pool closed
+    work: std::sync::Condvar,
+    /// a job ended (`settle`)
+    ended: std::sync::Condvar,
+}
+
+#[derive(Default)]
+struct CompileQueue {
+    jobs: VecDeque<(Arc<std::sync::atomic::AtomicU8>, Job)>,
+    /// threads started, and those waiting for a job
+    started: usize,
+    idle: usize,
+    running: usize,
+    /// `stop` or `Drop`: the queued jobs run, then the threads end; later pushes are dropped
+    closed: bool,
+}
+
+impl Compilers {
+    pub fn new() -> Self {
+        Self { shared: Arc::new(CompileShared { queue: Mutex::new(CompileQueue::default()), work: std::sync::Condvar::new(), ended: std::sync::Condvar::new() }),
+            threads: Mutex::new(Vec::new()) }
+    }
+
+    /// Half the cores, 2 to 8.
+    fn threads() -> usize {
+        std::thread::available_parallelism().map_or(2, |n| n.get() / 2).clamp(2, 8)
+    }
+
+    /// A rank a job is queued with and its waiters lower (`waited`).
+    pub fn rank(rank: u8) -> Arc<std::sync::atomic::AtomicU8> {
+        Arc::new(std::sync::atomic::AtomicU8::new(rank))
+    }
+
+    /// A frame or pass waits for the job queued with `rank`: it goes before every job not waited for.
+    pub fn waited(rank: &std::sync::atomic::AtomicU8) {
+        rank.fetch_min(compile_rank::WAITED, Ordering::Relaxed);
+    }
+
+    /// Queues `job` at `rank`; a thread is started for it when none is free (up to `threads()`).
+    pub fn push(&self, rank: Arc<std::sync::atomic::AtomicU8>, job: impl FnOnce() + Send + 'static) {
+        let mut q = lock(&self.shared.queue);
+        if q.closed { return; }
+        q.jobs.push_back((rank, Box::new(job)));
+        // an idle thread takes one queued job: woken, it counts as idle until it takes it, so
+        // the jobs queued past the idle threads are the ones without a thread
+        if q.jobs.len() > q.idle && q.started < Self::threads() {
+            q.started += 1;
+            let n = q.started;
+            let shared = self.shared.clone();
+            match std::thread::Builder::new().name(format!("makepad-vulkan-compile-{n}")).spawn(move || Self::run(&shared)) {
+                Ok(t) => lock(&self.threads).push(t),
+                Err(e) => { q.started -= 1; eprintln!("[hal-vulkan] compile thread: {e}"); }
+            }
+        } else {
+            self.shared.work.notify_one();
+        }
+    }
+
+    fn run(shared: &CompileShared) {
+        let mut q = lock(&shared.queue);
+        loop {
+            let at = q.jobs.iter().enumerate().min_by_key(|(_, (r, _))| r.load(Ordering::Relaxed)).map(|(i, _)| i);
+            let Some((_, job)) = at.and_then(|i| q.jobs.remove(i)) else {
+                if q.closed { return; }
+                q.idle += 1;
+                q = shared.work.wait(q).unwrap_or_else(|e| e.into_inner());
+                q.idle -= 1;
+                continue;
+            };
+            q.running += 1;
+            drop(q);
+            let permit = makepad_cpu_budget::admit(makepad_cpu_budget::INTERACTIVE, makepad_cpu_budget::HAL, "pipeline compile");
+            job();
+            makepad_cpu_budget::release(permit);
+            q = lock(&shared.queue);
+            q.running -= 1;
+            shared.ended.notify_all();
+        }
+    }
+
+    /// Waits (up to `limit`) until every job pushed before this call ran.
+    pub fn settle(&self, limit: std::time::Duration) -> bool {
+        let end = std::time::Instant::now() + limit;
+        let mut q = lock(&self.shared.queue);
+        while !q.jobs.is_empty() || q.running > 0 {
+            let left = end.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() { return false; }
+            q = self.shared.ended.wait_timeout(q, left).unwrap_or_else(|e| e.into_inner()).0;
+        }
+        true
+    }
+
+    /// The end of the process (`Vulkan::before_exit`): the queued jobs run, the threads end, and
+    /// this returns once they have. Jobs pushed afterwards are dropped. Never on a compile thread.
+    pub fn stop(&self) {
+        lock(&self.shared.queue).closed = true;
+        self.shared.work.notify_all();
+        for t in std::mem::take(&mut *lock(&self.threads)) {
+            debug_assert!(t.thread().id() != std::thread::current().id(), "a Vulkan compile thread cannot stop the pool");
+            if t.join().is_err() { eprintln!("[hal-vulkan] a compile thread panicked"); }
+        }
+    }
+}
+
+impl Drop for Compilers {
+    fn drop(&mut self) {
+        // the threads run the queued jobs and end on their own (only the end of the process
+        // joins them: `stop`)
+        lock(&self.shared.queue).closed = true;
+        self.shared.work.notify_all();
+    }
+}
+
 /// The Vulkan loader. makepad-vulkan opens it once per process and never closes it (ICDs register
 /// process-exit and thread-exit handlers that must not outlive their library).
 fn loader() -> Result<Entry, String> { unsafe { Entry::load() } }
@@ -806,5 +945,67 @@ mod tests {
         assert_eq!(Arc::strong_count(&ran), 1, "the abandoned job was dropped");
         // stopping again (a second before_exit) is a no-op
         worker.stop();
+    }
+
+    /// The compile threads run at once (a pipeline each), and a free thread takes the job a
+    /// frame waits for first, then the draw programs, then the kernels made ahead.
+    #[test]
+    fn compiles_run_at_once_waited_first() {
+        use super::{compile_rank, Compilers};
+        use std::sync::mpsc::{channel, sync_channel};
+        let pool = Compilers::new();
+        let n = Compilers::threads();
+        let (started_tx, started) = channel();
+        let gates: Vec<_> = (0..n).map(|_| {
+            let (gate, wait) = sync_channel::<()>(0);
+            let started = started_tx.clone();
+            pool.push(Compilers::rank(compile_rank::DRAW), move || { started.send(()).unwrap(); let _ = wait.recv(); });
+            gate
+        }).collect();
+        for _ in 0..n {
+            started.recv_timeout(std::time::Duration::from_secs(10)).expect("every compile thread runs at once");
+        }
+        let order = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let push = |name: &'static str, rank: u8| {
+            let (order, rank) = (order.clone(), Compilers::rank(rank));
+            pool.push(rank.clone(), move || order.lock().unwrap().push(name));
+            rank
+        };
+        push("kernel", compile_rank::KERNEL);
+        push("draw", compile_rank::DRAW);
+        Compilers::waited(&push("waited", compile_rank::KERNEL));
+        // one thread free: it takes the three in rank order (the others are held until it did)
+        gates[0].send(()).unwrap();
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while order.lock().unwrap().len() < 3 && std::time::Instant::now() < end { std::thread::yield_now(); }
+        for gate in &gates[1..] { gate.send(()).unwrap(); }
+        assert!(pool.settle(std::time::Duration::from_secs(10)), "the queue ran out");
+        assert_eq!(*order.lock().unwrap(), ["waited", "draw", "kernel"]);
+        pool.stop();
+        assert!(super::lock(&pool.threads).is_empty(), "the threads were joined");
+    }
+
+    /// Compiles pushed together while a thread idles run side by side: the woken thread takes
+    /// one, and the others each get a thread of their own instead of queueing behind it.
+    #[test]
+    fn pushes_past_an_idle_thread_start_threads() {
+        use super::{compile_rank, Compilers};
+        use std::sync::mpsc::{channel, sync_channel};
+        let pool = Compilers::new();
+        pool.push(Compilers::rank(compile_rank::KERNEL), || {});
+        assert!(pool.settle(std::time::Duration::from_secs(10)), "the first job ran");
+        assert_eq!(super::lock(&pool.shared.queue).idle, 1, "its thread idles");
+        let (started_tx, started) = channel();
+        let gates: Vec<_> = (0..2).map(|_| {
+            let (gate, wait) = sync_channel::<()>(0);
+            let started = started_tx.clone();
+            pool.push(Compilers::rank(compile_rank::KERNEL), move || { started.send(()).unwrap(); let _ = wait.recv(); });
+            gate
+        }).collect();
+        for _ in 0..2 {
+            started.recv_timeout(std::time::Duration::from_secs(10)).expect("both compiles run at once");
+        }
+        drop(gates);
+        pool.stop();
     }
 }

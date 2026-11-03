@@ -360,6 +360,9 @@ pub enum Builtin {
     Dot4U8,
     /// `atomic_add(buffer[i], v)`: returns the old value (u32 / i32).
     AtomicAdd,
+    /// `atomic_min(buffer[i], v)` / `atomic_max(buffer[i], v)`: returns the old value (u32 / i32).
+    AtomicMin,
+    AtomicMax,
     /// Write-only 2D storage image: image, uint2 coordinate, scalar/vec4 texel.
     StorageTextureWrite,
     /// Compute-only operations; load/store's first argument is a place.
@@ -440,6 +443,8 @@ impl Builtin {
             id!(extract_bits) => Builtin::ExtractBits,
             id!(dot4_u8) => Builtin::Dot4U8,
             id!(atomic_add) => Builtin::AtomicAdd,
+            id!(atomic_min) => Builtin::AtomicMin,
+            id!(atomic_max) => Builtin::AtomicMax,
             id!(coopmat_load) => Builtin::CooperativeLoad,
             id!(coopmat_store) => Builtin::CooperativeStore,
             id!(coopmat_mul_add) => Builtin::CooperativeMulAdd,
@@ -691,6 +696,25 @@ impl IrFunction {
 
     pub fn ty_of(&self, e: ExprId) -> TyId {
         self.exprs[e as usize].ty
+    }
+
+    /// Expressions safe to evaluate even when a scalar logical guard skips them.
+    /// Be conservative: indexing, resource access, calls and division can fault
+    /// or have effects even when their result is discarded.
+    pub fn trivially_pure(&self, e: ExprId) -> bool {
+        match &self.exprs[e as usize].kind {
+            ExprKind::Lit(_) | ExprKind::Local(_) | ExprKind::Param(_) => true,
+            ExprKind::Field(a, _) | ExprKind::Swizzle(a, _, _)
+            | ExprKind::Unary(_, a) | ExprKind::Convert(a) | ExprKind::Bitcast(a) => self.trivially_pure(*a),
+            ExprKind::Binary(BinOp::Div | BinOp::Rem, _, _) => false,
+            ExprKind::Binary(_, a, b) => self.trivially_pure(*a) && self.trivially_pure(*b),
+            ExprKind::Construct(args) => args.iter().all(|a| self.trivially_pure(*a)),
+            _ => false,
+        }
+    }
+
+    pub fn needs_short_circuit(&self, e: ExprId) -> bool {
+        matches!(self.exprs[e as usize], Expr { ty: TY_BOOL, kind: ExprKind::Binary(BinOp::LogicAnd | BinOp::LogicOr, _, b) } if !self.trivially_pure(b))
     }
 }
 

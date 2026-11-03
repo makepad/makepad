@@ -168,6 +168,11 @@ pub struct ThreadExecutor {
 
 impl ThreadExecutor {
     pub fn new(workers: usize) -> ThreadExecutor {
+        ThreadExecutor::with_thread_start(workers, || {})
+    }
+
+    /// [`Self::new`], each worker calling `start` first (a background pool lowers its class).
+    pub fn with_thread_start(workers: usize, start: fn()) -> ThreadExecutor {
         let inner = Arc::new(TeInner {
             state: Mutex::new(TeState { tasks: VecDeque::with_capacity(256), open: [None; BATCHES], used: [false; BATCHES], helpers: [0; BATCHES], shutdown: false }),
             work: Condvar::new(),
@@ -177,7 +182,10 @@ impl ThreadExecutor {
         });
         for k in 0..workers {
             let inner = inner.clone();
-            let _ = std::thread::Builder::new().name(format!("kernel-worker-{}", k)).spawn(move || worker(&inner));
+            let _ = std::thread::Builder::new().name(format!("kernel-worker-{}", k)).spawn(move || {
+                start();
+                worker(&inner)
+            });
         }
         ThreadExecutor { inner }
     }

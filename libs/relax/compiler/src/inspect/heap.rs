@@ -946,6 +946,9 @@ fn start_life(host: bool, rate: u64, life: Option<u64>) -> Result<(), &'static s
     if !supported {
         return Err("heap tracking needs macOS arm64 or Linux x86_64");
     }
+    // (`life` is the program's tracker's, which exists only on those targets)
+    #[cfg(not(any(all(target_os = "linux", target_arch = "x86_64"), all(target_vendor = "apple", target_arch = "aarch64"))))]
+    let _ = life;
     if host {
         super::cfi::refresh();
         HOST.on.store(false, Release);

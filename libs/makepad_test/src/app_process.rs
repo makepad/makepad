@@ -381,12 +381,16 @@ fn launch_command(
             return Err(TestError::new(format!("app remote failed to start: {line}")));
         }
         if let Ok(Some(status)) = child.try_wait() {
-            return Err(TestError::new(format!(
-                "{} exited ({status}) before its remote came up; stdout tail:\n{}\nstderr tail:\n{}",
-                executable.display(),
-                file_tail(&stdout_path),
-                file_tail(&stderr_path)
-            )));
+            return Err(startup_exit(
+                executable,
+                &status,
+                "before its remote came up",
+                format!(
+                    "stdout tail:\n{}\nstderr tail:\n{}",
+                    file_tail(&stdout_path),
+                    file_tail(&stderr_path)
+                ),
+            ));
         }
         // A JIT app registers with the loader's endpoint instead of
         // printing the native listening line. Read only our child's record.
@@ -430,11 +434,12 @@ fn launch_command(
             Ok(client) => break client,
             Err(err) => {
                 if let Ok(Some(status)) = child.try_wait() {
-                    return Err(TestError::new(format!(
-                        "{} exited ({status}) during startup; stderr tail:\n{}",
-                        executable.display(),
-                        file_tail(&stderr_path)
-                    )));
+                    return Err(startup_exit(
+                        executable,
+                        &status,
+                        "during startup",
+                        format!("stderr tail:\n{}", file_tail(&stderr_path)),
+                    ));
                 }
                 if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                     let _ = child.kill();
@@ -466,11 +471,12 @@ fn launch_command(
     let mut help_seen = false;
     loop {
         if let Some(status) = app.poll_exit() {
-            return Err(TestError::new(format!(
-                "{} exited ({status}) during startup; stderr tail:\n{}",
-                app.executable.display(),
-                app.stderr_tail()
-            )));
+            return Err(startup_exit(
+                &app.executable,
+                &status,
+                "during startup",
+                format!("stderr tail:\n{}", app.stderr_tail()),
+            ));
         }
         if !help_seen {
             help_seen = app.client.help().is_ok();
@@ -521,6 +527,30 @@ pub fn parse_listening_line(line: &str) -> TestResult<ListeningLine> {
         app,
         socket: PathBuf::from(socket),
     })
+}
+
+/// An app that ended before it was up. An app on a JIT older than its tree in a crate linked
+/// into that JIT stops at startup ("The JIT itself changed (<crate>)"): the run's stale JIT,
+/// never the app's own failure.
+fn startup_exit(
+    executable: &Path,
+    status: &dyn std::fmt::Display,
+    when: &str,
+    tails: String,
+) -> TestError {
+    const STALE: &str = "The JIT itself changed (";
+    if let Some(krate) = tails.split(STALE).nth(1).and_then(|rest| rest.split(')').next()) {
+        return TestError::new(format!(
+            "{} stopped {when}: a stale JIT, not a test failure: the JIT running it is older \
+             than the app's tree in {krate}, a crate linked into the JIT; run it on a JIT built \
+             from this tree\n{tails}",
+            executable.display()
+        ));
+    }
+    TestError::new(format!(
+        "{} exited ({status}) {when}; {tails}",
+        executable.display()
+    ))
 }
 
 pub fn file_tail(path: &Path) -> String {
@@ -774,6 +804,16 @@ mod tests {
         let err = launch_error(launch(&spec, &script));
         assert!(err.message().contains("pid 1"), "{}", err.message());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_stale_jit_at_startup_is_named_as_one() {
+        let tail = "stderr tail:\nmakepad live: The JIT itself changed (makepad_hal) -- Restart to update: a restart applies it\n";
+        let stale = startup_exit(Path::new("app"), &"exit status: 0", "during startup", tail.into());
+        assert!(stale.message().contains("stopped during startup: a stale JIT, not a test failure"), "{}", stale.message());
+        assert!(stale.message().contains("tree in makepad_hal, a crate linked into the JIT"), "{}", stale.message());
+        let exited = startup_exit(Path::new("app"), &"exit status: 1", "during startup", "stderr tail:\nboom".into());
+        assert_eq!(exited.message(), "app exited (exit status: 1) during startup; stderr tail:\nboom");
     }
 
     #[test]

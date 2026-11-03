@@ -78,52 +78,12 @@ impl DomainHost for Host {
         domain::still_owned(domain).is_none()
     }
 
-    fn domain_replaced(&self, previous: u32, replacement: u32) {
-        crate::hal_run::domain_replaced(previous, replacement);
-    }
-
-    // The HAL either joined the old incarnation or allocated a fresh id. Old
-    // threads cannot turn this relaunch into an app failure or a process exec.
+    /// A window manager's relaunch of one of its child apps (the HAL joined the old run or gave
+    /// the child a fresh id). `makepad run`'s own app never relaunches: its restarts start the
+    /// process again (relax_compiler::reload).
     fn relaunch(&self, launch: DomainLaunch) -> Result<(), String> {
         let id = launch.domain;
-        crate::hal_run::restarting(id);
-        match self.launch(launch) {
-            Ok(()) => Ok(()),
-            Err(e) => self.relaunch_failed(id, e),
-        }
-    }
-}
-
-impl Host {
-    fn relaunch_failed(&self, id: u32, why: String) -> Result<(), String> {
-        // the run window shows what follows (its relaunch began; the stop is over)
-        crate::hal_run::restarting(id);
-        if relax_compiler::run::app_domain() == Some(id) {
-            if relax_compiler::hot_failure::recovering() {
-                relax_compiler::hot_failure::restart_failed(&why);
-                relax_compiler::hot_failure::pump();
-                crate::hal_run::observe(id, &DomainState::Crashed(why.clone()));
-                return Err(why);
-            }
-            relax_compiler::hot_failure::failed(makepad_remote::hot::Outcome::RelaunchFailed, &[why.clone()], None);
-            eprintln!("makepad-run domain: {id}: the relaunch in place failed: {why}; starting a fresh domain on the warm compiler, with the app's saved state");
-            let restart = crate::hal_run::spec(id).ok_or_else(|| "the app's launch specification is unavailable".to_string()).and_then(crate::hal_run::start);
-            match restart {
-                Ok(()) => return Ok(()),
-                Err(e) => {
-                    relax_compiler::hot_failure::restart_failed(&e);
-                    relax_compiler::hot_failure::pump();
-                    let message = format!("relaunch failed: {why}; the warm restart failed too: {e}");
-                    eprintln!("makepad-run domain: {id}: {message}");
-                    crate::hal_run::observe(id, &DomainState::Crashed(message.clone()));
-                    return Err(message);
-                }
-            }
-        }
-        let message = format!("relaunch failed: {why}; start the app again");
-        eprintln!("makepad-run domain: {id}: {message}");
-        crate::hal_run::observe(id, &DomainState::Crashed(message.clone()));
-        Err(message)
+        self.launch(launch).inspect_err(|e| eprintln!("makepad-run domain: {id}: relaunch failed: {e}"))
     }
 }
 

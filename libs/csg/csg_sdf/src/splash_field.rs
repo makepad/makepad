@@ -27,9 +27,16 @@
 //!
 //! When compiling fails the function is outside the kernel language and
 //! cannot be meshed as a field.
+//!
+//! A field may read a grid ([`SdfSplashExpr::compile_gridded`]): its fn reads
+//! the flat buffer `sdf_grid` (an [`SdfGrid`]'s words: the header, then the
+//! samples), and the kernel's first parameter, `sdf_grid_at`, is where a GPU
+//! route finds those words (unused on the CPU, which binds the buffer).
 
 use makepad_script_compute_sched::kernel::KernelExt;
+use crate::grid::SdfGrid;
 use crate::sdf::Sdf3;
+use std::sync::Arc;
 use makepad_csg_math::Vec3d;
 use makepad_script::*;
 use makepad_script_compute::kernel::{KernelRef, MathMode};
@@ -73,20 +80,40 @@ pub struct SdfSplashExpr {
     slots: Vec<usize>,
     /// The program's key (hashing it walks the whole program: once).
     structure: u64,
+    /// The grid the fn reads (a gridded field), and its words as the kernel reads them.
+    grid: Option<(Arc<SdfGrid>, Arc<[f32]>)>,
 }
 
 /// The most document numbers a field lifts to parameters (the rest stay
 /// constants): what the GPU route passes per call.
 pub const MAX_LIFTED: usize = 16;
 
+/// A gridded field's grid buffer and the parameter that locates it (the
+/// kernel's first).
+pub const GRID_INPUT: &str = "sdf_grid";
+pub const GRID_PARAM: &str = "sdf_grid_at";
+
 impl SdfSplashExpr {
     /// Compiles `f` (a script fn) as a field. `uniforms` holds the lane
     /// count (1-4) of each parameter after the point.
     pub fn compile(vm: &mut ScriptVm, f: ScriptObject, point: SplashPoint, uniforms: &[usize]) -> Result<SdfSplashExpr, Vec<ShaderError>> {
+        Self::compile_inner(vm, f, point, uniforms, None)
+    }
+
+    /// [`SdfSplashExpr::compile`] for a fn that reads `grid` as `sdf_grid`.
+    pub fn compile_gridded(vm: &mut ScriptVm, f: ScriptObject, point: SplashPoint, uniforms: &[usize], grid: SdfGrid) -> Result<SdfSplashExpr, Vec<ShaderError>> {
+        Self::compile_inner(vm, f, point, uniforms, Some(grid))
+    }
+
+    fn compile_inner(vm: &mut ScriptVm, f: ScriptObject, point: SplashPoint, uniforms: &[usize], grid: Option<SdfGrid>) -> Result<SdfSplashExpr, Vec<ShaderError>> {
         let mut decls = vec![
             Decl::Input { name: "sdf_points".into(), ty: "vec3".into(), stride: None, offset: None, buffer: None },
             Decl::Output { name: "sdf_dist".into(), ty: "f32".into(), stride: None, offset: None, buffer: None },
         ];
+        if grid.is_some() {
+            decls.push(Decl::Input { name: GRID_INPUT.into(), ty: "f32".into(), stride: None, offset: None, buffer: None });
+            decls.push(Decl::Param { name: GRID_PARAM.into(), default: 0.0, range: None });
+        }
         let mut args = match point {
             SplashPoint::Vec3 => "sdf_points[i]".to_string(),
             SplashPoint::Xyz => "sdf_points[i].x, sdf_points[i].y, sdf_points[i].z".to_string(),
@@ -132,7 +159,27 @@ impl SdfSplashExpr {
         let slots = params.iter().map(|n| kernel.param_index(n).expect("a declared uniform is a kernel parameter")).collect();
         let values = vec![0.0; params.len()];
         let structure = kernel.program_key();
-        Ok(SdfSplashExpr { kernel, params, values, lifted, slots, structure })
+        if grid.is_some() && kernel.param_index(GRID_PARAM) != Some(0) {
+            return Err(vec![ShaderError::new(0, 1, format!("the grid's parameter is not the kernel's first ({:?})", kernel.param_index(GRID_PARAM)))]);
+        }
+        let grid = grid.map(|g| {
+            let words: Arc<[f32]> = g.words().into();
+            (Arc::new(g), words)
+        });
+        Ok(SdfSplashExpr { kernel, params, values, lifted, slots, structure, grid })
+    }
+
+    /// The grid a gridded field reads.
+    pub fn grid(&self) -> Option<&Arc<SdfGrid>> {
+        self.grid.as_ref().map(|(g, _)| g)
+    }
+
+    /// The same program reading `grid` (a piece of this field's grid, or another of its
+    /// frame): no compile.
+    pub fn with_grid(&self, grid: SdfGrid) -> SdfSplashExpr {
+        assert!(self.grid.is_some(), "a field without a grid");
+        let words: Arc<[f32]> = grid.words().into();
+        SdfSplashExpr { grid: Some((Arc::new(grid), words)), ..self.clone() }
     }
 
     /// The compiled program's identity (its whole AIR; lifted numbers are
@@ -147,6 +194,9 @@ impl SdfSplashExpr {
         let mut h = self.structure_key() ^ 0x9e37_79b9_7f4a_7c15;
         for v in self.params() {
             h = (h ^ v.to_bits() as u64).wrapping_mul(0x100_0000_01b3);
+        }
+        if let Some((g, _)) = &self.grid {
+            h = (h ^ g.hash()).wrapping_mul(0x100_0000_01b3);
         }
         h
     }
@@ -185,11 +235,21 @@ impl SdfSplashExpr {
     /// [`SdfSplashExpr::distance_batch`] with every parameter given (by
     /// parameter index, as [`SdfSplashExpr::params`] lists them).
     pub fn distance_batch_with(&self, params: &[f32], xyz: &[f32], out: &mut [f32]) {
+        self.distance_batch_words(params, self.grid.as_ref().map(|(_, w)| &w[..]), xyz, out)
+    }
+
+    /// [`SdfSplashExpr::distance_batch_with`] reading `grid` (an [`SdfGrid`]'s words, as a
+    /// program's payload holds them) in place of the field's own grid.
+    pub fn distance_batch_words(&self, params: &[f32], grid: Option<&[f32]>, xyz: &[f32], out: &mut [f32]) {
         assert!(xyz.len() == out.len() * 3);
+        assert_eq!(grid.is_some(), self.grid.is_some(), "a gridded field reads a grid, others none");
         let count = out.len();
         let mut call = self.kernel.call();
         for (k, v) in params.iter().enumerate().take(self.kernel.param_count()) {
             call.set_param(self.kernel.param_view(k).name, *v);
+        }
+        if let Some(words) = grid {
+            call.input(GRID_INPUT, words).expect("the field's grid input");
         }
         call.input("sdf_points", xyz).expect("the field's point input");
         call.output("sdf_dist", out).expect("the field's distance output");

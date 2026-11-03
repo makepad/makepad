@@ -541,7 +541,7 @@ impl ModelDraw<'_> {
         for layer in 0..=shells {
             draw.fur_layer.x = layer as f32 / shells.max(1) as f32;
             draw.draw_vars.draw_shader_id = if layer == 0 { opaque.or(stock) } else { stock };
-            let area = cx.add_instance(&draw.draw_vars);
+            let area = cx.add_instance(&mut draw.draw_vars);
             draw.draw_vars.area = cx.update_area_refs(draw.draw_vars.area, area);
         }
         draw.draw_vars.draw_shader_id = stock;

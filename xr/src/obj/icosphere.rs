@@ -196,7 +196,7 @@ impl DrawIcoSolid {
         self.draw_vars.geometry_id = Some(geometry_id);
         self.apply_uniforms(cx);
         if self.draw_vars.can_instance() {
-            let new_area = cx.add_instance(&self.draw_vars);
+            let new_area = cx.add_instance(&mut self.draw_vars);
             self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
         }
     }

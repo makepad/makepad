@@ -537,6 +537,12 @@ impl Cx {
                     fb.w.menu_set(items.len() as u32, &bytes);
                 }
                 CxOsOp::SetTray(tray) => {
+                    // A tray app shows itself with its tray: before it made a window, the first tray
+                    // the desktop shows is its first present (the launcher, the JIT's startup and its
+                    // first-frame deadline wait for one). A window app's stays its first frame.
+                    if self.trays.contains(&tray.id) && !self.windows.id_iter().any(|w| self.windows[w].is_created) {
+                        crate::startup_trace_first_present();
+                    }
                     // A hosted app's tray is its host's to show (the makepad WM's tray area).
                     if self.hal.hosted.is_some() {
                         Self::send_studio_message(crate::studio::AppToStudio::Relay(crate::studio::ChildRelay::SetTray(crate::tray::relay_tray(&tray))));

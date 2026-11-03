@@ -16,6 +16,8 @@ required-features = ["checkout"]
 [dependencies]
 relax-base = { workspace = true, optional = true }
 makepad-ci-merge = { path = "../../tools/ci_merge" }
+# git reads and writes in process (refs, worktrees, config, history): rounds never spawn git
+makepad-git = { path = "../git" }
 makepad-ci-judge = { path = "../ci_judge", optional = true }
 makepad-network = { path = "../../platform/network" }
 makepad-devhub-conf = { path = "../devhub_conf" }

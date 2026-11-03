@@ -8,7 +8,7 @@ use crate::error::GitError;
 use crate::index::Index;
 use crate::object::Object;
 use crate::oid::ObjectId;
-use crate::pack::{read_pack_object_from_data, PackIndex, PackLookup};
+use crate::pack::{PackIndex, PackLookup};
 use crate::refs;
 use crate::repo::{object_sources, read_loose_object_from_objects_dir, ObjectSources};
 use crate::tree::parse_tree;
@@ -35,67 +35,12 @@ struct FileEntry {
     mode: u32,
 }
 
-/// Thread-safe pack reader: pre-loaded pack data + immutable index metadata.
-struct SharedPack {
-    pack_data: Vec<u8>,
-    fanout: [u32; 256],
-    oids: Vec<ObjectId>,
-    offsets: Vec<u64>,
-}
-
-impl PackLookup for SharedPack {
-    fn find_offset(&self, oid: &ObjectId) -> Option<u64> {
-        let first_byte = oid.as_bytes()[0] as usize;
-        let start = if first_byte == 0 {
-            0
-        } else {
-            self.fanout[first_byte - 1] as usize
-        };
-        let end = self.fanout[first_byte] as usize;
-        let slice = &self.oids[start..end];
-        match slice.binary_search_by(|probe| probe.as_bytes().cmp(oid.as_bytes())) {
-            Ok(idx) => Some(self.offsets[start + idx]),
-            Err(_) => None,
-        }
-    }
-}
-
-impl SharedPack {
-    fn from_pack_index(idx: &PackIndex) -> Result<Self, GitError> {
-        idx.ensure_loaded()?;
-        let pack_data = idx.get_cached_data().ok_or_else(|| {
-            GitError::Io(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "pack data not loaded",
-            ))
-        })?;
-        Ok(SharedPack {
-            pack_data,
-            fanout: idx.fanout_copy(),
-            oids: idx.oids_copy(),
-            offsets: idx.offsets_copy(),
-        })
-    }
-
-    fn read_object(&self, oid: &ObjectId) -> Result<Object, GitError> {
-        if let Some(offset) = self.find_offset(oid) {
-            read_pack_object_from_data(&self.pack_data, offset as usize, self)
-        } else {
-            Err(GitError::ObjectNotFound(oid.to_hex()))
-        }
-    }
-}
-
-// SharedPack has no interior mutability — all fields are plain data.
-unsafe impl Send for SharedPack {}
-unsafe impl Sync for SharedPack {}
-
 /// Perform a local depth=1 clone using git alternates.
 ///
 /// Strategy:
 /// 1. Walk the tree to collect all file entries (sequential — trees are small)
 /// 2. Create all directories
-/// 3. Pre-load pack data into thread-safe shared readers
+/// 3. Share parsed indexes between independent bounded pack readers
 /// 4. Decompress blobs + write files in parallel across threads
 pub fn local_clone_depth1(
     src: &Path,
@@ -189,16 +134,8 @@ pub fn local_clone_depth1(
         fs::create_dir_all(workdir.join(dir))?;
     }
 
-    // --- Phase 5: Build thread-safe pack readers ---
-    for pack in &sources.packs {
-        pack.ensure_loaded()?;
-    }
-    let shared_packs: Vec<SharedPack> = sources
-        .packs
-        .iter()
-        .filter_map(|p| SharedPack::from_pack_index(p).ok())
-        .collect();
-    let shared_packs = Arc::new(shared_packs);
+    // Each worker owns its file handles and bounded cache; index tables are
+    // shared. No worker reads or copies an entire pack.
     let loose_dirs_arc = Arc::new(sources.loose_dirs.clone());
 
     // --- Phase 6: Parallel decompress + write ---
@@ -226,7 +163,7 @@ pub fn local_clone_depth1(
     let mut handles = Vec::new();
 
     for chunk in chunks {
-        let packs = Arc::clone(&shared_packs);
+        let packs: Vec<PackIndex> = sources.packs.iter().map(PackIndex::reader).collect();
         let wd = Arc::clone(&workdir_arc);
         let loose_dirs = Arc::clone(&loose_dirs_arc);
 
@@ -394,7 +331,7 @@ fn collect_entries(
 /// loose objects from every source directory first, then the packs.
 fn read_object_shared(
     loose_dirs: &[std::path::PathBuf],
-    packs: &[SharedPack],
+    packs: &[PackIndex],
     oid: &ObjectId,
 ) -> Result<Object, GitError> {
     for dir in loose_dirs {
@@ -405,8 +342,8 @@ fn read_object_shared(
         }
     }
     for pack in packs {
-        if let Ok(obj) = pack.read_object(oid) {
-            return Ok(obj);
+        if let Some(offset) = pack.find_offset(oid) {
+            return pack.read_object(offset);
         }
     }
     Err(GitError::ObjectNotFound(oid.to_hex()))

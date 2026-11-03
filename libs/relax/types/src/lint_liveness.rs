@@ -294,6 +294,29 @@ impl<'c, 'a> Unit<'c, 'a> {
         }
     }
 
+    /// The variables pattern `p` binds by reference (`ref x`, or `x` under a reference default
+    /// binding mode).
+    fn by_ref_bindings(&mut self, p: PatId, out: &mut Vec<u32>) {
+        let ast = self.cx.ast;
+        match *ast.pat(p) {
+            Pat::Ident { by_ref, sub, .. } => {
+                if self.cx.body.pat_res.get(&p.0).is_none() && (by_ref || self.cx.body.pat_bind_ref.get(&p.0).is_some_and(|&m| m != 0)) {
+                    if let Some(&l) = self.cx.body.pat_local.get(&p.0) {
+                        let v = self.var(l);
+                        if !out.contains(&v) { out.push(v); }
+                    }
+                }
+                if let Some(s) = sub { self.by_ref_bindings(s, out); }
+            }
+            Pat::Lit(_) | Pat::Range(..) | Pat::Path(_) | Pat::Wild | Pat::Rest | Pat::Mac(_) => {}
+            Pat::Or(ps) | Pat::TupleStruct(_, ps) | Pat::Tuple(ps) | Pat::Slice(ps) => {
+                for &x in ast.list(ps) { self.by_ref_bindings(x, out); }
+            }
+            Pat::Struct(_, fs, _) => { for f in ast.list(fs) { self.by_ref_bindings(f.pat, out); } }
+            Pat::Ref(_, x) | Pat::Paren(x) | Pat::Box(x) => self.by_ref_bindings(x, out),
+        }
+    }
+
     /// A parameter pattern: a plain name is the argument itself (its value is the entry access).
     fn param(&mut self, p: PatId) {
         let ast = self.cx.ast;
@@ -357,13 +380,64 @@ impl<'c, 'a> Unit<'c, 'a> {
                             self.cur = start;
                             self.bind_pat(l.pat, true);
                         } else {
+                            let from = self.accesses.len();
                             self.bind_pat(l.pat, true);
+                            self.init_at_tails(l.pat, init, from);
                         }
                     }
                     None => self.bind_pat(l.pat, false),
                 }
                 self.leave();
             }
+        }
+    }
+
+    /// A plain `let x = init;` is written where `init` makes its value (rustc_mir_build
+    /// expr_into_pattern: expr_into_dest), at each tail of `init` that does not diverge: a dead
+    /// initial value is reported there, and not at all inside an external macro (`vec![..]`).
+    /// `from`: the first access `bind_pat` recorded.
+    fn init_at_tails(&mut self, pat: PatId, init: ExprId, from: usize) {
+        let ast = self.cx.ast;
+        let mut q = pat;
+        while let Pat::Paren(x) = *ast.pat(q) { q = x; }
+        if !matches!(*ast.pat(q), Pat::Ident { sub: None, by_ref: false, .. }) || self.accesses.len() != from + 1 { return; }
+        let mut tails = Vec::new();
+        self.value_tails(init, &mut tails);
+        if tails.is_empty() { return; }
+        let a = self.accesses.pop().unwrap();
+        for key in tails {
+            self.accesses.push(Access { var: a.var, kind: a.kind, key, node: a.node, at_entry: a.at_entry, direct: a.direct, scope: a.scope, init: a.init });
+        }
+    }
+
+    /// The spans of the expressions whose values become the value of `e`.
+    fn value_tails(&self, e: ExprId, out: &mut Vec<(u32, u32)>) {
+        let ast = self.cx.ast;
+        let ex = *ast.expr(e);
+        if self.is_never(e) { return; }
+        match ex.kind {
+            ExprKind::Paren(x) => self.value_tails(x, out),
+            ExprKind::Block(b, label) if label.get().is_none() => self.block_value_tails(b, e, out),
+            ExprKind::Unsafe(b) => self.block_value_tails(b, e, out),
+            ExprKind::If(_, then, els) if els.get().is_some() => {
+                self.block_value_tails(then, e, out);
+                if let Some(x) = els.get() { self.value_tails(x, out); }
+            }
+            ExprKind::Match(_, arms) => { for a in ast.list(arms) { self.value_tails(a.body, out); } }
+            _ => out.push((ex.lo, ex.hi)),
+        }
+    }
+
+    fn block_value_tails(&self, b: BlockId, e: ExprId, out: &mut Vec<(u32, u32)>) {
+        let ast = self.cx.ast;
+        let tail = match ast.stmts(b).last() {
+            Some(&Stmt::Expr(t, false)) => Some(t),
+            Some(&Stmt::Attrs(r)) if !ast.row(r).semi => Some(ast.row(r).expr),
+            _ => None,
+        };
+        match tail {
+            Some(t) => self.value_tails(t, out),
+            None => { let ex = ast.expr(e); out.push((ex.lo, ex.hi)); }
         }
     }
 
@@ -644,6 +718,12 @@ impl<'c, 'a> Unit<'c, 'a> {
             self.enter(a.attrs);
             self.bind_pat(a.pat, true);
             if let Some(g) = a.guard {
+                // a by-reference binding of a guarded arm is made before the guard, which gets a
+                // reference to it (rustc_mir_build bind_matched_candidate_for_guard: the guard's
+                // local is `&arm_local`), so the arm's binding is read even when nothing names it
+                let mut by_ref = Vec::new();
+                self.by_ref_bindings(a.pat, &mut by_ref);
+                if !by_ref.is_empty() { self.step(by_ref, NONE); }
                 let ok = self.new_node();
                 let next = starts.get(i + 1).copied().unwrap_or(join);
                 // a failed guard falls through to the next arm (or nowhere: exhaustive)
@@ -742,6 +822,10 @@ impl<'c, 'a> Unit<'c, 'a> {
                 self.expr(i);
                 let overloaded = self.cx.body.ov_index.get(&e.0).is_some() || self.cx.body.index_derefs(e.0) > 0;
                 let deref = matches!(self.ty_kind_of(a), Some(TyKind::Ref(..) | TyKind::Ptr(..) | TyKind::Slice(_))) || self.is_box(a) || overloaded;
+                // the bounds check of an array index reads the array (rustc_mir_build
+                // len_of_slice_or_array: FakeRead ForIndex of the base), so writing `a[i]` is a
+                // use of `a` that kills nothing
+                if let Some(l) = r { if !ind && !deref { self.use_local(l); } }
                 (r, false, ind || deref)
             }
             ExprKind::Unary(UnOp::Deref, x) => {
@@ -822,7 +906,13 @@ impl<'c, 'a> Unit<'c, 'a> {
         if let Some(p) = args.pat {
             // matches!(e, pat if guard)
             self.bind_pat(p, true);
-            if let Some(g) = args.guard { self.expr(g); }
+            if let Some(g) = args.guard {
+                // by-reference bindings are read by the guard's reference to them (match_expr)
+                let mut by_ref = Vec::new();
+                self.by_ref_bindings(p, &mut by_ref);
+                if !by_ref.is_empty() { self.step(by_ref, NONE); }
+                self.expr(g);
+            }
         } else if let Some(g) = args.guard {
             self.expr(g);
         }

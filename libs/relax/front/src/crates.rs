@@ -19,6 +19,8 @@ pub struct CrateUnit {
     pub proc_macro: bool,
     /// the unit is a binary target (its `main` is checked)
     pub bin: bool,
+    /// built with `--test` (GraphUnit::harness): no entry point of its own
+    pub harness: bool,
     pub build_script: bool,
     /// package version from cargo's pkg_id ("1.15.1")
     pub version: String,
@@ -163,7 +165,7 @@ pub struct SrcFile {
 }
 
 /// Loads every lib/proc-macro unit of cargo's `--unit-graph` output, deduplicated by
-/// source path (host and target copies of a crate parse the same files).
+/// source path and test mode (host and target copies still share a crate).
 pub fn load_units(path: &str) -> Result<Vec<CrateUnit>, String> {
     let data = crate::vfs::read(path).map_err(|e| format!("{}: {}", path, e))?;
     let j = json::parse(&data)?;
@@ -205,9 +207,10 @@ pub fn load_units(path: &str) -> Result<Vec<CrateUnit>, String> {
             map.push(usize::MAX);
             continue;
         }
+        let harness = u.get("mode").is_some_and(|m| m.str() == "test");
         let mut found = usize::MAX;
         for i in 0..out.len() {
-            if crate::vfs::normalize_path(&out[i].src_path) == crate::vfs::normalize_path(&src_path) {
+            if out[i].harness == harness && crate::vfs::normalize_path(&out[i].src_path) == crate::vfs::normalize_path(&src_path) {
                 found = i;
                 break;
             }
@@ -266,7 +269,7 @@ pub fn load_units(path: &str) -> Result<Vec<CrateUnit>, String> {
             None => String::new(),
         };
         map.push(out.len());
-        out.push(CrateUnit { name, src_path, edition, features, deps, host: None, proc_macro: kind_pm, bin: false, build_script, version, registry: !pkg.starts_with("path+") });
+        out.push(CrateUnit { name, src_path, edition, features, deps, host: None, proc_macro: kind_pm, bin: false, harness, build_script, version, registry: !pkg.starts_with("path+") });
     }
     // remap dependency indices to deduplicated crate indices; drop build-script deps
     for c in out.iter_mut() {
@@ -358,7 +361,7 @@ pub fn discover(sess: &std::sync::Arc<crate::Session>, crates: &[CrateUnit], cfg
         files: Vec<SrcFile>,
         missing: Vec<String>,
         errors: Vec<String>,
-        seen: Vec<String>,
+        seen: Vec<(u32, String)>,
     }
     let sources = std::sync::Arc::new(crate::source::SourceRegistry::default());
     let contexts = crate::source_context::Context::for_units(crates, sources, sess);
@@ -374,7 +377,7 @@ pub fn discover(sess: &std::sync::Arc<crate::Session>, crates: &[CrateUnit], cfg
     {
         let mut s = state.lock().unwrap();
         for i in 0..crates.len() {
-            s.seen.push(crates[i].src_path.clone());
+            s.seen.push((i as u32, crates[i].src_path.clone()));
             s.queue.push(Job { crate_idx: i as u32, path: crates[i].src_path.clone(), edition: crates[i].edition, mod_rs: true, active: true });
         }
     }
@@ -430,14 +433,14 @@ pub fn discover(sess: &std::sync::Arc<crate::Session>, crates: &[CrateUnit], cfg
                         if crate::vfs::exists(c) {
                             ok = true;
                             let mut dup = false;
-                            for x in &s.seen {
-                                if x == c {
+                            for (krate, path) in &s.seen {
+                                if *krate == job.crate_idx && path == c {
                                     dup = true;
                                     break;
                                 }
                             }
                             if !dup {
-                                s.seen.push(c.clone());
+                                s.seen.push((job.crate_idx, c.clone()));
                                 let ismodrs = mod_rs || c.ends_with("/mod.rs");
                                 s.queue.push(Job { crate_idx: job.crate_idx, path: c.clone(), edition: job.edition, mod_rs: ismodrs, active: act });
                             }

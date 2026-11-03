@@ -12,6 +12,14 @@ pub type Handle = *mut c_void;
 const NONE: i32 = 0x3038;
 const EXTENSIONS: i32 = 0x3055;
 
+/// NVIDIA crashes or deadlocks when contexts are created and first used on several
+/// threads at once (tests/gl.rs); serialize bring-up and teardown.
+static CONTEXT_LIFECYCLE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+pub(super) fn lock_context_lifecycle() -> std::sync::MutexGuard<'static, ()> {
+    CONTEXT_LIFECYCLE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 macro_rules! egl_functions {
     ($($field:ident: $symbol:literal ($($arg:ty),*) -> $ret:ty;)*) => {
         pub struct Egl {
@@ -278,6 +286,7 @@ impl Context {
 
 impl Drop for Context {
     fn drop(&mut self) {
+        let _context_lifecycle = lock_context_lifecycle();
         let keys: Vec<_> = self.windows.keys().copied().collect();
         for key in keys { self.close(key); }
         let s = &self.share;

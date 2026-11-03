@@ -18,6 +18,8 @@ pub enum Kind {
     UnsizedTail = 3,
     /// the layout of a type: (type id, 2)
     Layout = 4,
+    /// a named constant folded without running code (const_eval::fold_without_execution): (def, 0)
+    Fold = 5,
 }
 
 pub struct Guard { kind: u8, a: u32, b: u32 }
@@ -45,4 +47,20 @@ pub fn enter(kind: Kind, a: u32, b: u32) -> Result<Guard, ()> {
         Ok(r) => r,
         Err(_) => Ok(Guard { kind: 0, a: 0, b: 0 }),
     }
+}
+
+/// The computations in progress on this thread, set aside while the owner thread serves a
+/// request inside another request's wait (the compiler's per-request frame, jit::frame_enter):
+/// what the request below has in progress is not this request's, so meeting it is no cycle (M55:
+/// a Job served in a query wait during `OnceLock<..>`'s layout was refused that layout, E0391).
+pub struct Active(Vec<(u8, u32, u32)>);
+
+/// Takes this thread's computations in progress, leaving none.
+pub fn take() -> Active {
+    Active(ACTIVE.try_with(|v| std::mem::take(&mut *v.borrow_mut())).unwrap_or_default())
+}
+
+/// Puts back what `take` took (the computations entered since have ended).
+pub fn restore(a: Active) {
+    let _ = ACTIVE.try_with(|v| *v.borrow_mut() = a.0);
 }

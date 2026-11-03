@@ -14,13 +14,10 @@ tweaker = ["dep:makepad-widgets-tweaker", "makepad-widgets/data", "makepad-widge
 [dependencies]
 makepad-widgets = { path = "../../widgets", version = "2.0.0", default-features = false }
 makepad-widgets-tweaker = { path = "../../widgets/families/tweaker", version = "2.0.0", optional = true }
-# Network rendering (src/remote.rs): the AI hub's kernel client and the
-# fractal Splash kernels, featureless (no models, no local kernel runtime).
-makepad-ai-hub = { path = "../../libs/ai/hub", default-features = false }
+# Network rendering (src/remote.rs): the fractal program's sessions on AI hub
+# nodes (the hub's program client; no models, no node side).
+makepad-ai-hub = { path = "../../libs/ai/hub", default-features = false, features = ["program"] }
+makepad-compute-program = { path = "../../libs/compute_program", version = "1.0.0" }
 # Fleet credentials (makepad_network::fleet).
 makepad-network = { path = "../../platform/network" }
 
-[dev-dependencies]
-# src/parity.rs: the node's Splash kernels run here, against the local tiles
-makepad-ai-hub = { path = "../../libs/ai/hub", default-features = false, features = ["kernel"] }
-makepad-script-compute = { path = "../../platform/script/compute" }

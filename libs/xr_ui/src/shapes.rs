@@ -309,8 +309,8 @@ impl XrShapes {
         for (draw, opacity) in [(&mut self.draw_shape, 1.0), (&mut self.draw_hidden, self.hidden_alpha)] {
             draw.light_dir = self.light_dir;
             draw.opacity = opacity;
-            cx.new_draw_call(&draw.draw_vars);
-            let Some(mut many) = cx.begin_many_instances(&draw.draw_vars) else { continue };
+            cx.new_draw_call(&mut draw.draw_vars);
+            let Some(mut many) = cx.begin_many_instances(&mut draw.draw_vars) else { continue };
             for i in &self.instances {
                 draw.shape = i.kind;
                 draw.center = i.center;

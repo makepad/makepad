@@ -38,7 +38,7 @@ pub fn feed(work: &Path, repo: &str, commit: &str, lane: &str) -> Result<(usize,
             return Ok((0, 0));
         }
         // Retained pins can outgrow argv; rev-list reads the whole revision set from stdin.
-        let mut child = makepad_remote::group::command("git")
+        let mut child = crate::git_exec::command()
             .args(["-c", "core.hooksPath=/dev/null", "--git-dir"]).arg(bare(repo)).args(["rev-list", "--objects", "--stdin"])
             .env("GIT_TERMINAL_PROMPT", "0").env_remove("GIT_DIR").env_remove("GIT_WORK_TREE").env_remove("GIT_INDEX_FILE")
             .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(io)?;
@@ -70,7 +70,7 @@ pub fn feed(work: &Path, repo: &str, commit: &str, lane: &str) -> Result<(usize,
             if let Some(oid) = words.next().and_then(store::from_hex) { ids.insert(oid); }
         }
         ids.retain(|o| held.as_ref().is_none_or(|s| !s.contains(o)));
-        let mut child = std::process::Command::new("git").arg("--git-dir").arg(bare(repo)).args(["cat-file", "--batch"])
+        let mut child = crate::git_exec::command().arg("--git-dir").arg(bare(repo)).args(["cat-file", "--batch"])
             .env_remove("GIT_DIR").env_remove("GIT_WORK_TREE").env_remove("GIT_INDEX_FILE")
             .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(io)?;
         let result = (|| -> Result<Vec<(Oid, u8, Vec<u8>)>, String> {

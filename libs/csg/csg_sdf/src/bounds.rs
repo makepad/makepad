@@ -131,6 +131,7 @@ pub fn node_bounds(n: &SdfNode) -> Option<Bounds> {
             places.iter().map(|pl| map_bounds(&b, |q| pl.out_of(q))).reduce(union)?
         }
         SdfNode::Deform { deform, of, .. } => deform_bounds(deform, &node_bounds(of)?),
+        SdfNode::Texture { tex, of } => crate::texture::texture_bounds(tex, node_bounds(of)?),
         // raised tubes add to the solid (lowered ones only take away)
         SdfNode::Sculpt { strokes, of } => {
             let b = node_bounds(of)?;
@@ -246,9 +247,51 @@ pub fn cull(n: &SdfNode, region: &Bounds) -> Option<SdfNode> {
             SdfNode::Instance { places: kept, of: of.clone() }
         }
         SdfNode::Sculpt { strokes, of } => sculpt_in(strokes, of, region)?,
+        // The source exact where the texture reads it: its displacement and gradient samples.
+        SdfNode::Texture { tex, of } => SdfNode::Texture { tex: tex.clone(), of: Box::new(cull(of, &grow(*region, tex.reach()))?) },
+        // A gridded kernel with the piece of its grid the region reads.
+        SdfNode::Kernel(k) => SdfNode::Kernel(k.cropped(region)),
         // A warp's preimage of a box is no box: kept whole.
         leaf => leaf.clone(),
     })
+}
+
+/// [`cull`] keeps the same operands, copies and cutters of `n` in region `a` as in region `b`:
+/// each of its decisions comes out the same for both, so both culls are the same node. Nothing
+/// is built. A sculpt's strokes are not compared (false).
+pub fn culls_alike(n: &SdfNode, a: &Bounds, b: &Bounds) -> bool {
+    let nb = node_bounds(n);
+    let reach = |r: &Bounds| nb.map_or(true, |nb| overlaps(&nb, r));
+    let kept = reach(a);
+    if kept != reach(b) {
+        return false;
+    }
+    if !kept {
+        return true;
+    }
+    match n {
+        SdfNode::Combine { blend, of, .. } => {
+            let r = fold_reach(*blend, of.len());
+            let (na, nb) = (grow(*a, r), grow(*b, r));
+            of.iter().all(|c| culls_alike(c, &na, &nb))
+        }
+        SdfNode::Shell { thickness: r, of } | SdfNode::Round { radius: r, of } => culls_alike(of, &grow(*a, *r), &grow(*b, *r)),
+        SdfNode::Transform { at, rotate, scale, of } => {
+            culls_alike(of, &map_bounds(a, into(*at, *rotate, *scale)), &map_bounds(b, into(*at, *rotate, *scale)))
+        }
+        SdfNode::Material { of, .. } | SdfNode::Id { of, .. } | SdfNode::Bone { of, .. } => culls_alike(of, a, b),
+        SdfNode::Instance { places, of } => {
+            let ob = node_bounds(of);
+            places.iter().all(|pl| {
+                let near = |r: &Bounds| ob.map_or(true, |ob| overlaps(&map_bounds(&ob, |q| pl.out_of(q)), r));
+                near(a) == near(b)
+            })
+        }
+        SdfNode::Sculpt { .. } => false,
+        SdfNode::Texture { tex, of } => culls_alike(of, &grow(*a, tex.reach()), &grow(*b, tex.reach())),
+        SdfNode::Kernel(k) => k.splash.as_ref().and_then(|s| s.grid()).map_or(true, |g| g.crops_alike(a, b)),
+        _ => true,
+    }
 }
 
 /// Structural equality, kernels by their key.
@@ -277,6 +320,7 @@ pub fn same(a: &SdfNode, b: &SdfNode) -> bool {
         (Instance { places: p1, of: x }, Instance { places: p2, of: y }) => p1 == p2 && same(x, y),
         (Deform { deform: d1, lipschitz: l1, of: x }, Deform { deform: d2, lipschitz: l2, of: y }) => d1 == d2 && l1 == l2 && same(x, y),
         (Sculpt { strokes: s1, of: x }, Sculpt { strokes: s2, of: y }) => s1.shape_key() == s2.shape_key() && same(x, y),
+        (Texture { tex: t1, of: x }, Texture { tex: t2, of: y }) => t1.same(t2) && same(x, y),
         _ => false,
     }
 }
@@ -321,6 +365,8 @@ pub fn changed(old: &SdfNode, new: &SdfNode) -> Option<Bounds> {
         // A slot change is a material change on the same surface.
         (SdfNode::Material { of: a, .. }, SdfNode::Material { of: b, .. }) | (SdfNode::Id { of: a, .. }, SdfNode::Id { of: b, .. }) => changed(a, b).unwrap_or_else(whole),
         (SdfNode::Bone { id: ia, rest: ra, of: a }, SdfNode::Bone { id: ib, rest: rb, of: b }) if ia == ib && ra == rb => changed(a, b)?,
+        // The source's change, as far as the texture reads it.
+        (SdfNode::Texture { tex: ta, of: a }, SdfNode::Texture { tex: tb, of: b }) if ta.same(tb) => grow(changed(a, b)?, ta.reach()),
         // Only where the strokes moved (one drawn, one undone).
         (SdfNode::Sculpt { strokes: sa, of: a }, SdfNode::Sculpt { strokes: sb, of: b }) if same(a, b) => strokes_changed(sa, sb)?,
         // The first stroke (or the last one undone): only where it reaches.
@@ -430,6 +476,42 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Brick-sized regions that [`culls_alike`] calls alike cull to the same node, over a vase
+    /// beside a row of copies; neighbours inside one solid's reach are alike, ones across a
+    /// copy's edge are not.
+    #[test]
+    fn alike_regions_cull_the_same() {
+        use crate::shape::SdfPlace;
+        let place = |x: f64| SdfPlace { at: [x, 4.0, 30.0], ..SdfPlace::IDENTITY };
+        let n = SdfNode::Combine { op: SdfOp::Union, blend: 0.0, of: vec![
+            vase(4.0),
+            SdfNode::Instance { places: vec![place(-12.0), place(0.0), place(12.0)], of: Box::new(SdfNode::Sphere { radius: 3.0 }) },
+        ] };
+        let cell = |i: i32, j: i32, k: i32| -> Bounds {
+            let lo = [i as f64 * 4.0, j as f64 * 4.0, k as f64 * 4.0];
+            (lo, [lo[0] + 4.0, lo[1] + 4.0, lo[2] + 4.0])
+        };
+        let (mut alike, mut differ) = (0, 0);
+        for i in -5..5 {
+            for j in -1..12 {
+                for k in -4..10 {
+                    let (a, b) = (cell(i, j, k), cell(i + 1, j, k));
+                    if !culls_alike(&n, &a, &b) {
+                        differ += 1;
+                        continue;
+                    }
+                    alike += 1;
+                    match (cull(&n, &a), cull(&n, &b)) {
+                        (None, None) => {}
+                        (Some(x), Some(y)) => assert!(same(&x, &y), "{a:?} and {b:?} cull apart"),
+                        (x, y) => panic!("{a:?} and {b:?}: {} and {}", x.is_some(), y.is_some()),
+                    }
+                }
+            }
+        }
+        assert!(alike > 0 && differ > 0, "alike {alike}, differ {differ}");
     }
 
     #[test]

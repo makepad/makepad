@@ -37,6 +37,7 @@ pub mod splash_host;
 pub mod splash_storage;
 pub mod widget_match_event;
 pub mod widget_tree;
+mod draw_times;
 pub mod ui_checks;
 pub mod scan;
 pub mod widget_hooks;

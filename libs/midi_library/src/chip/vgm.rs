@@ -283,7 +283,6 @@ pub fn voices(l: &Log) -> Vec<ChipVoice> {
     let mut sn_retrig = [false; 4];
     // YM2612 and YM2151.
     let mut opn = [Opn::default(); 6];
-    let mut opn_regs = [[0u8; 256]; 2];
     let mut opm = [Opn::default(); 8];
     let mut opm_kc = [0u8; 8];
     // AY.
@@ -329,7 +328,6 @@ pub fn voices(l: &Log) -> Vec<ChipVoice> {
                     }
                 }
                 W::Opn(port, reg, v) => {
-                    opn_regs[port as usize][reg as usize] = v;
                     let base = port as usize * 3;
                     match reg {
                         0x28 if port == 0 => {

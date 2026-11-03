@@ -278,9 +278,20 @@ impl Win {
             let () = msg_send![self.window, setAlphaValue: 0.0f64];
             let () = msg_send![self.window, setIgnoresMouseEvents: YES];
         }
+        // a restarted run's first window: the old window's place in the stacking (restack.rs)
+        let restart = if windows_hidden() { None } else { super::restack::take_restart() };
         if windows_hidden() {
             // Explicit Metal + MAKEPAD_HIDE_WINDOWS keeps real AppKit objects for native
             // inspection, without ordering their windows onto the display.
+        } else if let Some((false, above)) = restart {
+            // the old window was not key: just below the window that was above it, unfocused,
+            // and no pointer motion takes the focus (startup_focus_hack)
+            if above > 0 {
+                let () = msg_send![self.window, orderWindow: -1isize relativeTo: above];
+            } else {
+                let () = msg_send![self.window, orderFront: nil];
+            }
+            app().focus_hack_done();
         } else if self.nonactivating_panel() || !focus_allowed() {
             // visible but unfocused: never key, the app never activates
             let () = msg_send![self.window, orderFront: nil];
@@ -290,6 +301,10 @@ impl Win {
                 let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
                 let () = msg_send![ns_app, activateIgnoringOtherApps: YES];
             }
+        }
+        if !windows_hidden() {
+            let number: isize = msg_send![self.window, windowNumber];
+            super::restack::window_shown(number);
         }
         let input_context: ObjcId = msg_send![self.view, inputContext];
         let () = msg_send![input_context, invalidateCharacterCoordinates];
@@ -483,6 +498,9 @@ impl Win {
     }
 
     pub fn got_focus(&self) {
+        if !self.popup && !self.dropdown {
+            super::restack::key_changed(true);
+        }
         self.push(|q| q.focus(self.id.get(), true));
     }
 
@@ -490,6 +508,7 @@ impl Win {
         if self.popup || self.dropdown {
             self.push(|q| q.popup_dismissed(self.id.get()));
         } else {
+            super::restack::key_changed(false);
             self.push(|q| q.focus(self.id.get(), false));
         }
     }

@@ -216,6 +216,11 @@ fn identity<C: ServiceConf>(binary: &Path, conf: &C) -> String {
     format!("{} {size} {modified} {}", binary.display(), conf.identity())
 }
 
+/// The settings part of a recorded identity of `binary` ([`identity`]).
+fn recorded_settings<'a>(id: &'a str, binary: &Path) -> Option<&'a str> {
+    id.strip_prefix(&format!("{} ", binary.display()))?.splitn(3, ' ').nth(2)
+}
+
 /// The registry's app of a service.
 fn target_of(kind: &Kind) -> Result<registry::AppTarget<'static>, String> {
     registry::find(kind.app_id).map(|entry| entry.target()).ok_or_else(|| format!("the registry has no {}", kind.app_id))
@@ -471,7 +476,7 @@ impl<C: ServiceConf> Supervised<C> {
         if !app_alive(self.kind, pid) {
             return false;
         }
-        if id == identity(binary, &self.conf) {
+        if self.runs_as_started(pid, &id, binary) {
             makepad_widgets::log!("wm: {label}: kept pid {pid}, started by an earlier WM with this program and these settings");
             self.running = Some(Running::Adopted(pid));
             self.restart_at = None;
@@ -494,6 +499,18 @@ impl<C: ServiceConf> Supervised<C> {
         makepad_widgets::log!("wm: {label}: pid {pid} runs another program or other settings; replacing it");
         self.replace(pid, now);
         true
+    }
+
+    /// Whether the kept app `pid` (its state's identity `id`) runs as this WM would start it: these
+    /// settings and (Linux) the program `binary` holds now. Its start wrote `id` before cargo built
+    /// it, so the binary's size and time in it can be the build before: a WM restart replaced
+    /// AI Hubs that ran the current program (every devhub roll, 11-02), and a restart reloads
+    /// their models. Elsewhere the recorded identity decides.
+    fn runs_as_started(&self, pid: u32, id: &str, binary: &Path) -> bool {
+        match registry::runs_binary(pid, binary) {
+            Some(runs) => runs && recorded_settings(id, binary) == Some(self.conf.identity().as_str()),
+            None => id == identity(binary, &self.conf),
+        }
     }
 
     /// Stops the kept app `pid` (SIGTERM, SIGKILL after the grace) and starts this WM's own once
@@ -939,6 +956,32 @@ mod tests {
         std::fs::write(&state, format!("pid = {}\nidentity = {}\n", u32::MAX - 7, identity(&program, &h.conf))).unwrap();
         assert!(!h.adopt_or_replace(0.0, &program));
         assert!(h.running.is_none());
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_kept_app_runs_as_started_when_it_runs_the_current_program() {
+        let dir = scratch("runs");
+        let program = dir.join("makepad-app-aihub");
+        std::fs::copy("/bin/sleep", &program).unwrap();
+        let h = app("runs");
+        // its start recorded the binary before cargo built it again (same bytes, a new file)
+        let stale = format!("{} 1 2 {}", program.display(), h.conf.identity());
+        let mut child = Command::new(&program).arg("30").spawn().unwrap();
+        let fresh = identity(&program, &h.conf);
+        assert!(h.runs_as_started(child.id(), &fresh, &program));
+        assert!(h.runs_as_started(child.id(), &stale, &program), "a stale size and time in its state never replace the program it runs");
+        let other = format!("{} 1 2 nice=0 features=other env=[]", program.display());
+        assert!(!h.runs_as_started(child.id(), &other, &program), "other settings replace it");
+        let next = dir.join("next");
+        std::fs::copy("/bin/sleep", &next).unwrap();
+        std::fs::rename(&next, &program).unwrap();
+        assert!(h.runs_as_started(child.id(), &stale, &program), "a relink to the same bytes keeps it");
+        std::fs::write(&next, b"another build").unwrap();
+        std::fs::rename(&next, &program).unwrap();
+        assert!(!h.runs_as_started(child.id(), &fresh, &program), "a new build replaces it");
+        let _ = child.kill();
+        let _ = child.wait();
     }
 
     #[test]

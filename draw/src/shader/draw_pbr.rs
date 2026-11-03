@@ -2734,11 +2734,11 @@ impl DrawPbr {
             .ok_or_else(|| format!("invalid mesh handle {mesh}"))?;
         self.draw_vars.geometry_id = Some(geom.geometry_id());
         self.apply_draw_uniforms(cx);
-        if cx.new_draw_call(&self.draw_vars).is_none() {
+        if cx.new_draw_call(&mut self.draw_vars).is_none() {
             return Err("DrawPbr draw call failed (shader not initialized)".to_string());
         }
         if self.draw_vars.can_instance() {
-            let new_area = cx.add_instance(&self.draw_vars);
+            let new_area = cx.add_instance(&mut self.draw_vars);
             self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
         }
         Ok(())
@@ -2765,7 +2765,7 @@ impl DrawPbr {
             .ok_or_else(|| format!("invalid mesh handle {mesh}"))?;
         self.draw_vars.geometry_id = Some(geom.geometry_id());
         self.apply_draw_uniforms(cx);
-        let Some(instances) = cx.begin_many_instances(&self.draw_vars) else {
+        let Some(instances) = cx.begin_many_instances(&mut self.draw_vars) else {
             return Err("DrawPbr begin_many_instances failed".to_string());
         };
         self.many_instances = Some(instances);
@@ -2811,9 +2811,9 @@ impl DrawPbr {
         geom.update_with_recycled_buffers(cx.cx, &mut self.acc_indices, &mut self.acc_verts);
         self.draw_vars.geometry_id = Some(geom.geometry_id());
         self.apply_draw_uniforms(cx);
-        cx.new_draw_call(&self.draw_vars);
+        cx.new_draw_call(&mut self.draw_vars);
         if self.draw_vars.can_instance() {
-            let new_area = cx.add_instance(&self.draw_vars);
+            let new_area = cx.add_instance(&mut self.draw_vars);
             self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
         }
     }

@@ -12,7 +12,7 @@
 //! Actions are devhub words: any `makepad devhub` command (`verify kick`, `job submit ...`);
 //! `launch mac <app>` is a show on the Mac (`devhub show`, watched for failures).
 
-use super::{git, is_ancestor, Ctx};
+use super::{git, Ctx};
 use crate::proto::{wall_ms, Sev};
 use crate::state::{Cond, Waiter};
 use std::sync::Arc;
@@ -30,7 +30,7 @@ pub fn start(ctx: Arc<Ctx>) {
             ids.push(w.id.clone());
         }
         ids
-    });
+    }).unwrap_or_else(|e| { eprintln!("devhub state: {e}"); Default::default() });
     for id in lost {
         ctx.store.event("after", Sev::Warn, format!("after {id}: its action was running when the master restarted (outcome unknown)"), None);
     }
@@ -43,8 +43,9 @@ pub fn start(ctx: Arc<Ctx>) {
 /// Fires every waiter whose condition holds now.
 fn tick(ctx: &Arc<Ctx>) {
     let waiting: Vec<Waiter> = ctx.store.read(|d| d.after.iter().filter(|w| w.state == "waiting").cloned().collect());
+    let mut pass = crate::gitread::Pass::default();
     for w in waiting {
-        let (met, cond) = check(ctx, &w);
+        let (met, cond) = cond_met_in(ctx, &w.cond, w.added_ms, &mut pass);
         if let (Cond::Landed { branch, sha: old, .. }, Cond::Landed { sha: new, .. }) = (&w.cond, &cond) {
             if old != new {
                 ctx.store.event("after", Sev::Info, format!("after {}: {branch} has new commits of its own: it now waits for {} (was {})", w.id, super::short(new), super::short(old)), None);
@@ -55,7 +56,7 @@ fn tick(ctx: &Arc<Ctx>) {
                 if let Some(x) = d.after.iter_mut().find(|x| x.id == w.id) {
                     x.cond = cond.clone();
                 }
-            });
+            }).unwrap_or_else(|e| { eprintln!("devhub state: {e}"); Default::default() });
         }
         let Some(note) = met else { continue };
         let fired = ctx.store.update(|d| match d.after.iter_mut().find(|x| x.id == w.id && x.state == "waiting") {
@@ -66,7 +67,7 @@ fn tick(ctx: &Arc<Ctx>) {
                 true
             }
             None => false,
-        });
+        }).unwrap_or_else(|e| { eprintln!("devhub state: {e}"); Default::default() });
         if !fired {
             continue;
         }
@@ -78,26 +79,32 @@ fn tick(ctx: &Arc<Ctx>) {
 
 /// Whether the condition holds (`Some(what met it)`), and the condition with what it learned (a
 /// branch's newest tip).
+#[cfg(test)]
 fn check(ctx: &Ctx, w: &Waiter) -> (Option<String>, Cond) {
     cond_met(ctx, &w.cond, w.added_ms)
 }
 
 /// Whether `cond` holds now (`added_ms`: when it was asked for), and the condition with what it
 /// learned (a branch's newest tip). Shared with `devhub show --after`.
+#[cfg(test)]
 pub fn cond_met(ctx: &Ctx, cond: &Cond, added_ms: u64) -> (Option<String>, Cond) {
+    cond_met_in(ctx, cond, added_ms, &mut crate::gitread::Pass::default())
+}
+
+pub fn cond_met_in(ctx: &Ctx, cond: &Cond, added_ms: u64, pass: &mut crate::gitread::Pass) -> (Option<String>, Cond) {
     match cond {
         Cond::Landed { branch, repo, sha } => {
             let (dir, tip_name) = if repo == "commercial" { (ctx.commercial(), "main") } else { (ctx.repo.clone(), "work") };
             // the newest commit of the branch's own (deleted after landing: the last one seen)
-            let own = own_tip(&dir, branch, tip_name).unwrap_or_else(|| sha.clone());
+            let own = pass.own_tip(&dir, branch, tip_name).unwrap_or_else(|| sha.clone());
             let cond = Cond::Landed { branch: branch.clone(), repo: repo.clone(), sha: own.clone() };
-            let mut met = !own.is_empty() && is_ancestor(&dir, &own, &format!("refs/heads/{tip_name}"));
+            let mut met = !own.is_empty() && pass.is_ancestor(&dir, &own, &format!("refs/heads/{tip_name}")) == Some(true);
             // the lane's other half (the commercial branch of a makepad lane, by the same name)
             let other = (repo != "commercial").then(|| ctx.commercial());
             let mut what = format!("{branch}@{} is in {tip_name}", super::short(&own));
             if let (true, Some(cdir)) = (met, other) {
-                if let Some(c) = own_tip(&cdir, branch, "main") {
-                    met = is_ancestor(&cdir, &c, "refs/heads/main");
+                if let Some(c) = pass.own_tip(&cdir, branch, "main") {
+                    met = pass.is_ancestor(&cdir, &c, "refs/heads/main") == Some(true);
                     what = format!("{what}, its commercial half @{} in main", super::short(&c));
                 }
             }
@@ -111,7 +118,7 @@ pub fn cond_met(ctx: &Ctx, cond: &Cond, added_ms: u64) -> (Option<String>, Cond)
             let tips: Vec<crate::state::Tip> = ctx.store.read(|d| d.verify.verified.iter().filter(|t| t.at_ms >= added_ms).cloned().collect());
             let hit = tips.iter().rev().find(|t| match contains {
                 None => true,
-                Some(c) => is_ancestor(&ctx.repo, c, &t.pair.work) || is_ancestor(&ctx.commercial(), c, &t.pair.main),
+                Some(c) => pass.is_ancestor(&ctx.repo, c, &t.pair.work) == Some(true) || pass.is_ancestor(&ctx.commercial(), c, &t.pair.main) == Some(true),
             });
             (hit.map(|t| format!("verified {}", t.pair.short())), cond.clone())
         }
@@ -126,16 +133,7 @@ pub fn cond_met(ctx: &Ctx, cond: &Cond, added_ms: u64) -> (Option<String>, Cond)
 /// The newest commit on `branch`'s first-parent line that is its own: past the merge bot's
 /// "Merge <tip> (<sha>) into <branch>" commits (they never land). None: no such branch.
 pub fn own_tip(dir: &std::path::Path, branch: &str, tip_name: &str) -> Option<String> {
-    let log = git(dir, &["log", "--first-parent", "-n", "200", "--format=%H%x09%s", &format!("refs/heads/{branch}"), "--"]).ok()?;
-    let (pre, post) = (format!("Merge {tip_name} ("), format!(") into {branch}"));
-    let mut last = None;
-    for (h, subject) in log.lines().filter_map(|l| l.split_once('\t')) {
-        last = Some(h.to_string());
-        if !(subject.starts_with(&pre) && subject.ends_with(&post)) {
-            return last;
-        }
-    }
-    last
+    crate::gitread::Pass::default().own_tip(dir, branch, tip_name)
 }
 
 /// Runs the waiter's words; its exit and log are state.
@@ -163,7 +161,7 @@ fn act(ctx: &Ctx, w: &Waiter) {
             x.note = note.clone();
             x.log = log.to_string_lossy().into_owned();
         }
-    });
+    }).unwrap_or_else(|e| { eprintln!("devhub state: {e}"); Default::default() });
     ctx.store.event("after", sev, format!("after {} {state}: {} (exit {}){}", w.id, w.cmd.join(" "), exit.map_or("-".into(), |c| c.to_string()), if note.is_empty() { String::new() } else { format!(": {note}") }), None);
 }
 
@@ -239,7 +237,7 @@ pub fn serve(ctx: &Ctx, line: &str) -> Result<String, String> {
                     true
                 }
                 None => false,
-            });
+            })?;
             if !ok {
                 return Err(format!("no waiting {id}"));
             }
@@ -264,7 +262,7 @@ pub fn serve(ctx: &Ctx, line: &str) -> Result<String, String> {
                 let w = Waiter { id: format!("A{}", d.after_next), cond, cmd, by, added_ms: wall_ms(), state: "waiting".into(), ..Default::default() };
                 d.after.push(w.clone());
                 w
-            });
+            })?;
             ctx.store.event("after", Sev::Info, format!("after {} waiting: {} -> {} (by {})", w.id, w.cond.describe(), w.cmd.join(" "), w.by), None);
             Ok(format!("{{\"id\":{},\"state\":\"waiting\",\"cond\":{}}}", makepad_remote::json_str(&w.id), makepad_remote::json_str(&w.cond.describe())))
         }
@@ -282,7 +280,7 @@ mod tests {
         let home = std::env::temp_dir().join(format!("devhub-after-test-{name}-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&home);
         let leases = Arc::new(LeaseMaster::new("mac", home.clone(), Arc::new(|_: &str, _: &str, _: &str| Err("no nodes".to_string())), Arc::new(|_| {}), Arc::new(|| 1), None, true));
-        Ctx { store: Store::open(&home, "mac", Arc::new(|_| 0)), leases, machine: "mac".into(), monitor: crate::monitor::Monitor::start(&[]), repo: home.clone(), home }
+        Ctx { store: Store::open(&home, "mac", Arc::new(|_| 0)).expect("workflow state must open before services start"), leases, machine: "mac".into(), monitor: crate::monitor::Monitor::start(&[]), repo: home.clone(), home }
     }
 
     #[test]
@@ -299,7 +297,7 @@ mod tests {
         assert_eq!((w.by.as_str(), w.cmd.len()), ("lane x", 3));
         // not met until a verify passes after it was added
         assert_eq!(check(&c, &w).0, None);
-        c.store.update(|d| d.verify.verified.push(Tip { pair: Pair::new(&"a".repeat(40), &"b".repeat(40)), at_ms: w.added_ms + 1, diff: "affected".into() }));
+        c.store.update(|d| d.verify.verified.push(Tip { pair: Pair::new(&"a".repeat(40), &"b".repeat(40)), at_ms: w.added_ms + 1, diff: "affected".into() })).unwrap_or_else(|e| { eprintln!("devhub state: {e}"); Default::default() });
         assert_eq!(check(&c, &w).0.as_deref(), Some("verified aaaaaaaaaa,bbbbbbbbbb"));
         assert!(serve(&c, "after list").unwrap().contains("A1"));
         assert!(serve(&c, "after cancel A1").is_ok());
@@ -350,4 +348,118 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
         let _ = std::fs::remove_file(c.home.join("state.json"));
     }
+    #[test]
+    fn readiness_passes_observe_refs_and_spawn_no_git() {
+        let temp = makepad_git::test_support::tempdir().unwrap();
+        let mut c = ctx("readiness");
+        c.repo = temp.path().join("repo");
+        std::fs::create_dir_all(&c.repo).unwrap();
+        g(&c.repo, &["init", "-q", "-b", "work"]);
+        std::fs::write(c.repo.join("file"), "one\n").unwrap();
+        std::fs::write(c.repo.join(".gitattributes"), "*.csv text eol=crlf\n*.bin -text\n*.ident ident\n").unwrap();
+        std::fs::write(c.repo.join("values.csv"), "one\r\ntwo\r\n").unwrap();
+        std::fs::write(c.repo.join("raw.bin"), "one\n").unwrap();
+        std::fs::write(c.repo.join("marker.ident"), "$Id: expanded $\n$Id: not closed\n").unwrap();
+        g(&c.repo, &["add", "."]);
+        g(&c.repo, &["commit", "-q", "-m", "base"]);
+        let base = g(&c.repo, &["rev-parse", "HEAD"]);
+        g(&c.repo, &["checkout", "-q", "-b", "rc-query"]);
+        std::fs::write(c.repo.join("file"), "two\n").unwrap();
+        g(&c.repo, &["commit", "-q", "-am", "own"]);
+        let own = g(&c.repo, &["rev-parse", "HEAD"]);
+        let cond = Cond::Landed { branch: "rc-query".into(), repo: "makepad".into(), sha: own.clone() };
+        let mut old = crate::gitread::Pass::default();
+        assert_eq!(old.rev(&c.repo, "work"), Some(base.clone()));
+        assert_eq!(old.own_tip(&c.repo, "rc-query", "work"), Some(own.clone()));
+        assert!(cond_met(&c, &cond, 0).0.is_none());
+        g(&c.repo, &["update-ref", "refs/heads/work", &own]);
+        assert_eq!(old.rev(&c.repo, "work"), Some(base.clone()), "one pass keeps its ref snapshot");
+        assert!(cond_met(&c, &cond, 0).0.is_some(), "next pass sees the moved ref");
+        g(&c.repo, &["update-ref", "refs/heads/work-old-test", &own]);
+        let live = crate::state::Live { tree: c.repo.to_string_lossy().into(), rev: format!("rc-query@{base}"), ..Default::default() };
+        assert!(g(&c.repo, &["status", "--porcelain", "--untracked-files=no"]).is_empty(), "fixture is clean including normalized CRLF text");
+        let broken = c.repo.join(".git/refs/heads/work-old-aaa");
+        std::fs::write(&broken, format!("{}\n", "ab".repeat(20))).unwrap();
+        let before = crate::git_exec::on_this_thread();
+        for _ in 0..4 {
+            let mut pass = crate::gitread::Pass::default();
+            assert_eq!(pass.own_tip(&c.repo, "rc-query", "work"), Some(own.clone()));
+            assert!(cond_met_in(&c, &cond, 0, &mut pass).0.is_some());
+            assert_eq!(super::super::live::lane_landed(&c, &live, &mut pass), Some(own.clone()));
+            let range = crate::bucket::range(&c.repo, &base, &own).unwrap();
+            assert_eq!(*range, std::collections::HashSet::from([own.clone()]));
+            assert_eq!(crate::land::retired_base(&c.repo, &own, &base), Some(own.clone()));
+            assert_eq!(pass.retired_holds(&c.repo, &own), Some(true), "a broken retired ref must not hide a later match");
+        }
+        assert_eq!(crate::git_exec::on_this_thread(), before, "repeated readiness ticks must launch zero git commands");
+        std::fs::remove_file(&broken).unwrap();
+        // %s joins the first paragraph, preserving meaningful leading space.
+        let mut commit = crate::gitread::with(&c.repo, |_, repo| repo.read_commit(&makepad_git::ObjectId::from_hex(&own).unwrap()).unwrap()).unwrap();
+        commit.parents = vec![makepad_git::ObjectId::from_hex(&own).unwrap()];
+        for message in ["Merge work (abc) into rc-subject\n", " Merge work (abc) into rc-subject\n", "Merge work (abc)\ninto rc-subject\n", "Merge work (abc) into rc-subject  \n"] {
+            commit.message = message.into();
+            let oid = makepad_git::object::write_loose_object(&c.repo.join(".git"), makepad_git::ObjectKind::Commit, &makepad_git::commit::serialize_commit(&commit)).unwrap();
+            makepad_git::refs::write_ref(&c.repo.join(".git"), "refs/heads/rc-subject", &oid).unwrap();
+            let out = std::process::Command::new("git").arg("-C").arg(&c.repo).args(["log", "-1", "--format=%s", &oid.to_hex()]).output().unwrap();
+            assert!(out.status.success());
+            let text = String::from_utf8(out.stdout).unwrap();
+            let subject = text.trim_end_matches('\n');
+            let want = if subject.starts_with("Merge work (") && subject.ends_with(") into rc-subject") { own.clone() } else { oid.to_hex() };
+            assert_eq!(own_tip(&c.repo, "rc-subject", "work"), Some(want), "subject {subject:?}");
+        }
+        // Tracked changes block orphan release; untracked files do not.
+        std::fs::write(c.repo.join("values.csv"), "one\r\ntwo\r\n").unwrap();
+        std::fs::write(c.repo.join("marker.ident"), "$Id: expanded $\n$Id: not closed\n").unwrap();
+        assert!(c.monitor.tracked_clean(&c.repo).unwrap().1, "built-in clean conversions agree after stat records change");
+        std::fs::write(c.repo.join("raw.bin"), "one\r\n").unwrap();
+        assert!(!c.monitor.tracked_clean(&c.repo).unwrap().1, "binary attribute preserves CRLF changes");
+        std::fs::write(c.repo.join("raw.bin"), "one\n").unwrap();
+        std::fs::write(c.repo.join("untracked"), "scratch").unwrap();
+        assert!(c.monitor.tracked_clean(&c.repo).unwrap().1);
+        std::fs::write(c.repo.join("file"), "bad\n").unwrap();
+        assert!(!c.monitor.tracked_clean(&c.repo).unwrap().1, "same-size edit");
+        assert!(super::super::live::lane_landed(&c, &live, &mut crate::gitread::Pass::default()).is_none());
+        std::fs::write(c.repo.join("file"), "two\n").unwrap();
+        assert!(c.monitor.tracked_clean(&c.repo).unwrap().1, "reverted edit");
+        g(&c.repo, &["update-index", "--chmod=+x", "file"]);
+        assert!(!c.monitor.tracked_clean(&c.repo).unwrap().1, "staged mode change");
+        g(&c.repo, &["update-index", "--chmod=-x", "file"]);
+        assert!(c.monitor.tracked_clean(&c.repo).unwrap().1);
+        let linked = temp.path().join("linked");
+        g(&c.repo, &["worktree", "add", "-q", "--detach", linked.to_str().unwrap(), &base]);
+        let mut pass = crate::gitread::Pass::default();
+        assert_eq!(pass.rev(&linked, "HEAD"), Some(base.clone()));
+        assert_eq!(pass.rev(&c.repo, "HEAD"), Some(own.clone()));
+        let p = crate::gitread::paths(&linked).unwrap();
+        let q = crate::gitread::paths(&c.repo).unwrap();
+        assert!(std::sync::Arc::ptr_eq(&crate::gitread::handle(&p.common_dir).unwrap(), &crate::gitread::handle(&q.common_dir).unwrap()), "linked worktrees share objects");
+        // A commercial half must land too.
+        let com = c.commercial();
+        std::fs::create_dir_all(&com).unwrap();
+        g(&com, &["init", "-q", "-b", "main"]);
+        g(&com, &["commit", "-q", "--allow-empty", "-m", "commercial base"]);
+        g(&com, &["checkout", "-q", "-b", "rc-query"]);
+        g(&com, &["commit", "-q", "--allow-empty", "-m", "commercial own"]);
+        let com_own = g(&com, &["rev-parse", "HEAD"]);
+        assert!(cond_met(&c, &cond, 0).0.is_none(), "commercial half is still pending");
+        g(&com, &["update-ref", "refs/heads/main", &com_own]);
+        assert!(cond_met(&c, &cond, 0).0.is_some(), "both halves landed");
+        // A new own commit moves the wait; deleting its branch keeps the last
+        // observed commit. Packed refs must not resurrect a deleted branch.
+        std::fs::write(c.repo.join("file"), "new\n").unwrap();
+        g(&c.repo, &["commit", "-q", "-am", "new own"]);
+        let next = g(&c.repo, &["rev-parse", "HEAD"]);
+        let (met, moved) = cond_met(&c, &cond, 0);
+        assert!(met.is_none());
+        assert_eq!(moved, Cond::Landed { branch: "rc-query".into(), repo: "makepad".into(), sha: next.clone() });
+        g(&c.repo, &["pack-refs", "--all"]);
+        g(&c.repo, &["update-ref", "-d", "refs/heads/rc-query"]);
+        assert_eq!(cond_met(&c, &moved, 0), (None, moved.clone()));
+        g(&c.repo, &["update-ref", "refs/heads/work", &next]);
+        assert!(cond_met(&c, &moved, 0).0.is_some());
+        // Reach follows rewinds too, without retaining now-unreachable tips.
+        g(&c.repo, &["update-ref", "refs/heads/work", &base]);
+        assert_eq!(crate::gitread::Pass::default().is_ancestor(&c.repo, &next, "work"), Some(false));
+    }
+
 }

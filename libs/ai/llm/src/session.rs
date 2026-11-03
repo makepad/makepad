@@ -2591,8 +2591,8 @@ impl LlamaSession {
     }
 
     /// The driver's name for the device this session decodes on
-    /// (`"NVIDIA GPU-C"`,
-    /// `"NVIDIA GeForce GPU-B"`), or `"metal"`.
+    /// (`"NVIDIA RTX PRO <n> Blackwell Workstation Edition"`,
+    /// `"NVIDIA GeForce RTX <n>"`), or `"metal"`.
     ///
     /// The allocator's step-cost curve is a per-card measurement, and the two
     /// cards in service differ by ~1.8x on the term that decides draft depth;
@@ -4212,7 +4212,7 @@ fn session_attention_key_count(spec: &HybridDecodeSpec) -> Result<usize> {
 ///
 /// This runs once per generated token over a 248320-entry vocabulary and is
 /// several ms with an `Iterator::max_by(total_cmp)` — comparable to a whole
-/// decode step on a GPU-B, and the speculative path pays it once per verify
+/// decode step on a 32 GB card, and the speculative path pays it once per verify
 /// row. A plain loop over `f32` with a NaN guard is ~20x faster and picks the
 /// same token.
 pub(crate) fn argmax_token_id(logits: &[f32]) -> Result<i32> {

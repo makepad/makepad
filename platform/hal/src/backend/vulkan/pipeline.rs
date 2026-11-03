@@ -338,12 +338,14 @@ pub(super) struct State {
     /// by shader content, so every session that created a pipeline with it is told); `None` once
     /// the compile has answered
     waiters: Mutex<Option<Vec<u32>>>,
+    /// the compile's place in the queue (`Compilers`): a draw program's, lowered once a frame waits for it
+    pub rank: Arc<std::sync::atomic::AtomicU8>,
 }
 
 impl State {
     pub fn new(src: Arc<Source>) -> Arc<Self> {
         Arc::new(Self { src, program: OnceLock::new(), variants: Mutex::new(HashMap::new()), video: Mutex::new(HashMap::new()), video_variants: Mutex::new(HashMap::new()),
-            epoch: AtomicU64::new(0), waiters: Mutex::new(Some(Vec::new())) })
+            epoch: AtomicU64::new(0), waiters: Mutex::new(Some(Vec::new())), rank: super::Compilers::rank(super::compile_rank::DRAW) })
     }
 
     /// Session `sid` has a pipeline on this program: its pump is woken when the compile answers.

@@ -626,7 +626,6 @@ impl State {
             | id!(+=)
             | id!(<:)
             | id!(+:)
-            | id!(+=)
             | id!(-=)
             | id!(*=)
             | id!(/=)
@@ -1692,6 +1691,9 @@ impl ScriptParser {
         let op = tok.operator();
         let sep = tok.separator();
         let id = tok.identifier();
+        let starts_field = id.not_empty()
+            && tokenizer.tokens.get(self.index as usize + 1)
+                .is_some_and(|next| next.token.operator() == id!(:));
         match self.state.pop().unwrap() {
             State::ForIdent { idents, index } => {
                 // we push k and v
@@ -3775,7 +3777,7 @@ impl ScriptParser {
                 self.state.push(State::EndExpr);
             }
             State::CallMaybeDo { is_method, index } => {
-                if id == id!(do) {
+                if id == id!(do) && !starts_field {
                     self.state.push(State::EmitCallFromDo { is_method, index });
                     self.state.push(State::BeginExpr { required: true });
                     return 1;
@@ -3927,7 +3929,7 @@ impl ScriptParser {
                 protected_was_block,
                 try_start,
             } => {
-                if allow_catch && id == id!(catch) {
+                if allow_catch && id == id!(catch) && !starts_field {
                     // Canonical `try protected catch fallback`. A canonical
                     // block ends its final expression with a separator, which
                     // marked it pop-to-me; retain that tail value as the try
@@ -4016,7 +4018,7 @@ impl ScriptParser {
                 err_start,
                 was_block,
             } => {
-                if id == id!(ok) {
+                if id == id!(ok) && !starts_field {
                     // A successful legacy try skips TRY_OK itself so it enters
                     // the ok branch; without `ok`, TRY_ERR's encoded distance
                     // lands directly on the opcode after the fallback.
@@ -4131,7 +4133,7 @@ impl ScriptParser {
                 stmt,
                 true_valued,
             } => {
-                if id == id!(elif) {
+                if id == id!(elif) && !starts_field {
                     // Desugar `elif ...` as `else { if ... }`: the rest of the
                     // chain parses as a nested if, and IfElseExpr patches this
                     // arm's IF_ELSE to the chain's end once it completes. The
@@ -4157,7 +4159,7 @@ impl ScriptParser {
                     self.state.push(State::BeginExpr { required: true });
                     return 1;
                 }
-                if id == id!(else) {
+                if id == id!(else) && !starts_field {
                     let else_start = self.code_len() as u32;
                     self.push_code(Opcode::IF_ELSE.into(), self.index);
                     self.set_opcode_args(
@@ -4245,6 +4247,20 @@ impl ScriptParser {
                 }
             }
             State::BeginExpr { required } => {
+                // Field names are literal identifiers, including keywords. Resolve
+                // this context before dispatching expression keywords such as loop.
+                let field_name = matches!(
+                    self.state.last(),
+                    Some(State::EmitOp {
+                        what_op: id!(.) | id!(.?) | id!(me.),
+                        ..
+                    })
+                ) || (matches!(self.state.last(), Some(State::EndStmt { .. })) && starts_field);
+                if id.not_empty() && field_name {
+                    self.push_code(ScriptValue::from_id(id), self.index);
+                    self.state.push(State::EndExpr);
+                    return 1;
+                }
                 if !required
                     && matches!(
                         self.state.last(),
@@ -4658,6 +4674,11 @@ impl ScriptParser {
                     return 1;
                 }
                 // named operators
+                // With optional commas, `and:` starts the next field rather
+                // than continuing the preceding field's value as an operator.
+                if starts_field {
+                    return 0;
+                }
                 let op = if id == id!(is) {
                     id!(is)
                 } else if id == id!(and) {
@@ -5566,6 +5587,7 @@ impl ScriptParser {
                     // same stuck guard as the main loop
                     steps_zero = if step2 == 0 { steps_zero + 1 } else { 0 };
                     if steps_zero > 1000 {
+                        error!(self, tokenizer, "Parser stuck on token {:?}", tok2);
                         break;
                     }
                     self.index += step2;

@@ -86,7 +86,7 @@ impl PartialEq for Font {
 mod tests {
     use super::{Font, FontId};
     use crate::{
-        makepad_platform::SharedBytes,
+        makepad_platform::HostBuf,
         text::{
             font_face::FontFace,
             layouter,
@@ -109,7 +109,7 @@ mod tests {
     }
 
     fn load_font_data(path: PathBuf) -> FontData {
-        SharedBytes::from_file_mmap_or_read(path).expect("font bytes should load")
+        HostBuf::from_file_mmap_or_read(path).expect("font bytes should load")
     }
 
     fn make_font(path: PathBuf) -> Font {

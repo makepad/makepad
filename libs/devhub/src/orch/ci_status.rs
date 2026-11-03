@@ -2,8 +2,8 @@
 //! its verify state (was tools/ci's status endpoint on the CI mini; same route, same version-1
 //! document, so Scope's CI strip reads it with only its `url` changed).
 //!
-//! One branch, `work`: its tip is the pair under test (a `tip` run) or else the newest judged pair;
-//! `last_pass` the newest verified tip. Each verify leg is one "script" with one step, whose detail
+//! The branch `work` twice: CI's own result first, then verify's, each with its tip (the pair
+//! under test, or else its newest judged pair) and its own `last_pass`. Each verify leg is one "script" with one step, whose detail
 //! carries the leg's verdict line and the error lines of its log, the way Scope cuts them
 //! (`ci_link::error_lines`: from the first `error` line). It listens on loopback only
 //! ([`LISTEN`]; `MAKEPAD_DEVHUB_CI_LISTEN` overrides it, `off` turns it off).
@@ -183,65 +183,73 @@ fn ci_legs(r: &crate::state::CiRun) -> Vec<Leg> {
     r.shards.iter().map(|s| s.leg()).collect()
 }
 
-/// The version-1 status document of the verify and CI state (`now` in seconds; `tail` reads a
-/// leg's log). A run in progress shows first (CI's, then verify's tip run); else the newest of the
-/// verified tips, the failures and the finished CI runs.
-pub fn status_value(d: &Doc, now: u64, tail: &dyn Fn(&str) -> String) -> Value {
-    let v = &d.verify;
-    let mut note = String::new();
+/// CI's own result: its run in progress, else its newest run with a verdict (a newer incomplete
+/// one is a note, not a verdict). Verify never stands in for it: its legs never build what CI
+/// builds (the Windows JIT; run 129's red was hidden by a verify green within the hour, 11-02).
+fn ci_shown(d: &Doc, notes: &mut Vec<String>) -> Option<Shown> {
     let red_if = |legs: &[Leg]| if legs.iter().any(|l| l.state == "fail") { "red" } else { "running" };
-    let live = if let Some(r) = &d.ci.run {
+    if let Some(r) = &d.ci.run {
         let legs = ci_legs(r);
-        Some(Shown { tip: r.pair.clone(), verdict: red_if(&legs), finished: 0, detail: format!("ci run {} ({} shards)", r.id, r.shards.len()), legs, at_ms: r.started_ms })
-    } else if let Some(r) = v.run.as_ref().filter(|r| r.purpose == "tip") {
+        return Some(Shown { tip: r.pair.clone(), verdict: red_if(&legs), finished: 0, detail: format!("ci run {} ({} shards)", r.id, r.shards.len()), legs, at_ms: r.started_ms });
+    }
+    let runs: Vec<_> = d.ci.runs.iter().filter(|r| !r.sweep).collect();
+    let judged = runs.iter().rev().find(|r| matches!(r.verdict.as_str(), "ok" | "fail"));
+    if let Some(r) = runs.last().filter(|r| judged.is_none_or(|j| j.id != r.id)) {
+        notes.push(format!("ci run {} at {} {}", r.id, r.pair.short(), r.verdict));
+    }
+    judged.map(|r| Shown {
+        tip: r.pair.clone(),
+        verdict: if r.verdict == "ok" { "green" } else { "red" },
+        finished: r.ended_ms / 1000,
+        detail: format!("ci run {} {}: {}", r.id, r.verdict, r.critical),
+        legs: ci_legs(r),
+        at_ms: r.ended_ms,
+    })
+}
+
+/// Verify's result: its tip run in progress, else the newer of its verified tips and failures.
+fn verify_shown(d: &Doc, notes: &mut Vec<String>) -> Option<Shown> {
+    let v = &d.verify;
+    let red_if = |legs: &[Leg]| if legs.iter().any(|l| l.state == "fail") { "red" } else { "running" };
+    if let Some(r) = v.run.as_ref().filter(|r| r.purpose == "tip") {
         let legs = r.legs.clone();
-        Some(Shown { tip: r.pair.clone(), verdict: red_if(&legs), finished: 0, detail: format!("verify run {} (diff {})", r.id, r.diff), legs, at_ms: r.started_ms })
-    } else {
-        None
-    };
-    if live.is_none() {
-        if let Some(r) = &v.run {
-            note = format!("verify {} at {}", r.purpose, r.pair.short());
-        }
+        return Some(Shown { tip: r.pair.clone(), verdict: red_if(&legs), finished: 0, detail: format!("verify run {} (diff {})", r.id, r.diff), legs, at_ms: r.started_ms });
     }
-    let mut done: Vec<Shown> = Vec::new();
-    if let Some(g) = v.verified.iter().max_by_key(|t| t.at_ms) {
-        done.push(Shown { tip: g.pair.clone(), verdict: "green", finished: g.at_ms / 1000, detail: format!("verified (diff {})", g.diff), legs: Vec::new(), at_ms: g.at_ms });
+    if let Some(r) = &v.run {
+        notes.push(format!("verify {} at {}", r.purpose, r.pair.short()));
     }
-    if let Some(f) = v.failures.iter().max_by_key(|f| f.at_ms) {
-        done.push(Shown { tip: f.pair.clone(), verdict: "red", finished: f.at_ms / 1000, detail: failure_detail(f), legs: f.legs.clone(), at_ms: f.at_ms });
-    }
-    if let Some(r) = d.ci.runs.iter().rev().find(|r| !r.sweep) {
-        let verdict = match r.verdict.as_str() {
-            "ok" => "green",
-            "fail" => "red",
-            _ => "waiting",
-        };
-        done.push(Shown { tip: r.pair.clone(), verdict, finished: r.ended_ms / 1000, detail: format!("ci run {} {}: {}", r.id, r.verdict, r.critical), legs: ci_legs(r), at_ms: r.ended_ms });
-    }
-    let shown = live.or_else(|| done.into_iter().max_by_key(|x| x.at_ms));
-    let last_pass = v
-        .verified
-        .iter()
-        .map(|t| (t.at_ms, &t.pair.work))
-        .chain(d.ci.runs.iter().filter(|r| !r.sweep && r.verdict == "ok").map(|r| (r.ended_ms, &r.pair.work)))
-        .max_by_key(|(at, _)| *at)
-        .map_or(Value::Null, |(_, w)| s(w));
-    let shown = shown.unwrap_or(Shown { tip: Pair::default(), verdict: "waiting", finished: 0, detail: String::new(), legs: Vec::new(), at_ms: 0 });
-    if shown.tip.work.is_empty() && note.is_empty() {
-        note = "no run yet".into();
-    }
-    let branch = obj(vec![
+    let green = v.verified.iter().max_by_key(|t| t.at_ms).map(|g| Shown { tip: g.pair.clone(), verdict: "green", finished: g.at_ms / 1000, detail: format!("verified (diff {})", g.diff), legs: Vec::new(), at_ms: g.at_ms });
+    let red = v.failures.iter().max_by_key(|f| f.at_ms).map(|f| Shown { tip: f.pair.clone(), verdict: "red", finished: f.at_ms / 1000, detail: failure_detail(f), legs: f.legs.clone(), at_ms: f.at_ms });
+    green.into_iter().chain(red).max_by_key(|x| x.at_ms)
+}
+
+fn branch(source: &str, shown: Option<Shown>, last_pass: Option<&String>, tail: &dyn Fn(&str) -> String) -> Value {
+    let shown = shown.unwrap_or(Shown { tip: Pair::default(), verdict: "waiting", finished: 0, detail: format!("no {source} run yet"), legs: Vec::new(), at_ms: 0 });
+    obj(vec![
         ("name", s("work")),
+        ("source", s(source)),
         ("tip", s(&shown.tip.work)),
         ("commercial", s(&shown.tip.main)),
         ("verdict", s(shown.verdict)),
         ("finished", Value::Int(shown.finished as i64)),
         ("detail", s(&shown.detail)),
-        ("last_pass", last_pass),
+        ("last_pass", last_pass.map_or(Value::Null, |w| s(w))),
         ("scripts", Value::Arr(shown.legs.iter().map(|l| script(l, tail)).collect())),
-    ]);
-    obj(vec![("version", Value::Int(VERSION)), ("generated", Value::Int(now as i64)), ("note", s(note)), ("branches", Value::Arr(vec![branch]))])
+    ])
+}
+
+/// The version-1 status document (`now` in seconds; `tail` reads a leg's log): `work` twice, CI's
+/// own result first (`"source":"ci"`, what a one-branch reader such as Scope's caption shows), then
+/// verify's (`"source":"verify"`). Each has its own last pass: a verify green never replaces a CI
+/// red.
+pub fn status_value(d: &Doc, now: u64, tail: &dyn Fn(&str) -> String) -> Value {
+    let mut notes = Vec::new();
+    let ci = ci_shown(d, &mut notes);
+    let verify = verify_shown(d, &mut notes);
+    let ci_pass = d.ci.runs.iter().filter(|r| !r.sweep && r.verdict == "ok").max_by_key(|r| r.ended_ms).map(|r| &r.pair.work);
+    let verify_pass = d.verify.verified.iter().max_by_key(|t| t.at_ms).map(|t| &t.pair.work);
+    let branches = vec![branch("ci", ci, ci_pass, tail), branch("verify", verify, verify_pass, tail)];
+    obj(vec![("version", Value::Int(VERSION)), ("generated", Value::Int(now as i64)), ("note", s(notes.join("; "))), ("branches", Value::Arr(branches))])
 }
 
 fn failure_detail(f: &crate::state::Failure) -> String {
@@ -283,7 +291,9 @@ mod tests {
         let tail = |p: &str| if p == "cross.log" { "Compiling a\nerror[E0425]: cannot find value `x`\n --> src/a.rs:1:1\n  |\nwarning: w\nerror: could not compile `a`\nCI-FAIL wasm32\n".to_string() } else { String::new() };
         let v = status_value(&d, 9, &tail);
         assert_eq!(get(&v, &["version"]).as_i64(), Some(1));
-        let br = get(&v, &["branches", "0"]);
+        assert_eq!(get(&v, &["branches", "0", "verdict"]).as_str(), Some("waiting"), "no CI run: CI waits");
+        let br = get(&v, &["branches", "1"]);
+        assert_eq!(get(br, &["source"]).as_str(), Some("verify"));
         assert_eq!(get(br, &["verdict"]).as_str(), Some("red"));
         assert_eq!(get(br, &["tip"]).as_str(), Some(b.work.as_str()));
         assert_eq!(get(br, &["last_pass"]).as_str(), Some(a.work.as_str()));
@@ -301,20 +311,20 @@ mod tests {
     #[test]
     fn a_tip_run_is_running_until_a_leg_fails_and_a_bisect_keeps_the_judged_tip() {
         let mut d = Doc::default();
-        assert_eq!(get(&status_value(&d, 1, &|_| String::new()), &["note"]).as_str(), Some("no run yet"));
+        assert_eq!(get(&status_value(&d, 1, &|_| String::new()), &["branches", "0", "detail"]).as_str(), Some("no ci run yet"));
         let a = Pair::new(&"a".repeat(40), &"c".repeat(40));
         d.verify.verified.push(Tip { pair: a.clone(), at_ms: 1_000, diff: "affected".into() });
         let t = Pair::new(&"d".repeat(40), &"c".repeat(40));
         d.verify.run = Some(Run { id: "R".into(), pair: t.clone(), started_ms: 1, diff: "affected".into(), dry: false, purpose: "tip".into(), legs: vec![leg("ci-workspace", "run", "")], asked: false, tries: 0 });
         let v = status_value(&d, 1, &|_| String::new());
-        assert_eq!(get(&v, &["branches", "0", "verdict"]).as_str(), Some("running"));
-        assert_eq!(get(&v, &["branches", "0", "tip"]).as_str(), Some(t.work.as_str()));
+        assert_eq!(get(&v, &["branches", "1", "verdict"]).as_str(), Some("running"));
+        assert_eq!(get(&v, &["branches", "1", "tip"]).as_str(), Some(t.work.as_str()));
         d.verify.run.as_mut().unwrap().legs.push(leg("ci-cross", "fail", ""));
-        assert_eq!(get(&status_value(&d, 1, &|_| String::new()), &["branches", "0", "verdict"]).as_str(), Some("red"));
+        assert_eq!(get(&status_value(&d, 1, &|_| String::new()), &["branches", "1", "verdict"]).as_str(), Some("red"));
         d.verify.run.as_mut().unwrap().purpose = "bisect 1/3".into();
         let v = status_value(&d, 1, &|_| String::new());
-        assert_eq!(get(&v, &["branches", "0", "verdict"]).as_str(), Some("green"));
-        assert_eq!(get(&v, &["branches", "0", "tip"]).as_str(), Some(a.work.as_str()));
+        assert_eq!(get(&v, &["branches", "1", "verdict"]).as_str(), Some("green"));
+        assert_eq!(get(&v, &["branches", "1", "tip"]).as_str(), Some(a.work.as_str()));
         assert!(get(&v, &["note"]).as_str().unwrap().starts_with("verify bisect 1/3"));
     }
 
@@ -337,5 +347,29 @@ mod tests {
         let v = status_value(&d, 1, &|_| String::new());
         assert_eq!(get(&v, &["branches", "0", "verdict"]).as_str(), Some("green"));
         assert_eq!(get(&v, &["branches", "0", "last_pass"]).as_str(), Some(p.work.as_str()));
+    }
+
+    #[test]
+    fn a_verify_green_never_replaces_a_ci_red_and_both_show() {
+        use crate::state::{CiRun, CiShard};
+        let mut d = Doc::default();
+        let (old, red, newer) = (Pair::new(&"1".repeat(40), &"c".repeat(40)), Pair::new(&"2".repeat(40), &"c".repeat(40)), Pair::new(&"3".repeat(40), &"c".repeat(40)));
+        let shard = |state: &str| CiShard { id: "smoke:windows:apps/x".into(), state: state.into(), node: "105".into(), summary: "x".into(), errors: vec!["E0433: failed to resolve".into()], ..Default::default() };
+        let run = |id: &str, pair: &Pair, verdict: &str, ended_ms: u64| CiRun { id: id.into(), pair: pair.clone(), started_ms: ended_ms - 1, ended_ms, verdict: verdict.into(), shards: vec![shard(if verdict == "ok" { "ok" } else { "fail" })], ..Default::default() };
+        d.ci.runs.push(run("128", &old, "ok", 1_000));
+        d.ci.runs.push(run("129", &red, "fail", 2_000));
+        // an incomplete run after the red is no verdict either
+        d.ci.runs.push(run("130", &newer, "incomplete", 3_000));
+        d.verify.verified.push(Tip { pair: newer.clone(), at_ms: 4_000, diff: "affected".into() });
+        let v = status_value(&d, 9, &|_| String::new());
+        let ci = get(&v, &["branches", "0"]);
+        assert_eq!((get(ci, &["source"]).as_str(), get(ci, &["verdict"]).as_str()), (Some("ci"), Some("red")));
+        assert_eq!(get(ci, &["tip"]).as_str(), Some(red.work.as_str()));
+        assert_eq!(get(ci, &["last_pass"]).as_str(), Some(old.work.as_str()), "CI's last pass is its own");
+        assert!(get(ci, &["scripts", "0", "steps", "0", "detail"]).as_str().unwrap().contains("E0433"));
+        let verify = get(&v, &["branches", "1"]);
+        assert_eq!((get(verify, &["source"]).as_str(), get(verify, &["verdict"]).as_str()), (Some("verify"), Some("green")));
+        assert_eq!(get(verify, &["last_pass"]).as_str(), Some(newer.work.as_str()));
+        assert!(get(&v, &["note"]).as_str().unwrap().contains("ci run 130"), "{:?}", get(&v, &["note"]).as_str());
     }
 }

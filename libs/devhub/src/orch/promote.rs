@@ -291,9 +291,10 @@ fn plan(repo: &Path) -> Result<Plan, String> {
 }
 
 /// `git` with an extra environment, feeding `input` when there is one.
+#[track_caller]
 fn git_env(repo: &Path, env: &[(&str, &str)], args: &[&str], input: Option<&[u8]>) -> Result<String, String> {
     use std::io::Write;
-    let mut cmd = Command::new("git");
+    let mut cmd = crate::git_exec::command();
     cmd.args(args).current_dir(repo).stdout(Stdio::piped()).stderr(Stdio::piped());
     cmd.stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() });
     for (k, v) in env {

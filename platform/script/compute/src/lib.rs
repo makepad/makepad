@@ -23,6 +23,14 @@
 //! bit-identical to the interpreter: AIR's ops are total and exactly
 //! specified (a fused multiply-add is one rounding everywhere) and math
 //! functions are polynomials of those ops (no libm).
+//!
+//! A kernel runs on every worker only when each access to a buffer it writes
+//! is `buf[i]`, the element's own record (or a field of it); any other index
+//! (`buf[i * 3 + k]`) runs the whole kernel on one thread
+//! (`KernelLowered::parallel_safe`). Keep a vector's components in separate
+//! buffers, make the record the element type, or write its values through
+//! views of one buffer at the record's stride (`output(ty, stride, offset,
+//! buffer)`, every view the same stride).
 use makepad_relax_api::relax_api;
 
 pub mod cost;

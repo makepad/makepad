@@ -249,9 +249,13 @@ pub fn writable_in_place(b: &Buf, completed: u64) -> bool {
     b.last_bound <= completed
 }
 
-pub fn fill(b: &mut Buf, off: u64, data: &[u8]) {
-    // SAFETY: the caller checked off + len <= size <= the allocation
+pub fn fill(b: &mut Buf, off: u64, data: &[u8]) -> Result<(), String> {
+    if off.checked_add(data.len() as u64).is_none_or(|end| end > b.size) {
+        return Err(format!("Metal buffer upload offset={off} bytes={} exceeds mapped buffer size={}", data.len(), b.size));
+    }
+    // SAFETY: the checked range is inside this allocation.
     unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), b.contents.add(off as usize), data.len()) };
+    Ok(())
 }
 
 /// A fresh buffer holding the old one's bytes, for a write that cannot go in place.

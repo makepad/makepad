@@ -4778,9 +4778,8 @@ impl MaterialMirror {
         }
     }
 
-    fn draw(&self, cx: &mut Cx2d, rect: Rect, clip: Option<(Vec2d, Vec2d)>) {
-        let draw_vars = &self.draw_vars;
-        let Some(mut many) = cx.begin_many_instances(draw_vars) else {
+    fn draw(&mut self, cx: &mut Cx2d, rect: Rect, clip: Option<(Vec2d, Vec2d)>) {
+        let Some(mut many) = cx.begin_many_instances(&mut self.draw_vars) else {
             return;
         };
         let mut inst = self.instance.clone();

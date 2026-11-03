@@ -403,7 +403,7 @@ pub use {
         },
         script::vm::*,
         screen::{fit_window_rect_to_screens, linux_screen_names, screens, ScreenGeom, MIN_WINDOW_SIZE},
-        shared_bytes::{MappedBytes, SharedBytes, SharedBytesStats},
+        shared_bytes::{MappedBytes, HostBuf, HostBufStats, Scalar},
         storage::{
             StorageError, StorageHandle, StorageList, StorageOp, StorageRequestId,
             StorageEstimate, StorageResponse, StorageResult, StorageStat, DEFAULT_STORAGE_VALUE_CAP,

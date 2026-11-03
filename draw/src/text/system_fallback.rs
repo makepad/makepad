@@ -17,7 +17,7 @@ use {
         loader::{font_is_bold, FontDefinition},
         shaper::{mark_missing_glyph_for_warning, missing_glyph_message, WARNED_MISSING_GLYPHS},
     },
-    crate::makepad_platform::{log, SharedBytes},
+    crate::makepad_platform::{log, HostBuf},
     fxhash::FxHashSet,
     makepad_font_core::system_fonts::{self, fallback_script, Script},
     std::hash::{Hash, Hasher},
@@ -112,7 +112,7 @@ impl SystemFallback {
                 if layouter.loader.system_fallbacks().iter().any(|(known, _)| *known == id) {
                     continue;
                 }
-                let Ok(data) = SharedBytes::from_file_mmap_or_read(&candidate.path) else {
+                let Ok(data) = HostBuf::from_file_mmap_or_read(&candidate.path) else {
                     continue;
                 };
                 let Some(face) = FontFace::from_data_and_index(data.clone(), candidate.index) else {

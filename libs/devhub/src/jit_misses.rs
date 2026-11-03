@@ -47,7 +47,8 @@ pub(crate) fn build_failed(log: &str) -> bool {
 /// `test result:` text does not end the window.
 /// The JIT's live-edit reports (`makepad live:` lines) and restart reasons (also with a prefix a
 /// log window cut off) reach devhub through its patch events: never a build's compile errors (a
-/// restart reason's edit is applied by the warm restart).
+/// restart reason's edit is applied by the warm restart). Neither are a run's crash reports
+/// (`report: {..}`): a failing assertion is the program's own verdict.
 pub(crate) fn compile_errors(log: &str) -> Vec<String> {
     let log = plain(log);
     let mut errors: Vec<String> = Vec::new();
@@ -60,6 +61,8 @@ pub(crate) fn compile_errors(log: &str) -> Vec<String> {
             continue;
         }
         if line.starts_with("makepad live:") || line.contains("restart the app") { continue; }
+        // A run's crash report (a test's panic, a fault): the program's verdict, never a build's.
+        if line.starts_with("report: {") || line.contains(" report: {") { continue; }
         if let Ok(v) = makepad_strict_json::parse(line.as_bytes()) {
             if text(&v, "severity") == "error" {
                 let file = text(&v, "file");
@@ -179,7 +182,7 @@ pub(crate) fn jit_own(repo: &Path, pair: &crate::state::Pair, pkg: &str) -> Resu
 /// The old CI refusal seeds a miss once. A closed row overrides the stale mark, allowing the
 /// next attempt to reach the JIT; a real miss on that attempt reopens its diagnostic's row.
 fn ci_error(home: &Path, pkg: &str) -> Option<Vec<String>> {
-    let (pair, checkout, errors) = crate::state::Store::open_quiet(home, "").read(|d| {
+    let (pair, checkout, errors) = crate::state::Store::open_quiet(home, "").map_err(|e| eprintln!("devhub state: {e}")).ok()?.read(|d| {
         d.ci.timing(&format!("failing:{pkg}"))?;
         let id = format!("test:{pkg}");
         d.ci.run.iter().chain(d.ci.sweep_run.iter()).chain(d.ci.runs.iter().rev()).find_map(|r| {
@@ -203,11 +206,26 @@ fn ci_error(home: &Path, pkg: &str) -> Option<Vec<String>> {
 }
 
 /// The id of an open miss of `pkg` (any target), if the ledger has one.
+#[cfg(feature = "checkout")]
 pub(crate) fn open(home: &Path, pkg: &str) -> Option<String> {
     std::fs::read_to_string(home.join("jit_misses.jsonl")).ok()?.lines()
         .filter_map(|l| makepad_strict_json::parse(l.as_bytes()).ok().and_then(|v| Miss::parse(&v).ok()))
         .find(|m| m.pkg == pkg && m.closed_ms == 0).map(|m| m.id)
 }
+
+/// The lane's base on work, when work changed the JIT since: the JIT of the lane's pin (the one
+/// its tree needs) is older than work's, so its compile errors can be the lane's code using what
+/// landed since (M54: an std API of #806 on a pin before it), not a JIT miss. None: the lane's JIT
+/// is work's, or git cannot say.
+#[cfg(feature = "checkout")]
+pub(crate) fn behind_work_jit(repo: &Path, pin: &crate::state::Pair) -> Option<String> {
+    let tip = crate::orch::snapshot(repo)?;
+    let base = crate::orch::git(repo, &["merge-base", &pin.work, &tip.work]).ok()?.trim().to_string();
+    if base == tip.work { return None; }
+    crate::orch::ci::Inputs::between(repo, &crate::state::Pair::new(&base, &tip.main), &tip).filter(|i| i.jit_changed).map(|_| base)
+}
+#[cfg(not(feature = "checkout"))]
+pub(crate) fn behind_work_jit(_: &Path, _: &crate::state::Pair) -> Option<String> { None }
 
 /// Whether the JIT's inputs differ between the pair of a miss's last JIT failure and the
 /// requester's (the JIT id changed): CI's own JIT-input rule. Commits git cannot compare
@@ -323,6 +341,38 @@ pub(crate) fn serve(home: &Path, line: &str, now: u64, event: &dyn Fn(&str, &Val
 mod tests {
     use super::*;
 
+    #[cfg(feature = "checkout")]
+    #[test]
+    fn a_lane_whose_jit_is_older_than_works_has_no_jit_miss() {
+        let repo = std::env::temp_dir().join(format!("devhub-miss-behind-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&repo);
+        let git = |dir: &Path, args: &[&str]| crate::orch::git(dir, &[&["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"][..], args].concat()).unwrap().trim().to_string();
+        let write = |p: &str, text: &str| { let f = repo.join(p); std::fs::create_dir_all(f.parent().unwrap()).unwrap(); std::fs::write(f, text).unwrap(); };
+        write("Cargo.toml", "[workspace]\nmembers = [\"tools/run\", \"libs/relax\", \"apps/x\"]\n");
+        write("tools/run/Cargo.toml", "[package]\nname = \"makepad-run\"\n[dependencies]\nrelax = { path = \"../../libs/relax\" }\n");
+        write("libs/relax/Cargo.toml", "[package]\nname = \"relax\"\n");
+        write("libs/relax/std.rs", "pub struct Realtime;\n");
+        write("apps/x/x.rs", "fn main() {}\n");
+        git(&repo, &["init", "-q", "-b", "work"]);
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-qm", "base"]);
+        let com = repo.join("apps/commercial");
+        std::fs::create_dir_all(&com).unwrap();
+        git(&com, &["init", "-q", "-b", "main"]);
+        git(&com, &["commit", "-q", "--allow-empty", "-m", "c"]);
+        let pin = crate::state::Pair::new(&git(&repo, &["rev-parse", "HEAD"]), &git(&com, &["rev-parse", "HEAD"]));
+        assert_eq!(behind_work_jit(&repo, &pin), None, "the lane is at work");
+        // work moved, but not the JIT: the lane's JIT is work's
+        write("apps/x/x.rs", "fn main() { let _ = 1; }\n");
+        git(&repo, &["commit", "-qam", "app"]);
+        assert_eq!(behind_work_jit(&repo, &pin), None);
+        // work changed the JIT's std (#806): the lane's JIT is older, its errors no miss
+        write("libs/relax/std.rs", "pub struct Realtime;\npub struct RealtimeArmed;\n");
+        git(&repo, &["commit", "-qam", "std"]);
+        assert_eq!(behind_work_jit(&repo, &pin).as_deref(), Some(pin.work.as_str()));
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
     #[test]
     fn a_miss_filed_by_hand_is_listed_and_counted() {
         let home = std::env::temp_dir().join(format!("devhub-miss-add-{}", std::process::id()));
@@ -354,6 +404,17 @@ test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
     }
 
     #[test]
+    fn a_tests_crash_report_is_not_a_miss() {
+        let log = r#"running 1 test
+test an_unbaked_protected_request_is_traced ... FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.10s
+  report: {"kind":"panic","message":"at rest the tracer still holds 507392 bytes of GPU buffers","location":"/tree/apps/x/tests/trace_unbaked.rs:112:13"}
+makepad-run: main panic report: {"kind":"panic","location":"/tree/src/main.rs:3:5"}
+"#;
+        assert!(compile_errors(log).is_empty(), "{:?}", compile_errors(log));
+    }
+
+    #[test]
     fn a_warm_restarts_reasons_are_not_misses() {
         let log = "testverdict group=1 ran=101 passed=101 failed=0
 makepad live:   /tree/src/lease/exec.rs:2435:1: mod `tests` changed: a module's item list changed -- restart the app
@@ -374,7 +435,7 @@ test b ... ok
 
     #[test]
     fn a_target_that_fails_to_compile_between_passing_targets_is_a_miss() {
-        let error = "/tree/apps/commercial/scope/deps/code_atlas/tests/relief.rs:160:62: E0277: the trait bound `HashMap<Arc<str>, Arc<str>, RandomState>: FromIterator<<Map<Iter<String, FrozenFile>, closure#825> as Iterator>::Item>` is not satisfied";
+        let error = "/tree/apps/x/deps/atlas/tests/relief.rs:160:62: E0277: the trait bound `HashMap<Arc<str>, Arc<str>, RandomState>: FromIterator<<Map<Iter<String, FrozenFile>, closure#825> as Iterator>::Item>` is not satisfied";
         let log = format!("running 2 tests
 test a ... ok
 test b ... ok

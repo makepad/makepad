@@ -179,7 +179,7 @@ impl ScriptVm<'_> {
     }
 
     /// The script domain this VM runs documents of, by name (`domain::DOMAINS`: "ui", "motion",
-    /// "cut", "score", "flow", "scene3d"): named in the errors that suggest an import.
+    /// "cut", "score", "flow", "scene3d", "compute"): named in the errors that suggest an import.
     #[inline(always)]
     pub fn set_script_domain(&mut self, domain: &str) -> bool {
         self.vm_lazy(LAZY_SET_DOMAIN, LiveId(0), domain)

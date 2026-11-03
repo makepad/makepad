@@ -36,6 +36,7 @@ enum Op {
     DerefOfRawPointer,
     AccessToUnionField,
     CallToFunctionWith(DefId),
+    UseOfInlineAssembly,
 }
 
 struct V<'a> {
@@ -211,6 +212,7 @@ impl V<'_> {
             Op::UseOfExternStatic => "use of extern static".into(),
             Op::DerefOfRawPointer => "dereference of raw pointer".into(),
             Op::AccessToUnionField => "access to union field".into(),
+            Op::UseOfInlineAssembly => "use of inline assembly".into(),
             Op::CallToFunctionWith(d) => format!("call to function `{}` with `#[target_feature]`", self.fn_path(d)),
         }
     }
@@ -509,6 +511,11 @@ impl V<'_> {
                 let m = *self.ast.row(m);
                 if m.args == NO_MAC_ARGS { return; }
                 let args = *self.ast.mac_arg(m.args);
+                // rustc check_unsafety: `asm!` is an unsafe operation (UseOfInlineAssembly);
+                // `naked_asm!` is not, its `#[unsafe(naked)]` function is the unit of unsafety
+                if args.asm.is_some() && self.ast.segs(m.path.segs).last().is_some_and(|s| self.pf.text(s.name) == "asm") {
+                    self.requires_unsafe(lo, Op::UseOfInlineAssembly);
+                }
                 // rustc check_unsafety: a label block of `asm!` is a safe context of its own
                 let labels: Vec<ExprId> = args.asm.map_or(Vec::new(), |asm| self.ast.list(asm.ops).iter().filter(|op| op.dir == AsmDir::Label).filter_map(|op| op.input).collect());
                 if labels.is_empty() {
@@ -609,7 +616,7 @@ pub fn run_crate_impl_errors(prog: &Program, tcx: &Tcx, krate: u32) -> std::sync
     }
     let Some(_active) = ImplChecks::enter() else { return std::sync::Arc::new(Vec::new()) };
     let mut out = Vec::new();
-    for d in crate_impls(prog, &[krate]) {
+    for d in crate_impls(prog, tcx, &[krate]) {
         out.extend(impl_errors_inner(prog, tcx, d.1));
     }
     store_crate_impl_errors(krate, epoch, out)
@@ -635,9 +642,9 @@ impl Drop for ImplChecks {
     fn drop(&mut self) { IMPL_CHECKS.with(|a| a.set(false)); }
 }
 
-/// The impls of `crates` (crate, impl), in definition order.
-pub fn crate_impls(prog: &Program, crates: &[u32]) -> Vec<(u32, DefId)> {
-    (0..prog.defs.len() as u32).map(DefId).filter(|&d| { let def = prog.def(d); def.kind == DefKind::Impl && crates.contains(&def.krate) }).map(|d| (prog.def(d).krate, d)).collect()
+/// The live impls of `crates` (crate, impl), in definition order; a refused edit's impls are excluded.
+pub fn crate_impls(prog: &Program, tcx: &Tcx, crates: &[u32]) -> Vec<(u32, DefId)> {
+    (0..prog.defs.len() as u32).map(DefId).filter(|&d| { let def = prog.def(d); def.kind == DefKind::Impl && crates.contains(&def.krate) && !tcx.refused_impls.contains(&d) }).map(|d| (prog.def(d).krate, d)).collect()
 }
 
 /// Impl `d`'s part of its crate's run_crate_impl_errors (one impl, so a whole crate's can be

@@ -1469,8 +1469,8 @@ impl DrawDepthMeshBasic {
     fn draw_geometry(&mut self, cx: &mut Cx2d, geometry_id: GeometryId) {
         self.draw_vars.append_group_id = cx.draw_call_group_background().0;
         self.draw_vars.geometry_id = Some(geometry_id);
-        if cx.new_draw_call(&self.draw_vars).is_some() && self.draw_vars.can_instance() {
-            let new_area = cx.add_aligned_instance(&self.draw_vars);
+        if cx.new_draw_call(&mut self.draw_vars).is_some() && self.draw_vars.can_instance() {
+            let new_area = cx.add_aligned_instance(&mut self.draw_vars);
             self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
         }
     }

@@ -1,0 +1,14 @@
+[package]
+name = "makepad-compute-program"
+version = "1.0.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Long-running, sandboxed Splash compute programs: a driver isolate with CPU and GPU kernels, in-process or on an AI hub"
+
+[dependencies]
+makepad-script = { path = "../../platform/script", version = "1.0.0" }
+makepad-script-compute = { path = "../../platform/script/compute", version = "1.0.0", features = ["vm"] }
+makepad-script-compute-sched = { path = "../../platform/script/compute_sched", version = "1.0.0" }
+makepad-cpu-budget = { path = "../../platform/cpu_budget", version = "1.0.0" }
+makepad-lz4 = { path = "../lz4", version = "0.1.0" }
+makepad-fast-inflate = { path = "../fast_inflate", version = "0.1.0" }

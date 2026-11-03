@@ -5,8 +5,8 @@
 #           seeds block, random batch never), makepad check of the 7 gate packages + Stage, headless Calc+Stage
 #           present, boundary (provided_sweep.sh audits of the six smoke apps), warm_zero (Calculator: the warm launch shows no JIT spinner), warm_after_app_edit (Sandbox: a
 #           new item in an app file stays warm), warm_after_hal (a HAL body edit keeps the stored builds), inspect_cold
-#           (inspect during a cold start never stalls the app), relaunch (session relaunch never leaves the app
-#           dead), diff_fast, zone leg
+#           (inspect during a cold start never stalls the app), relaunch (in-place relaunches keep the app alive,
+#           show new first frames with the window kept and state handed over, and have no faults), diff_fast, zone leg
 #   full-a/full-b: the two halves of full (STEPS_A: cargo legs, checks, presents, warm_app_edit; STEPS_B: the other
 #           JIT runtime legs), for two nodes at once; together exactly the steps of full
 #   fast  : the JIT binary of the landed tree (kept or built here, 0 warnings), devhub's binary when changed,
@@ -35,7 +35,7 @@ if [ -n "${DEVHUB_ARM64_VERDICT:-}" ]; then
   echo "$DEVHUB_ARM64_VERDICT"
   sum="$sum $DEVHUB_ARM64_VERDICT"
 fi
-echo "GATE $mode: steps before (107, 10-30, in series 932 s): build 82 s, rustc_check 17, libtest_build 38, x64_tests 25, fuzz 164, checks 29, presents 27 (calc 8 + stage 19), warm_zero 30, warm_hal 49, warm_app_edit 159, inspect_cold 41, relaunch 44, diff 204, zone 18; after: the STEP lines"
+echo "GATE $mode: steps before (a pool box, 10-30, in series 932 s): build 82 s, rustc_check 17, libtest_build 38, x64_tests 25, fuzz 164, checks 29, presents 27 (calc 8 + stage 19), warm_zero 30, warm_hal 49, warm_app_edit 159, inspect_cold 41, relaunch 44, diff 204, zone 18; after: the STEP lines"
 export MAKEPAD_RUN_STD=$PWD/libs/relax/compiler/std
 
 step_build() {
@@ -63,6 +63,10 @@ check_pkg() { # check_pkg <label> <pkg> <dir> [check options: --also=<libs> from
   # the errors themselves (bare `path:line:col: message` lines and their notes), not the stats lines
   echo "$line" | grep -qE "^$1: 0 errors$" || echo "$full" | grep -vE "^makepad(-run)? check:|^makepad-run |^ *$" | head -60
   echo "$line"; echo "$line" | grep -qE "^$1: 0 errors$" || fail="$fail $1"
+  # a warning fails it too (0 warnings; devhub ci's Judge::Check the same): only errors counted here, and two
+  # dead-code warnings of the JIT build stood from 10-31
+  warn=$(echo "$full" | grep -E ':[0-9]+:[0-9]+: warning: ')
+  [ -z "$warn" ] || { echo "$warn" | head -20; echo "$1: $(echo "$warn" | wc -l | tr -d ' ') warnings"; fail="$fail $1-warnings"; }
 }
 step_checks() {
   for p in makepad-example-counter makepad-app-calculator makepad-platform makepad-draw makepad-widgets makepad-widgets-core; do check_pkg $p $p .; done
@@ -75,11 +79,17 @@ step_check_stage() { check_pkg stage makepad-stage apps/commercial; }
 present() { # present <name> <dir> <pkg args...>: headless cold run from a fresh home; 1 when the app reports `present`
   name=$1; dir=$2; shift 2
   s=$log/hrun-$name; mkdir -p "$s"
+  # its own empty app data and home (gone with $log): nothing an earlier run left in the tree or the box (a
+  # draft another synth left open in the tree's local/synth reopened with 9 script errors); the same list as
+  # tools/ci_leg/src/smoke.rs fresh_data
+  d=$s/data; mkdir -p "$d"/{data,config,state,storage,home,synth,amp,aichat}
+  fresh=(XDG_DATA_HOME="$d/data" XDG_CONFIG_HOME="$d/config" XDG_STATE_HOME="$d/state" MAKEPAD_STORAGE_DIR="$d/storage"
+    MAKEPAD_TEST_HOME="$d/home" SYNTH_DATA_DIR="$d/synth" AMP_DATA_DIR="$d/amp" MAKEPAD_AICHAT_DIR="$d/aichat")
   if [ -n "$PRESENT_WARM" ]; then  # fast/hot: the node's one warm JIT cache (the tree's; keyed by the loader build id)
-    (cd "$dir" && exec env MAKEPAD_HIDE_WINDOWS=1 SANDBOX_MUTE=1 MAKEPAD_TRACE=startup $B run --report-to $s/report "$@" -- --remote > $s/out.log 2>&1) &
+    (cd "$dir" && exec env "${fresh[@]}" ${PRESENT_JOBS:+MAKEPAD_RUN_JOBS=$PRESENT_JOBS MAKEPAD_RUN_O3_THREADS=$(( (PRESENT_JOBS + 1) / 2 ))} MAKEPAD_HIDE_WINDOWS=1 SANDBOX_MUTE=1 MAKEPAD_TRACE=startup $B run --report-to $s/report "$@" -- --remote > $s/out.log 2>&1) &
   else  # full: cold, from a fresh home
     rh=$s/home
-    (cd "$dir" && exec env MAKEPAD_RUN_HOME=$rh MAKEPAD_RUN_CACHE_DIR=$rh/cache \
+    (cd "$dir" && exec env "${fresh[@]}" MAKEPAD_RUN_HOME=$rh MAKEPAD_RUN_CACHE_DIR=$rh/cache \
       MAKEPAD_HIDE_WINDOWS=1 SANDBOX_MUTE=1 MAKEPAD_TRACE=startup $B run --report-to $s/report "$@" -- --remote > $s/out.log 2>&1) &
   fi
   pid=$!
@@ -216,8 +226,8 @@ step_warm_hal() { # JITCOLD: a body-only HAL edit (a provided crate: the loader 
   wh=$(WAIT=200 BUILD="cargo build --profile host -p makepad-run -p makepad-remote --bin makepad --bin makepad-launcher --bin makepad-remote -j8" tools/run/fixture/warm_after_hal.sh 2>&1 | tail -1 | cut -c1-400)
   echo "$wh"; echo "$wh" | grep -q "^warm_after_hal: OK" || fail="$fail warm_after_hal"
 }
-step_relaunch() { # JITRELAUNCH: `session relaunch` 5x in place, 5x with stops that time out (late handover), and the
-  # process-restart fallback: the app is alive and presents after every relaunch (RU0001 "still owns" left it dead)
+step_relaunch() { # JITRELAUNCH: `session relaunch` 5x in place: the app stays alive and shows a new first frame
+  # after every relaunch, with the window kept, state handed over, and no crash or fault line
   rl=$(WAIT=200 tools/run/fixture/relaunch.sh 2>&1 | tail -1 | cut -c1-400)
   echo "$rl"; echo "$rl" | grep -q "^relaunch: OK" || fail="$fail relaunch"
 }
@@ -229,7 +239,7 @@ step_boundary() { # JITPROV: the smoke apps and the WM reach provided crates onl
   echo "$bd" | grep -q "^provided_sweep: ok" || { fail="$fail boundary"; echo "$bd" | grep -A1 "^violation" | head -20 | cut -c1-300; }
 }
 # full-a + full-b = full; land-batch.sh runs the two halves on two pool nodes at once (each builds), balanced on the
-# measured step times (107, 2026-10-30: A ~460 s, B ~370 s with the build; full in series ~930 s)
+# measured step times (a pool box, 2026-10-30: A ~460 s, B ~370 s with the build; full in series ~930 s)
 STEPS_FULL="step_x64_tests step_fuzz step_checks step_boundary step_present_calc step_present_stage step_warm_zero step_warm_hal step_warm_app_edit step_inspect_cold step_relaunch step_diff step_jit_suites step_zone"
 STEPS_A="step_x64_tests step_fuzz step_checks step_present_calc step_present_stage step_warm_app_edit"
 STEPS_B="step_boundary step_warm_zero step_warm_hal step_inspect_cold step_relaunch step_diff step_jit_suites step_zone"
@@ -243,7 +253,7 @@ step_jit() { # the JIT binary of this tree: the one this box built before from e
   out=$(bash tools/run/fixture/loader_build.sh 2>&1) || { fail="$fail build"; echo "$out"; return 1; }
   echo "$out" | grep -v '^LOADER-OK'
   # a new JIT binary starts on an empty JIT cache: its presents are cold, and six cold boots at once on a
-  # loaded box took over 60 s (Stage, Sandbox and Fab on a node, 11:27): a hang still fails, later
+  # loaded box took over 60 s (Stage, Sandbox and Fab on a pool box, 11:27): a hang still fails, later
   PRESENT_WAIT=240
 }
 step_devhub() { # devhub's own binary when the bucket diff touches it (0 warnings)
@@ -263,13 +273,19 @@ step_affected() {
 }
 # fast: the affected apps' checks and presents all at once on this one warm box, on its one JIT cache; each in its
 # own subshell, so its output and failures are gathered here in affected.py's order
-at_once() { # at_once <fn> <lines file>: runs `<fn> <fields of a line>` per line in parallel
-  i=0
+at_once() { # at_once <fn> <lines file> [at most N]: runs `<fn> <fields of a line>` per line in parallel
+  i=0; local max=${3:-0} pids=() p live
   while read -r -a f; do
     i=$((i + 1))
+    while [ "$max" -gt 0 ]; do
+      live=0; for p in "${pids[@]}"; do kill -0 "$p" 2>/dev/null && live=$((live + 1)); done
+      [ "$live" -lt "$max" ] && break
+      wait -n 2>/dev/null || sleep 0.2
+    done
     # both files open here: present's own `for i` loop changed $i inside the subshell, so its failures
     # went to another par-N.fail and the verdict passed with GATEUNIT fail lines
     ( fail=""; "$1" "${f[@]}" 3>&-; printf '%s' "$fail" >&3 ) > "$log/par-$i.out" 2>&1 3> "$log/par-$i.fail" &
+    pids+=($!)
   done < "$2"
   wait
   for n in $(seq 1 $i); do
@@ -296,7 +312,15 @@ qpresent_one() {
   if [ -z "$fail" ]; then unit_line ok "$unit"; else unit_line fail "$unit"; fi
 }
 step_qcheck() { at_once qcheck_one "$log/checks"; }
-step_qpresent() { at_once qpresent_one "$log/presents"; }
+# a cold present takes about PRESENT_CORES cores (its JIT compiling, its first pipelines): five side by side on
+# a gate's 8 cores ran a pool box to load 31 and missed their first frames; so at most a present per
+# PRESENT_CORES of the lease's cores runs at once, and they split the lease's cores (MAKEPAD_RUN_JOBS)
+step_qpresent() {
+  local cores=${MAKEPAD_RUN_JOBS:-8} at
+  at=$(( cores / ${PRESENT_CORES:-4} )); [ "$at" -ge 1 ] || at=1
+  PRESENT_JOBS=$(( cores / at ))
+  at_once qpresent_one "$log/presents" "$at"
+}
 if [ "$mode" = hot ]; then
   QBASE=${2:?hot <makepad base sha> <commercial base sha|->}; QCBASE=${3:--}
   export PRESENT_WARM=1 PRESENT_WAIT=60 SETTLE=3

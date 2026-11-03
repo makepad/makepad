@@ -149,7 +149,6 @@ libs/gltf/*
 libs/model/*
 libs/mesh_edit/*
 libs/remesh/*
-libs/skyline/*
 libs/text_mesh/*
 libs/tween/*
 libs/frametween/*

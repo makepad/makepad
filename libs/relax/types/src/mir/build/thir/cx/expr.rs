@@ -649,7 +649,7 @@ impl Cx<'_> {
                 if let Some(sig) = tcx.fn_sig(prog, m.def) {
                     if let Some(&p0) = sig.params.first() {
                         let p0 = tcx.tys.subst(p0, tcx.tys.list(m.args));
-                        let p0 = tcx.try_normalize_erasing_regions(prog, self.root.cx.env, p0).unwrap_or(p0);
+                        let p0 = tcx.try_normalize_erasing_late_bound_regions(prog, self.root.cx.env, p0).unwrap_or(p0);
                         if matches!(*tcx.tys.kind(p0), TyKind::Ref(_, inner, _) if matches!(tcx.tys.kind(inner), TyKind::Slice(_))) {
                             let slice = tcx.tys.intern(TyKind::Slice(elem));
                             let target = self.ref_ty(mutable, slice);

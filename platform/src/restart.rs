@@ -324,8 +324,7 @@ pub fn restored() -> Option<RestartState> {
     }
 }
 
-/// Restarts with `state`. A hosted Relax app returns for cooperative event-loop shutdown;
-/// a directly running program returns only if replacing its process failed.
+/// Restarts with `state`: the process is replaced by a fresh run. Returns only if that failed.
 pub fn restart_now(state: &RestartState) {
     #[cfg(relax)]
     std::relax::restart_now(&state.to_text());

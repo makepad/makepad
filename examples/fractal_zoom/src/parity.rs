@@ -1,20 +1,27 @@
 //! Local tiles against the node's: the same tile through the app's SIMD
-//! kernels and through the hub's Splash kernel (run here the way a node
-//! runs it), texel by texel.
+//! kernels and through the fractal program a node runs (in-process here: the
+//! same Splash, the same bits), texel by texel.
 
 use crate::kernels::{render_tile, FractalKind, Params, Precision, TileRect};
-use crate::remote::node_params;
-use makepad_ai_hub::kernel_compute::{compile, PreparedJob};
-use makepad_ai_hub::kernel_wire::kernels::{fractal_job, fractal_tile};
-use makepad_script_compute::Backend;
+use crate::remote::{tile_message, SLOTS};
+use makepad_compute_program::programs::FRACTAL;
+use makepad_compute_program::{OutputData, Program, Session, SessionConfig};
 
-fn node_tile(p: &Params, rect: TileRect, res: usize) -> Vec<u32> {
-    let fp = node_params(p);
-    let job = fractal_job(&fp, vec![fractal_tile(0, rect.x, rect.y, rect.size, res as u32, &fp)]);
-    let kernel = compile(&job.source, Backend::Native).expect("kernel compiles");
-    let prepared = PreparedJob::new(kernel, &job).expect("job");
-    let r = prepared.run_tile(0, Backend::Native);
-    r.outputs.iter().find(|o| o.name == "out").expect("out").words.clone()
+/// The node's tile: one message to the program, its output back.
+fn node_tile(node: &Session, p: &Params, rect: TileRect, res: usize) -> Vec<u32> {
+    let rev = node.send("tile", tile_message(0, p, rect.x, rect.y, rect.size, res));
+    loop {
+        let u = node.wait();
+        if let Some(Err(e)) = &u.end {
+            panic!("the fractal program ended: {e}");
+        }
+        if let Some(o) = u.output(SLOTS[0]).filter(|o| o.rev == rev) {
+            match &o.data {
+                OutputData::Words(words) => return words.to_vec(),
+                other => panic!("a tile is words: {other:?}"),
+            }
+        }
+    }
 }
 
 /// (differing texels, differing class/code bytes, largest low-24 difference)
@@ -46,7 +53,7 @@ pub fn cases() -> Vec<(&'static str, Params, (f64, f64, f64))> {
         v.push((name, Params { kind: FractalKind::Tricorn, ..p }, (-0.3, 0.0, 3.8)));
         v.push((name, Params { kind: FractalKind::Multibrot, power: 4, ..p }, (0.0, 0.0, 3.2)));
     }
-    // past one call's bound: the node's multi-pass kernel (fractal_long)
+    // past one pass (2048 iterations): the orbit state carried from pass to pass
     v.push(("long", Params { kind: FractalKind::Mandelbrot, max_iter: 20000, de: true, ..base }, (-0.743_643_887_037_151, 0.131_825_904_205_330, 2.0e-9)));
     v.push(("long", Params { kind: FractalKind::Multibrot, power: 3, max_iter: 7000, trap: true, ..base }, (0.0, 0.0, 3.2)));
     v.push(("newton", Params { kind: FractalKind::Newton, power: 3, de: false, ..base }, (0.0, 0.0, 3.0)));
@@ -59,20 +66,23 @@ pub fn cases() -> Vec<(&'static str, Params, (f64, f64, f64))> {
 fn local_tiles_match_node_tiles() {
     let res = 64;
     let mut bad = Vec::new();
+    let node = Session::open(&Program::new("fractal.splash", FRACTAL), SessionConfig::default());
     for (name, p, (cx, cy, w)) in cases() {
         // a 3x3 grid of tiles over the view, at the app's precision for that step and at f64
         let size = w / 3.0;
+        let rects: Vec<TileRect> = (0..9).map(|k| TileRect { x: cx - 1.5 * size + (k % 3) as f64 * size, y: cy - 1.5 * size + (k / 3) as f64 * size, size }).collect();
+        let nodes: Vec<Vec<u32>> = rects.iter().map(|rect| node_tile(&node, &p, *rect, res)).collect();
         for precision in [Precision::for_step(size / res as f64, cx, cy), Precision::F64] {
             let mut sum = (0, 0, 0);
             for j in 0..3 {
                 for i in 0..3 {
-                    let rect = TileRect { x: cx - 1.5 * size + i as f64 * size, y: cy - 1.5 * size + j as f64 * size, size };
+                    let rect = rects[j * 3 + i];
                     let mut local = vec![0u32; res * res];
                     render_tile(&p, (0.0, 0.0), rect, res, precision, None, &mut local, &|| false);
-                    let node = node_tile(&p, rect, res);
-                    let (n, top, low) = compare(&local, &node);
+                    let node = &nodes[j * 3 + i];
+                    let (n, top, low) = compare(&local, node);
                     if n > 0 && n < 5 && precision == Precision::F64 {
-                        for (k, (a, b)) in local.iter().zip(&node).enumerate().filter(|(_, (a, b))| a != b) {
+                        for (k, (a, b)) in local.iter().zip(node).enumerate().filter(|(_, (a, b))| a != b) {
                             let (col, row) = (k % res, k / res);
                             let step = rect.size / res as f64;
                             println!("PARITY-TEXEL {name} {:?} tile ({i},{j}) texel {col},{row} x {:e} y {:e}: local {a:08x} node {b:08x}", p.kind, rect.x + (col as f64 + 0.5) * step, rect.y + (row as f64 + 0.5) * step);

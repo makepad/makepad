@@ -234,6 +234,8 @@ pub struct Tcx {
     pub nominal_region_contracts: ImageMap<DefId, outlives::RegionContract>,
     pub impl_self: ImageMap<DefId, TyId>,
     pub impl_trait: ImageMap<DefId, DefId>,
+    /// Hot reload: impls uncollect_impls took out of the impl tables that no collection has recorded again (a refused or rolled-back version's: their defs stay loaded for code that names them, but they are no impls of the program).
+    pub refused_impls: crate::fxhash::HashSet<DefId>,
     pub inherent: ImageMap<TyKey, Vec<DefId>>,
     pub trait_impls: ImageMap<(TyKey, DefId), Vec<DefId>>,
     /// All impls of a trait, shared by candidate assembly and coherence.
@@ -426,6 +428,7 @@ impl Tcx {
             contracts_waiting: Default::default(),
             impl_self: Default::default(),
             impl_trait: Default::default(),
+            refused_impls: Default::default(),
             inherent: Default::default(),
             trait_impls: Default::default(),
             trait_impls_of: Default::default(),
@@ -849,6 +852,7 @@ impl Tcx {
             self.err_sink.get_mut().unwrap_or_else(|e| e.into_inner()).extend(h.errors);
             let st = h.self_ty;
             self.impl_self.insert(im.def, st);
+            self.refused_impls.remove(&im.def);
             let key = ty_key(&self.tys, st);
             match h.trait_ {
                 None => {
@@ -1042,6 +1046,7 @@ impl Tcx {
             self.err_sink.get_mut().unwrap_or_else(|e| e.into_inner()).extend(h.errors);
             let st = h.self_ty;
             self.impl_self.insert(d, st);
+            self.refused_impls.remove(&d);
             let key = ty_key(&self.tys, st);
             match h.trait_ {
                 None => self.inherent.entry(key).or_default().push(d),
@@ -1172,6 +1177,7 @@ impl Tcx {
         if impls.is_empty() {
             return;
         }
+        self.refused_impls.extend(impls.iter().copied());
         // a set: every impl list of the program is filtered against them (a slice scan per
         // entry was 2% of a `makepad check makepad-scope`)
         let impls: crate::fxhash::HashSet<DefId> = impls.iter().copied().collect();

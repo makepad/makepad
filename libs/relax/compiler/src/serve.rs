@@ -97,7 +97,7 @@ impl Session {
         let mut primed = Vec::new();
         for (file, path) in hot {
             if let Ok(v) = unit.prog.parse_version(file, &path, sources[&path].clone()) {
-                if let Ok(plan) = crate::reload::classify(&unit.prog, file, &v.pf, &path) {
+                if let Ok(plan) = crate::reload::classify(&unit.prog, file, &v.pf, &path, &Default::default()) {
                     if plan.changes.is_empty() && plan.added.is_empty() && plan.removed.is_empty() && plan.removed_uses.is_empty() && !plan.attributes_changed {
                         if let Ok(f) = unit.prog.commit_body_version(v, &plan.pairs) {
                             unit.prog.lower_body_declarations(&[], &[f]);
@@ -318,7 +318,7 @@ impl Session {
             };
             let krate = self.unit.prog.file_crate[file as usize];
             if self.front.get(&path).is_some_and(|v| !v.is_empty()) { rebuild.insert(krate); }
-            let plan = crate::reload::classify(&self.unit.prog, file, &v.pf, &path);
+            let plan = crate::reload::classify(&self.unit.prog, file, &v.pf, &path, &Default::default());
             let pairs = match plan {
                 Ok(plan) => {
                     if trace { eprintln!("makepad-run check plan: {}: {} changes, {} added, {} removed, {} uses removed", path, plan.changes.len(), plan.added.len(), plan.removed.len(), plan.removed_uses.len()); }

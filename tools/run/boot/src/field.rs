@@ -201,7 +201,7 @@ impl Field {
         field
     }
 
-    /// A new run begins (a relaunch): the counters count from here, the buffer starts again.
+    /// A new run begins (a retried build): the counters count from here, the buffer starts again.
     pub fn reset(&mut self) {
         self.began_ms = relax_base::clock::ms_since_process_start();
         self.time = 0.0;
@@ -224,7 +224,7 @@ impl Field {
         self.pipe = None;
     }
 
-    /// The buffer for records of `stride`: one that fits stays (a relaunch only writes it again);
+    /// The buffer for records of `stride`: one that fits stays (a new run only writes it again);
     /// a new size is a new generation, as the HAL refuses a destroyed id's generation.
     fn buffer_for(&mut self, writer: &mut CmdWriter, stride: usize) {
         if self.stride == stride {

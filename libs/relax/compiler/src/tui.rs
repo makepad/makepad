@@ -24,6 +24,14 @@ static ABNORMAL: AtomicBool = AtomicBool::new(false);
 pub(crate) fn exit_code(code: i32) { EXIT_CODE.store(code, Ordering::Release); }
 pub(crate) fn abnormal() { ABNORMAL.store(true, Ordering::Release); }
 
+/// The session met an internal compiler error (a makepad run bug): its log is kept where the
+/// run's temporary directory going away does not take it (the captures directory).
+static KEEP_LOG: AtomicBool = AtomicBool::new(false);
+pub(crate) fn keep_log() {
+    KEEP_LOG.store(true, Ordering::Release);
+    abnormal();
+}
+
 // ---- what each compiling thread is on: one slot per thread, written without locks.
 // A slot is a sequence number (odd while written), the start (ms since process start, +1) and
 // the first 96 bytes of the name; the ticker reads it and drops a torn read.
@@ -657,6 +665,11 @@ mod unix {
         if clean {
             if let Err(e) = std::fs::remove_file(&st.path) {
                 out_all(st.out, format!("makepad-run: session log kept at {}: {e}\n", st.path.display()).as_bytes());
+            }
+        } else if KEEP_LOG.load(Ordering::Acquire) {
+            match crate::inspect::snapshot::keep_file(&st.path, "session") {
+                Ok(kept) => out_all(st.out, format!("makepad-run: session log kept at {} (an internal compiler error)\n", kept.display()).as_bytes()),
+                Err(e) => out_all(st.out, format!("makepad-run: session log kept at {} (an internal compiler error; not copied to the captures: {e})\n", st.path.display()).as_bytes()),
             }
         } else {
             out_all(st.out, format!("makepad-run: session log kept at {}\n", st.path.display()).as_bytes());

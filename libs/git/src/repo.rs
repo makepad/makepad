@@ -9,7 +9,7 @@ use crate::index::{read_index, write_index, Index, IndexEntry};
 use crate::merge::{self, MergeResult, TreeMergeEntry};
 use crate::object::{read_loose_object, write_loose_object, Object, ObjectKind};
 use crate::oid::ObjectId;
-use crate::pack::{find_packs, find_packs_in_objects_dir, read_pack_object, PackIndex, PackLookup};
+use crate::pack::{find_packs, find_packs_in_objects_dir, PackIndex, PackLookup};
 use crate::refs::{self, RefTarget};
 use crate::tree::{parse_tree, serialize_tree, Tree};
 use crate::worktree;
@@ -37,14 +37,21 @@ pub struct Repository {
 
 struct ReadCache {
     account: crate::memory::MemoryAccount,
-    /// The largest object a pack reader reads (`set_read_cache_budget`).
     object_budget: usize,
-    /// Decoded objects kept (as much as `object_budget` unless lowered).
-    budget: usize,
-    used: usize,
-    entries: HashMap<ObjectId, (Object, crate::memory::Reservation)>,
-    order: std::collections::VecDeque<ObjectId>,
+    explicit_account: bool,
+    entries: crate::memory::ReadLru<ObjectId, Object>,
     hits: u64,
+}
+
+impl Default for ReadCache {
+    fn default() -> Self {
+        // Pack readers already retain decoded objects and delta bases. Avoid
+        // duplicating them here by default, and preserve fresh loose-object
+        // reads (including missing-object errors). Explicit worker budgets
+        // still enable the repository-level cache for loose objects too.
+        Self { account: crate::memory::read_account(), object_budget: crate::memory::READ_CACHE_BYTES,
+            explicit_account: false, entries: crate::memory::ReadLru::new(0), hits: 0 }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -271,7 +278,7 @@ impl ObjectSources {
         // Packs first (see `Repository::read_object_uncached`).
         for pack in &self.packs {
             if let Some(offset) = pack.find_offset(oid) {
-                return read_pack_object(&pack.pack_path, offset, pack);
+                return pack.read_object(offset);
             }
         }
         for dir in &self.loose_dirs {
@@ -326,7 +333,7 @@ impl Repository {
             packs: None,
             alternates: None,
             alternate_packs: None,
-            read_cache: None,
+            read_cache: Some(ReadCache::default()),
             blob_reads: 0,
         }
     }
@@ -376,49 +383,34 @@ impl Repository {
     /// Configure a persistent worker reader. Pack reads use bounded windows;
     /// decoded read-cache entries reserve from the same history account.
     pub fn set_read_cache_budget(&mut self, account: crate::memory::MemoryAccount, bytes: usize) -> Result<(), GitError> {
-        self.read_cache = Some(ReadCache { account: account.clone(), object_budget: bytes, budget: bytes, used: 0, entries: HashMap::new(), order: std::collections::VecDeque::new(), hits: 0 });
+        self.read_cache = Some(ReadCache { account: account.clone(), object_budget: bytes, explicit_account: true, entries: crate::memory::ReadLru::new(bytes), hits: 0 });
         for pack in self.packs.iter_mut().chain(self.alternate_packs.iter_mut()).flatten() { pack.set_read_budget(account.clone(), bytes)?; }
         Ok(())
     }
-    /// Keep at most `bytes` of decoded objects (after
-    /// `set_read_cache_budget`, whose per-object limit stays): a reader that
-    /// only meets an object again soon after needs a small cache.
+    /// Keep at most `bytes` of decoded objects. Larger reads remain valid
+    /// and bypass retention; a cache budget is not an object-size limit.
     pub fn set_read_cache_bytes(&mut self, bytes: usize) {
-        if let Some(cache) = &mut self.read_cache {
-            cache.budget = bytes;
-            while cache.used > cache.budget {
-                let Some(old) = cache.order.pop_front() else { break };
-                if let Some((_, lease)) = cache.entries.remove(&old) { cache.used = cache.used.saturating_sub(lease.bytes()); }
-            }
-        }
+        if let Some(cache) = &mut self.read_cache { cache.entries.resize(bytes); }
     }
     pub fn read_stats(&self) -> RepositoryReadStats {
         let mut stats = RepositoryReadStats { blob_reads: self.blob_reads, ..Default::default() };
-        if let Some(cache) = &self.read_cache { stats.cache_hits = cache.hits; stats.cache_bytes = cache.used; }
+        if let Some(cache) = &self.read_cache { stats.cache_hits = cache.hits; stats.cache_bytes = cache.entries.used; }
         for pack in self.packs.iter().chain(self.alternate_packs.iter()).flatten() {
             let p = pack.read_phases(); stats.pack_load_ms += p.pack_load_ms; stats.inflate_ms += p.inflate_ms; stats.pack_bytes_read += p.pack_bytes_read; stats.objects_inflated += p.objects_inflated; stats.pack_index_bytes += pack.retained_bytes();
         }
         stats
     }
     pub fn clear_read_cache(&mut self) {
-        if let Some(cache) = &mut self.read_cache { cache.entries = HashMap::new(); cache.order = std::collections::VecDeque::new(); cache.used = 0; }
+        if let Some(cache) = &mut self.read_cache { cache.entries.clear(); }
     }
     pub fn read_object(&mut self, oid: &ObjectId) -> Result<Object, GitError> {
         if let Some(cache) = &mut self.read_cache {
-            if let Some((obj, _)) = cache.entries.get(oid) { cache.hits += 1; return Ok(obj.clone()); }
+            if let Some(obj) = cache.entries.get(oid) { cache.hits += 1; return Ok(obj.clone()); }
         }
         let object = self.read_object_uncached(oid)?;
         if let Some(cache) = &mut self.read_cache {
             let bytes = object.data.len().saturating_add(256);
-            if bytes <= cache.budget {
-                while cache.used.saturating_add(bytes) > cache.budget {
-                    let Some(old) = cache.order.pop_front() else { break };
-                    if let Some((_, lease)) = cache.entries.remove(&old) { cache.used = cache.used.saturating_sub(lease.bytes()); }
-                }
-                if let Some(lease) = cache.account.try_reserve(bytes) {
-                    cache.entries.insert(*oid, (object.clone(), lease)); cache.order.push_back(*oid); cache.used += bytes;
-                }
-            }
+            cache.entries.insert(*oid, bytes, &cache.account, || object.clone());
         }
         Ok(object)
     }
@@ -432,7 +424,7 @@ impl Repository {
         if let Some(packs) = &self.packs {
             for pack in packs {
                 if let Some(offset) = pack.find_offset(oid) {
-                    return read_pack_object(&pack.pack_path, offset, pack);
+                    return pack.read_object(offset);
                 }
             }
         }
@@ -458,7 +450,7 @@ impl Repository {
         if let Some(alt_packs) = &self.alternate_packs {
             for pack in alt_packs {
                 if let Some(offset) = pack.find_offset(oid) {
-                    return read_pack_object(&pack.pack_path, offset, pack);
+                    return pack.read_object(offset);
                 }
             }
         }
@@ -858,7 +850,7 @@ impl Repository {
 
     /// The commits listed in `<common>/shallow`, treated as parentless by
     /// history walks. Empty for a full clone.
-    fn shallow_boundary(&self) -> Result<std::collections::HashSet<ObjectId>, GitError> {
+    pub fn shallow_boundary(&self) -> Result<std::collections::HashSet<ObjectId>, GitError> {
         let path = self.common_dir.join("shallow");
         let mut set = std::collections::HashSet::new();
         match std::fs::read_to_string(&path) {
@@ -1044,6 +1036,7 @@ impl Repository {
             skip_hidden: true,
             skip_target_dirs: true,
             skip_worktree_content_compare: false,
+            skip_untracked: false,
         })
     }
 
@@ -1063,6 +1056,7 @@ impl Repository {
             skip_hidden: true,
             skip_target_dirs: true,
             skip_worktree_content_compare: false,
+            skip_untracked: false,
         };
 
         let head_oid = match self.head_blob_oid_for_path(&path) {
@@ -1096,6 +1090,91 @@ impl Repository {
             }
             Err(err) => Err(err),
         }
+    }
+
+    /// `git status --untracked-files=all -- <paths>` for those files only: one index read,
+    /// HEAD's trees read once per directory, ignore rules read once. A directory is reported
+    /// as unchanged (`None`); an unmerged path as modified. Read-only, like `git status`
+    /// under `GIT_OPTIONAL_LOCKS=0`.
+    pub fn status_of_paths(&mut self, paths: &[String]) -> Result<Vec<worktree::PathStatus>, GitError> {
+        self.ensure_object_sources()?;
+        let index = self.read_index()?;
+        let staged: HashMap<&str, &IndexEntry> = index.entries.iter().filter(|e| e.stage() == 0).map(|e| (e.path.as_str(), e)).collect();
+        let unmerged: std::collections::HashSet<&str> = index.entries.iter().filter(|e| e.stage() != 0).map(|e| e.path.as_str()).collect();
+        let root = match self.head_oid() {
+            Ok(head) => Some(self.read_commit(&head)?.tree),
+            Err(GitError::RefNotFound(_)) => None,
+            Err(e) => return Err(e),
+        };
+        // directory -> its tree in HEAD (None: HEAD has no such directory)
+        let mut trees: HashMap<String, Option<Tree>> = HashMap::new();
+        let mut ignore = None;
+        let options = worktree::StatusOptions::default();
+        let mut out = Vec::with_capacity(paths.len());
+        for path in paths {
+            let path = normalize_rel_path(path);
+            let (dir, name) = path.rsplit_once('/').unwrap_or(("", path.as_str()));
+            let head_oid = match root {
+                None => None,
+                Some(root) => {
+                    if !trees.contains_key(dir) {
+                        let mut tree = Some(self.read_tree(&root)?);
+                        for part in dir.split('/').filter(|p| !p.is_empty()) {
+                            let next = tree.as_ref().and_then(|t| t.entries.iter().find(|e| e.name == part && e.is_tree()).map(|e| e.oid));
+                            tree = match next {
+                                Some(oid) => Some(self.read_tree(&oid)?),
+                                None => None,
+                            };
+                        }
+                        trees.insert(dir.to_string(), tree);
+                    }
+                    trees[dir].as_ref().and_then(|t| t.entries.iter().find(|e| e.name == name && !e.is_tree()).map(|e| e.oid))
+                }
+            };
+            let status = if let Some(entry) = staged.get(path.as_str()) {
+                let staged = match head_oid {
+                    Some(oid) if oid == entry.oid => None,
+                    Some(_) => Some(worktree::FileStatus::Staged),
+                    None => Some(worktree::FileStatus::StagedNew),
+                };
+                let unstaged = worktree::worktree_vs_index_status_for_path(entry, &self.workdir, &path, options)?;
+                staged.or(unstaged)
+            } else if unmerged.contains(path.as_str()) {
+                Some(worktree::FileStatus::Modified)
+            } else if head_oid.is_some() {
+                Some(worktree::FileStatus::StagedDeleted)
+            } else {
+                match fs::symlink_metadata(self.workdir.join(&path)) {
+                    Ok(m) if !m.is_dir() => {
+                        if ignore.is_none() {
+                            ignore = Some(worktree::status_ignore(&self.workdir)?);
+                        }
+                        let ignore = ignore.as_mut().expect("just set");
+                        (!ignore.ignored(&path, false).map_err(worktree::ignore_error)?).then_some(worktree::FileStatus::Untracked)
+                    }
+                    _ => None,
+                }
+            };
+            out.push(worktree::PathStatus { path, status, in_head: head_oid.is_some() });
+        }
+        Ok(out)
+    }
+
+    /// The object at `path` (`a/b/c`, a tree or a blob) under the tree `tree`; the empty path is
+    /// `tree` itself. Equal ids at a path in two trees: nothing under it differs.
+    pub fn entry_at(&mut self, tree: &ObjectId, path: &str) -> Result<Option<ObjectId>, GitError> {
+        let parts: Vec<&str> = path.split('/').filter(|c| !c.is_empty()).collect();
+        let mut at = *tree;
+        for (i, component) in parts.iter().enumerate() {
+            let tree = self.read_tree(&at)?;
+            let Some(entry) = tree.entries.iter().find(|e| e.name == *component) else { return Ok(None) };
+            if !entry.is_tree() && i + 1 < parts.len() {
+                // a file where the path goes on: nothing is there
+                return Ok(None);
+            }
+            at = entry.oid;
+        }
+        Ok(Some(at))
     }
 
     fn head_blob_oid_for_path(&mut self, path: &str) -> Result<Option<ObjectId>, GitError> {
@@ -1592,7 +1671,7 @@ impl Repository {
         if self.packs.is_none() || self.alternates.is_none() {
             let sources = object_sources(&self.common_dir)?;
             let mut packs = sources.packs;
-            if let Some(cache) = &self.read_cache { for pack in &mut packs { pack.set_read_budget(cache.account.clone(), cache.object_budget)?; } }
+            if let Some(cache) = &self.read_cache { if cache.explicit_account { for pack in &mut packs { pack.set_read_budget(cache.account.clone(), cache.object_budget)?; } } }
             self.packs = Some(packs);
             self.alternates = Some(sources.alternate_dirs);
             self.alternate_packs = Some(Vec::new());
@@ -1673,7 +1752,7 @@ pub(crate) fn read_object_standalone(
     if let Some(packs) = packs {
         for pack in packs {
             if let Some(offset) = pack.find_offset(oid) {
-                return read_pack_object(&pack.pack_path, offset, pack);
+                return pack.read_object(offset);
             }
         }
     }

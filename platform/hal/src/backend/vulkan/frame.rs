@@ -328,7 +328,10 @@ impl Vulkan {
         }
         // a recorded frame times its passes: its batch's timestamp pool is sized for them
         let prof_key = gpu_prof::current(sid);
-        let queries = prof_key.map_or(2, |k| prof::queries_for(k, pr.len(), dr.len()));
+        let prof_queries = prof_key.map_or(2, |k| prof::queries_for(k, pr.len(), dr.len()));
+        let timed_dispatches = view.passes[pr.clone()].iter().filter(|p| p.kind == crate::types::pass_kind::COMPUTE)
+            .flat_map(|p| crate::compute::records::<Dispatch>(view.arena, p.dispatches).unwrap_or_default()).filter(|d| d.timer != 0).count() as u32;
+        let queries = prof_queries + timed_dispatches * 2;
         let mut batch = match Batch::new(self.dev.clone(), &self.spares, queries, reserve) {
             Ok(b) => b,
             Err(e) => {
@@ -337,6 +340,7 @@ impl Vulkan {
                 s.bad(); return None;
             }
         };
+        batch.dispatch_query = prof_queries;
         batch.draw_counts = draw_counts;
         if !self.compute_ready(sid, &view.passes[pr.clone()], view) { return None; }
         s.frame = packet.frame; s.font_frames.submitted(packet.frame);
@@ -344,7 +348,7 @@ impl Vulkan {
         let is_window = kind & !target::FLAGS == target::WINDOW;
         let pick = kind & target::PICK != 0;
         if let Some(key) = prof_key {
-            batch.prof = Some(BatchProf::new(key, if self.dev.timestamp_bits > 0 { queries } else { 0 }));
+            batch.prof = Some(BatchProf::new(key, if self.dev.timestamp_bits > 0 { prof_queries } else { 0 }));
             batch.prof_key = Some(key);
             gpu_prof::with_frame(key, |b| b.packet(packet.frame, is_window && !pick, &packet.meta));
         }
@@ -372,6 +376,7 @@ impl Vulkan {
             if self.compose.is_none() {
                 // nothing rendered yet to draw the layer over
                 if !replay { batch.tickets.push(Ticket::Frame { token: Self::token(s), target, kind, frame: packet.frame, window: false }); }
+                self.pay_zeroes();
                 batch.finish(self.queue.as_ref().unwrap(), self.complete.clone(), self.mailbox.clone());
                 return Some(exec::SubmittedFrame { deps: Vec::new(), window: false });
             }
@@ -551,6 +556,7 @@ impl Vulkan {
             // image goes to its host, and the batch is submitted with them (`flush`).
             self.batch = Some(batch);
         } else {
+            self.pay_zeroes();
             batch.finish(self.queue.as_ref().unwrap(), self.complete.clone(), self.mailbox.clone());
         }
         Some(exec::SubmittedFrame { deps, window: scheduled })
@@ -902,7 +908,11 @@ impl Vulkan {
             video.push(match picture { Some(image) => image.video, None => self.dev.video_sampler(0, None)? });
         }
         let selected = if video.is_empty() { state.select(&render_pass, d.flags) } else { state.select_video(&render_pass, d.flags, &video) };
-        let Some(pipeline) = selected else { return Ok(None) };
+        let Some(pipeline) = selected else {
+            // its program still compiles: it goes before the compiles no frame waits for
+            if state.program.get().is_none() { super::Compilers::waited(&state.rank); }
+            return Ok(None)
+        };
         crate::compute::validate_draw(s, d, arena, &pipeline.program.storage)?;
         let p = &pipeline.program;
         let buffer = |id: Id| self.buf.get(&(s.id, id.index)).filter(|b| b.gen == id.gen).map(|b| b.buffer.clone());

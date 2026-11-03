@@ -229,7 +229,7 @@ impl DrawQuad {
         self.draw_vars.append_group_id = cx.draw_call_group_background().0;
         cx.begin_turtle(walk, layout);
         if self.draw_vars.draw_shader_id.is_some() {
-            let new_area = cx.add_aligned_instance(&self.draw_vars);
+            let new_area = cx.add_aligned_instance(&mut self.draw_vars);
             self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
         }
     }
@@ -253,7 +253,7 @@ impl DrawQuad {
         if let Some(mi) = &mut self.many_instances {
             mi.instances.extend_from_slice(self.draw_vars.as_slice());
         } else if self.draw_vars.can_instance() {
-            let new_area = cx.add_aligned_instance(&self.draw_vars);
+            let new_area = cx.add_aligned_instance(&mut self.draw_vars);
             self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
         }
     }
@@ -279,16 +279,16 @@ impl DrawQuad {
 
     pub fn new_draw_call(&mut self, cx: &mut Cx2d) {
         self.draw_vars.append_group_id = cx.draw_call_group_background().0;
-        cx.new_draw_call(&self.draw_vars);
+        cx.new_draw_call(&mut self.draw_vars);
     }
 
     pub fn append_to_draw_call(&mut self, cx: &mut Cx2d) {
         self.draw_vars.append_group_id = cx.draw_call_group_background().0;
-        cx.append_to_draw_call(&self.draw_vars);
+        cx.append_to_draw_call(&mut self.draw_vars);
     }
 
     pub fn begin_many_instances(&mut self, cx: &mut Cx2d) {
-        let mi = cx.begin_many_aligned_instances(&self.draw_vars);
+        let mi = cx.begin_many_aligned_instances(&mut self.draw_vars);
         self.many_instances = mi;
     }
 
@@ -384,7 +384,7 @@ impl DrawQuad {
     pub fn begin(&mut self, cx: &mut Cx2d, walk: Walk, layout: Layout) {
         cx.begin_turtle(walk, layout);
         if self.draw_vars.draw_shader.is_some() {
-            let new_area = cx.add_aligned_instance(&self.draw_vars);
+            let new_area = cx.add_aligned_instance(&mut self.draw_vars);
             self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
         }
     }
@@ -407,7 +407,7 @@ impl DrawQuad {
             mi.instances.extend_from_slice(self.draw_vars.as_slice());
         }
         else if self.draw_vars.can_instance() {
-            let new_area = cx.add_aligned_instance(&self.draw_vars);
+            let new_area = cx.add_aligned_instance(&mut self.draw_vars);
             self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
         }
     }
@@ -432,15 +432,15 @@ impl DrawQuad {
     }
 
     pub fn new_draw_call(&self, cx: &mut Cx2d) {
-        cx.new_draw_call(&self.draw_vars);
+        cx.new_draw_call(&mut self.draw_vars);
     }
 
     pub fn append_to_draw_call(&self, cx: &mut Cx2d) {
-        cx.append_to_draw_call(&self.draw_vars);
+        cx.append_to_draw_call(&mut self.draw_vars);
     }
 
     pub fn begin_many_instances(&mut self, cx: &mut Cx2d) {
-        let mi = cx.begin_many_aligned_instances(&self.draw_vars);
+        let mi = cx.begin_many_aligned_instances(&mut self.draw_vars);
         self.many_instances = mi;
     }
 

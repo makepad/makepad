@@ -18,15 +18,20 @@ use current source for API signatures and working examples.
 
 ## Current agent workflow
 
-- Opus 5.5 does all work that takes judgement: implementation lanes, reviews
-  of every lane's diff, research and design.
+- Opus 5.5 decides who gets each task. It keeps design, research, hard
+  diagnosis and reviews of every lane's diff, and gives well-specified
+  implementation, tests, runs and cleanups to Codex.
 - Grok handles only hyper-mechanical work (bulk renames, repetitive edits,
   transcription, log sweeps) under precise briefs.
-- Codex takes mechanical implementation under precise briefs: `codex exec -s workspace-write -C <worktree> -m <model> "<brief>" < /dev/null`, from the normal user environment (its real HOME; a changed HOME or CODEX_HOME fails with 401, an open stdin hangs it). Sol and Fable are not used for now.
+- Codex works under precise briefs: `codex exec -s workspace-write -C <worktree> -m <model> "<brief>" < /dev/null`, from the normal user environment (its real HOME; a changed HOME or CODEX_HOME fails with 401, an open stdin hangs it). Sol and Fable are not used for now.
+- An agent does the task it was given itself. It never starts another agent
+  CLI (claude, codex, grok) as a subprocess. If a task is too hard or the
+  brief is not enough, it stops and ends with `HAND BACK: <reason>` plus what
+  it found and changed; the Opus lead then takes the task over.
 - Resume a finished lane with its context for follow-ups instead of starting
   a fresh one that repays the same input. Idle without polling while waiting.
-- This is the user's current workflow (2026-09-27) and supersedes older role
-  assignments in local skills or memories (including the 2026-09-16 one).
+- This is the user's current workflow (2026-11-03) and supersedes older role
+  assignments in local skills or memories.
 
 ## Sending your changes to Makepad
 
@@ -173,6 +178,14 @@ it used (this one and any build or bench node):
   `git diff --stat` before every commit and stop on paths you did not write;
   a chain that carries such content is rewritten before it is pushed, never
   fixed with a follow-up delete.
+- NEVER put machine or host names, node numbers, LAN addresses, user names,
+  home paths or hardware inventory in tracked files, test names, fixtures or
+  commit messages. Write "a Linux node", "the Mac", "an M-series Metal GPU",
+  "a 24 GB GPU" or 192.0.2.x, and repo-relative paths; machine names belong
+  only in `local/`. The git hooks (`tools/private_check/hooks`, installed in
+  the common git dir) and `devhub land` enforce this with
+  `tools/private_check/scan.sh`; never use `--no-verify`. A real exception is
+  one reasoned line in `tools/private_check/allow`, reviewed before it lands.
 - Run the existing repository tests for validation. Do not add generated test
   files, inline test code, or test scaffolding unless the user explicitly requests
   that change. Never weaken a test to make it pass. Every test in the repo must

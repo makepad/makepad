@@ -1,0 +1,9 @@
+[package]
+name = "test-dep-keys"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+tdk-mid = { path = "mid" }

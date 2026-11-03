@@ -81,7 +81,7 @@ impl FrontImages {
             || graph.crates.iter().zip(&recipe.crates).any(|((key, _), want)| key != want) { return None; }
         let present = pre.iter().map(|c| c.name.clone()).collect();
         let mut late = HashMap::new();
-        Some(pre.iter().zip(&graph.crates).enumerate().map(|(i, (c, ((_, _), fp)))| {
+        Some(pre.iter().zip(&graph.crates).enumerate().map(|(i, (c, (_, fp)))| {
             let reopened;
             let store = match opened.and_then(|o| o.get(i)) {
                 Some(store) => &**store,
@@ -199,8 +199,8 @@ impl FrontImages {
     pub fn load_order(&self, pre: &[crate::preload::PreCrate], std_count: usize) -> Option<Vec<usize>> {
         let recipe = GraphRecipe::new(pre);
         let stored = read_front_order(&self.dir, recipe.set)?;
-        let at: HashMap<(&str, &str), usize> = pre.iter().enumerate().map(|(i, c)| ((c.name.as_str(), c.root.as_str()), i)).collect();
-        let order: Vec<usize> = stored.iter().map(|(n, r)| at.get(&(n.as_str(), r.as_str())).copied()).collect::<Option<_>>()?;
+        let at: HashMap<_, usize> = pre.iter().enumerate().map(|(i, c)| (c.key(), i)).collect();
+        let order: Vec<usize> = stored.iter().map(|key| at.get(key).copied()).collect::<Option<_>>()?;
         if !order.iter().copied().take(std_count).eq(0..std_count) { return None; }
         let base = crate::preload::reorder(pre, &order)?;
         self.begin_load(&base);
@@ -330,14 +330,14 @@ impl FrontImages {
         phase("mapped");
         let options = crate::crate_image::parse_options(&session.options);
         let store_paths: Vec<PathBuf> = graph.crates.iter()
-            .map(|((name, _), fp)| self.dir.join(front_store_name_with(options, name, *fp))).collect();
+            .map(|((name, _, _), fp)| self.dir.join(front_store_name_with(options, name, *fp))).collect();
         let indexes = MappedIndexes::read(image.bytes(4, 4)?, &self.dir).filter(|ix| {
             ix.stores.len() == graph.crates.len()
                 && ix.stores.iter().zip(&store_paths).all(|(s, path)| s.path.as_os_str() == path.as_os_str())
         });
         let mut stores = Vec::new();
         let mut late = HashMap::new();
-        let present = graph.crates.iter().map(|((name, _), _)| name.clone()).collect();
+        let present = graph.crates.iter().map(|((name, _, _), _)| name.clone()).collect();
         why = "crate stores / late inputs";
         for (i, store_path) in store_paths.iter().enumerate() {
             let store = indexes.as_ref().and_then(|ix| ix.stores.get(i)).cloned()
@@ -393,7 +393,7 @@ impl FrontImages {
         prog.front_sink = self.sink();
         why = "crate identities";
         if prog.crates.len() != graph.crates.len() || prog.crates.iter().zip(&graph.crates)
-            .any(|(c, ((name, root), _))| prog.syms.str(c.name) != name || c.root_path() != root) { return None; }
+            .any(|(c, (key, _))| crate::preload::crate_key(prog.syms.str(c.name), c.root_path(), &c.cfg) != *key) { return None; }
         why = "Tcx";
         let mut tcx = Tcx::restore_collected(types, prog.files.len(), prog.crates.len())?;
         phase("Tcx");
@@ -435,9 +435,9 @@ impl FrontImages {
             phase("Tcx prefix retained");
             if session.options.verbose { eprintln!("makepad-run collected: retained {} crates; rebuilding {} changed/dependent crates", prefix, pre.len() - prefix); }
             // the crates loaded after them find these as their dependencies (full_deps)
-            *self.retained.lock().unwrap() = graph.crates[..prefix].iter().map(|((name, _), fp)| (name.clone(), *fp)).collect();
+            *self.retained.lock().unwrap() = graph.crates[..prefix].iter().map(|((name, _, _), fp)| (name.clone(), *fp)).collect();
             *self.retained_proc.lock().unwrap() = graph.crates[..prefix].iter().enumerate().filter(|(k, _)| prog.crates.get(*k).is_some_and(|c| c.proc_macro))
-                .map(|(_, ((name, _), fp))| (name.clone(), *fp)).collect();
+                .map(|(_, ((name, _, _), fp))| (name.clone(), *fp)).collect();
         }
         if let Some(plan) = plan {
             self.pending_plan.lock().unwrap().take();
@@ -602,7 +602,7 @@ impl Encoder<'_> {
         *why = "recipe";
         let recipe = prog.front_graph.as_ref()?;
         if recipe.crates.len() != prog.crates.len() || recipe.crates.iter().zip(&prog.crates)
-            .any(|(key, c)| prog.syms.str(c.name) != key.0 || c.root_path() != key.1) { return None; }
+            .any(|(key, c)| crate::preload::crate_key(prog.syms.str(c.name), c.root_path(), &c.cfg) != *key) { return None; }
         *why = "Program";
         let mut parts = Parts::new();
         crate::run::yield_section("collected Program");

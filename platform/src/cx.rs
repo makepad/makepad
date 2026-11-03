@@ -133,6 +133,10 @@ pub struct Cx {
     /// `redraw_id` when that drawing began: the lists its draw contexts
     /// recorded carry a higher one.
     pub(crate) drawing_start: u64,
+    /// Redraws asked during the draw event for lists it had not recorded yet: they record in
+    /// it, like the lists the frame began with (`Cx::redraw_list`). The drawing's end hands
+    /// those it never reached to the next frame.
+    pub(crate) in_draw_redraws: Vec<crate::cx_api::InDrawRedraw>,
     /// What a frame drawn again before it painted keeps of its earlier
     /// drawings (`Cx::frame_drawn_again`).
     pub(crate) redraw_keep: crate::os::cx_shared::RedrawKeep,
@@ -1042,6 +1046,7 @@ impl Cx {
             redraw_id: 1,
             drawing_id: 0,
             drawing_start: 0,
+            in_draw_redraws: Vec::new(),
             redraw_keep: Default::default(),
             uniform_gen: 1,
             event_id: 1,

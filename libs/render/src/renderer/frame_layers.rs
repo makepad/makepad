@@ -35,7 +35,7 @@ impl Renderer {
                 );
                 shadow.draw_vars.geometry_id = Some(geometry.geometry_id());
                 if shadow.draw_vars.can_instance() {
-                    let new_area = cx.add_instance(&shadow.draw_vars);
+                    let new_area = cx.add_instance(&mut shadow.draw_vars);
                     shadow.draw_vars.area = cx.update_area_refs(shadow.draw_vars.area, new_area);
                 }
             }
@@ -77,7 +77,7 @@ impl Renderer {
                     sd.sdf_d = inst.d;
                     sd.sdf_e = inst.e;
                     if sd.draw_vars.can_instance() {
-                        let new_area = cx.add_instance(&sd.draw_vars);
+                        let new_area = cx.add_instance(&mut sd.draw_vars);
                         sd.draw_vars.area =
                             cx.update_area_refs(sd.draw_vars.area, new_area);
                     }
@@ -184,7 +184,7 @@ impl Renderer {
                     smoke.smoke_a = vec4(v.center.x, v.center.y, v.center.z, v.radius.max(0.05));
                     smoke.smoke_b = vec4(v.density.clamp(0.0, 4.0), v.age, v.seed, 0.0);
                     if smoke.draw_vars.can_instance() {
-                        let new_area = cx.add_instance(&smoke.draw_vars);
+                        let new_area = cx.add_instance(&mut smoke.draw_vars);
                         smoke.draw_vars.area = cx.update_area_refs(smoke.draw_vars.area, new_area);
                     }
                 }
@@ -210,7 +210,7 @@ impl Renderer {
                     fw.color = f.color;
                     fw.color_tail = f.color_tail;
                     if fw.draw_vars.can_instance() {
-                        let new_area = cx.add_instance(&fw.draw_vars);
+                        let new_area = cx.add_instance(&mut fw.draw_vars);
                         fw.draw_vars.area = cx.update_area_refs(fw.draw_vars.area, new_area);
                     }
                 }
@@ -251,7 +251,7 @@ impl Renderer {
                         1.0,
                     );
                     if fl.draw_vars.can_instance() {
-                        let new_area = cx.add_instance(&fl.draw_vars);
+                        let new_area = cx.add_instance(&mut fl.draw_vars);
                         fl.draw_vars.area = cx.update_area_refs(fl.draw_vars.area, new_area);
                     }
                     stats.flares += 1;
@@ -290,7 +290,7 @@ impl Renderer {
                         mark.kind.shader_id(),
                     );
                     if decal.draw_vars.can_instance() {
-                        let new_area = cx.add_instance(&decal.draw_vars);
+                        let new_area = cx.add_instance(&mut decal.draw_vars);
                         decal.draw_vars.area = cx.update_area_refs(decal.draw_vars.area, new_area);
                         stats.bullet_decals += 1;
                     }
@@ -331,7 +331,7 @@ impl Renderer {
                 && sc.screen_size.y > 0.0
                 && sc.draw_vars.can_instance()
             {
-                let new_area = cx.add_instance(&sc.draw_vars);
+                let new_area = cx.add_instance(&mut sc.draw_vars);
                 sc.draw_vars.area = cx.update_area_refs(sc.draw_vars.area, new_area);
             }
             // Sprite billboards are cut-out artwork, always: the quad is a
@@ -355,7 +355,7 @@ impl Renderer {
                 sc.tint = inst.tint;
                 sc.color_adjust_ctl = inst.color_adjust;
                 if sc.draw_vars.can_instance() {
-                    let new_area = cx.add_instance(&sc.draw_vars);
+                    let new_area = cx.add_instance(&mut sc.draw_vars);
                     sc.draw_vars.area = cx.update_area_refs(sc.draw_vars.area, new_area);
                 }
             }

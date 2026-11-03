@@ -233,7 +233,7 @@ impl Glyphs<'_> {
                 continue;
             }
             d.draw_vars.geometry_id = Some(self.geometries[shape].geometry_id());
-            let Some(mut many) = cx.begin_many_instances(&d.draw_vars) else { continue };
+            let Some(mut many) = cx.begin_many_instances(&mut d.draw_vars) else { continue };
             for &i in bucket {
                 let i = i as usize;
                 many.instances.extend_from_slice(&self.out[i * self.stride..(i + 1) * self.stride]);
@@ -254,7 +254,7 @@ impl Glyphs<'_> {
             d.info = vec4(0.0, 0.0, 0.0, -1.0);
             d.shape = fid as f32;
             d.draw_vars.geometry_id = Some(self.geometries[fid].geometry_id());
-            if let Some(mut many) = cx.begin_many_instances(&d.draw_vars) {
+            if let Some(mut many) = cx.begin_many_instances(&mut d.draw_vars) {
                 many.instances.extend_from_slice(d.draw_vars.as_slice());
                 let area = cx.end_many_instances(many);
                 d.draw_vars.area = cx.update_area_refs(d.draw_vars.area, area);
@@ -274,7 +274,7 @@ impl Glyphs<'_> {
         d.color = vec4(1.0, 1.0, 1.0, 1.0);
         d.shape = sid as f32;
         d.draw_vars.geometry_id = Some(self.geometries[sid].geometry_id());
-        let Some(mut many) = cx.begin_many_instances(&d.draw_vars) else { return 0 };
+        let Some(mut many) = cx.begin_many_instances(&mut d.draw_vars) else { return 0 };
         for c in 0..copies {
             d.attr = vec4(c as f32, copies as f32, 0.0, 0.0);
             d.info = vec4(c as f32 / (copies.max(2) - 1) as f32, 0.0, 0.0, c as f32);

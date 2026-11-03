@@ -423,11 +423,12 @@ mod tests {
 
     #[test]
     fn paths_show_home_as_tilde() {
-        let home = Path::new("/home/me");
-        assert_eq!(display_path("/home/me/demo-repos/linux", Some(home)), "~/demo-repos/linux");
-        assert_eq!(display_path("/home/me", Some(home)), "~");
-        assert_eq!(display_path("/home/me/x", Some(home)), "/home/me/x");
-        assert_eq!(display_name("/home/me/demo-repos/linux"), "linux");
+        let home = Path::new("/home/user");
+        assert_eq!(display_path("/home/user/demo-repos/linux", Some(home)), "~/demo-repos/linux");
+        assert_eq!(display_path("/home/user", Some(home)), "~");
+        // a sibling whose name starts with the home's is not inside it
+        assert_eq!(display_path("/home/username/x", Some(home)), "/home/username/x");
+        assert_eq!(display_name("/home/user/demo-repos/linux"), "linux");
     }
 
     #[test]

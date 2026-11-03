@@ -571,7 +571,7 @@ impl DrawGlyph {
             return;
         }
 
-        let Some(mut instances) = cx.begin_many_aligned_instances(&self.draw_vars) else {
+        let Some(mut instances) = cx.begin_many_aligned_instances(&mut self.draw_vars) else {
             return;
         };
         for (index, layer) in layers.iter().enumerate() {
@@ -623,7 +623,7 @@ impl DrawGlyph {
 
     fn push_instance(&mut self, cx: &mut Cx2d) {
         if self.draw_vars.can_instance() {
-            let new_area = cx.add_aligned_instance(&self.draw_vars);
+            let new_area = cx.add_aligned_instance(&mut self.draw_vars);
             let old_area = self.draw_vars.area;
             self.draw_vars.area = cx.update_area_refs(old_area, new_area);
         }

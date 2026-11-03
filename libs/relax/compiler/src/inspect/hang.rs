@@ -77,6 +77,9 @@ pub fn why_hung(req: &Req, out: &mut Out) {
     // the main thread sampled during the probe: where a busy main spends it
     let is_main = |t: &super::threads::Thread| super::is_program_main(t);
     let mut main_tops: Vec<Vec<u64>> = Vec::new();
+    // main's JIT waits and the first compiles over the probe: a main that waits on its lazy
+    // compiles (they run on the owner) shows little CPU of its own and is not idle
+    let (jit_wait0, compiled0) = (crate::postframe::ui_wait_ns(), crate::jit::COMPILED_FNS.load(std::sync::atomic::Ordering::Relaxed));
     let t0 = std::time::Instant::now();
     while t0.elapsed().as_millis() < probe as u128 {
         match super::capture_all(&is_main) {
@@ -94,6 +97,8 @@ pub fn why_hung(req: &Req, out: &mut Out) {
         Err(e) => return out.err(&e),
     };
     let elapsed_ns = t0.elapsed().as_nanos().max(1) as u64;
+    let jit_duty = crate::postframe::ui_wait_ns().saturating_sub(jit_wait0) * 100 / elapsed_ns;
+    let compiled = crate::jit::COMPILED_FNS.load(std::sync::atomic::Ordering::Relaxed).saturating_sub(compiled0);
     let waits = crate::waits::snapshot();
     let list: Vec<super::threads::Thread> = caps.iter().map(|c| c.t.clone()).collect();
     let cpu = |c: &Captured| -> u64 {
@@ -185,7 +190,11 @@ pub fn why_hung(req: &Req, out: &mut Out) {
     }
     if let Some(m) = main_i {
         let busy = cpu(&caps[m]);
-        if chain.len() > 1 {
+        // a short owner request now (a lazy compile's round trip), not a long one
+        let owner_round_trip = wait_of(caps[m].t.handle).map_or(true, |w| w.kind == Kind::Owner && crate::clock::wall_ns().saturating_sub(w.since_ns) < 1_000_000_000);
+        if cycle.is_empty() && jit_duty >= 50 && owner_round_trip {
+            findings.push(("compiling", format!("main is not stuck: it waited on its lazy compiles {}% of the {} ms probe ({} first compiles finished in it; main {}% CPU, the compiles run on the owner) -- see `jit`", jit_duty.min(100), probe, compiled, busy)));
+        } else if chain.len() > 1 {
             let steps: Vec<String> = chain.iter().map(|&i| describe(i)).collect();
             findings.push(("blocked", format!("main is blocked: {}", steps.join(" -> "))));
         } else if wait_of(caps[m].t.handle).is_some() {

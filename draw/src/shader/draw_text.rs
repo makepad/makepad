@@ -523,7 +523,7 @@ impl DrawText {
             return;
         }
         self.update_draw_vars(cx);
-        self.many_instances = cx.begin_many_aligned_instances(&self.draw_vars);
+        self.many_instances = cx.begin_many_aligned_instances(&mut self.draw_vars);
     }
 
     pub fn end_many_instances(&mut self, cx: &mut Cx2d) {
@@ -596,7 +596,7 @@ impl DrawText {
         }
 
         self.update_draw_vars(cx);
-        let Some(mut instances) = cx.begin_many_aligned_instances(&self.draw_vars) else {
+        let Some(mut instances) = cx.begin_many_aligned_instances(&mut self.draw_vars) else {
             return;
         };
 
@@ -657,7 +657,7 @@ impl DrawText {
             Some(instances) => instances,
             None => {
                 self.update_draw_vars(cx);
-                let Some(instances) = cx.begin_many_aligned_instances(&self.draw_vars) else { return };
+                let Some(instances) = cx.begin_many_aligned_instances(&mut self.draw_vars) else { return };
                 self.glyph_depth = self.draw_depth;
                 self.char_index = 0.0;
                 instances
@@ -1120,7 +1120,7 @@ impl DrawText {
                 }
 
                 // Draw this row's glyphs as a separate aligned-instance batch.
-                if let Some(mut instances) = cx.begin_many_aligned_instances(&self.draw_vars) {
+                if let Some(mut instances) = cx.begin_many_aligned_instances(&mut self.draw_vars) {
                     self.draw_row(cx, row_origin, row, &mut instances.instances);
                     self.finish_many_instances(cx, instances);
                 }
@@ -1582,7 +1582,7 @@ impl DrawText {
                 note_glyph_uses(cx);
                 return;
             }
-            let Some(mut instances) = cx.begin_many_aligned_instances(&self.draw_vars) else {
+            let Some(mut instances) = cx.begin_many_aligned_instances(&mut self.draw_vars) else {
                 return;
             };
             self.glyph_depth = self.draw_depth;
@@ -1927,11 +1927,11 @@ impl DrawText {
 
     pub fn new_draw_call(&mut self, cx: &mut Cx2d) {
         self.update_draw_vars(cx);
-        cx.new_draw_call(&self.draw_vars);
+        cx.new_draw_call(&mut self.draw_vars);
     }
 
-    pub fn append_to_draw_call(&self, cx: &mut Cx2d) {
-        cx.append_to_draw_call(&self.draw_vars);
+    pub fn append_to_draw_call(&mut self, cx: &mut Cx2d) {
+        cx.append_to_draw_call(&mut self.draw_vars);
     }
 
     pub fn get_aa_pad_px(&self, cx: &mut Cx) -> f32 {
@@ -2136,7 +2136,7 @@ impl FontFamily {
                             fonts.note_font_unavailable(font_id);
                             continue;
                         }
-                        SystemFaceState::Found(face) => match SharedBytes::from_file_mmap_or_read(&face.path) {
+                        SystemFaceState::Found(face) => match HostBuf::from_file_mmap_or_read(&face.path) {
                             Ok(data) => fonts.define_font(
                                 font_id,
                                 FontDefinition {

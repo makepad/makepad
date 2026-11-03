@@ -43,12 +43,24 @@ pub struct Status {
     pub entries: Vec<StatusEntry>,
 }
 
+/// One path's status from [`crate::Repository::status_of_paths`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PathStatus {
+    pub path: String,
+    /// `None`: the path is as HEAD has it (or untracked and ignored, or absent everywhere)
+    pub status: Option<FileStatus>,
+    /// HEAD's tree has a file at the path
+    pub in_head: bool,
+}
+
 /// Options controlling status traversal behavior.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct StatusOptions {
     pub skip_hidden: bool,
     pub skip_target_dirs: bool,
     pub skip_worktree_content_compare: bool,
+    /// Report tracked changes only (`git status --untracked-files=no`).
+    pub skip_untracked: bool,
 }
 
 /// Compute full working tree status by comparing HEAD tree, index, and worktree.
@@ -138,16 +150,18 @@ pub fn compute_status_cancellable(
     }
 
     // 3. Untracked files
-    let mut ignore = status_ignore(workdir)?;
-    collect_untracked(
-        workdir,
-        workdir,
-        &index_map,
-        &mut entries,
-        options,
-        &mut ignore,
-        cancel,
-    )?;
+    if !options.skip_untracked {
+        let mut ignore = status_ignore(workdir)?;
+        collect_untracked(
+            workdir,
+            workdir,
+            &index_map,
+            &mut entries,
+            options,
+            &mut ignore,
+            cancel,
+        )?;
+    }
 
     // Sort by path for deterministic output
     entries.sort_by(|a, b| a.path.cmp(&b.path));
@@ -210,16 +224,18 @@ pub fn compute_status_worktree_only_cancellable(
     }
 
     // Untracked files
-    let mut ignore = status_ignore(workdir)?;
-    collect_untracked(
-        workdir,
-        workdir,
-        &index_map,
-        &mut entries,
-        options,
-        &mut ignore,
-        cancel,
-    )?;
+    if !options.skip_untracked {
+        let mut ignore = status_ignore(workdir)?;
+        collect_untracked(
+            workdir,
+            workdir,
+            &index_map,
+            &mut entries,
+            options,
+            &mut ignore,
+            cancel,
+        )?;
+    }
 
     entries.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(Status { entries })
@@ -322,7 +338,7 @@ fn symlink_text(path: &Path) -> Result<Vec<u8>, GitError> {
     }
 }
 
-fn worktree_vs_index_status_for_path(
+pub(crate) fn worktree_vs_index_status_for_path(
     idx_entry: &IndexEntry,
     workdir: &Path,
     path: &str,
@@ -439,11 +455,11 @@ fn is_ignored_path(root: &Path, rel_path: &str, is_dir: bool) -> Result<bool, Gi
 
 /// The ignore rules `git status` applies: per-directory `.gitignore`,
 /// `info/exclude` and the user's excludes file.
-fn status_ignore(root: &Path) -> Result<GitIgnore, GitError> {
+pub(crate) fn status_ignore(root: &Path) -> Result<GitIgnore, GitError> {
     GitIgnore::with_user_excludes(root).map_err(ignore_error)
 }
 
-fn ignore_error(error: IgnoreError) -> GitError {
+pub(crate) fn ignore_error(error: IgnoreError) -> GitError {
     match error {
         IgnoreError::Io(message) => GitError::Io(std::io::Error::other(message)),
         IgnoreError::Git(message) => GitError::InvalidIndex(message),

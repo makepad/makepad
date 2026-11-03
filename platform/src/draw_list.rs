@@ -1928,6 +1928,26 @@ pub struct DrawItemInstanceCounters {
     pub recording_refused: bool,
 }
 
+/// A publication leaves a draw slot. Another reader (its producer, or the
+/// same publication recorded again) keeps it alive, so this lease is only a
+/// count and drops here. The last lease of a superseded publication goes to
+/// worker retirement, so freeing its storage never runs on the UI thread.
+/// Queueing shared leases too pinned every re-recorded publication in the
+/// queue (millions at rest in a retained-heavy app, faster than retirement
+/// drains it), and with them the superseded ones that only the queue held.
+fn retire_publication(
+    queue: &Option<std::rc::Rc<RetiredDrawInstances>>,
+    publication: crate::retained_instances::RetainedInstances,
+) {
+    if publication.readers() > 1 {
+        return;
+    }
+    if let Some(queue) = queue {
+        queue.values.borrow_mut().push(publication);
+        queue.pending.store(true, Ordering::Release);
+    }
+}
+
 #[derive(Default)]
 pub struct CxDrawItems {
     list_id: Option<DrawListId>,
@@ -2273,7 +2293,9 @@ impl CxDrawItems {
     }
     /// Discard bindings from calls omitted by this recording. Keep their
     /// reusable instance/backend storage, but never keep a shared framebuffer
-    /// leased through a spare slot that the renderer no longer visits.
+    /// or a CPU publication leased through a spare slot that the renderer no
+    /// longer visits (the backend keys its buffer by publication id, so the
+    /// same publication drawn here again uploads nothing).
     pub fn finish_recording(&mut self) {
         if self.used < self.bindings_used {
             for item in &mut self.buffer[self.used..self.bindings_used] {
@@ -2284,6 +2306,9 @@ impl CxDrawItems {
                     call.geometry_id = None;
                 }
                 item.shared = None;
+                if let Some(old) = item.retained_instances.take() {
+                    retire_publication(&self.retired_instances, old);
+                }
             }
         }
         // Only newly discarded slots need cleanup on the next recording.
@@ -2363,11 +2388,8 @@ impl CxDrawItems {
             if draw_item.retained_instances.is_none() {
                 draw_item.retained_instance_id = 0;
             }
-            if let Some(retired) = draw_item.retained_instances.take() {
-                if let Some(queue) = &self.retired_instances {
-                    queue.values.borrow_mut().push(retired);
-                    queue.pending.store(true, Ordering::Release);
-                }
+            if let Some(old) = draw_item.retained_instances.take() {
+                retire_publication(&self.retired_instances, old);
             }
             draw_item.retained_schema = 0;
             draw_item.consumed_serial = 0;
@@ -3091,6 +3113,36 @@ mod retained_sub_list_tests {
         assert!(items[0].retained_upload_needed());
     }
 
+    /// Re-recording a slot with the publication its producer still holds
+    /// queues nothing for retirement. Only the last lease of a superseded
+    /// publication, or of one left in a spare slot, is queued (every
+    /// re-recorded lease was, which pinned superseded ones behind them).
+    #[test]
+    fn re_recorded_publications_queue_only_their_last_lease() {
+        use crate::retained_instances::RetainedInstances;
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let list = DrawList::new(&mut cx);
+        let kept = RetainedInstances::new(4, vec![1.0; 16].into()).unwrap();
+        for _ in 0..8 {
+            let items = &mut cx.draw_lists[list.id()].draw_items;
+            items.clear();
+            items.push_item(1, CxDrawKind::Empty).retained_instances = Some(kept.clone());
+            items.push_item(1, CxDrawKind::Empty).retained_instances =
+                Some(RetainedInstances::new(4, vec![2.0; 16].into()).unwrap());
+            items.finish_recording();
+        }
+        let queued = |cx: &Cx| cx.draw_lists.3.values.borrow().iter().map(|p| p.data()[0]).collect::<Vec<_>>();
+        assert_eq!(queued(&cx), vec![2.0; 7], "seven superseded publications, never the kept one");
+        assert_eq!(kept.readers(), 2, "the producer and the slot");
+        let items = &mut cx.draw_lists[list.id()].draw_items;
+        items.clear();
+        items.push_item(1, CxDrawKind::Empty).retained_instances = Some(kept.clone());
+        items.finish_recording();
+        assert!(cx.draw_lists[list.id()].draw_items.buffer[1].retained_instances.is_none());
+        assert_eq!(queued(&cx), vec![2.0; 8], "the spare slot's publication is queued too");
+        assert_eq!(kept.readers(), 2);
+    }
+
     /// The retained-sub-list contract: a parent list may keep naming a child
     /// list that its owner dropped (a map tile evicted at event time, a hidden
     /// page). The dropped id stays dead — before AND after the pool hands its
@@ -3656,6 +3708,8 @@ mod uniform_generation_tests {
             append_group_id: 0,
             draw_shader_id: Some(call.draw_shader_id),
             geometry_id: None,
+            shader_gen: 0,
+            shader_default: None,
             dyn_uniforms: call.dyn_uniforms.clone(),
             #[cfg(not(target_arch = "wasm32"))]
             storage_buffers: call.storage_buffers.clone(),

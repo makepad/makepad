@@ -159,10 +159,43 @@ pub fn late_hash(content: Option<&[u8]>) -> u128 {
     h.finish128()
 }
 
+/// Bumped by each late input seen for the first time (a live session's watcher adds included files).
+static LATE_NEW: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 pub fn note_late_hash(krate: &str, kind: u8, name: &str, hash: u128) {
     let key = (krate.to_string(), kind, name.to_string());
     let mut g = LATE.lock().unwrap_or_else(|e| e.into_inner());
-    g.get_or_insert_with(Default::default).insert(key, hash);
+    if g.get_or_insert_with(Default::default).insert(key, hash).is_none() {
+        LATE_NEW.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// How many late inputs have been seen (changes when a new one is: `late_files` has more).
+pub fn late_count() -> u64 {
+    LATE_NEW.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The files read by include_str!/include_bytes! so far (any crate), each once.
+pub fn late_files() -> Vec<String> {
+    let g = LATE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut v: Vec<String> = g.as_ref().map_or(Vec::new(), |m| m.keys().filter(|k| k.1 == LATE_FILE).map(|k| k.2.clone()).collect());
+    v.sort();
+    v.dedup();
+    v
+}
+
+/// The included files' records, (crate, path, content hash): what the code compiled so far read.
+pub fn late_file_records() -> Vec<(String, String, u128)> {
+    let g = LATE.lock().unwrap_or_else(|e| e.into_inner());
+    g.as_ref().map_or(Vec::new(), |m| m.iter().filter(|(k, _)| k.1 == LATE_FILE).map(|((c, _, n), h)| (c.clone(), n.clone(), *h)).collect())
+}
+
+/// Puts included files' records back (a live edit whose parse read new contents was not applied:
+/// the running code still holds the contents it read).
+pub fn restore_late_files(records: &[(String, String, u128)]) {
+    let mut g = LATE.lock().unwrap_or_else(|e| e.into_inner());
+    let m = g.get_or_insert_with(Default::default);
+    for (c, n, h) in records { m.insert((c.clone(), LATE_FILE, n.clone()), *h); }
 }
 
 pub fn note_late_input(krate: &str, kind: u8, name: &str, content: Option<&[u8]>) {

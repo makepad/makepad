@@ -133,6 +133,7 @@ struct FnCx {
     locals: Vec<u32>,
     params: Vec<u32>,
     open: bool,
+    label: u32,
     loops: Vec<(u32, u32)>,
     entry_in: Vec<u32>,
     entry_out: Vec<u32>,
@@ -365,6 +366,7 @@ impl<'a> Gen<'a> {
 
     fn label(&mut self, id: u32) {
         self.emit(OP_LABEL, &[id]);
+        self.f.label = id;
         self.f.open = true;
     }
 
@@ -780,6 +782,8 @@ impl<'a> Gen<'a> {
             locals.push(self.local_var(l.ty));
         }
         self.f.locals = locals;
+        let label = self.b.id();
+        self.f.label = label;
         self.stmts(&func.body)?;
         if self.f.open {
             if func.ret == TY_VOID || self.f.is_entry {
@@ -789,7 +793,6 @@ impl<'a> Gen<'a> {
             }
             self.f.open = false;
         }
-        let label = self.b.id();
         let out = &mut self.b.functions;
         out.extend_from_slice(&header);
         spv_inst(out, OP_LABEL, &[label]);
@@ -1161,6 +1164,21 @@ impl<'a> Gen<'a> {
             }
             ExprKind::Binary(op, a, b) => {
                 let av = self.value(a)?;
+                if ty == TY_BOOL && matches!(op, BinOp::LogicAnd | BinOp::LogicOr) && !self.func().trivially_pure(b) {
+                    let left = self.f.label;
+                    let rhs = self.b.id();
+                    let merge = self.b.id();
+                    let (yes, no) = if op == BinOp::LogicAnd { (rhs, merge) } else { (merge, rhs) };
+                    self.emit(OP_SELECTION_MERGE, &[merge, 0]);
+                    self.emit(OP_BRANCH_CONDITIONAL, &[av, yes, no]);
+                    self.label(rhs);
+                    let bv = self.value(b)?;
+                    // A nested logical expression can end in a different block.
+                    let right = self.f.label;
+                    self.branch(merge);
+                    self.label(merge);
+                    return Ok(self.ins(OP_PHI, TY_BOOL, &[av, left, bv, right]));
+                }
                 let bv = self.value(b)?;
                 let at = self.ety(a);
                 let bt = self.ety(b);
@@ -1747,9 +1765,12 @@ impl<'a> Gen<'a> {
                 self.compute_builtin(bi, ty)
             }
             Builtin::Barrier => {
-                let scope = self.b.const_u32(SCOPE_WORKGROUP);
-                let sem = self.b.const_u32(SEMANTICS_ACQUIRE_RELEASE | SEMANTICS_WORKGROUP_MEMORY);
-                self.emit(OP_CONTROL_BARRIER, &[scope, scope, sem]);
+                let execution = self.b.const_u32(SCOPE_WORKGROUP);
+                let memory = self.b.const_u32(SCOPE_DEVICE);
+                // Match Metal's mem_device | mem_threadgroup and HLSL's
+                // AllMemoryBarrierWithGroupSync: publish storage writes too.
+                let sem = self.b.const_u32(SEMANTICS_ACQUIRE_RELEASE | SEMANTICS_WORKGROUP_MEMORY | SEMANTICS_UNIFORM_MEMORY);
+                self.emit(OP_CONTROL_BARRIER, &[execution, memory, sem]);
                 0
             }
             Builtin::StorageTextureWrite => {
@@ -1826,9 +1847,9 @@ impl<'a> Gen<'a> {
                 let b = self.value(args[1])?;
                 self.ins_id(OP_U_DOT, t, &[a, b, PACKED_VECTOR_FORMAT_4X8_BIT])
             }
-            Builtin::AtomicAdd => {
+            Builtin::AtomicAdd | Builtin::AtomicMin | Builtin::AtomicMax => {
                 if args.len() != 2 || !self.is_place(args[0]) {
-                    return err("atomic_add takes a buffer element and a value");
+                    return err("atomic_add, atomic_min and atomic_max take a buffer element and a value");
                 }
                 let p = self.place(args[0])?;
                 let v = self.value(args[1])?;
@@ -1839,7 +1860,13 @@ impl<'a> Gen<'a> {
                 }
                 let scope = self.b.const_u32(SCOPE_DEVICE);
                 let sem = self.b.const_u32(0);
-                self.ins(OP_ATOMIC_I_ADD, p.ty, &[p.id, scope, sem, v])
+                let signed = matches!(self.m.scalar_of(p.ty), Some(IrScalar::I32));
+                let code = match (op, signed) {
+                    (Builtin::AtomicMin, true) => OP_ATOMIC_S_MIN, (Builtin::AtomicMin, false) => OP_ATOMIC_U_MIN,
+                    (Builtin::AtomicMax, true) => OP_ATOMIC_S_MAX, (Builtin::AtomicMax, false) => OP_ATOMIC_U_MAX,
+                    _ => OP_ATOMIC_I_ADD,
+                };
+                self.ins(code, p.ty, &[p.id, scope, sem, v])
             }
             Builtin::CooperativeLoad | Builtin::CooperativeStore => {
                 let p = self.place(args[0])?;

@@ -18,7 +18,7 @@ use makepad_draw::text::font::FontId;
 use makepad_draw::text::font_family::FontFamilyId;
 use makepad_draw::text::layouter::{BorrowedLayoutParams, LaidoutText, LayoutOptions, Layouter, Settings, Style};
 use makepad_draw::text::loader::{FontDefinition, FontFamilyDefinition};
-use makepad_draw::SharedBytes;
+use makepad_draw::HostBuf;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -384,7 +384,7 @@ pub fn build_text3d(params: &Text3dParams) -> Result<Text3d, String> {
     layouter.define_font(
         font_id,
         FontDefinition {
-            data: SharedBytes::from_vec(bytes),
+            data: HostBuf::from_vec(bytes),
             index: 0,
             ascender_fudge_in_ems: 0.0,
             descender_fudge_in_ems: 0.0,

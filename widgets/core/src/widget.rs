@@ -1357,6 +1357,7 @@ impl WidgetRef {
             cx.enter_nesting_depth();
             let text_owner = if cx.text_runs.is_some() { cx.enter_text_owner(inner.widget.widget_uid().0) } else { 0 };
             let draw_owner = if cx.draw_owners.is_some() { cx.enter_draw_owner(inner.widget.widget_uid().0) } else { 0 };
+            let timed = crate::draw_times::enter(cx, inner.widget.widget_uid());
             if cx.sploded_active() {
                 let uid = inner.widget.widget_uid();
                 let depth = cx.nesting_depth;
@@ -1372,6 +1373,9 @@ impl WidgetRef {
             }
             if cx.draw_owners.is_some() {
                 cx.exit_draw_owner(draw_owner);
+            }
+            if let Some(timed) = timed {
+                crate::draw_times::exit(timed);
             }
             cx.exit_nesting_depth();
             if let Some(nd) = step {
@@ -1392,6 +1396,7 @@ impl WidgetRef {
             cx.enter_nesting_depth();
             let text_owner = if cx.text_runs.is_some() { cx.enter_text_owner(inner.widget.widget_uid().0) } else { 0 };
             let draw_owner = if cx.draw_owners.is_some() { cx.enter_draw_owner(inner.widget.widget_uid().0) } else { 0 };
+            let timed = crate::draw_times::enter(cx, inner.widget.widget_uid());
             if cx.sploded_active() {
                 let uid = inner.widget.widget_uid();
                 let depth = cx.nesting_depth;
@@ -1407,6 +1412,9 @@ impl WidgetRef {
             }
             if cx.draw_owners.is_some() {
                 cx.exit_draw_owner(draw_owner);
+            }
+            if let Some(timed) = timed {
+                crate::draw_times::exit(timed);
             }
             cx.exit_nesting_depth();
         }
@@ -1435,6 +1443,7 @@ impl WidgetRef {
             cx.enter_nesting_depth();
             let text_owner = if cx.text_runs.is_some() { cx.enter_text_owner(inner.widget.widget_uid().0) } else { 0 };
             let draw_owner = if cx.draw_owners.is_some() { cx.enter_draw_owner(inner.widget.widget_uid().0) } else { 0 };
+            let timed = crate::draw_times::enter(cx, inner.widget.widget_uid());
             if cx.sploded_active() {
                 let uid = inner.widget.widget_uid();
                 let depth = cx.nesting_depth;
@@ -1448,6 +1457,9 @@ impl WidgetRef {
             }
             if cx.draw_owners.is_some() {
                 cx.exit_draw_owner(draw_owner);
+            }
+            if let Some(timed) = timed {
+                crate::draw_times::exit(timed);
             }
             cx.exit_nesting_depth();
             if let Some(nd) = step {
@@ -1465,6 +1477,7 @@ impl WidgetRef {
             cx.enter_nesting_depth();
             let text_owner = if cx.text_runs.is_some() { cx.enter_text_owner(inner.widget.widget_uid().0) } else { 0 };
             let draw_owner = if cx.draw_owners.is_some() { cx.enter_draw_owner(inner.widget.widget_uid().0) } else { 0 };
+            let timed = crate::draw_times::enter(cx, inner.widget.widget_uid());
             if cx.sploded_active() {
                 let uid = inner.widget.widget_uid();
                 let depth = cx.nesting_depth;
@@ -1476,6 +1489,9 @@ impl WidgetRef {
             }
             if cx.draw_owners.is_some() {
                 cx.exit_draw_owner(draw_owner);
+            }
+            if let Some(timed) = timed {
+                crate::draw_times::exit(timed);
             }
             cx.exit_nesting_depth();
             if let Some(nd) = step {

@@ -594,7 +594,7 @@ fn checkout_unchanged(checkout: &Path) -> Result<bool, String> {
     let tree = repository.read_tree(&commit.tree).map_err(describe)?;
     let files = flatten_tree(&tree, "", &mut |oid| repository.read_tree(oid)).map_err(describe)?;
     let index = repository.read_index().map_err(describe)?;
-    let options = StatusOptions { skip_hidden: false, skip_target_dirs: true, skip_worktree_content_compare: false };
+    let options = StatusOptions { skip_hidden: false, skip_target_dirs: true, skip_worktree_content_compare: false, skip_untracked: false };
     let status = compute_status_with_options(&files, &index, &repository.workdir, options).map_err(describe)?;
     // Makepad tracks a few symbolic links. The Builder's checkout does not
     // create them, and Git's own checkout in the bootstrap leaves them
@@ -666,7 +666,7 @@ fn local_changes(checkout: &Path, label: &str, skip: &[String], diff: &mut Strin
     let tree = repository.read_tree(&commit.tree).map_err(describe)?;
     let tracked = flatten_tree(&tree, "", &mut |oid| repository.read_tree(oid)).map_err(describe)?;
     let index = repository.read_index().map_err(describe)?;
-    let options = StatusOptions { skip_hidden: false, skip_target_dirs: true, skip_worktree_content_compare: false };
+    let options = StatusOptions { skip_hidden: false, skip_target_dirs: true, skip_worktree_content_compare: false, skip_untracked: false };
     let status = compute_status_with_options(&tracked, &index, &repository.workdir, options).map_err(describe)?;
     let symbolic_link = |path: &str| index.entries.iter().any(|entry| entry.path == path && entry.mode & 0o170000 == 0o120000);
     for entry in &status.entries {

@@ -124,6 +124,8 @@ pub struct Metal {
     /// Draws left out so far for a pipeline variant still compiling (a frame that adds to it is
     /// partial, `FramePartial`).
     pending_draws: u64,
+    /// Failed command buffers must not silently strand their clients.
+    lost_posted: bool,
 }
 
 impl Metal {
@@ -212,6 +214,7 @@ impl Metal {
             prof: Vec::new(),
             prof_key: None,
             pending_draws: 0,
+            lost_posted: false,
         })
     }
 
@@ -253,9 +256,16 @@ impl Metal {
 
     /// Applies what finished on the GPU to the sessions: events, counters.
     fn drain(&mut self, world: &mut World) {
-        for done in self.dev.mailbox.take() {
+        let completions = self.dev.mailbox.take();
+        // Announce loss before any completion in the same drain can retire its
+        // dispatch metadata or publish bytes from a later command buffer.
+        if !self.lost_posted && completions.iter().any(|done| matches!(done, Done::Frame { failed: true, .. })) {
+            exec::device_lost(world);
+            self.lost_posted = true;
+        }
+        for done in completions {
             let (sid, incarnation) = match &done {
-                Done::Frame { sid, incarnation, .. } | Done::Readback { sid, incarnation, .. }
+                Done::Frame { sid, incarnation, .. } | Done::DispatchTime { sid, incarnation, .. } | Done::Readback { sid, incarnation, .. }
                 | Done::Pick { sid, incarnation, .. } | Done::PipelineReady { sid, incarnation, .. }
                 | Done::PipelineFailed { sid, incarnation, .. } | Done::Surface { sid, incarnation, .. } => (*sid, incarnation),
             };
@@ -266,6 +276,7 @@ impl Metal {
                 continue;
             }
             match done {
+                Done::DispatchTime { sid, name, gpu_ns, .. } => world.to_session(sid, |q| q.dispatch_time(name.as_bytes(), gpu_ns)),
                 Done::Frame { sid, target, frame, gpu_ns, present_ns, gpu_span, failed, partial, window, kind, .. } => {
                     if window && !failed && kind & target::OVERLAY == 0 {
                         world.window_presented(sid, target, frame, gpu_ns, present_ns);
@@ -615,6 +626,11 @@ impl Gpu for Metal {
     }
 
     fn buffer_update(&mut self, s: &mut Session, id: Id, b: &mut BufferObj, off: u64, data: &[u8]) {
+        let Some(size) = self.buf.get(&(s.id, id.index)).filter(|b| b.gen == id.gen).map(|b| b.size) else { s.bad(); return; };
+        if off.checked_add(data.len() as u64).is_none_or(|end| end > size) {
+            eprintln!("[hal-metal] buffer {id:?} upload offset={off} bytes={} exceeds buffer size={size}", data.len());
+            s.bad(); return;
+        }
         if b.kind & buffer_kind::KIND_MASK == buffer_kind::STORAGE {
             // Storage may contain GPU writes: never copy its contents on the CPU.
             // A queued blit preserves untouched bytes and orders the update with dispatches.
@@ -649,7 +665,7 @@ impl Gpu for Metal {
                 }
             }
         }
-        fill(buf, off, data);
+        if let Err(error) = fill(buf, off, data) { eprintln!("[hal-metal] {error}"); s.bad(); }
     }
 
     fn buffer_readback(&mut self, s: &mut Session, id: Id, req: u32, offset: u64, len: u64) { self.read_compute_buffer(s, id, req, offset, len); }

@@ -36,7 +36,8 @@ impl Program {
         Ok(Arc::new(p))
     }
 }
-pub(super) struct Pipe { pub gen: u32, pub state: Arc<OnceLock<Result<Arc<Program>, String>>>, pub announced: bool }
+/// `rank`: the compile's place in the queue (`Compilers`), lowered once a pass waits for it.
+pub(super) struct Pipe { pub gen: u32, pub state: Arc<OnceLock<Result<Arc<Program>, String>>>, pub announced: bool, pub rank: Arc<std::sync::atomic::AtomicU8> }
 pub(super) struct Descriptors { dev: Arc<Device>, pool: vk::DescriptorPool }
 impl Drop for Descriptors { fn drop(&mut self) { unsafe { self.dev.raw.destroy_descriptor_pool(self.pool, None); } } }
 
@@ -58,7 +59,7 @@ impl Vulkan {
             let Some(dispatches) = compute::records::<Dispatch>(view.arena, pass.dispatches) else { return false; };
             for d in dispatches {
                 let Some(p) = self.compute.get(&(sid, d.pipeline.index)).filter(|p| p.gen == d.pipeline.gen) else { return false; };
-                if !matches!(p.state.get(), Some(Ok(_))) { return false; }
+                if !matches!(p.state.get(), Some(Ok(_))) { super::Compilers::waited(&p.rank); return false; }
             }
         }
         true
@@ -71,9 +72,10 @@ impl Vulkan {
         if blob.code.len() % 4 != 0 { return PipeStatus::Failed("invalid SPIR-V bytes".into()); }
         let code: Vec<u32> = blob.code.chunks_exact(4).map(|w| u32::from_le_bytes(w.try_into().unwrap())).collect();
         let state = Arc::new(OnceLock::new());
-        self.compute.insert((s.id, id.index), Pipe { gen: id.gen, state: state.clone(), announced: false });
+        let rank = super::Compilers::rank(super::compile_rank::KERNEL);
+        self.compute.insert((s.id, id.index), Pipe { gen: id.gen, state: state.clone(), announced: false, rank: rank.clone() });
         let dev = self.dev.clone(); let notify = self.mailbox.notify.clone(); let sid = s.id;
-        self.compiler.push(move || { let _ = state.set(Program::new(dev, layout, &code)); notify(sid, false); });
+        self.compiler.push(rank, move || { let _ = state.set(Program::new(dev, layout, &code)); notify(sid, false); });
         PipeStatus::Pending
     }
     pub(super) fn announce_compute(&mut self, world: &mut World) {
@@ -126,6 +128,13 @@ impl Vulkan {
                 unsafe { self.dev.raw.update_descriptor_sets(&writes, &[]); self.dev.raw.cmd_bind_descriptor_sets(batch.cb, vk::PipelineBindPoint::COMPUTE, p.pipeline_layout, 0, &sets, &[]); }
                 batch.compute_descriptors.push(pool);
             }
+            let timer = if d.timer != 0 {
+                let q = batch.dispatch_query;
+                batch.dispatch_query += 2;
+                batch.dispatch_times.push((Self::token(s), s.string(d.timer).unwrap_or("compute").to_string(), q));
+                batch.stamp(q);
+                Some(q)
+            } else { None };
             unsafe {
                 if !params.is_empty() { self.dev.raw.cmd_push_constants(batch.cb, p.pipeline_layout, vk::ShaderStageFlags::COMPUTE, 0, &params); }
                 if d.indirect_buffer.is_none() { self.dev.raw.cmd_dispatch(batch.cb, d.groups[0], d.groups[1], d.groups[2]); }
@@ -136,6 +145,7 @@ impl Vulkan {
                 }
             }
             barrier(batch);
+            if let Some(q) = timer { batch.stamp(q + 1); }
             batch.compute_pipelines.push(p);
         }
         Ok(())

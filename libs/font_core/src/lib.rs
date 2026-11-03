@@ -20,5 +20,5 @@ pub mod sdfer;
 pub mod slug;
 pub mod system_fonts;
 
-pub use makepad_shared_bytes::{MappedBytes, SharedBytes};
+pub use makepad_shared_bytes::{MappedBytes, HostBuf};
 pub use rustybuzz;

@@ -52,7 +52,7 @@ pub fn parse(text: &str) -> (String, Vec<PkgErrors>) {
 }
 
 pub fn start(ctx: Arc<Ctx>) {
-    if ctx.store.update(|d| d.allapps.running.take()).is_some() {
+    if ctx.store.update(|d| d.allapps.running.take()).unwrap_or_else(|e| { eprintln!("devhub state: {e}"); Default::default() }).is_some() {
         ctx.store.event("allapps", Sev::Warn, "allapps: the run ended with the master; again when due".into(), None);
     }
     let _ = std::thread::Builder::new().name("devhub-allapps".into()).spawn(move || loop {
@@ -92,7 +92,7 @@ fn run(ctx: &Ctx, pair: Pair) {
     ctx.store.update(|d| {
         d.allapps.asked = false;
         d.allapps.running = Some(r.clone());
-    });
+    }).unwrap_or_else(|e| { eprintln!("devhub state: {e}"); Default::default() });
     ctx.store.event("allapps", Sev::Info, format!("allapps {} started", pair.short()), None);
     let spec = Spec { since_ms: None, only: false, lane: "allapps".into(), agent: "devhub-allapps".into(), kind: Kind::Long, needs: "arch=x64,os=linux,role=pool".into(), prio: super::verify::PRIO, rev: pair.rev(), repo_dir: ctx.repo.to_string_lossy().into_owned(), node: None };
     let outcome = (|| -> Result<(), String> {
@@ -102,7 +102,7 @@ fn run(ctx: &Ctx, pair: Pair) {
             let held = Held::acquire(&spec, &mut |_| {}, &|| false)?;
             r.lease = held.id.clone();
             r.node = held.node.clone();
-            ctx.store.update(|d| d.allapps.running = Some(r.clone()));
+            ctx.store.update(|d| d.allapps.running = Some(r.clone())).unwrap_or_else(|e| { eprintln!("devhub state: {e}"); Default::default() });
             let argv: Vec<String> = ["env", "CARGO_INCREMENTAL=0", "bash", "tools/run/fixture/allapps_check.sh"].iter().map(|s| s.to_string()).collect();
             let id = held.id.clone();
             let res = held.run(&argv, &mut file);
@@ -138,7 +138,7 @@ fn run(ctx: &Ctx, pair: Pair) {
     ctx.store.update(|d| {
         d.allapps.running = None;
         d.allapps.last = Some(done);
-    });
+    }).unwrap_or_else(|e| { eprintln!("devhub state: {e}"); Default::default() });
     ctx.store.event("allapps", sev, line, None);
 }
 
@@ -147,12 +147,12 @@ pub fn serve(ctx: &Ctx, line: &str) -> Result<String, String> {
     match line.split_whitespace().nth(1) {
         None | Some("status") => Ok(ctx.store.read(|d| d.section(Some("allapps"))).unwrap_or_default()),
         Some(on @ ("on" | "off")) => {
-            ctx.store.update(|d| d.allapps.on = on == "on");
+            ctx.store.update(|d| d.allapps.on = on == "on")?;
             ctx.store.event("allapps", Sev::Info, format!("allapps: hourly runs {on}"), None);
             Ok(format!("{{\"on\":{}}}", on == "on"))
         }
         Some("kick") => {
-            ctx.store.update(|d| d.allapps.asked = true);
+            ctx.store.update(|d| d.allapps.asked = true)?;
             ctx.store.event("allapps", Sev::Info, "allapps: asked to run now".into(), None);
             Ok("{\"asked\":true}".into())
         }

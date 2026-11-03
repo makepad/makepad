@@ -269,6 +269,60 @@ pub fn checkout_binary(app: &AppTarget, root: &Path, target_dir: Option<&OsStr>)
     path
 }
 
+/// Whether the live process `pid` runs the program `binary` holds now: the same file, or one with
+/// the same bytes (a relink that changed nothing). A service (the AI Hub, the devhub) restarts
+/// only for a program it does not run: a start that built first wrote its state before the
+/// build, and a restart reloads its models. None: no way to tell here (only Linux names a
+/// process's program, `/proc/<pid>/exe`, also once the file was replaced).
+pub fn runs_binary(pid: u32, binary: &Path) -> Option<bool> {
+    #[cfg(target_os = "linux")]
+    {
+        Some(same_program(Path::new(&format!("/proc/{pid}/exe")), binary))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (pid, binary);
+        None
+    }
+}
+
+/// The same file, or two files with the same bytes.
+pub fn same_program(a: &Path, b: &Path) -> bool {
+    use std::io::Read;
+    let (Ok(ma), Ok(mb)) = (std::fs::metadata(a), std::fs::metadata(b)) else { return false };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if (ma.dev(), ma.ino()) == (mb.dev(), mb.ino()) {
+            return true;
+        }
+    }
+    if ma.len() != mb.len() {
+        return false;
+    }
+    let (Ok(mut fa), Ok(mut fb)) = (std::fs::File::open(a), std::fs::File::open(b)) else { return false };
+    let fill = |f: &mut std::fs::File, buf: &mut [u8]| -> Option<usize> {
+        let mut n = 0;
+        while n < buf.len() {
+            match f.read(&mut buf[n..]).ok()? {
+                0 => break,
+                k => n += k,
+            }
+        }
+        Some(n)
+    };
+    let (mut ba, mut bb) = (vec![0u8; 1 << 20], vec![0u8; 1 << 20]);
+    loop {
+        let (Some(na), Some(nb)) = (fill(&mut fa, &mut ba), fill(&mut fb, &mut bb)) else { return false };
+        if na != nb || ba[..na] != bb[..nb] {
+            return false;
+        }
+        if na == 0 {
+            return true;
+        }
+    }
+}
+
 /// `bin` beside the running executable (`.exe` on Windows, where a bare
 /// name never exists): an installed layout's apps.
 pub fn installed_binary(bin: &str) -> Option<PathBuf> {
@@ -476,6 +530,25 @@ mod tests {
     /// Every other app Builder builds is in the registry (the ones the WM
     /// does not host are `wm_launchable: false`).
     const BUILDER_ONLY: &[(&str, &str)] = &[];
+
+    #[test]
+    fn a_program_is_the_same_file_or_the_same_bytes() {
+        let dir = std::env::temp_dir().join(format!("app-registry-program-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (a, b, c) = (dir.join("a"), dir.join("b"), dir.join("c"));
+        std::fs::write(&a, b"program").unwrap();
+        std::fs::write(&b, b"program").unwrap();
+        std::fs::write(&c, b"programs").unwrap();
+        assert!(same_program(&a, &a), "the same file");
+        assert!(same_program(&a, &b), "a relink that changed nothing");
+        assert!(!same_program(&a, &c), "a new build");
+        std::fs::write(&c, b"PROGRAM").unwrap();
+        assert!(!same_program(&a, &c), "a new build of the same size");
+        assert!(!same_program(&a, &dir.join("gone")));
+        #[cfg(target_os = "linux")]
+        assert_eq!(runs_binary(std::process::id(), &std::env::current_exe().unwrap()), Some(true));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// The checkout these tests were compiled in.
     fn test_root() -> PathBuf {

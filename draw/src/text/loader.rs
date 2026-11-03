@@ -8,12 +8,12 @@ use {
         shaper,
         shaper::Shaper,
     },
-    crate::makepad_platform::SharedBytes,
+    crate::makepad_platform::HostBuf,
     fxhash::FxHashMap,
     std::{cell::RefCell, rc::Rc},
 };
 
-pub type FontData = SharedBytes;
+pub type FontData = HostBuf;
 
 #[derive(Clone, Debug)]
 pub struct Loader {
@@ -267,7 +267,7 @@ pub struct FontDefinition {
 mod tests {
     use super::{FontDefinition, FontFamilyDefinition, Loader};
     use crate::{
-        makepad_platform::{Cx, SharedBytes},
+        makepad_platform::{Cx, HostBuf},
         text::{font::FontId, font_family::FontDiagnostics, layouter},
     };
     use std::path::PathBuf;
@@ -280,7 +280,7 @@ mod tests {
     fn get_or_load_font_reuses_cached_instance() {
         let mut loader = Loader::new(layouter::Settings::default().loader);
         let font_id: FontId = 0xCAFE_BABE_u64.into();
-        let font_data = SharedBytes::from_file_mmap_or_read(bundled_font_path())
+        let font_data = HostBuf::from_file_mmap_or_read(bundled_font_path())
             .expect("font bytes should load");
 
         loader.define_font(
@@ -306,7 +306,7 @@ mod tests {
         let mut loader = Loader::new(layouter::Settings::default().loader);
         let font_id: FontId = 0xCAFE_C001_u64.into();
         let family_id = 0xCAFE_C002_u64.into();
-        let font_data = SharedBytes::from_file_mmap_or_read(bundled_font_path())
+        let font_data = HostBuf::from_file_mmap_or_read(bundled_font_path())
             .expect("font bytes should load");
         loader.define_font(
             font_id,
@@ -370,7 +370,7 @@ mod tests {
             (primary_id, "IBMPlexSans-Text.ttf"),
             (fallback_id, "jetbrains_mono_variable.ttf"),
         ] {
-            let data = SharedBytes::from_file_mmap_or_read(
+            let data = HostBuf::from_file_mmap_or_read(
                 PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                     .join("../widgets/resources")
                     .join(name),
@@ -463,7 +463,7 @@ mod tests {
     #[test]
     fn variable_font_weight_changes_outline_shape() {
         let mut loader = Loader::new(layouter::Settings::default().loader);
-        let font_data = SharedBytes::from_file_mmap_or_read(bundled_variable_font_path())
+        let font_data = HostBuf::from_file_mmap_or_read(bundled_variable_font_path())
             .expect("variable font bytes should load");
         let regular_id: FontId = 0xD00D_0001_u64.into();
         let bold_id: FontId = 0xD00D_0002_u64.into();

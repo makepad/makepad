@@ -121,6 +121,26 @@ fn virtual_fd() -> io::Result<OwnedFd> {
     }
 }
 
+/// A folder fd that names no folder: a fresh empty folder in the temp folder, removed once it is
+/// open (the fd stays a folder's: fstat and fsync work on it, reads fail EISDIR).
+fn virtual_dir_fd() -> io::Result<OwnedFd> {
+    static NEXT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+    let pid = unsafe { sys::getpid() };
+    loop {
+        let n = NEXT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let path = crate::env::temp_dir().join(alloc::format!("relax-vfs-dir-{pid}-{n}"));
+        let c = CString::new(path.as_os_str().as_encoded_bytes()).map_err(|_| NUL_ERR)?;
+        if let Err(e) = cvt(unsafe { sys::mkdir(c.as_ptr(), 0o700) }) {
+            // a folder left by an earlier process of the same pid: the next name
+            if e.kind() == io::ErrorKind::AlreadyExists { continue; }
+            return Err(e);
+        }
+        let fd = cvt_r(|| unsafe { sys::open(c.as_ptr(), sys::O_RDONLY | sys::os::O_DIRECTORY | sys::os::O_CLOEXEC, 0 as core::ffi::c_uint) });
+        unsafe { sys::rmdir(c.as_ptr()) };
+        return Ok(unsafe { OwnedFd::from_raw_fd(fd?) });
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct OpenOptions {
     read: bool,
@@ -185,7 +205,18 @@ impl OpenOptions {
                     file.virtual_len = Some(data.len() as u64);
                     Ok(file)
                 }
-                vfs::Kind::Dir => Err(io::const_error!(io::ErrorKind::IsADirectory, "is a directory")),
+                // open(2) of a folder for reading succeeds on the disk (its reads fail EISDIR; a
+                // folder's fd is fsync'd to make its entries durable): the run's edits copy of the
+                // folder when there is one, else a folder fd of its own
+                vfs::Kind::Dir => {
+                    self.access_mode()?;
+                    if let Some(Ok(disk)) = vfs::edit_target(&*abs, vfs::Edit::Existing) {
+                        if let Ok(file) = run_path_with_cstr(&disk, &|c| self.open_c(c)) {
+                            return Ok(file);
+                        }
+                    }
+                    Ok(File { fd: virtual_dir_fd()?, virtual_len: None })
+                }
                 vfs::Kind::Missing => Err(io::Error::from(io::ErrorKind::NotFound)),
             };
         }

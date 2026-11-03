@@ -324,3 +324,36 @@ impl FoldHeaderRef {
         self.borrow().map(|inner| inner.header_rect(cx)).unwrap_or_default()
     }
 }
+
+#[cfg(test)]
+mod settled_cut_tests {
+    use super::*;
+
+    /// A cut to the state the animator is already in, with nothing on its way, applies
+    /// nothing: a widget that sets its state as it draws re-applies (and redraws) nothing on
+    /// an unchanged draw. A cut to another state, or one while a track runs, still applies.
+    #[test]
+    fn a_cut_to_the_settled_state_applies_nothing_and_another_cut_applies() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut fold = cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            let value = crate::script_eval!(vm, {use mod.widgets.* FoldHeader{}});
+            FoldHeader::script_from_value(vm, value)
+        });
+        fold.set_is_open(&mut cx, false, Animate::No);
+        assert_eq!(fold.opened(), 0.0, "the first cut applies its state");
+        // A value the animator did not write: an applied cut would put it back to 0.
+        fold.opened = 0.5;
+        fold.set_is_open(&mut cx, false, Animate::No);
+        assert_eq!(fold.opened(), 0.5, "a cut to the settled state applied");
+        fold.set_is_open(&mut cx, true, Animate::No);
+        assert_eq!(fold.opened(), 1.0, "a cut to another state did not apply");
+        // Settled in `off`, on its way to `on`: a cut back to `off` stops the track.
+        fold.set_is_open(&mut cx, false, Animate::No);
+        fold.set_is_open(&mut cx, true, Animate::Yes);
+        assert!(fold.animator.is_animating(), "no track to `on`");
+        fold.set_is_open(&mut cx, false, Animate::No);
+        assert!(!fold.animator.is_animating(), "a cut under a running track left it running");
+        assert_eq!(fold.opened(), 0.0);
+    }
+}

@@ -90,6 +90,10 @@ pub use window_controls::{host_caption, host_window_controls, HostCaption, Windo
 
 #[cfg(target_vendor = "apple")]
 pub use backend::apple::media::{can_play_type, video_h264_probe};
+/// What a macOS process hands to the image it execs into so its window keeps its place in the
+/// stacking and its focus (the exec restart).
+#[cfg(target_os = "macos")]
+pub use backend::apple::appkit::restack_handover;
 #[cfg(target_os = "linux")]
 pub use backend::linux::media::can_play_type;
 #[cfg(target_os = "android")]
@@ -387,6 +391,25 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// The process's Hal ([`Hal::global`]).
+static GLOBAL: OnceLock<Arc<Hal>> = OnceLock::new();
+
+/// The process's exit ends the global Hal's backend first ([`Hal::before_exit`]) in every way the
+/// process ends, a host that never calls it among them: a test binary exits when its harness's
+/// main returns, with the GPU frames of its last sessions still in the driver workers, and
+/// exit() then ran the driver's exit handlers under them (a SIGSEGV in a batch's completion).
+/// Registered once the backend, and with it the driver, is made: exit() runs the handlers
+/// last registered first, so this one runs before those the driver registered as it loaded.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn before_exit_at_exit() {
+    extern "C" { fn atexit(f: extern "C" fn()) -> i32; }
+    extern "C" fn at_exit() { if let Some(hal) = GLOBAL.get() { hal.before_exit(); } }
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| { unsafe { atexit(at_exit) }; });
+}
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn before_exit_at_exit() {}
+
 impl Hal {
     pub fn new() -> Arc<Hal> {
         raise_open_file_limit();
@@ -401,8 +424,7 @@ impl Hal {
     }
 
     pub fn global() -> &'static Hal {
-        static HAL: OnceLock<Arc<Hal>> = OnceLock::new();
-        HAL.get_or_init(Hal::new)
+        GLOBAL.get_or_init(Hal::new)
     }
 
     // ---- the four ops
@@ -521,6 +543,7 @@ impl Hal {
                     }
                     st.backend = Some((b.info().backend, b));
                     st.backend_inits += 1;
+                    if GLOBAL.get().is_some_and(|hal| std::ptr::eq(&**hal, self)) { before_exit_at_exit(); }
                     // a remote headset slot's XR window events wake the pumps like the backend's
                     xr_remote::set_wake(notify.clone());
                 }
@@ -899,7 +922,9 @@ impl Hal {
     /// backend leaves the Hal -- no call reaches it any more, no backend is made again -- and its
     /// driver threads stop and are joined (work in flight completes or is abandoned), so exit()
     /// never runs the driver's exit handlers under a thread inside the driver. Returns once
-    /// they are gone. A host API, the last HAL call of every way the host ends; once is enough.
+    /// they are gone. The last HAL call of every way the process ends: a host calls it where it
+    /// ends, and the process's exit calls it for the global Hal (`before_exit_at_exit`); once is
+    /// enough.
     pub fn before_exit(&self) {
         let backend = {
             let mut guard = lock(&self.state);

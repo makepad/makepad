@@ -100,7 +100,7 @@ impl Renderer {
                 for &(x, z) in patches {
                     draw.pbr.skinned.morph_weights6 = vec4(x, z, 0.0, crate::grass::PATCH);
                     if draw.pbr.skinned.draw_vars.can_instance() {
-                        let area = cx.add_instance(&draw.pbr.skinned.draw_vars);
+                        let area = cx.add_instance(&mut draw.pbr.skinned.draw_vars);
                         draw.pbr.skinned.draw_vars.area = cx.update_area_refs(draw.pbr.skinned.draw_vars.area, area);
                     }
                 }

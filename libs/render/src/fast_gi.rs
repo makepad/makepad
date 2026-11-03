@@ -12,7 +12,12 @@
 //! - GPU: four fragment passes per frame over a small probe batch whose size
 //!   follows the passes' measured GPU time (fast_gi/shaders.rs).
 //! - Receivers sample the finest confident cascade, then coarser ones, then
-//!   their ordinary ambient: never darker than GI off where GI knows nothing.
+//!   their ordinary ambient. A probe holds the light the scene's surfaces
+//!   send and the share of its rays that left the scene; a receiver's
+//!   ambient is its ordinary ambient (the hemisphere, an environment map's
+//!   fill) times that open share, plus the surfaces' light. Open space looks
+//!   as with GI off, a cavity darkens, a coloured neighbour adds what it
+//!   reflects.
 //!
 //! A host with a still scene sets `GiConfig::settle`: only probes a surface
 //! can read are traced, each a fixed number of times, then the passes stop
@@ -77,9 +82,10 @@ pub struct GiConfig {
     pub anchor: Option<Vec3f>,
     /// Previous-field diffuse transport gain. 0 reproduces one bounce.
     pub feedback: f32,
-    /// Gain on the light surfaces reflect into the probes (1: physical): a
-    /// host whose sun far outweighs its sky, or whose surfaces are dark, can
-    /// make the bounce read. Sky and emission stay as they are.
+    /// Share of the light a surface receives that it reflects into the
+    /// probes (1: physical; 0..1, never more: a gain over 1 lit cavities and
+    /// neighbours brighter than their light and tinted them with their own
+    /// colour). Emission stays as it is.
     pub bounce: f32,
     /// GPU time the GI passes aim for per frame.
     pub gpu_budget_ms: f32,
@@ -87,7 +93,8 @@ pub struct GiConfig {
     /// number of updates each, then stop until the scene or the light
     /// changes (`FastGi::wants_frames` goes false). Off: every probe is refreshed forever.
     pub settle: bool,
-    /// Receivers leave out the probes behind their own surface. For a scene whose walls are
+    /// Receivers leave out the probes behind their own surface (a probe's weight fades to zero
+    /// as it nears the surface's plane, so no seam marks where it crosses). For a scene whose walls are
     /// thinner than a cascade's voxels (printed shells, sheet parts): a probe inside one sees
     /// its dark inside, and its visibility test, which allows for a voxel's depth, lets it
     /// light the outside through the wall in patches. Off, a probe behind the surface still
@@ -104,7 +111,7 @@ impl GiConfig {
         let mut grid=[even(self.grid[0],4,16),even(self.grid[1],2,16),even(self.grid[2],4,16)];
         // One field row per probe: stay within WebGL2's 2048 texture minimum.
         grid[1]=grid[1].min((2048/(grid[0]*grid[2]))&!1).max(2);
-        Self { grid, home:[0,1,2].map(|a|sane(self.home[a],HOME[a],0.05,0.95)), settle:self.settle, thin_walls:self.thin_walls, cascades:self.cascades.clamp(1,MAX_CASCADES), anchor:self.anchor.filter(|p|finite(*p)), feedback:sane(self.feedback,0.85,0.0,0.95), bounce:sane(self.bounce,1.0,0.0,8.0),
+        Self { grid, home:[0,1,2].map(|a|sane(self.home[a],HOME[a],0.05,0.95)), settle:self.settle, thin_walls:self.thin_walls, cascades:self.cascades.clamp(1,MAX_CASCADES), anchor:self.anchor.filter(|p|finite(*p)), feedback:sane(self.feedback,0.85,0.0,0.95), bounce:sane(self.bounce,1.0,0.0,1.0),
             spacing:sane(self.spacing,1.0,0.001,8.0), probes_per_frame:self.probes_per_frame.clamp(1,4096), ray_distance:sane(self.ray_distance,48.0,0.01,200.0),
             strength:sane(self.strength,1.0,0.0,1.0), gpu_budget_ms:sane(self.gpu_budget_ms,1.5,0.1,16.0) }
     }

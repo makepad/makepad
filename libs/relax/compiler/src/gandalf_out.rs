@@ -10,6 +10,8 @@ impl Console {
         let join = std::thread::Builder::new().name("gandalf-out".into()).spawn(move || {
             let mut count = 0;
             for ev in context {
+                // The test dependency check prints and reports these when the tests end.
+                if ev.origin == Origin::DeferredCheck { continue; }
                 count += 1;
                 // A live-edit gate refusal is printed and emitted once, by reload's
                 // report_gandalf_refusal, before the transaction returns.

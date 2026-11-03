@@ -1,0 +1,374 @@
+// Fractal tiles as a program: the app sends tiles, the program renders each and publishes it.
+//
+// messages:
+// - {tile: {slot, x, y, step, res, kind, power, max_iter, de, trap, julia: [re, im]}} renders
+//   that tile (res x res texels, row-major, texel centres at x + (col + 0.5) * step, y likewise)
+//   and publishes it as `tile0` or `tile1`, its slot: two slots, so a tile on its way never
+//   replaces another. Taking a tile sets the value `took` to the message's rev, so the app can
+//   have the next tile waiting while this one renders.
+// - {stop: true} ends the run; it returns the tiles drawn.
+//
+// kind: 0 Mandelbrot, 1 Julia, 2 Burning Ship, 3 Tricorn, 4 Multibrot (z^power + c, power
+// 2..8), 5 Newton on z^power - 1. Kinds 0..4 run in passes of at most 2048 iterations per
+// texel, the orbit state carried from pass to pass, up to 131072 iterations; Newton takes at
+// most 1024 steps.
+//
+// Escape-time texels (kinds 0..4), a u32 each: the low 24 bits are the smooth iteration count in
+// 1/64 steps (capped at 2^24 - 1), the top byte the class: 0 escaped, 255 inside. The bailout is
+// |z|^2 < 256; z is frozen at escape; n counts the steps taken. Mandelbrot's main cardioid and
+// period-2 bulb are inside up front.
+// de = 1 (distance estimation): |dz| is carried by its magnitude recurrence
+// |dz'| = power |z|^(power-1) |dz| + 1 (Julia: dz0 = 1, no +1) before each step; an escaped
+// texel's top byte is then the distance code clamp(round(log2(max(dist, 1e-9)) * 20 + 100), 1,
+// 254), dist = |z| ln|z| / |dz| in texels.
+// trap = 1 (cross orbit trap): the low 24 bits are min(max((1 - log2(max(trap, 1e-30))) * 8, 0)
+// * 64, 2^24 - 1), trap the orbit's closest approach to the axes over the steps after which it was
+// still bounded, for escaped and inside texels; the cardioid and bulb are iterated then.
+//
+// Newton texels (kind 5): z <- ((p-1) z^p + 1) / (p z^(p-1)) from the texel until a step's
+// |dz|^2 is below 1e-10. The top byte is 1 + the root reached (the root nearest z's angle,
+// 0..power-1), or 255 when none was; the low 24 bits are (n - frac) in 1/64 steps, n the steps
+// taken and frac = min(log2(max(ln(d) / ln(1e-10), 1)), 1) of the last step d, 1 when d is 0.
+use mod.pod.*
+use mod.kernel.*
+
+fn low24(v) {
+    var w = v * 64.0
+    if w < 0.0 {
+        w = f64(0.0)
+    }
+    if w > 16777215.0 {
+        w = f64(16777215.0)
+    }
+    int(float(floor(w)))
+}
+
+// One pass of kinds 0..4. The orbit state (z, |dz|, trap, steps, flag: 0 running, 1 escaped,
+// 2 inside) is read and written in place; pass 0 starts it, the last pass writes `out`.
+let escape = {
+    label: "escape"
+    view: input(@f64)
+    out: output(u32)
+    zr_s: output(@f64)
+    zi_s: output(@f64)
+    dz_s: output(@f64)
+    tr_s: output(@f64)
+    n_s: output(i32)
+    fl_s: output(i32)
+    res: param(256, 1, 4096)
+    max_iter: param(500, 1, 131072)
+    kind: param(0, 0, 4)
+    power: param(3, 2, 8)
+    de: param(0, 0, 1)
+    trap: param(0, 0, 1)
+    pass: param(0, 0, 63)
+    last: param(0, 0, 1)
+    element: fn(i) {
+        let r = int(res)
+        let col = i % r
+        let row = i / r
+        let step = view[2]
+        let cr = view[0] + (f64(col) + 0.5) * step
+        let ci = view[1] + (f64(row) + 0.5) * step
+        let k = int(kind)
+        let p = if k == 4 { int(power) } else { 2 }
+        let pf = f64(p)
+        let mi = int(max_iter)
+        let d_on = int(de)
+        let t_on = int(trap)
+        var ar = cr
+        var ai = ci
+        var dz_add = f64(1.0)
+        if k == 1 {
+            ar = view[3]
+            ai = view[4]
+            dz_add = f64(0.0)
+        }
+        var zr = zr_s[i]
+        var zi = zi_s[i]
+        var dz = dz_s[i]
+        var tr = tr_s[i]
+        var n = n_s[i]
+        var flag = fl_s[i]
+        if int(pass) == 0 {
+            zr = f64(0.0)
+            zi = f64(0.0)
+            dz = f64(0.0)
+            tr = f64(1000000000.0)
+            n = 0
+            flag = 0
+            if k == 1 {
+                zr = cr
+                zi = ci
+                dz = f64(1.0)
+            }
+            if k == 0 && t_on == 0 {
+                let x = cr - 0.25
+                let q = x * x + ci * ci
+                if q * (q + x) < 0.25 * ci * ci {
+                    flag = 2
+                }
+                let x1 = cr + 1.0
+                if x1 * x1 + ci * ci < 0.0625 {
+                    flag = 2
+                }
+            }
+        }
+        var mag = zr * zr + zi * zi
+        if flag == 0 {
+            for it in 0..2048 {
+                if n >= mi {
+                    break
+                }
+                if d_on == 1 {
+                    let za = sqrt(mag)
+                    var zp = za
+                    for j in 0..6 {
+                        if j >= p - 2 {
+                            break
+                        }
+                        zp = zp * za
+                    }
+                    dz = pf * zp * dz + dz_add
+                }
+                var fr = zr * zr - zi * zi
+                var fi = (zr + zr) * zi
+                if k == 2 {
+                    let a = abs(zr)
+                    let b = abs(zi)
+                    fr = a * a - b * b
+                    fi = (a + a) * b
+                }
+                if k == 3 {
+                    fi = -2.0 * zr * zi
+                }
+                if k == 4 {
+                    var wr = zr
+                    var wi = zi
+                    for j in 0..7 {
+                        if j >= p - 1 {
+                            break
+                        }
+                        let t = wr * zr - wi * zi
+                        wi = wr * zi + wi * zr
+                        wr = t
+                    }
+                    fr = wr
+                    fi = wi
+                }
+                zr = fr + ar
+                zi = fi + ai
+                mag = zr * zr + zi * zi
+                n = n + 1
+                if mag < 256.0 {
+                    if t_on == 1 {
+                        let ax = abs(zr)
+                        let ay = abs(zi)
+                        let d = if ax < ay { ax } else { ay }
+                        if d < tr {
+                            tr = d
+                        }
+                    }
+                } else {
+                    flag = 1
+                    break
+                }
+            }
+        }
+        zr_s[i] = zr
+        zi_s[i] = zi
+        dz_s[i] = dz
+        tr_s[i] = tr
+        n_s[i] = n
+        fl_s[i] = flag
+        if int(last) == 1 {
+            let tv = (1.0 - log2(max(tr, 1e-30))) * 8.0
+            if flag != 1 {
+                out[i] = if t_on == 1 { -16777216 + low24(tv) } else { -16777216 }
+            } else {
+                var nu = f64(n)
+                if mag > 1.0 {
+                    nu = f64(n) + 1.0 - ln(0.5 * ln(mag)) / ln(pf)
+                }
+                let value = if t_on == 1 { low24(tv) } else { low24(nu) }
+                if d_on == 1 && dz > 0.0 && mag > 1.0 {
+                    let za = sqrt(mag)
+                    let dist = za * ln(za) / dz / step
+                    var code = int(float(round(log2(max(dist, 1e-9)) * 20.0 + 100.0)))
+                    if code < 1 {
+                        code = 1
+                    }
+                    if code > 254 {
+                        code = 254
+                    }
+                    let top = if code >= 128 { (code - 256) * 16777216 } else { code * 16777216 }
+                    out[i] = top + value
+                } else {
+                    out[i] = value
+                }
+            }
+        }
+    }
+}
+
+let newton = {
+    label: "newton"
+    view: input(@f64)
+    out: output(u32)
+    res: param(256, 1, 4096)
+    max_iter: param(500, 1, 1024)
+    power: param(3, 2, 8)
+    element: fn(i) {
+        let r = int(res)
+        let col = i % r
+        let row = i / r
+        let step = view[2]
+        var zr = view[0] + (f64(col) + 0.5) * step
+        var zi = view[1] + (f64(row) + 0.5) * step
+        let p = int(power)
+        let pf = f64(p)
+        let pm1 = f64(p - 1)
+        let mi = int(max_iter)
+        var n = 0
+        var d = f64(1.0)
+        var alive = 1
+        for it in 0..1024 {
+            if it >= mi {
+                break
+            }
+            // w = z^(p-1)
+            var wr = f64(1.0)
+            var wi = f64(0.0)
+            for j in 0..7 {
+                if j >= p - 1 {
+                    break
+                }
+                let t = wr * zr - wi * zi
+                wi = wr * zi + wi * zr
+                wr = t
+            }
+            let zpr = wr * zr - wi * zi
+            let zpi = wr * zi + wi * zr
+            let ar = pm1 * zpr + 1.0
+            let ai = pm1 * zpi
+            let br = pf * wr
+            let bi = pf * wi
+            let den = br * br + bi * bi
+            let nr = (ar * br + ai * bi) / den
+            let ni = (ai * br - ar * bi) / den
+            let dr = nr - zr
+            let di = ni - zi
+            let s = dr * dr + di * di
+            zr = nr
+            zi = ni
+            d = s
+            n = n + 1
+            // NaN (z hit 0) compares false: such a texel stays unconverged
+            if s < 1e-10 {
+                alive = 0
+                break
+            }
+        }
+        if alive == 1 {
+            out[i] = -16777216
+        } else {
+            let ang = atan2(zi, zr)
+            let kf = floor(ang / 6.283185307179586 * pf + 0.5)
+            var k = int(float(kf)) % p
+            if k < 0 {
+                k = k + p
+            }
+            var frac = f64(1.0)
+            if d > 0.0 {
+                var q = ln(d) / ln(f64(1e-10))
+                if q < 1.0 {
+                    q = f64(1.0)
+                }
+                frac = log2(q)
+                if frac > 1.0 {
+                    frac = f64(1.0)
+                }
+            }
+            var w = (f64(n) - frac) * 64.0
+            if w < 0.0 {
+                w = f64(0.0)
+            }
+            if w > 16777215.0 {
+                w = f64(16777215.0)
+            }
+            out[i] = (k + 1) * 16777216 + int(float(floor(w)))
+        }
+    }
+}
+
+{run: fn(s, p) {
+    let view = s.buffer(@f64, 5)
+    var res = 0
+    var out = nil
+    var zr = nil
+    var zi = nil
+    var dz = nil
+    var tr = nil
+    var steps = nil
+    var flags = nil
+    var drawn = 0
+    loop {
+        let m = s.wait_inbox({tile: nil, stop: nil})
+        if m.msgs.stop != nil {
+            return drawn
+        }
+        let t = m.msgs.tile
+        if t != nil {
+            s.value("took", m.rev)
+            if t.res != res {
+                if out != nil {
+                    s.free(out)
+                    s.free(zr)
+                    s.free(zi)
+                    s.free(dz)
+                    s.free(tr)
+                    s.free(steps)
+                    s.free(flags)
+                }
+                res = t.res
+                let cells = res * res
+                out = s.buffer(u32, cells)
+                zr = s.buffer(@f64, cells)
+                zi = s.buffer(@f64, cells)
+                dz = s.buffer(@f64, cells)
+                tr = s.buffer(@f64, cells)
+                steps = s.buffer(i32, cells)
+                flags = s.buffer(i32, cells)
+            }
+            let n = res * res
+            s.write(view, [t.x, t.y, t.step, t.julia[0], t.julia[1]])
+            if t.kind == 5 {
+                var mi = t.max_iter
+                if mi > 1024 {
+                    mi = 1024
+                }
+                s.run(newton, n, {res: res, max_iter: mi, power: t.power}, {view: view, out: out})
+            } else {
+                var mi = t.max_iter
+                if mi > 131072 {
+                    mi = 131072
+                }
+                var passes = 1
+                loop {
+                    if passes * 2048 >= mi {
+                        break
+                    }
+                    passes = passes + 1
+                }
+                let state = {view: view, out: out, zr_s: zr, zi_s: zi, dz_s: dz, tr_s: tr, n_s: steps, fl_s: flags}
+                for k in 0..passes {
+                    let last = if k == passes - 1 { 1 } else { 0 }
+                    s.run(escape, n, {res: res, max_iter: mi, kind: t.kind, power: t.power, de: t.de, trap: t.trap, pass: k, last: last}, state)
+                }
+            }
+            if s.publish(if t.slot == 1 { "tile1" } else { "tile0" }, out) {
+                drawn = drawn + 1
+            }
+        }
+    }
+}}

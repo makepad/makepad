@@ -60,12 +60,16 @@ pub mod fleet_report;
 pub mod fleet_routes;
 pub mod job;
 pub mod board;
-// Splash compute kernels on fleet CPUs: the wire and the client are
-// featureless; the node side is the `kernel` feature.
+// Long-running Splash compute programs (`makepad_compute_program`) on fleet nodes: the wire is
+// featureless, the client (the node's stream and the remote session) is the `program` feature,
+// the node side the `kernel` feature.
 pub mod kernel_wire;
+#[cfg(feature = "program")]
 pub mod kernel_client;
+#[cfg(feature = "program")]
+pub mod program_client;
 #[cfg(feature = "kernel")]
-pub mod kernel_compute;
+pub mod program_serve;
 pub mod gpu;
 pub mod gpu_yield;
 pub mod home;

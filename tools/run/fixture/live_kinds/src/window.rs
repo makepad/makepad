@@ -1,5 +1,7 @@
 //! The partial-landing probe also presents a real app frame, so a run overlay
-//! would cover it and `session view` can assert that the frame stays available.
+//! would cover it and `session view` can assert that the frame stays available. It hands its
+//! tick over a restart (restart_state): a restarted run prints "out restored <tick>" and goes on
+//! from it (restart_exec.py).
 use makepad_widgets::*;
 
 script_mod! {
@@ -35,9 +37,17 @@ impl AppMain for App {
         self::script_mod(vm)
     }
 
+    fn restart_state(&mut self, _cx: &mut Cx) -> Option<String> {
+        Some(self.tick.to_string())
+    }
+
+    fn restore_state(&mut self, _cx: &mut Cx, state: &str) {
+        self.tick = state.trim().parse().unwrap_or(0);
+        println!("out restored {}", self.tick);
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         if matches!(event, Event::Startup) {
-            if std::relax::restored_state().is_some() { println!("out restored"); }
             self.state = Some(crate::kinds::State::new());
             self.timer = cx.start_interval(0.02);
         }

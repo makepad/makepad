@@ -3090,7 +3090,14 @@ impl Lowerer {
             if unroll && !has_own_break(body) {
                 for k in a..z {
                     self.scoped(|l| {
-                        l.bind(var, Bind::Const(V::Lit(k as f64)));
+                        // Kernel counters stay i32 when unrolled, just as
+                        // in the rolled loop below. An untyped literal
+                        // would fold `k / 2` as f64 and change indexing.
+                        let value = match l.domain {
+                            Domain::Kernel => V::I(l.b.ci(k as i32)),
+                            Domain::Audio => V::Lit(k as f64),
+                        };
+                        l.bind(var, Bind::Const(value));
                         l.stmts(body)
                     })?;
                     if self.b.prog.vals.len() > MAX_IR_VALS {

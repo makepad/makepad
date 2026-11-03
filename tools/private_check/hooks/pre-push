@@ -1,0 +1,11 @@
+#!/bin/sh
+# The private-data check on everything a push sends: every unpushed commit's diff and message.
+# A repository's own pre-push policy calls this (`sh <this> < refs`) or is this file.
+scan="$(git rev-parse --path-format=absolute --git-common-dir)/../tools/private_check/scan.sh"
+[ -f "$scan" ] || { echo "pre-push: no private check at $scan" >&2; exit 1; }
+z=0000000000000000000000000000000000000000
+while read lref lsha rref rsha; do
+    [ "$lsha" = "$z" ] && continue
+    sh "$scan" commits "$lsha" --not --remotes >&2 || { echo "pre-push: REFUSED $lref -> $rref: private data (above)" >&2; exit 1; }
+done
+exit 0

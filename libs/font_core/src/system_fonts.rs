@@ -388,7 +388,7 @@ mod imp {
         });
         let index = if is_collection {
             let name = postscript_name?;
-            let data = makepad_shared_bytes::SharedBytes::from_file_mmap_or_read(&path).ok()?;
+            let data = makepad_shared_bytes::HostBuf::from_file_mmap_or_read(&path).ok()?;
             super::collection_index_of(data.as_slice(), name)?
         } else {
             0

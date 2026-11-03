@@ -232,10 +232,12 @@ impl Elements {
         })
     }
 
-    /// The separator written between elements put on one line.
-    fn inline_separator(&self, src: &str) -> String {
+    /// The separator written between elements put on one line, around the elements `joins`:
+    /// a list written with spaces (`[a b]`) keeps to them while none of those continues a value.
+    fn inline_separator(&self, src: &str, joins: &[&str]) -> String {
         match (self.separator(src), self.kind) {
             (Some(c), _) => format!("{c} "),
+            (None, ContainerKind::List) if self.spans.len() >= 2 && !joins.iter().any(|t| continues_a_value(t)) => " ".to_string(),
             (None, ContainerKind::List) => ", ".to_string(),
             (None, _) => " ".to_string(),
         }
@@ -340,7 +342,7 @@ fn insertion(src: &str, el: &Elements, index: usize, text: &str, after_header: b
                 edits.push(Replace::new(prev.end..prev.end, ","));
             }
         }
-        edits.push(Replace::new(span.start..span.start, format!("{text}{}", el.inline_separator(src))));
+        edits.push(Replace::new(span.start..span.start, format!("{text}{}", el.inline_separator(src, &[text, &src[span.clone()]]))));
         return edits;
     }
     let last = &el.spans[n - 1];
@@ -359,7 +361,7 @@ fn insertion(src: &str, el: &Elements, index: usize, text: &str, after_header: b
         edits.push(Replace::new(at..at, format!("\n{indent}{text}{tail_sep}")));
         return edits;
     }
-    vec![Replace::new(last.end..last.end, format!("{}{text}", el.inline_separator(src)))]
+    vec![Replace::new(last.end..last.end, format!("{}{text}", el.inline_separator(src, &[text])))]
 }
 
 /// Would `text`, written after a value inside brackets, continue that value
@@ -515,7 +517,7 @@ pub fn duplicate_element_edits(src: &str, node: &Node, index: usize, transform: 
             edits.push(Replace::new(span.end..span.end, format!("\n{indent}{copy}{sep}")));
         }
     } else {
-        edits.push(Replace::new(span.end..span.end, format!("{}{copy}", el.inline_separator(src))));
+        edits.push(Replace::new(span.end..span.end, format!("{}{copy}", el.inline_separator(src, &[copy.as_str()]))));
     }
     Ok(edits)
 }

@@ -17,13 +17,20 @@ impl Hold {
 }
 
 /// The argv a lease run executes: the scope (collected even on failure), nice and pinning wrappers, then `argv`.
-pub fn lease_argv(argv: Vec<String>, unit: Option<&str>, cpus: &str, share: Option<crate::lease::Cost>) -> Vec<String> {
+/// `share`: a shared lease's cost, whose cores become its scope's CPU weight (100 per core): its
+/// share of the box under contention, the whole box when idle. Never a CPU quota: a quota of the
+/// lease's cores throttled a live Fab (measured at one core) to one CPU, and its pools and JIT
+/// sized themselves to that one CPU.
+/// `ram_max_gb`: the RAM the lease asked for itself (`--ram-gb`), the only hard memory cap; a
+/// measured ask only schedules, never kills a run that needs more than it measured.
+pub fn lease_argv(argv: Vec<String>, unit: Option<&str>, cpus: &str, share: Option<crate::lease::Cost>, ram_max_gb: Option<f64>) -> Vec<String> {
     let mut full: Vec<String> = Vec::new();
     if let Some(u) = unit {
         full.extend(["systemd-run", "--user", "--scope", "--collect", "--quiet"].map(String::from));
         full.push(format!("--unit={u}"));
         if let Some(cost) = share.filter(|_| cfg!(target_os = "linux")) {
-            full.extend(["-p".into(), format!("CPUQuota={:.2}%", cost.cores * 100.0), "-p".into(), format!("MemoryMax={}G", cost.ram_gb * 1.5)]);
+            full.extend(["-p".into(), format!("CPUWeight={}", (cost.cores * 100.0).round().clamp(1.0, 10_000.0) as u32)]);
+            if let Some(gb) = ram_max_gb { full.extend(["-p".into(), format!("MemoryMax={}G", gb * 1.5)]); }
         }
         full.push("--".into());
     }
@@ -141,7 +148,7 @@ pub fn wait_usage(child: &mut Child) -> std::io::Result<(ExitStatus, Option<f64>
 }
 
 /// Starts a lease run in its own session and process group (the group is what end signals).
-pub fn lease_spawn(cmd: &mut Command, _share: Option<crate::lease::Cost>) -> std::io::Result<(Child, Hold)> {
+pub fn lease_spawn(cmd: &mut Command) -> std::io::Result<(Child, Hold)> {
     use std::os::unix::process::CommandExt;
     extern "C" {
         fn setsid() -> i32;
@@ -398,6 +405,9 @@ pub fn raise_fd_limit() -> u64 {
         fn getrlimit(resource: i32, rlim: *mut RLimit) -> i32;
         fn setrlimit(resource: i32, rlim: *const RLimit) -> i32;
     }
+    #[cfg(target_os = "linux")]
+    const RLIMIT_NOFILE: i32 = 7;
+    #[cfg(not(target_os = "linux"))]
     const RLIMIT_NOFILE: i32 = 8;
     let mut r = RLimit { cur: 0, max: 0 };
     if unsafe { getrlimit(RLIMIT_NOFILE, &mut r) } != 0 {
@@ -409,9 +419,18 @@ pub fn raise_fd_limit() -> u64 {
     let want = r.max;
     if want > r.cur {
         let n = RLimit { cur: want, max: r.max };
-        if unsafe { setrlimit(RLIMIT_NOFILE, &n) } == 0 {
-            return want;
-        }
+        unsafe { setrlimit(RLIMIT_NOFILE, &n) };
     }
+    if unsafe { getrlimit(RLIMIT_NOFILE, &mut r) } != 0 { return 0; }
     r.cur
+}
+
+#[cfg(all(test, target_os = "linux"))]
+#[test]
+fn safety_raised_limit_is_the_open_file_limit() {
+    let actual = raise_fd_limit();
+    let limits = std::fs::read_to_string("/proc/self/limits").unwrap();
+    let soft = limits.lines().find_map(|l| l.strip_prefix("Max open files")).unwrap()
+        .split_whitespace().next().unwrap().parse::<u64>().unwrap();
+    assert_eq!(actual, soft);
 }

@@ -934,7 +934,7 @@ impl LocalShadows {
                 rigid.transform = Mat4f::identity();
                 rigid.draw_vars.geometry_id = Some(quad);
                 if rigid.draw_vars.can_instance() {
-                    cx.add_instance(&rigid.draw_vars);
+                    cx.add_instance(&mut rigid.draw_vars);
                 }
             }
             rigid.face_rx = face.rx;
@@ -955,7 +955,7 @@ impl LocalShadows {
                 draw.transform = m.transform;
                 draw.draw_vars.geometry_id = Some(m.geometry);
                 if draw.draw_vars.can_instance() {
-                    cx.add_instance(&draw.draw_vars);
+                    cx.add_instance(&mut draw.draw_vars);
                     self.stats.caster_draws += 1;
                 }
             }
@@ -975,7 +975,7 @@ impl LocalShadows {
                     skinned.base.draw_vars.set_texture(0, &skin.joint_tex);
                     skinned.base.draw_vars.geometry_id = Some(m.geometry);
                     if skinned.base.draw_vars.can_instance() {
-                        cx.add_instance(&skinned.base.draw_vars);
+                        cx.add_instance(&mut skinned.base.draw_vars);
                         self.stats.caster_draws += 1;
                     }
                 } else {
@@ -984,7 +984,7 @@ impl LocalShadows {
                     draw.transform = m.transform;
                     draw.draw_vars.geometry_id = Some(m.geometry);
                     if draw.draw_vars.can_instance() {
-                        cx.add_instance(&draw.draw_vars);
+                        cx.add_instance(&mut draw.draw_vars);
                         self.stats.caster_draws += 1;
                     }
                 }

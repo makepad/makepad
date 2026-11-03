@@ -526,6 +526,9 @@ struct State {
     /// A large block handed out from the warm large list: its pages hold old bytes, so
     /// `alloc_zeroed` writes the zeros the pool's decommitted runs would have given.
     dirty: bool,
+    /// The live blocks this chunk had when, detached, it last gave its whole free granules back
+    /// (`trim_detached`; usize::MAX: not since it was last handed back).
+    trim_live: usize,
 }
 
 // A buddy free-chunk list supports both single chunks and contiguous large mappings.
@@ -1014,6 +1017,7 @@ impl Arena {
         s.bump = o.bump.load(Ordering::Relaxed);
         h.live.store(o.live.load(Ordering::Relaxed), Ordering::Relaxed);
         s.attached = false;
+        s.trim_live = usize::MAX;
         if o.live.load(Ordering::Relaxed) == 0 {
             self.release_empty(index, s);
         } else if s.free != 0 || s.bump + s.stride <= CHUNK {
@@ -1086,6 +1090,22 @@ impl Arena {
         let chunk = self.base.load(Ordering::Relaxed) + index * CHUNK;
         if let Some(head) = self.drop_free_granules(index, chunk, o.stride, bump, o.free) {
             o.free = head;
+        }
+    }
+    /// A detached chunk `index` of a program heap (its lock held, `live` blocks) that a free left
+    /// sparse, its live blocks filling under a quarter of what it carved, gives its whole free
+    /// granules back at once, and again each time its live blocks halve: a chunk emptied by a
+    /// burst of frees is walked a few times, not at every free. They went back only on a trim,
+    /// which a program at rest gets only when something compiles (Fab kept them through hours of
+    /// edits).
+    unsafe fn trim_detached(&self, index: usize, s: &mut State, live: usize) {
+        if s.stride == 0 || s.committed != CHUNK || s.bump < OWNED_TRIM_MIN || live * s.stride * 4 >= s.bump || live * 2 > s.trim_live {
+            return;
+        }
+        s.trim_live = live;
+        let chunk = self.base.load(Ordering::Relaxed) + index * CHUNK;
+        if let Some(head) = self.drop_free_granules(index, chunk, s.stride, s.bump, s.free) {
+            s.free = head;
         }
     }
     /// The monitor (`densify`, chunk `index` attached, its lock held) settles a current chunk whose
@@ -1302,16 +1322,18 @@ impl Arena {
             os::huge_pages(address, len, false);
         }
     }
-    /// Domain heaps (Linux with transparent huge pages): a program heap's chunks are reserved
-    /// without huge pages, and only dense ones get them. A thread keeps a current chunk per size
-    /// class, so a program with 37 threads held 1212 chunks with 166 MB carved (Scope); with huge
-    /// pages everywhere, khugepaged turned every one of them into 2 MB resident (2-2.4 GB for 100
-    /// MB in use), while huge pages are worth having on dense heap data (Sandbox race UI-thread
-    /// CPU). Each pass marks for huge pages, and collapses at once: a thread's current chunk carved
-    /// at least half way, another small chunk at least half full of live blocks, a large block of a
-    /// whole 2 MB or more. A marked chunk no thread allocates in that fell under 1/8 live loses its
-    /// mark (the trim's page release then shrinks it). At most `budget` collapses per pass.
-    /// Returns the collapses done.
+    /// Domain heaps, once a second on every platform: the next trim epoch starts (each thread
+    /// settles its current chunks again, `owned_tick`) and the current chunks of threads blocked in
+    /// a wait are settled for them (`settle_for_waiting_owner`). With transparent huge pages
+    /// (Linux), a program heap's chunks are reserved without huge pages, and only dense ones get
+    /// them. A thread keeps a current chunk per size class, so a program with 37 threads held 1212
+    /// chunks with 166 MB carved (Scope); with huge pages everywhere, khugepaged turned every one of
+    /// them into 2 MB resident (2-2.4 GB for 100 MB in use), while huge pages are worth having on
+    /// dense heap data (Sandbox race UI-thread CPU). Each pass marks for huge pages, and collapses
+    /// at once: a thread's current chunk carved at least half way, another small chunk at least
+    /// half full of live blocks, a large block of a whole 2 MB or more. A marked chunk no thread
+    /// allocates in that fell under 1/8 live loses its mark (the trim's page release then shrinks
+    /// it). At most `budget` collapses per pass. Returns the collapses done.
     pub fn densify(&self, budget: usize) -> usize {
         let base = self.base.load(Ordering::Relaxed);
         if !self.dynamic || base == 0 {
@@ -1372,7 +1394,8 @@ impl Arena {
     /// unlisted (full)], columns [chunks, touched bytes, live slot bytes, resident bytes]; then
     /// [large runs, committed, resident]; then [sparse chunks (live slots under 1/8 of touched),
     /// their resident bytes]; then [chunks committed before the last `mark_old`, their live slot
-    /// bytes, their resident bytes] (`memory`'s arena states).
+    /// bytes, their resident bytes]; then the free granules and the requested bytes of attached
+    /// chunks; then the requested bytes of the large blocks (`memory`'s arena states).
     /// Does block `p` (of this arena) lie in a chunk marked old (`mark_old`)?
     pub fn is_old(&self, p: *const u8) -> bool {
         let base = self.base.load(Ordering::Relaxed);
@@ -1398,8 +1421,8 @@ impl Arena {
             HAND_BACK.fetch_add(1, Ordering::Relaxed);
         }
     }
-    pub fn states(&self) -> [usize; 28] {
-        let mut c = [0usize; 28];
+    pub fn states(&self) -> [usize; 29] {
+        let mut c = [0usize; 29];
         let base = self.base.load(Ordering::Relaxed);
         if base == 0 {
             return c;
@@ -1414,6 +1437,10 @@ impl Arena {
                 c[16] += 1;
                 c[17] += s.committed;
                 c[18] += res;
+                // the requested bytes of the live large block (a warm run: none)
+                if !s.released {
+                    c[28] += h.account.load(Ordering::Relaxed).wrapping_sub(h.remote_bytes.load(Ordering::Relaxed)) as isize as usize;
+                }
                 continue;
             }
             let (row, bump, live) = if s.released {
@@ -1930,8 +1957,16 @@ impl Arena {
             }
             { self.alloc_failed(5, l); return null_mut(); }
         }
-        // a warm large run keeps what it had committed beyond this block (resize_in_place trims it)
-        let committed = committed.max(kept);
+        // A warm large run gives back what it had committed beyond this block. Kept, it stayed
+        // with a block that is never resized (an `Arc<[T]>` made from a Vec) for the block's whole
+        // life: Fab's program heap held 5.1 GB committed for 4.3 GB of large blocks.
+        let committed = if kept > committed && os::decommit((address + committed) as *mut u8, kept - committed, COMPILER) {
+            self.committed.fetch_sub(kept - committed, Ordering::Relaxed);
+            self.chunks.fetch_sub((kept + CHUNK - 1) / CHUNK - (committed + CHUNK - 1) / CHUNK, Ordering::Relaxed);
+            committed
+        } else {
+            committed.max(kept)
+        };
         let h = &self.headers[index];
         let generation;
         {
@@ -1950,6 +1985,7 @@ impl Arena {
                 order,
                 bytes: 0,
                 dirty: warm_large.is_some(),
+                trim_live: usize::MAX,
             };
             h.live.store(1, Ordering::Relaxed);
             h.old.store(false, Ordering::Relaxed);
@@ -2149,7 +2185,8 @@ impl Arena {
         } else {
             s.bytes -= l.size();
         }
-        if h.live.fetch_sub(1, Ordering::Relaxed) != 1 {
+        let live = h.live.fetch_sub(1, Ordering::Relaxed) - 1;
+        if live != 0 {
             *(p as *mut usize) = s.free;
             s.free = p as usize;
             if COMPILER
@@ -2158,6 +2195,9 @@ impl Arena {
                 && !h.in_part.load(Ordering::Relaxed)
             {
                 self.partial_push(index, s.class);
+            }
+            if COMPILER && self.dynamic && !s.attached {
+                self.trim_detached(index, &mut s, live);
             }
             return;
         }
@@ -2668,7 +2708,7 @@ pub fn detail() -> (usize, usize, usize, usize) {
 pub fn census() -> [usize; 11] {
     DEFAULT.census()
 }
-pub fn states() -> [usize; 28] {
+pub fn states() -> [usize; 29] {
     DEFAULT.states()
 }
 pub fn mark_old() {

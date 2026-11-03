@@ -4,6 +4,7 @@ pub mod clone;
 mod bounded_read;
 mod clock;
 pub mod commit;
+pub mod config;
 pub mod diff;
 pub mod error;
 pub mod http_sync;
@@ -13,6 +14,7 @@ pub mod merge;
 pub mod object;
 pub mod oid;
 pub mod pack;
+pub mod reach;
 pub mod refs;
 pub mod repo;
 mod sha1;
@@ -41,6 +43,9 @@ pub use index::{Index, IndexEntry};
 pub use merge::{find_merge_base, merge3_text, merge_trees, MergeResult, TreeMergeEntry};
 pub use object::{Object, ObjectKind};
 pub use oid::ObjectId;
+/// Incremental SHA-1 for streaming canonical object content.
+pub use sha1::Sha1;
+pub use reach::{is_ancestor, Range, Reach};
 pub use refs::{Ref, RefTarget};
 pub use repo::{repository_paths, resolve_commondir, resolve_gitfile, FirstParents, Repository, RepositoryPaths};
 pub use tree::{Tree, TreeEntry};
@@ -49,7 +54,7 @@ pub use worktree::{
     compute_status_for_path_worktree_only_with_options, compute_status_with_options,
     compute_status_worktree_only, compute_status_worktree_only_with_options, flatten_tree,
     hash_file_blob, index_entry_from_metadata, stage_file, unstage_file, write_worktree_file,
-    FileStatus, Status, StatusEntry, StatusOptions,
+    FileStatus, PathStatus, Status, StatusEntry, StatusOptions,
 };
 pub use worktrees::{LinkedWorktree, WorktreeBranch};
 

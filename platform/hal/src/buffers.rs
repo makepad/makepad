@@ -476,8 +476,72 @@ fn merge_closest(rects: &mut [[f32; 4]; 9]) {
     rects[best.3] = rects[8];
 }
 
+/// The bytes of a writer's upload commands and kept runs: copied in at the call (or moved in
+/// whole, `*_owned`) and held until [`CmdWriter::clear`], so the caller's memory may change or go
+/// away before the submit. A chunk never grows past the capacity it was made with, so a run in it
+/// never moves; runs start 16-byte aligned.
+#[derive(Default)]
+struct Uploads {
+    chunks: Vec<Vec<u8>>,
+    /// the chunk being filled
+    at: usize,
+    /// payloads moved in whole, dropped at `clear`
+    owned: Vec<Vec<u8>>,
+}
+
+/// The smallest chunk: the first holds a frame's small uploads (glyph rects, uniforms) for good.
+const UPLOAD_CHUNK: usize = 256 << 10;
+
+impl Uploads {
+    fn keep(&mut self, bytes: &[u8]) -> Slice {
+        if bytes.is_empty() {
+            return Slice::EMPTY;
+        }
+        loop {
+            if self.at == self.chunks.len() {
+                // geometric: a turn's uploads take a few chunks, however many there are
+                let used: usize = self.chunks.iter().map(Vec::len).sum();
+                self.chunks.push(Vec::with_capacity((bytes.len() + 15).max(UPLOAD_CHUNK).max(used)));
+            }
+            let chunk = &mut self.chunks[self.at];
+            let base = chunk.as_ptr() as usize;
+            let start = (base + chunk.len()).next_multiple_of(16) - base;
+            if start + bytes.len() <= chunk.capacity() {
+                chunk.resize(start, 0);
+                chunk.extend_from_slice(bytes);
+                return Slice { ptr: chunk[start..].as_ptr(), len: bytes.len() };
+            }
+            self.at += 1;
+        }
+    }
+
+    fn own(&mut self, bytes: Vec<u8>) -> Slice {
+        // a Vec's heap block does not move with the Vec
+        let run = Slice { ptr: bytes.as_ptr(), len: bytes.len() };
+        self.owned.push(bytes);
+        run
+    }
+
+    /// After the submit. A chunk this turn filled stays for the next, as does the first small
+    /// one; a chunk the turn did not touch is freed, so a one-off upload does not stay resident.
+    fn clear(&mut self) {
+        let mut first = true;
+        self.chunks.retain_mut(|chunk| {
+            let keep = !chunk.is_empty() || (first && chunk.capacity() <= UPLOAD_CHUNK);
+            first = false;
+            chunk.clear();
+            keep
+        });
+        self.at = 0;
+        self.owned.clear();
+    }
+}
+
 /// Cx's builder of one loop turn's CmdBuf. Every vector keeps its capacity across [`clear`], so a
 /// steady-state frame allocates nothing.
+///
+/// Nothing the writer encodes points at the caller's memory unless the caller built that
+/// [`Slice`] itself (unsafe [`Slice::of`]): upload bytes are copied in at the call.
 ///
 /// [`clear`]: CmdWriter::clear
 #[derive(Default)]
@@ -485,6 +549,7 @@ pub struct CmdWriter {
     session: u32,
     cmds: Vec<Cmd>,
     arena: Vec<u8>,
+    uploads: Uploads,
     frames: Vec<FramePacket>,
     passes: Vec<Pass>,
     draws: Vec<Draw>,
@@ -534,6 +599,44 @@ impl CmdWriter {
 
     pub fn arena(&self) -> &[u8] {
         &self.arena
+    }
+
+    /// Copies `v` into the writer's upload memory, for a [`Pass`] / [`Draw`] / [`Inst`] field:
+    /// valid until [`CmdWriter::clear`], whatever happens to `v`.
+    pub fn keep<T: Scalar>(&mut self, v: &[T]) -> Slice {
+        // SAFETY: a `Scalar` has no padding: every byte of `v` is initialized
+        let bytes = unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, std::mem::size_of_val(v)) };
+        self.uploads.keep(bytes)
+    }
+
+    /// [`CmdWriter::buffer_update`] with bytes the writer takes: they move in without a copy.
+    pub fn buffer_update_owned(&mut self, id: Id, off: u64, bytes: Vec<u8>) {
+        let bytes = self.uploads.own(bytes);
+        self.push(Cmd::buffer_update(id, off, bytes));
+    }
+
+    /// [`CmdWriter::texture_update`] with bytes the writer takes: they move in without a copy.
+    pub fn texture_update_owned(&mut self, id: Id, mip: u16, rect: [u32; 4], layer: u32, mut bytes: Vec<u8>) {
+        // the run's length is one word (`k::slice32`)
+        bytes.truncate(u32::MAX as usize);
+        let bytes = self.uploads.own(bytes);
+        self.push(Cmd::texture_update(id, mip, rect, layer, bytes));
+    }
+
+    /// [`CmdWriter::buffer_update`] without the copy: the command points at `bytes`.
+    ///
+    /// # Safety
+    /// `bytes` must stay alive and unchanged until this batch has been submitted.
+    pub unsafe fn buffer_update_borrowed(&mut self, id: Id, off: u64, bytes: &[u8]) {
+        self.push(Cmd::buffer_update(id, off, Slice::from_bytes(bytes)));
+    }
+
+    /// [`CmdWriter::texture_update`] without the copy: the command points at `bytes`.
+    ///
+    /// # Safety
+    /// As [`CmdWriter::buffer_update_borrowed`].
+    pub unsafe fn texture_update_borrowed(&mut self, id: Id, mip: u16, rect: [u32; 4], layer: u32, bytes: &[u8]) {
+        self.push(Cmd::texture_update(id, mip, rect, layer, Slice::from_bytes(&bytes[..bytes.len().min(u32::MAX as usize)])));
     }
 
     /// Copies a typed record array into the arena.
@@ -756,14 +859,17 @@ impl CmdWriter {
     /// `hal_submit` and [`clear`](CmdWriter::clear).
     pub fn buf(&self) -> CmdBuf {
         assert!(self.open_frame.is_none(), "CmdWriter: buf inside a frame");
-        CmdBuf {
-            session: self.session,
-            cmds: Slice::of(&self.cmds),
-            arena: Slice::from_bytes(&self.arena),
-            frames: Slice::of(&self.frames),
-            passes: Slice::of(&self.passes),
-            draws: Slice::of(&self.draws),
-            layers: Slice::of(&self.layers),
+        // SAFETY: the writer's own memory, valid until it is next changed (the contract above)
+        unsafe {
+            CmdBuf {
+                session: self.session,
+                cmds: Slice::of(&self.cmds),
+                arena: Slice::from_bytes(&self.arena),
+                frames: Slice::of(&self.frames),
+                passes: Slice::of(&self.passes),
+                draws: Slice::of(&self.draws),
+                layers: Slice::of(&self.layers),
+            }
         }
     }
 
@@ -771,6 +877,7 @@ impl CmdWriter {
     pub fn clear(&mut self) {
         self.cmds.clear();
         self.arena.clear();
+        self.uploads.clear();
         self.frames.clear();
         self.passes.clear();
         self.draws.clear();
@@ -780,10 +887,11 @@ impl CmdWriter {
         self.open_frame = None;
     }
 
-    /// Capacities (cmds, arena bytes, frames, passes, draws, layers): tests show a steady
-    /// state does not grow.
-    pub fn capacities(&self) -> [usize; 6] {
-        [self.cmds.capacity(), self.arena.capacity(), self.frames.capacity(), self.passes.capacity(), self.draws.capacity(), self.layers.capacity()]
+    /// Capacities (cmds, arena bytes, frames, passes, draws, layers, upload bytes): tests show a
+    /// steady state does not grow.
+    pub fn capacities(&self) -> [usize; 7] {
+        let uploads = self.uploads.chunks.iter().map(Vec::capacity).sum();
+        [self.cmds.capacity(), self.arena.capacity(), self.frames.capacity(), self.passes.capacity(), self.draws.capacity(), self.layers.capacity(), uploads]
     }
 }
 
@@ -792,6 +900,9 @@ impl ArenaSink for CmdWriter {
         let off = self.arena.len();
         self.arena.extend_from_slice(bytes);
         self.range_from(off)
+    }
+    fn keep_bytes(&mut self, bytes: &[u8]) -> Slice {
+        self.uploads.keep(bytes)
     }
 }
 
@@ -954,6 +1065,9 @@ impl ArenaSink for EventQueue {
         let off = self.arena.len();
         self.arena.extend_from_slice(bytes);
         Range { off: off as u32, len: bytes.len() as u32 }
+    }
+    fn keep_bytes(&mut self, _bytes: &[u8]) -> Slice {
+        unreachable!("the event table has no upload field (asserted by hal_events!)")
     }
 }
 

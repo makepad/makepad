@@ -335,6 +335,18 @@ fn an_insert_before_a_value_that_continues_the_previous_one_gets_a_comma_in_any_
 }
 
 #[test]
+fn a_list_written_with_spaces_takes_its_new_elements_with_spaces() {
+    let s = sx("let xs = [a b]\nlet ys = [a]\n");
+    let out = s.insert_element(&Loc(vec![0, 0]), At::End, "c").unwrap();
+    assert_eq!(out.syntax.source(), "let xs = [a b c]\nlet ys = [a]\n");
+    let out = s.insert_element(&Loc(vec![0, 0]), At::Before(1), "c").unwrap();
+    assert_eq!(out.syntax.source(), "let xs = [a c b]\nlet ys = [a]\n");
+    // one element shows no style: a comma
+    let out = s.insert_element(&Loc(vec![1, 0]), At::End, "c").unwrap();
+    assert_eq!(out.syntax.source(), "let xs = [a b]\nlet ys = [a, c]\n");
+}
+
+#[test]
 fn a_for_block_ends_its_statement() {
     let s = sx("let f = fn() {\n    for x in [1] {}\n    -1.0\n}\n");
     let body = s.node(&Loc(vec![0, 0, 0])).unwrap();

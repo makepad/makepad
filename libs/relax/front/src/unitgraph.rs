@@ -128,8 +128,8 @@ pub fn load(g: &Units, check_all_bins: bool) -> Result<Graph, String> {
     let units = &g.units;
     let roots = &g.roots;
     let mut crates: Vec<CrateUnit> = Vec::new();
-    // per crate: its normalized source path (host and target copies of a crate are one crate)
-    let mut crate_paths: Vec<String> = Vec::new();
+    // Host and target copies share a crate; test and build modes do not.
+    let mut crate_paths: Vec<(String, bool)> = Vec::new();
     let mut pkg = Vec::new();
     let n_units = units.len();
     let mut map: Vec<usize> = vec![usize::MAX; n_units]; // unit index -> crate index or usize::MAX
@@ -190,8 +190,7 @@ pub fn load(g: &Units, check_all_bins: bool) -> Result<Graph, String> {
         if !(lib || pm || is_root_bin) {
             continue;
         }
-        // host and target copies of a crate parse the same files: one crate
-        let norm = crate::vfs::normalize_path(&src_path);
+        let norm = (crate::vfs::normalize_path(&src_path), mode == "test");
         if let Some(i) = crate_paths.iter().position(|p| *p == norm) {
             map[ui] = i;
             if u.host {
@@ -218,7 +217,7 @@ pub fn load(g: &Units, check_all_bins: bool) -> Result<Graph, String> {
         if mode == "test" {
             test_crates.push(crates.len());
         }
-        crates.push(CrateUnit { name: tname, src_path, edition, features, deps: udeps, host: None, proc_macro: pm, bin, build_script: false, version: ver.clone(), registry: !u.pkg_id.starts_with("path+") });
+        crates.push(CrateUnit { name: tname, src_path, edition, features, deps: udeps, host: None, proc_macro: pm, bin, harness: u.harness, build_script: false, version: ver.clone(), registry: !u.pkg_id.starts_with("path+") });
         crate_paths.push(norm);
         pkg.push((pkg_dir, pname, ver));
     }
@@ -289,7 +288,7 @@ pub fn load(g: &Units, check_all_bins: bool) -> Result<Graph, String> {
         env[ci].push(("CARGO_CRATE_NAME".to_string(), c.name.clone()));
     }
     // cargo's integration-test environment: CARGO_TARGET_TMPDIR and CARGO_BIN_EXE_<bin>
-    let integration_tests: Vec<usize> = test_crates.iter().copied().filter(|&ci| crates[ci].bin && units.iter().any(|u| crate::vfs::normalize_path(&u.src_path) == crate_paths[ci] && u.kind.iter().any(|k| k == "test"))).collect();
+    let integration_tests: Vec<usize> = test_crates.iter().copied().filter(|&ci| crates[ci].bin && units.iter().any(|u| crate::vfs::normalize_path(&u.src_path) == crate_paths[ci].0 && u.kind.iter().any(|k| k == "test"))).collect();
     if !integration_tests.is_empty() {
         let target_dir = crate::dirs::relax_dir();
         let tmpdir = target_dir.join("tmp");

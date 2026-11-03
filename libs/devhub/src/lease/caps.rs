@@ -1,7 +1,8 @@
 //! This machine's capabilities and health: hardware from the OS (Linux `/proc` + `/sys` +
 //! `nvidia-smi`; macOS `sysctl` + `statfs`), policy from `~/.makepad/devhub/lease.conf`.
 //!
-//! `lease.conf` is `key = value` lines: `role = pool|hot|suite|bench|user-wm|device`, `slots.<kind> = 0|1` (one write lease and one CI lease, except timed),
+//! `lease.conf` is `key = value` lines: `role = pool|hot|suite|bench|user-wm|device` (`bench`: the
+//! boxes timed leases go to), `slots.<kind> = 0|1` (one write lease per kind; CI only with `slots.ci`),
 //! `disk_floor_gb`, `disk_warn_gb`, `timed = on|off`, `spec = <text>`, `work = <dir>` (default
 //! `~/devhub`), CPU pinning for leases (`cpus.shared = 8-15,24-31`, `cpus.timed = 0-7,16-23`) and
 //! `user_idle_min` (default 3: minutes without a person's input before a node with our WM
@@ -90,9 +91,10 @@ impl LeaseConf {
         c
     }
 
-    /// One slot per kind by default; CI stays off user boxes. `inspect` is not counted.
+    /// One slot per kind by default; CI only where `slots.ci` opts in, never on a user's box.
+    /// `inspect` is not counted.
     pub fn slots(&self, gpus: u32) -> Vec<(Kind, u32)> {
-        let defaults = [(Kind::Build, 1), (Kind::Test, 1), (Kind::Screen, 1), (Kind::Long, 1), (Kind::Gate, 1), (Kind::Gpu, gpus.min(1)), (Kind::Timed, self.timed as u32), (Kind::Ci, (!self.role.users()) as u32)];
+        let defaults = [(Kind::Build, 1), (Kind::Test, 1), (Kind::Screen, 1), (Kind::Long, 1), (Kind::Gate, 1), (Kind::Gpu, gpus.min(1)), (Kind::Timed, self.timed as u32), (Kind::Ci, 0)];
         defaults.iter().map(|(k, d)| (*k, if *k == Kind::Ci && self.role.users() { 0 } else { self.slots.iter().find(|(x, _)| x == k).map_or(*d, |(_, n)| *n) })).collect()
     }
 }
@@ -268,7 +270,7 @@ pub fn hub_rev() -> &'static str {
     static REV: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     REV.get_or_init(|| {
         let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        // a tree a deploy script or sync wrote with no `.git` of its own (103) names its commit in
+        // a tree a deploy script or sync wrote with no `.git` of its own (a node's) names its commit in
         // FLEET-REVISION.txt
         head_sha(&repo).or_else(|| {
             let t = std::fs::read_to_string(repo.join("FLEET-REVISION.txt")).ok()?;
@@ -711,7 +713,7 @@ mod tests {
         let d = LeaseConf::parse("", home);
         assert_eq!((d.role, d.disk_floor_gb, d.disk_warn_gb, d.timed), (Role::Pool, 25.0, 50.0, true));
         assert_eq!(d.work, PathBuf::from("/home/me/devhub"));
-        assert_eq!(d.slots(2), vec![(Kind::Build, 1), (Kind::Test, 1), (Kind::Screen, 1), (Kind::Long, 1), (Kind::Gate, 1), (Kind::Gpu, 1), (Kind::Timed, 1), (Kind::Ci, 1)]);
+        assert_eq!(d.slots(2), vec![(Kind::Build, 1), (Kind::Test, 1), (Kind::Screen, 1), (Kind::Long, 1), (Kind::Gate, 1), (Kind::Gpu, 1), (Kind::Timed, 1), (Kind::Ci, 0)]);
         let c = LeaseConf::parse("# the 166 conf\nrole = user-wm\nslots.build = 1\nslots.nope = 4\nslots.test=6\ndisk_floor_gb = 40\ntimed = off\nspec = CPU-A+GPU-A  # comment\nwork = ~/scratch/dh\ncpus.shared = 8-15,24-31\ncpus.timed = rm -rf\n", home);
         assert_eq!(c.role, Role::UserWm);
         assert_eq!(c.disk_floor_gb, 40.0);

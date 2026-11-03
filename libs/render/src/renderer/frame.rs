@@ -831,7 +831,7 @@ impl Renderer {
                 }
                 draws.terrain.draw_vars.geometry_id = Some(tile.geometry.geometry_id());
                 if draws.terrain.draw_vars.can_instance() {
-                    let new_area = cx.add_instance(&draws.terrain.draw_vars);
+                    let new_area = cx.add_instance(&mut draws.terrain.draw_vars);
                     draws.terrain.draw_vars.area =
                         cx.update_area_refs(draws.terrain.draw_vars.area, new_area);
                 }
@@ -867,7 +867,7 @@ impl Renderer {
                 }
                 draws.terrain.draw_vars.geometry_id = Some(tile.geometry.geometry_id());
                 if draws.terrain.draw_vars.can_instance() {
-                    let new_area = cx.add_instance(&draws.terrain.draw_vars);
+                    let new_area = cx.add_instance(&mut draws.terrain.draw_vars);
                     draws.terrain.draw_vars.area =
                         cx.update_area_refs(draws.terrain.draw_vars.area, new_area);
                 }
@@ -1042,7 +1042,7 @@ impl Renderer {
             let geometry_id = self.ensure_shape_geometry(cx.cx, shape);
             draws.cube.cube.draw_vars.geometry_id = Some(geometry_id);
             draws.cube.cube.many_instances =
-                cx.begin_many_instances(&draws.cube.cube.draw_vars);
+                cx.begin_many_instances(&mut draws.cube.cube.draw_vars);
             if has_static {
                 if let Some(mi) = &mut draws.cube.cube.many_instances {
                     for (chunk, visible) in self.static_chunks.iter().zip(&self.chunk_visible) {
@@ -1694,7 +1694,7 @@ impl Renderer {
             let geometry_id = self.ensure_shape_geometry(cx.cx, shape);
             draws.alpha.cube.cube.draw_vars.geometry_id = Some(geometry_id);
             draws.alpha.cube.cube.many_instances =
-                cx.begin_many_instances(&draws.alpha.cube.cube.draw_vars);
+                cx.begin_many_instances(&mut draws.alpha.cube.cube.draw_vars);
             if has_static {
                 if let Some(mi) = &mut draws.alpha.cube.cube.many_instances {
                     for (chunk, visible) in self.static_chunks.iter().zip(&self.chunk_visible) {

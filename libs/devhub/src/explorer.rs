@@ -399,11 +399,31 @@ mod tests {
     }
 
     #[test]
-    fn ai_hub_warns_once_per_loss_of_service() {
-        let mut previous = None;
-        let observed = [Some(false), Some(true), None, Some(false), Some(false), None, Some(false), Some(true), Some(false)];
-        let warnings: Vec<_> = observed.into_iter().map(|serving| crate::local::ai_hub_lost_serving(&mut previous, serving)).collect();
-        assert_eq!(warnings, vec![false, false, false, true, false, false, false, false, true]);
+    fn ai_hub_warns_once_per_loss_of_service_that_outlasts_its_usual_start() {
+        let mut w = crate::local::AiHubWatch::default();
+        let min = 60_000;
+        // a hub down at the probe's first look was never seen serving: no loss
+        assert_eq!(w.observe(Some(false), 0), None);
+        assert_eq!(w.observe(Some(false), 10 * min), None);
+        assert_eq!(w.observe(Some(true), 11 * min), None);
+        // a planned restart is back within its usual start (3 min at least): nothing said
+        assert_eq!(w.observe(Some(false), 20 * min), None);
+        assert_eq!(w.observe(None, 20 * min + 10_000), None);
+        assert_eq!(w.observe(Some(false), 20 * min + 20_000), None);
+        assert_eq!(w.observe(Some(true), 20 * min + 30_000), None);
+        // one that stays down past it warns once
+        assert_eq!(w.observe(Some(false), 30 * min), None);
+        assert_eq!(w.observe(Some(false), 33 * min + 1), Some((3 * min + 1, 3 * min)));
+        assert_eq!(w.observe(Some(false), 40 * min), None, "once per loss");
+        assert_eq!(w.observe(Some(true), 41 * min), None);
+        // its usual start follows the starts it took (half again the longest)
+        for at in [50, 60, 70] {
+            assert_eq!(w.observe(Some(false), at * min), None);
+            assert_eq!(w.observe(Some(true), at * min + 4 * min), None);
+        }
+        assert_eq!(w.observe(Some(false), 80 * min), None);
+        assert_eq!(w.observe(Some(false), 85 * min), None);
+        assert_eq!(w.observe(Some(false), 86 * min + 1), Some((6 * min + 1, 6 * min)));
     }
 
     #[test]

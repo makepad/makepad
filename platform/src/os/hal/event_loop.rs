@@ -137,6 +137,7 @@ impl Cx {
     /// service actions, but leave their draw tree pending. No session is closed here.
     pub fn hal_session_turn(&mut self, timeout_ns: u64, present: bool) -> bool {
         assert!(self.hal.externally_driven);
+        if self.hal.info.is_none() { return false; }
         if !self.hal_pump_events(timeout_ns, PumpWait::Idle) { return false; }
         self.hal_service_signals();
         self.call_event_handler(&Event::Signal);
@@ -146,6 +147,18 @@ impl Cx {
         self.hal_run_tasks();
         self.hal_submit_batch();
         alive
+    }
+
+    /// Ends a session attached with [`Cx::hal_attach_session`] as its own loop ends one:
+    /// `Quit` in a last batch makes the HAL free what it owns (buffers, textures, pipelines,
+    /// windows). The context takes no turn after it (a turn reports the session ended).
+    pub fn hal_close_session(&mut self) {
+        assert!(self.hal.externally_driven);
+        let Some(info) = self.hal.info else { return };
+        self.hal.frames.w.quit();
+        self.hal_submit_batch();
+        super::unregister_wake_session(info.session);
+        self.hal.info = None;
     }
 
     pub fn event_loop(cx: Rc<RefCell<Cx>>) {
@@ -565,6 +578,11 @@ impl Cx {
     /// One batch to the HAL, then the memory its slices pointed at is ours again.
     pub(super) fn hal_submit_batch(&mut self) {
         let _phase = crate::thread::ui_phase(crate::thread::UiPhase::Submit);
+        // Readback callbacks and pipeline readiness can enqueue compute without
+        // a Draw/NextFrame event. Flush it on this turn, even with paint withheld.
+        let mut fb = std::mem::take(&mut self.hal.frames);
+        self.fb_compute(&mut fb);
+        self.hal.frames = fb;
         #[cfg(relax)]
         self.hal_audio_waiting_ready();
         #[cfg(target_os = "linux")]
@@ -572,11 +590,13 @@ impl Cx {
             self.hal.direct_display.flush(&mut self.hal.frames.w);
             if self.hal.direct_display.window.is_some() { crate::linux_input::flush(&mut self.hal.frames.w); }
         }
+        let reclaim = self.gpu_admission.take_reclaim();
+        if reclaim != 0 { self.hal.frames.w.gpu_reclaim(reclaim); }
         if self.hal.frames.w.is_empty() {
             self.fb_after_submit();
             return;
         }
-        let has_frames = self.hal.frames.w.buf().frames.len != 0;
+        let has_frames = !self.hal.frames.w.buf().frames.is_empty();
         let epoch = self.gpu_admission.submitted(has_frames);
         self.hal.frames.w.gpu_budget(epoch);
         let buf = self.hal.frames.w.buf();
@@ -623,6 +643,7 @@ impl Cx {
             if crate::remote::needs_ticks() { count("beat: remote ticks"); }
             if self.hal_software_video_active() { count("beat: video"); }
             if !self.pick.requests.is_empty() { count("beat: pick"); }
+            if self.hal.compute.beat { count("beat: compute"); }
         }
         self.hal_service_signals();
         if let Some(hosted) = self.hal.hosted.as_mut() {

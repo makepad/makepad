@@ -435,4 +435,6 @@ hal_commands! {
     /// Keeps the display at its fastest refresh rate for about another second, for content that
     /// keeps moving on its own, like a fling (input already does this). Android; elsewhere nothing.
     FrameRateBoost = 165, frame_rate_boost {};
+    /// Ask device clients to release reclaimable memory for foreground work.
+    GpuReclaim = 166, gpu_reclaim { bytes: u64 };
 }

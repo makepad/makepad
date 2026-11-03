@@ -201,37 +201,43 @@ pub struct Wait {
 
 /// Every thread's current wait (consistent per row; lock-free).
 pub fn snapshot() -> Vec<Wait> {
-    let mut out = Vec::new();
-    for r in TABLE.iter() {
-        let thread = r.thread.load(Acquire);
-        if thread == 0 {
+    TABLE.iter().filter_map(read).collect()
+}
+
+/// `thread`'s current wait (None: it waits for nothing the registry knows, or has no row).
+pub fn of(thread: u64) -> Option<Wait> {
+    TABLE.iter().find(|r| r.thread.load(Acquire) == thread).and_then(read)
+}
+
+/// A row's wait, read consistently (None: no wait, or a writer kept it busy).
+fn read(r: &Row) -> Option<Wait> {
+    let thread = r.thread.load(Acquire);
+    if thread == 0 {
+        return None;
+    }
+    for _ in 0..8 {
+        let s0 = r.state.load(Acquire);
+        if s0 & 0xff == 0xff {
+            std::hint::spin_loop();
             continue;
         }
-        for _ in 0..8 {
-            let s0 = r.state.load(Acquire);
-            if s0 & 0xff == 0xff {
-                std::hint::spin_loop();
-                continue;
-            }
-            let (object, holder, since_ns) = (r.object.load(Relaxed), r.holder.load(Relaxed), r.since_ns.load(Relaxed));
-            let (l, n) = (r.label.load(Relaxed), r.label_len.load(Relaxed));
-            if r.state.load(Acquire) != s0 {
-                continue;
-            }
-            let kind = match s0 & 0xff {
-                1 => Kind::Owner,
-                2 => Kind::Pump,
-                3 => Kind::Query,
-                4 => Kind::Build,
-                5 => Kind::Futex,
-                6 => Kind::Join,
-                _ => break,
-            };
-            // labels are 'static strs written whole before the state word
-            let label = if l == 0 { "" } else { unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(l as *const u8, n)) } };
-            out.push(Wait { thread, kind, object, holder, since_ns, label });
-            break;
+        let (object, holder, since_ns) = (r.object.load(Relaxed), r.holder.load(Relaxed), r.since_ns.load(Relaxed));
+        let (l, n) = (r.label.load(Relaxed), r.label_len.load(Relaxed));
+        if r.state.load(Acquire) != s0 {
+            continue;
         }
+        let kind = match s0 & 0xff {
+            1 => Kind::Owner,
+            2 => Kind::Pump,
+            3 => Kind::Query,
+            4 => Kind::Build,
+            5 => Kind::Futex,
+            6 => Kind::Join,
+            _ => return None,
+        };
+        // labels are 'static strs written whole before the state word
+        let label = if l == 0 { "" } else { unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(l as *const u8, n)) } };
+        return Some(Wait { thread, kind, object, holder, since_ns, label });
     }
-    out
+    None
 }

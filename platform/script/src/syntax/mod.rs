@@ -150,6 +150,20 @@ pub enum Kind {
     Jump { keyword: String, value: Option<Box<Node>> },
 }
 
+/// Hands each child of a node to a visitor, with the `push` / `extend` of a list.
+struct Push<'f, 'a>(&'f mut dyn FnMut(&'a Node));
+
+impl<'a> Push<'_, 'a> {
+    fn push(&mut self, node: &'a Node) {
+        (self.0)(node);
+    }
+    fn extend(&mut self, nodes: impl Iterator<Item = &'a Node>) {
+        for node in nodes {
+            (self.0)(node);
+        }
+    }
+}
+
 /// An address of a node: child indexes from the root (see [`Node::children`]).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Loc(pub Vec<usize>);
@@ -304,6 +318,13 @@ impl Node {
     /// The nodes inside this one, in source order. A [`Loc`] step indexes this list.
     pub fn children(&self) -> Vec<&Node> {
         let mut out: Vec<&Node> = Vec::new();
+        self.for_each_child(&mut |child| out.push(child));
+        out
+    }
+
+    /// Each of [`children`](Self::children) in order, without collecting them.
+    pub fn for_each_child<'a>(&'a self, f: &mut dyn FnMut(&'a Node)) {
+        let mut out = Push(f);
         match &self.kind {
             Kind::Number(_) | Kind::Str(_) | Kind::Name(_) | Kind::Color(_) | Kind::Ident(_) => {}
             Kind::Call { callee, args, .. } => {
@@ -358,24 +379,44 @@ impl Node {
             }
             Kind::Jump { value, .. } => out.extend(value.iter().map(|v| &**v)),
         }
-        out
     }
 
     /// The node at `loc` below this one.
     pub fn at(&self, loc: &[usize]) -> Option<&Node> {
         let mut node = self;
         for &step in loc {
-            node = node.children().get(step).copied()?;
+            node = node.child(step)?;
         }
         Some(node)
     }
 
+    /// Child `index` of [`children`](Self::children).
+    pub fn child(&self, index: usize) -> Option<&Node> {
+        let (mut at, mut found) = (0, None);
+        self.for_each_child(&mut |child| {
+            if at == index {
+                found = Some(child);
+            }
+            at += 1;
+        });
+        found
+    }
+
     /// Visit this node and everything inside it, depth first, in source order.
     pub fn walk<'a>(&'a self, loc: &Loc, f: &mut dyn FnMut(&Loc, &'a Node)) {
+        self.walk_at(&mut loc.clone(), f);
+    }
+
+    /// [`walk`](Self::walk) with one address that each step extends and takes back.
+    fn walk_at<'a>(&'a self, loc: &mut Loc, f: &mut dyn FnMut(&Loc, &'a Node)) {
         f(loc, self);
-        for (i, child) in self.children().into_iter().enumerate() {
-            child.walk(&loc.child(i), f);
-        }
+        let mut i = 0;
+        self.for_each_child(&mut |child| {
+            loc.0.push(i);
+            child.walk_at(&mut *loc, &mut *f);
+            loc.0.pop();
+            i += 1;
+        });
     }
 
     /// The value one step below this one.

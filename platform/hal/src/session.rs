@@ -435,6 +435,18 @@ pub struct Stats {
 /// own, their pixels reach the screen through the parent's frames.
 pub const EMBEDDED_FRAME_NS: u64 = 16_666_667;
 
+/// Submitted compute work, retained until its GPU completion (not merely
+/// until command encoding finishes). Indirect dimensions remain GPU-owned;
+/// their argument buffer and offset identify the unresolved dispatch exactly.
+#[derive(Clone, Copy, Debug)]
+pub struct InFlightDispatch {
+    pub frame: u64,
+    pub kernel: StrId,
+    pub groups: [u32; 3],
+    pub indirect_buffer: Id,
+    pub indirect_offset: u64,
+}
+
 pub struct Session {
     pub id: u32,
     pub app_key: u64,
@@ -455,6 +467,9 @@ pub struct Session {
     /// the frame id of the newest frame submitted / finished
     pub frame: u64,
     pub last_frame_done: u64,
+    pub compute_in_flight: std::collections::VecDeque<InFlightDispatch>,
+    /// Automation injects one discarded compute packet through the normal completion path.
+    pub drop_next_compute: bool,
     /// dropped frames `(wait_for_submitted_serial, target, frame, now)` held until the
     /// preceding submitted frame on this session completes so `FrameDone` stays in order
     pub dropped_frames: Vec<(u64, Id, u64, u64)>,
@@ -524,6 +539,8 @@ impl Session {
             stats: Stats::default(),
             frame: 0,
             last_frame_done: 0,
+            compute_in_flight: Default::default(),
+            drop_next_compute: false,
             dropped_frames: Vec::new(),
             last_frame_layers: Vec::new(),
             last_frame_occluders: Vec::new(),
@@ -808,6 +825,7 @@ impl World {
     pub fn finish_close(&mut self, id: u32, how: CloseAs) -> bool {
         let Some(mut s) = self.sessions.remove(&id) else { return false };
         crate::a11y::close_session(id);
+        crate::gpu_prof::session_closed(id);
         self.listeners.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
         // its fonts and its interest in glyphs end; the glyphs stay in the host's atlas
         if let Some(fonts) = self.fonts.as_mut() {
@@ -901,6 +919,7 @@ impl World {
     pub fn frame_done(&mut self, sid: u32, target: Id, kind: u32, frame: u64, gpu_ns: u64, present_ns: u64, gpu_span: [f64; 2]) {
         let Some(s) = self.sessions.get_mut(&sid) else { return };
         s.last_frame_done = s.last_frame_done.max(frame);
+        while s.compute_in_flight.front().is_some_and(|d| d.frame <= frame) { s.compute_in_flight.pop_front(); }
         // a window frame (not a pick pass) of a window lent to the parent is also the parent's news
         let lent = if kind & !(crate::types::target::CAPTURE | crate::types::target::SNAPSHOT) == crate::types::target::WINDOW {
             s.windows.get(sid, target).ok().and_then(|w| w.val.embedded).map(|em| (s.parent, em.alias))

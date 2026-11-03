@@ -108,7 +108,7 @@ pub fn report_checked(prog: &Program, src: usize, epoch: u64, def: DefId, args: 
     VIOLATIONS.fetch_add(errors.len() as u64, Ordering::Relaxed);
     // a check names the crates it checks: it reports all of them. Only what runs on its own (a
     // run's background check, a live edit's gate) keeps to the application's crates.
-    let asked = matches!(origin, Origin::Check | Origin::Serve);
+    let asked = matches!(origin, Origin::Check | Origin::Serve | Origin::DeferredCheck);
     for error in errors {
         let allowed = asked || admit(prog, error.krate);
         let mut ev = GandalfEvent { seq: 0, origin, src, epoch, args: args.to_vec(), error };

@@ -38,6 +38,8 @@ macro_rules! hal_events {
                     const _: () = assert!(0 $(+ <k::$kind as Field>::UW)* <= EVENT_WORDS);
                     #[allow(unused_comparisons)]
                     const _: () = assert!(0 $(+ <k::$kind as Field>::FW)* <= EVENT_FLOATS);
+                    // the queue has no upload memory ([`ArenaSink::keep_bytes`])
+                    const _: () = assert!(!(false $(|| <k::$kind as Field>::UPLOAD)*), "an event field cannot be an upload");
                     let mut p = Packer::new();
                     $( <k::$kind as Field>::pack($f, &mut p); )*
                     RawEvent { tag: $tag, window: p.id, time_ns: 0, a: p.f, b: p.words_b3(), data: p.data }
@@ -170,6 +172,8 @@ hal_events! {
     /// The packet finished: GPU busy ns, completion ns, and the GPU span in host seconds.
     /// Zero span means this backend has no GPU timestamps. Cx submits one pass per packet.
     FrameDone = 51, frame_done { window: obj, frame: u64, gpu_ns: u64, present_ns: u64, gpu_start: f64, gpu_end: f64 };
+    /// A named compute dispatch completed inside a submission.
+    DispatchTime = 71, dispatch_time { name: rng, gpu_ns: u64 };
     PipelineReady = 52, pipeline_ready { pipeline: id };
     /// The packet left draws out: a pipeline they use was still being built for its target's
     /// layout (they come with a later packet, after `PipelineReady`). Posted before its `FrameDone`.
@@ -187,7 +191,10 @@ hal_events! {
     /// The GPU device `generation` was lost (removed, reset, driver update, adapter switch). Every
     /// event the old device still owed comes before the matching `DeviceReset`; GPU commands sent
     /// meanwhile are dropped. The app stops submitting until the reset.
-    DeviceLost = 58, device_lost { generation: u32 };
+    // `dispatches`: UTF-8 pending kernel names and workgroup dimensions; an
+    // indirect dispatch names its argument buffer/offset instead of inventing
+    // dimensions the host cannot read after a device failure.
+    DeviceLost = 58, device_lost { generation: u32, dispatches: rng };
     /// The HAL gave a transient texture's storage back after it sat unused; the object is gone
     /// and the app produces its content again when it is next needed.
     TextureEvicted = 59, texture_evicted { texture: id };

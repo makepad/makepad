@@ -3,8 +3,8 @@ use crate::cx::Cx;
 
 impl Cx {
     /// The GPU profiler through the HAL, for an app's own readout: the first call starts a
-    /// recording kept `keep_s` seconds; each call asks for the busiest session's recording so far
-    /// and returns the last answer (None until one came).
+    /// recording kept `keep_s` seconds; each call asks for this app's own session's recording so
+    /// far (a relaunch starts it empty) and returns the last answer (None until one came).
     pub fn gpu_prof_recording(&mut self, keep_s: u32) -> Option<&makepad_gpu_trace::Recording> {
         self.hal.frames.w.gpu_prof_query(keep_s);
         self.hal.gpu_prof.as_ref()

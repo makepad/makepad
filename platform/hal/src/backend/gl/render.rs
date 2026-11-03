@@ -3,7 +3,7 @@
 //! write after the reads queued before it, so no lease outlives a job). Completion is a fence
 //! per frame or readback, polled between jobs; results go to the mailbox the HAL drains.
 
-use super::egl::Context;
+use super::egl::{lock_context_lifecycle, Context};
 use super::surface::EglSurfaceSource;
 use super::sys::{self, GLenum, GLsync, GLuint};
 use super::{PipeState, TexObj};
@@ -220,7 +220,10 @@ pub(super) fn start(source: Box<dyn EglSurfaceSource>, mailbox: Mailbox) -> Resu
 
 impl Renderer {
     fn new(source: Box<dyn EglSurfaceSource>, mailbox: Mailbox) -> Result<Self, String> {
-        let ctx = Context::new(source)?;
+        // Drop the guard before ctx on errors; Context::drop takes the same lock.
+        let ctx;
+        let _context_lifecycle = lock_context_lifecycle();
+        ctx = Context::new(source)?;
         let gl = &ctx.gl;
         let version = gl.string(sys::VERSION);
         if !version.starts_with("OpenGL ES 3") {

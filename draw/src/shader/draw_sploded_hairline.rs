@@ -164,7 +164,7 @@ impl DrawSplodedHairline {
         // The returned area is deliberately dropped: one shared outline emits
         // every scope in the frame, so holding on to the last one's area would
         // leave a stale reference behind on the next redraw.
-        cx.add_aligned_instance(&self.draw_vars);
+        cx.add_aligned_instance(&mut self.draw_vars);
     }
 
     /// Emit one of the tweaker's marks — a hover (`emphasis` 1) or pinned
@@ -188,7 +188,7 @@ impl DrawSplodedHairline {
         // background. 100 stays well inside the per-level headroom.
         self.draw_depth = 100.0;
         self.draw_vars.append_group_id = cx.draw_call_group_background().0;
-        cx.add_instance(&self.draw_vars);
+        cx.add_instance(&mut self.draw_vars);
         self.emphasis = 0.0;
         self.draw_depth = 0.0;
     }

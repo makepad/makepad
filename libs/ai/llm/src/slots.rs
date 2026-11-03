@@ -135,52 +135,53 @@ impl StepCostModel {
     /// batches at every width on a cold, un-captured graph set before the
     /// worker serves its first turn — seconds of GPU time on a box that is
     /// live for everyone else, measuring exactly the compile-and-capture churn
-    /// the bench had to be taught to exclude. Two cards are in service and
-    /// both have been measured on their own hardware; the name picks the
-    /// measurement, the boot line says which one was picked, and a new card
-    /// falls to the **GPU-B** fit. That fallback is the safe direction on
-    /// purpose: it is the most expensive verify curve measured, so an unknown
-    /// card is under-speculated rather than over-speculated until someone
-    /// runs `llama-batch-bench --verify-widths` on it.
+    /// the bench had to be taught to exclude. Two card classes have been
+    /// measured on their own hardware (an RTX PRO workstation card and a
+    /// 32 GB GeForce); the name picks the measurement, the boot line says
+    /// which one was picked, and any other card falls to the **consumer**
+    /// fit. That fallback is the safe direction on purpose: it is the most
+    /// expensive verify curve measured, so an unknown card is under-speculated
+    /// rather than over-speculated until someone runs
+    /// `llama-batch-bench --verify-widths` on it.
     pub fn for_device(device_name: &str) -> Self {
         let name = device_name.to_ascii_lowercase();
-        if name.contains("gpu-c") {
-            Self::measured_gpu_c()
+        if name.contains("rtx pro") {
+            Self::measured_workstation()
         } else {
-            Self::measured_gpu_b()
+            Self::measured_consumer()
         }
     }
 
-    /// Where this model's numbers were measured: `"GPU-B"` or `"gpu-c"`.
+    /// Where this model's numbers were measured: `"consumer"` or `"workstation"`.
     pub fn calibration(&self) -> &'static str {
         self.calibration
     }
 
-    /// The measured curves on `.76` (GPU-C, Q4_K_M,
+    /// The measured curves on a 96 GB RTX PRO workstation card (Q4_K_M,
     /// fill-4096, `llama-batch-bench`, 2026-08-25).
     ///
     /// Plain `n_outputs = 1` steps: 1 → 14.24, 2 → 17.16, 4 → 20.65,
-    /// 8 → 31.60 ms — a marginal column costs ~2.1–2.5 ms, against the GPU-B's
+    /// 8 → 31.60 ms — a marginal column costs ~2.1–2.5 ms, against the consumer card's
     /// ~3.7. Verify batches, read off `SpeculativeStats::verify_nanos` at
     /// widths 2..8: 20.0, 21.2, 26.1, 26.6, 34.0, 38.7, 39.1 ms, which fit
     /// `13.7 + 3.17 * columns`. Per column the verify batch gets CHEAPER with
     /// width (10.0 ms at 2, 4.9 at 8), so 8 columns — the MMVQ cap — is the
-    /// efficient point, and the GPU-B fit's `17.5 + 5.73 * B` over-charges this
+    /// efficient point, and the consumer fit's `17.5 + 5.73 * B` over-charges this
     /// card by ~1.8x on the per-column term. That over-charge is not a
     /// rounding matter: it is the difference between an allocator that can
     /// take a deeper round when acceptance is there and one that never does.
     ///
-    /// Same caveat as the GPU-B curve: the plain points are a lower bound on a
+    /// Same caveat as the consumer curve: the plain points are a lower bound on a
     /// real multi-slot step, and the verify fit is single-lane, so the
     /// [`SPECULATION_MARGIN`] stands.
-    pub fn measured_gpu_c() -> Self {
+    pub fn measured_workstation() -> Self {
         const MEASURED: &[(usize, f32)] = &[(1, 14.24), (2, 17.16), (4, 20.65), (8, 31.60)];
         let mut model = Self::from_points(MEASURED, 1.80, 0.30).with_verify_cost(13.7, 3.17);
-        model.calibration = "gpu-c";
+        model.calibration = "workstation";
         model
     }
 
-    /// The measured `n_outputs = B` curve on .89 (GPU-B, Q4_K_M, fill-4096,
+    /// The measured `n_outputs = B` curve on a 32 GB GeForce card (Q4_K_M, fill-4096,
     /// medians of 12 after 3 warm-ups).
     ///
     /// **Lower bound**: the verify-batch shape carries neither the per-slot
@@ -188,7 +189,7 @@ impl StepCostModel {
     /// multi-slot step costs at least this. Columns 1..8 are measured points;
     /// 9..16 come from the raised-cap sweep with the gaps linearly
     /// interpolated, and are only reachable if the cap raise is ever taken.
-    pub fn measured_gpu_b() -> Self {
+    pub fn measured_consumer() -> Self {
         const MEASURED: &[(usize, f32)] = &[
             (1, 14.113),
             (2, 17.889),
@@ -207,7 +208,7 @@ impl StepCostModel {
         // 248,320-row draft head: 1.72-1.87 ms. Verify dominates a round; the
         // draft chain is comparatively cheap.
         let mut model = Self::from_points(MEASURED, 1.80, 0.30);
-        model.calibration = "GPU-B";
+        model.calibration = "consumer";
         model
     }
 
@@ -217,7 +218,7 @@ impl StepCostModel {
     /// whole story.** The `n_outputs = B` sweep that produced `step_ms`
     /// measured the plain decode graph at B columns. A verify batch runs a
     /// different graph — the one that checkpoints the recurrent state after
-    /// every token so a rejected draft can be rolled back — and on `.89` it
+    /// every token so a rejected draft can be rolled back — and on the 32 GB card it
     /// costs **2.5x more per column**:
     ///
     /// | shape | measured | `step_ms` says |
@@ -279,7 +280,7 @@ impl StepCostModel {
             step_ms,
             draft_base_ms,
             draft_per_lane_ms,
-            // Measured on .89; see `verify_ms`.
+            // Measured on the 32 GB card; see `verify_ms`.
             verify_base_ms: 17.5,
             verify_per_column_ms: 5.73,
         }
@@ -326,7 +327,7 @@ pub const MEASURED_CHAT_ACCEPTANCE: f32 = 0.7647;
 
 /// The acceptance the BATCHED round's uniform depth is chosen at.
 ///
-/// Measured on `.89` serving real chat turns through the lane worker:
+/// Measured on the 32 GB card serving real chat turns through the lane worker:
 /// 0.51-0.62 across turns, 2.5-2.9 tokens per round. The campaign's 0.7647 is a
 /// warm-chat figure from a different prompt mix, and using it here would pick
 /// depth 1 at width 4 — which on the measured cost curve is a **10 % aggregate
@@ -430,7 +431,7 @@ pub fn uniform_allocation(
 /// taken.
 ///
 /// Not a fudge factor — a correction for a bias whose SIGN is known.
-/// [`StepCostModel::measured_gpu_b`] is explicitly a **lower bound** on a real
+/// [`StepCostModel::measured_consumer`] is explicitly a **lower bound** on a real
 /// multi-slot step: the `n_outputs = B` sweep it came from carries neither the
 /// per-slot recurrent state reads nor the unified-cache attention span, and
 /// both of those grow with the column count. Depth buys tokens by adding
@@ -551,7 +552,7 @@ impl Allocation {
 /// [`uniform_allocation`]), so nothing runs this; it is the design's
 /// heterogeneous allocator, kept because it is what the ladder would become if
 /// a ragged batch ever became expressible. It prices every candidate with
-/// [`StepCostModel::step_ms`], the PLAIN decode curve, which on `.89`
+/// [`StepCostModel::step_ms`], the PLAIN decode curve, which on the 32 GB card
 /// under-states a real verify batch by 55-75 %. Anything that starts using
 /// this for a speculative allocation has to price the `k > 0` candidates with
 /// [`StepCostModel::verify_ms`] first, or it will reach the same wrong answer
@@ -1245,7 +1246,7 @@ impl SlotTable {
         // reason is that the SLOT CHANGED HANDS: the solo path advances the
         // session's own draft-head fill every round with no idea which slot it
         // is sitting in, so a handover carries the PREVIOUS occupant's number.
-        // Observed on .89 as `draft head at 8366 tokens, ahead of the model's
+        // Observed on the 32 GB card as `draft head at 8366 tokens, ahead of the model's
         // 1024` — 1024 being two prefill chunks of the new conversation.
         //
         // This used to be an error, and refusing the turn is disproportionate:
@@ -1388,7 +1389,7 @@ mod tests {
                     SOLO_DRAFT_MAX,
                     acceptance,
                     &SchedulerConfig::default(),
-                    &StepCostModel::measured_gpu_b(),
+                    &StepCostModel::measured_consumer(),
                 );
                 assert!(
                     width * (depth + 1) <= COLUMN_BUDGET,
@@ -1404,8 +1405,8 @@ mod tests {
         // The guard against collapsing the two curves back into one. Doing that
         // is not a simplification — it is a 55-75 % under-estimate of the graph
         // the round actually runs, and it is exactly what made a batched
-        // speculative round look like a win before .89 was asked.
-        let costs = StepCostModel::measured_gpu_b();
+        // speculative round look like a win before the 32 GB card was asked.
+        let costs = StepCostModel::measured_consumer();
         for columns in 2..=8usize {
             let plain = costs.step_ms(columns).expect("measured column");
             assert!(
@@ -1422,7 +1423,7 @@ mod tests {
 
     #[test]
     fn a_batched_round_does_not_speculate_at_the_measured_verify_cost() {
-        // What .89 said, and it said it at every width: a fused verify batch
+        // What the 32 GB card said, and it said it at every width: a fused verify batch
         // costs so much more per column than a plain step that no acceptance
         // rate can pay for it. Measured aggregates, 160-step windows:
         //
@@ -1443,8 +1444,8 @@ mod tests {
         // cheaper.
         let config = SchedulerConfig::default();
         for costs in [
-            StepCostModel::measured_gpu_b(),
-            StepCostModel::measured_gpu_b().with_restricted_draft_head(),
+            StepCostModel::measured_consumer(),
+            StepCostModel::measured_consumer().with_restricted_draft_head(),
         ] {
             for width in 2..=4usize {
                 for acceptance in [BATCHED_CHAT_ACCEPTANCE, 0.8, 0.9] {
@@ -1471,8 +1472,8 @@ mod tests {
         // head" is the obvious next idea and this says, in advance, that it is
         // aimed at the wrong 2 % of the round.
         let config = SchedulerConfig::default();
-        let full = StepCostModel::measured_gpu_b();
-        let restricted = StepCostModel::measured_gpu_b().with_restricted_draft_head();
+        let full = StepCostModel::measured_consumer();
+        let restricted = StepCostModel::measured_consumer().with_restricted_draft_head();
         for width in 1..=4usize {
             assert_eq!(
                 batched_draft_depth(width, SOLO_DRAFT_MAX, 0.9, &config, &full),
@@ -1492,7 +1493,7 @@ mod tests {
         // rather than by the kernels — and it would fail the invariance gate by
         // construction.
         let config = SchedulerConfig::default();
-        let costs = StepCostModel::measured_gpu_b();
+        let costs = StepCostModel::measured_consumer();
         let a = batched_draft_depth(2, SOLO_DRAFT_MAX, BATCHED_CHAT_ACCEPTANCE, &config, &costs);
         let b = batched_draft_depth(2, SOLO_DRAFT_MAX, BATCHED_CHAT_ACCEPTANCE, &config, &costs);
         assert_eq!(a, b);
@@ -1515,7 +1516,7 @@ mod tests {
     #[test]
     fn a_session_with_speculation_off_never_gets_it_back_through_the_batch() {
         let config = SchedulerConfig::default();
-        let costs = StepCostModel::measured_gpu_b();
+        let costs = StepCostModel::measured_consumer();
         for width in 1..=4usize {
             assert_eq!(
                 batched_draft_depth(width, 0, 0.99, &config, &costs),
@@ -1537,28 +1538,28 @@ mod tests {
     fn the_cost_model_is_picked_by_the_card_it_runs_on() {
         // The two names the driver actually reports on the fleet, verbatim.
         assert_eq!(
-            StepCostModel::for_device("NVIDIA GPU-C")
+            StepCostModel::for_device("NVIDIA RTX PRO Test Workstation Edition")
                 .calibration(),
-            "gpu-c"
+            "workstation"
         );
         assert_eq!(
-            StepCostModel::for_device("NVIDIA GeForce GPU-B").calibration(),
-            "GPU-B"
+            StepCostModel::for_device("NVIDIA GeForce Test 32 GB").calibration(),
+            "consumer"
         );
-        // Anything unmeasured falls to the GPU-B fit — the dearest verify curve
+        // Anything unmeasured falls to the consumer fit — the dearest verify curve
         // on file, so an unknown card under-speculates rather than over.
         assert_eq!(
-            StepCostModel::for_device("NVIDIA GeForce GPU-A").calibration(),
-            "GPU-B"
+            StepCostModel::for_device("NVIDIA GeForce Test 24 GB").calibration(),
+            "consumer"
         );
-        assert_eq!(StepCostModel::for_device("metal").calibration(), "GPU-B");
-        assert_eq!(StepCostModel::for_device("").calibration(), "GPU-B");
+        assert_eq!(StepCostModel::for_device("metal").calibration(), "consumer");
+        assert_eq!(StepCostModel::for_device("").calibration(), "consumer");
     }
 
     #[test]
-    fn the_gpu_c_verify_curve_is_the_measured_one() {
-        let card = StepCostModel::measured_gpu_c();
-        // Measured anchors from the `.76` sweep (recipe §11, Step C), so a
+    fn the_workstation_verify_curve_is_the_measured_one() {
+        let card = StepCostModel::measured_workstation();
+        // Measured anchors from the workstation card's sweep (recipe §11, Step C), so a
         // re-fit that drifts from the box shows up here.
         for (columns, measured) in [(2usize, 20.03f32), (4, 26.09), (8, 39.05)] {
             assert!(
@@ -1570,24 +1571,24 @@ mod tests {
         // Per column the verify batch gets cheaper with width — that is the
         // whole reason 8 columns is the operating point.
         assert!(card.verify_ms(8) / 8.0 < card.verify_ms(2) / 2.0);
-        // And it is cheaper than the GPU-B fit at every width the cap allows.
-        let fit = StepCostModel::measured_gpu_b();
+        // And it is cheaper than the consumer fit at every width the cap allows.
+        let fit = StepCostModel::measured_consumer();
         for columns in 2..=8usize {
             assert!(card.verify_ms(columns) < fit.verify_ms(columns), "{columns}");
         }
         // The plain curve is measured too: the marginal column on this card is
-        // ~2.1-2.5 ms, not the GPU-B's ~3.7.
+        // ~2.1-2.5 ms, not the consumer card's ~3.7.
         let (one, eight) = (card.step_ms(1).unwrap(), card.step_ms(8).unwrap());
         assert!((eight - one) / 7.0 < 2.6, "{}", (eight - one) / 7.0);
     }
 
     #[test]
-    fn the_6000_ladder_never_spends_more_than_the_column_budget() {
+    fn the_workstation_ladder_never_spends_more_than_the_column_budget() {
         // The wall holds for the cheaper curve exactly as it does for the
-        // GPU-B one: `width * (depth + 1) <= 8`, whatever the acceptance.
+        // consumer one: `width * (depth + 1) <= 8`, whatever the acceptance.
         for costs in [
-            StepCostModel::measured_gpu_c(),
-            StepCostModel::measured_gpu_c().with_restricted_draft_head(),
+            StepCostModel::measured_workstation(),
+            StepCostModel::measured_workstation().with_restricted_draft_head(),
         ] {
             for width in 1..=8usize {
                 for acceptance in [0.0f32, 0.3, 0.58, 0.72, 0.9, 0.99] {
@@ -1609,16 +1610,16 @@ mod tests {
     }
 
     #[test]
-    fn what_the_6000_curve_changes_and_what_it_does_not() {
+    fn what_the_workstation_curve_changes_and_what_it_does_not() {
         // The honest verdict, pinned, at the restricted draft head the box
         // serves with. The corrected curve is ~1.8x cheaper per verify column
-        // than the GPU-B fit, and that changes the allocator's answer at ONE
+        // than the consumer fit, and that changes the allocator's answer at ONE
         // width, not all of them:
         //
         // * width 1 (a lone lane off slot 0, the only place the batched path
         //   prices a single lane): depth 1 now pays — a 2-column verify at
         //   20.6 ms for 1.58 expected tokens beats a 14.2 ms plain step for
-        //   one (76.8 vs 70.2 tok/s), by more than the margin. On the GPU-B
+        //   one (76.8 vs 70.2 tok/s), by more than the margin. On the consumer card
         //   fit it did not.
         // * width 2 at the served-chat acceptance (0.58): still depth 0. A
         //   4-column verify (27.0 ms incl. draft) yields 1.58 tokens per lane,
@@ -1638,8 +1639,8 @@ mod tests {
         // accepted tokens per round earns; a depth-1 MTP round at four lanes
         // does not, on this curve, and the allocator must keep saying so.
         let config = SchedulerConfig::default();
-        let card = StepCostModel::measured_gpu_c().with_restricted_draft_head();
-        let fit = StepCostModel::measured_gpu_b().with_restricted_draft_head();
+        let card = StepCostModel::measured_workstation().with_restricted_draft_head();
+        let fit = StepCostModel::measured_consumer().with_restricted_draft_head();
         let depth = |width: usize, acceptance: f32, costs: &StepCostModel| {
             batched_draft_depth(width, SOLO_DRAFT_MAX, acceptance, &config, costs)
         };
@@ -1675,7 +1676,7 @@ mod tests {
         let allocation = allocate_depths(
             &lanes(&[0.9]),
             &open_config(),
-            &StepCostModel::measured_gpu_b(),
+            &StepCostModel::measured_consumer(),
         )
         .expect("allocation");
         assert_eq!(allocation.depths.len(), 1);
@@ -1694,7 +1695,7 @@ mod tests {
         let allocation = allocate_depths(
             &lanes(&[0.95, 0.02]),
             &open_config(),
-            &StepCostModel::measured_gpu_b(),
+            &StepCostModel::measured_consumer(),
         )
         .expect("allocation");
         assert!(
@@ -1715,7 +1716,7 @@ mod tests {
         let allocation = allocate_depths(
             &lanes(&[0.9, 0.9, 0.9, 0.9]),
             &open_config(),
-            &StepCostModel::measured_gpu_b(),
+            &StepCostModel::measured_consumer(),
         )
         .expect("allocation");
         let min = allocation.depths.iter().copied().min().unwrap_or(0);
@@ -1731,7 +1732,7 @@ mod tests {
     fn an_allocation_never_overspends_the_column_budget() {
         // Overspending falls off the MMVQ cliff, so this is the one invariant
         // that must hold for every demand shape.
-        let costs = StepCostModel::measured_gpu_b();
+        let costs = StepCostModel::measured_consumer();
         for shape in [
             vec![0.9],
             vec![0.9, 0.5],
@@ -1759,7 +1760,7 @@ mod tests {
     fn the_floor_outranks_aggregate() {
         // A floor-satisfying allocation must win even when a floor-breaking one
         // scores more aggregate, or the floor is decoration.
-        let costs = StepCostModel::measured_gpu_b();
+        let costs = StepCostModel::measured_consumer();
         let demand = lanes(&[0.9, 0.9]);
         let open = allocate_depths(&demand, &open_config(), &costs).expect("open");
         let strict = allocate_depths(
@@ -1780,7 +1781,7 @@ mod tests {
 
     #[test]
     fn admission_stops_before_it_degrades_the_clients_already_there() {
-        let costs = StepCostModel::measured_gpu_b();
+        let costs = StepCostModel::measured_consumer();
         let config = SchedulerConfig {
             floor_tok_s: 50.0,
             ..SchedulerConfig::default()
@@ -1802,7 +1803,7 @@ mod tests {
         // SLOWER (0.66x greedy at depth 5). The allocator has to reach depth 0
         // for that lane on its own — per-class policy falling out of measured
         // demand, with no prompt-class special case anywhere in the planner.
-        let costs = StepCostModel::measured_gpu_b();
+        let costs = StepCostModel::measured_consumer();
         let solo_expander = allocate_depths(
             &lanes(&[MEASURED_EXPANDER_ACCEPTANCE]),
             &open_config(),
@@ -1832,7 +1833,7 @@ mod tests {
         // among identical clients. On measured costs at 4 lanes, max-aggregate
         // prefers [0,0,0,1] over [1,1,1,1] for 0.4% more aggregate and a 1.76x
         // spread between clients doing the exact same thing. Refuse that trade.
-        let costs = StepCostModel::measured_gpu_b();
+        let costs = StepCostModel::measured_consumer();
         let demand = lanes(&[MEASURED_CHAT_ACCEPTANCE; 4]);
         let config = SchedulerConfig {
             floor_tok_s: 50.0,
@@ -1863,8 +1864,8 @@ mod tests {
         // means the recalibration is a number change, not a redesign.
         let demand = lanes(&[0.9, 0.9, 0.9, 0.9]);
         let config = open_config();
-        let full_head = StepCostModel::measured_gpu_b();
-        let sidecar = StepCostModel::measured_gpu_b().with_draft_cost(0.8, 0.1);
+        let full_head = StepCostModel::measured_consumer();
+        let sidecar = StepCostModel::measured_consumer().with_draft_cost(0.8, 0.1);
         let before = allocate_depths(&demand, &config, &full_head).expect("before");
         let after = allocate_depths(&demand, &config, &sidecar).expect("after");
         let depth_before: usize = before.depths.iter().sum();
@@ -2360,7 +2361,7 @@ mod tests {
     ///
     /// The solo path advances the session's own draft-head fill with no idea
     /// which slot it occupies, so when a slot changes hands the number it
-    /// carries across belongs to the PREVIOUS conversation. On .89 that
+    /// carries across belongs to the PREVIOUS conversation. On the 32 GB card that
     /// surfaced as `draft head at 8366 tokens, ahead of the model's 1024` and
     /// reached the player as a raw gguf-layer error on every ~20k prompt.
     #[test]

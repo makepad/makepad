@@ -1,4 +1,5 @@
 // `label` operands of asm! (stable asm goto): a jump runs the label's block, falling through skips it.
+// needs-native: inline assembly
 #[cfg(target_arch = "x86_64")]
 fn jump(taken: u64) -> u32 {
     let mut seen = 0;

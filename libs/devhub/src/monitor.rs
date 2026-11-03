@@ -3,14 +3,16 @@
 //! what a worktree holds on top of its HEAD without scanning it.
 //!
 //! A tree (a worktree root; a nested `apps/commercial` is a tree of its own) is baselined once
-//! with `git status` when it is first asked about and again when its HEAD moves (HEAD is read
-//! from the files under `.git`, no git call); from then on every file event under it joins its
-//! touched set. Its dirty set is the baseline plus what was touched, minus ignored paths (asked
-//! of `git check-ignore` once per new path) and directories. Touched files are asked of `git
-//! status` (those paths only) at the next ask and join the baseline or leave it: an edit undone
-//! is no work (a reverted file kept a lane dirty for good, refusing `lane remove`, 11-02). Lost
-//! events (an overflow, the root changing) re-baseline every tree. One monitor serves the
-//! master's lane worktrees and a node's tree alike.
+//! with a status (makepad-git, in process) when it is first asked about and again when its HEAD
+//! moves (HEAD is read from the files under `.git`); from then on every file event under it joins
+//! its touched set. Its dirty set is the baseline plus what was touched, minus ignored paths and
+//! directories. Touched files get a status of those paths only at the next ask and join the
+//! baseline or leave it: an edit undone is no work (a reverted file kept a lane dirty for good,
+//! refusing `lane remove`, 11-02). Lost events (an overflow, the root changing) re-baseline every
+//! tree. Nothing here runs git. One monitor serves the master's lane worktrees and a node's tree
+//! alike.
+
+mod tracked;
 
 use makepad_filesystem_watcher::{ExcludePolicy, FileSystemEvent, FileSystemEventKind, FileSystemWatcher, WatchRoot, WatcherConfig};
 use std::collections::{BTreeMap, BTreeSet};
@@ -31,13 +33,15 @@ pub struct Dirty {
 
 #[derive(Default)]
 struct Tree {
+    tracked: Option<tracked::Tracked>,
+    tracked_touched: BTreeSet<String>,
+    tracked_stale: bool,
     head: String,
     base: BTreeSet<String>,
-    /// paths with events since they were last asked of git, and the event's number
+    /// paths with events since their status was last read, and the event's number
     touched: BTreeMap<String, u64>,
     /// file events so far
     seq: u64,
-    ignored: BTreeMap<String, bool>,
     stale: bool,
     /// the wall time of the last file event under it
     last_ms: u64,
@@ -106,37 +110,16 @@ pub fn read_head(tree: &Path) -> Option<(String, String)> {
     Some((sha.to_string(), branch))
 }
 
-fn git(tree: &Path, args: &[&str], input: Option<&[u8]>) -> Result<Vec<u8>, String> {
-    use std::io::Write;
-    let mut cmd = makepad_remote::group::command("git");
-    cmd.arg("-C").arg(tree).args(args).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null());
-    cmd.stdin(if input.is_some() { std::process::Stdio::piped() } else { std::process::Stdio::null() });
-    let mut child = cmd.spawn().map_err(|e| format!("git: {e}"))?;
-    if let (Some(data), Some(mut sin)) = (input, child.stdin.take()) {
-        let _ = sin.write_all(data);
-    }
-    let out = child.wait_with_output().map_err(|e| format!("git: {e}"))?;
-    // check-ignore exits 1 when nothing is ignored
-    if !out.status.success() && out.status.code() != Some(1) {
-        return Err(format!("git {} failed in {}", args.first().unwrap_or(&""), tree.display()));
-    }
-    Ok(out.stdout)
+fn repo(tree: &Path) -> Result<makepad_git::Repository, String> {
+    let e = |e: makepad_git::GitError| format!("{}: {e}", tree.display());
+    let p = makepad_git::repository_paths(tree).map_err(e)?.ok_or_else(|| format!("{}: not a git worktree", tree.display()))?;
+    crate::gitread::worktree(p).map_err(e)
 }
 
-/// `git status` of the tree: every path that differs from HEAD or is untracked (not ignored).
+/// The tree's status: every path that differs from HEAD or is untracked (not ignored).
 fn baseline(tree: &Path) -> Result<BTreeSet<String>, String> {
-    status(tree, &[])
-}
-
-/// `git status` of `paths` (none: the whole tree), as [`baseline`].
-fn status(tree: &Path, paths: &[String]) -> Result<BTreeSet<String>, String> {
-    let mut args = vec!["--literal-pathspecs", "status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all", "--ignore-submodules=all"];
-    if !paths.is_empty() {
-        args.push("--");
-        args.extend(paths.iter().map(String::as_str));
-    }
-    let out = git(tree, &args, None)?;
-    Ok(String::from_utf8_lossy(&out).split('\0').filter(|e| e.len() > 3).map(|e| e[3..].to_string()).collect())
+    let status = repo(tree)?.status().map_err(|e| format!("{}: status: {e}", tree.display()))?;
+    Ok(status.entries.into_iter().map(|e| e.path).collect())
 }
 
 impl Monitor {
@@ -195,7 +178,8 @@ impl Monitor {
             let watched = self.watcher.is_some() && self.roots.iter().any(|r| root.starts_with(r));
             if t.head != head || t.stale || !watched {
                 let last_ms = t.last_ms;
-                *t = Tree { head: head.clone(), last_ms, ..Default::default() };
+                let seq = t.seq + 1;
+                *t = Tree { head: head.clone(), last_ms, seq, ..Default::default() };
                 true
             } else {
                 false
@@ -209,76 +193,51 @@ impl Monitor {
             }
         }
         let nested = root.join("apps/commercial/.git").exists();
-        let (cands, unknown, asked_at): (Vec<String>, Vec<String>, u64) = {
+        let (cands, asked_at): (Vec<String>, u64) = {
             let g = self.inner.lock().unwrap();
             let t = g.trees.get(&root).ok_or("the tree was forgotten")?;
             let all: Vec<String> = t.base.iter().chain(t.touched.keys()).collect::<BTreeSet<_>>().into_iter().filter(|p| !(nested && p.starts_with("apps/commercial/"))).cloned().collect();
-            let unknown = t.touched.keys().filter(|p| !t.base.contains(*p) && !t.ignored.contains_key(*p)).cloned().collect();
-            (all, unknown, t.seq)
+            (all, t.seq)
         };
-        if !unknown.is_empty() {
-            let mut input = Vec::new();
-            for p in &unknown {
-                input.extend_from_slice(p.as_bytes());
-                input.push(0);
-            }
-            let out = git(&root, &["check-ignore", "-z", "--stdin"], Some(&input))?;
-            let ignored: BTreeSet<String> = String::from_utf8_lossy(&out).split('\0').filter(|s| !s.is_empty()).map(str::to_string).collect();
-            let mut g = self.inner.lock().unwrap();
-            if let Some(t) = g.trees.get_mut(&root) {
-                for p in unknown {
-                    let ig = ignored.contains(&p);
-                    t.ignored.insert(p, ig);
-                }
-            }
-        }
         let mut d = Dirty { head, branch, ..Default::default() };
-        let mut missing = Vec::new();
+        // touched files and files gone get a status of their own; the rest of the baseline stands
         let mut ask = Vec::new();
         {
             let g = self.inner.lock().unwrap();
             let t = g.trees.get(&root).ok_or("the tree was forgotten")?;
             for p in cands {
-                if t.ignored.get(&p) == Some(&true) {
-                    continue;
-                }
                 match std::fs::symlink_metadata(root.join(&p)) {
                     Ok(m) if m.is_dir() => {}
-                    Ok(_) if t.touched.contains_key(&p) => ask.push(p),
-                    Ok(_) => d.changed.push(p),
-                    Err(_) => missing.push(p),
+                    Ok(_) if !t.touched.contains_key(&p) => d.changed.push(p),
+                    _ => ask.push(p),
                 }
             }
         }
-        // touched files: git says which still differ from HEAD (an edit undone drops out); an
-        // event after the ask keeps a path touched for the next one
-        let mut differ = BTreeSet::new();
-        for chunk in ask.chunks(500) {
-            differ.extend(status(&root, chunk)?);
+        if ask.is_empty() {
+            return Ok(d);
         }
+        let states = repo(&root)?.status_of_paths(&ask).map_err(|e| format!("{}: status: {e}", root.display()))?;
         {
+            // an event after the read keeps a path touched for the next ask
             let mut g = self.inner.lock().unwrap();
             if let Some(t) = g.trees.get_mut(&root).filter(|t| t.head == d.head) {
-                for p in &ask {
-                    if t.touched.get(p).is_some_and(|n| *n <= asked_at) {
-                        t.touched.remove(p);
-                        if differ.contains(p) { t.base.insert(p.clone()); } else { t.base.remove(p); }
+                for s in &states {
+                    if t.touched.get(&s.path).is_none_or(|n| *n <= asked_at) {
+                        t.touched.remove(&s.path);
+                        if s.status.is_some() { t.base.insert(s.path.clone()); } else { t.base.remove(&s.path); }
                     }
                 }
             }
         }
-        d.changed.extend(ask.into_iter().filter(|p| differ.contains(p)));
-        d.changed.sort();
         // a path that is gone counts only when HEAD has it (an untracked file came and went)
-        // (in chunks: a removed build dir can be more paths than one command line takes)
-        let mut tracked = BTreeSet::new();
-        for chunk in missing.chunks(500) {
-            let mut args = vec!["ls-tree", "-z", "--name-only", "HEAD", "--"];
-            args.extend(chunk.iter().map(String::as_str));
-            let out = git(&root, &args, None)?;
-            tracked.extend(String::from_utf8_lossy(&out).split('\0').filter(|s| !s.is_empty()).map(str::to_string));
+        for s in states.into_iter().filter(|s| s.status.is_some()) {
+            if root.join(&s.path).symlink_metadata().is_ok() {
+                d.changed.push(s.path);
+            } else if s.in_head {
+                d.deleted.push(s.path);
+            }
         }
-        d.deleted = missing.into_iter().filter(|p| tracked.contains(p)).collect();
+        d.changed.sort();
         Ok(d)
     }
 }
@@ -301,12 +260,12 @@ fn touch(g: &mut Inner, e: &FileSystemEvent, heard: &mut Vec<(PathBuf, String)>)
     if let FileSystemEventKind::RescanRequired { .. } = e.kind {
         for t in g.trees.values_mut() {
             t.stale = true;
+            t.tracked_stale = true;
+            t.seq += 1;
         }
         return;
     }
-    if e.is_dir == Some(true) {
-        return;
-    }
+
     let mut paths = vec![e.path.clone()];
     if let FileSystemEventKind::Renamed { from } = &e.kind {
         paths.push(from.clone());
@@ -316,8 +275,10 @@ fn touch(g: &mut Inner, e: &FileSystemEvent, heard: &mut Vec<(PathBuf, String)>)
         let Some((root, rel)) = p.ancestors().skip(1).find_map(|a| g.trees.contains_key(a).then(|| (a.to_path_buf(), p.strip_prefix(a).ok().map(|r| r.to_string_lossy().replace('\\', "/"))))) else { continue };
         let Some(rel) = rel.filter(|r| !r.is_empty()) else { continue };
         if let Some(t) = g.trees.get_mut(&root) {
-            t.ignored.remove(&rel);
             t.seq += 1;
+            if e.is_dir == Some(true) { t.tracked_stale = true; continue; }
+            if rel.rsplit("/").next() == Some(".gitattributes") { t.tracked_stale = true; }
+            t.tracked_touched.insert(rel.clone());
             t.touched.insert(rel.clone(), t.seq);
             t.last_ms = crate::proto::wall_ms();
             heard.push((root, rel));
@@ -349,6 +310,7 @@ mod tests {
         g(&tree, &["add", "."]);
         g(&tree, &["commit", "-q", "-m", "x"]);
         let m = Monitor::start(&[base.clone()]);
+        let spawned = crate::git_exec::on_this_thread();
         let d = m.dirty(&tree).unwrap();
         assert_eq!((d.branch.as_str(), d.head.len(), d.changed.len(), d.deleted.len()), ("rc-x", 40, 0, 0));
         std::fs::write(tree.join("untracked.rs"), "u").unwrap();
@@ -384,6 +346,8 @@ mod tests {
         g(&tree, &["commit", "-q", "-m", "y"]);
         let d = m.dirty(&tree).unwrap();
         assert_eq!((d.changed.len(), d.deleted.len()), (0, 0), "{d:?}");
+        // baselines, edits, ignored output and a HEAD move: no git process
+        assert_eq!(crate::git_exec::on_this_thread(), spawned);
         drop(m);
         let _ = std::fs::remove_dir_all(&base);
     }

@@ -84,7 +84,7 @@ pub fn repo() -> PathBuf {
 
 /// Registers the services and starts the jobs (the master only).
 pub fn start(ep: &makepad_remote::Endpoint, machine: &str, leases: Arc<LeaseMaster>, publish: crate::state::Publish) {
-    let store = crate::state::Store::open(&crate::proto::home(), machine, publish);
+    let store = crate::state::Store::open(&crate::proto::home(), machine, publish).expect("workflow state must open before services start");
     let repo = repo();
     for dir in [repo.clone(), repo.join("apps/commercial")] {
         if dir.join(".git").exists() {
@@ -96,6 +96,9 @@ pub fn start(ep: &makepad_remote::Endpoint, machine: &str, leases: Arc<LeaseMast
     let monitor = crate::monitor::Monitor::start(&[crate::lease::wt::root_of(&repo)]);
     if let Some(e) = &monitor.error {
         store.event("lane", crate::proto::Sev::Warn, format!("lane: the file monitor did not start ({e}); dirty sets come from git status"), None);
+    }
+    if let Err(e) = roll::keep_started_binary(&repo) {
+        store.event("update", crate::proto::Sev::Warn, format!("{e}: a rollback goes back to the file a restart finds"), None);
     }
     let ctx = Arc::new(Ctx { store, leases, machine: machine.to_string(), repo, home: crate::proto::home(), monitor });
     for svc in SERVICES {
@@ -262,6 +265,7 @@ fn serve(ctx: &Arc<Ctx>, svc: &str, line: &str, out: &mut Vec<String>) {
         "master" if line.trim() == "master restart" => git(&ctx.repo, &["rev-parse", "refs/heads/work"])
             .and_then(|work| if work == crate::lease::caps::hub_rev() { Ok(format!("the master already runs work's tip {}: nothing to restart", short(&work))) } else { roll::restart_master(ctx, &work, "`devhub master restart`") })
             .map(|done| format!("{{\"restart\":{}}}", json_str(&done))),
+        "master" if line.trim() == "master rollback" => roll::rollback_master(ctx, "`devhub master rollback`").map(|done| format!("{{\"restart\":{}}}", json_str(&done))),
         "state" => {
             let name = line.split_whitespace().nth(1);
             ctx.store.read(|d| d.section(name)).ok_or_else(|| format!("no state section `{}` (verify jitlegs allapps after pushes lanes jobs)", name.unwrap_or("")))
@@ -276,8 +280,9 @@ pub fn err(e: &str) -> String {
 }
 
 /// `git -C <dir> <args>`: its stdout (trimmed), or why it failed.
+#[track_caller]
 pub fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
-    let o = makepad_remote::group::command("git")
+    let o = crate::git_exec::command()
         .arg("-C")
         .arg(dir)
         .args(args)
@@ -291,29 +296,23 @@ pub fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&o.stdout).trim().to_string())
 }
 
-/// `git merge-base --is-ancestor a b`.
+/// `git merge-base --is-ancestor a b`, in-process ([`crate::gitread`]).
 pub fn is_ancestor(dir: &Path, a: &str, b: &str) -> bool {
-    makepad_remote::group::command("git")
-        .arg("-C")
-        .arg(dir)
-        .args(["merge-base", "--is-ancestor", a, b])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
+    crate::gitread::is_ancestor(dir, a, b)
 }
 
 /// The newest landed pair: work and commercial main, read twice, never while a landing moves them
-/// (`land-ff.lock` in the makepad repo's common dir). No ref is written.
+/// (`land-ff.lock` in the makepad repo's common dir). No ref is written and no git process starts:
+/// the refs are read as files (a few stats and small reads), so pollers may call it every second.
 pub fn snapshot(repo: &Path) -> Option<Pair> {
-    let common = PathBuf::from(git(repo, &["rev-parse", "--path-format=absolute", "--git-common-dir"]).ok()?);
-    let lock = common.join("land-ff.lock");
+    let mk = makepad_git::repository_paths(repo).ok()??;
+    let com = makepad_git::repository_paths(&repo.join("apps/commercial")).ok()??;
+    let lock = mk.common_dir.join("land-ff.lock");
     if lock.exists() {
         return None;
     }
-    let com = repo.join("apps/commercial");
-    let read = || Some(Pair { work: git(repo, &["rev-parse", "refs/heads/work"]).ok()?, main: git(&com, &["rev-parse", "refs/heads/main"]).ok()? });
+    let sha = |p: &makepad_git::RepositoryPaths, name: &str| makepad_git::refs::resolve_ref_in(&p.git_dir, &p.common_dir, name).ok().map(|o| o.to_hex());
+    let read = || Some(Pair { work: sha(&mk, "refs/heads/work")?, main: sha(&com, "refs/heads/main")? });
     let (a, b) = (read()?, read()?);
     (a == b && a.valid() && !lock.exists()).then_some(a)
 }

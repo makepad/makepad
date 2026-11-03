@@ -12,7 +12,6 @@ struct Recovery { attempt: Attempt, failure: String }
 #[derive(Default)]
 struct State {
     current: Option<Attempt>,
-    restart: Option<Attempt>,
     groups: BTreeMap<u32, Attempt>,
     recovery: Option<Recovery>,
     pending: VecDeque<Record>,
@@ -55,33 +54,11 @@ fn current() -> Attempt {
 
 fn empty_attempt() -> Attempt { Attempt { id: id(), units: Arc::new(Vec::new()), logs: Arc::new(Vec::new()) } }
 
-pub(crate) fn classified(lines: &[String], needs_restart: bool) {
+pub(crate) fn classified(lines: &[String]) {
     let _kept = crate::zone_alloc::kept();
     let logs = Arc::new(lines.to_vec());
     let old = state().current.as_mut().map(|a| std::mem::replace(&mut a.logs, logs));
     drop(old);
-    if needs_restart {
-        let mut a = current();
-        if !crate::reload::restart_pending().is_empty() {
-            let earlier = state().restart.clone();
-            if let Some(earlier) = earlier {
-                let mut units = (*earlier.units).clone();
-                for unit in a.units.iter() {
-                    if let Some(old) = units.iter_mut().find(|u| u.path == unit.path) { old.after = unit.after.clone(); }
-                    else { units.push(unit.clone()); }
-                }
-                let mut logs = (*earlier.logs).clone();
-                for line in a.logs.iter() { if !logs.contains(line) { logs.push(line.clone()); } }
-                a.units = Arc::new(units);
-                a.logs = Arc::new(logs);
-            }
-        }
-        let old = state().restart.replace(a);
-        drop(old);
-    } else if crate::reload::restart_pending().is_empty() {
-        let old = state().restart.take();
-        drop(old);
-    }
 }
 
 /// Capture the running text before the transaction can replace its file table.
@@ -129,8 +106,7 @@ pub fn failed(outcome: Outcome, lines: &[String], group: Option<u32>) -> bool {
     let _kept = crate::zone_alloc::kept();
     if ACTIVE.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() { return false; }
     REPLACEMENT.store(false, Ordering::Release);
-    let restart = if outcome == Outcome::RelaunchFailed && !crate::reload::restart_pending().is_empty() { state().restart.clone() } else { None };
-    let a = group.and_then(|g| state().groups.remove(&g)).or(restart).unwrap_or_else(current);
+    let a = group.and_then(|g| state().groups.remove(&g)).unwrap_or_else(current);
     let r = record(&a, outcome, lines.join("; "), String::new(), lines.to_vec());
     let record_id = r.id.clone();
     let load_id = r.load.clone();
@@ -245,6 +221,8 @@ pub fn verdict(code: i32) -> Verdict {
 
 /// An existing process restart carries the recovery identity and changed units
 /// alongside the app's snapshot. It does not manufacture another hot load.
+/// (unix-only: the restart is an exec in place, reload.rs exec_restart)
+#[cfg(unix)]
 pub(crate) fn prepare_exec(cmd: &mut std::process::Command) -> Result<(), String> {
     let _kept = crate::zone_alloc::kept();
     let recovery = state().recovery.as_ref().map(|r| (r.attempt.clone(), r.failure.clone()));

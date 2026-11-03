@@ -52,8 +52,9 @@ impl Renderer {
     /// A host's screen cache of the field: the host's receivers that sample
     /// it (`mod.draw.FastGiScreen`, bound through `bind_gi`) read it where it
     /// answers instead of gathering per pixel (`mod.draw.FastGiSampling`'s
-    /// `gi_screen_value` fills it, at the view the scene pass draws with;
-    /// `size` its pixels). None: they gather. The renderer's own scene
+    /// `gi_screen_value` fills it, at the view the scene pass draws with,
+    /// under the ambient those receivers pass to `gi_ambient`; `size` its
+    /// pixels). None: they gather. The renderer's own scene
     /// shaders always gather (their families have no texture slot for it).
     pub fn set_gi_screen(&mut self, screen: Option<(Texture, [f32; 2])>) { self.gi.set_screen(screen); }
 

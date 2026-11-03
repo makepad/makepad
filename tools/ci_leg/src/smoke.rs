@@ -7,6 +7,13 @@
 //! - a launch lives through a settle window after its first window (until the JIT is idle, at most
 //!   [`SETTLE`]): a panic (parked or not), a JIT compile error or an exit in it fails the launch
 //!   (the first frame comes before an app's worker threads do their work);
+//! - the app's Splash script errors and host diagnostics fail it (`no_errors` and its cleanup ask the
+//!   JIT's `script errors` on the app's socket: errors an app shows in its own UI too), unless its launch
+//!   says why they are expected (`script_errors: "<why>"`); a WM's cleanup asks every app it hosts
+//!   the same (the pids of its `tiles`, on their own endpoints); an app that ends before its cleanup
+//!   other than with exit 0 fails it (synth's 16 score.splash errors and a crash passed, 11-03);
+//! - the settle asks the JIT's `jit` on the app's socket (no loader spawn: a lane's run dir has no
+//!   Cargo.toml, so every lane's settle waited its whole window);
 //! - a parked panic anywhere fails the app at once: it would hold the thread for minutes, and a
 //!   request to a parked UI thread never answers ([`watch_parks`] kills the app and its children);
 //! - `ci.accept` saves the grab and its acceptance text; the devhub master judges them on the AI
@@ -184,6 +191,10 @@ struct AppHandle {
     parked: Arc<Mutex<Option<String>>>,
     /// left running for a human: nothing touches it any more
     left: Arc<AtomicBool>,
+    /// why its script errors are expected (its launch's `script_errors`); None: they fail it
+    script_errors: Option<String>,
+    /// its own app data and home for this run ([`fresh_data`]), removed once it is gone
+    data: PathBuf,
 }
 
 impl AppHandle {
@@ -390,15 +401,16 @@ impl Runtime {
 
     /// Starts `target` under the JIT, hidden and muted, takes its remote endpoint, waits for a
     /// real GPU and first presented frame, a window, ownership, then the settle window.
-    fn launch(&mut self, target: &Target, app_env: &[(String, String)]) -> Result<usize> {
+    fn launch(&mut self, target: &Target, app_env: &[(String, String)], script_errors: Option<String>) -> Result<usize> {
         let name = target.binary.clone();
         let cwd = inside(&self.run.root, Path::new(&target.cwd))?;
         let index = self.apps.len();
         let report = self.run.path(&format!("{}-{index}-report", safe_name(&name)));
         let _ = std::fs::remove_file(&report);
         let loader = crate::loader();
-        let config = self.run.path("config");
-        std::fs::create_dir_all(&config).map_err(|e| format!("{}: {e}", config.display()))?;
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
+        let data = std::env::temp_dir().join(format!("ci-leg-data-{}-{index}-{stamp}", std::process::id()));
+        let fresh = fresh_data(&data)?;
         let mut command = Command::new(&loader[0]);
         command.args(&loader[1..]).arg("run").arg("--report-to").arg(&report).arg(&target.package);
         if target.binary != target.package {
@@ -417,16 +429,21 @@ impl Runtime {
             // the smoke boots this tree: a WM it starts runs its apps from here, not from the
             // checkout of a WM session the runner was started in
             .env_remove("MAKEPAD_WM_ROOT")
-            // nor the box's own desktop settings (a WM applied the node's saved display scale,
-            // 250: its desk was 540x240 points), and nothing it saves reaches the person's
-            .env("XDG_CONFIG_HOME", &config)
+            // nothing an earlier run or the box left: no desktop settings (a WM applied the
+            // node's saved display scale, 250: its desk was 540x240 points), no open document (a
+            // draft another synth left in its tree's data reopened with 9 script errors), and
+            // nothing it saves reaches the person's or the next run's
+            .envs(fresh.iter().map(|(k, v)| (*k, v.as_os_str())))
             .envs(app_env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
         let log = self.run.path(&format!("{}-{index}-stdout.log", safe_name(&name)));
-        let child = ChildLog::spawn(&mut command, log.clone())?;
+        let child = ChildLog::spawn(&mut command, log.clone()).inspect_err(|_| {
+            let _ = std::fs::remove_dir_all(&data);
+        })?;
         self.run.log(&format!("owned {name} pid={}", child.child.id()));
         let (parked, left) = (Arc::new(Mutex::new(None)), Arc::new(AtomicBool::new(false)));
         watch_parks(child.child.id(), File::open(&log).map_err(|e| e.to_string())?, parked.clone(), left.clone());
-        self.apps.push(AppHandle { child, remote: None, interrupted: false, closed: false, name: name.clone(), report, parked, left });
+        if let Some(why) = &script_errors { self.run.log(&format!("{name}: its script errors do not fail it ({why})")); }
+        self.apps.push(AppHandle { child, remote: None, interrupted: false, closed: false, name: name.clone(), report, parked, left, script_errors, data });
         let deadline = Instant::now() + STARTUP;
         loop {
             self.drain_app(index)?;
@@ -541,22 +558,23 @@ impl Runtime {
     /// compile error or an exit in it fails.
     fn settle(&mut self, i: usize) -> Result<()> {
         let t = Instant::now();
-        let pid = self.apps[i].child.child.id().to_string();
-        let loader = crate::loader_cmd();
         let mut idle = 0;
-        let mut first_busy: Option<String> = None;
+        // what the JIT said last while it was not idle (its state line, not the reply's header)
+        let mut busy = String::new();
         while t.elapsed() < SETTLE && idle < 2 {
             if !self.alive(i)? {
                 return Err(format!("{} exited {:.1} s into the settle window\n{}", self.apps[i].name, t.elapsed().as_secs_f64(), tail(&self.apps[i].child.text, 30)));
             }
-            let out = Command::new(&loader[0]).args(&loader[1..]).args(["inspect", &pid, "jit", "ms=500"]).stdin(Stdio::null()).output();
-            let answer = out.map(|o| format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr))).unwrap_or_default();
+            // the JIT's endpoint answers `jit` on the app's own socket (no loader spawn, no tree)
+            let answer = match self.request(i, &argv(&["jit", "ms=500"]), false) {
+                Ok(a) => a,
+                Err(e) if self.fatal => return Err(e),
+                Err(e) => e,
+            };
             if answer.lines().any(|l| l.trim_start().starts_with("idle")) {
                 idle += 1;
             } else {
-                if idle == 0 && first_busy.is_none() {
-                    first_busy = answer.lines().find(|l| !l.trim().is_empty()).map(|l| l.chars().take(160).collect());
-                }
+                busy = answer.lines().find(|l| !l.trim().is_empty() && !l.trim_start().starts_with('{')).unwrap_or(answer.as_str()).chars().take(200).collect();
                 idle = 0;
                 std::thread::sleep(Duration::from_millis(500));
             }
@@ -566,7 +584,7 @@ impl Runtime {
         let report = std::fs::read_to_string(&self.apps[i].report).unwrap_or_default();
         bad.extend(report.lines().filter(|l| l.starts_with("panic\t") || l.starts_with("error\t")).map(|l| l.replace('\t', " ")));
         if bad.is_empty() {
-            let how = if idle >= 2 { "JIT idle".to_string() } else { format!("window ended; the JIT said: {}", first_busy.unwrap_or_default()) };
+            let how = if idle >= 2 { "JIT idle".to_string() } else { format!("window ended; the JIT said: {busy}") };
             self.run.log(&format!("{} settled in {:.1} s ({how})", self.apps[i].name, t.elapsed().as_secs_f64()));
             Ok(())
         } else {
@@ -605,11 +623,65 @@ impl Runtime {
         }
         let log = format!("{}\n{}", self.log_text(i)?, self.apps[i].child.text);
         let errors = error_lines(&log);
-        if errors.is_empty() {
-            Ok(())
-        } else {
-            Err(errors.join("\n"))
+        if !errors.is_empty() {
+            return Err(errors.join("\n"));
         }
+        self.script_errors(i)
+    }
+
+    /// The app's Splash script errors and host diagnostics since it started, shown in its own UI
+    /// or not: they fail it unless its launch said why they are expected.
+    fn script_errors(&mut self, i: usize) -> Result<()> {
+        if self.apps[i].script_errors.is_some() {
+            return Ok(());
+        }
+        // the JIT's endpoint answers its inspect commands on the app's own socket
+        let answer = self.request(i, &argv(&["script", "errors"]), false)?;
+        let Some((sites, rows)) = script_error_sites(&answer) else {
+            return Err(format!("{}: `script errors` did not answer: {}", self.apps[i].name, tail(&answer, 5)));
+        };
+        if sites == 0 {
+            return Ok(());
+        }
+        Err(format!("{} has {sites} script error site(s) (a launch with `script_errors: \"<why>\"` expects them):\n{}", self.apps[i].name, rows.join("\n")))
+    }
+
+    /// The script errors of every app a WM hosts, under the same rule: the pids its `tiles` names,
+    /// asked on their own endpoints before it quits (its apps go with it). An app that answers no
+    /// `tiles` hosts none; a launch's `script_errors` covers the apps it hosts too.
+    fn hosted_script_errors(&mut self, i: usize) -> Result<()> {
+        if self.apps[i].script_errors.is_some() {
+            return Ok(());
+        }
+        let name = self.apps[i].name.clone();
+        let tiles = match self.request(i, &argv(&["tiles"]), false) {
+            Ok(t) => t,
+            Err(e) if e.contains("unknown command `tiles`") => return Ok(()),
+            Err(e) => return Err(format!("{name}: `tiles` did not answer: {e}")),
+        };
+        let mut bad = Vec::new();
+        let mut asked = Vec::new();
+        for (app, pid) in tile_pids(&tiles, self.apps[i].child.child.id()) {
+            let client = match Client::connect(&pid.to_string()) {
+                Ok(c) => c,
+                Err(e) => {
+                    self.run.log(&format!("  {name} hosts {app} pid={pid} with no endpoint to ask ({e})"));
+                    continue;
+                }
+            };
+            let at = format!("{name} hosts {app} pid={pid}");
+            asked.push(format!("{app} pid={pid}"));
+            match (Remote { client, user_seq: None }).request(&argv(&["script", "errors"]), false) {
+                Ok(answer) => match script_error_sites(&answer) {
+                    Some((0, _)) => {}
+                    Some((sites, rows)) => bad.push(format!("{at} with {sites} script error site(s):\n{}", rows.join("\n"))),
+                    None => bad.push(format!("{at}: `script errors` did not answer: {}", tail(&answer, 5))),
+                },
+                Err(Failure::Message(e) | Failure::Interrupted(e)) => bad.push(format!("{at}: `script errors`: {e}")),
+            }
+        }
+        self.run.log(&format!("  {name}: asked the {} app(s) it hosts for their script errors: {}", asked.len(), asked.join(", ")));
+        if bad.is_empty() { Ok(()) } else { Err(bad.join("\n")) }
     }
 
     /// `secs` without progress: the wait goes on while a JIT of the app's process tree compiles
@@ -667,6 +739,13 @@ impl Runtime {
         Ok(self.images.len() - 1)
     }
 
+    /// The app is gone: its run's own data goes too (an app left to a human keeps it).
+    fn drop_data(&mut self, i: usize) {
+        if let Err(e) = std::fs::remove_dir_all(&self.apps[i].data).or_else(|e| if e.kind() == std::io::ErrorKind::NotFound { Ok(()) } else { Err(e) }) {
+            self.run.log(&format!("  {}: its data {}: {e}", self.apps[i].name, self.apps[i].data.display()));
+        }
+    }
+
     fn quit(&mut self, i: usize) -> Result<()> {
         if self.apps[i].interrupted {
             return Err("human intervention; app left running".into());
@@ -676,8 +755,15 @@ impl Runtime {
         }
         if !self.apps[i].child.alive()? {
             self.apps[i].closed = true;
-            return Ok(());
+            self.drain_app(i)?;
+            let status = self.apps[i].child.child.try_wait().map_err(|e| e.to_string())?;
+            self.run.log(&format!("  {} had ended before its cleanup ({})", self.apps[i].name, status.map_or("no exit status".into(), |s| s.to_string())));
+            self.drop_data(i);
+            return ended_early(&self.apps[i].name, status, &self.apps[i].child.text);
         }
+        // what it and the apps it hosts reported while they ran, asked before it quits
+        let script = self.script_errors(i).err();
+        let hosted = self.hosted_script_errors(i).err();
         // the graceful quit on a thread of its own: an app that no longer answers (its UI thread
         // stuck) waits the deadline out, and is killed, however long its answer would take
         let asked = self.apps[i].remote.take().map(|mut remote| {
@@ -728,7 +814,11 @@ impl Runtime {
         }
         self.drain_app(i)?;
         self.apps[i].closed = true;
-        error.map_or(Ok(()), Err)
+        self.drop_data(i);
+        match [script, hosted, error].into_iter().flatten().collect::<Vec<_>>() {
+            e if e.is_empty() => Ok(()),
+            e => Err(e.join("\n")),
+        }
     }
 }
 
@@ -778,6 +868,65 @@ fn parse_startup(line: &str, pid: u32) -> Option<String> {
     }
     let socket = rest.split_once(" socket=")?.1.trim();
     (!socket.is_empty()).then(|| socket.to_string())
+}
+
+/// `script errors`' answer (makepad inspect's): its error sites and the first ten as
+/// `<at> <n>x: <text>`; None when it did not answer.
+fn script_error_sites(answer: &str) -> Option<(u64, Vec<String>)> {
+    let mut rows = answer.lines().filter(|l| l.trim_start().starts_with('{')).filter_map(|l| json::parse(l.trim().as_bytes()).ok());
+    let sites = rows.next()?.get("script_errors")?.as_u64()?;
+    let text = |v: &Value, k: &str| v.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+    Some((sites, rows.take(10).map(|v| format!("{} {}x: {}", text(&v, "at"), v.get("n").and_then(Value::as_u64).unwrap_or(0), text(&v, "text"))).collect()))
+}
+
+/// A launch's own app data and home under `dir`, made empty, as the environment the apps honour:
+/// the general case (XDG on Linux, APPDATA on Windows, the key/value storage, a test instance's
+/// home) and the apps that keep their data in their checkout or the makepad home
+/// (`SYNTH_DATA_DIR` and its kind). The same list as tools/run/fixture/land_gate.sh `present`.
+fn fresh_data(dir: &Path) -> Result<Vec<(&'static str, PathBuf)>> {
+    let mut env = vec![
+        ("XDG_DATA_HOME", "data"),
+        ("XDG_CONFIG_HOME", "config"),
+        ("XDG_STATE_HOME", "state"),
+        ("MAKEPAD_STORAGE_DIR", "storage"),
+        ("MAKEPAD_TEST_HOME", "home"),
+        ("SYNTH_DATA_DIR", "synth"),
+        ("AMP_DATA_DIR", "amp"),
+        ("MAKEPAD_AICHAT_DIR", "aichat"),
+    ];
+    if cfg!(windows) {
+        env.push(("APPDATA", "appdata"));
+    }
+    let _ = std::fs::remove_dir_all(dir);
+    env.into_iter()
+        .map(|(key, sub)| {
+            let path = dir.join(sub);
+            std::fs::create_dir_all(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+            Ok((key, path))
+        })
+        .collect()
+}
+
+/// The live apps of a WM's `tiles` answer, each pid once (a client's windows share it), not `own`.
+fn tile_pids(answer: &str, own: u32) -> Vec<(String, u32)> {
+    let mut out: Vec<(String, u32)> = Vec::new();
+    for v in answer.lines().filter(|l| l.trim_start().starts_with('{')).filter_map(|l| json::parse(l.trim().as_bytes()).ok()) {
+        let pid = v.get("pid").and_then(Value::as_u64).and_then(|p| u32::try_from(p).ok());
+        let alive = v.get("alive").and_then(Value::as_bool) == Some(true);
+        if let Some(pid) = pid.filter(|p| alive && *p != own && !out.iter().any(|(_, q)| q == p)) {
+            out.push((v.get("app").and_then(Value::as_str).unwrap_or("?").to_string(), pid));
+        }
+    }
+    out
+}
+
+/// An app found ended at its cleanup: fine after exit 0 (it closed itself), else it failed.
+fn ended_early(name: &str, status: Option<std::process::ExitStatus>, text: &str) -> Result<()> {
+    match status {
+        Some(s) if s.success() => Ok(()),
+        Some(s) => Err(format!("{name} ended before its cleanup ({s})\n{}", tail(text, 30))),
+        None => Err(format!("{name} ended before its cleanup (no exit status)\n{}", tail(text, 30))),
+    }
 }
 
 fn tail(text: &str, n: usize) -> String {
@@ -1050,10 +1199,11 @@ fn register(vm: &mut ScriptVm, target: Option<&Target>) {
             let binary = field_text(vm, v, id!(binary))?.unwrap_or_else(|| package.clone());
             let cwd = field_text(vm, v, id!(cwd))?.unwrap_or_else(|| ".".into());
             let app_env = env_pairs(vm, object_field(vm, v, id!(app_env)), "app_env")?;
+            let script_errors = field_text(vm, v, id!(script_errors))?.filter(|why| !why.trim().is_empty());
             let r = rt(vm);
             let i = r.run.begin(&format!("{} / launch {binary}", r.group));
             let t = Target { package, binary, cwd };
-            let result = r.launch(&t, &app_env);
+            let result = r.launch(&t, &app_env, script_errors);
             match &result {
                 Ok(_) => r.run.end(i, "passed", ""),
                 Err(e) => {
@@ -1387,6 +1537,48 @@ mod tests {
         }
         assert!(!makepad_remote::procs::is_alive(child));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn script_errors_its_hosted_apps_and_an_early_end_fail_an_app() {
+        assert_eq!(script_error_sites("{\"script_errors\":0,\"note\":\"none\"}\n"), Some((0, Vec::new())));
+        let answer = "noise\n{\"script_errors\":2}\n{\"vm\":\"V3\",\"kind\":\"error\",\"at\":\"score.splash:21\",\"n\":4,\"text\":\"variable Score not found in scope\"}\n{\"vm\":\"V3\",\"kind\":\"error\",\"n\":1,\"text\":\"x\"}\n";
+        let (sites, rows) = script_error_sites(answer).unwrap();
+        assert_eq!(sites, 2);
+        assert_eq!(rows[0], "score.splash:21 4x: variable Score not found in scope");
+        assert_eq!(script_error_sites("error: no such process\n"), None, "no answer is no pass");
+        #[cfg(unix)]
+        {
+            let exit = |code: &str| Command::new("/bin/sh").args(["-c", &format!("exit {code}")]).status().ok();
+            assert!(ended_early("calc", exit("0"), "").is_ok(), "it closed itself");
+            assert!(ended_early("calc", exit("3"), "last line").unwrap_err().contains("calc ended before its cleanup"));
+        }
+        assert!(ended_early("calc", None, "").is_err());
+        // a WM's hosted apps: live tiles, each pid once, never the WM itself
+        let tiles = "{\"client\":1,\"app\":\"calc\",\"title\":\"\",\"pid\":40,\"connected\":true,\"alive\":true,\"window\":1,\"parent\":null}\n\
+            {\"client\":2,\"app\":\"calc\",\"title\":\"\",\"pid\":40,\"connected\":true,\"alive\":true,\"window\":2,\"parent\":1}\n\
+            {\"client\":3,\"app\":\"clock\",\"title\":\"\",\"pid\":41,\"connected\":false,\"alive\":false,\"window\":3,\"parent\":null}\n\
+            {\"client\":4,\"app\":\"term\",\"title\":\"\",\"pid\":null,\"connected\":true,\"alive\":false,\"window\":4,\"parent\":null}\n\
+            {\"client\":5,\"app\":\"desk\",\"title\":\"\",\"pid\":7,\"connected\":true,\"alive\":true,\"window\":5,\"parent\":null}\n";
+        assert_eq!(tile_pids(tiles, 7), [("calc".to_string(), 40)]);
+    }
+
+    /// Each launch: its own empty app data and home, the same list the gate's presents get.
+    #[test]
+    fn each_launch_gets_its_own_empty_app_data_and_home() {
+        let dir = std::env::temp_dir().join(format!("ci-leg-test-{}-fresh", std::process::id()));
+        std::fs::create_dir_all(dir.join("synth/drafts")).unwrap();
+        std::fs::write(dir.join("synth/drafts/open.score"), "an earlier run's open draft").unwrap();
+        let env = fresh_data(&dir).unwrap();
+        let gate = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../run/fixture/land_gate.sh")).unwrap();
+        for key in ["XDG_DATA_HOME", "XDG_CONFIG_HOME", "MAKEPAD_STORAGE_DIR", "SYNTH_DATA_DIR"] {
+            assert!(env.iter().any(|(k, _)| *k == key), "{key}");
+        }
+        for (key, path) in &env {
+            assert!(path.starts_with(&dir) && std::fs::read_dir(path).unwrap().next().is_none(), "{key}: fresh, nothing an earlier run left");
+            assert!(*key == "APPDATA" || gate.contains(&format!("{key}=")), "{key}: land_gate.sh's presents get it too");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

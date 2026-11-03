@@ -78,8 +78,8 @@ impl GenRouter for Avoiding {
 }
 
 /// The hubs a grab goes to: those with the model loaded, else those with it ready (installed),
-/// else every hub; of them, the fastest GPU's (the fleet's speed table: a GPU-C, then a
-/// GPU-B, ...). A model is never loaded just to pick a box while another hub has it loaded.
+/// else every hub; of them, the fastest GPU's (the fleet's VRAM classes: a 96 GB card, then a
+/// 32 GB card, ...). A model is never loaded just to pick a box while another hub has it loaded.
 pub fn judges(snapshots: Vec<BoxSnapshot>) -> Vec<BoxSnapshot> {
     let state = |s: &BoxSnapshot| fleet::affinity(s, MODEL);
     let pool: Vec<BoxSnapshot> = [4, 3]

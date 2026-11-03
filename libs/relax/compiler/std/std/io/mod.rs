@@ -639,21 +639,62 @@ impl Write for &Sink {
     }
 }
 
-/// A buffer for vectored writes (real std's IoSlice; here a plain slice, not an iovec).
+/// The buffer description the OS's vectored calls take (real std's sys io_slice): `iovec` on
+/// Unix (and on the web, which has no such call), `WSABUF` on Windows. `IoSlice` and
+/// `IoSliceMut` are ABI compatible with it, as std documents, so FFI code may hand them to
+/// `writev` / `sendmsg` / `WSASend` (and `improper_ctypes` sees a C struct, not a slice).
+#[cfg(not(windows))]
 #[derive(Clone, Copy)]
-pub struct IoSlice<'a> {
-    buf: &'a [u8],
+#[repr(C)]
+struct IoBuf {
+    base: *mut u8,
+    len: usize,
 }
+#[cfg(windows)]
+#[derive(Clone, Copy)]
+#[repr(C)]
+struct IoBuf {
+    len: u32,
+    base: *mut u8,
+}
+
+impl IoBuf {
+    fn new(base: *mut u8, len: usize) -> IoBuf {
+        // real std's windows io_slice: WSABUF's length is a u32
+        #[cfg(windows)]
+        let len = { assert!(len <= u32::MAX as usize, "buffer is too large for a vectored call"); len as u32 };
+        IoBuf { base, len }
+    }
+    fn parts(&self) -> (*mut u8, usize) {
+        (self.base, self.len as usize)
+    }
+    fn advance(&mut self, n: usize, what: &str) {
+        let (base, len) = self.parts();
+        if len < n {
+            panic!("advancing {} beyond its length", what);
+        }
+        *self = IoBuf::new(unsafe { base.add(n) }, len - n);
+    }
+}
+
+/// A buffer for vectored writes (real std's IoSlice: an `iovec` / `WSABUF` borrowing `'a`).
+#[derive(Clone, Copy)]
+#[repr(transparent)]
+pub struct IoSlice<'a> {
+    vec: IoBuf,
+    _p: core::marker::PhantomData<&'a [u8]>,
+}
+
+// real std's: the buffer is borrowed as `&'a [u8]` is
+unsafe impl<'a> Send for IoSlice<'a> {}
+unsafe impl<'a> Sync for IoSlice<'a> {}
 
 impl<'a> IoSlice<'a> {
     pub fn new(buf: &'a [u8]) -> IoSlice<'a> {
-        IoSlice { buf }
+        IoSlice { vec: IoBuf::new(buf.as_ptr() as *mut u8, buf.len()), _p: core::marker::PhantomData }
     }
     pub fn advance(&mut self, n: usize) {
-        if self.buf.len() < n {
-            panic!("advancing IoSlice beyond its length");
-        }
-        self.buf = &self.buf[n..];
+        self.vec.advance(n, "IoSlice");
     }
     pub fn advance_slices(bufs: &mut &mut [IoSlice<'a>], n: usize) {
         let mut remove = 0;
@@ -677,31 +718,33 @@ impl<'a> IoSlice<'a> {
 impl<'a> core::ops::Deref for IoSlice<'a> {
     type Target = [u8];
     fn deref(&self) -> &[u8] {
-        self.buf
+        let (base, len) = self.vec.parts();
+        unsafe { core::slice::from_raw_parts(base, len) }
     }
 }
 
 impl<'a> fmt::Debug for IoSlice<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Debug::fmt(self.buf, f)
+        fmt::Debug::fmt(&**self, f)
     }
 }
 
-/// A buffer for vectored reads (real std's IoSliceMut).
+/// A buffer for vectored reads (real std's IoSliceMut: an `iovec` / `WSABUF` borrowing `'a` mutably).
+#[repr(transparent)]
 pub struct IoSliceMut<'a> {
-    buf: &'a mut [u8],
+    vec: IoBuf,
+    _p: core::marker::PhantomData<&'a mut [u8]>,
 }
+
+unsafe impl<'a> Send for IoSliceMut<'a> {}
+unsafe impl<'a> Sync for IoSliceMut<'a> {}
 
 impl<'a> IoSliceMut<'a> {
     pub fn new(buf: &'a mut [u8]) -> IoSliceMut<'a> {
-        IoSliceMut { buf }
+        IoSliceMut { vec: IoBuf::new(buf.as_mut_ptr(), buf.len()), _p: core::marker::PhantomData }
     }
     pub fn advance(&mut self, n: usize) {
-        if self.buf.len() < n {
-            panic!("advancing IoSliceMut beyond its length");
-        }
-        let b = core::mem::take(&mut self.buf);
-        self.buf = &mut b[n..];
+        self.vec.advance(n, "IoSliceMut");
     }
     pub fn advance_slices(bufs: &mut &mut [IoSliceMut<'a>], n: usize) {
         let mut remove = 0;
@@ -725,19 +768,21 @@ impl<'a> IoSliceMut<'a> {
 impl<'a> core::ops::Deref for IoSliceMut<'a> {
     type Target = [u8];
     fn deref(&self) -> &[u8] {
-        self.buf
+        let (base, len) = self.vec.parts();
+        unsafe { core::slice::from_raw_parts(base, len) }
     }
 }
 
 impl<'a> core::ops::DerefMut for IoSliceMut<'a> {
     fn deref_mut(&mut self) -> &mut [u8] {
-        self.buf
+        let (base, len) = self.vec.parts();
+        unsafe { core::slice::from_raw_parts_mut(base, len) }
     }
 }
 
 impl<'a> fmt::Debug for IoSliceMut<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Debug::fmt(&*self.buf, f)
+        fmt::Debug::fmt(&**self, f)
     }
 }
 

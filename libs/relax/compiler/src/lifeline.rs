@@ -66,7 +66,21 @@ thread_local! {
     static INDEX: Cell<usize> = const { Cell::new(usize::MAX) };
     /// the last panic's position on this thread ("file.rs:line"), written by the panic hook with
     /// no allocation (it may run on any thread at any time)
-    static PANIC_AT: Cell<([u8; 62], u8, u32)> = const { Cell::new(([0; 62], 0, 0)) };
+    static PANIC_AT: Cell<PanicAt> = const { Cell::new(NO_PANIC_AT) };
+}
+
+/// A recorded panic position: (the path's tail, its length, the line).
+pub type PanicAt = ([u8; 62], u8, u32);
+pub const NO_PANIC_AT: PanicAt = ([0; 62], 0, 0);
+
+/// This thread's recorded panic position as it is stored (the owner hands it to a requester).
+pub fn panic_at_raw() -> PanicAt {
+    PANIC_AT.try_with(|c| c.get()).unwrap_or(NO_PANIC_AT)
+}
+
+/// Takes over a position recorded on another thread (a request's panic on the owner, resumed here).
+pub fn set_panic_at_raw(at: PanicAt) {
+    let _ = PANIC_AT.try_with(|c| c.set(at));
 }
 
 /// Records where a panic happened on this thread (the panic hook; no allocation, no lock).

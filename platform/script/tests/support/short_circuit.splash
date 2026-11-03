@@ -1,0 +1,22 @@
+use mod.pod.*
+use mod.math.*
+use mod.shader
+{
+    workgroup_size: 32
+    src: shader.buffer(f32)
+    dst: shader.buffer_rw(u32)
+    calls: shader.buffer_rw(u32)
+    main: fn() {
+        let lane = global_id().x
+        let i = if lane == u32(31) { u32(4294967295) } else { lane }
+        let n = u32(5)
+        let skip = i == u32(4294967295) || i >= n || self.src[i] > f32(0.0)
+        let hit = i < n && self.src[i] > f32(0.0)
+        self.dst[lane] = if skip { u32(1) } else { u32(0) }
+        if hit { self.dst[lane] += u32(2) }
+        let branch_rhs = i >= n || (if self.src[i] > f32(0.0) { true } else { false })
+        if branch_rhs { self.dst[lane] += u32(4) }
+        let or_effect = i >= n || atomic_add(self.calls[0], u32(1)) == u32(4294967295)
+        let and_effect = i < n && atomic_add(self.calls[1], u32(1)) == u32(4294967295)
+    }
+}

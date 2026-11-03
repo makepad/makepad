@@ -20,9 +20,11 @@ pub fn makepad_home() -> PathBuf {
         .join(".makepad")
 }
 
-/// Returns the root used by the native key/value storage backend.
+/// Returns the root used by the native key/value storage backend: an absolute
+/// `MAKEPAD_STORAGE_DIR` (a test run's own, so it never reads what an earlier run
+/// stored), else `storage` in [`makepad_home`].
 pub fn storage_dir() -> PathBuf {
-    makepad_home().join("storage")
+    std::env::var_os("MAKEPAD_STORAGE_DIR").map(PathBuf::from).filter(|dir| dir.is_absolute()).unwrap_or_else(|| makepad_home().join("storage"))
 }
 
 /// Where an app keeps its own per-user files: `~/Library/Application

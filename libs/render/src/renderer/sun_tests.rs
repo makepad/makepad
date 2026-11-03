@@ -1,5 +1,37 @@
 use super::*;
 
+/// The key light and the sky's own sun of the generated skies these tests
+/// were written against (recorded 2026-10-29): no generator is part of this
+/// crate, so the numbers stand in for it.
+pub(super) fn preset_keys(name: &str) -> (Option<makepad_scene::EnvSun>, Option<Vec3f>) {
+    use makepad_scene::EnvSun;
+    match name {
+        // The sun 6 degrees up is the key.
+        "Golden hour" => {
+            let sun = vec3f(-0.901343, 0.104528464, -0.42030305);
+            (Some(EnvSun { dir: sun, radiance: vec3f(67960.4, 37019.0, 9390.565), cos_radius: 0.99998933, facing: 1.0, cos_cover: 0.99998647 }), Some(sun))
+        }
+        // The moon 30 degrees up is the key, the sun 30 degrees down.
+        "Moonlit night" => (
+            Some(EnvSun { dir: vec3f(0.83651626, 0.5, 0.22414386), radiance: vec3f(1035.5789, 933.7166, 753.7075), cos_radius: 0.9999897, facing: 1.0, cos_cover: 0.9999897 }),
+            Some(vec3f(-0.8365164, -0.50000006, -0.22414386)),
+        ),
+        // No key: the sun 5 degrees down and the moon not yet keyed.
+        "Blue hour" => (None, Some(vec3f(-0.7850121, -0.08715574, -0.61331874))),
+        // A studio: a softbox key 30 degrees up and no sun.
+        "Three-point" => (
+            Some(EnvSun { dir: vec3f(0.6123724, 0.5, 0.6123724), radiance: vec3f(10.660884, 9.144196, 8.304669), cos_radius: 0.9396926, facing: 0.9752553, cos_cover: 0.87078816 }),
+            None,
+        ),
+        // A studio: a 110 degree dome overhead as the key, and no sun.
+        "Overcast dome" => (
+            Some(EnvSun { dir: vec3f(0.0, 0.9961947, -0.087155804), radiance: vec3f(1.3910319, 1.3651712, 1.533927), cos_radius: 0.57357645, facing: 0.7823475, cos_cover: 0.24030651 }),
+            None,
+        ),
+        _ => panic!("no recorded keys for {name}"),
+    }
+}
+
 /// T7 on the game side: every game shader must read ONE sun. Before the
 /// unification each shader carried its own ambient/direct constants and
 /// five script blocks set the light direction by hand, so changing one
@@ -186,10 +218,10 @@ fn settle_world(renderer: &mut Renderer, cx: &mut Cx, world: &World) {
 fn a_landed_environment_lights_the_rig_in_both_lanes() {
     let mut cx = Cx::new(Box::new(|_, _| {}));
     let mut renderer = Renderer::default();
-    let toward = crate::hdri::dir_from_az_el(90.0, 45.0);
+    let toward = crate::env_map::dir_from_az_el(90.0, 45.0);
     let sun = env_sun_of(toward, 1.0e3, 3.0, 1.0);
     let map = makepad_render_material::ibl::EnvMap::from_fn(128, |d| {
-        if crate::hdri::vec(d).dot(toward) >= sun.cos_radius { [1.0e3; 3] } else { [0.5; 3] }
+        if crate::env_map::vec(d).dot(toward) >= sun.cos_radius { [1.0e3; 3] } else { [0.5; 3] }
     });
     renderer.register_environment(makepad_scene::TextureRef(1), std::sync::Arc::new(map));
     let mut world = env_named(makepad_scene::IblSource::Hdri(makepad_scene::TextureRef(1)), Some(sun));
@@ -265,8 +297,8 @@ fn the_rig_lights_with_the_bound_preparations_key_until_the_next_lands() {
     let mut cx = Cx::new(Box::new(|_, _| {}));
     let mut renderer = Renderer::default();
     renderer.hdr_output = true;
-    let a = env_sun_of(crate::hdri::dir_from_az_el(90.0, 45.0), 1.0e3, 3.0, 1.0);
-    let b = env_sun_of(crate::hdri::dir_from_az_el(200.0, 30.0), 2.0e3, 3.0, 1.0);
+    let a = env_sun_of(crate::env_map::dir_from_az_el(90.0, 45.0), 1.0e3, 3.0, 1.0);
+    let b = env_sun_of(crate::env_map::dir_from_az_el(200.0, 30.0), 2.0e3, 3.0, 1.0);
     // A plain map: either key's filled cone is the same grey, so the two
     // preparations differ only in the key they were made with.
     let map = makepad_render_material::ibl::EnvMap::constant(64, [0.5, 0.5, 0.5]);
@@ -335,8 +367,8 @@ fn lamp_renderer(hdr: bool, clustered: bool, level: f32, key: Option<makepad_sce
 /// world's own clock says 14:00 here: the environment's sun decides.
 #[test]
 fn a_moon_key_lights_the_scene_while_the_lamps_and_the_sky_follow_the_sun() {
-    let preset = crate::hdri::Env::new(&crate::hdri::presets::preset("Moonlit night").unwrap());
-    let (moon, sun_dir) = (preset.sun().expect("the moon is the key"), preset.sun_dir().expect("a sky has its sun"));
+    let (moon, sun_dir) = preset_keys("Moonlit night");
+    let (moon, sun_dir) = (moon.expect("the moon is the key"), sun_dir.expect("a sky has its sun"));
     let mut r = lamp_renderer(true, true, 0.02, Some(moon), Some(sun_dir));
     let mut world = env_named(makepad_scene::IblSource::Hdri(makepad_scene::TextureRef(1)), Some(moon));
     world.environment.daylight_sun = Some(sun_dir);
@@ -362,9 +394,9 @@ fn a_moon_key_lights_the_scene_while_the_lamps_and_the_sky_follow_the_sun() {
 /// lamps are on; at 13:00 they are off.
 #[test]
 fn a_studio_map_leaves_the_daylight_switches_on_the_worlds_sun() {
-    let preset = crate::hdri::Env::new(&crate::hdri::presets::preset("Three-point").unwrap());
-    let key = preset.sun().expect("a studio key");
-    assert!(preset.sun_dir().is_none() && Renderer::lamp_photocell(key.dir) == 0.0, "premise: the key alone would say day: {key:?}");
+    let (key, daylight) = preset_keys("Three-point");
+    let key = key.expect("a studio key");
+    assert!(daylight.is_none() && Renderer::lamp_photocell(key.dir) == 0.0, "premise: the key alone would say day: {key:?}");
     let mut r = lamp_renderer(true, true, 0.2, Some(key), None);
     let mut world = env_named(makepad_scene::IblSource::Hdri(makepad_scene::TextureRef(1)), Some(key));
     world.sun.latitude = 52.0;
@@ -401,8 +433,8 @@ fn the_frames_analytic_sky_puts_its_sun_where_the_light_is_when_the_key_is_the_s
         (rig.dir, vec3f(sky.sun_true.x, sky.sun_true.y, sky.sun_true.z), sky.zenith.w)
     };
     let preset = |name: &str| {
-        let env = crate::hdri::Env::new(&crate::hdri::presets::preset(name).unwrap());
-        (env.sun(), env.sun_dir().expect("a sky has its sun"))
+        let (key, daylight) = preset_keys(name);
+        (key, daylight.expect("a sky has its sun"))
     };
     let sky_world = |key: Option<makepad_scene::EnvSun>, daylight: Vec3f| {
         let mut world = env_named(makepad_scene::IblSource::Hdri(makepad_scene::TextureRef(1)), key);
@@ -412,7 +444,7 @@ fn the_frames_analytic_sky_puts_its_sun_where_the_light_is_when_the_key_is_the_s
         world.sun.time_of_day = Some(14.0);
         world
     };
-    let aimed = crate::hdri::dir_from_az_el(120.0, 20.0);
+    let aimed = crate::env_map::dir_from_az_el(120.0, 20.0);
 
     // Golden hour: the key is the map's sun. Aimed elsewhere by an authored
     // direction, the light and the sky's sun go there together.
@@ -487,10 +519,10 @@ fn the_frames_sun_direction_is_where_its_light_comes_from() {
         crate::world_lights::apply_world_sun(world, r.lane_rig(world, sun)).dir
     };
     let preset = |name: &str| {
-        let env = crate::hdri::Env::new(&crate::hdri::presets::preset(name).unwrap());
-        (env.sun().expect("a keyed preset"), env.sun_dir().expect("a sky has its sun"))
+        let (key, daylight) = preset_keys(name);
+        (key.expect("a keyed preset"), daylight.expect("a sky has its sun"))
     };
-    let aimed = crate::hdri::dir_from_az_el(120.0, 20.0);
+    let aimed = crate::env_map::dir_from_az_el(120.0, 20.0);
     let own = vec3f(0.3, 0.6, -0.5).normalize();
     for hdr in [false, true] {
         for (name, level) in [("Golden hour", 0.5), ("Moonlit night", 0.02)] {
@@ -532,7 +564,7 @@ fn the_frames_sun_direction_is_where_its_light_comes_from() {
 /// and the per-frame lamps and the baked pools must agree on which.
 #[test]
 fn the_frame_lamps_and_the_bake_take_one_rig() {
-    let key = env_sun_of(crate::hdri::dir_from_az_el(200.0, 45.0), 6.0e3, 0.27, 1.0);
+    let key = env_sun_of(crate::env_map::dir_from_az_el(200.0, 45.0), 6.0e3, 0.27, 1.0);
     let mut r = lamp_renderer(false, false, 0.5, Some(key), Some(key.dir));
     let mut world = env_named(makepad_scene::IblSource::Hdri(makepad_scene::TextureRef(1)), Some(key));
     world.environment.daylight_sun = Some(key.dir);
@@ -626,8 +658,8 @@ fn a_prepared_environment_colours_the_host_fog_only() {
     let metered = r.env_lighting(&world).unwrap().mean_luminance;
     assert!(metered > 1.4 && metered < 1.6, "1.0 + 0.5, got {metered}");
     assert!(crate::sun::env_exposure(&r.env_lighting(&world).unwrap()) < crate::sun::env_exposure(&crate::sun::EnvLighting { mean_luminance: 1.0, ..r.env_lighting(&world).unwrap() }), "a sunny map meters darker than its sky alone");
-    // And the rig lights with that sun (the bound preparation's key, as a
-    // declared sun or a procedural hdri preset's baked one).
+    // And the rig lights with that sun (the bound preparation's key, the
+    // declared sun).
     assert_eq!(r.ibl_sun(), world.environment.sun);
     assert!(r.env_sun_rig(&world, SunLight::default().to_hdr()).color.x > 0.0);
 }

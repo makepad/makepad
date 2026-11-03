@@ -5,7 +5,7 @@ use makepad_relax_api::relax_api;
 use std::cell::Cell;
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Write;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicU8, Ordering::Relaxed};
+use std::sync::atomic::{AtomicI64, AtomicU64, AtomicU8, Ordering::Relaxed};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::thread::{self, Thread};
 use std::time::Instant;
@@ -76,7 +76,8 @@ struct Budget {
     classes: Box<[AtomicU8]>,
     // A precomputed bit per yielding class: should_yield needs just two relaxed loads.
     yield_classes: AtomicU8,
-    warming: AtomicBool,
+    // 0: not begun, 1: startup warm-up, 2: permanently ended.
+    warmup: AtomicU8,
     queued: [[AtomicI64; 3]; 3],
     waits: [[AtomicU64; BUCKETS]; 3],
     max_wait: [AtomicU64; 3],
@@ -95,7 +96,7 @@ impl Budget {
                 changed: None,
             }),
             classes: (0..cores).map(|_| AtomicU8::new(INTERACTIVE)).collect(),
-            yield_classes: AtomicU8::new(0), warming: AtomicBool::new(false),
+            yield_classes: AtomicU8::new(0), warmup: AtomicU8::new(0),
             queued: std::array::from_fn(|_| std::array::from_fn(|_| AtomicI64::new(0))),
             waits: std::array::from_fn(|_| std::array::from_fn(|_| AtomicU64::new(0))),
             max_wait: std::array::from_fn(|_| AtomicU64::new(0)),
@@ -108,7 +109,7 @@ impl Budget {
             VISIBLE => self.limit,
             BACKGROUND => self.limit.saturating_sub(2).max(1),
             _ => unreachable!(),
-        } && (class != BACKGROUND || !self.warming.load(Relaxed) || s.background == 0)
+        } && (class != BACKGROUND || !self.warming() || s.background == 0)
     }
     fn first(s: &State) -> Option<usize> {
         s.waiters.iter().enumerate().min_by_key(|(_, w)| (w.class, w.ticket)).map(|(i, _)| i)
@@ -118,7 +119,7 @@ impl Budget {
         let mut bits = 0;
         for class in 0..3 {
             if s.waiting & ((1 << class) - 1) != 0 || s.running > self.cores
-                || (class == BACKGROUND && self.warming.load(Relaxed) && s.background > 1)
+                || (class == BACKGROUND && self.warming() && s.background > 1)
             { bits |= 1 << class; }
         }
         self.yield_classes.store(bits, Relaxed);
@@ -231,9 +232,19 @@ impl Budget {
         self.classes[permit as usize].store(class, Relaxed);
         self.refresh(&mut s);
     }
-    fn set_warming(&self, on: bool) {
+    fn warming(&self) -> bool { self.warmup.load(Relaxed) == 1 }
+    fn begin_warmup(&self) {
         let mut s = self.state.lock().unwrap();
-        self.warming.store(on, Relaxed);
+        // Only JIT startup may begin it. Input before startup also closes the latch.
+        if self.warmup.compare_exchange(0, 1, Relaxed, Relaxed).is_ok() {
+            self.refresh(&mut s);
+        }
+    }
+    fn end_warmup(&self) {
+        // Input dispatch stays atomic-only after the first interaction/settle.
+        if self.warmup.load(Relaxed) == 2 { return; }
+        let mut s = self.state.lock().unwrap();
+        self.warmup.store(2, Relaxed);
         self.refresh(&mut s);
     }
     fn waited(&self, class: u8, client: u8, ns: u64, label: &str) {
@@ -268,7 +279,7 @@ impl Budget {
             }
         }
         let total = s.running;
-        let warm = self.warming.load(Relaxed);
+        let warm = self.warming();
         let worst = s.worst.iter().find(|w| now.saturating_sub(w.when) <= RECENT_NS).copied();
         let parked = s.parked;
         let admitted = s.admitted;
@@ -348,9 +359,12 @@ pub fn queued(class: u8, client: u8, delta: i32) {
 #[relax_api]
 pub fn waited(class: u8, client: u8, ns: u64, label: &str) { global().waited(class, client, ns, label); }
 #[relax_api]
-pub fn set_warming(on: bool) { global().set_warming(on); }
+pub fn begin_warmup() { global().begin_warmup(); }
+/// Permanently restore the normal budget at first settle or real user input.
 #[relax_api]
-pub fn warming() -> bool { global().warming.load(Relaxed) }
+pub fn end_warmup() { global().end_warmup(); }
+#[relax_api]
+pub fn warming() -> bool { global().warming() }
 #[relax_api]
 pub fn report(out: &mut [u8]) -> usize {
     let text = global().report();

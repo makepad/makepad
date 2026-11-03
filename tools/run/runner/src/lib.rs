@@ -158,6 +158,50 @@ pub fn run_with_args(args: Vec<Vec<u8>>) {
     run(args)
 }
 
+/// NVIDIA's shader disk cache (GL and Vulkan) for every program this loader runs. The driver keys
+/// its files by the executable's path, and every JIT build is a new executable: each binary's first
+/// runs compiled every pipeline cold (Stage held its first frame 9 s for 109 pipelines), so they
+/// all take one name. And a folder of their own, `$XDG_CACHE_HOME/makepad/nvidia`: the driver's
+/// shared folder takes no entry once it holds its 1 GB, and every other program's per-path keys
+/// fill it (a pool box at 1025 MB: every cold Fab compiled its pipelines again, the first frame
+/// held 20.5 s for 177 pipelines; in a folder of its own 0.3 s). The driver trims neither: past
+/// 3/4 of its cap this one is emptied, and the next runs fill it again. It is renamed away before
+/// it is removed, so a start beside this one finds the full folder or a new empty one, never one
+/// half removed, and a running program's open files go with the old one (its writes are lost, not
+/// mixed into the new folder).
+#[cfg(target_os = "linux")]
+fn nvidia_shader_cache() {
+    if std::env::var_os("__GL_SHADER_DISK_CACHE_APP_NAME").is_none() {
+        std::env::set_var("__GL_SHADER_DISK_CACHE_APP_NAME", "makepad");
+    }
+    if std::env::var_os("__GL_SHADER_DISK_CACHE_PATH").is_some() {
+        return;
+    }
+    let abs = |v: Option<std::ffi::OsString>| v.map(std::path::PathBuf::from).filter(|p| p.is_absolute());
+    let Some(base) = abs(std::env::var_os("XDG_CACHE_HOME")).or_else(|| abs(std::env::var_os("HOME")).map(|h| h.join(".cache"))) else {
+        return;
+    };
+    let dir = base.join("makepad").join("nvidia");
+    fn bytes(dir: &std::path::Path) -> u64 {
+        let Ok(entries) = std::fs::read_dir(dir) else { return 0 };
+        entries.flatten().map(|e| match e.file_type() {
+            Ok(t) if t.is_dir() => bytes(&e.path()),
+            _ => e.metadata().map_or(0, |m| m.len()),
+        }).sum()
+    }
+    if bytes(&dir) > 768 << 20 {
+        // (one name: what a killed removal left goes with the next one)
+        let old = dir.with_extension("old");
+        let _ = std::fs::remove_dir_all(&old);
+        if std::fs::rename(&dir, &old).is_ok() {
+            let _ = std::fs::remove_dir_all(&old);
+        }
+    }
+    if std::fs::create_dir_all(&dir).is_ok() {
+        std::env::set_var("__GL_SHADER_DISK_CACHE_PATH", &dir);
+    }
+}
+
 fn run(raw_args: Vec<Vec<u8>>) {
     {
         let _k = relax_compiler::zone_alloc::kept();
@@ -218,6 +262,8 @@ fn run(raw_args: Vec<Vec<u8>>) {
     std::env::set_var("MAKEPAD_LOADER_STATE", fetch::home().join("cache"));
     // the programs it runs (the runner app) keep their launch records in the same home
     std::env::set_var("MAKEPAD_RUN_HOME", fetch::home());
+    #[cfg(target_os = "linux")]
+    nvidia_shader_cache();
     macros::register();
     match args.get(1).map(String::as_str) {
         None => {
@@ -576,8 +622,10 @@ fn boot_package(opts: Vec<String>, rest: Vec<String>) -> i32 {
 
 
 /// `makepad devhub <words>`: the `makepad-devhub` binary of the checkout this JIT came from (else
-/// the one this folder is in), through cargo: never a stale one. devhub is not linked here, so
-/// its changes never rebuild the JIT. Returns only when it could not start.
+/// the one this folder is in), as built: the devhub master swaps a landing's build in when its
+/// rebuild finishes, so a call never waits on a build lock. A checkout with none yet goes through
+/// `cargo run`, which builds it. devhub is not linked here, so its changes never rebuild the JIT.
+/// Returns only when it could not start.
 fn devhub(words: &[String]) -> i32 {
     let exe = std::env::current_exe().ok();
     let cwd = std::env::current_dir().ok();
@@ -587,14 +635,17 @@ fn devhub(words: &[String]) -> i32 {
         eprintln!("makepad devhub: no makepad checkout above {} or this folder (devhub builds from one)", exe.as_ref().map_or_else(String::new, |e| e.display().to_string()));
         return 2;
     };
-    let cargo = std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".cargo/bin/cargo")).filter(|c| c.exists()).unwrap_or_else(|| "cargo".into());
+    let built = root.join("target/host").join(format!("makepad-devhub{}", std::env::consts::EXE_SUFFIX));
+    let mut command = if built.is_file() {
+        std::process::Command::new(built)
+    } else {
+        let cargo = std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".cargo/bin/cargo")).filter(|c| c.exists()).unwrap_or_else(|| "cargo".into());
+        let mut c = std::process::Command::new(cargo);
+        c.args(["run", "--profile", "host", "-q", "--manifest-path"]).arg(root.join("Cargo.toml")).args(["-p", "makepad-devhub", "--bin", "makepad-devhub", "--"]);
+        c
+    };
     // (rustup counts its nested proxies in this one and refuses past 20: cargo -> makepad -> cargo must not count)
-    let mut command = std::process::Command::new(cargo);
-    command.args(["run", "--profile", "host", "-q", "--manifest-path"])
-        .arg(root.join("Cargo.toml"))
-        .args(["-p", "makepad-devhub", "--bin", "makepad-devhub", "--"])
-        .args(words)
-        .env_remove("RUST_RECURSION_COUNT");
+    command.args(words).env_remove("RUST_RECURSION_COUNT");
     #[cfg(unix)]
     let e = std::os::unix::process::CommandExt::exec(&mut command);
     #[cfg(not(unix))]
@@ -602,6 +653,6 @@ fn devhub(words: &[String]) -> i32 {
         Ok(status) => return status.code().unwrap_or(1),
         Err(e) => e,
     };
-    eprintln!("makepad devhub: cargo: {e}");
+    eprintln!("makepad devhub: {}: {e}", command.get_program().to_string_lossy());
     1
 }

@@ -337,8 +337,8 @@ script_mod! {
         // lane's scale on the map (1 under HDR output, the map's exposure
         // in the legacy lane, so the lookups carry the exposure the rig's
         // fill carries), and the fill from the map only while ibl_ctl.z is
-        // set (cleared, the fill stays what it was: an authored ambient,
-        // the gathered GI; renderer/stock_ibl.rs `ibl_lane_ctl`). Declared
+        // set (cleared, the fill stays what it was: an authored ambient;
+        // renderer/stock_ibl.rs `ibl_lane_ctl`). Declared
         // after the surface maps so every numbered slot keeps its number;
         // morph_map stays the last texture.
         detail_map: texture_2d(float)
@@ -472,19 +472,21 @@ script_mod! {
                 let reflection=n*(2.0*ndv)-view
                 let hemi_n=mix(self.sun_ground,self.sun_sky,clamp(n.y*0.5+0.5,0.0,1.0))
                 var environment=mix(self.sun_ground,self.sun_sky,clamp(reflection.y*0.5+0.5,0.0,1.0))
-                var fill=self.gi_ambient(self.v_csm.xyz,n,hemi_n)
+                var fill=hemi_n
                 // An environment (ibl_ctl.x, bound by the renderer) replaces the
                 // hemisphere reflection and the ambient fill with the lookups the
                 // PBR lane takes through Builtin::Ibl: prefiltered radiance along
                 // the reflection at this roughness, SH9 irradiance over pi along
                 // the normal (the lane's fill units), both at the lane's scale
-                // (ibl_ctl.y); the fill stays the one above while the world
-                // authors it or GI gathers it (ibl_ctl.z 0). Off, the two values
-                // above are the lane's old expressions, unchanged.
+                // (ibl_ctl.y); the fill stays the hemisphere while the world
+                // authors it (ibl_ctl.z 0). Off, the two values above are the
+                // lane's old expressions, unchanged.
                 if self.ibl_ctl.x>0.5 {
                     environment=self.mat_ibl_lane_sky_env(normalize(reflection),rough)
                     fill=self.mat_ibl_lane_ambient(n,fill)
                 }
+                // GI occludes that fill and adds its bounce.
+                fill=self.gi_ambient(self.v_csm.xyz,n,fill)
                 let fresnel=f0+(max(vec3(1.0-rough,1.0-rough,1.0-rough),f0)-f0)*pow(1.0-ndv,5.0)
                 let ambient=(base*(1.0-metal)*fill+environment*fresnel)*ao
                 let occlusion=mix(1.0,self.occlusion_map.sample_repeat(self.v_uv).x,self.occlusion_strength)

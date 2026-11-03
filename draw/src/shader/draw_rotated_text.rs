@@ -297,7 +297,7 @@ impl DrawRotatedText {
         }
         self.draw_super.update_draw_vars(cx);
         self.draw_super.many_instances =
-            cx.begin_many_aligned_instances(&self.draw_super.draw_vars);
+            cx.begin_many_aligned_instances(&mut self.draw_super.draw_vars);
     }
 
     pub fn end_glyph_batch(&mut self, cx: &mut Cx2d) {

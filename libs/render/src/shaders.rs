@@ -1771,8 +1771,7 @@ mod skin_ibl_tests {
                 // lane functions, which carry its control (ibl_ctl): the
                 // lane's scale on the reflection and on the fill (y), and
                 // the fill from the map only while the switch is set (z),
-                // else the fill the lane had (an authored ambient, the
-                // gathered GI).
+                // else the fill the lane had (an authored ambient).
                 let reflection = lowered_fn_body(&source, "mat_ibl_lane_sky_env").unwrap_or_else(|| panic!("{name}: no lane reflection lookup"));
                 assert!(reflection.contains("mat_ibl_sky_env(p_r, p_rough) * ") && reflection.contains("ibl_ctl.y"), "{name}: the reflection lookup carries the lane's scale: {reflection}");
                 let fill = lowered_fn_body(&source, "mat_ibl_lane_ambient").unwrap_or_else(|| panic!("{name}: no lane fill lookup"));

@@ -386,7 +386,7 @@ pub fn offline_dir() -> Option<PathBuf> {
 
 /// Settings, artwork, indexes and the offline library: wherever
 /// `AMP_DATA_DIR` (or `MUSIC_DATA_DIR`) says (a test run keeps its data
-/// apart), else `local/amp` in the Makepad checkout Amp runs from, else
+/// apart), else `local/amp` in the Makepad checkout Amp runs in, else
 /// (an installed Amp) the app's data folder. Resolved once.
 fn own_dir() -> Option<PathBuf> {
     static OWN_DIR: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
@@ -396,19 +396,25 @@ fn own_dir() -> Option<PathBuf> {
                 return Some(dir);
             }
         }
-        // The running binary's checkout first; the working directory covers
-        // a binary built into a target dir outside it. Not on Android: there
-        // the checkout is the APK's read-only source pack.
+        // Not on Android: there the checkout is the APK's read-only source pack.
         #[cfg(not(target_os = "android"))]
-        for start in [std::env::current_exe().ok(), std::env::current_dir().ok()].into_iter().flatten() {
-            for root in start.ancestors() {
-                if root.join("makepad.splash").is_file() && root.join("apps/amp/Cargo.toml").is_file() {
-                    return Some(root.join("local/amp"));
-                }
-            }
+        if let Some(dir) = checkout_data_dir(std::env::current_dir().ok().as_deref(), std::env::current_exe().ok().as_deref()) {
+            return Some(dir);
         }
         makepad_widgets::makepad_platform::home::app_data_dir("amp")
     }).clone()
+}
+
+/// `local/amp` of the Makepad checkout Amp runs in: the working directory's,
+/// else (a binary started from outside one) the binary's. Not the binary's
+/// first: under `makepad run` it is the box's shared JIT loader, and every
+/// Amp it runs (CI legs, lanes, the dock's) would share its settings,
+/// indexes and offline library.
+#[cfg(not(target_os = "android"))]
+fn checkout_data_dir(cwd: Option<&Path>, exe: Option<&Path>) -> Option<PathBuf> {
+    [cwd, exe].into_iter().flatten().find_map(|start| {
+        start.ancestors().find(|root| root.join("makepad.splash").is_file() && root.join("apps/amp/Cargo.toml").is_file()).map(|root| root.join("local/amp"))
+    })
 }
 
 // ---- merge ----
@@ -852,6 +858,31 @@ fn coalesce(commands: Vec<Command>) -> Vec<Command> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A CI leg or lane run starts Amp in its own tree through the box's
+    /// shared JIT loader: the tree's data decides, not the loader checkout's
+    /// (the same fault booted a stale Synth draft in CI run 130).
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn the_working_checkout_decides_before_the_binarys() {
+        let checkout = |root: &Path| {
+            std::fs::create_dir_all(root.join("apps/amp")).unwrap();
+            std::fs::write(root.join("makepad.splash"), "").unwrap();
+            std::fs::write(root.join("apps/amp/Cargo.toml"), "").unwrap();
+        };
+        let dir = std::env::temp_dir().join(format!("amp-test-{}-checkouts", std::process::id()));
+        let (tree, loader) = (dir.join("tree"), dir.join("box"));
+        checkout(&tree);
+        checkout(&loader);
+        let exe = loader.join("target/host/makepad");
+        let in_tree = checkout_data_dir(Some(&tree.join("apps/amp")), Some(&exe));
+        let outside = checkout_data_dir(Some(&dir), Some(&exe));
+        let neither = checkout_data_dir(Some(&dir), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(in_tree, Some(tree.join("local/amp")), "started in a checkout: its data");
+        assert_eq!(outside, Some(loader.join("local/amp")), "started outside one: the binary's checkout");
+        assert_eq!(neither, None, "neither in a checkout");
+    }
 
     #[test]
     fn a_burst_keeps_only_the_last_search_volume_and_seek() {

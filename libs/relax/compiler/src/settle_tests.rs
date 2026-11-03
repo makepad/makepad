@@ -705,7 +705,7 @@ fn unrelated(x: u32) -> u32 { x + 1 }
         assert!(retired.upgrade().is_some(), "unlinking must defer destruction until after unlocking");
         (verify, rir, calls, closure, closure_rir, dropped, retired)
     });
-    dropped.release_rir();
+    dropped.release();
     crate::owner::call(crate::owner::Class::Program, || {
         assert!(retired.upgrade().is_none(), "retired RIR must actually be released off the unit lock");
         assert_eq!(u.fns[id as usize].calls, calls);
@@ -1201,4 +1201,92 @@ fn preempted_check_under_a_front_read_gives_way() {
     assert!(gave_way, "a preempted check holding another front read waited for the writer (the writer waits for that read)");
     drop(u);
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// The run monitor's settle sweep runs in steps, one owner request each (JITOWNER: one request
+/// over every slot held the owner 10-50 ms while a cold Fab's UI dragged): a main-thread request
+/// that comes during a step is served when that step ends, while the sweep still has steps to go,
+/// and the stepped sweep still ends with every eligible slot's RIR and body taken (freed by its
+/// requester, not on the owner).
+#[test]
+fn a_settle_sweep_lets_main_through_between_steps() {
+    isolated_test!(a_settle_sweep_lets_main_through_between_steps);
+    use std::sync::atomic::{AtomicBool, AtomicU32};
+    let mut source = String::from("#![no_std]\n");
+    // (the first four with a closure: a slot keeps its checked body for its closures)
+    for i in 0..200 {
+        let body = if i < 4 { format!("let _g = |y: u32| y ^ {i}; x") } else { format!("x ^ {i}") };
+        source.push_str(&format!("fn f{i}(x: u32) -> u32 {{ {body} }}\n"));
+    }
+    let path = std::env::temp_dir().join(format!("relax-settle-steps-{}.rs", std::process::id()));
+    std::fs::write(&path, &source).unwrap();
+    let mut session = crate::Session::default();
+    session.options.ctfe = crate::options::Ctfe::Off;
+    let session = std::sync::Arc::new(session);
+    let mut prog = Program::new(&session);
+    prog.load_crate("settle_steps", path.to_str().unwrap(), 2021, crate::cfg::CfgSet::host(&session, &[]), vec![]).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    let defs: Vec<DefId> = (0..200).map(|i| {
+        let name = format!("f{i}");
+        (0..prog.defs.len() as u32).map(DefId).find(|&d| prog.name(d) == name).unwrap()
+    }).collect();
+    let mut tcx = Tcx::new();
+    tcx.collect(&prog);
+    assert!(tcx.errors.is_empty(), "{:?}", tcx.errors);
+    let mut u = Unit::new(prog, tcx, 0);
+    let up = &mut *u as *mut Unit;
+    // 200 slots; four compiled and installed, with their RIR kept (and the bodies they hold)
+    let (built, bodies, rir_kept) = crate::owner::call(crate::owner::Class::Program, || {
+        let ids: Vec<u32> = defs.iter().map(|&d| u.fn_id(FnKey::Inst(d, Vec::new()))).collect();
+        let built: Vec<u32> = ids[..4].to_vec();
+        for &id in &built {
+            let c = unsafe { compile_fn(up, id) }.unwrap();
+            u.install(id, &c.0, &c.2, c.1, 0).unwrap();
+            unsafe { build_rir(up, id) }.unwrap();
+        }
+        let bodies = built.iter().filter(|&&id| u.bodies.contains_key(&id)).count();
+        let rir_kept = built.iter().all(|&id| u.fns[id as usize].rir.is_some());
+        (built, bodies, rir_kept)
+    });
+    assert!(rir_kept && bodies > 0, "the fixture's compiled slots have RIR ({rir_kept}) and checked bodies ({bodies})");
+    // this thread is the program's main thread; the sweep's driver plays the run monitor
+    crate::jit::MAIN_TID.store(crate::os::thread::current(), Ordering::SeqCst);
+    static STEPS: AtomicU32 = AtomicU32::new(0);
+    static ASK: AtomicBool = AtomicBool::new(false);
+    let upn = up as usize;
+    let driver = std::thread::spawn(move || {
+        let mut sweep = SettleSweep::default();
+        while !crate::owner::call(crate::owner::Class::Program, || {
+            let n = STEPS.fetch_add(1, Ordering::SeqCst) + 1;
+            if n == 3 {
+                // main asks while this step runs on the owner
+                ASK.store(true, Ordering::SeqCst);
+                let t = std::time::Instant::now();
+                while !crate::owner::main_waiting() {
+                    assert!(t.elapsed().as_secs() < 10, "main's request never queued");
+                    std::hint::spin_loop();
+                }
+            }
+            unsafe { sweep.step(upn as *mut Unit, 16) }
+        }) {}
+        sweep.drops
+    });
+    while !ASK.load(Ordering::SeqCst) {
+        std::thread::yield_now();
+    }
+    let served_after = crate::owner::call(crate::owner::Class::Program, || STEPS.load(Ordering::SeqCst));
+    let mut drops = driver.join().unwrap();
+    let steps = STEPS.load(Ordering::SeqCst);
+    assert_eq!(served_after, 3, "main's request waited for more than the step it came in");
+    assert!(steps > 6, "the sweep of 200 slots took {steps} steps of 16 slots");
+    assert_eq!(drops.fns, built.len(), "the stepped sweep took the RIR of every compiled slot");
+    crate::owner::call(crate::owner::Class::Program, || {
+        for &id in &built {
+            assert!(u.fns[id as usize].rir.is_none() && !u.bodies.contains_key(&id), "slot {id} kept its RIR or body");
+        }
+    });
+    assert!(drops.retired_bodies.len() == bodies && drops.retired_rir.len() == built.len(), "the bodies and RIR are freed by the requester");
+    drops.release();
+    assert!(drops.retired_bodies.is_empty() && drops.retired_rir.is_empty());
+    drop(u);
 }

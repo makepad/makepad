@@ -890,6 +890,7 @@ pub fn describe(u: &Unit, s: Sym) -> String {
             }
         }
         Some(SymKind::Thunk(id)) => format!("thunk:{}", stable_fn_name(u, id)),
+        Some(SymKind::TierRec(id)) if s.off == crate::jit::PATCH_FLAG_OFF => format!("patch-flag:{}", stable_fn_name(u, id)),
         Some(SymKind::TierRec(id)) => format!("loop-counter:{}", stable_fn_name(u, id)),
         Some(SymKind::Provided(n)) => format!("provided:{}", n),
         Some(SymKind::Rw(k)) => {

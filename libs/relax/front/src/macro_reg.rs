@@ -55,6 +55,7 @@ pub struct UnitInfo {
     pub features: Vec<String>,
     pub deps: Vec<(usize, String)>,
     pub proc_macro: bool,
+    pub harness: bool,
     /// a registry/git package (CrateUnit::registry): third-party, sandboxed under a strict
     /// proc-macro policy (pmhost::Policy)
     pub registry: bool,
@@ -437,12 +438,12 @@ fn register(sess: &std::sync::Arc<crate::Session>, units: &[CrateUnit], std_dir:
     for (i, u) in units.iter().enumerate() {
         let features = u.host.as_ref().map_or(&u.features, |h| &h.features);
         let same = if additive {
-            reg.units.iter().position(|r| r.name == u.name && r.src_path == u.src_path && r.edition == u.edition && &r.features == features && r.proc_macro == u.proc_macro && r.registry == u.registry)
+            reg.units.iter().position(|r| r.name == u.name && r.src_path == u.src_path && r.edition == u.edition && &r.features == features && r.proc_macro == u.proc_macro && r.harness == u.harness && r.registry == u.registry)
         } else {
             None
         };
         map[i] = same.unwrap_or_else(|| {
-            reg.units.push(UnitInfo { name: String::new(), src_path: String::new(), edition: 0, features: Vec::new(), deps: Vec::new(), proc_macro: false, registry: false, cfgs: Vec::new(), env: Vec::new() });
+            reg.units.push(UnitInfo { name: String::new(), src_path: String::new(), edition: 0, features: Vec::new(), deps: Vec::new(), proc_macro: false, harness: false, registry: false, cfgs: Vec::new(), env: Vec::new() });
             fresh.push(i);
             reg.units.len() - 1
         });
@@ -450,7 +451,7 @@ fn register(sess: &std::sync::Arc<crate::Session>, units: &[CrateUnit], std_dir:
     for &i in &fresh {
         let u = &units[i];
         let (features, deps) = u.host.as_ref().map_or((&u.features, &u.deps), |h| (&h.features, &h.deps));
-        reg.units[map[i]] = UnitInfo { name: u.name.clone(), src_path: u.src_path.clone(), edition: u.edition, features: features.clone(), deps: deps.iter().map(|(d, n)| (map[*d], n.clone())).collect(), proc_macro: u.proc_macro, registry: u.registry, cfgs: Vec::new(), env: Vec::new() };
+        reg.units[map[i]] = UnitInfo { name: u.name.clone(), src_path: u.src_path.clone(), edition: u.edition, features: features.clone(), deps: deps.iter().map(|(d, n)| (map[*d], n.clone())).collect(), proc_macro: u.proc_macro, harness: u.harness, registry: u.registry, cfgs: Vec::new(), env: Vec::new() };
     }
     for &i in &fresh {
         let u = reg.units[map[i]].clone();
@@ -490,7 +491,7 @@ fn merged_host_units_keep_features_and_dependencies() {
         pkg_id: format!("path+file://{dir}/{name}#0.1.0"),
         name: name.to_string(), kind: vec![kind.to_string()],
         src_path: format!("{dir}/{name}/src/lib.rs"), edition: "2021".to_string(),
-        host, mode: "build".to_string(), features: features.iter().map(|s| s.to_string()).collect(),
+        host, mode: "build".to_string(), harness: false, features: features.iter().map(|s| s.to_string()).collect(),
         deps: deps.iter().map(|(d, n)| (*d, n.to_string())).collect(),
     };
     let units = Units { units: vec![
@@ -544,7 +545,7 @@ pub fn set_build_outputs(sess: &std::sync::Arc<crate::Session>, units: &[CrateUn
                 continue;
             }
             for (ui, u) in reg.units.iter_mut().enumerate() {
-                if u.name == c.name {
+                if u.name == c.name && u.harness == c.harness {
                     if let Some(cs) = cfgs.get(ci) {
                         if u.cfgs != *cs {
                             u.cfgs = cs.clone();

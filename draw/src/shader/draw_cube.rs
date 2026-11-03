@@ -90,19 +90,19 @@ impl DrawCube {
         if let Some(mi) = &mut self.many_instances {
             mi.instances.extend_from_slice(self.draw_vars.as_slice());
         } else if self.draw_vars.can_instance() {
-            let new_area = cx.add_instance(&self.draw_vars);
+            let new_area = cx.add_instance(&mut self.draw_vars);
             self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
         }
     }
 
     pub fn new_draw_call(&mut self, cx: &mut CxDraw) {
         self.apply_draw_uniforms(cx);
-        cx.new_draw_call(&self.draw_vars);
+        cx.new_draw_call(&mut self.draw_vars);
     }
 
     pub fn begin_many_instances(&mut self, cx: &mut CxDraw) {
         self.apply_draw_uniforms(cx);
-        self.many_instances = cx.begin_many_instances(&self.draw_vars);
+        self.many_instances = cx.begin_many_instances(&mut self.draw_vars);
     }
 
     pub fn end_many_instances(&mut self, cx: &mut CxDraw) {

@@ -33,8 +33,9 @@ pub fn loader() -> Vec<String> {
     ["cargo", "run", "--profile", "host", "-q", "-p", "makepad-run", "--bin", "makepad", "--"].iter().map(|s| s.to_string()).collect()
 }
 
-/// The JIT loader for every other command (`inspect`, `check`): through cargo, since a spawn of
-/// this program's own executable with anything but `run` first runs this program again.
+/// The JIT loader for every other command (`check` in a tree): through cargo, since a spawn of
+/// this program's own executable with anything but `run` first runs this program again. An app's
+/// inspect commands go to its own socket, never through this.
 pub fn loader_cmd() -> Vec<String> {
     if let Ok(l) = std::env::var("MAKEPAD_CI_LOADER") {
         if !l.is_empty() {

@@ -23,7 +23,8 @@ pub struct RawRegion {
 
 /// `limit` after a trim: the part of the region kept committed between uses
 pub(crate) const KEEP: usize = 1 << 20;
-/// `limit` steps (Windows commits this much at a time)
+/// `limit` steps (Windows commits this much at a time); under the JIT its host grows the region
+#[cfg(not(relax))]
 const STEP: usize = 1 << 20;
 
 #[cfg(relax)]

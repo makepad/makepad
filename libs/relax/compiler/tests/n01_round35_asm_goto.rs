@@ -1,4 +1,5 @@
 // Stable asm goto: a `label` operand whose block returns; the jump to it skips the code after the asm!.
+// needs-native: inline assembly
 #[test]
 fn asm_label_operand() {
     #[cfg(target_arch = "x86_64")]

@@ -634,7 +634,7 @@ pub struct ScriptFnToken {
 /// To Relax-compiled code it is an opaque handle: the crate drops, clones and
 /// reads it (relax_api.txt ops); an empty image ([`Self::is_empty`]) stands
 /// for "no fn" where a handle crosses by value.
-#[relax_api(handle, clone)]
+#[relax_api(handle, clone, debug)]
 #[repr(transparent)]
 pub struct ScriptFnImage(Option<Box<ScriptFnImageData>>);
 
@@ -770,7 +770,7 @@ pub struct ScriptErrorLoc {
 /// source location (zero-based line and column, like [`ScriptLoc`]) and
 /// its message apart, and the text the VM has always reported it as
 /// (`file:line:col: message (origin)`), which `Display` prints.
-#[relax_api(handle, clone)]
+#[relax_api(handle, clone, debug, display)]
 #[derive(Clone)]
 pub struct ScriptErrorRecord {
     pub loc: Option<ScriptErrorLoc>,
@@ -2357,6 +2357,7 @@ impl<'a> ScriptVm<'a> {
                     return value;
                 }
             }
+            // The interrupt is sampled here, every 1024 instructions of a limited run: one load.
             let instruction_limit_exceeded = if let Some(remaining) =
                 self.bx.threads.cur().instruction_limit_remaining.as_mut()
             {
@@ -2364,16 +2365,20 @@ impl<'a> ScriptVm<'a> {
                     true
                 } else {
                     *remaining -= 1;
-                    false
+                    *remaining & 1023 == 0 && self.bx.interrupt.is_set()
                 }
             } else {
                 false
             };
             if instruction_limit_exceeded {
-                let err = script_err_limit!(
-                    self.bx.threads.cur_ref().trap,
-                    "script instruction limit exceeded"
-                );
+                let err = if self.bx.interrupt.is_set() {
+                    script_err_limit!(self.bx.threads.cur_ref().trap, "script interrupted")
+                } else {
+                    script_err_limit!(
+                        self.bx.threads.cur_ref().trap,
+                        "script instruction limit exceeded"
+                    )
+                };
                 // drain_errors routes to the captured-error sink, the log, or
                 // the void depending on host configuration.
                 self.drain_errors();
@@ -2501,6 +2506,14 @@ impl<'a> ScriptVm<'a> {
         // Extract values from bodies before modifying thread state
         let (scope, me) = {
             let bodies = self.bx.code.bodies.borrow();
+            // Recovery bytecode is for parser tooling, never execution: a
+            // rejected loop body can otherwise become an infinite empty loop.
+            if bodies[body_id as usize].parser.had_error {
+                return ScriptValue::script_err_unexpected(ScriptIp {
+                    body: body_id,
+                    index: 0,
+                });
+            }
             (
                 bodies[body_id as usize].scope.obj,
                 bodies[body_id as usize].me.obj,
@@ -3264,7 +3277,7 @@ impl<'a> ScriptVm<'a> {
             // surface them to a captured-diagnostics sink here or a validating
             // host reports success for a script that failed to parse.
             // (A file's errors stay with its body: the same text evaluated again reports them again.)
-            let parse_errors = if body.shown.is_some() { body.parser.parse_errors.clone() } else { std::mem::take(&mut body.parser.parse_errors) };
+            let parse_errors = body.parser.parse_errors.clone();
             let parse_records: Vec<ScriptErrorRecord> = parse_errors.into_iter().enumerate()
                 .map(|(i, text)| ScriptErrorRecord::parse(text, body.parser.diagnostics.get(i), &body.parser.file)).collect();
             drop(bodies);
@@ -3401,12 +3414,9 @@ impl<'a> ScriptVm<'a> {
             body.checkpoint = Some(cp);
             body.content_hash = ScriptBody::content_hash_of(code, &existing_mod.values);
 
-            // A host that installed a captured-error sink is running a GAME
-            // eval and needs structural parse errors to FAIL it — the
-            // tolerant recovery otherwise runs something else entirely
-            // (`let loop` recovered into an infinite empty loop and burned
-            // the instruction budget). Live-typing paths install no sink and
-            // keep the log-only tolerance.
+            // Surface structural errors before run_root rejects the body.
+            // Incomplete but valid prefixes still use the parser's auto-close;
+            // recovery bytecode from an actual parse error is never executed.
             let from = errors_before.min(body.parser.parse_errors.len());
             let new_parse_errors: Vec<ScriptErrorRecord> = body.parser.parse_errors[from..].iter().enumerate()
                 .map(|(i, text)| ScriptErrorRecord::parse(text.clone(), body.parser.diagnostics.get(from + i), &body.parser.file)).collect();
@@ -3529,6 +3539,8 @@ pub struct ScriptVmBase {
     pub keep_numbers: bool,
     /// the allocation budgets with_heap_allocation_limit put aside (CTL_ALLOC_BEGIN / CTL_ALLOC_END)
     pub(crate) alloc_budgets: Vec<Option<ScriptAllocationBudget>>,
+    /// The cross-thread stop runs under an instruction limit sample ([`Self::interrupt_handle`]).
+    pub(crate) interrupt: crate::interrupt::ScriptInterrupt,
 }
 
 impl Drop for ScriptVmBase {
@@ -3550,6 +3562,9 @@ impl ScriptVmBase {
     pub fn select_thread(&mut self, id: ScriptThreadId) { self.threads.set_current_thread_id(id); }
     #[inline(always)]
     pub fn gc_if_needed(&mut self) { self.vm_ctl(&mut ScriptCtlReq::new(CTL_GC_IF_NEEDED)); }
+    /// A handle another thread uses to stop this VM's runs ([`crate::interrupt`]).
+    #[relax_api]
+    pub fn interrupt_handle(&self) -> crate::interrupt::ScriptInterrupt { self.interrupt.clone() }
     #[inline(always)]
     pub fn body_count(&self) -> usize { self.vm_stat(&mut ScriptCtlReq::new(STAT_BODY_COUNT)) as usize }
     #[relax_api]
@@ -3603,6 +3618,7 @@ impl ScriptVmBase {
             let_hook: None,
             keep_numbers: false,
             alloc_budgets: Vec::new(),
+            interrupt: Default::default(),
         }
     }
 
@@ -3654,6 +3670,7 @@ impl ScriptVmBase {
             let_hook: None,
             keep_numbers: false,
             alloc_budgets: Vec::new(),
+            interrupt: Default::default(),
         }
     }
 }

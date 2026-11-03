@@ -25,6 +25,10 @@ const HUB_RESTART_FOR: Duration = Duration::from_secs(900);
 /// The exit a node reports for a run whose end it did not see (its hub restarted under it).
 const EXIT_UNKNOWN: i32 = -1;
 
+/// Starts the error of a run the node refused (its argv, its overlay): the same ask on another
+/// box is refused again, so it is the run's result, not a lost box.
+pub const REFUSED: &str = "refused: ";
+
 pub struct Spec {
     pub lane: String,
     pub agent: String,
@@ -340,7 +344,7 @@ impl Held {
 
     fn run_at_live(&self, cwd: &str, argv: &[String], live: bool, log: &mut dyn Write, started: &mut dyn FnMut(u64)) -> Result<i32, String> {
         let b64 = makepad_network::digest::base64_encode(argv.join("\0").as_bytes());
-        let extra = if live { " {\"live\":true}" } else { "" };
+        let extra = format!(" {{\"live\":{live},\"request_id\":{}}}", makepad_remote::json_str(&crate::proto::request_id()));
         // the node's hub restarting for its self-update (at a run boundary: this one) takes the
         // lease back from its ledger: the run starts on the new hub
         let (mut failing, mut last, mut beat) = (None::<Instant>, String::new(), Instant::now());
@@ -365,7 +369,9 @@ impl Held {
                     if failing.get_or_insert_with(Instant::now).elapsed() >= HUB_RESTART_FOR { return Err(e); }
                     std::thread::sleep(Duration::from_secs(2));
                 }
-                Err(e) => return Err(e),
+                // (a node that lost the lease lost the box's run, not refused it)
+                Err(e) if e.contains(&format!("no lease {} ", self.id)) => return Err(e),
+                Err(e) => return Err(format!("{REFUSED}{e}")),
             }
         };
         let n = v.get("n").and_then(crate::lease::num).map_or(1, |x| x as u64);

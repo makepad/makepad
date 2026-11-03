@@ -266,8 +266,18 @@ pub struct Lcx<'a> {
     stmt_temps: Vec<(VReg, TyId, Option<VReg>)>,
     /// owner of the place a pattern currently matches (by-value bindings move out of it)
     match_root: Option<MatchRoot>,
-    /// in an FnOnce closure body: the drop flag (env, offset) of each by-value capture
+    /// environment drop flags (env, offset) of by-value captures before body ownership
     capture_flag: HashMap<u32, (VReg, i32)>,
+    /// the kind of the closure whose body this is (its env is borrowed unless FnOnce)
+    closure_kind: Option<relax_types::upvar::ClosureKind>,
+    /// the place expression the pattern being bound matches (a match or `if let` scrutinee):
+    /// a by-value binding with no owner (`match_root` None) moves out of it
+    match_scrut: Option<ExprId>,
+    /// the pattern being bound is under a `&` pattern: its by-value bindings move out of a borrow
+    pat_through_ref: bool,
+    /// a `let` initializer (parens peeled) read whole only to match its pattern against: no move
+    /// out of it but its pattern's by-value bindings (checked at the `let`)
+    scrut_read: Option<ExprId>,
     /// drop flags of evaluated operands not yet consumed (guard_operand): on an exit they drop
     /// before the statement's temporaries (rustc: an operand's drop is scheduled in the scope of
     /// the expression using it, nested inside the statement's temporary scope)
@@ -340,8 +350,6 @@ pub struct Lcx<'a> {
     last_pad: Option<(u64, u32)>,
     /// lowering a coroutine's poll function
     coro: Option<Coro>,
-    /// the coroutine's (expr, captures, state pointer, state field offsets)
-    coro_caps: Option<(u32, Vec<u32>, VReg, Vec<u32>)>,
     tree_cx: Option<TreeCx>,
 
     /// per scope: where the statement temporaries of its block's tail expression start
@@ -535,6 +543,10 @@ impl<'a> Lcx<'a> {
             drop_misaligned: false,
             temp_moved: HashMap::default(),
             capture_flag: HashMap::default(),
+            closure_kind: None,
+            match_scrut: None,
+            pat_through_ref: false,
+            scrut_read: None,
             guard_flags: HashMap::default(),
             cond_rescope: None,
             indirect_tracked: false,
@@ -554,7 +566,6 @@ impl<'a> Lcx<'a> {
             building_pad: false,
             last_pad: None,
             coro: None,
-            coro_caps: None,
             tree_cx: None,
 
             tail_marks: vec![None],
@@ -563,10 +574,14 @@ impl<'a> Lcx<'a> {
 
     /// A field of a provided crate's type is read only when its layout is the same on both
     /// sides (provided.rs `trusted`, or a handle laid out as rustc does: Unit::provided_rustc_layout);
-    /// otherwise rustc's fields are the crate's business.
+    /// otherwise rustc's fields are the crate's business. An opaque handle's fields are decided
+    /// one by one where they are projected (`project`: Unit::provided_handle_field).
     fn check_provided_field(&mut self, t: TyId) {
         if let TyKind::Adt(d, _, _) = self.u.tcx.tys.kind(t) {
             let krate = self.u.prog.def(*d).krate;
+            if self.u.provided_types.contains_key(d) {
+                return;
+            }
             if self.u.provided.iter().any(|(k, _)| *k == krate) && !crate::provided::trusted(&self.u.prog, &self.u.tcx, krate, t, 0) && !self.u.provided_rustc_layout(*d) && !self.relax_only_instance(t) {
                 let ts = crate::typeck::ty_to_string(false, &self.u.prog, &self.u.tcx, t);
                 self.provided_err(krate, format!("a field of `{}` is read from JIT-compiled code, but `{}` lives in a provided crate (built by rustc into the loader) and its layout is not C-shaped: call a method of the crate instead", ts, ts));
@@ -1602,20 +1617,29 @@ impl<'a> Lcx<'a> {
                 (storage.fields[fi as usize], l.fields[fi as usize], storage.fields.len())
             }
             TyKind::Tuple(v) if (fi as usize) < u.tcx.tys.list(*v).len() => (u.tcx.tys.list(*v)[fi as usize], l.fields.get(fi as usize).copied().unwrap_or(0), u.tcx.tys.list(*v).len()),
-            TyKind::Adt(d, args, _) => {
-                // an opaque type of a provided crate (rustc's layout, size only): every way of
-                // reaching a field -- `x.f`, a struct pattern, a derived or written impl body --
-                // ends here, so this is where it is refused (provided.rs)
-                if self.u.provided_types.contains_key(d) && !self.u.provided_rustc_layout(*d) {
-                    let ts = crate::typeck::ty_to_string(false, &self.u.prog, &self.u.tcx, t);
-                    let krate = self.u.prog.def(*d).krate;
-                    self.provided_err(krate, format!("a field of `{}` is reached from JIT-compiled code (a field access, a pattern or a trait impl's body), but `{}` lives in a provided crate (built by rustc into the loader) and its layout is rustc's alone: call a fn of the crate, or route the impl to rustc's (jit.rs provided_fmt_hash)", ts, ts));
-                    // the fn fails with the error above; lowering goes on over a scratch place of
-                    // the field's type so nothing after it trips over a shapeless one
-                    let ft = self.u.tcx.adts.get(d).and_then(|a| a.variants.get(vi as usize)).and_then(|v| v.fields.get(fi as usize)).map(|_| self.u.tcx.field_ty(&self.u.prog, crate::tcx::TypingEnv::fully_monomorphized(&self.u.prog), *d, vi, fi, self.u.tcx.tys.list(*args))).unwrap_or(self.u.tcx.tys.unit);
-                    let a = self.new_slot_for(ft);
-                    return (Place::Mem(a, 0), ft);
+            // an opaque type of a provided crate (rustc's layout, size only): every way of reaching
+            // a field -- `x.f`, a struct pattern, a derived or written impl body -- ends here. A
+            // handle struct's field that is the same bytes on both sides (or is itself a handle)
+            // is reached at rustc's offset (Unit::provided_handle_field); any other is refused
+            // here (provided.rs)
+            TyKind::Adt(d, args, _) if self.u.provided_types.contains_key(d) && !self.u.provided_rustc_layout(*d) => {
+                let fdef = self.u.tcx.adts.get(d).and_then(|a| a.variants.get(vi as usize)).and_then(|v| v.fields.get(fi as usize).map(|f| (f.name, v.fields.len())));
+                let ft = fdef.map(|_| self.u.tcx.field_ty(&self.u.prog, crate::tcx::TypingEnv::fully_monomorphized(&self.u.prog), *d, vi, fi, self.u.tcx.tys.list(*args))).unwrap_or(self.u.tcx.tys.unit);
+                match (fdef, if vi == 0 { self.u.provided_handle_field(*d, fi, ft) } else { None }) {
+                    (Some((_, n)), Some(off)) => (ft, off, n),
+                    _ => {
+                        let ts = crate::typeck::ty_to_string(false, &self.u.prog, &self.u.tcx, t);
+                        let fs = fdef.map_or(String::new(), |(name, _)| format!(" (`{}: {}`)", self.u.prog.syms.str(name), crate::typeck::ty_to_string(false, &self.u.prog, &self.u.tcx, ft)));
+                        let krate = self.u.prog.def(*d).krate;
+                        self.provided_err(krate, format!("a field of `{}`{} is reached from JIT-compiled code (a field access, a pattern or a trait impl's body), but `{}` lives in a provided crate (built by rustc into the loader) and that field's bytes are rustc's alone (only plain data, pointers and the crate's handles are reached at rustc's offsets): call a fn of the crate, or route the impl to rustc's (jit.rs provided_fmt_hash)", ts, fs, ts));
+                        // the fn fails with the error above; lowering goes on over a scratch place of
+                        // the field's type so nothing after it trips over a shapeless one
+                        let a = self.new_slot_for(ft);
+                        return (Place::Mem(a, 0), ft);
+                    }
                 }
+            }
+            TyKind::Adt(d, _, _) => {
                 let adt = self.u.tcx.adts.get(d).unwrap();
                 let var = &adt.variants[vi as usize];
                 let ft = var.fields.get(fi as usize).map(|_| field_ty(fi as usize));
@@ -2264,7 +2288,8 @@ impl<'a> Lcx<'a> {
                 _ => self.u.tcx.tys.unit,
             };
             let ul = self.u.closure_storage_layout(up);
-            let once = self.u.tcx.tys.to_opt_closure_kind(ca.kind_ty()) == Some(relax_types::upvar::ClosureKind::FnOnce);
+            self.closure_kind = self.u.tcx.tys.to_opt_closure_kind(ca.kind_ty());
+            let once = self.closure_kind == Some(relax_types::upvar::ClosureKind::FnOnce);
             for (i, li) in caps.iter().enumerate() {
                 let off = ul.fields.get(i).copied().unwrap_or(0) as i32;
                 if self.storage_for_closure(ce).drop_flags && self.capture_by_value(ce, i, *li) {
@@ -2282,33 +2307,8 @@ impl<'a> Lcx<'a> {
                 };
                 self.locals[*li as usize] = Some(LocalSt::Slot(a));
                 self.foreign[*li as usize] = true;
-                // an FnOnce body owns its by-value captures (rustc: the upvars are moved into
-                // the body, which drops what it does not move out at its end): the state's flag
-                // is cleared and the capture becomes a local of this body, so partial moves out
-                // of it (`item.uri.unwrap_or_default()`) are tracked like any local's and only
-                // the rest drops (unwinding included)
                 if once && self.capture_by_value(ce, i, *li) {
-                    if let Some(&(fenv, foff)) = self.capture_flag.get(li) {
-                        let z = self.iconst(0);
-                        self.emit(Inst::Store(Mem::Int(1, false), fenv, foff, z));
-                        self.capture_flag.remove(li);
-                    }
-                    self.foreign[*li as usize] = false;
-                    self.own_local(*li);
-                    // a precise capture owns only its fields: the others are not this
-                    // body's to drop
-                    if let Some(fs) = self.capture_fields(ce, i) {
-                        let lt = self.monomorphize(self.b.locals[*li as usize].ty);
-                        let n = match self.kind(lt) {
-                            TyKind::Adt(d, _, _) => self.u.tcx.adts.get(&d).map_or(0, |a| a.variants.first().map_or(0, |v| v.fields.len())),
-                            _ => 0,
-                        };
-                        for j in 0..n as u32 {
-                            if !fs.contains(&j) {
-                                self.moved_field(*li, &[(0, j)]);
-                            }
-                        }
-                    }
+                    self.own_capture(ce, i, *li);
                 }
             }
         }
@@ -2337,6 +2337,29 @@ impl<'a> Lcx<'a> {
         let v = self.settle_before_temp_drop(v, ret, mark);
         self.drop_stmt_temps_from(mark);
         self.ret_val(v, ret);
+    }
+
+    /// Transfer a by-value capture from its environment to the body's drop scope.
+    fn own_capture(&mut self, ce: u32, i: usize, li: u32) {
+        if let Some((env, off)) = self.capture_flag.remove(&li) {
+            let z = self.iconst(0);
+            self.emit(Inst::Store(Mem::Int(1, false), env, off, z));
+        }
+        self.foreign[li as usize] = false;
+        self.own_local(li);
+        // A precise capture owns only its captured fields.
+        if let Some(fs) = self.capture_fields(ce, i) {
+            let lt = self.monomorphize(self.b.locals[li as usize].ty);
+            let n = match self.kind(lt) {
+                TyKind::Adt(d, _, _) => self.u.tcx.adts.get(&d).map_or(0, |a| a.variants.first().map_or(0, |v| v.fields.len())),
+                _ => 0,
+            };
+            for j in 0..n as u32 {
+                if !fs.contains(&j) {
+                    self.moved_field(li, &[(0, j)]);
+                }
+            }
+        }
     }
 
     /// The coroutine (closure) type of async block / async fn body `ce`.
@@ -2451,7 +2474,25 @@ impl<'a> Lcx<'a> {
         let nfields = storage.fields.len();
         let frame_off = ul.fields[nfields - 1] as i32;
         let tag = Mem::Int(self.layout(storage.fields[nfields - 1]).size as u8, false);
+        // Build dispatcher targets before captures enter the body's drop scopes.
+        let saved = self.cur;
+        let pending_ret = self.f.block();
+        self.switch(pending_ret);
+        let vi_p = self.variant_index(poll_ret, LangItem::PollPending);
+        let pv = self.build_enum(poll_ret, vi_p, Vec::new());
+        self.ret_raw(pv, poll_ret);
+        let cancel_end = self.f.block();
+        self.switch(cancel_end);
+        self.goto(pending_ret);
+        let after_done = self.f.block();
+        self.switch(after_done);
+        self.panic_here("`async fn` resumed after completion");
+        let after_panic = self.f.block();
+        self.switch(after_panic);
+        self.panic_here("`async fn` resumed after panicking");
+        self.switch(saved);
         let once = self.storage_for_closure(ce).drop_flags;
+        // Captures enter the outer scope; async fn parameters are in declaration order.
         for (i, li) in caps.iter().enumerate() {
             let off = ul.fields.get(i).copied().unwrap_or(0) as i32;
             if once && self.capture_by_value(ce, i, *li) {
@@ -2469,59 +2510,21 @@ impl<'a> Lcx<'a> {
             };
             self.locals[*li as usize] = Some(LocalSt::Slot(a));
             self.foreign[*li as usize] = true;
+            if once && self.capture_by_value(ce, i, *li) {
+                self.own_capture(ce, i, *li);
+            }
         }
-        // fixed blocks the state machine needs (coroutine_transform)
-        let saved = self.cur;
-        let pending_ret = self.f.block();
-        self.switch(pending_ret);
-        let vi_p = self.variant_index(poll_ret, LangItem::PollPending);
-        let pv = self.build_enum(poll_ret, vi_p, Vec::new());
-        self.ret_raw(pv, poll_ret);
-        let cancel_end = self.f.block();
-        self.switch(cancel_end);
-        self.goto(pending_ret);
-        let after_done = self.f.block();
-        self.switch(after_done);
-        self.panic_here("`async fn` resumed after completion");
-        let after_panic = self.f.block();
-        self.switch(after_panic);
-        self.panic_here("`async fn` resumed after panicking");
-        self.switch(saved);
         self.coro = Some(Coro { ct, env, cx, frame_off, tag, up_size: ul.size, await_slots: Vec::new(), poll_scratch: Vec::new(), call_private: Default::default(), call_sret: Default::default(), poll_ret, suspends: Vec::new(), cancel_end: Some(cancel_end), pending_ret, after_done, after_panic });
         self.pos = ast.block(body).lo;
         let mark = self.stmt_temps.len();
         let v = self.lower_block(body);
         let v = self.settle_before_temp_drop(v, out, mark);
         self.drop_stmt_temps_from(mark);
-        self.coro_caps = Some((ce, caps, env, ul.fields.clone()));
         self.ret_val(v, out);
     }
 
-    /// The end of a coroutine body (its tail or a `return`): the by-value captures it did not
-    /// move out drop (rustc moves the upvars into the coroutine and drops them at its end),
-    /// then Ready(v) is returned.
+    /// Return Ready(v) after the body's drop scopes have been cleaned up.
     fn coro_complete(&mut self, v: Val, out: TyId) {
-        if let Some((ce, caps, env, fields)) = self.coro_caps.clone() {
-            for (i, li) in caps.iter().enumerate() {
-                if self.capture_by_value(ce, i, *li) {
-                    if let Some(&(fenv, foff)) = self.capture_flag.get(li) {
-                        let lt = self.monomorphize(self.b.locals[*li as usize].ty);
-                        let fl = self.f.vreg(Cls::I);
-                        self.emit(Inst::Load(Mem::Int(1, false), fl, fenv, foff));
-                        let yes = self.f.block();
-                        let join = self.f.block();
-                        self.term(Term::Branch(fl, yes, join));
-                        self.switch(yes);
-                        let a = self.addr_add(env, fields.get(i).copied().unwrap_or(0) as i32);
-                        self.drop_at(a, lt);
-                        let z = self.iconst(0);
-                        self.emit(Inst::Store(Mem::Int(1, false), fenv, foff, z));
-                        self.goto(join);
-                        self.switch(join);
-                    }
-                }
-            }
-        }
         let poll_ret = match &self.coro {
             Some(c) => c.poll_ret,
             None => return,
@@ -3166,6 +3169,24 @@ impl<'a> Lcx<'a> {
                     for li in lis {
                         self.decl_depth[li as usize] = Some(depth);
                     }
+                    // a place matched against a pattern: what moves out of it is the pattern's
+                    // by-value bindings (E0507/8/9 when the place is borrowed, indexed or of a
+                    // Drop type); a plain `let x = place;` moves the whole value (lower_expr)
+                    let plain_move = matches!(ast.pat(*pat), Pat::Ident { sub: None, by_ref: false, .. } | Pat::Wild);
+                    let mut scrut_read = None;
+                    if let Some(e) = init {
+                        if !plain_move && self.is_place_expr(*e) {
+                            let mut x = *e;
+                            while let ExprKind::Paren(y) = ast.expr(x).kind { x = y; }
+                            scrut_read = Some(x);
+                            if self.pat_moves_droppable(*pat) {
+                                if let Some(msg) = self.illegal_move(x) {
+                                    self.err(ast.expr(*e).lo, msg);
+                                }
+                            }
+                        }
+                    }
+                    let scrut_saved = std::mem::replace(&mut self.scrut_read, scrut_read);
                     match init {
                         Some(e) if matches!(ast.pat(*pat), Pat::Wild) && else_.is_none() && self.is_place_expr(*e) => {
                             // `let _ = place;` evaluates the place expression (an index is bounds
@@ -3386,6 +3407,7 @@ impl<'a> Lcx<'a> {
                             }
                         }
                     }
+                    self.scrut_read = scrut_saved;
                 }
                 // stripped at load (program::strip_cfg_stmts)
                 Stmt::Item(_) | Stmt::Empty | Stmt::Attrs(..) => {}
@@ -3564,9 +3586,9 @@ impl<'a> Lcx<'a> {
             let sig = self.u.tcx.fn_sig(&self.u.prog, next).cloned();
             match sig {
                 Some(sig) => {
-                    let x = self.u.tcx.tys.subst_erasing_regions(sig.ret, &nargs);
+                    let x = self.u.tcx.tys.subst(sig.ret, &nargs);
                     let u = self.u;
-                    u.tcx.normalize_erasing_regions(&u.prog, crate::tcx::TypingEnv::fully_monomorphized(&u.prog), x)
+                    u.tcx.normalize_erasing_late_bound_regions(&u.prog, crate::tcx::TypingEnv::fully_monomorphized(&u.prog), x)
                 }
                 None => self.u.tcx.tys.error,
             }
@@ -3780,6 +3802,14 @@ impl<'a> Lcx<'a> {
             if let Some(&(env, off)) = self.capture_flag.get(&li) {
                 let z = self.iconst(0);
                 self.emit(Inst::Store(Mem::Int(1, false), env, off, z));
+            } else {
+                // the capture lives in a borrowed env (an Fn / FnMut closure's, or a borrow of
+                // the owner's local): moving it out would leave a second owner (E0507)
+                let lt = self.monomorphize(self.b.locals[li as usize].ty);
+                if self.needs_drop_glue(lt) {
+                    let msg = self.illegal_capture_move(li);
+                    self.err(self.pos, msg);
+                }
             }
             return;
         }
@@ -3851,6 +3881,79 @@ impl<'a> Lcx<'a> {
                 self.box_inner(self.body_ty(*x))?;
                 p.push((BOX_STEP, 0));
                 Some((li, p))
+            }
+            _ => None,
+        }
+    }
+
+    /// rustc borrowck's move out of a captured variable (diagnostics/move_errors.rs
+    /// report_cannot_move_from_borrowed_content, BorrowedContent of an upvar).
+    fn illegal_capture_move(&self, li: u32) -> String {
+        let name = self.u.prog.syms.str(self.b.locals[li as usize].name).to_string();
+        match self.closure_kind {
+            Some(relax_types::upvar::ClosureKind::Fn) => format!("cannot move out of `{name}`, a captured variable in an `Fn` closure (E0507)"),
+            Some(relax_types::upvar::ClosureKind::FnMut) => format!("cannot move out of `{name}`, a captured variable in an `FnMut` closure (E0507)"),
+            _ => format!("cannot move out of `{name}`, which is behind a reference (E0507)"),
+        }
+    }
+
+    /// Why moving the value of place expression `e` (its type needs drop glue) out is illegal:
+    /// rustc gather_moves' IllegalMoveOriginKind (rustc_mir_dataflow move_paths/builder.rs
+    /// move_path_for: BorrowedContent through a non-Box deref, an overloaded deref or index,
+    /// or a static; InteriorOfTypeWithDestructor; InteriorOfSliceOrArray). None: the place is
+    /// owned here (a local, a by-value capture this body owns, a temporary) and may be moved.
+    fn illegal_move(&mut self, e: ExprId) -> Option<String> {
+        let ast = self.ast();
+        let ts = |l: &Self, t: TyId| crate::typeck::ty_to_string(false, &l.u.prog, &l.u.tcx, t);
+        match &ast.expr(e).kind {
+            ExprKind::Paren(x) => self.illegal_move(*x),
+            ExprKind::Path(_) => match self.b.res.get(&e.0).copied() {
+                Some(Res::Local(li)) if self.foreign[li as usize] && !self.capture_flag.contains_key(&li) => Some(self.illegal_capture_move(li)),
+                Some(Res::Def(d)) if matches!(self.u.prog.def(d).kind, DefKind::Static | DefKind::ForeignStatic) => Some("cannot move out of a static item (E0507)".to_string()),
+                _ => None,
+            },
+            ExprKind::Field(x, _) | ExprKind::TupleField(x, _) => {
+                let derefs = self.b.field_idx.get(&e.0).map_or(0, |&(d, _)| d as usize);
+                let mut t = self.body_ty(*x);
+                for k in 0..derefs {
+                    // a Box's deref is a builtin place (its contents move out); any other
+                    // overloaded deref is a call returning a reference
+                    if let Some(inner) = self.box_inner(t) {
+                        t = inner;
+                        continue;
+                    }
+                    if self.b.ov_deref(e.0, k).is_some() {
+                        return Some(format!("cannot move out of dereference of `{}` (E0507)", ts(self, t)));
+                    }
+                    return Some(format!("cannot move out of a field of `{}`, which is behind a reference (E0507)", ts(self, t)));
+                }
+                if let TyKind::Adt(d, _, _) = self.kind(t) {
+                    if self.u.tcx.adt_destructor(d).is_some() {
+                        return Some(format!("cannot move out of type `{}`, which implements the `Drop` trait (E0509)", ts(self, t)));
+                    }
+                }
+                if derefs > 0 && !self.is_place_expr(*x) { return None; }
+                self.illegal_move(*x)
+            }
+            ExprKind::Index(x, _) => {
+                // builtin indexing auto-derefs the base: the array or slice behind references
+                let mut t = self.body_ty(*x);
+                while let TyKind::Ref(_, inner, _) = self.kind(t) { t = inner; }
+                match self.kind(t) {
+                    TyKind::Array(..) => Some(format!("cannot move out of type `{}`, a non-copy array (E0508)", ts(self, t))),
+                    TyKind::Slice(..) => Some(format!("cannot move out of type `{}`, a non-copy slice (E0508)", ts(self, t))),
+                    _ => Some(format!("cannot move out of index of `{}` (E0507)", ts(self, t))),
+                }
+            }
+            ExprKind::Unary(UnOp::Deref, x) => {
+                let t = self.body_ty(*x);
+                match self.kind(t) {
+                    TyKind::Ref(m, ..) => Some(format!("cannot move out of a value which is behind a {} reference (E0507)", if m { "mutable" } else { "shared" })),
+                    TyKind::Ptr(..) => Some("cannot move out of a value which is behind a raw pointer (E0507)".to_string()),
+                    _ if self.box_inner(t).is_some() => if self.is_place_expr(*x) { self.illegal_move(*x) } else { None },
+                    _ if self.b.ov_deref(e.0, 0).is_some() => Some(format!("cannot move out of dereference of `{}` (E0507)", ts(self, t))),
+                    _ => None,
+                }
             }
             _ => None,
         }
@@ -4493,6 +4596,16 @@ impl<'a> Lcx<'a> {
                         }
                     } else {
                         if self.needs_drop_glue(t) {
+                            // a binding that moves out of a borrow: through a `&` pattern, or
+                            // of a scrutinee place this body does not own (E0507/8/9)
+                            let illegal = if self.pat_through_ref {
+                                Some("cannot move out of a value which is behind a reference, in a `&` pattern (E0507)".to_string())
+                            } else if self.match_root.is_none() {
+                                self.match_scrut.filter(|&x| self.is_place_expr(x)).and_then(|x| self.illegal_move(x))
+                            } else { None };
+                            if let Some(msg) = illegal {
+                                self.err(self.pos, msg);
+                            }
                             // moving out of the matched place: its owner no longer drops it
                             // (only this part of it when the path is known)
                             let mv = match self.match_root {
@@ -4543,7 +4656,10 @@ impl<'a> Lcx<'a> {
                     self.pat_path = None;
                     // `&[a, ..]` against `&[T]`: the pointee place keeps the length
                     let pl = if self.unsized_ty(inner) { Place::Regs(ptr) } else { Place::Mem(ptr[0], 0) };
+                    let through_ref = matches!(self.kind(t), TyKind::Ref(..));
+                    let saved = std::mem::replace(&mut self.pat_through_ref, through_ref);
                     self.bind_pat_place(*x, &pl, inner);
+                    self.pat_through_ref = saved;
                 }
             }
             Pat::Tuple(v) => {
@@ -6740,6 +6856,11 @@ impl<'a> Lcx<'a> {
                         // moving out of `*b` (a Box local): the box is freed without dropping
                         // its contents again (rustc drop elaboration of the moved path)
                         if self.needs_drop_glue(pt) {
+                            if self.scrut_read != Some(e) {
+                                if let Some(msg) = self.illegal_move(e) {
+                                    self.err(self.pos, msg);
+                                }
+                            }
                             if let Some((li, path)) = self.field_move_path(e) {
                                 self.moved_field(li, &path);
                             }
@@ -6747,6 +6868,12 @@ impl<'a> Lcx<'a> {
                         v
                     }
                     UnOp::Deref => {
+                        // a move out of `*r` of a reference or raw pointer (E0507)
+                        if self.needs_drop_glue(t) && self.scrut_read != Some(e) {
+                            if let Some(msg) = self.illegal_move(e) {
+                                self.err(self.pos, msg);
+                            }
+                        }
                         let p = self.lower_expr(*x);
                         let p = self.to_leaves(p, xt);
                         self.read_place(&Place::Mem(p[0], 0), t)
@@ -7159,6 +7286,13 @@ impl<'a> Lcx<'a> {
                 // (rustc: a move path for the field, the temporary's drop elaborated around it;
                 // `three().1.0` is one temporary, `three()`, and one move path in it)
                 if self.needs_drop_glue(t) {
+                    // out of a borrowed place, an index or a Drop type: refused (E0507/8/9)
+                    // (a `let` initializer matched against a pattern is checked at the `let`)
+                    if self.scrut_read != Some(e) {
+                        if let Some(msg) = self.illegal_move(e) {
+                            self.err(self.pos, msg);
+                        }
+                    }
                     if let Some((root, path)) = self.rvalue_proj(e) {
                         let (a, rt, f, fp, ft) = self.lower_rvalue_proj(root, &path);
                         let v = self.read_place(&fp, ft);
@@ -9219,12 +9353,13 @@ impl<'a> Lcx<'a> {
                 }
                 let fail = self.f.block();
                 self.test_pat(*p, &place, pt, fail);
-                let saved = (self.match_root, self.pat_path.take());
+                let saved = (self.match_root, self.pat_path.take(), self.match_scrut.replace(*x));
                 self.match_root = root;
                 self.pat_path = self.root_path(*x, root, &temp);
                 self.bind_pat_place(*p, &place, pt);
                 self.match_root = saved.0;
                 self.pat_path = saved.1;
+                self.match_scrut = saved.2;
                 // an rvalue scrutinee lives to the end of the statement (bindings may
                 // borrow it); parts moved out clear its flag
                 if let (Some(MatchRoot::Temp(fl)), Some(tp)) = (root, &temp) {
@@ -9703,7 +9838,7 @@ impl<'a> Lcx<'a> {
                 let alt_fail = if ci + 1 == n { next } else { self.f.block() };
                 self.or_force = combo.into_iter().collect();
                 self.test_pat(pat, place, pt, alt_fail);
-                let saved = (self.match_root, self.pat_path.take());
+                let saved = (self.match_root, self.pat_path.take(), self.match_scrut.replace(x));
                 self.match_root = root;
                 self.pat_path = self.root_path(x, root, temp);
                 self.defer_moves = Some(Vec::new());
@@ -9711,6 +9846,7 @@ impl<'a> Lcx<'a> {
                 let pend = self.defer_moves.take().unwrap_or_default();
                 self.match_root = saved.0;
                 self.pat_path = saved.1;
+                self.match_scrut = saved.2;
                 self.or_force.clear();
                 let gok = self.f.block();
                 let gfail = self.f.block();
@@ -9749,7 +9885,7 @@ impl<'a> Lcx<'a> {
             }
             let arm_depth = self.scopes.len();
             self.push_scope();
-            let saved = (self.match_root, self.pat_path.take());
+            let saved = (self.match_root, self.pat_path.take(), self.match_scrut.replace(x));
             self.match_root = root;
             self.pat_path = self.root_path(x, root, temp);
             // (a guarded arm here has too many or-candidates to try one by one: its moves
@@ -9758,6 +9894,7 @@ impl<'a> Lcx<'a> {
             self.bind_pat_place(pat, place, pt);
             self.match_root = saved.0;
             self.pat_path = saved.1;
+            self.match_scrut = saved.2;
             // the guard's scope (see the candidate path above)
             self.push_scope();
             if let Some(g) = guard {
@@ -13584,7 +13721,7 @@ fn coroutine_transform(f: &mut Func, c: &Coro, ptr_bytes: u32) -> Result<(u32, u
         for i in &b.insts {
             match i {
                 Inst::Iconst(..) | Inst::Fconst(..) => {}
-                Inst::Mov(d, x) if *x == c.cx => {}
+                Inst::Mov(_, x) if *x == c.cx => {}
                 _ => {
                     uses_defs(i, &mut us, &mut ds);
                     for d in &ds {
@@ -15080,6 +15217,98 @@ mod query_drop_tests {
         assert!(result.load(Ordering::Relaxed), "query must remain callable from a TLS destructor");
     }
 
+}
+
+#[cfg(test)]
+mod illegal_move_tests {
+    /// Moves rustc's borrowck rejects (E0507, E0508, E0509), run before any borrow check answers
+    /// (`makepad test` checks a dependency beside its tests): each would leave two owners of one
+    /// value, a double free when both drop. The lowering refuses the body instead; valid moves of
+    /// the same shapes still run.
+    const SRC: &str = r#"
+pub struct WithDrop { pub name: String }
+impl Drop for WithDrop { fn drop(&mut self) {} }
+pub struct Pair { pub a: String, pub b: String }
+fn call_fn<F: Fn() -> usize>(f: F) -> usize { f() + f() }
+fn s(x: &str) -> String { x.to_string() }
+// fab_arms' planner: the inner `move` closure takes `model` out of the FnMut flat_map closure
+pub fn fnmut_capture(out: &mut usize) { let model = vec![s("arm")]; *out = (0..3).flat_map(|i| (0..2).map(move |k| model.len() + i + k)).count(); }
+pub fn fn_capture(out: &mut usize) { let x = s("once"); *out = call_fn(move || { let t = x; t.len() }); }
+pub fn deref_ref(out: &mut usize) { let r = &s("ab"); let v: String = *r; *out = v.len(); }
+pub fn field_through_ref(out: &mut usize) { let p = &Pair { a: s("a"), b: s("b") }; let v = p.a; *out = v.len(); }
+pub fn rc_deref(out: &mut usize) { let r = std::rc::Rc::new(s("abc")); let v: String = *r; *out = v.len(); }
+pub fn vec_index(out: &mut usize) { let v = vec![s("a")]; let x = v[0]; *out = x.len(); }
+pub fn array_index(out: &mut usize) { let a = [s("a"), s("bb")]; let x = a[1]; *out = x.len(); }
+pub fn slice_index(out: &mut usize) { let a: &[String] = &[s("a")]; let x = a[0]; *out = x.len(); }
+pub fn drop_type_field(out: &mut usize) { let w = WithDrop { name: s("abcd") }; let x = w.name; *out = x.len(); }
+pub fn ref_pattern(out: &mut usize) { let r = &Some(s("ab")); *out = match r { &Some(x) => x.len(), &None => 0 }; }
+pub fn borrowed_scrutinee(out: &mut usize) { let r = &Some(s("abc")); *out = match *r { Some(x) => x.len(), None => 0 }; }
+pub fn let_pattern_index(out: &mut usize) { let v = vec![(s("a"), 1)]; let (x, _) = v[0]; *out = x.len(); }
+pub enum Shape { Circle(u32, String), Dot }
+// valid: an owned local's field, a Box's contents, a temporary's field, a closure param's capture
+pub fn valid_moves(out: &mut usize) {
+    let p = Pair { a: s("a"), b: s("bb") };
+    let a = p.a;
+    let b = Box::new(s("ccc"));
+    let c = *b;
+    let d = (s("dddd"), 1).0;
+    let e: usize = vec![s("e")].into_iter().flat_map(|x| (0..2).map(move |k| x.len() + k)).sum();
+    let f = match Some(s("ff")) { Some(x) => x.len(), None => 0 };
+    // a pattern binding only Copy parts of a borrowed or indexed place reads it, moves nothing
+    let shapes = vec![Shape::Circle(3, s("c")), Shape::Dot];
+    let Shape::Circle(r, _) = shapes[0] else { return };
+    let r2 = &shapes;
+    let Shape::Circle(q, ref name) = r2[0] else { return };
+    *out = a.len() + p.b.len() * 10 + c.len() * 100 + d.len() * 1000 + e * 10000 + f * 100000 + (r + q) as usize * 1000000 + name.len() * 10000000;
+}
+"#;
+
+    #[test]
+    fn moves_rustc_rejects_are_refused_at_lowering() {
+        isolated_test!(moves_rustc_rejects_are_refused_at_lowering);
+        crate::jit::CHECK_FIRST.store(false, std::sync::atomic::Ordering::Relaxed);
+        std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+        let dir = std::env::temp_dir().join(format!("relax-illegal-moves-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("lib.rs");
+        std::fs::write(&path, SRC).unwrap();
+        let (prog, core, krate) = crate::load_with_std(&std::sync::Arc::new(crate::Session::default()), path.to_str().unwrap(), "illegal_moves", false).unwrap();
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(dir).unwrap();
+        let mut tcx = crate::tcx::Tcx::new();
+        tcx.collect(&prog);
+        let mut u = crate::jit::Unit::new(prog, tcx, core);
+        let up = &mut *u as *mut crate::jit::Unit;
+        let run = |name: &str| -> Result<usize, String> {
+            let def = (0..u.prog.defs.len()).map(|i| crate::program::DefId(i as u32)).find(|&d| u.prog.def(d).krate == krate && u.prog.name(d) == name).unwrap();
+            let entry = crate::owner::call(crate::owner::Class::Program, || { let f = u.fn_id(crate::jit::FnKey::Inst(def, vec![])); u.entry(f) });
+            let mut out = 0usize;
+            unsafe { crate::jit::call_jit(up, entry, &mut out as *mut usize as u64) }.map(|_| out).map_err(|p| p.message)
+        };
+        let cases = [
+            ("fnmut_capture", "cannot move out of `model`, a captured variable in an `FnMut` closure (E0507)"),
+            ("fn_capture", "cannot move out of `x`, a captured variable in an `Fn` closure (E0507)"),
+            ("deref_ref", "cannot move out of a value which is behind a shared reference (E0507)"),
+            ("field_through_ref", "cannot move out of a field of `&Pair`, which is behind a reference (E0507)"),
+            ("rc_deref", "cannot move out of dereference of `Rc<String>` (E0507)"),
+            ("vec_index", "cannot move out of index of `Vec<String>` (E0507)"),
+            ("array_index", "cannot move out of type `[String; 2]`, a non-copy array (E0508)"),
+            ("slice_index", "cannot move out of type `[String]`, a non-copy slice (E0508)"),
+            ("drop_type_field", "cannot move out of type `WithDrop`, which implements the `Drop` trait (E0509)"),
+            ("ref_pattern", "in a `&` pattern (E0507)"),
+            ("borrowed_scrutinee", "cannot move out of a value which is behind a shared reference (E0507)"),
+            ("let_pattern_index", "cannot move out of index of `Vec<(String, i32)>` (E0507)"),
+        ];
+        let mut wrong = Vec::new();
+        for (name, msg) in cases {
+            match run(name) {
+                Err(e) if e.contains("compile error in ") && e.contains(msg) => {}
+                other => wrong.push(format!("{name}: {other:?}")),
+            }
+        }
+        assert!(wrong.is_empty(), "not refused as rustc does:\n{}", wrong.join("\n"));
+        assert_eq!(run("valid_moves"), Ok(16_234_321));
+    }
 }
 
 /// rustc_middle/src/ty/instance.rs: Display; identities include the method and args.

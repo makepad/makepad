@@ -1,11 +1,12 @@
 use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use crate::error::GitError;
 use crate::oid::ObjectId;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RefTarget {
     Direct(ObjectId),
     Symbolic(String),
@@ -144,9 +145,9 @@ pub fn list_refs_in(git_dir: &Path, common_dir: &Path, prefix: &str) -> Result<V
     let mut result: HashMap<String, RefTarget> = HashMap::new();
 
     // Shared store: packed refs first, loose refs override.
-    for (name, oid) in read_packed_refs(common_dir)? {
-        if name.starts_with(prefix) && (same_store || !is_private_ref(&name)) {
-            result.insert(name, RefTarget::Direct(oid));
+    for (name, oid) in read_packed_refs(common_dir)?.iter() {
+        if name.starts_with(prefix) && (same_store || !is_private_ref(name)) {
+            result.insert(name.clone(), RefTarget::Direct(*oid));
         }
     }
     let mut shared: HashMap<String, RefTarget> = HashMap::new();
@@ -217,13 +218,30 @@ fn collect_refs_under(
 /// <sha1> <refname>
 /// ^<sha1>           (peeled tag — we skip these)
 /// ```
-pub fn read_packed_refs(git_dir: &Path) -> Result<HashMap<String, ObjectId>, GitError> {
+///
+/// A file read before is not parsed again while it is the same file: git writes packed-refs
+/// whole and renames it into place, so every write changes its identity, size or mtime. A
+/// repository with thousands of packed refs costs a stat per ref read, not a parse.
+pub fn read_packed_refs(git_dir: &Path) -> Result<Arc<HashMap<String, ObjectId>>, GitError> {
+    type Parsed = (PackedKey, Arc<HashMap<String, ObjectId>>);
+    static PARSED: Mutex<Option<HashMap<PathBuf, Parsed>>> = Mutex::new(None);
     let packed_path = git_dir.join("packed-refs");
+    let key = match fs::metadata(&packed_path) {
+        Ok(meta) => PackedKey::of(&meta),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Arc::default()),
+        Err(e) => return Err(GitError::Io(e)),
+    };
+    if let Some((k, refs)) = PARSED.lock().unwrap_or_else(|e| e.into_inner()).as_ref().and_then(|m| m.get(&packed_path)) {
+        if *k == key {
+            return Ok(refs.clone());
+        }
+    }
     let mut refs = HashMap::new();
 
+    // replaced since the stat: the next read sees another key and parses again
     let content = match fs::read_to_string(&packed_path) {
         Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(refs),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Arc::default()),
         Err(e) => return Err(GitError::Io(e)),
     };
 
@@ -244,7 +262,31 @@ pub fn read_packed_refs(git_dir: &Path) -> Result<HashMap<String, ObjectId>, Git
         refs.insert(name.to_string(), oid);
     }
 
+    let refs = Arc::new(refs);
+    PARSED.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).insert(packed_path, (key, refs.clone()));
     Ok(refs)
+}
+
+/// What tells one packed-refs file from the next.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct PackedKey {
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+    #[cfg(unix)]
+    ino: u64,
+}
+
+impl PackedKey {
+    fn of(meta: &fs::Metadata) -> PackedKey {
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt;
+        PackedKey {
+            len: meta.len(),
+            modified: meta.modified().ok(),
+            #[cfg(unix)]
+            ino: meta.ino(),
+        }
+    }
 }
 
 /// Write a ref atomically using a lockfile.

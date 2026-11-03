@@ -1,0 +1,5 @@
+#!/bin/sh
+# The private-data check on the commit message (AGENTS.md). Never commit with --no-verify.
+scan="$(git rev-parse --path-format=absolute --git-common-dir)/../tools/private_check/scan.sh"
+[ -f "$scan" ] || { echo "commit-msg: no private check at $scan" >&2; exit 1; }
+exec sh "$scan" msg "$1"

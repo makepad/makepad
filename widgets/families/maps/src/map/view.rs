@@ -3753,8 +3753,8 @@ impl DrawMapVector {
         self.draw_super.draw_depth = draw_depth;
         stamp_map_uniforms(&mut self.draw_super.draw_vars, slots, uniforms, env);
         self.draw_super.draw_vars.geometry_id = Some(geometry_id);
-        cx.new_draw_call(&self.draw_super.draw_vars);
-        let Some(mut instances) = cx.begin_many_aligned_instances(&self.draw_super.draw_vars)
+        cx.new_draw_call(&mut self.draw_super.draw_vars);
+        let Some(mut instances) = cx.begin_many_aligned_instances(&mut self.draw_super.draw_vars)
         else {
             return Area::Empty;
         };
@@ -3934,8 +3934,8 @@ impl DrawMapIcon {
         });
         stamp_map_uniforms(&mut self.draw_vars, slots, uniforms, env);
         self.draw_vars.geometry_id = Some(geometry.geometry_id());
-        cx.new_draw_call(&self.draw_vars);
-        let Some(mut instances) = cx.begin_many_aligned_instances(&self.draw_vars) else {
+        cx.new_draw_call(&mut self.draw_vars);
+        let Some(mut instances) = cx.begin_many_aligned_instances(&mut self.draw_vars) else {
             return Area::Empty;
         };
         for record in group.data.chunks_exact(ICON_INSTANCE_FLOATS) {
@@ -3992,8 +3992,8 @@ impl DrawMapProp {
         self.draw_depth = draw_depth;
         stamp_map_uniforms(&mut self.draw_vars, slots, uniforms, env);
         self.draw_vars.geometry_id = Some(geometry_id);
-        cx.new_draw_call(&self.draw_vars);
-        let Some(mut instances) = cx.begin_many_aligned_instances(&self.draw_vars) else {
+        cx.new_draw_call(&mut self.draw_vars);
+        let Some(mut instances) = cx.begin_many_aligned_instances(&mut self.draw_vars) else {
             return Area::Empty;
         };
         for record in records {
@@ -4056,8 +4056,8 @@ impl DrawMapWall {
         }
         self.draw_depth = draw_depth;
         stamp_map_uniforms(&mut self.draw_vars, slots, uniforms, env);
-        cx.new_draw_call(&self.draw_vars);
-        let Some(mut instances) = cx.begin_many_aligned_instances(&self.draw_vars) else {
+        cx.new_draw_call(&mut self.draw_vars);
+        let Some(mut instances) = cx.begin_many_aligned_instances(&mut self.draw_vars) else {
             return Area::Empty;
         };
         for record in records {
@@ -4113,8 +4113,8 @@ impl DrawMapShadow {
         }
         self.draw_depth = draw_depth;
         stamp_map_uniforms(&mut self.draw_vars, slots, uniforms, env);
-        cx.new_draw_call(&self.draw_vars);
-        let Some(mut instances) = cx.begin_many_aligned_instances(&self.draw_vars) else {
+        cx.new_draw_call(&mut self.draw_vars);
+        let Some(mut instances) = cx.begin_many_aligned_instances(&mut self.draw_vars) else {
             return Area::Empty;
         };
         for record in records {
@@ -4157,8 +4157,8 @@ impl DrawMapShadowDisc {
             return Area::Empty;
         }
         stamp_map_uniforms(&mut self.draw_vars, slots, uniforms, env);
-        cx.new_draw_call(&self.draw_vars);
-        let Some(mut instances) = cx.begin_many_aligned_instances(&self.draw_vars) else {
+        cx.new_draw_call(&mut self.draw_vars);
+        let Some(mut instances) = cx.begin_many_aligned_instances(&mut self.draw_vars) else {
             return Area::Empty;
         };
         for record in records.chunks_exact(SHADOW_DISC_INSTANCE_FLOATS) {

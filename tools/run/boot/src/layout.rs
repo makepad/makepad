@@ -61,8 +61,8 @@ fn plural(n: usize, one: &str, many: &str) -> String {
 pub(crate) fn choice_text(choice: &str, main: bool, keeps_state: bool) -> (&'static str, &'static str) {
     match choice {
         "retry" => ("Retry", "runs the call that panicked again; what it did before the panic may happen twice"),
-        "restart" if keeps_state => ("Restart app (keep state)", "relaunches the app in this window with the state it saves for restarts"),
-        "restart" => ("Restart app", "relaunches the app in this window; what it holds only in memory is lost"),
+        "restart" if keeps_state => ("Restart app (keep state)", "starts the app again (a fresh process) with the state it saves for restarts"),
+        "restart" => ("Restart app", "starts the app again (a fresh process); what it holds only in memory is lost"),
         "panic" if main => ("Let it panic", "the panic goes on as without the JIT: the event handler unwinds and the app redraws"),
         "panic" => ("Unwind the thread", "the panic goes on to this thread's catch boundary, so the app's own failure path runs (a job ends as failed)"),
         "return" => ("Return a value", "the stopped function returns a value you type"),

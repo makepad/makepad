@@ -595,8 +595,12 @@ impl Profile {
                         path.push(CpStep { lane, t0: end, t1: t, wait: None, ended_by: None });
                     }
                     let from = s.t0.max(floor);
+                    // a wake at or after the walk's point (the wait still ran at t; woke_by allows a
+                    // wake just past the wait's end) ended nothing yet: following it consumed no
+                    // time, and two lanes woken by each other later took turns without end
+                    // (a parked main thread's recording spun `pf brief` for minutes)
                     match self.woke_by(lane, &s) {
-                        Some((by, at)) if at > s.t0 => {
+                        Some((by, at)) if at > s.t0 && at < t => {
                             let w = at.max(from).min(end);
                             path.push(CpStep { lane, t0: w, t1: end, wait: Some(s), ended_by: Some(by) });
                             // the waker's time from the wake back to the wait's start

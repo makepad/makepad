@@ -256,10 +256,13 @@ pub fn report(home: &Path, leases: &[Lease], q: &Query, now: u64, summary: bool)
             if let Some(peak) = v.get("peak_ram_gb").and_then(super::num).filter(|n| n.is_finite() && *n >= 0.0) { c.2 = Some(c.2.unwrap_or(0.0).max(peak)); }
         }
         let mut waits = BTreeMap::<String, (u64, BTreeSet<String>)>::new();
+        // devhub's prebuilds go before timed work and wait behind a running timed lease by design:
+        // their own rows, so `held by timed` is the work that waits for a timed run
+        let prebuild = s(v, "lane").starts_with(super::PREBUILD_LANE_PREFIX);
         for span in phases.0.iter().filter(|s| s.phase == "queued") {
             let ms = (if span.end == 0 { now } else { span.end.min(now) }).saturating_sub(span.start.max(since));
             if ms == 0 { continue; }
-            let w = waits.entry(span.blocker.clone()).or_default();
+            let w = waits.entry(if prebuild { format!("prebuild {}", span.blocker) } else { span.blocker.clone() }).or_default();
             w.0 += ms;
             w.1.extend(span.boxes.iter().cloned());
         }
@@ -500,6 +503,17 @@ mod tests {
         assert!(out.contains("  a: native 1 (--native 1, measured 0, no JIT platform 0, JIT miss 0; app), refused 2; live saves 0; OVER\n    --native \"perf\" (app)\n"), "{out}");
         assert!(out.contains("  b: native 2 (--native 0, measured 0, no JIT platform 1, JIT miss 1; app), refused 0; live saves 1\n"), "{out}");
         assert!(!out.contains("old"), "{out}");
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[test]
+    fn prebuilds_behind_timed_work_get_their_own_blocker_row() {
+        let home = std::env::temp_dir().join(format!("devhub-prof-prebuild-{}", std::process::id()));
+        std::fs::create_dir_all(&home).unwrap();
+        let lease = |id: &str, lane: &str, kind: &str, ms: u64| format!("{{\"id\":\"{id}\",\"lane\":\"{lane}\",\"kind\":\"{kind}\",\"asked_ms\":1000,\"ended_ms\":{e},\"reported_ms\":{e},\"phases\":[{{\"phase\":\"queued\",\"blocker\":\"held by timed\",\"boxes\":[\"b\"],\"start_ms\":1000,\"end_ms\":{e}}}]}}\n", e = 1000 + ms);
+        std::fs::write(home.join("leases.jsonl"), [lease("L1", "prebuild-b", "build", 120_000), lease("L2", "lane", "test", 60_000)].concat()).unwrap();
+        let out = super::report(&home, &[], &super::Query::parse(&[]).unwrap(), 200_000, false).unwrap();
+        assert!(out.contains("  prebuild held by timed: 2.0; 1 / 2.0 / 2.0; b\n") && out.contains("  held by timed: 1.0; 1 / 1.0 / 1.0; b\n"), "{out}");
         std::fs::remove_dir_all(&home).unwrap();
     }
 }

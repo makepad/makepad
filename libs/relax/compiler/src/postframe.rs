@@ -340,13 +340,20 @@ mod tests {
     }
 }
 
+/// ns the UI thread has spent in JIT waits so far, its open one included (atomics only: why-hung
+/// reads it while threads may hold the queue locks `activity` takes).
+pub fn ui_wait_ns() -> u64 {
+    let mut ns = UI_WAIT_SUM.load(Relaxed);
+    if UI_WAITING.load(Relaxed) > 0 {
+        ns += wall_ns().saturating_sub(UI_WAIT_START.load(Relaxed));
+    }
+    ns
+}
+
 /// What the JIT is doing now and has done so far.
 pub fn activity() -> Activity {
     let ui_waiting = UI_WAITING.load(Relaxed) > 0;
-    let mut ui_wait_ns = UI_WAIT_SUM.load(Relaxed);
-    if ui_waiting {
-        ui_wait_ns += wall_ns().saturating_sub(UI_WAIT_START.load(Relaxed));
-    }
+    let ui_wait_ns = ui_wait_ns();
     let (o3, o3_running, o3_slot) = crate::jit::o3_counts();
     let (o2, o2_running, o2_done) = crate::jit::o2_counts();
     let ahead_running = AHEAD_RUNNING.load(Relaxed);

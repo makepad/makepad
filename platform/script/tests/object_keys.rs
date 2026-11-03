@@ -40,6 +40,44 @@ fn boolean(vm: &mut ScriptVm, name: &str, code: &str) -> bool {
         .unwrap_or_else(|| panic!("{name}: expected a bool, got {value:?}"))
 }
 
+fn keyword_fields(keywords: &[&str]) {
+    let vm = &mut test_vm();
+    for keyword in keywords {
+        vm.bx.captured_errors = Some(Vec::new());
+        assert!(boolean(
+            vm,
+            keyword,
+            &format!(
+                "use mod.pod.*\n\
+                 let o = {{value: (fn() {{1}})() {keyword}: 2}}\n\
+                 let p = {{value: if true {{1}} {keyword}: 2}}\n\
+                 let initial = o.{keyword}\n\
+                 o.{keyword} = 3\n\
+                 let methods = {{{keyword}: fn() -> u32 {{ 7u }}}}\n\
+                 initial == 2 && p.{keyword} == 2 && o.{keyword} == 3 && methods.{keyword}() == 7"
+            ),
+        ), "keyword field definition, access, assignment and call: {keyword}");
+    }
+}
+
+#[test]
+fn declaration_keywords_are_field_names() {
+    keyword_fields(&["let", "var", "mut", "fn", "use"]);
+}
+
+#[test]
+fn control_flow_keywords_are_field_names() {
+    keyword_fields(&[
+        "if", "elif", "else", "for", "in", "while", "loop", "match", "return", "break",
+        "continue", "do", "try",
+    ]);
+}
+
+#[test]
+fn operator_keywords_are_field_names() {
+    keyword_fields(&["and", "or", "is"]);
+}
+
 #[test]
 fn delete_id_literal_removes_the_field_and_returns_its_value() {
     let vm = &mut test_vm();

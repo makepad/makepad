@@ -122,6 +122,21 @@ $(grep -E -m8 -A3 '^error' "$work/$pkg.build" | cut -c1-240)
     for prog in $("$pkgtarget/release/$pkg" --list); do pkgprogs="$pkgprogs $pkg~$prog"; done
 done
 for p in $progs $known $pkgprogs; do for k in native $difftiers; do echo "$p $k"; done; done | xargs -P "$jobs" -n 2 "$0" --job "$work"
+# how a run ended: its exit status, or the signal that killed it (the JIT runs through cargo run,
+# which execs it: a signal N shows as 128+N, N at most 64)
+how() {
+    case $1 in
+    '') echo "no exit status" ;;
+    129|1[3-8][0-9]|19[0-2]) echo "killed by signal $(($1 - 128)) (SIG$(kill -l $(($1 - 128)) 2>/dev/null))" ;;
+    *) echo "exit $1" ;;
+    esac
+}
+# the end of a run's stderr: its panic or error lines, else its last lines (a test's compile errors
+# and panics are on its stdout: the raw output's are shown too)
+errtail() {
+    grep -a -v '^\s*$' "$1" 2>/dev/null | grep -a -m3 -i 'panic\|error\|abort\|cannot\|overflow\|signal\|fault' | cut -c1-240 | grep . \
+        || grep -a -v '^\s*$' "$1" 2>/dev/null | tail -3 | cut -c1-240
+}
 check() {
     p=$1; fail=
     sed -n 's/^test [A-Za-z0-9_:]* \.\.\. //; /^D /p' "$work/$p.native.raw" > "$work/$p.native.d"
@@ -133,14 +148,15 @@ check() {
         rc=$(cat "$work/$p.$k.rc" 2>/dev/null)
         if [ "$rc" != "$nrc" ] && [ ! -s "$work/$p.$k.d" ] && ! grep -aq . "$work/$p.$k.raw"; then
             # makepad itself failed (no std, bad binary, crash before main): not a codegen difference
-            fail="HARNESS ERROR: $p at tier $k: makepad exited $rc with no output: $(grep -a -m1 . "$work/$p.$k.err" | cut -c1-240)"
+            fail="HARNESS ERROR: $p at tier $k: makepad $(how "$rc") with no output: $(grep -a -m1 . "$work/$p.$k.err" | cut -c1-240)"
             harness=1
         elif ! cmp -s "$work/$p.native.d" "$work/$p.$k.d"; then
-            fail="$p at tier $k: stdout differs from rustc (cksum native $sum, $k $(cksum < "$work/$p.$k.d"))
+            fail="$p at tier $k: stdout differs from rustc (cksum native $sum, $k $(cksum < "$work/$p.$k.d")); $k $(how "$rc") (native $(how "$nrc"))
 $(diff "$work/$p.native.d" "$work/$p.$k.d" | head -8 | cut -c1-240)
-$(grep -a -v '^\s*$' "$work/$p.$k.err" 2>/dev/null | grep -a -m3 -i 'panic\|error\|abort\|cannot\|overflow' | cut -c1-240)"
+$(grep -a -m3 'compile error\|internal compiler error\|panicked at' "$work/$p.$k.raw" | cut -c1-240)
+$(errtail "$work/$p.$k.err")"
         elif [ "$rc" != "$nrc" ] || { case $p in *~*) false ;; *) ! grep -aq '[1-9][0-9]* passed; 0 failed' "$work/$p.$k.raw" ;; esac; }; then
-            fail="$p at tier $k: exit status $rc (native $nrc) or test failed: $(grep -a 'test result\|panicked' "$work/$p.$k.raw" | head -2 | cut -c1-200)"
+            fail="$p at tier $k: $(how "$rc") (native $(how "$nrc")) or test failed: $(grep -a 'test result\|panicked' "$work/$p.$k.raw" | head -2 | cut -c1-200)"
         fi
     done
 }

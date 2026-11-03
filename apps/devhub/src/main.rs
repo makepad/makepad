@@ -934,7 +934,9 @@ impl AppMain for App {
                 id if id == PAUSE => {
                     if let Some(Core::Master(m)) = &self.core {
                         let resume = m.master.land.paused().is_some();
-                        m.master.land.set_paused(if resume { None } else { Some("from the menu bar") });
+                        if let Err(e) = m.master.land.set_paused(if resume { None } else { Some("from the menu bar") }) {
+                            log_line(&format!("devhub: land pause: {e}"));
+                        }
                     }
                     self.refresh(cx);
                 }

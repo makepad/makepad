@@ -177,6 +177,9 @@ pub enum Event {
     /// child): handle this to redo that work. Delivered once per reset, after
     /// the uploads were queued and before the repaint.
     GpuReset,
+    /// The GPU device was lost. Fail in-flight work now; replacement may not
+    /// succeed immediately. GpuReset announces when new work can be submitted.
+    GpuLost,
     /// Clear all hover/pressed visual state, e.g. after an overlay that
     /// swallowed the hover-outs (a context menu) has closed.
     ClearHover,
@@ -380,7 +383,7 @@ impl Event {
             10 => "WindowLostFocus",
             11 => "GameInputConnected",
             12 => "NextFrame",
-            13 => "XRUpdate",
+            13 => "XrUpdate",
 
             14 => "WindowDragQuery",
             15 => "WindowCloseRequested",
@@ -389,6 +392,7 @@ impl Event {
             18 => "VirtualKeyboard",
             19 => "ClearAtlasses",
             78 => "GpuReset",
+            95 => "GpuLost",
             72 => "ClearHover",
 
             20 => "MouseDown",
@@ -500,6 +504,7 @@ impl Event {
             Self::VirtualKeyboard(_) => 18,
             Self::ClearAtlasses => 19,
             Self::GpuReset => 78,
+            Self::GpuLost => 95,
             Self::ClearHover => 72,
             Self::PopupDismissed(_) => 61,
 
@@ -763,12 +768,16 @@ impl DrawEvent {
         self.redraw_all || self.draw_lists.len() != 0 || self.draw_lists_and_children.len() != 0
     }
 
+    /// The list records in this drawing: it, or a list drawn inside it, was asked to redraw
+    /// before the frame began or during its draw before the list's turn (`Cx::redraw_list`).
     pub fn draw_list_will_redraw(&self, cx: &Cx, draw_list_id: DrawListId) -> bool {
         if self.redraw_all {
             return true;
         }
+        let asked = cx.in_draw_redraws.iter().filter(|r| !r.children).map(|r| &r.list);
+        let asked_with_children = cx.in_draw_redraws.iter().filter(|r| r.children).map(|r| &r.list);
         // figure out if areas are in some way a child of view_id, then we need to redraw
-        for check_draw_list_id in &self.draw_lists {
+        for check_draw_list_id in self.draw_lists.iter().chain(asked) {
             let mut next = Some(*check_draw_list_id);
             while let Some(vw) = next {
                 if vw == draw_list_id {
@@ -783,7 +792,7 @@ impl DrawEvent {
             }
         }
         // figure out if areas are in some way a parent of view_id, then redraw
-        for check_draw_list_id in &self.draw_lists_and_children {
+        for check_draw_list_id in self.draw_lists_and_children.iter().chain(asked_with_children) {
             let mut next = Some(draw_list_id);
             while let Some(vw) = next {
                 if vw == *check_draw_list_id {
@@ -1358,5 +1367,29 @@ pub struct ToWasmMsgEvent {
 impl ToWasmMsgEvent {
     pub fn as_ref(&self) -> ToWasmMsgRef<'_> {
         self.msg.as_ref_at(self.offset)
+    }
+}
+
+#[cfg(test)]
+mod event_id_tests {
+    /// Every `to_u32` arm has its own id, and `name_from_u32` names that id after the same
+    /// variant: event names, recordings, the flight recorder and inspect events key on it.
+    #[test]
+    fn every_event_id_is_unique_and_named_after_its_variant() {
+        let src = include_str!("event.rs");
+        let body = src.split("pub fn to_u32(&self) -> u32 {").nth(1).unwrap().split("\n    }\n").next().unwrap();
+        let mut seen = std::collections::HashMap::new();
+        let mut gated = false;
+        for line in body.lines().map(str::trim) {
+            // an arm under a #[cfg(..)] is unique like any other; its name only exists on that target
+            if line.starts_with("#[cfg") { gated = true; continue; }
+            if !line.starts_with("Self::") { continue; }
+            let (pattern, id) = line.split_once("=>").unwrap();
+            let name: String = pattern["Self::".len()..].chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+            let id: u32 = id.trim().trim_end_matches(',').parse().unwrap();
+            if let Some(other) = seen.insert(id, name.clone()) { panic!("event id {id} is used by both {other} and {name}"); }
+            if !std::mem::take(&mut gated) { assert_eq!(super::Event::name_from_u32(id), name, "event id {id}"); }
+        }
+        assert!(seen.len() > 90, "parsed only {} to_u32 arms", seen.len());
     }
 }

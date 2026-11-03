@@ -30,9 +30,12 @@ pub(crate) struct Readbacks {
     raw: HashMap<u32, (Texture, usize, usize, usize, RawCallback)>,
     jobs: VecDeque<Box<dyn FnOnce() + Send>>,
     raw_worker: Option<TaskHandle<()>>,
-    texture_pending: Vec<(makepad_hal::Id, u32, usize, usize)>,
+    texture_pending: Vec<(crate::TextureId, makepad_hal::Id, u32, usize, usize)>,
     buffer_pending: Vec<(makepad_hal::Id, u32, u64, u64)>,
     buffers: HashMap<u32, (crate::GpuBuffer, usize, Box<dyn FnOnce(Result<Arc<[u8]>, ReadbackError>) + Send>)>,
+    /// Buffer reads' callbacks, run one at a time at Interactive class: someone waits on each.
+    buffer_jobs: VecDeque<Box<dyn FnOnce() + Send>>,
+    buffer_worker: Option<TaskHandle<()>>,
 }
 
 impl Cx {
@@ -73,8 +76,8 @@ impl Cx {
             .ok_or(ReadbackError::NotRendered)?;
         let req = self.hal_readback_request();
         self.hal.event_arena_min = self.hal.event_arena_min.max(bytes);
-        if storage && self.hal.compute.has_pending() {
-            self.hal.readbacks.texture_pending.push((hal, req, width, height));
+        if storage && self.hal.compute.binds_texture(id) {
+            self.hal.readbacks.texture_pending.push((id, hal, req, width, height));
         } else {
             self.hal.frames.w.texture_readback(hal, req, [0, 0, width as u32, height as u32]);
         }
@@ -86,12 +89,16 @@ impl Cx {
         Ok(())
     }
 
+    /// Read a storage buffer's bytes once the queued compute that binds it has run. `done` runs
+    /// on the worker pool at Interactive class, one read at a time in completion order: keep it
+    /// short (hand the bytes on), so it never waits behind a queue of background work.
     pub fn read_gpu_buffer(&mut self, buffer: &crate::GpuBuffer, offset: u64, len: u64,
         done: impl FnOnce(Result<Arc<[u8]>, ReadbackError>) + Send + 'static) -> Result<(), ReadbackError> {
+        if self.hal.device_lost { return Err(ReadbackError::DeviceLost); }
         if buffer.hal_id().is_none() || offset.checked_add(len).is_none_or(|n| n > buffer.size()) { return Err(ReadbackError::InvalidSize); }
         let req = self.hal_readback_request();
         self.hal.event_arena_min = self.hal.event_arena_min.max(len as usize);
-        if self.hal.compute.has_pending() {
+        if self.hal.compute.binds_buffer(buffer.hal_id()) {
             self.hal.readbacks.buffer_pending.push((buffer.hal_id(), req, offset, len));
         } else { self.hal.frames.w.buffer_readback(buffer.hal_id(), req, offset, len); }
         self.hal.readbacks.buffers.insert(req, (buffer.clone(), len as usize, Box::new(done)));
@@ -99,14 +106,22 @@ impl Cx {
         Ok(())
     }
 
+    /// Encodes the reads whose producers this build encoded: a read waits only for the queued
+    /// passes that bind its buffer or texture, never for unrelated compute (another pass's
+    /// work held until that pass draws).
     pub(crate) fn hal_compute_readbacks(&mut self, fb: &mut FrameBuilder) {
-        if self.hal.compute.has_pending() { return; }
-        for (id, req, width, height) in self.hal.readbacks.texture_pending.drain(..) {
-            fb.w.texture_readback(id, req, [0, 0, width as u32, height as u32]);
-        }
-        for (id, req, offset, len) in self.hal.readbacks.buffer_pending.drain(..) {
-            fb.w.buffer_readback(id, req, offset, len);
-        }
+        let compute = &self.hal.compute;
+        let r = &mut self.hal.readbacks;
+        r.texture_pending.retain(|&(texture, id, req, width, height)| {
+            let held = compute.binds_texture(texture);
+            if !held { fb.w.texture_readback(id, req, [0, 0, width as u32, height as u32]); }
+            held
+        });
+        r.buffer_pending.retain(|&(id, req, offset, len)| {
+            let held = compute.binds_buffer(id);
+            if !held { fb.w.buffer_readback(id, req, offset, len); }
+            held
+        });
     }
 
     pub(crate) fn hal_readback_request(&mut self) -> u32 {
@@ -230,11 +245,23 @@ impl Cx {
             .insert(req, (ticket, original, texture));
     }
 
+    /// Readback commands queued before replacement refer to the old device's
+    /// contents. Fail them before any later completion can publish empty bytes.
+    pub(crate) fn hal_fail_device_readbacks(&mut self) {
+        let r = &mut self.hal.readbacks;
+        let requests: HashSet<_> = r.buffers.keys().chain(r.raw.keys()).chain(r.textures.keys())
+            .chain(r.windows.keys()).chain(r.snapshots.keys()).chain(r.captures.keys())
+            .chain(r.picks.keys()).copied().collect();
+        r.buffer_pending.clear();
+        r.texture_pending.clear();
+        for req in requests { self.hal_readback(req, makepad_hal::readback::FAILED, [0; 4], &[]); }
+    }
+
     pub(crate) fn hal_readback(&mut self, req: u32, status: u32, rect: [u32; 4], pixels: &[u8]) {
         self.hal.readbacks.active.remove(&req);
         if let Some((_buffer, len, done)) = self.hal.readbacks.buffers.remove(&req) {
             let result = if status == makepad_hal::readback::OK && pixels.len() == len { Ok(Arc::from(pixels)) } else { Err(ReadbackError::Failed) };
-            self.hal.readbacks.jobs.push_back(Box::new(move || done(result)));
+            self.hal.readbacks.buffer_jobs.push_back(Box::new(move || done(result)));
             self.hal_poll_readback_images();
             return;
         }
@@ -416,6 +443,16 @@ impl Cx {
             if pool.is_open() {
                 let job = self.hal.readbacks.jobs.pop_front().unwrap();
                 self.hal.readbacks.raw_worker = pool.submit(Class::Visible, job).ok();
+            }
+        }
+        if self.hal.readbacks.buffer_worker.as_mut().is_some_and(|w| w.try_take().is_some()) {
+            self.hal.readbacks.buffer_worker = None;
+        }
+        if self.hal.readbacks.buffer_worker.is_none() && !self.hal.readbacks.buffer_jobs.is_empty() {
+            let pool = self.task_pool();
+            if pool.is_open() {
+                let job = self.hal.readbacks.buffer_jobs.pop_front().unwrap();
+                self.hal.readbacks.buffer_worker = pool.submit(Class::Interactive, job).ok();
             }
         }
         while let Some((ids, ..)) = self.hal.readbacks.images.front() {

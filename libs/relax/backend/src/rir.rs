@@ -1275,6 +1275,13 @@ pub struct Func {
     /// computes values in halves made them (compute's eight-lane kernels): `pair256` seeds.
     /// A hint only (pair256 checks every pairing itself); `compact_vregs` renames it.
     pub halves: Vec<(VReg, VReg)>,
+    /// A live session (hot reload): the byte a patch of this fn sets (`SlotTable::patch` of its
+    /// slot). An inlined copy of the body runs only while it reads 0; once a patch sets it, the
+    /// copy's site calls the slot, which holds the patched body (`guard_calls`). Side metadata of
+    /// the callee for its callers' inliner: the body's own code does not read it.
+    pub patch_flag: Option<Sym>,
+    /// The calls a guarded inline copy falls back to (call position, slot): never inlined again.
+    pub guard_calls: Vec<(u64, u32)>,
 }
 
 /// A named local of the source and its storage (`Func::dbg`).
@@ -1339,13 +1346,16 @@ impl Func {
         for c in &mut self.inl_slots {
             f(c);
         }
+        for (_, c) in &mut self.guard_calls {
+            f(c);
+        }
     }
 
     /// Structural equality of everything but `name`, with the function slots each side names
     /// compared through its own map (`ma` for self, `mb` for `o`; block counts by bits). With
     /// injective maps: the bodies are equal up to a renaming of their slots.
     pub fn same_body_mapped(&self, ma: &mut dyn FnMut(u32) -> u32, o: &Func, mb: &mut dyn FnMut(u32) -> u32) -> bool {
-        let Func { name: _, blocks, vregs, slots, params, rets, file, noalias, withheld_noalias, plain_calls, deref, cabi, sret, sret_callees, nocapture, nounwind_inputs, baseline, full, owned, nonnull, param_ints, ranged, naked, inl, inl_slots, dbg, halves } = self;
+        let Func { name: _, blocks, vregs, slots, params, rets, file, noalias, withheld_noalias, plain_calls, deref, cabi, sret, sret_callees, nocapture, nounwind_inputs, baseline, full, owned, nonnull, param_ints, ranged, naked, inl, inl_slots, dbg, halves, patch_flag: _, guard_calls } = self;
         let callee_eq = |a: &Callee, ma: &mut dyn FnMut(u32) -> u32, b: &Callee, mb: &mut dyn FnMut(u32) -> u32| match (a, b) {
             (Callee::Fn(x), Callee::Fn(y)) => ma(*x) == mb(*y),
             (Callee::CFn(x, xs), Callee::CFn(y, ys)) => ma(*x) == mb(*y) && xs == ys,
@@ -1398,12 +1408,14 @@ impl Func {
             && inl_slots.iter().zip(&o.inl_slots).all(|(x, y)| ma(*x) == mb(*y))
             && *dbg == o.dbg
             && *halves == o.halves
+            && guard_calls.len() == o.guard_calls.len()
+            && guard_calls.iter().zip(&o.guard_calls).all(|(x, y)| x.0 == y.0 && ma(x.1) == mb(y.1))
     }
 
     /// A hash of what `same_body_mapped` compares, the function slots replaced by `m(slot)`.
     pub fn hash_body_mapped<H: std::hash::Hasher>(&self, h: &mut H, m: &mut dyn FnMut(u32) -> u32) {
         use std::hash::Hash;
-        let Func { name: _, blocks, vregs, slots, params, rets, file, noalias, withheld_noalias, plain_calls, deref, cabi, sret, sret_callees, nocapture, nounwind_inputs, baseline, full, owned, nonnull, param_ints, ranged, naked, inl, inl_slots, dbg, halves } = self;
+        let Func { name: _, blocks, vregs, slots, params, rets, file, noalias, withheld_noalias, plain_calls, deref, cabi, sret, sret_callees, nocapture, nounwind_inputs, baseline, full, owned, nonnull, param_ints, ranged, naked, inl, inl_slots, dbg, halves, patch_flag: _, guard_calls } = self;
         fn callee<H: std::hash::Hasher>(c: &Callee, h: &mut H, m: &mut dyn FnMut(u32) -> u32) {
             match c {
                 Callee::Fn(x) => {
@@ -1474,6 +1486,12 @@ impl Func {
         // (only when present: bodies without the hint keep the hash they had before it existed)
         if !halves.is_empty() {
             halves.hash(h);
+        }
+        if !guard_calls.is_empty() {
+            guard_calls.len().hash(h);
+            for (p, x) in guard_calls {
+                (p, m(*x)).hash(h);
+            }
         }
     }
 
@@ -1615,7 +1633,7 @@ pub fn inline_pc_entries(f: &Func) -> impl Iterator<Item = (u32, u64)> + '_ {
 
 impl Func {
     pub fn new(name: String, file: u32) -> Func {
-        Func { name, blocks: Vec::new(), vregs: Vec::new(), slots: Vec::new(), params: Vec::new(), rets: Vec::new(), file, noalias: Vec::new(), withheld_noalias: Vec::new(), plain_calls: false, deref: Vec::new(), cabi: None, sret: None, sret_callees: Vec::new(), nocapture: Vec::new(), nounwind_inputs: Vec::new(), baseline: false, full: false, owned: Vec::new(), nonnull: Vec::new(), param_ints: Vec::new(), ranged: Vec::new(), naked: false, inl: Vec::new(), inl_slots: Vec::new(), dbg: Vec::new(), halves: Vec::new() }
+        Func { name, blocks: Vec::new(), vregs: Vec::new(), slots: Vec::new(), params: Vec::new(), rets: Vec::new(), file, noalias: Vec::new(), withheld_noalias: Vec::new(), plain_calls: false, deref: Vec::new(), cabi: None, sret: None, sret_callees: Vec::new(), nocapture: Vec::new(), nounwind_inputs: Vec::new(), baseline: false, full: false, owned: Vec::new(), nonnull: Vec::new(), param_ints: Vec::new(), ranged: Vec::new(), naked: false, inl: Vec::new(), inl_slots: Vec::new(), dbg: Vec::new(), halves: Vec::new(), patch_flag: None, guard_calls: Vec::new() }
     }
     pub fn vreg(&mut self, c: Cls) -> VReg {
         self.vregs.push(c);

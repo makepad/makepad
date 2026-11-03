@@ -211,6 +211,190 @@ fn worley3(p) {
     best
 }
 
+// Voronoi cells of a jittered lattice, with exact distances to their borders.
+// The seed of whole cell (x y z) is the cell's centre moved by up to random/2
+// along each axis (random 0..1; the three offsets are 10 bits each of one
+// hash). salt (a whole number) picks an independent lattice.
+fn voronoi_seed3(x, y, z, random, salt) {
+    let h = hash3(x, y, int(z) + int(salt) * 7919)
+    let u = vec3(float(h & 1023), float((h >>> 10) & 1023), float((h >>> 20) & 1023)) * (1.0 / 1023.0)
+    vec3(float(x) + 0.5, float(y) + 0.5, float(z) + 0.5) + (u - vec3(0.5, 0.5, 0.5)) * random
+}
+// The seed nearest q, as vec4(seed, distance), searched over the 4x4x4 cells
+// round q's nearest lattice corner. Exact for random <= 0.7: a seed outside
+// lies at least 2 - random/2 away, the nearest inside at most
+// sqrt(3) (1 + random)/2.
+fn voronoi3_nearest(q, random, salt) {
+    let o = floor(q + vec3(0.5, 0.5, 0.5))
+    let ox = int(o.x) - 2
+    let oy = int(o.y) - 2
+    let oz = int(o.z) - 2
+    let best = vec4(0.0, 0.0, 0.0, 1000000000.0)
+    for dz in 0..4 {
+        for dy in 0..4 {
+            for dx in 0..4 {
+                let s = voronoi_seed3(ox + dx, oy + dy, oz + dz, random, salt)
+                let d = length(s - q)
+                if d < best.w {
+                    best = vec4(s.x, s.y, s.z, d)
+                }
+            }
+        }
+    }
+    best
+}
+// The border of the cell of seed c (from voronoi3_nearest) seen from p, where
+// q = m * p per axis (the lattice is 1/m long along each axis), in p's units:
+// vec4(face, bound, nearest face, 0).
+// - face: the distance to the cell's faces, smooth-min'd over them with
+//   radius k (rounded corners; k > 0). Inside a convex cell the distance to
+//   its boundary is the least distance to its faces' planes, so it is exact.
+// - bound: no face of a seed outside the window lies nearer, so face never
+//   exceeds it and the field stays a distance bound.
+fn voronoi3_border(q, c, m, random, salt, k) {
+    let o = floor(q + vec3(0.5, 0.5, 0.5))
+    let ox = int(o.x) - 2
+    let oy = int(o.y) - 2
+    let oz = int(o.z) - 2
+    let a = c - q
+    let aa = dot(a, a)
+    let bound = voronoi_window_gap(q, o, random, sqrt(aa)) / max(max(m.x, m.y), m.z)
+    let face = bound
+    let d1 = bound
+    for dz in 0..4 {
+        for dy in 0..4 {
+            for dx in 0..4 {
+                let s = voronoi_seed3(ox + dx, oy + dy, oz + dz, random, salt)
+                let n = s - c
+                if dot(n, n) > 0.000001 {
+                    let b = s - q
+                    let d = (dot(b, b) - aa) * 0.5 / length(n * m)
+                    face = smin(face, d, k)
+                    d1 = min(d1, d)
+                }
+            }
+        }
+    }
+    vec4(min(face, bound), bound, d1, 0.0)
+}
+// Half of how much nearer q's nearest seed (f1 away) is than any seed outside
+// the 4x4x4 window round corner o (in q units): a face or edge of an outside
+// seed's cell lies at least this far from q. A seed outside is at least the
+// window's nearest wall plus (1 - random)/2 away.
+fn voronoi_window_gap(q, o, random, f1) {
+    let lo = o - vec3(2.0, 2.0, 2.0)
+    let hi = o + vec3(2.0, 2.0, 2.0)
+    let wall = min(min(min(q.x - lo.x, hi.x - q.x), min(q.y - lo.y, hi.y - q.y)), min(q.z - lo.z, hi.z - q.z))
+    max(wall + 0.5 - 0.5 * random - f1, 0.0) * 0.5
+}
+// The distance (p's units, q = m * p) to the line of points as far from seeds
+// a, b and c (where their cells meet): the meet of two bisector planes.
+fn voronoi_line3(q, a, b, c, m) {
+    let qa = a - q
+    let qb = b - q
+    let qc = c - q
+    let aa = dot(qa, qa)
+    let r1 = (dot(qb, qb) - aa) * 0.5
+    let r2 = (dot(qc, qc) - aa) * 0.5
+    let w1 = (b - a) * m
+    let w2 = (c - a) * m
+    let g11 = dot(w1, w1)
+    let g12 = dot(w1, w2)
+    let g22 = dot(w2, w2)
+    let det = max(g11 * g22 - g12 * g12, 0.000001 * g11 * g22)
+    sqrt(max((g22 * r1 * r1 - 2.0 * g12 * r1 * r2 + g11 * r2 * r2) / det, 0.0))
+}
+// The distance (p's units, q = m * p) to the edges of the cells, where three
+// meet: an open-cell foam's struts. A lower bound everywhere and continuous:
+// over the triples of q's 4 nearest seeds, the distance to their line, but no
+// less than half how much nearer the nearest seed is than the triple's
+// farthest (an edge of a cell lies on its faces); and no more than that bound
+// for the 5th nearest, or for any seed outside the window.
+fn voronoi3_edge(q, m, random, salt) {
+    let o = floor(q + vec3(0.5, 0.5, 0.5))
+    let ox = int(o.x) - 2
+    let oy = int(o.y) - 2
+    let oz = int(o.z) - 2
+    let f1 = 1000000000.0
+    let f2 = f1
+    let f3 = f1
+    let f4 = f1
+    let f5 = f1
+    let s1 = vec3(0.0, 0.0, 0.0)
+    let s2 = s1
+    let s3 = s1
+    let s4 = s1
+    for dz in 0..4 {
+        for dy in 0..4 {
+            for dx in 0..4 {
+                let s = voronoi_seed3(ox + dx, oy + dy, oz + dz, random, salt)
+                let d = length(s - q)
+                if d < f5 {
+                    if d < f4 {
+                        f5 = f4
+                        if d < f3 {
+                            f4 = f3
+                            s4 = s3
+                            if d < f2 {
+                                f3 = f2
+                                s3 = s2
+                                if d < f1 {
+                                    f2 = f1
+                                    s2 = s1
+                                    f1 = d
+                                    s1 = s
+                                } else {
+                                    f2 = d
+                                    s2 = s
+                                }
+                            } else {
+                                f3 = d
+                                s3 = s
+                            }
+                        } else {
+                            f4 = d
+                            s4 = s
+                        }
+                    } else {
+                        f5 = d
+                    }
+                }
+            }
+        }
+    }
+    let unit = 1.0 / max(max(m.x, m.y), m.z)
+    let far = min(f5 - f1, 2.0 * voronoi_window_gap(q, o, random, f1)) * 0.5 * unit
+    let g3 = (f3 - f1) * 0.5 * unit
+    let g4 = (f4 - f1) * 0.5 * unit
+    let e = max(voronoi_line3(q, s1, s2, s3, m), g3)
+    e = min(e, max(voronoi_line3(q, s1, s2, s4, m), g4))
+    e = min(e, max(voronoi_line3(q, s1, s3, s4, m), g4))
+    e = min(e, max(voronoi_line3(q, s2, s3, s4, m), g4))
+    min(e, far)
+}
+
+// ---- Grids ---------------------------------------------------------------------
+
+// The trilinear value at p of a field's grid: the input `sdf_grid` of a gridded
+// SDF field (csg_sdf's SdfGrid words: a 16-word header, then the samples, x
+// fastest), clamped to the grid's edge. The header's origin, 1 / spacing and
+// counts frame the whole grid; its first sample and counts, the piece the
+// buffer holds: the same point reads the same samples in either.
+fn sdf_grid3(p) {
+    let u = (p - vec3(sdf_grid[0], sdf_grid[1], sdf_grid[2])) * sdf_grid[3]
+    let c = clamp(floor(u), vec3(0.0, 0.0, 0.0), vec3(sdf_grid[4], sdf_grid[5], sdf_grid[6]) - vec3(2.0, 2.0, 2.0))
+    let f = clamp(u - c, vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0))
+    let l = clamp(c - vec3(sdf_grid[7], sdf_grid[8], sdf_grid[9]), vec3(0.0, 0.0, 0.0), vec3(sdf_grid[10], sdf_grid[11], sdf_grid[12]) - vec3(2.0, 2.0, 2.0))
+    let nx = int(sdf_grid[10])
+    let nxy = nx * int(sdf_grid[11])
+    let i = 16 + int(l.x) + nx * int(l.y) + nxy * int(l.z)
+    let x00 = mix(sdf_grid[i], sdf_grid[i + 1], f.x)
+    let x10 = mix(sdf_grid[i + nx], sdf_grid[i + nx + 1], f.x)
+    let x01 = mix(sdf_grid[i + nxy], sdf_grid[i + nxy + 1], f.x)
+    let x11 = mix(sdf_grid[i + nxy + nx], sdf_grid[i + nxy + nx + 1], f.x)
+    mix(mix(x00, x10, f.y), mix(x01, x11, f.y), f.z)
+}
+
 // Fractal sums (octaves up to 16).
 fn fbm2(p, octaves, lacunarity, gain) {
     let s = 0.0

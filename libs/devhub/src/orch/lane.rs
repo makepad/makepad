@@ -16,14 +16,15 @@
 //! - `devhub lanes`: each lane's worktree, tip, dirty files, merge state (the merge bot's), land
 //!   state (the train's).
 
-use super::{git, is_ancestor, Ctx};
+use super::{git, Ctx};
 use crate::lease::wt;
 use crate::proto::{wall_ms, Sev};
 use crate::state::LaneRec;
+use makepad_git::{ObjectId, Reach, Repository};
 use makepad_remote::json_str;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// A landed lane is removed only after this long with no file activity and no new commit.
@@ -47,6 +48,10 @@ fn rec(ctx: &Ctx, name: &str) -> Option<LaneRec> {
 }
 
 fn set(ctx: &Ctx, name: &str, f: impl FnOnce(&mut LaneRec)) -> Option<LaneRec> {
+    try_set(ctx, name, f).unwrap_or_else(|e| { eprintln!("devhub state: {e}"); None })
+}
+
+fn try_set(ctx: &Ctx, name: &str, f: impl FnOnce(&mut LaneRec)) -> Result<Option<LaneRec>, String> {
     ctx.store.update(|d| {
         let l = d.lanes.iter_mut().rev().find(|l| l.name == name && l.state == "live")?;
         f(l);
@@ -55,17 +60,10 @@ fn set(ctx: &Ctx, name: &str, f: impl FnOnce(&mut LaneRec)) -> Option<LaneRec> {
 }
 
 pub fn start(ctx: Arc<Ctx>) {
-    // follow the registered lanes from the start (their dirty sets are ready for the first job)
-    let live: Vec<String> = ctx.store.read(|d| d.lanes.iter().filter(|l| l.state == "live").map(|l| l.path.clone()).collect());
+    // a lane's dirty set is baselined when it is first asked about (a job, a live session, the
+    // cleanup of a landed lane), not for every registered lane at start: most are idle
     let c2 = ctx.clone();
     let _ = std::thread::Builder::new().name("devhub-lanes-clean".into()).spawn(move || {
-        for p in live {
-            let _ = c2.monitor.dirty(Path::new(&p));
-            let nested = Path::new(&p).join("apps/commercial");
-            if nested.join(".git").exists() {
-                let _ = c2.monitor.dirty(&nested);
-            }
-        }
         loop {
             std::thread::sleep(TICK);
             cleanup(&c2);
@@ -73,48 +71,203 @@ pub fn start(ctx: Arc<Ctx>) {
     });
 }
 
-/// `git rev-list --first-parent <tip>`: work's (main's) own commits.
-fn first_parents(dir: &Path, tip: &str) -> HashSet<String> {
-    git(dir, &["rev-list", "--first-parent", tip]).map(|o| o.lines().map(str::to_string).collect()).unwrap_or_default()
-}
-
 fn branch_tip(dir: &Path, branch: &str) -> Option<String> {
-    git(dir, &["rev-parse", "-q", "--verify", &format!("refs/heads/{branch}^{{commit}}")]).ok()
+    let p = makepad_git::repository_paths(dir).ok()??;
+    makepad_git::refs::resolve_ref_in(&p.git_dir, &p.common_dir, &format!("refs/heads/{branch}")).ok().map(|o| o.to_hex())
 }
 
-/// One half landed: its own commits are in `target` (they reach it, and the newest is not one of
-/// `target`'s own first-parent commits, so a fresh lane never counts). The merge bot's merges of
-/// the tip into the lane ("Merge work (<sha>) into rc-x") are not the lane's own: a lane that
-/// landed and then got the tip merged in again is landed. `tree`: a detached worktree's HEAD.
-fn half_landed(dir: &Path, branch: &str, tree: &Path, target: &str, own: Option<&HashSet<String>>) -> Result<(), String> {
-    let tip = if branch.is_empty() { crate::monitor::read_head(tree).map(|h| h.0).ok_or_else(|| format!("{}: no HEAD", tree.display()))? } else { branch_tip(dir, branch).ok_or_else(|| format!("no branch {branch}"))? };
-    let name = if branch.is_empty() { "its detached HEAD" } else { branch };
-    let bot = |s: &str| s.starts_with(&format!("Merge {target} (")) && s.ends_with(&format!(") into {branch}"));
-    // the lane's newest own commit: down its first-parent line past the bot's merges
-    let line = git(dir, &["log", "--first-parent", "-n", "200", "--format=%H%x09%s", &tip])?;
-    let newest = line.lines().filter_map(|l| l.split_once('\t')).find(|(_, s)| branch.is_empty() || !bot(s)).map(|(h, _)| h.to_string()).ok_or_else(|| format!("{name}: no commit of its own in 200"))?;
-    if !is_ancestor(dir, &newest, target) {
-        return Err(format!("{name} is not in {target}"));
+/// One repo's history as the cleanup reads it, kept across its ticks (in process, never git):
+/// what the target (work or main) reaches, the target's own first-parent commits, and each lane
+/// tip's newest own commit.
+#[derive(Default)]
+struct Hist {
+    reach: Reach,
+    /// the target's first-parent line (`git rev-list --first-parent <target>`)
+    firsts: HashSet<ObjectId>,
+    /// (lane tip, branch) -> its newest commit past the merge bot's merges (None: none in 200)
+    newest: HashMap<(ObjectId, String), Option<ObjectId>>,
+    /// the retired chains (`<target>-old-*`, kept when the target moved onto a squashed tip):
+    /// (ref, what it reaches, its first-parent line). What they reach landed.
+    retired: Vec<(String, Reach, HashSet<ObjectId>)>,
+}
+
+static HISTS: Mutex<BTreeMap<PathBuf, Hist>> = Mutex::new(BTreeMap::new());
+
+/// A repo for one cleanup pass: its history moved to the target's tip (only new commits read).
+struct View {
+    dir: PathBuf,
+    target: &'static str,
+    git_dir: PathBuf,
+    common: PathBuf,
+    /// the repo's shared reader ([`crate::gitread`]), locked per question
+    repo: std::sync::Arc<Mutex<Repository>>,
+    hist: Hist,
+    /// the lane tips this pass asked about (the cleanup forgets the others)
+    used: HashSet<(ObjectId, String)>,
+}
+
+impl View {
+    fn open(dir: &Path, target: &'static str) -> Result<View, String> {
+        let e = |e: makepad_git::GitError| format!("{}: {e}", dir.display());
+        let p = makepad_git::repository_paths(dir).map_err(e)?.ok_or_else(|| format!("{}: not a repository", dir.display()))?;
+        let tip = makepad_git::refs::resolve_ref_in(&p.git_dir, &p.common_dir, &format!("refs/heads/{target}")).map_err(e)?;
+        let shared = crate::gitread::handle(&p.common_dir).ok_or_else(|| format!("{}: cannot read {}", dir.display(), p.common_dir.display()))?;
+        let mut guard = shared.lock().unwrap_or_else(|e| e.into_inner());
+        let repo = &mut *guard;
+        let mut hist = HISTS.lock().unwrap().remove(dir).unwrap_or_default();
+        let old = hist.reach.tip();
+        if old != Some(tip) {
+            hist.reach.advance(repo, tip).map_err(e)?;
+            // the first-parent line grows at its top while the tip moves forward along it
+            let mut fresh = Vec::new();
+            let mut joined = false;
+            for c in repo.first_parents(tip) {
+                let (oid, _) = c.map_err(e)?;
+                if hist.firsts.contains(&oid) {
+                    joined = Some(oid) == old;
+                    break;
+                }
+                fresh.push(oid);
+            }
+            if !joined && !hist.firsts.is_empty() {
+                hist.firsts.clear();
+                for c in repo.first_parents(tip) {
+                    hist.firsts.insert(c.map_err(e)?.0);
+                }
+            } else {
+                hist.firsts.extend(fresh);
+            }
+        }
+        // retired chains never move: each is read once
+        let old_prefix = format!("refs/heads/{target}-old-");
+        let refs = makepad_git::refs::list_refs_in(&p.git_dir, &p.common_dir, "refs/heads/").map_err(e)?;
+        let mut retired = Vec::new();
+        for r in refs.into_iter().filter(|r| r.name.starts_with(&old_prefix)) {
+            let makepad_git::RefTarget::Direct(tip) = r.target else { continue };
+            if let Some(i) = hist.retired.iter().position(|x| x.0 == r.name && x.1.tip() == Some(tip)) {
+                retired.push(hist.retired.swap_remove(i));
+                continue;
+            }
+            let mut reach = Reach::new();
+            reach.advance(repo, tip).map_err(e)?;
+            let mut firsts = HashSet::new();
+            for c in repo.first_parents(tip) {
+                firsts.insert(c.map_err(e)?.0);
+            }
+            retired.push((r.name, reach, firsts));
+        }
+        hist.retired = retired;
+        drop(guard);
+        Ok(View { dir: dir.to_path_buf(), target, git_dir: p.git_dir, common: p.common_dir, repo: shared, hist, used: HashSet::new() })
     }
-    if own.is_some_and(|o| o.contains(&newest)) {
-        return Err(format!("{name} has no commits of its own (never landed)"));
+
+    /// Whether `oid` landed: the target or a retired chain of it reaches it.
+    fn reached(&self, oid: &ObjectId) -> bool {
+        self.hist.reach.contains(oid) || self.hist.retired.iter().any(|r| r.1.contains(oid))
     }
-    Ok(())
+
+    /// One of the target's (or a retired chain's) own first-parent commits.
+    fn first_parent(&self, oid: &ObjectId) -> bool {
+        self.hist.firsts.contains(oid) || self.hist.retired.iter().any(|r| r.2.contains(oid))
+    }
+
+    fn tip_of(&self, branch: &str) -> Option<ObjectId> {
+        makepad_git::refs::resolve_ref_in(&self.git_dir, &self.common, &format!("refs/heads/{branch}")).ok()
+    }
+
+    /// One half landed: its own commits are in the target (they reach it, and the newest is not
+    /// one of the target's own first-parent commits, so a fresh lane never counts). The merge
+    /// bot's merges of the tip into the lane ("Merge work (<sha>) into rc-x") are not the lane's
+    /// own: a lane that landed and then got the tip merged in again is landed. `tree`: a detached
+    /// worktree's HEAD.
+    fn landed(&mut self, branch: &str, tree: &Path, check_own: bool) -> Result<(), String> {
+        let tip = if branch.is_empty() {
+            crate::monitor::read_head(tree).and_then(|h| ObjectId::from_hex(&h.0).ok()).ok_or_else(|| format!("{}: no HEAD", tree.display()))?
+        } else {
+            self.tip_of(branch).ok_or_else(|| format!("no branch {branch}"))?
+        };
+        let name = if branch.is_empty() { "its detached HEAD" } else { branch };
+        let key = (tip, branch.to_string());
+        self.used.insert(key.clone());
+        let newest = match self.hist.newest.get(&key) {
+            Some(n) => *n,
+            None => {
+                let (pre, post) = (format!("Merge {} (", self.target), format!(") into {branch}"));
+                let mut newest = None;
+                // the lane's newest own commit: down its first-parent line past the bot's merges
+                let mut repo = self.repo.lock().unwrap_or_else(|e| e.into_inner());
+                for c in repo.first_parents(tip).take(200) {
+                    let (oid, c) = c.map_err(|e| format!("{}: {e}", self.dir.display()))?;
+                    let subject = c.message.lines().next().unwrap_or("");
+                    if branch.is_empty() || !(subject.starts_with(&pre) && subject.ends_with(&post)) {
+                        newest = Some(oid);
+                        break;
+                    }
+                }
+                self.hist.newest.insert(key, newest);
+                newest
+            }
+        };
+        let newest = newest.ok_or_else(|| format!("{name}: no commit of its own in 200"))?;
+        // a lane that landed before its target moved onto a squashed tip landed on the retired chain
+        if !self.reached(&newest) {
+            return Err(format!("{name} is not in {}", self.target));
+        }
+        if check_own && self.first_parent(&newest) {
+            return Err(format!("{name} has no commits of its own (never landed)"));
+        }
+        Ok(())
+    }
+}
+
+impl View {
+    /// Forgets the lane tips no one asked about this pass (lanes gone or moved on).
+    fn forget_unused(&mut self) {
+        let used = std::mem::take(&mut self.used);
+        self.hist.newest.retain(|k, _| used.contains(k));
+    }
+}
+
+impl Drop for View {
+    fn drop(&mut self) {
+        HISTS.lock().unwrap().insert(self.dir.clone(), std::mem::take(&mut self.hist));
+    }
+}
+
+/// Both repos for one cleanup pass (commercial: when the checkout has it).
+struct Views {
+    makepad: View,
+    commercial: Option<View>,
+}
+
+impl Views {
+    fn open(ctx: &Ctx) -> Result<Views, String> {
+        let commercial = if ctx.commercial().join(".git").exists() { Some(View::open(&ctx.commercial(), "main")?) } else { None };
+        Ok(Views { makepad: View::open(&ctx.repo, "work")?, commercial })
+    }
 }
 
 /// Whether the lane landed (both halves), and what still references it; Ok = removable.
-fn removable(ctx: &Ctx, l: &LaneRec, own: &(HashSet<String>, HashSet<String>), cwds: &[(u32, PathBuf)], land: &[String]) -> Result<(), String> {
+fn removable(ctx: &Ctx, l: &LaneRec, views: &mut Views, cwds: &[(u32, PathBuf)], land: &[String]) -> Result<(), String> {
     let path = Path::new(&l.path);
-    half_landed(&ctx.repo, &l.branch, path, "work", Some(&own.0))?;
+    views.makepad.landed(&l.branch, path, true)?;
     let nested = path.join("apps/commercial");
     if nested.join(".git").exists() {
         if l.cbranch.is_empty() {
             if wt::unique_commits(&nested) {
                 return Err("apps/commercial has commits on no commercial ref".into());
             }
-        } else if branch_tip(&ctx.commercial(), &l.cbranch).is_some() {
+        } else if let Some(c) = views.commercial.as_mut().filter(|c| c.tip_of(&l.cbranch).is_some()) {
             // its own commits (if any) in main; the bot's merges of main into it do not count
-            half_landed(&ctx.commercial(), &l.cbranch, &nested, "main", None).map_err(|e| format!("commercial: {e}"))?;
+            c.landed(&l.cbranch, &nested, false).map_err(|e| format!("commercial: {e}"))?;
+        }
+    }
+    for (tree, branch) in [(path.to_path_buf(), &l.branch), (nested.clone(), &l.cbranch)] {
+        if tree.join(".git").exists() {
+            let (head, actual) = crate::monitor::read_head(&tree).ok_or("worktree has no HEAD")?;
+            if actual != *branch || (!branch.is_empty() && branch_tip(&tree, branch).as_deref() != Some(head.as_str())) {
+                return Err(format!("{}: HEAD or branch identity changed; reconcile before cleanup", tree.display()));
+            }
         }
     }
     for tree in [path.to_path_buf(), nested.clone()] {
@@ -161,15 +314,21 @@ pub fn cleanup(ctx: &Ctx) {
     if lanes.is_empty() {
         return;
     }
-    let own = (first_parents(&ctx.repo, "work"), first_parents(&ctx.commercial(), "main"));
+    let mut views = match Views::open(ctx) {
+        Ok(v) => v,
+        Err(e) => {
+            event(ctx, Sev::Warn, format!("lane cleanup: {e}"), None);
+            return;
+        }
+    };
     let cwds = wt::live_cwds();
     let land = land_entries();
     let now = wall_ms();
     for l in lanes {
-        match removable(ctx, &l, &own, &cwds, &land) {
+        match removable(ctx, &l, &mut views, &cwds, &land) {
             Err(why) => {
                 // a lane that landed and is still referenced says why once
-                let landed = half_landed(&ctx.repo, &l.branch, Path::new(&l.path), "work", Some(&own.0)).is_ok();
+                let landed = views.makepad.landed(&l.branch, Path::new(&l.path), true).is_ok();
                 if l.landed_ms != 0 || (landed && l.note != why) {
                     set(ctx, &l.name, |x| {
                         if !landed {
@@ -198,6 +357,10 @@ pub fn cleanup(ctx: &Ctx) {
             }
         }
     }
+    views.makepad.forget_unused();
+    if let Some(c) = views.commercial.as_mut() {
+        c.forget_unused();
+    }
 }
 
 fn finish(ctx: &Ctx, name: &str, state: &str, what: Result<String, String>) {
@@ -217,16 +380,44 @@ fn finish(ctx: &Ctx, name: &str, state: &str, what: Result<String, String>) {
     }
 }
 
-/// Removes the worktree pair, the branches (`-d`, or `-D` for a drop that bundled them), origin's
-/// lane branches, and the lane's dirs on every node.
+/// Keep the exact commit before removing its worktree or branch, including detached heads
+/// and bot merges absent from the destination. Recovery refs are private and never pushed.
+fn preserve_commit(tree: &Path, oid: &str, target: &str) -> Result<(), String> {
+    if git(tree, &["merge-base", "--is-ancestor", oid, &format!("refs/heads/{target}")]).is_err() {
+        git(tree, &["update-ref", &format!("refs/devhub/recovery/{oid}"), oid])?;
+    }
+    Ok(())
+}
+
+fn preserve_head(tree: &Path, target: &str) -> Result<(), String> {
+    let head = git(tree, &["rev-parse", "--verify", "HEAD"])?;
+    preserve_commit(tree, &head, target)?;
+    if git(tree, &["rev-parse", "--verify", "HEAD"])? != head {
+        return Err("HEAD changed during cleanup; worktree kept for reconciliation".into());
+    }
+    Ok(())
+}
+
+/// Removes the worktree pair after preserving its actual heads, conditionally deletes the
+/// checked local/origin branch tips, and cleans the lane's dirs on every node.
 fn remove(ctx: &Ctx, l: &LaneRec, drop: bool) -> Result<String, String> {
     let path = PathBuf::from(&l.path);
     let nested = path.join("apps/commercial");
     let mut done = Vec::new();
     let force: &[&str] = if drop { &["--force"] } else { &[] };
+    let mut checked = Vec::new();
+    for (dir, branch, target) in [(ctx.repo.clone(), &l.branch, "work"), (ctx.commercial(), &l.cbranch, "main")] {
+        if let Some(oid) = branch_tip(&dir, branch) {
+            preserve_commit(&dir, &oid, target)?;
+            let remote = git(&dir, &["rev-parse", "-q", "--verify", &format!("refs/remotes/origin/{branch}")]).ok();
+            checked.push((dir, branch.clone(), oid, remote));
+        }
+    }
+
     if nested.join(".git").exists() {
         // removed from its own repository (the one its .git names), so neither keeps a dangling entry
         let common = wt::git(Some(&nested), None, &["rev-parse", "--path-format=absolute", "--git-common-dir"])?;
+        preserve_head(&nested, "main")?;
         let mut a = vec!["worktree", "remove"];
         a.extend_from_slice(force);
         let n = nested.to_string_lossy().into_owned();
@@ -235,6 +426,7 @@ fn remove(ctx: &Ctx, l: &LaneRec, drop: bool) -> Result<String, String> {
         ctx.monitor.forget(&nested);
     }
     if path.exists() {
+        preserve_head(&path, "work")?;
         let mut a = vec!["worktree", "remove"];
         a.extend_from_slice(force);
         let p = path.to_string_lossy().into_owned();
@@ -244,17 +436,13 @@ fn remove(ctx: &Ctx, l: &LaneRec, drop: bool) -> Result<String, String> {
     ctx.monitor.forget(&path);
     done.push(format!("removed {}", path.display()));
     // landed (checked) or bundled (a drop): the branch goes even with the merge bot's merges on it
-    let del = "-D";
-    for (dir, b) in [(ctx.repo.clone(), l.branch.clone()), (ctx.commercial(), l.cbranch.clone())] {
-        if b.is_empty() || branch_tip(&dir, &b).is_none() {
-            continue;
-        }
-        match wt::git(Some(&dir), None, &["branch", del, &b]) {
+    for (dir, b, oid, remote) in checked {
+        match wt::git(Some(&dir), None, &["update-ref", "-d", &format!("refs/heads/{b}"), &oid]) {
             Ok(_) => done.push(format!("branch {b}")),
-            Err(e) => done.push(format!("branch {b} kept ({e})")),
+            Err(e) => { done.push(format!("branch {b} kept ({e})")); continue; }
         }
-        if git(&dir, &["rev-parse", "-q", "--verify", &format!("refs/remotes/origin/{b}")]).is_ok() {
-            match git(&dir, &["push", "-q", "origin", "--delete", &b]) {
+        if let Some(remote) = remote {
+            match git(&dir, &["push", "-q", &format!("--force-with-lease=refs/heads/{b}:{remote}"), "origin", &format!(":refs/heads/{b}")]) {
                 Ok(_) => done.push(format!("origin/{b}")),
                 Err(e) => done.push(format!("origin/{b} kept ({e})")),
             }
@@ -300,7 +488,7 @@ fn create(ctx: &Ctx, name: &str, from: &str, commercial: bool) -> Result<LaneRec
         }
     }
     let l = LaneRec { name: name.into(), path: p, branch: branch.clone(), cbranch: if commercial { branch } else { String::new() }, created_ms: wall_ms(), state: "live".into(), ..Default::default() };
-    ctx.store.update(|d| d.lanes.push(l.clone()));
+    ctx.store.update(|d| d.lanes.push(l.clone()))?;
     crate::ci_merge::install_merge_driver(&path, &path)?;
     if commercial {
         crate::ci_merge::install_merge_driver(&path.join("apps/commercial"), &path)?;
@@ -357,10 +545,151 @@ fn drop_lane(ctx: &Ctx, name: &str) -> Result<String, String> {
     Ok(note)
 }
 
+/// One worktree half as `lane audit` finds it.
+struct HalfAudit {
+    branch: String,
+    /// Ok: landed; Err: why not
+    landed: Result<(), String>,
+    /// its own commits that landed nowhere (merges and the bot's merges left out)
+    unlanded: usize,
+    /// uncommitted tracked paths, untracked (not ignored) paths
+    tracked: Vec<String>,
+    untracked: Vec<String>,
+}
+
+impl View {
+    fn audit(&mut self, path: &Path, branch: &str, head: ObjectId, check_own: bool, nested: bool) -> HalfAudit {
+        let landed = self.landed(branch, path, check_own);
+        let (pre, post) = (format!("Merge {} (", self.target), format!(") into {branch}"));
+        let reaches: Vec<&Reach> = std::iter::once(&self.hist.reach).chain(self.hist.retired.iter().map(|r| &r.1)).collect();
+        let unlanded = match Reach::range_beyond(&reaches, &mut self.repo.lock().unwrap_or_else(|e| e.into_inner()), head) {
+            Ok(r) => r.commits.iter().filter(|(_, c)| {
+                let subject = c.message.lines().next().unwrap_or("");
+                c.parents.len() < 2 && !(subject.starts_with(&pre) && subject.ends_with(&post))
+            }).count(),
+            Err(_) => usize::MAX,
+        };
+        let (mut tracked, mut untracked) = (Vec::new(), Vec::new());
+        match makepad_git::repository_paths(path).ok().flatten().map(crate::gitread::worktree) {
+            Some(Ok(mut r)) => match r.status() {
+                Ok(st) => {
+                    for e in st.entries {
+                        if nested && e.path.starts_with("apps/commercial/") {
+                            continue;
+                        }
+                        if e.status == makepad_git::FileStatus::Untracked { untracked.push(e.path) } else { tracked.push(e.path) }
+                    }
+                    tracked.dedup();
+                }
+                Err(e) => tracked.push(format!("(status failed: {e})")),
+            },
+            _ => tracked.push("(no git dir)".into()),
+        }
+        HalfAudit { branch: branch.to_string(), landed, unlanded, tracked, untracked }
+    }
+}
+
+/// `lane audit [--json]`: every worktree under the lanes root (both repos, registered or not):
+/// whether each half landed (work / main, or a retired chain of them), its commits that landed
+/// nowhere, its uncommitted tracked and untracked files, and what to do. Read in process (no git),
+/// here (no master needed). Removes nothing.
+pub fn audit(repo: &Path, json: bool) -> Result<String, String> {
+    let root = wt::root_of(repo).canonicalize().map_err(|e| format!("lanes root: {e}"))?;
+    let mut mk = View::open(repo, "work")?;
+    let commercial = repo.join("apps/commercial");
+    let mut com = if commercial.join(".git").exists() { Some(View::open(&commercial, "main")?) } else { None };
+    // registered lanes, from the master's state (read only)
+    let state = std::fs::read(crate::proto::home().join("state.json")).ok().and_then(|b| makepad_strict_json::parse(&b).ok());
+    let mut registered: HashMap<PathBuf, (String, String, bool)> = HashMap::new();
+    for l in state.as_ref().and_then(|v| v.get("lanes")).and_then(|v| v.as_arr()).unwrap_or(&[]) {
+        let s = |k: &str| l.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+        if s("state") == "live" {
+            registered.insert(PathBuf::from(s("path")), (s("name"), s("note"), l.get("keep").and_then(|x| x.as_bool()).unwrap_or(false)));
+        }
+    }
+    let list = |v: &View| -> Result<Vec<(PathBuf, String, ObjectId)>, String> {
+        Ok(v.repo.lock().unwrap_or_else(|e| e.into_inner()).worktree_list().map_err(|e| e.to_string())?.into_iter().filter(|w| !w.main && w.path.starts_with(&root) && w.path.is_dir()).filter_map(|w| Some((w.path, w.branch.unwrap_or_default(), w.head?))).collect())
+    };
+    let mk_list = list(&mk)?;
+    let mut com_list = match &com { Some(c) => list(c)?, None => Vec::new() };
+    // (name, path, registered note, kept, halves)
+    let mut lanes: Vec<(String, PathBuf, Option<(String, String, bool)>, Vec<(&'static str, HalfAudit)>)> = Vec::new();
+    for (path, branch, head) in mk_list {
+        let name = path.strip_prefix(&root).map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+        let nested = path.join("apps/commercial");
+        let mut halves = vec![("makepad", mk.audit(&path, &branch, head, true, nested.join(".git").exists()))];
+        if let Some(i) = com_list.iter().position(|c| c.0 == nested) {
+            let (cp, cb, ch) = com_list.swap_remove(i);
+            if let Some(c) = com.as_mut() {
+                halves.push(("commercial", c.audit(&cp, &cb, ch, false, false)));
+            }
+        }
+        let reg = registered.get(&path).cloned();
+        lanes.push((name, path, reg, halves));
+    }
+    for (path, branch, head) in com_list {
+        let name = path.strip_prefix(&root).map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+        if let Some(c) = com.as_mut() {
+            let h = c.audit(&path, &branch, head, true, false);
+            lanes.push((name, path.clone(), registered.get(&path).cloned(), vec![("commercial", h)]));
+        }
+    }
+    lanes.sort_by(|a, b| a.0.cmp(&b.0));
+    // the class of each lane: what keeps it, most serious first
+    let class = |halves: &[(&str, HalfAudit)]| -> &'static str {
+        if halves.iter().any(|(_, h)| h.unlanded > 0) {
+            "unlanded commits"
+        } else if halves.iter().any(|(_, h)| !h.tracked.is_empty()) {
+            "uncommitted changes"
+        } else if halves.iter().any(|(_, h)| h.landed.is_err()) {
+            "nothing of its own"
+        } else if halves.iter().any(|(_, h)| !h.untracked.is_empty()) {
+            "landed, untracked files only"
+        } else {
+            "landed and clean"
+        }
+    };
+    let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut rows = Vec::new();
+    let mut text_rows: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+    for (name, path, reg, halves) in &lanes {
+        let c = class(halves);
+        *counts.entry(c).or_default() += 1;
+        let hs: Vec<String> = halves.iter().map(|(repo, h)| format!(
+            "{{\"repo\":\"{repo}\",\"branch\":{},\"landed\":{},\"why\":{},\"unlanded\":{},\"tracked\":{},\"untracked\":{},\"untracked_files\":[{}]}}",
+            json_str(&h.branch), h.landed.is_ok(), json_str(h.landed.as_ref().err().map_or("", |s| s.as_str())), h.unlanded, h.tracked.len(), h.untracked.len(),
+            h.untracked.iter().take(20).map(|f| json_str(f)).collect::<Vec<_>>().join(","))).collect();
+        rows.push(format!("{{\"name\":{},\"path\":{},\"class\":\"{c}\",\"registered\":{},\"keep\":{},\"note\":{},\"halves\":[{}]}}",
+            json_str(name), json_str(&path.to_string_lossy()), reg.is_some(), reg.as_ref().is_some_and(|r| r.2), json_str(reg.as_ref().map_or("", |r| r.1.as_str())), hs.join(",")));
+        let detail: Vec<String> = halves.iter().map(|(repo, h)| {
+            let mut d = format!("{repo} {}", if h.branch.is_empty() { "(detached)" } else { &h.branch });
+            if h.unlanded > 0 { d.push_str(&format!(" {} unlanded commit(s)", h.unlanded)); }
+            if !h.tracked.is_empty() { d.push_str(&format!(" {} uncommitted tracked", h.tracked.len())); }
+            if !h.untracked.is_empty() { d.push_str(&format!(" {} untracked ({})", h.untracked.len(), h.untracked.iter().take(3).cloned().collect::<Vec<_>>().join(", "))); }
+            if let Err(w) = &h.landed { if h.unlanded == 0 { d.push_str(&format!(" [{w}]")); } }
+            d
+        }).collect();
+        text_rows.entry(c).or_default().push(format!("  {name:<28} {}{}", detail.join("; "), if reg.is_none() { " (unregistered)" } else if reg.as_ref().is_some_and(|r| r.2) { " (keep)" } else { "" }));
+    }
+    if json {
+        return Ok(format!("{{\"lanes\":[{}]}}", rows.join(",")));
+    }
+    let mut out = format!("{} lane worktree(s) under {}: {}\n", lanes.len(), root.display(), counts.iter().map(|(k, n)| format!("{n} {k}")).collect::<Vec<_>>().join(", "));
+    for (c, rows) in &text_rows {
+        out.push_str(&format!("\n{c} ({}):\n", rows.len()));
+        for r in rows {
+            out.push_str(r);
+            out.push('\n');
+        }
+    }
+    out.push_str("\nlanded and clean: `makepad devhub lane remove <name>` removes each (worktrees, branches, node dirs). Nothing here was removed.\n");
+    Ok(out)
+}
+
 /// `lane adopt`: registers the live worktrees under the lanes root; lists the landed ones.
 fn adopt(ctx: &Ctx) -> Result<String, String> {
     let infos = wt::infos(&ctx.repo)?;
-    let own = first_parents(&ctx.repo, "work");
+    let work = View::open(&ctx.repo, "work")?;
     let known: HashSet<String> = ctx.store.read(|d| d.lanes.iter().filter(|l| l.state == "live").map(|l| l.path.clone()).collect());
     let (mut registered, mut landed) = (Vec::new(), Vec::new());
     for i in infos {
@@ -375,7 +704,7 @@ fn adopt(ctx: &Ctx) -> Result<String, String> {
         if known.contains(&p) || !i.entry.path.is_dir() {
             continue;
         }
-        let tip_landed = i.merged && !own.contains(&i.entry.head);
+        let tip_landed = i.merged && !ObjectId::from_hex(&i.entry.head).is_ok_and(|h| work.first_parent(&h));
         let com_ok = !matches!(i.commercial, Some((true, _)) | Some((_, true)));
         if tip_landed && !i.dirty && com_ok {
             landed.push(format!("{{\"name\":{},\"path\":{},\"branch\":{},\"live\":{}}}", json_str(&i.lane), json_str(&p), json_str(i.entry.branch.as_deref().unwrap_or("")), i.live.len()));
@@ -385,7 +714,7 @@ fn adopt(ctx: &Ctx) -> Result<String, String> {
         let cbranch = if nested.join(".git").exists() { crate::monitor::read_head(&nested).map(|h| h.1).unwrap_or_default() } else { String::new() };
         let l = LaneRec { name: i.lane.clone(), path: p.clone(), branch: i.entry.branch.clone().unwrap_or_default(), cbranch, created_ms: wall_ms(), adopted: true, state: "live".into(), ..Default::default() };
         registered.push(json_str(&l.name));
-        ctx.store.update(|d| d.lanes.push(l));
+        ctx.store.update(|d| d.lanes.push(l))?;
     }
     event(ctx, Sev::Info, format!("lane adopt: {} registered, {} landed listed for removal (nothing removed)", registered.len(), landed.len()), None);
     Ok(format!("{{\"registered\":[{}],\"landed\":[{}]}}", registered.join(","), landed.join(",")))
@@ -402,12 +731,12 @@ fn remove_now(ctx: &Ctx, name: &str) -> Result<String, String> {
             let nested = path.join("apps/commercial");
             let cbranch = crate::monitor::read_head(&nested).map(|h| h.1).unwrap_or_default();
             let l = LaneRec { name: name.into(), path: path.to_string_lossy().into_owned(), branch: head.1, cbranch, created_ms: wall_ms(), adopted: true, state: "live".into(), ..Default::default() };
-            ctx.store.update(|d| d.lanes.push(l.clone()));
+            ctx.store.update(|d| d.lanes.push(l.clone()))?;
             l
         }
     };
-    let own = (first_parents(&ctx.repo, "work"), first_parents(&ctx.commercial(), "main"));
-    removable(ctx, &l, &own, &wt::live_cwds(), &land_entries())?;
+    let mut views = Views::open(ctx)?;
+    removable(ctx, &l, &mut views, &wt::live_cwds(), &land_entries())?;
     let what = remove(ctx, &l, false);
     let out = what.clone();
     finish(ctx, name, "removed", what);
@@ -869,7 +1198,7 @@ fn timeline(ctx: &Ctx, name: &str) -> Result<String, String> {
     let now = wall_ms();
     let (t0, t1) = (l.created_ms, if l.ended_ms > 0 { l.ended_ms } else { now });
     // the lane's landings
-    let entries: Vec<crate::land::Entry> = ctx.store.read(|d| d.land.iter().filter_map(|v| crate::land::Entry::parse(&v.to_json())).filter(|e| (!l.branch.is_empty() && e.branch == l.branch) || (!l.cbranch.is_empty() && e.cbranch == l.cbranch)).collect());
+    let entries: Vec<crate::land::Entry> = ctx.store.history("land")?.iter().filter_map(|v| crate::land::Entry::parse(&v.to_json())).filter(|e| (!l.branch.is_empty() && e.branch == l.branch) || (!l.cbranch.is_empty() && e.cbranch == l.cbranch)).collect();
     let gates: Vec<String> = entries.iter().map(|e| format!("landq{}", e.id)).collect();
     // (kind rank, from, to)
     let mut spans: Vec<(usize, u64, u64)> = Vec::new();
@@ -956,7 +1285,7 @@ pub fn serve(ctx: &Ctx, line: &str) -> Result<String, String> {
         "drop" => drop_lane(ctx, rest).map(|n| format!("{{\"dropped\":{},\"note\":{}}}", json_str(rest), json_str(&n))),
         "remove" => remove_now(ctx, rest).map(|n| format!("{{\"removed\":{},\"note\":{}}}", json_str(rest), json_str(&n))),
         "keep" | "unkeep" => {
-            set(ctx, rest, |l| l.keep = verb == "keep").ok_or_else(|| format!("no live lane {rest}"))?;
+            try_set(ctx, rest, |l| l.keep = verb == "keep")?.ok_or_else(|| format!("no live lane {rest}"))?;
             Ok(format!("{{\"name\":{},\"keep\":{}}}", json_str(rest), verb == "keep"))
         }
         "timeline" => timeline(ctx, rest).map(|t| format!("{{\"text\":{}}}", json_str(&t))),
@@ -966,7 +1295,7 @@ pub fn serve(ctx: &Ctx, line: &str) -> Result<String, String> {
                 Some((n, "off")) => (n, false),
                 _ => return Err("lane live <name> on|off".into()),
             };
-            let l = set(ctx, name, |l| l.waited = on).ok_or_else(|| format!("no live lane {name}"))?;
+            let l = try_set(ctx, name, |l| l.waited = on)?.ok_or_else(|| format!("no live lane {name}"))?;
             event(ctx, Sev::Info, format!("lane {name}: {}", if on { "live: the user waits for it; its landings take the fast path (merge + check)" } else { "not live: its landings gate before landing" }), Some(&l));
             Ok(format!("{{\"name\":{},\"live\":{on}}}", json_str(name)))
         }
@@ -1020,6 +1349,36 @@ mod tests {
         g(dir, &["commit", "-q", "-m", "base"]);
     }
 
+    /// A lane whose commits landed before work moved onto a squashed tip (its old chain kept as
+    /// `work-old-*`) is landed; a lane with commits of its own on neither is not.
+    #[test]
+    fn a_lane_landed_on_a_retired_chain_is_landed() {
+        let base = std::env::temp_dir().join(format!("devhub-lane-retired-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let mk = base.join("makepad");
+        repo(&mk, "work");
+        for (name, land) in [("a", true), ("b", false)] {
+            let wt = base.join(name);
+            g(&mk, &["worktree", "add", "-q", "-b", &format!("rc-{name}"), &wt.to_string_lossy(), "work"]);
+            std::fs::write(wt.join(format!("lane-{name}.txt")), name).unwrap();
+            g(&wt, &["-c", "user.name=t", "-c", "user.email=t@t", "add", "."]);
+            g(&wt, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "lane work"]);
+            if land {
+                g(&mk, &["merge", "-q", "--no-ff", "-m", "land", &format!("rc-{name}")]);
+            }
+        }
+        let old = g(&mk, &["rev-parse", "work"]);
+        let tree = g(&mk, &["rev-parse", "work^{tree}"]);
+        let squashed = g(&mk, &["commit-tree", &tree, "-m", "squashed"]);
+        g(&mk, &["update-ref", "refs/heads/work-old-1", &old]);
+        g(&mk, &["update-ref", "refs/heads/work", &squashed]);
+        let mut v = View::open(&mk, "work").unwrap();
+        assert_eq!(v.landed("rc-a", &base.join("a"), true), Ok(()));
+        assert_eq!(v.landed("rc-b", &base.join("b"), true), Err("rc-b is not in work".to_string()));
+        drop(v);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     /// new, a landing, the cleanup (after its grace) and a drop, on throwaway repos.
     #[test]
     fn lanes_are_made_cleaned_after_landing_and_dropped() {
@@ -1031,14 +1390,17 @@ mod tests {
         let home = base.join("home");
         std::fs::create_dir_all(&home).unwrap();
         let leases = Arc::new(LeaseMaster::new("mac", home.clone(), Arc::new(|_: &str, _: &str, _: &str| Err("no nodes".to_string())), Arc::new(|_| {}), Arc::new(|| 1), None, true));
-        let ctx = Ctx { store: Store::open(&home, "mac", Arc::new(|_| 0)), leases, machine: "mac".into(), monitor: crate::monitor::Monitor::start(&[base.join("wt.noindex")]), repo: mk.clone(), home: home.clone() };
+        let ctx = Ctx { store: Store::open(&home, "mac", Arc::new(|_| 0)).unwrap(), leases, machine: "mac".into(), monitor: crate::monitor::Monitor::start(&[base.join("wt.noindex")]), repo: mk.clone(), home: home.clone() };
         let r = serve(&ctx, "lane new {\"name\":\"x\",\"from\":\"work\",\"commercial\":true}").unwrap();
         let lane = base.join("wt.noindex/x");
         assert!(r.contains("rc-x") && lane.join("a.txt").exists() && lane.join("apps/commercial/a.txt").exists(), "{r}");
         assert_eq!(g(&lane.join("apps/commercial"), &["branch", "--show-current"]), "rc-x");
         assert!(serve(&ctx, "lane new {\"name\":\"x\"}").unwrap_err().contains("exists"));
-        // a fresh lane is in work but never landed: the cleanup keeps it
+        // a fresh lane is in work but never landed: the cleanup keeps it, without a git process
+        let spawned = crate::git_exec::on_this_thread();
         cleanup(&ctx);
+        cleanup(&ctx);
+        assert_eq!(crate::git_exec::on_this_thread(), spawned);
         assert_eq!(ctx.store.read(|d| (d.lanes[0].state.clone(), d.lanes[0].landed_ms)), ("live".to_string(), 0));
         // a commit, landed by a merge into work (and commercial into main)
         std::fs::write(lane.join("b.txt"), "b").unwrap();
@@ -1055,6 +1417,8 @@ mod tests {
         std::fs::write(lane.join("wip.txt"), "w").unwrap();
         cleanup(&ctx);
         assert!(ctx.store.read(|d| d.lanes[0].note.clone()).contains("uncommitted"));
+        let a = audit(&mk, false).unwrap();
+        assert!(a.contains("landed, untracked files only (1):") && a.contains("1 untracked (wip.txt)"), "{a}");
         std::fs::remove_file(lane.join("wip.txt")).unwrap();
         // clean: first seen landed, then removed once the grace passed with no activity
         cleanup(&ctx);
@@ -1079,6 +1443,33 @@ mod tests {
         let _ = std::fs::remove_file(&bundle);
         drop(ctx);
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn safety_detached_cleanup_head_has_a_recovery_ref() {
+        let base = std::env::temp_dir().join(format!("devhub-detached-{}", std::process::id()));
+        let mk = base.join("makepad");
+        repo(&mk, "work");
+        repo(&mk.join("apps/commercial"), "main");
+        let home = base.join("state");
+        let leases = Arc::new(LeaseMaster::new("test", home.clone(), Arc::new(|_, _, _| Err("no nodes".into())), Arc::new(|_| {}), Arc::new(|| 1), None, true));
+        let ctx = Ctx { store: Store::open(&home, "test", Arc::new(|_| 0)).unwrap(), leases, machine: "test".into(), monitor: crate::monitor::Monitor::start(&[]), repo: mk.clone(), home };
+        let lane = create(&ctx, "detached", "work", true).unwrap();
+        let path = PathBuf::from(&lane.path);
+        let mut heads = Vec::new();
+        // Both actual heads diverge from the registered branches before the final remove.
+        for tree in [&path, &path.join("apps/commercial")] {
+            g(tree, &["checkout", "--detach", "-q"]);
+            g(tree, &["commit", "--allow-empty", "-q", "-m", "detached work"]);
+            heads.push(g(tree, &["rev-parse", "HEAD"]));
+        }
+        remove(&ctx, &lane, false).unwrap();
+        assert!(!path.exists());
+        for (repo, head) in [mk.clone(), mk.join("apps/commercial")].iter().zip(heads) {
+            assert_eq!(g(repo, &["rev-parse", &format!("refs/devhub/recovery/{head}")]), head, "detached work must survive removal of either half");
+        }
+        drop(ctx);
+        std::fs::remove_dir_all(&base).unwrap();
     }
 
     #[test]

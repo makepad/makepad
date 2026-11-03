@@ -56,7 +56,7 @@ fn submit(ctx: &Ctx, x: &Live, t: &LiveTests) -> Result<(), String> {
             agent: "devhub-shadow".into(), kind: "test".into(), cost: "medium".into(), class: format!("shadow-live:{}", x.app), needs,
             rev, snap, snap_files: files, repo_dir: x.tree.clone(), cmd, live_sample: sample, state: "queued".into(), submitted_ms: crate::proto::wall_ms(), ..Default::default()
         });
-    });
+    })?;
     Ok(())
 }
 

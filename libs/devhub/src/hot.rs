@@ -187,7 +187,7 @@ mod tests {
         let mut r = Record { id: "one".into(), load: "load-a".into(), at_ms: 1, app: "test-app".into(), node: "test-node".into(), pid: 1, outcome: Outcome::Verified, reason: String::new(), failure: String::new(), units: vec![], logs: vec![] };
         assert!(l.add(r.clone()).unwrap());
         assert!(!l.add(r.clone()).unwrap());
-        r.id = "two".into(); r.outcome = Outcome::RelaunchFailed; r.reason = "domain 4 still owns its previous run".into();
+        r.id = "two".into(); r.outcome = Outcome::Panic; r.reason = "internal compiler error applying an edit".into();
         l.add(r.clone()).unwrap();
         r.id = "three".into(); r.outcome = Outcome::RestartFailed;
         l.add(r.clone()).unwrap();

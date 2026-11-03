@@ -30,16 +30,16 @@ impl Wire for ComputeDesc {
     }
 }
 impl Wire for Dispatch {
-    const SIZE: usize = 60;
+    const SIZE: usize = 64;
     fn write(&self, out: &mut Vec<u8>) {
         words(out, &[self.pipeline.index, self.pipeline.gen, self.groups[0], self.groups[1], self.groups[2],
             self.indirect_buffer.index, self.indirect_buffer.gen]);
         out.extend_from_slice(&self.indirect_offset.to_le_bytes());
-        words(out, &[self.params.off, self.params.len, self.buffers.off, self.buffers.len, self.textures.off, self.textures.len]);
+        words(out, &[self.params.off, self.params.len, self.buffers.off, self.buffers.len, self.textures.off, self.textures.len, self.timer]);
     }
     fn read(b: &[u8]) -> Self {
         Self { pipeline: id(b, 0), groups: [word(b, 8), word(b, 12), word(b, 16)], indirect_buffer: id(b, 20),
-            indirect_offset: u64::from_le_bytes(b[28..36].try_into().unwrap()), params: range(b, 36), buffers: range(b, 44), textures: range(b, 52) }
+            indirect_offset: u64::from_le_bytes(b[28..36].try_into().unwrap()), params: range(b, 36), buffers: range(b, 44), textures: range(b, 52), timer: word(b, 60) }
     }
 }
 

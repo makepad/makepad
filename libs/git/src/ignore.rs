@@ -145,7 +145,8 @@ impl Rule {
 
 /// Byte-oriented FNM_PATHNAME matching, including Git's component-boundary **.
 /// Dynamic programming bounds repeated stars without exponential backtracking.
-fn wildmatch(pattern: &[u8], text: &[u8]) -> bool {
+/// Git-style pathname glob matching (also used by attribute readers).
+pub fn wildmatch(pattern: &[u8], text: &[u8]) -> bool {
     fn run(p: &[u8], t: &[u8], i: usize, j: usize, memo: &mut [Option<bool>]) -> bool {
         let key = i * (t.len() + 1) + j;
         if let Some(value) = memo[key] {

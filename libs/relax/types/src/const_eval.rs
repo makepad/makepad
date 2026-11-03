@@ -41,11 +41,8 @@ enum Folded { Value(EvalToValTreeResult), Execute(ConstEvalKey) }
 /// code; where it succeeds, eval_to_valtree folds to the same value.
 /// A cycle (which the query engine would report) is not folded here.
 pub fn fold_without_execution(tcx: &Tcx, prog: &Program, typing_env: TypingEnv, def: DefId) -> Option<EvalToValTreeResult> {
-    crate::memo_local! { static ACTIVE: std::cell::RefCell<Vec<DefId>>; }
-    if ACTIVE.with(|a| a.borrow().contains(&def)) { return None; }
-    ACTIVE.with(|a| a.borrow_mut().push(def));
+    let _cycle = crate::cycle::enter(crate::cycle::Kind::Fold, def.0, 0).ok()?;
     let folded = fold_to_valtree(tcx, prog, &ConstEvalKey { typing_env, def, args: Arc::from([]) }, true);
-    ACTIVE.with(|a| a.borrow_mut().pop());
     match folded {
         Folded::Value(value) => Some(value),
         Folded::Execute(_) => None,

@@ -19,6 +19,8 @@
 //!   until it has (once per box). Only requests needing a newer protocol wait for it. A hub from
 //!   before the self-update needs one restart by hand (it is said once).
 //! - the services the WM supervises (the AI hub): `service-restart` once `caps.deploy` has the code
+//!   and the node's apply has built it, only when the hub does not run that build already (a
+//!   restart reloads its models; `current` answers)
 //!   (SIGTERM: it hands its jobs back; the WM starts it again through `cargo run`), never while
 //!   a user is at the box (input within `user_idle_min`) or an app holds unsaved work: the roll
 //!   waits until the box is idle. The hub itself restarts regardless (the user never sees it); a
@@ -28,10 +30,10 @@
 //!   shards go on from where their logs stand; queued ones stay queued). Only an allapps run is
 //!   started over, so it is waited for up to [`MASTER_DEADLINE`]. It builds first: a build that
 //!   fails keeps it running and is an inbox error (`devhub master restart` waits for the build and
-//!   answers with it; it never waits out the self-update's retry pause). It execs `cargo run --profile host
-//!   -p makepad-devhub --bin makepad-devhub -- <its own args>` in the checkout (only devhub builds: its
-//!   own small binary, never the JIT) (the node rolls start over
-//!   from the new master).
+//!   answers with it; it never waits out the self-update's retry pause). It builds devhub's own
+//!   small binary (never the JIT) in a target dir of its own, swaps it in at
+//!   `target/host/makepad-devhub` and execs it with its own args ([`build_devhub`]) (the node
+//!   rolls start over from the new master).
 //! - the WM (with its window handover, never over unsaved work) and the dock apps (patched live,
 //!   or a restart offered) are the auto-sync's apply (`restart=auto`) and live deploy.
 //!
@@ -173,7 +175,7 @@ fn lacks(repo: &Path, at: &str, to: &str, dirs: &BTreeSet<String>) -> bool {
     if at.is_empty() {
         return true;
     }
-    if git(repo, &["merge-base", "--is-ancestor", to, at]).is_ok() {
+    if crate::gitread::is_ancestor(repo, to, at) {
         return false;
     }
     touches(repo, at, to, dirs)
@@ -184,17 +186,27 @@ fn touches(repo: &Path, from: &str, to: &str, dirs: &BTreeSet<String>) -> bool {
     if from == to {
         return false;
     }
-    let mut args = vec!["diff", "--quiet", from, to, "--"];
-    args.extend(dirs.iter().map(String::as_str));
-    // `diff --quiet` exits 1 when there are differences (and on errors: an unknown commit counts as a change)
-    git(repo, &args).is_err()
+    // (an unknown commit counts as a change)
+    crate::gitread::differ_under(repo, from, to, dirs.iter().map(String::as_str))
 }
 
-/// The newest commit of `to` that touched `dirs`, as wall ms (its commit time).
+/// The newest commit of `to` that touched `dirs`, as wall ms (its commit time). The answer for one
+/// commit never changes: asked once per landing and dir set, not per tick.
 fn last_change_ms(repo: &Path, to: &str, dirs: &BTreeSet<String>) -> u64 {
+    static KNOWN: Mutex<Option<(String, HashMap<BTreeSet<String>, u64>)>> = Mutex::new(None);
+    let mut known = KNOWN.lock().unwrap_or_else(|e| e.into_inner());
+    if known.as_ref().is_none_or(|(at, _)| at != to) {
+        *known = Some((to.to_string(), HashMap::new()));
+    }
+    let Some((_, by_dirs)) = known.as_mut() else { return 0 };
+    if let Some(ms) = by_dirs.get(dirs) {
+        return *ms;
+    }
     let mut args = vec!["log", "-1", "--format=%ct", to, "--"];
     args.extend(dirs.iter().map(String::as_str));
-    git(repo, &args).ok().and_then(|s| s.trim().parse::<u64>().ok()).map_or(0, |s| s * 1000)
+    let ms = git(repo, &args).ok().and_then(|s| s.trim().parse::<u64>().ok()).map_or(0, |s| s * 1000);
+    by_dirs.insert(dirs.clone(), ms);
+    ms
 }
 
 fn event(ctx: &Ctx, sev: Sev, line: String) {
@@ -236,11 +248,11 @@ pub fn start(ctx: Arc<Ctx>) {
             std::thread::sleep(TICK);
             note_fds(&ctx, &mut fds_said);
             if RESTART_ASKED.swap(false, std::sync::atomic::Ordering::AcqRel) {
-                if let Ok(w) = git(&ctx.repo, &["rev-parse", "refs/heads/work"]) {
+                if let Some(w) = crate::gitread::rev(&ctx.repo, "refs/heads/work") {
                     update_master(&w);
                 }
             }
-            let Ok(work) = git(&ctx.repo, &["rev-parse", "refs/heads/work"]) else { continue };
+            let Some(work) = crate::gitread::rev(&ctx.repo, "refs/heads/work") else { continue };
             if closures_at != work {
                 closures = SERVICES.iter().map(|(n, d)| (n.to_string(), crate_dirs(&ctx.repo, d))).collect();
                 master_dirs = crate_dirs(&ctx.repo, "libs/devhub");
@@ -268,7 +280,7 @@ pub fn start(ctx: Arc<Ctx>) {
                     }
                     None
                 } else if !mine.is_empty()
-                    && git(&ctx.repo, &["merge-base", "--is-ancestor", mine, &c.hub_rev]).is_err()
+                    && !crate::gitread::is_ancestor(&ctx.repo, mine, &c.hub_rev)
                     && touches(&ctx.repo, &c.hub_rev, mine, hub)
                     && broken.lock().unwrap().get(&n.name).map(String::as_str) != Some(c.deploy.split(',').next().unwrap_or(""))
                 {
@@ -330,10 +342,10 @@ pub fn start(ctx: Arc<Ctx>) {
 /// A CLI build runs now ([`prebuild_cli`]).
 static CLI_BUILDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Lanes call devhub through `cargo run -p makepad-devhub`: right after a landing that changes
-/// its inputs the master builds that binary once, niced on 4 jobs, so their runs find it fresh
-/// (the first one rebuilt it at full -j and default nice while the rest waited on the lock: 5 at
-/// once, the Mac at load 20, 11-02). Landings during a build get one more after it.
+/// Lanes call the built binary (`target/host/makepad-devhub`, through `makepad devhub`): right
+/// after a landing that changes its inputs the master builds it once, niced on 4 jobs, and swaps
+/// it in when done ([`build_devhub`]); a landing's CLI goes live when its rebuild finishes.
+/// Landings during a build get one more after it.
 fn prebuild_cli(ctx: &Arc<Ctx>, work: &str, dirs: &BTreeSet<String>, at: &mut String) {
     if *at == work || CLI_BUILDING.load(Ordering::Acquire) {
         return;
@@ -347,12 +359,9 @@ fn prebuild_cli(ctx: &Arc<Ctx>, work: &str, dirs: &BTreeSet<String>, at: &mut St
     let (ctx, work) = (ctx.clone(), work.to_string());
     let spawned = std::thread::Builder::new().name("devhub-cli-build".into()).spawn(move || {
         let t = Instant::now();
-        let cargo = std::env::var_os("HOME").map(PathBuf::from).map(|h| h.join(".cargo/bin/cargo")).filter(|c| c.exists()).unwrap_or_else(|| PathBuf::from("cargo"));
-        let built = std::process::Command::new("nice").args(["-n", "10"]).arg(cargo).args(["build", "--profile", "host", "-j4", "-p", "makepad-devhub", "--bin", "makepad-devhub"]).current_dir(&ctx.repo).env("CARGO_INCREMENTAL", "0").env_remove(RUSTUP_DEPTH).stdin(std::process::Stdio::null()).output();
-        match built {
-            Ok(o) if o.status.success() => event(&ctx, Sev::Info, format!("update: devhub's CLI is built at {} in {:.0} s", super::short(&work), t.elapsed().as_secs_f64())),
-            Ok(o) => event(&ctx, Sev::Warn, format!("update: devhub's CLI does not build at {}: {}", super::short(&work), first_error(&String::from_utf8_lossy(&o.stderr)))),
-            Err(e) => event(&ctx, Sev::Warn, format!("update: devhub's CLI build: {e}")),
+        match build_devhub(&ctx.repo) {
+            Ok(()) => event(&ctx, Sev::Info, format!("update: devhub's CLI is built at {} in {:.0} s", super::short(&work), t.elapsed().as_secs_f64())),
+            Err(e) => event(&ctx, Sev::Warn, format!("update: devhub's CLI at {}: {e}", super::short(&work))),
         }
         CLI_BUILDING.store(false, Ordering::Release);
     });
@@ -509,13 +518,22 @@ fn roll_node(ctx: &Ctx, node: &str, svc: &str, dirs: &BTreeSet<String>, work: &s
                 event(ctx, Sev::Warn, format!("update: {node} {svc}: {e}"));
                 return None;
             }
+            // its service already runs the deployment's build (the WM's restart took it there,
+            // or the landing changed nothing it is built of): never restarted for nothing
+            Ok(l) if svc != "devhub" && l.first().is_some_and(|x| x.starts_with("{\"current\":")) => {
+                event(ctx, Sev::Info, format!("update: {node} runs {svc} at {short} already: no restart"));
+                return None;
+            }
             Ok(_) => {
                 event(ctx, Sev::Info, format!("update: {node} restarts {svc} for {short}"));
                 break;
             }
         }
     }
-    // back: the hub reports the new commit; a service a newer start
+    // back: the hub reports the new commit; a service a newer start that answers again (its slot
+    // is held till then: a new start takes seconds, its build and load minutes, and a roll that
+    // went on at the new start had every box's AI hub down at once)
+    let answers = || crate::cli::ask(&ctl, Some(node), "service-health", &format!("service-health {svc}")).is_ok_and(|l| l.first().is_some_and(|x| x.contains("\"answers\":true")));
     let t = Instant::now();
     while t.elapsed() < Duration::from_secs(1500) {
         std::thread::sleep(Duration::from_secs(5));
@@ -524,11 +542,11 @@ fn roll_node(ctx: &Ctx, node: &str, svc: &str, dirs: &BTreeSet<String>, work: &s
             !c.hub_rev.is_empty() && Some(&c.hub_rev) != before.as_ref().map(|b| &b.hub_rev)
         } else {
             let old = before.as_ref().and_then(|b| b.services.iter().find(|(x, _)| x == svc).map(|s| s.1)).unwrap_or(0);
-            c.services.iter().any(|(x, t)| x == svc && *t > old)
+            c.services.iter().any(|(x, t)| x == svc && *t > old) && answers()
         };
         if back {
             let at = if svc == "devhub" { super::short(&c.hub_rev).to_string() } else { short.to_string() };
-            event(ctx, Sev::Info, format!("update: {node} runs {svc} at {at}"));
+            event(ctx, Sev::Info, format!("update: {node} runs {svc} at {at}{}", if svc == "devhub" { "" } else { ", and it answers" }));
             return None;
         }
     }
@@ -539,14 +557,64 @@ fn roll_node(ctx: &Ctx, node: &str, svc: &str, dirs: &BTreeSet<String>, work: &s
 /// The deployments a hub did not build at, said loudly once (each box refuses it on its own).
 static BROKEN_SAID: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
 
-/// Rustup counts its nested proxies here and refuses past 20 ("infinite recursion detected"): each
-/// exec through `cargo run` would count one more, and the master's 20th restart would be its last.
+/// Rustup counts its nested proxies here and refuses past 20 ("infinite recursion detected"): a
+/// master started through `cargo run` carries it into every build it runs.
 const RUSTUP_DEPTH: &str = "RUST_RECURSION_COUNT";
 
 /// One master restart at a time: the self-update's and `devhub master restart`'s.
 pub(super) static RESTARTING: Mutex<()> = Mutex::new(());
 
-/// The master execs itself through cargo run in the checkout: the landed code, the same args.
+/// The master's own lease holders an exec cannot carry over (the show's prewarms, the warm and
+/// prebuild legs: their work is this process's threads), and whether a restart drains them. A
+/// cut prewarm lost its build's last step and its lease expired (11-02). Draining: no new one
+/// starts (it waits in [`holding`]; the exec ends that wait and the new master plans its own), a
+/// queued one gives its request up ([`draining`]), a running one finishes. Waiting, never a cap.
+static DRAIN: (Mutex<(bool, usize)>, std::sync::Condvar) = (Mutex::new((false, 0)), std::sync::Condvar::new());
+
+fn drain_state() -> std::sync::MutexGuard<'static, (bool, usize)> {
+    DRAIN.0.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// One of the master's own lease holders, counted until dropped.
+pub struct Holding(());
+
+impl Drop for Holding {
+    fn drop(&mut self) {
+        drain_state().1 -= 1;
+        DRAIN.1.notify_all();
+    }
+}
+
+/// Before one of the master's own holders asks for its lease: waits out a drain, then counts it.
+pub fn holding() -> Holding {
+    let mut d = drain_state();
+    while d.0 {
+        d = DRAIN.1.wait(d).unwrap_or_else(|e| e.into_inner());
+    }
+    d.1 += 1;
+    Holding(())
+}
+
+/// The master drains for its restart: a holder still queued gives its request up.
+pub fn draining() -> bool {
+    drain_state().0
+}
+
+fn set_draining(on: bool) {
+    drain_state().0 = on;
+    DRAIN.1.notify_all();
+}
+
+/// Waits until no holder of the master's own runs; `say` hears how many there were, once.
+fn drained(say: impl FnOnce(usize)) {
+    let mut d = drain_state();
+    if d.1 > 0 { say(d.1); }
+    while d.1 > 0 {
+        d = DRAIN.1.wait(d).unwrap_or_else(|e| e.into_inner());
+    }
+}
+
+/// The master execs itself into the landed code ([`build_devhub`]), with the same args.
 /// It builds first, and a build that fails keeps this master running and says so: an Err event
 /// (the inbox) and the answer to whoever asked (`by`: `devhub master restart` waits for it).
 /// Never a silent no-op (11-02: a hand restart after a failed self-update was dropped by its
@@ -555,26 +623,29 @@ pub(super) static RESTARTING: Mutex<()> = Mutex::new(());
 pub fn restart_master(ctx: &Arc<Ctx>, work: &str, by: &str) -> Result<String, String> {
     let _one = RESTARTING.lock().unwrap_or_else(|e| e.into_inner());
     let mine = super::short(crate::lease::caps::hub_rev()).to_string();
+    // the running build is kept before the new one is swapped in: `devhub master rollback` execs back into it
+    keep_running_binary(&ctx.repo)?;
     event(ctx, Sev::Info, format!("update: the master restarts on {} ({by}; it builds in {} first)", super::short(work), ctx.repo.display()));
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let cargo = std::env::var_os("HOME").map(PathBuf::from).map(|h| h.join(".cargo/bin/cargo")).filter(|c| c.exists()).unwrap_or_else(|| PathBuf::from("cargo"));
-    // built first: a build that fails keeps this master running (an exec into a failing cargo run would end it);
-    // a prewarm of the JIT would hold the cargo lock all that time
+    // its own lease holders drain while it builds: none starts, the running ones finish
+    set_draining(true);
+    // built first: a build that fails keeps this master running; a prewarm of the JIT would take
+    // the cores all that time
     super::show::stop_mac_prewarm();
     let t = Instant::now();
-    let built = std::process::Command::new(&cargo).args(["build", "--profile", "host", "-p", "makepad-devhub", "--bin", "makepad-devhub"]).current_dir(&ctx.repo).env("CARGO_INCREMENTAL", "0").env_remove(RUSTUP_DEPTH).stdin(std::process::Stdio::null()).output();
-    let failed = match built {
-        Ok(o) if o.status.success() => None,
-        Ok(o) => Some(first_error(&String::from_utf8_lossy(&o.stderr))),
-        Err(e) => Some(format!("cargo: {e}")),
-    };
-    if let Some(why) = failed {
+    if let Err(why) = build_devhub(&ctx.repo) {
+        set_draining(false);
         let line = format!("update: the master's build of {} failed ({why}); it keeps running {mine} ({by})", super::short(work));
         event(ctx, Sev::Err, line.clone());
         return Err(line);
     }
-    let mut cmd = std::process::Command::new(cargo);
-    cmd.args(["run", "--profile", "host", "-p", "makepad-devhub", "--bin", "makepad-devhub", "--"]).args(&args).current_dir(&ctx.repo).env("CARGO_INCREMENTAL", "0").env_remove(RUSTUP_DEPTH);
+    let t_drain = Instant::now();
+    drained(|n| event(ctx, Sev::Info, format!("update: the master's restart waits for {n} of its own leases (prewarms, prebuilds) to finish; no new ones start")));
+    ctx.leases.declare_restart(RESTART_GRACE);
+    // the build just swapped in, exec'd as it is: a `cargo run` here would wait on the build lock
+    // of every other cargo in `target/host` while no master beats
+    let mut cmd = std::process::Command::new(ctx.repo.join("target/host").join(format!("makepad-devhub{}", std::env::consts::EXE_SUFFIX)));
+    cmd.args(&args).current_dir(&ctx.repo);
     #[cfg(unix)]
     {
         let c2 = ctx.clone();
@@ -582,16 +653,124 @@ pub fn restart_master(ctx: &Arc<Ctx>, work: &str, by: &str) -> Result<String, St
             std::thread::sleep(Duration::from_millis(300));
             let _held = RESTARTING.lock().unwrap_or_else(|e| e.into_inner());
             let e = std::os::unix::process::CommandExt::exec(&mut cmd);
+            set_draining(false);
             event(&c2, Sev::Err, format!("update: the master could not restart itself: {e}; it keeps running {}", super::short(crate::lease::caps::hub_rev())));
         });
-        Ok(format!("built {} in {:.0} s; the master execs into it now (the same pid: leases, jobs and live sessions go on)", super::short(work), t.elapsed().as_secs_f64()))
+        let waited = t_drain.elapsed().as_secs();
+        Ok(format!("built {} in {:.0} s{}; the master execs into it now (the same pid: leases, jobs and live sessions go on)", super::short(work), t.elapsed().as_secs_f64() - waited as f64, if waited > 0 { format!(", its own leases drained in {waited} s") } else { String::new() }))
     }
     #[cfg(not(unix))]
     {
-        let _ = (cmd, t);
+        let _ = (cmd, t, t_drain);
+        set_draining(false);
         let line = "update: restart the master by hand (no exec on this OS)".to_string();
         event(ctx, Sev::Err, line.clone());
         Err(line)
+    }
+}
+
+/// devhub's binary, built in a target dir of its own (never the lock of `target/host`, where the
+/// apps and the JIT build) and swapped in at `target/host/makepad-devhub` through a rename: a
+/// caller runs the old build or the new one, never a missing or half-written file. Niced on 4
+/// jobs, the master's own restart too: the running master beats on while it builds, and only
+/// the exec's gap counts (no full-speed builds on the user's Mac).
+pub fn build_devhub(repo: &Path) -> Result<(), String> {
+    let cargo = std::env::var_os("HOME").map(PathBuf::from).map(|h| h.join(".cargo/bin/cargo")).filter(|c| c.exists()).unwrap_or_else(|| PathBuf::from("cargo"));
+    let mut cmd = std::process::Command::new("nice");
+    cmd.args(["-n", "10"]).arg(&cargo).args(["build", "-j4", "--profile", "host", "-p", "makepad-devhub", "--bin", "makepad-devhub", "--target-dir"]).arg(repo.join("target/devhub")).current_dir(repo).env("CARGO_INCREMENTAL", "0").env_remove(RUSTUP_DEPTH).stdin(std::process::Stdio::null());
+    match cmd.output() {
+        Ok(o) if o.status.success() => {}
+        Ok(o) => return Err(format!("does not build: {}", first_error(&String::from_utf8_lossy(&o.stderr)))),
+        Err(e) => return Err(format!("cargo: {e}")),
+    }
+    let name = format!("makepad-devhub{}", std::env::consts::EXE_SUFFIX);
+    swap_in(&repo.join("target/devhub/host").join(&name), &repo.join("target/host").join(&name))
+}
+
+/// Copies `built` beside `live` and renames it over: `live` is always a whole binary. One swap
+/// at a time (the CLI's rebuild and the master's restart share the file beside it).
+fn swap_in(built: &Path, live: &Path) -> Result<(), String> {
+    static SWAP: Mutex<()> = Mutex::new(());
+    let _one = SWAP.lock().unwrap_or_else(|e| e.into_inner());
+    let next = live.with_extension("next");
+    std::fs::create_dir_all(live.parent().unwrap_or(Path::new("."))).map_err(|e| format!("{}: {e}", live.display()))?;
+    std::fs::copy(built, &next).and_then(|_| std::fs::rename(&next, live)).map(|_| ()).map_err(|e| format!("swapping {} in at {}: {e}", built.display(), live.display()))
+}
+
+/// How long the nodes keep the master's leases past their no-beat limit while it restarts: its
+/// start (then through cargo, waiting on its lock; the state load, the first beat) took 69 s once.
+const RESTART_GRACE: Duration = Duration::from_secs(300);
+
+/// The master build a restart replaced, kept for `devhub master rollback`.
+fn prev_binary(repo: &Path) -> PathBuf {
+    repo.join("target/host").join(format!("makepad-devhub{}.prev", std::env::consts::EXE_SUFFIX))
+}
+
+/// The build this master started from, copied as it starts: a CLI rebuild swaps a new file in at
+/// the path it ran from, and a rollback needs the build that ran.
+fn started_binary(repo: &Path) -> PathBuf {
+    prev_binary(repo).with_extension("running")
+}
+
+/// At the master's start: its own binary, kept as [`started_binary`] (a master that runs the
+/// rollback copy keeps none: [`prev_binary`] is that build already).
+pub fn keep_started_binary(repo: &Path) -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| format!("update: the master's binary: {e}"))?;
+    let started = started_binary(repo);
+    if exe.canonicalize().ok() == prev_binary(repo).canonicalize().ok() {
+        let _ = std::fs::remove_file(&started);
+        return Ok(());
+    }
+    std::fs::copy(&exe, &started).map(|_| ()).map_err(|e| format!("update: keeping {} as {}: {e}", exe.display(), started.display()))
+}
+
+/// Before a restart: the build that runs becomes [`prev_binary`] (what it started from, or its
+/// file now when it kept none; a master that runs that copy already, after a rollback, keeps it).
+fn keep_running_binary(repo: &Path) -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| format!("update: the running master's binary: {e}"))?;
+    let prev = prev_binary(repo);
+    if exe.canonicalize().ok() == prev.canonicalize().ok() {
+        return Ok(());
+    }
+    let started = started_binary(repo);
+    let kept = std::fs::copy(if started.is_file() { &started } else { &exe }, &prev).map(|_| ());
+    kept.map_err(|e| format!("update: keeping {} as {}: {e} (no restart without a build to roll back to)", exe.display(), prev.display()))
+}
+
+/// Execs the master back into the build its last restart replaced ([`prev_binary`]), the same
+/// args and pid: a deploy rollback when a new build misbehaves (memory, CPU), not a code revert.
+/// The next `devhub master restart` builds work's tip again.
+pub fn rollback_master(ctx: &Arc<Ctx>, by: &str) -> Result<String, String> {
+    let _one = RESTARTING.lock().unwrap_or_else(|e| e.into_inner());
+    let prev = prev_binary(&ctx.repo);
+    if !prev.is_file() {
+        return Err(format!("update: no previous master build at {} to roll back to", prev.display()));
+    }
+    event(ctx, Sev::Warn, format!("update: the master rolls back from {} to its previous build ({by})", super::short(crate::lease::caps::hub_rev())));
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    set_draining(true);
+    super::show::stop_mac_prewarm();
+    drained(|n| event(ctx, Sev::Info, format!("update: the master's rollback waits for {n} of its own leases to finish")));
+    ctx.leases.declare_restart(RESTART_GRACE);
+    let mut cmd = std::process::Command::new(&prev);
+    cmd.args(&args).current_dir(&ctx.repo);
+    #[cfg(unix)]
+    {
+        let c2 = ctx.clone();
+        let _ = std::thread::Builder::new().name("devhub-master-exec".into()).spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            let _held = RESTARTING.lock().unwrap_or_else(|e| e.into_inner());
+            let e = std::os::unix::process::CommandExt::exec(&mut cmd);
+            set_draining(false);
+            event(&c2, Sev::Err, format!("update: the master could not roll back: {e}; it keeps running {}", super::short(crate::lease::caps::hub_rev())));
+        });
+        Ok(format!("the master execs into its previous build {} now (the same pid)", prev.display()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = cmd;
+        set_draining(false);
+        Err("update: roll the master back by hand (no exec on this OS)".to_string())
     }
 }
 
@@ -607,6 +786,46 @@ pub fn first_error(stderr: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// A restart keeps the running build beside the new one; a master that runs that copy keeps it.
+    #[test]
+    fn the_previous_master_build_is_kept_for_a_rollback() {
+        let d = std::env::temp_dir().join(format!("devhub-prev-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("target/host")).unwrap();
+        super::keep_running_binary(&d).unwrap();
+        let prev = super::prev_binary(&d);
+        assert_eq!(std::fs::read(&prev).unwrap(), std::fs::read(std::env::current_exe().unwrap()).unwrap());
+        // the build it started from wins over whatever replaced its file since
+        std::fs::write(super::started_binary(&d), b"the build that ran").unwrap();
+        super::keep_running_binary(&d).unwrap();
+        assert_eq!(std::fs::read(&prev).unwrap(), b"the build that ran");
+        super::keep_started_binary(&d).unwrap();
+        assert_eq!(std::fs::read(super::started_binary(&d)).unwrap(), std::fs::read(std::env::current_exe().unwrap()).unwrap());
+        assert!(super::keep_running_binary(std::path::Path::new("/nonexistent-devhub-repo")).is_err(), "no restart without a build to roll back to");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The live binary is replaced whole: the old one or the new one, never a partial file.
+    #[test]
+    fn a_built_binary_is_swapped_in_whole() {
+        let d = std::env::temp_dir().join(format!("devhub-swap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("own/host")).unwrap();
+        let (built, live) = (d.join("own/host/bin"), d.join("host/bin"));
+        std::fs::write(&built, b"new build").unwrap();
+        std::fs::create_dir_all(d.join("host")).unwrap();
+        std::fs::write(&live, b"old build").unwrap();
+        let held = std::fs::File::open(&live).unwrap();
+        super::swap_in(&built, &live).unwrap();
+        assert_eq!(std::fs::read(&live).unwrap(), b"new build");
+        // a caller that had the old file open keeps reading the old build
+        let mut old = String::new();
+        std::io::Read::read_to_string(&mut &held, &mut old).unwrap();
+        assert_eq!(old, "old build");
+        assert!(!live.with_extension("next").exists());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     #[test]
     fn a_failed_build_says_its_first_error_and_where() {
         let err = "   Compiling makepad-devhub v0.1.0\nerror[E0425]: cannot find value `X` in module `super`\n   --> libs/devhub/src/lease/native.rs:122:40\n    |\nerror: could not compile `makepad-devhub`";
@@ -624,6 +843,29 @@ mod tests {
         assert!(!b.try_take());
         drop(a);
         assert!(b.try_take());
+    }
+
+    #[test]
+    fn a_restart_drains_the_masters_own_holders() {
+        use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+        let running = super::holding();
+        super::set_draining(true);
+        let started = std::sync::Arc::new(AtomicBool::new(false));
+        let s2 = started.clone();
+        // a new one waits out the drain
+        let new = std::thread::spawn(move || {
+            let _h = super::holding();
+            s2.store(true, SeqCst);
+        });
+        // the running one finishes: drained, the new one not started
+        let drain = std::thread::spawn(|| super::drained(|n| assert_eq!(n, 1)));
+        drop(running);
+        drain.join().unwrap();
+        assert!(!started.load(SeqCst) && super::draining());
+        // no exec (its build failed): it goes on
+        super::set_draining(false);
+        new.join().unwrap();
+        assert!(started.load(SeqCst));
     }
 
     #[test]

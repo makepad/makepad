@@ -35,7 +35,7 @@ const CAPS_MS: u64 = 10_000;
 /// What an inspect lease left on a JIT (undone on the node at `lease-end`).
 #[derive(Clone, Debug, Default)]
 struct Marks {
-    jit: String,
+    pid: u32,
     breaks: Vec<String>,
     probes: Vec<String>,
     paused: bool,
@@ -53,9 +53,9 @@ pub struct LeaseMaster {
     profile_writer: Mutex<u64>,
     /// tests: node calls run on the caller's thread
     inline: bool,
-    marks: Mutex<HashMap<String, Marks>>,
-    /// (node, jit) -> the lease that holds its breakpoints
-    holders: Mutex<HashMap<(String, String), String>>,
+    marks: Mutex<HashMap<String, Arc<Mutex<Marks>>>>,
+    /// (node, canonical app pid) -> the lease that holds its inspect effects
+    holders: Mutex<HashMap<(String, u32), String>>,
     /// the dev switch each node was last told (a role change on the node moves its default)
     pushed: Mutex<HashMap<String, bool>>,
     /// per node: the lifetime JIT builds and build seconds its store reported last (the ledger gets the deltas)
@@ -69,7 +69,7 @@ pub struct LeaseMaster {
     /// the last text written to `leases.live` ([`Self::persist`])
     saved: Mutex<String>,
     /// (node, call) of the beat and caps calls in flight: a hub that stops answering holds only
-    /// its own call (105 out of memory on 2026-11-02 held one loop over all nodes, and every
+    /// its own call (a node out of memory on 2026-11-02 held one loop over all nodes, and every
     /// node ended its leases after 60 s without a beat)
     calling: Mutex<std::collections::HashSet<(String, &'static str)>>,
     /// lease-ends a node could not take while its hub restarted: (node, line), sent with the
@@ -114,6 +114,15 @@ fn bind_lane(home: &Path, req: &Req) -> Result<(), String> {
     let out: String = lines.iter().map(|(l, d)| format!("{l} {d}\n")).collect();
     let tmp = home.join("lanes.conf.new");
     std::fs::create_dir_all(home).and_then(|_| std::fs::write(&tmp, out)).and_then(|_| std::fs::rename(&tmp, &path)).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// The node's receipt for lease `id` with no survivor: the only answer that frees its capacity. A
+/// lease the node holds no record of counts once the node swept its marked processes (`unknown`).
+fn cleanup_confirmed(v: &makepad_strict_json::Value, id: &str) -> bool {
+    v.get("ended").and_then(|v| v.as_str()) == Some(id)
+        && v.get("err").is_none()
+        && v.get("pending").is_none()
+        && v.get("leak").and_then(|v| v.as_arr()).is_some_and(|v| v.is_empty())
 }
 
 fn err(e: &str) -> String {
@@ -405,24 +414,24 @@ impl LeaseMaster {
     }
 
     fn save_live(&self) {
+        if let Err(e) = self.persist() { self.event(Sev::Err, e); return; }
         *self.changes.0.lock().unwrap() += 1;
         self.changes.1.notify_all();
-        self.persist();
     }
 
     /// Writes `leases.live` when its text changed: every state change reaches the file at once
     /// (not after a node's teardown), so a restart in between neither loses a lease nor brings an
     /// ended one back.
-    fn persist(&self) {
+    fn persist(&self) -> Result<(), String> {
+        // Acquire the writer before taking the scheduler snapshot: a waiting writer can
+        // never overwrite a newer snapshot with one captured earlier.
+        let mut saved = self.saved.lock().unwrap();
         let lines = self.sched.lock().unwrap().live_lines();
         let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
-        let mut saved = self.saved.lock().unwrap();
-        if *saved == text { return; }
-        let _ = std::fs::create_dir_all(&self.home);
-        let (path, tmp) = (self.home.join("leases.live"), self.home.join("leases.live.new"));
-        if std::fs::write(&tmp, &text).is_ok() && std::fs::rename(&tmp, &path).is_ok() {
-            *saved = text;
-        }
+        if *saved == text { return Ok(()); }
+        crate::state::durable_write(&self.home.join("leases.live"), text.as_bytes())?;
+        *saved = text;
+        Ok(())
     }
 
     /// See [`Sched::timed_series`].
@@ -521,8 +530,12 @@ impl LeaseMaster {
             }
             s.tick(now)
         };
+        if let Err(e) = self.persist() {
+            self.sched.lock().unwrap().retry_actions(acts);
+            self.event(Sev::Err, e);
+            return;
+        }
         self.act(acts);
-        self.persist();
     }
 
     fn act(self: &Arc<Self>, acts: Vec<Action>) {
@@ -700,7 +713,7 @@ impl LeaseMaster {
         };
         let needs: Vec<String> = l.req.needs.iter().map(|(k, v)| format!("{}:{}", json_str(k), json_str(v))).collect();
         let warms = l.req.warms.as_deref().map_or(String::new(), |lane| format!(",\"warms\":{}", json_str(lane)));
-        let line = format!("lease-start {{\"id\":{},\"lane\":{}{warms},\"kind\":\"{}\",\"src\":\"{}\",\"priority\":\"{}\",\"loader\":{},\"cost\":{{\"cores\":{},\"ram_gb\":{}}},\"needs\":{{{}}},\"rev\":{rev},\"env\":{{}}}}", json_str(&l.id), json_str(&l.req.lane), l.req.kind.as_str(), l.req.src.as_str(), l.priority.as_str(), l.req.loader.as_deref().map_or("null".to_string(), json_str), l.cost.cores, l.cost.ram_gb, needs.join(","));
+        let line = format!("lease-start {{\"id\":{},\"lane\":{}{warms},\"kind\":\"{}\",\"src\":\"{}\",\"priority\":\"{}\",\"loader\":{},\"cost\":{{\"cores\":{},\"ram_gb\":{},\"ram_max_gb\":{}}},\"live\":{},\"needs\":{{{}}},\"rev\":{rev},\"env\":{{}}}}", json_str(&l.id), json_str(&l.req.lane), l.req.kind.as_str(), l.req.src.as_str(), l.priority.as_str(), l.req.loader.as_deref().map_or("null".to_string(), json_str), l.cost.cores, l.cost.ram_gb, l.req.ram_gb.map_or("null".to_string(), |g| g.to_string()), l.req.live, needs.join(","));
         let lines = (self.ask)(node, "lease-start", &line)?;
         let first = lines.into_iter().next().ok_or("lease-start: no answer")?;
         let v = makepad_strict_json::parse(first.as_bytes()).map_err(|_| "lease-start: bad answer".to_string())?;
@@ -736,23 +749,23 @@ impl LeaseMaster {
         for phase in ["sync", "jit", "run"] { node_phases.close(phase, report_start); }
         let mut run_class = String::new();
         let mut cost_recorded = false;
-        let marks = self.marks.lock().unwrap().remove(id);
-        self.holders.lock().unwrap().retain(|_, v| v != id);
+        let marks = self.marks.lock().unwrap().get(id).cloned();
+        // Wait for the accepted command and its marks before sending cleanup.
+        let marks = marks.as_ref().map(|m| m.lock().unwrap());
         let mut summary = "{\"cleanup\":\"nothing to clean\"}".to_string();
-        let (mut teardown, mut freed_early) = (0u64, false);
+        let (mut teardown, mut cleanup_ok, mut freed_early) = (0u64, true, false);
         if let (Some(node), Some(l)) = (node, l.as_ref()) {
             // an inspect lease that changed nothing has nothing to undo
-            if l.req.on_node() || marks.is_some() {
+            if l.req.on_node() || marks.as_ref().is_some_and(|m| m.paused || !m.breaks.is_empty() || !m.probes.is_empty()) {
                 let wire_how = match how {
                     "released" | "expired" | "holder-dead" | "denied" => how,
                     "lost" => "expired",
                     _ => "released",
                 };
                 let mut parts = Vec::new();
-                if let Some(m) = marks {
+                if let Some(m) = marks.as_ref() {
                     let list = |v: &[String]| v.iter().map(|s| json_str(s)).collect::<Vec<_>>().join(",");
-                    let pid = m.jit.parse::<u32>().map_or("null".to_string(), |p| p.to_string());
-                    parts.push(format!("\"inspect\":{{\"pid\":{pid},\"jit\":{},\"breaks\":[{}],\"probes\":[{}],\"paused\":{}}}", json_str(&m.jit), list(&m.breaks), list(&m.probes), m.paused));
+                    parts.push(format!("\"inspect\":{{\"pid\":{},\"breaks\":[{}],\"probes\":[{}],\"paused\":{}}}", m.pid, list(&m.breaks), list(&m.probes), m.paused));
                 }
                 let payload = if parts.is_empty() { String::new() } else { format!(" {{{}}}", parts.join(",")) };
                 let t0 = std::time::Instant::now();
@@ -768,11 +781,15 @@ impl LeaseMaster {
                 measured.node_phases = node_phases.clone();
                 self.ended_cost(&measured, class, answer.as_ref().ok());
                 cost_recorded = true;
-                // the box is free the moment its lease-end answers: grant what waits for it now, the
-                // bookkeeping (recovered work, ledger) after
-                self.sched.lock().unwrap().cleaned(node, id, teardown);
-                freed_early = true;
-                self.pump();
+                cleanup_ok = answer.as_ref().is_ok_and(|v| cleanup_confirmed(v, id));
+                if cleanup_ok {
+                    self.sched.lock().unwrap().cleaned(node, id, teardown);
+                    freed_early = true;
+                    self.pump();
+                } else {
+                    self.sched.lock().unwrap().cleanup_failed(node, id);
+                    self.ends_later.lock().unwrap().push((node.to_string(), end_line.clone()));
+                }
                 match answer {
                     Ok(v) => {
                         let leak = strs(v.get("leak"));
@@ -782,7 +799,16 @@ impl LeaseMaster {
                             self.event(Sev::Err, format!("lease_leak: {} of {}: {} processes left after cleanup on {node} (pids {})", l.tag(), l.req.lane, leak.len(), leak.join(" ")));
                         }
                         self.event(Sev::Info, format!("{} of {}: cleaned up on {node}: {} stopped, {freed:.0} MB freed{}", l.tag(), l.req.lane, plural(killed.len(), "process", "processes"), if leak.is_empty() { String::new() } else { format!(", {} LEFT", leak.len()) }));
-                        summary = format!("{{\"cleanup\":\"ok\",\"node\":{},\"stopped\":{},\"freed_mb\":{freed:.0},\"leak\":{}}}", json_str(node), killed.len(), leak.len());
+                        // a run that ended without its normal end: how, in the lane's output (the
+                        // release answer) and the inbox, and its last lines kept under the lease id
+                        let ended = v.get("abnormal").filter(|_| how != "cancelled").and_then(|a| Some((a.get("line")?.as_str()?.to_string(), a.get("serious").and_then(|s| s.as_bool()).unwrap_or(false), a.get("tail").and_then(|t| t.as_str()).unwrap_or("").to_string())));
+                        if let Some((line, serious, tail)) = &ended {
+                            let path = self.home.join("lease-logs").join(format!("{id}.log"));
+                            let kept = std::fs::create_dir_all(path.parent().unwrap()).and_then(|_| std::fs::write(&path, format!("{line}\n{tail}\n")));
+                            let at = if kept.is_ok() { format!("; its last lines: {}", path.display()) } else { String::new() };
+                            (self.publish)(hub_record(&self.machine, "", 0, "lease", if *serious { Sev::Warn } else { Sev::Info }, format!("{line} ({} of {} on {node}{at})", l.tag(), l.req.lane), tail.clone()));
+                        }
+                        summary = format!("{{\"cleanup\":{},\"node\":{},\"stopped\":{},\"freed_mb\":{freed:.0},\"leak\":{},\"ended\":{}}}", json_str(if cleanup_ok { "ok" } else { "unconfirmed: capacity unknown" }), json_str(node), killed.len(), leak.len(), ended.as_ref().map_or("null".to_string(), |e| json_str(&e.0)));
                         if let Some(path) = v.get("recovered").and_then(|r| r.as_str()) {
                             self.fetch_recovered(node, path, l);
                         }
@@ -791,7 +817,6 @@ impl LeaseMaster {
                     // the end goes to it with the node's next beats
                     Err(e) if unreachable(&e) || e.contains("restarting: ") => {
                         self.event(Sev::Info, format!("{} of {}: cleanup on {node} waits for its hub to answer again ({e})", l.tag(), l.req.lane));
-                        self.ends_later.lock().unwrap().push((node.to_string(), end_line));
                         summary = format!("{{\"cleanup\":{}}}", json_str(&format!("deferred on {node}: its hub restarts")));
                     }
                     Err(e) => {
@@ -802,8 +827,10 @@ impl LeaseMaster {
             }
         }
         // a lease with nothing to tear down: its node is free now
-        if let (Some(node), false) = (node, freed_early) {
-            self.sched.lock().unwrap().cleaned(node, id, teardown);
+        if cleanup_ok {
+            if let (Some(node), false) = (node, freed_early) { self.sched.lock().unwrap().cleaned(node, id, teardown); }
+            self.holders.lock().unwrap().retain(|_, v| v != id);
+            self.marks.lock().unwrap().remove(id);
         }
         self.save_live();
         let reported = self.now();
@@ -854,7 +881,7 @@ impl LeaseMaster {
         let Some(dir) = &l.req.repo_dir else {
             return self.event(Sev::Warn, format!("{} of {}: recovered work saved as {}", l.tag(), l.req.lane, dst.display()));
         };
-        let ok = makepad_remote::group::command("git")
+        let ok = crate::git_exec::command()
             .arg("-C")
             .arg(dir)
             .arg("fetch")
@@ -974,17 +1001,57 @@ impl LeaseMaster {
         self.pump();
     }
 
+    /// Before the master execs into another build: every node keeps this master's live leases
+    /// `grace` beyond its no-beat limit (`lease-beat grace=<s>`), so the time the new build takes
+    /// to start beating ends none. Waits at most a few seconds for the nodes' answers.
+    pub fn declare_restart(self: &Arc<Self>, grace: Duration) {
+        let nodes = self.sched.lock().unwrap().nodes_with_leases();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut asked = 0;
+        for node in nodes {
+            let ids = self.sched.lock().unwrap().live_on(&node);
+            if ids.is_empty() {
+                continue;
+            }
+            let (m, tx) = (self.clone(), tx.clone());
+            let line = format!("lease-beat grace={} {}", grace.as_secs(), ids.join(" "));
+            asked += 1;
+            let _ = std::thread::Builder::new().name("devhub-lease-grace".into()).spawn(move || {
+                let r = m.ask1(&node, "lease-beat", &line);
+                let _ = tx.send((node, r.err()));
+            });
+        }
+        let until = std::time::Instant::now() + Duration::from_secs(5);
+        let mut missed: Vec<String> = Vec::new();
+        for _ in 0..asked {
+            match rx.recv_timeout(until.saturating_duration_since(std::time::Instant::now())) {
+                Ok((_, None)) => {}
+                Ok((node, Some(e))) => missed.push(format!("{node}: {e}")),
+                Err(_) => break,
+            }
+        }
+        if !missed.is_empty() {
+            self.event(Sev::Warn, format!("update: the master's restart grace did not reach {}", missed.join("; ")));
+        }
+    }
+
     /// The deferred lease-ends of a node whose hub restarted, once it answers again.
     fn end_later(self: &Arc<Self>, node: &str) {
         let lines: Vec<String> = self.ends_later.lock().unwrap().iter().filter(|(n, _)| n == node).map(|(_, l)| l.clone()).collect();
         for line in lines {
+            let id = line.split_whitespace().nth(1).unwrap_or("");
             match self.ask1(node, "lease-end", &line) {
-                Err(e) if unreachable(&e) || e.contains("restarting: ") => return,
-                r => {
-                    let id = line.split_whitespace().nth(1).unwrap_or("");
-                    self.event(Sev::Info, format!("{id}: cleaned up on {node} after its hub came back{}", r.err().map_or(String::new(), |e| format!(" ({e})"))));
+                Ok(v) if cleanup_confirmed(&v, id) => {
+                    self.sched.lock().unwrap().cleaned(node, id, 0);
+                    self.holders.lock().unwrap().retain(|_, owner| owner != id);
+                    self.marks.lock().unwrap().remove(id);
+                    self.cleanups.lock().unwrap().insert(id.to_string(), v.to_json());
+                    self.cleaned.notify_all();
+                    self.event(Sev::Info, format!("{id}: cleanup confirmed on {node}"));
                     self.ends_later.lock().unwrap().retain(|(n, l)| !(n == node && *l == line));
+                    self.pump();
                 }
+                _ => self.sched.lock().unwrap().cleanup_failed(node, id),
             }
         }
     }
@@ -1012,8 +1079,8 @@ impl LeaseMaster {
     /// The lease loop: places every second, beats the nodes every 5 s, their caps every 10 s. Each
     /// node's beat and caps call runs on its own thread: a slow, down or silent box (a just-started
     /// master's links coming up, a hub out of memory) must not starve the other boxes' beats, or
-    /// the nodes end their leases after 60 s without one (a master restart ended L8158 on a node,
-    /// 2026-10-30; 105's silent hub ended leases fleet-wide on 2026-11-02).
+    /// the nodes end their leases after 60 s without one (a master restart ended L8158 on a pool box,
+    /// 2026-10-30; one node's silent hub ended leases fleet-wide on 2026-11-02).
     pub fn start(self: &Arc<Self>, hosts: Hosts) {
         self.resume_starts();
         let m = self.clone();
@@ -1092,7 +1159,7 @@ impl LeaseMaster {
             };
             sched.bump(&id).map(|_| id)
         };
-        if r.is_ok() { self.pump(); }
+        if r.is_ok() { self.persist()?; self.pump(); }
         r
     }
 
@@ -1111,6 +1178,17 @@ impl LeaseMaster {
         let s = self.sched.lock().unwrap();
         let l = s.get(id)?;
         Some(l.state_line(self.now(), &l.node.as_deref().map(|n| s.addr(n)).unwrap_or_default()))
+    }
+
+    fn durable_state_line(&self, id: &str) -> Result<Option<String>, String> {
+        let mut saved = self.saved.lock().unwrap();
+        let s = self.sched.lock().unwrap();
+        let text: String = s.live_lines().iter().map(|l| format!("{l}\n")).collect();
+        if *saved != text {
+            crate::state::durable_write(&self.home.join("leases.live"), text.as_bytes())?;
+            *saved = text;
+        }
+        Ok(s.get(id).map(|l| l.state_line(self.now(), &l.node.as_deref().map(|n| s.addr(n)).unwrap_or_default())))
     }
 
     /// One control service request (the line may repeat the service word, like `ps`).
@@ -1134,16 +1212,27 @@ impl LeaseMaster {
                         }
                         req
                     };
-                    let id = self.sched.lock().unwrap().request(req, now);
-                    self.persist();
+                    let accepted = {
+                        let mut saved = self.saved.lock().unwrap();
+                        self.sched.lock().unwrap().request_durable(req, now, |lines| {
+                            let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
+                            crate::state::durable_write(&self.home.join("leases.live"), text.as_bytes())?;
+                            *saved = text;
+                            Ok(())
+                        })
+                    };
+                    let id = match accepted { Ok(id) => id, Err(e) => { out.push(err(&e)); return; } };
                     self.pump();
-                    out.extend(self.state_line(&id));
+                    match self.durable_state_line(&id) { Ok(Some(line)) => out.push(line), Ok(None) => {}, Err(e) => out.push(err(&e)) }
+
                 }
                 Err(e) => out.push(err(&e)),
             },
-            "beat" => match self.sched.lock().unwrap().beat(line.trim(), now) {
-                Some(l) => out.push(l),
-                None => out.push(err(&format!("no lease {}", line.trim()))),
+            "beat" => {
+                let exists = self.sched.lock().unwrap().beat(line.trim(), now).is_some();
+                if exists {
+                    match self.durable_state_line(line.trim()) { Ok(Some(line)) => out.push(line), Ok(None) => {}, Err(e) => out.push(err(&e)) }
+                } else { out.push(err(&format!("no lease {}", line.trim()))); }
             },
             "release" | "cancel" => {
                 let mut w = line.split_whitespace();
@@ -1153,7 +1242,7 @@ impl LeaseMaster {
                 let by = w.clone().find_map(|x| x.strip_prefix("by=")).unwrap_or("user").to_string();
                 let ended = if service == "cancel" { self.sched.lock().unwrap().cancel_by(id, &by, now) } else { self.sched.lock().unwrap().release(id, how, now) };
                 if ended {
-                    self.persist();
+                    if let Err(e) = self.persist() { out.push(err(&e)); return; }
                     self.pump();
                     // the answer says how the node cleaned up (it waits for the node, not forever)
                     let cleanup = self.cleanup_of(id, Duration::from_secs(30)).unwrap_or_else(|| "{\"cleanup\":\"still running\"}".into());
@@ -1319,6 +1408,8 @@ impl LeaseMaster {
         if cmd.is_empty() {
             return out.push(err("linspect <lease> <node> <pid|app> <cmd...>"));
         }
+        let state = self.marks.lock().unwrap().entry(id.to_string()).or_default().clone();
+        let mut m = state.lock().unwrap();
         let (lane, user) = {
             let s = self.sched.lock().unwrap();
             let Some(l) = s.get(id) else { return out.push(err(&format!("no lease {id}"))) };
@@ -1337,27 +1428,35 @@ impl LeaseMaster {
         };
         let verb = cmd.split_whitespace().next().unwrap_or("");
         let stops = matches!(verb, "break" | "pause") && !cmd.starts_with("break clear") && !cmd.starts_with("break list");
-        let key = (node.to_string(), jit.to_string());
-        if stops {
-            let held = self.holders.lock().unwrap().get(&key).cloned().filter(|h| h != id);
-            if let Some(h) = held {
-                let live = self.sched.lock().unwrap().get(&h).filter(|l| l.state == State::Granted).map(|l| l.req.lane.clone());
-                if let Some(other) = live {
-                    return out.push(err(&format!("{node}/{jit}: breakpoints are held by {h} (lane {other})")));
-                }
-            }
+        let effects = matches!(verb, "break" | "pause" | "continue" | "resume" | "probe")
+            && !matches!((verb, cmd.split_whitespace().nth(1)), ("break" | "probe", Some("list")));
+        if m.pid == 0 {
+            let lines = match (self.ask)(node, "ps", "ps") { Ok(v) => v, Err(e) => return out.push(err(&e)) };
+            let pids: Vec<_> = lines.iter().filter_map(|l| makepad_strict_json::parse(l.as_bytes()).ok()).filter(|v| {
+                v.get("app").and_then(|v| v.as_str()) == Some(jit) || v.get("pid").and_then(|v| v.as_u64()).is_some_and(|p| p.to_string() == jit)
+            }).filter_map(|v| v.get("pid").and_then(|v| v.as_u64()).and_then(|pid| u32::try_from(pid).ok()).filter(|pid| *pid > 0)).collect();
+            if pids.len() != 1 { return out.push(err("inspect: select one live app instance by pid")); }
+            m.pid = pids[0];
         }
+        let key = (node.to_string(), m.pid);
+        if effects {
+            let mut holders = self.holders.lock().unwrap();
+            if let Some(h) = holders.get(&key).filter(|h| *h != id) {
+                return out.push(err(&format!("{node}/{jit}: breakpoints are held by {h}")));
+            }
+            // Reserve before forwarding; failed/uncertain commands retain ownership until cleanup.
+            holders.insert(key, id.to_string());
+        }
+        if verb == "pause" { m.paused = true; }
         if user || matches!(verb, "break" | "pause" | "continue" | "resume" | "probe") {
             let sev = if stops { Sev::Warn } else { Sev::Info };
             self.event(sev, format!("inspect {node}/{jit} by lane {lane}: {}", proto::clean(cmd, 200)));
         }
-        let answer = match (self.ask)(&format!("{node}:{jit}"), "cmd", cmd) {
+        let answer = match (self.ask)(&format!("{node}:{}", m.pid), "cmd", cmd) {
             Ok(l) => l,
             Err(e) => return out.push(err(&e)),
         };
-        if matches!(verb, "break" | "pause" | "continue" | "resume" | "probe") {
-            let mut marks = self.marks.lock().unwrap();
-            let m = marks.entry(id.to_string()).or_insert_with(|| Marks { jit: jit.to_string(), ..Marks::default() });
+        if effects && !answer.iter().any(|a| makepad_strict_json::parse(a.as_bytes()).ok().is_some_and(|v| v.get("err").is_some())) {
             let ids: Vec<String> = answer.iter().filter_map(|a| makepad_strict_json::parse(a.as_bytes()).ok()).filter_map(|v| ["id", "probe", "break"].iter().find_map(|k| v.get(k)).and_then(|i| i.as_str().map(str::to_string).or_else(|| super::num(i).map(|n| (n as i64).to_string())))).collect();
             let arg = cmd.split_whitespace().nth(2).unwrap_or("").to_string();
             match (verb, cmd.split_whitespace().nth(1)) {
@@ -1366,10 +1465,8 @@ impl LeaseMaster {
                 ("break", _) => m.breaks.extend(ids),
                 ("probe", _) => m.probes.extend(ids),
                 ("pause", _) => m.paused = true,
-                _ => m.paused = false,
-            }
-            if stops {
-                self.holders.lock().unwrap().insert(key, id.to_string());
+                ("continue" | "resume", _) => m.paused = false,
+                _ => {}
             }
         }
         out.extend(answer);
@@ -1455,6 +1552,10 @@ mod tests {
         known: Mutex<Vec<String>>,
             /// its hub is gone (restarting): every call fails as a lost link
         gone: std::sync::atomic::AtomicBool,
+        paused: std::sync::atomic::AtomicBool,
+        breaks: Mutex<Vec<String>>,
+        end_answer: Mutex<Option<String>>,
+        inspect_gate: Mutex<Option<(std::sync::mpsc::SyncSender<()>, std::sync::mpsc::Receiver<()>)>>,
 }
 
     impl FakeNode {
@@ -1466,6 +1567,7 @@ mod tests {
             let caps = super::super::Caps { hub_proto: super::super::HUB_PROTO, node: node.into(), arch: "x86_64".into(), os: "linux".into(), cores: 16, ram_gb: 64.0, ram_avail_gb: 50.0, disk_free_gb: 300.0, disk_total_gb: 1000.0, disk_floor_gb: 25.0, timed: true, ..Default::default() };
             Ok(vec![match service {
                 "caps" => caps.to_json(),
+                "ps" => "{\"pid\":42,\"app\":\"sandbox\"}".into(),
                 "policy" => "{\"dev\":\"on\"}".into(),
                 "lease-start" => {
                     let id = line.split("\"id\":\"").nth(1).unwrap().split('"').next().unwrap().to_string();
@@ -1478,18 +1580,37 @@ mod tests {
                     format!("{{\"live\":[{}],\"unknown\":[{}]}}", k.iter().map(|s| json_str(s)).collect::<Vec<_>>().join(","), u.iter().map(|s| json_str(s)).collect::<Vec<_>>().join(","))
                 }
                 "lease-end" => {
+                    if let Some(answer) = self.end_answer.lock().unwrap().clone() { return Ok(vec![answer]); }
                     let id = line.split_whitespace().nth(1).unwrap();
+                    if let Some(extra) = line.splitn(4, ' ').nth(3) {
+                        let v = makepad_strict_json::parse(extra.as_bytes()).unwrap();
+                        let i = v.get("inspect").unwrap();
+                        assert_eq!(i.get("pid").and_then(|p| p.as_u64()), Some(42));
+                        for cmd in super::super::exec::inspect_commands(&strs(i.get("breaks")), &strs(i.get("probes")), i.get("paused").and_then(|p| p.as_bool()).unwrap_or(false)) {
+                            if cmd == "resume" { self.paused.store(false, Ordering::SeqCst); }
+                            if let Some(id) = cmd.strip_prefix("rm ") { self.breaks.lock().unwrap().retain(|b| b != id); }
+                        }
+                    }
                     self.known.lock().unwrap().retain(|k| k != id);
                     format!("{{\"ended\":{},\"killed\":[],\"freed_mb\":0,\"recovered\":null,\"leak\":[]}}", json_str(id))
                 }
-                "cmd" => "{\"id\":\"B1\",\"ok\":true}".into(),
+                "cmd" => {
+                    assert!(node.ends_with(":42"), "command must use the resolved instance");
+                    if let Some((entered, resume)) = self.inspect_gate.lock().unwrap().take() {
+                        entered.send(()).unwrap();
+                        resume.recv().unwrap();
+                    }
+                    if line == "pause" { self.paused.store(true, Ordering::SeqCst); }
+                    if line.starts_with("break set") { self.breaks.lock().unwrap().push("G1".into()); }
+                    "{\"id\":\"G1\",\"ok\":true}".into()
+                },
                 _ => return Err(format!("no service {service}")),
             }])
         }
     }
 
     fn master(dir: &Path) -> (Arc<LeaseMaster>, Arc<FakeNode>, Arc<AtomicU64>, Arc<Mutex<Vec<Record>>>) {
-        let node = Arc::new(FakeNode { calls: Mutex::new(Vec::new()), known: Mutex::new(Vec::new()), gone: Default::default() });
+        let node = Arc::new(FakeNode { calls: Mutex::new(Vec::new()), known: Mutex::new(Vec::new()), gone: Default::default(), paused: Default::default(), breaks: Default::default(), end_answer: Default::default(), inspect_gate: Default::default() });
         let clock = Arc::new(AtomicU64::new(1_000));
         let recs = Arc::new(Mutex::new(Vec::new()));
         let (n, c, r) = (node.clone(), clock.clone(), recs.clone());
@@ -1509,6 +1630,41 @@ mod tests {
         let mut out = Vec::new();
         m.serve(svc, line, &mut out);
         out.join("\n")
+    }
+
+    #[test]
+    fn persistence_failure_never_acknowledges_or_queues_a_lease() {
+        let dir = std::env::temp_dir().join(format!("devhub-lease-write-error-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (master, ..) = master(&dir);
+        std::fs::create_dir(dir.join("leases.new")).unwrap();
+        let reply = serve(&master, "lease", &Req::new("write-test", Kind::Build).to_json());
+        assert!(reply.contains("\"err\"") && reply.contains("persist"), "{reply}");
+        assert!(master.sched.lock().unwrap().view().is_empty(), "unacknowledged request cannot run later");
+        assert!(!dir.join("leases.live").exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn concurrent_lease_persists_keep_the_latest_scheduler_snapshot() {
+        let dir = std::env::temp_dir().join(format!("devhub-lease-write-order-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (master, ..) = master(&dir);
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let threads: Vec<_> = ["first", "second"].into_iter().map(|lane| {
+            let (master, barrier) = (master.clone(), barrier.clone());
+            std::thread::spawn(move || {
+                barrier.wait();
+                master.sched.lock().unwrap().request(Req::new(lane, Kind::Build), 1_000);
+                master.persist().unwrap();
+            })
+        }).collect();
+        barrier.wait();
+        for thread in threads { thread.join().unwrap(); }
+        let expected: String = master.sched.lock().unwrap().live_lines().iter().map(|line| format!("{line}\n")).collect();
+        assert_eq!(std::fs::read_to_string(dir.join("leases.live")).unwrap(), expected);
+        assert_eq!(master.sched.lock().unwrap().view().len(), 2);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -1622,7 +1778,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let (m, node, clock, recs) = master(&dir);
-        m.refresh(&[("217".to_string(), "192.0.2.89".to_string())]);
+        m.refresh(&[("pool-a".to_string(), "192.0.2.89".to_string())]);
         assert!(serve(&m, "lease", &Req::new("a", Kind::Build).to_json()).contains("\"state\":\"granted\""));
         let b = serve(&m, "lease", &Req::new("b", Kind::Test).to_json());
         assert!(b.contains("\"state\":\"queued\""), "one lease per box: {b}");
@@ -1637,7 +1793,7 @@ mod tests {
         assert!(nodes.contains("handoff 0.0 s") && nodes.contains("setup ") && nodes.contains("teardown "), "{nodes}");
         let ledger = std::fs::read_to_string(dir.join("leases.jsonl")).unwrap();
         assert!(ledger.contains("\"id\":\"L2\"") && ledger.contains("\"wait_ms\":0") && ledger.contains("\"setup_ms\":"), "{ledger}");
-        assert!(recs.lock().unwrap().iter().any(|r| r.line.contains("lease_latency: L2 test@217 of b on a node: release->grant 0.0 s")));
+        assert!(recs.lock().unwrap().iter().any(|r| r.line.contains("lease_latency: L2 test@pool-a of b on pool-a: release->grant 0.0 s")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1664,20 +1820,20 @@ mod tests {
     }
 
     #[test]
-    fn dev_switch_and_inspect_holders() {
+    fn safety_dev_switch_and_inspect_holders() {
         let dir = std::env::temp_dir().join(format!("devhub-lease-test2-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("nodes.conf"), "217 addr=192.0.2.89 # pool\n").unwrap();
+        std::fs::write(dir.join("nodes.conf"), "pool-a addr=192.0.2.89 # pool\n").unwrap();
         let (m, node, _clock, recs) = master(&dir);
-        m.refresh(&[("217".to_string(), "192.0.2.89".to_string())]);
-        assert!(serve(&m, "node-dev", "217 off").contains("\"dev\":false"));
-        assert_eq!(std::fs::read_to_string(dir.join("nodes.conf")).unwrap(), "217 addr=192.0.2.89 dev=off # pool\n");
+        m.refresh(&[("pool-a".to_string(), "192.0.2.89".to_string())]);
+        assert!(serve(&m, "node-dev", "pool-a off").contains("\"dev\":false"));
+        assert_eq!(std::fs::read_to_string(dir.join("nodes.conf")).unwrap(), "pool-a addr=192.0.2.89 dev=off # pool\n");
         assert!(node.calls.lock().unwrap().iter().any(|c| c.2 == "policy dev=off"));
         assert!(serve(&m, "lease", &Req::new("x", Kind::Build).to_json()).contains("\"reason\":\"dev off\""));
         let ins = |lane: &str| {
             let mut r = Req::new(lane, Kind::Inspect);
-            r.node = Some("217".into());
+            r.node = Some("pool-a".into());
             r.jit = Some("sandbox".into());
             r.to_json()
         };
@@ -1685,15 +1841,71 @@ mod tests {
         assert!(serve(&m, "lease", &ins("b")).contains("\"state\":\"granted\""));
         let id_a = "L2";
         let id_b = "L3";
-        assert!(serve(&m, "linspect", &format!("{id_a} 217 sandbox break set game/ai.rs:88")).contains("B1"));
-        assert!(recs.lock().unwrap().iter().any(|r| r.sev == Sev::Warn && r.line == "inspect 217/sandbox by lane a: break set game/ai.rs:88"));
-        assert!(serve(&m, "linspect", &format!("{id_b} 217 sandbox pause")).contains("held by L2"));
-        assert!(serve(&m, "linspect", &format!("{id_b} 217 other eval 1")).contains("not a live inspect lease"));
-        serve(&m, "release", id_a);
-        let end = node.calls.lock().unwrap().iter().find(|c| c.1 == "lease-end").cloned().unwrap();
-        assert_eq!(end.2, "lease-end L2 released {\"inspect\":{\"pid\":null,\"jit\":\"sandbox\",\"breaks\":[\"B1\"],\"probes\":[],\"paused\":false}}");
-        assert!(!serve(&m, "linspect", &format!("{id_b} 217 sandbox pause")).contains("err"));
+        assert!(serve(&m, "linspect", &format!("{id_b} pool-a other eval 1")).contains("not a live inspect lease"));
+        // Hold a pause in the transport: a competing inspect cannot acquire ownership and
+        // release must wait until the accepted command has applied and its marks are recorded.
+        let (entered, wait) = std::sync::mpsc::sync_channel(0);
+        let (resume, continued) = std::sync::mpsc::sync_channel(0);
+        *node.inspect_gate.lock().unwrap() = Some((entered, continued));
+        std::thread::scope(|scope| {
+            let command = scope.spawn(|| serve(&m, "linspect", &format!("{id_a} pool-a sandbox pause")));
+            wait.recv().unwrap();
+            assert!(serve(&m, "linspect", &format!("{id_b} pool-a sandbox pause")).contains("held by L2"));
+            let release = scope.spawn(|| serve(&m, "release", id_a));
+            // Release state changes before its cleanup waits for the in-flight command.
+            while m.sched.lock().unwrap().get(id_a).unwrap().state == State::Granted { std::thread::yield_now(); }
+            assert!(!node.calls.lock().unwrap().iter().any(|c| c.1 == "lease-end"));
+            resume.send(()).unwrap();
+            assert!(!command.join().unwrap().contains("err"));
+            assert!(release.join().unwrap().contains("cleanup"));
+        });
+        assert!(!node.paused.load(Ordering::SeqCst), "release must resume the named app");
+        assert!(serve(&m, "linspect", &format!("{id_b} pool-a sandbox break set game/ai.rs:88")).contains("G1"));
+        assert!(recs.lock().unwrap().iter().any(|r| r.sev == Sev::Warn && r.line == "inspect pool-a/sandbox by lane b: break set game/ai.rs:88"));
+        assert!(!serve(&m, "linspect", &format!("{id_b} pool-a sandbox pause")).contains("err"));
+        serve(&m, "release", id_b);
+        assert!(!node.paused.load(Ordering::SeqCst));
+        assert!(node.breaks.lock().unwrap().is_empty(), "release removes its breakpoints");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn safety_failed_cleanup_keeps_capacity_until_a_confirmed_receipt() {
+        let dir = std::env::temp_dir().join(format!("devhub-cleanup-retry-{}", std::process::id()));
+        let (m, node, _, _) = master(&dir);
+        let hosts = [("pool-a".into(), "192.0.2.1".into())];
+        m.refresh(&hosts);
+        let mut first = Req::new("a", Kind::Build);
+        first.whole = true;
+        assert!(serve(&m, "lease", &first.to_json()).contains("granted"));
+        assert!(serve(&m, "lease", &Req::new("b", Kind::Test).to_json()).contains("queued"));
+        *node.end_answer.lock().unwrap() = Some("{\"err\":\"cleanup failed\"}".into());
+        serve(&m, "release", "L1");
+        for reply in ["{\"pending\":\"cleanup in progress\"}", "{\"ended\":\"L1\",\"leak\":[42]}", "{\"ended\":\"L9\",\"leak\":[]}"] {
+            *node.end_answer.lock().unwrap() = Some(reply.into());
+            m.end_later("pool-a");
+            m.refresh(&hosts);
+            assert!(serve(&m, "beat", "L2").contains("queued"), "{reply} must not free capacity");
+            assert!(m.sched.lock().unwrap().in_transition().is_some(), "reservation survives failed cleanup");
+        }
+        *node.end_answer.lock().unwrap() = None;
+        m.end_later("pool-a");
+        assert!(serve(&m, "beat", "L2").contains("granted"));
+        serve(&m, "release", "L2");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A restarting master declares it to every node with its live leases.
+    #[test]
+    fn a_restart_is_declared_to_the_nodes_with_leases() {
+        let dir = std::env::temp_dir().join(format!("devhub-restart-grace-{}", std::process::id()));
+        let (m, node, _, _) = master(&dir);
+        m.refresh(&[("pool-a".into(), "192.0.2.1".into())]);
+        assert!(serve(&m, "lease", &Req::new("a", Kind::Build).to_json()).contains("granted"));
+        m.declare_restart(Duration::from_secs(300));
+        assert!(node.calls.lock().unwrap().iter().any(|c| c.0 == "pool-a" && c.1 == "lease-beat" && c.2 == "lease-beat grace=300 L1"));
+        serve(&m, "release", "L1");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
