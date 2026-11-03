@@ -1,5 +1,6 @@
 use {
     crate::cx::Cx,
+    foldhash::fast::FixedState,
     std::{
         collections::hash_map::Entry,
         collections::{HashMap, HashSet},
@@ -7,17 +8,22 @@ use {
     },
 };
 
+/// A std `HashMap` using foldhash's fixed-seed hasher, a lot faster than SipHash for small keys
+/// like `LiveId`s and uids. It isn't DoS-resistant, so don't key it by untrusted input.
+pub type FastHashMap<K, V> = HashMap<K, V, FixedState>;
+pub type FastHashSet<K> = HashSet<K, FixedState>;
+
 #[derive(Debug, Clone)]
 pub struct ComponentMap<K, V> {
-    map: HashMap<K, V>,
-    visible: HashSet<K>,
+    map: FastHashMap<K, V>,
+    visible: FastHashSet<K>,
 }
 
 impl<K, V> Default for ComponentMap<K, V> {
     fn default() -> Self {
         Self {
-            map: HashMap::new(),
-            visible: HashSet::new(),
+            map: FastHashMap::default(),
+            visible: FastHashSet::default(),
         }
     }
 }
@@ -81,7 +87,7 @@ impl<K: std::cmp::Eq + std::hash::Hash + Copy, V> ComponentMap<K, V> {
 }
 
 impl<K, V> Deref for ComponentMap<K, V> {
-    type Target = HashMap<K, V>;
+    type Target = FastHashMap<K, V>;
     fn deref(&self) -> &Self::Target {
         &self.map
     }
