@@ -109,14 +109,14 @@ struct WidgetTreeInner {
     subtree_end: Vec<u32>,
     scope: Vec<bool>,
     nodes: Vec<WidgetTreeNode>,
-    uid_map: HashMap<WidgetUid, u32>,
+    uid_map: FastHashMap<WidgetUid, u32>,
 
     root_uid: WidgetUid,
 
     // Persistent graph, lazily synced from WidgetNode::children()
-    graph: HashMap<WidgetUid, GraphNode>,
+    graph: FastHashMap<WidgetUid, GraphNode>,
     // Per-entrypoint path cache keyed by xor-combined path hash.
-    path_cache: HashMap<WidgetUid, HashMap<u64, Vec<PathCacheEntry>>>,
+    path_cache: FastHashMap<WidgetUid, FastHashMap<u64, Vec<PathCacheEntry>>>,
     /// Bumped by every invalidation that could turn a cached MISS into a
     /// hit (a node appearing, being renamed, re-parented, becoming
     /// searchable). A walk snapshots it and only writes its result back if
@@ -124,7 +124,7 @@ struct WidgetTreeInner {
     /// discoveries could persist a stale "not found" forever.
     path_cache_epoch: u64,
     stats: WidgetTreeStats,
-    dirty: HashSet<WidgetUid>,
+    dirty: FastHashSet<WidgetUid>,
     discovery_buffers: Vec<Vec<(LiveId, WidgetRef)>>,
     refresh_pending: Vec<WidgetUid>,
     refresh_retry: Vec<WidgetUid>,
@@ -144,11 +144,11 @@ struct WidgetTreeInner {
     /// the nodes with the path's last name instead of walking the root's whole subtree
     /// (collect_within_indexed). Holds every node of the graph under its current name; may
     /// also hold renamed or removed ones, which the lookup filters out.
-    by_name: HashMap<LiveId, Vec<WidgetUid>>,
+    by_name: FastHashMap<LiveId, Vec<WidgetUid>>,
     /// Placeholder nodes that list children they never adopted (refresh's keep_real_parent):
     /// a walk through one reaches nodes whose parent chain does not lead through it, so the
     /// index answers no lookup whose subtree holds one.
-    foreign_listers: HashSet<WidgetUid>,
+    foreign_listers: FastHashSet<WidgetUid>,
     /// Parentless placeholders, tracked so `note_placeholder_root()` can sweep out the dead ones.
     ///
     /// They're made when a lookup starts at a widget nothing reports as a child (like one made from
@@ -161,7 +161,7 @@ struct WidgetTreeInner {
     ///
     /// They get removed once nothing in them is alive, or along with their parent. Most apps never
     /// have any, so these live apart from the graph's nodes and only get looked at if there are some.
-    detached: HashMap<WidgetUid, Vec<WidgetUid>>,
+    detached: FastHashMap<WidgetUid, Vec<WidgetUid>>,
 }
 
 struct WidgetTreeNode {
