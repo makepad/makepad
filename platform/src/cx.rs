@@ -26,7 +26,7 @@ use {
         texture::{CxTexturePool, Texture, TextureFormat, TextureUpdated},
         thread::{SignalToUI, ToUIReceiver},
         uniform_buffer::CxUniformBufferPool,
-        window::CxWindowPool,
+        window::{CxWindowPool, WindowId},
     },
     makepad_futures::{
         executor,
@@ -329,7 +329,8 @@ pub struct Cx {
     /// Selects a cancel scope from the currently active widget hierarchy. The lookup
     /// returns the newest matching scope for a widget UID. Called only for a new
     /// Escape/Back press; widgets install this without a platform dependency on them.
-    pub cancel_scope_resolver: Option<fn(&Cx, &dyn Fn(u64) -> Option<u64>) -> Option<u64>>,
+    /// For a swipe, it also gets the window the swipe starts in.
+    pub cancel_scope_resolver: Option<fn(&Cx, Option<WindowId>, &dyn Fn(u64) -> Option<u64>) -> Option<u64>>,
     /// The tweaker overlay's remote dispatcher (widgets/families/tweaker/src/tweaker.rs).
     /// Registered by the widgets crate at startup, exactly like the widget
     /// tree callbacks above; the /tweak routes in remote.rs delegate here so
