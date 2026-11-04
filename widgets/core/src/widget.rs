@@ -325,6 +325,11 @@ pub trait Widget: WidgetNode {
         self.cancel_children_impl(visit)
     }
 
+    /// Like [`Self::visit_cancel()`], but for finding who owns a swipe that starts in `window_id`.
+    fn visit_cancel_for_swipe(&self, _window_id: WindowId, visit: &mut dyn FnMut(LiveId, WidgetRef)) -> bool {
+        self.visit_cancel(visit)
+    }
+
     fn handle_event_with(
         &mut self,
         cx: &mut Cx,
@@ -1072,13 +1077,21 @@ impl WidgetRef {
         false
     }
 
-    pub(crate) fn resolve_cancel_scope(&self, candidate: &dyn Fn(u64) -> Option<u64>) -> Option<u64> {
+    pub(crate) fn resolve_cancel_scope(
+        &self,
+        swipe_window: Option<WindowId>,
+        candidate: &dyn Fn(u64) -> Option<u64>,
+    ) -> Option<u64> {
         let inner = self.0.try_borrow().ok()?;
         let inner = inner.as_ref()?;
         let mut descendant = None;
-        let active = inner.widget.visit_cancel(&mut |_, child| {
-            descendant = descendant.max(child.resolve_cancel_scope(candidate));
-        });
+        let mut visit = |_: LiveId, child: WidgetRef| {
+            descendant = descendant.max(child.resolve_cancel_scope(swipe_window, candidate));
+        };
+        let active = match swipe_window {
+            Some(window_id) => inner.widget.visit_cancel_for_swipe(window_id, &mut visit),
+            None => inner.widget.visit_cancel(&mut visit),
+        };
         if active {
             descendant.or_else(|| candidate(inner.widget.widget_uid().0))
         } else {

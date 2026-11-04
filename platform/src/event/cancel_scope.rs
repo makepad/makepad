@@ -1,6 +1,6 @@
 use std::{cell::Cell, rc::Rc};
 
-use crate::event::{BackGestureState, Event, KeyCode, TouchState};
+use crate::{event::{BackGestureState, Event, KeyCode, TouchState}, window::WindowId};
 
 /// The gestures a cancel scope handles. Other gestures pass to the next eligible scope.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -130,7 +130,7 @@ impl CxCancelScopes {
             Event::MouseUp(e) if e.button.is_back() && !intercepted => {
                 self.begin_press(CancelScopeKind::Back, widget_owner)
             }
-            _ if starts_back_swipe(event, starts_scroll_gesture) && !intercepted => {
+            _ if get_swipe_start_window(event, starts_scroll_gesture).is_some() && !intercepted => {
                 let front = self.find_front_scope(CancelScopeKind::Back, widget_owner);
                 // Only a back-swipe scope can own a swipe, but any other scope in front still blocks it.
                 self.back_swipe_owner = if self.stack.iter().any(|e| e.id == front && e.back_swipe) { front } else { 0 };
@@ -144,23 +144,25 @@ impl CxCancelScopes {
     }
 
     /// Resolve current widget visibility only at the start of an independent press.
-    /// The resolver receives a lookup rather than a copied list of live scopes.
+    /// The resolver receives a lookup rather than a copied list of live scopes,
+    /// plus the window that a swipe starts in.
     pub(crate) fn resolve_widget_owner(
         &self,
         event: &Event,
         starts_scroll_gesture: bool,
         intercepted: bool,
-        resolve: impl FnOnce(&dyn Fn(u64) -> Option<u64>) -> Option<u64>,
+        resolve: impl FnOnce(Option<WindowId>, &dyn Fn(u64) -> Option<u64>) -> Option<u64>,
     ) -> Option<u64> {
         if intercepted {
             return None;
         }
+        let swipe_window = get_swipe_start_window(event, starts_scroll_gesture);
         let kind = match event {
             Event::KeyDown(key) if key.key_code == KeyCode::Escape && !key.is_repeat => CancelScopeKind::Escape,
             Event::BackPressed { .. } => CancelScopeKind::Back,
             Event::BackGesture(e) if e.state == BackGestureState::Start => CancelScopeKind::Back,
             Event::MouseUp(e) if e.button.is_back() => CancelScopeKind::Back,
-            _ if starts_back_swipe(event, starts_scroll_gesture) => {
+            _ if swipe_window.is_some() => {
                 // Only a back-swipe scope can ask who owns a swipe, so without one there's nothing to resolve.
                 if !self.stack.iter().any(|e| e.back_swipe && e.alive.get()) {
                     return None;
@@ -174,7 +176,7 @@ impl CxCancelScopes {
         {
             return None;
         }
-        resolve(&|owner| {
+        resolve(swipe_window, &|owner| {
             self.stack.iter().rev().find(|e| owner != 0 && e.owner == owner && e.alive.get()
                 && (e.kind == CancelScopeKind::Both || e.kind == kind))
                 .map(|e| e.id)
@@ -210,12 +212,13 @@ impl CxCancelScopes {
     }
 }
 
-/// Whether `event` starts something that can become a back swipe: a touch, or a trackpad scroll gesture.
-fn starts_back_swipe(event: &Event, starts_scroll_gesture: bool) -> bool {
+/// The window that `event` starts a back swipe in, if it starts something that can become one:
+/// a touch, or a trackpad scroll gesture.
+fn get_swipe_start_window(event: &Event, starts_scroll_gesture: bool) -> Option<WindowId> {
     match event {
-        Event::TouchUpdate(e) => e.touches.iter().any(|t| t.state == TouchState::Start),
-        Event::Scroll(_) => starts_scroll_gesture,
-        _ => false,
+        Event::TouchUpdate(e) if e.touches.iter().any(|t| t.state == TouchState::Start) => Some(e.window_id),
+        Event::Scroll(e) if starts_scroll_gesture => Some(e.window_id),
+        _ => None,
     }
 }
 
@@ -339,13 +342,13 @@ mod tests {
         // An Escape-only scope in front doesn't get a say in Back.
         let _escape = scopes.begin_for(CancelScopeKind::Escape);
         let start = new_touch_event(TouchState::Start);
-        let owner = scopes.resolve_widget_owner(&start, false, false, |lookup| lookup(7));
+        let owner = scopes.resolve_widget_owner(&start, false, false, |_, lookup| lookup(7));
         scopes.handle_event(&start, false, false, owner);
         assert!(scopes.owns_back_swipe(&widget_scope));
         assert!(!scopes.owns_back_swipe(&behind));
 
         let moved = new_touch_event(TouchState::Move);
-        assert_eq!(scopes.resolve_widget_owner(&moved, false, false, |lookup| lookup(7)), None);
+        assert_eq!(scopes.resolve_widget_owner(&moved, false, false, |_, lookup| lookup(7)), None);
         scopes.handle_event(&moved, false, false, None);
         assert!(!scopes.owns_back_swipe(&widget_scope), "only the event that starts the touch answers");
     }
@@ -356,7 +359,7 @@ mod tests {
         let mut scopes = CxCancelScopes::default();
         let widget_scope = scopes.begin_widget(7, CancelScopeKind::Back, false);
         let start = new_touch_event(TouchState::Start);
-        let owner = scopes.resolve_widget_owner(&start, false, false, |_| -> Option<u64> { panic!("resolved a touch nothing can ask about") });
+        let owner = scopes.resolve_widget_owner(&start, false, false, |_, _| -> Option<u64> { panic!("resolved a touch nothing can ask about") });
         assert_eq!(owner, None);
         scopes.handle_event(&start, false, false, owner);
         assert!(!scopes.owns_back_swipe(&widget_scope));
@@ -368,7 +371,7 @@ mod tests {
         let swipe_scope = scopes.begin_widget(7, CancelScopeKind::Back, true);
         let modal = scopes.begin();
         let start = new_touch_event(TouchState::Start);
-        let owner = scopes.resolve_widget_owner(&start, false, false, |lookup| lookup(7));
+        let owner = scopes.resolve_widget_owner(&start, false, false, |_, lookup| lookup(7));
         scopes.handle_event(&start, false, false, owner);
         assert!(!scopes.owns_back_swipe(&swipe_scope));
         assert!(!scopes.owns_back_swipe(&modal), "only a back-swipe scope can own a swipe");
@@ -393,14 +396,14 @@ mod tests {
         let behind = scopes.begin();
         let widget_scope = scopes.begin_widget(7, CancelScopeKind::Back, false);
         let start = new_back_gesture_event(BackGestureState::Start);
-        let owner = scopes.resolve_widget_owner(&start, false, false, |lookup| lookup(7));
+        let owner = scopes.resolve_widget_owner(&start, false, false, |_, lookup| lookup(7));
         scopes.handle_event(&start, false, false, owner);
         assert!(scopes.owns_press(&widget_scope));
         assert!(!scopes.owns_press(&behind));
         // The rest of the gesture has no owner, and the BackPressed that completes it finds its own.
         for state in [BackGestureState::Move, BackGestureState::Cancel] {
             let event = new_back_gesture_event(state);
-            assert_eq!(scopes.resolve_widget_owner(&event, false, false, |lookup| lookup(7)), None);
+            assert_eq!(scopes.resolve_widget_owner(&event, false, false, |_, lookup| lookup(7)), None);
             scopes.handle_event(&event, false, false, None);
             assert!(!scopes.has_press_owner());
         }
