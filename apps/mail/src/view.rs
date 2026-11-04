@@ -866,7 +866,7 @@ impl MailView {
         self.compact = metrics.kind == LayoutKind::Compact;
         if !self.compact {
             // The wide layout hides the phone stack, which then never sees a gesture's pop end.
-            self.view.stack_navigation(cx, ids!(phone)).end_interactive_pop_without_animation(cx);
+            self.view.stack_navigation(cx, ids!(phone)).end_interactive_transition_without_animation(cx);
         }
         self.view.widget(cx, ids!(sidebar)).set_visible(cx, metrics.show_sidebar);
         self.view.widget(cx, ids!(wide_mailbox_btn)).set_visible(cx, !self.compact && !metrics.show_sidebar);
