@@ -72,6 +72,14 @@ impl<P: DerefMut> Pin<P> {
     }
 }
 
+impl<'a, Ptr: DerefMut> Pin<&'a mut Pin<Ptr>> {
+    /// `Pin<&mut Pin<Ptr>>` → `Pin<&mut Ptr::Target>` (real core's `as_deref_mut`, whose
+    /// receiver is `self: Pin<&mut Pin<Ptr>>`).
+    pub fn as_deref_mut(self) -> Pin<&'a mut Ptr::Target> {
+        Pin { pointer: &mut *self.pointer.pointer }
+    }
+}
+
 impl<'a, T: ?Sized> Pin<&'a T> {
     pub const fn get_ref(self) -> &'a T {
         self.pointer

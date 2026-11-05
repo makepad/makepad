@@ -84,6 +84,30 @@ impl<T: PointeeSized> Unpin for &mut T {}
 impl<T: PointeeSized> Unpin for *const T {}
 impl<T: PointeeSized> Unpin for *mut T {}
 impl !Unpin for PhantomPinned {}
+impl crate::fmt::Debug for PhantomPinned {
+    fn fmt(&self, f: &mut crate::fmt::Formatter<'_>) -> crate::fmt::Result {
+        f.write_str("PhantomPinned")
+    }
+}
+impl crate::cmp::PartialEq for PhantomPinned {
+    fn eq(&self, _other: &PhantomPinned) -> bool {
+        true
+    }
+}
+impl crate::cmp::Eq for PhantomPinned {}
+impl crate::cmp::PartialOrd for PhantomPinned {
+    fn partial_cmp(&self, _other: &PhantomPinned) -> Option<crate::cmp::Ordering> {
+        Some(crate::cmp::Ordering::Equal)
+    }
+}
+impl crate::cmp::Ord for PhantomPinned {
+    fn cmp(&self, _other: &PhantomPinned) -> crate::cmp::Ordering {
+        crate::cmp::Ordering::Equal
+    }
+}
+impl crate::hash::Hash for PhantomPinned {
+    fn hash<H: crate::hash::Hasher>(&self, _state: &mut H) {}
+}
 
 // :257: implemented by the PartialEq derive with its exact generic bounds.
 #[cfg_attr(not(relax_check), lang = "structural_peq")]

@@ -179,6 +179,14 @@ impl<T: Copy> Clone for MaybeUninit<T> {
     }
 }
 impl<T: Copy> Copy for MaybeUninit<T> {}
+impl<T> crate::fmt::Debug for MaybeUninit<T> {
+    fn fmt(&self, f: &mut crate::fmt::Formatter<'_>) -> crate::fmt::Result {
+        // real core: the type name from `MaybeUninit` on (no module path)
+        let full = crate::any::type_name::<MaybeUninit<T>>();
+        let from = full.find("MaybeUninit").unwrap_or(0);
+        f.pad(&full[from..])
+    }
+}
 
 impl<T> MaybeUninit<T> {
     pub const fn new(val: T) -> MaybeUninit<T> {

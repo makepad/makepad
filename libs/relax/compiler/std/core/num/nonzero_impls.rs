@@ -3,6 +3,7 @@
 //! Per-type NonZero<T> API (constants, bit queries, checked/saturating arithmetic, conversions, BitOr), as real core's nonzero.rs macros generate it.
 
 use super::nonzero::NonZero;
+use crate::num::TryFromIntError;
 use crate::ops::{BitOr, BitOrAssign, Div, DivAssign, Rem, RemAssign};
 
 impl NonZero<u8> {
@@ -352,36 +353,133 @@ impl From<NonZero<u8>> for NonZero<u32> { fn from(v: NonZero<u8>) -> NonZero<u32
 impl From<NonZero<u8>> for NonZero<u64> { fn from(v: NonZero<u8>) -> NonZero<u64> { unsafe { NonZero::new_unchecked(v.get() as u64) } } }
 impl From<NonZero<u8>> for NonZero<u128> { fn from(v: NonZero<u8>) -> NonZero<u128> { unsafe { NonZero::new_unchecked(v.get() as u128) } } }
 impl From<NonZero<u8>> for NonZero<usize> { fn from(v: NonZero<u8>) -> NonZero<usize> { unsafe { NonZero::new_unchecked(v.get() as usize) } } }
+impl TryFrom<NonZero<u8>> for NonZero<i8> { type Error = TryFromIntError; fn try_from(v: NonZero<u8>) -> Result<NonZero<i8>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(i8::try_from(v.get())?) }) } }
 impl From<NonZero<u8>> for NonZero<i16> { fn from(v: NonZero<u8>) -> NonZero<i16> { unsafe { NonZero::new_unchecked(v.get() as i16) } } }
 impl From<NonZero<u8>> for NonZero<i32> { fn from(v: NonZero<u8>) -> NonZero<i32> { unsafe { NonZero::new_unchecked(v.get() as i32) } } }
 impl From<NonZero<u8>> for NonZero<i64> { fn from(v: NonZero<u8>) -> NonZero<i64> { unsafe { NonZero::new_unchecked(v.get() as i64) } } }
 impl From<NonZero<u8>> for NonZero<i128> { fn from(v: NonZero<u8>) -> NonZero<i128> { unsafe { NonZero::new_unchecked(v.get() as i128) } } }
 impl From<NonZero<u8>> for NonZero<isize> { fn from(v: NonZero<u8>) -> NonZero<isize> { unsafe { NonZero::new_unchecked(v.get() as isize) } } }
+impl TryFrom<NonZero<u16>> for NonZero<u8> { type Error = TryFromIntError; fn try_from(v: NonZero<u16>) -> Result<NonZero<u8>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(u8::try_from(v.get())?) }) } }
 impl From<NonZero<u16>> for NonZero<u32> { fn from(v: NonZero<u16>) -> NonZero<u32> { unsafe { NonZero::new_unchecked(v.get() as u32) } } }
 impl From<NonZero<u16>> for NonZero<u64> { fn from(v: NonZero<u16>) -> NonZero<u64> { unsafe { NonZero::new_unchecked(v.get() as u64) } } }
 impl From<NonZero<u16>> for NonZero<u128> { fn from(v: NonZero<u16>) -> NonZero<u128> { unsafe { NonZero::new_unchecked(v.get() as u128) } } }
 impl From<NonZero<u16>> for NonZero<usize> { fn from(v: NonZero<u16>) -> NonZero<usize> { unsafe { NonZero::new_unchecked(v.get() as usize) } } }
+impl TryFrom<NonZero<u16>> for NonZero<i8> { type Error = TryFromIntError; fn try_from(v: NonZero<u16>) -> Result<NonZero<i8>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(i8::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<u16>> for NonZero<i16> { type Error = TryFromIntError; fn try_from(v: NonZero<u16>) -> Result<NonZero<i16>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(i16::try_from(v.get())?) }) } }
 impl From<NonZero<u16>> for NonZero<i32> { fn from(v: NonZero<u16>) -> NonZero<i32> { unsafe { NonZero::new_unchecked(v.get() as i32) } } }
 impl From<NonZero<u16>> for NonZero<i64> { fn from(v: NonZero<u16>) -> NonZero<i64> { unsafe { NonZero::new_unchecked(v.get() as i64) } } }
 impl From<NonZero<u16>> for NonZero<i128> { fn from(v: NonZero<u16>) -> NonZero<i128> { unsafe { NonZero::new_unchecked(v.get() as i128) } } }
+impl TryFrom<NonZero<u16>> for NonZero<isize> { type Error = TryFromIntError; fn try_from(v: NonZero<u16>) -> Result<NonZero<isize>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(isize::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<u32>> for NonZero<u8> { type Error = TryFromIntError; fn try_from(v: NonZero<u32>) -> Result<NonZero<u8>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(u8::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<u32>> for NonZero<u16> { type Error = TryFromIntError; fn try_from(v: NonZero<u32>) -> Result<NonZero<u16>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(u16::try_from(v.get())?) }) } }
 impl From<NonZero<u32>> for NonZero<u64> { fn from(v: NonZero<u32>) -> NonZero<u64> { unsafe { NonZero::new_unchecked(v.get() as u64) } } }
 impl From<NonZero<u32>> for NonZero<u128> { fn from(v: NonZero<u32>) -> NonZero<u128> { unsafe { NonZero::new_unchecked(v.get() as u128) } } }
+impl TryFrom<NonZero<u32>> for NonZero<usize> { type Error = TryFromIntError; fn try_from(v: NonZero<u32>) -> Result<NonZero<usize>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(usize::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<u32>> for NonZero<i8> { type Error = TryFromIntError; fn try_from(v: NonZero<u32>) -> Result<NonZero<i8>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(i8::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<u32>> for NonZero<i16> { type Error = TryFromIntError; fn try_from(v: NonZero<u32>) -> Result<NonZero<i16>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(i16::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<u32>> for NonZero<i32> { type Error = TryFromIntError; fn try_from(v: NonZero<u32>) -> Result<NonZero<i32>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(i32::try_from(v.get())?) }) } }
 impl From<NonZero<u32>> for NonZero<i64> { fn from(v: NonZero<u32>) -> NonZero<i64> { unsafe { NonZero::new_unchecked(v.get() as i64) } } }
 impl From<NonZero<u32>> for NonZero<i128> { fn from(v: NonZero<u32>) -> NonZero<i128> { unsafe { NonZero::new_unchecked(v.get() as i128) } } }
+impl TryFrom<NonZero<u32>> for NonZero<isize> { type Error = TryFromIntError; fn try_from(v: NonZero<u32>) -> Result<NonZero<isize>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(isize::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<u64>> for NonZero<u8> { type Error = TryFromIntError; fn try_from(v: NonZero<u64>) -> Result<NonZero<u8>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(u8::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<u64>> for NonZero<u16> { type Error = TryFromIntError; fn try_from(v: NonZero<u64>) -> Result<NonZero<u16>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(u16::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<u64>> for NonZero<u32> { type Error = TryFromIntError; fn try_from(v: NonZero<u64>) -> Result<NonZero<u32>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(u32::try_from(v.get())?) }) } }
 impl From<NonZero<u64>> for NonZero<u128> { fn from(v: NonZero<u64>) -> NonZero<u128> { unsafe { NonZero::new_unchecked(v.get() as u128) } } }
+impl TryFrom<NonZero<u64>> for NonZero<usize> { type Error = TryFromIntError; fn try_from(v: NonZero<u64>) -> Result<NonZero<usize>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(usize::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<u64>> for NonZero<i8> { type Error = TryFromIntError; fn try_from(v: NonZero<u64>) -> Result<NonZero<i8>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(i8::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<u64>> for NonZero<i16> { type Error = TryFromIntError; fn try_from(v: NonZero<u64>) -> Result<NonZero<i16>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(i16::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<u64>> for NonZero<i32> { type Error = TryFromIntError; fn try_from(v: NonZero<u64>) -> Result<NonZero<i32>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(i32::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<u64>> for NonZero<i64> { type Error = TryFromIntError; fn try_from(v: NonZero<u64>) -> Result<NonZero<i64>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(i64::try_from(v.get())?) }) } }
 impl From<NonZero<u64>> for NonZero<i128> { fn from(v: NonZero<u64>) -> NonZero<i128> { unsafe { NonZero::new_unchecked(v.get() as i128) } } }
+impl TryFrom<NonZero<u64>> for NonZero<isize> { type Error = TryFromIntError; fn try_from(v: NonZero<u64>) -> Result<NonZero<isize>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(isize::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<u128>> for NonZero<u8> { type Error = TryFromIntError; fn try_from(v: NonZero<u128>) -> Result<NonZero<u8>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(u8::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<u128>> for NonZero<u16> { type Error = TryFromIntError; fn try_from(v: NonZero<u128>) -> Result<NonZero<u16>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(u16::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<u128>> for NonZero<u32> { type Error = TryFromIntError; fn try_from(v: NonZero<u128>) -> Result<NonZero<u32>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(u32::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<u128>> for NonZero<u64> { type Error = TryFromIntError; fn try_from(v: NonZero<u128>) -> Result<NonZero<u64>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(u64::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<u128>> for NonZero<usize> { type Error = TryFromIntError; fn try_from(v: NonZero<u128>) -> Result<NonZero<usize>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(usize::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<u128>> for NonZero<i8> { type Error = TryFromIntError; fn try_from(v: NonZero<u128>) -> Result<NonZero<i8>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(i8::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<u128>> for NonZero<i16> { type Error = TryFromIntError; fn try_from(v: NonZero<u128>) -> Result<NonZero<i16>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(i16::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<u128>> for NonZero<i32> { type Error = TryFromIntError; fn try_from(v: NonZero<u128>) -> Result<NonZero<i32>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(i32::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<u128>> for NonZero<i64> { type Error = TryFromIntError; fn try_from(v: NonZero<u128>) -> Result<NonZero<i64>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(i64::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<u128>> for NonZero<i128> { type Error = TryFromIntError; fn try_from(v: NonZero<u128>) -> Result<NonZero<i128>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(i128::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<u128>> for NonZero<isize> { type Error = TryFromIntError; fn try_from(v: NonZero<u128>) -> Result<NonZero<isize>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(isize::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<usize>> for NonZero<u8> { type Error = TryFromIntError; fn try_from(v: NonZero<usize>) -> Result<NonZero<u8>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(u8::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<usize>> for NonZero<u16> { type Error = TryFromIntError; fn try_from(v: NonZero<usize>) -> Result<NonZero<u16>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(u16::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<usize>> for NonZero<u32> { type Error = TryFromIntError; fn try_from(v: NonZero<usize>) -> Result<NonZero<u32>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(u32::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<usize>> for NonZero<u64> { type Error = TryFromIntError; fn try_from(v: NonZero<usize>) -> Result<NonZero<u64>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(u64::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<usize>> for NonZero<u128> { type Error = TryFromIntError; fn try_from(v: NonZero<usize>) -> Result<NonZero<u128>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(u128::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<usize>> for NonZero<i8> { type Error = TryFromIntError; fn try_from(v: NonZero<usize>) -> Result<NonZero<i8>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(i8::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<usize>> for NonZero<i16> { type Error = TryFromIntError; fn try_from(v: NonZero<usize>) -> Result<NonZero<i16>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(i16::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<usize>> for NonZero<i32> { type Error = TryFromIntError; fn try_from(v: NonZero<usize>) -> Result<NonZero<i32>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(i32::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<usize>> for NonZero<i64> { type Error = TryFromIntError; fn try_from(v: NonZero<usize>) -> Result<NonZero<i64>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(i64::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<usize>> for NonZero<i128> { type Error = TryFromIntError; fn try_from(v: NonZero<usize>) -> Result<NonZero<i128>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(i128::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<usize>> for NonZero<isize> { type Error = TryFromIntError; fn try_from(v: NonZero<usize>) -> Result<NonZero<isize>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(isize::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<i8>> for NonZero<u8> { type Error = TryFromIntError; fn try_from(v: NonZero<i8>) -> Result<NonZero<u8>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(u8::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<i8>> for NonZero<u16> { type Error = TryFromIntError; fn try_from(v: NonZero<i8>) -> Result<NonZero<u16>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(u16::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<i8>> for NonZero<u32> { type Error = TryFromIntError; fn try_from(v: NonZero<i8>) -> Result<NonZero<u32>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(u32::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<i8>> for NonZero<u64> { type Error = TryFromIntError; fn try_from(v: NonZero<i8>) -> Result<NonZero<u64>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(u64::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<i8>> for NonZero<u128> { type Error = TryFromIntError; fn try_from(v: NonZero<i8>) -> Result<NonZero<u128>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(u128::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<i8>> for NonZero<usize> { type Error = TryFromIntError; fn try_from(v: NonZero<i8>) -> Result<NonZero<usize>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(usize::try_from(v.get())?) }) } }
 impl From<NonZero<i8>> for NonZero<i16> { fn from(v: NonZero<i8>) -> NonZero<i16> { unsafe { NonZero::new_unchecked(v.get() as i16) } } }
 impl From<NonZero<i8>> for NonZero<i32> { fn from(v: NonZero<i8>) -> NonZero<i32> { unsafe { NonZero::new_unchecked(v.get() as i32) } } }
 impl From<NonZero<i8>> for NonZero<i64> { fn from(v: NonZero<i8>) -> NonZero<i64> { unsafe { NonZero::new_unchecked(v.get() as i64) } } }
 impl From<NonZero<i8>> for NonZero<i128> { fn from(v: NonZero<i8>) -> NonZero<i128> { unsafe { NonZero::new_unchecked(v.get() as i128) } } }
 impl From<NonZero<i8>> for NonZero<isize> { fn from(v: NonZero<i8>) -> NonZero<isize> { unsafe { NonZero::new_unchecked(v.get() as isize) } } }
+impl TryFrom<NonZero<i16>> for NonZero<u8> { type Error = TryFromIntError; fn try_from(v: NonZero<i16>) -> Result<NonZero<u8>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(u8::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<i16>> for NonZero<u16> { type Error = TryFromIntError; fn try_from(v: NonZero<i16>) -> Result<NonZero<u16>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(u16::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<i16>> for NonZero<u32> { type Error = TryFromIntError; fn try_from(v: NonZero<i16>) -> Result<NonZero<u32>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(u32::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<i16>> for NonZero<u64> { type Error = TryFromIntError; fn try_from(v: NonZero<i16>) -> Result<NonZero<u64>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(u64::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<i16>> for NonZero<u128> { type Error = TryFromIntError; fn try_from(v: NonZero<i16>) -> Result<NonZero<u128>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(u128::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<i16>> for NonZero<usize> { type Error = TryFromIntError; fn try_from(v: NonZero<i16>) -> Result<NonZero<usize>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(usize::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<i16>> for NonZero<i8> { type Error = TryFromIntError; fn try_from(v: NonZero<i16>) -> Result<NonZero<i8>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(i8::try_from(v.get())?) }) } }
 impl From<NonZero<i16>> for NonZero<i32> { fn from(v: NonZero<i16>) -> NonZero<i32> { unsafe { NonZero::new_unchecked(v.get() as i32) } } }
 impl From<NonZero<i16>> for NonZero<i64> { fn from(v: NonZero<i16>) -> NonZero<i64> { unsafe { NonZero::new_unchecked(v.get() as i64) } } }
 impl From<NonZero<i16>> for NonZero<i128> { fn from(v: NonZero<i16>) -> NonZero<i128> { unsafe { NonZero::new_unchecked(v.get() as i128) } } }
 impl From<NonZero<i16>> for NonZero<isize> { fn from(v: NonZero<i16>) -> NonZero<isize> { unsafe { NonZero::new_unchecked(v.get() as isize) } } }
+impl TryFrom<NonZero<i32>> for NonZero<u8> { type Error = TryFromIntError; fn try_from(v: NonZero<i32>) -> Result<NonZero<u8>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(u8::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<i32>> for NonZero<u16> { type Error = TryFromIntError; fn try_from(v: NonZero<i32>) -> Result<NonZero<u16>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(u16::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<i32>> for NonZero<u32> { type Error = TryFromIntError; fn try_from(v: NonZero<i32>) -> Result<NonZero<u32>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(u32::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<i32>> for NonZero<u64> { type Error = TryFromIntError; fn try_from(v: NonZero<i32>) -> Result<NonZero<u64>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(u64::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<i32>> for NonZero<u128> { type Error = TryFromIntError; fn try_from(v: NonZero<i32>) -> Result<NonZero<u128>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(u128::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<i32>> for NonZero<usize> { type Error = TryFromIntError; fn try_from(v: NonZero<i32>) -> Result<NonZero<usize>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(usize::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<i32>> for NonZero<i8> { type Error = TryFromIntError; fn try_from(v: NonZero<i32>) -> Result<NonZero<i8>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(i8::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<i32>> for NonZero<i16> { type Error = TryFromIntError; fn try_from(v: NonZero<i32>) -> Result<NonZero<i16>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(i16::try_from(v.get())?) }) } }
 impl From<NonZero<i32>> for NonZero<i64> { fn from(v: NonZero<i32>) -> NonZero<i64> { unsafe { NonZero::new_unchecked(v.get() as i64) } } }
 impl From<NonZero<i32>> for NonZero<i128> { fn from(v: NonZero<i32>) -> NonZero<i128> { unsafe { NonZero::new_unchecked(v.get() as i128) } } }
+impl TryFrom<NonZero<i32>> for NonZero<isize> { type Error = TryFromIntError; fn try_from(v: NonZero<i32>) -> Result<NonZero<isize>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(isize::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<i64>> for NonZero<u8> { type Error = TryFromIntError; fn try_from(v: NonZero<i64>) -> Result<NonZero<u8>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(u8::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<i64>> for NonZero<u16> { type Error = TryFromIntError; fn try_from(v: NonZero<i64>) -> Result<NonZero<u16>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(u16::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<i64>> for NonZero<u32> { type Error = TryFromIntError; fn try_from(v: NonZero<i64>) -> Result<NonZero<u32>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(u32::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<i64>> for NonZero<u64> { type Error = TryFromIntError; fn try_from(v: NonZero<i64>) -> Result<NonZero<u64>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(u64::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<i64>> for NonZero<u128> { type Error = TryFromIntError; fn try_from(v: NonZero<i64>) -> Result<NonZero<u128>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(u128::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<i64>> for NonZero<usize> { type Error = TryFromIntError; fn try_from(v: NonZero<i64>) -> Result<NonZero<usize>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(usize::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<i64>> for NonZero<i8> { type Error = TryFromIntError; fn try_from(v: NonZero<i64>) -> Result<NonZero<i8>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(i8::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<i64>> for NonZero<i16> { type Error = TryFromIntError; fn try_from(v: NonZero<i64>) -> Result<NonZero<i16>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(i16::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<i64>> for NonZero<i32> { type Error = TryFromIntError; fn try_from(v: NonZero<i64>) -> Result<NonZero<i32>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(i32::try_from(v.get())?) }) } }
 impl From<NonZero<i64>> for NonZero<i128> { fn from(v: NonZero<i64>) -> NonZero<i128> { unsafe { NonZero::new_unchecked(v.get() as i128) } } }
+impl TryFrom<NonZero<i64>> for NonZero<isize> { type Error = TryFromIntError; fn try_from(v: NonZero<i64>) -> Result<NonZero<isize>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(isize::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<i128>> for NonZero<u8> { type Error = TryFromIntError; fn try_from(v: NonZero<i128>) -> Result<NonZero<u8>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(u8::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<i128>> for NonZero<u16> { type Error = TryFromIntError; fn try_from(v: NonZero<i128>) -> Result<NonZero<u16>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(u16::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<i128>> for NonZero<u32> { type Error = TryFromIntError; fn try_from(v: NonZero<i128>) -> Result<NonZero<u32>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(u32::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<i128>> for NonZero<u64> { type Error = TryFromIntError; fn try_from(v: NonZero<i128>) -> Result<NonZero<u64>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(u64::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<i128>> for NonZero<u128> { type Error = TryFromIntError; fn try_from(v: NonZero<i128>) -> Result<NonZero<u128>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(u128::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<i128>> for NonZero<usize> { type Error = TryFromIntError; fn try_from(v: NonZero<i128>) -> Result<NonZero<usize>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(usize::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<i128>> for NonZero<i8> { type Error = TryFromIntError; fn try_from(v: NonZero<i128>) -> Result<NonZero<i8>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(i8::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<i128>> for NonZero<i16> { type Error = TryFromIntError; fn try_from(v: NonZero<i128>) -> Result<NonZero<i16>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(i16::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<i128>> for NonZero<i32> { type Error = TryFromIntError; fn try_from(v: NonZero<i128>) -> Result<NonZero<i32>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(i32::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<i128>> for NonZero<i64> { type Error = TryFromIntError; fn try_from(v: NonZero<i128>) -> Result<NonZero<i64>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(i64::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<i128>> for NonZero<isize> { type Error = TryFromIntError; fn try_from(v: NonZero<i128>) -> Result<NonZero<isize>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(isize::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<isize>> for NonZero<u8> { type Error = TryFromIntError; fn try_from(v: NonZero<isize>) -> Result<NonZero<u8>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(u8::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<isize>> for NonZero<u16> { type Error = TryFromIntError; fn try_from(v: NonZero<isize>) -> Result<NonZero<u16>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(u16::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<isize>> for NonZero<u32> { type Error = TryFromIntError; fn try_from(v: NonZero<isize>) -> Result<NonZero<u32>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(u32::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<isize>> for NonZero<u64> { type Error = TryFromIntError; fn try_from(v: NonZero<isize>) -> Result<NonZero<u64>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(u64::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<isize>> for NonZero<u128> { type Error = TryFromIntError; fn try_from(v: NonZero<isize>) -> Result<NonZero<u128>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(u128::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<isize>> for NonZero<usize> { type Error = TryFromIntError; fn try_from(v: NonZero<isize>) -> Result<NonZero<usize>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(usize::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<isize>> for NonZero<i8> { type Error = TryFromIntError; fn try_from(v: NonZero<isize>) -> Result<NonZero<i8>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(i8::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<isize>> for NonZero<i16> { type Error = TryFromIntError; fn try_from(v: NonZero<isize>) -> Result<NonZero<i16>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(i16::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<isize>> for NonZero<i32> { type Error = TryFromIntError; fn try_from(v: NonZero<isize>) -> Result<NonZero<i32>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(i32::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<isize>> for NonZero<i64> { type Error = TryFromIntError; fn try_from(v: NonZero<isize>) -> Result<NonZero<i64>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(i64::try_from(v.get())?) }) } }
+impl TryFrom<NonZero<isize>> for NonZero<i128> { type Error = TryFromIntError; fn try_from(v: NonZero<isize>) -> Result<NonZero<i128>, TryFromIntError> { Ok(unsafe { NonZero::new_unchecked(i128::try_from(v.get())?) }) } }
 
 impl Div<NonZero<u8>> for u8 { type Output = u8; fn div(self, rhs: NonZero<u8>) -> u8 { self / rhs.get() } }
 impl DivAssign<NonZero<u8>> for u8 { fn div_assign(&mut self, rhs: NonZero<u8>) { *self = *self / rhs; } }

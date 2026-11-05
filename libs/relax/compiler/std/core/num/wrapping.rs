@@ -111,6 +111,33 @@ impl<T: Not<Output = T>> Not for Wrapping<T> {
         Wrapping(!self.0)
     }
 }
+// The by-reference operand forms real core gets from forward_ref_binop!: `a + &b`, `&a + b`, `&a + &b`.
+macro_rules! wrapping_ref_binop {
+    ($($Trait:ident, $method:ident);* $(;)?) => {$(
+        impl<'a, T: $Trait<Output = T> + Copy> $Trait<&'a Wrapping<T>> for Wrapping<T> {
+            type Output = Wrapping<T>;
+            fn $method(self, rhs: &'a Wrapping<T>) -> Wrapping<T> {
+                Wrapping($Trait::$method(self.0, rhs.0))
+            }
+        }
+        impl<'a, T: $Trait<Output = T> + Copy> $Trait<Wrapping<T>> for &'a Wrapping<T> {
+            type Output = Wrapping<T>;
+            fn $method(self, rhs: Wrapping<T>) -> Wrapping<T> {
+                Wrapping($Trait::$method(self.0, rhs.0))
+            }
+        }
+        impl<'a, 'b, T: $Trait<Output = T> + Copy> $Trait<&'b Wrapping<T>> for &'a Wrapping<T> {
+            type Output = Wrapping<T>;
+            fn $method(self, rhs: &'b Wrapping<T>) -> Wrapping<T> {
+                Wrapping($Trait::$method(self.0, rhs.0))
+            }
+        }
+    )*};
+}
+wrapping_ref_binop! {
+    Add, add; Sub, sub; Mul, mul; Div, div; Rem, rem; BitXor, bitxor; BitOr, bitor; BitAnd, bitand;
+}
+
 impl<T: Add<Output = T> + Copy> AddAssign for Wrapping<T> {
     fn add_assign(&mut self, rhs: Wrapping<T>) {
         self.0 = self.0 + rhs.0;
