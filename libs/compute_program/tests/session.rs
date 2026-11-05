@@ -110,6 +110,26 @@ fn every_op_gives_the_same_bits_on_any_worker_count_and_on_the_interpreter() {
     assert_eq!(half[0], (0.0 + 1.0 + 4.0 + 5.0 + 16.0 + 17.0 + 20.0 + 21.0) / 8.0);
 }
 
+/// A boundary collects garbage, and a literal `defaults` is referenced from nowhere else.
+#[test]
+fn an_inbox_reads_its_defaults_after_the_collector_ran() {
+    let source = r#"
+{run: fn(s, p) {
+    for round in 0..200 {
+        for j in 0..1000 {
+            let junk = {a: j}
+        }
+        let m = s.inbox({add: nil})
+        if m.msgs.add != nil {
+            return -1
+        }
+    }
+    return 1
+}}
+"#;
+    assert_eq!(run(source, config(Value::Nil)).unwrap().as_number(), Some(1.0));
+}
+
 #[test]
 fn messages_steer_the_program_and_outputs_carry_their_rev() {
     let source = r#"
@@ -316,4 +336,103 @@ let inc = {x: output(f32) a: param(0.0) element: fn(i) { x[i] = x[i] + a }}
 "#;
     let limits = Limits { heap_bytes: 16 << 20, ..Limits::default() };
     assert_eq!(run(source, SessionConfig { limits, ..config(Value::Nil) }), Ok(n(1000.0)));
+}
+
+#[test]
+fn the_answer_outlives_the_ends_collection() {
+    // Thousands of objects of garbage and no op to collect them before the end: the end's
+    // boundary collects, and the answer (made last, held by nothing in the VM) must come out
+    // whole.
+    let source = r#"
+{run: fn(s, p) {
+    var last = nil
+    for k in 0..5000 {
+        last = {k: k, squares: [k, k * k]}
+    }
+    return {last: last, tail: [1, 2, 3]}
+}}
+"#;
+    let v = run(source, config(Value::Nil)).unwrap_or_else(|e| panic!("{e}"));
+    let last = v.get("last").unwrap_or_else(|| panic!("{v:?}"));
+    assert_eq!(last.get("k"), Some(&n(4999.0)), "{v:?}");
+    assert_eq!(last.get("squares"), Some(&Value::Array(vec![n(4999.0), n(4999.0 * 4999.0)])), "{v:?}");
+    assert_eq!(v.get("tail"), Some(&Value::Array(vec![n(1.0), n(2.0), n(3.0)])), "{v:?}");
+}
+
+#[test]
+fn a_fetch_reads_where_it_stands_and_takes_later() {
+    // the fetch reads x as the work before it leaves it; the work after it does not show; a
+    // fetch taken twice, or never made, is a script error
+    let source = r#"
+use mod.pod.*
+use mod.kernel.*
+let inc = {x: output(f32) a: param(0.0) element: fn(i) { x[i] = x[i] + a }}
+{run: fn(s, p) {
+    let x = s.buffer(f32, 8)
+    s.fill(x, 1.0)
+    let f = s.fetch(x, 2, 3)
+    s.run(inc, 8, {a: 10.0}, {x: x})
+    let now = s.read(x, 2, 1)
+    let then = s.take(f)
+    return [then, now[0]]
+}}
+"#;
+    assert_eq!(run(source, config(Value::Nil)), Ok(Value::Array(vec![Value::Array(vec![n(1.0); 3]), n(11.0)])));
+    let twice = r#"
+use mod.pod.*
+{run: fn(s, p) {
+    let x = s.buffer(f32, 4)
+    let f = s.fetch(x)
+    s.take(f)
+    return s.take(f)
+}}
+"#;
+    let e = run(twice, config(Value::Nil)).unwrap_err();
+    assert!(e.to_string().contains("taken already"), "{e}");
+}
+
+/// A host's keep for the test: what each session remembered, by key.
+#[derive(Default)]
+struct Shelf(std::sync::Mutex<std::collections::HashMap<u128, std::sync::Arc<[u32]>>>);
+
+impl Keep for Shelf {
+    fn recall(&self, key: u128) -> Option<std::sync::Arc<[u32]>> {
+        self.0.lock().unwrap().get(&key).cloned()
+    }
+
+    fn remember(&self, _name: &str, key: u128, words: std::sync::Arc<[u32]>) {
+        self.0.lock().unwrap().insert(key, words);
+    }
+}
+
+#[test]
+fn a_result_kept_in_one_session_is_recalled_by_the_next_made_from_the_same() {
+    // built once from x and the salt; a session from the same takes it back, one from another x
+    // or salt (or with nothing to keep in) builds its own
+    let source = r#"
+use mod.pod.*
+use mod.kernel.*
+let twice = {x: input(f32) y: output(f32) element: fn(i) { y[i] = x[i] * 2.0 }}
+{run: fn(s, p) {
+    let x = s.input("x")
+    let kept = s.recall("doubled", f32, ["x"], p.salt)
+    if kept != nil { return ["recalled", s.read(kept, 0, 3)] }
+    let y = s.buffer(f32, 3)
+    s.run(twice, 3, {}, {x: x, y: y})
+    let made = s.read(y, 0, 3)
+    return [s.remember("doubled", y, ["x"], p.salt), made]
+}}
+"#;
+    let shelf: std::sync::Arc<dyn Keep> = std::sync::Arc::new(Shelf::default());
+    let session = |x: &[f32], salt: f64, keep: Option<std::sync::Arc<dyn Keep>>| {
+        let config = SessionConfig { params: Value::object(&[("salt", n(salt))]), inputs: vec![Input::f32("x", x)], keep, ..SessionConfig::default() };
+        run(source, config).unwrap_or_else(|e| panic!("{e}"))
+    };
+    let made = |kept: bool, v: [f64; 3]| Value::Array(vec![Value::Bool(kept), Value::Array(v.map(n).to_vec())]);
+    let recalled = |v: [f64; 3]| Value::Array(vec![Value::String("recalled".into()), Value::Array(v.map(n).to_vec())]);
+    assert_eq!(session(&[1.0, 2.0, 3.0], 1.0, Some(shelf.clone())), made(true, [2.0, 4.0, 6.0]));
+    assert_eq!(session(&[1.0, 2.0, 3.0], 1.0, Some(shelf.clone())), recalled([2.0, 4.0, 6.0]));
+    assert_eq!(session(&[1.0, 2.0, 4.0], 1.0, Some(shelf.clone())), made(true, [2.0, 4.0, 8.0]), "another x");
+    assert_eq!(session(&[1.0, 2.0, 3.0], 2.0, Some(shelf.clone())), made(true, [2.0, 4.0, 6.0]), "another salt");
+    assert_eq!(session(&[1.0, 2.0, 3.0], 1.0, None), made(false, [2.0, 4.0, 6.0]), "nothing to keep in");
 }

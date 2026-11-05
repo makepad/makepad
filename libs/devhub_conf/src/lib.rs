@@ -1,7 +1,8 @@
 //! A devhub node's settings file (the WM's `~/.makepad/wm/devhub.conf`; any file through
 //! `makepad devhub serve --node`), its default name and port, and devhub's tray glyph: what the WM
 //! needs of devhub, without linking devhub (a devhub landing relinked and so restarted every idle
-//! node's WM). Platform-neutral: the WM reads it on every OS.
+//! node's WM), and the report of a hub the WM could not keep running ([`Trouble`]).
+//! Platform-neutral: the WM reads it on every OS.
 
 pub mod tray_glyph;
 
@@ -9,6 +10,14 @@ pub mod tray_glyph;
 pub const NODE_PORT: u16 = 8797;
 /// Hitches shorter than this are not worth a line (the JIT reports from 50 ms).
 pub const HITCH_MS: f64 = 500.0;
+
+/// A lane's one spelling, lower case: a Mac's file system folds case, so `SLICECPU` and
+/// `slicecpu` are one native tree there (a startup scrub took a running lease's shipped files when
+/// its hold said the one and the scrub the other, 11-04). Each place a lane enters devhub (a lease
+/// ask, `lane new`, a job submit, a live session, `stop`) folds it here; every key after is that one string.
+pub fn lane_name(name: &str) -> String {
+    name.to_ascii_lowercase()
+}
 
 /// Whether `name` is a hub name: what a line and a hosts entry can carry.
 pub fn valid_name(name: &str) -> bool {
@@ -74,7 +83,6 @@ pub const NODE_CONF_ENV: &str = "MAKEPAD_DEVHUB_NODE_CONF";
 /// port = 8797
 /// hitch_ms = 500          # shorter hitches are not reported
 /// launch = makepad run    # what `session launch <app>` runs
-/// nice = 10               # the WM starts it under nice
 /// embedded = off          # on: devhub runs inside the JIT host it observes (phones, headsets)
 /// discovery = on          # off: no LAN beacon (macOS: sending or receiving broadcasts asks the
 ///                         # Local Network question, which nobody answers on a headless Mac);
@@ -91,8 +99,6 @@ pub struct NodeConf {
     /// devhub runs inside the JIT host it observes (a phone or headset build): its own process's
     /// programs are observed too
     pub embedded: bool,
-    /// the WM starts it under `nice -n <nice>` (0: not niced)
-    pub nice: i32,
     /// announce itself and listen for the other nodes on the LAN beacon
     pub discovery: bool,
 }
@@ -114,7 +120,7 @@ fn default_launch() -> Vec<String> {
 
 impl Default for NodeConf {
     fn default() -> Self {
-        NodeConf { enabled: true, name: String::new(), host: None, port: NODE_PORT, hitch_ms: HITCH_MS, launch: default_launch(), embedded: false, nice: 10, discovery: !cfg!(target_os = "macos") }
+        NodeConf { enabled: true, name: String::new(), host: None, port: NODE_PORT, hitch_ms: HITCH_MS, launch: default_launch(), embedded: false, discovery: !cfg!(target_os = "macos") }
     }
 }
 
@@ -131,7 +137,6 @@ impl NodeConf {
                 "host" => c.host = v.parse().ok(),
                 "port" => c.port = v.parse().unwrap_or(c.port),
                 "hitch_ms" => c.hitch_ms = v.parse().unwrap_or(c.hitch_ms),
-                "nice" => c.nice = v.parse().unwrap_or(c.nice),
                 "embedded" => c.embedded = matches!(v, "on" | "true" | "1"),
                 "discovery" => c.discovery = matches!(v, "on" | "true" | "1"),
                 "launch" if !v.is_empty() => c.launch = v.split_whitespace().map(str::to_string).collect(),
@@ -149,8 +154,69 @@ impl NodeConf {
     }
 }
 
+/// The file beside a node's conf (`~/.makepad/wm/devhub.down`) in which the WM keeps why it could
+/// not start or keep the node's hub: the WM writes it on each failed start or exit, and the hub that
+/// starts next reports it to the master's inbox and removes it. While no hub runs on a box nothing
+/// there reaches the master; this way the outage and its reason still arrive.
+pub const TROUBLE_FILE: &str = "devhub.down";
+
+/// What [`TROUBLE_FILE`] holds: since when the hub has not run, how many starts failed or ended,
+/// and the latest reason.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Trouble {
+    pub since_ms: u64,
+    pub tries: u32,
+    pub reason: String,
+}
+
+impl Trouble {
+    /// One more failed start or exit at `now_ms`, after `prev` (None: the first of this outage).
+    pub fn next(prev: Option<Trouble>, now_ms: u64, reason: &str) -> Trouble {
+        let reason = reason.lines().map(str::trim).filter(|l| !l.is_empty()).collect::<Vec<_>>().join(" ");
+        match prev {
+            Some(p) => Trouble { since_ms: p.since_ms, tries: p.tries + 1, reason },
+            None => Trouble { since_ms: now_ms, tries: 1, reason },
+        }
+    }
+
+    pub fn to_text(&self) -> String {
+        format!("since_ms = {}\ntries = {}\nreason = {}\n", self.since_ms, self.tries, self.reason)
+    }
+
+    pub fn parse(text: &str) -> Option<Trouble> {
+        let get = |key: &str| text.lines().find_map(|l| l.split_once(" = ").filter(|(k, _)| *k == key).map(|(_, v)| v.trim().to_string()));
+        Some(Trouble { since_ms: get("since_ms")?.parse().ok()?, tries: get("tries")?.parse().ok()?, reason: get("reason")? })
+    }
+
+    /// The line the hub reports once it runs, at `now_ms`.
+    pub fn report(&self, machine: &str, now_ms: u64) -> String {
+        let s = now_ms.saturating_sub(self.since_ms) / 1000;
+        let took = if s < 120 { format!("{s} s") } else { format!("{} min", s / 60) };
+        let tries = if self.tries == 1 { "1 try".to_string() } else { format!("{} tries", self.tries) };
+        format!("devhub on {machine} could not run for {took} ({tries}): {}", self.reason)
+    }
+}
+
+/// The trouble file of the node whose conf is `conf_path`.
+pub fn trouble_path(conf_path: &std::path::Path) -> std::path::PathBuf {
+    conf_path.with_file_name(TROUBLE_FILE)
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn trouble_keeps_its_start_counts_tries_and_says_the_latest_reason() {
+        use super::Trouble;
+        let first = Trouble::next(None, 1_000, "could not start: the user's service manager is down\n");
+        assert_eq!(first, Trouble { since_ms: 1_000, tries: 1, reason: "could not start: the user's service manager is down".into() });
+        let second = Trouble::next(Trouble::parse(&first.to_text()), 9_000, "exited (signal: 9)");
+        assert_eq!((second.since_ms, second.tries, second.reason.as_str()), (1_000, 2, "exited (signal: 9)"));
+        assert_eq!(second.report("node-a", 31_000), "devhub on node-a could not run for 30 s (2 tries): exited (signal: 9)");
+        assert_eq!(first.report("node-a", 1_000 + 27 * 60_000), "devhub on node-a could not run for 27 min (1 try): could not start: the user's service manager is down");
+        assert_eq!(Trouble::parse("tries = 1\n"), None);
+        assert_eq!(super::trouble_path(std::path::Path::new("/h/.makepad/wm/devhub.conf")), std::path::Path::new("/h/.makepad/wm/devhub.down"));
+    }
+
     #[test]
     fn conf_defaults_and_overrides() {
         let c = super::NodeConf::parse("name = 217\nport = 9001\nhitch_ms = 250\nlaunch = /home/me/bin/makepad run\nbogus = 1\n");

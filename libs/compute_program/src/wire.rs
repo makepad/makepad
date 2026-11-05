@@ -3,7 +3,8 @@
 //! `kind: u8, word: u64 (a request or session id), payload`; this module is the payloads.
 //!
 //! ```text
-//! app -> node   OPEN    request id   program, params, limits, codec, inputs
+//! app -> node   OPEN    request id   program, params, limits, codec, inputs (each its data or a
+//!                                    hash of data the stream sent before)
 //!               MSG     session id   interrupt: u8, key, value
 //!               ACK     session id   output name, state: u8, version
 //!               CANCEL  session id   -
@@ -15,11 +16,17 @@
 //! true, number f64, text, array, object) and its contents. An output is its header and its
 //! elements in a [`Codec`]. A node sends at most [`IN_FLIGHT`] versions of one output before the
 //! app acks one; a newer version replaces the one waiting, so a slow link skips versions.
+//!
+//! An open may name a slot on its stream (`keep`): the node keeps that open's inputs under their
+//! [`input_hash`] in the slot, in place of what the slot held, so a later open on the stream names
+//! an input it sent before by its hash alone (an edit's solve sends only what changed). A node
+//! that no longer keeps one answers [`NOT_KEPT`], and the app sends them all.
 
 use crate::codec::{self, Codec, Reader};
 use crate::cpu::ElemTy;
 use crate::session::{Class, Input, Limits, Output, OutputData, Program, ProgramError, Updates};
 use crate::value::Value;
+use std::sync::Arc;
 
 pub const OPEN: u8 = 16;
 pub const MSG: u8 = 17;
@@ -27,6 +34,13 @@ pub const ACK: u8 = 18;
 pub const CANCEL: u8 = 19;
 pub const OPENED: u8 = 16;
 pub const UPDATE: u8 = 17;
+
+/// `OPENED`'s status when an input the open named by its hash is no longer kept.
+pub const NOT_KEPT: u16 = 409;
+
+/// An input travelling with its data, or by its hash.
+const WITH_DATA: u8 = 0;
+const BY_HASH: u8 = 1;
 
 /// Unacked versions of one output a node sends.
 pub const IN_FLIGHT: usize = 2;
@@ -47,10 +61,57 @@ pub struct Open {
     pub codec: Codec,
     /// Who waits on it: the node runs it at this class.
     pub class: Class,
+    /// The slot on the stream the node keeps the inputs in (empty: none).
+    pub keep: String,
     pub inputs: Vec<Input>,
 }
 
-pub fn encode_open(open: &Open, threads: usize) -> Vec<u8> {
+/// An input's content as a node keeps it: 128 bits over its words and their count (four 64-bit
+/// lanes over the words two at a time, rounded and merged as xxHash64 does, finished twice). The
+/// same words under another element type are the same content.
+pub fn input_hash(words: &[u32]) -> u128 {
+    const P1: u64 = 0x9E37_79B1_85EB_CA87;
+    const P2: u64 = 0xC2B2_AE3D_27D4_EB4F;
+    const P3: u64 = 0x1656_67B1_9E37_79F9;
+    const P4: u64 = 0x85EB_CA77_C2B2_AE63;
+    const P5: u64 = 0x27D4_EB2F_1656_67C5;
+    let round = |acc: u64, x: u64| acc.wrapping_add(x.wrapping_mul(P2)).rotate_left(31).wrapping_mul(P1);
+    let pair = |w: &[u32]| w[0] as u64 | (w[1] as u64) << 32;
+    let mut v = [P1.wrapping_add(P2), P2, 0, P1.wrapping_neg()];
+    let stripes = words.chunks_exact(8);
+    let rest = stripes.remainder();
+    for s in stripes {
+        for (k, lane) in v.iter_mut().enumerate() {
+            *lane = round(*lane, pair(&s[2 * k..]));
+        }
+    }
+    let avalanche = |mut h: u64| {
+        h ^= h >> 33;
+        h = h.wrapping_mul(P2);
+        h ^= h >> 29;
+        h = h.wrapping_mul(P3);
+        h ^ (h >> 32)
+    };
+    let finish = |lanes: [u64; 4]| {
+        let mut h = lanes[0].rotate_left(1).wrapping_add(lanes[1].rotate_left(7)).wrapping_add(lanes[2].rotate_left(12)).wrapping_add(lanes[3].rotate_left(18));
+        for lane in lanes {
+            h = (h ^ round(0, lane)).wrapping_mul(P1).wrapping_add(P4);
+        }
+        h = h.wrapping_add(words.len() as u64);
+        for w in rest.chunks(2) {
+            let x = if w.len() == 2 { pair(w) } else { w[0] as u64 | P5 << 32 };
+            h = (h ^ round(0, x)).rotate_left(27).wrapping_mul(P1).wrapping_add(P4);
+        }
+        avalanche(h)
+    };
+    let low = finish(v);
+    let high = finish([v[3] ^ P5, v[2], v[1].rotate_left(32), v[0] ^ P3]);
+    (high as u128) << 64 | low as u128
+}
+
+/// `OPEN` with each input whose hash `kept` says the node keeps sent by its hash alone, and every
+/// input's hash (in order).
+pub fn encode_open(open: &Open, threads: usize, kept: &dyn Fn(u128) -> bool) -> (Vec<u8>, Vec<u128>) {
     let mut w = Vec::new();
     put_str(&mut w, &open.program.name);
     put_str(&mut w, &open.program.source);
@@ -62,16 +123,36 @@ pub fn encode_open(open: &Open, threads: usize) -> Vec<u8> {
     w.extend_from_slice(&open.seed.to_le_bytes());
     w.push(open.codec.id());
     w.push(open.class.budget());
+    put_str(&mut w, &open.keep);
     w.extend_from_slice(&(open.inputs.len() as u32).to_le_bytes());
+    let mut hashes = Vec::with_capacity(open.inputs.len());
     for input in &open.inputs {
         put_str(&mut w, &input.name);
         put_str(&mut w, input.ty.name());
-        put_words(&mut w, &input.data, open.codec, threads);
+        let hash = input_hash(&input.data);
+        w.extend_from_slice(&hash.to_le_bytes());
+        if kept(hash) {
+            w.push(BY_HASH);
+        } else {
+            w.push(WITH_DATA);
+            put_words(&mut w, &input.data, open.codec, threads);
+        }
+        hashes.push(hash);
     }
-    w
+    (w, hashes)
 }
 
-pub fn decode_open(bytes: &[u8], max_input_words: usize, threads: usize) -> Result<Open, String> {
+/// An input of an `OPEN` as it came: its hash, and its data unless it came by the hash alone.
+pub struct Arrived {
+    pub name: String,
+    pub ty: ElemTy,
+    pub hash: u128,
+    pub data: Option<Arc<[u32]>>,
+}
+
+/// An `OPEN` back: the open (no inputs) and its inputs as they came, in order; the inputs that
+/// came with data hold at most `max_input_words` words.
+pub fn decode_open(bytes: &[u8], max_input_words: usize, threads: usize) -> Result<(Open, Vec<Arrived>), String> {
     let mut r = Reader { bytes, at: 0 };
     let name = r.str()?.to_string();
     let source = r.str()?;
@@ -98,20 +179,29 @@ pub fn decode_open(bytes: &[u8], max_input_words: usize, threads: usize) -> Resu
     let seed = r.u32()?;
     let codec = Codec::from_id(r.u8()?).ok_or("an unknown codec")?;
     let class = Class::from_budget(r.u8()?).ok_or("an unknown class")?;
+    let keep = r.str()?.to_string();
     let count = r.u32()? as usize;
     let mut inputs = Vec::with_capacity(count.min(64));
     let mut words_left = max_input_words;
     for _ in 0..count {
         let name = r.str()?.to_string();
         let ty = ElemTy::from_name(r.str()?).ok_or("an input of an unknown type")?;
-        let data = get_words(&mut r, &mut words_left, threads)?;
-        if data.len() % ty.words() != 0 {
-            return Err(format!("input `{name}`: not whole elements"));
-        }
-        inputs.push(Input::words(&name, ty, data.into()));
+        let hash = u128::from_le_bytes(r.take(16)?.try_into().unwrap());
+        let data = match r.u8()? {
+            WITH_DATA => {
+                let data = get_words(&mut r, &mut words_left, threads)?;
+                if data.len() % ty.words() != 0 {
+                    return Err(format!("input `{name}`: not whole elements"));
+                }
+                Some(data.into())
+            }
+            BY_HASH => None,
+            _ => return Err(format!("input `{name}`: neither data nor a hash")),
+        };
+        inputs.push(Arrived { name, ty, hash, data });
     }
     end(&r)?;
-    Ok(Open { program, params, limits, seed, codec, class, inputs })
+    Ok((Open { program, params, limits, seed, codec, class, keep, inputs: Vec::new() }, inputs))
 }
 
 /// `OPENED`: the session, and what it runs on.
@@ -191,10 +281,10 @@ pub fn encode_update(u: &Updates, codec: Codec, threads: usize) -> Vec<u8> {
         w.extend_from_slice(&o.version.to_le_bytes());
         w.extend_from_slice(&o.rev.to_le_bytes());
         put_str(&mut w, o.ty.name());
-        let (kind, width, bytes, range): (u8, usize, Vec<u8>, Option<(f32, f32)>) = match &o.data {
-            OutputData::Words(words) => (0, 4, words.iter().flat_map(|x| x.to_le_bytes()).collect(), None),
-            OutputData::F16(h) => (1, 2, h.iter().flat_map(|x| x.to_le_bytes()).collect(), None),
-            OutputData::U8 { lo, hi, levels } => (2, 1, levels.to_vec(), Some((*lo, *hi))),
+        let (kind, width, bytes, range): (u8, usize, &[u8], Option<(f32, f32)>) = match &o.data {
+            OutputData::Words(words) => (0, 4, bytemuck::cast_slice(words), None),
+            OutputData::F16(h) => (1, 2, bytemuck::cast_slice(h), None),
+            OutputData::U8 { lo, hi, levels } => (2, 1, levels, Some((*lo, *hi))),
         };
         w.push(kind);
         if let Some((lo, hi)) = range {
@@ -203,7 +293,7 @@ pub fn encode_update(u: &Updates, codec: Codec, threads: usize) -> Vec<u8> {
         }
         w.extend_from_slice(&((bytes.len() / width) as u32).to_le_bytes());
         w.push(codec.id());
-        let payload = codec::encode(&bytes, width, codec, threads);
+        let payload = codec::encode(bytes, width, codec, threads);
         w.extend_from_slice(&(payload.len() as u32).to_le_bytes());
         w.extend_from_slice(&payload);
     }
@@ -234,6 +324,7 @@ pub fn encode_update(u: &Updates, codec: Codec, threads: usize) -> Vec<u8> {
                 ProgramError::OverBudget(what) => (2, *what),
                 ProgramError::Cancelled => (3, ""),
                 ProgramError::Lost(m) => (4, m.as_str()),
+                ProgramError::DeviceLost => (5, ""),
             };
             w.push(kind);
             put_str(&mut w, text);
@@ -264,14 +355,14 @@ pub fn decode_update(bytes: &[u8], max_elements: usize, threads: usize) -> Resul
         let payload = r.take(len)?;
         let data = match (kind, range) {
             (0, _) => {
-                let mut b = vec![0u8; count * 4];
-                codec::decode(payload, 4, codec, &mut b, threads)?;
-                OutputData::Words(b.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect())
+                let mut words = vec![0u32; count];
+                codec::decode(payload, 4, codec, bytemuck::cast_slice_mut(&mut words), threads)?;
+                OutputData::Words(words.into())
             }
             (1, _) => {
-                let mut b = vec![0u8; count * 2];
-                codec::decode(payload, 2, codec, &mut b, threads)?;
-                OutputData::F16(b.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect())
+                let mut h = vec![0u16; count];
+                codec::decode(payload, 2, codec, bytemuck::cast_slice_mut(&mut h), threads)?;
+                OutputData::F16(h.into())
             }
             (2, Some((lo, hi))) => {
                 let mut b = vec![0u8; count];
@@ -303,6 +394,7 @@ pub fn decode_update(bytes: &[u8], max_elements: usize, threads: usize) -> Resul
                 1 => ProgramError::Program(text),
                 2 => ProgramError::OverBudget(budget_name(&text)),
                 3 => ProgramError::Cancelled,
+                5 => ProgramError::DeviceLost,
                 _ => ProgramError::Lost(text),
             }))
         }
@@ -329,8 +421,7 @@ fn put_str(w: &mut Vec<u8>, s: &str) {
 }
 
 fn put_words(w: &mut Vec<u8>, words: &[u32], codec: Codec, threads: usize) {
-    let bytes: Vec<u8> = words.iter().flat_map(|x| x.to_le_bytes()).collect();
-    let payload = codec::encode(&bytes, 4, codec, threads);
+    let payload = codec::encode(bytemuck::cast_slice(words), 4, codec, threads);
     w.extend_from_slice(&(words.len() as u32).to_le_bytes());
     w.push(codec.id());
     w.extend_from_slice(&(payload.len() as u32).to_le_bytes());
@@ -346,9 +437,9 @@ fn get_words(r: &mut Reader, words_left: &mut usize, threads: usize) -> Result<V
     let codec = Codec::from_id(r.u8()?).ok_or("an unknown codec")?;
     let len = r.u32()? as usize;
     let payload = r.take(len)?;
-    let mut b = vec![0u8; n * 4];
-    codec::decode(payload, 4, codec, &mut b, threads)?;
-    Ok(b.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect())
+    let mut words = vec![0u32; n];
+    codec::decode(payload, 4, codec, bytemuck::cast_slice_mut(&mut words), threads)?;
+    Ok(words)
 }
 
 pub fn put_value(w: &mut Vec<u8>, v: &Value) {

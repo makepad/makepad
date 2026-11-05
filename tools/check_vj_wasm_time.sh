@@ -46,7 +46,6 @@ library_roots=(
     makepad-system-speech
     makepad-audio-encode
     makepad-audio-picture
-    makepad-rtsmap
     makepad-midi-file
     makepad-video-flow
 )

@@ -1,6 +1,6 @@
 #!/bin/sh
 # Renders app icon sources (resources/icon.svg) to the resources/icon_1024.png
-# that the Builder turns into macOS AppIcons and Windows icon resources.
+# that cargo makepad turns into macOS AppIcons and Windows icon resources.
 # Uses macOS QuickLook (WebKit) for SVG rendering, which paints on opaque white;
 # the icon_mask example then cuts the icon back to its transparent rounded
 # square. Authoring only, nothing at build time depends on it.

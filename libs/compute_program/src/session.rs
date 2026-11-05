@@ -1,10 +1,11 @@
 //! The app's side of a program: open a session, steer it, take its outputs.
 use crate::cpu::{CancelSlot, ElemTy};
+use crate::gpu::GpuLink;
 use crate::value::Value;
 use makepad_script::ScriptInterrupt;
 use makepad_script_compute::Backend;
 use makepad_script_compute_sched::sched::Executor;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
 /// A program's document: its name (the file its errors name) and its Splash source.
@@ -18,6 +19,18 @@ impl Program {
     pub fn new(name: &str, source: &str) -> Program {
         Program { name: name.to_string(), source: source.into() }
     }
+}
+
+/// What a host keeps for a program between its sessions (an AI hub node keeps it in the keep slot
+/// the session opened with, on its stream): `s.remember` gives it a buffer's words under a key
+/// made from the program, the result's name and type, the inputs it was made from and what else
+/// it depends on; `s.recall` in a later session made from the same takes them back. Kept results
+/// last as long as the host keeps them; a program builds what it cannot recall.
+pub trait Keep: Send + Sync {
+    fn recall(&self, key: u128) -> Option<Arc<[u32]>>;
+    /// Keeps `words` under `key` as the result named `name`, in place of the one kept before
+    /// under that name.
+    fn remember(&self, name: &str, key: u128, words: Arc<[u32]>);
 }
 
 /// A session input: words the app shares by reference (`s.input(name)` binds them read-only,
@@ -121,6 +134,11 @@ pub struct SessionConfig {
     /// The kernels' `seed`.
     pub seed: u32,
     pub class: Class,
+    /// The GPU device the program may use besides the CPU (its buffers made with
+    /// `{device: "gpu"}`). None: the CPU alone.
+    pub gpu: Option<GpuLink>,
+    /// Where results last between sessions. None: nothing is recalled or kept.
+    pub keep: Option<Arc<dyn Keep>>,
 }
 
 impl Default for SessionConfig {
@@ -134,6 +152,8 @@ impl Default for SessionConfig {
             backend: if cfg!(any(target_arch = "aarch64", target_arch = "x86_64")) { Backend::Native } else { Backend::Interp },
             seed: 0,
             class: Class::Visible,
+            gpu: None,
+            keep: None,
         }
     }
 }
@@ -150,6 +170,9 @@ pub enum ProgramError {
     Cancelled,
     /// A remote session's link to its node broke, or the node sent what does not decode.
     Lost(String),
+    /// The GPU device was lost (a reset, a device removed): the program may run again, on the
+    /// CPU if it chooses.
+    DeviceLost,
 }
 
 impl std::fmt::Display for ProgramError {
@@ -160,6 +183,7 @@ impl std::fmt::Display for ProgramError {
             ProgramError::OverBudget(what) => write!(f, "over its {what} budget"),
             ProgramError::Cancelled => write!(f, "cancelled"),
             ProgramError::Lost(why) => write!(f, "the node was lost: {why}"),
+            ProgramError::DeviceLost => write!(f, "the GPU was lost"),
         }
     }
 }
@@ -298,6 +322,10 @@ pub(crate) struct Shared {
     pub interrupted: AtomicBool,
     pub vm_interrupt: Mutex<Option<ScriptInterrupt>>,
     pub running: CancelSlot,
+    /// The session's GPU stop epoch: an interrupt or a cancel moves it on, and the device drops
+    /// the work sent before it.
+    pub gpu_stop: Arc<AtomicU64>,
+    pub gpu: Mutex<Option<GpuLink>>,
 }
 
 pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -311,6 +339,14 @@ impl Shared {
 
     pub(crate) fn interrupted(&self) -> bool {
         self.interrupted.load(Ordering::Relaxed)
+    }
+
+    /// Stops the GPU work in flight: the device drops what was sent so far.
+    fn stop_gpu(&self) {
+        self.gpu_stop.fetch_add(1, Ordering::Relaxed);
+        if let Some(link) = lock(&self.gpu).as_ref() {
+            link.wake();
+        }
     }
 }
 
@@ -333,7 +369,14 @@ impl Session {
             .stack_size(16 << 20)
             .spawn(move || {
                 config.class.apply();
-                let result = crate::driver::drive(&program, config, thread_shared.clone());
+                // A panic in the driver (the VM, a kernel's compile) is the session's end, with
+                // its message: the waiters and the device's session are not left without one.
+                let shared = thread_shared.clone();
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| crate::driver::drive(&program, config, shared)))
+                    .unwrap_or_else(|panic| {
+                        let why = panic.downcast_ref::<&str>().map(|m| m.to_string()).or_else(|| panic.downcast_ref::<String>().cloned()).unwrap_or_default();
+                        Err(ProgramError::Program(format!("the driver panicked: {why}")))
+                    });
                 let mut out = lock(&thread_shared.outbox);
                 out.updates.end = Some(result.clone());
                 out.ended = Some(result);
@@ -370,6 +413,7 @@ impl Session {
         };
         if interrupt {
             self.shared.running.cancel();
+            self.shared.stop_gpu();
         }
         self.shared.inbox_cv.notify_all();
         rev
@@ -383,6 +427,7 @@ impl Session {
             interrupt.interrupt();
         }
         self.shared.running.cancel();
+        self.shared.stop_gpu();
         // Wakes a `wait_inbox` (it checks the flag under the inbox lock).
         drop(lock(&self.shared.inbox));
         self.shared.inbox_cv.notify_all();

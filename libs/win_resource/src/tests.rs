@@ -6,7 +6,7 @@ use crate::version::parse_version_resource;
 use crate::*;
 
 fn scope_icns() -> Vec<u8> {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/makepad_builder/resources/scope.icns");
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/scope.icns");
     std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
 }
 

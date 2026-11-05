@@ -1,0 +1,13 @@
+[package]
+name = "makepad-toolchain"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+description = "Installs Microsoft's C++ Build Tools, the Windows SDK, the MSVC Rust and NVIDIA's CUDA toolkit into one folder, without running installers, and says what a build needs to use them"
+
+[dependencies]
+makepad-core-util = { path = "../core_util" }
+makepad-fast-inflate = { path = "../fast_inflate" }
+makepad-strict-json = { path = "../strict_json" }
+makepad-zip-file = { path = "../zip_file" }

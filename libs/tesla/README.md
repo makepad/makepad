@@ -14,9 +14,9 @@ developer app registration, even for your own single car. Steps:
 2. Go to <https://developer.tesla.com> → request app access. Fill in a name and
    "personal use: vehicle data for private navigation app" as purpose.
 3. OAuth Grant Type: **Authorization Code and Machine-to-Machine**.
-4. Allowed Origin: a domain you control (e.g. `https://n4.io/`).
+4. Allowed Origin: a domain you control (e.g. `https://example.com/`).
 5. Allowed Redirect URI: something you can read the address bar on, e.g.
-   `https://n4.io/tesla-callback` — the page does not need to exist, you just
+   `https://example.com/tesla-callback` — the page does not need to exist, you just
    copy the `?code=` out of the URL after login.
 6. Scopes: enable at least `vehicle_device_data` (Vehicle Information).
    `vehicle_location` if the app should also read the car's own GPS position.

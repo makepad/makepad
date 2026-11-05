@@ -1,0 +1,15 @@
+[package]
+name = "makepad-compute-program-gpu"
+version = "1.0.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Compute programs' GPU device: a program's element kernels on this machine's GPU through the platform's plain compute path"
+
+[dependencies]
+makepad-platform = { path = "../../platform", version = "2.0.0" }
+makepad-compute-program = { path = "../compute_program", version = "1.0.0" }
+makepad-script-compute = { path = "../../platform/script/compute", version = "1.0.0", features = ["vm"] }
+
+[[bin]]
+name = "program-gpu-checks"
+path = "src/bin/program_gpu_checks.rs"

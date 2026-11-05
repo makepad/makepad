@@ -29,58 +29,61 @@ use current source for API signatures and working examples.
   brief is not enough, it stops and ends with `HAND BACK: <reason>` plus what
   it found and changed; the Opus lead then takes the task over.
 - Resume a finished lane with its context for follow-ups instead of starting
-  a fresh one that repays the same input. Idle without polling while waiting.
+  a fresh one that repays the same input.
 - This is the user's current workflow (2026-11-03) and supersedes older role
   assignments in local skills or memories.
 
+## Token cost of a turn
+
+Every tool round re-reads your whole context, on average about 25 times what its result
+costs, so the number of rounds is the cost. Measured over 36 h of lanes: 95% of messages
+carried a single tool call, 59% of rounds were code reads, and waiting for or checking on
+runs took 17% of the cost.
+
+- Batch what you can already name: several Reads or searches in one message, or one command
+  that prints them all. Go one at a time only when the next call depends on the last result.
+- Never poll: no `until grep` or `sleep` loops, no repeated `tail` of a log or task output, no
+  repeated `job list`. Start a script of your own with the Bash tool's `run_in_background`; it
+  wakes you when it exits.
+- Wait for a run with `devhub job submit`, then `devhub job wait <id>` in the background: no
+  filter, no buffer, no expiry. A plan of several jobs goes in one `job submit --batch <file>`.
+- A Monitor on a log must end in a stage that flushes: `grep --line-buffered` does; `cut`,
+  `head` and `sed` hold the matches back, so it stays silent.
+- A finished job: `devhub job result <id> [--tail]` gives exit, error lines and log tail; the
+  whole log is `~/.makepad/devhub/jobs/<id>.log`.
+- `devhub <cmd> --help` prints that command's entry; don't read or grep the whole help.
+
 ## Sending your changes to Makepad
 
-People who installed Makepad apps with the Makepad Builder change them with
-their own coding agent. When the person asks you to "send what I changed",
-"share my changes with Makepad" or similar, write a change report and send
-it only with their approval. The format, limits and anonymisation rules are
-in [Change reports](docs/agents/change-report.md); the steps:
+People who run Makepad apps with the Makepad Runner change them with their
+own coding agent. When the person asks you to "send what I changed", "share
+my changes with Makepad" or similar, write a change report. The format, limits
+and anonymisation rules are in
+[Change reports](docs/agents/change-report.md); the steps:
 
-1. Find the installation. This checkout is `builder/sources/<release>/makepad`
-   inside it (app repositories at `makepad/apps/<name>`); the installation
-   folder holds `makepad-builder.exe` (Windows) or `makepad-builder.sh`
-   (macOS, Linux). `builder/installed/<app>.json` names the app (`"id"`) and
-   the release its source came from (`"release"`, `"repositories"`). Below,
-   `BUILDER` is `<installation>\makepad-builder.exe` or
-   `<installation>/makepad-builder.sh`.
-2. Collect the changes: `BUILDER changes <app>` prints the diff of the app's
-   source against that release (`--files` lists the files). Edits saved by
-   an earlier update are in `builder/changes/<app>-<date>.diff`. With git
-   available, `git status` and `git diff HEAD` in each repository give the
-   same. Skip build output and anything unrelated to the app.
-3. Write the list as concepts, not code: per change a one-line title, a
+1. Collect the changes. In a Runner installation an app's edits are the files
+   in `runner/edits/<app>/` of its folder, and `runner/releases.tsv` names the
+   release its source came from. With git available, `git status` and
+   `git diff HEAD` in each repository give the same. Skip build output and
+   anything unrelated to the app.
+2. Write the list as concepts, not code: per change a one-line title, a
    kind (fix, feature, tweak, ui, performance, refactor, docs, other), what
    is different for someone using the app and why, and the screens or
    components it touches. Add a tiny snippet only when a change cannot be
    told without it.
-4. Anonymise everything that will be sent: replace names and usernames,
+3. Anonymise everything that will be sent: replace names and usernames,
    email addresses, host names and private IP addresses, absolute and home
    folder paths (use repo-relative paths), keys, tokens and passwords,
    private service URLs and personal data in strings or comments with
    `[name]`, `[email]`, `[host]`, `[path]`, `[secret]`, `[private-url]` or
    `[personal]`, and count what you took out, by kind.
-5. Show the person the list and what was taken out, ask whether to include
-   a trimmed diff (default: no) and whether Makepad may reply by email, and
-   wait for their explicit approval or edits. Never send without it.
-6. Write `builder/changes/<app>-report/` with `report.json` (schema:
+4. Show the person the list and what was taken out, ask whether to include
+   a trimmed diff (default: no), and wait for their explicit approval or edits.
+5. Write `<app>-report/`, outside the app's source, with `report.json` (schema:
    `docs/agents/change-report.schema.json`), `REPORT.md` (the same list for
-   people) and, only when they opted in, `changes.diff`. `BUILDER
-   send-changes <app>` checks it (schema, 256 KB limit, the anonymisation
-   scan) and prints what would be sent; fix what it reports.
-7. Send it: `BUILDER send-changes <app> --yes`, adding `--with-email` only
-   when the person wants a reply (the Builder adds the address it is logged
-   in with; you never need it). Or leave the report for them to read and
-   send in the Builder (`e` on the app's row). Without the Builder, POST the
-   zip: `curl -sS -X POST -H 'X-Makepad-Feedback: 1' -H 'Content-Type:
-   application/zip' --data-binary @report.zip
-   https://makepad.nl/api/feedback/changes`.
-8. Tell the person the report id the Builder (or the server's
-   `{"ok":true,"id":N}`) returned.
+   people) and, only when they opted in, `changes.diff`.
+6. Nothing can send it yet: makepad.nl has no route for reports. Tell the
+   person and leave the report with them.
 
 ## Lanes go through devhub
 
@@ -106,14 +109,17 @@ in [Change reports](docs/agents/change-report.md); the steps:
   benchmarks and JIT cold starts included). Add `--needs os=macos` only for
   macOS/Metal-specific work and macOS-specific timings: nothing else lands on a Mac, and a
   lease naming a Mac without it is refused. The Macs are scarce: one batched bench lease
-  per lane, all its cases in one run.
+  per lane, all its cases in one run. A macOS timed lease runs on the bench Mac, or on another
+  Mac while the bench Mac runs timed work; its release line names the box. A series compared
+  across leases names its box (`--node`).
 - The merge bot keeps each lane merged with the tip, in the lane's own worktree. It waits
   while a job or live job runs there, and while a `timed` lease of the lane is queued, live,
   or ended in the last 15 minutes. A timed or bench series with longer gaps between runs, or
   any other pinned binary you compare against, needs `makepad devhub hold <branch> "why"` before
   the first run and `devhub unhold <branch>` after the last.
-- A master restart (self-update) keeps every lease and queued request; it happens at most every
-  30 minutes, at a quiet moment (no lease in setup, no landing gate running). Holders just keep
+- A master restart (self-update) keeps every lease and queued request, and leases in setup or
+  cleanup; it happens at most every 10 minutes, within 5 minutes of a devhub landing even while
+  landings keep coming (a wait says `stalled: <why>` in the update events). Holders just keep
   beating; `devhub master restart` forces one.
 
 ## Clean up after work
@@ -161,10 +167,11 @@ it used (this one and any build or bench node):
 ## Commit content and Studio iteration history
 
 - NEVER create or publish additional public branches in `makepad/makepad`.
-  Use only the established `local` → `work` → `main` workflow. `local` remains
-  private and must never be pushed. Feature, test, release, packaging, and
-  distribution work do not authorize another public branch; using a separate
-  checkout or worktree does not change this rule.
+  Use only the established `local` → `work` → `main` workflow, plus `release`:
+  the branch Runner reads, which only ever moves to the already-pushed `work`
+  tip. `local` remains private and must never be pushed. Feature, test,
+  packaging, and distribution work do not authorize another public branch;
+  using a separate checkout or worktree does not change this rule.
 - Keep AI-generated Markdown, plans, reports, scratch helpers, logs, recordings,
   captures, build output, and other temporary artifacts out of commits. Existing
   instruction files such as `AGENTS.md` are the Markdown exception. Preserve
@@ -304,8 +311,8 @@ it used (this one and any build or bench node):
 - Apps that embed the AI chat build only its CLI/MCP/cloud backends. The
   local model runtimes (Qwen on Metal/CUDA, the metallib and kernel builds)
   come in through the app's own `localai` cargo feature
-  (`cargo build --release -p <app> --features localai`, or in a Builder
-  catalog entry's `features`). It is on by default only where the app's own
+  (`cargo build --release -p <app> --features localai`, or in an entry's
+  `features` in `libs/app_registry/runner_apps.json`). It is on by default only where the app's own
   job runs local models: `apps/ai-hub`, route and files.
 
 ## App ownership, focus, and screenshots

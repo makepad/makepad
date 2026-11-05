@@ -10,7 +10,7 @@ palette (apps/code/src/ui/theme.rs). This script writes:
 
 Run from the repository root: python3 tools/app_icons/code/icons.py
 Then: sh tools/app_icons/render.sh apps/code/resources/icon.svg and copy
-icon_1024.png to code-icon.png (the Builder's bundle icon). Original
+icon_1024.png to code-icon.png (the bundle icon). Original
 artwork made for this project.
 """
 import os

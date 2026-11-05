@@ -23,9 +23,19 @@
 //! ```
 //!
 //! - **Ops record, boundaries run them.** Buffer and kernel ops are recorded into a segment; a
-//!   boundary (`read`, `flush`, `publish`, `state`, `inbox`, `wait_inbox`, the end of `run`)
-//!   runs it. The CPU device runs each kernel over the executor's workers; any worker count gives
-//!   the same bits, and so does the interpreter.
+//!   boundary (`read`, `fetch`, `take`, `flush`, `publish`, `state`, `remember`, `inbox`,
+//!   `wait_inbox`, the end of `run`) runs it. The CPU device runs each kernel over the executor's
+//!   workers; any worker count gives the same bits, and so does the interpreter.
+//! - **Reads that do not wait**: `let f = s.fetch(buf, at, n)` reads as `s.read` does, without
+//!   waiting; `s.take(f)` sends what was recorded since, then waits for the fetch's elements. A
+//!   GPU program checks its progress on what it sent last while the device runs what it sent
+//!   since.
+//! - **Kept results**: `s.remember(name, buf, inputs, with)` gives a buffer's elements to the
+//!   session's [`Keep`] (an AI hub node: the keep slot the session opened with), keyed by the
+//!   program, the name and type, the content of the named inputs and `with`; a later session of
+//!   the program made from the same takes them with `s.recall(name, type, inputs, with)` (nil
+//!   when nothing is kept: the program builds it). What an edit leaves alone (a hierarchy built
+//!   from a model that did not change) is built once.
 //! - **One thread unless own records**: a kernel runs on every worker only when each access to a
 //!   buffer it writes is `buf[i]` (its element's own record); `buf[i * 3 + k]` runs it on one
 //!   thread. Keep a vector's components in separate buffers, or write a record's values through
@@ -47,6 +57,7 @@
 pub mod codec;
 mod cpu;
 mod driver;
+pub mod gpu;
 mod session;
 mod value;
 pub mod wire;
@@ -64,7 +75,7 @@ pub mod programs {
 }
 
 pub use cpu::ElemTy;
-pub use session::{Class, Input, Limits, Output, OutputData, Program, ProgramError, Session, SessionConfig, Updates};
+pub use session::{Class, Input, Keep, Limits, Output, OutputData, Program, ProgramError, Session, SessionConfig, Updates};
 pub use value::Value;
 pub use makepad_script_compute::Backend;
 pub use makepad_script_compute_sched::sched::Executor;

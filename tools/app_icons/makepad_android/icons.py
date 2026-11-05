@@ -27,7 +27,7 @@ ANDROID_NS = "http://schemas.android.com/apk/res/android"
 ROOT = Path(__file__).resolve().parents[3]
 ARTWORK = Path(__file__).resolve().parent
 
-# tools/makepad_builder/resources/logo_makepad.svg: rgb(255,92,57).
+# Makepad's logo orange: rgb(255,92,57).
 ORANGE = "#ff5c39"
 # apps/wm/resources/icon.svg: flat average of #1b3354 -> #0b1627,
 # with the original light and blue. Keep every output on the same flat palette.

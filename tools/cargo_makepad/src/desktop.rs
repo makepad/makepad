@@ -104,7 +104,7 @@ fn write_windows_icon_resource(
 /// that one target's final link as a `cargo rustc` argument, never through
 /// RUSTFLAGS: those are in every crate's fingerprint, so alternating with a
 /// plain cargo build or another app's icon recompiled every crate. This way
-/// only the app crate itself rebuilds, as the Builder does it.
+/// only the app crate itself rebuilds.
 struct WindowsIconLink {
     res: PathBuf,
     bin: String,

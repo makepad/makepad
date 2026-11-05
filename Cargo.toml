@@ -79,10 +79,9 @@ workspace.members = [
     "apps/ai-hub",
     "apps/aihub",
     "apps/devhub",
+    "apps/devhub_panel",
     "apps/mixer",
     "apps/storybook",
-    # The tiled-RTS map generator, shared by the importer and the sandbox.
-    "libs/rtsmap",
     "libs/texcomp",
     "libs/ai/hub_ui",
     "libs/ai/hub_panel",
@@ -100,6 +99,7 @@ workspace.members = [
     "libs/ai/hub",
     # Long-running Splash compute programs (in-process and on hub nodes).
     "libs/compute_program",
+    "libs/compute_program_gpu",
     "libs/ai/livepipe",
     # Constructive solid geometry.
     "libs/csg/csg",
@@ -139,8 +139,8 @@ workspace.members = [
     "libs/strict_json",
     "libs/cell_width",
     "libs/source_slice",
-    "libs/loader_bundle",
     "libs/change_report",
+    "libs/toolchain",
     # === remesh (FaithC port) / xatlas (jpcy port) ===
     "libs/remesh",
     "libs/xatlas",
@@ -150,6 +150,7 @@ workspace.members = [
     "libs/model",
     # === examples ===
     "examples/teamtalk",
+    "examples/spritelab",
     "examples/app_host_probe",
     "examples/browser_capture_probe",
     "examples/layout_probe",
@@ -276,7 +277,6 @@ workspace.members = [
     "platform/video",
     "tools/cargo_makepad",
     "tools/cef_fetch",
-    "tools/makepad_builder",
     "libs/win_resource",
     # === OSM PBF -> tile archive + nav artifact bake passes (CLI + in-app) ===
     "libs/map_build",

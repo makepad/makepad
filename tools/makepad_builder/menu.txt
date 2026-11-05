@@ -1,6 +1,0 @@
-new|{mb} MB|download
-partial|download stopped|resume
-compile|needs compiling|compile
-update|update available|update
-ready|ready|run
-merge|updated · your changes to merge|merge with agent

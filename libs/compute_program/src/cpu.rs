@@ -70,6 +70,9 @@ pub(crate) enum Data {
     Owned(Vec<u32>),
     /// A session input, shared with the app by reference: read-only.
     Shared(Arc<[u32]>),
+    /// A buffer of this many words on the GPU device: the slot holds its place in the session's
+    /// table, the device its words.
+    Gpu(usize),
 }
 
 impl Data {
@@ -77,6 +80,7 @@ impl Data {
         match self {
             Data::Owned(v) => v,
             Data::Shared(a) => a,
+            Data::Gpu(_) => unreachable!("a CPU op names a GPU buffer: the driver checks each op's device"),
         }
     }
 }
@@ -88,11 +92,18 @@ pub(crate) struct Buffer {
 
 impl Buffer {
     pub(crate) fn len_words(&self) -> usize {
-        self.data.words().len()
+        match &self.data {
+            Data::Gpu(words) => *words,
+            data => data.words().len(),
+        }
     }
 
     pub(crate) fn read_only(&self) -> bool {
         matches!(self.data, Data::Shared(_))
+    }
+
+    pub(crate) fn on_gpu(&self) -> bool {
+        matches!(self.data, Data::Gpu(_))
     }
 }
 
@@ -320,10 +331,10 @@ impl CpuDevice {
         self.slots[slot].buffer.as_mut().expect("a recorded op names a live buffer")
     }
 
-    fn owned(&mut self, slot: usize) -> &mut Vec<u32> {
+    pub(crate) fn owned(&mut self, slot: usize) -> &mut Vec<u32> {
         match &mut self.buffer_mut(slot).data {
             Data::Owned(v) => v,
-            Data::Shared(_) => unreachable!("written buffers are checked at record time"),
+            Data::Shared(_) | Data::Gpu(_) => unreachable!("written buffers are checked at record time"),
         }
     }
 
@@ -339,7 +350,7 @@ impl CpuDevice {
         let from = from.buffer.as_ref().expect("a recorded op names a live buffer").data.words();
         match &mut to.buffer.as_mut().expect("a recorded op names a live buffer").data {
             Data::Owned(v) => (from, v),
-            Data::Shared(_) => unreachable!("written buffers are checked at record time"),
+            Data::Shared(_) | Data::Gpu(_) => unreachable!("written buffers are checked at record time"),
         }
     }
 

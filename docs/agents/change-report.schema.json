@@ -14,8 +14,8 @@
       "additionalProperties": false,
       "required": ["id", "release"],
       "properties": {
-        "id": {"$ref": "#/$defs/identifier", "description": "The app's id in the Builder (scope, stage, calculator, ...)."},
-        "release": {"$ref": "#/$defs/identifier", "description": "The release the edits were made against: \"release\" in builder/installed/<app>.json."}
+        "id": {"$ref": "#/$defs/identifier", "description": "The app's id (scope, stage, calculator, ...)."},
+        "release": {"$ref": "#/$defs/identifier", "description": "The release the edits were made against."}
       }
     },
     "base": {

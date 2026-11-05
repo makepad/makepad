@@ -1,6 +1,6 @@
 # Change reports: sending your changes to Makepad
 
-People who install Makepad apps with the Makepad Builder change the apps'
+People who run Makepad apps with the Makepad Runner change the apps'
 source with their own coding agent (Codex desktop, Codex CLI, Claude Code or
 any other). A change report tells Makepad what they changed, as concepts:
 what is different for someone using the app, and why. The person reads the
@@ -8,8 +8,7 @@ report before it is sent; nothing leaves their machine without that.
 
 This document is the format and the rules. `AGENTS.md` ("Sending your
 changes to Makepad") tells an agent how to write one; `libs/change_report`
-checks one exactly as described here, in the Builder before sending and on
-the server when it arrives. The JSON schema of `report.json` is
+checks one exactly as described here. The JSON schema of `report.json` is
 [change-report.schema.json](change-report.schema.json); a complete example
 is [change-report-example/report.json](change-report-example/report.json).
 
@@ -26,10 +25,6 @@ A change report is one zip file of at most **256 KB** holding exactly:
 No other files, no folders, no binaries: each file is UTF-8 text without NUL
 or other control characters (tabs and newlines are fine). A diff holds no
 `GIT binary patch`; leave images and other binary files out.
-
-The Builder can make the zip itself: an agent may leave the three files in
-a folder, `builder/changes/<app>-report/`, instead of a zip at
-`builder/changes/<app>-report.zip`.
 
 ## report.json
 
@@ -68,9 +63,9 @@ a folder, `builder/changes/<app>-report/`, instead of a zip at
 | field | | |
 |-------|---|---|
 | `format`, `version` | required | `"makepad-change-report"` and `1` |
-| `app.id` | required | the app's id in the Builder (`scope`, `stage`, `calculator`, ...) |
-| `app.release` | required | the release the edits were made against: `"release"` in `builder/installed/<app>.json` |
-| `base` | optional | that release's repositories and commits (`"repositories"` in the same file), at most 8 |
+| `app.id` | required | the app's id (`scope`, `stage`, `calculator`, ...) |
+| `app.release` | required | the release the edits were made against |
+| `base` | optional | that release's repositories and commits, at most 8 |
 | `summary` | optional | one paragraph, at most 2000 characters |
 | `changes` | required | 1 to 100 items |
 | `changes[].title` | required | one line, at most 120 characters |
@@ -89,8 +84,7 @@ nothing the person did not see listed.
 ## REPORT.md
 
 The same changes, for people. It must name every change by its exact title;
-otherwise its form is free. The Builder's own rendering, which agents may
-copy:
+otherwise its form is free. A rendering agents may copy:
 
 ```markdown
 # Changes to calculator (release 2026-09-20)
@@ -133,7 +127,7 @@ Public URLs (makepad.nl, github.com/makepad, documentation) and placeholder
 addresses (`@example.com`) may stay. Use these bracketed placeholders, not
 `<angle brackets>`, so every report reads the same.
 
-The Builder and the server run a safety-net scan of every file and refuse a
+`libs/change_report` runs a safety-net scan of every file and refuses a
 report that still holds an email address (other than `@example.*` and
 `@makepad.nl`), an absolute or home folder path, a well-known key or token
 format (`sk-…`, `ghp_…`, `AKIA…`, `xoxb-…`, private key blocks, `Bearer …`,
@@ -142,26 +136,10 @@ network address. The refusal names the file, line and kind of each finding.
 Names of people and personal details in prose cannot be found this way:
 they are the agent's to take out and the person's to check when reading.
 
-## Sending
-
-The person sends the report from the Builder (`e` on the app's row: the
-review page lists the changes, then Send anonymously, Send with my email,
-Read it all or Don't send), or the agent sends it after the person approved
-the list in the conversation:
-
-    makepad-builder.exe send-changes <app> [PATH] [--yes] [--with-email]   (Windows)
-    ./makepad-builder.sh send-changes <app> [PATH] [--yes] [--with-email]  (macOS, Linux)
-
-Without `--yes` it only checks the report and prints what would be sent.
-`--with-email` includes the address the Builder is logged in with, so
-Makepad can reply; the agent never sees it. A sent report is renamed
-`<app>-report-sent-<id>` in `builder/changes/`.
-
-`makepad-builder.exe changes <app>` / `./makepad-builder.sh changes <app>` prints the
-edits to describe: the diff of the app's source snapshot against the
-release it was checked out at (`--files` lists the files).
-
 ## The endpoint
+
+Not served yet: makepad.nl answers this route with 404, and nothing in the
+Runner sends a report.
 
     POST https://makepad.nl/api/feedback/changes
     X-Makepad-Feedback: 1
@@ -185,7 +163,7 @@ followed by `/changes`.
 | `429` | rate limit (shared with app feedback: 10 per client address and 300 overall per hour) |
 | `507` | feedback storage full |
 
-Without the Builder (a plain HTTP fallback):
+With curl:
 
     curl -sS -X POST -H 'X-Makepad-Feedback: 1' -H 'Content-Type: application/zip' \
          --data-binary @changes.zip https://makepad.nl/api/feedback/changes

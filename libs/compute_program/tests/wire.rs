@@ -58,6 +58,21 @@ fn a_damaged_payload_is_an_error() {
     }
 }
 
+/// An input's hash goes with its length and every word.
+#[test]
+fn an_inputs_hash_is_its_content() {
+    let words: Vec<u32> = (0..1000u32).map(|k| k.wrapping_mul(2654435761)).collect();
+    let h = wire::input_hash(&words);
+    assert_eq!(h, wire::input_hash(&words.clone()));
+    for at in [0, 7, 8, 999] {
+        let mut changed = words.clone();
+        changed[at] ^= 1;
+        assert_ne!(h, wire::input_hash(&changed), "word {at}");
+    }
+    assert_ne!(h, wire::input_hash(&words[..999]));
+    assert_ne!(wire::input_hash(&[]), wire::input_hash(&[0]));
+}
+
 #[test]
 fn frames_carry_their_values() {
     let value = Value::object(&[
@@ -73,19 +88,27 @@ fn frames_carry_their_values() {
         seed: 7,
         codec: Codec::DeltaLz4,
         class: Class::Background,
+        keep: "study 1".into(),
         inputs: vec![Input::f32("field", &[1.0, 2.5, -3.0]), Input::words("view", ElemTy::F64, vec![1, 2, 3, 4].into())],
     };
-    let back = wire::decode_open(&wire::encode_open(&open, 2), 1 << 20, 2).unwrap();
+    let (bytes, hashes) = wire::encode_open(&open, 2, &|_| false);
+    let (back, inputs) = wire::decode_open(&bytes, 1 << 20, 2).unwrap();
     assert_eq!(back.program.source, open.program.source);
     assert_eq!(back.params, value);
     assert_eq!(back.limits.fuel, 12345);
     assert_eq!(back.seed, 7);
     assert_eq!(back.class, Class::Background);
-    assert_eq!(back.inputs.len(), 2);
-    assert_eq!(back.inputs[0].data.to_vec(), [1.0f32, 2.5, -3.0].map(f32::to_bits).to_vec());
-    assert_eq!(back.inputs[1].ty, ElemTy::F64);
+    assert_eq!(back.keep, "study 1");
+    assert_eq!(inputs.len(), 2);
+    assert_eq!(inputs[0].data.as_ref().unwrap().to_vec(), [1.0f32, 2.5, -3.0].map(f32::to_bits).to_vec());
+    assert_eq!(inputs[1].ty, ElemTy::F64);
+    assert_eq!(inputs.iter().map(|i| i.hash).collect::<Vec<_>>(), hashes);
     // The node's input budget holds.
-    assert!(wire::decode_open(&wire::encode_open(&open, 2), 6, 2).is_err());
+    assert!(wire::decode_open(&bytes, 6, 2).is_err());
+    // An input the node keeps goes by its hash alone, and outside the budget.
+    let (bytes, _) = wire::encode_open(&open, 2, &|h| h == hashes[1]);
+    let (_, inputs) = wire::decode_open(&bytes, 3, 2).unwrap();
+    assert!(inputs[0].data.is_some() && inputs[1].data.is_none() && inputs[1].hash == hashes[1]);
 
     assert_eq!(wire::decode_msg(&wire::encode_msg("view", &value, true)).unwrap(), ("view".to_string(), value.clone(), true));
     assert_eq!(wire::decode_ack(&wire::encode_ack("tile", false, 9)).unwrap(), ("tile".to_string(), false, 9));
