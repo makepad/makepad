@@ -581,8 +581,40 @@ fn process_exists(pid: u32) -> bool {
     alive || std::io::Error::last_os_error().raw_os_error() != Some(3)
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn process_exists(pid: u32) -> bool {
+    use makepad_windows_sys::Win32::{
+        Foundation::{CloseHandle, E_INVALIDARG, STILL_ACTIVE},
+        System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
+    };
+    if pid == 0 {
+        return true;
+    }
+    // SAFETY: the handle OpenProcess returns is used only here and closed.
+    unsafe {
+        match OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) {
+            Ok(process) => {
+                // An open handle elsewhere keeps an exited process's object
+                // alive: only a process still running counts. One that exited
+                // with the STILL_ACTIVE code reads as running, which keeps
+                // the lock (its heartbeat age decides).
+                let mut code = 0u32;
+                let running = GetExitCodeProcess(process, &mut code).is_err()
+                    || code == STILL_ACTIVE.0 as u32;
+                let _ = CloseHandle(process);
+                running
+            }
+            // ERROR_INVALID_PARAMETER (E_INVALIDARG as an HRESULT): no process
+            // has this pid. Access denied (another user's or a protected
+            // process) means it exists.
+            Err(error) => error != E_INVALIDARG,
+        }
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
 fn process_exists(_pid: u32) -> bool {
+    // No other processes exist here (wasm).
     true
 }
 

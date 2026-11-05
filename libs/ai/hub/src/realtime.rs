@@ -2051,7 +2051,7 @@ mod tests {
 
     fn run_recording_session(
         params: LiveParams,
-        setup: impl FnOnce(&RealtimeSession) + Send + 'static,
+        setup: impl FnOnce(&RealtimeSession, &dyn Fn(usize)) + Send + 'static,
         done: impl Fn(&[SeenFrame]) -> bool,
         source: RgbImage,
     ) -> Vec<SeenFrame> {
@@ -2070,7 +2070,14 @@ mod tests {
                 run_live(&session, &mut backend, &cancel, |_, _, _, _| {})
             })
         };
-        setup(&session);
+        // Waits until the worker has made `n` frames: a control sent after
+        // it lands after those frames, however long they took.
+        let frames_seen = |n: usize| {
+            while seen.lock().unwrap().len() < n {
+                std::thread::yield_now();
+            }
+        };
+        setup(&session, &frames_seen);
         let deadline = Instant::now() + Duration::from_secs(10);
         while !done(&seen.lock().unwrap()) {
             assert!(Instant::now() < deadline, "timed out waiting for the session to reach the wanted state");
@@ -2149,7 +2156,7 @@ mod tests {
         let pushed = source.clone();
         let frames = run_recording_session(
             recording_params(LoopMode::Feed),
-            move |session| {
+            move |session, _| {
                 session.push_input_frame(pushed.clone());
                 session.push_input_frame(pushed);
             },
@@ -2170,7 +2177,7 @@ mod tests {
         let reference = source.clone();
         let frames = run_recording_session(
             recording_params(LoopMode::Feedback),
-            move |session| {
+            move |session, _| {
                 // Nothing for a while: the worker must wait, not fail.
                 std::thread::sleep(Duration::from_millis(120));
                 session.set_reference(0, reference);
@@ -2200,10 +2207,10 @@ mod tests {
         let pushed = source.clone();
         let frames = run_recording_session(
             recording_params(LoopMode::Feedback),
-            move |session| {
+            move |session, frames_seen| {
                 session.push_input_frame(pushed);
-                // Let a few frames run, then ask for a cold start.
-                std::thread::sleep(Duration::from_millis(60));
+                // Frames 0 (the cold start) and 1 (warm), then ask for a cold start.
+                frames_seen(2);
                 session.handle_text(r#"{"type":"control","reset":true}"#).unwrap();
             },
             |frames| frames.iter().filter(|f| !f.has_init).count() >= 2 && frames.len() >= 6,
@@ -2223,9 +2230,10 @@ mod tests {
         let pushed = source.clone();
         let frames = run_recording_session(
             recording_params(LoopMode::Feedback),
-            move |session| {
+            move |session, frames_seen| {
                 session.push_input_frame(pushed);
-                std::thread::sleep(Duration::from_millis(60));
+                // Frames 0 and 1 at the first size, then resize.
+                frames_seen(2);
                 session.handle_text(r#"{"type":"control","width":64,"height":48}"#).unwrap();
             },
             |frames| frames.iter().filter(|f| f.init_size == Some((64, 48))).count() >= 3,

@@ -111,6 +111,7 @@ pub mod motion_native_backend;
 pub mod motion_retarget;
 #[cfg(feature = "paint")]
 pub mod paint_backend;
+pub mod page_gate;
 pub mod peer;
 pub mod pipe;
 pub mod peer_fetch;

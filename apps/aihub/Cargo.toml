@@ -50,6 +50,7 @@ claude-stub = ["makepad-ai-hub/claude-stub"]
 makepad-widgets = { path = "../../widgets", default-features = false }
 makepad-shell-kit = { path = "../../libs/shell_kit" }
 makepad-ai-hub-panel = { path = "../../libs/ai/hub_panel" }
-makepad-ai-hub = { path = "../../libs/ai/hub", default-features = false }
+makepad-ai-hub = { path = "../../libs/ai/hub", default-features = false, features = ["kernel"] }
+makepad-compute-program-gpu = { path = "../../libs/compute_program_gpu" }
 makepad-network = { path = "../../platform/network" }
 makepad-strict-json = { path = "../../libs/strict_json" }

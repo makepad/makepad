@@ -10,7 +10,7 @@ use makepad_ai_hub::http_client::{http_fetch, HttpClientRequest};
 use makepad_ai_hub::protocol::{GenerateRequestJson, RealtimeRequestJson, RealtimeResponseJson};
 use makepad_ai_hub::realtime_wire::{self, FrameHeader, FrameKind};
 use makepad_ai_hub::registry::{Domain, Registry};
-use makepad_ai_hub::server::{start_service, ServiceConfig};
+use makepad_ai_hub::server::{control_post, start_service, ServiceConfig, ServiceHandle};
 use makepad_live_id::LiveId;
 use makepad_micro_serde::{DeJson, SerJson};
 use makepad_network::plain_web_socket::PlainWebSocket;
@@ -39,29 +39,44 @@ fn peer_off() -> makepad_ai_hub::peer_serve::PeerOptions {
     }
 }
 
+/// The test-pattern model alone: it needs no files and no GPU.
+const TESTPATTERN: &str = r#"{"models":[{"id":"testpattern","domain":"image","backend":"testpattern","available":true,"gated":false,"vram_gb":0.0,"files":[]}]}"#;
+
 /// The shipped registry and the test-pattern model (crate-internal: the shipped one does not
 /// advertise it).
 fn test_registry() -> Registry {
     let mut r = Registry::embedded().unwrap();
-    r.models.extend(Registry::parse(r#"{"models":[{"id":"testpattern","domain":"image","backend":"testpattern","available":true,"gated":false,"vram_gb":0.0,"files":[]}]}"#).unwrap().models);
+    r.models.extend(Registry::parse(TESTPATTERN).unwrap().models);
     r
 }
 
 fn start_test_service(name: &str) -> LocalService {
+    start_service_with(name, test_registry())
+}
+
+fn start_service_with(name: &str, registry: Registry) -> LocalService {
     let handle = start_service(ServiceConfig {
         host: "127.0.0.1".to_string(),
         port: 0,
         cache_dir: test_dir(name),
-        registry: test_registry(),
+        registry,
         downloader: Downloader::new("http://127.0.0.1:1", None).unwrap(),
         peer: peer_off(),
         fleet: makepad_ai_hub::discovery::DEFAULT_FLEET.to_string(),
     })
     .unwrap();
+    host_admits_work(&handle);
     let provider = LocalService::new(&format!("http://{}", handle.addr));
     // The service outlives the test; keep the singleton lock with it.
     std::mem::forget(handle);
     provider
+}
+
+/// The test is the service's host, as the window manager is for a real hub:
+/// it gives the box to AI work (UI First), so the local-use probe (on
+/// Windows: this desktop in use) does not close admission under the tests.
+fn host_admits_work(handle: &ServiceHandle) {
+    control_post(&handle.shared, "/control/local-use", br#"{"mode":"ui-first"}"#).unwrap();
 }
 
 fn poll_until_done(provider: &LocalService, job_id: &str) -> Vec<(String, String)> {
@@ -204,9 +219,10 @@ fn generate_testpattern_end_to_end() {
 
 #[test]
 fn model_picked_by_domain_when_unnamed() {
-    let provider = start_test_service("bydomain");
-    // Empty model + image domain -> the provider picks testpattern (the only
-    // available image model in a no-flux build).
+    // Its own registry, the test-pattern model alone: which shipped models are
+    // available depends on the build's features and the platform.
+    let provider = start_service_with("bydomain", Registry::parse(TESTPATTERN).unwrap());
+    // Empty model + image domain -> the provider picks testpattern.
     let job_id = provider
         .request(
             Domain::Image,
@@ -221,16 +237,11 @@ fn model_picked_by_domain_when_unnamed() {
     let artifacts = poll_until_done(&provider, &job_id);
     assert_eq!(artifacts.len(), 1);
 
-    // Mesh domain has no available model in the default (stub) build ->
-    // clean error. (A `--features mesh` build compiles the real trellis
-    // backend, so the domain IS routable there and this check doesn't apply.)
-    #[cfg(not(feature = "mesh"))]
-    {
-        let err = provider
-            .request(Domain::Mesh, &GenerateRequestJson::default())
-            .unwrap_err();
-        assert!(matches!(err, AssetAiError::Unavailable(_)));
-    }
+    // A domain with no available model -> clean error.
+    let err = provider
+        .request(Domain::Mesh, &GenerateRequestJson::default())
+        .unwrap_err();
+    assert!(matches!(err, AssetAiError::Unavailable(_)));
 }
 
 #[test]
@@ -940,8 +951,7 @@ fn realtime_h264_round_trip_input_and_output() {
 fn a_board_cancel_stops_the_hub_job_on_its_node() {
     use makepad_ai_hub::board::BoardGen;
     use makepad_ai_hub::job::{process_origin, FixedRouter, GenJob, JobPoll, Want};
-    // Its own registry: the test-pattern model alone (it needs no files and no GPU).
-    let registry = Registry::parse(r#"{"models":[{"id":"testpattern","domain":"image","backend":"testpattern","available":true,"gated":false,"vram_gb":0.0,"files":[]}]}"#).unwrap();
+    let registry = Registry::parse(TESTPATTERN).unwrap();
     let handle = start_service(ServiceConfig {
         host: "127.0.0.1".to_string(),
         port: 0,
@@ -952,6 +962,7 @@ fn a_board_cancel_stops_the_hub_job_on_its_node() {
         fleet: makepad_ai_hub::discovery::DEFAULT_FLEET.to_string(),
     })
     .unwrap();
+    host_admits_work(&handle);
     let base = format!("http://{}", handle.addr);
     let provider = LocalService::new(&base);
     std::mem::forget(handle);

@@ -407,8 +407,8 @@ fn build_cuda_backends(target_os: &str, require_cuda: bool) {
 /// device itself. No console (CI, a piped build, a GUI invocation) simply
 /// means no progress lines; the `cargo:warning` summary still records what
 /// happened.
-/// Where the kernel progress goes: the terminal, or, when a front end such as
-/// the Makepad Builder draws the build itself, the one-line status file it
+/// Where the kernel progress goes: the terminal, or, when a front end
+/// draws the build itself, the one-line status file it
 /// names in `MAKEPAD_BUILD_STATUS_FILE`, so the lines never land on top of
 /// its screen. The variable is read, not declared as a rerun trigger, so
 /// setting it never rebuilds anything.
@@ -694,8 +694,7 @@ fn is_toolkit_root(path: &Path, target_os: &str) -> bool {
 }
 
 /// The one toolkit a build may use: the root named by `MAKEPAD_CUDA_ROOT`
-/// (the Makepad Builder's private CUDA, or a build box that opts in the same
-/// way). A system install is never picked up: CUDA_PATH, CUDA_HOME and the
+/// (a build box that opts in). A system install is never picked up: CUDA_PATH, CUDA_HOME and the
 /// usual install folders are ignored, because an exe linked against a system
 /// toolkit then needs that toolkit's DLLs on PATH wherever it runs.
 fn cuda_root(target_os: &str) -> Option<PathBuf> {

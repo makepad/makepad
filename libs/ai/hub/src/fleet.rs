@@ -510,9 +510,9 @@ fn vram_admission(
     // actually enforce residency: a v0.2+ node publishes it and retires
     // co-resident models plus byte-gates every load before a job runs. A
     // legacy node publishes nothing and enforces nothing, so routing must
-    // trust only its raw memory facts — never its "loaded" labels. (The .89
+    // trust only its raw memory facts — never its "loaded" labels. (An earlier
     // incident: flux1-schnell 24 GB + moss 7 GB + sa3 3 GB resident on a
-    // 32.6 GB card left 155 MB free; every warm denoise paged over PCIe and
+    // 33 GB card left 155 MB free; every warm denoise paged over PCIe and
     // a 1.6 s FLUX job took 47.2 s. The target being "loaded" was the trap.)
     let enforcing = health.vram_reserve_mb.is_some();
     let reserve_mb = health
@@ -733,7 +733,7 @@ pub fn affinity_reason(score: u32) -> &'static str {
 /// would have to download the weights, never past an idle box onto a busy
 /// one, and never past a role: those rules are decided before it is read.
 const GPU_CLASSES: &[(u64, u32, f64)] = &[
-    (80_000, 3, 1.6), // a 96 GB workstation card
+    (80_000, 3, 1.6), // a workstation card
     (28_000, 2, 1.3), // a 32 GB card
     (20_000, 1, 1.0), // a 24 GB card
 ];
@@ -1799,9 +1799,8 @@ mod tests {
 
     #[test]
     fn the_default_role_list_keeps_the_chat_box_on_chat() {
-        // The ratified fleet end state, as data: chat and text live on the
-        // workstation card (82 GB free beside the live model) since the 32 GB card was
-        // turned over to the live-feed pool on the user's order.
+        // A fleet's end state, as data: chat and text live on one box while the others
+        // serve other pools.
         let roles = FleetRoles::parse(TEST_FLEET_ROLES);
         assert!(roles.allows("http://192.0.2.76:8123", "chat"));
         assert!(roles.allows("http://192.0.2.76:8123", "text"));
@@ -1907,7 +1906,7 @@ mod tests {
             model
         };
         let big = |url: &str, models: Vec<ModelInfoJson>| {
-            let mut snapshot = snap(url, 96 * 1024, 96 * 1024);
+            let mut snapshot = snap(url, 100 * 1024, 100 * 1024);
             snapshot.models = models;
             snapshot
         };
@@ -2127,32 +2126,32 @@ mod tests {
     /// a different thing from being excluded.
     #[test]
     fn a_faster_gpu_breaks_a_tie_and_an_unranked_card_never_wins_one() {
-        assert_eq!(gpu_speed(97_887), 3);
-        assert_eq!(gpu_speed(32_607), 2);
-        assert_eq!(gpu_speed(24_564), 1);
+        assert_eq!(gpu_speed(100_000), 3);
+        assert_eq!(gpu_speed(33_000), 2);
+        assert_eq!(gpu_speed(25_000), 1);
         assert_eq!(gpu_speed(12_288), 0);
         assert_eq!(gpu_speed(0), 0);
         // A box that names no GPU ranks with the unranked, whatever memory it reports.
         assert_eq!(gpu_rank(&snapshot("http://quiet", 0, Vec::new())), 0);
-        assert_eq!(gpu_rank(&with_vram(snapshot("http://quiet", 0, Vec::new()), 90_000, 97_887, 0)), 0);
+        assert_eq!(gpu_rank(&with_vram(snapshot("http://quiet", 0, Vec::new()), 90_000, 100_000, 0)), 0);
 
         let ready = || vec![model("m", "image", MODEL_STATE_READY, true)];
         let fleet = vec![
-            with_gpu(snapshot("http://a", 0, ready()), "NVIDIA GeForce Test 24 GB", 24_564),
-            with_gpu(snapshot("http://b", 0, ready()), "NVIDIA RTX PRO Test Workstation Edition", 97_887),
-            with_gpu(snapshot("http://c", 0, ready()), "NVIDIA GeForce Test 32 GB", 32_607),
+            with_gpu(snapshot("http://a", 0, ready()), "Test GPU small", 25_000),
+            with_gpu(snapshot("http://b", 0, ready()), "Test GPU large", 100_000),
+            with_gpu(snapshot("http://c", 0, ready()), "Test GPU mid", 33_000),
         ];
-        assert_eq!(pick_box(&fleet, "m"), Some(1), "96 GB > 32 GB > 24 GB");
+        assert_eq!(pick_box(&fleet, "m"), Some(1), "large > mid > small");
         assert_eq!(pick_for_domain(&fleet, "image"), Some((1, "m".to_string())));
 
-        // But it never outranks the weights: the 24 GB card HOLDS the model
-        // and the workstation card would have to fetch it.
+        // But it never outranks the weights: the small card HOLDS the model
+        // and the large card would have to fetch it.
         let cold_fast = vec![
-            with_gpu(snapshot("http://a", 0, ready()), "NVIDIA GeForce Test 24 GB", 24_564),
+            with_gpu(snapshot("http://a", 0, ready()), "Test GPU small", 25_000),
             with_gpu(
                 snapshot("http://b", 0, vec![model("m", "image", MODEL_STATE_ABSENT, true)]),
-                "NVIDIA RTX PRO Test Workstation Edition",
-                97_887,
+                "Test GPU large",
+                100_000,
             ),
         ];
         assert_eq!(pick_box(&cold_fast, "m"), Some(0));
@@ -2163,9 +2162,9 @@ mod tests {
 
     #[test]
     fn gpu_eta_throughput_has_a_conservative_unknown_floor() {
-        assert_eq!(gpu_throughput(97_887), 1.6);
-        assert_eq!(gpu_throughput(32_607), 1.3);
-        assert_eq!(gpu_throughput(24_564), 1.0);
+        assert_eq!(gpu_throughput(100_000), 1.6);
+        assert_eq!(gpu_throughput(33_000), 1.3);
+        assert_eq!(gpu_throughput(25_000), 1.0);
         assert_eq!(gpu_throughput(12_288), 0.7);
         assert_eq!(
             gpu_throughput_of(&snapshot("http://quiet", 0, Vec::new())),
@@ -2174,8 +2173,8 @@ mod tests {
         assert_eq!(
             gpu_throughput_of(&with_gpu(
                 snapshot("http://fast", 0, Vec::new()),
-                "NVIDIA GeForce Test 32 GB",
-                32_607,
+                "Test GPU mid",
+                33_000,
             )),
             1.3
         );
@@ -2373,8 +2372,8 @@ mod tests {
         let fleet = vec![
             with_gpu(
                 snapshot("http://ready-fast", 0, vec![ready]),
-                "NVIDIA RTX PRO Test Workstation Edition",
-                97_887,
+                "Test GPU large",
+                100_000,
             ),
             with_gpu(
                 snapshot(
@@ -2382,7 +2381,7 @@ mod tests {
                     0,
                     vec![model("m", "image", MODEL_STATE_LOADED, true)],
                 ),
-                "NVIDIA Test 16 GB",
+                "Test GPU tiny",
                 16_384,
             ),
         ];
@@ -2594,17 +2593,17 @@ mod tests {
     }
 
     #[test]
-    fn full_h3_excludes_small_gpus_and_waits_for_free_vram_on_96gb() {
+    fn full_h3_excludes_small_gpus_and_waits_for_free_vram_on_the_largest_card() {
         let mut h3 = model("minimax-h3", "video", MODEL_STATE_READY, true);
         h3.vram_gb = Some(90.0);
         let mut snaps = vec![
             // Required admission = 90 GiB estimate + 2 GiB reserve = 94,208
-            // MiB. The 96 GB card can fit it in total, but not while only 24
+            // MiB. The largest card can fit it in total, but not while only 24
             // GiB is free.
             with_vram(
                 snapshot("http://192.0.2.80:8123", 0, vec![h3.clone()]),
                 24 * 1024,
-                96 * 1024,
+                100 * 1024,
                 2 * 1024,
             ),
             with_vram(
@@ -2637,14 +2636,14 @@ mod tests {
             Some(VramAdmission::Incompatible { .. })
         ));
 
-        // Capability selection retains only the 96 GiB node, allowing the
+        // Capability selection retains only the largest node, allowing the
         // app scheduler to classify this as WAIT rather than a service gap.
         assert_eq!(pick_box_scored(&snaps, "minimax-h3"), Some((0, 3)));
         assert_eq!(
             pick_for_domain_scored(&snaps, "video"),
             Some((0, "minimax-h3".to_string(), 3))
         );
-        // Dispatch selection refuses every node until the 96 GiB one has enough free.
+        // Dispatch selection refuses every node until the largest one has enough free.
         assert_eq!(pick_box_admitted(&snaps, "minimax-h3"), None);
         assert_eq!(pick_for_domain_admitted(&snaps, "video"), None);
 
@@ -2661,36 +2660,36 @@ mod tests {
     }
 
     #[test]
-    fn usable_vram_excludes_a_32gb_card_for_flux2_but_admits_a_96gb_card() {
+    fn usable_vram_excludes_a_mid_card_for_flux2_but_admits_a_large_one() {
         let mut flux2 = model("flux2-dev", "image", MODEL_STATE_READY, true);
         flux2.vram_gb = Some(29.0);
-        let mut card32 = with_vram(
+        let mut card_mid = with_vram(
             snapshot("http://192.0.2.89", 0, vec![flux2.clone()]),
-            29_785,
-            32_607,
+            29_500,
+            33_000,
             2_048,
         );
-        card32.health.as_mut().unwrap().vram_usable_mb = Some(30_603);
-        let mut card96 = with_vram(
-            snapshot("http://card-96", 0, vec![flux2]),
-            36_535,
-            97_887,
+        card_mid.health.as_mut().unwrap().vram_usable_mb = Some(30_000);
+        let mut card_large = with_vram(
+            snapshot("http://card-large", 0, vec![flux2]),
+            36_000,
+            100_000,
             2_048,
         );
-        card96.health.as_mut().unwrap().vram_usable_mb = Some(36_535);
+        card_large.health.as_mut().unwrap().vram_usable_mb = Some(36_000);
 
         assert_eq!(
-            model_admission(&card32, "flux2-dev"),
+            model_admission(&card_mid, "flux2-dev"),
             Some(VramAdmission::Incompatible {
                 required_total_mb: 31_744,
-                total_mb: 30_603,
+                total_mb: 30_000,
             })
         );
         assert_eq!(
-            model_admission(&card96, "flux2-dev"),
+            model_admission(&card_large, "flux2-dev"),
             Some(VramAdmission::Admitted)
         );
-        assert_eq!(pick_box_admitted(&[card32, card96], "flux2-dev"), Some(1));
+        assert_eq!(pick_box_admitted(&[card_mid, card_large], "flux2-dev"), Some(1));
     }
 
     #[test]
@@ -2706,8 +2705,8 @@ mod tests {
         );
         let large = with_vram(
             snapshot("http://large.example", 0, vec![flux2]),
-            96 * 1_024,
-            96 * 1_024,
+            100 * 1_024,
+            100 * 1_024,
             2 * 1_024,
         );
         let baseline = image_request(1_024, 1_024, 8);
@@ -2747,7 +2746,7 @@ mod tests {
         let snap = with_vram(
             snapshot("http://loaded.example", 0, vec![flux2]),
             2 * 1_024,
-            96 * 1_024,
+            100 * 1_024,
             2 * 1_024,
         );
 
@@ -2780,8 +2779,8 @@ mod tests {
         let fleet = vec![
             with_gpu(
                 snapshot("http://ready-fast.example", 0, vec![ready]),
-                "NVIDIA RTX PRO Test Workstation Edition",
-                97_887,
+                "Test GPU large",
+                100_000,
             ),
             with_gpu(
                 snapshot(
@@ -2789,7 +2788,7 @@ mod tests {
                     0,
                     vec![model("same-model", "image", MODEL_STATE_LOADED, true)],
                 ),
-                "NVIDIA Test 16 GB",
+                "Test GPU tiny",
                 16_384,
             ),
         ];
@@ -2843,7 +2842,7 @@ mod tests {
         let mut snap = with_vram(
             snapshot("http://gpuc", 0, vec![h3]),
             2 * 1024,
-            96 * 1024,
+            100 * 1024,
             2 * 1024,
         );
         snap.health
@@ -2875,7 +2874,7 @@ mod tests {
         let mut sa3 = model("sa3-sfx", "audio", MODEL_STATE_LOADED, true);
         sa3.vram_gb = Some(3.0);
         let snap = with_vram(
-            snapshot("http://card32", 0, vec![target, flux, moss, sa3]),
+            snapshot("http://card_mid", 0, vec![target, flux, moss, sa3]),
             166,
             32 * 1024,
             2 * 1024,
@@ -2898,7 +2897,7 @@ mod tests {
         let mut resident = model("small", "audio", MODEL_STATE_LOADED, true);
         resident.vram_gb = Some(3.0);
         let snap = with_vram(
-            snapshot("http://card32", 0, vec![target, resident]),
+            snapshot("http://card_mid", 0, vec![target, resident]),
             512,
             32 * 1024,
             2 * 1024,
@@ -2914,8 +2913,8 @@ mod tests {
         assert_eq!(pick_box_admitted(&[snap], "large"), None);
     }
 
-    /// The exact .89 production incident: flux1-schnell 24 GB + moss 7 GB +
-    /// sa3 3 GB all resident on a 32,607 MB card, 155 MB free. On a legacy
+    /// A production incident: flux1-schnell 24 GB + moss 7 GB +
+    /// sa3 3 GB all resident on a 33,000 MB card, 155 MB free. On a legacy
     /// node nothing will evict the co-residents, so the "loaded" flux target
     /// paged every denoise over PCIe (47.2 s for a warm 1.6 s job). Routing
     /// must not prefer it — and must not lend a legacy node the enforcing
@@ -2934,7 +2933,7 @@ mod tests {
         let legacy = with_legacy_vram(
             snapshot("http://192.0.2.99:8765", 0, models.clone()),
             155,
-            32_607,
+            33_000,
         );
 
         // Resident target: loaded-set estimates (34,816 MB + reserve) exceed
@@ -2960,7 +2959,7 @@ mod tests {
         let enforcing = with_vram(
             snapshot("http://192.0.2.99:8765", 0, models),
             155,
-            32_607,
+            33_000,
             2 * 1024,
         );
         assert_eq!(
@@ -2983,7 +2982,7 @@ mod tests {
         let legacy = with_legacy_vram(
             snapshot("http://gpuc", 0, vec![flux]),
             70 * 1024,
-            96 * 1024,
+            100 * 1024,
         );
         assert_eq!(
             model_admission(&legacy, "flux1-schnell"),
@@ -3001,9 +3000,9 @@ mod tests {
         let mut flux = model("flux1-schnell", "image", MODEL_STATE_LOADED, true);
         flux.vram_gb = Some(24.0);
         let enforcing = with_vram(
-            snapshot("http://card32", 0, vec![flux.clone()]),
+            snapshot("http://card_mid", 0, vec![flux.clone()]),
             1_500,
-            32_607,
+            33_000,
             2 * 1024,
         );
         assert_eq!(
@@ -3015,7 +3014,7 @@ mod tests {
         // The identical shape on a legacy node fails closed: the set fits by
         // estimate, but 1,500 MB free is under the workspace reserve and no
         // service-side gate exists to defend the job.
-        let legacy = with_legacy_vram(snapshot("http://card32", 0, vec![flux]), 1_500, 32_607);
+        let legacy = with_legacy_vram(snapshot("http://card_mid", 0, vec![flux]), 1_500, 33_000);
         assert_eq!(
             model_admission(&legacy, "flux1-schnell"),
             Some(VramAdmission::Waiting {
@@ -3042,7 +3041,7 @@ mod tests {
         let legacy = with_legacy_vram(
             snapshot("http://192.0.2.99:8765", 0, vec![flux, moss, sa3, synthetic]),
             155,
-            32_607,
+            33_000,
         );
 
         assert_eq!(pick_for_domain_admitted(&[legacy.clone()], "image"), None);

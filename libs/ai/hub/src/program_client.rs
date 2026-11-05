@@ -10,7 +10,7 @@
 //! [`ProgramError::Lost`].
 
 use crate::error::AssetAiError;
-use crate::kernel_client::KernelStream;
+use crate::kernel_client::{KernelStream, Look};
 use makepad_compute_program::codec::Codec;
 use makepad_compute_program::wire;
 use makepad_compute_program::{Class, Input, Limits, Program, ProgramError, Updates, Value};
@@ -27,15 +27,19 @@ pub struct RemoteConfig {
     pub inputs: Vec<Input>,
     pub limits: Limits,
     pub seed: u32,
-    /// How the node codes outputs (and the app its inputs).
-    pub codec: Codec,
+    /// How the node codes outputs (and the app its inputs); None: the stream's
+    /// ([`KernelStream::codec`]: as they are on loopback).
+    pub codec: Option<Codec>,
     /// Who waits on it: the node runs the program at this class.
     pub class: Class,
+    /// The slot on the stream the node keeps the inputs in, in place of what it held, so a later
+    /// open sends the ones that did not change by their hash alone (empty: none).
+    pub keep: String,
 }
 
 impl Default for RemoteConfig {
     fn default() -> RemoteConfig {
-        RemoteConfig { params: Value::Nil, inputs: Vec::new(), limits: Limits::default(), seed: 0, codec: Codec::DeltaLz4, class: Class::Visible }
+        RemoteConfig { params: Value::Nil, inputs: Vec::new(), limits: Limits::default(), seed: 0, codec: None, class: Class::Visible, keep: String::new() }
     }
 }
 
@@ -53,10 +57,21 @@ impl RemoteSession {
     /// Opens `program` on the stream's node: Err when the node refuses it (busy, over its
     /// limits) or the stream breaks.
     pub fn open(stream: &Arc<KernelStream>, program: &Program, config: RemoteConfig) -> Result<RemoteSession, AssetAiError> {
+        let opened = Self::open_unless(stream, program, config, &mut || false)?;
+        Ok(opened.expect("an open that never goes stale ends with the node's answer"))
+    }
+
+    /// [`Self::open`], for a node that may never answer: `stale` is asked every so often while
+    /// it says nothing, and None comes back once it says yes (a session the node opens after
+    /// that is cancelled as its answer comes).
+    pub fn open_unless(stream: &Arc<KernelStream>, program: &Program, config: RemoteConfig, stale: &mut dyn FnMut() -> bool) -> Result<Option<RemoteSession>, AssetAiError> {
         let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
-        let open = wire::Open { program: program.clone(), params: config.params, limits: config.limits, seed: config.seed, codec: config.codec, class: config.class, inputs: config.inputs };
-        let (id, device) = stream.program_open(&wire::encode_open(&open, threads))?;
-        Ok(RemoteSession { stream: stream.clone(), id, device, rev: AtomicU64::new(0), end: Mutex::new(None), threads })
+        let codec = config.codec.unwrap_or_else(|| stream.codec());
+        let open = wire::Open { program: program.clone(), params: config.params, limits: config.limits, seed: config.seed, codec, class: config.class, keep: config.keep, inputs: config.inputs };
+        let Some((id, device)) = stream.program_open(&open, threads, stale)? else {
+            return Ok(None);
+        };
+        Ok(Some(RemoteSession { stream: stream.clone(), id, device, rev: AtomicU64::new(0), end: Mutex::new(None), threads }))
     }
 
     /// What the program runs on: `{kind, backend, threads}`.
@@ -88,7 +103,7 @@ impl RemoteSession {
 
     /// What came since the last look (never blocks on the network).
     pub fn poll(&self) -> Updates {
-        self.take(false).0
+        self.take(Look::Now).0
     }
 
     /// What came since the last look, waiting for something or a [`Self::wake`] (then it may
@@ -96,11 +111,18 @@ impl RemoteSession {
     pub fn wait(&self) -> Updates {
         loop {
             let ended = self.ended();
-            let (u, woken) = self.take(!ended);
+            let (u, woken) = self.take(if ended { Look::Now } else { Look::Until });
             if !u.is_empty() || woken || ended {
                 return u;
             }
         }
+    }
+
+    /// What came since the last look, waiting at most `wait` for something or a [`Self::wake`]
+    /// (then it may be empty); once the program ended, never waits: for a thread that has its
+    /// own question to ask while the program says nothing.
+    pub fn wait_within(&self, wait: std::time::Duration) -> Updates {
+        self.take(if self.ended() { Look::Now } else { Look::Within(wait) }).0
     }
 
     /// Makes a [`Self::wait`] (now or the next) return: for a thread that waits on the program
@@ -115,7 +137,7 @@ impl RemoteSession {
             if let Some(end) = self.end.lock().unwrap().clone() {
                 return end;
             }
-            self.take(true);
+            self.take(Look::Until);
         }
     }
 
@@ -123,8 +145,8 @@ impl RemoteSession {
         self.end.lock().unwrap().is_some()
     }
 
-    fn take(&self, block: bool) -> (Updates, bool) {
-        let (frames, woken, closed) = self.stream.program_take(self.id, block);
+    fn take(&self, look: Look) -> (Updates, bool) {
+        let (frames, woken, closed) = self.stream.program_take(self.id, look);
         let mut out = Updates::default();
         for frame in frames {
             match wire::decode_update(&frame, MAX_OUTPUT_ELEMENTS, self.threads) {

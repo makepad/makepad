@@ -31,7 +31,7 @@ path = "src/main.rs"
 [features]
 default = ["tweaker", "engine", "gen"]
 # The design overlay (Shift+F10 with the dev overlays on). On for development
-# builds; the Builder's releases build without it (--no-default-features).
+# builds; the Runner's releases build without it (--no-default-features).
 tweaker = ["dep:makepad-widgets-tweaker", "makepad-widgets/data", "makepad-widgets/dock", "makepad-widgets/fab"]
 # The chat backends: the person's own Claude Code / Codex CLIs, Claude
 # Desktop over MCP, the Claude API. No model runtime. Off for a build

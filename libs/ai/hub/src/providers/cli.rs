@@ -16,7 +16,7 @@
 //! format ([`crate::providers::claude::parse_stream_line`]), `codex` speaks
 //! its own item/turn events ([`crate::providers::codex_cli`]).
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -34,13 +34,18 @@ enum IoLine {
 /// loudly, not fall back to whatever is on `$PATH`. Otherwise `$PATH`, then
 /// the vendors' usual install dirs (`extra` may use a leading `~`).
 pub fn find_cli(env_override: &str, name: &str, extra: &[&str]) -> Option<PathBuf> {
-    if let Ok(p) = std::env::var(env_override) {
+    // USERPROFILE on Windows (HOME is usually unset there), HOME elsewhere.
+    let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).unwrap_or_default();
+    find_cli_from(std::env::var_os(env_override), std::env::var_os("PATH").as_deref(), Path::new(&home), name, extra)
+}
+
+/// [`find_cli`] with the override, `PATH` and the home dir given.
+fn find_cli_from(override_path: Option<OsString>, path: Option<&OsStr>, home: &Path, name: &str, extra: &[&str]) -> Option<PathBuf> {
+    if let Some(p) = override_path {
         let p = PathBuf::from(p);
         return p.is_file().then_some(p);
     }
-    // USERPROFILE on Windows (HOME is usually unset there), HOME elsewhere.
-    let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).unwrap_or_default();
-    find_cli_in(std::env::var_os("PATH").as_deref(), Path::new(&home), name, extra)
+    find_cli_in(path, home, name, extra)
 }
 
 /// [`find_cli`] past the override, with `PATH` and the home dir given.
@@ -495,13 +500,21 @@ mod tests {
 
     #[test]
     fn a_wrong_override_never_falls_back() {
-        // The override names a directory, not a file: nothing on PATH may
-        // be substituted for it.
-        std::env::set_var("MAKEPAD_TEST_CLI_OVERRIDE", std::env::temp_dir());
-        assert!(find_cli("MAKEPAD_TEST_CLI_OVERRIDE", "sh", &[]).is_none());
-        std::env::remove_var("MAKEPAD_TEST_CLI_OVERRIDE");
-        // Without it, a PATH binary is found.
-        assert!(find_cli("MAKEPAD_TEST_CLI_OVERRIDE_UNSET", "sh", &[]).is_some());
+        let root = std::env::temp_dir().join(format!("makepad-find-cli-override-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (bin, nowhere) = (root.join("bin"), root.join("nowhere"));
+        std::fs::create_dir_all(&bin).unwrap();
+        // The CLI on PATH: a file the test writes (on Windows a command is a
+        // file named with a PATHEXT extension).
+        let cli = bin.join(if cfg!(windows) { "fake-cli.exe" } else { "fake-cli" });
+        std::fs::write(&cli, b"").unwrap();
+        let path = std::env::join_paths([&bin]).unwrap();
+        // The override names a directory, not a file: the PATH binary may
+        // not be substituted for it.
+        assert_eq!(find_cli_from(Some(root.clone().into_os_string()), Some(&path), &nowhere, "fake-cli", &[]), None);
+        // Without it, the PATH binary is found.
+        assert_eq!(find_cli_from(None, Some(&path), &nowhere, "fake-cli", &[]), Some(cli));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[cfg(windows)]

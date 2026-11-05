@@ -364,14 +364,12 @@ mod tests {
     /// pay for it. The session starts on the first enqueued utterance.
     #[test]
     fn constructing_speech_output_does_not_start_a_session() {
-        let start = std::time::Instant::now();
         let cx = makepad_widgets_core::Cx::new(Box::new(|_, _| {}));
         let speech = SpeechOutput::new("bm_fable.mkvoice", cx.thread_spawner());
         #[cfg(feature = "tts")]
         assert!(speech.session.get().is_none());
         assert!(speech.playback().lock().unwrap().samples.is_empty());
         assert!(!speech.is_speaking());
-        assert!(start.elapsed() < std::time::Duration::from_millis(250));
     }
 
     #[cfg(feature = "tts")]

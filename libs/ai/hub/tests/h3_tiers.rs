@@ -19,8 +19,8 @@ fn gpu(vram_total_mb: u64, compute_cap: f64) -> GpuInfo {
 }
 
 /// The embedded registry's three tier manifests drive the exact fleet
-/// placement matrix: q4 on the GPU-A+, nvfp4 on Blackwell 32GB+, bf16 on the
-/// 96GB box — and never the other way around.
+/// placement matrix: q4 on the GPU-A+, nvfp4 on Blackwell 32GB+, bf16 on a
+/// 96 GB card — and never the other way around.
 #[test]
 fn tier_manifests_place_on_the_fleet_exactly() {
     let registry = Registry::embedded().unwrap();
@@ -55,10 +55,11 @@ fn tier_manifests_place_on_the_fleet_exactly() {
     assert!(tier_plan_for_spec(nv4).unwrap().staged);
     assert!(!tier_plan_for_spec(bf16).unwrap().staged);
 
-    // The fleet placement matrix, driven entirely by registry data.
-    let gpua = gpu(24_564, 8.9); // .59
-    let gpub = gpu(32_607, 12.0); // .89
-    let gpuc = gpu(97_887, 12.0); // .80
+    // The fleet placement matrix, driven entirely by registry data. Each class's total is
+    // rounded down from what its cards report, so what fits here fits on them.
+    let gpua = gpu(24_000, 8.9);
+    let gpub = gpu(32_000, 12.0);
+    let gpuc = gpu(96_000, 12.0);
     let gate = |spec: &makepad_ai_hub::registry::ModelSpec, gpu: &GpuInfo| {
         check_gpu_requirements(&spec.id, spec.min_vram_gb, spec.min_compute_cap, gpu)
     };
@@ -75,14 +76,14 @@ fn tier_manifests_place_on_the_fleet_exactly() {
     assert!(gate(bf16, &gpua).is_err());
     assert!(gate(bf16, &gpub).is_err());
     assert!(gate(bf16, &gpuc).is_ok());
-    // Same VRAM class as the bf16 tree: the 96GB box only.
+    // Same VRAM class as the bf16 tree: a 96 GB card only.
     assert!(gate(fast, &gpua).is_err());
     assert!(gate(fast, &gpub).is_err());
     assert!(gate(fast, &gpuc).is_ok());
 
     // Service discovery and the fleet scheduler add the safety reserve to
-    // `vram_gb`. Pin this second gate against the actual NVML totals: the
-    // named quant tiers must remain routable on their real cards, not merely
+    // `vram_gb`. Pin this second gate against each class's total: the
+    // named quant tiers must remain routable on their cards, not merely
     // pass the backend's independent min-VRAM/compute-cap checks above.
     let required = |spec: &makepad_ai_hub::registry::ModelSpec| {
         estimated_peak_mb(spec).saturating_add(DEFAULT_RESERVE_MB)

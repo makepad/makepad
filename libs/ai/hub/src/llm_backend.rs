@@ -1448,7 +1448,7 @@ mod llama_worker {
     /// with the tokens in it — the attention kernel's pass over the key span,
     /// and a 27B FFN that is latency-bound below a few hundred columns — so 64
     /// was costing a factor of four and a half on a real prompt. Measured on
-    /// .89, 4096 tokens into one lane: 786 tok/s at 64, 3575 at 512, 3800 at
+    /// a Linux node, 4096 tokens into one lane: 786 tok/s at 64, 3575 at 512, 3800 at
     /// 1024. The last step is not worth twice the graph activations.
     ///
     /// A player feels this as the wait before the FIRST token of a fresh

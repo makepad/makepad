@@ -25,6 +25,9 @@ pub struct Plan {
     /// A WM node's hub: every local model of the node's registry is served (prefetch and
     /// downloads follow the node's settings), and this chat model (empty: none) loads at start.
     pub node_model: Option<String>,
+    /// Compute programs (the hub's `kernel` domain, Fab's Force studies): served whenever the
+    /// hub is enabled, to this machine's apps over loopback, and to the fleet when networked.
+    pub programs: bool,
 }
 
 impl Plan {
@@ -37,14 +40,20 @@ impl Plan {
                 cache_dir: n.cache_dir(),
                 compute: n.compute,
                 node_model: Some(n.model.clone()),
+                programs: settings.enabled,
             },
-            None => Plan { offered: settings.offered(), host: settings.host.clone(), port: settings.port, cache_dir: settings.cache_dir(), compute: settings.compute, node_model: None },
+            None => Plan { offered: settings.offered(), host: settings.host.clone(), port: settings.port, cache_dir: settings.cache_dir(), compute: settings.compute, node_model: None, programs: settings.enabled },
         }
+    }
+
+    /// Whether the hub runs at all: a backend offered, or programs.
+    fn serves(&self) -> bool {
+        !self.offered.is_empty() || self.programs
     }
 
     /// Whether the hub `self` describes serves the same as `other` (all but the compute mode).
     fn same_service(&self, other: &Plan) -> bool {
-        (&self.offered, &self.host, self.port, &self.cache_dir, &self.node_model) == (&other.offered, &other.host, other.port, &other.cache_dir, &other.node_model)
+        (&self.offered, &self.host, self.port, &self.cache_dir, &self.node_model, self.programs) == (&other.offered, &other.host, other.port, &other.cache_dir, &other.node_model, other.programs)
     }
 
     /// Whether the hub serves exactly the local models on disk (not a WM node, whose hub
@@ -469,9 +478,9 @@ fn owner(rx: Receiver<Msg>, published: Arc<Mutex<Published>>) {
                     p.control = None;
                     p.addr = None;
                     p.serving.clear();
-                    p.phase = if plan.offered.is_empty() { Phase::Off } else { Phase::Starting };
+                    p.phase = if plan.serves() { Phase::Starting } else { Phase::Off };
                 });
-                if !plan.offered.is_empty() {
+                if plan.serves() {
                     match start(&plan, local) {
                         Ok((handle, serving, notes)) => {
                             let addr = handle.addr;
@@ -616,14 +625,14 @@ fn start(plan: &Plan, local: Vec<ModelSpec>) -> Result<(ServiceHandle, Vec<Backe
             }
         }
     }
-    if models.is_empty() {
+    if models.is_empty() && !plan.programs {
         return Err((String::new(), notes));
     }
     let downloader = match makepad_ai_hub::download::Downloader::from_env() {
         Ok(d) => d,
         Err(e) => return Err((e.to_string(), notes)),
     };
-    let handle = start_service(ServiceConfig {
+    let mut handle = start_service(ServiceConfig {
         host,
         port: plan.port,
         cache_dir: plan.cache_dir.clone(),
@@ -633,6 +642,10 @@ fn start(plan: &Plan, local: Vec<ModelSpec>) -> Result<(ServiceHandle, Vec<Backe
         fleet: makepad_ai_hub::discovery::normalize_fleet(&makepad_ai_hub::discovery::fleet_from_env()),
     })
     .map_err(|e| (e.to_string(), notes.clone()))?;
+    // this machine's apps find it in ~/.makepad/run and reach it on loopback with the machine token
+    if let Err(e) = handle.register_on_machine() {
+        eprintln!("aihub: this machine's apps cannot find the hub: {e}");
+    }
     Ok((handle, serving, notes))
 }
 

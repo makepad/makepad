@@ -300,22 +300,17 @@ mod stop_signal {
 /// machine find it, then idle down and exit once nothing has needed it for
 /// the TTL — it reads as a cache, not a daemon (aicore §3). Visible in any
 /// process list as makepad-app-ai-hub.
-fn run_machine_node(handle: makepad_ai_hub::server::ServiceHandle) -> Result<(), AssetAiError> {
-    use makepad_ai_hub::machine::{write_node_entry, NodeEntry};
+fn run_machine_node(mut handle: makepad_ai_hub::server::ServiceHandle) -> Result<(), AssetAiError> {
     use std::time::{Duration, Instant};
 
     let ttl_min: u64 = std::env::var("MAKEPAD_AI_HUB_MACHINE_TTL_MIN")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(15);
-    let entry = NodeEntry {
-        pid: std::process::id() as u64,
-        port: handle.addr.port(),
-        pipes_hash: 0,
-    };
-    let entry_path = write_node_entry(&handle.shared.node_key, &entry)
+    handle
+        .register_on_machine()
         .map_err(|e| AssetAiError::Io(format!("write node entry: {e}")))?;
-    println!("  machine node: registered {} (ttl {ttl_min}m idle)", entry_path.display());
+    println!("  machine node: registered on port {} (ttl {ttl_min}m idle)", handle.local_addr.port());
 
     let mut idle_since = Instant::now();
     loop {
@@ -333,7 +328,7 @@ fn run_machine_node(handle: makepad_ai_hub::server::ServiceHandle) -> Result<(),
             idle_since = Instant::now();
         } else if idle_since.elapsed() > Duration::from_secs(ttl_min * 60) {
             println!("{SERVICE_NAME}: machine node idle for {ttl_min}m — exiting");
-            let _ = std::fs::remove_file(&entry_path);
+            handle.stop();
             return Ok(());
         }
     }

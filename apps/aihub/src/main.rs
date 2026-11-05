@@ -29,6 +29,7 @@ mod view;
 
 use makepad_ai_hub::node_conf::{NodeConf, NODE_CONF_ENV};
 use makepad_ai_hub_panel::hub_control::{parse_snapshot, HubCommand};
+use makepad_compute_program_gpu::GpuDevice;
 use std::path::PathBuf;
 use makepad_shell_kit::tray_app::TrayDropdown;
 use makepad_widgets::*;
@@ -79,6 +80,10 @@ pub struct App {
     /// the regular window shows (no tray on this desktop, or "Open in window")
     #[rust]
     window_shown: bool,
+    /// The GPU device compute programs use (where this GPU has compute): it runs on this Cx,
+    /// on each signal.
+    #[rust]
+    gpu: Option<GpuDevice>,
 }
 
 /// The dropdown's width.
@@ -340,6 +345,14 @@ impl App {
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
         login::write_pid();
+        // compute programs' GPU work runs on this Cx: the sessions the hub opens get it
+        match GpuDevice::new(cx) {
+            Ok((device, link)) => {
+                makepad_ai_hub::program_serve::service().set_gpu(link);
+                self.gpu = Some(device);
+            }
+            Err(e) => log!("aihub: compute programs run on the CPU alone: {e}"),
+        }
         let hub = Hub::start(cx);
         self.hub = Some(hub);
         // sets the tray
@@ -395,6 +408,9 @@ impl AppMain for App {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        if let (Event::Signal, Some(gpu)) = (event, self.gpu.as_mut()) {
+            gpu.handle(cx);
+        }
         match event {
             Event::Timer(t) if self.hub.as_ref().is_some_and(|h| h.timer.is_timer(t).is_some()) => self.refresh(cx, false),
             Event::TrayMenu(e) if e.tray == tray::TRAY => {

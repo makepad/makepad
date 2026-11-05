@@ -15,18 +15,24 @@
 //!   cores ahead of the node's background work; fan-out takes only what is left;
 //! - sets its share of the box from the highest class open ([`Share`]): a thread's priority
 //!   counts only inside its own process group, so against builds next to it (each in its own
-//!   scope, weighted by its cores) the node competes with its scope's weight;
+//!   scope, weighted by its cores) the node competes with its scope's weight. A session never
+//!   waits for it, and the share comes down only [`SHARE_LINGER`] after the last session that
+//!   raised it (a study's solves one after another keep it up);
 //! - sends at most `wire::IN_FLIGHT` unacked versions of an output; a newer one replaces the
 //!   one waiting (a slow link skips versions, it never queues them);
+//! - keeps a stream's inputs in the slots its opens name (`wire`'s `keep`), so a later open names
+//!   the ones it sent before by their hash, and the results its sessions remember there, so a
+//!   later session made from the same recalls them ([`Kept`]), at most [`KEPT_BYTES`] a stream;
 //! - ends a session when its stream closes, and only its owner may steer or cancel it.
 
 use crate::kernel_wire::{KernelInfoJson, KERNEL_API_VERSION};
 use makepad_compute_program::codec::Codec;
 use makepad_compute_program::wire;
-use makepad_compute_program::{Backend, Class, Limits, Output, Session, SessionConfig, Updates, Value};
+use makepad_compute_program::gpu::GpuLink;
+use makepad_compute_program::{Backend, Class, Keep, Limits, Output, Session, SessionConfig, Updates, Value};
 use makepad_script_compute_sched::sched::{Executor, ThreadExecutor};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
 /// Sessions one credential may hold.
 pub const MAX_SESSIONS_PER_CLIENT: usize = 4;
@@ -34,6 +40,11 @@ pub const MAX_SESSIONS_PER_CLIENT: usize = 4;
 pub const MAX_SESSIONS: usize = 16;
 /// Words all of one open's inputs may hold (1 GiB).
 const MAX_INPUT_WORDS: usize = 1 << 28;
+/// Bytes of inputs and results a stream's slots keep; past them the slots kept in longest ago go
+/// (the slot just kept in stays, whatever its size).
+const KEPT_BYTES: u64 = 1 << 30;
+/// How long the node's share stays up once no session open asks for it.
+const SHARE_LINGER: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// The most a program on this node may use, whatever the client asks.
 fn node_ceiling() -> Limits {
@@ -63,11 +74,143 @@ fn capped(ask: Limits) -> Limits {
     }
 }
 
-/// A client's stream: its frames go out through `tx`, never blocking the sender.
+/// A client's stream: its frames go out through `tx`, never blocking the sender; the inputs it
+/// keeps.
 #[derive(Clone)]
 pub struct Push {
     pub socket: u64,
     pub tx: std::sync::mpsc::Sender<Vec<u8>>,
+    kept: Arc<Mutex<Kept>>,
+}
+
+/// A stream's kept words: each slot's inputs and the results its sessions remembered (and when it
+/// was last kept in), each kept input or result once, however many slots name it; at most `cap`
+/// bytes past the slot just kept in.
+struct Kept {
+    slots: HashMap<String, Slot>,
+    words: HashMap<u128, Arc<[u32]>>,
+    bytes: u64,
+    clock: u64,
+    cap: u64,
+}
+
+/// A keep slot: its last open's input hashes, its results' keys by name, when it was kept in.
+#[derive(Default)]
+struct Slot {
+    inputs: Vec<u128>,
+    results: Vec<(String, u128)>,
+    at: u64,
+}
+
+impl Default for Kept {
+    fn default() -> Kept {
+        Kept { slots: HashMap::new(), words: HashMap::new(), bytes: 0, clock: 0, cap: KEPT_BYTES }
+    }
+}
+
+impl Kept {
+    /// An open's inputs, the kept ones from their hashes: NOT_KEPT when one is not kept, and 400
+    /// when kept words are not whole elements of the type the open declares for them (the check
+    /// `wire::decode_open` makes of the data that came with the open).
+    fn inputs(&self, arrived: &[wire::Arrived]) -> Result<Vec<makepad_compute_program::Input>, (u16, String)> {
+        arrived
+            .iter()
+            .map(|a| {
+                let data = match &a.data {
+                    Some(data) => data.clone(),
+                    None => {
+                        let kept = self.words.get(&a.hash).ok_or_else(|| (wire::NOT_KEPT, "an input this stream no longer keeps: send them all".to_string()))?;
+                        if kept.len() % a.ty.words() != 0 {
+                            return Err((400, format!("input `{}`: not whole elements", a.name)));
+                        }
+                        kept.clone()
+                    }
+                };
+                Ok(makepad_compute_program::Input::words(&a.name, a.ty, data))
+            })
+            .collect()
+    }
+
+    /// `inputs` (with their hashes) in `slot`, in place of the inputs it held (its results stay:
+    /// a session made from the same recalls them); then the slots kept in longest ago go while
+    /// the stream keeps more than its cap.
+    fn keep(&mut self, slot: &str, inputs: &[(u128, Arc<[u32]>)]) {
+        for (hash, words) in inputs {
+            self.hold(*hash, words);
+        }
+        self.clock += 1;
+        let s = self.slots.entry(slot.to_string()).or_default();
+        s.inputs = inputs.iter().map(|(h, _)| *h).collect();
+        s.at = self.clock;
+        self.trim(slot);
+    }
+
+    /// A result a session in `slot` remembered, in place of the one of that name the slot held
+    /// (none when the slot went meanwhile).
+    fn remember(&mut self, slot: &str, name: &str, key: u128, words: &Arc<[u32]>) {
+        if !self.slots.contains_key(slot) {
+            return;
+        }
+        self.hold(key, words);
+        self.clock += 1;
+        let s = self.slots.get_mut(slot).unwrap();
+        s.results.retain(|(n, _)| n != name);
+        s.results.push((name.to_string(), key));
+        s.at = self.clock;
+        self.trim(slot);
+    }
+
+    fn hold(&mut self, hash: u128, words: &Arc<[u32]>) {
+        if !self.words.contains_key(&hash) {
+            self.bytes += words.len() as u64 * 4;
+            self.words.insert(hash, words.clone());
+        }
+    }
+
+    /// The slots kept in longest ago go (never `slot`) while the stream keeps more than its cap,
+    /// then the words no slot names.
+    fn trim(&mut self, slot: &str) {
+        while self.bytes > self.cap {
+            let Some(oldest) = self.slots.iter().filter(|(s, _)| s.as_str() != slot).min_by_key(|(_, s)| s.at).map(|(s, _)| s.clone()) else { break };
+            self.slots.remove(&oldest);
+            self.forget_unnamed();
+        }
+        self.forget_unnamed();
+    }
+
+    /// A kept input or result by its key.
+    fn recall(&self, key: u128) -> Option<Arc<[u32]>> {
+        self.words.get(&key).cloned()
+    }
+
+    /// Drops the words no slot names.
+    fn forget_unnamed(&mut self) {
+        let named: std::collections::HashSet<u128> = self.slots.values().flat_map(|s| s.inputs.iter().chain(s.results.iter().map(|(_, k)| k)).copied()).collect();
+        let bytes = &mut self.bytes;
+        self.words.retain(|h, w| {
+            let keep = named.contains(h);
+            if !keep {
+                *bytes -= w.len() as u64 * 4;
+            }
+            keep
+        });
+    }
+}
+
+/// A session's keep: its stream's kept words, its results kept in the slot its open named.
+struct SlotKeep {
+    kept: Arc<Mutex<Kept>>,
+    slot: String,
+}
+
+impl Keep for SlotKeep {
+    fn recall(&self, key: u128) -> Option<Arc<[u32]>> {
+        self.kept.lock().unwrap().recall(key)
+    }
+
+    fn remember(&self, name: &str, key: u128, words: Arc<[u32]>) {
+        self.kept.lock().unwrap().remember(&self.slot, name, key, &words);
+    }
 }
 
 pub struct ProgramService {
@@ -83,8 +226,13 @@ struct Inner {
     pools: [OnceLock<Arc<ThreadExecutor>>; 3],
     workers: usize,
     backend: Backend,
-    /// None where the node runs in no scope it can weigh.
+    /// None where the node runs in no scope it can weigh (or setting it failed).
     share: Mutex<Option<Share>>,
+    /// Tells the thread that sets the share ([`Inner::share_thread`]) what the sessions want.
+    share_cv: Condvar,
+    share_started: OnceLock<()>,
+    /// The GPU device sessions get besides the CPU, once the host installed one.
+    gpu: Mutex<Option<GpuLink>>,
 }
 
 /// The node's share of the box against the other work on it: on Linux, the `CPUWeight` of the
@@ -98,6 +246,10 @@ struct Share {
     /// The scope's weight before any session.
     base: u32,
     applied: u32,
+    /// What the sessions open now ask for.
+    wanted: u32,
+    /// Counts the sessions' asks (a lowering lingers from the last one).
+    asked: u64,
 }
 
 impl Share {
@@ -111,7 +263,7 @@ impl Share {
                 return None;
             }
             let base = std::fs::read_to_string(format!("/sys/fs/cgroup{path}/cpu.weight")).ok()?.trim().parse().ok()?;
-            Some(Share { unit: unit.to_string(), base, applied: base })
+            Some(Share { unit: unit.to_string(), base, applied: base, wanted: base, asked: 0 })
         }
         #[cfg(not(target_os = "linux"))]
         None
@@ -137,33 +289,67 @@ impl Inner {
         self.pools[k].get_or_init(|| Arc::new(ThreadExecutor::with_thread_start(self.workers, START[k]))).clone()
     }
 
-    /// The node's share from the sessions open now ([`Share`]).
-    fn reshare(&self) {
+    /// The node's share from the sessions open now ([`Share`]), set by its own thread.
+    fn reshare(self: &Arc<Self>) {
         let mut held = self.share.lock().unwrap();
         let Some(share) = held.as_mut() else { return };
         let top = self.sessions.lock().unwrap().values().map(|s| s.class).min_by_key(|c| c.budget());
-        let weight = match top {
+        share.wanted = match top {
             Some(Class::Interactive) => 10_000,
             Some(Class::Visible) => share.base.max(100 * (self.workers as u32 + 1)),
             _ => share.base,
         };
-        if weight == share.applied {
-            return;
-        }
-        let set = std::process::Command::new("systemctl")
-            .args(["--user", "set-property", "--runtime", &share.unit, &format!("CPUWeight={weight}")])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .output();
-        match set {
-            Ok(out) if out.status.success() => share.applied = weight,
-            failed => {
-                let why = match failed {
-                    Ok(out) => String::from_utf8_lossy(&out.stderr).trim().to_string(),
-                    Err(e) => e.to_string(),
-                };
-                eprintln!("{}: programs: {} keeps its CPU weight {} (setting {weight}: {why})", crate::SERVICE_NAME, share.unit, share.applied);
-                *held = None;
+        share.asked += 1;
+        drop(held);
+        self.share_cv.notify_all();
+        self.share_started.get_or_init(|| {
+            let inner = self.clone();
+            let _ = std::thread::Builder::new().name("program-share".into()).spawn(move || inner.share_thread());
+        });
+    }
+
+    /// Sets the share the sessions want: a raise at once, a lowering once no session asked for
+    /// [`SHARE_LINGER`]. Ends where setting it fails (the node keeps the weight it has).
+    fn share_thread(&self) {
+        let mut held = self.share.lock().unwrap();
+        loop {
+            let Some(share) = held.as_ref() else { return };
+            if share.wanted == share.applied {
+                held = self.share_cv.wait(held).unwrap();
+                continue;
+            }
+            if share.wanted < share.applied {
+                let asked = share.asked;
+                let (h, waited) = self.share_cv.wait_timeout_while(held, SHARE_LINGER, |s| s.as_ref().is_some_and(|s| s.asked == asked)).unwrap();
+                held = h;
+                if !waited.timed_out() {
+                    continue;
+                }
+            }
+            let Some(share) = held.as_ref() else { return };
+            let (unit, weight) = (share.unit.clone(), share.wanted);
+            drop(held);
+            let set = std::process::Command::new("systemctl")
+                .args(["--user", "set-property", "--runtime", &unit, &format!("CPUWeight={weight}")])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .output();
+            held = self.share.lock().unwrap();
+            match set {
+                Ok(out) if out.status.success() => {
+                    if let Some(share) = held.as_mut() {
+                        share.applied = weight;
+                    }
+                }
+                failed => {
+                    let why = match failed {
+                        Ok(out) => String::from_utf8_lossy(&out.stderr).trim().to_string(),
+                        Err(e) => e.to_string(),
+                    };
+                    let applied = held.as_ref().map_or(0, |s| s.applied);
+                    eprintln!("{}: programs: {unit} keeps its CPU weight {applied} (setting {weight}: {why})", crate::SERVICE_NAME);
+                    *held = None;
+                }
             }
         }
     }
@@ -238,12 +424,21 @@ pub fn service() -> &'static ProgramService {
                 workers,
                 backend: if cfg!(any(target_arch = "aarch64", target_arch = "x86_64")) { Backend::Native } else { Backend::Interp },
                 share: Mutex::new(Share::find()),
+                share_cv: Condvar::new(),
+                share_started: OnceLock::new(),
+                gpu: Mutex::new(None),
             }),
         }
     })
 }
 
 impl ProgramService {
+    /// The GPU device sessions opened from now on may use (the host's: the aihub app's Cx, or
+    /// a device thread of its own).
+    pub fn set_gpu(&self, link: GpuLink) {
+        *self.inner.gpu.lock().unwrap() = Some(link);
+    }
+
     /// Sessions open on the node.
     pub fn sessions(&self) -> usize {
         self.inner.sessions.lock().unwrap().len()
@@ -262,7 +457,7 @@ impl ProgramService {
 
     /// A stream opened by `owner`; its frames go out through `tx`.
     pub fn stream_open(&self, socket: u64, owner: &str, tx: std::sync::mpsc::Sender<Vec<u8>>) {
-        self.inner.streams.lock().unwrap().insert(socket, (owner.to_string(), Push { socket, tx }));
+        self.inner.streams.lock().unwrap().insert(socket, (owner.to_string(), Push { socket, tx, kept: Arc::default() }));
     }
 
     /// Whether `socket` is one of this service's streams.
@@ -286,10 +481,17 @@ impl ProgramService {
         match data[0] {
             wire::OPEN => {
                 let (inner, owner, sender, payload) = (self.inner.clone(), owner.to_string(), push.clone(), payload.to_vec());
-                // Inputs decode and the program starts off the routing thread.
-                let started = std::thread::Builder::new().name("program-open".into()).spawn(move || {
-                    let reply = open(&inner, &owner, &sender, &payload);
-                    send(&sender, wire::OPENED, word, wire::encode_opened(reply));
+                // Inputs decode and the program starts off the routing thread; this thread then
+                // sends its updates, each after the OPENED that names the session (the app
+                // drops an update for a session it was not told of).
+                let started = std::thread::Builder::new().name("program-session".into()).spawn(move || match open(&inner, &owner, &sender, &payload) {
+                    Ok((id, device, served)) => {
+                        send(&sender, wire::OPENED, word, wire::encode_opened(Ok((id, device))));
+                        pump(&served, &sender, id, inner.workers + 1);
+                        inner.sessions.lock().unwrap().remove(&id);
+                        inner.reshare();
+                    }
+                    Err(e) => send(&sender, wire::OPENED, word, wire::encode_opened(Err(e))),
                 });
                 if started.is_err() {
                     send(push, wire::OPENED, word, wire::encode_opened(Err((503, "the node cannot start a session now".into()))));
@@ -345,9 +547,19 @@ fn send(push: &Push, kind: u8, word: u64, payload: Vec<u8>) {
     let _ = push.tx.send(frame);
 }
 
-fn open(inner: &Arc<Inner>, owner: &str, push: &Push, payload: &[u8]) -> Result<(u64, Value), (u16, String)> {
+/// An `OPEN`: the session's id, what it runs on, and the session (open now, its updates not yet
+/// sent).
+fn open(inner: &Arc<Inner>, owner: &str, push: &Push, payload: &[u8]) -> Result<(u64, Value, Arc<Served>), (u16, String)> {
     let threads = inner.workers + 1;
-    let open = wire::decode_open(payload, MAX_INPUT_WORDS, threads).map_err(|e| (400, e))?;
+    let (open, arrived) = wire::decode_open(payload, MAX_INPUT_WORDS, threads).map_err(|e| (400, e))?;
+    let inputs = {
+        let mut kept = push.kept.lock().unwrap();
+        let inputs = kept.inputs(&arrived)?;
+        if !open.keep.is_empty() {
+            kept.keep(&open.keep, &arrived.iter().zip(&inputs).map(|(a, i)| (a.hash, i.data.clone())).collect::<Vec<_>>());
+        }
+        inputs
+    };
     let class = open.class;
     class.apply();
     let id = {
@@ -364,40 +576,30 @@ fn open(inner: &Arc<Inner>, owner: &str, push: &Push, payload: &[u8]) -> Result<
     };
     let config = SessionConfig {
         params: open.params,
-        inputs: open.inputs,
+        inputs,
         limits: capped(open.limits),
         executor: Some(inner.pool(class) as Arc<dyn Executor>),
         threads,
         backend: inner.backend,
         seed: open.seed,
         class,
+        gpu: inner.gpu.lock().unwrap().clone(),
+        // an open naming no slot keeps nothing, so its session neither recalls nor remembers
+        keep: (!open.keep.is_empty()).then(|| Arc::new(SlotKeep { kept: push.kept.clone(), slot: open.keep.clone() }) as Arc<dyn Keep>),
     };
     let served = Arc::new(Served { owner: owner.to_string(), socket: push.socket, class, session: Session::open(&open.program, config), codec: open.codec, flow: Mutex::new(Flow::default()) });
     inner.sessions.lock().unwrap().insert(id, served.clone());
     inner.reshare();
-    let (pump_inner, pump_push) = (inner.clone(), push.clone());
-    let pumped = std::thread::Builder::new().name("program-send".into()).spawn(move || {
-        class.apply();
-        pump(&served, &pump_push, id, threads);
-        pump_inner.sessions.lock().unwrap().remove(&id);
-        pump_inner.reshare();
-    });
-    if pumped.is_err() {
-        if let Some(s) = inner.sessions.lock().unwrap().remove(&id) {
-            s.session.cancel();
-        }
-        inner.reshare();
-        return Err((503, "the node cannot start a session now".into()));
-    }
     let device = Value::object(&[
         ("kind", Value::String("cpu".into())),
         ("backend", Value::String(if inner.backend == Backend::Native { "native" } else { "interp" }.into())),
         ("threads", Value::Number(threads as f64)),
         ("class", Value::String(format!("{class:?}").to_lowercase())),
         // the node's CPU weight against the builds next to it (absent: no scope it can weigh)
-        ("weight", inner.share.lock().unwrap().as_ref().map_or(Value::Nil, |s| Value::Number(s.applied as f64))),
+        ("weight", inner.share.lock().unwrap().as_ref().map_or(Value::Nil, |s| Value::Number(s.wanted as f64))),
+        ("gpu", Value::Bool(inner.gpu.lock().unwrap().is_some())),
     ]);
-    Ok((id, device))
+    Ok((id, device, served))
 }
 
 /// The session's updates to its stream until it ends.
@@ -413,5 +615,68 @@ fn pump(served: &Served, push: &Push, id: u64, threads: usize) {
         if ending {
             return;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn arrived(hash: u128, data: Option<&[u32]>) -> wire::Arrived {
+        wire::Arrived { name: format!("i{hash}"), ty: makepad_compute_program::ElemTy::U32, hash, data: data.map(Into::into) }
+    }
+
+    fn words(n: usize) -> Arc<[u32]> {
+        vec![7; n].into()
+    }
+
+    /// A slot keeps its last open's inputs: a later open names them by hash, what the slot held
+    /// before goes unless another slot names it, and past the cap the slots kept longest ago go.
+    #[test]
+    fn a_stream_keeps_each_slots_last_inputs() {
+        let mut kept = Kept { cap: 100 * 4, ..Kept::default() };
+        kept.keep("step 1", &[(1, words(10)), (2, words(20))]);
+        kept.keep("step 2", &[(2, words(20)), (3, words(30))]);
+        assert_eq!(kept.inputs(&[arrived(1, None), arrived(3, None)]).ok().map(|i| i.len()), Some(2));
+        assert_eq!(kept.inputs(&[arrived(9, Some(&[1, 2]))]).ok().map(|i| i[0].data.to_vec()), Some(vec![1, 2]), "an input with its data needs nothing kept");
+        let typed = |ty, hash| wire::Arrived { ty, ..arrived(hash, None) };
+        assert_eq!(kept.inputs(&[arrived(4, None)]).err().map(|e| e.0), Some(wire::NOT_KEPT), "never sent: the stream asks for them all");
+        assert_eq!(kept.inputs(&[typed(makepad_compute_program::ElemTy::Vec3, 1)]).err().map(|e| e.0), Some(400), "10 kept words are not whole vec3s");
+        assert!(kept.inputs(&[typed(makepad_compute_program::ElemTy::Vec2, 1)]).is_ok(), "they are whole vec2s");
+        // step 1 again with another model: its old input goes, the one step 2 shares stays
+        kept.keep("step 1", &[(2, words(20)), (4, words(40))]);
+        assert!(kept.inputs(&[arrived(1, None)]).is_err());
+        assert!(kept.inputs(&[arrived(2, None), arrived(3, None), arrived(4, None)]).is_ok());
+        assert_eq!(kept.bytes, (20 + 30 + 40) * 4);
+        // past the cap the slot kept longest ago goes, never the one just kept
+        kept.keep("step 3", &[(5, words(30))]);
+        assert!(kept.inputs(&[arrived(3, None)]).is_err(), "step 2 went");
+        assert!(kept.inputs(&[arrived(2, None), arrived(4, None), arrived(5, None)]).is_ok());
+        assert_eq!(kept.bytes, (20 + 40 + 30) * 4);
+        kept.keep("huge", &[(6, words(500))]);
+        assert!(kept.inputs(&[arrived(6, None)]).is_ok(), "the slot just kept stays, whatever its size");
+        assert_eq!(kept.slots.len(), 1);
+    }
+
+    /// A slot keeps the results its sessions remember while it stays: a later open of the slot
+    /// with other inputs keeps them, a result of the same name replaces the one before, and they
+    /// go with the slot.
+    #[test]
+    fn a_slot_keeps_the_results_its_sessions_remember() {
+        let mut kept = Kept { cap: 100 * 4, ..Kept::default() };
+        kept.keep("step 1", &[(1, words(10))]);
+        kept.remember("step 1", "levels", 11, &words(20));
+        kept.remember("gone", "levels", 12, &words(20));
+        assert!(kept.recall(11).is_some());
+        assert!(kept.recall(12).is_none(), "a slot not kept in keeps nothing");
+        kept.keep("step 1", &[(2, words(10))]);
+        assert!(kept.recall(11).is_some(), "an open with other inputs keeps the slot's results");
+        assert_eq!(kept.bytes, (10 + 20) * 4);
+        kept.remember("step 1", "levels", 13, &words(30));
+        assert!(kept.recall(11).is_none(), "the result of the same name replaces it");
+        assert_eq!(kept.bytes, (10 + 30) * 4);
+        kept.keep("step 2", &[(3, words(70))]);
+        assert!(kept.recall(13).is_none(), "past the cap the results go with their slot");
+        assert_eq!(kept.slots.len(), 1);
     }
 }

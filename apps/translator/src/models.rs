@@ -334,6 +334,8 @@ mod tests {
         s.models[3].since = Some((Instant::now() - Duration::from_secs(3), s.models[3].state.bytes));
         s.step();
         assert!(matches!(s.models[3].state.state, State::Failed(_)));
+        // from here on nothing finishes during the test, however long it takes to get to the pause
+        s.speed = 1;
         s.start("kokoro");
         s.pause("kokoro");
         assert!(matches!(s.models[3].state.state, State::Paused { .. }));

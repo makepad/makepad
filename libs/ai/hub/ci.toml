@@ -2,3 +2,15 @@
 
 [ci]
 test_features = "claude-stub,flux,paint,tts,indextts,video,interpolate,audio,mesh,matte-native,depth-native,segment-native,body-native,upscale-native,motion-native,splat-native,rig-native,beats-native,stems-native,notes-native"
+
+[job.jit_01.linux]
+date = "2026-11-04"
+digest = "5b677f2030670bad9d8092144709962c1eb227792a15dc6be252cd2887766dbd"
+main = "5f4597d2fb65f354696542829214d4c6b99c39ab"
+work = "7d8695372c6cd232c174a43ee12e1ee51ba72023"
+
+[tests.linux]
+date = "2026-11-05"
+digest = "ec5c8a98a45c25a84ee8dfead125869433559b1dbab6961d79740034444c41f6"
+main = "d47583cbdaf8c9b01e43ac1218a7b8fde373f93c"
+work = "76947602e9bddae66de9d80bd8a393a6c8073a17"

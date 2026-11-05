@@ -2010,22 +2010,22 @@ mod tests {
         // No requirements: any GPU, even unknown, passes (legacy models).
         check_gpu_requirements("legacy", None, None, &GpuInfo::default()).unwrap();
         // GPU-A-class box: q4 tier passes, nvfp4 (cap) and bf16 (vram) refuse.
-        let gpua = gpu(Some(24_564), Some(8.9));
+        let gpua = gpu(Some(24_000), Some(8.9));
         check_gpu_requirements("q4", Some(22.0), Some(8.9), &gpua).unwrap();
         assert!(check_gpu_requirements("nv4", Some(30.0), Some(12.0), &gpua).is_err());
         assert!(check_gpu_requirements("bf16", Some(90.0), None, &gpua).is_err());
         // GPU-B-class box: everything up to nvfp4 passes, bf16 refuses.
-        let gpub = gpu(Some(32_607), Some(12.0));
+        let gpub = gpu(Some(32_000), Some(12.0));
         check_gpu_requirements("q4", Some(22.0), Some(8.9), &gpub).unwrap();
         check_gpu_requirements("nv4", Some(30.0), Some(12.0), &gpub).unwrap();
         assert!(check_gpu_requirements("bf16", Some(90.0), None, &gpub).is_err());
-        // 96GB box passes bf16.
-        check_gpu_requirements("bf16", Some(90.0), Some(8.9), &gpu(Some(97_887), Some(12.0)))
+        // A 96 GB card passes bf16.
+        check_gpu_requirements("bf16", Some(90.0), Some(8.9), &gpu(Some(96_000), Some(12.0)))
             .unwrap();
         // UNKNOWN GPU with any requirement: refuse — never thrash-and-see.
         assert!(check_gpu_requirements("q4", Some(22.0), None, &GpuInfo::default()).is_err());
         assert!(check_gpu_requirements("nv4", None, Some(12.0), &GpuInfo::default()).is_err());
-        let vram_only = gpu(Some(32_607), None);
+        let vram_only = gpu(Some(32_000), None);
         assert!(check_gpu_requirements("nv4", Some(30.0), Some(12.0), &vram_only).is_err());
     }
 

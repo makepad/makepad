@@ -178,6 +178,20 @@ fn blob_get(
     }
 }
 
+/// The status of a blob GET written as raw bytes, so the path reaches the
+/// server exactly as given (an HTTP client may resolve `..` segments before
+/// it sends, as the Windows one does).
+fn raw_blob_get_status(base: &str, digest_path: &str, ticket: &str, receiver: &str) -> u16 {
+    let addr = base.trim_start_matches("http://");
+    let mut stream = TcpStream::connect(addr).unwrap();
+    let request = format!(
+        "GET /v1/model_blob/{digest_path} HTTP/1.1\r\nHost: {addr}\r\nX-Peer-Ticket: {ticket}\r\nX-Peer-Receiver: {receiver}\r\nConnection: close\r\n\r\n"
+    );
+    stream.write_all(request.as_bytes()).unwrap();
+    let head = read_head(&mut stream);
+    head.split(' ').nth(1).and_then(|code| code.parse().ok()).unwrap_or_else(|| panic!("no status in {head:?}"))
+}
+
 fn receiver_key() -> String {
     "1234567890abcdef1234567890abcdef".to_string()
 }
@@ -294,8 +308,8 @@ fn blob_endpoint_auth_allowlist_and_ranges() {
     let a63 = "a".repeat(63);
     let g64 = "g".repeat(64);
     for bad in ["../../etc/passwd", "abc", a63.as_str(), g64.as_str()] {
-        let reply = blob_get(&source.base, bad, Some(&ticket), Some(&receiver), None, &[]);
-        assert_eq!(reply.status, 400, "path {bad:?}");
+        let status = raw_blob_get_status(&source.base, bad, &ticket, &receiver);
+        assert_eq!(status, 400, "path {bad:?}");
     }
     let reply = blob_get(
         &source.base,

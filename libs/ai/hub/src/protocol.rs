@@ -1502,7 +1502,7 @@ mod warm_history_tests {
     ///
     /// The brief seed is a CLOSED think block, so the generation prompt ends
     /// with a finished thought and nothing else. On a long taught context with
-    /// a substantive question the model answers (gated: four turns on .89);
+    /// a substantive question the model answers (gated: four turns on a node);
     /// on a two-word casual turn it can read the turn as already over. That is
     /// the same trap as the empty `</think>` prefill, in a milder form, and
     /// the guard below is necessary but demonstrably NOT sufficient.

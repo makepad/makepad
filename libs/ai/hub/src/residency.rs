@@ -512,16 +512,16 @@ mod tests {
     #[test]
     fn usable_vram_is_the_idle_free_ceiling_and_drives_too_small_notes() {
         let gpu = crate::gpu::GpuInfo {
-            vram_free_mb: Some(30_603),
-            vram_total_mb: Some(32_607),
+            vram_free_mb: Some(30_000),
+            vram_total_mb: Some(32_000),
             ..Default::default()
         };
-        assert_eq!(usable_vram_mb(&gpu), Some(30_603));
+        assert_eq!(usable_vram_mb(&gpu), Some(30_000));
         assert_eq!(
-            too_small_note(&spec(Some(29.0)), DEFAULT_RESERVE_MB, 30_603).as_deref(),
-            Some("needs 31744 MB, this card can free 30603")
+            too_small_note(&spec(Some(29.0)), DEFAULT_RESERVE_MB, 30_000).as_deref(),
+            Some("needs 31744 MB, this card can free 30000")
         );
-        assert!(too_small_note(&spec(Some(29.0)), DEFAULT_RESERVE_MB, 36_535).is_none());
+        assert!(too_small_note(&spec(Some(29.0)), DEFAULT_RESERVE_MB, 36_000).is_none());
     }
 
     fn trim_fake_pool(total_mb: u64, free_mb: u64, cached_mb: u64) -> CachedPoolTrim {
@@ -541,17 +541,17 @@ mod tests {
 
     #[test]
     fn incident_card_admits_after_releasing_cached_pool() {
-        let trimmed = trim_fake_pool(32_607, 30_510, 1_487);
-        let (free, admitted) = admission_after_trim(&trimmed, 30_510, 29_696 + 1_024);
-        assert_eq!(free, 31_997);
-        assert_eq!(trimmed.released_mb_at(31_997), 1_487);
+        let trimmed = trim_fake_pool(32_000, 30_500, 1_000);
+        let (free, admitted) = admission_after_trim(&trimmed, 30_500, 29_696 + 1_024);
+        assert_eq!(free, 31_500);
+        assert_eq!(trimmed.released_mb_at(31_500), 1_000);
         assert!(admitted);
     }
 
     #[test]
     fn card_still_short_after_pool_trim_refuses_with_release_amount() {
-        let trimmed = trim_fake_pool(32_607, 29_116, 1_487);
-        let (free, admitted) = admission_after_trim(&trimmed, 29_116, 29_696 + 1_024);
+        let trimmed = trim_fake_pool(32_000, 29_000, 1_000);
+        let (free, admitted) = admission_after_trim(&trimmed, 29_000, 29_696 + 1_024);
         assert!(!admitted);
         assert_eq!(
             insufficient_vram_message(
@@ -561,16 +561,16 @@ mod tests {
                 free,
                 trimmed.released_mb_at(free),
             ),
-            "insufficient VRAM for flux2-dev: need 30720 MB (estimate 29696 MB + reserve 1024 MB), only 30603 MB free after evicting every resident and releasing 1487 MB of cached pool — refusing to load (no CPU/other-node fallback)"
+            "insufficient VRAM for flux2-dev: need 30720 MB (estimate 29696 MB + reserve 1024 MB), only 30000 MB free after evicting every resident and releasing 1000 MB of cached pool — refusing to load (no CPU/other-node fallback)"
         );
     }
 
     #[test]
     fn usable_vram_is_published_from_the_post_trim_sample() {
-        let usable = UsableVram::new(Some(30_510));
-        let trimmed = trim_fake_pool(32_607, 30_510, 1_487);
+        let usable = UsableVram::new(Some(30_500));
+        let trimmed = trim_fake_pool(32_000, 30_500, 1_000);
         usable.refresh_from_gpu(&trimmed.after_gpu);
-        assert_eq!(usable.get(), Some(31_997));
+        assert_eq!(usable.get(), Some(31_500));
     }
 
     #[test]

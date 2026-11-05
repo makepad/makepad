@@ -87,7 +87,7 @@ fn a_remote_fractal_tile_is_the_in_process_tile() {
     let program = Program::new("fractal.splash", programs::FRACTAL);
     let views = [[-2.0, -1.25, 2.5 / 32.0], [-0.75, 0.05, 0.1 / 32.0]];
     for codec in [Codec::DeltaLz4, Codec::DeltaDeflate, Codec::Raw] {
-        let remote = RemoteSession::open(&stream, &program, RemoteConfig { codec, class: Class::Interactive, ..RemoteConfig::default() }).unwrap();
+        let remote = RemoteSession::open(&stream, &program, RemoteConfig { codec: Some(codec), class: Class::Interactive, ..RemoteConfig::default() }).unwrap();
         let device = remote.device();
         for (key, want) in [("kind", "cpu"), ("backend", "native"), ("class", "interactive")] {
             assert_eq!(device.get(key), Some(&Value::String(want.into())), "{device:?}");
@@ -109,6 +109,73 @@ fn a_remote_fractal_tile_is_the_in_process_tile() {
         // The end stays: a later wait returns at once.
         assert!(remote.wait().is_empty());
     }
+}
+
+#[test]
+fn a_bounded_wait_comes_back_from_a_silent_program_and_its_cancel_lands() {
+    let (_guard, stream) = node();
+    let silent = RemoteSession::open(&stream, &Program::new("t.splash", "{run: fn(s, p) { s.wait_inbox() return 1 }}"), RemoteConfig::default()).unwrap();
+    assert!(silent.wait_within(std::time::Duration::from_millis(5)).is_empty());
+    silent.cancel();
+    assert_eq!(silent.wait_end(), Err(ProgramError::Cancelled));
+    // ended: an hour's wait does not wait
+    assert!(silent.wait_within(std::time::Duration::from_secs(3600)).is_empty());
+}
+
+/// An open on a node that takes the stream and then says nothing comes back once it goes stale;
+/// the session the node opens after all is cancelled, as nobody will ever use it.
+#[test]
+fn an_open_goes_stale_on_a_silent_node_and_a_late_session_is_cancelled() {
+    use makepad_compute_program::wire;
+    use makepad_network::web_socket_parser::{WebSocketMessage, WebSocketMessageFormat, WebSocketMessageHeader, WebSocketParser};
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let (gave_up, answer) = std::sync::mpsc::channel::<()>();
+    let (told, cancelled) = std::sync::mpsc::channel::<u64>();
+    std::thread::spawn(move || {
+        let (mut link, _) = listener.accept().unwrap();
+        let mut buf = vec![0u8; 1 << 16];
+        let mut head = Vec::new();
+        while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+            let n = link.read(&mut buf).unwrap();
+            head.extend_from_slice(&buf[..n]);
+        }
+        link.write_all(b"HTTP/1.1 101 Switching Protocols\r\n\r\n").unwrap();
+        let mut parser = WebSocketParser::new();
+        let mut next = |link: &mut std::net::TcpStream, kind: u8| loop {
+            let n = link.read(&mut buf).unwrap();
+            let mut word = None;
+            parser.parse(&buf[..n], |r| {
+                if let Ok(WebSocketMessage::Binary(f)) = r {
+                    if f[0] == kind {
+                        word = Some(u64::from_le_bytes(f[1..9].try_into().unwrap()));
+                    }
+                }
+            });
+            if let Some(word) = word {
+                return word;
+            }
+        };
+        let request = next(&mut link, wire::OPEN);
+        answer.recv().unwrap();
+        let mut frame = vec![wire::OPENED];
+        frame.extend_from_slice(&request.to_le_bytes());
+        frame.extend_from_slice(&wire::encode_opened(Ok((77, Value::Nil))));
+        let header = WebSocketMessageHeader::from_len(frame.len(), WebSocketMessageFormat::Binary, false);
+        link.write_all(header.as_slice()).unwrap();
+        link.write_all(&frame).unwrap();
+        told.send(next(&mut link, wire::CANCEL)).unwrap();
+    });
+    let stream = Arc::new(KernelStream::open(&KernelNode::new(&url)).unwrap());
+    let mut asked = 0;
+    let opened = RemoteSession::open_unless(&stream, &Program::new("t.splash", "{run: fn(s, p) { return 1 }}"), RemoteConfig::default(), &mut || {
+        asked += 1;
+        asked == 2
+    });
+    assert!(matches!(opened, Ok(None)), "a stale open comes back with no session");
+    gave_up.send(()).unwrap();
+    assert_eq!(cancelled.recv_timeout(std::time::Duration::from_secs(5)), Ok(77));
 }
 
 #[test]
@@ -164,4 +231,23 @@ use mod.pod.*
     // The newest version always arrives; the link carried far fewer than 200.
     assert_eq!(seen.iter().max(), Some(&200), "{seen:?}");
     assert!(seen.len() < 200, "every version came: {}", seen.len());
+}
+
+/// Opens in one slot: the second names the input the first sent by its hash and runs on the same
+/// words; another slot's open of other words, then the first slot's again, run on theirs.
+#[test]
+fn an_open_in_a_slot_runs_on_the_inputs_kept_there() {
+    let (_guard, stream) = node();
+    let source = "{run: fn(s, p) { let b = s.input(\"big\") return s.read(b, p.at, 1)[0] }}";
+    let program = Program::new("t.splash", source);
+    let big = |offset: u32| makepad_compute_program::Input::words("big", makepad_compute_program::ElemTy::U32, (0..1u32 << 20).map(|k| k + offset).collect::<Vec<_>>().into());
+    let run = |offset: u32, keep: &str, at: f64| {
+        let config = RemoteConfig { params: Value::object(&[("at", n(at))]), inputs: vec![big(offset)], keep: keep.into(), ..RemoteConfig::default() };
+        RemoteSession::open(&stream, &program, config).unwrap().wait_end()
+    };
+    assert_eq!(run(0, "step", 5.0), Ok(n(5.0)));
+    assert_eq!(run(0, "step", 999_999.0), Ok(n(999_999.0)));
+    assert_eq!(run(7, "other", 5.0), Ok(n(12.0)));
+    assert_eq!(run(0, "step", 6.0), Ok(n(6.0)));
+    assert_eq!(run(7, "", 6.0), Ok(n(13.0)), "an open in no slot names what the slots keep, and keeps nothing");
 }

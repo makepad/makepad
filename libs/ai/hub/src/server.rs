@@ -64,9 +64,9 @@ pub struct ServiceHandle {
     /// One per chat lane. They take from the chat admission class only, so a
     /// chat turn never waits on the heavy worker and vice versa.
     pub chat_threads: Vec<JoinHandle<()>>,
-    /// Machine-wide Windows singleton plus the per-cache-dir lock. Hold this
-    /// for the life of the daemon (main.rs never drops its handle). Dropping
-    /// the handle releases both locks (tests rely on that for restarts).
+    /// The per-data-dir lock. Hold this for the life of the daemon (main.rs
+    /// never drops its handle). Dropping the handle releases it (tests rely
+    /// on that for restarts).
     pub singleton: ServiceLock,
     /// The live service state, for hosts that supervise the service
     /// in-process (the machine node's idle clock reads job and residency
@@ -76,6 +76,11 @@ pub struct ServiceHandle {
     /// loopback node): what [`ServiceHandle::stop`] closes first.
     fleet_run: FleetRun,
     fleet_view_thread: JoinHandle<()>,
+    /// The loopback surface: where this machine's apps reach the hub (with the machine token),
+    /// the address itself on a loopback node, the server behind the TLS front on a fleet node.
+    pub local_addr: SocketAddr,
+    /// This hub's entry in `~/.makepad/run` ([`ServiceHandle::register_on_machine`]).
+    node_entry: Option<std::path::PathBuf>,
 }
 
 /// What a fleet node runs on the network: its TLS front(s) and its beacon.
@@ -93,7 +98,10 @@ impl ServiceHandle {
     /// loopback server and every worker thread end, the loaded models are released and the
     /// service locks are dropped. A new [`start_service`] may follow in the same process.
     pub fn stop(self) {
-        let ServiceHandle { activity_monitor, http_thread, route_thread, worker_thread, chat_threads, singleton, shared, mut fleet_run, fleet_view_thread, .. } = self;
+        let ServiceHandle { activity_monitor, http_thread, route_thread, worker_thread, chat_threads, singleton, shared, mut fleet_run, fleet_view_thread, node_entry, .. } = self;
+        if let Some(entry) = node_entry {
+            let _ = std::fs::remove_file(entry);
+        }
         drain_for_stop(&shared, Duration::from_secs(3));
         if let Some(beacon) = fleet_run.beacon.as_mut() {
             beacon.stop();
@@ -103,6 +111,12 @@ impl ServiceHandle {
             front.stop();
         }
         http_thread.stop();
+        // The route thread ends with the last connection, and a client stays connected until it
+        // hears something: an app's kernel stream would keep this stop waiting and the app
+        // waiting on it, with its link open and nothing ever coming. Their close tells them.
+        for (_, socket) in shared.web_sockets.lock().unwrap().take().into_iter().flatten() {
+            let _ = socket.send(Vec::new());
+        }
         shared.stopped.store(true, std::sync::atomic::Ordering::SeqCst);
         fleet_view_thread.thread().unpark();
         let _ = fleet_view_thread.join();
@@ -124,18 +138,25 @@ impl ServiceHandle {
         shared.residency_claims.lock().unwrap_or_else(|e| e.into_inner()).clear();
         drop(singleton);
     }
+
+    /// Registers this hub for the apps on this machine: its loopback surface in
+    /// `~/.makepad/run` ([`crate::machine`]), reached with the machine token. [`ServiceHandle::stop`]
+    /// takes the entry away again.
+    pub fn register_on_machine(&mut self) -> std::io::Result<()> {
+        let entry = crate::machine::NodeEntry { pid: std::process::id() as u64, port: self.local_addr.port(), pipes_hash: 0 };
+        self.node_entry = Some(crate::machine::write_node_entry(&self.shared.node_key, &entry)?);
+        Ok(())
+    }
 }
 
-/// A Windows global named mutex makes the singleton independent of cache
-/// directory and login session. The cache lock remains as defense in depth
-/// and as the portable behavior on non-Windows development/test hosts.
+/// One service per data dir, on every OS alike: the cache-dir lock. A real
+/// install keeps one service per data dir; tests run several services at
+/// once, each with its own dir.
 pub struct ServiceLock {
     _cache_file: fs::File,
-    _machine: MachineServiceLock,
 }
 
 fn acquire_service_lock(cache_dir: &Path) -> Result<ServiceLock, AssetAiError> {
-    let machine = acquire_machine_service_lock()?;
     let path = cache_dir.join("service.lock");
     let file = fs::OpenOptions::new()
         .create(true)
@@ -144,82 +165,13 @@ fn acquire_service_lock(cache_dir: &Path) -> Result<ServiceLock, AssetAiError> {
         .open(&path)
         .map_err(|e| AssetAiError::Io(format!("open {}: {e}", path.display())))?;
     match file.try_lock() {
-        Ok(()) => Ok(ServiceLock {
-            _cache_file: file,
-            _machine: machine,
-        }),
+        Ok(()) => Ok(ServiceLock { _cache_file: file }),
         Err(_) => Err(AssetAiError::Io(format!(
-            "another {} service already owns {} — one service per box (it serves every GPU); not starting a second",
+            "another {} service already owns {} — one service per data dir (it serves every GPU); not starting a second",
             crate::SERVICE_NAME,
             cache_dir.display()
         ))),
     }
-}
-
-#[cfg(target_os = "windows")]
-struct MachineServiceLock {
-    handle: usize,
-}
-
-#[cfg(target_os = "windows")]
-impl Drop for MachineServiceLock {
-    fn drop(&mut self) {
-        unsafe {
-            let _ = CloseHandle(HANDLE(self.handle as *mut std::ffi::c_void));
-        }
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn acquire_machine_service_lock() -> Result<MachineServiceLock, AssetAiError> {
-    let name: Vec<u16> = "Global\\MakepadAssetAiServiceSingleton"
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
-    let handle = unsafe { CreateMutexW(None, false, Some(PCWSTR(name.as_ptr()))) };
-    let handle = match handle {
-        Ok(handle) => handle,
-        Err(_) => {
-            return Err(AssetAiError::Io(format!(
-                "create machine-wide {} singleton: {}",
-                crate::SERVICE_NAME,
-                std::io::Error::last_os_error()
-            )))
-        }
-    };
-    // CreateMutexW succeeds on an existing mutex and says so in the last error.
-    if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
-        unsafe {
-            let _ = CloseHandle(handle);
-        }
-        return Err(AssetAiError::Io(format!(
-            "another {} service is already running on this Windows machine — one service serves every GPU and cache directory",
-            crate::SERVICE_NAME
-        )));
-    }
-    Ok(MachineServiceLock {
-        handle: handle.0 as usize,
-    })
-}
-
-#[cfg(target_os = "windows")]
-use makepad_windows_sys::{
-    core::PCWSTR,
-    Win32::{
-        Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE},
-        System::Threading::CreateMutexW,
-    },
-};
-
-#[cfg(not(target_os = "windows"))]
-struct MachineServiceLock;
-
-#[cfg(not(target_os = "windows"))]
-fn acquire_machine_service_lock() -> Result<MachineServiceLock, AssetAiError> {
-    // Do not impose a host-global lock on macOS/Linux: unit and integration
-    // tests intentionally run isolated services concurrently. The cache-dir
-    // lock above still protects shared state on every platform.
-    Ok(MachineServiceLock)
 }
 
 /// Per-model runtime state surfaced on `/models`.
@@ -305,6 +257,9 @@ pub struct ServiceShared {
     /// `BinaryMessage`/`TextMessage`/`DisconnectWebSocket` (which only carry
     /// the socket id) can find the right session.
     pub ws_sessions: Mutex<HashMap<u64, String>>,
+    /// The websockets open now, and the way to close each (an empty payload); None once the
+    /// service stops, when a new one closes as it comes.
+    pub web_sockets: Mutex<Option<HashMap<u64, mpsc::Sender<Vec<u8>>>>>,
     /// The resident backends, shared by every worker thread.
     ///
     /// One map behind one lock because **residency is a whole-device
@@ -340,9 +295,8 @@ pub fn start_service(mut config: ServiceConfig) -> Result<ServiceHandle, AssetAi
     let loras_dir = lora_dir(&config.cache_dir);
     fs::create_dir_all(&loras_dir)
         .map_err(|e| AssetAiError::Io(format!("loras dir {}: {e}", loras_dir.display())))?;
-    // Hard deployment invariant: exactly one service process per Windows
-    // machine, independent of cache dir, plus an advisory cache-dir lock on
-    // every platform. Acquire both before binding or mutating cache state.
+    // One service per data dir: take its lock before binding or mutating
+    // cache state.
     let singleton = acquire_service_lock(&config.cache_dir)?;
     crate::llm_context::load_persisted(&config.cache_dir);
 
@@ -462,6 +416,7 @@ pub fn start_service(mut config: ServiceConfig) -> Result<ServiceHandle, AssetAi
         peer,
         realtime_sessions: Mutex::new(HashMap::new()),
         ws_sessions: Mutex::new(HashMap::new()),
+        web_sockets: Mutex::new(Some(HashMap::new())),
         backends: Mutex::new(HashMap::new()),
         stopped: std::sync::atomic::AtomicBool::new(false),
     });
@@ -559,6 +514,8 @@ pub fn start_service(mut config: ServiceConfig) -> Result<ServiceHandle, AssetAi
         shared,
         fleet_run,
         fleet_view_thread,
+        local_addr: inner_addr,
+        node_entry: None,
     })
 }
 
@@ -728,8 +685,57 @@ pub fn load_or_create_node_key(cache_dir: &Path) -> String {
 // Routing
 // ---------------------------------------------------------------------------
 
+/// Why a request is a web page's and not an app's or a fleet machine's, None when it is not.
+/// A request the fleet front stamped has proved a fleet credential on its TLS link, which a
+/// page cannot do; its Host is the name the fleet client dialled (a LAN address or name), so
+/// the loopback rules do not apply to it. Every other request reached the hub from this
+/// machine, and a browser on the machine is one of those ([`crate::page_gate`]).
+fn foreign_page(shared: &ServiceShared, headers: &HttpServerHeaders) -> Option<String> {
+    let through_front = shared
+        .front_secret
+        .as_deref()
+        .is_some_and(|secret| makepad_network::fleet::front::caller_from_headers(&headers.lines, secret).is_some());
+    if through_front {
+        return None;
+    }
+    crate::page_gate::refusal(headers)
+}
+
+/// The gate in front of every route (GET, POST, the websocket upgrades, `/realtime`,
+/// `/control/watch`, blobs, `/kernel`): the request back when it may go on, else answered
+/// 403 here (a websocket closed with the empty sentinel) and not seen by any route.
+fn admit(shared: &ServiceShared, request: HttpServerRequest) -> Option<HttpServerRequest> {
+    let (HttpServerRequest::Get { headers, .. }
+    | HttpServerRequest::Post { headers, .. }
+    | HttpServerRequest::PostPending { headers, .. }
+    | HttpServerRequest::ConnectWebSocket { headers, .. }) = &request
+    else {
+        // a websocket message or its end: of a socket this gate let in, or one no route knows
+        return Some(request);
+    };
+    let Some(why) = foreign_page(shared, headers) else {
+        return Some(request);
+    };
+    let refusal = error_json(403, why);
+    match request {
+        HttpServerRequest::Get { response_sender: to, .. }
+        | HttpServerRequest::Post { response: to, .. } => {
+            let _ = to.send(refusal);
+        }
+        HttpServerRequest::PostPending { body, .. } => body.reject(refusal),
+        HttpServerRequest::ConnectWebSocket { response_sender, .. } => {
+            let _ = response_sender.send(Vec::new());
+        }
+        _ => {}
+    }
+    None
+}
+
 fn route_loop(shared: Arc<ServiceShared>, request_rx: mpsc::Receiver<HttpServerRequest>) {
     while let Ok(request) = request_rx.recv() {
+        let Some(request) = admit(&shared, request) else {
+            continue;
+        };
         match request {
             HttpServerRequest::Get {
                 headers,
@@ -781,6 +787,15 @@ fn route_loop(shared: Arc<ServiceShared>, request_rx: mpsc::Receiver<HttpServerR
                 headers,
                 response_sender,
             } => {
+                match shared.web_sockets.lock().unwrap().as_mut() {
+                    Some(open) => {
+                        open.insert(web_socket_id, response_sender.clone());
+                    }
+                    None => {
+                        let _ = response_sender.send(Vec::new());
+                        continue;
+                    }
+                }
                 if headers.path.split('?').next() == Some("/kernel/stream") {
                     route_kernel_stream(&shared, &headers, web_socket_id, response_sender);
                     continue;
@@ -837,6 +852,9 @@ fn route_loop(shared: Arc<ServiceShared>, request_rx: mpsc::Receiver<HttpServerR
                 }
             }
             HttpServerRequest::DisconnectWebSocket { web_socket_id } => {
+                if let Some(open) = shared.web_sockets.lock().unwrap().as_mut() {
+                    open.remove(&web_socket_id);
+                }
                 #[cfg(feature = "kernel")]
                 crate::program_serve::service().stream_closed(web_socket_id);
                 if let Some(job_id) = shared.ws_sessions.lock().unwrap().remove(&web_socket_id) {
@@ -851,15 +869,11 @@ fn route_loop(shared: Arc<ServiceShared>, request_rx: mpsc::Receiver<HttpServerR
 
 
 
-/// The `kernel` domain (`crate::kernel_wire`): compute programs on this node, for fleet
-/// machine credentials only. `GET /kernel` is the node's info; the programs run over the stream.
+/// The `kernel` domain (`crate::kernel_wire`): compute programs on this node, for the callers
+/// [`kernel_caller`] takes. `GET /kernel` is the node's info; the programs run over the stream.
 fn route_kernel(shared: &Arc<ServiceShared>, headers: &HttpServerHeaders, response_sender: mpsc::Sender<HttpServerResponse>) {
-    let Some(caller) = caller_of(shared, headers) else {
-        let _ = response_sender.send(unauthorized_response());
-        return;
-    };
-    if !(caller.admin || caller.role != makepad_network::fleet::id::Role::Paired) {
-        let _ = response_sender.send(error_json(403, "compute programs need a fleet machine credential".into()));
+    if kernel_caller(shared, headers).is_none() {
+        let _ = response_sender.send(error_json(401, "compute programs need this machine's token or a fleet machine credential".into()));
         return;
     }
     let path = headers.path.split('?').next().unwrap_or_default();
@@ -880,9 +894,9 @@ fn route_kernel(shared: &Arc<ServiceShared>, headers: &HttpServerHeaders, respon
 }
 
 /// `GET /kernel/stream` (websocket): one long-lived stream per client and node for compute
-/// programs (frames: `crate::kernel_wire`). Fleet machine credentials only.
+/// programs (frames: `crate::kernel_wire`), for the callers [`kernel_caller`] takes.
 fn route_kernel_stream(shared: &Arc<ServiceShared>, headers: &HttpServerHeaders, web_socket_id: u64, response_sender: mpsc::Sender<Vec<u8>>) {
-    let caller = caller_of(shared, headers).filter(|c| c.admin || c.role != makepad_network::fleet::id::Role::Paired);
+    let caller = kernel_caller(shared, headers);
     #[cfg(feature = "kernel")]
     if let Some(caller) = caller {
         crate::program_serve::service().stream_open(web_socket_id, &caller.client_id, response_sender);
@@ -891,6 +905,16 @@ fn route_kernel_stream(shared: &Arc<ServiceShared>, headers: &HttpServerHeaders,
     #[cfg(not(feature = "kernel"))]
     let _ = (caller, web_socket_id);
     let _ = response_sender.send(Vec::new());
+}
+
+/// Who may run compute programs here: an app on this machine, by the machine token on the
+/// loopback surface, or a fleet machine credential through the fleet front.
+fn kernel_caller(shared: &ServiceShared, headers: &HttpServerHeaders) -> Option<makepad_network::fleet::front::Caller> {
+    if crate::machine::token_in_headers(&headers.lines) {
+        return Some(makepad_network::fleet::front::Caller::local());
+    }
+    shared.front_secret.as_ref()?;
+    caller_of(shared, headers).filter(|c| c.admin || c.role != makepad_network::fleet::id::Role::Paired)
 }
 
 /// Who sent a request, or None when it is not allowed in at all.
@@ -3102,7 +3126,7 @@ fn execute_job(
         // below (a generation error, a cancel) waits for that thread to end,
         // and a handle still held here kept it alive -- the job worker then
         // waited on itself, holding the backends, and the hub answered nothing
-        // more (149, a chat during a yield).
+        // more (a chat during a yield).
         drop(concurrent);
         match gen_result {
             Ok(artifacts) => {
@@ -4346,6 +4370,7 @@ mod lifecycle_tests {
             ),
             realtime_sessions: Mutex::new(HashMap::new()),
             ws_sessions: Mutex::new(HashMap::new()),
+            web_sockets: Mutex::new(Some(HashMap::new())),
             backends: Mutex::new(HashMap::new()),
             stopped: std::sync::atomic::AtomicBool::new(false),
         })
@@ -4531,11 +4556,11 @@ mod lifecycle_tests {
         let blob = request_headers("GET", &format!("{}{}", crate::peer_serve::BLOB_PATH_PREFIX, "a".repeat(64)), None);
         assert!(caller_of(&shared, &blob).is_none());
         // A guessed front secret is not the front.
-        let forged = route_get_request(&shared, &request_headers("GET", "/jobs", Some(("guess", "rik"))));
+        let forged = route_get_request(&shared, &request_headers("GET", "/jobs", Some(("guess", "someone"))));
         assert!(forged.header.starts_with("HTTP/1.1 401 Unauthorized"));
-        let ok = route_get_request(&shared, &request_headers("GET", "/jobs", Some((SECRET, "rik"))));
+        let ok = route_get_request(&shared, &request_headers("GET", "/jobs", Some((SECRET, "someone"))));
         assert!(ok.header.starts_with("HTTP/1.1 200 OK"));
-        let health = route_get_request(&shared, &request_headers("GET", "/health", Some((SECRET, "rik"))));
+        let health = route_get_request(&shared, &request_headers("GET", "/health", Some((SECRET, "someone"))));
         let health = String::from_utf8(health.body).unwrap();
         assert!(health.contains("\"auth_required\":true"));
         assert_eq!(HealthJson::deserialize_json_lenient(&health).unwrap().lan_listening, Some(true));
@@ -4544,6 +4569,153 @@ mod lifecycle_tests {
         assert!(crate::fleet_report::FleetJson::deserialize_json(&String::from_utf8(fleet.body).unwrap()).unwrap().lan_listening);
         let post = route_post_request(&shared, &request_headers("POST", "/not-an-endpoint", None), b"{}");
         assert!(post.header.starts_with("HTTP/1.1 401 Unauthorized"));
+    }
+
+    /// A real listener with the route loop behind it: `run` gets its port and a function that
+    /// sends one raw request and returns the whole answer. Both stop when `run` returns.
+    fn with_served(shared: &Arc<ServiceShared>, run: impl FnOnce(u16, &dyn Fn(&str) -> String)) {
+        use std::io::{Read, Write};
+        // A port probed and released can be taken before the server binds it: try again on a fresh one.
+        let (addr, request_rx, server) = (0..50)
+            .find_map(|_| {
+                let probe = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+                let addr = probe.local_addr().unwrap();
+                drop(probe);
+                let (request_tx, request_rx) = mpsc::channel();
+                start_http_server(HttpServer {
+                    listen_address: addr,
+                    request: request_tx,
+                    post_max_size: POST_MAX_SIZE,
+                    post_max_size_overrides: job_body_size_overrides(),
+                    pre_admit_posts: false,
+                    client_ip_resolver: None,
+                    trusted_proxy: None,
+                    allowed_methods: None,
+                })
+                .map(|server| (addr, request_rx, server))
+            })
+            .expect("no free port for the test server");
+        let route_shared = shared.clone();
+        let route = std::thread::spawn(move || route_loop(route_shared, request_rx));
+        let exchange = |request: &str| {
+            let mut stream = std::net::TcpStream::connect(addr).unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            stream.write_all(request.as_bytes()).unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).unwrap();
+            response
+        };
+        run(addr.port(), &exchange);
+        server.stop();
+        server.join().unwrap();
+        route.join().unwrap();
+    }
+
+    /// A page in a browser on the machine can reach a loopback hub: a cross-site POST, a
+    /// preflight, a name rebound to 127.0.0.1. Apps send no Origin and dial a loopback host.
+    /// The lease table stands for a side effect: a refused `/bye` must leave it alone.
+    #[test]
+    fn a_web_page_cannot_drive_the_loopback_hub() {
+        let shared = fixture_shared(&[]);
+        let lease = crate::lease::Origin { node_key: "origin-a".into(), epoch: 1 };
+        shared.leases.lock().unwrap().register("job-1", lease, crate::jobs::now_ms());
+        with_served(&shared, |port, exchange| {
+            let bye = |extra: &str| {
+                let body = r#"{"origin_key":"origin-a"}"#;
+                exchange(&format!("POST /bye HTTP/1.1\r\n{extra}Content-Type: text/plain\r\nContent-Length: {}\r\n\r\n{body}", body.len()))
+            };
+            let get = |extra: &str| exchange(&format!("GET /health HTTP/1.1\r\n{extra}\r\n"));
+            let held = || shared.leases.lock().unwrap().len();
+
+            let foreign = bye(&format!("Host: 127.0.0.1:{port}\r\nOrigin: https://evil.example\r\n"));
+            assert!(foreign.starts_with("HTTP/1.1 403 Forbidden"), "a foreign page's POST: {foreign}");
+            let sandboxed = bye(&format!("Host: 127.0.0.1:{port}\r\nOrigin: null\r\n"));
+            assert!(sandboxed.starts_with("HTTP/1.1 403"), "a sandboxed frame's POST: {sandboxed}");
+            let rebound = bye(&format!("Host: evil.example:{port}\r\n"));
+            assert!(rebound.starts_with("HTTP/1.1 403"), "a rebound name's POST: {rebound}");
+            assert_eq!(held(), 1, "no refused request reached /bye");
+
+            let preflight = exchange(&format!(
+                "OPTIONS /generate HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: https://evil.example\r\nAccess-Control-Request-Method: POST\r\nAccess-Control-Request-Headers: content-type\r\n\r\n"
+            ));
+            assert!(preflight.starts_with("HTTP/1.1 403"), "a foreign preflight: {preflight}");
+            assert!(!preflight.to_ascii_lowercase().contains("access-control-allow"), "a foreign preflight is allowed nothing: {preflight}");
+            assert!(get(&format!("Host: evil.example:{port}\r\n")).starts_with("HTTP/1.1 403"), "a rebound name's GET");
+            assert!(get(&format!("Host: 127.0.0.1:{port}\r\nOrigin: https://evil.example\r\n")).starts_with("HTTP/1.1 403"), "a foreign page's GET");
+            assert!(get("Connection: close\r\n").starts_with("HTTP/1.1 403"), "a request with no Host");
+
+            // Apps: no Origin, a loopback Host; and a page the hub itself serves (a loopback Origin).
+            for host in [format!("127.0.0.1:{port}"), format!("localhost:{port}"), "127.0.0.1".to_string(), format!("[::1]:{port}")] {
+                let answer = get(&format!("Host: {host}\r\n"));
+                assert!(answer.starts_with("HTTP/1.1 200"), "an app dialling {host}: {answer}");
+            }
+            assert!(get(&format!("Host: 127.0.0.1:{port}\r\nOrigin: http://localhost:{port}\r\n")).starts_with("HTTP/1.1 200"));
+            let app = bye(&format!("Host: localhost:{port}\r\n"));
+            assert!(app.starts_with("HTTP/1.1 200") && app.contains("\"cancelled\":1"), "an app's /bye: {app}");
+            assert_eq!(held(), 0, "the app's /bye ran");
+        });
+    }
+
+    /// The gate covers the websocket upgrade, and a request the fleet front stamped keeps the
+    /// Host the fleet client dialled and passes, where the same Host without the stamp does not.
+    #[test]
+    fn the_gate_covers_websockets_and_lets_the_fleet_front_through() {
+        const SECRET: &str = "front-secret";
+        // Sends GETs and websocket upgrades (id, whether a page's) through the route loop: the GETs'
+        // status lines, and whether each upgrade was closed at once.
+        let open = |shared: &Arc<ServiceShared>, headers: Vec<HttpServerHeaders>, sockets: Vec<(u64, bool)>| {
+            let (tx, rx) = mpsc::channel();
+            let route_shared = shared.clone();
+            let route = std::thread::spawn(move || route_loop(route_shared, rx));
+            let mut answers = Vec::new();
+            for headers in headers {
+                let (to, from) = mpsc::channel();
+                tx.send(HttpServerRequest::Get { headers, response_sender: to }).unwrap();
+                answers.push(from.recv_timeout(Duration::from_secs(5)).expect("an answer").header);
+            }
+            let mut closed = Vec::new();
+            for (id, from_page) in sockets {
+                let (to, from) = mpsc::channel();
+                let mut headers = request_headers("GET", "/realtime/job-1", None);
+                if from_page {
+                    headers.lines.push("Origin: https://evil.example\r\n".to_string());
+                }
+                tx.send(HttpServerRequest::ConnectWebSocket { web_socket_id: id, headers, response_sender: to }).unwrap();
+                closed.push(from.recv_timeout(Duration::from_secs(5)).expect("a close").is_empty());
+            }
+            drop(tx);
+            route.join().unwrap();
+            (answers, closed)
+        };
+        let host = |mut headers: HttpServerHeaders, host: &str| {
+            headers.lines[1] = format!("Host: {host}\r\n");
+            headers
+        };
+
+        // A loopback hub: the page's upgrade (id 2) is never registered; the app's (id 1) is.
+        let shared = fixture_shared(&[]);
+        let (_, closed) = open(&shared, Vec::new(), vec![(1, false), (2, true)]);
+        assert_eq!(closed, [true, true], "both are closed: there is no session behind either");
+        let registered = shared.web_sockets.lock().unwrap().as_ref().unwrap().keys().copied().collect::<Vec<_>>();
+        assert_eq!(registered, [1], "only the app's upgrade reached the routes");
+
+        // A fleet hub: the stamped request keeps its dialled Host and a fleet client's headers.
+        let shared = fixture_shared_with_secret(&[], Some(SECRET));
+        let stamped = |name: &str| request_headers("GET", "/jobs", Some((SECRET, name)));
+        let (answers, _) = open(
+            &shared,
+            vec![
+                host(stamped("someone"), "192.0.2.5:8765"),
+                host(stamped("someone"), "mac.local:8765"),
+                host(request_headers("GET", "/jobs", None), "192.0.2.5:8765"),
+                host(request_headers("GET", "/jobs", Some(("guess", "someone"))), "192.0.2.5:8765"),
+                request_headers("GET", "/jobs", None),
+            ],
+            Vec::new(),
+        );
+        let status = |header: &String| header.split_whitespace().nth(1).unwrap_or("").to_string();
+        let statuses = answers.iter().map(status).collect::<Vec<_>>();
+        assert_eq!(statuses, ["200", "200", "403", "403", "401"], "stamped: in whatever Host it dialled; unstamped or forged: a non-loopback Host is refused, a loopback one is unauthorised");
     }
 
     /// The blob endpoint's answer for `caller` (no peer ticket sent).
@@ -4559,7 +4731,7 @@ mod lifecycle_tests {
     fn paired_phones_fetch_blobs_without_a_peer_ticket_nodes_still_need_one() {
         let shared = fixture_shared_serving(&[], Some("front-secret"), true);
         let phone = makepad_network::fleet::front::Caller { client_id: "phone".into(), role: makepad_network::fleet::id::Role::Paired, admin: false, this_machine: false, app: None };
-        let lan = makepad_network::fleet::front::Caller { client_id: "rik".into(), role: makepad_network::fleet::id::Role::Device, admin: true, this_machine: false, app: None };
+        let lan = makepad_network::fleet::front::Caller { client_id: "someone".into(), role: makepad_network::fleet::id::Role::Device, admin: true, this_machine: false, app: None };
         let node = makepad_network::fleet::front::Caller { client_id: "box".into(), role: makepad_network::fleet::id::Role::Node, admin: false, this_machine: false, app: None };
         // The paired phone passes the gate and reaches the digest allow-list
         // (nothing verified in this fixture): 404, not 401/403.
@@ -4584,7 +4756,7 @@ mod lifecycle_tests {
         shared.job_owners.lock().unwrap().insert("job-7".into(), "phone".into());
         let phone = makepad_network::fleet::front::Caller { client_id: "phone".into(), role: makepad_network::fleet::id::Role::Paired, admin: false, this_machine: false, app: None };
         let other = makepad_network::fleet::front::Caller { client_id: "tablet".into(), role: makepad_network::fleet::id::Role::Paired, admin: false, this_machine: false, app: None };
-        let lan = makepad_network::fleet::front::Caller { client_id: "rik".into(), role: makepad_network::fleet::id::Role::Device, admin: true, this_machine: false, app: None };
+        let lan = makepad_network::fleet::front::Caller { client_id: "someone".into(), role: makepad_network::fleet::id::Role::Device, admin: true, this_machine: false, app: None };
         for path in ["/job/job-7", "/artifact/job-7-0", "/realtime/job-7"] {
             assert!(may_read(&shared, &phone, path), "{path}");
             assert!(!may_read(&shared, &other, path), "{path}");
@@ -4728,7 +4900,7 @@ mod lifecycle_tests {
             .get_mut()
             .unwrap()
             .insert("flux2-dev".into(), ModelTrack::Ready);
-        inner.vram_usable = residency::UsableVram::new(Some(30_603));
+        inner.vram_usable = residency::UsableVram::new(Some(30_000));
 
         let model = models_json(&shared)
             .models
@@ -4739,7 +4911,7 @@ mod lifecycle_tests {
         assert_eq!(model.state, MODEL_STATE_TOO_SMALL);
         assert_eq!(
             model.note.as_deref(),
-            Some("needs 31744 MB, this card can free 30603")
+            Some("needs 31744 MB, this card can free 30000")
         );
     }
 
@@ -5057,6 +5229,7 @@ fn status_reason(status: u16) -> &'static str {
         200 => "OK",
         401 => "Unauthorized",
         400 => "Bad Request",
+        403 => "Forbidden",
         404 => "Not Found",
         409 => "Conflict",
         503 => "Service Unavailable",

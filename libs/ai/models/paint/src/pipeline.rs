@@ -106,8 +106,8 @@ impl Default for PaintConfig {
 
 /// Service-side admission reserve added on top of a model's declared peak.
 pub const SERVICE_VRAM_RESERVE_MIB: u32 = 2048;
-/// Measured usable total of the GPU-A admission class.
-pub const GPUA_TOTAL_MIB: u32 = 24_564;
+/// Usable total of the GPU-A admission class, a 24 GB card's rounded down.
+pub const GPUA_TOTAL_MIB: u32 = 24_000;
 /// The frozen torch oracle logged "22.15GB" device peak (all components
 /// resident, 6 views @ 512). The log line did not state GiB vs decimal GB, so
 /// both readings are kept until the native canary measures exactly; admission
@@ -1319,7 +1319,7 @@ mod tests {
         let high = admission_estimate(MemoryProfile::HighVram);
         assert!(
             !fits_24g_service(&high),
-            "all-resident oracle worst case + reserve exceeds 24,564 MiB and must not admit on a GPU-A"
+            "all-resident oracle worst case + reserve exceeds the class total and must not admit on a GPU-A"
         );
         assert_eq!(high.declared_peak_mib, ORACLE_PEAK_MIB_UPPER);
         assert!(high.basis.contains("22.15"));

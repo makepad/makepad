@@ -621,8 +621,8 @@ mod tests {
     }
 
     #[test]
-    fn the_149_refusal_numbers_fit_now() {
-        // 149, 15:00: the 27B cut to 16384 measured 'whole load 19711 MB' while the
+    fn a_measured_refusals_numbers_fit_now() {
+        // Measured on a node: the 27B cut to 16384 measured 'whole load 19711 MB' while the
         // desktop allocated; the hub then wanted 19439 MB for the floor and refused
         // with 21256 MB free next to a 2048 MB reserve+headroom.
         let _serial = llm_memory_tests();

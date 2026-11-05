@@ -53,6 +53,19 @@ pub fn machine_token() -> io::Result<String> {
     Ok(token)
 }
 
+/// The request header an app on this machine presents [`machine_token`] in, on a hub's
+/// loopback surface.
+pub const TOKEN_HEADER: &str = "X-Makepad-Machine-Token";
+
+/// Whether request header `lines` carry this machine's token.
+pub fn token_in_headers(lines: &[String]) -> bool {
+    let sent = lines.iter().find_map(|line| {
+        let (name, value) = line.trim_end().split_once(':')?;
+        name.trim().eq_ignore_ascii_case(TOKEN_HEADER).then(|| value.trim().to_string())
+    });
+    sent.is_some_and(|sent| machine_token().is_ok_and(|token| token == sent))
+}
+
 /// 32 hex chars of OS randomness.
 fn mint_token() -> io::Result<String> {
     Ok(to_hex(&rand16()?))
@@ -302,19 +315,28 @@ fn try_lock_exclusive(file: &File) -> io::Result<bool> {
     use makepad_windows_sys::Win32::{
         Foundation::{ERROR_LOCK_VIOLATION, HANDLE},
         Storage::FileSystem::{LockFileEx, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY},
-        System::IO::OVERLAPPED,
+        System::IO::{OVERLAPPED, OVERLAPPED_0_0},
     };
     use std::os::windows::io::AsRawHandle;
-    // SAFETY: a zeroed OVERLAPPED with offset 0 locks from the file start;
-    // the handle is owned and open.
+    // Windows byte-range locks are mandatory: a lock over the record would
+    // fail every other handle's read of it, so a loser could never see the
+    // holder's state. The lock takes one byte far past any record instead
+    // (locking beyond the end of a file is allowed).
+    const LOCK_OFFSET: u64 = 1 << 62;
     let mut overlapped = OVERLAPPED::default();
+    overlapped.Anonymous.Anonymous = OVERLAPPED_0_0 {
+        Offset: LOCK_OFFSET as u32,
+        OffsetHigh: (LOCK_OFFSET >> 32) as u32,
+    };
+    // SAFETY: the OVERLAPPED names the locked offset; the handle is owned
+    // and open.
     let rc = unsafe {
         LockFileEx(
             HANDLE(file.as_raw_handle()),
             LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
             0,
-            u32::MAX,
-            u32::MAX,
+            1,
+            0,
             &mut overlapped,
         )
     };

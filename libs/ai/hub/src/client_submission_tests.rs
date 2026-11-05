@@ -316,6 +316,9 @@ fn loopback_six_real_local_services_accept_once_and_poll_error_never_reposts() {
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => { std::thread::sleep(Duration::from_millis(1)); continue; }
                     Err(e) => panic!("fixture accept: {e}"),
                 };
+                // On macOS and Windows an accepted socket inherits the
+                // listener's non-blocking mode; the fixture reads blocking.
+                stream.set_nonblocking(false).unwrap();
                 stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
                 let mut bytes = Vec::new();
                 let mut byte = [0];
