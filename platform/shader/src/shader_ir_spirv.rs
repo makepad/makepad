@@ -28,7 +28,13 @@ pub fn ir_to_spirv(m: &IrModule, entry: FuncId, xr: bool) -> Result<Vec<u32>, St
         Some(e) => e.stage,
         None => return Err("not an entry point".to_string()),
     };
-    let compute = if stage == IrStage::Compute { Some(compute_layout(m)?) }
+    let compute = if stage == IrStage::Compute {
+        let layout = compute_layout(m)?;
+        if layout.push_size > crate::shader_ir_compute::MAX_PUSH_PARAMS {
+            return Err(format!("kernel push constants take {} bytes, over the {} every device has", layout.push_size, crate::shader_ir_compute::MAX_PUSH_PARAMS));
+        }
+        Some(layout)
+    }
         else if m.globals.iter().any(|g| matches!(g.kind, IrGlobalKind::Io(IrIo::Storage(_)))) {
             Some(crate::shader_ir_compute::draw_storage_layout(m, crate::shader_ir_compute::ComputeTarget::Spirv)?)
         } else { None };

@@ -384,33 +384,7 @@ pub fn build(dev: &Device, code: &HlslPipeline, desc: PipelineDesc, bindings: Ve
     };
     let mut samplers = Vec::new();
     for s in &code.samplers {
-        let address = match s.address {
-            0 => D3D11_TEXTURE_ADDRESS_WRAP,
-            1 => D3D11_TEXTURE_ADDRESS_CLAMP,
-            2 => D3D11_TEXTURE_ADDRESS_BORDER,
-            _ => D3D11_TEXTURE_ADDRESS_MIRROR,
-        };
-        let filter = match (s.filter, s.compare) {
-            (0, false) => D3D11_FILTER_MIN_MAG_MIP_POINT,
-            (_, false) => D3D11_FILTER_MIN_MAG_MIP_LINEAR,
-            (0, true) => D3D11_FILTER_COMPARISON_MIN_MAG_MIP_POINT,
-            (_, true) => D3D11_FILTER_COMPARISON_MIN_MAG_MIP_LINEAR,
-        };
-        let d = D3D11_SAMPLER_DESC {
-            Filter: filter,
-            AddressU: address,
-            AddressV: address,
-            AddressW: address,
-            MipLODBias: 0.0,
-            MaxAnisotropy: 1,
-            ComparisonFunc: if s.compare { D3D11_COMPARISON_LESS_EQUAL } else { D3D11_COMPARISON_NEVER },
-            BorderColor: [0.0; 4],
-            MinLOD: 0.0,
-            MaxLOD: f32::MAX,
-        };
-        let mut out = None;
-        unsafe { dev.device.CreateSamplerState(&d, Some(&mut out)) }.map_err(|e| hr("CreateSamplerState", e))?;
-        samplers.push(out);
+        samplers.push(sampler_state(dev, s)?);
     }
     if code.textures.len() + desc.instance_stride.min(1) as usize > D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT as usize {
         return Err(format!("`{name}` binds {} textures; D3D11 has {} shader-resource slots", code.textures.len(), D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT));
@@ -429,6 +403,37 @@ pub fn build(dev: &Device, code: &HlslPipeline, desc: PipelineDesc, bindings: Ve
         stride,
         desc,
     }))
+}
+
+/// The sampler state a draw's or a kernel's sampler `s` describes.
+pub(super) fn sampler_state(dev: &Device, s: &crate::spirv::SpirvSampler) -> Result<Option<ID3D11SamplerState>, String> {
+    let address = match s.address {
+        0 => D3D11_TEXTURE_ADDRESS_WRAP,
+        1 => D3D11_TEXTURE_ADDRESS_CLAMP,
+        2 => D3D11_TEXTURE_ADDRESS_BORDER,
+        _ => D3D11_TEXTURE_ADDRESS_MIRROR,
+    };
+    let filter = match (s.filter, s.compare) {
+        (0, false) => D3D11_FILTER_MIN_MAG_MIP_POINT,
+        (_, false) => D3D11_FILTER_MIN_MAG_MIP_LINEAR,
+        (0, true) => D3D11_FILTER_COMPARISON_MIN_MAG_MIP_POINT,
+        (_, true) => D3D11_FILTER_COMPARISON_MIN_MAG_MIP_LINEAR,
+    };
+    let d = D3D11_SAMPLER_DESC {
+        Filter: filter,
+        AddressU: address,
+        AddressV: address,
+        AddressW: address,
+        MipLODBias: 0.0,
+        MaxAnisotropy: 1,
+        ComparisonFunc: if s.compare { D3D11_COMPARISON_LESS_EQUAL } else { D3D11_COMPARISON_NEVER },
+        BorderColor: [0.0; 4],
+        MinLOD: 0.0,
+        MaxLOD: f32::MAX,
+    };
+    let mut out = None;
+    unsafe { dev.device.CreateSamplerState(&d, Some(&mut out)) }.map_err(|e| hr("CreateSamplerState", e))?;
+    Ok(out)
 }
 
 #[cfg(test)]

@@ -1,7 +1,8 @@
 //! Compute entry points and their host ABI. Every target shares the original
 //! address-slot/parameter byte layout. Only SPIR-V consumes the addresses;
 //! text targets bind buffers separately and leave those slots as padding.
-//! Storage images have explicit format and binding reflection.
+//! Storage images have explicit format and binding reflection, as do sampled
+//! textures (read only, through the kernel's samplers; Metal and HLSL only).
 
 use crate::shader_ir::*;
 use makepad_live_id::LiveId;
@@ -46,6 +47,30 @@ pub struct StorageTextureBinding {
     pub set: u32,
     /// SPIR-V binding, Metal texture index, or HLSL u register.
     pub index: u32,
+}
+
+/// A 2D texture a kernel samples (`shader.texture_2d`), read only.
+#[relax_api(plain)]
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct SampledTextureBinding {
+    pub name: LiveId,
+    pub global: GlobalId,
+    /// Metal texture index (after the storage images) or HLSL t register (after the
+    /// read-only buffers).
+    pub index: u32,
+}
+
+/// A sampler a kernel's samples use (`_s<i>`, i its place in `ComputeLayout::samplers`):
+/// Metal declares it in the kernel, HLSL binds it at register s<i>.
+#[relax_api(plain)]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ComputeSampler {
+    /// 0 nearest, 1 linear
+    pub filter: u32,
+    /// 0 repeat, 1 clamp to edge, 2 clamp to zero, 3 mirrored repeat
+    pub address: u32,
 }
 
 #[relax_api(plain)]
@@ -108,6 +133,10 @@ pub struct ComputeLayout {
     pub target: ComputeTarget,
     pub buffers: Vec<ComputeBufferBinding>,
     pub storage_textures: Vec<StorageTextureBinding>,
+    /// Sampled 2D textures (text targets only).
+    pub textures: Vec<SampledTextureBinding>,
+    /// The samplers the kernel's samples use, filled from the shader's samplers.
+    pub samplers: Vec<ComputeSampler>,
     /// MSL buffer index or HLSL b register; None for push constants.
     pub param_binding: Option<u32>,
     /// Allocation/binding byte size; HLSL rounds the common block to 16 bytes.
@@ -137,6 +166,11 @@ impl ComputeLayout {
 
 /// The push-constant block of a lowered kernel: its buffers (in the order
 /// the kernel first uses them) then its params, at their natural alignment.
+/// The most bytes of params a kernel takes as push constants (SPIR-V: the Vulkan minimum every
+/// device guarantees) and as a parameter block (Metal's `setBytes`, D3D11's constant buffer).
+pub const MAX_PUSH_PARAMS: u32 = 128;
+pub const MAX_TEXT_PARAMS: u32 = 4096;
+
 pub fn compute_layout(m: &IrModule) -> Result<ComputeLayout, String> {
     let mut slots = Vec::new();
     let mut offset = 0u32;
@@ -164,9 +198,8 @@ pub fn compute_layout(m: &IrModule) -> Result<ComputeLayout, String> {
         offset += size;
     }
     let push_size = round_up(offset, 8);
-    if push_size > 128 {
-        // 128 bytes is the Vulkan minimum every device guarantees.
-        return Err(format!("kernel push constants take {} bytes, over the 128 every device has", push_size));
+    if push_size > MAX_TEXT_PARAMS {
+        return Err(format!("kernel params take {} bytes, over the {MAX_TEXT_PARAMS} a parameter block holds", push_size));
     }
     let mut shared_bytes = 0u32;
     for g in &m.globals {
@@ -184,7 +217,8 @@ pub fn compute_layout(m: &IrModule) -> Result<ComputeLayout, String> {
 /// Target bindings supplement, never reorder, the common byte layout.
 pub fn compute_target_layout(m: &IrModule, target: ComputeTarget) -> Result<ComputeLayout, String> {
     for g in &m.globals {
-        if !matches!(g.kind, IrGlobalKind::Io(IrIo::Storage(_) | IrIo::Uniform | IrIo::Workgroup) | IrGlobalKind::StorageTexture(_) | IrGlobalKind::IterCounter) {
+        if !matches!(g.kind, IrGlobalKind::Io(IrIo::Storage(_) | IrIo::Uniform | IrIo::Workgroup) | IrGlobalKind::StorageTexture(_) | IrGlobalKind::IterCounter)
+            && !(target != ComputeTarget::Spirv && g.kind == IrGlobalKind::Io(IrIo::Texture(crate::shader_output::TextureType::Texture2d))) {
             return Err(format!("kernel resource {} ({:?}) is unsupported on {target:?}", g.name, g.kind));
         }
         if target != ComputeTarget::Spirv && g.kind == IrGlobalKind::Io(IrIo::Workgroup) {
@@ -196,6 +230,9 @@ pub fn compute_target_layout(m: &IrModule, target: ComputeTarget) -> Result<Comp
     }
     let mut layout = compute_layout(m)?;
     layout.target = target;
+    if target == ComputeTarget::Spirv && layout.push_size > MAX_PUSH_PARAMS {
+        return Err(format!("kernel push constants take {} bytes, over the {MAX_PUSH_PARAMS} every device has", layout.push_size));
+    }
     if target != ComputeTarget::Spirv && !layout.cooperative_matrices.is_empty() {
         return Err(format!("cooperative matrices are unsupported on {target:?}"));
     }
@@ -223,6 +260,12 @@ pub fn compute_target_layout(m: &IrModule, target: ComputeTarget) -> Result<Comp
         }
     }
     write += layout.storage_textures.len() as u32;
+    for (g, global) in m.globals.iter().enumerate() {
+        if global.kind == IrGlobalKind::Io(IrIo::Texture(crate::shader_output::TextureType::Texture2d)) {
+            let index = layout.textures.len() as u32 + if target == ComputeTarget::Hlsl { read } else { layout.storage_textures.len() as u32 };
+            layout.textures.push(SampledTextureBinding { name: global.name, global: g as GlobalId, index });
+        }
+    }
     if target == ComputeTarget::Hlsl {
         layout.shared_bytes = 0;
         for g in &m.globals {
@@ -250,7 +293,7 @@ pub fn compute_target_layout(m: &IrModule, target: ComputeTarget) -> Result<Comp
         }
         if let Some(offset) = layout.group_count_offset {
             layout.push_size = round_up(offset + 12, 8);
-            if layout.push_size > 128 { return Err("HLSL kernel params including group_count exceed 128 bytes".into()); }
+            if layout.push_size > MAX_TEXT_PARAMS { return Err(format!("HLSL kernel params including group_count exceed {MAX_TEXT_PARAMS} bytes")); }
         }
         if write > 8 { return Err(format!("D3D11.0 supports 8 compute UAVs; kernel needs {write}")); }
     }

@@ -1492,6 +1492,27 @@ pub struct StorageImageBinding {
     pub format: u32,
 }
 
+/// Native binding of one sampled 2D texture a kernel reads, in reflection order: a Metal
+/// texture index or an HLSL t register.
+#[relax_api(plain)]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SampledImageBinding {
+    pub index: u32,
+}
+
+/// One sampler a kernel's samples use (HLSL register s<i>, i its place; Metal declares its
+/// own in the kernel, so the backend ignores these).
+#[relax_api(plain)]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ComputeSamplerDesc {
+    /// 0 nearest, 1 linear
+    pub filter: u32,
+    /// 0 repeat, 1 clamp to edge, 2 clamp to zero, 3 mirrored repeat
+    pub address: u32,
+}
+
 /// Kernel ABI; ranges point into the pipeline blob, never into host pointers.
 #[relax_api(plain)]
 #[repr(C)]
@@ -1506,6 +1527,10 @@ pub struct ComputeDesc {
     pub group_count_offset: u32,
     pub workgroup: [u32; 3],
     pub precise_math: u32,
+    /// `[SampledImageBinding]` and `[ComputeSamplerDesc]` records (empty when the kernel
+    /// samples nothing).
+    pub sampled: Range,
+    pub samplers: Range,
 }
 
 /// One dispatch. All ranges are byte ranges in the command arena; buffer and
@@ -1523,4 +1548,6 @@ pub struct Dispatch {
     pub params: Range,
     pub buffers: Range,
     pub textures: Range,
+    /// the sampled textures (any 2D texture, never one of `textures`), in reflection order
+    pub sampled: Range,
 }

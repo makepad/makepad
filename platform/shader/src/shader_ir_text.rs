@@ -1410,6 +1410,8 @@ impl<'a> TextCx<'a> {
                         let l = self.expr(f, smp.lod);
                         format!("{}.sample(_s{}, {}, level({}))", t, smp.sampler, coord, l)
                     }
+                    // a kernel has no derivatives: an implicit sample reads the top level
+                    SampleKind::Implicit | SampleKind::Video if self.compute.is_some() => format!("{}.sample(_s{}, {}, level(0.0))", t, smp.sampler, coord),
                     SampleKind::Implicit | SampleKind::Video => format!("{}.sample(_s{}, {})", t, smp.sampler, coord),
                 };
                 // The pick variant: a 2D texture's sample also reads its twin.

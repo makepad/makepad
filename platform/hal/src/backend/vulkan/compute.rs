@@ -69,6 +69,7 @@ impl Vulkan {
         if !self.dev.compute { return PipeStatus::Failed("Vulkan compute needs bufferDeviceAddress".into()); }
         let layout = match KernelLayout::parse(blob) { Ok(l) => l, Err(e) => return PipeStatus::Failed(e) };
         if let Err(e) = layout.validate_device(&self.info) { return PipeStatus::Failed(e); }
+        if !layout.sampled.is_empty() { return PipeStatus::Failed("kernels that sample textures are not built on Vulkan yet".into()); }
         if blob.code.len() % 4 != 0 { return PipeStatus::Failed("invalid SPIR-V bytes".into()); }
         let code: Vec<u32> = blob.code.chunks_exact(4).map(|w| u32::from_le_bytes(w.try_into().unwrap())).collect();
         let state = Arc::new(OnceLock::new());

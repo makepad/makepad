@@ -173,6 +173,13 @@ impl Metal {
                     t.last_bound = seq;
                     unsafe { let _: () = msg_send![encoder, setTexture: t.obj.as_id() atIndex: binding.index as u64]; }
                 }
+                // sampled textures after the storage images; the kernel declares its samplers
+                let sampled = compute::ids(view.arena, d.sampled).ok_or("invalid compute sampled textures")?;
+                for (id, binding) in sampled.iter().zip(&p.layout.sampled) {
+                    let t = self.tex.get_mut(&(s.id, id.index)).filter(|t| t.gen == id.gen).ok_or("missing sampled texture")?;
+                    t.last_bound = seq;
+                    unsafe { let _: () = msg_send![encoder, setTexture: t.obj.as_id() atIndex: binding.index as u64]; }
+                }
                 if !params.is_empty() { unsafe { let _: () = msg_send![encoder, setBytes: params.as_ptr() as *const std::ffi::c_void length: params.len() as u64 atIndex: p.layout.desc.param_binding as u64]; } }
                 let [x, y, z] = p.layout.desc.workgroup;
                 let threads = MTLSize { width: x as u64, height: y as u64, depth: z as u64 };
