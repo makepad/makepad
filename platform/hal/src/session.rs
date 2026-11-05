@@ -428,6 +428,9 @@ pub struct Stats {
     pub media_unsupported: u64,
     /// WindowOverlay requests a backend could not draw
     pub overlay_unsupported: u64,
+    /// pipelines that took the compiled states of an identical one of the app's session before
+    /// (a restart in place) instead of compiling
+    pub pipelines_taken: u64,
 }
 
 /// The display-rate tick embedded windows are paced at (60 Hz): they have no display link of their
@@ -1181,17 +1184,13 @@ impl World {
         }
     }
 
-    fn surface_px(size: [f32; 2], dpi: f32) -> (u32, u32) {
-        (((size[0] * dpi).round() as u32).max(1), ((size[1] * dpi).round() as u32).max(1))
-    }
-
     /// Creates the embedded window `id` of a child (no OS window): a render target in the child's
     /// table, lent to the parent under an alias, announced with `ChildWindow`. Returns the
     /// pixel size, or `None` for a stale id or a missing parent.
     pub fn create_embedded(&mut self, sid: u32, id: Id, kind: u32, parent_window: Id, geom: [f32; 4], now: u64) -> Option<(u32, u32)> {
         let parent = self.sessions.get(&sid)?.parent;
         let dpi = self.domain_dpi(parent)?;
-        let px = Self::surface_px([geom[2], geom[3]], dpi);
+        let px: (u32, u32) = crate::window_pixels([geom[2], geom[3]].map(f64::from), dpi as f64).into();
         let em = self.surface(sid, parent, id, px, 1, dpi, now)?;
         let s = self.sessions.get_mut(&sid)?;
         if s.windows.insert(sid, id, sid, WindowObj { kind, parent: parent_window, geom, dpi: Some(dpi), embedded: Some(em), ..Default::default() }).is_err() {
@@ -1263,7 +1262,7 @@ impl World {
         w.val.geom[2] = size[0];
         w.val.geom[3] = size[1];
         let (geom, state) = (w.val.geom, w.val.state);
-        let px = Self::surface_px(size, dpi);
+        let px: (u32, u32) = crate::window_pixels(size.map(f64::from), dpi as f64).into();
         let same = s.textures.get(sid, old.tex).is_ok_and(|t| (t.val.w, t.val.h) == px);
         if !(same && old.dpi == dpi) {
             self.retire_surface(sid, parent, old);

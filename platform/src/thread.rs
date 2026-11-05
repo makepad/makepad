@@ -1766,6 +1766,7 @@ fn app_pool() -> &'static Mutex<Weak<PoolInner>> {
     static POOL: OnceLock<Mutex<Weak<PoolInner>>> = OnceLock::new();
     POOL.get_or_init(|| Mutex::new(Weak::new()))
 }
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn cpu_summary() -> String {
     let pool = app_pool().lock().unwrap().upgrade();
     pool.map_or_else(

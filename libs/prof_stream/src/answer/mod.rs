@@ -278,6 +278,11 @@ pub fn arr<'a>(v: &'a Value, k: &str) -> &'a [Value] {
     v.get(k).and_then(Value::as_arr).unwrap_or(&[])
 }
 
+/// A tally `[["Timer",16],["tasks",2]]` as "Timer 16, tasks 2".
+pub fn tally_text(v: &[Value]) -> String {
+    v.iter().filter_map(|x| x.as_arr()).filter_map(|x| Some(format!("{} {}", x.first()?.as_str()?, num(x.get(1))? as u64))).collect::<Vec<_>>().join(", ")
+}
+
 /// 2-3 significant digits, no trailing zeros: 1234 -> "1234", 12.34 -> "12.3", 0.3141 -> "0.31".
 pub fn sig(x: f64) -> String {
     if x == 0.0 || !x.is_finite() {

@@ -2,7 +2,8 @@
 //! the group, and read a process's start time (pid + start time name one process for good: a
 //! reused pid has a different start).
 //!
-//! - Unix: `process_group(0)`; the group is signalled with `kill(-pid)` (TERM, then KILL).
+//! - Unix: `setsid`, a session of its own, which is what says it may outlive its starter under
+//!   `makepad run`; the session's group is signalled with `kill(-pid)` (TERM, then KILL).
 //! - Windows: `CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS` (no console flashes up for a console
 //!   program); there is no TERM, so both ends stop the process and its descendants (Toolhelp
 //!   snapshot, pid + start time checked before each stop).
@@ -48,7 +49,16 @@ mod imp {
 
     pub fn detach(cmd: &mut Command) {
         use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
+        extern "C" {
+            fn setsid() -> i32;
+        }
+        // SAFETY: setsid is async-signal-safe.
+        unsafe {
+            cmd.pre_exec(|| {
+                setsid();
+                Ok(())
+            });
+        }
     }
 
     pub fn signal(pid: u32, hard: bool) -> bool {

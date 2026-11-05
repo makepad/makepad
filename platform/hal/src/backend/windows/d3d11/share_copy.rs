@@ -41,6 +41,12 @@ fn slots() -> &'static Mutex<HashMap<u64, Arc<Slot>>> {
     SLOTS.get_or_init(Default::default)
 }
 
+/// (`windows::end_run`) The shared slots the ended run opened.
+pub(crate) fn end_run() {
+    let slots = std::mem::take(&mut *lock(slots()));
+    drop(slots);
+}
+
 fn device1(dev: &Device) -> Result<ID3D11Device1, String> {
     unsafe { ID3D11Device1::query(dev.device.as_raw()) }.map_err(|e| hr("ID3D11Device1", e))
 }

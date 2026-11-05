@@ -402,6 +402,7 @@ pub use {
             unregister_media_playback_session, MediaPlaybackSessionId,
         },
         script::vm::*,
+        script::reload::ScriptVmReload,
         screen::{fit_window_rect_to_screens, linux_screen_names, screens, ScreenGeom, MIN_WINDOW_SIZE},
         shared_bytes::{MappedBytes, HostBuf, HostBufStats, Scalar},
         storage::{

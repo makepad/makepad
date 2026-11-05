@@ -216,6 +216,11 @@ pub fn is_fleet_endpoint(host_port: &str) -> bool {
     fleet_endpoints().read().unwrap().contains(&host_port.to_ascii_lowercase())
 }
 
+/// The process's one OpenSSL setup (no exit handler): what code outside this crate that calls
+/// OpenSSL itself calls first.
+#[cfg(target_os = "linux")]
+pub use crate::backend::linux::socket_stream::init_openssl;
+
 /// A fresh P-256 key (X9.63) from the OS.
 pub fn generate_p256() -> io::Result<[u8; X963_KEY_LEN]> {
     platform::generate_p256()

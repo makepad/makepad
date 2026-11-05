@@ -1657,6 +1657,15 @@ fn action_watch() -> &'static Mutex<Option<ActionWatch>> {
     static WATCH: OnceLock<Mutex<Option<ActionWatch>>> = OnceLock::new();
     WATCH.get_or_init(Default::default)
 }
+/// (`win32::end_run`) The providers go with the session.
+pub(super) fn end_run() {
+    use std::sync::atomic::Ordering::Relaxed;
+    *action_watch().lock().unwrap_or_else(|e| e.into_inner()) = None;
+    PREPARE_UPDATES.store(0, Relaxed);
+    PREPARE_NODES.store(0, Relaxed);
+    PREPARE_NS.store(0, Relaxed);
+    PREPARE_MAX_NS.store(0, Relaxed);
+}
 fn action_signal() -> &'static std::sync::Condvar {
     static SIGNAL: std::sync::Condvar = std::sync::Condvar::new();
     &SIGNAL

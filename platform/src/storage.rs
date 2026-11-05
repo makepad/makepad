@@ -6,6 +6,13 @@ use {
     },
     std::collections::HashMap,
 };
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::{Arc, Mutex};
+
+/// A request on its way to a worker, who holds the lock while running it: an app that ends runs
+/// what no worker took, and waits for what one did (`Cx::finish_native_storage_writes`).
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) type HeldStorageRequest = Arc<Mutex<Option<StorageRequest>>>;
 
 /// Default maximum size of one stored value. Writes are whole-value for now;
 /// streaming or append-style writes can be added without changing
@@ -416,6 +423,9 @@ pub(crate) struct StorageState {
     pending: HashMap<StorageRequestId, PendingStorageRequest>,
     responses: ToUIReceiver<StorageWorkerResponse>,
     value_cap: usize,
+    /// The writes a worker may not have finished: what the app still owes the disk when it ends.
+    #[cfg(not(target_arch = "wasm32"))]
+    writes: Vec<HeldStorageRequest>,
 }
 
 impl Default for StorageState {
@@ -425,6 +435,8 @@ impl Default for StorageState {
             pending: HashMap::new(),
             responses: ToUIReceiver::default(),
             value_cap: DEFAULT_STORAGE_VALUE_CAP,
+            #[cfg(not(target_arch = "wasm32"))]
+            writes: Vec::new(),
         }
     }
 }
@@ -464,6 +476,23 @@ impl StorageState {
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn sender(&self) -> crate::thread::ToUISender<StorageWorkerResponse> {
         self.responses.sender()
+    }
+
+    /// `request` for a worker to take; a write stays known here until its worker lets it go.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn hold(&mut self, request: StorageRequest) -> HeldStorageRequest {
+        let writes = matches!(request.kind.op(), StorageOp::Set | StorageOp::Delete);
+        let held = Arc::new(Mutex::new(Some(request)));
+        if writes {
+            self.writes.retain(|write| Arc::strong_count(write) > 1);
+            self.writes.push(held.clone());
+        }
+        held
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn take_writes(&mut self) -> Vec<HeldStorageRequest> {
+        std::mem::take(&mut self.writes)
     }
 }
 
@@ -1339,5 +1368,23 @@ mod tests {
             assert!(validate_namespace(invalid).is_err(), "{invalid:?}");
         }
         assert!(validate_namespace(&"a".repeat(65)).is_err());
+    }
+
+    /// What an app asked to write before it ended is on disk after its `Event::Shutdown`, though
+    /// the pool cancels what no worker took: a close that saves and then ends keeps the save.
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn what_an_app_asked_to_write_is_on_disk_after_its_shutdown() {
+        let root = std::env::temp_dir().join(format!("makepad-storage-shutdown-{}", std::process::id()));
+        std::env::set_var("MAKEPAD_STORAGE_DIR", &root);
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let storage = cx.storage("ending");
+        for i in 0..256 {
+            storage.set(&mut cx, &format!("key-{i}"), vec![7u8; 64]);
+        }
+        cx.call_event_handler(&Event::Shutdown);
+        let stored = std::fs::read_dir(root.join("ending")).map_or(0, |dir| dir.count());
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(stored, 256);
     }
 }

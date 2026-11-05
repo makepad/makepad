@@ -21,6 +21,7 @@ mod compute;
 mod readback;
 mod resources;
 mod timing;
+pub(crate) use timing::end_run;
 
 use super::super::exec::{self, Gpu, OsCmd, PipeStatus};
 use super::shell::Shared;
@@ -43,6 +44,9 @@ const TRANSIENT_IDLE_NS: u64 = 3_000_000_000;
 const CAPTURE_IDLE_NS: u64 = 2_000_000_000;
 /// The device is asked how much it holds, and transient targets are looked at, this often.
 const HOUSEKEEPING_NS: u64 = 250_000_000;
+/// How long the compiled pipelines of a closed session wait for the next session to take them
+/// (`pipeline::Compiled`), from the close or from the last one taken.
+const KEPT_NS: u64 = 30_000_000_000;
 /// Retained instance data the HAL may drop is dropped, least recently used first, once the
 /// device holds more than this fraction of its recommended working set, down to the low mark.
 const RESIDENCY_HIGH: (u64, u64) = (3, 4);
@@ -126,6 +130,10 @@ pub struct Metal {
     pending_draws: u64,
     /// Failed command buffers must not silently strand their clients.
     lost_posted: bool,
+    /// the compiled pipelines of the app session that closed last, for the next one to take
+    /// (`pipeline::Compiled`), and when that session closed or the next took one
+    kept: Vec<pipeline::Compiled>,
+    kept_ns: u64,
 }
 
 impl Metal {
@@ -216,6 +224,8 @@ impl Metal {
             prof_key: None,
             pending_draws: 0,
             lost_posted: false,
+            kept: Vec::new(),
+            kept_ns: 0,
         })
     }
 
@@ -363,6 +373,11 @@ impl Metal {
         self.dev.arena_trim(clock);
         self.leases.trim(clock);
         if let Some(Some(pass_clock)) = &self.dev.clock { pass_clock.trim(clock); }
+        // what the session before left and the running one did not take for a while
+        if !self.kept.is_empty() && clock.saturating_sub(self.kept_ns) > KEPT_NS {
+            self.kept = Vec::new();
+        }
+        self.dev.pools.set_count(crate::ledger::Pool::KeptPipelines, self.kept.len() as u64);
         // the queue keeps driver memory for the most command buffers it had at once
         self.dev.pools.set_count(crate::ledger::Pool::CommandBuffers, self.dev.peak_in_flight);
         if let Some(host) = world.session_mut(HOST) {
@@ -529,6 +544,12 @@ impl Backend for Metal {
             if let Some(b) = self.buf.remove(&k) {
                 self.dev.retire(Box::new(b));
             }
+        }
+        // an app session's compiled pipelines wait for the next session (a restart in place makes
+        // the same ones again); what the session before left and this one did not take goes
+        if sid != HOST {
+            self.kept = self.pipe.iter().filter(|(k, _)| own(k)).filter_map(|(_, p)| p.state.compiled(&p.desc)).collect();
+            self.kept_ns = crate::clock_ns();
         }
         self.pipe.retain(|k, _| !own(k));
         self.compute.retain(|k, _| !own(k));
@@ -705,11 +726,18 @@ impl Gpu for Metal {
         }
         if blob.desc.compute.len != 0 { return self.create_compute(s, id, blob); }
         let Ok(source) = std::str::from_utf8(blob.code) else { return PipeStatus::Failed("the pipeline source is not utf8".into()) };
-        let state = pipeline::create(&self.dev, s.id, id, s.font_frames.clone(), source, &blob.desc);
+        // the same pipeline of the session before (a restart in place): its states, no compile
+        let taken = self.kept.iter().position(|c| c.is(source, &blob.desc)).map(|i| self.kept.swap_remove(i));
+        let ready = taken.is_some();
+        if ready {
+            self.kept_ns = crate::clock_ns();
+            s.stats.pipelines_taken += 1;
+        }
+        let state = pipeline::create(&self.dev, s.id, id, s.font_frames.clone(), source, &blob.desc, taken);
         let stats = crate::gpu_prof::source_stats(source).into();
-        let kept = crate::gpu_prof::keep_sources().then(|| source.into());
-        self.pipe.insert((s.id, id.index), pipeline::Pipe { gen: id.gen, state, desc: blob.desc, storage: crate::compute::records(blob.raw, blob.desc.storage_buffers).unwrap_or_default(), bindings: blob.bindings.as_slice().into(), announced: false, stats, source: kept });
-        PipeStatus::Pending
+        let prof_source = crate::gpu_prof::keep_sources().then(|| state.source.clone());
+        self.pipe.insert((s.id, id.index), pipeline::Pipe { gen: id.gen, state, desc: blob.desc, storage: crate::compute::records(blob.raw, blob.desc.storage_buffers).unwrap_or_default(), bindings: blob.bindings.as_slice().into(), announced: ready, stats, source: prof_source });
+        if ready { PipeStatus::Ready } else { PipeStatus::Pending }
     }
 
     fn pipeline_destroy(&mut self, sid: u32, id: Id) -> bool {

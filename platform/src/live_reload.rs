@@ -662,7 +662,11 @@ impl Cx {
         let Some(script_vm) = self.script_vm.as_ref() else { return };
         let file_name = normalize_path_string(Path::new(file_name));
         let sites = collect_compiled_sites_for_file(script_vm, &file_name);
-        if sites.is_empty() {
+        // A file whose modules only an isolate registered (a game's material lane, in its
+        // level isolate) runs the pass too: the isolate registers them again on it.
+        let in_isolate = sites.is_empty()
+            && crate::script::reload::any_other_vm(self, &mut |vm| !collect_compiled_sites_for_file(vm, &file_name).is_empty());
+        if sites.is_empty() && !in_isolate {
             return;
         }
         crate::log!("live design: {} was patched: its script_mod! design runs again", file_name);

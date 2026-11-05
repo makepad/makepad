@@ -1422,8 +1422,9 @@ impl Cx {
             return None;
         }
         fb.pass_px = (pass_rect.pos.x as f32, pass_rect.pos.y as f32, dpi as f32);
-        // A window's target is its surface: exactly round(inner size * dpi), the size the HAL made it
-        // (the pass rect is ceiled in points, which at a fractional scale is up to 2 px more than the surface).
+        // A window's target is its surface: its pixels (`makepad_hal::window_pixels`), the size the HAL
+        // and a host WM made it (the pass rect is ceiled in points, which at a fractional scale is up
+        // to 2 px more than the surface).
         let size = match window {
             // an offscreen XR pass supersampled (`Cx::xr_set_supersample`): each eye's half
             // scaled alike, whole pixels
@@ -1432,7 +1433,11 @@ impl Cx {
                 let eye = self.windows[w].window_geom.inner_size;
                 crate::makepad_math::dvec2(2.0 * (eye.x * 0.5 * s).round(), (eye.y * s).round())
             }
-            Some(w) if self.windows.is_valid(w) && self.windows[w].window_geom.inner_size.x > 0.0 => (self.windows[w].window_geom.inner_size * dpi).round(),
+            Some(w) if self.windows.is_valid(w) && self.windows[w].window_geom.inner_size.x > 0.0 => {
+                let inner = self.windows[w].window_geom.inner_size;
+                let [pw, ph] = makepad_hal::window_pixels([inner.x, inner.y], dpi);
+                crate::makepad_math::dvec2(pw as f64, ph as f64)
+            }
             _ => {
                 let (w, h) = Self::pass_pixel_size(pass_rect.size, dpi);
                 crate::makepad_math::dvec2(w as f64, h as f64)

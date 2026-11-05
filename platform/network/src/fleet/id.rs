@@ -482,6 +482,11 @@ impl Fleet {
         self.root
     }
 
+    /// The root key as its `root.pub` begins: the key a refusal says it expected.
+    pub fn root_hint(&self) -> String {
+        format!("{}…", to_hex(&self.root[..8]))
+    }
+
     pub fn check_credential(&self, text: &str, now: u64) -> Result<Credential, Rejection> {
         let cred = Credential::parse(text).ok_or(Rejection::Malformed)?;
         cred.check(self, now)?;
@@ -541,6 +546,12 @@ fn proof_message(bound: &[u8; 32], time: u64) -> String {
 
 const ANNOUNCE_MAGIC: &[u8; 5] = b"MKAN1";
 const ANNOUNCE_DOMAIN: &[u8] = b"mkid1 announce|";
+
+/// The credential a signed announcement carries, unchecked: who it says signed it (for messages;
+/// [`Fleet::check_announcement`] checks it).
+pub fn announcement_credential(bytes: &[u8]) -> Option<Credential> {
+    Credential::parse(split_announcement(bytes)?.0)
+}
 
 /// Whether `bytes` looks like a signed announcement (cheap; check it with
 /// [`Fleet::check_announcement`]).

@@ -134,6 +134,22 @@ mod imp {
     /// Runs one resolved command. `p` holds the request's key=value arguments (words after the
     /// command name count as flags set to `1`).
     pub fn command(r: &Resolved, p: &Params) -> Answer {
+        let schema = match r.key {
+            "design" => makepad_remote::params::design(r.sub.as_deref().unwrap_or("")),
+            "tweak" => makepad_remote::params::tweak("toggle"),
+            "tweak op" => match p.get(&["op"]) {
+                Some(op) => if let Some(op) = op.strip_prefix("design_") {
+                    makepad_remote::params::design(op)
+                } else { makepad_remote::params::tweak(op) },
+                None => return err("need op="),
+            },
+            key if key.starts_with("tweak ") => makepad_remote::params::tweak(&key[6..]),
+            key => COMMANDS.iter().find(|c| c.words == key).map(|c| c.params),
+        };
+        let Some(schema) = schema else { return err("unknown command operation"); };
+        if let Err(e) = makepad_remote::params::validate(p.0.iter().filter(|(k, _)| !(r.key == "tweak op" && k == "op")).map(|(k, _)| k.as_str()), schema) {
+            return err(&e);
+        }
         REQUEST_USER_SEQ.set(match p.get(&["if_user_seq"]) {
             Some(value) => match value.parse::<u64>() {
                 Ok(value) => Some(value),
@@ -526,7 +542,7 @@ mod imp {
         {
             let _ = driven;
             register_with_host();
-            for (name, _, _, _) in APP_QUERIES.lock().unwrap().iter() {
+            for (name, _, _, _, _) in APP_QUERIES.lock().unwrap().iter() {
                 super::host_registration::register_with_host(name);
             }
             // held until ACTIVE is set, so a service registered meanwhile is not lost
@@ -600,7 +616,9 @@ mod imp {
                 answers,
                 service: if words.starts_with("ui") { "ui" } else { "inspect" },
                 risk: if matches!(*words, "ui act" | "ui type") { crate::remote_schema::CmdRisk::Act } else { crate::remote_schema::CmdRisk::Read },
-                params: if words.starts_with("ui") { crate::remote_schema::UI_PARAMS } else { "" },
+                params: if *words == "ui" || words.starts_with("ui ") {
+                    makepad_remote::params::ui(words.strip_prefix("ui").unwrap().trim()).unwrap_or("")
+                } else { makepad_remote::params::inspect(words).unwrap_or("") },
                 required: &[],
                 positional: if *words == "ui act" { &["action"] } else { &[] },
             })
@@ -698,16 +716,19 @@ mod imp {
     /// answer's JSON lines (an `{"err":..}` line for an error); words[0] is the command.
     pub type AppQueryFn = fn(&mut Cx, &[String], &[(String, String)]) -> Vec<String>;
 
-    static APP_QUERIES: Mutex<Vec<(&'static str, &'static str, &'static str, AppQueryFn)>> = Mutex::new(Vec::new());
+    /// JSON-schema properties for these command words, checked before queuing the callback.
+    pub type AppQueryParams = fn(&[String]) -> &'static str;
+
+    static APP_QUERIES: Mutex<Vec<(&'static str, &'static str, &'static str, AppQueryParams, AppQueryFn)>> = Mutex::new(Vec::new());
 
     /// Registers the app's inspect command `name` (`makepad inspect <app> game actors`): what a
     /// person or an agent asks the live app about its own state (a game's entities and actors).
     /// `args` and `answers` are its `help` line. Read-only by convention; a later registration of
-    /// the same name replaces the earlier one.
-    pub fn register_app_query(name: &'static str, args: &'static str, answers: &'static str, f: AppQueryFn) {
+    /// the same name replaces the earlier one. `params` selects its per-command JSON properties.
+    pub fn register_app_query(name: &'static str, args: &'static str, answers: &'static str, params: AppQueryParams, f: AppQueryFn) {
         let mut q = APP_QUERIES.lock().unwrap();
         q.retain(|x| x.0 != name);
-        q.push((name, args, answers, f));
+        q.push((name, args, answers, params, f));
         drop(q);
         #[cfg(relax)]
         if ACTIVE.load(Ordering::SeqCst) {
@@ -715,8 +736,8 @@ mod imp {
         }
     }
 
-    fn app_query(name: &str) -> Option<AppQueryFn> {
-        APP_QUERIES.lock().unwrap().iter().find(|x| x.0 == name).map(|x| x.3)
+    fn app_query(name: &str) -> Option<(AppQueryParams, AppQueryFn)> {
+        APP_QUERIES.lock().unwrap().iter().find(|x| x.0 == name).map(|x| (x.3, x.4))
     }
 
     extern "C" fn no_app_close(_handle: usize) {}
@@ -750,6 +771,9 @@ mod imp {
     /// The `cmd` service of this process: the remote commands (`help` lists them) and the GPU
     /// ledger's `gpu ...`.
     pub(crate) fn dispatch(req: &Req, out: &mut Out) {
+        if matches!(req.cmd.as_str(), "help" | "ping") {
+            if let Err(e) = req.validate_params("") { return out.err(&e); }
+        }
         REQUEST_START_USER_SEQ.set(activity::user_seq_now());
         match req.cmd.as_str() {
             "ping" => out.line(&format!(
@@ -760,7 +784,7 @@ mod imp {
             )),
             "help" => {
                 out.measured("commands", "static", &[]);
-                for (name, args, answers, _) in APP_QUERIES.lock().unwrap().iter() {
+                for (name, args, answers, _, _) in APP_QUERIES.lock().unwrap().iter() {
                     out.line(&format!(
                         "{{\"cmd\":{},\"args\":{},\"answers\":{},\"tool\":{},\"risk\":\"Read\"}}",
                         json_str(name),
@@ -782,9 +806,10 @@ mod imp {
             }
             "" => out.err("empty request"),
             c if app_query(c).is_some() => {
-                let f = app_query(c).unwrap();
+                let (params, f) = app_query(c).unwrap();
                 let mut words = vec![req.cmd.clone()];
                 words.extend(req.pos.iter().cloned());
+                if let Err(e) = req.validate_params(params(&words)) { return out.err(&e); }
                 let kv = req.kv.clone();
                 out.limit = usize::MAX;
                 match ask(move |tx| Cmd::Platform(Box::new(PlatformCmd::AppQuery { f, words, kv, tx })), 6) {
@@ -2993,6 +3018,33 @@ mod imp {
         }
 
         #[test]
+        fn platform_and_app_reject_unknown_parameters() {
+            for line in ["tools typo=1", "call service.tool typo=1"] {
+                let error = makepad_remote::app::app_request_of(line).unwrap().unwrap_err();
+                assert!(error.contains("unknown parameter") && error.contains("known:"), "{line}: {error}");
+            }
+            for command in ["status", "resize", "cap start", "tweak apply", "design insert", "input replay"] {
+                let answer = answered(command, &[("typo", "1")]);
+                assert!(answer.contains("unknown parameter") && answer.contains("typo") && answer.contains("known:"), "{command}: {answer}");
+            }
+            for line in ["status typo=1", r#"{"cmd":"resize","typo":1}"#, "settled typo=1"] {
+                let (bytes, _) = makepad_remote::cmd::answer(dispatch, line);
+                let answer = String::from_utf8(bytes).unwrap();
+                assert!(answer.contains("unknown parameter") && answer.contains("known:"), "{line}: {answer}");
+            }
+            assert!(makepad_remote::params::validate(["path", "splash", "if_user_seq"], makepad_remote::params::tweak("apply").unwrap()).is_ok());
+            let cross = answered("design state", &[("type", "View")]);
+            assert!(cross.contains("unknown parameter"), "{cross}");
+            let cross = answered("tweak op", &[("op", "state"), ("splash", "{}")]);
+            assert!(cross.contains("unknown parameter"), "{cross}");
+            register_app_query("parameter_test", "[limit=]", "parameter validation", |_| r#""limit":{"type":"integer"}"#, |_, _, _| panic!("invalid request reached the UI"));
+            let (bytes, _) = makepad_remote::cmd::answer(dispatch, "parameter_test typo=1");
+            let answer = String::from_utf8(bytes).unwrap();
+            APP_QUERIES.lock().unwrap().retain(|q| q.0 != "parameter_test");
+            assert!(answer.contains("unknown parameter") && answer.contains("known: limit, full"), "{answer}");
+        }
+
+        #[test]
         fn arguments_are_checked_before_the_ui_thread_is_asked() {
             assert!(answered("drop", &[]).contains("drop requires path="));
             assert!(answered("resize", &[("w", "0"), ("h", "10")]).contains("layout points"));
@@ -3087,8 +3139,9 @@ mod imp {
     use crate::cx::Cx;
 
     pub type AppQueryFn = fn(&mut Cx, &[String], &[(String, String)]) -> Vec<String>;
+    pub type AppQueryParams = fn(&[String]) -> &'static str;
     /// No remote endpoint on the web: nothing asks.
-    pub fn register_app_query(_name: &'static str, _args: &'static str, _answers: &'static str, _f: AppQueryFn) {}
+    pub fn register_app_query(_name: &'static str, _args: &'static str, _answers: &'static str, _params: AppQueryParams, _f: AppQueryFn) {}
 
     pub(crate) fn note_user_event(_cx: &mut Cx, _event: &crate::event::Event) {}
     /// There is no remote bridge on these targets, so nothing ever asked for one.

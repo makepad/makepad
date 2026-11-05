@@ -19,6 +19,16 @@ static PRESENTED: Mutex<Vec<(u32, Id, u64)>> = Mutex::new(Vec::new());
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 pub(crate) fn active(on: bool) { ACTIVE.store(on, Ordering::Release); }
 
+/// (`wm::end_run`) The native-layer messages of the ended app's session, with their descriptors.
+pub(crate) fn end_run() {
+    let incoming = std::mem::take(&mut *lock(&INCOMING));
+    let outgoing = std::mem::take(&mut *lock(&OUTGOING));
+    drop((incoming, outgoing));
+    lock(&PRESENTED).clear();
+    BRIDGE.store(u32::MAX, Ordering::Release);
+    ACTIVE.store(false, Ordering::Release);
+}
+
 #[makepad_relax_api::relax_api]
 pub fn trace_enabled() -> bool {
     static TRACE: OnceLock<bool> = OnceLock::new();

@@ -1,6 +1,6 @@
 //! `prof` / `top by=time` and `why-slow`.
 
-use super::{arr, f, ms, pct, s, short_fn, Answer, Table};
+use super::{arr, f, ms, num, pct, s, short_fn, sig, tally_text, Answer, Table};
 use makepad_strict_json::Value;
 
 /// A fn row's name as read: an inlined copy names the fn whose code it is in.
@@ -157,6 +157,25 @@ pub fn why_slow(a: &mut Answer) {
     }
     for (i, l) in list.iter().enumerate().skip(1) {
         a.line(&format!("{}. {}", i + 1, l));
+    }
+    // the UI thread's turns: frames that drew, wakes that drew nothing (no frame to look for)
+    if let Some(u) = a.take1("ui_frames_drew") {
+        let woken_by = arr(&u, "woken_by");
+        let woke = tally_text(woken_by);
+        let (wakes, named) = (f(&u, "wakes_drew_nothing") as u64, woken_by.iter().filter_map(|x| num(x.as_arr()?.get(1))).sum::<f64>() as u64);
+        a.line(&format!(
+            "UI in {} s: {} frames drew, {} wakes drew nothing{}",
+            sig(f(&u, "s")),
+            f(&u, "ui_frames_drew") as u64,
+            wakes,
+            if woke.is_empty() {
+                String::new()
+            } else if named < wakes {
+                format!(" (the last {named} woken by {woke})")
+            } else {
+                format!(" (woken by {woke})")
+            }
+        ));
     }
     a.more("prof threads=main s=5");
     a.more("why-hung");

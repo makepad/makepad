@@ -110,6 +110,16 @@ struct Samples {
 }
 static SAMPLES: Mutex<Option<Samples>> = Mutex::new(None);
 
+/// (`hal::end_run`) The recording goes with the run.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn end_run() {
+    ON.store(false, Ordering::Relaxed);
+    CREDIT.store(0, Ordering::Relaxed);
+    SUBMIT.store(0, Ordering::Relaxed);
+    let samples = lock().take();
+    drop(samples);
+}
+
 fn lock() -> std::sync::MutexGuard<'static, Option<Samples>> {
     SAMPLES.lock().unwrap_or_else(|e| e.into_inner())
 }

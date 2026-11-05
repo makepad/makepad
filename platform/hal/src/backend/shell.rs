@@ -30,6 +30,8 @@ pub(crate) struct Snapshot {
     pub app_frame_at: Option<u64>,
     pub detached: bool,
     pub windows: HashMap<usize, Window>,
+    /// Native windows made so far: a restart in this process makes none.
+    pub windows_made: u64,
 }
 
 impl Snapshot {
@@ -42,8 +44,22 @@ impl Snapshot {
             hub_id: 0,
             app_frame_shown: None, app_frame_at: None, detached: false,
             windows: HashMap::new(),
+            windows_made: 0,
         }
     }
+}
+
+/// (`backend::end_run`) The next run has shown no frame yet; a window of the WM stays.
+pub(crate) fn end_run() {
+    let mut s = snapshot();
+    if s.app_frame_shown.is_some() {
+        s.app_frame_shown = Some(false);
+    }
+    s.app_frame_at = None;
+}
+
+pub(crate) fn window_made() {
+    snapshot().windows_made += 1;
 }
 
 pub(crate) fn snapshot() -> MutexGuard<'static, Snapshot> {
@@ -64,10 +80,10 @@ pub(crate) fn line() -> String {
         number(w.starved.map(|at| at.elapsed().as_millis() as u64)), w.pending_swapchain,
     )).collect::<Vec<_>>().join(",");
     format!(
-        "{{\"backend\":{},\"reason\":{},\"wm_socket\":{},\"protocol\":{},\"admitted\":{},\"refused\":{},\"hub\":{},\"app_frame_shown\":{},\"app_frame_ago_ms\":{},\"detached\":{},\"windows\":[{}]}}",
+        "{{\"backend\":{},\"reason\":{},\"wm_socket\":{},\"protocol\":{},\"admitted\":{},\"refused\":{},\"hub\":{},\"app_frame_shown\":{},\"app_frame_ago_ms\":{},\"detached\":{},\"windows\":[{}],\"windows_made\":{}}}",
         json_str(s.backend), json_str(&s.reason), string(s.wm_socket.as_deref()),
         number(s.protocol.map(u64::from)), number(s.admitted), string(s.refused.as_deref()),
         json_str(s.hub), s.app_frame_shown.map_or_else(|| "null".into(), |b| b.to_string()),
-        number(s.app_frame_at.map(|at| crate::clock_ns().saturating_sub(at) / 1_000_000)), s.detached, windows,
+        number(s.app_frame_at.map(|at| crate::clock_ns().saturating_sub(at) / 1_000_000)), s.detached, windows, s.windows_made,
     )
 }

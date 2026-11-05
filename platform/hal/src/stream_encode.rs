@@ -26,6 +26,12 @@ struct Open {
 static ENCODERS: Mutex<Option<HashMap<u64, Arc<Mutex<Open>>>>> = Mutex::new(None);
 static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
+/// (`hal::end_run`) The ended run's encoders.
+pub(crate) fn end_run() {
+    let open = crate::lock(&ENCODERS).take();
+    drop(open);
+}
+
 fn get(encoder: u64) -> Option<Arc<Mutex<Open>>> {
     crate::lock(&ENCODERS).as_ref()?.get(&encoder).cloned()
 }

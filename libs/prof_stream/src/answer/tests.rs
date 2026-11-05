@@ -142,3 +142,31 @@ fn the_owner_answer_says_mains_waits_then_tables_the_holds() {
     assert!(r.contains("| jit.rs:10579 | jit.rs:7815 | 4 | 8.25 | 1.5 | - |"), "{r}");
     assert!(r.contains("owner since=3") && !r.contains("pure_census"), "{r}");
 }
+
+/// An idle app's capture: no frame drew; its timer's wakes are said apart, by what woke them
+/// (an 80-"frame" answer for 16 timer wakes sent two agents after a redraw that did not exist).
+#[test]
+fn timeline_frames_of_an_idle_app_name_its_wakes_not_frames() {
+    let r = render(
+        "timeline frames",
+        &lines(r#"{"measured":"0 frames drew on the UI thread, 16 wakes drew nothing, 9 threads recorded","at_ms":1,"source":"timeline rings","partial":[]}
+{"event_only_beats":{"n":16,"per_s":2.0,"woken_by":[["Timer",16]],"phases":[["platform-ops",32],["Timer",16],["submit",16],["tasks",16]],"ui_busy_ms":{"median":0.25,"max":0.8},"more":["trace topics=frame_sources","log"]}}
+{"frame_ms":{"n":0,"median":0.00,"p95":0.00,"max":0.00},"series_ms":[]}
+{"ui_busy_ms":{"median":0.00,"p95":0.00},"ui_wait_ms":{"median":0.00,"p95":0.00},"frames_listed":"slowest first"}"#),
+    );
+    assert!(r.starts_with("No frame drew: 16 wakes of the UI thread drew nothing (woken by Timer 16)."), "{}", r);
+    assert!(r.contains("wakes that drew nothing (not frames): 16 (2/s), woken by Timer 16; they ran platform-ops 32, Timer 16, submit 16, tasks 16"), "{}", r);
+    assert!(!r.contains("slowest frames"), "{}", r);
+    assert!(r.contains("trace topics=frame_sources"), "{}", r);
+}
+
+/// `why-slow` says the UI thread's frames that drew apart from its wakes that drew nothing, and
+/// over how many of the wakes it names what woke them.
+#[test]
+fn why_slow_says_the_ui_wakes_apart_from_its_frames() {
+    let finding = r#"{"finding":"main thread busy 2% of the time (60 ms CPU in 3000 ms)"}"#;
+    let r = render("why-slow", &lines(&format!("{finding}\n{}", r#"{"ui_frames_drew":0,"wakes_drew_nothing":6,"woken_by":[["Timer",6]],"s":3.0}"#)));
+    assert!(r.contains("UI in 3 s: 0 frames drew, 6 wakes drew nothing (woken by Timer 6)"), "{}", r);
+    let r = render("why-slow", &lines(&format!("{finding}\n{}", r#"{"ui_frames_drew":180,"wakes_drew_nothing":90,"woken_by":[["platform-ops",60],["Timer",4]],"s":3.0}"#)));
+    assert!(r.contains("UI in 3 s: 180 frames drew, 90 wakes drew nothing (the last 64 woken by platform-ops 60, Timer 4)"), "{}", r);
+}

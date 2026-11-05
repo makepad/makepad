@@ -1,6 +1,21 @@
 //! Backends: what a session's commands execute against. A backend is chosen at `hal_open`.
 
 pub mod exec;
+
+/// (`hal::end_run`) What the backend of this platform holds of the ended run outside its session.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn end_run() {
+    shell::end_run();
+    #[cfg(target_os = "linux")]
+    {
+        linux::end_run();
+        vulkan::share::copy::end_run();
+    }
+    #[cfg(target_vendor = "apple")]
+    apple::metal::end_run();
+    #[cfg(windows)]
+    windows::end_run();
+}
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod shell;
 #[cfg(any(target_os = "macos", target_os = "linux"))]

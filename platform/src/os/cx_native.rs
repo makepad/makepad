@@ -123,12 +123,28 @@ impl Cx {
         request: crate::storage::StorageRequest,
     ) {
         let sender = self.storage_state.sender();
+        let held = self.storage_state.hold(request);
         match self.task_pool().submit_internal(crate::thread::Class::Background, move || {
-            let response = crate::storage::native::execute(&crate::home::storage_dir(), request);
-            let _ = sender.send(response);
+            let mut held = held.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(request) = held.take() {
+                let response = crate::storage::native::execute(&crate::home::storage_dir(), request);
+                let _ = sender.send(response);
+            }
         }) {
             Ok(task) => task.detach(),
             Err(error) => crate::error!("storage request refused by the task pool: {error}"),
+        }
+    }
+
+    /// The app is ending and its pool is about to cancel what no worker took: every write it asked
+    /// for reaches the disk first. One a worker runs is waited for and the rest run here; their
+    /// answers have nobody left to go to.
+    pub(crate) fn finish_native_storage_writes(&mut self) {
+        for write in self.storage_state.take_writes() {
+            let mut held = write.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(request) = held.take() {
+                let _ = crate::storage::native::execute(&crate::home::storage_dir(), request);
+            }
         }
     }
 

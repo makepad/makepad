@@ -231,6 +231,7 @@ impl Win {
             NSPoint { x, y }
         };
         let frame = NSRect { origin, size };
+        crate::backend::shell::window_made();
         let () = msg_send![self.window, initWithContentRect: frame styleMask: style_mask backing: NSBackingStoreType::NSBackingStoreBuffered as u64 defer: NO];
         let () = msg_send![self.window, setDelegate: self.delegate];
         let () = msg_send![self.window, setReleasedWhenClosed: NO];

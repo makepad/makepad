@@ -1,7 +1,7 @@
 //! `help`, events (`panics`, `events`, `watch`), `locals`, `timeline frames|frame`, `hitch`.
 
 use super::frames::{Frames, Kind};
-use super::{arr, f, ms, s, short_fn, sig, spark, Answer, Table};
+use super::{arr, f, ms, s, short_fn, sig, spark, tally_text, Answer, Table};
 use makepad_strict_json::Value;
 
 /// Which question goes to which command (the start of `help`).
@@ -274,32 +274,57 @@ pub fn locals(a: &mut Answer) {
 
 pub fn frames(a: &mut Answer) {
     let Some(sum) = a.take1("frame_ms") else { return };
+    let beats = a.take1("event_only_beats").and_then(|l| l.get("event_only_beats").cloned());
     let rows = a.take("critical_path_ms");
     let st = sum.get("frame_ms").cloned().unwrap_or(Value::Null);
     let series: Vec<f64> = arr(&sum, "series_ms").iter().filter_map(|x| super::num(Some(x))).collect();
     let n = f(&st, "n");
     let slow = rows.first();
     let over = series.iter().filter(|x| **x > 50.0).count();
-    a.head = format!(
-        "{} frames: median {}, p95 {}, max {}{}; {} over 50 ms.",
-        n,
-        ms(f(&st, "median")),
-        ms(f(&st, "p95")),
-        ms(f(&st, "max")),
-        slow.map(|r| format!(" ({})", s(r, "frame"))).unwrap_or_default(),
-        over
-    );
+    // wakes of the UI thread that drew nothing: no frame of their own, said apart
+    let quiet = beats.as_ref().map(|b| (f(b, "n") as u64, tally_text(arr(b, "woken_by"))));
+    a.head = if n == 0.0 {
+        match &quiet {
+            Some((k, woke)) => format!("No frame drew: {} wakes of the UI thread drew nothing (woken by {}).", k, woke),
+            None => "No frame drew and the UI thread did not wake.".to_string(),
+        }
+    } else {
+        format!(
+            "{} frames drew: median {}, p95 {}, max {}{}; {} over 50 ms{}.",
+            n,
+            ms(f(&st, "median")),
+            ms(f(&st, "p95")),
+            ms(f(&st, "max")),
+            slow.map(|r| format!(" ({})", s(r, "frame"))).unwrap_or_default(),
+            over,
+            quiet.as_ref().map(|(k, _)| format!("; {} wakes drew nothing", k)).unwrap_or_default()
+        )
+    };
+    if let Some(b) = &beats {
+        a.line(&format!(
+            "wakes that drew nothing (not frames): {} ({}/s), woken by {}; they ran {}; UI busy median {}, max {}",
+            f(b, "n") as u64,
+            sig(f(b, "per_s")),
+            tally_text(arr(b, "woken_by")),
+            tally_text(arr(b, "phases")),
+            ms(f(b.get("ui_busy_ms").unwrap_or(&Value::Null), "median")),
+            ms(f(b.get("ui_busy_ms").unwrap_or(&Value::Null), "max"))
+        ));
+        a.more("trace topics=frame_sources (the source lines that set the timers and asked for frames)");
+    }
     if !series.is_empty() {
         let lo = series.iter().cloned().fold(f64::MAX, f64::min);
         let hi = series.iter().cloned().fold(f64::MIN, f64::max);
         a.line(&format!("frame ms over time ({}..{} ms, {} frames, oldest left): {}", sig(lo), sig(hi), series.len(), spark(&series, 80)));
     }
-    let mut t = Table::new(&["frame", "ms", "UI busy ms", "UI wait ms", "work ms (all threads)", "critical path busy ms", "parallelism", "GPU ms"]);
-    for r in rows.iter().take(8) {
-        t.row(vec![s(r, "frame").into(), sig(f(r, "ms")), sig(f(r, "ui_busy_ms")), sig(f(r, "ui_wait_ms")), sig(f(r, "work_ms")), sig(f(r, "critical_path_ms")), sig(f(r, "achieved_parallelism")), sig(f(r, "gpu_ms"))]);
+    if !rows.is_empty() {
+        let mut t = Table::new(&["frame", "ms", "UI busy ms", "UI wait ms", "work ms (all threads)", "critical path busy ms", "parallelism", "GPU ms"]);
+        for r in rows.iter().take(8) {
+            t.row(vec![s(r, "frame").into(), sig(f(r, "ms")), sig(f(r, "ui_busy_ms")), sig(f(r, "ui_wait_ms")), sig(f(r, "work_ms")), sig(f(r, "critical_path_ms")), sig(f(r, "achieved_parallelism")), sig(f(r, "gpu_ms"))]);
+        }
+        a.line("slowest frames:");
+        a.line(&t.md());
     }
-    a.line("slowest frames:");
-    a.line(&t.md());
     if rows.len() > 8 {
         a.line(&format!("+{} more slow frames not shown (the next is {} ms)", rows.len() - 8, sig(f(&rows[8], "ms"))));
     }

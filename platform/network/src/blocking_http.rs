@@ -977,7 +977,6 @@ mod linux_tls {
     #[link(name = "ssl")]
     #[link(name = "crypto")]
     unsafe extern "C" {
-        fn OPENSSL_init_ssl(opts: u64, settings: *const c_void) -> c_int;
         fn TLS_client_method() -> *const SSL_METHOD;
         fn SSL_CTX_new(method: *const SSL_METHOD) -> *mut SSL_CTX;
         fn SSL_CTX_free(ctx: *mut SSL_CTX);
@@ -1050,7 +1049,7 @@ mod linux_tls {
             if unsafe { OpenSSL_version_num() } < OPENSSL_1_1_0 {
                 return Err(Error::Unsupported);
             }
-            if unsafe { OPENSSL_init_ssl(0, ptr::null()) } != 1 {
+            if crate::backend::linux::socket_stream::init_openssl().is_err() {
                 return Err(Error::Connect);
             }
             let method = unsafe { TLS_client_method() };

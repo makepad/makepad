@@ -148,6 +148,10 @@ impl Renderer {
         unsafe { (gl.glUseProgram)(program) };
         let flip = uniform("mp_clip_y_flip");
         if flip >= 0 { unsafe { (gl.glUniform1f)(flip, 1.0) } }
+        // every pass stores its rows top-down (the flip above): `fragment_position()`'s y is
+        // gl_FragCoord.y as it is
+        let frag_y = uniform("mp_frag_y");
+        if frag_y >= 0 { unsafe { (gl.glUniform2f)(frag_y, 0.0, 1.0) } }
         let mut block_sizes = Vec::with_capacity(code.blocks.len());
         for (binding, name) in code.blocks.iter().enumerate() {
             let index = unsafe { (gl.glGetUniformBlockIndex)(program, cstr(name).as_ptr()) };

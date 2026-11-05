@@ -93,6 +93,12 @@ impl App {
     pub fn serves(&self, service: &str) -> bool {
         self.caps.iter().any(|c| c.split('/').next() == Some(service))
     }
+
+    /// Why nothing can reach this process: it runs, but its socket could not be bound
+    /// (`"socket_error"`, carrier/unix.rs `listen`).
+    pub fn unreachable(&self) -> Option<String> {
+        self.text("socket_error").map(|why| format!("pid {} ({}) runs but cannot be reached: {}", self.pid, self.app, why))
+    }
 }
 
 pub(crate) fn alive(pid: u32) -> bool {
@@ -257,7 +263,8 @@ pub(crate) fn rewrite_caps(file: &std::path::Path, caps: &[String]) {
 }
 
 /// Where every process of this user registers its endpoint: one directory whatever the
-/// process's TMPDIR. The socket itself stays in the process's temp dir (its path is in the file).
+/// process's TMPDIR. The socket itself is in the user's socket dir
+/// ([`crate::carrier::unix::socket_dir`]; its path is in the file).
 /// A makepad WM gives its JIT apps an on-disk TMPDIR (`~/.makepad/wm/jit.env`), and `makepad
 /// inspect` from a shell has another: with the files in the temp dir it found none of them
 /// (166, 2026-10-25). Linux (and other Unix with a session): `$XDG_RUNTIME_DIR`, the user's 0700
@@ -341,9 +348,13 @@ pub fn find(spec: &str, caller: &Caller) -> Result<App, String> {
     if spec.starts_with("tcp:") {
         return list.into_iter().rfind(|a| a.socket == spec).ok_or_else(|| no_endpoint(spec));
     }
-    match spec.parse::<u32>() {
+    let app = match spec.parse::<u32>() {
         Ok(pid) => list.into_iter().find(|a| a.answers_to(pid)).ok_or_else(|| no_endpoint(spec)),
         Err(_) => named(&list, spec, caller),
+    }?;
+    match app.unreachable() {
+        Some(why) => Err(why),
+        None => Ok(app),
     }
 }
 
@@ -414,11 +425,12 @@ mod rewrite_tests {
 mod registry_tests {
     /// The discovery file is in the registry dir, not the temp dir: a process with another TMPDIR
     /// (a WM's JIT apps, `~/.makepad/wm/jit.env`) still lists in `makepad inspect` from a shell.
+    /// Its socket is in the socket dir, not the temp dir either (a deep one cannot hold it).
     #[test]
     fn discovery_files_go_to_the_registry_dir() {
         let (sock, disc) = crate::carrier::unix::paths(7);
         assert_eq!(disc.parent(), Some(super::registry_dir().as_path()));
-        assert_eq!(sock.parent(), Some(std::env::temp_dir().as_path()));
+        assert_eq!(sock.parent(), Some(crate::carrier::unix::socket_dir().as_path()));
         #[cfg(all(unix, not(target_os = "macos")))]
         if let Some(xdg) = std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from).filter(|d| d.is_absolute() && d.is_dir()) {
             assert_eq!(super::registry_dir(), xdg);

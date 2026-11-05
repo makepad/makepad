@@ -56,6 +56,8 @@ pub use backend::linux::wm::native as hosted_native;
 #[cfg(target_os = "linux")]
 pub use backend::linux::wm::{prepare_exec as wm_prepare_exec, undo_exec as wm_undo_exec};
 pub mod cmds;
+#[cfg(test)]
+mod cmd_tests;
 pub mod compute;
 pub mod codec;
 pub mod events;
@@ -1213,6 +1215,26 @@ pub fn expect_main_loop() {
 }
 
 /// Ends [`run_main_loop`] (any thread), as the app does when it is done.
+/// A run of this process's app ended in place (`makepad run`): what the HAL holds of it outside its
+/// session goes, as a fresh process has it. The session's close frees the rest (`free_session`);
+/// the window, the GPU device and the host's own session stay.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn end_run() {
+    completion::end_run();
+    framecap::end_run();
+    gpu_prof::end_run();
+    inspect::end_run();
+    lease::end_run();
+    profile::end_run();
+    a11y::end_run();
+    stream_decode::end_run();
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    stream_encode::end_run();
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    frame_tap::end_run();
+    backend::end_run();
+}
+
 pub fn stop_main_loop() {
     main_loop::stop()
 }

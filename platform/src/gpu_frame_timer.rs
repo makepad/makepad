@@ -96,6 +96,7 @@ pub fn take_watched(name: &str) -> Vec<f32> {
 }
 
 /// An individual dispatch's GPU duration, independent of frame aggregation.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn record_dispatch(name: &str, ns: u64) {
     let Ok(mut watched) = WATCHED.lock() else { return };
     if let Some((_, samples)) = watched.iter_mut().find(|e| e.0 == name) {

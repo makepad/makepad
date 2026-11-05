@@ -18,6 +18,12 @@
 
 pub(crate) mod a11y;
 mod appearance;
+
+/// (`windows::end_run`)
+pub(crate) fn end_run() {
+    a11y::end_run();
+    appearance::end_run();
+}
 mod clipboard;
 mod dialog;
 mod drag;

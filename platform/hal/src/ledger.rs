@@ -67,10 +67,13 @@ pub enum Pool {
     Capture,
     /// copies of instance buffers as textures, for programs that fetch instances by id (GL)
     WordTextures,
+    /// the compiled pipelines of an app session that closed, waiting for the next session to take
+    /// them (a restart in place, Metal)
+    KeptPipelines,
 }
 
 impl Pool {
-    pub const ALL: [Pool; 11] = [
+    pub const ALL: [Pool; 12] = [
         Pool::UploadArena,
         Pool::Staging,
         Pool::Leases,
@@ -82,6 +85,7 @@ impl Pool {
         Pool::WindowCopies,
         Pool::Capture,
         Pool::WordTextures,
+        Pool::KeptPipelines,
     ];
     pub fn name(self) -> &'static str {
         match self {
@@ -96,6 +100,7 @@ impl Pool {
             Pool::WindowCopies => "window copies",
             Pool::Capture => "capture",
             Pool::WordTextures => "instance word textures",
+            Pool::KeptPipelines => "kept pipelines",
         }
     }
 }

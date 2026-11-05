@@ -288,6 +288,7 @@ pub(crate) fn shared() -> &'static (Endpoint, crate::watch::WatchSink) {
         let ep = Endpoint::new("makepad-remote-test");
         ep.register_cmd(app_dispatch);
         ep.register("frames", 1, fake_frames());
+        ep.register("app", 1, fake_app());
         let w = ep.register_watch();
         ep.register_stream();
         ep.listen_unix(",\"extra\":\"x\"").unwrap();
@@ -498,6 +499,32 @@ fn fake_frames() -> Factory {
         });
         Ok(())
     })
+}
+
+/// An `app` service that answers each request with the request it was asked, then ends.
+fn fake_app() -> Factory {
+    Arc::new(|_, open| {
+        std::thread::spawn(move || {
+            let _ = open.channel.send(format!("{{\"asked\":{}}}\n", crate::json_str(&open.args)).into_bytes());
+            open.channel.close(crate::conn::CLOSE_NORMAL, "");
+        });
+        Ok(())
+    })
+}
+
+/// `call` and `tools` are the app's AI tools (its `app` service), not `cmd` commands: a JSON
+/// argument keeps its spaces, and a `call` without its tool says how it goes.
+#[test]
+fn call_and_tools_ask_the_app_service() {
+    let (lines, err) = run_app(&["call", "fab.support", "plate", "{\"at\": [1, 2]}"]);
+    assert_eq!((lines, err), (vec![r#"{"asked":"call fab.support plate\n{\"at\": [1, 2]}"}"#.to_string()], false));
+    assert_eq!(run_app(&["tools"]).0, vec![r#"{"asked":"list"}"#.to_string()]);
+    assert_eq!(run_app(&["call"]), (vec![r#"{"err":"call <service>.<tool> [<instance>] [<json args>]"}"#.to_string()], true));
+    assert_eq!(crate::app::app_request_of("call fab.x {\"a\": \"b c\"}"), Some(Ok("call fab.x\n{\"a\": \"b c\"}".to_string())));
+    assert_eq!(crate::app::app_request_of("call fab.x"), Some(Ok("call fab.x\n{}".to_string())));
+    assert_eq!(crate::app::app_request_of("ui tree"), None);
+    let typed: Vec<String> = ["call", "fab.x", "{\"t\": \"a = b\"}"].map(String::from).into();
+    assert_eq!(crate::app::typed_line(&typed), "call fab.x {\"t\": \"a = b\"}");
 }
 
 fn run_app(argv: &[&str]) -> (Vec<String>, bool) {
@@ -771,4 +798,49 @@ fn req_wire_round_trip() {
     assert_eq!((b.cmd.as_str(), b.pos.clone(), b.kv.clone()), (r.cmd.as_str(), r.pos.clone(), r.kv.clone()));
     assert!(Req::from_wire(&w[..w.len() - 1]).is_none());
     assert!(Req::from_wire(b"2:ui").is_none());
+}
+
+/// A run whose TMPDIR is deep is still reached: a test's own home under a lease's scratch dir
+/// made one 121 bytes long, its socket there could not be bound, and a capture of its JIT waited
+/// a jitlegs leg out to twice its time (11-05). A child of this test binary listens with such a
+/// TMPDIR and says where.
+#[test]
+fn a_run_with_a_deep_tmpdir_is_reached() {
+    use std::io::BufRead;
+    if std::env::var_os("MAKEPAD_REMOTE_DEEP_CHILD").is_some() {
+        let ep = Endpoint::new("makepad-remote-deep");
+        ep.register_cmd(dispatch);
+        let sock = ep.listen_unix("").unwrap();
+        println!("deep socket {}", sock.display());
+        // serves until the parent closes its stdin
+        let _ = std::io::stdin().read_line(&mut String::new());
+        return;
+    }
+    let base = std::env::temp_dir().join(format!("makepad-remote-deep-{}", std::process::id()));
+    let (deep, registry) = (base.join("lease").join("d".repeat(120)).join("tmp"), base.join("registry"));
+    for d in [&deep, &registry] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "tests::a_run_with_a_deep_tmpdir_is_reached", "--nocapture", "--test-threads=1"])
+        .env("MAKEPAD_REMOTE_DEEP_CHILD", "1")
+        .env("TMPDIR", &deep)
+        .env("MAKEPAD_REMOTE_REGISTRY", &registry)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut out = std::io::BufReader::new(child.stdout.take().unwrap()).lines().map_while(Result::ok);
+    let said = out.by_ref().find_map(|l| l.strip_prefix("deep socket ").map(str::to_string));
+    let sock = std::path::PathBuf::from(said.expect("the child listens"));
+    assert!(!sock.starts_with(&deep) && sock.starts_with(crate::carrier::unix::socket_dir()), "{}", sock.display());
+    let app = crate::discovery::apps_in(&registry).into_iter().find(|a| a.pid == child.id()).expect("its discovery file");
+    assert_eq!((app.socket.as_str(), app.unreachable()), (sock.to_str().unwrap(), None));
+    let lines: Vec<String> = Client::new(Target::Unix(sock.clone()), "deep-test").cmd("ping").unwrap().map_while(Result::ok).collect();
+    assert_eq!(lines.first().map(String::as_str), Some("{\"pong\":1}"));
+    drop(child.stdin.take());
+    out.for_each(drop);
+    assert!(child.wait().unwrap().success());
+    assert!(!sock.exists(), "its socket goes with it");
+    std::fs::remove_dir_all(&base).unwrap();
 }

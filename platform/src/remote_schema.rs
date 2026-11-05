@@ -75,6 +75,24 @@ pub fn json_str(s: &str) -> String {
 
 /// The JSON schema of a command's arguments.
 pub fn schema(c: &Command) -> String {
+    let operations = match c.words {
+        "design" => Some(makepad_remote::params::DESIGN),
+        "tweak op" => Some(makepad_remote::params::TWEAK),
+        _ => None,
+    };
+    if let Some(operations) = operations {
+        let mut variants: Vec<String> = operations.iter().map(|(op, params)| {
+            let rest = if params.is_empty() { String::new() } else { format!(",{params}") };
+            format!("{{\"type\":\"object\",\"properties\":{{\"op\":{{\"const\":{}}}{rest}}},\"required\":[\"op\"],\"additionalProperties\":false}}", json_str(op))
+        }).collect();
+        if c.words == "tweak op" {
+            for (op, params) in makepad_remote::params::DESIGN {
+                let rest = if params.is_empty() { String::new() } else { format!(",{params}") };
+                variants.push(format!("{{\"type\":\"object\",\"properties\":{{\"op\":{{\"const\":{}}}{rest}}},\"required\":[\"op\"],\"additionalProperties\":false}}", json_str(&format!("design_{op}"))));
+            }
+        }
+        return format!("{{\"oneOf\":[{}]}}", variants.join(","));
+    }
     let required: Vec<String> = c.required.iter().map(|r| json_str(r)).collect();
     format!("{{\"type\":\"object\",\"properties\":{{{}}},\"required\":[{}]}}", c.params, required.join(","))
 }
@@ -219,6 +237,3 @@ mod tests {
         assert_eq!(instance_lines(&[&CLICK]).len(), 1);
     }
 }
-
-/// Arguments of the semantic ui tools, shared by their generated MCP manifests.
-pub const UI_PARAMS: &str = r#""app":{"type":"string","description":"hosted app name or client ID; shell selects local sessions"},"machine":{"type":"string","description":"Desk Link tab name or zero-based index; list enumerates tabs"},"q":{"type":"string"},"node":{"type":"string"},"w":{"type":"string"},"role":{"type":"string"},"name":{"type":"string"},"text":{"type":"string"},"value":{"type":"string"},"state":{"type":"string"},"path":{"type":"string"},"class":{"type":"string"},"action":{"type":"string"},"v":{"type":"string"},"t":{"type":"string"},"from":{"type":"integer"},"to":{"type":"integer"},"dx":{"type":"number"},"dy":{"type":"number"},"ms":{"type":"number"},"hz":{"type":"number"},"legs":{"type":"integer"},"x":{"type":"number"},"y":{"type":"number"},"mods":{"type":"string"},"nth":{"type":"integer"},"depth":{"type":"integer"},"wait":{"type":"boolean"},"gone":{"type":"boolean"},"changed":{"type":"boolean"},"count":{"type":"integer"},"timeout_ms":{"type":"integer"},"if_user_seq":{"type":"integer"},"json":{"type":"boolean"},"a":{"type":"string"},"b":{"anyOf":[{"type":"integer"},{"type":"string"}],"description":"mouse button number, or ui diff's second snapshot"},"since":{"type":"integer"},"act":{"type":"boolean"}"#;

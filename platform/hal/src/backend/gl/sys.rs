@@ -93,6 +93,7 @@ gl_functions! {
     glGetActiveUniformBlockiv(GLuint, GLuint, GLenum, *mut GLint);
     glUniform1i(GLint, GLint);
     glUniform1f(GLint, GLfloat);
+    glUniform2f(GLint, GLfloat, GLfloat);
     glUniform2ui(GLint, GLuint, GLuint);
     glGenSamplers(GLsizei, *mut GLuint);
     glDeleteSamplers(GLsizei, *const GLuint);

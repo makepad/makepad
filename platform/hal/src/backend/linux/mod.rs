@@ -12,6 +12,12 @@ mod x11;
 pub mod direct;
 pub(crate) mod wm;
 
+/// (`backend::end_run`)
+pub(crate) fn end_run() {
+    direct::end_run();
+    wm::end_run();
+}
+
 use super::exec::OsCmd;
 use super::log_enabled;
 use super::shell;

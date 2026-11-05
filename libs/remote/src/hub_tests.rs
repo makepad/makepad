@@ -112,6 +112,25 @@ fn cmd_goes_to_the_endpoint() {
     }
 }
 
+/// An app's AI tools through the hub, as `devhub inspect <node>/<pid> call ..` and `live act`
+/// ask them (both sent `call` to `cmd`, which knows no such command, 11-05).
+#[test]
+fn an_app_request_goes_to_the_app_service_through_the_hub() {
+    let (_, _) = shared();
+    let hub = Hub::new(&hosts());
+    let _relay_conn = link(&hub, &relay_endpoint());
+    let c = client(&hub);
+    let me = std::process::id();
+    let request = crate::app::app_request_of("call fab.support {\"at\": 1}").unwrap().unwrap();
+    let ch = c.open("route", &format!("d:{me} app {request}")).unwrap();
+    let mut lines = Vec::new();
+    let err = crate::hub::app_answer(ch, &mut |l| {
+        lines.push(l.to_string());
+        true
+    });
+    assert_eq!((err, lines), (Ok(false), vec![r#"{"asked":"call fab.support\n{\"at\": 1}"}"#.to_string()]));
+}
+
 #[test]
 fn unknown_host_and_unknown_app_are_errors() {
     let (_, _) = shared();

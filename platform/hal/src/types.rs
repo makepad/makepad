@@ -172,19 +172,27 @@ pub struct Attr {
 /// One batch of commands per loop turn. All slices are borrowed for the `hal_submit` call
 /// only. `cmds` is `[Cmd]`, `frames` is `[FramePacket]`, `arena` holds every `Range` the commands
 /// and packets name (8-aligned, so typed arrays in it can be read in place).
+/// Construct a batch with [`crate::buffers::CmdWriter::buf`].
 #[relax_api(plain)]
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub struct CmdBuf {
-    pub session: u32,
-    pub cmds: Slice,
-    pub arena: Slice,
-    pub frames: Slice,
+    pub(crate) session: u32,
+    pub(crate) cmds: Slice,
+    pub(crate) arena: Slice,
+    pub(crate) frames: Slice,
     /// `[Pass]` and `[Draw]` of every frame in `frames` (element ranges, see [`FramePacket`])
-    pub passes: Slice,
-    pub draws: Slice,
+    pub(crate) passes: Slice,
+    pub(crate) draws: Slice,
     /// `[Layer]` of every frame, addressed by `FramePacket::layers`.
-    pub layers: Slice,
+    pub(crate) layers: Slice,
+}
+
+impl CmdBuf {
+    /// Whether this batch submits any frames.
+    pub fn has_frames(&self) -> bool {
+        !self.frames.is_empty()
+    }
 }
 
 /// One fire-and-forget command. `a` is decoded per `tag` by the generated constructors and
@@ -193,11 +201,11 @@ pub struct CmdBuf {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Cmd {
-    pub tag: u16,
-    pub flags: u16,
-    pub id: Id,
-    pub a: [u64; 4],
-    pub data: Range,
+    pub(crate) tag: u16,
+    pub(crate) flags: u16,
+    pub(crate) id: Id,
+    pub(crate) a: [u64; 4],
+    pub(crate) data: Range,
 }
 
 unsafe impl Plain for Cmd {}
@@ -1354,6 +1362,21 @@ pub struct FrameMeta {
 /// process-start-relative monotonic clock). The headless backend's automation clock replaces it.
 pub fn clock_ns() -> u64 {
     crate::clock::raw_ns()
+}
+
+/// A window of `points` at `dpi` in whole pixels: round(points × dpi), at least one.
+///
+/// The one points-to-pixels conversion of a window: a WM makes a window's shared images this
+/// size, the HAL's window shell and a session's embedded window take it as the window's pixels,
+/// and the boot screen and an app's frames size the window's pass to it. The size and dpi are
+/// taken at f32 first, as they reach an app (`HalEvent::Geom` carries an f32 dpi, a session keeps
+/// f32 geometry), so every side makes the same pixels from the numbers it has. A frame a pixel
+/// larger than its window's shared images is drawn offscreen and never shown: the boot screen's
+/// f32 points × dpi made 1352 × 789 frames for the WM's 1352 × 788 images of a tile at 2.43, and
+/// the app behind it never started.
+pub fn window_pixels(points: [f64; 2], dpi: f64) -> [u32; 2] {
+    let dpi = dpi as f32 as f64;
+    points.map(|p| (p as f32 as f64 * dpi).round().max(1.0) as u32)
 }
 
 /// One window's / target's frame. `passes` and `draws` are ELEMENT ranges into the CmdBuf's

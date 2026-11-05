@@ -37,6 +37,7 @@ macro_rules! print {
 pub mod app;
 pub mod carrier;
 pub mod cmd;
+pub mod params;
 pub mod conn;
 pub mod discovery;
 pub mod endpoint;

@@ -241,6 +241,20 @@ pub fn armed() -> bool {
     ARMED.load(Ordering::Relaxed)
 }
 
+/// (`hal::end_run`) No capture of the ended run is waited for or answered; the numbers go on, a
+/// waiter of an old one times out on its own.
+pub(crate) fn end_run() {
+    let done = {
+        let mut st = state();
+        st.arm = None;
+        st.open = None;
+        ARMED.store(false, Ordering::Relaxed);
+        std::mem::take(&mut st.done)
+    };
+    drop(done);
+    answer::end_run();
+}
+
 /// Arms the recorder for the next frame of `session` (`None`: any): its texture packets and the
 /// window packet that ends it. Returns the request's number for [`wait`].
 pub fn arm(session: Option<u32>, window: Option<u32>) -> u64 {

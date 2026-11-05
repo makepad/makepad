@@ -927,6 +927,16 @@ fn sessions() -> Vec<(u32, usize)> {
 /// Session `sid` ended (it exits, or relaunches empty under the same id): its frames, the ones
 /// still on the GPU and the backend names it gave leave the recording. The default session
 /// (the busiest) and an app's own readout follow the sessions that draw now, never a closed one.
+/// (`hal::end_run`) The recording and its subscribers go with the run; the device's facts stay.
+pub(crate) fn end_run() {
+    REC.store(false, Ordering::Relaxed);
+    let state = crate::lock(&STATE).take();
+    let stopped = crate::lock(&STOPPED).take();
+    crate::lock(&SHOWN_IDS).clear();
+    let subs = std::mem::take(&mut *crate::lock(&SUBS));
+    drop((state, stopped, subs));
+}
+
 pub fn session_closed(sid: u32) {
     let mut g = lock();
     let Some(st) = g.as_mut() else { return };
@@ -1079,6 +1089,10 @@ fn answer(req: &makepad_remote::Req) -> Result<Answer, String> {
 pub fn dispatch(req: &makepad_remote::Req, out: &mut makepad_remote::Out) -> bool {
     if req.cmd != "gpu" || req.pos.first().map(String::as_str) != Some("prof") {
         return false;
+    }
+    let words = format!("gpu prof {}", req.pos.get(1).map(String::as_str).unwrap_or(""));
+    if let Some(params) = makepad_remote::params::inspect(&words) {
+        if let Err(e) = req.validate_params(params) { out.err(&e); return true; }
     }
     match answer(req) {
         Ok(a) if req.get("as") == Some("md") => {

@@ -57,6 +57,17 @@ static PACE: Mutex<Pace> = Mutex::new(Pace {
     rafs_in_tick: 0, hidden: false, windows: Vec::new(),
 });
 
+/// (`linux::end_run`) The ticks and frames of the ended app go; the connection stays.
+pub(crate) fn end_run() {
+    {
+        let mut p = lock(&PACE);
+        *p = Pace { started: p.started, asked_since_ns: 0, tick_open_since_ns: 0, last_tick_ns: 0,
+            last_tick_done_ns: 0, last_raf_ns: 0, ticks: 0, tick_dones: 0, rafs: 0,
+            rafs_in_tick: 0, hidden: false, windows: Vec::new() };
+    }
+    native::end_run();
+}
+
 impl Pace {
     fn tick_done(&mut self) {
         self.tick_open_since_ns = 0;
@@ -656,7 +667,7 @@ impl App {
         match images {
             Ok(images) => {
                 if log_enabled() { eprintln!("[hal-wm] window {} has {} shared images of {}x{}", swapchain.window_id, images.len(), swapchain.alloc_width, swapchain.alloc_height); }
-                let pixels = self.windows.get(&key).and_then(|w| w.geom).map_or([swapchain.alloc_width, swapchain.alloc_height], |(g, dpi, _)| pixels(g, dpi));
+                let pixels = self.windows.get(&key).and_then(|w| w.geom).map_or([swapchain.alloc_width, swapchain.alloc_height], |(g, dpi, _)| crate::window_pixels([g[2], g[3]], dpi));
                 let mut rings = lock(&self.state.rings);
                 // The host says a swapchain again until a frame confirms it: the same allocations
                 // stay as they are. A new ring would strand the frames in flight: they no longer
@@ -723,8 +734,8 @@ impl App {
                     w.geom = Some((geom, dpi_factor, screen_origin));
                     crate::a11y::set_screen_origin(crate::a11y::window_key(w.recipient.0, w.recipient.1.index), screen_origin.map(|(x,y)| (x as f32,y as f32)));
                 }
-                if let Some(ring) = lock(&self.state.rings).get_mut(&key) { ring.pixels = pixels(geom, dpi_factor); }
-                if let Some(w) = shell::snapshot().windows.get_mut(&window_id) { w.pixels = pixels(geom, dpi_factor); }
+                if let Some(ring) = lock(&self.state.rings).get_mut(&key) { ring.pixels = crate::window_pixels([geom[2], geom[3]], dpi_factor); }
+                if let Some(w) = shell::snapshot().windows.get_mut(&window_id) { w.pixels = crate::window_pixels([geom[2], geom[3]], dpi_factor); }
                 if resized { self.push_geom(key); }
             }
             StudioToApp::Tick => {
@@ -953,11 +964,6 @@ fn wm_state_name(json: &str) -> Option<&str> {
     STATE.contains(&name).then_some(name)
 }
 
-/// A window's size in pixels at `dpi`.
-fn pixels(geom: [f64; 4], dpi: f64) -> [u32; 2] {
-    [(geom[2] * dpi).round().max(1.0) as u32, (geom[3] * dpi).round().max(1.0) as u32]
-}
-
 fn key_mods(shift: bool, control: bool, alt: bool, logo: bool) -> u32 {
     (shift as u32 * input::MOD_SHIFT) | (control as u32 * input::MOD_CONTROL) | (alt as u32 * input::MOD_ALT) | (logo as u32 * input::MOD_LOGO)
 }
@@ -1129,12 +1135,13 @@ impl Shell for App {
                         let mut s = shell::snapshot();
                         if let Some(w) = old { s.windows.remove(&w.window_id); }
                         s.windows.insert(window_id, shell::Window {
-                            pixels: geom.map_or([0, 0], |(g, dpi, _)| pixels(g, dpi)),
+                            pixels: geom.map_or([0, 0], |(g, dpi, _)| crate::window_pixels([g[2], g[3]], dpi)),
                             hidden: self.hidden_windows.contains(&(sid, id)),
                             pending_swapchain: self.pending.iter().any(|s| s.window_id == window_id),
                             ..Default::default()
                         });
                     }
+                    shell::window_made();
                     self.hub.send(vec![AppToStudio::CreateWindow { window_id, kind_id: if dropdown { window_kind::DROPDOWN as usize } else { 0 } }]);
                     a11y::window(window_id, Some((sid, id)));
                     let focused = self.wm_focus.get(&window_id).copied().unwrap_or(true);
@@ -1838,7 +1845,6 @@ mod tests {
         assert_eq!(mouse_cursor(cursor::ROW_RESIZE), MouseCursor::RowResize);
         assert_eq!(mouse_cursor(999), MouseCursor::Default);
         assert_eq!(phase(ScrollPhase::Momentum), input::scroll::MOMENTUM);
-        assert_eq!(pixels([0.0, 0.0, 100.5, 50.0], 2.0), [201, 100]);
         assert_eq!(key_mods(true, false, true, false), input::MOD_SHIFT | input::MOD_ALT);
     }
 }

@@ -234,6 +234,7 @@ impl State {
             self.shared.window_failed(key, "xdg_wm_base unavailable");
             return;
         };
+        crate::backend::shell::window_made();
         let surface = compositor.create_surface(&self.qh, key);
         if !surface.is_alive() {
             self.shared.window_failed(key, "wl_compositor.create_surface returned a dead proxy");

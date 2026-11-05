@@ -1860,6 +1860,15 @@ impl Cx {
         self.handle_pending_clear_hover();
         if matches!(event, Event::Shutdown) {
             crate::thread::service_scheduler(self, event);
+            #[cfg(any(
+                target_os = "android",
+                target_os = "linux",
+                target_os = "macos",
+                target_os = "ios",
+                target_os = "tvos",
+                target_os = "windows"
+            ))]
+            self.finish_native_storage_writes();
             self.close_task_pool();
             self.thread_spawner.close_runtime();
         }

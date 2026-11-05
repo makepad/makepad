@@ -97,10 +97,20 @@ fn last_ssl_error() -> String {
     }
 }
 
-fn init_openssl() -> io::Result<()> {
+/// `OPENSSL_INIT_NO_ATEXIT`: OpenSSL registers no exit handler.
+const OPENSSL_INIT_NO_ATEXIT: u64 = 0x0008_0000;
+
+/// OpenSSL, set up once, before this crate's first call into it (the TLS clients and server, P-256
+/// keys and signatures), without its exit handler: `exit` runs that handler while the process's
+/// other threads still run, and it frees the library under them. A devhub node exiting for its
+/// self-update had a sync order's signature check fail mid-exit as `not a credential of this
+/// fleet` (11-05). The process's end frees what OpenSSL holds. The first initialisation decides
+/// it for the process, so every entry into OpenSSL in the tree comes through this one (crates that
+/// call OpenSSL themselves through [`crate::tls::init_openssl`]).
+pub fn init_openssl() -> io::Result<()> {
     static INIT: OnceLock<Result<(), String>> = OnceLock::new();
     match INIT.get_or_init(|| unsafe {
-        if OPENSSL_init_ssl(0, ptr::null()) == 1 {
+        if OPENSSL_init_ssl(OPENSSL_INIT_NO_ATEXIT, ptr::null()) == 1 {
             Ok(())
         } else {
             Err(last_ssl_error())

@@ -598,12 +598,12 @@ impl Cx {
             self.fb_after_submit();
             return;
         }
-        let has_frames = !self.hal.frames.w.buf().frames.is_empty();
+        let has_frames = self.hal.frames.w.buf().has_frames();
         let epoch = self.gpu_admission.submitted(has_frames);
         self.hal.frames.w.gpu_budget(epoch);
         let buf = self.hal.frames.w.buf();
         if log_enabled() && !self.hal.frames.window_frames.is_empty() {
-            eprintln!("[hal-client] session={} submitting window FramePackets targets={:?}", buf.session, self.hal.frames.window_frames);
+            eprintln!("[hal-client] session={} submitting window FramePackets targets={:?}", self.hal.frames.w.session(), self.hal.frames.window_frames);
         }
         if !self.hal.frames.window_frames.is_empty() {
             crate::cx::relax_before_first_frame();

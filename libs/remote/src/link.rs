@@ -219,6 +219,12 @@ impl Client {
         Ok(conn)
     }
 
+    /// True once the connection this client had has ended (its next call dials a new one): a
+    /// call that failed then lost the link itself, not an answer from the far side.
+    pub fn link_ended(&self) -> bool {
+        self.0.conn.lock().unwrap().as_ref().is_some_and(|c| !c.is_usable())
+    }
+
     /// The services the endpoint listed in HELLO_OK (`name/version`).
     pub fn caps(&self) -> Vec<String> {
         self.0.caps.lock().unwrap().clone()

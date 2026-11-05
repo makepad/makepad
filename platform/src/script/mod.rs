@@ -4,6 +4,7 @@ use makepad_script::*;
 pub mod cx;
 pub mod draw;
 pub mod event;
+pub mod reload;
 pub mod res;
 pub mod script;
 pub mod std;

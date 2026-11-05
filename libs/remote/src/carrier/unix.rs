@@ -1,16 +1,35 @@
-//! The local carrier: a Unix socket `$TMPDIR/makepad-remote-<pid>.sock` (0600, same-uid peers
-//! only); its discovery file `makepad-remote-<pid>.json` is in the user's registry dir
-//! ([`crate::discovery::registry_dir`], the same for every process whatever its TMPDIR). On Windows the same
-//! discovery file points at the loopback carrier (`carrier::loopback`: TCP on 127.0.0.1 behind a token).
+//! The local carrier: a Unix socket `makepad-remote-<pid>.sock` in the user's socket dir
+//! ([`socket_dir`]; 0600, same-uid peers only); its discovery file `makepad-remote-<pid>.json` is
+//! in the user's registry dir ([`crate::discovery::registry_dir`]). Both are the same for every
+//! process whatever its TMPDIR. On Windows the same discovery file points at the loopback carrier
+//! (`carrier::loopback`: TCP on 127.0.0.1 behind a token).
 
 use std::path::PathBuf;
 
 /// The socket and discovery file paths of process `pid`.
 pub fn paths(pid: u32) -> (PathBuf, PathBuf) {
     (
-        std::env::temp_dir().join(format!("makepad-remote-{pid}.sock")),
+        socket_dir().join(format!("makepad-remote-{pid}.sock")),
         crate::discovery::registry_dir().join(format!("makepad-remote-{pid}.json")),
     )
+}
+
+/// Where this user's endpoint sockets are, whatever the process's TMPDIR: a socket's path holds
+/// about a hundred bytes, and a run's TMPDIR can be deep (a test's own home under a lease's
+/// scratch dir made one 121 bytes long, and the JIT in it could not be reached: a capture held a
+/// jitlegs leg to twice its time, 11-05). A desktop Unix: `/tmp/makepad-<uid>`, this user's own
+/// (0700, made by the first endpoint that listens). A phone's app writes only in its own temp
+/// dir, and that one is short.
+pub fn socket_dir() -> PathBuf {
+    #[cfg(all(unix, not(any(target_os = "android", target_os = "ios"))))]
+    {
+        extern "C" {
+            fn getuid() -> u32;
+        }
+        PathBuf::from(format!("/tmp/makepad-{}", unsafe { getuid() }))
+    }
+    #[cfg(not(all(unix, not(any(target_os = "android", target_os = "ios")))))]
+    std::env::temp_dir()
 }
 
 /// Removes the socket and discovery file of this process (at exit).
@@ -29,6 +48,35 @@ mod imp {
     use crate::frame::FrameReader;
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::path::Path;
+
+    /// Makes [`socket_dir`] this user's own directory (0700) before a socket goes in it. In /tmp
+    /// anyone may make one: a directory (or link) that is not this user's is refused, never used.
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    fn own_dir(sock: &Path) -> io::Result<()> {
+        use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+        extern "C" {
+            fn getuid() -> u32;
+        }
+        let dir = sock.parent().unwrap_or(Path::new("/"));
+        match std::fs::DirBuilder::new().mode(0o700).create(dir) {
+            Err(e) if e.kind() != io::ErrorKind::AlreadyExists => return Err(io::Error::new(e.kind(), format!("its socket dir {} could not be made: {e}", dir.display()))),
+            _ => {}
+        }
+        let m = std::fs::symlink_metadata(dir)?;
+        if !m.is_dir() || m.uid() != unsafe { getuid() } {
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied, format!("its socket dir {} is not this user's own directory", dir.display())));
+        }
+        if m.mode() & 0o077 != 0 {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+        }
+        Ok(())
+    }
+
+    /// A phone's app temp dir is its own already.
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    fn own_dir(_: &Path) -> io::Result<()> {
+        Ok(())
+    }
 
     fn bind(path: &Path) -> io::Result<UnixListener> {
         use std::os::unix::fs::PermissionsExt;
@@ -89,33 +137,61 @@ mod imp {
         let _ = s.set_read_timeout(None);
     }
 
+    /// The longest socket path a `sockaddr_un` holds, its terminating zero not counted.
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))]
+    pub(super) const SOCKET_PATH_MAX: usize = 103;
+    #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd")))]
+    pub(super) const SOCKET_PATH_MAX: usize = 107;
+
+    /// Why the socket at `path` cannot be bound: its length said plainly, else the bind's error.
+    fn unbindable(path: &Path, e: &io::Error) -> String {
+        let n = path.as_os_str().len();
+        if n > SOCKET_PATH_MAX {
+            format!("its socket path {} is {} bytes, over the {} a Unix socket's path holds", path.display(), n, SOCKET_PATH_MAX)
+        } else {
+            format!("its socket {} could not be bound: {}", path.display(), e)
+        }
+    }
+
     /// Listens on this process's socket and writes the discovery file: `{"pid","app","socket",
     /// "started_ms","caps"}` plus `extra` (already-serialised `,"key":value` fields). Register the
     /// services first: the caps are written now. Returns the socket path.
+    /// A socket that cannot be bound is an error, and the discovery file says why
+    /// (`"socket_error"`, no caps): a client names the reason instead of finding no app.
     pub fn listen(ep: &Endpoint, extra: &str) -> io::Result<PathBuf> {
         let _ = crate::cmd::now_ms();
-        let pid = std::process::id();
-        let (sock, disc) = paths(pid);
-        let _ = std::fs::remove_file(&sock);
-        let listener = bind(&sock)?;
-        let caps: Vec<String> = ep.caps().iter().map(|c| crate::cmd::json_str(c)).collect();
-        let info = format!(
-            "{{\"pid\":{},\"app\":{},\"socket\":{},\"started_ms\":{},\"caps\":[{}]{}}}\n",
-            pid,
-            crate::cmd::json_str(ep.app()),
-            crate::cmd::json_str(&sock.display().to_string()),
-            crate::cmd::wall_ms(),
-            caps.join(","),
-            format!("{extra}{}", crate::discovery::lease_field())
-        );
-        let _ = std::fs::write(&disc, info);
-        ep.set_discovery(disc.clone());
+        let (sock, disc) = paths(std::process::id());
+        let served = serve_announced(ep, extra, &sock, &disc, own_dir);
         extern "C" {
             fn atexit(f: extern "C" fn()) -> i32;
         }
         unsafe { atexit(cleanup) };
+        served.map(|()| sock)
+    }
+
+    /// [`listen`] on the socket `sock`, announced in the discovery file `disc`; `ready` makes
+    /// the socket's directory ready first ([`own_dir`]).
+    pub(super) fn serve_announced(ep: &Endpoint, extra: &str, sock: &Path, disc: &Path, ready: fn(&Path) -> io::Result<()>) -> io::Result<()> {
+        let bound = ready(sock).and_then(|()| {
+            let _ = std::fs::remove_file(sock);
+            bind(sock).map_err(|e| io::Error::new(e.kind(), unbindable(sock, &e)))
+        });
+        let caps: Vec<String> = if bound.is_ok() { ep.caps().iter().map(|c| crate::cmd::json_str(c)).collect() } else { Vec::new() };
+        let info = format!(
+            "{{\"pid\":{},\"app\":{},\"socket\":{},\"started_ms\":{},\"caps\":[{}]{}{}}}\n",
+            std::process::id(),
+            crate::cmd::json_str(ep.app()),
+            crate::cmd::json_str(&sock.display().to_string()),
+            crate::cmd::wall_ms(),
+            caps.join(","),
+            bound.as_ref().err().map_or(String::new(), |e| format!(",\"socket_error\":{}", crate::cmd::json_str(&e.to_string()))),
+            format!("{extra}{}", crate::discovery::lease_field())
+        );
+        let _ = std::fs::write(disc, info);
+        let listener = bound?;
+        ep.set_discovery(disc.to_path_buf());
         accept_loop(ep, listener);
-        Ok(sock)
+        Ok(())
     }
 
     fn accept_loop(ep: &Endpoint, listener: UnixListener) {
@@ -148,16 +224,50 @@ mod imp {
 
     /// Listens on the socket at `path` (0600, same-uid peers) without a discovery file: for a
     /// service with a fixed address such as the hub. The caller has made sure no live process
-    /// serves the path; a stale socket file is replaced.
-    pub fn listen_at(ep: &Endpoint, path: &Path) -> io::Result<()> {
+    /// serves the path; a stale socket file is replaced. Returns the listener's descriptor, which
+    /// a process that execs a new image of itself can keep open for it ([`serve_listener`]).
+    pub fn listen_at(ep: &Endpoint, path: &Path) -> io::Result<std::os::unix::io::RawFd> {
+        use std::os::unix::io::AsRawFd;
         let _ = std::fs::remove_file(path);
-        accept_loop(ep, bind(path)?);
-        Ok(())
+        let listener = bind(path)?;
+        let fd = listener.as_raw_fd();
+        accept_loop(ep, listener);
+        Ok(fd)
+    }
+
+    /// Serves `ep` on a listener this process holds already: one its previous image bound with
+    /// [`listen_at`] and kept open over an exec. The socket file stays, and the dials that queued
+    /// on it while the new image started are served now.
+    pub fn serve_listener(ep: &Endpoint, listener: UnixListener) {
+        accept_loop(ep, listener);
     }
 }
 
 #[cfg(unix)]
 pub use imp::*;
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::imp::*;
+
+    /// A socket path longer than a Unix socket holds cannot be bound (one in a deep TMPDIR could
+    /// not, before the sockets had a dir of their own: `makepad inspect` found no app and
+    /// waited). The run's discovery file says why, and a client names it.
+    #[test]
+    fn a_socket_path_too_long_to_bind_is_said_in_the_discovery_file() {
+        let sock = std::env::temp_dir().join("d".repeat(SOCKET_PATH_MAX)).join("makepad-remote-1.sock");
+        let disc = std::env::temp_dir().join(format!("makepad-remote-long-test-{}.json", std::process::id()));
+        let ep = crate::endpoint::Endpoint::new("makepad-remote-long");
+        ep.register_cmd(|_, _| {});
+        let err = serve_announced(&ep, "", &sock, &disc, |_| Ok(())).unwrap_err().to_string();
+        assert!(err.contains(&format!("bytes, over the {SOCKET_PATH_MAX}")), "{err}");
+        let app = crate::discovery::parse(&std::fs::read_to_string(&disc).unwrap()).unwrap();
+        std::fs::remove_file(&disc).unwrap();
+        assert!(app.caps.is_empty(), "nothing is served: {:?}", app.caps);
+        let why = app.unreachable().expect("the discovery file says why");
+        assert!(why.contains("runs but cannot be reached") && why.contains(&err), "{why}");
+    }
+}
 
 #[cfg(windows)]
 mod imp {

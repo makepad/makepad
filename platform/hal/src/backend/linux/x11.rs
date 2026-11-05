@@ -244,6 +244,7 @@ impl App {
                 | x::LeaveWindowMask) as c_long
                 | PROPERTY_CHANGE;
             let dpi = self.dpi as f64;
+            crate::backend::shell::window_made();
             let native = x::XCreateWindow(
                 self.display,
                 self.root,

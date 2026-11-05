@@ -622,7 +622,13 @@ macro_rules! _app_main_event_closure {
                     cx.with_vm(|vm| {
                         // MAKEPAD_TRACE=design: what a design re-run costs, by part
                         let t0 = $crate::Cx::time_now();
-                        let value = vm.with_reload(|vm| <$app as AppMain>::script_mod(vm));
+                        // The app's modules, then what was registered outside them and
+                        // kept for the pass (script/reload.rs).
+                        let value = vm.with_reload(|vm| {
+                            let value = <$app as AppMain>::script_mod(vm);
+                            $crate::script::reload::ScriptVmReload::run_kept_for_reload(vm);
+                            value
+                        });
                         if let Some(obj) = value.as_object() {
                             app_value = Some(vm.heap_mut().new_object_ref(obj));
                         }

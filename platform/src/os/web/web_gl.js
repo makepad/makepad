@@ -1503,6 +1503,7 @@ export class WasmWebGL extends WasmWebBrowser {
         "liveUniforms",
       ),
       clip_y_flip_loc: gl.getUniformLocation(shader.program, "mp_clip_y_flip"),
+      frag_y_loc: gl.getUniformLocation(shader.program, "mp_frag_y"),
       pass_uniform_buf,
       draw_list_uniform_buf,
       live_uniform_buf,
@@ -2637,6 +2638,17 @@ export class WasmWebGL extends WasmWebBrowser {
       if (shader.clip_y_flip_loc && shader._clip_y_flip !== clip_y_flip) {
         gl.uniform1f(shader.clip_y_flip_loc, clip_y_flip);
         shader._clip_y_flip = clip_y_flip;
+      }
+      // `fragment_position()` counts rows from the target's top: a texture pass already stores
+      // them top-down, the canvas bottom-up (y = height - gl_FragCoord.y).
+      if (shader.frag_y_loc) {
+        const frag_y0 = clip_y_flip ? 0 : gl.drawingBufferHeight;
+        const frag_y1 = clip_y_flip ? 1 : -1;
+        if (shader._frag_y0 !== frag_y0 || shader._frag_y1 !== frag_y1) {
+          gl.uniform2f(shader.frag_y_loc, frag_y0, frag_y1);
+          shader._frag_y0 = frag_y0;
+          shader._frag_y1 = frag_y1;
+        }
       }
       gl.frontFace(this.texture_pass_front_face_cw ? gl.CW : gl.CCW);
       gl.bindVertexArray(vao.gl_vao);

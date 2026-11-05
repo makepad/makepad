@@ -396,8 +396,11 @@ impl Device {
         for offset in (0..capacity).step_by(4096) {
             unsafe { contents.add(offset).write_volatile(0) };
         }
-        self.chunks.push(Chunk { buffer, contents, capacity, used: 0, lease: 0, used_ns: crate::clock_ns() });
-        Some(self.chunks.len() - 1)
+        // smallest first, as a batch takes the first with room: a burst's larger chunk goes idle
+        // and `arena_trim` releases it
+        let i = self.chunks.partition_point(|c| c.capacity <= capacity);
+        self.chunks.insert(i, Chunk { buffer, contents, capacity, used: 0, lease: 0, used_ns: crate::clock_ns() });
+        Some(i)
     }
 
     /// Copies `data` into the arena for command buffer `seq` (256-byte aligned: the constant
@@ -483,13 +486,14 @@ impl Device {
         }
         drop_idx.sort_unstable_by(|a, b| b.cmp(a));
         for i in drop_idx {
-            let chunk = self.chunks.swap_remove(i);
+            let chunk = self.chunks.remove(i);
             self.retire(Box::new(chunk.buffer));
         }
     }
 
-    /// Releases the free chunks no batch wrote for `ARENA_IDLE_NS`, keeping two (what the
-    /// device starts with): an idle app gives back what a burst of uploads made.
+    /// Releases the free chunks no batch wrote for `ARENA_IDLE_NS`, keeping two of the size the
+    /// device starts with: an idle app gives back what a burst of uploads made, also while its
+    /// first chunks stay in use (the burst's larger chunks were the two kept then).
     pub fn arena_trim(&mut self, now: u64) {
         let completed = self.completed.load(Ordering::Acquire);
         let mut kept = 0;
@@ -497,8 +501,8 @@ impl Device {
         while i < self.chunks.len() {
             let c = &self.chunks[i];
             let idle = c.lease <= completed && now.saturating_sub(c.used_ns) > ARENA_IDLE_NS;
-            if idle && kept >= 2 {
-                let chunk = self.chunks.swap_remove(i);
+            if idle && (kept >= 2 || c.capacity > CHUNK_BYTES) {
+                let chunk = self.chunks.remove(i);
                 self.retire(Box::new(chunk.buffer));
             } else {
                 kept += usize::from(idle);

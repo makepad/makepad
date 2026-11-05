@@ -256,6 +256,7 @@ pub struct Cx {
 
     /// How many live patches (`std::relax::patched`) this context has taken in: what a grab's
     /// frame was drawn with.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) live_patches: u64,
 
     /// `WindowGeomChange` events queued up during an event dispatch.
@@ -1138,6 +1139,7 @@ impl Cx {
             pending_live_edit_request: false,
             live_edit_errors: Vec::new(),
             live_edit_apply: Apply::Reload,
+            #[cfg(not(target_arch = "wasm32"))]
             live_patches: 0,
             pending_window_geom_changes: Default::default(),
             clear_hover_queued: false,
@@ -1574,7 +1576,7 @@ pub(crate) fn relax_before_first_frame() {
     }
 }
 
-#[cfg(not(any(unix, windows)))]
+#[cfg(all(not(target_arch = "wasm32"), not(any(unix, windows))))]
 pub(crate) fn relax_before_first_frame() {}
 
 /// The app's shutdown starts (it quits, its last window closed, a remote `/quit`): under Relax the

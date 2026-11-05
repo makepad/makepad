@@ -79,7 +79,7 @@ fn mods(m: &crate::event::KeyModifiers) -> String {
         s.push_str(" alt=1");
     }
     if m.logo {
-        s.push_str(" cmd=1");
+        s.push_str(" logo=1");
     }
     s
 }

@@ -9,7 +9,7 @@ use std::os::fd::AsRawFd;
 use std::ptr;
 
 use crate::backend::linux::socket_stream::{
-    ERR_error_string_n, ERR_get_error, OPENSSL_init_ssl, SSL_CTX_free, SSL_CTX_new, SSL_free,
+    init_openssl, ERR_error_string_n, ERR_get_error, SSL_CTX_free, SSL_CTX_new, SSL_free,
     SSL_get_error, SSL_new, SSL_read, SSL_set_fd, SSL_shutdown, SSL_write, SSL, SSL_CTX, SSL_METHOD,
 };
 use crate::tls::x509;
@@ -91,6 +91,7 @@ fn ssl_error(what: &str) -> io::Error {
 }
 
 pub fn generate_p256() -> io::Result<[u8; 97]> {
+    init_openssl()?;
     unsafe {
         let key = EC_KEY_new_by_curve_name(NID_X9_62_PRIME256V1);
         if key.is_null() || EC_KEY_generate_key(key) != 1 {
@@ -122,6 +123,7 @@ fn sec1(key: &[u8; 97]) -> Vec<u8> {
 }
 
 pub fn ecdh_p256(key: &[u8; 97], peer_point: &[u8]) -> io::Result<[u8; 32]> {
+    init_openssl()?;
     let der = sec1(key);
     unsafe {
         let mut p = der.as_ptr();
@@ -153,6 +155,7 @@ pub fn ecdh_p256(key: &[u8; 97], peer_point: &[u8]) -> io::Result<[u8; 32]> {
 }
 
 pub fn sign_p256_sha256(key: &[u8; 97], msg: &[u8]) -> io::Result<Vec<u8>> {
+    init_openssl()?;
     let der = sec1(key);
     let digest = crate::digest::sha256_hash(msg);
     unsafe {
@@ -174,6 +177,9 @@ pub fn sign_p256_sha256(key: &[u8; 97], msg: &[u8]) -> io::Result<Vec<u8>> {
 }
 
 pub fn verify_p256_sha256(point: &[u8], msg: &[u8], sig: &[u8]) -> bool {
+    if init_openssl().is_err() {
+        return false;
+    }
     let digest = crate::digest::sha256_hash(msg);
     unsafe {
         let key = EC_KEY_new_by_curve_name(NID_X9_62_PRIME256V1);
@@ -197,8 +203,8 @@ unsafe impl Sync for ServerConfig {}
 
 impl ServerConfig {
     pub fn new(cert_der: &[u8], key: &[u8; 97]) -> io::Result<Self> {
+        init_openssl()?;
         unsafe {
-            OPENSSL_init_ssl(0, ptr::null());
             let ctx = SSL_CTX_new(TLS_server_method());
             if ctx.is_null() {
                 return Err(ssl_error("SSL_CTX_new"));
@@ -323,5 +329,48 @@ impl Write for ServerStream {
 
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::c_int;
+    use std::path::PathBuf;
+    use std::sync::OnceLock;
+
+    const ROLE: &str = "MAKEPAD_NETWORK_EXIT_CHECK";
+    static AT_EXIT: OnceLock<(PathBuf, [u8; 65], Vec<u8>)> = OnceLock::new();
+
+    extern "C" fn check_at_exit() {
+        let (out, point, sig) = AT_EXIT.get().unwrap();
+        let _ = std::fs::write(out, if super::verify_p256_sha256(point, b"exit", sig) { "checks" } else { "fails" });
+    }
+
+    /// A signature checked while the process exits, the way a node's other threads check orders
+    /// while it exits for its self-update: by an exit handler registered before OpenSSL's first
+    /// use, so it runs after any handler OpenSSL registers (in a child: it only runs at exit).
+    #[test]
+    fn a_signature_still_checks_while_the_process_exits() {
+        if let Some(out) = std::env::var_os(ROLE) {
+            extern "C" {
+                fn atexit(f: extern "C" fn()) -> c_int;
+            }
+            unsafe { atexit(check_at_exit) };
+            let key = super::generate_p256().unwrap();
+            let sig = super::sign_p256_sha256(&key, b"exit").unwrap();
+            AT_EXIT.set((out.into(), key[..65].try_into().unwrap(), sig)).unwrap();
+            std::process::exit(0);
+        }
+        let out = std::env::temp_dir().join(format!("makepad-network-exit-check-{}", std::process::id()));
+        let _ = std::fs::remove_file(&out);
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "tls::platform::tests::a_signature_still_checks_while_the_process_exits", "--nocapture"])
+            .env(ROLE, &out)
+            .status()
+            .unwrap();
+        let seen = std::fs::read_to_string(&out).unwrap_or_default();
+        let _ = std::fs::remove_file(&out);
+        assert!(status.success(), "{status}");
+        assert_eq!(seen, "checks", "a valid signature failed its check during exit: OpenSSL's exit handler ran first");
     }
 }

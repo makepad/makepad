@@ -461,6 +461,7 @@ fn short(s: &str, n: usize) -> String {
 
 /// `prof [s=3] [hz=200] [threads=all|main|<name>|T<n>] [n=15] [wall=1] [save=1]`
 pub fn cmd_prof(req: &Req, out: &mut Out) {
+    if let Err(e) = req.validate_params(makepad_remote::params::inspect("prof").unwrap()) { return out.err(&e); }
     let secs = (req.num("s", 3) as f64).clamp(0.2, 30.0);
     let hz = req.num("hz", 200).clamp(10, 2000);
     let n = req.num("n", 15) as usize;
@@ -644,6 +645,7 @@ fn off_cpu_stacks(t: &Th) -> (Vec<(String, usize)>, usize) {
 /// `why-slow [s=3] [n=12]`: the UI thread's time, ranked: busy share, its buckets, its hottest app
 /// fns, where it waits, other busy threads (the JIT's why-slow without its owner lines).
 pub fn cmd_why_slow(req: &Req, out: &mut Out) {
+    if let Err(e) = req.validate_params(makepad_remote::params::inspect("why-slow").unwrap()) { return out.err(&e); }
     let secs = (req.num("s", 3) as f64).clamp(0.5, 30.0);
     out.limit = usize::MAX;
     let gone = out.gone();

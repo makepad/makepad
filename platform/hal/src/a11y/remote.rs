@@ -190,6 +190,11 @@ fn paced_drag(req: &Req, backend: &dyn Backend, key: u64, node: &Node) -> Result
 /// Shared command interpreter. All waits and action acknowledgements happen on its caller's
 /// consumer thread, never in a widget draw or event handler.
 pub fn dispatch(req: &Req, out: &mut Out, backend: &dyn Backend, snapshots: &Snapshots) {
+    let verb = req.pos.first().map_or("", String::as_str);
+    let Some(params) = makepad_remote::params::ui(verb) else {
+        return out.err("ui: find, act, type, wait, snap, diff, speak, lint, oscheck (help lists arguments)");
+    };
+    if let Err(e) = req.validate_params(params) { return out.err(&e); }
     backend.activate();
     out.limit = usize::MAX;
     if let Err(e) = run(req, out, backend, snapshots) { out.err(&e); }
@@ -354,4 +359,37 @@ fn run(req: &Req, out: &mut Out, backend: &dyn Backend, snapshots: &Snapshots) -
         _ => return Err("ui: find, act, type, wait, snap, diff, speak, lint, oscheck (help lists arguments)".into()),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ui_rejects_unknown_parameters() {
+        let snapshots = Snapshots::default();
+        let run = |line: &str| {
+            let mut bytes = Vec::new();
+            dispatch(&Req::parse(line), &mut Out::new(&mut bytes, usize::MAX), &super::super::Native, &snapshots);
+            String::from_utf8(bytes).unwrap()
+        };
+        let error = run("ui wait timeout=1");
+        assert!(error.contains("unknown parameter \\\"timeout\\\""), "{error}");
+        assert!(error.contains("timeout_ms"), "{error}");
+        // No tree or window is needed: a zero-count condition is already satisfied.
+        let ok = run("ui wait w=4294967295 count=0 timeout_ms=0 json=1");
+        assert!(!ok.contains("\"err\""), "{ok}");
+        assert!(ok.contains("\"count\":0"), "{ok}");
+        let timed_out = run("ui wait w=4294967295 count=1 timeout_ms=0");
+        assert!(timed_out.contains("ui wait timed out"), "{timed_out}");
+        // A key valid for one verb must not leak into the others, even with full output.
+        for line in ["ui find depth=1", "ui snap q=button", "ui lint node=1", "ui wait wait=1 full=1"] {
+            let error = run(line);
+            assert!(error.contains("unknown parameter"), "{line}: {error}");
+        }
+        // JSON requests use the identical validation, including query shorthand omitted by
+        // the old all-verbs schema.
+        let ok = run(r#"{"cmd":"ui wait","w":"4294967295","count":0,"timeout_ms":0,"states":"hidden","name~":"missing","actions":"press"}"#);
+        assert!(!ok.contains("\"err\""), "{ok}");
+    }
 }

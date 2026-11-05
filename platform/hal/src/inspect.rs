@@ -124,6 +124,12 @@ pub fn dispatch(req: &Req, out: &mut Out) -> bool {
     if crate::framecap::dispatch(req, out) {
         return true;
     }
+    if matches!(req.cmd.as_str(), "gpu" | "hal") && req.pos.first().map(String::as_str) != Some("prof") {
+        let words = std::iter::once(req.cmd.as_str()).chain(req.pos.first().map(String::as_str)).collect::<Vec<_>>().join(" ");
+        if let Some(params) = makepad_remote::params::inspect(&words) {
+            if let Err(e) = req.validate_params(params) { out.err(&e); return true; }
+        }
+    }
     if req.cmd == "hal" {
         match req.pos.first().map(String::as_str) {
             Some("pump") => pump(out),
@@ -340,4 +346,56 @@ fn pump(out: &mut Out) {
         ));
     }
     *last = Some((now, counts));
+}
+
+/// (`hal::end_run`) The named reports and pump counts of the ended run.
+pub(crate) fn end_run() {
+    let snaps = std::mem::take(&mut *SNAPS.lock().unwrap_or_else(|e| e.into_inner()));
+    drop(snaps);
+    *PUMP_LAST.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+#[cfg(test)]
+mod parameter_tests {
+    use super::*;
+
+    fn run(line: &str) -> String {
+        let mut bytes = Vec::new();
+        assert!(dispatch(&Req::parse(line), &mut Out::new(&mut bytes, usize::MAX)));
+        String::from_utf8(bytes).unwrap()
+    }
+
+    #[test]
+    fn gpu_rejects_unknown_parameters() {
+        let error = run("gpu top count=0");
+        assert!(error.contains("unknown parameter \\\"count\\\"") && error.contains("known: by, n"), "{error}");
+        let ok = run("gpu top by=bytes n=0");
+        assert!(!ok.contains("\"err\""), "{ok}");
+        assert!(run("gpu device n=1").contains("unknown parameter"));
+    }
+
+    #[test]
+    fn hal_rejects_unknown_parameters() {
+        assert!(run("hal pace timeout=1").contains("unknown parameter"));
+        let ok = run("hal pace full=1");
+        assert!(!ok.contains("\"err\""), "{ok}");
+    }
+
+    #[test]
+    fn cap_rejects_unknown_parameters() {
+        let error = run("cap grab timeout_ms=1");
+        assert!(error.contains("unknown parameter") && error.contains("timeout,"), "{error}");
+        let ok = run("cap list full=1");
+        assert!(!ok.contains("\"err\""), "{ok}");
+        assert!(run("cap tex X0 mip=1").contains("unknown parameter"));
+    }
+
+    #[test]
+    fn gpu_prof_rejects_unknown_parameters() {
+        let error = run("gpu prof start seconds=1");
+        assert!(error.contains("unknown parameter") && error.contains("known: s, split"), "{error}");
+        let ok = run("gpu prof status as=md");
+        assert!(!ok.contains("\"err\""), "{ok}");
+        assert!(run("gpu prof frames split=1").contains("unknown parameter"));
+    }
 }

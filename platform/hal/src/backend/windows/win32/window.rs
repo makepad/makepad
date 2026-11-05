@@ -450,6 +450,7 @@ fn create(s: &'static Shared, sid: u32, id: Id, kind: u32, parent: Id, geom: [f3
     });
     // WM_NCCREATE takes this reference into GWLP_USERDATA (and the map takes its own)
     let raw = Rc::into_raw(win.clone());
+    crate::backend::shell::window_made();
     let hwnd = unsafe {
         let instance = GetModuleHandleW(None).ok().map(|m| HINSTANCE(m.0));
         CreateWindowExW(ex, Some(PCWSTR(class.as_ptr())), Some(PCWSTR(title.as_ptr())), style, x, y, w, h, parent_hwnd, None, instance, Some(raw as *const _))

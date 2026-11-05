@@ -629,6 +629,35 @@ pub fn ask(client: &Client, target: &str, service: &str, args: &str, line: &str,
     }
 }
 
+/// One request of `target`'s `app` service (its AI tools: `list`, `call <service>.<tool>\n<json>`,
+/// [`crate::app::app_request_of`]) through the hub: `each` gets its answer lines, which end with
+/// the channel. `Ok(true)` when the answer held an `err` line; `Err` the hub's or the far side's
+/// refusal (a process with no AI tools says `unsupported service`).
+pub fn ask_app(client: &Client, target: &str, request: &str, each: &mut dyn FnMut(&str) -> bool) -> Result<bool, String> {
+    app_answer(client.open("route", &format!("{target} app {request}")).map_err(|e| e.to_string())?, each)
+}
+
+/// The answer of an `app` request's channel ([`ask_app`]): its lines until the channel ends.
+pub(crate) fn app_answer(ch: Channel, each: &mut dyn FnMut(&str) -> bool) -> Result<bool, String> {
+    let mut had_err = false;
+    loop {
+        match ch.recv() {
+            Some(Event::Data(d)) => {
+                for l in String::from_utf8_lossy(&d).lines().filter(|l| !l.is_empty()) {
+                    had_err |= l.starts_with("{\"err\":");
+                    if !each(l) {
+                        return Ok(had_err);
+                    }
+                }
+            }
+            Some(Event::Opened(_)) => {}
+            Some(Event::Closed(CLOSE_NORMAL, _)) => return Ok(had_err),
+            Some(Event::Closed(_, why)) => return Err(why),
+            None => return Err("the hub connection ended".into()),
+        }
+    }
+}
+
 /// [`ask`] that gives the answer up once `keep` says no (asked every 20 ms while no line comes):
 /// `Ok(None)` then. The request's channel closes with it, which ends the request at the far end
 /// too (an app's `watch` stops waiting).

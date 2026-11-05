@@ -384,6 +384,16 @@ struct State {
 
 static STATE: Mutex<Option<State>> = Mutex::new(None);
 
+/// (`backend::end_run`) The buffers the ended run registered and sources it imported; the copier
+/// stays with the device.
+pub(crate) fn end_run() {
+    let mut state = lock(&STATE);
+    if let Some(state) = state.as_mut() {
+        state.registered.clear();
+        state.foreign.clear();
+    }
+}
+
 fn with_state<R>(f: impl FnOnce(&mut State) -> Result<R, String>) -> Result<R, String> {
     let mut state = lock(&STATE);
     f(state.get_or_insert_with(State::default))

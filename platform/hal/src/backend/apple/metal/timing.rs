@@ -361,6 +361,11 @@ const MTL_COMMAND_BUFFER_STATUS_ERROR: u64 = 5;
 /// Command buffers that ended in error since launch. Bounds the log below.
 static CB_ERRORS: AtomicU64 = AtomicU64::new(0);
 
+/// (`backend::end_run`) The log's bound counts per run.
+pub(crate) fn end_run() {
+    CB_ERRORS.store(0, Ordering::Relaxed);
+}
+
 /// A command buffer that ends in `MTLCommandBufferStatusError` produced no pixels: whatever it
 /// was going to draw is missing from the frame, and nothing else in the backend notices, because
 /// Metal runs the completion handler either way, so the completion frontier advances and the

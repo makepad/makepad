@@ -100,6 +100,13 @@ pub(super) fn set_app_appearance(value: u32) {
     }
 }
 
+/// (`win32::end_run`) The next app asks for its own; until then the system's, as at launch.
+pub(super) fn end_run() {
+    if APPEARANCE.load(Ordering::Acquire) != native_appearance::SYSTEM {
+        set_app_appearance(native_appearance::SYSTEM);
+    }
+}
+
 /// A window frame's look: the app's appearance, or the system theme while it follows that.
 pub(super) fn apply_to_window(hwnd: HWND, system_dark: bool) {
     let value = APPEARANCE.load(Ordering::Acquire);

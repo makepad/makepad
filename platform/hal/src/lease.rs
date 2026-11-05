@@ -68,6 +68,14 @@ static NEXT: AtomicU64 = AtomicU64::new(1);
 static LEASES: OnceLock<Mutex<HashMap<u64, Lease>>> = OnceLock::new();
 fn registry() -> &'static Mutex<HashMap<u64, Lease>> { LEASES.get_or_init(Default::default) }
 
+/// (`hal::end_run`) Every handle the ended run was given and did not release: their storage goes
+/// now, outside the registry lock. The only receiver of a handle is the app.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn end_run() {
+    let leases = std::mem::take(&mut *registry().lock().unwrap_or_else(|e| e.into_inner()));
+    drop(leases);
+}
+
 /// Release a delivered handle on any thread and return its byte length (zero if already released).
 /// Destruction runs outside the registry lock.
 #[relax_api]

@@ -217,10 +217,13 @@ impl DrawVars {
     #[inline(never)]
     fn refresh_after_reload_slow(&mut self, cx: &mut Cx) {
         self.shader_gen = cx.reload_generation as u32;
-        if self.shader_default.is_none() || cx.script_vm.is_none() {
+        let Some(heap) = self.shader_default.as_ref().map(|src| src.object.heap_key()) else { return };
+        if cx.script_vm.is_none() {
             return;
         }
-        cx.with_vm(|vm| self.rebuild_from_default(vm));
+        // In the VM whose heap holds the default it was made from: a draw an isolate made takes
+        // its isolate's new default, never the installed VM's.
+        cx.with_vm_of_heap(heap, &mut |vm| self.rebuild_from_default(vm));
     }
 
     fn rebuild_from_default(&mut self, vm: &mut ScriptVm) {
@@ -286,8 +289,11 @@ impl DrawVars {
         }
         self.area = saved.area;
         self.append_group_id = saved.append_group_id;
-        // (the same code is the same shader: only its values were taken)
-        if new_id != old_id {
+        // (the same code is the same shader: only its values were taken; the shader on the draw
+        // may be one its holder derived from the old default, a renderer lane's variant)
+        let heap_key = vm.heap_key();
+        let was = vm.host.cx().draw_shaders.cache_object_id_to_shader.get(&(heap_key, old_obj)).copied().unwrap_or(old_id);
+        if new_id != was {
             let name = vm.heap().object_type_name_in_chain(old_obj).map_or_else(|| "a draw object".to_string(), |n| format!("{n}"));
             crate::log!("live design: {name} (made from its default, kept outside the reloaded tree) draws the edited shader");
         }
@@ -1793,5 +1799,38 @@ impl DrawVars {
     pub fn set_storage_buffer(&mut self, name: LiveId, buffer: &crate::GpuBuffer) {
         if let Some(slot) = self.storage_buffers.iter_mut().find(|b| b.0 == name) { slot.1 = buffer.clone(); }
         else { self.storage_buffers.push((name, buffer.clone())); }
+    }
+}
+
+impl Cx {
+    /// Writes one uniform, by name, into every retained draw call in `list` and the lists it
+    /// holds whose shader declares it, whatever the shader. Identical stored bits leave a call
+    /// untouched; a real change issues a new uniform generation and marks its pass dirty.
+    /// Whether any call changed.
+    pub fn set_uniform_in_draw_lists(&mut self, list: crate::draw_list::DrawListId, id: LiveId, value: &[f32]) -> bool {
+        let mut lists = vec![list];
+        let mut any = false;
+        while let Some(l) = lists.pop() {
+            let mut touched = false;
+            for item in 0..self.draw_lists[l].draw_items.len() {
+                let kind = &self.draw_lists[l].draw_items[item].kind;
+                if let Some(sub) = kind.sub_list() {
+                    lists.push(sub);
+                    continue;
+                }
+                let Some(shader) = kind.draw_call().map(|c| c.draw_shader_id) else { continue };
+                let Some(input) = self.draw_shaders[shader.index].mapping.dyn_uniforms.find(id) else { continue };
+                let (offset, slots) = (input.offset, input.slots.min(value.len()));
+                let uniform_gen = &mut self.uniform_gen;
+                touched |= self.draw_lists[l].draw_items.set_dyn_uniform(item, shader, offset, &value[..slots], uniform_gen);
+            }
+            if touched {
+                if let Some(pass) = self.draw_lists[l].draw_pass_id {
+                    self.passes[pass].paint_dirty = true;
+                }
+            }
+            any |= touched;
+        }
+        any
     }
 }

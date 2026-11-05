@@ -7,6 +7,7 @@ mod gpu_bridge;
 mod hotplug;
 mod kms;
 mod preferences;
+pub(crate) use preferences::end_run;
 mod raw_input;
 mod render;
 mod sys;

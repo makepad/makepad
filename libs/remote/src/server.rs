@@ -925,9 +925,9 @@ fn spawn_detached(cwd: &Path, command: &str) -> io::Result<(u32, PathBuf)> {
         unsafe {
             cmd.pre_exec(|| {
                 extern "C" {
-                    fn setpgid(pid: i32, pgid: i32) -> i32;
+                    fn setsid() -> i32;
                 }
-                setpgid(0, 0);
+                setsid();
                 Ok(())
             });
         }

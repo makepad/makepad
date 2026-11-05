@@ -203,9 +203,12 @@ pub struct GpuLedgerSnapshot {
 
 /// Readback accounting is released by the last lease view, possibly on a worker.
 #[derive(Debug)]
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) struct ReadbackReservation { bytes: u64 }
 static READBACK_BYTES: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn release_readback_bytes(bytes: u64) { READBACK_BYTES.fetch_sub(bytes, Ordering::AcqRel); }
+#[cfg(not(target_arch = "wasm32"))]
 impl ReadbackReservation {
     /// Transfer the charge to a HAL token; its final HostBuf release returns these bytes.
     pub(crate) fn transfer(&mut self, bytes: u64) {
@@ -218,11 +221,13 @@ impl ReadbackReservation {
         Self { bytes }
     }
 }
+#[cfg(not(target_arch = "wasm32"))]
 impl Drop for ReadbackReservation {
     fn drop(&mut self) { release_readback_bytes(self.bytes); }
 }
 
 impl GpuLedger {
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn admit_readback(&self, bytes: u64) -> Result<ReadbackReservation, GpuRefusal> {
         let mut state = self.state.borrow_mut();
         let base = state.device_used.saturating_add(state.pending_bytes).max(state.reserved);
@@ -334,6 +339,7 @@ impl GpuLedger {
         self.register_kind(label.into(), true)
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn take_reclaim(&self) -> u64 {
         std::mem::take(&mut self.state.borrow_mut().reclaim)
     }

@@ -159,6 +159,23 @@ pub fn own_process_group(cmd: &mut Command) {
     cmd.process_group(0);
 }
 
+/// A process meant to outlive this one (unix only): a session of its own, which is also a group of
+/// its own, so a negative-pid signal still reaches it. Under `makepad run` that is what says a
+/// process stays when the run that started it ends; anything else ends with the run.
+#[cfg(unix)]
+pub fn own_session(cmd: &mut Command) {
+    extern "C" {
+        fn setsid() -> i32;
+    }
+    // SAFETY: setsid is async-signal-safe.
+    unsafe {
+        cmd.pre_exec(|| {
+            setsid();
+            Ok(())
+        });
+    }
+}
+
 /// The child (and everything it starts: a build's rustc) runs at `nice` (a lower priority than
 /// its host; lowering needs no privilege), so a desktop's own work -- its compositor, a remote
 /// desktop stream -- keeps the CPU while its apps and their builds take the rest.
@@ -338,6 +355,23 @@ pub fn kill_child_group(child: &mut Child, _grace: std::time::Duration, _pool: &
     let _ = child.kill();
 }
 
+/// A host on its way out ends the children it asked to close (`StudioToApp::Kill` sent): they
+/// share one `grace`, the same on every OS, and what is left after it is killed. This blocks,
+/// because a child ends with its host: its time to save is only as long as the host's own.
+pub fn end_asked_children(children: &mut [Child], grace: std::time::Duration) {
+    let deadline = std::time::Instant::now() + grace;
+    let ended = |child: &mut Child| matches!(child.try_wait(), Ok(Some(_)));
+    while !children.iter_mut().all(ended) && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(16));
+    }
+    for child in children.iter_mut().filter_map(|child| (!ended(child)).then_some(child)) {
+        #[cfg(unix)]
+        signal::kill_group(child.id() as i32, signal::SIGKILL);
+        #[cfg(not(unix))]
+        let _ = child.kill();
+    }
+}
+
 /// Final slot teardown owns the child from here on. Signal and reap it wholly
 /// on a heavy pool worker; dropping a slot on the UI thread never waits for a
 /// process or decoder wrapper to exit.
@@ -389,6 +423,41 @@ mod tests {
     use super::*;
     #[cfg(unix)]
     use std::process::Stdio;
+
+    /// Children asked to close end the wait as soon as they have gone; one that ignores the
+    /// ask is killed when the grace is up.
+    #[test]
+    fn children_asked_to_close_share_one_grace() {
+        fn child(secs: u32) -> Child {
+            #[cfg(unix)]
+            let mut command = {
+                let mut command = makepad_remote::group::command("sleep");
+                command.arg(secs.to_string());
+                own_process_group(&mut command);
+                command
+            };
+            #[cfg(not(unix))]
+            let mut command = {
+                let mut command = makepad_remote::group::command("cmd.exe");
+                command.args(["/c", &format!("ping -n {} 127.0.0.1 >nul", secs + 1)]);
+                command
+            };
+            command.spawn().unwrap()
+        }
+        let long = std::time::Duration::from_secs(20);
+        let start = std::time::Instant::now();
+        let mut gone = vec![child(0), child(0)];
+        end_asked_children(&mut gone, long);
+        assert!(start.elapsed() < long / 2, "nothing left to wait for");
+
+        let start = std::time::Instant::now();
+        let mut stuck = vec![child(0), child(30)];
+        end_asked_children(&mut stuck, std::time::Duration::from_millis(100));
+        for child in &mut stuck {
+            child.wait().unwrap();
+        }
+        assert!(start.elapsed() < long, "the one that stayed was killed");
+    }
 
     /// The exit watch returns when the process ends, and leaves it for the
     /// owner's own `try_wait` (it does not reap).

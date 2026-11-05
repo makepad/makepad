@@ -163,6 +163,18 @@ pub fn subscribe(session: u32, window: Id, region: Region, size: [u32; 2], fps: 
     Ok(Tap { sub, frames })
 }
 
+/// (`hal::end_run`) The taps of the ended run: their `Tap`s went with its heap and are never
+/// dropped, so their threads stop from here. Only an app holds a tap.
+pub(crate) fn end_run() {
+    let subs = std::mem::take(&mut *lock(&SUBS));
+    TAPS.store(0, Ordering::Release);
+    for sub in subs {
+        sub.stop.store(true, Ordering::Release);
+        drop(sub.slot.clear());
+        sub.slot.wake();
+    }
+}
+
 impl Drop for Tap {
     fn drop(&mut self) {
         let mut subs = lock(&SUBS);

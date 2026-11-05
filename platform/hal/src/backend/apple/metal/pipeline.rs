@@ -41,11 +41,38 @@ pub struct PipeState {
     id: Id,
     incarnation: Arc<crate::font::FrameProgress>,
     mailbox: Mailbox,
+    /// the MSL it was compiled from (what a later session's pipeline must equal to take its
+    /// states, [`Compiled`])
+    pub source: Arc<str>,
 }
 
 // SAFETY: Metal objects are usable from any thread; the cells are write-once
 unsafe impl Send for PipeState {}
 unsafe impl Sync for PipeState {}
+
+/// The compiled states of a pipeline whose session closed, for the next session: a restart in
+/// place creates the same pipelines again, and one that compiles to these ([`Compiled::is`]: its
+/// source equal in full) takes them instead of compiling. Compiling them again is not only slower: with every
+/// restart that rebuilt them the driver's own memory grew (on Apple GPUs a few hundred KB a
+/// restart of a big app, and none while they are taken).
+pub struct Compiled {
+    source: Arc<str>,
+    desc: PipelineDesc,
+    functions: (RcObjcId, RcObjcId),
+    solid: RcObjcId,
+    blend: RcObjcId,
+    variants: Vec<(Vec<MTLPixelFormat>, bool, RcObjcId)>,
+}
+
+impl Compiled {
+    /// Whether a pipeline of `source` and `desc` compiles to these states: the same source in
+    /// full, and the same of what a state is built from besides (its attachments, outputs, blend,
+    /// math). The rest of a description names the pipeline, or is read at a draw.
+    pub fn is(&self, source: &str, desc: &PipelineDesc) -> bool {
+        let d = &self.desc;
+        d.color_formats == desc.color_formats && d.outputs == desc.outputs && d.blend == desc.blend && d.flags == desc.flags && *self.source == *source
+    }
+}
 
 /// The backend's record of a pipeline.
 pub struct Pipe {
@@ -113,6 +140,16 @@ pub(super) fn describe_error(error: ObjcId, none: &str) -> String {
 }
 
 impl PipeState {
+    /// What a later session's identical pipeline takes instead of compiling: the states this one
+    /// finished, its variants among them. None while it compiles, or when it failed.
+    pub fn compiled(&self, desc: &PipelineDesc) -> Option<Compiled> {
+        let (Some(functions), Some(Ok(solid)), Some(Ok(blend))) = (self.functions.get(), self.solid.get(), self.blend.get()) else { return None };
+        let variants = self.variants.lock().unwrap_or_else(|e| e.into_inner()).iter()
+            .filter_map(|v| match v.pipeline.get() { Some(Ok(p)) => Some((v.formats.clone(), v.blend, p.clone())), _ => None })
+            .collect();
+        Some(Compiled { source: self.source.clone(), desc: *desc, functions: functions.clone(), solid: solid.clone(), blend: blend.clone(), variants })
+    }
+
     fn failure(&self, error: String) {
         let _ = self.blend.set(Err(error.clone()));
         let _ = self.solid.set(Err(error.clone()));
@@ -228,8 +265,10 @@ pub enum Select {
 }
 
 /// Starts the compile of a pipeline. Returns the state the completion handlers fill and the
-/// backend reads; `PipelineReady` / `PipelineFailed` arrive through the mailbox.
-pub(super) fn create(dev: &Device, sid: u32, id: Id, incarnation: Arc<crate::font::FrameProgress>, source: &str, desc: &PipelineDesc) -> Arc<PipeState> {
+/// backend reads; `PipelineReady` / `PipelineFailed` arrive through the mailbox. With `taken`
+/// (the states of an identical pipeline, [`Compiled::is`]) nothing compiles: the state is ready
+/// as it returns and no message follows.
+pub(super) fn create(dev: &Device, sid: u32, id: Id, incarnation: Arc<crate::font::FrameProgress>, source: &str, desc: &PipelineDesc, taken: Option<Compiled>) -> Arc<PipeState> {
     let declared = mtl_format(desc.color_formats[0]).unwrap_or(MTLPixelFormat::BGRA8Unorm);
     let raw = desc.blend & pipeline_blend::RAW != 0;
     let state = Arc::new(PipeState {
@@ -249,12 +288,24 @@ pub(super) fn create(dev: &Device, sid: u32, id: Id, incarnation: Arc<crate::fon
         id,
         incarnation,
         mailbox: dev.mailbox.clone(),
+        source: taken.as_ref().map_or_else(|| source.into(), |c| c.source.clone()),
     });
-    let source = source.to_owned();
+    if let Some(c) = taken {
+        let _ = state.functions.set(c.functions);
+        let _ = state.solid.set(Ok(c.solid));
+        let _ = state.blend.set(Ok(c.blend));
+        state.settled.store(2, Ordering::Release);
+        let mut variants = state.variants.lock().unwrap_or_else(|e| e.into_inner());
+        for (formats, blend, p) in c.variants {
+            variants.push(Arc::new(Variant { formats, blend, queued: AtomicBool::new(true), pipeline: OnceLock::from(Ok(p)) }));
+        }
+        drop(variants);
+        return state;
+    }
     let device = RcObjcId::from_unowned(NonNull::new(dev.device).expect("device"));
     let job = state.clone();
     let precise = desc.flags & pipeline_flags::PRECISE != 0;
-    dev.compile(Box::new(move || compile(device, source, job, precise)));
+    dev.compile(Box::new(move || compile(device, job, precise)));
     state
 }
 
@@ -313,9 +364,10 @@ pub fn compile_msl(source: &str) -> Result<(), String> {
 /// The line a precise-math MSL source starts with (`shader_ir_metal`).
 const PRECISE_PRAGMA: &str = "#pragma clang fp contract(off)";
 
-fn compile(device: RcObjcId, source: String, ready: Arc<PipeState>, precise: bool) {
+fn compile(device: RcObjcId, ready: Arc<PipeState>, precise: bool) {
     let options = compile_options(precise);
     let callback_device = device.clone();
+    let source = ready.source.clone();
     let callback_source = source.clone();
     let completion = objc_block!(move |library: ObjcId, error: ObjcId| {
         if library == nil {

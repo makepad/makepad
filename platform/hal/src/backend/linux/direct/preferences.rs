@@ -46,3 +46,12 @@ pub fn tap_to_click() -> bool {
 pub fn set_tap_to_click(on: bool) {
     TAP_TO_CLICK.store(on, Ordering::Relaxed);
 }
+
+/// (`linux::end_run`) What the ended app's device settings set; the next one applies its own.
+pub(crate) fn end_run() {
+    MOUSE_SPEED.store(POINTER_SPEED_DEFAULT, Ordering::Relaxed);
+    TOUCHPAD_SPEED.store(POINTER_SPEED_DEFAULT, Ordering::Relaxed);
+    NATURAL_SCROLL_MOUSE.store(true, Ordering::Relaxed);
+    NATURAL_SCROLL_TOUCHPAD.store(true, Ordering::Relaxed);
+    TAP_TO_CLICK.store(false, Ordering::Relaxed);
+}

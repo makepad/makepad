@@ -160,3 +160,10 @@ pub fn hal_frame_completion_error(out: &mut [u8]) -> u64 {
         e.len() as u64
     })
 }
+
+/// (`hal::end_run`) The ended app's completions: nothing polls them any more.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn end_run() {
+    let pending = crate::lock(&PENDING).take();
+    drop(pending);
+}

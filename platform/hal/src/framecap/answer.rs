@@ -25,7 +25,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("cap pixel", "<x>,<y> [pass=P<k>]", "pixel history: the draws that changed a pixel, with the value before and after each"),
     ("cap overdraw", "[png=<path>] [max=1000]", "per-pixel count of draws that changed it, as a heatmap PNG and numbers"),
     ("cap mesh", "D<k> [n=8]", "a draw's vertex and instance inputs, decoded"),
-    ("cap tex", "X<k> [png=<path>] [mip=0] [layer=0]", "a texture as the frame found it"),
+    ("cap tex", "X<k> [png=<path>] [max=1000]", "a texture as the frame found it"),
     ("cap time", "[n=15] [repeat=16]", "per-draw GPU time measured in replay (each draw repeated in place)"),
     ("cap save", "<path.mkcap>", "write the newest capture to a file"),
     ("cap list", "", "the captures this process keeps"),
@@ -49,6 +49,12 @@ struct Coverage {
 }
 
 static LIVE: Mutex<Option<Live>> = Mutex::new(None);
+
+/// (`framecap::end_run`) The replay of a frame of the ended run, with its GPU objects.
+pub(super) fn end_run() {
+    let live = LIVE.lock().unwrap_or_else(|e| e.into_inner()).take();
+    drop(live);
+}
 
 fn source(req: &Req) -> Result<Arc<Capture>, String> {
     if let Some(path) = req.get("file") {
@@ -490,6 +496,9 @@ pub fn dispatch(req: &Req, out: &mut Out) -> bool {
         return false;
     }
     let what = format!("cap {sub}");
+    if let Some(params) = makepad_remote::params::inspect(&what) {
+        if let Err(e) = req.validate_params(params) { out.err(&e); return true; }
+    }
     let r = match sub {
         "grab" => grab(req).map(|(c, path)| {
             let mut t = frame_text(&c);
