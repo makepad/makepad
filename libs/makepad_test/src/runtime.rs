@@ -647,6 +647,25 @@ impl PointerDrag {
         self
     }
 
+    /// A flick to `(dx, dy)` from the press point, `seconds` long, and let go at its end. Its events
+    /// carry their own times, counted from zero, so what it throws is the same however long the
+    /// app takes over each.
+    pub fn fling_by(mut self, dx: f64, dy: f64, seconds: f64) {
+        let client = self.app.client();
+        let from = self.at;
+        let to = (self.start.0 + dx, self.start.1 + dy);
+        for step in 1..=DRAG_STEPS {
+            let t = step as f64 / DRAG_STEPS as f64;
+            self.at = (from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t);
+            let moved = MouseInput { time: Some(seconds * t), ..MouseInput::at(MouseKind::Move, self.window, self.at.0, self.at.1) };
+            client.mouse(&moved).unwrap_or_else(|err| panic_for_error(err));
+        }
+        let up = MouseInput { time: Some(seconds), ..MouseInput::at(MouseKind::Up, self.window, self.at.0, self.at.1) };
+        client.mouse(&up).unwrap_or_else(|err| panic_for_error(err));
+        self.app.inner.borrow_mut().focus_window = self.window;
+        self.app.pace_after_action();
+    }
+
     /// Let go where the pointer is.
     pub fn release(self) {
         self.app.client().mouse(&MouseInput::at(MouseKind::Up, self.window, self.at.0, self.at.1)).unwrap_or_else(|err| panic_for_error(err));

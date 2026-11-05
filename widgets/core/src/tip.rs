@@ -583,6 +583,14 @@ impl Widget for Tip {
             return;
         }
         let uid = self.widget_uid();
+        // A control that went away takes its tip with it: the pointer may never move again over
+        // it, and a key focus stays on an area nothing draws any more.
+        if (self.hovered || self.focused) && self.children_all_hidden() {
+            self.hovered = false;
+            self.focused = false;
+            cx.widget_action(uid, TipAction::HoverOut);
+            return;
+        }
         let claimed = || {
             let claimed_after = event.pointer_claimed_area();
             claimed_after != claimed_before && !claimed_after.is_empty()
@@ -1347,6 +1355,30 @@ mod tests {
         });
         layer.handle_event(&mut cx, &Event::Actions(actions), &mut Scope::empty());
         assert_eq!(focus(&mut cx, &mut root, &mut layer, Area::Empty).as_deref(), Some("host"));
+        });
+    }
+
+    /// A control that hides with its tip up takes the tip with it, on the next event of any
+    /// kind: nothing else would, with the pointer still or the key focus left behind on it.
+    #[test]
+    fn a_control_that_hides_takes_its_tip_with_it() {
+        crate::on_test_cx(|| {
+        let mut cx = cx();
+        cx.init_cx_os();
+        let mut root = view(&mut cx, script! {
+            use mod.prelude.widgets.*
+            View{ width: 300 height: 20 flow: Right
+                Tip{ text: "first" View{ width: 50 height: 20 } }
+            }
+        });
+        let mut layer = tip_layer(&mut cx);
+        let mut target = Target::new(&mut cx, dvec2(300.0, 20.0));
+        target.draw(&mut cx, &mut root);
+        let to = at(&root, &[0]).area();
+        assert_eq!(focus(&mut cx, &mut root, &mut layer, to).as_deref(), Some("first"));
+        assert_eq!(deliver(&mut cx, &mut root, &mut layer, &Event::Signal).as_deref(), Some("first"), "the control is still there");
+        at(&root, &[0, 0]).set_visible(&mut cx, false);
+        assert_eq!(deliver(&mut cx, &mut root, &mut layer, &Event::Signal), None, "the control went, and the tip");
         });
     }
 

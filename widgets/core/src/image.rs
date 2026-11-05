@@ -1825,8 +1825,14 @@ impl ImageRef {
         if let Some(mut inner) = self.borrow_mut() {
             // Route through the trait impl so the content invariants (draw_svg,
             // async-load state, texture provenance) live in one place.
+            let changed = inner.texture != texture
+                || inner.draw_svg.is_some()
+                || inner.svg_source.is_some()
+                || inner.async_image_path.is_some()
+                || inner.async_image_size.is_some();
             ImageCacheImpl::set_texture(&mut *inner, texture, 0);
-            if cx.in_draw_event() {
+            // Asked again from a draw, the same picture would draw forever.
+            if changed && cx.in_draw_event() {
                 inner.redraw(cx);
             }
         }

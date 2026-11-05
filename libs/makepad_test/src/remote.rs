@@ -91,6 +91,9 @@ pub struct MouseInput {
     /// A scroll's trackpad gesture phase (`began`, `changed`, `ended`, `momentum`,
     /// `momentum_ended`, `touched`; `None` is a mouse wheel), or a touch's phase.
     pub phase: Option<&'static str>,
+    /// The event's own time in seconds, for a gesture that goes by its speed; `None` is when it
+    /// arrives.
+    pub time: Option<f64>,
 }
 
 impl MouseInput {
@@ -106,6 +109,7 @@ impl MouseInput {
             modifiers: KeyModifiers::default(),
             wait: true,
             phase: None,
+            time: None,
         }
     }
 }
@@ -247,6 +251,10 @@ impl RemoteClient {
         }
         if let Some(phase) = input.phase {
             params.push(("phase", phase));
+        }
+        let time = input.time.map(format_num);
+        if let Some(time) = &time {
+            params.push(("time", time.as_str()));
         }
         push_modifier_params(&mut params, &input.modifiers);
         if let Some(window) = &window {
@@ -653,7 +661,7 @@ mod tests {
         server.route("help", "makepad-remote  app=fake pid=1\nstatus  this sheet");
         server.route(
             "status",
-            r#"{"app":"fake","pid":1,"w":[{"i":0,"t":"Fake [remote]","sz":[640,480],"px":[1280,960],"dpi":2,"pos":[0,0]}]}"#,
+            r#"{"app":"fake","pid":1,"w":[{"i":0,"t":"Fake [remote]","sz":[640,480],"px":[1280,960],"dpi":2,"pass_dpi":2,"pos":[0,0]}]}"#,
         );
         server.route("ui", &semantic_reply());
         server.route("click", r#"{"ok":1,"f":12}"#);

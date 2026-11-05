@@ -681,7 +681,7 @@ mod tests {
         server.route("help", "makepad-remote app=fake-app");
         server.route(
             "status",
-            r#"{"app":"fake-app","pid":1,"w":[{"i":0,"t":"fake","sz":[10,10],"px":[10,10],"dpi":1,"pos":[0,0]}]}"#,
+            r#"{"app":"fake-app","pid":1,"w":[{"i":0,"t":"fake","sz":[10,10],"px":[10,10],"dpi":1,"pass_dpi":1,"pos":[0,0]}]}"#,
         );
         server
     }

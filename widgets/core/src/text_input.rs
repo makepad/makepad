@@ -843,11 +843,14 @@ pub struct TextInput {
     #[apply_default]
     animator: Animator,
 
+    /// Public so a host can recolour the field from its own draw: an apply
+    /// redraws the input, and in a draw that asks for the next frame.
     #[redraw]
     #[live]
-    draw_bg: DrawColor,
+    pub draw_bg: DrawColor,
+    /// Public for the same reason as `draw_bg`.
     #[live]
-    draw_text: DrawText,
+    pub draw_text: DrawText,
     #[live]
     draw_selection: DrawQuad,
     #[live]
@@ -1264,6 +1267,15 @@ impl TextInput {
     }
 
     pub fn set_selection(&mut self, cx: &mut Cx, selection: Selection) {
+        self.place_selection(selection);
+        self.draw_bg.redraw(cx);
+    }
+
+    /// All of setting a selection but the redraw. True when a draw would show
+    /// something else: the selection moved or a composition ended.
+    fn place_selection(&mut self, selection: Selection) -> bool {
+        let before = self.selection;
+        let composing = self.composition_start != 0 || self.composition_end != 0;
         self.selection = Selection {
             anchor: Cursor {
                 index: floor_grapheme_boundary(&self.text, selection.anchor.index),
@@ -1277,7 +1289,7 @@ impl TextInput {
         self.needs_scroll_to_cursor = true;
         self.clear_composition();
         self.history.force_new_edit_group();
-        self.draw_bg.redraw(cx);
+        composing || before.anchor != self.selection.anchor || before.cursor != self.selection.cursor
     }
 
     pub fn cursor(&self) -> Cursor {
@@ -2986,24 +2998,29 @@ impl Widget for TextInput {
 
 
     fn set_text(&mut self, cx: &mut Cx, text: &str) {
-        self.text = self.filter_input(text, true);
-        self.marks.clear_on_edit();
-        self.set_selection(
-            cx,
-            Selection {
-                anchor: Cursor {
-                    index: floor_grapheme_boundary(&self.text, self.selection.anchor.index),
-                    prefer_next_row: self.selection.anchor.prefer_next_row,
-                },
-                cursor: Cursor {
-                    index: floor_grapheme_boundary(&self.text, self.selection.cursor.index),
-                    prefer_next_row: self.selection.cursor.prefer_next_row,
-                },
+        let text = self.filter_input(text, true);
+        let text_changed = text != self.text;
+        self.text = text;
+        let marks_changed = self.marks.clear_on_edit();
+        let selection_changed = self.place_selection(Selection {
+            anchor: Cursor {
+                index: floor_grapheme_boundary(&self.text, self.selection.anchor.index),
+                prefer_next_row: self.selection.anchor.prefer_next_row,
             },
-        );
-        self.history.clear();
-        self.laidout_text = None;
-        self.draw_bg.redraw(cx);
+            cursor: Cursor {
+                index: floor_grapheme_boundary(&self.text, self.selection.cursor.index),
+                prefer_next_row: self.selection.cursor.prefer_next_row,
+            },
+        });
+        let history_changed = self.history.clear();
+        // The same text keeps its layout and asks for no draw: a widget that
+        // writes its fields from its own draw would otherwise draw forever.
+        if text_changed {
+            self.laidout_text = None;
+        }
+        if text_changed || marks_changed || selection_changed || history_changed {
+            self.draw_bg.redraw(cx);
+        }
         self.check_text_is_empty(cx, Animate::Yes);
     }
 
@@ -4421,10 +4438,13 @@ impl History {
         }
     }
 
-    fn clear(&mut self) {
+    /// Forgets every edit; true when there were any.
+    fn clear(&mut self) -> bool {
+        let had_edits = !self.undo_stack.edit_groups.is_empty() || !self.redo_stack.edit_groups.is_empty();
         self.current_edit_kind = None;
         self.undo_stack.clear();
         self.redo_stack.clear();
+        had_edits
     }
 }
 
@@ -4692,6 +4712,24 @@ mod tests {
 
     fn redo(cx: &mut Cx, input: &TextInputRef) -> bool {
         input.borrow_mut().unwrap().redo(cx)
+    }
+
+    /// Writing the text it already has still drops the undo history and keeps
+    /// the caret in the text, and leaves the layout to the draw that made it.
+    #[test]
+    fn repeat_set_text_keeps_its_effects() {
+        let (mut cx, input, _) = field("abc");
+        caret(&mut cx, &input, 3);
+        type_text(&mut cx, &input, "d");
+        input.set_text(&mut cx, "abcd");
+        assert!(!undo(&mut cx, &input));
+        assert_eq!(selection(&input), (4, 4));
+        input.set_text(&mut cx, "ab");
+        assert_eq!(selection(&input), (2, 2));
+        let mut inner = input.borrow_mut().unwrap();
+        let same = inner.selection;
+        assert!(!inner.place_selection(same));
+        assert!(inner.place_selection(Selection { anchor: Cursor { index: 0, prefer_next_row: false }, cursor: Cursor { index: 0, prefer_next_row: false } }));
     }
 
     #[test]

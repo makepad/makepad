@@ -324,6 +324,8 @@ script_mod! {
             hairline_color: uniform(theme.color_bevel_inset_2)
             color_active: uniform(theme.color_ctrl_selected)
             mark_color_active: uniform(on_accent)
+            // A locked box still says what it holds: a tick in the quiet ink, never no tick.
+            mark_color_disabled: uniform(theme.prop_ink_dim)
             focus_color: uniform(theme.color_focus)
             pixel: fn() {
                 let dpi = self.draw_pass.dpi_factor
@@ -342,19 +344,16 @@ script_mod! {
                 }
                 let c = (lo + hi) * 0.5
                 let ink = self.mark_color_active.mix(self.mark_color_disabled, self.disabled)
+                // The mark is 2 pt wide on any display (a stroke takes its half width).
                 if self.mixed > 0.5 {
-                    let y = (floor((self.rect_pos.y + c.y) * dpi) + 0.5) / dpi - self.rect_pos.y
-                    sdf.move_to(lo.x + 3.0, y)
-                    sdf.line_to(hi.x - 3.0, y)
-                    sdf.stroke(ink, px * 0.5)
+                    sdf.move_to(lo.x + 3.0, c.y)
+                    sdf.line_to(hi.x - 3.0, c.y)
+                    sdf.stroke(ink, 1.0)
                 } else if self.active > 0.5 {
-                    let p0 = (floor((self.rect_pos + c + vec2(-3.0, 0.0)) * dpi) + 0.5) / dpi - self.rect_pos
-                    let p1 = (floor((self.rect_pos + c + vec2(-1.0, 2.0)) * dpi) + 0.5) / dpi - self.rect_pos
-                    let p2 = (floor((self.rect_pos + c + vec2(3.0, -2.0)) * dpi) + 0.5) / dpi - self.rect_pos
-                    sdf.move_to(p0.x, p0.y)
-                    sdf.line_to(p1.x, p1.y)
-                    sdf.line_to(p2.x, p2.y)
-                    sdf.stroke(ink, px * 0.5)
+                    sdf.move_to(c.x - 3.0, c.y)
+                    sdf.line_to(c.x - 1.0, c.y + 2.0)
+                    sdf.line_to(c.x + 3.0, c.y - 2.0)
+                    sdf.stroke(ink, 1.0)
                 }
                 if self.focus > 0.5 {
                     sdf.box(lo.x + px * 0.5, lo.y + px * 0.5, hi.x - lo.x - px, hi.y - lo.y - px, self.border_radius)

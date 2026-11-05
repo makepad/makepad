@@ -7,7 +7,8 @@
 //! footprint `px` (mm, from screen derivatives), returns (slot a, slot b, coverage of a, 1).
 //! Slot 0 is unpainted. The eight lattice corners round `p` are read; each corner's distance is
 //! signed by whether it shows the nearest corner's slot, so the interpolated value crosses zero
-//! on the boundary between the two slots, a pixel wide at any zoom.
+//! on the boundary between the two slots, a pixel wide at any zoom. A point past the volume reads
+//! its nearest face: a part that has grown shows the paint there is until its host bakes again.
 //!
 //! A header may instead be an overlay (`bake::Overlay`, first value -1): a host's values over a
 //! regular lattice, read trilinear where the surface is and coloured through its palette, and its
@@ -31,13 +32,10 @@ script_mod! {
             return dot(v, m)
         }
 
-        // the index entry of the brick holding lattice point g: a sample brick (>= 0) or a
-        // whole one (-1 - slot; outside the volume: slot 0)
+        // the index entry of the brick holding lattice point g (in the volume): a sample brick
+        // (>= 0) or a whole one (-1 - slot)
         paint_brick: fn(g: vec3, bmin: vec3, dim: vec3, bases: vec4) -> f32 {
             let b = floor(g / 8.0) - bmin
-            if b.x < 0.0 || b.y < 0.0 || b.z < 0.0 || b.x >= dim.x || b.y >= dim.y || b.z >= dim.z {
-                return 0.0 - 1.0
-            }
             let i = (b.z * dim.y + b.y) * dim.x + b.x
             return self.paint_pick(self.paint_texel(bases.x + floor(i / 4.0)), modf(i, 4.0))
         }
@@ -182,7 +180,7 @@ script_mod! {
             let cell = h0.x
             let bmin = vec3(h0.z, h0.w, h1.x)
             let dim = vec3(h1.y, h1.z, h1.w)
-            let f = p / cell
+            let f = clamp(p / cell, bmin * 8.0, (bmin + dim) * 8.0 - vec3(1.001, 1.001, 1.001))
             let g = floor(f)
             let t = f - g
             // the eight corners: one index read when they share a brick (7 in 8 cells per

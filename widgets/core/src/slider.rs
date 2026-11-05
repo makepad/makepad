@@ -3707,6 +3707,13 @@ impl SliderRef {
         return None;
     }
 
+    /// The top of the range, so a host that sets it from its own draw can
+    /// leave it alone when it already holds: an apply redraws the slider,
+    /// and in a draw that asks for the next frame.
+    pub fn max(&self) -> Option<f64> {
+        self.borrow().map(|inner| inner.max)
+    }
+
     pub fn set_value(&self, cx: &mut Cx, v: f64) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_value(cx, v)

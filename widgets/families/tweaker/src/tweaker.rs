@@ -113,7 +113,7 @@ use crate::theme_builder::{all_suggestions_for, surface_sliders, Applied as Buil
 use crate::theme_tokens::{Appearance, WeightMode, RELATIVE_TOTAL};
 use crate::Animate;
 use crate::ButtonAction;
-use crate::button::ButtonWidgetRefExt;
+use crate::button::{Button, ButtonWidgetRefExt};
 use crate::tooltip::Tooltip;
 use crate::animator::{AnimatorState, Ease as AnimEase, Play};
 use crate::makepad_draw::makepad_platform::DrawShaderId;
@@ -5758,7 +5758,6 @@ fn sight_target(cx: &Cx, uid: u64, in_frame: bool) -> TargetSighting {
 /// focus states a second stop, and a two-tone face reads as a third state
 /// that does not exist.
 fn set_button_fill(cx: &mut Cx, btn: WidgetRef, selected: bool) {
-    let mut btn = btn;
     // Literals, and deliberately: the panel's chrome stands still under
     // whatever theme the app is wearing, so the colour that says "you are in
     // this mode" must not be read from a table that can move underneath it.
@@ -5778,18 +5777,31 @@ fn set_button_fill(cx: &mut Cx, btn: WidgetRef, selected: bool) {
         )
     };
     let flat: Vec4f = vec4(-1.0, -1.0, -1.0, -1.0);
-    script_apply_eval!(cx, btn, {
-        draw_bg +: {
-            color: #(base)
-            color_hover: #(hover)
-            color_down: #(down)
-            color_focus: #(base)
-            color_2: #(flat)
-            color_2_hover: #(flat)
-            color_2_down: #(flat)
-            color_2_focus: #(flat)
-        }
-    });
+    if let Some(mut btn) = btn.borrow_mut::<Button>() {
+        set_face(cx, &mut btn, &[
+            (live_id!(color), base),
+            (live_id!(color_hover), hover),
+            (live_id!(color_down), down),
+            (live_id!(color_focus), base),
+            (live_id!(color_2), flat),
+            (live_id!(color_2_hover), flat),
+            (live_id!(color_2_down), flat),
+            (live_id!(color_2_focus), flat),
+        ]);
+    }
+}
+
+/// Writes a button's face colours, which are shader uniforms, straight in.
+/// The panel sets them from its draw, where an apply would redraw the button
+/// and so ask for the next frame for as long as the panel is up.
+fn set_face(cx: &Cx, btn: &mut Button, colors: &[(LiveId, Vec4f)]) {
+    for (id, color) in colors {
+        btn.draw_bg.set_uniform(cx, *id, &rgba(*color));
+    }
+}
+
+fn rgba(color: Vec4f) -> [f32; 4] {
+    [color.x, color.y, color.z, color.w]
 }
 
 /// A panel tab up or down. Up wears the body's face with a hairline
@@ -5797,7 +5809,6 @@ fn set_button_fill(cx: &mut Cx, btn: WidgetRef, selected: bool) {
 /// do, in dimmer ink, lit a little under the pointer. Literals, for the
 /// same reason `set_button_fill` uses them.
 fn set_tab_fill(cx: &mut Cx, btn: WidgetRef, selected: bool) {
-    let mut btn = btn;
     let (base, hover, down, border, ink): (Vec4f, Vec4f, Vec4f, Vec4f, Vec4f) = if selected {
         (
             vec4(0.20, 0.20, 0.21, 1.0),
@@ -5815,20 +5826,20 @@ fn set_tab_fill(cx: &mut Cx, btn: WidgetRef, selected: bool) {
             vec4(0.64, 0.64, 0.66, 1.0),
         )
     };
-    script_apply_eval!(cx, btn, {
-        draw_bg +: {
-            color: #(base)
-            color_hover: #(hover)
-            color_down: #(down)
-            color_focus: #(base)
-            border_color: #(border)
-            border_color_hover: #(border)
-            border_color_down: #(border)
-            border_color_focus: #(border)
-        }
-        draw_text +: { color: #(ink) }
-        draw_icon +: { color: #(ink) }
-    });
+    if let Some(mut btn) = btn.borrow_mut::<Button>() {
+        set_face(cx, &mut btn, &[
+            (live_id!(color), base),
+            (live_id!(color_hover), hover),
+            (live_id!(color_down), down),
+            (live_id!(color_focus), base),
+            (live_id!(border_color), border),
+            (live_id!(border_color_hover), border),
+            (live_id!(border_color_down), border),
+            (live_id!(border_color_focus), border),
+        ]);
+        btn.draw_text.color = ink;
+        btn.draw_icon.color = ink;
+    }
 }
 
 /// A Button live or off, as one thing. Its `enabled` is what makes it
@@ -7778,9 +7789,6 @@ pub fn tweak_callback(
             ))
         }
         "apply" => {
-            if !tweak_is_on() {
-                set_tweak_on(cx, true);
-            }
             let path = arg(args, &["path", "p"]).ok_or("need path=")?.to_string();
             let chunk = match arg(args, &["splash", "s", "chunk"]) {
                 Some(chunk) => chunk.to_string(),
@@ -15517,13 +15525,14 @@ impl Tweaker {
                     {
                         let btn = row.child(live_id!(scope_line)).child(live_id!(scope_isolated));
                         set_button_fill(cx, btn.clone(), confined);
-                        let mut btn = btn;
                         let color: Vec4f = if isolating && all {
                             vec4(0.92, 0.92, 0.94, 1.0)
                         } else {
                             vec4(0.42, 0.42, 0.45, 1.0)
                         };
-                        script_apply_eval!(cx, btn, { draw_text +: { color: #(color) } });
+                        if let Some(mut btn) = btn.borrow_mut::<Button>() {
+                            btn.draw_text.color = color;
+                        };
                     }
                     let widget = cx.widget_tree().widget(WidgetUid(sel.uid));
                     // Same three-way answer the apply itself gives: a
@@ -15753,11 +15762,10 @@ impl Tweaker {
                 } else {
                     vec4(0.16, 0.16, 0.17, 1.0)
                 };
-                let mut input = input;
-                script_apply_eval!(cx, input, {
-                    draw_text +: { color: #(text) }
-                    draw_bg +: { color: #(bg) }
-                });
+                if let Some(mut input) = input.borrow_mut::<crate::TextInput>() {
+                    input.draw_text.color = text;
+                    input.draw_bg.color = bg;
+                }
                 // The search toggle lights while on; the count and the
                 // arrows show only then, and only where rows are searched
                 // (the Tree tab keeps its filter).
@@ -16379,10 +16387,12 @@ impl Tweaker {
                             for (k, id) in [live_id!(ic_app), live_id!(ic_lib), live_id!(ic_theme), live_id!(ic_native)].into_iter().enumerate() {
                                 head.child(id).set_visible(cx, k == kind);
                             }
-                            let mut chip = head.child(live_id!(chip));
+                            let chip = head.child(live_id!(chip));
                             chip.child(live_id!(lbl)).set_text(cx, &format!("L{level}"));
                             let color = Self::level_color(level);
-                            script_apply_eval!(cx, chip, { draw_bg +: { color: #(color) } });
+                            if let Some(mut chip) = chip.borrow_mut::<View>() {
+                                chip.draw_bg.set_dyn_instance(cx, live_id!(color), &rgba(color));
+                            }
                             head.child(live_id!(loc)).set_text(cx, if lvl.file.is_empty() { "native" } else { &lvl.loc });
                             let own: Vec<&str> = lvl.sets.iter().map(|(n, _)| n.as_str()).collect();
                             let over: Vec<&str> = lvl.sets.iter().filter(|(_, o)| *o).map(|(n, _)| n.as_str()).collect();
@@ -16444,13 +16454,14 @@ impl Tweaker {
                         // A name that has been asked for but not yet carried
                         // out shows in amber: it is what the person wants the
                         // widget called, not what it is called.
-                        let mut field_ref = field.clone();
                         let color: Vec4f = if wanted.is_some() {
                             vec4(1.0, 0.78, 0.29, 1.0)
                         } else {
                             vec4(0.902, 0.902, 0.902, 1.0)
                         };
-                        script_apply_eval!(cx, field_ref, { draw_text +: { color: #(color) } });
+                        if let Some(mut field) = field.borrow_mut::<crate::TextInput>() {
+                            field.draw_text.color = color;
+                        }
                         // Never while it is being typed in.
                         if field.area() == Area::Empty || !cx.has_key_focus(field.area()) {
                             field.set_text(cx, wanted.as_deref().unwrap_or(&name));
@@ -16973,7 +16984,7 @@ impl Tweaker {
                             check.set_active(cx, dock_wanted, Animate::No);
                         }
                         self.dock_uid = if can_tick { check.widget_uid().0 } else { 0 };
-                        let mut label = dock_row.child(live_id!(dock_label));
+                        let label = dock_row.child(live_id!(dock_label));
                         label.set_text(cx, if in_dock { "a tab in a dock" } else { "dockable" });
                         // Amber while the ask stands, as a wanted name is: it
                         // is what the person wants, not what the source says.
@@ -16982,7 +16993,9 @@ impl Tweaker {
                         } else {
                             vec4(0.706, 0.706, 0.706, 1.0)
                         };
-                        script_apply_eval!(cx, label, { draw_text +: { color: #(color) } });
+                        if let Some(mut label) = label.borrow_mut::<Label>() {
+                            label.draw_text.color = color;
+                        }
                         let hint = col.child(live_id!(dock_hint));
                         hint.set_visible(cx, dock_wanted);
                         hint.set_text(
@@ -25349,6 +25362,19 @@ line two");
     /// mix section keeps its whole state on the struct -- it has to, because
     /// the sidebar is dropped and rebuilt whenever the panel's own palette
     /// moves -- so this is enough to ask the section what it did.
+    /// An edit through the bridge takes nothing from the pointer: the overlay stays as it was.
+    #[test]
+    fn a_remote_apply_leaves_the_overlay_off() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        crate::widget_tree::set_ui_root(&mut cx, &widget);
+        let uid = widget.widget_uid().0.to_string();
+        let args = [("path", "panel"), ("uid", uid.as_str()), ("prop", "height"), ("value", "100")].map(|(k, v)| (k.to_string(), v.to_string()));
+        let applied = tweak_callback(&mut cx, "apply", &args).expect("the edit applies");
+        assert!(applied.contains("\"ok\":1"), "{applied}");
+        assert!(!tweak_is_on(), "the edit switched the overlay on");
+    }
+
     fn bare_panel(cx: &mut Cx) -> WidgetRef {
         cx.with_vm(|vm| {
             crate::script_mod(vm);

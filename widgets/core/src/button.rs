@@ -1423,11 +1423,14 @@ pub struct Button {
     #[apply_default]
     animator: Animator,
 
+    /// Public so a host can recolour the face from its own draw: an apply
+    /// redraws the button, and in a draw that asks for the next frame.
     #[redraw]
     #[live]
-    draw_bg: DrawQuad,
+    pub draw_bg: DrawQuad,
+    /// Public for the same reason as `draw_bg`.
     #[live]
-    draw_text: DrawText,
+    pub draw_text: DrawText,
     #[live]
     /// Public so a host can recolour the mark directly. Going through a
     /// script apply instead re-applies the whole object and drops the loaded

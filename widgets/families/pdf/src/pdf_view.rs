@@ -1307,11 +1307,21 @@ impl PdfView {
                 bottom: 0.0,
             };
             let mut page_view = item.widget(&**cx, ids!(page_view));
-            script_apply_eval!(cx, page_view, {
-                width: #(width)
-                height: #(height)
-                margin: #(margin)
+            // Only when it moved: an apply redraws the page, and in a draw
+            // that asks for the next frame. Read off the widget, so a row the
+            // list made anew is never taken for one already laid out.
+            let placed = page_view.borrow::<PdfPageView>().is_some_and(|page| {
+                page.walk.width == Size::Fixed(width)
+                    && page.walk.height == Size::Fixed(height)
+                    && page.walk.margin.left == margin.left
             });
+            if !placed {
+                script_apply_eval!(cx, page_view, {
+                    width: #(width)
+                    height: #(height)
+                    margin: #(margin)
+                });
+            }
 
             // Draw the item — the View contains a PdfPageView.
             // PdfPageView.draw_walk returns make_step(), then we get it here via step(),
