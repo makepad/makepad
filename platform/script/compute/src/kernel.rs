@@ -410,6 +410,24 @@ pub(crate) fn trace_items_impl(items: Vec<crate::parse::Item>, src_len: usize) -
 pub(crate) fn compile_items_impl(items: Vec<crate::parse::Item>, src_len: usize, source: &str, layouts: &[Layout], backend: Backend, modules: &[crate::module::Module], lift: Option<crate::lower::LiveLift>) -> Result<Arc<KernelBody>, Vec<ShaderError>> {
     let all = program_items(items, src_len, modules)?;
     let lowered = kl::lower_kernel(&all, src_len + 1, layouts, lift, false).map_err(|e| vec![e])?;
+    install_lowered(lowered, source, layouts, backend, modules)
+}
+
+/// Compiles a program a host built as AIR objects ([`crate::ir::to_words`]): an element loop in
+/// the shape [`kl::lower_kernel`] emits, reading and writing `buffers` (buffer 0 is the control
+/// word), `shared` its tables. Nothing is parsed or printed: the program goes straight to the
+/// optimizer and the backends.
+pub(crate) fn compile_air_impl(words: &[u32], shared: &[u32], buffers: &[crate::boundary::AirBufferView<'_>], math: MathMode, backend: Backend) -> Result<Arc<KernelBody>, Vec<ShaderError>> {
+    let Some(program) = crate::ir::from_words(words) else {
+        return Err(vec![ShaderError::new(0, 1, "the host's words are no AIR program".to_string())]);
+    };
+    let buffers = buffers.iter().map(|b| BufferDecl { name: b.name.to_string(), access: if b.write { Access::Write } else { Access::Read }, stride: b.stride }).collect();
+    let lowered = kl::lowered_from_air(program, shared.to_vec(), buffers, math).map_err(|e| vec![e])?;
+    install_lowered(lowered, "", &[], backend, &[])
+}
+
+/// The backends' code and the kernel's body, from a lowered program.
+fn install_lowered(lowered: kl::KernelLowered, source: &str, layouts: &[Layout], backend: Backend, modules: &[crate::module::Module<'_>]) -> Result<Arc<KernelBody>, Vec<ShaderError>> {
     let ctx_words = K_PARAMS as usize + lowered.params.len();
     let shared_words = lowered.shared_init.len().max(1);
     let regions = ir::Regions {

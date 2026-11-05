@@ -78,6 +78,30 @@ impl KernelRef {
 }
 
 #[relax_api]
+impl KernelRef {
+    /// How many words [`KernelRef::air_words`] writes.
+    pub fn air_word_count(&self) -> usize {
+        crate::ir::to_words(&crate::ir::flat(self.0.program())).len()
+    }
+
+    /// The kernel's program with its calls inlined, as [`crate::ir::from_words`] reads it: a host
+    /// that compiles this kernel into a program of its own takes it from here.
+    pub fn air_words(&self, out: &mut [u32]) {
+        out.copy_from_slice(&crate::ir::to_words(&crate::ir::flat(self.0.program())));
+    }
+
+    /// How many words of read-only tables the kernel keeps.
+    pub fn shared_word_count(&self) -> usize {
+        self.0.shared_words()
+    }
+
+    /// The kernel's read-only tables (its `Region::Shared`).
+    pub fn shared_copy(&self, out: &mut [u32]) {
+        out.copy_from_slice(self.0.shared_table());
+    }
+}
+
+#[relax_api]
 impl std::ops::Deref for KernelRef {
     type Target = Kernel;
     #[relax_api]
@@ -458,6 +482,9 @@ pub enum CompileReq<'a> {
     /// Splash text lowered for a host to read and not compiled (`kernel::trace`): the
     /// compilation's trace.
     Traced { src: &'a str },
+    /// A program built as AIR objects by the host ([`crate::ir::to_words`]): an element loop
+    /// over `buffers` (buffer 0 the control word), `shared` its tables.
+    Air { words: &'a [u32], shared: &'a [u32], buffers: &'a [AirBufferView<'a>], math: crate::kernel::MathMode, backend: Backend },
     /// A kernel made from Splash values: its syntax tree comes from the
     /// declarations and the fns the entry reaches through the VM. The errors
     /// name the document place.
@@ -507,6 +534,7 @@ impl Compiling {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let kind = match req {
             CompileReq::Source { .. } | CompileReq::Traced { .. } => "source kernel".to_string(),
+            CompileReq::Air { .. } => "air kernel".to_string(),
             #[cfg(feature = "vm")]
             CompileReq::Vm { .. } | CompileReq::VmLifted { .. } | CompileReq::VmTraced { .. } => "splash kernel".to_string(),
             #[cfg(feature = "vm")]
@@ -535,6 +563,10 @@ pub fn kernel_compile(req: &CompileReq<'_>) -> KernelCompilation {
     let data = match req {
         CompileReq::Source { src, layouts, backend, modules, live } => compile_source(src, layouts, *backend, modules, *live),
         CompileReq::Traced { src } => traced_data(crate::kernel::trace_source_impl(src)),
+        CompileReq::Air { words, shared, buffers, math, backend } => match crate::kernel::compile_air_impl(words, shared, buffers, *math, *backend) {
+            Ok(kernel) => CompileData::new(Some(KernelRef(kernel)), Vec::new()),
+            Err(errors) => CompileData::new(None, errors),
+        },
         #[cfg(feature = "vm")]
         CompileReq::Vm { vm, kernel, layouts, backend, modules } => compile_vm(vm, kernel, layouts, *backend, modules),
         #[cfg(feature = "vm")]
@@ -581,6 +613,23 @@ pub fn trace_vm_kernel_lifted(vm: &makepad_script::ScriptVm<'_>, kernel: &VmKern
 #[inline(always)]
 pub unsafe fn compile_kernel(src: &str, layouts: &[LayoutView<'_>], backend: Backend, modules: &[crate::module::Module<'_>], live: LiveFilter) -> KernelCompilation {
     kernel_compile(&CompileReq::Source { src, layouts, backend, modules, live })
+}
+
+/// A host buffer of an AIR kernel ([`CompileReq::Air`]). `stride`: words per element of a
+/// buffer written per element.
+#[relax_api(plain)]
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct AirBufferView<'a> {
+    pub name: &'a str,
+    pub write: bool,
+    pub stride: u32,
+}
+
+/// Compiles a program a host built as AIR objects (see [`CompileReq::Air`]).
+#[inline(always)]
+pub fn compile_air(words: &[u32], shared: &[u32], buffers: &[AirBufferView<'_>], math: crate::kernel::MathMode, backend: Backend) -> KernelCompilation {
+    kernel_compile(&CompileReq::Air { words, shared, buffers, math, backend })
 }
 
 /// Builds and compiles a kernel made from Splash values wholly inside the

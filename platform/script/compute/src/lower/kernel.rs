@@ -758,6 +758,41 @@ pub fn lower_kernel(items: &[Item], prelude_base: usize, layouts: &[Layout], liv
     Ok(KernelLowered { kind, math, entry: entry_name, program, flat, init, params: l.params, buffers: l.kernel.buffers, shared_init: l.shared_init, cost, element_work, parallel_safe, live, folded, trace })
 }
 
+/// A host's AIR program ([`crate::kernel::compile_air_impl`]) made ready for the backends, as
+/// [`lower_kernel`]'s tail makes its own: optimized, its work counted, in an element loop.
+pub fn lowered_from_air(mut program: Program, shared: Vec<u32>, buffers: Vec<BufferDecl>, math: MathMode) -> Result<KernelLowered, ShaderError> {
+    if math != MathMode::Fast {
+        canonical_nan_stores(&mut program.body, &mut program.vals);
+    }
+    crate::opt::dce(&mut program);
+    crate::opt::optimize(&mut program);
+    if math == MathMode::Fast {
+        crate::opt::fuse_fma(&mut program);
+    }
+    let cost = program.cost();
+    let Some(element_work) = crate::work::count(&mut program) else {
+        return Err(ShaderError::new(0, 1, "the host's program has no element loop".to_string()));
+    };
+    let flat = program.clone();
+    Ok(KernelLowered {
+        kind: KernelKind::Map,
+        math,
+        entry: "element".to_string(),
+        program,
+        flat,
+        init: None,
+        params: Vec::new(),
+        buffers,
+        shared_init: shared,
+        cost,
+        element_work,
+        parallel_safe: true,
+        live: Vec::new(),
+        folded: Vec::new(),
+        trace: None,
+    })
+}
+
 /// Every f32 stored to a host buffer goes through `x != x ? NaN : x`, so
 /// any NaN leaves the kernel as [`CANONICAL_NAN`] whatever produced it.
 fn canonical_nan_stores(b: &mut Block, vals: &mut Vec<Ty>) {

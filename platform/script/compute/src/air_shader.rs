@@ -2,7 +2,7 @@
 //! body, inside the compiler. Every AIR op maps to the shader op with the same IEEE meaning
 //! (min/max as selects, integer ops wrapping, saturating conversions written out).
 //!
-//! What the kernel's memory is on the GPU is the route's ([`Io`]): the SDF bake's field route
+//! What the kernel's memory is on the GPU is the route's ([`Io`]): a host's point route
 //! ([`crate::shader_route`]) and compute programs' element route ([`crate::element_route`])
 //! each own theirs, so either one deletes alone.
 //!
