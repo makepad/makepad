@@ -795,6 +795,7 @@ relax_compiler::run::link_trace::ON	env MAKEPAD_RUN_LINK_TRACE read once, nothin
 relax_compiler::run::spill_cache::LIM	env MAKEPAD_RUN_CACHE_SPILL_MB read once, nothing sets it
 relax_compiler::run::spill_cache::SEEN	compared to monotone SERVED and RECORDS
 relax_compiler::run::start_monitor::STEP	env MAKEPAD_RUN_MEM_TRIM_GROWTH_MB read once, nothing sets it
+relax_compiler::run_end::HANDED	the next run's inputs: the restart that starts it hands them over (run_input)
 relax_compiler::run_end::NATIVE_END	native host hook, set once
 relax_compiler::run_end::RESTARTING	run_end's own latch
 relax_compiler::run_end::leftovers::START	the test's start image

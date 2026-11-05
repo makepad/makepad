@@ -24,6 +24,17 @@ pub struct CollectedCache {
     pub(super) kept: Option<(usize, usize)>,
 }
 
+impl CollectedCache {
+    /// The cache opens for the first `n` crates only: the ones a boot loaded (crates added at run
+    /// time have no fingerprint in the cache, so nothing of theirs is cached; their front entries
+    /// are not in its index).
+    pub(crate) fn boot_crates(&mut self, n: usize) {
+        self.fps.truncate(n);
+        self.ifaces.truncate(n);
+        if let Some(ix) = &mut self.indexes { ix.stores.truncate(n); }
+    }
+}
+
 /// MAKEPAD_RUN_COLLECTED_TRACE: the collected encode's parts, timed.
 struct Parts(Option<(std::time::Instant, String)>);
 impl Parts {
@@ -544,6 +555,9 @@ struct Encoder<'a> {
     committed: bool,
     /// the definition tables the cache restored, with the definition count they were restored for
     mapped: Option<(&'a MappedDefinitions, usize)>,
+    /// the graph the image is of when it is not the program's own (crates added at run time:
+    /// CollectedInputs::with_added)
+    recipe: Option<&'a GraphRecipe>,
 }
 
 
@@ -559,6 +573,7 @@ pub(crate) struct CollectedInputs {
     crate_path: Vec<PathBuf>,
     crate_ident: Vec<u128>,
     mapped: Option<(MappedDefinitions, usize)>,
+    recipe: Option<GraphRecipe>,
 }
 
 impl CollectedInputs {
@@ -569,8 +584,31 @@ impl CollectedInputs {
     pub(crate) fn encode_now<'p>(&self, prog: &'p Program, tcx: &'p Tcx, stop: &dyn Fn() -> bool) -> CollectedRecord<'p> {
         Encoder { mode: self.mode, dir: &self.dir, fps: &self.fps, iface_plain: &self.iface_plain,
             crate_path: &self.crate_path, crate_ident: &self.crate_ident, boot: None, committed: false,
-            mapped: self.mapped.as_ref().map(|(m, n)| (m, *n)) }
+            mapped: self.mapped.as_ref().map(|(m, n)| (m, *n)), recipe: self.recipe.as_ref() }
             .encode_as(prog, tcx, stop, true, |boot| boot)
+    }
+
+    /// These inputs for a program whose crates from `boot` on were added at run time
+    /// (modules::add_crates: an app domain's), described by `pre`: the image covers them too.
+    /// Their fingerprints and interfaces are computed as a boot's (from their files only), their
+    /// stores and the graph of `pre` written (record_added_crates). The cache's own tables stay
+    /// the boot's (the crate identities: definition keys are the ones it computes). Under the
+    /// caller's front read.
+    pub(crate) fn with_added(&self, prog: &Program, pre: &[crate::preload::PreCrate], boot: usize) -> Result<CollectedInputs, String> {
+        if self.fps.len() != boot || self.iface_plain.len() != boot || self.crate_path.len() != boot || pre.len() != prog.crates.len() || boot > pre.len() {
+            return Err("the cache does not describe the boot's crates".into());
+        }
+        let fps = crate::stable::crate_fingerprints_from(prog, &self.fps);
+        let want: Vec<usize> = (0..prog.files.len()).filter(|&f| prog.file_crate.get(f).is_some_and(|&k| k as usize >= boot)).collect();
+        let mut digests = vec![None; prog.files.len()];
+        super::items::file_digests_of(prog, &want, &mut digests);
+        let iface_plain = super::items::crate_ifaces_from(prog, &fps, &digests, &self.iface_plain);
+        let recipe = GraphRecipe::new(pre);
+        let fps = record_added_crates(prog, &self.dir, &GraphRecipe::new(&pre[..boot]), &recipe, &fps)?;
+        let crate_path = self.crate_path.iter().cloned().chain((boot..pre.len())
+            .map(|ci| self.dir.join(front_store_name(&prog.session.options, &pre[ci].name, fps[ci])))).collect();
+        Ok(CollectedInputs { mode: self.mode, dir: self.dir.clone(), fps, iface_plain, crate_path, crate_ident: self.crate_ident.clone(),
+            mapped: self.mapped.clone(), recipe: Some(recipe) })
     }
 }
 
@@ -578,13 +616,13 @@ impl Cache {
     pub(crate) fn collected_inputs(&self) -> CollectedInputs {
         CollectedInputs { mode: self.mode, dir: self.dir.clone(), fps: self.fps.clone(), iface_plain: self.iface_plain.clone(),
             crate_path: self.crate_path.clone(), crate_ident: self.crate_ident.clone(),
-            mapped: self.mapped_definitions.clone().map(|m| (m, self.crate_defs_n)) }
+            mapped: self.mapped_definitions.clone().map(|m| (m, self.crate_defs_n)), recipe: None }
     }
 
     fn encoder(&self) -> Encoder<'_> {
         Encoder { mode: self.mode, dir: &self.dir, fps: &self.fps, iface_plain: &self.iface_plain,
             crate_path: &self.crate_path, crate_ident: &self.crate_ident, boot: self.collected_boot.as_ref(),
-            committed: self.collected_committed, mapped: self.mapped_definitions.as_ref().map(|m| (m, self.crate_defs_n)) }
+            committed: self.collected_committed, mapped: self.mapped_definitions.as_ref().map(|m| (m, self.crate_defs_n)), recipe: None }
     }
 
 
@@ -659,7 +697,7 @@ impl Cache {
 impl Encoder<'_> {
     fn capture_boot<'p>(&self, prog: &'p Program, tcx: &'p Tcx, stop: &dyn Fn() -> bool, why: &mut &'static str) -> Option<CollectedBoot<'p>> {
         *why = "recipe";
-        let recipe = prog.front_graph.as_ref()?;
+        let recipe = self.recipe.or(prog.front_graph.as_ref())?;
         if recipe.crates.len() != prog.crates.len() || recipe.crates.iter().zip(&prog.crates)
             .any(|(key, c)| crate::preload::crate_key(prog.syms.str(c.name), c.root_path(), &c.cfg) != *key) { return None; }
         *why = "Program";
@@ -728,7 +766,7 @@ impl Encoder<'_> {
         let mut yielded = false;
         let recorded = (|| {
         let frozen = self.boot.filter(|_| !fresh);
-        let recipe = frozen.map(|boot| &boot.recipe).or(prog.front_graph.as_ref())?;
+        let recipe = frozen.map(|boot| &boot.recipe).or(self.recipe).or(prog.front_graph.as_ref())?;
         why = "graph certificate";
         let graph = read_front_graph(self.dir, recipe.identity)?;
         why = "fingerprints";
@@ -983,7 +1021,8 @@ impl MappedIndexes {
     }
     pub(super) fn get(&self, key: u128) -> Option<(u32, u32)> {
         let loc = self.locations.get(find_key(self.keys, key)?)?;
-        Some((loc.store, loc.entry))
+        // (an entry of a store the cache does not open: CollectedCache::boot_crates)
+        ((loc.store as usize) < self.stores.len()).then_some((loc.store, loc.entry))
     }
     pub(super) fn len(&self) -> usize { self.keys.len() }
 }

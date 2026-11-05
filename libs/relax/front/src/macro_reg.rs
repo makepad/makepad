@@ -277,7 +277,7 @@ thread_local! {
     /// this thread works for the macro world's build (the builder, or a parse worker on one of
     /// the world's crates): a macro the boot world lacks must not wait for that build (pmhost)
     static WORLD_BUILDER: Cell<bool> = const { Cell::new(false) };
-    /// the invoking crate name during a proc-macro expansion (`run_derive_in`, `run_attr`, `run_bang_in`)
+    /// the invoking crate name during a proc-macro expansion (`run_derive_entry`, `run_attr`, `run_bang_in`)
     static CALL_KRATE: RefCell<String> = const { RefCell::new(String::new()) };
 }
 
@@ -306,7 +306,9 @@ pub fn call_krate_env(key: &str) -> Option<String> {
     if let Some(v) = crate::crates::crate_env_registered(&krate, key) {
         return Some(v);
     }
-    REG.with(|r| {
+    // the crate's cargo variables, then cargo's `[env]` configuration (rustc, which runs the
+    // macro, has both); the caller falls back to the process environment
+    let own = REG.with(|r| {
         let b = r.borrow();
         let reg = b.as_ref()?;
         let u = reg.units.iter().find(|u| u.name == krate)?;
@@ -327,7 +329,8 @@ pub fn call_krate_env(key: &str) -> Option<String> {
             "CARGO_PKG_NAME" => Some(crate::crates::base_crate_name(&krate).replace('_', "-")),
             _ => None,
         }
-    })
+    });
+    own.or_else(|| crate::crates::config_env_value(key))
 }
 
 /// The registry and the stats are process-wide: files parse on worker threads too.
@@ -1004,18 +1007,27 @@ fn scan_tokens_for_entries(
     }
 }
 
-/// Runs derive `name` as crate `krate` sees it on `item` (any thread). `None`: not a registered
-/// derive, or this thread builds the macro world (a derive inside the macro crates themselves is
-/// left alone).
-pub fn run_derive_in(sess: &std::sync::Arc<crate::Session>, krate: &str, name: &str, item: &TokenStream, call_span: Span) -> Option<Result<TokenStream, String>> {
+/// The entry derive `name` runs as crate `krate` sees it (`run_derive_entry`, any thread). `None`:
+/// not a registered derive, or this thread builds the macro world (a derive inside the macro
+/// crates themselves is left alone).
+pub fn derive_entry(krate: &str, name: &str) -> Option<Entry> {
     if in_world() {
         return None;
     }
-    let e = REG.with(|r| {
+    REG.with(|r| {
         let mut b = r.borrow_mut();
         resolve_entry(b.as_mut()?, krate, name, Kind::Derive)
-    })?;
-    Some(run_derive_entry(sess, krate, name, &e, item, call_span))
+    })
+}
+
+/// The edition of the crate that defines proc macro `e` (0: not registered).
+pub fn entry_edition(e: &Entry) -> u16 {
+    REG.with(|r| r.borrow().as_ref().and_then(|r| r.units.get(e.unit)).map_or(0, |u| u.edition))
+}
+
+/// The edition of the crate that defines function-like proc macro `i` (bang_index).
+pub fn bang_edition(i: usize) -> u16 {
+    REG.with(|r| r.borrow().as_ref().and_then(|r| r.units.get(r.macros.get(i)?.1.unit)).map_or(0, |u| u.edition))
 }
 
 pub(crate) fn run_derive_entry(sess: &std::sync::Arc<crate::Session>, krate: &str, name: &str, e: &Entry, item: &TokenStream, call_span: Span) -> Result<TokenStream, String> {

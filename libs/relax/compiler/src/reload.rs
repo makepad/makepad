@@ -1881,11 +1881,6 @@ fn layout_edit(u: &Unit, d: DefId, fresh: &crate::tcx::AdtT, running_discriminan
         if adt_ext_field(old, k) && u.needs_drop_glue(fields[k].ty) && !u.has_default(fields[k].ty) {
             return Err(format!("struct `{}`: field `{}` (added live earlier) removed, and its type owns memory without a Default -- restart the app", name, u.prog.syms.str(fields[k].name)));
         }
-        // a value built by raw writes at computed offsets leaves its ext word as the memory had
-        // it (a moved-out value's, maybe): whether it set the dead slot is unknown
-        if !adt_ext_field(old, k) && u.needs_drop_glue(fields[k].ty) && u.offsets_computed.lock().unwrap_or_else(|e| e.into_inner()).contains(&d) {
-            return Err(format!("struct `{}`: the program computes its fields' offsets (offset_of!) and may build values by raw writes, so whether a value set removed field `{}`, which needs dropping, is unknown -- restart the app", name, u.prog.syms.str(fields[k].name)));
-        }
         let hidden = format!("__relax_dead_{}_{}", k, u.prog.syms.str(fields[k].name));
         if !notes.iter().any(|n| n.contains(&format!("field `{}` of `{}` changed its type", u.prog.syms.str(fields[k].name), name))) {
             notes.push(format!("field `{}` of `{}` removed (its slot stays unused)", u.prog.syms.str(fields[k].name), name));
@@ -1934,13 +1929,6 @@ fn layout_edit(u: &Unit, d: DefId, fresh: &crate::tcx::AdtT, running_discriminan
             }
             fields.push(nf.clone());
         }
-    }
-    // code that builds the struct by raw writes at the offsets it computed (offset_of!, as
-    // reflection crates do) has none for a field in the extension block: the running layout
-    // cannot follow
-    if fields.len() > n_old && u.offsets_computed.lock().unwrap_or_else(|e| e.into_inner()).contains(&d) {
-        let added = u.prog.syms.str(fields[n_old].name);
-        return Err(format!("struct `{}`: the program computes its fields' offsets (offset_of!), and field `{}` added by this edit has no offset in the running layout -- restart the app", name, added));
     }
     adt.variants[0].fields = fields;
     Ok((adt, notes))
@@ -2060,6 +2048,268 @@ fn ty_adts(u: &Unit, t: TyId, out: &mut Vec<DefId>, depth: u32) {
         Tuple(v) => for a in u.tcx.tys.list(v).iter() { ty_adts(u, *a, out, depth + 1) },
         _ => {}
     }
+}
+
+/// Live sessions (M10): the structs the code of `d` writes in place through a raw pointer -- a
+/// raw or `&mut` borrow of a place reached through the deref of a raw pointer, an assignment to
+/// one, a `&mut self` method called on one: `addr_of_mut!((*p).f)`, `&raw mut (*p).f`,
+/// `&mut *p`, `(*u.as_mut_ptr()).f = x`, `(*p).f.write(x)`, and the `&raw const (*base).f` of
+/// `offset_of!`. Such code makes a value without writing its ext word: the memory keeps what it
+/// held there, a moved-out value's word maybe. The places' types are typeck's.
+fn raw_written(u: &Unit, d: DefId, out: &mut Vec<DefId>) {
+    use crate::ast::{ExprKind, UnOp};
+    use crate::types::TyKind;
+    let body = u.tcx.typeck(&u.prog, d);
+    let ast = &u.prog.files[body.file as usize].ast;
+    for i in 0..body.expr_ty.len() {
+        let e = body.expr_at(i);
+        let place = match ast.expr(e).kind {
+            ExprKind::AddrOf(raw, mutbl, p) if raw || mutbl => p,
+            ExprKind::Assign(l, _) | ExprKind::AssignOp(_, l, _) => l,
+            ExprKind::MethodCall(recv, _) if body.methods.get(&e.0).is_some_and(|m| m.autoref == 2 && m.derefs == 0) => recv,
+            _ => continue,
+        };
+        let mut adts: Vec<DefId> = Vec::new();
+        let mut p = place;
+        loop {
+            match ast.expr(p).kind {
+                ExprKind::Paren(x) => p = x,
+                ExprKind::Index(x, _) if body.ov_index.get(&p.0).is_none() => p = x,
+                ExprKind::Field(x, _) | ExprKind::TupleField(x, _) => {
+                    // a field reached through a reference (autoderef) is written where that points
+                    if body.field_idx.get(&p.0).is_some_and(|f| f.0 != 0) || !body.has_expr(x) {
+                        break;
+                    }
+                    if let TyKind::Adt(a, _, _) = u.tcx.tys.kind(body.ty(x)) {
+                        adts.push(*a);
+                    }
+                    p = x;
+                }
+                ExprKind::Unary(UnOp::Deref, y) => {
+                    if body.has_expr(y) && matches!(u.tcx.tys.kind(body.ty(y)), TyKind::Ptr(..)) {
+                        if let TyKind::Adt(a, _, _) = u.tcx.tys.kind(body.ty(p)) {
+                            adts.push(*a);
+                        }
+                        for a in adts {
+                            if !out.contains(&a) {
+                                out.push(a);
+                            }
+                        }
+                    }
+                    break;
+                }
+                _ => break,
+            }
+        }
+    }
+}
+
+/// Live sessions (M10): the structs whose running layout needs their values' ext word -- fields
+/// in the extension block (a block a stale word would share), or a dead slot to drop (a stale
+/// EXT_BUILT word would drop what the value never set).
+fn structs_needing_ext_word(u: &Unit) -> Vec<DefId> {
+    let mut out: Vec<DefId> = u.tcx.adts.iter().filter(|(_, a)| !a.is_enum && !a.is_union && a.variants.len() == 1 && {
+        let fields = &a.variants[0].fields;
+        (a.ext_from as usize) < fields.len()
+            || fields.iter().enumerate().any(|(k, f)| !adt_ext_field(a, k) && crate::lower::is_dead_field(u, f.name) && u.needs_drop_glue(f.ty))
+    }).map(|(d, _)| *d).collect();
+    out.sort();
+    out
+}
+
+/// Live sessions (M10): whether code can write through a raw pointer, which takes an unsafe
+/// context. Code is read by its text where the text is its code: it says `unsafe`, or it invokes
+/// a macro_rules whose text can (by name, through the macros that one invokes). Code a macro made
+/// (a derive's impl), and code invoking a function-like proc macro (whose expansion is not text to
+/// read), is read parsed, with every expansion in it (parsed_raw_write).
+struct RawGate {
+    procs: Vec<Vec<u8>>,
+    /// the macro_rules by name, made at the first lookup
+    macros: std::cell::OnceCell<std::collections::HashMap<Vec<u8>, Vec<DefId>>>,
+    memo: std::cell::RefCell<std::collections::HashMap<Vec<u8>, bool>>,
+}
+
+impl RawGate {
+    fn new() -> RawGate {
+        let procs = crate::macro_reg::REG.with(|r| r.borrow().as_ref().map(|g| g.macros.iter().filter(|(_, e)| e.kind == crate::macro_reg::Kind::Bang).map(|(n, _)| n.as_bytes().to_vec()).collect()).unwrap_or_default());
+        RawGate { procs, macros: Default::default(), memo: Default::default() }
+    }
+
+    /// The names `text` invokes as macros (`name!`).
+    fn invoked<'t>(text: &[&'t [u8]]) -> Vec<&'t [u8]> {
+        text.windows(2).filter(|w| w[1] == b"!" && w[0].first().is_some_and(|c| c.is_ascii_alphabetic() || *c == b'_')).map(|w| w[0]).collect()
+    }
+
+    fn proc_call(&self, text: &[&[u8]]) -> bool {
+        Self::invoked(text).into_iter().any(|n| self.procs.iter().any(|p| p.as_slice() == n))
+    }
+
+    /// Whether code `d`, whose text is `text`, is read parsed: a macro expansion made it, or it
+    /// invokes a proc macro.
+    fn read_parsed(&self, prog: &Program, d: DefId, text: &[&[u8]]) -> bool {
+        let def = prog.def(d);
+        let pf = &prog.files[def.file as usize];
+        pf.ast.item(def.item).lo >= pf.src_len || self.proc_call(text)
+    }
+
+    /// Whether code `d`, whose text is `text`, can write through a raw pointer.
+    fn can_write_raw(&self, prog: &Program, d: DefId, text: &[&[u8]]) -> bool {
+        if self.read_parsed(prog, d, text) { parsed_raw_write(prog, d) } else { self.text_unsafe(prog, text) }
+    }
+
+    /// Whether `text` can write through a raw pointer, read as text (a proc macro it invokes can).
+    fn text_unsafe(&self, prog: &Program, text: &[&[u8]]) -> bool {
+        text.iter().any(|t| *t == b"unsafe") || Self::invoked(text).into_iter().any(|n| self.procs.iter().any(|p| p.as_slice() == n) || self.macro_unsafe(prog, n))
+    }
+
+    fn macro_unsafe(&self, prog: &Program, name: &[u8]) -> bool {
+        if let Some(&known) = self.memo.borrow().get(name) {
+            return known;
+        }
+        // (a macro invoking itself: no until shown otherwise)
+        self.memo.borrow_mut().insert(name.to_vec(), false);
+        let macros = self.macros.get_or_init(|| {
+            let mut by_name: std::collections::HashMap<Vec<u8>, Vec<DefId>> = Default::default();
+            for i in 0..prog.defs.len() {
+                let d = DefId(i as u32);
+                if prog.def(d).kind == DefKind::MacroRules {
+                    by_name.entry(def_name(prog, d).into_bytes()).or_default().push(d);
+                }
+            }
+            by_name
+        });
+        let found = macros.get(name).is_some_and(|defs| defs.iter().any(|&m| {
+            let pf = &prog.files[prog.def(m).file as usize];
+            let it = pf.ast.item(prog.def(m).item);
+            self.text_unsafe(prog, &toks(pf, it.lo, it.hi, &[]))
+        }));
+        self.memo.borrow_mut().insert(name.to_vec(), found);
+        found
+    }
+}
+
+/// Live sessions (M10): whether the parsed code of `d`, every macro expansion in it included, can
+/// write in place through a raw pointer, as raw_written reads it but by shape alone: in an unsafe
+/// context (an `unsafe` block, an `unsafe fn`), a raw or `&mut` borrow of, an assignment to, or a
+/// method call on a place reached through a deref. Code that does not parse counts as one that can.
+fn parsed_raw_write(prog: &Program, d: DefId) -> bool {
+    use crate::ast::{Ast, ExprId, ExprKind, ItemKind, UnOp};
+    use relax_types::ast_visit::{walk_expr, Visitor};
+    struct Find<'a> {
+        ast: &'a Ast,
+        unsafe_depth: u32,
+        found: bool,
+    }
+    impl Find<'_> {
+        fn through_deref(&self, mut p: ExprId) -> bool {
+            loop {
+                match self.ast.expr(p).kind {
+                    ExprKind::Paren(x) | ExprKind::Index(x, _) | ExprKind::Field(x, _) | ExprKind::TupleField(x, _) => p = x,
+                    ExprKind::Unary(UnOp::Deref, _) => return true,
+                    _ => return false,
+                }
+            }
+        }
+    }
+    impl<'a> Visitor<'a> for Find<'a> {
+        fn ast(&self) -> &'a Ast {
+            self.ast
+        }
+        fn expr(&mut self, e: ExprId) {
+            if self.found {
+                return;
+            }
+            let kind = self.ast.expr(e).kind;
+            if self.unsafe_depth > 0 {
+                let place = match kind {
+                    ExprKind::AddrOf(raw, mutbl, p) if raw || mutbl => Some(p),
+                    ExprKind::Assign(l, _) | ExprKind::AssignOp(_, l, _) => Some(l),
+                    ExprKind::MethodCall(recv, _) => Some(recv),
+                    _ => None,
+                };
+                if place.is_some_and(|p| self.through_deref(p)) {
+                    self.found = true;
+                    return;
+                }
+            }
+            let inner = matches!(kind, ExprKind::Unsafe(_)) as u32;
+            self.unsafe_depth += inner;
+            walk_expr(self, e);
+            self.unsafe_depth -= inner;
+        }
+    }
+    let def = prog.def(d);
+    let ast = &prog.files[def.file as usize].ast;
+    let mut f = Find { ast, unsafe_depth: 0, found: false };
+    match ast.item(def.item).kind {
+        ItemKind::Fn(sig, ..) => {
+            f.unsafe_depth = ast.fn_sig(sig).unsafe_ as u32;
+            match prog.fn_body(def.file, def.item) {
+                Ok(Some(b)) => f.block(b),
+                Ok(None) => {}
+                Err(_) => return true,
+            }
+        }
+        ItemKind::Const(..) | ItemKind::Static(..) => match prog.const_body(def.file, def.item) {
+            Ok(Some(e)) => f.expr(e),
+            Ok(None) => {}
+            Err(_) => return true,
+        },
+        _ => return true,
+    }
+    f.found
+}
+
+/// Live sessions (M10): of the structs `need` (structs_needing_ext_word), one whose fields code
+/// writes in place through a raw pointer (raw_written), with that code. The program is read,
+/// not its compiled code: a builder compiled only after the edit counts. So does `replaced` (the
+/// earlier versions of what the edit replaces: code that may still be running). Code that can do
+/// it is type-checked: its text names one of the struct's fields (or a macro_rules that can) and
+/// can write through a raw pointer, or (code a macro made, code invoking a proc macro) its parsed
+/// code has the shape of such a write (RawGate).
+fn raw_builder(u: &Unit, need: &[DefId], replaced: &[(DefId, DefId)]) -> Option<(DefId, DefId)> {
+    if let Some(&found) = replaced.iter().find(|(s, _)| need.contains(s)) {
+        return Some(found);
+    }
+    let prog = &u.prog;
+    let gate = RawGate::new();
+    // one pass for all of them: the crates seeing any, the names of all their fields
+    let visible = prog.crates_seeing_files(need.iter().map(|&s| prog.def(s).file));
+    let mut fields: Vec<&[u8]> = Vec::new();
+    for &s in need {
+        let Some(adt) = u.tcx.adts.get(&s) else { continue };
+        // a dead slot's field went by its own name (`__relax_dead_<k>_<name>`)
+        fields.extend(adt.variants[0].fields.iter().map(|f| {
+            let n = prog.syms.str(f.name).as_bytes();
+            match n.strip_prefix(b"__relax_dead_") {
+                Some(rest) => rest.iter().position(|c| *c == b'_').map_or(n, |at| &rest[at + 1..]),
+                None => n,
+            }
+        }));
+    }
+    let names = through_macros(prog, &visible, &fields);
+    let names: Vec<&[u8]> = names.iter().map(|n| n.as_slice()).collect();
+    for i in 0..prog.defs.len() {
+        let d = DefId(i as u32);
+        let def = prog.def(d);
+        if !visible.get(def.krate as usize).copied().unwrap_or(false) || !matches!(def.kind, DefKind::Fn | DefKind::AssocFn | DefKind::Const | DefKind::AssocConst | DefKind::Static) {
+            continue;
+        }
+        let pf = &prog.files[def.file as usize];
+        let it = pf.ast.item(def.item);
+        let text = toks(pf, it.lo, it.hi, &[]);
+        // code a macro made, or code invoking a proc macro, may name the fields where its text does not
+        let can = if gate.read_parsed(prog, d, &text) { parsed_raw_write(prog, d) } else { text.iter().any(|t| names.contains(t)) && gate.text_unsafe(prog, &text) };
+        if !can {
+            continue;
+        }
+        let mut written = Vec::new();
+        raw_written(u, d, &mut written);
+        if let Some(&s) = written.iter().find(|w| need.contains(w)) {
+            return Some((s, d));
+        }
+    }
+    None
 }
 
 fn adt_ext_field(a: &crate::tcx::AdtT, k: usize) -> bool {
@@ -2722,6 +2972,26 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
         out.test_changes = Some(changes.iter().filter_map(|c| match c { Change::Body(d) => Some(*d), _ => None }).collect());
     }
     let visible_crates = crates_seeing_edit(&u.prog, versions.iter().map(|(v, _)| v.old));
+    // the structs the code this edit replaces writes in place through raw pointers (M10): that
+    // code may still be running after the commit (raw_builder)
+    let mut replaced_raw: Vec<(DefId, DefId)> = Vec::new();
+    let mut raw_gate: Option<RawGate> = None;
+    for d in changes.iter().filter_map(|c| match *c { Change::Body(d) | Change::Const(d) | Change::StaticInit(d) => Some(d), _ => None })
+        .chain(versions.iter().flat_map(|(_, p)| p.removed.iter().copied()))
+    {
+        let def = u.prog.def(d);
+        if !matches!(def.kind, DefKind::Fn | DefKind::AssocFn | DefKind::Const | DefKind::AssocConst | DefKind::Static) {
+            continue;
+        }
+        let pf = &u.prog.files[def.file as usize];
+        let it = pf.ast.item(def.item);
+        let text = toks(pf, it.lo, it.hi, &[]);
+        if raw_gate.get_or_insert_with(RawGate::new).can_write_raw(&u.prog, d, &text) {
+            let mut written = Vec::new();
+            raw_written(u, d, &mut written);
+            replaced_raw.extend(written.into_iter().map(|s| (s, d)));
+        }
+    }
     let mut body_defs: Vec<DefId> = changes.iter().filter_map(|c| if let Change::Body(d) = c { Some(*d) } else { None }).collect();
     // items added or removed change what names resolve to (a new fn shadowing a glob import, a
     // new inherent method shadowing a trait method, a removed fn): every running fn whose text
@@ -3645,6 +3915,15 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
             }
         }
         trace_sub("layout");
+        // a value code builds by raw writes keeps the ext word its memory held (M10): a struct
+        // whose running layout needs that word is built so by no code, running or to be compiled
+        let need = structs_needing_ext_word(u);
+        if !need.is_empty() {
+            if let Some((s, by)) = raw_builder(u, &need, &replaced_raw) {
+                layout_restart.push(format!("struct `{}`: `{}` writes its fields in place through a raw pointer, which leaves the hidden word of its live layout as the memory had it, and after this edit its values need that word (fields added live, or a removed field to drop) -- restart the app", u.prog.def_path(s), u.prog.def_path(by)));
+            }
+        }
+        trace_sub("raw_builders");
         unsafe {
             u.prog.reclaim_caches();
         }
@@ -4620,7 +4899,7 @@ pub fn domain_stopping(id: u32) {
 }
 
 // the first domain of a restarted run gets the state the previous run left
-// (MAKEPAD_RUN_RESTORE, read once)
+// (MAKEPAD_RUN_RESTORE, read once: run_end::run_input)
 static FIRST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
 pub(crate) fn domain_loaded(inputs: Option<Inputs>) {
@@ -4629,7 +4908,7 @@ pub(crate) fn domain_loaded(inputs: Option<Inputs>) {
     clear_restart_pending();
     let mut restored = None;
     if FIRST.swap(false, std::sync::atomic::Ordering::AcqRel) {
-        if let Some(path) = std::env::var_os("MAKEPAD_RUN_RESTORE") {
+        if let Some(path) = crate::run_end::run_input("MAKEPAD_RUN_RESTORE") {
             let _k = crate::zone_alloc::kept();
             restored = std::fs::read_to_string(&path).ok();
             let _ = std::fs::remove_file(&path);
@@ -4888,6 +5167,14 @@ pub extern "C" fn __relax_restored_state(buf: *mut u8, cap: usize) -> usize {
             Some(t) => copy_out(t, buf, cap),
             None => usize::MAX,
         }
+    })
+}
+
+/// When the edit whose restart started this run was saved (unix ms; 0 for a run no restart started):
+/// MAKEPAD_RUN_RESTART_T0 as this run has it (run_end::run_input), for save -> back on screen.
+pub extern "C" fn __relax_restart_saved_ms() -> f64 {
+    crate::jit::host_boundary("__relax_restart_saved_ms", || {
+        crate::run_end::run_input("MAKEPAD_RUN_RESTART_T0").and_then(|v| v.into_string().ok()).and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0)
     })
 }
 
@@ -5278,22 +5565,74 @@ pub(crate) fn hand_back() {
     }
 }
 
-/// What the next run reads, as a process finds it in its environment (a value, or none): the
-/// recovery on its way, `state` as the app left it, when the edit behind this was saved.
+/// What the next run reads (run_end::run_input; a value, or none): the recovery on its way, `state`
+/// as the app left it, when the edit behind this was saved. A process started for the next run
+/// finds it in its environment, a run started in place in the restart's hand-over.
 pub(crate) fn next_run_env(state: Option<&[u8]>) -> Result<Vec<(&'static str, Option<std::ffi::OsString>)>, String> {
     let recovery = crate::hot_failure::hand_over()?.map(|path| path.into_os_string());
     let restore = match state {
-        Some(st) => {
-            // (one file, which the next run removes when it reads it: on Windows a run of a process
-            // that starts again has another pid)
-            let path = std::env::temp_dir().join(format!("relax-restart-state-{}", std::process::id()));
-            std::fs::write(&path, st).map_err(|e| format!("cannot write the state: {e}"))?;
-            Some(path.into_os_string())
-        }
+        Some(st) => Some(restart_state_file(st)?.into_os_string()),
         None => None,
     };
     let saved = RESTART_SAVED_MS.load(std::sync::atomic::Ordering::Relaxed).to_string();
     Ok(vec![("MAKEPAD_JIT_RECOVERY", recovery), ("MAKEPAD_RUN_RESTORE", restore), ("MAKEPAD_RUN_RESTART_T0", Some(saved.into()))])
+}
+
+/// The app's state for the next run (MAKEPAD_RUN_RESTORE), in a file of its own, which that run
+/// removes when it reads it: made new in this user's own directory (makepad_remote's socket dir),
+/// so no other user can read it, put it there first or point it elsewhere.
+pub(crate) fn restart_state_file(st: &[u8]) -> Result<std::path::PathBuf, String> {
+    #[cfg(unix)]
+    let dir = makepad_remote::carrier::unix::own_socket_dir().map_err(|e| format!("cannot write the state: {e}"))?;
+    #[cfg(not(unix))]
+    let dir = makepad_remote::carrier::unix::socket_dir();
+    let path = dir.join(format!("relax-restart-state-{}-{}", std::process::id(), crate::clock::wall_ns()));
+    write_new_private(&path, st).map_err(|e| format!("cannot write the state {}: {e}", path.display()))?;
+    Ok(path)
+}
+
+/// `bytes` in a file made at `path` (0600 on Unix), never one that is there already, nor a link's
+/// target: another file or link at `path` is an error.
+fn write_new_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
+    o.open(path)?.write_all(bytes)
+}
+
+#[cfg(all(test, unix))]
+#[test]
+fn a_restarts_state_file_is_made_new_never_through_a_link() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = std::env::temp_dir().join(format!("relax-state-file-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let target = dir.join("target");
+    std::fs::write(&target, b"keep").unwrap();
+    let link = dir.join("state-link");
+    let _ = std::fs::remove_file(&link);
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    assert!(write_new_private(&link, b"state").is_err(), "a link at the path is refused");
+    assert_eq!(std::fs::read(&target).unwrap(), b"keep", "the link's target is untouched");
+    assert!(write_new_private(&target, b"state").is_err(), "a file at the path is refused");
+    let fresh = dir.join("state-fresh");
+    let _ = std::fs::remove_file(&fresh);
+    write_new_private(&fresh, b"state").unwrap();
+    assert_eq!(std::fs::read(&fresh).unwrap(), b"state");
+    assert_eq!(std::fs::metadata(&fresh).unwrap().permissions().mode() & 0o777, 0o600);
+    for f in [&fresh, &link, &target] {
+        let _ = std::fs::remove_file(f);
+    }
+    let _ = std::fs::remove_dir(&dir);
+    // the restart's own: in this user's 0700 directory, 0600
+    let state = restart_state_file(b"state").unwrap();
+    let own = makepad_remote::carrier::unix::socket_dir();
+    assert_eq!(state.parent(), Some(own.as_path()));
+    assert_eq!(std::fs::metadata(&own).unwrap().permissions().mode() & 0o777, 0o700);
+    assert_eq!(std::fs::metadata(&state).unwrap().permissions().mode() & 0o777, 0o600);
+    assert_eq!(std::fs::read(&state).unwrap(), b"state");
+    std::fs::remove_file(&state).unwrap();
 }
 
 /// A run with no app domain starts again as a process: the loader binary with the same command
@@ -5592,6 +5931,7 @@ pub fn restart_symbol(name: &[u8]) -> Option<usize> {
         b"__relax_restart_requested" => __relax_restart_requested as *const () as usize,
         b"__relax_restart_reason" => __relax_restart_reason as *const () as usize,
         b"__relax_restored_state" => __relax_restored_state as *const () as usize,
+        b"__relax_restart_saved_ms" => __relax_restart_saved_ms as *const () as usize,
         b"__relax_restart_now" => __relax_restart_now as *const () as usize,
         b"__relax_hot_load_failed" => __relax_hot_load_failed as *const () as usize,
         b"__relax_live_stream" => __relax_live_stream as *const () as usize,

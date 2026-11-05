@@ -39,7 +39,7 @@ pub fn unit_sizes(u: &crate::jit::Unit) -> Vec<(String, u64)> {
     for (fi, f) in p.files.iter().enumerate() {
         let a = &f.ast;
         let ab = vbytes(&a.exprs) + vbytes(&a.pats) + vbytes(&a.tys) + vbytes(&a.items) + vbytes(&a.blocks) + vbytes(&a.mac_args);
-        let sb = (f.exp_map.heap_bytes() as u64) + (f.tok_origin.heap_bytes() as u64) + (f.token_origins.heap_bytes() as u64) + (f.rules_exp.heap_bytes() as u64) + (f.body_origin.heap_bytes() as u64) + f.line_starts.get().map_or(0, |l| vbytes(l));
+        let sb = (f.exp_map.heap_bytes() as u64) + (f.tok_origin.heap_bytes() as u64) + (f.token_origins.heap_bytes() as u64) + (f.rules_exp.heap_bytes() as u64) + (f.body_origin.heap_bytes() as u64) + (f.pm_editions.heap_bytes() as u64) + f.line_starts.get().map_or(0, |l| vbytes(l));
         src += f.src.heap_bytes() as u64;
         toks += f.toks.heap_bytes() as u64;
         ast += ab;
@@ -258,11 +258,11 @@ fn file_arrays(p: &crate::program::Program) -> Vec<(String, u64)> {
         }
         arrays!("main.", f, src);
         add_toks(&mut totals, "main.toks".into(), &f.toks);
-        tables!("main.", f, exp_map, tok_origin, token_origins, rules_exp, body_origin);
+        tables!("main.", f, exp_map, tok_origin, token_origins, rules_exp, body_origin, pm_editions);
         for part in f.parts() {
             arrays!("part.", part, ext);
             add_toks(&mut totals, "part.toks".into(), &part.toks);
-            tables!("part.", part, exp_map, tok_origin, token_origins, rules_exp, body_origin);
+            tables!("part.", part, exp_map, tok_origin, token_origins, rules_exp, body_origin, pm_editions);
         }
         let mut a = Some(&f.ast);
         let mut prefix = "main.ast.";

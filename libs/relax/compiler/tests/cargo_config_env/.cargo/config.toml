@@ -1,0 +1,7 @@
+# cargo's [env] for the fixture (issue 1385): a relative path, a forced value, a plain value, and
+# one a build script's rustc-env overrides.
+[env]
+CCE_SOURCES = { value = "data", relative = true }
+CCE_FORCED = { value = "forced by config", force = true }
+CCE_PLAIN = "plain from config"
+CCE_OVERRIDE = "override from config"

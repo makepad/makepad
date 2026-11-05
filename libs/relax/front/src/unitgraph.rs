@@ -925,6 +925,12 @@ fn run_one(sess: &std::sync::Arc<crate::Session>, bs: &BuildScript, raw: &[RawUn
         // there, found nothing and chose its libc backend)
         cmd.current_dir(dir).env_remove("MAKEPAD_RUN_WORKSPACE");
     }
+    // cargo's `[env]` configuration, after every variable set above (cargo apply_env_config)
+    for (k, v) in crate::crates::config_env() {
+        if !cmd.get_envs().any(|(n, _)| n == k.as_str()) {
+            cmd.env(k, v);
+        }
+    }
     // cargo's rerun rules: the previous output stands while the script's units, the environment
     // it was given and its `rerun-if-changed` / `rerun-if-env-changed` inputs are unchanged (a
     // script that names none: no file of its package changed)

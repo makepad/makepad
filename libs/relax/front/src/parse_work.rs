@@ -238,6 +238,7 @@ mod tests {
             assert_eq!(v.pf.tok_origin, full.pf.tok_origin);
             assert_eq!(v.pf.token_origins, full.pf.token_origins);
             assert_eq!(v.pf.body_origin, full.pf.body_origin);
+            assert_eq!(v.pf.pm_editions, full.pf.pm_editions);
             s.reuse = v.reuse;
         }
         assert!(s.reuse.expansions.is_empty() && s.reuse.rules.is_empty());

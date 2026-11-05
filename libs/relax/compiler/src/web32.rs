@@ -192,9 +192,18 @@ pub fn free(a: u64, size: usize) {
     FREE.lock().unwrap_or_else(|e| e.into_inner()).push((a, len));
 }
 
-/// Names the thread-local words of the shadow stack (Unit::new).
-pub fn set_ss_off(off: u32) {
-    SS_OFF.store(off as u64, Ordering::Release);
+/// The thread-local words of the shadow stack (Unit::new): the run's first unit places them
+/// (`alloc`), the others use them there.
+pub fn ss_off_or(alloc: impl FnOnce() -> u32) -> u32 {
+    let at = SS_OFF.load(Ordering::Acquire);
+    if at != 0 {
+        return at as u32;
+    }
+    let off = alloc() as u64;
+    match SS_OFF.compare_exchange(0, off, Ordering::AcqRel, Ordering::Acquire) {
+        Ok(_) => off as u32,
+        Err(placed) => placed as u32,
+    }
 }
 
 fn ss_words() -> *mut u64 {

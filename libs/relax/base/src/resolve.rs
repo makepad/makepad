@@ -1303,9 +1303,9 @@ enum Vendor {
 
 /// cargo's target directory for a start folder (what `cargo metadata` reports as
 /// `target_directory`): CARGO_TARGET_DIR, else CARGO_BUILD_TARGET_DIR (relative to the current
-/// folder), else `[build] target-dir` of the nearest `.cargo/config.toml` (or `.cargo/config`)
-/// at or above `dir`, then of $CARGO_HOME's config (relative to the folder holding that
-/// `.cargo`), else `<workspace root>/target` (find_root).
+/// folder), else `[build] target-dir` of the first cargo config file that sets it
+/// (cargo_config_files: the nearest at or above `dir`, then $CARGO_HOME's; relative to the folder
+/// holding that `.cargo`), else `<workspace root>/target` (find_root).
 pub fn target_dir(dir: &str) -> Result<String, String> {
     for k in ["CARGO_TARGET_DIR", "CARGO_BUILD_TARGET_DIR"] {
         if let Some(v) = std::env::var(k).ok().filter(|v| !v.is_empty()) {
@@ -1313,34 +1313,9 @@ pub fn target_dir(dir: &str) -> Result<String, String> {
             return Ok(join(&cwd, &v));
         }
     }
-    let config_target = |d: &str, path: &str| -> Result<Option<String>, String> {
-        Ok(table(&read_toml(path)?, "build").and_then(|b| s(b, "target-dir")).map(|t| join(d, &t)))
-    };
-    let mut cur = Some(normalize(dir));
-    while let Some(d) = cur {
-        for f in ["config.toml", "config"] {
-            let path = format!("{}/.cargo/{}", d, f);
-            if crate::vfs::is_file(&path) {
-                if let Some(t) = config_target(&d, &path)? {
-                    return Ok(t);
-                }
-                break;
-            }
-        }
-        cur = parent(&d);
-    }
-    let home = std::env::var("CARGO_HOME").ok().filter(|h| !h.is_empty()).map(|h| normalize(&h)).or_else(|| {
-        std::env::var(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).ok().map(|h| format!("{}/.cargo", normalize(&h)))
-    });
-    if let Some(home) = home {
-        for f in ["config.toml", "config"] {
-            let path = format!("{}/{}", home, f);
-            if crate::vfs::is_file(&path) {
-                if let Some(t) = config_target(&parent(&home).unwrap_or_default(), &path)? {
-                    return Ok(t);
-                }
-                break;
-            }
+    for (d, path) in cargo_config_files(dir) {
+        if let Some(t) = table(&read_toml(&path)?, "build").and_then(|b| s(b, "target-dir")) {
+            return Ok(join(&d, &t));
         }
     }
     Ok(format!("{}/target", find_root(dir)?))
@@ -1348,6 +1323,92 @@ pub fn target_dir(dir: &str) -> Result<String, String> {
 
 pub fn find_root(dir: &str) -> Result<String, String> {
     find_root_in(dir, None)
+}
+
+/// The cargo config files for a start folder, in cargo's order (GlobalContext::walk_tree): the
+/// `.cargo/config` (else `.cargo/config.toml`) of `dir` and of every folder above it, then
+/// $CARGO_HOME's when none of those is it. Each with the folder its relative paths resolve
+/// against: the one holding that `.cargo` (the folder above CARGO_HOME for its config).
+fn cargo_config_files(dir: &str) -> Vec<(String, String)> {
+    let in_dir = |d: &str| ["config", "config.toml"].iter().map(|f| format!("{}/{}", d, f)).find(|p| crate::vfs::is_file(p));
+    let mut files: Vec<(String, String)> = Vec::new();
+    let mut cur = Some(normalize(dir));
+    while let Some(d) = cur {
+        if let Some(path) = in_dir(&format!("{}/.cargo", d)) { files.push((d.clone(), path)); }
+        cur = parent(&d);
+    }
+    let home = std::env::var("CARGO_HOME").ok().filter(|h| !h.is_empty()).map(|h| normalize(&h)).or_else(|| {
+        std::env::var(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).ok().map(|h| format!("{}/.cargo", normalize(&h)))
+    });
+    if let Some(path) = home.as_deref().and_then(in_dir) {
+        if !files.iter().any(|(_, p)| *p == path) { files.push((parent(home.as_deref().unwrap_or_default()).unwrap_or_default(), path)); }
+    }
+    files
+}
+
+/// cargo's `[env]` configuration as it applies for a start folder (GlobalContext::env_config):
+/// what cargo hands its rustc, build scripts and `cargo run` programs beside the variables it sets
+/// itself. The `[env]` tables of the config files (cargo_config_files) merge as cargo merges
+/// config: the nearest file's value wins, a `{ value, force, relative }` entry merges field by
+/// field, and a string in one file against a table in another is an error. A `relative` value is
+/// joined to the folder of the file its `value` comes from (Path::join: unnormalized, an absolute
+/// value stands). An entry applies when it is `force`d or the process environment lacks the
+/// variable. CARGO_HOME, RUSTUP_HOME and RUSTUP_TOOLCHAIN may not be set there.
+pub fn cargo_env(dir: &str) -> Result<Vec<(String, String)>, String> {
+    // a plain string, or the table's (value and its file's folder, force, relative)
+    enum Entry { Plain(String), Options(Option<(String, String)>, Option<bool>, Option<bool>) }
+    let mut env: BTreeMap<String, (Entry, String)> = BTreeMap::new();
+    for (base, path) in cargo_config_files(dir) {
+        let t = read_toml(&path)?;
+        let Some(tab) = t.get("env") else { continue };
+        let Toml::Table(tab) = tab else { return Err(format!("{}: `env` is not a table", path)) };
+        for (k, v) in tab {
+            let flag = |e: &TomlTable, f: &str| match e.get(f) {
+                None => Ok(None),
+                Some(Toml::Bool(x, _)) => Ok(Some(*x)),
+                Some(_) => Err(format!("{}: [env] `{}`: `{}` is not a boolean", path, k, f)),
+            };
+            let new = match v {
+                Toml::Str(value, _) => Entry::Plain(value.clone()),
+                Toml::Table(e) => {
+                    let value = match e.get("value") {
+                        None => None,
+                        Some(Toml::Str(value, _)) => Some((value.clone(), base.clone())),
+                        Some(_) => return Err(format!("{}: [env] `{}`: `value` is not a string", path, k)),
+                    };
+                    Entry::Options(value, flag(e, "force")?, flag(e, "relative")?)
+                }
+                _ => return Err(format!("{}: [env] `{}` is neither a string nor a table", path, k)),
+            };
+            match env.get_mut(k) {
+                None => { env.insert(k.clone(), (new, path.clone())); }
+                Some((Entry::Plain(_), _)) if matches!(new, Entry::Plain(_)) => {}
+                Some((Entry::Options(value, force, relative), _)) if matches!(new, Entry::Options(..)) => {
+                    let Entry::Options(v2, f2, r2) = new else { unreachable!() };
+                    if value.is_none() { *value = v2; }
+                    if force.is_none() { *force = f2; }
+                    if relative.is_none() { *relative = r2; }
+                }
+                Some((_, first)) => return Err(format!("failed to merge [env] `{}` between {} and {}: a string against a table", k, first, path)),
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for (k, (e, path)) in env {
+        if ["CARGO_HOME", "RUSTUP_HOME", "RUSTUP_TOOLCHAIN"].contains(&k.as_str()) {
+            return Err(format!("{}: setting the `{}` environment variable is not supported in the `[env]` configuration table", path, k));
+        }
+        let (value, force) = match e {
+            Entry::Plain(value) => (value, false),
+            Entry::Options(None, _, _) => return Err(format!("{}: [env] `{}` is a table without a `value`", path, k)),
+            Entry::Options(Some((value, base)), force, relative) => {
+                let value = if relative == Some(true) { std::path::Path::new(&base).join(&value).to_string_lossy().into_owned() } else { value };
+                (value, force == Some(true))
+            }
+        };
+        if force || std::env::var_os(&k).is_none() { out.push((k, value)); }
+    }
+    Ok(out)
 }
 
 /// What `file!()` names a source file relative to, as cargo decides it (`path_args`): a file of a

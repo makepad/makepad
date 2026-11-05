@@ -6747,6 +6747,10 @@ impl<'a> Lcx<'a> {
             Some(Coerce::Upcast(sd, dd)) => {
                 let sd = self.monomorphize(sd);
                 let dd = self.monomorphize(dd);
+                // The same principal trait (`dyn Any + 'static` to `dyn Any`, an auto trait
+                // dropped) keeps its vtable (rustc codegen unsized_info): the value is unchanged,
+                // whatever holds the pointer (`Ref<'_, dyn Any>` passed on as `Ref<'_, T>`).
+                let Some(slot) = self.u.tcx.supertrait_vtable_slot(&self.u.prog, sd, dd) else { return v };
                 // (data, vtable of Sub) -> (data, Sub's stored vtable for Super)
                 let st = self.body_ty(e);
                 let p = self.to_leaves(v, st);
@@ -6754,7 +6758,6 @@ impl<'a> Lcx<'a> {
                     self.err(self.pos, "internal: trait object upcast of a value without a vtable -- makepad run bug, report it".to_string());
                     return self.unit();
                 }
-                let Some(slot) = self.u.tcx.supertrait_vtable_slot(&self.u.prog, sd, dd) else { return Val::L(p) };
                 let vt = self.f.vreg(Cls::I);
                 let pm = self.pmem();
                 self.emit(Inst::Load(pm, vt, p[1], (slot * self.pb() as usize) as i32));
@@ -13375,7 +13378,15 @@ fn ext_word_block(word: u64) -> u64 {
 }
 
 fn ext_block_made(blk: u64) {
-    EXT_BLOCKS.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(Default::default).insert(blk);
+    // (the set is the process's, whatever heap the caller's thread is in: run_end drops it)
+    crate::zone_alloc::kept_with(|| { EXT_BLOCKS.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(Default::default).insert(blk); });
+}
+
+/// What this module holds of a run, as a fresh process has it (`run_end`): the blocks of a run
+/// that ended went with its values, and a word of the next run's that holds one's address
+/// (what its memory held) names no block.
+pub(crate) unsafe fn reset_statics() {
+    relax_session::reset_static(&EXT_BLOCKS, relax_session::sync::Mutex::new(None));
 }
 
 /// Forgets block `blk`; false when it is no block of this runtime's.
@@ -15431,6 +15442,19 @@ mod query_drop_tests {
         }
     }
 
+    /// A run that ends in place forgets its extension blocks: an earlier run's block address in a
+    /// word of the next run's names no block.
+    #[test]
+    fn a_run_end_forgets_its_extension_blocks() {
+        isolated_test!(a_run_end_forgets_its_extension_blocks);
+        let mut word = 0u64;
+        let blk = rt_ext_get(&mut word as *mut u64 as u64, 16, 16);
+        assert!(blk != 0 && ext_word_block(word) == blk, "premise: a block of this run's");
+        unsafe { reset_statics() };
+        assert_eq!(ext_word_block(word), 0, "a block of a run that ended is no block of the next one");
+        rt_ext_free(word);
+        assert_eq!(ext_word_block(word), 0);
+    }
     #[test]
     fn extension_blocks_are_freed_once_for_trivial_values_and_aggregates() {
         isolated_test!(extension_blocks_are_freed_once_for_trivial_values_and_aggregates);

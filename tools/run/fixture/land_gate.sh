@@ -306,24 +306,27 @@ step_affected() {
 # fast: the affected apps' checks and presents all at once on this one warm box, on its one JIT cache; each in its
 # own subshell, so its output and failures are gathered here in affected.py's order
 at_once() { # at_once <fn> <lines file> [at most N]: runs `<fn> <fields of a line>` per line in parallel
-  i=0; local max=${3:-0} pids=() p live
+  i=0; local max=${3:-0} pids=() outs=() p live o
   while read -r -a f; do
     i=$((i + 1))
+    # each run's files by its step and package (qcheck-4-makepad-widgets.out): numbered alone, the presents' runs
+    # wrote over the checks' par-N files, and a failed check's output was gone from the kept logs (11-05)
+    o="$log/${1%_one}-$i-${f[1]}"; outs+=("$o")
     while [ "$max" -gt 0 ]; do
       live=0; for p in "${pids[@]}"; do kill -0 "$p" 2>/dev/null && live=$((live + 1)); done
       [ "$live" -lt "$max" ] && break
       wait -n "${pids[@]}" 2>/dev/null || sleep 0.2
     done
     # both files open here: present's own `for i` loop changed $i inside the subshell, so its failures
-    # went to another par-N.fail and the verdict passed with GATEUNIT fail lines
-    ( fail=""; "$1" "${f[@]}" 3>&-; printf '%s' "$fail" >&3 ) > "$log/par-$i.out" 2>&1 3> "$log/par-$i.fail" &
+    # went to another run's .fail and the verdict passed with GATEUNIT fail lines
+    ( fail=""; "$1" "${f[@]}" 3>&-; printf '%s' "$fail" >&3 ) > "$o.out" 2>&1 3> "$o.fail" &
     pids+=($!)
   done < "$2"
   # only its own: a bare wait also reaped the depcheck running beside it, whose `wait` then found no
   # child (11-03)
   [ "${#pids[@]}" = 0 ] || wait "${pids[@]}"
-  for n in $(seq 1 $i); do
-    cat "$log/par-$n.out"; fail="$fail$(cat "$log/par-$n.fail" 2>/dev/null)"
+  for o in "${outs[@]}"; do
+    cat "$o.out"; fail="$fail$(cat "$o.fail" 2>/dev/null)"
   done
 }
 filter_units() {

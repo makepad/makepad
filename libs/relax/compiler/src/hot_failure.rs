@@ -339,8 +339,9 @@ pub(crate) fn next_run_failed(path: &std::path::Path, why: &str) {
 
 pub(crate) fn restore() {
     let _kept = crate::zone_alloc::kept();
-    let Some(path) = std::env::var_os("MAKEPAD_JIT_RECOVERY") else { return };
-    std::env::remove_var("MAKEPAD_JIT_RECOVERY");
+    let Some(path) = crate::run_end::run_input("MAKEPAD_JIT_RECOVERY") else { return };
+    // (a process's first run: the programs it starts do not take its recovery for theirs)
+    if !crate::run_end::started_in_place() { std::env::remove_var("MAKEPAD_JIT_RECOVERY"); }
     match std::fs::read_to_string(&path).ok().and_then(|s| Record::parse(&s)) {
         Some(r) => {
             state().recovery = Some(Recovery { attempt: Attempt { id: r.load, units: Arc::new(r.units), logs: Arc::new(r.logs) }, failure: r.failure });

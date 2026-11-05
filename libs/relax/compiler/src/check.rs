@@ -21,6 +21,19 @@ use relax_types::mir::transform::const_check::is_live_default;
 use crate::jit::{self, FnKey, Unit};
 use crate::program::DefKind;
 
+/// MAKEPAD_RUN_CHECK_TIMES: one line per serial step of a check that took 50 ms or more.
+struct StepTimes { on: bool, t: std::time::Instant, label: &'static str }
+impl StepTimes {
+    fn new(label: &'static str) -> Self {
+        StepTimes { on: std::env::var_os("MAKEPAD_RUN_CHECK_TIMES").is_some(), t: std::time::Instant::now(), label }
+    }
+    fn mark(&mut self, step: &str) {
+        let dt = self.t.elapsed();
+        if self.on && dt.as_millis() >= 50 { stderr_line!("makepad check: {} {} {:.2} s", self.label, step, dt.as_secs_f64()); }
+        self.t = std::time::Instant::now();
+    }
+}
+
 fn check_trace() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("MAKEPAD_RUN_CHECK_TRACE").is_some())
@@ -788,30 +801,32 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
     }
     let d_sigs = t_sigs0.elapsed();
     let t_items0 = std::time::Instant::now();
-    errors.extend(relax_types::item_checks::duplicate_items(&u.prog, &own));
-    errors.extend(relax_types::item_checks::duplicate_exported_macros(&u.prog, &own));
-    errors.extend(relax_types::item_checks::super_paths(&u.prog, &own));
-    errors.extend(relax_types::item_checks::impl_trait_path_privacy(&u.prog, &u.tcx, &own));
-    errors.extend(relax_types::item_checks::private_assoc_types(&u.prog, &u.tcx, &own));
-    errors.extend(relax_types::item_checks::gated_syntax(&u.prog, &own));
-    errors.extend(relax_types::item_checks::node_attribute_targets(&u.prog, &own));
-    errors.extend(relax_types::item_checks::param_attributes(&u.prog, &own));
-    errors.extend(relax_types::item_checks::foreign_blocks(&u.prog, &own));
-    errors.extend(relax_types::item_checks::duplicate_symbols(&u.prog, &own));
+    let mut st = StepTimes::new("item_checks");
+    errors.extend(relax_types::item_checks::duplicate_items(&u.prog, &own)); st.mark("duplicate_items");
+    errors.extend(relax_types::item_checks::duplicate_exported_macros(&u.prog, &own)); st.mark("duplicate_exported_macros");
+    errors.extend(relax_types::item_checks::super_paths(&u.prog, &own)); st.mark("super_paths");
+    errors.extend(relax_types::item_checks::impl_trait_path_privacy(&u.prog, &u.tcx, &own)); st.mark("impl_trait_path_privacy");
+    errors.extend(relax_types::item_checks::private_assoc_types(&u.prog, &u.tcx, &own)); st.mark("private_assoc_types");
+    errors.extend(relax_types::item_checks::gated_syntax(&u.prog, &own)); st.mark("gated_syntax");
+    errors.extend(relax_types::item_checks::node_attribute_targets(&u.prog, &own)); st.mark("node_attribute_targets");
+    errors.extend(relax_types::item_checks::param_attributes(&u.prog, &own)); st.mark("param_attributes");
+    errors.extend(relax_types::item_checks::foreign_blocks(&u.prog, &own)); st.mark("foreign_blocks");
+    errors.extend(relax_types::item_checks::duplicate_symbols(&u.prog, &own)); st.mark("duplicate_symbols");
     // the compiled binaries: `makepad test`'s subjects are each a test binary (cargo builds every
     // target separately); a check's are its bin crates
     let binaries: Vec<u32> = crates.iter().copied().filter(|&k| subjects_mode() != 0 || u.prog.crates[k as usize].is_bin).collect();
-    errors.extend(relax_types::item_checks::global_allocators_and_lang_items(&u.prog, &own, &binaries));
-    errors.extend(relax_types::proc_macro_harness::check(&u.prog, &u.tcx, &own));
+    errors.extend(relax_types::item_checks::global_allocators_and_lang_items(&u.prog, &own, &binaries)); st.mark("global_allocators_and_lang_items");
+    errors.extend(relax_types::proc_macro_harness::check(&u.prog, &u.tcx, &own)); st.mark("proc_macro_harness");
     let entry = u.prog.crates[root as usize].is_bin && !u.prog.crates[root as usize].harness && subjects_mode() != 2;
     if entry { errors.extend(relax_types::item_checks::entry_point(&u.prog, root)); }
     if entry { errors.extend(relax_types::item_checks::entry_symbol_conflict(&u.prog, &own, root)); }
-    errors.extend(relax_types::lint_levels::check(&u.prog, &own));
-    relax_types::lint_pass::check_items(&u.prog, &u.tcx, &own);
+    st.mark("entry");
+    errors.extend(relax_types::lint_levels::check(&u.prog, &own)); st.mark("lint_levels");
+    relax_types::lint_pass::check_items(&u.prog, &u.tcx, &own); st.mark("lint_pass::check_items");
     relax_types::lint_dead::reset();
-    errors.extend(u.prog.import_privacy_errors(&own));
-    errors.extend(u.prog.attribute_errors(&own));
-    errors.extend(u.prog.ast_validation_errors(&own));
+    errors.extend(u.prog.import_privacy_errors(&own)); st.mark("import_privacy");
+    errors.extend(u.prog.attribute_errors(&own)); st.mark("attribute_errors");
+    errors.extend(u.prog.ast_validation_errors(&own)); st.mark("ast_validation");
     let d_items = t_items0.elapsed();
     let t_wf0 = std::time::Instant::now();
     // item well-formedness (rustc wfcheck): after the signatures, and only when they are sound -- an
@@ -1058,6 +1073,8 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
         if let Some(d) = o.seed { seeds.push(d); }
     }
     let checked = seeds.len();
+    let mut st = StepTimes::new("after bodies:");
+    st.mark("merge");
     // the late lints of the anonymous constants inside the bodies (rustc visit_nested_body: a
     // const argument `U::<300>` is a body of its own, its literal typed as the parameter); a
     // repeat count its owner typed was linted with the owner; an owner whose clean verdict was
@@ -1078,28 +1095,31 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
             }));
         }
     }
-    relax_types::lint_early::finish(&u.prog, &own);
-    errors.extend(static_self_access(up, &own));
+    st.mark("body anon consts");
+    relax_types::lint_early::finish(&u.prog, &own); st.mark("lint_early::finish");
+    errors.extend(static_self_access(up, &own)); st.mark("static_self_access");
     // the feature gates (E0658 and friends): items and signatures, then the loaded bodies
     for &k in crates {
         errors.extend(relax_types::feature_gate::check_crate(unsafe { &(*up).prog }, unsafe { &(*up).tcx }, k));
         errors.extend(relax_types::feature_gate::check_bodies(unsafe { &(*up).prog }, unsafe { &(*up).tcx }, k));
         errors.extend(relax_types::feature_gate::check_imports(unsafe { &(*up).prog }, k));
     }
+    st.mark("feature gates");
     // rustc_hir_analysis check_crate: every static and every non-generic, non-associated const
     // item of the checked crates is evaluated, used or not; one that cannot be evaluated is an
     // E0080 (the unit notes it, reported below with the builds' other notes)
-    eval_items(up, &own, &tainted);
+    eval_items(up, &own, &tainted); st.mark("eval_items");
     // rustc_interface passes.rs analysis: an error (lint errors excluded) of the required analyses
     // -- resolution, feature gates, type and borrow checks, constant evaluation of items -- ends the
     // compilation before misc_checking_3, so check_mod_deathness (dead_code, unnameable_types)
     // never runs: a body that failed its check reported nothing it uses as dead. Nor does
     // check_expectations (unfulfilled_lint_expectations).
     let analyses_ok = errors.is_empty() && borrow_diagnostics.is_empty() && unsafe { (&*up).errors.iter().all(|e| e.starts_with("compile error in ")) };
-    if analyses_ok { relax_types::lint_dead::finish(&u.prog, &u.tcx, &own, root); }
+    if analyses_ok { relax_types::lint_dead::finish(&u.prog, &u.tcx, &own, root); } st.mark("lint_dead::finish");
     // rustc_monomorphize: a program's `main` and what it reaches, instantiated -- the constants
     // generic code evaluates there (post-monomorphization E0080) -- in a check of a program
     if options.const_fuel && !compile && errors.is_empty() && borrow_diagnostics.is_empty() && unsafe { (&*up).errors.is_empty() } { mono_check(up, &own, root); }
+    st.mark("mono_check");
     let t_front = t_check.elapsed();
     // the type/borrow check's freed memory goes back before the compile starts (Stage: 4.6 GB
     // of malloc free pages held after it)
@@ -1173,7 +1193,9 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
     } else if !quiet {
         eprintln!("makepad check: {} crates type- and borrow-checked in {:.1} s", crates.len(), t_front.as_secs_f64());
     }
+    let mut st = StepTimes::new("end:");
     if analyses_ok { relax_types::lint_levels::finish(&u.prog); }
+    st.mark("lint_levels::finish");
     let (lint_errors, mut lint_warnings) = relax_types::lint::take();
     errors.extend(lint_errors);
     lint_warnings.sort_by_cached_key(|e| error_position(e));
@@ -1194,8 +1216,10 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
             crate::diag::emit(&crate::diag::from_legacy(e, "typeck"));
         } else { println!("{}", e); }
     }
+    st.mark("lints and errors out");
     crate::borrowck::finish_check(unsafe { &(*up).prog });
     let borrow_count = console.finish();
+    st.mark("borrowck finish");
     // a clean check: every body it checked is clean (lints included: they are the check's, not
     // the body's, so only a check with no error at all says so of each)
     if errors.is_empty() && borrow_count == 0 && !verdict_keys.is_empty() {
@@ -1462,19 +1486,37 @@ fn eval_items(up: *mut Unit, own: &[bool], tainted: &std::collections::HashSet<c
         .filter(|(d, _)| relax_types::const_eval::const_body(&u.prog, *d).is_some())
         .collect();
     let _job = jit::compile_job();
+    // MAKEPAD_RUN_CHECK_TIMES: where the time goes (typeck lookups, owner-call queueing, statics, consts)
+    let times = std::env::var_os("MAKEPAD_RUN_CHECK_TIMES").is_some();
+    let (mut t_tyck, mut t_queue, mut t_static, mut t_const, mut n_static, mut n_const) = (0u128, 0u128, 0u128, 0u128, 0usize, 0usize);
+    let n_items = items.len();
     for (d, is_static) in items {
-        if tainted.contains(&d) || !u.tcx.typeck(&u.prog, d).errors.is_empty() { continue; }
+        let t0 = std::time::Instant::now();
+        let skip = tainted.contains(&d) || !u.tcx.typeck(&u.prog, d).errors.is_empty();
+        t_tyck += t0.elapsed().as_nanos();
+        if skip { continue; }
         let before = unsafe { (&*up).errors.len() };
+        let t1 = std::time::Instant::now();
+        let inner = std::sync::atomic::AtomicU64::new(0);
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| crate::owner::call(crate::owner::Class::Program, || unsafe {
+            let t2 = std::time::Instant::now();
             let u = &mut *up;
             if is_static { u.static_addr(d); } else { u.const_addr(d, Vec::new()); }
+            inner.store(t2.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
         })));
+        let inner = inner.load(std::sync::atomic::Ordering::Relaxed) as u128;
+        t_queue += t1.elapsed().as_nanos().saturating_sub(inner);
+        if is_static { t_static += inner; n_static += 1; } else { t_const += inner; n_const += 1; }
         // a foreign static the check does not link is not the program's error
         let u = unsafe { &mut *up };
         let mut i = before;
         while i < u.errors.len() {
             if u.errors[i].starts_with("compile error in ") && u.errors[i].contains("not found in the loaded libraries") { u.errors.remove(i); } else { i += 1; }
         }
+    }
+    if times {
+        stderr_line!("makepad check: eval_items {} items: typeck lookups {:.2} s, owner calls {:.2} s, {} statics {:.2} s, {} consts {:.2} s",
+            n_items, t_tyck as f64 / 1e9, t_queue as f64 / 1e9, n_static, t_static as f64 / 1e9, n_const, t_const as f64 / 1e9);
     }
 }
 

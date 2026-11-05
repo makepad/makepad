@@ -1430,7 +1430,17 @@ fn start_prepared(up: *mut Unit, spec: AppSpec, id: DomainId) -> Result<DomainId
     if compile_phase(id, "link").is_err() { return Ok(id); }
     let t2 = std::time::Instant::now();
     // the libraries the new crates link
-    let (_, missing) = crate::run::link_libraries(unsafe { &(*up).prog }, &g.link_libs, g.native.as_ref(), first_file);
+    let (_, missing, callbacks) = match crate::run::link_libraries(unsafe { &(*up).prog }, &g.link_libs, g.native.as_ref(), first_file) {
+        Ok(linked) => linked,
+        Err(error) => {
+            eprintln!("makepad-run domain: {error}");
+            return fail(id, vec![error]);
+        }
+    };
+    if let Err(error) = crate::owner::call(crate::owner::Class::Program, || crate::run::bind_native_callbacks(unsafe { &*(upn as *const Unit) }, &callbacks)) {
+        eprintln!("makepad-run domain: {error}");
+        return fail(id, vec![error]);
+    }
     if !missing.is_empty() && crate::run::VERBOSE.load(std::sync::atomic::Ordering::Relaxed) {
         eprintln!("makepad-run domain: libraries not found: {:?}", missing);
     }

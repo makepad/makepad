@@ -5181,6 +5181,82 @@ fn write_front_graph(job: &FrontGraphWrite) -> Option<()> {
     Some(())
 }
 
+/// The store fingerprint of a crate added at run time (modules::add_crates: an app domain's):
+/// its store is apart from the one a boot of the same crate keeps, whose record and images are
+/// a boot load's.
+fn added_store_fp(fp: u128) -> u128 {
+    let mut h = Sip128::new();
+    h.str("added at run time");
+    h.u128(fp);
+    h.finish128()
+}
+
+/// What a collected image of a program with crates added at run time (`fps[boot..]`, every
+/// crate's fingerprint) is certified and restored by (the settle rebuild): each added crate's
+/// references to its files' images, in a store of its own (`added_store_fp`), then the graph of
+/// `recipe` -- the boot graph (`boot`) with the added crates' files as inputs and the program's
+/// module probes. The added crates have no crate record: a restore of the graph goes by its
+/// certificate (one that finds it stale has none of their records, and parses). Under the
+/// caller's front read. The fingerprints the graph names come back.
+pub(crate) fn record_added_crates(prog: &crate::program::Program, dir: &std::path::Path, boot: &crate::crate_image::GraphRecipe,
+    recipe: &crate::crate_image::GraphRecipe, fps: &[u128]) -> Result<Vec<u128>, String> {
+    let b = boot.crates.len();
+    let base = read_front_graph(dir, boot.identity).ok_or("the boot's graph is not in the store")?;
+    if base.crates.iter().map(|(key, _)| key).ne(boot.crates.iter()) || base.crates.iter().map(|(_, fp)| fp).ne(fps[..b].iter())
+        || base.stamps.len() != base.inputs.len() || recipe.crates.len() != fps.len() || recipe.crates[..b] != boot.crates[..] {
+        return Err("the boot's graph is not this program's".into());
+    }
+    let stored: Vec<u128> = fps.iter().enumerate().map(|(ci, &fp)| if ci < b { fp } else { added_store_fp(fp) }).collect();
+    let mut inputs: std::collections::BTreeMap<String, (u128, Option<crate::vfs::FileStat>)> =
+        base.inputs.iter().zip(&base.stamps).map(|((p, h), s)| (p.clone(), (*h, *s))).collect();
+    let mut entries: Vec<Vec<NewEntry>> = (b..prog.crates.len()).map(|_| Vec::new()).collect();
+    let mut keys = HashSet::new();
+    for (f, (pf, path)) in prog.files.iter().zip(&prog.file_paths).enumerate() {
+        let Some(k) = prog.file_crate.get(f).map(|&k| k as usize).filter(|&k| k >= b) else { continue };
+        let hash = pf.source_hash(path);
+        let image = pf.image.as_ref().ok_or_else(|| format!("{path} has no front image"))?;
+        // (one image per source key: a file loaded twice cannot say which parse it is)
+        if !keys.insert((k, path.as_str(), hash)) { return Err(format!("{path} is loaded twice")); }
+        entries[k - b].push(NewEntry { key: Cache::front_key(path, hash), kind: KIND_FRONT_REF, payload: front_run::encode_ref(image) });
+        if let Some(part) = pf.part.get().and_then(|p| p.image.as_ref()) {
+            entries[k - b].push(NewEntry { key: Cache::front_part_key(path, hash), kind: KIND_FRONT_REF, payload: front_run::encode_ref(part) });
+        }
+        // (a module a macro made is no input of its own: its macro's file is)
+        if !prog.front_macro_fragments.contains(&f) {
+            if inputs.get(path).is_some_and(|(h, _)| *h != hash) { return Err(format!("{path} changed since the boot")); }
+            inputs.entry(path.clone()).or_insert((hash, None));
+        }
+    }
+    let late = crate::sip::late_inputs();
+    let marks = front_run::run_marks();
+    for (i, entries) in entries.into_iter().enumerate() {
+        let ci = b + i;
+        let path = dir.join(front_store_name(&prog.session.options, prog.syms.str(prog.crates[ci].name), stored[ci]));
+        let lock = front_store_lock(&path);
+        let _store = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = SPILL_IO.read().unwrap_or_else(|e| e.into_inner());
+        Spill { dir: dir.to_owned(), files: vec![(path, false, entries)], marks: marks.clone() }.write_locked(&guard, &late)?;
+    }
+    let mut probes: std::collections::BTreeMap<String, bool> = base.probes.iter().cloned().collect();
+    for (p, exists) in &prog.module_probes { probes.entry(p.clone()).or_insert(*exists); }
+    // the added inputs' stats (the boot's are its graph's)
+    let now_ns = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64);
+    let fresh: Vec<(String, u128)> = inputs.iter().filter(|(p, _)| base.inputs.binary_search_by(|(q, _)| q.as_str().cmp(p.as_str())).is_err())
+        .map(|(p, (h, _))| (p.clone(), *h)).collect();
+    for ((p, _), stamp) in fresh.iter().zip(par_map(&fresh, |(p, h)| crate::source_context::input_stamp(p, *h, now_ns))) {
+        if let Some(e) = inputs.get_mut(p) { e.1 = stamp; }
+    }
+    let (inputs, stamps) = inputs.into_iter().map(|(p, (h, s))| ((p, h), s)).unzip();
+    let graph = crate::crate_image::GraphImage {
+        identity: recipe.identity, crates: recipe.crates.iter().cloned().zip(stored.iter().copied()).collect(),
+        inputs, stamps, probes: probes.into_iter().collect(), demand_image: None,
+    };
+    let entry = NewEntry { key: front_graph_key(recipe.identity), kind: KIND_FRONT_GRAPH, payload: crate::crate_image::encode(&graph) };
+    let _io = SPILL_IO.write().unwrap_or_else(|e| e.into_inner());
+    crate::store::append(&front_graph_path(dir, recipe.identity), vec![entry], true).map_err(|e| format!("the graph write: {e}"))?;
+    Ok(stored)
+}
+
 pub fn front_graph_pending() -> bool {
     !FRONT_GRAPH_WRITES.lock().unwrap().is_empty() || !DEFERRED_FRONT.lock().unwrap().is_empty()
 }
@@ -5245,6 +5321,12 @@ impl FrontImages {
         pack::ensure_private_dir(&dir).ok()?;
         let sink = ColdFront::enabled(options).then(|| FrontSink::for_dir(&dir));
         Some(Self { dir, sink, ..Default::default() })
+    }
+    /// Whether the stored graph of `pre` is current (its certificate holds): a restore of it then
+    /// reads its collected image and stores only.
+    pub(crate) fn certified(&self, pre: &[crate::preload::PreCrate]) -> bool {
+        crate::crate_image::CrateImages::begin_load(self, pre);
+        self.certificate.lock().unwrap().is_some()
     }
     /// What writes the images of the files and parts a program parses (Program::front_sink).
     pub fn sink(&self) -> Option<std::sync::Arc<dyn crate::parser::ImageSink>> {
@@ -6977,6 +7059,7 @@ mod cold_tests {
         assert_eq!(format!("{:?}", part.bodies), format!("{:?}", fresh_part.bodies));
         assert_eq!(part.rules_exp, fresh_part.rules_exp);
         assert_eq!(part.body_origin, fresh_part.body_origin);
+        assert_eq!(part.pm_editions, fresh_part.pm_editions);
         assert_eq!(format!("{:?}", &f.ast.part.get().unwrap().exprs[..]), format!("{:?}", &fresh.ast.part.get().unwrap().exprs[..]));
         commit_runs().unwrap();
         std::fs::remove_dir_all(&dir).unwrap();

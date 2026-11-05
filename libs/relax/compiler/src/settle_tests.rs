@@ -175,6 +175,94 @@ fn settle_rebuild_segregates_slot_lifetimes() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+/// A run that added a crate at run time (an app domain's: modules::add_crates) gets its settle
+/// rebuild: the image covers the added crate, the rebuilt program is the running one (the
+/// replace compares them), and the added crate's code compiles from it. It was refused for the
+/// life of the process ("crates were added at run time").
+#[test]
+fn settle_rebuild_covers_a_crate_added_at_run_time() {
+    isolated_test!(settle_rebuild_covers_a_crate_added_at_run_time);
+    std::env::set_var("MAKEPAD_RUN_CACHE", "on");
+    crate::borrowck::lazy::disable_gandalf();
+    let dir = std::env::temp_dir().join(format!("relax-added-crate-{}", std::process::id()));
+    let (host, added) = (dir.join("host"), dir.join("added"));
+    std::fs::create_dir_all(&host).unwrap();
+    std::fs::create_dir_all(&added).unwrap();
+    crate::dirs::set_relax_dir(dir.join("run"));
+    let manifest = |name: &str| format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[lib]\npath = \"lib.rs\"\n");
+    std::fs::write(host.join("Cargo.toml"), manifest("settle_host")).unwrap();
+    std::fs::write(host.join("lib.rs"), "#![no_std]\npub fn host_value(x: u32) -> u32 { x * 3 }\n").unwrap();
+    std::fs::write(added.join("Cargo.toml"), manifest("settle_added")).unwrap();
+    std::fs::write(added.join("lib.rs"), "#![no_std]\nmod part;\npub use part::Part;\npub fn added_value(x: u32) -> u32 { settle_host::host_value(x) + Part { n: 4 }.n }\n").unwrap();
+    std::fs::write(added.join("part.rs"), "pub struct Part { pub n: u32 }\n").unwrap();
+    let mut session = crate::Session::default();
+    session.options.ctfe = crate::options::Ctfe::Off;
+    let session = std::sync::Arc::new(session);
+    let cfg = crate::cfg::CfgSet::host(&session, &[]);
+    let root = host.join("lib.rs").to_string_lossy().into_owned();
+    let pre = vec![crate::preload::PreCrate {
+        name: "settle_host".into(), root: root.clone(), edition: 2021,
+        cfg: cfg.clone(), deps: vec![], proc_macro: false, image_deps: vec![], image_dep_names: vec![],
+    }];
+    settle_rebuild::remember_boot(&pre);
+    let _compiler = crate::zone_alloc::compiler();
+    let mut prog = Program::new(&session);
+    prog.record_front = true;
+    prog.front_sink = Some(crate::cache::FrontSink::for_dir(&crate::dirs::cache_dir()));
+    prog.preload(pre.clone());
+    prog.load_crate("settle_host", &root, 2021, cfg.clone(), vec![]).unwrap();
+    prog.resolve_imports();
+    assert!(prog.errors.is_empty(), "{:?}", prog.errors);
+    crate::cache::ColdFront::default().finish_in(&mut prog, crate::dirs::cache_dir());
+    let mut tcx = Tcx::new();
+    tcx.collect(&prog);
+    assert!(tcx.errors.is_empty(), "{:?}", tcx.errors);
+    let mut u = Unit::new(prog, tcx, 0);
+    let up = &mut *u as *mut Unit;
+    fn named(u: &Unit, name: &str) -> Option<DefId> {
+        (0..u.prog.defs.len()).map(|d| DefId(d as u32)).find(|&d| u.prog.name(d) == name)
+    }
+    let slot = crate::owner::call(crate::owner::Class::Program, || {
+        let cache = crate::cache::Cache::open(&u, crate::cache::Mode::On).unwrap();
+        u.cache = Some(Box::new(crate::cache::CacheCell::new(cache)));
+        // the domain's crate, loaded into the running program
+        let new = [crate::modules::NewCrate {
+            name: "settle_added".into(), path: added.join("lib.rs").to_string_lossy().into_owned(), edition: 2021, cfg: cfg.clone(),
+            deps: vec![("settle_host".into(), crate::modules::Dep::Existing(0))], proc_macro: false,
+        }];
+        let loaded = unsafe { crate::modules::add_crates(up, &new, false, None) }.unwrap_or_else(|e| panic!("the crate did not load: {e:?}"));
+        assert!(loaded.errs.is_empty(), "{:?}", loaded.errs);
+        let id = u.fn_id(FnKey::Inst(named(&u, "added_value").expect("the added crate's fn"), vec![]));
+        let (code, map, relocs) = unsafe { compile_fn(up, id) }.unwrap();
+        u.install(id, &code, &relocs, map, 0).unwrap();
+        id
+    });
+    FIRST_PRESENT.store(true, Ordering::Release);
+    let encodes = settle_rebuild::encodes();
+    match settle_rebuild::run(up, false) {
+        settle_rebuild::Outcome::Done => {}
+        settle_rebuild::Outcome::Retry(why) | settle_rebuild::Outcome::Refused(why) => panic!("settle rebuild did not replace: {why}"),
+    }
+    assert_eq!(settle_rebuild::encodes(), encodes + 1, "the image of the whole program is recorded");
+    crate::owner::call(crate::owner::Class::Program, || {
+        assert_eq!(u.prog.crates.len(), 2, "the rebuilt program has the added crate");
+        assert_eq!(u.prog.syms.str(u.prog.crates[1].name), "settle_added");
+        assert!(named(&u, "Part").is_some_and(|d| u.prog.file_paths[u.prog.def(d).file as usize].ends_with("part.rs")));
+        assert!(u.fns.iter().all(|f| f.rir.is_none()), "replace drops disposable RIR");
+        // the added crate's code compiles from the rebuilt program
+        unsafe { compile_fn(up, slot) }.expect("the added crate's fn compiles after the rebuild");
+    });
+    // the same program again: the store holds the image of it, added crate included
+    match settle_rebuild::run(up, false) {
+        settle_rebuild::Outcome::Done => {}
+        settle_rebuild::Outcome::Retry(why) | settle_rebuild::Outcome::Refused(why) => panic!("the second settle rebuild did not replace: {why}"),
+    }
+    assert_eq!(settle_rebuild::encodes(), encodes + 1, "a rebuild of a program the store holds encodes nothing");
+    // The isolated process owns the runtime globals; no workers survive the child.
+    std::mem::forget(u);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 // Rounds 49-50: restarting leaves the running solver answers and native code intact.
 #[test]
 fn round47_const_fn_body_invalidates_solver_answer() {

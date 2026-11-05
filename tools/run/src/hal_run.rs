@@ -1225,9 +1225,9 @@ fn pump(
     // the window's first present (there is none before the app's): the window is open now. A restart
     // the person asked for went to the start screen first (`restart_begins`): that run shows it
     // from its first frame, as a first start does.
-    let mut restarted = std::env::var_os("MAKEPAD_RUN_RESTART_T0").is_some()
-        && std::env::var_os(RESTART_SCREEN).is_none_or(|v| v != "1");
-    if !restarted && std::env::var_os("MAKEPAD_RUN_RESTART_T0").is_some() {
+    let restart_t0 = relax_compiler::run_end::run_input("MAKEPAD_RUN_RESTART_T0").is_some();
+    let mut restarted = restart_t0 && std::env::var_os(RESTART_SCREEN).is_none_or(|v| v != "1");
+    if !restarted && restart_t0 {
         host.continues_start_screen();
     }
     let mut ready = if has_window && !restarted {

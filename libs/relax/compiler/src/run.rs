@@ -556,6 +556,11 @@ pub(crate) fn resolve_package(
     let units = with_sysroot_proc_macro(units, std_dir);
     let t_load = Instant::now();
     let mut g = unitgraph::load(&units, check_only)?;
+    // cargo's `[env]` configuration of the workspace, for every crate's compile-time environment
+    // and every build script (a build script's own run has it in its process environment)
+    if std::env::var_os("MAKEPAD_RUN_SCRIPT_DEPTH").is_none() {
+        crate::crates::set_config_env(crate::resolve::cargo_env(workspace)?);
+    }
     let t_loaded = Instant::now();
     // The graph is enough to choose the host. Its window opens now, beside the rest of the
     // resolve (the watch inputs, the substitutions, the hash and the build scripts); the process
@@ -636,7 +641,7 @@ pub(crate) fn resolve_package(
             // `--allow-c`: cargo builds the native dependencies (front native.rs); a build
             // script's own child run never builds them again
             let triple = crate::cfg::CfgSet::host(sess, &[]).triple();
-            let native_request = (options.allow_c && std::env::var_os("MAKEPAD_RUN_SCRIPT_DEPTH").is_none()).then(|| crate::native::Request { workspace, package, cargo_flags, relax_dir: target_dir, triple });
+            let native_request = (options.allow_c && std::env::var_os("MAKEPAD_RUN_SCRIPT_DEPTH").is_none()).then(|| crate::native::Request { workspace, package, cargo_flags, relax_dir: target_dir, triple, resolvable: native_resolvable });
             // a cold `--allow-c` boot: while cargo still compiles the C code, the proc-macro world
             // (built from the other crates' outputs) starts beside it, unless a macro crate needs
             // a native package's output
@@ -723,7 +728,7 @@ fn warm_front(images: &crate::cache::FrontImages, sess: &std::sync::Arc<crate::S
 
 fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session: Option<&mut Option<crate::serve::Session>>) -> i32 {
     // Restore before resolution so a failed replacement compile is a JIT verdict too.
-    if std::env::var_os("MAKEPAD_JIT_RECOVERY").is_some() {
+    if crate::run_end::run_input("MAKEPAD_JIT_RECOVERY").is_some() {
         crate::hot_failure::enable();
         crate::hot_failure::restore();
     }
@@ -1689,7 +1694,9 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
         // the parsed files go to the cache's front images as a run's do (one store shared with
         // `makepad run`): the next check (or run) of the package maps them instead of parsing
         // every file again (Stage: 6 s of a warm check was parsing)
+        let t = Instant::now();
         if !selftest { record_check_front(&mut u, options); }
+        phase("record check front", t);
         if crate::memstat::enabled() {
             crate::memstat::print("check complete", &crate::memreport::unit_sizes(&u));
         }
@@ -1752,10 +1759,16 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
 
     // ---- the libraries the build scripts link (#[link] blocks load on the first miss)
     let t = Instant::now();
-    let (n_link, missing) = link_libraries(&prog, &g.link_libs, g.native.as_ref(), 0);
+    let (n_link, missing, callbacks) = match link_libraries(&prog, &g.link_libs, g.native.as_ref(), 0) {
+        Ok(linked) => linked,
+        Err(error) => {
+            eprintln!("makepad-run: {error}");
+            return 1;
+        }
+    };
     phase(&format!("link libraries ({})", n_link), t);
-    // a library that is not there only matters when one of its symbols is used: that miss is
-    // reported where it happens (the #[link] block's lazy load); here only with --verbose
+    // Optional system libraries still report a miss when their symbols are used. A failed
+    // --allow-c bundle has already stopped the run: all of its externs depend on that load.
     if !missing.is_empty() {
         verbose!("makepad-run: libraries not found: {:?}", missing);
     }
@@ -1966,6 +1979,11 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
         }
         None => 0,
     });
+    // the native library's C code calls into the program: its stubs go to the unit's fns
+    if let Err(error) = crate::owner::call(crate::owner::Class::Program, || bind_native_callbacks(&u, &callbacks)) {
+        eprintln!("makepad-run: {error}");
+        return 1;
+    }
     let up: *mut Unit = &mut *u;
     unsafe { RUN_UNIT = up };
     if let Err(e) = finish_window() {
@@ -2318,20 +2336,80 @@ pub(crate) fn exported_fns(prog: &crate::program::Program, prefixes: &[String]) 
     Ok(out)
 }
 
+/// native::Resolvable for this process: the libraries loaded, which of the symbols the
+/// dynamic loader binds (what a native library's import resolves to without the program).
+fn native_resolvable(names: &[String], dylibs: &[String], frameworks: &[String]) -> Vec<bool> {
+    for l in dylibs {
+        let _ = crate::os::proc::load_library(l, false) || crate::os::proc::load_library_versioned(l);
+    }
+    for f in frameworks {
+        let _ = crate::os::proc::load_library(f, true);
+    }
+    names.iter().map(|n| {
+        let Ok(c) = std::ffi::CString::new(n.as_str()) else { return false };
+        unsafe { !crate::os::proc::lookup(std::ptr::null_mut(), c.as_ptr().cast()).is_null() || !crate::os::proc::find_system(c.as_ptr().cast()).is_null() }
+    }).collect()
+}
+
+/// The callback stubs of an `--allow-c` native library (front native_stub.rs): per symbol its
+/// C code calls into the program, the stub's pointer slot and the `#[no_mangle]` fn it goes to.
+#[derive(Default)]
+pub(crate) struct NativeCallbacks(Vec<(usize, DefId)>);
+
+/// The stubs of the library `handle`, each matched to the program's fn of its name; a symbol
+/// no fn of the program defines is the error a linker would report.
+fn native_callbacks(prog: &crate::program::Program, n: &crate::native::NativeLib, handle: usize) -> Result<NativeCallbacks, String> {
+    let names = crate::os::proc::symbol_in(handle, crate::native_stub::NAMES);
+    let slots = crate::os::proc::symbol_in(handle, crate::native_stub::SLOTS);
+    if names == 0 || slots == 0 {
+        return Ok(NativeCallbacks::default());
+    }
+    let exports = crate::global_asm::exported_fns(prog);
+    let mut out = Vec::new();
+    let mut at = names as *const std::ffi::c_char;
+    loop {
+        let name = unsafe { std::ffi::CStr::from_ptr(at) }.to_string_lossy().into_owned();
+        if name.is_empty() {
+            break;
+        }
+        let Some(&d) = exports.get(&name) else {
+            return Err(format!("cannot load {} (--allow-c native library of {}): its C code calls `{}`, which no library and no `#[no_mangle]` fn of the program defines", n.path, n.crates.join(", "), name));
+        };
+        out.push((slots + 8 * out.len(), d));
+        at = unsafe { at.add(name.len() + 1) };
+    }
+    Ok(NativeCallbacks(out))
+}
+
+/// Points the native library's callback stubs at the unit's fns (their callable addresses, as a
+/// fn pointer handed to C has them) before the program's first call into the library. A unit
+/// that loads the library binds them again (a restart, a domain), the last one's fns winning.
+pub(crate) fn bind_native_callbacks(u: &Unit, cb: &NativeCallbacks) -> Result<(), String> {
+    for &(slot, d) in &cb.0 {
+        let addr = crate::global_asm::fn_addr(u, d)?;
+        unsafe { (*(slot as *const std::sync::atomic::AtomicU64)).store(addr, Ordering::Release) };
+    }
+    Ok(())
+}
+
 /// Loads the libraries the build scripts link and the ones `#[link]` blocks of files from
-/// `first_file` on name: (how many, the ones not found).
-pub(crate) fn link_libraries(prog: &crate::program::Program, link_libs: &[(String, bool)], native: Option<&crate::native::NativeLib>, first_file: usize) -> (usize, Vec<String>) {
+/// `first_file` on name: (how many, the optional ones not found, the native library's callbacks
+/// to bind once the unit is made). A native bundle's load failure is fatal, with the loader's
+/// diagnostic and the crates it carries, and so is a callback the program does not define.
+pub(crate) fn link_libraries(prog: &crate::program::Program, link_libs: &[(String, bool)], native: Option<&crate::native::NativeLib>, first_file: usize) -> Result<(usize, Vec<String>, NativeCallbacks), String> {
     let mut missing = Vec::new();
     // no-codegen mode: nothing is linked at run time -- native code is the host binary's, and
     // the program reaches only the symbols the host exports (jit.rs foreign_addr)
     if prog.session.options.no_codegen {
-        return (0, missing);
+        return Ok((0, missing, NativeCallbacks::default()));
     }
     // `--allow-c`: the native dependencies' library (front native.rs), its symbols global
+    let mut callbacks = NativeCallbacks::default();
     if let Some(n) = native {
-        if !crate::os::proc::load_path(&n.path) {
-            missing.push(format!("{} (--allow-c native library of {})", n.path, n.crates.join(", ")));
-        }
+        let handle = crate::os::proc::load_path(&n.path).map_err(|error| {
+            format!("cannot load {} (--allow-c native library of {}): {}", n.path, n.crates.join(", "), error)
+        })?;
+        callbacks = native_callbacks(prog, n, handle)?;
     }
     let provided_static = |name: &str| native.is_some_and(|n| n.statics.iter().any(|s| s == name));
     for (name, fw) in link_libs {
@@ -2352,7 +2430,7 @@ pub(crate) fn link_libraries(prog: &crate::program::Program, link_libs: &[(Strin
             missing.push(name);
         }
     }
-    (n_link, missing)
+    Ok((n_link, missing, callbacks))
 }
 
 /// The native run host: the OS loop starts before compilation, the graph opens a host window,
@@ -3588,6 +3666,8 @@ static ONCE: AtomicBool = AtomicBool::new(false);
 
 fn quit_mark() {
     jit::QUIT_SEEN.store(true, Ordering::Relaxed);
+    // the quit write and the exit's commit without waiting on the disk (store.rs Slot::tail)
+    crate::store::set_exiting();
     if ONCE.swap(true, Ordering::SeqCst) || unsafe { RUN_UNIT }.is_null() { return; }
     if jit::FIRST_PRESENT.load(Ordering::Acquire) {
         jit::ORDER_UNTIL_NS.fetch_min(jit::wall_ns(), Ordering::Relaxed);
@@ -3935,6 +4015,8 @@ fn summary_inner(why: &str) {
     // Independent of owner thread state: still emit when exit quiescence times out.
     if why != "stats" { crate::exec_profile::report(false); }
     if why != "stats" {
+        // the exit's writes commit without waiting on the disk (store.rs Slot::tail)
+        crate::store::set_exiting();
         // the run is ending: background borrow checks stop at their next preemption point
         // (nothing waits for them; finished verdicts are stored below)
         crate::borrowck::lazy::stop();

@@ -5753,6 +5753,7 @@ impl ParseSnapshot {
             assert_eq!(v.pf.token_origins, full.pf.token_origins);
             assert_eq!(v.pf.rules_exp, full.pf.rules_exp);
             assert_eq!(v.pf.body_origin, full.pf.body_origin);
+            assert_eq!(v.pf.pm_editions, full.pf.pm_editions);
             assert_eq!(v.idents, full.idents);
             let defs = |v: &FileVersion| v.macros.iter().map(|d| format!("{:?}:{:?}:{}:{}:{:?}:{}:{:?}", d.name, d.krate, d.exported, d.builtin, d.def_file, d.def_pos, d.arms)).collect::<Vec<_>>();
             assert_eq!(defs(&v), defs(&full));

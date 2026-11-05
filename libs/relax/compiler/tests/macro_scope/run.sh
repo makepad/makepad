@@ -13,10 +13,10 @@ T=$(mktemp -d)
 for v in with without; do
   if [ $v = with ]; then DEPS='[{"index":0,"extern_crate_name":"dep_a"},{"index":2,"extern_crate_name":"user"}]'; else DEPS='[{"index":2,"extern_crate_name":"user"}]'; fi
   sed -e "s#@R@#$H#g" -e "s#@MAIN@#main_${v}_a.rs#" -e "s#@DEPS@#$DEPS#" $H/units.json.in > $T/units-$v.json
-  MAKEPAD_RUN_STD=$H/../../std MAKEPAD_RUN_CACHE_DIR=$T/target-$v $1 run --quiet --units $T/units-$v.json app 2>&1 | grep -v '^makepad-run:\|^makepad-run cache' || true
+  MAKEPAD_RUN_STD=$H/../../std MAKEPAD_RUN_CACHE_DIR=$T/target-$v $1 run --quiet --units $T/units-$v.json app 2>&1 | grep -v '^makepad-run:\|^makepad-run cache\|^makepad-remote:' || true
 done
 sed -e "s#@R@#$H#g" $H/units-chain.json.in > $T/units-chain.json
-MAKEPAD_RUN_STD=$H/../../std MAKEPAD_RUN_CACHE_DIR=$T/target-chain $1 run --quiet --units $T/units-chain.json app 2>&1 | grep -v '^makepad-run:\|^makepad-run cache' || true
+MAKEPAD_RUN_STD=$H/../../std MAKEPAD_RUN_CACHE_DIR=$T/target-chain $1 run --quiet --units $T/units-chain.json app 2>&1 | grep -v '^makepad-run:\|^makepad-run cache\|^makepad-remote:' || true
 } > $T/out.txt
 cat $T/out.txt
 if cmp -s $T/out.txt $H/expected.txt; then echo "macro_scope: ok"; else echo "macro_scope: FAILED"; exit 1; fi

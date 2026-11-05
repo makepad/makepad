@@ -162,6 +162,8 @@ pub struct ModItem {
     pub pos: u32,
     pub end: u32,
     pub macro_use: bool,
+    /// a plain `pub mod`: another crate sees the module through a glob of its parent
+    pub is_pub: bool,
 }
 
 #[derive(Default)]
@@ -201,7 +203,7 @@ pub struct FileImports {
 impl FileImports {
     /// The same imports (`mod` items only move with the text around them).
     pub fn same_as(&self, other: &FileImports) -> bool {
-        let items = |f: &'_ FileImports| f.mod_items.iter().map(|(m, i)| (m.clone(), i.macro_use)).collect::<Vec<_>>();
+        let items = |f: &'_ FileImports| f.mod_items.iter().map(|(m, i)| (m.clone(), i.macro_use, i.is_pub)).collect::<Vec<_>>();
         self.uses == other.uses && self.aliases == other.aliases && self.macro_use == other.macro_use && self.mods == other.mods && items(self) == items(other)
     }
 }
@@ -309,7 +311,11 @@ pub struct CrateScope {
     /// modules in source order (searched on demand: copying every module's names into every
     /// glob importer costs more than the few path lookups that need them)
     tnon: HashMap<String, HashMap<String, (String, String)>>,
-    tglobs: HashMap<String, Vec<(String, String)>>,
+    /// module -> the names of its non-glob bindings another crate cannot see (a private `mod`,
+    /// a private `use`): a glob of the module from another crate does not import them
+    tpriv: HashMap<String, crate::fxhash::HashSet<String>>,
+    /// glob sources, with whether the glob import is `pub` (another crate's glob follows only those)
+    tglobs: HashMap<String, Vec<(String, String, bool)>>,
     /// module -> name -> macro, non-glob then glob
     mnon: HashMap<String, HashMap<String, MacroRef>>,
     mglob: HashMap<String, HashMap<String, MacroRef>>,
@@ -1119,7 +1125,7 @@ impl<'a> Res<'a> {
             }
         }
         let mut seen = Seen::new();
-        let found = self.glob_find(k, m, n, &mut seen, None);
+        let found = self.glob_find(k, k, m, n, &mut seen, None);
         let mut deps: Vec<(String, u64)> = Vec::new();
         seen.each(|c, _| {
             if !deps.iter().any(|d| d.0 == c) {
@@ -1138,11 +1144,14 @@ impl<'a> Res<'a> {
     where
         'a: 'b,
     {
-        self.glob_find(k, m, n, seen, partial).map(|(_, _, t)| (t.0.as_str(), t.1.as_str()))
+        self.glob_find(k, k, m, n, seen, partial).map(|(_, _, t)| (t.0.as_str(), t.1.as_str()))
     }
 
-    /// `type_in_seen`, with the (crate, module) whose non-glob bindings had the name.
-    fn glob_find<'b>(&self, k: &'b str, m: &'b str, n: &str, seen: &mut Seen<'b>, partial: Option<(&str, &'b CrateScope)>) -> Option<(&'b str, &'b str, &'b (String, String))>
+    /// `type_in_seen`, with the (crate, module) whose non-glob bindings had the name. `from`: the
+    /// crate asking; a module of another crate, reached through a glob, gives only what that
+    /// crate exports (rustc: a glob imports the bindings visible to the importer), so its private
+    /// `mod serde_json` neither binds the name nor hides the extern crate of that name.
+    fn glob_find<'b>(&self, from: &str, k: &'b str, m: &'b str, n: &str, seen: &mut Seen<'b>, partial: Option<(&str, &'b CrateScope)>) -> Option<(&'b str, &'b str, &'b (String, String))>
     where
         'a: 'b,
     {
@@ -1153,11 +1162,15 @@ impl<'a> Res<'a> {
             Some((pk, psc)) if pk == k => psc,
             _ => self.scope(k)?,
         };
+        let foreign = k != from;
         if let Some(t) = sc.tnon.get(m).and_then(|t| t.get(n)) {
+            // a binding the importer cannot see still shadows the module's globs of the name
+            if foreign && sc.tpriv.get(m).is_some_and(|p| p.contains(n)) { return None; }
             return Some((k, m, t));
         }
-        for (k2, m2) in sc.tglobs.get(m).map_or(&[][..], |v| &v[..]) {
-            if let Some(t) = self.glob_find(k2, m2, n, seen, partial) {
+        for (k2, m2, is_pub) in sc.tglobs.get(m).map_or(&[][..], |v| &v[..]) {
+            if foreign && !is_pub { continue; }
+            if let Some(t) = self.glob_find(from, k2, m2, n, seen, partial) {
                 return Some(t);
             }
         }
@@ -1237,6 +1250,9 @@ impl CrateScope {
         for m in &mods {
             if let Some((parent, name)) = m.rsplit_once("::") {
                 sc.tnon.entry(parent.to_string()).or_default().insert(name.to_string(), (k.to_string(), m.clone()));
+                if cm.items.get(m).is_some_and(|it| !it.is_pub) {
+                    sc.tpriv.entry(parent.to_string()).or_default().insert(name.to_string());
+                }
             }
         }
         // the root's `#[macro_export]` macros (the latest definition of each name)
@@ -1290,6 +1306,7 @@ impl CrateScope {
                                 let t = resolve_path(&r, k, m, &u.path, &|kk, mm, n| sc.lookup_type(&r, k, kk, mm, n)).map(|(a, b)| (a.to_string(), b.to_string()));
                                 if let Some(t) = t {
                                     sc.tnon.entry(m.clone()).or_default().insert(b.clone(), t);
+                                    if !u.is_pub { sc.tpriv.entry(m.clone()).or_default().insert(b.clone()); }
                                     changed = true;
                                 }
                             }
@@ -1331,9 +1348,13 @@ impl CrateScope {
                             copied.insert((m.clone(), ui), size);
                             // the source's modules: searched through it on demand
                             let srcs = sc.tglobs.entry(m.clone()).or_default();
-                            if !srcs.iter().any(|x| x.0 == k2 && x.1 == m2) {
-                                srcs.push((k2.clone(), m2.clone()));
-                                changed = true;
+                            match srcs.iter_mut().find(|x| x.0 == k2 && x.1 == m2) {
+                                // (a `pub` glob of a source already imported privately re-exports it)
+                                Some(x) => if u.is_pub && !x.2 { x.2 = true; changed = true; },
+                                None => {
+                                    srcs.push((k2.clone(), m2.clone(), u.is_pub));
+                                    changed = true;
+                                }
                             }
                             // its macros, under the names it has
                             let macros = sc.all_macros_of(&r, k, &k2, &m2);
@@ -3553,7 +3574,7 @@ mod replay_tests {
     #[test]
     fn textual_scope_is_lexical_and_leaves_modules_only_through_macro_use() {
         let mut cm = CrateMods { root: "c".into(), ..Default::default() };
-        let item = |pos, end, macro_use| ModItem { pos, end, macro_use };
+        let item = |pos, end, macro_use| ModItem { pos, end, macro_use, is_pub: false };
         // c: macro a (pos 10); mod b { macro b1 (pos 20) } at 30..40 ; #[macro_use] mod m { macro m1 } at 50..60; mod x; at 70..71
         // c::b::inner, c::m::sub (with its own #[macro_use] mod deep { macro d1 } at 15..25)
         for (m, it) in [("c::b", item(30, 40, false)), ("c::m", item(50, 60, true)), ("c::x", item(70, 71, false)),

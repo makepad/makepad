@@ -433,7 +433,7 @@ pub fn on_panic(info: &crate::jit::PanicInfo, regs: *const u64) {
             Some(b) => format!("{{\"reruns\":{},\"note\":\"side effects since it began may repeat\"}}", json_str(b)),
             None => "null".into(),
         },
-        if primary { format!(",\"restart\":{{\"domain\":{},\"window_kept\":true}}", domain.unwrap()) } else { match &restartable {
+        if primary { format!(",\"restart\":{{\"domain\":{},\"window_kept\":{}}}", domain.unwrap(), crate::run::hosted_run()) } else { match &restartable {
             Some((_, name, rets)) => format!(
                 ",\"restart\":{{\"fn\":{},\"return_words\":{}}}",
                 json_str(&super::short(name, 160)),
@@ -704,7 +704,7 @@ pub fn cmd_resume(req: &Req, out: &mut Out) {
                     }
                 });
                 match spawned {
-                    Ok(_) => out.line(&format!("{{\"resumed\":\"P{}\",\"as\":\"restart\",\"window_kept\":true,\"state_kept\":false}}", id)),
+                    Ok(_) => out.line(&format!("{{\"resumed\":\"P{}\",\"as\":\"restart\",\"window_kept\":{},\"state_kept\":false}}", id, crate::run::hosted_run())),
                     Err(e) => out.err(&format!("cannot start the restart: {e}")),
                 }
                 return;

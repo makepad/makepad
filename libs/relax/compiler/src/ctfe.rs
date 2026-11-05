@@ -1095,13 +1095,11 @@ impl<'a> Ctx<'a> {
         if self.u.lay.is_unsized(&crate::layout::LayoutCx::new(&self.u.prog), &mut self.u.tcx, t) { return None; }
         let offset = match self.kind(t) {
             TyKind::Tuple(_) => *self.layout(t).fields.get(fi as usize)?,
-            TyKind::Adt(d, _, _) => {
+            TyKind::Adt(..) => {
+                // a field in a live layout's extension block (M10) has no offset: the place has none
                 let offset = self.struct_field_off(t, fi)?;
-                if self.layout(t).ext.is_some() {
-                    self.u.offsets_computed.lock().unwrap_or_else(|e| e.into_inner()).insert(d);
-                    if offset == u32::MAX {
-                        return Some(u32::MAX);
-                    }
+                if offset == u32::MAX && self.layout(t).ext.is_some() {
+                    return Some(u32::MAX);
                 }
                 offset
             }

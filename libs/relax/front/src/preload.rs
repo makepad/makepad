@@ -1260,7 +1260,8 @@ fn scan_tokens(path: &str, dir: &str, mpath: &str, krate: &str, edition: u16, cf
                     let active = attrs.active;
                     let pa = attrs.path;
                     if cur_active && active {
-                        mod_items.push((child_path.clone(), crate::macros::ModItem { pos: toks[i].lo, end: toks[i + 2].hi, macro_use: attrs.macro_use }));
+                        let is_pub = i >= 1 && toks[i - 1].kind == T::KwPub;
+                        mod_items.push((child_path.clone(), crate::macros::ModItem { pos: toks[i].lo, end: toks[i + 2].hi, macro_use: attrs.macro_use, is_pub }));
                     }
                     if toks[i + 2].kind == T::Semi {
                         if cur_active && active {

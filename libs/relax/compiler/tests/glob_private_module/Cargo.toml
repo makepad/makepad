@@ -1,0 +1,3 @@
+[workspace]
+members = ["realj", "globb", "app"]
+resolver = "2"

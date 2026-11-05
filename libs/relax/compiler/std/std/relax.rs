@@ -157,6 +157,7 @@ extern "C" {
     fn __relax_restart_reason(buf: *mut u8, cap: usize) -> usize;
     fn __relax_patched_files(since: u64, buf: *mut u8, cap: usize) -> usize;
     fn __relax_restored_state(buf: *mut u8, cap: usize) -> usize;
+    fn __relax_restart_saved_ms() -> f64;
     fn __relax_restart_now(state: *const u8, len: usize);
     fn __relax_hot_load_failed(why: *const u8, len: usize);
     fn __relax_live_stream(path: *const u8, plen: usize, text: *const u8, len: usize) -> u32;
@@ -308,7 +309,7 @@ pub fn engine_replies(after: u64) -> String {
 
 /// After a restart: when the edit that caused it was saved (unix ms), for save -> back on screen.
 pub fn restart_saved_ms() -> Option<f64> {
-    crate::env::var("MAKEPAD_RUN_RESTART_T0").ok().and_then(|v| v.parse::<f64>().ok()).filter(|v| *v > 0.0)
+    Some(unsafe { __relax_restart_saved_ms() }).filter(|v| *v > 0.0)
 }
 
 // ---- state-preserving restart (live sessions: an edit Relax cannot patch in place)

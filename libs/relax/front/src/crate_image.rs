@@ -11,7 +11,7 @@ use crate::{
 use std::sync::Arc;
 
 // Macro definitions record the invocation position that orders a generated definition.
-pub const VERSION: u32 = 24;
+pub const VERSION: u32 = 25;
 
 pub(crate) mod strings;
 
@@ -211,7 +211,7 @@ impl Codec for MacroDef {
     }
 }
 fields!(UseItem, module, path, bind, is_pub);
-fields!(ModItem, pos, end, macro_use);
+fields!(ModItem, pos, end, macro_use, is_pub);
 fields!(LazyCtx, krate, path, module_path, mods, s2_fmt);
 /// Option<Box<LazyCtx>>'s encoding
 impl Codec for crate::parser::FileLazy {

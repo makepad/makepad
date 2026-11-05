@@ -1,4 +1,4 @@
 v1 patch|reinst
-v2 restart note=computes its fields' offsets
-v3 restart note=computes its fields' offsets
-v4 rollback note=has no offset in the running layout
+v2 restart note=writes its fields in place through a raw pointer
+v3 restart note=writes its fields in place through a raw pointer
+v4 restart note=writes its fields in place through a raw pointer

@@ -4,7 +4,7 @@
 //! compilation and the app domains as its guests (hal_host.rs). The Android host library
 //! (tools/run/android_host) is the same host as a shared object.
 // Diagnostics never panic: std's print macros panic when a write fails (ENOSPC on the session
-// log in a full tmpfs /tmp aborted a fleet Sandbox inside a lazy compile, 2026-10-23), so in this
+// log in a full tmpfs /tmp aborted an app inside a lazy compile, 2026-10-23), so in this
 // crate every print is a write whose error is dropped. Test builds keep std's captured macros.
 #[cfg(not(test))]
 #[allow(unused_macros)]
@@ -75,8 +75,8 @@ pub static HOST: relax_runner::Host = relax_runner::Host {
 };
 
 /// `makepad` with no arguments and no `runner` launch record (an installation's entry script
-/// writes one): the runner app of the checkout this binary was built from, when it has one
-/// (apps/commercial/runner), run from that checkout like `makepad run makepad-runner` there.
+/// writes one): the default app of the checkout this binary was built from, when it has one,
+/// run from that checkout.
 fn checkout_runner() -> Option<relax_runner::launch::Launch> {
     let checkout = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().ok()?;
     if !checkout.join("apps/commercial/runner/Cargo.toml").is_file() {

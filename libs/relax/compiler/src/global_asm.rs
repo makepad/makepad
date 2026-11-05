@@ -149,7 +149,7 @@ fn place_all(u: &Unit) -> Result<HashMap<String, u64>, String> {
             }
         }
     }
-    let exports = exported_fns(u);
+    let exports = exported_fns(&u.prog);
     for (ci, c) in assembled.iter().enumerate() {
         let local: HashMap<&str, u64> = c.out.defs.iter().map(|d| (d.name.as_str(), bases[ci][d.section as usize] + d.offset as u64)).collect();
         let resolve = |name: &str| -> Result<u64, String> {
@@ -253,8 +253,7 @@ fn veneer(arch: Arch, b: &mut Vec<u8>, target: u64) {
 }
 
 /// The program's `#[no_mangle]` / `#[export_name]` fns by symbol.
-fn exported_fns(u: &Unit) -> HashMap<String, DefId> {
-    let prog = &u.prog;
+pub(crate) fn exported_fns(prog: &crate::program::Program) -> HashMap<String, DefId> {
     let mut out = HashMap::new();
     for (di, d) in prog.defs.iter().enumerate() {
         if d.kind != DefKind::Fn {
@@ -276,7 +275,7 @@ fn exported_fns(u: &Unit) -> HashMap<String, DefId> {
 }
 
 /// A fn item's callable address (its slot; compiled on its first call).
-fn fn_addr(u: &Unit, d: DefId) -> Result<u64, String> {
+pub(crate) fn fn_addr(u: &Unit, d: DefId) -> Result<u64, String> {
     let instance = crate::instance::Instance::resolve_for_fn_ptr(&u.tcx, &u.prog, d, &[]).map_err(|_| format!("`{}`: a generic fn cannot be a global_asm! symbol", u.prog.def_path(d)))?;
     Ok(u.entry(u.instance_fn_id(instance)))
 }

@@ -863,14 +863,10 @@ fn restart(h: Handover, state: Option<&[u8]>) {
         let mut cmd = std::process::Command::new(&h.loader);
         cmd.args(&args);
         match state {
-            Some(st) => {
-                let dir = std::env::temp_dir().join(format!("relax-restart-{}", std::process::id()));
-                let path = dir.join("state");
-                if let Err(e) = std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&path, st)) {
-                    return fail(format!("restart into the rebuilt makepad: cannot write the app's state: {e}; the app runs the previous code"));
-                }
-                cmd.env("MAKEPAD_RUN_RESTORE", &path);
-            }
+            Some(st) => match super::restart_state_file(st) {
+                Ok(path) => { cmd.env("MAKEPAD_RUN_RESTORE", &path); }
+                Err(e) => return fail(format!("restart into the rebuilt makepad: {e}; the app runs the previous code")),
+            },
             None => { cmd.env_remove("MAKEPAD_RUN_RESTORE"); }
         }
         let reason = super::RESTART_REASON.lock().unwrap_or_else(|e| e.into_inner()).clone();

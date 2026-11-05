@@ -482,6 +482,12 @@ def run_kind(slot, kind):
         if name == "partial_landing":
             # Historical refusals remain in the log, but the final verdict and
             # the run's current notice must both clear without any user action.
+            # The effect is on stdout and the JIT's verdict on stderr: either can be read first
+            # (the new value came up to 5 ms before its patched line). A patch's landing check
+            # follows its verdict on stderr, so the verdicts are all in once it is (or the run ended).
+            if seen:
+                wait(lambda: any("landing check of patch group" in l for _, l in err[n_err:]), float("inf"))
+                e = [l for _, l in err[n_err:]]
             verdicts = [l for l in e if "NOT applied" in l or ": patched (" in l]
             if not verdicts or ": patched (" not in verdicts[-1]:
                 res["fail"] = res["fail"] or "a NOT applied verdict was left standing"

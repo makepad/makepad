@@ -17,7 +17,10 @@
 //! 1. the entries the cache recorded are written to its stores (off the owner); the collected
 //!    image of the program as it is now, encoded under a front read (compiles go on) and committed
 //!    to the store -- unless the store holds an image of this program already (a warm start's, or
-//!    an earlier rebuild's) and only the interners grew since: step 3 tops those up;
+//!    an earlier rebuild's) and only the interners grew since: step 3 tops those up. Crates added
+//!    at run time (an app domain's: modules::add_crates) are in the image too: the program is
+//!    listed as a boot would list it (`with_added`), and their stores and the graph of the whole
+//!    program are written for it (cache::record_added_crates); the cache stays the boot's;
 //! 2. the image restored into a new program and type context, on the monitor thread (it reads
 //!    only the image and the stores);
 //! 3. one owner request under a front write: the counts must be those of the encode (only the
@@ -38,7 +41,8 @@ pub(crate) fn enabled() -> bool {
     *ON.get_or_init(|| std::env::var("MAKEPAD_RUN_SETTLE_REBUILD").map_or(true, |v| v != "0"))
 }
 
-/// The crate list of this launch (kept: the rebuild restores against it).
+/// The crate list of this launch (kept: the rebuild restores against it, and the crates added
+/// at run time after it: `with_added`).
 static BOOT: relax_session::sync::Mutex<Option<Vec<crate::preload::PreCrate>>> = relax_session::sync::Mutex::new(None);
 
 pub(crate) fn remember_boot(pre: &[crate::preload::PreCrate]) {
@@ -164,13 +168,8 @@ fn refuse(up: *mut Unit) -> Option<String> {
     if crate::sandbox::any_live() {
         return Some("a sandbox module exists".into());
     }
-    let Some(boot) = BOOT.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map(|b| b.len()) else {
+    if BOOT.lock().unwrap_or_else(|e| e.into_inner()).is_none() {
         return Some("no boot record".into());
-    };
-    let r = front_read("settle rebuild check");
-    let (prog, _) = r.unit(up);
-    if prog.crates.len() != boot {
-        return Some("crates were added at run time (the boot image does not describe them)".into());
     }
     if unsafe { (*up).retired } {
         return Some("a retired unit".into());
@@ -193,6 +192,23 @@ fn not_now() -> Option<String> {
         return Some("the proc-macro world is alive".into());
     }
     None
+}
+
+/// The crates of the program as a boot would list them: the boot's, then each crate added at run
+/// time (modules::add_crates: an app domain's) with the dependencies it was loaded with. The
+/// collected image of the whole program is recorded and restored against this list.
+fn with_added(prog: &Program, boot: &[crate::preload::PreCrate]) -> Vec<crate::preload::PreCrate> {
+    let mut pre = boot.to_vec();
+    for (ci, c) in prog.crates.iter().enumerate().skip(boot.len()) {
+        let deps: Vec<(u32, (String, String))> = c.deps.iter().filter(|&&(_, k)| k as usize != ci && (k as usize) < prog.crates.len())
+            .map(|&(alias, k)| (k, (prog.syms.str(alias).to_string(), prog.syms.str(prog.crates[k as usize].name).to_string()))).collect();
+        pre.push(crate::preload::PreCrate {
+            name: prog.syms.str(c.name).to_string(), root: c.root_path().to_string(), edition: c.edition, cfg: c.cfg.clone(),
+            deps: deps.iter().map(|(_, d)| d.clone()).collect(), proc_macro: c.proc_macro,
+            image_deps: deps.iter().map(|&(k, _)| k as usize).collect(), image_dep_names: deps.into_iter().map(|(_, d)| d).collect(),
+        });
+    }
+    pre
 }
 
 fn trace(what: &str) {
@@ -240,6 +256,8 @@ struct Fresh {
     collected: crate::cache::CollectedCache,
     /// its cache, opened before the replace (off the owner thread)
     cache: Option<crate::cache::Cache>,
+    /// the image covers crates added at run time (`with_added`)
+    added: bool,
 }
 
 /// Runs the rebuild. Called by the monitor thread once the run has settled and its collected
@@ -268,7 +286,7 @@ pub(crate) fn run(up: *mut Unit, patient: bool) -> Outcome {
     let _running = Running;
     let t_all = Instant::now();
     let rss0 = crate::memstat::resident();
-    let pre = BOOT.lock().unwrap_or_else(|e| e.into_inner()).clone().unwrap();
+    let boot = BOOT.lock().unwrap_or_else(|e| e.into_inner()).clone().unwrap();
     let sess = unsafe { unit_session(up) };
     let Some(mode) = crate::cache::mode_from_env(&sess.options) else { return Outcome::Refused("the cache mode is off".into()) };
 
@@ -300,16 +318,24 @@ pub(crate) fn run(up: *mut Unit, patient: bool) -> Outcome {
     // the run's resident cache file pages go first: the encode adds its image to what the old
     // state holds
     crate::pack::release_resident();
-    let (before, encoded) = {
+    let (before, encoded, pre) = {
         let _c = crate::zone_alloc::compiler();
         let r = front_read("settle rebuild encode");
         let (prog, tcx) = r.unit(up);
         let before = Counts::of(prog, tcx);
         trace(&format!("the program {before:?}, the stored image {stored:?}"));
         let stop = || crate::preempt::writer_waiting() || crate::preempt::is_stopped();
+        // crates added at run time (app domains) are in the image too, listed after the boot's
+        let pre = with_added(prog, &boot);
         if stored.is_some_and(|s| s.same_program(&before)) {
-            (before, false)
+            (before, false, pre)
         } else {
+            let inputs = if pre.len() == boot.len() { inputs } else {
+                match inputs.with_added(prog, &pre, boot.len()) {
+                    Ok(inputs) => inputs,
+                    Err(why) => return Outcome::Refused(format!("the crates added at run time are not recordable: {why}")),
+                }
+            };
             let (dest, payload) = match inputs.encode_now(prog, tcx, &stop) {
                 crate::cache::CollectedRecord::Ready(dest, payload) => (dest, payload),
                 crate::cache::CollectedRecord::Current => return Outcome::Retry("the store already holds the image".into()),
@@ -320,9 +346,10 @@ pub(crate) fn run(up: *mut Unit, patient: bool) -> Outcome {
             if crate::cache::Cache::commit_collected(None, dest, payload, &stop).is_none() {
                 return Outcome::Retry(if stop() { "the image write yielded to a front writer" } else { "the collected image could not be written" }.into());
             }
-            (before, true)
+            (before, true, pre)
         }
     };
+    let added = pre.len() > boot.len();
     if encoded {
         *STORED.lock().unwrap_or_else(|e| e.into_inner()) = Some(before);
         ENCODES.fetch_add(1, Ordering::Relaxed);
@@ -346,10 +373,17 @@ pub(crate) fn run(up: *mut Unit, patient: bool) -> Outcome {
         let _f = crate::zone_alloc::compiler_fresh();
         let restored = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let images = crate::cache::FrontImages::open(&sess.options).ok_or_else(|| "the front image stores did not open".to_string())?;
+            // (the graph of a program with crates added at run time has none of their records:
+            // a restore that finds it stale would parse)
+            if added && !images.certified(&pre) { return Err("the graph of the program and its added crates is not current".to_string()); }
             images.restore_collected(&sess, &pre)
         }));
         match restored {
-            Ok(Ok((prog, tcx, Some(collected)))) => Fresh { prog, tcx, collected, cache: None },
+            Ok(Ok((prog, tcx, Some(mut collected)))) => {
+                // the cache stays the boot's: the added crates are cached by none of its tables
+                collected.boot_crates(boot.len());
+                Fresh { prog, tcx, collected, cache: None, added }
+            }
             Ok(Ok(_)) => return Outcome::Retry("only a prefix of the program was restored".into()),
             Ok(Err(why)) => return Outcome::Retry(format!("the collected image was not restored: {why}")),
             Err(_) => return Outcome::Retry("the restore panicked".into()),
@@ -459,10 +493,16 @@ unsafe fn replace(up: *mut Unit, sess: &std::sync::Arc<crate::Session>, mode: cr
     let t_r = Instant::now();
     let mut laps: Vec<(&str, f64)> = Vec::new();
     let lap = |w: &'static str, laps: &mut Vec<(&'static str, f64)>| laps.push((w, t_r.elapsed().as_secs_f64() * 1e3));
-    let Fresh { prog, mut tcx, collected: _, cache: fresh_cache } = fresh;
+    let Fresh { mut prog, mut tcx, collected: _, cache: fresh_cache, added } = fresh;
     // the types interned since the encode, copied from the live interner: ids stay identical
     tcx.tys.top_up_from(&u.tcx.tys).ok_or("the image holds more types than the program")?;
     compare((&u.prog, &u.tcx), (&prog, &tcx))?;
+    if added {
+        // the program's own recipes, not the image's: its graph is the boot's (what the cache
+        // records the program by) and its load recipe lists each crate as it was loaded
+        prog.front_graph = u.prog.front_graph.clone();
+        prog.load_recipe = u.prog.load_recipe.clone();
+    }
     lap("compare", &mut laps);
     // (the steps up to the swap give way to a waiting program request: the rebuild is tried again later)
     let yielded = || owner::program_waiting() && !crate::jit::QUIT_SEEN.load(Ordering::Relaxed);

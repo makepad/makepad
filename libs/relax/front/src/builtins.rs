@@ -770,9 +770,14 @@ pub fn expand(p: &crate::parser::Parser, id: u16, lo: usize, hi: usize, call_lo:
     if let Some(x) = crate::parse_work::get(&key) { return Ok(x); }
     if id >= HOSTED {
         let i = (id - HOSTED) as usize;
-        let ts = expand_pm_ts(p, true, lo, hi, call_lo, call_hi, |input, call| crate::macro_reg::run_bang_in(p.session, &p.krate, i, input, call))?;
-        let mut out = Expansion { text: String::new(), toks: Vec::new(), origins: Vec::new() };
+        let mut call_span = None;
+        let ts = expand_pm_ts(p, true, lo, hi, call_lo, call_hi, |input, call| {
+            call_span = Some(call);
+            crate::macro_reg::run_bang_in(p.session, &p.krate, i, input, call)
+        })?;
+        let mut out = Expansion { text: String::new(), toks: Vec::new(), origins: Vec::new(), editions: Vec::new() };
         emit_tokens(&ts.trees, p.edition, &mut out, &mut Vec::new())?;
+        if let Some(call) = call_span { mark_made(&mut out, 0, call, crate::macro_reg::bang_edition(i)); }
         crate::parse_work::put(key, &out);
         return Ok(out);
     }
@@ -798,7 +803,7 @@ pub fn expand(p: &crate::parser::Parser, id: u16, lo: usize, hi: usize, call_lo:
                 origin(t.lo, t.hi);
             }
         }
-        return Ok(Expansion { text, toks, origins });
+        return Ok(Expansion { text, toks, origins, editions: Vec::new() });
     }
     let g = expand_buf(p, id, lo, hi, call_lo, call_hi)?;
     if g.origins.is_empty() { return Ok(Expansion::from_buf(g)); }
@@ -824,7 +829,7 @@ pub fn expand(p: &crate::parser::Parser, id: u16, lo: usize, hi: usize, call_lo:
 impl Expansion {
     /// Flatten a whole file or macro output with one spelling buffer and full token origins.
     pub fn from_stream(stream: &TokenStream, edition: u16) -> Result<Self, String> {
-        let mut out = Self { text: String::new(), toks: Vec::new(), origins: Vec::new() };
+        let mut out = Self { text: String::new(), toks: Vec::new(), origins: Vec::new(), editions: Vec::new() };
         emit_tokens(&stream.trees, edition, &mut out, &mut Vec::new())?;
         Ok(out)
     }
@@ -834,7 +839,7 @@ impl Expansion {
         if crate::parser::verify_tokens() {
             g.verify("built-in macro");
         }
-        Self { text: g.s, toks: g.toks, origins: Vec::new() }
+        Self { text: g.s, toks: g.toks, origins: Vec::new(), editions: Vec::new() }
     }
 }
 
@@ -1288,7 +1293,8 @@ fn env_value(ctx: Option<&FileCtx>, name: &str) -> Option<String> {
 
 fn env_value_inner(ctx: Option<&FileCtx>, name: &str) -> Option<String> {
     // cargo's per-crate environment as `makepad run` registered it (unitgraph.rs), then what Relax
-    // knows from the crate's Cargo.toml, then the process environment
+    // knows from the crate's Cargo.toml, then cargo's `[env]` configuration, then the process
+    // environment
     if let Some(c) = ctx {
         if let Some(v) = crate::crates::crate_env_registered(&c.krate, name) {
             return Some(v);
@@ -1301,7 +1307,7 @@ fn env_value_inner(ctx: Option<&FileCtx>, name: &str) -> Option<String> {
             _ => {}
         }
     }
-    std::env::var(name).ok()
+    crate::crates::config_env_value(name).or_else(|| std::env::var(name).ok())
 }
 
 /// The value of tokens [a, z) when they are a literal or a literal-producing built-in call
@@ -1435,6 +1441,8 @@ pub struct Expansion {
     pub toks: Vec<Tok>,
     /// Every output token's source span, sorted by its spelling-buffer offset.
     pub origins: Vec<TokenOrigin>,
+    /// Text ranges of tokens a proc macro made, with its crate's edition (`mark_made`).
+    pub editions: Vec<(u32, u32, u16)>,
 }
 
 enum ItemOut {
@@ -1547,14 +1555,13 @@ fn expand_item(sess: &std::sync::Arc<crate::Session>, krate: &str, path: &str, i
     let call = span_of(0, item.len() as u32);
     // leading space: expansion ranges map to call sites by an inclusive range check, so two
     // expansions must not share an endpoint
-    let mut out = Expansion { text: String::from(" "), toks: Vec::new(), origins: Vec::new() };
+    let mut out = Expansion { text: String::from(" "), toks: Vec::new(), origins: Vec::new(), editions: Vec::new() };
     let mut scratch = Vec::new();
     let mut expanded = false;
     for name in names {
         // The host selects a source-matched linked library or the sandboxed JIT.
-        let result = if scoped_derive(&name) {
-            resolve.and_then(|resolve| resolve(&name)).map(|entry| crate::macro_reg::run_derive_entry(sess, krate, &name, &entry, &item_ts, call))
-        } else { crate::macro_reg::run_derive_in(sess, krate, &name, &item_ts, call) };
+        let entry = if scoped_derive(&name) { resolve.and_then(|resolve| resolve(&name)) } else { crate::macro_reg::derive_entry(krate, &name) };
+        let result = entry.as_ref().map(|entry| crate::macro_reg::run_derive_entry(sess, krate, &name, entry, &item_ts, call));
         let r = match result {
             Some(r) => r,
             // A builtin or an unrelated crate's same-named derive has no host
@@ -1577,7 +1584,9 @@ fn expand_item(sess: &std::sync::Arc<crate::Session>, krate: &str, path: &str, i
             }
         };
         let t0 = out.text.len();
+        let o0 = out.origins.len();
         emit_tokens(&ts.trees, edition, &mut out, &mut scratch).map_err(|m| (item_lo, m))?;
+        if let Some(entry) = &entry { mark_made(&mut out, o0, call, crate::macro_reg::entry_edition(entry)); }
         if trace_on("expand:derive") {
             eprintln!("expand derive({}) @{} => {}", name, path, &out.text[t0..]);
         }
@@ -1597,6 +1606,29 @@ fn emit_lexed(text: &str, toks: &[Tok], source: SourceSpan, out: &mut Expansion)
         }
     }
     out.text.push(' ');
+}
+
+/// Records which output tokens of `out` from `origins[from..]` on the proc macro made itself: the
+/// ones spanned at its call site (`Span::call_site()`, `def_site()` and `mixed_site()` are that
+/// span here, as are a parsed string's tokens and a new group's delimiters). rustc gives them
+/// the expansion's edition, the macro crate's (rustc_expand proc_macro_server.rs: the call-site
+/// context's outer expansion; ExpnData::edition), while a token taken from the input keeps its
+/// own. Consecutive made tokens share one range.
+fn mark_made(out: &mut Expansion, from: usize, call: Span, edition: u16) {
+    if edition == 0 { return; }
+    let call = SourceSpan::from(call);
+    let mut open = false;
+    for o in &out.origins[from..] {
+        if o.source != call {
+            open = false;
+            continue;
+        }
+        match out.editions.last_mut() {
+            Some(r) if open => r.1 = o.hi,
+            _ => out.editions.push((o.lo, o.hi, edition)),
+        }
+        open = true;
+    }
 }
 
 /// Proc-macro output trees straight to Relax tokens (and the text they point into): idents,
@@ -1719,7 +1751,7 @@ fn emit_tokens(trees: &[TokenTree], edition: u16, out: &mut Expansion, scratch: 
 
 /// Proc-macro style trees as tokens over their own text (no origins).
 pub fn trees_to_buf(trees: &[TokenTree], edition: u16) -> Result<TokBuf, String> {
-    let mut out = Expansion { text: String::new(), toks: Vec::new(), origins: Vec::new() };
+    let mut out = Expansion { text: String::new(), toks: Vec::new(), origins: Vec::new(), editions: Vec::new() };
     emit_tokens(trees, edition, &mut out, &mut Vec::new())?;
     Ok(TokBuf::from_parts(edition, out.text, out.toks))
 }
@@ -2108,10 +2140,11 @@ pub fn expand_attr_macro(p: &crate::parser::Parser, attrs: &[crate::ast::Attr], 
     trees.extend(stream(buf.get(body_lo, item_hi), body_lo)?.trees);
     let item_ts = TokenStream { trees };
     let call = span_of(item_lo, item_hi);
-    let mut out = Expansion { text: String::from(" "), toks: Vec::new(), origins: Vec::new() };
+    let mut out = Expansion { text: String::from(" "), toks: Vec::new(), origins: Vec::new(), editions: Vec::new() };
     match crate::macro_reg::run_attr(p.session, &p.krate, entry, &attr_ts, &item_ts, call) {
         Ok(ts) => {
             emit_tokens(&ts.trees, p.edition, &mut out, &mut Vec::new()).map_err(|m| (item_lo, m))?;
+            mark_made(&mut out, 0, call, crate::macro_reg::entry_edition(entry));
             if trace_on("expand:attr") {
                 eprintln!("expand #[{}] @{} => {}", name, path, out.text);
             }

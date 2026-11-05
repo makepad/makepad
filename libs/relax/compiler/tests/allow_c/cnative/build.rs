@@ -14,5 +14,6 @@ fn main() {
     println!("cargo:rerun-if-changed=csrc/cnative.c");
     println!("cargo:rustc-link-search=native={}", out);
     println!("cargo:rustc-link-lib=static=cnative");
+    println!("cargo:rustc-check-cfg=cfg(cnative_built)");
     println!("cargo:rustc-cfg=cnative_built");
 }

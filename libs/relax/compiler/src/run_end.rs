@@ -30,6 +30,26 @@ pub fn restarting() -> bool {
     RESTARTING.load(Ordering::Acquire)
 }
 
+/// What the run before this one left for it (reload.rs next_run_env: the recovery record, the
+/// state, the edit's save time), for a run started in place: the restart hands it over here. The
+/// process's environment is never written for it: the host's threads and the C code they run read
+/// the environment meanwhile, and a write under a read is undefined.
+static HANDED: std::sync::Mutex<Option<Vec<(&'static str, Option<std::ffi::OsString>)>>> = std::sync::Mutex::new(None);
+
+/// The input `name` of next_run_env as this run has it: from the run before it in this process
+/// (`restart`), or for the process's first run from the environment its starter gave it.
+pub fn run_input(name: &str) -> Option<std::ffi::OsString> {
+    match &*HANDED.lock().unwrap_or_else(|e| e.into_inner()) {
+        Some(handed) => handed.iter().find(|(n, _)| *n == name).and_then(|(_, v)| v.clone()),
+        None => std::env::var_os(name),
+    }
+}
+
+/// This run was started in place, by a restart in this process (`run_input` reads its hand-over).
+pub fn started_in_place() -> bool {
+    HANDED.lock().unwrap_or_else(|e| e.into_inner()).is_some()
+}
+
 /// # Safety
 /// `up` is the running unit; nothing of the run is called after this.
 pub unsafe fn end(up: *mut Unit, grace: Duration) -> Ended {
@@ -141,13 +161,8 @@ pub fn restart(why: String, state: Option<&[u8]>) -> Result<(), String> {
         let up = crate::run::running_unit();
         let ended = unsafe { end(up, PROGRAM_GRACE) };
         eprintln!("makepad-run: {} ; run's threads stayed: {:?}; {:.0} ms in all: end {:.0}, cache {:.0}, threads {:.0}, unit {:.0}, statics {:.0}", ended.program.line(), ended.stayed, t.elapsed().as_secs_f64() * 1e3, ended.ms[0], ended.ms[1], ended.ms[2], ended.ms[3], ended.ms[4]);
-        // what the next run reads, where a process would find it; only the host's threads are here
-        for (name, value) in next {
-            match value {
-                Some(value) => unsafe { std::env::set_var(name, value) },
-                None => unsafe { std::env::remove_var(name) },
-            }
-        }
+        // what the next run reads (run_input)
+        *HANDED.lock().unwrap_or_else(|e| e.into_inner()) = Some(next);
         RESTARTING.store(false, Ordering::Release);
         crate::run::host_next_run();
     });

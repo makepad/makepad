@@ -54,7 +54,7 @@ build() {
     mkdir -p "$(dirname "$out")" "$td"
     echo "build.sh: $flavour -> $out (target dir $td, log $log)"
     local t0=$SECONDS
-    if ! ( cd "$root" && RUSTFLAGS="-Ctarget-cpu=$cpu $extra" nice -n 15 cargo build --profile host \
+    if ! ( cd "$root" && RUSTFLAGS="-Ctarget-cpu=$cpu -Z allow-features= $extra" nice -n 15 cargo build --profile host \
         --target "$triple" -p makepad-run --bin makepad --bin makepad-launcher -j "$jobs" --target-dir "$td" ) > "$log" 2>&1; then
         grep -E '^(warning|error)' "$log" | head -20; echo "build.sh: $flavour build FAILED (log $log)" >&2; exit 3
     fi

@@ -1,7 +1,7 @@
 //~ none
 // accepted by rustc: a field read through `&&T` (`iter()` over a `Vec<&T>` built by an inferred
 // `Vec<_>` collect) collects into a Vec of the field's type, and a `&dyn Fn(&T)` closure takes `&&T`
-// by deref coercion (Sandbox's game_cost.rs measure)
+// by deref coercion.
 struct Cost { instructions: u64, us: u64 }
 fn main() {
     let all = vec![Cost { instructions: 3, us: 10 }, Cost { instructions: 1, us: 30 }];

@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-// Mirrors apps/commercial/runner/src/jitupdate.rs active(), including its src fallback.
+// Select the active installed loader, or the source loader when the selection is unavailable.
 fn loader_path(root: &Path, current: &str, is_file: impl Fn(&Path) -> bool) -> PathBuf {
     let named = |name: &str| root.join(name).join("target/host").join(if cfg!(windows) { "makepad.exe" } else { "makepad" });
     let name = current.trim();
@@ -123,8 +123,8 @@ mod tests {
 
     #[test]
     fn plist_values() {
-        let plist = "<dict><key>MakepadApp</key>\n<string>scope</string><key>MakepadRunHome</key><string>/a &amp; &lt;b&gt; &quot;c&quot; &apos;d&apos; &amp;lt;</string><key>NotAString</key><true/></dict>";
-        assert_eq!(plist_string(plist, "MakepadApp").as_deref(), Some("scope"));
+        let plist = "<dict><key>MakepadApp</key>\n<string>demo</string><key>MakepadRunHome</key><string>/a &amp; &lt;b&gt; &quot;c&quot; &apos;d&apos; &amp;lt;</string><key>NotAString</key><true/></dict>";
+        assert_eq!(plist_string(plist, "MakepadApp").as_deref(), Some("demo"));
         assert_eq!(plist_string(plist, "MakepadRunHome").as_deref(), Some("/a & <b> \"c\" 'd' &lt;"));
         assert_eq!(plist_string(plist, "Missing"), None);
         assert_eq!(plist_string(plist, "NotAString"), None);

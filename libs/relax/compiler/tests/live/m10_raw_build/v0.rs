@@ -4,10 +4,9 @@
 // (its fields once each), and kept in a static next to a value of a struct literal. v1 removes a
 // field with nothing to drop: the offsets the builder computes are still the running layout's,
 // for new values and kept ones. v2 removes a field that owns something to drop (and holds no
-// niche): whether a raw value set it is unknown -- restart. v3 (on v1) adds a field the builder
-// writes at its offset_of! offset: the running layout has no offset for it -- restart. v4 (on
-// v1) adds a field to a struct built only by literals so far, and code that writes it at its
-// offset_of! offset: that code panics saying the field has no offset (the patch rolls back).
+// niche): a raw value's word does not say whether it set that slot -- restart. v3 (on v1) adds a
+// field: its values would need the word -- restart. v4 (on v1) adds a field to a struct built
+// only by literals so far, and a builder writing it at its offset_of! offset -- restart.
 
 use std::alloc::{alloc, Layout};
 use std::mem::{offset_of, size_of, MaybeUninit};

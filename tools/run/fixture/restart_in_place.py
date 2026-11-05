@@ -13,6 +13,8 @@ cannot take it: the Restart rung). It passes when:
   - the process is the same pid afterwards and is the only one the run left;
   - the app's state came back ("out restored <tick>" at or past the tick before the edit, the
     platform's "restart (..): kept .. app state kept") and the new code runs (later=123);
+  - the restarted run has the edit's save time (handed over in the process, not through its
+    environment): its save -> back on screen is in the session log (`restart_present`);
   - the restarted run has no more threads than the first one had at the same point;
   - no panic, internal compiler error or fault line appears.
 The restart is offered (the Restart rung) and taken as a person would, by `session relaunch`.
@@ -65,7 +67,7 @@ ready = os.path.join(tmp, "ready")
 home = os.path.join(tmp, "home")
 env = dict(os.environ, MAKEPAD_RUN_LIVE_READY=ready, MAKEPAD_RUN_HOME=home, MAKEPAD_RUN_CACHE_DIR=os.path.join(home, "cache"),
            MAKEPAD_RUN_TARGET_DIR=os.path.join(home, "target"), MAKEPAD_MUTE="1", SANDBOX_MUTE="1", MUSIC_MUTE="1",
-           MAKEPAD_RUN_LIVE_TRACE="1")
+           MAKEPAD_RUN_LIVE_TRACE="1", MAKEPAD_RUN_LIVE_LOG=os.path.join(tmp, "live.jsonl"))
 if not visible:
     env["MAKEPAD_HIDE_WINDOWS"] = "1"
 panic_file = os.path.join(tmp, "panic-now")
@@ -310,6 +312,12 @@ if not fails:
     if t_first is None:
         fails.append("no-first-frame")
     time.sleep(2.0)
+    try:
+        presents = [l for l in open(env["MAKEPAD_RUN_LIVE_LOG"]) if '"event":"restart_present"' in l]
+    except OSError:
+        presents = []
+    if not presents:
+        fails.append("no-restart-present-logged")
     pid1 = app_pid()
     procs1 = len(descendants(p.pid)[0])
     threads1 = threads(pid1) if pid1 else 0

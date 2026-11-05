@@ -1,0 +1,9 @@
+[package]
+name = "gpm-app"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+realj = { path = "../realj" }
+globb = { path = "../globb" }

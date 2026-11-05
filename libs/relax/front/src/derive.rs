@@ -410,7 +410,7 @@ impl<'a> Parser<'a> {
                 eprintln!("derive {} => {}", name, all.s);
             }
         }
-        crate::parse_work::put(key, &crate::builtins::Expansion { text: all.s.clone(), toks: all.toks.clone(), origins: Vec::new() });
+        crate::parse_work::put(key, &crate::builtins::Expansion { text: all.s.clone(), toks: all.toks.clone(), origins: Vec::new(), editions: Vec::new() });
         self.install_derive_buf(&all, it.name.lo)
     }
 

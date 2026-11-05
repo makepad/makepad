@@ -206,6 +206,32 @@ mod unix {
         pub fn dlsym(handle: *mut u8, name: *const u8) -> *mut u8;
     }
 
+    /// The library's handle, or the loader's diagnostic.
+    pub fn load_path(path: &str, flags: i32) -> Result<usize, String> {
+        let path = std::ffi::CString::new(path).map_err(|e| e.to_string())?;
+        unsafe {
+            let h = dlopen(path.as_ptr().cast(), flags);
+            if !h.is_null() {
+                return Ok(h as usize);
+            }
+            extern "C" {
+                fn dlerror() -> *const std::ffi::c_char;
+            }
+            let error = dlerror();
+            Err(if error.is_null() {
+                "dlopen failed without a loader diagnostic".into()
+            } else {
+                std::ffi::CStr::from_ptr(error).to_string_lossy().into_owned()
+            })
+        }
+    }
+
+    /// The address of `name` (a C symbol) in the library `handle` (load_path) and what it loaded.
+    pub fn symbol_in(handle: usize, name: &str) -> usize {
+        let Ok(name) = std::ffi::CString::new(name) else { return 0 };
+        unsafe { dlsym(handle as *mut u8, name.as_ptr().cast()) as usize }
+    }
+
     // (Android's own `lookup` also asks the host library and the program's libraries)
     #[cfg(not(target_os = "android"))]
     pub unsafe fn lookup(handle: *mut u8, name: *const u8) -> *mut u8 {
@@ -326,27 +352,11 @@ mod imp {
         std::ptr::null_mut()
     }
 
-    /// A shared library by absolute path (--allow-c's native library), its symbols global.
-    pub fn load_path(path: &str) -> bool {
-        // RTLD_LAZY | RTLD_GLOBAL: the bridge exports archive functions before
-        // knowing which the JIT will call. Resolve function relocations on use,
-        // as native archive extraction would leave uncalled functions unlinked.
-        // Data relocations still resolve at load time; called missing symbols
-        // remain loader errors rather than being replaced with stubs.
-        unsafe {
-            if !dlopen(format!("{}\0", path).as_ptr(), 1 | 0x100).is_null() {
-                return true;
-            }
-            extern "C" {
-                fn dlerror() -> *const std::ffi::c_char;
-            }
-            let error = dlerror();
-            if !error.is_null() {
-                eprintln!("makepad: cannot load {}: {}", path, std::ffi::CStr::from_ptr(error).to_string_lossy());
-            }
-            false
-        }
+    /// A native bundle must resolve every import before any program code starts. Its handle.
+    pub fn load_path(path: &str) -> Result<usize, String> {
+        super::unix::load_path(path, 2 | 0x100)
     }
+    pub use super::unix::symbol_in;
 
     pub fn load_library(name: &str, framework: bool) -> bool {
         let path = if framework { format!("/System/Library/Frameworks/{}.framework/{}\0", name, name) } else { format!("lib{}.so\0", name) };
@@ -506,11 +516,11 @@ mod imp {
         std::ptr::null_mut()
     }
 
-    /// A shared library by absolute path (--allow-c's native library), its symbols global.
-    pub fn load_path(path: &str) -> bool {
-        // RTLD_NOW | RTLD_GLOBAL
-        unsafe { !dlopen(format!("{}\0", path).as_ptr(), 2 | 0x100).is_null() }
+    /// A shared library by absolute path (--allow-c's native library), its symbols global. Its handle.
+    pub fn load_path(path: &str) -> Result<usize, String> {
+        super::unix::load_path(path, 2 | 0x100)
     }
+    pub use super::unix::symbol_in;
 
     pub fn load_library(name: &str, framework: bool) -> bool {
         let path = if framework { format!("/System/Library/Frameworks/{}.framework/{}\0", name, name) } else { format!("lib{}.so\0", name) };
@@ -572,11 +582,11 @@ mod imp {
         std::ptr::null_mut()
     }
 
-    /// A shared library by absolute path (--allow-c's native library), its symbols global.
-    pub fn load_path(path: &str) -> bool {
-        // RTLD_NOW | RTLD_GLOBAL
-        unsafe { !dlopen(format!("{}\0", path).as_ptr(), 2 | 8).is_null() }
+    /// A shared library by absolute path (--allow-c's native library), its symbols global. Its handle.
+    pub fn load_path(path: &str) -> Result<usize, String> {
+        super::unix::load_path(path, 2 | 8)
     }
+    pub use super::unix::symbol_in;
 
     pub fn load_library(name: &str, framework: bool) -> bool {
         let path = if framework { format!("/System/Library/Frameworks/{}.framework/{}\0", name, name) } else { format!("lib{}.dylib\0", name) };
@@ -658,8 +668,12 @@ mod imp {
     }
 
     /// --allow-c's native library is not supported on Windows.
-    pub fn load_path(_path: &str) -> bool {
-        false
+    pub fn load_path(_path: &str) -> Result<usize, String> {
+        Err("--allow-c native libraries are not supported on Windows".into())
+    }
+
+    pub fn symbol_in(_handle: usize, _name: &str) -> usize {
+        0
     }
 
     /// `#[link(name = "user32")]` / raw-dylib `name = "DINPUT8"`: the DLL of that name.

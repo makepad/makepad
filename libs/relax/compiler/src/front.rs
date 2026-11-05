@@ -23,6 +23,8 @@ const S_TOKEN_ORIGINS: u32 = 7;
 const S_SOURCES: u32 = 8;
 /// `Ast::gated_syntax` as (index in `GATED_SYNTAX`, position) pairs, after the tree's arrays
 const S_GATED: u32 = 9;
+/// `ParsedFile::pm_editions`, after the gated syntax
+const S_PM_EDITIONS: u32 = 10;
 /// tree arrays: 100 + index in AST_ARRAYS order
 const S_AST: u32 = 100;
 
@@ -83,13 +85,14 @@ pub fn image(pf: &ParsedFile) -> Writer<'_> {
         [i as u32, pos]
     }).collect();
     w.add_owned(S_GATED, &gated);
+    w.add(S_PM_EDITIONS, pf.pm_editions.bytes());
     w
 }
 
 /// Heap capacity retired by the main image (parts are accounted separately).
 pub fn heap_bytes(pf: &ParsedFile) -> usize {
     let mut n = pf.src.heap_bytes() + pf.toks.heap_bytes() + pf.exp_map.heap_bytes()
-        + pf.tok_origin.heap_bytes() + pf.token_origins.heap_bytes() + pf.rules_exp.heap_bytes() + pf.body_origin.heap_bytes();
+        + pf.tok_origin.heap_bytes() + pf.token_origins.heap_bytes() + pf.rules_exp.heap_bytes() + pf.body_origin.heap_bytes() + pf.pm_editions.heap_bytes();
     macro_rules! count { ($($f:ident: $t:ident),*) => { $( n += pf.ast.$f.heap_bytes(); )* }; }
     ast_arrays!(count);
     n
@@ -148,14 +151,16 @@ pub fn apply(path: &str, pf: &mut ParsedFile, img: &'static [u8]) -> bool {
         };
     }
     let got = ast_arrays!(get);
-    let _ = k;
-    let mut before = pf.src.heap_bytes() + pf.toks.heap_bytes() + pf.exp_map.heap_bytes() + pf.tok_origin.heap_bytes() + pf.token_origins.heap_bytes() + pf.rules_exp.heap_bytes() + pf.body_origin.heap_bytes();
+    let Some(pe) = r.slice::<u8>(9 + k, S_PM_EDITIONS).and_then(Table::<Regions>::mapped) else { return mismatch(path, "pm_editions") };
+    check!(pe, pf.pm_editions, pe == pf.pm_editions, "pm_editions");
+    let mut before = pf.src.heap_bytes() + pf.toks.heap_bytes() + pf.exp_map.heap_bytes() + pf.tok_origin.heap_bytes() + pf.token_origins.heap_bytes() + pf.rules_exp.heap_bytes() + pf.body_origin.heap_bytes() + pf.pm_editions.heap_bytes();
     pf.src = Arena::Mapped(src);
     pf.toks = toks;
     pf.exp_map = em;
     pf.tok_origin = to;
     pf.rules_exp = re;
     pf.body_origin = bo;
+    pf.pm_editions = pe;
     pf.token_origins = origins;
     let a = &mut pf.ast;
     macro_rules! set {
@@ -182,6 +187,7 @@ const P_TOKEN_ORIGINS: u32 = 206;
 const P_SOURCES: u32 = 207;
 const P_RULES_EXP: u32 = 208;
 const P_BODY_ORIGIN: u32 = 209;
+const P_PM_EDITIONS: u32 = 210;
 const P_AST: u32 = 300;
 
 pub static PARTS_MAPPED: AtomicU64 = AtomicU64::new(0);
@@ -226,6 +232,7 @@ pub fn part_image<'a>(pf: &'a ParsedFile, fp: &'a crate::parser::FilePart, a: &'
     // its macro_rules expansions (hygiene), after the tree
     w.add(P_RULES_EXP, fp.rules_exp.bytes());
     w.add(P_BODY_ORIGIN, fp.body_origin.bytes());
+    w.add(P_PM_EDITIONS, fp.pm_editions.bytes());
     Some(w)
 }
 
@@ -260,13 +267,14 @@ fn part_from_image(path: &str, ends: [u32; crate::ast::ARENAS], (src, toks, rule
         };
     }
     ast_arrays!(get);
-    let (Some(rules_exp), Some(body_origin)) = (r.slice::<u8>(8 + k, P_RULES_EXP).and_then(Table::<Rules>::mapped), r.slice::<u8>(9 + k, P_BODY_ORIGIN).and_then(Table::<Maps>::mapped)) else {
+    let (Some(rules_exp), Some(body_origin), Some(pm_editions)) = (r.slice::<u8>(8 + k, P_RULES_EXP).and_then(Table::<Rules>::mapped), r.slice::<u8>(9 + k, P_BODY_ORIGIN).and_then(Table::<Maps>::mapped),
+        r.slice::<u8>(10 + k, P_PM_EDITIONS).and_then(Table::<Regions>::mapped)) else {
         mismatch(path, "part.rules");
         return None;
     };
     let fp = crate::parser::FilePart {
         src_base: src as u32, tok_base: toks as u32, rules_base: rules as u32,
-        rules_exp, body_origin, next: Default::default(),
+        rules_exp, body_origin, pm_editions, next: Default::default(),
         ext: Arena::Mapped(ext),
         toks: ptoks,
         exp_map: em,
@@ -284,10 +292,10 @@ fn same_part(a: &crate::parser::FilePart, aa: &crate::ast::Ast, b: &crate::parse
     let v = verify();
     let mut s = aa.base == ba.base && a.bodies.iter().eq(b.bodies.iter()) && a.ext.len() == b.ext.len() && a.toks.len() == b.toks.len()
         && a.exp_map.len() == b.exp_map.len() && a.tok_origin.len() == b.tok_origin.len() && a.token_origins.len() == b.token_origins.len()
-        && a.rules_exp.len() == b.rules_exp.len() && a.body_origin.len() == b.body_origin.len();
+        && a.rules_exp.len() == b.rules_exp.len() && a.body_origin.len() == b.body_origin.len() && a.pm_editions.len() == b.pm_editions.len();
     if v {
         s = s && a.ext[..] == b.ext[..] && a.toks.words() == b.toks.words() && a.exp_map == b.exp_map && a.tok_origin == b.tok_origin && a.token_origins == b.token_origins
-            && a.rules_exp == b.rules_exp && a.body_origin == b.body_origin;
+            && a.rules_exp == b.rules_exp && a.body_origin == b.body_origin && a.pm_editions == b.pm_editions;
     }
     macro_rules! cmp {
         ($($f:ident: $t:ident),*) => {
@@ -502,6 +510,7 @@ fn restore_inner(meta: &mut crate::crate_image::FileMeta, img: &'static [u8], ce
         tok_origin: Table::mapped(r.slice(3, S_TOK_ORIGIN)?)?,
         rules_exp: Table::mapped(r.slice(4, S_RULES_EXP)?)?,
         body_origin: Table::mapped(r.slice(5, S_BODY_ORIGIN)?)?,
+        pm_editions: Table::mapped(r.slice(9 + k, S_PM_EDITIONS)?)?,
         line_starts: Default::default(),
         part: Default::default(),
         impl_heads: Default::default(),
@@ -526,6 +535,7 @@ pub fn verify_file(image: &ParsedFile, fresh: &ParsedFile) {
     assert!(same_origins(image, &image.token_origins, fresh, &fresh.token_origins), "front token origins");
     assert_eq!(image.rules_exp, fresh.rules_exp);
     assert_eq!(image.body_origin, fresh.body_origin);
+    assert_eq!(image.pm_editions, fresh.pm_editions);
     assert_eq!((image.edition, image.src_len, image.token_input), (fresh.edition, fresh.src_len, fresh.token_input));
     assert_eq!(crate::crate_image::encode(&image.lazy), crate::crate_image::encode(&fresh.lazy));
     // Some callers compare main images before either side has demanded bodies.
@@ -544,6 +554,7 @@ pub fn verify_file(image: &ParsedFile, fresh: &ParsedFile) {
         assert!(same_origins(image, &ip.token_origins, fresh, &fp.token_origins), "front part token origins");
         assert_eq!(ip.rules_exp, fp.rules_exp);
         assert_eq!(ip.body_origin, fp.body_origin);
+        assert_eq!(ip.pm_editions, fp.pm_editions);
     }
 }
 

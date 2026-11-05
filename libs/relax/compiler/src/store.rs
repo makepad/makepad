@@ -4,8 +4,9 @@
 //!
 //! Layout:
 //!   header (HEADER bytes): magic "RCS1", format u32, active slot u32, slot capacity u32 (index
-//!     entries per slot), then per slot: entry count u64, data end u64, index checksum u64;
-//!     the writing Relax build u64 (the codegen identity's low half, codegen_id.rs: build_of); header checksum u64 last
+//!     entries per slot), then per slot: entry count u64, data end u64, index checksum u64, where its
+//!     payloads committed without a barrier begin u64 (Slot::tail); the writing Relax build u64 (the
+//!     codegen identity's low half, codegen_id.rs: build_of); header checksum u64 last
 //!   index slot 0, index slot 1 (capacity x INDEX_ENTRY bytes each): sorted (key u128, offset u64,
 //!     length u32, kind u32, payload checksum u64)
 //!   entries (8-byte aligned payloads) up to the active slot's data end
@@ -15,9 +16,16 @@
 //! header and index valid. Crash safety is ordering, not durability (the stores are a rebuildable
 //! cache: a lost commit is a cache miss): readers do not checksum payloads, so the payloads must
 //! reach the disk before a header that commits them -- one write barrier (`order_writes`) between
-//! them. The index and header carry checksums, so a torn index or header only invalidates the store. When the merged index does not fit a slot, or dead bytes outgrow a
-//! quarter of the live ones (or the store is stale), the store is rewritten whole as its next generation.
-//! The newest entry of a key wins.
+//! them. A process's exit does not wait on the disk (on ext4 that barrier is a journal commit: half
+//! a second on a busy disk, for a few KB): its commits leave the barrier out and say where their
+//! payloads begin (Slot::tail), and no reader serves one of those before it verified them all
+//! against their checksums. A commit that fails that (a power cut lost some of its payloads), or
+//! whose index fails its checksum, gives way to the commit before it, in the other slot: appends
+//! write past both slots' data ends, so its payloads are intact. The first open that verifies an
+//! exit's payloads makes them durable in the background and clears its `tail` (`seal`). A torn
+//! header invalidates the store (its checksum). When the merged index does not fit a slot, or dead
+//! bytes outgrow a quarter of the live ones (or the store is stale), the store is rewritten whole as
+//! its next generation. The newest entry of a key wins.
 //!
 //! Generations (one design on every OS): a store is never renamed over or deleted while it may
 //! be open. A file another process has mapped or open cannot be replaced on Windows, and a
@@ -32,14 +40,18 @@
 use crate::pack::{Bytes, NewEntry};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 pub const MAGIC: &[u8; 4] = b"RCS1";
-const FORMAT: u32 = 1;
-const HEADER: usize = 80;
+const FORMAT: u32 = 2;
+const HEADER: usize = 96;
 const INDEX_ENTRY: usize = 40;
 const MIN_CAP: u32 = 256;
+/// Where the header's two slots begin, and the bytes of each.
+const SLOTS_AT: usize = 16;
+const SLOT: usize = 32;
 /// Where the header names the Relax build that wrote the store.
-const BUILD_AT: usize = 64;
+const BUILD_AT: usize = 80;
 
 /// This Relax build's codegen identity (codegen_id.rs) as store headers carry it. Every store name hashes it
 /// (cache.rs front_store_name, code_store_name, front_graph_key; run stores are one process's),
@@ -155,10 +167,29 @@ fn write_entry(out: &mut dyn Write, off: &mut u64, e: &impl Entry) -> std::io::R
     Ok(Ix { key: e.key(), kind: e.kind(), off: at, len, sum })
 }
 
+/// One slot's commit, as the header records it.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+struct Slot {
+    /// entries in the slot's index
+    n: u64,
+    /// the data end it commits
+    end: u64,
+    /// its index's checksum
+    sum: u64,
+    /// the payloads at or past this offset were committed without a write barrier (a process's
+    /// exit, `set_exiting`): none is served before all are verified (`slot_index`); `end`: none
+    tail: u64,
+}
+
+impl Slot {
+    /// A slot no commit uses (a fresh rewrite's second one): its data end lies in the header.
+    const NONE: Slot = Slot { n: 0, end: 0, sum: 0, tail: 0 };
+}
+
 struct Header {
     active: u32,
     cap: u32,
-    slots: [(u64, u64, u64); 2],
+    slots: [Slot; 2],
 }
 
 fn u32_at(b: &[u8], o: usize) -> u32 {
@@ -181,7 +212,10 @@ impl Header {
         if active > 1 || cap == 0 {
             return None;
         }
-        let slot = |k: usize| (u64_at(b, 16 + k * 24), u64_at(b, 24 + k * 24), u64_at(b, 32 + k * 24));
+        let slot = |k: usize| {
+            let o = SLOTS_AT + k * SLOT;
+            Slot { n: u64_at(b, o), end: u64_at(b, o + 8), sum: u64_at(b, o + 16), tail: u64_at(b, o + 24) }
+        };
         Some(Header { active, cap, slots: [slot(0), slot(1)] })
     }
 
@@ -191,11 +225,11 @@ impl Header {
         b[4..8].copy_from_slice(&FORMAT.to_le_bytes());
         b[8..12].copy_from_slice(&self.active.to_le_bytes());
         b[12..16].copy_from_slice(&self.cap.to_le_bytes());
-        for k in 0..2 {
-            let (n, end, sum) = self.slots[k];
-            b[16 + k * 24..24 + k * 24].copy_from_slice(&n.to_le_bytes());
-            b[24 + k * 24..32 + k * 24].copy_from_slice(&end.to_le_bytes());
-            b[32 + k * 24..40 + k * 24].copy_from_slice(&sum.to_le_bytes());
+        for (k, s) in self.slots.iter().enumerate() {
+            let o = SLOTS_AT + k * SLOT;
+            for (i, v) in [s.n, s.end, s.sum, s.tail].into_iter().enumerate() {
+                b[o + i * 8..o + i * 8 + 8].copy_from_slice(&v.to_le_bytes());
+            }
         }
         b[BUILD_AT..BUILD_AT + 8].copy_from_slice(&this_build().to_le_bytes());
         let s = sum64(&b[..HEADER - 8]);
@@ -214,6 +248,152 @@ impl Header {
 
 fn align8(x: u64) -> u64 {
     (x + 7) & !7
+}
+
+/// The commit a header names (Store::generation): its bytes without the slots' `tail`, so a
+/// `seal` keeps it (and a collected program certified against it stays valid).
+fn generation(hb: &[u8]) -> u64 {
+    let mut b = [0u8; HEADER - 8];
+    b.copy_from_slice(&hb[..HEADER - 8]);
+    for k in 0..2 {
+        let o = SLOTS_AT + k * SLOT + 24;
+        b[o..o + 8].fill(0);
+    }
+    sum64(&b)
+}
+
+/// The process is exiting (run.rs: the quit write, the exit summary): its commits leave the write
+/// barrier out, so the exit does not wait on the disk (Slot::tail).
+static EXITING: AtomicBool = AtomicBool::new(false);
+
+/// This process's exit begins: what it commits from now on is verified by the next open rather
+/// than ordered on the disk.
+pub fn set_exiting() {
+    EXITING.store(true, Ordering::Relaxed);
+}
+
+/// Whether a commit puts a write barrier between its payloads and the header (not while exiting).
+fn ordered() -> bool {
+    !EXITING.load(Ordering::Relaxed)
+}
+
+/// Whether `e`'s payload lies within the data end `end` and matches its checksum, read through `f`.
+fn payload_ok(f: &mut std::fs::File, e: &Ix, end: u64) -> bool {
+    if e.off.checked_add(e.len as u64).is_none_or(|x| x > end) || f.seek(SeekFrom::Start(e.off)).is_err() {
+        return false;
+    }
+    let mut buf = [0u8; 64 * 1024];
+    let mut sum = Sum64::new();
+    let mut left = e.len as usize;
+    while left != 0 {
+        let n = left.min(buf.len());
+        if f.read_exact(&mut buf[..n]).is_err() {
+            return false;
+        }
+        sum.update(&buf[..n]);
+        left -= n;
+    }
+    sum.finish() == e.sum
+}
+
+/// Slot `k`'s index, when its commit holds in the `len` bytes of `f`: the index matches its
+/// checksum, its data end lies in the file, and every payload it committed without a barrier (at
+/// or past its `tail`) matches its checksum.
+fn slot_index(f: &mut std::fs::File, h: &Header, k: u32, len: u64) -> Option<Vec<Ix>> {
+    let s = h.slots[k as usize];
+    if s.n > h.cap as u64 || s.end < h.data_start() || s.end > len || s.tail > s.end {
+        return None;
+    }
+    let mut ib = vec![0u8; s.n as usize * INDEX_ENTRY];
+    f.seek(SeekFrom::Start(h.slot_off(k))).ok()?;
+    f.read_exact(&mut ib).ok()?;
+    if sum64(&ib) != s.sum {
+        return None;
+    }
+    let ix = decode_index(&ib);
+    ix.iter().filter(|e| e.off >= s.tail).all(|e| payload_ok(f, e, s.end)).then_some(ix)
+}
+
+/// The commit a reader or an appender takes, with its index: the active slot's, or else the one
+/// before it, in the other slot.
+fn usable_slot(f: &mut std::fs::File, h: &Header, len: u64) -> Option<(u32, Vec<Ix>)> {
+    let a = h.active;
+    slot_index(f, h, a, len).map(|ix| (a, ix)).or_else(|| slot_index(f, h, 1 - a, len).map(|ix| (1 - a, ix)))
+}
+
+/// Commits this process verified without their barrier (the store file, its header as verified),
+/// for the `seal` thread; SEALING: that thread runs.
+static TO_SEAL: relax_session::sync::Mutex<Vec<(PathBuf, [u8; HEADER])>> = relax_session::sync::Mutex::new(Vec::new());
+static SEALING: AtomicBool = AtomicBool::new(false);
+
+/// An open verified what an exit committed without a barrier (`hb`, the header it read): one
+/// background thread makes it durable (`seal`), so later opens do not read it all again.
+fn queue_seal(file: &Path, hb: &[u8]) {
+    let Ok(hb) = <[u8; HEADER]>::try_from(hb) else { return };
+    if !ordered() {
+        return;
+    }
+    let _k = crate::zone_alloc::kept();
+    let mut q = TO_SEAL.lock().unwrap_or_else(|e| e.into_inner());
+    if q.iter().any(|(p, h)| p == file && *h == hb) {
+        return;
+    }
+    q.push((file.to_path_buf(), hb));
+    if SEALING.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    drop(q);
+    let started = crate::run_threads::spawn("store-seal", || {
+        let _z = crate::zone_alloc::compiler_thread();
+        loop {
+            let next = {
+                let mut q = TO_SEAL.lock().unwrap_or_else(|e| e.into_inner());
+                // a run that ends, or an exit, leaves the rest to the next open
+                if crate::run_threads::ending() || !ordered() {
+                    q.clear();
+                }
+                let next = q.pop();
+                if next.is_none() {
+                    SEALING.store(false, Ordering::Release);
+                }
+                next
+            };
+            let Some((file, hb)) = next else { break };
+            seal(&file, &hb);
+        }
+    });
+    if started.is_err() {
+        SEALING.store(false, Ordering::Release);
+    }
+}
+
+/// Makes the payloads of the commit `hb` names (an exit's, verified by this process) durable, then
+/// clears its slot's `tail`: a write barrier, then, under the lock and only while the header still
+/// is `hb`, the same header with the active slot's `tail` at its end (its generation unchanged).
+/// The barrier runs outside the lock: no reader or appender waits on the disk for it.
+fn seal(file: &Path, hb: &[u8; HEADER]) {
+    let Ok(mut f) = std::fs::OpenOptions::new().read(true).write(true).open(file) else { return };
+    if order_writes(&f).is_err() || f.lock().is_err() {
+        return;
+    }
+    let mut now = [0u8; HEADER];
+    if f.read_exact(&mut now).is_ok() && now == *hb {
+        if let Some(h) = Header::parse(&now) {
+            let o = SLOTS_AT + h.active as usize * SLOT + 24;
+            now[o..o + 8].copy_from_slice(&h.slots[h.active as usize].end.to_le_bytes());
+            let s = sum64(&now[..HEADER - 8]);
+            now[HEADER - 8..].copy_from_slice(&s.to_le_bytes());
+            let _ = f.seek(SeekFrom::Start(0)).and_then(|_| f.write_all(&now));
+        }
+    }
+    let _ = f.unlock();
+}
+
+/// What a run in this process sets, as a fresh process has it (a run that ends in place).
+pub(crate) unsafe fn reset_statics() {
+    relax_session::reset_static(&EXITING, AtomicBool::new(false));
+    relax_session::reset_static(&TO_SEAL, relax_session::sync::Mutex::new(Vec::new()));
+    relax_session::reset_static(&SEALING, AtomicBool::new(false));
 }
 
 fn encode_index(ix: &[Ix]) -> Vec<u8> {
@@ -443,23 +623,19 @@ impl Store {
             let mut hb = [0u8; HEADER];
             f.read_exact(&mut hb).ok()?;
             let h = Header::parse(&hb)?;
-            let (n, end, sum) = h.slots[h.active as usize];
-            if n > h.cap as u64 {
-                return None;
-            }
-            let mut ib = vec![0u8; n as usize * INDEX_ENTRY];
-            f.seek(SeekFrom::Start(h.slot_off(h.active))).ok()?;
-            f.read_exact(&mut ib).ok()?;
-            if sum64(&ib) != sum {
-                return None;
-            }
+            let len = f.metadata().ok()?.len();
+            let (k, ix) = usable_slot(&mut f, &h, len)?;
+            let s = h.slots[k as usize];
             let data = Bytes::map(&file)?;
-            if (data.len() as u64) < end {
+            if (data.len() as u64) < s.end {
                 return None;
             }
-            Some(Store { path: base.clone(), file: file.clone(), index: decode_index(&ib).into(), generation: sum64(&hb), data,
+            if k == h.active && s.tail < s.end {
+                queue_seal(&file, &hb);
+            }
+            Some(Store { path: base.clone(), file: file.clone(), index: ix.into(), generation: generation(&hb), data,
                 #[cfg(unix)] source: ReadSource::new(&file, &f),
-                data_end: end })
+                data_end: s.end })
         })();
         let _ = f.unlock();
         r
@@ -471,18 +647,21 @@ impl Store {
     pub(crate) fn open_certified(path: &Path, index: &'static [Ix], generation: u64) -> Option<Self> {
         let base = base_path(path);
         let file = current(&base);
-        let f = std::fs::File::open(&file).ok()?;
+        let mut f = std::fs::File::open(&file).ok()?;
         f.lock_shared().ok()?;
         let result = (|| {
             let data = Bytes::map(&file)?;
             let hb = data.get(..HEADER)?;
             let h = Header::parse(hb)?;
-            if sum64(hb) != generation { return None; }
-            let (n, end, _) = h.slots[h.active as usize];
-            if n != index.len() as u64 || n > h.cap as u64 || end > data.len() as u64 { return None; }
+            if self::generation(hb) != generation { return None; }
+            let s = h.slots[h.active as usize];
+            if s.n != index.len() as u64 || s.n > h.cap as u64 || s.end > data.len() as u64 { return None; }
+            // what an exit committed without a barrier is served only once all of it is verified
+            if !index.iter().filter(|e| e.off >= s.tail).all(|e| payload_ok(&mut f, e, s.end)) { return None; }
+            if s.tail < s.end { queue_seal(&file, hb); }
             Some(Self { path: base.clone(), file: file.clone(), index: crate::arena::Arena::Mapped(index), generation, data,
                 #[cfg(unix)] source: ReadSource::new(&file, &f),
-                data_end: end })
+                data_end: s.end })
         })();
         let _ = f.unlock();
         if let Some(st) = &result { st.mark_used(); }
@@ -490,8 +669,8 @@ impl Store {
     }
 
     /// The payload of index entry `i` if its key is `key`: bounds-checked, NOT checksummed. A
-    /// store's index and header are checksummed when it opens and a rewrite re-checks every
-    /// payload it carries; the payload checksums run in the background for front images
+    /// store's index and header are checksummed when it opens, with every payload an exit
+    /// committed without a barrier (Slot::tail), and a rewrite re-checks every payload it carries; the payload checksums run in the background for front images
     /// (`verify_at`), so a warm start does not read every page of what it maps. A torn write is
     /// the store file generations' business, not the reader's.
     pub fn get_at(&self, i: usize, key: u128) -> Option<(u32, &[u8])> {
@@ -583,7 +762,7 @@ pub fn header_generation(path: &Path) -> Option<u64> {
     let mut f = std::fs::File::open(current(&base_path(path))).ok()?;
     f.lock_shared().ok()?;
     let mut hb = [0u8; HEADER];
-    let r = f.read_exact(&mut hb).ok().and_then(|_| Header::parse(&hb)).map(|_| sum64(&hb));
+    let r = f.read_exact(&mut hb).ok().and_then(|_| Header::parse(&hb)).map(|_| generation(&hb));
     let _ = f.unlock();
     r
 }
@@ -592,15 +771,20 @@ pub fn header_generation(path: &Path) -> Option<u64> {
 /// from an empty store (its contents were found stale). Atomic: an append commits by flipping
 /// the header; a rewrite goes through a temp file and rename.
 pub fn append<T: Entry>(path: &Path, entries: Vec<T>, drop_all: bool) -> std::io::Result<()> {
+    append_as(path, entries, drop_all, ordered())
+}
+
+/// `append`; `ordered`: with the write barrier before its commit (else as an exit commits).
+fn append_as<T: Entry>(path: &Path, entries: Vec<T>, drop_all: bool, ordered: bool) -> std::io::Result<()> {
     let base = base_path(path);
-    let r = append_inner(&base, entries, drop_all);
+    let r = append_inner(&base, entries, drop_all, ordered);
     if r.is_ok() {
         mark_live(&base, &base, false);
     }
     r
 }
 
-fn append_inner<T: Entry>(base: &Path, mut entries: Vec<T>, drop_all: bool) -> std::io::Result<()> {
+fn append_inner<T: Entry>(base: &Path, mut entries: Vec<T>, drop_all: bool, ordered: bool) -> std::io::Result<()> {
     // newest first within this batch: a stable sort keeps the first of equal keys
     entries.sort_by_key(|a| a.key());
     entries.dedup_by(|b, a| a.key() == b.key());
@@ -614,7 +798,7 @@ fn append_inner<T: Entry>(base: &Path, mut entries: Vec<T>, drop_all: bool) -> s
         let (g, path) = current_gen(base);
         let f = match std::fs::OpenOptions::new().read(true).write(true).open(&path) {
             Ok(f) => f,
-            Err(_) => return rewrite(base, dir, Vec::new(), None, entries),
+            Err(_) => return rewrite(base, dir, Vec::new(), None, entries, ordered),
         };
         f.lock()?;
         if !gen_path(base, g + 1).exists() {
@@ -623,41 +807,33 @@ fn append_inner<T: Entry>(base: &Path, mut entries: Vec<T>, drop_all: bool) -> s
         let _ = f.unlock();
     };
     let path = base;
-    let r = (|| -> std::io::Result<Option<(Vec<Ix>, Header)>> {
+    let r = (|| -> std::io::Result<Option<(Header, u32, Vec<Ix>)>> {
         let mut hb = [0u8; HEADER];
         if f.read_exact(&mut hb).is_err() {
             return Ok(None);
         }
         let Some(h) = Header::parse(&hb) else { return Ok(None) };
-        let (n, end, sum) = h.slots[h.active as usize];
-        if n > h.cap as u64 {
-            return Ok(None);
-        }
-        let mut ib = vec![0u8; n as usize * INDEX_ENTRY];
-        f.seek(SeekFrom::Start(h.slot_off(h.active)))?;
-        f.read_exact(&mut ib)?;
-        if sum64(&ib) != sum {
-            return Ok(None);
-        }
-        let _ = end;
-        Ok(Some((decode_index(&ib), h)))
+        let len = f.metadata()?.len();
+        // the commit to build on: the active one, or the one before it when an exit's payloads did
+        // not all reach the disk (they are written over)
+        Ok(usable_slot(&mut f, &h, len).map(|(k, ix)| (h, k, ix)))
     })()?;
-    let (mut old, h) = match r {
+    let (h, k, mut old) = match r {
         Some(x) if !drop_all => x,
         // unreadable or stale: replaced whole
         _ => {
-            let res = rewrite(path, dir, Vec::new(), None, entries);
+            let res = rewrite(path, dir, Vec::new(), None, entries, ordered);
             let _ = f.unlock();
             return res;
         }
     };
-    let (_, end, _) = h.slots[h.active as usize];
+    let Slot { end, tail, .. } = h.slots[k as usize];
     if !removed.is_empty() { old.retain(|e| !removed.contains(&{ e.key })); }
     // the merged index: new entries replace old ones of the same key
     let new_keys: std::collections::HashSet<u128> = entries.iter().map(|e| e.key()).collect();
     let merged_n = old.iter().filter(|e| !new_keys.contains(&{ e.key })).count() + entries.len();
     if merged_n as u64 > h.cap as u64 {
-        let res = rewrite(path, dir, old, Some(&f), entries);
+        let res = rewrite(path, dir, old, Some(&f), entries, ordered);
         let _ = f.unlock();
         return res;
     }
@@ -676,20 +852,23 @@ fn append_inner<T: Entry>(base: &Path, mut entries: Vec<T>, drop_all: bool) -> s
     let live: u64 = ix.iter().map(|e| e.len as u64).sum();
     let dead = end.saturating_sub(h.data_start()).saturating_sub(live.min(end));
     if dead * 4 > live && dead > 1 << 20 {
-        let res = rewrite::<T>(path, dir, ix, Some(&f), Vec::new());
+        let res = rewrite::<T>(path, dir, ix, Some(&f), Vec::new(), ordered);
         let _ = f.unlock();
         return res;
     }
     crate::memstat::print_tag("cache append", crate::memstat::Tag::CacheStore);
     let ib = encode_index(&ix);
-    let next = 1 - h.active;
+    let next = 1 - k;
     // the payloads before the index and header that commit them; nothing after the header (a
-    // commit lost to a power cut is a cache miss, and other processes read the page cache)
-    order_writes(&f)?;
+    // commit lost to a power cut is a cache miss, and other processes read the page cache). An
+    // exit's commit has no barrier: the next open verifies its payloads, from `tail` on.
+    if ordered {
+        order_writes(&f)?;
+    }
     f.seek(SeekFrom::Start(h.slot_off(next)))?;
     f.write_all(&ib)?;
     let mut nh = Header { active: next, cap: h.cap, slots: h.slots };
-    nh.slots[next as usize] = (ix.len() as u64, off, sum64(&ib));
+    nh.slots[next as usize] = Slot { n: ix.len() as u64, end: off, sum: sum64(&ib), tail: if ordered { off } else { tail } };
     f.seek(SeekFrom::Start(0))?;
     f.write_all(&nh.bytes())?;
     let _ = f.unlock();
@@ -723,12 +902,12 @@ fn order_writes(f: &std::fs::File) -> std::io::Result<()> {
 
 /// Writes a fresh store with the live entries of `old` (read from `from`) plus `entries`, to a temp
 /// file, then renames it to the store's next generation (never over an existing file).
-fn rewrite<T: Entry>(base: &Path, dir: &Path, old: Vec<Ix>, from: Option<&std::fs::File>, entries: Vec<T>) -> std::io::Result<()> {
+fn rewrite<T: Entry>(base: &Path, dir: &Path, old: Vec<Ix>, from: Option<&std::fs::File>, entries: Vec<T>, ordered: bool) -> std::io::Result<()> {
     let new_keys: std::collections::HashSet<u128> = entries.iter().map(|e| e.key()).collect();
     let old: Vec<_> = old.into_iter().filter(|e| !new_keys.contains(&{ e.key })).collect();
     let n = old.len() + entries.len();
     let cap = (n as u32 + n as u32 / 4).max(MIN_CAP);
-    let mut h = Header { active: 0, cap, slots: [(0, 0, 0); 2] };
+    let mut h = Header { active: 0, cap, slots: [Slot::NONE; 2] };
     let (g, path) = next_gen(base);
     let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
     crate::pack::write_atomic_with(dir, &name, |f| {
@@ -764,12 +943,14 @@ fn rewrite<T: Entry>(base: &Path, dir: &Path, old: Vec<Ix>, from: Option<&std::f
         ix.sort_by_key(|e| e.key);
         crate::memstat::print_tag("cache rewrite", crate::memstat::Tag::CacheStore);
         let ib = encode_index(&ix);
-        h.slots[0] = (ix.len() as u64, off, sum64(&ib));
+        h.slots[0] = Slot { n: ix.len() as u64, end: off, sum: sum64(&ib), tail: if ordered { off } else { h.data_start() } };
         out.seek(SeekFrom::Start(h.slot_off(0)))?;
         out.write_all(&ib)?;
         // the payloads before the header that commits them (as `append`)
         out.flush()?;
-        order_writes(out.get_ref())?;
+        if ordered {
+            order_writes(out.get_ref())?;
+        }
         out.seek(SeekFrom::Start(0))?;
         out.write_all(&h.bytes())?;
         out.flush()?;
@@ -809,6 +990,8 @@ struct RunState {
     /// payloads being written (their index slots are reserved)
     in_flight: usize,
     active: u32,
+    /// the header's slots as the last commit wrote them
+    slots: [Slot; 2],
     /// the written payloads' mappings, by key
     mapped: std::collections::HashMap<u128, &'static [u8]>,
     /// what keeps them mapped: as long as this store lives
@@ -838,12 +1021,13 @@ impl RunStore {
             o.mode(0o600);
         }
         let file = o.open(&path)?;
-        let mut h = Header { active: 0, cap, slots: [(0, 0, 0); 2] };
-        h.slots = [(0, h.data_start(), sum64(&[])); 2];
+        let mut h = Header { active: 0, cap, slots: [Slot::NONE; 2] };
+        let start = h.data_start();
+        h.slots = [Slot { n: 0, end: start, sum: sum64(&[]), tail: start }; 2];
         write_at(&file, &h.bytes(), 0)?;
         mark_live(&path, &path, false);
         Ok(RunStore { name: name.into(), path, file, cap,
-            state: relax_session::sync::Mutex::new(RunState { end: h.data_start(), written: h.data_start(), ..Default::default() }),
+            state: relax_session::sync::Mutex::new(RunState { end: start, written: start, slots: h.slots, ..Default::default() }),
             commit: relax_session::sync::Mutex::new(()) })
     }
 
@@ -908,20 +1092,31 @@ impl RunStore {
     /// commit, unless the first `n` payloads written are committed already (by a commit that
     /// covered them, perhaps made for another writer meanwhile): one sync covers many writers.
     pub fn commit_upto(&self, n: usize) -> std::io::Result<()> {
+        self.commit_as(n, ordered())
+    }
+
+    /// `commit_upto`; `ordered`: with the write barrier before the commit (else as an exit commits).
+    fn commit_as(&self, n: usize, ordered: bool) -> std::io::Result<()> {
         let _c = self.commit.lock().unwrap_or_else(|e| e.into_inner());
-        let (mut ix, end, n, active) = {
+        let (mut ix, end, n, active, slots, fresh) = {
             let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
             if s.committed >= n.min(s.index.len()) { return Ok(()); }
-            (s.index.clone(), s.written, s.index.len(), s.active)
+            // the lowest payload this commit adds: payloads finish out of order, so one may lie
+            // below the last commit's end
+            let fresh = s.index[s.committed..].iter().map(|e| e.off).min().unwrap_or(s.written);
+            (s.index.clone(), s.written, s.index.len(), s.active, s.slots, fresh)
         };
         ix.sort_by_key(|e| e.key);
         ix.dedup_by_key(|e| e.key);
         // the payloads before the index and header that commit them (see `append`)
-        order_writes(&self.file)?;
+        if ordered {
+            order_writes(&self.file)?;
+        }
         let ib = encode_index(&ix);
         let next = 1 - active;
-        let mut h = Header { active: next, cap: self.cap, slots: [(0, 0, 0); 2] };
-        h.slots[next as usize] = (ix.len() as u64, end, sum64(&ib));
+        let mut h = Header { active: next, cap: self.cap, slots };
+        let tail = if ordered { end } else { slots[active as usize].tail.min(fresh) };
+        h.slots[next as usize] = Slot { n: ix.len() as u64, end, sum: sum64(&ib), tail };
         self.file.lock()?;
         let r = (|| {
             write_at(&self.file, &ib, h.slot_off(next))?;
@@ -932,6 +1127,7 @@ impl RunStore {
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
         s.committed = n;
         s.active = next;
+        s.slots = h.slots;
         Ok(())
     }
 
@@ -1124,18 +1320,11 @@ pub fn peek(p: &Path, kind: u32) -> Option<Vec<Vec<u8>>> {
         let mut hb = [0u8; HEADER];
         f.read_exact(&mut hb).ok()?;
         let h = Header::parse(&hb)?;
-        let (n, end, sum) = h.slots[h.active as usize];
-        if n > h.cap as u64 {
-            return None;
-        }
-        let mut ib = vec![0u8; n as usize * INDEX_ENTRY];
-        f.seek(SeekFrom::Start(h.slot_off(h.active))).ok()?;
-        f.read_exact(&mut ib).ok()?;
-        if sum64(&ib) != sum {
-            return None;
-        }
+        let len = f.metadata().ok()?.len();
+        let (k, ix) = usable_slot(&mut f, &h, len)?;
+        let end = h.slots[k as usize].end;
         let mut out = Vec::new();
-        for e in decode_index(&ib).into_iter().filter(|e| e.kind == kind && e.off + e.len as u64 <= end) {
+        for e in ix.into_iter().filter(|e| e.kind == kind && e.off + e.len as u64 <= end) {
             let mut b = vec![0u8; e.len as usize];
             f.seek(SeekFrom::Start(e.off)).ok()?;
             f.read_exact(&mut b).ok()?;
@@ -1465,5 +1654,129 @@ mod tests {
         }
         // the folder also holds this process's live lock (hold_build)
         std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// The active commit of the store file at `p` and its index, read as an open reads them but
+    /// without opening it (an open that verifies an exit's commit starts its seal).
+    fn active(p: &Path) -> (Slot, Vec<Ix>) {
+        let mut f = std::fs::File::open(current(&base_path(p))).unwrap();
+        let mut hb = [0u8; HEADER];
+        f.read_exact(&mut hb).unwrap();
+        let h = Header::parse(&hb).unwrap();
+        let len = f.metadata().unwrap().len();
+        (h.slots[h.active as usize], slot_index(&mut f, &h, h.active, len).unwrap())
+    }
+
+    /// A commit of key 1 under its barrier, then an exit's commit of key 2 without one: key 2's
+    /// payload offset, and the exit's commit (unopened).
+    fn exit_over(p: &Path) -> (u64, Slot, Vec<Ix>) {
+        append_as(p, vec![NewEntry { key: 1, kind: 1, payload: vec![1; 5000] }], false, true).unwrap();
+        append_as(p, vec![NewEntry { key: 2, kind: 1, payload: vec![2; 5000] }], false, false).unwrap();
+        let (s, ix) = active(p);
+        (ix.iter().find(|e| e.key == 2).unwrap().off, s, ix)
+    }
+
+    /// An exit commits without the write barrier (so it does not wait on the disk) and says from
+    /// where: an open verifies those payloads and serves them, then seals the commit (its barrier,
+    /// after the fact) without changing its generation; a later commit with its barrier covers them.
+    #[test]
+    fn an_exits_commit_is_verified_served_and_sealed() {
+        let d = tmpdir("exit-tail");
+        let p = d.join("core-00112233445566bb.rcs");
+        let (two, s, _) = exit_over(&p);
+        assert!(s.tail <= two && s.tail < s.end, "the exit's commit says where its unordered payloads begin");
+        let st = Store::open(&p).unwrap();
+        assert_eq!(st.get(1).unwrap().1, &[1u8; 5000][..]);
+        assert_eq!(st.get(2).unwrap().1, &[2u8; 5000][..]);
+        // sealed here, or already by the thread the open started
+        let mut hb = [0u8; HEADER];
+        std::fs::File::open(&p).unwrap().read_exact(&mut hb).unwrap();
+        seal(&p, &hb);
+        let (s, ix) = active(&p);
+        assert_eq!(s.tail, s.end, "a sealed commit has nothing left to verify");
+        assert_eq!(ix.len(), 2);
+        assert_eq!(header_generation(&p), Some(st.generation), "a seal keeps the commit's generation");
+        let certified = Store::open_certified(&p, Box::leak(st.index.to_vec().into_boxed_slice()), st.generation).unwrap();
+        assert_eq!(certified.get(2).unwrap().1, &[2u8; 5000][..]);
+        // another exit's commit, then one with its barrier: that one covers both
+        append_as(&p, vec![NewEntry { key: 3, kind: 1, payload: vec![3; 100] }], false, false).unwrap();
+        assert!(active(&p).0.tail < active(&p).0.end);
+        append_as(&p, vec![NewEntry { key: 4, kind: 1, payload: vec![4; 100] }], false, true).unwrap();
+        let (s, ix) = active(&p);
+        assert_eq!((s.tail, ix.len()), (s.end, 4));
+        drop((st, certified));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// An exit's commit whose payloads did not all reach the disk (a power cut: `damage`) gives way
+    /// to the commit before it: nothing of the exit's is served (by an open, a collected program's
+    /// certified index, or a peek), the commit before stays warm, and the next commit builds on it.
+    fn falls_back_to_the_commit_before(tag: &str, damage: impl Fn(&Path, u64)) {
+        let d = tmpdir(tag);
+        let p = d.join("core-00112233445566cc.rcs");
+        let (two, _, exit_index) = exit_over(&p);
+        let exit_generation = header_generation(&p).unwrap();
+        damage(&p, two);
+        let st = Store::open(&p).expect("the commit before the exit's");
+        assert_eq!(st.get(1).unwrap().1, &[1u8; 5000][..], "the commit before stays warm");
+        assert!(st.get(2).is_none(), "an exit's payload that did not all reach the disk is never served");
+        assert!(Store::open_certified(&p, Box::leak(exit_index.into_boxed_slice()), exit_generation).is_none());
+        assert_eq!(peek(&p, 1).unwrap(), vec![vec![1u8; 5000]]);
+        // the next run's commit (with its barrier) builds on the commit before
+        append_as(&p, vec![NewEntry { key: 3, kind: 1, payload: vec![3; 100] }], false, true).unwrap();
+        let next = Store::open(&p).unwrap();
+        assert_eq!(next.get(1).unwrap().1, &[1u8; 5000][..]);
+        assert_eq!(next.get(3).unwrap().1, &[3u8; 100][..]);
+        assert!(next.get(2).is_none());
+        let (s, ix) = active(&p);
+        assert_eq!((s.tail, ix.len()), (s.end, 2));
+        drop((st, next));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_truncated_exit_commit_falls_back() {
+        falls_back_to_the_commit_before("exit-cut", |p, two| {
+            std::fs::OpenOptions::new().write(true).open(p).unwrap().set_len(two + 2500).unwrap();
+        });
+    }
+
+    #[test]
+    fn a_torn_exit_commit_falls_back() {
+        falls_back_to_the_commit_before("exit-torn", |p, two| {
+            let f = std::fs::OpenOptions::new().write(true).open(p).unwrap();
+            write_at(&f, &[0x5a; 16], two + 2500).unwrap();
+        });
+    }
+
+    #[test]
+    fn an_exit_header_past_the_files_end_falls_back() {
+        falls_back_to_the_commit_before("exit-eof", |p, two| {
+            std::fs::OpenOptions::new().write(true).open(p).unwrap().set_len(two).unwrap();
+        });
+    }
+
+    /// A run store's commit at an exit: the same verification, and the same fall back.
+    #[test]
+    fn a_torn_exit_commit_of_a_run_store_falls_back() {
+        let d = tmpdir("run-exit");
+        let run = RunStore::create(&d, "front_run", 8).unwrap();
+        let put = |b: u8| match run.append(b as u128, 6, 3000, &|out| out.write_all(&[b; 3000])) {
+            Appended::Done(key, _) => key,
+            _ => panic!("append"),
+        };
+        let one = put(1);
+        run.commit_as(usize::MAX, true).unwrap();
+        let two = put(2);
+        run.commit_as(usize::MAX, false).unwrap();
+        let (s, ix) = active(&run.path);
+        let at = ix.iter().find(|e| e.key == two).unwrap().off;
+        assert!(s.tail <= at && s.tail < s.end);
+        let f = std::fs::OpenOptions::new().write(true).open(&run.path).unwrap();
+        write_at(&f, &[0x5a; 16], at + 1000).unwrap();
+        let st = Store::open(&run.path).unwrap();
+        assert_eq!(st.get(one).unwrap().1, &[1u8; 3000][..]);
+        assert!(st.get(two).is_none());
+        drop(st);
     }
 }
