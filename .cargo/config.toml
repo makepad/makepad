@@ -11,9 +11,17 @@
 # binary and its speed are unchanged. `-Z allow-features=` (an empty list) keeps the bootstrap from letting a
 # `#![feature]` through: one fails with E0725, as it would on stable (tools/run/src/build_flags.rs tests both).
 # Every host build here (cargo run/build/test/check by hand, devhub, CI and the land gate) gets this one flag set;
-# a different set builds and stores its own copy of every crate. Cross targets keep plain flags, and builds that
-# set RUSTFLAGS (Runner, the CI's cross checks) replace these flags along with target-cpu=native. A rustc without
-# `-Z threads` stops at cargo's first call: "unknown unstable option: `threads`".
+# a different set builds and stores its own copy of every crate. A rustc without `-Z threads` stops at cargo's first
+# call: "unknown unstable option: `threads`".
+#
+# The bootstrap reaches every rustc cargo runs here, cross targets too, so every target gets `-Z allow-features=`:
+# the host tables below with the frontend flags, every other target through [build] (a target without a table of
+# its own). Builds that set RUSTFLAGS replace both and add the flag themselves (Runner, cargo-makepad's Android
+# build, the CI's stable cross checks, tools/run/host/build.sh). Two kinds stay without it, as they must:
+# a nightly `-Z build-std` build (it compiles std, whose crates need their features) sets RUSTFLAGS itself (empty
+# is enough: cargo-makepad's tvOS and build-std checks, the CI's std shard, the wasm build); and the build scripts
+# and proc macros of a `--target` build, which cargo gives no rustflags at all (they are the host build's crates,
+# where a feature fails).
 [env]
 RUSTC_BOOTSTRAP = "1"
 
@@ -26,7 +34,7 @@ RUSTC_BOOTSTRAP = "1"
 # For local PGO experiments, pass an absolute path explicitly, for example:
 # RUSTFLAGS="-Cprofile-use=/tmp/box3d-pgo/merged.profdata" cargo build --release -p makepad-box3d
 [build]
-rustflags = []
+rustflags = ["-Z", "allow-features="]
 
 [target.x86_64-unknown-linux-gnu]
 rustflags = ["-C", "target-cpu=native", "-Z", "threads=8", "-Z", "allow-features="]

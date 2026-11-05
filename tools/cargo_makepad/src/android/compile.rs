@@ -331,8 +331,10 @@ fn host_bin_name(host_os: HostOs, bin_filename: &str, windows_extension: &str) -
 }
 
 /// The `RUSTFLAGS` an Android `cargo rustc` for `android_target` runs with:
-/// the caller's flags, `-C prefer-dynamic` when asked, and the
-/// `--cfg android_target="<arch>"` the platform crate reads.
+/// the caller's flags, `-C prefer-dynamic` when asked, the
+/// `--cfg android_target="<arch>"` the platform crate reads, and
+/// `-Z allow-features=`: the workspace's `RUSTC_BOOTSTRAP=1` (.cargo/config.toml)
+/// reaches this build too, and RUSTFLAGS replaces the config's flags.
 pub fn android_rustflags(
     existing: Option<&str>,
     android_target: &AndroidTarget,
@@ -916,6 +918,13 @@ fn compose_android_rustflags(existing: Option<&str>, cfg_flag: &str, prefer_dyna
             rustflags.push(' ');
         }
         rustflags.push_str(cfg_flag.trim());
+    }
+    // the caller's own allow list (`-Z allow-features=a,b` or `-Zallow-features=..`) stands
+    if !rustflags.split_whitespace().any(|token| token.starts_with("allow-features=") || token.starts_with("-Zallow-features=")) {
+        if !rustflags.is_empty() {
+            rustflags.push(' ');
+        }
+        rustflags.push_str("-Z allow-features=");
     }
     rustflags
 }
@@ -3754,7 +3763,7 @@ default via 192.0.2.1 dev wlan0 proto dhcp src 192.0.2.42 metric 303\n\
     fn compose_android_rustflags_adds_prefer_dynamic() {
         assert_eq!(
             compose_android_rustflags(None, "--cfg android_target=\"aarch64\"", true),
-            "-C prefer-dynamic --cfg android_target=\"aarch64\""
+            "-C prefer-dynamic --cfg android_target=\"aarch64\" -Z allow-features="
         );
     }
 
@@ -3762,7 +3771,7 @@ default via 192.0.2.1 dev wlan0 proto dhcp src 192.0.2.42 metric 303\n\
     fn compose_android_rustflags_preserves_existing_flags() {
         assert_eq!(
             compose_android_rustflags(Some("-C debuginfo=1"), "--cfg android_target=\"aarch64\"", true),
-            "-C debuginfo=1 -C prefer-dynamic --cfg android_target=\"aarch64\""
+            "-C debuginfo=1 -C prefer-dynamic --cfg android_target=\"aarch64\" -Z allow-features="
         );
     }
 
@@ -3774,7 +3783,7 @@ default via 192.0.2.1 dev wlan0 proto dhcp src 192.0.2.42 metric 303\n\
                 "--cfg android_target=\"aarch64\"",
                 true,
             ),
-            "-C prefer-dynamic -C debuginfo=1 --cfg android_target=\"aarch64\""
+            "-C prefer-dynamic -C debuginfo=1 --cfg android_target=\"aarch64\" -Z allow-features="
         );
     }
 
@@ -3786,7 +3795,15 @@ default via 192.0.2.1 dev wlan0 proto dhcp src 192.0.2.42 metric 303\n\
                 "--cfg android_target=\"aarch64\"",
                 false,
             ),
-            "-C debuginfo=1 --cfg android_target=\"aarch64\""
+            "-C debuginfo=1 --cfg android_target=\"aarch64\" -Z allow-features="
+        );
+    }
+
+    #[test]
+    fn compose_android_rustflags_keeps_the_callers_allow_list() {
+        assert_eq!(
+            compose_android_rustflags(Some("-Z allow-features=test"), "--cfg android_target=\"aarch64\"", false),
+            "-Z allow-features=test --cfg android_target=\"aarch64\""
         );
     }
 }

@@ -22,9 +22,10 @@ is the one it loads. It never picks a model you did not install.
   Check: `df -h ~`.
 - Linux/Windows with NVIDIA: the CUDA toolkit, and its root in
   `MAKEPAD_CUDA_ROOT` (for example `export MAKEPAD_CUDA_ROOT=/opt/cuda`).
-  Without it the build succeeds but prints
-  `makepad-ai-cuda: building WITHOUT CUDA — GPU inference is unavailable`.
-  Add `MAKEPAD_GGML_REQUIRE_CUDA=1` to make that an error instead.
+  Without it the build succeeds with no CUDA kernels, and says nothing; add
+  `MAKEPAD_GGML_REQUIRE_CUDA=1` to make that an error instead. A
+  `MAKEPAD_CUDA_ROOT` that does not hold a toolkit (no `bin/nvcc`, no
+  libcudart) fails the build, and so does a toolkit whose kernels fail to compile.
   Only the hub builds the kernels: they are makepad-ai-cuda's `cuda` feature, on in
   `makepad-app-ai-hub` (default) and the AI Hub app's `node`. Every other app is CPU-only;
   a model crate's own bin or test gets CUDA with `--features makepad-ai-cuda/cuda`.
@@ -41,7 +42,8 @@ export PATH="$PWD/target/release:$PATH"
 
 Success: `target/release/makepad-app-ai-hub`, `makepad-code` and
 `hub-install` exist (about 2.5 min on a 32-core Linux box with the CUDA kernels; the 23 kernels build twice, about 1 min each).
-If `makepad-ai-cuda: building WITHOUT CUDA` appears on an NVIDIA machine,
+On an NVIDIA machine the build log shows
+`makepad-ai-cuda: building 23 CUDA kernels for sm_<arch>`; if it does not,
 set `MAKEPAD_CUDA_ROOT` (step 0) and build again.
 
 ## 2. Install the model

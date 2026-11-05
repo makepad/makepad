@@ -9,6 +9,14 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+/// The `RUSTFLAGS` of a nightly `-Z build-std` build: the caller's, else none. Set even when empty, so that
+/// the workspace config's `-Z allow-features=` (.cargo/config.toml `[build]`, there because the config's
+/// RUSTC_BOOTSTRAP=1 reaches every target) stays off it: build-std compiles std, whose own crates need
+/// their features.
+pub fn build_std_rustflags() -> String {
+    std::env::var("RUSTFLAGS").unwrap_or_default()
+}
+
 /// Ensure a rustup toolchain channel (e.g. `"stable"`, `"nightly"`) is present,
 /// WITHOUT updating it if it already exists.
 ///

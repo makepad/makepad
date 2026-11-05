@@ -281,7 +281,9 @@ it used (this one and any build or bench node):
   letting a `#![feature]` through, so stable's guarantee still holds. Do not
   add these flags in `~/.cargo/config.toml` or override them per shell with
   `RUSTFLAGS`: a different flag set builds a second copy of every crate.
-  Cross targets keep plain flags.
+  Cross targets get `-Z allow-features=` too (`[build] rustflags`); a build
+  that sets `RUSTFLAGS` for one adds it, except a nightly `-Z build-std`
+  build, which needs std's features.
 - Use the WM’s Cargo launch path for its hosted apps: `cargo run --release`
   builds each app on demand, and the WM shows compilation while it starts.
   Do not collect prebuilt app binaries for a WM session.

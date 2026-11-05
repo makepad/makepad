@@ -770,6 +770,10 @@ pub fn build(
         rust_env.push(("IPHONEOS_DEPLOYMENT_TARGET", IOS_DEPLOYMENT_TARGET));
         rust_env.push(("IPHONESIMULATOR_DEPLOYMENT_TARGET", IOS_DEPLOYMENT_TARGET));
     }
+    let build_std_flags = build_std_rustflags();
+    if apple_target.needs_build_std() {
+        rust_env.push(("RUSTFLAGS", build_std_flags.as_str()));
+    }
     shell_env(&rust_env, &cwd, "rustup", &args_out)?;
 
     // Read the application contract directly from the freshly linked Mach-O before copying or
@@ -1418,8 +1422,10 @@ pub fn build_host(stable: bool, org: &str, product: &str, package: &str, flags: 
     }
     // the JIT's own build profile, the desktop `makepad`'s (opt-level 3, LTO within each crate)
     let mut args = vec!["run", apple_target.rust_channel(stable), "cargo", "build", "--profile", "host", "-p", "makepad-run", "--bin", "makepad", &target_opt, &target_dir_arg];
+    let build_std_flags = build_std_rustflags();
     if apple_target.needs_build_std() {
         args.extend(["-Z", "build-std=std"]);
+        rust_env.push(("RUSTFLAGS", build_std_flags.as_str()));
     }
     shell_env(&rust_env, &cwd, "rustup", &args)?;
     let src_bin = target_dir.join(format!("{}/host/makepad", apple_target.toolchain()));
