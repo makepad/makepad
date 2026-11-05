@@ -4,4 +4,5 @@ fn main() {
     println!("hash {:016x}", cnative::hash(b"makepad"));
     println!("apply {}", cnative::apply(inc, 20));
     println!("cfg {}", cnative::built());
+    println!("hidden {}", cnative::hidden_mul(6, 7));
 }

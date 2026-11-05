@@ -17,6 +17,8 @@
 // modules would otherwise resolve next to it (the Win32 declarations are not here: relax_session::win32)
 #[path = "os/fault.rs"]
 pub mod fault;
+/// Local (hidden) symbols of --allow-c's native library, by its symbol table.
+pub mod hidden;
 #[path = "os/mem.rs"]
 pub mod mem;
 #[path = "os/proc.rs"]

@@ -7,3 +7,8 @@ pub fn add(a: i32, b: i32) -> i32 { unsafe { cn_add(a, b) } }
 pub fn hash(b: &[u8]) -> u64 { unsafe { cn_hash(b.as_ptr(), b.len()) } }
 pub fn apply(f: extern "C" fn(i32) -> i32, x: i32) -> i32 { unsafe { cn_apply(f, x) } }
 pub fn built() -> bool { cfg!(cnative_built) }
+extern "C" {
+    fn cn_hidden_mul(a: i32, b: i32) -> i32;
+}
+/// A function the library does not export (hidden visibility).
+pub fn hidden_mul(a: i32, b: i32) -> i32 { unsafe { cn_hidden_mul(a, b) } }
