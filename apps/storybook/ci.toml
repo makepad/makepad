@@ -3,16 +3,16 @@
 [app.linux]
 capture = ""
 date = "2026-11-05"
-digest = "591a2ed9505a7d0ef5529c518570997dec8e9e7da041ab327a2e6465649f2fb3"
-main = "f8b30e3e6c67708763fe2bef9ae80fa8f7eb0a3a"
-work = "8ab7761fc8fcd495fc5bb589ce486a61f33965f7"
+digest = "cc6198a11274bf3736deba53f556bd69de0ff2e144a6ac637a46ef07c5ef9cab"
+main = "6aff3f7d4a7dc69809181ec243f85de10ec70841"
+work = "bc7950ba2a9ef116af414b0bd12331146b736804"
 
 [app.windows]
 capture = ""
 date = "2026-11-05"
-digest = "a12456f00440ac5532e0b55b9d5f59c9d43396cadb84b3521e1cbfb6cc919fc5"
-main = "bac634fd1103ed3453797a04fb1bdf0dd8a1ba9c"
-work = "7954fb8a65f663048b1ea7dfcbc6e4a8c5d65464"
+digest = "8b4cc1096174e106992f3a45ac62dbb9eab94f767593d9c62e7c120f1c3c2195"
+main = "c54d1b8e946549ffe004fa3467876d47000b8217"
+work = "cf0505f036e9ec9290479362fa89eb169ff714d6"
 
 [job.jit_05.linux]
 date = "2026-11-04"

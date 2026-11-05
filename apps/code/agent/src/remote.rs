@@ -112,13 +112,13 @@ pub fn specs() -> Vec<ToolSpec> {
         t("apps", "List the running makepad apps on this machine and on the paired hosts: target name, pid, and the AI services each offers (with tool counts). Apps inside a window manager are listed under it.",
           r#"{"type":"object","properties":{}}"#),
         t("app_tools", "Show the AI tools of a running app: name, risk, what it does, its arguments.",
-          r#"{"type":"object","properties":{"target":{"type":"string","description":"app name, pid, or host:app (from apps)"},"service":{"type":"string","description":"only this service"}},"required":["target"]}"#),
+          r#"{"type":"object","properties":{"target":{"type":"string","description":"pid or host:pid (from apps)"},"service":{"type":"string","description":"only this service"}},"required":["target"]}"#),
         t("app_call", "Call one AI tool of a running app and get its result.",
-          r#"{"type":"object","properties":{"target":{"type":"string","description":"app name, pid, or host:app"},"tool":{"type":"string","description":"service.tool, e.g. calculator.eval"},"args":{"type":"string","description":"the arguments as a JSON object, default {}"},"instance":{"type":"string","description":"which instance when several run (the endpoint from apps, e.g. w4)"}},"required":["target","tool"]}"#),
+          r#"{"type":"object","properties":{"target":{"type":"string","description":"pid or host:pid (from apps)"},"tool":{"type":"string","description":"service.tool, e.g. calculator.eval"},"args":{"type":"string","description":"the arguments as a JSON object, default {}"},"instance":{"type":"string","description":"which instance when several run (the endpoint from apps, e.g. w4)"}},"required":["target","tool"]}"#),
         t("ui", "Drive an app's window directly: `dump` (widget tree), `snap` (widgets with their positions), `click x=.. y=..`, `text text=..`, `key key=..`, `grab` (a PNG), `status`, `help` (all commands).",
-          r#"{"type":"object","properties":{"target":{"type":"string","description":"app name, pid, or host:pid"},"command":{"type":"string","description":"the command line, e.g. click x=120 y=40"}},"required":["target","command"]}"#),
+          r#"{"type":"object","properties":{"target":{"type":"string","description":"pid or host:pid (from apps)"},"command":{"type":"string","description":"the command line, e.g. click x=120 y=40"}},"required":["target","command"]}"#),
         t("attach", "Add the tools of one app service to your own tools for this session (at most 3 services), so you call them directly as <service>__<tool> with named arguments instead of through app_call.",
-          r#"{"type":"object","properties":{"target":{"type":"string","description":"app name, pid, or host:app"},"service":{"type":"string","description":"the service id from apps"},"instance":{"type":"string","description":"which instance when several run"}},"required":["target","service"]}"#),
+          r#"{"type":"object","properties":{"target":{"type":"string","description":"pid or host:pid (from apps)"},"service":{"type":"string","description":"the service id from apps"},"instance":{"type":"string","description":"which instance when several run"}},"required":["target","service"]}"#),
         t("detach", "Remove an attached service's tools.",
           r#"{"type":"object","properties":{"service":{"type":"string"}},"required":["service"]}"#),
         t("list_apps", "Every makepad app on this machine (the app registry): id, label, package, whether it is built and running; and what the window manager runs, when one runs. Use it for \"what apps are there\".",
@@ -189,7 +189,7 @@ fn hub_ask(hub: &Client, target: &str, service: &str, args: &str, line: &str, ea
     }
 }
 
-/// A client of `target`: local by app name or pid, or `<host>:<app|pid>` through the hub.
+/// A client of `target`: local by pid, or `<host>:<pid>` through the hub.
 fn client(target: &str) -> Result<Client, String> {
     let target = target.trim();
     if target.contains(':') {

@@ -3,9 +3,9 @@
 [app.linux]
 capture = ""
 date = "2026-11-05"
-digest = "7932b78a3e85c9b84c46ff5ebe77e1854a8ec0f4777e6c3f291f4d382130ea62"
-main = "d47583cbdaf8c9b01e43ac1218a7b8fde373f93c"
-work = "76947602e9bddae66de9d80bd8a393a6c8073a17"
+digest = "838410f6d3a070339af7b93f5004dd334587ca9be2d48f5eb6cebb2605b39a32"
+main = "6aff3f7d4a7dc69809181ec243f85de10ec70841"
+work = "bc7950ba2a9ef116af414b0bd12331146b736804"
 
 [app.macos]
 capture = ""
