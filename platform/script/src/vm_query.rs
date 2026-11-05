@@ -379,8 +379,8 @@ impl ScriptCode {
             },
             QUERY_BODY_MODULE => {
                 let bodies = self.bodies.borrow();
-                match bodies.get(req.index).map(|b| &b.source) {
-                    Some(ScriptSource::Mod(m)) => {
+                match bodies.get(req.index).and_then(|b| b.source.written()) {
+                    Some(m) => {
                         text0.push(&m.cargo_manifest_path);
                         text1.push(&m.module_path);
                         true

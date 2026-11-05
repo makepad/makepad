@@ -15,7 +15,7 @@ use makepad_script::value::*;
 use makepad_script::heap::ScriptHeap;
 use makepad_script::vm::*;
 use std::collections::{HashMap, HashSet};
-use std::sync::Mutex;
+use makepad_relax_api::sync::Mutex;
 
 /// A top-level statement of a Splash block: its byte range (from the end
 /// of the previous statement, so the comments above it are its own) and
@@ -438,6 +438,12 @@ struct TouchRecord {
 }
 
 static TOUCHES: Mutex<Option<TouchRecord>> = Mutex::new(None);
+
+/// (`crate::end_run`)
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn end_run() {
+    *TOUCHES.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
 
 fn fnv64(bytes: &[u8]) -> u64 {
     bytes.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &b| (h ^ b as u64).wrapping_mul(0x100_0000_01b3))

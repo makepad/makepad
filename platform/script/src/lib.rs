@@ -2,6 +2,24 @@
 // spellings rather than depending on Rust's host-side constants.
 #![allow(clippy::approx_constant)]
 
+/// A run of this process's app ended in place (`makepad run`): what this crate holds of it goes, as
+/// a fresh process has it. Its VMs went with the run's heap without dropping.
+pub fn end_run() {
+    inspect_query::end_run();
+    inspect_registry::end_run();
+    literal::end_run();
+    heap_tag::end_run();
+    gc::end_run();
+    touch::end_run();
+}
+
+/// A domain's heap goes while the process and other programs go on: what the crate's statics hold
+/// of that program's VMs goes first. (The rest of those statics is in the process's heap.)
+pub fn end_domain(heap: std::ops::Range<usize>) {
+    inspect_registry::end_domain(heap.clone());
+    literal::end_domain(heap);
+}
+
 pub use makepad_error_log;
 pub use makepad_live_id;
 pub use makepad_live_id::makepad_live_id_macros;

@@ -138,7 +138,7 @@ pub fn metal_draw(output: &ShaderOutput, types: &impl crate::shader_types::Shade
         }
         let name = cx.plain_global_name(g as GlobalId);
         match glob.kind {
-            IrGlobalKind::Io(IrIo::Geometry | IrIo::DynInstance | IrIo::RustInstance | IrIo::Varying | IrIo::FragmentOutput(_) | IrIo::FragmentDepth)
+            IrGlobalKind::Io(IrIo::Geometry | IrIo::DynInstance | IrIo::RustInstance | IrIo::Varying | IrIo::FragmentOutput(_) | IrIo::FragmentDepth | IrIo::FragmentPosition)
             | IrGlobalKind::VertexPosition
             | IrGlobalKind::InstanceIndex => {
                 writeln!(out, "    {};", cx.decl(glob.ty, &name)).ok();
@@ -218,7 +218,7 @@ pub fn metal_draw(output: &ShaderOutput, types: &impl crate::shader_types::Shade
             }
             // The invocation's state starts zeroed: a varying a vertex
             // function writes on some paths only passes 0 on the others.
-            IrGlobalKind::Io(IrIo::Geometry | IrIo::DynInstance | IrIo::RustInstance | IrIo::Varying | IrIo::FragmentOutput(_) | IrIo::FragmentDepth)
+            IrGlobalKind::Io(IrIo::Geometry | IrIo::DynInstance | IrIo::RustInstance | IrIo::Varying | IrIo::FragmentOutput(_) | IrIo::FragmentDepth | IrIo::FragmentPosition)
             | IrGlobalKind::VertexPosition
             | IrGlobalKind::InstanceIndex => {
                 writeln!(fill, "    _mp.{} = {{}};", cx.plain_global_name(g as GlobalId)).ok();

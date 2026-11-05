@@ -30,7 +30,7 @@ use crate::vm::ScriptVm;
 #[relax_api(plain)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EvalLimits {
-    pub instructions: usize,
+    pub instructions: u64,
     /// Heap bytes the evaluation may allocate.
     pub heap_bytes: usize,
     pub stack_values: usize,
@@ -54,7 +54,7 @@ impl EvalLimits {
         call_frames: 1024,
     };
 
-    pub const fn with_instructions(self, instructions: usize) -> EvalLimits {
+    pub const fn with_instructions(self, instructions: u64) -> EvalLimits {
         EvalLimits { instructions, ..self }
     }
 }
@@ -63,7 +63,7 @@ impl EvalLimits {
 #[relax_api(handle)]
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct EvalReport {
-    pub instructions: usize,
+    pub instructions: u64,
     pub heap: ScriptAllocationReport,
     /// The limit that stopped the evaluation (its script error message).
     pub limit: Option<String>,

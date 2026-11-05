@@ -15,8 +15,8 @@ use crate::trap::*;
 use std::collections::VecDeque;
 use std::fmt::Write as _;
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+use makepad_relax_api::sync::Mutex;
 use std::sync::mpsc::{channel, Sender};
-use std::sync::Mutex;
 
 // ------------------------------------------------------------------ safe points
 
@@ -25,6 +25,21 @@ type Job = Box<dyn FnOnce(&ScriptVmBase) -> Vec<String> + Send>;
 static PENDING: Mutex<Vec<(u32, u64, Job, Sender<Vec<String>>)>> = Mutex::new(Vec::new());
 static NEXT_JOB: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 static ANY_PENDING: AtomicBool = AtomicBool::new(false);
+
+/// (`crate::end_run`) The queries wait for VMs that are gone: their askers hear nothing. The
+/// wakers, trace and line probes were the ended run's.
+pub(crate) fn end_run() {
+    let pending = std::mem::take(&mut *PENDING.lock().unwrap_or_else(|e| e.into_inner()));
+    drop(pending);
+    ANY_PENDING.store(false, std::sync::atomic::Ordering::Release);
+    WAKERS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    TRACE_ON.store(false, std::sync::atomic::Ordering::Release);
+    *TRACE.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    CALLS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    SITES.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    LINE_PROBES_ON.store(false, std::sync::atomic::Ordering::Release);
+    LINE_PROBES.lock().unwrap_or_else(|e| e.into_inner()).clear();
+}
 
 /// The VM `base` is about to run script on its own thread: answer the queries waiting for it.
 #[inline(always)]
@@ -47,7 +62,8 @@ fn serve(base: &ScriptVmBase) {
     };
     for (_, _, job, tx) in mine {
         let lines = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job(base))).unwrap_or_else(|_| vec![err("the query panicked while reading the VM")]);
-        let _ = tx.send(lines);
+        // (the asker reads the answer past this program's end)
+        let _ = tx.send(makepad_relax_api::process_heap(|| lines.clone()));
     }
 }
 
@@ -80,7 +96,7 @@ static WAKERS: Mutex<Vec<(extern "C" fn(u32), u32)>> = Mutex::new(Vec::new());
 pub fn add_idle_waker(wake: extern "C" fn(u32), arg: u32) {
     if let Ok(mut w) = WAKERS.lock() {
         if !w.contains(&(wake, arg)) {
-            w.push((wake, arg));
+            makepad_relax_api::process_heap(|| w.push((wake, arg)));
         }
     }
 }
@@ -437,6 +453,11 @@ pub(crate) fn trace_wants(type_name: &str, method: LiveId) -> Option<String> {
 /// A traced call returned: its arguments and result, formatted on the VM's thread.
 #[cold]
 pub(crate) fn trace_record(base: &ScriptVmBase, verb: String, ip: ScriptIp, args: ScriptObject, ret: ScriptValue) {
+    // (what the trace keeps is read past this program's end)
+    makepad_relax_api::process_heap(|| trace_record_here(base, verb.clone(), ip, args, ret))
+}
+
+fn trace_record_here(base: &ScriptVmBase, verb: String, ip: ScriptIp, args: ScriptObject, ret: ScriptValue) {
     let heap = &base.heap;
     // positional arguments, the `self` key left out
     let mut a = String::new();

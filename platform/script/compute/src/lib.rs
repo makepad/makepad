@@ -35,6 +35,14 @@ use makepad_relax_api::relax_api;
 
 pub mod cost;
 pub mod boundary;
+
+/// A run of this process's app ended in place (`makepad run`): what this crate holds of it goes, as a
+/// fresh process has it.
+pub fn end_run() {
+    boundary::end_run();
+    host::end_run();
+    kernel::end_run();
+}
 pub mod host;
 /// The store of native kernel code between runs (the native back ends only).
 #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]

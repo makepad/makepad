@@ -148,6 +148,9 @@ pub enum IrIo {
     /// The fragment depth output (one f32 global; the entry writes it to the
     /// FragDepth builtin).
     FragmentDepth,
+    /// The fragment's position (one vec4 global; the fragment entry sets it from the position
+    /// builtin before the fragment function runs, `ShaderIoKind::FragmentPosition`).
+    FragmentPosition,
     Texture(TextureType),
     /// A compute kernel's device buffer (`shader.buffer` / `buffer_rw`): a
     /// runtime-sized array reached by its device address (writable when
@@ -183,6 +186,8 @@ pub enum IrGlobalKind {
     ScopeUniformBlock,
     /// GL: the host's clip-space Y flip for bottom-up render targets.
     ClipYFlip,
+    /// GL: the host's row origin for `fragment_position()` (vec2: y = x + y * gl_FragCoord.y).
+    FragYOrigin,
     /// HLSL: the draw's first instance. `SV_InstanceID` starts at zero for every draw, so the
     /// host passes the first instance (`StartInstanceLocation` is not seen by the shader) in a
     /// constant buffer at b13; an unbound buffer reads zero.

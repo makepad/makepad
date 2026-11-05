@@ -33,6 +33,11 @@ use std::sync::OnceLock;
 /// Heaps made from now on record touches (the census sets it).
 pub static TOUCH_RECORD: AtomicBool = AtomicBool::new(false);
 
+/// (`crate::end_run`) The next run's heaps record only if its census asks.
+pub(crate) fn end_run() {
+    TOUCH_RECORD.store(false, Ordering::Relaxed);
+}
+
 /// The census's mapping of the definitions of every block not mapped yet:
 /// run at each registration's end.
 pub static TOUCH_MAP: OnceLock<fn(&ScriptHeap, &ScriptCode)> = OnceLock::new();

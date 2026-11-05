@@ -32,7 +32,7 @@ fn script(name: &str, code: &str) -> ScriptMod {
 /// Evaluates `code` under the callback cap, returning its value and every script error.
 fn eval(vm: &mut ScriptVm, name: &str, code: &str) -> (ScriptValue, Vec<String>) {
     vm.bx.captured_errors = Some(Vec::new());
-    let value = vm.with_instruction_limit(CALLBACK_INSTRUCTION_CAP, |vm| {
+    let value = vm.with_instruction_limit(CALLBACK_INSTRUCTION_CAP as u64, |vm| {
         vm.eval(script(name, code))
     });
     (value, vm.take_errors())
@@ -77,10 +77,10 @@ fn deliver(
     vm: &mut ScriptVm,
     callback: ScriptValue,
     payload: &str,
-) -> (ScriptValue, usize, Vec<String>) {
+) -> (ScriptValue, u64, Vec<String>) {
     let payload = vm.bx.heap.new_string_from_str(payload);
     vm.bx.captured_errors = Some(Vec::new());
-    let value = vm.with_instruction_limit(CALLBACK_INSTRUCTION_CAP, |vm| {
+    let value = vm.with_instruction_limit(CALLBACK_INSTRUCTION_CAP as u64, |vm| {
         vm.call(callback, &[payload])
     });
     (value, vm.last_limit_consumed(), vm.take_errors())

@@ -53,6 +53,7 @@ pub const STD: &[(&str, &str)] = &[
     ("std.anim", include_str!("../std/anim.splash")),
     ("std.cam", include_str!("../std/cam.splash")),
     ("std.beat", include_str!("../std/beat.splash")),
+    ("std.noise", include_str!("../std/noise.splash")),
 ];
 
 /// The std modules in scope unqualified by default (the kernel modules'

@@ -89,11 +89,14 @@ fn fn_content_key_follows_the_text() {
     // The same text in another body can name other things: another key.
     let b = vm.eval(module("gen://elsewhere", "{f: fn() { return 1 }}")).as_object().unwrap();
     assert_ne!(vm.bx.code.fn_content_key(fn_ip(&vm, b, id!(f))), key_a);
-    // The first body re-evaluated with other text keeps its ips but not its key.
+    // The first body re-evaluated with other text runs it at the same ips, under
+    // another key; the fn made from the earlier text keeps that text elsewhere.
+    let ip_a = fn_ip(&vm, a, id!(f));
     let c = vm.eval(module("gen://same", "{f: fn() { return 2 }}")).as_object().unwrap();
     let ip_c = fn_ip(&vm, c, id!(f));
-    assert_eq!(ip_c, fn_ip(&vm, a, id!(f)));
+    assert_eq!(ip_c, ip_a);
     assert_ne!(vm.bx.code.fn_content_key(ip_c), key_a);
+    assert_ne!(fn_ip(&vm, a, id!(f)).body, ip_a.body);
 }
 
 /// A draw shader cached by its object's own functions and fields (`shader_functions_hash`)

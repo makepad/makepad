@@ -25,12 +25,12 @@ fn main() {
     let lanes = if a[2] == "x8" { 8 } else { 4 };
     if a[1] == "compile" {
         for (name, s) in [("one_pass", ONE_PASS), ("heights", HEIGHTS), ("normals", NORMALS), ("instances", INSTANCES)] {
-            let t0 = relax_backend::cpu_ns();
+            let t0 = relax_session::clock::cpu_ns();
             for _ in 0..reps {
                 let k = native_vec::with_lanes(lanes, || compile_with(s, &[], Backend::Native)).unwrap_or_else(|e| panic!("{:?}", e));
                 assert_eq!(k.vector_lanes(), lanes);
             }
-            let ns = (relax_backend::cpu_ns() - t0) / reps.max(1) as u64;
+            let ns = (relax_session::clock::cpu_ns() - t0) / reps.max(1) as u64;
             println!("compile {} x{} {:.3} ms/compile (scalar + vector code, thread CPU, {} reps)", name, lanes, ns as f64 * 1e-6, reps);
         }
         return;

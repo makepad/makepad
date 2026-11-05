@@ -215,7 +215,7 @@ pub fn hlsl_draw(output: &ShaderOutput, types: &impl crate::shader_types::Shader
         }
         let name = cx.global_name(g as GlobalId);
         match glob.kind {
-            IrGlobalKind::Io(IrIo::Geometry | IrIo::DynInstance | IrIo::RustInstance | IrIo::Varying | IrIo::FragmentOutput(_) | IrIo::FragmentDepth)
+            IrGlobalKind::Io(IrIo::Geometry | IrIo::DynInstance | IrIo::RustInstance | IrIo::Varying | IrIo::FragmentOutput(_) | IrIo::FragmentDepth | IrIo::FragmentPosition)
             | IrGlobalKind::VertexPosition
             | IrGlobalKind::InstanceIndex => {
                 writeln!(out, "static {};", cx.decl(glob.ty, &name)).ok();

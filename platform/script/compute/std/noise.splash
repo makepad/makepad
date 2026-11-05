@@ -1,0 +1,294 @@
+// Seeded 3D noise: value, gradient (Perlin), simplex, cellular (Worley, Voronoi), the fractal
+// sums of gradient noise (fbm, ridged, turbulence), a domain warp, and the ramps and bands that
+// shape them. Reach it qualified (`noise.perlin(p, 1)`) or with `use std.noise.*`; only what a
+// kernel calls is compiled in.
+//
+// A point is in noise cells: the lattice is one unit apart, so divide a point by the feature
+// size. A seed is a whole number, and another seed is another field unrelated to the first.
+// The same point and seed give the same bits on every machine and backend. The `_tiled` forms
+// repeat every `period` cells along each axis (whole numbers; 0 on an axis never repeats), so a
+// pattern closes on itself round a part or across tiles. Value, gradient and simplex noise and
+// their sums are smooth; a cell's distances are continuous and its id steps at the cell walls.
+//
+// Seed 0 untiled is the prelude's own lattice: `value(p, 0)` is the field `value_noise3(p)`
+// spans, over -1..1.
+
+// A lattice coordinate wrapped into 0..n (n over 0), else as it is.
+fn lattice_wrap(i, n) {
+    if n <= 0 { return i }
+    let m = i % n
+    if m < 0 { return m + n }
+    return m
+}
+
+// Lattice coordinates under a seed, wrapped first: a seed moves the lattice by whole cells, far
+// enough that the fields do not correlate.
+fn lattice_x(i, s, n) { lattice_wrap(i, n) + s * 1013 }
+fn lattice_y(i, s, n) { lattice_wrap(i, n) + s * 1619 }
+fn lattice_z(i, s, n) { lattice_wrap(i, n) + s * 6971 }
+
+// The value at a lattice point, -1..1.
+fn lattice_value(x, y, z, s, period) {
+    lattice3(lattice_x(x, s, int(period.x)), lattice_y(y, s, int(period.y)), lattice_z(z, s, int(period.z))) * 2.0 - 1.0
+}
+
+// The gradient at a lattice point dotted with the offset f from it.
+fn lattice_slope(x, y, z, s, period, f) {
+    grad3(lattice_x(x, s, int(period.x)), lattice_y(y, s, int(period.y)), lattice_z(z, s, int(period.z)), f)
+}
+
+// ---- value noise, -1..1
+
+fn value_tiled(p, seed, period) {
+    let s = int(seed)
+    let i = floor(p)
+    let f = p - i
+    let x = int(i.x)
+    let y = int(i.y)
+    let z = int(i.z)
+    let u = fade(f.x)
+    let v = fade(f.y)
+    let w = fade(f.z)
+    let a = mix(mix(lattice_value(x, y, z, s, period), lattice_value(x + 1, y, z, s, period), u), mix(lattice_value(x, y + 1, z, s, period), lattice_value(x + 1, y + 1, z, s, period), u), v)
+    let b = mix(mix(lattice_value(x, y, z + 1, s, period), lattice_value(x + 1, y, z + 1, s, period), u), mix(lattice_value(x, y + 1, z + 1, s, period), lattice_value(x + 1, y + 1, z + 1, s, period), u), v)
+    mix(a, b, w)
+}
+fn value(p, seed) { value_tiled(p, seed, vec3(0.0, 0.0, 0.0)) }
+
+// ---- gradient (Perlin) noise, -1..1
+
+// About -1..1 (the twelve edge gradients reach 1 at a cell's centre), held to it.
+fn perlin_tiled(p, seed, period) {
+    let s = int(seed)
+    let i = floor(p)
+    let f = p - i
+    let x = int(i.x)
+    let y = int(i.y)
+    let z = int(i.z)
+    let u = fade(f.x)
+    let v = fade(f.y)
+    let w = fade(f.z)
+    let n000 = lattice_slope(x, y, z, s, period, f)
+    let n100 = lattice_slope(x + 1, y, z, s, period, f - vec3(1.0, 0.0, 0.0))
+    let n010 = lattice_slope(x, y + 1, z, s, period, f - vec3(0.0, 1.0, 0.0))
+    let n110 = lattice_slope(x + 1, y + 1, z, s, period, f - vec3(1.0, 1.0, 0.0))
+    let n001 = lattice_slope(x, y, z + 1, s, period, f - vec3(0.0, 0.0, 1.0))
+    let n101 = lattice_slope(x + 1, y, z + 1, s, period, f - vec3(1.0, 0.0, 1.0))
+    let n011 = lattice_slope(x, y + 1, z + 1, s, period, f - vec3(0.0, 1.0, 1.0))
+    let n111 = lattice_slope(x + 1, y + 1, z + 1, s, period, f - vec3(1.0, 1.0, 1.0))
+    let a = mix(mix(n000, n100, u), mix(n010, n110, u), v)
+    let b = mix(mix(n001, n101, u), mix(n011, n111, u), v)
+    clamp(mix(a, b, w), -1.0, 1.0)
+}
+fn perlin(p, seed) { perlin_tiled(p, seed, vec3(0.0, 0.0, 0.0)) }
+
+// ---- simplex noise, -1..1 (no period: its lattice is skewed)
+
+// One corner's share: its gradient's wave under a kernel of radius squared 0.5, which ends
+// inside the simplex, so the sum is smooth across simplex faces.
+fn simplex_corner(x, y, z, s, d) {
+    let t = 0.5 - dot(d, d)
+    if t <= 0.0 { return 0.0 }
+    let t2 = t * t
+    return t2 * t2 * grad3(x + s * 1013, y + s * 1619, z + s * 6971, d)
+}
+
+fn simplex(p, seed) {
+    let s = int(seed)
+    let F3 = 0.33333333
+    let G3 = 0.16666667
+    let k = (p.x + p.y + p.z) * F3
+    let i = floor(p + vec3(k, k, k))
+    let t = (i.x + i.y + i.z) * G3
+    let d0 = p - (i - vec3(t, t, t))
+    // the simplex holding the point: its second and third corners' offsets
+    var a = vec3(0.0, 0.0, 1.0)
+    var b = vec3(1.0, 0.0, 1.0)
+    if d0.x >= d0.y {
+        if d0.y >= d0.z {
+            a = vec3(1.0, 0.0, 0.0)
+            b = vec3(1.0, 1.0, 0.0)
+        } elif d0.x >= d0.z {
+            a = vec3(1.0, 0.0, 0.0)
+            b = vec3(1.0, 0.0, 1.0)
+        }
+    } else {
+        if d0.y < d0.z {
+            a = vec3(0.0, 0.0, 1.0)
+            b = vec3(0.0, 1.0, 1.0)
+        } elif d0.x < d0.z {
+            a = vec3(0.0, 1.0, 0.0)
+            b = vec3(0.0, 1.0, 1.0)
+        } else {
+            a = vec3(0.0, 1.0, 0.0)
+            b = vec3(1.0, 1.0, 0.0)
+        }
+    }
+    let d1 = d0 - a + vec3(G3, G3, G3)
+    let d2 = d0 - b + vec3(2.0 * G3, 2.0 * G3, 2.0 * G3)
+    let d3 = d0 - vec3(1.0 - 3.0 * G3, 1.0 - 3.0 * G3, 1.0 - 3.0 * G3)
+    let x = int(i.x)
+    let y = int(i.y)
+    let z = int(i.z)
+    let n = simplex_corner(x, y, z, s, d0) + simplex_corner(x + int(a.x), y + int(a.y), z + int(a.z), s, d1) + simplex_corner(x + int(b.x), y + int(b.y), z + int(b.z), s, d2) + simplex_corner(x + 1, y + 1, z + 1, s, d3)
+    clamp(n * 76.0, -1.0, 1.0)
+}
+
+// ---- cellular noise: one feature point per lattice cell
+
+// The distance from p to cell (x, y, z)'s feature point, and that cell's id in 0..1.
+fn cell_point(x, y, z, s, nx, ny, nz, p) {
+    let kx = lattice_x(x, s, nx)
+    let ky = lattice_y(y, s, ny)
+    let kz = lattice_z(z, s, nz)
+    let fp = vec3(float(x) + lattice3(kx, ky, kz), float(y) + lattice3(ky, kz, kx + 31), float(z) + lattice3(kz, kx, ky + 57))
+    length(fp - p)
+}
+fn cell_point_id(x, y, z, s, nx, ny, nz) {
+    lattice3(lattice_x(x, s, nx) + 101, lattice_y(y, s, ny) + 211, lattice_z(z, s, nz) + 307)
+}
+
+// The cells round p: vec4(the distance to the nearest feature point, to the second nearest, the
+// nearest one's cell id in 0..1, 0). Distances are in cells. A point two cells away can be one
+// of the two only when the second distance is past one cell; then that ring is searched too, so
+// both distances are the true ones.
+fn cells_tiled(p, seed, period) {
+    let s = int(seed)
+    let i = floor(p)
+    let x = int(i.x)
+    let y = int(i.y)
+    let z = int(i.z)
+    let nx = int(period.x)
+    let ny = int(period.y)
+    let nz = int(period.z)
+    var f1 = 8.0
+    var f2 = 8.0
+    var id = 0.0
+    for dz in 0..3 {
+        for dy in 0..3 {
+            for dx in 0..3 {
+                let d = cell_point(x + dx - 1, y + dy - 1, z + dz - 1, s, nx, ny, nz, p)
+                if d < f1 {
+                    f2 = f1
+                    f1 = d
+                    id = cell_point_id(x + dx - 1, y + dy - 1, z + dz - 1, s, nx, ny, nz)
+                } elif d < f2 {
+                    f2 = d
+                }
+            }
+        }
+    }
+    if f2 > 1.0 {
+        for dz in 0..5 {
+            for dy in 0..5 {
+                for dx in 0..5 {
+                    if dx == 0 || dx == 4 || dy == 0 || dy == 4 || dz == 0 || dz == 4 {
+                        let d = cell_point(x + dx - 2, y + dy - 2, z + dz - 2, s, nx, ny, nz, p)
+                        if d < f1 {
+                            f2 = f1
+                            f1 = d
+                            id = cell_point_id(x + dx - 2, y + dy - 2, z + dz - 2, s, nx, ny, nz)
+                        } elif d < f2 {
+                            f2 = d
+                        }
+                    }
+                }
+            }
+        }
+    }
+    vec4(f1, f2, id, 0.0)
+}
+fn cells(p, seed) { cells_tiled(p, seed, vec3(0.0, 0.0, 0.0)) }
+// The distance to the nearest feature point (Worley F1), in cells.
+fn worley(p, seed) { cells(p, seed).x }
+// The distance to the walls between cells (F2 - F1): 0 on a wall.
+fn edges(p, seed) {
+    let c = cells(p, seed)
+    c.y - c.x
+}
+// The cell's id, 0..1: one value through each cell, for a material per cell.
+fn cell_id(p, seed) { cells(p, seed).z }
+
+// ---- fractal sums of gradient noise: octaves, each twice the frequency and half the weight
+// (another seed each), normalised by their weights; `octaves` is a whole number (up to 16)
+
+// -1..1.
+fn fbm_tiled(p, seed, octaves, period) {
+    let s = int(seed)
+    var sum = 0.0
+    var weight = 0.0
+    var a = 1.0
+    var q = p
+    var per = period
+    for o in 0..octaves {
+        sum = sum + a * perlin_tiled(q, s + o, per)
+        weight = weight + a
+        q = q * 2.0
+        per = per * 2.0
+        a = a * 0.5
+    }
+    sum / max(weight, 1e-6)
+}
+fn fbm(p, seed, octaves) { fbm_tiled(p, seed, octaves, vec3(0.0, 0.0, 0.0)) }
+
+// Sharp crests where each octave crosses zero, 0..1.
+fn ridged_tiled(p, seed, octaves, period) {
+    let s = int(seed)
+    var sum = 0.0
+    var weight = 0.0
+    var a = 1.0
+    var q = p
+    var per = period
+    for o in 0..octaves {
+        let r = 1.0 - abs(perlin_tiled(q, s + o, per))
+        sum = sum + a * r * r
+        weight = weight + a
+        q = q * 2.0
+        per = per * 2.0
+        a = a * 0.5
+    }
+    sum / max(weight, 1e-6)
+}
+fn ridged(p, seed, octaves) { ridged_tiled(p, seed, octaves, vec3(0.0, 0.0, 0.0)) }
+
+// Billowing creases where each octave crosses zero, 0..1.
+fn turbulence_tiled(p, seed, octaves, period) {
+    let s = int(seed)
+    var sum = 0.0
+    var weight = 0.0
+    var a = 1.0
+    var q = p
+    var per = period
+    for o in 0..octaves {
+        sum = sum + a * abs(perlin_tiled(q, s + o, per))
+        weight = weight + a
+        q = q * 2.0
+        per = per * 2.0
+        a = a * 0.5
+    }
+    sum / max(weight, 1e-6)
+}
+fn turbulence(p, seed, octaves) { turbulence_tiled(p, seed, octaves, vec3(0.0, 0.0, 0.0)) }
+
+// ---- shaping
+
+// p moved by up to `amount` cells along a smooth random field: feed it to another noise for
+// swirled, folded patterns (marble, smoke).
+fn warp(p, seed, amount) {
+    let s = int(seed)
+    p + vec3(perlin(p, s), perlin(p, s + 1), perlin(p, s + 2)) * amount
+}
+fn warp_tiled(p, seed, amount, period) {
+    let s = int(seed)
+    p + vec3(perlin_tiled(p, s, period), perlin_tiled(p, s + 1, period), perlin_tiled(p, s + 2, period)) * amount
+}
+
+// 0 at a, 1 at b, along the line through them; held at the ends.
+fn ramp(p, a, b) {
+    let ab = b - a
+    clamp(dot(p - a, ab) / max(dot(ab, ab), 1e-12), 0.0, 1.0)
+}
+
+// Layers: 0 at whole t, rising to 1 halfway and back, so t = height / thickness stacks layers
+// of one material and the next (warp t for strata).
+fn bands(t) { 1.0 - abs(2.0 * fract(t) - 1.0) }

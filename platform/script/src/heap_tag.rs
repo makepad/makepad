@@ -10,6 +10,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 static SERIAL: AtomicUsize = AtomicUsize::new(0);
 static LIVE: AtomicUsize = AtomicUsize::new(0);
 
+/// (`crate::end_run`) The ended run's heaps went without dropping their tags.
+pub(crate) fn end_run() {
+    LIVE.store(0, Ordering::Relaxed);
+}
+
 /// A heap's tag.
 #[derive(Default)]
 pub struct HeapTag(u8);

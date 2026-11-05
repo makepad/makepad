@@ -25,6 +25,12 @@ pub(crate) fn io_kind_for(mode: ShaderMode, io_type: ShaderIoType) -> Result<Sha
     if let Some(m) = fragment_depth_mode(io_type) {
         return Ok(ShaderIoKind::FragmentDepth(m));
     }
+    if io_type == SHADER_IO_FRAGMENT_POSITION {
+        if mode != ShaderMode::Fragment {
+            return Err("fragment_position() is the fragment's own position: read it in `fragment`/`pixel:` (a vertex has none yet)".to_string());
+        }
+        return Ok(ShaderIoKind::FragmentPosition);
+    }
     if let Some(t) = texture_type_of(io_type) {
         return Ok(ShaderIoKind::Texture(t));
     }
@@ -65,6 +71,7 @@ fn kinds_match(a: &ShaderIoKind, b: &ShaderIoKind) -> bool {
         (VertexPosition, VertexPosition) => true,
         (FragmentOutput(ai), FragmentOutput(bi)) => ai == bi,
         (FragmentDepth(a), FragmentDepth(b)) => a == b,
+        (FragmentPosition, FragmentPosition) => true,
         (RustInstance, RustInstance) => true,
         (Uniform, Uniform) => true,
         (DynInstance, DynInstance) => true,

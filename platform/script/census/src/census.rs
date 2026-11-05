@@ -26,7 +26,14 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 /// Some VM records a census: registrations in other VMs are noted.
 static RECORDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// The modules other VMs registered while one recorded.
-static OTHER_VMS: std::sync::Mutex<BTreeSet<&'static str>> = std::sync::Mutex::new(BTreeSet::new());
+static OTHER_VMS: makepad_relax_api::sync::Mutex<BTreeSet<&'static str>> = makepad_relax_api::sync::Mutex::new(BTreeSet::new());
+
+/// (`crate::end_run`)
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn end_run() {
+    RECORDING.store(false, std::sync::atomic::Ordering::Relaxed);
+    OTHER_VMS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+}
 
 /// What the module registrations made, while recording.
 #[derive(Default)]

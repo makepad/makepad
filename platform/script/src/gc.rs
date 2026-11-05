@@ -750,7 +750,7 @@ impl ScriptHeap {
                     if let Some(end) = &body.end_scope {
                         self.mark_vec.push(ScriptGcMark::Object(end.as_object()));
                     }
-                    if let ScriptSource::Mod(script_mod) = &body.source {
+                    if let Some(script_mod) = body.source.written() {
                         for v in script_mod.values.iter() {
                             self.mark_value(*v);
                         }
@@ -1236,6 +1236,11 @@ mod tests {
 /// Stress mode (a trace host's run that must reach the collector's paths):
 /// every safepoint collects ([`set_gc_stress`]).
 static GC_STRESS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// (`crate::end_run`) The next run starts by the growth rule.
+pub(crate) fn end_run() {
+    GC_STRESS.store(false, std::sync::atomic::Ordering::Relaxed);
+}
 
 /// Collect at every safepoint from now on (`on`), or by the growth rule again.
 pub fn set_gc_stress(on: bool) {

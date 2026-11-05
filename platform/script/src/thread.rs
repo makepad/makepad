@@ -133,7 +133,7 @@ pub struct ScriptThread {
     pub(crate) slots: Vec<ScriptValue>,
     /// Base of the CURRENT slot frame (see CallFrame::prev_slot_base).
     pub(crate) slot_base: usize,
-    pub(crate) instruction_limit_remaining: Option<usize>,
+    pub(crate) instruction_limit_remaining: Option<u64>,
     /// The innermost scope when the root frame returned, kept alive so
     /// the body can hand it to host->script calls.
     pub(crate) root_end_scope: Option<ScriptObjectRef>,

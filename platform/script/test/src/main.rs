@@ -4881,7 +4881,7 @@ pub fn main() {
         assert!(errs.is_empty(), "budget eval errors: {:?}", errs);
         let work = vm.heap_mut().value(exports, id!(work).into(), NoTrap);
 
-        fn call(vm: &mut ScriptVm, work: ScriptValue, n: f64, limit: usize) -> ScriptValue {
+        fn call(vm: &mut ScriptVm, work: ScriptValue, n: f64, limit: u64) -> ScriptValue {
             let args = vm.heap_mut().new_object();
             vm.heap_mut().set_object_storage_vec2(args);
             vm.heap_mut()
@@ -4908,7 +4908,7 @@ pub fn main() {
         );
 
         // A host pool decrements across calls (gamemaker's tick pattern).
-        let mut pool = 500_000usize;
+        let mut pool = 500_000u64;
         let _ = call(vm, work, 100.0, pool);
         pool -= vm.last_limit_consumed();
         let _ = call(vm, work, 100.0, pool);

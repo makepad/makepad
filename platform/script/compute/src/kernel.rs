@@ -410,7 +410,7 @@ pub(crate) fn trace_items_impl(items: Vec<crate::parse::Item>, src_len: usize) -
 pub(crate) fn compile_items_impl(items: Vec<crate::parse::Item>, src_len: usize, source: &str, layouts: &[Layout], backend: Backend, modules: &[crate::module::Module], lift: Option<crate::lower::LiveLift>) -> Result<Arc<KernelBody>, Vec<ShaderError>> {
     let all = program_items(items, src_len, modules)?;
     let lowered = kl::lower_kernel(&all, src_len + 1, layouts, lift, false).map_err(|e| vec![e])?;
-    install_lowered(lowered, source, layouts, backend, modules)
+    install_lowered(lowered, source, #[cfg(not(target_arch = "wasm32"))] layouts, backend, #[cfg(not(target_arch = "wasm32"))] modules)
 }
 
 /// Compiles a program a host built as AIR objects ([`crate::ir::to_words`]): an element loop in
@@ -423,11 +423,11 @@ pub(crate) fn compile_air_impl(words: &[u32], shared: &[u32], buffers: &[crate::
     };
     let buffers = buffers.iter().map(|b| BufferDecl { name: b.name.to_string(), access: if b.write { Access::Write } else { Access::Read }, stride: b.stride }).collect();
     let lowered = kl::lowered_from_air(program, shared.to_vec(), buffers, math).map_err(|e| vec![e])?;
-    install_lowered(lowered, "", &[], backend, &[])
+    install_lowered(lowered, "", #[cfg(not(target_arch = "wasm32"))] &[], backend, #[cfg(not(target_arch = "wasm32"))] &[])
 }
 
 /// The backends' code and the kernel's body, from a lowered program.
-fn install_lowered(lowered: kl::KernelLowered, source: &str, layouts: &[Layout], backend: Backend, modules: &[crate::module::Module<'_>]) -> Result<Arc<KernelBody>, Vec<ShaderError>> {
+fn install_lowered(lowered: kl::KernelLowered, source: &str, #[cfg(not(target_arch = "wasm32"))] layouts: &[Layout], backend: Backend, #[cfg(not(target_arch = "wasm32"))] modules: &[crate::module::Module<'_>]) -> Result<Arc<KernelBody>, Vec<ShaderError>> {
     let ctx_words = K_PARAMS as usize + lowered.params.len();
     let shared_words = lowered.shared_init.len().max(1);
     let regions = ir::Regions {
@@ -588,6 +588,14 @@ pub fn take_unlinked() -> Vec<KernelRef> {
 
 static RECORDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// (`crate::end_run`) A recording goes with the run that asked for it.
+pub(crate) fn end_run() {
+    RECORDING.store(false, std::sync::atomic::Ordering::Relaxed);
+    let q = recorded();
+    let rx = q.1.lock().unwrap_or_else(|e| e.into_inner());
+    while rx.try_recv().is_ok() {}
+}
+
 /// A kernel compiled while recording, with what it was compiled from (so
 /// a tool can compile it again elsewhere: its source, host layouts and the
 /// modules its `use` items named).
@@ -601,11 +609,11 @@ pub struct Recorded {
     pub modules: Vec<(String, String)>,
 }
 
-fn recorded() -> &'static (std::sync::mpsc::Sender<Recorded>, std::sync::Mutex<std::sync::mpsc::Receiver<Recorded>>) {
-    static Q: std::sync::OnceLock<(std::sync::mpsc::Sender<Recorded>, std::sync::Mutex<std::sync::mpsc::Receiver<Recorded>>)> = std::sync::OnceLock::new();
+fn recorded() -> &'static (std::sync::mpsc::Sender<Recorded>, makepad_relax_api::sync::Mutex<std::sync::mpsc::Receiver<Recorded>>) {
+    static Q: std::sync::OnceLock<(std::sync::mpsc::Sender<Recorded>, makepad_relax_api::sync::Mutex<std::sync::mpsc::Receiver<Recorded>>)> = std::sync::OnceLock::new();
     Q.get_or_init(|| {
         let (tx, rx) = std::sync::mpsc::channel();
-        (tx, std::sync::Mutex::new(rx))
+        (tx, makepad_relax_api::sync::Mutex::new(rx))
     })
 }
 

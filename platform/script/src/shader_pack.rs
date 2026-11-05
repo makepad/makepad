@@ -112,6 +112,8 @@ pub enum PackIoKind {
     ScopeUniform,
     /// The fragment depth output and its conservative mode (`FRAG_DEPTH_*`).
     FragmentDepth(u8),
+    /// The fragment's own position (`fragment_position()`).
+    FragmentPosition,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -585,6 +587,7 @@ impl ShaderPackEntry {
                     PackIoKind::DynInstance => ShaderIoKind::dyn_instance(),
                     PackIoKind::ScopeUniform => ShaderIoKind::scope_uniform(),
                     PackIoKind::FragmentDepth(m) => ShaderIoKind::FragmentDepth(m),
+                    PackIoKind::FragmentPosition => ShaderIoKind::FragmentPosition,
                 };
                 // A custom uniform buffer keeps the heap's pod type: the one
                 // its marker on the shader object names.
@@ -777,6 +780,7 @@ pub(crate) fn pack_entry_from_desc(
             crate::shader_output::ShaderIoKindTag::DynInstance => PackIoKind::DynInstance,
             crate::shader_output::ShaderIoKindTag::ScopeUniform => PackIoKind::ScopeUniform,
             crate::shader_output::ShaderIoKindTag::FragmentDepth => PackIoKind::FragmentDepth(d.kind.fragment_depth().unwrap()),
+            crate::shader_output::ShaderIoKindTag::FragmentPosition => PackIoKind::FragmentPosition,
             crate::shader_output::ShaderIoKindTag::Workgroup => return Err(format!("io `{}` is a compute kernel's workgroup array; draw packs have none", d.name)),
         };
         io.push(PackIo {
@@ -1095,6 +1099,7 @@ impl PackWriter {
                     self.u8(12);
                     self.u8(m);
                 }
+                PackIoKind::FragmentPosition => self.u8(13),
             }
             self.u64(io.name);
             self.u32(io.ty);
@@ -1300,6 +1305,7 @@ impl<'a> PackReader<'a> {
                 10 => PackIoKind::DynInstance,
                 11 => PackIoKind::ScopeUniform,
                 12 => PackIoKind::FragmentDepth(self.u8()?),
+                13 => PackIoKind::FragmentPosition,
                 _ => return Err("a shader pack holds an unknown io kind".into()),
             };
             io.push(PackIo {

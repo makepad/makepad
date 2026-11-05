@@ -7,7 +7,8 @@
 use crate::heap::ScriptHeap;
 use crate::vm::ScriptVmBase;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering::Relaxed};
-use std::sync::{Arc, Mutex};
+use makepad_relax_api::sync::Mutex;
+use std::sync::Arc;
 
 struct Entry {
     id: u32,
@@ -73,6 +74,10 @@ fn now_ms() -> u64 {
 }
 
 fn note_diag(e: &Entry, kind: &'static str, at: Option<(&str, u32)>, text: &str) {
+    makepad_relax_api::process_heap(|| note_diag_here(e, kind, at, text))
+}
+
+fn note_diag_here(e: &Entry, kind: &'static str, at: Option<(&str, u32)>, text: &str) {
     let Ok(mut d) = e.diags.lock() else { return };
     let (file, line) = at.unwrap_or(("", 0));
     let t = now_ms();
@@ -89,6 +94,19 @@ fn note_diag(e: &Entry, kind: &'static str, at: Option<(&str, u32)>, text: &str)
 
 static REGISTRY: Mutex<Vec<Arc<Entry>>> = Mutex::new(Vec::new());
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+/// (`crate::end_run`) The entries name VMs in the ended run's heap, which never dropped.
+pub(crate) fn end_run() {
+    let entries = std::mem::take(&mut *REGISTRY.lock().unwrap_or_else(|e| e.into_inner()));
+    drop(entries);
+    EVALS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+}
+
+/// (`crate::end_domain`) The entries of the VMs in a heap that goes.
+pub(crate) fn end_domain(heap: std::ops::Range<usize>) {
+    REGISTRY.lock().unwrap_or_else(|e| e.into_inner()).retain(|e| !heap.contains(&e.base));
+    EVALS.lock().unwrap_or_else(|e| e.into_inner()).retain(|e| !heap.contains(&e.1));
+}
 static ERROR_HOOK: AtomicUsize = AtomicUsize::new(0);
 /// set by the host that reads the registry (makepad inspect, through `set_error_hook`): until then
 /// the hooks cost one relaxed load (a native build never pays more)
@@ -121,6 +139,10 @@ fn find(addr: usize, by_heap: bool) -> Option<Arc<Entry>> {
 
 /// Register a VM base (its address must be stable: it is boxed). A second call is a no-op.
 pub fn register(base: *const ScriptVmBase, label: &'static str) {
+    makepad_relax_api::process_heap(|| register_here(base, label))
+}
+
+fn register_here(base: *const ScriptVmBase, label: &'static str) {
     let Ok(mut reg) = REGISTRY.lock() else { return };
     if reg.iter().any(|e| e.base == base as usize) {
         return;
@@ -356,7 +378,7 @@ pub(crate) fn eval_guard(base: &ScriptVmBase) -> EvalGuard {
                     e.1 = base as *const ScriptVmBase as usize;
                     e.2 += 1;
                 }
-                None => v.push((key, base as *const ScriptVmBase as usize, 1)),
+                None => makepad_relax_api::process_heap(|| v.push((key, base as *const ScriptVmBase as usize, 1))),
             }
         }
     }

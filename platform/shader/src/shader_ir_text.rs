@@ -331,6 +331,7 @@ impl<'a> TextCx<'a> {
                 IrIo::Varying => format!("var_{}", n),
                 IrIo::FragmentOutput(i) => format!("frag_fb{}", i),
                 IrIo::FragmentDepth => "frag_depth_out".to_string(),
+                IrIo::FragmentPosition => "frag_position".to_string(),
                 IrIo::Texture(_) => format!("tex_{}", n),
                 IrIo::Storage(_) | IrIo::Workgroup => format!("kernel_{}", n),
             },
@@ -351,6 +352,7 @@ impl<'a> TextCx<'a> {
             IrGlobalKind::XrDepth => "tex_xr_depth".to_string(),
             IrGlobalKind::Sampler(i) => format!("_s{}", i),
             IrGlobalKind::ClipYFlip => "mp_clip_y_flip".to_string(),
+            IrGlobalKind::FragYOrigin => "mp_frag_y".to_string(),
             IrGlobalKind::InstanceBase => "_mp_inst_base".to_string(),
         }
     }

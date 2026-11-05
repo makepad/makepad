@@ -396,7 +396,7 @@ pub fn load(vm: &mut ScriptVm, module: ScriptObject, uses: &[ScriptObject], load
         let (exports, value) = if let Some(value) = cached { (value.as_object(), value) } else {
             vm.capture_errors();
             let file = file_of(m);
-            let (value, body) = vm.with_instruction_limit(instructions, |vm| vm.eval_module(ScriptMod::new("", "", &file, m.source.first_line, 0, &m.source.text, &[]), uses));
+            let (value, body) = vm.with_instruction_limit(instructions as u64, |vm| vm.eval_module(ScriptMod::new("", "", &file, m.source.first_line, 0, &m.source.text, &[]), uses));
             errors.extend(vm.take_error_records());
             match m.source.exports {
                 Exports::Value => (value.as_object(), value),

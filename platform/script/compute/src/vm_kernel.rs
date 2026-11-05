@@ -202,7 +202,8 @@ impl KernelProgram {
         if let Some(kernel) = COMPILED.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
             return Ok(kernel.clone());
         }
-        match kernel::compile_items_impl(self.items.clone(), self.end, "", layouts, backend, modules, None) {
+        // (the memo stays for the process, past the run whose document asked: not in the run's heap)
+        match makepad_relax_api::process_heap(|| kernel::compile_items_impl(self.items.clone(), self.end, "", layouts, backend, modules, None)) {
             Ok(kernel) => {
                 let kernel = KernelRef::from_arc(kernel);
                 COMPILED.lock().unwrap_or_else(|e| e.into_inner()).insert(key, kernel.clone());
@@ -251,7 +252,7 @@ impl KernelProgram {
 
 /// The kernels compiled in this process, by [`KernelProgram::key`] (every compile runs inside
 /// the compiler: the `kernel_compile` op).
-static COMPILED: std::sync::Mutex<std::collections::BTreeMap<u64, KernelRef>> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+static COMPILED: makepad_relax_api::sync::Mutex<std::collections::BTreeMap<u64, KernelRef>> = makepad_relax_api::sync::Mutex::new(std::collections::BTreeMap::new());
 
 /// A constant a kernel can hold, from a document value.
 #[derive(Clone, Copy, Debug, PartialEq)]

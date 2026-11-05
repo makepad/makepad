@@ -266,3 +266,208 @@ fn vector_and_colour_constants_fold_at_lowering() {
     let e = compile("let K = #12345\nlet o = output(f32)\nfn element(i) { o[i] = K.x }").map(|_| ()).unwrap_err();
     assert!(e[0].message.contains("bad colour"), "{}", e[0].message);
 }
+
+// -- std.noise -------------------------------------------------------------------------
+
+/// `n` points over a few hundred cells and a unit direction beside each, the same every run.
+fn noise_points(n: usize) -> (Vec<f32>, Vec<f32>) {
+    let mut state = 0x2545_f491_4f6c_dd1du64;
+    let mut next = || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        (state >> 40) as f32 / (1u64 << 24) as f32
+    };
+    let mut pts = Vec::with_capacity(n * 3);
+    let mut dirs = Vec::with_capacity(n * 3);
+    for _ in 0..n {
+        pts.extend([next() * 80.0 - 40.0, next() * 80.0 - 40.0, next() * 80.0 - 40.0]);
+        let d = [next() * 2.0 - 1.0, next() * 2.0 - 1.0, next() * 2.0 - 1.0];
+        let l = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt().max(1e-3);
+        dirs.extend(d.map(|v| v / l));
+    }
+    (pts, dirs)
+}
+
+/// A kernel whose element writes `body` (a vec4 of `p`, the point, and `d`, its direction).
+fn noise_kernel(body: &str, backend: Backend) -> KernelRef {
+    let src = format!("let pts = input(vec3)\nlet dirs = input(vec3)\nlet o = output(vec4)\nfn element(i) {{\n let p = pts[i]\n let d = dirs[i]\n o[i] = {body}\n}}");
+    compile_with_modules(&src, &[], backend, &[]).unwrap_or_else(|e| panic!("{body}: {e:?}"))
+}
+
+/// The prelude's hash (PCG output permutation), for the references below.
+fn pcg(x: i32) -> i32 {
+    let s = x.wrapping_mul(747796405).wrapping_add(0xAC564B05u32 as i32);
+    let w = (((s as u32) >> (((s as u32) >> 28) + 4)) as i32 ^ s).wrapping_mul(277803737);
+    (((w as u32) >> 22) as i32) ^ w
+}
+
+fn lattice3_ref(x: i32, y: i32, z: i32) -> f64 {
+    let h = pcg(x ^ pcg(y ^ pcg(z.wrapping_add(0x7F4A7C15))));
+    ((h as u32) >> 8) as f64 / 16777216.0
+}
+
+/// Cellular noise by brute force over the 7^3 cells round p: (F1, F2, the nearest cell's id,
+/// whether one of the two is two or more cells away).
+fn cells_ref(p: [f64; 3], seed: i32) -> (f64, f64, f64, bool) {
+    let c = p.map(|v| v.floor() as i32);
+    let (mut f1, mut f2, mut id) = (f64::MAX, f64::MAX, 0.0);
+    let (mut r1, mut r2) = (0, 0);
+    for dz in -3..=3 {
+        for dy in -3..=3 {
+            for dx in -3..=3 {
+                let (x, y, z) = (c[0] + dx, c[1] + dy, c[2] + dz);
+                let (kx, ky, kz) = (x.wrapping_add(seed.wrapping_mul(1013)), y.wrapping_add(seed.wrapping_mul(1619)), z.wrapping_add(seed.wrapping_mul(6971)));
+                let fp = [x as f64 + lattice3_ref(kx, ky, kz), y as f64 + lattice3_ref(ky, kz, kx + 31), z as f64 + lattice3_ref(kz, kx, ky + 57)];
+                let d = ((fp[0] - p[0]).powi(2) + (fp[1] - p[1]).powi(2) + (fp[2] - p[2]).powi(2)).sqrt();
+                let ring = dx.abs().max(dy.abs()).max(dz.abs());
+                if d < f1 {
+                    (f2, f1, id, r2, r1) = (f1, d, lattice3_ref(kx + 101, ky + 211, kz + 307), r1, ring);
+                } else if d < f2 {
+                    (f2, r2) = (d, ring);
+                }
+            }
+        }
+    }
+    (f1, f2, id, r1.max(r2) >= 2)
+}
+
+fn correlation(a: &[f32], b: &[f32]) -> f64 {
+    let n = a.len() as f64;
+    let (ma, mb) = (a.iter().map(|v| *v as f64).sum::<f64>() / n, b.iter().map(|v| *v as f64).sum::<f64>() / n);
+    let (mut ab, mut aa, mut bb) = (0.0, 0.0, 0.0);
+    for (x, y) in a.iter().zip(b) {
+        let (x, y) = (*x as f64 - ma, *y as f64 - mb);
+        ab += x * y;
+        aa += x * x;
+        bb += y * y;
+    }
+    ab / (aa * bb).sqrt().max(1e-12)
+}
+
+#[test]
+fn std_noise_is_seeded_bounded_and_smooth() {
+    const N: usize = 2000;
+    const H: f32 = 1e-3;
+    let (pts, dirs) = noise_points(N);
+    // (call with seed S, its range, its steepest slope per cell)
+    let cases: [(&str, f32, f32, f32); 7] = [
+        ("noise.value(q, S)", -1.0, 1.0, 5.0),
+        ("noise.perlin(q, S)", -1.0, 1.0, 5.0),
+        ("noise.simplex(q, S)", -1.0, 1.0, 10.0),
+        ("noise.fbm(q, S, 4)", -1.0, 1.0, 5.0),
+        ("noise.ridged(q, S, 3)", 0.0, 1.0, 6.0),
+        ("noise.turbulence(q, S, 3)", 0.0, 1.0, 5.0),
+        ("noise.bands(noise.fbm(q, S, 2) * 3.0)", 0.0, 1.0, 25.0),
+    ];
+    for (call, lo, hi, slope) in cases {
+        let at = |q: &str, s: &str| call.replace('q', q).replace('S', s);
+        let body = format!("vec4({}, {}, {}, 0.0)", at("p", "3"), at("(p + d * 0.001)", "3"), at("p", "4"));
+        let inputs = [("pts", pts.clone()), ("dirs", dirs.clone())];
+        let native = run(&noise_kernel(&body, Backend::Native), N, &inputs, "o", 4);
+        // the same bits on the reference interpreter
+        let interp = run(&noise_kernel(&body, Backend::Interp), N, &inputs, "o", 4);
+        assert!(native.iter().zip(&interp).all(|(a, b)| a.to_bits() == b.to_bits()), "{call}: native and interpreter differ");
+        let (mut min, mut max, mut steep) = (f32::MAX, f32::MIN, 0f32);
+        let (mut a, mut b) = (Vec::with_capacity(N), Vec::with_capacity(N));
+        for e in native.chunks(4) {
+            min = min.min(e[0]).min(e[2]);
+            max = max.max(e[0]).max(e[2]);
+            steep = steep.max((e[1] - e[0]).abs() / H);
+            a.push(e[0]);
+            b.push(e[2]);
+        }
+        assert!(min >= lo && max <= hi, "{call}: {min}..{max} leaves {lo}..{hi}");
+        assert!(max - min > 0.5 * (hi - lo), "{call}: {min}..{max} spans too little of {lo}..{hi}");
+        assert!(steep <= slope, "{call}: a step of {H} cells moves it by {} (slope {steep} over {slope}): not smooth", steep * H);
+        let r = correlation(&a, &b);
+        assert!(r.abs() < 0.1, "{call}: seeds 3 and 4 correlate ({r})");
+    }
+}
+
+/// Cellular noise over the 27 cells round p only: its second distance.
+fn cells_near_f2(p: [f64; 3], seed: i32) -> f64 {
+    let c = p.map(|v| v.floor() as i32);
+    let (mut f1, mut f2) = (f64::MAX, f64::MAX);
+    for dz in -1..=1 {
+        for dy in -1..=1 {
+            for dx in -1..=1 {
+                let (x, y, z) = (c[0] + dx, c[1] + dy, c[2] + dz);
+                let (kx, ky, kz) = (x.wrapping_add(seed.wrapping_mul(1013)), y.wrapping_add(seed.wrapping_mul(1619)), z.wrapping_add(seed.wrapping_mul(6971)));
+                let fp = [x as f64 + lattice3_ref(kx, ky, kz), y as f64 + lattice3_ref(ky, kz, kx + 31), z as f64 + lattice3_ref(kz, kx, ky + 57)];
+                let d = ((fp[0] - p[0]).powi(2) + (fp[1] - p[1]).powi(2) + (fp[2] - p[2]).powi(2)).sqrt();
+                if d < f1 {
+                    (f2, f1) = (f1, d);
+                } else if d < f2 {
+                    f2 = d;
+                }
+            }
+        }
+    }
+    f2
+}
+
+#[test]
+fn std_noise_cells_are_the_true_nearest_points() {
+    const H: f32 = 1e-3;
+    // Ordinary points, and the rare ones whose second distance over the cells next to theirs is
+    // past one cell (where a point two cells away may be nearer).
+    let (mut pts, mut dirs) = noise_points(1000);
+    let (wide, wide_dirs) = noise_points(30_000);
+    for i in 0..30_000 {
+        let p = [wide[i * 3] as f64, wide[i * 3 + 1] as f64, wide[i * 3 + 2] as f64];
+        if cells_near_f2(p, 5) > 1.0 {
+            pts.extend_from_slice(&wide[i * 3..i * 3 + 3]);
+            dirs.extend_from_slice(&wide_dirs[i * 3..i * 3 + 3]);
+        }
+    }
+    let n = pts.len() / 3;
+    let k = noise_kernel("vec4(noise.cells(p, 5).xyz, noise.edges(p + d * 0.001, 5))", Backend::Native);
+    let o = run(&k, n, &[("pts", pts.clone()), ("dirs", dirs.clone())], "o", 4);
+    let near = run(&noise_kernel("noise.cells(p + d * 0.001, 5)", Backend::Native), n, &[("pts", pts.clone()), ("dirs", dirs)], "o", 4);
+    let mut far = 0;
+    for i in 0..n {
+        let p = [pts[i * 3] as f64, pts[i * 3 + 1] as f64, pts[i * 3 + 2] as f64];
+        let (f1, f2, id, ring2) = cells_ref(p, 5);
+        let e = &o[i * 4..i * 4 + 4];
+        assert!((e[0] as f64 - f1).abs() < 1e-4 && (e[1] as f64 - f2).abs() < 1e-4, "at {p:?}: ({}, {}) for the true ({f1}, {f2})", e[0], e[1]);
+        if f2 - f1 > 1e-3 {
+            assert_eq!(e[2] as f64, id, "at {p:?}: the nearest cell's id");
+        }
+        far += ring2 as usize;
+        // distances move no faster than the point; the id changes only on a wall
+        let m = &near[i * 4..i * 4 + 4];
+        assert!((m[0] - e[0]).abs() <= H * 1.01 + 1e-5 && (m[1] - e[1]).abs() <= H * 1.01 + 1e-5, "at {p:?}: the distances jump");
+        assert!(m[2] == e[2] || (e[1] - e[0]) <= 2.0 * H + 1e-5, "at {p:?}: the id changes off a wall");
+        assert!(e[3] >= 0.0 && (e[3] - (m[1] - m[0])).abs() < 1e-6, "at {p:?}: edges is F2 - F1");
+    }
+    // points whose nearest two reach past the cells next to theirs: the second ring was searched
+    assert!(far > 0, "no point of {n} needed the second ring");
+}
+
+#[test]
+fn std_noise_tiles_repeat_and_untiled_do_not() {
+    const N: usize = 1000;
+    let (pts, dirs) = noise_points(N);
+    let calls = [
+        "noise.value_tiled(q, 2, T)",
+        "noise.perlin_tiled(q, 2, T)",
+        "noise.fbm_tiled(q, 2, 3, T)",
+        "noise.ridged_tiled(q, 2, 3, T)",
+        "noise.turbulence_tiled(q, 2, 3, T)",
+        "noise.cells_tiled(q, 2, T).x",
+        "(noise.warp_tiled(q, 2, 0.5, T) - q).y",
+    ];
+    for call in calls {
+        let at = |q: &str, t: &str| call.replace('q', q).replace('T', t);
+        let period = "vec3(5.0, 3.0, 4.0)";
+        let body = format!("vec4({}, {}, {}, {})", at("p", period), at("(p + vec3(5.0, 0.0, 0.0))", period), at("(p + vec3(0.0, 3.0, 4.0))", period), at("(p + vec3(5.0, 0.0, 0.0))", "vec3(0.0, 0.0, 0.0)"));
+        let o = run(&noise_kernel(&body, Backend::Native), N, &[("pts", pts.clone()), ("dirs", dirs.clone())], "o", 4);
+        let mut moved = 0;
+        for e in o.chunks(4) {
+            assert!((e[1] - e[0]).abs() < 1e-4 && (e[2] - e[0]).abs() < 1e-4, "{call}: {:?} does not repeat", e);
+            moved += ((e[3] - e[0]).abs() > 1e-3) as usize;
+        }
+        assert!(moved > N / 2, "{call}: untiled it repeats too ({moved} of {N} moved)");
+    }
+}

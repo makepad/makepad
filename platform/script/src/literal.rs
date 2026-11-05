@@ -23,7 +23,8 @@ use makepad_relax_api::relax_api;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, RwLock, Weak};
+use makepad_relax_api::sync::Mutex;
+use std::sync::{Arc, RwLock, Weak};
 
 /// Where a literal is written: a file and the zero-based line and column
 /// (in characters) of its first character (a number's digits, past any
@@ -333,11 +334,13 @@ pub fn literal(op: u32, req: &mut LiteralReq) -> bool {
         }
         LIT_REGISTER_SINK => {
             // SAFETY: the record is moved in by the caller
-            let entry = Arc::new(LiteralSinkEntry(unsafe { std::ptr::read(req.sink) }));
-            if let Ok(mut sinks) = SINKS.lock() {
-                sinks.retain(|s| unsafe { (s.0.alive)(s.0.data) });
-                sinks.push(entry);
-            }
+            makepad_relax_api::process_heap(|| {
+                let entry = Arc::new(LiteralSinkEntry(unsafe { std::ptr::read(req.sink) }));
+                if let Ok(mut sinks) = SINKS.lock() {
+                    sinks.retain(|s| unsafe { (s.0.alive)(s.0.data) });
+                    sinks.push(entry);
+                }
+            });
             true
         }
         _ => {
@@ -382,6 +385,10 @@ pub fn live_into() -> *const LiveLiterals {
 }
 
 fn update(f: impl FnOnce(&mut LiveLiterals) -> bool) -> bool {
+    makepad_relax_api::process_heap(|| update_here(f))
+}
+
+fn update_here(f: impl FnOnce(&mut LiveLiterals) -> bool) -> bool {
     let Ok(mut guard) = LIVE.write() else { return false };
     let mut next = guard.as_deref().cloned().unwrap_or_default();
     if !f(&mut next) {
@@ -449,6 +456,32 @@ impl Drop for LiteralSinkEntry {
     fn drop(&mut self) { unsafe { (self.0.release)(self.0.data) } }
 }
 static SINKS: Mutex<Vec<Arc<LiteralSinkEntry>>> = Mutex::new(Vec::new());
+
+/// (`crate::end_run`) A sink's data and its `release` went with the ended run's heap and code, so
+/// the entries go without calling it.
+pub(crate) fn end_run() {
+    ON.store(false, Ordering::Relaxed);
+    let live = LIVE.write().unwrap_or_else(|e| e.into_inner()).take();
+    drop(live);
+    let sinks = std::mem::take(&mut *SINKS.lock().unwrap_or_else(|e| e.into_inner()));
+    for sink in sinks {
+        if let Ok(entry) = Arc::try_unwrap(sink) {
+            std::mem::forget(entry);
+        }
+    }
+}
+
+/// (`crate::end_domain`) The sinks whose data is in a heap that goes, without calling them.
+pub(crate) fn end_domain(heap: std::ops::Range<usize>) {
+    let mut sinks = SINKS.lock().unwrap_or_else(|e| e.into_inner());
+    for sink in std::mem::take(&mut *sinks) {
+        if !heap.contains(&(sink.0.data as usize)) {
+            sinks.push(sink);
+        } else if let Ok(entry) = Arc::try_unwrap(sink) {
+            std::mem::forget(entry);
+        }
+    }
+}
 
 /// Register a sink for as long as it lives. Generic over the sink's own type: the boxes below are
 /// made, read and freed by the code that instantiates this for its sink, so they never cross

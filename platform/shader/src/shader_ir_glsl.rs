@@ -143,6 +143,10 @@ fn draw_sources(output: &mut ShaderOutput, types: &impl crate::shader_types::Sha
     let mut fragment = shared;
     textures(&cx, output, true, &mut fragment);
     private_globals(&cx, &ir, false, &mut fragment);
+    if ir.globals.iter().any(|g| g.kind == IrGlobalKind::FragYOrigin) {
+        // `fragment_position()`'s row origin (the host sets it with the clip Y flip)
+        fragment.push_str("uniform vec2 mp_frag_y;\n");
+    }
     let entry = ir.functions[fragment_main as usize].entry.clone().unwrap();
     for io in &entry.inputs {
         // gl_FragCoord (the depth output's default) is built in
@@ -339,7 +343,7 @@ fn private_globals(cx: &TextCx, ir: &IrModule, vertex: bool, out: &mut String) {
         let keep = match glob.kind {
             IrGlobalKind::Io(IrIo::Geometry) => vertex,
             IrGlobalKind::Io(IrIo::DynInstance) | IrGlobalKind::Io(IrIo::RustInstance) | IrGlobalKind::Io(IrIo::Varying) => true,
-            IrGlobalKind::Io(IrIo::FragmentOutput(_) | IrIo::FragmentDepth) => !vertex,
+            IrGlobalKind::Io(IrIo::FragmentOutput(_) | IrIo::FragmentDepth | IrIo::FragmentPosition) => !vertex,
             _ => false,
         };
         if keep {

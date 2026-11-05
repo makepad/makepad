@@ -125,6 +125,11 @@ pub enum ShaderIoKind {
     /// written depth only moves that way from the rasterised depth
     /// (conservative depth), so early depth testing stays on.
     FragmentDepth(u8),
+    /// The fragment's own position (`fragment_position()`, read in the fragment stage): x and y
+    /// in pixels of the render target from its top-left corner (a pixel's centre at .5), z its
+    /// window-space depth (0..1, what `depth_of` gives) and w the reciprocal of its clip w, on
+    /// every backend.
+    FragmentPosition,
 }
 
 pub const FRAG_DEPTH_ANY: u8 = 0;
@@ -415,7 +420,7 @@ impl ShaderOutput {
 }
 #[relax_api(plain)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ShaderIoKindTag { StorageBuffer, UniformBuffer, Sampler, Texture, Varying, VertexBuffer, VertexPosition, FragmentOutput, RustInstance, Uniform, DynInstance, ScopeUniform, Workgroup, FragmentDepth }
+pub enum ShaderIoKindTag { StorageBuffer, UniformBuffer, Sampler, Texture, Varying, VertexBuffer, VertexPosition, FragmentOutput, RustInstance, Uniform, DynInstance, ScopeUniform, Workgroup, FragmentDepth, FragmentPosition }
 impl ShaderIoKind {
     pub fn kind(&self) -> ShaderIoKindTag {
         match self {
@@ -433,6 +438,7 @@ impl ShaderIoKind {
             Self::ScopeUniform => ShaderIoKindTag::ScopeUniform,
             Self::Workgroup => ShaderIoKindTag::Workgroup,
             Self::FragmentDepth(_) => ShaderIoKindTag::FragmentDepth,
+            Self::FragmentPosition => ShaderIoKindTag::FragmentPosition,
         }
     }
 }
@@ -489,6 +495,7 @@ impl std::fmt::Debug for ShaderIoKind {
             DynInstance => f.write_str("DynInstance"), ScopeUniform => f.write_str("ScopeUniform"),
             Workgroup => f.write_str("Workgroup"),
             FragmentDepth => f.debug_tuple("FragmentDepth").field(&self.fragment_depth().unwrap()).finish(),
+            FragmentPosition => f.write_str("FragmentPosition"),
         }
     }
 }
@@ -511,6 +518,7 @@ pub fn global_kind_of(kind: &ShaderIoKind) -> Option<IrGlobalKind> {
         ShaderIoKind::Varying => IrGlobalKind::Io(IrIo::Varying),
         ShaderIoKind::FragmentOutput(i) => IrGlobalKind::Io(IrIo::FragmentOutput(*i)),
         ShaderIoKind::FragmentDepth(_) => IrGlobalKind::Io(IrIo::FragmentDepth),
+        ShaderIoKind::FragmentPosition => IrGlobalKind::Io(IrIo::FragmentPosition),
         ShaderIoKind::Texture(t) => IrGlobalKind::Io(IrIo::Texture(*t)),
         ShaderIoKind::VertexPosition => IrGlobalKind::VertexPosition,
         ShaderIoKind::StorageBuffer(flags) => IrGlobalKind::Io(IrIo::Storage(flags.is_write())),

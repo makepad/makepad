@@ -360,7 +360,7 @@ impl ScriptVmBase {
         match req.op {
             STAT_RELOAD => self.is_reload as u64,
             STAT_KEEP_NUMBERS => self.keep_numbers as u64,
-            STAT_LAST_LIMIT_CONSUMED => self.last_limit_consumed as u64,
+            STAT_LAST_LIMIT_CONSUMED => self.last_limit_consumed,
             STAT_CURRENT_THREAD => self.threads.current() as u64,
             STAT_THREAD_COUNT => self.threads.len() as u64,
             STAT_THREAD_ID => self.threads.cur_ref().thread_id().0 as u64,
@@ -369,7 +369,7 @@ impl ScriptVmBase {
                 let ip = self.threads.cur_ref().trap.ip;
                 ((ip.body as u64) << 32) | ip.index as u64
             }
-            STAT_LIMIT_REMAINING => self.threads.cur_ref().instruction_limit_remaining.map_or(u64::MAX, |n| n as u64),
+            STAT_LIMIT_REMAINING => self.threads.cur_ref().instruction_limit_remaining.unwrap_or(u64::MAX),
             STAT_HANDLE_TYPE => self.code.native.borrow().handle_type.get(&LiveId(req.a)).unwrap().0 as u64,
             STAT_BODY_COUNT => self.code.bodies.borrow().len() as u64,
             STAT_RUN_BUDGET => match self.run_budget {
@@ -418,14 +418,14 @@ impl ScriptVmBase {
             }
             CTL_SET_SILENCE_ERRORS => std::mem::replace(&mut self.silence_errors, req.a != 0) as u64,
             CTL_LIMIT_SET => {
-                self.threads.cur().instruction_limit_remaining = Some(req.a as usize);
+                self.threads.cur().instruction_limit_remaining = Some(req.a);
                 // If the limited code runs no script at all, exit_remaining is never written:
                 // seed it so consumed reads 0 in that case.
-                self.last_limit_exit_remaining = req.a as usize;
+                self.last_limit_exit_remaining = req.a;
                 0
             }
             CTL_LIMIT_END => {
-                let (previous, applied) = (if req.a == u64::MAX { None } else { Some(req.a as usize) }, req.b as usize);
+                let (previous, applied) = (if req.a == u64::MAX { None } else { Some(req.a) }, req.b);
                 // Record what the call actually charged: hosts running several calls against ONE
                 // cumulative budget (a game tick where on_tick + timers + touch events share a
                 // pool) read it back via last_limit_consumed and shrink the next call's limit

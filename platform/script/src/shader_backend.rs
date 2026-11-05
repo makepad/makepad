@@ -12,6 +12,9 @@ impl ScriptShaderBackend for ShaderBackend {
         if let Some(m) = fragment_depth_mode(io_type) {
             return (ShaderIoKind::FragmentDepth(m), ShaderIoPrefix::Full("frag_depth_out"));
         }
+        if io_type == SHADER_IO_FRAGMENT_POSITION {
+            return (ShaderIoKind::FragmentPosition, ShaderIoPrefix::Full("frag_position"));
+        }
         match self {
             Self::Metal => {
                 match mode {
