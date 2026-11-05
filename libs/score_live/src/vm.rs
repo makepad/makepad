@@ -253,7 +253,7 @@ impl Evaluated {
         self.with_vm(|vm| {
             vm.capture_errors();
             let args: Vec<ScriptValue> = args.iter().map(|a| (*a).into()).collect();
-            let value = vm.with_instruction_limit(CYCLE_LIMIT, |vm| vm.call(function, &args));
+            let value = vm.with_instruction_limit(CYCLE_LIMIT as u64, |vm| vm.call(function, &args));
             let errors = vm.take_errors();
             match errors.first() {
                 Some(error) => Err(error.clone()),
@@ -308,7 +308,7 @@ pub fn evaluate(source: &str) -> Evaluated {
         let prelude_errors = vm.take_errors();
         debug_assert!(prelude_errors.is_empty(), "mod.score prelude: {prelude_errors:?}");
         vm.capture_errors();
-        let value = vm.with_instruction_limit(EVAL_LIMIT, |vm| {
+        let value = vm.with_instruction_limit(EVAL_LIMIT as u64, |vm| {
             // Rows count from 1 like an editor's lines; columns from 0.
             vm.eval(ScriptMod::new("", "", &(DOC_FILE), 1, 0, &(source), &[]))
         });
