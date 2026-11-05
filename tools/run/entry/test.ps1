@@ -69,7 +69,7 @@ function Run($name) {
 try {
     $r1 = Run 'run1'
     Check 'first run exits 0' "$script:code" '^0$'
-    Check 'progress line' $r1 'Building the JIT .* [0-9]+/2 crates'
+    Check 'progress line' $r1 'Building the JIT .* [1-9][0-9]*/2 crates'
     Check 'loader started' $r1 'fixture loader: one launch record present: true'
     '--- sizes (KB), first run'
     foreach ($d in 'install\rust', 'install\cache\downloads', 'install') { '{0}  {1}' -f [int]((Get-ChildItem "$Base\$d" -Recurse -Force -File | Measure-Object Length -Sum).Sum / 1024), $d }

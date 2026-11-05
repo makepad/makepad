@@ -198,3 +198,20 @@ fn load_is_hoisted_past_a_call_before_the_loop_that_keeps_nothing() {
         assert_eq!(b == 0, hoisted, "kept_by_callee {kept_by_callee}: load in b{b}");
     }
 }
+
+/// The same with the build's nocapture facts for a callee outside the inline snapshot
+/// (`Func::nocapture`): a call that keeps no copy lets the load out; one that may return the
+/// pointer does not.
+#[test]
+fn load_is_hoisted_past_a_call_before_the_loop_the_builds_facts_clear() {
+    for (returned, hoisted) in [(false, true), (true, false)] {
+        let (mut f, _) = build(Body::OtherStore, false);
+        let at = f.blocks[0].insts.len();
+        let p = p_of(&f);
+        f.blocks[0].insts.insert(at, Inst::Call(Callee::Fn(7), vec![p], vec![]));
+        f.blocks[0].pos.insert(at, 0);
+        f.nocapture = vec![(Callee::Fn(7), 0, returned, None)];
+        let b = run(&mut f, &relax_session::Options::default());
+        assert_eq!(b == 0, hoisted, "returned {returned}: load in b{b}");
+    }
+}

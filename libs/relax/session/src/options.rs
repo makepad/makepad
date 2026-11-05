@@ -75,12 +75,6 @@ impl CheckTarget {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Ctfe { Off, Check, On }
-/// Register allocation order (regalloc prio): weighted references, or per square root of the live
-/// range's length (compute kernels).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Priority { References, Sqrt }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum WorkerQos { Default, Background, Utility }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tier0Baseline { Off, Startup, Always }
 /// How much the JIT compiles ahead of the program's calls (`makepad run --ahead=<level>`,
@@ -250,9 +244,6 @@ pub struct Options {
     pub relaxed: Option<String>,
     /// `MAKEPAD_RUN_UNROLL_ONLY`; default `None`.
     pub unroll_only: Option<String>,
-    /// `MAKEPAD_RUN_AHEAD_HELPERS`; default `None` (jit::ahead_helpers: a few threads, until the
-    /// first present).
-    pub ahead_helpers: Option<u32>,
     /// `MAKEPAD_RUN_PERTURB`; default `0`.
     pub perturb: u64,
     /// `MAKEPAD_RUN_SPEC_DEPTH`; default `3`.
@@ -272,8 +263,6 @@ pub struct Options {
     pub sandbox_opt: Option<bool>,
     /// `MAKEPAD_RUN_INLINE_SRC`; default `None`.
     pub inline_src: Option<u32>,
-    /// `MAKEPAD_RUN_SPEC_JOBS`; default `None`.
-    pub spec_jobs: Option<usize>,
     /// `MAKEPAD_RUN_INLINE_LEAF`; default `(40, 8)`.
     pub inline_leaf: (usize, usize),
     /// `MAKEPAD_RUN_OPT`; default `Vec::new()`.
@@ -294,8 +283,6 @@ pub struct Options {
     /// so one that never ends is rustc's `long_running_const_eval` error (the interpreter's
     /// terminator limit) instead of a hang. Changes the compiled code.
     pub const_fuel: bool,
-    /// Register allocation order; `Priority::References` (compute kernels: `Sqrt`).
-    pub ra_prio: Priority,
     /// Default `false`: the quick allocation round (no live-range splitting) also coalesces
     /// copies. Compute kernels set it.
     pub ra_quick_coalesce: bool,
@@ -304,13 +291,6 @@ pub struct Options {
     /// signaling NaN) stay ops. Compute kernels set it: their results are bit-specified (the
     /// interpreter's), and Rust leaves the payload unspecified, so Relax's tiers fold them.
     pub nan_exact: bool,
-    /// `MAKEPAD_RUN_O3_PROFILE`; default `None`. Deterministic O3: a missing/empty file records the
-    /// run's O3 decisions (each installed build's inputs and inline set), a recorded one replays them
-    /// strictly (only its slots build O3 code, each once at its first call; its O2 slots get O2 builds);
-    /// both runs are check-first and have no baseline tier (MAKEPAD_RUN_O1=0).
-    pub tier1_profile: Option<std::ffi::OsString>,
-    /// Profile replay contents frozen by the driver, separately from its environment path.
-    pub tier1_profile_data: Option<String>,
     /// `--cfg <name>` / `--cfg name="value"` of `makepad run|check` (what `RUSTFLAGS=--cfg` is to
     /// cargo), as `name` / `name=value` entries added to the cfg set the program is read with.
     pub cfgs: Vec<String>,
@@ -376,7 +356,6 @@ impl Default for Options {
             noinl_callee: None,
             relaxed: None,
             unroll_only: None,
-            ahead_helpers: None,
             perturb: 0,
             spec_depth: 3,
             spec_hot_from: 2,
@@ -386,7 +365,6 @@ impl Default for Options {
             spec_hot: None,
             sandbox_opt: None,
             inline_src: None,
-            spec_jobs: None,
             inline_leaf: (40, 8),
             opt: Vec::new(),
             a64: Vec::new(),
@@ -396,11 +374,8 @@ impl Default for Options {
             web_threads: WebThreads::Off,
             ctfe: Ctfe::On,
             const_fuel: false,
-            ra_prio: Priority::References,
             ra_quick_coalesce: false,
             nan_exact: false,
-            tier1_profile: None,
-            tier1_profile_data: None,
             cfgs: Vec::new(),
             target: String::new(),
             cpu: CpuFeatures::default(),
@@ -486,7 +461,6 @@ impl Options {
             noinl_callee: { let os = get("MAKEPAD_RUN_NOINL_CALLEE"); let v = os.and_then(|v| v.into_string().ok()); v },
             relaxed: { let os = get("MAKEPAD_RUN_RELAXED"); let v = os.and_then(|v| v.into_string().ok()); v },
             unroll_only: { let os = get("MAKEPAD_RUN_UNROLL_ONLY"); let v = os.and_then(|v| v.into_string().ok()); v },
-            ahead_helpers: { let os = get("MAKEPAD_RUN_AHEAD_HELPERS"); let v = os.and_then(|v| v.into_string().ok()); v.and_then(|v| v.parse().ok()) },
             perturb: { let os = get("MAKEPAD_RUN_PERTURB"); let v = os.and_then(|v| v.into_string().ok()); v.and_then(|v| v.parse().ok()).unwrap_or(0) },
             spec_depth: { let os = get("MAKEPAD_RUN_SPEC_DEPTH"); let v = os.and_then(|v| v.into_string().ok()); v.and_then(|v| v.parse().ok()).unwrap_or(3) },
             spec_hot_from: { let os = get("MAKEPAD_RUN_SPEC_HOT_FROM"); let v = os.and_then(|v| v.into_string().ok()); v.and_then(|v| v.parse().ok()).unwrap_or(2) },
@@ -496,7 +470,6 @@ impl Options {
             spec_hot: { let os = get("MAKEPAD_RUN_SPEC_HOT"); let v = os.and_then(|v| v.into_string().ok()); v.map(|v| v == "1") },
             sandbox_opt: { let os = get("MAKEPAD_RUN_SANDBOX_OPT"); let v = os.and_then(|v| v.into_string().ok()); match v.as_deref() { Some("0") => Some(false), Some("1") => Some(true), _ => None } },
             inline_src: { let os = get("MAKEPAD_RUN_INLINE_SRC"); let v = os.and_then(|v| v.into_string().ok()); v.and_then(|v| v.parse().ok()) },
-            spec_jobs: { let os = get("MAKEPAD_RUN_SPEC_JOBS"); let v = os.and_then(|v| v.into_string().ok()); v.and_then(|v| v.parse().ok()) },
             inline_leaf: { let os = get("MAKEPAD_RUN_INLINE_LEAF"); let v = os.and_then(|v| v.into_string().ok()); parse_leaf(v.as_deref()) },
             opt: { let os = get("MAKEPAD_RUN_OPT"); let v = os.and_then(|v| v.into_string().ok()); split(v) },
             a64: { let os = get("MAKEPAD_RUN_A64"); let v = os.and_then(|v| v.into_string().ok()); split(v) },
@@ -506,11 +479,8 @@ impl Options {
             web_threads: if get("MAKEPAD_RUN_WEB_THREADS").as_deref() == Some(std::ffi::OsStr::new("1")) { WebThreads::On } else { WebThreads::Off },
             const_fuel: false,
             ctfe: { let os = get("MAKEPAD_RUN_CTFE"); let v = os.and_then(|v| v.into_string().ok()); match v.as_deref() { Some("0") => Ctfe::Off, Some("check") => Ctfe::Check, _ => Ctfe::On } },
-            ra_prio: Priority::References,
             ra_quick_coalesce: false,
             nan_exact: false,
-            tier1_profile: { let os = get("MAKEPAD_RUN_O3_PROFILE"); os },
-            tier1_profile_data: None,
             cfgs: Vec::new(),
             target: String::new(),
             cpu: CpuFeatures::default(),
@@ -576,17 +546,19 @@ impl Options {
             noinl_callee,
             relaxed,
             unroll_only,
-            ahead_helpers,
             perturb,
             spec_depth,
             spec_hot_from,
             spec_ttl_ms,
             tier1_calls,
             core_hint,
-            spec_hot,
+            // a run-time scheduling knob, filled in from the machine's state at session start
+            // (lib.rs session_from_env: on battery): it decides when bodies are compiled, not
+            // what code they compile to -- hashing it made a cache written on mains a stranger
+            // to the next launch (every record rejected: "identity: parser options")
+            spec_hot: _,
             sandbox_opt,
             inline_src,
-            spec_jobs,
             inline_leaf,
             opt,
             a64,
@@ -596,11 +568,9 @@ impl Options {
             web_threads,
             ctfe,
             const_fuel,
-            ra_prio,
             ra_quick_coalesce,
             nan_exact,
-            tier1_profile,
-            tier1_profile_data, cfgs, target, cpu,
+            cfgs, target, cpu,
         } = self;
         let mut h = Sip128::new();
         h.str("relax-options-v1");
@@ -708,8 +678,6 @@ impl Options {
         match relaxed { Some(v) => { h.u8(1); h.str(v); }, None => h.u8(0) }
         h.str("unroll_only");
         match unroll_only { Some(v) => { h.u8(1); h.str(v); }, None => h.u8(0) }
-        h.str("ahead_helpers");
-        match ahead_helpers { Some(v) => { h.u8(1); h.u64(*v as u64); }, None => h.u8(0) }
         h.str("perturb");
         h.u64(*perturb as u64);
         h.str("spec_depth");
@@ -722,14 +690,10 @@ impl Options {
         h.u64(*tier1_calls as u64);
         h.str("core_hint");
         match core_hint { Some(v) => { h.u8(1); h.u64(*v as u64); }, None => h.u8(0) }
-        h.str("spec_hot");
-        match spec_hot { Some(v) => { h.u8(1); h.u64(*v as u64); }, None => h.u8(0) }
         h.str("sandbox_opt");
         match sandbox_opt { Some(v) => { h.u8(1); h.u64(*v as u64); }, None => h.u8(0) }
         h.str("inline_src");
         match inline_src { Some(v) => { h.u8(1); h.u64(*v as u64); }, None => h.u8(0) }
-        h.str("spec_jobs");
-        match spec_jobs { Some(v) => { h.u8(1); h.u64(*v as u64); }, None => h.u8(0) }
         h.str("inline_leaf");
         h.u64(inline_leaf.0 as u64); h.u64(inline_leaf.1 as u64);
         h.str("opt");
@@ -759,8 +723,6 @@ impl Options {
         h.u8(*ctfe as u8);
         h.str("const_fuel");
         h.u8(*const_fuel as u8);
-        h.str("ra_prio");
-        h.u8(*ra_prio as u8);
         h.str("ra_quick_coalesce");
         h.u8(*ra_quick_coalesce as u8);
         // (only when set: the default key stays the key it was before the option existed)
@@ -768,9 +730,6 @@ impl Options {
             h.str("nan_exact");
             h.u8(1);
         }
-        h.str("o3_profile");
-        match tier1_profile { Some(v) => { h.u8(1); h.u64(v.as_encoded_bytes().len() as u64); h.write(v.as_encoded_bytes()); }, None => h.u8(0) }
-        match tier1_profile_data { Some(v) => { h.u8(1); h.str(v); }, None => h.u8(0) }
         h.str(target);
         let CpuFeatures { avx, bmi2, popcnt, lzcnt, bmi1, fma, avx2, avx512 } = cpu;
         for b in [avx, bmi2, popcnt, lzcnt, bmi1, fma, avx2, avx512] { h.u8(*b as u8); }
@@ -804,9 +763,6 @@ pub struct RuntimeOptions {
     pub settle_drop: bool,
     /// `MAKEPAD_RUN_BURST_ARENA`; default `true`.
     pub burst_arena: bool,
-    /// `MAKEPAD_RUN_O3_BURST` (`0`: off, for A/Bs); default `true`: after the first present, while the O3
-    /// queue is not trivial, more O3 workers run (every performance core but one) until it drains.
-    pub tier1_burst: bool,
     /// `MAKEPAD_RUN_MODULE_FUEL`; default `4_000_000_000`.
     pub module_fuel: i64,
     /// `MAKEPAD_RUN_MODULE_MEM_MB`; default `256`.
@@ -818,12 +774,8 @@ pub struct RuntimeOptions {
     pub test_domains: usize,
     /// `MAKEPAD_RUN_WATCHDOG_MS`; default `20_000`.
     pub watchdog_ms: u64,
-    /// `MAKEPAD_RUN_O3_THREADS`; default `None`.
-    pub tier1_threads: Option<usize>,
     /// `MAKEPAD_RUN_RESTORE`; default `None`.
     pub restore: Option<String>,
-    /// `MAKEPAD_RUN_WORKER_QOS`; default `WorkerQos::Background`.
-    pub worker_qos: WorkerQos,
     /// `MAKEPAD_RUN_AHEAD` (`--ahead=<level>` sets it); default `AheadLevel::Balanced`. Not part of
     /// the code identity: every level makes the same code for a slot, so they share warm caches.
     pub ahead: AheadLevel,
@@ -841,15 +793,12 @@ impl Default for RuntimeOptions {
             mem_trim: true,
             settle_drop: true,
             burst_arena: true,
-            tier1_burst: true,
             module_fuel: 4_000_000_000,
             module_mem_mb: 256,
             repeat: 1,
             test_domains: 1,
             watchdog_ms: 20_000,
-            tier1_threads: None,
             restore: None,
-            worker_qos: WorkerQos::Background,
             ahead: AheadLevel::Balanced,
         }
     }
@@ -871,15 +820,12 @@ impl RuntimeOptions {
             mem_trim: { let os = get("MAKEPAD_RUN_MEM_TRIM"); let v = os.and_then(|v| v.into_string().ok()); v.as_deref() != Some("0") },
             settle_drop: { let os = get("MAKEPAD_RUN_SETTLE_DROP"); let v = os.and_then(|v| v.into_string().ok()); v.as_deref() != Some("0") },
             burst_arena: { let os = get("MAKEPAD_RUN_BURST_ARENA"); let v = os.and_then(|v| v.into_string().ok()); v.as_deref() != Some("0") },
-            tier1_burst: { let os = get("MAKEPAD_RUN_O3_BURST"); let v = os.and_then(|v| v.into_string().ok()); v.as_deref() != Some("0") },
             module_fuel: { let os = get("MAKEPAD_RUN_MODULE_FUEL"); let v = os.and_then(|v| v.into_string().ok()); v.and_then(|v| v.parse().ok()).unwrap_or(4_000_000_000) },
             module_mem_mb: { let os = get("MAKEPAD_RUN_MODULE_MEM_MB"); let v = os.and_then(|v| v.into_string().ok()); v.and_then(|v| v.parse().ok()).unwrap_or(256) },
             repeat: { let os = get("MAKEPAD_RUN_REPEAT"); let v = os.and_then(|v| v.into_string().ok()); v.and_then(|v| v.parse().ok()).unwrap_or(1) },
             test_domains: { let os = get("MAKEPAD_RUN_TEST_DOMAINS"); let v = os.and_then(|v| v.into_string().ok()); v.and_then(|v| v.parse().ok()).filter(|n: &usize| *n >= 1).unwrap_or(1) },
             watchdog_ms: { let os = get("MAKEPAD_RUN_WATCHDOG_MS"); let v = os.and_then(|v| v.into_string().ok()); v.and_then(|v| v.parse().ok()).unwrap_or(20_000) },
-            tier1_threads: { let os = get("MAKEPAD_RUN_O3_THREADS"); let v = os.and_then(|v| v.into_string().ok()); v.and_then(|v| v.parse().ok()) },
             restore: { let os = get("MAKEPAD_RUN_RESTORE"); let v = os.and_then(|v| v.into_string().ok()); v },
-            worker_qos: { let os = get("MAKEPAD_RUN_WORKER_QOS"); let v = os.and_then(|v| v.into_string().ok()); match v.as_deref() { Some("0") => WorkerQos::Default, Some("utility") => WorkerQos::Utility, _ => WorkerQos::Background } },
             ahead: { let os = get("MAKEPAD_RUN_AHEAD"); let v = os.and_then(|v| v.into_string().ok()); v.as_deref().and_then(AheadLevel::parse).unwrap_or(AheadLevel::Balanced) },
         }
     }
@@ -926,7 +872,7 @@ mod tests {
     }
 
     #[test]
-    fn q2_options_hash_effective_cpu_target_and_replay_contents() {
+    fn q2_options_hash_effective_cpu_and_target() {
         let base = Options::default();
         let fingerprint = base.fingerprint();
         let mut changed = base.clone();
@@ -937,11 +883,6 @@ mod tests {
         assert_ne!(fingerprint, changed.fingerprint());
         changed = base.clone();
         changed.target = "x86_64-pc-windows-gnu".to_string();
-        assert_ne!(fingerprint, changed.fingerprint());
-        changed = base.clone();
-        changed.tier1_profile_data = Some("record".to_string());
-        assert_ne!(fingerprint, changed.fingerprint());
-        changed.tier1_profile_data = Some("other record".to_string());
         assert_ne!(fingerprint, changed.fingerprint());
         assert_eq!(base.fingerprint(), base.clone().fingerprint());
     }
@@ -954,7 +895,6 @@ mod tests {
         assert!(!opts.no_avx);
         assert!(opts.no_simd);
         assert!(opts.live_stream);
-        assert!(opts.tier1_profile.is_some());
         assert!(opts.derives);
         assert_eq!(opts.core_hint, None);
     }

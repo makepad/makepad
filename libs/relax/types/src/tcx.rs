@@ -274,8 +274,9 @@ pub struct Tcx {
     /// poll function is lowered (coroutine_transform)
     pub coro_frames: crate::conc::MemoMap<TyId, (u32, u32)>,
     /// a coroutine type's state shape (M5): a hash of its suspension points' saved slots and
-    /// values (offset, size), its size and alignment -- a body edit whose new poll code has the
-    /// same shape and the same code up to its last await may resume suspended values (reload.rs)
+    /// values (offset, size; in a live session their types too), its size and alignment -- a
+    /// body edit whose new poll code has the same shape and the same code up to its last await
+    /// may resume suspended values (reload.rs)
     pub coro_shapes: crate::conc::MemoMap<TyId, u64>,
     /// a coroutine poll slot's coroutine type (set when it is lowered)
     pub coro_slot_ty: crate::conc::MemoMap<u32, TyId>,

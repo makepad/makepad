@@ -1,12 +1,17 @@
 //! Changes a running process cannot take in place: the provided crates built into makepad, std,
 //! makepad run's own sources, the Cargo graph and build scripts (a program edit the patcher
-//! cannot absorb restarts in place without a rebuild: reload.rs restart_in_place). The loader is
-//! rebuilt with cargo in
-//! the background (nice) while the app keeps running the code it has, then the process truly
-//! restarts: the rebuilt binary replaces it (exec) with the same command line, and an app that
+//! cannot absorb restarts in place without a rebuild: reload.rs restart_in_place). A running app
+//! offers the update ([`offer`]): each landing built makepad in every app on the person's machine,
+//! whether or not they meant to restart (96 min of builds in 13 h, 11-04). The person's restart,
+//! or the next `cargo run`, builds it. A live test session and a dock app's sync build at once.
+//! The loader is rebuilt with cargo while the app keeps running the code it has (at low priority
+//! when nobody waits for it, at the person's when they asked for the restart: [`Priority`], and
+//! their build goes before the low ones: [`Gate`]), then the process truly restarts: the rebuilt binary replaces it (exec) with the same command line, and an app that
 //! restarts with its state (std::relax::restart_supported) is asked first, at its next safe point
 //! (it may postpone for unsaved work), and gets its state back in the new process. A failed
-//! rebuild keeps the running app and says why; the next such change builds again.
+//! rebuild keeps the running app and says why; the next such change builds again. From the click
+//! until the restart the ring says what happens ([`restart_asked`], [`build_progress`]) and what a
+//! click would do before it ([`route`]).
 //!
 //! One rebuild at a time; a change during it builds once more after it. The new binary is the
 //! one cargo leaves at the loader's own path. Its codegen identity (codegen_id.rs) keys every cache
@@ -74,8 +79,28 @@ pub(crate) fn target_dir(exe: &Path) -> Option<PathBuf> {
     layout(exe).map(|l| l.0)
 }
 
-/// The cargo command that rebuilds the loader in place, or why there is none.
-fn command() -> Result<(std::process::Command, String), String> {
+/// How a build of the loader runs.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Priority {
+    /// Nobody waits for it: the app keeps running while it builds (a landing that changed makepad,
+    /// a live test session). On macOS at background QoS (efficiency cores, throttled I/O; cargo's
+    /// rustc inherit it, and nothing can lift that clamp from a running process), never at full
+    /// width beside the app the person works in: three running apps' rebuilds after a landing took
+    /// rustc to ~1080% of a core on the person's Mac while they tweaked Fab (11-03). Elsewhere,
+    /// nice 10.
+    Background,
+    /// A boot waits for it: nice 10.
+    Boot,
+    /// The person asked for the restart it leads to and looks at the ring until it comes: their
+    /// own priority, on all cores (the clamp held rustc at ~230% for over six minutes; 63 s at ~840%).
+    Asked,
+}
+
+/// The cargo command that rebuilds the loader in place, or why there is none. Apps that start
+/// their rebuilds at once build
+/// once: cargo's lock on the profile's build directory keeps the others waiting for that build,
+/// and their cargo then finds makepad current.
+fn command(priority: Priority) -> Result<(std::process::Command, String), String> {
     if !cfg!(unix) {
         return Err("this platform cannot replace a running makepad binary".into());
     }
@@ -87,7 +112,7 @@ fn command() -> Result<(std::process::Command, String), String> {
     }
     let bin = exe.file_stem().ok_or("no binary name")?.to_string_lossy().into_owned();
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
-    let mut args: Vec<String> = vec!["-n".into(), "10".into(), cargo, "build".into(), "--manifest-path".into(), manifest.into(), "-p".into(), package.into(), "--bin".into(), bin];
+    let mut args: Vec<String> = vec![cargo, "build".into(), "--manifest-path".into(), manifest.into(), "-p".into(), package.into(), "--bin".into(), bin];
     match profile.as_str() {
         "debug" => {}
         "release" => args.push("--release".into()),
@@ -96,9 +121,15 @@ fn command() -> Result<(std::process::Command, String), String> {
     args.push("--target-dir".into());
     args.push(target.to_string_lossy().into_owned());
     if let Some(t) = triple { args.push("--target".into()); args.push(t); }
-    let shown = args[2..].join(" ");
-    let mut cmd = std::process::Command::new("nice");
-    cmd.args(&args).env_remove("MAKEPAD_RUN_RESTORE").env_remove("MAKEPAD_RUN_RESTART_T0").stdin(std::process::Stdio::null());
+    let shown = args.join(" ");
+    let low: &[&str] = match priority {
+        Priority::Asked => &[],
+        Priority::Background if cfg!(target_os = "macos") => &["/usr/sbin/taskpolicy", "-c", "background"],
+        Priority::Background | Priority::Boot => &["nice", "-n", "10"],
+    };
+    let line: Vec<&str> = low.iter().copied().chain(args.iter().map(String::as_str)).collect();
+    let mut cmd = std::process::Command::new(line[0]);
+    cmd.args(&line[1..]).env_remove("MAKEPAD_RUN_RESTORE").env_remove("MAKEPAD_RUN_RESTART_T0").stdin(std::process::Stdio::null());
     Ok((cmd, shown))
 }
 
@@ -113,6 +144,34 @@ pub enum Phase {
     Failed,
 }
 
+/// What cargo said last of the running build: the ring's progress and tooltip.
+#[derive(Clone, Default, PartialEq, Debug)]
+pub struct BuildProgress {
+    /// units finished, of how many (0 of 0: cargo has not said yet)
+    pub done: u32,
+    pub total: u32,
+    /// the first of what it builds now, in cargo's words
+    pub building: String,
+    /// what another cargo holds that this one waits for (empty: it does not wait)
+    pub waiting: String,
+}
+
+/// What a click on the ring's dot (`session relaunch`) does now, so the dot can say it.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Route {
+    /// The program's run starts again on this JIT.
+    Plain,
+    /// The JIT's own inputs changed: it builds first, then the restart.
+    BuildFirst,
+    /// The new JIT builds already: the restart follows it.
+    Building,
+    /// The new JIT is built: the restart goes into it.
+    Built,
+    /// The JIT's own inputs changed, and this process cannot build it (Windows cannot replace a
+    /// running binary): the restart stays on this JIT.
+    CannotBuild,
+}
+
 struct State {
     phase: Phase,
     since: Option<Instant>,
@@ -125,10 +184,17 @@ struct State {
     failed: String,
     /// A source-check mismatch waits for the same rebuild/restart action as a watched edit.
     provided: Option<crate::provided::ProvidedChange>,
+    /// A change of what makepad is built from waits for the person's restart ([`offer`]).
+    offered: bool,
+    /// A change of the JIT's own inputs came and this process cannot build it.
+    cannot_build: bool,
+    progress: BuildProgress,
+    /// the low-priority cargo running now: its process and where it is marked ([`Gate`])
+    low_cargo: Option<(u32, PathBuf)>,
     update_message: Option<std::sync::Arc<str>>,
 }
 
-static STATE: Mutex<State> = Mutex::new(State { phase: Phase::Idle, since: None, why: String::new(), paths: Vec::new(), again: false, failed: String::new(), provided: None, update_message: None });
+static STATE: Mutex<State> = Mutex::new(State { phase: Phase::Idle, since: None, why: String::new(), paths: Vec::new(), again: false, failed: String::new(), provided: None, offered: false, cannot_build: false, low_cargo: None, progress: BuildProgress { done: 0, total: 0, building: String::new(), waiting: String::new() }, update_message: None });
 
 /// Best effort, once on the compiler worker when the mismatch is found. Group paths by their
 /// repository (a worktree's .git may be a file); removed inputs still name a commit in git log.
@@ -158,11 +224,13 @@ pub(crate) fn offer_provided(change: crate::provided::ProvidedChange, domain: Op
     let provided = Some(change.clone());
     let update_message = Some(std::sync::Arc::<str>::from(message.as_str()));
     let why = message.clone();
+    let cannot_build = command(Priority::Background).is_err();
     {
         let mut st = STATE.lock().unwrap_or_else(|e| e.into_inner());
         st.paths = paths;
         st.why = why;
         st.provided = provided;
+        st.cannot_build = cannot_build;
         st.update_message = update_message;
         if st.phase == Phase::Building { st.again = true; }
     }
@@ -197,7 +265,7 @@ pub(crate) fn apply_at_boot(change: &crate::provided::ProvidedChange) -> i32 {
     if std::env::var(REBUILT_ENV).ok().and_then(|v| v.parse::<u32>().ok()) == Some(std::process::id()) {
         return failed("the rebuilt makepad differs from the program's copy too (makepad is built from other sources than the program uses)".into());
     }
-    let (mut cmd, shown) = match command() {
+    let (mut cmd, shown) = match command(Priority::Boot) {
         Ok(c) => c,
         Err(e) => return failed(format!("this makepad cannot rebuild itself ({e}): build it again, then run")),
     };
@@ -238,10 +306,12 @@ pub fn update_message() -> Option<std::sync::Arc<str>> {
 /// existing background build; a build already running finishes before requesting a safe point.
 pub(super) fn relaunch() -> Option<Result<&'static str, String>> {
     let (phase, why, paths) = {
-        let st = STATE.lock().unwrap_or_else(|e| e.into_inner());
-        if st.phase == Phase::Idle && st.provided.is_none() { return None; }
+        let mut st = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        if st.phase == Phase::Idle && st.provided.is_none() && !st.offered { return None; }
         if st.phase == Phase::Building {
             RESTART_AFTER_BUILD.store(true, std::sync::atomic::Ordering::SeqCst);
+            // a build nobody waited for: it goes on at the person's priority now
+            end_low_cargo(&mut st);
             return Some(Ok("rebuild makepad, then restart with the program's state"));
         }
         (st.phase, st.why.clone(), st.paths.clone())
@@ -304,6 +374,58 @@ pub fn status() -> (Phase, std::time::Duration) {
     (st.phase, st.since.map_or(std::time::Duration::ZERO, |t| t.elapsed()))
 }
 
+/// What a click on the dot would do now (cached state: this is for the UI thread).
+pub fn route() -> Route {
+    let st = STATE.lock().unwrap_or_else(|e| e.into_inner());
+    match st.phase {
+        Phase::Building => Route::Building,
+        Phase::Restarting => Route::Built,
+        Phase::Idle | Phase::Failed if st.cannot_build => Route::CannotBuild,
+        Phase::Idle | Phase::Failed if st.offered || st.provided.is_some() => Route::BuildFirst,
+        Phase::Idle | Phase::Failed => Route::Plain,
+    }
+}
+
+/// The restart was asked for and is on its way (the new JIT builds first, or the program's next
+/// safe point takes it): nothing is left to click, and a repeat of the request changes nothing.
+pub fn restart_asked() -> bool {
+    let phase = STATE.lock().unwrap_or_else(|e| e.into_inner()).phase;
+    use std::sync::atomic::Ordering::SeqCst;
+    match phase {
+        Phase::Building => RESTART_AFTER_BUILD.load(SeqCst),
+        Phase::Restarting => super::RESTART_CONFIRMED.load(SeqCst),
+        Phase::Idle => super::RESTART_CONFIRMED.load(SeqCst) && super::RESTART_REQUESTED.load(SeqCst),
+        Phase::Failed => false,
+    }
+}
+
+/// A restart that waits for the app to be unpinned.
+pub fn restart_pinned() -> bool {
+    super::pinned()
+}
+
+/// Where the ring's dot is in the window (points), while it shows: `session pending` says, so an
+/// agent clicks where the person does.
+static DOT: Mutex<Option<[f32; 4]>> = Mutex::new(None);
+
+pub fn note_dot(place: Option<[f32; 4]>) {
+    *DOT.lock().unwrap_or_else(|e| e.into_inner()) = place;
+}
+
+pub fn dot() -> Option<[f32; 4]> {
+    *DOT.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// What cargo said last of the running build.
+pub fn build_progress() -> BuildProgress {
+    STATE.lock().unwrap_or_else(|e| e.into_inner()).progress.clone()
+}
+
+/// A change of the JIT's own inputs that this process cannot build (the watcher: [`offer`] said so).
+pub(super) fn note_cannot_build() {
+    STATE.lock().unwrap_or_else(|e| e.into_inner()).cannot_build = true;
+}
+
 /// The last failure's message (empty without one).
 pub fn failure() -> String {
     STATE.lock().unwrap_or_else(|e| e.into_inner()).failed.clone()
@@ -315,12 +437,43 @@ fn stamps(paths: &[String]) -> Vec<super::inputs::Stamp> {
 
 /// The watcher: `why` changed, which needs a new process. Starts the rebuild (or one more after
 /// the running one). Err: this run cannot rebuild itself (the caller says how to restart).
+/// A change of what makepad is built from, in a running app: offered on the ring, and built when
+/// the person restarts ([`relaunch`]). Err: this makepad cannot rebuild itself.
+pub(super) fn offer(why: String, paths: Vec<String>) -> Result<(), String> {
+    let _k = crate::zone_alloc::kept();
+    command(Priority::Background)?;
+    {
+        let mut st = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        st.why = why.clone();
+        st.paths = paths;
+        st.offered = true;
+        match st.phase {
+            // the build the person asked for takes it too
+            Phase::Building => st.again = true,
+            // older than this change: the click builds first
+            Phase::Restarting => {
+                HANDOVER.lock().unwrap_or_else(|e| e.into_inner()).take();
+                st.phase = Phase::Idle;
+            }
+            // the failed build is answered by this change: the dot offers it again
+            Phase::Failed => {
+                st.phase = Phase::Idle;
+                st.failed.clear();
+            }
+            Phase::Idle => {}
+        }
+    }
+    super::offer_restart(&why);
+    Ok(())
+}
+
 pub(super) fn request(why: String, paths: Vec<String>) -> Result<(), String> {
     let _k = crate::zone_alloc::kept();
-    command()?;
+    command(Priority::Background)?;
     let mut st = STATE.lock().unwrap_or_else(|e| e.into_inner());
     st.why = why;
     st.paths = paths;
+    st.offered = false;
     match st.phase {
         Phase::Building => {
             st.again = true;
@@ -340,7 +493,7 @@ pub(super) fn request(why: String, paths: Vec<String>) -> Result<(), String> {
 }
 
 fn fail(message: String) {
-    RESTART_AFTER_BUILD.store(false, std::sync::atomic::Ordering::SeqCst);
+    let asked = RESTART_AFTER_BUILD.swap(false, std::sync::atomic::Ordering::SeqCst);
     eprintln!("makepad live: {message}");
     super::note_restart_pending(&message);
     super::live_log(&format!("{{\"event\":\"host_rebuild\",\"ok\":false,\"message\":{}}}", super::json_str(&message)));
@@ -355,8 +508,9 @@ fn fail(message: String) {
     let lines: Vec<String> = message.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect();
     super::patch_refused_event(&why, true, &lines);
     // A boot waiting for this update has no running app's ring yet. Show a genuine rebuild
-    // failure in its run view too, retaining the update button so the person can retry.
-    if update {
+    // failure in its run view too, retaining the update button so the person can retry. A build
+    // the person asked for: the view the failed dot opens has cargo's errors.
+    if update || asked {
         crate::run_state::diagnostic(crate::run::app_domain(), crate::diag::Diagnostic::new("host rebuild", "", 0, 0, message));
     }
 }
@@ -369,28 +523,203 @@ fn errors(log: &str) -> String {
     picked.join("\n  ")
 }
 
+/// A line of cargo's stderr.
+#[derive(PartialEq, Debug)]
+enum CargoLine<'a> {
+    /// `    Building [===>    ] 12/345: a, b(build), c`
+    Progress { done: u32, total: u32, building: &'a str },
+    /// `    Blocking waiting for file lock on build directory`
+    Waiting(&'a str),
+    Other,
+}
+
+fn cargo_line(line: &str) -> CargoLine<'_> {
+    let line = line.trim();
+    if let Some(what) = line.strip_prefix("Blocking waiting for file lock on ") {
+        return CargoLine::Waiting(what);
+    }
+    let parsed = (|| {
+        let (_, rest) = line.strip_prefix("Building [")?.split_once("] ")?;
+        let (count, names) = rest.split_once(": ").unwrap_or((rest, ""));
+        let (done, total) = count.split_once('/')?;
+        let building = names.split(", ").next().unwrap_or("").trim();
+        Some(CargoLine::Progress { done: done.parse().ok()?, total: total.parse().ok()?, building })
+    })();
+    parsed.unwrap_or(CargoLine::Other)
+}
+
+/// The builds of one profile directory, across the makepad processes that run from it: cargo's
+/// lock lets one build at a time, and a low-priority one can hold it for minutes. So the person's
+/// build goes first: it ends the low-priority ones, which build again after it (their cargo then
+/// finds makepad current). In `<profile dir>/.makepad-rebuilds`: `turn`, locked by the person's
+/// build while it runs and by a low-priority build until its cargo has started and is marked;
+/// `low.<pid>` per low-priority cargo, locked while the makepad that started it lives (unlocked
+/// is left behind by a crash, its pid no longer ours to signal), removed by whoever ends it.
+struct Gate {
+    dir: PathBuf,
+    turn: Option<std::fs::File>,
+    low: Option<(PathBuf, std::fs::File)>,
+}
+
+impl Gate {
+    fn enter(dir: &Path, asked: bool, waits: impl FnOnce()) -> std::io::Result<Gate> {
+        std::fs::create_dir_all(dir)?;
+        let turn = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.join("turn"))?;
+        if asked {
+            if turn.try_lock().is_err() {
+                waits();
+                turn.lock()?;
+            }
+            for entry in std::fs::read_dir(dir)?.flatten() {
+                let name = entry.file_name();
+                let Some(pid) = name.to_str().and_then(|n| n.strip_prefix("low.")).and_then(|p| p.parse::<u32>().ok()) else { continue };
+                let held = std::fs::File::open(entry.path()).is_ok_and(|f| matches!(f.try_lock(), Err(std::fs::TryLockError::WouldBlock)));
+                let _ = std::fs::remove_file(entry.path());
+                if held { end_group(pid); }
+            }
+        } else if turn.try_lock_shared().is_err() {
+            waits();
+            turn.lock_shared()?;
+        }
+        Ok(Gate { dir: dir.to_path_buf(), turn: Some(turn), low: None })
+    }
+
+    /// A low-priority cargo started: marked, where the person's build finds it.
+    fn mark_low(&mut self, pid: u32) -> Option<PathBuf> {
+        let path = self.dir.join(format!("low.{pid}"));
+        let marker = std::fs::File::create(&path).ok()?;
+        marker.lock().ok()?;
+        self.low = Some((path.clone(), marker));
+        self.turn = None;
+        Some(path)
+    }
+
+    /// The build is over: whether it was ended for a build the person waits for.
+    fn ended_for_asked(self) -> bool {
+        let Some((path, _marker)) = self.low else { return false };
+        if !path.exists() { return true; }
+        let _ = std::fs::remove_file(&path);
+        false
+    }
+}
+
+/// `pid` leads a process group (`run_cargo`): the group ends.
+fn end_group(pid: u32) {
+    #[cfg(unix)]
+    {
+        extern "C" { fn kill(pid: i32, sig: i32) -> i32; }
+        const SIGTERM: i32 = 15;
+        // (never -1, which is every process)
+        if pid > 1 && pid <= i32::MAX as u32 {
+            // SAFETY: a plain syscall on the group this process started.
+            unsafe { kill(-(pid as i32), SIGTERM) };
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = pid;
+}
+
+/// The person asked while their own process's low-priority build runs: it ends, and `build_loop`
+/// starts it again at their priority.
+fn end_low_cargo(st: &mut State) {
+    if let Some((pid, path)) = st.low_cargo.take() {
+        let _ = std::fs::remove_file(&path);
+        end_group(pid);
+        st.progress = BuildProgress::default();
+    }
+}
+
+/// Runs the build, the state following what cargo says. Its status, and its output without the
+/// progress lines (a pipe is no terminal: cargo shows progress only when told, at a given width).
+fn run_cargo(cmd: &mut std::process::Command, started: impl FnOnce(u32)) -> std::io::Result<(std::process::ExitStatus, String)> {
+    use std::io::Read;
+    cmd.env("CARGO_TERM_PROGRESS_WHEN", "always").env("CARGO_TERM_PROGRESS_WIDTH", "200").env("CARGO_TERM_COLOR", "never");
+    // (a process group of its own: ending this build ends its rustc too)
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(cmd, 0);
+    let mut child = cmd.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped()).spawn()?;
+    started(child.id());
+    let mut err = child.stderr.take().ok_or_else(|| std::io::Error::other("cargo has no stderr pipe"))?;
+    let (mut log, mut line, mut buf) = (String::new(), Vec::new(), [0u8; 4096]);
+    let mut take = |line: &mut Vec<u8>| {
+        let text = String::from_utf8_lossy(line).into_owned();
+        let mut st = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        match cargo_line(&text) {
+            CargoLine::Progress { done, total, building } => {
+                st.progress = BuildProgress { done, total, building: building.to_string(), waiting: String::new() };
+            }
+            CargoLine::Waiting(what) => {
+                st.progress.waiting = what.to_string();
+                drop(st);
+                eprintln!("makepad live: its cargo waits for another build (file lock on {what})");
+            }
+            CargoLine::Other if !text.trim().is_empty() => {
+                st.progress.waiting.clear();
+                log.push_str(&text);
+                log.push('\n');
+            }
+            CargoLine::Other => {}
+        }
+        line.clear();
+    };
+    loop {
+        let n = match err.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        };
+        for &b in &buf[..n] {
+            if b == b'\n' || b == b'\r' { take(&mut line); } else { line.push(b); }
+        }
+    }
+    take(&mut line);
+    Ok((child.wait()?, log))
+}
+
 fn build_loop() {
     loop {
         let (why, paths) = {
             let mut st = STATE.lock().unwrap_or_else(|e| e.into_inner());
             st.again = false;
+            st.progress = BuildProgress::default();
             (st.why.clone(), st.paths.clone())
         };
         let before = stamps(&paths);
-        let (mut cmd, shown) = match command() {
+        let asked = RESTART_AFTER_BUILD.load(std::sync::atomic::Ordering::SeqCst);
+        let (mut cmd, shown) = match command(if asked { Priority::Asked } else { Priority::Background }) {
             Ok(c) => c,
             Err(e) => return fail(format!("{why}; cannot rebuild makepad: {e}; the app runs the previous code -- restart it by hand")),
         };
+        let Some(dir) = loader().as_deref().and_then(Path::parent).map(|d| d.join(".makepad-rebuilds")) else { return fail("the makepad binary's path is unknown".into()) };
+        let waits = || STATE.lock().unwrap_or_else(|e| e.into_inner()).progress.waiting = "another restart's build".into();
+        let mut gate = match Gate::enter(&dir, asked, waits) {
+            Ok(g) => g,
+            Err(e) => return fail(format!("{why}; cannot rebuild makepad: {}: {e}; the app runs the previous code", dir.display())),
+        };
+        STATE.lock().unwrap_or_else(|e| e.into_inner()).progress.waiting.clear();
         eprintln!("makepad live: {why}; restarting makepad: it builds first in the background (`{shown}`, a no-op when makepad is current); the app keeps running the previous code");
         super::live_log(&format!("{{\"event\":\"host_rebuild\",\"started\":true,\"why\":{}}}", super::json_str(&why)));
         let t0 = Instant::now();
-        let out = match cmd.output() {
-            Ok(o) => o,
+        let started = |pid: u32| {
+            if asked { return; }
+            let Some(path) = gate.mark_low(pid) else { return };
+            let mut st = STATE.lock().unwrap_or_else(|e| e.into_inner());
+            st.low_cargo = Some((pid, path));
+            // (the click came while this cargo started)
+            if RESTART_AFTER_BUILD.load(std::sync::atomic::Ordering::SeqCst) { end_low_cargo(&mut st); }
+        };
+        let (status, log) = match run_cargo(&mut cmd, started) {
+            Ok(done) => done,
             Err(e) => return fail(format!("rebuilding makepad: cannot start `{shown}`: {e}; the app runs the previous code")),
         };
-        if !out.status.success() {
-            let log = String::from_utf8_lossy(&out.stderr);
-            return fail(format!("rebuilding makepad FAILED ({}); the app runs the previous code; fix and save to build again:\n  {}", out.status, errors(&log)));
+        STATE.lock().unwrap_or_else(|e| e.into_inner()).low_cargo = None;
+        if gate.ended_for_asked() {
+            eprintln!("makepad live: a restart was asked for: its build goes first, at the person's priority");
+            continue;
+        }
+        if !status.success() {
+            return fail(format!("rebuilding makepad FAILED ({status}); the app runs the previous code; fix and save to build again:\n  {}", errors(&log)));
         }
         if STATE.lock().unwrap_or_else(|e| e.into_inner()).again || stamps(&paths) != before {
             eprintln!("makepad live: sources changed during the build; building again");
@@ -419,6 +748,9 @@ fn build_loop() {
             st.phase = Phase::Idle;
             st.since = Some(Instant::now());
             RESTART_AFTER_BUILD.store(false, std::sync::atomic::Ordering::SeqCst);
+            drop(st);
+            // the offer the click answered: nothing is left to update to
+            super::clear_restart_pending();
             return;
         }
         super::live_log(&format!("{{\"event\":\"host_rebuild\",\"ok\":true,\"s\":{secs:.1}}}"));
@@ -426,9 +758,12 @@ fn build_loop() {
             let mut st = STATE.lock().unwrap_or_else(|e| e.into_inner());
             if st.again { drop(st); continue; }
             *HANDOVER.lock().unwrap_or_else(|e| e.into_inner()) = Some(Handover { #[cfg(unix)] loader, stamps: before });
+            let asked = RESTART_AFTER_BUILD.swap(false, std::sync::atomic::Ordering::SeqCst);
+            // (under the lock: the ring never sees the asked restart as one still to ask for)
+            if asked { super::RESTART_CONFIRMED.store(true, std::sync::atomic::Ordering::SeqCst); }
             st.phase = Phase::Restarting;
             st.since = Some(Instant::now());
-            RESTART_AFTER_BUILD.swap(false, std::sync::atomic::Ordering::SeqCst)
+            asked
         };
         let reason = format!("makepad was rebuilt ({why})");
         // a live test session restarts its tests into it at once (its verdict: the restarted run)
@@ -537,6 +872,7 @@ fn restart(h: Handover, state: Option<&[u8]>) {
         }
         let reason = super::RESTART_REASON.lock().unwrap_or_else(|e| e.into_inner()).clone();
         cmd.env("MAKEPAD_RUN_RESTART_T0", super::RESTART_SAVED_MS.load(std::sync::atomic::Ordering::Relaxed).to_string());
+        super::restart_begins();
         // the run ends as at exit (exec skips the exit handlers); fd 2 goes back to the terminal
         // now (the transcript tee is a thread of this process: the new one starts its own), so
         // the line below and the new process's output are not lost in the old pipe
@@ -554,5 +890,59 @@ fn restart(h: Handover, state: Option<&[u8]>) {
     {
         let _ = (h, state);
         fail("this platform cannot restart into a rebuilt makepad; restart it by hand".into());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn the_person_s_build_ends_the_low_ones_and_goes_first() {
+        use std::os::unix::process::{CommandExt, ExitStatusExt};
+        let dir = std::env::temp_dir().join(format!("relax-gate-test-{}", std::process::id()));
+        let sleep = || std::process::Command::new("sleep").arg("30").process_group(0).spawn().unwrap();
+        // a low-priority build, marked, and a marker a crashed makepad left behind
+        let mut low = Gate::enter(&dir, false, || panic!("nothing holds the turn")).unwrap();
+        let mut running = sleep();
+        low.mark_low(running.id()).unwrap();
+        let mut unrelated = sleep();
+        std::fs::write(dir.join(format!("low.{}", unrelated.id())), "").unwrap();
+        let asked = Gate::enter(&dir, true, || panic!("the low build gave the turn up")).unwrap();
+        assert_eq!(running.wait().unwrap().signal(), Some(15));
+        assert!(low.ended_for_asked(), "the low build sees why it ended");
+        assert_eq!(unrelated.try_wait().unwrap(), None, "a stale marker's pid is not ours to signal");
+        assert!(!dir.join(format!("low.{}", unrelated.id())).exists());
+        // a low build waits for the person's before it starts, and its cargo then finds it current
+        let (done, entered) = std::sync::mpsc::channel();
+        let waiter = {
+            let dir = dir.clone();
+            std::thread::spawn(move || {
+                let gate = Gate::enter(&dir, false, || {}).unwrap();
+                done.send(()).unwrap();
+                gate.ended_for_asked()
+            })
+        };
+        assert!(entered.recv_timeout(std::time::Duration::from_millis(30)).is_err());
+        drop(asked);
+        entered.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        assert!(!waiter.join().unwrap(), "unmarked: nothing ended it");
+        unrelated.kill().unwrap();
+        unrelated.wait().unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn what_cargo_says_is_read_from_its_own_lines() {
+        assert_eq!(
+            cargo_line("    Building [========>                    ] 1/3: relax-session(build), relax-base                    "),
+            CargoLine::Progress { done: 1, total: 3, building: "relax-session(build)" },
+        );
+        assert_eq!(cargo_line("    Building [==========================>] 790/790"), CargoLine::Progress { done: 790, total: 790, building: "" });
+        assert_eq!(cargo_line("    Blocking waiting for file lock on build directory"), CargoLine::Waiting("build directory"));
+        for other in ["   Compiling relax-session v0.1.0 (/x)", "    Finished `release` profile [optimized] target(s) in 0.87s", "error[E0308]: mismatched types", "    Building something else", ""] {
+            assert_eq!(cargo_line(other), CargoLine::Other, "{other}");
+        }
     }
 }

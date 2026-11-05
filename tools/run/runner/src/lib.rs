@@ -146,7 +146,6 @@ pub fn init_embedded(exe: &std::path::Path, host: &'static Host) {
     // the program's argv[0] / current_exe: the embedder has no command line of its own
     relax_compiler::os::proc::set_args(vec![exe.as_os_str().as_encoded_bytes().to_vec()]);
     std::env::set_var("MAKEPAD_RUN_LOADER", exe);
-    std::env::set_var("MAKEPAD_LOADER_STATE", fetch::home().join("cache"));
     macros::register();
 }
 
@@ -234,6 +233,9 @@ fn run(raw_args: Vec<Vec<u8>>) {
             std::process::exit(2);
         }
     };
+    // Windows has no exec: a run that can restart becomes the child of this process, which waits
+    #[cfg(windows)]
+    relax_compiler::restart_parent::enter(&raw_args);
     // a child started in a virtual folder of a git repository run gets the mount table
     if let Err(e) = relax_compiler::vfs::mount_from_env() {
         eprintln!("makepad: MAKEPAD_RUN_VFS: {e}");
@@ -256,10 +258,6 @@ fn run(raw_args: Vec<Vec<u8>>) {
     if let Some(e) = loader_exe() {
         std::env::set_var("MAKEPAD_RUN_LOADER", e);
     }
-    // one folder for everything makepad run and the runner keep: $MAKEPAD_RUN_HOME/cache (the entry
-    // scripts set MAKEPAD_RUN_HOME to the launcher's folder); the runner's Builder library keeps its
-    // records there too (MAKEPAD_LOADER_STATE)
-    std::env::set_var("MAKEPAD_LOADER_STATE", fetch::home().join("cache"));
     // the programs it runs (the runner app) keep their launch records in the same home
     std::env::set_var("MAKEPAD_RUN_HOME", fetch::home());
     #[cfg(target_os = "linux")]
@@ -341,21 +339,19 @@ fn run(raw_args: Vec<Vec<u8>>) {
                 std::process::exit(2);
             }
         },
+        Some("export") if args.get(2).is_some_and(|a| a == "--mounted") => {
+            let [out] = &args[3..] else {
+                eprintln!("usage: makepad export --mounted <folder>");
+                std::process::exit(2);
+            };
+            let table = std::env::var("MAKEPAD_RUN_VFS").unwrap_or_default();
+            let workspace = std::env::var("MAKEPAD_RUN_WORKSPACE").unwrap_or_default();
+            export_to(fetch::mounted(&table, &workspace), out)
+        }
         Some("export") => match fetch::split_args(&args[2..]) {
             Some(Ok((_, spec, cached, rest))) if rest.len() == 1 => {
                 let home = fetch::home();
-                let snap = if cached { fetch::cached(&home, &spec) } else { fetch::fetch(&home, &spec) };
-                let edits = std::env::var_os("MAKEPAD_RUN_EDITS").filter(|d| !d.is_empty()).map(std::path::PathBuf::from);
-                match snap.and_then(|snap| fetch::export(&snap, edits.as_deref(), std::path::Path::new(&rest[0]))) {
-                    Ok((files, wrote)) => {
-                        println!("{files} files, {wrote} written");
-                        std::process::exit(0)
-                    }
-                    Err(e) => {
-                        eprintln!("makepad: {e}");
-                        std::process::exit(1)
-                    }
-                }
+                export_to(if cached { fetch::cached(&home, &spec) } else { fetch::fetch(&home, &spec) }, &rest[0])
             }
             Some(Err(e)) => {
                 eprintln!("makepad: {e}");
@@ -564,6 +560,21 @@ pub fn mount_archive(file: &std::path::Path, offset: u64, len: u64, root: Option
     };
     relax_compiler::vfs::mount(&workspace, std::sync::Arc::new(store), &commit)?;
     Ok(workspace)
+}
+
+/// `makepad export`: writes a snapshot out with `$MAKEPAD_RUN_EDITS` over it, and ends the process.
+fn export_to(snap: Result<fetch::Snapshot, String>, out: &str) -> ! {
+    let edits = std::env::var_os("MAKEPAD_RUN_EDITS").filter(|d| !d.is_empty()).map(std::path::PathBuf::from);
+    match snap.and_then(|snap| fetch::export(&snap, edits.as_deref(), std::path::Path::new(out))) {
+        Ok((files, wrote)) => {
+            println!("{files} files, {wrote} written");
+            std::process::exit(0)
+        }
+        Err(e) => {
+            eprintln!("makepad: {e}");
+            std::process::exit(1)
+        }
+    }
 }
 
 /// Runs `rest` (the package and its flags) with `opts` (`cmd_run`'s options before the package)

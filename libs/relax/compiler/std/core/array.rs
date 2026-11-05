@@ -29,6 +29,18 @@ pub fn from_fn<T, const N: usize, F: FnMut(usize) -> T>(f: F) -> [T; N] {
     let mut f = f;
     let mut out: MaybeUninit<[T; N]> = MaybeUninit::uninit();
     let p = out.as_mut_ptr() as *mut T;
+    if !crate::mem::needs_drop::<T>() {
+        // Nothing to drop if `f` panics: no guard. Its unwind path would hold `out`'s address
+        // (the drop call in a cleanup block), so `out` would stay in memory and the loop rolled:
+        // a `[bool; 4]` built by `map` stored byte by byte and reread as a word (a store-forward
+        // stall per use).
+        let mut n = 0;
+        while n < N {
+            unsafe { im::ptr_write(im::ptr_add_mut(p, n), f(n)) };
+            n += 1;
+        }
+        return unsafe { out.assume_init() };
+    }
     let mut guard = InitGuard { p, n: 0 };
     while guard.n < N {
         unsafe { im::ptr_write(im::ptr_add_mut(p, guard.n), f(guard.n)) };

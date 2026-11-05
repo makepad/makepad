@@ -25,6 +25,32 @@
 
 pub use makepad_relax_api_macro::relax_api;
 
+static APP_CALL: std::sync::OnceLock<fn(unsafe extern "C" fn(*mut u8), *mut u8) -> bool> = std::sync::OnceLock::new();
+
+/// The host's way of calling code it compiled (`app_call`), once per process.
+pub fn set_app_call(call: fn(unsafe extern "C" fn(*mut u8), *mut u8) -> bool) {
+    let _ = APP_CALL.set(call);
+}
+
+/// How native code calls a function pointer JIT code gave it: a callback, a waker, a router. A host
+/// can end the app's run while the call is in there, or before it starts. The call then comes back
+/// with false, as if the callback had returned at once: every frame of the caller goes on, whatever
+/// it holds is released as usual. Forget the pointer then, it will never work again. Without such a
+/// host this is a plain call.
+pub fn app_call<F: FnOnce()>(f: F) -> bool {
+    let Some(call) = APP_CALL.get() else {
+        f();
+        return true;
+    };
+    unsafe extern "C" fn thunk<F: FnOnce()>(p: *mut u8) {
+        if let Some(f) = (*(p as *mut Option<F>)).take() {
+            f()
+        }
+    }
+    let mut f = Some(f);
+    call(thunk::<F>, &mut f as *mut Option<F> as *mut u8)
+}
+
 /// A generated op wrapper: arguments moved out of `args[i]`, the result written to `ret`;
 /// 0 = returned, 1 = panicked (the text: [`last_panic`]).
 pub type ShimFn = unsafe extern "C" fn(*const *mut u8, *mut u8) -> u32;

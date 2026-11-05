@@ -673,9 +673,38 @@ fn vectorize_stream_maps(f: &mut Func) -> bool {
             bad |= uses.iter().any(|v| (v.0 as usize) < nv && defined[v.0 as usize] && !inputs[v.0 as usize] && !redefined[v.0 as usize]);
             if bad { continue 'candidate; }
         }
+        // entry: one guard's run length against a vector's elements, so a short run (the common
+        // entry of a loop over a few elements) goes to the scalar loop after two instructions;
+        // guard: every check (any one failing also leaves for the scalar loop); body: the vector loop
         let entry = f.blocks.len() as u32;
-        let body = entry + 1;
+        let guard = entry + 1;
+        let body = entry + 2;
         let pos = f.blocks[head as usize].term_pos;
+        let mut pre = Vec::new();
+        let long = f.vreg(Cls::I);
+        if let Some(&(p, oa, e, _)) = end_guards.first() {
+            // bytes (an index: elements) left to `e`, `oa` of them ahead of the entry value
+            let step = if walkers.contains(&p) { sz } else { 1 };
+            let left = f.vreg(Cls::I);
+            pre.push(Inst::IBin(IOp::Sub, U64_TY, left, e, p));
+            pre.push(Inst::ICmpI(Cond::Ge, false, long, left, (lanes + oa / step) * step));
+        } else if let Some(&(c, o)) = zero_guards.iter().find(|g| counts.contains(&g.0)) {
+            pre.push(Inst::ICmpI(Cond::Ge, false, long, c, lanes + (-o).max(0)));
+        } else if let Some(&(iv, o, nb, _)) = lt_guards.first() {
+            let n = match nb {
+                Bound::Reg(r) => r,
+                Bound::Imm(k) => {
+                    let n = f.vreg(Cls::I);
+                    pre.push(Inst::Iconst(n, k));
+                    n
+                }
+            };
+            let left = f.vreg(Cls::I);
+            pre.push(Inst::IBin(IOp::Sub, U64_TY, left, n, iv));
+            pre.push(Inst::ICmpI(Cond::Ge, false, long, left, lanes + o.max(0)));
+        } else {
+            pre.push(Inst::Iconst(long, 1));
+        }
         let trip = f.vreg(Cls::I);
         let mut init = vec![Inst::Iconst(trip, -1)];
         let min_into = |f: &mut Func, init: &mut Vec<Inst>, trip: VReg, c: VReg| {
@@ -867,6 +896,7 @@ fn vectorize_stream_maps(f: &mut Func) -> bool {
                 block.term.map_succs(|s| if s == head { entry } else { s });
             }
         }
+        f.blocks.push(Block { pos: vec![pos; pre.len()], insts: pre, term: Term::Branch(long, guard, head), term_pos: pos, count: -1.0 });
         f.blocks.push(Block { pos: vec![pos; init.len()], insts: init, term: Term::Branch(ok, body, head), term_pos: pos, count: -1.0 });
         f.blocks.push(Block { pos: vec![pos; wide.len()], insts: wide, term: Term::Branch(again, body, head), term_pos: pos, count: -1.0 });
         for (done, member) in transformed.iter_mut().zip(&members) { *done |= *member; }
@@ -2179,6 +2209,17 @@ pub fn unroll_const_loops(options: &relax_session::Options, f: &mut Func) -> boo
             for_defs(i, |d| ndef[d.0 as usize] += 1);
         }
     }
+    // the single definitions (block, instruction): base-relative counters below
+    let mut def1: std::collections::HashMap<u32, (u32, Inst)> = std::collections::HashMap::new();
+    for (bi, b) in f.blocks.iter().enumerate() {
+        for i in &b.insts {
+            for_defs(i, |d| {
+                if ndef[d.0 as usize] == 1 {
+                    def1.insert(d.0, (bi as u32, i.clone()));
+                }
+            });
+        }
+    }
     let mut changed = false;
     let mut budget = 800usize;
     // innermost first (natural_loops sorts by size); loops nested in a changed one are skipped
@@ -2298,16 +2339,14 @@ pub fn unroll_const_loops(options: &relax_session::Options, f: &mut Func) -> boo
         // the counter step c = c + s: in the latch, or (with the test in the header) in a block
         // that dominates the latch -- an iterator's `start += 1` right after its test
         let lb = &f.blocks[l as usize];
-        let mut found = None;
         // (block, k, type, counter, step, the step's value made at k is a constant in each copy)
+        let mut cands = Vec::new();
+        let mut first = None;
         for &sb in std::iter::once(&l).filter(|_| !multi).chain(members.iter().filter(|b| multi || **b != l)) {
-            if found.is_some() {
-                break;
-            }
             for (k, i) in f.blocks[sb as usize].insts.iter().enumerate() {
                 if let Inst::IBinI(IOp::Add, it, d, a, s) = *i {
                     if d == a && ndef[d.0 as usize] == 2 {
-                        found = Some((sb, k, it, d, s, false));
+                        cands.push((sb, k, it, d, s, false));
                     }
                 }
                 // a narrow counter steps through a normalizing chain: `c = conv(conv(c) + s)`
@@ -2316,12 +2355,30 @@ pub fn unroll_const_loops(options: &relax_session::Options, f: &mut Func) -> boo
                 if let Inst::Mov(d, x) = *i {
                     if ndef[d.0 as usize] == 2 {
                         if let Some((it, s)) = narrow_step(&f.blocks[sb as usize], k, d, x, &ndef) {
-                            found = Some((sb, k, it, d, s, true));
+                            cands.push((sb, k, it, d, s, true));
                         }
                     }
                 }
             }
+            if first.is_none() && !cands.is_empty() {
+                first = cands.last().copied();
+            }
         }
+        // the counter the header's or the latch's test reads (an enumerated cursor steps two:
+        // `enumerate()`'s index and the slice cursor whose end decides), else the last step of
+        // the first block with one
+        let decides = |d: VReg| -> bool {
+            [h, l].iter().any(|&b| {
+                let blk = &f.blocks[b as usize];
+                let Term::Branch(cv, _, _) = blk.term else { return false };
+                blk.insts.iter().any(|i| match *i {
+                    Inst::ICmpI(_, _, x, a, _) => x == cv && a == d,
+                    Inst::ICmp(_, _, x, a, e) => x == cv && (a == d || e == d),
+                    _ => false,
+                })
+            })
+        };
+        let found = cands.iter().copied().find(|x| decides(x.3)).or(first);
         let Some((sb, ak, it, c, step, step_const)) = found else {
             if tr {
                 eprintln!("  no counter step c = c + s in latch b{}", l);
@@ -2329,16 +2386,19 @@ pub fn unroll_const_loops(options: &relax_session::Options, f: &mut Func) -> boo
             continue;
         };
         // a step outside the latch: it must dominate the latch, and blocks it dominates read the
-        // stepped counter in the copies
-        if multi && latches.contains(&sb) {
+        // stepped counter in the copies. A step in one of several latches must dominate the
+        // others (`iter().filter(..).count()`: the kept arm counts and jumps back too)
+        let step_in_latches = multi && latches.contains(&sb);
+        if step_in_latches && relax_backend::stats::opt_off(options, "-unrollsteplatch") {
             if tr {
                 eprintln!("  {} latches and the step in latch b{}", latches.len(), sb);
             }
             continue;
         }
-        let idom = if sb != l { relax_backend::dom::idoms(f) } else { Vec::new() };
+        let doms = sb != l || step_in_latches;
+        let idom = if doms { relax_backend::dom::idoms(f) } else { Vec::new() };
         let dominated = |b: u32| -> bool {
-            if sb == l {
+            if !doms {
                 return false;
             }
             let mut x = b;
@@ -2354,7 +2414,7 @@ pub fn unroll_const_loops(options: &relax_session::Options, f: &mut Func) -> boo
             }
             false
         };
-        if sb != l && (sb == h || !latches.iter().all(|&x| dominated(x))) {
+        if doms && (sb == h || !latches.iter().all(|&x| dominated(x))) {
             if tr {
                 eprintln!("  step in b{} does not dominate the latches {:?}", sb, latches);
             }
@@ -2363,6 +2423,57 @@ pub fn unroll_const_loops(options: &relax_session::Options, f: &mut Func) -> boo
         if !f.vregs.get(c.0 as usize).map_or(false, |x| *x == Cls::I) {
             continue;
         }
+        // where the counter starts: a constant, or (an iterator's cursor) an address plus a
+        // constant -- a slot's, a parameter's or one made in front of the loop -- with its end
+        // the same address plus a constant (`[T; N].iter()`: the trip count is N)
+        let mut start: Option<(Base, i64)> = None;
+        let mut starts = 0;
+        for (bi, b) in f.blocks.iter().enumerate() {
+            if m.get(bi).copied().unwrap_or(false) {
+                continue;
+            }
+            for i in &b.insts {
+                let s0 = match *i {
+                    Inst::Iconst(d, v) if d == c => Some((Base::Const, v)),
+                    Inst::Mov(d, x) if d == c => affine(&def1, &ndef, x),
+                    Inst::IBinI(IOp::Add, _, d, x, k) if d == c => affine(&def1, &ndef, x).map(|(b, o)| (b, o.wrapping_add(k))),
+                    _ => {
+                        let mut redef = false;
+                        for_defs(i, |d| redef |= d == c);
+                        if redef {
+                            starts += 1;
+                        }
+                        continue;
+                    }
+                };
+                starts += 1;
+                start = s0;
+            }
+        }
+        let start = if starts == 1 { start } else { None };
+        let start = start.filter(|(b, _)| *b == Base::Const || it.bits == 64);
+        // an address base must hold at the header: a slot (made afresh in each copy), a parameter,
+        // or a definition in a block that dominates the loop
+        let start = start.filter(|(b, _)| match *b {
+            Base::Const | Base::Slot(_) => true,
+            Base::Reg(x) => f.params.contains(&x) || def1.get(&x.0).is_some_and(|(db, _)| {
+                let id = relax_backend::dom::idoms(f);
+                let mut y = h;
+                for _ in 0..100_000 {
+                    if y == *db {
+                        return !m.get(*db as usize).copied().unwrap_or(false);
+                    }
+                    let p = id[y as usize];
+                    if p == u32::MAX || p == y {
+                        return false;
+                    }
+                    y = p;
+                }
+                false
+            }),
+        });
+        // a cursor over a local array: the copies read it at constant offsets (sroa takes it)
+        let slot_cursor = matches!(start, Some((Base::Slot(_), _))) && !relax_backend::stats::opt_off(options, "-unrollcursor");
         // The two generalisations (several latches, an exit split over two blocks) pay only where
         // the copies remove an escape: reconcile's `[(&mut entry.a, ..), (..)]` array read by its
         // IntoIter (`data + start * stride`) becomes constant-offset loads that forward the
@@ -2385,7 +2496,7 @@ pub fn unroll_const_loops(options: &relax_session::Options, f: &mut Func) -> boo
         let mut local_gain = early_ok;
         if general {
             let gain = counter_indexes_fixed_memory(f, &members, c);
-            local_gain = local_gain || (!gain && !relax_backend::stats::opt_off(options, "-unrollearly") && counter_indexes_local_values(f, &members, c, tr));
+            local_gain = local_gain || slot_cursor || (!gain && !relax_backend::stats::opt_off(options, "-unrollearly") && counter_indexes_local_values(f, &members, c, tr));
             if tr {
                 eprintln!("  several latches {} / split exit {}: fixed-address gain {} local-values gain {}", multi, split_used, gain, local_gain);
             }
@@ -2396,14 +2507,43 @@ pub fn unroll_const_loops(options: &relax_session::Options, f: &mut Func) -> boo
         // the decision: in the latch after the step (`Branch(c' cmp k, h, exit)`: iteration j
         // runs again iff cmp(c0 + (j+1)s)), or in the header before anything redefines c
         // (`Branch(c cmp k, body, exit)`: the header's test of iteration j sees c0 + j*s)
-        let find_cmp = |b: &Block, from: usize| -> Option<(Cond, bool, i64, VReg)> {
+        let Some((cbase, c0)) = start else {
+            if tr {
+                eprintln!("  counter v{} has no constant or address-plus-constant start outside", c.0);
+            }
+            continue;
+        };
+        // the end of a base-relative counter: the same base plus a constant, made outside the
+        // loop; only (in)equality (exact however the addresses wrap)
+        let end_of = |e: VReg| -> Option<i64> {
+            let (eb, ek) = affine(&def1, &ndef, e)?;
+            let outside_def = f.params.contains(&e) || def1.get(&e.0).is_some_and(|(db, _)| !m.get(*db as usize).copied().unwrap_or(false));
+            (eb == cbase && outside_def).then_some(ek)
+        };
+        let find_cmp = |b: &Block, from: usize| -> Option<(Cond, bool, i64, VReg, usize)> {
             let Term::Branch(cv, _, _) = b.term else { return None };
             let mut cmp = None;
-            for i in &b.insts[from..] {
+            for (k0, i) in b.insts[from..].iter().enumerate() {
                 if let Inst::ICmpI(cond, signed, d, x, k) = *i {
-                    if d == cv && x == c {
-                        cmp = Some((cond, signed, k, cv));
+                    if d == cv && x == c && cbase == Base::Const {
+                        cmp = Some((cond, signed, k, cv, from + k0));
                         continue;
+                    }
+                }
+                if let Inst::ICmp(cond, signed, d, x, e) = *i {
+                    let swapped = match cond {
+                        Cond::Lt => Cond::Gt,
+                        Cond::Gt => Cond::Lt,
+                        Cond::Le => Cond::Ge,
+                        Cond::Ge => Cond::Le,
+                        q => q,
+                    };
+                    let hit = if x == c && e != c { end_of(e).map(|k| (cond, k)) } else if e == c && x != c { end_of(x).map(|k| (swapped, k)) } else { None };
+                    if let Some((q, k)) = hit.filter(|(q, _)| cbase == Base::Const || matches!(q, Cond::Eq | Cond::Ne)) {
+                        if d == cv {
+                            cmp = Some((q, signed, k, cv, from + k0));
+                            continue;
+                        }
                     }
                 }
                 let mut redef = false;
@@ -2421,9 +2561,9 @@ pub fn unroll_const_loops(options: &relax_session::Options, f: &mut Func) -> boo
         } else {
             None
         };
-        let (cond, signed, k, in_latch) = match (latch_cmp, header_cmp) {
-            (Some((a, b, k, _)), _) => (a, b, k, true),
-            (None, Some((a, b, k, _))) => (a, b, k, false),
+        let (cond, signed, k, in_latch, cmp_at) = match (latch_cmp, header_cmp) {
+            (Some((a, b, k, _, at)), _) => (a, b, k, true, at),
+            (None, Some((a, b, k, _, at))) => (a, b, k, false, at),
             _ => {
                 if tr {
                     eprintln!("  no compare of the counter deciding the loop (latch b{}, header b{})", l, h);
@@ -2434,26 +2574,6 @@ pub fn unroll_const_loops(options: &relax_session::Options, f: &mut Func) -> boo
         let (bt, be) = match if in_latch { &f.blocks[l as usize].term } else { &f.blocks[h as usize].term } {
             Term::Branch(_, a, b) => (*a, *b),
             _ => continue,
-        };
-        // the one outside definition: a constant
-        let mut c0 = None;
-        for (bi, b) in f.blocks.iter().enumerate() {
-            if m.get(bi).copied().unwrap_or(false) {
-                continue;
-            }
-            for i in &b.insts {
-                if let Inst::Iconst(d, v) = *i {
-                    if d == c {
-                        c0 = Some(v);
-                    }
-                }
-            }
-        }
-        let Some(c0) = c0 else {
-            if tr {
-                eprintln!("  counter v{} has no constant outside definition", c.0);
-            }
-            continue;
         };
         // c is read nowhere outside the loop
         for (bi, b) in f.blocks.iter().enumerate() {
@@ -2500,7 +2620,8 @@ pub fn unroll_const_loops(options: &relax_session::Options, f: &mut Func) -> boo
                 continue 'next;
             }
         }
-        if local_gain && t > 4 {
+        let trips = if in_latch { t } else { t - 1 };
+        if local_gain && trips > 4 {
             if tr {
                 eprintln!("  early exits: {} copies, over 4", t);
             }
@@ -2527,9 +2648,18 @@ pub fn unroll_const_loops(options: &relax_session::Options, f: &mut Func) -> boo
         let pos_of = |b: u32| -> usize { idx.iter().position(|x| *x == b).unwrap() };
         let n = idx.len() as u32;
         let mut v = c0;
+        // the block and index of the deciding compare: a base-relative counter's copies get its
+        // value (the constant folding a constant counter gets from simplify)
+        let cmp_blk = if in_latch { l } else { h };
         for j in 0..t as u32 {
             let rj = f.vreg(Cls::I);
             let rj2 = f.vreg(Cls::I);
+            // this copy's base: a slot's address afresh (in the header copy), else the register
+            let bj = match cbase {
+                Base::Slot(_) => f.vreg(Cls::I),
+                Base::Reg(x) => x,
+                Base::Const => rj,
+            };
             let mut fresh: std::collections::HashMap<u32, VReg> = std::collections::HashMap::new();
             for &lv in &local {
                 let cls = f.vregs[lv as usize];
@@ -2546,8 +2676,22 @@ pub fn unroll_const_loops(options: &relax_session::Options, f: &mut Func) -> boo
                     let after = past || (step_blk && ii > ak);
                     if step_blk && ii == ak {
                         // the normalizing chain's value is this copy's next counter: a constant
-                        *ins = if step_const { Inst::Iconst(rj2, extend_const(v.wrapping_add(step), it)) } else { Inst::IBinI(IOp::Add, it, rj2, rj, step) };
+                        *ins = if !step_const {
+                            Inst::IBinI(IOp::Add, it, rj2, rj, step)
+                        } else if cbase == Base::Const {
+                            Inst::Iconst(rj2, extend_const(v.wrapping_add(step), it))
+                        } else {
+                            Inst::IBinI(IOp::Add, it, rj2, bj, v.wrapping_add(step))
+                        };
                         continue;
+                    }
+                    if cbase != Base::Const && b == cmp_blk && ii == cmp_at {
+                        if let Inst::ICmp(_, _, d, ..) = *ins {
+                            let cv = fresh.get(&d.0).copied().unwrap_or(d);
+                            let at = if in_latch { extend_const(v.wrapping_add(step), it) } else { v };
+                            *ins = Inst::Iconst(cv, cmp_holds(cond, signed, at, k) as i64);
+                            continue;
+                        }
                     }
                     ins.vregs_mut(|r| {
                         if *r == c {
@@ -2584,8 +2728,22 @@ pub fn unroll_const_loops(options: &relax_session::Options, f: &mut Func) -> boo
                 }
                 if b == h {
                     let p = blk.pos.first().copied().unwrap_or(blk.term_pos);
-                    blk.insts.insert(0, Inst::Iconst(rj, v));
-                    blk.pos.insert(0, p);
+                    match cbase {
+                        Base::Const => {
+                            blk.insts.insert(0, Inst::Iconst(rj, v));
+                            blk.pos.insert(0, p);
+                        }
+                        Base::Slot(sl) => {
+                            blk.insts.insert(0, Inst::IBinI(IOp::Add, it, rj, bj, v));
+                            blk.insts.insert(0, Inst::SlotAddr(bj, sl));
+                            blk.pos.insert(0, p);
+                            blk.pos.insert(0, p);
+                        }
+                        Base::Reg(_) => {
+                            blk.insts.insert(0, Inst::IBinI(IOp::Add, it, rj, bj, v));
+                            blk.pos.insert(0, p);
+                        }
+                    }
                 }
                 debug_assert_eq!(f.blocks.len() as u32, base + j * n + q as u32);
                 f.blocks.push(blk);
@@ -2603,6 +2761,41 @@ pub fn unroll_const_loops(options: &relax_session::Options, f: &mut Func) -> boo
         changed = true;
     }
     changed
+}
+
+/// What a counter's start and end are relative to: nothing (constants), a stack slot's address, or
+/// a register (a parameter or a definition in front of the loop).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Base {
+    Const,
+    Slot(u32),
+    Reg(VReg),
+}
+
+/// `v` as a base plus a constant, through single definitions (constants, slot addresses, moves,
+/// adds and subtracts of constants); any other single definition or parameter is its own base.
+fn affine(def1: &std::collections::HashMap<u32, (u32, Inst)>, ndef: &[u32], v: VReg) -> Option<(Base, i64)> {
+    let (mut v, mut off) = (v, 0i64);
+    for _ in 0..32 {
+        if ndef.get(v.0 as usize).copied() != Some(1) {
+            return None;
+        }
+        match def1.get(&v.0).map(|x| &x.1) {
+            Some(Inst::Iconst(_, k)) => return Some((Base::Const, off.wrapping_add(*k))),
+            Some(Inst::SlotAddr(_, sl)) => return Some((Base::Slot(*sl), off)),
+            Some(Inst::Mov(_, a)) => v = *a,
+            Some(Inst::IBinI(IOp::Add, it, _, a, k)) if it.bits == 64 => {
+                off = off.wrapping_add(*k);
+                v = *a;
+            }
+            Some(Inst::IBinI(IOp::Sub, it, _, a, k)) if it.bits == 64 => {
+                off = off.wrapping_sub(*k);
+                v = *a;
+            }
+            _ => return Some((Base::Reg(v), off)),
+        }
+    }
+    None
 }
 
 /// Whether the loop indexes, with its counter `c`, a stack slot that every other access reaches at

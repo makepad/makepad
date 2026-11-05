@@ -220,60 +220,17 @@ impl NativeThread {
     }
 }
 
-struct StartArg {
-    f: fn(*mut u8),
-    arg: *mut u8,
-    /// the starting thread's domain static block (relax domain.rs): the new thread runs in it
-    domain: u64,
-    token: u64,
-}
-
 extern "C" {
-    fn __relax_on_program_stack(f: extern "C" fn(*mut u8), arg: *mut u8);
-    fn __relax_domain_base() -> u64;
-    fn __relax_domain_enter(base: u64, token: u64);
-    fn __relax_domain_reserve(base: u64) -> u64;
-    fn __relax_domain_failed(base: u64, token: u64);
-}
-
-extern "C" fn posix_thread_start(p: *mut c_void) -> *mut c_void {
-    // first, before anything that may name a static
-    unsafe { __relax_domain_enter((*(p as *const StartArg)).domain, (*(p as *const StartArg)).token) };
-    // the thread's body runs on a program stack (a large lazily committed reservation with a guard;
-    // relax_base::stack::on_program_stack)
-    unsafe { __relax_on_program_stack(start_body, p as *mut u8) };
-    core::ptr::null_mut()
-}
-
-extern "C" fn start_body(p: *mut u8) {
-    let a = unsafe { alloc::boxed::Box::from_raw(p as *mut StartArg) };
-    (a.f)(a.arg);
+    fn __relax_thread_spawn(out: *mut pthread_t, stack_size: usize, f: fn(*mut u8), arg: *mut u8) -> i32;
 }
 
 /// Starts a thread running `f(arg)` with a stack of at least `stack_size` bytes; Err(os error).
+/// (The runtime starts it: its native code runs around the thread's JIT code.)
 pub fn spawn_thread(stack_size: usize, f: fn(*mut u8), arg: *mut u8) -> Result<NativeThread, i32> {
-    let domain = unsafe { __relax_domain_base() };
-    let token = unsafe { __relax_domain_reserve(domain) };
-    let start = alloc::boxed::Box::into_raw(alloc::boxed::Box::new(StartArg { f, arg, domain, token })) as *mut c_void;
     let mut native: pthread_t = 0;
-    let mut attr = pthread_attr_t { storage: [0; 8] };
-    unsafe {
-        let r = pthread_attr_init(&mut attr as *mut pthread_attr_t);
-        if r != 0 {
-            drop(alloc::boxed::Box::from_raw(start as *mut StartArg));
-            __relax_domain_failed(domain, token);
-            return Err(r);
-        }
-        let page = 16 * 1024;
-        let size = (stack_size + page - 1) / page * page;
-        pthread_attr_setstacksize(&mut attr as *mut pthread_attr_t, size);
-        let r = pthread_create(&mut native as *mut pthread_t, &attr as *const pthread_attr_t, posix_thread_start, start);
-        pthread_attr_destroy(&mut attr as *mut pthread_attr_t);
-        if r != 0 {
-            drop(alloc::boxed::Box::from_raw(start as *mut StartArg));
-            __relax_domain_failed(domain, token);
-            return Err(r);
-        }
+    let r = unsafe { __relax_thread_spawn(&mut native as *mut pthread_t, stack_size, f, arg) };
+    if r != 0 {
+        return Err(r);
     }
     Ok(NativeThread(native))
 }

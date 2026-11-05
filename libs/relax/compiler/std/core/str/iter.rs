@@ -4,6 +4,7 @@ use super::sub;
 use super::validations::{decode_at, decode_before};
 use crate::char::{EscapeDebug as CharEscapeDebug, EscapeDebugArgs};
 use crate::fmt;
+use crate::fmt::Write as _;
 use crate::iter::{DoubleEndedIterator, ExactSizeIterator, FusedIterator, Iterator};
 use crate::option::Option::{self, None, Some};
 

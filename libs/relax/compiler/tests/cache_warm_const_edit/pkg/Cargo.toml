@@ -1,0 +1,17 @@
+[package]
+name = "cache-warm-const-edit"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# A program whose code comes from the disk cache, its consts and statics edited while it runs
+# (tests/cache_warm_const_edit/run.py).
+[[bin]]
+name = "cache-warm-const-edit"
+path = "src/main.rs"
+
+[dependencies]
+warm-const-dep = { path = "dep" }
+
+[workspace]
+members = ["dep"]

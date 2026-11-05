@@ -503,10 +503,6 @@ impl<'a> Formatter<'a> {
         self.buf.write_str(data)
     }
 
-    pub fn write_char(&mut self, c: char) -> Result {
-        self.buf.write_char(c)
-    }
-
     pub fn write_fmt(&mut self, fmt: Arguments<'_>) -> Result {
         if let Some(s) = fmt.as_str() {
             self.buf.write_str(s)

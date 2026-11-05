@@ -660,7 +660,7 @@ pub fn attrs_at_call(prog: &Program, owner: DefId, file: u32, call: u32) -> Vec<
         }
     }
     let od = prog.def(owner);
-    if od.file != file || od.item.0 == u32::MAX { return Vec::new(); }
+    if od.file != file || od.item.0 == u32::MAX || !has_body_item(od.kind) { return Vec::new(); }
     let pf = &prog.files[od.file as usize];
     let ast = &pf.ast;
     let mut f = Find { ast, pf, call: pf.diagnostic_pos(call), stack: Vec::new(), found: None };
@@ -685,6 +685,13 @@ pub fn is_automatically_derived(prog: &Program, d: DefId) -> bool {
     let item = ast.item(def.item);
     has_attr(prog, def.file, ast.list(item.attrs), "automatically_derived")
         || derived(prog, d)
+}
+
+/// Whether a definition of this kind is an item with parameters or a body whose nodes can sit
+/// under attributes (fns, consts, statics). A module's def has none: a crate root's, or a module
+/// whose def names no item of its own, carries a placeholder item id (no item of that file).
+fn has_body_item(kind: DefKind) -> bool {
+    matches!(kind, DefKind::Fn | DefKind::AssocFn | DefKind::ForeignFn | DefKind::Const | DefKind::AssocConst | DefKind::Static | DefKind::ForeignStatic)
 }
 
 /// The attributes of the parameters, statements, arms, blocks and fields around the source span
@@ -725,7 +732,7 @@ pub fn attrs_at(prog: &Program, def: DefId, file: u32, lo: u32, hi: u32) -> Vec<
     while owner != NO_DEF && matches!(prog.def(owner).kind, DefKind::Closure | DefKind::AnonConst) { owner = prog.def(owner).parent; }
     if owner == NO_DEF { return Vec::new(); }
     let od = prog.def(owner);
-    if od.file != file || od.item.0 == u32::MAX { return Vec::new(); }
+    if od.file != file || od.item.0 == u32::MAX || !has_body_item(od.kind) { return Vec::new(); }
     let ast = &prog.files[od.file as usize].ast;
     let item = ast.item(od.item);
     // (a span outside the item is none of its body's nodes)

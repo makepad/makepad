@@ -1622,7 +1622,7 @@ impl Predecoded {
             match std::mem::replace(&mut slots[ci], Slot::Taken) {
                 Slot::Done(image) => return image,
                 Slot::Taken => return None,
-                busy => { slots[ci] = busy; slots = self.done.wait(slots).unwrap(); }
+                busy => { slots[ci] = busy; slots = crate::pool::wait(&self.done, &self.slots, slots).unwrap(); }
             }
         }
     }

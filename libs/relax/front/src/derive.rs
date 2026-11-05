@@ -516,6 +516,11 @@ impl<'a> Parser<'a> {
                     r
                 };
                 let name_of = |s: &Self, x: usize| -> String { String::from_utf8_lossy(s.tok_text(s.toks.at(x))).into_owned() };
+                // A bound list may end in `+` (`T: Zeroize + `, as a macro's `$($b + )*` leaves it): the
+                // emitted impl header adds its own `+ Trait` or closes with `>` right after, so drop it.
+                while toks.len() > 2 && *toks.last().unwrap() != GT && self.toks.at(*toks.last().unwrap()).kind == T::Plus {
+                    toks.pop();
+                }
                 if first.kind == T::Lifetime {
                     let n = name_of(self, toks[0]);
                     let b = if toks.len() > 2 { txt(self, &toks[2..]) } else { Gen::new(self.edition) };

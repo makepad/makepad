@@ -3,6 +3,44 @@
 use crate::regalloc::reachable;
 use crate::rir::*;
 
+/// Panic and unwind paths: blocks that can only end in `Unreachable` or `Resume`, and landing
+/// pads (a block whose every successor is one, back to front until nothing changes). A panic
+/// call in a function with cleanups is an `Invoke` whose normal successor is `Unreachable`: its
+/// block is cold too, not only the blocks ending in `Unreachable`.
+pub fn cold_blocks(f: &Func, reach: &[bool]) -> Vec<bool> {
+    let nb = f.blocks.len();
+    let mut cold = vec![false; nb];
+    for (bi, b) in f.blocks.iter().enumerate() {
+        match b.term {
+            Term::Invoke(_, u) => cold[u as usize] = true,
+            Term::Unreachable | Term::Resume => cold[bi] = true,
+            _ => {}
+        }
+    }
+    loop {
+        let mut changed = false;
+        for bi in (0..nb).rev() {
+            if cold[bi] || !reach[bi] {
+                continue;
+            }
+            let mut n = 0;
+            let mut all = true;
+            for s in f.blocks[bi].term.succs() {
+                n += 1;
+                all &= cold[s as usize];
+            }
+            if n > 0 && all {
+                cold[bi] = true;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    cold
+}
+
 /// `relayout`, returning the new order: per new block, the block it was.
 pub fn relayout_order(f: &mut Func) -> Vec<u32> {
     let n = f.blocks.len();
@@ -10,6 +48,7 @@ pub fn relayout_order(f: &mut Func) -> Vec<u32> {
         return (0..n as u32).collect();
     }
     let reach = reachable(f);
+    let panic_path = cold_blocks(f, &reach);
     // blocks only reachable through unwind edges (cleanup pads) are cold
     let mut normal = vec![false; n];
     let mut st = vec![0u32];
@@ -45,7 +84,7 @@ pub fn relayout_order(f: &mut Func) -> Vec<u32> {
         let mut b = next;
         while !placed[b as usize] && reach[b as usize] {
             placed[b as usize] = true;
-            if (matches!(f.blocks[b as usize].term, Term::Unreachable | Term::Resume) || !normal[b as usize]) && b != 0 {
+            if (panic_path[b as usize] || !normal[b as usize]) && b != 0 {
                 cold.push(b);
             } else {
                 order.push(b);
@@ -56,8 +95,8 @@ pub fn relayout_order(f: &mut Func) -> Vec<u32> {
                     // fall through to the true successor (then-block, loop body) unless it is
                     // placed already or a panic path, or the branch is a search's hit test in a
                     // loop (then the scan goes on next: the miss is what repeats)
-                    let t_cold = matches!(f.blocks[t as usize].term, Term::Unreachable);
-                    let e_first = !placed[e as usize] && !matches!(f.blocks[e as usize].term, Term::Unreachable) && search_hit(b as usize);
+                    let t_cold = panic_path[t as usize];
+                    let e_first = !placed[e as usize] && !panic_path[e as usize] && search_hit(b as usize);
                     if !placed[t as usize] && !t_cold && !e_first {
                         t
                     } else {

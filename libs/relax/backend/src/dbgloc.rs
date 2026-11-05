@@ -36,6 +36,107 @@ pub enum Home {
     /// call sequence leaves alone): known only at a stop's innermost call, whose trampoline
     /// stores the caller-saved registers
     CallReg(u8),
+    /// recomputed from another value's home: a named value held nowhere at the call that was
+    /// made from one that is (`x * 2` from `x`: the salvage LLVM's debug info does)
+    Calc(Calc),
+}
+
+/// `op(base, imm)` at an integer width (`Home::Calc`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Calc {
+    pub op: CalcOp,
+    pub bits: u8,
+    pub signed: bool,
+    pub imm: i64,
+    pub base: Base,
+}
+
+/// The operations a `Calc` recomputes (`IBinI`'s with a constant operand).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CalcOp {
+    Add,
+    Sub,
+    Mul,
+    And,
+    Or,
+    Xor,
+    Shl,
+    Shr,
+}
+
+/// Where a `Calc`'s operand is: the homes a stop reads (a constant operand folds).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Base {
+    Reg(u8),
+    Fp(i32),
+    CallReg(u8),
+}
+
+impl Base {
+    pub fn home(self) -> Home {
+        match self {
+            Base::Reg(r) => Home::Reg(r),
+            Base::Fp(d) => Home::Fp(d),
+            Base::CallReg(r) => Home::CallReg(r),
+        }
+    }
+}
+
+impl CalcOp {
+    const ALL: [CalcOp; 8] = [CalcOp::Add, CalcOp::Sub, CalcOp::Mul, CalcOp::And, CalcOp::Or, CalcOp::Xor, CalcOp::Shl, CalcOp::Shr];
+
+    fn of(op: IOp) -> Option<CalcOp> {
+        Some(match op {
+            IOp::Add => CalcOp::Add,
+            IOp::Sub => CalcOp::Sub,
+            IOp::Mul => CalcOp::Mul,
+            IOp::And => CalcOp::And,
+            IOp::Or => CalcOp::Or,
+            IOp::Xor => CalcOp::Xor,
+            IOp::Shl => CalcOp::Shl,
+            IOp::Shr => CalcOp::Shr,
+            _ => return None,
+        })
+    }
+
+    /// `op(x, imm)` at width `bits` (the low `bits` are the result; a right shift first
+    /// narrows x to the width, sign-extended when signed).
+    pub fn eval(self, bits: u8, signed: bool, imm: i64, x: u64) -> u64 {
+        let w = bits.clamp(1, 64) as u32;
+        let k = imm as u64;
+        let sh = (k % w as u64) as u32;
+        match self {
+            CalcOp::Add => x.wrapping_add(k),
+            CalcOp::Sub => x.wrapping_sub(k),
+            CalcOp::Mul => x.wrapping_mul(k),
+            CalcOp::And => x & k,
+            CalcOp::Or => x | k,
+            CalcOp::Xor => x ^ k,
+            CalcOp::Shl => x << sh,
+            CalcOp::Shr if signed => (((x << (64 - w)) as i64 >> (64 - w)) >> sh) as u64,
+            CalcOp::Shr => ((x << (64 - w)) >> (64 - w)) >> sh,
+        }
+    }
+
+    pub fn symbol(self) -> &'static str {
+        match self {
+            CalcOp::Add => "+",
+            CalcOp::Sub => "-",
+            CalcOp::Mul => "*",
+            CalcOp::And => "&",
+            CalcOp::Or => "|",
+            CalcOp::Xor => "^",
+            CalcOp::Shl => "<<",
+            CalcOp::Shr => ">>",
+        }
+    }
+}
+
+impl Calc {
+    /// The value from its operand's 8 bytes.
+    pub fn apply(&self, x: u64) -> u64 {
+        self.op.eval(self.bits, self.signed, self.imm, x)
+    }
 }
 
 /// How a variable is stored, for the whole function.
@@ -311,6 +412,26 @@ pub fn build(f: &Func, al: &Alloc, fr: &Frame, calls: &[(u32, u32)]) -> Vec<u8> 
             }
         }
     }
+    // tracked single-definition values made as op(s, imm) from a single-definition s: where
+    // one is held nowhere at a call but s is, the site recomputes it from s (s tracked too,
+    // holding no leaf of its own)
+    let mut calc_of: Vec<Option<(u32, CalcOp, IntTy, i64)>> = vec![None; regs_of.len()];
+    for b in &f.blocks {
+        for i in &b.insts {
+            let &Inst::IBinI(op, ty, d, s, imm) = i else { continue };
+            let Some(op) = CalcOp::of(op) else { continue };
+            let Some(&n) = idx.get(d.0 as usize).filter(|n| **n != NONE && (**n as usize) < calc_of.len()) else { continue };
+            if ndef[d.0 as usize] != 1 || ndef[s.0 as usize] != 1 || f.vregs[s.0 as usize] != Cls::I {
+                continue;
+            }
+            if idx[s.0 as usize] == NONE {
+                idx[s.0 as usize] = regs_of.len() as u32;
+                regs_of.push(s.0);
+                holds.push(Vec::new());
+            }
+            calc_of[n as usize] = Some((idx[s.0 as usize], op, ty, imm));
+        }
+    }
     let mut table = Table { vars, sites: Vec::new() };
     if !regs_of.is_empty() && !calls.is_empty() {
         // Stable sorting after reversing keeps the last return offset for a repeated position,
@@ -403,6 +524,7 @@ pub fn build(f: &Func, al: &Alloc, fr: &Frame, calls: &[(u32, u32)]) -> Vec<u8> 
         let mut defs_here = Vec::new();
         let mut int_args: Vec<u32> = Vec::new();
         let mut row: Vec<(u32, u32, Home)> = Vec::new();
+        let mut calc_rows: Vec<(u32, u32, Home)> = Vec::new();
         let mut cand: Vec<usize> = Vec::new();
         for (b, blk) in f.blocks.iter().enumerate() {
             if !blk.insts.iter().any(|i| matches!(i, Inst::Call(..))) {
@@ -521,7 +643,8 @@ pub fn build(f: &Func, al: &Alloc, fr: &Frame, calls: &[(u32, u32)]) -> Vec<u8> 
                         }
                         cand.sort_unstable();
                         cand.dedup();
-                        for &n in &cand {
+                        // where tracked value n is while the call runs
+                        let locate = |n: usize| -> Option<Home> {
                             let v = regs_of[n];
                             let across = !live_after.is_empty() && has(live_after, n) && !defs_here.contains(&v);
                             let used = args.contains(&VReg(v)) || matches!(callee, Callee::Indirect(x) if x.0 == v);
@@ -540,16 +663,36 @@ pub fn build(f: &Func, al: &Alloc, fr: &Frame, calls: &[(u32, u32)]) -> Vec<u8> 
                             } else {
                                 None
                             };
-                            let h = h.or_else(|| {
+                            h.or_else(|| {
                                 let still = across || used || held_here && !matches!(al.loc[v as usize], Loc::Reg(r) if has(&hit_regs, r as usize));
                                 if across || used || held_here { call_reg(v, still) } else { None }
-                            });
-                            let Some(h) = h else { continue };
+                            })
+                        };
+                        calc_rows.clear();
+                        for &n in &cand {
+                            if let Some(h) = locate(n) {
+                                for &(var, leaf) in &holds[n] {
+                                    row.push((var, leaf, h));
+                                }
+                                continue;
+                            }
+                            // held nowhere: recomputed from its operand where that is located
+                            let Some(&Some((s, op, ty, imm))) = calc_of.get(n) else { continue };
+                            let calc = |base| Calc { op, bits: ty.bits, signed: ty.signed, imm, base };
+                            let h = match locate(s as usize) {
+                                Some(Home::Reg(r)) => Home::Calc(calc(Base::Reg(r))),
+                                Some(Home::Fp(d)) => Home::Calc(calc(Base::Fp(d))),
+                                Some(Home::CallReg(r)) => Home::Calc(calc(Base::CallReg(r))),
+                                Some(Home::Const(k)) => Home::Const(op.eval(ty.bits, ty.signed, imm, k as u64) as i64),
+                                Some(Home::Flt(_) | Home::Calc(_)) | None => continue,
+                            };
                             for &(var, leaf) in &holds[n] {
-                                row.push((var, leaf, h));
+                                calc_rows.push((var, leaf, h));
                             }
                         }
-                        // one home per leaf (values of one copy class hold the same value)
+                        // one home per leaf (values of one copy class hold the same value; a
+                        // value held somewhere before one recomputed)
+                        row.extend_from_slice(&calc_rows);
                         row.sort_by_key(|r| (r.0, r.1));
                         row.dedup_by_key(|r| (r.0, r.1));
                         // Reuse the row's capacity across calls; each site owns only its
@@ -680,12 +823,14 @@ fn put_s(b: &mut Vec<u8>, x: i64) {
 }
 
 // A home is one byte, tag in the top three bits: Reg / Flt / CallReg with the register number
-// (< 32), Fp and Const followed by the zigzag value.
+// (< 32), Fp and Const followed by the zigzag value, Calc with its op (`CalcOp::ALL` index)
+// followed by the width (bit 7: signed), the zigzag constant and the operand's home.
 const H_REG: u8 = 0x00;
 const H_FLT: u8 = 0x20;
 const H_CALL: u8 = 0x40;
 const H_FP: u8 = 0x60;
 const H_CONST: u8 = 0x80;
+const H_CALC: u8 = 0xa0;
 
 fn put_home(b: &mut Vec<u8>, h: Home) {
     match h {
@@ -699,6 +844,12 @@ fn put_home(b: &mut Vec<u8>, h: Home) {
         Home::Const(k) => {
             b.push(H_CONST);
             put_s(b, k);
+        }
+        Home::Calc(c) => {
+            b.push(H_CALC | CalcOp::ALL.iter().position(|o| *o == c.op).unwrap_or(0) as u8);
+            put(b, c.bits as u64 | (c.signed as u64) << 7);
+            put_s(b, c.imm);
+            put_home(b, c.base.home());
         }
     }
 }
@@ -783,6 +934,30 @@ impl Rd<'_> {
         let z = self.u()?;
         Some(((z >> 1) as i64) ^ -((z & 1) as i64))
     }
+    fn home(&mut self) -> Option<Home> {
+        let hb = *self.b.get(self.i)?;
+        self.i += 1;
+        Some(match hb & 0xe0 {
+            H_REG => Home::Reg(hb & 0x1f),
+            H_FLT => Home::Flt(hb & 0x1f),
+            H_CALL => Home::CallReg(hb & 0x1f),
+            H_FP => Home::Fp(self.s()? as i32),
+            H_CONST => Home::Const(self.s()?),
+            H_CALC => {
+                let op = *CalcOp::ALL.get((hb & 0x1f) as usize)?;
+                let ty = self.u()?;
+                let imm = self.s()?;
+                let base = match self.home()? {
+                    Home::Reg(r) => Base::Reg(r),
+                    Home::Fp(d) => Base::Fp(d),
+                    Home::CallReg(r) => Base::CallReg(r),
+                    _ => return None,
+                };
+                Home::Calc(Calc { op, bits: (ty & 0x7f) as u8, signed: ty & 0x80 != 0, imm, base })
+            }
+            _ => return None,
+        })
+    }
 }
 
 /// The table encoded in `b` (`encode`'s); None when it does not parse.
@@ -824,17 +999,7 @@ pub fn decode(b: &[u8]) -> Option<Table> {
                 let vl = r.u()?;
                 let var = (vl >> 2) as u32;
                 let leaf = if vl & 3 == 3 { r.u()? as u32 } else { (vl & 3) as u32 };
-                let hb = *r.b.get(r.i)?;
-                r.i += 1;
-                let h = match hb & 0xe0 {
-                    H_REG => Home::Reg(hb & 0x1f),
-                    H_FLT => Home::Flt(hb & 0x1f),
-                    H_CALL => Home::CallReg(hb & 0x1f),
-                    H_FP => Home::Fp(r.s()? as i32),
-                    H_CONST => Home::Const(r.s()?),
-                    _ => return None,
-                };
-                row.push((var, leaf, h));
+                row.push((var, leaf, r.home()?));
             }
             row
         };
@@ -895,7 +1060,7 @@ mod tests {
             sites: vec![
                 (12, vec![(0, 0, Home::Reg(19)), (0, 1, Home::Fp(-24)), (3, 0, Home::Const(-5))]),
                 (40, vec![(0, 0, Home::Reg(19)), (0, 1, Home::Fp(-24)), (3, 0, Home::Const(-5))]),
-                (64, vec![(0, 1, Home::Flt(8)), (3, 0, Home::CallReg(2))]),
+                (64, vec![(0, 0, Home::Calc(Calc { op: CalcOp::Shr, bits: 32, signed: true, imm: 3, base: Base::Fp(-16) })), (0, 1, Home::Flt(8)), (3, 0, Home::CallReg(2))]),
                 (90, vec![]),
             ],
         };
@@ -909,5 +1074,16 @@ mod tests {
         let back = from_pc_entries(all.into_iter());
         assert_eq!(back, b);
         assert_eq!(decode(&back), Some(t));
+    }
+
+    #[test]
+    fn a_calc_recomputes_at_its_width() {
+        let c = |op, signed, imm| Calc { op, bits: 32, signed, imm, base: Base::Reg(15) };
+        assert_eq!(c(CalcOp::Shl, false, 1).apply(3001) as u32, 6002);
+        assert_eq!(c(CalcOp::Mul, false, 3).apply(0xdead_0000_0000_0001) as u32, 3);
+        // a right shift reads only the width (bits above it are whatever the register held)
+        assert_eq!(c(CalcOp::Shr, true, 2).apply(0x1234_5678_ffff_fff0) as u32, 0xffff_fffc);
+        assert_eq!(c(CalcOp::Shr, false, 2).apply(0x1234_5678_ffff_fff0) as u32, 0x3fff_fffc);
+        assert_eq!(c(CalcOp::Sub, false, 5).apply(2) as u32, u32::MAX - 2);
     }
 }

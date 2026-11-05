@@ -455,7 +455,7 @@ fn compute_exhaustiveness_and_usefulness(mcx: &mut UsefulnessCtxt, matrix: &mut 
         // a wildcard row is only relevant under a constructor that is not missing anyway
         let ctor_is_relevant = matches!(ctor, Ctor::Missing) || missing_ctors.is_empty();
         let mut spec_matrix = matrix.specialize_constructor(cx, &ctor, ctor_is_relevant)?;
-        let mut witnesses = compute_exhaustiveness_and_usefulness(mcx, &mut spec_matrix)?;
+        let mut witnesses = crate::stack::ensure_sufficient_stack(|| compute_exhaustiveness_and_usefulness(mcx, &mut spec_matrix))?;
         witnesses.apply_constructor(cx, ty, &missing_ctors, &ctor);
         ret.0.extend(witnesses.0);
         if let Ctor::IntRange(overlap_range) = &ctor {

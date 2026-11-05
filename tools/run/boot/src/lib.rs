@@ -247,6 +247,13 @@ pub struct Boot {
     ring: ring::Ring,
     /// the ring's badge takes a click (`window_style::BADGE_PRESS`): while it shows a dot
     ring_button: bool,
+    /// this run goes on from the start screen of the run before it (`continues_start_screen`)
+    continues: bool,
+    /// the start screen over the app in the window's badge layer, at this opacity (`veil`)
+    veil: Option<f32>,
+    veil_next: Instant,
+    /// this run's restart has begun (`start_screen_anew`): the only time the start screen says so
+    restart_begun: bool,
     /// the window's chrome as the platform reports it: the caption strip follows it
     chrome: caption::Chrome,
     /// the window has focus (the caption's traffic lights grey without it)
@@ -294,6 +301,10 @@ impl Boot {
             badges: info.flags & info_flags::WINDOW_BADGES != 0,
             ring: ring::Ring::new(),
             ring_button: false,
+            continues: false,
+            veil: None,
+            veil_next: Instant::now(),
+            restart_begun: false,
             chrome: caption::Chrome {
                 client: info.flags & info_flags::CLIENT_CHROME != 0,
                 // under a makepad WM the window's controls are its family's, as the app's caption
@@ -398,6 +409,25 @@ impl Boot {
     pub fn window(&self) -> Option<Id> {
         self.window
     }
+
+    /// The window goes and the run stays: its `Closed` is no longer this window's and ends nothing.
+    /// False for a WM's tile, which stays: the WM ends the process with its tile (`Kill`).
+    pub fn close_window(&mut self) -> bool {
+        if self.chrome.hosted.is_some() {
+            return false;
+        }
+        self.layer(None, 0);
+        let Some(window) = self.window.take() else { return true };
+        let mut writer = CmdWriter::new(HOST);
+        if let Some(badge) = self.ring.window.take() {
+            writer.window_close(badge);
+            self.ring.hovered = None;
+        }
+        writer.window_close(window);
+        Hal::global().submit(&writer.buf());
+        true
+    }
+
     pub fn events(&mut self) -> Vec<Event> {
         std::mem::take(&mut self.events)
     }
@@ -601,7 +631,7 @@ impl Boot {
         }
         if let Some(renderer) = &mut self.renderer {
             if state.elapsed < self.state.elapsed {
-                renderer.began = Instant::now();
+                renderer.began = Instant::now() - if self.continues { field::WARP } else { Duration::ZERO };
                 renderer.scroll = 0.0;
                 renderer.field.reset();
             }
@@ -805,6 +835,8 @@ impl Boot {
                     self.events.push(Event::Input(raw, payload.to_vec()));
                 }
                 HalEvent::MouseDown { window, .. } if Some(window) == self.ring.window => {
+                    // the ring answers the click in its next frame, now
+                    self.ring.next_frame = Instant::now();
                     self.events.push(Event::RingPressed)
                 }
                 HalEvent::MouseMove { window, .. } | HalEvent::MouseLeave { window, .. }
@@ -995,6 +1027,10 @@ impl Boot {
             return;
         };
         if renderer.active.is_none() {
+            return;
+        }
+        // (the start screen over the app draws at its own pace: `veil`)
+        if self.veil.is_some() {
             return;
         }
         if renderer.layer.on && !renderer.layer.paused() {
@@ -1236,6 +1272,25 @@ impl Boot {
             && self.renderer.as_ref().is_some_and(|r| r.active.is_some())
     }
 
+    /// What the boot window's first frame waits for, by the state `present` stops at; `None` once
+    /// a frame was drawn (whether the window system presented it is the window's count).
+    pub fn first_frame_waits(&self) -> Option<&'static str> {
+        if self.window.is_none() {
+            return Some("it has no window");
+        }
+        if !self.geometry[2..].iter().all(|v| v.is_finite() && *v > 0.0) {
+            return Some("its size is not known");
+        }
+        let Some(renderer) = &self.renderer else { return Some("it has no renderer") };
+        if renderer.active.is_none() {
+            return Some("its shaders are compiling");
+        }
+        if let Some(waits) = renderer.text.waits() {
+            return Some(waits);
+        }
+        (self.frame == 0).then_some("it has drawn no frame")
+    }
+
     /// Whether a dump keeps the field going after the app has the window.
     pub fn hold(&self) -> bool {
         self.dump.as_ref().is_some_and(|d| d.hold)
@@ -1243,6 +1298,10 @@ impl Boot {
 
     pub fn offscreen(&mut self, offscreen: bool) {
         self.offscreen = offscreen;
+    }
+
+    fn frame_period_ns_field(&self) -> Duration {
+        Duration::from_nanos(33_333_333)
     }
 
     /// The time between the window's frames: the field animates at 30 fps at most.
@@ -1397,10 +1456,12 @@ impl Boot {
             self.ring.hovered.get_or_insert_with(|| Instant::now() - Duration::from_secs(1));
         }
         self.ring.set(want.filter(|_| shows), alert.filter(|_| shows));
-        // a dot takes a click (the run acts on what it shows), a busy ring leaves input with the
-        // app: its badge is made anew, and the ring goes on in the new one (a dot that goes fades
-        // out in it; its layer is cleared once faded, never left drawn without a badge)
-        let button = alert.is_some() && shows;
+        // a dot takes a click (the run acts on what it shows), and so does the ring of a restart
+        // on its way (the repeat click does nothing, and never reaches the caption under it); a
+        // busy ring leaves input with the app: its badge is made anew, and the ring goes on in the
+        // new one (a dot that goes fades out in it; its layer is cleared once faded, never left
+        // drawn without a badge)
+        let button = (alert.is_some() || want.is_some_and(|w| w.restart_asked)) && shows;
         let remade = self.ring.window.is_some() && self.ring_button != button;
         if let Some(badge) = self.ring.window.filter(|_| remade) {
             let mut writer = CmdWriter::new(HOST);
@@ -1466,9 +1527,9 @@ impl Boot {
         // the tooltip while the pointer rests on the ring
         let tip = match (self.ring.tip_shown(), self.renderer.as_mut()) {
             (true, Some(renderer)) => {
-                let text = match (alert, detail) {
-                    (Some(_), Some(detail)) => detail.to_string(),
-                    _ => self.ring.tip_text(),
+                let text = match detail {
+                    Some(detail) => detail.to_string(),
+                    None => self.ring.tip_text(),
                 };
                 let run = renderer.text.shape(&text, ring::TIP_FONT, 1.0e4, ring::TIP_H);
                 self.ring.tip_placed = ring::Ring::place_tip(place, run.width, size);
@@ -1494,6 +1555,71 @@ impl Boot {
         }
         let wait = self.ring.next_frame.saturating_duration_since(Instant::now());
         Some(self.ring.tip_due().map_or(wait, |due| wait.min(due)))
+    }
+
+    /// This run goes on from the start screen the run before it faded to (a restart the person
+    /// asked for): the galaxy is there from the first frame, no dust warps into it.
+    pub fn continues_start_screen(&mut self) {
+        self.continues = true;
+        if let Some(renderer) = &mut self.renderer {
+            renderer.began -= field::WARP;
+        }
+    }
+
+    /// The start screen begins again in this run (it fades to it for a restart): the same picture
+    /// the next run goes on from (`continues_start_screen`), not this run's field of long ago.
+    pub fn start_screen_anew(&mut self) {
+        self.restart_begun = true;
+        if let Some(renderer) = &mut self.renderer {
+            renderer.began = Instant::now() - field::WARP;
+            renderer.field.reset();
+        }
+    }
+
+    /// The start screen over the app's frames, at `opacity`, in the window's badge layer: the
+    /// restart begins (the app fades to it) or the new run's first frame came (the app fades in
+    /// from it). The layer is what every backend composes over a lent window, also over the last
+    /// frame of an app that no longer draws; the ring's badge gives way to it. `None`: the layer
+    /// ends. How soon its next frame is due while it shows.
+    pub fn veil(&mut self, opacity: Option<f32>) -> Option<Duration> {
+        let window = self.window?;
+        let Some(opacity) = opacity else {
+            if self.veil.take().is_some() {
+                let size = [self.geometry[2], self.geometry[3]];
+                let mut writer = CmdWriter::new(HOST);
+                badge_frame(&mut writer, &mut self.frame, self.dump.as_mut(), window, self.dpi, size, |_| {});
+                Hal::global().submit(&writer.buf());
+            }
+            return None;
+        };
+        if !self.badges() {
+            self.veil = None;
+            return None;
+        }
+        if let Some(badge) = self.ring.window.take() {
+            let mut writer = CmdWriter::new(HOST);
+            writer.window_close(badge);
+            Hal::global().submit(&writer.buf());
+            self.ring.hovered = None;
+            if std::mem::take(&mut self.ring.tip) {
+                if let Some(renderer) = &mut self.renderer {
+                    renderer.text.unpin();
+                }
+            }
+        }
+        self.veil = Some(opacity);
+        let now = Instant::now();
+        if now >= self.veil_next && self.renderer.as_ref().is_some_and(|r| r.active.is_some()) {
+            self.present_field();
+            // (a still start screen is the field at its own pace)
+            self.veil_next = now + if opacity >= 1.0 { self.frame_period_ns_field() } else { VEIL_FRAME };
+        }
+        Some(self.veil_next.saturating_duration_since(Instant::now()))
+    }
+
+    /// Where the ring's badge is in the window (points), while there is one.
+    pub fn ring_place(&self) -> Option<[f32; 4]> {
+        self.ring.window.map(|_| self.ring.placed)
     }
 
     /// The pointer hovering the ring's badge (session 0 sees its moves over it and its leave; a
@@ -1616,8 +1742,14 @@ impl Boot {
         let program = renderer.active.as_ref().unwrap();
         let mut writer = CmdWriter::new(HOST);
         let time = renderer.began.elapsed().as_secs_f32();
-        let layered = renderer.layer.on && program.layer.is_some();
-        let look = layered.then(|| renderer.layer.look(reduce_motion));
+        let veil = self.veil;
+        let layered = veil.is_none() && renderer.layer.on && program.layer.is_some();
+        let look = match veil {
+            Some(opacity) => Some(layer::Look::veil(opacity)),
+            None => layered.then(|| renderer.layer.look(reduce_motion)),
+        };
+        // the window buttons only once the start screen covers the app's
+        let opaque = veil.is_none_or(|opacity| opacity >= 1.0);
         let region = [0.0, 0.0, viewport[0], viewport[1]];
         renderer.text.begin_layout();
         let updating = look.and_then(|l| l.updating);
@@ -1631,7 +1763,7 @@ impl Boot {
                 reduce_motion,
                 false,
                 look.map_or(-1.0, |l| l.resolve),
-                renderer.layer.on && !matches!(renderer.layer.want(), None | Some(LayerWant::Boot)),
+                veil.is_some() || renderer.layer.on && !matches!(renderer.layer.want(), None | Some(LayerWant::Boot)),
             )
         });
         let card = if let Some(LayerWant::Updating(work)) = renderer.layer.want().filter(|_| layered) {
@@ -1649,6 +1781,9 @@ impl Boot {
                     let app = caption.title.as_deref().unwrap_or(&self.state.app);
                     format!("Warming up {app}")
                 });
+            }
+            if veil.is_some() && self.restart_begun {
+                status = Some(format!("Restarting {}", caption.title.as_deref().unwrap_or(&self.state.app)));
             }
             renderer.field.hud(
                 &mut renderer.text,
@@ -1719,13 +1854,13 @@ impl Boot {
         common(&program.pipes[GLYPH], &mut glyph_uniforms);
         // the caption's window buttons (the field's only cards)
         let mut buttons = Vec::new();
-        if let Some(ground) = caption.ground.filter(|_| caption.height > 0.0 && updating.is_none()) {
+        if let Some(ground) = caption.ground.filter(|_| caption.height > 0.0 && updating.is_none() && opaque) {
             program.pipes[ERROR_BAND].instances.write(
                 &[(id!(rect), &[0.0, 0.0, viewport[0], caption.height]), (id!(accent), &[CAPTION_GROUND]), (id!(tint), &ground)],
                 &mut buttons,
             );
         }
-        for card in renderer.layout.cards.iter().filter(|c| c.accent == CAPTION_BUTTON) {
+        for card in renderer.layout.cards.iter().filter(|c| c.accent == CAPTION_BUTTON && opaque) {
             program.pipes[ERROR_BAND].instances.write(
                 &[
                     (id!(rect), &card.rect),
@@ -1757,7 +1892,7 @@ impl Boot {
         let mut band_uniforms = Vec::new();
         common(&program.pipes[ERROR_BAND], &mut band_uniforms);
         self.frame += 1;
-        let offscreen = if self.offscreen && !layered {
+        let offscreen = if self.offscreen && !layered && veil.is_none() {
             let size = [(viewport[0] * dpi) as u32, (viewport[1] * dpi) as u32];
             Some((self.dump.as_mut().unwrap().target(&mut writer, size), size))
         } else {
@@ -1823,7 +1958,8 @@ impl Boot {
         }
         writer.pass(Pass {
             color,
-            load: [pass_load::CLEAR; 5],
+            // (a badge layer's frame draws over the app's)
+            load: [if veil.is_some() { pass_load::LOAD } else { pass_load::CLEAR }; 5],
             clear: [[0.0; 4]; 4],
             viewport: [0.0, 0.0, viewport[0] * dpi, viewport[1] * dpi],
             dpi,
@@ -1895,6 +2031,7 @@ impl Boot {
             writer.frame_end(
                 window,
                 target::WINDOW
+                    | if veil.is_some() { target::BADGES } else { 0 }
                     | if snapshot.is_some() {
                         target::SNAPSHOT
                     } else {
@@ -1993,6 +2130,9 @@ fn badge_frame(writer: &mut CmdWriter, frame: &mut u64, dump: Option<&mut dump::
         writer.snapshot(window, req);
     }
 }
+
+/// The start screen's frames while it fades over the app (`Boot::veil`).
+const VEIL_FRAME: Duration = Duration::from_nanos(16_666_667);
 
 /// A badge id of `slot` (one slot per badge, made on first use), a new generation each time.
 fn next_badge(slot: &mut Option<Id>) -> Id {

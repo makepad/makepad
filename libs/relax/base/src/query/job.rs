@@ -60,6 +60,7 @@ impl QueryLatch {
             return self.result.lock().unwrap_or_else(|e| e.into_inner()).as_ref().unwrap().clone();
         }
         let _w = (result.is_none()).then(|| crate::waits::begin(crate::waits::Kind::Query, 0, runner, "query"));
+        let _budget = result.is_none().then(crate::pool::suspend_program);
         while result.is_none() {
             drop(result);
             crate::preempt::point();
@@ -115,28 +116,26 @@ impl Drop for WaitGuard<'_> {
     }
 }
 
-/// Unwinding poisons the node and wakes every waiter before the panic escapes.
-/// rustc_query_impl/src/execution.rs:154,190,220 (ActiveJobGuard).
-pub(super) struct ActiveJobGuard<'a> {
+/// The query a thread runs now. It ends with a result, or cancelled: an unwind (a preemption, any
+/// other cancellation, a panic) is no result. rustc_query_impl/src/execution.rs:154,190,220 poisons
+/// the job on a panic, since an ICE ends its process. Here the process is a running app and the
+/// panic may be a background check's: the job goes away, its waiters retry, and whoever asks next
+/// runs the query itself. If that panics as well, the panic is that caller's own.
+pub(super) struct ActiveJob<'a> {
     pub engine: &'a QueryEngine,
     pub index: DepNodeIndex,
-    pub finished: bool,
 }
 
-impl ActiveJobGuard<'_> {
-    // Lead design round 42 extends rustc_query_impl/src/execution.rs:108-159,
-    // 179-257 @8d1a764: cancellation removes the active job without publishing
-    // poison or a value. Waiters retry; ordinary panic still poisons in Drop.
-    pub fn cancel(&mut self) {
+impl ActiveJob<'_> {
+    pub fn cancel(self) {
         let latch = {
             let mut state = self.engine.state.lock().unwrap_or_else(|e| e.into_inner());
             state.jobs.remove(&self.index).unwrap().latch
         };
-        self.finished = true;
         if let Some(latch) = latch { latch.complete(Completion::Retry); }
     }
 
-    pub fn complete(&mut self, result: Result<(), QueryError>) {
+    pub fn complete(self, result: Result<(), QueryError>) {
         let latch = {
             let mut state = self.engine.state.lock().unwrap_or_else(|e| e.into_inner());
             match &result {
@@ -145,18 +144,8 @@ impl ActiveJobGuard<'_> {
             }
             state.jobs.remove(&self.index).unwrap().latch
         };
-        self.finished = true;
         if let Some(latch) = latch {
             latch.complete(Completion::Value(result));
-        }
-    }
-}
-
-impl Drop for ActiveJobGuard<'_> {
-    fn drop(&mut self) {
-        if !self.finished {
-            let query = self.engine.state.lock().unwrap_or_else(|e| e.into_inner()).graph.query(self.index).unwrap();
-            self.complete(Err(QueryError::Poisoned(query)));
         }
     }
 }

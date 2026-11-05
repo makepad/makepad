@@ -16,7 +16,8 @@
 # PACKAGES (default "makepad-app-calculator"), PERIOD (ms, default 300), AFTER (seconds of stress after
 # the first settle, default 8), WAIT (seconds to wait for the first frame / settle, default 90), the JIT runs
 # through `cargo run --profile host`. A run passes only with at least one settle rebuild (NEED_REBUILD=0: off).
-# Logs stay in a scratch directory under TMPDIR (removed on success unless KEEP=1).
+# Logs stay in a scratch directory under TMPDIR (removed on success unless KEEP=1); a failure's go to the
+# lease's keep dir too (keep_logs.sh), which outlives the lease's scratch.
 ROOT=$(pwd)
 # the JIT through cargo: rebuilt when its sources changed, a ~0.2 s no-op otherwise (no binary path)
 J="cargo run --profile host -q --manifest-path $ROOT/Cargo.toml -p makepad-run --bin makepad --"
@@ -103,7 +104,8 @@ for pkg in $PACKAGES; do
     [ -n "$bad" ] && why="$why $bad;"
     jobs=$(grep -ac "^makepad-run job:" "$d/run.log")
     rebuilds=$(grep -ac "makepad-run settle rebuild at" "$d/run.log")
-    [ "${NEED_REBUILD:-1}" = 1 ] && [ "$rebuilds" -eq 0 ] && why="$why no settle rebuild ($(grep -a 'settle rebuild deferred\|settle rebuild refused' "$d/run.log" | tail -1 | cut -c1-160));"
+    # (the last deferral names the refusing check: a restore that failed says which one)
+    [ "${NEED_REBUILD:-1}" = 1 ] && [ "$rebuilds" -eq 0 ] && why="$why no settle rebuild ($(grep -a 'settle rebuild deferred\|settle rebuild refused' "$d/run.log" | tail -1 | sed 's/^makepad-run //' | cut -c1-600));"
     [ "${STRICT_JOBS:-0}" = 1 ] && [ "$jobs" -gt 0 ] && why="$why $jobs jobs left survivors;"
     if [ -z "$why" ]; then
         echo "settle_stress: $pkg: ok ($(grep -a 'settles' "$d/fixture.log" | cut -c16-); $rebuilds settle rebuilds; $jobs jobs left survivors)"
@@ -112,5 +114,7 @@ for pkg in $PACKAGES; do
         fails=$((fails + 1))
     fi
 done
+# a failure's logs outlive the lease's scratch (keep_logs.sh: copied to the master by the lease's holder)
+[ $fails -eq 0 ] || bash "$(dirname "$0")/keep_logs.sh" "$dir"
 [ $fails -eq 0 ] && [ "${KEEP:-0}" != 1 ] && rm -rf "$dir"
 exit $fails

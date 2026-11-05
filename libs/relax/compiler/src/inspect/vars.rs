@@ -176,6 +176,7 @@ fn home_name(h: Home) -> String {
         Home::Fp(d) => format!("fp{:+}", d),
         Home::Const(_) => "constant".into(),
         Home::CallReg(r) => format!("{}{} (as the call began)", if cfg!(target_arch = "aarch64") { "x" } else { "r" }, r),
+        Home::Calc(c) => format!("{} {} {} (recomputed)", home_name(c.base.home()), c.op.symbol(), c.imm),
     }
 }
 
@@ -185,6 +186,7 @@ fn home_word(regs: &[Option<u64>], fp: u64, h: Home) -> Option<u64> {
         Home::Reg(_) | Home::Flt(_) | Home::CallReg(_) => reg_word(regs, h),
         Home::Fp(d) => rd(fp.wrapping_add(d as i64 as u64)),
         Home::Const(k) => Some(k as u64),
+        Home::Calc(c) => home_word(regs, fp, c.base.home()).map(|x| c.apply(x)),
     }
 }
 

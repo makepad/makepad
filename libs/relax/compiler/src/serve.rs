@@ -76,7 +76,7 @@ impl Session {
             }
         }
         let mut files = HashMap::new();
-        for (p, i) in unit.prog.current_source_files() { files.insert(p, i); }
+        for (p, i) in unit.prog.current_source_files(|_| true) { files.insert(p, i); }
         let mut front: HashMap<String, Vec<Diagnostic>> = HashMap::new();
         let mut parse_errors = HashMap::new();
         for e in errors {
@@ -477,7 +477,7 @@ impl Session {
                 self.unit.tcx.errors.retain(|e| !self.files.iter().any(|(p, f)| self.unit.prog.file_crate[*f as usize] == krate && e.starts_with(p)));
                 self.unit.tcx.collect_check(&self.unit.prog, &defs);
             }
-            for (path, i) in self.unit.prog.current_source_files() {
+            for (path, i) in self.unit.prog.current_source_files(|_| true) {
                 self.files.insert(path.clone(), i);
                 self.sources.entry(path).or_insert_with(|| self.unit.prog.files[i as usize].src[..self.unit.prog.files[i as usize].src_len as usize].to_vec());
             }
@@ -581,7 +581,7 @@ impl Session {
         // replacement. Use the existing auxiliary-unit retirement protocol.
         unsafe { crate::jit::retire_unit(&mut *self.unit); }
         self.unit = Unit::new(prog, tcx, core);
-        self.files = self.unit.prog.current_source_files().into_iter().collect();
+        self.files = self.unit.prog.current_source_files(|_| true).into_iter().collect();
         for (path, file) in &self.files {
             self.sources.entry(path.clone()).or_insert_with(|| {
                 let pf = &self.unit.prog.files[*file as usize]; pf.src[..pf.src_len as usize].to_vec()

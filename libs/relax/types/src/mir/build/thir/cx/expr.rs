@@ -47,6 +47,10 @@ impl Cx<'_> {
     /// Create a THIR expression for the given expression. This expands all adjustments and directly
     /// adds the type information from the typeck results.
     pub fn mirror_expr(&mut self, e: ast::ExprId) -> BuildResult<ExprId> {
+        crate::stack::ensure_sufficient_stack(|| self.mirror_expr_inner(e))
+    }
+
+    fn mirror_expr_inner(&mut self, e: ast::ExprId) -> BuildResult<ExprId> {
         let two_phase = std::mem::take(&mut self.two_phase);
         let span = self.espan(e);
         let expr_scope = self.node_scope(Node::Expr(e.0), span)?;

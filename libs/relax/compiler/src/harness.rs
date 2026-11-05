@@ -102,9 +102,9 @@ fn find_fn(u: &Unit, path: &str) -> Option<DefId> {
 
 /// Runs each crate's tests through the program's harness, crate after crate as cargo runs test
 /// binaries (`label`: what cargo's "Running" line names); the exit status (101 after a failing
-/// crate; the crates after it still run).
+/// crate; the crates after it still run; NO_TESTS_EXIT when a filter matched no test in any).
 pub(crate) fn run(u: &mut Unit, up: *mut Unit, groups: &[(String, u32)]) -> i32 {
-    let mut code = 0;
+    let (mut code, mut matched, mut unmatched) = (0, false, false);
     for (label, krate) in groups {
         eprintln!("     Running {label}");
         let c = match run_crate(u, up, *krate) {
@@ -114,11 +114,16 @@ pub(crate) fn run(u: &mut Unit, up: *mut Unit, groups: &[(String, u32)]) -> i32 
                 101
             }
         };
+        if c == makepad_remote::hot::NO_TESTS_EXIT {
+            unmatched = true;
+            continue;
+        }
+        matched = true;
         if c != 0 {
             code = 101;
         }
     }
-    code
+    if unmatched && !matched { makepad_remote::hot::NO_TESTS_EXIT } else { code }
 }
 
 struct Run {

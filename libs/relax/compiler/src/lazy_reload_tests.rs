@@ -194,6 +194,91 @@ fn gandalf_live_edit_guard_and_reporting() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+/// A panic in the background checker stays in that check and is reported; the query it left
+/// unfinished is not poisoned, so the app's compile of the same body runs that query itself. If
+/// that panics too, it is this compile's own failure with its own message, and the app runs on.
+/// (One Windows run: the check of a Drop body panicked, the app's first call of that body failed
+/// with `typeck query: Poisoned`, parked, and the run's restart failed.)
+#[test]
+fn a_background_check_panic_leaves_the_query_to_the_apps_compile() {
+    // The checker's worker and its panic counters are process-global: each case has its process.
+    const CHILD: &str = "MAKEPAD_RUN_CHECK_PANIC_TEST";
+    let Ok(case) = std::env::var(CHILD) else {
+        for (case, panics_in) in [("check", "target:gandalf"), ("both", "target")] {
+            // (its own home: the injected panics are no record for this machine's ledger)
+            let home = std::env::temp_dir().join(format!("relax-check-panic-home-{}-{case}", std::process::id()));
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "lazy_reload_tests::a_background_check_panic_leaves_the_query_to_the_apps_compile", "--nocapture", "--test-threads=1"])
+                .env(CHILD, case).env("MAKEPAD_RUN_TEST_TYPECK_PANIC", panics_in).env("MAKEPAD_RUN_PANIC_PARK", "0").env("MAKEPAD_HOME", &home)
+                .output().unwrap();
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(output.status.success(), "{case}: {}\n{stderr}", String::from_utf8_lossy(&output.stdout));
+            std::fs::remove_dir_all(&home).unwrap();
+            // the check's panic is on the run's log when it happens
+            assert!(stderr.contains("thread 'gandalf'") && stderr.contains("forced panic type-checking `target`"), "{case}: {stderr}");
+        }
+        return;
+    };
+    std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    let dir = std::env::temp_dir().join(format!("relax-check-panic-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("Cargo.toml"), "[package]\nname = \"check_panic\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[lib]\npath = \"lib.rs\"\n").unwrap();
+    let root = dir.join("lib.rs").to_string_lossy().into_owned();
+    std::fs::write(&root, "pub fn target(out: &mut u32) { *out = 11; }\npub fn other(out: &mut u32) { *out = 3; }\n").unwrap();
+    let session = Arc::new(crate::Session::default());
+    let (prog, core, app_crate) = crate::load_with_std(&session, &root, "check_panic", false).unwrap();
+    let named = |name: &str| prog.defs.iter().enumerate().find_map(|(i, d)| {
+        let id = crate::program::DefId(i as u32);
+        (d.krate == app_crate && prog.name(id) == name).then_some(id)
+    }).unwrap();
+    let (target, other) = (named("target"), named("other"));
+    let mut tcx = crate::tcx::Tcx::new();
+    tcx.collect(&prog);
+    crate::borrowck::event::set_app_scope(vec![crate::vfs::normalize_path(&root)]);
+    let mut u = crate::jit::Unit::new(prog, tcx, core);
+    let up = &mut *u as *mut crate::jit::Unit;
+    // The check gets there first, as discovery does for a body the app has not called yet.
+    let (target_entry, other_entry) = crate::owner::call(crate::owner::Class::Program, || {
+        let (t, o) = (u.fn_id(crate::jit::FnKey::Inst(target, vec![])), u.fn_id(crate::jit::FnKey::Inst(other, vec![])));
+        u.note_first_borrowck(t, None);
+        (u.entry(t), u.entry(o))
+    });
+    let epoch = u.tcx.collect_epoch.load(std::sync::atomic::Ordering::SeqCst);
+    // no wall-clock limit (as lazy_tests): a worker that never delivers hangs the test
+    let why = loop {
+        match crate::borrowck::lazy::verdict(u.front.checker_id, target, &[], epoch) {
+            crate::borrowck::lazy::FnVerdict::Unchecked(why) if why.starts_with("checker failure") => break why,
+            _ => std::thread::sleep(std::time::Duration::from_millis(5)),
+        }
+    };
+    assert!(why.contains("forced panic type-checking `target`"), "{why}");
+    assert_eq!(crate::borrowck::lazy::PANICS.load(std::sync::atomic::Ordering::Relaxed), 1);
+    assert!(crate::borrowck::lazy::PANIC_NOTES.lock().unwrap()[0].contains("target"));
+    // devhub's ledger gets it, naming the body and what panicked, with no hot load counted
+    let records: Vec<_> = std::fs::read_dir(makepad_remote::hot::outbox()).unwrap().map(|f| std::fs::read_to_string(f.unwrap().path()).unwrap()).collect();
+    assert_eq!(records.len(), 1, "{records:?}");
+    let record = makepad_remote::hot::Record::parse(&records[0]).unwrap();
+    assert_eq!(record.outcome, makepad_remote::hot::Outcome::CheckerPanic);
+    assert_eq!(record.reason, "checker panic in `check_panic::target`: MAKEPAD_RUN_TEST_TYPECK_PANIC: forced panic type-checking `target`");
+    assert!(!record.outcome.failure());
+    // call_jit returns a recovery status, so the function's output comes back via its argument.
+    let call = |entry| {
+        let mut result = 0u32;
+        unsafe { crate::jit::call_jit(up, entry, &mut result as *mut u32 as u64) }.map(|_| result)
+    };
+    if case == "check" {
+        let result = call(target_entry).unwrap_or_else(|p| panic!("the app's compile of the checked body failed: {}", p.message));
+        assert_eq!(result, 11);
+    } else {
+        let failed = call(target_entry).expect_err("the provider panics on the app's thread as well");
+        assert!(failed.message.contains("internal compiler error") && failed.message.contains("forced panic type-checking `target`"), "{}", failed.message);
+    }
+    assert_eq!(call(other_entry).unwrap_or_else(|p| panic!("another body after it: {}", p.message)), 3);
+    // Like settle_tests: process exit owns the runtime worker/executable-memory teardown.
+    std::mem::forget(u);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 /// SPEC-V: a patch runs before its verdict as baseline code with `noalias` dropped; a rejected one
 /// is never promoted, is reported and reverts; a clean one is promoted with its `noalias` facts.
 #[test]
@@ -958,7 +1043,7 @@ fn restored_images_take_live_edits() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
-/// std::relax::realtime for arming a machine (FABARMS): `compiled` is the strict ready (the whole
+/// std::relax::realtime for arming a machine (the Fab arms experiment): `compiled` is the strict ready (the whole
 /// reach compiled, never "the wait ran out"), `lazy` counts what would still compile on a call, and
 /// an armed root freezes live edits of real-time code (refused "frozen", applied at the disarm)
 /// while edits of other code patch as usual.
@@ -1047,7 +1132,7 @@ fn realtime_thread_marks_the_calling_thread() {
     assert!(!std::thread::spawn(crate::jit::is_realtime_thread).join().unwrap(), "another thread is not marked");
 }
 
-/// FABARMS3's hole: the marked root calls through `dyn Route` (its value holds no trait object),
+/// A Fab arms run's hole: the marked root calls through `dyn Route` (its value holds no trait object),
 /// and other code makes the first `Box<Ded> -> Box<dyn Route>` after the mark, and a second type's
 /// after the reach is done. The root's lowering names the trait object it calls through, so the
 /// reach follows its vtables: the strict ready is false the moment a new one is made (polled
@@ -1125,7 +1210,7 @@ fn realtime_reach_follows_vtables_made_after_the_mark() {
         }
         panic!("the real-time reach was not compiled in 10 s");
     };
-    // the mark, then at once the first unsizing (FABARMS3's order), polled right after it ran
+    // the mark, then at once the first unsizing (a Fab arms run's order), polled right after it ran
     let ticket = crate::owner::call(crate::owner::Class::Program, || unsafe { crate::jit::realtime_mark_slots(up, vec![root]) });
     call(start_e);
     assert!(!compiled(ticket) || next_built(), "compiled right after the first `Box<Ded> -> Box<dyn Route>`, with `<Ded as Route>::next` lazy");
@@ -1289,7 +1374,7 @@ fn realtime_reach_skips_trait_objects_it_only_makes_itself() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
-/// FABARMS3's misses on a node (W1207: 24 lazy compiles on the real-time thread, drop glue of generic
+/// A Fab run's misses on a node (24 lazy compiles on the real-time thread, drop glue of generic
 /// containers and core::fmt's float path): code ran before the mark (the planner's simulation), so
 /// the reach found slots compiled already whose RIR was dropped after their install. A drop glue's
 /// references were never read again (only fns' RIR was rebuilt), and with a disk cache a lookup
@@ -1368,7 +1453,7 @@ fn realtime_reach_walks_code_that_ran_before_the_mark() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
-/// What FABARMS3's misses on a node (W1207) were, on a cold store: the marked root formats floats
+/// What a Fab run's misses on a node were, on a cold store: the marked root formats floats
 /// (core::fmt's float path is reached through the formatter fn pointer an `Argument` holds, data the
 /// reach reads) and drops containers (`Vec`, `vec::IntoIter`, `array::IntoIter`, `Weak`: drop glue
 /// of generic types). Nothing else ran before the mark: the reach alone compiles them, and the
@@ -1689,6 +1774,120 @@ fn a_live_edit_reaches_both_crates_of_a_lib_test_root() {
     assert!(o.failure.is_none() && o.rung == Rung::Patch, "{:?}", o.lines);
     // the harness copy's f and the plain copy's f (reached through twinuser) both changed
     assert_eq!(run(), 202);
+    std::mem::forget(u);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// A closure stored by the running version (a boxed handler) runs every later edit of its body,
+/// and an edit's work stays flat however many came before: a patch installs at most two
+/// forwarders per closure (the lineage's cell jumps to the newest version, the previous newest to
+/// the cell) and copies no code into the older versions; every older version reaches the newest in
+/// at most two jumps; a build of an older version's own body never lands in it (a tier-up would
+/// bring back old code); a rolled-back patch brings back the forwarders it replaced.
+#[test]
+fn stored_closure_follows_edits_with_flat_work() {
+    const CHILD: &str = "MAKEPAD_RUN_STORED_CLOSURE_TEST";
+    if std::env::var(CHILD).is_err() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "lazy_reload_tests::stored_closure_follows_edits_with_flat_work", "--nocapture", "--test-threads=1", "--format=terse"])
+            .env(CHILD, "1").env("MAKEPAD_RUN_GANDALF_ALL", "0")
+            .output().unwrap();
+        let out = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success() && out.contains("1 passed"), "{out}\n{}", String::from_utf8_lossy(&output.stderr));
+        return;
+    }
+    use crate::jit::{FnKey, Unit};
+    use crate::reload::{apply, Edit, Rung};
+    crate::jit::CHECK_FIRST.store(false, std::sync::atomic::Ordering::Relaxed);
+    std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    let dir = std::env::temp_dir().join(format!("relax-stored-closure-{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("app/src")).unwrap();
+    std::fs::write(dir.join("Cargo.toml"), "[workspace]\nmembers = [\"app\"]\n").unwrap();
+    std::fs::write(dir.join("app/Cargo.toml"), "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n").unwrap();
+    let src = |i: u32| format!(r#"use std::cell::RefCell;
+thread_local! {{ static H: RefCell<Option<Box<dyn Fn(u32) -> u32>>> = RefCell::new(None); }}
+fn make() -> Box<dyn Fn(u32) -> u32> {{
+    let k = 3;
+    Box::new(move |x| x * k + {i})
+}}
+pub fn value(out: &mut u32) {{
+    H.with(|h| {{
+        if h.borrow().is_none() {{ *h.borrow_mut() = Some(make()); }}
+        *out = (h.borrow().as_ref().unwrap())(5);
+    }});
+}}
+"#);
+    std::fs::write(dir.join("app/src/lib.rs"), src(1)).unwrap();
+    let app = dir.join("app/src/lib.rs").to_string_lossy().into_owned();
+    let session = Arc::new(crate::Session::default());
+    let (prog, core, app_crate) = crate::load_with_std(&session, &app, "stored_closure_app", false).unwrap();
+    let def = |prog: &Program, name: &str| prog.defs.iter().enumerate().find_map(|(i, d)| {
+        let id = crate::program::DefId(i as u32);
+        (d.krate == app_crate && prog.name(id) == name).then_some(id)
+    }).unwrap();
+    let (value, make) = (def(&prog, "value"), def(&prog, "make"));
+    let mut tcx = crate::tcx::Tcx::new();
+    tcx.collect(&prog);
+    let mut u = crate::jit::Unit::new(prog, tcx, core);
+    let up = &mut *u as *mut Unit;
+    let (entry, make_slot) = crate::owner::call(crate::owner::Class::Program, || {
+        let f = u.fn_id(FnKey::Inst(value, vec![]));
+        (u.entry(f), u.fn_id(FnKey::Inst(make, vec![])))
+    });
+    let run = || {
+        let mut result = 0u32;
+        unsafe { crate::jit::call_jit(up, entry, &mut result as *mut u32 as u64) }.unwrap_or_else(|p| panic!("JIT call panicked: {}", p.message));
+        result
+    };
+    // the versions of make's closure, oldest first, and where each one's calls end up
+    let versions = |u: &Unit| -> Vec<u32> { (0..u.fns.len() as u32).filter(|&id| matches!(u.fns[id as usize].key, FnKey::Closure(_, _, p) if p == make_slot) && u.fns[id as usize].compiled).collect() };
+    let reaches = |u: &Unit, mut s: u32| -> u32 {
+        for _ in 0..2 {
+            match u.forward_of(s) { Some((t, _)) => s = t, None => return s }
+        }
+        assert!(u.forward_of(s).is_none(), "more than two jumps from an older version to the newest");
+        s
+    };
+    assert_eq!(run(), 16);
+    let first = versions(&u)[0];
+    let mut files = vec![u.prog.def(value).file];
+    let mut undo = None;
+    let mut names_first: Option<Vec<String>> = None;
+    for i in 2..=6u32 {
+        let before = u.forwards.len();
+        let o = unsafe { apply(up, vec![Edit { file: *files.last().unwrap(), path: app.clone(), src: src(i).into_bytes() }]) };
+        assert_eq!(o.rung, Rung::Patch, "edit {i}: {:?}", o.lines);
+        // (make, and value's closure while it inlines make)
+        let first_names = names_first.get_or_insert_with(|| o.names.clone());
+        assert!(o.names.iter().all(|n| first_names.contains(n)), "edit {i}: more fns installed than by the first edit: {:?}", o.names);
+        files.push(o.files[0]);
+        assert_eq!(run(), 15 + i, "edit {i}: the box stored at the first run runs the edited closure");
+        assert_eq!(u.forwards.len() - before, if i == 2 { 1 } else { 2 }, "edit {i}: forwarders installed (the cell, the previous version)");
+        let vs = versions(&u);
+        let newest = *vs.last().unwrap();
+        assert!(vs[..vs.len() - 1].iter().all(|&v| reaches(&u, v) == newest), "edit {i}: every older version reaches the newest");
+        assert_eq!(u.forward_of(first), Some((newest, true)), "edit {i}: the first version is the lineage's cell");
+        undo = o.undo;
+    }
+    // the old version's own body, built and installed as a tier-up would, does not replace its
+    // forwarder; nor does it get an O3 build
+    let at = u.fns[first as usize].code;
+    let (code, map, relocs) = unsafe { crate::jit::compile_fn(up, first) }.unwrap();
+    crate::owner::call(crate::owner::Class::Program, || u.install(first, &code, &relocs, map, 0)).unwrap();
+    assert_eq!(u.fns[first as usize].code, at, "a build of the cell's own body was installed");
+    assert!(!unsafe { crate::jit::compile_tier1(up, first) }, "an O3 build of a forwarder");
+    assert_eq!(run(), 21);
+    // edit 6 rolled back: the cell jumps to edit 5's closure again, which runs its own code
+    let previous = versions(&u)[versions(&u).len() - 2];
+    unsafe { crate::reload::rollback(up, undo.take().unwrap(), "test") };
+    files.pop();
+    assert_eq!(run(), 20, "after the rollback the stored box runs edit 5's closure");
+    assert_eq!(u.forward_of(first), Some((previous, true)));
+    assert_eq!(u.forward_of(previous), None, "edit 5's closure runs its own code again");
+    let o = unsafe { apply(up, vec![Edit { file: *files.last().unwrap(), path: app.clone(), src: src(7).into_bytes() }]) };
+    assert_eq!(o.rung, Rung::Patch, "{:?}", o.lines);
+    assert_eq!(run(), 22, "an edit after the rollback reaches the stored box");
+    assert_eq!(u.forward_of(previous), Some((first, false)), "edit 5's closure forwards to the cell");
     std::mem::forget(u);
     std::fs::remove_dir_all(dir).unwrap();
 }

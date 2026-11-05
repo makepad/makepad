@@ -1,0 +1,4 @@
+# two body edits of kernel while LEN (an array length computed by a const fn from LAZY, whose
+# initializer builds its array in a frame slot) is in use: both patch
+v1 patch
+v2 patch

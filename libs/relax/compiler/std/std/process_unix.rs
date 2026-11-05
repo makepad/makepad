@@ -1017,16 +1017,12 @@ fn setup_stdio(cfg: Option<Stdio>, default_piped: bool, readable_by_child: bool)
     }
 }
 
+/// io::pipe: close-on-exec from the start where the OS can, as real std. Set after the pipe, another
+/// thread's fork in between leaves the write end open in its child: a read of this pipe then waits
+/// for that child to end (a spawn's error pipe held a devhub test's hub in its spawn, 11-04).
 fn anon_pipe() -> io::Result<(OwnedFd, OwnedFd)> {
-    let mut fds = [0 as c_int; 2];
-    if unsafe { sys::pipe(fds.as_mut_ptr()) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    unsafe {
-        sys::fcntl(fds[0], sys::F_SETFD, sys::FD_CLOEXEC);
-        sys::fcntl(fds[1], sys::F_SETFD, sys::FD_CLOEXEC);
-        Ok((OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])))
-    }
+    let (r, w) = io::pipe()?;
+    Ok((r.into(), w.into()))
 }
 
 #[repr(C)]

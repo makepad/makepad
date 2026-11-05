@@ -42,6 +42,14 @@ pub fn base_crate_name(s: &str) -> &str {
     }
 }
 
+/// The internal name of a package's own crate. A sysroot crate is the only crate that keeps one of
+/// the sysroot's names, so that name identifies it, in crate indices and in string-keyed tables
+/// alike: `tests/alloc.rs` is not `alloc`. What a program sees of the name (`crate_name`,
+/// `module_path!`, `CARGO_CRATE_NAME`) goes through base_crate_name.
+pub fn own_crate_name(name: String) -> String {
+    if matches!(name.as_str(), "core" | "alloc" | "std" | "proc_macro" | "test") { format!("{name}__relax_vown") } else { name }
+}
+
 /// Gives multi-version library crates a canonical identifier-safe name (`<name>__relax_v<ver>`)
 /// when more than one non-bin, non-build-script unit in the graph shares `name` with distinct
 /// `src_path`s (leaving the highest version unsuffixed).
@@ -281,6 +289,9 @@ pub fn load_units(path: &str) -> Result<Vec<CrateUnit>, String> {
         }
         c.deps = nd;
     }
+    for c in &mut out {
+        c.name = own_crate_name(std::mem::take(&mut c.name));
+    }
     disambiguate_multi_version_crates(&mut out);
 
     Ok(out)
@@ -394,7 +405,7 @@ pub fn discover(sess: &std::sync::Arc<crate::Session>, crates: &[CrateUnit], cfg
                         if s.active == 0 {
                             break None;
                         }
-                        s = cv.wait(s).unwrap();
+                        s = crate::pool::wait(&cv, &state, s).unwrap();
                     }
                 };
                 let job = match job {
@@ -542,4 +553,15 @@ pub fn crate_env_registered(krate: &str, key: &str) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+#[test]
+fn a_package_crate_never_keeps_a_sysroot_name() {
+    for name in ["core", "alloc", "std", "proc_macro", "test"] {
+        let own = own_crate_name(name.to_string());
+        assert_ne!(own, name);
+        assert_eq!(base_crate_name(&own), name);
+    }
+    assert_eq!(own_crate_name("alloc_menu".to_string()), "alloc_menu");
 }

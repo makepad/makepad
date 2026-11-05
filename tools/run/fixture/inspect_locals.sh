@@ -9,7 +9,8 @@
 # Runs at O3 (outer tiers up: pick inlined at O3), O1 (MAKEPAD_RUN_O1=always), the default O2
 # pipeline (MAKEPAD_RUN_O3=0), and warm (a second run linking the first run's cached O3 code).
 # Also a breakpoint in `sink` (called from outer's O3 code): `locals break=K1` shows outer's `p`
-# and `n` in the frame above; and a paused thread (`pause`, `locals thread=main`).
+# and `n` in the frame above; a paused thread (`pause`, `locals thread=main`); and a thread parked
+# in a futex (`stacks thread=parked`: walked from its syscall's sp and pc, its program frames).
 # Run from the workspace root (the JIT runs through `cargo run --profile host`). the JIT runs through `cargo
 # run --profile host`. Prints one PASS/FAIL line per check and a last line `inspect_locals: N/M passed`.
 ROOT=$(pwd)
@@ -63,6 +64,10 @@ until ask versions relax_inspect_locals::outer | grep -q '"version":{"slot":[0-9
     n=$((n + 1)); [ $n -ge 120 ] && break
     sleep 0.5
 done
+# a thread blocked in a futex is walked from the syscall's sp and pc only: each JIT frame's frame
+# pointer comes from its size above sp (the code's unwind info), so its program frames show
+r=$(ask stacks thread=parked depth=24)
+check "stacks: the futex-parked thread shows its program frames" "$r" 'relax_inspect_locals::park_here'
 # a paused thread: its frames' locals where they are in memory (frame slots) -- its registers
 # are host code's while it sleeps
 ask pause > /dev/null 2>&1

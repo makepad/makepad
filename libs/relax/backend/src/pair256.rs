@@ -68,7 +68,7 @@ enum Kind {
     LoadX(VReg, VReg, u8),
     StoreX(VReg, VReg, u8),
     Vx(VX),
-    Fma(bool, bool),
+    Fma(bool, bool, bool, bool),
     Mov,
     /// VSel (mask, a, b)
     Sel,
@@ -96,7 +96,7 @@ fn shape(f: &Func, i: &Inst, caps: Caps) -> Option<Shape> {
         Inst::VX(op, d, a, b) if (op256(op) || (caps.ints && op256_ints(op))) && v(d) && v(a) && v(b) => Some(Shape { kind: Kind::Vx(op), off: 0, dest: Some(d), ops: [a, b, z], n: 2 }),
         Inst::VSel(d, m, a, b) if caps.ints && v(d) && v(m) && v(a) && v(b) => Some(Shape { kind: Kind::Sel, off: 0, dest: Some(d), ops: [m, a, b], n: 3 }),
         Inst::VSplat(d, s) if caps.ints && v(d) && (caps.avx2 || f.vregs[s.0 as usize] == Cls::F32) => Some(Shape { kind: Kind::Splat(s), off: 0, dest: Some(d), ops: [z; 3], n: 0 }),
-        Inst::VFma(np, na, d, a, b, c) if caps.fma && v(d) => Some(Shape { kind: Kind::Fma(np, na), off: 0, dest: Some(d), ops: [a, b, c], n: 3 }),
+        Inst::VFma(np, na, keep, w, d, a, b, c) if caps.fma && v(d) => Some(Shape { kind: Kind::Fma(np, na, keep, w), off: 0, dest: Some(d), ops: [a, b, c], n: 3 }),
         Inst::Mov(d, a) if v(d) && v(a) && d != a => Some(Shape { kind: Kind::Mov, off: 0, dest: Some(d), ops: [a, z, z], n: 1 }),
         _ => None,
     }
@@ -725,7 +725,7 @@ pub fn pair256(f: &mut Func, caps: Caps) -> bool {
                     Inst::VLoadX(_, base, x, sh, off) => Inst::VLoadX(dest.unwrap(), base, x, sh, off),
                     Inst::VStoreX(base, x, sh, off, _) => Inst::VStoreX(base, x, sh, off, ops[0]),
                     Inst::VX(op, ..) => Inst::VX(op, dest.unwrap(), ops[0], ops[1]),
-                    Inst::VFma(np, na, ..) => Inst::VFma(np, na, dest.unwrap(), ops[0], ops[1], ops[2]),
+                    Inst::VFma(np, na, keep, w, ..) => Inst::VFma(np, na, keep, w, dest.unwrap(), ops[0], ops[1], ops[2]),
                     Inst::Mov(..) => Inst::Mov(dest.unwrap(), ops[0]),
                     Inst::VSel(..) => Inst::VSel(dest.unwrap(), ops[0], ops[1], ops[2]),
                     Inst::VSplat(_, s) => Inst::VSplat(dest.unwrap(), s),

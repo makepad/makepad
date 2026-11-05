@@ -217,7 +217,7 @@ fn kernel(fma: bool) -> Func {
         push(&mut f, 2, Inst::VX(mul, m2, ci, zi));
         push(&mut f, 2, Inst::VX(VX::FSub(VW::S, NanBits::Host), sb, m1, m2));
         if fma {
-            push(&mut f, 2, Inst::VFma(false, false, t1, gin, sp, sb));
+            push(&mut f, 2, Inst::VFma(false, false, false, false, t1, gin, sp, sb));
         } else {
             let p = f.vreg(Cls::V128);
             push(&mut f, 2, Inst::VX(mul, p, gin, sp));
@@ -225,7 +225,7 @@ fn kernel(fma: bool) -> Func {
         }
         push(&mut f, 2, Inst::VX(mul, m3, cr, zi));
         if fma {
-            push(&mut f, 2, Inst::VFma(false, true, zi, ci, zr, m3));
+            push(&mut f, 2, Inst::VFma(false, true, false, false, zi, ci, zr, m3));
         } else {
             let p = f.vreg(Cls::V128);
             push(&mut f, 2, Inst::VX(mul, p, ci, zr));
@@ -240,7 +240,7 @@ fn kernel(fma: bool) -> Func {
         let (av, r) = (f.vreg(Cls::V128), f.vreg(Cls::V128));
         push(&mut f, 2, Inst::VLoad(av, aa, 16 * half as i32));
         if fma {
-            push(&mut f, 2, Inst::VFma(false, false, r, h[5][half], h[1][half], av));
+            push(&mut f, 2, Inst::VFma(false, false, false, false, r, h[5][half], h[1][half], av));
         } else {
             let p = f.vreg(Cls::V128);
             push(&mut f, 2, Inst::VX(mul, p, h[5][half], h[1][half]));

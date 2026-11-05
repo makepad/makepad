@@ -1,11 +1,8 @@
-use std::sync::atomic::AtomicUsize;
-
-static COUNT: AtomicUsize = AtomicUsize::new(0);
-
 #[global_allocator]
-static ALLOC: ta_app::Counting = ta_app::Counting(&COUNT);
+static ALLOC: ta_app::Counting = ta_app::Counting(&ta_app::FIRST);
 
 #[test]
 fn first_allocates_through_its_own_allocator() {
-    assert!(ta_app::counted_allocation(&COUNT) >= 1);
+    assert!(ta_app::counted_allocation(&ta_app::FIRST) >= 1);
+    assert_eq!(ta_app::counted_allocation(&ta_app::SECOND), 0);
 }

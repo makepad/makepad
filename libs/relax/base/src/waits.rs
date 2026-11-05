@@ -21,16 +21,20 @@ pub enum Kind {
     Pump,
     /// a query another thread runs (object: the query's dep node)
     Query,
-    /// a slot another thread builds
+    /// a slot another thread builds (object: the slot, label: its fn, holder: the thread running
+    /// the build)
     Build,
     /// a program futex wait (object: the futex address; label: mutex, condvar, read, write, park,
     /// once). Its holder is an address on the holder thread's stack (0: unknown), not a thread id.
     Futex,
     /// a program thread join
     Join,
+    /// a CPU token of the budget (object and label: the class). No one thread holds it up:
+    /// makepad_cpu_budget::tokens names who has them.
+    Token,
 }
 
-pub const KIND_NAMES: [&str; 7] = ["none", "owner", "pump", "query", "build", "futex", "join"];
+pub const KIND_NAMES: [&str; 8] = ["none", "owner", "pump", "query", "build", "futex", "join", "token"];
 
 const ROWS: usize = 1024;
 
@@ -163,6 +167,13 @@ impl Drop for Guard {
     }
 }
 
+/// What wraps a wait for a CPU token (makepad_cpu_budget::set_wait_hook).
+pub fn token_wait(class: u8, park: &dyn Fn()) {
+    const CLASSES: [&str; 3] = ["interactive", "visible", "background"];
+    let _w = begin(Kind::Token, class as u64, 0, CLASSES[class as usize]);
+    park();
+}
+
 /// Starts a wait with no guard (program futex waits enter and leave through two C calls).
 pub fn enter(kind: Kind, object: u64, holder: u64, label: &'static str) {
     if let Some(r) = row() {
@@ -233,6 +244,7 @@ fn read(r: &Row) -> Option<Wait> {
             4 => Kind::Build,
             5 => Kind::Futex,
             6 => Kind::Join,
+            7 => Kind::Token,
             _ => return None,
         };
         // labels are 'static strs written whole before the state word

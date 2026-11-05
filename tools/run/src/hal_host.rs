@@ -204,6 +204,9 @@ pub fn register() {
     Hal::global().set_domain_host(Arc::new(Host::default()));
     // a callback an app registers (audio entry, fence notify, main-thread work) runs in that
     // app's domain on whatever thread the HAL calls it: its statics, its heap
+    makepad_relax_api::set_app_call(relax_compiler::jit::app_call);
+    // an app's event loop waits in the HAL's pump
+    domain::set_run_end_wake(|| Hal::global().wake());
     makepad_hal::call_scope::set_call_scope(makepad_hal::call_scope::CallScope {
         capture: domain::foreign_scope,
         enter: |scope| domain::foreign_enter(scope).into_words(),

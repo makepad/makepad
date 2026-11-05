@@ -24,7 +24,7 @@ path = "src/lib.rs"
 name = "relax-provided-fixture"
 path = "src/main.rs"
 
-# `makepad run relax-provided-fixture-guard` must stop with "a field of `Registry` (`names: ..`) is
+# `makepad run relax-provided-fixture-guard` must stop with "a field of `Registry` (`by_name: ..`) is
 # reached from JIT-compiled code" (provided_script.sh); under rustc it prints 1
 [[bin]]
 name = "relax-provided-fixture-guard"

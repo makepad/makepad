@@ -3,13 +3,15 @@
 # loader's rustc build (relax-provided-script-ops; `makepad run` binds, a test harness does not).
 # Each bin's JIT run prints what its rustc build prints:
 # - relax-provided-script-ops: an unmarked pub fn that reads rustc's tables goes through the
-#   crate's ops (ScriptHeap::type_name_by_id was refused: "a field of ScriptHeap is read");
+#   crate's ops (ScriptHeap::type_name_by_id was refused: "a field of ScriptHeap is read"), and
+#   `file!()` names the file relative to the workspace root, as cargo passes it to rustc;
 # - fields: an opaque handle's plain fields at rustc's offsets, a handle field as a place
-#   (ScriptVmBase: compute_program's driver sets two of its flags);
+#   (ScriptVmBase: compute_program's driver sets two of its flags), and a Vec field of plain data
+#   read and grown (ScriptTokenizer.tokens: makepad-script-test's main);
 # - driver: compute_program's driver running a program (a Fab Force study's in-process session):
 #   every makepad-script call it makes from JIT code;
 # and a field whose bytes are rustc's alone stays refused, naming the field
-# (relax-provided-fixture-guard: `Registry.names`, a Vec<String>).
+# (relax-provided-fixture-guard: `Registry.by_name`, rustc's HashMap).
 # Run from the workspace root after `cargo build --release -p makepad-run`. TARGET (default
 # target/release); BINS (default: every bin).
 T=${TARGET:-${CARGO_TARGET_DIR:-target}/release}
@@ -34,7 +36,7 @@ for bin in $BINS; do
     fi
 done
 guard=$(jit relax-provided-fixture --bin relax-provided-fixture-guard)
-echo "$guard" | grep -q 'a field of `relax_provided_fixture::Registry` (`names: ' || echo "$guard" | grep -q 'a field of `Registry` (`names: ' || { fail="$fail guard"; echo "--- guard:"; echo "$guard" | tail -6 | cut -c1-600; }
+echo "$guard" | grep -q 'a field of `relax_provided_fixture::Registry` (`by_name: ' || echo "$guard" | grep -q 'a field of `Registry` (`by_name: ' || { fail="$fail guard"; echo "--- guard:"; echo "$guard" | tail -6 | cut -c1-600; }
 rm -rf "$dir"
 if [ -z "$fail" ]; then
     echo "provided_script: ok"

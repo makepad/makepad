@@ -106,6 +106,11 @@ pub(crate) fn first_present_ms() -> Option<f64> {
 }
 
 fn cause(sections: &[(&str, String)]) -> String {
+    // the app's start waits for its boot window, which has not presented (run.rs boot_window_waits);
+    // while the load goes on, the cause is the load's
+    if let Some((true, note)) = crate::run::boot_window_note() {
+        return format!("boot window: {note}");
+    }
     let get = |name| sections.iter().find(|s| s.0 == name).map_or("", |s| s.1.as_str());
     for view in objects(get("session view")) {
         if let Some(error) = view.get("compile_errors").and_then(Value::as_arr).and_then(|a| a.first()).and_then(Value::as_str) {
@@ -228,7 +233,8 @@ fn prune(dir: &Path) {
 
 /// A copy of `src` (a session's log) in the captures directory, `<stamp>-<app>-<pid>-<what>.log`,
 /// where it outlives the run's temporary directory (a devhub lease's, deleted when the lease
-/// ends); the newest 20 of each kind are kept.
+/// ends); the newest 20 of each kind are kept. (The terminal session's log: unix only.)
+#[cfg(unix)]
 pub(crate) fn keep_file(src: &Path, what: &str) -> std::io::Result<PathBuf> {
     let dir = makepad_remote::hot::home().join("captures");
     std::fs::create_dir_all(&dir)?;

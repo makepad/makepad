@@ -344,10 +344,19 @@ pub fn restart_reason() -> String {
     }
 }
 
-/// The source files live patches changed since `*seen` (start it at 0; the call advances it).
-/// The patched fns run the new code at their next call; what the program built from code at run
-/// time (makepad's `script_mod!` designs, evaluated once) it builds again for these files.
-pub fn patched_files(seen: &mut u64) -> crate::vec::Vec<String> {
+/// What live patches changed since a program last asked ([`patched`]).
+pub struct Patched {
+    /// The source files they changed. The patched fns run the new code at their next call.
+    pub files: crate::vec::Vec<String>,
+    /// The items whose bodies they changed, by name (`script_mod`, `handle_event`); None when a
+    /// patch changed more than bodies (an item added or removed, a const, a layout): take every
+    /// item as changed. What the program built from code at run time (makepad's `script_mod!`
+    /// designs, evaluated once) it builds again when that code is among them.
+    pub items: Option<crate::vec::Vec<String>>,
+}
+
+/// What live patches changed since `*seen` (start it at 0; the call advances it).
+pub fn patched(seen: &mut u64) -> Patched {
     let text = unsafe {
         let mut v: crate::vec::Vec<u8> = crate::vec::Vec::new();
         loop {
@@ -360,11 +369,22 @@ pub fn patched_files(seen: &mut u64) -> crate::vec::Vec<String> {
         }
         String::from_utf8_lossy(&v).into_owned()
     };
+    // "<count> <1 when every item>", a path per line, a tab and an item name per line
     let mut lines = text.lines();
-    if let Some(n) = lines.next().and_then(|n| n.parse().ok()) {
-        *seen = n;
+    let mut every = false;
+    if let Some((n, all)) = lines.next().and_then(|l| l.split_once(' ')) {
+        if let Ok(n) = n.parse() { *seen = n; }
+        every = all == "1";
     }
-    lines.map(String::from).collect()
+    let mut files = crate::vec::Vec::new();
+    let mut items = crate::vec::Vec::new();
+    for line in lines {
+        match line.strip_prefix('\t') {
+            Some(item) => items.push(String::from(item)),
+            None => files.push(String::from(line)),
+        }
+    }
+    Patched { files, items: (!every).then_some(items) }
 }
 
 /// Restarts the program with `state`, which its fresh run reads with `restored_state`: the

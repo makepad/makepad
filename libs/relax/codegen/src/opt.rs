@@ -3133,6 +3133,12 @@ pub fn forward_slot_loads(f: &mut Func) -> bool {
     let may_write = |i: &Inst, a: &At, k: i64| -> bool {
         let tgt = |b: VReg, off: i64, n: i64| -> bool {
             let (s, o) = vs[b.0 as usize];
+            if s != NONE && s == a.slot {
+                // the same slot at known offsets: the bytes decide, escaped or not (an array
+                // also read at a runtime index: its element stores, then the reads of
+                // elements 0 and 1, each behind the stores of the others)
+                return o + off < a.soff + k && a.soff < o + off + n;
+            }
             if a.slot != NONE && !esc[a.slot as usize] {
                 // a non-escaping slot: only its own address writes it
                 return s == a.slot && o + off < a.soff + k && a.soff < o + off + n;
@@ -3147,7 +3153,8 @@ pub fn forward_slot_loads(f: &mut Func) -> bool {
             Inst::Store(m, b, off, _) => tgt(*b, *off as i64, mem_size(*m) as i64),
             Inst::VStore(b, off, _) => tgt(*b, *off as i64, 16),
             Inst::Copy(d, _, n) => tgt(*d, 0, *n as i64),
-            Inst::StoreX(_, b, ..) => tgt(*b, 0, i64::MAX / 4) || vs[b.0 as usize].0 == NONE,
+            // (a runtime index may reach below its base too)
+            Inst::StoreX(_, b, ..) => tgt(*b, i64::MIN / 4, i64::MAX / 2) || vs[b.0 as usize].0 == NONE,
             _ if is_mem_effect(i) => !(a.slot != NONE && !esc[a.slot as usize]),
             _ => false,
         }
@@ -4358,6 +4365,267 @@ pub fn sink_loads_to_successor(f: &mut Func) -> bool {
         }
     }
     changed
+}
+
+/// The entry test of a rotated loop over a slice, `begin == begin + (end - start) * 4` (a
+/// cell's items `&items[at[c] as usize..at[c + 1] as usize]`, the iterator's cursor against its
+/// end), compares the two indices instead: `end == start`. The difference of two values of at
+/// most 32 bits never wraps to zero when scaled, so the pointers are equal exactly when the
+/// indices are. The pointer arithmetic, then read only on the non-empty edge, moves onto it (a
+/// block of its own in front of the loop): rustc builds the slice pointers only for a non-empty
+/// cell. Runs after rotate_loops (the guard is the old header, entered from one block).
+/// MAKEPAD_RUN_OPT=-emptytest. Returns whether anything changed.
+pub fn fold_empty_tests(options: &relax_session::Options, f: &mut Func) -> bool {
+    if opt_off(options, "-emptytest") {
+        return false;
+    }
+    let nv = f.vregs.len();
+    let mut ndef = vec![0u32; nv];
+    for p in &f.params {
+        ndef[p.0 as usize] += 1;
+    }
+    for b in &f.blocks {
+        for i in &b.insts {
+            for_defs(i, |d| ndef[d.0 as usize] += 1);
+        }
+    }
+    let mut def1: std::collections::HashMap<u32, Inst> = std::collections::HashMap::new();
+    for b in &f.blocks {
+        for i in &b.insts {
+            for_defs(i, |d| {
+                if ndef[d.0 as usize] == 1 {
+                    def1.insert(d.0, i.clone());
+                }
+            });
+        }
+    }
+    let mut npred = vec![0u32; f.blocks.len()];
+    let mut pred1 = vec![u32::MAX; f.blocks.len()];
+    for (bi, b) in f.blocks.iter().enumerate() {
+        for s in b.term.succs() {
+            npred[s as usize] += 1;
+            pred1[s as usize] = bi as u32;
+        }
+    }
+    let mut changed = false;
+    let mut added = false;
+    let nb0 = f.blocks.len();
+    for g in 0..nb0 {
+        let Term::Branch(cv, t, e) = f.blocks[g].term else { continue };
+        if t == e {
+            continue;
+        }
+        let Some(ci) = f.blocks[g].insts.iter().rposition(|i| {
+            let mut d = false;
+            for_defs(i, |x| d |= x == cv);
+            d
+        }) else {
+            continue;
+        };
+        let Inst::ICmp(cond @ (Cond::Eq | Cond::Ne), _, _, x, y) = f.blocks[g].insts[ci] else { continue };
+        // the entry block: the guard's one predecessor, jumping to it
+        let p = pred1[g];
+        let chain_p = npred[g] == 1 && p != u32::MAX && p as usize != g && matches!(f.blocks[p as usize].term, Term::Jump(_));
+        // a value's single-definition source at the compare, through moves in the guard and
+        // the entry block
+        let resolve = |v: VReg| -> Option<VReg> {
+            let (mut v, mut blk, mut at) = (v, g, ci);
+            for _ in 0..64 {
+                let mut found = None;
+                for j in (0..at).rev() {
+                    let mut d = false;
+                    for_defs(&f.blocks[blk].insts[j], |x| d |= x == v);
+                    if d {
+                        found = Some(j);
+                        break;
+                    }
+                }
+                match found {
+                    Some(j) => match f.blocks[blk].insts[j] {
+                        Inst::Mov(_, w) => {
+                            v = w;
+                            at = j;
+                        }
+                        _ => return (ndef[v.0 as usize] == 1).then_some(v),
+                    },
+                    None if blk == g && chain_p => {
+                        blk = p as usize;
+                        at = f.blocks[blk].insts.len();
+                    }
+                    None => return (ndef[v.0 as usize] == 1).then_some(v),
+                }
+            }
+            None
+        };
+        let (Some(xr), Some(yr)) = (resolve(x), resolve(y)) else { continue };
+        // one side is the other plus a difference
+        let diff = |a: VReg, b: VReg| -> Option<VReg> {
+            match def1.get(&b.0) {
+                Some(&Inst::IBin(IOp::Add, it, _, l, r)) if it.bits == 64 => {
+                    if l == a {
+                        Some(r)
+                    } else if r == a {
+                        Some(l)
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            }
+        };
+        let Some(dv) = diff(xr, yr).or_else(|| diff(yr, xr)) else { continue };
+        // bits a value is zero-extended from (64: unknown)
+        let zext = |v: VReg| -> u32 {
+            match def1.get(&v.0) {
+                Some(&Inst::Load(Mem::Int(n, false), ..)) | Some(&Inst::LoadX(Mem::Int(n, false), ..)) => n as u32 * 8,
+                Some(&Inst::Conv(Conv::IntToInt(IntTy { bits, signed: false }), ..)) => bits as u32,
+                Some(&Inst::IBinI(IOp::And, _, _, _, k)) if k >= 0 => 64 - (k as u64).leading_zeros(),
+                Some(&Inst::Iconst(_, k)) if k >= 0 => 64 - (k as u64).leading_zeros(),
+                _ => 64,
+            }
+        };
+        // the difference unscaled: `d << s` is zero exactly when d is, for d of at most 33 bits
+        // signed (a difference of two 32-bit values) and s <= 31
+        let (mut lhs, mut rhs) = (dv, None);
+        if let Some(&Inst::IBinI(IOp::Shl, IntTy { bits: 64, .. }, _, d, s)) = def1.get(&dv.0) {
+            let small = match def1.get(&d.0) {
+                Some(&Inst::IBin(IOp::Sub, _, _, a, b)) => zext(a).max(zext(b)) + 1,
+                _ => zext(d),
+            };
+            if (1..=31).contains(&s) && small + s as u32 <= 64 {
+                lhs = d;
+            }
+        }
+        // (a narrower difference is zero for other indices too; an index defined again after the
+        // subtraction no longer is the one subtracted)
+        if let Some(&Inst::IBin(IOp::Sub, IntTy { bits: 64, .. }, _, a, b)) = def1.get(&lhs.0) {
+            if ndef[a.0 as usize] == 1 && ndef[b.0 as usize] == 1 {
+                lhs = a;
+                rhs = Some(b);
+            }
+        }
+        if lhs == dv && rhs.is_none() {
+            // nothing gained over the pointers
+            continue;
+        }
+        f.blocks[g].insts[ci] = match rhs {
+            Some(b) => Inst::ICmp(cond, false, cv, lhs, b),
+            None => Inst::ICmpI(cond, false, cv, lhs, 0),
+        };
+        changed = true;
+        // the arithmetic only the other edge reads moves onto it
+        added |= sink_to_edge(f, g, if chain_p { Some(p as usize) } else { None });
+    }
+    // an edge block follows its guard (the non-empty path falls through)
+    if added {
+        relax_backend::passes::relayout(f);
+    }
+    changed
+}
+
+/// Moves the pure instructions of guard `g` (and of its entry block `p`) whose results only one of
+/// its two successors reads to that edge: a block of their own in front of the successor (or its
+/// start when `g` is its only predecessor). Returns whether a block was added.
+fn sink_to_edge(f: &mut Func, g: usize, p: Option<usize>) -> bool {
+    let Term::Branch(_, t, e) = f.blocks[g].term else { return false };
+    // whether `v` is read on a path from block `s`'s start before a definition
+    let live_at = |f: &Func, v: VReg, s: u32| -> bool {
+        let mut seen = vec![false; f.blocks.len()];
+        let mut work = vec![s];
+        let mut tu = Vec::new();
+        while let Some(b) = work.pop() {
+            if std::mem::replace(&mut seen[b as usize], true) {
+                continue;
+            }
+            let blk = &f.blocks[b as usize];
+            let mut killed = false;
+            for i in &blk.insts {
+                let mut used = false;
+                for_uses(i, |u| used |= u == v);
+                if used {
+                    return true;
+                }
+                for_defs(i, |d| killed |= d == v);
+                if killed {
+                    break;
+                }
+            }
+            if killed {
+                continue;
+            }
+            term_uses(&blk.term, &mut tu);
+            if tu.contains(&v) {
+                return true;
+            }
+            work.extend(blk.term.succs());
+        }
+        false
+    };
+    let pure = |i: &Inst| -> Option<(VReg, Vec<VReg>)> {
+        match *i {
+            Inst::Mov(d, a) => Some((d, vec![a])),
+            Inst::IBinI(op, _, d, a, _) if !matches!(op, IOp::Div | IOp::Rem) => Some((d, vec![a])),
+            Inst::IBin(op, _, d, a, b) if !matches!(op, IOp::Div | IOp::Rem | IOp::MulHi) => Some((d, vec![a, b])),
+            _ => None,
+        }
+    };
+    for (to, other) in [(t, e), (e, t)] {
+        // backwards over g, then p: what stays reads `needed`, defines `later`
+        let mut tu = Vec::new();
+        term_uses(&f.blocks[g].term, &mut tu);
+        let mut needed: Vec<VReg> = tu.clone();
+        let mut later: Vec<VReg> = Vec::new();
+        let mut moved: Vec<(usize, usize)> = Vec::new();
+        for blk in std::iter::once(g).chain(p) {
+            for k in (0..f.blocks[blk].insts.len()).rev() {
+                let i = &f.blocks[blk].insts[k];
+                if let Some((d, ops)) = pure(i) {
+                    let ok = !needed.contains(&d)
+                        && !later.contains(&d)
+                        && !ops.contains(&d)
+                        && !ops.iter().any(|o| later.contains(o))
+                        && !live_at(f, d, other);
+                    if ok {
+                        moved.push((blk, k));
+                        continue;
+                    }
+                }
+                for_uses(i, |u| needed.push(u));
+                for_defs(i, |x| later.push(x));
+            }
+        }
+        // only arithmetic that reads a value of the blocks (not a lone copy) is worth a block
+        if !moved.iter().any(|&(b, k)| !matches!(f.blocks[b].insts[k], Inst::Mov(..))) {
+            continue;
+        }
+        // program order: p's before g's, each block's ascending
+        moved.sort_by_key(|&(b, k)| (b != p.unwrap_or(usize::MAX), k));
+        let mut insts = Vec::new();
+        let mut pos = Vec::new();
+        for &(b, k) in &moved {
+            insts.push(f.blocks[b].insts[k].clone());
+            pos.push(f.blocks[b].pos.get(k).copied().unwrap_or(f.blocks[b].term_pos));
+        }
+        for &(b, k) in moved.iter().rev() {
+            f.blocks[b].insts.remove(k);
+            if k < f.blocks[b].pos.len() {
+                f.blocks[b].pos.remove(k);
+            }
+        }
+        let preds_to = f.blocks.iter().filter(|b| b.term.succs().any(|s| s == to)).count();
+        if preds_to == 1 {
+            let tb = &mut f.blocks[to as usize];
+            tb.insts.splice(0..0, insts);
+            tb.pos.splice(0..0, pos);
+            return false;
+        }
+        let nb = f.blocks.len() as u32;
+        let (term_pos, count) = (f.blocks[g].term_pos, f.blocks[to as usize].count);
+        f.blocks.push(Block { insts, pos, term: Term::Jump(to), term_pos, count });
+        retarget(&mut f.blocks[g].term, to, nb);
+        return true;
+    }
+    false
 }
 
 pub fn sink_single_uses(f: &mut Func) -> bool {
@@ -9205,6 +9473,52 @@ mod rotate_tests {
                 assert!(matches!(b0.insts[0], Inst::ICmp(Cond::Gt, ..)));
                 assert_eq!(ret_of(t0), r2);
             }
+        }
+    }
+
+    /// A signed division's overflow check in a loop: `(b == -1) & (a == MIN)` with `b == -1`
+    /// hoisted out (a flag from another block). The branch tests the flag; the block's compare
+    /// moves to a new block reached only when the flag holds. A plain value (not a compare's
+    /// result) in place of the flag is a bitwise `&` and stays.
+    #[test]
+    fn branch_on_flag_and_compare_splits() {
+        for plain in [false, true] {
+            let mut f = Func::new("divcheck".into(), 0);
+            let (a, b) = (f.vreg(Cls::I), f.vreg(Cls::I));
+            f.params.extend([a, b]);
+            f.rets.push(Cls::I);
+            let (x, y, c, r1, r2) = (f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I));
+            for _ in 0..4 {
+                f.block();
+            }
+            f.blocks[0].insts = if plain { vec![Inst::IBinI(IOp::Add, U64T, x, b, 1)] } else { vec![Inst::ICmpI(Cond::Eq, true, x, b, -1)] };
+            f.blocks[0].term = Term::Jump(1);
+            f.blocks[1].insts = vec![Inst::ICmpI(Cond::Eq, true, y, a, i64::MIN), Inst::IBin(IOp::And, U64T, c, x, y)];
+            f.blocks[1].term = Term::Branch(c, 2, 3);
+            f.blocks[2].insts = vec![Inst::Iconst(r1, 1)];
+            f.blocks[2].term = Term::Ret(vec![r1]);
+            f.blocks[3].insts = vec![Inst::Iconst(r2, 2)];
+            f.blocks[3].term = Term::Ret(vec![r2]);
+            for b in &mut f.blocks {
+                b.pos = vec![0; b.insts.len()];
+            }
+            let opts = relax_session::Options::default();
+            let changed = relax_backend::passes::split_branch_conditions(&opts, &mut f);
+            f.verify().unwrap();
+            let b1 = f.blocks.iter().position(|bl| bl.insts.iter().any(|i| matches!(i, Inst::IBin(IOp::And, ..))) || matches!(bl.term, Term::Branch(cv, _, _) if cv == x)).unwrap();
+            if plain {
+                assert!(!changed && matches!(f.blocks[b1].term, Term::Branch(cv, _, _) if cv == c), "a bitwise & of a plain value is not a branch condition pair");
+                continue;
+            }
+            assert!(changed);
+            let ret_of = |b: u32| match &f.blocks[b as usize].term { Term::Ret(v) => v[0], _ => panic!() };
+            // the flag first: false -> r2; true -> the block that compares a with MIN
+            assert!(f.blocks[b1].insts.is_empty(), "the compare left the flag's block: {:?}", f.blocks[b1].insts);
+            let Term::Branch(cx, tx, ex) = f.blocks[b1].term else { panic!() };
+            assert_eq!((cx, ret_of(ex)), (x, r2));
+            assert!(matches!(f.blocks[tx as usize].insts[..], [Inst::ICmpI(Cond::Eq, true, d, s, k)] if d == y && s == a && k == i64::MIN));
+            let Term::Branch(cy, ty, ey) = f.blocks[tx as usize].term else { panic!() };
+            assert_eq!((cy, ret_of(ty), ret_of(ey)), (y, r1, r2));
         }
     }
 }

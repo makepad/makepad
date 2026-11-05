@@ -328,7 +328,7 @@ mod tests {
         collect(&mut prog);
         assert_eq!(prog.defs.len(), count);
         for d in trait_assocs { assert!(prog.impl_trait_in_trait_data.contains_key(&d)); }
-        let files = prog.current_source_files().into_iter().collect();
+        let files = prog.current_source_files(|_| true).into_iter().collect();
         prog.recollect_check_crate(0, files).unwrap();
         assert_eq!(prog.impl_trait_in_trait_data.len(), 6);
         for (&d, _) in &prog.impl_trait_in_trait_data { assert!(d.0 as usize >= count); }

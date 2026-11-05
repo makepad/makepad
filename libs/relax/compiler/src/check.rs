@@ -216,39 +216,38 @@ impl PreparedErrors {
     fn strings(self) -> Vec<String> { self.errors.into_iter().map(|(_, e)| e).collect() }
 }
 
-/// Checks prepared bodies. Beside a running program each body holds a front read, yields to
-/// writers and retries after them. Test dependencies use the full error pipeline on jobs()
-/// low-priority threads; the app's type check keeps its smaller pool.
-fn check_prepared(up: *mut Unit, p: AppCheck, beside: Option<&crate::options::RuntimeOptions>, mode: CheckMode) -> PreparedErrors {
-    let AppCheck { t0, todo, keys, owners } = p;
-    let strict = mode == CheckMode::Errors;
-    let upn = up as usize;
-    let front = unsafe { (*up).front.clone() };
-    let init = || if let Some(r) = beside { jit::lower_this_thread_priority(r) };
-    let threads = if beside.is_some() && !strict { beside_jobs() } else { jobs() };
-    let cpu = std::sync::atomic::AtomicU64::new(0);
-    struct Cpu<'a>(&'a std::sync::atomic::AtomicU64, u64);
-    impl Drop for Cpu<'_> {
-        fn drop(&mut self) { self.0.fetch_add(relax_backend::cpu_ns() - self.1, std::sync::atomic::Ordering::Relaxed); }
-    }
-    let again = || if beside.is_some() { std::thread::sleep(std::time::Duration::from_millis(5)) } else { std::thread::yield_now() };
-    let retry = |p: &(dyn std::any::Any + Send)| crate::preempt::is_preempted(p) || p.is::<crate::preempt::NeedsLoad>() || p.is::<crate::preempt::OwnerBusy>();
-    let ice = |prog: &crate::program::Program, d: crate::program::DefId| -> Option<Vec<String>> {
-        let def = prog.def(d);
-        let pos = prog.files[def.file as usize].ast.item(def.item).lo;
-        Some(vec![prog.record_error(def.file, pos, "typeck", format!("internal compiler error while checking {} -- makepad run bug, report it{}", prog.def_path(d), jit::take_ice_location()))])
-    };
-    let check = |d: crate::program::DefId, impl_check: bool| -> Option<Vec<String>> {
-        let _cpu = strict.then(|| Cpu(&cpu, relax_backend::cpu_ns()));
+/// One check of check_prepared -- a body owner's errors, or an impl's soundness -- owning what it
+/// reads: a scoped thread runs it, or beside a running program a job of the JIT's queue.
+struct BodyCheck {
+    upn: usize,
+    front: std::sync::Arc<jit::FrontShared>,
+    strict: bool,
+    beside: bool,
+    cpu: std::sync::atomic::AtomicU64,
+}
+impl BodyCheck {
+    fn check(&self, d: crate::program::DefId, impl_check: bool) -> Option<Vec<String>> {
+        struct Cpu<'a>(&'a std::sync::atomic::AtomicU64, u64);
+        impl Drop for Cpu<'_> {
+            fn drop(&mut self) { self.0.fetch_add(relax_backend::cpu_ns() - self.1, std::sync::atomic::Ordering::Relaxed); }
+        }
+        let ice = |prog: &crate::program::Program, d: crate::program::DefId| -> Option<Vec<String>> {
+            let def = prog.def(d);
+            let pos = prog.files[def.file as usize].ast.item(def.item).lo;
+            Some(vec![prog.record_error(def.file, pos, "typeck", format!("internal compiler error while checking {} -- makepad run bug, report it{}", prog.def_path(d), jit::take_ice_location()))])
+        };
+        let retry = |p: &(dyn std::any::Any + Send)| crate::preempt::is_preempted(p) || p.is::<crate::preempt::NeedsLoad>() || p.is::<crate::preempt::OwnerBusy>();
+        let (strict, beside) = (self.strict, self.beside);
+        let _cpu = strict.then(|| Cpu(&self.cpu, relax_backend::cpu_ns()));
         let _quiet = strict.then(crate::lint::Suppress::new);
-        let uu = unsafe { &*(upn as *const Unit) };
+        let uu = unsafe { &*(self.upn as *const Unit) };
         let mut tries = 0;
         loop {
-            let r = beside.map(|_| jit::front_read("app check"));
-            let (prog, tcx) = r.as_ref().map_or((&uu.prog, &uu.tcx), |r| r.of(&front));
+            let r = beside.then(|| jit::front_read("app check"));
+            let (prog, tcx) = r.as_ref().map_or((&uu.prog, &uu.tcx), |r| r.of(&self.front));
             if !strict && tries >= 100 { return if impl_check { None } else { ice(prog, d) }; }
             match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let _p = beside.map(|_| crate::preempt::Preemptible::on());
+                let _p = beside.then(crate::preempt::Preemptible::on);
                 if impl_check { return crate::unsafety::impl_errors(prog, tcx, d); }
                 if !strict { return Some(tcx.typeck(prog, d).errors.to_vec()); }
                 let owner = crate::borrowck::body::CheckedBody::item(prog, d).expect("prepared body owner");
@@ -260,16 +259,37 @@ fn check_prepared(up: *mut Unit, p: AppCheck, beside: Option<&crate::options::Ru
                 Err(p) if strict && p.is::<crate::preempt::NeedsLoad>() => {
                     if prog.skipped_files.is_empty() { return ice(prog, d); }
                     drop(r);
-                    unsafe { jit::load_all_skipped(upn as *mut Unit) };
+                    unsafe { jit::load_all_skipped(self.upn as *mut Unit) };
                 }
                 Err(p) if retry(&*p) => {
-                    tries += usize::from(beside.is_none() || p.is::<crate::preempt::NeedsLoad>());
+                    tries += usize::from(!beside || p.is::<crate::preempt::NeedsLoad>());
                     drop(r);
-                    again();
+                    if beside {
+                        // (a queued check's CPU permit goes back while the writer runs)
+                        let _wait = crate::pool::suspend();
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    } else {
+                        std::thread::yield_now();
+                    }
                 }
                 Err(_) => return if impl_check && !strict { None } else { ice(prog, d) },
             }
         }
+    }
+}
+
+/// Checks prepared bodies. Beside a running program they are jobs of the JIT's queue (`queued_map`):
+/// each body holds a front read, yields to writers and retries after them. Test dependencies use
+/// the full error pipeline.
+fn check_prepared(up: *mut Unit, p: AppCheck, beside: Option<&crate::options::RuntimeOptions>, mode: CheckMode) -> PreparedErrors {
+    let AppCheck { t0, todo, keys, owners } = p;
+    let strict = mode == CheckMode::Errors;
+    let front = unsafe { (*up).front.clone() };
+    let ctx = std::sync::Arc::new(BodyCheck {
+        upn: up as usize, front: front.clone(), strict, beside: beside.is_some(), cpu: std::sync::atomic::AtomicU64::new(0),
+    });
+    let check_all = |items: Vec<crate::program::DefId>, impl_check: bool| -> Vec<Option<Vec<String>>> {
+        if beside.is_some() { queued_map(&ctx, items, impl_check) } else { par_map(&items, jobs(), |&d| ctx.check(d, impl_check)) }
     };
     // Impl soundness once per crate, in parallel before its bodies. Dependencies are checked
     // regardless of the app-only scope used by the ordinary run's checker.
@@ -284,7 +304,7 @@ fn check_prepared(up: *mut Unit, p: AppCheck, beside: Option<&crate::options::Ru
     };
     let mut failed = Vec::new();
     if !impls.is_empty() {
-        let parts = par_map(&impls, threads, &init, |&(_, d)| check(d, true));
+        let parts = check_all(impls.iter().map(|&(_, d)| d).collect(), true);
         for &k in &admitted {
             let mine: Vec<&Option<Vec<String>>> = impls.iter().zip(&parts).filter(|((c, _), _)| *c == k).map(|(_, p)| p).collect();
             if mine.iter().all(|p| p.is_some()) {
@@ -295,7 +315,7 @@ fn check_prepared(up: *mut Unit, p: AppCheck, beside: Option<&crate::options::Ru
             failed.extend(impls.iter().zip(parts).filter_map(|(&(_, d), e)| e.filter(|e| !e.is_empty()).map(|e| (d, e))));
         }
     }
-    let mut bodies: Vec<_> = owners.iter().zip(par_map(&owners, threads, &init, |&d| check(d, false)))
+    let mut bodies: Vec<_> = owners.iter().zip(check_all(owners.clone(), false))
         .filter_map(|(&d, e)| e.filter(|e| !e.is_empty()).map(|e| (d, e))).collect();
     let skipped_left = {
         let r = beside.map(|_| jit::front_read("app check skipped"));
@@ -304,10 +324,10 @@ fn check_prepared(up: *mut Unit, p: AppCheck, beside: Option<&crate::options::Ru
     if (!bodies.is_empty() || !failed.is_empty()) && skipped_left {
         unsafe { jit::load_all_skipped(up) };
         let again: Vec<_> = bodies.iter().map(|f| f.0).collect();
-        bodies = again.iter().zip(par_map(&again, threads, &init, |&d| check(d, false)))
+        bodies = again.iter().zip(check_all(again.clone(), false))
             .filter_map(|(&d, e)| e.filter(|e| !e.is_empty()).map(|e| (d, e))).collect();
         let again: Vec<_> = failed.iter().map(|f| f.0).collect();
-        failed = again.iter().zip(par_map(&again, threads, &init, |&d| check(d, true)))
+        failed = again.iter().zip(check_all(again.clone(), true))
             .filter_map(|(&d, e)| e.filter(|e| !e.is_empty()).map(|e| (d, e))).collect();
     }
     failed.extend(bodies);
@@ -327,7 +347,87 @@ fn check_prepared(up: *mut Unit, p: AppCheck, beside: Option<&crate::options::Ru
     errors.sort_by_cached_key(|(_, e)| error_position(e));
     errors.dedup();
     if errors.iter().any(|(_, e)| !is_follow_on(e)) { errors.retain(|(_, e)| !is_follow_on(e)); }
-    PreparedErrors { errors, cpu_ns: cpu.load(std::sync::atomic::Ordering::Relaxed) }
+    PreparedErrors { errors, cpu_ns: ctx.cpu.load(std::sync::atomic::Ordering::Relaxed) }
+}
+
+/// A batch of a check beside the running program (the app's own crates, a test's dependencies) on
+/// the JIT's queue (jit_queue `Job::Check`): no threads of its own. Its jobs run in the Background
+/// class behind every build of the queue, on what the budget gives Background beside the program,
+/// the JIT and the app's pools (it yields to their waiters between items), and go first in the
+/// waiter's class once something waits for them (`waited`: the app's first window frame, the run's
+/// exit). Each job takes the next item until its slice is used, then queues itself again: its
+/// worker goes back to the queue's order every few milliseconds. (On threads of its own a test's
+/// dependency check took every core beside a cold Fab start, first frame 27.5 s; on two of them
+/// the start drew at 14.8 s, but the check ended 66 s after the tests.)
+pub(crate) struct CheckBatch {
+    ctx: std::sync::Arc<BodyCheck>,
+    items: Vec<crate::program::DefId>,
+    impl_check: bool,
+    next: std::sync::atomic::AtomicUsize,
+    /// items whose result is not in `out` yet
+    left: std::sync::atomic::AtomicUsize,
+    out: relax_session::sync::Mutex<Vec<(usize, Option<Vec<String>>)>>,
+    done: (relax_session::sync::Mutex<()>, relax_session::sync::Condvar),
+}
+
+/// Something waits for the check beside the program (`waited`).
+static CHECK_WAITED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// A job's slice: past it, the job gives its worker back to the queue after the item it is on.
+const CHECK_SLICE: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// Something waits for the check beside the program: its jobs run first in the Interactive class.
+pub(crate) fn check_waited() -> bool {
+    CHECK_WAITED.load(std::sync::atomic::Ordering::Acquire)
+}
+
+/// The app's first window frame or the run's exit waits for the check beside the program.
+fn waited() {
+    if !CHECK_WAITED.swap(true, std::sync::atomic::Ordering::AcqRel) { jit::promote_checks(); }
+}
+
+/// `items` checked by jobs of the JIT's queue, results in order.
+fn queued_map(ctx: &std::sync::Arc<BodyCheck>, items: Vec<crate::program::DefId>, impl_check: bool) -> Vec<Option<Vec<String>>> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let n = items.len();
+    if n == 0 { return Vec::new(); }
+    let batch = std::sync::Arc::new(CheckBatch {
+        ctx: ctx.clone(), items, impl_check, next: AtomicUsize::new(0), left: AtomicUsize::new(n),
+        out: relax_session::sync::Mutex::new(Vec::with_capacity(n)), done: (relax_session::sync::Mutex::new(()), relax_session::sync::Condvar::new()),
+    });
+    // as many jobs as the budget admits at most: its classes decide how many of them run
+    jit::queue_check(&batch, n.min(makepad_cpu_budget::limit() as usize));
+    {
+        let mut g = batch.done.0.lock().unwrap_or_else(|e| e.into_inner());
+        while batch.left.load(Ordering::Acquire) != 0 { g = batch.done.1.wait(g).unwrap_or_else(|e| e.into_inner()); }
+    }
+    let mut out = std::mem::take(&mut *batch.out.lock().unwrap_or_else(|e| e.into_inner()));
+    out.sort_unstable_by_key(|(i, _)| *i);
+    out.into_iter().map(|(_, r)| r).collect()
+}
+
+/// One job of a check batch (on a worker of the JIT's queue): items until its slice is
+/// used, then the job queues itself again while items are left.
+pub(crate) fn run_check_slice(batch: std::sync::Arc<CheckBatch>) {
+    use std::sync::atomic::Ordering;
+    let start = std::time::Instant::now();
+    loop {
+        let i = batch.next.fetch_add(1, Ordering::Relaxed);
+        let Some(&d) = batch.items.get(i) else { return };
+        // (a check's own panics are its ICE verdict; this is one outside them, its bookkeeping)
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| batch.ctx.check(d, batch.impl_check)))
+            .unwrap_or_else(|_| Some(vec!["internal compiler error in the check beside the program -- makepad run bug, report it".to_string()]));
+        batch.out.lock().unwrap_or_else(|e| e.into_inner()).push((i, r));
+        if batch.left.fetch_sub(1, Ordering::AcqRel) == 1 {
+            let _g = batch.done.0.lock().unwrap_or_else(|e| e.into_inner());
+            batch.done.1.notify_all();
+            return;
+        }
+        if start.elapsed() >= CHECK_SLICE {
+            if batch.next.load(Ordering::Relaxed) < batch.items.len() { jit::queue_check(&batch, 1); }
+            return;
+        }
+        crate::pool::checkpoint(0, "check beside the program");
+    }
 }
 
 struct TestDepsResult {
@@ -353,7 +453,7 @@ pub fn start_test_deps(up: *mut Unit, select: impl FnOnce(&crate::program::Progr
     let _k = crate::zone_alloc::kept();
     let worker = std::thread::Builder::new().name("test-deps-check".into()).stack_size(256 << 20).spawn(move || {
         let _z = crate::zone_alloc::compiler_thread();
-        jit::lower_this_thread_priority(&runtime);
+        makepad_cpu_budget::set_thread_class(makepad_cpu_budget::BACKGROUND);
         let (t0, cpu0) = (jit::wall_ns(), relax_backend::cpu_ns());
         let up = upn as *mut Unit;
         let front = unsafe { (*up).front.clone() };
@@ -410,6 +510,7 @@ pub fn finish_test_deps(code: i32) -> i32 {
     let Some(check) = TEST_DEPS.get() else { return code };
     let failed = check.failed.get_or_init(|| {
         let t0 = jit::wall_ns();
+        waited();
         let worker = check.worker.lock().unwrap_or_else(|e| e.into_inner()).take().expect("test dependency check worker");
         let result = worker.join();
         let waited = jit::wall_ns() - t0;
@@ -457,7 +558,7 @@ pub fn start_app_check(up: *mut Unit, p: AppCheck, runtime: crate::options::Runt
     let upn = up as usize;
     std::thread::Builder::new().name("run-app-check".into()).stack_size(256 << 20).spawn(move || {
         let _z = crate::zone_alloc::compiler_thread();
-        jit::lower_this_thread_priority(&runtime);
+        makepad_cpu_budget::set_thread_class(makepad_cpu_budget::BACKGROUND);
         let errors = check_prepared(upn as *mut Unit, p, Some(&runtime), CheckMode::Typeck).strings();
         if crate::run::VERBOSE.load(std::sync::atomic::Ordering::Relaxed) {
             eprintln!("makepad-run: app check beside main: {} crates, {} body owners, {} errors, {:.0} ms",
@@ -475,9 +576,15 @@ pub fn start_app_check(up: *mut Unit, p: AppCheck, runtime: crate::options::Runt
 /// The first frame's gate (the platform asks before it submits its first window frame): waits
 /// for the app check beside main. An error it finds ends the process instead (start_app_check).
 pub fn wait_app_check() {
+    if *BESIDE.0.lock().unwrap_or_else(|e| e.into_inner()) != 1 { return; }
+    waited();
+    let t0 = std::time::Instant::now();
     let mut g = BESIDE.0.lock().unwrap_or_else(|e| e.into_inner());
     while *g == 1 {
         g = BESIDE.1.wait(g).unwrap_or_else(|e| e.into_inner());
+    }
+    if crate::run::VERBOSE.load(std::sync::atomic::Ordering::Relaxed) {
+        eprintln!("makepad-run: the first frame waited {:.0} ms for the app check", t0.elapsed().as_secs_f64() * 1e3);
     }
 }
 
@@ -492,21 +599,13 @@ fn jobs() -> usize {
         .unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |n| n.get()).min(16))
 }
 
-/// The app check beside main: a few threads, an eighth of the hardware's (2 to 4). It has the
-/// time until the first frame (a cold Fab: 2 threads end it 3.3 s after main, the frame comes 8 s
-/// later), and more threads slow main down (on 16, by half a second: they share its core).
-fn beside_jobs() -> usize {
-    (std::thread::available_parallelism().map_or(4, |n| n.get()) / 8).clamp(2, 4)
-}
-
-fn par_map<T: Sync, R: Send>(items: &[T], jobs: usize, init: &(dyn Fn() + Sync), f: impl Fn(&T) -> R + Sync) -> Vec<R> {
+fn par_map<T: Sync, R: Send>(items: &[T], jobs: usize, f: impl Fn(&T) -> R + Sync) -> Vec<R> {
     let next = std::sync::atomic::AtomicUsize::new(0);
     let out: relax_session::sync::Mutex<Vec<(usize, R)>> = relax_session::sync::Mutex::new(Vec::with_capacity(items.len()));
     std::thread::scope(|sc| {
         for w in 0..jobs.min(items.len().max(1)) {
             let (next, out, f) = (&next, &out, &f);
             std::thread::Builder::new().name(format!("run-check-{}", w)).stack_size(256 << 20).spawn_scoped(sc, move || { let _z = crate::zone_alloc::compiler_thread();
-                init();
                 let mut local = Vec::new();
                 loop {
                     let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -667,7 +766,7 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
         let check_times = std::env::var_os("MAKEPAD_RUN_CHECK_TIMES").is_some();
         let defs: Vec<crate::program::DefId> = (0..u.prog.defs.len()).filter(|&i| own[u.prog.defs[i].krate as usize]).map(|i| crate::program::DefId(i as u32)).filter(|&d| !is_live_default(&u.prog, d)).collect();
         let (prog, tcx) = (&u.prog, &u.tcx);
-        for e in par_map(&defs, jobs(), &|| {}, |&d| std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        for e in par_map(&defs, jobs(), |&d| std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let t0 = std::time::Instant::now();
                 let mut e = tcx.check_def_signature(prog, d);
                 let dt_sig = t0.elapsed();
@@ -718,7 +817,7 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
         let (prog, tcx) = (&u.prog, &u.tcx);
         // (a constant a well-formedness check evaluates may find the compiler's owner busy: preempted
         // work is asked again, as the body checks do)
-        for e in par_map(&defs, jobs(), &|| {}, |&d| {
+        for e in par_map(&defs, jobs(), |&d| {
             let mut tries = 0;
             loop {
                 let t0 = std::time::Instant::now();
@@ -932,7 +1031,7 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
         .collect();
     if !retry_idxs.is_empty() {
         let t_retry = std::time::Instant::now();
-        let retried = par_map(&retry_idxs, jobs, &|| {}, |&idx| {
+        let retried = par_map(&retry_idxs, jobs, |&idx| {
             let fi = outcomes[idx].0;
             let (owner, generic) = &fns[fi];
             check_one(owner, *generic)
@@ -967,7 +1066,10 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], mut errors: Vec<Str
                 let outer = uu.tcx.typeck(&uu.prog, owner);
                 if !outer.errors.is_empty() || (outer.has_expr(e) && outer.expr_typed.get(outer.expr_ix(e))) { return; }
                 let body = uu.tcx.typeck(&uu.prog, anon);
-                if body.errors.is_empty() { relax_types::lint::check_literals(&uu.prog, &uu.tcx, &body); }
+                if body.errors.is_empty() {
+                    relax_types::lint::check_literals(&uu.prog, &uu.tcx, &body);
+                    relax_types::lint_dead::collect_body(&uu.prog, &uu.tcx, &body);
+                }
             }));
         }
     }

@@ -344,14 +344,20 @@ pub mod intrinsics_vx {
     // (width 32: f32 lanes, 64: f64 lanes; Intel NaN results).
     // 52/53 f32 NEON min/max (NaN propagation and signed-zero ordering).
     // 60..63 NEON f32 add/sub/mul/div.
+    // 90..93 carry-less multiply of one 64-bit lane of a and one of b (width 64; x86 pclmulqdq,
+    // Arm pmull .1q): bit 0 of op - 90 picks a's high lane, bit 1 b's.
     // SHA binary (width 32): 70 x86 sha1nexte, 71 sha1msg1, 72 sha1msg2,
     // 73 sha256msg1, 74 sha256msg2; 80 Arm sha1su1, 81 sha256su0.
     // Ternary: 0 x86 sha256rnds2; 1/2/3 Arm sha1c/p/m (b is u32),
     // 4 Arm sha1su0, 5 sha256h, 6 sha256h2, 7 sha256su1 (b is a vector).
     // 8 / 9 NEON f32 fused a + b * c / a - b * c (FMLA / FMLS .4s); 10 bitwise select
-    // (a & b) | (!a & c) (BSL; a, the mask, is passed as T).
+    // (a & b) | (!a & c) (BSL; a, the mask, is passed as T); 11..14 x86 f32, 15..18 x86 f64 fused
+    // a * b + c, a * b - c, -(a * b) + c, -(a * b) - c (vfmadd / vfmsub / vfnmadd / vfnmsub .ps /
+    // .pd: a NaN operand keeps its sign, where FMLS flips it).
     // vx_sha1rnds4: x86, immediate FUNC in 0..=3, checked at lowering.
     // vx_sha1h: Arm, scalar u32 -> u32 through lane 0 of a V128.
+    // vx_crc32: Arm crc32{b,h,w,x} of data's low `bytes` (1/2/4/8, constant) bytes into crc;
+    // aarch64 targets only, checked at lowering.
     // Unary: 0 abs, 1 shl, 2 unsigned shr, 3 signed shr, 4 shuffle i32,
     // 5/6 byte shift right/left, 7 SSE sqrt, 8 float abs, 9 NEON sqrt f32, 10 float neg
     // 11 SSE4.1 round to integral, imm & 3 = nearest-even / down / up / toward zero
@@ -363,6 +369,7 @@ pub mod intrinsics_vx {
         pub fn vx_ternary<T, S>(a: T, b: S, c: T, op: u32) -> T;
         pub fn vx_sha1rnds4<T>(a: T, b: T, func: i32) -> T;
         pub fn vx_sha1h(a: u32) -> u32;
+        pub fn vx_crc32(crc: u32, data: u64, bytes: u32) -> u32;
         pub fn vx_unary<T>(a: T, op: u32, width: u32, imm: i32) -> T;
         pub fn vx_splat<T>(a: u64, width: u32) -> T;
         pub fn vx_load<T>(p: *const u8) -> T;

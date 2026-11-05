@@ -129,7 +129,7 @@ pub fn check_root(cx: &EvalCx<'_>, prog: &Program, tcx: &Tcx, typeck: &typeck::B
         return v;
     };
     owners.push(item);
-    let g = Group { cx, prog, tcx, typeck, env, eval: &eval, root: &root, name: &name, fv_cache };
+    let g = Group { cx, prog, tcx, typeck, env, root: &root, name: &name, fv_cache };
     check_group(&g, &owners, false, &mut v);
     for child in body::const_children(prog, tcx, typeck) {
         check_group(&g, &[child], true, &mut v);
@@ -324,7 +324,6 @@ struct Group<'a, 'b> {
     tcx: &'a Tcx,
     typeck: &'a typeck::Body,
     env: TypingEnv,
-    eval: &'b EvalCx<'b>,
     root: &'b BuildRoot<'b>,
     name: &'a str,
     fv_cache: Option<&'a Rc<SummaryCx>>,
@@ -333,7 +332,7 @@ struct Group<'a, 'b> {
 /// Borrow-check a group of bodies together (one inference context each, nested bodies first):
 /// the item with its closures, or one anonymous constant.
 fn check_group(g: &Group<'_, '_>, owners: &[CheckedBody], anon_const: bool, v: &mut Verdict) {
-    let Group { cx, prog, tcx, typeck, env, eval, root, name, fv_cache } = *g;
+    let Group { cx, prog, tcx, typeck, env, root, name, fv_cache } = *g;
     let env = env;
     let provider = BuildProvider { prog, tcx, memo: Default::default() };
 
@@ -450,6 +449,7 @@ fn check_group(g: &Group<'_, '_>, owners: &[CheckedBody], anon_const: bool, v: &
         };
         let moves = MoveData::gather_moves(&mir, prog, tcx, env, &|_| true);
         let mut infcx = BorrowckInferCtxt::new(tcx, prog, typeck.def, typeck.def, &typeck.args);
+        infcx.root_typeck = Some(typeck);
         let input = MirNllInput { sig: &sig, nested, def_span: mir.span, moves: &moves, has_loans: true };
         let tc = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| type_check_body(tcx, prog, &mut infcx, &mut *mir, &input))) {
             Ok(tc) => tc,
@@ -497,14 +497,6 @@ fn check_group(g: &Group<'_, '_>, owners: &[CheckedBody], anon_const: bool, v: &
     let fv_cache: &SummaryCx = match fv_cache { Some(c) => c, None => { own_cache = SummaryCx::new(); &own_cache } };
     let bodies_of = MirBodies { prog, tcx };
     let relaxed = field_views::relaxed(prog, typeck.def);
-    let closure_fv: crate::fxhash::HashMap<u32, Vec<field_views::Summary>> = {
-        let fenv = field_views::FvEnv { prog, tcx, cx: eval, cache: fv_cache, bodies: &bodies_of };
-        prepared.iter().filter_map(|p| match p.owner.kind {
-            OwnerKind::Closure(e) => Some((e.0, field_views::closure_captures(&fenv, &p.mir))),
-            _ => None,
-        }).collect()
-    };
-    let views = FieldViews::new(prog, env, cx.state, fv_cache, &bodies_of, relaxed, closure_fv);
 
     // do_mir_borrowck: nested bodies first.
     let results = {
@@ -512,6 +504,12 @@ fn check_group(g: &Group<'_, '_>, owners: &[CheckedBody], anon_const: bool, v: &
             key: p.key, body: &p.mir, moves: &p.moves, infcx: &mut p.infcx as &mut dyn RootBodyOps,
             typeck: p.typeck.take().unwrap(), nested: p.nested,
         }).collect();
+        // the closures' capture summaries are made at the first conflict that asks (FieldViews::closure_summaries)
+        let closure_bodies: Vec<(u32, &Body)> = root_bodies.iter().filter_map(|r| match r.key {
+            ClauseOwner::Closure(id) | ClauseOwner::Coroutine(id) => Some((id.expr, r.body)),
+            ClauseOwner::Def(_) => None,
+        }).collect();
+        let views = FieldViews::new(prog, env, cx.state, fv_cache, &bodies_of, relaxed, closure_bodies);
         let ctxt = BorrowCheckRootCtxt { tcx, prog };
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| ctxt.do_mir_borrowck_fv(root_bodies, Some(&views)))) {
             Ok(r) => r,

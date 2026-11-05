@@ -409,7 +409,7 @@ impl Plan {
                         let mut map = job.ready.0.lock().unwrap();
                         loop {
                             if let Some(surface) = map.remove(&key) { return surface; }
-                            map = job.ready.1.wait(map).unwrap();
+                            map = crate::pool::wait(&job.ready.1, &job.ready.0, map).unwrap();
                         }
                     };
                     let mut directories = BTreeMap::new();
@@ -1018,7 +1018,7 @@ impl Discovery {
         let _profile = crate::load_profile::span(profile, "rust-demand-discovery-wait", name);
         loop {
             if g.1 { panic!("context discovery worker"); }
-            g = self.wake.wait(g).unwrap_or_else(|e| e.into_inner());
+            g = crate::pool::wait(&self.wake, &self.entries, g).unwrap_or_else(|e| e.into_inner());
             if let Some(entry) = g.0[ci].take() { return entry; }
         }
     }
@@ -1080,7 +1080,7 @@ impl OutlineQueue {
                 g.0.remove(&ci);
             }
             if g.1 { return None; }
-            g = self.wake.wait(g).unwrap();
+            g = crate::pool::wait(&self.wake, &self.jobs, g).unwrap();
         }
     }
 }

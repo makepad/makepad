@@ -17,24 +17,41 @@ use crate::jit::{self, FrontShared, Unit};
 use crate::program::{DefId, DefKind, Program};
 use crate::typeck::{Body, Res};
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// body owners checked, owners with errors, crates whose clean verdict was stored, cpu ns, wall ns
 /// from its start to its end (0 while it runs)
 pub static STATS: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
 
+/// The check is under way (started and not ended): it fills the type side for every body owner of
+/// the dependency crates, so the settle rebuild waits for its end. Rebuilt before it, the devhub
+/// panel's compiler arena grew back from 0.55 to 1.05 GB committed (352 MB live, against 81 MB when
+/// the rebuild came after it): signatures and declarations of 63k checked owners.
+static RUNNING: AtomicBool = AtomicBool::new(false);
+
+pub fn running() -> bool {
+    RUNNING.load(Ordering::Acquire)
+}
+
 /// Starts the background check of unit `up` (`root`: the program's crate; `main`: where the
 /// reachability walk starts).
-pub fn start(up: *mut Unit, root: u32, main: Option<DefId>, runtime: &crate::options::RuntimeOptions) {
+pub fn start(up: *mut Unit, root: u32, main: Option<DefId>) {
     if std::env::var("MAKEPAD_RUN_BG_TYPECK").is_ok_and(|v| v == "0") { return; }
     let upn = up as usize;
-    let runtime = crate::zone_alloc::kept_clone(runtime);
     let _k = crate::zone_alloc::kept();
+    RUNNING.store(true, Ordering::Release);
     // (typeck recurses deeply on big bodies: the check workers' stack)
-    let _ = std::thread::Builder::new().name("run-typeck-bg".into()).stack_size(256 << 20).spawn(move || {
+    let spawned = std::thread::Builder::new().name("run-typeck-bg".into()).stack_size(256 << 20).spawn(move || {
         let _z = crate::zone_alloc::compiler_thread();
-        run(upn as *mut Unit, root, main, &runtime);
+        // ended however it ends (done, the run stopping, a panic)
+        struct Ended;
+        impl Drop for Ended {
+            fn drop(&mut self) { RUNNING.store(false, Ordering::Release); }
+        }
+        let _ended = Ended;
+        run(upn as *mut Unit, root, main);
     });
+    if spawned.is_err() { RUNNING.store(false, Ordering::Release); }
 }
 
 fn stopping() -> bool {
@@ -74,12 +91,12 @@ enum Checked {
     Stop,
 }
 
-fn run(up: *mut Unit, root: u32, main: Option<DefId>, runtime: &crate::options::RuntimeOptions) {
+fn run(up: *mut Unit, root: u32, main: Option<DefId>) {
     while !jit::past_startup() {
         if stopping() { return; }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
-    jit::lower_this_thread_priority(runtime);
+    makepad_cpu_budget::set_thread_class(makepad_cpu_budget::BACKGROUND);
     let (t0, w0) = (relax_backend::cpu_ns(), jit::wall_ns());
     let f = unsafe { (*up).front.clone() };
     // the crates' skipped files read here, the keys made on the owner (the cache is the owner's)
@@ -188,9 +205,10 @@ fn check(f: &FrontShared, d: DefId, todo: &[bool], failed: &mut HashSet<u32>) ->
                 continue;
             }
             Err(p) if p.is::<crate::preempt::NeedsLoad>() && !prog.skipped_files.is_empty() => return Checked::Later,
-            Err(_) => {
+            Err(p) => {
                 // the checker failed on a body: a makepad run bug, reported like a build's
                 // internal error, and the crate's verdict is not stored
+                crate::hot_failure::checker_panic(&prog.def_path(d), &jit::payload_text(&*p));
                 let e = format!("internal compiler error while checking {} -- makepad run bug, report it{}", prog.def_path(d), jit::take_ice_location());
                 STATS[1].fetch_add(1, Ordering::Relaxed);
                 failed.insert(krate);

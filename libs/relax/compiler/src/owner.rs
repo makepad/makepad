@@ -124,6 +124,7 @@ struct Req {
     ctx: *const (),
     /// the requester's compile record (jit::main_rec)
     rec: *const (),
+    budget_job: Option<std::sync::Arc<crate::pool::JobClass>>,
     state: AtomicU8,
     panic: Cell<Option<Box<dyn Any + Send>>>,
     /// where it panicked on the owner (lifeline's record there): the requester's own record when
@@ -131,6 +132,13 @@ struct Req {
     panic_at: Cell<crate::lifeline::PanicAt>,
     /// false: posted (heap, nobody waits); the owner frees it
     waited: bool,
+    /// a program thread's lazy compile front (`call_or_yield`): served outermost, it gives the owner
+    /// back rather than wait for a build another thread runs while program requests queue
+    yields: bool,
+    /// it did (`yield_for_build`): the build it waits for off the owner
+    yielded: Cell<Option<crate::jit::Yielded>>,
+    /// the class of the requester: a job it waits for runs at that (`waiter_class`)
+    waiter_class: u8,
     /// main-thread request accounting (0: not a main-thread request): wall ns at the push, and at
     /// the owner's completion
     t_push: u64,
@@ -153,7 +161,7 @@ static Q: Mutex<Queue> = Mutex::new(Queue { lanes: [const { VecDeque::new() }; C
 
 static WAKE: Condvar = Condvar::new();
 static STARTED: std::sync::Once = std::sync::Once::new();
-/// Program requests queued (diagnostics)
+/// Program requests queued: long work on the owner stops for them (program_waiting)
 static FOREGROUND: AtomicU32 = AtomicU32::new(0);
 /// the main thread's requests queued
 static MAIN_QUEUED: AtomicU32 = AtomicU32::new(0);
@@ -540,6 +548,8 @@ thread_local! {
     static LEAVES: Cell<u32> = const { Cell::new(0) };
     /// owner: the request being served is background work (Req::bg)
     static SERVING_BG: Cell<bool> = const { Cell::new(false) };
+    /// owner: the request being served (a Req; 0: none)
+    static SERVING_REQ: Cell<usize> = const { Cell::new(0) };
     /// a publish runs on this thread (`publish`: PUB_STRICT, `publish_or_bail`: PUB_BAIL, 0: none)
     static PUBLISHING: Cell<u8> = const { Cell::new(0) };
     /// this thread is one of Relax's own (run-*, gandalf*), not the program's (None: not looked up)
@@ -717,7 +727,7 @@ pub fn bailing() -> bool {
 /// an install. `f` may not run what `forbid_in_publish` guards; doing so panics.
 #[track_caller]
 pub fn publish<R>(f: impl FnOnce() -> R) -> R {
-    request(std::panic::Location::caller(), Class::Publish, None, move || {
+    request(std::panic::Location::caller(), Class::Publish, None, false, move || {
         let _p = Publishing::enter(PUB_STRICT);
         f()
     })
@@ -735,7 +745,7 @@ pub fn publish_or_bail<R>(f: impl FnOnce() -> R) -> Result<R, PublishBail> {
     }
     let site = std::panic::Location::caller();
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        request(site, Class::Publish, None, move || {
+        request(site, Class::Publish, None, false, move || {
             let _p = Publishing::enter(PUB_BAIL);
             let _ = take_needs();
             let _clear = ClearNeeds;
@@ -855,10 +865,13 @@ pub fn for_main() -> bool {
     main != 0 && if is_owner() { serving().1 == main } else { me() == main }
 }
 
-/// The main thread waits for a request now: a program request, or the publish that finishes its
-/// lazy compile (long work on the owner stops for either).
-pub fn main_waiting() -> bool {
-    MAIN_QUEUED.load(Ordering::Relaxed) + MAIN_PUBLISH.load(Ordering::Relaxed) > 0
+/// A program request waits now (a program thread's, a live patch's or its landing check, a structural
+/// step, inspect), or the publish that finishes the main thread's lazy compile: long work on the
+/// owner (the cache's mid-run writes, the settle rebuild) stops for either. (Stopping for the main
+/// thread's alone, a live session's landing checks waited 565-747 ms behind a mid-run write, whose
+/// startup manifest held the owner 1-6 s.)
+pub fn program_waiting() -> bool {
+    FOREGROUND.load(Ordering::Relaxed) + MAIN_PUBLISH.load(Ordering::Relaxed) > 0
 }
 
 /// What the owner serves now (diagnostics): "idle", or the class and its requester's name.
@@ -914,6 +927,7 @@ pub fn start() {
         // The blocking context retains the owner's thread handle, including its name.
         let _k = crate::zone_alloc::kept();
         crate::query::set_wait_hook(crate::query::WaitHook { on_owner: is_owner, pump: pump_latch, wake, me });
+        makepad_cpu_budget::set_wait_hook(crate::waits::token_wait);
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::Builder::new()
             .name("run-owner".into())
@@ -932,9 +946,9 @@ pub fn start() {
                 let _ = OWNER_THREAD.set(std::thread::current());
                 crate::jit::ensure_altstack();
                 // the UI thread waits on this thread for every lazy compile: it runs in the UI's
-                // class (macOS: user-interactive QoS), so a busy machine does not starve the one
-                // thread the UI waits behind
-                crate::os::thread::interactive();
+                // class (macOS: user-interactive QoS), whoever's request it serves, so a busy machine
+                // does not starve the one thread the UI waits behind
+                makepad_cpu_budget::set_ui_thread();
                 let _ = crate::zone_alloc::kept_with(|| tx.send(()));
                 // a panic outside a request (serve catches those) ends the process with a report:
                 // a dead owner would leave every requester waiting forever
@@ -950,7 +964,16 @@ pub fn start() {
 /// waits, so `f` may borrow its locals (as `std::thread::scope`'s threads do).
 #[track_caller]
 pub fn call<R>(class: Class, f: impl FnOnce() -> R) -> R {
-    request(std::panic::Location::caller(), class, None, f).unwrap()
+    request(std::panic::Location::caller(), class, None, false, f).unwrap()
+}
+
+/// `call` for a program thread's lazy compile front: served outermost, it may give the owner back
+/// instead of waiting there for a build another thread runs while program requests queue behind
+/// it (`yield_for_build`). None: it did, and that build has ended since; the caller asks again. The
+/// main thread's front is never given back (it would queue behind the requests it let go first).
+#[track_caller]
+pub fn call_or_yield<R>(class: Class, f: impl FnOnce() -> R) -> Option<R> {
+    request(std::panic::Location::caller(), class, None, true, f)
 }
 
 /// `call`, unless the owner has not started it within `ms`: then it is withdrawn (None).
@@ -958,10 +981,10 @@ pub fn call<R>(class: Class, f: impl FnOnce() -> R) -> R {
 pub fn call_within<R>(class: Class, ms: u64, f: impl FnOnce() -> R) -> Option<R> {
     // (at least 2 ms: an idle owner picks a request up in microseconds; 0 means "only if the
     // owner is free now")
-    request(std::panic::Location::caller(), class, Some(std::time::Instant::now() + std::time::Duration::from_millis(ms.max(2))), f)
+    request(std::panic::Location::caller(), class, Some(std::time::Instant::now() + std::time::Duration::from_millis(ms.max(2))), false, f)
 }
 
-fn request<R>(site: &'static std::panic::Location<'static>, class: Class, deadline: Option<std::time::Instant>, f: impl FnOnce() -> R) -> Option<R> {
+fn request<R>(site: &'static std::panic::Location<'static>, class: Class, deadline: Option<std::time::Instant>, yields: bool, f: impl FnOnce() -> R) -> Option<R> {
     forbid_in_publish("a request", u32::MAX);
     debug_assert!(!NO_WAIT.try_with(|n| n.get()).unwrap_or(false), "makepad: a request to the compiler's owner on a JIT call's path (rule I-CALL: rt_hot waits for nothing)");
     if is_owner() || CHILD.load(Ordering::Relaxed) {
@@ -998,10 +1021,14 @@ fn request<R>(site: &'static std::panic::Location<'static>, class: Class, deadli
         bg: is_background_request(class),
         ctx: crate::query::context_ptr(),
         rec: crate::jit::main_rec_target(),
+        budget_job: crate::pool::current_job(),
         state: AtomicU8::new(QUEUED),
         panic: Cell::new(None),
         panic_at: Cell::new(crate::lifeline::NO_PANIC_AT),
         waited: true,
+        yields: yields && !on_main,
+        yielded: Cell::new(None),
+        waiter_class: thread_class(),
         t_push: if class == Class::Program && on_main { crate::jit::wall_ns().max(1) } else { 0 },
         t_main: if main_after { crate::jit::wall_ns().max(1) } else { 0 },
         t_serve: AtomicU64::new(0),
@@ -1084,13 +1111,19 @@ fn request<R>(site: &'static std::panic::Location<'static>, class: Class, deadli
         return None;
     }
     match req.panic.take() {
-        // served nested and blocked by an earlier request on the owner: the requester's
-        // work is cancelled as a preemption is (its queries too) and redone later. Only
-        // Job requests are served nested, and those that can be blocked come from type
-        // checks (a constant's value), which retry a preempted body.
-        Some(p) if p.is::<crate::preempt::OwnerBusy>() => {
-            std::panic::resume_unwind(Box::new(crate::preempt::Preempted));
-        }
+        Some(p) if p.is::<crate::preempt::OwnerBusy>() => match req.yielded.take() {
+            // a front that gave the owner back (`yield_for_build`): off the owner (and out of the job
+            // count: `_idle`) it waits for that build to end, then its caller asks again
+            Some(build) => {
+                build.wait();
+                None
+            }
+            // served nested and blocked by an earlier request on the owner: the requester's
+            // work is cancelled as a preemption is (its queries too) and redone later. Only
+            // Job requests are served nested, and those that can be blocked come from type
+            // checks (a constant's value), which retry a preempted body.
+            None => std::panic::resume_unwind(Box::new(crate::preempt::Preempted)),
+        },
         Some(p) => {
             crate::lifeline::set_panic_at_raw(req.panic_at.get());
             resume_said(p)
@@ -1128,10 +1161,14 @@ pub fn post_queued(class: Class, f: impl FnOnce() + Send + 'static) {
         bg: is_background_request(class),
         ctx: std::ptr::null(),
         rec: std::ptr::null(),
+        budget_job: None,
         state: AtomicU8::new(QUEUED),
         panic: Cell::new(None),
         panic_at: Cell::new(crate::lifeline::NO_PANIC_AT),
         waited: false,
+        yields: false,
+        yielded: Cell::new(None),
+        waiter_class: makepad_cpu_budget::INTERACTIVE,
         t_push: 0,
         t_main: 0,
         t_serve: AtomicU64::new(0),
@@ -1192,6 +1229,9 @@ fn wait(req: &Req, deadline: Option<std::time::Instant>) -> bool {
             std::hint::spin_loop();
         }
     }
+    // Asleep it keeps no CPU token: what it waits for may need one. A compile job's Job or Publish
+    // request keeps its job's: the owner runs on it, and every pump serves it.
+    let _budget = (req.budget_job.is_none() || !req.class.keeps_job()).then(crate::pool::suspend);
     let mut done = req.done.lock().unwrap_or_else(|e| e.into_inner());
     while !*done {
         match deadline {
@@ -1315,9 +1355,11 @@ fn serve(r: usize) {
     if req.t_push != 0 || req.t_main != 0 {
         req.t_serve.store(t0.max(1), Ordering::Relaxed);
     }
+    let budget_context = crate::pool::enter_job(req.budget_job.clone());
     let prev_ctx = unsafe { crate::query::swap_context(req.ctx) };
     let prev = SERVING.with(|s| s.replace((req.class, req.from)));
     let prev_bg = SERVING_BG.with(|b| b.replace(req.bg));
+    let prev_req = SERVING_REQ.with(|q| q.replace(r));
     if req.class == Class::Job && req.bg {
         PURE_BAILS[PURE_BG_JOB].fetch_add(1, Ordering::Relaxed);
     }
@@ -1366,6 +1408,7 @@ fn serve(r: usize) {
     NOW_T0.store(prev_t0, Ordering::Relaxed);
     SERVING.with(|s| s.set(prev));
     SERVING_BG.with(|b| b.set(prev_bg));
+    SERVING_REQ.with(|q| q.set(prev_req));
     unsafe { crate::query::swap_context(prev_ctx) };
     OWNER_SERVING.store(was_serving, Ordering::Relaxed);
     let t1 = crate::jit::wall_ns();
@@ -1389,6 +1432,8 @@ fn serve(r: usize) {
     if res.as_ref().is_err_and(|p| p.is::<ExitParked>()) {
         return;
     }
+    // Restore the requester's wake target before it can resume using its admission.
+    drop(budget_context);
     match req.waited {
         true => {
             if let Err(p) = res {
@@ -1504,21 +1549,28 @@ pub fn pump_wait(done: &dyn Fn() -> bool) {
 /// `pump_wait` for a wait on thread `runner` (0: unknown), as the wait registry records it.
 #[track_caller]
 pub(crate) fn pump_wait_for(runner: u64, done: &dyn Fn() -> bool) {
-    pump_wait_at(std::panic::Location::caller(), runner, done, &|| false)
+    pump_wait_at(std::panic::Location::caller(), (crate::waits::Kind::Pump, 0, "pump"), runner, done, &|| false)
+}
+
+/// `pump_wait_for` a slot's build: the wait registry names the slot and its fn.
+#[track_caller]
+pub(crate) fn pump_wait_build(slot: u32, name: &'static str, runner: u64, done: &dyn Fn() -> bool) {
+    pump_wait_at(std::panic::Location::caller(), (crate::waits::Kind::Build, slot as u64, name), runner, done, &|| false)
 }
 
 /// `pump_wait_for`, which also gives up (`blocked`: the owner's own stack holds the wait up) at its
 /// start and whenever it found nothing to serve.
-fn pump_wait_at(site: &'static std::panic::Location<'static>, runner: u64, done: &dyn Fn() -> bool, blocked: &dyn Fn() -> bool) {
+fn pump_wait_at(site: &'static std::panic::Location<'static>, row: (crate::waits::Kind, u64, &'static str), runner: u64, done: &dyn Fn() -> bool, blocked: &dyn Fn() -> bool) {
     if done() {
         return;
     }
     assert_no_leaf("a wait that serves the owner's requests");
     forbid_in_publish("a wait", u32::MAX);
-    let _w = crate::waits::begin(crate::waits::Kind::Pump, 0, runner, "pump");
+    let _w = crate::waits::begin(row.0, row.1, runner, row.2);
     if !is_owner() || CHILD.load(Ordering::Relaxed) {
         // a job waiting for another thread is not running meanwhile (jit::job_sleep's reason)
         let _idle = (!CHILD.load(Ordering::Relaxed)).then(crate::jit::JobIdle::enter);
+        let _budget = (!CHILD.load(Ordering::Relaxed)).then(crate::pool::suspend_program);
         let t0 = std::time::Instant::now();
         while !done() {
             if CHILD.load(Ordering::Relaxed) && t0.elapsed().as_secs() >= 10 {
@@ -1594,7 +1646,7 @@ fn pump_latch(runner: u64, done: &dyn Fn() -> bool) {
         return pump_wait_for(runner, done);
     }
     let owner = OWNER_TID.load(Ordering::Relaxed);
-    pump_wait_at(std::panic::Location::caller(), runner, done, &|| runner == owner || nested() && stack_blocks(runner));
+    pump_wait_at(std::panic::Location::caller(), (crate::waits::Kind::Pump, 0, "pump"), runner, done, &|| runner == owner || nested() && stack_blocks(runner));
 }
 
 /// Whether thread `t` cannot go on before a request open on the owner's stack ends: it is the owner
@@ -1623,6 +1675,51 @@ fn stack_blocked() -> ! {
     let (class, from) = serving();
     panic!("makepad: a query waits for itself on the compiler's owner thread (a query cycle the engine did not see; serving a {} request of {}, own work {})",
         CLASS_NAMES[class as usize], crate::os::thread::name(from), OWN_WORK.with(|w| w.get()));
+}
+
+/// The request being served is a lazy compile front that may give the owner back
+/// (`call_or_yield`), outermost on the owner, and program requests queue behind it: rather than
+/// wait for a build another thread runs, it gives the owner back (`yield_for_build`). (A live
+/// session's landing checks waited 374-583 ms behind an app thread's front that waited there for
+/// its callees' back ends, 2026-11-04.)
+pub fn may_yield() -> bool {
+    is_owner() && !nested() && program_waiting() && with_serving(|r| r.yields).unwrap_or(false)
+}
+
+/// `f` on the request the owner serves now (None: none).
+fn with_serving<T>(f: impl FnOnce(&Req) -> T) -> Option<T> {
+    let r = SERVING_REQ.with(|q| q.get());
+    // SAFETY: a request outlives its service (its requester waits until Done)
+    (r != 0).then(|| f(unsafe { &*(r as *const Req) }))
+}
+
+/// Ends the front being served (`may_yield`) as a request the owner cannot serve yet is ended
+/// (OwnerBusy: the builds it opened are closed); its requester waits off the owner until `build` has
+/// ended, then asks again.
+pub(crate) fn yield_for_build(build: crate::jit::Yielded) -> ! {
+    with_serving(|r| r.yielded.set(Some(build)));
+    std::panic::resume_unwind(Box::new(crate::preempt::OwnerBusy))
+}
+
+/// This process is a forked child on its way to exec (no other thread survived: a lock they held
+/// stays held).
+pub(crate) fn in_fork_child() -> bool {
+    CHILD.load(Ordering::Relaxed)
+}
+
+/// The calling thread's budget class (one that set none: Visible, the class of work someone sees).
+fn thread_class() -> u8 {
+    makepad_cpu_budget::thread_class().unwrap_or(makepad_cpu_budget::VISIBLE)
+}
+
+/// The class a job runs at while the work on this thread waits for it: the main thread's wait is
+/// Interactive, on the owner the requester's class counts. Never Background: a Background job that
+/// waits may have a program thread waiting for it by now, whose class came after this wait began.
+pub(crate) fn waiter_class() -> u8 {
+    if for_main() {
+        return makepad_cpu_budget::INTERACTIVE;
+    }
+    with_serving(|r| r.waiter_class).unwrap_or_else(thread_class).min(makepad_cpu_budget::VISIBLE)
 }
 
 /// A request served nested cannot do what only the owner's earlier request may finish (a load,
@@ -1757,7 +1854,7 @@ mod tests {
         assert!(APP_RAN.load(Ordering::SeqCst));
     }
 
-    /// M55 (makepad-sdf-engine's thin-wall tests on the Vulkan HAL, 2026-11-03): the owner,
+    /// M55 (a crate's compute tests on the Vulkan HAL, 2026-11-03): the owner,
     /// computing the layout of `OnceLock<Result<Arc<Program>, String>>` for one request, waited in
     /// a query and served a Job there that needed the same layout. The type layer's cycle guard is
     /// per thread: the Job met the layout in progress, reported E0391 and got a zero-size one. A

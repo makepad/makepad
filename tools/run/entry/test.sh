@@ -32,6 +32,9 @@ dep-a = { path = "dep-a" }
 [[bin]]
 name = "makepad"
 path = "main.rs"
+[[bin]]
+name = "makepad-launcher"
+path = "launcher.rs"
 [profile.host]
 inherits = "release"
 TOML
@@ -52,6 +55,12 @@ LOCK
     printf '[package]\nname = "dep-a"\nversion = "0.1.0"\nedition = "2021"\n' > "$base/zipfix/fx1/dep-a/Cargo.toml"
     printf 'pub fn text() -> &'"'"'static str { "%s" }\n' "$1" > "$base/zipfix/fx1/dep-a/lib.rs"
     printf '\n[lib]\npath = "lib.rs"\n' >> "$base/zipfix/fx1/dep-a/Cargo.toml"
+    printf 'fn main() {}\n' > "$base/zipfix/fx1/launcher.rs"
+    # two paths that are a file in the first release and a folder in the next, and the other way round
+    if [ "$1" = one ]; then first=flip second=flop; else first=flop second=flip; fi
+    printf 'a file\n' > "$base/zipfix/fx1/$first"
+    mkdir "$base/zipfix/fx1/$second" || exit 2
+    printf 'inside\n' > "$base/zipfix/fx1/$second/inner"
     if [ "${2:-}" = broken ]; then
         printf 'fn main() { this is not rust }\n' > "$base/zipfix/fx1/main.rs"
     else
@@ -109,6 +118,12 @@ publish two
 run "$base/run3.out"
 check "changed loader: rebuilt" "$base/run3.out" "compiled in"
 check "changed loader: new text" "$base/install/cache/logs/makepad.log" "fixture loader: two"
+source=$base/install/cache/loader/src
+if [ -f "$source/flip/inner" ] && [ -f "$source/flop" ] && [ "$(cat "$source/.version")" = "$sum" ]; then
+    echo "PASS changed loader: a file became a folder, a folder a file"
+else
+    echo "FAIL changed loader: flip and flop were not replaced"; failures=$((failures + 1))
+fi
 
 # a runner switch to a commit folder: the script runs on the folder `current` names
 loader=$base/install/cache/loader
@@ -125,6 +140,24 @@ run "$base/run6.out"
 check "rollback: line" "$base/run6.out" "JIT: went back to src"
 check "rollback: src binary runs" "$base/install/cache/logs/makepad.log" "fixture loader: two"
 [ ! -e "$loader/pending" ] && [ ! -e "$loader/current" ] && [ -s "$loader/rolled-back" ] && echo "PASS rollback: pointers" || { echo "FAIL rollback: pointers"; failures=$((failures + 1)); }
+
+# A line of diff's this doesn't know means a path was not updated: no stamp of the new version.
+stamped=$(cat "$source/.version")
+mkdir "$base/stub" || exit 2
+printf '#!/bin/sh\necho "A line diff never said"\nexit 1\n' > "$base/stub/diff"
+chmod 755 "$base/stub/diff"
+publish four
+unstubbed=$path
+path=$base/stub:$path
+run "$base/run7.out"
+path=$unstubbed
+[ "$code" != 0 ] || { echo "FAIL unknown diff line exited 0"; failures=$((failures + 1)); }
+check "unknown diff line: error" "$base/run7.out" "A line diff never said"
+if [ "$(cat "$source/.version")" = "$stamped" ]; then
+    echo "PASS unknown diff line: not stamped"
+else
+    echo "FAIL unknown diff line: stamped"; failures=$((failures + 1))
+fi
 
 publish three broken
 run "$base/run4.out"

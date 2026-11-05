@@ -71,6 +71,15 @@ impl<I: Iterator, P: FnMut(&I::Item) -> bool> Iterator for Filter<I, P> {
         let (_, upper) = self.iter.size_hint();
         (0, upper)
     }
+    // as core: the predicate's result added up, no branch per item
+    fn count(self) -> usize {
+        let Filter { mut iter, mut predicate } = self;
+        let mut n = 0;
+        while let Some(x) = iter.next() {
+            n += predicate(&x) as usize;
+        }
+        n
+    }
 }
 
 impl<I: DoubleEndedIterator, P: FnMut(&I::Item) -> bool> DoubleEndedIterator for Filter<I, P> {

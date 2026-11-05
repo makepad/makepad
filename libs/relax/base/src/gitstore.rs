@@ -144,7 +144,9 @@ impl Index {
         out
     }
 
-    fn decode(b: &[u8]) -> Option<Index> {
+    /// The index with the path tables of the commits `keep` names only: the others are walked
+    /// over, never allocated (a store keeping a table per lane decoded every one on each open).
+    fn decode_with(b: &[u8], keep: &dyn Fn(&Oid) -> bool) -> Option<Index> {
         let mut at = 0;
         let n = get_varint(b, &mut at)? as usize;
         let mut objects = Vec::with_capacity(n.min(1 << 24));
@@ -162,6 +164,15 @@ impl Index {
         for _ in 0..n {
             let commit = get_oid(b, &mut at)?;
             let m = get_varint(b, &mut at)? as usize;
+            if !keep(&commit) {
+                for _ in 0..m {
+                    let len = get_varint(b, &mut at)? as usize;
+                    get_bytes(b, &mut at, len)?;
+                    get_varint(b, &mut at)?;
+                    get_bytes(b, &mut at, 20)?;
+                }
+                continue;
+            }
             let mut entries = Vec::with_capacity(m.min(1 << 22));
             for _ in 0..m {
                 entries.push(Entry { path: get_str(b, &mut at)?, mode: get_varint(b, &mut at)? as u32, oid: get_oid(b, &mut at)? });
@@ -188,6 +199,10 @@ pub struct Store {
     /// (offset, len) when the store sits inside a bigger file (`open_range`): read-only, every
     /// offset in the store is relative to `offset`
     pub range: Option<(u64, u64)>,
+    /// opened with only some path tables ([`Store::open_with`]): read-only, no compaction
+    pub partial: bool,
+    /// the index bytes this open read
+    pub index_len: u64,
 }
 
 /// SHA-1 (git's object ids; the trailer's index check).
@@ -200,6 +215,16 @@ pub fn sha1(data: &[u8]) -> [u8; 20] {
 impl Store {
     /// The store at `path`, or None when there is none (or it is not a store).
     pub fn open(path: &Path) -> std::io::Result<Option<Store>> {
+        Self::opened(path, &|_| true, false)
+    }
+
+    /// The store at `path` with the path tables of the commits `keep` names only (every object
+    /// and ref stays listed): what a reader of one commit opens.
+    pub fn open_with(path: &Path, keep: &dyn Fn(&Oid) -> bool) -> std::io::Result<Option<Store>> {
+        Self::opened(path, keep, true)
+    }
+
+    fn opened(path: &Path, keep: &dyn Fn(&Oid) -> bool, partial: bool) -> std::io::Result<Option<Store>> {
         let file = match File::open(path) {
             Ok(f) => f,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -209,19 +234,19 @@ impl Store {
         // index off the end (`append`), so a reader in that moment would see an older index or
         // none (a commit another process has just mounted "is not kept")
         file.lock_shared()?;
-        let r = (|| -> std::io::Result<Option<Index>> {
+        let r = (|| -> std::io::Result<Option<(Index, u64)>> {
             let len = file.metadata()?.len();
             let mut head = [0u8; 12];
             if len < 12 || read_at(&file, &mut head, 0)? != 12 || &head[..8] != MAGIC {
                 return Ok(None);
             }
             // the last valid trailer: at the end, else (an interrupted append) searched backwards
-            Ok(Some(Self::last_trailer(&file, 0, len)?.map(|(_, index)| index).unwrap_or_default()))
+            Ok(Some(Self::last_trailer(&file, 0, len, keep)?.map(|(_, index, ilen)| (index, ilen)).unwrap_or_default()))
         })();
         let _ = file.unlock();
         match r? {
             None => Ok(None),
-            Some(index) => Ok(Some(Store { path: path.to_path_buf(), file, index, range: None })),
+            Some((index, index_len)) => Ok(Some(Store { path: path.to_path_buf(), file, index, range: None, partial, index_len })),
         }
     }
 
@@ -240,11 +265,12 @@ impl Store {
             return Ok(None);
         }
         // a range ends at its trailer: no backwards search over bytes that belong to the next thing
-        let Some(index) = Self::trailer_at(&file, offset, len.saturating_sub(TRAILER_LEN as u64))? else { return Ok(None) };
-        Ok(Some(Store { path: path.to_path_buf(), file, index, range: Some((offset, len)) }))
+        let Some((index, index_len)) = Self::trailer_at(&file, offset, len.saturating_sub(TRAILER_LEN as u64), &|_| true)? else { return Ok(None) };
+        Ok(Some(Store { path: path.to_path_buf(), file, index, range: Some((offset, len)), partial: false, index_len }))
     }
 
-    fn trailer_at(file: &File, base: u64, at: u64) -> std::io::Result<Option<Index>> {
+    /// The index the trailer at `at` names, with the tables `keep` names, and its length.
+    fn trailer_at(file: &File, base: u64, at: u64, keep: &dyn Fn(&Oid) -> bool) -> std::io::Result<Option<(Index, u64)>> {
         let mut t = [0u8; TRAILER_LEN];
         if read_at(file, &mut t, base + at)? != TRAILER_LEN || t[0] != b'T' || &t[1..9] != TRAILER {
             return Ok(None);
@@ -261,14 +287,14 @@ impl Store {
         if sha1(&body) != t[25..45] {
             return Ok(None);
         }
-        Ok(Index::decode(&body))
+        Ok(Index::decode_with(&body, keep).map(|i| (i, ilen)))
     }
 
     /// The last valid trailer of the `len` bytes at `base`: (end of the store, index).
-    fn last_trailer(file: &File, base: u64, len: u64) -> std::io::Result<Option<(u64, Index)>> {
+    fn last_trailer(file: &File, base: u64, len: u64, keep: &dyn Fn(&Oid) -> bool) -> std::io::Result<Option<(u64, Index, u64)>> {
         if len >= TRAILER_LEN as u64 + 12 {
-            if let Some(i) = Self::trailer_at(file, base, len - TRAILER_LEN as u64)? {
-                return Ok(Some((len, i)));
+            if let Some((i, ilen)) = Self::trailer_at(file, base, len - TRAILER_LEN as u64, keep)? {
+                return Ok(Some((len, i, ilen)));
             }
         }
         // backwards in 1 MB windows for the magic
@@ -282,8 +308,8 @@ impl Store {
             loop {
                 if buf[i] == b'T' && buf.get(i + 1..i + 9) == Some(TRAILER) {
                     let at = lo + i as u64;
-                    if let Some(idx) = Self::trailer_at(file, base, at)? {
-                        return Ok(Some((at + TRAILER_LEN as u64, idx)));
+                    if let Some((idx, ilen)) = Self::trailer_at(file, base, at, keep)? {
+                        return Ok(Some((at + TRAILER_LEN as u64, idx, ilen)));
                     }
                 }
                 if i == 0 {
@@ -350,8 +376,12 @@ impl Store {
         self.index.offset(oid).is_some()
     }
 
-    /// Bytes of objects the kept commits do not reach.
+    /// Bytes of objects the kept commits do not reach (of a whole open: a partial one knows only
+    /// some tables and answers 0).
     pub fn garbage(&self) -> u64 {
+        if self.partial {
+            return 0;
+        }
         // an upper bound from the index: objects not in any kept path table and not a kept commit or tree
         let live: HashSet<&Oid> = self.index.tables.iter().flat_map(|(c, t)| std::iter::once(c).chain(t.iter().map(|e| &e.oid))).collect();
         let mut offs: Vec<(u64, bool)> = self.index.objects.iter().map(|(o, off)| (*off, live.contains(o))).collect();
@@ -506,8 +536,8 @@ pub fn append(path: &Path, add: Append, keep: &dyn Fn(&[Ref]) -> Vec<Ref>) -> Re
         if &head[..8] != MAGIC {
             return Err(format!("{}: not a makepad run git store", path.display()));
         }
-        match Store::last_trailer(&file, 0, len).map_err(err)? {
-            Some((e, i)) => (e, i),
+        match Store::last_trailer(&file, 0, len, &|_| true).map_err(err)? {
+            Some((e, i, _)) => (e, i),
             None => (12, Index::default()),
         }
     };
@@ -555,7 +585,7 @@ pub fn append(path: &Path, add: Append, keep: &dyn Fn(&[Ref]) -> Vec<Ref>) -> Re
     // the commit's files, from the store as written now plus this fetch's objects
     let fetched: HashMap<Oid, (u8, &Vec<u8>)> = add.objects.iter().map(|(o, k, d)| (*o, (*k, d))).collect();
     let table = {
-        let store = Store { path: path.to_path_buf(), file: file.try_clone().map_err(err)?, index: index.clone(), range: None };
+        let store = Store { path: path.to_path_buf(), file: file.try_clone().map_err(err)?, index: index.clone(), range: None, partial: false, index_len: 0 };
         let mut get = |o: &Oid| fetched.get(o).map(|(k, d)| (*k, (*d).clone())).or_else(|| store.object(o).ok().flatten());
         path_table(&add.reference.commit, &mut get)?
     };
@@ -598,6 +628,9 @@ pub fn append(path: &Path, add: Append, keep: &dyn Fn(&[Ref]) -> Vec<Ref>) -> Re
 pub fn compact(store: &Store) -> Result<(), String> {
     if store.range.is_some() {
         return Err(format!("{}: a store inside another file is read-only", store.path.display()));
+    }
+    if store.partial {
+        return Err(format!("{}: opened with some path tables only; compaction needs them all", store.path.display()));
     }
     let path = &store.path;
     let err = |e: std::io::Error| format!("{}: {e}", path.display());
@@ -813,7 +846,9 @@ mod tests {
         let text = crate::vfs::mounts_text();
         assert!(text.contains(&format!("\t{offset}+{}\n", bytes.len())), "{text}");
         let root2 = dir.join("vfs").join("r2").to_string_lossy().into_owned();
-        let line = text.lines().find(|l| l.starts_with(&root_dir)).unwrap().replacen(&root_dir, &root2, 1);
+        // The mount table uses normalized VFS roots, even when the caller uses native paths.
+        let prefix = format!("{}\t", crate::vfs::normalize_path(&root_dir));
+        let line = text.lines().find(|l| l.starts_with(&prefix)).unwrap().replacen(&prefix, &format!("{root2}\t"), 1);
         crate::vfs::mount_text(&line).unwrap();
         assert_eq!(crate::vfs::read(format!("{root2}/Cargo.toml")).unwrap(), b);
         let _ = std::fs::remove_dir_all(&dir);
@@ -870,6 +905,12 @@ mod tests {
         let s = append(&path, Append { objects: &[(c3o, COMMIT, c3)], reference: Ref { key: "u#main".into(), commit: c3o, time: 3 } }, &keep_two).unwrap();
         assert_eq!(s.index.refs.len(), 2);
         assert!(s.index.table(&c1o).is_none() && s.index.table(&c2o).is_some() && s.index.table(&c3o).is_some());
+        // a reader of one commit decodes its table only; objects and refs stay whole
+        let one = Store::open_with(&path, &|c| *c == c3o).unwrap().unwrap();
+        assert!(one.partial && one.index.table(&c2o).is_none() && one.index.table(&c3o).unwrap().len() == 2);
+        assert_eq!((one.index.refs.len(), one.index.objects.len(), one.index_len), (2, s.index.objects.len(), s.index_len));
+        assert_eq!(one.object(&a2o).unwrap().unwrap().1, a2);
+        assert!(compact(&one).is_err() && one.garbage() == 0, "a partial open never compacts");
         // an interrupted append (garbage at the end) is ignored on open and cut on the next write
         let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
         f.write_all(b"O\x03garbage-without-a-trailer").unwrap();

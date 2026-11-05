@@ -3,7 +3,7 @@
 # the runner release (public, with its loader ZIP) and one licensed app (scope) cut from THIS
 # source tree, and the entry script run against it. Not a fake: the same release, catalog, pack and
 # loader-ZIP code as makepad.nl; only the git sources are local snapshots of this tree (the server
-# is told fake GitHub URLs with pinned commits whose objects are already in its git cache).
+# is told the GitHub URLs, and its git caches fetch `release` of the snapshots in their place).
 #
 #   fixture.sh BASE init                  snapshot this tree (run it in the tree's root) into git repos
 #                                         under BASE and write the service's source settings
@@ -23,22 +23,23 @@ api=$service/api/loader
 data=$base/data/private
 git_env() { GIT_AUTHOR_NAME=fixture GIT_AUTHOR_EMAIL=fixture@localhost GIT_COMMITTER_NAME=fixture GIT_COMMITTER_EMAIL=fixture@localhost "$@"; }
 
-cache_dir() { # cache_dir URL BRANCH NAME
-    key=$(printf '%s\n%s' "$1" "$2" | shasum -a 256 | cut -c1-16)
-    echo "$data/git-cache/$key/$3"
+cache_dir() { # cache_dir URL NAME
+    if command -v sha256sum > /dev/null; then key=$(printf '%s' "$1" | sha256sum | cut -c1-16)
+    else key=$(printf '%s' "$1" | shasum -a 256 | cut -c1-16); fi
+    echo "$data/git-cache/$key/$2"
 }
 
-# the sources a release is cut from: pin them in the git caches, write the settings with their commits
+# the sources a release is cut from: the git caches read the snapshots for the GitHub URLs
 write_sources() { # write_sources MAKEPAD_SHA COMMERCIAL_SHA
     msha=$1; csha=$2
     mk=https://github.com/makepad/makepad.git
     cm=https://github.com/makepad/commercial.git
-    for spec in "$mk work makepad" "$cm main commercial"; do
+    for spec in "$mk makepad" "$cm commercial"; do
         set -- $spec
-        dir=$(cache_dir "$1" "$2" "$3")
+        dir=$(cache_dir "$1" "$2")
         mkdir -p "$dir" || exit 2
         [ -f "$dir/HEAD" ] || git -C "$dir" init -q --bare . || exit 2
-        git -C "$dir" fetch -q --no-tags "$base/src/$3" "$2" || exit 2
+        git -C "$dir" config "url.file://$base/src/$2.insteadOf" "$1" || exit 2
     done
     mkdir -p "$data/apps/runner" "$data/apps/scope" || exit 2
     cat > "$data/apps/runner/source.json.new" <<EOF
@@ -46,16 +47,16 @@ write_sources() { # write_sources MAKEPAD_SHA COMMERCIAL_SHA
  "platforms":["aarch64-apple-darwin","x86_64-apple-darwin","x86_64-pc-windows-gnu","x86_64-unknown-linux-gnu","aarch64-unknown-linux-gnu"],
  "cuda":false,"public":true,"loader":{"repository":"makepad","roots":["makepad-run"]},
  "repositories":[
-  {"name":"makepad","path":"makepad","url":"$mk","branch":"work","commit":"$msha"},
-  {"name":"commercial","path":"makepad/apps/commercial","url":"$cm","branch":"main","commit":"$csha","roots":["makepad-runner"]}]}
+  {"name":"makepad","path":"makepad","url":"$mk"},
+  {"name":"commercial","path":"makepad/apps/commercial","url":"$cm","roots":["makepad-runner"]}]}
 EOF
     cat > "$data/apps/scope/source.json.new" <<EOF
 {"title":"Makepad Scope","rust":"1.98.0","package":"makepad-scope","binary":"scope","workspace":"makepad/apps/commercial/scope",
  "platforms":["aarch64-apple-darwin","x86_64-apple-darwin","x86_64-pc-windows-msvc","x86_64-unknown-linux-gnu"],
  "cuda":false,
  "repositories":[
-  {"name":"makepad","path":"makepad","url":"$mk","branch":"work","commit":"$msha"},
-  {"name":"commercial","path":"makepad/apps/commercial","url":"$cm","branch":"main","commit":"$csha","roots":["makepad-scope"]}]}
+  {"name":"makepad","path":"makepad","url":"$mk"},
+  {"name":"commercial","path":"makepad/apps/commercial","url":"$cm","roots":["makepad-scope"]}]}
 EOF
     mv "$data/apps/runner/source.json.new" "$data/apps/runner/source.json"
     mv "$data/apps/scope/source.json.new" "$data/apps/scope/source.json"
@@ -70,7 +71,10 @@ admin() { # admin PATH JSON
 }
 
 commit_all() { # commit_all REPO MESSAGE
-    git -C "$1" add -A && git_env git -C "$1" commit -q --allow-empty -m "$2" && git -C "$1" rev-parse HEAD
+    git -C "$1" add -A || return 1
+    # *.bat is ignored in this repository, and a release serves this one
+    [ ! -f "$1/tools/run/entry/makepad.bat" ] || git -C "$1" add -f tools/run/entry/makepad.bat || return 1
+    git_env git -C "$1" commit -q --allow-empty -m "$2" && git -C "$1" rev-parse HEAD
 }
 
 case "$cmd" in
@@ -82,7 +86,7 @@ init)
     rsync -a --exclude target --exclude .git --exclude /apps/commercial --exclude /tmp --exclude /tools/run/webfx --exclude /local --exclude Cargo.lock "$tree/" "$base/src/makepad/" || exit 2
     rsync -a --exclude target --exclude .git "$tree/apps/commercial/" "$base/src/commercial/" || exit 2
     for r in makepad commercial; do
-        git -C "$base/src/$r" init -q -b "$([ $r = makepad ] && echo work || echo main)" || exit 2
+        git -C "$base/src/$r" init -q -b release || exit 2
     done
     m=$(commit_all "$base/src/makepad" "release 1") || exit 2
     c=$(commit_all "$base/src/commercial" "release 1") || exit 2
@@ -133,6 +137,7 @@ up)
     bin=${3:?up SERVER_BIN}
     mkdir -p "$base/web" "$base/logs" "$base/install" "$base/home" "$base/apps" || exit 2
     if [ -f "$base/state/server.pid" ] && kill -0 "$(cat "$base/state/server.pid")" 2>/dev/null; then :; else
+        chmod 555 "$base/web" || exit 2  # the server refuses a docroot its own account can change
         MAKEPAD_LOADER_DATA="$data" nohup "$bin" --listen "127.0.0.1:$port" --root "$base/web" > "$base/logs/server.log" 2>&1 < /dev/null &
         echo $! > "$base/state/server.pid"
     fi

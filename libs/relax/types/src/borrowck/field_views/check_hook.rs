@@ -64,6 +64,7 @@ impl<'a> MirBorrowckCtxt<'a> {
         if l.borrowed_place.projection.iter().any(|p| matches!(p, PlaceElem::Index(_) | PlaceElem::ConstantIndex { .. } | PlaceElem::Subslice { .. } | PlaceElem::Downcast(..))) {
             return None;
         }
+        let closures = views.closure_summaries(self.tcx);
         let summ = match feed {
             Feed::Call(bi, ai) => {
                 let Some(Terminator { kind: TerminatorKind::Call { func, .. }, .. }) = &self.body.basic_blocks[bi].terminator else { return None };
@@ -72,7 +73,7 @@ impl<'a> MirBorrowckCtxt<'a> {
                     summaries(env, d, &a, 0).get(ai).cloned()
                 })?
             }
-            Feed::Closure(ce, k) => views.closure_fv.get(&ce)?.get(k).cloned()?,
+            Feed::Closure(ce, k) => closures.get(&ce)?.get(k).cloned()?,
         };
         match summ {
             crate::borrowck::field_views::Summary::Whole => None,

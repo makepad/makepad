@@ -37,9 +37,9 @@ impl Builder<'_> {
         }
 
         let block_and: BuildResult<BlockAnd<()>> = (|| match kind {
-            ExprKind::Scope { region_scope, value, .. } => {
+            ExprKind::Scope { region_scope, value, .. } => crate::stack::ensure_sufficient_stack(|| {
                 self.in_scope((region_scope, source_info), |this| this.expr_into_dest(destination, block, value))
-            }
+            }),
             ExprKind::Block { block: ast_block } => self.ast_block(destination, block, ast_block, source_info),
             ExprKind::Match { scrutinee, ref arms, .. } => {
                 let scrutinee_span = self.thir.thir[scrutinee].span;

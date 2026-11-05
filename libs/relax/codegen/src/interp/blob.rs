@@ -319,6 +319,7 @@ fn vx_code(op: VX) -> u64 {
         VX::FCvtNarrow => (88, None, 0),
         VX::FCvtLo => (89, None, 0),
         VX::MoveMask(w) => (90, Some(w), 0),
+        VX::Clmul(k) => (91, None, k),
     };
     t << 16 | w.map_or(0, vw_code) << 8 | k as u64
 }
@@ -417,6 +418,7 @@ fn vx_of(v: u64) -> Option<VX> {
         88 => VX::FCvtNarrow,
         89 => VX::FCvtLo,
         90 => VX::MoveMask(w),
+        91 => VX::Clmul(k),
         _ => return None,
     })
 }

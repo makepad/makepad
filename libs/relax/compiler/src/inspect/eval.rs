@@ -501,7 +501,9 @@ pub fn cmd_locals(req: &Req, out: &mut Out) {
         }
     } else if let Some(sel) = req.get("thread") {
         let want = super::pick_threads(sel);
-        let list = super::threads::list();
+        // `main` / `owner` pick by handle: the OS list knows tids only until handles are named
+        let mut list = super::threads::list();
+        super::name_handles(&mut list);
         let Some(t) = list.iter().find(|t| want(t)) else { return out.err(&format!("no thread {}", sel)) };
         if t.os_id == super::threads::self_os_id() {
             return out.err("that is the inspect thread");

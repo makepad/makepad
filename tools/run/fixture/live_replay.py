@@ -35,9 +35,9 @@ over the app, or the run stops: its checks could not fail.
 
 --host: the path replay cannot reach, a landing that changes what makepad itself is built from. The
 app runs from this tree, as a dock app runs from its node's checkout (the edits go where the job's end
-resets them). Each case edits a provided crate or makepad run's own sources: makepad rebuilds in the
-background, offers the restart, `session relaunch` is the click, and the app must come back working in
-the same process id with its state handed over. --wm: the app is a hosted window of a WM.
+resets them). Each case edits a provided crate or makepad run's own sources: the app offers the restart,
+`session relaunch` is the click, makepad rebuilds in the background, and the app must come back working
+in the same process id with its state handed over. --wm: the app is a hosted window of a WM.
 
 Ends with one number per app: `live_replay: <app> pass rate P% (pass/judged, ...)`; exit 3 on a miss, 1
 when the run could judge nothing.
@@ -59,7 +59,7 @@ JIT = ["cargo", "run", "--profile", "host", "-q", "--manifest-path", os.path.joi
 # The inspect client is a copy of this tree's binary: only a client of the app's socket, and in --host
 # the tree it would be rebuilt from changes under it (a cargo run per ask would race the JIT's rebuild).
 CLIENT = os.path.join(WORK, "makepad-client")
-REBUILD = 1500  # a rebuild of makepad on a busy box, to the offered restart
+REBUILD = 1500  # a rebuild of makepad on a busy box, from the click to the restart
 COLD = 1500  # a cold first start of a big app on a busy box
 BOOT = 600  # a start after a tree move
 VERDICT = int(os.environ.get("LIVE_REPLAY_VERDICT", "180"))  # save to the JIT's verdict on the edit
@@ -628,7 +628,7 @@ HOST_EDITS = [("HAL", "platform/hal/src/lib.rs"), ("script", "platform/script/sr
 
 
 def host_case(app, what, path, n, rec):
-    """One landing into what makepad is built from: offered after its rebuild, the click, back."""
+    """One landing into what makepad is built from: offered, the click, its rebuild, back."""
     since = len(app.text())
     t0 = time.time()
     with open(os.path.join(ROOT, path), "a") as f:
@@ -647,7 +647,10 @@ def host_case(app, what, path, n, rec):
         if time.time() - t0 > REBUILD:
             return done(rec, result="silent", why="no restart offered in %d s: %s" % (REBUILD, said[-400:]))
         time.sleep(1)
-    rec["s"]["rebuilt"] = round(time.time() - t0, 1)
+    # the offer comes first: the build is the click's, or the next `cargo run`'s
+    if "it builds first in the background" in app.text()[since:]:
+        return done(rec, result="fail", kind="rebuild", why="makepad built before anyone asked")
+    rec["s"]["offered"] = round(time.time() - t0, 1)
     rec["rung"] = "restart"
     found = healthy(app, since)
     if found:
@@ -658,7 +661,7 @@ def host_case(app, what, path, n, rec):
     code, said = app.ask("session", "relaunch")
     if code != 0:
         return done(rec, result="fail", kind="restart", why="session relaunch: " + said.strip()[:300])
-    why = app.wait_frame(frames, BOOT)
+    why = app.wait_frame(frames, REBUILD + BOOT)
     rec["s"]["restart"] = round(time.time() - t1, 1)
     if why:
         return done(rec, result="fail", kind="restart", why="the click: %s: %s" % (why, " | ".join(bad_lines(app.text(), since)) or app.text()[-400:]))

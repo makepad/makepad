@@ -34,6 +34,10 @@ pub struct BorrowckInferCtxt<'tcx> {
     /// The views of the bodies being checked around the current one (a promoted's parent).
     mir_views_outer: Vec<Option<MirView>>,
     pub reg_var_to_origin: RefCell<HashMap<RegionVid, RegionCtxt>>,
+    /// The typeck root's body being checked (driver.rs check_group sets it): its closures'
+    /// written signatures are read from it, not from the typeck query, which holds no body for a
+    /// dependency check's root (check.rs typeck_unstored) and would type-check it again.
+    pub root_typeck: Option<&'tcx crate::typeck::Body>,
 }
 
 impl<'tcx> BorrowckInferCtxt<'tcx> {
@@ -55,7 +59,7 @@ impl<'tcx> BorrowckInferCtxt<'tcx> {
         for p in &*result.clauses { clauses.push(tcx.instantiate_predicate(prog, def_id, &full, p)); }
         let param_env = ParamEnv { clauses: clauses.into() };
         let param_env_id = std::cell::OnceCell::new();
-        BorrowckInferCtxt { infcx, prog, root_def_id, param_env, param_env_id, tainted_by_errors: std::cell::Cell::new(false), type_op_failed: std::cell::Cell::new(false), encountered_re_error: std::cell::Cell::new(false), universal_regions: None, region_bound_pairs: Vec::new(), mir_view: None, mir_views_outer: Vec::new(), reg_var_to_origin: RefCell::new(HashMap::default()) }
+        BorrowckInferCtxt { infcx, prog, root_def_id, param_env, param_env_id, tainted_by_errors: std::cell::Cell::new(false), type_op_failed: std::cell::Cell::new(false), encountered_re_error: std::cell::Cell::new(false), universal_regions: None, region_bound_pairs: Vec::new(), mir_view: None, mir_views_outer: Vec::new(), reg_var_to_origin: RefCell::new(HashMap::default()), root_typeck: None }
     }
 
     pub(crate) fn param_env_id(&self) -> crate::tcx::ParamEnvId {
@@ -323,7 +327,7 @@ impl BorrowckTypeOps for BorrowckInferCtxt<'_> {
     /// `FnPtr` binder instantiated with fresh variables.
     fn closure_user_provided_sig(&mut self, body: &Body) -> Option<FnSig> {
         let mir::BodyKind::Closure(expr) = body.source.kind else { return None };
-        let typeck = self.tcx.typeck(self.prog, self.root_def_id);
+        let typeck = self.root_typeck.expect("a closure body is borrow-checked with its typeck root's body (driver.rs check_group)");
         let canonical = typeck.user_provided_sigs.get(&expr)?.clone();
         let sig = crate::next_solver::canonical::user_type::instantiate_user_signature(&self.infcx, &canonical);
         let TyKind::FnPtr(inputs, output, header, bound) = *self.tcx.tys.kind(sig) else { unreachable!("closure signature is a FnPtr") };

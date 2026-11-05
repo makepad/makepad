@@ -10,13 +10,16 @@ pub(crate) struct Edit {
     pub compile_ms: Option<f64>,
     pub restarted: bool,
     pub changed: Option<Vec<crate::program::DefId>>,
+    /// a patch: the items it changed and the fns it installed (the verdict's reader sees both)
+    pub patch: Option<(usize, usize)>,
 }
 
 impl Edit {
     fn fields(&self) -> String {
         let edit = if self.paths.is_empty() { json_str("initial") }
             else { format!("[{}]", self.paths.iter().map(|p| json_str(p)).collect::<Vec<_>>().join(",")) };
-        format!("\"edit\":{edit},\"group\":{},\"compile_ms\":{},\"restarted\":{}",
+        let patch = self.patch.map_or(String::new(), |(items, fns)| format!(",\"items_changed\":{items},\"fns_installed\":{fns}"));
+        format!("\"edit\":{edit},\"group\":{},\"compile_ms\":{},\"restarted\":{}{patch}",
             self.group, self.compile_ms.map_or("null".to_string(), |ms| ms.to_string()), self.restarted)
     }
 }
@@ -36,7 +39,7 @@ pub(crate) fn enabled() -> bool { LIVE.get().is_some() }
 pub(crate) fn start(restart: Option<&str>) -> Result<(), String> {
     let _k = crate::zone_alloc::kept();
     let edit = match restart {
-        None => Edit { paths: Vec::new(), group: 0, compile_ms: None, restarted: false, changed: None },
+        None => Edit { paths: Vec::new(), group: 0, compile_ms: None, restarted: false, changed: None, patch: None },
         Some(s) => {
             use crate::json::Json;
             let j = crate::json::parse(s.as_bytes())?;
@@ -54,7 +57,7 @@ pub(crate) fn start(restart: Option<&str>) -> Result<(), String> {
                 Some(Json::Null) => None,
                 _ => return Err("invalid harness restart compile time".into()),
             };
-            Edit { paths, group, compile_ms, restarted: true, changed: None }
+            Edit { paths, group, compile_ms, restarted: true, changed: None, patch: None }
         }
     };
     let _ = LIVE.set((Mutex::new(State { edit, waiting: false, faults: Vec::new(), runs: 0 }), Condvar::new()));
@@ -157,7 +160,7 @@ pub(crate) fn restart(mut edit: Edit, why: &str) {
 }
 
 /// Replace the previous exec marker before the package, preserving the libtest argv verbatim.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub(crate) fn restart_args(args: Vec<std::ffi::OsString>) -> Vec<std::ffi::OsString> {
     let Some((state, _)) = LIVE.get() else { return args };
     let mut out = Vec::new();

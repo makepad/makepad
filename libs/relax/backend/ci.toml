@@ -1,13 +1,19 @@
 # CI (devhub ci): [ci] is hand-written settings; the other sections are proofs devhub writes.
 
+[job.jit_22.linux]
+date = "2026-11-04"
+digest = "dff6844fdf8b69df86a7785c8e7c6daac9a13609e58357d33015eaddb42bf5ab"
+main = "5f4597d2fb65f354696542829214d4c6b99c39ab"
+work = "7d8695372c6cd232c174a43ee12e1ee51ba72023"
+
 [tests.linux]
-date = "2026-11-02"
-digest = "2ebf171c60f58c5552aecd3e0a648296c9683a661767e177d895ddd5f03f221b"
-main = "85980f83132c6555f0343e3546f4af32c107f28f"
-work = "4f672791d60e305be9748c3bc85988225bbb56eb"
+date = "2026-11-05"
+digest = "dff6844fdf8b69df86a7785c8e7c6daac9a13609e58357d33015eaddb42bf5ab"
+main = "d47583cbdaf8c9b01e43ac1218a7b8fde373f93c"
+work = "76947602e9bddae66de9d80bd8a393a6c8073a17"
 
 [tests.windows]
-date = "2026-11-02"
-digest = "6d903da8c372874576c4c304414022d51ac2d413338b0c1de6716d8782dd2632"
-main = "f74166da6dfdb67f974ba0643cae2eab1c598535"
-work = "887855c1f9abe2cff0add968d8cc4fa6c79fc716"
+date = "2026-11-04"
+digest = "56f8e535d4802d99cfa951faa4586f9e5e82f16616edca6c7f564911362c9252"
+main = "34d2bfcf5593f48147a9bf8d7368e5a5a71e19d8"
+work = "a8bafff9f9ccd73f40684985e39d86f3435d8ea1"

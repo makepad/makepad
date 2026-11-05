@@ -188,8 +188,9 @@ pub fn carry_whole(src: usize, from: u64, to: u64) {
 
 /// A source of the program / type context for the worker (the unit's shared front end).
 pub trait FrontSource: Send + Sync {
-    /// Wait for the runner to admit background checking (once, before any work).
-    fn wait_start(&self) {}
+    /// Whether the runner admits background checking (its startup is over). Before that the
+    /// worker checks a live edit's owners only.
+    fn started(&self) -> bool { true }
     /// Runs `f` with the program and type context if the unit is alive (under the front
     /// end's read lock); None when it is gone or not checkable right now.
     fn with_front(&self, f: &mut dyn FnMut(&Program, &Tcx, &crate::tcx::EvalCx<'_>)) -> bool;
@@ -238,6 +239,12 @@ struct Queue {
     /// (src, epoch) -> the earlier epoch it stands for (carry_epoch): keys hold that one
     alias: HashMap<(usize, u64), u64>,
 }
+/// A live edit's checks: the person waits for its verdict. Ahead of hot code's: those are
+/// promoted keeping their place among the startup's checks, so a first edit after a cold start,
+/// at rank 0 with them, waited 9 s behind 362 promoted after it (Fab, 11-04).
+pub const RANK_EDIT: u32 = 0;
+/// Hot code waiting for its verdict (SPEC-V twins and callers).
+pub const RANK_HOT: u32 = 1;
 pub const RANK_DEFAULT: u32 = 1 << 31;
 const RANK_DISCOVER: u32 = u32::MAX - 1;
 const RANK_OWNER: u32 = u32::MAX;
@@ -249,6 +256,8 @@ impl Queue {
     /// The epoch `src`'s keys use for collect epoch `epoch`.
     fn canon(&self, src: usize, epoch: u64) -> u64 { self.alias.get(&(src, epoch)).copied().unwrap_or(epoch) }
     fn insert(&mut self, item: Item, rank: u32) {
+        // a live edit's check: the background check running now gives way (worker)
+        if rank == RANK_EDIT { crate::preempt::set_urgent(true); }
         let at = (rank, self.seq); self.seq += 1;
         self.rank_of.insert(item.key.clone(), at);
         self.order.insert(at); self.items.insert(at, item);
@@ -296,6 +305,7 @@ pub fn set_ranks(src: usize, epoch: u64, ranks: &[(DefId, Vec<TyId>, u32)]) {
             q.order.remove(&at);
             let item = q.items.remove(&at).unwrap();
             let next = ((*rank).min(at.0), at.1);
+            if next.0 == RANK_EDIT { crate::preempt::set_urgent(true); }
             q.order.insert(next); q.items.insert(next, item); q.rank_of.insert(key, next);
         } else if !q.seen.contains_key(&key) {
             let key = (src, *def);
@@ -366,6 +376,16 @@ static STARTED: AtomicBool = AtomicBool::new(false);
 static STOP: AtomicBool = AtomicBool::new(false);
 
 fn stopping() -> bool { STOP.load(Ordering::SeqCst) || crate::preempt::is_stopped() }
+/// The worker paces itself (`ms`) on WAKE, not in a sleep: a check queued at rank `rank` or
+/// ahead ends the wait at once. A plain sleep missed the wake of a live edit's check, which then
+/// waited out the rest of it at the front of the queue (Fab early in a session: up to 500 ms
+/// behind the compile-quiet pacing, verdicts 110-450 ms late, 11-04).
+fn pace(ms: u64, rank: u32) {
+    let guard = QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+    let _ = WAKE.wait_timeout_while(guard, std::time::Duration::from_millis(ms), |q| {
+        !stopping() && !q.as_ref().and_then(|q| q.order.first()).is_some_and(|a| a.0 <= rank)
+    });
+}
 pub static CHECKED: AtomicU64 = AtomicU64::new(0);
 /// checks that failed inside the checker (a panic): those fns are NOT checked
 pub static PANICS: AtomicU64 = AtomicU64::new(0);
@@ -455,6 +475,19 @@ fn enqueue(options: &crate::options::Options, src: &Arc<dyn FrontSource>, def: D
     }
     WAKE.notify_one();
 }
+/// (trace) Where `def`'s check stands: its rank and the checks queued ahead of it; None: not queued.
+/// What the worker checks now: (rank, definition (NO_DEF: discovery), since wall ns).
+static RUNNING: Mutex<Option<(u32, DefId, u64)>> = Mutex::new(None);
+/// The check the worker runs now (a verdict wait's trace names what it waits behind).
+pub fn running() -> Option<(u32, DefId, u64)> {
+    *RUNNING.lock().unwrap_or_else(|e| e.into_inner())
+}
+pub fn queue_place(src: usize, def: DefId, epoch: u64) -> Option<(u32, usize)> {
+    let guard = QUEUE.lock().unwrap_or_else(|e| e.into_inner());
+    let q = guard.as_ref()?;
+    let at = *q.rank_of.get(&(src, def, q.canon(src, epoch)))?;
+    Some((at.0, q.order.range(..at).count()))
+}
 /// Checks queued (0 also before the worker started); the aot levels' completion line reads it.
 pub fn queued() -> usize {
     QUEUE.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map_or(0, |q| q.order.len())
@@ -538,6 +571,26 @@ fn settle_finished_check() {
 pub(crate) fn panic_message(e: &Box<dyn std::any::Any + Send>) -> String {
     e.downcast_ref::<String>().cloned().or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_default()
 }
+/// Where a checker panic goes beyond the run's log and summary (the compiler: devhub's ledger):
+/// body, message.
+static PANIC_SINK: std::sync::OnceLock<fn(&str, &str)> = std::sync::OnceLock::new();
+pub fn set_panic_sink(sink: fn(&str, &str)) {
+    let _ = PANIC_SINK.set(sink);
+}
+/// A panic in a check of `body`: counted and noted for the run's summary, and sent to the sink (a
+/// cancellation that reached the catch is no panic of the checker). Returns its message.
+fn report_panic(body: String, payload: &Box<dyn std::any::Any + Send>) -> String {
+    let _k = crate::zone_alloc::kept();
+    let message = panic_message(payload);
+    PANICS.fetch_add(1, Ordering::Relaxed);
+    let mut notes = PANIC_NOTES.lock().unwrap_or_else(|e| e.into_inner());
+    if notes.len() < 5 { notes.push(format!("{}: {}", body, message)); }
+    drop(notes);
+    if !crate::preempt::is_cancelled(&**payload) {
+        if let Some(sink) = PANIC_SINK.get() { sink(&body, &message); }
+    }
+    message
+}
 fn finish_verdict(prog: &Program, src: usize, epoch: u64, def: DefId, args: &[TyId], result: Result<Option<super::Verdict>, String>, origin: Origin) -> Vec<GandalfEvent> {
     let key = (src, def, epoch);
     match result {
@@ -578,18 +631,30 @@ impl FrontSource for Parked {
 
 fn worker(mut src: Arc<dyn FrontSource>, verbose: bool) {
     let _mem = crate::memstat::tag(crate::memstat::Tag::Borrowck);
-    src.lower_priority(); src.wait_start();
+    src.lower_priority();
+    let mut started = false;
     loop {
         if stopping() { return; }
+        // The startup's checks wait for the runner; a live edit's do not: the person waits for its
+        // verdict (a cold Fab releases the checker 1.5 s after its first present; an edit saved
+        // in that time waited for the release, 11-04).
+        if !started {
+            started = src.started();
+            let edit_first = || QUEUE.lock().unwrap_or_else(|e| e.into_inner()).as_ref().and_then(|q| q.order.first()).is_some_and(|a| a.0 == RANK_EDIT);
+            if !started && !edit_first() {
+                pace(20, RANK_EDIT);
+                continue;
+            }
+        }
         // (the source the worker started with must not keep a replaced front state alive)
         if !src.alive() {
             if let Some(n) = rehomed(&src) { src = n; }
         }
         let quiet = src.quiet_ns();
-        // rank 0 (hot code waiting for its verdict, set_ranks) runs while compiles go on
-        let urgent = || QUEUE.lock().unwrap_or_else(|e| e.into_inner()).as_ref().and_then(|q| q.order.first()).is_some_and(|a| a.0 == 0);
+        // a live edit's checks and hot code waiting for its verdict (set_ranks) run while compiles go on
+        let urgent = || QUEUE.lock().unwrap_or_else(|e| e.into_inner()).as_ref().and_then(|q| q.order.first()).is_some_and(|a| a.0 <= RANK_HOT);
         if quiet < QUIET_NS && !urgent() {
-            std::thread::sleep(std::time::Duration::from_millis(((QUIET_NS - quiet) / 1_000_000).clamp(20, 500)));
+            pace(((QUIET_NS - quiet) / 1_000_000).clamp(20, 500), RANK_HOT);
             continue;
         }
         let (rank, item) = {
@@ -597,7 +662,11 @@ fn worker(mut src: Arc<dyn FrontSource>, verbose: bool) {
             loop {
                 if stopping() { return; }
                 settle_finished_check();
-                if let Some(item) = guard.as_mut().and_then(Queue::pop) { break item; }
+                if let Some(item) = guard.as_mut().and_then(Queue::pop) {
+                    // urgent while a live edit's check is still queued
+                    crate::preempt::set_urgent(guard.as_ref().and_then(|q| q.order.first()).is_some_and(|a| a.0 == RANK_EDIT));
+                    break item;
+                }
                 if verbose && std::env::var_os("MAKEPAD_RUN_GANDALF_STATS").is_some() && CHECKED.load(Ordering::Relaxed) > 0 && !IDLE_REPORTED.swap(true, Ordering::Relaxed) {
                     eprintln!("gandalf: idle at t={:.0} ms: {} fns checked, {} violations, cpu {:.1} ms ({:.1} us/fn), {} clean from the cache",
                         crate::clock::wall_ns() as f64 / 1e6, CHECKED.load(Ordering::Relaxed), VIOLATIONS.load(Ordering::Relaxed),
@@ -634,7 +703,12 @@ fn worker(mut src: Arc<dyn FrontSource>, verbose: bool) {
         let mut preempted = false;
         let (identity, def, epoch) = &item.key;
         let phase = std::cell::Cell::new("start");
+        *RUNNING.lock().unwrap_or_else(|e| e.into_inner()) = Some((rank, *def, crate::clock::wall_ns()));
         let ok = item.src.with_front(&mut |prog, tcx, cx| {
+            // A panic in this item's steps around the body's own check below (its stored verdict, its
+            // owner's identity arguments, a discovery batch) ends this item, reported like the
+            // check's own; the worker goes on.
+            let around = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             struct Slow<'a>(std::time::Instant, &'a std::cell::Cell<&'static str>, &'a Program, DefId, usize);
             impl Drop for Slow<'_> {
                 fn drop(&mut self) {
@@ -696,6 +770,10 @@ fn worker(mut src: Arc<dyn FrontSource>, verbose: bool) {
             };
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let _p = crate::preempt::Preemptible::on();
+                // every other check gives way to a live edit's (hot code's too: RANK_EDIT is ahead
+                // of it): the edit's verdict waited at the front of the queue for the check
+                // running, 133-480 ms in a session's first edits (Fab, 11-04)
+                let _y = (rank > RANK_EDIT).then(crate::preempt::Yields::on);
                 crate::preempt::point();
                 let _origin = crate::clock::origin("gandalf");
                 phase.set("typeck");
@@ -714,12 +792,7 @@ fn worker(mut src: Arc<dyn FrontSource>, verbose: bool) {
                 preempted = true;
                 return;
             }
-            let result = result.map_err(|e| panic_message(&e));
-            if let Err(msg) = &result {
-                PANICS.fetch_add(1, Ordering::Relaxed);
-                let mut notes = PANIC_NOTES.lock().unwrap_or_else(|e| e.into_inner());
-                if notes.len() < 5 { notes.push(format!("{}: {}", prog.def_path(*def), msg)); }
-            }
+            let result = result.map_err(|e| report_panic(prog.def_path(*def), &e));
             // Re-ranking to a new epoch may have happened during the check.
             let queue = QUEUE.lock().unwrap_or_else(|e| e.into_inner());
             if queue.as_ref().and_then(|q| q.epoch.get(identity)).is_some_and(|e| *e > *epoch) {
@@ -732,8 +805,15 @@ fn worker(mut src: Arc<dyn FrontSource>, verbose: bool) {
             }
             phase.set("finish");
             finish_verdict(prog, *identity, *epoch, *def, args, result, Origin::Background);
+            }));
+            if let Err(p) = around {
+                let body = if *def == crate::program::NO_DEF { "(discovery)".to_string() } else { prog.def_path(*def) };
+                let message = report_panic(body, &p);
+                record(item.key.clone(), FnVerdict::Unchecked(format!("checker failure: {}", message)));
+            }
         });
         CHECK_NS.fetch_add(relax_backend::cpu_ns() - t0, Ordering::Relaxed);
+        *RUNNING.lock().unwrap_or_else(|e| e.into_inner()) = None;
         // An exit cancels the whole attempt, including constant deferrals/discovery.
         // Only a front writer's temporary preemption is queued again below.
         if crate::preempt::is_stopped() { return; }
@@ -755,8 +835,9 @@ fn worker(mut src: Arc<dyn FrontSource>, verbose: bool) {
                 if !q.epoch.get(identity).is_some_and(|e| *e > *epoch) { q.insert(item, rank); }
             }
             drop(guard);
-            // the writer runs; checking again at once would only meet it again
-            std::thread::sleep(std::time::Duration::from_millis(50));
+            // the writer runs; checking again at once would only meet it again (a live edit's
+            // check, which preempted this one, runs at once)
+            pace(50, RANK_EDIT);
             continue;
         }
         if !ok {
@@ -765,8 +846,9 @@ fn worker(mut src: Arc<dyn FrontSource>, verbose: bool) {
                 if q.epoch.get(identity).is_some_and(|e| *e > *epoch) { STALE.fetch_add(1, Ordering::Relaxed); }
                 else { q.insert(item, rank); }
             }
-            drop(guard);
-            std::thread::sleep(std::time::Duration::from_millis(200));
+            // the front was not to be had (the failed check went back at its rank, maybe the
+            // front of the queue): again after a while, or when other work is queued
+            let _ = WAKE.wait_timeout(guard, std::time::Duration::from_millis(200));
             continue;
         }
         if let Some(next) = discovery_next {
@@ -819,14 +901,9 @@ pub fn check_before_run(prog: &Program, tcx: &Tcx, src: &Arc<dyn FrontSource>, d
         let body = tcx.typeck(prog, def);
         if !body.errors.is_empty() { return None; }
         Some(super::check_body(&cx, prog, tcx, &body))
-    })).map_err(|e| panic_message(&e));
+    })).map_err(|e| report_panic(prog.def_path(def), &e));
     CHECK_NS.fetch_add(relax_backend::cpu_ns() - t0, Ordering::Relaxed);
     CHECKED.fetch_add(1, Ordering::Relaxed);
-    if let Err(msg) = &result {
-        PANICS.fetch_add(1, Ordering::Relaxed);
-        let mut notes = PANIC_NOTES.lock().unwrap_or_else(|e| e.into_inner());
-        if notes.len() < 5 { notes.push(format!("{}: {}", prog.def_path(def), msg)); }
-    }
     if let Some(v) = storable(&result) {
         let mut keys = VERDICT_KEYS.lock().unwrap_or_else(|e| e.into_inner());
         keys.extend(cache_key.into_iter().chain(owner_key).map(|k| (k, v.clone())));
@@ -876,7 +953,7 @@ pub fn check_now(prog: &Program, tcx: &Tcx, req: &CheckRequest<'_>) -> GateResul
             let body = tcx.typeck(prog, def);
             if !body.errors.is_empty() { return None; }
             Some(super::check_body_in(&cx, prog, tcx, &body, req.fv))
-        })).map_err(|e| panic_message(&e));
+        })).map_err(|e| report_panic(prog.def_path(def), &e));
         let errors = result.as_ref().ok().and_then(|v| v.as_ref()).map_or(0, |v| v.errors.len());
         let events = finish_verdict(prog, 0, req.epoch, def, &args, result, req.origin);
         out.withheld += errors - events.len();
@@ -926,7 +1003,7 @@ pub fn check_now(prog: &Program, tcx: &Tcx, req: &CheckRequest<'_>) -> GateResul
                 matched
             });
             Some(v)
-        })).map_err(|e| panic_message(&e));
+        })).map_err(|e| report_panic(prog.def_path(d), &e));
         let errors = result.as_ref().ok().and_then(|v| v.as_ref()).map_or(0, |v| v.errors.len());
         let events = finish_verdict(prog, 0, req.epoch, d, &args, result, req.origin);
         out.withheld += errors - events.len();

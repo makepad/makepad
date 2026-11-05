@@ -415,7 +415,7 @@ pub(super) fn role_of(handle: u64, name: &str) -> u8 {
     if handle != 0 && handle == crate::owner::owner_tid() {
         return ps::role::OWNER;
     }
-    const COMPILERS: [&str; 6] = ["run-o3-", "run-O2", "run-spec", "run-ahead", "run-complete", "run-seed"];
+    const COMPILERS: [&str; 3] = ["run-jit-", "run-complete", "run-seed"];
     if COMPILERS.iter().any(|p| name.starts_with(p)) {
         return ps::role::COMPILER;
     }

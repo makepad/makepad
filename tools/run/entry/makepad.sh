@@ -43,6 +43,8 @@ service=${service%/}
 # --- Progress and jobs --------------------------------------------------------------------
 logs=
 jobs=
+job_names='fetch build unpack-rustc unpack-rust-std unpack-cargo'
+prefetch_pids=
 
 say() { printf '  %s\n' "$1"; }
 now() { date +%s; }
@@ -53,13 +55,73 @@ stamp() {
     case "$t" in *N) t=${t%.N} ;; *) t=$(printf '%s' "$t" | cut -c1-11) ;; esac
     printf '%s %s\n' "$1" "$t" >> "$logs/bootstrap.log"
 }
-# the background jobs this script started (by PID), stopped when it fails or is stopped
+# Stop the recorded tree from the parent down before enumerating children: a stopped parent
+# cannot fork another child between the snapshot and termination. ps is available on both hosts.
+stop_tree() (
+    stop_pid=$1
+    case "$stop_pid" in ''|0|1|*[!0-9]*) printf '  Invalid job PID: %s\n' "$stop_pid" >&2; exit 1 ;; esac
+    if ! kill -STOP "$stop_pid" 2>/dev/null; then
+        state=$(ps -p "$stop_pid" -o stat=)
+        case "$state" in ''|*Z*) exit 0 ;; esac
+        printf '  Could not stop job process %s\n' "$stop_pid" >&2
+        exit 1
+    fi
+    failed=0
+    if snapshot=$(ps -axo pid=,ppid=); then
+        children=$(printf '%s\n' "$snapshot" | awk -v parent="$stop_pid" '$2 == parent { print $1 }')
+        for child_pid in $children; do stop_tree "$child_pid" || failed=1; done
+    else
+        printf '  Could not inspect children of job process %s\n' "$stop_pid" >&2
+        failed=1
+    fi
+    if ! kill -KILL "$stop_pid" 2>/dev/null; then
+        state=$(ps -p "$stop_pid" -o stat=)
+        case "$state" in ''|*Z*) ;; *) printf '  Could not kill job process %s\n' "$stop_pid" >&2; failed=1 ;; esac
+    fi
+    deadline=$(($(now) + 5))
+    while :; do
+        state=$(ps -p "$stop_pid" -o stat=)
+        case "$state" in ''|*Z*) break ;; esac
+        if [ "$(now)" -ge "$deadline" ]; then
+            printf '  Could not confirm job process %s stopped\n' "$stop_pid" >&2
+            failed=1
+            break
+        fi
+        sleep 0.1 2>/dev/null || sleep 1
+    done
+    exit "$failed"
+)
+# The background jobs this script started, stopped and reaped on failure or cancellation.
 stop_jobs() {
     [ -n "$jobs" ] && [ -d "$jobs" ] || return 0
-    for job in fetch build unpack-rustc unpack-rust-std unpack-cargo; do
-        [ -f "$jobs/$job.pid" ] && [ ! -f "$jobs/$job.done" ] && kill "$(cat "$jobs/$job.pid")" 2>/dev/null
+    stop_failed=0
+    for job in $job_names; do
+        if [ -f "$jobs/$job.pid" ] && [ ! -f "$jobs/$job.done" ]; then
+            stop_tree "$(cat "$jobs/$job.pid")" || stop_failed=1
+            if [ "$stop_failed" = 0 ] && [ -f "$jobs/$job.waiter.pid" ]; then
+                wait "$(cat "$jobs/$job.waiter.pid")" 2>/dev/null || :
+            fi
+        fi
     done
-    return 0
+    # A download that ended was reaped and its PID can be anyone's by now: only a child of this
+    # script is stopped.
+    for prefetch_pid in $prefetch_pids; do
+        [ "$(ps -o ppid= -p "$prefetch_pid" | tr -d ' ')" = "$$" ] || continue
+        stop_tree "$prefetch_pid" || stop_failed=1
+        wait "$prefetch_pid" 2>/dev/null || :
+    done
+    return "$stop_failed"
+}
+# A run that was killed leaves its jobs' PID files, and those PIDs can be anyone's by now. They go
+# before anything can stop a job; if they cannot, nothing here acts on them.
+forget_old_jobs() {
+    for job in $job_names; do
+        if ! rm -f "$jobs/$job.pid" "$jobs/$job.waiter.pid"; then
+            old_jobs=$jobs
+            jobs=
+            fail "Cannot clear the old job records in $old_jobs"
+        fi
+    done
 }
 # fail MESSAGE [BUILD_LOG]: error and optional build-log excerpt on stderr, exit 1
 fail() {
@@ -90,6 +152,7 @@ job() {
         echo $? > "$jobs/$name.code"
         mv -f "$jobs/$name.code" "$jobs/$name.done"
     ) &
+    echo $! > "$jobs/$name.waiter.pid"
     while [ ! -f "$jobs/$name.pid" ]; do sleep 0.1 2>/dev/null || sleep 1; done
 }
 sha256() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi; }
@@ -174,6 +237,7 @@ loader_root=$cache/loader
 downloads=$cache/downloads
 logs_dir=$cache/logs
 jobs=$cache/jobs
+forget_old_jobs
 
 case "$(uname -s)/$(uname -m)" in
     Darwin/arm64 | Darwin/aarch64) triple=aarch64-apple-darwin ;;
@@ -262,7 +326,6 @@ makepad=$src/target/host/makepad
 # $MAKEPAD_RUN_HOME/cache/incoming/<commit>.pack (renamed into place when complete), where makepad run
 # takes it instead of downloading, and the loader is compiled for it. With arguments a loader
 # compiled before stays as it is (the runner and the apps it recorded were made for it).
-prefetch_pids=
 runner_release=
 repos=
 release_json=
@@ -511,19 +574,27 @@ if [ -n "$need_zip" ]; then
                 "Files $new/"*" differ")
                     rel=${line#"Files $new/"}
                     rel=${rel%%" and $src/"*}
-                    mv -f "$new/$rel" "$src/$rel" && touch "$src/$rel" || exit 1 ;;
+                    mv -f "$new/$rel" "$src/$rel" && touch "$src/$rel" || fail "Cannot replace $src/$rel" ;;
+                "File $new/"*" while file $src/"*)
+                    # a file on one side and a folder on the other: the new one takes its place
+                    rel=${line#"File $new/"}
+                    rel=${rel%%" is a "*}
+                    rm -rf "$src/$rel" && mv -f "$new/$rel" "$src/$rel" \
+                        && find "$src/$rel" -exec touch {} + || fail "Cannot replace $src/$rel" ;;
                 "Only in $new"*)
                     dir=${line#"Only in $new"}
                     dir=${dir%%": "*}
                     rel=${dir#/}${dir:+/}${line#*": "}
                     rel=${rel#/}
-                    mkdir -p "$(dirname "$src/$rel")" && mv -f "$new/$rel" "$src/$rel" || exit 1
-                    find "$src/$rel" -exec touch {} + ;;
+                    mkdir -p "$(dirname "$src/$rel")" && mv -f "$new/$rel" "$src/$rel" \
+                        && find "$src/$rel" -exec touch {} + || fail "Cannot add $src/$rel" ;;
                 "Only in $src"*)
                     dir=${line#"Only in $src"}
                     dir=${dir%%": "*}
                     rel=${dir#/}${dir:+/}${line#*": "}
-                    rm -rf "$src/${rel#/}" ;;
+                    rm -rf "$src/${rel#/}" || fail "Cannot remove $src/${rel#/}" ;;
+                # Something was not updated, so this is not the new version.
+                *) fail "Cannot update the loader's source in $src - diff said: $line" ;;
             esac
         done < "$unpack/changes" || fail "Cannot update the loader's source in $src"
     fi

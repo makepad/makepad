@@ -20,8 +20,31 @@ pub fn stop_all() { STOPPED.store(true, Ordering::SeqCst); }
 pub fn is_stopped() -> bool { STOPPED.load(Ordering::Acquire) }
 
 static WRITERS: AtomicUsize = AtomicUsize::new(0);
+/// Work the person waits for is queued (a live edit's borrow check): threads doing background
+/// work of that kind that opted in (`Yields`) stop at their next point, as for a writer.
+static URGENT: AtomicBool = AtomicBool::new(false);
 thread_local! {
     static ON: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static YIELDS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether work the person waits for is queued (`URGENT`); the queue that holds it sets and clears it.
+pub fn set_urgent(on: bool) { URGENT.store(on, Ordering::SeqCst); }
+pub fn urgent() -> bool { URGENT.load(Ordering::Relaxed) }
+
+/// The calling thread's preemptible work in this scope is background work that gives way to
+/// urgent work as well (`set_urgent`).
+pub struct Yields(bool);
+impl Yields {
+    pub fn on() -> Self {
+        Yields(YIELDS.with(|c| c.replace(true)))
+    }
+}
+impl Drop for Yields {
+    fn drop(&mut self) {
+        let prev = self.0;
+        YIELDS.with(|c| c.set(prev));
+    }
 }
 
 /// The unwind payload of preempted work.
@@ -59,10 +82,14 @@ impl Drop for Preemptible {
     }
 }
 
-/// Unwinds with `Preempted` on opted-in threads when a writer waits or shutdown begins.
+/// Unwinds with `Preempted` on opted-in threads when a writer waits or shutdown begins, and on
+/// threads that also yield to urgent work while it is queued.
 #[inline]
 pub fn point() {
-    if (WRITERS.load(Ordering::Relaxed) != 0 || is_stopped()) && ON.try_with(|c| c.get()).unwrap_or(false) {
+    let urgent = URGENT.load(Ordering::Relaxed);
+    if (WRITERS.load(Ordering::Relaxed) != 0 || is_stopped() || urgent) && ON.try_with(|c| c.get()).unwrap_or(false)
+        && (!urgent || WRITERS.load(Ordering::Relaxed) != 0 || is_stopped() || YIELDS.try_with(|c| c.get()).unwrap_or(false))
+    {
         std::panic::resume_unwind(Box::new(Preempted));
     }
 }
@@ -105,8 +132,7 @@ pub struct PublishBail {
 /// Whether a caught unwind payload is work to be redone rather than a failure: a preemption,
 /// a build waiting for the post-boot loader (NeedsLoad), lowering ahead that needs the unit
 /// (NeedsUnit), a request the owner thread could not serve yet (OwnerBusy), or a publish that bailed
-/// (PublishBail). A query it
-/// crosses is cancelled.
+/// (PublishBail). The query engine asks nothing of a payload: any unwind cancels the queries it crosses.
 pub fn is_cancelled(payload: &(dyn std::any::Any + Send)) -> bool {
     payload.is::<Preempted>() || payload.is::<NeedsLoad>() || payload.is::<NeedsUnit>() || payload.is::<OwnerBusy>() || payload.is::<PublishBail>()
 }
@@ -114,7 +140,7 @@ pub fn is_cancelled(payload: &(dyn std::any::Any + Send)) -> bool {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn point_unwinds_only_opted_in_threads_while_a_writer_waits() {
+    fn point_unwinds_opted_in_threads_while_a_writer_waits_and_yielding_ones_for_urgent_work() {
         super::point();
         let _on = super::Preemptible::on();
         super::point();
@@ -124,6 +150,18 @@ mod tests {
         let other = std::thread::spawn(|| std::panic::catch_unwind(super::point).is_ok()).join().unwrap();
         assert!(other, "a thread that did not opt in was preempted");
         drop(w);
+        super::point();
+        // (one test: the writer count and the urgent flag are the process's)
+        super::set_urgent(true);
+        let plain = std::panic::catch_unwind(super::point).is_ok();
+        let r = {
+            let _y = super::Yields::on();
+            std::panic::catch_unwind(super::point)
+        };
+        super::set_urgent(false);
+        assert!(plain, "a thread that does not yield to urgent work was preempted by it");
+        assert!(r.is_err_and(|p| super::is_preempted(&*p)));
+        let _y = super::Yields::on();
         super::point();
     }
 }

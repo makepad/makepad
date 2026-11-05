@@ -83,7 +83,7 @@ fn crate_meta_uncached(path: &str) -> (String, String, String, String) {
     let mut d = Some(mdir.clone());
     while let Some(x) = d {
         if let Ok(t) = crate::vfs::read_to_string(x.join("Cargo.toml")) {
-            if t.lines().any(|l| l.trim() == "[workspace]") {
+            if is_workspace_manifest(&t) {
                 ws = x.to_string_lossy().into_owned();
                 if ver_ws {
                     version = workspace_version(&t);
@@ -151,15 +151,26 @@ pub fn lex_stream(s: &str) -> Option<TokenStream> {
     to_stream(s.as_bytes(), &toks, 0, toks.len().saturating_sub(1), &|_lo, _hi| cs)
 }
 
-/// The path `file!()` names for source file `path` (as cargo passes it to rustc: relative to
-/// the workspace root for a workspace member, else as given); `Location::caller().file()` and
-/// panic locations name the same path.
+/// The path `file!()` names for source file `path`, as cargo passes it to rustc: a path
+/// package's file under the run's workspace root relative to that root, any other as given
+/// (resolve.rs FileRoot); `Location::caller().file()` and panic locations name the same path.
 pub fn file_macro_path(path: &str) -> String {
-    let ws = crate_meta(path).3;
-    if !ws.is_empty() {
-        if let Some(rel) = crate::vfs::relative_path(path, &ws) { return rel; }
-    }
-    path.to_string()
+    static ROOT: std::sync::OnceLock<Option<crate::resolve::FileRoot>> = std::sync::OnceLock::new();
+    let root = ROOT.get_or_init(|| crate::zone_alloc::kept_with(|| crate::resolve::FileRoot::of(&crate::dirs::workspace_dir())));
+    root.as_ref().and_then(|r| r.relative(path)).unwrap_or_else(|| path.to_string())
+}
+
+/// A workspace root's manifest: a `[workspace]` table, as a header, a `[workspace.<x>]`
+/// sub-table or top-level dotted `workspace.<x> = ..` keys (the makepad root's spelling).
+fn is_workspace_manifest(toml: &str) -> bool {
+    let mut top = true;
+    toml.lines().map(str::trim).any(|l| {
+        if l.starts_with('[') {
+            top = false;
+            return l == "[workspace]" || l.starts_with("[workspace.");
+        }
+        top && l.strip_prefix("workspace").is_some_and(|r| r.trim_start().starts_with(['.', '=']))
+    })
 }
 
 impl FileCtx {
@@ -2591,6 +2602,17 @@ mod pm_input_tests {
         p.expand_toks(text, &toks, call_lo)
     }
     use super::*;
+
+    #[test]
+    fn workspace_manifests_in_every_spelling() {
+        assert!(is_workspace_manifest("[workspace]\nmembers = []\n"));
+        assert!(is_workspace_manifest("workspace.members = [\n    \"a\",\n]\n[workspace.dependencies]\n"));
+        assert!(is_workspace_manifest("[package]\nname = \"a\"\n[workspace.dependencies]\n"));
+        assert!(is_workspace_manifest("workspace = { members = [] }\n"));
+        assert!(!is_workspace_manifest("[package]\nname = \"a\"\nworkspace = \"..\"\n"));
+        assert!(!is_workspace_manifest("[package]\nname = \"a\"\n[dependencies]\nb = { workspace = true }\n"));
+        assert!(!is_workspace_manifest("workspaces = 1\n"));
+    }
 
     #[test]
     fn prescan_cfg_definitions() {

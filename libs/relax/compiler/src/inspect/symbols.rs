@@ -32,11 +32,11 @@ pub fn host_symbol(pc: u64) -> Option<(String, String, u64)> {
     }
     let img = images.iter_mut().find(|i| pc >= i.lo && pc < i.hi)?;
     if img.syms.is_none() {
-        let mut v = std::fs::read(&img.path).ok().map(|b| read_symbols(&b, img.bias)).unwrap_or_default();
+        let mut v = std::fs::read(&img.path).ok().map(|b| read_symbols(&b, img.bias, &img.path)).unwrap_or_default();
         v.sort_by_key(|s| s.0);
         img.syms = Some(v);
     }
-    let base = img.path.rsplit('/').next().unwrap_or("").to_string();
+    let base = img.path.rsplit(['/', '\\']).next().unwrap_or("").to_string();
     let syms = img.syms.as_ref().unwrap();
     let k = syms.partition_point(|s| s.0 <= pc);
     if k > 0 {
@@ -142,7 +142,21 @@ fn enumerate() -> Vec<Image> {
     v
 }
 
-#[cfg(windows)]
+/// Windows x64: each loaded module whole (its image's size from its PE header); names come from
+/// its PDB's public symbols (`pe_symbols`), else its export table (`dladdr_name`).
+#[cfg(all(windows, target_arch = "x86_64"))]
+fn enumerate() -> Vec<Image> {
+    use super::pe_unwind::{image_layout, module_bases, module_path};
+    module_bases()
+        .into_iter()
+        .filter_map(|lo| {
+            let (size, _, _) = image_layout(lo)?;
+            Some(Image { lo, hi: lo + size, path: module_path(lo), bias: lo, syms: None })
+        })
+        .collect()
+}
+
+#[cfg(all(windows, not(target_arch = "x86_64")))]
 fn enumerate() -> Vec<Image> {
     Vec::new()
 }
@@ -164,9 +178,11 @@ pub(crate) fn cstr(b: &[u8], o: usize) -> Option<&str> {
     std::str::from_utf8(&s[..n]).ok()
 }
 
-/// Function symbols of an image file: (runtime address, size, raw name).
-fn read_symbols(b: &[u8], bias: u64) -> Vec<(u64, u64, String)> {
-    if b.starts_with(b"\x7fELF") {
+/// Function symbols of an image file at `path`: (runtime address, size, raw name).
+fn read_symbols(b: &[u8], bias: u64, path: &str) -> Vec<(u64, u64, String)> {
+    if b.starts_with(b"MZ") {
+        pe_symbols(b, bias, path)
+    } else if b.starts_with(b"\x7fELF") {
         elf_symbols(b, bias).unwrap_or_default()
     } else if b.starts_with(&[0xcf, 0xfa, 0xed, 0xfe]) {
         macho_symbols(b, bias).unwrap_or_default()
@@ -189,6 +205,17 @@ fn read_symbols(b: &[u8], bias: u64) -> Vec<(u64, u64, String)> {
     } else {
         Vec::new()
     }
+}
+
+/// A PE image's functions: its PDB's public symbols (a PE file keeps no symbol table of its
+/// own). The PDB is where the image's debug record says, or beside the image under that name
+/// (a build copied elsewhere); none: no names (exports are dladdr's).
+fn pe_symbols(b: &[u8], bias: u64, path: &str) -> Vec<(u64, u64, String)> {
+    let Some(pdb) = super::pdb::pdb_path(b) else { return Vec::new() };
+    let file = pdb.rsplit(['/', '\\']).next().unwrap_or("");
+    let beside = std::path::Path::new(path).with_file_name(file);
+    let Some(bytes) = std::fs::read(&pdb).ok().or_else(|| std::fs::read(beside).ok()) else { return Vec::new() };
+    super::pdb::public_symbols(&bytes, &super::pdb::pe_sections(b)).into_iter().map(|(rva, name)| (bias + rva as u64, 0, name)).collect()
 }
 
 fn elf_symbols(b: &[u8], bias: u64) -> Option<Vec<(u64, u64, String)>> {

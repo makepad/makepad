@@ -145,7 +145,7 @@ pub fn cmd_live(sess: &std::sync::Arc<crate::Session>, args: &[String]) -> i32 {
             let skip: Vec<String> = edits.iter().map(|e| u.prog.file_paths[e.file as usize].clone()).collect();
             edits.extend(crate::reload::include_edits(&u.prog, &included, &skip));
         }
-        crate::reload::trace_input(0.0, read_started.elapsed().as_secs_f64() * 1000., edits.len());
+        crate::reload::trace_input(0.0, 0.0, read_started.elapsed().as_secs_f64() * 1000., edits.len());
         let olds: Vec<u32> = edits.iter().map(|e| e.file).collect();
         let up: *mut Unit = &mut *u;
         let o = if options.live_stream && edits.len() == 1 {

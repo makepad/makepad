@@ -156,7 +156,8 @@ fn structural(f: &Func, reach: &[bool], rpo: &[u32]) -> Vec<f64> {
     for (i, &b) in rpo.iter().enumerate() {
         rank[b as usize] = i;
     }
-    let cold = |t: u32| matches!(f.blocks[t as usize].term, Term::Unreachable | Term::Resume);
+    let panic_path = crate::dom::cold_blocks(f, reach);
+    let cold = |t: u32| panic_path[t as usize];
     let mut mass = vec![0.0f64; nb];
     if nb > 0 {
         mass[0] = 1.0;
@@ -177,6 +178,12 @@ fn structural(f: &Func, reach: &[bool], rpo: &[u32]) -> Vec<f64> {
         }
     }
     (0..nb).map(|b| (mass[b] * 8f64.powi(depth[b].min(6) as i32)).max(1e-9)).collect()
+}
+
+#[cfg(test)]
+pub(crate) fn structural_for_test(f: &Func) -> Vec<f64> {
+    let reach = crate::regalloc::reachable(f);
+    structural(f, &reach, &crate::frame::block_rpo(f))
 }
 
 /// Per block, its count, or for a block without one an estimate: the largest over its forward

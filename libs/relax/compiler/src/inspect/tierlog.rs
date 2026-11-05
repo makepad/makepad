@@ -79,7 +79,7 @@ pub const REFUSE_TAKE: u8 = 1;
 pub const REFUSE_PROFILE_GONE: u8 = 2;
 pub const REFUSE_WHY: [&str; 3] = ["not allowed (borrow-check verdict pending, or a patch without a clean verdict)", "its snapshot bailed (a front could not be made off the owner)", "its counted profile is gone (patched or rebuilt)"];
 
-pub const Q_WHY: [&str; 5] = ["calls", "loop", "retier", "marked", "profiled"];
+pub const Q_WHY: [&str; 6] = ["calls", "loop", "retier", "marked", "profiled", "stored"];
 
 /// One decision.
 #[derive(Clone, Copy, Default)]
@@ -219,6 +219,42 @@ pub fn history(id: u32) -> (Option<Hist>, u64, u64) {
         Some(st) => (st.by.get(&id).cloned(), st.lost, st.untracked),
         None => (None, 0, 0),
     }
+}
+
+/// The slots first queued for O3 at or after `after_ms` of the run, by that time: the late tier-up
+/// that keeps a warm run from settling (run.rs verbose exit line).
+pub fn queued_after(after_ms: u32) -> Vec<(u32, Hist)> {
+    drain();
+    let g = STORE.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(st) = g.as_ref() else { return Vec::new() };
+    let q = ev::QUEUE as usize;
+    let mut v: Vec<(u32, Hist)> = st.by.iter().filter(|(_, h)| h.n[q] > 0 && h.first_ms[q] >= after_ms).map(|(&id, h)| (id, h.clone())).collect();
+    v.sort_by_key(|(id, h)| (h.first_ms[q], *id));
+    v
+}
+
+/// What became of a queued slot, in a word: its O3 code installed, parked in counted code, counting
+/// (its counted window open), its build dropped or refused, taken by a worker, or still queued.
+pub fn outcome(h: &Hist) -> &'static str {
+    let n = |e: u8| h.n[e as usize] > 0;
+    if n(ev::O3_INSTALLED) {
+        "O3"
+    } else if n(ev::PARKED) {
+        "parked"
+    } else if n(ev::O3_DROPPED) || n(ev::O3_REFUSED) || n(ev::O3_PANIC) {
+        "dropped"
+    } else if n(ev::COUNTED) {
+        "counting"
+    } else if n(ev::POP) {
+        "taken"
+    } else {
+        "queued"
+    }
+}
+
+/// The code a slot was first queued on (its count stub's code), when its history still has it.
+pub fn queued_on(h: &Hist) -> Option<u64> {
+    h.recent.iter().find(|e| e.ev == ev::QUEUE && e.b != 0).map(|e| e.b).or_else(|| h.windows.iter().find(|w| w.1 > 0).map(|w| w.0))
 }
 
 /// The words the inspect answer prints for one event (`code` names a code address: tier origin).

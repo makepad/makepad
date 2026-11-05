@@ -144,6 +144,8 @@ struct Coro {
     /// the slots of awaited futures (address vreg, suspension point): live only across their
     /// own suspension point
     await_slots: Vec<(VReg, usize)>,
+    /// the type of each awaited future, by its slot's address vreg (the state's shape: M5)
+    await_tys: Vec<(VReg, TyId)>,
     /// slots made by an await's poll (its result): dead at its suspension point (rustc: the
     /// poll's result is dead before the yield)
     poll_scratch: Vec<(u32, u32, usize)>,
@@ -1916,34 +1918,7 @@ impl<'a> Lcx<'a> {
         if self.coro.is_some() || !relax_backend::dbgloc::on() {
             return;
         }
-        // single definitions of address vregs: SlotAddr and slot + constant
-        let mut slot_of: std::collections::HashMap<u32, (u32, i32)> = std::collections::HashMap::new();
-        let mut consts: std::collections::HashMap<u32, i64> = std::collections::HashMap::new();
-        for b in &self.f.blocks {
-            for i in &b.insts {
-                let (d, a, off) = match i {
-                    Inst::SlotAddr(d, s) => {
-                        slot_of.insert(d.0, (*s, 0));
-                        continue;
-                    }
-                    Inst::Iconst(d, k) => {
-                        consts.insert(d.0, *k);
-                        continue;
-                    }
-                    Inst::IBinI(IOp::Add, _, d, a, off) => (d, a, *off),
-                    Inst::IBin(IOp::Add, _, d, a, k) => match consts.get(&k.0) {
-                        Some(off) => (d, a, *off),
-                        None => continue,
-                    },
-                    _ => continue,
-                };
-                if let Some(&(s, o)) = slot_of.get(&a.0) {
-                    if let Ok(off) = i32::try_from(o as i64 + off) {
-                        slot_of.insert(d.0, (s, off));
-                    }
-                }
-            }
-        }
+        let slot_of = slot_addrs(&self.f);
         for (li, st) in self.locals.iter().enumerate() {
             let Some(st) = st else { continue };
             let n = self.u.prog.syms.str(self.b.locals[li].name);
@@ -1963,6 +1938,30 @@ impl<'a> Lcx<'a> {
         }
     }
 
+    /// A coroutine body's locals and awaited futures by where they live: the types held in each
+    /// slot, and in each register. M5 (reload.rs) resumes a suspended state in new poll code only when what it
+    /// saved has the same types, not just the same places and sizes: a future of another
+    /// coroutine (an async fn a live edit replaced) or a closure of another version has the
+    /// size of the old one and other code.
+    fn coro_local_tys(&self, c: &Coro) -> (std::collections::HashMap<u32, Vec<TyId>>, std::collections::HashMap<u32, TyId>) {
+        let slot_of = slot_addrs(&self.f);
+        let mut slots: std::collections::HashMap<u32, Vec<TyId>> = std::collections::HashMap::new();
+        let mut regs: std::collections::HashMap<u32, TyId> = std::collections::HashMap::new();
+        for (li, st) in self.locals.iter().enumerate() {
+            let Some(st) = st else { continue };
+            let t = self.u.tcx.tys.erase_regions(self.monomorphize(self.b.locals[li].ty));
+            match st {
+                LocalSt::Slot(a) => if let Some(&(s, _)) = slot_of.get(&a.0) { slots.entry(s).or_default().push(t); },
+                LocalSt::Regs(r) => for v in r { regs.insert(v.0, t); },
+            }
+        }
+        // the awaited futures (each in a slot of its own: rustc's `__awaitee`)
+        for &(a, t) in &c.await_tys {
+            if let Some(&(s, _)) = slot_of.get(&a.0) { slots.entry(s).or_default().push(t); }
+        }
+        (slots, regs)
+    }
+
     pub fn finish(&mut self) {
         self.record_dbg();
         let inits = std::mem::take(&mut self.entry_inits);
@@ -1979,12 +1978,14 @@ impl<'a> Lcx<'a> {
         }
         elaborate_drop_flags(&mut self.f, &flags);
         if let Some(c) = self.coro.take() {
+            // (only a live session resumes states in new code)
+            let tys = if self.u.prog.session.options.live { self.coro_local_tys(&c) } else { Default::default() };
             // the transform moves the body's slots around the suspension points
             for s in self.f.slots.iter_mut() {
                 s.born = false;
             }
             let ptr_bytes = self.pb();
-            match coroutine_transform(&mut self.f, &c, ptr_bytes) {
+            match coroutine_transform(&mut self.f, &c, ptr_bytes, &tys) {
                 Ok((sz, al, shape)) => {
                     let area = (sz, al);
                     if self.errors.is_empty() {
@@ -2514,7 +2515,7 @@ impl<'a> Lcx<'a> {
                 self.own_capture(ce, i, *li);
             }
         }
-        self.coro = Some(Coro { ct, env, cx, frame_off, tag, up_size: ul.size, await_slots: Vec::new(), poll_scratch: Vec::new(), call_private: Default::default(), call_sret: Default::default(), poll_ret, suspends: Vec::new(), cancel_end: Some(cancel_end), pending_ret, after_done, after_panic });
+        self.coro = Some(Coro { ct, env, cx, frame_off, tag, up_size: ul.size, await_slots: Vec::new(), await_tys: Vec::new(), poll_scratch: Vec::new(), call_private: Default::default(), call_sret: Default::default(), poll_ret, suspends: Vec::new(), cancel_end: Some(cancel_end), pending_ret, after_done, after_panic });
         self.pos = ast.block(body).lo;
         let mark = self.stmt_temps.len();
         let v = self.lower_block(body);
@@ -2623,6 +2624,7 @@ impl<'a> Lcx<'a> {
         if let Some(c) = self.coro.as_mut() {
             let k = c.suspends.len();
             c.await_slots.push((slot, k));
+            c.await_tys.push((slot, fut_t));
         }
         self.store_val(slot, 0, fut_t, fut);
         // no drop flag: the future is a temporary only between here and its drop after Ready
@@ -6207,10 +6209,35 @@ impl<'a> Lcx<'a> {
     /// `a = v` for a place expression `a`: drops its old value (what of it was not moved out),
     /// then writes.
     fn assign_to(&mut self, a: ExprId, v: Val) {
-                // a local: drop its old value if it holds one, then it owns the new one
+                // a local: drop its old value if it holds one, then it owns the new one. A
+                // capture of an Fn/FnMut closure always holds a value (never moved out, and rustc
+                // rejects capturing an unassigned local): it takes the place path below, its old
+                // value dropped before the write (it leaked: app_main!'s `app_value = ..` kept
+                // every design re-run's app tree)
                 if let ExprKind::Path(_) = &self.ast().expr(strip_paren(self.ast(), a)).kind {
-                    if let Some(Res::Local(li)) = self.b.res.get(&strip_paren(self.ast(), a).0).copied() {
+                    if let Some(Res::Local(li)) = self.b.res.get(&strip_paren(self.ast(), a).0).copied().filter(|r| !matches!(r, Res::Local(li) if self.foreign[*li as usize] && !self.capture_flag.contains_key(li))) {
                         let lt = self.monomorphize(self.b.locals[li as usize].ty);
+                        if self.foreign[li as usize] {
+                            // a by-value capture in a state with drop flags: the old value drops
+                            // if its flag says it is there, and the state owns the new one
+                            let (env, off) = self.capture_flag[&li];
+                            let pl = self.local_place(li);
+                            if self.needs_drop_glue(lt) && self.dead_blk != Some(self.cur) {
+                                let f = self.f.vreg(Cls::I);
+                                self.emit(Inst::Load(Mem::Int(1, false), f, env, off));
+                                let (yes, join) = (self.f.block(), self.f.block());
+                                self.term(Term::Branch(f, yes, join));
+                                self.switch(yes);
+                                let addr = self.place_addr(&pl, lt);
+                                self.drop_at(addr, lt);
+                                self.goto(join);
+                                self.switch(join);
+                            }
+                            self.write_place(&pl, lt, v);
+                            let one = self.iconst(1);
+                            self.emit(Inst::Store(Mem::Int(1, false), env, off, one));
+                            return;
+                        }
                         let dynamic = self.unwind_on() && self.nounwind == 0 && self.needs_drop_glue(lt) && self.drop_flags[li as usize].is_some() && !self.foreign[li as usize] && self.u.drop_may_unwind(lt);
                         if dynamic && self.dead_blk != Some(self.cur) {
                             // rustc's drop-and-replace: if dropping the old value panics, the new
@@ -11312,7 +11339,7 @@ impl<'a> Lcx<'a> {
             "vx_binary" | "vx_unary" | "vx_ternary" => 4,
             "vx_splat" | "vx_store" | "vx_narrow" | "vx_table" | "vx_mask" => 2,
             "vx_load" | "vx_sha1h" => 1,
-            "vx_blend" | "vx_sha1rnds4" => 3,
+            "vx_blend" | "vx_sha1rnds4" | "vx_crc32" => 3,
             _ => {
                 self.err(self.pos, "unknown SIMD intrinsic".into());
                 return self.dummy_val(t);
@@ -11347,6 +11374,25 @@ impl<'a> Lcx<'a> {
             let a = vector(self, 0);
             let b = vector(self, 1);
             self.emit(Inst::VX(VX::X86Sha1Rnds4(func as u8), d, a, b));
+        } else if name == "vx_crc32" {
+            // Arm __crc32{b,h,w,d}(crc, data): crc32{b,h,w,x} of the data's low `bytes` bytes;
+            // std's aarch64 module asks for it only on aarch64 targets
+            let bytes = constant(self, 2);
+            if !matches!(bytes, 1 | 2 | 4 | 8) || !self.u.prog.session.options.target.starts_with("aarch64") {
+                self.err(self.pos, "vx_crc32: (crc, data, bytes 1/2/4/8) on an aarch64 target".into());
+                return self.dummy_val(t);
+            }
+            let crc = scalar(self, 0);
+            let data = scalar(self, 1);
+            let r = self.f.vreg(Cls::I);
+            let op = match bytes {
+                1 => IOp::Crc32B,
+                2 => IOp::Crc32H,
+                4 => IOp::Crc32W,
+                _ => IOp::Crc32X,
+            };
+            self.emit(Inst::IBin(op, IntTy { bits: 64, signed: false }, r, crc, data));
+            return Val::L(vec![r]);
         } else if name == "vx_sha1h" {
             let x = scalar(self, 0);
             let a = self.f.vreg(Cls::V128);
@@ -11371,7 +11417,18 @@ impl<'a> Lcx<'a> {
                 let a = vector(self, 0);
                 let b = vector(self, 1);
                 let c = vector(self, 2);
-                self.emit(Inst::VFma(selector == 9, false, d, b, c, a));
+                self.emit(Inst::VFma(selector == 9, false, false, false, d, b, c, a));
+                return self.vx_result(d, t);
+            }
+            if (11..=18).contains(&selector) {
+                // x86 FMA3 .ps (11..14) and .pd (15..18): a * b + c, a * b - c, -(a * b) + c,
+                // -(a * b) - c, fused, a NaN operand passing on with its own sign (vfmadd /
+                // vfmsub / vfnmadd / vfnmsub)
+                let a = vector(self, 0);
+                let b = vector(self, 1);
+                let c = vector(self, 2);
+                let k = (selector - 11) % 4;
+                self.emit(Inst::VFma(k >= 2, k & 1 != 0, true, selector >= 15, d, a, b, c));
                 return self.vx_result(d, t);
             }
             let op = match selector {
@@ -11512,6 +11569,7 @@ impl<'a> Lcx<'a> {
                         // the SSE float ops: f32 (_ps) and f64 (_pd) lanes
                         40..=51 => matches!(w, VW::S | VW::D),
                         52 | 53 | 60..=63 | 70..=74 | 80 | 81 => w == VW::S,
+                        90..=93 => w == VW::D,
                         _ => false,
                     }
                 } else {
@@ -11566,6 +11624,8 @@ impl<'a> Lcx<'a> {
                         74 => VX::X86Sha256Msg2,
                         80 => VX::ArmSha1Su1,
                         81 => VX::ArmSha256Su0,
+                        // carry-less product of a 64-bit lane of a and one of b (pclmulqdq / pmull)
+                        90..=93 => VX::Clmul((op - 90) as u8),
                         29 => {
                             // Unsigned comparison = signed comparison after sign-bit bias.
                             let k = self.iconst((1u64 << (w.bits() - 1)) as i64);
@@ -13649,7 +13709,41 @@ fn coro_trace() -> bool {
     *ON.get_or_init(|| std::env::var_os("MAKEPAD_RUN_CORO_TRACE").is_some())
 }
 
-fn coroutine_transform(f: &mut Func, c: &Coro, ptr_bytes: u32) -> Result<(u32, u32, u64), String> {
+/// Single definitions of a body's address vregs: a slot's address and slot + constant, by vreg
+/// (slot, offset).
+fn slot_addrs(f: &Func) -> std::collections::HashMap<u32, (u32, i32)> {
+    let mut slot_of: std::collections::HashMap<u32, (u32, i32)> = std::collections::HashMap::new();
+    let mut consts: std::collections::HashMap<u32, i64> = std::collections::HashMap::new();
+    for b in &f.blocks {
+        for i in &b.insts {
+            let (d, a, off) = match i {
+                Inst::SlotAddr(d, s) => {
+                    slot_of.insert(d.0, (*s, 0));
+                    continue;
+                }
+                Inst::Iconst(d, k) => {
+                    consts.insert(d.0, *k);
+                    continue;
+                }
+                Inst::IBinI(IOp::Add, _, d, a, off) => (d, a, *off),
+                Inst::IBin(IOp::Add, _, d, a, k) => match consts.get(&k.0) {
+                    Some(off) => (d, a, *off),
+                    None => continue,
+                },
+                _ => continue,
+            };
+            if let Some(&(s, o)) = slot_of.get(&a.0) {
+                if let Ok(off) = i32::try_from(o as i64 + off) {
+                    slot_of.insert(d.0, (s, off));
+                }
+            }
+        }
+    }
+    slot_of
+}
+
+/// `tys`: the types of the body's locals by slot and by register (coro_local_tys), for the state's shape.
+fn coroutine_transform(f: &mut Func, c: &Coro, ptr_bytes: u32, tys: &(std::collections::HashMap<u32, Vec<TyId>>, std::collections::HashMap<u32, TyId>)) -> Result<(u32, u32, u64), String> {
     use relax_backend::regalloc::{term_uses, uses_defs};
     // MAKEPAD_RUN_TRACE=coro: the transform's sizes and phase times (coro-transform line)
     let tr = coro_transform_trace();
@@ -14680,19 +14774,19 @@ fn coroutine_transform(f: &mut Func, c: &Coro, ptr_bytes: u32) -> Result<(u32, u
             b.pos.push(pos0);
         }
     }
-    // the state's shape (M5): what each suspension point saves where
+    // the state's shape (M5): what each suspension point saves where, and the types it saves
     let shape = {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         (nk, size, align).hash(&mut h);
         for s in 0..ns {
             if !saved_at[s].is_empty() {
-                (&saved_at[s], f.slots[s].size, slot_off[s]).hash(&mut h);
+                (&saved_at[s], f.slots[s].size, slot_off[s], tys.0.get(&(s as u32))).hash(&mut h);
             }
         }
         for k in 0..nk {
-            for (_, o) in &cell[k] {
-                (k, *o).hash(&mut h);
+            for (v, o) in &cell[k] {
+                (k, *o, tys.1.get(&v.0)).hash(&mut h);
             }
         }
         h.finish()

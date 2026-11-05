@@ -17,6 +17,10 @@
 //! uniforms (boot.splash `ignition`). No per-star state is kept beyond the log needed to write the
 //! buffer again after a document reload.
 use crate::{document::Line, gpu::Pipeline, text::Text, Card, Layout, State, TextLine};
+
+/// How long the dust takes to warp into the spiral (the shader's clock, boot.splash `ignition`).
+pub(crate) const WARP: std::time::Duration = std::time::Duration::from_millis(1600);
+
 use makepad_hal::{buffer_kind, Attr, CmdWriter, Id};
 use makepad_script::{id, LiveId};
 use relax_base::{

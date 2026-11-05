@@ -64,7 +64,7 @@ enum Place {
 const PLACES: [Place; 7] = [Place::MemC, Place::MemA, Place::MemB, Place::DiesC, Place::DiesA, Place::DiesB, Place::AllLive];
 
 /// fn(src: *const [a, b, c], dst: *mut [d, ...]) with one FMulAdd (scalar, w = f64) or one VFma
-/// (vector: a, b, c and d are f32x4) placed as `p`.
+/// (vector: a, b, c and d are f32x4, or f64x2 with w) placed as `p`.
 fn build(p: Place, np: bool, na: bool, w: bool, vector: bool) -> Code {
     let (cls, mem, sz) = match (vector, w) {
         (true, _) => (Cls::V128, Mem::F32, 16),
@@ -78,7 +78,7 @@ fn build(p: Place, np: bool, na: bool, w: bool, vector: bool) -> Code {
     let (a, b, c, d) = (f.vreg(cls), f.vreg(cls), f.vreg(cls), f.vreg(cls));
     let load = |v: VReg, k: i32| if vector { Inst::VLoad(v, ps, k * sz) } else { Inst::Load(mem, v, ps, k * sz) };
     let store = |v: VReg, k: i32| if vector { Inst::VStore(pd, k * sz, v) } else { Inst::Store(mem, pd, k * sz, v) };
-    let op = if vector { Inst::VFma(np, na, d, a, b, c) } else { Inst::FMulAdd(np, na, w, d, a, b, c) };
+    let op = if vector { Inst::VFma(np, na, false, w, d, a, b, c) } else { Inst::FMulAdd(np, na, w, d, a, b, c) };
     let mut insts = match p {
         Place::MemC => vec![load(a, 0), load(b, 1), load(c, 2)],
         Place::MemA => vec![load(b, 1), load(c, 2), load(a, 0)],
@@ -192,6 +192,36 @@ fn scalar_fma_nans_whatever_the_placement() {
 }
 
 #[test]
+fn vector_f64_fma_nans_whatever_the_placement() {
+    if !has_fma() {
+        return;
+    }
+    let vs = values64();
+    for p in PLACES {
+        for (np, na) in FORMS {
+            let code = build(p, np, na, true, true);
+            let run: Entry = unsafe { std::mem::transmute(code.ptr()) };
+            for &a in &vs {
+                for &b in &vs {
+                    // two lanes, two addends
+                    for cs in vs.chunks(2) {
+                        let mut c2 = [1f64; 2];
+                        c2[..cs.len()].copy_from_slice(cs);
+                        let src = [a, a, b, b, c2[0], c2[1]];
+                        let mut d = [0f64; 16];
+                        run(src.as_ptr() as *const u8, d.as_mut_ptr() as *mut u8);
+                        for l in 0..2 {
+                            let c = c2[l];
+                            assert_eq!(d[l].to_bits(), want64(np, na, a, b, c), "f64x2 {p:?} np={np} na={na} lane {l} ({:x}, {:x}, {:x})", a.to_bits(), b.to_bits(), c.to_bits());
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn vector_fma_nans_whatever_the_placement() {
     if !has_fma() {
         return;
@@ -238,8 +268,8 @@ fn build_splat(np: bool, na: bool) -> Code {
         Inst::VSplat(x, s),
         Inst::VLoad(a, ps, 0),
         Inst::VLoad(c, ps, 32),
-        Inst::VFma(np, na, d0, a, x, c),
-        Inst::VFma(np, na, d1, x, a, c),
+        Inst::VFma(np, na, false, false, d0, a, x, c),
+        Inst::VFma(np, na, false, false, d1, x, a, c),
         Inst::VStore(pd, 0, d0),
         Inst::VStore(pd, 16, d1),
     ];

@@ -8,6 +8,7 @@ mod inherent;
 mod convert_impls;
 
 use crate::fmt;
+use crate::fmt::Write as _;
 use crate::iter::{DoubleEndedIterator, ExactSizeIterator, FusedIterator, IntoIterator, Iterator};
 use crate::option::Option::{self, None, Some};
 use crate::result::Result::{self, Err, Ok};

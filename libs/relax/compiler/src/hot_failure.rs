@@ -131,7 +131,25 @@ fn jit_error(record: &str, reason: &str) {
         &format!("\"record\":{},\"reason\":{}", crate::inspect::json_str(record), crate::inspect::json_str(reason)));
 }
 
+/// Records per run (a checker broken for every body of an app wrote one synced file per body; the
+/// run's summary counts them all).
+const CHECKER_PANIC_RECORDS: u64 = 16;
+
+/// A panic in a check of `body` (borrowck::lazy's sink, typeck_bg): its own record, since no hot load
+/// failed and the app runs on. This ledger is where the next one is seen. Runs on the checking
+/// thread: a write that fails stays pending for the next flush, and nothing here waits for it.
+pub fn checker_panic(body: &str, message: &str) {
+    static RECORDED: AtomicU64 = AtomicU64::new(0);
+    if RECORDED.fetch_add(1, Ordering::Relaxed) >= CHECKER_PANIC_RECORDS { return; }
+    let _kept = crate::zone_alloc::kept();
+    let r = record(&empty_attempt(), Outcome::CheckerPanic, format!("checker panic in `{body}`: {message}"), String::new(), Vec::new());
+    state().pending.push_back(r);
+    flush();
+}
+
 pub fn recovering() -> bool { ACTIVE.load(Ordering::Acquire) }
+/// Whether a live edit was attempted in this process.
+pub(crate) fn edit_ran() -> bool { state().current.is_some() }
 pub(crate) fn enable() { REPORTING.store(true, Ordering::Release); }
 pub fn has_error() -> bool { ERROR.load(Ordering::Acquire) }
 pub(crate) fn replacement_loaded() {
@@ -221,8 +239,7 @@ pub fn verdict(code: i32) -> Verdict {
 
 /// An existing process restart carries the recovery identity and changed units
 /// alongside the app's snapshot. It does not manufacture another hot load.
-/// (unix-only: the restart is an exec in place, reload.rs exec_restart)
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub(crate) fn prepare_exec(cmd: &mut std::process::Command) -> Result<(), String> {
     let _kept = crate::zone_alloc::kept();
     let recovery = state().recovery.as_ref().map(|r| (r.attempt.clone(), r.failure.clone()));
@@ -233,6 +250,24 @@ pub(crate) fn prepare_exec(cmd: &mut std::process::Command) -> Result<(), String
     std::fs::create_dir_all(path.parent().unwrap()).and_then(|_| std::fs::write(&path, data.to_json())).map_err(|e| e.to_string())?;
     cmd.env("MAKEPAD_JIT_RECOVERY", path);
     Ok(())
+}
+
+/// Windows: the next run never started, and the run that asked for it has ended, so its parent
+/// (restart_parent.rs) closes the recovery that run's file `path` describes.
+#[cfg(windows)]
+pub(crate) fn next_run_failed(path: &std::path::Path, why: &str) {
+    let Some(r) = std::fs::read_to_string(path).ok().and_then(|s| Record::parse(&s)) else {
+        eprintln!("makepad hot: cannot read the recovery record {}", path.display());
+        return;
+    };
+    let _ = std::fs::remove_file(path);
+    let attempt = Attempt { id: r.load, units: Arc::new(r.units), logs: Arc::new(r.logs) };
+    let mut done = record(&attempt, Outcome::RestartFailed, why.to_string(), r.failure, vec![why.to_string()]);
+    done.app = r.app;
+    eprintln!("{}", Verdict::JitError { record: done.id.clone() }.line());
+    if let Err(e) = makepad_remote::hot::persist(&done) {
+        eprintln!("makepad hot: record {} not written: {e}", done.id);
+    }
 }
 
 pub(crate) fn restore() {

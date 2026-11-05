@@ -31,12 +31,14 @@ pub(crate) fn cvt(r: c_int) -> io::Result<c_int> {
 
 impl Socket {
     pub(crate) fn new(family: c_int, ty: c_int) -> io::Result<Socket> {
-        let fd = cvt(unsafe { sn::socket(family, ty, 0) })?;
+        // close-on-exec from the start where the OS can, as real std (another thread's fork must
+        // not leave it open in its child: the peer would never see it close)
+        let fd = cvt(unsafe { sn::socket(family, ty | sn::SOCK_CLOEXEC, 0) })?;
         let s = Socket { fd: unsafe { OwnedFd::from_raw_fd(fd) } };
-        unsafe {
-            sys::fcntl(fd, sys::F_SETFD, sys::FD_CLOEXEC);
-        }
         if cfg!(target_vendor = "apple") {
+            unsafe {
+                sys::fcntl(fd, sys::F_SETFD, sys::FD_CLOEXEC);
+            }
             s.set_int(sn::SOL_SOCKET, sn::SO_NOSIGPIPE, 1)?;
         }
         Ok(s)
@@ -161,11 +163,16 @@ impl Socket {
         let mut buf = sn::zeroed();
         let mut len: sn::socklen_t = 128;
         loop {
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            let r = unsafe { sn::accept4(self.raw(), sn::storage_mut_ptr(&mut buf), &mut len as *mut sn::socklen_t, sn::SOCK_CLOEXEC) };
+            #[cfg(not(any(target_os = "linux", target_os = "android")))]
             let r = unsafe { sn::accept(self.raw(), sn::storage_mut_ptr(&mut buf), &mut len as *mut sn::socklen_t) };
             if r >= 0 {
                 let s = Socket::from_fd(r);
-                unsafe {
-                    sys::fcntl(r, sys::F_SETFD, sys::FD_CLOEXEC);
+                if cfg!(target_vendor = "apple") {
+                    unsafe {
+                        sys::fcntl(r, sys::F_SETFD, sys::FD_CLOEXEC);
+                    }
                 }
                 // SO_NOSIGPIPE is inherited from the listener (setting it again fails with
                 // EINVAL once the peer has already closed)

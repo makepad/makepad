@@ -166,9 +166,10 @@ fn os_regions(s: &mut Snap) {
         fn mach_vm_region_recurse(task: u32, addr: *mut u64, size: *mut u64, depth: *mut u32, info: *mut u32, count: *mut u32) -> i32;
     }
     let task = unsafe { mach_task_self_ };
-    // TASK_VM_INFO: resident 2, resident peak 3, internal 6, external 8, compressed 15, phys_footprint 18
-    let mut vm = [0u64; 24];
-    let mut count: u32 = 38;
+    // TASK_VM_INFO: resident 2, resident peak 3, internal 6, external 8, compressed 15, phys_footprint 18,
+    // ledger_phys_footprint_peak 21 (rev3: count 84)
+    let mut vm = [0u64; 48];
+    let mut count: u32 = 93;
     if unsafe { task_info(task, 22, vm.as_mut_ptr(), &mut count) } == 0 {
         // the resident size is the kernel's (the region walk below counts pages a file and other
         // processes share too, so its parts do not add up to it)
@@ -176,6 +177,11 @@ fn os_regions(s: &mut Snap) {
         s.add("footprint", vm[18]);
         s.add("peak_rss", vm[3]);
         s.add("compressed", vm[15]);
+        // the peak that counts on macOS: the peak resident size includes pages given back with
+        // MADV_FREE_REUSABLE (the arenas' release) that the kernel had not taken yet
+        if count >= 84 {
+            s.add("peak_footprint", vm[21]);
+        }
     }
     let page = unsafe { vm_page_size } as u64;
     let (mut addr, mut depth) = (0u64, 0u32);
@@ -591,7 +597,7 @@ pub fn cmd_memory(req: &Req, out: &mut Out) {
     let rss = snap.get("rss");
     let mut total = format!("{{\"rss_mb\":{},\"peak_rss_mb\":{}", mb(rss), mb(snap.get("peak_rss")));
     if snap.get("footprint") > 0 {
-        total.push_str(&format!(",\"footprint_mb\":{},\"compressed_mb\":{}", mb(snap.get("footprint")), mb(snap.get("compressed"))));
+        total.push_str(&format!(",\"footprint_mb\":{},\"peak_footprint_mb\":{},\"compressed_mb\":{}", mb(snap.get("footprint")), mb(snap.get("peak_footprint")), mb(snap.get("compressed"))));
     }
     let (inuse, free) = (snap.get("malloc/in use"), snap.get("malloc/held free"));
     total.push_str(&format!(",\"malloc_in_use_mb\":{},\"malloc_held_free_mb\":{}", mb(inuse), mb(free)));

@@ -211,6 +211,11 @@ const FileAllocationInfo: i32 = 5;
 const FileEndOfFileInfo: i32 = 6;
 const FileAttributeTagInfo: i32 = 9;
 const FileDispositionInfoEx: i32 = 21;
+const FileRenameInfoEx: i32 = 22;
+
+const FILE_RENAME_FLAG_REPLACE_IF_EXISTS: u32 = 0x1;
+const FILE_RENAME_FLAG_POSIX_SEMANTICS: u32 = 0x2;
+const ERROR_DIR_NOT_EMPTY: u32 = 145;
 
 const FILE_DISPOSITION_FLAG_DELETE: u32 = 0x1;
 const FILE_DISPOSITION_FLAG_POSIX_SEMANTICS: u32 = 0x2;
@@ -1551,8 +1556,9 @@ pub fn remove_file<P: AsRef<Path>>(path: P) -> io::Result<()> {
     unlink_native(&p)
 }
 
-/// MoveFileExW(MOVEFILE_REPLACE_EXISTING). Real std additionally retries an ACCESS_DENIED rename
-/// of a readonly file through SetFileInformationByHandle(FileRenameInfoEx); not done here.
+/// real std's sys/fs/windows.rs rename(): MoveFileExW(MOVEFILE_REPLACE_EXISTING), and an
+/// ACCESS_DENIED one again through SetFileInformationByHandle(FileRenameInfoEx) with POSIX
+/// semantics: over a target that is read-only or open elsewhere (the old file stays readable there).
 pub fn rename<P: AsRef<Path>, Q: AsRef<Path>>(from: P, to: Q) -> io::Result<()> {
     // within a virtual folder: between the edited files on disk
     let from = match vfs::edit_target(from.as_ref(), vfs::Edit::Existing) {
@@ -1565,7 +1571,31 @@ pub fn rename<P: AsRef<Path>, Q: AsRef<Path>>(from: P, to: Q) -> io::Result<()> 
     };
     let a = maybe_verbatim(&from)?;
     let b = maybe_verbatim(&to)?;
-    cvt(unsafe { MoveFileExW(a.as_ptr(), b.as_ptr(), MOVEFILE_REPLACE_EXISTING) })?;
+    if unsafe { MoveFileExW(a.as_ptr(), b.as_ptr(), MOVEFILE_REPLACE_EXISTING) } != 0 {
+        return Ok(());
+    }
+    let err = last_error();
+    if err != ERROR_ACCESS_DENIED {
+        return Err(os_error(err));
+    }
+    let mut opts = OpenOptions::new();
+    opts.set_access_mode(DELETE);
+    opts.set_custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS);
+    let Ok(f) = opts.open_native(&a) else { return Err(os_error(err)) };
+    // FILE_RENAME_INFO on x64: Flags at 0, RootDirectory at 8, FileNameLength (bytes, no NUL) at
+    // 16, FileName (with its NUL) at 20
+    let size = 20 + b.len() * 2;
+    let mut info: Vec<u64> = Vec::new();
+    info.resize((size + 7) / 8, 0);
+    unsafe {
+        let p = info.as_mut_ptr() as *mut u8;
+        (p as *mut u32).write(FILE_RENAME_FLAG_REPLACE_IF_EXISTS | FILE_RENAME_FLAG_POSIX_SEMANTICS);
+        (p.add(16) as *mut u32).write(((b.len() - 1) * 2) as u32);
+        core::ptr::copy_nonoverlapping(b.as_ptr() as *const u8, p.add(20), b.len() * 2);
+    }
+    if unsafe { SetFileInformationByHandle(f.raw(), FileRenameInfoEx, info.as_ptr() as *const c_void, size as DWORD) } == 0 {
+        return Err(os_error(if last_error() == ERROR_DIR_NOT_EMPTY { ERROR_DIR_NOT_EMPTY } else { err }));
+    }
     Ok(())
 }
 

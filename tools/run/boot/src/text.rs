@@ -388,9 +388,28 @@ impl Text {
         if !release.is_empty() {
             writer.release_glyphs(&release.into_iter().collect::<Vec<_>>());
         }
-        self.opened
-            && !self.atlas.is_none()
-            && self.used.iter().all(|key| self.ready.contains_key(key))
+        self.drawable(&self.used)
+    }
+
+    /// Whether a frame using glyphs `keys` can be drawn now: each is in the atlas. A frame with no
+    /// text needs no font and no atlas (the HAL makes the atlas for the first glyph asked for):
+    /// a boot window too small for its text (a remembered 320x200) is drawn, never held for an
+    /// atlas nobody asks for.
+    fn drawable(&self, keys: &HashSet<Key>) -> bool {
+        keys.is_empty() || (self.opened && !self.atlas.is_none() && keys.iter().all(|key| self.ready.contains_key(key)))
+    }
+
+    /// What the last frame's text waits for before it can be drawn, while it waits (`drawable`).
+    pub fn waits(&self) -> Option<&'static str> {
+        if self.drawable(&self.used) {
+            None
+        } else if !self.opened {
+            Some("its text waits for its font to open")
+        } else if self.atlas.is_none() {
+            Some("its text waits for the glyph atlas")
+        } else {
+            Some("its text waits for its glyphs to be rasterized")
+        }
     }
 
     /// A frame drawn apart from the boot window's (the JIT ring's tooltip): its glyphs are
@@ -406,7 +425,7 @@ impl Text {
         if !requests.is_empty() {
             writer.request_glyphs(FONT_ID, wire::kind::SDF, requests);
         }
-        self.opened && !self.atlas.is_none() && self.pinned.iter().all(|key| self.ready.contains_key(key))
+        self.drawable(&self.pinned)
     }
 
     /// The pinned glyphs may go (the next frame of the boot window releases them).
@@ -432,5 +451,30 @@ impl Text {
         ];
         let [aw, ah] = self.atlas_size;
         (rect, [x / aw, y / ah, (x + w) / aw, (y + h) / ah])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A boot window too small for its text (a hidden CLI run's remembered 320x200) lays out no
+    /// glyph; its frame is drawable before the HAL made an atlas, which only the first glyph asked
+    /// for makes. Held for the atlas, it never presented and the app never started.
+    #[test]
+    fn a_frame_with_no_text_draws_before_any_atlas() {
+        let mut writer = CmdWriter::new(makepad_hal::session::HOST);
+        let mut text = Text::new(&mut writer).unwrap();
+        text.begin_frame();
+        assert!(text.finish_frame(&mut writer, &[]), "a frame with no text waited for the font and its atlas");
+        assert_eq!(text.waits(), None);
+        text.begin_pinned();
+        assert!(text.finish_pinned(&mut writer, &[]), "a pinned frame with no text waited for the atlas");
+        // one glyph: it waits for the font, the atlas and the glyph
+        text.begin_frame();
+        let mut requests = Vec::new();
+        assert!(text.lookup(3, 12.0, 1.0, &mut requests).is_none());
+        assert!(!text.finish_frame(&mut writer, &requests));
+        assert_eq!(text.waits(), Some("its text waits for its font to open"));
     }
 }

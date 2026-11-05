@@ -1,6 +1,6 @@
 //! The permanent window of `makepad run`. Session 0 presents the boot document on
 //! any native HAL backend; compilation and app domains are guests.
-//! Only ending the run closes the physical window.
+//! Only ending the run closes the physical window, or a program that turns out to draw nothing.
 use crate::boot_progress::{History, Progress};
 use makepad_hal::{domain_stop, open_flags, session::HOST, CmdWriter, Hal, Id, OpenReq};
 use makepad_studio_protocol::KeyCode;
@@ -33,12 +33,16 @@ struct Run {
 
 #[derive(Clone)]
 enum Update {
+    /// the run-actions worker has answered the ring's click: `restart_asked` says from here on
+    Relaunched,
     Compiler(run_state::Event),
     Domain(DomainState),
     /// a build that failed before the app started compiles again (retry)
     Begin,
     Failure(String),
     Message(String),
+    /// The program turned out to draw nothing: its load screen closes, the run goes on.
+    Batch,
     SourcesChanged,
     Document(Document),
     Environment(Environment),
@@ -168,7 +172,7 @@ impl Watch {
 
     /// The ring's wish now (`None`: the JIT is settled). `clock`: the frame dump's clock (ms),
     /// for the trace.
-    fn look(&mut self, clock: Option<u128>) -> Option<RingWant> {
+    fn look(&mut self, clock: Option<u128>, restart_asked: bool) -> Option<RingWant> {
         use relax_compiler::postframe::{activity, ui_blocked_ns};
         let now = Instant::now();
         let dt = now.duration_since(self.looked).as_secs_f32();
@@ -193,11 +197,11 @@ impl Watch {
         // a program thread compiles lazily: the UI thread's JIT duty is up, or other threads'
         // first compiles finished
         let lazy = self.duty > 0.02 || self.demand;
-        use relax_compiler::reload::host::{status, Phase};
+        use relax_compiler::reload::host::{build_progress, status, Phase};
         let rebuild = match status().0 {
             Phase::Building => 1,
             Phase::Restarting => 2,
-            Phase::Idle | Phase::Failed => 0,
+            Phase::Idle | Phase::Failed => if restart_asked { 2 } else { 0 },
         };
         if block || rebuild != 0 {
             self.worked = Some(now);
@@ -221,9 +225,14 @@ impl Watch {
             }
         }
         self.blocked = block;
+        // the build of the new JIT is what the arc tells while it runs (cargo says how far; it
+        // never reads full before the build's end). Cargo waiting, or not yet saying: no arc.
+        let cargo = (rebuild == 1).then(build_progress).map(|p| {
+            if p.total > 0 && p.waiting.is_empty() { (p.done as u64, (p.total - p.done.min(p.total)).max(1) as u64) } else { (0, 0) }
+        });
         let want = RingWant {
-            done: a.queue_done().saturating_sub(self.done_from.unwrap_or(a.queue_done())),
-            pending: a.pending(),
+            done: cargo.map_or_else(|| a.queue_done().saturating_sub(self.done_from.unwrap_or(a.queue_done())), |c| c.0),
+            pending: cargo.map_or_else(|| a.pending(), |c| c.1),
             ahead: a.ahead,
             o2: a.o2,
             o3: a.o3 + a.o3_running,
@@ -234,6 +243,7 @@ impl Watch {
             rate: self.rate,
             busy: self.busy_since.map_or(Duration::ZERO, |t| now.duration_since(t)),
             rebuild,
+            restart_asked,
         };
         // the trace: what the ring was told, at most 4 times a second while it shows
         if self.trace && (self.shown || self.traced.is_some()) && self.traced.is_none_or(|t| now.duration_since(t) >= Duration::from_millis(250)) {
@@ -272,6 +282,12 @@ impl Watch {
     }
 }
 
+/// The fades' curve.
+fn smooth(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
 /// The ring dot's tooltip: what `alert` means, the first thing behind it, and what a click does.
 fn ring_tip(alert: Option<RingAlert>, data: &State, diagnostics: &[Diagnostic], update_message: Option<&str>) -> Option<String> {
     let first_error = || diagnostics.iter().find(|d| d.severity == relax_compiler::diag::Severity::Error).map(|d| tip_line(&d.message, 70));
@@ -282,7 +298,11 @@ fn ring_tip(alert: Option<RingAlert>, data: &State, diagnostics: &[Diagnostic], 
             let n = pending.len().max(1);
             let more = if n > 1 { format!(" (+{} more)", n - 1) } else { String::new() };
             let keeps = if relax_compiler::reload::restart_keeps_state() { ", the app keeps its state" } else { "" };
-            format!("{n} change{} need{} a restart: {what}{more} · click to restart{keeps}", if n > 1 { "s" } else { "" }, if n > 1 { "" } else { "s" })
+            let click = click_says(relax_compiler::reload::host::route(), &relax_compiler::reload::host::build_progress(), keeps);
+            // what a click does comes first: a narrow window cuts the end of this line
+            let mut click = click.chars();
+            let first = click.next().map(|c| c.to_ascii_uppercase()).unwrap_or(' ');
+            format!("{first}{} · {n} change{}: {what}{more}", click.as_str(), if n > 1 { "s" } else { "" })
         }
         RingAlert::PatchFailed => match first_error() {
             Some(error) => format!("Live patch not applied, the previous code runs: {error} · click for details"),
@@ -292,8 +312,8 @@ fn ring_tip(alert: Option<RingAlert>, data: &State, diagnostics: &[Diagnostic], 
             let failure = relax_compiler::reload::host::failure();
             let error = failure.lines().map(str::trim).find(|l| l.starts_with("error")).map(|l| tip_line(l, 70));
             match error {
-                Some(error) => format!("Rebuilding makepad failed, the previous code runs: {error} · click for details"),
-                None => "Rebuilding makepad failed, the previous code runs · click for details".into(),
+                Some(error) => format!("Building the new JIT failed, the previous code runs: {error} · click for details"),
+                None => format!("Building the new JIT failed, the previous code runs: {} · click for details", tip_line(&failure, 70)),
             }
         }
         RingAlert::Panic => match &data.parked {
@@ -303,6 +323,35 @@ fn ring_tip(alert: Option<RingAlert>, data: &State, diagnostics: &[Diagnostic], 
         RingAlert::Stale => "Paused on code a live edit replaced · click to see it".into(),
     };
     Some(text)
+}
+
+/// What a click on the waiting-change dot does, for its tooltip: a click that starts a build of
+/// the JIT never reads as a plain restart.
+fn click_says(route: relax_compiler::reload::host::Route, progress: &relax_compiler::reload::host::BuildProgress, keeps: &str) -> String {
+    use relax_compiler::reload::host::Route;
+    match route {
+        Route::Plain => format!("click to restart{keeps}"),
+        Route::BuildFirst => format!("the JIT changed too: click to build it, then restart{keeps}"),
+        Route::Building if progress.total > 0 => format!("the new JIT is building ({}/{}): click to restart when it's done{keeps}", progress.done, progress.total),
+        Route::Building => format!("the new JIT is building: click to restart when it's done{keeps}"),
+        Route::Built => format!("the new JIT is built: click to restart into it{keeps}"),
+        Route::CannotBuild => format!("the JIT changed too and can't rebuild while it runs here: click to restart on this JIT{keeps}; `cargo run` updates it"),
+    }
+}
+
+/// The ring's tooltip from the click until the restart: what is happening, how far it is, and that
+/// nothing is left to click. `keeps`: how the app comes back.
+fn restart_says(phase: relax_compiler::reload::host::Phase, secs: u64, progress: &relax_compiler::reload::host::BuildProgress, pinned: bool, keeps: &str) -> String {
+    use relax_compiler::reload::host::Phase;
+    match phase {
+        Phase::Building if !progress.waiting.is_empty() => format!("Waiting for another JIT build · {secs} s · then it builds and restarts{keeps}"),
+        Phase::Building if progress.total > 0 => format!("Building the new JIT: {}/{} · {secs} s · then it restarts{keeps}", progress.done, progress.total),
+        Phase::Building => format!("Building the new JIT · {secs} s · then it restarts{keeps}"),
+        Phase::Restarting if pinned => "New JIT built · the restart waits until the app is unpinned".into(),
+        Phase::Restarting => format!("New JIT built · the app restarts{keeps} at its next safe point (unsaved work holds it)"),
+        Phase::Idle | Phase::Failed if pinned => "The restart waits until the app is unpinned".into(),
+        Phase::Idle | Phase::Failed => format!("The app restarts{keeps} at its next safe point (unsaved work holds it)"),
+    }
 }
 
 /// A restart-pending entry without the batch's file list in front (`a.rs, b.rs: <what>`).
@@ -662,6 +711,10 @@ pub fn open(package: &str, package_dir: &str) -> Result<(), String> {
     // at that size from the start, exactly, and the size is not kept for the next run
     let launch = launch_window(info.dpi);
     let geometry = launch.unwrap_or(geometry);
+    // the window is remembered for the user's next run: not a launch size, nor a hidden run's
+    // window, which nobody sized (a command-line app's hidden 320x200 opened the user's next run
+    // at that size)
+    let remember = launch.is_none() && !unseen();
     let history = History::load(
         relax_compiler::dirs::cache_dir()
             .join("boot")
@@ -717,14 +770,14 @@ pub fn open(package: &str, package_dir: &str) -> Result<(), String> {
                 let environment = ENVIRONMENT.lock().unwrap_or_else(|e| e.into_inner()).unwrap_or_default();
                 host.environment(environment);
                 if let Some(icon) = icon { host.icon(icon); }
-                if launch.is_none() {
+                if remember {
                     let _ = GEOMETRY.set(state_path.clone());
                 }
                 pump(
                     host,
                     initial,
                     history,
-                    launch.is_none().then_some(state_path),
+                    remember.then_some(state_path),
                     package_dir,
                     watched_document,
                     ready,
@@ -767,6 +820,11 @@ pub fn start(spec: AppSpec) -> Result<(), String> {
     crate::hal_host::start(launch)
 }
 
+/// The program went quiet without starting an app (`MainHost::batch`).
+pub fn batch() {
+    post(Update::Batch);
+}
+
 pub fn spec(id: u32) -> Option<AppSpec> {
     state()
         .as_ref()
@@ -775,15 +833,42 @@ pub fn spec(id: u32) -> Option<AppSpec> {
 }
 
 /// Where the run window's geometry is remembered (the app's next run, and a restart, opens there);
-/// unset for a launch size (`MAKEPAD_WINDOW`).
+/// unset for a launch size (`MAKEPAD_WINDOW`) and a hidden run.
 static GEOMETRY: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// The restart itself has begun: the window goes to the start screen.
+static LEAVING: AtomicBool = AtomicBool::new(false);
+/// The window shows the start screen (or cannot): the restart goes on.
+static LEFT: (std::sync::Mutex<bool>, std::sync::Condvar) = (std::sync::Mutex::new(false), std::sync::Condvar::new());
+/// The thread of the run window's loop (a restart it starts itself cannot wait for its frames).
+static PUMP_THREAD: std::sync::OnceLock<std::thread::ThreadId> = std::sync::OnceLock::new();
+/// The app's content fades to the start screen in this time, and in from it.
+const VEIL_IN: Duration = Duration::from_millis(250);
+const VEIL_OUT: Duration = Duration::from_millis(500);
+/// A restarted run whose window went to the start screen before the restart: "1".
+const RESTART_SCREEN: &str = "MAKEPAD_RUN_RESTART_SCREEN";
+
+/// The restart itself begins (on the thread that restarts, the run's end still to do): the app's
+/// content fades to the start screen in the same window; this returns when it covers the app. A
+/// window that cannot show it (none yet, a panel over it, its loop gone) never holds up the restart.
+pub fn restart_begins() {
+    // (an edit's restart keeps the app's last frame on the window until the new one replaces it)
+    if !relax_compiler::reload::relaunch_asked() || state().is_none() || PUMP_THREAD.get() == Some(&std::thread::current().id()) {
+        return;
+    }
+    *LEFT.0.lock().unwrap_or_else(|e| e.into_inner()) = false;
+    LEAVING.store(true, Ordering::SeqCst);
+    Hal::global().wake_session(HOST);
+    let left = LEFT.0.lock().unwrap_or_else(|e| e.into_inner());
+    let _ = LEFT.1.wait_timeout_while(left, VEIL_IN * 3, |left| !*left);
+}
 
 /// Right before the exec restart (relax_compiler::reload::set_before_exec): the restarted run
 /// opens its window exactly where this one is -- the geometry is written now, not once it held
 /// still -- and keeps the window manager's window (Linux) or its place in the window stacking
 /// and the focus (macOS, makepad_hal::restack_handover). Returns the environment for the new
-/// image.
-#[cfg(unix)]
+/// image. (Windows: the restarted run is a new process, which only opens its window there.)
+#[cfg(any(unix, windows))]
 pub fn prepare_exec() -> Vec<(String, String)> {
     let window = state().as_ref().map(|r| r.window).filter(|w| !w.is_none());
     if let (Some(window), Some(path)) = (window, GEOMETRY.get()) {
@@ -800,14 +885,19 @@ pub fn prepare_exec() -> Vec<(String, String)> {
     env.extend(makepad_hal::wm_prepare_exec());
     #[cfg(target_os = "macos")]
     env.extend(makepad_hal::restack_handover());
+    // the window went to the start screen: the new run goes on from it
+    env.push((RESTART_SCREEN.to_string(), if LEAVING.load(Ordering::SeqCst) { "1" } else { "0" }.to_string()));
     env
 }
 
 /// The exec after [`prepare_exec`] failed: the window manager's connection is this process's again.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub fn undo_exec() {
     #[cfg(target_os = "linux")]
     makepad_hal::wm_undo_exec();
+    // the app stays: the window goes back to it
+    LEAVING.store(false, Ordering::SeqCst);
+    Hal::global().wake_session(HOST);
 }
 
 pub fn observe(id: u32, next: &DomainState) {
@@ -929,6 +1019,7 @@ fn work(rx: std::sync::mpsc::Receiver<Work>, package_dir: PathBuf, document: Doc
                 if let Err(e) = relax_compiler::reload::relaunch_pending() {
                     post(Update::Message(e));
                 }
+                post(Update::Relaunched);
             }
             Work::OpenFile { file, line, col } => {
                 if let Err(error) = editor.open_file(file, line, col) {
@@ -1062,19 +1153,25 @@ fn pump(
         .expect("run action worker");
     let mut work_pending = VecDeque::new();
     let mut work_full = false;
-    let has_window = host.window().is_some();
+    let mut has_window = host.window().is_some();
     let unseen = unseen();
     let mut probe = crate::boot_probe::Probe::from_env();
     if probe.is_some() {
         host.measure_input();
     }
-    // A restarted process (the exec restart, reload.rs exec_restart) draws nothing of its own
-    // while it compiles: its window shows with the app's first frame (HIDDEN_UNTIL_PRESENT), never
-    // with the boot field first -- no flash of another picture, and in a window manager that kept
-    // the window across the exec, the app's last frame stays until the new one replaces it. A
-    // failure, a parked thread or an offered update still shows. So its compile does not wait for
-    // the window's first present (there is none before the app's): the window is open now.
-    let restarted = std::env::var_os("MAKEPAD_RUN_RESTART_T0").is_some();
+    // A process restarted by an edit (the exec restart, reload.rs exec_restart) draws nothing of
+    // its own while it compiles: its window shows with the app's first frame
+    // (HIDDEN_UNTIL_PRESENT), never with the boot field first -- no flash of another picture, and
+    // in a window manager that kept the window across the exec, the app's last frame stays until
+    // the new one replaces it. A failure, a parked thread or an offered update still shows. So its
+    // compile does not wait for the window's first present (there is none before the app's): the
+    // window is open now. A restart the person asked for went to the start screen first
+    // (`restart_begins`): that run shows it from its first frame, as a first start does.
+    let restarted = std::env::var_os("MAKEPAD_RUN_RESTART_T0").is_some()
+        && std::env::var_os(RESTART_SCREEN).is_none_or(|v| v != "1");
+    if !restarted && std::env::var_os("MAKEPAD_RUN_RESTART_T0").is_some() {
+        host.continues_start_screen();
+    }
     let mut ready = if has_window && !restarted {
         Some(ready)
     } else {
@@ -1103,6 +1200,13 @@ fn pump(
     let mut next_status = Instant::now();
     let mut dirty = true;
     let mut stage = Stage::Running;
+    // the ring's dot was clicked: it answers at once, before the worker has taken the request
+    let mut ring_clicked = false;
+    // when the app began to fade to the start screen, and in from it
+    let mut leave_at: Option<Instant> = None;
+    let mut arrive_at: Option<Instant> = None;
+    let mut dot_noted = None;
+    let _ = PUMP_THREAD.set(std::thread::current().id());
     let ring = ring_on();
     // A dump-only preview: after the running app's first half second, show the card for
     // three seconds and fade it out. No synthetic JIT wait or input change. Works hidden
@@ -1188,11 +1292,23 @@ fn pump(
                     active = false;
                     data.domain = "Boot failed".into();
                 }
+                Update::Relaunched => ring_clicked = false,
                 Update::Message(message) => {
                     diagnostics.push(Diagnostic::new("run", "", 0, 0, message));
                     diagnostics_dirty = true;
                     overlay_dismissed = false;
                     action_failed = true;
+                }
+                // from here on the run is one without a window: nobody answers a parked panic
+                // from it, and a failure ends the run
+                Update::Batch => {
+                    if host.close_window() {
+                        has_window = false;
+                        relax_compiler::inspect::events::run_state_available(false);
+                        if let Some(r) = state().as_mut() {
+                            r.window = Id::NONE;
+                        }
+                    }
                 }
                 Update::Document(document) => host.reload(document),
                 Update::Environment(environment) => host.environment(environment),
@@ -1340,7 +1456,7 @@ fn pump(
                         w.val.geom,
                         w.val.borrower_frame,
                         w.val.presentations,
-                        w.val.presenter,
+                        w.val.borrower_presented,
                         w.lent_to,
                     )
                 })
@@ -1350,7 +1466,7 @@ fn pump(
         let mut app_frames = 0;
         let mut lent_to_app = false;
         let first_present = active;
-        if let Some((geom, borrower_frame, presentations, presenter, lent)) = physical {
+        if let Some((geom, borrower_frame, presentations, borrower_presented, lent)) = physical {
             app_frames = presentations;
             lent_to_app = lent == domain && domain != 0;
             app_frame = borrower_frame && lent == domain && domain != 0;
@@ -1377,6 +1493,7 @@ fn pump(
             }
             if presentations > 0 {
                 if let Some(ready) = ready.take() {
+                    relax_compiler::run::boot_window_waits(None);
                     let _ = ready.try_send(Ok(()));
                 }
             }
@@ -1384,7 +1501,7 @@ fn pump(
                 && borrower_frame
                 && lent == domain
                 && domain != 0
-                && presenter == domain
+                && borrower_presented
                 && presentations > 0
             {
                 active = false;
@@ -1528,6 +1645,33 @@ fn pump(
             Stage::Lift if host.layer_done() => Stage::Running,
             stage => stage,
         };
+        // the restart itself: the window goes to the start screen, in its badge layer
+        let leaving = LEAVING.load(Ordering::SeqCst);
+        if leaving {
+            stage = Stage::Running;
+            if leave_at.is_none() {
+                host.start_screen_anew();
+            }
+        } else {
+            leave_at = None;
+        }
+        // a backend without window layers: the start screen in the badge layer from the moment
+        // the app has the window, so its first frames land under it; the first present fades in
+        // (a window layer does this itself: `Stage`)
+        let veil_holds = !host.layers() && host.badges() && lent_to_app && active && !restarted && !overlay && !failed && host.field_mode();
+        if first_present && !active && !restarted && !host.layers() && host.badges() && lent_to_app {
+            arrive_at = Some(Instant::now());
+        }
+        let veil = if leaving {
+            let t = leave_at.get_or_insert_with(Instant::now).elapsed().as_secs_f32() / VEIL_IN.as_secs_f32();
+            (lent_to_app && !overlay).then(|| smooth(t))
+        } else if veil_holds {
+            Some(1.0)
+        } else if let Some(t) = arrive_at.map(|at| at.elapsed().as_secs_f32() / VEIL_OUT.as_secs_f32()) {
+            if t >= 1.0 || overlay || failed { arrive_at = None; None } else { Some(1.0 - smooth(t)) }
+        } else {
+            None
+        };
         let mut wake_in = None;
         let want = match stage {
             Stage::Boot => Some(LayerWant::Boot),
@@ -1543,22 +1687,34 @@ fn pump(
         let mut want = if overlay && host.layers() { Some(LayerWant::Paused) } else { want };
         // the JIT ring while the app runs: the JIT's work in flight, a UI block, what the program
         // is stopped on (while it is)
-        let running = stage == Stage::Running && lent_to_app && !active && !failed;
+        let running = stage == Stage::Running && lent_to_app && !active && !failed && veil.is_none() && !leaving;
         let update_message = relax_compiler::reload::host::update_message();
+        // the person asked for the restart: the ring says how far it is, no dot offers it again
+        let restart_asked = ring_clicked || relax_compiler::reload::host::restart_asked();
         let alert = data
             .parked
             .as_ref()
             .map(|p| if p.stale { RingAlert::Stale } else { RingAlert::Panic })
             .or_else(|| rebuild_failed().then_some(RingAlert::RebuildFailed))
-            .or_else(|| (update_message.is_some() || !relax_compiler::reload::restart_pending().is_empty()).then_some(RingAlert::UpdateReady))
-            .or_else(|| patch_notice.is_some().then_some(RingAlert::PatchFailed));
+            .or_else(|| (!restart_asked && (update_message.is_some() || !relax_compiler::reload::restart_pending().is_empty())).then_some(RingAlert::UpdateReady))
+            .or_else(|| (!restart_asked && patch_notice.is_some()).then_some(RingAlert::PatchFailed));
         let ring_detail = match alert {
             Some(RingAlert::UpdateReady) => update_message.as_deref(),
             Some(RingAlert::PatchFailed) => patch_notice.as_deref(),
             _ => None,
         };
         // the dot's tooltip: what it means and what a click on it does (only while it shows)
-        let ring_tip = (running && ring && alert.is_some()).then(|| ring_tip(alert, &data, &diagnostics, update_message.as_deref())).flatten();
+        let ring_tip = (running && ring).then(|| match alert {
+            Some(_) => ring_tip(alert, &data, &diagnostics, update_message.as_deref()),
+            None => restart_asked.then(|| {
+                use relax_compiler::reload::host;
+                let (phase, since) = host::status();
+                // (clicked, the worker yet to start the build)
+                let phase = if ring_clicked && host::route() == host::Route::BuildFirst { host::Phase::Building } else { phase };
+                let keeps = if relax_compiler::reload::restart_keeps_state() { " with its state" } else { "" };
+                restart_says(phase, since.as_secs(), &host::build_progress(), host::restart_pinned(), keeps)
+            }),
+        }).flatten();
         // The existing wait hook is the only idle check. No card work (queue sampling,
         // layout or drawing) until it is armed. An app present (or an episode gap without
         // a wait) ends the episode, and with it the card.
@@ -1570,7 +1726,7 @@ fn pump(
         let waiting = can_wait && UI_WAIT_ARMED.load(Ordering::Acquire)
             && relax_compiler::postframe::ui_blocked_ns() > WAIT_CARD_AFTER.as_nanos() as u64;
         let ring_work = if (running && ring && host.badges()) || waiting {
-            watch.look(host.dump_ms()).filter(|_| data.parked.is_none())
+            watch.look(host.dump_ms(), restart_asked).filter(|_| data.parked.is_none())
         } else {
             None
         };
@@ -1595,6 +1751,14 @@ fn pump(
             }
         }
         host.layer(want, app_frames);
+        let veiled = host.veil(veil);
+        if let Some(wait) = veiled {
+            wake_in = Some(wake_in.map_or(wait, |w: Duration| w.min(wait)));
+        }
+        if leaving && (veiled.is_none() || veil.is_some_and(|opacity| opacity >= 1.0)) {
+            *LEFT.0.lock().unwrap_or_else(|e| e.into_inner()) = true;
+            LEFT.1.notify_all();
+        }
         if running && ring && host.badges() {
             let want = ring_work;
             if inspect_open {
@@ -1616,6 +1780,11 @@ fn pump(
         if running && host.dumping() {
             host.dump_app();
             wake_in = Some(wake_in.map_or(RING_LOOK, |w: Duration| w.min(RING_LOOK)));
+        }
+        let dot = host.ring_place();
+        if dot != dot_noted {
+            dot_noted = dot;
+            relax_compiler::reload::host::note_dot(dot);
         }
         let layered = host.layer_on();
         if active && (dirty || Instant::now() >= next_status) {
@@ -1690,6 +1859,13 @@ fn pump(
             QUIT.store(true, Ordering::Release);
             break;
         }
+        // until this window's first present: what it waits for (a frame drawn and not presented
+        // yet: the window system's); the run says it while its start waits for the window
+        if ready.is_some() {
+            relax_compiler::run::boot_window_waits(Some(
+                host.first_frame_waits().unwrap_or("its frame is drawn; the window system has presented none"),
+            ));
+        }
         if draw {
             // frames on a fixed 60 Hz schedule: the time a turn takes is not added to every
             // interval; a turn that fell behind starts the schedule again from now
@@ -1711,7 +1887,12 @@ fn pump(
                     match alert {
                         // the restart a waiting change asks for (the paused view's Restart):
                         // with the app's state where it restarts with it, never without the click
-                        Some(RingAlert::UpdateReady) => enqueue(&mut work_pending, Work::Relaunch),
+                        Some(RingAlert::UpdateReady) => {
+                            enqueue(&mut work_pending, Work::Relaunch);
+                            // the dot answers now: the circle in the next frame, which is the
+                            // next pass of this loop
+                            ring_clicked = true;
+                        }
                         // the inspect view, its first error selected
                         Some(RingAlert::RebuildFailed | RingAlert::PatchFailed) => {
                             inspect_open = true;
@@ -1996,5 +2177,31 @@ fn pump(
     }
     if worker.join().is_err() {
         eprintln!("makepad: run action worker panicked");
+    }
+}
+
+#[cfg(test)]
+mod ring_tip_tests {
+    use super::{click_says, restart_says};
+    use relax_compiler::reload::host::{BuildProgress, Phase, Route};
+
+    #[test]
+    fn a_click_that_builds_the_jit_never_reads_as_a_plain_restart() {
+        let none = BuildProgress::default();
+        assert_eq!(click_says(Route::Plain, &none, ", the app keeps its state"), "click to restart, the app keeps its state");
+        for route in [Route::BuildFirst, Route::Building, Route::Built, Route::CannotBuild] {
+            assert!(click_says(route, &none, "").contains("JIT"), "{route:?}");
+        }
+        assert!(click_says(Route::CannotBuild, &none, "").contains("this JIT"));
+    }
+
+    #[test]
+    fn from_the_click_the_tooltip_says_what_cargo_says() {
+        let at = |done, total, building: &str, waiting: &str| BuildProgress { done, total, building: building.into(), waiting: waiting.into() };
+        let says = |p: &BuildProgress| restart_says(Phase::Building, 12, p, false, " with its state");
+        assert_eq!(says(&BuildProgress::default()), "Building the new JIT · 12 s · then it restarts with its state");
+        assert_eq!(says(&at(301, 790, "relax-compiler", "")), "Building the new JIT: 301/790 · 12 s · then it restarts with its state");
+        assert!(says(&at(0, 0, "", "build directory")).starts_with("Waiting for another JIT build"));
+        assert!(restart_says(Phase::Restarting, 0, &BuildProgress::default(), true, "").contains("unpinned"));
     }
 }

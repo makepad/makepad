@@ -1,6 +1,6 @@
 #!/bin/sh
-# Regression test: JIT-compiled code reaching a provided crate's statics (sdf_bake's
-# vm_kernel::COMPILED, 10-30). A static marked #[relax_api(per_side)] is JIT code's own instance:
+# Regression test: JIT-compiled code reaching a provided crate's statics (a kernel
+# cache's static, 10-30). A static marked #[relax_api(per_side)] is JIT code's own instance:
 # `memo` prints what rustc's run prints. An unmarked static whose type is not the same bytes on
 # both sides stays rustc's one copy: `shared` stops with the clear refusal naming the static and
 # the remedy, never reading rustc's memory with Relax's layouts. Run from the workspace root after

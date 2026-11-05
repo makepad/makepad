@@ -1,6 +1,7 @@
 //! Operations on ASCII bytes.
 
 use crate::fmt;
+use crate::fmt::Write as _;
 use crate::iter::FusedIterator;
 
 #[derive(Clone)]

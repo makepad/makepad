@@ -1129,13 +1129,17 @@ pub(crate) fn pointer_offsets(u: &Unit, start: u64, image: &[u8]) -> Option<Vec<
             let pw = u.ptr_bytes() as u64;
             ((w.len() as u64) >= len / pw).then(|| w.iter().enumerate().filter(|(_, x)| x.is_some()).map(|(i, _)| (i as u64 * pw) as u32).collect())
         }
-        DataKind::Typed(t) => {
-            if u.layout_of(t).size as usize > image.len() { return None; }
-            let mut words = Vec::new();
-            walk(u, t, image.as_ptr() as u64, 0, &mut words, 0, &mut Vec::new())?;
-            Some(words.into_iter().map(|(o, _)| o).collect())
-        }
+        DataKind::Typed(t) => value_pointer_offsets(u, t, image),
     }
+}
+
+/// The pointer offsets of a value of type `t` whose bytes are `image` (an enum's active variant
+/// comes from them). None when the type cannot tell (a union) or `image` is too short.
+pub(crate) fn value_pointer_offsets(u: &Unit, t: TyId, image: &[u8]) -> Option<Vec<u32>> {
+    if u.layout_of(t).size as usize > image.len() { return None; }
+    let mut words = Vec::new();
+    walk(u, t, image.as_ptr() as u64, 0, &mut words, 0, &mut Vec::new())?;
+    Some(words.into_iter().map(|(o, _)| o).collect())
 }
 
 pub fn obj_pointer_words(u: &Unit, idx: u32) -> Option<Vec<(u32, Sym)>> {

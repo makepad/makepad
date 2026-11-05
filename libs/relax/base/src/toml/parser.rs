@@ -124,6 +124,10 @@ impl TomlDocument {
 pub struct TomlErr {
     pub msg: String,
     pub span: TomlSpan,
+    /// where the span starts, 1-based (parse_toml fills them from the text): a manifest's
+    /// error names its file, line and column as rustc does, not a byte offset
+    pub line: u32,
+    pub col: u32,
 }
 
 impl std::fmt::Debug for TomlErr {
@@ -138,12 +142,30 @@ impl std::fmt::Debug for TomlErr {
 
 impl std::fmt::Display for TomlErr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} at byte {}", self.msg, self.span.start)
+        write!(f, "{} at line {} column {}", self.msg, self.line, self.col)
+    }
+}
+
+impl TomlErr {
+    /// `<path>:<line>:<col>: <message>`, a manifest's error as rustc names a source location.
+    pub fn in_file(&self, path: &str) -> String {
+        format!("{}:{}:{}: {}", path, self.line, self.col, self.msg)
     }
 }
 
 /// Parse a complete TOML text.
 pub fn parse_toml(text: &str) -> Result<TomlDocument, TomlErr> {
+    parse_toml_text(text).map_err(|mut e| {
+        let at = e.span.start.min(text.len());
+        let before = &text.as_bytes()[..at];
+        e.line = 1 + before.iter().filter(|&&b| b == b'\n').count() as u32;
+        let line_start = before.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
+        e.col = 1 + text[line_start..].char_indices().take_while(|(i, _)| line_start + i < at).count() as u32;
+        e
+    })
+}
+
+fn parse_toml_text(text: &str) -> Result<TomlDocument, TomlErr> {
     let mut parser = Parser {
         src: text,
         bytes: text.as_bytes(),
@@ -242,6 +264,8 @@ fn conflict(msg: String, span: &TomlSpan) -> TomlErr {
     TomlErr {
         msg,
         span: span.clone(),
+        line: 0,
+        col: 0,
     }
 }
 
@@ -453,6 +477,8 @@ impl<'a> Parser<'a> {
                 start,
                 len: self.pos.saturating_sub(start).max(1).min(self.bytes.len().saturating_sub(start)),
             },
+            line: 0,
+            col: 0,
         }
     }
     fn span_from(&self, start: usize) -> TomlSpan {
@@ -1318,6 +1344,20 @@ mod tests {
         assert!(parse_toml("x = \"unterminated\n").is_err());
         let err = parse_toml("first = 1\nsecond = 2\nfirst = 3\n").unwrap_err();
         assert_eq!(err.span.start, "first = 1\nsecond = 2\n".len());
+    }
+
+    /// A duplicate key in a manifest's [dev-dependencies] names the key, its line and column
+    /// (`makepad test` read it as "not a member of the workspace" with a byte offset at best).
+    #[test]
+    fn a_duplicate_key_names_its_line_and_column() {
+        let text = "[package]\nname = \"p\"\n\n[dev-dependencies]\na = { path = \"../a\" }\nmakepad-core-util = { path = \"x\" }\n  makepad-core-util = { path = \"y\" }\n";
+        let err = parse_toml(text).unwrap_err();
+        assert_eq!((err.line, err.col), (7, 3));
+        assert_eq!(err.in_file("libs/thing/Cargo.toml"), "libs/thing/Cargo.toml:7:3: duplicate key `makepad-core-util`");
+        assert_eq!(err.to_string(), "duplicate key `makepad-core-util` at line 7 column 3");
+        // columns count characters, not bytes
+        let err = parse_toml("x = 1\na = { \"\u{e9}\" = 1, \"\u{e9}\" = 2 }\n").unwrap_err();
+        assert_eq!((err.line, err.col, err.msg.as_str()), (2, 16, "duplicate key `\u{e9}`"));
     }
 
     #[test]

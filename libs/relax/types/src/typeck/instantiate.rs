@@ -62,9 +62,10 @@ pub(super) fn try_normalize_body(prog: &Program, tcx: &Tcx, env: crate::tcx::Typ
         }
     }
     // The canonical annotations are the generic body's: they have no instantiated reading
-    // (regions are erased here), and nothing reads them from an instance.
+    // (regions are erased here). The types are read from no instance; a closure's written
+    // signature is read by the MIR borrowck of the body it checks, an instance's too (the check
+    // server's), so the instance keeps the generic body's.
     b.user_provided_types = SideTable::new();
-    b.user_provided_sigs = SideTable::new();
     for (_, args) in b.ov_index.values_mut() { sl(args, &mut s)?; }
     for (_, args) in b.mutable_index.values_mut() { sl(args, &mut s)?; }
     for (_, args) in b.std_index.values_mut() { sl(args, &mut s)?; }

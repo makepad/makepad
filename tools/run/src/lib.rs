@@ -225,13 +225,15 @@ fn provided() {
     relax_compiler::inspect::register_host_commands(makepad_script::inspect_query::COMMANDS);
     // an exec restart (an edit's, or into a rebuilt makepad) opens the window where it was and
     // keeps the WM connection: the app keeps its window
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     relax_compiler::reload::set_before_exec(hal_run::prepare_exec, hal_run::undo_exec);
+    relax_compiler::reload::set_restart_begins(hal_run::restart_begins);
     relax_compiler::run::set_main_host(relax_compiler::run::MainHost {
         domain_zero: cfg!(target_os = "android"),
         run: hal_run::run,
         open: hal_run::open,
         start: hal_run::start,
+        batch: hal_run::batch,
     });
 }
 

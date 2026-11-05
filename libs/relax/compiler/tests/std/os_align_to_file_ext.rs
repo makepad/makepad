@@ -1,6 +1,6 @@
 // <[T]>::align_to / align_to_mut (layout of the three parts for several element/target sizes and
 // start offsets) and std::os::unix::fs::FileExt (read_at / write_at / *_exact_at / *_all_at).
-// "| " lines must equal real std's. Needed by makepad-fast-inflate (crc32) and the Builder library.
+// "| " lines must equal real std's. Needed by makepad-fast-inflate (crc32).
 use std::os::unix::fs::FileExt;
 
 #[test]

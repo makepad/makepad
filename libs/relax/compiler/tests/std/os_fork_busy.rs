@@ -74,6 +74,9 @@ fn in_child<const K: usize>() -> std::io::Result<()> {
     Ok(())
 }
 
+/// The longest spawn() call so far, in microseconds (stderr: what a spawn waited for).
+static SPAWN_MAX_US: AtomicUsize = AtomicUsize::new(0);
+
 /// Starts `true` with a pre_exec closure and waits for it, at most 20 s.
 fn fork_once<const K: usize>() -> bool {
     let mut c = Command::new("true");
@@ -81,7 +84,10 @@ fn fork_once<const K: usize>() -> bool {
     unsafe {
         c.pre_exec(|| in_child::<K>());
     }
-    let mut child = match c.spawn() {
+    let t = Instant::now();
+    let spawned = c.spawn();
+    SPAWN_MAX_US.fetch_max(t.elapsed().as_micros() as usize, Ordering::Relaxed);
+    let mut child = match spawned {
         Ok(ch) => ch,
         Err(_) => return false,
     };
@@ -123,6 +129,102 @@ pub fn fork_while_jit_busy() {
         w.join().unwrap();
     }
     println!("| forks that reached exec: {} of 200", ok);
+}
+
+const SIBLING_SPAWNS: usize = 100;
+
+static HEAT_STOP: AtomicBool = AtomicBool::new(false);
+
+/// Hot code for the tiers: each instantiation a slot of its own, whose calls and loop turn it hot
+/// (its O2, then O3 builds on the compile workers while the spawns below fork).
+#[inline(never)]
+fn hot<const K: usize>(n: u64) -> u64 {
+    let mut x = n ^ K as u64;
+    for i in 0..2000u64 {
+        x = x.rotate_left(5) ^ i.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    }
+    x
+}
+
+macro_rules! hots {
+    ($n:expr; $($k:literal)*) => {{ let mut s = 0u64; $( s = s.wrapping_add(hot::<$k>($n)); )* s }};
+}
+
+fn heat() {
+    let mut n = 0u64;
+    while !HEAT_STOP.load(Ordering::Relaxed) {
+        let x = hots!(n; 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32);
+        SINK.fetch_add(x as usize, Ordering::Relaxed);
+        n += 1;
+    }
+}
+
+/// Spawns from four threads at once (each closure new: its code is built for that spawn, through
+/// the compiler's owner, while another thread forks), with hot loops tiering up beside them. Under
+/// `makepad run` a spawn's fork once waited for every compile job to end: for O3 builds, and for
+/// good where a job waited on an owner request the pause held back (a devhub test gate hung 26 min
+/// in a spawn, 2026-11-04).
+#[test]
+fn a03_concurrent_spawns_while_tiers_build() {
+    concurrent_spawns_while_tiers_build();
+}
+
+/// The test's body (also run by `relax-fork-busy`).
+pub fn concurrent_spawns_while_tiers_build() {
+    HEAT_STOP.store(false, Ordering::Relaxed);
+    let heaters: Vec<_> = (0..3).map(|_| std::thread::spawn(heat)).collect();
+    let spawners = vec![
+        std::thread::spawn(|| { let mut ok = 0usize; forks!(ok; 101 102 103 104 105 106 107 108 109 110 111 112); ok }),
+        std::thread::spawn(|| { let mut ok = 0usize; forks!(ok; 201 202 203 204 205 206 207 208 209 210 211 212); ok }),
+        std::thread::spawn(|| { let mut ok = 0usize; forks!(ok; 301 302 303 304 305 306 307 308 309 310 311 312); ok }),
+        std::thread::spawn(|| { let mut ok = 0usize; forks!(ok; 401 402 403 404 405 406 407 408 409 410 411 412); ok }),
+    ];
+    let ok: usize = spawners.into_iter().map(|s| s.join().unwrap()).sum();
+    HEAT_STOP.store(true, Ordering::Relaxed);
+    for h in heaters {
+        h.join().unwrap();
+    }
+    println!("| concurrent spawns that reached exec: {} of 48", ok);
+    eprintln!("os_fork_busy: longest spawn {:.1} ms", SPAWN_MAX_US.load(Ordering::Relaxed) as f64 / 1e3);
+}
+
+/// Spawns from four threads whose children outlive them: no spawn waits for another spawn's child.
+/// Between `pipe` and `fcntl(FD_CLOEXEC)` another thread's fork left this spawn's error pipe open in
+/// its child, and the spawn read that pipe until that child ended (a devhub test's hub held its
+/// lease table through it, and its tools waited for the run that never started, 2026-11-04). Real
+/// std's `pipe2` has no such moment on Linux; macOS has no pipe2, in real std either.
+#[test]
+fn a04_spawns_never_wait_for_each_others_children() {
+    spawns_never_wait_for_each_others_children();
+}
+
+/// The test's body (also run by `relax-fork-busy`).
+pub fn spawns_never_wait_for_each_others_children() {
+    const LIFE: Duration = Duration::from_secs(1);
+    let waited = AtomicUsize::new(0);
+    std::thread::scope(|s| {
+        for _ in 0..4 {
+            s.spawn(|| {
+                let mut children = Vec::new();
+                for _ in 0..SIBLING_SPAWNS {
+                    let mut c = Command::new("sleep");
+                    c.arg("1").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+                    unsafe {
+                        c.pre_exec(|| Ok(()));
+                    }
+                    let t = Instant::now();
+                    children.push(c.spawn().unwrap());
+                    if t.elapsed() >= LIFE {
+                        waited.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+                for mut c in children {
+                    let _ = c.wait();
+                }
+            });
+        }
+    });
+    println!("| spawns that waited for another spawn's child: {}", waited.load(Ordering::Relaxed));
 }
 
 trait Probe: Sync {

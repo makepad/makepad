@@ -417,7 +417,8 @@ fn frame_finish(now: u64) {
         l.avg = if avg == 0 { ms } else { (avg * 15 + ms) / 16 };
         let start = l.start;
         l.start = 0;
-        if !crate::jit::FIRST_PRESENT.load(Relaxed) {
+        // a test run's slow frames are its verdict's, not the inbox's
+        if !crate::jit::FIRST_PRESENT.load(Relaxed) || super::TEST_RUN.load(Relaxed) {
             return None;
         }
         let spike = FRAME_WATCH.load(Relaxed) && avg > 0 && ms > 100_000_000 && ms > avg * 4;

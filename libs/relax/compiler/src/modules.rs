@@ -350,7 +350,7 @@ unsafe fn front(up: *mut Unit, name: &str, path: &str, deps: &[String], sandbox:
     let cfg = crate::program_cfg(sess, &[]);
     let tr = module_trace();
     let mut marks: Vec<(&str, std::time::Instant)> = vec![("", std::time::Instant::now())];
-    let added = add_crates(up, &[NewCrate { name: name.to_string(), path: path.to_string(), edition: 2021, cfg, deps: dep_list, proc_macro: false }], false, None)?;
+    let added = add_crates(up, &[NewCrate { name: crate::crates::own_crate_name(name.to_string()), path: path.to_string(), edition: 2021, cfg, deps: dep_list, proc_macro: false }], false, None)?;
     let u = &mut *up;
     let Added { crates, defs, d0, e0, f0, mut errs } = added;
     let krate = crates[0];

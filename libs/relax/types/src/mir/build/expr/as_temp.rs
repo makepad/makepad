@@ -11,7 +11,7 @@ impl Builder<'_> {
     /// Compile `expr` into a fresh temporary. This is used when building up rvalues so as to freeze the value that
     /// will be consumed.
     pub fn as_temp(&mut self, block: BasicBlock, temp_lifetime: TempLifetime, expr_id: ExprId, mutability: Mutability) -> BuildResult<BlockAnd<Local>> {
-        self.as_temp_inner(block, temp_lifetime, expr_id, mutability)
+        crate::stack::ensure_sufficient_stack(|| self.as_temp_inner(block, temp_lifetime, expr_id, mutability))
     }
 
     fn as_temp_inner(&mut self, mut block: BasicBlock, temp_lifetime: TempLifetime, expr_id: ExprId, mutability: Mutability) -> BuildResult<BlockAnd<Local>> {

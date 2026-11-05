@@ -33,7 +33,7 @@ if not exist "%ROOT%\cache" (
     for /f "delims=" %%F in ('dir /b /a "%ROOT%" 2^>nul') do if /i not "%%F"=="%~nx0" if /i not "%%F"=="desktop.ini" set "ROOT=%USERPROFILE%\makepad-runner"
 )
 if defined MAKEPAD_LOADER_ROOT set "ROOT=%MAKEPAD_LOADER_ROOT%"
-if not exist "%ROOT%" mkdir "%ROOT%" || (echo   Cannot create the folder %ROOT%. & exit /b 1)
+if not exist "%ROOT%" mkdir "%ROOT%" || (echo   Cannot create the folder !ROOT!. & exit /b 1)
 if /i not "%~dp0"=="%ROOT%\" copy /y "%~f0" "%ROOT%\makepad.bat" >nul
 set "RUST_VERSION=1.98.0"
 set "TRIPLE=x86_64-pc-windows-gnu"
@@ -87,8 +87,11 @@ set "SRC=!LOADER!\!LOADER_NAME!"
 
 rem --- 1. Rust ------------------------------------------------------------------------------------
 set "NEED_RUST="
-if not exist "%RUST%\.toolchain-version" set "NEED_RUST=1"
+set "HAVE_TOOLCHAIN="
+if exist "%RUST%\.toolchain-version" set /p HAVE_TOOLCHAIN=<"%RUST%\.toolchain-version"
+if not "!HAVE_TOOLCHAIN!"=="%RUST_VERSION% %TRIPLE%" set "NEED_RUST=1"
 if not exist "%RUST%\bin\cargo.exe" set "NEED_RUST=1"
+if not exist "%RUST%\bin\rustc.exe" set "NEED_RUST=1"
 if not defined NEED_RUST goto :have_rust
 echo   Rust %RUST_VERSION%: downloading, once, into this folder
 set "CFG=%DOWNLOADS%\rust.curl"
@@ -142,9 +145,11 @@ if "%~1"=="" set "ASK=1"
 if not exist "%SRC%\.built" set "ASK=1"
 if defined ASK curl.exe -fsS --proto %SVCPROTO% -m 60 "%SERVICE%/public/app/runner/latest" -o "%RUNNER%" 2>>"%LOGS%\download.log"
 set "REL=" & set "VERSION=" & set "ZIPNAME=" & set "ZIPBYTES=" & set "ZIPSHA="
-if exist "%RUNNER%" for /f "tokens=1-5" %%A in ('powershell -NoProfile -Command "$j = Get-Content -Raw '%RUNNER%' | ConvertFrom-Json; '{0} {1} {2} {3} {4}' -f $j.release, $j.loader.sha256, $j.loader.name, $j.loader.bytes, $j.loader.sha256"') do (
+if exist "%RUNNER%" for /f "tokens=1-5" %%A in ('powershell -NoProfile -Command "$j = Get-Content -Raw -LiteralPath $env:RUNNER | ConvertFrom-Json; if ($j.release -cmatch '^[A-Za-z0-9_-]+$' -and $j.loader.name -cmatch '^[A-Za-z0-9_-]([A-Za-z0-9_.-]*[A-Za-z0-9_-])?$' -and $j.loader.bytes -cmatch '^[0-9]+$' -and $j.loader.sha256 -cmatch '^[0-9a-f]{64}$' -and -not ($j.repositories | Where-Object { $_.name -cnotmatch '^[A-Za-z0-9_-]+$' -or $_.path -cnotmatch '^[A-Za-z0-9_/-]+$' -or $_.commit -cnotmatch '^([0-9a-f]{40})?$' })) { '{0} {1} {2} {3} {4}' -f $j.release, $j.loader.sha256, $j.loader.name, $j.loader.bytes, $j.loader.sha256 }"') do (
     set "REL=%%A" & set "VERSION=%%B" & set "ZIPNAME=%%C" & set "ZIPBYTES=%%D" & set "ZIPSHA=%%E"
 )
+rem What a release names ends up in paths and URLs: anything makepad.sh would not take is no release.
+if not defined REL del "%RUNNER%" 2>nul
 set "HAVE_LOADER_SHA="
 if exist "!SRC!\.loader-sha256" set /p HAVE_LOADER_SHA=<"!SRC!\.loader-sha256"
 if not defined VERSION set "VERSION=!HAVE_LOADER_SHA!"
@@ -173,13 +178,13 @@ if not "!HAVE_VERSION!"=="!VERSION!" if not "!HAVE_LOADER_SHA!"=="!VERSION!" (
         rem files the new version no longer has removed, the rest (and target\) left as they are
         echo   Makepad's loader: updating its source to %VERSION:~0,10%
         powershell -NoProfile -Command ^
-            "$new = '%CACHE%\loader\.unpack\%REL%'; $src = '%SRC%'; $now = Get-Date; $keep = @{};" ^
+            "$ErrorActionPreference = 'Stop'; $new = Join-Path $env:CACHE ('loader\.unpack\' + $env:REL); $src = $env:SRC; $now = Get-Date; $keep = @{};" ^
             "foreach ($f in Get-ChildItem -LiteralPath $new -Recurse -File) { $rel = $f.FullName.Substring($new.Length + 1); $keep[$rel] = 1; $dst = Join-Path $src $rel;" ^
             "  if (-not (Test-Path -LiteralPath $dst) -or (Get-FileHash -LiteralPath $f.FullName).Hash -ne (Get-FileHash -LiteralPath $dst).Hash) {" ^
             "    New-Item -ItemType Directory -Force -Path (Split-Path $dst) | Out-Null; Move-Item -Force -LiteralPath $f.FullName -Destination $dst; (Get-Item -LiteralPath $dst).LastWriteTime = $now } };" ^
             "foreach ($f in Get-ChildItem -LiteralPath $src -Recurse -File) { $rel = $f.FullName.Substring($src.Length + 1);" ^
             "  if (-not $rel.StartsWith('target\') -and $rel -ne '.version' -and $rel -ne '.built' -and $rel -ne '.loader-sha256' -and -not $keep.ContainsKey($rel)) { Remove-Item -Force -LiteralPath $f.FullName } }" ^
-            || (echo   Could not update the loader's source in %SRC%. & exit /b 1)
+            || (echo   Could not update the loader's source in !SRC!. & exit /b 1)
     )
     >"!SRC!\.version.part" echo !VERSION!|| exit /b 1
     move /y "!SRC!\.version.part" "!SRC!\.version" >nul || exit /b 1
@@ -192,7 +197,13 @@ if exist "!MAKEPAD!" if exist "!SRC!\target\host\makepad-launcher.exe" if "!HAVE
 )
 
 rem --- 3. Compile the loader: no Rust settings from elsewhere on this computer; output in cache\
-set "PATH=%RUST%\bin;%SystemRoot%\System32;%SystemRoot%;%SystemRoot%\System32\WindowsPowerShell\v1.0"
+rem rust-mingw keeps the dlltool that raw-dylib imports need beside its linker, where rustc does not
+rem look, and has no assembler for it: rustc assembles (assemble.rs).
+set "RUST_TOOLS=%RUST%\lib\rustlib\%TRIPLE%\bin\self-contained"
+set "PATH=%RUST%\bin;%RUST_TOOLS%;%SystemRoot%\System32;%SystemRoot%;%SystemRoot%\System32\WindowsPowerShell\v1.0"
+if not exist "!RUST_TOOLS!\as.exe" (
+    rustc.exe --edition=2021 -O -o "!RUST_TOOLS!\as.exe" "!SRC!\tools\run\entry\assemble.rs" >"!LOGS!\assemble.log" 2>&1 || (type "!LOGS!\assemble.log" & echo   Error: could not compile the assembler. & exit /b 1)
+)
 set "CARGO_HOME=%CACHE%\cargo-home"
 set "CARGO_INCREMENTAL=0"
 set "CARGO_TERM_COLOR=never"
@@ -263,12 +274,12 @@ rem The service's latest licence-free `runner` release: its repositories on the 
 rem git face, the one at `makepad` the workspace, the others mounted at their folders.
 if exist "%RUNNER%" (
     powershell -NoProfile -Command ^
-        "$j = Get-Content -Raw '%RUNNER%' | ConvertFrom-Json; $g = '%SERVICE%/public/git/runner'; $r = $j.release;" ^
+        "$ErrorActionPreference = 'Stop'; $j = Get-Content -Raw -LiteralPath $env:RUNNER | ConvertFrom-Json; $g = $env:SERVICE + '/public/git/runner'; $r = $j.release;" ^
         "$l = @('title`tMakepad', 'arg`trun', 'arg`t--quiet', 'arg`t--cached'); $m = @();" ^
         "foreach ($p in $j.repositories) { $u = '{0}/{1}.git#{2}@{3}' -f $g, $p.name, $r, $p.commit;" ^
         "  if ($p.path -eq 'makepad') { $l += ('arg`t' + $u) } elseif ($p.path.StartsWith('makepad/')) { $m += 'arg`t--mount'; $m += ('arg`t' + $p.path.Substring(8) + '=' + $u) } };" ^
         "$l += $m; $l += 'arg`tmakepad-runner';" ^
-        "[IO.File]::WriteAllText('%ROOT%\apps\runner.launch.part', (($l | ForEach-Object { $_ -replace '`t', [char]9 }) -join [char]10) + [char]10)" ^
+        "[IO.File]::WriteAllText((Join-Path $env:ROOT 'apps\runner.launch.part'), (($l | ForEach-Object { $_ -replace '`t', [char]9 }) -join [char]10) + [char]10)" ^
         || (echo   The runner release could not be read. & exit /b 1)
     move /y "%ROOT%\apps\runner.launch.part" "%ROOT%\apps\runner.launch" >nul || exit /b 1
 )
@@ -287,10 +298,11 @@ for /f "delims=" %%N in ('powershell -NoProfile -Command "try { $n = [IO.File]::
 exit /b 0
 
 rem :build_progress counts Cargo's own Compiling lines and keeps the last crate's name, no version.
+rem (A line with ! in it loses one level of ^ even inside quotes, hence the doubled ones.)
 :build_progress
 set "COMPILED=0"
 set "CURRENT=waiting"
-for /f "tokens=2" %%C in ('findstr /r /c:"^ *Compiling [^ ][^ ]* v[0-9]" "!LOG!"') do (
+for /f "tokens=2" %%C in ('findstr /r /c:"^^ *Compiling [^^ ][^^ ]* v[0-9]" "!LOG!"') do (
     set /a COMPILED+=1 >nul
     set "CURRENT=%%C"
 )

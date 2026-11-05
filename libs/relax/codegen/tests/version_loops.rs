@@ -469,10 +469,9 @@ fn unswitch_invariant_branch() {
     }
 }
 
-/// `out[i] = a[i].wrapping_mul(3) ^ b[i] >> 1` (u32) after versioning and rotation: one block, a
-/// constant shift among the lane operations; the stream-map vectoriser takes it.
-#[test]
-fn u32_map_with_shift_vectorises() {
+/// `out[i] = a[i].wrapping_mul(3) ^ b[i] >> 1` (u32) after versioning and rotation: b0 tests
+/// `0 < n`, b1 is the loop (one block), b2 returns.
+fn u32_map() -> Func {
     let mut f = Func::new("mix_clone".into(), 0);
     let p: Vec<VReg> = (0..4).map(|_| f.vreg(Cls::I)).collect();
     let (out, a, b, n) = (p[0], p[1], p[2], p[3]);
@@ -502,10 +501,32 @@ fn u32_map_with_shift_vectorises() {
     push(&mut f, 1, Inst::ICmp(Cond::Lt, false, c1, i, n));
     term(&mut f, 1, Term::Branch(c1, 1, 2));
     term(&mut f, 2, Term::Ret(vec![]));
+    f
+}
+
+/// The u32 map: one block, a constant shift among the lane operations; the stream-map vectoriser
+/// takes it.
+#[test]
+fn u32_map_with_shift_vectorises() {
+    let mut f = u32_map();
     let n0 = f.blocks.len();
     let ch = relax_codegen::loops::vectorize_reductions(&relax_session::Options::default(), &mut f);
     assert!(ch && f.blocks.len() > n0, "vectorised");
     assert!(f.blocks.iter().any(|b| b.insts.iter().any(|i| matches!(i, Inst::VX(VX::ShrUI(_, 1), ..)))));
+}
+
+/// A widened map entered for a few elements (a loop over a short run, entered often: the slicer's
+/// per-edge strip counts) leaves for the scalar loop after the run length's test alone, not after
+/// every check of the vector guard (some twenty instructions).
+#[test]
+fn stream_map_entry_tests_run_length_first() {
+    let mut f = u32_map();
+    assert!(relax_codegen::loops::vectorize_reductions(&relax_session::Options::default(), &mut f), "vectorised");
+    let Term::Branch(_, entry, _) = f.blocks[0].term else { panic!("b0: {:?}", f.blocks[0].term) };
+    let Term::Branch(_, guard, short) = f.blocks[entry as usize].term else { panic!("entry: {:?}", f.blocks[entry as usize].term) };
+    assert_eq!(short, 1, "a short run goes to the scalar loop");
+    assert!(f.blocks[entry as usize].insts.len() <= 2, "the entry tests the run length only: {:?}", f.blocks[entry as usize].insts);
+    assert!(matches!(f.blocks[guard as usize].term, Term::Branch(_, _, 1)), "the full guard falls back to the scalar loop");
 }
 
 /// `base = if a.cmp(&b) == Greater { base } else { mid }` (binary_search's step): the Ordering is a

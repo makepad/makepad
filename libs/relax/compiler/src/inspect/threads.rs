@@ -3,23 +3,27 @@
 //!
 //! - `list()`: every thread: OS id, pthread handle, name, run state, CPU time.
 //! - `capture(t)`: the thread's pcs, innermost first. macOS suspends it (Mach) and reads its
-//!   registers; Linux and Android interrupt it with a real-time signal whose handler hands its
-//!   registers over and waits until the walk is done. Either way the thread stands still while its stack is
-//!   walked, and nothing is allocated or locked meanwhile (it may hold malloc's or the loader's
-//!   lock): pcs go to a fixed array, names are looked up after it runs again.
+//!   registers; Windows suspends it too (SuspendThread + GetThreadContext); Linux and Android
+//!   interrupt it with a real-time signal whose handler hands its registers over and waits until
+//!   the walk is done. Either way the thread stands still while its stack is walked, and nothing
+//!   is allocated or locked meanwhile (it may hold malloc's or the loader's lock): pcs go to a
+//!   fixed array, names are looked up after it runs again.
 //!
-//! The walk: JIT code keeps frame pointers (both targets); host code on macOS arm64 too (the
+//! The walk: JIT code keeps frame pointers (every target); host code on macOS arm64 too (the
 //! platform ABI) and on Android arm64 (frame records); host code on Linux x86_64 is stepped by
-//! its DWARF CFI (cfi.rs). Every memory read goes through a call that fails instead of faulting.
+//! its DWARF CFI (cfi.rs), on Windows x64 by its PE unwind info (pe_unwind.rs). A program
+//! thread's walk crosses the switch to its program stack (relax_base::stack::switch_return_pc).
+//! Every memory read goes through a call that fails instead of faulting.
 
 /// Most frames kept per stack.
 pub const MAX_FRAMES: usize = 128;
 
 #[derive(Debug)]
 pub struct Thread {
-    /// the OS's id: the Mach thread id (macOS), the tid (Linux)
+    /// the OS's id: the Mach thread id (macOS), the tid (Linux), the thread id (Windows)
     pub os_id: u64,
-    /// the pthread handle (what owner / waits name a thread by); 0: not known yet
+    /// the pthread handle (what owner / waits name a thread by; Windows: the thread id); 0: not
+    /// known yet
     pub handle: u64,
     pub name: String,
     /// running / runnable / waiting / stopped / uninterruptible / zombie
@@ -62,11 +66,14 @@ pub struct Raw {
     pub sp: u64,
     /// the thread's pthread handle as the thread itself reported it (Linux capture), else 0
     pub handle: u64,
+    /// why the walk ended at the last frame when that frame is not the stack's outermost: the
+    /// step to its caller could not be proven (a walk never guesses a caller)
+    pub stop: Option<&'static str>,
 }
 
 impl Raw {
     pub fn new() -> Raw {
-        Raw { pcs: [0; MAX_FRAMES], n: 0, lr: 0, sp: 0, handle: 0 }
+        Raw { pcs: [0; MAX_FRAMES], n: 0, lr: 0, sp: 0, handle: 0, stop: None }
     }
     pub fn frames(&self) -> &[u64] {
         &self.pcs[..self.n]
@@ -95,6 +102,7 @@ pub fn self_os_id() -> u64 {
 /// suspends itself (macOS) never runs again, one that signals itself (Linux) waits for itself.
 pub fn capture(t: &Thread, raw: &mut Raw) -> Result<(), &'static str> {
     raw.n = 0;
+    raw.stop = None;
     if t.os_id == self_os_id() {
         return Err("the calling thread (not captured)");
     }
@@ -138,9 +146,10 @@ pub fn release_hold(s: &HoldSlot) {
 }
 
 /// Up to `len` bytes of this process's memory at `addr`, or None where it is not readable (a
-/// read that fails instead of faulting: process_vm_readv / mach_vm_read_overwrite).
+/// read that fails instead of faulting: process_vm_readv / mach_vm_read_overwrite /
+/// ReadProcessMemory).
 pub fn read_mem(addr: u64, len: usize) -> Option<Vec<u8>> {
-    #[cfg_attr(windows, allow(unused_mut))]
+    #[cfg_attr(all(windows, not(target_arch = "x86_64")), allow(unused_mut))]
     let mut v = vec![0u8; len];
     if len == 0 {
         return Some(v);
@@ -168,7 +177,13 @@ pub fn read_mem(addr: u64, len: usize) -> Option<Vec<u8>> {
         let r = unsafe { mach_vm_read_overwrite(mach_task_self_, addr, len as u64, v.as_mut_ptr() as u64, &mut got) };
         (r == 0 && got == len as u64).then_some(v)
     }
-    #[cfg(windows)]
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    {
+        let mut got = 0usize;
+        let ok = unsafe { makepad_windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory(makepad_windows_sys::Win32::System::Threading::GetCurrentProcess(), addr as *const std::ffi::c_void, v.as_mut_ptr() as *mut std::ffi::c_void, len, Some(&mut got)) }.is_ok();
+        (ok && got == len).then_some(v)
+    }
+    #[cfg(all(windows, not(target_arch = "x86_64")))]
     {
         let _ = addr;
         None
@@ -189,9 +204,12 @@ fn walk_fp(raw: &mut Raw, mut fp: u64, read: &dyn Fn(u64) -> Option<u64>) {
             break;
         }
         // pointer authentication bits (arm64e system libraries)
-        raw.pcs[raw.n] = ra & 0x0000_ffff_ffff_ffff;
+        let ra = ra & 0x0000_ffff_ffff_ffff;
+        raw.pcs[raw.n] = ra;
         raw.n += 1;
-        if next <= fp {
+        // records go up the stack, except across the program stack's switch (its frame record is
+        // on the thread's own stack, the callee's on the segment)
+        if next <= fp && ra != crate::stack::switch_return_pc() {
             break;
         }
         fp = next;
@@ -381,8 +399,6 @@ mod imp {
 #[cfg(any(target_os = "linux", all(target_os = "android", target_arch = "aarch64")))]
 mod imp {
     use super::{Raw, Thread};
-    #[cfg(target_arch = "x86_64")]
-    use super::MAX_FRAMES;
     use std::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering::{AcqRel, Acquire, Relaxed, Release}};
 
     extern "C" {
@@ -525,6 +541,8 @@ mod imp {
     static HOLDS: [Slot; SLOTS] = [const { Slot { state: AtomicU32::new(0), tid: AtomicI32::new(0), regs: [const { AtomicU64::new(0) }; 9], mode: AtomicU32::new(0) } }; SLOTS];
     pub const HOLD_CAPTURE: u32 = 0;
     pub const HOLD_PAUSE: u32 = 1;
+    // a hold for good: Linux x86_64 only (`hold_for_good`, `keep_held`)
+    #[cfg(target_arch = "x86_64")]
     pub const HOLD_FOREVER: u32 = 2;
     static SIGNAL: AtomicI32 = AtomicI32::new(0);
 
@@ -635,6 +653,7 @@ mod imp {
     }
 
     /// A held thread stays held for good.
+    #[cfg(target_arch = "x86_64")]
     pub fn keep(slot: &Slot) {
         slot.mode.store(HOLD_FOREVER, Relaxed);
     }
@@ -645,17 +664,11 @@ mod imp {
     }
 
     /// A paused thread's pc, frame pointer and callee-saved integer registers (x86_64: rbx,
-    /// r12..r15 as the panic trampoline's block holds them: indices 2..6).
-    /// A thread blocked in a syscall (a pause never signals one: its stack stands still while
-    /// it blocks) gives its syscall's pc and the first frame record above its sp, no registers.
+    /// r12..r15 as the panic trampoline's block holds them: indices 2..6). None for a thread
+    /// blocked in a syscall: a pause never signals one (its stack stands still while it blocks),
+    /// and the syscall's sp and pc do not give its frame pointer.
     pub fn regs_now(t: &Thread) -> Option<(u64, u64, Vec<(usize, u64)>)> {
-        let Some(slot) = held(t.os_id) else {
-            let (_, _, sp, pc) = read_syscall(t.os_id)?;
-            #[cfg(target_arch = "x86_64")]
-            return find_record(sp, &read).map(|fp| (pc, fp, Vec::new()));
-            #[cfg(not(target_arch = "x86_64"))]
-            return super::arm64_walk::find_record(sp, &super::arm64_walk::code_ranges(), &read).map(|fp| (pc, fp, Vec::new()));
-        };
+        let slot = held(t.os_id)?;
         let r = |k: usize| slot.regs[k].load(Relaxed);
         #[cfg(target_arch = "x86_64")]
         return Some((r(0), r(2), (3..8).map(|k| (k - 1, r(k))).collect()));
@@ -707,6 +720,10 @@ mod imp {
         (n == 8).then_some(v)
     }
 
+    /// Why a walk of a thread blocked in a syscall ends where its frame pointer is needed (each
+    /// `Raw::stop` says why the walk ends at its last frame: "walk stops at <pc>: <why>").
+    pub const BLOCKED_NO_FP: &str = "its caller is found through the frame pointer, which a thread blocked in a syscall does not give (it is walked from the syscall's sp and pc only, not signalled)";
+
     pub fn capture(t: &Thread, raw: &mut Raw) -> Result<(), &'static str> {
         raw.n = 0;
         // a paused thread already stands still in its handler: walked from the registers it was
@@ -727,6 +744,7 @@ mod imp {
                     return Ok(());
                 }
                 raw.n = 0;
+                raw.stop = None;
             }
         }
         let slot = hold(t.os_id, HOLD_CAPTURE)?;
@@ -756,16 +774,15 @@ mod imp {
         super::arm64_walk::walk_fp(raw, r(2), &ranges, &read);
     }
 
-    /// A thread blocked in a syscall: its pc, then the frame records above the syscall's sp.
+    /// A thread blocked in a syscall: its pc. The syscall stub keeps no frame record, and the
+    /// record (x29) and return address (lr) it was called with are registers the syscall's sp
+    /// and pc do not give: the caller is not known.
     #[cfg(target_arch = "aarch64")]
     fn walk_blocked(raw: &mut Raw, sp: u64, pc: u64) {
         raw.sp = sp;
         raw.pcs[0] = pc;
         raw.n = 1;
-        let ranges = super::arm64_walk::code_ranges();
-        if let Some(fp) = super::arm64_walk::find_record(sp, &ranges, &read) {
-            super::arm64_walk::walk_fp(raw, fp, &ranges, &read);
-        }
+        raw.stop = Some(BLOCKED_NO_FP);
     }
 
     /// Walks from registers into `out` (pcs, innermost first; a running thread's own stack:
@@ -773,39 +790,16 @@ mod imp {
     #[cfg(target_arch = "x86_64")]
     pub fn walk_regs_with(r: &mut super::super::cfi::Regs, out: &mut [u64], read: &dyn Fn(u64) -> Option<u64>) -> usize {
         let mut raw = Raw::new();
-        walk_with(&mut raw, r, read);
+        super::x64_walk::walk_with(&mut raw, r, read);
         let n = raw.n.min(out.len());
         out[..n].copy_from_slice(&raw.pcs[..n]);
         n
     }
 
-    /// A frame record at or above `sp`: [a] = a higher record (or 0), [a+8] = code, and the record
-    /// it links to looks the same (two links checked: stale data rarely chains twice).
-    #[cfg(target_arch = "x86_64")]
-    fn find_record(sp: u64, read: &dyn Fn(u64) -> Option<u64>) -> Option<u64> {
-        let code = |a: u64| crate::jit::in_jit_code(a) || super::super::cfi::covers(a);
-        let ok = |a: u64| -> Option<u64> {
-            let next = read(a)?;
-            let ra = read(a + 8)?;
-            (code(ra) && (next == 0 || (next > a && next - a < 1 << 20))).then_some(next)
-        };
-        let mut a = sp;
-        while a < sp + (64 << 10) {
-            if let Some(next) = ok(a) {
-                if next == 0 || ok(next).is_some() {
-                    return Some(a);
-                }
-            }
-            a += 8;
-        }
-        None
-    }
-
-    /// Mixed walk: JIT frames by their frame pointers, host frames by their CFI (frame pointers
-    /// where a module has none).
+    /// Mixed walk: JIT frames by their frame records, host frames by their CFI.
     #[cfg(target_arch = "x86_64")]
     fn walk(raw: &mut Raw, r: &mut super::super::cfi::Regs) {
-        walk_with(raw, r, &read)
+        super::x64_walk::walk_with(raw, r, &read)
     }
 
     /// The highest address of the calling thread's stack (glibc reads /proc/self/maps for the
@@ -831,55 +825,94 @@ mod imp {
             (addr + size) as u64
         }
     }
+}
 
-    #[cfg(target_arch = "x86_64")]
-    fn walk_with(raw: &mut Raw, r: &mut super::super::cfi::Regs, read: &dyn Fn(u64) -> Option<u64>) {
+/// The x86_64 walk (Linux and Windows): JIT frames by their frame records, host frames by the
+/// module's unwind tables (Linux: DWARF CFI, cfi.rs; Windows: PE unwind info, pe_unwind.rs, as
+/// `cfi`), across the program stack's switch by its switch record.
+#[cfg(all(target_arch = "x86_64", any(target_os = "linux", windows)))]
+mod x64_walk {
+    use super::{Raw, MAX_FRAMES};
+
+    /// Each step is proven or the walk ends there, saying why (`raw.stop`): a JIT frame by its
+    /// frame record (JIT code keeps one in rbp; where rbp is not known, at its unwind info's
+    /// distance above sp), a host frame by its module's unwind tables, the stack switch
+    /// (relax_base::stack, a program thread's stack below its start) by the sp the switching frame
+    /// keeps on the segment. Never a caller guessed from stack contents: a scan for something
+    /// shaped like a frame record finds return addresses that earlier calls left on the stack (a
+    /// CI hang's main thread, blocked in poll, read as called from the feature resolver that had
+    /// run there before).
+    pub fn walk_with(raw: &mut Raw, r: &mut super::super::cfi::Regs, read: &dyn Fn(u64) -> Option<u64>) {
         use super::super::cfi;
         let mut top = true;
         while raw.n < MAX_FRAMES && r.rip != 0 {
-            // a caller that is no code we know ends the walk (a frame-pointer guess through code
-            // without frame pointers or CFI reads garbage)
-            if !top && !crate::jit::in_jit_code(r.rip.wrapping_sub(1)) && !cfi::covers(r.rip.wrapping_sub(1)) {
+            // the lookup pc: a return address points past its call
+            let look = if top { r.rip } else { r.rip.wrapping_sub(1) };
+            let jit = crate::jit::in_jit_code(look);
+            if !top && !jit && !cfi::covers(look) {
+                raw.stop = Some("its return address is in neither JIT code nor a module with unwind tables");
                 break;
             }
             raw.pcs[raw.n] = r.rip;
             raw.n += 1;
-            let sp0 = r.rsp;
-            let jit = crate::jit::in_jit_code(r.rip);
-            let mut stepped = false;
-            if !jit && cfi::covers(r.rip) {
-                match cfi::step(r, top, read) {
-                    cfi::Step::Done => stepped = true,
-                    cfi::Step::NeedRbp => {
-                        // a frame-pointer frame of a walk without registers: its record is the
-                        // first chained one above sp
-                        let Some(fp) = find_record(r.rsp, read) else { break };
-                        r.rbp = fp;
-                        stepped = cfi::step(r, top, read) == cfi::Step::Done;
+            // the stack switch's frame: it runs on the thread's own stack (its sp is in the
+            // switch record on the segment), its callee on the segment
+            if !top && r.rip == crate::stack::switch_return_pc() {
+                match read(r.rsp.wrapping_add(crate::stack::SWITCH_RECORD)) {
+                    Some(own) => r.rsp = own,
+                    None => {
+                        raw.stop = Some("it switched to the program stack and its switch record is unreadable");
+                        break;
                     }
-                    cfi::Step::Fail => {}
                 }
             }
-            if !stepped && jit && (r.rbp < r.rsp || r.rbp - r.rsp > 1 << 20) {
-                // a JIT frame reached from host frames that never saved rbp (a walk from a
-                // syscall's sp/pc has no rbp): its frame record is the first one above sp that
-                // chains to another record
-                match find_record(r.rsp, read) {
-                    Some(fp) => r.rbp = fp,
-                    None => break,
+            let sp0 = r.rsp;
+            if jit {
+                // [rbp] = the caller's rbp, [rbp + 8] = the return address. A thread blocked in a
+                // syscall is walked from its sp and pc: when no frame below saved rbp, the frame
+                // pointer at this call comes from the function's frame size and the call's
+                // staged arguments (its unwind info), which need sp only
+                if r.rbp == 0 {
+                    if top {
+                        raw.stop = Some("it is JIT code at no call (it makes the syscall itself) and its frame pointer is not known");
+                        break;
+                    }
+                    match crate::jit::frame_pointer_at(r.rip, sp0) {
+                        Ok(fp) => r.rbp = fp,
+                        Err(why) => {
+                            raw.stop = Some(why);
+                            break;
+                        }
+                    }
                 }
-            }
-            if !stepped {
-                // frame record: [rbp] = caller's rbp, [rbp+8] = return address
-                let (Some(ra), Some(next)) = (read(r.rbp.wrapping_add(8)), read(r.rbp)) else { break };
-                if r.rbp == 0 || r.rbp < sp0 {
+                if r.rbp < sp0 || r.rbp - sp0 > 1 << 20 {
+                    raw.stop = Some("it is JIT code and its frame pointer is not in its stack");
                     break;
                 }
+                let (Some(ra), Some(next)) = (read(r.rbp.wrapping_add(8)), read(r.rbp)) else {
+                    raw.stop = Some("it is JIT code and its frame record is unreadable");
+                    break;
+                };
                 r.rsp = r.rbp + 16;
                 r.rip = ra;
                 r.rbp = next;
+            } else {
+                match cfi::step(r, top, read) {
+                    cfi::Step::Done => {}
+                    cfi::Step::End => break,
+                    #[cfg(target_os = "linux")]
+                    cfi::Step::NeedRbp => {
+                        raw.stop = Some(super::imp::BLOCKED_NO_FP);
+                        break;
+                    }
+                    cfi::Step::Fail(why) => {
+                        raw.stop = Some(why);
+                        break;
+                    }
+                }
             }
             if r.rsp <= sp0 {
+                raw.stop = Some("its caller's frame is not above it");
                 break;
             }
             top = false;
@@ -924,43 +957,152 @@ mod arm64_walk {
     /// Appends the frames of the record chain from `fp` (the top pc is already in `raw`).
     pub fn walk_fp(raw: &mut Raw, mut fp: u64, ranges: &[(u64, u64)], read: &dyn Fn(u64) -> Option<u64>) {
         while raw.n < MAX_FRAMES && fp != 0 && fp % 8 == 0 {
-            let (Some(next), Some(ra)) = (read(fp), read(fp + 8)) else { break };
+            let (Some(next), Some(ra)) = (read(fp), read(fp + 8)) else {
+                raw.stop = Some("its frame record is unreadable");
+                break;
+            };
             let ra = strip(ra);
-            if ra == 0 || !is_code(ranges, ra) {
+            if ra == 0 {
+                break;
+            }
+            if !is_code(ranges, ra) {
+                raw.stop = Some("its frame record's return address is not code");
                 break;
             }
             raw.pcs[raw.n] = ra;
             raw.n += 1;
-            if next <= fp {
+            // up the stack, except across the program stack's switch (relax_base::stack)
+            if next <= fp && ra != crate::stack::switch_return_pc() {
                 break;
             }
             fp = next;
         }
     }
+}
 
-    /// A frame record at or above `sp` (a thread stopped in a syscall stub, which keeps no
-    /// record of its own): [a] = a higher record (or 0), [a+8] = code, and the record it links
-    /// to looks the same (two links checked: stale data rarely chains twice).
-    pub fn find_record(sp: u64, ranges: &[(u64, u64)], read: &dyn Fn(u64) -> Option<u64>) -> Option<u64> {
-        let ok = |a: u64| -> Option<u64> {
-            let next = read(a)?;
-            let ra = strip(read(a + 8)?);
-            (is_code(ranges, ra) && (next == 0 || (next > a && next - a < 1 << 20))).then_some(next)
-        };
-        let mut a = sp;
-        while a < sp + (64 << 10) {
-            if let Some(next) = ok(a) {
-                if next == 0 || ok(next).is_some() {
-                    return Some(a);
+/// Windows x64: every thread from the toolhelp snapshot; a capture suspends the thread
+/// (SuspendThread, then GetThreadContext, which waits until the suspension took effect) and walks
+/// it from its full registers, blocked or not, then resumes it. The walk reads through
+/// ReadProcessMemory (fails instead of faulting) and takes no lock: the suspended thread may hold
+/// the loader's or the heap's.
+#[cfg(all(windows, target_arch = "x86_64"))]
+mod imp {
+    use super::{Raw, Thread};
+    use makepad_windows_sys::Win32::Foundation::{CloseHandle, FILETIME, HANDLE};
+    use makepad_windows_sys::Win32::System::Diagnostics::Debug::{GetThreadContext, ReadProcessMemory, CONTEXT, CONTEXT_CONTROL_AMD64, CONTEXT_INTEGER_AMD64};
+    use makepad_windows_sys::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32};
+    use makepad_windows_sys::Win32::System::Threading::{GetCurrentProcess, GetCurrentProcessId, GetCurrentThreadId, GetThreadDescription, GetThreadTimes, OpenThread, ResumeThread, SuspendThread, THREAD_GET_CONTEXT, THREAD_QUERY_LIMITED_INFORMATION, THREAD_SUSPEND_RESUME};
+
+    /// (no pause on Windows: nothing holds a thread whose registers this could give)
+    pub fn regs_now(_t: &Thread) -> Option<(u64, u64, Vec<(usize, u64)>)> {
+        None
+    }
+
+    pub fn self_os_id() -> u64 {
+        unsafe { GetCurrentThreadId() as u64 }
+    }
+
+    /// A thread's handle is its thread id on Windows (os::thread::current).
+    pub fn tid_of_handle(h: u64) -> Option<u64> {
+        (h != 0).then_some(h)
+    }
+
+    pub fn list() -> Vec<Thread> {
+        let mut out = Vec::new();
+        let Ok(snap) = (unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) }) else { return out };
+        let pid = unsafe { GetCurrentProcessId() };
+        let mut e = THREADENTRY32::default();
+        e.dwSize = std::mem::size_of::<THREADENTRY32>() as u32;
+        let mut more = unsafe { Thread32First(snap, &mut e) }.is_ok();
+        while more {
+            if e.th32OwnerProcessID == pid {
+                let tid = e.th32ThreadID as u64;
+                let (name, cpu_ns) = name_and_cpu(tid);
+                // the run state is not known without NtQuerySystemInformation: "?"
+                out.push(Thread { os_id: tid, handle: tid, name, state: "?", cpu_ns, stack: (0, 0), syscall: None });
+            }
+            e.dwSize = std::mem::size_of::<THREADENTRY32>() as u32;
+            more = unsafe { Thread32Next(snap, &mut e) }.is_ok();
+        }
+        unsafe {
+            let _ = CloseHandle(snap);
+        }
+        out.sort_by_key(|t| t.os_id);
+        out
+    }
+
+    /// The thread's description (SetThreadDescription; std names its threads with it) and its
+    /// user + kernel CPU time.
+    fn name_and_cpu(tid: u64) -> (String, u64) {
+        let Ok(h) = (unsafe { OpenThread(THREAD_QUERY_LIMITED_INFORMATION, false, tid as u32) }) else { return (String::new(), 0) };
+        let mut name = String::new();
+        unsafe {
+            if let Ok(p) = GetThreadDescription(h) {
+                if !p.0.is_null() {
+                    let mut n = 0;
+                    while *p.0.add(n) != 0 {
+                        n += 1;
+                    }
+                    name = String::from_utf16_lossy(std::slice::from_raw_parts(p.0, n));
+                    let _ = makepad_windows_sys::Win32::Foundation::LocalFree(Some(makepad_windows_sys::Win32::Foundation::HLOCAL(p.0 as *mut std::ffi::c_void)));
                 }
             }
-            a += 8;
         }
-        None
+        let (mut created, mut exited, mut kernel, mut user) = (FILETIME::default(), FILETIME::default(), FILETIME::default(), FILETIME::default());
+        let ticks = |f: &FILETIME| (f.dwLowDateTime as u64) | ((f.dwHighDateTime as u64) << 32);
+        let cpu_ns = match unsafe { GetThreadTimes(h, &mut created, &mut exited, &mut kernel, &mut user) } {
+            Ok(()) => (ticks(&kernel) + ticks(&user)) * 100,
+            Err(_) => 0,
+        };
+        unsafe {
+            let _ = CloseHandle(h);
+        }
+        (name, cpu_ns)
+    }
+
+    /// Reads 8 bytes of this process's memory; None where nothing is readable (a system call:
+    /// it fails instead of faulting, and takes no user-space lock).
+    pub fn read(addr: u64) -> Option<u64> {
+        let mut v = 0u64;
+        let mut got = 0usize;
+        let ok = unsafe { ReadProcessMemory(GetCurrentProcess(), addr as *const std::ffi::c_void, &mut v as *mut u64 as *mut std::ffi::c_void, 8, Some(&mut got)) }.is_ok();
+        (ok && got == 8).then_some(v)
+    }
+
+    /// GetThreadContext needs its record 16-byte aligned (the generated CONTEXT says 8).
+    #[repr(C, align(16))]
+    struct Aligned(CONTEXT);
+    const _: () = assert!(std::mem::size_of::<CONTEXT>() == 0x4d0, "the x64 CONTEXT record");
+
+    pub fn capture(t: &Thread, raw: &mut Raw) -> Result<(), &'static str> {
+        raw.n = 0;
+        let h: HANDLE = unsafe { OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_LIMITED_INFORMATION, false, t.os_id as u32) }.map_err(|_| "OpenThread failed (the thread ended)")?;
+        let mut ctx = Aligned(CONTEXT::default());
+        ctx.0.ContextFlags = CONTEXT_CONTROL_AMD64 | CONTEXT_INTEGER_AMD64;
+        let r = unsafe {
+            if SuspendThread(h) == u32::MAX {
+                Err("SuspendThread failed (the thread ended)")
+            } else {
+                // the suspension takes effect asynchronously: GetThreadContext returns once it has
+                let got = GetThreadContext(h, &mut ctx.0).is_ok();
+                if got {
+                    let c = &ctx.0;
+                    let mut regs = super::super::cfi::Regs { rip: c.Rip, rsp: c.Rsp, rbp: c.Rbp, rbx: c.Rbx, rsi: c.Rsi, rdi: c.Rdi, r12: c.R12, r13: c.R13, r14: c.R14, r15: c.R15 };
+                    raw.sp = regs.rsp;
+                    super::x64_walk::walk_with(raw, &mut regs, &read);
+                }
+                ResumeThread(h);
+                if got { Ok(()) } else { Err("GetThreadContext failed") }
+            }
+        };
+        unsafe {
+            let _ = CloseHandle(h);
+        }
+        r
     }
 }
 
-#[cfg(any(windows, all(target_os = "android", not(target_arch = "aarch64"))))]
+#[cfg(any(all(windows, not(target_arch = "x86_64")), all(target_os = "android", not(target_arch = "aarch64"))))]
 mod imp {
     pub fn regs_now(_t: &super::Thread) -> Option<(u64, u64, Vec<(usize, u64)>)> {
         None
@@ -977,5 +1119,154 @@ mod imp {
     }
     pub fn capture(_t: &Thread, _raw: &mut Raw) -> Result<(), &'static str> {
         Err("stack capture is not implemented on this target")
+    }
+}
+
+/// A walk proves each step or stops there and says why; it never takes a caller from stack
+/// contents that look like a frame record. The CI shape: a thread blocked in poll whose own frame
+/// holds what earlier calls left there (here: two chained frame records naming `fake_caller`), with
+/// a garbage rbp. The walk from the syscall's sp and pc must not name `fake_caller`: it reaches
+/// `park_in_poll` through the CFI (a libc without frame pointers), or stops where the frame
+/// pointer is needed and says so (a libc built with them).
+#[cfg(all(test, target_os = "linux", target_arch = "x86_64"))]
+mod tests {
+    use super::{capture, imp::BLOCKED_NO_FP, list, Raw};
+    use std::io::Write;
+    use std::os::fd::AsRawFd;
+    use std::sync::atomic::{AtomicU64, Ordering::{Acquire, Release}};
+
+    #[repr(C)]
+    struct PollFd { fd: i32, events: i16, revents: i16 }
+    extern "C" {
+        fn poll(fds: *mut PollFd, n: u64, timeout: i32) -> i32;
+        fn gettid() -> i32;
+    }
+
+    #[inline(never)]
+    extern "C" fn fake_caller() -> u64 {
+        std::hint::black_box(7)
+    }
+
+    /// poll(fd) with rbp holding `rbp` (garbage, as rustc code without frame pointers leaves it)
+    #[inline(never)]
+    fn park_in_poll(fd: i32, rbp: u64, tid: &AtomicU64) {
+        // two chained records pointing into `fake_caller`, in this frame above poll's sp
+        let mut stale = [0u64; 64];
+        let base = stale.as_mut_ptr() as u64;
+        let ra = fake_caller as extern "C" fn() -> u64 as usize as u64 + 4;
+        stale[8] = base + 8 * 16;
+        stale[9] = ra;
+        stale[16] = 0;
+        stale[17] = ra;
+        std::hint::black_box(&mut stale);
+        tid.store(unsafe { gettid() } as u64, Release);
+        let mut p = PollFd { fd, events: 1, revents: 0 };
+        let pp = &mut p as *mut PollFd;
+        unsafe {
+            std::arch::asm!(
+                "push rbp", ".cfi_adjust_cfa_offset 8",
+                "sub rsp, 8", ".cfi_adjust_cfa_offset 8",
+                "mov rbp, {rbp}",
+                "call {poll}",
+                "add rsp, 8", ".cfi_adjust_cfa_offset -8",
+                "pop rbp", ".cfi_adjust_cfa_offset -8",
+                rbp = in(reg) rbp,
+                poll = sym poll,
+                inout("rdi") pp => _,
+                inout("rsi") 1u64 => _,
+                inout("edx") -1i32 => _,
+                clobber_abi("C"),
+            );
+        }
+        std::hint::black_box(&stale);
+    }
+
+    #[test]
+    fn a_blocked_threads_walk_never_takes_a_caller_from_stack_contents() {
+        super::super::cfi::refresh();
+        let (reader, mut writer) = std::io::pipe().unwrap();
+        static TID: AtomicU64 = AtomicU64::new(0);
+        let read_fd = reader.as_raw_fd();
+        let parked = std::thread::spawn(move || park_in_poll(read_fd, 0x10, &TID));
+        // until it blocks in poll (syscall 7)
+        let t = loop {
+            let tid = TID.load(Acquire);
+            let blocked = tid != 0 && std::fs::read_to_string(format!("/proc/self/task/{tid}/syscall")).is_ok_and(|s| s.split_whitespace().next() == Some("7"));
+            if blocked {
+                if let Some(t) = list().into_iter().find(|t| t.os_id == tid && t.state != "running") {
+                    break t;
+                }
+            }
+            std::thread::yield_now();
+        };
+        let mut raw = Raw::new();
+        let captured = capture(&t, &mut raw);
+        writer.write_all(b"x").unwrap();
+        parked.join().unwrap();
+        drop(reader);
+        captured.unwrap();
+        let names: Vec<String> = raw.frames().iter().enumerate().map(|(i, &pc)| {
+            super::super::symbols::host_symbol(if i == 0 { pc } else { pc - 1 }).map_or(format!("{pc:#x}"), |s| s.0)
+        }).collect();
+        assert!(!names.iter().any(|n| n.contains("fake_caller")), "a caller guessed from stack contents: {names:?}");
+        let reached = names.iter().any(|n| n.contains("park_in_poll"));
+        assert!(reached || raw.stop == Some(BLOCKED_NO_FP), "the walk neither reached park_in_poll nor said why it stopped: {names:?} {:?}", raw.stop);
+        assert!(raw.n >= 1);
+    }
+}
+
+/// A program thread's walk crosses the program stack's switch (relax_base::stack): a thread
+/// parked on a program stack shows the function that switched to it, which runs on the thread's
+/// own stack. Host frames only (no JIT here): the module's unwind tables, both sides.
+#[cfg(all(test, target_arch = "x86_64", any(target_os = "linux", windows)))]
+mod switch_tests {
+    use super::{capture, list, Raw};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::{Acquire, Release}};
+
+    static TID: AtomicU64 = AtomicU64::new(0);
+    static STOP: AtomicBool = AtomicBool::new(false);
+
+    /// Spins (on Linux a thread blocked in a syscall is walked from its sp and pc only, and host
+    /// code built with frame pointers needs rbp: a running thread is walked from its registers)
+    #[inline(never)]
+    fn below_the_switch() {
+        TID.store(super::self_os_id(), Release);
+        while !STOP.load(Acquire) {
+            std::hint::spin_loop();
+        }
+    }
+
+    fn bounds_changed() {}
+
+    #[inline(never)]
+    fn above_the_switch() {
+        crate::stack::on_program_stack(bounds_changed, below_the_switch);
+        // a call, not a tail jump: this frame stays on the stack
+        std::hint::black_box(());
+    }
+
+    #[test]
+    fn a_walk_crosses_the_program_stack_switch() {
+        super::super::cfi::refresh();
+        let h = std::thread::spawn(above_the_switch);
+        let t = loop {
+            let tid = TID.load(Acquire);
+            if let Some(t) = list().into_iter().find(|t| tid != 0 && t.os_id == tid) {
+                break t;
+            }
+            std::thread::yield_now();
+        };
+        let mut raw = Raw::new();
+        let captured = capture(&t, &mut raw);
+        STOP.store(true, Release);
+        h.join().unwrap();
+        captured.unwrap();
+        // by name (ELF symbols; Windows: the test binary's PDB)
+        let names: Vec<String> = raw.frames().iter().enumerate().map(|(i, &pc)| {
+            super::super::symbols::host_symbol(if i == 0 { pc } else { pc - 1 }).map_or(format!("{pc:#x}"), |s| s.0)
+        }).collect();
+        let below = names.iter().position(|n| n.contains("below_the_switch"));
+        let above = names.iter().position(|n| n.contains("above_the_switch"));
+        assert!(below.is_some() && above > below, "the walk does not cross the switch: {names:?}, stop {:?}", raw.stop);
     }
 }

@@ -50,9 +50,8 @@ static UI_WAIT_START: AtomicU64 = AtomicU64::new(0);
 static UI_WAIT_END: AtomicU64 = AtomicU64::new(0);
 /// ns the UI thread spent in (outermost) JIT waits so far
 static UI_WAIT_SUM: AtomicU64 = AtomicU64::new(0);
-/// builds ahead (speculative / prepared) finished after the first present, and running now
+/// builds ahead (speculative / prepared) finished after the first present
 pub(crate) static AHEAD_DONE: AtomicU64 = AtomicU64::new(0);
-pub(crate) static AHEAD_RUNNING: AtomicU64 = AtomicU64::new(0);
 
 // ------------------------------------------------------------ UI blocks (the JIT ring's rule)
 
@@ -189,23 +188,23 @@ pub fn ui_idle_ns() -> u64 {
 }
 
 /// Functions built ahead since the first present, and those still queued or building (the
-/// speculative / prepare queue; a queue being changed right now reads as 1 more).
+/// speculative / prepare queue).
 pub fn ahead_progress() -> (u64, u64) {
-    (AHEAD_DONE.load(Relaxed), crate::jit::ahead_queued() + AHEAD_RUNNING.load(Relaxed))
+    (AHEAD_DONE.load(Relaxed), crate::jit::ahead_queued() + crate::jit::ahead_running())
 }
 
 /// The JIT's work: what is queued and running now, and what it has finished so far (monotonic,
 /// so two looks give the work rate). For the run's JIT ring and makepad inspect `jit`: a look,
-/// not a measurement (two queue locks, each alone; the rest atomics).
+/// not a measurement (queue counters and running slots).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Activity {
     /// O3 builds queued, and running now (with the slot of one)
     pub o3: u64,
     pub o3_running: u64,
     pub o3_slot: Option<u32>,
-    /// O2 builds and verified O1 rebuilds queued; the O2 worker builds one now
+    /// O2 builds and verified O1 rebuilds queued; builds running now
     pub o2: u64,
-    pub o2_running: bool,
+    pub o2_running: u64,
     /// functions queued or building ahead now, and of them building
     pub ahead: u64,
     pub ahead_running: u64,
@@ -233,12 +232,12 @@ impl Activity {
 
     /// Something is being built right now.
     pub fn running(&self) -> bool {
-        self.o3_running > 0 || self.o2_running || self.ahead_running > 0 || self.ui_waiting || self.settling
+        self.o3_running > 0 || self.o2_running > 0 || self.ahead_running > 0 || self.ui_waiting || self.settling
     }
 
     /// Builds waiting or running, all queues.
     pub fn pending(&self) -> u64 {
-        self.ahead + self.o2 + self.o3 + self.o3_running
+        self.ahead + self.o2 + self.o2_running + self.o3 + self.o3_running
     }
 
     /// Builds finished out of the queues (ahead, O2, O3): with `pending`, the queues' progress.
@@ -269,8 +268,8 @@ impl Activity {
             }
         } else if self.ahead_running > 0 {
             "building ahead".into()
-        } else if self.o2_running {
-            "O2 build".into()
+        } else if self.o2_running > 0 {
+            format!("{} O2 builds", self.o2_running)
         } else {
             String::new()
         }
@@ -356,7 +355,7 @@ pub fn activity() -> Activity {
     let ui_wait_ns = ui_wait_ns();
     let (o3, o3_running, o3_slot) = crate::jit::o3_counts();
     let (o2, o2_running, o2_done) = crate::jit::o2_counts();
-    let ahead_running = AHEAD_RUNNING.load(Relaxed);
+    let ahead_running = crate::jit::ahead_running();
     Activity {
         o3,
         o3_running,
@@ -592,6 +591,16 @@ pub fn in_first_frames() -> bool {
 pub fn image_window_open() -> bool {
     let fp = present_ns();
     fp == 0 || FRAMES_AFTER_PRESENT.load(Relaxed) == 0 && wall_ns() < fp + IMAGE_WINDOW_NS
+}
+
+/// The live patches the newest window frame on the glass was built with (makepad-platform calls
+/// the loader symbol `relax_frame_patch` before `relax_frame_done`): `inspect live`'s
+/// `frame_patch`, which devhub's "→ frame" of a live edit waits for. A frame count says nothing
+/// about the edit in an app that animates.
+pub static FRAME_PATCH: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) extern "C" fn relax_frame_patch(patches: u64) {
+    FRAME_PATCH.fetch_max(patches, Relaxed);
 }
 
 /// The program presented a frame (makepad-platform calls the loader symbol `relax_frame_done`

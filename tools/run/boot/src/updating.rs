@@ -27,9 +27,9 @@ pub fn layout(
     let left = (viewport[0] - width) * 0.5;
     let total = work.done.saturating_add(work.pending);
     let progress = if total > 0 { work.done as f32 / total as f32 } else { 0.0 };
-    let title = if work.rebuild != 0 { "Rebuilding makepad…" } else { "Updating…" };
+    let title = if work.rebuild != 0 { "Building the new JIT…" } else { "Updating…" };
     let doing = if work.rebuild == 2 {
-        "Restarting into the rebuilt makepad"
+        "Restarting into the new JIT"
     } else if work.linking {
         "Installing cached functions"
     } else if work.settling {

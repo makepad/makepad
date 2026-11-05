@@ -539,8 +539,14 @@ impl Store {
             return sum.finish() == e.sum;
         }
         // A removed/replaced generation is still pinned by its mapping. If it cannot
-        // be reopened, verify those exact bytes. Non-Unix Bytes already owns its data.
-        self.data.get(e.off as usize..e.off as usize + e.len as usize).is_some_and(|p| sum64(p) == e.sum)
+        // be reopened, verify those exact bytes. Windows always does: its file locks are
+        // mandatory, so a read through a descriptor fails during another writer's commit. The
+        // pages hashed leave the working set again, as the descriptor's never entered it.
+        let Some(p) = self.data.get(e.off as usize..e.off as usize + e.len as usize) else { return false };
+        let same = sum64(p) == e.sum;
+        #[cfg(windows)]
+        crate::pack::release_pages(p);
+        same
     }
 
     /// Whether the entry `key` holds exactly a payload of `len` bytes with checksum `sum`
@@ -1061,6 +1067,14 @@ pub fn lock_builds(dir: &Path) -> Vec<u64> {
         .collect()
 }
 
+/// Whether a process of `build` is running here (its live lock in `dir` is held).
+pub fn build_runs(dir: &Path, build: u64) -> bool {
+    let Ok(f) = std::fs::OpenOptions::new().read(true).write(true).open(live_lock(dir, build)) else { return false };
+    let held = f.try_lock().is_err();
+    let _ = f.unlock();
+    held
+}
+
 /// When no process of `build` is running (its live lock in `dir` is free), runs `retire` under
 /// that lock held exclusively, then removes the lock file; false: the build is running.
 pub fn retire_build(dir: &Path, build: u64, retire: impl FnOnce()) -> bool {
@@ -1217,6 +1231,68 @@ mod tests {
         assert!(s.get(7).is_some(), "the unchecked read still finds it");
         assert!(s.get_checked(7).is_none(), "a corrupt payload must never be linked");
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// An update replaces and deletes store files that running programs have mapped: neither may
+    /// fail, what the programs hold stays readable, and a new program opens what is there now.
+    #[test]
+    fn a_mapped_store_can_be_replaced_and_deleted() {
+        let d = tmpdir("mapped");
+        let name = "core-0123456789abcdef.rcs";
+        let p = d.join(name);
+        append(&p, vec![NewEntry { key: 5, kind: 1, payload: b"held".to_vec() }], false).unwrap();
+        let held = Store::open(&p).unwrap();
+        let q = d.join("next-0123456789abcdef.rcs");
+        append(&q, vec![NewEntry { key: 5, kind: 1, payload: b"next".to_vec() }], false).unwrap();
+        crate::pack::write_atomic(&d, name, &std::fs::read(&q).unwrap()).unwrap();
+        assert_eq!(held.get(5).unwrap().1, b"held");
+        let next = Store::open(&p).unwrap();
+        assert_eq!(next.get(5).unwrap().1, b"next");
+        assert!(delete_checked(&p), "a mapped store is deleted");
+        assert!(!p.exists());
+        assert_eq!(held.get(5).unwrap().1, b"held");
+        assert_eq!(next.get(5).unwrap().1, b"next");
+        // the name is free at once, for a store of that name written while the old one is mapped
+        append(&p, vec![NewEntry { key: 5, kind: 1, payload: b"new".to_vec() }], false).unwrap();
+        assert_eq!(Store::open(&p).unwrap().get(5).unwrap().1, b"new");
+        assert_eq!(held.get(5).unwrap().1, b"held");
+        drop((held, next));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A writer's lock on the file (mandatory on Windows) does not stop a reader of the mapped bytes.
+    #[test]
+    fn a_mapped_store_is_read_and_verified_under_a_writers_lock() {
+        let d = tmpdir("locked");
+        let p = d.join("core-0123456789abcdef.rcs");
+        append(&p, vec![NewEntry { key: 5, kind: 1, payload: b"five".to_vec() }], false).unwrap();
+        let s = Store::open(&p).unwrap();
+        let writer = std::fs::OpenOptions::new().read(true).write(true).open(&p).unwrap();
+        writer.lock().unwrap();
+        assert_eq!(s.get(5).unwrap().1, b"five");
+        assert!(s.verify_at(0));
+        assert_eq!(Bytes::map(&p).unwrap().len() as u64, std::fs::metadata(&p).unwrap().len(), "and it is mapped under that lock");
+        writer.unlock().unwrap();
+        drop((s, writer));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A payload's mapping holds its bytes wherever it lies: a view starts on the system's
+    /// granularity (64 KB on Windows), a payload does not, and the file grows while views exist.
+    #[test]
+    fn run_store_payloads_map_at_any_offset() {
+        let d = tmpdir("run-map");
+        let run = RunStore::create(&d, "front_run", 64).unwrap();
+        let payload = |i: usize| vec![i as u8 + 1; 30_000 + i * 977];
+        let mapped: Vec<(usize, &'static [u8])> = (0..40).map(|i| {
+            let p = payload(i);
+            let Appended::Done(_, bytes) = run.append(i as u128, 1, p.len(), &|w| w.write_all(&p)) else { panic!("append {i}") };
+            (i, bytes)
+        }).collect();
+        for (i, bytes) in mapped {
+            assert_eq!(bytes, &payload(i)[..]);
+            assert_eq!(bytes.as_ptr() as usize % 8, 0, "8-byte aligned, as a store payload is");
+        }
     }
 
     #[test]

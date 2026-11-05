@@ -147,6 +147,31 @@ pub fn mount(home: &Path, snap: &Snapshot) -> Result<String, String> {
     Ok(root)
 }
 
+fn export_path(out: &Path, rel: &str) -> Result<Option<PathBuf>, String> {
+    if rel == ".makepad-export" {
+        return Ok(None);
+    }
+    // What leads out of `out` or the manifest's lines can't hold, on any OS; the rest only where this
+    // OS can't hold it (`a:b.txt` is an ordinary file on Unix, a stream on Windows).
+    if rel.split('/').any(|c| c.is_empty() || c == "." || c == ".."
+        || c.chars().any(char::is_control)
+        || (cfg!(windows) && makepad_core_util::file_name::windows_refuses(c)))
+    {
+        return Err(format!("export: unsafe relative path {rel:?}"));
+    }
+    let mut path = out.to_path_buf();
+    for component in rel.split('/') {
+        path.push(component);
+        match std::fs::symlink_metadata(&path) {
+            Ok(meta) if meta.file_type().is_symlink() => return Err(format!("export: symbolic link at {}", path.display())),
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("export: {}: {error}", path.display())),
+        }
+    }
+    Ok(Some(path))
+}
+
 /// `makepad export`: writes the snapshot's files into `out` as one working tree (the mounted
 /// repositories at their folders), then the edits folder's files over them (MAKEPAD_RUN_EDITS: what
 /// the app's runs read instead of the store's), so a native build (cargo) sees what the app runs.
@@ -158,10 +183,7 @@ pub fn export(snap: &Snapshot, edits: Option<&Path>, out: &Path) -> Result<(usiz
     let mut files: BTreeSet<String> = BTreeSet::new();
     let mut wrote = 0usize;
     let mut put = |rel: &str, data: &[u8], exec: bool, files: &mut BTreeSet<String>| -> Result<(), String> {
-        if rel.is_empty() || rel.split('/').any(|c| c.is_empty() || c == "." || c == ".." || c.contains('\\')) || rel == ".makepad-export" {
-            return Ok(());
-        }
-        let path = out.join(rel);
+        let Some(path) = export_path(out, rel)? else { return Ok(()) };
         if std::fs::read(&path).ok().as_deref() != Some(data) {
             if let Some(p) = path.parent() {
                 std::fs::create_dir_all(p).map_err(|e| format!("{}: {e}", p.display()))?;
@@ -225,13 +247,36 @@ pub fn export(snap: &Snapshot, edits: Option<&Path>, out: &Path) -> Result<(usiz
     }
     let manifest = out.join(".makepad-export");
     for old in std::fs::read_to_string(&manifest).unwrap_or_default().lines() {
-        if !files.contains(old) && !old.split('/').any(|c| c.is_empty() || c == "." || c == "..") {
-            let _ = std::fs::remove_file(out.join(old));
+        // A line that names nothing this can touch (damaged, or from an OS that holds other names)
+        // is left alone, and doesn't stop this export or the next.
+        if !files.contains(old) {
+            if let Ok(Some(path)) = export_path(out, old) { let _ = std::fs::remove_file(path); }
         }
     }
     let text: String = files.iter().map(|f| format!("{f}\n")).collect();
     std::fs::write(&manifest, text).map_err(|e| format!("{}: {e}", manifest.display()))?;
     Ok((files.len(), wrote))
+}
+
+/// The repositories a run has mounted (`MAKEPAD_RUN_VFS`) as a snapshot, each at its folder in the
+/// virtual workspace: what `makepad export --mounted` writes out for a native build of a run that
+/// stands nowhere on disk.
+pub fn mounted(table: &str, workspace: &str) -> Result<Snapshot, String> {
+    use relax_compiler::vfs::normalize_path;
+    let workspace = normalize_path(workspace);
+    let mut parts = Vec::new();
+    for line in table.lines().filter(|l| !l.is_empty()) {
+        let bad = || format!("MAKEPAD_RUN_VFS: cannot export {line}");
+        let mut it = line.split('\t');
+        // a fourth field is a store inside a bigger file, an embedded app's and never a workspace's
+        let (Some(root), Some(path), Some(commit), None) = (it.next(), it.next(), it.next(), it.next()) else { return Err(bad()) };
+        let root = normalize_path(root);
+        let dir = root.strip_prefix(&workspace).filter(|d| d.is_empty() || d.starts_with('/')).ok_or_else(bad)?;
+        let commit = relax_compiler::gitstore::from_hex(commit).ok_or_else(bad)?;
+        parts.push((dir.trim_start_matches('/').to_string(), PathBuf::from(path), commit));
+    }
+    if parts.is_empty() { return Err("MAKEPAD_RUN_VFS: nothing is mounted".to_string()); }
+    Ok(Snapshot { label: String::new(), parts })
 }
 
 /// Splits `run`/`fetch` words into (options for the run, spec, `--cached`, the rest after the
@@ -309,6 +354,50 @@ mod tests {
     fn s(v: &[&str]) -> Vec<String> {
         v.iter().map(|x| x.to_string()).collect()
     }
+    #[test]
+    fn export_refuses_paths_outside_its_folder() {
+        for rel in ["../payload.rs", "/payload.rs", "a/../payload.rs", "", "a\nfile"] {
+            assert!(export_path(Path::new("out"), rel).is_err(), "accepted {rel:?}");
+        }
+        for rel in ["C:/outside/payload.rs", "C:payload.rs", r"\\server\share\payload.rs", "file:stream", "a/.. /payload.rs", "NUL", "a/con.txt", "name."] {
+            assert_eq!(export_path(Path::new("out"), rel).is_err(), cfg!(windows), "{rel:?}");
+        }
+        assert_eq!(export_path(Path::new("out"), "src/lib.rs").unwrap(), Some(PathBuf::from("out/src/lib.rs")));
+    }
+
+    #[test]
+    fn an_old_manifest_never_stops_an_export() {
+        let base = std::env::temp_dir().join(format!("makepad-export-manifest-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (edits, out) = (base.join("edits"), base.join("out"));
+        std::fs::create_dir_all(&edits).unwrap();
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::write(edits.join("kept.rs"), "new").unwrap();
+        std::fs::write(out.join("gone.rs"), "old").unwrap();
+        std::fs::write(base.join("outside.rs"), "not ours").unwrap();
+        std::fs::write(out.join(".makepad-export"), "gone.rs\na:b.txt\n../outside.rs\n/outside.rs\n\n").unwrap();
+        let snap = Snapshot { label: "manifest".into(), parts: Vec::new() };
+        assert_eq!(export(&snap, Some(&edits), &out).unwrap(), (1, 1));
+        assert!(!out.join("gone.rs").exists() && base.join("outside.rs").exists());
+        assert_eq!(std::fs::read_to_string(out.join(".makepad-export")).unwrap(), "kept.rs\n");
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn a_mount_table_exports_each_repository_at_its_folder_in_the_workspace() {
+        let commit = "ab".repeat(20);
+        let table = format!("C:\\dev/src\tC:\\git\\makepad\t{commit}\nC:\\dev/src/apps/commercial\tC:\\git\\commercial\t{commit}\n");
+        let snap = mounted(&table, "C:\\dev/src").unwrap();
+        let dirs: Vec<&str> = snap.parts.iter().map(|(d, _, _)| d.as_str()).collect();
+        assert_eq!(dirs, ["", "apps/commercial"]);
+        assert_eq!(snap.parts[1].1, PathBuf::from("C:\\git\\commercial"));
+        // a mount outside the workspace, a store inside a file and no mounts at all say so
+        assert!(mounted(&format!("/elsewhere\t/s\t{commit}\n"), "/dev/src").is_err());
+        assert!(mounted(&format!("/dev/src-2\t/s\t{commit}\n"), "/dev/src").is_err());
+        assert!(mounted(&format!("/dev/src\t/s\t{commit}\t0+9\n"), "/dev/src").is_err());
+        assert!(mounted("", "/dev/src").is_err());
+    }
+
     #[test]
     fn specs() {
         let (opts, spec, cached, rest) = split_args(&s(&["--quiet", "--cached", "https://h/m.git#main", "--mount", "apps/c=https://h/c.git#r1", "pkg", "--release", "--", "x"])).unwrap().unwrap();

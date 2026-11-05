@@ -3,7 +3,7 @@
 //!
 //! `cfg!` is the literal the crate's cfg gives (rustc_builtin_macros cfg.rs expand_cfg) wherever
 //! it is read: in run-time code, and in the consts the type layer evaluates for it (an array
-//! length, a const generic argument, a constant pattern). sdf_engine bake.rs:127's
+//! length, a const generic argument, a constant pattern). a crate's
 //! `const _: () = assert!(cfg!(target_endian = "little"))` failed `makepad check` (E0080) on
 //! x86_64: the check-mode interpreter runs MIR built by the type layer, which had made every
 //! `cfg!` false (check_lint_tests covers that path). The run-time lowering reads the crate's cfg
@@ -359,7 +359,7 @@ fn guards_bound_out_of_tuples_drop_where_rustc_drops_them() {
 }
 
 #[path = "../../base/tests/support/vfs_store.rs"]
-mod vfs_store;
+pub(crate) mod vfs_store;
 
 /// Sandbox game_store (asset client cache.rs fsync_dir: `File::open(dir)?.sync_all()`): a folder
 /// opens for reading as it does on the disk (open(2) of a directory O_RDONLY succeeds; its reads

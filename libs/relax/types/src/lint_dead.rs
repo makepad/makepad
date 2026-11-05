@@ -36,6 +36,7 @@ enum Ref {
 }
 
 /// What one body owner references, and the diagnostics it emits when it is live.
+#[derive(Default)]
 struct BodyInfo {
     refs: Vec<Ref>,
     /// (position, message, attributes in scope): `useless assignment ... to itself`
@@ -395,27 +396,38 @@ pub fn collect_body(prog: &Program, tcx: &Tcx, body: &Body) {
     let ast = &prog.files[body.file as usize].ast;
     let mut b = BodyRefs { prog, tcx, body, ast, tw: TypeWalker::new(prog, body.def), in_pat: false, ignore: Vec::new(), out: Vec::new(), stack: Vec::new(), notes: Vec::new() };
     b.tw.module = d.scope;
-    match ast.item(d.item).kind {
-        ItemKind::Fn(s, _, _) => {
-            let Ok(Some(block)) = prog.fn_body(body.file, d.item) else { return };
-            for p in ast.list(ast.fn_sig(s).params) {
-                b.enter_attrs(p.attrs);
-                b.pat(p.pat);
-                b.leave_attrs(p.attrs);
+    // rustc dead.rs visit_nested_body: an anonymous constant is walked with its own typeck results,
+    // and what it uses, the item around it uses (`d.item` is that item's, not the constant's)
+    let holder = if d.kind == DefKind::AnonConst {
+        let Some(e) = crate::const_eval::const_body(prog, body.def) else { return };
+        b.expr(e);
+        crate::borrowck::body::root_owner(prog, body.def)
+    } else {
+        match ast.item(d.item).kind {
+            ItemKind::Fn(s, _, _) => {
+                let Ok(Some(block)) = prog.fn_body(body.file, d.item) else { return };
+                for p in ast.list(ast.fn_sig(s).params) {
+                    b.enter_attrs(p.attrs);
+                    b.pat(p.pat);
+                    b.leave_attrs(p.attrs);
+                }
+                b.block(block);
             }
-            b.block(block);
+            ItemKind::Const(..) | ItemKind::Static(..) => {
+                let Ok(Some(e)) = prog.const_body(body.file, d.item) else { return };
+                b.expr(e);
+            }
+            _ => return,
         }
-        ItemKind::Const(..) | ItemKind::Static(..) => {
-            let Ok(Some(e)) = prog.const_body(body.file, d.item) else { return };
-            b.expr(e);
-        }
-        _ => return,
-    }
+        body.def
+    };
     let mut out = std::mem::take(&mut b.out);
     out.append(&mut b.tw.out);
+    let mut notes = std::mem::take(&mut b.notes);
     let mut g = BODY_REFS.lock().unwrap_or_else(|e| e.into_inner());
-    let notes = std::mem::take(&mut b.notes);
-    g.get_or_insert_with(HashMap::new).insert(body.def, BodyInfo { refs: out, notes });
+    let info = g.get_or_insert_with(HashMap::new).entry(holder).or_default();
+    info.refs.append(&mut out);
+    info.notes.append(&mut notes);
 }
 
 struct BodyRefs<'a> {

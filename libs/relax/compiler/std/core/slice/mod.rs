@@ -30,6 +30,7 @@ pub use iter::{
 pub use join::{concat_str, concat_vec, join_str, join_vec};
 
 use crate::cmp::Ordering;
+use crate::fmt::Write as _;
 use crate::intrinsics_mem as im;
 
 #[rustc_diagnostic_item = "slice_from_raw_parts"]

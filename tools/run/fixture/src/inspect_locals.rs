@@ -2,7 +2,8 @@
 //! panic inside `pick`, which `outer` inlines once it runs optimised code, with locals of every
 //! kind at the panic: an integer held across the panic call (`scale`), a struct whose address a
 //! call takes (`p`, a stack slot), a value dead before the call (`gone`: optimised out), and the
-//! inlined fn's own (`i`, `doubled`).
+//! inlined fn's own (`i`, `doubled`). A thread named `parked` waits in a futex the whole run
+//! (`stacks thread=parked`: a blocked thread's program frames).
 
 #[derive(Debug, Clone, Copy)]
 pub struct Pt {
@@ -23,8 +24,10 @@ pub fn step(x: u32) -> u32 {
 #[inline]
 pub fn pick(v: &[u32], i: usize, k: u32) -> u32 {
     let doubled = k.wrapping_mul(2);
-    // (a branch on it: it is computed before the index check at every tier)
-    if doubled == 7 {
+    // (a branch on it, through black_box: it is computed before the index check at every tier.
+    // A plain `doubled == 7` folds away at O3, an even number is never 7, and the product then
+    // sinks past the check)
+    if std::hint::black_box(doubled) == 7 {
         return 0;
     }
     v[i].wrapping_add(doubled).wrapping_add(doubled >> 3)
@@ -47,7 +50,16 @@ pub fn outer(n: u32, at: usize) -> u32 {
     s.wrapping_add(got).wrapping_add(scale).wrapping_add(base as u32).wrapping_add(n).wrapping_add(p.x as u32)
 }
 
+/// Parks for good: blocked in a futex, never running (no frame pointer in its walk).
+#[inline(never)]
+pub fn park_here() {
+    loop {
+        std::thread::park();
+    }
+}
+
 fn main() {
+    std::thread::Builder::new().name("parked".into()).spawn(park_here).unwrap();
     let trigger = std::env::var("PROBE_TRIGGER").unwrap_or_default();
     let secs: u64 = std::env::var("PROBE_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(120);
     let mut total = 0u32;

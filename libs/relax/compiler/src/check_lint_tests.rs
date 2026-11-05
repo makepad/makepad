@@ -125,7 +125,7 @@ fn a_second_binary_targets_main_is_its_entry() {
     assert_eq!(warnings, ["function `unused_in_bin` is never used [dead_code]"]);
 }
 
-/// sdf_engine bake.rs:127 (E0080 under the JIT's check only): the check evaluates every const
+/// A crate's `const _: () = assert!(cfg!(..))` (E0080 under the JIT's check only): the check evaluates every const
 /// item (rustc_hir_analysis check_crate), and `cfg!` in one is the literal the crate's cfg gives
 /// (rustc_builtin_macros cfg.rs expand_cfg); MIR building had made every `cfg!` false.
 #[test]
@@ -170,6 +170,84 @@ fn the_global_allocator_static_is_used() {
         "#, &[]);
     };
     assert_eq!(warnings, ["static `UNUSED` is never used [dead_code]"]);
+}
+
+/// A fn named only in a `#[rustc_legacy_const_generics]` argument is used, written at the call or in
+/// a macro's expansion (zune-jpeg's `shuffle`): rustc gives no warning for either, and still warns
+/// about the fn nothing names or only a dead fn names. x86_64: the callee is the x86 intrinsic.
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn a_fn_in_a_legacy_const_generic_argument_is_used() {
+    let Some(warnings) = warnings_in_child("check_lint_tests::a_fn_in_a_legacy_const_generic_argument_is_used") else {
+        return check_package(r#"
+            use core::arch::x86_64::*;
+            const fn at_the_call(x: i32) -> i32 { x }
+            const fn in_a_macro(x: i32) -> i32 { x }
+            const fn unused(x: i32) -> i32 { x }
+            const NAMED: i32 = 216;
+            const fn only_a_dead_fn_uses(x: i32) -> i32 { x }
+            #[target_feature(enable = "avx2")]
+            unsafe fn dead_user(v: __m256i) -> __m256i {
+                _mm256_permute4x64_epi64(v, only_a_dead_fn_uses(216))
+            }
+            #[target_feature(enable = "avx2")]
+            pub unsafe fn direct(v: __m256i) -> __m256i {
+                _mm256_permute4x64_epi64(v, at_the_call(216))
+            }
+            #[target_feature(enable = "avx2")]
+            pub unsafe fn named(v: __m256i) -> __m256i {
+                _mm256_permute4x64_epi64(v, NAMED)
+            }
+            #[target_feature(enable = "avx2")]
+            pub unsafe fn local(v: __m256i) -> __m256i {
+                const fn in_the_block(x: i32) -> i32 { x }
+                _mm256_permute4x64_epi64(v, in_the_block(216))
+            }
+            #[target_feature(enable = "avx2")]
+            pub unsafe fn expanded(v: __m256i) -> __m256i {
+                macro_rules! permute {
+                    ($v:tt) => { _mm256_permute4x64_epi64($v, in_a_macro(216)) };
+                }
+                permute!(v)
+            }
+        "#, &[]);
+    };
+    assert_eq!(warnings, [
+        "function `dead_user` is never used [dead_code]",
+        "function `only_a_dead_fn_uses` is never used [dead_code]",
+        "function `unused` is never used [dead_code]",
+    ]);
+}
+
+/// `Formatter::write_char` is `fmt::Write`'s (real core has no inherent one, zerocopy's error.rs),
+/// so the import is used.
+#[test]
+fn a_formatters_write_char_uses_the_write_import() {
+    let Some(warnings) = warnings_in_child("check_lint_tests::a_formatters_write_char_uses_the_write_import") else {
+        return check_package(r#"
+            use core::fmt::{self, Write};
+            pub struct S;
+            impl fmt::Display for S {
+                fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { f.write_char('s') }
+            }
+        "#, &[]);
+    };
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+/// `Formatter::write_str` is inherent: it does not use the import.
+#[test]
+fn a_formatters_write_str_leaves_the_write_import_unused() {
+    let Some(warnings) = warnings_in_child("check_lint_tests::a_formatters_write_str_leaves_the_write_import_unused") else {
+        return check_package(r#"
+            use core::fmt::{self, Write};
+            pub struct S;
+            impl fmt::Display for S {
+                fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { f.write_str("s") }
+            }
+        "#, &[]);
+    };
+    assert_eq!(warnings, ["unused import: `Write` [unused_imports]"]);
 }
 
 /// WARNZERO class 4 (inspect/heap.rs:537, jit.rs:2554): `asm!` is an unsafe operation (rustc

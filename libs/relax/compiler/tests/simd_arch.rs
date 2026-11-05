@@ -85,6 +85,61 @@ fn tri<A: Copy, B: Copy, C: Copy, R, F: Fn(A, B, C) -> R>(name: &str, f: F, p: f
     println!("{} {:016x} {}", name, h, if h == hp { "" } else { "PTR-DIFFERS" });
 }
 
+/// A float lane's bits, for `fma`.
+trait Lane: Copy + PartialEq {
+    const MARKER: Self;
+    fn nan(self) -> bool;
+    fn quieted(self) -> Self;
+}
+impl Lane for u32 {
+    const MARKER: u32 = 0x7fc0_0000;
+    fn nan(self) -> bool {
+        self & 0x7fff_ffff > 0x7f80_0000
+    }
+    fn quieted(self) -> u32 {
+        self | 0x0040_0000
+    }
+}
+impl Lane for u64 {
+    const MARKER: u64 = 0x7ff8_0000_0000_0000;
+    fn nan(self) -> bool {
+        self & 0x7fff_ffff_ffff_ffff > 0x7ff0_0000_0000_0000
+    }
+    fn quieted(self) -> u64 {
+        self | 0x0008_0000_0000_0000
+    }
+}
+
+/// `tri` for a packed fused multiply-add of L lanes of E's bits. A lane with two or more NaN
+/// operands may return any of them: llvm.fma leaves the choice open and rustc's pick depends on
+/// register allocation (b's NaN at 128 bits, a's at 256). Such a lane hashes as one marker when its
+/// result is one of those NaNs, quieted; any other result still shows.
+fn fma<V: Copy, E: Lane, const L: usize>(name: &str, f: impl Fn(V, V, V) -> V, p: fn(V, V, V) -> V) {
+    let lanes = |v: V| -> [E; L] { unsafe { core::ptr::read_unaligned(&v as *const V as *const [E; L]) } };
+    let masked = |r: V, a: V, b: V, c: V| -> [E; L] {
+        let (mut r, a, b, c) = (lanes(r), lanes(a), lanes(b), lanes(c));
+        for l in 0..L {
+            let ops = [a[l], b[l], c[l]];
+            let nans = ops.iter().filter(|x| x.nan());
+            if nans.clone().count() >= 2 && nans.clone().any(|x| x.quieted() == r[l]) {
+                r[l] = E::MARKER;
+            }
+        }
+        r
+    };
+    let mut s = 0x1234_5678_9abc_def1u64;
+    let mut h = 0xcbf2_9ce4_8422_2325u64;
+    let mut hp = h;
+    for _ in 0..N {
+        let a: V = rnd(&mut s);
+        let b: V = rnd(&mut s);
+        let c: V = rnd(&mut s);
+        mix(&mut h, &masked(f(a, b, c), a, b, c));
+        mix(&mut hp, &masked(p(core::hint::black_box(a), b, c), a, b, c));
+    }
+    println!("{} {:016x} {}", name, h, if h == hp { "" } else { "PTR-DIFFERS" });
+}
+
 macro_rules! u {
     ($name:ident, $a:ty) => {
         un(stringify!($name), |a: $a| unsafe { $name(a) }, |a: $a| unsafe { $name(a) })
@@ -104,6 +159,11 @@ macro_rules! b {
 macro_rules! t {
     ($name:ident, $a:ty, $b:ty, $c:ty) => {
         tri(stringify!($name), |a: $a, b: $b, c: $c| unsafe { $name(a, b, c) }, |a: $a, b: $b, c: $c| unsafe { $name(a, b, c) })
+    };
+}
+macro_rules! fma {
+    ($name:ident, $v:ty, $e:ty, $l:literal) => {
+        fma::<$v, $e, $l>(stringify!($name), |a: $v, b: $v, c: $v| unsafe { $name(a, b, c) }, |a: $v, b: $v, c: $v| unsafe { $name(a, b, c) })
     };
 }
 
@@ -382,14 +442,30 @@ fn arch() {
     b!(_mm256_or_ps, __m256, __m256);
     b!(_mm256_xor_ps, __m256, __m256);
     b!(_mm256_andnot_ps, __m256, __m256);
-    t!(_mm256_fmadd_ps, __m256, __m256, __m256);
-    t!(_mm256_fmsub_ps, __m256, __m256, __m256);
-    t!(_mm256_fnmadd_ps, __m256, __m256, __m256);
-    t!(_mm256_fnmsub_ps, __m256, __m256, __m256);
-    t!(_mm_fmadd_ps, __m128, __m128, __m128);
-    t!(_mm_fmsub_ps, __m128, __m128, __m128);
-    t!(_mm_fnmadd_ps, __m128, __m128, __m128);
-    t!(_mm_fnmsub_ps, __m128, __m128, __m128);
+    fma!(_mm256_fmadd_ps, __m256, u32, 8);
+    fma!(_mm256_fmsub_ps, __m256, u32, 8);
+    fma!(_mm256_fnmadd_ps, __m256, u32, 8);
+    fma!(_mm256_fnmsub_ps, __m256, u32, 8);
+    fma!(_mm_fmadd_ps, __m128, u32, 4);
+    fma!(_mm_fmsub_ps, __m128, u32, 4);
+    fma!(_mm_fnmadd_ps, __m128, u32, 4);
+    fma!(_mm_fnmsub_ps, __m128, u32, 4);
+    fma!(_mm_fmadd_pd, __m128d, u64, 2);
+    fma!(_mm_fmsub_pd, __m128d, u64, 2);
+    fma!(_mm_fnmadd_pd, __m128d, u64, 2);
+    fma!(_mm_fnmsub_pd, __m128d, u64, 2);
+    fma!(_mm_fmaddsub_pd, __m128d, u64, 2);
+    fma!(_mm_fmsubadd_pd, __m128d, u64, 2);
+    fma!(_mm_fmadd_sd, __m128d, u64, 2);
+    fma!(_mm_fmsub_sd, __m128d, u64, 2);
+    fma!(_mm_fnmadd_sd, __m128d, u64, 2);
+    fma!(_mm_fnmsub_sd, __m128d, u64, 2);
+    fma!(_mm256_fmadd_pd, __m256d, u64, 4);
+    fma!(_mm256_fmsub_pd, __m256d, u64, 4);
+    fma!(_mm256_fnmadd_pd, __m256d, u64, 4);
+    fma!(_mm256_fnmsub_pd, __m256d, u64, 4);
+    fma!(_mm256_fmaddsub_pd, __m256d, u64, 4);
+    fma!(_mm256_fmsubadd_pd, __m256d, u64, 4);
     b!(_mm256_and_si256, __m256i, __m256i);
     b!(_mm256_cmpeq_epi8, __m256i, __m256i);
     u!(_mm256_set1_ps, f32);

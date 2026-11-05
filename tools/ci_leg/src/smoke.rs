@@ -43,7 +43,10 @@ pub type Result<T> = std::result::Result<T, String>;
 pub const SETTLE: Duration = Duration::from_secs(15);
 /// A cold JIT start of a big app can take minutes; a warm one seconds.
 const STARTUP: Duration = Duration::from_secs(300);
-/// Once the remote is up, a boot without a presented frame is hung.
+/// Once the remote is up, a boot without a presented frame whose UI thread is not compiling is
+/// hung. One still compiling is judged by the JIT's own first-frame timeout (3x the app's measured
+/// first frames, with a floor): a leg shares its box, and elapsed time there says nothing of a
+/// boot that goes on (4 of 16 legs of one run read as hung, the 12 others took 16 to 55 s).
 const FIRST_FRAME: Duration = Duration::from_secs(60);
 
 /// The lines of an app's output that fail it: panics (parked or not), JIT compile errors, fatal
@@ -182,6 +185,8 @@ impl Remote {
 
 struct AppHandle {
     child: ChildLog,
+    /// the program's process once it has announced itself: `child`, or on Windows `child`'s child
+    run_pid: u32,
     remote: Option<Remote>,
     interrupted: bool,
     closed: bool,
@@ -443,16 +448,18 @@ impl Runtime {
         let (parked, left) = (Arc::new(Mutex::new(None)), Arc::new(AtomicBool::new(false)));
         watch_parks(child.child.id(), File::open(&log).map_err(|e| e.to_string())?, parked.clone(), left.clone());
         if let Some(why) = &script_errors { self.run.log(&format!("{name}: its script errors do not fail it ({why})")); }
-        self.apps.push(AppHandle { child, remote: None, interrupted: false, closed: false, name: name.clone(), report, parked, left, script_errors, data });
+        self.apps.push(AppHandle { run_pid: child.child.id(), child, remote: None, interrupted: false, closed: false, name: name.clone(), report, parked, left, script_errors, data });
         let deadline = Instant::now() + STARTUP;
-        loop {
+        let socket = loop {
             self.drain_app(index)?;
             let app = &mut self.apps[index];
             let pid = app.child.child.id();
-            if let Some(socket) = app.child.text.lines().find_map(|line| parse_startup(line, pid)) {
+            // on Windows a `makepad run` is the child of the process started here (restart_parent.rs)
+            if let Some((run, socket)) = app.child.text.lines().filter_map(parse_startup).find(|(run, _)| *run == pid || process_tree(pid).contains(run)) {
                 let client = Client::connect(&socket).map_err(|e| format!("{} remote endpoint {socket}: {e}", app.name))?;
                 app.remote = Some(Remote { client, user_seq: None });
-                break;
+                app.run_pid = run;
+                break socket;
             }
             if !app.child.alive()? {
                 self.fatal = true;
@@ -462,13 +469,15 @@ impl Runtime {
                 return Err(format!("remote startup timed out after {} s\n{}", STARTUP.as_secs(), tail(&self.apps[index].child.text, 30)));
             }
             std::thread::sleep(Duration::from_millis(100));
-        }
+        };
         let remote_up = Instant::now();
-        let first_frame_deadline = remote_up + FIRST_FRAME;
+        let mut first_frame_deadline = remote_up + FIRST_FRAME;
+        let mut gpu_deadline = first_frame_deadline;
         // A stuck inspector must not hold the first-frame verdict hostage. This worker only
         // reads the GPU fact; the launch thread keeps watching the app's report and its log.
-        let gpu_reply = startup_gpu(self.apps[index].remote.as_ref().unwrap().client.clone(), first_frame_deadline);
+        let gpu_reply = startup_gpu(socket, remote_up + STARTUP);
         let mut gpu_seen = false;
+        let mut slow_said = false;
         let first_frame_line = format!("makepad: {} first frame at ", target.package);
         loop {
             if !self.alive(index)? {
@@ -478,8 +487,24 @@ impl Runtime {
             let presented = report.lines().any(|line| line.trim() == "present")
                 || self.apps[index].child.text.lines().any(|line| line.starts_with(&first_frame_line));
             if !presented && Instant::now() >= first_frame_deadline {
+                self.apps[index].remote.as_ref().unwrap().client.set_timeout(Some(Duration::from_secs(10)));
+                let said = self.request(index, &argv(&["jit", "ms=5000"]), false).unwrap_or_else(|e| e);
+                let said = said.lines().find(|l| !l.trim().is_empty() && !l.trim_start().starts_with('{')).unwrap_or(said.as_str());
+                if ui_thread_compiling(said) {
+                    if !slow_said {
+                        slow_said = true;
+                        self.run.log(&format!("{name}: no first frame {} s after its remote came up and its UI thread is compiling: {said}", remote_up.elapsed().as_secs()));
+                    }
+                    first_frame_deadline = Instant::now();
+                    gpu_deadline = first_frame_deadline + FIRST_FRAME;
+                    continue;
+                }
                 let why = format!("hang: no first frame {} s after its remote came up", remote_up.elapsed().as_secs());
                 println!("CIERR {name}: {why}");
+                // a stuck boot's state, and the app's log goes with its lease
+                self.run.log(&format!("{name}: the JIT said: {said}"));
+                let _ = self.drain_app(index);
+                self.run.log(&format!("{name}: its log ended:\n{}", tail(&self.apps[index].child.text, 30)));
                 return Err(why);
             }
             if !gpu_seen {
@@ -510,7 +535,7 @@ impl Runtime {
             if presented && gpu_seen {
                 break;
             }
-            if Instant::now() >= first_frame_deadline {
+            if Instant::now() >= gpu_deadline {
                 let why = format!("gpu inspection timed out {} s after its remote came up", remote_up.elapsed().as_secs());
                 println!("CIERR {name}: {why}");
                 return Err(why);
@@ -661,7 +686,8 @@ impl Runtime {
         };
         let mut bad = Vec::new();
         let mut asked = Vec::new();
-        for (app, pid) in tile_pids(&tiles, self.apps[i].child.child.id()) {
+        let hosted = tile_pids(&tiles, self.apps[i].run_pid);
+        for (app, pid) in &hosted {
             let client = match Client::connect(&pid.to_string()) {
                 Ok(c) => c,
                 Err(e) => {
@@ -681,6 +707,7 @@ impl Runtime {
             }
         }
         self.run.log(&format!("  {name}: asked the {} app(s) it hosts for their script errors: {}", asked.len(), asked.join(", ")));
+        bad.extend(none_asked(&name, hosted.len(), asked.len()));
         if bad.is_empty() { Ok(()) } else { Err(bad.join("\n")) }
     }
 
@@ -825,9 +852,24 @@ impl Runtime {
 /// Ask immediately, retrying only while the HAL is not open yet (the JIT's endpoint precedes
 /// it). The caller polls this worker alongside the present report, so an unanswered command
 /// cannot extend the first-frame deadline. No process is stopped here.
-fn startup_gpu(client: Client, deadline: Instant) -> std::sync::mpsc::Receiver<Result<Value>> {
+/// Whether a `jit` line says the UI thread gets on with its boot: first compiles finished in its
+/// window, and the UI thread waited for them. Background tiers build on while a UI thread hangs.
+fn ui_thread_compiling(jit_line: &str) -> bool {
+    let after = |word: &str| jit_line.split(word).nth(1).and_then(|r| r.split(|c: char| !c.is_ascii_digit()).next()).and_then(|n| n.parse::<u64>().ok());
+    after("lazy ").is_some_and(|n| n > 0) && after("UI JIT duty ").is_some_and(|n| n > 0)
+}
+
+fn startup_gpu(socket: String, deadline: Instant) -> std::sync::mpsc::Receiver<Result<Value>> {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
+        // a connection of its own: it may be stuck on it, and it sets its timeout
+        let client = match Client::connect(&socket) {
+            Ok(client) => client,
+            Err(e) => {
+                let _ = tx.send(Err(format!("gpu: remote endpoint {socket}: {e}")));
+                return;
+            }
+        };
         let remote = Remote { client, user_seq: None };
         loop {
             remote.client.set_timeout(Some(deadline.saturating_duration_since(Instant::now())));
@@ -849,25 +891,19 @@ fn startup_gpu(client: Client, deadline: Instant) -> std::sync::mpsc::Receiver<R
     rx
 }
 
-/// The remote endpoint of the process this run owns: the platform's `[makepad-remote] pid=<pid>
+/// The pid and remote endpoint a line announces: the platform's `[makepad-remote] pid=<pid>
 /// app=<app> socket=<path>`, or the JIT's `makepad-remote: pid <pid> app <app> socket <path> (...)`.
-fn parse_startup(line: &str, pid: u32) -> Option<String> {
+fn parse_startup(line: &str) -> Option<(u32, String)> {
     if let Some(rest) = line.strip_prefix("makepad-remote: pid ") {
-        let (actual, rest) = rest.split_once(' ')?;
-        if actual.parse::<u32>().ok()? != pid {
-            return None;
-        }
+        let (pid, rest) = rest.split_once(' ')?;
         let socket = rest.split_once(" socket ")?.1;
         let socket = socket.rsplit_once(" (").map_or(socket, |(s, _)| s).trim();
-        return (!socket.is_empty()).then(|| socket.to_string());
+        return if socket.is_empty() { None } else { Some((pid.parse().ok()?, socket.to_string())) };
     }
     let rest = line.strip_prefix("[makepad-remote] pid=")?;
-    let (actual, rest) = rest.split_once(' ')?;
-    if actual.parse::<u32>().ok()? != pid {
-        return None;
-    }
+    let (pid, rest) = rest.split_once(' ')?;
     let socket = rest.split_once(" socket=")?.1.trim();
-    (!socket.is_empty()).then(|| socket.to_string())
+    if socket.is_empty() { None } else { Some((pid.parse().ok()?, socket.to_string())) }
 }
 
 /// `script errors`' answer (makepad inspect's): its error sites and the first ten as
@@ -918,6 +954,11 @@ fn tile_pids(answer: &str, own: u32) -> Vec<(String, u32)> {
         }
     }
     out
+}
+
+/// A WM's hosted apps none of which could be asked: their script errors went unchecked, which is no pass.
+fn none_asked(name: &str, hosted: usize, asked: usize) -> Option<String> {
+    (hosted > 0 && asked == 0).then(|| format!("{name}: `tiles` reports {hosted} hosted app(s), none with an endpoint: their script errors went unchecked"))
 }
 
 /// An app found ended at its cleanup: fine after exit 0 (it closed itself), else it failed.
@@ -1427,6 +1468,17 @@ fn hosted_object(vm: &mut ScriptVm, index: usize) -> ScriptValue {
         })();
         result(vm, r)
     });
+    // `[w, h]` of its first window, from `status`
+    vm.add_method(obj, id_lut!(size), script_args!(), move |vm, _| {
+        if !allow(vm) {
+            return NIL;
+        }
+        let r = rt(vm).hosted_request(index, &argv(&["status"]), false).and_then(|status| {
+            let v = json::parse_depth(status.as_bytes(), 64).map_err(str::to_string)?;
+            v.get("w").and_then(Value::as_arr).and_then(|w| w.first()).and_then(|w| w.get("sz")).cloned().ok_or_else(|| format!("status has no window size: {status}"))
+        });
+        result(vm, r)
+    });
     obj.into()
 }
 
@@ -1504,11 +1556,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn startup_lines_name_this_pid_and_logs_match_with_stars() {
-        assert_eq!(parse_startup("[makepad-remote] pid=7 app=test socket=/tmp/a b/makepad-remote-7.sock", 7).as_deref(), Some("/tmp/a b/makepad-remote-7.sock"));
-        assert_eq!(parse_startup("[makepad-remote] pid=8 app=test socket=/tmp/x.sock", 7), None);
-        assert_eq!(parse_startup("makepad-remote: pid 7 app calc socket /h/t/L1/makepad-remote-7.sock (makepad inspect 7 help)", 7).as_deref(), Some("/h/t/L1/makepad-remote-7.sock"));
-        assert_eq!(parse_startup("makepad-remote: pid 8 app calc socket /x.sock (y)", 7), None);
+    fn only_a_ui_thread_getting_first_compiles_is_not_hung() {
+        // the lines of legs that read as hung while their boot went on
+        assert!(ui_thread_compiling("busy · running: UI thread compiling, 1 O2 builds · queued: ahead 2, O2 72, O3 156 · finished 24.7k (+206 in 500 ms = 412 fns/s: lazy 171, ahead 0, O2 4, O3 0, linked 31) · UI JIT duty 98%"));
+        assert!(ui_thread_compiling("busy · running: UI thread compiling · queued: ahead 53, O2 3, O3 25 · finished 24.6k (+94 in 500 ms = 188 fns/s: lazy 92, ahead 0, O2 0, O3 0, linked 2) · UI JIT duty 100%"));
+        // a hung UI thread: only background tiers finish, or nothing does
+        assert!(!ui_thread_compiling("busy (background) · running: 1 O2 builds · queued: ahead 0, O2 72, O3 156 · finished 24.7k (+20 in 5000 ms = 4 fns/s: lazy 0, ahead 0, O2 20, O3 0, linked 0) · UI JIT duty 0%"));
+        assert!(!ui_thread_compiling("idle · running: nothing · queued: ahead 0, O2 0, O3 0 · finished 24.7k (+0 in 5000 ms = 0 fns/s: lazy 0, ahead 0, O2 0, O3 0, linked 0) · UI JIT duty 0%"));
+        // another thread's first compile, the UI thread not waiting for it
+        assert!(!ui_thread_compiling("busy · running: nothing · queued: ahead 0, O2 0, O3 0 · finished 24.7k (+3 in 5000 ms = 0 fns/s: lazy 3, ahead 0, O2 0, O3 0, linked 0) · UI JIT duty 0%"));
+        // a compile that never ends: the UI thread waits, nothing finishes
+        assert!(!ui_thread_compiling("busy · running: UI thread compiling · queued: ahead 0, O2 0, O3 0 · finished 24.7k (+0 in 5000 ms = 0 fns/s: lazy 0, ahead 0, O2 0, O3 0, linked 0) · UI JIT duty 100%"));
+        // no JIT to ask
+        assert!(!ui_thread_compiling("jit: connection refused"));
+    }
+
+    #[test]
+    fn startup_lines_name_their_pid_and_logs_match_with_stars() {
+        assert_eq!(parse_startup("[makepad-remote] pid=7 app=test socket=/tmp/a b/makepad-remote-7.sock"), Some((7, "/tmp/a b/makepad-remote-7.sock".to_string())));
+        assert_eq!(parse_startup("[makepad-remote] cannot listen: nope"), None);
+        assert_eq!(parse_startup("makepad-remote: pid 7 app calc socket /h/t/L1/makepad-remote-7.sock (makepad inspect 7 help)"), Some((7, "/h/t/L1/makepad-remote-7.sock".to_string())));
         assert!(log_has("x\nterminal client 4 first frame\n", "terminal client * first frame"));
         assert!(!log_has("terminal client 4\n", "terminal client * first frame"));
         assert_eq!(end_seq("{\"end\":\"snap\",\"ms\":3,\"user_seq\":12}"), Some(12));
@@ -1561,6 +1628,9 @@ mod tests {
             {\"client\":4,\"app\":\"term\",\"title\":\"\",\"pid\":null,\"connected\":true,\"alive\":false,\"window\":4,\"parent\":null}\n\
             {\"client\":5,\"app\":\"desk\",\"title\":\"\",\"pid\":7,\"connected\":true,\"alive\":true,\"window\":5,\"parent\":null}\n";
         assert_eq!(tile_pids(tiles, 7), [("calc".to_string(), 40)]);
+        assert!(none_asked("wm", 4, 0).is_some(), "hosted apps nobody asked are no pass");
+        assert_eq!(none_asked("wm", 4, 1), None);
+        assert_eq!(none_asked("calc", 0, 0), None);
     }
 
     /// Each launch: its own empty app data and home, the same list the gate's presents get.

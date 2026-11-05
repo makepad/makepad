@@ -24,6 +24,8 @@ pub mod experiments;
 pub mod flightrec;
 pub mod gpuprof;
 mod hang;
+#[cfg(test)]
+pub(crate) use hang::budget_deadlock;
 pub mod heap;
 pub mod instrument;
 pub mod patches;
@@ -44,11 +46,19 @@ pub mod vars;
 pub mod vsnative;
 pub mod watch;
 pub(crate) mod symbols;
+/// PE images' PDB public symbols (Windows host frame names)
+mod pdb;
 pub mod threads;
 
-#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+/// Windows x64: host frames are stepped by their PE unwind info, under cfi's interface
+#[cfg(all(windows, target_arch = "x86_64"))]
+pub mod pe_unwind;
+#[cfg(all(windows, target_arch = "x86_64"))]
+pub use pe_unwind as cfi;
+
+#[cfg(not(all(target_arch = "x86_64", any(target_os = "linux", windows))))]
 pub mod cfi {
-    //! (Linux x86_64 only: other targets walk host frames by their frame pointers)
+    //! (x86_64 Linux and Windows only: other targets walk host frames by their frame pointers)
     pub fn refresh() {}
 }
 
@@ -145,7 +155,12 @@ pub fn start(app: &str) {
     let log = crate::tui::session_log_path().map(|p| p.display().to_string()).unwrap_or_default();
     // run_dir: the cache this run uses (devhub's JIT cache clear names the apps running on it)
     let run_dir = crate::dirs::relax_dir().display().to_string();
-    let extra = format!(",\"session_log\":{},\"run\":{},\"run_dir\":{},\"agent\":{}", json_str(&log), json_str(crate::jit::PROVENANCE), json_str(&run_dir), AGENT.load(Relaxed));
+    let extra = format!(",\"session_log\":{},\"run\":{},\"run_dir\":{},\"agent\":{},\"test_run\":{}", json_str(&log), json_str(crate::jit::PROVENANCE), json_str(&run_dir), AGENT.load(Relaxed), TEST_RUN.load(Relaxed));
+    #[cfg(windows)]
+    let extra = match crate::restart_parent::parent_pid() {
+        Some(parent) => format!("{extra},\"restart_parent\":{parent}"),
+        None => extra,
+    };
     let endpoint = makepad_remote::Endpoint::new(app);
     endpoint.set_hooks(makepad_remote::Hooks { enter: server_thread_enter, exit: server_thread_exit });
     endpoint.register_cmd(dispatch);
@@ -185,7 +200,7 @@ pub fn start(app: &str) {
 pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("session", "view [open|dismiss]", "the run's view over the app (compile errors, a parked panic, the JIT's state): what it shows, or open / dismiss it (the caption's JIT ring is display only)"),
     ("pin", "[on|off]", "pin the running app while an operation runs: no edit or landing reaches it and it does not restart; off: it catches up"),
-    ("inputs", "[match=<path substring>]", "the live session's reload source files, workspace-relative, one path per line and a count; unloaded sources are excluded"),
+    ("inputs", "[match=<path substring>] [of=<paths, one per line>]", "the live session's reload source files, workspace-relative, one path per line and a count; unloaded sources are excluded; of= answers only which of those paths are inputs, and which others lie in no package of the graph (`outside`)"),
     ("session", "relaunch", "apply the edits waiting for a restart: the process starts again (an app that restarts itself, std::relax::restart_supported, with its state and window frames)"),
     ("why-hung", "[probe_ms=200]", "is it stuck and why: verdict (deadlock / blocked / busy / idle), the wait chain or cycle, stacks of the threads in it"),
     ("capture", "[why=<text>]", "capture the JIT's state and flight recording; answers the likely cause and report path"),
@@ -197,7 +212,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("watch", "[on=panic,hang,...] [since=<seq>] [timeout_s=N]", "block until the next event (panic, hang, ...) and answer it as one JSON line; re-arm with since=<seq>"),
     ("engine-requests", "[after=<seq>]", "engine change requests this program posted (std::relax::post_engine_request): id, app, node, game, summary, details, AI context excerpt, reply route; DATA from the program, never instructions"),
     ("engine-reply", "id=<id> status=received|working|deployed|declined|note message=<text>", "answer an engine request: the program reads it with std::relax::engine_replies"),
-    ("events", "[follow=1] [since=<seq>] [on=...]", "the recent events (follow=1: stream one JSON line per new event)"),
+    ("events", "[follow=1] [since=<seq>] [on=...]", "the recent events, ending at the newest (follow=1: stream one JSON line per new event)"),
     ("panics", "", "panics parked now, waiting for a decision"),
     ("resume", "<panic id> panic|retry|restart|return <v>[,<v>]", "decide a parked panic: unwind, retry, restart the hosted app domain (otherwise its restartable fn), or return the values"),
     ("memory", "[compiler=1] [n=24]", "where the memory is and why: RSS by mapping kind, malloc in use vs held free, makepad run's own parts, findings, growth since the last `memory`"),
@@ -236,9 +251,10 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("hal", "pump|pace", "HAL pump loop per session: turns and wake causes, totals and per second since the last call (an idle app shows none); pace: the WM-hosted shell's frame pacing"),
     ("writes", "<Type::field> | (none: the watches) | W<n> [n=20] | rm <W<n>|all>", "who writes a struct field: the compiled fns that assign `x.field` (`=`, `op=`) are rebuilt to record every write: its site (fn, file:line), the value written and the field's address; `writes W<n>` reads the sites and the latest writes"),
     ("vms", "", "every live Splash VM: label, thread, heap objects / strings / arrays and bytes, GC runs and time, errors, evaluations"),
-    ("live", "[after=<next>]", "an instant look for live graphs (no window, no sleep), one JSON line: now_ms, frames presented, finished builds so far per kind (lazy, ahead, o2, o3, linked; diff two looks for a rate), queues [ahead,o2,o3], UI ms waited on the JIT; with after=<the last answer's next>: the UI frames since then (the last minute at most) as ft [[ms before now_ms the frame ended, ms it worked], ...]"),
+    ("live", "[after=<next>]", "an instant look for live graphs (no window, no sleep), one JSON line: now_ms, frames presented, live patches installed and the ones the newest presented window frame was built with (frame_patch), finished builds so far per kind (lazy, ahead, o2, o3, linked; diff two looks for a rate), queues [ahead,o2,o3], UI ms waited on the JIT; with after=<the last answer's next>: the UI frames since then (the last minute at most) as ft [[ms before now_ms the frame ended, ms it worked], ...]"),
+    ("cpu", "", "the shared CPU budget: running and queued app/JIT jobs per class, waits and checkpoint warnings, who holds and waits for the tokens"),
     ("jit", "[ms=250]","live compile activity in one line (what the JIT ring shows): busy or idle, the jobs running now, the queues per tier (ahead, O2, O3), builds finished and their rate over ms, the UI thread's JIT duty"),
-    ("jit queue", "[n=10]","what the JIT builds now, then the next n of the O3 and O2 queues in the order they are built: heat (x the O3 threshold; ui: the UI thread's path), why queued, seconds waited, fn"),
+    ("jit queue", "[n=10]","running JIT jobs, then the unified queue in admission order: class, heat, UI path, wait, function"),
     ("threads", "", "every thread: name, role, state, CPU time, what it waits on; JIT threads: alive/restarting/dead, panics, heartbeat"),
     ("stacks", "[thread=<name|tid|main|owner|all>] [depth=12]", "symbolised stacks (identical stacks folded)"),
     ("waits", "", "the wait registry: who waits for what, held by whom"),
@@ -255,7 +271,39 @@ fn dispatch(req: &Req, out: &mut Out) {
     }
 }
 
+/// The reads that measure or show the running code (profiles, timelines, memory, code, values):
+/// with edits waiting for a restart they answer about the code from before those edits.
+const MEASURES_CODE: &[&str] = &[
+    "prof", "why-slow", "top", "path", "timeline", "frame", "frames", "hitch", "contention", "memory", "mem", "diff", "heap",
+    "counters", "vsnative", "ab", "asm", "remarks", "code", "versions", "why-tier", "tier", "eval", "static", "locals", "stacks",
+];
+
+/// The header of a read of the running code while edits wait for a restart: they are saved and
+/// shown as accepted, the process runs the code before them (a layout change measured for hours
+/// as if it ran, 11-04).
+pub(crate) fn stale_line() -> Option<String> {
+    let p = crate::reload::restart_pending();
+    if p.is_empty() {
+        return None;
+    }
+    let stale = format!(
+        "STALE: {} edit{} wait{} for a restart ({}): this answers about the code before {}; `session relaunch` applies {}",
+        p.len(),
+        if p.len() == 1 { "" } else { "s" },
+        if p.len() == 1 { "s" } else { "" },
+        p.join("; "),
+        if p.len() == 1 { "it" } else { "them" },
+        if p.len() == 1 { "it" } else { "them" },
+    );
+    Some(format!("{{\"stale\":{},\"restart_pending\":{}}}", json_str(&stale), p.len()))
+}
+
 fn dispatch_command(req: &Req, out: &mut Out) {
+    if MEASURES_CODE.contains(&req.cmd.as_str()) {
+        if let Some(line) = stale_line() {
+            out.line(&line);
+        }
+    }
     match req.cmd.as_str() {
         "session" => match req.pos.first().map(String::as_str) {
             Some("relaunch") => match crate::reload::relaunch_pending() {
@@ -268,6 +316,16 @@ fn dispatch_command(req: &Req, out: &mut Out) {
             None | Some("pending") => {
                 let p = crate::reload::restart_pending();
                 out.line(&format!("{{\"restart_pending\":{},\"note\":\"edits that cannot apply live wait here; the app runs the code before them until `session relaunch`\"}}", p.len()));
+                {
+                    use crate::reload::host;
+                    let (phase, since) = host::status();
+                    let b = host::build_progress();
+                    out.line(&format!(
+                        "{{\"restart\":{{\"click\":\"{:?}\",\"phase\":\"{:?}\",\"asked\":{},\"secs\":{},\"done\":{},\"total\":{},\"building\":{},\"waiting\":{},\"failed\":{},\"dot\":{}}}}}",
+                        host::route(), phase, host::restart_asked(), since.as_secs(), b.done, b.total, json_str(&b.building), json_str(&b.waiting), json_str(&host::failure()),
+                        host::dot().map_or("null".to_string(), |[x, y, w, h]| format!("[{x},{y},{w},{h}]")),
+                    ));
+                }
                 for w in p {
                     out.line(&format!("{{\"waits\":{}}}", json_str(&w)));
                 }
@@ -312,22 +370,32 @@ fn dispatch_command(req: &Req, out: &mut Out) {
             out.line(&format!("{{\"pinned\":{on}}}"));
         }
         "help" => help(req, out),
-        "inputs" => match crate::reload::input_paths() {
-            Ok(paths) => {
-                let paths: Vec<_> = paths.into_iter().filter(|p| p.contains(req.get("match").unwrap_or(""))).collect();
-                // Callers use absence to skip a patch wait: never truncate this source list.
-                out.always(&format!("{{\"count\":{}}}", paths.len()));
-                for path in paths {
-                    if out.cancelled() { break; }
-                    out.always(&format!("{{\"path\":{}}}", json_str(&path)));
+        "inputs" => {
+            // `of`: the paths asked about, one per line (a live session's saves): only those are
+            // looked at; every input path cost the owner 25-40 ms an edit (Fab, 11-04)
+            let of: Vec<&str> = req.get("of").map_or_else(Vec::new, |v| v.lines().filter(|l| !l.is_empty()).collect());
+            let keep = |p: &str| of.is_empty() || of.iter().any(|a| ends_with_rel(p, a.trim_start_matches("../")));
+            match crate::reload::input_paths(&keep) {
+                Ok(paths) => {
+                    let paths: Vec<_> = paths.into_iter().filter(|p| (of.is_empty() || of.contains(&p.as_str())) && p.contains(req.get("match").unwrap_or(""))).collect();
+                    // Callers use absence to skip a patch wait: never truncate this source list.
+                    out.always(&format!("{{\"count\":{}}}", paths.len()));
+                    for path in crate::reload::outside_packages(of.iter().copied().filter(|a| !paths.iter().any(|p| p == a))) {
+                        out.always(&format!("{{\"outside\":{}}}", json_str(path)));
+                    }
+                    for path in paths {
+                        if out.cancelled() { break; }
+                        out.always(&format!("{{\"path\":{}}}", json_str(&path)));
+                    }
                 }
+                Err(e) => out.err(&e),
             }
-            Err(e) => out.err(&e),
-        },
+        }
         "pf" => out.err("pf is answered by the client: makepad inspect <app> pf <query> (it attaches to the app's prof stream)"),
         "ping" => out.line(&format!("{{\"pid\":{},\"app\":{},\"ms\":{}}}", std::process::id(), json_str(&APP.lock().unwrap()), now_ms())),
         "threads" => cmd_threads(out),
         "jit" => cmd_jit(req, out),
+        "cpu" => cmd_cpu(out),
         "live" => cmd_live(req, out),
         "stacks" => cmd_stacks(req, out),
         "waits" => cmd_waits(out),
@@ -427,6 +495,14 @@ pub(crate) fn owner_loading<T>(ms: u64, mut f: impl FnMut() -> Result<Result<T, 
 }
 
 /// `req` with `word` put in front of its positional words (an alias for a subcommand).
+/// Whether `path` ends with the relative `rel` at a path component ('/' and '\\' alike).
+fn ends_with_rel(path: &str, rel: &str) -> bool {
+    let (p, r) = (path.as_bytes(), rel.as_bytes());
+    let sep = |c: u8| c == b'/' || c == b'\\';
+    let Some(at) = p.len().checked_sub(r.len()) else { return false };
+    !r.is_empty() && p[at..].iter().zip(r).all(|(&a, &b)| a == b || (sep(a) && sep(b))) && (at == 0 || sep(p[at - 1]))
+}
+
 fn shifted(req: &Req, word: &str) -> Req {
     let mut pos = vec![word.to_string()];
     pos.extend(req.pos.iter().cloned());
@@ -487,7 +563,7 @@ fn role(name: &str, os_id: u64, handle: u64) -> &'static str {
     let _ = os_id;
     match name {
         n if n.starts_with("run-inspect") || n.starts_with("makepad-remote") => "inspect",
-        n if n.starts_with("run-spec") || n.starts_with("run-O2") || n.starts_with("run-o3") || n.starts_with("run-ahead") || n.starts_with("gandalf") || n.starts_with("run-check") => "compiler",
+        n if n.starts_with("run-jit-") || n.starts_with("gandalf") || n.starts_with("run-check") => "compiler",
         n if n.starts_with("run-") => "makepad run",
         // an unnamed thread: the OS's dispatch workers, or a program thread spawned without a name
         "" => "unnamed",
@@ -502,6 +578,16 @@ pub struct Captured {
     pub lr: u64,
     pub sp: u64,
     pub err: Option<&'static str>,
+    /// why the walk ended at the last frame when that is not the stack's outermost (threads::Raw)
+    pub stop: Option<&'static str>,
+}
+
+impl Captured {
+    /// Where the walk ended short of the stack's outermost frame and why: "walk stops at <pc>: <why>".
+    pub fn stops(&self) -> Option<String> {
+        let why = self.stop?;
+        Some(format!("walk stops at {:#x}: {why}", self.frames.last().copied().unwrap_or(0)))
+    }
 }
 
 /// The threads `want` picks with their stacks, captured now; Err: another capture holds the lock
@@ -523,7 +609,7 @@ pub fn capture_all(want: &dyn Fn(&threads::Thread) -> bool) -> Result<Vec<Captur
         if t.handle == 0 && raw.handle != 0 {
             t.handle = raw.handle;
         }
-        out.push(Captured { frames: raw.frames().to_vec(), lr: raw.lr, sp: raw.sp, err: r.err(), t });
+        out.push(Captured { frames: raw.frames().to_vec(), lr: raw.lr, sp: raw.sp, err: r.err(), stop: raw.stop, t });
     }
     Ok(out)
 }
@@ -1023,6 +1109,25 @@ fn lifeline_fields(r: &crate::lifeline::Row) -> String {
     f
 }
 
+/// The budget's report, and who has its tokens (and what those threads wait for).
+fn cmd_cpu(out: &mut Out) {
+    for line in makepad_cpu_budget::report_string().lines() {
+        out.line(line);
+    }
+    let mut list = threads::list();
+    name_handles(&mut list);
+    let tokens = makepad_cpu_budget::tokens();
+    const CLASSES: [&str; 3] = ["interactive", "visible", "background"];
+    const CLIENTS: [&str; 3] = ["app", "jit", "hal"];
+    for h in &tokens.holders {
+        let wait = crate::waits::of(h.thread).map(|w| format!(" -- waits: {}", wait_text(&w, &list))).unwrap_or_default();
+        out.line(&format!("{} {} {} {:?} on {} for {:.1} s{}", if h.lent { "lent" } else if h.above { "above" } else { "token" }, CLASSES[h.class as usize], CLIENTS[h.client as usize], h.label, thread_label(h.thread, &list), h.held_ns as f64 / 1e9, wait));
+    }
+    for w in &tokens.waiting {
+        out.line(&format!("wanted {} {} by {}", CLASSES[w.class as usize], CLIENTS[w.client as usize], thread_label(w.thread, &list)));
+    }
+}
+
 pub fn wait_text(w: &crate::waits::Wait, list: &[threads::Thread]) -> String {
     let ms_n = crate::clock::wall_ns().saturating_sub(w.since_ns) / 1_000_000;
     // "for 812 ms", "for 40.9 s"
@@ -1040,6 +1145,8 @@ pub fn wait_text(w: &crate::waits::Wait, list: &[threads::Thread]) -> String {
             format!("{} {:#x}{} for {}", if w.label.is_empty() { "futex" } else { w.label }, w.object, held, ms)
         }
         crate::waits::Kind::Owner => format!("owner ({} request) for {}; owner serves {}", w.label, ms, crate::owner::serving_note()),
+        crate::waits::Kind::Build => format!("build #{} {} held by {} for {}", w.object, w.label, thread_label(w.holder, list), ms),
+        crate::waits::Kind::Token => format!("a {} CPU token for {}", w.label, ms),
         _ => format!("{} held by {} for {}", kind, thread_label(w.holder, list), ms),
     }
 }
@@ -1084,10 +1191,17 @@ pub(crate) fn cmd_stacks(req: &Req, out: &mut Out) {
             None => groups.push((key, vec![i])),
         }
     }
+    // stacks with JIT code (the program's threads) first: a reply cut at its size limit drops
+    // runtime threads, not the program's
+    groups.sort_by_key(|g| !caps[g.1[0]].frames.iter().any(|&pc| crate::jit::in_jit_code(pc)));
     for (key, members) in &groups {
         let names: Vec<String> = members.iter().map(|&i| json_str(&format!("{} ({})", caps[i].t.name, tid_label(caps[i].t.os_id)))).collect();
         let c = &caps[members[0]];
         let mut err = c.err.map(|e| format!(",\"err\":{}", json_str(e))).unwrap_or_default();
+        // a walk cut short above the depth shown: where and why it ends there
+        if let Some(stops) = c.stops().filter(|_| c.frames.len() <= depth.max(1)) {
+            err.push_str(&format!(",\"stops\":{}", json_str(&stops)));
+        }
         if c.t.handle != 0 && instrument::stopped(&c.t) {
             err.push_str(&script_stack_field("script", c.t.handle));
         }
@@ -1129,7 +1243,7 @@ fn cmd_waits(out: &mut Out) {
 fn cmd_jit(req: &Req, out: &mut Out) {
     use crate::postframe::activity;
     if req.pos.first().map(String::as_str) == Some("queue") {
-        out.measured("JIT compile queues", "jit::queue_view: each queue locked for one scan, heat from the tier records", &[]);
+        out.measured("JIT compile queues", "jit::queue_view: unified queue admission order, heat from tier records", &[]);
         for l in crate::jit::queue_view(req.num("n", 10) as usize) {
             out.line(&l);
         }
@@ -1191,8 +1305,11 @@ fn cmd_live(req: &Req, out: &mut Out) {
         None => flightrec::frames_head(),
     };
     out.line(&format!(
-        "{{\"now_ms\":{:.1},\"frames\":{frames},\"lazy\":{},\"ahead\":{},\"o2\":{},\"o3\":{},\"linked\":{},\"q\":[{},{},{}],\"ui_wait_ms\":{},\"next\":{next},\"ft\":[{ft}]}}",
+        "{{\"now_ms\":{:.1},\"frames\":{frames},\"patches\":{},\"frame_patch\":{},\"restart_pending\":{},\"lazy\":{},\"ahead\":{},\"o2\":{},\"o3\":{},\"linked\":{},\"q\":[{},{},{}],\"ui_wait_ms\":{},\"next\":{next},\"ft\":[{ft}]}}",
         now as f64 / 1e6,
+        crate::reload::patches_installed(),
+        crate::postframe::FRAME_PATCH.load(Relaxed),
+        crate::reload::restart_pending().len(),
         a.demand(),
         a.ahead_done,
         a.o2_done,
@@ -1227,11 +1344,11 @@ fn jit_line(a: &crate::postframe::Activity, b: &crate::postframe::Activity, ms: 
     if b.ahead_running > 0 && !b.ui_waiting {
         running.push(format!("{} ahead", b.ahead_running));
     }
-    if b.o2_running && b.o3_slot.is_some() {
-        running.push("O2 build".into());
+    if b.o2_running > 0 && (b.o3_slot.is_some() || b.ahead_running > 0 || b.ui_waiting || b.settling) {
+        running.push(format!("{} O2 builds", b.o2_running));
     }
     parts.push(format!("running: {}", if running.is_empty() { "nothing".into() } else { running.join(", ") }));
-    parts.push(format!("queued: ahead {}, O2 {}, O3 {}", k(b.ahead), k(b.o2), k(b.o3)));
+    parts.push(format!("queued: ahead {}, O2 {}, O3 {}", k(b.ahead.saturating_sub(b.ahead_running)), k(b.o2), k(b.o3)));
     let rate = built as f64 * 1000.0 / ms as f64;
     parts.push(format!(
         "finished {} (+{} in {} ms = {:.0} fns/s: lazy {}, ahead {}, O2 {}, O3 {}, linked {})",
@@ -1734,6 +1851,11 @@ fn cmd_vms(out: &mut Out) {
 /// condvar, 3 read lock, 4 write lock, 5 park, 6 once; holder: a mutex holder's tag) or joins a
 /// thread (kind 7; holder: its pthread handle).
 pub extern "C" fn relax_wait_enter(kind: u32, addr: usize, holder: usize) {
+    // asleep a program thread keeps no CPU token: what it sleeps on (another job, a lock its holder
+    // keeps while it waits for a build) may need one
+    if !crate::owner::in_fork_child() {
+        makepad_cpu_budget::lend();
+    }
     if kind == 7 {
         // a join: the holder is the joined thread's pthread handle
         crate::waits::enter(crate::waits::Kind::Join, 0, holder as u64, "join");
@@ -1748,7 +1870,25 @@ pub extern "C" fn relax_wait_enter(kind: u32, addr: usize, holder: usize) {
 }
 
 pub extern "C" fn relax_wait_leave() {
+    if !crate::owner::in_fork_child() {
+        makepad_cpu_budget::take_back();
+    }
     crate::zone_alloc::domain::after_wait();
     crate::waits::leave();
 }
 
+
+#[cfg(test)]
+mod tests {
+    /// `inputs of=`: a saved path names an input at a whole path component, either separator.
+    #[test]
+    fn a_saved_path_names_an_input_at_a_whole_component() {
+        use super::ends_with_rel as ends;
+        assert!(ends("/w/apps/fab/src/a.rs", "apps/fab/src/a.rs"));
+        assert!(ends("apps/fab/src/a.rs", "apps/fab/src/a.rs"));
+        assert!(ends("C:\\w\\apps\\fab\\a.rs", "apps/fab/a.rs"));
+        assert!(!ends("/w/xapps/fab/a.rs", "apps/fab/a.rs"));
+        assert!(!ends("a.rs", "src/a.rs"));
+        assert!(!ends("/w/a.rs", ""));
+    }
+}

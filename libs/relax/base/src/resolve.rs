@@ -84,6 +84,10 @@ struct Target {
     required_features: Vec<String>,
     /// a test target built with the libtest harness (`harness = false`: its own `main`)
     harness: bool,
+    /// `test = false`: `cargo test` leaves it out unless it is named
+    test: bool,
+    /// `doctest = false` (a lib): `cargo test` runs none of its doc tests
+    doctest: bool,
 }
 
 impl Target {
@@ -376,7 +380,7 @@ pub struct Resolver {
 
 fn read_toml(path: &str) -> Result<TomlTable, String> {
     let text = crate::vfs::read_to_string(path).map_err(|e| format!("{}: {}", path, e))?;
-    parse_toml(&text).map(|d| d.root).map_err(|e| format!("{}: {}", path, e))
+    parse_toml(&text).map(|d| d.root).map_err(|e| e.in_file(path))
 }
 
 impl Workspace {
@@ -714,6 +718,8 @@ impl Resolver {
                 kind,
                 required_features: lt.map(|l| strs(l, "required-features")).unwrap_or_default(),
                 harness: lt.and_then(|l| b(l, "harness")).unwrap_or(true),
+                test: lt.and_then(|l| b(l, "test")).unwrap_or(true),
+                doctest: lt.and_then(|l| b(l, "doctest")).unwrap_or(true),
             }
         });
         // [[bin]] + discovered bins
@@ -732,7 +738,7 @@ impl Resolver {
                     }
                 }
             };
-            bins.push(Target { name: bname, path, edition: s(bt, "edition").unwrap_or_else(|| edition.clone()), kind: vec!["bin".to_string()], required_features: strs(bt, "required-features"), harness: b(bt, "harness").unwrap_or(true) });
+            bins.push(Target { name: bname, path, edition: s(bt, "edition").unwrap_or_else(|| edition.clone()), kind: vec!["bin".to_string()], required_features: strs(bt, "required-features"), harness: b(bt, "harness").unwrap_or(true), test: b(bt, "test").unwrap_or(true), doctest: false });
         }
         // autobins: default on, except for edition 2015 packages with explicit [[bin]] targets
         let autobins = match b(pkg, "autobins") {
@@ -761,7 +767,7 @@ impl Resolver {
             for (n, p) in found {
                 // an explicit target with that name or path replaces the discovered one
                 if !bins.iter().any(|b| b.name == n || b.path == p) {
-                    bins.push(Target { name: n, path: p, edition: edition.clone(), kind: vec!["bin".to_string()], required_features: Vec::new(), harness: true });
+                    bins.push(Target { name: n, path: p, edition: edition.clone(), kind: vec!["bin".to_string()], required_features: Vec::new(), harness: true, test: true, doctest: false });
                 }
             }
         }
@@ -782,7 +788,7 @@ impl Resolver {
                     }
                 }
             };
-            tests.push(Target { name: tname, path, edition: s(tt, "edition").unwrap_or_else(|| edition.clone()), kind: vec!["test".to_string()], required_features: strs(tt, "required-features"), harness: b(tt, "harness").unwrap_or(true) });
+            tests.push(Target { name: tname, path, edition: s(tt, "edition").unwrap_or_else(|| edition.clone()), kind: vec!["test".to_string()], required_features: strs(tt, "required-features"), harness: b(tt, "harness").unwrap_or(true), test: b(tt, "test").unwrap_or(true), doctest: false });
         }
         let autotests = match b(pkg, "autotests") {
             Some(v) => v,
@@ -805,7 +811,7 @@ impl Resolver {
             found.sort();
             for (n, p) in found {
                 if !tests.iter().any(|x| x.name == n || x.path == p) {
-                    tests.push(Target { name: n, path: p, edition: edition.clone(), kind: vec!["test".to_string()], required_features: Vec::new(), harness: true });
+                    tests.push(Target { name: n, path: p, edition: edition.clone(), kind: vec!["test".to_string()], required_features: Vec::new(), harness: true, test: true, doctest: false });
                 }
             }
         }
@@ -1059,17 +1065,22 @@ impl Resolver {
     }
 
     /// The workspace member named `package` (members, and path dependencies under the root).
+    /// A manifest that does not load is passed over while another may be the package; when none
+    /// is, its error is the answer (a duplicate key in the package's own manifest read as "not a
+    /// member"), the ones whose text names the package first.
     fn find_member(&mut self, package: &str) -> Result<usize, String> {
         let mut queue: Vec<String> = self.ws.member_dirs();
+        // manifests that did not load: (names the package, error), in the order met
+        let mut broken: Vec<(bool, String)> = Vec::new();
         // fast path: a member whose manifest names the package (parsed only when the text matches)
         let needle = format!("\"{}\"", package);
         for d in &queue {
             let path = format!("{}/Cargo.toml", d);
             if crate::vfs::read_to_string(&path).is_ok_and(|t| t.contains(&needle)) {
-                if let Ok(i) = self.load(d, Source::Path) {
-                    if self.manifests[i].name == package {
-                        return Ok(i);
-                    }
+                match self.load(d, Source::Path) {
+                    Ok(i) if self.manifests[i].name == package => return Ok(i),
+                    Ok(_) => {}
+                    Err(e) => broken.push((true, e)),
                 }
             }
         }
@@ -1079,7 +1090,15 @@ impl Resolver {
             if !seen.insert(d.clone()) || !crate::vfs::is_file(format!("{}/Cargo.toml", d)) {
                 continue;
             }
-            let Ok(i) = self.load(&d, Source::Path) else { continue };
+            let i = match self.load(&d, Source::Path) {
+                Ok(i) => i,
+                Err(e) => {
+                    if !broken.iter().any(|b| b.1 == e) {
+                        broken.push((false, e));
+                    }
+                    continue;
+                }
+            };
             if self.manifests[i].name == package {
                 return Ok(i);
             }
@@ -1090,6 +1109,21 @@ impl Resolver {
                     }
                 }
             }
+        }
+        if !broken.is_empty() {
+            broken.sort_by_key(|b| !b.0);
+            let errs: Vec<&str> = broken.iter().map(|b| b.1.as_str()).collect();
+            return Err(format!(
+                "{}\n(package `{}` was not found in the workspace at {}: {} see above)",
+                errs.join("\n"),
+                package,
+                self.ws.root,
+                if errs.len() == 1 {
+                    "a member's manifest does not load,".to_string()
+                } else {
+                    format!("{} members' manifests do not load,", errs.len())
+                }
+            ));
         }
         Err(format!(
             "package `{}` is not a member of the workspace at {}: no member or path dependency there has that name (check the name; a private repository's package needs that repository checked out under apps/, e.g. apps/commercial)",
@@ -1103,7 +1137,7 @@ impl Resolver {
 /// (cargo test's order: the lib's unit tests, the bins' unit tests, then the test targets by name).
 /// The package's lib path, bins and integration tests: (name, path, harness) each. Missing
 /// required features skip implicit targets and reject explicitly named targets before any run.
-pub fn test_targets(sess: &std::sync::Arc<crate::Session>, dir: &str, package: &str, flags: &[String], bin_names: &[String], test_names: &[String]) -> Result<(Option<String>, Vec<(String, String, bool)>, Vec<(String, String, bool)>), String> {
+pub fn test_targets(sess: &std::sync::Arc<crate::Session>, dir: &str, package: &str, flags: &[String], bin_names: &[String], test_names: &[String]) -> Result<(Option<LibTarget>, Vec<(String, String, bool)>, Vec<(String, String, bool)>), String> {
     let o = parse_flags(flags)?;
     let mut r = Resolver::new(sess, dir)?;
     let i = r.find_member(package)?;
@@ -1112,7 +1146,8 @@ pub fn test_targets(sess: &std::sync::Arc<crate::Session>, dir: &str, package: &
     let enabled = |targets: &[Target], names: &[String]| -> Result<Vec<(String, String, bool)>, String> {
         let mut out = Vec::new();
         for t in targets {
-            if t.enabled(&features, names.contains(&t.name))? {
+            let named = names.contains(&t.name);
+            if (t.test || named) && t.enabled(&features, named)? {
                 out.push((t.name.clone(), t.path.clone(), t.harness));
             }
         }
@@ -1121,7 +1156,16 @@ pub fn test_targets(sess: &std::sync::Arc<crate::Session>, dir: &str, package: &
     };
     let bins = enabled(&m.bins, bin_names)?;
     let tests = enabled(&m.tests, test_names)?;
-    Ok((m.lib.as_ref().map(|l| l.path.clone()), bins, tests))
+    Ok((m.lib.as_ref().map(|l| LibTarget { path: l.path.clone(), test: l.test, doctest: l.doctest }), bins, tests))
+}
+
+/// The package's lib as `cargo test` sees it.
+pub struct LibTarget {
+    pub path: String,
+    /// `[lib] test = false`: its unit tests run only when asked for (`--lib`)
+    pub test: bool,
+    /// `[lib] doctest = false`: it has no doc tests to run
+    pub doctest: bool,
 }
 
 /// The folder of the workspace member `package` of the workspace containing `dir`.
@@ -1306,6 +1350,36 @@ pub fn find_root(dir: &str) -> Result<String, String> {
     find_root_in(dir, None)
 }
 
+/// What `file!()` names a source file relative to, as cargo decides it (`path_args`): a file of a
+/// path package under the workspace root of the run is named relative to that root; a file of a
+/// registry, git or vendored package, or of a path package outside the root, as given. The
+/// folders under the root that hold no path package are where the resolver reads the others
+/// from: Relax's registry store (inside the target folder), the cargo home and a vendored folder.
+pub struct FileRoot {
+    root: String,
+    not_path: Vec<String>,
+}
+
+impl FileRoot {
+    /// The workspace of a run started in `dir`.
+    pub fn of(dir: &str) -> Option<FileRoot> {
+        let root = find_root(dir).ok()?;
+        let mut not_path = vec![normalize(&crate::dirs::relax_dir().join("registry").display().to_string()), normalize(&crate::git::cargo::home().display().to_string())];
+        if let Ok(Some((Vendor::Dir(v), _))) = vendor_dir(dir) {
+            not_path.push(normalize(&v));
+        }
+        Some(FileRoot { root, not_path })
+    }
+
+    /// `path` relative to the root when it is a path package's file under it.
+    pub fn relative(&self, path: &str) -> Option<String> {
+        if self.not_path.iter().any(|n| crate::vfs::relative_path(path, n).is_some()) {
+            return None;
+        }
+        crate::vfs::relative_path(path, &self.root).filter(|r| !r.is_empty())
+    }
+}
+
 /// `find_root` looking no higher than `ceiling` (a mounted repository's root).
 fn find_root_in(dir: &str, ceiling: Option<&str>) -> Result<String, String> {
     let up = |d: &str| if ceiling == Some(d) { None } else { parent(d) };
@@ -1482,10 +1556,10 @@ pub struct Options {
     pub all_features: bool,
     pub features: Vec<String>,
     pub bin: Option<String>,
-    /// `--lib`, `--tests`, `--test <name>` (cargo test's target selection): the graph of the
-    /// package's test harness. The lib's unit tests and the integration tests are separate
-    /// programs (the lib is cfg(test) in the first and plain in the second), so one graph holds
-    /// either the lib test or the integration tests.
+    /// `--lib`, `--bins`, `--bin <name>`, `--tests`, `--test <name>` (cargo test's target
+    /// selection): the graph of the package's test harness. The lib's unit tests are a program of
+    /// their own (the lib is cfg(test) there and plain beside the bins' unit tests and the
+    /// integration tests), so one graph holds either the lib test or bin and integration tests.
     pub test: Option<TestSel>,
 }
 
@@ -1493,10 +1567,11 @@ pub struct Options {
 pub enum TestSel {
     /// the lib target built with `--test`
     Lib,
-    /// these bin targets built with `--test` (empty: all of them)
-    Bins(Vec<String>),
-    /// these integration test targets (empty: all of them)
-    Integration(Vec<String>),
+    /// these bin targets built with `--test` and these integration test targets, beside the plain
+    /// lib: one graph, as `cargo test` builds them in one go with one feature resolution (`makepad
+    /// test` runs each target out of it in a process of its own, run.rs `--subject`). None: no
+    /// target of that kind; empty: all of them.
+    Targets { bins: Option<Vec<String>>, tests: Option<Vec<String>> },
 }
 
 pub fn parse_flags(flags: &[String]) -> Result<Options, String> {
@@ -1553,10 +1628,9 @@ pub fn parse_flags(flags: &[String]) -> Result<Options, String> {
     };
     o.test = match (lib, bins, tests) {
         (true, None, None) => Some(TestSel::Lib),
-        (false, Some(b), None) => Some(TestSel::Bins(b)),
-        (false, None, Some(t)) => Some(TestSel::Integration(t)),
         (false, None, None) => None,
-        _ => return Err("unit graph: --lib, --bins and integration tests are separate test programs; select one".to_string()),
+        (false, bins, tests) => Some(TestSel::Targets { bins, tests }),
+        _ => return Err("unit graph: the lib's unit tests (--lib) are a test program of their own; select them alone".to_string()),
     };
     Ok(o)
 }
@@ -1729,6 +1803,8 @@ pub struct GraphUnit {
     /// built with rustc's `--test`: libtest's generated main replaces the crate's own
     /// (a lib's or bin's unit tests, an integration test without `harness = false`)
     pub harness: bool,
+    /// Relax's own sysroot crate of its name (run.rs with_sysroot_proc_macro); no package's unit is
+    pub sysroot: bool,
     pub features: Vec<String>,
     /// (unit index, extern crate name)
     pub deps: Vec<(usize, String)>,
@@ -1766,6 +1842,7 @@ impl Units {
                     host: u.get("profile").and_then(|p| p.get("opt_level")).map(|o| o.str() == "0").unwrap_or(false) || matches!(u.get("relax_host"), Some(crate::json::Json::Bool(true))),
                     mode: s(u.get("mode")),
                     harness: u.get("mode").is_some_and(|m| m.str() == "test"),
+                    sysroot: false,
                     features: list(u.get("features")),
                     deps: u.get("dependencies").map(|d| d.arr().iter().filter_map(|dep| Some((dep.get("index")?.num() as usize, s(dep.get("extern_crate_name"))))).collect()).unwrap_or_default(),
                 }
@@ -2090,49 +2167,51 @@ fn emit(r: &Resolver, nodes: &HashMap<(usize, bool), Node>, order: &[(usize, boo
     let rm = &r.manifests[root];
     match &o.test {
         Some(TestSel::Lib) if rm.lib.is_none() => return Err(format!("no library targets found in package `{}`", rm.name)),
-        Some(TestSel::Bins(names)) => {
-            if rm.bins.is_empty() {
-                return Err(format!("no bin targets found in package `{}`", rm.name));
-            }
-            for n in names {
-                if !rm.bins.iter().any(|t| &t.name == n) {
-                    return Err(format!("no bin target named `{}` in package `{}`", n, rm.name));
+        Some(TestSel::Targets { bins, tests }) => {
+            if let Some(names) = bins {
+                if rm.bins.is_empty() {
+                    return Err(format!("no bin targets found in package `{}`", rm.name));
+                }
+                for n in names {
+                    if !rm.bins.iter().any(|t| &t.name == n) {
+                        return Err(format!("no bin target named `{}` in package `{}`", n, rm.name));
+                    }
+                }
+                for (bi, bt) in rm.bins.iter().enumerate() {
+                    if !names.is_empty() && !names.contains(&bt.name) {
+                        continue;
+                    }
+                    if !bt.enabled(&rn.features, !names.is_empty())? {
+                        continue;
+                    }
+                    // `harness = false` bins (no libtest main): `--bins` builds the harness ones;
+                    // `makepad test` names the targets it runs (test_pkg.rs), these included
+                    if !bt.harness && names.is_empty() {
+                        continue;
+                    }
+                    roots.push(add((root, false), UKind::BinTest(bi), &mut units));
                 }
             }
-            for (bi, bt) in rm.bins.iter().enumerate() {
-                if !names.is_empty() && !names.contains(&bt.name) {
-                    continue;
+            if let Some(names) = tests {
+                for n in names {
+                    if !rm.tests.iter().any(|t| &t.name == n) {
+                        return Err(format!("no test target named `{}` in package `{}`", n, rm.name));
+                    }
                 }
-                if !bt.enabled(&rn.features, !names.is_empty())? {
-                    continue;
+                for (ti, tt) in rm.tests.iter().enumerate() {
+                    if !names.is_empty() && !names.contains(&tt.name) {
+                        continue;
+                    }
+                    if !tt.enabled(&rn.features, !names.is_empty())? {
+                        continue;
+                    }
+                    // `harness = false` (cargo: `--cfg test`, no `--test`, run as a plain program):
+                    // `--tests` builds the harness ones; `makepad test` names the targets it runs
+                    if !tt.harness && names.is_empty() {
+                        continue;
+                    }
+                    roots.push(add((root, false), UKind::Test(ti), &mut units));
                 }
-                // `harness = false` bins (no libtest main): `--bins` builds the harness ones; `makepad
-                // test` runs each of the others as a program of its own (`--bin <name>`, test_targets)
-                if !bt.harness && names.is_empty() {
-                    continue;
-                }
-                roots.push(add((root, false), UKind::BinTest(bi), &mut units));
-            }
-        }
-        Some(TestSel::Integration(names)) => {
-            for n in names {
-                if !rm.tests.iter().any(|t| &t.name == n) {
-                    return Err(format!("no test target named `{}` in package `{}`", n, rm.name));
-                }
-            }
-            for (ti, tt) in rm.tests.iter().enumerate() {
-                if !names.is_empty() && !names.contains(&tt.name) {
-                    continue;
-                }
-                if !tt.enabled(&rn.features, !names.is_empty())? {
-                    continue;
-                }
-                // `harness = false` (cargo: `--cfg test`, no `--test`, run as a plain program): `--tests`
-                // builds the harness ones; `makepad test` runs each of the others alone (`--test <name>`)
-                if !tt.harness && names.is_empty() {
-                    continue;
-                }
-                roots.push(add((root, false), UKind::Test(ti), &mut units));
             }
         }
         _ => {}
@@ -2143,7 +2222,7 @@ fn emit(r: &Resolver, nodes: &HashMap<(usize, bool), Node>, order: &[(usize, boo
             continue;
         }
         if o.test.is_some() {
-            if matches!(o.test, Some(TestSel::Integration(_))) {
+            if matches!(o.test, Some(TestSel::Targets { tests: Some(_), .. })) {
                 bins.push(bt.name.clone());
             }
             continue;
@@ -2252,6 +2331,7 @@ fn emit(r: &Resolver, nodes: &HashMap<(usize, bool), Node>, order: &[(usize, boo
                 UKind::Test(ti) => m.tests[*ti].harness,
                 _ => false,
             },
+            sysroot: false,
             features: node.features.iter().cloned().collect(),
             deps,
         });
@@ -2295,7 +2375,7 @@ required-features = ["b", "manual"]
         let target = &manifest.get("test").unwrap().as_array_of_tables().unwrap()[0];
         let target = Target {
             name: s(target, "name").unwrap(), path: String::new(), edition: "2021".into(),
-            kind: vec!["test".into()], required_features: strs(target, "required-features"), harness: true,
+            kind: vec!["test".into()], required_features: strs(target, "required-features"), harness: true, test: true, doctest: false,
         };
         let enabled = |flags: &[&str]| {
             let flags: Vec<String> = flags.iter().map(|f| f.to_string()).collect();
@@ -2436,6 +2516,28 @@ required-features = ["b", "manual"]
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// A member manifest that does not parse is the answer when no member is the package: its
+    /// file, line, column and message, not "not a member of the workspace". Another broken member
+    /// does not hide a package that loads.
+    #[test]
+    fn a_member_manifest_that_does_not_parse_is_reported() {
+        let sess = &std::sync::Arc::new(crate::Session::default());
+        let root = tree("broken-member", &[
+            ("Cargo.toml", "[workspace]\nmembers = [\"slice\", \"other\"]\n"),
+            ("slice/Cargo.toml", "[package]\nname = \"fab-slice\"\nversion = \"0.1.0\"\n\n[dev-dependencies]\nsdf = { path = \"../other\" }\nsdf = { path = \"../other\" }\n"),
+            ("slice/src/lib.rs", ""),
+            ("other/Cargo.toml", "[package]\nname = \"other\"\nversion = \"0.1.0\"\n"),
+            ("other/src/lib.rs", ""),
+        ]);
+        let mut r = Resolver::new(sess, &root).unwrap();
+        let e = r.find_member("fab-slice").err().unwrap();
+        let path = format!("{}/slice/Cargo.toml", normalize(&root));
+        assert!(e.starts_with(&format!("{path}:7:1: duplicate key `sdf`\n")), "{e}");
+        assert!(!e.contains("not a member"), "{e}");
+        assert!(r.find_member("other").is_ok());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn standalone_and_member_packages() {
         let sess = &std::sync::Arc::new(crate::Session::default());
@@ -2506,8 +2608,67 @@ fn git_sources_as_cargo_spells_them() {
 
 #[cfg(test)]
 #[test]
+fn file_macro_paths_as_cargo_names_them() {
+    // a workspace root spelt with dotted `workspace.` keys (as makepad's), a member, a package
+    // in Relax's registry store under the target folder, and a package outside the root
+    let base = std::env::temp_dir().join(format!("relax_file_root_{}", std::process::id()));
+    let ws = base.join("ws");
+    std::fs::create_dir_all(ws.join("m/src")).unwrap();
+    std::fs::write(ws.join("Cargo.toml"), "workspace.members = [\"m\"]\nworkspace.resolver = \"2\"\n\n[workspace.dependencies]\n").unwrap();
+    std::fs::write(ws.join("m/Cargo.toml"), "[package]\nname = \"m\"\nversion = \"0.1.0\"\n").unwrap();
+    let ws = normalize(&ws.display().to_string());
+    let registry = format!("{}/target/makepad-run/registry", ws);
+    let r = FileRoot { root: find_root(&format!("{}/m", ws)).unwrap(), not_path: vec![registry.clone()] };
+    assert_eq!(r.relative(&format!("{}/m/src/main.rs", ws)).as_deref(), Some("m/src/main.rs"));
+    assert_eq!(r.relative(&format!("{}/src/foo-1.0.0-0123456789abcdef/src/lib.rs", registry)), None);
+    assert_eq!(r.relative(&format!("{}/other/src/lib.rs", normalize(&base.display().to_string()))), None);
+    assert_eq!(FileRoot::of(&format!("{}/m", ws)).map(|r| r.root), Some(ws));
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[cfg(test)]
+#[test]
 fn run_env_reads_the_packages_table() {
     let m = "[package]\nname = \"makepad-amp\"\n\n[package.metadata.makepad.run-env]\n# why\nMAKEPAD_LOG = \"0\"\nbad key = \"x\"\n\n[dependencies]\nX = \"1\"\n";
     assert_eq!(run_env(m), vec![("MAKEPAD_LOG".to_string(), "0".to_string())]);
     assert!(run_env("[package]\nname = \"a\"\n").is_empty());
+}
+
+#[cfg(test)]
+#[test]
+fn test_false_targets_run_only_when_named() {
+    let root = std::env::temp_dir().join(format!("relax-test-false-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::create_dir_all(root.join("tests")).unwrap();
+    std::fs::write(root.join("Cargo.toml"), r#"[package]
+name = "quiet"
+version = "0.1.0"
+edition = "2021"
+[lib]
+path = "src/lib.rs"
+test = false
+doctest = false
+[[bin]]
+name = "quiet_bin"
+path = "src/quiet_bin.rs"
+test = false
+[[test]]
+name = "quiet_test"
+path = "tests/quiet_test.rs"
+test = false
+"#).unwrap();
+    for f in ["src/lib.rs", "src/quiet_bin.rs", "tests/quiet_test.rs", "tests/loud.rs"] { std::fs::write(root.join(f), "").unwrap(); }
+    let sess = std::sync::Arc::new(crate::Session::default());
+    let dir = root.to_str().unwrap();
+    let names = |t: &[(String, String, bool)]| t.iter().map(|t| t.0.clone()).collect::<Vec<_>>();
+    let (lib, bins, tests) = test_targets(&sess, dir, "quiet", &[], &[], &[]).unwrap();
+    let lib = lib.unwrap();
+    assert!(!lib.test && !lib.doctest);
+    assert!(bins.is_empty(), "{bins:?}");
+    assert_eq!(names(&tests), ["loud"]);
+    let (_, bins, tests) = test_targets(&sess, dir, "quiet", &[], &["quiet_bin".to_string()], &["quiet_test".to_string()]).unwrap();
+    assert_eq!(names(&bins), ["quiet_bin"]);
+    assert_eq!(names(&tests), ["loud", "quiet_test"]);
+    let _ = std::fs::remove_dir_all(&root);
 }

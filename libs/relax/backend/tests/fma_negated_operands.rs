@@ -1,7 +1,8 @@
 //! `FMulAdd` / `VFma` with `neg_prod` / `neg_add` negate the operands `a` / `c` themselves:
 //! d = (neg_prod ? -a : a) * b + (neg_add ? -c : c), one rounding, so a NaN operand's sign flips
-//! as in `(-a).mul_add(b, c)`. x86-64's vfnmadd/vfmsub negate after the multiply (a NaN kept its
-//! sign); the encoder must give those bits for NaNs of both signs, quiet and signaling, one or
+//! as in `(-a).mul_add(b, c)`. x86-64's vfnmadd/vfmsub negate after the multiply (a NaN keeps its
+//! sign): `VFma`'s `keep_nan` forms, one instruction there and NaN-guarded negations on arm64.
+//! The encoder must give those bits for NaNs of both signs, quiet and signaling, one or
 //! several at once (the NaN rule: rir::fma_nan_f32 / fma_nan_f64). The reference spells the NaN
 //! out: Rust's own `mul_add` NaN is unspecified (rustc with the fma feature keeps a NaN `a`'s
 //! sign in `(-a).mul_add(b, c)`, without it flips it).
@@ -54,14 +55,14 @@ fn scalar(np: bool, na: bool, w: bool) -> Code {
     compile(&f)
 }
 
-/// fn(src: *const [a, b, c] (three f32x4), dst: *mut f32x4) with one VFma.
-fn vector(np: bool, na: bool) -> Code {
+/// fn(src: *const [a, b, c] (three f32x4, or f64x2 with w), dst: *mut d) with one VFma.
+fn vector(np: bool, na: bool, keep: bool, w: bool) -> Code {
     let mut f = Func::new("vfma".into(), 0);
     let (ps, pd) = (f.vreg(Cls::I), f.vreg(Cls::I));
     f.params = vec![ps, pd];
     f.block();
     let (a, b, c, d) = (f.vreg(Cls::V128), f.vreg(Cls::V128), f.vreg(Cls::V128), f.vreg(Cls::V128));
-    let insts = vec![Inst::VLoad(a, ps, 0), Inst::VLoad(b, ps, 16), Inst::VLoad(c, ps, 32), Inst::VFma(np, na, d, a, b, c), Inst::VStore(pd, 0, d)];
+    let insts = vec![Inst::VLoad(a, ps, 0), Inst::VLoad(b, ps, 16), Inst::VLoad(c, ps, 32), Inst::VFma(np, na, keep, w, d, a, b, c), Inst::VStore(pd, 0, d)];
     f.blocks[0].pos = vec![0; insts.len()];
     f.blocks[0].insts = insts;
     f.blocks[0].term = Term::Ret(vec![]);
@@ -78,13 +79,16 @@ fn values32() -> Vec<f32> {
     vec![0.0, -0.0, 1.0, -1.5, 3.25, f32::INFINITY, f32::NEG_INFINITY, f32::NAN, -f32::NAN, b(0x7fc0_1234), b(0xffc0_4321), b(0x7f80_0567), b(0xff80_0089)]
 }
 
-/// The bits of the RIR op: the value of the fused op, or its NaN by the rule
-fn want64(np: bool, na: bool, a: f64, b: f64, c: f64) -> u64 {
+/// The bits of the RIR op: the value of the fused op, or its NaN by the rule. `keep`: a NaN operand
+/// is not negated (`VFma`'s keep_nan)
+fn want64(np: bool, na: bool, keep: bool, a: f64, b: f64, c: f64) -> u64 {
+    let (np, na) = (np && !(keep && a.is_nan()), na && !(keep && c.is_nan()));
     let (a, c) = (if np { -a } else { a }, if na { -c } else { c });
     fma_nan_f64(a, b, c).unwrap_or_else(|| a.mul_add(b, c).to_bits())
 }
 
-fn want32(np: bool, na: bool, a: f32, b: f32, c: f32) -> u32 {
+fn want32(np: bool, na: bool, keep: bool, a: f32, b: f32, c: f32) -> u32 {
+    let (np, na) = (np && !(keep && a.is_nan()), na && !(keep && c.is_nan()));
     let (a, c) = (if np { -a } else { a }, if na { -c } else { c });
     fma_nan_f32(a, b, c).unwrap_or_else(|| a.mul_add(b, c).to_bits())
 }
@@ -103,7 +107,7 @@ fn scalar_fma_negates_operands() {
                     let src = [a, b, c];
                     let mut d = 0f64;
                     run(src.as_ptr() as *const u8, &mut d as *mut f64 as *mut u8);
-                    assert_eq!(d.to_bits(), want64(np, na, a, b, c), "f64 np={np} na={na} ({:x}, {:x}, {:x})", a.to_bits(), b.to_bits(), c.to_bits());
+                    assert_eq!(d.to_bits(), want64(np, na, false, a, b, c), "f64 np={np} na={na} ({:x}, {:x}, {:x})", a.to_bits(), b.to_bits(), c.to_bits());
                 }
             }
         }
@@ -116,18 +120,17 @@ fn scalar_fma_negates_operands() {
                     let src = [a, b, c];
                     let mut d = 0f32;
                     run(src.as_ptr() as *const u8, &mut d as *mut f32 as *mut u8);
-                    assert_eq!(d.to_bits(), want32(np, na, a, b, c), "f32 np={np} na={na} ({:x}, {:x}, {:x})", a.to_bits(), b.to_bits(), c.to_bits());
+                    assert_eq!(d.to_bits(), want32(np, na, false, a, b, c), "f32 np={np} na={na} ({:x}, {:x}, {:x})", a.to_bits(), b.to_bits(), c.to_bits());
                 }
             }
         }
     }
 }
 
-#[test]
-fn vector_fma_negates_operands() {
+fn vector_forms(keep: bool) {
     let vs = values32();
     for (np, na) in FORMS {
-        let code = vector(np, na);
+        let code = vector(np, na, keep, false);
         let run: Entry = unsafe { std::mem::transmute(code.ptr()) };
         for &a in &vs {
             for &b in &vs {
@@ -143,9 +146,55 @@ fn vector_fma_negates_operands() {
                     run(src.as_ptr() as *const u8, d.as_mut_ptr() as *mut u8);
                     for l in 0..4 {
                         let c = c4[l];
-                        assert_eq!(d[l].to_bits(), want32(np, na, a, b, c), "f32x4 np={np} na={na} ({:x}, {:x}, {:x})", a.to_bits(), b.to_bits(), c.to_bits());
+                        assert_eq!(d[l].to_bits(), want32(np, na, keep, a, b, c), "f32x4 np={np} na={na} keep={keep} ({:x}, {:x}, {:x})", a.to_bits(), b.to_bits(), c.to_bits());
                     }
                 }
+            }
+        }
+    }
+}
+
+fn vector_forms64(keep: bool) {
+    let vs = values64();
+    for (np, na) in FORMS {
+        let code = vector(np, na, keep, true);
+        let run: Entry = unsafe { std::mem::transmute(code.ptr()) };
+        for &a in &vs {
+            for &b in &vs {
+                // the two lanes take two addends
+                for cs in vs.chunks(2) {
+                    let mut c2 = [0f64; 2];
+                    c2[..cs.len()].copy_from_slice(cs);
+                    let src = [a, a, b, b, c2[0], c2[1]];
+                    let mut d = [0f64; 2];
+                    run(src.as_ptr() as *const u8, d.as_mut_ptr() as *mut u8);
+                    for l in 0..2 {
+                        let c = c2[l];
+                        assert_eq!(d[l].to_bits(), want64(np, na, keep, a, b, c), "f64x2 np={np} na={na} keep={keep} ({:x}, {:x}, {:x})", a.to_bits(), b.to_bits(), c.to_bits());
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn vector_fma_negates_operands() {
+    vector_forms(false);
+    vector_forms64(false);
+}
+
+#[test]
+fn vector_fma_keep_nan() {
+    vector_forms(true);
+    vector_forms64(true);
+    // x86-64: each keep_nan form is the one vfmsub / vfnmadd / vfnmsub, as long as the plain op
+    #[cfg(target_arch = "x86_64")]
+    if options().cpu.fma {
+        for w in [false, true] {
+            let plain = vector(false, false, false, w).len();
+            for (np, na) in FORMS {
+                assert_eq!(vector(np, na, true, w).len(), plain, "np={np} na={na} w={w}");
             }
         }
     }

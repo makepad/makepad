@@ -57,7 +57,7 @@ impl TraceCell {
 }
 static TRACE: TraceCell = TraceCell;
 thread_local! {
-    static TRACE_INPUT: std::cell::Cell<(f64, f64, usize)> = const { std::cell::Cell::new((0.0, 0.0, 0)) };
+    static TRACE_INPUT: std::cell::Cell<(f64, f64, f64, usize)> = const { std::cell::Cell::new((0.0, 0.0, 0.0, 0)) };
 }
 
 pub(crate) fn reload_trace() -> bool {
@@ -75,9 +75,11 @@ fn live_trace() -> bool {
     *ON.get_or_init(|| std::env::var_os("MAKEPAD_RUN_LIVE_TRACE").is_some())
 }
 
-pub(crate) fn trace_input(watch_ms: f64, read_ms: f64, scanned: usize) {
+/// The watcher's part of an edit: `watch_ms` from the save to the read, `look_ms` of it from the
+/// change seen to the read (the settle looks), `read_ms` reading the files.
+pub(crate) fn trace_input(watch_ms: f64, look_ms: f64, read_ms: f64, scanned: usize) {
     if reload_trace() {
-        TRACE_INPUT.with(|s| s.set((watch_ms, read_ms, scanned)));
+        TRACE_INPUT.with(|s| s.set((watch_ms, look_ms, read_ms, scanned)));
     }
 }
 fn trace_stage(name: &'static str) {
@@ -95,7 +97,7 @@ fn trace_stage(name: &'static str) {
     });
 }
 /// A finer split of the running stage: wall time since the stage began or the previous sub mark.
-fn trace_sub(name: &'static str) {
+pub(crate) fn trace_sub(name: &'static str) {
     TRACE.with(|s| {
         if let Some(prev) = s.sub_last.or(s.last) {
             let now = Instant::now();
@@ -118,7 +120,7 @@ fn call_traced<R>(at: &'static str, f: impl FnOnce() -> R) -> R {
         f()
     })
 }
-fn trace_count(name: &'static str, n: usize) {
+pub(crate) fn trace_count(name: &'static str, n: usize) {
     TRACE.with(|s| {
         if s.started.is_some() { *s.counts.entry(name).or_default() += n; }
     });
@@ -134,9 +136,10 @@ impl TraceTransaction {
     fn begin(files: usize) -> Self {
         if reload_trace() {
             let now = Instant::now();
-            let (watch, read, scanned) = TRACE_INPUT.with(|s| s.replace((0.0, 0.0, 0)));
+            let (watch, look, read, scanned) = TRACE_INPUT.with(|s| s.replace((0.0, 0.0, 0.0, 0)));
             let mut state = ReloadTrace { started: Some(now), last: Some(now), cpu_last: relax_backend::cpu_ns(), ..Default::default() };
             state.stages.insert("watch", watch);
+            state.subs.insert("look", look);
             state.stages.insert("read", read);
             state.counts.insert("watch_files", scanned);
             state.counts.insert("edit_files", files);
@@ -289,6 +292,8 @@ pub struct Undo {
     variants: Vec<(DefId, usize)>,
     const_failed: Vec<(DefId, Vec<TyId>)>,
     full_inputs: bool,
+    /// a const edit moved the code keys: they follow the rollback's text
+    rekeyed: bool,
     // Lead decision 52 (R1): the crates a declaration publication reached (None: all).
     scope: Option<Vec<bool>>,
 }
@@ -320,6 +325,43 @@ fn placed_storage(u: &Unit, d: DefId) -> Option<DefId> {
     u.statics.keys().chain(u.tls_places.keys()).copied().find(|&s| changed_body_owner(&u.prog, s, &[d]))
 }
 
+/// Every constant-evaluated context that reads one of `hit` by name, directly or through the consts
+/// and const fns it names (`const_contexts_reading`, so aliases and macro text count). None: it
+/// cannot say. Same-named items count: a false restart, never stale code.
+fn consts_read_through(prog: &Program, hit: &[DefId]) -> Option<crate::fxhash::HashSet<DefId>> {
+    let mut found = crate::fxhash::HashSet::default();
+    let mut next = hit.to_vec();
+    while !next.is_empty() {
+        let reads = const_contexts_reading(prog, &next)?;
+        next = reads.into_iter().filter(|d| found.insert(*d) && matches!(prog.def(*d).kind, DefKind::Const | DefKind::AssocConst | DefKind::Fn | DefKind::AssocFn)).collect();
+    }
+    Some(found)
+}
+
+/// Whether a type reads `hit`: an array length, repeat count, const argument or discriminant, or a
+/// type or impl header naming it as a generic argument. A body naming it lands: its keys show it.
+fn read_in_a_type(prog: &Program, hit: &[DefId]) -> bool {
+    consts_read_through(prog, hit).is_none_or(|found| found.iter().any(|c| matches!(prog.def(*c).kind,
+        DefKind::AnonConst | DefKind::Struct | DefKind::Enum | DefKind::Union | DefKind::TypeAlias | DefKind::AssocTy | DefKind::Impl)))
+}
+
+/// One of `hit` a type reads: it was evaluated, or `read_in_a_type`. Types have no key of their own,
+/// and a warm run evaluated only what it checked.
+fn const_read_by_a_type(u: &Unit, hit: &[DefId]) -> Option<DefId> {
+    let prog = &u.prog;
+    if let Some(&d) = hit.iter().find(|d| u.tcx.const_was_evaluated(**d)) { return Some(d); }
+    if !read_in_a_type(prog, hit) { return None; }
+    hit.iter().copied().find(|d| read_in_a_type(prog, &[*d])).or(hit.first().copied())
+}
+
+/// A static with storage whose initializer reads one of `hit`: its running value is the old text's.
+fn static_of_changed_consts(u: &Unit, hit: &[DefId]) -> Option<DefId> {
+    let mut live = u.statics.iter().filter(|(_, &a)| a != 0).map(|(d, _)| *d).peekable();
+    live.peek()?;
+    let found = consts_read_through(&u.prog, hit)?;
+    live.find(|d| found.contains(d))
+}
+
 fn changed_body_owner(prog: &Program, mut def: DefId, changed: &[DefId]) -> bool {
     while def != crate::program::NO_DEF {
         if changed.contains(&def) { return true; }
@@ -347,7 +389,35 @@ fn in_scope(prog: &Program, scope: Option<&[bool]>, d: DefId) -> bool {
 /// generated body). Text no definition holds (a cfg-disabled generated item) is never
 /// evaluated, and a generated body never materialized was never evaluated either.
 fn const_contexts_mention(prog: &Program, items: &[DefId]) -> bool {
+    const_contexts_reading(prog, items).is_none_or(|found| !found.is_empty())
+}
+
+/// `names` and what else can call those items: a `use` renaming one, a type alias whose text names one.
+fn renames_of(prog: &Program, mut names: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
+    let aliases: Vec<DefId> = (0..prog.defs.len()).map(|i| DefId(i as u32)).filter(|d| prog.def(*d).kind == DefKind::TypeAlias).collect();
+    let mut idents: Vec<Vec<u8>> = names.iter().filter(|n| n.first().is_some_and(|b| *b == b'_' || b.is_ascii_alphabetic())).cloned().collect();
+    loop {
+        let refs: Vec<&[u8]> = idents.iter().map(|n| n.as_slice()).collect();
+        let mut more: Vec<Vec<u8>> = prog.imports.iter().filter(|im| !im.glob).filter_map(|im| {
+            let (bind, last) = (im.bind?, im.segs.last()?.1);
+            (bind != last && refs.contains(&prog.syms.str(last).as_bytes())).then(|| prog.syms.str(bind).as_bytes().to_vec())
+        }).collect();
+        more.extend(aliases.iter().filter(|a| item_mentions(prog, **a, &refs)).map(|a| def_name(prog, *a).into_bytes()));
+        more.retain(|n| !names.contains(n));
+        more.sort_unstable();
+        more.dedup();
+        if more.is_empty() {
+            return names;
+        }
+        names.extend(more.iter().cloned());
+        idents.extend(more);
+    }
+}
+
+/// The definitions of the contexts `const_contexts_mention` counts; None: it cannot say.
+fn const_contexts_reading(prog: &Program, items: &[DefId]) -> Option<crate::fxhash::HashSet<DefId>> {
     use crate::def_collector::NodeId;
+    let mut found = crate::fxhash::HashSet::default();
     let visible = prog.crates_seeing_files(items.iter().map(|d| prog.def(*d).file));
     let alias_closure = |mut names: Vec<Vec<u8>>| -> Vec<Vec<u8>> {
         loop {
@@ -362,11 +432,11 @@ fn const_contexts_mention(prog: &Program, items: &[DefId]) -> bool {
         }
     };
     let all = alias_closure(items.iter().map(|d| def_name(prog, *d).into_bytes()).collect());
-    let consts = alias_closure(items.iter().filter(|d| matches!(prog.def(**d).kind, DefKind::Const | DefKind::AssocConst)).map(|d| def_name(prog, *d).into_bytes()).collect());
-    // the constant-evaluated contexts, per file: (lo, hi, whether static names count); and the
+    let consts = alias_closure(items.iter().filter(|d| matches!(prog.def(**d).kind, DefKind::Const | DefKind::AssocConst | DefKind::Fn | DefKind::AssocFn)).map(|d| def_name(prog, *d).into_bytes()).collect());
+    // the constant-evaluated contexts, per file: (lo, hi, whether static names count, whose); and the
     // ranges of every other item of those files (text there is not a context's, unless a
     // context range inside it holds it)
-    let mut contexts: crate::fxhash::HashMap<u32, Vec<(u32, u32, bool)>> = Default::default();
+    let mut contexts: crate::fxhash::HashMap<u32, Vec<(u32, u32, bool, DefId)>> = Default::default();
     let mut others: crate::fxhash::HashMap<u32, Vec<(u32, u32)>> = Default::default();
     for i in 0..prog.defs.len() {
         let d = DefId(i as u32);
@@ -378,6 +448,17 @@ fn const_contexts_mention(prog: &Program, items: &[DefId]) -> bool {
             others.entry(def.file).or_default().push((it.lo, it.hi));
         }
         if items.contains(&d) { continue; }
+        // a type's own text names a const only as a generic argument, an array length or a
+        // discriminant; an impl's only in its header
+        if matches!(def.kind, DefKind::Struct | DefKind::Enum | DefKind::Union | DefKind::TypeAlias | DefKind::AssocTy | DefKind::Impl) {
+            let pf = &prog.files[def.file as usize];
+            let it = pf.ast.item(def.item);
+            let hi = if def.kind != DefKind::Impl { it.hi } else {
+                pf.src.get(it.lo as usize..it.hi as usize).and_then(|t| t.iter().position(|b| *b == b'{')).map_or(it.hi, |at| it.lo + at as u32)
+            };
+            contexts.entry(def.file).or_default().push((it.lo, hi, true, d));
+            continue;
+        }
         let statics_count = match def.kind {
             DefKind::Const | DefKind::AssocConst | DefKind::AnonConst => true,
             DefKind::Static => false,
@@ -391,38 +472,68 @@ fn const_contexts_mention(prog: &Program, items: &[DefId]) -> bool {
             match prog.def_id_to_node_id.get(&d) {
                 Some(&(file, NodeId::AnonConst(e) | NodeId::InlineConst(e))) => {
                     let x = prog.files[file as usize].ast.expr(e);
-                    contexts.entry(file).or_default().push((x.lo, x.hi, true));
+                    contexts.entry(file).or_default().push((x.lo, x.hi, true, d));
                 }
-                _ => return true,
+                _ => return None,
             }
             continue;
         }
         let pf = &prog.files[def.file as usize];
         let it = pf.ast.item(def.item);
-        contexts.entry(def.file).or_default().push((it.lo, it.hi, statics_count));
+        contexts.entry(def.file).or_default().push((it.lo, it.hi, statics_count, d));
     }
     let ident = |b: u8| b == b'_' || b.is_ascii_alphanumeric();
+    // A const fn of an inherent impl goes by its type: `OnceLock::new` is not this `new`. What may
+    // name its type (its impl's header, `Self`, a renaming of those) counts; None: any mention counts.
+    // (No path reaches a const fn through a generic parameter: const trait calls are unstable.)
+    let owners = |name: &str| -> Option<Vec<Vec<u8>>> {
+        let mut named = items.iter().filter(|d| prog.syms.str(prog.def(**d).name) == name).peekable();
+        named.peek()?;
+        let mut owners = vec![b"Self".to_vec()];
+        for d in named {
+            let parent = prog.def(*d).parent;
+            if prog.def(*d).kind != DefKind::AssocFn || parent == crate::program::NO_DEF || prog.def(parent).kind != DefKind::Impl { return None; }
+            let pf = &prog.files[prog.def(parent).file as usize];
+            let it = pf.ast.item(prog.def(parent).item);
+            let hi = pf.src.get(it.lo as usize..it.hi as usize).and_then(|t| t.iter().position(|b| *b == b'{')).map_or(it.hi, |at| it.lo + at as u32);
+            owners.extend(toks(pf, it.lo, hi, &[]).into_iter().map(|t| t.to_vec()));
+        }
+        Some(renames_of(prog, owners))
+    };
     for (&file, ranges) in &contexts {
         let pf = &prog.files[file as usize];
         let other: &[(u32, u32)] = others.get(&file).map_or(&[], |v| v.as_slice());
         let src: &[u8] = &pf.src[..];
         // (source text is UTF-8; text that is not counts as a mention)
-        let Ok(text) = std::str::from_utf8(src) else { return true };
+        let Ok(text) = std::str::from_utf8(src) else { return None };
         let mut calls: Vec<(u32, u32, u32)> = pf.exp_map.iter().collect();
         calls.sort_unstable();
         for name in &all {
-            let Ok(name) = std::str::from_utf8(name) else { return true };
+            let Ok(name) = std::str::from_utf8(name) else { return None };
             let is_const = consts.iter().any(|n| n.as_slice() == name.as_bytes());
+            let owners = owners(name);
             for (start, _) in text.match_indices(name) {
                 let end = start + name.len();
                 if (start > 0 && ident(src[start - 1])) || (end < src.len() && ident(src[end])) { continue; }
+                // another item's definition under this name reads nothing
+                let before = src[..start].trim_ascii_end();
+                if [&b"fn"[..], b"const", b"static"].iter().any(|k| before.ends_with(k) && before.len() < start && !before[..before.len() - k.len()].last().is_some_and(|b| ident(*b))) { continue; }
+                if let Some(owners) = owners.as_ref().filter(|_| start >= 2 && &src[start - 2..start] == b"::") {
+                    let path = src[..start - 2].iter().rposition(|b| !ident(*b)).map_or(0, |at| at + 1);
+                    let q = &src[path..start - 2];
+                    if !q.is_empty() && !owners.iter().any(|o| o.as_slice() == q) { continue; }
+                }
                 // a context holds it, or another item, or it is expansion text followed back to
                 // its call site; text no context, item or call site holds is no definition's
                 // (a cfg-disabled generated item, module-level text) and is never evaluated
                 let mut at = start as u32;
                 let mut steps = 0;
                 loop {
-                    if ranges.iter().any(|&(lo, hi, statics_count)| at >= lo && at < hi && (statics_count || is_const)) { return true; }
+                    let mut held = false;
+                    for &(lo, hi, statics_count, d) in ranges {
+                        if at >= lo && at < hi && (statics_count || is_const) { held = true; found.insert(d); }
+                    }
+                    if held { break; }
                     if at < pf.src_len || other.iter().any(|&(lo, hi)| at >= lo && at < hi) { break; }
                     let j = calls.partition_point(|c| c.0 <= at);
                     match j.checked_sub(1).map(|j| calls[j]) {
@@ -433,7 +544,7 @@ fn const_contexts_mention(prog: &Program, items: &[DefId]) -> bool {
             }
         }
     }
-    false
+    Some(found)
 }
 
 /// Lead decision 52 (R2 (a)): an initializer made only of literals -- arrays, repeats with a
@@ -465,6 +576,16 @@ fn publish_reload(u: &mut Unit, versions: &[(u32, u32)], full: bool, scope: Opti
         let mut files = Vec::new();
         for &(old, new) in versions { files.push(old); files.push(new); }
         u.tcx.publish_file_bodies(&files);
+    }
+}
+
+/// A refused or rolled-back edit's removed impls go back into the impl tables (the edit took
+/// them out: apply_locked's commit).
+fn recollect_impls(u: &mut Unit, removed: &[DefId], scope: Option<&[bool]>) {
+    let impls: Vec<DefId> = removed.iter().copied().filter(|d| u.prog.def(*d).kind == DefKind::Impl).collect();
+    if !impls.is_empty() {
+        // (they were collected without errors before the edit)
+        let _ = u.tcx.collect_added_in(&u.prog, &impls, false, scope);
     }
 }
 
@@ -502,6 +623,7 @@ pub unsafe fn rollback(up: *mut Unit, undo: Undo, why: &str) -> Vec<String> {
             for (k, &(o, n)) in undo.versions.iter().enumerate().rev() {
                 u.prog.revert_version(o, n, &undo.pairs[k]);
             }
+            recollect_impls(u, &undo.removed, undo.scope.as_deref());
             for (d, n) in &undo.variants { u.prog.truncate_variants(*d, *n); }
             for (d, adt) in &undo.adts { u.tcx.adts.insert(*d, adt.clone()); }
             publish_reload(u, &undo.versions, undo.full_inputs, undo.scope.as_deref());
@@ -509,6 +631,7 @@ pub unsafe fn rollback(up: *mut Unit, undo: Undo, why: &str) -> Vec<String> {
             u.prog.reclaim_caches();
             drop(fw);
         }
+        if undo.rekeyed { crate::cache::rekey_after_revert(up); }
         if undo.full_inputs {
             let (prog, scope) = (&u.prog, undo.scope.as_deref());
             u.consts.retain(|(d, _), _| !in_scope(prog, scope, *d));
@@ -1111,10 +1234,11 @@ pub(crate) fn pair_items(old: &crate::parser::ParsedFile, new: &crate::parser::P
     (pairs, removed, added)
 }
 
-/// Adding an expanded native derive only adds an impl. Removing one or changing marker/glue
-/// derives still takes the existing conservative path. Accept only plain derive lists here;
-/// cfg_attr and qualified paths need their own semantic attribute comparison.
-fn added_expanded_derives(old: &crate::parser::ParsedFile, a: &crate::ast::Item, new: &crate::parser::ParsedFile, b: &crate::ast::Item) -> bool {
+/// Adding or removing an expanded native derive only adds or removes an impl (a removed impl's
+/// callers are checked with the edit: apply_locked). Changing marker/glue derives still takes
+/// the existing conservative path. Accept only plain derive lists here; cfg_attr and qualified
+/// paths need their own semantic attribute comparison.
+fn changed_expanded_derives(old: &crate::parser::ParsedFile, a: &crate::ast::Item, new: &crate::parser::ParsedFile, b: &crate::ast::Item) -> bool {
     fn attrs(pf: &crate::parser::ParsedFile, it: &crate::ast::Item) -> (Vec<Vec<Vec<u8>>>, Vec<Vec<u8>>) {
         let mut kept = Vec::new();
         let mut expanded = Vec::new();
@@ -1136,7 +1260,7 @@ fn added_expanded_derives(old: &crate::parser::ParsedFile, a: &crate::ast::Item,
     }
     let (ak, ae) = attrs(old, a);
     let (bk, be) = attrs(new, b);
-    ak == bk && ae.iter().all(|n| be.contains(n)) && be.iter().any(|n| !ae.contains(n))
+    ak == bk && (be.iter().any(|n| !ae.contains(n)) || ae.iter().any(|n| !be.contains(n)))
 }
 
 /// The files the program's own code included (include_str!/include_bytes!) so far: not Rust
@@ -1181,8 +1305,8 @@ fn includes_moved(pf: &crate::parser::ParsedFile, path: &str, it: &crate::ast::I
 /// batch edits already.
 pub(crate) fn include_edits(prog: &crate::program::Program, changed: &[String], skip: &[String]) -> Vec<Edit> {
     let mut out = Vec::new();
-    for (path, file) in prog.current_source_files() {
-        if skip.contains(&path) || !own_source_file(prog, file) { continue; }
+    for (path, file) in prog.current_source_files(|p| !skip.iter().any(|s| s == p)) {
+        if !own_source_file(prog, file) { continue; }
         let pf = &prog.files[file as usize];
         let src = &pf.src[..pf.src_len as usize];
         if !src.windows(8).any(|w| w == b"include_") { continue; }
@@ -1197,6 +1321,19 @@ pub(crate) fn include_edits(prog: &crate::program::Program, changed: &[String], 
 /// Ok: the item pairing (old item -> new item) and the changes that apply live.
 /// Err: the restart reasons (one line each).
 pub(crate) fn classify(prog: &crate::program::Program, old_file: u32, new: &crate::parser::ParsedFile, path: &str, base: &IncludeBase) -> Result<Plan, Vec<String>> {
+    classify_moving(prog, old_file, new, path, base, &[])
+}
+
+/// Whether `d` is a fn whose signature returns an opaque type (an async fn, or `-> impl Trait`):
+/// the type its callers' code is built for (the coroutine or closure of its body, the
+/// iterator its body builds) is made by its body.
+fn defines_opaque(prog: &crate::program::Program, d: DefId) -> bool {
+    prog.opaque_types_defined_by.get(&d).is_some_and(|defs| !defs.is_empty())
+}
+
+/// `classify`, with the fns `moving` (of the running version) handled as a signature change: the
+/// old fn goes, a new one comes from the new text, and its callers are rebuilt against it.
+fn classify_moving(prog: &crate::program::Program, old_file: u32, new: &crate::parser::ParsedFile, path: &str, base: &IncludeBase, moving: &[DefId]) -> Result<Plan, Vec<String>> {
     let _timing = crate::parse_work::time(6);
     use crate::ast::ItemKind;
     let old = &prog.files[old_file as usize];
@@ -1216,7 +1353,11 @@ pub(crate) fn classify(prog: &crate::program::Program, old_file: u32, new: &crat
     trace_sub("classify_pair");
     // a fn whose signature changed (M2/M4): the old fn goes and a new one with the new signature
     // comes (its own slots: frames of the old code in flight keep calling the old one), and every
-    // fn naming it is type-checked and rebuilt against the new signature (apply: set_names)
+    // fn naming it is type-checked and rebuilt against the new signature (apply: set_names).
+    // A fn returning an opaque type whose body changed is one too: its callers' code is built
+    // for the type its body makes (an async fn's coroutine: its poll code and state layout), and
+    // the new body makes another one. So is a fn of `moving` (apply_locked: a rebuilt fn of that
+    // kind whose own text is unchanged).
     {
         let skip_name = |pf: &crate::parser::ParsedFile, it: &crate::ast::Item| -> bool { pf.src[it.name.lo as usize..it.name.hi as usize].starts_with(b"__relax_") };
         let attr_toks = |pf: &crate::parser::ParsedFile, it: &crate::ast::Item| -> Vec<Vec<u8>> {
@@ -1230,10 +1371,12 @@ pub(crate) fn classify(prog: &crate::program::Program, old_file: u32, new: &crat
                 // an edited `use`: its old imports go, the new ones resolve (M13)
                 (ItemKind::Use { .. }, ItemKind::Use { .. }) => !same_toks(old, a.lo, a.hi, &[], new, b.lo, b.hi, &[]),
                 (ItemKind::Fn(sa, _, _), ItemKind::Fn(sb, _, _)) if !skip_name(new, b) && attr_toks(old, a) == attr_toks(new, b) => {
+                    let def = prog.item_defs.get(&(old_file, i)).copied();
+                    let opaque = (oa.fn_sig(*sa).asyncness && na.fn_sig(*sb).asyncness) || def.is_some_and(|d| defines_opaque(prog, d));
                     match (body_span(old, &a.kind), body_span(new, &b.kind)) {
                         (Some((alo, ahi)), Some((blo, bhi))) => !same_toks(old, a.lo, alo, &[], new, b.lo, blo, &[])
-                            || (oa.fn_sig(*sa).asyncness && na.fn_sig(*sb).asyncness
-                                && !same_toks(old, alo, ahi, &[], new, blo, bhi, &[])),
+                            || (opaque && !same_toks(old, alo, ahi, &[], new, blo, bhi, &[]))
+                            || def.is_some_and(|d| moving.contains(&d)),
                         _ => false,
                     }
                 }
@@ -1262,20 +1405,36 @@ pub(crate) fn classify(prog: &crate::program::Program, old_file: u32, new: &crat
     // other edit in the transaction, including callers saved before it existed.
     let addable = |pf: &crate::parser::ParsedFile, k: &ItemKind| matches!(k, ItemKind::Fn(sig, _, _) if pf.ast.fn_sig(*sig).lazy_body.is_some()) || matches!(k, ItemKind::Fn(_, Some(_), _) | ItemKind::Const(..) | ItemKind::Static(..) | ItemKind::Struct(..) | ItemKind::Enum(..) | ItemKind::Union(..) | ItemKind::TypeAlias { .. } | ItemKind::Impl { .. } | ItemKind::Use { .. } | ItemKind::Mod(_));
     let inherent_impl = |pf: &crate::parser::ParsedFile, i: u32| matches!(&pf.ast.items[i as usize].kind, ItemKind::Impl(r) if pf.ast.row(*r).trait_.is_none());
-    // an item in a body (`use` in a fn or closure body, a nested fn): part of the edit of the
-    // paired item whose body holds it -- its body is checked again, and its blocks' items get
-    // their scopes when the version is committed (Program::collect_new_body_blocks)
+    // an item in a body (`use` in a fn or closure body, a nested fn, a const): part of the edit
+    // of the item whose body holds it. In a paired item's body: its body is checked again, and
+    // its blocks' items get their scopes when the version is committed
+    // (Program::collect_new_body_blocks). In an added one's (also a fn replaced for a new
+    // signature): collected with it (Program::add_items); in a removed one's: gone with it.
+    // An item a macro call in the body made is at the call (its text is in the expansion).
+    let holds = |pf: &crate::parser::ParsedFile, k: u32, at: u32| -> bool {
+        let it = &pf.ast.items[k as usize];
+        if !matches!(it.kind, ItemKind::Fn(..) | ItemKind::Const(..) | ItemKind::Static(..)) {
+            return false;
+        }
+        let mut pos = at;
+        for _ in 0..32 {
+            if it.lo < pos && pos < it.hi {
+                return true;
+            }
+            match pf.exp_map.iter_rev().find(|&(a, b, _)| a <= pos && pos < b) {
+                Some((_, _, call)) if call != pos => pos = call,
+                _ => break,
+            }
+        }
+        false
+    };
     let in_paired_body = |pf: &crate::parser::ParsedFile, side_new: bool, at: u32| -> bool {
-        pairs.iter().any(|&(i, j)| {
-            let k = if side_new { j } else { i };
-            let it = &pf.ast.items[k as usize];
-            matches!(it.kind, ItemKind::Fn(..) | ItemKind::Const(..) | ItemKind::Static(..)) && it.lo < at && at < it.hi
-        })
+        pairs.iter().any(|&(i, j)| holds(pf, if side_new { j } else { i }, at))
     };
     for &j in &added {
         let it = &na.items[j as usize];
         let name = String::from_utf8_lossy(&new.src[it.name.lo as usize..it.name.hi as usize]).into_owned();
-        if !nreached[j as usize] && in_paired_body(new, true, it.lo) {
+        if !nreached[j as usize] && (in_paired_body(new, true, it.lo) || added.iter().any(|&k| k != j && holds(new, k, it.lo))) {
             continue;
         }
         // inside an added container: collected with it
@@ -1310,19 +1469,23 @@ pub(crate) fn classify(prog: &crate::program::Program, old_file: u32, new: &crat
     for &i in &removed {
         let it = &oa.items[i as usize];
         let name = String::from_utf8_lossy(&old.src[it.name.lo as usize..it.name.hi as usize]).into_owned();
-        if !oreached[i as usize] && in_paired_body(old, false, it.lo) {
+        if !oreached[i as usize] && (in_paired_body(old, false, it.lo) || removed.iter().any(|&k| k != i && holds(old, k, it.lo))) {
             continue;
         }
+        // inside a removed module: unbound with it (its impls leave the impl tables themselves)
         if let Some(p) = op[i as usize] {
-            if removed.contains(&p) && !matches!(&oa.items[p as usize].kind, ItemKind::Impl { .. }) {
+            if removed.contains(&p) && !matches!(&oa.items[p as usize].kind, ItemKind::Impl { .. }) && !matches!(it.kind, ItemKind::Impl { .. }) {
                 continue;
             }
         }
+        // A removed impl (inherent or trait, a derive's too) goes with its items: apply_locked
+        // takes it out of the impl tables and checks and rebuilds the code that called them
         let ok = oreached[i as usize]
             && match op[i as usize] {
-                None => addable(old, &it.kind) && !matches!(it.kind, ItemKind::Impl { .. }),
+                None => addable(old, &it.kind),
                 Some(p) => match &oa.items[p as usize].kind {
-                    ItemKind::Mod(Some(_)) => addable(old, &it.kind) && !matches!(it.kind, ItemKind::Impl { .. }) && !removed.contains(&p),
+                    ItemKind::Mod(Some(_)) => addable(old, &it.kind),
+                    ItemKind::Impl(_) if removed.contains(&p) => true,
                     ItemKind::Impl(r) if oa.row(*r).trait_.is_none() => matches!(it.kind, ItemKind::Fn(..) | ItemKind::Const(..)),
                     _ => false,
                 },
@@ -1331,6 +1494,7 @@ pub(crate) fn classify(prog: &crate::program::Program, old_file: u32, new: &crat
             (true, Some(&d)) => plan_removed.push(d),
             (true, None) if matches!(it.kind, ItemKind::Use { .. }) => removed_uses.push(it.lo),
             (true, None) => {} // never collected (cfg'd out)
+            (false, Some(d)) if moving.contains(d) => why.push(format!("{}: fn `{}` is rebuilt with this edit and returns a future or `impl Trait` its body makes (its callers' code holds it), so it is replaced like a changed signature -- replacing a fn here (a trait impl's) is not applied live yet: restart the app", pos(old, it.lo), name)),
             _ => why.push(format!("{}:1:1: {} `{}` removed -- removing this kind of item is not applied live yet: restart the app", path, kind_name(&it.kind), name)),
         }
     }
@@ -1361,7 +1525,15 @@ pub(crate) fn classify(prog: &crate::program::Program, old_file: u32, new: &crat
     for &(i, j) in &pairs {
         let (a, b) = (&oa.items[i as usize], &na.items[j as usize]);
         let name = String::from_utf8_lossy(&new.src[b.name.lo as usize..b.name.hi as usize]).into_owned();
-        let holes = |pf: &crate::parser::ParsedFile, k: &ItemKind| -> Vec<(u32, u32)> { child_items(&pf.ast, k).iter().map(|c| (pf.ast.items[c.0 as usize].lo, pf.ast.items[c.0 as usize].hi)).collect() };
+        // (a module's items with their attributes: an item's attributes are classified with it)
+        let holes = |pf: &crate::parser::ParsedFile, k: &ItemKind| -> Vec<(u32, u32)> {
+            let module = matches!(k, ItemKind::Mod(_));
+            child_items(&pf.ast, k).iter().map(|c| {
+                let it = &pf.ast.items[c.0 as usize];
+                let lo = if module { pf.ast.list(it.attrs).iter().filter_map(|t| pf.toks.get(t.toks.lo as usize).map(|x| x.lo)).fold(it.lo, u32::min) } else { it.lo };
+                (lo, it.hi)
+            }).collect()
+        };
         let ha = holes(old, &a.kind);
         let hb = holes(new, &b.kind);
         // attributes are part of the item (cfg, derive, repr, inline)
@@ -1476,8 +1648,8 @@ pub(crate) fn classify(prog: &crate::program::Program, old_file: u32, new: &crat
                 }
             }
             (ItemKind::Struct(..), ItemKind::Struct(..)) | (ItemKind::Enum(..), ItemKind::Enum(..))
-                if toks_norm(old, la, a.hi, &ha) == toks_norm(new, lb, b.hi, &hb) && added_expanded_derives(old, a, new, b) => {
-                    // Native expanded derives add ordinary impl items, classified above.
+                if toks_norm(old, la, a.hi, &ha) == toks_norm(new, lb, b.hi, &hb) && changed_expanded_derives(old, a, new, b) => {
+                    // Native expanded derives add or remove ordinary impl items, classified above.
                     // The ADT's layout and marker/glue derives did not change.
                 }
             (ItemKind::Struct(ra), ItemKind::Struct(rb)) if matches!(oa.row(*ra).data, crate::ast::VariantData::Struct(_)) && matches!(na.row(*rb).data, crate::ast::VariantData::Struct(_)) && attrs_same && struct_head(old, a) == struct_head(new, b) => match def {
@@ -1759,6 +1931,27 @@ fn ty_mentions(u: &Unit, t: TyId, ds: &[DefId], depth: u32) -> bool {
     }
 }
 
+/// The ADTs type `t` names (as ty_mentions walks it).
+fn ty_adts(u: &Unit, t: TyId, out: &mut Vec<DefId>, depth: u32) {
+    use crate::types::TyKind::*;
+    if depth > 16 {
+        return;
+    }
+    match u.tcx.tys.kind(t).clone() {
+        Adt(d, args, _) => {
+            if !out.contains(&d) {
+                out.push(d);
+            }
+            for a in u.tcx.tys.list(args).iter() {
+                ty_adts(u, *a, out, depth + 1);
+            }
+        }
+        Ref(_, x, _) | Ptr(_, x) | Slice(x) | Array(x, _) => ty_adts(u, x, out, depth + 1),
+        Tuple(v) => for a in u.tcx.tys.list(v).iter() { ty_adts(u, *a, out, depth + 1) },
+        _ => {}
+    }
+}
+
 fn adt_ext_field(a: &crate::tcx::AdtT, k: usize) -> bool {
     a.ext_from != u32::MAX && k as u32 >= a.ext_from
 }
@@ -1861,6 +2054,19 @@ unsafe fn initializer_deps_changed(up: *mut Unit, root: u32, changed: &[DefId], 
     use relax_backend::rir::{Callee, Inst};
     let mut todo = vec![root];
     let mut seen: Vec<u32> = Vec::new();
+    // the slot each one was reached from: an unknown dependency names the way it was reached
+    let mut from: std::collections::HashMap<u32, u32> = Default::default();
+    let path = |from: &std::collections::HashMap<u32, u32>, mut s: u32| -> String {
+        let u = &*up;
+        let mut names = vec![u.fns[s as usize].name.to_string()];
+        while let Some(&p) = from.get(&s) {
+            if names.len() > 12 { names.push("..".into()); break; }
+            names.push(u.fns[p as usize].name.to_string());
+            s = p;
+        }
+        names.reverse();
+        names.join(" -> ")
+    };
     while let Some(s) = todo.pop() {
         if seen.contains(&s) { continue; }
         seen.push(s);
@@ -1880,13 +2086,18 @@ unsafe fn initializer_deps_changed(up: *mut Unit, root: u32, changed: &[DefId], 
         }
         let u = &*up;
         let Some(rir) = u.fns[s as usize].rir.clone() else { return Err(format!("`{}` has no RIR", u.fns[s as usize].name)) };
-        todo.extend_from_slice(&u.fns[s as usize].calls);
+        fn reach(from: &mut std::collections::HashMap<u32, u32>, todo: &mut Vec<u32>, by: u32, c: u32) {
+            from.entry(c).or_insert(by);
+            todo.push(c);
+        }
+        for &c in &u.fns[s as usize].calls { reach(&mut from, &mut todo, s, c); }
         for i in rir.blocks.iter().flat_map(|b| &b.insts) {
             match i {
-                Inst::Call(Callee::Fn(c) | Callee::CFn(c, _), _, _) | Inst::FnAddr(_, c) | Inst::SlotAddr(_, c) => todo.push(*c),
-                Inst::Call(Callee::Indirect(_) | Callee::CIndirect(..), _, _) => return Err(format!("an indirect call in `{}`", u.fns[s as usize].name)),
+                // (SlotAddr is a frame slot of this code, not a fn slot)
+                Inst::Call(Callee::Fn(c) | Callee::CFn(c, _), _, _) | Inst::FnAddr(_, c) => reach(&mut from, &mut todo, s, *c),
+                Inst::Call(Callee::Indirect(_) | Callee::CIndirect(..), _, _) => return Err(format!("an indirect call in `{}`, reached as {}", u.fns[s as usize].name, path(&from, s))),
                 Inst::Addr(_, sym) => match u.syms.kind(sym.id) {
-                    Some(crate::syms::SymKind::Thunk(c)) => todo.push(c),
+                    Some(crate::syms::SymKind::Thunk(c)) => reach(&mut from, &mut todo, s, c),
                     Some(crate::syms::SymKind::Static(d)) if changed.contains(&d) => return Ok(true),
                     _ => {}
                 },
@@ -1900,7 +2111,7 @@ unsafe fn initializer_deps_changed(up: *mut Unit, root: u32, changed: &[DefId], 
                 return Err(format!("`{}` reads a trait's associated constant", u.fns[s as usize].name));
             }
             let keys: Vec<Vec<TyId>> = u.consts.keys().filter(|(x, _)| *x == c).map(|(_, a)| a.clone()).collect();
-            for args in keys { todo.push(u.fn_id(FnKey::Inst(c, args))); }
+            for args in keys { reach(&mut from, &mut todo, s, u.fn_id(FnKey::Inst(c, args))); }
         }
     }
     Ok(false)
@@ -2198,7 +2409,7 @@ unsafe fn apply_mode(up: *mut Unit, edits: Vec<Edit>, sources: &[Edit], partial:
             // under the lock, before the parse snapshot and the pairing against the running version.
             let edits: Vec<Edit> = {
                 let prog = &(*up).prog;
-                let current = (!module).then(|| prog.current_source_file_sets());
+                let current = (!module).then(|| prog.current_source_file_sets(|p| edits.iter().any(|e| prog.file_paths[e.file as usize] == p)));
                 // every crate's copy of the file takes the edit: a --lib test root's harness crate
                 // and the plain library its dev-dependencies link (M50). The other copies follow
                 // the edits as given, whose outcome files stay at their positions.
@@ -2216,7 +2427,6 @@ unsafe fn apply_mode(up: *mut Unit, edits: Vec<Edit>, sources: &[Edit], partial:
             let cur = snap(&edits);
             (edits, cur)
         });
-        let mut stale = 0;
         loop {
             let (macro_table, epoch, snapshots) = cur;
             // Only owned snapshots are reachable here; never retain a Unit/Program reference
@@ -2232,10 +2442,9 @@ unsafe fn apply_mode(up: *mut Unit, edits: Vec<Edit>, sources: &[Edit], partial:
                     drop(macro_table); // allow commit's Arc::make_mut to update an unshared table
                     return Ok(apply_locked(up, edits, pre, t0, partial, 8, module, &base));
                 }
-                stale += 1;
-                if stale == 3 {
-                    return Ok(Outcome { failure: None, kept: 0, pending: false, rung: Rung::Refuse, files: files.clone(), lines: vec!["program context changed while parsing -- retry the edit; running code is unchanged".into()], names: Vec::new(), changed: 0, test_changes: None, group: 0, ms: [ms(t0), 0.0, 0.0, 0.0], undo: None, work: [0; 5] });
-                }
+                // a module load or a rollback moved the program while this parsed: parse again
+                // against it. Each pass follows such a move, and loads end (the parse itself
+                // moves nothing), so the edit applies once they do instead of being refused.
                 let cur = snap(&edits);
                 Err((edits, cur))
             });
@@ -2364,6 +2573,21 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
         if let Change::Const(d) = c {
             if u.tcx.const_was_evaluated(*d) {
                 restart.push(format!("const `{}` is used in a type (an array length or const generic argument): its users' types change -- restart the app", def_name(&u.prog, *d)));
+            }
+        }
+    }
+    // Code linked from the disk cache was lowered by an earlier run, and what it read (const_readers,
+    // const_was_evaluated) is known only for code this run lowered. The keys show its readers: each
+    // changed const's closure before the edit, to compare after it (a const with no node has no key).
+    let linked_process = crate::cache::linked_code(up);
+    let const_before = {
+        let consts: Vec<DefId> = changes.iter().filter_map(|c| if let Change::Const(d) = c { Some(*d) } else { None }).collect();
+        if consts.is_empty() { Vec::new() } else { crate::cache::const_closures(up, &consts) }
+    };
+    if linked_process {
+        for (d, closure) in &const_before {
+            if closure.is_none() {
+                restart.push(format!("const `{}` changed, and this run's code comes from the disk cache: no key shows its readers there -- restart the app", def_name(&u.prog, *d)));
             }
         }
     }
@@ -2496,27 +2720,213 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
         out.changed += plan.added.len() + plan.removed.len();
     }
     set_names.retain(|n| !n.is_empty());
-    if !set_names.is_empty() {
-        let names: Vec<&[u8]> = set_names.iter().map(|n| n.as_slice()).collect();
-        let std_crates: Vec<u32> = (0..u.prog.crates.len() as u32).filter(|&c| matches!(u.prog.syms.str(u.prog.crates[c as usize].name), "core" | "alloc" | "std" | "proc_macro")).collect();
-        let mut seen: Vec<DefId> = Vec::new();
-        for f in u.fns.iter() {
-            trace_count("slot_visits", 1);
-            if let FnKey::Inst(d, _) = &f.key {
-                if !visible_crates[u.prog.def(*d).krate as usize] { continue; }
-                if (f.compiled || f.rir.is_some()) && !seen.contains(d) && !std_crates.contains(&u.prog.def(*d).krate) && matches!(u.prog.def(*d).kind, DefKind::Fn | DefKind::AssocFn) {
-                    seen.push(*d);
-                    if !body_defs.contains(d) && def_is_bound(&u.prog, *d) && item_mentions(&u.prog, *d, &names) {
-                        body_defs.push(*d);
+    // The fns the edit's names reach are type-checked and rebuilt. What a rebuilt fn's body makes
+    // must then be new too (rustc builds it from the new types; here the running values of the
+    // old ones live on):
+    // - its closures and coroutines (async blocks): their identity is their file version, and
+    //   their code is where the names are used. A rebuilt fn of a file the edit does not touch
+    //   gets a new version of that file (the same text), so its closures and async blocks are new
+    //   types with their own slots, layouts and vtables, built from the new body; values the old
+    //   code made keep their own code (closures of the same shape take the new one, below).
+    // - the type it returns, when that is opaque (an async fn's coroutine: its state holds the
+    //   futures it awaits): the fn is replaced like one whose signature changed, and its callers
+    //   are rebuilt against the new one, to a fixpoint.
+    // (Previously the closures of such a fn kept their compiled code: an async block that awaited
+    // an edited async fn went on calling the replaced fn, and the patch reported success.)
+    let std_crates: Vec<u32> = (0..u.prog.crates.len() as u32).filter(|&c| matches!(u.prog.syms.str(u.prog.crates[c as usize].name), "core" | "alloc" | "std" | "proc_macro")).collect();
+    // A removed impl: its fns' slots stay for the code in flight, and the code that calls them
+    // is checked and rebuilt with the edit. That is the fns naming its items (by name, above)
+    // and every caller the running code has: operators, `{:?}`, other types' derives and generic
+    // code reach a trait impl without naming it (rustc: the obligations a body proved). The
+    // callers are the slots whose code calls one of its fns, takes its address or inlined it.
+    // One that is generic code at the impl's type (`<Vec<T> as Clone>::clone` at `T = X`,
+    // `fmt::Argument::new_debug::<X>`) is followed to its own callers, up to the code that chose
+    // the type: that code is checked (it errs if it still needs the impl; otherwise its new code
+    // does not reach it), and the generic code is rebuilt only when another impl takes the
+    // removed one's place (at the commit). A trait object holding one of its fns was made by
+    // code no call shows: that edit restarts, unless the impl's type goes too (then every value
+    // of it is made by code naming it).
+    let gone_impls: Vec<DefId> = versions.iter().flat_map(|(_, p)| p.removed.iter().copied()).filter(|d| u.prog.def(*d).kind == DefKind::Impl).collect();
+    let mut impl_over: Vec<u32> = Vec::new();
+    if !gone_impls.is_empty() {
+        let removed_all: Vec<DefId> = versions.iter().flat_map(|(_, p)| p.removed.iter().copied()).collect();
+        let slots_of_impls = |u: &Unit, impls: &[DefId]| -> std::collections::HashSet<u32> {
+            let fns = impls.iter().flat_map(|&imp| u.prog.impls[u.prog.def(imp).sub as usize].items.iter().copied()).filter(|d| u.prog.def(*d).kind == DefKind::AssocFn);
+            let mut set: std::collections::HashSet<u32> = u.slots_of_defs(fns).into_iter().collect();
+            let mut parents: Vec<u32> = set.iter().copied().collect();
+            while !parents.is_empty() {
+                parents = u.closures_of_slots(parents).into_iter().filter(|c| set.insert(*c)).collect();
+            }
+            set
+        };
+        let self_adts = |u: &Unit, imp: DefId| -> Vec<DefId> {
+            let mut a = Vec::new();
+            if let Some(&t) = u.tcx.impl_self.get(&imp) { ty_adts(u, t, &mut a, 0); }
+            a
+        };
+        let mut adts: Vec<DefId> = Vec::new();
+        let mut blanket = false;
+        for &imp in &gone_impls {
+            let a = self_adts(u, imp);
+            blanket |= a.is_empty();
+            adts.extend(a);
+        }
+        let kept: Vec<DefId> = gone_impls.iter().copied().filter(|&imp| { let a = self_adts(u, imp); a.is_empty() || !a.iter().all(|d| removed_all.contains(d)) }).collect();
+        let held = slots_of_impls(u, &kept);
+        if !held.is_empty() {
+            for ((src, dy), addr) in u.vtables.snapshot() {
+                let mut thunks = Vec::new();
+                crate::syms::data_thunks(u, addr, &mut thunks);
+                if let Some(&s) = thunks.iter().find(|s| held.contains(s)) {
+                    restart.push(format!("`{}` of a removed impl is in trait objects (`{}` as `{}`) the running code made, and which code makes them is not known -- removing it is applied by a restart", u.fns[s as usize].name, crate::syms::stable_ty(u, src), crate::syms::stable_ty(u, dy)));
+                    break;
+                }
+            }
+        }
+        let gone = slots_of_impls(u, &gone_impls);
+        let mut seen = gone.clone();
+        let mut frontier = gone;
+        while !frontier.is_empty() && restart.is_empty() {
+            let mut users: Vec<u32> = frontier.iter().flat_map(|&s| u.fns[s as usize].history().inlined_into.iter().copied()).collect();
+            for (i, f) in u.fns.iter().enumerate() {
+                trace_count("slot_visits", 1);
+                if f.rir_refs().iter().chain(f.calls.iter()).any(|c| frontier.contains(c)) {
+                    users.push(i as u32);
+                }
+            }
+            let mut next = std::collections::HashSet::new();
+            for c in users {
+                if !seen.insert(c) {
+                    continue;
+                }
+                // the instance this code belongs to (a closure's: its fn's)
+                let mut k = c;
+                let mut inst = None;
+                for _ in 0..64 {
+                    match &u.fns[k as usize].key {
+                        FnKey::Closure(_, _, p) => k = *p,
+                        FnKey::Inst(d, args) => { inst = Some((*d, args.clone())); break; }
+                        _ => break,
+                    }
+                }
+                match inst {
+                    // a removed fn's or an earlier version's: code in flight
+                    Some((d, _)) if removed_all.contains(&d) || !def_is_bound(&u.prog, d) => {}
+                    Some((d, args)) if !std_crates.contains(&u.prog.def(d).krate) && !(blanket && !args.is_empty()) && !args.iter().any(|a| ty_mentions(u, *a, &adts, 0)) => {
+                        if !matches!(u.prog.def(d).kind, DefKind::Fn | DefKind::AssocFn) {
+                            restart.push(format!("`{}` was evaluated with a removed impl's `{}` -- restart the app", u.prog.def_path(d), u.fns[c as usize].name));
+                        } else if !body_defs.contains(&d) {
+                            body_defs.push(d);
+                        }
+                    }
+                    _ => {
+                        impl_over.push(c);
+                        next.insert(c);
+                    }
+                }
+            }
+            frontier = next;
+        }
+        trace_count("impl_callers", impl_over.len());
+    }
+    let mut scanned = 0usize;
+    let mut moving: Vec<DefId> = Vec::new();
+    loop {
+        if set_names.len() > scanned {
+            let names: Vec<&[u8]> = set_names[scanned..].iter().map(|n| n.as_slice()).collect();
+            scanned = set_names.len();
+            let mut seen: std::collections::HashSet<DefId> = std::collections::HashSet::new();
+            for f in u.fns.iter() {
+                trace_count("slot_visits", 1);
+                if let FnKey::Inst(d, _) = &f.key {
+                    if !visible_crates[u.prog.def(*d).krate as usize] { continue; }
+                    // (a fn returning an opaque type with a slot: compiled code built for the type
+                    // it returns calls it, or will)
+                    if (f.compiled || f.rir.is_some() || defines_opaque(&u.prog, *d)) && !std_crates.contains(&u.prog.def(*d).krate) && matches!(u.prog.def(*d).kind, DefKind::Fn | DefKind::AssocFn) && seen.insert(*d) {
+                        if !body_defs.contains(d) && def_is_bound(&u.prog, *d) && item_mentions(&u.prog, *d, &names) {
+                            body_defs.push(*d);
+                        }
                     }
                 }
             }
         }
+        // Removed functions keep their old slots for code in flight. In particular, generated
+        // child styles name their own entry: the dependency scan above must not schedule that
+        // deleted body against the new namespace (or its retired lazy parse) when a child goes.
+        body_defs.retain(|d| !versions.iter().any(|(_, plan)| plan.removed.contains(d)));
+        let versioned: Vec<u32> = versions.iter().map(|(v, _)| v.old).collect();
+        let mut touch: Vec<u32> = Vec::new();
+        let mut moves: Vec<DefId> = Vec::new();
+        for &d in &body_defs {
+            let file = u.prog.def(d).file;
+            if defines_opaque(&u.prog, d) {
+                if moving.contains(&d) { continue; }
+                moves.push(d);
+            } else if versioned.contains(&file) || u.closures_of_slots(u.slots_of_defs([d])).is_empty() {
+                continue;
+            }
+            if !versioned.contains(&file) && !touch.contains(&file) {
+                if !own_source_file(&u.prog, file) {
+                    restart.push(format!("`{}` is rebuilt with this edit, and its closures or async blocks (or the future it returns) need new code, but its file `{}` cannot take a new version live -- restart the app", u.prog.def_path(d), u.prog.file_paths[file as usize]));
+                    continue;
+                }
+                touch.push(file);
+            }
+        }
+        if !restart.is_empty() || (touch.is_empty() && moves.is_empty()) {
+            break;
+        }
+        moving.extend_from_slice(&moves);
+        trace_count("reversioned_files", touch.len());
+        trace_count("moved_dependents", moves.len());
+        for &file in &touch {
+            let path = u.prog.file_paths[file as usize].clone();
+            let src = { let pf = &u.prog.files[file as usize]; pf.src[..pf.src_len as usize].to_vec() };
+            match u.prog.parse_version(file, &path, src) {
+                Ok(v) => match classify_moving(&u.prog, file, &v.pf, &path, base, &moving) {
+                    // (its text is the running one's: no change of its own but an include that moved)
+                    Ok(mut plan) => {
+                        changes.extend(std::mem::take(&mut plan.changes));
+                        for &d in &plan.removed { set_names.push(def_name(&u.prog, d).into_bytes()); }
+                        out.changed += plan.removed.len();
+                        versions.push((v, plan));
+                    }
+                    Err(w) => restart.extend(w),
+                },
+                Err(e) => restart.push(format!("{}: a new version of this file (its closures and async blocks are rebuilt with the edit) did not parse: {} -- restart the app", path, e)),
+            }
+        }
+        // the versions that already were in the transaction, with fns now moving
+        for (v, plan) in versions.iter_mut() {
+            if touch.contains(&v.old) || !moves.iter().any(|&d| u.prog.def(d).file == v.old) { continue; }
+            match classify_moving(&u.prog, v.old, &v.pf, &v.path, base, &moving) {
+                Ok(mut p) => {
+                    // (its changes were taken already; a moving fn's text is unchanged: it had none)
+                    p.changes.clear();
+                    for &d in p.removed.iter().filter(|d| !plan.removed.contains(d)) {
+                        set_names.push(def_name(&u.prog, d).into_bytes());
+                        out.changed += 1;
+                    }
+                    *plan = p;
+                }
+                Err(w) => restart.extend(w),
+            }
+        }
+        if !restart.is_empty() {
+            break;
+        }
     }
-    // Removed functions keep their old slots for code in flight. In particular, generated
-    // child styles name their own entry: the dependency scan above must not schedule that
-    // deleted body against the new namespace (or its retired lazy parse) when a child goes.
-    body_defs.retain(|d| !versions.iter().any(|(_, plan)| plan.removed.contains(d)));
+    if !restart.is_empty() {
+        out.rung = Rung::Restart;
+        out.lines = restart;
+        out.ms[0] = ms(t0);
+        return out;
+    }
+    if !moving.is_empty() {
+        out.test_changes = None;
+    }
+    // (the code of the files given new versions is rebuilt against the edit: never from the disk cache)
+    note_edited_crates(u, &versions.iter().map(|(v, _)| v.old).filter(|f| !olds.contains(f)).collect::<Vec<u32>>());
     let const_defs: Vec<DefId> = changes.iter().filter_map(|c| if let Change::Const(d) = c { Some(*d) } else { None }).collect();
     let static_defs: Vec<DefId> = changes.iter().filter_map(|c| if let Change::StaticInit(d) = c { Some(*d) } else { None }).collect();
     trace_count("changed_consts", const_defs.len());
@@ -2551,7 +2961,8 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
             if via_slot || item_mentions(&u.prog, c, &names) {
                 if u.tcx.const_was_evaluated(c) {
                     out.rung = Rung::Restart;
-                    out.lines.push(format!("const `{}` depends on a changed const and is used in a type -- restart the app", def_name(&u.prog, c)));
+                    let named = if u.prog.def(c).kind == DefKind::AnonConst { consts_hit[0] } else { c };
+                    out.lines.push(format!("const `{}` depends on a changed const and is used in a type -- restart the app", def_name(&u.prog, named)));
                     out.ms[0] = ms(t0);
                     return out;
                 }
@@ -2562,6 +2973,18 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
         if !grew {
             break;
         }
+    }
+    if let Some(d) = const_read_by_a_type(u, &consts_hit) {
+        out.rung = Rung::Restart;
+        out.lines.push(format!("const `{}` is used in a type (an array length or const generic argument): its users' types change -- restart the app", def_name(&u.prog, d)));
+        out.ms[0] = ms(t0);
+        return out;
+    }
+    if let Some(st) = static_of_changed_consts(u, &consts_hit) {
+        out.rung = Rung::Restart;
+        out.lines.push(format!("the initializer of `{}` reads a changed const, and `{}` already holds the value the old one made (an initializer runs once) -- restart the app", def_name(&u.prog, st), def_name(&u.prog, st)));
+        out.ms[0] = ms(t0);
+        return out;
     }
     // the slots to rebuild: every instance of a changed fn or const initializer, the readers of
     // every affected const, and (transitively) the callers that inlined any of them
@@ -2649,6 +3072,7 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
     // source version is replaced, including owners of already compiled closures: O3
     // and closure matching may need those old bodies long after this edit.
     let old_files: Vec<u32> = versions.iter().map(|(v, _)| v.old).collect();
+    trace_sub("realtime_frozen");
     if let Err(e) = jit::preserve_closure_bodies(up, &old_files) {
         out.rung = Rung::Refuse;
         out.lines.push(e);
@@ -2898,6 +3322,12 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
                     }
                     trace_sub("add_items");
                     u.prog.unbind_defs(&removed);
+                    // removed impls leave the impl tables: trait selection and method lookup no
+                    // longer find them (their defs stay for the code in flight)
+                    let gone: Vec<DefId> = removed.iter().copied().filter(|d| u.prog.def(*d).kind == DefKind::Impl).collect();
+                    if !gone.is_empty() {
+                        u.tcx.uncollect_impls(&gone);
+                    }
                     if !removed.is_empty() {
                         // method answers that named a removed associated fn (only crates that
                         // can see the edit name it: lead decision 52 R1)
@@ -3078,12 +3508,17 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
     // an added `impl Drop`: the type now needs dropping where code compiled before left it alone
     // -- the drop glue of every type holding it, the generic instances over it (`Vec<T>`'s
     // drop_in_place) and every fn naming the type are rebuilt; values made before the edit are
-    // dropped by the new glue
+    // dropped by the new glue. A removed one: the same code, which no longer drops it (also
+    // where a caller inlined the glue). A marker impl (a trait impl with no items, `Copy`): no
+    // code calls it, but it picks which specializing impl an instance takes (std's `to_vec` for
+    // `T: Copy`), so the same code is rebuilt.
     {
         let drop_trait = u.tcx.lang_items.get(LangItem::Drop);
         let mut dtypes: Vec<DefId> = Vec::new();
-        for &imp in &added_impls {
-            if drop_trait.is_some() && u.tcx.impl_trait.get(&imp).copied() == drop_trait {
+        for &imp in added_impls.iter().chain(&gone_impls) {
+            let trait_of = u.tcx.impl_trait.get(&imp).copied();
+            let marker = trait_of.is_some() && u.prog.impls[u.prog.def(imp).sub as usize].items.is_empty();
+            if marker || (drop_trait.is_some() && trait_of == drop_trait) {
                 if let Some(&st) = u.tcx.impl_self.get(&imp) {
                     if let crate::types::TyKind::Adt(d, _, _) = u.tcx.tys.kind(st) {
                         dtypes.push(*d);
@@ -3114,6 +3549,45 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
                     }
                 }
             }
+            let mut work: Vec<u32> = slots.iter().chain(fresh.iter()).copied().filter(|&s| matches!(u.fns[s as usize].key, FnKey::Glue(..))).collect();
+            while let Some(s) = work.pop() {
+                for c in u.fns[s as usize].history().inlined_into.clone() {
+                    if slots.contains(&c) || fresh.contains(&c) {
+                        continue;
+                    }
+                    if u.fns[c as usize].compiled {
+                        slots.push(c);
+                    } else if u.fns[c as usize].rir.is_some() {
+                        fresh.push(c);
+                    }
+                    work.push(c);
+                }
+            }
+        }
+    }
+    // A removed impl another impl replaces (the same trait for the same type: its header was
+    // edited): the generic code at the type that called the removed one is rebuilt, and calls
+    // the new one. (Without a replacement it is dead code: the code that chose the type needs
+    // the impl, and was checked with the edit.)
+    if !impl_over.is_empty() {
+        let head = |u: &Unit, imp: &DefId| -> Option<(DefId, Vec<DefId>)> {
+            let td = *u.tcx.impl_trait.get(imp)?;
+            let mut a = Vec::new();
+            ty_adts(u, *u.tcx.impl_self.get(imp)?, &mut a, 0);
+            Some((td, a))
+        };
+        let replaced = gone_impls.iter().filter_map(|imp| head(u, imp)).any(|h| added_impls.iter().any(|a| head(u, a).as_ref() == Some(&h)));
+        if replaced {
+            for &c in &impl_over {
+                if slots.contains(&c) || fresh.contains(&c) {
+                    continue;
+                }
+                if u.fns[c as usize].compiled {
+                    slots.push(c);
+                } else if u.fns[c as usize].rir.is_some() {
+                    fresh.push(c);
+                }
+            }
         }
     }
     trace_sub("drop_glue");
@@ -3125,6 +3599,69 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
     let mut errs: Vec<String> = add_errs.into_iter().filter(|e| !(e.contains(".rs:")) || edited.iter().any(|p| e.starts_with(p.as_str()))).collect();
     let mut as_restart = !layout_restart.is_empty();
     errs.extend(layout_restart);
+    // `Copy` removed and `Drop` added for one type: code compiled for the copies it made copies
+    // its values bit for bit, and the new glue would drop every copy
+    if let (Some(copy), Some(drop_trait)) = (u.tcx.lang_items.get(LangItem::Copy), u.tcx.lang_items.get(LangItem::Drop)) {
+        let of = |u: &Unit, imp: &DefId, t: DefId| -> Option<DefId> {
+            if u.tcx.impl_trait.get(imp) != Some(&t) { return None; }
+            match u.tcx.tys.kind(*u.tcx.impl_self.get(imp)?) { crate::types::TyKind::Adt(d, _, _) => Some(*d), _ => None }
+        };
+        for imp in &gone_impls {
+            if let Some(d) = of(u, imp, copy) {
+                if added_impls.iter().any(|a| of(u, a, drop_trait) == Some(d)) {
+                    errs.push(format!("`{}` stops being `Copy` and gets a `Drop` impl: code compiled before copies its values -- restart the app", u.prog.def_path(d)));
+                    as_restart = true;
+                }
+            }
+        }
+    }
+    // The keys follow the text. What a new run of this text would not link is rebuilt with the
+    // edit's slots, by the same walk as const_readers' readers before the commit.
+    let rekeyed = !const_before.is_empty();
+    if rekeyed {
+        let found = crate::cache::rekey_after_const_edit(up, &const_before);
+        trace_count("rekey_readers", found.readers.len());
+        if linked_process {
+            for d in &found.blind {
+                errs.push(format!("const `{}` changed outside the text the keys are made from (an included file): no key shows its readers in this run's code from the disk cache -- restart the app", def_name(&u.prog, *d)));
+                as_restart = true;
+            }
+        }
+        let mut seen: std::collections::HashSet<u32> = slots.iter().chain(fresh.iter()).copied().collect();
+        let mut marked: std::collections::HashSet<u32> = flagged.iter().copied().collect();
+        let mut work: Vec<u32> = Vec::new();
+        for s in found.readers {
+            // an initializer that ran does not run again. Whether it read the edit was asked of its
+            // text before the commit (static_of_changed_consts): a key also moves with its fn's names
+            if matches!(&u.fns[s as usize].key, FnKey::Inst(d, _) if u.prog.def(*d).kind == DefKind::Static && u.statics.get(d).is_some_and(|&a| a != 0)) { continue; }
+            if marked.insert(s) { flagged.push(s); }
+            if seen.insert(s) {
+                if u.fns[s as usize].compiled { slots.push(s); } else { fresh.push(s); }
+                work.push(s);
+            }
+        }
+        while let Some(s) = work.pop() {
+            let inl = u.fns[s as usize].history().inlined_into.len();
+            let mut deps = u.fns[s as usize].history().inlined_into.clone();
+            deps.extend(crate::sandbox::twin_of(s));
+            for (k, d) in deps.into_iter().enumerate() {
+                if k >= inl && marked.contains(&s) && marked.insert(d) { flagged.push(d); }
+                if !seen.insert(d) { continue; }
+                if u.fns[d as usize].compiled {
+                    if k < inl { inlining_callers.push(d); }
+                    slots.push(d);
+                } else {
+                    fresh.push(d);
+                }
+                work.push(d);
+            }
+        }
+        // an armed real-time root's code is not replaced under it (as before the commit)
+        if let Some(line) = jit::realtime_frozen(u, &slots.iter().chain(fresh.iter()).copied().collect::<Vec<u32>>()) {
+            errs.push(line);
+        }
+        trace_count("selected_slots_rekey", slots.len() + fresh.len());
+    }
     trace_sub("consts_errs");
     trace_stage("commit_collect");
     let mut checked_bodies = Vec::new();
@@ -3228,7 +3765,7 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
     let u = &mut *up;
     trace_stage("typecheck");
     // D3: the gate is synchronous only under `makepad run --check-first`; otherwise the patched
-    // instances are queued to Gandalf when their new code is installed (jit.rs install, rank 0).
+    // instances are queued to Gandalf when their new code is installed (jit.rs install, RANK_EDIT).
     if errs.is_empty() && crate::borrowck::enabled(options) && crate::jit::CHECK_FIRST.load(std::sync::atomic::Ordering::Relaxed) {
         // Check/report one changed owner at a time: do not hold its diagnostics until
         // another body has finished, compilation has run, or the transaction unwinds.
@@ -3328,6 +3865,16 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
             }
         }
     }
+    // Linked code's type-level uses show here, as its readers lower: an evaluation of the new text
+    // (publish_reload dropped the evaluations of the old; a const no constant context names is not
+    // read by one). The types of the code around them changed: none of it installs.
+    if linked_process && ctfe_relevant {
+        let u = &*up;
+        if let Some(d) = const_read_by_a_type(u, &consts_hit) {
+            errs = vec![format!("const `{}` is used in a type (an array length or const generic argument): its users' types change -- restart the app", def_name(&u.prog, d))];
+            as_restart = true;
+        }
+    }
     if errs.is_empty() {
         // Only newly created slots are prepared ahead synchronously. Existing edited slots,
         // inlined callers and invalidated Drop glue are already rebuilt in staged; their
@@ -3384,7 +3931,9 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
     // was rebuilt runs the new version of itself when the new parent has a closure at the same
     // place with the same signature and captures (same environment layout); otherwise it keeps
     // its own code (memory-safe; reported). The new code is built now if the edit's precompile
-    // did not reach it.
+    // did not reach it. An older version that forwards to its lineage's cell (install_forward)
+    // follows the cell and is not looked at again: an edit's work stays the same however many
+    // edits came before.
     let mut rebind: Vec<(u32, u32)> = Vec::new();
     if errs.is_empty() {
         let u = &*up;
@@ -3397,7 +3946,7 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
             let f = &u.fns[id as usize];
             if let FnKey::Closure(file, _, _) = &f.key {
                 if new_files.contains(file) { news_c.push(id); }
-                else if f.compiled { olds_c.push(id); }
+                else if f.compiled && !matches!(u.forward_of(id), Some((_, false))) { olds_c.push(id); }
             }
         }
         // a new closure's identity is read from its parent's checked body, which the parent's
@@ -3460,7 +4009,7 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
             for o in u.closures_of_slots(parents) {
                 let fo = &u.fns[o as usize];
                 trace_count("slot_visits", 1);
-                let (FnKey::Closure(of, oce, op), true) = (&fo.key, is_body(&fo.key) && fo.compiled) else { continue };
+                let (FnKey::Closure(of, oce, op), true) = (&fo.key, is_body(&fo.key) && fo.compiled && !matches!(u.forward_of(o), Some((_, false)))) else { continue };
                 let replaced = matches!(&u.fns[*op as usize].key, FnKey::Inst(d, _) if removed_defs.contains(d));
                 if !(rebuilt.contains(op) || replaced) || new_files.contains(of) {
                     continue;
@@ -3523,6 +4072,7 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
         for (k, &(o, n)) in news.iter().enumerate().rev() {
             u.prog.revert_version(o, n, &news_pairs[k]);
         }
+        recollect_impls(u, &removed_defs, scope.as_deref());
         publish_reload(u, &news, full_inputs, scope.as_deref());
         if carry && !ctfe_relevant {
             let files: Vec<u32> = news.iter().flat_map(|&(a, b)| [a, b]).collect();
@@ -3543,6 +4093,7 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
             out.lines.retain(|l| !l.starts_with("field `"));
         }
         drop(fw);
+        if rekeyed { crate::cache::rekey_after_revert(up); }
         jit::bump_patch_epoch();
         let mut invalidated = u.reload_rir.take().unwrap_or_default();
         invalidated.extend(slots.iter().chain(&fresh).copied());
@@ -3554,7 +4105,11 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
             f.spec = None;
             u.reload_errors.remove(&id);
             u.reload_specs.remove(&id);
-            u.bodies.remove(&id);
+            // (a body of the refused text; one of an older version stays: that version's closures
+            // are lowered from it, and only it can give them their bodies)
+            if u.bodies.get(&id).is_some_and(|b| news.iter().any(|&(_, n)| n == b.file)) {
+                u.bodies.remove(&id);
+            }
         }
         if full_inputs {
             let (prog, sc) = (&u.prog, scope.as_deref());
@@ -3630,13 +4185,29 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
     let gen = u.begin_patch();
     out.group = gen;
     crate::zone_alloc::kept_with(|| for &(_, n) in &news { u.file_gen.insert(n, gen); });
-    let mut rebind_code: Vec<(u32, Code)> = Vec::new();
-    for (o, n) in &rebind {
-        let c = pre.iter().find(|(id, _)| id == n).and_then(|(_, r)| r.as_ref().ok()).or_else(|| staged.iter().find(|(id, _)| id == n).map(|(_, c)| c));
-        if let Some(c) = c {
-            rebind_code.push((*o, c.clone()));
+    // the rebound older versions run the new ones through forwarders (jit::install_forward): per
+    // new slot, its lineage's cell jumps to it, and every other older version paired with it jumps
+    // to the cell (and is never looked at again). A lineage without a cell yet makes its oldest
+    // version the cell. Cells go first: a version that becomes a forwarder may be what its cell
+    // jumps to until then (no jump cycle at any moment).
+    let forwards: Vec<(u32, u32, bool)> = {
+        let u = &*up;
+        let mut targets: Vec<u32> = rebind.iter().map(|x| x.1).collect();
+        targets.sort_unstable();
+        targets.dedup();
+        let (mut cells, mut rest) = (Vec::new(), Vec::new());
+        for n in targets {
+            let mut olds: Vec<u32> = rebind.iter().filter(|x| x.1 == n).map(|x| x.0).collect();
+            olds.sort_unstable();
+            let cell = olds.iter().copied().find(|&o| u.forward_of(o).is_some()).unwrap_or(olds[0]);
+            for o in olds {
+                if o == cell || u.forward_of(o).is_some() { cells.push((o, n, true)); } else { rest.push((o, cell, false)); }
+            }
         }
-    }
+        cells.extend(rest);
+        cells
+    };
+    trace_count("forwarders", forwards.len());
     // An enum layout edit (variants added): code built before it can meet a variant it does not
     // know (a match falls through), so it never runs again. A struct edit (M10) does not change
     // the running layout -- its first fields stay where they are and added fields live in the
@@ -3666,12 +4237,9 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
             Err(e) => out.lines.push(format!("link error in {}: {}", (&*up).fns[id as usize].name, e)),
         }
     }
-    for (id, c) in rebind_code {
-        match jit::install_patched(up, id, &c.0, c.1, &c.2, gen) {
-            Ok(_) => {
-                out.names.push((&*up).fns[id as usize].name.to_string());
-            }
-            Err(e) => out.lines.push(format!("link error in {}: {}", (&*up).fns[id as usize].name, e)),
+    for (id, target, cell) in forwards {
+        if let Err(e) = jit::install_forward(up, id, target, cell, gen) {
+            out.lines.push(format!("link error in {}: {}", (&*up).fns[id as usize].name, e));
         }
     }
     // the new bodies are installed: the guards of their copies inlined before call them now
@@ -3718,7 +4286,7 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
         }
     }
     out.files = olds.iter().map(|o| news.iter().find(|(x, _)| x == o).map_or(*o, |(_, n)| *n)).collect();
-    out.undo = Some(Undo { group: gen, versions: news.clone(), pairs: news_pairs.clone(), added: added_defs.clone(), removed: removed_defs.clone(), consts: saved_consts, consts_hit: consts_hit.clone(), adts: saved_adts, variants: saved_variants, const_failed: saved_failed, full_inputs, scope: scope.clone() });
+    out.undo = Some(Undo { rekeyed, group: gen, versions: news.clone(), pairs: news_pairs.clone(), added: added_defs.clone(), removed: removed_defs.clone(), consts: saved_consts, consts_hit: consts_hit.clone(), adts: saved_adts, variants: saved_variants, const_failed: saved_failed, full_inputs, scope: scope.clone() });
     out.rung = Rung::Patch;
     if let Some(fv_cx) = fv_cx { fv_session_keep(transaction, fv_cx); }
     trace_count("inlining_callers", inlining_callers.len());
@@ -3780,6 +4348,7 @@ pub(crate) fn set_pinned(on: bool) -> bool {
     if was && !on {
         CATCH_UP.store(true, std::sync::atomic::Ordering::Release);
         host::unpinned();
+        watch_events::kick();
     }
     on
 }
@@ -3794,8 +4363,43 @@ static RESTART_SAVED_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomi
 static DOMAIN_RESTORED: relax_session::sync::Mutex<Option<String>> = relax_session::sync::Mutex::new(None);
 static DOMAIN_LOADING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static DOMAIN_INPUTS: relax_session::sync::Mutex<Option<Inputs>> = relax_session::sync::Mutex::new(None);
-/// The watcher's reload inputs, also readable while it waits for a live test verdict.
-static WATCH_INPUTS: relax_session::sync::Mutex<Option<std::sync::Arc<Inputs>>> = relax_session::sync::Mutex::new(None);
+/// What the watcher watches, also readable while it waits for a live test verdict: its reload
+/// inputs and the program's own source files loaded so far (`input_paths`, inspect `inputs`).
+/// Read without the owner: asked for the loaded files, an `inputs` waited behind the program's
+/// requests (a cold Fab's first edit: 0.5 s of its ship, at the first frames, 11-04).
+struct WatchView {
+    inputs: std::sync::Arc<Inputs>,
+    loaded: std::sync::Arc<Vec<String>>,
+}
+static WATCH_INPUTS: relax_session::sync::Mutex<Option<WatchView>> = relax_session::sync::Mutex::new(None);
+/// Told when the watcher's inputs are set, or when it ends without them ([`WATCH_GONE`]).
+static WATCH_READY: relax_session::sync::Condvar = relax_session::sync::Condvar::new();
+/// The live session's watcher could not start, or ended: nothing waits for its inputs.
+static WATCH_GONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+type WatchFile = (String, u32, Option<(std::time::SystemTime, u64)>);
+
+fn set_watch_inputs(inputs: &Inputs, files: &[WatchFile]) {
+    let inputs = crate::zone_alloc::kept_with(|| std::sync::Arc::new(inputs.clone()));
+    *WATCH_INPUTS.lock().unwrap_or_else(|e| e.into_inner()) = Some(WatchView { inputs, loaded: loaded_of(files) });
+    WATCH_READY.notify_all();
+}
+
+/// The watcher's files changed which of them the program loaded (a rewatch, a patch).
+fn set_watch_loaded(files: &[WatchFile]) {
+    let loaded = loaded_of(files);
+    if let Some(v) = WATCH_INPUTS.lock().unwrap_or_else(|e| e.into_inner()).as_mut() { v.loaded = loaded; }
+}
+
+fn loaded_of(files: &[WatchFile]) -> std::sync::Arc<Vec<String>> {
+    crate::zone_alloc::kept_with(|| std::sync::Arc::new(files.iter().filter(|f| f.1 != u32::MAX).map(|f| f.0.clone()).collect()))
+}
+
+fn watch_gone() {
+    let _g = WATCH_INPUTS.lock().unwrap_or_else(|e| e.into_inner());
+    WATCH_GONE.store(true, std::sync::atomic::Ordering::Release);
+    WATCH_READY.notify_all();
+}
 static DOMAIN_REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// End native callbacks into the outgoing domain before its static block can be reclaimed.
@@ -3824,7 +4428,11 @@ pub(crate) fn domain_loaded(inputs: Option<Inputs>) {
     }
     *DOMAIN_RESTORED.lock().unwrap_or_else(|e| e.into_inner()) = restored;
     *DOMAIN_INPUTS.lock().unwrap_or_else(|e| e.into_inner()) = inputs;
-    PATCHED_FILES.lock().unwrap_or_else(|e| e.into_inner()).1.clear();
+    {
+        let mut p = PATCHED.lock().unwrap_or_else(|e| e.into_inner());
+        p.files.clear();
+        p.items.clear();
+    }
     DOMAIN_REVISION.fetch_add(1, std::sync::atomic::Ordering::Release);
     DOMAIN_LOADING.store(false, std::sync::atomic::Ordering::Release);
     watch_events::kick();
@@ -3884,16 +4492,17 @@ impl DockGate {
 
     /// Files changed outside a sync: reported once per revision, not applied. A sync writes
     /// the files first and its revision last, so files seen before their revision are given
-    /// that long to be a sync's (the next watch round applies them).
-    pub(crate) fn held<'a>(&mut self, paths: impl Iterator<Item = &'a str>) {
+    /// that long to be a sync's: true when the revision moved (the next watch round, due at once,
+    /// applies them).
+    pub(crate) fn held<'a>(&mut self, paths: impl Iterator<Item = &'a str>) -> bool {
         if self.warned {
-            return;
+            return false;
         }
         let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while std::time::Instant::now() < until {
             let now = std::fs::read_to_string(&self.revision).unwrap_or_default();
             if !now.is_empty() && now != self.applied {
-                return;
+                return true;
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
@@ -3902,6 +4511,7 @@ impl DockGate {
         let message = format!("dock app: {} changed outside a devhub sync of landed work; not applied: the app keeps running the synced code", paths.join(", "));
         eprintln!("makepad live: {message}");
         live_log(&format!("{{\"event\":\"dock_held\",\"message\":{}}}", json_str(&message)));
+        false
     }
 }
 
@@ -3922,35 +4532,88 @@ fn wake_program() {
     if let Some((scope, wake)) = wake { let _ = scope.call(|| wake()); }
 }
 
-/// The source files installed patches changed, each with the patch count when it last changed
-/// (and the count): what the program built from a file's text at run time (makepad's
-/// `script_mod!` designs, evaluated from their fns once) it builds again from the patched code
-/// (std::relax::patched_files). A loaded domain starts with none.
-static PATCHED_FILES: relax_session::sync::Mutex<(u64, Vec<(u64, String)>)> = relax_session::sync::Mutex::new((0, Vec::new()));
+/// What installed patches changed, for the program (std::relax::patched): what it built from code
+/// at run time (makepad's `script_mod!` designs, evaluated from their fns once) it builds again
+/// when that code changed. A loaded domain starts with none.
+struct Patched {
+    /// patches installed
+    count: u64,
+    /// each source file a patch changed, with the count when one last did
+    files: Vec<(u64, String)>,
+    /// each item whose body a patch changed (its name), with the count when one last did
+    items: Vec<(u64, String)>,
+    /// the count of the last patch that changed more than item bodies (an item added or removed,
+    /// a const, a layout): to a program that has not seen it every item changed
+    whole: u64,
+}
 
-/// A patch of `paths` is installed: noted for the program, which is woken.
-fn patch_landed(paths: impl Iterator<Item = String>) {
-    {
-        let mut p = PATCHED_FILES.lock().unwrap_or_else(|e| e.into_inner());
-        p.0 += 1;
-        let n = p.0;
+impl Patched {
+    const fn new() -> Self {
+        Self { count: 0, files: Vec::new(), items: Vec::new(), whole: 0 }
+    }
+
+    /// A patch of `paths` that changed the bodies of `items` (None: more than bodies).
+    fn land(&mut self, paths: impl Iterator<Item = String>, items: Option<Vec<String>>) {
+        self.count += 1;
+        let n = self.count;
         for path in paths {
-            p.1.retain(|(_, q)| *q != path);
-            p.1.push((n, path));
+            self.files.retain(|(_, q)| *q != path);
+            self.files.push((n, path));
+        }
+        match items {
+            Some(items) => for item in items {
+                self.items.retain(|(_, q)| *q != item);
+                self.items.push((n, item));
+            },
+            None => self.whole = n,
         }
     }
+
+    /// What changed after count `since`: "<count> <1 when every item>\n", a path per line, then
+    /// a tab and an item name per line.
+    fn since(&self, since: u64) -> String {
+        let mut s = format!("{} {}\n", self.count, u8::from(self.whole > since));
+        for (n, path) in &self.files {
+            if *n > since { s.push_str(path); s.push('\n'); }
+        }
+        for (n, item) in &self.items {
+            if *n > since { s.push('\t'); s.push_str(item); s.push('\n'); }
+        }
+        s
+    }
+}
+
+static PATCHED: relax_session::sync::Mutex<Patched> = relax_session::sync::Mutex::new(Patched::new());
+
+/// SPEC-V: the slots patch `group` installed without a clean verdict (owner thread); their checks
+/// were queued at the install, first in the borrow checker's queue (`RANK_EDIT`).
+unsafe fn unverified_patch(up: *mut Unit, group: u32) -> Vec<u32> {
+    let u = &*up;
+    (0..u.fns.len() as u32).filter(|&id| u.fns[id as usize].patch_gen == group && u.fns[id as usize].unverified.load(Ordering::Relaxed)).collect()
+}
+
+/// The names of the items whose bodies an installed patch changed; None when it changed more (an
+/// item added or removed, a const, a layout).
+unsafe fn changed_items(up: *mut Unit, o: &Outcome) -> Option<Vec<String>> {
+    o.test_changes.as_ref().map(|defs| defs.iter().map(|&d| def_name(&(*up).prog, d)).collect())
+}
+
+/// A patch of `paths` is installed: noted for the program, which is woken.
+fn patch_landed(paths: impl Iterator<Item = String>, items: Option<Vec<String>>) {
+    PATCHED.lock().unwrap_or_else(|e| e.into_inner()).land(paths, items);
     wake_program();
 }
 
-/// The files patched after count `since`: "<count>\n" then one path per line.
+/// How many patches are installed (std::relax::patched's count): a grab's `patch` that is lower
+/// shows a frame drawn before the newest one.
+pub fn patches_installed() -> u64 {
+    PATCHED.lock().unwrap_or_else(|e| e.into_inner()).count
+}
+
+/// What patches changed after count `since` ([`Patched::since`]).
 pub extern "C" fn __relax_patched_files(since: u64, buf: *mut u8, cap: usize) -> usize {
     crate::jit::host_boundary("__relax_patched_files", move || {
-        let p = PATCHED_FILES.lock().unwrap_or_else(|e| e.into_inner());
-        let mut s = format!("{}\n", p.0);
-        for (n, path) in &p.1 {
-            if *n > since { s.push_str(path); s.push('\n'); }
-        }
-        copy_out(&s, buf, cap)
+        copy_out(&PATCHED.lock().unwrap_or_else(|e| e.into_inner()).since(since), buf, cap)
     })
 }
 
@@ -4066,6 +4729,18 @@ pub(crate) struct PendingPatch {
     pub(crate) event_seq: u64,
 }
 
+/// MAKEPAD_RUN_SPECV_TRACE: the slots a patch group's verdict waits on, printed when they change
+/// (the queue position aside: it moves on every poll).
+fn trace_patch_wait(group: u32, waits: &[String]) {
+    static LAST: relax_session::sync::Mutex<Vec<(u32, String)>> = relax_session::sync::Mutex::new(Vec::new());
+    let stable: String = waits.iter().map(|w| w.split(" queued Some((").next().unwrap_or(w)).collect::<Vec<_>>().join("; ");
+    let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+    if last.iter().any(|(g, s)| *g == group && *s == stable) { return; }
+    last.retain(|(g, _)| *g != group);
+    last.push((group, stable));
+    eprintln!("specv @{:.3} patch group {group} waits on {}", crate::jit::wall_ns() as f64 / 1e9, waits.join("; "));
+}
+
 /// SPEC-V: settles the patch groups awaiting verdicts. A group whose every slot is clean is verified
 /// (an inspect event says which observations that makes verified). A group with a failed verdict is
 /// rolled back -- newer groups first, they were made on top of it -- the slots return to their
@@ -4084,15 +4759,20 @@ pub(crate) fn settle_verdicts(up: *mut Unit, pending: &mut Vec<PendingPatch>, un
                 let u = &*up;
                 let mut failed = Vec::new();
                 let mut waiting = false;
+                let mut waits: Vec<String> = Vec::new();
                 for &id in &p.ids {
                     match u.verdict_state(id) {
                         Verdict::Clean => {}
                         Verdict::Failed(events) => failed.extend(events),
                         // never verified, never reported: the slots stay unverified (baseline)
                         Verdict::Unverifiable(why) => unchecked.push(format!("{}: {}", u.fns[id as usize].name, why)),
-                        Verdict::Pending => waiting = true,
+                        Verdict::Pending => {
+                            waiting = true;
+                            if crate::jit::specv_trace() { waits.push(format!("#{id} {}", u.pending_why(id))); }
+                        }
                     }
                 }
+                if !waits.is_empty() { trace_patch_wait(p.group, &waits); }
                 if !failed.is_empty() { Some(Some(failed)) }
                 else if waiting { None }
                 else {
@@ -4270,7 +4950,7 @@ pub fn recover_hot_failure(kind: makepad_remote::hot::Outcome, lines: &[String],
 /// restarts the process itself). False: no recovery started (no edit ran in this process, or a
 /// recovery runs already) or asking for the restart failed.
 pub(crate) fn recover_compile_ice(message: &str, on_main: bool) -> bool {
-    if !crate::hot_failure::failed(makepad_remote::hot::Outcome::Panic, &[message.to_string()], None) { return false; }
+    if !crate::hot_failure::edit_ran() || !crate::hot_failure::failed(makepad_remote::hot::Outcome::Panic, &[message.to_string()], None) { return false; }
     mark_unit_suspect(message);
     note_restart_pending(message);
     if on_main { return true; }
@@ -4291,14 +4971,28 @@ pub(crate) fn recover_compile_ice(message: &str, on_main: bool) -> bool {
 type Handover = (fn() -> Vec<(String, String)>, fn());
 static BEFORE_EXEC: std::sync::Mutex<Option<Handover>> = std::sync::Mutex::new(None);
 
+/// What the host does when the restart itself begins, on the thread that restarts: the window goes
+/// from the app to the start screen (hal_run), before the run's end takes its time.
+static RESTART_BEGINS: std::sync::OnceLock<fn()> = std::sync::OnceLock::new();
+
+/// Set once by the runner.
+pub fn set_restart_begins(begins: fn()) {
+    let _ = RESTART_BEGINS.set(begins);
+}
+
+pub(crate) fn restart_begins() {
+    if let Some(begins) = RESTART_BEGINS.get() {
+        begins();
+    }
+}
+
 /// The host's handover at an exec ([`BEFORE_EXEC`]); set once by the runner.
 pub fn set_before_exec(prepare: fn() -> Vec<(String, String)>, undo: fn()) {
     *BEFORE_EXEC.lock().unwrap_or_else(|e| e.into_inner()) = Some((prepare, undo));
 }
 
 /// Readies the host's handover for `cmd`, which execs next (its environment is added).
-/// (live-rebuild handover is unix-only: the restart is an exec in place)
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub(crate) fn hand_over(cmd: &mut std::process::Command) {
     let f = *BEFORE_EXEC.lock().unwrap_or_else(|e| e.into_inner());
     if let Some((prepare, _)) = f {
@@ -4309,7 +5003,7 @@ pub(crate) fn hand_over(cmd: &mut std::process::Command) {
 }
 
 /// The exec after [`hand_over`] failed: the host takes its handover back.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub(crate) fn hand_back() {
     let f = *BEFORE_EXEC.lock().unwrap_or_else(|e| e.into_inner());
     if let Some((_, undo)) = f {
@@ -4318,25 +5012,26 @@ pub(crate) fn hand_back() {
 }
 
 /// The process starts again: the loader binary with the same command line, `state` handed to the
-/// new run (MAKEPAD_RUN_RESTORE). Returns only on failure.
+/// new run (MAKEPAD_RUN_RESTORE). An exec in place; Windows has none, there its parent process starts
+/// the next run (restart_parent.rs). Returns only on failure.
 fn exec_restart(state: Option<&[u8]>) -> Result<(), String> {
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     {
-        use std::os::unix::process::CommandExt;
         let exe = host::loader().ok_or("the makepad binary's path is unknown")?;
         let mut cmd = std::process::Command::new(exe);
         cmd.args(crate::harness::live::restart_args(std::env::args_os().skip(1).collect()));
         crate::hot_failure::prepare_exec(&mut cmd)?;
         match state {
             Some(st) => {
-                let dir = std::env::temp_dir().join(format!("relax-restart-{}", std::process::id()));
-                let path = dir.join("state");
-                std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&path, st)).map_err(|e| format!("cannot write the state: {e}"))?;
+                // (one file, which the next run removes when it reads it: on Windows that run has another pid)
+                let path = std::env::temp_dir().join(format!("relax-restart-state-{}", std::process::id()));
+                std::fs::write(&path, st).map_err(|e| format!("cannot write the state: {e}"))?;
                 cmd.env("MAKEPAD_RUN_RESTORE", &path);
             }
             None => { cmd.env_remove("MAKEPAD_RUN_RESTORE"); }
         }
         cmd.env("MAKEPAD_RUN_RESTART_T0", RESTART_SAVED_MS.load(std::sync::atomic::Ordering::Relaxed).to_string());
+        restart_begins();
         // the run's end as at exit: compiles stop and this run's code goes into the disk cache,
         // so the restarted run links it instead of compiling it again (exec skips the exit handlers)
         crate::run::summary("restart");
@@ -4345,11 +5040,14 @@ fn exec_restart(state: Option<&[u8]>) -> Result<(), String> {
         crate::tui::finish(false);
         eprintln!("makepad live: restarting ({})", RESTART_REASON.lock().unwrap_or_else(|e| e.into_inner()));
         hand_over(&mut cmd);
-        let e = cmd.exec();
+        #[cfg(unix)]
+        let e = std::os::unix::process::CommandExt::exec(&mut cmd);
+        #[cfg(windows)]
+        let e = crate::restart_parent::request(&cmd);
         hand_back();
         Err(format!("restart failed: {e}"))
     }
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = state;
         Err("this platform cannot start the process again in place".into())
@@ -4380,10 +5078,22 @@ fn note_restart_pending(why: &str) {
 
 /// `session relaunch`: applies the edits waiting for a restart (restart_in_place). Returns how.
 pub fn relaunch_pending() -> Result<&'static str, String> {
+    RELAUNCH_ASKED.store(true, Ordering::SeqCst);
     let why = RESTART_PENDING.lock().unwrap_or_else(|e| e.into_inner()).join("; ");
-    eprintln!("makepad live: session relaunch: {}", if why.is_empty() { "nothing waits" } else { why.as_str() });
+    // (a repeat while it is on its way changes nothing, and says nothing)
+    if !host::restart_asked() {
+        eprintln!("makepad live: session relaunch: {}", if why.is_empty() { "nothing waits" } else { why.as_str() });
+    }
     if let Some(result) = host::relaunch() { return result; }
     restart_in_place(if why.is_empty() { "session relaunch".into() } else { why })
+}
+
+/// `session relaunch` (a click on the ring's dot) asked for this restart: the window shows it
+/// happening. An edit's restart keeps the app's last frame instead.
+static RELAUNCH_ASKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn relaunch_asked() -> bool {
+    RELAUNCH_ASKED.load(Ordering::SeqCst)
 }
 
 /// The edits that wait for a relaunch, oldest first (cleared once a run loads the sources).
@@ -4637,7 +5347,7 @@ fn idle_outcome(file: Option<u32>, line: &str) -> Outcome {
 unsafe fn stream_file(up: *mut Unit, path: &str) -> Option<u32> {
     crate::owner::call(crate::owner::Class::Program, || {
         let prog = &(&*up).prog;
-        prog.current_source_files().get(path).copied()
+        prog.current_source_files(|p| p == path).get(path).copied()
     })
 }
 
@@ -4648,12 +5358,12 @@ unsafe fn target_file(up: *mut Unit, target: &StreamTarget) -> Option<(u32, Stri
     }
 }
 
-fn record_stream(target: &StreamTarget, o: &Outcome) {
+unsafe fn record_stream(up: *mut Unit, target: &StreamTarget, o: &Outcome) {
     if o.rung != Rung::Patch { return; }
     match target {
         StreamTarget::Module(h) => if let Some(&file) = o.files.first() { crate::modules::stream_applied(*h, file); },
         // (a streamed edit of a program file: the program hears of it as of a save)
-        StreamTarget::Path(path) => if o.changed > 0 { patch_landed(std::iter::once(path.clone())); },
+        StreamTarget::Path(path) => if o.changed > 0 { patch_landed(std::iter::once(path.clone()), changed_items(up, o)); },
     }
 }
 
@@ -4662,7 +5372,7 @@ unsafe fn feed_stream(up: *mut Unit, target: &StreamTarget, file: u32, path: &st
     let seen = Instant::now();
     let mut o = apply_mode(up, vec![Edit { file, path: path.to_string(), src: text }], &[],
         2, matches!(target, StreamTarget::Module(_)));
-    record_stream(target, &o);
+    record_stream(up, target, &o);
     state.last = Some(Instant::now());
     if o.rung == Rung::Refuse {
         o.lines = vec!["incomplete: no item applied".to_string()];
@@ -4722,7 +5432,7 @@ pub(crate) unsafe fn finish_module_stream(up: *mut Unit, h: u64, text: Vec<u8>) 
     streams.retain(|s| !(s.0 == up as usize && s.1 == StreamTarget::Module(h)));
     let (file, path) = crate::modules::stream_target(h)?;
     let o = apply_full(up, vec![Edit { file, path, src: text }]);
-    record_stream(&StreamTarget::Module(h), &o);
+    record_stream(up, &StreamTarget::Module(h), &o);
     Some(o)
 }
 
@@ -4763,7 +5473,7 @@ unsafe fn drain_streams(up: *mut Unit) {
                     eprintln!("makepad live: {}", error);
                 } else if let Some(src) = composed {
                     let o = apply_mode(up, vec![Edit { file, path: path.clone(), src }], &[], 0, matches!(target, StreamTarget::Module(_)));
-                    record_stream(target, &o);
+                    record_stream(up, target, &o);
                     if o.rung != Rung::Patch {
                         log_edit(&path, &o, None, seen);
                         for line in &o.lines { eprintln!("makepad live: {}: {}", path, line); }
@@ -4811,16 +5521,14 @@ pub use host::set_loader_package;
 pub fn start_watcher(up: *mut Unit, inputs: Inputs) {
     crate::hot_failure::enable();
     crate::hot_failure::restore();
-    let session = unsafe { crate::jit::unit_session(up) };
     struct P(*mut Unit);
     unsafe impl Send for P {}
     let p = P(up);
-    let _ = std::thread::Builder::new()
+    let spawned = std::thread::Builder::new()
         .name("run-live".to_string())
         .spawn(move || { let _z = crate::zone_alloc::compiler_thread();
-            let runtime = &session.runtime;
             let p = p;
-            jit::lower_this_thread_priority(runtime);
+            makepad_cpu_budget::set_thread_class(makepad_cpu_budget::BACKGROUND);
             // a panic here (the ICE hook is silent on the compiler's owner thread) would end
             // live editing without a word: say so
             loop {
@@ -4841,20 +5549,64 @@ pub fn start_watcher(up: *mut Unit, inputs: Inputs) {
                     break;
                 }
             }
+            watch_gone();
         });
+    if spawned.is_err() {
+        watch_gone();
+    }
+}
+
+/// The files of `removed` (gone from disk) that are running modules whose declaring file is not
+/// among `edited`: the program still declares them, each one's refusal line. A file the program
+/// does not run (its module unbound by an earlier edit) or a crate root is no such module.
+fn undeclared_removals(prog: &crate::program::Program, removed: &[&str], edited: &std::collections::HashSet<&str>) -> Vec<String> {
+    let loaded = prog.current_source_files(|p| removed.contains(&p));
+    removed.iter().filter_map(|&path| {
+        let &file = loaded.get(path)?;
+        let module = prog.mods.iter().find(|m| m.file == file)?;
+        let declares = prog.file_paths.get(prog.mods[module.parent_mod? as usize].file as usize)?;
+        (!edited.contains(declares.as_str())).then(|| removed_module_line(path, declares))
+    }).collect()
+}
+
+/// The refusal of a module whose file `path` was removed while `declares` still declares it:
+/// rustc's E0583 for the module's name (its folder's for a `mod.rs`).
+fn removed_module_line(path: &str, declares: &str) -> String {
+    let file = path.rsplit('/').next().unwrap_or(path);
+    let name = match file {
+        "mod.rs" => path.rsplit('/').nth(1).unwrap_or(file),
+        _ => file.strip_suffix(".rs").unwrap_or(file),
+    };
+    format!("error[E0583]: file not found for module `{name}`: {path} was removed and {declares} still declares it")
 }
 
 /// Inspect takes the loaded paths on the owner: tests can load more files while the watcher
 /// waits for their verdict. No inputs lock survives that request or the path formatting.
-pub(crate) fn input_paths() -> Result<Vec<String>, String> {
-    let inputs = WATCH_INPUTS.lock().unwrap_or_else(|e| e.into_inner()).clone().ok_or("the live watcher has not started")?;
-    let up = crate::run::running_unit();
-    if up.is_null() { return Err("no running program".into()); }
+/// The run's inputs `keep` takes (an absolute path; `inspect inputs` answers relative ones).
+pub(crate) fn input_paths(keep: &dyn Fn(&str) -> bool) -> Result<Vec<String>, String> {
+    // a live session's request that comes before its watcher started (a patch sent right after
+    // the launch) waits for it: it was refused "not started" (11-03). The run's own flag: this
+    // answers from before the program is laid out (the layout's flag), and a save that came then
+    // read "watches no sources" and ended the session (12 min of native build lost, 11-04)
+    let mut g = WATCH_INPUTS.lock().unwrap_or_else(|e| e.into_inner());
+    while g.is_none() && crate::run::live_session() && !WATCH_GONE.load(std::sync::atomic::Ordering::Acquire) {
+        g = WATCH_READY.wait(g).unwrap_or_else(|e| e.into_inner());
+    }
+    let (inputs, loaded) = g.as_ref().map(|v| (v.inputs.clone(), v.loaded.clone())).ok_or("this run watches no sources (not a live session, or its watcher ended)")?;
+    drop(g);
+    // (and what its code included: the watcher patches those files' includers, so a save of one
+    // is an edit the process reads)
     let std_dir = std::env::var("MAKEPAD_RUN_STD").unwrap_or_default();
-    let loaded = crate::owner::call(crate::owner::Class::Program, || unsafe {
-        (*up).prog.current_source_files().into_keys().filter(|p| own_source(p, &std_dir)).collect::<Vec<_>>()
-    });
-    Ok(inputs.source_paths(loaded.into_iter()))
+    let included = included_files(&std_dir).into_iter().filter(|p| keep(p));
+    Ok(inputs.source_paths(loaded.iter().filter(|p| keep(p)).cloned().chain(included), keep))
+}
+
+/// Of `asked` (workspace-relative paths), those in no package of the app's graph.
+pub(crate) fn outside_packages<'a>(asked: impl Iterator<Item = &'a str>) -> Vec<&'a str> {
+    let g = WATCH_INPUTS.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(v) = g.as_ref() else { return Vec::new() };
+    let std_dir = std::env::var("MAKEPAD_RUN_STD").unwrap_or_default();
+    asked.filter(|p| v.inputs.outside_packages(p, &std_dir)).collect()
 }
 
 /// A source file a live session watches and patches (`own_source`).
@@ -4879,6 +5631,100 @@ pub(crate) fn stamp(path: &str) -> Option<(std::time::SystemTime, u64)> {
     }
     let m = std::fs::metadata(path).ok()?;
     Some((m.modified().ok()?, m.len()))
+}
+
+/// The watcher's rounds while live tracing: its wakeups, the rounds that looked at files and why,
+/// printed once a minute with more than one wakeup (at rest a native watch wakes for nothing).
+struct WatchCost { since: Instant, wakes: u32, rounds: u32, stats: usize, why: [u32; 5] }
+
+impl WatchCost {
+    const WHY: [&'static str; 5] = ["poll (no native watch)", "events lost", "retry", "rescan", "events"];
+
+    fn new() -> WatchCost {
+        WatchCost { since: Instant::now(), wakes: 0, rounds: 0, stats: 0, why: [0; 5] }
+    }
+
+    /// A round that stats `n` files; `why`: its first reason of WHY.
+    fn round(&mut self, n: usize, why: usize) {
+        self.wakes += 1;
+        if n > 0 {
+            self.rounds += 1;
+            self.stats += n;
+            self.why[why] += 1;
+        }
+        if self.since.elapsed() >= std::time::Duration::from_secs(60) {
+            if self.wakes > 1 {
+                let why: Vec<String> = self.why.iter().zip(Self::WHY).filter(|(n, _)| **n > 0).map(|(n, w)| format!("{w} {n}")).collect();
+                eprintln!("makepad live: watch cost: {} wakeup(s), {} round(s) looked at {} file(s) in {:.0} s ({})", self.wakes, self.rounds, self.stats, self.since.elapsed().as_secs_f64(), why.join(", "));
+            }
+            *self = WatchCost::new();
+        }
+    }
+}
+
+/// Which watched files are a mounted store's, and where an edit of each would sit in the edits
+/// folder: asked once per watch set (each answer normalizes the path and walks the mounts).
+#[derive(Default)]
+struct Virtual {
+    is: Vec<bool>,
+    rels: std::collections::HashMap<String, usize>,
+}
+
+impl Virtual {
+    fn of(files: &[(String, u32, Option<(std::time::SystemTime, u64)>)]) -> Virtual {
+        let is: Vec<bool> = files.iter().map(|f| crate::vfs::is_virtual(&f.0)).collect();
+        let rels = files.iter().enumerate().filter(|&(k, _)| is[k]).filter_map(|(k, f)| Some((crate::vfs::edit_rel(&f.0)?, k))).collect();
+        Virtual { is, rels }
+    }
+}
+
+/// One round's look at the watched files, as `stamp` gives them: a disk file's from its stat; the
+/// virtual files' from one walk of the edits folder at the round's first virtual file, matched to
+/// them by their place there. A round over thousands of virtual files costs the few edits, not a
+/// path lookup and a failing stat each (two looks on every edit took 11-29 ms on Fab's 5,500).
+struct Look(std::cell::OnceCell<std::collections::HashMap<usize, (std::time::SystemTime, u64)>>);
+
+impl Look {
+    fn new() -> Look {
+        Look(std::cell::OnceCell::new())
+    }
+
+    /// Watched file `k` (`path`); one added since `virt` was taken is stat'ed on its own.
+    fn stamp(&self, virt: &Virtual, k: usize, path: &str) -> Option<(std::time::SystemTime, u64)> {
+        if !virt.is.get(k).copied().unwrap_or(false) {
+            return stamp(path);
+        }
+        let edits = self.0.get_or_init(|| {
+            crate::vfs::EditsLook::now().map(|l| l.entries().filter_map(|(rel, s)| Some((*virt.rels.get(rel)?, s))).collect()).unwrap_or_default()
+        });
+        Some(edits.get(&k).copied().unwrap_or((std::time::UNIX_EPOCH, 0)))
+    }
+}
+
+/// Whether every changed path is an edit of a mounted store that the edits ledger committed:
+/// devhub's ship-done (`relaxgit::finish`) renames each file into the edits folder and the ledger
+/// last, so an edit whose file was in place when the ledger was renamed is whole, and a save after
+/// it is not settled by it (its file came later). Told by the files' and the ledger's change times,
+/// set by this machine's clock at each rename (a modified time is the saver's, set to its save).
+fn committed_by_ledger<'a>(mut paths: impl Iterator<Item = &'a str>) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let changed_at = |m: &std::fs::Metadata| (m.ctime(), m.ctime_nsec());
+        let Some(ledger) = crate::vfs::edits_record().and_then(|p| std::fs::metadata(p).ok()) else { return false };
+        let mut any = false;
+        let whole = paths.all(|p| {
+            any = true;
+            // an edit taken back has no file: the ledger's rewrite removed it
+            crate::vfs::is_virtual(p) && crate::vfs::edited_disk_path(p).is_none_or(|d| std::fs::metadata(d).is_ok_and(|m| changed_at(&m) <= changed_at(&ledger)))
+        });
+        any && whole
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = paths.next();
+        false
+    }
 }
 
 fn gate_note(g: u8) {
@@ -4920,7 +5766,7 @@ impl LiveWatch {
         }
         Some(Self { watch: watch_events::Watch::new(watched.iter().map(String::as_str))?, files })
     }
-    fn wait(&mut self, timeout: std::time::Duration) { self.watch.wait(timeout) }
+    fn wait(&mut self, timeout: Option<std::time::Duration>) { self.watch.wait(timeout) }
     /// None: events may have been lost, or a new edit was recorded: stat every file, watch again.
     fn changed(&mut self) -> Option<Vec<usize>> {
         let ids = self.watch.changed()?;
@@ -4930,16 +5776,48 @@ impl LiveWatch {
     }
 }
 
-/// The live watcher's longest sleep on file events (a backstop: every input wakes it).
-const LIVE_IDLE: std::time::Duration = std::time::Duration::from_secs(1);
-/// Stillness, not an overall deadline: a busy checkout can take as long as it needs.
+/// The edits ledger (`.makepad-run-edits`) as the watcher last looked at the virtual files. A
+/// mounted store's file changes only through the edits folder, and every edit rewrites the ledger
+/// (a devhub ship writes it last, after its files): while it stands still the virtual files are
+/// as they were, and their stamps (an edits-folder lookup and a failing stat each; 2,700 files
+/// every 100 ms took a third of a core on a phone) are not read. A round that sees it move looks
+/// at every virtual file, whatever woke it, and only that round takes the new stamp. (A backstop
+/// round that took it without looking lost overlay edits for good, 11-03: the stamp moved between
+/// a ship's ledger write and its file event, whose round then found the ledger quiet.)
+struct Ledger(Option<(std::time::SystemTime, u64)>);
+
+impl Ledger {
+    fn now() -> Ledger {
+        Ledger(crate::vfs::edits_ledger_stamp())
+    }
+
+    /// The watched files a round stats, given the ledger's stamp now: every disk file (`full`), or
+    /// those the native watch named (none: the polled hot set's disk files); and every virtual
+    /// file when the ledger moved.
+    fn round(&mut self, now: Option<(std::time::SystemTime, u64)>, full: bool, named: Option<Vec<usize>>, hot: &[usize], virt: &[bool]) -> Vec<usize> {
+        let disk = |k: &usize| !virt[*k];
+        let mut ids: Vec<usize> = if full { (0..virt.len()).filter(disk).collect() } else { named.unwrap_or_else(|| hot.iter().copied().filter(disk).collect()) };
+        if now != self.0 {
+            self.0 = now;
+            ids.extend((0..virt.len()).filter(|&k| virt[k]));
+            ids.sort_unstable();
+            ids.dedup();
+        }
+        ids
+    }
+}
+
+/// Stillness, not an overall deadline: a busy checkout can take as long as it needs. Also the
+/// stat poll of a watch without native file events.
 const LIVE_QUIET: std::time::Duration = std::time::Duration::from_millis(100);
+/// How often a watcher whose startup scan waits for the first frames to pass looks again.
+const STARTUP_SCAN_LOOK: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// The harness is parked: verify this group, run its tests, then undo faulting code before another edit.
 unsafe fn test_edit(up: *mut Unit, paths: Vec<String>, o: &mut Outcome, undos: &mut Vec<Undo>) -> Vec<(u32, u32)> {
     use crate::harness::live;
     let what = paths.join(", ");
-    let mut edit = live::Edit { paths, group: o.group, compile_ms: Some(o.ms[2]), restarted: false, changed: o.test_changes.clone() };
+    let mut edit = live::Edit { paths, group: o.group, compile_ms: Some(o.ms[2]), restarted: false, changed: o.test_changes.clone(), patch: Some((o.changed, o.names.len())) };
     for line in &o.lines { eprintln!("makepad live:   {line}"); }
     if o.rung != Rung::Patch {
         patch_refused_event(&what, o.rung == Rung::Refuse, &o.lines);
@@ -4950,13 +5828,10 @@ unsafe fn test_edit(up: *mut Unit, paths: Vec<String>, o: &mut Outcome, undos: &
         return Vec::new();
     }
     eprintln!("makepad live: {what}: patched ({} item(s) changed, {} fn(s) installed) in {:.1} ms", o.changed, o.names.len(), o.ms.iter().sum::<f64>());
-    patch_landed(edit.paths.iter().cloned());
+    patch_landed(edit.paths.iter().cloned(), changed_items(up, o));
     let mut pending = Vec::new();
     if let Some(undo) = o.undo.take() {
-        let ids = crate::owner::call(crate::owner::Class::Program, || {
-            let u = &*up;
-            (0..u.fns.len() as u32).filter(|&id| u.fns[id as usize].patch_gen == o.group && u.fns[id as usize].unverified.load(Ordering::Relaxed)).collect::<Vec<_>>()
-        });
+        let ids = crate::owner::call(crate::owner::Class::Program, || unverified_patch(up, o.group));
         if !ids.is_empty() {
             UNVERIFIED_PATCHES.fetch_add(1, Ordering::AcqRel);
             pending.push(PendingPatch { group: o.group, what: what.clone(), ids, event_seq: crate::inspect::events::last_seq() });
@@ -4992,19 +5867,17 @@ unsafe fn test_edit(up: *mut Unit, paths: Vec<String>, o: &mut Outcome, undos: &
 }
 
 unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
+    // a body that includes a file for the first time: the watcher watches it from now on
+    crate::sip::on_late_new(watch_events::kick);
     inputs.add_runner();
-    let snapshot = crate::zone_alloc::kept_with(|| std::sync::Arc::new(inputs.clone()));
-    *WATCH_INPUTS.lock().unwrap_or_else(|e| e.into_inner()) = Some(snapshot);
     let std_dir = std::env::var("MAKEPAD_RUN_STD").unwrap_or_default();
     // (path, running file index, last stamp)
     // the program's own source files (not std, registry or git dependencies), loaded so far
     let own_files = |u: &Unit| -> Vec<(String, u32)> {
-        u.prog.current_source_files().into_iter().filter(|(p, _)| {
-            own_source(p, &std_dir) && crate::vfs::is_file(p)
-        }).collect()
+        u.prog.current_source_files(|p| own_source(p, &std_dir)).into_iter().filter(|(p, _)| crate::vfs::is_file(p)).collect()
     };
     // (the watcher's holds read the program's files only: lock_unit_quick)
-    let mut files: Vec<(String, u32, Option<(std::time::SystemTime, u64)>)> = {
+    let mut files: Vec<WatchFile> = {
         crate::owner::call(crate::owner::Class::Program, || {
             let loaded: std::collections::HashMap<_, _> = own_files(&*up).into_iter().collect();
             let mut v: Vec<_> = inputs.paths.iter().map(|(p, (stamp, _))| (p.clone(), loaded.get(p).copied().unwrap_or(u32::MAX), *stamp)).collect();
@@ -5019,10 +5892,11 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
     for path in crate::native_macros::paths() {
         if !files.iter().any(|f| f.0 == path) { let s = stamp(&path); files.push((path, u32::MAX, s)); }
     }
+    set_watch_inputs(&inputs, &files);
     // the files the program's own code includes (include_str!/include_bytes!): a save of one is
     // an edit of the files that include it (`include_edits`). Bodies read more as they compile:
     // each is watched from its read (late_count moves).
-    let add_included = |files: &mut Vec<(String, u32, Option<(std::time::SystemTime, u64)>)>| -> bool {
+    let add_included = |files: &mut Vec<WatchFile>| -> bool {
         let mut added = false;
         for path in included_files(&std_dir) {
             if !files.iter().any(|f| f.0 == path) { let s = stamp(&path); files.push((path, u32::MAX, s)); added = true; }
@@ -5044,11 +5918,12 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
     let mut undos: Vec<Undo> = Vec::new();
     // SPEC-V: patches that ran before their verdict
     let mut pending: Vec<PendingPatch> = Vec::new();
-    // a save is seen within 100 ms (a restart's whole budget is 1 s); one round is a stat per
-    // watched file (MAKEPAD_RUN_LIVE_TRACE=1 prints its cost once)
+    // with native file events a round runs only on an event or a kick: a watcher at rest makes no
+    // system call. Without them a save is seen within 100 ms; one round is a stat per watched file
+    // (MAKEPAD_RUN_LIVE_TRACE=1 prints its cost once)
     let mut traced = !live_trace();
-    // the hot set: the program's own package (its root crate's directory) and every file saved
-    // this session, polled every 5 ms (a few stats); every file is polled every 100 ms
+    // the hot set (no native events): the program's own package (its root crate's directory) and
+    // every file saved this session, polled every 5 ms (a few stats); every file every 100 ms
     let mut hot: Vec<usize> = {
         let dir = crate::owner::call(crate::owner::Class::Program, || {
             let u = &*up;
@@ -5061,16 +5936,24 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
         }
     };
     // Refused texts stay pending until a batch containing them applies, or they
-    // return to their running text. Every tree change retries the entire set.
-    // One quiet retry also handles a save whose last notification preceded its
-    // final write; a persistent source error then waits for the next change.
+    // return to their running text. Every tree change retries the entire set, and
+    // nothing else does: a batch's inputs are its files, so an unchanged tree
+    // compiles the same verdict (no timer; at rest the watch makes no wakeup).
     let mut stalled: std::collections::HashMap<usize, (Vec<u8>, Vec<String>)> = std::collections::HashMap::new();
-    let mut retry_at: Option<Instant> = None;
+    // one more round at once, whatever the events say: a write resumed while the batch was read,
+    // or files moved outside a dock app's sync
+    let mut again = false;
     // installed patches whose landing is checked once LANDING has passed: (when, patch group, the edit)
     let mut landing: Vec<(Instant, u32, String)> = Vec::new();
     let mut last_scan = Instant::now();
     // a WM dock app: only a devhub sync of landed work may change its code (`DockGate`)
     let mut dock = DockGate::from_env();
+    // the edits ledger as the last round that looked at the virtual files saw it (`Ledger`), and
+    // which files are a mounted store's (asked once per watch set: the lookup normalizes the path
+    // and walks the mounts)
+    let mut ledger = Ledger::now();
+    let mut cost = WatchCost::new();
+    let mut virt = Virtual::default();
     let mut startup_scan = true;
     let mut restart_required = false;
     let mut restart_message = String::new();
@@ -5093,18 +5976,24 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
             continue;
         }
         // native file events: sleep on them while nothing else is in flight (startup, a domain
-        // loading, verdicts pending, a refused edit to retry, an open stream); else the 5 ms
-        // poll. Other inputs wake it (watch_events::kick); one look a second regardless.
+        // loading, verdicts pending, an open stream); else the 5 ms poll. Every other input wakes
+        // it (watch_events::kick: a streamed edit, a domain's inputs, the post-boot loader's files,
+        // a late include, the startup's end, an unpin, a recovery, a disarmed real-time root); a
+        // timeout only for what is due (a landing check, the startup scan). At rest it makes no
+        // system call.
         let quiet = (crate::harness::live::enabled() || jit::live_startup_done()) && !DOMAIN_LOADING.load(std::sync::atomic::Ordering::Acquire)
             && pending.is_empty() && !streams_busy(up);
+        let t_wait = Instant::now();
         match events.as_mut() {
             Some(w) if quiet => {
-                let next = retry_at.iter().map(|t| t.saturating_duration_since(Instant::now()))
-                    .chain(landing.iter().map(|l| l.0.saturating_duration_since(Instant::now()))).min();
-                w.wait(next.unwrap_or(LIVE_IDLE).min(LIVE_IDLE).max(std::time::Duration::from_millis(5)));
+                let next = again.then_some(std::time::Duration::ZERO)
+                    .into_iter().chain(landing.iter().map(|l| l.0.saturating_duration_since(Instant::now())))
+                    .chain(startup_scan.then_some(STARTUP_SCAN_LOOK)).min();
+                w.wait(next.map(|t| t.max(std::time::Duration::from_millis(5))));
             }
             _ => std::thread::sleep(std::time::Duration::from_millis(5)),
         }
+        let woke = Instant::now();
         if DOMAIN_LOADING.load(std::sync::atomic::Ordering::Acquire) { gate_note(1); continue; }
         let latest = DOMAIN_REVISION.load(std::sync::atomic::Ordering::Acquire);
         if latest != revision {
@@ -5112,8 +6001,6 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
             if let Some(next) = DOMAIN_INPUTS.lock().unwrap_or_else(|e| e.into_inner()).take() {
                 inputs = next;
                 inputs.add_runner();
-                let snapshot = crate::zone_alloc::kept_with(|| std::sync::Arc::new(inputs.clone()));
-                *WATCH_INPUTS.lock().unwrap_or_else(|e| e.into_inner()) = Some(snapshot);
             }
             let loaded = crate::owner::call(crate::owner::Class::Program, || own_files(&*up));
             files = inputs.paths.iter().map(|(p, (s, _))| (p.clone(), u32::MAX, *s)).collect();
@@ -5121,6 +6008,7 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
                 if let Some(f) = files.iter_mut().find(|f| f.0 == path) { f.1 = file; }
                 else { let s = stamp(&path); files.push((path, file, s)); }
             }
+            set_watch_inputs(&inputs, &files);
             late_seen = crate::sip::late_count();
             add_included(&mut files);
             events = LiveWatch::new(files.iter().map(|f| f.0.as_str()));
@@ -5128,7 +6016,7 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
             repositories.include(files.iter().map(|f| f.0.as_str()));
             hot.clear();
             stalled.clear();
-            retry_at = None;
+            again = false;
             undos.clear();
             restart_required = false;
             restart_message.clear();
@@ -5143,8 +6031,20 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
         if let Some(why) = host::take_harness_restart() {
             let group = crate::owner::call(crate::owner::Class::Program, || (*up).begin_patch());
             crate::harness::live::restart(crate::harness::live::Edit {
-                paths: std::mem::take(&mut host_edit), group, compile_ms: None, restarted: true, changed: None,
+                paths: std::mem::take(&mut host_edit), group, compile_ms: None, restarted: true, changed: None, patch: None,
             }, &why);
+        }
+        // A patch's verdict settles ahead of the gates below: they hold the watch's own work (the
+        // startup scan for the UI thread's first frames, a pending restart), never the verdict
+        // the person waits for. A patch sets the startup scan again when the tree holds files
+        // the program has not loaded (Fab: always), so the first edit after a cold start had its
+        // verdict held until the first-frames window closed, 10 s after the present (11-04).
+        if !pending.is_empty() {
+            for (o, n) in settle_verdicts(up, &mut pending, &mut undos) {
+                for f in files.iter_mut() {
+                    if f.1 == n { f.1 = o; }
+                }
+            }
         }
         // Once the tree no longer matches this session, later saves must not patch a
         // mixture of revisions into the old process. A fresh run restores live editing.
@@ -5153,13 +6053,14 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
             let notifications = events.as_mut().and_then(|w| w.changed());
             let lost = events.is_some() && notifications.is_none();
             if lost { events = LiveWatch::new(files.iter().map(|f| f.0.as_str())); }
-            let ids = if lost || last_scan.elapsed() >= if events.is_some() { LIVE_IDLE } else { LIVE_QUIET } {
-                last_scan = Instant::now();
-                (0..files.len()).collect()
-            } else { notifications.unwrap_or_else(|| hot.clone()) };
+            let full = lost || (events.is_none() && last_scan.elapsed() >= LIVE_QUIET);
+            if full { last_scan = Instant::now(); }
+            if virt.is.len() != files.len() { virt = Virtual::of(&files); }
+            let ids = ledger.round(crate::vfs::edits_ledger_stamp(), full, notifications, &hot, &virt.is);
+            let look = Look::new();
             let changed: Vec<_> = ids.into_iter().filter_map(|k| {
                 let f = &files[k];
-                let current = stamp(&f.0);
+                let current = look.stamp(&virt, k, &f.0);
                 (current != f.2).then_some((k, current))
             }).collect();
             if !changed.is_empty() {
@@ -5173,8 +6074,16 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
         }
         // the startup's file scan (own_files: an owner request of 10-15 ms on Sandbox) waits until
         // the UI thread's first frames after the present are done: run right at the present, the
-        // UI thread's first lazy links queued behind it (36 ms of a first post-present episode)
-        if startup_scan && crate::postframe::in_first_frames() { continue; }
+        // UI thread's first lazy links queued behind it (36 ms of a first post-present episode).
+        // A save ends the wait: the person waits for that edit, not for the first frames (Fab's
+        // first edit right after its window showed waited 7.6 s here, 11-04). The scan's round
+        // looks at every file, those the taken notifications named among them.
+        if startup_scan && crate::postframe::in_first_frames() {
+            let named = events.as_mut().map(|w| w.changed());
+            // (events lost: the watch starts over)
+            if matches!(named, Some(None)) { events = LiveWatch::new(files.iter().map(|f| f.0.as_str())); }
+            if !named.is_some_and(|n| n.is_none_or(|c| !c.is_empty())) && crate::vfs::edits_ledger_stamp() == ledger.0 { continue; }
+        }
         gate_note(0);
         let loads = jit::DEFERRED_LOADS.load(std::sync::atomic::Ordering::Relaxed);
         // a new watch set drops the events the old one had not delivered yet (a save made
@@ -5198,6 +6107,7 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
                 if jit::deferred_trace() { eprintln!("makepad live: watching {} more file(s) the post-boot loader loaded", added.len()); }
                 for (p, i) in added { let st = stamp(&p); files.push((p, i, st)); }
             }
+            set_watch_loaded(&files);
             if add_included(&mut files) || loaded_more {
                 repositories.include(files.iter().map(|f| f.0.as_str()));
                 events = LiveWatch::new(files.iter().map(|f| f.0.as_str()));
@@ -5207,13 +6117,6 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
         let t_dr = Instant::now();
         drain_streams(up);
         if live_trace() && t_dr.elapsed().as_millis() > 20 { eprintln!("makepad live: drain_streams took {:.1} ms at t={:.0} ms", t_dr.elapsed().as_secs_f64() * 1e3, crate::clock::ms_since_start()); }
-        if !pending.is_empty() {
-            for (o, n) in settle_verdicts(up, &mut pending, &mut undos) {
-                for f in files.iter_mut() {
-                    if f.1 == n { f.1 = o; }
-                }
-            }
-        }
         if crate::hot_failure::recovering() { continue; }
         // The landing check: a patch whose old code is still running a while after the install
         // has not reached that call (a loop that never returns): the edit restarts the app.
@@ -5222,7 +6125,15 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
             let due: Vec<(u32, String)> = landing.iter().filter(|l| l.0 <= now).map(|l| (l.1, l.2.clone())).collect();
             landing.retain(|l| l.0 > now);
             for (gen, what) in due {
-                if let Some(name) = crate::owner::call(crate::owner::Class::Program, || running_old_code(&*up, gen)) {
+                let t_land = Instant::now();
+                let w0 = crate::jit::wall_ns();
+                let old = crate::owner::call(crate::owner::Class::Program, || { let held = t_land.elapsed(); (running_old_code(&*up, gen), held) });
+                if live_trace() {
+                    // a long wait names what the owner served meanwhile
+                    let behind = if old.1.as_millis() >= 20 { format!("; behind {}", crate::owner::served_during(w0, w0 + old.1.as_nanos() as u64)) } else { String::new() };
+                    eprintln!("makepad live: landing check of patch group {gen} at t={:.0} ms: {:.1} ms ({:.1} ms waiting for the owner{behind})", crate::clock::ms_since_start(), t_land.elapsed().as_secs_f64() * 1e3, old.1.as_secs_f64() * 1e3);
+                }
+                if let Some(name) = old.0 {
                     let lines = vec![format!("`{name}` still runs the code from before the edit: a call made before the patch has not returned (a loop) -- restart the app")];
                     log_edit(&what, &Outcome { failure: None, kept: 0, pending: false, rung: Rung::Restart, files: Vec::new(), lines: lines.clone(), names: Vec::new(), changed: 0, test_changes: None, group: gen, ms: [0.0; 4], undo: None, work: [0; 5] }, None, Instant::now());
                     restart_for_edit(&what, &lines);
@@ -5237,39 +6148,35 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
         let notifications = events.as_mut().and_then(|w| w.changed());
         if t_ev.elapsed().as_millis() > 20 && live_trace() { eprintln!("makepad live: events drain took {:.1} ms", t_ev.elapsed().as_secs_f64() * 1e3); }
         let lost = events.is_some() && notifications.is_none();
+        let t_rewatch = Instant::now();
         if lost { events = LiveWatch::new(files.iter().map(|f| f.0.as_str())); }
+        let rewatch_ms = t_rewatch.elapsed().as_secs_f64() * 1e3;
         // a sync moved the dock app's checkout: every file is compared with what runs
         let synced = dock.as_mut().is_some_and(DockGate::synced);
         let caught_up = CATCH_UP.swap(false, std::sync::atomic::Ordering::AcqRel);
-        let retry_due = retry_at.is_some_and(|t| t <= Instant::now()) || RETRY_NOW.swap(false, std::sync::atomic::Ordering::AcqRel);
+        let retry_due = std::mem::take(&mut again) | RETRY_NOW.swap(false, std::sync::atomic::Ordering::AcqRel);
         let all = lost || rewatched || synced || caught_up || retry_due
-            || last_scan.elapsed() >= if events.is_some() { LIVE_IDLE } else { LIVE_QUIET };
-        let backstop_only = all && !(lost || rewatched || synced || caught_up || retry_due);
+            || (events.is_none() && last_scan.elapsed() >= LIVE_QUIET);
+        if rewatched || synced || virt.is.len() != files.len() { virt = Virtual::of(&files); }
         let t_round = std::time::Instant::now();
-        let mut changed: Vec<usize> = Vec::new();
-        let mut scanned = 0;
-        if all {
-            last_scan = Instant::now();
-            for (k, f) in files.iter_mut().enumerate() {
-                // Virtual files change only through the edits folder, which the native watch covers.
-                if backstop_only && events.is_some() && crate::vfs::is_virtual(&f.0) { continue; }
-                scanned += 1;
-                if stamp(&f.0) != f.2 {
-                    changed.push(k);
-                }
-            }
-        } else if let Some(ids) = notifications {
-            for k in ids {
-                scanned += 1;
-                if stamp(&files[k].0) != files[k].2 { changed.push(k); }
-            }
-        } else {
-            scanned = hot.len();
-            for &k in &hot {
-                if stamp(&files[k].0) != files[k].2 {
-                    changed.push(k);
-                }
-            }
+        if all { last_scan = Instant::now(); }
+        // a sync moved the checkout: every file, the virtual ones too
+        let named = notifications.as_ref().map(Vec::len);
+        let ledger_was = ledger.0;
+        let ids = if synced { (0..files.len()).collect() } else { ledger.round(crate::vfs::edits_ledger_stamp(), all, notifications, &hot, &virt.is) };
+        let mut scanned = ids.len();
+        if live_trace() {
+            let why = [events.is_none(), lost, retry_due, rewatched || synced || caught_up].iter().position(|&w| w).unwrap_or(4);
+            cost.round(scanned, why);
+        }
+        let look = Look::new();
+        let mut changed: Vec<usize> = ids.into_iter().filter(|&k| look.stamp(&virt, k, &files[k].0) != files[k].2).collect();
+        // a round that looked at something: when it woke, what woke it and what it found (the
+        // 5 ms polls while a verdict is pending look at nothing and print nothing)
+        if live_trace() && scanned > 0 {
+            eprintln!("makepad live: watch round at t={:.0} ms: woke after {:.1} ms, round {:.1} ms after the wake; {}named {:?}, ledger {}, looked {scanned}, changed {}",
+                crate::clock::ms_since_start(), woke.duration_since(t_wait).as_secs_f64() * 1e3, woke.elapsed().as_secs_f64() * 1e3,
+                if lost { format!("events lost (rewatched in {rewatch_ms:.1} ms), ") } else { String::new() }, named, if ledger.0 != ledger_was { "moved" } else { "still" }, changed.len());
         }
         if !traced && all {
             traced = true;
@@ -5279,7 +6186,6 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
         if changed.is_empty() && !quiet_retry {
             continue;
         }
-        retry_at = None;
         changed.extend(stalled.keys().copied());
         changed.sort_unstable();
         changed.dedup();
@@ -5287,7 +6193,8 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
             // changed by something other than the sync (a lane's build or checkout in this tree,
             // a hand edit): held, the app keeps running the synced code; the next sync applies
             // whatever the files say then
-            gate.held(changed.iter().map(|&k| files[k].0.as_str()));
+            // (its revision moved meanwhile: the next round is the sync's, at once)
+            if gate.held(changed.iter().map(|&k| files[k].0.as_str())) { again = true; }
             continue;
         }
         let seen = std::time::Instant::now();
@@ -5303,11 +6210,40 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
         // is a wakeup, not proof that a checkout has finished: index.lock must
         // be gone and HEAD, its ref and every changed file must stay still for
         // a full quiet window. Never give up waiting on a slow writer.
-        let mut last: Vec<_> = files.iter().map(|f| stamp(&f.0)).collect();
+        let look = Look::new();
+        let mut last: Vec<_> = files.iter().enumerate().map(|(k, f)| look.stamp(&virt, k, &f.0)).collect();
         let mut git_state = repositories.snapshot();
         let mut still_since = Instant::now();
+        // an overlay edit its ledger committed is whole: one look, no quiet window (100 ms of
+        // every overlay edit's save -> frame)
+        let mut committed = committed_by_ledger(changed.iter().map(|&k| files[k].0.as_str()));
+        let mut waited = false;
         loop {
-            std::thread::sleep(LIVE_QUIET);
+            if !committed {
+                // the rest of the quiet window, or for an overlay edit until the watch hears a file
+                // or the ledger: one seen between its file's rename and ship-done's last write, the
+                // ledger's, goes on at that rename (a third of overlay edits waited out the whole
+                // window, 11-03). Every file is looked at below, so an event is only a wakeup; a
+                // disk save waits out the window without a look per event (a checkout's files).
+                let left = LIVE_QUIET.saturating_sub(still_since.elapsed());
+                let overlay = cfg!(unix) && changed.iter().all(|&k| crate::vfs::is_virtual(&files[k].0));
+                let rewatch = match events.as_mut().filter(|_| overlay) {
+                    Some(w) => {
+                        waited = true;
+                        // whole milliseconds, rounded up: a wait that ends short of the window
+                        // would look again at once
+                        w.wait(Some(std::time::Duration::from_millis(left.as_micros().div_ceil(1000) as u64)));
+                        w.changed().is_none()
+                    }
+                    None => {
+                        std::thread::sleep(left);
+                        false
+                    }
+                };
+                // events lost, or a new edit recorded (it may have made a folder): watched anew
+                if rewatch { events = LiveWatch::new(files.iter().map(|f| f.0.as_str())); }
+                committed = committed_by_ledger(changed.iter().map(|&k| files[k].0.as_str()));
+            }
             let additions = inputs.discover_sources(files.iter().map(|f| f.0.as_str()));
             if !additions.is_empty() {
                 let known: std::collections::HashSet<_> = files.iter().map(|f| f.0.clone()).collect();
@@ -5317,7 +6253,8 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
                 repositories.include(files.iter().map(|f| f.0.as_str()));
                 events = LiveWatch::new(files.iter().map(|f| f.0.as_str()));
             }
-            let now: Vec<_> = files.iter().map(|f| stamp(&f.0)).collect();
+            let look = Look::new();
+            let now: Vec<_> = files.iter().enumerate().map(|(k, f)| look.stamp(&virt, k, &f.0)).collect();
             scanned += files.len();
             for (k, f) in files.iter().enumerate() {
                 if now[k] != f.2 { changed.push(k); }
@@ -5331,10 +6268,14 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
             if moving {
                 quiet_retry = false;
                 still_since = Instant::now();
-            } else if still_since.elapsed() >= LIVE_QUIET {
+            } else if committed || still_since.elapsed() >= LIVE_QUIET {
                 break;
             }
+            committed = false;
         }
+        // a wait above may have taken a wakeup meant for the loop's own (a streamed edit, a
+        // retry, a domain's inputs): one more round sees what it was for
+        if waited { watch_events::kick(); }
         let settled_stamps = last;
         // A moved lockfile or manifest (any landing moves the checkout's) is this app's only when
         // its own resolved graph moved; else there is nothing to rebuild or restart.
@@ -5367,7 +6308,7 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
                 let names: Vec<String> = host_side.iter().take(3).map(|&k| short(&files[k].0)).collect();
                 let why = format!("{} makepad input(s) changed ({}{}): {}", host_side.len(), names.join(", "), if host_side.len() > 3 { ", ..." } else { "" },
                     inputs.restart_reason(host_side.iter().map(|&k| files[k].0.as_str())).unwrap_or("its sources changed"));
-                if let Err(e) = host::request(why.clone(), inputs.process_paths()) {
+                if let Err(e) = host::request(why.clone(), inputs.process_paths(&|_| true)) {
                     let message = format!("{why}; cannot rebuild makepad here ({e}); the app goes on with the makepad it runs");
                     eprintln!("makepad live: {message}");
                     live_log(&format!("{{\"event\":\"host_rebuild\",\"ok\":false,\"message\":{}}}", json_str(&message)));
@@ -5411,18 +6352,20 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
                 if crate::harness::live::enabled() {
                     let group = crate::owner::call(crate::owner::Class::Program, || (*up).begin_patch());
                     crate::harness::live::restart(crate::harness::live::Edit {
-                        paths: changed.iter().map(|&k| files[k].0.clone()).collect(), group, compile_ms: None, restarted: true, changed: None,
+                        paths: changed.iter().map(|&k| files[k].0.clone()).collect(), group, compile_ms: None, restarted: true, changed: None, patch: None,
                     }, &why);
                 } else { offer_restart(&why); }
                 for &k in &changed { files[k].2 = settled_stamps[k]; stalled.remove(&k); }
                 continue;
             }
-            // a change the running process cannot take: makepad rebuilds itself in the background
-            // and restarts into the new binary; the app keeps running (and patching) meanwhile
+            // a change the running process cannot take: offered, and the person's restart builds
+            // makepad in the background and restarts into it; the app keeps running (and
+            // patching) meanwhile. A live test session builds now: its verdict is the restarted run
             let what = if changed.iter().any(|&k| std::path::Path::new(&files[k].0).is_dir()) { "source inputs" } else { "files" };
             let names: Vec<String> = changed.iter().take(3).map(|&k| short(&files[k].0)).collect();
             let why = format!("{} {what} changed ({}{}): {reason}", changed.len(), names.join(", "), if changed.len() > 3 { ", ..." } else { "" });
-            match host::request(why.clone(), inputs.process_paths()) {
+            let paths = inputs.process_paths(&|_| true);
+            match if crate::harness::live::enabled() { host::request(why.clone(), paths) } else { host::offer(why.clone(), paths) } {
                 Ok(()) => {
                     // answered at once (a restart follows the build); the build's end answers
                     // again: refused with its errors, no change, or the restart into it
@@ -5437,6 +6380,7 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
             let what = if changed.iter().any(|&k| std::path::Path::new(&files[k].0).is_dir()) { "source inputs" } else { "files" };
             // provided crates and std are built into this binary: cargo rebuilds it on the way
             let restart = if inputs.host_restart_required(changed.iter().map(|&k| files[k].0.as_str())) {
+                host::note_cannot_build();
                 format!("needs a JIT rebuild: restart it through cargo (which rebuilds makepad): {}", crate::srchash::rebuild_command(&std::env::args().skip(1).collect::<Vec<_>>()))
             } else {
                 format!("restart `makepad run {package}`")
@@ -5464,12 +6408,16 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
             }
             continue;
         }
-        let saved = changed.iter().filter_map(|&k| stamp(&files[k].0).map(|s| s.0)).max();
+        // (a store's file whose edit was taken back stamps UNIX_EPOCH: it has no save time, and
+        // watch_ms printed the epoch's age)
+        let saved = changed.iter().filter_map(|&k| stamp(&files[k].0).map(|s| s.0)).filter(|t| *t != std::time::UNIX_EPOCH).max();
         let read_started = Instant::now();
         let watch_ms = saved.and_then(|s| s.elapsed().ok()).map_or_else(|| ms(seen), |d| d.as_secs_f64() * 1000.);
         let mut edits = Vec::new();
         let mut which = Vec::new();
         let mut read_failed = false;
+        // the files gone from disk (a module's file removed, or a store's edit taken back)
+        let mut removed = Vec::new();
         // the included files saved
         let mut moved = Vec::new();
         for &k in &changed {
@@ -5484,12 +6432,18 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
             }
             let src = match stalled.get(&k).filter(|_| current == f.2).map(|(src, _)| Ok(src.clone())).unwrap_or_else(|| crate::vfs::read(&f.0)) {
                 Ok(s) => s,
-                Err(_) => {
-                    // A removed module can be unbound by its parent's edit.
-                    // A file that still exists but cannot be read must never
-                    // turn a multi-file batch into a partial transaction.
-                    read_failed |= current.is_some();
-                    if current.is_none() { f.2 = current; }
+                Err(e) => {
+                    // A removed module can be unbound by its parent's edit: a file gone from disk,
+                    // or a mounted store's file whose edit was taken back and that the store
+                    // lacks (its stamp is the store's, its read finds nothing). A file that still
+                    // exists but cannot be read must never turn a multi-file batch into a partial
+                    // transaction: the batch waits for that file's next change (its stamp kept).
+                    if current.is_none() || e.kind() == std::io::ErrorKind::NotFound {
+                        f.2 = current;
+                        removed.push(k);
+                    } else {
+                        read_failed = true;
+                    }
                     continue;
                 }
             };
@@ -5512,7 +6466,29 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
             }
         }
         if read_failed {
-            retry_at = Some(Instant::now() + LIVE_IDLE);
+            continue;
+        }
+        // A running module's file removed while the file that declares it is not in this batch:
+        // the program still declares the module and has no file for it (rustc E0583). Nothing of
+        // the batch is installed and the app keeps the module's previous code; the batch's edits
+        // wait for the next change (the file's return, or the declaring file's edit).
+        let undeclared = if removed.is_empty() { Vec::new() } else {
+            let edited: std::collections::HashSet<&str> = edits.iter().map(|e| e.path.as_str()).chain(moved.iter().map(|&k| files[k].0.as_str())).collect();
+            let gone: Vec<&str> = removed.iter().map(|&k| files[k].0.as_str()).collect();
+            crate::owner::call(crate::owner::Class::Program, || undeclared_removals(&(*up).prog, &gone, &edited))
+        };
+        if !undeclared.is_empty() {
+            for (&k, e) in which.iter().zip(&edits) {
+                stalled.insert(k, (e.src.clone(), undeclared.clone()));
+            }
+            for &k in &moved { stalled.insert(k, (Vec::new(), undeclared.clone())); }
+            let what: Vec<String> = removed.iter().chain(&which).map(|&k| files[k].0.rsplit('/').next().unwrap_or("").to_string()).collect();
+            let what = what.join(", ");
+            let o = Outcome { failure: None, kept: 0, pending: false, rung: Rung::Refuse, files: Vec::new(), lines: undeclared.clone(), names: Vec::new(), changed: 0, test_changes: None, group: 0, ms: [0.0; 4], undo: None, work: [0; 5] };
+            log_edit(&what, &o, saved, seen);
+            eprintln!("makepad live: {}: NOT applied (errors below); the app runs the previous code", what);
+            for l in &undeclared { eprintln!("makepad live:   {}", l); }
+            patch_refused_event(&what, true, &undeclared);
             continue;
         }
         if !moved.is_empty() {
@@ -5547,11 +6523,12 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
         let originals: Vec<_> = edits.iter().map(|e| e.src.clone()).collect();
         // A writer may have resumed while we read. Keep these texts pending and
         // collect its next batch before compiling or requesting a recovery.
-        if files.iter().map(|f| stamp(&f.0)).ne(settled_stamps.iter().copied()) || repositories.snapshot() != git_state {
-            retry_at = Some(Instant::now());
+        let look = Look::new();
+        if files.iter().enumerate().map(|(k, f)| look.stamp(&virt, k, &f.0)).ne(settled_stamps.iter().copied()) || repositories.snapshot() != git_state {
+            again = true;
             continue;
         }
-        trace_input(watch_ms, ms(read_started), scanned);
+        trace_input(watch_ms, (read_started - seen).as_secs_f64() * 1000., ms(read_started), scanned);
         let mut o = apply_update(up, edits);
         let only_previous_errors = !o.lines.is_empty() && o.lines.iter().all(|l| l.ends_with("type checking failed due to previous errors"));
         let mut failure = o.failure.or_else(|| (o.rung == Rung::Refuse && internal_failure(&o.lines)).then_some(makepad_remote::hot::Outcome::Refused));
@@ -5578,8 +6555,12 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
             eprintln!("makepad live: {}: NOT applied (errors below); the app runs the previous code", what);
             for l in &o.lines { eprintln!("makepad live:   {}", l); }
             patch_refused_event(&what, true, &o.lines);
-            let unchanged = files.iter().map(|f| stamp(&f.0)).eq(settled_stamps.iter().copied()) && repositories.snapshot() == git_state;
-            if quiet_retry && unchanged {
+            // An unchanged tree compiles the same verdict again: a failure of makepad itself
+            // recovers now, the edit's own errors wait for the tree's next change. A tree that
+            // moved while this compiled has that move's events queued: their round retries it.
+            let look = Look::new();
+            let unchanged = files.iter().enumerate().map(|(k, f)| look.stamp(&virt, k, &f.0)).eq(settled_stamps.iter().copied()) && repositories.snapshot() == git_state;
+            if unchanged {
                 if let Some(failure) = failure {
                     drop(_reloading);
                     if crate::harness::live::enabled() {
@@ -5587,27 +6568,36 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
                             let group = crate::owner::call(crate::owner::Class::Program, || (*up).begin_patch());
                             crate::harness::live::restart(crate::harness::live::Edit {
                                 paths: which.iter().map(|&k| files[k].0.clone()).collect(), group,
-                                compile_ms: Some(o.ms[2]), restarted: true, changed: None,
+                                compile_ms: Some(o.ms[2]), restarted: true, changed: None, patch: None,
                             }, &o.lines.join("; "));
                         }
                     } else { recover_hot_failure(failure, &o.lines, None); }
                 }
-            } else {
-                retry_at = Some(Instant::now() + LIVE_IDLE);
             }
             continue;
         }
         if o.rung == Rung::Patch {
-            let loaded = crate::owner::call(crate::owner::Class::Program, || (*up).prog.current_source_files());
+            let loaded = crate::owner::call(crate::owner::Class::Program, || (*up).prog.current_source_files(|p| own_source(p, &std_dir)));
             for &k in &which {
-                if let Some(&file) = loaded.get(&files[k].0) {
-                    files[k].1 = file;
+                if loaded.contains_key(&files[k].0) {
                     stalled.remove(&k);
                 }
             }
-            // Module additions can load files without a post-boot loader turn.
-            // Refresh their file indices before the next save reaches them.
-            if files.iter().any(|f| f.1 == u32::MAX && f.0.ends_with(".rs") && !inputs.process_input(&f.0)) {
+            // every path: a patch also gives files it did not edit new versions (a rebuilt fn's
+            // closures and async blocks are new: apply_locked)
+            for f in files.iter_mut() {
+                if let Some(&file) = loaded.get(&f.0) {
+                    f.1 = file;
+                }
+            }
+            set_watch_loaded(&files);
+            // Module additions can load files without a post-boot loader turn: a loaded file
+            // the watcher does not know yet is taken in by a rescan before the next save reaches
+            // it (the known ones took their indices above). Asked when any watched file was not
+            // loaded, it rescanned after every Fab patch (an owner request) and held the watch
+            // round for the first frames again.
+            let known: std::collections::HashSet<&str> = files.iter().map(|f| f.0.as_str()).collect();
+            if loaded.keys().any(|p| !known.contains(p.as_str()) && crate::vfs::is_file(p)) {
                 startup_scan = true;
             }
         }
@@ -5642,7 +6632,7 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
         }
         crate::tui::flush();
         if o.rung == Rung::Patch {
-            patch_landed(which.iter().map(|&k| files[k].0.clone()));
+            patch_landed(which.iter().map(|&k| files[k].0.clone()), changed_items(up, &o));
             if o.group != 0 { landing.push((Instant::now() + LANDING, o.group, what.clone())); }
         }
         // what is left unverified reports when the borrow checker answers; else the verdict is now
@@ -5653,10 +6643,7 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
             // SPEC-V: the slots this group installed without a clean verdict (all of them, unless
             // --check-first refused what failed before the install)
             let group = u.group;
-            let ids: Vec<u32> = crate::owner::call(crate::owner::Class::Program, || {
-                let up = &*up;
-                (0..up.fns.len() as u32).filter(|&id| up.fns[id as usize].patch_gen == group && up.fns[id as usize].unverified.load(Ordering::Relaxed)).collect()
-            });
+            let ids: Vec<u32> = crate::owner::call(crate::owner::Class::Program, || unverified_patch(up, group));
             if !ids.is_empty() {
                 UNVERIFIED_PATCHES.fetch_add(1, Ordering::AcqRel);
                 pending.push(PendingPatch { group, what: what.clone(), ids, event_seq: crate::inspect::events::last_seq() });
@@ -5825,6 +6812,76 @@ mod use_edit_tests {
 }
 
 #[cfg(test)]
+mod watch_wait_tests {
+    use super::*;
+
+    #[test]
+    fn an_inputs_ask_during_the_boot_waits_for_the_watcher() {
+        isolated_test!(an_inputs_ask_during_the_boot_waits_for_the_watcher);
+        assert!(input_paths(&|_| true).is_err(), "no live run: no watcher to wait for");
+        // a live run that has not laid out its program yet
+        crate::run::LIVE_SESSION.store(true, std::sync::atomic::Ordering::Release);
+        assert!(!crate::layout::LIVE_SESSION.load(std::sync::atomic::Ordering::Acquire));
+        let ask = std::thread::spawn(|| input_paths(&|_| true));
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(!ask.is_finished(), "the ask waits for the watcher");
+        set_watch_inputs(&Inputs::default(), &[]);
+        assert_eq!(ask.join().unwrap(), Ok(Vec::new()));
+    }
+}
+
+#[cfg(test)]
+mod removed_module_tests {
+    use super::*;
+
+    /// A running module's file gone from disk while the file that declares it stays as it was is
+    /// refused as rustc's E0583 (the app keeps the module's code; a "patched (0 items)" verdict
+    /// was a silent wrong patch, 11-04). The declaring file's edit in the same batch decides
+    /// instead (the compile unbinds the module or reports it), and a crate root or a file the
+    /// program does not run is no such module.
+    #[test]
+    fn a_removed_module_file_its_parent_still_declares_is_refused() {
+        isolated_test!(a_removed_module_file_its_parent_still_declares_is_refused);
+        std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+        let dir = std::env::temp_dir().join(format!("relax-removed-module-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("zz")).unwrap();
+        std::fs::write(dir.join("main.rs"), "mod zz;\nmod leaf;\nfn main() { let _ = zz::f() + leaf::g(); }\n").unwrap();
+        std::fs::write(dir.join("zz/mod.rs"), "pub fn f() -> u32 { 1 }\n").unwrap();
+        std::fs::write(dir.join("leaf.rs"), "pub fn g() -> u32 { 2 }\n").unwrap();
+        let session = std::sync::Arc::new(crate::Session::default());
+        let (prog, _, _) = crate::load_with_std(&session, dir.join("main.rs").to_str().unwrap(), "removed_module", false).unwrap();
+        let path = |end: &str| prog.file_paths.iter().find(|p| p.ends_with(end)).cloned().unwrap();
+        let (main, zz, leaf) = (path("/main.rs"), path("/zz/mod.rs"), path("/leaf.rs"));
+        let none = std::collections::HashSet::new();
+        let lines = undeclared_removals(&prog, &[zz.as_str(), leaf.as_str()], &none);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(lines[0].starts_with("error[E0583]: file not found for module `zz`") && lines[0].contains(&main), "{lines:?}");
+        assert!(lines[1].starts_with("error[E0583]: file not found for module `leaf`"), "{lines:?}");
+        // the declaring file is in the batch: its compile decides
+        let edited: std::collections::HashSet<&str> = [main.as_str()].into_iter().collect();
+        assert!(undeclared_removals(&prog, &[zz.as_str()], &edited).is_empty());
+        // the crate root, and a file the program does not run
+        let other = dir.join("other.rs").to_string_lossy().into_owned();
+        assert!(undeclared_removals(&prog, &[main.as_str(), other.as_str()], &none).is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A read of the running code (prof, mem, eval, ..) while a saved edit waits for a restart
+    /// heads its answer with STALE and the edit: it measures the code from before it (a layout
+    /// change measured for hours as if it ran, 11-04). A run that loads the sources clears it.
+    #[test]
+    fn a_read_while_an_edit_waits_for_a_restart_says_stale() {
+        isolated_test!(a_read_while_an_edit_waits_for_a_restart_says_stale);
+        assert_eq!(crate::inspect::stale_line(), None);
+        note_restart_pending("main.rs: the layout of WorkStats changed");
+        let line = crate::inspect::stale_line().unwrap();
+        assert!(line.contains("STALE: 1 edit waits for a restart (main.rs: the layout of WorkStats changed)") && line.contains("\"restart_pending\":1"), "{line}");
+        clear_restart_pending();
+        assert_eq!(crate::inspect::stale_line(), None);
+    }
+}
+
+#[cfg(test)]
 mod round43_tests {
     #[test]
     fn generated_impl_identity_ignores_tokenization_whitespace() {
@@ -5982,12 +7039,17 @@ pub fn revision() -> u32 { 0 }
             file = prog.commit_body_version(version, &plan.pairs).unwrap();
             assert_eq!(prog.def(revision).file, file);
         }
-        // A real derive removal must still take the restart path.
+        // A real derive removal removes its impls with their fns (a nested module's and an
+        // expansion's too); apply_locked checks the code that called them.
         let old = &prog.files[file as usize];
         let removed_debug = String::from_utf8(old.src[..old.src_len as usize].to_vec()).unwrap().replace("Clone, Debug, Default", "Clone, Default");
         let version = prog.parse_version(file, path_text, removed_debug.into_bytes()).unwrap();
-        let why = classify(&prog, file, &version.pf, path_text, &Default::default()).err().expect("removing Debug must require a restart");
-        assert!(why.iter().any(|line| line.contains("fn `fmt` removed")), "{why:?}");
+        let plan = classify(&prog, file, &version.pf, path_text, &Default::default()).unwrap_or_else(|why| panic!("removing Debug: {why:?}"));
+        let kinds: Vec<(DefKind, &str)> = plan.removed.iter().map(|&d| (prog.def(d).kind, prog.name(d))).collect();
+        assert_eq!(kinds.iter().filter(|k| k.0 == DefKind::Impl).count(), 3, "{kinds:?}");
+        assert_eq!(kinds.iter().filter(|k| k.1 == "fmt").count(), 3, "{kinds:?}");
+        // (and `record!`, whose text changed: its callers are expanded again)
+        assert!(plan.added.is_empty() && plan.changes.iter().all(|c| matches!(c, Change::Macro(_))), "{:?} {:?}", plan.added, plan.changes);
         std::fs::remove_file(path).unwrap();
     }
 }
@@ -6167,6 +7229,15 @@ pub const C_ALIAS: u32 = 7; mod m { pub use super::C_ALIAS as RENAMED; } const E
 pub const C_INLINE: u32 = 8; fn uses_inline() -> u32 { const { C_INLINE } }
 macro_rules! get { () => { C_MACRO } }
 pub const C_MACRO: u32 = 9; const F: u32 = get!();
+pub const C_FIELD: usize = 10; struct Ga<const N: usize>; struct UsesField { _f: Ga<C_FIELD> }
+pub const C_ALIAS_TY: usize = 11; type UsesAlias = Ga<C_ALIAS_TY>;
+pub const C_IMPL: usize = 12; trait Tr {} impl Tr for Ga<C_IMPL> { }
+pub const C_BODY_ONLY: usize = 13; impl Ga<0> { fn body_only() -> usize { C_BODY_ONLY } }
+pub const C_THROUGH: usize = 14; const fn through() -> usize { C_THROUGH } struct UsesThrough { _a: [u8; through()] }
+pub const C_VALUE: u32 = 15; const VALUE_READ: u32 = C_VALUE + 1; const fn value_read() -> u32 { VALUE_READ } fn reads_value() -> u32 { value_read() }
+pub const C_NEW_OTHER: usize = 16; struct ViaOther(usize); impl ViaOther { const fn new() -> Self { ViaOther(C_NEW_OTHER) } } struct Unrelated; impl Unrelated { const fn new() -> Self { Unrelated } } struct UsesUnrelated { _a: [u8; { let _ = Unrelated::new(); 1 }] }
+pub const C_NEW_VIA: usize = 17; struct ViaIt(usize); impl ViaIt { const fn make() -> Self { ViaIt(C_NEW_VIA) } } struct UsesViaIt { _a: [u8; { let _ = ViaIt::make(); 1 }] }
+pub const C_NEW_RENAMED: usize = 18; struct ViaRen(usize); impl ViaRen { const fn build() -> Self { ViaRen(C_NEW_RENAMED) } } use ViaRen as Ren; struct UsesRen { _a: [u8; { let _ = Ren::build(); 1 }] }
 pub static S_FN: [u32; 2] = [1, 2];
 pub static S_ADDR: [u32; 2] = [3, 4]; static HOLDER: &[u32; 2] = &S_ADDR;
 pub static S_READ: [u32; 2] = [5, 6]; const fn cf2() -> u32 { S_READ[0] }
@@ -6186,6 +7257,11 @@ fn ordinary() -> u32 { let _a = S_FN[0]; C_FN + S_FN[1] }
             assert_eq!(const_contexts_mention(&prog, &[named(name)]), expected, "{name}");
         }
         assert!(const_contexts_mention(&prog, &[named("C_FN"), named("C_LEN")]), "any item of the transaction");
+        for (name, expected) in [("C_FN", false), ("C_CONST", false), ("C_LEN", true), ("C_REPEAT", true), ("C_BODY", false), ("C_STATIC", false),
+            ("C_FIELD", true), ("C_ALIAS_TY", true), ("C_IMPL", true), ("C_BODY_ONLY", false), ("C_THROUGH", true), ("C_VALUE", false),
+            ("C_NEW_OTHER", false), ("C_NEW_VIA", true), ("C_NEW_RENAMED", true)] {
+            assert_eq!(read_in_a_type(&prog, &[named(name)]), expected, "{name}: read by a type");
+        }
         std::fs::remove_file(path).unwrap();
     }
 
@@ -6272,5 +7348,130 @@ mod dock_gate_tests {
         std::fs::remove_file(&rev).unwrap();
         assert!(!gate.synced());
         let _ = std::fs::remove_dir(&dir);
+    }
+}
+
+#[cfg(test)]
+mod ledger_tests {
+    /// The 11-03 overlay loss: an overlay edit rewrites the edits ledger, and the round that first
+    /// sees it move must stat every virtual file, whatever woke it (a kick or an empty drain before
+    /// the ledger's own event, a full round, the poll without native events); a round that finds
+    /// it standing still stats none of them.
+    #[test]
+    fn every_round_that_sees_the_edits_ledger_move_looks_at_every_virtual_file() {
+        let at = |s| Some((std::time::UNIX_EPOCH + std::time::Duration::from_secs(s), 10));
+        // files 0 and 2 are on disk, 1 and 3 virtual; the polled hot set is 0 and 1
+        let (virt, hot) = ([false, true, false, true], [0, 1]);
+        let none = Vec::<usize>::new();
+        let mut ledger = super::Ledger(at(1));
+        assert_eq!(ledger.round(at(1), false, Some(vec![]), &hot, &virt), none, "at rest: an empty drain stats nothing");
+        assert_eq!(ledger.round(at(1), true, None, &hot, &virt), [0, 2], "at rest: a full round stats the disk files only");
+        assert_eq!(ledger.round(at(2), false, Some(vec![]), &hot, &virt), [1, 3], "a round before the ledger's event: every virtual file");
+        assert_eq!(ledger.round(at(2), true, None, &hot, &virt), [0, 2], "the event's full round after that: the disk files");
+        assert_eq!(ledger.round(at(2), false, None, &hot, &virt), [0], "no native events: the hot set's disk files");
+        assert_eq!(ledger.round(at(3), false, None, &hot, &virt), [0, 1, 3], "no native events, the ledger moved: and every virtual file");
+        assert_eq!(ledger.round(at(3), false, Some(vec![3]), &hot, &virt), [3], "a virtual file the watch named (an in-app edit leaves the ledger)");
+    }
+}
+
+#[cfg(test)]
+mod patched_tests {
+    /// A program that keeps up hears each patch's files and the items whose bodies it changed;
+    /// one that fell behind hears everything since it last asked; a patch that changed more than
+    /// bodies changed every item for a program that has not seen it.
+    #[test]
+    fn a_program_hears_the_items_each_patch_changed() {
+        let v = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        let mut p = super::Patched::new();
+        p.land(v(&["a.rs"]).into_iter(), Some(v(&["handle_event"])));
+        assert_eq!(p.since(0), "1 0\na.rs\n\thandle_event\n");
+        p.land(v(&["a.rs", "b.rs"]).into_iter(), Some(v(&["script_mod"])));
+        assert_eq!(p.since(1), "2 0\na.rs\nb.rs\n\tscript_mod\n");
+        assert_eq!(p.since(0), "2 0\na.rs\nb.rs\n\thandle_event\n\tscript_mod\n");
+        p.land(v(&["b.rs"]).into_iter(), None);
+        assert_eq!(p.since(2), "3 1\nb.rs\n");
+        assert_eq!(p.since(3), "3 0\n");
+    }
+}
+
+#[cfg(all(test, unix))]
+mod commit_tests {
+    use crate::value_tests::vfs_store;
+
+    /// An overlay edit devhub's ship-done committed (its file, then the ledger renamed) is taken
+    /// at one look; a file written after the ledger (an app's own write, or the next ship's
+    /// before its ledger) still settles first.
+    #[test]
+    fn an_overlay_edit_is_whole_once_the_ledger_after_it_moved() {
+        isolated_test!(an_overlay_edit_is_whole_once_the_ledger_after_it_moved);
+        let fixture = vfs_store::Fixture::new(&[("app/a.rs", b"a"), ("app/b.rs", b"b")]);
+        let root = "/relax-live-commit/vfs/m";
+        crate::vfs::mount(root, fixture.store.clone(), &fixture.commit).unwrap();
+        let edits = std::env::temp_dir().join(format!("relax-live-commit-{}", std::process::id()));
+        std::fs::create_dir_all(edits.join("app")).unwrap();
+        crate::vfs::set_edits(Some(edits.clone()));
+        let (a, b) = (format!("{root}/app/a.rs"), format!("{root}/app/b.rs"));
+        let put = |rel: &str, text: &str| {
+            let tmp = edits.join(format!("{rel}.part"));
+            std::fs::write(&tmp, text).unwrap();
+            std::fs::rename(&tmp, edits.join(rel)).unwrap();
+        };
+        // ctimes are the clock's coarse ticks: a write meant to come later waits one out
+        let tick = || std::thread::sleep(std::time::Duration::from_millis(20));
+        put("app/a.rs", "a2");
+        put(".makepad-run-edits", "app/a.rs\tnew\n");
+        let whole = |paths: &[&str]| super::committed_by_ledger(paths.iter().copied());
+        assert!(whole(&[a.as_str()]), "a shipped edit is whole once its ledger moved");
+        tick();
+        put("app/b.rs", "b2");
+        assert!(!whole(&[a.as_str(), b.as_str()]), "a file written after the ledger settles first");
+        tick();
+        put(".makepad-run-edits", "app/a.rs\tnew\napp/b.rs\tnew\n");
+        assert!(whole(&[a.as_str(), b.as_str()]), "its own ledger commits it");
+        assert!(!whole(&[a.as_str(), "/tmp/not-in-a-store.rs"]), "a disk file settles as any save does");
+        assert!(!whole(&[]), "nothing changed is nothing committed");
+        crate::vfs::set_edits(None);
+        let _ = std::fs::remove_dir_all(&edits);
+    }
+
+    /// An overlay edit seen between its file's rename and its ledger's goes on when the watch
+    /// hears the ledger, not a quiet window later: the settle waits on the live watch.
+    #[test]
+    fn the_watch_wakes_at_the_ledger_that_commits_an_overlay_edit() {
+        isolated_test!(the_watch_wakes_at_the_ledger_that_commits_an_overlay_edit);
+        let fixture = vfs_store::Fixture::new(&[("app/a.rs", b"a")]);
+        let root = "/relax-live-wake/vfs/m";
+        crate::vfs::mount(root, fixture.store.clone(), &fixture.commit).unwrap();
+        let edits = std::env::temp_dir().join(format!("relax-live-wake-{}", std::process::id()));
+        std::fs::create_dir_all(edits.join("app")).unwrap();
+        crate::vfs::set_edits(Some(edits.clone()));
+        let a = format!("{root}/app/a.rs");
+        let put = |rel: &str, text: &str| {
+            let tmp = edits.join(format!("{rel}.part"));
+            std::fs::write(&tmp, text).unwrap();
+            std::fs::rename(&tmp, edits.join(rel)).unwrap();
+        };
+        let tick = || std::thread::sleep(std::time::Duration::from_millis(20));
+        put(".makepad-run-edits", "");
+        let mut watch = super::LiveWatch::new(std::iter::once(a.as_str())).expect("a native watch");
+        tick();
+        put("app/a.rs", "a2");
+        let whole = || super::committed_by_ledger(std::iter::once(a.as_str()));
+        assert!(!whole(), "its ledger has not moved yet");
+        let start = std::time::Instant::now();
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                tick();
+                put(".makepad-run-edits", "app/a.rs\tnew\n");
+            });
+            // the file's own event may come first: each wakeup looks again
+            while !whole() {
+                watch.wait(Some(std::time::Duration::from_secs(30)));
+                let _ = watch.changed();
+            }
+        });
+        assert!(start.elapsed() < std::time::Duration::from_secs(2), "woken by the ledger's rename, not a timeout ({:?})", start.elapsed());
+        crate::vfs::set_edits(None);
+        let _ = std::fs::remove_dir_all(&edits);
     }
 }

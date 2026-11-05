@@ -132,7 +132,7 @@ mod imp {
     }
 
     #[repr(C)]
-    struct SigAction {
+    pub(crate) struct SigAction {
         handler: usize,
         mask: [u64; 16],
         flags: i32,
@@ -194,15 +194,15 @@ mod imp {
     /// `this_thread_done`.
     pub fn this_thread() -> u64 {
         unsafe {
-            let stack = super::guarded_altstack(1 << 16);
-            let ss = StackT { sp: stack as *mut u8, flags: 0, pad: 0, size: 1 << 16 };
+            let stack = super::guarded_altstack();
+            let ss = StackT { sp: stack as *mut u8, flags: 0, pad: 0, size: super::ALTSTACK };
             sigaltstack(&ss, std::ptr::null_mut());
             stack
         }
     }
 
-    /// The calling thread ends: its fault stack `sp` (this_thread's) is switched off and freed,
-    /// unless something else replaced it since.
+    /// The calling thread ends: its fault stack `sp` (this_thread's) is switched off and given
+    /// back (`free_altstack`), unless something else replaced it since.
     pub fn this_thread_done(sp: u64) {
         const SS_DISABLE: i32 = 2;
         unsafe {
@@ -212,7 +212,7 @@ mod imp {
             }
             let off = StackT { sp: std::ptr::null_mut(), flags: SS_DISABLE, pad: 0, size: 0 };
             if sigaltstack(&off, std::ptr::null_mut()) == 0 {
-                super::free_altstack(sp, old.size);
+                super::free_altstack(sp);
             }
         }
     }
@@ -316,7 +316,7 @@ mod imp {
     }
 
     #[repr(C)]
-    struct SigAction {
+    pub(crate) struct SigAction {
         flags: i32,
         pad: i32,
         handler: usize,
@@ -373,15 +373,15 @@ mod imp {
     /// `this_thread_done`.
     pub fn this_thread() -> u64 {
         unsafe {
-            let stack = super::guarded_altstack(1 << 16);
-            let ss = StackT { sp: stack as *mut u8, flags: 0, pad: 0, size: 1 << 16 };
+            let stack = super::guarded_altstack();
+            let ss = StackT { sp: stack as *mut u8, flags: 0, pad: 0, size: super::ALTSTACK };
             sigaltstack(&ss, std::ptr::null_mut());
             stack
         }
     }
 
-    /// The calling thread ends: its fault stack `sp` (this_thread's) is switched off and freed,
-    /// unless something else replaced it since.
+    /// The calling thread ends: its fault stack `sp` (this_thread's) is switched off and given
+    /// back (`free_altstack`), unless something else replaced it since.
     pub fn this_thread_done(sp: u64) {
         const SS_DISABLE: i32 = 2;
         unsafe {
@@ -391,7 +391,7 @@ mod imp {
             }
             let off = StackT { sp: std::ptr::null_mut(), flags: SS_DISABLE, pad: 0, size: 0 };
             if sigaltstack(&off, std::ptr::null_mut()) == 0 {
-                super::free_altstack(sp, old.size);
+                super::free_altstack(sp);
             }
         }
     }
@@ -501,7 +501,7 @@ mod imp {
 
     /// Darwin `struct sigaction` (user side): handler, sa_mask (u32), sa_flags.
     #[repr(C)]
-    struct SigAction {
+    pub(crate) struct SigAction {
         handler: usize,
         mask: u32,
         flags: i32,
@@ -661,16 +661,15 @@ mod imp {
     /// `this_thread_done`.
     pub fn this_thread() -> u64 {
         unsafe {
-            let size = 1 << 16;
-            let stack = super::guarded_altstack(size);
-            let ss = StackT { sp: stack as *mut u8, size, flags: 0 };
+            let stack = super::guarded_altstack();
+            let ss = StackT { sp: stack as *mut u8, size: super::ALTSTACK, flags: 0 };
             sigaltstack(&ss, std::ptr::null_mut());
             stack
         }
     }
 
-    /// The calling thread ends: its fault stack `sp` (this_thread's) is switched off and freed,
-    /// unless something else replaced it since.
+    /// The calling thread ends: its fault stack `sp` (this_thread's) is switched off and given
+    /// back (`free_altstack`), unless something else replaced it since.
     pub fn this_thread_done(sp: u64) {
         const SS_DISABLE: i32 = 4;
         unsafe {
@@ -680,7 +679,7 @@ mod imp {
             }
             let off = StackT { sp: std::ptr::null_mut(), size: 0, flags: SS_DISABLE };
             if sigaltstack(&off, std::ptr::null_mut()) == 0 {
-                super::free_altstack(sp, old.size);
+                super::free_altstack(sp);
             }
         }
     }
@@ -790,7 +789,9 @@ mod imp {
         if trace() {
             trace_fault(rec.code, pc, chained);
         }
-        if chained && !crate::jit::in_jit_code(pc) {
+        // (the code of a run that ended and a thread of an ending run are this runtime's whatever
+        // unit is current: the normal search cannot walk their frames)
+        if chained && !crate::jit::in_jit_code(pc) && !crate::stale::in_ended_run(pc) && !crate::domain::current_is_ending() {
             return EXCEPTION_CONTINUE_SEARCH;
         }
         // the data address of an access violation / in-page error (ExceptionInformation[1]);
@@ -844,8 +845,17 @@ mod imp {
         unsafe { handle(ep, true) }
     }
 
+    /// The end of every search, on a thread's own stack and on a program stack (its last frame):
+    /// what the runtime does not resume ends the process here, with its code. The system's way on
+    /// is an error report, and with no one to answer it (no desktop, a dialog) the process stays.
     extern "system" fn unhandled(ep: *mut ExceptionPointers) -> i32 {
-        unsafe { handle(ep, false) }
+        unsafe {
+            let r = handle(ep, false);
+            if r != EXCEPTION_CONTINUE_EXECUTION {
+                TerminateProcess(GetCurrentProcess(), (*(*ep).record).code);
+            }
+            r
+        }
     }
 
     /// The stack-overflow handler runs in the thread's guaranteed stack area (64 KB).
@@ -870,6 +880,20 @@ mod imp {
     pub fn reassert() {}
 
     /// Suspends thread `t` and reads its context. MAKEPAD_RUN_COMPILE_WATCH: prints where it is. Hang
+    /// A run's end (domain.rs end_run): no signal ends a wait here. A synchronous I/O call is
+    /// cancelled, and the program's waits end by themselves (domain_threads.rs `waits`). Back in JIT
+    /// code the thread faults and ends as on unix.
+    pub fn end_interrupt(t: u64, waiting: usize) {
+        crate::domain_threads::waits::wake(waiting);
+        unsafe {
+            let h = OpenThread(THREAD_TERMINATE, 0, t as u32);
+            if h != 0 {
+                CancelSynchronousIo(h);
+                CloseHandle(h);
+            }
+        }
+    }
+
     /// watchdog: a thread running JIT code continues in jit::HANG_TRAMP as if the interrupted pc
     /// had called it (the return address pushed on its stack); there, on the thread itself, the
     /// policy decides as a watchdog signal's handler does.
@@ -906,23 +930,35 @@ mod imp {
 #[cfg(not(target_os = "android"))]
 pub fn watchdog_signal() -> i32 { SIG_WATCHDOG }
 
-/// Fault stack memory: `size` bytes above one PROT_NONE guard page, so a handler that overflows
-/// its alternate stack faults on the guard (the process dies) instead of writing into whatever
-/// mapping lies below it.
+/// Fault stack memory: ALTSTACK bytes above one PROT_NONE guard page, so a handler that
+/// overflows its alternate stack faults on the guard (the process dies) instead of writing into
+/// whatever mapping lies below it. One a finished thread left (`free_altstack`), else a new one.
 #[cfg(unix)]
-fn guarded_altstack(size: usize) -> u64 {
-    let base = crate::os::mem::alloc_rw(size + ALTSTACK_GUARD);
+fn guarded_altstack() -> u64 {
+    if let Some(sp) = SPARE_ALTSTACKS.take() {
+        return sp;
+    }
+    let base = crate::os::mem::alloc_rw(ALTSTACK + ALTSTACK_GUARD);
     crate::os::mem::guard_page(base, ALTSTACK_GUARD);
     base + ALTSTACK_GUARD as u64
 }
 
 #[cfg(unix)]
+const ALTSTACK: usize = 1 << 16;
+#[cfg(unix)]
 const ALTSTACK_GUARD: usize = 16 << 10;
 
-/// Gives back what `guarded_altstack` made (`sp` above its guard, `size` bytes).
+/// Fault stacks no thread uses, for the next thread's `guarded_altstack`.
 #[cfg(unix)]
-fn free_altstack(sp: u64, size: usize) {
-    crate::os::mem::free(sp - ALTSTACK_GUARD as u64, size + ALTSTACK_GUARD);
+static SPARE_ALTSTACKS: crate::stack::Spares<u64> = crate::stack::Spares::new();
+
+/// A thread is done with what `guarded_altstack` made (`sp` above its guard): it is kept for the
+/// next thread, or unmapped when enough are kept.
+#[cfg(unix)]
+fn free_altstack(sp: u64) {
+    if let Some(sp) = SPARE_ALTSTACKS.keep(sp) {
+        crate::os::mem::free(sp - ALTSTACK_GUARD as u64, ALTSTACK + ALTSTACK_GUARD);
+    }
 }
 
 /// The calling thread's stack bounds (0, 0: unknown). Recorded in normal context;

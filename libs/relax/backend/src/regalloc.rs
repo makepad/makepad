@@ -125,6 +125,13 @@ pub struct Alloc {
     /// (instruction position, vreg) definitions of a spilled value whose store home nobody reads
     /// (dead_spill_stores): the result only goes to the region window's register
     pub store_skip: std::collections::HashSet<(u32, u32)>,
+    /// position -> (vreg, register) stores of a region's register into the value's home: at a
+    /// block's start (block_start) before anything else -- every predecessor holds the value in
+    /// that register -- or at a region block's terminator (block_end - 1) before its jump. The
+    /// value's definitions in the region skip their store (store_skip): it goes home on the way
+    /// out, where the slot is read after the region (dead_spill_stores). Such a block is never
+    /// skipped
+    pub exit_stores: HashMap<u32, Vec<(u32, u8)>>,
 }
 
 /// A value the backend recomputes at each use instead of keeping it (see Alloc::remat).
@@ -238,7 +245,7 @@ pub fn uses_defs(i: &Inst, uses: &mut Vec<VReg>, defs: &mut Vec<VReg>) {
             uses.push(*a);
             defs.push(*d);
         }
-        Inst::VX3(_, d, m, a, b) | Inst::VSel(d, m, a, b) | Inst::VFma(_, _, d, m, a, b) => {
+        Inst::VX3(_, d, m, a, b) | Inst::VSel(d, m, a, b) | Inst::VFma(_, _, _, _, d, m, a, b) => {
             uses.push(*m);
             uses.push(*a);
             uses.push(*b);
@@ -344,7 +351,7 @@ pub fn for_uses(i: &Inst, mut uses: impl FnMut(VReg)) {
         Inst::VSplat(d, a) | Inst::VExtract(d, a, _) | Inst::VLoad(d, a, _) | Inst::VAny(d, a) => {
             uses(*a);
         }
-        Inst::VX3(_, d, m, a, b) | Inst::VSel(d, m, a, b) | Inst::VFma(_, _, d, m, a, b) => {
+        Inst::VX3(_, d, m, a, b) | Inst::VSel(d, m, a, b) | Inst::VFma(_, _, _, _, d, m, a, b) => {
             uses(*m);
             uses(*a);
             uses(*b);
@@ -428,7 +435,7 @@ pub fn for_defs(i: &Inst, mut defs: impl FnMut(VReg)) {
         | Inst::VLoad(d, _, _)
         | Inst::VAny(d, _)
         | Inst::VSel(d, _, _, _)
-        | Inst::VFma(_, _, d, _, _, _)
+        | Inst::VFma(_, _, _, _, d, _, _, _)
         | Inst::VInsert(d, _, _, _)
         | Inst::Sel(d, _, _, _)
         | Inst::FMulAdd(_, _, _, d, _, _, _)
@@ -1070,7 +1077,7 @@ fn allocate_low(options: &relax_session::Options, f: &Func, cfg: &RegConfig, tho
         }
         // recomputing costs about what a reload does, without the store: half the weight (times the
         // instructions a recomputation takes: an arm64 64-bit constant is up to four)
-        weight[v as usize] = prio(options, r, l) * if remat[v as usize].is_some() { 0.5 * (cfg.remat_cost)(&remat[v as usize]) as f32 } else { 1.0 };
+        weight[v as usize] = prio(r, l) * if remat[v as usize].is_some() { 0.5 * (cfg.remat_cost)(&remat[v as usize]) as f32 } else { 1.0 };
         if low.map_or(false, |lw| lw.get(v as usize).copied().unwrap_or(false)) {
             weight[v as usize] *= 1e-6;
         }
@@ -1259,7 +1266,7 @@ fn allocate_low(options: &relax_session::Options, f: &Func, cfg: &RegConfig, tho
                 let mut parts: Vec<u32> = m.clone();
                 parts.push(v);
                 dissolved[v as usize].set(true);
-                parts.sort_by(|a, b| prio(options, refs[*b as usize], lens[*b as usize]).partial_cmp(&prio(options, refs[*a as usize], lens[*a as usize])).unwrap_or(std::cmp::Ordering::Equal));
+                parts.sort_by(|a, b| prio(refs[*b as usize], lens[*b as usize]).partial_cmp(&prio(refs[*a as usize], lens[*a as usize])).unwrap_or(std::cmp::Ordering::Equal));
                 let parts: Vec<u32> = parts.into_iter().filter(|u| !ranges.of(*u).is_empty()).collect();
                 order.splice(oi..oi, parts);
                 continue;
@@ -1472,11 +1479,13 @@ fn allocate_low(options: &relax_session::Options, f: &Func, cfg: &RegConfig, tho
     let mut chained: Vec<(u32, u32, u32, u8)> = Vec::new();
     let mut region_windows: Vec<(u32, u32, u32, u8)> = Vec::new();
     let mut in_region: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
+    // the register of each value's region
+    let mut region_reg: HashMap<u32, u8> = HashMap::new();
     if thorough && windows_on(options) && !crate::stats::opt_off(options, "-regionwin") {
         // MAKEPAD_RUN_OPT=-defregion: regions leave out blocks that redefine the value;
         // -edgeload: entry loads stay at the region block's start
         let (dr, el) = (!crate::stats::opt_off(options, "-defregion"), !crate::stats::opt_off(options, "-edgeload"));
-        region_windows_alloc(f, &reach, &tab, &block_start, &block_end, &ranges, &wts, &loc, &remat, &call_pos, cfg, &used_callee_int, &mut occ, pos_words, &mut region_windows, &mut chained, &mut in_region, dr, el);
+        region_windows_alloc(f, &reach, &tab, &block_start, &block_end, &ranges, &wts, &loc, &remat, &call_pos, cfg, &used_callee_int, &mut occ, pos_words, &mut region_windows, &mut chained, &mut in_region, &mut region_reg, dr, el);
     }
     // spill windows (O3): a spilled int value's runs of >= 2 uses inside a block take a
     // register free over the run in the final occupancy -- one load instead of one per use.
@@ -1698,17 +1707,19 @@ fn allocate_low(options: &relax_session::Options, f: &Func, cfg: &RegConfig, tho
     // values' stores are checked
     let defstore = !crate::stats::opt_off(options, "-defstore");
     windows.extend(region_windows);
-    let store_skip = if thorough && windows_on(options) && (!in_region.is_empty() || (defstore && !def_wins.is_empty())) && !crate::stats::opt_off(options, "-storeskip") {
-        dead_spill_stores(f, &reach, &tab, &block_start, &block_end, &loc, &in_region, &windows, if defstore { &def_wins } else { &[] }, &use_count, cfg.defers)
+    // MAKEPAD_RUN_OPT=-exitstore: region values' stores stay at their definitions
+    let (store_skip, exit_stores) = if thorough && windows_on(options) && (!in_region.is_empty() || (defstore && !def_wins.is_empty())) && !crate::stats::opt_off(options, "-storeskip") {
+        let sink = (!crate::stats::opt_off(options, "-exitstore")).then_some(SinkStores { ranges: &ranges, region_reg: &region_reg, wts: &wts });
+        dead_spill_stores(f, &reach, &tab, &block_start, &block_end, &loc, &in_region, &windows, &chained, if defstore { &def_wins } else { &[] }, &use_count, cfg.defers, sink)
     } else {
         Default::default()
     };
     chained.extend(def_wins);
     asm_callee_writes(f, cfg, &mut used_callee_int, &mut used_callee_flt);
     if trace_on(f) {
-        eprintln!("ra-windows {}: {} windows, {} def windows/chained, {} dead stores", f.name, windows.len(), chained.len(), store_skip.len());
+        eprintln!("ra-windows {}: {} windows, {} def windows/chained, {} dead stores, {} exit stores", f.name, windows.len(), chained.len(), store_skip.len(), exit_stores.values().map(|x| x.len()).sum::<usize>());
     }
-    Alloc { loc, used_callee_int, used_callee_flt, spill_bytes, block_start, block_end, saves, start, end, uses: use_count, remat, windows, chained, save_skip, restore_skip, store_skip }
+    Alloc { loc, used_callee_int, used_callee_flt, spill_bytes, block_start, block_end, saves, start, end, uses: use_count, remat, windows, chained, save_skip, restore_skip, store_skip, exit_stores }
 }
 
 /// MAKEPAD_RUN_RA_TRACE=<fn name suffix>: the allocation as the emitter reads it (locations,
@@ -1738,6 +1749,13 @@ pub fn trace_alloc(f: &Func, al: &Alloc) {
     }
     for (p, v) in &al.store_skip {
         o.push_str(&format!("  store_skip @{} v{}\n", p, v));
+    }
+    let mut ex: Vec<_> = al.exit_stores.iter().collect();
+    ex.sort_by_key(|x| *x.0);
+    for (p, st) in ex {
+        for (v, r) in st {
+            o.push_str(&format!("  exit_store @{} v{} r{}\n", p, v, r));
+        }
     }
     o.push_str(&format!("  blocks {:?}\n", al.block_start));
     eprint!("{}", o);
@@ -1773,7 +1791,8 @@ pub fn check_or_fail(options: &relax_session::Options, f: &Func, cfg: &RegConfig
 ///   (save_skip: the slot is left as it is) and its restores -- after its results are in place,
 ///   as the emitter orders them -- copy the slot back (restore_skip: the register stays empty);
 /// - a window's start loads its register from the home slot (a recomputed value: the value
-///   itself), chained windows load nothing;
+///   itself), chained windows load nothing; an exit store (Alloc::exit_stores) copies the
+///   region's register into the home slot at its block's start;
 /// - every read must find its value where the emitter reads it: its register, the window or the
 ///   copy_reuse register serving the read, or else its home slot; a store into a slot (a save)
 ///   must find the value in the register it stores.
@@ -1979,8 +1998,25 @@ pub fn check_alloc(options: &relax_session::Options, f: &Func, cfg: &RegConfig, 
                 }
             }
         };
+        // exit stores: the region's register -> the home slot, at the block's start (before
+        // anything else) and before its terminator
+        let exit_store = |st: &mut St, reported: &mut std::collections::HashSet<(u32, u32)>, out: &mut Vec<String>, dd: &[u64], p: u32| {
+            for &(v, r) in al.exit_stores.get(&p).into_iter().flatten() {
+                let Loc::Stack(o) = al.loc[v as usize] else { continue };
+                let ri = r as usize;
+                if !st.reg[ri].contains(&v) && dd[v as usize / 64] & (1 << (v % 64)) != 0 && reported.insert((p, v)) {
+                    out.push(format!("ra-check {}: exit store of v{} at {} (b{}) stores {} holding {:?}", f.name, v, p, bi, name(ri), st.reg[ri]));
+                }
+                let held = st.reg[ri].clone();
+                st.slot.insert(o, held);
+            }
+        };
+        exit_store(&mut st, &mut reported, &mut out, &dd, bs);
         for ii in 0..=n {
             let p = if ii < n { bs + 2 * ii as u32 + 1 } else { al.block_end[bi] - 1 };
+            if ii == n {
+                exit_store(&mut st, &mut reported, &mut out, &dd, p);
+            }
             // window loads: the home slot into the register (a recomputed value: itself)
             if let Some(ls) = win_load.get(&p) {
                 for &(v, ri) in ls {
@@ -2378,6 +2414,15 @@ fn redundant_saves(f: &Func, reach: &[bool], tab: &OpTab, block_start: &[u32], s
 /// loads before predecessors' terminators); the writes are the definitions. A loop counter dead
 /// after its loop (piano's `i += 2` in a 49-instruction body) then lives in its register only.
 /// Slots shared with float or vector values are left alone.
+///
+/// With `sink`: a region value whose slot is read only after the region (a hot loop's segment
+/// fields, their region register taken on the cold accept path) skips the stores of its
+/// definitions in the region and stores the register at the start of the blocks outside the region
+/// where the slot is read next (Alloc::exit_stores), when those run less often than the
+/// definitions. From each definition, forward over the region's blocks while the slot is stale: a
+/// read of the slot there (a call's operand, a region block's load) keeps the stores; leaving the
+/// region where the slot is read next needs a block whose predecessors all hold the value in the
+/// register (all in the region, the value live into it).
 fn dead_spill_stores(
     f: &Func,
     reach: &[bool],
@@ -2387,11 +2432,14 @@ fn dead_spill_stores(
     loc: &[Loc],
     in_region: &std::collections::HashSet<(u32, u32)>,
     loads: &[(u32, u32, u32, u8)],
+    held: &[(u32, u32, u32, u8)],
     def_wins: &[(u32, u32, u32, u8)],
     uses: &[u32],
     defers: fn(&Block, usize, &[u32]) -> bool,
-) -> std::collections::HashSet<(u32, u32)> {
+    sink: Option<SinkStores<'_>>,
+) -> (std::collections::HashSet<(u32, u32)>, HashMap<u32, Vec<(u32, u8)>>) {
     let mut out = std::collections::HashSet::new();
+    let mut exits: HashMap<u32, Vec<(u32, u8)>> = HashMap::new();
     let nv = f.vregs.len();
     let nb = f.blocks.len();
     // the slots of region values and def-window values, and whether any non-integer value or
@@ -2405,7 +2453,7 @@ fn dead_spill_stores(
         }
     }
     if slots.is_empty() {
-        return out;
+        return (out, exits);
     }
     slots.sort_unstable();
     for v in 0..nv {
@@ -2418,7 +2466,7 @@ fn dead_spill_stores(
         }
     }
     if slots.is_empty() {
-        return out;
+        return (out, exits);
     }
     let slot_ix = |v: u32| -> Option<usize> {
         match loc[v as usize] {
@@ -2427,10 +2475,11 @@ fn dead_spill_stores(
         }
     };
     let ns = slots.len();
-    // uses inside a window (spill windows, def windows) read its register, not the slot; a window
-    // that is not entered with the value loads it from the slot at its start (`loads`)
+    // uses inside a window (spill windows, def windows, region windows entered with the value:
+    // `held`) read its register, not the slot; a window that is not entered with the value loads
+    // it from the slot at its start (`loads`)
     let mut win_of: HashMap<u32, Vec<(u32, u32)>> = HashMap::new();
-    for &(v, a, z, _) in loads.iter().chain(def_wins) {
+    for &(v, a, z, _) in loads.iter().chain(held).chain(def_wins) {
         if slot_ix(v).is_some() {
             win_of.entry(v).or_default().push((a, z));
         }
@@ -2439,7 +2488,9 @@ fn dead_spill_stores(
     // per block, per slot: events in order (position, read?) -- a read sorts before a write at
     // the same position (an instruction reads its operands before its result goes home)
     let mut ev: Vec<Vec<(u32, bool, usize, u32)>> = vec![Vec::new(); nb];
-    let simple = |i: &Inst| matches!(i, Inst::IBin(..) | Inst::IBinI(..) | Inst::ICmp(..) | Inst::ICmpI(..) | Inst::Load(..) | Inst::Store(..) | Inst::LoadX(..) | Inst::StoreX(..) | Inst::Conv(..) | Inst::Mov(..));
+    // (a select reads its condition and integer operands through the windows too: x64 cmov_sel,
+    // arm64 csel)
+    let simple = |i: &Inst| matches!(i, Inst::IBin(..) | Inst::IBinI(..) | Inst::ICmp(..) | Inst::ICmpI(..) | Inst::Load(..) | Inst::Store(..) | Inst::LoadX(..) | Inst::StoreX(..) | Inst::Conv(..) | Inst::Mov(..) | Inst::Sel(..));
     // An instruction the emitter defers into the next one (RegConfig::defers) reads its operands at
     // the next instruction's position -- from a window only if that window still holds them there,
     // else from the slot -- and its own result is never written (no write event: it kills no earlier
@@ -2539,7 +2590,156 @@ fn dead_spill_stores(
             }
         }
     }
-    out
+    let Some(sk) = sink else { return (out, exits) };
+    let slot_live = |b: usize, si: usize| live_in[b * words + si / 64] & (1u64 << (si % 64)) != 0;
+    let preds = preds_of(f, reach);
+    let mut region_of: HashMap<u32, Vec<u32>> = HashMap::new();
+    for &(v, b) in in_region {
+        region_of.entry(v).or_default().push(b);
+    }
+    // (value, block) whose window loads the value at the block's start
+    let mut loads_at: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
+    for &(v, a, _, _) in loads {
+        let b = block_of(a);
+        if a == block_start[b] + 1 {
+            loads_at.insert((v, b as u32));
+        }
+    }
+    let mut vals: Vec<u32> = region_of.keys().copied().collect();
+    vals.sort_unstable();
+    let mut seen = vec![false; nb];
+    for v in vals {
+        let (Some(&c), Some(si)) = (sk.region_reg.get(&v), slot_ix(v)) else { continue };
+        let blocks = region_of.get_mut(&v).unwrap();
+        blocks.sort_unstable();
+        let blocks = &*blocks;
+        let inr = |b: u32| blocks.binary_search(&b).is_ok();
+        let rv = sk.ranges.of(v);
+        let live_at = |p: u32| rv.iter().any(|&(a, z)| a <= p && p <= z);
+        // v's definitions in its region (each leaves the value in the register): (block, the
+        // write's position); a deferred one is left alone
+        let mut defs: Vec<(u32, u32)> = Vec::new();
+        let mut soft_def = false;
+        for &b in blocks {
+            for &(p, rd, s2, u) in &ev[b as usize] {
+                if !rd && s2 == si && u == v {
+                    soft_def |= soft.contains(&(p, v));
+                    defs.push((b, p));
+                }
+            }
+        }
+        if defs.is_empty() || soft_def {
+            continue;
+        }
+        // forward from the definitions while the slot is stale: (block, from position on). At a
+        // block's end each successor where the slot is read next (the value live into it) is
+        // entered stale (a region block that loads nothing), or stored at its start (outside the
+        // region, every predecessor in it), or else this block stores before its terminator
+        // (fresh for every successor)
+        seen.iter_mut().for_each(|x| *x = false);
+        let mut work: Vec<(u32, u32)> = defs.iter().map(|&(b, p)| (b, p + 1)).collect();
+        // stores at positions: block starts / terminators
+        let mut stores: Vec<(u32, u32)> = Vec::new();
+        // why the stores stay: (block, position of a read of the slot, or u32::MAX and the
+        // successor the value leaves to)
+        let mut kept: Option<(u32, u32, u32)> = None;
+        'walk: while let Some((b, from)) = work.pop() {
+            let bu = b as usize;
+            for &(p, rd, s2, u) in &ev[bu] {
+                if s2 != si || p < from {
+                    continue;
+                }
+                if rd {
+                    kept = Some((b, p, u));
+                    break 'walk;
+                }
+                // v's own definitions here write nothing either; another value's write ends it
+                if u != v && !soft.contains(&(p, u)) {
+                    continue 'walk;
+                }
+            }
+            let (mut into, mut starts, mut at_end) = (Vec::new(), Vec::new(), false);
+            for t in f.blocks[bu].term.succs() {
+                let tu = t as usize;
+                if !reach[tu] || !slot_live(tu, si) {
+                    continue;
+                }
+                if !live_at(block_start[tu]) {
+                    kept = Some((b, u32::MAX, t));
+                    break 'walk;
+                }
+                if inr(t) && !loads_at.contains(&(v, t)) {
+                    into.push(t);
+                } else if !inr(t) && preds[tu].iter().all(|&q| inr(q) && !matches!(f.blocks[q as usize].term, Term::Invoke(..))) {
+                    starts.push(t);
+                } else {
+                    at_end = true;
+                }
+            }
+            if at_end {
+                if !matches!(f.blocks[bu].term, Term::Jump(_) | Term::Branch(..) | Term::Switch(..)) {
+                    kept = Some((b, u32::MAX, u32::MAX));
+                    break 'walk;
+                }
+                let p = block_end[bu] - 1;
+                if !stores.contains(&(p, b)) {
+                    stores.push((p, b));
+                }
+                continue;
+            }
+            for t in starts {
+                let p = block_start[t as usize];
+                if !stores.contains(&(p, t)) {
+                    stores.push((p, t));
+                }
+            }
+            for t in into {
+                let tu = t as usize;
+                if !seen[tu] {
+                    seen[tu] = true;
+                    work.push((t, block_start[tu]));
+                }
+            }
+        }
+        if let Some((b, p, x)) = kept {
+            if trace_on(f) {
+                if p == u32::MAX {
+                    if x == u32::MAX {
+                        eprintln!("ra-exit {} v{}: stores kept, b{} would store before a terminator that cannot", f.name, v, b);
+                    } else {
+                        eprintln!("ra-exit {} v{}: stores kept, leaves b{} to b{} where the slot is read next", f.name, v, b, x);
+                    }
+                } else {
+                    eprintln!("ra-exit {} v{}: stores kept, the slot is read in b{} at {} (v{})", f.name, v, b, p, x);
+                }
+            }
+            continue;
+        }
+        let new: Vec<(u32, u32)> = defs.iter().filter(|&&(_, p)| !out.contains(&(p - 1, v))).copied().collect();
+        let before: f32 = new.iter().map(|&(b, _)| sk.wts[b as usize]).sum();
+        let after: f32 = stores.iter().map(|&(_, b)| sk.wts[b as usize]).sum();
+        if trace_on(f) {
+            let ts: Vec<String> = stores.iter().map(|&(p, b)| format!("b{}{}", b, if p == block_start[b as usize] { "" } else { "E" })).collect();
+            eprintln!("ra-exit {} v{} r{}: {} definitions weigh {:.0}, exit stores at {} weigh {:.0}", f.name, v, c, new.len(), before, ts.join(" "), after);
+        }
+        if new.is_empty() || after >= before {
+            continue;
+        }
+        for (_, p) in new {
+            out.insert((p - 1, v));
+        }
+        for (p, _) in stores {
+            exits.entry(p).or_default().push((v, c));
+        }
+    }
+    (out, exits)
+}
+
+/// What dead_spill_stores needs to move region values' stores to the region's exits.
+struct SinkStores<'a> {
+    ranges: &'a Ranges,
+    region_reg: &'a HashMap<u32, u8>,
+    wts: &'a [f32],
 }
 
 fn region_windows_alloc(
@@ -2560,6 +2760,7 @@ fn region_windows_alloc(
     loading: &mut Vec<(u32, u32, u32, u8)>,
     chained: &mut Vec<(u32, u32, u32, u8)>,
     in_region: &mut std::collections::HashSet<(u32, u32)>,
+    region_reg: &mut HashMap<u32, u8>,
     def_regions: bool,
     edge_loads: bool,
 ) {
@@ -2608,12 +2809,16 @@ fn region_windows_alloc(
             }
         }
     }
-    // blocks the emitters may skip (only moves, then a jump: x64 / arm64 jump threading sends
-    // their predecessors straight on) or that start no code are never in a region
+    // blocks the emitters may skip (only moves, then a jump: x64 jump threading sends their
+    // predecessors straight on) or that start no code never load at their start: they are in a
+    // region only where every predecessor holds the value or loads it at its end (a hot loop's
+    // move-only latch left out broke the region at the header: one load per iteration)
     let skippable: Vec<bool> = f.blocks.iter().map(|b| b.insts.is_empty() || (matches!(b.term, Term::Jump(_)) && b.insts.iter().all(|i| matches!(i, Inst::Mov(..))))).collect();
     let preds = preds_of(f, reach);
     // a predecessor ending in an invoke reaches its successors (the landing pad) after a call
     let invoke_pred: Vec<bool> = (0..nb).map(|b| preds[b].iter().any(|&p| matches!(f.blocks[p as usize].term, Term::Invoke(..)))).collect();
+    // loop depths, uncapped (edge_preds: a loop's exits)
+    let depth = if edge_loads { loop_depths(f, reach) } else { Vec::new() };
     let regs: Vec<u8> = cfg.int_caller.iter().chain(used_callee_int.iter()).copied().collect();
     let min_blocks = if edge_loads { 1 } else { 2 };
     let mut order: Vec<u32> = (0..nv as u32).filter(|v| cand[*v as usize] && uses_in.get(v).map_or(false, |m| m.len() >= min_blocks)).collect();
@@ -2653,7 +2858,6 @@ fn region_windows_alloc(
             .iter()
             .filter(|(b, ps)| {
                 reach[*b as usize]
-                    && !skippable[*b as usize]
                     && match def_in.get(&(v, *b)) {
                         None => live_in(*b, ps),
                         Some(ok) => *ok,
@@ -2695,7 +2899,10 @@ fn region_windows_alloc(
             // the join of a cold path. The register must be free from the predecessor's last two
             // instructions on (fused compares and loads are emitted with the terminator and read
             // operands whose ranges ended there) to its end (whatever it holds into another
-            // successor is live out). None: b loads at its start.
+            // successor is live out). A predecessor in a loop b is not in (deeper: b is its exit)
+            // runs every iteration, whatever the weights say: past the depth cap they tie, and
+            // estimated frequencies put a loop's latch below its exit (a nested search loop loaded
+            // five outer values per iteration). None: b loads at its start.
             let edge_preds = |b: u32, inset: &dyn Fn(u32) -> bool| -> Option<Vec<u32>> {
                 let bu = b as usize;
                 if !edge_loads || invoke_pred[bu] || preds[bu].is_empty() {
@@ -2709,7 +2916,7 @@ fn region_windows_alloc(
                     let pu = p as usize;
                     let from = block_end[pu].saturating_sub(5).max(block_start[pu]);
                     let term_ok = matches!(f.blocks[pu].term, Term::Jump(_) | Term::Branch(..) | Term::Switch(..));
-                    if p == b || !reach[pu] || !term_ok || (!o.is_empty() && bits_any(o, from, block_end[pu])) {
+                    if p == b || !reach[pu] || !term_ok || depth[pu] > depth[bu] || (!o.is_empty() && bits_any(o, from, block_end[pu])) {
                         return None;
                     }
                     at_end.push(p);
@@ -2720,12 +2927,12 @@ fn region_windows_alloc(
                 Some(at_end)
             };
             // drop blocks that only load for nothing (no use, no definition, and a load of their
-            // own needed) until stable. Dropping a block only makes its successors' loads more
-            // needed (more predecessors outside), so a worklist over the successors of dropped
-            // blocks reaches the same fixpoint (a round-by-round rescan cascaded one block per
-            // round along chains)
+            // own needed), and skippable blocks that would load at their start, until stable.
+            // Dropping a block only makes its successors' loads more needed (more predecessors
+            // outside), so a worklist over the successors of dropped blocks reaches the same
+            // fixpoint (a round-by-round rescan cascaded one block per round along chains)
             {
-                let idle = |b: u32| !used.contains_key(&b) && !def_in.contains_key(&(v, b));
+                let idle = |b: u32| skippable[b as usize] || (!used.contains_key(&b) && !def_in.contains_key(&(v, b)));
                 let mut inset_h: std::collections::HashSet<u32> = set.iter().copied().collect();
                 let mut queue: Vec<u32> = set.iter().copied().filter(|b| idle(*b)).collect();
                 while let Some(b) = queue.pop() {
@@ -2790,6 +2997,7 @@ fn region_windows_alloc(
             let es: Vec<String> = edge.iter().map(|b| format!("b{}", b)).collect();
             eprintln!("ra-region {} v{} r{} gain {:.0}: {} | end-loads {}", f.name, v, c, gain, bs.join(" "), es.join(" "));
         }
+        region_reg.insert(v, c);
         let o = &mut occ[c as usize];
         if o.is_empty() {
             o.resize(pos_words, 0);
@@ -3156,7 +3364,7 @@ fn allocate_baseline(options: &relax_session::Options, f: &Func, cfg: &RegConfig
         }
     }
     asm_callee_writes(f, cfg, &mut used_callee_int, &mut used_callee_flt);
-    Alloc { loc, used_callee_int, used_callee_flt, spill_bytes, block_start, block_end, saves, start, end, uses: use_count, remat, windows: Vec::new(), chained: Vec::new(), save_skip: Default::default(), restore_skip: Default::default(), store_skip: Default::default() }
+    Alloc { loc, used_callee_int, used_callee_flt, spill_bytes, block_start, block_end, saves, start, end, uses: use_count, remat, windows: Vec::new(), chained: Vec::new(), save_skip: Default::default(), restore_skip: Default::default(), store_skip: Default::default(), exit_stores: Default::default() }
 }
 
 /// Rematerialisable values: one definition by a constant-like instruction, not parameters.
@@ -3320,41 +3528,7 @@ fn block_weights(f: &Func, reach: &[bool], freq: Option<&[f32]>) -> Vec<f32> {
 /// Unreachable or Resume, and landing pads) ~0.
 fn static_weights(f: &Func, reach: &[bool], depth: &[u32]) -> Vec<f32> {
     let nb = f.blocks.len();
-    let mut cold = vec![false; nb];
-    for b in &f.blocks {
-        if let Term::Invoke(_, u) = b.term {
-            cold[u as usize] = true;
-        }
-    }
-    for (bi, b) in f.blocks.iter().enumerate() {
-        if matches!(b.term, Term::Unreachable | Term::Resume) {
-            cold[bi] = true;
-        }
-    }
-    // a block whose every successor is cold is cold (back to front until nothing changes)
-    loop {
-        let mut changed = false;
-        for bi in (0..nb).rev() {
-            if cold[bi] || !reach[bi] {
-                continue;
-            }
-            let mut n = 0;
-            let mut all = true;
-            for s in f.blocks[bi].term.succs() {
-                n += 1;
-                if !cold[s as usize] {
-                    all = false;
-                }
-            }
-            if n > 0 && all {
-                cold[bi] = true;
-                changed = true;
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
+    let cold = crate::dom::cold_blocks(f, reach);
     (0..nb).map(|b| if cold[b] { 0.001 } else { 8f32.powi(depth[b].min(DEPTH_CAP) as i32) }).collect()
 }
 
@@ -3501,7 +3675,7 @@ fn affinities(f: &Func, reach: &[bool], block_start: &[u32], ranges: &Ranges, wt
                 }
                 // fused multiply-add accumulates in place on both targets (arm64 fmla/fmls
                 // vd += vn*vm, x64 vfmadd231 d += a*b): the result prefers the addend's register
-                Inst::VFma(_, _, d, _, _, c) => {
+                Inst::VFma(_, _, _, _, d, _, _, c) => {
                     if d != c && dies_at(ranges, c.0, p) {
                         edges.push((d.0, c.0, w));
                         edges.push((c.0, d.0, w));
@@ -3667,14 +3841,13 @@ fn spill_weights(f: &Func, reach: &[bool], tab: &OpTab, ranges: &Ranges, wts: &[
     (refs, lens)
 }
 
-/// Allocation priority: weighted references (the values whose spilling costs most go first;
-/// live-range splitting keeps long ones from blocking whole functions), or per square root of the
-/// live range's length (compute kernels, Options::ra_prio).
-fn prio(options: &relax_session::Options, refs: f32, len: u32) -> f32 {
-    match options.ra_prio {
-        relax_session::options::Priority::References => refs,
-        relax_session::options::Priority::Sqrt => refs / (len.max(1) as f32).sqrt(),
-    }
+/// Allocation priority: weighted references per square root of the live range's length. The
+/// allocator places in this order and never evicts, so a value used once right after its
+/// definition goes before one that holds a register across a loop for as many references: by
+/// references alone those short temporaries came last and each spilled (a store and a reload
+/// through one shared slot per orient64 term in the slicer's pair loop).
+fn prio(refs: f32, len: u32) -> f32 {
+    refs / (len.max(1) as f32).sqrt()
 }
 
 /// A move between locations (registers or spill/stack addresses as backends define them).
@@ -5480,6 +5653,77 @@ pub fn sink_branch_compares(options: &relax_session::Options, f: &Func) -> Optio
     g
 }
 
+/// Selects on one condition next to each other: a later `Sel` on c moves up to right after the
+/// first one in its block when nothing it passes defines its operands or touches its result, and
+/// no call is passed. `x.min(y)` and `x.max(y)` (one compare, two selects) with arithmetic between
+/// them otherwise made x64 materialise the condition (setcc + movzx) and test it again for the
+/// second cmov (the arithmetic sets the flags); adjacent, both cmovs read the compare's flags.
+pub fn pair_selects(f: &Func) -> Option<Func> {
+    let mut g: Option<Func> = None;
+    for bi in 0..f.blocks.len() {
+        let mut i = 0;
+        loop {
+            let b = g.as_ref().map_or(&f.blocks[bi], |x| &x.blocks[bi]);
+            let n = b.insts.len();
+            if i >= n {
+                break;
+            }
+            let Inst::Sel(_, c, _, _) = b.insts[i] else {
+                i += 1;
+                continue;
+            };
+            // the run of selects on c that starts here
+            let mut end = i + 1;
+            while end < n && matches!(b.insts[end], Inst::Sel(_, c2, _, _) if c2 == c) {
+                end += 1;
+            }
+            let mut k = end;
+            let mut moved = None;
+            while k < n {
+                let inst = &b.insts[k];
+                if matches!(inst, Inst::Call(..)) {
+                    break;
+                }
+                let mut redef_c = false;
+                for_defs(inst, |d| redef_c |= d == c);
+                if redef_c {
+                    break;
+                }
+                if let Inst::Sel(d, c2, x, y) = *inst {
+                    if c2 == c {
+                        let blocked = (end..k).any(|j| {
+                            let mut bad = false;
+                            for_defs(&b.insts[j], |w| bad |= w == x || w == y || w == d);
+                            for_uses(&b.insts[j], |u| bad |= u == d);
+                            bad
+                        });
+                        if !blocked {
+                            moved = Some(k);
+                            break;
+                        }
+                    }
+                }
+                k += 1;
+            }
+            match moved {
+                Some(k) => {
+                    let gf = g.get_or_insert_with(|| f.clone());
+                    let blk = &mut gf.blocks[bi];
+                    let inst = blk.insts.remove(k);
+                    blk.insts.insert(end, inst);
+                    if blk.pos.len() == n {
+                        let p = blk.pos.remove(k);
+                        blk.pos.insert(end, p);
+                    }
+                    // look at the grown run again
+                }
+                None => i = end,
+            }
+        }
+    }
+    g
+}
+
 pub fn sink_compares(f: &Func) -> Option<Func> {
     let mut g: Option<Func> = None;
     for bi in 0..f.blocks.len() {
@@ -5630,7 +5874,7 @@ mod dead_store_tests {
         loc[vs[1].0 as usize] = Loc::Stack(16);
         // v1: defined at position 2 (instruction 0), read at 3 (instruction 1)
         let def_wins = [(vs[0].0, 2, 3, 9u8)];
-        let out = dead_spill_stores(&f, &reach, &tab, &block_start, &block_end, &loc, &Default::default(), &[], &def_wins, &uses, defers);
+        let (out, _) = dead_spill_stores(&f, &reach, &tab, &block_start, &block_end, &loc, &Default::default(), &[], &[], &def_wins, &uses, defers, None);
         out.contains(&(1, vs[0].0))
     }
 
@@ -5665,5 +5909,53 @@ mod dead_store_tests {
         assert!(!skipped(&sel, x64), "x64 reads the compare's operands at the cmov");
         assert!(skipped(&sel, a64), "arm64 compares at the compare's own position");
         assert!(skipped(&add, a64) && skipped(&add, x64), "an add feeding the next instruction is emitted where it stands");
+    }
+
+    /// A loop whose values are each read three times per iteration (p, n, i, acc, a), with four
+    /// registers, and two temporaries read once by the very next instruction (t, x): the
+    /// temporaries go first and get registers, a loop-long value takes the slot (one reload per
+    /// read). By references alone the temporaries came last and each went through the slot (a
+    /// store and a reload per iteration each: split_until_planar's orient64 terms on x64).
+    #[test]
+    fn one_instruction_temporaries_get_registers_before_loop_long_values() {
+        let mut f = Func::new("pressure".into(), 0);
+        let v: Vec<VReg> = (0..9).map(|_| f.vreg(Cls::I)).collect();
+        let (p, n, i, acc, a, t, x, c, one) = (v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8]);
+        f.params = vec![p, n];
+        for _ in 0..3 {
+            f.block();
+        }
+        let m = Mem::Int(8, false);
+        f.blocks[0].insts = vec![Inst::Iconst(i, 0), Inst::Iconst(acc, 0)];
+        f.blocks[0].term = Term::Jump(1);
+        f.blocks[1].insts = vec![
+            Inst::Load(m, a, p, 0),
+            Inst::IBin(IOp::Add, W, t, a, i),
+            Inst::IBin(IOp::Xor, W, acc, acc, t),
+            Inst::IBin(IOp::Add, W, acc, acc, n),
+            Inst::Load(m, x, p, 8),
+            Inst::IBin(IOp::Mul, W, acc, acc, x),
+            Inst::IBin(IOp::Sub, W, acc, acc, n),
+            Inst::IBin(IOp::Add, W, acc, acc, a),
+            Inst::IBin(IOp::Xor, W, acc, acc, a),
+            Inst::Iconst(one, 1),
+            Inst::IBin(IOp::Add, W, i, i, one),
+            Inst::Store(m, p, 16, acc),
+            Inst::ICmp(Cond::Lt, false, c, i, n),
+        ];
+        f.blocks[1].term = Term::Branch(c, 1, 2);
+        f.blocks[2].term = Term::Ret(Vec::new());
+        for b in f.blocks.iter_mut() {
+            b.pos = vec![0; b.insts.len()];
+        }
+        f.verify().unwrap();
+        let o = relax_session::Options::default();
+        let mut cfg = crate::x64::reg_config(&o);
+        // rsi, rdi; rbx, r12
+        cfg.int_caller = vec![6, 7];
+        cfg.int_callee = vec![3, 12];
+        let al = allocate(&o, &f, &cfg);
+        let in_reg = |v: VReg| matches!(al.loc[v.0 as usize], Loc::Reg(_));
+        assert!(in_reg(t) && in_reg(x), "t {:?} x {:?}", al.loc[t.0 as usize], al.loc[x.0 as usize]);
     }
 }

@@ -72,6 +72,13 @@ pub fn status() -> Status {
     st
 }
 
+/// The device's RAM (MemTotal), for the choices that depend on its class.
+pub fn total_memory_mb() -> Option<u64> {
+    let text = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let kb: u64 = text.lines().find(|l| l.starts_with("MemTotal:"))?.split_whitespace().nth(1)?.parse().ok()?;
+    Some(kb / 1024)
+}
+
 /// The compile-memory budget for this device (MAKEPAD_RUN_MEM_BUDGET_MB): the smaller of a quarter of the
 /// physical RAM and 60% of what is available, at least 256 MB (/proc/meminfo).
 pub fn memory_budget_mb() -> Option<u64> {
@@ -81,12 +88,53 @@ pub fn memory_budget_mb() -> Option<u64> {
     Some((total / 4).min(available * 6 / 10).max(256))
 }
 
+/// The activity stopped (home, recents, the screen off): Android kills a process instead of
+/// exiting it, so the loader's quit write runs now, on its own thread -- the startup manifest,
+/// this run's code and front images and the collected program reach the cache, and the next
+/// launch starts warm. The process exits when the write is done; the next start of the activity
+/// is a new process.
+#[cfg(target_os = "android")]
+fn background_quit_write() {
+    // A stop before the first frame (the keyguard, a screen timeout during a 40-100 s first launch,
+    // a Home trip): the boot goes on and the tiers keep running. Stopping them here left them
+    // stopped for the life of the process (the loader's quit flag is never cleared) with the exit
+    // thread waiting for a quit write that could not complete, and the next launch no warmer;
+    // the first stop after a frame writes and exits as before.
+    if !relax_compiler::jit::first_present_seen() {
+        crate::logcat::log("background: the activity stopped before the first frame; the boot goes on (the cache is written at the first stop after a frame)");
+        return;
+    }
+    // (a second stop while the write runs: the first already ends the process)
+    static WRITING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if WRITING.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    crate::logcat::log("background: stopping the background tiers, writing the compile cache, then exiting (the next launch starts warm)");
+    // The tiers keep the owner thread busy for minutes on a phone, and the exit's own drain of
+    // the deferred cache records stops at SPEC_STOP: stop the tiers, let the quit write encode
+    // and write everything, however long it takes (Android kills the process itself if it wants
+    // it gone), then exit. Android starts a new process on the next launch, from the warm cache.
+    relax_compiler::jit::stop_background_tiers();
+    relax_compiler::run::quit_requested();
+    let _ = std::thread::Builder::new().name("background-exit".into()).spawn(|| {
+        let t = std::time::Instant::now();
+        while !relax_compiler::run::quit_write_done() {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        crate::logcat::log(&format!("background: cache written in {:.1} s; exiting", t.elapsed().as_secs_f64()));
+        std::process::exit(0);
+    });
+}
+
 /// Compiles and runs the package main on this domain thread.
 /// Runs on the boot thread: it holds the compiler's allocation zone while Relax loads the program.
 pub fn boot(mut b: Boot) -> Result<(), String> {
     let _zone = relax_compiler::zone_alloc::compiler();
     relax_compiler::clock::mark_process_start();
     relax_runner::init_embedded(&b.exe, &makepad_run::HOST);
+    // an activity's stop is Android's, and its log is logcat's
+    #[cfg(target_os = "android")]
+    makepad_hal::set_background_hook(background_quit_write);
     if b.privileged {
         relax_runner::set_privileged();
     }

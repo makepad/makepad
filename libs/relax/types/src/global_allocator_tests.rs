@@ -51,3 +51,21 @@ fn one_global_allocator_per_crate_and_per_binary() {
     // all of them at once (`makepad test` checks every test target of a package together)
     assert_eq!(check(&[t1, t2, t3, t4]).len(), 2);
 }
+
+/// A test target may be named `alloc` (tests/alloc.rs): that is not the sysroot crate of the name
+/// (front crates.rs own_crate_name), so its siblings do not link it, and their allocators and its
+/// own do not conflict.
+#[test]
+fn a_test_target_named_alloc_is_not_linked_by_its_siblings() {
+    let sess = &std::sync::Arc::new(crate::Session::default());
+    let mut prog = Program::new(sess);
+    let alloc = "#[global_allocator]\nstatic A: u8 = 0;\n";
+    let named_alloc = load(&mut prog, &relax_front::crates::own_crate_name("alloc".to_string()), alloc, &[]);
+    let sibling = load(&mut prog, "sibling", alloc, &[]);
+    for k in [named_alloc, sibling] { prog.crates[k as usize].harness = true; }
+    prog.resolve_imports();
+    let targets = [named_alloc, sibling];
+    let mut own = vec![false; prog.crates.len()];
+    for k in targets { own[k as usize] = true; }
+    assert_eq!(crate::item_checks::global_allocators_and_lang_items(&prog, &own, &targets), Vec::<String>::new());
+}

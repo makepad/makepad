@@ -73,15 +73,30 @@ pub fn legalize(f: &mut Func, native: &dyn Fn(VX) -> bool, native_shuffle: bool)
     changed
 }
 
-/// Fused multiply-adds with a negated operand as a negation then the plain fused op: on x86-64
-/// the vfnmadd/vfmsub forms negate the product or addend after the multiply, so a NaN operand
-/// keeps its sign, while RIR's `neg_prod`/`neg_add` negate `a`/`c` themselves (a NaN's sign
-/// flips, as `(-a).mul_add(b, c)` and NEON's fmsub/fnmadd do). Returns whether anything changed.
-pub fn expand_fma_negations(f: &mut Func) -> bool {
-    let wants = |i: &Inst| matches!(i, Inst::FMulAdd(np, na, ..) | Inst::VFma(np, na, ..) if *np || *na);
+/// Whether `i` is a fused multiply-add whose negations [`expand_fma_negations`] makes explicit.
+fn negates_fma(i: &Inst, x86: bool) -> bool {
+    match i {
+        Inst::FMulAdd(np, na, ..) => x86 && (*np || *na),
+        Inst::VFma(np, na, keep, ..) => (*np || *na) && *keep != x86,
+        _ => false,
+    }
+}
+
+/// Whether [`expand_fma_negations`] changes `f`.
+pub fn has_fma_negations(f: &Func, x86: bool) -> bool {
+    f.blocks.iter().any(|b| b.insts.iter().any(|i| negates_fma(i, x86)))
+}
+
+/// Fused multiply-adds whose negations the back end's instructions do not have, as negations
+/// then the plain fused op. `x86`: the x86-64 vfnmadd/vfmsub forms negate the product or addend
+/// inside the fused op, so a NaN operand keeps its sign (`VFma`'s `keep_nan`); RIR's plain
+/// `neg_prod`/`neg_add` negate `a`/`c` themselves (a NaN's sign flips, as `(-a).mul_add(b, c)`
+/// and NEON's fmls/fnmadd do) and become an explicit negation there. Elsewhere (arm64) the
+/// `keep_nan` forms become a negation of the non-NaN lanes. Returns whether anything changed.
+pub fn expand_fma_negations(f: &mut Func, x86: bool) -> bool {
     let mut changed = false;
     for bi in 0..f.blocks.len() {
-        if !f.blocks[bi].insts.iter().any(|i| wants(i)) {
+        if !f.blocks[bi].insts.iter().any(|i| negates_fma(i, x86)) {
             continue;
         }
         changed = true;
@@ -91,8 +106,13 @@ pub fn expand_fma_negations(f: &mut Func) -> bool {
         let mut pos = Vec::with_capacity(old.len() + 8);
         for (k, i) in old.into_iter().enumerate() {
             let p = old_pos.get(k).copied().unwrap_or(0);
+            if !negates_fma(&i, x86) {
+                out.push(i);
+                pos.push(p);
+                continue;
+            }
             match i {
-                Inst::FMulAdd(np, na, w, d, mut a, b, mut c) if np || na => {
+                Inst::FMulAdd(np, na, w, d, mut a, b, mut c) => {
                     let cls = if w { Cls::F64 } else { Cls::F32 };
                     if np {
                         let t = f.vreg(cls);
@@ -108,23 +128,29 @@ pub fn expand_fma_negations(f: &mut Func) -> bool {
                     }
                     out.push(Inst::FMulAdd(false, false, w, d, a, b, c));
                 }
-                Inst::VFma(np, na, d, mut a, b, mut c) if np || na => {
+                Inst::VFma(np, na, keep, w, d, a, b, c) => {
                     let cls = f.vregs[d.0 as usize];
-                    if np {
+                    let vw = if w { VW::D } else { VW::S };
+                    let mut neg = |x: VReg| {
                         let t = f.vreg(cls);
-                        out.push(Inst::VX(VX::FNeg(VW::S), t, a, a));
+                        out.push(Inst::VX(VX::FNeg(vw), t, x, x));
                         pos.push(p);
-                        a = t;
-                    }
-                    if na {
-                        let t = f.vreg(cls);
-                        out.push(Inst::VX(VX::FNeg(VW::S), t, c, c));
-                        pos.push(p);
-                        c = t;
-                    }
-                    out.push(Inst::VFma(false, false, d, a, b, c));
+                        if !keep {
+                            return t;
+                        }
+                        // the lanes equal to themselves (not NaN) take the negation
+                        let m = f.vreg(cls);
+                        let s = f.vreg(cls);
+                        out.push(Inst::VX(VX::FCmp(Cond::Eq, vw), m, x, x));
+                        out.push(Inst::VSel(s, m, t, x));
+                        pos.extend([p, p]);
+                        s
+                    };
+                    let a = if np { neg(a) } else { a };
+                    let c = if na { neg(c) } else { c };
+                    out.push(Inst::VFma(false, false, false, w, d, a, b, c));
                 }
-                i => out.push(i),
+                _ => unreachable!(),
             }
             pos.push(p);
         }

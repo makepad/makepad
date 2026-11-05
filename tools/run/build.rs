@@ -33,11 +33,12 @@ fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
             println!("cargo:rustc-link-arg-bins=/STACK:8388608");
-        } else if std::env::var("CARGO_ENCODED_RUSTFLAGS").is_ok_and(|f| f.contains("linker-flavor=ld.lld")) {
-            // Rust's LLD called directly in MinGW mode (the Makepad Builder's GNU toolchain)
-            println!("cargo:rustc-link-arg-bins=--stack=8388608");
         } else {
             println!("cargo:rustc-link-arg-bins=-Wl,--stack,8388608");
+            // the #[relax_api] entries (makepad-relax-api) are reached only through the table's
+            // bounds, and `#[used]` is no GC root on COFF outside MSVC: GNU ld's gc would drop
+            // every object's entries that nothing else references
+            println!("cargo:rustc-link-arg-bins=-Wl,--no-gc-sections");
         }
     }
     // ELF: the #[relax_api] entries (makepad-relax-api) sit in the `relax_api` section, reached

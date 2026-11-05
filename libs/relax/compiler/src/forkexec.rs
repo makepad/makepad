@@ -5,9 +5,16 @@
 //! machinery:
 //! - before the fork, Relax std has the code the child will run built (`__relax_precompile`,
 //!   jit.rs: its half of the spawn and each closure, with everything they call);
-//! - `__relax_fork_exec` forks as the loader's `fork` does and marks the child (`exec_child`):
-//!   a lazy stub reached there anyway ends the child at once with the function's name
-//!   (`child_reached_unbuilt`), a count stub just runs on;
+//! - `__relax_fork_exec` forks at once and marks the child (`exec_child`): a lazy stub reached
+//!   there anyway ends the child at once with the function's name (`child_reached_unbuilt`), a
+//!   count stub or loop counter just runs on (rt_hot, rt_loop_hot);
+//! - nothing of the compiler is paused, parked or copied for that fork (as the loader's `fork`
+//!   does, jit.rs relax_fork, for a child that compiles on): the child runs only code built before
+//!   the fork, and code memory is only added to, so it shares the parent's code pages as one more
+//!   reader. The pause waited for every compile job to end and for the owner to park: a spawn
+//!   waited for O3 builds and the cache's mid-run writes, and for good where a job waited for an
+//!   owner request the pause held back (a devhub test gate hung 26 min in a lease's spawn, the AI
+//!   hub's service tests in theirs: "the fork itself has not returned", 2026-11-04);
 //! - every fork for an exec is recorded in a page the children share, from the fork until the
 //!   parent learnt the exec happened (`__relax_fork_exec_done`), so `makepad inspect why-hung`
 //!   names a child that has not reached exec (in_flight).
@@ -58,9 +65,8 @@ thread_local! {
     static ENTRY: std::cell::Cell<usize> = const { std::cell::Cell::new(usize::MAX) };
 }
 
-/// `__relax_fork_exec`: the fork of Relax std's fork_exec. As the loader's `fork` (jit.rs
-/// relax_fork: compile jobs and the owner parked, the child's own copy of the code memory), and
-/// the child is marked and recorded.
+/// `__relax_fork_exec`: the fork of Relax std's fork_exec. The fork alone (no compile job, owner
+/// or code memory is touched: the module's header), and the child is marked and recorded.
 pub(crate) extern "C" fn relax_fork_exec() -> i32 {
     static ENV: std::sync::Once = std::sync::Once::new();
     ENV.call_once(|| VERBOSE.store(std::env::var_os("MAKEPAD_RUN_VERBOSE").is_some_and(|v| v != "0"), Ordering::Relaxed));
@@ -72,17 +78,16 @@ pub(crate) extern "C" fn relax_fork_exec() -> i32 {
         t[k][3].store(STATE_FORKING, Ordering::Release);
     }
     ENTRY.with(|e| e.set(k.unwrap_or(usize::MAX)));
-    crate::jit::fork_prepare();
     let pid = crate::os::thread::fork();
     let err = crate::os::proc::last_error();
     if pid == 0 {
+        crate::domain_res::fork_child();
         EXEC_CHILD.store(true, Ordering::SeqCst);
-        crate::jit::fork_child();
         if let (Some(t), Some(k)) = (t, k) {
             t[k][3].store(STATE_CHILD, Ordering::Release);
         }
     } else {
-        crate::jit::fork_parent();
+        crate::domain_res::note_child(pid);
         if let (Some(t), Some(k)) = (t, k) {
             t[k][0].store(if pid > 0 { pid as u64 } else { 0 }, Ordering::Release);
         }

@@ -77,7 +77,7 @@ pub fn map_inst(x: &Inst, m: &dyn Fn(VReg) -> VReg, slot_base: u32) -> Inst {
         Inst::TlsStatic(d, off) => Inst::TlsStatic(m(*d), *off),
         Inst::Sel(d, c, a, b) => Inst::Sel(m(*d), m(*c), m(*a), m(*b)),
         Inst::VSel(d, k, a, b) => Inst::VSel(m(*d), m(*k), m(*a), m(*b)),
-        Inst::VFma(np, na, d, a, b, c) => Inst::VFma(*np, *na, m(*d), m(*a), m(*b), m(*c)),
+        Inst::VFma(np, na, keep, w, d, a, b, c) => Inst::VFma(*np, *na, *keep, *w, m(*d), m(*a), m(*b), m(*c)),
         Inst::VSplat(d, a) => Inst::VSplat(m(*d), m(*a)),
         Inst::VExtract(d, a, l) => Inst::VExtract(m(*d), m(*a), *l),
         Inst::VInsert(d, v, l, a) => Inst::VInsert(m(*d), m(*v), *l, m(*a)),
@@ -165,8 +165,21 @@ pub fn rotl(bits: u8, a: u64, b: u64) -> u64 {
     if k == 0 { x } else { ((x << k) | (x >> (w - k))) & mask }
 }
 
+/// IOp::Crc32B/H/W/X (the semantics every backend implements): the low `bits` (8, 16, 32 or 64)
+/// of `data` folded bit by bit, least significant first, into the 32-bit crc in the low bits of
+/// `crc` with the reflected IEEE polynomial (0xEDB88320); no inversions. The result is the u32.
+pub fn crc32(bits: u8, crc: u64, data: u64) -> u64 {
+    let mut r = crc as u32;
+    for i in 0..bits.min(64) as u32 {
+        r ^= ((data >> i) & 1) as u32;
+        r = (r >> 1) ^ (0xEDB8_8320 & 0u32.wrapping_sub(r & 1));
+    }
+    r as u64
+}
+
 pub fn fold_ibin(op: IOp, it: IntTy, a: i64, b: i64) -> Option<i64> {
     let r = match op {
+        IOp::Crc32B | IOp::Crc32H | IOp::Crc32W | IOp::Crc32X => crc32(op.crc32_bits()?, a as u64, b as u64) as i64,
         IOp::Add => a.wrapping_add(b),
         IOp::Sub => a.wrapping_sub(b),
         IOp::Mul => a.wrapping_mul(b),
@@ -2076,6 +2089,10 @@ pub fn simplify(options: &relax_session::Options, f: &mut Func, ro: Option<RoRea
     if f.blocks.iter().any(|b| b.insts.iter().any(|i| matches!(i, Inst::IBin(IOp::Or, ..)))) && combine_rotates(f) {
         dce(f);
     }
+    // the high word of `a as i128 * b as i128`: one signed high multiply (imul / smulh)
+    if !opt_off(options, "-smulh") && f.blocks.iter().any(|b| b.insts.iter().any(|i| matches!(i, Inst::IBin(IOp::MulHi, IntTy { signed: false, .. }, ..)))) && signed_mulhi(f) {
+        dce(f);
+    }
     // x / 2^k: x * 2^-k (adds vregs, so after the rounds)
     if recip_pow2_div(f) {
         dce(f);
@@ -2378,6 +2395,101 @@ pub fn combine_rotates(f: &mut Func) -> bool {
             }
             f.blocks[bi].insts[k] = Inst::IBinI(IOp::Rotl, IntTy { bits: w as u8, signed: false }, d, l.2, l.3);
             changed = true;
+        }
+    }
+    changed
+}
+
+/// The high word of a product of two sign-extended 64-bit values (`a as i128 * b as i128`) as one
+/// signed high multiply. lower.rs (wide_arith) builds a 128-bit product's high word as
+/// `umulh(x, y) + x * hi(y) + hi(x) * y`; when each high word is its low word's sign (`v >> 63`,
+/// arithmetic) that sum is `smulh(x, y)` (mod 2^64), which LLVM selects as one `imul` (x64) /
+/// `smulh` (arm64). Geometry's i128 cross products, orientations and sort keys (the slicer's clip:
+/// `cross`, `dot`, `orient`) paid two shifts, three multiplies and two adds per product, and the
+/// registers they hold. The chain must be one block's (as lowering emits it) and every vreg in it
+/// defined once, so each reads the values the high multiply reads. Returns whether anything changed.
+pub fn signed_mulhi(f: &mut Func) -> bool {
+    let nv = f.vregs.len();
+    let mut ndef = vec![0u32; nv];
+    for p in &f.params {
+        ndef[p.0 as usize] += 1;
+    }
+    let mut def_at: Vec<(u32, u32)> = vec![(u32::MAX, 0); nv];
+    for (bi, b) in f.blocks.iter().enumerate() {
+        for (k, i) in b.insts.iter().enumerate() {
+            for_defs(i, |d| {
+                ndef[d.0 as usize] += 1;
+                def_at[d.0 as usize] = (bi as u32, k as u32);
+            });
+        }
+    }
+    // v's only definition, when it is in block `bi`
+    let def_in = |f: &Func, v: VReg, bi: usize| -> Option<Inst> {
+        if ndef[v.0 as usize] != 1 || def_at[v.0 as usize].0 as usize != bi {
+            return None;
+        }
+        Some(f.blocks[bi].insts[def_at[v.0 as usize].1 as usize].clone())
+    };
+    // v = x >> 63 (arithmetic, 64 bits): x's sign word
+    let sign_of = |f: &Func, v: VReg| -> Option<VReg> {
+        if ndef[v.0 as usize] != 1 {
+            return None;
+        }
+        let (bi, k) = def_at[v.0 as usize];
+        if bi == u32::MAX {
+            return None;
+        }
+        let x = match f.blocks[bi as usize].insts[k as usize] {
+            Inst::IBinI(IOp::Shr, IntTy { bits: 64, signed: true }, _, x, 63) => x,
+            // (before immediates are folded in) the count a constant 63
+            Inst::IBin(IOp::Shr, IntTy { bits: 64, signed: true }, _, x, c) if ndef[c.0 as usize] == 1 && def_at[c.0 as usize].0 != u32::MAX => {
+                let (cb, ck) = def_at[c.0 as usize];
+                match f.blocks[cb as usize].insts[ck as usize] {
+                    Inst::Iconst(_, 63) => x,
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        };
+        (ndef[x.0 as usize] == 1).then_some(x)
+    };
+    let mut changed = false;
+    for bi in 0..f.blocks.len() {
+        for k in 0..f.blocks[bi].insts.len() {
+            let (d, p, q) = match f.blocks[bi].insts[k] {
+                Inst::IBin(IOp::Add, IntTy { bits: 64, .. }, d, p, q) => (d, p, q),
+                _ => continue,
+            };
+            // the three addends: one operand is itself an add of two
+            let terms = [(p, q), (q, p)].into_iter().find_map(|(inner, outer)| match def_in(f, inner, bi) {
+                Some(Inst::IBin(IOp::Add, IntTy { bits: 64, .. }, _, t1, t2)) => Some([t1, t2, outer]),
+                _ => None,
+            });
+            let Some(terms) = terms else { continue };
+            let found = (0..3).find_map(|h| {
+                let Some(Inst::IBin(IOp::MulHi, IntTy { bits: 64, signed: false }, _, x, y)) = def_in(f, terms[h], bi) else { return None };
+                if ndef[x.0 as usize] != 1 || ndef[y.0 as usize] != 1 {
+                    return None;
+                }
+                // the other two: x * sign(y) and sign(x) * y, either operand order
+                let (mut xs, mut sy) = (false, false);
+                for t in (0..3).filter(|&t| t != h) {
+                    let Some(Inst::IBin(IOp::Mul, IntTy { bits: 64, .. }, _, a, b)) = def_in(f, terms[t], bi) else { return None };
+                    let is = |v: VReg, s: VReg, of: VReg| v == of && sign_of(f, s) == Some(if of == x { y } else { x });
+                    if !xs && (is(a, b, x) || is(b, a, x)) {
+                        xs = true;
+                    } else if !sy && (is(a, b, y) || is(b, a, y)) {
+                        sy = true;
+                    } else {
+                        return None;
+                    }
+                }
+                (xs && sy).then_some((x, y))
+            });
+            if let Some((x, y)) = found {
+                f.blocks[bi].insts[k] = Inst::IBin(IOp::MulHi, I64, d, x, y);
+                changed = true;
+            }
         }
     }
     changed
@@ -3093,7 +3205,7 @@ pub fn rename(i: &Inst, a: &dyn Fn(VReg) -> VReg) -> Inst {
         Inst::AtomicCas(k, o1, o2, d, x, e, n) => Inst::AtomicCas(*k, *o1, *o2, *d, a(*x), a(*e), a(*n)),
         Inst::Sel(d, c, x, y) => Inst::Sel(*d, a(*c), a(*x), a(*y)),
         Inst::VSel(d, k, x, y) => Inst::VSel(*d, a(*k), a(*x), a(*y)),
-        Inst::VFma(np, na, d, x, y, z) => Inst::VFma(*np, *na, *d, a(*x), a(*y), a(*z)),
+        Inst::VFma(np, na, keep, w, d, x, y, z) => Inst::VFma(*np, *na, *keep, *w, *d, a(*x), a(*y), a(*z)),
         Inst::VSplat(d, x) => Inst::VSplat(*d, a(*x)),
         Inst::VExtract(d, x, l) => Inst::VExtract(*d, a(*x), *l),
         Inst::VInsert(d, v, l, x) => Inst::VInsert(*d, a(*v), *l, a(*x)),
@@ -4139,6 +4251,15 @@ pub fn if_convert(f: &mut Func, spec_on: bool) -> bool {
             nuse[u.0 as usize] += 1;
         }
     }
+    // integer constants (single definitions): a threaded branch may compare the choice to them
+    let mut const_vreg = vec![false; nv];
+    for b in &f.blocks {
+        for i in &b.insts {
+            if let Inst::Iconst(d, _) = i {
+                const_vreg[d.0 as usize] = ndef[d.0 as usize] == 1;
+            }
+        }
+    }
     // compares and selects only: the arms of a value choice (an Ordering), not general arithmetic
     // (speculating sums cost iterator loops more instructions than their branches: iter_chain +27%)
     // A float negation too: `if x < 0.0 { -x } else { x }` (box3d's scalar abs_v: -0.0 and NaN keep
@@ -4252,7 +4373,12 @@ pub fn if_convert(f: &mut Func, spec_on: bool) -> bool {
         }
         // a choice the join then branches on stays a branch: the branch can be threaded to
         // its known outcome on each arm (an Option's Some / None test after a select would
-        // turn a threadable branch into a select plus a test)
+        // turn a threadable branch into a select plus a test). Threadable means computed from
+        // the choice and constants by what thread_known evaluates (integer moves, arithmetic,
+        // compares): a branch on a distance computed from a `min` of two loaded coordinates
+        // and a point (a float compare) cannot be threaded, and the `min` stayed a branch that
+        // mispredicts half the time (painted slicing's nearest-segment walk: its bounding-box
+        // test, `a.y.min(b.y)`, once per segment; rustc's code has a csel)
         {
             let mut taint = dests.clone();
             let mut seen = Vec::new();
@@ -4264,9 +4390,10 @@ pub fn if_convert(f: &mut Func, spec_on: bool) -> bool {
                 }
                 seen.push(at);
                 for i in &f.blocks[at as usize].insts {
-                    let mut hit = false;
-                    for_uses(i, |u| hit |= taint.contains(&u));
-                    if hit {
+                    let (mut hit, mut other) = (false, false);
+                    for_uses(i, |u| if taint.contains(&u) { hit = true } else if !const_vreg.get(u.0 as usize).copied().unwrap_or(false) { other = true });
+                    let evaluable = matches!(i, Inst::Mov(..) | Inst::IBinI(..) | Inst::IBin(..) | Inst::ICmpI(..) | Inst::ICmp(..) | Inst::Conv(Conv::IntToInt(_), ..));
+                    if hit && !other && evaluable {
                         for_defs(i, |d| taint.push(d));
                     }
                 }
@@ -4476,8 +4603,10 @@ pub fn sink_consts(f: &mut Func) {
             nuse[u.0 as usize] += 1;
         }
     }
-    // constants used only on a cold path (a block ending in Unreachable: panics) move there
+    // constants used only on a cold path (a panic: a block ending in Unreachable, or the
+    // invoke of a panic call in a function with cleanups) move there
     let nb = f.blocks.len();
+    let cold = crate::dom::cold_blocks(f, &reachable(f));
     let mut use_block = vec![u32::MAX; nv]; // u32::MAX-1: several blocks
     for (bi, b) in f.blocks.iter().enumerate() {
         for i in &b.insts {
@@ -4512,13 +4641,83 @@ pub fn sink_consts(f: &mut Func) {
                 }
             };
             let ub = use_block[d.0 as usize];
-            if ub < nb as u32 && ub != bi as u32 && matches!(f.blocks[ub as usize].term, Term::Unreachable | Term::Resume) {
+            if ub < nb as u32 && ub != bi as u32 && cold[ub as usize] {
                 let i = f.blocks[bi].insts.remove(k);
                 let p = f.blocks[bi].pos.remove(k);
                 f.blocks[ub as usize].insts.insert(0, i);
                 f.blocks[ub as usize].pos.insert(0, p);
             } else {
                 k += 1;
+            }
+        }
+    }
+    // used in several blocks, all on cold paths: a copy in each, under a vreg of its own (the
+    // panic location two bounds checks of a cell walk share: its address was loaded, and held
+    // in a register, in each step of the loop). (constant, its block, its index there)
+    let mut several: Vec<(VReg, usize, usize)> = Vec::new();
+    for (bi, b) in f.blocks.iter().enumerate() {
+        for (j, i) in b.insts.iter().enumerate() {
+            if let Inst::Fconst(d, _, _) | Inst::Iconst(d, _) | Inst::Addr(d, _) = i {
+                if ndef[d.0 as usize] == 1 && use_block[d.0 as usize] == u32::MAX - 1 {
+                    several.push((*d, bi, j));
+                }
+            }
+        }
+    }
+    if !several.is_empty() {
+        let mut at = vec![u32::MAX; nv];
+        for (k, (d, _, _)) in several.iter().enumerate() {
+            at[d.0 as usize] = k as u32;
+        }
+        // per candidate: its use blocks (None once one is hot)
+        let mut ubs: Vec<Option<Vec<u32>>> = vec![Some(Vec::new()); several.len()];
+        for (bi, b) in f.blocks.iter().enumerate() {
+            let mut note = |u: VReg| {
+                let k = at[u.0 as usize];
+                if k != u32::MAX {
+                    let e = &mut ubs[k as usize];
+                    match e {
+                        Some(v) if cold[bi] => {
+                            if v.last() != Some(&(bi as u32)) {
+                                v.push(bi as u32);
+                            }
+                        }
+                        _ => *e = None,
+                    }
+                }
+            };
+            for i in &b.insts {
+                for_uses(i, &mut note);
+            }
+            term_uses(&b.term, &mut uses);
+            for u in &uses {
+                note(*u);
+            }
+        }
+        // last first: removing a definition leaves the indices of the earlier ones as they are;
+        // no copy goes into a block holding a candidate (nor into the constant's own block)
+        let mut holds = vec![false; nb];
+        for &(_, bi, _) in &several {
+            holds[bi] = true;
+        }
+        for (k, &(d, bi, j)) in several.iter().enumerate().rev() {
+            let Some(blocks) = ubs[k].take() else { continue };
+            if blocks.len() > 8 || blocks.iter().any(|&ub| holds[ub as usize]) {
+                continue;
+            }
+            let i = f.blocks[bi].insts.remove(j);
+            let p = f.blocks[bi].pos.remove(j);
+            for ub in blocks {
+                let nd = f.vreg(f.vregs[d.0 as usize]);
+                let mut c = i.clone();
+                c.vregs_mut(|v| *v = nd);
+                let b = &mut f.blocks[ub as usize];
+                for x in b.insts.iter_mut() {
+                    x.vregs_mut(|v| if *v == d { *v = nd });
+                }
+                crate::regalloc::term_vregs_mut(&mut b.term, |v| if *v == d { *v = nd });
+                b.insts.insert(0, c);
+                b.pos.insert(0, p);
             }
         }
     }
@@ -5779,7 +5978,7 @@ pub fn gvn_pure(f: &mut Func) -> bool {
             let key = match *i {
                 Inst::VX(op, _, a, b) => GvnKey::X(op, o(a), o(b), 0),
                 Inst::VX3(op, _, a, b, c) => GvnKey::X(op, o(a), o(b), o(c)),
-                Inst::VFma(np, na, _, a, b, c) => GvnKey::Fma(np, na, o(a), o(b), o(c)),
+                Inst::VFma(np, na, keep, w, _, a, b, c) => GvnKey::Fma(np, na, keep, w, o(a), o(b), o(c)),
                 Inst::VSel(_, m, a, b) => GvnKey::Sel(o(m), o(a), o(b)),
                 Inst::VShuffle(_, a, b, k) => GvnKey::Shuf(o(a), o(b), k),
                 _ => match cse_key(i) {
@@ -5820,7 +6019,7 @@ pub fn gvn_pure(f: &mut Func) -> bool {
 enum GvnKey {
     K([u64; 3]),
     X(VX, u64, u64, u64),
-    Fma(bool, bool, u64, u64, u64),
+    Fma(bool, bool, bool, bool, u64, u64, u64),
     Sel(u64, u64, u64),
     Shuf(u64, u64, [u8; 16]),
 }
@@ -6864,7 +7063,9 @@ pub fn mem_size(m: Mem) -> i32 {
 /// Loop-invariant code motion: pure, non-trapping, single-definition instructions inside a
 /// natural loop whose operands come from outside it (or from other hoisted instructions)
 /// move to the end of the loop's preheader (its single outside predecessor ending in a
-/// jump to the header). Loads stay (stores/calls in the loop), integer div/rem stay (trap).
+/// jump to the header). Loads stay (stores/calls in the loop) unless nothing in the loop can
+/// write what they read (noalias params' memory, stack slots no pointer to which is kept: see
+/// `licm`), integer div/rem stay (trap).
 /// No edge goes to the same or an earlier block: the CFG has no cycle, so no loop.
 pub fn forward_only(f: &Func) -> bool {
     f.blocks.iter().enumerate().all(|(bi, b)| b.term.succs().all(|t| t as usize > bi))
@@ -7060,11 +7261,15 @@ pub fn licm(options: &relax_session::Options, f: &mut Func) -> bool {
     // handed it: rustc's `noalias`, with local_cse's roots. Params withheld until the borrow
     // check's verdict are not in `f.noalias`, so they hoist nothing.
     let mut na = if f.noalias.is_empty() || no_noalias(options) { None } else { Some(noalias_roots(f, &ndef)) };
+    // whether a call keeps no copy of its pointer argument k and does not return it: O3's
+    // param_nocapture oracle over the inline snapshot, or the build's facts for the callees
+    // it keeps calls to (`Func::nocapture`, LLVM's `nocapture` from FunctionAttrs)
+    let facts = f.nocapture.clone();
+    let keeps_none = |c: &Callee, k: usize| sroa_nocapture(c, k) || facts.iter().any(|x| x.0 == *c && x.1 as usize == k && !x.2);
     // a param handed to a call anywhere in the function may be kept by it (then reached later through a
     // loaded pointer, which the roots take as not derived from the param): captured for the hoist,
-    // unless the callee provably keeps no pointer it gets there (O3's param_nocapture oracle, as
-    // LLVM's `nocapture`: `f1.decode(&mut r, &self.setup.codebooks, y)` left every `self.spectra`
-    // load in decode_spectra's loops)
+    // unless the callee provably keeps no pointer it gets there (`f1.decode(&mut r,
+    // &self.setup.codebooks, y)` left every `self.spectra` load in decode_spectra's loops)
     if let Some((_, cap, taint)) = na.as_mut() {
         for b in &f.blocks {
             for i in &b.insts {
@@ -7075,7 +7280,7 @@ pub fn licm(options: &relax_session::Options, f: &mut Func) -> bool {
                     };
                     for (k, a) in args.iter().copied().enumerate() {
                         let t = taint[a.0 as usize];
-                        if t != u32::MAX && !cap.contains(&t) && !(sroa_nocapture(c, k) && !opt_off(options, "-licmnocap")) {
+                        if t != u32::MAX && !cap.contains(&t) && !(keeps_none(c, k) && !opt_off(options, "-licmnocap")) {
                             cap.push(t);
                         }
                     }
@@ -7089,6 +7294,24 @@ pub fn licm(options: &relax_session::Options, f: &mut Func) -> bool {
             }
         }
     }
+    // stack slots no pointer to which is kept: the address is only a load / store / copy base,
+    // moved or offset by constants, or passed to calls that provably keep no copy and do not
+    // return it (`keeps_none`) -- never stored, returned, an indirect callee or another operand.
+    // Only pointers derived from the slot's address reach its memory, so a loop that writes
+    // none through them and hands none to a call reads the same value every iteration (LLVM's
+    // LICM, an alloca's capture tracking: nearest_with inlined into nearest_region read a
+    // local SegGrid's `nx` and cell vectors' pointers and lengths from the frame in each step
+    // of its cell walk). (per vreg: slot and offset of the address it holds; per slot: kept by
+    // no one; slot sizes)
+    let slot_kept: Option<(Vec<(u32, i64)>, Vec<bool>, Vec<u32>)> = if f.slots.is_empty() || loops.is_empty() || opt_off(options, "-licmslot") {
+        None
+    } else {
+        let sc = slot_scan(f);
+        let free: Vec<bool> = (0..f.slots.len())
+            .map(|s| !sc.esc_other[s] && sc.call_args[s].iter().all(|&(b, i, k)| matches!(&f.blocks[b].insts[i], Inst::Call(c, ..) if keeps_none(c, k as usize))))
+            .collect();
+        free.iter().any(|&x| x).then(|| (sc.vs, free, f.slots.iter().map(|s| s.size).collect()))
+    };
     for (h, body) in &loops {
         let outside: Vec<u32> = preds[*h as usize].iter().copied().filter(|p| !body[*p as usize]).collect();
         if outside.len() != 1 {
@@ -7141,6 +7364,52 @@ pub fn licm(options: &relax_session::Options, f: &mut Func) -> bool {
         // a loop that writes no memory and calls nothing: loads from dereferenceable params
         // read the same value on every iteration and may run before it
         let read_only = (0..n).all(|bi| !body[bi] || (f.blocks[bi].insts.iter().all(|i| !is_mem_effect(i)) && matches!(f.blocks[bi].term, Term::Jump(_) | Term::Branch(..) | Term::Ret(_) | Term::Unreachable)));
+        // the slots kept by no one that this loop only reads: their addresses in it are load
+        // and copy-source bases (and address arithmetic), nothing else
+        let slot_rd: Vec<bool> = match &slot_kept {
+            None => Vec::new(),
+            Some((vs, free, _)) => {
+                let mut r = free.clone();
+                for bi in 0..n {
+                    if !body[bi] {
+                        continue;
+                    }
+                    for i in &f.blocks[bi].insts {
+                        let rd = match i {
+                            Inst::Load(_, _, b, _) | Inst::VLoad(_, b, _) | Inst::LoadX(_, _, b, ..) | Inst::VLoadX(_, b, ..) | Inst::Copy(_, b, _) => Some(*b),
+                            Inst::Mov(..) | Inst::IBinI(IOp::Add, ..) => continue,
+                            _ => None,
+                        };
+                        for_uses(i, |u| {
+                            let s = vs[u.0 as usize].0;
+                            if s != u32::MAX && Some(u) != rd {
+                                r[s as usize] = false;
+                            }
+                        });
+                    }
+                    term_uses(&f.blocks[bi].term, &mut uses);
+                    for u in &uses {
+                        let s = vs[u.0 as usize].0;
+                        if s != u32::MAX {
+                            r[s as usize] = false;
+                        }
+                    }
+                }
+                r
+            }
+        };
+        // a load inside such a slot: the same value every iteration; frame memory, so safe
+        // to run before the loop
+        let slot_load = |i: &Inst| -> bool {
+            match (i, &slot_kept) {
+                (Inst::Load(m, _, base, off), Some((vs, _, size))) => {
+                    let (s, o) = vs[base.0 as usize];
+                    let at = o + *off as i64;
+                    s != u32::MAX && slot_rd[s as usize] && at >= 0 && at + mem_size(*m) as i64 <= size[s as usize] as i64
+                }
+                _ => false,
+            }
+        };
         // vregs with a definition inside the loop (multi-def ones never become invariant
         // through hoisting: only single-def instructions move)
         let mut def_in_loop = vec![false; nv];
@@ -7163,7 +7432,7 @@ pub fn licm(options: &relax_session::Options, f: &mut Func) -> bool {
                     continue;
                 }
                 for i2 in &f.blocks[b2].insts {
-                    if matches!(i2, Inst::Load(..) | Inst::Store(..) | Inst::Call(..) | Inst::Copy(..) | Inst::Mov(..)) {
+                    if matches!(i2, Inst::Load(..) | Inst::Store(..) | Inst::Call(..) | Inst::Copy(..) | Inst::Mov(..)) && !slot_load(i2) {
                         continue;
                     }
                     uses_defs(i2, &mut uses, &mut defs);
@@ -7197,6 +7466,7 @@ pub fn licm(options: &relax_session::Options, f: &mut Func) -> bool {
                     let pure = match i {
                         Inst::IBin(IOp::Div | IOp::Rem, ..) | Inst::IBinI(IOp::Div | IOp::Rem, ..) => false,
                         Inst::Load(m, _, base, off) if read_only && *off >= 0 && ndef[base.0 as usize] == 1 && f.deref.iter().any(|(p, sz)| p == base && (*off as i64 + mem_size(*m) as i64) <= *sz as i64) => true,
+                        i if slot_load(i) => true,
                         // a load of an uncaptured noalias param's own dereferenceable memory that
                         // the loop never writes: same value every iteration, and safe to run
                         // before the loop (the param is dereferenceable for the whole call)
@@ -8221,6 +8491,10 @@ pub fn set_sroa_nocapture(q: Option<Box<dyn Fn(&Callee, usize) -> bool>>) {
 /// (`setbe; movzx; setbe; movzx; and; test; je`, `cset; cset; and; cbz`). The compares have no
 /// effects, so evaluating `y` only when `x` does not decide is the same branch. Version guards
 /// (`lo <= hi & hi <= len`) and selects folded into `&` of conditions take this shape.
+/// One of the two may be a flag computed elsewhere (a compare's result, defined once: a signed
+/// division's `b == -1`, hoisted out of a loop, `&` the `a == MIN` of its block): the branch
+/// tests the flag first and the block's compare moves to the new block, which runs only when
+/// the flag does not decide (`test; jne` instead of `cmp; sete; movzx; and; test; jne`).
 /// MAKEPAD_RUN_OPT=-splitbr off. Returns whether anything changed.
 pub fn split_branch_conditions(options: &relax_session::Options, f: &mut Func) -> bool {
     if crate::stats::opt_off(options, "-splitbr") {
@@ -8245,6 +8519,15 @@ pub fn split_branch_conditions(options: &relax_session::Options, f: &mut Func) -
     }
     let once = |v: VReg| nuse[v.0 as usize] == 1 && ndef[v.0 as usize] == 1;
     let is_cmp = |i: &Inst, v: VReg| matches!(*i, Inst::ICmp(_, _, d, _, _) | Inst::ICmpI(_, _, d, _, _) | Inst::FCmp(_, _, d, _, _) if d == v);
+    // a flag: the result of a compare, its only definition (0 or 1 wherever it is read)
+    let mut flag = vec![false; nv];
+    for b in &f.blocks {
+        for i in &b.insts {
+            if let Inst::ICmp(_, _, d, _, _) | Inst::ICmpI(_, _, d, _, _) | Inst::FCmp(_, _, d, _, _) = *i {
+                flag[d.0 as usize] = ndef[d.0 as usize] == 1;
+            }
+        }
+    }
     let mut changed = false;
     for bi in 0..f.blocks.len() {
         let Term::Branch(c, t, e) = f.blocks[bi].term else { continue };
@@ -8258,10 +8541,40 @@ pub fn split_branch_conditions(options: &relax_session::Options, f: &mut Func) -
             Inst::IBin(IOp::Or, _, _, x, y) => (true, x, y),
             _ => continue,
         };
-        if x == y || !once(x) || !once(y) {
+        if x == y {
             continue;
         }
-        let (Some(px), Some(py)) = (b.insts[..k].iter().position(|i| is_cmp(i, x)), b.insts[..k].iter().position(|i| is_cmp(i, y))) else { continue };
+        let (px, py) = (b.insts[..k].iter().position(|i| is_cmp(i, x)), b.insts[..k].iter().position(|i| is_cmp(i, y)));
+        // one compare of this block read only here, the other operand a flag from elsewhere (or
+        // read elsewhere too): the flag is tested as it is, the compare moves to the new block
+        let lone = match (px.filter(|_| once(x)), py.filter(|_| once(y))) {
+            (Some(_), Some(_)) => None,
+            (None, Some(q)) if flag[x.0 as usize] => Some((x, y, q)),
+            (Some(q), None) if flag[y.0 as usize] => Some((y, x, q)),
+            _ => continue,
+        };
+        if let Some((fl, y, py)) = lone {
+            let mut ops: Vec<VReg> = Vec::new();
+            for_uses(&b.insts[py], |u| ops.push(u));
+            if b.insts[py + 1..].iter().any(|i| { let mut w = false; for_defs(i, |d| w |= ops.contains(&d)); w }) {
+                continue;
+            }
+            let ycmp = b.insts[py].clone();
+            let ypos = b.pos[py];
+            let (term_pos, count) = (b.term_pos, b.count);
+            let nb = f.blocks.len() as u32;
+            let b = &mut f.blocks[bi];
+            b.insts.remove(k);
+            b.pos.remove(k);
+            b.insts.remove(py);
+            b.pos.remove(py);
+            // `fl & y`: fl false decides (e); `fl | y`: fl true decides (t)
+            b.term = if or { Term::Branch(fl, t, nb) } else { Term::Branch(fl, nb, e) };
+            f.blocks.push(Block { insts: vec![ycmp], pos: vec![ypos], term: Term::Branch(y, t, e), term_pos, count });
+            changed = true;
+            continue;
+        }
+        let (Some(px), Some(py)) = (px, py) else { continue };
         // y's compare moves to the new block: its operands must keep their values from py to
         // the end of the block (and x's compare must not read y)
         let mut ops: Vec<VReg> = Vec::new();
@@ -8309,4 +8622,110 @@ pub fn split_branch_conditions(options: &relax_session::Options, f: &mut Func) -
         relayout(f);
     }
     changed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// lower.rs's high word of `x as i128 * y as i128`: umulh(x, y) + x * (y >> 63) + (x >> 63) * y
+    fn wide_mul_high(signed_shift: bool) -> (Func, VReg, VReg, VReg) {
+        let mut f = Func::new("wide_mul_high".into(), 0);
+        let v: Vec<VReg> = (0..8).map(|_| f.vreg(Cls::I)).collect();
+        let (x, y, sx, sy, h0, c1, c2, h1) = (v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7]);
+        let hi = f.vreg(Cls::I);
+        f.params = vec![x, y];
+        f.rets = vec![Cls::I];
+        f.block();
+        let sh = IntTy { bits: 64, signed: signed_shift };
+        f.blocks[0].insts = vec![
+            Inst::IBinI(IOp::Shr, sh, sx, x, 63),
+            Inst::IBinI(IOp::Shr, sh, sy, y, 63),
+            Inst::IBin(IOp::MulHi, U64, h0, x, y),
+            Inst::IBin(IOp::Mul, U64, c1, x, sy),
+            Inst::IBin(IOp::Mul, U64, c2, sx, y),
+            Inst::IBin(IOp::Add, U64, h1, h0, c1),
+            Inst::IBin(IOp::Add, U64, hi, h1, c2),
+        ];
+        f.blocks[0].term = Term::Ret(vec![hi]);
+        f.blocks[0].pos = vec![0; f.blocks[0].insts.len()];
+        (f, x, y, hi)
+    }
+
+    #[test]
+    fn the_high_word_of_a_sign_extended_product_is_one_signed_mulhi() {
+        let (mut f, x, y, hi) = wide_mul_high(true);
+        assert!(signed_mulhi(&mut f));
+        assert_eq!(f.blocks[0].insts[6], Inst::IBin(IOp::MulHi, I64, hi, x, y));
+        f.verify().unwrap();
+        // the identity it rests on (mod 2^64), signs and extremes included
+        let vals = [0i64, 1, -1, 2, -2, 0x1234_5678_9abc, -0x7777_0000_1111, i64::MAX, i64::MIN, i64::MIN + 1];
+        for &a in &vals {
+            for &b in &vals {
+                let u = fold_ibin(IOp::MulHi, U64, a, b).unwrap();
+                let sum = u.wrapping_add(a.wrapping_mul(b >> 63)).wrapping_add((a >> 63).wrapping_mul(b));
+                assert_eq!(sum, fold_ibin(IOp::MulHi, I64, a, b).unwrap(), "{a} {b}");
+            }
+        }
+        // zero-extended high words (u64 as u128) are not signs: left alone
+        let (mut g, ..) = wide_mul_high(false);
+        let before = g.blocks[0].insts.clone();
+        assert!(!signed_mulhi(&mut g));
+        assert_eq!(g.blocks[0].insts, before);
+    }
+
+    /// A bounds check in a loop of a function with cleanups: its panic call is an invoke (it
+    /// unwinds into the landing pad), so the panic block ends in Invoke, not Unreachable.
+    /// b0 -> b1 (i < n?) -> b2 (check: panic b4 | ok b3) -> b3 (i += 1) -> b1; b4 calls the
+    /// panic with the location's address, b5 Unreachable, b6 the pad (Resume), b7 returns.
+    fn loop_with_invoked_panic() -> (Func, VReg) {
+        let mut f = Func::new("bounds".into(), 0);
+        let v: Vec<VReg> = (0..6).map(|_| f.vreg(Cls::I)).collect();
+        let (n, len, i, c, ok, loc) = (v[0], v[1], v[2], v[3], v[4], v[5]);
+        f.params = vec![n, len];
+        for _ in 0..8 {
+            f.block();
+        }
+        let b = &mut f.blocks;
+        b[0].insts = vec![Inst::Iconst(i, 0)];
+        b[0].term = Term::Jump(1);
+        b[1].insts = vec![Inst::ICmp(Cond::Lt, false, c, i, n)];
+        b[1].term = Term::Branch(c, 2, 7);
+        b[2].insts = vec![Inst::Addr(loc, Sym::new(5)), Inst::ICmp(Cond::Ge, false, ok, i, len)];
+        b[2].term = Term::Branch(ok, 4, 3);
+        b[3].insts = vec![Inst::IBinI(IOp::Add, U64, i, i, 1)];
+        b[3].term = Term::Jump(1);
+        b[4].insts = vec![Inst::Call(Callee::Fn(9), vec![i, len, loc], Vec::new())];
+        b[4].term = Term::Invoke(5, 6);
+        b[5].term = Term::Unreachable;
+        b[6].term = Term::Resume;
+        b[7].term = Term::Ret(Vec::new());
+        for blk in b.iter_mut() {
+            blk.pos = vec![0; blk.insts.len()];
+        }
+        (f, loc)
+    }
+
+    #[test]
+    fn an_invoked_panic_is_a_cold_path() {
+        let (f, loc) = loop_with_invoked_panic();
+        f.verify().unwrap();
+        let reach = reachable(&f);
+        let cold = crate::dom::cold_blocks(&f, &reach);
+        assert_eq!(cold, vec![false, false, false, false, true, true, true, false]);
+        // the location's address moves out of the loop's check into the panic block
+        let mut g = f.clone();
+        sink_consts(&mut g);
+        assert!(!g.blocks[2].insts.iter().any(|x| matches!(x, Inst::Addr(..))));
+        assert_eq!(g.blocks[4].insts[0], Inst::Addr(loc, Sym::new(5)));
+        g.verify().unwrap();
+        // layout: the check falls through to the loop's next step, the panic path goes last
+        let order = relayout_order(&mut g);
+        let at = |b: u32| order.iter().position(|x| *x == b).unwrap();
+        assert!(at(3) == at(2) + 1, "{order:?}");
+        assert!([4, 5, 6].iter().all(|&p| at(p) > at(7)), "{order:?}");
+        // the no-count estimate gives the panic block next to nothing
+        let s = crate::profile::structural_for_test(&f);
+        assert!(s[4] < s[3] * 1e-2, "{s:?}");
+    }
 }

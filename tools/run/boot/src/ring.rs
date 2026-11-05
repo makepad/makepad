@@ -12,8 +12,10 @@
 //! that stays while the program is stopped on it, or waits (a failed rebuild or patch, a change
 //! that needs a restart). Hovering it shows a tooltip: the live numbers, or what the dot means and
 //! what a click does. A dot takes a click (the run restarts the app for a waiting change, opens
-//! the inspect view at a failure, or the paused view); a busy ring is display only, and a click,
-//! a scroll or a drag over it is the app's. Placement follows the caption the app draws
+//! the inspect view at a failure, or the paused view). From that click until the restart the ring
+//! turns, its arc cargo's progress when makepad builds first, its tooltip what happens, and it
+//! takes clicks to do nothing; any other busy ring is display only, and a click, a scroll or a
+//! drag over it is the app's. Placement follows the caption the app draws
 //! (`WindowCaption`):
 //! just left of window buttons at the caption's right (Windows, Linux), else ~12 pt from the
 //! window's right edge (macOS), vertically centred. It is a badge of the window
@@ -97,12 +99,14 @@ pub struct Want {
     /// makepad rebuilds itself in the background (1) or waits for the app to restart into the
     /// rebuilt binary (2), for a change the running process cannot take
     pub rebuild: u8,
+    /// the person asked for the restart this leads to: nothing is left to click
+    pub restart_asked: bool,
 }
 
 impl Want {
     /// Work the program waits for (bright and fast); else background tier-up (slower, dimmer).
     fn foreground(&self) -> bool {
-        self.ahead > 0 && !self.linking || self.lazy || self.block
+        self.ahead > 0 && !self.linking || self.lazy || self.block || self.restart_asked
     }
 
     /// The builds finished of those queued since the JIT got busy (None: no queue says).
@@ -301,7 +305,7 @@ pub fn summary(want: Option<Want>, alert: Option<Alert>) -> String {
         return match alert {
             Alert::Stale => format!("paused on invalidated code · makepad inspect {} panics", std::process::id()),
             Alert::Panic => format!("paused on a panic · makepad inspect {} panics", std::process::id()),
-            Alert::RebuildFailed => "rebuilding makepad failed · the app runs the previous code (see the terminal)".into(),
+            Alert::RebuildFailed => "building the new JIT failed · the app runs the previous code (see the terminal)".into(),
             Alert::PatchFailed => "Live patch not applied · previous code is running · retrying when sources settle or change".into(),
             Alert::UpdateReady => "Update ready · click to restart".into(),
         };
@@ -309,8 +313,8 @@ pub fn summary(want: Option<Want>, alert: Option<Alert>) -> String {
     let Some(w) = want else { return "settled".into() };
     let mut parts = Vec::new();
     match w.rebuild {
-        1 => parts.push("rebuilding makepad".to_string()),
-        2 => parts.push("restarting into the rebuilt makepad".to_string()),
+        1 => parts.push("building the new JIT".to_string()),
+        2 => parts.push("restarting into the new JIT".to_string()),
         _ => {}
     }
     if w.block {

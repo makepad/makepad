@@ -124,12 +124,25 @@ impl<'a> Writer<'a> {
         self.secs.push((id, std::mem::size_of::<T>() as u32, vec![Chunk::Mapped(bytes)], v.len() as u64));
     }
 
-    /// One array with a mapped prefix and newly generated tail, in the same section.
-    pub fn add_mapped_prefix<T: Pod>(&mut self, id: u32, mapped: &'static [T], tail: &[T]) {
+    /// One array with a mapped prefix and a newly generated tail (its elements' bytes, taken as
+    /// they are), in the same section.
+    pub fn add_mapped_prefix<T: Pod>(&mut self, id: u32, mapped: &'static [T], tail: Vec<u8>) {
+        debug_assert!(tail.len() % std::mem::size_of::<T>() == 0);
         let mapped_bytes = unsafe { std::slice::from_raw_parts(mapped.as_ptr() as *const u8, std::mem::size_of_val(mapped)) };
-        let tail_bytes = unsafe { std::slice::from_raw_parts(tail.as_ptr() as *const u8, std::mem::size_of_val(tail)) };
-        self.secs.push((id, std::mem::size_of::<T>() as u32,
-            vec![Chunk::Mapped(mapped_bytes), Chunk::Owned(tail_bytes.to_vec())], (mapped.len() + tail.len()) as u64));
+        let n = mapped.len() + tail.len() / std::mem::size_of::<T>();
+        self.secs.push((id, std::mem::size_of::<T>() as u32, vec![Chunk::Mapped(mapped_bytes), Chunk::Owned(tail)], n as u64));
+    }
+
+    /// One array from a mapped prefix and borrowed runs, in the same section: the bytes of
+    /// `add_mapped_prefix(id, mapped, &runs.concat())` without the concatenated copy.
+    pub fn add_parts<T: Pod>(&mut self, id: u32, mapped: &'static [T], runs: Vec<&'a [T]>) {
+        fn bytes<T: Pod>(v: &[T]) -> &[u8] {
+            unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, std::mem::size_of_val(v)) }
+        }
+        let n = mapped.len() + runs.iter().map(|r| r.len()).sum::<usize>();
+        let mut chunks = vec![Chunk::Mapped(bytes(mapped))];
+        chunks.extend(runs.into_iter().map(|r| Chunk::Borrowed(bytes(r))));
+        self.secs.push((id, std::mem::size_of::<T>() as u32, chunks, n as u64));
     }
 
     /// Small generated sections whose temporary backing array does not outlive the writer.
@@ -178,6 +191,14 @@ impl<'a> Writer<'a> {
             }).collect();
             (id, es, chunks, n)
         }).collect() }
+    }
+
+    /// The bytes the writer holds itself (generated sections, frozen copies), nested images'
+    /// included: what it adds to the process beyond the arrays it borrows or maps.
+    pub fn owned_len(&self) -> usize {
+        self.secs.iter().flat_map(|(_, _, b, _)| b).map(|c| match c {
+            Chunk::Owned(b) => b.len(), Chunk::Image(image) => image.owned_len(), _ => 0,
+        }).sum()
     }
 
     pub fn len(&self) -> usize {

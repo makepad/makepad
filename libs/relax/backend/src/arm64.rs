@@ -62,6 +62,30 @@ const FS2: u8 = 29;
 /// x8: indirect result register of the C ABI; otherwise a scratch for atomics loops
 const X8: u8 = 8;
 
+/// Whether the CPU running the JIT'd code has ARMv8.1 LSE atomics (`cas`, `ldadd`, ...). Every
+/// Apple arm64 CPU does; Android and Linux ask the kernel (HWCAP_ATOMICS: Cortex-A53/A73 class
+/// cores have none). `MAKEPAD_RUN_NO_LSE=1` forces the ARMv8.0 exclusive-load/store loops (to test
+/// them on an LSE machine; stored code is keyed by this class, relax-compiler codegen_id::target_tag).
+pub fn lse_atomics() -> bool {
+    static LSE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *LSE.get_or_init(|| {
+        if std::env::var_os("MAKEPAD_RUN_NO_LSE").is_some_and(|v| !v.is_empty()) {
+            return false;
+        }
+        #[cfg(all(target_arch = "aarch64", any(target_os = "linux", target_os = "android")))]
+        {
+            extern "C" {
+                fn getauxval(t: u64) -> u64;
+            }
+            const AT_HWCAP: u64 = 16;
+            const HWCAP_ATOMICS: u64 = 1 << 8;
+            return unsafe { getauxval(AT_HWCAP) } & HWCAP_ATOMICS != 0;
+        }
+        #[allow(unreachable_code)]
+        true
+    })
+}
+
 const INT_ARGS: usize = 8;
 const FLT_ARGS: usize = 8;
 
@@ -99,6 +123,21 @@ pub fn reg_config() -> RegConfig {
         remat_cost: arm64_remat_cost,
         float_windows: true,
         defers: arm64_defers,
+    }
+}
+
+/// Instructions whose code leaves the condition flags alone (no compare, test or flag-setting
+/// form in any of their lowerings): a compare's selects read its flags across them. Plain integer
+/// add / sub / mul / logic / shifts (W and X forms), int conversions, float add / sub / mul / div,
+/// constants and copies.
+/// (`m = min(a, b); t = m - p; n = max(a, b)` was `cmp; cset; csel; sub; cmp #0; csel`.)
+fn keeps_flags(i: &Inst) -> bool {
+    match i {
+        Inst::IBin(op, it, ..) | Inst::IBinI(op, it, ..) => (it.bits == 64 || *it == U32) && matches!(op, IOp::Add | IOp::Sub | IOp::Mul | IOp::And | IOp::Or | IOp::Xor | IOp::Shl | IOp::Shr),
+        Inst::Conv(Conv::IntToF(..) | Conv::IntToInt(_), ..) => true,
+        Inst::FBin(FOp::Add | FOp::Sub | FOp::Mul | FOp::Div, ..) => true,
+        Inst::Iconst(..) | Inst::Mov(..) => true,
+        _ => false,
     }
 }
 
@@ -1080,6 +1119,16 @@ impl<'a> Gen<'a> {
             self.def_win_copy(v, r);
         }
     }
+    /// Alloc::exit_stores at position p (a block's start or its terminator): region registers home
+    fn exit_stores(&mut self, p: u32) {
+        let Some(st) = self.al.exit_stores.get(&p).cloned() else { return };
+        for (v, r) in st {
+            if let Loc::Stack(o) = self.al.loc[v as usize] {
+                let off = self.spill_sp(o);
+                self.a.ldst(STRX, 8, r, SP, off);
+            }
+        }
+    }
     /// A window that starts at this definition (def windows, regions over redefining blocks)
     /// holds the result: computed elsewhere (a scratch), it is copied there.
     fn def_win_copy(&mut self, v: VReg, r: u8) {
@@ -1307,6 +1356,8 @@ impl<'a> Gen<'a> {
             if !reach[bi] {
                 continue;
             }
+            // a region's register home on the way out of the region (Alloc::exit_stores)
+            self.exit_stores(self.al.block_start[bi]);
             if bi != 0 && self.dom_read.get(bi) == Some(&true) {
                 self.dom_base();
             }
@@ -1387,9 +1438,10 @@ impl<'a> Gen<'a> {
                         }
                     }
                 }
-                // only selects continue a chain; checked before any instruction is skipped or
-                // fused into the terminator (a fused compare rewrites the flags)
-                if !matches!(inst, Inst::Sel(..)) {
+                // only selects (and what leaves the flags alone) continue a chain; checked before
+                // any instruction is skipped or fused into the terminator (a fused compare
+                // rewrites the flags)
+                if !matches!(inst, Inst::Sel(..)) && !keeps_flags(inst) {
                     self.sel_chain = None;
                 }
                 if fused && ii == n - 1 {
@@ -1457,16 +1509,27 @@ impl<'a> Gen<'a> {
                     }
                     continue;
                 }
-                // a compare feeding the selects right after it: they read its flags (nothing between
-                // them sets flags); when they are all its uses, the bool is never materialised
-                // (`cmp; cset; cmp #0; csel` was `cmp; csel`: Paeth's lo / hi / thresh selects)
+                // a compare feeding the selects after it: they read its flags (nothing between them
+                // sets flags: other selects of it, keeps_flags instructions); when they are all its
+                // uses, the bool is never materialised (`cmp; cset; cmp #0; csel` was `cmp; csel`:
+                // Paeth's lo / hi / thresh selects, a min and max of one compare)
                 if let Inst::ICmp(_, _, d, ..) | Inst::ICmpI(_, _, d, ..) | Inst::FCmp(_, _, d, ..) = inst {
-                    let mut k = 0;
-                    while ii + 1 + k < n && !(fused && ii + 1 + k == n - 1) {
-                        match &b.insts[ii + 1 + k] {
+                    let (mut k, mut span) = (0, 0);
+                    while ii + 1 + span < n && !(fused && ii + 1 + span == n - 1) {
+                        let next = &b.insts[ii + 1 + span];
+                        match next {
                             Inst::Sel(sd, c, x, y) if c == d && x != d && y != d && sd != d => k += 1,
+                            _ if keeps_flags(next) => {
+                                let (mut reads, mut sets) = (false, false);
+                                regalloc::for_uses(next, |u| reads |= u == *d);
+                                regalloc::for_defs(next, |v| sets |= v == *d);
+                                if reads || sets {
+                                    break;
+                                }
+                            }
                             _ => break,
                         }
+                        span += 1;
                     }
                     if k > 0 {
                         if self.al.uses[d.0 as usize] as usize == k {
@@ -1493,9 +1556,11 @@ impl<'a> Gen<'a> {
             if self.tail.get(bi).is_some_and(|t| t.is_some()) {
                 continue;
             }
-            // region windows entered from here: loaded before the terminator (regalloc edge loads)
+            // region windows entered from here: loaded before the terminator (regalloc edge loads);
+            // the region's register home before it (exit stores)
             if matches!(b.term, Term::Jump(_) | Term::Branch(..) | Term::Switch(..)) {
                 let tp = self.al.block_end[bi] - 1;
+                self.exit_stores(tp);
                 if let Some(ls) = self.win_start.get(&tp).cloned() {
                     for (v, r) in ls {
                         if let Loc::Stack(o) = self.al.loc[v as usize] {
@@ -1669,7 +1734,7 @@ impl<'a> Gen<'a> {
         // unwind info for the runtime's frame walk (crate::unwind_info)
         let mut saved: Vec<u32> = self.al.used_callee_int.iter().map(|r| *r as u32).collect();
         saved.extend(self.al.used_callee_flt.iter().map(|x| 0x100 | *x as u32));
-        let words = crate::rir::unwind_info_words(&saved, &unwind_tab, self.frame as u32);
+        let words = crate::rir::unwind_info_words(&saved, &unwind_tab, &[], self.frame as u32);
         if crate::rir::unwind_stats_on() {
             crate::rir::UNWIND_STATS[2].fetch_add((words.len() * 4) as u64, std::sync::atomic::Ordering::Relaxed);
         }
@@ -2034,7 +2099,7 @@ impl<'a> Gen<'a> {
         }
     }
 
-    // ---- atomics (LSE: every Apple arm64 CPU has ARMv8.1 atomics)
+    // ---- atomics (LSE when the CPU has ARMv8.1 atomics, else exclusive-access loops: lse_atomics)
 
     fn atomic(&mut self, i: &Inst) {
         fn size_bits(m: Mem) -> (u32, u8, bool) {
@@ -2089,6 +2154,62 @@ impl<'a> Gen<'a> {
                 let rd0 = self.def_i(*d, S0);
                 // the old value goes to a register no operand uses
                 let rd = if rd0 == ra || rd0 == rv { S0 } else { rd0 };
+                if !lse_atomics() {
+                    // ARMv8.0 (no LSE): a load-acquire-exclusive / store-release-exclusive loop.
+                    // x8 = the old value, ip1 = the new one, rd = the store status (a temp before it).
+                    let top = self.a.pos();
+                    // ldaxr{b,h,,} x8, [ra]
+                    self.a.e(0x085F_FC00 | sz << 30 | (ra as u32) << 5 | X8 as u32);
+                    match op {
+                        RmwOp::Xchg => self.a.mov(IP1, rv),
+                        RmwOp::Add => self.a.rrr(0x8B00_0000, IP1, X8, rv),
+                        RmwOp::Sub => self.a.rrr(0xCB00_0000, IP1, X8, rv),
+                        RmwOp::And => self.a.rrr(0x8A00_0000, IP1, X8, rv),
+                        RmwOp::Or => self.a.rrr(0xAA00_0000, IP1, X8, rv),
+                        RmwOp::Xor => self.a.rrr(0xCA00_0000, IP1, X8, rv),
+                        RmwOp::Nand => {
+                            self.a.rrr(0x8A00_0000, IP1, X8, rv);
+                            self.a.rrr(0xAA20_0000, IP1, ZR, IP1);
+                        }
+                        RmwOp::Max | RmwOp::Min | RmwOp::UMax | RmwOp::UMin => {
+                            let signed = matches!(op, RmwOp::Max | RmwOp::Min);
+                            let keep_old = match op {
+                                RmwOp::Max => GT,
+                                RmwOp::Min => LT,
+                                RmwOp::UMax => HI,
+                                _ => LO,
+                            };
+                            if bits == 64 {
+                                self.a.cmp(X8, rv);
+                            } else if bits == 32 {
+                                // cmp w8, w(rv)
+                                self.a.e(0x6B00_001F | (rv as u32) << 16 | (X8 as u32) << 5);
+                            } else {
+                                // compare at the access width: the load zero-extended x8
+                                let lhs = if signed {
+                                    self.a.extend(IP1, X8, bits, true);
+                                    IP1
+                                } else {
+                                    X8
+                                };
+                                self.a.extend(rd, rv, bits, signed);
+                                self.a.cmp(lhs, rd);
+                            }
+                            self.a.csel(IP1, X8, rv, keep_old);
+                        }
+                    }
+                    // stlxr{b,h,,} w(rd), ip1, [ra]
+                    self.a.e(0x0800_FC00 | sz << 30 | (rd as u32) << 16 | (ra as u32) << 5 | IP1 as u32);
+                    let retry = self.a.cbnz(rd);
+                    self.a.patch(retry, top);
+                    if sg && bits < 64 {
+                        self.a.extend(rd0, X8, bits, true);
+                    } else {
+                        self.a.mov(rd0, X8);
+                    }
+                    self.fin_i(*d, rd0);
+                    return;
+                }
                 // LDADD family: size 111000 A R 1 Rs o3 opc 00 Rn Rt
                 let lse = |opc: u32, o3: u32, rs: u8| 0x3820_0000 | sz << 30 | ar | (rs as u32) << 16 | o3 << 15 | opc << 12 | (ra as u32) << 5;
                 match op {
@@ -2136,6 +2257,31 @@ impl<'a> Gen<'a> {
                 let ra = self.use_i(*a, IP0);
                 let re = self.use_i(*e, S0);
                 let rn = self.use_i(*n, S1);
+                if !lse_atomics() {
+                    // ARMv8.0: ldaxr / cmp / stlxr loop. x8 = the observed value; ip1 = the expected
+                    // value at the access width, then the store status.
+                    let top = self.a.pos();
+                    self.a.e(0x085F_FC00 | sz << 30 | (ra as u32) << 5 | X8 as u32);
+                    if bits < 64 {
+                        self.a.extend(IP1, re, bits, false);
+                        self.a.cmp(X8, IP1);
+                    } else {
+                        self.a.cmp(X8, re);
+                    }
+                    let miss = self.a.bcond(NE);
+                    self.a.e(0x0800_FC00 | sz << 30 | (IP1 as u32) << 16 | (ra as u32) << 5 | rn as u32);
+                    let retry = self.a.cbnz(IP1);
+                    self.a.patch(retry, top);
+                    let done = self.a.pos();
+                    self.a.patch(miss, done);
+                    let rd = self.def_i(*d, S0);
+                    self.a.mov(rd, X8);
+                    if sg && bits < 64 {
+                        self.a.extend(rd, rd, bits, true);
+                    }
+                    self.fin_i(*d, rd);
+                    return;
+                }
                 let a_bit = (acq(*ok) || acq(*fail)) as u32;
                 let r_bit = rel(*ok) as u32;
                 // cas: Rs = expected in, observed out
@@ -2727,6 +2873,17 @@ impl<'a> Gen<'a> {
         if self.vx_lanes(op, d, a, b) {
             return;
         }
+        if let VX::Clmul(k) = op {
+            // the selected 64-bit lanes into lane 0 of v4 / v5 (dup .2d), then pmull v.1q
+            let xa = self.use_f(a, FS0);
+            let xb = self.use_f(b, FS1);
+            self.v2(0x4E08_0400 | (k as u32 & 1) << 20, 4, xa);
+            self.v2(0x4E08_0400 | (k as u32 >> 1 & 1) << 20, 5, xb);
+            let xd = self.def_f(d, FS0);
+            self.v3(0x0EE0_E000, xd, 4, 5);
+            self.fin_f(d, xd);
+            return;
+        }
         // core::arch exposes Intel semantics on Arm too (check_arch's cross-ISA
         // fixtures exercise them). Keep these in hardware, with lane conversion.
         if matches!(op, VX::X86Sha1Rnds4(_) | VX::X86Sha1NextE | VX::X86Sha1Msg1
@@ -3104,13 +3261,15 @@ impl<'a> Gen<'a> {
                 self.vmov(xd, t);
                 self.fin_f(d, xd);
             }
-            Inst::VFma(np, na, d, a, b, c) => {
+            Inst::VFma(np, na, _, w, d, a, b, c) => {
+                // (keep_nan's negations are explicit by now: legal.rs expand_fma_negations)
+                let sz = (w as u32) << 22; // .2d, else .4s
                 // t = c (negated first for the - c forms: exact, and the fused op then
                 // rounds once, with IEEE's sign of an exact zero); fmla / fmls t, a, b
                 let t = self.vtmp(d, &[a, b]);
                 let xc = self.use_f(c, t);
                 if na {
-                    self.v2(VFNEG, t, xc);
+                    self.v2(VFNEG | sz, t, xc);
                 } else {
                     self.vmov(t, xc);
                 }
@@ -3120,7 +3279,7 @@ impl<'a> Gen<'a> {
                     // by element (fold_lane_splats): fmla / fmls t.4s, a.4s, b.s[0]
                     self.v3(if np { 0x4F80_5000 } else { 0x4F80_1000 }, t, xa, xb);
                 } else {
-                    self.v3(if np { 0x4EA0_CC00 } else { 0x4E20_CC00 }, t, xa, xb);
+                    self.v3(if np { 0x4EA0_CC00 } else { 0x4E20_CC00 } | sz, t, xa, xb);
                 }
                 let xd = self.def_f(d, FS2);
                 self.vmov(xd, t);
@@ -4349,8 +4508,9 @@ impl<'a> Gen<'a> {
                     }
                 };
                 if self.cls(*d) == Cls::I {
-                    let ra = self.use_i(*a, S0);
-                    let rb = self.use_i(*b, S1);
+                    // (a 0 is xzr: register 31 in csel's operands)
+                    let ra = if self.zero_val[a.0 as usize] { ZR } else { self.use_stored(*a, S0) };
+                    let rb = if self.zero_val[b.0 as usize] { ZR } else { self.use_stored(*b, S1) };
                     let rd = self.def_i(*d, S0);
                     self.a.csel(rd, ra, rb, cond);
                     self.fin_i(*d, rd);
@@ -4404,6 +4564,17 @@ impl<'a> Gen<'a> {
     }
     /// `ext`: re-extend a narrow result (false: nobody reads its upper bits, passes::low_bits_only)
     fn ibin_rr(&mut self, op: IOp, it: IntTy, rd: u8, ra: u8, rb: u8, ext: bool) {
+        if let Some(n) = op.crc32_bits() {
+            // crc32b/h/w wd, wn, wm and crc32x wd, wn, xm: the W result zero-extends
+            let base = match n {
+                8 => 0x1AC0_4000u32,
+                16 => 0x1AC0_4400,
+                32 => 0x1AC0_4800,
+                _ => 0x9AC0_4C00,
+            };
+            self.a.rrr(base, rd, ra, rb);
+            return;
+        }
         if op == IOp::Bzhi {
             // ip0 = -1 << (b mod 64); rd = a & !ip0 (movn, lslv, bic)
             self.a.e(0x9280_0000 | IP0 as u32);
@@ -4448,7 +4619,7 @@ impl<'a> Gen<'a> {
             // smulh / umulh
             IOp::MulHi => self.a.rrr(if it.signed { 0x9B40_7C00 } else { 0x9BC0_7C00 }, rd, ra, rb),
             // handled at the top
-            IOp::Rotl | IOp::Bzhi => {}
+            IOp::Rotl | IOp::Bzhi | IOp::Crc32B | IOp::Crc32H | IOp::Crc32W | IOp::Crc32X => {}
             IOp::Rem => {
                 // q = a / b; d = a - q * b  (rd may alias ra or rb: compute q in IP0)
                 self.a.rrr(if it.signed { 0x9AC0_0C00 } else { 0x9AC0_0800 }, IP0, ra, rb);
@@ -5248,7 +5419,7 @@ fn fold_lane_splats(f: &Func) -> Option<Func> {
         for (ii, i) in b.insts.iter().enumerate() {
             let folded = match *i {
                 Inst::VSplat(d, s) => kof(s).map(|k| Inst::VConst(d, k)),
-                Inst::VFma(np, na, d, a, b, c) => of(b).map(|s| Inst::VFma(np, na, d, a, s, c)),
+                Inst::VFma(np, na, keep, false, d, a, b, c) => of(b).map(|s| Inst::VFma(np, na, keep, false, d, a, s, c)),
                 Inst::VX(op @ VX::FMul(VW::S, nb), d, a, b) if a != b => {
                     if let Some(s) = of(b) {
                         Some(Inst::VX(op, d, a, s))
@@ -5335,6 +5506,17 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
             }
         }
     }
+    // the x86 rule's negated fused multiply-add operands (keep_nan): negations of the non-NaN
+    // lanes, as fmla/fmls negate NaNs too (legal.rs)
+    let unfused;
+    let f = if crate::legal::has_fma_negations(f, false) {
+        let mut g = f.clone();
+        crate::legal::expand_fma_negations(&mut g, false);
+        unfused = g;
+        &unfused
+    } else {
+        f
+    };
     // vector ops without an instruction sequence here: per-lane scalar code
     let legal;
     // (MAKEPAD_RUN_OPT=-vxnative: every expandable op, the legaliser's reference meaning)
@@ -5567,6 +5749,9 @@ thread_local! {
 
 // ------------------------------------------------------------ runtime glue
 
+/// `lazy_entry`'s frame below its frame record at its host call (fp - sp there: x0-x7, d0-d7, x8)
+pub const LAZY_ENTRY_FRAME: u32 = 144;
+
 /// The lazy-compile entry shared by all stubs: saves the argument registers, calls
 /// `compile_fn(slot) -> code address`, restores them and jumps to the code.
 /// On entry x16 holds the slot index.
@@ -5574,7 +5759,7 @@ pub fn lazy_entry(host_compile: u64) -> Vec<u8> {
     let mut a = Asm { w: Vec::new() };
     a.stp_pre(FP, LR, SP, -16);
     a.mov_sp(FP, SP);
-    a.sub_imm(SP, SP, 144);
+    a.sub_imm(SP, SP, LAZY_ENTRY_FRAME);
     for k in 0..4u8 {
         a.stp(false, 2 * k, 2 * k + 1, SP, 16 * k as i32);
         a.stp(true, 2 * k, 2 * k + 1, SP, 64 + 16 * k as i32);
@@ -5711,6 +5896,9 @@ pub fn stub(slot: u32, lazy: u64) -> Vec<u8> {
     words_to_bytes(&a.w)
 }
 
+/// `enter`'s frame below its frame record at its call of fn (fp - sp there: x19-x28, d8-d15)
+pub const ENTER_FRAME: u32 = 160;
+
 /// enter(fn, arg, ctx): saves the callee-saved registers and sp into *ctx, calls fn(arg).
 /// Returns 0 normally. `leave(ctx, code)` (at the returned offset) restores them and
 /// returns `code` from enter (used by panics, faults and hangs to get back to the host).
@@ -5719,7 +5907,7 @@ pub fn enter_leave() -> (Vec<u8>, usize) {
     // enter: x0 = fn, x1 = arg, x2 = ctx
     a.stp_pre(FP, LR, SP, -16);
     a.mov_sp(FP, SP);
-    a.sub_imm(SP, SP, 160);
+    a.sub_imm(SP, SP, ENTER_FRAME);
     for k in 0..5u8 {
         a.stp(false, 19 + 2 * k, 20 + 2 * k, SP, 16 * k as i32);
     }
@@ -5740,7 +5928,7 @@ pub fn enter_leave() -> (Vec<u8>, usize) {
     for k in 0..4u8 {
         a.ldp(true, 8 + 2 * k, 9 + 2 * k, SP, 80 + 16 * k as i32);
     }
-    a.add_imm(SP, SP, 160);
+    a.add_imm(SP, SP, ENTER_FRAME);
     a.ldp_post(FP, LR, SP, 16);
     a.ret();
     // leave(ctx = x0, code = x1)
@@ -5786,6 +5974,9 @@ pub fn panic_tramp(target: u64) -> Vec<u8> {
     a.br(IP0);
     words_to_bytes(&a.w)
 }
+
+/// `regs_call_tramp`'s frame below its frame record at its call: none (the record is at sp)
+pub const REGS_CALL_FRAME: u32 = 0;
 
 /// JIT trampoline in front of a host function that returns (makepad inspect's breakpoint):
 /// stores the register block as `panic_tramp` does, makes it the frame record (x29 = its
@@ -5839,6 +6030,9 @@ pub fn jump_with_arg0(arg: u64, target: u64) -> Vec<u8> {
     words_to_bytes(&a.w)
 }
 
+/// `tls_slow`'s frame below its frame record at its host call (fp - sp there: x0-x15, q0-q31)
+pub const TLS_SLOW_FRAME: u32 = 640;
+
 /// This thread's thread-local block in x16, preserving every other register JIT code may hold
 /// (x0-x15, q0-q31): the fast path `tls_addr` inlines (slot `key` of the thread's slot
 /// array), and when the slot is still null `host() -> block`. `tls_addr` calls it after its own
@@ -5855,7 +6049,7 @@ pub fn tls_slow(host: u64, key: u64) -> Vec<u8> {
     a.ret();
     a.stp_pre(FP, LR, SP, -16);
     a.mov_sp(FP, SP);
-    a.sub_imm(SP, SP, 640);
+    a.sub_imm(SP, SP, TLS_SLOW_FRAME);
     for k in 0..8u8 {
         a.stp(false, 2 * k, 2 * k + 1, SP, 16 * k as i32);
     }

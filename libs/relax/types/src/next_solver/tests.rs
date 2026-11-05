@@ -1369,6 +1369,17 @@ fn round41_preempted_typeck_can_be_checked_later() {
     assert!(body.errors.is_empty(), "{:?}", body.errors);
 }
 
+/// The panic of a check that reaches an anonymous const nobody fed names it: this message is the
+/// reason of the ledger's checker_panic record.
+#[test]
+fn an_unfed_anonymous_const_panic_names_the_const() {
+    let (prog, tcx) = program("static NS: [u8; 2] = [0; 1 + 1];", "unfed_anon_const");
+    let messages: Vec<String> = (0..prog.defs.len()).map(|i| DefId(i as u32)).filter(|d| prog.def(*d).kind == crate::program::DefKind::AnonConst).filter_map(|d| {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| { tcx.typeck(&prog, d); })).err().map(|p| p.downcast_ref::<String>().cloned().unwrap_or_default())
+    }).collect();
+    assert!(messages.iter().any(|m| m.starts_with("anonymous const type of `unfed_anon_const::NS::{constant#") && m.contains("its holder never fed it")), "{messages:?}");
+}
+
 #[test]
 fn round42_borrowck_forwards_preemption_after_typeck() {
     let (prog, mut tcx) = program("#[lang = \"sized\"] trait Sized {} #[lang = \"copy\"] trait Copy {} fn target<T>(x: T) { let y = x; }", "borrowck_preempt");

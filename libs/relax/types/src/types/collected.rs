@@ -167,10 +167,10 @@ impl Types {
 
     /// The settle rebuild (relax-compiler settle_rebuild.rs): `self` was restored from an image of
     /// `live` encoded while compiles ran, so it holds the rows up to that encode's count. With
-    /// every type check held off (a front write), the rows interned since are copied as they are (same ids, same
-    /// bucket chains: a row's `next` is final once written) and the small tables -- regions,
-    /// constants, the list arena, the bucket heads -- are copied whole, so the restored interner
-    /// equals the live one. Nothing of `live`'s heap is shared (it is dropped after the rebuild).
+    /// every type check held off (a front write), the rows interned since are copied as they are (same ids)
+    /// and the small tables -- regions, constants, the list arena, the intern tables -- are copied
+    /// whole, so the restored interner equals the live one. Nothing of `live`'s heap is shared
+    /// (it is dropped after the rebuild).
     /// None: `self` holds rows `live` does not.
     pub fn top_up_from(&mut self, live: &Types) -> Option<()> {
         let (n0, n1) = (self.len(), live.len());
@@ -186,7 +186,7 @@ impl Types {
             unsafe { c.add(i & (CHUNK - 1)).write(row) };
         }
         *self.len.get_mut() = n1 as u32;
-        for (b, h) in self.buckets.iter_mut().zip(live.buckets.iter()) { *b.get_mut() = h.load(Ordering::Acquire); }
+        self.index = index::Index::copy_of(&live.index);
         let kinds: Vec<RegionKind> = live.regions.kinds.iter().copied().collect();
         let args: Vec<std::sync::Arc<[RegionId]>> = live.regions.args.iter().map(|a| std::sync::Arc::from(&a[..])).collect();
         self.regions = Regions::restored(kinds, args);
@@ -200,15 +200,19 @@ impl Types {
     }
 
     /// The interner's image. Consistent while other threads intern (a mid-run encode runs
-    /// with compiles running): the row count is read first, every table read after it holds what
-    /// those rows name, and a bucket head past the count is followed down its chain to the first
-    /// row below it.
+    /// with compiles running): the row count and the intern table are read first, under the table's
+    /// lock, so every row below the count is in that table; every table read after them holds what
+    /// those rows name. A row claimed since lies past the count and its slot is written empty,
+    /// which cuts no other row's probe run (slots are claimed in id order).
     pub fn collected_writer(&self) -> Option<crate::image::Writer<'_>> {
         self.collected_writer_with(&|| false)
     }
-    /// collected_writer, asking `stop` every 64k rows and bucket heads (None: it said yes)
+    /// collected_writer, asking `stop` every arena chunk of rows (None: it said yes)
     pub fn collected_writer_with(&self, stop: &dyn Fn() -> bool) -> Option<crate::image::Writer<'_>> {
-        let n = self.len();
+        let (n, table) = {
+            let _g = self.index.lock();
+            (self.len(), self.index.table())
+        };
         let mut meta = Vec::new();
         let kinds: Vec<RegionKind> = self.regions.kinds.iter().copied().collect();
         let args: Vec<std::sync::Arc<[RegionId]>> = self.regions.args.iter().cloned().collect();
@@ -219,32 +223,34 @@ impl Types {
             self.i32_, self.i64_, self.u8_, self.u32_, self.u64_, self.usize_, self.isize_,
             self.f32_, self.f64_, self.str_ref] { t.put(&mut meta); }
         let mapped_rows = self.image.as_ref().map_or(&[][..], |image| image.rows);
-        let mut rows: Vec<Entry> = Vec::with_capacity(n.saturating_sub(mapped_rows.len()));
-        for i in mapped_rows.len()..n {
-            if i % 65536 == 65535 && stop() { return None; }
-            let r = *self.entry(TyId(i as u32));
-            if !(r.next as usize <= n && (r.erased.0 as usize) < n) { return None; }
-            rows.push(r);
+        // the rows past the mapped ones, as the arena chunks hold them (no copy): a row below
+        // `n` is written before `len` publishes it and never changes, and a chunk is freed only
+        // with exclusive access (adopt_collected)
+        let mut runs: Vec<&[Entry]> = Vec::new();
+        let mut i = mapped_rows.len();
+        while i < n {
+            let end = n.min((i | (CHUNK - 1)) + 1);
+            let c = self.chunks[i >> CHUNK_BITS].load(Ordering::Acquire);
+            if c.is_null() { return None; }
+            let run = unsafe { std::slice::from_raw_parts(c.add(i & (CHUNK - 1)) as *const Entry, end - i) };
+            for r in run {
+                if (r.erased.0 as usize) >= n { return None; }
+            }
+            runs.push(run);
+            if stop() { return None; }
+            i = end;
         }
-        let mut buckets: Vec<u32> = Vec::new();
-        for (i, head) in self.buckets.iter().enumerate() {
-            if i % 65536 == 65535 && stop() { return None; }
-            // Acquire: the rows a head names are published before it
-            let mut head = head.load(Ordering::Acquire);
-            while head as usize > n { head = self.entry(TyId(head - 1)).next; }
-            if head != 0 { buckets.push(i as u32); buckets.push(head); }
-        }
+        let slots = table.snapshot(|s| (s & ID_MASK) as usize <= n);
         if stop() { return None; }
-        // list bucket heads before the words: every head (and the rows taken above) names a list
-        // published before the words are copied, so the image never holds a head past its words
-        let list_buckets = self.lists.bucket_pairs();
+        // the list table after the rows taken above: every list they name is below its end
+        let (list_end, list_slots) = self.lists.image_slots();
         let mapped_words = self.lists.mapped;
-        let words = self.lists.tail_words(mapped_words.len());
+        let words = self.lists.tail_word_bytes(mapped_words.len(), list_end);
         let mut image = crate::image::Writer::default();
-        image.add_bytes(0, meta); image.add_mapped_prefix(1, mapped_rows, &rows);
-        image.add_mapped_prefix(2, mapped_words, &words);
-        image.add_owned(3, &buckets);
-        image.add_owned(4, &list_buckets);
+        image.add_bytes(0, meta); image.add_parts(1, mapped_rows, runs);
+        image.add_mapped_prefix(2, mapped_words, words);
+        image.add_owned(3, &slots);
+        image.add_owned(4, &list_slots);
         Some(image)
     }
 
@@ -260,7 +266,7 @@ impl Types {
         let n = rows.len();
         let same = |i: usize| {
             let (a, b) = (self.entry(TyId(i as u32)), &rows[i]);
-            a.kind == b.kind && a.next == b.next && a.erased == b.erased && a.meta == b.meta
+            a.kind == b.kind && a.hash == b.hash && a.erased == b.erased && a.meta == b.meta
         };
         if n == 0 || n > self.len() || !same(0) || !same(n - 1) || !same(n / 2) { return Adopt::Mismatch; }
         let whole = n >> CHUNK_BITS;
@@ -269,6 +275,8 @@ impl Types {
             if !p.is_null() { unsafe { std::alloc::dealloc(p.cast(), std::alloc::Layout::array::<Entry>(CHUNK).unwrap()) }; }
         }
         self.image = Some(MappedTypes { rows });
+        self.index.free_retired();
+        self.lists.free_retired();
         Adopt::Adopted(whole << CHUNK_BITS)
     }
 
@@ -277,13 +285,13 @@ impl Types {
         let image = crate::image::Reader::new(bytes)?;
         let rows: &'static [Entry] = image.slice(1, 1)?;
         let words: &'static [u32] = image.slice(2, 2)?;
-        let buckets: &'static [u32] = image.slice(3, 3)?;
-        let list_buckets: &'static [u32] = image.slice(4, 4)?;
+        let slots: &'static [u32] = image.slice(3, 3)?;
+        let list_slots: &'static [u64] = image.slice(4, 4)?;
         let n = rows.len();
         // The checksummed, same-build snapshot is constructed from valid interner entries.
         // Row relationships were certified at publication; demand decoding still uses
         // bounds-checked slices, without a pass over every type on each warm boot.
-        if n > MAX_CHUNKS * CHUNK || buckets.len() % 2 != 0 { return None; }
+        if n > MAX_CHUNKS * CHUNK { return None; }
         let mut r = Decode::new(image.bytes(0, 0)?);
         let region_kinds: Vec<RegionKind> = Codec::get(&mut r)?;
         let args: Vec<std::sync::Arc<[RegionId]>> = Codec::get(&mut r)?;
@@ -302,12 +310,8 @@ impl Types {
             if dst.0 as usize >= n { return None; }
         }
         if !r.bytes.is_empty() { return None; }
-        for b in &mut t.buckets { *b.get_mut() = 0; }
-        for pair in buckets.chunks_exact(2) {
-            if pair[0] as usize >= t.buckets.len() || pair[1] as usize > n { return None; }
-            *t.buckets[pair[0] as usize].get_mut() = pair[1];
-        }
-        t.lists = list::Lists::restored(words, list_buckets)?;
+        t.index = index::Index::restored(slots, |s| s & ID_MASK != 0 && (s & ID_MASK) as usize <= n)?;
+        t.lists = list::Lists::restored(words, list_slots)?;
         // Retire new()'s primitive arena. Mapped IDs need no Entry allocations;
         // subsequent interning starts after the image and retains the same append-only IDs.
         let first = *t.chunks[0].get_mut();
@@ -381,6 +385,12 @@ mod tests {
         assert_eq!(tys.mk_array(u8_ref, tys.const_usize(5)), arrays[5]);
         assert_eq!(tys.mk_array(u8_ref, tys.const_usize(1_000_000)), late);
         assert!(tys.len() >= before && tys.mk_array(u8_ref, tys.const_usize(2_000_000)).0 as usize >= before + 1);
+        // the adopted interner's image (its mapped rows, then the arena's from inside a chunk)
+        // restores to the same types
+        let again: &'static [u8] = Box::leak(tys.collected_image().unwrap().into_boxed_slice());
+        let restored = Types::restore_collected(again).unwrap();
+        assert_eq!(restored.len(), tys.len());
+        for t in arrays.iter().step_by(997).chain([&late]) { assert!(restored.kind(*t) == tys.kind(*t)); }
         // an image of other types at the same ids is refused
         let other = Types::new();
         let _ = other.intern(TyKind::Slice(other.u8_));
@@ -421,5 +431,47 @@ mod tests {
         let TyKind::Tuple(l) = *tys.kind(last) else { panic!() };
         assert_eq!(restored.mk_list(tys.list(l)), l);
         assert_eq!(restored.len(), tys.len(), "nothing interned twice");
+    }
+
+    /// The intern tables double while other threads intern and look up: every thread gets one
+    /// id per kind and list, and an image taken meanwhile restores to an interner that finds
+    /// every type and list it holds (none is interned again).
+    #[test]
+    fn intern_tables_double_under_concurrent_interning_and_images() {
+        const KINDS: u32 = 60_000;
+        let tys = Types::new();
+        let id_of = |i: u32| tys.intern(TyKind::Tuple(tys.mk_list(&[tys.intern(TyKind::Infer(i)), tys.u8_])));
+        let image = std::thread::scope(|s| {
+            // every thread walks the same kinds from its own start, so most are raced
+            let threads: Vec<_> = (0..8u32).map(|t| {
+                let id_of = &id_of;
+                s.spawn(move || (0..KINDS).map(|i| ((i + t * 7_001) % KINDS, id_of((i + t * 7_001) % KINDS))).collect::<Vec<_>>())
+            }).collect();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            let image = tys.collected_image().unwrap();
+            let ids: Vec<Vec<(u32, TyId)>> = threads.into_iter().map(|t| t.join().unwrap()).collect();
+            for thread in &ids[1..] {
+                let mut by_kind: Vec<(u32, TyId)> = thread.clone();
+                by_kind.sort_by_key(|p| p.0);
+                for (i, id) in by_kind { assert_eq!(id, id_of(i)); }
+            }
+            image
+        });
+        let restored = Types::restore_collected(Box::leak(image.into_boxed_slice())).unwrap();
+        let n = restored.len();
+        assert!(restored.list_const_counts().0 <= tys.list_const_counts().0);
+        for i in 0..n {
+            let (t, k) = (TyId(i as u32), *restored.kind(TyId(i as u32)));
+            assert!(k == *tys.kind(t));
+            assert_eq!(restored.lookup(&k), Some(t), "type {i} is in the image's table");
+            if let TyKind::Tuple(l) = k { assert_eq!(restored.mk_list(restored.list(l)), l); }
+        }
+        assert_eq!(restored.len(), n, "nothing interned twice");
+        // a table that grew freed nothing a lookup could still read, and frees it when not shared
+        let mut tys = tys;
+        let before = tys.index.bytes();
+        tys.index.free_retired();
+        assert!(tys.index.bytes() < before);
+        assert_eq!(tys.intern(*tys.kind(TyId(0))), TyId(0));
     }
 }

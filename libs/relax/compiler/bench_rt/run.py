@@ -2,7 +2,7 @@
 """Runtime ratio table: each kernel of src/main.rs under rustc --release and under `makepad run`,
 one process per kernel (a compile failure in one cannot hide the others), best of ROUNDS runs
 of each process's best-of-5. Usage: run.py <makepad binary> <target dir> [kernel ...]
-Env: O3_PROFILE_DIR (steady runs replay a recorded O3 profile per kernel: MAKEPAD_RUN_O3_PROFILE), ROUNDS (default 2), STEADY_MS (also time after warming each kernel up for this long:
+Env: ROUNDS (default 2), STEADY_MS (also time after warming each kernel up for this long:
 the steady state once Relax's O3 has settled; default 2000, 0 = off), NATIVE (prebuilt rustc binary of this crate), MAKEPAD_RUN_OPT etc. pass through to Relax."""
 import os, re, subprocess, sys, platform
 
@@ -60,17 +60,6 @@ for n in names:
     if steady_ms > 0:
         sa, _ = one(nice + [native, n], dict(os.environ, BENCH_WARM_MS=str(steady_ms)), n)
         senv = dict(kenv, BENCH_WARM_MS=str(steady_ms))
-        # O3_PROFILE_DIR: steady runs replay one recorded O3 profile per kernel (the first
-        # steady run of a kernel without a profile records it), so every compared run (and every
-        # binary of an A/B sharing the dir) builds the same hot set from the same inputs; cold rows
-        # stay in normal mode
-        pdir = os.environ.get("O3_PROFILE_DIR")
-        if pdir:
-            os.makedirs(pdir, exist_ok=True)
-            prof = os.path.join(pdir, n + ".prof")
-            senv["MAKEPAD_RUN_O3_PROFILE"] = prof
-            if not os.path.exists(prof):
-                subprocess.run(nice + [runner, "run", "--quiet", "relax-bench-rt", "--", n], cwd=here, env=senv, capture_output=True, timeout=300)
         sb, _ = one(nice + [runner, "run", "--quiet", "relax-bench-rt", "--", n], senv, n)
         if sa and sb:
             sratios.append(sb[0] / sa[0])

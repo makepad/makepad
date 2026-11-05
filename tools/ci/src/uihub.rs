@@ -13,6 +13,7 @@ use makepad_ai_hub::{
 use makepad_ai_llm::{
     preprocess_rgb8, GgufFile, LlamaSession, LlamaSessionConfig, VisionConfig, VisionTower,
 };
+use makepad_ci_judge::Acceptance;
 use makepad_strict_json::{self as json, Value};
 use std::{
     path::{Path, PathBuf},
@@ -43,19 +44,6 @@ impl Verdict {
             ("skipped", Value::Bool(self.skipped)),
             ("parse_error", Value::Bool(self.parse_error)),
         ])
-    }
-}
-pub fn parse_verdict(raw: &str) -> Result<bool> {
-    match raw
-        .lines()
-        .filter_map(|line| line.strip_prefix("VERDICT:"))
-        .last()
-        .map(str::trim)
-    {
-        Some("YES") => Ok(true),
-        Some("NO") => Ok(false),
-        Some(v) => Err(format!("invalid final VERDICT: {v}")),
-        None => Err("missing VERDICT: YES or VERDICT: NO".into()),
     }
 }
 
@@ -170,6 +158,8 @@ impl UiHub {
         control: &Control,
         notify: &Notify,
     ) -> Result<Verdict> {
+        // numbered questions, each with the answer that passes it; the model sees only the questions
+        let ask = Acceptance::parse(prompt).map_err(|e| format!("acceptance text: {e}"))?;
         if !self.ensure(control, notify)? {
             return Ok(Verdict {
                 yes: true,
@@ -205,7 +195,7 @@ impl UiHub {
         let suffix = loaded
             .session
             .vocab()
-            .tokenize(&vision_suffix(prompt), false, true)
+            .tokenize(&vision_suffix(&ask.prompt()), false, true)
             .map_err(|e| format!("tokenize: {e:?}"))?;
         loaded
             .session
@@ -220,22 +210,21 @@ impl UiHub {
             .append_tokens(&suffix)
             .map_err(|e| format!("prompt prefill: {e:?}"))?;
         let (mut raw, tokens, decode_secs) = decode(&mut loaded.session, control)?;
-        let mut parsed = parse_verdict(&raw);
-        if parsed.is_err() {
-            let forced = force_verdict(&mut loaded.session, control)?;
-            raw = format!("{raw}\n[no verdict line; asked outright]\n{forced}");
-            parsed = parse_verdict(&forced);
+        let unanswered = ask.unanswered(&raw);
+        if !unanswered.is_empty() {
+            raw.push_str("\n[questions left unanswered; asked outright]");
+            for k in unanswered {
+                let forced = force_answer(&mut loaded.session, control, k)?;
+                raw.push_str(&format!("\n{forced}"));
+            }
         }
-        let mut reasons: Vec<String> = raw
-            .lines()
-            .filter(|s| s.starts_with("- "))
-            .map(str::to_string)
-            .collect();
-        if let Err(e) = &parsed {
-            reasons.push(e.clone());
-        }
+        let parsed = ask.misses(&raw);
+        let reasons = match &parsed {
+            Ok(misses) => misses.clone(),
+            Err(e) => vec![e.clone()],
+        };
         Ok(Verdict {
-            yes: parsed.as_ref().copied().unwrap_or(false),
+            yes: parsed.as_ref().is_ok_and(|misses| misses.is_empty()),
             reasons,
             raw,
             seconds: start.elapsed().as_secs_f64(),
@@ -307,20 +296,20 @@ fn decode_limit(session: &mut LlamaSession, control: &Control, limit: usize) -> 
 fn decode(session: &mut LlamaSession, control: &Control) -> Result<(String, usize, f64)> {
     decode_limit(session, control, 160)
 }
-/// The verdict, asked for outright. When the free answer did not end in one
-/// (it looped, or ran to the cap mid-sentence), the conversation is continued
-/// with "VERDICT:" already written and the model finishes that line, so a
+/// Question `k`'s answer, asked for outright. When the free answer left it out
+/// (it looped, or ran to the cap), the conversation is continued with the
+/// question's number already written and the model finishes that line, so a
 /// judgement is never lost to the way it was phrased.
-fn force_verdict(session: &mut LlamaSession, control: &Control) -> Result<String> {
+fn force_answer(session: &mut LlamaSession, control: &Control, k: usize) -> Result<String> {
     let ids = session
         .vocab()
-        .tokenize("\nVERDICT:", false, false)
+        .tokenize(&format!("\n{k}:"), false, false)
         .map_err(|e| format!("tokenize: {e:?}"))?;
     session
         .append_tokens(&ids)
-        .map_err(|e| format!("verdict prefill: {e:?}"))?;
+        .map_err(|e| format!("answer prefill: {e:?}"))?;
     let (tail, _, _) = decode_limit(session, control, 4)?;
-    Ok(format!("VERDICT: {}", tail.trim()))
+    Ok(format!("{k}: {}", tail.trim()))
 }
 
 /// Is the vision model's whole file set on this machine?
@@ -395,25 +384,15 @@ pub fn peak_rss_bytes() -> Option<u64> {
 mod tests {
     use super::*;
     #[test]
-    fn a_looping_answer_is_cut_and_a_verdict_line_is_still_read() {
+    fn a_looping_answer_is_cut_and_an_answer_asked_outright_is_still_read() {
         assert!(is_looping("a command prompt line at the top reading sudo -g -g -g -g -g -g -g -g -g -g -g -g -g -g -g -g -g -g -g -g -g"));
         assert!(is_looping(&"ab".repeat(40)));
-        assert!(!is_looping("1. The window shows a terminal with a prompt.\n2. Nothing else is open.\nVERDICT: YES"));
+        assert!(!is_looping("1: YES - a terminal with a prompt.\n2: NO - nothing else is open."));
         assert!(!is_looping("short"));
-        assert_eq!(parse_verdict("- looks fine\n[no verdict line; asked outright]\nVERDICT: YES"), Ok(true));
-        assert_eq!(parse_verdict("VERDICT: NO"), Ok(false));
-        assert!(parse_verdict("VERDICT: maybe").is_err());
-    }
-    #[test]
-    fn verdict_is_last_strict_marker() {
-        assert_eq!(
-            parse_verdict("- clear\nVERDICT: NO\nVERDICT: YES").unwrap(),
-            true
-        );
-        assert!(!parse_verdict("VERDICT: YES\nVERDICT: NO").unwrap());
-        assert!(parse_verdict("Yes").is_err());
-        assert!(parse_verdict("VERDICT: YES\nVERDICT: perhaps").is_err());
-        assert!(parse_verdict(" VERDICT: YES").is_err());
+        // the free answer looped before question 2; its answer was asked outright
+        let ask = Acceptance::parse("A window. 1. Is there a terminal? expected YES 2. Does an error panel cover it? expected NO").unwrap();
+        let raw = "1: YES - a prompt -g -g -g -g\n[questions left unanswered; asked outright]\n2: NO";
+        assert_eq!(ask.misses(raw), Ok(vec![]));
     }
 }
 

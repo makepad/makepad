@@ -6,7 +6,7 @@
 // default features, so a root's optional crates behind them stay out), their
 // declared includes and a generated members Cargo.toml. It goes into a clean
 // checkout of the tested Makepad commit at apps/commercial, as a customer's
-// Builder has it, and is checked there with --no-default-features.
+// Runner has it, and is checked there with --no-default-features.
 
 use mod.std.*
 use mod.ci;

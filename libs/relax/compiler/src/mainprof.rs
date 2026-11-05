@@ -102,25 +102,16 @@ fn host_name(pc: u64) -> String {
 
 #[cfg(unix)]
 fn host_name(pc: u64) -> String {
-    #[repr(C)]
-    struct DlInfo {
-        fname: *const i8,
-        fbase: *mut u8,
-        sname: *const i8,
-        saddr: *mut u8,
-    }
-    extern "C" {
-        fn dladdr(addr: *const u8, info: *mut DlInfo) -> i32;
-    }
-    let mut info = DlInfo { fname: std::ptr::null(), fbase: std::ptr::null_mut(), sname: std::ptr::null(), saddr: std::ptr::null_mut() };
+    use crate::os::proc::{dladdr, DlInfo};
+    let mut info = DlInfo::default();
     if unsafe { dladdr(pc as *const u8, &mut info) } == 0 || info.sname.is_null() {
         return format!("?{:x}", pc);
     }
-    let s = unsafe { std::ffi::CStr::from_ptr(info.sname.cast()) }.to_string_lossy().to_string();
+    let s = unsafe { std::ffi::CStr::from_ptr(info.sname) }.to_string_lossy().to_string();
     let lib = if info.fname.is_null() {
         String::new()
     } else {
-        let f = unsafe { std::ffi::CStr::from_ptr(info.fname.cast()) }.to_string_lossy().to_string();
+        let f = unsafe { std::ffi::CStr::from_ptr(info.fname) }.to_string_lossy().to_string();
         f.rsplit('/').next().unwrap_or("").to_string()
     };
     format!("{}!{}", lib, s)

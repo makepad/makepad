@@ -9,6 +9,11 @@ use crate::io;
 pub type socklen_t = u32;
 
 pub const AF_UNIX: c_int = 1;
+/// socket(), socketpair() and accept4()'s close-on-exec flag (macOS has none: fcntl after).
+#[cfg(target_vendor = "apple")]
+pub const SOCK_CLOEXEC: c_int = 0;
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub const SOCK_CLOEXEC: c_int = 0o2000000;
 #[cfg(target_vendor = "apple")]
 pub const AF_INET6: c_int = 30;
 #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -125,6 +130,8 @@ extern "C" {
     pub fn bind(fd: c_int, addr: *const u8, len: socklen_t) -> c_int;
     pub fn listen(fd: c_int, backlog: c_int) -> c_int;
     pub fn accept(fd: c_int, addr: *mut u8, len: *mut socklen_t) -> c_int;
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    pub fn accept4(fd: c_int, addr: *mut u8, len: *mut socklen_t, flags: c_int) -> c_int;
     pub fn getsockname(fd: c_int, addr: *mut u8, len: *mut socklen_t) -> c_int;
     pub fn getpeername(fd: c_int, addr: *mut u8, len: *mut socklen_t) -> c_int;
     pub fn shutdown(fd: c_int, how: c_int) -> c_int;

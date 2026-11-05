@@ -22,7 +22,7 @@ pub use dep_graph::{context_ptr, swap_context};
 
 use crate::fxhash::HashMap;
 use dep_graph::{DepGraph, TaskDeps, TaskGuard, TaskReads};
-use job::{ActiveJobGuard, QueryJob, QueryLatch, WaitGuard};
+use job::{ActiveJob, QueryJob, QueryLatch, WaitGuard};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use relax_session::sync::Mutex;
@@ -42,7 +42,6 @@ pub struct Cycle {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum QueryError {
     Cycle(Cycle),
-    Poisoned(QueryId),
     MissingInput(QueryId),
     MissingQuery(QueryId),
     IdentityConflict(QueryId),
@@ -244,7 +243,7 @@ impl QueryEngine {
                     job::Completion::Retry => { crate::preempt::point(); continue; },
                 }
             }
-            let mut job = ActiveJobGuard { engine: self, index, finished: false };
+            let job = ActiveJob { engine: self, index };
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 // Validation must not leak forced dependencies into the caller's read set.
                 let frame = TaskDeps::new(self.id, Some(index), false);
@@ -265,10 +264,8 @@ impl QueryEngine {
                 Ok(result) => { job.complete(result.clone()); return result; }
                 Err(payload) => {
                     // The task/read frame has already dropped, before waiters may retry.
-                    if crate::preempt::is_cancelled(&*payload) {
-                        drop(_waiting);
-                        job.cancel();
-                    }
+                    drop(_waiting);
+                    job.cancel();
                     std::panic::resume_unwind(payload);
                 }
             }

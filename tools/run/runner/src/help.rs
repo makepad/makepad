@@ -212,11 +212,13 @@ fn export_page(st: &Style) -> String {
     title(&mut p, "export a working tree");
     p.blank();
     p.usage("makepad export <git-url>[#ref] [--mount <dir>=<git-url>[#ref]]... [--cached] <folder>");
+    p.usage("makepad export --mounted <folder>");
     p.blank();
     p.text("Writes the repositories' files into <folder> (each mounted one at its");
     p.text("folder), then the files of $MAKEPAD_RUN_EDITS over them: the tree a run of");
     p.text("the same spec reads, for a native build. Unchanged files are not rewritten;");
-    p.text("files an earlier export wrote and this one does not are removed.");
+    p.text("files an earlier export wrote and this one does not are removed. --mounted");
+    p.text("writes out what this run's own virtual workspace has mounted.");
     p.out
 }
 

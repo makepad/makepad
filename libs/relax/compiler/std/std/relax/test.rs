@@ -439,5 +439,13 @@ fn run(t: &mut Tests, opts: &Opts, descs: Arc<Vec<Desc>>, filtered_out: usize) -
     );
     println!();
     let _ = crate::io::stdout().flush();
+    // a filter that ran no test is no pass (makepad_remote::hot::NO_TESTS_EXIT); under
+    // `makepad test` (TEST_PACKAGE_ENV) it says so once for all its targets
+    if ok && passed == 0 && !opts.filters.is_empty() {
+        if crate::env::var("MAKEPAD_TEST_PACKAGE").is_err() {
+            eprintln!("error: no test matched {}{}", opts.filters.join(" "), if ignored > 0 { format!(" ({} matched and ignored: --ignored runs them)", ignored) } else { String::new() });
+        }
+        return 87;
+    }
     if ok { 0 } else { 101 }
 }

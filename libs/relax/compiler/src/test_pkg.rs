@@ -1,11 +1,15 @@
 //! `makepad test [options] <package> [--lib] [--bins] [--bin <name>]... [--tests] [--test <name>]...
 //! [cargo feature flags] [-- <libtest args>]`: what `cargo test -p <package>` runs,
-//! under the JIT. The lib's unit tests (the lib built cfg(test)), the bins' unit tests, and the
-//! integration tests (the plain lib and every tests/ target) are separate programs, as under cargo;
-//! each is `makepad run --harness` in its own process (run.rs), one after the other. Without a
-//! selection all three run (cargo test's default minus doc tests, which are counted and said).
-//! A `harness = false` target runs as a program of its own (`makepad run --plain-test`), as cargo
-//! runs it: its exit status is its verdict.
+//! under the JIT. The lib's unit tests (the lib built cfg(test)) are a program of their own; the
+//! selected bins' unit tests and integration tests (beside the plain lib) are one program, as
+//! `cargo test` builds them in one go, so every target after the first restores its collected
+//! image. Each target runs in a process of its own, one after the other (`makepad run --harness
+//! --subject <its source>`, run.rs): its own main, statics, environment, threads, exit status
+//! and errors, as under cargo. A file of the program that does not parse stops the run there, as
+//! cargo builds no target then. Without a selection all of them run (cargo test's default minus
+//! doc tests, which are counted and said).
+//! A `harness = false` target runs as a plain program (`makepad run --plain-test --subject ..`),
+//! as cargo runs it: its exit status is its verdict.
 //! `--live` keeps one harness target (default: the lib, else the package's only harness target) running across source edits.
 
 pub fn cmd_test_package(args: &[String]) -> i32 {
@@ -143,7 +147,7 @@ pub fn cmd_test_package(args: &[String]) -> i32 {
         }
     };
     if live_default {
-        if has_lib.is_some() {
+        if has_lib.as_ref().is_some_and(|l| l.test) {
             lib = true;
         } else {
             let harness: Vec<_> = bin_targets.iter().filter(|t| t.2).map(|t| ("--bin", &t.0))
@@ -161,60 +165,50 @@ pub fn cmd_test_package(args: &[String]) -> i32 {
     if live && lib && has_lib.is_none() { return live_usage(); }
     let default_selection = !lib && bins.is_none() && tests.is_none();
     if default_selection {
-        lib = has_lib.is_some();
+        lib = has_lib.as_ref().is_some_and(|l| l.test);
         bins = (!bin_targets.is_empty()).then(Vec::new);
         tests = (!targets.is_empty()).then(Vec::new);
     }
-    // each run: the selection, and for a `harness = false` target its source path (it runs as a
-    // program of its own, its exit status the verdict, as cargo runs it)
-    let mut runs: Vec<(Vec<String>, Option<String>)> = Vec::new();
+    // each run: None the lib's unit tests (`--lib`), else one bin or test target out of the
+    // package's test graph: its source path, and whether it is a `harness = false` one (a plain
+    // program, its exit status the verdict, as cargo runs it)
+    let mut runs: Vec<Option<(String, bool)>> = Vec::new();
     if lib {
-        runs.push((vec!["--lib".to_string()], None));
+        runs.push(None);
     }
-    // (harness targets, plain targets) of a selection: every target for an empty one
-    let split = |all: &[(String, String, bool)], names: &[String]| -> Result<(Vec<String>, Vec<(String, String)>), String> {
+    // a selection's targets, harness ones first: every target for an empty one
+    let chosen = |all: &[(String, String, bool)], names: &[String]| -> Result<Vec<(String, bool)>, String> {
         for n in names {
             if !all.iter().any(|t| &t.0 == n) {
                 return Err(format!("no target named `{n}` in package `{package}`"));
             }
         }
-        let chosen = all.iter().filter(|t| names.is_empty() || names.contains(&t.0));
-        let (h, p): (Vec<_>, Vec<_>) = chosen.partition(|t| t.2);
-        Ok((h.into_iter().map(|t| t.0.clone()).collect(), p.into_iter().map(|t| (t.0.clone(), t.1.clone())).collect()))
+        let (h, p): (Vec<_>, Vec<_>) = all.iter().filter(|t| names.is_empty() || names.contains(&t.0)).partition(|t| t.2);
+        Ok(h.into_iter().chain(p).map(|t| (t.1.clone(), !t.2)).collect())
     };
-    if let Some(b) = &bins {
-        let (h, p) = match split(&bin_targets, b) {
-            Ok(x) => x,
+    for (sel, all) in [(&bins, &bin_targets), (&tests, &targets)] {
+        let Some(names) = sel else { continue };
+        match chosen(all, names) {
+            Ok(r) => runs.extend(r.into_iter().map(Some)),
             Err(e) => {
                 eprintln!("makepad test: {e}");
                 return 101;
             }
-        };
-        // Each target needs its own process: the harness shares dependency
-        // statics, environment and background threads across a target graph.
-        for n in h {
-            runs.push((vec!["--bins".to_string(), "--bin".to_string(), n], None));
-        }
-        for (n, path) in p {
-            runs.push((vec!["--bins".to_string(), "--bin".to_string(), n], Some(path)));
         }
     }
-    if let Some(t) = &tests {
-        let (h, p) = match split(&targets, t) {
-            Ok(x) => x,
-            Err(e) => {
-                eprintln!("makepad test: {e}");
-                return 101;
+    // the test program of the selected bin and integration test targets, as `cargo test` builds
+    // them: each named (the `harness = false` ones too)
+    let mut graph: Vec<String> = Vec::new();
+    for (sel, all, flag) in [(&bins, &bin_targets, "--bin"), (&tests, &targets, "--test")] {
+        let Some(names) = sel else { continue };
+        for t in all.iter().filter(|t| names.is_empty() || names.contains(&t.0)) {
+            if flag == "--bin" && graph.is_empty() {
+                graph.push("--bins".to_string());
             }
-        };
-        for n in h {
-            runs.push((vec!["--test".to_string(), n], None));
-        }
-        for (n, path) in p {
-            runs.push((vec!["--test".to_string(), n], Some(path)));
+            graph.extend([flag.to_string(), t.0.clone()]);
         }
     }
-    if live && (runs.len() != 1 || runs[0].1.is_some()) { return live_usage(); }
+    if live && (runs.len() != 1 || runs[0].as_ref().is_some_and(|r| r.1)) { return live_usage(); }
     let exe = match std::env::current_exe() {
         Ok(e) => e,
         Err(e) => {
@@ -224,24 +218,29 @@ pub fn cmd_test_package(args: &[String]) -> i32 {
     };
     let pkg_dir = crate::resolve::package_dir(&sess, &crate::run::workspace_dir(), &package).unwrap_or_default();
     let mut code = 0;
-    for (sel, plain) in runs {
+    // a filter no target matched is no pass (a target exits NO_TESTS_EXIT when it matched none)
+    let (mut matched, mut unmatched) = (false, false);
+    for run in runs {
         let mut a: Vec<String> = vec!["run".to_string()];
-        match &plain {
-            Some(path) => {
+        match &run {
+            Some((path, true)) => {
                 let rel = path.strip_prefix(pkg_dir.as_str()).map_or(path.as_str(), |r| r.trim_start_matches(['/', '\\']));
                 eprintln!("     Running {rel} (harness = false)");
-                a.push("--plain-test".to_string());
-                a.push(path.clone());
+                a.extend(["--plain-test".to_string(), "--subject".to_string(), path.clone()]);
             }
+            Some((path, false)) => a.extend(["--harness".to_string(), "--subject".to_string(), path.clone()]),
             None => a.push("--harness".to_string()),
         }
         a.extend(pre.iter().cloned());
         a.push(package.clone());
         a.extend(flags.iter().cloned());
-        a.extend(sel);
+        match &run {
+            Some(_) => a.extend(graph.iter().cloned()),
+            None => a.push("--lib".to_string()),
+        }
         a.push("--".to_string());
         a.extend(prog.iter().cloned());
-        let status = std::process::Command::new(&exe).args(&a).status();
+        let status = std::process::Command::new(&exe).args(&a).env(makepad_remote::hot::TEST_PACKAGE_ENV, "1").status();
         let c = match status {
             Ok(s) => s.code().unwrap_or(101),
             Err(e) => {
@@ -249,19 +248,31 @@ pub fn cmd_test_package(args: &[String]) -> i32 {
                 101
             }
         };
+        if c == makepad_remote::hot::NO_TESTS_EXIT {
+            unmatched = true;
+            continue;
+        }
+        matched = true;
         if c != 0 {
             if c == makepad_remote::hot::JIT_ERROR_EXIT { return c; }
-            if plain.is_some() {
+            // the program did not load (a file that does not parse, named above): every target
+            // of it would say the same, and cargo test runs none then
+            if c == makepad_remote::hot::LOAD_ERROR_EXIT { return 101; }
+            if run.as_ref().is_some_and(|r| r.1) {
                 eprintln!("error: test failed (harness = false target exited with status {c})");
             }
             code = 101;
         }
     }
+    if unmatched && !matched {
+        eprintln!("error: no test matched {}", prog.join(" "));
+        return makepad_remote::hot::NO_TESTS_EXIT;
+    }
     // cargo test's default selection also runs the lib's doc tests; makepad test does not: say
     // how many there are, so the counts compare honestly
     if default_selection {
-        if let Some(lib_root) = &has_lib {
-            let n = count_doctests(lib_root);
+        if let Some(lib_target) = has_lib.as_ref().filter(|l| l.doctest) {
+            let n = count_doctests(&lib_target.path);
             if n > 0 {
                 eprintln!("makepad test: {n} doc test{} not run (makepad test runs no doc tests; `cargo test --doc` does)", if n == 1 { "" } else { "s" });
             }

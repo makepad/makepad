@@ -131,14 +131,14 @@ impl UnixStream {
     }
     pub fn pair() -> io::Result<(UnixStream, UnixStream)> {
         let mut fds = [0 as c_int; 2];
-        cvt(unsafe { sn::socketpair(sn::AF_UNIX, sn::SOCK_STREAM, 0, fds.as_mut_ptr()) })?;
+        cvt(unsafe { sn::socketpair(sn::AF_UNIX, sn::SOCK_STREAM | sn::SOCK_CLOEXEC, 0, fds.as_mut_ptr()) })?;
         let a = Socket::from_fd(fds[0]);
         let b = Socket::from_fd(fds[1]);
-        unsafe {
-            crate::sys::fcntl(fds[0], crate::sys::F_SETFD, crate::sys::FD_CLOEXEC);
-            crate::sys::fcntl(fds[1], crate::sys::F_SETFD, crate::sys::FD_CLOEXEC);
-        }
         if cfg!(target_vendor = "apple") {
+            unsafe {
+                crate::sys::fcntl(fds[0], crate::sys::F_SETFD, crate::sys::FD_CLOEXEC);
+                crate::sys::fcntl(fds[1], crate::sys::F_SETFD, crate::sys::FD_CLOEXEC);
+            }
             a.set_int(sn::SOL_SOCKET, sn::SO_NOSIGPIPE, 1)?;
             b.set_int(sn::SOL_SOCKET, sn::SO_NOSIGPIPE, 1)?;
         }
@@ -284,14 +284,14 @@ impl UnixDatagram {
     }
     pub fn pair() -> io::Result<(UnixDatagram, UnixDatagram)> {
         let mut fds = [0 as c_int; 2];
-        cvt(unsafe { sn::socketpair(sn::AF_UNIX, sn::SOCK_DGRAM, 0, fds.as_mut_ptr()) })?;
+        cvt(unsafe { sn::socketpair(sn::AF_UNIX, sn::SOCK_DGRAM | sn::SOCK_CLOEXEC, 0, fds.as_mut_ptr()) })?;
         let a = Socket::from_fd(fds[0]);
         let b = Socket::from_fd(fds[1]);
-        unsafe {
-            crate::sys::fcntl(fds[0], crate::sys::F_SETFD, crate::sys::FD_CLOEXEC);
-            crate::sys::fcntl(fds[1], crate::sys::F_SETFD, crate::sys::FD_CLOEXEC);
-        }
         if cfg!(target_vendor = "apple") {
+            unsafe {
+                crate::sys::fcntl(fds[0], crate::sys::F_SETFD, crate::sys::FD_CLOEXEC);
+                crate::sys::fcntl(fds[1], crate::sys::F_SETFD, crate::sys::FD_CLOEXEC);
+            }
             a.set_int(sn::SOL_SOCKET, sn::SO_NOSIGPIPE, 1)?;
             b.set_int(sn::SOL_SOCKET, sn::SO_NOSIGPIPE, 1)?;
         }

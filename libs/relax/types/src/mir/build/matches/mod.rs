@@ -7,7 +7,7 @@
 //! Port of rustc_mir_build/src/builder/matches/mod.rs (1.97.1). Differences, all deliberate:
 //! - `BuildResult` threads through every step the builder can stop at (scope and expression lowering
 //!   return `BuildError` for what is not built), and `unpack!` is `?`-based.
-//! - No lint levels, coverage instrumentation, `ensure_sufficient_stack`, loop-match
+//! - No lint levels, coverage instrumentation, loop-match
 //!   (`static_pattern_match`) or pinned bindings (unstable); `Place` is `Clone`, not `Copy`.
 //! - `OpaqueCast` projections are not added (see `match_pair.rs`).
 use crate::mir::build::scope::DropKind;
@@ -1507,7 +1507,7 @@ impl Builder<'_> {
     /// Note how we test `x` twice. This is the tradeoff of backtracking automata: we prefer smaller
     /// code size so we accept non-optimal code paths.
     fn match_candidates(&mut self, span: Span, scrutinee_span: Span, start_block: BasicBlock, candidates: &mut [&mut Candidate]) -> BuildResult<BasicBlock> {
-        self.match_candidates_inner(span, scrutinee_span, start_block, candidates)
+        crate::stack::ensure_sufficient_stack(|| self.match_candidates_inner(span, scrutinee_span, start_block, candidates))
     }
 
     /// Construct the decision tree for `candidates`. Don't call this, call `match_candidates`

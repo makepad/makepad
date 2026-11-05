@@ -24,11 +24,19 @@ struct AppHandle {
     closed: bool,
     name: String,
 }
+/// An app a launched app hosts (a WM's windows), found among its descendants: the launched app
+/// owns it, so it is never quit from here.
+struct HostedApp {
+    name: String,
+    pid: u32,
+    remote: Remote,
+}
 struct Runtime {
     run: Run,
     config: Config,
     hub: Judge,
     apps: Vec<AppHandle>,
+    hosted: Vec<HostedApp>,
     images: Vec<PathBuf>,
     group: String,
     step: Option<usize>,
@@ -95,33 +103,52 @@ impl Runtime {
         }
         let remote = app.remote.as_ref().ok_or("remote unavailable")?;
         self.run.log(&format!("{} {route}", app.name));
-        // A grab the app could not place, or a grab budget that is full,
-        // ends in "; retry": ask again. An input is never asked again: the
-        // app applied it when it took the request, whatever it answered
-        // about the frame after it, and a second request is a second key.
-        let mut attempt = 0;
-        let result = loop {
-            let result = remote.request(argv, mutate);
-            let again = !applies_input(argv)
-                && matches!(&result, Err(e) if e.to_string().contains("; retry"));
-            if !again || attempt == 5 {
-                break result;
-            }
-            attempt += 1;
-            std::thread::sleep(Duration::from_millis(300));
-        };
+        let result = ask(remote, argv, mutate);
         if matches!(result, Err(Failure::Interrupted(_))) {
             app.interrupted = true;
             self.fatal = true;
             self.run.held_pids.push(app.child.child.id());
         }
-        let text = result.map_err(|e| e.to_string())?;
-        if let Ok(v) = json::parse_depth(text.as_bytes(), 64) {
-            if let Some(e) = v.get("err") {
-                return Err(format!("{route}: {}", e.to_json()));
-            }
+        answer(&route, result.map_err(|e| e.to_string())?)
+    }
+    /// The newest endpoint named `name` among app `i`'s descendants (an app a WM hosts), with the
+    /// user sequence it has now pinned for its mutations.
+    fn hosted(&mut self, i: usize, name: &str) -> Result<usize> {
+        let app = self.apps.get(i).ok_or("invalid app handle")?;
+        if app.interrupted {
+            return Err("human intervention; app is no longer owned".into());
         }
-        Ok(text)
+        if app.closed {
+            return Err(format!("{} already closed", app.name));
+        }
+        let root = app.child.child.id();
+        let tree = process_tree(root);
+        let descendants: Vec<_> = makepad_remote::discovery::apps().into_iter().filter(|a| a.pid != root && tree.contains(&a.pid)).collect();
+        let endpoint = descendants.iter().filter(|a| a.app == name).max_by_key(|a| a.started_ms).ok_or_else(|| {
+            let seen = descendants.iter().map(|a| format!("{} pid={} socket={}", a.app, a.pid, a.socket)).collect::<Vec<_>>().join(", ");
+            format!("{}: hosted app {name:?} not found; descendant endpoints: [{seen}]", app.name)
+        })?;
+        let client = makepad_remote::Client::connect(&endpoint.socket).map_err(|e| format!("{} remote endpoint {}: {e}", endpoint.app, endpoint.socket))?;
+        let index = self.hosted.len();
+        self.hosted.push(HostedApp { name: endpoint.app.clone(), pid: endpoint.pid, remote: Remote { client, user_seq: None } });
+        let activity = json::parse_depth(self.hosted_request(index, &argv(&["activity"]), false)?.as_bytes(), 64).map_err(str::to_string)?;
+        let seq = activity.get("user_seq").and_then(Value::as_u64).ok_or("missing activity user_seq")?;
+        self.hosted[index].remote.user_seq = Some(seq);
+        Ok(index)
+    }
+    /// One remote command to hosted app `i`, as [`Self::request`] to a launched one.
+    fn hosted_request(&mut self, i: usize, argv: &[String], mutate: bool) -> Result<String> {
+        if argv.is_empty() || argv.iter().any(|a| a.bytes().any(|b| b.is_ascii_control()) || a.starts_with("if_user_seq")) {
+            return Err("invalid command (or attempt to replace the pinned user sequence)".into());
+        }
+        let route = argv.join(" ");
+        let app = self.hosted.get(i).ok_or("invalid hosted app handle")?;
+        self.run.log(&format!("{} {route}", app.name));
+        let result = ask(&app.remote, argv, mutate);
+        if matches!(result, Err(Failure::Interrupted(_))) {
+            self.fatal = true;
+        }
+        answer(&route, result.map_err(|e| format!("{} pid={}: {e}", app.name, app.pid))?)
     }
     fn request_json(&mut self, i: usize, argv: &[String], mutate: bool) -> Result<Value> {
         json::parse_depth(self.request(i, argv, mutate)?.as_bytes(), 64).map_err(str::to_string)
@@ -332,8 +359,16 @@ impl Runtime {
     }
     fn grab(&mut self, i: usize, name: &str) -> Result<usize> {
         let value = self.request_json(i, &argv(&["grab"]), false)?;
+        self.save_grab(&value, name)
+    }
+    fn hosted_grab(&mut self, i: usize, name: &str) -> Result<usize> {
+        let value = json::parse_depth(self.hosted_request(i, &argv(&["grab"]), false)?.as_bytes(), 64).map_err(str::to_string)?;
+        self.save_grab(&value, name)
+    }
+    /// A grab's answer saved under the step's group as `name`.png; its index among the images.
+    fn save_grab(&mut self, value: &Value, name: &str) -> Result<usize> {
         let mut paths = Vec::new();
-        png_paths(&value, &mut paths);
+        png_paths(value, &mut paths);
         let source = paths.first().ok_or("grab did not return a PNG path")?;
         let bytes = fs::read(source).map_err(|e| e.to_string())?;
         if !bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
@@ -433,6 +468,43 @@ fn parse_startup(line: &str, pid: u32) -> Option<String> {
     }
     let socket = rest.split_once(" socket=")?.1.trim();
     (!socket.is_empty()).then(|| socket.to_string())
+}
+/// One remote command to `remote`. A grab the app could not place, or a grab budget that is
+/// full, ends in "; retry": ask again. An input is never asked again: the app applied it when it
+/// took the request, whatever it answered about the frame after it, and a second request is a
+/// second key.
+fn ask(remote: &Remote, argv: &[String], mutate: bool) -> crate::remote::Result<String> {
+    let mut attempt = 0;
+    loop {
+        let result = remote.request(argv, mutate);
+        let again = !applies_input(argv) && matches!(&result, Err(e) if e.to_string().contains("; retry"));
+        if !again || attempt == 5 {
+            return result;
+        }
+        attempt += 1;
+        std::thread::sleep(Duration::from_millis(300));
+    }
+}
+/// An answer, or the error it carries (`{"err":...}`).
+fn answer(route: &str, text: String) -> Result<String> {
+    if let Ok(v) = json::parse_depth(text.as_bytes(), 64) {
+        if let Some(e) = v.get("err") {
+            return Err(format!("{route}: {}", e.to_json()));
+        }
+    }
+    Ok(text)
+}
+/// `root` and its descendants, by pid.
+fn process_tree(root: u32) -> Vec<u32> {
+    let mut tree = vec![root];
+    let Ok(procs) = makepad_remote::procs::list_processes() else { return tree };
+    let mut k = 0;
+    while k < tree.len() {
+        let parent = tree[k];
+        tree.extend(procs.iter().filter(|p| p.ppid == parent && p.pid != parent).map(|p| p.pid));
+        k += 1;
+    }
+    tree
 }
 fn argv(words: &[&str]) -> Vec<String> {
     words.iter().map(|w| w.to_string()).collect()
@@ -725,7 +797,8 @@ fn register(vm: &mut ScriptVm, target: Option<&Target>) {
             if !allow(vm) {
                 return NIL;
             }
-            if value(vm, args, id!(condition)).as_bool() != Some(true) {
+            // a validation run's answers are stand-ins: it judges no condition made from them
+            if !rt(vm).validate && value(vm, args, id!(condition)).as_bool() != Some(true) {
                 let message = str_arg(vm, args, id!(message)).unwrap_or_else(|e| e);
                 rt(vm).fail(&message);
             }
@@ -768,10 +841,13 @@ fn register(vm: &mut ScriptVm, target: Option<&Target>) {
                     let prompt = str_arg(vm, args, id!(text))?;
                     let index = num_arg(vm, args, id!(image))? as usize;
                     if rt(vm).validate {
+                        // a validation run checks the acceptance text; nothing is judged
+                        let ask = makepad_ci_judge::Acceptance::parse(&prompt)
+                            .map_err(|e| format!("acceptance text: {e}"))?;
                         return Ok(json::obj(vec![
                             ("yes", Value::Bool(true)),
                             ("reasons", Value::Arr(vec![])),
-                            ("raw", json::s("VERDICT: YES")),
+                            ("raw", json::s(&format!("validate: {} questions, not judged", ask.points.len()))),
                         ]));
                     }
                     let runtime = rt(vm);
@@ -837,7 +913,7 @@ fn register(vm: &mut ScriptVm, target: Option<&Target>) {
         let r = (|| {
             let prompt = str_arg(vm, args, id!(text))?;
             if rt(vm).validate {
-                return Ok(json::s("VERDICT: YES"));
+                return Ok(json::s("validate: not asked"));
             }
             let r = rt(vm);
             let answer = r.hub.ask(&prompt, &r.run.control, &r.run.notify)?;
@@ -932,6 +1008,20 @@ fn register(vm: &mut ScriptVm, target: Option<&Target>) {
 
 fn app_object(vm: &mut ScriptVm, index: usize) -> ScriptValue {
     let obj = vm.new_object();
+    vm.add_method(obj, id_lut!(hosted), script_args!(name = NIL), move |vm, args| {
+        if !allow(vm) {
+            // stopped or failed: an inert handle, as for a failed launch
+            return hosted_object(vm, usize::MAX);
+        }
+        let r = str_arg(vm, args, id!(name)).and_then(|s| if rt(vm).validate { Ok(usize::MAX) } else { rt(vm).hosted(index, &s) });
+        match r {
+            Ok(i) => hosted_object(vm, i),
+            Err(e) => {
+                rt(vm).fail(&e);
+                hosted_object(vm, usize::MAX)
+            }
+        }
+    });
     vm.add_method(
         obj,
         id_lut!(key),
@@ -1141,6 +1231,56 @@ fn app_object(vm: &mut ScriptVm, index: usize) -> ScriptValue {
     obj.into()
 }
 
+/// What `app.hosted(name)` gives: the remote commands and grabs of an app the launched one hosts.
+fn hosted_object(vm: &mut ScriptVm, index: usize) -> ScriptValue {
+    let obj = vm.new_object();
+    vm.add_method(obj, id_lut!(cmd), script_args!(command = NIL), move |vm, args| {
+        if !allow(vm) {
+            return NIL;
+        }
+        let r = str_arg(vm, args, id!(command)).and_then(|s| {
+            if rt(vm).validate {
+                Ok(json::s("{}"))
+            } else {
+                let words: Vec<String> = s.split_whitespace().map(str::to_string).collect();
+                rt(vm).hosted_request(index, &words, true).map(json::s)
+            }
+        });
+        result(vm, r)
+    });
+    vm.add_method(obj, id_lut!(grab), script_args!(name = NIL), move |vm, args| {
+        if !allow(vm) {
+            return NIL;
+        }
+        let r = str_arg(vm, args, id!(name)).and_then(|s| {
+            if rt(vm).validate {
+                Ok(Value::Int(0))
+            } else {
+                rt(vm).hosted_grab(index, &s).map(|i| Value::Int(i as i64))
+            }
+        });
+        result(vm, r)
+    });
+    vm.add_method(obj, id_lut!(size), script_args!(), move |vm, _| {
+        if !allow(vm) {
+            return NIL;
+        }
+        let r = if rt(vm).validate {
+            Ok(Value::Arr(vec![Value::F64(0.0), Value::F64(0.0)]))
+        } else {
+            rt(vm).hosted_request(index, &argv(&["status"]), false).and_then(|t| window_size(&t))
+        };
+        result(vm, r)
+    });
+    obj.into()
+}
+
+/// `[w, h]` of the first window in a `status` answer.
+fn window_size(status: &str) -> Result<Value> {
+    let v = json::parse_depth(status.as_bytes(), 64).map_err(str::to_string)?;
+    v.get("w").and_then(Value::as_arr).and_then(|w| w.first()).and_then(|w| w.get("sz")).cloned().ok_or_else(|| format!("status has no window size: {status}"))
+}
+
 pub fn run_script(
     run: Run,
     config: Config,
@@ -1228,6 +1368,7 @@ fn execute_with(
             config,
             hub,
             apps: Vec::new(),
+            hosted: Vec::new(),
             images: Vec::new(),
             group: script.name.clone(),
             step: None,
@@ -1331,8 +1472,8 @@ mod tests {
         // The three contract scripts with their pinned step counts, then every
         // app script in the tree: each follows the default shape, two steps.
         let mut scripts: Vec<(String, usize)> = vec![
-            ("ci.splash".into(), 3),
-            ("apps/wm/ci.splash".into(), 6),
+            ("ci.splash".into(), 4),
+            ("apps/wm/ci.splash".into(), 7),
             ("tools/ci/default.ci.splash".into(), 2),
             (crate::smoke::SLICE_SCRIPT.into(), 3),
         ];
@@ -1345,9 +1486,10 @@ mod tests {
         apps.sort();
         assert!(apps.len() >= 20, "the app scripts are missing: {apps:?}");
         // The terminal also builds the pty helper it starts its shell through; Desk Host is a
-        // windowless service (no launch step).
+        // windowless service, the AI Hub and devhub tray apps open no window at start (no launch
+        // step).
         scripts.extend(apps.into_iter().map(|app| {
-            let steps = match app.as_str() { "terminal" => 3, "deskhost" => 1, _ => 2 };
+            let steps = match app.as_str() { "terminal" => 3, "deskhost" | "aihub" | "devhub" => 1, _ => 2 };
             (format!("apps/{app}/ci.splash"), steps)
         }));
         for (path, count) in scripts.iter().map(|(path, count)| (path.as_str(), *count)) {
@@ -1386,7 +1528,7 @@ mod tests {
                 None,
             );
             assert!(!run.failed, "{} failed: {:?}", path, run.stages);
-            assert_eq!(steps.len(), count);
+            assert_eq!(steps.len(), count, "{path}");
             drop(run);
             fs::remove_dir_all(dir).unwrap();
         }

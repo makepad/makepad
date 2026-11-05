@@ -161,9 +161,10 @@ impl Drop for Registry {
     }
 }
 
-/// generic, so compiled by Relax: reads an opaque type's field, which Relax refuses (provided.rs)
-pub fn names_peek<T>(r: &Registry, _t: T) -> usize {
-    r.names.len()
+/// generic, so compiled by Relax: reads an opaque type's field whose bytes are rustc's alone (its
+/// std's HashMap), which Relax refuses (provided.rs)
+pub fn by_name_peek<T>(r: &Registry, _t: T) -> usize {
+    r.by_name.len()
 }
 
 /// Option<usize> by value (tag + payload in registers on Relax's side)

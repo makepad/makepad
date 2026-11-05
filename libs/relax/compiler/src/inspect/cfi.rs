@@ -482,35 +482,35 @@ fn set(r: &mut Regs, n: usize, v: u64) {
 pub enum Step {
     /// `r` is now the caller's frame
     Done,
+    /// the outermost frame: its CFI leaves the return address undefined (a thread's start, the
+    /// process's entry) or the return address is 0; `r` is unchanged
+    End,
     /// the frame's CFA is rbp-based and `r.rbp` is 0 (unknown: a walk that started from a
     /// syscall's sp and pc); `r` is unchanged
     NeedRbp,
-    /// no FDE, or rules it cannot follow; `r` is unchanged
-    Fail,
+    /// the step cannot be proven, and why (no FDE, a rule this walker does not follow, an
+    /// unreadable stack); `r` is unchanged
+    Fail(&'static str),
 }
 
 /// One step from the frame `r` describes to its caller (`is_top`: r.rip is the interrupted
 /// instruction itself, otherwise a return address and the lookup uses rip - 1). `r.rbp == 0`
-/// means rbp is not known.
+/// means rbp is not known. Only what the frame's CFI says and the stack holds where it says:
+/// a step it does not prove is not taken (no frame-pointer or stack-content guess).
 pub fn step(r: &mut Regs, is_top: bool, read: &dyn Fn(u64) -> Option<u64>) -> Step {
-    let mut need_rbp = false;
-    match step_inner(r, is_top, read, &mut need_rbp) {
-        Some(()) => Step::Done,
-        None if need_rbp => Step::NeedRbp,
-        None => Step::Fail,
+    let pc = if is_top { r.rip } else { r.rip.wrapping_sub(1) };
+    match module(pc) {
+        Some(m) => step_in(m, pc, r, read),
+        None => Step::Fail("no loaded module with CFI covers it"),
     }
 }
 
-fn step_inner(r: &mut Regs, is_top: bool, read: &dyn Fn(u64) -> Option<u64>, need_rbp: &mut bool) -> Option<()> {
-    let pc = if is_top { r.rip } else { r.rip.wrapping_sub(1) };
-    step_in(module(pc)?, pc, r, read, need_rbp)
-}
-
 /// One step of the frame at `pc` (the lookup pc: rip, or rip - 1 for a return address) in module `m`.
-fn step_in(m: &Module, pc: u64, r: &mut Regs, read: &dyn Fn(u64) -> Option<u64>, need_rbp: &mut bool) -> Option<()> {
+fn step_in(m: &Module, pc: u64, r: &mut Regs, read: &dyn Fn(u64) -> Option<u64>) -> Step {
+    const UNFOLLOWED: &str = "its CFI uses a rule this walker does not follow";
     // the CFI's address of pc (another process's module: its copy here)
     let pc = pc.wrapping_sub(m.delta);
-    let fde = find_fde(m, pc)?;
+    let Some(fde) = find_fde(m, pc) else { return Step::Fail("no FDE of its module covers it") };
     let mut c = Cur { p: fde };
     let mut len = c.u32() as u64;
     if len == 0xffff_ffff {
@@ -519,11 +519,10 @@ fn step_in(m: &Module, pc: u64, r: &mut Regs, read: &dyn Fn(u64) -> Option<u64>,
     let end = c.p + len;
     let id_at = c.p;
     let cie_off = c.u32() as u64;
-    let cie = parse_cie(id_at - cie_off)?;
-    let start = c.enc(cie.fde_enc, 0)?;
-    let range = c.enc(cie.fde_enc & 0x0f, 0)?;
+    let Some(cie) = parse_cie(id_at - cie_off) else { return Step::Fail(UNFOLLOWED) };
+    let (Some(start), Some(range)) = (c.enc(cie.fde_enc, 0), c.enc(cie.fde_enc & 0x0f, 0)) else { return Step::Fail(UNFOLLOWED) };
     if pc < start || pc >= start + range {
-        return None;
+        return Step::Fail("no FDE of its module covers it");
     }
     if cie.has_aug {
         let alen = c.uleb();
@@ -531,34 +530,53 @@ fn step_in(m: &Module, pc: u64, r: &mut Regs, read: &dyn Fn(u64) -> Option<u64>,
     }
     let mut row = Row { cfa_reg: 7, cfa_off: 8, rules: [Rule::Same; NREG] };
     let empty = row;
-    run(&mut row, &empty, &cie, cie.init.0, cie.init.1, start, u64::MAX)?;
-    let init = row;
-    run(&mut row, &init, &cie, c.p, end, start, pc)?;
-    if row.cfa_reg == 6 && r.rbp == 0 {
-        *need_rbp = true;
-        return None;
+    if run(&mut row, &empty, &cie, cie.init.0, cie.init.1, start, u64::MAX).is_none() {
+        return Step::Fail(UNFOLLOWED);
     }
-    let cfa = get(r, row.cfa_reg)?.wrapping_add(row.cfa_off as u64);
+    let init = row;
+    if run(&mut row, &init, &cie, c.p, end, start, pc).is_none() {
+        return Step::Fail(UNFOLLOWED);
+    }
+    // the CFA from rsp or rbp only (the rules rustc, gcc and clang emit); rbp 0 is not known
+    let cfa = match row.cfa_reg {
+        7 => r.rsp,
+        6 if r.rbp == 0 => return Step::NeedRbp,
+        6 => r.rbp,
+        _ => return Step::Fail("its CFA is based on a register other than rsp or rbp"),
+    }
+    .wrapping_add(row.cfa_off as u64);
     let ra = match row.rules[cie.ra as usize % NREG] {
-        Rule::Offset(o) => read(cfa.wrapping_add(o as u64))?,
-        _ => return None,
+        Rule::Offset(o) => match read(cfa.wrapping_add(o as u64)) {
+            Some(ra) => ra,
+            None => return Step::Fail("its return address slot is unreadable"),
+        },
+        Rule::Undef => return Step::End,
+        _ => return Step::Fail("its return address rule is not a stack slot"),
     };
+    if ra == 0 {
+        return Step::End;
+    }
+    if cfa <= r.rsp {
+        return Step::Fail("its CFA is not above its stack pointer");
+    }
     let mut next = *r;
     for n in [3usize, 6, 12, 13, 14, 15] {
         match row.rules[n] {
-            Rule::Offset(o) => set(&mut next, n, read(cfa.wrapping_add(o as u64))?),
+            Rule::Offset(o) => match read(cfa.wrapping_add(o as u64)) {
+                Some(v) => set(&mut next, n, v),
+                None => return Step::Fail("a saved register's slot is unreadable"),
+            },
             Rule::ValOffset(o) => set(&mut next, n, cfa.wrapping_add(o as u64)),
-            Rule::Reg(s) => set(&mut next, n, get(r, s)?),
-            Rule::Same | Rule::Undef => {}
+            // a register the walk does not know stays unknown (rbp 0)
+            Rule::Reg(s) => set(&mut next, n, get(r, s).unwrap_or(0)),
+            Rule::Undef => set(&mut next, n, 0),
+            Rule::Same => {}
         }
     }
     next.rsp = cfa;
     next.rip = ra;
-    if ra == 0 || cfa <= r.rsp {
-        return None;
-    }
     *r = next;
-    Some(())
+    Step::Done
 }
 
 /// The CFI of another process's modules (`vsnative pid=`: a native build's stacks walked here):
@@ -623,11 +641,9 @@ impl Foreign {
     /// `step` for a frame of that process (`read`: its copied stack).
     pub fn step(&self, r: &mut Regs, is_top: bool, read: &dyn Fn(u64) -> Option<u64>) -> Step {
         let pc = if is_top { r.rip } else { r.rip.wrapping_sub(1) };
-        let mut need_rbp = false;
-        match self.module(pc).and_then(|m| step_in(m, pc, r, read, &mut need_rbp)) {
-            Some(()) => Step::Done,
-            None if need_rbp => Step::NeedRbp,
-            None => Step::Fail,
+        match self.module(pc) {
+            Some(m) => step_in(m, pc, r, read),
+            None => Step::Fail("no mapped file with CFI covers it"),
         }
     }
 }

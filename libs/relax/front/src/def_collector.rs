@@ -973,7 +973,7 @@ mod tests {
         let before = prog.defs.len();
         for d in 0..before { if prog.def(DefId(d as u32)).kind == DefKind::Fn { collect_definitions(&mut prog, DefId(d as u32)).unwrap(); } }
         assert_eq!(prog.defs.len(), before);
-        let files = prog.current_source_files().into_iter().collect();
+        let files = prog.current_source_files(|_| true).into_iter().collect();
         let new = prog.recollect_check_crate(0, files).unwrap();
         assert!(!new.is_empty());
         for (&key, &d) in &prog.node_id_to_def_id {

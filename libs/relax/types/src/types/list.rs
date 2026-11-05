@@ -3,6 +3,7 @@
 //! a TyKind holds no heap pointer (it is Copy and maps from a collected image as is).
 use super::*;
 use std::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
+use super::index::Index;
 
 /// An interned list of `T` (u32-sized ids: TyId, DefId, or a trait object's (item, term,
 /// bound regions) triples): the arena position of its first word and, below 7, its word count
@@ -46,7 +47,7 @@ const _: () = {
 };
 
 /// Words per arena chunk; a list never crosses a chunk (chunks never move: `list` hands out
-/// slices into them), so a list holds at most LIST_CHUNK - 2 words.
+/// slices into them), so a list holds at most LIST_CHUNK - 1 words.
 const LIST_CHUNK_BITS: u32 = 16;
 const LIST_CHUNK: usize = 1 << LIST_CHUNK_BITS;
 /// 2^29 words at most (a list id holds a position in its high 29 bits).
@@ -54,20 +55,21 @@ const LIST_MAX_CHUNKS: usize = 1 << 13;
 /// A list id's low bits: its word count, or LONG when a length word precedes the words.
 const LEN_BITS: u32 = 3;
 const LONG: u32 = (1 << LEN_BITS) - 1;
-const LIST_BUCKET_BITS: u32 = 18;
 
-/// The list arena: each list is [next, words...], or [next, len, words...] from LONG words on
-/// (next: the following list in its hash bucket, 0 = none), named by `position of its first
-/// word << 3 | word count` (LONG: read the length word): most lists hold one or two ids, so
-/// the count is in the id rather than in a word. Positions below `mapped.len()` read from a
-/// collected image; later ones from chunks (zeroed, so skipped words read 0).
-/// Lookups and inserts are lock-free (a list is complete before its bucket head publishes it).
+/// The list arena: each list is [words...], or [len, words...] from LONG words on, named by
+/// `position of its first word << 3 | word count` (LONG: read the length word): most lists
+/// hold one or two ids, so the count is in the id rather than in a word. Positions below
+/// `mapped.len()` read from a collected image; later ones from chunks (zeroed, so skipped
+/// words read 0). Lookups are lock-free (a list is complete before its slot publishes it).
 pub(super) struct Lists {
     pub(super) mapped: &'static [u32],
     chunks: Box<[AtomicPtr<u32>]>,
     /// the next free position
     end: AtomicU32,
-    buckets: Box<[AtomicU32]>,
+    /// the intern table: a slot is `hash << 32 | id`, so a probe reads a list's words only when
+    /// the hash matches and a doubling reads no list at all. Its lock serialises position
+    /// assignment and slot claims (slots are claimed in position order).
+    index: Index<u64>,
 }
 
 // Raw chunk pointers are owned here; words are written once before publication.
@@ -90,7 +92,7 @@ impl Lists {
     /// mapped: the settle rebuild's restored interner (Types::top_up_from). Every list is complete,
     /// since nothing interns while it copies.
     pub(super) fn copy_of(live: &Lists) -> Self {
-        let l = Lists::new();
+        let mut l = Lists::new();
         let words = live.tail_words(0);
         for (p, &w) in words.iter().enumerate() {
             if w != 0 {
@@ -99,7 +101,7 @@ impl Lists {
             }
         }
         l.end.store(words.len() as u32, Ordering::Release);
-        for (b, h) in l.buckets.iter().zip(live.buckets.iter()) { b.store(h.load(Ordering::Acquire), Ordering::Release); }
+        l.index = Index::copy_of(&live.index);
         l
     }
 
@@ -109,7 +111,7 @@ impl Lists {
             chunks: (0..LIST_MAX_CHUNKS).map(|_| AtomicPtr::new(std::ptr::null_mut())).collect(),
             // position 0 is never a list's (id 0 is the empty list)
             end: AtomicU32::new(1),
-            buckets: (0..1usize << LIST_BUCKET_BITS).map(|_| AtomicU32::new(0)).collect(),
+            index: Index::new(),
         }
     }
 
@@ -145,78 +147,56 @@ impl Lists {
         unsafe { std::slice::from_raw_parts(c.add(p & (LIST_CHUNK - 1)), n) }
     }
 
-    /// The next list in `id`'s hash bucket (0: none).
     #[inline]
-    fn next(&self, id: u32) -> u32 {
-        let p = (id >> LEN_BITS) as usize;
-        self.word(if id & LONG == LONG { p - 2 } else { p - 1 })
+    fn find(&self, h: u32, w: &[u32]) -> Option<u32> {
+        let s = self.index.find(h, |s| (s >> 32) as u32 == h && self.words(s as u32) == w)?;
+        Some(s as u32)
     }
 
-    fn find(&self, mut id: u32, w: &[u32]) -> Option<u32> {
-        while id != 0 {
-            if self.words(id) == w {
-                return Some(id);
-            }
-            id = self.next(id);
-        }
-        None
-    }
-
-    /// Interns `w` (a list's words). Lock-free: the words go to space reserved by advancing
-    /// `end`, and the bucket head publishes the list (a lost race re-reads the bucket, which
-    /// then holds any equal list; the reserved words stay unused).
+    /// Interns `w` (a list's words): looked up without a lock; a new list takes the table's lock
+    /// and is complete before its slot publishes it.
     pub(super) fn intern(&self, w: &[u32]) -> u32 {
         if w.is_empty() {
             return 0;
         }
         use std::hash::{Hash, Hasher};
-        let mut h = crate::fxhash::FxHasher::default();
-        w.hash(&mut h);
-        let bucket = &self.buckets[(h.finish() >> (64 - LIST_BUCKET_BITS)) as usize];
-        let mut head = bucket.load(Ordering::Acquire);
-        if let Some(id) = self.find(head, w) {
+        let mut hasher = crate::fxhash::FxHasher::default();
+        w.hash(&mut hasher);
+        // the high half: the high bits of the multiplicative hash mix best
+        let h = (hasher.finish() >> 32) as u32;
+        if let Some(id) = self.find(h, w) {
+            return id;
+        }
+        let mut g = self.index.lock();
+        if let Some(id) = self.find(h, w) {
             return id;
         }
         let long = w.len() >= LONG as usize;
-        let head_words = 1 + long as usize;
+        let head_words = long as usize;
         let need = w.len() + head_words;
         assert!(need <= LIST_CHUNK, "makepad: interned list of {} words", w.len());
-        let mut end = self.end.load(Ordering::Relaxed);
-        let p = loop {
-            let mut p = end as usize;
-            if (p & (LIST_CHUNK - 1)) + need > LIST_CHUNK {
-                p = (p | (LIST_CHUNK - 1)) + 1;
-            }
-            assert!(p >> LIST_CHUNK_BITS < LIST_MAX_CHUNKS, "makepad: list arena full");
-            match self.end.compare_exchange_weak(end, (p + need) as u32, Ordering::Relaxed, Ordering::Relaxed) {
-                Ok(_) => break p,
-                Err(e) => end = e,
-            }
-        };
+        let mut p = self.end.load(Ordering::Relaxed) as usize;
+        if (p & (LIST_CHUNK - 1)) + need > LIST_CHUNK {
+            p = (p | (LIST_CHUNK - 1)) + 1;
+        }
+        assert!(p >> LIST_CHUNK_BITS < LIST_MAX_CHUNKS, "makepad: list arena full");
         let c = self.chunk(p >> LIST_CHUNK_BITS);
         let at = unsafe { c.add(p & (LIST_CHUNK - 1)) };
         unsafe {
             if long {
-                at.add(1).write(w.len() as u32);
+                at.write(w.len() as u32);
             }
             std::ptr::copy_nonoverlapping(w.as_ptr(), at.add(head_words), w.len());
         }
+        self.end.store((p + need) as u32, Ordering::Release);
         let id = (((p + head_words) as u32) << LEN_BITS) | (w.len() as u32).min(LONG);
-        loop {
-            unsafe { at.write(head) };
-            match bucket.compare_exchange(head, id, Ordering::Release, Ordering::Acquire) {
-                Ok(_) => return id,
-                Err(now) => {
-                    if let Some(other) = self.find(now, w) {
-                        return other;
-                    }
-                    head = now;
-                }
-            }
-        }
+        let slot = (h as u64) << 32 | id as u64;
+        self.index.claim(&mut g, h, slot, || self.index.table().filled().map(|s| ((s >> 32) as u32, s)).chain(std::iter::once((h, slot))));
+        id
     }
 
-    /// Chunk `ci`, allocated (zeroed) by the first thread that needs it.
+    /// Chunk `ci`, allocated (zeroed) by the first list that needs it (the table's lock is held,
+    /// or the interner is not shared yet).
     fn chunk(&self, ci: usize) -> *mut u32 {
         let c = self.chunks[ci].load(Ordering::Acquire);
         if !c.is_null() {
@@ -226,13 +206,8 @@ impl Lists {
         if new.is_null() {
             std::alloc::handle_alloc_error(Self::chunk_layout());
         }
-        match self.chunks[ci].compare_exchange(std::ptr::null_mut(), new, Ordering::AcqRel, Ordering::Acquire) {
-            Ok(_) => new,
-            Err(other) => {
-                unsafe { std::alloc::dealloc(new.cast(), Self::chunk_layout()) };
-                other
-            }
-        }
+        self.chunks[ci].store(new, Ordering::Release);
+        new
     }
 
     /// Positions in use (the image's word count).
@@ -240,53 +215,60 @@ impl Lists {
         self.end.load(Ordering::Acquire) as usize
     }
 
-    /// Lists in the buckets (memory report).
-    pub(super) fn count(&self) -> usize {
-        self.buckets.iter().map(|b| {
-            let (mut id, mut n) = (b.load(Ordering::Acquire), 0);
-            while id != 0 {
-                n += 1;
-                id = self.next(id);
-            }
-            n
-        }).sum()
+    /// Frees the intern tables replaced by growth (`self` is not shared).
+    pub(super) fn free_retired(&mut self) {
+        self.index.free_retired();
     }
 
-    /// Bytes held: allocated chunks and the bucket table.
+    /// Lists interned (memory report).
+    pub(super) fn count(&self) -> usize {
+        self.index.count()
+    }
+
+    /// Bytes held: allocated chunks and the intern table.
     pub(super) fn heap_bytes(&self) -> (usize, usize) {
         let chunks = self.chunks.iter().filter(|c| !c.load(Ordering::Relaxed).is_null()).count();
-        (chunks * LIST_CHUNK * 4, self.buckets.len() * 4)
+        (chunks * LIST_CHUNK * 4, self.index.bytes())
     }
 
     /// The words from position `from` to the end (image tail), skipped words as 0.
+    fn word_at(&self, p: usize) -> u32 {
+        if p < self.mapped.len() { return self.mapped[p]; }
+        let c = self.chunks[p >> LIST_CHUNK_BITS].load(Ordering::Acquire);
+        if c.is_null() { 0 } else { unsafe { *c.add(p & (LIST_CHUNK - 1)) } }
+    }
+
     pub(super) fn tail_words(&self, from: usize) -> Vec<u32> {
-        (from..self.end()).map(|p| {
-            if p < self.mapped.len() { return self.mapped[p]; }
-            let c = self.chunks[p >> LIST_CHUNK_BITS].load(Ordering::Acquire);
-            if c.is_null() { 0 } else { unsafe { *c.add(p & (LIST_CHUNK - 1)) } }
-        }).collect()
+        (from..self.end()).map(|p| self.word_at(p)).collect()
     }
 
-    pub(super) fn bucket_pairs(&self) -> Vec<u32> {
-        self.buckets.iter().enumerate().filter_map(|(i, head)| {
-            let head = head.load(Ordering::Acquire);
-            (head != 0).then_some([i as u32, head])
-        }).flatten().collect()
+    /// tail_words as the bytes of the words (an image section's tail, taken once)
+    pub(super) fn tail_word_bytes(&self, from: usize, end: usize) -> Vec<u8> {
+        let mut b = Vec::with_capacity(end.saturating_sub(from) * 4);
+        for p in from..end { b.extend_from_slice(&self.word_at(p).to_ne_bytes()); }
+        b
     }
 
+    /// The image's view of the table: the end position and the slots of the lists below it.
+    /// Read under the lock, so every list below the end is in the table read; a list claimed
+    /// since lies past the end and reads as empty, which cuts no other list's probe run (slots
+    /// are claimed in position order). A table replaced meanwhile stays allocated.
+    pub(super) fn image_slots(&self) -> (usize, Vec<u64>) {
+        let (end, t) = {
+            let _g = self.index.lock();
+            (self.end(), self.index.table())
+        };
+        (end, t.snapshot(|s| ((s as u32) >> LEN_BITS) as usize >= 1 && (((s as u32) >> LEN_BITS) as usize) < end))
+    }
 
-    /// A collected image's words and bucket heads; new lists follow the mapped words.
-    pub(super) fn restored(mapped: &'static [u32], buckets: &[u32]) -> Option<Self> {
-        if mapped.first() != Some(&0) || buckets.len() % 2 != 0 || mapped.len() >= LIST_MAX_CHUNKS * LIST_CHUNK {
+    /// A collected image's words and intern table; new lists follow the mapped words.
+    pub(super) fn restored(mapped: &'static [u32], slots: &[u64]) -> Option<Self> {
+        if mapped.first() != Some(&0) || mapped.len() >= LIST_MAX_CHUNKS * LIST_CHUNK {
             return None;
         }
+        let index = Index::restored(slots, |s| s as u32 != 0 && (((s as u32) >> LEN_BITS) as usize) < mapped.len())?;
         let mut l = Lists::new();
-        for pair in buckets.chunks_exact(2) {
-            if pair[0] as usize >= l.buckets.len() || pair[1] == 0 || (pair[1] >> LEN_BITS) as usize >= mapped.len() {
-                return None;
-            }
-            *l.buckets[pair[0] as usize].get_mut() = pair[1];
-        }
+        l.index = index;
         l.mapped = mapped;
         *l.end.get_mut() = mapped.len() as u32;
         Some(l)

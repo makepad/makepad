@@ -7,6 +7,10 @@ pub fn add(a: u32, b: u32) -> u32 {
     a + b
 }
 
+/// Touched once by each of tests/fresh_a.rs and tests/fresh_b.rs: each test target is a process
+/// of its own, so each finds it untouched.
+pub static TOUCHED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 #[cfg(test)]
 mod tests {
     #[test]

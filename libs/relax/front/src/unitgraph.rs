@@ -217,6 +217,7 @@ pub fn load(g: &Units, check_all_bins: bool) -> Result<Graph, String> {
         if mode == "test" {
             test_crates.push(crates.len());
         }
+        let tname = if u.sysroot { tname } else { crate::crates::own_crate_name(tname) };
         crates.push(CrateUnit { name: tname, src_path, edition, features, deps: udeps, host: None, proc_macro: pm, bin, harness: u.harness, build_script: false, version: ver.clone(), registry: !u.pkg_id.starts_with("path+") });
         crate_paths.push(norm);
         pkg.push((pkg_dir, pname, ver));
@@ -1115,7 +1116,7 @@ impl Drop for ScriptSlot {
 fn script_slot() -> ScriptSlot {
     let mut n = SCRIPT_RUNNING.lock().unwrap_or_else(|e| e.into_inner());
     while *n >= script_slots() {
-        n = SCRIPT_FREE.wait(n).unwrap_or_else(|e| e.into_inner());
+        n = crate::pool::wait(&SCRIPT_FREE, &SCRIPT_RUNNING, n).unwrap_or_else(|e| e.into_inner());
     }
     *n += 1;
     ScriptSlot

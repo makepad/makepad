@@ -28,6 +28,8 @@ pub mod user_type;
 pub use closure::ClosureArgs;
 #[path = "types/list.rs"]
 mod list;
+#[path = "types/index.rs"]
+mod index;
 pub use list::{List, ListElem, TyList};
 
 /// Zero denotes the innermost binder, as in the existing region representation.
@@ -334,8 +336,9 @@ const F_STUCK: u32 = 128;
 #[repr(C)]
 struct Entry {
     kind: TyKind,
-    /// the next entry (id + 1, 0 = none) in this entry's hash bucket
-    next: u32,
+    /// the high half of the kind's hash (Types::hash_of): the intern table's probes and its
+    /// doubling read it instead of hashing the kind again
+    hash: u32,
     /// Canonical free-region-erased type (self for already erased types).
     erased: TyId,
     /// flags (META_FLAGS), nesting depth and outer exclusive binder (`meta`)
@@ -366,19 +369,19 @@ fn meta(flags: u32, depth: u16, binder: DebruijnIndex) -> u32 {
 /// Entries per arena chunk (chunks never move: `kind` hands out references into them).
 const CHUNK_BITS: u32 = 14;
 const CHUNK: usize = 1 << CHUNK_BITS;
-/// Chunk table size: 2^26 types at most (a run uses ~10^5).
+/// Chunk table size: 2^26 types at most (a run uses ~10^5, a large app's dependency check ~10^7).
 const MAX_CHUNKS: usize = 1 << 12;
-/// Hash buckets of the intern table (fixed): a cold Stage interns ~1.1*10^6 types, which 2^19
-/// buckets held in chains of ~2 (every lookup walked them: a third of the interner's time).
-const BUCKET_BITS: u32 = 21;
-/// Insert locks, by bucket.
-const LOCKS: usize = 64;
+/// An intern table slot is `tag << ID_BITS | (id + 1)`, the tag being the low bits of the type's
+/// hash: a probe reads a type's row only when the tag matches.
+const ID_BITS: u32 = 26;
+const ID_MASK: u32 = (1 << ID_BITS) - 1;
+const _: () = assert!(MAX_CHUNKS * CHUNK == 1 << ID_BITS);
 
 /// The type interner. Shared by every thread that type-checks or lowers: `intern` takes
 /// `&self` (rustc's sharded interners). Entries live in an append-only arena of fixed-size
 /// chunks, so a `&TyKind` stays valid while other threads intern; the map from kind to id is
-/// a chained hash table whose buckets and chains are read without locks (entries are complete
-/// before a bucket head publishes them, Release/Acquire); inserts take one of a few bucket locks.
+/// a hash index (index.rs) that grows with the number of types and is read without locks (an
+/// entry is complete before its slot publishes it, Release/Acquire); inserts take its lock.
 pub struct Types {
     image: Option<collected::MappedTypes>,
     lists: list::Lists,
@@ -387,10 +390,9 @@ pub struct Types {
     free_regions: std::sync::atomic::AtomicBool,
     chunks: Box<[std::sync::atomic::AtomicPtr<Entry>]>,
     len: std::sync::atomic::AtomicU32,
-    /// serialises chunk allocation and id assignment (ids stay dense)
-    grow: relax_session::sync::Mutex<()>,
-    buckets: Box<[std::sync::atomic::AtomicU32]>,
-    locks: Box<[relax_session::sync::Mutex<()>]>,
+    /// the intern table; its lock serialises id assignment, chunk allocation and slot claims
+    /// (ids stay dense, and slots are claimed in id order)
+    index: index::Index<u32>,
     pub unit: TyId,
     pub bool_: TyId,
     pub char_: TyId,
@@ -438,9 +440,7 @@ impl Types {
             free_regions: std::sync::atomic::AtomicBool::new(false),
             chunks: (0..MAX_CHUNKS).map(|_| std::sync::atomic::AtomicPtr::new(std::ptr::null_mut())).collect(),
             len: std::sync::atomic::AtomicU32::new(0),
-            grow: relax_session::sync::Mutex::new(()),
-            buckets: (0..1usize << BUCKET_BITS).map(|_| std::sync::atomic::AtomicU32::new(0)).collect(),
-            locks: (0..LOCKS).map(|_| relax_session::sync::Mutex::new(())).collect(),
+            index: index::Index::new(),
             unit: TyId(0),
             bool_: TyId(0),
             char_: TyId(0),
@@ -498,30 +498,30 @@ impl Types {
         self.entry(t).meta & META_FLAGS
     }
 
+    /// The high half of the kind's hash (the high bits of the multiplicative hash mix best).
     #[inline]
-    fn hash_of(k: &TyKind) -> u64 {
+    fn hash_of(k: &TyKind) -> u32 {
         use std::hash::{Hash, Hasher};
         let mut h = crate::fxhash::FxHasher::default();
         k.hash(&mut h);
-        h.finish()
+        (h.finish() >> 32) as u32
+    }
+
+    #[inline(always)]
+    fn slot(h: u32, i: usize) -> u32 {
+        (h << ID_BITS) | (i as u32 + 1)
     }
 
     #[inline]
-    fn bucket_of(h: u64) -> usize {
-        // the high bits of the multiplicative hash mix best
-        (h >> (64 - BUCKET_BITS)) as usize
-    }
-
-    #[inline]
-    fn find(&self, mut id1: u32, k: &TyKind) -> Option<TyId> {
-        while id1 != 0 {
-            let e = self.entry(TyId(id1 - 1));
-            if e.kind == *k {
-                return Some(TyId(id1 - 1));
+    fn find(&self, h: u32, k: &TyKind) -> Option<TyId> {
+        let tag = h << ID_BITS;
+        let s = self.index.find(h, |s| {
+            (s ^ tag) & !ID_MASK == 0 && {
+                let e = self.entry(TyId((s & ID_MASK) - 1));
+                e.hash == h && e.kind == *k
             }
-            id1 = e.next;
-        }
-        None
+        })?;
+        Some(TyId((s & ID_MASK) - 1))
     }
 
     /// Number of interned types.
@@ -565,14 +565,14 @@ impl Types {
                 par_n += 1;
             }
         }
-        let (list_chunks, list_buckets) = self.lists.heap_bytes();
+        let (list_chunks, list_table) = self.lists.heap_bytes();
         let mut out = vec![
             (format!("types: arena ({} types, {} mapped, {} B entries, {} chunks)", n, mapped, es, chunks), (chunks * CHUNK * es) as u64),
             (format!("types: list arena ({} lists, {} words, {} mapped)", self.lists.count(), self.lists.end(), self.lists.mapped.len()), list_chunks as u64),
-            ("types: list buckets".to_string(), list_buckets as u64),
+            ("types: list intern table".to_string(), list_table as u64),
             (format!("types: holding inference vars ({}; entries)", inf_n), (inf_n * es) as u64),
             (format!("types: holding generic params ({}; entries)", par_n), (par_n * es) as u64),
-            ("types: hash buckets".to_string(), (self.buckets.len() * 4) as u64),
+            ("types: intern table".to_string(), self.index.bytes() as u64),
         ];
         let names = ["bool", "tuple", "adt", "fndef", "assoc", "infer", "ref", "closure", "fnptr", "other"];
         for (i, c) in by.iter().enumerate() {
@@ -588,28 +588,25 @@ impl Types {
     }
 
     pub fn intern(&self, k: TyKind) -> TyId {
-        use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
+        use std::sync::atomic::Ordering::{Relaxed, Release};
         let h = Self::hash_of(&k);
-        let b = Self::bucket_of(h);
-        if let Some(id) = self.find(self.buckets[b].load(Acquire), &k) {
+        if let Some(id) = self.find(h, &k) {
             return id;
         }
         let (binder_flags, outer_exclusive_binder) = self.binder_flags_of(&k);
         let m = meta(self.flags_of(&k) | binder_flags, self.depth_of(&k), outer_exclusive_binder);
-        // Before taking either type-interner lock: erasure may intern a new type.
+        // Before taking the intern table's lock: erasure may intern a new type.
         let erased = self.erased_kind(&k).map(|k| self.intern(k));
         if erased.is_some() {
             self.free_regions.store(true, std::sync::atomic::Ordering::Relaxed);
         }
-        let _l = self.locks[b % LOCKS].lock().unwrap_or_else(|e| e.into_inner());
-        let head = self.buckets[b].load(Acquire);
-        if let Some(id) = self.find(head, &k) {
+        let mut g = self.index.lock();
+        if let Some(id) = self.find(h, &k) {
             return id;
         }
-        let _g = self.grow.lock().unwrap_or_else(|e| e.into_inner());
         let i = self.len.load(Relaxed) as usize;
         let ci = i >> CHUNK_BITS;
-        assert!(ci < MAX_CHUNKS, "makepad: type interner full");
+        assert!(i + 1 < 1 << ID_BITS, "makepad: type interner full");
         let mut c = self.chunks[ci].load(Relaxed);
         if c.is_null() {
             let layout = std::alloc::Layout::array::<Entry>(CHUNK).unwrap();
@@ -619,9 +616,13 @@ impl Types {
             }
             self.chunks[ci].store(c, Release);
         }
-        unsafe { c.add(i & (CHUNK - 1)).write(Entry { kind: k, next: head, erased: erased.unwrap_or(TyId(i as u32)), meta: m }) };
+        unsafe { c.add(i & (CHUNK - 1)).write(Entry { kind: k, hash: h, erased: erased.unwrap_or(TyId(i as u32)), meta: m }) };
         self.len.store(i as u32 + 1, Release);
-        self.buckets[b].store(i as u32 + 1, Release);
+        // a doubled table takes the types in id order (their rows are read in sequence)
+        self.index.claim(&mut g, h, Self::slot(h, i), || (0..=i).map(|j| {
+            let h = self.entry(TyId(j as u32)).hash;
+            (h, Self::slot(h, j))
+        }));
         TyId(i as u32)
     }
 
@@ -701,8 +702,7 @@ impl Types {
 
     /// An already interned type.
     pub fn lookup(&self, k: &TyKind) -> Option<TyId> {
-        let h = Self::hash_of(k);
-        self.find(self.buckets[Self::bucket_of(h)].load(std::sync::atomic::Ordering::Acquire), k)
+        self.find(Self::hash_of(k), k)
     }
 
     #[inline(always)]

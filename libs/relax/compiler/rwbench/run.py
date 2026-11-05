@@ -13,7 +13,6 @@ NATIVE_COMMERCIAL names its prebuilt rustc binary.
 Env: WARM=1 (O3/code disk cache on, one dir per name, one untimed fill run per workload and name before the timed rounds; the O3 column then shows hot / installed / from the disk cache), ROUNDS (default 4), RW_MS (per-process iteration budget ms, default 4000), WORKLOADS ("a b": only those),
 MAKEPAD_RUN_STD_<NAME> (that name's own std tree, e.g. its compiler tree's std; a Relax change that touches std must be measured with its own std), NATIVE (prebuilt rustc binary; else built here with cargo --release into <target dir>/rustc), MAKEPAD_RUN_STD
 (default ../std), RUN_PREFIX (default "nice -n 10", "none" on Windows), RW_ROOT (the tree holding the inputs).
-O3PROF=1 records an untimed profile per name/workload in <target>/o3-profiles, then replays it.
 MAKEPAD_RUN_ENV_<NAME> supplies shell-quoted KEY=value overrides for that name.
 Timing belongs on a quiet machine; the spreads show how quiet it was."""
 import os, re, subprocess, sys, shlex, time, statistics
@@ -74,24 +73,13 @@ def one(cmd, e):
     if out.returncode != 0 or not m:
         return None, ("exit %d: " % out.returncode) + (out.stdout + out.stderr)[-300:].replace("\n", " ").replace("|", "/")
     t1 = re.search(r"makepad-run: O3: (\d+) hot, (\d+) installed(?:.*?(\d+) from the disk cache)?", out.stderr, re.M)
-    replay = "-"
-    profile = e.get("MAKEPAD_RUN_O3_PROFILE")
-    if profile and os.path.isfile(profile + ".replay"):
-        replay = Path(profile + ".replay").read_text().splitlines()[0]
     stuck = re.search(r"^makepad-run: O3 stuck: (\d+) hot fns[^\n]*", out.stderr, re.M)
-    return dict(stuck=int(stuck.group(1)) if stuck else None, stuck_line=stuck.group(0) if stuck else "", replay=replay, steady=float(m.group(2)), tts=float(m.group(4)), sum=m.group(8), o3=int(m.group(7)), tier1="%s hot / %s inst / %s cache" % (t1.group(1), t1.group(2), t1.group(3) or "0") if t1 else "-"), None
+    return dict(stuck=int(stuck.group(1)) if stuck else None, stuck_line=stuck.group(0) if stuck else "", steady=float(m.group(2)), tts=float(m.group(4)), sum=m.group(8), o3=int(m.group(7)), tier1="%s hot / %s inst / %s cache" % (t1.group(1), t1.group(2), t1.group(3) or "0") if t1 else "-"), None
 
 # runs[workload]["rustc" | name] = [result per round or None]
 warm = os.environ.get("WARM") == "1"
 filled = set()
-recorded = set()
-profiled = os.environ.get("O3PROF") == "1"
-profile_dir = Path(target) / "o3-profiles"
-if profiled:
-    profile_dir.mkdir(parents=True, exist_ok=True)
 assert len({n for n, _ in bins}) == len(bins), "Relax names must be unique"
-if profiled:
-    assert all(n and "/" not in n and "\\" not in n for n, _ in bins), "profile names must not contain path separators"
 
 def relax_env(n, w=""):
     suffix = n.upper().replace("-", "_")
@@ -117,29 +105,12 @@ def relax_env(n, w=""):
 def prepare(n, p, w):
     renv = relax_env(n, w)
     cmd = prefix + relax_cmd(p, w)
-    if profiled:
-        profile = profile_dir / (n + "-" + w + ".t1")
-        renv["MAKEPAD_RUN_O3_PROFILE"] = str(profile)
-        if (w, n) not in recorded:
-            # A stale profile (even under the same name) may belong to another binary.
-            profile.unlink(missing_ok=True)
-            Path(str(profile) + ".replay").unlink(missing_ok=True)
-            rec, err = one(cmd, renv)
-            if err or not profile.exists() or not profile.stat().st_size:
-                raise RuntimeError("profile record %s/%s: %s" % (n, w, err or "empty profile"))
-            recorded.add((w, n))
     if warm and (w, n) not in filled:
         filled.add((w, n))
         _, err = one(cmd, renv)
         if err:
             raise RuntimeError("cache fill %s/%s: %s" % (n, w, err))
     return renv
-
-# Record every build before any measured round (including the native side).
-if profiled:
-    for w in names:
-        for n, p in bins:
-            prepare(n, p, w)
 
 runs = {w: {k: [] for k in ["rustc"] + [n for n, _ in bins]} for w in names}
 errs = {}
@@ -151,8 +122,6 @@ for r in range(rounds):
         if ea: errs[(w, "rustc")] = ea
         for n, p in order:
             renv = prepare(n, p, w)
-            if profiled:
-                Path(renv["MAKEPAD_RUN_O3_PROFILE"] + ".replay").unlink(missing_ok=True)
             b, eb = one(prefix + relax_cmd(p, w), renv)
             runs[w][n].append(b)
             if eb: errs[(w, n)] = eb
@@ -170,17 +139,17 @@ def ratios(w, num, den):
 
 for n, _ in bins:
     print("\n== %s  (%d rounds, medians; [min..max] over rounds)" % (n, rounds))
-    print("| workload | rustc steady ms | Relax steady ms | O3 replay (installed / recorded / unrecorded-live / divergences) | Relax/rustc (median of per-round ratios) | spread | Relax time-to-steady ms | O3 settled ms (since main; 0 = never within RW_MAX_MS) | Relax O3 coverage | checksums equal |")
-    print("|---|---:|---:|---|---:|---|---:|---:|---|---|")
+    print("| workload | rustc steady ms | Relax steady ms | Relax/rustc (median of per-round ratios) | spread | Relax time-to-steady ms | O3 settled ms (since main; 0 = never within RW_MAX_MS) | Relax O3 coverage | checksums equal |")
+    print("|---|---:|---:|---:|---|---:|---:|---|---|")
     gm = []
     for w in names:
         a = [x for x in runs[w]["rustc"] if x]; b = [x for x in runs[w][n] if x]
         if not a or not b:
-            print("| %s | | | | ERROR | | | | %s |" % (w, errs.get((w, n)) or errs.get((w, "rustc"), ""))); continue
+            print("| %s | | | ERROR | | | | %s |" % (w, errs.get((w, n)) or errs.get((w, "rustc"), ""))); continue
         rt = ratios(w, n, "rustc")
         gm.append(med(rt))
         sums = {x["sum"] for x in a + b}
-        print("| %s | %.3f [%s] | %.3f [%s] | %s | %.2f | %s | %.0f | %s | %s | %s |" % (w, med([x["steady"] for x in a]), rng([x["steady"] for x in a]), med([x["steady"] for x in b]), rng([x["steady"] for x in b]), "; ".join(dict.fromkeys(x["replay"] for x in b)), med(rt), rng(rt), med([x["tts"] for x in b]), "/".join(str(x["o3"]) for x in b), b[-1]["tier1"], "yes" if len(sums) == 1 else "**NO** %s" % sorted(sums)))
+        print("| %s | %.3f [%s] | %.3f [%s] | %.2f | %s | %.0f | %s | %s | %s |" % (w, med([x["steady"] for x in a]), rng([x["steady"] for x in a]), med([x["steady"] for x in b]), rng([x["steady"] for x in b]), med(rt), rng(rt), med([x["tts"] for x in b]), "/".join(str(x["o3"]) for x in b), b[-1]["tier1"], "yes" if len(sums) == 1 else "**NO** %s" % sorted(sums)))
     if gm:
         print("\ngeomean Relax/rustc: %.3f (%d workloads)" % (geo(gm), len(gm)))
     # hot fns a run ended with below O3 and nothing pending (the JIT's `why-tier stuck`): they should be none

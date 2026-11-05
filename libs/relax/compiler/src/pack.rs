@@ -12,13 +12,10 @@ pub struct NewEntry {
     pub payload: Vec<u8>,
 }
 
-/// A pack file's bytes: mapped read-only (unix; pages are read as entries are linked, nothing is
-/// copied at open), else read into memory.
+/// A file's bytes, mapped read-only: pages are read as entries are linked, nothing is copied at open.
 pub struct Bytes {
     ptr: *const u8,
     len: usize,
-    mapped: bool,
-    owned: Vec<u8>,
 }
 
 unsafe impl Send for Bytes {}
@@ -27,76 +24,108 @@ unsafe impl Sync for Bytes {}
 impl std::ops::Deref for Bytes {
     type Target = [u8];
     fn deref(&self) -> &[u8] {
-        if self.mapped {
-            unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
-        } else {
-            &self.owned
-        }
+        unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
     }
 }
 
 impl Drop for Bytes {
     fn drop(&mut self) {
-        #[cfg(unix)]
-        if self.mapped {
-            extern "C" {
-                fn munmap(addr: *mut u8, len: usize) -> i32;
-            }
-            forget_mapping(self.ptr as usize);
-            unsafe { munmap(self.ptr as *mut u8, self.len) };
-        }
+        forget_mapping(self.ptr as usize);
+        unmap_view(self.ptr, self.len);
     }
 }
 
 impl Bytes {
-    pub fn from_vec(v: Vec<u8>) -> Bytes {
-        Bytes { ptr: std::ptr::null(), len: v.len(), mapped: false, owned: v }
-    }
-
     /// The file mapped read-only, shared: the page cache's pages (packs are immutable: written whole,
-    /// then renamed; a store's committed payloads never change). Not MAP_PRIVATE: macOS sets up a
-    /// private file mapping slowly (~1.9 ms each on an M4, ~0.002 ms shared), and read-only the two
-    /// read the same bytes.
+    /// then renamed; a store's committed payloads never change).
     pub fn map(path: &Path) -> Option<Bytes> {
-        #[cfg(unix)]
-        {
-            use std::os::unix::io::AsRawFd;
-            extern "C" {
-                fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut u8;
-            }
-            let f = std::fs::File::open(path).ok()?;
-            let len = f.metadata().ok()?.len() as usize;
-            if len == 0 {
-                return None;
-            }
-            const PROT_READ: i32 = 1;
-            const MAP_SHARED: i32 = 1;
-            let p = unsafe { mmap(std::ptr::null_mut(), len, PROT_READ, MAP_SHARED, f.as_raw_fd(), 0) };
-            if p.is_null() || p as isize == -1 {
-                return None;
-            }
-            note_mapping(p as usize, len, &f, 0);
-            return Some(Bytes { ptr: p, len, mapped: true, owned: Vec::new() });
+        let f = std::fs::File::open(path).ok()?;
+        let len = f.metadata().ok()?.len() as usize;
+        if len == 0 {
+            return None;
         }
-        #[allow(unreachable_code)]
-        Bytes::read_kept(path)
+        let ptr = map_view(&f, 0, len)?;
+        note_mapping(ptr as usize, len, &f, 0);
+        Some(Bytes { ptr, len })
     }
+}
 
-    /// The file read into the kept heap: where it is not mapped (Windows), the bytes stand for a
-    /// mapping, which is process state -- what is read in place from them (a startup image's pc
-    /// maps, unwind trailers) is identity state of installed code: the kept heap.
-    fn read_kept(path: &Path) -> Option<Bytes> {
-        crate::zone_alloc::kept_with(|| std::fs::read(path).ok().map(Bytes::from_vec))
+/// `len` bytes of `file` at `off` (a multiple of `view_align`), mapped read-only until `unmap_view`.
+/// Shared, not private: a private file mapping costs ~1.9 ms to set up on macOS (an M4, while the
+/// file is being appended to), and a cold Stage maps ~3.5k images on the load thread (6.5 s);
+/// read-only, both read the page cache's bytes, and an appended payload never changes.
+#[cfg(unix)]
+fn map_view(file: &std::fs::File, off: u64, len: usize) -> Option<*const u8> {
+    use std::os::unix::io::AsRawFd;
+    extern "C" {
+        fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut u8;
+    }
+    const PROT_READ: i32 = 1;
+    const MAP_SHARED: i32 = 1;
+    let p = unsafe { mmap(std::ptr::null_mut(), len, PROT_READ, MAP_SHARED, file.as_raw_fd(), off as i64) };
+    (!p.is_null() && p as isize != -1).then_some(p as *const u8)
+}
+
+#[cfg(unix)]
+fn unmap_view(p: *const u8, len: usize) {
+    extern "C" {
+        fn munmap(addr: *mut u8, len: usize) -> i32;
+    }
+    unsafe { munmap(p as *mut u8, len) };
+}
+
+#[cfg(unix)]
+fn view_align() -> u64 {
+    extern "C" {
+        fn getpagesize() -> i32;
+    }
+    unsafe { getpagesize() }.max(4096) as u64
+}
+
+#[cfg(windows)]
+fn map_view(file: &std::fs::File, off: u64, len: usize) -> Option<*const u8> {
+    use makepad_windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use makepad_windows_sys::Win32::System::Memory::{CreateFileMappingW, MapViewOfFile, FILE_MAP_READ, PAGE_READONLY};
+    use std::os::windows::io::AsRawHandle;
+    // size 0: the section ends where the file ends now, and `off + len` is written by now. The view
+    // keeps the section and the section keeps the file, so neither handle stays open.
+    let section = unsafe { CreateFileMappingW(HANDLE(file.as_raw_handle() as _), None, PAGE_READONLY, 0, 0, None) }.ok()?;
+    let view = unsafe { MapViewOfFile(section, FILE_MAP_READ, (off >> 32) as u32, off as u32, len) };
+    let _ = unsafe { CloseHandle(section) };
+    Some(view.ok()?.0 as *const u8)
+}
+
+#[cfg(windows)]
+fn unmap_view(p: *const u8, _len: usize) {
+    use makepad_windows_sys::Win32::System::Memory::{UnmapViewOfFile, MEMORY_MAPPED_VIEW_ADDRESS};
+    let _ = unsafe { UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS(p as _)) };
+}
+
+/// A view starts on the allocation granularity (64 KB), not on a page.
+#[cfg(windows)]
+fn view_align() -> u64 {
+    use makepad_windows_sys::Win32::System::SystemInformation::{GetNativeSystemInfo, SYSTEM_INFO};
+    let mut info: SYSTEM_INFO = unsafe { std::mem::zeroed() };
+    unsafe { GetNativeSystemInfo(&mut info) };
+    info.dwAllocationGranularity as u64
+}
+
+/// Takes `b`'s pages out of this process's working set. They stay file pages: a later read faults
+/// them back without touching the disk. Unlocking pages that are not locked is how Windows does
+/// this; it answers "not locked", the ordinary outcome here.
+#[cfg(windows)]
+pub(crate) fn release_pages(b: &[u8]) {
+    use makepad_windows_sys::Win32::System::Memory::VirtualUnlock;
+    if !b.is_empty() {
+        let _ = unsafe { VirtualUnlock(b.as_ptr() as *const std::ffi::c_void, b.len()) };
     }
 }
 
 /// Every read-only cache file mapping of this process: (start, length).
-#[cfg(unix)]
 static MAPPINGS: relax_session::sync::Mutex<Vec<Mapping>> = relax_session::sync::Mutex::new(Vec::new());
 
 /// One cache file mapping: where, and (macOS) what to map again over it: the file's path, its
 /// identity (device, inode) and the offset mapped.
-#[cfg(unix)]
 struct Mapping {
     start: usize,
     len: usize,
@@ -104,7 +133,6 @@ struct Mapping {
     again: Option<(std::path::PathBuf, u64, u64, u64)>,
 }
 
-#[cfg(unix)]
 fn note_mapping(start: usize, len: usize, file: &std::fs::File, off: u64) {
     // kept heap: the list outlives every compiler generation
     let _k = crate::zone_alloc::kept();
@@ -134,7 +162,6 @@ fn note_mapping(start: usize, len: usize, file: &std::fs::File, off: u64) {
     });
 }
 
-#[cfg(unix)]
 fn forget_mapping(start: usize) {
     let mut m = MAPPINGS.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(i) = m.iter().position(|x| x.start == start) {
@@ -149,7 +176,7 @@ fn forget_mapping(start: usize) {
 /// nothing is lost: a later read faults the page back from the page cache (a minor fault).
 /// Linux/Android: madvise(DONTNEED). macOS: that only deactivates the pages, so the same file is
 /// mapped again over the range (MAP_FIXED replaces the mapping atomically; the file is the one
-/// mapped before, checked by device and inode). Returns bytes released.
+/// mapped before, checked by device and inode). Windows: release_pages. Returns bytes released.
 pub fn release_resident() -> usize {
     #[cfg(any(target_os = "linux", target_os = "android"))]
     {
@@ -193,55 +220,33 @@ pub fn release_resident() -> usize {
         }
         return n;
     }
+    #[cfg(windows)]
+    {
+        let m = MAPPINGS.lock().unwrap_or_else(|e| e.into_inner());
+        let mut n = 0;
+        for x in m.iter() {
+            release_pages(unsafe { std::slice::from_raw_parts(x.start as *const u8, x.len) });
+            n += x.len;
+        }
+        return n;
+    }
     #[allow(unreachable_code)]
     0
 }
 
-/// `len` bytes of `file` at `off`, mapped read-only for the rest of the process (unix: the
-/// page cache's pages, nothing copied; elsewhere a copy). The file is never truncated below
-/// `off + len` while this process runs (store.rs RunStore: append-only).
-#[cfg(unix)]
+/// `len` bytes of `file` at `off`, mapped read-only for the rest of the process (the page cache's
+/// pages, nothing copied). The file is never truncated below `off + len` while this process runs
+/// (store.rs RunStore: append-only).
 pub fn map_pinned(file: &std::fs::File, off: u64, len: usize) -> Option<&'static [u8]> {
-    use std::os::unix::io::AsRawFd;
-    extern "C" {
-        fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut u8;
-        fn getpagesize() -> i32;
-    }
     if len == 0 {
         return Some(&[]);
     }
-    let page = unsafe { getpagesize() }.max(4096) as u64;
-    let base = off & !(page - 1);
+    let align = view_align();
+    let base = off & !(align - 1);
     let span = (off - base) as usize + len;
-    const PROT_READ: i32 = 1;
-    // shared, not private: a private file mapping costs ~1.9 ms to set up on macOS (an M4, while
-    // the file is being appended to), and a cold Stage maps ~3.5k images on the load thread (6.5 s);
-    // read-only, both read the page cache's bytes, and an appended payload never changes
-    const MAP_SHARED: i32 = 1;
-    let p = unsafe { mmap(std::ptr::null_mut(), span, PROT_READ, MAP_SHARED, file.as_raw_fd(), base as i64) };
-    if p.is_null() || p as isize == -1 {
-        return None;
-    }
+    let p = map_view(file, base, span)?;
     note_mapping(p as usize, span, file, base);
     Some(unsafe { std::slice::from_raw_parts(p.add((off - base) as usize), len) })
-}
-
-#[cfg(not(unix))]
-pub fn map_pinned(file: &std::fs::File, off: u64, len: usize) -> Option<&'static [u8]> {
-    use std::os::windows::fs::FileExt;
-    // the copy stands for a mapping kept for the rest of the process: the kept heap (Bytes::read_kept)
-    let _k = crate::zone_alloc::kept();
-    // 8-byte aligned, as a store payload is
-    let mut words = vec![0u64; len.div_ceil(8)];
-    let buf = unsafe { std::slice::from_raw_parts_mut(words.as_mut_ptr() as *mut u8, len) };
-    let mut at = 0;
-    while at < len {
-        let n = file.seek_read(&mut buf[at..], off + at as u64).ok()?;
-        if n == 0 { return None; }
-        at += n;
-    }
-    let words = Box::leak(words.into_boxed_slice());
-    Some(unsafe { std::slice::from_raw_parts(words.as_ptr() as *const u8, len) })
 }
 
 /// Writes `image` to `dir/name` atomically: a fresh temp file (O_EXCL, 0600) in the same
@@ -285,31 +290,8 @@ pub fn ensure_private_dir(dir: &Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    /// A cache file read in place of a mapping, from the compiler phase (a warm start's load):
-    /// its bytes are in the kept heap (the program's), not in the compiler arena.
-    #[test]
-    fn unmapped_cache_bytes_live_in_the_kept_heap() {
-        let path = std::env::temp_dir().join(format!("relax-pack-kept-{}", std::process::id()));
-        std::fs::write(&path, vec![7u8; 4096]).unwrap();
-        let _c = crate::zone_alloc::compiler();
-        // the phase routes: a plain read now lands in the compiler arena
-        let plain = std::fs::read(&path).unwrap();
-        assert!(crate::zone_alloc::compiler_owns(plain.as_ptr()), "the compiler phase does not route to the arena here");
-        let read = super::Bytes::read_kept(&path).unwrap();
-        assert_eq!(read.len(), 4096);
-        assert!(!crate::zone_alloc::compiler_owns(read.as_ptr()), "read into the compiler arena");
-        #[cfg(not(unix))]
-        {
-            let file = std::fs::File::open(&path).unwrap();
-            let pinned = super::map_pinned(&file, 8, 1024).unwrap();
-            assert!(!crate::zone_alloc::compiler_owns(pinned.as_ptr()), "pinned copy in the compiler arena");
-        }
-        std::fs::remove_file(&path).unwrap();
-    }
-
     /// The settle's release of the cache mappings' resident pages: the process's resident size
     /// falls by about the mapped size and the same bytes are read again from the file.
-    #[cfg(unix)]
     #[test]
     fn release_resident_drops_the_pages_and_keeps_the_bytes() {
         let path = std::env::temp_dir().join(format!("relax-pack-release-{}", std::process::id()));

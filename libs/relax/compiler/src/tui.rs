@@ -236,11 +236,13 @@ pub fn start(_progress: bool) {}
 pub fn finish(_summary: bool) {}
 #[cfg(not(unix))]
 pub(crate) fn flush() {}
+#[cfg(not(unix))]
+pub(crate) fn log_only(_line: &str) {}
 
 #[cfg(unix)]
 pub use unix::{finish, start};
 #[cfg(unix)]
-pub(crate) use unix::{flush, fault_fd};
+pub(crate) use unix::{flush, fault_fd, log_only};
 
 #[cfg(unix)]
 mod unix {
@@ -339,6 +341,25 @@ mod unix {
                 _ => return true,
             }
         }
+    }
+
+    /// A line for the session log alone (the terminal does not show it), after what the program
+    /// wrote before it. Nothing without a session log.
+    pub(crate) fn log_only(line: &str) {
+        use std::io::Write;
+        let mut g = READER.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(r) = g.as_mut() else { return };
+        let ended = drain(r);
+        if let Some(f) = r.file.as_mut() {
+            // a failed transcript write drops this line from the file only
+            let _ = writeln!(f, "{line}");
+        }
+        if ended {
+            unsafe { close(r.fd) };
+            *g = None;
+        }
+        drop(g);
+        kick_forward();
     }
 
     /// Drain under READER; closes the read end at end of stream.

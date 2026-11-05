@@ -65,6 +65,14 @@ pub struct Look {
     pub updating: Option<f32>,
 }
 
+impl Look {
+    /// The start screen at `opacity` over the app's frames (`Boot::veil`: the window's badge
+    /// layer, which every backend composes).
+    pub fn veil(opacity: f32) -> Self {
+        Look { blur: false, backdrop: opacity, galaxy: opacity, sharp: 0.0, progress: -1.0, resolve: -1.0, done: false, updating: None }
+    }
+}
+
 pub struct Layer {
     /// the HAL layer is on, with the APP texture of this size and generation
     pub on: bool,

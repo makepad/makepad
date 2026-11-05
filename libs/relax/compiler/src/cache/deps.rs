@@ -367,6 +367,9 @@ pub(crate) struct Deps {
     pub(crate) atomic: Vec<bool>,
     /// the store a mapped graph's tables are in
     _store: Option<std::sync::Arc<crate::store::Store>>,
+    /// a graph of edited text (Cache::keys_follow_text): per version it took a file from, the boot
+    /// file its rows are under
+    pub(crate) file_versions: HashMap<u32, u32>,
     pub(crate) nodes_n: usize,
     /// the nodes this build walked (the others' rows came from the stored graph it was built over)
     pub(crate) walked: usize,
@@ -857,7 +860,7 @@ fn kind_code(k: &ItemKind) -> u32 {
 impl Deps {
     /// Per crate: what its rows are built from, besides the crates it can see (CrateRow without its
     /// own lists and always hash).
-    fn crate_inputs(prog: &Program, iface: &[u128], atomic: &[bool]) -> Vec<CrateRow> {
+    fn crate_inputs(prog: &Program, parsed: &[std::sync::Arc<ParsedFile>], iface: &[u128], atomic: &[bool]) -> Vec<CrateRow> {
         let mut files: Vec<Sip128> = (0..prog.crates.len()).map(|_| { let mut h = Sip128::new(); h.str("deps-crate-files"); h }).collect();
         let mut place = vec![0u32; prog.crates.len()];
         for f in 0..prog.boot_files.min(prog.files.len()) {
@@ -869,7 +872,7 @@ impl Deps {
             h.u32(place[c as usize]);
             place[c as usize] += 1;
             h.str(prog.file_paths.get(f).map_or("", |p| p.as_str()));
-            h.u32(prog.files[f].ast.items.len() as u32);
+            h.u32(parsed[f].ast.items.len() as u32);
         }
         files.into_iter().enumerate().map(|(c, files)| {
             let ci = &prog.crates[c];
@@ -911,12 +914,13 @@ impl Deps {
     }
 
     /// The crates whose rows a build over `prev` takes over (`build`): their files need no digests.
-    pub(crate) fn clean_crates(prog: &Program, iface: &[u128], prev: Option<&Deps>) -> Vec<bool> {
+    pub(crate) fn clean_crates(prog: &Program, parsed: &[std::sync::Arc<ParsedFile>], iface: &[u128], prev: Option<&Deps>) -> Vec<bool> {
         let atomic = atomic_crates(prog, iface.len());
-        Self::clean_with(prev, &Self::crate_inputs(prog, iface, &atomic), &universes(prog))
+        Self::clean_with(prev, &Self::crate_inputs(prog, parsed, iface, &atomic), &universes(prog))
     }
 
-    /// Builds the graph of the program's boot files; `iface`: the crates' interface fingerprints
+    /// Builds the graph of the program's boot files, `parsed` per boot file (`prog.files`, or the
+    /// versions a live edit made current); `iface`: the crates' interface fingerprints
     /// (what coarse nodes and sysroot crates are keyed by), `valid` what
     /// it is built from (Deps::valid). Over `prev` (the graph a start before this one stored), the
     /// rows of every crate that is clean (`clean_crates`) are taken over and only the other crates'
@@ -924,12 +928,12 @@ impl Deps {
     /// closures and components are known. The result is the graph a build from scratch makes (the
     /// component ids aside). None: over `prev`, the names that decide clean crates' nodes (the
     /// program's alias and macro names) changed -- build without it.
-    pub(crate) fn build(prog: &Program, digests: &[Option<std::sync::Arc<super::items::FileDigest>>], iface: &[u128], valid: u128, prev: Option<&Deps>) -> Option<Deps> {
+    pub(crate) fn build(prog: &Program, parsed: &[std::sync::Arc<ParsedFile>], digests: &[Option<std::sync::Arc<super::items::FileDigest>>], iface: &[u128], valid: u128, prev: Option<&Deps>) -> Option<Deps> {
         let t0 = std::time::Instant::now();
         let n_crates = prog.crates.len();
         let atomic = atomic_crates(prog, iface.len());
         let universe = universes(prog);
-        let mut crates = Self::crate_inputs(prog, iface, &atomic);
+        let mut crates = Self::crate_inputs(prog, parsed, iface, &atomic);
         let clean = Self::clean_with(prev, &crates, &universe);
         let prev = prev.filter(|_| clean.iter().any(|&c| c));
         let file_crate = Self::file_crates(prog);
@@ -963,7 +967,7 @@ impl Deps {
         // expansions' names belong to the node; without them it would be coarse -- and whether it
         // is must not depend on what ran before the graph was built)
         for &f in &files {
-            let (Some(pf), Some(Some(dg))) = (prog.files.get(f), digests.get(f)) else { continue };
+            let (Some(pf), Some(Some(dg))) = (parsed.get(f), digests.get(f)) else { continue };
             if pf.part.get().is_some() { continue; }
             let needs = pf.ast.items.iter().enumerate().any(|(i, it)| {
                 matches!(it.kind, ItemKind::Fn(sig, None, _) if pf.ast.fn_sig(sig).lazy_body.is_some())
@@ -976,7 +980,7 @@ impl Deps {
         }
         struct Shared<'a>(&'a [std::sync::Arc<ParsedFile>]);
         unsafe impl Sync for Shared<'_> {}
-        let pfs = Shared(&prog.files);
+        let pfs = Shared(parsed);
         let paths = &prog.file_paths;
         let threads = std::thread::available_parallelism().map_or(4, |x| x.get()).clamp(1, 8);
         let next = std::sync::atomic::AtomicUsize::new(0);
@@ -1020,7 +1024,7 @@ impl Deps {
         for (id, r) in raws.iter().enumerate() {
             let f = node_file[id] as usize;
             if let Some(&i) = r.items.first() {
-                match &prog.files[f].ast.item(crate::ast::ItemId(i)).kind {
+                match &parsed[f].ast.item(crate::ast::ItemId(i)).kind {
                     ItemKind::TypeAlias(_) => own_aliases[node_crate[id] as usize].extend(r.keys.iter().copied()),
                     ItemKind::MacroRules(_) => own_macros[node_crate[id] as usize].extend(r.keys.iter().copied()),
                     _ => {}
@@ -1028,7 +1032,7 @@ impl Deps {
             }
         }
         // proc macros: the fns of the proc-macro crates' root files (their names)
-        for (f, pf) in prog.files.iter().enumerate().take(prog.boot_files.min(prog.files.len())) {
+        for (f, pf) in parsed.iter().enumerate().take(prog.boot_files.min(prog.files.len())) {
             let Some(&c) = prog.file_crate.get(f) else { continue };
             if clean[c as usize] || !prog.crates.get(c as usize).is_some_and(|ci| ci.proc_macro) { continue; }
             for &i in pf.ast.root_items.iter() {
@@ -1321,13 +1325,13 @@ impl Deps {
             let mut out = String::new();
             for id in 0..n_items {
                 let f = node_file[id] as usize;
-                let at = raws[id].items.first().map(|&i| prog.files[f].ast.item(crate::ast::ItemId(i)).lo).unwrap_or(0);
-                let (l, _) = prog.files[f].line_col(at);
+                let at = raws[id].items.first().map(|&i| parsed[f].ast.item(crate::ast::ItemId(i)).lo).unwrap_or(0);
+                let (l, _) = parsed[f].line_col(at);
                 let keys: Vec<String> = raws[id].keys.iter().map(|k| format!("{:x}", k)).collect();
                 let why = if !coarse[id] { "0".to_string() } else if raws[id].mac { "1".to_string() } else {
                     let lines: Vec<String> = raws[id].invoked.iter().zip(&raws[id].invoked_at)
                         .filter(|(m, _)| **m & QUIET_BIT == 0 || user_macros.contains(&(**m & !QUIET_BIT)))
-                        .map(|(_, &p)| { let (l, c) = prog.files[f].line_col(p); format!("{}:{}", l, c) }).collect();
+                        .map(|(_, &p)| { let (l, c) = parsed[f].line_col(p); format!("{}:{}", l, c) }).collect();
                     format!("2@{}", lines.join(","))
                 };
                 out.push_str(&format!("{}\t{}\t{}:{}\t{:032x}\t{:032x}\t{}\t{}\t{}\n", id, prog.syms.str(prog.crates[node_crate[id] as usize].name),
@@ -1354,7 +1358,7 @@ impl Deps {
         macros.sort_unstable();
         let phases = [t_files, t_edges, t_scc, t0.elapsed()].map(|d| d.as_secs_f64() * 1e3);
         Some(Deps { valid, nodes_n: nodes.len(), walked: nodes.len() - taken, nodes: Rows::Owned(nodes), names: Rows::Owned(names), macros: Rows::Owned(macros),
-            crates: Rows::Owned(crates), files: Rows::Owned(file_crate), lists: Rows::Owned(lists), comp_end: base + comps.len() as u32, universe, atomic, _store: None,
+            crates: Rows::Owned(crates), files: Rows::Owned(file_crate), lists: Rows::Owned(lists), comp_end: base + comps.len() as u32, universe, atomic, _store: None, file_versions: HashMap::new(),
             edges, coarse: ncoarse, phases })
     }
 
@@ -1421,7 +1425,7 @@ impl Deps {
         // every list range in bounds (a build over this graph slices them)
         if crates.iter().any(|r| [r.always_at, r.aliases_at, r.macros_at].iter().any(|at| at[0] as usize + at[1] as usize > nl) || r.always_at[1] % 2 != 0) { return None; }
         Some(Deps { valid, nodes: Rows::Mapped(nodes), names: Rows::Mapped(names), macros: Rows::Mapped(macros), crates: Rows::Mapped(crates), files: Rows::Mapped(files),
-            lists: Rows::Mapped(lists), comp_end, universe: universes(prog), atomic: atomic_crates(prog, ncr), _store: Some(store),
+            lists: Rows::Mapped(lists), comp_end, universe: universes(prog), atomic: atomic_crates(prog, ncr), _store: Some(store), file_versions: HashMap::new(),
             nodes_n: nn, walked: 0, edges: 0, coarse: 0, phases: [0.0; 4] })
     }
 
@@ -1482,7 +1486,8 @@ impl Deps {
             let def = prog.def(d);
             if self.atomic.get(def.krate as usize).copied().unwrap_or(true) { return None; }
             let rows = self.nodes.rows();
-            if let Ok(k) = rows.binary_search_by_key(&(def.file, def.item.0), |r| (r.file, r.item)) { return Some(u2(rows[k].closure)); }
+            let file = self.file_versions.get(&def.file).copied().unwrap_or(def.file);
+            if let Ok(k) = rows.binary_search_by_key(&(file, def.item.0), |r| (r.file, r.item)) { return Some(u2(rows[k].closure)); }
             // a field, variant, closure, anonymous const or opaque type: its item's
             if !matches!(def.kind, DefKind::Field | DefKind::Variant | DefKind::AnonConst | DefKind::OpaqueTy | DefKind::Closure) || def.parent == NO_DEF {
                 return None;

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Live patches always land: one edit per edit kind against a running program, visible effect asserted.
 
-usage: live_kinds.py [--only k1,k2] [--jobs N]
+usage: live_kinds.py [--only k1,k2] [--jobs N] [--warm]
   (the JIT runs through `cargo run --profile host`; MAKEPAD_RUN_STD in the environment, default
    libs/relax/compiler/std; run from the workspace root)
 
@@ -16,6 +16,10 @@ a kind fails on no effect after that, or on a crash, ICE, panic or parked thread
 rustc rejects (accepted: KEEPS) passes when the app keeps running its old code with nothing wrong.
 partial_landing uses the fixture's native window and must patch automatically, clear its refusal,
 and leave session view over_app false; it never requests a relaunch.
+--warm: each worker's disk cache is filled by a run of the fixture first, so every session starts from
+stored code, as a person's second run does (without it each session compiles what it runs). A kind whose
+JIT said "patched" and whose effect showed only after the relaunch is then marked "stale" (but for
+running_loop_body: a loop that never returns shows its edit only after a restart, stored or not).
 Prints the table `kind | outcome | effect | ms` and `live_kinds: N/M landed`; exit 1 on any miss.
 """
 import json, os, shutil, subprocess, sys, tempfile, threading, time
@@ -33,6 +37,7 @@ def wrong(lines):
     return next((l.strip()[:200] for l in lines if any(b in l for b in BAD)), None)
 only = [k for k in opt("--only", "").split(",") if k]
 jobs = int(opt("--jobs", "3"))
+warm_start = "--warm" in args
 os.environ.setdefault("MAKEPAD_RUN_STD", os.path.abspath("libs/relax/compiler/std"))
 WAIT = float(os.environ.get("LIVE_KINDS_WAIT", "60"))
 
@@ -276,6 +281,12 @@ def run_kind(slot, kind):
                MAKEPAD_RUN_TARGET_DIR=os.path.join(home, "target"), MAKEPAD_HIDE_WINDOWS="1", SANDBOX_MUTE="1", MAKEPAD_MUTE="1",
                LIVE_KINDS_SECS=str(int(WAIT) * 3 + 120), MAKEPAD_RUN_LIVE_TRACE="1", MAKEPAD_REMOTE="1")
     features = ["--features", "window"] if name == "partial_landing" else []
+    if warm_start and slot not in filled:
+        # past the startup window (5 s), then a normal exit: the run's code goes into the cache
+        subprocess.run(JIT + ["run", "--quiet", "--ahead=minimal", "relax-live-kinds"], cwd=pkg, env=dict(env, LIVE_KINDS_SECS="6"), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=600)
+        filled.add(slot)
+        if os.path.exists(ready):
+            os.remove(ready)
     p = subprocess.Popen(JIT + ["run", "--quiet", "--ahead=minimal", "relax-live-kinds"] + features, cwd=pkg, env=env,
                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
     out, err = [], []
@@ -349,6 +360,7 @@ def run_kind(slot, kind):
             n = len(ticks())
             seen = said() and wait(lambda: len(ticks()) > n + 5, 10) and probe(ticks()[-1], key) == base
         elif not seen and p.poll() is None and name != "partial_landing":
+            res["patched_old"] = any(": patched (" in l for l in e)
             res["restart"] = inspect(p.pid, os.environ.get("TMPDIR", "/tmp"), "session", "relaunch").strip()[:120]
             seen = wait(hit, WAIT)
         res["effect"] = "yes" if seen else "no"
@@ -379,7 +391,9 @@ def run_kind(slot, kind):
                 res["fail"] = res["fail"] or "session view did not clear: " + (view[0].strip() if view else "no reply")
             if any("the run's view is over the app" in l for _, l in err[n_err:]):
                 res["fail"] = res["fail"] or "a view covered the app during the partial landing"
-        if restored or res.get("restart"):
+        if warm_start and seen and res.get("patched_old") and name != "running_loop_body":
+            res["outcome"] = "stale"
+        elif restored or res.get("restart"):
             res["outcome"] = "restarted"
         elif any(": patched (" in l for l in e):
             res["outcome"] = "patched"
@@ -401,6 +415,7 @@ def run_kind(slot, kind):
     return res
 
 root = tempfile.mkdtemp(prefix="live-kinds-")
+filled = set()
 results = [None] * len(KINDS)
 lock = threading.Lock()
 queue = list(range(len(KINDS)))
@@ -435,4 +450,6 @@ subprocess.run(["cargo", "build", "--profile", "host", "-q", "-p", "makepad-run"
 binary = os.path.join(os.environ.get("CARGO_TARGET_DIR", "target"), "host", "makepad")
 warm = subprocess.run([sys.executable, "libs/relax/compiler/tests/live_closure_owner_app/run.py", "--makepad", binary, "--warm"], capture_output=True, text=True)
 print(warm.stdout[-3000:], flush=True)
-sys.exit(0 if landed == len(results) and warm.returncode == 0 else 1)
+consts = subprocess.run([sys.executable, "libs/relax/compiler/tests/cache_warm_const_edit/run.py", "--makepad", binary], capture_output=True, text=True)
+print(consts.stdout[-3000:], flush=True)
+sys.exit(0 if landed == len(results) and warm.returncode == 0 and consts.returncode == 0 else 1)

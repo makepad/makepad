@@ -277,7 +277,7 @@ unsafe fn lane_op(op: VX, x: uint8x16_t, y: uint8x16_t) -> Option<uint8x16_t> {
 
 // out of line (inlined, its stack arrays cost the handler its tail jump)
 #[inline(never)]
-#[target_feature(enable = "neon,sha2")]
+#[target_feature(enable = "neon,sha2,aes")]
 unsafe fn vx2(op: VX, a: *const u64, b: *const u64, d: *mut u64) {
     // scalar operands and results first (I cells)
     match op {
@@ -394,6 +394,13 @@ unsafe fn vx2(op: VX, a: *const u64, b: *const u64, d: *mut u64) {
             VW::D => lanes(w, x, y, |p, q| ((p as u128 + q as u128 + 1) >> 1) as u64),
             _ => by_w!(w, x, y, vrhaddq_u8, vrhaddq_u16, vrhaddq_u32, vaddq_u64),
         },
+        // pmull .1q of the selected 64-bit lanes
+        VX::Clmul(k) => {
+            let (p, q) = (vreinterpretq_u64_u8(x), vreinterpretq_u64_u8(y));
+            let p = if k & 1 != 0 { vgetq_lane_u64::<1>(p) } else { vgetq_lane_u64::<0>(p) };
+            let q = if k & 2 != 0 { vgetq_lane_u64::<1>(q) } else { vgetq_lane_u64::<0>(q) };
+            vreinterpretq_u8_p128(vmull_p64(p, q))
+        }
         VX::And => vandq_u8(x, y),
         VX::Or => vorrq_u8(x, y),
         VX::Xor => veorq_u8(x, y),

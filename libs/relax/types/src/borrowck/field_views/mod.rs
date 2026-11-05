@@ -631,14 +631,22 @@ pub struct FieldViews<'a> {
     pub bodies: &'a dyn FvBodies,
     /// relaxed crate: accepted conflicts are reported as such instead of errors
     pub relaxed: bool,
-    /// what each closure of the body does through its captured references, by closure expr
-    pub closure_fv: HashMap<u32, Vec<Summary>>,
+    /// the closures of the body group (closure expr, MIR), in check order
+    closure_bodies: Vec<(u32, &'a Body)>,
+    /// what each closure does through its captured references, by closure expr (closure_summaries)
+    closure_fv: std::cell::OnceCell<HashMap<u32, Vec<Summary>>>,
     pub default_trait: Option<DefId>,
 }
 impl<'a> FieldViews<'a> {
     pub fn new(prog: &'a Program, typing_env: TypingEnv, state: &'a crate::tcx::EvalState, cache: &'a SummaryCx, bodies: &'a dyn FvBodies,
-        relaxed: bool, closure_fv: HashMap<u32, Vec<Summary>>) -> Self {
-        Self { prog, typing_env, state, cache, bodies, relaxed, closure_fv, default_trait: lang_path(prog, "default::Default") }
+        relaxed: bool, closure_bodies: Vec<(u32, &'a Body)>) -> Self {
+        Self { prog, typing_env, state, cache, bodies, relaxed, closure_bodies, closure_fv: std::cell::OnceCell::new(), default_trait: lang_path(prog, "default::Default") }
+    }
+    /// The closures' capture summaries, made at the group's first field-view question (a
+    /// conflict: a body without one asks none): every closure, in check order, before any callee
+    /// summary, so the summary cache fills in the order it did when they were made up front.
+    pub fn closure_summaries(&self, tcx: &Tcx) -> &HashMap<u32, Vec<Summary>> {
+        self.closure_fv.get_or_init(|| self.with_env(tcx, |env| self.closure_bodies.iter().map(|&(e, body)| (e, closure_captures(env, body))).collect()))
     }
     /// Run `f` with the summary environment of this body.
     pub fn with_env<R>(&self, tcx: &Tcx, f: impl FnOnce(&FvEnv<'_>) -> R) -> R {

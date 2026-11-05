@@ -1,16 +1,10 @@
 //! Threads: ids (what the unit lock records as owner), names, stack bounds, the watchdog's
-//! interrupt, priorities, fork hooks.
+//! interrupt, realtime policy queries, fork hooks.
 //!
 //! - `current()`: the calling thread's id (nonzero; pthread_t on unix).
 //! - `name(t)`: a thread's name for diagnostics.
 //! - `kick(t)`: interrupts thread `t` for the hang watchdog / MAKEPAD_RUN_COMPILE_WATCH: the fault
 //!   layer's handler then runs on that thread (jit::on_watchdog decides what it does).
-//! - `lower_priority(utility)`: background compile workers below the program's threads.
-//! - `background()`: the OS background class (aot-min's compile workers: macOS QOS_CLASS_BACKGROUND,
-//!   Linux SCHED_IDLE, Windows EcoQoS).
-//! - `interactive()`: the sampler thread asks not to have its timers coalesced.
-//! - `performance_cores()`: logical CPUs of the performance class (macOS: hw.perflevel0; elsewhere
-//!   every CPU this process may run on).
 //! - `realtime()`: the calling thread runs under a real-time policy (an audio callback thread:
 //!   SCHED_FIFO/RR on Linux, a time-constraint policy on macOS).
 //! - `fork()`: the C library's fork (unix), for the fork the loader hands to programs.
@@ -119,6 +113,17 @@ mod unix {
         }
     }
 
+    /// A run's end: ends the system call thread `t` is waiting in (EINTR: no handler restarts one).
+    /// The thread itself does the rest.
+    pub fn end_kick(t: u64, _waiting: usize) {
+        kick(t);
+    }
+
+    /// (`end_kick`'s second argument: only Windows needs it)
+    pub fn waiting_cell() -> usize {
+        0
+    }
+
     pub fn fork() -> i32 {
         unsafe { libc_fork() }
     }
@@ -130,37 +135,7 @@ mod unix {
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
 mod imp {
-    pub use super::unix::{current, exit_now, fork, kick, name, note_current};
-
-    pub fn lower_priority(_utility: bool) {
-        extern "C" {
-            fn setpriority(which: i32, who: u32, prio: i32) -> i32;
-        }
-        // who 0: the calling thread (Linux nices threads one by one)
-        unsafe {
-            setpriority(0, 0, 5);
-        }
-    }
-
-    /// The OS background class for this thread: SCHED_IDLE (runs only when a CPU is otherwise idle).
-    pub fn background() {
-        #[repr(C)]
-        struct SchedParam { priority: i32 }
-        extern "C" {
-            fn sched_setscheduler(pid: i32, policy: i32, param: *const SchedParam) -> i32;
-        }
-        const SCHED_IDLE: i32 = 5;
-        // pid 0: the calling thread
-        unsafe {
-            sched_setscheduler(0, SCHED_IDLE, &SchedParam { priority: 0 });
-        }
-    }
-
-    pub fn interactive() {}
-
-    pub fn performance_cores() -> usize {
-        std::thread::available_parallelism().map_or(1, |n| n.get())
-    }
+    pub use super::unix::{current, end_kick, waiting_cell, exit_now, fork, kick, name, note_current};
 
     pub fn realtime() -> bool {
         extern "C" {
@@ -173,53 +148,8 @@ mod imp {
 
 #[cfg(target_vendor = "apple")]
 mod imp {
-    pub use super::unix::{current, exit_now, fork, kick, name, note_current};
+    pub use super::unix::{current, end_kick, waiting_cell, exit_now, fork, kick, name, note_current};
     use super::unix::pthread_self;
-
-    extern "C" {
-        fn pthread_set_qos_class_self_np(qos_class: u32, relative_priority: i32) -> i32;
-    }
-
-    pub fn lower_priority(utility: bool) {
-        const QOS_CLASS_DEFAULT: u32 = 0x15;
-        const QOS_CLASS_UTILITY: u32 = 0x11;
-        unsafe {
-            if utility {
-                pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0);
-            } else {
-                pthread_set_qos_class_self_np(QOS_CLASS_DEFAULT, -15);
-            }
-        }
-    }
-
-    /// The OS background class for this thread: QOS_CLASS_BACKGROUND (efficiency cores,
-    /// throttled, low power).
-    pub fn background() {
-        const QOS_CLASS_BACKGROUND: u32 = 0x09;
-        unsafe {
-            pthread_set_qos_class_self_np(QOS_CLASS_BACKGROUND, 0);
-        }
-    }
-
-    /// macOS coalesces the timers of background-QoS threads (a process started from a daemon or
-    /// a script): a 2 ms sleep then lasts tens of ms. Interactive QoS has no coalescing.
-    pub fn interactive() {
-        unsafe {
-            pthread_set_qos_class_self_np(0x21, 0); // QOS_CLASS_USER_INTERACTIVE
-        }
-    }
-
-    /// Performance-core logical CPUs (hw.perflevel0.logicalcpu; Intel Macs have no levels: every CPU).
-    pub fn performance_cores() -> usize {
-        extern "C" {
-            fn sysctlbyname(name: *const u8, old: *mut u8, oldlen: *mut usize, new: *const u8, newlen: usize) -> i32;
-        }
-        let mut n: i32 = 0;
-        let mut len = std::mem::size_of::<i32>();
-        let r = unsafe { sysctlbyname(b"hw.perflevel0.logicalcpu\0".as_ptr(), &mut n as *mut i32 as *mut u8, &mut len, std::ptr::null(), 0) };
-        let all = std::thread::available_parallelism().map_or(1, |n| n.get());
-        if r == 0 && n > 0 { (n as usize).min(all) } else { all }
-    }
 
     /// A thread with a time-constraint policy (CoreAudio's IO threads, audio workgroups).
     pub fn realtime() -> bool {
@@ -270,39 +200,21 @@ mod imp {
         }
     }
 
-
     /// The watchdog / MAKEPAD_RUN_COMPILE_WATCH interrupt: the thread is suspended and its context read
     /// from this (the watching) thread; the fault layer decides (os::fault::interrupt).
     pub fn kick(t: u64) {
         crate::os::fault::interrupt(t);
     }
 
-    pub fn lower_priority(_utility: bool) {
-        const THREAD_PRIORITY_BELOW_NORMAL: i32 = -1;
-        unsafe {
-            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
-        }
+    /// A run's end: ends the wait thread `t` is in (os::fault::end_interrupt; `waiting`: its
+    /// `waiting_cell`).
+    pub fn end_kick(t: u64, waiting: usize) {
+        crate::os::fault::end_interrupt(t, waiting)
     }
 
-    /// The OS background class for this thread: EcoQoS (execution-speed power throttling) at idle
-    /// priority.
-    pub fn background() {
-        #[repr(C)]
-        struct ThreadPowerThrottlingState { version: u32, control_mask: u32, state_mask: u32 }
-        const THREAD_POWER_THROTTLING: i32 = 3;
-        const THREAD_POWER_THROTTLING_EXECUTION_SPEED: u32 = 1;
-        const THREAD_PRIORITY_IDLE: i32 = -15;
-        let state = ThreadPowerThrottlingState { version: 1, control_mask: THREAD_POWER_THROTTLING_EXECUTION_SPEED, state_mask: THREAD_POWER_THROTTLING_EXECUTION_SPEED };
-        unsafe {
-            SetThreadInformation(GetCurrentThread(), THREAD_POWER_THROTTLING, &state as *const _ as *const u8, std::mem::size_of::<ThreadPowerThrottlingState>() as u32);
-            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_IDLE);
-        }
-    }
-
-    pub fn interactive() {}
-
-    pub fn performance_cores() -> usize {
-        std::thread::available_parallelism().map_or(1, |n| n.get())
+    /// Where the calling thread says what it waits on, for `end_kick`.
+    pub fn waiting_cell() -> usize {
+        crate::domain_threads::waits::cell()
     }
 
     /// A time-critical thread (WASAPI render threads run at THREAD_PRIORITY_TIME_CRITICAL or

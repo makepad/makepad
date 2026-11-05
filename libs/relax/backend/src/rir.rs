@@ -153,6 +153,10 @@ pub enum VX {
     PackUsS,
     /// d[i] = b[i] & 0x80 ? 0 : a[b[i] & 15] (pshufb)
     ByteShuffle,
+    /// carry-less product of one 64-bit lane of a and one of b, 128 bits (x64 `pclmulqdq`, Arm
+    /// `pmull` .1q): bit 0 of the selector picks a's high lane, bit 1 b's high lane (the x86
+    /// immediate's bits 0 and 4)
+    Clmul(u8),
     // SHA instruction semantics are architecture-specific (not interchangeable lane orders).
     X86Sha1Rnds4(u8),
     X86Sha1NextE,
@@ -298,6 +302,28 @@ pub enum IOp {
     /// optimiser from that mask idiom (bit readers' `bitbuf & bitmask(n)`): x64 BMI2 `bzhi`,
     /// arm64 `lsl` of all ones + `bic`
     Bzhi,
+    /// CRC-32 (IEEE 802.3, reflected polynomial 0xEDB88320) of the low 8 / 16 / 32 / 64 bits of
+    /// b folded into the 32-bit crc in a, no pre/post inversion: Arm's `__crc32b/h/w/d`
+    /// (`crc32b/h/w/x`); the result is the u32, zero-extended. IntTy is U64, so no pass takes
+    /// either operand for a narrow one (crc32x reads all of b). Arm only: x64 has no instruction
+    /// for this polynomial (std's aarch64 module computes it in software elsewhere)
+    Crc32B,
+    Crc32H,
+    Crc32W,
+    Crc32X,
+}
+
+impl IOp {
+    /// the payload bits of a Crc32 op (8, 16, 32, 64)
+    pub fn crc32_bits(self) -> Option<u8> {
+        match self {
+            IOp::Crc32B => Some(8),
+            IOp::Crc32H => Some(16),
+            IOp::Crc32W => Some(32),
+            IOp::Crc32X => Some(64),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -929,9 +955,12 @@ pub enum Inst {
     // ---- 128-bit vectors (Cls::V128; four 32-bit lanes)
     /// d = bitwise m ? a : b (m: lane masks)
     VSel(VReg, VReg, VReg, VReg), // d, m, a, b
-    /// f32 lanes, one rounding: (neg_prod ? -a : a) * b + (neg_add ? -c : c) (operand negations
-    /// and NaN lanes as `FMulAdd`)
-    VFma(bool, bool, VReg, VReg, VReg, VReg), // neg_prod, neg_add, d, a, b, c
+    /// float lanes (`w`: f64, else f32), one rounding: (neg_prod ? -a : a) * b + (neg_add ? -c : c)
+    /// (operand negations and NaN lanes as `FMulAdd`). `keep_nan`: a negation leaves a NaN operand
+    /// as it is, the x86 rule (vfmsub / vfnmadd / vfnmsub negate the product or addend inside the
+    /// fused op, so the NaN passes on with its own sign; without it a NaN's sign flips, as NEON's
+    /// fmls).
+    VFma(bool, bool, bool, bool, VReg, VReg, VReg, VReg), // neg_prod, neg_add, keep_nan, w, d, a, b, c
     /// every lane = the low 32 bits of s (an I or F32 vreg)
     VSplat(VReg, VReg),
     /// every lane = a 32-bit constant (a constant-pool load: cheap to rematerialise)
@@ -1048,7 +1077,7 @@ impl Inst {
             Inst::Iconst(d, _) | Inst::Fconst(d, _, _) | Inst::SlotAddr(d, _) | Inst::Addr(d, _) | Inst::FnAddr(d, _) | Inst::TlsAddr(d, _) | Inst::TlsStatic(d, _) | Inst::VConst(d, _) => f(*d),
             Inst::Mov(d, _) | Inst::INeg(_, d, _) | Inst::INot(_, d, _) | Inst::IBit(_, d, _) | Inst::FUnary(_, _, d, _) | Inst::Conv(_, d, _) | Inst::IBinI(_, _, d, _, _) | Inst::ICmpI(_, _, d, _, _) | Inst::Load(_, d, _, _) | Inst::VSplat(d, _) | Inst::VExtract(d, _, _) | Inst::VLoad(d, _, _) | Inst::VAny(d, _) | Inst::AtomicLoad(_, _, d, _) => f(*d),
             Inst::IBin(_, _, d, _, _) | Inst::ICmp(_, _, d, _, _) | Inst::FBin(_, _, d, _, _) | Inst::FCmp(_, _, d, _, _) | Inst::VGather(d, _, _) | Inst::VTbl(d, _, _, _) | Inst::VShuffle(d, _, _, _) | Inst::VX(_, d, _, _) | Inst::AtomicRmw(_, _, _, d, _, _) | Inst::LoadX(_, d, _, _, _, _) | Inst::VLoadX(d, _, _, _, _) => f(*d),
-            Inst::Sel(d, _, _, _) | Inst::VX3(_, d, _, _, _) | Inst::VSel(d, _, _, _) | Inst::VFma(_, _, d, _, _, _) | Inst::FMulAdd(_, _, _, d, _, _, _) | Inst::AtomicCas(_, _, _, d, _, _, _) => f(*d),
+            Inst::Sel(d, _, _, _) | Inst::VX3(_, d, _, _, _) | Inst::VSel(d, _, _, _) | Inst::VFma(_, _, _, _, d, _, _, _) | Inst::FMulAdd(_, _, _, d, _, _, _) | Inst::AtomicCas(_, _, _, d, _, _, _) => f(*d),
             Inst::VInsert(d, _, _, _) => f(*d),
             Inst::Call(_, _, rets) => rets.iter().for_each(|r| f(*r)),
             Inst::FpEnv(_, v) => f(*v),
@@ -1080,7 +1109,7 @@ impl Inst {
                 f(b);
                 f(c);
             }
-            Inst::Sel(d, a, b, c) | Inst::VX3(_, d, a, b, c) | Inst::VSel(d, a, b, c) | Inst::VFma(_, _, d, a, b, c) | Inst::FMulAdd(_, _, _, d, a, b, c) | Inst::AtomicCas(_, _, _, d, a, b, c) => {
+            Inst::Sel(d, a, b, c) | Inst::VX3(_, d, a, b, c) | Inst::VSel(d, a, b, c) | Inst::VFma(_, _, _, _, d, a, b, c) | Inst::FMulAdd(_, _, _, d, a, b, c) | Inst::AtomicCas(_, _, _, d, a, b, c) => {
                 f(d);
                 f(a);
                 f(b);
@@ -1786,7 +1815,7 @@ impl Func {
                         regs.push(*a);
                         regs.push(*b);
                     }
-                    Inst::VX3(_, d, a, b, c) | Inst::VSel(d, a, b, c) | Inst::VFma(_, _, d, a, b, c) => {
+                    Inst::VX3(_, d, a, b, c) | Inst::VSel(d, a, b, c) | Inst::VFma(_, _, _, _, d, a, b, c) => {
                         regs.push(*d);
                         regs.push(*a);
                         regs.push(*b);
@@ -1981,7 +2010,7 @@ pub fn slot_offsets(f: &Func) -> Vec<Option<(u32, i64)>> {
 
 /// `v` re-extended to integer type `it` (how RIR keeps narrow integers in registers).
 /// The NaN result of `FMulAdd` / `VFma` lanes: `fma(a, b, c)` with the operands already negated
-/// (`neg_prod` / `neg_add`), on this host (Rust leaves it unspecified; the back ends fix it so
+/// (`neg_prod` / `neg_add`; under `keep_nan` a NaN operand stays as it is), on this host (Rust leaves it unspecified; the back ends fix it so
 /// that every tier and register assignment gives the same bits, and compute kernels match their
 /// interpreter, makepad_script_compute::ir::fma_nan):
 /// - x86-64: the first NaN of b, a, c, quieted (vfmadd213 with a in the destination, b in vvvv,
@@ -2054,10 +2083,16 @@ pub fn extend_const(v: i64, it: IntTy) -> i64 {
 /// words, read backwards from the end): (ret, stub).., saved registers as bytes (n | 0x80 for
 /// a float register) four per word, sp_off, then UNWIND_MAGIC << 24 | n_saved << 19 | n_pads.
 pub const UNWIND_MAGIC: u32 = 0xA5;
+/// The same trailer for a function with staged calls (calls that move the stack pointer below the
+/// body's for their stack arguments, x86-64): (ret, bytes) of each after the pads, their count
+/// before sp_off. With them the frame pointer of a frame is known from its stack pointer alone at
+/// any of its calls (`UnwindInfo::fp_from_sp`): a thread walked without its registers (blocked in
+/// a syscall). A function without staged calls keeps UNWIND_MAGIC and costs nothing more.
+pub const UNWIND_MAGIC_STAGED: u32 = 0xA6;
 
-pub fn unwind_info_words(saved: &[u32], pads: &[(u32, u32)], sp_off: u32) -> Vec<u32> {
-    let mut w = Vec::with_capacity(2 * pads.len() + saved.len() / 4 + 3);
-    for (r, s) in pads {
+pub fn unwind_info_words(saved: &[u32], pads: &[(u32, u32)], staged: &[(u32, u32)], sp_off: u32) -> Vec<u32> {
+    let mut w = Vec::with_capacity(2 * pads.len() + 2 * staged.len() + saved.len() / 4 + 4);
+    for (r, s) in pads.iter().chain(staged) {
         w.push(*r);
         w.push(*s);
     }
@@ -2069,16 +2104,35 @@ pub fn unwind_info_words(saved: &[u32], pads: &[(u32, u32)], sp_off: u32) -> Vec
         }
         w.push(x);
     }
+    let magic = if staged.is_empty() { UNWIND_MAGIC } else { w.push(staged.len() as u32); UNWIND_MAGIC_STAGED };
     w.push(sp_off);
-    w.push(UNWIND_MAGIC << 24 | (saved.len() as u32) << 19 | pads.len() as u32);
+    w.push(magic << 24 | (saved.len() as u32) << 19 | pads.len() as u32);
     w
 }
 
-/// Parsed trailer of a function's code (see `unwind_info_words`).
+/// Parsed trailer of a function's code (see `unwind_info_words`). Boxed slices: the code tables
+/// keep one per installed body.
 pub struct UnwindInfo {
-    pub saved: Vec<u32>,
-    pub pads: Vec<(u32, u32)>,
+    pub saved: Box<[u32]>,
+    pub pads: Box<[(u32, u32)]>,
     pub sp_off: u32,
+    /// (return offset, bytes below the body's stack pointer) of each staged call
+    pub staged: Box<[(u32, u32)]>,
+}
+
+impl UnwindInfo {
+    /// u32 words of the trailer
+    fn words(&self) -> usize {
+        2 * self.pads.len() + 2 * self.staged.len() + (self.saved.len() + 3) / 4 + 2 + usize::from(!self.staged.is_empty())
+    }
+
+    /// The frame pointer of this function's frame from its stack pointer at the call whose
+    /// return address is `ret_off` bytes into the code: the body's frame below it, and the
+    /// call's stack arguments when it staged them.
+    pub fn fp_from_sp(&self, ret_off: u32, sp: u64) -> u64 {
+        let staged = self.staged.iter().find(|s| s.0 == ret_off).map_or(0, |s| s.1);
+        sp + self.sp_off as u64 + staged as u64
+    }
 }
 
 /// Reads the trailer at the end of `code` (`len` bytes at `code`, a multiple of 4).
@@ -2092,20 +2146,24 @@ pub unsafe fn read_unwind_info(code: u64, len: u64) -> Option<UnwindInfo> {
     let rd = |off: u64| -> u32 { std::ptr::read_unaligned((code + off) as *const u32) };
     let end = len & !3;
     let head = rd(end - 4);
-    if head >> 24 != UNWIND_MAGIC {
-        return None;
-    }
+    let n_staged = match head >> 24 {
+        UNWIND_MAGIC => 0,
+        UNWIND_MAGIC_STAGED if end >= 12 => rd(end - 12) as u64,
+        _ => return None,
+    };
     let n_saved = ((head >> 19) & 0x1f) as u64;
     let n_pads = (head & 0x7_ffff) as u64;
     let sp_off = rd(end - 8);
     let saved_words = (n_saved + 3) / 4;
-    let words = 2 * n_pads + saved_words + 2;
+    let words = 2 * n_pads + 2 * n_staged + saved_words + 2 + u64::from(n_staged != 0);
     if words * 4 > end {
         return None;
     }
     let base = end - words * 4;
-    let pads = (0..n_pads).map(|k| (rd(base + 8 * k), rd(base + 8 * k + 4))).collect();
-    let sbase = base + 8 * n_pads;
+    let pair = |k: u64| (rd(base + 8 * k), rd(base + 8 * k + 4));
+    let pads = (0..n_pads).map(pair).collect();
+    let staged = (n_pads..n_pads + n_staged).map(pair).collect();
+    let sbase = base + 8 * (n_pads + n_staged);
     let saved = (0..n_saved)
         .map(|k| {
             let b = (rd(sbase + 4 * (k / 4)) >> (8 * (k % 4))) & 0xff;
@@ -2116,7 +2174,7 @@ pub unsafe fn read_unwind_info(code: u64, len: u64) -> Option<UnwindInfo> {
             }
         })
         .collect();
-    Some(UnwindInfo { saved, pads, sp_off })
+    Some(UnwindInfo { saved, pads, sp_off, staged })
 }
 
 /// Splits a compiled function into its code and its unwind trailer: (code length without
@@ -2128,10 +2186,7 @@ pub fn split_unwind_info(code: &[u8]) -> (usize, Option<UnwindInfo>) {
     }
     let info = unsafe { read_unwind_info(code.as_ptr() as u64, n as u64) };
     match info {
-        Some(i) => {
-            let words = 2 * i.pads.len() + (i.saved.len() + 3) / 4 + 2;
-            (n - 4 * words, Some(i))
-        }
+        Some(i) => (n - 4 * i.words(), Some(i)),
         None => (code.len(), None),
     }
 }
@@ -2190,6 +2245,33 @@ mod slot_table_tests {
         assert_eq!(t.find(2, t.table((1 << 18) + 3)), Some(((1 << 18) + 3, 0)));
         assert_eq!(t.find(0, a + 5 * 32 + 4), Some((5, 4)));
         assert_eq!(t.find(0, 0x2000_0000), None);
+    }
+}
+
+#[cfg(test)]
+mod unwind_trailer_tests {
+    /// A trailer reads back as written behind its code, with and without staged calls; a frame's
+    /// pointer from sp adds the staged bytes at that call only. Without staged calls the trailer
+    /// keeps the plain magic (and its size).
+    #[test]
+    fn trailer_round_trip_and_fp_from_sp() {
+        let code = [0x90u8; 12];
+        let saved = [3u32, 12, 0x108];
+        let pads = [(8u32, 40u32)];
+        for staged in [&[][..], &[(8u32, 16u32), (12, 32)][..]] {
+            let mut bytes = code.to_vec();
+            for w in super::unwind_info_words(&saved, &pads, staged, 48) {
+                bytes.extend_from_slice(&w.to_le_bytes());
+            }
+            let (n, info) = super::split_unwind_info(&bytes);
+            let info = info.expect("a trailer");
+            assert_eq!(n, code.len());
+            assert_eq!((&info.saved[..], &info.pads[..], &info.staged[..], info.sp_off), (&saved[..], &pads[..], staged, 48));
+            let extra = staged.iter().find(|s| s.0 == 12).map_or(0, |s| s.1 as u64);
+            assert_eq!(info.fp_from_sp(12, 0x1000), 0x1000 + 48 + extra);
+            assert_eq!(info.fp_from_sp(4, 0x1000), 0x1000 + 48);
+        }
+        assert_eq!(super::unwind_info_words(&saved, &pads, &[], 48).last().map(|h| h >> 24), Some(super::UNWIND_MAGIC));
     }
 }
 

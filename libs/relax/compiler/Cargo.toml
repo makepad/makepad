@@ -39,6 +39,10 @@ makepad-prof-stream = { workspace = true }
 relax-light-http = { workspace = true }
 relax-native-macros = { workspace = true }
 
+# inspect's stack capture on Windows (threads.rs, pe_unwind.rs): the generated Win32 bindings
+[target.'cfg(windows)'.dependencies]
+makepad-windows-sys = { path = "../../windows/sys", version = "0.1.0" }
+
 [lints.rust]
 # `cfg(relax)`: set when makepad run (Relax) compiles the crate
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(relax)"] }

@@ -13,7 +13,7 @@ path = "src/main.rs"
 [features]
 default = ["tweaker"]
 # The design overlay (Shift+F10 with the dev overlays on). On for development
-# builds; the Builder's releases build without it (--no-default-features).
+# builds; the Runner's releases build without it (--no-default-features).
 tweaker = ["dep:makepad-widgets-tweaker", "makepad-widgets/data", "makepad-widgets/dock", "makepad-widgets/fab"]
 
 [dependencies]
@@ -26,3 +26,4 @@ makepad-source-slice = { path = "../../libs/source_slice" }
 makepad-script = { path = "../../platform/script" }
 makepad-ai-hub = { path = "../../libs/ai/hub", default-features = false, features = ["local", "llm"] }
 makepad-ai-llm = { path = "../../libs/ai/llm" }
+makepad-ci-judge = { path = "../../libs/ci_judge" }

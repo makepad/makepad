@@ -302,7 +302,7 @@ impl Widget for CiWall {
                         state.steps.iter().find(|s| s.state == "failed").map(short).unwrap_or_else(|| "failed".into()),
                         clock(state.seconds)
                     ),
-                    state.detail.lines().next().unwrap_or("").trim_start_matches("VERDICT: NO - ").into(),
+                    state.detail.lines().next().unwrap_or("").into(),
                 ],
                 "orange" => vec![
                     format!("{w} warning{} · {}", if w == 1 { "" } else { "s" }, clock(state.seconds)),

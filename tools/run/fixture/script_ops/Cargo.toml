@@ -11,6 +11,3 @@ default-run = "relax-provided-script-ops"
 makepad-script = { path = "../../../../platform/script", version = "1.0.0" }
 # compute_program's driver (bin `driver`): JIT code over the bound makepad-script
 makepad-compute-program = { path = "../../../../libs/compute_program", version = "1.0.0" }
-# makepad-script binds to the library built into makepad only with the features its graph has
-# there (the loader's graph turns these on; a program without them is told the JIT changed)
-bytemuck = { path = "../../../../libs/bytemuck", version = "1.25.0", features = ["min_const_generics", "extern_crate_alloc"] }

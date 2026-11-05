@@ -54,6 +54,24 @@ fn signal_group(pid: u32, sig: i32) {
         kill(-(pid as i32), sig);
     }
 }
+/// Stops a running command's process group while a `yield_to` job is there; returns how long it
+/// was stopped.
+#[cfg(unix)]
+fn yield_group(child: &ChildLog, control: &Control, log: &mut dyn FnMut(&str)) -> Result<Duration> {
+    if !must_yield() {
+        return Ok(Duration::ZERO);
+    }
+    signal_group(child.child.id(), SIGSTOP_CONT.0);
+    let waited = wait_for_quiet(control, log);
+    signal_group(child.child.id(), SIGSTOP_CONT.1);
+    waited
+}
+/// Windows has no process-group stop: a running command keeps running, and `yield_to` holds
+/// only the start of the next one.
+#[cfg(not(unix))]
+fn yield_group(_: &ChildLog, _: &Control, _: &mut dyn FnMut(&str)) -> Result<Duration> {
+    Ok(Duration::ZERO)
+}
 
 #[derive(Clone, Default)]
 pub struct Control {
@@ -220,12 +238,8 @@ pub fn run(
             Ok(None) => {}
         }
         polls += 1;
-        #[cfg(unix)]
-        if polls % 10 == 0 && must_yield() {
-            signal_group(child.child.id(), SIGSTOP_CONT.0);
-            let waited = wait_for_quiet(control, log);
-            signal_group(child.child.id(), SIGSTOP_CONT.1);
-            match waited {
+        if polls % 10 == 0 {
+            match yield_group(&child, control, log) {
                 Ok(d) => paused += d,
                 Err(e) => break Err(e),
             }

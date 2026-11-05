@@ -878,6 +878,11 @@ const OP_REM: u8 = 9;
 const OP_MULHI: u8 = 10;
 const OP_ROTL: u8 = 11;
 const OP_BZHI: u8 = 12;
+/// IOp::Crc32B/H/W/X: 8 << (op - OP_CRC8) payload bits
+const OP_CRC8: u8 = 13;
+const OP_CRC16: u8 = 14;
+const OP_CRC32: u8 = 15;
+const OP_CRC64: u8 = 16;
 
 fn iop_code(op: IOp) -> u8 {
     match op {
@@ -894,6 +899,10 @@ fn iop_code(op: IOp) -> u8 {
         IOp::MulHi => OP_MULHI,
         IOp::Rotl => OP_ROTL,
         IOp::Bzhi => OP_BZHI,
+        IOp::Crc32B => OP_CRC8,
+        IOp::Crc32H => OP_CRC16,
+        IOp::Crc32W => OP_CRC32,
+        IOp::Crc32X => OP_CRC64,
     }
 }
 
@@ -901,6 +910,9 @@ fn iop_code(op: IOp) -> u8 {
 /// u32: shift amounts mod 32), division by zero gives 0, remainder by zero the dividend.
 #[inline(always)]
 fn ibin(op: u8, bits: u8, s: bool, a: u64, b: u64) -> u64 {
+    if op >= OP_CRC8 {
+        return relax_backend::passes::crc32(8 << (op - OP_CRC8), a, b);
+    }
     if op == OP_BZHI {
         let n = (b & 63) as u32;
         return if n == 0 { 0 } else { a & (u64::MAX >> (64 - n)) };
@@ -1006,6 +1018,10 @@ fn pick_ibin<const B: u8, const S: bool>(op: u8, imm: bool) -> H {
         OP_REM => p!(OP_REM),
         OP_MULHI => p!(OP_MULHI),
         OP_BZHI => p!(OP_BZHI),
+        OP_CRC8 => p!(OP_CRC8),
+        OP_CRC16 => p!(OP_CRC16),
+        OP_CRC32 => p!(OP_CRC32),
+        OP_CRC64 => p!(OP_CRC64),
         _ => p!(OP_ROTL),
     }
 }
@@ -2024,19 +2040,38 @@ unsafe extern "C" fn h_vsel(pc: *const u64, fp: *mut u64, cx: *mut Cx) {
     vput(c(fp, w, 0), r);
     next!(pc.add(2), fp, cx)
 }
-/// [h, d|a|b|c, flags]
+/// [h, d|a|b|c, flags: 1 neg_prod, 2 neg_add, 4 keep_nan, 8 f64 lanes]
 unsafe extern "C" fn h_vfma(pc: *const u64, fp: *mut u64, cx: *mut Cx) {
     let w = *pc.add(1);
     let fl_ = *pc.add(2);
     let (a, b, z) = (vget(c(fp, w, 1)), vget(c(fp, w, 2)), vget(c(fp, w, 3)));
+    let keep = fl_ & 4 != 0;
     let mut r = [0u32; 4];
+    if fl_ & 8 != 0 {
+        let dl = |v: &[u32; 4], i: usize| f64::from_bits(v[2 * i] as u64 | (v[2 * i + 1] as u64) << 32);
+        for i in 0..2 {
+            let mut x = dl(&a, i);
+            let mut y = dl(&z, i);
+            if fl_ & 1 != 0 && !(keep && x.is_nan()) {
+                x = -x;
+            }
+            if fl_ & 2 != 0 && !(keep && y.is_nan()) {
+                y = -y;
+            }
+            let v = x.mul_add(dl(&b, i), y).to_bits();
+            r[2 * i] = v as u32;
+            r[2 * i + 1] = (v >> 32) as u32;
+        }
+        vput(c(fp, w, 0), r);
+        next!(pc.add(3), fp, cx)
+    }
     for i in 0..4 {
         let mut x = fl(a[i]);
         let mut y = fl(z[i]);
-        if fl_ & 1 != 0 {
+        if fl_ & 1 != 0 && !(keep && x.is_nan()) {
             x = -x;
         }
-        if fl_ & 2 != 0 {
+        if fl_ & 2 != 0 && !(keep && y.is_nan()) {
             y = -y;
         }
         r[i] = x.mul_add(fl(b[i]), y).to_bits();
@@ -3537,9 +3572,9 @@ fn lower_inst(l: &mut Lw, i: &Inst, slots: SlotsPtr, sym_class: u64, sym_val: &d
             let w = l.w4(*d, *m, *a, *b);
             l.emit(h_vsel, &[w]);
         }
-        Inst::VFma(np, na, d, a, b, c) => {
+        Inst::VFma(np, na, keep, f64_lanes, d, a, b, c) => {
             let w = l.w4(*d, *a, *b, *c);
-            l.emit(h_vfma, &[w, *np as u64 | (*na as u64) << 1]);
+            l.emit(h_vfma, &[w, *np as u64 | (*na as u64) << 1 | (*keep as u64) << 2 | (*f64_lanes as u64) << 3]);
         }
         Inst::VSplat(d, s) => {
             let w = l.w2(*d, *s);
@@ -3616,6 +3651,6 @@ fn defs_of(i: &Inst, out: &mut Vec<VReg>) {
         Inst::Iconst(d, _) | Inst::Fconst(d, _, _) | Inst::SlotAddr(d, _) | Inst::Addr(d, _) | Inst::FnAddr(d, _) | Inst::TlsAddr(d, _) | Inst::TlsStatic(d, _) | Inst::VConst(d, _) => out.push(*d),
         Inst::Mov(d, _) | Inst::INeg(_, d, _) | Inst::INot(_, d, _) | Inst::IBit(_, d, _) | Inst::FUnary(_, _, d, _) | Inst::Conv(_, d, _) | Inst::IBinI(_, _, d, _, _) | Inst::ICmpI(_, _, d, _, _) | Inst::Load(_, d, _, _) | Inst::VSplat(d, _) | Inst::VExtract(d, _, _) | Inst::VLoad(d, _, _) | Inst::VAny(d, _) | Inst::AtomicLoad(_, _, d, _) | Inst::Xgetbv(d, _) => out.push(*d),
         Inst::IBin(_, _, d, _, _) | Inst::ICmp(_, _, d, _, _) | Inst::FBin(_, _, d, _, _) | Inst::FCmp(_, _, d, _, _) | Inst::VGather(d, _, _) | Inst::VTbl(d, _, _, _) | Inst::VShuffle(d, _, _, _) | Inst::VX(_, d, _, _) | Inst::AtomicRmw(_, _, _, d, _, _) | Inst::LoadX(_, d, _, _, _, _) | Inst::VLoadX(d, _, _, _, _) => out.push(*d),
-        Inst::VInsert(d, _, _, _) | Inst::Sel(d, _, _, _) | Inst::VX3(_, d, _, _, _) | Inst::VSel(d, _, _, _) | Inst::VFma(_, _, d, _, _, _) | Inst::FMulAdd(_, _, _, d, _, _, _) | Inst::AtomicCas(_, _, _, d, _, _, _) => out.push(*d),
+        Inst::VInsert(d, _, _, _) | Inst::Sel(d, _, _, _) | Inst::VX3(_, d, _, _, _) | Inst::VSel(d, _, _, _) | Inst::VFma(_, _, _, _, d, _, _, _) | Inst::FMulAdd(_, _, _, d, _, _, _) | Inst::AtomicCas(_, _, _, d, _, _, _) => out.push(*d),
     }
 }

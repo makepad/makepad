@@ -3750,6 +3750,7 @@ impl<'a> Fx<'a> {
                 return Ok(());
             }
             IOp::Bzhi => unreachable!("bzhi handled above"),
+            IOp::Crc32B | IOp::Crc32H | IOp::Crc32W | IOp::Crc32X => return Err("crc32 is an Arm instruction".into()),
             IOp::Rotl => {
                 if it.bits != 64 {
                     return Err(format!("rotate of {}-bit {}", it.bits, if it.signed { "signed" } else { "unsigned" }));

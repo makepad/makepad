@@ -1001,8 +1001,9 @@ pub(crate) struct PrelinkedSlot {
     /// the kind of its key (its encoding's first byte: 0 an instance, 1 a closure, 2 glue), for
     /// what the install decides by it before the identity is decoded
     pub kind: u8,
-    /// an earlier run parked it below O3 (Cache::tier_parked_key): installed with its tier final
-    pub parked: bool,
+    /// the tier decision an earlier run stored for its code below O3 (Cache::tier_verdict_key; O3
+    /// code: None, unused)
+    pub verdict: TierVerdict,
 }
 
 /// One slot record of a loaded image (ranges into the flat arrays of `Img`).
@@ -1745,8 +1746,8 @@ impl Linker {
             let c = self.cache();
             c.linked.insert(id);
             c.linked_key.insert(id, entry);
-            let parked = tier != TIER_O3 && c.tier_parked_key(entry);
-            out.push(PrelinkedSlot { id, at: at + off as u64, len: n as u32, trailer, pc, inlined, o2: tier == TIER_O2, base: tier == TIER_BASE, kind, parked });
+            let verdict = if tier == TIER_O3 { TierVerdict::None } else { c.tier_verdict_key(entry) };
+            out.push(PrelinkedSlot { id, at: at + off as u64, len: n as u32, trailer, pc, inlined, o2: tier == TIER_O2, base: tier == TIER_BASE, kind, verdict });
         }
         out
     }

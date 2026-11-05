@@ -589,6 +589,7 @@ impl Providers<'_> {
         let q = &self.tcx.queries;
         let (_, body) = q.typeck.get(&q.engine, def, &mut |def| {
             q.read_owner(self.prog, def)?;
+            test_typeck_panic(self.prog, def);
             Ok((self.tcx.collect_epoch.load(std::sync::atomic::Ordering::SeqCst), std::sync::Arc::new(self.check_body(def))))
         }, &|id| self.force(id))?;
         // the post-boot loader's misses travel with the cached failure (Body::deferred_misses)
@@ -876,6 +877,22 @@ impl Tcx {
         Providers { tcx: self, prog }.try_normalize_generic_arg_after_erasing_regions(TypeKey { env, ty }).expect("normalize_erasing_regions query")
     }
 
+}
+
+/// MAKEPAD_RUN_TEST_TYPECK_PANIC=<fn name>[:gandalf]: `typeck`'s provider panics for that body, on
+/// the background checker's thread with `:gandalf`, else on every thread (compiler
+/// lazy_reload_tests: a panic in a background check stays in that check).
+fn test_typeck_panic(prog: &Program, def: DefId) {
+    static WANT: std::sync::OnceLock<Option<(String, bool)>> = std::sync::OnceLock::new();
+    let want = WANT.get_or_init(|| crate::zone_alloc::kept_with(|| std::env::var("MAKEPAD_RUN_TEST_TYPECK_PANIC").ok().filter(|w| !w.is_empty()).map(|w| match w.strip_suffix(":gandalf") {
+        Some(name) => (name.to_string(), true),
+        None => (w, false),
+    })));
+    if let Some((name, only_gandalf)) = want {
+        if prog.name(def) == name.as_str() && (!*only_gandalf || std::thread::current().name() == Some("gandalf")) {
+            panic!("MAKEPAD_RUN_TEST_TYPECK_PANIC: forced panic type-checking `{name}`");
+        }
+    }
 }
 
 #[cfg(test)]

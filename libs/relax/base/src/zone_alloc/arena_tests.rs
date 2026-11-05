@@ -157,12 +157,12 @@ mod tests {
             let (p, l) = checked(64, 16);
             let index = (p as usize - DEFAULT.base.load(Ordering::Relaxed)) / CHUNK;
             let generation = lock(&DEFAULT.headers[index].state).generation;
-            assert_eq!(stats(), (before.0 + CHUNK, before.1 + 64, before.2 + 1));
+            assert_eq!(stats(), (before.0 + FIRST_COMMIT, before.1 + 64, before.2 + 1));
             RelaxAlloc.dealloc(p, l);
             assert_eq!(DEFAULT.headers[index].live.load(Ordering::Relaxed), 0);
             // emptied with 64 bytes touched: kept warm (committed) until trim
-            assert_eq!(lock(&DEFAULT.headers[index].state).committed, CHUNK);
-            assert_eq!(stats(), (before.0 + CHUNK, before.1, before.2 + 1));
+            assert_eq!(lock(&DEFAULT.headers[index].state).committed, FIRST_COMMIT);
+            assert_eq!(stats(), (before.0 + FIRST_COMMIT, before.1, before.2 + 1));
             trim();
             assert_eq!(lock(&DEFAULT.headers[index].state).committed, 0);
             assert_eq!(stats(), before); // scope still active; no TLS pin
@@ -258,7 +258,7 @@ mod tests {
                 RelaxAlloc.dealloc(p, l);
             }
             let warm = stats();
-            assert_eq!(warm.0, before.0 + 5 * CHUNK); // kept committed
+            assert_eq!(warm.0, before.0 + 5 * FIRST_COMMIT); // kept committed
             assert_eq!(warm.1, before.1);
             // the next scope's chunks come from the warm list: nothing newly committed
             for size in [16, 48, 200, 1000, 5000] {
@@ -299,7 +299,7 @@ mod tests {
                 for _ in 0..(CHUNK / 2048 + 17) {
                     blocks.push(checked(2048, 16));
                 }
-                assert_eq!(stats().0, before.0 + 2 * CHUNK);
+                assert_eq!(stats().0, before.0 + CHUNK + FIRST_COMMIT);
                 let (p, l) = blocks.pop().unwrap();
                 RelaxAlloc.dealloc(p, l);
                 let (reuse, layout) = checked(2048, 16);

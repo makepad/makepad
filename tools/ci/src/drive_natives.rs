@@ -413,7 +413,7 @@ fn slice_git(vm: &mut ScriptVm, args: &[&str], cwd: &Path) -> Result<String> {
     Ok(out.out.trim().to_owned())
 }
 /// Cut the slice of the tested commercial commit (`apps/commercial` HEAD)
-/// and put it where a customer's Builder puts it: a clean checkout of the
+/// and put it where a customer's release has it: a clean checkout of the
 /// tested Makepad commit with the slice at `apps/commercial`, and nothing
 /// else of the commercial repository.
 fn slice_checkout(vm: &mut ScriptVm) -> Result<Value> {
@@ -495,7 +495,7 @@ fn slice_lint(vm: &mut ScriptVm) -> Result<Value> {
     ))
 }
 /// `cargo check --release --no-default-features` of the root packages in
-/// the slice checkout, as the Builder builds a release (with the slice's
+/// the slice checkout, as the Runner builds a release (with the slice's
 /// features, `SLICE_FEATURES`): the slice ships everything they compile
 /// from.
 fn slice_check(vm: &mut ScriptVm) -> Result<Value> {

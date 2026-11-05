@@ -847,7 +847,7 @@ fn check_fn_body(cx: &crate::tcx::EvalCx<'_>, prog: &Program, tcx: &Tcx, def: De
     if d.kind == DefKind::AnonConst {
         // rustc_hir_typeck/src/lib.rs: check the anonymous constant's own body.
         let init = crate::const_eval::const_body(prog, def).expect("anonymous const body");
-        let ct = tcx.tys.subst(tcx.type_of(prog, def).expect("anonymous const type"), args);
+        let ct = tcx.tys.subst(tcx.type_of(prog, def).unwrap_or_else(|e| panic!("anonymous const type of `{}`: {e:?} (its holder never fed it)", prog.def_path(def))), args);
         // hir_typeck lib.rs:194-206: normalized, well formed and Sized (SizedConstOrStatic)
         let ct = fcx.norm(ct);
         fcx.register_wf(ct, ast.expr(init).lo);
@@ -4988,7 +4988,7 @@ impl<'a> Fcx<'a> {
             self.file, self.prog.files[self.file as usize].ast.expr(e).lo, self.b.def, "typeck-expression")));
         let save_div = self.diverges;
         self.diverges = false;
-        let t = self.check_expr_inner(e, expected);
+        let t = crate::stack::ensure_sufficient_stack(|| self.check_expr_inner(e, expected));
         let ts = self.shallow(t);
         if ts == self.tcx.tys.never {
             self.diverges = true;

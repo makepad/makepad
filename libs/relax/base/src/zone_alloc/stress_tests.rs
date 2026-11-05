@@ -350,6 +350,33 @@ fn a_thread_allocating_after_its_exit_hook_still_works() {
 
 
 #[test]
+fn a_chunk_is_committed_as_it_is_carved() {
+    let _s = serial();
+    compiler_trim();
+    let (live0, chunks0) = (live_bytes(), compiler_stats().2);
+    let committed0 = compiler_stats().0;
+    let _g = compiler();
+    // another thread starts a chunk and leaves it, with its block in it, for this one to carve on
+    let left = std::thread::spawn(|| {
+        let _g = compiler();
+        unsafe { Block::make(3000, 8, 1) }
+    }).join().unwrap();
+    if cfg!(windows) {
+        assert!(compiler_stats().0 <= committed0 + (256 << 10), "one block commits the start of a chunk");
+    }
+    // past the commit a write faults, and `make` writes every block: 3000-byte blocks sit in 3072-byte slots
+    let n = 2 * compiler::CHUNK / 3072;
+    let blocks: Vec<Block> = (0..n).map(|i| unsafe { Block::make(3000, 8, (i % 200 + 1) as u8) }).collect();
+    assert!(compiler_stats().0 >= committed0 + n * 3072);
+    for b in blocks {
+        unsafe { b.free() };
+    }
+    unsafe { left.free() };
+    drop(_g);
+    assert_back_to(live0, chunks0);
+}
+
+#[test]
 fn an_emptied_chunk_is_released_when_it_was_carved_far_and_kept_when_it_was_not() {
     let _s = serial();
     compiler_trim();
@@ -358,7 +385,7 @@ fn an_emptied_chunk_is_released_when_it_was_carved_far_and_kept_when_it_was_not(
     let _g = compiler();
     // 100-byte blocks sit in 112-byte slots: 6,000 of them carve 672 KB of a chunk
     let big: Vec<Block> = (0..6_000).map(|i| unsafe { Block::make(100, 8, (i % 200 + 1) as u8) }).collect();
-    assert!(compiler_stats().0 >= committed0 + compiler::CHUNK);
+    assert!(compiler_stats().0 >= committed0 + (672 << 10));
     for b in big {
         unsafe { b.free() };
     }

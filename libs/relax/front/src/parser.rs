@@ -5788,6 +5788,18 @@ impl ParsedFile {
         pos
     }
 
+    /// Whether a position is in `lo..hi` or comes from a macro call written there.
+    pub fn expands_within(&self, mut pos: u32, lo: u32, hi: u32) -> bool {
+        for _ in 0..4096 {
+            if pos >= lo && pos < hi { return true; }
+            match region_of(self.tables(pos).1, pos) {
+                Some(p) if p != pos => pos = p,
+                _ => return false,
+            }
+        }
+        false
+    }
+
     /// Parse a file's skipped ordinary bodies together, on the first need of any of them, in
     /// source order: their expression/pattern IDs are a function of the file alone, so IDs that
     /// outlive a run (closure slot keys in the code cache) mean the same expression in the next

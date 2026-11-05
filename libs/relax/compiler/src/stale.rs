@@ -30,8 +30,13 @@ pub struct Range {
     pub reason: String,
     /// when (wall clock ns): also the time of its `stale.retire` flight-recorder event
     pub retired_ns: u64,
+    /// The code of a run that ended (`register_run_end`): the `leave` a thread found running it
+    /// goes through. 0: any other retired range.
+    pub run_end_leave: u64,
 }
 
+/// `register_run_end`s so far: none, and a thread's exit asks nothing of the table.
+static RUN_ENDS: AtomicUsize = AtomicUsize::new(0);
 const CAP: usize = 1 << 14;
 static RANGES: [AtomicPtr<Range>; CAP] = [const { AtomicPtr::new(std::ptr::null_mut()) }; CAP];
 static N: AtomicUsize = AtomicUsize::new(0);
@@ -39,6 +44,30 @@ static N: AtomicUsize = AtomicUsize::new(0);
 /// Registers a retired range (before it turns inaccessible). Entries are never removed. Also
 /// a `stale.retire` flight-recorder event (`a` = lo, `b` = hi), found again by `retired_ns`.
 pub fn register(lo: u64, hi: u64, kind: &'static str, name: String, version: u64, reason: String) {
+    add(lo, hi, kind, name, version, reason, 0);
+}
+
+/// Registers the code of a run that ended (domain.rs end_run): a thread found fetching from it ends
+/// through `leave` (jit.rs end_on_fault); nobody is asked anything.
+pub fn register_run_end(lo: u64, hi: u64, name: String, leave: u64) {
+    add(lo, hi, "ended run", name, 0, "the run ended".to_string(), leave);
+    RUN_ENDS.fetch_add(1, Ordering::AcqRel);
+}
+
+/// The `leave` of the ended run whose code holds `pc` (signal-safe: atomic loads only).
+pub fn run_end_leave(pc: u64) -> Option<u64> {
+    if RUN_ENDS.load(Ordering::Acquire) == 0 {
+        return None;
+    }
+    lookup(pc).map(|r| r.run_end_leave).filter(|&l| l != 0)
+}
+
+/// Whether the code at `addr` belongs to a run that ended.
+pub fn in_ended_run(addr: u64) -> bool {
+    run_end_leave(addr).is_some()
+}
+
+fn add(lo: u64, hi: u64, kind: &'static str, name: String, version: u64, reason: String, run_end_leave: u64) {
     start_watcher();
     let retired_ns = crate::clock::wall_ns();
     crate::inspect::flightrec::event("stale.retire", &format!("{} {} v{}: {}", kind, name, version, reason), lo, hi);
@@ -47,7 +76,7 @@ pub fn register(lo: u64, hi: u64, kind: &'static str, name: String, version: u64
         // (beyond the table a stale access is still a crash: the fault policy's generic path)
         return;
     }
-    let r = crate::zone_alloc::kept_with(|| Box::into_raw(Box::new(Range { lo, hi, kind, name, version, reason, retired_ns })));
+    let r = crate::zone_alloc::kept_with(|| Box::into_raw(Box::new(Range { lo, hi, kind, name, version, reason, retired_ns, run_end_leave })));
     RANGES[k].store(r, Ordering::Release);
 }
 

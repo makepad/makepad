@@ -60,6 +60,16 @@ pub fn front_id() -> u128 {
     })
 }
 
+/// The target a stored code entry runs on: `<arch>-<os>`, and on arm64 the atomics the backend
+/// emits (`lse` on ARMv8.1+, `llsc` exclusive-access loops without it): code stored on one CPU
+/// class must never be loaded on the other (a cache seed shipped in an APK, a copied home).
+pub fn target_tag() -> String {
+    let t = format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS);
+    #[cfg(target_arch = "aarch64")]
+    let t = t + if relax_backend::arm64::lse_atomics() { "-lse" } else { "-llsc" };
+    t
+}
+
 /// This build's codegen identity.
 pub fn id() -> u128 {
     static ID: std::sync::OnceLock<u128> = std::sync::OnceLock::new();

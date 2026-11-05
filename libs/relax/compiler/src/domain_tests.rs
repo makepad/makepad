@@ -653,3 +653,612 @@ fn process_exit_in_a_caught_handler_ends_the_domain_with_its_code() {
     drop(u);
     std::fs::remove_dir_all(root).unwrap();
 }
+
+// ---- a run's end: every thread ends wherever it is, nothing of the program runs, nothing is left
+
+const ENDED_RUN: &str = r#"
+use std::sync::atomic::{AtomicU64, Ordering};
+extern "C" { fn pipe(fds: *mut i32) -> i32; fn read(fd: i32, buf: *mut u8, n: usize) -> isize; }
+// flags[0]: threads at their place; flags[1]: a destructor of the program ran
+fn flags(a: usize) -> &'static [AtomicU64; 4] { unsafe { &*(a as *const [AtomicU64; 4]) } }
+struct MustNotRun(usize);
+impl Drop for MustNotRun {
+    fn drop(&mut self) {
+        flags(self.0)[1].fetch_add(1, Ordering::SeqCst);
+    }
+}
+thread_local! { static TLS: std::cell::RefCell<Option<MustNotRun>> = std::cell::RefCell::new(None); }
+fn at_place(a: usize) {
+    TLS.with(|t| *t.borrow_mut() = Some(MustNotRun(a)));
+    flags(a)[0].fetch_add(1, Ordering::SeqCst);
+}
+fn spawn(name: &str, f: impl FnOnce() + Send + 'static) {
+    std::thread::Builder::new().name(name.into()).spawn(f).unwrap();
+}
+fn fixture(p: *mut u64) {
+    let a = p as usize;
+    spawn("in-jit", move || { at_place(a); let mut x = 1u64; loop { x = std::hint::black_box(x.wrapping_mul(31).wrapping_add(7)); } });
+    spawn("parked", move || { at_place(a); loop { std::thread::park(); } });
+    spawn("sleeping", move || { at_place(a); loop { std::thread::sleep(std::time::Duration::from_secs(3600)); } });
+    spawn("condvar", move || {
+        at_place(a);
+        let pair = (std::sync::Mutex::new(()), std::sync::Condvar::new());
+        let mut g = pair.0.lock().unwrap();
+        loop { g = pair.1.wait(g).unwrap(); }
+    });
+    spawn("holds-lock", move || {
+        at_place(a);
+        let m = Box::leak(Box::new(std::sync::Mutex::new(0u64)));
+        let _g = m.lock().unwrap();
+        loop { std::thread::park(); }
+    });
+    #[cfg(unix)]
+    spawn("in-read", move || {
+        at_place(a);
+        let mut fds = [0i32; 2];
+        assert_eq!(unsafe { pipe(fds.as_mut_ptr()) }, 0);
+        let mut b = [0u8; 8];
+        loop { unsafe { read(fds[0], b.as_mut_ptr(), 8) }; }
+    });
+    spawn("in-accept", move || {
+        at_place(a);
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        loop { let _ = l.accept(); }
+    });
+    spawn("caught", move || {
+        at_place(a);
+        let _ = std::panic::catch_unwind(|| loop { std::thread::park(); });
+        // the run's end is no panic: this never comes
+        flags(a)[1].fetch_add(1, Ordering::SeqCst);
+    });
+    spawn("allocating", move || {
+        at_place(a);
+        let mut keep: Vec<Vec<u8>> = Vec::new();
+        loop {
+            keep.push(vec![7u8; 4096]);
+            if keep.len() > 256 { keep.clear(); }
+        }
+    });
+    spawn("host-calls", move || {
+        at_place(a);
+        // natives taking the runtime's locks, as fast as they can go
+        loop {
+            std::thread::current().id();
+            let _ = std::thread::Builder::new().name("short".into()).spawn(|| {}).map(|h| h.join());
+        }
+    });
+    at_place(a);
+    loop { std::thread::park(); }
+}
+"#;
+
+#[cfg(unix)]
+const ENDED_RUN_THREADS: u64 = 11;
+#[cfg(windows)]
+const ENDED_RUN_THREADS: u64 = 10;
+
+/// Until the fixture's threads are all at their place.
+fn wait_at_place(domain: DomainId, flags: &[AtomicU64; 4]) {
+    wait(|| {
+        if let Some(DomainState::Crashed(why)) = state(domain) { panic!("the fixture crashed: {why}"); }
+        flags[0].load(Ordering::SeqCst) >= ENDED_RUN_THREADS
+    });
+}
+
+/// The run ends under threads in every kind of place: spinning in JIT code, in the program's own
+/// waits, in system calls, under a catch_unwind, in the allocator, in natives taking the runtime's
+/// locks. All are gone at once, no destructor of the program ran, its memory is back.
+#[test]
+fn a_run_ends_with_every_thread_wherever_it_is() {
+    isolated_test!(a_run_ends_with_every_thread_wherever_it_is);
+    let _serial = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let (mut u, entry, root) = fixture_of(ENDED_RUN, "fixture");
+    let up = &mut *u as *mut Unit;
+    let flags: [AtomicU64; 4] = Default::default();
+    let (domain, _base, main) = launch(&mut u, entry, None, &flags);
+    wait_at_place(domain, &flags);
+    let end = end_run(up, Duration::from_secs(10));
+    eprintln!("{}", end.line());
+    assert!(end.left.is_empty(), "left: {:?}", end.left);
+    main.join().unwrap();
+    wait_thread_done(domain);
+    let dead = info(domain).unwrap();
+    assert_eq!((dead.threads, dead.base, dead.arena_committed), (0, 0, 0));
+    assert_eq!(dead.state, DomainState::Stopped);
+    assert_eq!(flags[1].load(Ordering::SeqCst), 0, "code of the ended run ran");
+    assert_eq!(end.called_in, 0);
+    // no native frame was left behind on the way: nothing of the runtime's can stay locked
+    assert_eq!(end.abandoned, Vec::new());
+    domains().retain(|d| d.info.id != domain);
+    drop(u);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+// A thread of the run in a native call (flags[2]), and the callback flags[3] hands native code.
+const NATIVE_CROSSINGS: &str = r#"
+use std::sync::atomic::{AtomicU64, Ordering};
+static FLAGS: AtomicU64 = AtomicU64::new(0);
+fn flags(a: usize) -> &'static [AtomicU64; 4] { unsafe { &*(a as *const [AtomicU64; 4]) } }
+extern "C" fn callback() {
+    flags(FLAGS.load(Ordering::SeqCst) as usize)[0].fetch_add(1, Ordering::SeqCst);
+    loop { std::thread::park(); }
+}
+fn fixture(p: *mut u64) {
+    let a = p as usize;
+    FLAGS.store(a as u64, Ordering::SeqCst);
+    // lazily compiled here, not in the native caller's call
+    let c: extern "C" fn() = callback;
+    std::thread::Builder::new().name("in-native".into()).spawn(move || {
+        let native: extern "C" fn() = unsafe { std::mem::transmute(flags(a)[2].load(Ordering::SeqCst) as usize) };
+        native();
+        // the run ended meanwhile: this never comes
+        flags(a)[1].fetch_add(1, Ordering::SeqCst);
+    }).unwrap();
+    flags(a)[3].store(c as usize as u64, Ordering::SeqCst);
+    loop { std::thread::park(); }
+}
+"#;
+
+static HOST_LOCK: std::sync::Mutex<u32> = std::sync::Mutex::new(0);
+static IN_NATIVE: AtomicU64 = AtomicU64::new(0);
+static NATIVE_GO: AtomicU64 = AtomicU64::new(0);
+
+/// A native op of the host: takes a lock of the host's and stays in there for as long as a GPU call
+/// or an allocator's slow path may.
+extern "C" fn native_holds_a_host_lock() {
+    let _g = HOST_LOCK.lock().unwrap();
+    IN_NATIVE.store(1, Ordering::SeqCst);
+    while NATIVE_GO.load(Ordering::SeqCst) == 0 {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+/// A run ends with a thread inside a native call holding a lock of the host's, and native threads in
+/// callbacks. Nothing native is cut off: the call finishes and lets go first (the end waits for it,
+/// up to its grace, naming it), the thread ends as it comes back. A native caller of a callback gets
+/// its call back, with its own lock free to go; so does a later call. One that bypasses the guard
+/// stays where it is, counted on the ledger.
+#[test]
+fn a_run_ends_with_native_frames_in_it_and_no_host_lock_stays_held() {
+    isolated_test!(a_run_ends_with_native_frames_in_it_and_no_host_lock_stays_held);
+    let _serial = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let (mut u, entry, root) = fixture_of(NATIVE_CROSSINGS, "fixture");
+    let up = &mut *u as *mut Unit;
+    let flags: [AtomicU64; 4] = Default::default();
+    flags[2].store(native_holds_a_host_lock as *const () as usize as u64, Ordering::SeqCst);
+    let (domain, base, main) = launch(&mut u, entry, None, &flags);
+    wait(|| flags[3].load(Ordering::SeqCst) != 0 && IN_NATIVE.load(Ordering::SeqCst) != 0);
+    let callback = flags[3].load(Ordering::SeqCst) as usize;
+    let scope = foreign_scope_of(base);
+    assert_ne!(scope, 0);
+    extern "C" fn thunk(p: *mut u8) {
+        let f: extern "C" fn() = unsafe { std::mem::transmute(p) };
+        f();
+    }
+    // a native thread with a lock of its own, in a callback that waits
+    static CALLER_LOCK: std::sync::Mutex<u32> = std::sync::Mutex::new(0);
+    let caller = std::thread::spawn(move || {
+        let _g = CALLER_LOCK.lock().unwrap();
+        let saved = foreign_enter(scope);
+        let returned = crate::jit::app_call(thunk, callback as *mut u8);
+        foreign_leave(saved);
+        returned
+    });
+    wait(|| flags[0].load(Ordering::SeqCst) == 1);
+    let end = end_run(up, Duration::from_millis(300));
+    eprintln!("{}", end.line());
+    assert_eq!(end.left.iter().map(|l| l.1.as_str()).collect::<Vec<_>>(), ["in-native"], "the call is never cut off");
+    assert!(!caller.join().unwrap(), "the callback's call came back saying the run ended");
+    assert!(CALLER_LOCK.try_lock().is_ok());
+    assert!(HOST_LOCK.try_lock().is_err(), "the native call is still in there");
+    NATIVE_GO.store(1, Ordering::SeqCst);
+    main.join().unwrap();
+    wait_thread_done(domain);
+    assert!(HOST_LOCK.try_lock().is_ok(), "and has let go");
+    assert_eq!(flags[1].load(Ordering::SeqCst), 0, "code of the ended run ran");
+    // a call that starts now comes back at once, on the same terms
+    assert!(!std::thread::spawn(move || crate::jit::app_call(thunk, callback as *mut u8)).join().unwrap());
+    assert_eq!(crate::jit::abandoned_frames(), Vec::new());
+    assert_eq!(CALLED_IN.load(Ordering::SeqCst), 0);
+    // no guard: nowhere to go, it stays and is counted
+    let f: extern "C" fn() = unsafe { std::mem::transmute(callback) };
+    std::thread::spawn(move || f());
+    wait(|| CALLED_IN.load(Ordering::SeqCst) == 1);
+    domains().retain(|d| d.info.id != domain);
+    std::mem::forget(u);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+extern "C" fn native_faults_at_the_end() {
+    IN_NATIVE.store(1, Ordering::SeqCst);
+    while NATIVE_GO.load(Ordering::SeqCst) == 0 {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    unsafe { std::ptr::write_volatile(8 as *mut u64, 1) };
+}
+
+/// A fault in a native call on a thread of a run that is ending is no crash of the process: the
+/// thread ends and the frames it left are named. The process goes on.
+#[test]
+fn a_fault_while_a_run_ends_does_not_take_the_process_down() {
+    isolated_test!(a_fault_while_a_run_ends_does_not_take_the_process_down);
+    let _serial = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let (mut u, entry, root) = fixture_of(NATIVE_CROSSINGS, "fixture");
+    let up = &mut *u as *mut Unit;
+    let flags: [AtomicU64; 4] = Default::default();
+    flags[2].store(native_faults_at_the_end as *const () as usize as u64, Ordering::SeqCst);
+    let (domain, _base, main) = launch(&mut u, entry, None, &flags);
+    wait(|| flags[3].load(Ordering::SeqCst) != 0 && IN_NATIVE.load(Ordering::SeqCst) != 0);
+    let end = end_run(up, Duration::from_millis(100));
+    assert_eq!(end.left.iter().map(|l| l.1.as_str()).collect::<Vec<_>>(), ["in-native"]);
+    NATIVE_GO.store(1, Ordering::SeqCst);
+    main.join().unwrap();
+    wait_thread_done(domain);
+    assert_eq!(flags[1].load(Ordering::SeqCst), 0, "code of the ended run ran");
+    let frames = crate::jit::abandoned_frames();
+    assert!(!frames.is_empty(), "the native frame is named");
+    domains().retain(|d| d.info.id != domain);
+    std::mem::forget(u);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+const NEXT_RUN: &str = r#"
+use std::sync::atomic::{AtomicU64, Ordering};
+fn fixture(p: *mut u64) {
+    let a = unsafe { &*(p as *const [AtomicU64; 4]) };
+    // allocation and threads in the next run: the locks the ended run's threads could have held
+    let v = vec![3u8; 1 << 20];
+    let h = std::thread::spawn(move || v.iter().map(|x| *x as u64).sum::<u64>());
+    a[0].store(h.join().unwrap(), Ordering::SeqCst);
+}
+fn crashes(p: *mut u64) {
+    let a = unsafe { &*(p as *const [AtomicU64; 4]) };
+    a[0].store(1, Ordering::SeqCst);
+    unsafe { std::ptr::write_volatile(8 as *mut u64, 1) };
+}
+"#;
+
+/// After ends under threads in every state, a next run in the process allocates and starts threads
+/// at once: nothing the ended threads were in the middle of stays locked. A real crash in that run
+/// is its crash, told from the ended run's faults by the address alone.
+#[test]
+fn the_next_run_finds_nothing_locked_and_its_crash_is_a_crash() {
+    isolated_test!(the_next_run_finds_nothing_locked_and_its_crash_is_a_crash);
+    let _serial = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let (mut old, entry, _root) = fixture_of(ENDED_RUN, "fixture");
+    old.tier1 = None;
+    let up = &mut *old as *mut Unit;
+    let flags: [AtomicU64; 4] = Default::default();
+    let (domain, _base, main) = launch(&mut old, entry, None, &flags);
+    wait_at_place(domain, &flags);
+    let end = end_run(up, Duration::from_secs(10));
+    assert!(end.left.is_empty(), "left: {:?}", end.left);
+    main.join().unwrap();
+    wait_thread_done(domain);
+
+    let (mut next, entry, _root) = fixture_of(NEXT_RUN, "fixture");
+    next.tier1 = None;
+    let flags: [AtomicU64; 4] = Default::default();
+    let (domain, _base, main) = launch(&mut next, entry, None, &flags);
+    main.join().unwrap();
+    wait_thread_done(domain);
+    assert_eq!(flags[0].load(Ordering::SeqCst), 1 << 20 | 3 << 20);
+    assert_eq!(info(domain).unwrap().state, DomainState::Exited(0));
+    let (mut crash, entry, _root) = fixture_of(NEXT_RUN, "crashes");
+    crash.tier1 = None;
+    let flags: [AtomicU64; 4] = Default::default();
+    let (domain, _base, main) = launch(&mut crash, entry, None, &flags);
+    main.join().unwrap();
+    wait_thread_done(domain);
+    assert_eq!(flags[0].load(Ordering::SeqCst), 1);
+    assert!(matches!(info(domain).unwrap().state, DomainState::Crashed(_)), "{:?}", info(domain).unwrap().state);
+}
+
+// Holds one of each kind of thing a run gets from the OS, and never gives any of it back.
+const HOLDS: &str = r#"
+use std::sync::atomic::{AtomicU64, Ordering};
+extern "C" fn called_after_the_end() {}
+#[cfg(unix)]
+extern "C" {
+    fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut u8;
+    fn signal(sig: i32, handler: usize) -> usize;
+    fn pthread_key_create(key: *mut u32, dtor: usize) -> i32;
+    fn pthread_atfork(prepare: Option<extern "C" fn()>, parent: Option<extern "C" fn()>, child: Option<extern "C" fn()>) -> i32;
+}
+#[cfg(unix)]
+fn platform() -> *mut u8 {
+    #[cfg(target_os = "linux")]
+    const MAP_ANON: i32 = 0x20;
+    #[cfg(not(target_os = "linux"))]
+    const MAP_ANON: i32 = 0x1000;
+    #[cfg(target_os = "linux")]
+    const SIGUSR2: i32 = 12;
+    #[cfg(not(target_os = "linux"))]
+    const SIGUSR2: i32 = 31;
+    unsafe {
+        signal(SIGUSR2, called_after_the_end as usize);
+        let mut key = 0;
+        pthread_key_create(&mut key, called_after_the_end as usize);
+        pthread_atfork(Some(called_after_the_end), None, None);
+        mmap(std::ptr::null_mut(), 1 << 20, 3, 2 | MAP_ANON, -1, 0)
+    }
+}
+#[cfg(windows)]
+extern "system" {
+    fn VirtualAlloc(addr: *mut u8, len: usize, ty: u32, prot: u32) -> *mut u8;
+    fn CreateEventW(attrs: *mut u8, manual: i32, initial: i32, name: *const u16) -> usize;
+}
+// one process left running, and one started to outlive the run
+#[cfg(unix)]
+fn children() -> (u32, u32) {
+    use std::os::unix::process::CommandExt;
+    extern "C" {
+        fn setsid() -> i32;
+    }
+    let left = std::process::Command::new("sleep").arg("600").spawn().unwrap();
+    let mut detached = std::process::Command::new("sleep");
+    detached.arg("600");
+    unsafe {
+        detached.pre_exec(|| {
+            setsid();
+            Ok(())
+        });
+    }
+    let detached = detached.spawn().unwrap();
+    let pids = (left.id(), detached.id());
+    std::mem::forget((left, detached));
+    pids
+}
+#[cfg(windows)]
+fn children() -> (u32, u32) {
+    use std::os::windows::process::CommandExt;
+    let waits = ["-n", "600", "127.0.0.1"];
+    let left = std::process::Command::new("ping").args(waits).stdout(std::process::Stdio::null()).spawn().unwrap();
+    let detached = std::process::Command::new("ping").args(waits).stdout(std::process::Stdio::null()).creation_flags(0x8).spawn().unwrap();
+    let pids = (left.id(), detached.id());
+    std::mem::forget((left, detached));
+    pids
+}
+#[cfg(windows)]
+fn platform() -> *mut u8 {
+    unsafe {
+        CreateEventW(std::ptr::null_mut(), 1, 0, std::ptr::null());
+        VirtualAlloc(std::ptr::null_mut(), 1 << 20, 0x3000, 4)
+    }
+}
+fn fixture(p: *mut u64) {
+    let a = unsafe { &*(p as *const [AtomicU64; 4]) };
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    a[2].store(listener.local_addr().unwrap().port() as u64, Ordering::SeqCst);
+    let file = std::fs::File::open(std::env::current_exe().unwrap()).unwrap();
+    let dir = std::fs::read_dir(".").unwrap();
+    let pipe = std::io::pipe().unwrap();
+    let block = platform();
+    unsafe { *block = 1 };
+    std::mem::forget((listener, file, dir, pipe));
+    let (left, detached) = children();
+    a[1].store(left as u64, Ordering::SeqCst);
+    a[3].store(detached as u64, Ordering::SeqCst);
+    a[0].store(1, Ordering::SeqCst);
+    loop { std::thread::park(); }
+}
+"#;
+
+/// Whether process `pid` still runs (and is not just unreaped).
+fn process_runs(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        extern "C" {
+            fn kill(pid: i32, sig: i32) -> i32;
+        }
+        unsafe { kill(pid as i32, 0) == 0 }
+    }
+    #[cfg(windows)]
+    {
+        use crate::os::win32::{CloseHandle, OpenProcess, WaitForSingleObject};
+        unsafe {
+            let h = OpenProcess(0x0010_0000, 0, pid);
+            if h == 0 {
+                return false;
+            }
+            let running = WaitForSingleObject(h, 0) != 0;
+            CloseHandle(h);
+            running
+        }
+    }
+}
+
+/// Ends a process the test started for good.
+fn end_process(pid: u32) {
+    #[cfg(unix)]
+    {
+        extern "C" {
+            fn kill(pid: i32, sig: i32) -> i32;
+        }
+        unsafe { kill(pid as i32, 9) };
+    }
+    #[cfg(windows)]
+    {
+        use crate::os::win32::{CloseHandle, OpenProcess, TerminateProcess};
+        unsafe {
+            let h = OpenProcess(0x0001, 0, pid);
+            TerminateProcess(h, 1);
+            CloseHandle(h);
+        }
+    }
+}
+
+/// What the process has open now.
+fn open_count() -> usize {
+    #[cfg(target_os = "linux")]
+    return std::fs::read_dir("/proc/self/fd").unwrap().count();
+    #[cfg(target_vendor = "apple")]
+    return std::fs::read_dir("/dev/fd").unwrap().count();
+    #[cfg(windows)]
+    {
+        use crate::os::win32::{GetCurrentProcess, GetProcessHandleCount};
+        let mut n = 0;
+        unsafe { GetProcessHandleCount(GetCurrentProcess(), &mut n) };
+        n as usize
+    }
+}
+
+/// The run's end gives back what the run held, though it never did: the next run binds the same
+/// port, and round after round the run leaves nothing open.
+#[test]
+fn a_run_ends_with_what_it_held_given_back() {
+    isolated_test!(a_run_ends_with_what_it_held_given_back);
+    let _serial = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let mut counts = Vec::new();
+    for _ in 0..3 {
+        let (mut u, entry, root) = fixture_of(HOLDS, "fixture");
+        u.tier1 = None;
+        let up = &mut *u as *mut Unit;
+        let flags: [AtomicU64; 4] = Default::default();
+        let open_before = open_count();
+        let (domain, _base, main) = launch(&mut u, entry, None, &flags);
+        wait(|| {
+            if let Some(DomainState::Crashed(why)) = state(domain) { panic!("the fixture crashed: {why}"); }
+            flags[0].load(Ordering::SeqCst) == 1
+        });
+        let end = end_run(up, Duration::from_secs(10));
+        eprintln!("{}", end.line());
+        assert!(end.left.is_empty(), "left: {:?}", end.left);
+        main.join().unwrap();
+        wait_thread_done(domain);
+        let r = end.released;
+        // the file, the directory, the pipe's two ends
+        assert!(r.files >= 4, "{r:?}");
+        assert_eq!(r.sockets, 1, "{r:?}");
+        assert!(r.mappings >= 1 && r.mapped_bytes >= 1 << 20, "{r:?}");
+        // the one it left running ended with it, and the one started to outlive it did not
+        assert_eq!((r.children_ended, r.children_detached, r.children_left), (1, 1, 0), "{r:?}");
+        assert!(!process_runs(flags[1].load(Ordering::SeqCst) as u32), "the run's child still runs");
+        let detached = flags[3].load(Ordering::SeqCst) as u32;
+        assert!(process_runs(detached), "the detached process did not stay");
+        end_process(detached);
+        #[cfg(unix)]
+        assert_eq!(r.callbacks, 3, "{r:?}");
+        let port = flags[2].load(Ordering::SeqCst) as u16;
+        let again = std::net::TcpListener::bind(("127.0.0.1", port));
+        assert!(again.is_ok(), "the run's port is still taken: {again:?}");
+        drop(again);
+        #[cfg(unix)]
+        {
+            #[cfg(target_os = "linux")]
+            const SIGUSR2: i32 = 12;
+            #[cfg(not(target_os = "linux"))]
+            const SIGUSR2: i32 = 31;
+            extern "C" {
+                fn signal(sig: i32, handler: usize) -> usize;
+            }
+            assert_eq!(unsafe { signal(SIGUSR2, 0) }, 0, "the run's handler stayed");
+        }
+        counts.push(open_count() as i64 - open_before as i64);
+        domains().retain(|d| d.info.id != domain);
+        drop(u);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    eprintln!("left open by each round: {counts:?}");
+    // (the first round's lazy compiles open what stays open for the whole process)
+    assert_eq!(&counts[1..], &[0, 0], "left open: {counts:?}");
+}
+
+const NATIVE_FAULT: &str = r#"
+use std::sync::atomic::{AtomicU64, Ordering};
+extern "C" { fn strlen(s: *const u8) -> usize; }
+fn fixture(p: *mut u64) {
+    let a = unsafe { &*(p as *const [AtomicU64; 4]) };
+    let deep = a[2].load(Ordering::SeqCst);
+    if deep == 0 {
+        unsafe { strlen(8 as *const u8) };
+    } else {
+        let native: extern "C" fn() = unsafe { std::mem::transmute(deep as usize) };
+        native();
+    }
+    a[0].store(1, Ordering::SeqCst);
+}
+"#;
+
+#[inline(never)]
+extern "C" fn native_faults_a_call_down() {
+    #[inline(never)]
+    fn down() {
+        unsafe { std::ptr::write_volatile(8 as *mut u64, 1) };
+    }
+    down();
+    std::hint::black_box(());
+}
+
+/// A native call the program made faults, on the program stack, in the function it called: the
+/// run's failure, as a fault in JIT code is. On Windows that takes the system's whole search, and
+/// the search has to end on the program stack.
+#[test]
+fn a_fault_in_a_native_function_a_program_called_fails_the_run() {
+    isolated_test!(a_fault_in_a_native_function_a_program_called_fails_the_run);
+    let _serial = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let (mut u, entry, _root) = fixture_of(NATIVE_FAULT, "fixture");
+    u.tier1 = None;
+    let flags: [AtomicU64; 4] = Default::default();
+    let (domain, _base, main) = launch(&mut u, entry, None, &flags);
+    main.join().unwrap();
+    wait_thread_done(domain);
+    assert_eq!(flags[0].load(Ordering::SeqCst), 0, "the program went on after the fault");
+    assert!(matches!(info(domain).unwrap().state, DomainState::Crashed(_)), "{:?}", info(domain).unwrap().state);
+    std::mem::forget(u);
+}
+
+/// A fault deeper in native code, on the program stack: no recovery point can be trusted past
+/// those frames, so the process ends with a report and the fault's code, and at once. It never
+/// stays up in the system's search or its error report, which nothing would come back from: a
+/// process that is gone is one a restart can follow.
+#[test]
+fn a_fault_deeper_in_native_code_ends_the_process_at_once() {
+    const CHILD: &str = "RELAX_NATIVE_FAULT_CHILD";
+    const THIS: &str = "domain::teardown_tests::a_fault_deeper_in_native_code_ends_the_process_at_once";
+    if std::env::var_os(CHILD).is_some() {
+        // (no core file: writing one is most of the time this takes)
+        #[cfg(unix)]
+        unsafe {
+            extern "C" {
+                fn setrlimit(resource: i32, limit: *const [u64; 2]) -> i32;
+            }
+            const RLIMIT_CORE: i32 = 4;
+            setrlimit(RLIMIT_CORE, &[0, 0]);
+        }
+        let (mut u, entry, _root) = fixture_of(NATIVE_FAULT, "fixture");
+        u.tier1 = None;
+        let flags: [AtomicU64; 4] = Default::default();
+        flags[2].store(native_faults_a_call_down as *const () as usize as u64, Ordering::SeqCst);
+        let (_domain, _base, main) = launch(&mut u, entry, None, &flags);
+        main.join().unwrap();
+        return;
+    }
+    let log = std::env::temp_dir().join(format!("relax-native-fault-{}.log", std::process::id()));
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", THIS, "--test-threads=1", "--nocapture"])
+        .env(CHILD, "1")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::fs::File::create(&log).unwrap())
+        .spawn()
+        .unwrap();
+    let since = std::time::Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        // (the fixture's compile comes first, on a loaded machine; the end is what is bounded)
+        if since.elapsed().as_secs() >= 300 {
+            child.kill().unwrap();
+            panic!("the process stayed up after its fault:\n{}", std::fs::read_to_string(&log).unwrap_or_default());
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let told = std::fs::read_to_string(&log).unwrap();
+    std::fs::remove_file(&log).unwrap();
+    assert!(told.contains("the process ends"), "{status:?}\n{told}");
+    #[cfg(windows)]
+    assert_eq!(status.code(), Some(0xc000_0005u32 as i32), "{told}");
+    #[cfg(unix)]
+    assert!(std::os::unix::process::ExitStatusExt::signal(&status).is_some(), "{status:?}\n{told}");
+}

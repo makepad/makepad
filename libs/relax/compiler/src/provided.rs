@@ -242,11 +242,19 @@ mod source_tests {
     }
 }
 
-/// Compares registered crates against the embedded library closure; absent crates skip.
+/// The one crate a test harness binds. Its other crates are the tests' subject, built from source;
+/// the CPU budget is the process's one, and a copy built from source would admit the tests' pool
+/// beside the JIT, neither seeing the other.
+pub const HARNESS_BINDS: &str = "makepad_cpu_budget";
+
 const IDENTITY_THREADS: usize = 4;
 
-pub fn check_sources(pkgs: &[crate::srchash::SrcPkg]) -> Result<(), SourceCheckError> {
-    let reg: Vec<_> = REGISTRY.lock().unwrap_or_else(|e| e.into_inner()).iter().map(|p| (p.name.clone(), p.source, p.manifest)).collect();
+/// Compares registered crates (`only`: that one) against the embedded library closure; absent
+/// crates skip.
+pub fn check_sources(pkgs: &[crate::srchash::SrcPkg], only: Option<&str>) -> Result<(), SourceCheckError> {
+    let reg: Vec<_> = REGISTRY.lock().unwrap_or_else(|e| e.into_inner()).iter()
+        .filter(|p| only.is_none_or(|o| p.name == o))
+        .map(|p| (p.name.clone(), p.source, p.manifest)).collect();
     let mut verified = Vec::new();
     let mut files = std::collections::HashMap::new();
     // the identity files of every package folder the registered crates reach, read and hashed
@@ -297,12 +305,12 @@ static PENDING: Mutex<Option<std::thread::JoinHandle<Result<(), SourceCheckError
 /// run and goes on loading; nothing may bind a provided crate before `finish_sources` has
 /// returned Ok (`take_for`, `take_for_crates` and the boot's own join before the unit is built
 /// call it). The hashes, the manifests and the error are those of `check_sources`.
-pub fn check_sources_later(pkgs: std::sync::Arc<Vec<crate::srchash::SrcPkg>>) {
+pub fn check_sources_later(pkgs: std::sync::Arc<Vec<crate::srchash::SrcPkg>>, only: Option<&'static str>) {
     let _k = crate::zone_alloc::kept();
     let spawned = std::thread::Builder::new().name("run-provided-sources".into()).spawn(move || {
         let _z = crate::zone_alloc::compiler_thread();
         let t = std::time::Instant::now();
-        let verdict = check_sources(&pkgs);
+        let verdict = check_sources(&pkgs, only);
         if crate::preload::trace() { eprintln!("boot-trace: provided sources checked in {:.1} ms (beside the load)", t.elapsed().as_secs_f64() * 1e3); }
         verdict
     });
@@ -327,14 +335,15 @@ pub fn finish_sources() -> Result<(), SourceCheckError> {
 }
 
 /// Reads what `check_sources` reads, for the identity of every registered crate in the program,
-/// and nothing else. A check for another target binds nothing, but the run on that target
-/// (the phone) compares these identities: `pack-src` records the files this reads so its archive
-/// holds them.
+/// and nothing else, each package folder once. A check for another target binds nothing, but the
+/// run on that target (the phone) compares these identities: `pack-src` records the files this
+/// reads so its archive holds them (run.rs calls it only while the read log records).
 pub fn read_identity_files(pkgs: &[crate::srchash::SrcPkg]) {
     let reg = REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
+    let mut files = std::collections::HashMap::new();
     for p in reg.iter() {
         for (root, _) in pkgs.iter().enumerate().filter(|(_, k)| k.name.replace('-', "_") == p.name) {
-            let _ = crate::srchash::closure_hash(pkgs, root);
+            let _ = crate::srchash::closure_manifest_with(pkgs, root, &mut files);
         }
     }
 }
@@ -841,11 +850,16 @@ fn rustc_vec_words() -> Option<([usize; 3], usize)> {
 /// the other's (both allocate through the loader's allocator; zone_alloc dealloc_layout frees a
 /// block of any heap).
 #[derive(Clone, Copy)]
-struct StdSame {
+pub struct StdSame {
     /// `Vec` (the ADT of `String`'s one field), with `String`
     vec: DefId,
     /// `Option<String>` / `Option<Vec<T>>`: rustc's niche (None in the capacity word)
     option: bool,
+}
+
+/// The String / Vec agreement of the two stds (`StdSame`), probed on a layout table of its own.
+pub fn std_same(prog: &Program, tcx: &Tcx) -> Option<StdSame> {
+    std_vec_same(prog, tcx, &crate::layout::Layouts::new())
 }
 
 fn std_vec_same(prog: &Program, tcx: &Tcx, probe: &crate::layout::Layouts) -> Option<StdSame> {
@@ -949,6 +963,16 @@ pub fn same_layout_handles(prog: &Program, tcx: &Tcx, cands: &[(DefId, u32, u32,
     let mut v: Vec<DefId> = ok.into_iter().collect();
     v.sort_by_key(|d| d.0);
     v
+}
+
+/// Is field `t` of an opaque handle of provided crate `krate` the same bytes on both sides, so
+/// JIT-compiled code reaches it at rustc's offset (Unit::provided_handle_field)? The rule of
+/// `same_layout_handles` for one field: `trusted` data, a handle laid out as rustc does (`laid`),
+/// or a `String` / `Vec<T>` of such data (and `Option` of one) when the two stds agree
+/// (`std_same`): ScriptTokenizer's `tokens: Vec<ScriptTokenPos>` in a handle that its `State` keeps
+/// opaque. A HashMap (rustc's std's own table) or an opaque handle's elements stay rustc's alone.
+pub fn handle_field_same(prog: &Program, tcx: &Tcx, krate: u32, t: TyId, std_same: Option<StdSame>, laid: &dyn Fn(DefId) -> bool, opaque: &dyn Fn(DefId) -> bool) -> bool {
+    same_bytes(prog, tcx, krate, t, laid, std_same, opaque, 0)
 }
 
 /// Is a field of type `t` (in a handle of provided crate `krate`) the same bytes on both sides

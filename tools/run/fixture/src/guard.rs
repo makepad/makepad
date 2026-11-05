@@ -2,5 +2,5 @@
 fn main() {
     let mut r = relax_provided_fixture::Registry::new();
     r.add("x");
-    println!("{}", relax_provided_fixture::names_peek(&r, 0u8));
+    println!("{}", relax_provided_fixture::by_name_peek(&r, 0u8));
 }

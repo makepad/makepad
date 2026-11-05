@@ -433,7 +433,7 @@ fn cycle_across_two_threads_includes_synchronous_children() {
 }
 
 #[test]
-fn panic_poison_wakes_blocked_waiters_and_restores_task_stack() {
+fn a_panic_wakes_blocked_waiters_one_runs_the_query_and_the_task_stack_is_restored() {
     let engine = Arc::new(QueryEngine::new());
     let table = Arc::new(QueryTable::new(1, fp, value_fp));
     let (started_send, started_recv) = mpsc::channel();
@@ -456,12 +456,14 @@ fn panic_poison_wakes_blocked_waiters_and_restores_task_stack() {
     };
     started_recv.recv_timeout(Duration::from_secs(5)).unwrap();
     let (send, recv) = mpsc::channel();
+    let runs = Arc::new(AtomicUsize::new(0));
     let mut waiters = Vec::new();
     for _ in 0..7 {
         let engine = Arc::clone(&engine);
         let table = Arc::clone(&table);
         let send = send.clone();
-        waiters.push(thread::spawn(move || send.send(table.get(&engine, 0, &mut |_| panic!("second executor"), &no_force)).unwrap()));
+        let runs = Arc::clone(&runs);
+        waiters.push(thread::spawn(move || send.send(table.get(&engine, 0, &mut |_| { runs.fetch_add(1, Ordering::Relaxed); Ok(7) }, &no_force)).unwrap()));
     }
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
@@ -479,14 +481,14 @@ fn panic_poison_wakes_blocked_waiters_and_restores_task_stack() {
     }
     release_send.send(()).unwrap();
     assert!(owner.join().is_err());
-    let query = table.query_id(&0).unwrap();
     for _ in 0..7 {
-        assert_eq!(recv.recv_timeout(Duration::from_secs(5)).unwrap(), Err(QueryError::Poisoned(query)));
+        assert_eq!(recv.recv_timeout(Duration::from_secs(5)).unwrap(), Ok(7));
     }
     for waiter in waiters {
         waiter.join().unwrap();
     }
-    assert_eq!(table.get(&engine, 0, &mut |_| Ok(7), &no_force), Err(QueryError::Poisoned(query)));
+    assert_eq!(runs.load(Ordering::Relaxed), 1);
+    assert_eq!(table.get(&engine, 0, &mut |_| panic!("computed again"), &no_force), Ok(7));
     assert_eq!(table.get(&engine, 1, &mut |_| Ok(8), &no_force), Ok(8));
 
     // Catch an unwind on this thread, then verify TLS has no abandoned task/job.
@@ -639,7 +641,7 @@ fn late_tls_provider_panic() {
             }, &no_force)
         }));
         assert!(result.is_err());
-        assert_eq!(table.get(&cx.engine, 0, &mut |_| Ok(0), &no_force), Err(QueryError::Poisoned(table.query_id(&0).unwrap())));
+        assert_eq!(table.get(&cx.engine, 0, &mut |_| Ok(0), &no_force), Ok(0));
         assert_eq!(table.get(&cx.engine, 1, &mut |_| Ok(9), &no_force), Ok(9));
         assert!(cx.engine.dependencies(table.query_id(&1).unwrap()).is_empty());
     });
@@ -750,8 +752,38 @@ fn round42_nested_cancellation_discards_reads_and_retries_after_edit() {
     assert_eq!(engine.dependencies(parent.query_id(&0).unwrap()), vec![child.query_id(&0).unwrap()]);
 }
 
+/// A panic records nothing in the queries it crosses, nested ones too: their next caller runs them.
+/// A caller whose own run panics gets its own panic, not a leftover of the first.
+#[test]
+fn a_panic_records_nothing_and_the_next_caller_runs_the_query() {
+    let mut engine = QueryEngine::new();
+    engine.register_input(0, 0, fp(&0)).unwrap();
+    engine.set_input(0, 0, value_fp(&1)).unwrap();
+    let parent = QueryTable::new(1, fp, value_fp);
+    let child = QueryTable::new(2, fp, value_fp);
+    let panics_with = |message: &'static str| {
+        let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            parent.get(&engine, 0, &mut |_| {
+                engine.input(0, 0)?;
+                child.get(&engine, 0, &mut |_| -> Result<u64, QueryError> { panic!("{message}") }, &no_force)
+            }, &no_force)
+        }));
+        run.unwrap_err().downcast_ref::<String>().cloned().unwrap()
+    };
+    assert_eq!(panics_with("the check's panic"), "the check's panic");
+    for query in [parent.query_id(&0).unwrap(), child.query_id(&0).unwrap()] {
+        let state = engine.state.lock().unwrap();
+        let index = state.graph.find(query).unwrap();
+        assert!(state.graph.fingerprint(index).is_none());
+        assert!(!state.graph.errors.contains_key(&index));
+        assert!(!state.jobs.contains_key(&index));
+    }
+    assert_eq!(panics_with("the compile's own panic"), "the compile's own panic");
+    assert_eq!(parent.get(&engine, 0, &mut |_| child.get(&engine, 0, &mut |_| Ok(7), &no_force), &no_force), Ok(7));
+}
+
 /// The post-boot loader's NeedsLoad (a constant waiting for a skipped module) crosses
-/// nested queries like a preemption: neither caches a value or an error (not Poisoned), and
+/// nested queries like a preemption: neither caches a value or an error, and
 /// the same key computes normally on the next request, in the same revision.
 #[test]
 fn needs_load_cancels_nested_queries_without_caching() {

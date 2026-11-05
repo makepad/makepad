@@ -72,7 +72,7 @@ pub fn body_anon_consts(prog: &Program, tcx: &Tcx, krate: u32) -> Vec<(DefId, De
     }).collect()
 }
 
-fn root_owner(prog: &Program, def: DefId) -> DefId {
+pub(crate) fn root_owner(prog: &Program, def: DefId) -> DefId {
     let mut owner = prog.def(def).parent;
     while matches!(prog.def(owner).kind, DefKind::Closure | DefKind::AnonConst | DefKind::OpaqueTy) { owner = prog.def(owner).parent; }
     owner
@@ -98,14 +98,15 @@ fn anon_consts(prog: &Program, tcx: &Tcx, krate: u32, inside: bool) -> Vec<DefId
 fn in_body(prog: &Program, owner: DefId, file: u32, lo: u32) -> bool {
     let d = prog.def(owner);
     if d.file != file || !matches!(d.kind, DefKind::Fn | DefKind::AssocFn | DefKind::Const | DefKind::AssocConst | DefKind::Static) { return false; }
-    let ast = &prog.files[file as usize].ast;
+    let pf = &prog.files[file as usize];
+    let ast = &pf.ast;
     match ast.item(d.item).kind {
-        ItemKind::Fn(_, Some(b), _) => { let b = ast.block(b); lo >= b.lo && lo < b.hi }
+        ItemKind::Fn(_, Some(b), _) => { let b = ast.block(b); pf.expands_within(lo, b.lo, b.hi) }
         ItemKind::Fn(s, None, _) => match ast.fn_sig(s).lazy_body {
-            Some(r) if r.hi > r.lo => { let src = prog.src(file); lo >= src.tok(r.lo as usize).lo && lo < src.tok(r.hi as usize - 1).hi }
+            Some(r) if r.hi > r.lo => { let src = prog.src(file); pf.expands_within(lo, src.tok(r.lo as usize).lo, src.tok(r.hi as usize - 1).hi) }
             _ => false,
         },
-        ItemKind::Const(_, init) | ItemKind::Static(_, _, init) if init.is_some() => { let x = ast.expr(init.get().unwrap()); lo >= x.lo && lo < x.hi }
+        ItemKind::Const(_, init) | ItemKind::Static(_, _, init) if init.is_some() => { let x = ast.expr(init.get().unwrap()); pf.expands_within(lo, x.lo, x.hi) }
         _ => false,
     }
 }

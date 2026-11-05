@@ -324,8 +324,10 @@ pub extern "C" fn relax_domain_enter(base: u64, token: u64) {
         }
         enter(base);
         if let Some(d) = domains().iter_mut().find(|d| d.info.base == base) {
-            if let Some(t) = d.threads.iter_mut().find(|t| t.0 == token) {
-                t.2 = crate::inspect::threads::self_os_id();
+            if let Some(t) = d.threads.iter_mut().find(|t| t.token == token) {
+                t.os_id = crate::inspect::threads::self_os_id();
+                t.handle = crate::os::thread::current();
+                t.waiting = crate::os::thread::waiting_cell();
             }
         }
     })
@@ -340,8 +342,10 @@ fn register_current(base: u64) {
     if token != 0 {
         t.registrations.push((base, token));
         if let Some(d) = domains().iter_mut().find(|d| d.info.base == base) {
-            if let Some(t) = d.threads.iter_mut().find(|t| t.0 == token) {
-                t.2 = crate::inspect::threads::self_os_id();
+            if let Some(t) = d.threads.iter_mut().find(|t| t.token == token) {
+                t.os_id = crate::inspect::threads::self_os_id();
+                t.handle = crate::os::thread::current();
+                t.waiting = crate::os::thread::waiting_cell();
             }
         }
     }
@@ -354,7 +358,7 @@ pub extern "C" fn relax_domain_reserve(base: u64) -> u64 {
     crate::jit::host_boundary("relax_domain_reserve", move || {
         let token = NEXT_THREAD.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if let Some(d) = domains().iter_mut().find(|d| d.info.base == base && base != 0) {
-            d.threads.push((token, format!("thread-{token}"), 0));
+            d.threads.push(DomainThread::new(token, format!("thread-{token}"), 0, 0));
             return token;
         }
         0
@@ -398,7 +402,7 @@ impl Callback {
             if d.info.id == 0 { drop(ds); return Some(f()); }
             if d.reclaiming || !cleanup && (d.cancel || !matches!(d.info.state, DomainState::Running)) { return None; }
             let token = NEXT_THREAD.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            d.threads.push((token, "host callback".into(), crate::inspect::threads::self_os_id()));
+            d.threads.push(DomainThread::new(token, "host callback".into(), crate::inspect::threads::self_os_id(), crate::os::thread::current()));
             token
         };
         Some(crate::jit::domain_callback(self.base, token, f))
@@ -412,7 +416,7 @@ pub extern "C" fn relax_domain_name(name: *const u8) {
         let Some((_, token)) = t.registrations.iter().find(|r| r.0 == base) else { return };
         let name = unsafe { std::ffi::CStr::from_ptr(name.cast()) }.to_string_lossy().into_owned();
         if let Some(d) = domains().iter_mut().find(|d| d.info.base == base) {
-            if let Some(entry) = d.threads.iter_mut().find(|e| e.0 == *token) { entry.1 = name; }
+            if let Some(entry) = d.threads.iter_mut().find(|e| e.token == *token) { entry.name = name; }
         }
     })
 }
@@ -425,7 +429,7 @@ pub extern "C" fn thread_finished(base: u64, token: u64) {
         let id = {
             let mut ds = domains();
             let Some(d) = ds.iter_mut().find(|d| d.info.base == base) else { return };
-            d.threads.retain(|e| e.0 != token);
+            d.threads.retain(|e| e.token != token);
             d.info.id
         };
         teardown(id);
@@ -586,6 +590,24 @@ pub struct DomainInfo {
     pub static_committed: u64,
 }
 
+/// A thread a domain counts on.
+struct DomainThread {
+    token: u64,
+    name: String,
+    os_id: u64,
+    /// what `os::thread::kick` takes; 0 until the thread entered
+    handle: u64,
+    /// `os::thread::waiting_cell`, once it entered
+    waiting: usize,
+}
+
+impl DomainThread {
+    fn new(token: u64, name: String, os_id: u64, handle: u64) -> DomainThread {
+        // (a handle here: made on the thread itself)
+        DomainThread { token, name, os_id, handle, waiting: if handle != 0 { crate::os::thread::waiting_cell() } else { 0 } }
+    }
+}
+
 struct Domain {
     info: DomainInfo,
     started: std::time::Instant,
@@ -596,7 +618,9 @@ struct Domain {
     compiling: bool,
     reclaiming: bool,
     cancel: bool,
-    threads: Vec<(u64, String, u64)>,
+    /// the unit whose code it runs (0: not started on one yet)
+    unit: usize,
+    threads: Vec<DomainThread>,
     heap: Option<Box<crate::zone_alloc::domain::DomainHeap>>,
 }
 
@@ -663,7 +687,7 @@ pub(crate) fn register_boot(package: &str, base: u64) {
         started: std::time::Instant::now(),
         args: Vec::new(),
         thread_done: false,
-        compiling: false, reclaiming: false, cancel: false, threads: Vec::new(), heap: None,
+        compiling: false, reclaiming: false, cancel: false, unit: 0, threads: Vec::new(), heap: None,
     });
     let token = relax_domain_reserve(base);
     relax_domain_enter(base, token);
@@ -686,7 +710,7 @@ pub(crate) fn first_present() {
 fn snapshot(d: &Domain) -> DomainInfo {
     let mut i = d.info.clone();
     i.threads = d.threads.len();
-    i.thread_names = d.threads.iter().map(|t| t.1.clone()).collect();
+    i.thread_names = d.threads.iter().map(|t| t.name.clone()).collect();
     (i.arena_in_use, i.arena_committed) = d.heap.as_ref().map_or((0, 0), |h| h.stats());
     i.arena_detail = d.heap.as_ref().map_or((0, 0, 0), |h| { let x = h.detail(); (x.0, x.1, x.2) });
     i
@@ -762,7 +786,7 @@ pub fn retire(id: DomainId) -> Result<(), String> {
         let mut ds = domains();
         let d = ds.iter_mut().find(|d| d.info.id == id).ok_or_else(|| format!("no domain {id}"))?;
         d.cancel = true;
-        d.threads.iter().map(|t| t.1.clone()).collect::<Vec<_>>()
+        d.threads.iter().map(|t| t.name.clone()).collect::<Vec<_>>()
     };
     CHANGED.notify_all();
     teardown(id);
@@ -794,6 +818,185 @@ fn wait_app_thread(id: DomainId) {
     }
 }
 
+/// What ending a run found (`end_run`).
+#[derive(Debug, Default)]
+pub struct RunEnd {
+    /// the program's threads there were when it began
+    pub threads: usize,
+    /// ms from the code's end until the last of them left, or until the grace ran out
+    pub ms: f64,
+    /// still there when the grace ran out: (domain, name, OS id). Each leaves as soon as it gets
+    /// back from whatever native call it is in; its domain's memory waits for it, nothing else does.
+    pub left: Vec<(DomainId, String, u64)>,
+    /// native frames left behind on the way, by name (jit::abandoned_frames, all runs so far)
+    pub abandoned: Vec<(String, u32)>,
+    /// threads that called into an ended run with no way out, all runs so far
+    pub called_in: u64,
+    /// what the run held of the OS, back
+    pub released: crate::domain_res::Released,
+}
+
+impl RunEnd {
+    /// The end's line for the run's ledger, the same on every platform.
+    pub fn line(&self) -> String {
+        let mut l = format!("run end: {} threads, {:.1} ms", self.threads, self.ms);
+        if !self.left.is_empty() {
+            let names: Vec<String> = self.left.iter().map(|t| format!("{} (tid {})", t.1, t.2)).collect();
+            l += &format!("; left: {}", names.join(", "));
+        }
+        if !self.abandoned.is_empty() {
+            let names: Vec<String> = self.abandoned.iter().map(|t| format!("{} x{}", t.0, t.1)).collect();
+            l += &format!("; native frames left behind: {}", names.join(", "));
+        }
+        if self.called_in != 0 {
+            l += &format!("; native threads that called in, held: {}", self.called_in);
+        }
+        l += &self.released.line();
+        l
+    }
+}
+
+/// Threads that called into a run that ended with no way out (`jit::end_on_fault`): native code the
+/// host did not stop first. They stay where they are.
+static CALLED_IN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// (signal context)
+pub(crate) fn note_called_into_ended_run(_pc: u64) {
+    CALLED_IN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+static RUN_END_WAKE: std::sync::OnceLock<fn()> = std::sync::OnceLock::new();
+
+/// What wakes the host's own waits a thread of the program can be in: native code a kick does not
+/// bring back (its condvar's wait goes on after the signal), which is the host's to wake.
+pub fn set_run_end_wake(wake: fn()) {
+    let _ = RUN_END_WAKE.set(wake);
+}
+
+/// Kicks the threads of the domains on `unit` once: ends the waits they are in. True: some are left.
+fn kick_threads(unit: usize) -> bool {
+    if let Some(wake) = RUN_END_WAKE.get() {
+        wake();
+    }
+    let me = crate::os::thread::current();
+    let mut any = false;
+    for d in domains().iter().filter(|d| d.unit == unit && d.info.id != 0) {
+        for t in &d.threads {
+            any = true;
+            if t.handle != 0 && t.handle != me {
+                crate::os::thread::end_kick(t.handle, t.waiting);
+            }
+        }
+    }
+    any
+}
+
+/// Ends a run: every thread of every app domain on unit `up` ends, whatever it is doing, and its
+/// domain's memory goes with the last of them (`teardown`).
+///
+/// The code goes first (`Unit::end_code`): a thread in it faults at its next instruction and leaves
+/// (`jit::end_on_fault`). A thread in native code is left alone there, holding what it holds, and
+/// faults when it gets back: no native frame above the fault is cut off. A kick ends the wait of a
+/// thread blocked in a system call (EINTR); the system call's return is the way back. So a thread
+/// ends with nothing of the runtime's on it, and the only memory its frames could have locked is
+/// the domain's own, which goes with it.
+///
+/// A thread that does not leave within `grace` (a native wait nobody ends) does not hold up the
+/// caller: it is named and kicked on until it goes.
+pub fn end_run(up: *mut Unit, grace: std::time::Duration) -> RunEnd {
+    let unit = up as usize;
+    let (threads, bases) = {
+        let mut ds = domains();
+        let mut n = 0;
+        let mut bases = Vec::new();
+        for d in ds.iter_mut().filter(|d| d.unit == unit && d.info.id != 0) {
+            d.cancel = true;
+            n += d.threads.len();
+            if d.info.base != 0 {
+                bases.push(d.info.base);
+            }
+        }
+        (n, bases)
+    };
+    note_ending(&bases, true);
+    CHANGED.notify_all();
+    let start = std::time::Instant::now();
+    // (first: from here a signal, a fork or a thread's exit calls nothing of the run's)
+    let callbacks = crate::domain_res::take_back_callbacks(&bases);
+    unsafe { (*up).end_code() };
+    let mut backoff = std::time::Duration::from_millis(1);
+    let end = |left, ms| RunEnd {
+        threads,
+        ms,
+        left,
+        abandoned: crate::jit::abandoned_frames(),
+        called_in: CALLED_IN.load(std::sync::atomic::Ordering::Relaxed),
+        released: crate::domain_res::Released { callbacks, ..crate::domain_res::give_back_run(&bases) },
+    };
+    loop {
+        let spent = start.elapsed();
+        let any = kick_threads(unit) | crate::jit::kick_app_callers(&bases);
+        let ds = domains();
+        if !any && !ds.iter().any(|d| d.unit == unit && d.info.id != 0 && (d.reclaiming || d.compiling)) {
+            drop(ds);
+            note_ending(&bases, false);
+            return end(Vec::new(), start.elapsed().as_secs_f64() * 1e3);
+        }
+        if spent >= grace {
+            let left: Vec<_> = ds
+                .iter()
+                .filter(|d| d.unit == unit && d.info.id != 0)
+                .flat_map(|d| d.threads.iter().map(|t| (d.info.id, t.name.clone(), t.os_id)))
+                .collect();
+            drop(ds);
+            for id in left.iter().map(|l| l.0).collect::<HashSet<_>>() {
+                let names: Vec<String> = left.iter().filter(|l| l.0 == id).map(|l| l.1.clone()).collect();
+                report_teardown_threads(id, &names);
+            }
+            let end = end(left, spent.as_secs_f64() * 1e3);
+            keep_kicking(unit, bases);
+            return end;
+        }
+        drop(ds.wait_timeout(backoff.min(grace - spent)));
+        backoff = (backoff * 2).min(std::time::Duration::from_millis(50));
+    }
+}
+
+/// Kicks the threads a run's end left until the last has gone, on a thread of its own.
+fn keep_kicking(unit: usize, bases: Vec<u64>) {
+    let _kept = crate::zone_alloc::kept();
+    let _ = std::thread::Builder::new().name("run-end-left".into()).spawn(move || {
+        while kick_threads(unit) | crate::jit::kick_app_callers(&bases) {
+            drop(domains().wait_timeout(std::time::Duration::from_secs(1)));
+        }
+        note_ending(&bases, false);
+    });
+}
+
+/// The domain blocks of the runs ending now, for the fault handler (no lock there). A block stays
+/// in here until the last thread of its run has gone, so no later run can have its address.
+static ENDING: [std::sync::atomic::AtomicU64; 64] = [const { std::sync::atomic::AtomicU64::new(0) }; 64];
+
+fn note_ending(bases: &[u64], ending: bool) {
+    use std::sync::atomic::Ordering::AcqRel;
+    for &b in bases {
+        let (from, to) = if ending { (0, b) } else { (b, 0) };
+        // (none free: more domains than ever ran at once; a fault on such a thread is fatal as ever)
+        let _ = ENDING.iter().find(|s| s.compare_exchange(from, to, AcqRel, std::sync::atomic::Ordering::Relaxed).is_ok());
+    }
+}
+
+/// Is the calling thread in a run that is ending? (a fault handler may ask)
+pub(crate) fn current_is_ending() -> bool {
+    use std::sync::atomic::Ordering::Acquire;
+    let b = crate::jit::tls_block_if_any();
+    if b == 0 {
+        return false;
+    }
+    let base = unsafe { *(b as *const u64) };
+    base != 0 && ENDING.iter().any(|s| s.load(Acquire) == base)
+}
+
 /// Close admission to app callbacks before the host cancels its producers and joins threads.
 pub fn begin_stop(id: DomainId) {
     if let Some(d) = domains().iter_mut().find(|d| d.info.id == id && id != 0) { d.cancel = true; }
@@ -804,7 +1007,7 @@ pub fn begin_stop(id: DomainId) {
 /// Thread ids disambiguate repeated or OS-truncated names across incarnations.
 pub fn report_teardown_threads(domain: DomainId, names: &[String]) {
     let threads = domains().iter().find(|d| d.info.id == domain)
-        .map(|d| d.threads.iter().map(|t| (t.1.clone(), t.2)).collect::<Vec<_>>())
+        .map(|d| d.threads.iter().map(|t| (t.name.clone(), t.os_id)).collect::<Vec<_>>())
         .unwrap_or_default();
     if threads.is_empty() { return; }
     eprintln!("makepad-run domain: {domain}: retaining mapping until thread exit: {}", names.join(", "));
@@ -1131,7 +1334,7 @@ pub fn prepare(spec: &AppSpec) -> Result<DomainId, Vec<String>> {
             started: t0,
             args: spec.argv.clone().unwrap_or_else(|| std::iter::once(spec.package.clone().into_bytes()).chain(spec.args.iter().map(|a| a.clone().into_bytes())).collect()),
             thread_done: false,
-            compiling: true, reclaiming: false, cancel: false, threads: Vec::new(), heap: None,
+            compiling: true, reclaiming: false, cancel: false, threads: Vec::new(), unit: 0, heap: None,
         });
         id
     };
@@ -1144,7 +1347,7 @@ fn owner_of(d: &Domain) -> String {
     if d.compiling { held.push("its loader is still compiling".to_string()); }
     if d.reclaiming { held.push("its teardown is still running".to_string()); }
     if !d.threads.is_empty() {
-        let names = d.threads.iter().take(8).map(|t| t.1.as_str()).collect::<Vec<_>>().join(", ");
+        let names = d.threads.iter().take(8).map(|t| t.name.as_str()).collect::<Vec<_>>().join(", ");
         held.push(format!("{} threads still alive: {names}", d.threads.len()));
     }
     if held.is_empty() && d.info.base != 0 { held.push(format!("its memory is not reclaimed yet ({:?})", d.info.state)); }
@@ -1178,6 +1381,7 @@ fn start_prepared(up: *mut Unit, spec: AppSpec, id: DomainId) -> Result<DomainId
     let _z = crate::zone_alloc::compiler_thread();
     if crate::preload::trace() { eprintln!("boot-trace: domain {id} start_prepared at t={:.1} ms", crate::clock::ms_since_start()); }
     let _loading = Loading(id);
+    if let Some(d) = domains().iter_mut().find(|d| d.info.id == id) { d.unit = up as usize; }
     let t0 = std::time::Instant::now();
     // The app's first start takes the boot's resolved package (same process, same instant). Taken
     // before anything can end this start, so a relaunch always resolves its own.
@@ -1281,7 +1485,8 @@ fn launch_main(upn: usize, id: DomainId, base: u64, target: u64, arg: u64, packa
     let token = relax_domain_reserve(base);
     let name = format!("domain-{id}-{package}");
     if let Some(d) = domains().iter_mut().find(|d| d.info.id == id) {
-        if let Some(t) = d.threads.iter_mut().find(|t| t.0 == token) { t.1 = name.clone(); }
+        d.unit = upn;
+        if let Some(t) = d.threads.iter_mut().find(|t| t.token == token) { t.name = name.clone(); }
     }
     let spawned = std::thread::Builder::new().name(name).stack_size(64 << 20).spawn(move || {
         crate::jit::ensure_altstack();
@@ -1292,7 +1497,7 @@ fn launch_main(upn: usize, id: DomainId, base: u64, target: u64, arg: u64, packa
             // is the HAL's). At the default QoS the scheduler moved the race's UI thread to the
             // efficiency cores 20-25% of the time whenever the performance cores were busy
             // (ARMIPC, mini); a native app's never goes there.
-            crate::os::thread::interactive();
+            makepad_cpu_budget::set_ui_thread();
         }
         let up = upn as *mut Unit;
         relax_domain_enter(base, token);
@@ -1305,10 +1510,13 @@ fn launch_main(upn: usize, id: DomainId, base: u64, target: u64, arg: u64, packa
                 d.info.state = DomainState::Running;
             }
             notify_state(id, &DomainState::Running);
+            if crate::run::app_domain() == Some(id) { crate::first_frame::main_entered(); }
             match unsafe { crate::jit::call_jit_in(up, base, target, arg) } {
                 Ok(_) => end(id, DomainState::Exited(0)),
                 // `process::exit` on the domain's thread (exit_current) already ended it
                 Err(p) if p.kind == EXIT_KIND => {}
+                // the run ended under it (`end_run`): teardown says Stopped
+                Err(p) if p.kind == crate::jit::RUN_ENDED_KIND => {}
                 Err(p) => end(id, DomainState::Crashed(format!("{}: {}", p.kind, p.message))),
             }
         };
@@ -1365,7 +1573,6 @@ pub(crate) fn current_app_domain() -> Option<DomainId> {
 /// exits the process.
 pub(crate) fn exit_current(code: i32) -> bool {
     let Some(id) = current_app_domain() else { return false };
-    #[cfg(unix)]
     if crate::run::app_domain() == Some(id) {
         crate::os::proc::run_program_atexit();
     }

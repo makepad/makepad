@@ -100,24 +100,35 @@ pub unsafe fn set_fpcr(x: u64) {
     crate::intrinsics_rt::fp_env_set(x)
 }
 
+#[inline(always)]
 pub unsafe fn __crc32b(crc: u32, data: u8) -> u32 {
-    let mut r = crc ^ data as u32;
-    let mut i = 0;
-    while i < 8 {
-        r = (r >> 1) ^ (0xedb8_8320u32 & (0u32.wrapping_sub(r & 1)));
-        i += 1;
-    }
-    r
+    crc32::<1>(crc, data as u64)
 }
 
+#[inline(always)]
 pub unsafe fn __crc32d(crc: u32, data: u64) -> u32 {
-    let mut r = crc;
-    let mut i = 0;
-    while i < 8 {
-        r = __crc32b(r, (data >> (i * 8)) as u8);
-        i += 1;
+    crc32::<8>(crc, data)
+}
+
+/// CRC-32 (reflected 0xEDB88320, no inversions) of data's low BYTES bytes into crc: the
+/// instruction on aarch64 targets, bit by bit elsewhere (this module compiles on every target).
+#[inline(always)]
+unsafe fn crc32<const BYTES: u32>(crc: u32, data: u64) -> u32 {
+    #[cfg(target_arch = "aarch64")]
+    {
+        vx::vx_crc32(crc, data, BYTES)
     }
-    r
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        let mut r = crc;
+        let mut i = 0;
+        while i < BYTES * 8 {
+            r ^= ((data >> i) & 1) as u32;
+            r = (r >> 1) ^ (0xedb8_8320u32 & (0u32.wrapping_sub(r & 1)));
+            i += 1;
+        }
+        r
+    }
 }
 
 #[inline(always)]

@@ -491,7 +491,7 @@ fn merged_host_units_keep_features_and_dependencies() {
         pkg_id: format!("path+file://{dir}/{name}#0.1.0"),
         name: name.to_string(), kind: vec![kind.to_string()],
         src_path: format!("{dir}/{name}/src/lib.rs"), edition: "2021".to_string(),
-        host, mode: "build".to_string(), harness: false, features: features.iter().map(|s| s.to_string()).collect(),
+        host, mode: "build".to_string(), harness: false, sysroot: false, features: features.iter().map(|s| s.to_string()).collect(),
         deps: deps.iter().map(|(d, n)| (*d, n.to_string())).collect(),
     };
     let units = Units { units: vec![

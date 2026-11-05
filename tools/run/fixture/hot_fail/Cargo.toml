@@ -1,0 +1,13 @@
+[package]
+name = "relax-hot-fail"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# A program tools/run/fixture/hot_fail.py edits while it runs: the hot load fails and a warm
+# restart, with the program's state, applies the edit.
+[[bin]]
+name = "relax-hot-fail"
+path = "src/main.rs"
+
+[workspace]

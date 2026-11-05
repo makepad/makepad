@@ -7,7 +7,31 @@ use crate::image::{Reader, Writer};
 use crate::lexer::Tok;
 use std::sync::Arc;
 
-pub(super) struct Images {
+/// The stores one parallel job's crates read, each opened once: every crate's part names the same
+/// run store, and opening one copies its index.
+pub(super) struct OpenStores(relax_session::sync::Mutex<HashMap<String, Arc<Store>>>);
+
+impl OpenStores {
+    pub(super) fn new() -> Self {
+        Self(relax_session::sync::Mutex::new(HashMap::new()))
+    }
+
+    /// The store `name` under `dir` with `key`'s place in its index. A key it lacks may have been
+    /// committed since it was opened: only then is it opened again.
+    fn find(&self, dir: &std::path::Path, name: &str, key: u128) -> Option<(Arc<Store>, usize)> {
+        let at = |st: &Store| st.index.binary_search_by_key(&key, |e| e.key).ok();
+        let mut stores = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(st) = stores.get(name) {
+            if let Some(i) = at(st) { return Some((st.clone(), i)); }
+        }
+        let st = Arc::new(Store::open(&dir.join(name))?);
+        stores.insert(name.to_owned(), st.clone());
+        let i = at(&st)?;
+        Some((st, i))
+    }
+}
+
+pub(super) struct Images<'a> {
     name: String,
     path: PathBuf,
     store: Arc<Store>,
@@ -17,16 +41,16 @@ pub(super) struct Images {
     /// per file image key: the store and entry holding it (the crate store's own, or the run
     /// store its reference names, mapped here: never the process's zone-scoped front mappings)
     main: HashMap<u128, Option<(Arc<Store>, usize)>>,
-    runs: HashMap<String, Option<Arc<Store>>>,
+    runs: &'a OpenStores,
     reused_src: usize,
     written: usize,
 }
 
-impl Images {
-    pub(super) fn open(dir: &std::path::Path, name: String) -> Option<Self> {
+impl<'a> Images<'a> {
+    pub(super) fn open(dir: &std::path::Path, name: String, runs: &'a OpenStores) -> Option<Self> {
         let path = dir.join(&name);
         Some(Self { name, store: Arc::new(Store::open(&path)?), path,
-            pending: Vec::new(), keys: HashSet::new(), definitions: HashMap::new(), main: HashMap::new(), runs: HashMap::new(), reused_src: 0, written: 0 })
+            pending: Vec::new(), keys: HashSet::new(), definitions: HashMap::new(), main: HashMap::new(), runs, reused_src: 0, written: 0 })
     }
 
     fn add(&mut self, key: u128, image: Writer<'_>) {
@@ -48,10 +72,7 @@ impl Images {
             KIND_FRONT_REF => {
                 let (name, k) = front_run::decode_ref(b)?;
                 if !crate::store::name_ours(name) { return None; }
-                let dir = self.path.parent()?.to_path_buf();
-                let st = self.runs.entry(name.to_string()).or_insert_with(|| Store::open(&dir.join(name)).map(Arc::new)).clone()?;
-                let i = st.index.binary_search_by_key(&k, |e| e.key).ok()?;
-                (st, i)
+                self.runs.find(self.path.parent()?, name, k)?
             }
             _ => return None,
         };
@@ -67,7 +88,7 @@ impl Images {
     }
 }
 
-impl DemandWriter for Images {
+impl DemandWriter for Images<'_> {
     fn store_name(&self) -> &str { &self.name }
 
     fn surface(&mut self, path: &str, hash: u128, src: &[u8], toks: &[Tok]) -> Option<(DemandSlice, DemandSlice)> {
@@ -117,29 +138,53 @@ impl DemandWriter for Images {
     }
 }
 
-/// Each part reader owns its mappings/memo. A retained part names the original
-/// store, not the edited graph's new fingerprint. Missing/pruned images invalidate
-/// that part; stale parts can still be read solely for boundary comparison.
-#[derive(Default)]
-pub(super) struct ReadImages {
-    stores: HashMap<String, Arc<Store>>,
+/// Each part reader owns its memo. A retained part names the original store, not the
+/// edited graph's new fingerprint. Missing/pruned images invalidate that part; stale parts
+/// can still be read solely for boundary comparison.
+pub(super) struct ReadImages<'a> {
+    stores: &'a OpenStores,
     images: HashMap<(String, u128), &'static [u8]>,
 }
-impl ReadImages {
+impl<'a> ReadImages<'a> {
+    pub(super) fn new(stores: &'a OpenStores) -> Self {
+        Self { stores, images: HashMap::new() }
+    }
+
     pub(super) fn get(&mut self, dir: &std::path::Path, name: &str, key: u128) -> Option<&'static [u8]> {
         let id = (name.to_owned(), key);
         if let Some(bytes) = self.images.get(&id) { return Some(*bytes); }
         // The encoded name is a basename, never a path supplied to the filesystem.
         if !name.ends_with(".rcs") || std::path::Path::new(name).components().count() != 1
             || !matches!(std::path::Path::new(name).components().next(), Some(std::path::Component::Normal(_))) { return None; }
-        if !self.stores.contains_key(name) {
-            self.stores.insert(name.to_owned(), Arc::new(Store::open(&dir.join(name))?));
-        }
-        let store = self.stores.get(name)?;
-        let ix = store.index.binary_search_by_key(&key, |e| e.key).ok()?;
+        let (store, ix) = self.stores.find(dir, name, key)?;
         // Do not expose unchecked native token discriminants to a planning worker.
-        let bytes = checked_front_entry(store, ix, key)?;
+        let bytes = checked_front_entry(&store, ix, key)?;
         self.images.insert(id, bytes);
         Some(bytes)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One open for a whole job, however many crates ask; a key committed after that open is found.
+    #[test]
+    fn a_store_is_opened_once_and_again_for_a_newer_key() {
+        let dir = std::env::temp_dir().join(format!("relax-open-stores-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let name = "front_run-0123456789abcdef.rcs";
+        let put = |key: u128| crate::store::append(&dir.join(name), vec![NewEntry { key, kind: KIND_FRONT, payload: vec![key as u8; 16] }], false).unwrap();
+        put(1);
+        let stores = OpenStores::new();
+        let (a, _) = stores.find(&dir, name, 1).unwrap();
+        let (b, _) = stores.find(&dir, name, 1).unwrap();
+        assert!(Arc::ptr_eq(&a, &b));
+        assert!(stores.find(&dir, name, 2).is_none());
+        put(2);
+        let (c, i) = stores.find(&dir, name, 2).unwrap();
+        assert_eq!(c.get_at(i, 2).unwrap().1, [2u8; 16]);
+        drop((a, b, c, stores));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

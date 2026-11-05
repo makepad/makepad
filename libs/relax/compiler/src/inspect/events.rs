@@ -195,11 +195,13 @@ pub fn cmd_watch(req: &Req, out: &mut Out) {
 }
 
 /// `events [since=<seq>] [follow=1] [on=..]`: the kept events after `since` (default: the last
-/// 20), then with follow=1 each new one as it comes, until the client goes away.
+/// 20, the newest of them when the reply limit cuts it), then with follow=1 each new one as it
+/// comes, until the client goes away.
 pub fn cmd_events(req: &Req, out: &mut Out) {
     let on = kinds(req);
     let follow = req.get("follow") == Some("1");
-    let mut since = req.get("since").and_then(|s| s.parse().ok()).unwrap_or_else(|| SEQ.load(SeqCst).saturating_sub(20));
+    let asked = req.get("since").and_then(|s| s.parse().ok());
+    let mut since = asked.unwrap_or_else(|| SEQ.load(SeqCst).saturating_sub(20));
     out.measured("events", "event queue", &[]);
     if follow {
         // a stream is unbounded by design
@@ -209,10 +211,17 @@ pub fn cmd_events(req: &Req, out: &mut Out) {
         retry_update();
     }
     loop {
-        let batch: Vec<(u64, std::sync::Arc<str>)> = {
+        let mut batch: Vec<(u64, std::sync::Arc<str>)> = {
             let q = EVENTS.lock().unwrap_or_else(|e| e.into_inner());
             q.iter().filter(|e| e.seq > since && wanted(&on, e.kind)).map(|e| (e.seq, e.json.clone())).collect()
         };
+        if asked.is_none() {
+            // The recent events end at the newest: a few hitch lines filled the reply before, and
+            // devhub took a 30 s old verdict for the edit it had just shipped (11-04).
+            let mut room = out.remaining();
+            let fit = batch.iter().rev().take_while(|(_, j)| room.checked_sub(j.len() + 1).map(|r| room = r).is_some()).count();
+            batch.drain(..batch.len() - fit);
+        }
         for (seq, j) in &batch {
             out.line(j);
             since = *seq;
@@ -366,6 +375,12 @@ pub fn on_panic(info: &crate::jit::PanicInfo, regs: *const u64) {
         // watcher and unwind; parking it would ask the agent to repair the JIT.
         crate::hot_failure::restart_failed(&format!("{}: {} at {}", info.kind, info.message, info.location));
         return;
+    }
+    // a call of a stub whose build hit an internal compiler error, built off this thread or
+    // panicking in its compile: a failed hot load like a call's own (jit.rs compile_ice), no panic
+    // of the program to park. It parks only when no fresh process took over.
+    if crate::jit::is_ice_stub_message(&info.message) && !crate::hot_failure::has_error() {
+        crate::jit::ice_at_call(&info.message);
     }
     // the run window shows the app's parked panic (resume, restart) in a live session; a run that
     // is none (a test's child) ends as its panic ends it
@@ -718,13 +733,14 @@ pub fn start() {
             let waits = crate::waits::snapshot();
             let main = crate::jit::MAIN_TID.load(Relaxed);
             let now = crate::clock::wall_ns();
-            // the main thread waiting: on the owner after the first present (a compile stall),
-            // on a lock / condvar / join any time
-            if let Some(w) = waits.iter().find(|w| w.thread == main && main != 0) {
+            // the main thread waiting, in a program whose main runs an event loop (it presented a
+            // frame): on the owner (a compile stall), on a lock / condvar / join. A test or bench
+            // run's main waits on its work by design: its hangs are its verdict's, not the inbox's
+            let judged = crate::jit::FIRST_PRESENT.load(Relaxed) && !super::TEST_RUN.load(Relaxed);
+            if let Some(w) = waits.iter().find(|w| judged && w.thread == main && main != 0) {
                 let ms = now.saturating_sub(w.since_ns) / 1_000_000;
-                let present = crate::jit::FIRST_PRESENT.load(Relaxed);
                 let relevant = match w.kind {
-                    crate::waits::Kind::Owner => present,
+                    crate::waits::Kind::Owner => true,
                     crate::waits::Kind::Futex => w.label != "park" && w.label != "condvar" || ms > hang_ms * 4,
                     crate::waits::Kind::None => false,
                     _ => true,
@@ -772,5 +788,24 @@ pub fn start() {
             }
         }
     });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_recent_events_end_at_the_newest_when_the_reply_is_cut() {
+        // twelve 3 KB events: the 16 KB reply holds about five
+        let pad = "x".repeat(3 << 10);
+        let seqs: Vec<u64> = (0..12).map(|n| emit("cuttest", &format!("cut{n}"), &format!("\"pad\":\"{pad}\""))).collect();
+        let mut buf = Vec::new();
+        cmd_events(&Req::parse("events on=cuttest"), &mut Out::new(&mut buf, 16 << 10));
+        let text = String::from_utf8(buf).unwrap();
+        let shown: Vec<u64> = text.lines().filter_map(|l| l.split("\"seq\":").nth(1)?.split(',').next()?.parse().ok()).collect();
+        assert!(!shown.is_empty() && shown.len() < seqs.len(), "{shown:?}");
+        assert_eq!(shown.last(), seqs.last(), "the newest event was cut from the reply");
+        assert!(shown.windows(2).all(|w| w[0] < w[1]), "{shown:?}");
     }
 }

@@ -7,9 +7,13 @@ the JIT itself (makepad-run's dependencies) or a workspace-wide input; the other
 GATE_PACKAGES are checked when the diff reaches them, along with every changed
 package with a lib or bin target. A diff that reaches no gate package gates
 Calculator, the one canary; a diff only in devhub's own crate gates
-its build alone. Prints `jit yes|no`: whether the diff touches what the JIT binary
+its build alone. The other repo's crates that use a changed crate get a `cargo` line each: the
+gate checks them all in one cargo check. Prints `jit yes|no`: whether the diff touches what the JIT binary
 is built from; `devhub yes|no`: whether it touches devhub's own binary. A `check` line may end in
 `--also=<libs>`: libs checked as that build compiles them (feature flips, below).
+GATE_RETRY (units joined by `;`, from the hub's ledger) names what failed earlier and has not passed
+since: selected whatever the diff reaches, as a diff that never reaches it says nothing about it. A
+`gone <unit>` line: its package left the tree. A `suite <package>` line: a JIT suite failing since.
 """
 import json
 import os
@@ -19,8 +23,10 @@ import sys
 
 # the smoke set, in run order: gated when the diff reaches the JIT or a workspace-wide input
 SMOKE = ("makepad-stage", "makepad-scope", "makepad-sandbox", "makepad-fab", "makepad-app-synth", "makepad-app-calculator")
-# checked too when the diff reaches them
-GATE_PACKAGES = SMOKE + ("makepad-example-counter", "makepad-platform", "makepad-draw", "makepad-widgets")
+# checked too when the diff reaches them. The phone host (makepad-run-android) builds crates no
+# smoke app does (its boot, the Android HAL paths): a change in any of them checks it on that
+# landing, not on the next one that happens to check it (11-03)
+GATE_PACKAGES = SMOKE + ("makepad-example-counter", "makepad-platform", "makepad-draw", "makepad-widgets", "makepad-run-android")
 CALC = "makepad-app-calculator"
 # the JIT binary; devhub's binary
 JIT_PACKAGE = "makepad-run"
@@ -141,6 +147,20 @@ def main():
     devhub_code = closure({devhub_dir}, forward) if devhub_dir else set()
     # Workspace-wide resolver/patch/profile inputs apply to every member.
     workspace = any(p in ("Cargo.toml", "Cargo.lock", ".cargo/config", ".cargo/config.toml") for p in compiled)
+    # (a word that is no unit, `steps`, is the gate's own)
+    retry = [words for words in (unit.split() for unit in os.environ.get("GATE_RETRY", "").split(";")) if len(words) >= 2]
+    gone = [words for words in retry if words[1] not in by_name or (words[0] == "present" and words[1] not in PRESENT_ARGS)]
+    live = [words for words in retry if words not in gone]
+    retry_presents = {words[1] for words in live if words[0] == "present"}
+    retry_devhub = any(words[0] == "devhub" for words in live)
+    retry_why = "; retry: " + ", ".join(" ".join(words) for words in retry) if retry else ""
+
+    def print_retried():
+        for words in gone:
+            print("gone " + " ".join(words))
+        for words in live:
+            if words[0] == "suite":
+                print("suite " + words[1])
     if os.environ.get("HOT") == "1":
         # every land boots one small drawing app under the JIT to its first present: a broken draw
         # path (a shader IR change) fails every app, whichever crate the landing touched
@@ -152,9 +172,11 @@ def main():
             app = "/".join(parts[:3] if parts[:2] == ("apps", "commercial") else parts[:2])
             if parts[0] == "apps" and any(p.startswith(app + "/") for p in compiled):
                 selected.add(name)
-        print(f"why files {len(files)}; changed: {' '.join(sorted(packages[d]['name'] for d in touched)) or '-'}; affected gate packages: {' '.join(sorted(selected)) or '-'}; feature flips: -")
+        selected |= retry_presents
+        print(f"why files {len(files)}; changed: {' '.join(sorted(packages[d]['name'] for d in touched)) or '-'}; affected gate packages: {' '.join(sorted(selected)) or '-'}; feature flips: -{retry_why}")
         print("jit " + ("yes" if workspace or touched & jit_code else "no"))
         print("devhub " + ("yes" if workspace or touched & devhub_code else "no"))
+        print_retried()
         for name in SMOKE:
             if name in selected:
                 print(" ".join(["present", name, str(by_name[name].relative_to(root)), *PRESENT_ARGS[name]]))
@@ -236,9 +258,36 @@ def main():
 
     # Every changed package is checked itself too: an app's check covers only its own
     # crates, so a changed lib outside the gate packages would go unchecked
-    # (makepad-sdf-engine's E0505 reached work, M47).
+    # (a lib's E0505 reached work, M47).
     alone.update(packages[d]["name"] for d in touched
                  if has_target(d, ("lib", "rlib", "dylib", "proc-macro", "bin")))
+
+    # The other repo's crates that use a changed crate, through an edge that can hold (the
+    # commercial member list's `cfg(any())` never does): an OSS crate's removed fn broke a
+    # commercial crate no gate package reached, and every fast bucket said ok (11-03). One cargo
+    # check takes them all (98 users of makepad-platform: 26 s on a pool box after an edit of
+    # it); a JIT check each would be a hundred. A workspace-wide input alone adds none: the smoke
+    # set stands for it.
+    users = {}
+    for d in packages:
+        for crate, _ in path_deps(d):
+            users.setdefault(crate, set()).add(d)
+
+    # what failed earlier, as it failed: a flip's lib that left the tree is no longer in that build
+    for words in live:
+        if words[0] == "check":
+            libs = {lib for word in words[2:] if word.startswith("--also=") for lib in word[len("--also="):].split(",") if lib in by_name}
+            if libs:
+                also.setdefault(words[1], set()).update(libs)
+            else:
+                alone.add(words[1])
+
+    def private(d):
+        return d == commercial or commercial in d.parents
+    checked = selected | set(also) | alone
+    other = {packages[d]["name"] for t in touched for d in closure({t}, users) - {t}
+             if private(d) != private(t) and has_target(d, ("lib", "rlib", "dylib", "proc-macro", "bin"))} - checked
+    other |= {words[1] for words in live if words[0] == "cargo"}
 
     def where(name):
         # Launch from the actual package directory; works for nested workspaces.
@@ -249,9 +298,10 @@ def main():
         return f"check {name} {where(name)}{extra}"
 
     flipped = sorted(f"{b}:{','.join(sorted(x))}" for b, x in also.items())
-    print(f"why files {len(files)}; changed: {' '.join(sorted(packages[d]['name'] for d in touched)) or '-'}; affected gate packages: {' '.join(sorted(selected)) or '-'}; feature flips: {' '.join(flipped) or '-'}")
+    print(f"why files {len(files)}; changed: {' '.join(sorted(packages[d]['name'] for d in touched)) or '-'}; affected gate packages: {' '.join(sorted(selected)) or '-'}; feature flips: {' '.join(flipped) or '-'}{retry_why}")
     print("jit " + ("yes" if workspace or touched & jit_code else "no"))
-    print("devhub " + ("yes" if workspace or touched & devhub_code else "no"))
+    print("devhub " + ("yes" if workspace or touched & devhub_code or retry_devhub else "no"))
+    print_retried()
     for name in GATE_PACKAGES:
         if name in selected:
             print(check_line(name))
@@ -259,8 +309,10 @@ def main():
         print(check_line(name))
     for name in sorted(alone - selected - set(also)):
         print(f"check {name} {where(name)}")
+    for name in sorted(other):
+        print(f"cargo {name} {where(name)}")
     for name in SMOKE:
-        if name in PRESENT_ARGS and name in selected:
+        if name in PRESENT_ARGS and (name in selected or name in retry_presents):
             print(" ".join(["present", name, where(name), *PRESENT_ARGS[name]]))
 
 

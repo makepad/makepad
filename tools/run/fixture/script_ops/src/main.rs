@@ -1,5 +1,5 @@
 //! makepad-script's pub API from JIT-compiled code, with the crate bound to the loader's rustc
-//! build (`makepad run` binds it; a test harness binds nothing): an unmarked pub fn of the crate
+//! build (`makepad run` binds it; a test harness does not): an unmarked pub fn of the crate
 //! that reads rustc's tables reaches them through the crate's ops. Prints what rustc's build
 //! prints (provided_script.sh compares the two).
 use makepad_script::*;
@@ -19,5 +19,7 @@ fn main() {
     // refused: "a field of ScriptHeap is read from JIT-compiled code")
     let named = vm.heap().type_name_by_id(Named::script_type_id_static());
     let missing = vm.heap().type_name_by_id(ScriptTypeId::of_path("relax_provided_script_ops::Missing"));
-    println!("type_name_by_id {} {} {} a {}", named.is_some(), named == Some(id!(Named)), missing.is_some(), n.a);
+    // `file!()` as cargo names it: relative to the workspace root (whose table the root
+    // manifest spells with dotted `workspace.` keys); Relax named the absolute path
+    println!("type_name_by_id {} {} {} a {} file {}", named.is_some(), named == Some(id!(Named)), missing.is_some(), n.a, file!());
 }

@@ -557,6 +557,14 @@ mod tests {
     fn a_sparse_detached_chunk_gives_its_free_pages_back_on_free() {
         symbol(b"relax_alloc");
         let heap = DomainHeap::new().unwrap();
+        // (a failed assert: this thread leaves the heap before the heap goes, a failure and no crash)
+        struct Leave;
+        impl Drop for Leave {
+            fn drop(&mut self) {
+                unsafe { enter(std::ptr::null()) };
+            }
+        }
+        let _leave = Leave;
         unsafe {
             enter(&*heap);
             // 1 KB blocks: the first chunk (2048 of them) is carved whole and left behind
@@ -585,7 +593,6 @@ mod tests {
                 }
             }
             assert_eq!(heap.stats().0, 0);
-            enter(std::ptr::null());
         }
     }
 

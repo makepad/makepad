@@ -573,6 +573,10 @@ pub struct Program {
     /// text (declarations, then the skipped bodies' part, then generated bodies): the code
     /// cache never keys or resolves closures, sites or positions through them.
     edit_versions: Vec<u32>,
+    /// Per boot file a live edit gave a version: the version current now (a refused or rolled
+    /// back version is not), and per committed version the boot file it is a version of.
+    edit_current: HashMap<u32, u32>,
+    edit_boot: HashMap<u32, u32>,
     /// Committed files used only during a warm checker crate recollection.
     check_files: Option<std::collections::HashMap<String, u32>>,
     parse_reuse: HashMap<u32, std::sync::Arc<crate::parse_work::Reuse>>,
@@ -875,6 +879,8 @@ impl Program {
             mod_dirs: Default::default(),
             source_versions: Default::default(),
             edit_versions: Vec::new(),
+            edit_current: Default::default(),
+            edit_boot: Default::default(),
             check_files: None,
             parse_reuse: Default::default(),
             syms: Interner::default(),
@@ -1210,15 +1216,18 @@ impl Program {
         out
     }
 
-    /// Current module versions, one per authored path (excluding deferred macro fragments).
-    pub fn current_source_files(&self) -> std::collections::BTreeMap<String, u32> {
-        self.current_source_file_sets().into_iter().filter_map(|(path, files)| Some((path, *files.last()?))).collect()
+    /// Current module versions, one per authored path `keep` takes (excluding deferred macro
+    /// fragments).
+    pub fn current_source_files(&self, keep: impl Fn(&str) -> bool) -> std::collections::BTreeMap<String, u32> {
+        self.current_source_file_sets(keep).into_iter().filter_map(|(path, files)| Some((path, *files.last()?))).collect()
     }
 
     /// `current_source_files` with every crate's file of a path, one per crate: a `--lib` test
     /// root's harness crate and the plain library its dev-dependencies link are two crates of one
-    /// path (M50). The last is the one `current_source_files` names.
-    pub fn current_source_file_sets(&self) -> std::collections::BTreeMap<String, Vec<u32>> {
+    /// path (M50). The last is the one `current_source_files` names. `keep` picks the paths before
+    /// any is copied: a live session asking whether its few saved paths are sources had every
+    /// module's path (std's too) cloned into the map, 25-40 ms of the owner per edit (Fab, 11-04).
+    pub fn current_source_file_sets(&self, keep: impl Fn(&str) -> bool) -> std::collections::BTreeMap<String, Vec<u32>> {
         let mut files: std::collections::BTreeMap<String, Vec<u32>> = std::collections::BTreeMap::new();
         let mut bound = Vec::with_capacity(self.mods.len());
         for module in &self.mods {
@@ -1230,7 +1239,7 @@ impl Program {
             });
             bound.push(live);
             if !live { continue; }
-            if let Some(path) = self.file_paths.get(module.file as usize) {
+            if let Some(path) = self.file_paths.get(module.file as usize).filter(|p| keep(p)) {
                 // the last module of a path names its crate's file and orders it
                 let krate = self.file_crate.get(module.file as usize);
                 let of = files.entry(path.clone()).or_default();
@@ -2075,6 +2084,11 @@ impl Program {
         self.edit_versions.contains(&f)
     }
 
+    /// Per boot file a live edit gave a version: the version current now.
+    pub fn current_versions(&self) -> &HashMap<u32, u32> {
+        &self.edit_current
+    }
+
     pub fn commit_version(&mut self, v: FileVersion, pairs: &[(u32, u32)]) -> Result<u32, String> {
         self.commit_version_inner(v, pairs, false, None)
     }
@@ -2142,6 +2156,9 @@ impl Program {
         self.source_versions.entry(old).or_insert_with(|| self.crates[krate as usize].context.clone());
         self.source_versions.insert(new, v.context.clone());
         self.edit_versions.push(new);
+        let boot = self.edit_boot.get(&old).copied().unwrap_or(old);
+        self.edit_boot.insert(new, boot);
+        self.edit_current.insert(boot, new);
         self.crates[krate as usize].context = v.context;
         let mut pf = v.pf;
         self.map_image(&v.path, krate, &mut pf);
@@ -2247,6 +2264,9 @@ impl Program {
     /// Hot reload: a refused patch (or a rolled-back one) points every def of `new` back at
     /// `old` (the version stays loaded, unused). `pairs` as given to commit_version.
     pub fn revert_version(&mut self, old: u32, new: u32, pairs: &[(u32, u32)]) {
+        if let Some(&boot) = self.edit_boot.get(&new) {
+            if old == boot { self.edit_current.remove(&boot); } else { self.edit_current.insert(boot, old); }
+        }
         if let Some(context) = self.source_versions.get(&old) {
             self.crates[self.file_crate[old as usize] as usize].context = context.clone();
         }
@@ -4323,7 +4343,7 @@ impl Program {
             let mut bits = vec![0u64; n.div_ceil(64)];
             let mut todo = vec![view as usize];
             for (c, k) in self.crates.iter().enumerate() {
-                if matches!(crate::crates::base_crate_name(self.syms.str(k.name)), "core" | "alloc" | "std") { todo.push(c); }
+                if matches!(self.syms.str(k.name), "core" | "alloc" | "std") { todo.push(c); }
             }
             while let Some(c) = todo.pop() {
                 if c >= n || bits[c / 64] & (1 << (c % 64)) != 0 { continue; }

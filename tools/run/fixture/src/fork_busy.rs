@@ -9,4 +9,6 @@ mod body {
 
 fn main() {
     body::fork_while_jit_busy();
+    body::concurrent_spawns_while_tiers_build();
+    body::spawns_never_wait_for_each_others_children();
 }
