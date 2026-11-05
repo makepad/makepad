@@ -2,10 +2,10 @@
 
 [app.linux]
 capture = ""
-date = "2026-11-03"
-digest = "6dbdc201ac6d1254a9eb2a9b2b435a98b9f4bc77409898723f45786d4343151f"
-main = "19f51e11f550a7350a096a33669c713308d2d8a5"
-work = "699beed5cba1931f3164b4dc8fdc57e884bc09f0"
+date = "2026-11-04"
+digest = "32fd1a676e9c552128318ffc67fb31ea5e482fffcc97abdba7db405c097413fc"
+main = "7316e1371cd096754bf27751b99882af47d29a73"
+work = "91726015a2b4955f5d6665d348d4a6be5b28ff20"
 
 [app.macos]
 capture = ""
@@ -16,19 +16,25 @@ work = "887855c1f9abe2cff0add968d8cc4fa6c79fc716"
 
 [app.windows]
 capture = ""
-date = "2026-11-03"
-digest = "dd3b190079c5f35bdae64e7c37d5864cd3e575dcdaece369bab5f24179add17a"
-main = "3514cd6f8a9c6c0ce8c7f0fb2289cd47dbd720e2"
-work = "056c349d41c58b1eb1d4e8bfc7080a940dc0ed18"
+date = "2026-11-04"
+digest = "c1fad841257a7f71b0043c562c492e9b0f9384c4ea2dedd79c2eaddf7fe39b0f"
+main = "8d8eb5056ab18d05787445affd1865dfdc0c3e9a"
+work = "3df32488ecf3a9bad5517836b05b71a6ea89d16b"
+
+[job.jit_05.linux]
+date = "2026-11-04"
+digest = "a0054d2574b2828cfd0433a004b22ea5310f0d575938cab48c1e6117528e5faf"
+main = "5f4597d2fb65f354696542829214d4c6b99c39ab"
+work = "7d8695372c6cd232c174a43ee12e1ee51ba72023"
 
 [tests.linux]
-date = "2026-11-02"
-digest = "4b5cb9c0b650d38c5397c653a487621f36793b228a2255488153bccb9bfe9126"
-main = "f74166da6dfdb67f974ba0643cae2eab1c598535"
-work = "887855c1f9abe2cff0add968d8cc4fa6c79fc716"
+date = "2026-11-05"
+digest = "5e5a43c4009a47241bcf64f5a13ebbfd3b7bd87a10021346a575e06bf00680d7"
+main = "d47583cbdaf8c9b01e43ac1218a7b8fde373f93c"
+work = "76947602e9bddae66de9d80bd8a393a6c8073a17"
 
 [tests.windows]
-date = "2026-11-02"
-digest = "cc9ee50c2e788e80ebc473d4ec7ad490f2b49e6770b252437d15f5f3b4942b8f"
-main = "f74166da6dfdb67f974ba0643cae2eab1c598535"
-work = "887855c1f9abe2cff0add968d8cc4fa6c79fc716"
+date = "2026-11-04"
+digest = "b423c42b35fd55b1c15a9a6f38b0583bc5dd42868fb6667186053f3acbb2bf4a"
+main = "c4cb113cf08313c6be7c7c4f1946dcfd8c7e3e52"
+work = "4737f3d8ec32eaf4b7bd907fc802c6564bdf51eb"

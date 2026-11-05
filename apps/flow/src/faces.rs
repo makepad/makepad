@@ -4451,16 +4451,16 @@ mod tests {
     #[test]
     fn model_with_no_admissible_node_is_dimmed_with_the_capacity_reason() {
         let mut too_small = model("flux2-dev", "192.0.2.89", false, "too_small");
-        too_small.note = Some("needs 31744 MB, this card can free 30603".into());
+        too_small.note = Some("needs 31744 MB, this card can free 30000".into());
         let response = ModelsResponse {
             nodes: vec![FleetNodeDto {
                 base_url: "192.0.2.89".into(),
                 fleet: "test".into(),
                 healthy: true,
                 gpu: Some("GPU-B".into()),
-                vram_total_mb: Some(32_607),
-                vram_usable_mb: Some(30_603),
-                vram_free_mb: Some(29_785),
+                vram_total_mb: Some(32_000),
+                vram_usable_mb: Some(30_000),
+                vram_free_mb: Some(29_500),
                 lanes_model: None,
                 lanes: None,
             }],
@@ -4472,7 +4472,7 @@ mod tests {
         assert!(choices[0].dimmed);
         assert_eq!(
             choices[0].note,
-            "needs 31744 MB, this card can free 30603"
+            "needs 31744 MB, this card can free 30000"
         );
     }
 

@@ -3,7 +3,7 @@ use mod.components.*
 
 /** Name for the first greeter. */
 let first = Input{
-    value: "Rik"
+    value: "Ada"
     at: vec2(40, 60)
 }
 

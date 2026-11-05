@@ -3,7 +3,7 @@ use super::events::EventHub;
 use super::backend::Backend;
 use super::routes::{dispatch, Outcome, Plane, RouteCtx};
 use super::util::{atomic_write, from_hex_16, log, random_16, random_32, random_u64, to_hex, write_secret_file};
-use super::watcher::spawn_watcher;
+use super::watcher::{spawn_watcher, watch_baseline};
 use crate::engine::results::{FolderStore, ResultStore};
 use makepad_bounded_http::{Conn, HeadError, Method, Resp};
 use std::fs::File;
@@ -109,6 +109,7 @@ impl FlowServer {
         };
         let config = Arc::new(config);
         let origin = (to_hex(&server_id), epoch);
+        let baseline = watch_baseline(&config.root)?;
         let (backend, backend_join) =
             Backend::start(config.clone(), events.clone(), epoch, origin, results.clone())?;
         let stop = Arc::new(AtomicBool::new(false));
@@ -120,7 +121,7 @@ impl FlowServer {
             events: events.clone(),
             results,
         };
-        let mut watcher = match spawn_watcher(config.clone(), backend.clone()) {
+        let mut watcher = match spawn_watcher(config.clone(), backend.clone(), baseline) {
             Ok(watcher) => Some(watcher),
             Err(error) => {
                 drop(route);

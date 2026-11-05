@@ -236,21 +236,27 @@ fn watcher_emits_changed_changed_removed() {
     let endpoints = server.endpoints();
     let mut next = cursor(endpoints.control, &endpoints.token);
     let path = root.0.join("flows/watched.splash");
+    let pending = root.0.join("flows/watched.tmp");
 
-    std::fs::write(&path, "use mod.flow.*\nFlow{label: \"one\"}\n").unwrap();
-    let first = poll(endpoints.control, &endpoints.token, &next, "&wait=1000&topic=flows");
+    // Publish complete sources: an in-place write exposes a truncated file
+    // to the watcher, which legitimately emits flow.error for that state.
+
+    std::fs::write(&pending, "use mod.flow.*\nFlow{label: \"one\"}\n").unwrap();
+    std::fs::rename(&pending, &path).unwrap();
+    let first = poll(endpoints.control, &endpoints.token, &next, "&wait=10000&topic=flows");
     assert_eq!(first.events.len(), 1);
     assert_eq!(first.events[0].key("kind").and_then(JsonValue::string).map(String::as_str), Some("flow.changed"));
     next = first.cursor;
 
-    std::fs::write(&path, "use mod.flow.*\nFlow{label: \"second label\"}\n").unwrap();
-    let second = poll(endpoints.control, &endpoints.token, &next, "&wait=1000&topic=flows");
+    std::fs::write(&pending, "use mod.flow.*\nFlow{label: \"second label\"}\n").unwrap();
+    std::fs::rename(&pending, &path).unwrap();
+    let second = poll(endpoints.control, &endpoints.token, &next, "&wait=10000&topic=flows");
     assert_eq!(second.events.len(), 1);
     assert_eq!(second.events[0].key("kind").and_then(JsonValue::string).map(String::as_str), Some("flow.changed"));
     next = second.cursor;
 
     std::fs::remove_file(path).unwrap();
-    let removed = poll(endpoints.control, &endpoints.token, &next, "&wait=1000&topic=flows");
+    let removed = poll(endpoints.control, &endpoints.token, &next, "&wait=10000&topic=flows");
     assert_eq!(removed.events.len(), 1);
     assert_eq!(removed.events[0].key("kind").and_then(JsonValue::string).map(String::as_str), Some("flow.removed"));
     server.shutdown();

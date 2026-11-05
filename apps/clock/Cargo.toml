@@ -22,7 +22,7 @@ path = "src/lib.rs"
 [features]
 default = ["tweaker", "standalone"]
 # The design overlay (Shift+F10 with the dev overlays on). On for development
-# builds; the Builder's releases build without it (--no-default-features).
+# builds; the Runner's releases build without it (--no-default-features).
 tweaker = ["dep:makepad-widgets-tweaker", "makepad-widgets/data", "makepad-widgets/dock", "makepad-widgets/fab"]
 # The standalone window: the F10 overlay and the port toward it. A host
 # that links the MODULE (makepad-app-wm) leaves this off and gets the lib only.

@@ -3,7 +3,7 @@
 //! same running apps. One per process (`RunManager::global()`); no UI types.
 //!
 //! - Apps come from the shared registry (`makepad-app-registry`, the table
-//!   the WM and Builder use) and must have their sources in the workspace.
+//!   the WM uses) and must have their sources in the workspace.
 //! - Builds run one at a time, in a queue: `cargo build --release` of the
 //!   app's package (the registry's `build_argv`), at normal priority with
 //!   cargo's own job count. When
@@ -16,8 +16,7 @@
 //!   in the checkout: cargo rebuilds the `makepad` tool when its sources (the
 //!   provided crates it carries) changed, so it never refuses a checkout newer
 //!   than a prebuilt binary; cargo's progress shows on the run, then cargo
-//!   becomes the tool (same pid). A Builder installation starts its published
-//!   `makepad`. A save reaches the run through the tool's own file watcher,
+//!   becomes the tool (same pid). A save reaches the run through the tool's own file watcher,
 //!   which patches the running code, relaunches the app domain when it must,
 //!   or refuses an edit with errors and keeps the app running (the errors
 //!   are read from its output and marked in the editor); Code adds nothing to
@@ -696,7 +695,7 @@ impl RunManager {
     /// The makepad checkout at or above the project folder; false when the
     /// project is not in one (there is nothing to build then).
     /// The checkout the apps come from: the project's, else this machine's (`registry::repo_root`:
-    /// `MAKEPAD_WM_ROOT`, the Builder's sources, the checkout this program was built in), so a
+    /// `MAKEPAD_WM_ROOT`, the checkout this program was built in), so a
     /// project folder outside any checkout still builds and starts the machine's apps.
     pub fn set_root(&self, project: &Path) -> bool {
         let root = registry::checkout_at_or_above(project)
@@ -822,19 +821,12 @@ impl RunManager {
     }
 
     /// Build and start `app`: natively (release build, then the binary with
-    /// `--remote`) or under `makepad run` (from a checkout `cargo run` of the
-    /// `makepad` tool; a Builder installation's tool is built first when it
-    /// is missing).
+    /// `--remote`) or under `makepad run` (`cargo run` of the `makepad` tool).
     pub fn run(&'static self, app: &'static AppEntry, mode: Mode) -> Result<Started, String> {
         match mode {
             Mode::Native => self.queue(app, app.target(), Goal::Run(mode)).map(Started::Job),
             Mode::MakepadRun => {
-                let root = self.root().ok_or("not a makepad checkout")?;
-                if registry::builder_install().is_none() || registry::built_binary(&MAKEPAD_RUN, Some(&root)).is_some() {
-                    self.launch(app, mode).map(Started::Running)
-                } else {
-                    self.queue(app, MAKEPAD_RUN, Goal::Run(mode)).map(Started::Job)
-                }
+                self.launch(app, mode).map(Started::Running)
             }
         }
     }
@@ -1012,9 +1004,9 @@ impl RunManager {
                 args.push("--remote".into());
                 (program, args)
             }
-            Mode::MakepadRun => makepad_run_argv(app, &root, registry::builder_install().is_some())?,
+            Mode::MakepadRun => makepad_run_argv(app, &root),
         };
-        let cargo = mode == Mode::MakepadRun && registry::builder_install().is_none();
+        let cargo = mode == Mode::MakepadRun;
         let mut command = Command::new(&program);
         command.args(&args).current_dir(&root);
         if cargo {
@@ -1766,19 +1758,14 @@ fn signal_group(pid: u32, _hard: bool) {
 /// How a `makepad run` of `app` starts. From a checkout: `cargo run --release
 /// -p makepad-run --bin makepad -- run <package> [-- <app args>]`, so cargo
 /// rebuilds the tool whenever its sources changed (never a prebuilt `makepad`
-/// older than the checkout's provided crates). A Builder installation
-/// (`builder`) starts its published `makepad` with the same arguments.
-fn makepad_run_argv(app: &AppEntry, root: &Path, builder: bool) -> Result<(PathBuf, Vec<String>), String> {
+/// older than the checkout's provided crates).
+fn makepad_run_argv(app: &AppEntry, root: &Path) -> (PathBuf, Vec<String>) {
     let mut args = vec!["run".to_string(), app.package.to_string()];
     if !app.args.is_empty() {
         args.push("--".into());
         args.extend(app.args.iter().map(|a| a.to_string()));
     }
-    if builder {
-        let program = registry::built_binary(&MAKEPAD_RUN, Some(root)).ok_or("the makepad tool is not built yet")?;
-        return Ok((program, args));
-    }
-    Ok(registry::run_argv(&MAKEPAD_RUN, root, &args))
+    registry::run_argv(&MAKEPAD_RUN, root, &args)
 }
 
 /// The stage of a `cargo run` after `line`: cargo's progress wording
@@ -2031,7 +2018,7 @@ warning: unused variable: `x`
     fn a_makepad_run_from_a_checkout_is_a_release_cargo_run_of_the_tool() {
         let root = Path::new("/checkout");
         let app = registry::apps().iter().find(|a| !a.args.is_empty()).or_else(|| registry::find("calculator")).unwrap();
-        let (program, args) = makepad_run_argv(app, root, false).unwrap();
+        let (program, args) = makepad_run_argv(app, root);
         assert_eq!(program, registry::cargo_bin());
         let manifest = root.join("Cargo.toml");
         let mut want: Vec<String> = ["run", "--profile", "host", "--manifest-path", &manifest.to_string_lossy(), "-p", "makepad-run", "--bin", "makepad", "--", "run", app.package]

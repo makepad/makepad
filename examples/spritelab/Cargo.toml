@@ -2,13 +2,13 @@
 name = "makepad-example-spritelab"
 version = "0.1.0"
 edition = "2021"
-description = "Working-tree sprite-pass lab: one immobile billboard per recipe, in an empty world"
+description = "Sprite-pass lab: one immobile billboard per recipe, in an empty world"
 license = "MIT OR Apache-2.0"
 
 [features]
 default = ["tweaker"]
 # The design overlay (Shift+F10 with the dev overlays on). On for development
-# builds; the Builder's releases build without it (--no-default-features).
+# builds; the Runner's releases build without it (--no-default-features).
 tweaker = ["dep:makepad-widgets-tweaker"]
 
 [dependencies]

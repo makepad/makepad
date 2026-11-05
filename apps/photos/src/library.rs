@@ -156,15 +156,11 @@ pub fn where_a_library_goes(collection: Option<&str>) -> String {
 }
 
 /// The status line of an empty wall: the camera's shots land here, and
-/// where a baked library would go.
+/// how to bake a library from pictures elsewhere.
 pub fn nothing_yet() -> String {
-    format!("No pictures yet. Shots you take with Camera show up here. {}", how_to_bake())
-}
-
-/// The one line the status shows when nothing is baked.
-pub fn how_to_bake() -> String {
     format!(
-        "No picture library found. Bake one: image-tiles-bake --root local/image-tiles/{DEFAULT_COLLECTION} <manifest.tsv>"
+        "No picture library yet. Shots you take with Camera show up here, or bake one: \
+         image-tiles-bake --root local/image-tiles/{DEFAULT_COLLECTION} <manifest.tsv>"
     )
 }
 

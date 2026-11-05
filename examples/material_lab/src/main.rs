@@ -468,11 +468,11 @@ impl Widget for MaterialLab {
             let scene = scene();
             self.renderer.set_models(if scene == Scene::Hooks { Self::instances() } else { Vec::new() });
             let mut draws = SceneDraws {
-                cube: &mut self.draw_cube,
-                alpha: &mut self.draw_alpha,
+                cube: Some(&mut self.draw_cube),
+                alpha: Some(&mut self.draw_alpha),
                 sky: &mut self.draw_sky,
                 sky_analytic: None,
-                terrain: &mut self.draw_terrain,
+                terrain: Some(&mut self.draw_terrain),
                 shadow: None,
                 shadow_sdf: None,
                 firework: None,

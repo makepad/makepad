@@ -1,0 +1,27 @@
+// CI smoke test for apps/devhub_panel. Run by tools/ci, which finds every `ci.splash`
+// in the checkout. The script decides every input; the vision model only
+// judges the grab against the acceptance text below. Basic on purpose: does
+// it check everywhere, build and come up here, and look like what it is.
+//
+// On its demo fleet: a CI box has no master to watch, and the empty page that leaves proves little
+// (the vision model read its one line as an error panel, four runs in a row).
+
+use mod.std.*
+use mod.ci;
+
+ci.step("check other platforms", fn(){
+    ci.check_targets({packages: ["makepad-app-devhub-panel"] targets: ci.host.targets})
+})
+
+let app = ci.launch({package: "makepad-app-devhub-panel" binary: "makepad-app-devhub-panel" cwd: "." app_env: {DEVHUB_PANEL_DEMO: "1"}})
+
+ci.step("comes up", fn(){
+    ci.sleep(3.0)
+    app.no_errors()
+    let shot = app.grab("start")
+    ci.accept(shot, "This is a screenshot of one application window. A thin bright red frame runs around the very edge of the picture; it is the test harness's marker and is not part of the application. Ignore it. The window should show a working application: panels, buttons, text, lists, a canvas, a map, a document or some other user interface. 1. Is the whole picture one flat colour from edge to edge, such as entirely black or entirely white? expected NO 2. Is any user interface visible, such as text labels, buttons, icons, panels, lists, input fields, a toolbar, a drawing or a picture? expected YES 3. Does an error panel cover the window: a large block of text with words such as panic, error, failed, backtrace or unwrap? expected NO")
+})
+
+app.no_errors()
+app.quit()
+nil

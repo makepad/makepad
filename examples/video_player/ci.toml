@@ -1,0 +1,7 @@
+# CI (devhub ci): [ci] is hand-written settings; the other sections are proofs devhub writes.
+
+[job.jit_13.linux]
+date = "2026-11-04"
+digest = "5e733f1c0696e9c97a1272c7998f81884a1f4987b3df19a49efb3d413b4121f7"
+main = "5f4597d2fb65f354696542829214d4c6b99c39ab"
+work = "7d8695372c6cd232c174a43ee12e1ee51ba72023"

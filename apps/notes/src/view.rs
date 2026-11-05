@@ -1,4 +1,5 @@
 //! Root ownership of canonical document, edit session, navigation and storage.
+use std::collections::HashMap;
 use crate::storage::{
     encode, load_from_storage, record_write, reduce_save, LoadOutcome, SaveEffect, SaveEvent,
     SaveMachine,
@@ -25,7 +26,7 @@ enum OverlayKind {
     Format,
     Folders,
 }
-#[derive(Script, ScriptHook, Widget)]
+#[derive(Script, Widget)]
 pub struct NotesView {
     #[deref]
     view: View,
@@ -33,6 +34,9 @@ pub struct NotesView {
     reduced_motion: bool,
     #[rust]
     applied_reduced_motion: bool,
+    /// What `restyled` last gave each widget.
+    #[rust]
+    applied_styles: HashMap<WidgetUid, u64>,
     #[rust]
     storage: Option<StorageHandle>,
     #[rust]
@@ -613,16 +617,21 @@ impl NotesView {
             }
             let h = if compact { 56.0 } else { 44.0 };
             let font = if compact { 12.75 } else { 10.5 };
-            script_apply_eval!(cx,row,{use mod.prelude.widgets.* height:#(h) tap +: {name +: {draw_text.text_style.font_size:#(font)}}});
+            if restyled(&mut self.applied_styles, &row, &[h, font]) {
+                script_apply_eval!(cx,row,{use mod.prelude.widgets.* height:#(h) tap +: {name +: {draw_text.text_style.font_size:#(font)}}});
+            }
             let mut count_widget = row.widget(cx, ids!(tap.count));
-            if compact {
-                script_apply_eval!(cx,count_widget,{use mod.prelude.widgets.* paper:theme.color_inset});
-            } else if self.ui.collection == count.collection {
-                script_apply_eval!(cx,count_widget,{use mod.prelude.widgets.* paper:theme.color_bg_highlight});
-            } else if overlay {
-                script_apply_eval!(cx,count_widget,{use mod.prelude.widgets.* paper:theme.color_bg_app});
-            } else {
-                script_apply_eval!(cx,count_widget,{use mod.prelude.widgets.* paper:theme.color_bg_container});
+            let selected = self.ui.collection == count.collection;
+            if restyled(&mut self.applied_styles, &count_widget, &[f64::from(compact), f64::from(selected), f64::from(overlay)]) {
+                if compact {
+                    script_apply_eval!(cx,count_widget,{use mod.prelude.widgets.* paper:theme.color_inset});
+                } else if selected {
+                    script_apply_eval!(cx,count_widget,{use mod.prelude.widgets.* paper:theme.color_bg_highlight});
+                } else if overlay {
+                    script_apply_eval!(cx,count_widget,{use mod.prelude.widgets.* paper:theme.color_bg_app});
+                } else {
+                    script_apply_eval!(cx,count_widget,{use mod.prelude.widgets.* paper:theme.color_bg_container});
+                }
             }
         }
     }
@@ -882,8 +891,11 @@ impl NotesView {
             .min((content.pos.y + content.size.y - height - 8.0).max(content.pos.y + 8.0));
         let mut panel = panel;
         let pad = if format { 12.0 } else { 8.0 };
-        script_apply_eval!(cx,panel,{use mod.prelude.widgets.* width:#(width) height:#(height) abs_pos:#(position) padding:#(pad) draw_bg +: {layer_opacity:#(self.menu_opacity)} rows +: {height:Fill} formatting +: {height:Fill} folders +: {height:Fill}});
-        menu_contents_opacity(cx, &panel, self.menu_opacity);
+        let style = [width, height, position.x, position.y, pad, self.menu_opacity];
+        if restyled(&mut self.applied_styles, &panel, &style) {
+            script_apply_eval!(cx,panel,{use mod.prelude.widgets.* width:#(width) height:#(height) abs_pos:#(position) padding:#(pad) draw_bg +: {layer_opacity:#(self.menu_opacity)} rows +: {height:Fill} formatting +: {height:Fill} folders +: {height:Fill}});
+            menu_contents_opacity(cx, &panel, self.menu_opacity);
+        }
     }
     fn apply_layout(&mut self, cx: &mut Cx, size: Vec2d) {
         let decision = engine::decide_layout(size.x, size.y, Some(self.layout));
@@ -1030,7 +1042,9 @@ impl NotesView {
                         28.0
                     };
                     let font = if self.layout.is_compact() { 11.25 } else { 9.0 };
-                    script_apply_eval!(cx,item,{use mod.prelude.widgets.* height:#(h) draw_text.text_style.font_size:#(font)});
+                    if restyled(&mut self.applied_styles, &item, &[h, font]) {
+                        script_apply_eval!(cx,item,{use mod.prelude.widgets.* height:#(h) draw_text.text_style.font_size:#(font)});
+                    }
                     item.draw_all(cx, &mut Scope::empty());
                 }
                 ListRow::Note(hit) => {
@@ -1057,7 +1071,9 @@ impl NotesView {
                     let pad = if self.layout.is_compact() { 16.0 } else { 20.0 };
                     let top = if self.layout.is_compact() { 12.0 } else { 10.0 };
                     let small = if self.layout.is_compact() { 9.75 } else { 9.0 };
-                    script_apply_eval!(cx,item,{use mod.prelude.widgets.* height:#(h) tap +: {padding:Inset{left:#(pad) right:#(pad) top:#(top) bottom:#(top)} title +: {draw_text.text_style.font_size:#(font)} preview +: {draw_text.text_style.font_size:#(meta)} metadata +: {date +: {draw_text.text_style.font_size:#(small)} folder +: {draw_text.text_style.font_size:#(small)}}}});
+                    if restyled(&mut self.applied_styles, &item, &[h, font, meta, pad, top, small]) {
+                        script_apply_eval!(cx,item,{use mod.prelude.widgets.* height:#(h) tap +: {padding:Inset{left:#(pad) right:#(pad) top:#(top) bottom:#(top)} title +: {draw_text.text_style.font_size:#(font)} preview +: {draw_text.text_style.font_size:#(meta)} metadata +: {date +: {draw_text.text_style.font_size:#(small)} folder +: {draw_text.text_style.font_size:#(small)}}}});
+                    }
                     item.widget(cx, ids!(tap.title)).set_text(cx, &hit.title);
                     let date = engine::format_note_date(hit.edited_ms, now_ms());
                     item.widget(cx, ids!(tap.preview)).set_text(
@@ -1080,10 +1096,12 @@ impl NotesView {
                         ids!(tap.metadata.folder).as_slice(),
                     ] {
                         let mut meta = item.widget(cx, path);
-                        if selected {
-                            script_apply_eval!(cx,meta,{use mod.prelude.widgets.* paper:theme.color_bg_highlight});
-                        } else {
-                            script_apply_eval!(cx,meta,{use mod.prelude.widgets.* paper:theme.color_bg_app});
+                        if restyled(&mut self.applied_styles, &meta, &[f64::from(selected)]) {
+                            if selected {
+                                script_apply_eval!(cx,meta,{use mod.prelude.widgets.* paper:theme.color_bg_highlight});
+                            } else {
+                                script_apply_eval!(cx,meta,{use mod.prelude.widgets.* paper:theme.color_bg_app});
+                            }
                         }
                     }
                     if let Some(mut selection) = item
@@ -1517,6 +1535,12 @@ fn collect_menu_taps(widget: &WidgetRef, taps: &mut Vec<WidgetRef>) {
     }
     widget.children(&mut |_, child| collect_menu_taps(&child, taps));
 }
+/// A script apply redraws what it touches, so one repeated on every draw keeps the app drawing
+/// for ever. True when the widget is not styled so already; a reload forgets (`on_after_apply`).
+fn restyled(applied: &mut HashMap<WidgetUid, u64>, widget: &WidgetRef, style: &[f64]) -> bool {
+    let key = style.iter().fold(0xcbf2_9ce4_8422_2325, |h: u64, v| (h ^ v.to_bits()).wrapping_mul(0x100_0000_01b3));
+    applied.insert(widget.widget_uid(), key) != Some(key)
+}
 fn menu_contents_opacity(cx: &mut Cx, widget: &WidgetRef, opacity: f64) {
     let mut children = Vec::new();
     widget.children(&mut |_, child| children.push(child));
@@ -1553,6 +1577,11 @@ fn menu_position(viewport: Rect, anchor: Rect, size: Vec2d) -> Vec2d {
         (anchor.pos.x + anchor.size.x - size.x).clamp(low.x, high.x.max(low.x)),
         y.clamp(low.y, high.y.max(low.y)),
     )
+}
+impl ScriptHook for NotesView {
+    fn on_after_apply(&mut self, _vm: &mut ScriptVm, _apply: &Apply, _scope: &mut Scope, _value: ScriptValue) {
+        self.applied_styles.clear();
+    }
 }
 impl Widget for NotesView {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {

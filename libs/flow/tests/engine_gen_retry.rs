@@ -12,7 +12,7 @@ use makepad_flow::graph::evaluate;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-const REFUSAL: &str = "backend error: insufficient VRAM for flux2-dev: need 31744 MB (estimate 29696 MB + reserve 2048 MB), only 30603 MB free after evicting every resident — refusing to load (no CPU/other-node fallback)";
+const REFUSAL: &str = "backend error: insufficient VRAM for flux2-dev: need 31744 MB (estimate 29696 MB + reserve 2048 MB), only 30000 MB free after evicting every resident — refusing to load (no CPU/other-node fallback)";
 
 #[derive(Clone)]
 struct RoutedGen {
@@ -229,7 +229,7 @@ fn admission_refusal_retries_on_the_second_provider_and_finishes() {
     };
     assert_eq!(
         stage,
-        "retrying on 192.0.2.76 (192.0.2.89 refused: insufficient VRAM)"
+        "retrying on node 76 (node 89 refused: insufficient VRAM)"
     );
     assert!(matches!(executor.poll(), Poll::Done(_)));
     let picks = picks.lock().unwrap();
@@ -241,12 +241,12 @@ fn admission_refusal_retries_on_the_second_provider_and_finishes() {
 
 #[test]
 fn disk_refusal_retries_on_another_node_preserving_the_request() {
-    let seam = RoutedGen::with_outcomes(&[(217, RoutedOutcome::DiskRefusal), (165, RoutedOutcome::Success)]);
+    let seam = RoutedGen::with_outcomes(&[(89, RoutedOutcome::DiskRefusal), (76, RoutedOutcome::Success)]);
     let picks = seam.picks.clone();
     let mut executor = GenExecutor::new(Arc::new(seam), ("disk-retry".into(), 1));
     executor.start(&cancellation_node(), &[]).unwrap();
     let Poll::Progress { stage, .. } = executor.poll() else { panic!("no disk failover"); };
-    assert!(stage.contains("retrying on 192.0.2.76"), "{stage}");
+    assert!(stage.contains("retrying on node 76"), "{stage}");
     assert!(stage.contains("disk-space:"), "{stage}");
     assert!(matches!(executor.poll(), Poll::Done(_)));
     let picks = picks.lock().unwrap();
@@ -268,9 +268,9 @@ fn three_admission_refusals_fail_with_every_node_listed() {
     let Poll::Failed(error) = executor.poll() else {
         panic!("third refusal did not fail the node");
     };
-    assert!(error.contains("192.0.2.1: insufficient VRAM"), "{error}");
-    assert!(error.contains("192.0.2.2: insufficient VRAM"), "{error}");
-    assert!(error.contains("192.0.2.3: insufficient VRAM"), "{error}");
+    assert!(error.contains("node 1: insufficient VRAM"), "{error}");
+    assert!(error.contains("node 2: insufficient VRAM"), "{error}");
+    assert!(error.contains("node 3: insufficient VRAM"), "{error}");
 }
 
 fn cancellation_node() -> makepad_flow::Node {
@@ -297,7 +297,7 @@ fn modelless_cancellation_node() -> makepad_flow::Node {
 
 #[test]
 fn local_use_cancellation_before_partial_text_retries_and_preserves_request() {
-    let seam = RoutedGen::with_outcomes(&[(217, RoutedOutcome::CancelLocal), (165, RoutedOutcome::Success)]);
+    let seam = RoutedGen::with_outcomes(&[(89, RoutedOutcome::CancelLocal), (76, RoutedOutcome::Success)]);
     let picks = seam.picks.clone();
     let mut executor = GenExecutor::new(Arc::new(seam), ("retry-local-use".to_string(), 1));
     executor.start(&cancellation_node(), &[]).unwrap();
@@ -305,7 +305,7 @@ fn local_use_cancellation_before_partial_text_retries_and_preserves_request() {
     let Poll::Progress { stage, .. } = executor.poll() else {
         panic!("local-use cancellation did not retry");
     };
-    assert!(stage.contains("retrying on 192.0.2.76"), "{stage}");
+    assert!(stage.contains("retrying on node 76"), "{stage}");
     assert!(matches!(executor.poll(), Poll::Done(_)));
     let picks = picks.lock().unwrap();
     assert_eq!(picks.len(), 2);
@@ -317,7 +317,7 @@ fn local_use_cancellation_before_partial_text_retries_and_preserves_request() {
 #[test]
 fn ordinary_cancellation_and_cancellation_after_delta_do_not_retry() {
     for outcome in [RoutedOutcome::CancelUser, RoutedOutcome::CancelAfterDelta] {
-        let seam = RoutedGen::with_outcomes(&[(217, outcome), (165, RoutedOutcome::Success)]);
+        let seam = RoutedGen::with_outcomes(&[(89, outcome), (76, RoutedOutcome::Success)]);
         let picks = seam.picks.clone();
         let mut executor = GenExecutor::new(Arc::new(seam), ("retry-cancel".to_string(), 1));
         executor.start(&cancellation_node(), &[]).unwrap();
@@ -332,7 +332,7 @@ fn ordinary_cancellation_and_cancellation_after_delta_do_not_retry() {
 
 #[test]
 fn accepted_model_is_retained_when_retrying_a_modelless_request() {
-    let mut seam = RoutedGen::with_outcomes(&[(217, RoutedOutcome::CancelLocal), (165, RoutedOutcome::Success)]);
+    let mut seam = RoutedGen::with_outcomes(&[(89, RoutedOutcome::CancelLocal), (76, RoutedOutcome::Success)]);
     seam.pick_model = Some("qwen3.8-27b".to_string());
     let picks = seam.picks.clone();
     let mut executor = GenExecutor::new(Arc::new(seam), ("retry-model-retain".to_string(), 1));
@@ -347,7 +347,7 @@ fn accepted_model_is_retained_when_retrying_a_modelless_request() {
 
 #[test]
 fn explicit_user_cancel_clears_active_job_without_retrying_on_later_poll() {
-    let seam = RoutedGen::with_outcomes(&[(217, RoutedOutcome::CancelUser), (165, RoutedOutcome::Success)]);
+    let seam = RoutedGen::with_outcomes(&[(89, RoutedOutcome::CancelUser), (76, RoutedOutcome::Success)]);
     let picks = seam.picks.clone();
     let mut executor = GenExecutor::new(Arc::new(seam), ("retry-explicit-cancel".to_string(), 1));
     executor.start(&cancellation_node(), &[]).unwrap();

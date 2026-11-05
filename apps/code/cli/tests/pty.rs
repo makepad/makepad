@@ -32,7 +32,7 @@ mod ffi {
         pub fn posix_openpt(flags: c_int) -> c_int;
         pub fn grantpt(fd: c_int) -> c_int;
         pub fn unlockpt(fd: c_int) -> c_int;
-        pub fn ptsname(fd: c_int) -> *const c_char;
+        pub fn ptsname_r(fd: c_int, buf: *mut c_char, len: usize) -> c_int;
         pub fn ioctl(fd: c_int, request: c_ulong, ...) -> c_int;
         pub fn fcntl(fd: c_int, cmd: c_int, ...) -> c_int;
     }
@@ -53,7 +53,11 @@ fn open_pty() -> Pty {
         assert_eq!(ffi::unlockpt(fd), 0);
         // Children must not inherit the master, or it never closes.
         ffi::fcntl(fd, ffi::F_SETFD, ffi::FD_CLOEXEC);
-        let name = std::ffi::CStr::from_ptr(ffi::ptsname(fd)).to_string_lossy().into_owned();
+        // ptsname's buffer is one per process: a test beside this one would change the name under it
+        // and both children would sit on one terminal
+        let mut name = [0 as std::os::raw::c_char; 128];
+        assert_eq!(ffi::ptsname_r(fd, name.as_mut_ptr(), name.len()), 0);
+        let name = std::ffi::CStr::from_ptr(name.as_ptr()).to_string_lossy().into_owned();
         Pty { master: std::fs::File::from_raw_fd(fd), slave: name.into() }
     }
 }
@@ -166,34 +170,61 @@ impl Session {
         String::from_utf8_lossy(&self.out.lock().unwrap()).into_owned()
     }
 
-    /// Wait for `what` in the output after the last thing waited for.
-    fn expect(&mut self, what: &str, secs: u64) -> String {
-        let t0 = Instant::now();
+    /// Wait for `what` in the output after the last thing waited for. The child takes as long as it
+    /// needs (a first run under the JIT compiles as it goes): this fails only once it has exited
+    /// without writing `what`, or has written nothing for SILENCE.
+    fn expect(&mut self, what: &str) -> String {
+        let mut watch = Watch::new(self.raw().len());
+        let mut exited: Option<Instant> = None;
         loop {
-            let all = plain(&self.raw());
+            let raw = self.raw();
+            let all = plain(&raw);
             if let Some(at) = all[self.seen.min(all.len())..].find(what) {
                 self.seen += at + what.len();
                 return all;
             }
-            if t0.elapsed() > Duration::from_secs(secs) {
-                panic!("did not see {what:?}; output so far:\n{}", &all[self.seen.min(all.len())..]);
+            // what it wrote just before it exited may still be on its way through the reader
+            if exited.is_some_and(|t| t.elapsed() > Duration::from_secs(2)) {
+                panic!("exited without writing {what:?}; output so far:\n{}", &all[self.seen.min(all.len())..]);
+            }
+            if exited.is_none() && self.child.try_wait().unwrap().is_some() {
+                exited = Some(Instant::now());
+            }
+            if watch.silent(raw.len()) {
+                panic!("did not see {what:?}: no output for {SILENCE:?}; output so far:\n{}", &all[self.seen.min(all.len())..]);
             }
             std::thread::sleep(Duration::from_millis(30));
         }
     }
 
-    fn wait_exit(&mut self, secs: u64) -> std::process::ExitStatus {
-        let t0 = Instant::now();
+    fn wait_exit(&mut self) -> std::process::ExitStatus {
+        let mut watch = Watch::new(self.raw().len());
         loop {
             if let Some(status) = self.child.try_wait().unwrap() {
                 return status;
             }
-            if t0.elapsed() > Duration::from_secs(secs) {
+            let raw = self.raw();
+            if watch.silent(raw.len()) {
                 let _ = self.child.kill();
-                panic!("did not exit; output:\n{}", plain(&self.raw()));
+                panic!("did not exit: no output for {SILENCE:?}; output:\n{}", plain(&raw));
             }
             std::thread::sleep(Duration::from_millis(30));
         }
+    }
+}
+
+/// How long a live child may write nothing before the test calls it hung.
+const SILENCE: Duration = Duration::from_secs(300);
+
+struct Watch { len: usize, since: Instant }
+
+impl Watch {
+    fn new(len: usize) -> Watch { Watch { len, since: Instant::now() } }
+    fn silent(&mut self, len: usize) -> bool {
+        if len != self.len {
+            *self = Watch::new(len);
+        }
+        self.since.elapsed() > SILENCE
     }
 }
 
@@ -201,49 +232,49 @@ impl Session {
 fn interactive_session_in_a_pty() {
     let dir = scratch("pty");
     let mut s = Session::start(&dir, "xterm-256color");
-    s.expect("scripted / offline", 10);
-    s.expect("allowlist", 5);
+    s.expect("scripted / offline");
+    s.expect("allowlist");
     // A request; the scripted agent streams, runs tools, asks for the edit.
     s.send(b"fix the handler\r");
-    s.expect("fix the handler", 5);
-    s.expect("I'll start by finding where this is handled.", 10);
-    s.expect("Applying the change now.", 15);
-    s.expect("edit apps/code/src/main.rs", 10);
-    let all = s.expect("[y] apply ticked", 10);
+    s.expect("fix the handler");
+    s.expect("I'll start by finding where this is handled.");
+    s.expect("Applying the change now.");
+    s.expect("edit apps/code/src/main.rs");
+    let all = s.expect("[y] apply ticked");
     assert!(all.contains("@@ -1,5 +1,5 @@") || all.contains("@@"), "the edit's diff is shown");
     assert!(all.contains("+app_main!(App); // the agent was here"), "the added line is shown");
     // A hunk toggled off and on again, then applied.
     s.send(b"1");
     s.send(b"1");
     s.send(b"y");
-    s.expect("allowed", 5);
-    s.expect("cargo check --release", 10);
-    s.expect("Finished `release` profile", 10);
-    s.expect("Want me to apply it?", 20);
+    s.expect("allowed");
+    s.expect("cargo check --release");
+    s.expect("Finished `release` profile");
+    s.expect("Want me to apply it?");
     // Coloured diff lines went out as SGR green/red.
     assert!(s.raw().contains("\x1b[32m+app_main!(App); // the agent was here"));
     // A second request, interrupted with Esc while it streams.
     std::thread::sleep(Duration::from_millis(300));
     s.send(b"again please\r");
-    s.expect("again please", 5);
-    s.expect("Looking for where", 10);
+    s.expect("again please");
+    s.expect("Looking for where");
     s.send(b"\x1b");
-    s.expect("interrupted", 5);
+    s.expect("interrupted");
     // The first turn was saved; /resume lists it and picks it up.
     std::thread::sleep(Duration::from_millis(300));
     s.send(b"/resume\r");
-    s.expect("1  ", 5);
-    s.expect("fix the handler", 5);
+    s.expect("1  ");
+    s.expect("fix the handler");
     s.send(b"/resume 1\r");
-    s.expect("-- resumed", 5);
-    s.expect("end of the saved conversation", 5);
+    s.expect("-- resumed");
+    s.expect("end of the saved conversation");
     // History: Up brings the last line back.
     s.send(b"\x1b[A");
-    s.expect("/resume 1", 5);
+    s.expect("/resume 1");
     s.send(b"\x15");
     // Ctrl+D at an empty prompt leaves, and the terminal is put back.
     s.send(b"\x04");
-    let status = s.wait_exit(10);
+    let status = s.wait_exit();
     assert!(status.success());
     assert!(s.raw().contains("\x1b[?2004l"), "bracketed paste is turned off on the way out");
     let history = std::fs::read_to_string(dir.join("home/.makepad/code/cli-history")).unwrap();
@@ -255,15 +286,15 @@ fn interactive_session_in_a_pty() {
 fn bare_console_uses_ascii() {
     let dir = scratch("linux");
     let mut s = Session::start(&dir, "linux");
-    s.expect("allowlist", 10);
+    s.expect("allowlist");
     s.send(b"/help\r");
-    s.expect("/resume", 5);
+    s.expect("/resume");
     s.send(b"/approve auto\r");
-    s.expect("approval: auto", 5);
+    s.expect("approval: auto");
     s.send(b"\x03");
-    s.expect("press Ctrl+C again", 5);
+    s.expect("press Ctrl+C again");
     s.send(b"\x03");
-    assert!(s.wait_exit(10).success());
+    assert!(s.wait_exit().success());
     let raw = s.raw();
     assert!(!raw.contains('›'), "no Unicode prompt on TERM=linux");
     assert!(raw.contains("> "));

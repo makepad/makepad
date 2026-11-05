@@ -262,6 +262,8 @@ pub struct RunTask {
     override_errors: OverrideErrors,
     values: ValueTable,
     active: HashMap<String, ActiveExecutor>,
+    /// What each node last reported, so a poll that repeats it stays silent.
+    last_progress: HashMap<String, (u16, String)>,
     // Ordinary Output nodes are catalog sinks when the host has an asset
     // worker. Keep one publication per content digest for duplicate outputs
     // in the same run; explicit Publish nodes retain their own semantics.
@@ -453,6 +455,7 @@ impl RunTask {
             override_errors,
             values: HashMap::new(),
             active: HashMap::new(),
+            last_progress: HashMap::new(),
             published_output_digests: HashSet::new(),
             in_flight_output_digests: HashSet::new(),
             output_publish_keys: HashMap::new(),
@@ -701,12 +704,19 @@ impl RunTask {
             match poll {
                 Poll::Pending => {}
                 Poll::Progress { permille, stage } => {
-                    events.send(RunEvent::NodeProgress {
-                        node: node_id,
-                        permille: Some(permille),
-                        stage,
-                        stage_permille: None,
-                    });
+                    // A poll that repeats the last report is no progress: no
+                    // event, and the lane may park instead of asking the
+                    // provider again at once.
+                    let report = (permille, stage);
+                    if self.last_progress.get(&node_id) != Some(&report) {
+                        events.send(RunEvent::NodeProgress {
+                            node: node_id.clone(),
+                            permille: Some(report.0),
+                            stage: report.1.clone(),
+                            stage_permille: None,
+                        });
+                        self.last_progress.insert(node_id, report);
+                    }
                 }
                 Poll::Stage { stage, permille } => {
                     events.send(RunEvent::NodeProgress {

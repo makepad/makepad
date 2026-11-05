@@ -55,6 +55,17 @@ fn wait_for(app: &TestApp, key: &str, value: f64) {
     }
 }
 
+/// The list inside a `RowList` or `NestedLists` called `name` (the wrapper has no node of its own).
+fn row_list(name: &str) -> Selector {
+    Selector::raw(format!("path={name}.list role=list"))
+}
+
+/// The row of the outer list that is all strip (`STRIP_ROW`): a `ScrollXView` has no node of its own,
+/// and what is in it moves away with a drag.
+fn strip_row() -> Selector {
+    Selector::raw("path=lists.list.9 role=list_item")
+}
+
 /// The middle of a widget, found by id or by its text.
 fn center(app: &TestApp, selector: Selector) -> (f64, f64) {
     let widget = app.locator(selector).snapshot();
@@ -84,7 +95,7 @@ fn trackpad(app: &TestApp, (x, y): (f64, f64), deltas: &[f64], momentum: &[f64])
 #[makepad_test]
 fn wheel_over_a_nested_list_scrolls_the_page_only_with_a_new_scroll_at_its_end(app: TestApp) {
     let [page, log] = offsets(&app, ["page", "log"]);
-    let over_log = center(&app, Selector::id("log_list"));
+    let over_log = center(&app, row_list("log_list"));
     wheel(&app, over_log, 0.0, 60.0);
     assert_eq!(offsets(&app, ["page", "log"]), [page, log + 60.0]);
 
@@ -101,14 +112,14 @@ fn wheel_over_a_nested_list_scrolls_the_page_only_with_a_new_scroll_at_its_end(a
 #[makepad_test]
 fn a_nested_list_with_nothing_to_scroll_leaves_the_wheel_to_the_page(app: TestApp) {
     let [page, short] = offsets(&app, ["page", "short"]);
-    wheel(&app, center(&app, Selector::id("short_list")), 0.0, 50.0);
+    wheel(&app, center(&app, row_list("short_list")), 0.0, 50.0);
     assert_eq!(offsets(&app, ["page", "short"]), [page + 50.0, short]);
 }
 
 #[makepad_test]
 fn a_list_with_nothing_to_scroll_still_takes_scrolls_when_nothing_around_it_can(app: TestApp) {
     // So it still counts the travel (which apps use to load more) and rubber-bands.
-    let over_fit = center(&app, Selector::id("fit_list"));
+    let over_fit = center(&app, row_list("fit_list"));
     for _ in 0..3 {
         thread::sleep(NEW_SCROLL);
         wheel(&app, over_fit, 0.0, -40.0);
@@ -191,7 +202,7 @@ fn a_wheel_scroll_stays_with_the_scrollable_it_began_on(app: TestApp) {
 #[makepad_test]
 fn moving_the_pointer_off_a_scrollable_once_the_wheel_rests_lets_the_next_notch_go_elsewhere(app: TestApp) {
     let [page, log] = offsets(&app, ["page", "log"]);
-    wheel(&app, center(&app, Selector::id("log_list")), 0.0, 40.0);
+    wheel(&app, center(&app, row_list("log_list")), 0.0, 40.0);
     // Well within the wheel's 500 ms scroll, but after a rest.
     thread::sleep(Duration::from_millis(200));
     let (x, y) = center(&app, Selector::id("page_top"));
@@ -215,7 +226,7 @@ fn a_trackpad_gesture_stays_with_the_scrollable_it_began_on(app: TestApp) {
 #[makepad_test]
 fn a_trackpad_gesture_that_starts_at_a_nested_lists_limit_scrolls_the_page(app: TestApp) {
     let [page] = offsets(&app, ["page"]);
-    let over_log = center(&app, Selector::id("log_list"));
+    let over_log = center(&app, row_list("log_list"));
     wheel(&app, over_log, 0.0, 5000.0);
     let [_, log_end] = offsets(&app, ["page", "log"]);
     thread::sleep(NEW_SCROLL);
@@ -239,7 +250,7 @@ fn a_trackpad_gesture_at_a_contained_views_limit_never_reaches_the_page(app: Tes
 #[makepad_test]
 fn a_list_nested_in_a_list_keeps_its_wheel_scroll_until_a_new_one_starts_at_its_end(app: TestApp) {
     let [outer, nested] = offsets(&app, ["outer", "nested"]);
-    let over_nested = center(&app, Selector::id("nested"));
+    let over_nested = center(&app, row_list("nested"));
     wheel(&app, over_nested, 0.0, 3000.0);
     let [outer_after, nested_end] = offsets(&app, ["outer", "nested"]);
     assert!(nested_end > nested, "the nested list scrolled");
@@ -250,14 +261,14 @@ fn a_list_nested_in_a_list_keeps_its_wheel_scroll_until_a_new_one_starts_at_its_
 
     // One with nothing to scroll leaves the wheel to the outer list.
     thread::sleep(NEW_SCROLL);
-    wheel(&app, center(&app, Selector::id("nested_short")), 0.0, 30.0);
+    wheel(&app, center(&app, row_list("nested_short")), 0.0, 30.0);
     assert_eq!(offsets(&app, ["outer", "nested_short"]), [outer + 130.0, 0.0]);
 }
 
 /// Scrolls the outer list until its far strip sits near the bottom, with a code block above it,
 /// and returns the strip's middle.
 fn far_strip_near_bottom(app: &TestApp) -> (f64, f64) {
-    let list = app.locator(Selector::id("lists")).snapshot();
+    let list = app.locator(row_list("lists")).snapshot();
     // 1000 down the list, so this puts it 600 below the list's top.
     wheel(app, center(app, Selector::all().text_exact("Outer 10")), 0.0, 400.0);
     thread::sleep(NEW_SCROLL);
@@ -294,13 +305,13 @@ fn a_wheel_scroll_keeps_its_list_when_the_strip_holding_its_other_axis_scrolls_a
 #[makepad_test]
 fn dragging_a_list_nested_in_a_list_never_drags_the_outer_one(app: TestApp) {
     let [outer, nested] = offsets(&app, ["outer", "nested"]);
-    app.locator(Selector::id("nested")).drag_by(0.0, -80.0);
+    app.locator(row_list("nested")).drag_by(0.0, -80.0);
     let [outer_after, nested_after] = offsets(&app, ["outer", "nested"]);
     assert!(nested_after >= nested + 80.0, "the nested list followed the drag");
     assert_eq!(outer_after, outer);
 
     // One with nothing to scroll lets the outer list take the drag.
-    app.locator(Selector::id("nested_short")).drag_by(0.0, -60.0);
+    app.locator(row_list("nested_short")).drag_by(0.0, -60.0);
     let [outer_after, nested_short] = offsets(&app, ["outer", "nested_short"]);
     assert!(outer_after >= outer + 60.0, "the outer list followed the drag");
     assert_eq!(nested_short, 0.0);
@@ -309,13 +320,13 @@ fn dragging_a_list_nested_in_a_list_never_drags_the_outer_one(app: TestApp) {
 #[makepad_test]
 fn dragging_a_horizontal_strip_in_a_list_scrolls_each_its_own_way(app: TestApp) {
     let [outer, strip] = offsets(&app, ["outer", "strip"]);
-    app.locator(Selector::id("strip")).drag_by(-100.0, 0.0);
+    app.locator(strip_row()).drag_by(-100.0, 0.0);
     let [outer_after, strip_after] = offsets(&app, ["outer", "strip"]);
     assert!(strip_after >= strip + 100.0, "the strip followed the drag");
     assert_eq!(outer_after, outer);
 
     // Held, so the list doesn't fling the strip's row out of view.
-    app.locator(Selector::id("strip")).drag_by_and_hold(0.0, -60.0);
+    app.locator(strip_row()).drag_by_and_hold(0.0, -60.0);
     let [outer_after, strip_after_vertical] = offsets(&app, ["outer", "strip"]);
     assert!(outer_after >= outer + 60.0, "the outer list followed the drag");
     assert_eq!(strip_after_vertical, strip_after);
@@ -324,7 +335,7 @@ fn dragging_a_horizontal_strip_in_a_list_scrolls_each_its_own_way(app: TestApp) 
 #[makepad_test]
 fn touch_dragging_a_nested_scrollable_never_drags_the_page(app: TestApp) {
     let [page, log, inner] = offsets(&app, ["page", "log", "inner"]);
-    app.locator(Selector::id("log_list")).touch_drag_by(0.0, -80.0);
+    app.locator(row_list("log_list")).touch_drag_by(0.0, -80.0);
     let [page_after, log_after] = offsets(&app, ["page", "log"]);
     assert!(log_after >= log + 80.0, "the list followed the finger");
     assert_eq!(page_after, page);
@@ -338,13 +349,13 @@ fn touch_dragging_a_nested_scrollable_never_drags_the_page(app: TestApp) {
 #[makepad_test]
 fn touch_dragging_a_list_nested_in_a_list_never_drags_the_outer_one(app: TestApp) {
     let [outer, nested] = offsets(&app, ["outer", "nested"]);
-    app.locator(Selector::id("nested")).touch_drag_by(0.0, -80.0);
+    app.locator(row_list("nested")).touch_drag_by(0.0, -80.0);
     let [outer_after, nested_after] = offsets(&app, ["outer", "nested"]);
     assert!(nested_after >= nested + 80.0, "the nested list followed the finger");
     assert_eq!(outer_after, outer);
 
     // One with nothing to scroll lets the outer list take the drag.
-    app.locator(Selector::id("nested_short")).touch_drag_by(0.0, -60.0);
+    app.locator(row_list("nested_short")).touch_drag_by(0.0, -60.0);
     let [outer_after, nested_short] = offsets(&app, ["outer", "nested_short"]);
     assert!(outer_after >= outer + 60.0, "the outer list followed the finger");
     assert_eq!(nested_short, 0.0);
@@ -353,12 +364,12 @@ fn touch_dragging_a_list_nested_in_a_list_never_drags_the_outer_one(app: TestApp
 #[makepad_test]
 fn touch_dragging_a_horizontal_strip_in_a_list_scrolls_each_its_own_way(app: TestApp) {
     let [outer, strip] = offsets(&app, ["outer", "strip"]);
-    app.locator(Selector::id("strip")).touch_drag_by(-100.0, 0.0);
+    app.locator(strip_row()).touch_drag_by(-100.0, 0.0);
     let [outer_after, strip_after] = offsets(&app, ["outer", "strip"]);
     assert!(strip_after >= strip + 100.0, "the strip followed the finger");
     assert_eq!(outer_after, outer);
 
-    app.locator(Selector::id("strip")).touch_drag_by_and_hold(0.0, -60.0);
+    app.locator(strip_row()).touch_drag_by_and_hold(0.0, -60.0);
     let [outer_after, strip_after_vertical] = offsets(&app, ["outer", "strip"]);
     assert!(outer_after > outer, "the outer list followed the finger");
     assert_eq!(strip_after_vertical, strip_after);
@@ -404,7 +415,7 @@ fn swiping_a_scroller_in_a_stack_view_scrolls_it_instead_of_going_back(app: Test
 #[makepad_test]
 fn dragging_a_list_in_a_sliding_panel_never_slides_the_panel(app: TestApp) {
     let [panel, list] = offsets(&app, ["panel", "panel_list"]);
-    app.locator(Selector::id("panel_list")).touch_drag_by_and_hold(0.0, -100.0);
+    app.locator(row_list("panel_list")).touch_drag_by_and_hold(0.0, -100.0);
     let [panel_after, list_after] = offsets(&app, ["panel", "panel_list"]);
     assert!(list_after >= list + 90.0, "the list followed the finger ({list_after})");
     assert_eq!(panel_after, panel);
@@ -415,7 +426,8 @@ fn a_list_partly_scrolled_out_of_a_modal_still_takes_its_scrolls(app: TestApp) {
     app.locator(Selector::id("open_modal")).click();
     thread::sleep(Duration::from_millis(300));
     // Scroll the modal until the top of the list in it, 150 down, is hidden.
-    let modal_page = app.locator(Selector::id("modal_page")).snapshot();
+    // (`modal_page` has no node of its own: its first label, before anything scrolls, is its top)
+    let modal_page = app.locator(Selector::id("modal_top")).snapshot();
     wheel(&app, center(&app, Selector::id("modal_top")), 0.0, 500.0);
     let [modal, list] = offsets(&app, ["modal", "modal_list"]);
     assert!(modal > 160.0, "the list's top is scrolled out of the modal ({modal})");
@@ -590,7 +602,7 @@ fn a_scroll_view_never_joins_a_drag_on_a_scroller_drawn_over_it(app: TestApp) {
 fn a_diagonal_touch_drag_on_a_strip_in_a_list_moves_only_one_of_them(app: TestApp) {
     let [outer, strip] = offsets(&app, ["outer", "strip"]);
     // Farther along x than y, so only the strip follows.
-    app.locator(Selector::id("strip")).touch_drag_by_and_hold(-60.0, -20.0);
+    app.locator(strip_row()).touch_drag_by_and_hold(-60.0, -20.0);
     let [outer_after, strip_after] = offsets(&app, ["outer", "strip"]);
     assert_eq!(outer_after, outer);
     assert!(strip_after >= strip + 40.0, "the strip followed the finger ({strip} -> {strip_after})");

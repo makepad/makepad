@@ -1,4 +1,4 @@
-//! Working-tree sprite-pass lab (not for commit).
+//! Sprite-pass lab.
 //!
 //! The smallest possible reproduction of "a submitted billboard draws
 //! nothing": an EMPTY preview world containing one immobile sprite per
@@ -42,20 +42,10 @@ script_mod! {
             main_window := Window{
                 window.inner_size: vec2(960, 540)
                 body +: {
-                    lab := SpriteLab{}
+                    lab := mod.widgets.SpriteLab{}
                 }
             }
         }
-    }
-}
-
-impl App {
-    fn run(vm: &mut ScriptVm) -> Self {
-        #[cfg(feature = "tweaker")]
-        makepad_widgets_tweaker::link(vm);
-        crate::makepad_widgets::script_mod(vm);
-        makepad_render::script_mod(vm);
-        App::from_script_mod(vm, self::script_mod)
     }
 }
 
@@ -68,6 +58,14 @@ pub struct App {
 impl MatchEvent for App {}
 
 impl AppMain for App {
+    fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
+        #[cfg(feature = "tweaker")]
+        makepad_widgets_tweaker::link(vm);
+        makepad_widgets::script_mod(vm);
+        makepad_render::script_mod(vm);
+        self::script_mod(vm)
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
@@ -126,6 +124,8 @@ fn make_big_sheet(cx: &mut Cx) -> Texture {
 
 #[derive(Script, ScriptHook, Widget)]
 pub struct SpriteLab {
+    #[uid]
+    uid: WidgetUid,
     #[source]
     source: ScriptObjectRef,
     #[walk]
@@ -239,6 +239,7 @@ impl Widget for SpriteLab {
                 &self.depth_texture,
                 DrawPassClearDepth::ClearWith(1.0),
             );
+            self.pass.set_keep_camera_matrix(cx.cx, true);
             self.small = Some(make_small_sheet(cx.cx));
             self.big = Some(make_big_sheet(cx.cx));
         }
@@ -282,11 +283,11 @@ impl Widget for SpriteLab {
             }
             self.renderer.set_models(Vec::new());
             let mut draws = SceneDraws {
-                cube: &mut self.draw_cube,
-                alpha: &mut self.draw_alpha,
+                cube: Some(&mut self.draw_cube),
+                alpha: Some(&mut self.draw_alpha),
                 sky: &mut self.draw_sky,
                 sky_analytic: None,
-                terrain: &mut self.draw_terrain,
+                terrain: Some(&mut self.draw_terrain),
                 shadow: None,
                 shadow_sdf: None,
                 firework: None,

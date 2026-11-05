@@ -987,9 +987,12 @@ fn inputs_validate_nodes_digests_uploads_dedup_and_body_limit() {
 fn concurrency_queues_parallelizes_and_finishes_twenty_seeded_instances() {
     let _socket_test = socket_test();
     let root = TempRoot::new("concurrency");
+    // Turns end when the test says: a run that finished before the next one started would tell
+    // nothing about queueing or overlap.
+    let held = Arc::new(AtomicBool::new(true));
     let server = start(
         &root.0,
-        seams(FakeChat::done("done"), FakeGen::done(), FakeHttp::json(200, "{}")),
+        seams(FakeChat { held: held.clone(), ..FakeChat::done("done") }, FakeGen::done(), FakeHttp::json(200, "{}")),
     );
     let endpoints = server.endpoints();
 
@@ -1000,6 +1003,7 @@ fn concurrency_queues_parallelizes_and_finishes_twenty_seeded_instances() {
     let serial_second = start_run(&endpoints, &serial_instance, None);
     assert_eq!(serial_first.queued, 0);
     assert_eq!(serial_second.queued, 1);
+    held.store(false, Ordering::SeqCst);
     let serial_events = poll_events_until(
         &endpoints,
         "run",
@@ -1029,16 +1033,25 @@ fn concurrency_queues_parallelizes_and_finishes_twenty_seeded_instances() {
     put_flow(&endpoints, "parallel", CHAT_FLOW_TWO);
     let parallel_instance = create_instance(&endpoints, "parallel", false);
     let parallel_cursor = event_cursor(&endpoints, "run");
+    held.store(true, Ordering::SeqCst);
     let parallel_first = start_run(&endpoints, &parallel_instance, None);
     let parallel_second = start_run(&endpoints, &parallel_instance, None);
     assert_eq!(parallel_first.queued, 0);
     assert_eq!(parallel_second.queued, 0);
+    let mut parallel_started = 0;
     let parallel_events = poll_events_until(
         &endpoints,
         "run",
         parallel_cursor,
         Duration::from_secs(10),
         |event| {
+            // both run at once only if neither waits for the other: they end once both started
+            if event_kind(event) == "run.started" {
+                parallel_started += 1;
+                if parallel_started == 2 {
+                    held.store(false, Ordering::SeqCst);
+                }
+            }
             event_kind(event) == "run.finished"
                 && event_str(event, "run_id") == Some(&parallel_second.run_id)
         },
@@ -1094,7 +1107,7 @@ fn concurrency_queues_parallelizes_and_finishes_twenty_seeded_instances() {
     }
     let expected: HashSet<String> = runs.iter().map(|run| run.run_id.clone()).collect();
     let mut finished = HashSet::new();
-    poll_events_until(
+    let events = poll_events_until(
         &endpoints,
         "run",
         cursor,
@@ -1110,6 +1123,13 @@ fn concurrency_queues_parallelizes_and_finishes_twenty_seeded_instances() {
             finished.len() == expected.len()
         },
     );
+    // Runs waiting for the one generation worker poll it: only what changes is an event.
+    let mut last_report = HashMap::new();
+    for event in events.iter().filter(|event| event_kind(event) == "node.progress") {
+        let node = (event_str(event, "run_id"), event_str(event, "node"));
+        let report = format!("{:?} {:?}", event.key("permille"), event.key("stage"));
+        assert_ne!(last_report.insert(node, report.clone()).as_ref(), Some(&report), "progress repeated: {event:?}");
+    }
     let digests: HashSet<String> = runs
         .iter()
         .map(|run| {
@@ -1304,7 +1324,9 @@ fn values_support_range_etag_missing_and_ttl_reference_liveness() {
         &root.0,
         seams(FakeChat::done("unused"), FakeGen::done(), FakeHttp::json(200, "{}")),
     );
-    config.values_ram_budget = 1;
+    // Only a value spilled out of RAM can expire. These stay in RAM until the
+    // run holds the live one, however long the steps up to there take.
+    config.values_ram_budget = 64;
     config.value_ttl_secs = 1;
     let server = FlowServer::start(config).unwrap();
     let endpoints = server.endpoints();
@@ -1353,19 +1375,8 @@ fn values_support_range_etag_missing_and_ttl_reference_liveness() {
     );
     assert_eq!(unknown.status, 404, "{unknown:?}");
 
-    let (unused_upload, unused_digest) = put_value(
-        &endpoints,
-        "image",
-        "image/png",
-        b"unreferenced-image-bytes",
-    );
-    assert_eq!(unused_upload.status, 201);
-    let (live_upload, live_digest) = put_value(
-        &endpoints,
-        "image",
-        "image/png",
-        b"parked-run-image-bytes",
-    );
+    let live_bytes = b"parked-run-image-bytes";
+    let (live_upload, live_digest) = put_value(&endpoints, "image", "image/png", live_bytes);
     assert_eq!(live_upload.status, 201);
     let parked_source = r#"use mod.flow.*
 let picture = Input{type: @image default: nil}
@@ -1395,7 +1406,19 @@ Flow{picture, ask, result, answer}
                 && event_str(event, "run_id") == Some(&run.run_id)
         },
     );
-    std::thread::sleep(Duration::from_millis(2_500));
+    // Larger than the RAM budget, so everything is spilled and can expire from
+    // here on. It was touched after the live value, so the sweep that removes
+    // it also found the live value past its TTL. Reading it over HTTP would
+    // touch it and keep it alive; its spill file going away is the sweep.
+    let (unused_upload, unused_digest) = put_value(&endpoints, "image", "image/png", &[b'u'; 65]);
+    assert_eq!(unused_upload.status, 201);
+    let spilled = root.0.join("values").join(&unused_digest);
+    assert!(spilled.exists(), "the value over the RAM budget was not spilled");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while spilled.exists() {
+        assert!(Instant::now() < deadline, "the unreferenced value never expired");
+        std::thread::sleep(Duration::from_millis(10));
+    }
     let expired = request(
         endpoints.data,
         "GET",
@@ -1414,6 +1437,7 @@ Flow{picture, ask, result, answer}
         &[],
     );
     assert_eq!(retained.status, 200, "{retained:?}");
+    assert_eq!(retained.bytes, live_bytes);
     server.shutdown();
 }
 

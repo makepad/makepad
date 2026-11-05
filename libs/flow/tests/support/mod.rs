@@ -27,6 +27,8 @@ pub struct FakeChat {
     pub requests: Arc<Mutex<Vec<(String, String, String, Option<u32>, Option<bool>)>>>,
     pub response: String,
     pub pending: bool,
+    /// While set, every turn stays unfinished: a test decides when they end.
+    pub held: Arc<AtomicBool>,
     pub cancelled: Arc<AtomicBool>,
 }
 
@@ -37,6 +39,7 @@ impl FakeChat {
             requests: Arc::new(Mutex::new(Vec::new())),
             response: response.to_string(),
             pending: false,
+            held: Arc::new(AtomicBool::new(false)),
             cancelled: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -66,6 +69,7 @@ impl ChatSeam for FakeChat {
             response: self.response.clone(),
             step: 0,
             pending: self.pending,
+            held: self.held.clone(),
             cancelled: self.cancelled.clone(),
         }))
     }
@@ -75,12 +79,13 @@ struct FakeTurn {
     response: String,
     step: usize,
     pending: bool,
+    held: Arc<AtomicBool>,
     cancelled: Arc<AtomicBool>,
 }
 
 impl ChatTurn for FakeTurn {
     fn poll(&mut self) -> Vec<ChatEvent> {
-        if self.pending {
+        if self.pending || self.held.load(Ordering::SeqCst) {
             return Vec::new();
         }
         self.step += 1;
@@ -322,18 +327,14 @@ pub fn receive_until(
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut events = Vec::new();
     loop {
-        match receiver.recv_timeout(Duration::from_millis(100)) {
-            Ok(event) => {
-                let found = predicate(&event);
-                events.push(event);
-                if found {
-                    return events;
-                }
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(error) => panic!("event channel failed: {error}"),
+        let event = receiver
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .expect("run event before deadline");
+        let found = predicate(&event);
+        events.push(event);
+        if found {
+            return events;
         }
-        assert!(Instant::now() < deadline, "event deadline elapsed");
     }
 }
 
