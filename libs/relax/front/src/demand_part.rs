@@ -322,7 +322,11 @@ impl MacroPart {
         self.expansions = table.exp_uses.get(krate).cloned().unwrap_or_default();
         self.s2_fmt = table.s2_fmt;
     }
-    pub(super) fn publish(&self, table: &mut crate::macros::MacroTable, krate: &str) {
+    pub(super) fn publish(&self, table: &mut crate::macros::MacroTable, krate: &str) -> bool {
+        // Graph certificates decode only part headers. Their default macro fields
+        // are not an outline and must not erase the loader's scanned namespace
+        // or reset the core formatting ABI when a cached file needs parsing.
+        if self.modules.is_none() { return false; }
         table.clear_lookup_cache();
         // Replace this crate's raw scan, preserving the completed outline's
         // declaration order. Counting same-named definitions loses replacements
@@ -338,6 +342,7 @@ impl MacroPart {
         table.exp_uses.insert(krate.to_owned(), self.expansions.clone());
         table.forget_expansion_index(krate);
         table.s2_fmt = self.s2_fmt;
+        true
     }
 }
 impl DemandPart {

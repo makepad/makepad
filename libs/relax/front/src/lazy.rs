@@ -122,14 +122,12 @@ impl PendingPlan {
             let macros = self.early.macros.lock().unwrap_or_else(|e| e.into_inner()).get(&ci).cloned();
             if let Some(macros) = macros {
                 drop(guard);
-                macros.publish(table, &self.pending_crates[ci].name);
-                return true;
+                return macros.publish(table, &self.pending_crates[ci].name);
             }
             if let Some(plan) = self.ready() {
                 if let Some(part) = plan.image.parts.get(ci) {
                     drop(guard);
-                    part.macros.publish(table, &self.pending_crates[ci].name);
-                    return true;
+                    return part.macros.publish(table, &self.pending_crates[ci].name);
                 }
                 return false;
             }
