@@ -45,8 +45,9 @@
 //! memory footprint, never of lifetime.
 //! `MAKEPAD_RUN_COMPILER_ARENA=0` turns compiler routing off (read once, without allocating).
 //!
-//! The JIT allocator ABI selects a domain heap through thread-local ownership (domain.rs).
-//! Native shims and runtime helpers use this global allocator and stay shared. Domain frees
+//! The JIT allocator ABI selects a domain heap through thread-local ownership (domain.rs), and so
+//! does an op of a crate whose objects are the program's (the run phase, `relax_session::phase::run`).
+//! Other native shims and runtime helpers use this global allocator and stay shared. Domain frees
 //! and reallocs find the owning range, including calls from native code and other threads.
 
 #[cfg(any(target_vendor = "apple", target_os = "linux", target_os = "android", windows))]
@@ -505,6 +506,25 @@ pub fn burst_owns(p: *const u8) -> bool {
 #[cfg(any(target_vendor = "apple", target_os = "linux", target_os = "android", windows))]
 pub mod domain;
 
+/// What the system heap holds free goes back to the system (a run's end: what its threads and
+/// caches used is free now, and the system's allocator would keep it resident).
+pub fn give_back() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    unsafe {
+        extern "C" {
+            fn malloc_trim(pad: usize) -> i32;
+        }
+        malloc_trim(0);
+    }
+    #[cfg(target_vendor = "apple")]
+    unsafe {
+        extern "C" {
+            fn malloc_zone_pressure_relief(zone: *const u8, goal: usize) -> usize;
+        }
+        malloc_zone_pressure_relief(std::ptr::null(), 0);
+    }
+}
+
 pub struct RelaxAlloc;
 
 /// glibc: the bytes of the system heap this allocator holds (the loader's own kept blocks, and the
@@ -695,6 +715,15 @@ unsafe impl GlobalAlloc for RelaxAlloc {
                 return p;
             }
         }
+        #[cfg(any(target_vendor = "apple", target_os = "linux", target_os = "android", windows))]
+        if relax_session::phase::in_run() {
+            if let Some(a) = compiler::domain_here() {
+                let p = a.alloc(l);
+                if !p.is_null() {
+                    return p;
+                }
+            }
+        }
         #[cfg(target_vendor = "apple")]
         if OWN_ZONE.load(Ordering::Relaxed) {
             return zone::alloc(l.size(), l.align());
@@ -726,6 +755,15 @@ unsafe impl GlobalAlloc for RelaxAlloc {
             let p = compiler::alloc_zeroed(l);
             if !p.is_null() {
                 return p;
+            }
+        }
+        #[cfg(any(target_vendor = "apple", target_os = "linux", target_os = "android", windows))]
+        if relax_session::phase::in_run() {
+            if let Some(a) = compiler::domain_here() {
+                let p = a.alloc_zeroed(l);
+                if !p.is_null() {
+                    return p;
+                }
             }
         }
         #[cfg(target_vendor = "apple")]
@@ -1241,4 +1279,10 @@ mod routing_tests {
         }
         compiler_trim();
     }
+}
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    #[cfg(any(target_vendor = "apple", target_os = "linux"))]
+    web::reset_statics();
 }

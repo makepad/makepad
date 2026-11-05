@@ -1,7 +1,7 @@
 //! `ci-leg`: the CI shards devhub runs (libs/devhub/src/orch/ci.rs) that are more than one command,
 //! under the JIT (`makepad run makepad-ci-leg -- ...`) in the lease's tree:
 //! - `smoke <ci.splash> --dir <dir> [--target <package>:<binary>:<cwd>]`: one app's smoke script
-//!   (the CI box's ci.splash runner, ported from tools/ci): its apps launch hidden and muted under
+//!   (the ci.splash runner): its apps launch hidden and muted under
 //!   the JIT, are driven over makepad-remote and grabbed; each acceptance (grab + text) is saved in
 //!   the lease target, and devhub judges them on the master with makepad-ci-judge;
 //! - `slice <app> <root,...>`: a licensed slice of the commercial repository, cut into a clean

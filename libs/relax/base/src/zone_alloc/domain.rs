@@ -1,6 +1,8 @@
-//! JIT program heaps. Native allocations never select these heaps: only the program allocator
-//! ABI does. This boundary keeps provided crates and runtime process-wide state shared, even
-//! when called by a domain thread; pointers are still freed according to their owning range.
+//! JIT program heaps. The program allocator ABI selects these heaps, and so does an op of a crate
+//! whose objects are the program's (the run phase). Other native allocations never do: this keeps
+//! the runtime's and other provided crates' process-wide state shared, even when called by a domain
+//! thread. A static of a crate with such ops fills in its blocks through `process_heap`, for the same
+//! reason. Pointers are still freed according to their owning range.
 use super::compiler::{self, Arena};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::UnsafeCell;

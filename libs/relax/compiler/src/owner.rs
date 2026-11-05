@@ -161,6 +161,9 @@ static Q: Mutex<Queue> = Mutex::new(Queue { lanes: [const { VecDeque::new() }; C
 
 static WAKE: Condvar = Condvar::new();
 static STARTED: std::sync::Once = std::sync::Once::new();
+/// The owner thread ends when no request is left (`stop`).
+static STOP: AtomicBool = AtomicBool::new(false);
+static OWNER_JOIN: std::sync::Mutex<Option<std::thread::JoinHandle<()>>> = std::sync::Mutex::new(None);
 /// Program requests queued: long work on the owner stops for them (program_waiting)
 static FOREGROUND: AtomicU32 = AtomicU32::new(0);
 /// the main thread's requests queued
@@ -929,7 +932,7 @@ pub fn start() {
         crate::query::set_wait_hook(crate::query::WaitHook { on_owner: is_owner, pump: pump_latch, wake, me });
         makepad_cpu_budget::set_wait_hook(crate::waits::token_wait);
         let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::Builder::new()
+        let thread = std::thread::Builder::new()
             .name("run-owner".into())
             .stack_size(256 << 20)
             .spawn(move || {
@@ -955,8 +958,25 @@ pub fn start() {
                 crate::lifeline::run("run-owner", crate::lifeline::OnPanic::Fatal, || owner_loop());
             })
             .expect("makepad: cannot start the compiler's owner thread");
+        *OWNER_JOIN.lock().unwrap_or_else(|e| e.into_inner()) = Some(thread);
         let _ = rx.recv();
     });
+}
+
+/// The owner thread ends (`run_end`): every thread that asked it for something has ended. The next
+/// run's `start` makes another.
+pub(crate) fn stop() {
+    if !STARTED.is_completed() {
+        return;
+    }
+    STOP.store(true, Ordering::SeqCst);
+    {
+        let _q = Q.lock().unwrap_or_else(|e| e.into_inner());
+        WAKE.notify_all();
+    }
+    if let Some(thread) = OWNER_JOIN.lock().unwrap_or_else(|e| e.into_inner()).take() {
+        let _ = thread.join();
+    }
 }
 
 /// Runs `f` on the owner thread and returns its result (its panic resumes here). On the owner it
@@ -990,6 +1010,18 @@ fn request<R>(site: &'static std::panic::Location<'static>, class: Class, deadli
     if is_owner() || CHILD.load(Ordering::Relaxed) {
         return Some(f());
     }
+    let mut out: Option<R> = None;
+    let mut f = Some(f);
+    let mut run = || out = Some((f.take().unwrap())());
+    if !request_dyn(site, class, deadline, yields, &mut run) {
+        return None;
+    }
+    Some(out.unwrap())
+}
+
+/// `request` past its owner fast path, for every result type (one copy, not one per caller's
+/// closure): false when the request was withdrawn or given back, and the caller asks again.
+fn request_dyn(site: &'static std::panic::Location<'static>, class: Class, deadline: Option<std::time::Instant>, yields: bool, run: &mut dyn FnMut()) -> bool {
     assert_no_leaf("a request to the compiler's owner");
     // a front reader that must not wait (lowering ahead) gives the work back first; a back
     // end's finish is never refused (its slots stay in flight until it is served)
@@ -998,11 +1030,6 @@ fn request<R>(site: &'static std::panic::Location<'static>, class: Class, deadli
         crate::preempt::point();
     }
     start();
-    let mut out: Option<R> = None;
-    let outp: *mut Option<R> = &mut out;
-    let mut f = Some(f);
-    let mut run = move || unsafe { *outp = Some((f.take().unwrap())()) };
-    let run: &mut dyn FnMut() = &mut run;
     // SAFETY: the request is done (or withdrawn) before this frame returns; the owner runs the
     // closure only between this push and the Done store
     let run: *mut (dyn FnMut() + 'static) = unsafe { std::mem::transmute(run) };
@@ -1108,7 +1135,7 @@ fn request<R>(site: &'static std::panic::Location<'static>, class: Class, deadli
         }
     }
     if withdrawn {
-        return None;
+        return false;
     }
     match req.panic.take() {
         Some(p) if p.is::<crate::preempt::OwnerBusy>() => match req.yielded.take() {
@@ -1116,7 +1143,7 @@ fn request<R>(site: &'static std::panic::Location<'static>, class: Class, deadli
             // count: `_idle`) it waits for that build to end, then its caller asks again
             Some(build) => {
                 build.wait();
-                None
+                false
             }
             // served nested and blocked by an earlier request on the owner: the requester's
             // work is cancelled as a preemption is (its queries too) and redone later. Only
@@ -1128,7 +1155,7 @@ fn request<R>(site: &'static std::panic::Location<'static>, class: Class, deadli
             crate::lifeline::set_panic_at_raw(req.panic_at.get());
             resume_said(p)
         }
-        None => Some(out.unwrap()),
+        None => true,
     }
 }
 
@@ -1469,7 +1496,7 @@ fn serve(r: usize) {
     }
 }
 
-fn owner_loop() -> ! {
+fn owner_loop() {
     calibrate();
     let mut main_last = false;
     loop {
@@ -1498,6 +1525,9 @@ fn owner_loop() -> ! {
                 }
                 if let Some(r) = pick(&mut q, Mode::Top) {
                     break r;
+                }
+                if STOP.load(Ordering::SeqCst) {
+                    return;
                 }
                 OWNER_ASLEEP.store(true, Ordering::SeqCst);
                 crate::zone_alloc::compiler_hand_back_idle();
@@ -1744,6 +1774,14 @@ pub fn wake() {
 /// is gone.
 pub fn begin_exit() {
     let _ = EXIT_TID.compare_exchange(0, me(), Ordering::AcqRel, Ordering::Acquire);
+    wake();
+}
+
+/// The run's summary is done and the process stays (`run_end`): every request is served again, and
+/// the run's threads waiting on one can end.
+pub(crate) fn end_exit() {
+    EXIT_TID.store(0, Ordering::Release);
+    EXIT_HELPER.store(0, Ordering::Release);
     wake();
 }
 
@@ -2077,4 +2115,35 @@ mod tests {
         // and the guard is released by the unwind: requests work again
         assert_eq!(call(Class::Program, || 5), 5);
     }
+}
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    use relax_session::reset_static as reset;
+    reset(&Q, Mutex::new(Queue { lanes: [const { VecDeque::new() }; CLASSES] }));
+    reset(&STARTED, std::sync::Once::new());
+    reset(&STOP, AtomicBool::new(false));
+    reset(&FOREGROUND, AtomicU32::new(0));
+    reset(&MAIN_QUEUED, AtomicU32::new(0));
+    reset(&MAIN_PUBLISH, AtomicU32::new(0));
+    reset(&QUEUED_N, AtomicU32::new(0));
+    reset(&OWNER_ASLEEP, AtomicBool::new(false));
+    reset(&OWNER_SERVING, AtomicBool::new(false));
+    reset(&OWNER_TID, AtomicU64::new(0));
+    reset(&OWNER_THREAD, std::sync::OnceLock::new());
+    reset(&EXIT_TID, AtomicU64::new(0));
+    reset(&EXIT_HELPER, AtomicU64::new(0));
+    reset(&BUSY_NS, [const { AtomicU64::new(0) }; CLASSES]);
+    reset(&MAIN_ACC, [const { AtomicU64::new(0) }; 12]);
+    reset(&MAIN_WAIT_MAX, AtomicU64::new(0));
+    reset(&MAIN_WAIT_BEHIND, AtomicU64::new(u64::MAX));
+    reset(&NOW_T0, AtomicU64::new(0));
+    reset(&SITES, [const { SiteAcc { site: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()), class: AtomicU8::new(0), acc: [const { AtomicU64::new(0) }; SITE_FIELDS] } }; SITES_N]);
+    reset(&PUMPS, [const { PumpAcc { site: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()), req: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()), acc: [const { AtomicU64::new(0) }; 4] } }; PUMPS_N]);
+    reset(&MAIN_BEHIND, [const { [const { AtomicU64::new(0) }; 2] }; CLASSES + 1]);
+    reset(&PURE_BAILS, [const { AtomicU64::new(0) }; PURE_N]);
+    reset(&PURE_AT_PRESENT, [const { AtomicU64::new(0) }; PURE_N]);
+    reset(&BAILS, [const { AtomicU64::new(0) }; 5]);
+    reset(&FORK, AtomicU8::new(0));
+    reset(&FORKING, AtomicBool::new(false));
 }

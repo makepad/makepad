@@ -207,6 +207,7 @@ pub extern "C" fn relax_probe_sample(k: *const u8, n: usize, t: *const u8, tn: u
 }
 
 pub extern "C" fn relax_probe_pause() {
+    let _kept = crate::zone_alloc::kept();
     let Some(p) = current() else { return };
     let saved = CURRENT.try_with(|c| c.get()).unwrap_or((usize::MAX, 0));
     super::instrument::park_here(u64::MAX, &format!("P{}", p.id), &format!("probe::pause in P{} at {}", p.id, p.hook), "");
@@ -828,4 +829,10 @@ pub fn cmd(req: &Req, out: &mut Out) {
         }
         _ => out.err("usage: probe add <fn|file:line> <probe.rs|code> [mutate=1] | list | read P<n> | rm <P<n>|all>"),
     }
+}
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    use relax_session::reset_static as reset;
+    reset(&PROBES, Mutex::new(Vec::new()));
 }

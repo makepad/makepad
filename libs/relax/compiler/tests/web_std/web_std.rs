@@ -341,7 +341,7 @@ fn net_section() {
     show("to_socket_addrs(port)", &"host:99999".to_socket_addrs().map(|i| i.collect::<Vec<_>>()));
     show("to_socket_addrs((str,port))", &("localhost", 80).to_socket_addrs().map(|i| i.collect::<Vec<_>>()));
     out!("addr: {:?} {:?}", "[::1]:8080".parse::<SocketAddr>(), "1.2.3.4".parse::<IpAddr>());
-    out!("addr: {} {} {}", Ipv4Addr::new(10, 0, 0, 1).is_private(), Ipv4Addr::LOCALHOST, Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1));
+    out!("addr: {} {} {}", Ipv4Addr::new(10, 77, 0, 1).is_private(), Ipv4Addr::LOCALHOST, Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1));
     out!("addr: {:?} {}", "256.0.0.1".parse::<Ipv4Addr>().map_err(|e| e.to_string()), Ipv6Addr::from([0u8; 16]));
 }
 

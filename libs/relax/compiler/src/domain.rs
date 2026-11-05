@@ -278,6 +278,7 @@ pub fn foreign_enter(scope: u64) -> ForeignSaved {
     if base == 0 {
         return none;
     }
+    crate::jit::fresh_thread();
     let slot = crate::jit::tls_block() as *mut u64;
     let heap = crate::zone_alloc::domain::current();
     unsafe {
@@ -699,7 +700,6 @@ pub(crate) fn first_present() {
     {
         let mut d = domains();
         if let Some(x) = d.iter_mut().find(|x| x.info.base == base && x.info.first_frame_ms.is_none()) {
-            if crate::run::app_domain() == Some(x.info.id) || x.info.id == 0 && crate::run::app_domain().is_none() { crate::hot_failure::ready(); }
             x.info.first_frame_ms = Some(x.started.elapsed().as_secs_f64() * 1e3);
             crate::run::domain_present();
         }
@@ -753,6 +753,9 @@ pub fn wait_first_frame(id: DomainId, timeout: std::time::Duration) -> Option<f6
     let end = std::time::Instant::now() + timeout;
     let mut d = domains();
     loop {
+        if crate::run_threads::ending() {
+            return None;
+        }
         match d.iter().find(|x| x.info.id == id) {
             Some(x) if x.info.first_frame_ms.is_some() => return x.info.first_frame_ms,
             Some(x) if matches!(x.info.state, DomainState::Crashed(_) | DomainState::Exited(_) | DomainState::Stopped) => return None,
@@ -1046,9 +1049,12 @@ fn teardown(id: DomainId) {
     }
     if let Some(heap) = heap {
         let (base, size) = heap.range();
+        crate::run_end::heap_goes(base..base + size);
         crate::inspect::heap::forget_range(base, size);
         freed += (heap.stats().1 + heap.metadata_bytes()) as u64;
         drop(heap);
+        #[cfg(any(target_os = "linux", target_vendor = "apple"))]
+        crate::run_end::leftovers::heap_gone(base, size);
     }
     drop((args, threads, crates));
     // The process heap keeps what the domain's threads freed in their malloc arenas (free but
@@ -1430,7 +1436,7 @@ fn start_prepared(up: *mut Unit, spec: AppSpec, id: DomainId) -> Result<DomainId
     }
     // the macro world only the load needed goes again (hot reload and later loads rebuild it)
     if crate::pmhost::free_world() {
-        std::thread::spawn(crate::memstat::trim);
+        let _ = crate::run_threads::spawn("run-trim", crate::memstat::trim);
     }
     if compile_phase(id, "main").is_err() { return Ok(id); }
     let prepared = crate::owner::call(crate::owner::Class::Program, || unsafe {
@@ -1470,7 +1476,8 @@ fn start_prepared(up: *mut Unit, spec: AppSpec, id: DomainId) -> Result<DomainId
     if cancelled(id) { return Ok(id); }
     if crate::run::app_domain() == Some(id) {
         crate::reload::domain_loaded(live_inputs);
-        crate::hot_failure::replacement_loaded();
+        // a restarted run's app is in, its state handed over: the restart completed
+        crate::hot_failure::restored();
     }
     // the domain's main thread (its name, its handle) is process state
     if crate::preload::trace() { eprintln!("boot-trace: domain {id} launching at t={:.1} ms", crate::clock::ms_since_start()); }
@@ -1740,7 +1747,7 @@ pub(crate) fn run_vehicle(up: *mut Unit, packages: Vec<String>) {
     // heap), whatever phase the caller is in.
     let _k = crate::zone_alloc::kept();
     let packages = packages.clone();
-    let _ = std::thread::Builder::new().name("run-domains".to_string()).spawn(move || {
+    let _ = crate::run_threads::spawn("run-domains", move || {
         let up = upn as *mut Unit;
         let wait = std::time::Duration::from_secs(180);
         let primary = crate::run::app_domain().unwrap_or(0);
@@ -1760,7 +1767,7 @@ pub(crate) fn run_vehicle(up: *mut Unit, packages: Vec<String>) {
             let started_ms = t.elapsed().as_secs_f64() * 1e3;
             let ff = wait_first_frame(id, wait);
             let (rss1, pss1) = process_memory_kb();
-            std::thread::sleep(std::time::Duration::from_secs(10));
+            crate::run_threads::sleep(std::time::Duration::from_secs(10));
             let (rss2, pss2) = process_memory_kb();
             let i = info(id).unwrap();
             eprintln!(
@@ -1949,3 +1956,12 @@ mod teardown_tests;
 
 #[cfg(test)]
 static TEST_SERIAL: Mutex<()> = Mutex::new(());
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    use relax_session::reset_static as reset;
+    reset(&BLOCKS, Mutex::new(Vec::new()));
+    reset(&DOMAINS, Mutex::new(Vec::new()));
+    reset(&TLS_KEYS, Mutex::new(Vec::new()));
+    reset(&LOADED, Mutex::new(Vec::new()));
+}

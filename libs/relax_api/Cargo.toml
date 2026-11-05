@@ -10,6 +10,7 @@ repository = "https://github.com/makepad/makepad/"
 
 [dependencies]
 makepad-relax-api-macro = { path = "macro", version = "1.0.0" }
+makepad-alloc-phase = { path = "phase", version = "1.0.0" }
 
 [features]
 # entries(): the table reader (only the `makepad` loader enables it)

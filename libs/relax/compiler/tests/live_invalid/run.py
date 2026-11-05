@@ -131,7 +131,7 @@ try:
     n_out, n_err = len(out), len(err)
     r = inspect("resume", pid1 or "P0", "restart")
     ok = wait(lambda: since(out, n_out, "^out start$") and since(out, n_out, r"^out tick \d+ 30$"), 180)
-    step("resume restart: the process starts again on the current source", ok and "process restart" in r, r + "\n".join(err[n_err:][-20:]))
+    step("resume restart: the process starts again on the current source", ok and "as: restart" in r, r + "\n".join(err[n_err:][-20:]))
     # 5. SPEC-V: an edit the borrow checker rejects after it ran, the worker blocked inside it
     n_out, n_err = len(out), len(err)
     rejected = layout.replace("""    s.a = s.a.wrapping_add(n & 1);
@@ -192,7 +192,7 @@ try:
     n_out, n_err = len(out), len(err)
     r = inspect("resume", pid3 or "P0", "restart")
     ok = wait(lambda: since(out, n_out, "^out start$") and since(out, n_out, r"^out tick \d+ 30$"), 180)
-    step("resume restart: the process starts again on the current source", ok and "process restart" in r, r + "\n".join(err[n_err:][-20:]))
+    step("resume restart: the process starts again on the current source", ok and "as: restart" in r, r + "\n".join(err[n_err:][-20:]))
     send("quit")
     wait(lambda: p.poll() is not None, 30)
 finally:

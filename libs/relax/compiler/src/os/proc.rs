@@ -328,8 +328,24 @@ mod imp {
 
     /// A shared library by absolute path (--allow-c's native library), its symbols global.
     pub fn load_path(path: &str) -> bool {
-        // RTLD_NOW | RTLD_GLOBAL
-        unsafe { !dlopen(format!("{}\0", path).as_ptr(), 2 | 0x100).is_null() }
+        // RTLD_LAZY | RTLD_GLOBAL: the bridge exports archive functions before
+        // knowing which the JIT will call. Resolve function relocations on use,
+        // as native archive extraction would leave uncalled functions unlinked.
+        // Data relocations still resolve at load time; called missing symbols
+        // remain loader errors rather than being replaced with stubs.
+        unsafe {
+            if !dlopen(format!("{}\0", path).as_ptr(), 1 | 0x100).is_null() {
+                return true;
+            }
+            extern "C" {
+                fn dlerror() -> *const std::ffi::c_char;
+            }
+            let error = dlerror();
+            if !error.is_null() {
+                eprintln!("makepad: cannot load {}: {}", path, std::ffi::CStr::from_ptr(error).to_string_lossy());
+            }
+            false
+        }
     }
 
     pub fn load_library(name: &str, framework: bool) -> bool {
@@ -945,4 +961,11 @@ mod imp {
             Ok(())
         }
     }
+}
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    use relax_session::reset_static as reset;
+    reset(&EMBEDDED_FAILURE, std::sync::atomic::AtomicI32::new(0));
+    reset(&PROGRAM_ATEXIT, std::sync::Mutex::new(Vec::new()));
 }

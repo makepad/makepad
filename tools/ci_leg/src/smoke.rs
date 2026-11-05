@@ -1,9 +1,9 @@
-//! An app's smoke script (`ci.splash`), as the CI box ran it (ported from tools/ci drive.rs and
-//! drive_natives.rs): a deterministic Splash host; natives never use model output to choose input.
+//! An app's smoke script (`ci.splash`): a deterministic Splash host; natives never use model output
+//! to choose input.
 //!
-//! What changed in the port:
+//! What a run holds an app to:
 //! - apps launch under the JIT (`makepad run <package> -- --remote`, hidden and muted), on the box's
-//!   one warm JIT cache, instead of a cargo release build;
+//!   one warm JIT cache;
 //! - a launch lives through a settle window after its first window (until the JIT is idle, at most
 //!   [`SETTLE`]): a panic (parked or not), a JIT compile error or an exit in it fails the launch
 //!   (the first frame comes before an app's worker threads do their work);
@@ -18,8 +18,8 @@
 //!   request to a parked UI thread never answers ([`watch_parks`] kills the app and its children);
 //! - `ci.accept` saves the grab and its acceptance text; the devhub master judges them on the AI
 //!   fleet after the boot (no lease process uses the LAN);
-//! - the cargo natives (`check_targets`, `build`, `warm`, `cargo`, `test`) are CI's own shards now
-//!   (devhub ci: cross checks, JIT checks, test shards): here they say so and pass.
+//! - the cargo natives (`check_targets`, `build`) are CI's own shards (devhub ci: cross checks,
+//!   JIT checks, test shards): here they say so and pass.
 
 use crate::report::Run;
 use makepad_remote::Client;
@@ -100,7 +100,7 @@ fn watch_parks(pid: u32, mut reader: File, parked: Arc<Mutex<Option<String>>>, l
     });
 }
 
-/// A child's output in a file, read as it grows (tools/ci process.rs `ChildLog`).
+/// A child's output in a file, read as it grows.
 struct ChildLog {
     child: Child,
     reader: File,
@@ -147,7 +147,7 @@ impl ChildLog {
     }
 }
 
-/// The app's remote commands, with ownership checked after every reply (tools/ci remote.rs).
+/// The app's remote commands, with ownership checked after every reply.
 struct Remote {
     client: Client,
     user_seq: Option<u64>,
@@ -311,10 +311,15 @@ struct Runtime {
     fatal: bool,
     warning: String,
     held_pids: Vec<u32>,
+    /// Nothing outside the VM happens, and every question gets a plain answer (the contract test).
+    dry: bool,
 }
 
 impl Runtime {
     fn defer_accept(&mut self, image: &Path, prompt: &str, step: &str) -> Result<Value> {
+        if self.dry {
+            return Ok(Value::Null);
+        }
         let dir = self.run.dir.join("deferred");
         let n = format!("{:02}", self.deferred + 1);
         let saved = dir.join(format!("{n}.png"));
@@ -347,6 +352,9 @@ impl Runtime {
     fn request(&mut self, i: usize, argv: &[String], mutate: bool) -> Result<String> {
         if argv.is_empty() || argv.iter().any(|a| a.bytes().any(|b| b.is_ascii_control()) || a.starts_with("if_user_seq")) {
             return Err("invalid command (or attempt to replace the pinned user sequence)".into());
+        }
+        if self.dry {
+            return Ok("{}".into());
         }
         let app = self.apps.get_mut(i).ok_or("invalid app handle")?;
         if app.interrupted {
@@ -390,6 +398,9 @@ impl Runtime {
 
     /// The newest named endpoint in this app's descendants.
     fn hosted(&mut self, i: usize, name: &str) -> Result<usize> {
+        if self.dry {
+            return Ok(usize::MAX);
+        }
         let app = self.apps.get(i).ok_or("invalid app handle")?;
         if app.interrupted {
             return Err("human intervention; app is no longer owned".into());
@@ -417,6 +428,9 @@ impl Runtime {
     fn hosted_request(&mut self, i: usize, argv: &[String], mutate: bool) -> Result<String> {
         if argv.is_empty() || argv.iter().any(|a| a.bytes().any(|b| b.is_ascii_control()) || a.starts_with("if_user_seq")) {
             return Err("invalid command (or attempt to replace the pinned user sequence)".into());
+        }
+        if self.dry {
+            return Ok("{\"w\":[{\"sz\":[1,1]}]}".into());
         }
         let app = self.hosted.get(i).ok_or("invalid hosted app handle")?;
         let text = match app.remote.request(argv, mutate) {
@@ -464,6 +478,9 @@ impl Runtime {
     }
 
     fn alive(&mut self, i: usize) -> Result<bool> {
+        if self.dry {
+            return Ok(true);
+        }
         self.drain_app(i)?;
         let alive = self.apps[i].child.alive()?;
         if !alive && !self.apps[i].closed {
@@ -475,6 +492,9 @@ impl Runtime {
     /// Starts `target` under the JIT, hidden and muted, takes its remote endpoint, waits for a
     /// real GPU and first presented frame, a window, ownership, then the settle window.
     fn launch(&mut self, target: &Target, app_env: &[(String, String)], script_errors: Option<String>) -> Result<usize> {
+        if self.dry {
+            return Ok(usize::MAX);
+        }
         let name = target.binary.clone();
         let cwd = inside(&self.run.root, Path::new(&target.cwd))?;
         let index = self.apps.len();
@@ -691,7 +711,9 @@ impl Runtime {
     fn key(&mut self, i: usize, code: &str, mods: &[&str]) -> Result<()> {
         self.request_json(i, &key_args("down", code, mods), true)?;
         // always release a pressed key
-        std::thread::sleep(Duration::from_millis(180));
+        if !self.dry {
+            std::thread::sleep(Duration::from_millis(180));
+        }
         self.request_json(i, &key_args("up", code, mods), true)?;
         Ok(())
     }
@@ -705,6 +727,9 @@ impl Runtime {
     }
 
     fn log_text(&mut self, i: usize) -> Result<String> {
+        if self.dry {
+            return Ok(String::new());
+        }
         self.drain_app(i)?;
         let v = self.request_json(i, &argv(&["log", "n=10000"]), false)?;
         let mut lines = Vec::new();
@@ -715,6 +740,9 @@ impl Runtime {
     /// No `[E]` line, panic or JIT compile error in the app's log and output, and alive.
     /// A warning, never a failure, and it only reads what is already captured.
     fn flag_idle_drawing(&mut self, i: usize) -> Result<()> {
+        if self.dry {
+            return Ok(());
+        }
         self.drain_app(i)?;
         let app = &self.apps[i];
         if let Some(warning) = app.child.text.get(app.started_at..).and_then(idle_drawing) {
@@ -724,6 +752,9 @@ impl Runtime {
     }
 
     fn no_errors(&mut self, i: usize) -> Result<()> {
+        if self.dry {
+            return Ok(());
+        }
         if !self.alive(i)? {
             return Err("app process is dead".into());
         }
@@ -798,6 +829,9 @@ impl Runtime {
         if !secs.is_finite() || !(0.0..=3600.0).contains(&secs) {
             return Err("invalid log timeout".into());
         }
+        if self.dry {
+            return Ok(());
+        }
         let quiet = Duration::from_secs_f64(secs);
         let mut end = Instant::now() + quiet;
         let mut compiled = Duration::ZERO;
@@ -831,6 +865,10 @@ impl Runtime {
     }
 
     fn save_grab(&mut self, value: &Value, name: &str) -> Result<usize> {
+        if self.dry {
+            self.images.push(PathBuf::from(name));
+            return Ok(self.images.len() - 1);
+        }
         let mut paths = Vec::new();
         png_paths(value, &mut paths);
         let source = paths.first().ok_or("grab did not return a PNG path")?;
@@ -855,6 +893,9 @@ impl Runtime {
     }
 
     fn quit(&mut self, i: usize) -> Result<()> {
+        if self.dry {
+            return Ok(());
+        }
         self.quit_within(i, LAST_GRAB, CLOSE_EXIT, TREE_GONE)
     }
 
@@ -1324,17 +1365,9 @@ fn register(vm: &mut ScriptVm, target: Option<&Target>) {
     vm.set_value_def(ci, id!(target), t);
     let host = json_value(vm, json::obj(vec![("target", json::s(std::env::consts::OS)), ("targets", Value::Arr(Vec::new()))]));
     vm.set_value_def(ci, id!(host), host);
-    vm.set_value_def(ci, id!(deep), ScriptValue::from(false));
-    let apps = json_value(vm, Value::Arr(Vec::new()));
-    vm.set_value_def(ci, id!(apps), apps);
     vm.add_method(ci, id_lut!(check_targets), script_args!(spec = NIL), |vm, _| covered(vm, "check_targets"));
-    vm.add_method(ci, id_lut!(warm), script_args!(spec = NIL), |vm, _| covered(vm, "warm"));
-    vm.add_method(ci, id_lut!(cargo), script_args!(args = NIL, options = NIL), |vm, _| covered(vm, "cargo"));
-    vm.add_method(ci, id_lut!(test), script_args!(spec = NIL), |vm, _| covered(vm, "test"));
     // apps run under the JIT: a launch compiles what it runs
     vm.add_method(ci, id_lut!(build), script_args!(spec = NIL), |vm, _| covered(vm, "build (apps run under the JIT)"));
-    vm.add_method(ci, id_lut!(shared), script_args!(), |_, _| NIL);
-    vm.add_method(ci, id_lut!(exclusive), script_args!(), |_, _| NIL);
     vm.add_method(ci, id_lut!(step), script_args!(name = NIL, body = NIL), |vm, args| {
         let name = match str_arg(vm, args, id!(name)) {
             Ok(v) => v,
@@ -1419,8 +1452,11 @@ fn register(vm: &mut ScriptVm, target: Option<&Target>) {
         if !allow(vm) {
             return NIL;
         }
+        let dry = rt(vm).dry;
         let r = num_arg(vm, args, id!(secs)).map(|n| {
-            std::thread::sleep(Duration::from_secs_f64(n.clamp(0.0, 600.0)));
+            if !dry {
+                std::thread::sleep(Duration::from_secs_f64(n.clamp(0.0, 600.0)));
+            }
             Value::Null
         });
         result(vm, r)
@@ -1429,7 +1465,7 @@ fn register(vm: &mut ScriptVm, target: Option<&Target>) {
         if !allow(vm) {
             return NIL;
         }
-        if value(vm, args, id!(condition)).as_bool() != Some(true) {
+        if !rt(vm).dry && value(vm, args, id!(condition)).as_bool() != Some(true) {
             let message = str_arg(vm, args, id!(message)).unwrap_or_else(|e| e);
             rt(vm).fail(&message);
         }
@@ -1674,17 +1710,22 @@ pub fn run(root: PathBuf, path: &str, dir: &str, target: Option<Target>) -> i32 
         println!("CI-DEFER-DIR target/{}/deferred", rel.to_string_lossy().replace('\\', "/"));
         target.join(rel)
     };
-    let run = Run::new(root.clone(), out);
-    let source = std::fs::read_to_string(root.join(path));
+    let mut run = execute(Run::new(root, out), path, dir, target.as_ref(), false);
+    run.finish(&format!("smoke {dir}"))
+}
+
+/// The script on a real VM, then its apps cleaned up.
+fn execute(run: Run, path: &str, dir: &str, target: Option<&Target>, dry: bool) -> Run {
+    let source = std::fs::read_to_string(run.root.join(path));
     let mut host = ScriptVmHost::new(
-        Runtime { run, deferred: 0, apps: Vec::new(), hosted: Vec::new(), images: Vec::new(), group: dir.to_string(), step: None, suppressed: false, fatal: false, warning: String::new(), held_pids: Vec::new() },
+        Runtime { run, deferred: 0, apps: Vec::new(), hosted: Vec::new(), images: Vec::new(), group: dir.to_string(), step: None, suppressed: false, fatal: false, warning: String::new(), held_pids: Vec::new(), dry },
         (),
     );
     match source {
         Err(e) => host.host.run.fail(dir, &format!("{path}: {e}")),
         Ok(code) => {
             let mut vm = ScriptVm { host: host.host_context(), bx: Box::new(ScriptVmBase::new()) };
-            register(&mut vm, target.as_ref());
+            register(&mut vm, target);
             vm.capture_errors();
             let answer = vm.with_instruction_limit(5_000_000, |vm| vm.eval(ScriptMod::new("", "", path, 0, 0, &code, &[])));
             let errors = vm.take_errors();
@@ -1704,8 +1745,7 @@ pub fn run(root: PathBuf, path: &str, dir: &str, target: Option<Target>) -> i32 
             Err(e) => r.run.end(stage, "failed", &e),
         }
     }
-    let what = format!("smoke {dir}");
-    host.host.run.finish(&what)
+    host.host.run
 }
 
 #[cfg(test)]
@@ -1776,7 +1816,7 @@ mod tests {
         let run_pid = child.child.id();
         let app = AppHandle { child, run_pid, remote: None, interrupted: false, closed: false, name: case.into(), started_at: 0, report: dir.join("report"), parked: Arc::default(), left: Arc::default(), script_errors: Some("a test".into()), data: dir.join("data") };
         let run = Run::new(dir.clone(), dir.clone());
-        let mut runtime = Runtime { run, deferred: 0, apps: vec![app], hosted: Vec::new(), images: Vec::new(), group: case.into(), step: None, suppressed: false, fatal: false, warning: String::new(), held_pids: Vec::new() };
+        let mut runtime = Runtime { run, deferred: 0, apps: vec![app], hosted: Vec::new(), images: Vec::new(), group: case.into(), step: None, suppressed: false, fatal: false, warning: String::new(), held_pids: Vec::new(), dry: false };
         let result = runtime.quit_within(0, Duration::ZERO, Duration::from_millis(500), tree_gone);
         let _ = std::fs::remove_dir_all(&dir);
         result
@@ -1842,7 +1882,11 @@ mod tests {
         assert_eq!(parse_startup("makepad-remote: pid 7 app calc socket /h/t/L1/makepad-remote-7.sock (makepad inspect 7 help)"), Some((7, "/h/t/L1/makepad-remote-7.sock".to_string())));
         assert!(log_has("x\nterminal client 4 first frame\n", "terminal client * first frame"));
         assert!(!log_has("terminal client 4\n", "terminal client * first frame"));
-        assert_eq!(end_seq("{\"end\":\"snap\",\"ms\":3,\"user_seq\":12}"), Some(12));
+        assert_eq!(end_seq("{\"end\":\"snap\",\"ms\":3,\"user_seq\":12,\"user_seq_start\":11}"), Some(12));
+        assert_eq!(end_seq("{\"end\":\"snap\",\"ms\":3,\"user_seq_start\":11}"), None);
+        assert_eq!(end_seq("{\"err\":\"x\"}"), None);
+        assert!(character_key('\u{e9}').is_err());
+        assert_eq!(character_key('A').unwrap(), ("KeyA".into(), true));
     }
 
     #[cfg(unix)]
@@ -1913,6 +1957,56 @@ mod tests {
             assert!(*key == "APPDATA" || gate.contains(&format!("{key}=")), "{key}: land_gate.sh's presents get it too");
         }
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_input_command_is_never_asked_twice_a_grab_is() {
+        for command in [&["key", "k=down", "c=KeyB", "wait=1"][..], &["mouse", "k=click", "x=1", "y=2"], &["text", "t=browser"], &["click", "x=1", "y=2"], &["drop", "path=/a", "x=1", "y=1"]] {
+            assert!(applies_input(&argv(command)), "{command:?}");
+        }
+        for command in [&["grab"][..], &["gseq", "n=8"], &["log", "n=10"], &["gq"], &["quit"], &["activity"], &["ui", "find", "q=path=x"]] {
+            assert!(!applies_input(&argv(command)), "{command:?}");
+        }
+        assert_eq!(key_args("down", "KeyA", &["shift"]), ["key", "k=down", "c=KeyA", "shift=1", "wait=1"]);
+    }
+
+    #[test]
+    fn the_log_answer_keeps_errors_and_launch_lines() {
+        let value = json::parse_depth(br#"{"n":7,"pool":"not a log line","l":["[E] shader failed","wm: launched terminal as client 2"]}"#, 32).unwrap();
+        let mut lines = Vec::new();
+        collect_log(&value, &mut lines);
+        assert_eq!(lines, ["[E] shader failed", "wm: launched terminal as client 2"]);
+    }
+
+    /// Every script on the real VM with nothing outside it happening: all it calls exists and takes
+    /// what it is given, and its steps are all there.
+    #[test]
+    fn the_scripts_run_on_the_real_vm_without_io() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap();
+        let mut scripts = vec![("tools/ci_leg/default.ci.splash".to_string(), 3), ("apps/wm/ci.splash".to_string(), 7)];
+        let mut apps: Vec<String> = std::fs::read_dir(root.join("apps")).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|app| app != "wm" && root.join("apps").join(app).join("ci.splash").is_file()).collect();
+        apps.sort();
+        assert!(apps.len() >= 20, "the app scripts are missing: {apps:?}");
+        // the default shape: check, launch, comes up. The terminal also builds the pty helper it
+        // starts its shell through; Desk Host is a windowless service, the AI Hub and devhub tray
+        // apps open no window at start; the browser host only builds.
+        scripts.extend(apps.into_iter().map(|app| {
+            let steps = match app.as_str() {
+                "terminal" => 4,
+                "browser_host" => 2,
+                "deskhost" | "aihub" | "devhub" => 1,
+                _ => 3,
+            };
+            (format!("apps/{app}/ci.splash"), steps)
+        }));
+        let target = Target { package: "test".into(), binary: "test".into(), cwd: ".".into() };
+        let out = std::env::temp_dir().join(format!("ci-leg-contract-{}", std::process::id()));
+        for (path, count) in scripts {
+            let run = execute(Run::new(root.clone(), out.clone()), &path, "contract", Some(&target), true);
+            assert!(!run.failed, "{path}: {:?}", run.steps);
+            assert_eq!(run.steps.len(), count, "{path}: {:?}", run.steps);
+        }
+        let _ = std::fs::remove_dir_all(&out);
     }
 
     #[test]

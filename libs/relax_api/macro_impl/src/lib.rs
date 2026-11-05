@@ -408,6 +408,16 @@ fn key_code(o: &Owner, name: &str) -> String {
 const CFG: &str = "#[cfg(feature = \"host-shims\")]";
 const SECTION: &str = "#[used] #[cfg_attr(target_vendor = \"apple\", link_section = \"__DATA,__relax_api\")] #[cfg_attr(all(not(target_vendor = \"apple\"), not(windows)), link_section = \"relax_api\")] #[cfg_attr(windows, link_section = \".relaxapi$m\")]";
 
+/// The wrapper's first statement: whose heap the op allocates in. The objects of the script crates
+/// are the program's: its end takes them, whatever state it died in. The other crates hold what
+/// outlives a program or keep nothing of one, and free what a program held at their own end.
+fn op_phase() -> &'static str {
+    match std::env::var("CARGO_CRATE_NAME").as_deref() {
+        Ok("makepad_script" | "makepad_script_std" | "makepad_tween_script" | "relax_provided_fixture") => "let _phase = ::makepad_relax_api::run_op();",
+        _ => "let _phase = ::makepad_relax_api::host_op();",
+    }
+}
+
 /// The wrapper and the entry of one op.
 fn op_code(o: &Owner, s: &Sig) -> String {
     let path = call_path(o, &s.name);
@@ -464,8 +474,9 @@ fn op_code(o: &Owner, s: &Sig) -> String {
         fnptr_params.join(", "),
         if ret.is_empty() { String::new() } else { format!(" -> {}", text_static(&ret)) }
     );
+    let phase = op_phase();
     format!(
-        "{CFG} #[doc(hidden)] #[allow(non_snake_case, unused_unsafe, clippy::all)] unsafe extern \"C\" fn {w}(a: *const *mut u8, r: *mut u8) -> u32 {{ let _ = r; {body} }}
+        "{CFG} #[doc(hidden)] #[allow(non_snake_case, unused_unsafe, clippy::all)] unsafe extern \"C\" fn {w}(a: *const *mut u8, r: *mut u8) -> u32 {{ let _ = r; {phase} {body} }}
 {CFG} {SECTION} #[doc(hidden)] #[allow(non_upper_case_globals)] static {w}_E: ::makepad_relax_api::Entry = ::makepad_relax_api::Entry {{
   kind: ::makepad_relax_api::OP, module: module_path!(),
   key: {key},
@@ -733,8 +744,9 @@ fn expand_type(toks: &[TokenTree], args: &[String]) -> Result<(TokenStream, Stri
         if args.iter().any(|a| a == "default") {
             // a derived Default: an ordinary op (JIT code may not build the handle itself)
             let h = fnv(&format!("{name} default"));
+            let phase = op_phase();
             extra.push_str(&format!(
-                "\n{CFG} #[doc(hidden)] #[allow(non_snake_case, unused_unsafe)] unsafe extern \"C\" fn __relax_api_h{h:016x}(a: *const *mut u8, r: *mut u8) -> u32 {{ let _ = a; match ::std::panic::catch_unwind(<{ty} as ::core::default::Default>::default) {{ Ok(v) => {{ ::core::ptr::write(r as *mut {ty}, v); 0 }} Err(p) => ::makepad_relax_api::caught(p) }} }}
+                "\n{CFG} #[doc(hidden)] #[allow(non_snake_case, unused_unsafe)] unsafe extern \"C\" fn __relax_api_h{h:016x}(a: *const *mut u8, r: *mut u8) -> u32 {{ let _ = a; {phase} match ::std::panic::catch_unwind(<{ty} as ::core::default::Default>::default) {{ Ok(v) => {{ ::core::ptr::write(r as *mut {ty}, v); 0 }} Err(p) => ::makepad_relax_api::caught(p) }} }}
 {CFG} {SECTION} #[doc(hidden)] #[allow(non_upper_case_globals)] static __relax_api_h{h:016x}_E: ::makepad_relax_api::Entry = ::makepad_relax_api::Entry {{
   kind: ::makepad_relax_api::OP, module: module_path!(),
   key: {{ fn k() -> &'static str {{ ::core::any::type_name_of_val(&<{ty} as ::core::default::Default>::default) }} k }},
@@ -745,8 +757,9 @@ fn expand_type(toks: &[TokenTree], args: &[String]) -> Result<(TokenStream, Stri
         // the handle's trait ops, under the keys Relax's bridges look up
         let mut helper = |tag: &str, trait_key: &str, call: String| {
             let h = fnv(&format!("{name} {tag}"));
+            let phase = op_phase();
             extra.push_str(&format!(
-                "\n{CFG} #[doc(hidden)] #[allow(non_snake_case, unused_unsafe)] unsafe extern \"C\" fn __relax_api_h{h:016x}(a: *const *mut u8, r: *mut u8) -> u32 {{ match ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(|| unsafe {{ {call} }})) {{ Ok(v) => {{ ::core::ptr::write(r as *mut _, v); 0 }} Err(p) => ::makepad_relax_api::caught(p) }} }}
+                "\n{CFG} #[doc(hidden)] #[allow(non_snake_case, unused_unsafe)] unsafe extern \"C\" fn __relax_api_h{h:016x}(a: *const *mut u8, r: *mut u8) -> u32 {{ {phase} match ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(|| unsafe {{ {call} }})) {{ Ok(v) => {{ ::core::ptr::write(r as *mut _, v); 0 }} Err(p) => ::makepad_relax_api::caught(p) }} }}
 {CFG} {SECTION} #[doc(hidden)] #[allow(non_upper_case_globals)] static __relax_api_h{h:016x}_E: ::makepad_relax_api::Entry = ::makepad_relax_api::Entry {{
   kind: ::makepad_relax_api::OP, module: module_path!(),
   key: {{ fn k() -> &'static str {{ concat!(\"<\", module_path!(), \"::{name} as {trait_key}\") }} k }}, sig: {none},

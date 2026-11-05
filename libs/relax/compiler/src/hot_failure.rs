@@ -8,23 +8,31 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 #[derive(Clone)]
 struct Attempt { id: String, units: Arc<Vec<SourceUnit>>, logs: Arc<Vec<String>> }
+#[derive(Clone)]
 struct Recovery { attempt: Attempt, failure: String }
 #[derive(Default)]
 struct State {
     current: Option<Attempt>,
     groups: BTreeMap<u32, Attempt>,
     recovery: Option<Recovery>,
+    /// The recovery this run's restore completed (`restored`), for the watcher to report.
+    restarted: Option<Recovery>,
+    /// The same recovery for the rest of the run: the run is its restart's replacement, and a
+    /// JIT-internal error of it is the restart's (`replacement_jit_failed`).
+    replaced: Option<Recovery>,
+    /// That error, for the watcher to report (the first one; `replacement_reported` once it did).
+    replacement_error: Option<String>,
+    replacement_reported: bool,
     pending: VecDeque<Record>,
     terminal: Option<String>,
 }
 static STATE: std::sync::OnceLock<Mutex<State>> = std::sync::OnceLock::new();
-static READY: AtomicBool = AtomicBool::new(false);
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 static REPORTING: AtomicBool = AtomicBool::new(false);
 static ERROR: AtomicBool = AtomicBool::new(false);
 static RESTART_ERROR: Mutex<Option<String>> = Mutex::new(None);
 static WRITER: Mutex<()> = Mutex::new(());
-// Only worker callers pump. UI callbacks publish through READY/RESTART_ERROR.
+// Only worker callers pump. Other threads publish through `restarted`/RESTART_ERROR.
 static PUMP: Mutex<()> = Mutex::new(());
 static REPLACEMENT: AtomicBool = AtomicBool::new(false);
 
@@ -135,11 +143,12 @@ fn jit_error(record: &str, reason: &str) {
 /// run's summary counts them all).
 const CHECKER_PANIC_RECORDS: u64 = 16;
 
+static RECORDED: AtomicU64 = AtomicU64::new(0);
+
 /// A panic in a check of `body` (borrowck::lazy's sink, typeck_bg): its own record, since no hot load
 /// failed and the app runs on. This ledger is where the next one is seen. Runs on the checking
 /// thread: a write that fails stays pending for the next flush, and nothing here waits for it.
 pub fn checker_panic(body: &str, message: &str) {
-    static RECORDED: AtomicU64 = AtomicU64::new(0);
     if RECORDED.fetch_add(1, Ordering::Relaxed) >= CHECKER_PANIC_RECORDS { return; }
     let _kept = crate::zone_alloc::kept();
     let r = record(&empty_attempt(), Outcome::CheckerPanic, format!("checker panic in `{body}`: {message}"), String::new(), Vec::new());
@@ -152,58 +161,118 @@ pub fn recovering() -> bool { ACTIVE.load(Ordering::Acquire) }
 pub(crate) fn edit_ran() -> bool { state().current.is_some() }
 pub(crate) fn enable() { REPORTING.store(true, Ordering::Release); }
 pub fn has_error() -> bool { ERROR.load(Ordering::Acquire) }
-pub(crate) fn replacement_loaded() {
-    if recovering() { REPLACEMENT.store(true, Ordering::Release); }
-}
+/// Whether this run is a restart's replacement whose restore has not completed (`restored`).
 pub(crate) fn replacement_running() -> bool { REPLACEMENT.load(Ordering::Acquire) }
 
-/// Called by the native app at its first present, or by a terminal harness once
-/// its replacement has actually run. The watcher does the reporting.
-pub fn ready() {
-    if recovering() && replacement_running() { READY.store(true, Ordering::Release); crate::reload::watch_kick(); }
+/// A restarted run's restore completed: its program is loaded, the state the run before it left is
+/// its to take, and its main is called next (run.rs for a program the run calls itself, domain.rs
+/// for a hosted app's domain). The warm restart completed here, for a terminal program and a window
+/// app alike, whether or not it ever presents: the watcher, which reports the restart, takes the next
+/// edit. A failure of the restart before this (`restart_failed`) is the restart's, and its own record;
+/// from here on a panic of the program's own code is the program's, and a JIT-internal error is
+/// still the JIT's (`replacement_jit_failed`).
+pub(crate) fn restored() {
+    if !replacement_running() { return; }
+    let _kept = crate::zone_alloc::kept();
+    let error = RESTART_ERROR.lock().unwrap_or_else(|e| e.into_inner());
+    if error.is_none() {
+        // under the error's lock (restart_failed's) and the state's: no failure lands between the
+        // recovery's move and the flags
+        let mut s = state();
+        s.replaced = s.recovery.clone();
+        s.restarted = s.recovery.take();
+        REPLACEMENT.store(false, Ordering::Release);
+        ACTIVE.store(false, Ordering::Release);
+    }
+    drop(error);
+    crate::reload::watch_kick();
 }
 
-/// Loader/host completion; the message is copied under a short metadata lock.
-pub fn restart_failed(why: &str) {
-    if recovering() {
-        let _kept = crate::zone_alloc::kept();
-        let message = why.to_string();
-        let old = RESTART_ERROR.lock().unwrap_or_else(|e| e.into_inner()).replace(message);
-        drop(old);
-        crate::reload::watch_kick();
-    }
+/// Loader/host completion; the message is copied under a short metadata lock. False when no restart
+/// is recovering, its restore completed meanwhile included: the failure is then not the restart's
+/// (a panic of the program's own, or the replacement's JIT error: `replacement_jit_failed`).
+pub fn restart_failed(why: &str) -> bool {
+    if !recovering() { return false; }
+    let _kept = crate::zone_alloc::kept();
+    let message = why.to_string();
+    let mut error = RESTART_ERROR.lock().unwrap_or_else(|e| e.into_inner());
+    let taken = recovering();
+    let old = if taken { error.replace(message) } else { Some(message) };
+    drop(error);
+    drop(old);
+    if taken { crate::reload::watch_kick(); }
+    taken
+}
+
+/// An internal compiler error at a call of this run past its restore that no restart recovers (no
+/// edit ran in it, jit.rs ice_at_call): the JIT's failure, never the program's -- its warm restart
+/// did not get past the JIT. The watcher reports it after the restart's own record: the restart's
+/// `restart_failed` record, the run's JIT error verdict line and the `jiterror` event (the flight
+/// recorder holds it). True when this run is a restart's replacement whose JIT failure is
+/// this one or one reported before it (the caller parks no panic for it); false for any other run.
+pub(crate) fn replacement_jit_failed(why: &str) -> bool {
+    let _kept = crate::zone_alloc::kept();
+    let mut s = state();
+    if s.replaced.is_none() { return false; }
+    if s.replacement_error.is_none() && !s.replacement_reported { s.replacement_error = Some(why.to_string()); }
+    drop(s);
+    crate::reload::watch_kick();
+    true
+}
+
+/// Whether this run is a restart's replacement (its restore read a recovery), restored or not.
+pub(crate) fn replacement() -> bool { replacement_running() || state().replaced.is_some() }
+
+/// The restart of `recovery` failed for `reason`: its record, the run's JIT error verdict (its exit
+/// code and line) and devhub's `jiterror` event.
+fn report_restart_failed(recovery: Recovery, reason: String) {
+    let r = record(&recovery.attempt, Outcome::RestartFailed, reason.clone(), recovery.failure, vec![reason.clone()]);
+    let record_id = r.id.clone();
+    // the run's verdict before its record is out: an exit once the record is seen carries it
+    state().terminal = Some(record_id.clone());
+    state().pending.push_back(r);
+    durable();
+    eprintln!("{}", Verdict::JitError { record: record_id.clone() }.line());
+    ERROR.store(true, Ordering::Release);
+    jit_error(&record_id, &reason);
 }
 
 pub fn pump() {
     let _pump = PUMP.lock().unwrap_or_else(|e| e.into_inner());
     let _kept = crate::zone_alloc::kept();
     let error = RESTART_ERROR.lock().unwrap_or_else(|e| e.into_inner()).take();
-    let ready = READY.swap(false, Ordering::AcqRel);
-    if error.is_some() || ready {
+    let restarted = state().restarted.take();
+    if let Some(recovery) = restarted {
+        let reason = "warm restart completed".to_string();
+        let r = record(&recovery.attempt, Outcome::Restarted, reason.clone(), recovery.failure, vec![reason]);
+        let record_id = r.id.clone();
+        let load_id = r.load.clone();
+        state().pending.push_back(r);
+        durable();
+        crate::inspect::events::emit("patchrestarted", &record_id,
+            &format!("\"record\":{},\"load\":{}", crate::inspect::json_str(&record_id), crate::inspect::json_str(&load_id)));
+    }
+    if let Some(reason) = error {
         let recovery = state().recovery.take();
         if let Some(recovery) = recovery {
-            let outcome = if error.is_some() { Outcome::RestartFailed } else { Outcome::Restarted };
-            let reason = error.unwrap_or_else(|| "warm restart completed".into());
-            let r = record(&recovery.attempt, outcome, reason.clone(), recovery.failure, vec![reason.clone()]);
-            let record_id = r.id.clone();
-            let load_id = r.load.clone();
-            state().pending.push_back(r);
-            durable();
-            if outcome == Outcome::RestartFailed {
-                let verdict = Verdict::JitError { record: record_id.clone() };
-                eprintln!("{}", verdict.line());
-                state().terminal = Some(record_id.clone());
-                ERROR.store(true, Ordering::Release);
-            }
-            if outcome == Outcome::RestartFailed {
-                jit_error(&record_id, &reason);
-            } else {
-                crate::inspect::events::emit("patchrestarted", &record_id,
-                    &format!("\"record\":{},\"load\":{}", crate::inspect::json_str(&record_id), crate::inspect::json_str(&load_id)));
-            }
+            report_restart_failed(recovery, reason);
         }
         ACTIVE.store(false, Ordering::Release);
         REPLACEMENT.store(false, Ordering::Release);
+    }
+    // (after the restart's own record: the restart completed, then its run met the JIT's error)
+    let failed = {
+        let mut s = state();
+        match s.replacement_error.take() {
+            Some(reason) => {
+                s.replacement_reported = true;
+                s.replaced.clone().map(|recovery| (recovery, reason))
+            }
+            None => None,
+        }
+    };
+    if let Some((recovery, reason)) = failed {
+        report_restart_failed(recovery, reason);
     }
     flush();
 }
@@ -237,19 +306,17 @@ pub fn verdict(code: i32) -> Verdict {
     }
 }
 
-/// An existing process restart carries the recovery identity and changed units
-/// alongside the app's snapshot. It does not manufacture another hot load.
-#[cfg(any(unix, windows))]
-pub(crate) fn prepare_exec(cmd: &mut std::process::Command) -> Result<(), String> {
+/// A restart carries the recovery identity and changed units to the next run alongside the app's
+/// state, in a file it reads (`restore`). It does not manufacture another hot load.
+pub(crate) fn hand_over() -> Result<Option<std::path::PathBuf>, String> {
     let _kept = crate::zone_alloc::kept();
     let recovery = state().recovery.as_ref().map(|r| (r.attempt.clone(), r.failure.clone()));
-    let Some((attempt, failure)) = recovery else { return Ok(()) };
+    let Some((attempt, failure)) = recovery else { return Ok(None) };
     let mut data = record(&attempt, Outcome::Refused, String::new(), failure, Vec::new());
     data.units = (*attempt.units).clone();
     let path = makepad_remote::hot::home().join("hot-restart").join(format!("{}.json", data.id));
     std::fs::create_dir_all(path.parent().unwrap()).and_then(|_| std::fs::write(&path, data.to_json())).map_err(|e| e.to_string())?;
-    cmd.env("MAKEPAD_JIT_RECOVERY", path);
-    Ok(())
+    Ok(Some(path))
 }
 
 /// Windows: the next run never started, and the run that asked for it has ended, so its parent
@@ -283,4 +350,11 @@ pub(crate) fn restore() {
         }
         None => eprintln!("makepad hot: cannot restore the pending recovery record"),
     }
+}
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    use relax_session::reset_static as reset;
+    reset(&STATE, std::sync::OnceLock::new());
+    reset(&RECORDED, AtomicU64::new(0));
 }

@@ -219,3 +219,9 @@ pub fn late_inputs() -> Vec<(String, u8, String, u128)> {
     v.sort();
     v
 }
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    use crate::reset_static as reset;
+    reset(&LATE, crate::sync::Mutex::new(None));
+}

@@ -1173,3 +1173,9 @@ pub fn class_of(k: &SymKind) -> relax_backend::rir::SymClass {
         SymKind::Site(_) | SymKind::ThreadLocal(_) => SymClass::Imm,
     }
 }
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    use relax_session::reset_static as reset;
+    reset(&UNIT_PTR, AtomicPtr::new(std::ptr::null_mut()));
+}

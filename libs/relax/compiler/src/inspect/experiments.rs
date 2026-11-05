@@ -98,7 +98,7 @@ fn install(up: *mut crate::jit::Unit, id: u32, v: &Variant, round: u32) -> Resul
             let (tx, rx) = std::sync::mpsc::channel::<bool>();
             let spawned = {
                 let _k = crate::zone_alloc::kept();
-                std::thread::Builder::new().name(format!("run-inspect-ab{}", round)).spawn(move || {
+                crate::run_threads::spawn(&format!("run-inspect-ab{}", round), move || {
                     super::heap::exclude_this_thread();
                     let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe { crate::jit::compile_tier1_inspect(upv as *mut crate::jit::Unit, id, None) })).unwrap_or(false);
                     let _ = tx.send(ok);
@@ -286,7 +286,7 @@ pub fn cmd_ab(req: &Req, out: &mut Out) {
                     return out.err(&format!("per=call: the timed count build failed: {}", e));
                 }
             };
-            std::thread::sleep(std::time::Duration::from_millis(settle));
+            crate::run_threads::sleep(std::time::Duration::from_millis(settle));
             let (h0, n0) = super::instrument::site_totals(&sites);
             let t0 = std::time::Instant::now();
             let gone = out.gone();
@@ -298,7 +298,7 @@ pub fn cmd_ab(req: &Req, out: &mut Out) {
             let calls = h1.saturating_sub(h0);
             (if calls > 0 { n1.saturating_sub(n0) as f64 / calls as f64 } else { 0.0 }, t0.elapsed().as_secs_f64())
         } else {
-            std::thread::sleep(std::time::Duration::from_millis(settle));
+            crate::run_threads::sleep(std::time::Duration::from_millis(settle));
             measure(lo, hi, secs, hz, ev, self_only, per_frame, out)
         };
         if took < secs * 0.8 {
@@ -385,4 +385,10 @@ mod tests {
         let q = super::perm_p(&[10.0, 9.0, 10.0, 9.0], &[9.5, 9.6, 9.4, 9.5]);
         assert!(q > 0.3, "{}", q);
     }
+}
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    use relax_session::reset_static as reset;
+    reset(&OPTS, relax_session::sync::Mutex::new(None));
 }

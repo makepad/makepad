@@ -1,5 +1,5 @@
 #!/bin/bash
-# land_gate.sh <fast <base> <cbase>|hot <base> <cbase>|full|full-a|full-b|stage>: checks under a devhub lease.
+# land_gate.sh <fast <base> <cbase>|hot <base> <cbase>|tests <base> <cbase>|checks <base> <cbase>|full|full-a|full-b|full-t|stage>: checks under a devhub lease.
 # The fast and hot buckets check a landed work/main tip against their previous tip. They never block landing.
 #   full  : build (0 warnings), rustc-check, relax-compiler libtest build, x64 relax tests, tier fuzzer (fixed
 #           seeds block, random batch never), makepad check of the 7 gate packages + Stage, headless Calc+Stage
@@ -7,15 +7,20 @@
 #           new item in an app file stays warm), warm_after_hal (a HAL body edit keeps the stored builds), inspect_cold
 #           (inspect during a cold start never stalls the app), relaunch (in-place relaunches keep the app alive,
 #           show new first frames with the window kept and state handed over, and have no faults), diff_fast, zone leg
-#   full-a/full-b: the two halves of full (STEPS_A: cargo legs, checks, presents, warm_app_edit; STEPS_B: the other
-#           JIT runtime legs), for two nodes at once; together exactly the steps of full
+#   full-a/full-b/full-t: full in three (STEPS_A: cargo legs, checks, presents; STEPS_B: the other JIT runtime legs;
+#           STEPS_T: the legs whose verdicts are times), A and B on two shared nodes at once, T on a timed lease's
+#           box; together exactly the steps of full
 #   fast  : the JIT binary of the landed tree (kept or built here, 0 warnings), devhub's binary when changed,
-#           checks and warm presents of the affected set across the bucket's landings, plus affected JIT suites.
+#           checks and warm presents of the affected set across the bucket's landings, plus affected JIT suites,
+#           and one cargo check of the test targets the landings reach (both repos; step_testcheck).
 #           GATE_PROVEN skips units whose inputs already passed. GATE_RETRY (fast and hot; units joined by ;) names
 #           what failed earlier and has not passed since: gated whatever the diff reaches, until it passes.
 #   hot   : boot the directly touched apps and always Calculator (one small drawing app: a broken draw path
 #           fails every app) on a Linux node's warm JIT, then settle for 3 s.
 #   stage : build, makepad check makepad-stage, headless Stage present (commercial-only branches)
+#   tests : the fast bucket's test-target check alone (step_testcheck), in any cargo workspace (merge_break.sh)
+#   checks: the fast bucket's JIT checks alone (affected.py's check lines, step_qcheck) with the tree's own JIT, in
+#           any cargo workspace holding the gate's packages (jit_break.sh)
 # Every mode runs in place: a devhub rev lease runs in the node's ONE tree (its synced checkout, moved to the gated
 # commits: only changed files get new mtimes), with the node's one target, JIT binary and JIT cache, so it is warm.
 # Prints "NODEGATE-OK <summary>" or "NODEGATE-FAIL: <steps>"; exit 0 / 1. Every step is a function named step_*;
@@ -26,12 +31,13 @@ proven() { case ";${GATE_PROVEN:-};" in *";$1;"*) return 0;; *) return 1;; esac;
 unit_line() { echo "GATEUNIT $1 $2"; }
 unit_of() { echo "$1 $2${4:+ }${*:4}"; }
 T=${CARGO_TARGET_DIR:-$PWD/target}
+here=$(cd "$(dirname "$0")" && pwd)
 # the node's one JIT through cargo (rebuilt when its sources changed, a ~0.2 s no-op otherwise)
 B="cargo run --profile host -q --manifest-path $PWD/Cargo.toml -p makepad-run --bin makepad --"
 log=$(mktemp -d "${TMPDIR:-/tmp}/landgate.XXXXXX") || exit 2
 # tmpfs /tmp on the nodes: orphaned gate dirs filled it and crashed a hosted app. A failed gate's step logs
 # (proofs, presents, depcheck) go to the lease's keep dir first, which its holder copies to the master
-KEEP_LOGS=$PWD/tools/run/fixture/keep_logs.sh
+KEEP_LOGS=$here/keep_logs.sh
 trap '[ -z "$fail" ] || bash "$KEEP_LOGS" "$log"; rm -rf -- "$log"' EXIT
 fail=""; sum=""
 # The master classifies before acquiring either lease; the shell only carries its verdict.
@@ -76,6 +82,8 @@ step_checks() {
   for p in makepad-example-counter makepad-app-calculator makepad-platform makepad-draw makepad-widgets makepad-widgets-core; do check_pkg $p $p .; done
   step_check_stage
   cr=$(bash tools/run/fixture/check_reject.sh 2>&1); echo "$cr"; case "$cr" in *"check_reject: ok"*) ;; *) fail="$fail check-reject";; esac
+  mb=$(bash tools/run/fixture/merge_break.sh 2>&1); echo "$mb"; case "$mb" in *"merge_break: ok"*) ;; *) fail="$fail merge-break";; esac
+  jb=$(bash tools/run/fixture/jit_break.sh 2>&1); echo "$jb"; case "$jb" in *"jit_break: ok"*) ;; *) fail="$fail jit-break";; esac
   lt=$(bash tools/run/fixture/lazy_typeck.sh 2>&1); echo "$lt"; case "$lt" in *"lazy_typeck: ok"*) ;; *) fail="$fail lazy-typeck";; esac
   ag=$(bash tools/run/fixture/agree.sh 2>&1); echo "$ag"; case "$ag" in *"agree: ok"*) ;; *) fail="$fail agree";; esac
   # (the checks above built this tree's JIT)
@@ -209,34 +217,44 @@ step_zone() { # THE memory leg: settle_stress.sh (MEMSAFE: settles + settle rebu
     echo "zone_swap: $zs"; echo "$zs" | grep -q FAIL && fail="$fail zone_swap"
   fi
 }
+said() { # said <ok prefix> <cut> <lines>: a fixture's verdict lines, cut to <cut> characters when its last line passed;
+  # whole when it failed (its numbers are the why: a FAIL past 600 characters lost them, 11-05), and the fixture's
+  # own logs ("logs in <dir>") kept beside the lease's (keep_logs.sh). Returns 1 when it failed.
+  local d
+  if [ "$(echo "$3" | tail -1 | cut -c1-${#1})" = "$1" ]; then echo "$3" | cut -c1-"$2"; return 0; fi
+  echo "$3"
+  d=$(echo "$3" | sed -n 's/.*logs in \([^ );]*\).*/\1/p' | tail -1)
+  [ -n "$d" ] && bash "$KEEP_LOGS" "$d"
+  return 1
+}
 step_warm_app_edit() { # JITCOLD2: a new item in an app file recompiles what names it, not the app (Sandbox: cold,
   # warm, then a new pub fn appended to one of its files; at most 480 first compiles, no JIT spinner).
   # MAX 480 (the script's default 400): the warm first-compile count grew with the app (observed
   # 400-405 across unrelated branches on 2026-10-30)
   [ -d apps/commercial/sandbox ] || { echo "warm_after_app_edit: skipped (no apps/commercial)"; return 0; }
-  wa=$(WAIT=300 MAX=480 STEPS="item graph" tools/run/fixture/warm_after_app_edit.sh 2>&1 | tail -1 | cut -c1-600)
-  echo "$wa"; echo "$wa" | grep -q "^warm_after_app_edit: OK" || fail="$fail warm_after_app_edit"
+  wa=$(WAIT=300 MAX=480 STEPS="item graph" tools/run/fixture/warm_after_app_edit.sh 2>&1 | tail -1)
+  said "warm_after_app_edit: OK" 600 "$wa" || fail="$fail warm_after_app_edit"
   sum="$sum warm_app_edit:$(echo "$wa" | sed -n 's/.*\[item\][^]]*compiled \([0-9]*\) first.*/\1/p')"
 }
 step_warm_zero() { # JITLOOP-B: after one normal session the next Calculator launch shows no JIT spinner and no UI
   # block >= 100 ms (first compiles of never-run code are reported, not failed); Sandbox + Play stays a lane measurement
-  wz=$(WAIT=200 tools/run/fixture/warm_zero.sh 2>&1 | tail -1 | cut -c1-400)
-  echo "$wz"; echo "$wz" | grep -q "^warm_zero: OK" || fail="$fail warm_zero"
+  wz=$(WAIT=200 tools/run/fixture/warm_zero.sh 2>&1 | tail -1)
+  said "warm_zero: OK" 400 "$wz" || fail="$fail warm_zero"
   sum="$sum warm_zero:$(echo "$wz" | sed -n 's/.*warm: spinner \([0-9]*\), UI blocked max \([0-9]*\) ms.*/spinner\1.max\2ms/p')"
 }
 step_inspect_cold() { # JITDEADLOCK: inspect static/eval/locals in a loop during a cold Calculator start answer or bail,
   # and the app still presents with no long UI block (an inspect `static` during a cold start froze the app)
-  ic=$(CLIENTS=1 ROUNDS=1 WAIT=150 tools/run/fixture/inspect_cold.sh 2>&1 | tail -3 | cut -c1-400)
-  echo "$ic"; echo "$ic" | tail -1 | grep -q "^inspect_cold: OK" || fail="$fail inspect_cold"
+  ic=$(CLIENTS=1 ROUNDS=1 WAIT=150 tools/run/fixture/inspect_cold.sh 2>&1 | tail -3)
+  said "inspect_cold: OK" 400 "$ic" || fail="$fail inspect_cold"
 }
 step_warm_hal() { # JITCOLD: a body-only HAL edit (a provided crate: the loader rebuilds) keeps the stored builds
-  wh=$(WAIT=200 BUILD="cargo build --profile host -p makepad-run -p makepad-remote --bin makepad --bin makepad-launcher --bin makepad-remote -j8" tools/run/fixture/warm_after_hal.sh 2>&1 | tail -1 | cut -c1-400)
-  echo "$wh"; echo "$wh" | grep -q "^warm_after_hal: OK" || fail="$fail warm_after_hal"
+  wh=$(WAIT=200 BUILD="cargo build --profile host -p makepad-run -p makepad-remote --bin makepad --bin makepad-launcher --bin makepad-remote -j8" tools/run/fixture/warm_after_hal.sh 2>&1 | tail -1)
+  said "warm_after_hal: OK" 400 "$wh" || fail="$fail warm_after_hal"
 }
 step_relaunch() { # JITRELAUNCH: `session relaunch` 5x in place: the app stays alive and shows a new first frame
   # after every relaunch, with the window kept, state handed over, and no crash or fault line
-  rl=$(WAIT=200 tools/run/fixture/relaunch.sh 2>&1 | tail -1 | cut -c1-400)
-  echo "$rl"; echo "$rl" | grep -q "^relaunch: OK" || fail="$fail relaunch"
+  rl=$(WAIT=200 tools/run/fixture/relaunch.sh 2>&1 | tail -1)
+  said "relaunch: OK" 400 "$rl" || fail="$fail relaunch"
 }
 step_boundary() { # JITPROV: the smoke apps and the WM reach provided crates only through their ops (`makepad check --boundary
   # all`: every body a run of the app compiles, from its main; a provided crate's static or rustc-laid field read from
@@ -245,11 +263,17 @@ step_boundary() { # JITPROV: the smoke apps and the WM reach provided crates onl
   echo "$bd" | grep -E "^audit |^provided_sweep" | cut -c1-200
   echo "$bd" | grep -q "^provided_sweep: ok" || { fail="$fail boundary"; echo "$bd" | grep -A1 "^violation" | head -20 | cut -c1-300; }
 }
-# full-a + full-b = full; land-batch.sh runs the two halves on two pool nodes at once (each builds), balanced on the
-# measured step times (a pool box, 2026-10-30: A ~460 s, B ~370 s with the build; full in series ~930 s)
+# full-a + full-b + full-t = full; the jitlegs run A and B on pool boxes, each building, balanced on the measured step
+# times (a pool box, 2026-10-30: A ~460 s, B ~370 s with the build; full in series ~930 s; T took ~160 s of A's and
+# ~160 s of B's, 11-05)
 STEPS_FULL="step_x64_tests step_fuzz step_checks step_boundary step_present_calc step_present_stage step_warm_zero step_warm_hal step_warm_app_edit step_inspect_cold step_relaunch step_diff step_jit_suites step_zone"
-STEPS_A="step_x64_tests step_fuzz step_checks step_present_calc step_present_stage step_warm_app_edit"
-STEPS_B="step_boundary step_warm_zero step_warm_hal step_inspect_cold step_relaunch step_diff step_jit_suites step_zone"
+STEPS_A="step_x64_tests step_fuzz step_checks step_present_calc step_present_stage"
+STEPS_B="step_boundary step_diff step_jit_suites step_zone"
+# the verdicts that are times (a JIT spinner, first compiles in a frame, UI blocked ms, first frames): only a box of their
+# own says them. Beside 8 other leases (32-44 of a 32-core pool box's cores granted) full-a's warm_after_app_edit failed with every
+# session twice as slow, and passed 3 times on quiet boxes (11-05). The jitlegs `warm` leg runs them timed: a bench
+# box, exclusive.
+STEPS_T="step_warm_app_edit step_warm_zero step_warm_hal step_inspect_cold step_relaunch"
 timed() { # timed <step fn>: runs it and prints "STEP <name> <s> s [start-end]" (the gate's wall-time breakdown)
   t=$(date +%s); t0=$(date +%T); "$1"; r=$?; echo "STEP ${1#step_} $(( $(date +%s) - t )) s [$t0-$(date +%T)]"; return $r
 }
@@ -276,7 +300,7 @@ step_devhub() { # devhub's own binary when the bucket diff touches it (0 warning
 step_affected() {
   python3 -I tools/run/fixture/affected.py "$QBASE" "$QCBASE" > "$log/affected" 2> "$log/affected.err" || { fail="$fail affected"; tail -5 "$log/affected.err"; return 1; }
   sed -n 's/^gone //p' "$log/affected" | while read -r unit; do unit_line gone "$unit"; done
-  grep '^why' "$log/affected"; sum="$sum $(grep -c '^check' "$log/affected") checks $(grep -c '^present' "$log/affected") presents $(grep -c '^cargo' "$log/affected") cargo checks"
+  grep '^why' "$log/affected"; sum="$sum $(grep -c '^check' "$log/affected") checks $(grep -c '^present' "$log/affected") presents $(grep -c '^cargo' "$log/affected") cargo checks $(grep -c '^tests' "$log/affected") test checks"
   return 0
 }
 # fast: the affected apps' checks and presents all at once on this one warm box, on its one JIT cache; each in its
@@ -335,29 +359,49 @@ step_qcheck() {
   echo "qcheck: $(grep -c . "$log/checks") checks, at most $max at once (${avail:-?} GB available)"
   at_once qcheck_one "$log/checks" "$max"
 }
-# the other repo's crates that use a changed crate (affected.py `cargo` lines): one cargo check of them all, beside
-# the JIT steps on half the lease's cores, niced. Its release profile has its own build directory in the node's one
-# target: no wait on the JIT steps' cargo (host). A crate it never reached (one it uses failed first) has no verdict.
-step_depcheck() {
-  [ -s "$log/cargo" ] || return 0
-  local f out code unit own pkgs=()
-  while read -r -a f; do pkgs+=(-p "${f[1]}"); done < "$log/cargo"
-  out=$(CARGO_TARGET_DIR=$T nice -n 10 cargo check --release --message-format short -j $(( (${MAKEPAD_RUN_JOBS:-8} + 1) / 2 )) "${pkgs[@]}" 2>&1); code=$?
+# one cargo check of a lines file's packages (affected.py's `<word> <pkg> <dir>`), beside the JIT steps on half the
+# lease's cores, niced. Its release profile has its own build directory in the node's one target: no wait on the JIT
+# steps' cargo (host). A package fails when cargo could not compile it, or at `warnings` on a warning of its own
+# (short-format lines under its directory); one it never reached (one it uses failed first) has no verdict. At
+# `errors` a warning of its own is a `GATEUNIT warn` line, no failure.
+# cargo_units <lines file> <LABEL> <failing step word> <errors|warnings> [cargo check args]
+cargo_units() {
+  local list=$1 label=$2 word=$3 level=$4 f out code unit own named=0 pkgs=(); shift 4
+  while read -r -a f; do pkgs+=(-p "${f[1]}"); done < "$list"
+  out=$(CARGO_TARGET_DIR=$T nice -n 10 cargo check --release --message-format short -j $(( (${MAKEPAD_RUN_JOBS:-8} + 1) / 2 )) "$@" "${pkgs[@]}" 2>&1); code=$?
   while read -r -a f; do
     unit=$(unit_of "${f[@]}")
-    # its own diagnostics: short-format lines under its directory (warnings fail it too: 0 warnings)
     own=$(echo "$out" | grep -E "^${f[2]}/[^:]+:[0-9]+:[0-9]+: (error|warning)")
-    if [ -n "$own" ] || echo "$out" | grep -qF "could not compile \`${f[1]}\`"; then
-      echo "$own" | head -40; echo "${f[1]}: cargo check failed"; unit_line fail "$unit"; fail="$fail ${f[1]}"
-    elif [ "$code" = 0 ]; then unit_line ok "$unit"; fi
-  done < "$log/cargo"
-  if [ "$code" != 0 ] && ! echo "$fail" | grep -q .; then
-    echo "$out" | grep -E "^(error|warning)|: (error|warning)" | head -40; fail="$fail cargo-check"
+    if echo "$out" | grep -qF "could not compile \`${f[1]}\`" || { [ "$level" = warnings ] && [ -n "$own" ]; }; then
+      echo "$own" | head -40; echo "${f[1]}: cargo check failed"; unit_line fail "$unit"; fail="$fail ${f[1]}"; named=$((named + 1))
+    else
+      # at `errors`, its own warnings (each once: its lib and its test build both say it) before a warn line:
+      # the bucket names who brought a new one, and the unit stays green
+      if [ -n "$own" ]; then echo "$own" | awk '!seen[$0]++' | head -40; unit_line warn "$unit"; fi
+      if [ "$code" = 0 ]; then unit_line ok "$unit"; fi
+    fi
+  done < "$list"
+  if [ "$code" != 0 ] && [ "$named" = 0 ]; then
+    echo "$out" | grep -E "^(error|warning)|: (error|warning)" | head -40; fail="$fail $word"
     # why, in one line that greps: one cargo check, so the crate that stopped it fails all those below
-    echo "DEPCHECK-FAIL: $(echo "$out" | grep -E '^error: could not compile' | sed -E 's/^error: //; s/ due to .*//' | sort -u | paste -sd, -) stopped the one cargo check of $(grep -c . "$log/cargo") crates; first: $(echo "$out" | grep -m1 -E ': error|^error')"
+    echo "$label-FAIL: $(echo "$out" | grep -E '^error: could not compile' | sed -E 's/^error: //; s/ due to .*//' | sort -u | paste -sd, -) stopped the one cargo check of $(grep -c . "$list") crates; first: $(echo "$out" | grep -m1 -E ': error|^error')"
     # none to blame: none of them passed, and a later diff that reaches none of them is no pass
-    while read -r -a f; do unit_line fail "$(unit_of "${f[@]}")"; done < "$log/cargo"
+    while read -r -a f; do unit_line fail "$(unit_of "${f[@]}")"; done < "$list"
   fi
+}
+# the other repo's crates that use a changed crate (affected.py `cargo` lines), their libs and bins (0 warnings)
+step_depcheck() {
+  [ -s "$log/cargo" ] || return 0
+  cargo_units "$log/cargo" DEPCHECK cargo-check warnings
+}
+# the test targets the landings reach (affected.py `tests` lines: the changed packages and their users, both repos),
+# after the depcheck in its slot, on what it checked: no other step compiles a #[cfg(test)] body, and two landings
+# that merged cleanly broke makepad-fab's tests unseen, a new test calling build_preview with an argument the other
+# landing took away (11-05). Errors fail it; a warning is a WARN to the landings that brought it (zero warnings is
+# the rule, but a test target's unused helper is no break of the branch).
+step_testcheck() {
+  [ -s "$log/tests" ] || return 0
+  cargo_units "$log/tests" TESTCHECK tests-check errors --tests
 }
 # a cold present takes about PRESENT_CORES cores (its JIT compiling, its first pipelines): five side by side on
 # a gate's 8 cores ran a pool box to load 31 and missed their first frames; so at most a present per
@@ -368,6 +412,25 @@ step_qpresent() {
   PRESENT_JOBS=$(( cores / at ))
   at_once qpresent_one "$log/presents" "$at"
 }
+if [ "$mode" = tests ]; then
+  QBASE=${2:?tests <base sha> <commercial base sha|->}; QCBASE=${3:--}
+  python3 -I "$here/affected.py" --tests "$QBASE" "$QCBASE" > "$log/affected" 2> "$log/affected.err" || { tail -5 "$log/affected.err"; echo "NODEGATE-FAIL: affected"; exit 1; }
+  filter_units tests "$log/tests"
+  timed step_testcheck
+  if [ -n "$fail" ]; then echo "NODEGATE-FAIL:$fail"; exit 1; fi
+  echo "NODEGATE-OK tests $(grep -c . "$log/tests") test checks"; exit 0
+fi
+if [ "$mode" = checks ]; then
+  QBASE=${2:?checks <base sha> <commercial base sha|->}; QCBASE=${3:--}
+  python3 -I "$here/affected.py" "$QBASE" "$QCBASE" > "$log/affected" 2> "$log/affected.err" || { tail -5 "$log/affected.err"; echo "NODEGATE-FAIL: affected"; exit 1; }
+  grep '^why' "$log/affected"
+  filter_units check "$log/checks"
+  if [ -x "${MAKEPAD_LOADER:-}" ]; then B=$MAKEPAD_LOADER
+  else cargo build --profile host -q -p makepad-run --bin makepad || { echo "NODEGATE-FAIL: build"; exit 1; }; B=$T/host/makepad; fi
+  timed step_qcheck
+  if [ -n "$fail" ]; then echo "NODEGATE-FAIL:$fail"; exit 1; fi
+  echo "NODEGATE-OK checks $(grep -c . "$log/checks") checks"; exit 0
+fi
 if [ "$mode" = hot ]; then
   QBASE=${2:?hot <makepad base sha> <commercial base sha|->}; QCBASE=${3:--}
   export PRESENT_WARM=1 PRESENT_WAIT=240 SETTLE=3  # the wait: see fast below
@@ -390,11 +453,12 @@ if [ "$mode" = fast ]; then
     filter_units check "$log/checks"
     filter_units present "$log/presents"
     filter_units cargo "$log/cargo"
+    filter_units tests "$log/tests"
     # the depcheck runs beside the presents (screen- and frame-bound: few cores busy), not beside the JIT build
     # or the checks, which it slowed by 11-27 s on a pool box; with no presents, beside the checks. Its output and
     # failures join after them.
     depcheck=""
-    start_depcheck() { rm -f "$log/depcheck.fail"; ( fail=""; timed step_depcheck; printf '%s' "$fail" > "$log/depcheck.fail" ) > "$log/depcheck.out" 2>&1 & depcheck=$!; }
+    start_depcheck() { rm -f "$log/depcheck.fail"; ( fail=""; timed step_depcheck; timed step_testcheck; printf '%s' "$fail" > "$log/depcheck.fail" ) > "$log/depcheck.out" 2>&1 & depcheck=$!; }
     # a JIT or kernel change runs the library suites under the JIT too (the full gate always does)
     suites=0; git diff --quiet "$QBASE" HEAD -- libs/relax libs/csg 2>/dev/null || suites=1
     ! grep -q '^suite ' "$log/affected" || suites=1
@@ -431,6 +495,7 @@ if timed step_build; then
     full) for s in $STEPS_FULL; do timed $s; done;;
     full-a) for s in $STEPS_A; do timed $s; done;;
     full-b) for s in $STEPS_B; do timed $s; done;;
+    full-t) for s in $STEPS_T; do timed $s; done;;
     stage) timed step_check_stage; timed step_present_stage;;
     *) fail="$fail bad-mode";;
   esac

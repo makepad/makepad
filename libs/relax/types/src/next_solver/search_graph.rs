@@ -266,3 +266,9 @@ pub fn goal_hist_report() {
         for (k, c) in v.into_iter().take(n) { eprintln!("makepad-run goal-hist {} {:>9} {}", name, c, k); }
     }
 }
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    use relax_session::reset_static as reset;
+    reset(&GOAL_HIST, std::sync::Mutex::new(None));
+}

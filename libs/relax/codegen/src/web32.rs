@@ -345,3 +345,9 @@ pub fn transform(f: &mut Func, c: &Cfg, sym_class: u64) -> Result<(), String> {
     f.withheld_noalias.clear();
     f.verify().map_err(|e| format!("{}: web32 transform made invalid RIR: {}", f.name, e))
 }
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    use relax_session::reset_static as reset;
+    reset(&CFG, OnceLock::new());
+}

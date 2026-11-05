@@ -1,5 +1,5 @@
-//! A licensed app's slice of the commercial repository ships complete (tools/ci slice.ci.splash,
-//! ported): the slice of the tree's commercial commit, cut for the app's roots as a release builds
+//! A licensed app's slice of the commercial repository ships complete: the slice of the
+//! tree's commercial commit, cut for the app's roots as a release builds
 //! them (no default features), goes into a clean checkout of the tree's makepad commit at
 //! `apps/commercial`, as a customer's Runner has it; its crates' outside references must be in
 //! their declared includes (lint), and the roots must check there (under the JIT).

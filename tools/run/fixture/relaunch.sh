@@ -1,6 +1,6 @@
 #!/bin/sh
 # Regression test (JITRELAUNCH): `makepad inspect <pid> session relaunch` never leaves the app dead.
-# One hidden, muted app, restarted RELAUNCHES times (default 5): each restart is the exec restart
+# One hidden, muted app, restarted RELAUNCHES times (default 5): each restart is in place
 # ("makepad live: restarting", the same pid) and shows a new first frame with the window frames
 # and the app's state handed over ("restart (...): kept"). The process stays alive after each
 # restart, with no crash or fault line. Run from the workspace root; the JIT runs through
@@ -63,9 +63,9 @@ run_case() {
     done
     now_inplace=$(count "makepad live: restarting (" "$d/run.log")
     restored=$(count "restart (.*): kept" "$d/run.log")
-    bad=$(grep -aE "zone: fault|panicked|Segmentation|SIGSEGV|SIGBUS|Aborted|process restart failed" "$d/run.log" | head -3)
+    bad=$(grep -aE "zone: fault|panicked|Segmentation|SIGSEGV|SIGBUS|Aborted|restart failed" "$d/run.log" | head -3)
     kill $pid 2>/dev/null; wait $pid
-    echo "relaunch: $name: $ok/$n alive (exec restarts $now_inplace, state handed over $restored)"
+    echo "relaunch: $name: $ok/$n alive (restarts $now_inplace, state handed over $restored)"
     [ -n "$bad" ] && { echo "$bad" | cut -c1-240; fails="$fails $name:fault"; }
     case $name in
         in-place) [ "$now_inplace" -ge "$n" ] || fails="$fails $name:not-in-place"

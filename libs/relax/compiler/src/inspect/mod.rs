@@ -179,7 +179,8 @@ pub fn start(app: &str) {
     let sock = match endpoint.listen_unix(&extra) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("makepad-remote: cannot listen on {}: {}", makepad_remote::carrier::unix::paths(pid).0.display(), e);
+            // (also when the run is silent: nothing else would say why inspect finds no socket)
+            eprintln!("makepad-remote: pid {} app {}: makepad inspect cannot reach this run: {}", pid, app, e);
             return;
         }
     };
@@ -263,8 +264,14 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
 ];
 
 fn dispatch(req: &Req, out: &mut Out) {
+    let _at_the_run = crate::run_threads::request();
+    // (a wait of a long command ends when the run does: `gone` says so, and so does the answer)
+    out.stop_also(crate::run_threads::ending);
     let _act = activity::begin(req);
     dispatch_command(req, out);
+    if crate::run_threads::ending() {
+        out.always("{\"run_ended\":true,\"why\":\"the run this answers about ended while it was asked\"}");
+    }
     // SPEC-V: the client prints the answer's rows, not its end line (which says `verified` too)
     if !crate::reload::observations_verified() && !matches!(req.cmd.as_str(), "help" | "ping" | "events" | "watch") {
         out.always("{\"verified\":false,\"why\":\"a patched fn runs before its borrow-check verdict; a failed verdict reverts it and the patchreverted event lists the observations it invalidates\"}");
@@ -299,6 +306,10 @@ pub(crate) fn stale_line() -> Option<String> {
 }
 
 fn dispatch_command(req: &Req, out: &mut Out) {
+    if let Some(schema) = makepad_remote::params::jit(&req.cmd, req.pos.first().map(String::as_str).unwrap_or(""))
+        .or_else(|| makepad_remote::params::script(&req.cmd, req.pos.first().map(String::as_str).unwrap_or(""))) {
+        if let Err(e) = req.validate_params(schema) { return out.err(&e); }
+    }
     if MEASURES_CODE.contains(&req.cmd.as_str()) {
         if let Some(line) = stale_line() {
             out.line(&line);
@@ -534,7 +545,12 @@ fn help(req: &Req, out: &mut Out) {
                 continue;
             }
         }
-        out.line(&format!("{{\"cmd\":{},\"args\":{},\"answers\":{}}}", json_str(name), json_str(args), json_str(what)));
+        let mut words = name.split_whitespace();
+        let command = words.next().unwrap_or("");
+        let sub = words.next().unwrap_or("");
+        let params = makepad_remote::params::jit(command, sub).or_else(|| makepad_remote::params::script(command, sub)).or_else(|| makepad_remote::params::inspect(name));
+        let params = params.map_or(String::new(), |p| format!(",\"params\":{{{p}}}"));
+        out.line(&format!("{{\"cmd\":{},\"args\":{},\"answers\":{}{params}}}", json_str(name), json_str(args), json_str(what)));
     }
 }
 
@@ -1253,7 +1269,7 @@ fn cmd_jit(req: &Req, out: &mut Out) {
     let t0 = std::time::Instant::now();
     let a = activity();
     let f0 = crate::postframe::FRAMES.load(std::sync::atomic::Ordering::Relaxed);
-    std::thread::sleep(std::time::Duration::from_millis(ms));
+    crate::run_threads::sleep(std::time::Duration::from_millis(ms));
     let b = activity();
     let f1 = crate::postframe::FRAMES.load(std::sync::atomic::Ordering::Relaxed);
     // the window as it was (a loaded machine oversleeps)
@@ -1602,6 +1618,9 @@ pub fn host_file_query(path: &str, words: &[String]) -> Option<i32> {
 /// Answers `req` with the host provider of command `name` (the Splash VM's `sprobe` for a
 /// `probe` on a .splash line); false when the host has none or it did not answer.
 pub(crate) fn host_query(name: &str, req: &Req, out: &mut Out) -> bool {
+    if let Some(schema) = makepad_remote::params::script(name, req.pos.first().map(String::as_str).unwrap_or("")) {
+        if let Err(e) = req.validate_params(schema) { out.err(&e); return true; }
+    }
     let query = HOST_PROVIDERS.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|(n, _)| *n == name).map(|(_, query)| *query);
     let r = Req { cmd: name.to_string(), pos: req.pos.clone(), kv: req.kv.clone() };
     query.is_some_and(|query| query(&r, out))
@@ -1626,6 +1645,7 @@ static PROVIDERS: relax_session::sync::Mutex<Vec<(String, ProgramQuery, crate::d
 /// registers the same commands: the process answers with its first domain's (the root: the window
 /// manager hosting app domains, or the one app), never with whichever domain started last.
 pub extern "C" fn relax_register_inspect(name: *const u8, len: usize, query: ProgramQuery) {
+    let _kept = crate::zone_alloc::kept();
     let Some(scope) = crate::domain::callback() else { return };
     let name = unsafe { String::from_utf8_lossy(std::slice::from_raw_parts(name, len)).into_owned() };
     let mut p = PROVIDERS.lock().unwrap_or_else(|e| e.into_inner());
@@ -1810,6 +1830,7 @@ fn serve_program_service(endpoint: &makepad_remote::Endpoint, name: &str, versio
 /// its endpoint, each channel a producer the program runs. The same mechanism as
 /// [`relax_register_inspect`], for streams.
 pub extern "C" fn relax_register_remote_service(name: *const u8, len: usize, version: u32, open: ServiceOpen, close: ServiceClose) {
+    let _kept = crate::zone_alloc::kept();
     let Some(scope) = crate::domain::callback() else { return };
     let name = unsafe { String::from_utf8_lossy(std::slice::from_raw_parts(name, len)).into_owned() };
     let mut services = SERVICES.lock().unwrap_or_else(|e| e.into_inner());
@@ -1880,6 +1901,32 @@ pub extern "C" fn relax_wait_leave() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn jit_rejects_unknown_parameters() {
+        let error = super::pf::split(&["frames".into(), "typo=1".into()]).unwrap_err();
+        assert!(error.contains("unknown parameter") && error.contains("known:") && error.contains("sort"), "{error}");
+        assert!(super::pf::split(&["frames".into(), "n=1".into(), "s=1".into()]).is_ok());
+        for command in ["session", "timeline start", "timeline stop", "timeline frames", "timeline waits", "heap start", "heap top", "heap life", "jit", "jit queue", "prof", "watch", "mem timeline", "eval", "probe add", "src", "vm roots", "verbs on", "sprobe add"] {
+            let (bytes, _) = makepad_remote::cmd::answer(super::dispatch_command, &format!("{command} typo=1"));
+            let answer = String::from_utf8(bytes).unwrap();
+            assert!(answer.contains("unknown parameter") && answer.contains("typo") && answer.contains("known:"), "{command}: {answer}");
+        }
+        for command in ["timeline stop n=2", "jit queue ms=1", "heap stop rate=1", "vm roots depth=1"] {
+            let (bytes, _) = makepad_remote::cmd::answer(super::dispatch_command, command);
+            let answer = String::from_utf8(bytes).unwrap();
+            assert!(answer.contains("unknown parameter"), "{command}: {answer}");
+        }
+        for (command, _, _) in super::COMMANDS {
+            if matches!(*command, "pf" | "gpu" | "hal") { continue; }
+            let mut words = command.split_whitespace();
+            assert!(makepad_remote::params::jit(words.next().unwrap(), words.next().unwrap_or("")).is_some(), "missing JIT schema: {command}");
+        }
+        for line in ["timeline start max_s=1", "heap top host=1 by=live n=2", "jit queue n=2", "prof view=tree focus=main min=1", "writes W1 n=2"] {
+            let req = super::Req::parse(line);
+            assert!(req.validate_params(makepad_remote::params::jit(&req.cmd, req.pos.first().map(String::as_str).unwrap_or("")).unwrap()).is_ok(), "{line}");
+        }
+    }
+
     /// `inputs of=`: a saved path names an input at a whole path component, either separator.
     #[test]
     fn a_saved_path_names_an_input_at_a_whole_component() {
@@ -1891,4 +1938,26 @@ mod tests {
         assert!(!ends("a.rs", "src/a.rs"));
         assert!(!ends("/w/a.rs", ""));
     }
+}
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    use relax_session::reset_static as reset;
+    codever::reset_statics();
+    events::reset_statics();
+    experiments::reset_statics();
+    flightrec::reset_statics();
+    heap::reset_statics();
+    instrument::reset_statics();
+    patches::reset_statics();
+    probes::reset_statics();
+    pstream::reset_statics();
+    remarks::reset_statics();
+    tierlog::reset_statics();
+    timeline::reset_statics();
+    watch::reset_statics();
+    reset(&OWNER_SNAPS, Mutex::new(Vec::new()));
+    reset(&PROVIDERS, relax_session::sync::Mutex::new(Vec::new()));
+    reset(&SERVICES, Mutex::new(Vec::new()));
+    reset(&ACTIVE_SERVICES, Mutex::new(Vec::new()));
 }

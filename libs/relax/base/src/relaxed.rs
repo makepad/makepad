@@ -209,3 +209,10 @@ pub fn apply_fixes(notes: &[Note]) -> std::io::Result<(usize, usize)> {
     }
     Ok((files, edits))
 }
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    use relax_session::reset_static as reset;
+    reset(&NOTES, Mutex::new(Vec::new()));
+    reset(&FEATURES_NS, std::sync::atomic::AtomicU64::new(0));
+}

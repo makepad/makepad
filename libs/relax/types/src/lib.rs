@@ -103,3 +103,18 @@ pub(crate) fn unique_test_suffix() -> String {
 
 // This crate's source stamp (build.rs, libs/relax/self_stamp.rs): relax-compiler folds it into the codegen identity.
 include!(concat!(env!("OUT_DIR"), "/src_stamp.rs"));
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub unsafe fn reset_statics() {
+    borrowck::reset_statics();
+    layout::reset_statics();
+    lint::reset_statics();
+    lint_dead::reset_statics();
+    lint_imports::reset_statics();
+    lint_levels::reset_statics();
+    next_solver::reset_statics();
+    tcx::reset_statics();
+    type_queries::reset_statics();
+    typeck::reset_statics();
+    unsafety::reset_statics();
+}

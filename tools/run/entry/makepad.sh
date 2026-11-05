@@ -29,7 +29,8 @@
 # file's own when it holds nothing else (or is an installation already), else ~/makepad-runner
 # (piped into sh, or saved among other downloads); $MAKEPAD_LOADER_ROOT overrides. Run it again to
 # update and start, reusing downloads and compiled crates. The system needs a C linker (Apple's command line tools; on
-# Linux cc) and, on Linux, OpenSSL 3's development files; it names the packages when missing.
+# Linux cc) and, on Linux, OpenSSL 3's development files and the desktop/audio libraries;
+# it names the packages when missing.
 set -u
 umask 022
 
@@ -241,25 +242,18 @@ forget_old_jobs
 
 case "$(uname -s)/$(uname -m)" in
     Darwin/arm64 | Darwin/aarch64) triple=aarch64-apple-darwin ;;
-    Darwin/x86_64) triple=x86_64-apple-darwin ;;
     Linux/x86_64) triple=x86_64-unknown-linux-gnu ;;
-    Linux/aarch64 | Linux/arm64) triple=aarch64-unknown-linux-gnu ;;
-    *) fail "Makepad supports macOS, and glibc Linux on x86_64 and ARM64." ;;
+    # the loader's JIT builds for the CPU it runs on, and has no Intel Mac or ARM64 Linux back end glue
+    *) fail "Makepad supports macOS on Apple silicon, and glibc Linux on x86_64." ;;
 esac
 # "<part> <bytes> <sha256>" for rustc, rust-std and cargo of this platform
 case "$triple" in
     aarch64-apple-darwin) parts='rustc 83206125 7b39cbbb11995584741b5821511b8706ab8ecab3bc7e12b11fb1ab50cab9d079
 rust-std 46977544 49dc82ff5b6fb033baa6e85635ed9cf07a27e5297a22314808ab4cf65a81335a
 cargo 12993393 ae556d0783f4ab2a6fccd4674158df08cf36526b73de03b7fde0e10b2bfc3d2e' ;;
-    x86_64-apple-darwin) parts='rustc 102807421 a0cf817df78615a10f4d0d29dbaafd657027e1a3665be728d0f19e341c8671bb
-rust-std 47585228 57a2c40ea919c06c4cd9ff4fc8b26e309c00c112538ea522227251e8ccc1f931
-cargo 13345290 7fdd094e131f98864fea06c6e0059fcecaba7b0010d07b90023f42215b6f33e8' ;;
     x86_64-unknown-linux-gnu) parts='rustc 134061173 18ed6559de1b8ea6b77474ea86992b9a507d3a3d134d9ee017d30cf3f406e3ee
 rust-std 48777886 8aa6405356392ce50160d1b286e86091c5e14adae3061115699c84ed4394d546
 cargo 15858529 18bf1598891b30dd5eb52a337d08a92b4456255ddbe4c1ab996ffb578077031c' ;;
-    aarch64-unknown-linux-gnu) parts='rustc 102526949 b6fdb37bc08e320bd92381e13d7311837f04a98423b8a5b678a5eb5e87c978ca
-rust-std 48592329 a2eece726a579de1f554a2c3bcc62410226b0be55736f57c2b5430c1bc71b98f
-cargo 15833225 e271c3c5d50336259a166e68b60ba792a64278ab117686183be3e51a0958d34b' ;;
 esac
 part_names='rustc rust-std cargo'
 part_field() { printf '%s\n' "$parts" | awk -v p="$1" -v f="$2" '$1 == p { print $f }'; }
@@ -275,7 +269,7 @@ esac
 command -v curl >/dev/null 2>&1 || fail "Makepad needs curl - install it, then run this again"
 command -v tar >/dev/null 2>&1 || fail "Makepad needs tar - install it, then run this again"
 
-# The system's linker (and on Linux OpenSSL's development files): named, never installed here.
+# The system's linker and Linux build/runtime libraries: named, never installed here.
 if [ "$(uname -s)" = Darwin ]; then
     if ! xcode-select -p >/dev/null 2>&1 || ! /usr/bin/xcrun --find ld >/dev/null 2>&1; then
         fail "Makepad needs Apple's command line tools - install them, then run this again"
@@ -283,16 +277,19 @@ if [ "$(uname -s)" = Darwin ]; then
 else
     missing=
     command -v cc >/dev/null 2>&1 || missing="a C linker (cc)"
-    if ! { [ -e /usr/lib/libssl.so ] || [ -e /usr/lib64/libssl.so ] || ls /usr/lib/*-linux-gnu/libssl.so >/dev/null 2>&1; }; then
-        missing="${missing:+$missing and }OpenSSL's development files (libssl.so)"
-    fi
+    for lib in libxkbcommon.so.0 libasound.so.2 libpulse.so.0 libX11.so.6 libXcursor.so.1 libdrm.so.2 libwayland-client.so.0 libssl.so.3 libcrypto.so.3 libssl.so; do
+        found=
+        for path in /usr/lib/"$lib" /usr/lib64/"$lib" /usr/lib/*-linux-gnu/"$lib"; do
+            if [ -e "$path" ]; then found=1; break; fi
+        done
+        [ -n "$found" ] || missing="${missing:+$missing, }$lib"
+    done
     if [ -n "$missing" ]; then
-        if command -v apt-get >/dev/null 2>&1; then cmd='sudo apt-get install build-essential libssl-dev'
-        elif command -v dnf >/dev/null 2>&1; then cmd='sudo dnf install gcc openssl-devel'
-        elif command -v pacman >/dev/null 2>&1; then cmd='sudo pacman -S --needed base-devel openssl'
-        elif command -v zypper >/dev/null 2>&1; then cmd='sudo zypper install gcc libopenssl-devel'
-        else cmd='a C compiler/linker and the OpenSSL 3 development package'; fi
-        fail "Makepad needs $missing - install it with: $cmd"
+        fail "Makepad needs $missing. Install the build and runtime packages, then run this again:
+    apt: sudo apt-get install build-essential libssl-dev libxkbcommon0 libasound2-dev libpulse0 libx11-6 libxcursor1 libdrm2 libwayland-client0
+    dnf: sudo dnf install gcc openssl-devel libxkbcommon alsa-lib pulseaudio-libs libX11 libXcursor libdrm wayland-libs
+    pacman: sudo pacman -S --needed base-devel openssl libxkbcommon alsa-lib libpulse libx11 libxcursor libdrm wayland
+    zypper: sudo zypper install gcc libopenssl-devel libxkbcommon0 libasound2 libpulse0 libX11-6 libXcursor1 libdrm2 libwayland-client0"
     fi
 fi
 mkdir -p "$downloads" "$logs_dir" "$jobs" "$loader_root" || fail "Cannot create $cache"
@@ -607,49 +604,66 @@ fi
 
 # --- 3. Compile the loader --------------------------------------------------------------------
 # The compile sees no Rust settings from elsewhere on this computer and writes only into
-# cache/. Cargo's plain output stays in the log. A terminal refreshes one line every second;
+# cache/. Its flags are the runner's own (apps/commercial/runner build_work.rs RUSTFLAGS): this
+# computer's CPU and rustc's parallel frontend, which stable rustc takes under RUSTC_BOOTSTRAP=1,
+# with an empty allow list so that no #![feature] builds. Cargo's plain output stays in the log. A terminal refreshes one line every second;
 # other output gets a plain line at most every ten seconds, plus the final progress and timing.
 unset RUSTUP_TOOLCHAIN RUSTFLAGS CARGO_ENCODED_RUSTFLAGS CARGO_BUILD_TARGET CARGO_BUILD_RUSTFLAGS CARGO_TARGET_DIR RUSTC_WRAPPER RUSTDOC
 export PATH="$rust/bin:$PATH" CARGO_HOME="$cache/cargo-home" RUSTC="$rust/bin/rustc" CARGO_INCREMENTAL=0
 build_loader() {
-    cd "$src" && CARGO_TERM_COLOR=never CARGO_TERM_PROGRESS_WHEN=never RUSTFLAGS=-Ctarget-cpu=native \
-        exec "$rust/bin/cargo" build --profile host --offline $locked -p makepad-run --bin makepad --bin makepad-launcher
+    cd "$src" && CARGO_TERM_COLOR=never CARGO_TERM_PROGRESS_WHEN=never RUSTFLAGS="-C target-cpu=native -Z threads=8 -Z allow-features=" RUSTC_BOOTSTRAP=1 \
+        exec "$rust/bin/cargo" build --profile host --offline --locked -p makepad-run --bin makepad --bin makepad-launcher
 }
 build_progress() {
-    progress=$(awk -v total="$crates" '
+    build_state=$(awk '
         $1 == "Compiling" && $3 ~ /^v[0-9]/ { compiled++; current = $2 }
-        END { printf "Building the JIT · %d/%d crates · %s", compiled, total, (current == "" ? "waiting" : current) }
+        END { printf "%d %s", compiled, (current == "" ? "waiting" : current) }
     ' "$build_log")
+    build_now=$(now)
+    if [ "$build_state" != "$build_previous" ]; then
+        crate_t0=$build_now
+        build_previous=$build_state
+    fi
+    [ "$1" = show ] || return 0
+    progress="Building the JIT · ${build_state%% *}/$crates crates · $((build_now - build_t0)) s elapsed · ${build_state#* } · $((build_now - crate_t0)) s on crate"
     if [ -n "$build_tty" ]; then printf '\r\033[K  %s' "$progress"; else say "$progress"; fi
 }
 if [ -n "$need_build" ]; then
     build_log=$logs/build.log
     rm -f "$build_log"
-    # the crates to compile: the lock file's packages (the archive holds only the loader's crates)
-    crates=$(grep -c '^name = ' "$src/Cargo.lock" 2>/dev/null)
-    [ "${crates:-0}" -gt 0 ] || crates=1
-    # the archive's lock file (path crates only): nothing is resolved or fetched on this computer
-    locked=
-    [ ! -f "$src/Cargo.lock" ] || locked=--locked
+    # Resolve the archive's path crates offline before compiling. Cargo writes the lock for
+    # --locked below; the archive need not ship one. Count only this host's normal/build
+    # dependencies, not other targets or the workspace's dev-dependency placeholders.
+    if ! (cd "$src" && CARGO_TERM_COLOR=never "$rust/bin/cargo" tree --offline --target "$triple" \
+        -p makepad-run --edges normal,build --prefix none --format '{p}') >"$logs/crates.log" 2>"$build_log"; then
+        fail "Cannot list the JIT's crates from the loader source." "$build_log"
+    fi
+    crates=$(awk '!seen[$1 FS $2]++ { count++ } END { print count + 0 }' "$logs/crates.log")
+    [ "$crates" -gt 0 ] || fail "The loader source lists no JIT crates." "$build_log"
     # room for the build (about 2 GB of target/), said before it starts rather than as a cargo error
     free_kb=$(df -Pk "$cache" | awk 'NR == 2 { print $4 }')
     [ "${free_kb:-0}" -ge 3000000 ] || fail "Compiling Makepad's loader needs about 3 GB free on this disk. Free some space, then run this again."
     build_tty=
     [ -t 1 ] && build_tty=1
     build_t0=$(now)
-    # for this computer's processor ([profile.host]: thin LTO, 16 codegen units, target-cpu=native)
+    crate_t0=$build_t0
+    build_previous=
+    # for this computer's processor ([profile.host]: opt-level 3, 16 codegen units, LTO within each crate; target-cpu=native)
     job build build_loader >"$build_log" 2>&1
     build_ticks=0
-    build_progress
+    build_progress show
     while [ ! -f "$jobs/build.done" ]; do
         sleep 1
         build_ticks=$((build_ticks + 1))
         [ ! -f "$jobs/build.done" ] || break
-        [ -n "$build_tty" ] || [ "$build_ticks" -ge 10 ] || continue
+        if [ -z "$build_tty" ] && [ "$build_ticks" -lt 10 ]; then
+            build_progress track
+            continue
+        fi
         build_ticks=0
-        build_progress
+        build_progress show
     done
-    build_progress
+    build_progress show
     [ -z "$build_tty" ] || printf '\n'
     if [ "$(cat "$jobs/build.done")" != 0 ]; then
         fail "the JIT did not compile." "$build_log"

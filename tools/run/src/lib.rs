@@ -38,6 +38,7 @@ mod boot_progress;
 mod boot_editor;
 mod boot_input;
 mod boot_probe;
+mod build_flags;
 
 pub use relax_boot::Environment as BootEnvironment;
 
@@ -234,7 +235,18 @@ fn provided() {
         open: hal_run::open,
         start: hal_run::start,
         batch: hal_run::batch,
+        end_app: hal_run::end_app,
+        next_run: hal_run::next_run,
     });
+    relax_compiler::run_end::set_native_end(
+        || {
+            makepad_hal::end_run();
+            makepad_script::end_run();
+            makepad_script_census::end_run();
+            makepad_script_compute::end_run();
+        },
+        makepad_script::end_domain,
+    );
 }
 
 /// makepad inspect's Splash VM commands (makepad_script::inspect_query).

@@ -300,8 +300,8 @@ mod imp {
     const SEEK_DATA: i32 = 3;
     const SEEK_HOLE: i32 = 4;
 
-    /// Code regions: (RX base, size, RW base, memfd); append-only, published by REGIONS_N (a
-    /// released region keeps its entry with size 0).
+    /// Code regions: (RX base, size, RW base, memfd), published by REGIONS_N. A released region's
+    /// slot is emptied (size 0: no lookup or forked child sees it) and reused by the next one.
     const REGIONS_CAP: usize = 4096;
     static REGIONS: [[AtomicU64; 3]; REGIONS_CAP] = [const { [const { AtomicU64::new(0) }; 3] }; REGIONS_CAP];
     static REGION_FD: [AtomicI64; REGIONS_CAP] = [const { AtomicI64::new(-1) }; REGIONS_CAP];
@@ -402,8 +402,9 @@ mod imp {
     /// seccomp) -- the caller keeps the single read-write-execute view.
     fn code_views(base: u64, size: usize) -> bool {
         let _g = REGIONS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        // (a region's entry is never reused: code_rw_of reads entries without the lock)
-        let n = REGIONS_N.load(Ordering::Acquire);
+        let used = REGIONS_N.load(Ordering::Acquire);
+        // a slot a released region emptied, else the next one
+        let n = REGIONS[..used].iter().position(|r| r[1].load(Ordering::Acquire) == 0).unwrap_or(used);
         if n == REGIONS_CAP {
             panic!("code memory: more than {} code reservations in this process", REGIONS_CAP);
         }
@@ -433,8 +434,9 @@ mod imp {
             REGIONS[n][0].store(base, Ordering::Relaxed);
             REGIONS[n][2].store(rw as u64, Ordering::Relaxed);
             REGION_FD[n].store(fd as i64, Ordering::Relaxed);
+            // the size last: a slot with a size has its views
             REGIONS[n][1].store(size as u64, Ordering::Release);
-            REGIONS_N.store(n + 1, Ordering::Release);
+            REGIONS_N.store(used.max(n + 1), Ordering::Release);
         }
         true
     }
@@ -538,6 +540,8 @@ mod imp {
                 if r[0].load(Ordering::Relaxed) == base && r[1].load(Ordering::Relaxed) != 0 {
                     let rw = r[2].load(Ordering::Relaxed);
                     r[1].store(0, Ordering::Release);
+                    // (the alias's addresses are the system's again: an empty slot names none)
+                    r[2].store(0, Ordering::Relaxed);
                     unsafe {
                         munmap(rw as *mut u8, code);
                         close(fd.swap(-1, Ordering::Relaxed) as i32);
@@ -744,6 +748,8 @@ mod imp {
             if r[0].load(Ordering::Relaxed) == base && r[1].load(Ordering::Relaxed) != 0 {
                 let rw = r[2].load(Ordering::Relaxed);
                 r[1].store(0, Ordering::Release);
+                // (the alias's addresses are the system's again: an empty slot names none)
+                r[2].store(0, Ordering::Relaxed);
                 // the RW alias is never executed: it goes
                 free(rw, code);
                 break;
@@ -861,8 +867,8 @@ mod imp {
     pub const CODE_TAIL: u64 = 4096;
     const REGIONS: usize = 1024;
     /// (base, code bytes, total bytes, RW alias of the code or 0, section handle) of each
-    /// reservation; append-only (lookups read entries without the lock), a released one keeps
-    /// its entry with total 0
+    /// reservation; lookups read entries without the lock. A released one's slot is emptied
+    /// (total 0: no lookup sees it) and reused by the next reservation.
     static RES: [[AtomicU64; 5]; REGIONS] = [const { [const { AtomicU64::new(0) }; 5] }; REGIONS];
     /// Per reservation: where its ended code starts (`end_code_committed`), 0: it runs.
     static ENDED_FROM: [AtomicU64; REGIONS] = [const { AtomicU64::new(0) }; REGIONS];
@@ -1018,15 +1024,21 @@ mod imp {
             }
         };
         let _g = RES_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let n = RES_N.load(Ordering::Acquire);
+        let used = RES_N.load(Ordering::Acquire);
+        // a slot a released reservation emptied, else the next one
+        let n = RES[..used].iter().position(|r| r[2].load(Ordering::Acquire) == 0).unwrap_or(used);
         assert!(n < REGIONS, "reservation: more than {} code reservations in this process", REGIONS);
+        for w in &BITS[n] {
+            w.store(0, Ordering::Relaxed);
+        }
+        ENDED_FROM[n].store(0, Ordering::SeqCst);
         RES[n][0].store(base, Ordering::Relaxed);
         RES[n][1].store(code as u64, Ordering::Relaxed);
         RES[n][3].store(rw, Ordering::Relaxed);
         RES[n][4].store(sec, Ordering::Relaxed);
         // the size last: an entry with a size is live
         RES[n][2].store(total as u64, Ordering::Release);
-        RES_N.store(n + 1, Ordering::Release);
+        RES_N.store(used.max(n + 1), Ordering::Release);
         drop(_g);
         register_unwind(base, code);
         base

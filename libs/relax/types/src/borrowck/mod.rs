@@ -118,7 +118,7 @@ pub fn check_all(prog: &Program, tcx: &Tcx, with_std: bool) -> usize {
     let mut errors = 0usize;
     let mut unchecked: std::collections::BTreeMap<String, usize> = Default::default();
     let mut unchecked_ex: std::collections::BTreeMap<String, String> = Default::default();
-    let t0 = relax_backend::cpu_ns();
+    let t0 = relax_session::clock::cpu_ns();
     let mut bck_ns = 0u64;
     let only = options.borrowck_only.clone();
     for owner in body::owners(prog) {
@@ -152,10 +152,10 @@ pub fn check_all(prog: &Program, tcx: &Tcx, with_std: bool) -> usize {
                 continue;
             }
         };
-        let c0 = relax_backend::cpu_ns();
+        let c0 = relax_session::clock::cpu_ns();
         let v = check_body(&crate::tcx::EvalCx::new(prog, &tcx, crate::tcx::TypingEnv::fully_monomorphized(&prog), &crate::tcx::EvalState::new()), prog, tcx, &body);
         note_verdict(&v);
-        bck_ns += relax_backend::cpu_ns() - c0;
+        bck_ns += relax_session::clock::cpu_ns() - c0;
         n_bodies += v.bodies;
         for u in &v.unchecked {
             let why = u.rsplit(": ").next().unwrap_or("").to_string();
@@ -168,7 +168,7 @@ pub fn check_all(prog: &Program, tcx: &Tcx, with_std: bool) -> usize {
         errors += v.errors.len();
     }
     if options.verbose {
-        eprintln!("makepad-run borrowck: {} owners ({} failed typeck polymorphically), {} bodies, {} errors; borrowck cpu {:.1} ms, total {:.1} ms", n_fns, n_typeck_fail, n_bodies, errors, bck_ns as f64 / 1e6, (relax_backend::cpu_ns() - t0) as f64 / 1e6);
+        eprintln!("makepad-run borrowck: {} owners ({} failed typeck polymorphically), {} bodies, {} errors; borrowck cpu {:.1} ms, total {:.1} ms", n_fns, n_typeck_fail, n_bodies, errors, bck_ns as f64 / 1e6, (relax_session::clock::cpu_ns() - t0) as f64 / 1e6);
         for (k, n) in &unchecked {
             eprintln!("makepad-run borrowck: unchecked {:>6}  {}   e.g. {}", n, k, unchecked_ex.get(k).map_or("", |s| s.as_str()));
         }
@@ -259,3 +259,13 @@ mod root_cx_tests;
 mod mir_source_tests;
 #[cfg(test)]
 mod lint_scope_tests;
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    use relax_session::reset_static as reset;
+    event::reset_statics();
+    lazy::reset_statics();
+    reset(&FV_ONLY, relax_session::sync::Mutex::new(Vec::new()));
+    reset(&FV_RECORDS, relax_session::sync::Mutex::new(Vec::new()));
+    reset(&RELAXED_RECORDS, relax_session::sync::Mutex::new(Vec::new()));
+}

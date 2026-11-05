@@ -8,3 +8,7 @@ publish = false
 
 [dependencies]
 relax-session = { workspace = true }
+
+# the process's one OpenSSL setup (makepad_network::tls::init_openssl)
+[target.'cfg(target_os = "linux")'.dependencies]
+makepad-network = { path = "../../../platform/network" }

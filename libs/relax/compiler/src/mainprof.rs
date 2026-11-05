@@ -45,7 +45,7 @@ pub fn start() {
     let lo = hi - unsafe { pthread_get_stacksize_np(me) } as u64;
     let port = unsafe { pthread_mach_thread_np(me) };
     let ms: u64 = std::env::var("MAKEPAD_RUN_PROFILE_MAIN_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(4000);
-    let _ = std::thread::Builder::new().name("run-mainprof".to_string()).spawn(move || {
+    let _ = crate::run_threads::spawn("run-mainprof", move || {
         extern "C" {
             fn pthread_set_qos_class_self_np(qos: u32, rel: i32) -> i32;
             fn thread_suspend(t: u32) -> i32;
@@ -195,4 +195,12 @@ fn short_name(n: &str) -> &str {
         k += 1;
     }
     &s[k..]
+}
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    use relax_session::reset_static as reset;
+    reset(&SAMPLES, Mutex::new(Vec::new()));
+    #[cfg(target_vendor = "apple")]
+    reset(&STARTED, AtomicBool::new(false));
 }

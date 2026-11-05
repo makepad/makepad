@@ -307,7 +307,7 @@ static PENDING: Mutex<Option<std::thread::JoinHandle<Result<(), SourceCheckError
 /// call it). The hashes, the manifests and the error are those of `check_sources`.
 pub fn check_sources_later(pkgs: std::sync::Arc<Vec<crate::srchash::SrcPkg>>, only: Option<&'static str>) {
     let _k = crate::zone_alloc::kept();
-    let spawned = std::thread::Builder::new().name("run-provided-sources".into()).spawn(move || {
+    let spawned = crate::run_threads::spawn("run-provided-sources", move || {
         let _z = crate::zone_alloc::compiler_thread();
         let t = std::time::Instant::now();
         let verdict = check_sources(&pkgs, only);
@@ -1005,4 +1005,12 @@ fn same_bytes(prog: &Program, tcx: &Tcx, krate: u32, t: TyId, ok: &dyn Fn(DefId)
         }
     }
     trusted_in(prog, tcx, krate, t, 0, true)
+}
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    use relax_session::reset_static as reset;
+    reset(&MATCHED, Mutex::new(Vec::new()));
+    reset(&PENDING, Mutex::new(None));
+    reset(&VERDICT, Mutex::new(None));
 }

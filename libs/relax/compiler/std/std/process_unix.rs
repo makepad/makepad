@@ -8,7 +8,7 @@ use core::fmt;
 use crate::ffi::{OsStr, OsString};
 use crate::fs::File;
 use crate::io::{self, Read, Write};
-use crate::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
+use crate::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use crate::path::Path;
 use crate::sys;
 
@@ -67,6 +67,11 @@ impl From<io::PipeWriter> for Stdio {
 impl From<OwnedFd> for Stdio {
     fn from(fd: OwnedFd) -> Stdio {
         Stdio(StdioKind::Fd(fd))
+    }
+}
+impl FromRawFd for Stdio {
+    unsafe fn from_raw_fd(fd: RawFd) -> Stdio {
+        Stdio(StdioKind::Fd(OwnedFd::from_raw_fd(fd)))
     }
 }
 
@@ -1289,6 +1294,61 @@ impl AsRawFd for ChildStderr {
 impl IntoRawFd for ChildStdout {
     fn into_raw_fd(self) -> RawFd {
         self.fd.into_raw_fd()
+    }
+}
+impl IntoRawFd for ChildStdin {
+    fn into_raw_fd(self) -> RawFd {
+        self.fd.into_raw_fd()
+    }
+}
+impl IntoRawFd for ChildStderr {
+    fn into_raw_fd(self) -> RawFd {
+        self.fd.into_raw_fd()
+    }
+}
+impl AsFd for ChildStdin {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.fd.as_fd()
+    }
+}
+impl From<ChildStdin> for OwnedFd {
+    fn from(c: ChildStdin) -> OwnedFd {
+        c.fd
+    }
+}
+impl From<OwnedFd> for ChildStdin {
+    fn from(fd: OwnedFd) -> ChildStdin {
+        ChildStdin { fd }
+    }
+}
+impl AsFd for ChildStdout {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.fd.as_fd()
+    }
+}
+impl From<ChildStdout> for OwnedFd {
+    fn from(c: ChildStdout) -> OwnedFd {
+        c.fd
+    }
+}
+impl From<OwnedFd> for ChildStdout {
+    fn from(fd: OwnedFd) -> ChildStdout {
+        ChildStdout { fd }
+    }
+}
+impl AsFd for ChildStderr {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.fd.as_fd()
+    }
+}
+impl From<ChildStderr> for OwnedFd {
+    fn from(c: ChildStderr) -> OwnedFd {
+        c.fd
+    }
+}
+impl From<OwnedFd> for ChildStderr {
+    fn from(fd: OwnedFd) -> ChildStderr {
+        ChildStderr { fd }
     }
 }
 impl From<ChildStdin> for Stdio {

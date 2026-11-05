@@ -57,6 +57,11 @@ impl<T> Arc<T> {
         Arc { ptr: unsafe { ptr::NonNull::new_unchecked(p) }, _marker: crate::marker::PhantomData }
     }
 
+    pub fn pin(data: T) -> crate::pin::Pin<Arc<T>> {
+        // The value stays in the Arc allocation when its owning handle moves.
+        unsafe { crate::pin::Pin::new_unchecked(Self::new(data)) }
+    }
+
     pub fn new_cyclic<F: FnOnce(&Weak<T>) -> T>(data_fn: F) -> Arc<T> {
         let (h, p) = alloc_block(crate::mem::size_of::<T>(), crate::mem::align_of::<T>(), 0, 1);
         let p = p as *mut T;
@@ -464,6 +469,20 @@ impl<T: ?Sized + fmt::Debug> fmt::Debug for Arc<T> {
     }
 }
 
+impl<T: ?Sized + crate::error::Error> crate::error::Error for Arc<T> {
+    fn cause(&self) -> Option<&dyn crate::error::Error> {
+        crate::error::Error::cause(&**self)
+    }
+
+    fn source(&self) -> Option<&(dyn crate::error::Error + 'static)> {
+        crate::error::Error::source(&**self)
+    }
+
+    fn provide<'a>(&'a self, request: &mut crate::error::Request<'a>) {
+        crate::error::Error::provide(&**self, request);
+    }
+}
+
 impl<T: ?Sized> fmt::Pointer for Arc<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Pointer::fmt(&(self.ptr.as_ptr() as *const T), f)
@@ -487,6 +506,17 @@ impl<T> Weak<T> {
 }
 
 impl<T: ?Sized> Weak<T> {
+    pub fn into_raw(self) -> *const T {
+        let p = self.ptr.as_ptr() as *const T;
+        crate::mem::forget(self);
+        p
+    }
+
+    /// Reclaims the weak count transferred by `into_raw`, including an empty Weak.
+    pub unsafe fn from_raw(p: *const T) -> Weak<T> {
+        Weak { ptr: unsafe { ptr::NonNull::new_unchecked(p as *mut T) } }
+    }
+
     pub fn upgrade(&self) -> Option<Arc<T>> {
         if is_dangling(self.ptr.as_ptr()) {
             return None;

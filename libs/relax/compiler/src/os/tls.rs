@@ -54,7 +54,10 @@ mod imp {
     /// Linux x86-64: the block pointer lives in a static-TLS cell of this (executable)
     /// runtime, at a fixed offset from the thread pointer that JIT code reads via fs.
     pub fn jit_offset(_key: u64, emit: &dyn Fn(&[u8]) -> u64) -> u64 {
+        #[cfg(target_arch = "x86_64")]
         let reader = emit(&relax_backend::x64::fs_reader());
+        #[cfg(not(target_arch = "x86_64"))]
+        let reader: u64 = compile_error!("the JIT does not build for Linux on this CPU: its thread-local fast path has only the x86-64 (fs) reader on Linux");
         let fs_base: rt_fn_ty!(fn() -> u64) = unsafe { std::mem::transmute(reader as usize) };
         let cell = TLS_BLOCK.with(|c| c as *const std::cell::Cell<u64> as u64);
         let off = cell.wrapping_sub(fs_base()) as i64;
@@ -158,6 +161,23 @@ mod fixed {
         }
     }
 
+    /// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+    pub(crate) unsafe fn reset_statics() {
+        use relax_session::reset_static as reset;
+        // (the reader is code of the ended run; the offsets start over, jit.rs `fresh_thread` gives a thread that stays a clean reserve)
+        reset(&FS_BASE, AtomicU64::new(0));
+        reset(&BASE, std::sync::OnceLock::new());
+        reset(&NEXT, AtomicU32::new(0));
+    }
+
+    /// The calling thread's words are the ended run's: they go.
+    pub fn static_tls_clear() {
+        let r = reserve();
+        for k in 0..RESERVE / 8 {
+            unsafe { (*r.add(k)).set(0) };
+        }
+    }
+
     /// Exchanges the calling thread's static TLS words in use with `saved` (empty: zeros), so a
     /// scoped thread-local block (jit.rs domain_callback) starts from fresh values and the
     /// thread's own come back after it.
@@ -183,9 +203,12 @@ mod fixed {
         None
     }
     pub fn static_tls_swap(_saved: &mut Vec<u64>) {}
+    pub fn static_tls_clear() {}
     pub extern "C" fn relax_tls_fixed(_addr: u64) -> u32 {
         0
     }
+
+    pub(crate) unsafe fn reset_statics() {}
 }
 pub use fixed::*;
 
@@ -240,7 +263,10 @@ mod imp {
 
     /// The inline fast path reads the TSD slot directly: check it sees pthread's value.
     pub fn jit_offset(key: u64, emit: &dyn Fn(&[u8]) -> u64) -> u64 {
+        #[cfg(target_arch = "aarch64")]
         let reader = emit(&relax_backend::arm64::tsd_reader());
+        #[cfg(not(target_arch = "aarch64"))]
+        let reader: u64 = compile_error!("the JIT does not build for x86-64 Apple targets: its thread-local fast path has no x86-64 Apple TLS reader (Apple hosts are AArch64)");
         let read: extern "C" fn(u64) -> u64 = unsafe { std::mem::transmute(reader as usize) };
         let old = get(key);
         set(key, 0x5a5a_0000 as *mut u8);
@@ -316,4 +342,9 @@ mod imp {
         }
         off
     }
+}
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    fixed::reset_statics();
 }

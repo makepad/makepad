@@ -162,6 +162,11 @@ pub fn async2_val() -> u64 { 0 }
 pub fn dropi_val() -> u64 { 0 }
 pub fn life_of(a: &u64) -> u64 { *a }
 pub fn life_val() -> u64 { life_of(&1) }
+pub trait Valued { fn v(&self) -> u64; }
+impl Valued for u64 { fn v(&self) -> u64 { *self } }
+pub fn odefault_val() -> u64 { let x = 3u64; let h: Holder<dyn Valued> = Holder(&x); h.0.v() }
+// after the fn: an edit of its body moves the struct, whose `T: 'a` gives `dyn Valued` its lifetime
+pub struct Holder<'a, T: 'a + ?Sized>(pub &'a T);
 extern "C" fn ec() -> u64 { 1 }
 pub fn ecfn_val() -> u64 { let f: extern "C" fn() -> u64 = ec; f() }
 fn tbl_a() -> u64 { 1 }
@@ -177,8 +182,8 @@ pub fn rmuse_val() -> u64 { in_use() + 1u16.k() }
 
 pub fn report2() -> String {
     format!(
-        "apit={} apit2={} apit3={} gen2={} cgen={} gstruct={} tblanket={} trm={} tdef={} aconst={} atype={} ccap={} cnest={} rpit={} sadd={} srm={} cadd={} crm={} clen={} madd={} mrm={} mfn={} modrm={} evrm={} epay={} edis={} dadd={} drm={} cfg1={} cfg2={} async1={} async2={} dropi={} life={} ecfn={} fptr={} mfile={} partial_landing={} rmuse={}",
-        apit_val(), apit2_val(), apit3_val(), gen2_val(), cgen_val(), gstruct_val(), tblanket_val(), trm_val(), tdef_val(), aconst_val(), atype_val(), ccap_val(), cnest_val(), rpit_val(), sadd_val(), srm_val(), cadd_val(), crm_val(), clen_val(), madd_val(), mrm_val(), mfn_val(), modrm_val(), evrm_val(), epay_val(), edis_val(), dadd_val(), drm_val(), cfg_on(), cfg2_val(), async1_val(), async2_val(), dropi_val(), life_val(), ecfn_val(), fptr_val(), mfile_val(), partial_landing_val(), rmuse_val(),
+        "apit={} apit2={} apit3={} gen2={} cgen={} gstruct={} tblanket={} trm={} tdef={} aconst={} atype={} ccap={} cnest={} rpit={} sadd={} srm={} cadd={} crm={} clen={} madd={} mrm={} mfn={} modrm={} evrm={} epay={} edis={} dadd={} drm={} cfg1={} cfg2={} async1={} async2={} dropi={} life={} odefault={} ecfn={} fptr={} mfile={} partial_landing={} rmuse={}",
+        apit_val(), apit2_val(), apit3_val(), gen2_val(), cgen_val(), gstruct_val(), tblanket_val(), trm_val(), tdef_val(), aconst_val(), atype_val(), ccap_val(), cnest_val(), rpit_val(), sadd_val(), srm_val(), cadd_val(), crm_val(), clen_val(), madd_val(), mrm_val(), mfn_val(), modrm_val(), evrm_val(), epay_val(), edis_val(), dadd_val(), drm_val(), cfg_on(), cfg2_val(), async1_val(), async2_val(), dropi_val(), life_val(), odefault_val(), ecfn_val(), fptr_val(), mfile_val(), partial_landing_val(), rmuse_val(),
     )
 }
 

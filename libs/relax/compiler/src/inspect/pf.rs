@@ -6,7 +6,7 @@
 
 use makepad_prof_stream::{ask, Profile};
 
-fn split(words: &[String]) -> (String, Vec<(String, String)>) {
+pub(super) fn split(words: &[String]) -> Result<(String, Vec<(String, String)>), String> {
     // the client's own options leave the query
     let mut q = Vec::new();
     let mut own = Vec::new();
@@ -16,7 +16,14 @@ fn split(words: &[String]) -> (String, Vec<(String, String)>) {
             _ => q.push(w.clone()),
         }
     }
-    (q.join(" "), own)
+    let query = q.join(" ");
+    let parsed = ask::Q::parse(&query);
+    let cmd = parsed.pos.first().map(String::as_str).unwrap_or("summary");
+    let sub = parsed.pos.get(1).map(String::as_str).unwrap_or("");
+    let schema = makepad_remote::params::profile(cmd, sub).ok_or_else(|| format!("unknown profile query {cmd:?}"))?;
+    let schema = format!("{}{}{}", makepad_remote::params::PROFILE_RECORD, if schema.is_empty() { "" } else { "," }, schema);
+    makepad_remote::params::validate(parsed.kv.iter().map(|(k, _)| k.as_str()), &schema)?;
+    Ok((query, own))
 }
 
 fn opt<'a>(own: &'a [(String, String)], k: &str) -> Option<&'a str> {
@@ -47,7 +54,10 @@ fn answer(p: &Profile, query: &str, own: &[(String, String)]) -> i32 {
 /// `file=<x.mkpf> pf <query>`.
 pub fn file_main(path: &str, words: &[String]) -> i32 {
     let w: Vec<String> = words.iter().skip_while(|w| *w == "pf").cloned().collect();
-    let (query, own) = split(&w);
+    let (query, own) = match split(&w) {
+        Ok(q) => q,
+        Err(e) => { println!("{e}"); return 1; }
+    };
     match load(path) {
         Ok(p) => answer(&p, &query, &own),
         Err(e) => {
@@ -59,7 +69,10 @@ pub fn file_main(path: &str, words: &[String]) -> i32 {
 
 /// `<app> pf <query>`: records the live stream for `s` seconds (default 3), then answers.
 pub fn live_main(app: &super::client::App, words: &[String]) -> i32 {
-    let (query, own) = split(words);
+    let (query, own) = match split(words) {
+        Ok(q) => q,
+        Err(e) => { println!("{e}"); return 1; }
+    };
     let secs: f64 = opt(&own, "s").and_then(|v| v.parse().ok()).unwrap_or(3.0);
     let client = match makepad_remote::Client::connect(&app.socket) {
         Ok(c) => c,

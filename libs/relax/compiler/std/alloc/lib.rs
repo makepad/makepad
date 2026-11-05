@@ -29,7 +29,7 @@ pub mod collections {
 
 /// alloc::ffi (CString lives in core/ffi/c_string.rs; std-os lane)
 pub mod ffi {
-    pub use core::ffi::{CString, IntoStringError, NulError};
+    pub use core::ffi::{CString, FromVecWithNulError, IntoStringError, NulError};
 }
 
 pub mod fmt {
@@ -61,7 +61,7 @@ pub mod str {
 }
 
 pub mod string {
-    pub use core::string::{Drain, FromUtf16Error, FromUtf8Error, String, ToString};
+    pub use core::string::{Drain, FromUtf16Error, FromUtf8Error, ParseError, String, ToString};
 }
 
 pub mod sync {

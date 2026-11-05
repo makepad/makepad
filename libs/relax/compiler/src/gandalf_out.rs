@@ -7,7 +7,7 @@ impl Console {
     pub fn start(json: bool, quiet: bool) -> Self {
         let _k = crate::zone_alloc::kept();
         let (id, context) = lazy::subscribe();
-        let join = std::thread::Builder::new().name("gandalf-out".into()).spawn(move || {
+        let join = crate::run_threads::spawn("gandalf-out", move || {
             let mut count = 0;
             for ev in context {
                 // The test dependency check prints and reports these when the tests end.

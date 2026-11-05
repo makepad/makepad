@@ -68,9 +68,10 @@ fn hot_fraction() -> f64 {
     *F.get_or_init(|| std::env::var("MAKEPAD_RUN_WASM_EXPORT_HOT").ok().and_then(|v| v.parse().ok()).unwrap_or(0.99))
 }
 
+static HOT: std::sync::OnceLock<Option<std::collections::HashSet<u32>>> = std::sync::OnceLock::new();
+
 /// Slot `id` is in the sampled hot set (hot_fraction) of the run that is exporting.
 pub(crate) fn sampled_hot(id: u32) -> bool {
-    static HOT: std::sync::OnceLock<Option<std::collections::HashSet<u32>>> = std::sync::OnceLock::new();
     let hot = HOT.get_or_init(|| {
         let frac = hot_fraction();
         if frac >= 1.0 {
@@ -1984,4 +1985,25 @@ fn keep_closure(funcs: &mut BTreeMap<u32, Func>, u: &Unit, whole: bool) -> Resul
         eprintln!("wasm export: size first: {} cold O1 bodies shipped their size-first build; {} slots sampled", shipped, sampled);
     }
     Ok((kept, failed))
+}
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    use relax_session::reset_static as reset;
+    reset(&CAPTURED, Mutex::new(None));
+    reset(&ENTRY, std::sync::atomic::AtomicU32::new(u32::MAX));
+    reset(&FAILED, std::sync::atomic::AtomicBool::new(false));
+    reset(&CLOSURE_ORIGINS, Mutex::new(BTreeMap::new()));
+    reset(&CLOSURE_PARENTS, Mutex::new(BTreeMap::new()));
+    reset(&CLOSURE_VIA, Mutex::new(BTreeMap::new()));
+    reset(&CLOSURE_VTABLES, Mutex::new(BTreeMap::new()));
+    reset(&SAMPLES, Mutex::new(None));
+    reset(&HOT, std::sync::OnceLock::new());
+    reset(&O3_BODIES, Mutex::new(None));
+    reset(&POSTOPT_EFFECTS, [const { std::sync::atomic::AtomicUsize::new(0) }; 5]);
+    reset(&ROOTS, Mutex::new(Vec::new()));
+    reset(&FINISHED, std::sync::atomic::AtomicBool::new(false));
+    reset(&FORCING, std::sync::atomic::AtomicBool::new(false));
+    reset(&SIZE_FIRST, Mutex::new(None));
+    reset(&SIZE_FIRST_SHIPPED, Mutex::new(None));
 }

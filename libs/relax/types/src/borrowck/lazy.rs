@@ -470,7 +470,7 @@ fn enqueue(options: &crate::options::Options, src: &Arc<dyn FrontSource>, def: D
     if !STARTED.swap(true, Ordering::SeqCst) {
         let s = src.clone(); let verbose = options.verbose;
         { let _k = crate::zone_alloc::kept();
-        let _ = std::thread::Builder::new().name("gandalf".to_string()).spawn(move || { let _z = crate::zone_alloc::compiler_thread(); worker(s, verbose) });
+        let _ = crate::run_threads::spawn("gandalf", move || { let _z = crate::zone_alloc::compiler_thread(); worker(s, verbose) });
         }
     }
     WAKE.notify_one();
@@ -696,7 +696,7 @@ fn worker(mut src: Arc<dyn FrontSource>, verbose: bool) {
             continue;
         }
         let _cost = relax_codegen::fncost::Record::new(u32::MAX, 0, "gandalf");
-        let t0 = relax_backend::cpu_ns();
+        let t0 = relax_session::clock::cpu_ns();
         let mut stale = false;
         let mut discovery_next = None;
         let mut reused_owner = false;
@@ -812,7 +812,7 @@ fn worker(mut src: Arc<dyn FrontSource>, verbose: bool) {
                 record(item.key.clone(), FnVerdict::Unchecked(format!("checker failure: {}", message)));
             }
         });
-        CHECK_NS.fetch_add(relax_backend::cpu_ns() - t0, Ordering::Relaxed);
+        CHECK_NS.fetch_add(relax_session::clock::cpu_ns() - t0, Ordering::Relaxed);
         *RUNNING.lock().unwrap_or_else(|e| e.into_inner()) = None;
         // An exit cancels the whole attempt, including constant deferrals/discovery.
         // Only a front writer's temporary preemption is queued again below.
@@ -894,7 +894,7 @@ pub fn check_before_run(prog: &Program, tcx: &Tcx, src: &Arc<dyn FrontSource>, d
     if let Some(v) = stored { v.reuse(key); return Vec::new(); }
     let Some(owner) = super::body::CheckedBody::item(prog, def) else { record(key, FnVerdict::Unchecked("no body".into())); return Vec::new(); };
     let args = owner.identity_args(prog, tcx);
-    let t0 = relax_backend::cpu_ns();
+    let t0 = relax_session::clock::cpu_ns();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let state = crate::tcx::EvalState::new();
         let cx = crate::tcx::EvalCx::new(prog, tcx, crate::tcx::TypingEnv::fully_monomorphized(prog), &state);
@@ -902,7 +902,7 @@ pub fn check_before_run(prog: &Program, tcx: &Tcx, src: &Arc<dyn FrontSource>, d
         if !body.errors.is_empty() { return None; }
         Some(super::check_body(&cx, prog, tcx, &body))
     })).map_err(|e| report_panic(prog.def_path(def), &e));
-    CHECK_NS.fetch_add(relax_backend::cpu_ns() - t0, Ordering::Relaxed);
+    CHECK_NS.fetch_add(relax_session::clock::cpu_ns() - t0, Ordering::Relaxed);
     CHECKED.fetch_add(1, Ordering::Relaxed);
     if let Some(v) = storable(&result) {
         let mut keys = VERDICT_KEYS.lock().unwrap_or_else(|e| e.into_inner());
@@ -1023,3 +1023,30 @@ fn grew(b: &super::field_views::Summary, a: &super::field_views::Summary) -> boo
 #[cfg(test)]
 #[path = "lazy_tests.rs"]
 mod lazy_tests;
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    use relax_session::reset_static as reset;
+    reset(&WITHHELD, AtomicU64::new(0));
+    reset(&SUBS, Mutex::new(Vec::new()));
+    reset(&VERDICTS, LazyLock::new(|| Mutex::new(HashMap::default())));
+    reset(&DISJOINT, LazyLock::new(|| Mutex::new(HashMap::default())));
+    reset(&RECORDED_OWNERS, Mutex::new(None));
+    reset(&VERDICT_KEYS, Mutex::new(Vec::new()));
+    reset(&CACHED_CLEAN, AtomicU64::new(0));
+    reset(&CACHED_UNCHECKED, AtomicU64::new(0));
+    reset(&QUEUE, Mutex::new(None));
+    reset(&REHOMED, Mutex::new(Vec::new()));
+    reset(&STARTED, AtomicBool::new(false));
+    reset(&STOP, AtomicBool::new(false));
+    reset(&CHECKED, AtomicU64::new(0));
+    reset(&PANICS, AtomicU64::new(0));
+    reset(&STALE, AtomicU64::new(0));
+    reset(&PANIC_NOTES, Mutex::new(Vec::new()));
+    reset(&CHECK_NS, AtomicU64::new(0));
+    reset(&PREEMPTED, AtomicU64::new(0));
+    reset(&VIOLATIONS, AtomicU64::new(0));
+    reset(&IDLE_REPORTED, AtomicBool::new(false));
+    reset(&RUNNING, Mutex::new(None));
+    reset(&SETTLE, Mutex::new(Vec::new()));
+}

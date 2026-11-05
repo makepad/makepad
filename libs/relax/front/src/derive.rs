@@ -157,13 +157,19 @@ impl<'a> Parser<'a> {
         None
     }
 
-    /// Token `i` as the source spelled it (a `>` the parser split off the token is restored).
+    /// Token `i` as the source spelled it (split generic delimiters are restored).
     fn copy_tok(&self, g: &mut Gen, i: usize) {
         let t = self.toks.at(i);
         if t.kind == T::Gt && self.closes(i) == 2 {
             g.punct(T::Gt);
             g.punct(T::Gt);
         } else {
+            // `Foo<-1>` is lexed with `<-`. Parsing its generic arguments
+            // consumes `<` and leaves `-` in place, just as `>>` leaves `>`.
+            let prev_hi = if i > 0 { self.toks.at(i - 1).hi } else { 0 };
+            if t.kind == T::Minus && t.lo > prev_hi && self.bytes(t.lo - 1, t.lo) == b"<" {
+                g.punct(T::Lt);
+            }
             g.put(t.kind, &String::from_utf8_lossy(self.tok_text(t)));
         }
     }
@@ -217,6 +223,18 @@ impl<'a> Parser<'a> {
                 }
                 let n = self.tok_text(t);
                 if let Some(e) = EXPANDED.iter().find(|x| x.as_bytes() == n) {
+                    let mut start = i;
+                    while start >= p + 2 && self.toks.at(start - 1).kind == T::PathSep
+                        && matches!(self.toks.at(start - 2).kind, T::Ident | T::RawIdent | T::KwCrate | T::KwSelfValue | T::KwSuper) { start -= 2; }
+                    if start > p && self.toks.at(start - 1).kind == T::PathSep { start -= 1; }
+                    let path = (start..=i).map(|j| String::from_utf8_lossy(self.tok_text(self.toks.at(j)))).collect::<String>();
+                    if crate::builtins::derive_entry(self, tok_lo, &path).is_some() { continue; }
+                    if path.contains("::") {
+                        let segments: Vec<_> = path.split("::").map(str::to_string).collect();
+                        if !self.macros.as_ref().is_some_and(|scope| scope.builtin_derive_path(&self.krate, &self.cur_module(), &segments, &mut Default::default())) {
+                            return Err(PErr { pos: t.lo, msg: format!("cannot find derive macro `{path}` in this scope") });
+                        }
+                    }
                     // (written twice, a derive is expanded twice: the impls then conflict, E0119)
                     wanted.push(e);
                 }

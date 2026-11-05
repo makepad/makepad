@@ -96,7 +96,7 @@ fn a03_ip_conversions() {
     let v6 = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1);
     let bits: u128 = v6.into();
     println!("| v6 bits {:#x} back {}", bits, Ipv6Addr::from(bits));
-    let v4: u32 = Ipv4Addr::new(10, 1, 2, 3).into();
+    let v4: u32 = Ipv4Addr::new(10, 77, 0, 3).into();
     println!("| v4 bits {:#x}", v4);
     let ip: IpAddr = [0u16, 0, 0, 0, 0, 0xffff, 0x7f00, 1].into();
     println!("| ip from segments {}", ip);

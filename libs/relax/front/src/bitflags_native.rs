@@ -1,9 +1,10 @@
 //! Native `bitflags!` (bitflags 2.x): Relax generates the items the crate's macro_rules
-//! produce (bitflags 2.10: lib.rs `bitflags!`, public.rs, internal.rs; no optional features)
+//! produce (bitflags 2.10: lib.rs `bitflags!`, public.rs, internal.rs)
 //! straight from the call's tokens -- no macro_rules matching or recursive transcription.
 //! The generated items are the same as the crate's expansion, so the API, Debug/Display output,
 //! iteration and from_bits rules are the crate's own (its `Flags`, `iter`, `parser` code is
-//! used as is, from the crate compiled by Relax). Used when the call resolves to the `bitflags`
+//! used as is, from the crate compiled by Relax). Optional external trait implementations
+//! use the crate's own feature-aware helper macros. Used when the call resolves to the `bitflags`
 //! crate's macro (builtins::override_rules); the real crate stays for rustc.
 //!
 //! One difference that is not observable through the API: the hidden internal type is a sibling
@@ -467,6 +468,12 @@ pub fn expand(input: &TokenStream, local: bool, cfg: Option<&crate::cfg::CfgSet>
         ops(&mut o, i);
         iter(&mut o, c, i, p);
         tg!(&mut o; impl #word(i) { #[inline] pub fn bits_mut (& mut self) -> & mut #append(t) { & mut self . 0 } });
+        // Keep optional traits and their wire formats owned by the bitflags crate.
+        tg!(&mut o; #append(c) :: __impl_external_bitflags ! #open_brace() #word(i) : #append(t) , #word(p) #open_brace());
+        for f in &d.flags {
+            tg!(&mut o; #append(&f.attrs) const #word(f.name.as_deref().unwrap_or("_")) ;);
+        }
+        tg!(&mut o; #close_brace() #close_brace());
         // public type: forward, ops, iter
         impl_bitflags(&mut o, &none_outer, p, t, &forward_bodies(i, edition));
         ops(&mut o, p);

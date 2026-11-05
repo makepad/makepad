@@ -13,7 +13,8 @@ pub static DEPENDENCIES: &[(&str, &[&str])] = &[
     ("makepad_script_derive_impl", &["makepad_micro_proc_macro"]),
     ("makepad_derive_widget", &["makepad_derive_widget_impl", "makepad_micro_proc_macro", "makepad_live_id"]),
     ("makepad_derive_widget_impl", &["makepad_micro_proc_macro"]),
-    ("makepad_relax_api", &["makepad_relax_api_macro"]),
+    ("makepad_alloc_phase", &[]),
+    ("makepad_relax_api", &["makepad_alloc_phase", "makepad_relax_api_macro"]),
     ("makepad_relax_api_macro", &["makepad_relax_api_macro_impl"]),
     ("makepad_relax_api_macro_impl", &["makepad_micro_proc_macro"]),
 ];

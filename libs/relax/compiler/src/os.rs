@@ -29,3 +29,10 @@ pub mod thread;
 pub mod tls;
 #[cfg(windows)]
 pub(crate) use relax_session::win32;
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    fault::reset_statics();
+    proc::reset_statics();
+    tls::reset_statics();
+}

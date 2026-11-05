@@ -118,15 +118,19 @@ pub fn run(core: &str) {
 
     let mut z = String::new();
     header(&mut z, "Per-type NonZero<T> API (constants, bit queries, checked/saturating arithmetic, conversions, BitOr), as real core's nonzero.rs macros generate it.");
-    z.push_str("use super::nonzero::NonZero;\nuse crate::ops::{BitOr, BitOrAssign, Div, DivAssign, Rem, RemAssign};\n\n");
+    z.push_str("use super::nonzero::NonZero;\nuse crate::num::TryFromIntError;\nuse crate::ops::{BitOr, BitOrAssign, Div, DivAssign, Rem, RemAssign};\n\n");
     for t in INTS.iter().filter(|t| t.pw != 32) {
         gen_nonzero(&mut z, t);
     }
     for from in INTS.iter().filter(|t| t.pw != 32) {
         for to in INTS.iter().filter(|t| t.pw != 32) {
-            if from.name != to.name && has_from(from, to) {
-                let (f, t) = (from.name, to.name);
+            if from.name == to.name { continue; }
+            let (f, t) = (from.name, to.name);
+            if has_from(from, to) {
                 let _ = writeln!(z, "impl From<NonZero<{f}>> for NonZero<{t}> {{ fn from(v: NonZero<{f}>) -> NonZero<{t}> {{ unsafe {{ NonZero::new_unchecked(v.get() as {t}) }} }} }}");
+            } else {
+                // A successful primitive conversion preserves the nonzero value.
+                let _ = writeln!(z, "impl TryFrom<NonZero<{f}>> for NonZero<{t}> {{ type Error = TryFromIntError; fn try_from(v: NonZero<{f}>) -> Result<NonZero<{t}>, TryFromIntError> {{ let value = <{t} as TryFrom<{f}>>::try_from(v.get())?; Ok(unsafe {{ NonZero::new_unchecked(value) }}) }} }}");
             }
         }
     }
@@ -152,10 +156,10 @@ fn gen_nonzero(o: &mut String, t: &Int) {
     let _ = writeln!(o, "    pub const fn leading_zeros(self) -> u32 {{ self.get().leading_zeros() }}");
     let _ = writeln!(o, "    pub const fn trailing_zeros(self) -> u32 {{ self.get().trailing_zeros() }}");
     let _ = writeln!(o, "    pub const fn count_ones(self) -> NonZero<u32> {{ unsafe {{ NonZero::new_unchecked(self.get().count_ones()) }} }}");
-    let _ = writeln!(o, "    pub fn checked_mul(self, other: NonZero<{n}>) -> Option<NonZero<{n}>> {{ match self.get().checked_mul(other.get()) {{ Some(v) => Some(unsafe {{ NonZero::new_unchecked(v) }}), None => None }} }}");
-    let _ = writeln!(o, "    pub fn saturating_mul(self, other: NonZero<{n}>) -> NonZero<{n}> {{ unsafe {{ NonZero::new_unchecked(self.get().saturating_mul(other.get())) }} }}");
-    let _ = writeln!(o, "    pub fn checked_pow(self, other: u32) -> Option<NonZero<{n}>> {{ match self.get().checked_pow(other) {{ Some(v) => Some(unsafe {{ NonZero::new_unchecked(v) }}), None => None }} }}");
-    let _ = writeln!(o, "    pub fn saturating_pow(self, other: u32) -> NonZero<{n}> {{ unsafe {{ NonZero::new_unchecked(self.get().saturating_pow(other)) }} }}");
+    let _ = writeln!(o, "    pub const fn checked_mul(self, other: NonZero<{n}>) -> Option<NonZero<{n}>> {{ match self.get().checked_mul(other.get()) {{ Some(v) => Some(unsafe {{ NonZero::new_unchecked(v) }}), None => None }} }}");
+    let _ = writeln!(o, "    pub const fn saturating_mul(self, other: NonZero<{n}>) -> NonZero<{n}> {{ unsafe {{ NonZero::new_unchecked(self.get().saturating_mul(other.get())) }} }}");
+    let _ = writeln!(o, "    pub const fn checked_pow(self, other: u32) -> Option<NonZero<{n}>> {{ match self.get().checked_pow(other) {{ Some(v) => Some(unsafe {{ NonZero::new_unchecked(v) }}), None => None }} }}");
+    let _ = writeln!(o, "    pub const fn saturating_pow(self, other: u32) -> NonZero<{n}> {{ unsafe {{ NonZero::new_unchecked(self.get().saturating_pow(other)) }} }}");
     if !t.signed {
         let _ = writeln!(o, "    pub fn checked_add(self, other: {n}) -> Option<NonZero<{n}>> {{ match self.get().checked_add(other) {{ Some(v) => Some(unsafe {{ NonZero::new_unchecked(v) }}), None => None }} }}");
         let _ = writeln!(o, "    pub fn saturating_add(self, other: {n}) -> NonZero<{n}> {{ unsafe {{ NonZero::new_unchecked(self.get().saturating_add(other)) }} }}");

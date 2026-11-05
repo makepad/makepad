@@ -94,6 +94,9 @@ pub(super) struct Ring {
     wrap_t: AtomicU64,
     /// short spans dropped (ELIDE_NS)
     pub(super) elided: AtomicU64,
+    /// the head when the last run ended: the records before it are not read (their labels may be
+    /// that run's, whose memory is gone)
+    floor: AtomicU64,
 }
 
 // written by its own thread only; readers check `head` before and after reading a slot
@@ -111,6 +114,10 @@ impl Ring {
         self.head.store(n + 1, Release);
     }
 }
+
+/// Whether records' labels can be read: not from when a run's end begins until its records are cut
+/// (a label or a `Location` may live in the run's memory). The readers hold it across their reads.
+static LABELS: std::sync::RwLock<bool> = std::sync::RwLock::new(true);
 
 static RINGS: Mutex<Vec<&'static Ring>> = Mutex::new(Vec::new());
 /// rings of threads that exited, for the next threads
@@ -212,6 +219,7 @@ fn claim(old: *const Ring, tier: u8) -> Option<&'static Ring> {
                 tier,
                 wrap_t: AtomicU64::new(now),
                 elided: AtomicU64::new(0),
+                floor: AtomicU64::new(0),
             }));
             RINGS.lock().unwrap_or_else(|e| e.into_inner()).push(r);
             r
@@ -282,7 +290,7 @@ pub(super) fn read_ring(r: &Ring, from: u64, f: &mut dyn FnMut(u64, u64, &Rec)) 
     let len = r.len() as u64;
     let head = r.head.load(Acquire);
     let mut lost = 0;
-    let mut from = from.min(head);
+    let mut from = from.min(head).max(r.floor.load(Acquire));
     if head - from > len {
         lost += head - from - len;
         from = head - len;
@@ -391,9 +399,7 @@ pub fn register(endpoint: &makepad_remote::Endpoint) {
             let args = open.args.clone();
             let ch = open.channel;
             let _k = crate::zone_alloc::kept();
-            std::thread::Builder::new()
-                .name("run-inspect-prof".into())
-                .spawn(move || {
+            crate::run_threads::spawn("run-inspect-prof", move || {
                     (hooks.enter)();
                     VIEWERS.fetch_add(1, Relaxed);
                     super::timeline::flag_update();
@@ -402,8 +408,8 @@ pub fn register(endpoint: &makepad_remote::Endpoint) {
                     super::timeline::flag_update();
                     (hooks.exit)();
                 })
-                .map(|_| ())
-                .map_err(|e| (makepad_remote::conn::CLOSE_REFUSED, format!("cannot start the prof thread: {e}")))
+            .map(|_| ())
+            .map_err(|e| (makepad_remote::conn::CLOSE_REFUSED, format!("cannot start the prof thread: {e}")))
         }),
     );
 }
@@ -456,12 +462,10 @@ fn start_sampler(args: &str) -> Option<Sampler> {
     let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let (q, st) = (queue.clone(), stop.clone());
     let _k = crate::zone_alloc::kept();
-    std::thread::Builder::new()
-        .name("run-inspect-psamp".into())
-        .spawn(move || {
+    crate::run_threads::spawn("run-inspect-psamp", move || {
             super::heap::exclude_this_thread();
-            while !st.load(Relaxed) {
-                let run = super::prof::collect_ev(0.25, hz, ev, &|_| true, &|| st.load(Relaxed));
+            while !st.load(Relaxed) && !crate::run_threads::ending() {
+                let run = super::prof::collect_ev(0.25, hz, ev, &|_| true, &|| st.load(Relaxed) || crate::run_threads::ending());
                 let mut partial = Vec::new();
                 let v = super::calltree::expanded_raw(&run, &mut partial);
                 let mut g = q.lock().unwrap_or_else(|e| e.into_inner());
@@ -577,6 +581,10 @@ impl StreamEnc {
     /// Ring records from each cursor on (and at or after `min_t`, ring clock) as THREAD / SPANS
     /// / DROP records appended to `body`; advances the cursors.
     pub fn rings(&mut self, cursors: &mut Vec<(&'static Ring, u64)>, min_t: u64, body: &mut Vec<u8>) {
+        let labels = LABELS.read().unwrap_or_else(|e| e.into_inner());
+        if !*labels {
+            return;
+        }
         let mut per: Vec<(u32, Vec<ps::SpanRec>)> = Vec::new();
         let mut drops: Vec<(u32, u64)> = Vec::new();
         for (ring, cursor) in cursors.iter_mut() {
@@ -656,7 +664,10 @@ fn serve(ch: &makepad_remote::Channel, args: &str) {
     let mut fcur = super::flightrec::Cursors::new(backfill);
     let mut last_clock = std::time::Instant::now();
     loop {
-        // the viewer closed the channel
+        // the run ended (the viewer connects to the next one), or the viewer closed the channel
+        if crate::run_threads::ending() {
+            return;
+        }
         match ch.try_recv() {
             Err(false) | Ok(makepad_remote::Event::Closed(..)) => return,
             _ => {}
@@ -683,7 +694,8 @@ fn serve(ch: &makepad_remote::Channel, args: &str) {
         }
         // GPU pass spans (raw clock already)
         let mut gpu = Vec::new();
-        if gpu_on {
+        let labels = LABELS.read().unwrap_or_else(|e| e.into_inner());
+        if gpu_on && *labels {
             let (gev, glost) = GPU.lock().unwrap_or_else(|e| e.into_inner()).read(&mut gpu_cursor);
             if glost > 0 {
                 drops.push((gpu_tid, glost));
@@ -701,6 +713,7 @@ fn serve(ch: &makepad_remote::Channel, args: &str) {
                 enc.new_threads.push(ps::thread_payload(gpu_tid, 0, 0, ps::role::GPU, sid));
             }
         }
+        drop(labels);
         // CPU stack samples (hz=): per thread one SAMPLES batch; a thread without a lane gets one
         let mut samples: Vec<Vec<u8>> = Vec::new();
         if let Some(sm) = &sampler {
@@ -748,4 +761,21 @@ fn serve(ch: &makepad_remote::Channel, args: &str) {
         }
         std::thread::sleep(std::time::Duration::from_millis(16));
     }
+}
+
+/// A run's end began: nothing reads a label until `reset_statics` cut the run's records.
+pub(crate) fn run_ends() {
+    *LABELS.write().unwrap_or_else(|e| e.into_inner()) = false;
+}
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    use relax_session::reset_static as reset;
+    reset(&GPU, Mutex::new(Log::new()));
+    // the rings stay, with the threads that stay on them; the records so far are cut, as their
+    // labels may be gone
+    for r in RINGS.lock().unwrap_or_else(|e| e.into_inner()).iter() {
+        r.floor.store(r.head.load(Acquire), Release);
+    }
+    *LABELS.write().unwrap_or_else(|e| e.into_inner()) = true;
 }

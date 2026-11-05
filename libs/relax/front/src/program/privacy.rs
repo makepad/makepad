@@ -63,7 +63,9 @@ impl Program {
             };
             let mut next = None;
             let mut hidden = None;
-            let mut visible = false;
+            // A use imports every accessible namespace. An exported macro
+            // remains public when a private module has the same spelling.
+            let mut visible = last && in_use && last_ns.is_none() && self.lookup_macro_in_container(cur, name);
             for &ns in nss {
                 let mut q = GlobQuery { precise: true, ..Default::default() };
                 let Some((fd, v)) = self.lookup_in_module_vis(m, name, ns, &mut q) else { continue };
@@ -325,7 +327,7 @@ impl Program {
         let item = f.ast.items.iter().find(|it| it.lo == im.pos && matches!(it.kind, ItemKind::Use(_)))?;
         let import_vis = self.vis_module(im.file, im.module, &item.vis);
         let pd = self.def(parent);
-        let mut any_ok = false;
+        let mut any_ok = self.lookup_macro_in_container(parent, name);
         let mut failed: Option<(bool, BindVis)> = None;
         for ns in [true, false] {
             let found = match pd.kind {

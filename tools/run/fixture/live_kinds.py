@@ -15,14 +15,17 @@ live gets the restart button (`session relaunch`) and passes when the restarted 
 a kind fails on no effect after that, or on a crash, ICE, panic or parked thread at any point. An edit
 rustc rejects (accepted: KEEPS) passes when the app keeps running its old code with nothing wrong.
 partial_landing uses the fixture's native window and must patch automatically, clear its refusal,
-and leave session view over_app false; it never requests a relaunch.
+and leave session view over_app false; it never requests a relaunch. The shader kinds edit the colour
+of the window's swatch shader (in its own file, and in a lookup it spreads from another file, as
+renderers spread mod.draw.PaintLookup) and read it from grabs: the new colour must show with no
+restart asked for (patched live, or the JIT's own restart), never "patched" and the old colour.
 --warm: each worker's disk cache is filled by a run of the fixture first, so every session starts from
 stored code, as a person's second run does (without it each session compiles what it runs). A kind whose
 JIT said "patched" and whose effect showed only after the relaunch is then marked "stale" (but for
 running_loop_body: a loop that never returns shows its edit only after a restart, stored or not).
 Prints the table `kind | outcome | effect | ms` and `live_kinds: N/M landed`; exit 1 on any miss.
 """
-import json, os, shutil, subprocess, sys, tempfile, threading, time
+import json, os, shutil, subprocess, sys, tempfile, threading, time, zlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PKG = os.path.join(HERE, "live_kinds")
@@ -118,6 +121,9 @@ KINDS += [
     ("async_fn_added", "async2", [(K, "pub fn async2_val() -> u64 { 0 }", "async fn newaf(a: u64) -> u64 { af2(a).await + 1 }\nasync fn af2(a: u64) -> u64 { a }\npub fn async2_val() -> u64 { block_on(newaf(3)) }")], {4}),
     ("drop_impl_added", "dropi", [(K, "pub fn dropi_val() -> u64 { 0 }", "struct Dp<'a>(&'a Cell<u64>);\nimpl Drop for Dp<'_> { fn drop(&mut self) { self.0.set(5); } }\npub fn dropi_val() -> u64 { let c = Cell::new(0); { let _d = Dp(&c); } c.get() }")], {5}),
     ("lifetime_param_added", "life", [(K, "pub fn life_of(a: &u64) -> u64 { *a }", "pub fn life_of<'a>(a: &'a u64) -> u64 { *a + 1 }")], {2}),
+    # a body edit moves the struct after it: the object lifetime default its `T: 'a` gives is read
+    # from its lifetime names, which follow the edited version (a Fab edit ICE'd on stale ones)
+    ("body_moves_struct_lifetimes", "odefault", [(K, "let x = 3u64; let h", "let x = 3u64; let more = 1u64; let h"), (K, "h.0.v() }", "h.0.v() + more }")], {4}),
     ("extern_c_fn_ptr", "ecfn", [(K, 'extern "C" fn ec() -> u64 { 1 }', 'extern "C" fn ec() -> u64 { 2 }')], {2}),
     ("fn_ptr_table", "fptr", [(K, "fn tbl_a() -> u64 { 1 }", "fn tbl_a() -> u64 { 2 }")], {2}),
     ("mod_file_added", "mfile", [("src/extra_mod.rs", None, "pub fn v() -> u64 { 24 }\n"), (K, "pub fn mfile_val() -> u64 { 0 }", "#[path = \"extra_mod.rs\"] mod extra_mod;\npub fn mfile_val() -> u64 { extra_mod::v() }")], {24}),
@@ -132,6 +138,15 @@ KINDS += [
     ("type_error", "rmuse", [(K, "pub fn in_use() -> u64 { 1 }", "pub fn in_use() -> u64 { \"x\" }")], KEEPS),
     ("syntax_error", "rmuse", [(K, "pub fn in_use() -> u64 { 1 }", "pub fn in_use() -> u64 { 1 ")], KEEPS),
     ("trait_removed_in_use", "rmuse", [(K, "pub trait Kept { fn k(&self) -> u64; }\nimpl Kept for u16 { fn k(&self) -> u64 { 1 } }\n", "")], KEEPS),
+]
+# a shader's colour: the fixture window's swatches, read from a grab at (x, y) of the window: the
+# window's own shader, the lookup it and a shader type spread from another file, and that type (in
+# the tree, and made from its default and held outside it)
+W, SW = "src/window.rs", "src/swatch.rs"
+KINDS += [
+    ("shader_same_file", "pixel", [(W, "return mix(vec4(1.0, 0.0, 0.0, 1.0)", "return mix(vec4(0.0, 1.0, 0.0, 1.0)")], {"at": [(0.125, 0.8)], "before": (255, 0, 0), "after": (0, 255, 0)}),
+    ("shader_other_file", "pixel", [(SW, "return vec4(0.0, 0.0, 1.0, 1.0)", "return vec4(1.0, 1.0, 0.0, 1.0)")], {"at": [(0.375, 0.8), (0.6875, 0.8), (0.9375, 0.8)], "before": (0, 0, 255), "after": (255, 255, 0)}),
+    ("shader_type_other_file", "pixel", [(SW, "return mix(vec4(1.0, 0.0, 1.0, 1.0)", "return mix(vec4(0.0, 1.0, 1.0, 1.0)")], {"at": [(0.5625, 0.8), (0.8125, 0.8)], "before": (255, 0, 255), "after": (0, 255, 255)}),
 ]
 # the UI cases (makepad-example-counter, seen in its live widget tree through makepad inspect):
 # a script_mod! (Splash DSL) edit; an event handler's body (clicked after the landing check);
@@ -163,6 +178,56 @@ def inspect(pid, tmp, *q):
     except subprocess.TimeoutExpired:
         return ""
     return r.stdout + r.stderr
+
+def png_rgb(path, points):
+    """The colours at `points` ((fx, fy), fractions of the size) of an 8-bit RGB or RGBA PNG."""
+    data = open(path, "rb").read()
+    if data[:8] != b"\x89PNG\r\n\x1a\n":
+        raise ValueError("not a PNG")
+    pos, idat, w, h, bpp = 8, b"", 0, 0, 0
+    while pos < len(data):
+        n = int.from_bytes(data[pos:pos + 4], "big")
+        kind, body = data[pos + 4:pos + 8], data[pos + 8:pos + 8 + n]
+        pos += 12 + n
+        if kind == b"IHDR":
+            w, h = int.from_bytes(body[0:4], "big"), int.from_bytes(body[4:8], "big")
+            if body[8] != 8 or body[9] not in (2, 6):
+                raise ValueError("PNG depth %d colour type %d" % (body[8], body[9]))
+            bpp = 3 if body[9] == 2 else 4
+        elif kind == b"IDAT":
+            idat += body
+        elif kind == b"IEND":
+            break
+    raw, stride = zlib.decompress(idat), w * bpp
+    rows, prev = {}, bytearray(stride)
+    want = {int(fy * (h - 1)) for _, fy in points}
+    for row in range(max(want) + 1):
+        f, line = raw[row * (stride + 1)], bytearray(raw[row * (stride + 1) + 1:(row + 1) * (stride + 1)])
+        for i in range(stride):
+            a = line[i - bpp] if i >= bpp else 0
+            b = prev[i]
+            c = prev[i - bpp] if i >= bpp else 0
+            if f == 1:
+                line[i] = (line[i] + a) & 255
+            elif f == 2:
+                line[i] = (line[i] + b) & 255
+            elif f == 3:
+                line[i] = (line[i] + (a + b) // 2) & 255
+            elif f == 4:
+                q = a + b - c
+                pa, pb, pc = abs(q - a), abs(q - b), abs(q - c)
+                line[i] = (line[i] + (a if pa <= pb and pa <= pc else b if pb <= pc else c)) & 255
+        prev = line
+        if row in want:
+            rows[row] = line
+    out = []
+    for fx, fy in points:
+        x, line = int(fx * (w - 1)), rows[int(fy * (h - 1))]
+        out.append(tuple(line[x * bpp:x * bpp + 3]))
+    return out
+
+def near(cs, want):
+    return cs is not None and all(abs(a - b) <= 48 for c in cs for a, b in zip(c, want))
 
 def click(pid, tmp, widget):
     reply = inspect(pid, tmp, "ui", "act", "q=path=" + widget, "press", "wait=1")
@@ -290,7 +355,8 @@ def run_kind(slot, kind):
     env = dict(os.environ, MAKEPAD_RUN_LIVE_READY=ready, MAKEPAD_RUN_HOME=home, MAKEPAD_RUN_CACHE_DIR=os.path.join(home, "cache"),
                MAKEPAD_RUN_TARGET_DIR=os.path.join(home, "target"), MAKEPAD_HIDE_WINDOWS="1", SANDBOX_MUTE="1", MAKEPAD_MUTE="1",
                LIVE_KINDS_SECS=str(int(WAIT) * 3 + 120), MAKEPAD_RUN_LIVE_TRACE="1", MAKEPAD_REMOTE="1")
-    features = ["--features", "window"] if name == "partial_landing" else []
+    window = name == "partial_landing" or key == "pixel"
+    features = ["--features", "window"] if window else []
     if warm_start and slot not in filled:
         # past the startup window (5 s), then a normal exit: the run's code goes into the cache
         subprocess.run(JIT + ["run", "--quiet", "--ahead=minimal", "relax-live-kinds"], cwd=pkg, env=dict(env, LIVE_KINDS_SECS="6"), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=600)
@@ -318,11 +384,31 @@ def run_kind(slot, kind):
     res = {"kind": name, "outcome": "-", "effect": "no", "ms": "-", "value": None, "note": ""}
     # the watcher applies saves once its startup gate opens (MAKEPAD_RUN_LIVE_TRACE says when)
     started = wait(lambda: os.path.exists(ready) and len(ticks()) >= 3 and any("watcher gate open" in l for _, l in err), 300)
-    if started and name == "partial_landing":
+    if started and window:
         started = wait(lambda: "Live patch probe" in inspect(p.pid, os.environ.get("TMPDIR", "/tmp"), "ui"), WAIT)
+    grab = os.path.join(work, "grab.png")
+    seen_colour = []
+    def colour():
+        # the swatch's colour now (a grab of the window): None while there is none
+        if seen_colour and time.time() - seen_colour[-1][0] < 0.5:
+            return seen_colour[-1][1]
+        if os.path.exists(grab):
+            os.remove(grab)
+        inspect(p.pid, os.environ.get("TMPDIR", "/tmp"), "grab", "out=" + grab)
+        try:
+            c = png_rgb(grab, accept["at"])
+        except (OSError, ValueError, IndexError, zlib.error):
+            c = None
+        seen_colour.append((time.time(), c))
+        return c
+    if started and key == "pixel" and not wait(lambda: near(colour(), accept["before"]), WAIT):
+        started = False
+        res_note = "the swatch is not drawn as written: %s, not %s" % (seen_colour[-1][1] if seen_colour else None, accept["before"])
+    else:
+        res_note = None
     if not started:
         res["outcome"] = "no-start"
-        res["note"] = (err[-1][1] if err else "")[:160]
+        res["note"] = res_note or (err[-1][1] if err else "")[:160]
     else:
         base = probe(ticks()[-1], key)
         t_save = time.time()
@@ -344,6 +430,13 @@ def run_kind(slot, kind):
         def hit():
             if accept == KEEPS:
                 return False
+            if key == "pixel":
+                c = colour()
+                if near(c, accept["after"]):
+                    res["value"] = " ".join("%d,%d,%d" % x for x in c)
+                    res["ms"] = "%.0f" % ((time.time() - t_save) * 1e3)
+                    return True
+                return False
             for t, l in out[n_out:]:
                 if l.startswith("out ") and not l.startswith("out restored"):
                     v = probe(l, key)
@@ -363,19 +456,25 @@ def run_kind(slot, kind):
                 patched_at.append(time.time())
                 return time.time() - patched_at[0] > 3
             return False
-        seen = wait(lambda: hit() or (name != "partial_landing" and said()), WAIT) and hit()
+        # (a shader edit shows when its frames are drawn: no stop at the JIT's answer)
+        seen = wait(lambda: hit() or (not window and said()), WAIT) and hit()
         e = [l for _, l in err[n_err:]]
         if accept == KEEPS:
             # rustc rejects the edit: the old code runs on, and the probe still ticks
             n = len(ticks())
             seen = said() and wait(lambda: len(ticks()) > n + 5, 10) and probe(ticks()[-1], key) == base
-        elif not seen and p.poll() is None and name != "partial_landing":
+        elif not seen and p.poll() is None and not window:
             res["patched_old"] = any(": patched (" in l for l in e)
             res["restart"] = inspect(p.pid, os.environ.get("TMPDIR", "/tmp"), "session", "relaunch").strip()[:120]
             seen = wait(hit, WAIT)
         res["effect"] = "yes" if seen else "no"
         res["fail"] = wrong([l for _, l in err[n_err:]] + [l for _, l in out[n_out:]]) or (None if p.poll() is None else "the app exited (%s)" % p.returncode)
-        if not seen:
+        if not seen and key == "pixel":
+            # the old colour on: whatever the JIT said, the edit did not land
+            last = seen_colour[-1][1] if seen_colour else None
+            res["value"] = " ".join("%d,%d,%d" % x for x in last) if last else "no grab"
+            res["fail"] = res["fail"] or "the shader still draws %s, not %s" % (res["value"], accept["after"])
+        elif not seen:
             vals = [probe(l, key) for _, l in out[n_out:] if l.startswith("out ") and not l.startswith("out restored")]
             res["value"] = vals[-1] if vals else base
         e = [l for _, l in err[n_err:]]

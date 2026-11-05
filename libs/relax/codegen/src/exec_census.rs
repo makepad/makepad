@@ -47,8 +47,9 @@ struct Registry {
     instances: HashMap<(usize, u32, Vec<u32>), Row>,
     rows: Vec<Row>,
 }
+static R: OnceLock<Mutex<Registry>> = OnceLock::new();
+
 fn registry() -> &'static Mutex<Registry> {
-    static R: OnceLock<Mutex<Registry>> = OnceLock::new();
     R.get_or_init(Default::default)
 }
 fn fresh(r: &mut Registry, meta: Metadata) -> Row {
@@ -103,13 +104,13 @@ struct State { unit: usize, demand: bool, stack: Vec<Frame>, phase: usize, cpu: 
 relax_session::memo_local! { static STATE: RefCell<State>; }
 impl State {
     fn tick(&mut self) {
-        let now = relax_backend::cpu_ns();
+        let now = relax_session::clock::cpu_ns();
         let phase = match self.phase { 1 => Some(0), 3 => Some(1), 4 => Some(2), 5 | 9 | 10 => Some(3), _ => None };
         if let (Some(p), Some(frame)) = (phase, self.stack.last()) {
             let mut f = frame.row.lock().unwrap();
             if active() { f.costs[frame.tier][p] += now.saturating_sub(self.cpu); }
         }
-        self.cpu = relax_backend::cpu_ns();
+        self.cpu = relax_session::clock::cpu_ns();
     }
 }
 pub struct Context(Option<(usize, bool)>);
@@ -218,10 +219,11 @@ impl Total {
         format!("functions={} compiled_functions={} inlined_functions={} builds={} typeck_cpu_ns={} lower_cpu_ns={} opt_cpu_ns={} codegen_cpu_ns={}", self.functions, self.compiled_functions, self.inlined_functions, self.builds, self.cpu[0], self.cpu[1], self.cpu[2], self.cpu[3])
     }
 }
+static ONCE: AtomicBool = AtomicBool::new(false);
+
 /// Snapshot after closing, without acquiring the compiler Unit lock. Frozen rows
 /// are not rewritten by exit reporting. Sorting/I/O happens after all row locks.
 pub fn report() {
-    static ONCE: AtomicBool = AtomicBool::new(false);
     if !enabled() || ONCE.swap(true, Ordering::AcqRel) { return; }
     first_present();
     let registered = std::mem::take(&mut *registry().lock().unwrap());
@@ -276,4 +278,14 @@ pub fn report() {
     for (i, ((krate, module), t)) in unused.into_iter().take(50).enumerate() {
         let _ = writeln!(out, "exec-compile-top-unused: kind=speculative-never-called rank={} crate={krate:?} module={module:?} {}", i + 1, t.fields());
     }
+}
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    use relax_session::reset_static as reset;
+    reset(&CLOSED, AtomicBool::new(false));
+    reset(&R, OnceLock::new());
+    reset(&UNATTRIBUTED_BUILDS, AtomicU64::new(0));
+    reset(&RELEASE, AtomicU8::new(0));
+    reset(&ONCE, AtomicBool::new(false));
 }

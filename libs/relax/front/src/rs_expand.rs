@@ -100,7 +100,7 @@ impl Parser<'_> {
                 let (_, range) = self.delim_tt()?;
                 let exported = attrs.iter().any(|a| self.tok_text(self.toks.at(a.toks.lo as usize)) == b"macro_export");
                 let local_inner = attrs.iter().any(|a| (a.toks.lo..a.toks.hi).any(|i| self.tok_text(self.toks.at(i as usize)) == b"local_inner_macros"));
-                self.define_rules(name, range, exported, local_inner)?;
+                self.define_rules(self.toks.at(head).lo, name, range, exported, local_inner)?;
                 self.eat(T::Semi);
                 out.extend_from_slice(&self.toks.range(start, self.pos));
                 continue;

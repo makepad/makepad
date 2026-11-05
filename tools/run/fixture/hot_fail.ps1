@@ -5,7 +5,7 @@
 # usage: powershell -NoProfile -ExecutionPolicy Bypass -File tools/run/fixture/hot_fail.ps1
 #   (from the workspace root; MAKEPAD_RUN_STD in the environment, default libs/relax/compiler/std)
 #
-# Runs hot_fail/ as hot_fail.py does, in the same two cases, with the same checks. Besides those:
+# Runs hot_fail/ as hot_fail.py does, in its error and panic cases, with the same checks. Besides those:
 #   - the restarted run has another pid, the same parent process, and answers `inspect` at its pid
 #     and at the parent's, the one whoever started it holds;
 #   - the discovery file of the first pid is gone (the hub reads one left behind as a crash);
@@ -96,7 +96,36 @@ function Case($name, $hooks, $killParent) {
             } elseif (@(& $restored)[-1] -lt $before) {
                 $null = $fails.Add('state-went-back')
             }
-            if ($fails.Count -eq 0 -and -not (& $wait { (& $outcomes) -contains 'restarted' })) { $null = $fails.Add('no-restart-record') }
+            if ($fails.Count -eq 0) {
+                # the edit after the restart: the restarted run's watcher takes it (a recovery its
+                # restore never ended parks the watcher, and every later edit is dropped)
+                # (until its value shows, a record or refusal of it comes, or the run ends)
+                $ids = @(& $ledger | ForEach-Object { $_.id })
+                $nLater = @(& $ticks).Count
+                $nErr = @(Lines $errFile).Count
+                $text = [IO.File]::ReadAllText($source) -replace 'pub fn value\(\) -> u64 \{\r?\n    hot_fail_target\(\)\r?\n\}', "pub fn value() -> u64 {`n    hot_fail_target() + 1`n}"
+                [IO.File]::WriteAllText("$source.new", $text)
+                [IO.File]::Replace("$source.new", $source, [NullString]::Value)
+                $later = { @(& $ticks | Select-Object -Skip $nLater | Where-Object { $_ -like '*value=3*' }).Count -gt 0 }
+                $came = { @(& $ledger | Where-Object { $ids -notcontains $_.id }) }
+                $refused = { @(Lines $errFile | Select-Object -Skip $nErr | Where-Object { $_ -like '*NOT applied*' }) }
+                $verifiedAt = -1
+                while (-not $p.HasExited -and -not (& $later) -and @(& $refused).Count -eq 0 -and @(& $came | Where-Object { $_.outcome -ne 'verified' }).Count -eq 0) {
+                    # verified: its value is in the next ticks
+                    if (@(& $came).Count -gt 0) {
+                        if ($verifiedAt -lt 0) { $verifiedAt = @(& $ticks).Count }
+                        if (@(& $ticks).Count -ge $verifiedAt + 10) { break }
+                    }
+                    Start-Sleep -Milliseconds 100
+                }
+                if (-not (& $later)) {
+                    $what = "records $(@(& $came | ForEach-Object { $_.outcome }) -join ','); $(@(& $refused) + @('no refusal') | Select-Object -First 1); exited $($p.HasExited)"
+                    $null = $fails.Add("later-edit-not-patched($what)")
+                }
+                elseif (@(& $pids).Count -ne 2) { $null = $fails.Add("later-edit-restarted-$(@(& $pids) -join ',')") }
+            }
+            if ($fails.Count -eq 0 -and -not (& $wait { (& $outcomes) -contains 'restarted' -or (& $outcomes) -contains 'restart_failed' })) { $null = $fails.Add("no-restart-record($(@(& $outcomes) -join ','))") }
+            elseif ($fails.Count -eq 0 -and (& $outcomes) -notcontains 'restarted') { $null = $fails.Add("no-restart-record($(@(& $outcomes) -join ','))") }
             if ((& $outcomes) -notcontains 'panic') { $null = $fails.Add('no-failure-record') }
             $loads = @(& $ledger | Where-Object { $_.outcome -in 'panic', 'restarted' } | ForEach-Object { $_.load } | Sort-Object -Unique)
             if ($loads.Count -ne 1) { $null = $fails.Add("records-of-$($loads.Count)-loads") }
@@ -112,10 +141,10 @@ function Case($name, $hooks, $killParent) {
                 if ($LASTEXITCODE -ne 0) { $null = $fails.Add("no-inspect-at-the-parent: $($answer.Substring(0, [Math]::Min(200, $answer.Length)))") }
             }
             if ($fails.Count -eq 0 -and $killParent) {
+                $nKill = @(& $ticks).Count
                 Stop-Process -Id $p.Id -Force
-                # (the program stops by itself only after 300 s)
-                $t = [Diagnostics.Stopwatch]::StartNew()
-                while ((Get-Process -Id $now -ErrorAction SilentlyContinue) -and $t.Elapsed.TotalSeconds -lt 60) { Start-Sleep -Milliseconds 50 }
+                # until the run is gone, or it ticks on a second (50 ticks) without its parent
+                while ((Get-Process -Id $now -ErrorAction SilentlyContinue) -and @(& $ticks).Count -lt $nKill + 50) { Start-Sleep -Milliseconds 50 }
                 if (Get-Process -Id $now -ErrorAction SilentlyContinue) { $null = $fails.Add('run-outlived-its-parent') }
             } elseif ($fails.Count -eq 0) {
                 $null = New-Item -ItemType File (Join-Path $pkg 'exit-now')

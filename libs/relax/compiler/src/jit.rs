@@ -399,6 +399,11 @@ pub struct Unit {
     /// hot reload: const -> the slots whose build read its value (folded into their code), so an
     /// edit of the const recompiles them (reload.rs)
     pub const_readers: relax_session::sync::Mutex<crate::fxhash::HashMap<DefId, Vec<u32>>>,
+    /// live sessions (M10): the structs whose field offsets the program computed (`offset_of!`),
+    /// as code that builds a value by raw writes at them does. A field an edit adds goes to the
+    /// extension block, with no offset to give that code, and whether such a value set a removed
+    /// field that needs dropping is unknown: those edits restart (reload.rs layout_edit)
+    pub offsets_computed: relax_session::sync::Mutex<crate::fxhash::HashSet<DefId>>,
     /// per slot: the slots whose optimised RIR its RIR took in this run -- inlined bodies and
     /// callees answering nounwind true (a false answer assumes nothing of the body). Grows
     /// over rebuilds, never shrinks: code made from an earlier RIR names them too. The disk
@@ -808,7 +813,7 @@ impl CodeTables {
 
 // ------------------------------------------------------------ OS memory
 
-use relax_backend::cpu_ns;
+use relax_session::clock::cpu_ns;
 pub use crate::clock::wall_ns;
 
 /// Lowering runs on `&Unit` (phase B2): every Unit state it changes is behind interior
@@ -851,6 +856,46 @@ fn tls_block_done(p: u64) {
     if let Some(p) = SPARE_TLS_BLOCKS.keep(p) {
         os::mem::free(p, TLS_CAP);
     }
+}
+
+/// Runs that ended in this process.
+static RUNS_ENDED: AtomicU32 = AtomicU32::new(0);
+
+thread_local! {
+    /// [`RUNS_ENDED`] when this thread last entered the program's code.
+    static RUNS_SEEN: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// A run ended: a thread that stays (a native worker of the process, a device's callback thread)
+/// meets the next run as a new thread ([`fresh_thread`]).
+pub(crate) fn thread_locals_end() {
+    RUNS_ENDED.fetch_add(1, Ordering::AcqRel);
+}
+
+/// A native thread enters the program's code ([`app_call`], `foreign_enter`). The thread-locals it
+/// has are the ended run's, whose destructors are gone with its code: the next run's start empty.
+#[inline]
+pub(crate) fn fresh_thread() {
+    let ended = RUNS_ENDED.load(Ordering::Acquire);
+    if RUNS_SEEN.with(|s| s.get()) != ended {
+        fresh_thread_now(ended);
+    }
+}
+
+#[cold]
+fn fresh_thread_now(ended: u32) {
+    RUNS_SEEN.with(|s| s.set(ended));
+    let b = tls_block_if_any();
+    if b != 0 {
+        let _keep = os::proc::KeepLastError::new();
+        set_tls_block(std::ptr::null_mut());
+        if crate::web32::on() {
+            crate::web32::free(b, TLS_CAP);
+        } else {
+            os::mem::free(b, TLS_CAP);
+        }
+    }
+    os::tls::static_tls_clear();
 }
 
 thread_local! {
@@ -1220,6 +1265,17 @@ fn raw_report(f: &os::fault::Fault, what: &str) {
     let scanned = !in_jit_code(f.pc);
     let k = if scanned { scan_jit_stack(f, &mut raw) } else { walk_fp_bounded(f.fp, f.sp, &mut raw) };
     raw_report_frames(f, &raw[..k], scanned);
+    // In host code the scan finds the JIT frames only; the native callers are what names the fault.
+    if scanned {
+        let mut native = [0u64; 16];
+        let n = walk_fp_bounded(f.fp, f.sp, &mut native);
+        let mut l = RawLine::new();
+        for r in &native[..n] {
+            l.put(b"makepad-run:   called by ");
+            unsafe { raw_name(&mut l, r.wrapping_sub(1), f.sp) };
+            l.flush();
+        }
+    }
 }
 
 fn raw_fault_line(f: &os::fault::Fault, what: &str, raw: &[u64], scanned: bool) {
@@ -1388,7 +1444,6 @@ unsafe fn adopt_runtime_unit(u: *mut Unit) {
         UNIT = u;
     }
     if !(*u).aux {
-        APP_LEAVE.store((*u).leave, Ordering::Release);
         APP_ENTER.store((*u).enter, Ordering::Release);
     }
 }
@@ -1472,7 +1527,7 @@ pub unsafe fn spec_seed_manifest(up: *mut Unit) {
     unsafe impl Send for P {}
     let p = P(up);
     { let _k = crate::zone_alloc::kept();
-    let _ = std::thread::Builder::new().name("run-seed".to_string()).spawn(move || { let _z = crate::zone_alloc::compiler_thread();
+    let _ = crate::run_threads::spawn("run-seed", move || { let _z = crate::zone_alloc::compiler_thread();
         let p = p;
         let up = p.0;
         set_worker(true);
@@ -1597,7 +1652,7 @@ pub unsafe fn prelink_startup(up: *mut Unit) -> usize {
         unsafe impl Send for P {}
         let p = P(up);
         { let _k = crate::zone_alloc::kept();
-        let _ = std::thread::Builder::new().name("run-prelink-notes".to_string()).spawn(move || { let _z = crate::zone_alloc::compiler_thread();
+        let _ = crate::run_threads::spawn("run-prelink-notes", move || { let _z = crate::zone_alloc::compiler_thread();
             let p = p;
             let up = p.0;
             set_worker(true);
@@ -2135,6 +2190,8 @@ fn note_abandoned_frames(app_call: bool) {
     while app_call && n > 0 && !crate::stale::in_ended_run(raw[n - 1]) {
         n -= 1;
     }
+    // (the names outlive this thread's domain and its heap, also while they are made)
+    let _k = crate::zone_alloc::kept();
     for &ret in &raw[..n] {
         if crate::stale::in_ended_run(ret) {
             continue;
@@ -2143,7 +2200,6 @@ fn note_abandoned_frames(app_call: bool) {
             Some((_, base, sym, _)) => format!("{} (image+{:#x})", String::from_utf8_lossy(sym), ret - base),
             None => format!("{ret:#x}"),
         };
-        let _k = crate::zone_alloc::kept();
         let mut a = ABANDONED_FRAMES.lock().unwrap_or_else(|e| e.into_inner());
         match a.iter_mut().find(|x| x.0 == name) {
             Some(x) => x.1 += 1,
@@ -2155,7 +2211,6 @@ fn note_abandoned_frames(app_call: bool) {
 /// A program's `enter`, for the calls native code makes into it (`app_call`). A program unit's entry
 /// glue stays mapped for the life of the process, any of them does.
 static APP_ENTER: AtomicU64 = AtomicU64::new(0);
-static APP_LEAVE: AtomicU64 = AtomicU64::new(0);
 
 thread_local! {
     /// In an `app_call` on this thread: the thread's recovery point as that call found it (a newer
@@ -2231,6 +2286,9 @@ pub(crate) fn kick_app_callers(bases: &[u64]) -> bool {
 /// A panic in the callback is the abort of any `extern "C"` callback.
 pub fn app_call(thunk: unsafe extern "C" fn(*mut u8), data: *mut u8) -> bool {
     let enter = APP_ENTER.load(Ordering::Acquire);
+    // (out of an op: JIT code and the runtime it calls run in the kept phase)
+    let _kept = crate::zone_alloc::kept();
+    fresh_thread();
     unsafe {
         if enter == 0 {
             thunk(data);
@@ -2274,12 +2332,30 @@ pub(crate) fn run_thread_body(enter: u64, f: u64, arg: u64) {
     }
 }
 
+/// The `leave` of the runs that ended: a thread can come back from a native call long after its
+/// run's Unit went. One copy for the process (the glue holds no address), on pages no run's end
+/// touches.
+static ENDED_LEAVE: AtomicU64 = AtomicU64::new(0);
+
+fn keep_leave(glue: &[u8], leave: usize) {
+    if ENDED_LEAVE.load(Ordering::Acquire) != 0 {
+        return;
+    }
+    const SIZE: usize = 1 << 16;
+    let base = os::mem::reserve(SIZE, 0);
+    os::mem::commit(base, SIZE);
+    unsafe { os::mem::write_code(base, glue) };
+    if ENDED_LEAVE.compare_exchange(0, base + leave as u64, Ordering::AcqRel, Ordering::Relaxed).is_err() {
+        os::mem::release(base, SIZE, 0);
+    }
+}
+
 /// A fetch from the code of a run that ended, on this thread: it leaves for its nearest recovery
-/// point through that run's `leave`. No report, no policy, nothing of the program runs. A thread
+/// point through `ENDED_LEAVE`. No report, no policy, nothing of the program runs. A thread
 /// with none (native code called into the ended run) stays here for good: no frame of a caller this
 /// runtime does not know can be left, and the host must stop such a caller before a run ends. Its
 /// stack stays intact, the run's end names it as a thread that called in.
-unsafe fn end_on_fault(f: &os::fault::Fault, leave: u64) -> os::fault::Action {
+unsafe fn end_on_fault(f: &os::fault::Fault) -> os::fault::Action {
     let ctx = ctx_ptr();
     let target = if *ctx != 0 && *ctx != APP_CALL_OVER.with(|o| o.get()) { ctx } else { END_CTX.with(|c| c.get() as *mut u64) };
     if *target == 0 {
@@ -2305,7 +2381,25 @@ unsafe fn end_on_fault(f: &os::fault::Fault, leave: u64) -> os::fault::Action {
         }
         w.1 = n;
     });
-    os::fault::Action::Resume { pc: leave, a0: target as u64, a1: LEAVE_RUN_ENDED }
+    os::fault::Action::Resume { pc: ENDED_LEAVE.load(Ordering::Acquire), a0: target as u64, a1: LEAVE_RUN_ENDED }
+}
+
+/// The calling thread of a run that is ending, in a host call with nothing of the host's held: it
+/// leaves the run from here, as [`end_on_fault`] has a thread do that faulted.
+///
+/// # Safety
+/// Every native frame of the thread above its way out is cut off.
+pub(crate) unsafe fn leave_ended_run() -> ! {
+    let ctx = ctx_ptr();
+    let target = if *ctx != 0 && *ctx != APP_CALL_OVER.with(|o| o.get()) { ctx } else { END_CTX.with(|c| c.get() as *mut u64) };
+    if *target == 0 {
+        crate::domain::note_called_into_ended_run(0);
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
+    }
+    let leave: extern "C" fn(u64, u64) -> ! = std::mem::transmute(ENDED_LEAVE.load(Ordering::Acquire) as usize);
+    leave(target as u64, LEAVE_RUN_ENDED)
 }
 
 #[derive(Clone)]
@@ -2844,6 +2938,8 @@ pub(crate) fn payload_text(p: &(dyn std::any::Any + Send)) -> String {
 /// rt_boundary_panic.
 #[inline(always)]
 pub(crate) fn host_boundary<R>(entry: &'static str, f: impl FnOnce() -> R) -> R {
+    // (JIT code a provided crate's op called directly, as a trait method: the runtime is the process's)
+    let _kept = crate::zone_alloc::kept();
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
         Ok(r) => r,
         Err(p) => rt_boundary_panic(entry, p),
@@ -3396,7 +3492,8 @@ fn park_compile_error(up: usize, slot: u32) -> u64 {
 /// live edits it is a failed hot load (reload.rs recover_compile_ice): recorded, and a fresh
 /// process replaces this one -- now when this is the app's main thread, else at the app's next
 /// event, with its state, while this call waits for it. Otherwise (no edit ran, a recovery
-/// failed or runs already: the replacement's own error) the call fails as the error's panic.
+/// failed or runs already: the replacement's own error, reported as the JIT's) the call fails as
+/// the error's panic.
 #[cold]
 #[inline(never)]
 fn compile_ice(up: usize, message: &str) -> u64 {
@@ -3410,24 +3507,34 @@ fn compile_ice(up: usize, message: &str) -> u64 {
 }
 
 /// compile_ice's recovery, on the program thread that met the internal compiler error `message`.
-/// Returns when no fresh process takes over: the call then fails as the error's panic.
-pub(crate) fn ice_at_call(message: &str) {
+/// Returns when no next run takes over: the call then fails as the error's panic. True when the
+/// error was reported as the JIT's failure (a restarted run's, before or after its restore): no
+/// panic of the program, so nothing parks it as one.
+pub(crate) fn ice_at_call(message: &str) -> bool {
     let on_main = os::thread::current() == MAIN_TID.load(Ordering::Relaxed);
     // (a recovery this process asked for already: its restart is this call's end too)
     let restarting = crate::reload::recover_compile_ice(message, on_main) || crate::reload::unit_suspect().is_some() && crate::hot_failure::recovering();
     if restarting {
         // the app's main thread cannot take the restart at its next event from inside this call:
-        // the process restarts now, with the state the app last left, if any
+        // the run restarts now, with the state the app last left, if any
         if on_main {
-            if let Err(e) = crate::reload::restart_process(message) { crate::hot_failure::restart_failed(&e); }
+            if let Err(e) = crate::reload::restart_run(message) { crate::hot_failure::restart_failed(&e); }
         }
-        // the call ends with this process (or, the restart failed, fails as the error's panic)
+        // the call ends with this run (or, the restart failed, fails as the error's panic)
         while crate::hot_failure::recovering() {
-            std::thread::sleep(std::time::Duration::from_millis(200));
+            if crate::domain::current_is_ending() {
+                crate::run_end::leave();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
         }
-    } else if crate::hot_failure::recovering() {
-        // the warm restart's own process failed the same way: the JIT error devhub reports
-        crate::hot_failure::restart_failed(message);
+        false
+    } else if crate::hot_failure::restart_failed(message) {
+        // the warm restart's own process failed the same way before its restore completed: the
+        // JIT error devhub reports
+        true
+    } else {
+        // past its restore: still the JIT's, never the program's
+        crate::hot_failure::replacement_jit_failed(message)
     }
 }
 
@@ -3438,6 +3545,11 @@ pub(crate) fn is_ice_stub_message(message: &str) -> bool {
 }
 
 fn fatal_compile_error(p: &PanicInfo, report: &str) {
+    // an internal compiler error in a restarted run is the JIT's, reported as its restart's failure
+    // (ice_at_call): no error of the program's that rustc rejects, so no end of the run as one
+    if is_ice_stub_message(&p.message) && crate::hot_failure::replacement() {
+        return;
+    }
     if COMPILE_ERRORS_FATAL.load(std::sync::atomic::Ordering::Relaxed) && p.message.starts_with("compile error in ") {
         eprintln!("makepad-run: {} -- the program cannot run past it (rustc rejects it)\n  report: {}", p.message, report);
         // an app domain's compile error is that domain's crash (its thread ends next); the others go on
@@ -3600,6 +3712,7 @@ use crate::stack::ensure_sufficient_stack;
 /// thread redirects it into this glue (x64::hang_tramp in front of rt_hang); 0 = none.
 pub(crate) static HANG_TRAMP: AtomicU64 = AtomicU64::new(0);
 
+#[cfg(not(target_arch = "aarch64"))]
 rt_fn! {
     /// The hang watchdog's interrupt, run on the interrupted thread through HANG_TRAMP: the same
     /// decision as a watchdog signal; when it acts, the call unwinds to its recovery point
@@ -3757,14 +3870,14 @@ unsafe fn on_fault_locked(f: &os::fault::Fault, hooks: &os::fault::Hooks) -> os:
     }
     // the code of a run that ended: told by the address alone, whichever unit is current now
     if matches!(f.kind, Kind::Segv | Kind::Bus) {
-        if let Some(leave) = crate::stale::run_end_leave(pc) {
-            return end_on_fault(f, leave);
+        if crate::stale::in_ended_run(pc) {
+            return end_on_fault(f);
         }
     }
     // any other fault on a thread of a run that is ending (a native call it was in, with what it was
     // given): the thread ends here, the frames it leaves are named on the ledger
     if crate::domain::current_is_ending() {
-        return end_on_fault(f, APP_LEAVE.load(Ordering::Acquire));
+        return end_on_fault(f);
     }
     let jit = in_jit_code(pc);
     let has_unit = !cur_unit().is_null();
@@ -3780,7 +3893,8 @@ unsafe fn on_fault_locked(f: &os::fault::Fault, hooks: &os::fault::Hooks) -> os:
     match containment(jit, at_leave, has_unit, has_ctx, hooks.chained, safe, stale.is_some(), leaf) {
         Containment::Stale => {
             let r = stale.expect("stale range");
-            crate::stale::on_fault(f, r, |out| walk_fp_bounded(f.fp, f.sp, out))
+            crate::stale::on_fault(f, r, |out| walk_fp_bounded(f.fp, f.sp, out));
+            end_on_fault(f)
         }
         Containment::FatalReport => fatal_report(f),
         Containment::PassOn => {
@@ -4027,6 +4141,8 @@ fn regs_call_tramp(target: u64) -> Vec<u8> {
     x64::regs_call_tramp(target)
 }
 
+static MADE: relax_session::sync::Mutex<Vec<(usize, u64, u64)>> = relax_session::sync::Mutex::new(Vec::new());
+
 impl Unit {
     /// The address JIT code calls to reach `target` (a returning host fn taking a register
     /// block as argument 6) through `regs_call_tramp`, made once per unit and target; None when
@@ -4035,7 +4151,6 @@ impl Unit {
         if self.prog.session.options.no_codegen {
             return None;
         }
-        static MADE: relax_session::sync::Mutex<Vec<(usize, u64, u64)>> = relax_session::sync::Mutex::new(Vec::new());
         let me = self as *const Unit as usize;
         let mut m = MADE.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(x) = m.iter().find(|x| x.0 == me && x.1 == target) {
@@ -4205,6 +4320,10 @@ fn const_eval_to_valtree(context: usize, _env: crate::tcx::TypingEnv, def: DefId
     }
 }
 
+// files load lazily (a platform file with its #[link] blocks may be parsed after an
+// earlier miss), so each call reads the files that came since the last
+static SCANNED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 impl Unit {
     pub(crate) fn flush_query_errors(&mut self, finished: bool) {
         if !self.errors.is_empty() { self.query_errors.note_reported_error(); }
@@ -4220,6 +4339,10 @@ impl Unit {
 
     /// Records a build error (identity state: the message is the program's).
     pub(crate) fn note_error(&mut self, m: String) {
+        // (a compile job running the program's initializer lost its code: no error of the program)
+        if self.code_ended.load(Ordering::Acquire) {
+            return;
+        }
         let _k = crate::zone_alloc::kept();
         let m = m.clone();
         self.errors.push(m);
@@ -4333,6 +4456,7 @@ impl Unit {
             fn_create: Default::default(),
             consts: Default::default(),
             const_readers: Default::default(),
+            offsets_computed: Default::default(),
             body_deps: Default::default(),
             statics: Default::default(),
             const_certs: Default::default(),
@@ -4426,6 +4550,7 @@ impl Unit {
                 u.hot_entry = g.hot_entry;
                 u.enter = g.enter;
                 u.leave = g.leave;
+                ENDED_LEAVE.store(g.leave, Ordering::Release);
             }
         } else {
             let lazy = x64::lazy_entry(rt_compile as *const () as usize as u64);
@@ -4435,6 +4560,7 @@ impl Unit {
             let (el, leave_off) = x64::enter_leave();
             u.enter = u.emit_glue(&el, "relax::enter_leave", x64::ENTER_FRAME);
             u.leave = u.enter + leave_off as u64;
+            keep_leave(&el, leave_off);
             // the entry glue has its pages to itself: they outlive the run's code (`end_code`)
             let page = os::mem::page_size();
             u.glue_end = (u.code_next.load(Ordering::Relaxed) + page - 1) & !(page - 1);
@@ -4501,8 +4627,9 @@ impl Unit {
             u.rt.panic_impl = u.emit_code(&panic_tramp(crate::web32::w32_panic_impl as *const () as usize as u64), "relax::panic_impl");
         }
         u.env.resume = u.rt.resume;
+        #[cfg(not(target_arch = "aarch64"))]
         if os::fault::NEEDS_HANG_TRAMP {
-            HANG_TRAMP.store(u.emit_code(&relax_backend::x64::hang_tramp(rt_hang as *const () as usize as u64), "relax::hang_tramp"), Ordering::Relaxed);
+            HANG_TRAMP.store(u.emit_code(&x64::hang_tramp(rt_hang as *const () as usize as u64), "relax::hang_tramp"), Ordering::Relaxed);
         }
         u.env.syms = u.syms.vals;
         u.env.sym_class = u.syms.classes;
@@ -6407,9 +6534,6 @@ impl Unit {
     /// Loads every library the program's extern blocks name with `#[link(name = ..)]`
     /// (frameworks on macOS), once: what the system linker would have linked.
     fn load_link_libs(&self) {
-        // files load lazily (a platform file with its #[link] blocks may be parsed after an
-        // earlier miss), so each call reads the files that came since the last
-        static SCANNED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let from = SCANNED.swap(self.prog.files.len(), Ordering::SeqCst);
         for (fi, f) in self.prog.files.iter().enumerate().skip(from) {
             for it in &f.ast.items {
@@ -6457,7 +6581,13 @@ impl Unit {
         let f = &self.prog.files[def.file as usize];
         for a in f.ast.list(f.ast.item(def.item).attrs) {
             if a.toks.hi >= a.toks.lo + 3 && f.tok_text(a.toks.lo) == "link_name" && f.tok_text(a.toks.lo + 1) == "=" {
-                return f.tok_text(a.toks.lo + 2).trim_matches('"').to_string();
+                let name = crate::lit::unescape_str(f.tok_text(a.toks.lo + 2));
+                // LLVM's leading SOH requests an exact object-file symbol. Our lookups use
+                // C names, so undo Mach-O's ABI prefix only for these exact names.
+                if let Some(exact) = name.strip_prefix('\u{1}') {
+                    return crate::global_asm::c_name(exact).to_string();
+                }
+                return name;
             }
         }
         self.prog.name(d).to_string()
@@ -7974,11 +8104,13 @@ pub fn watchdog(ms: u64) -> u64 {
     static START: std::sync::Once = std::sync::Once::new();
     START.call_once(|| {
         { let _k = crate::zone_alloc::kept();
-        std::thread::spawn(|| {
+        let _ = crate::run_threads::spawn("run-watchdog", || {
+            crate::run_threads::on_end(|| WATCHDOG_WAKE.notify_all());
             let mut calls = WATCHDOG_CALLS.lock().unwrap_or_else(|e| e.into_inner());
-            loop {
-                while calls.is_empty() {
+            while !crate::run_threads::ending() {
+                if calls.is_empty() {
                     calls = WATCHDOG_WAKE.wait(calls).unwrap_or_else(|e| e.into_inner());
+                    continue;
                 }
                 let now = std::time::Instant::now();
                 for call in calls.iter() {
@@ -8431,11 +8563,20 @@ unsafe fn compile_slot_on_stack_inner(up: *mut Unit, id: u32) -> u64 {
 /// MAKEPAD_RUN_TEST_HOT_BUILD_ERROR=<name part>: in a process a live edit ran in, the build of a fn
 /// whose name contains it fails with an internal compiler error, as a closure whose owner's body
 /// is gone does (tools/run/fixture/hot_fail.py).
+/// MAKEPAD_RUN_TEST_REPLACEMENT_BUILD_ERROR=<name part>: in a restarted run (no edit in it), the
+/// build of such a fn fails the same way: the JIT's error in the restart's own run
+/// (tools/run/fixture/hot_fail.py).
 unsafe fn test_hot_build_error(up: *mut Unit, id: u32) -> Result<(), String> {
     static WANT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    static WANT_REPLACEMENT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     if let Some(w) = WANT.get_or_init(|| std::env::var("MAKEPAD_RUN_TEST_HOT_BUILD_ERROR").ok().filter(|w| !w.is_empty())) {
         if (&*up).fns[id as usize].name.contains(w.as_str()) && crate::hot_failure::edit_ran() {
             return Err(format!("internal compiler error: MAKEPAD_RUN_TEST_HOT_BUILD_ERROR: forced for `{w}`"));
+        }
+    }
+    if let Some(w) = WANT_REPLACEMENT.get_or_init(|| std::env::var("MAKEPAD_RUN_TEST_REPLACEMENT_BUILD_ERROR").ok().filter(|w| !w.is_empty())) {
+        if (&*up).fns[id as usize].name.contains(w.as_str()) && !crate::hot_failure::edit_ran() && crate::hot_failure::replacement() {
+            return Err(format!("internal compiler error: MAKEPAD_RUN_TEST_REPLACEMENT_BUILD_ERROR: forced for `{w}`"));
         }
     }
     Ok(())
@@ -10157,13 +10298,14 @@ fn o2_hottest_queued(offered: &std::collections::HashSet<(usize, u32)>) -> Optio
         .map(|e| (up, e.0))
 }
 
+static OFFERED: std::sync::OnceLock<relax_session::sync::Mutex<std::collections::HashSet<(usize, u32)>>> = std::sync::OnceLock::new();
+
 /// Before every O2 build (and at a tick, for a queue with no O2 build to run) the hottest slot
 /// `o2_hottest_queued` finds is offered to `o2_hot` once, on the owner: one offer per build, as
 /// the O2 worker offered one before each of its builds, keeps the hot code's O2 builds coming
 /// as fast as they run (through a cold start the snapshot builds take the hot slots out of
 /// baseline / O1 code before the first frame).
 fn o2_offer_hottest() {
-    static OFFERED: std::sync::OnceLock<relax_session::sync::Mutex<std::collections::HashSet<(usize, u32)>>> = std::sync::OnceLock::new();
     let offered = crate::zone_alloc::kept_with(|| OFFERED.get_or_init(Default::default));
     let next = { let offered = offered.lock().unwrap_or_else(|e| e.into_inner()); o2_hottest_queued(&offered) };
     if let Some((up, id)) = next {
@@ -10239,15 +10381,16 @@ fn note_slow_base(_u: &Unit, id: u32) {
     queue::start();
 }
 
+// (counted code goes only with an install, a patch or a reclaim: none since the last look, no
+// owner request)
+static FORGET_SEEN: AtomicU64 = AtomicU64::new(u64::MAX);
+
 /// The first O3 worker's poll (no lock held): SLOW_BASE's O2 builds, and (at most once a second)
 /// the parked counting entries whose counted code is gone.
 fn drain_slow_base() {
     static LAST_FORGET: AtomicU64 = AtomicU64::new(0);
     let ids = std::mem::take(&mut *SLOW_BASE.lock().unwrap_or_else(|e| e.into_inner()));
     let now = wall_ns();
-    // (counted code goes only with an install, a patch or a reclaim: none since the last look, no
-    // owner request)
-    static FORGET_SEEN: AtomicU64 = AtomicU64::new(u64::MAX);
     let code = COMPILED_FNS.load(Ordering::Relaxed) + TIER1_INSTALLS.load(Ordering::Relaxed) + PATCH_EPOCH.load(Ordering::Relaxed) + reclaim_generation();
     let forget = now.saturating_sub(LAST_FORGET.load(Ordering::Relaxed)) >= PGO_WORK_NS
         && FORGET_SEEN.load(Ordering::Relaxed) != code
@@ -12860,8 +13003,7 @@ pub fn compile_watch(what: Option<(&str, usize)>) {
         let s = std::env::var("MAKEPAD_RUN_COMPILE_WATCH").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
         if s > 0 {
             { let _k = crate::zone_alloc::kept();
-            std::thread::spawn(move || loop {
-                std::thread::sleep(std::time::Duration::from_secs(s));
+            let _ = crate::run_threads::spawn("run-compile-watch", move || while crate::run_threads::sleep(std::time::Duration::from_secs(s)) {
                 let g = WATCH.lock().unwrap_or_else(|e| e.into_inner());
                 let steps = WATCH_STEPS.load(Ordering::Relaxed);
                 if steps == WATCH_PREV.swap(steps, Ordering::Relaxed) {
@@ -13107,12 +13249,12 @@ impl CoroTrace {
         let (depth, child) = CORO_TRACE.with(|c| c.get());
         CORO_TRACE.with(|c| c.set((depth + 1, child)));
         let parent = match &u.fns[id as usize].key { FnKey::Closure(_, _, p) => u.fns[*p as usize].name.to_string(), _ => String::new() };
-        Some(CoroTrace { t0: relax_backend::cpu_ns(), child0: child, depth, name: format!("{} in {}", u.fns[id as usize].name, parent) })
+        Some(CoroTrace { t0: relax_session::clock::cpu_ns(), child0: child, depth, name: format!("{} in {}", u.fns[id as usize].name, parent) })
     }
 }
 impl Drop for CoroTrace {
     fn drop(&mut self) {
-        let incl = relax_backend::cpu_ns() - self.t0;
+        let incl = relax_session::clock::cpu_ns() - self.t0;
         let (_, child) = CORO_TRACE.with(|c| c.get());
         let excl = incl.saturating_sub(child - self.child0);
         CORO_TRACE.with(|c| c.set((self.depth, self.child0 + incl)));
@@ -13373,7 +13515,7 @@ pub fn start_completion(up: *mut Unit) {
     if unsafe { (*up).prog.skipped_files.is_empty() } { return; }
     let upn = up as usize;
     { let _k = crate::zone_alloc::kept();
-    let _ = std::thread::Builder::new().name("run-complete".into()).spawn(move || { let _z = crate::zone_alloc::compiler_thread();
+    let _ = crate::run_threads::spawn("run-complete", move || { let _z = crate::zone_alloc::compiler_thread();
         let up = upn as *mut Unit;
         while !FIRST_PRESENT.load(Ordering::Acquire) {
             if crate::preempt::is_stopped() { return; }
@@ -15002,10 +15144,11 @@ fn profile_path() -> Option<&'static str> {
     relax_session::phase::env_once(&P, "MAKEPAD_RUN_PROFILE")
 }
 
+static T: std::sync::OnceLock<(std::time::Instant, u64)> = std::sync::OnceLock::new();
+
 /// MAKEPAD_RUN_PROFILE_FROM_MS=<ms>: count samples only after that long since the first sample (steady state of
 /// an app: startup's O1 code stays out of the profile)
 fn profile_started() -> bool {
-    static T: std::sync::OnceLock<(std::time::Instant, u64)> = std::sync::OnceLock::new();
     let (t0, from) = T.get_or_init(|| (std::time::Instant::now(), std::env::var("MAKEPAD_RUN_PROFILE_FROM_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(0)));
     t0.elapsed().as_millis() as u64 >= *from
 }
@@ -15251,22 +15394,23 @@ fn profile_write() {
     }
 }
 
+static PROGRESS: std::sync::Once = std::sync::Once::new();
+
 /// MAKEPAD_RUN_O3_PROGRESS: a thread writes the progress file (o3_progress_write) from the first
 /// JIT call on.
 fn progress_start() {
-    static PROGRESS: std::sync::Once = std::sync::Once::new();
     PROGRESS.call_once(|| {
         if std::env::var_os("MAKEPAD_RUN_O3_PROGRESS").is_none_or(|v| v.is_empty()) {
             return;
         }
         let _k = crate::zone_alloc::kept();
-        let _ = std::thread::Builder::new().name("run-progress".to_string()).spawn(|| {
+        let _ = crate::run_threads::spawn("run-progress", || {
             let mut last = std::time::Instant::now();
             // every 100 ms while the state moves, once a second after 5 s without a change
             let mut still = 0u32;
             while !TIER_STOP.load(Ordering::SeqCst) {
                 if o3_progress_write(&mut last) { still = 0 } else { still = still.saturating_add(1) }
-                std::thread::sleep(std::time::Duration::from_millis(if still >= 50 { 1000 } else { 100 }));
+                if !crate::run_threads::sleep(std::time::Duration::from_millis(if still >= 50 { 1000 } else { 100 })) { break; }
             }
         });
     });
@@ -15289,6 +15433,9 @@ pub(crate) fn o3_finished() -> u64 {
     TIER1_FINISHED.load(Ordering::Relaxed)
 }
 
+// an unchanged state is not written again (a reader sees the same file)
+static WRITTEN: relax_session::sync::Mutex<String> = relax_session::sync::Mutex::new(String::new());
+
 /// True when it wrote a changed state.
 fn o3_progress_write(last: &mut std::time::Instant) -> bool {
     static PATH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
@@ -15301,8 +15448,6 @@ fn o3_progress_write(last: &mut std::time::Instant) -> bool {
     let pending = queue::counts()[2] + TIER_ACTIVE.lock().map_or(0, |a| a.len()) + usize::from(startup_holds_tier1())
         + COUNTING.lock().map_or(0, |c| c.iter().filter(|e| !e.parked).count());
     let line = format!("{} {}\n", pending, TIER1_INSTALLS.load(Ordering::Relaxed));
-    // an unchanged state is not written again (a reader sees the same file)
-    static WRITTEN: relax_session::sync::Mutex<String> = relax_session::sync::Mutex::new(String::new());
     let mut written = WRITTEN.lock().unwrap_or_else(|e| e.into_inner());
     if *written == line {
         return false;
@@ -15354,7 +15499,7 @@ fn sampler_thread() {
         let settled = update_sampler_settled();
         let sleep_ms = if settled { sleep_ms.max(SETTLED_MS) } else { sleep_ms };
         wait.sleep(sleep_ms);
-        if TIER_STOP.load(Ordering::SeqCst) { break; }
+        if TIER_STOP.load(Ordering::SeqCst) || crate::run_threads::ending() { break; }
         // Direct-PC samplers use the time since the previous wake. Linux's ring
         // supplies each observation's own period instead. A sleep the OS stretched
         // (timer coalescing of low-QoS / nice'd processes: 2 ms became ~18 ms on the bench
@@ -15460,7 +15605,7 @@ impl Unit {
         let page = os::mem::page_size();
         let hi = (self.exec_base + self.exec_size - os::mem::CODE_TAIL) & !(page - 1);
         // (its entry glue is of the ended run too, it just keeps running)
-        crate::stale::register_run_end(self.exec_base, hi, format!("unit {:#x}", self.exec_base), self.leave);
+        crate::stale::register_run_end(self.exec_base, hi, format!("unit {:#x}", self.exec_base));
         os::mem::end_code(self.glue_end, (hi - self.glue_end) as usize);
         self.code_ended.store(true, Ordering::Release);
         #[cfg(windows)]
@@ -15529,6 +15674,20 @@ impl Drop for Unit {
         if self.retired {
             let rest = UNIT_DATA_SIZE + UNIT_RW_SIZE + (crate::syms::SYM_CAP * 8) as u64;
             os::mem::release(self.exec_base, self.exec_size as usize, rest as usize);
+            // Only what it used stays taken: the rest never was the address of anything, and each
+            // restart would take 1.8 GB of address space for good. (Windows: a reservation goes
+            // back whole or not at all.)
+            #[cfg(unix)]
+            {
+                let page = os::mem::page_size();
+                for (next, end) in [(&self.code_next, self.exec_base + self.exec_size), (&self.data_next, self.data_end), (&self.rw_next, self.rw_end)] {
+                    let from = (next.load(Ordering::Acquire) + page - 1) & !(page - 1);
+                    if from < end {
+                        os::mem::free(from, (end - from) as usize);
+                    }
+                }
+            }
+            os::mem::free(self.syms.classes, crate::syms::SYM_CAP);
             // the slot segments: stubs first, then the table words and tier records (the thunks
             // went with the code area)
             for seg in 0..relax_backend::rir::SLOT_SEGS {
@@ -15665,11 +15824,12 @@ unsafe fn loop_syms(u: &Unit, id: u32) -> Option<(relax_backend::rir::Sym, relax
     Some((loop_counter_sym(u, id), loop_hot_sym(u)))
 }
 
+static TRAMP: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+
 /// The symbol JIT code calls when a loop counter runs out: a trampoline that passes the calling
 /// JIT frame's frame pointer as the second argument and jumps to rt_loop_hot (interned on first
 /// use, also by a warm start's link: lower::intern_lazy_rt).
 pub(crate) fn loop_hot_sym(u: &Unit) -> relax_backend::rir::Sym {
-    static TRAMP: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     // no-codegen: rt_loop_hot itself with no frame pointer (an interpreted frame has no frame
     // record: its JIT callers are not charged)
     let at = *TRAMP.get_or_init(|| if u.prog.session.options.no_codegen { rt_loop_hot_no_fp as *const () as usize as u64 } else { u.emit_code(&loop_tramp(rt_loop_hot as *const () as usize as u64), "relax::loop_hot") });
@@ -16420,6 +16580,32 @@ fn tier_wake() {
 fn tier_wake_all() {
     TIER_GEN.fetch_add(1, Ordering::SeqCst);
     queue::wake_all();
+}
+
+/// Everything that compiles for the run stops at its next point (`run_end`).
+pub(crate) fn stop_compiling() {
+    TIER_STOP.store(true, Ordering::SeqCst);
+    SPEC_STOP.store(true, Ordering::SeqCst);
+    crate::borrowck::lazy::stop();
+    crate::preempt::stop_all();
+    tier_wake_all();
+}
+
+/// The compile queue's workers leave (`run_end`). False: some were still in a job after `give_up`.
+pub(crate) fn stop_queue_workers(give_up: std::time::Duration) -> bool {
+    queue::stop_workers(give_up)
+}
+
+/// The run's unit goes: nothing of the run calls it any more (`run_end`), the owner thread still serves.
+/// `no_thread_in_it` false: a thread that did not end may still read it, so its memory stays.
+///
+/// # Safety
+/// `up` came from `Unit::new`, and with `no_thread_in_it` no thread uses it.
+pub(crate) unsafe fn end_unit(up: *mut Unit, no_thread_in_it: bool) {
+    retire_unit(up);
+    if no_thread_in_it {
+        drop(Box::from_raw(up));
+    }
 }
 const Q_CALLS: u8 = 0;
 const Q_LOOP: u8 = 1;
@@ -17314,6 +17500,16 @@ pub(crate) mod busy {
             }
         }
         format!("makepad-run: the JIT {head}; what restarted its quiet, per 5 s: {}", windows.join("; "))
+    }
+
+    /// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+    pub(crate) unsafe fn reset_statics() {
+        use relax_session::reset_static as reset;
+        reset(&AT, [const { [const { AtomicU32::new(0) }; KINDS] }; SECS]);
+        reset(&SETTLED_AT, AtomicU64::new(0));
+        reset(&QUIET_MS, AtomicU64::new(0));
+        reset(&QUIET_AT, AtomicU64::new(0));
+        reset(&LAST_AT, AtomicU64::new(0));
     }
 }
 
@@ -20161,7 +20357,9 @@ pub fn startup_main(presents: bool) {
     let release = move || {
         makepad_cpu_budget::set_thread_class(makepad_cpu_budget::BACKGROUND);
         let _ = STARTUP_THREAD.set(std::thread::current());
+        crate::run_threads::on_end(startup_wake);
         while !FIRST_PRESENT.load(Ordering::Acquire) {
+            if crate::run_threads::ending() { return; }
             let left = quiet_left(main_at);
             // the live-edit gate (live_startup_done) waits for a present on its own: a
             // platform program that never presents (a headless bench, a hidden tool) still
@@ -20225,14 +20423,15 @@ pub fn startup_main(presents: bool) {
         STARTUP_PHASE.store(0, Ordering::Release);
     };
     let _k = crate::zone_alloc::kept();
-    if std::thread::Builder::new()
-        .name("run-startup".into())
-        .spawn(release)
-        .is_err()
-    {
+    if crate::run_threads::spawn("run-startup", release).is_err() {
         // Resource exhaustion must not leave a headless process gated forever.
         STARTUP_PHASE.store(0, Ordering::Release);
     }
+}
+
+/// A run's end: the startup thread stops waiting for a present.
+fn startup_wake() {
+    if let Some(t) = STARTUP_THREAD.get() { t.unpark(); }
 }
 
 /// Pipelining and speculation are on only where every compile goes through compile_slot
@@ -20785,7 +20984,7 @@ pub unsafe fn prepare_teardown(up: *mut Unit) {
     let p = P(up);
     { let _k = crate::zone_alloc::kept();
     TEARDOWN_RUNNING.store(true, Ordering::SeqCst);
-    let _ = std::thread::Builder::new().name("run-teardown".to_string()).spawn(move || { let _z = crate::zone_alloc::compiler_thread();
+    let _ = crate::run_threads::spawn("run-teardown", move || { let _z = crate::zone_alloc::compiler_thread();
         struct Done;
         impl Drop for Done { fn drop(&mut self) { TEARDOWN_RUNNING.store(false, Ordering::SeqCst); } }
         let _done = Done;
@@ -21820,6 +22019,8 @@ extern "C" fn relax_allocator_swap(phase: u32) {
 pub extern "C" fn __relax_exit(code: i32) {
     crate::domain::exit_current(code);
     let code = crate::check::finish_test_deps(code);
+    // a run past a JIT error ends with the JIT error's verdict, not the program's code
+    let code = crate::hot_failure::verdict(code).code();
     crate::tui::exit_code(code);
     os::proc::exit(code)
 }
@@ -21829,6 +22030,8 @@ extern "C" fn recorded_exit(code: i32) -> ! {
     // an app domain's exit ends that domain only (domain.rs)
     crate::domain::exit_current(code);
     let code = crate::check::finish_test_deps(code);
+    // a run past a JIT error ends with the JIT error's verdict, not the program's code
+    let code = crate::hot_failure::verdict(code).code();
     crate::tui::exit_code(code);
     os::proc::exit(code)
 }
@@ -25138,16 +25341,16 @@ pub fn start_background_coherence(u: &Unit) {
     }
     let front = u.front.clone();
     { let _k = crate::zone_alloc::kept();
-    let _ = std::thread::Builder::new().name("run-coherence".into()).spawn(move || { let _z = crate::zone_alloc::compiler_thread();
+    let _ = crate::run_threads::spawn("run-coherence", move || { let _z = crate::zone_alloc::compiler_thread();
         let _mem = crate::memstat::tag(crate::memstat::Tag::Borrowck);
         makepad_cpu_budget::set_thread_class(makepad_cpu_budget::BACKGROUND);
         while STARTUP_PHASE.load(Ordering::Acquire) != 0 && !SPEC_STOP.load(Ordering::SeqCst) {
-            std::thread::sleep(std::time::Duration::from_millis(20));
+            if !crate::run_threads::sleep(std::time::Duration::from_millis(20)) { return; }
         }
         let mut orphan_done = false;
         let emitted = crate::infer::diagnostics::DiagCtxt::thread_emitted();
         loop {
-            if SPEC_STOP.load(Ordering::SeqCst) || crate::preempt::is_stopped() { return; }
+            if SPEC_STOP.load(Ordering::SeqCst) || crate::preempt::is_stopped() || crate::run_threads::ending() { return; }
             let r = {
                 let _job = compile_job();
                 let r = front_read("coherence");
@@ -25622,6 +25825,11 @@ mod front_yield_tests {
         let handles = (0..jobs).map(|i| {
             let (admitted, go, left) = (admitted.clone(), go.clone(), left.clone());
             std::thread::spawn(move || {
+                // (the wait's own code compiled first: under the JIT a thread waiting for a compile
+                // lends its token, and the build would get it)
+                admitted.fetch_add(0, Ordering::SeqCst);
+                let _ = go.load(Ordering::SeqCst);
+                std::thread::yield_now();
                 let permit = budget::admit(budget::VISIBLE, budget::APP, "a pool job");
                 admitted.fetch_add(1, Ordering::SeqCst);
                 while !go.load(Ordering::SeqCst) {
@@ -25656,20 +25864,82 @@ mod front_yield_tests {
         (handles, left)
     }
 
+    /// Other compile jobs up to the JIT's floor, so the build is past it: a Visible job waiting for a
+    /// token takes the build's at its checkpoint, and the build needs another. (Below the floor it
+    /// keeps its token: `a_build_below_the_jit_floor_finishes_and_the_last_job_runs_after_it`.)
+    fn compile_jobs_at_the_floor(stop: &std::sync::Arc<AtomicBool>) -> (Vec<std::thread::JoinHandle<()>>, Vec<u64>) {
+        (0..makepad_cpu_budget::jit_floor().max(1)).map(|_| other_compile_job(stop.clone())).unzip()
+    }
+
+    /// With the JIT short of its floor, Visible work leaves it the token: the build keeps its own
+    /// through its checkpoints and finishes while a job waits for a token, and the job then runs. The
+    /// build waits for nothing that job holds, so this is no hang.
+    #[test]
+    fn a_build_below_the_jit_floor_finishes_and_the_last_job_runs_after_it() {
+        isolated_test!(a_build_below_the_jit_floor_finishes_and_the_last_job_runs_after_it);
+        use makepad_cpu_budget as budget;
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::Arc;
+        // (a small machine has no floor for the build to be below)
+        if budget::jit_floor() < 2 {
+            return;
+        }
+        let (u, f, _, path) = two_fn_unit("budget_floor");
+        let up = &*u as *const Unit as usize;
+        let jobs = budget::limit() as usize - 1;
+        let stop = Arc::new(AtomicBool::new(false));
+        let (other, _) = other_compile_job(stop.clone());
+        BACK_END_GATE.store(1, Ordering::SeqCst);
+        queue::spec(up, f);
+        reached("the build at its gate", || BACK_END_GATE.load(Ordering::SeqCst) == 2);
+        let (admitted, done) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicBool::new(false)));
+        let handles: Vec<_> = (0..jobs).map(|_| {
+            let (admitted, done) = (admitted.clone(), done.clone());
+            std::thread::spawn(move || {
+                // (compiled before it holds a token, as in `jobs_on_every_token`)
+                admitted.fetch_add(0, Ordering::SeqCst);
+                let _ = done.load(Ordering::SeqCst);
+                std::thread::yield_now();
+                let permit = budget::admit(budget::VISIBLE, budget::APP, "a pool job");
+                admitted.fetch_add(1, Ordering::SeqCst);
+                while !done.load(Ordering::SeqCst) {
+                    std::thread::yield_now();
+                }
+                budget::release(permit);
+            })
+        }).collect();
+        reached("the last job waiting for a token", || budget::tokens().waiting.iter().any(|w| w.class == budget::VISIBLE && w.client == budget::APP));
+        BACK_END_GATE.store(0, Ordering::SeqCst);
+        // (the jobs keep their tokens until the end: a build that gave its own up would stand still here)
+        reached("the build finished on its own token", || queue::running_class(up, f).is_none());
+        reached("the last job running after it", || admitted.load(Ordering::SeqCst) >= jobs);
+        done.store(true, Ordering::SeqCst);
+        for job in handles {
+            job.join().unwrap();
+        }
+        stop.store(true, Ordering::SeqCst);
+        other.join().unwrap();
+        assert!(u.fns[f as usize].build_err.is_none(), "{:?}", u.fns[f as usize].build_err);
+        // (the isolated process owns the runtime globals)
+        std::mem::forget(u);
+        let _ = std::fs::remove_file(&path);
+    }
+
     #[test]
     fn jobs_on_every_token_do_not_hang_on_a_build_that_needs_one() {
         isolated_test!(jobs_on_every_token_do_not_hang_on_a_build_that_needs_one);
         use std::sync::Arc;
         let (u, f, g, path) = two_fn_unit("budget_lock");
         let up = &*u as *const Unit as usize;
-        let tokens = makepad_cpu_budget::limit() as usize;
-        assert!(makepad_cpu_budget::background_limit() >= 2, "this needs the build and the other compile job in Background");
+        let floor = makepad_cpu_budget::jit_floor().max(1);
+        let jobs_beside = makepad_cpu_budget::limit() as usize - floor as usize;
+        assert!(makepad_cpu_budget::background_limit() > floor, "this needs the build and the other compile jobs in Background");
         // every job calls: they sleep without their tokens, and the build gets one. The registry's
         // chain says so when it does not: a plain failure, as it stands still. (A second of age: a
         // job between its wait's row and giving its token up looks stuck for that moment.)
         let stop = Arc::new(AtomicBool::new(false));
-        let (other, _) = other_compile_job(stop.clone());
-        let (jobs, left) = jobs_on_every_token(up, f, tokens - 1, tokens - 1);
+        let (others, _) = compile_jobs_at_the_floor(&stop);
+        let (jobs, left) = jobs_on_every_token(up, f, jobs_beside, jobs_beside);
         while left.load(Ordering::SeqCst) != 0 {
             if let Some(chain) = crate::inspect::budget_deadlock(1_000_000_000) {
                 panic!("deadlock: {chain}");
@@ -25680,15 +25950,15 @@ mod front_yield_tests {
             assert_ne!(job.join().unwrap(), 0);
         }
         stop.store(true, Ordering::SeqCst);
-        other.join().unwrap();
+        others.into_iter().for_each(|other| other.join().unwrap());
         assert!(u.fns[f as usize].build_err.is_none(), "{:?}", u.fns[f as usize].build_err);
         // one job calls and the others run on: only its token comes free, and Background is not let
         // in below its limit. The build takes the class of who waits for it.
         let stop = Arc::new(AtomicBool::new(false));
-        let (other, other_thread) = other_compile_job(stop.clone());
-        let (jobs, left) = jobs_on_every_token(up, g, tokens - 1, 1);
+        let (others, other_threads) = compile_jobs_at_the_floor(&stop);
+        let (jobs, left) = jobs_on_every_token(up, g, jobs_beside, 1);
         let building = BACK_END_THREAD.load(Ordering::SeqCst);
-        let waiter = || crate::waits::snapshot().into_iter().find(|w| w.thread != other_thread && w.holder == building && matches!(w.kind, crate::waits::Kind::Pump | crate::waits::Kind::Build)).map(|w| (w.thread, w.since_ns));
+        let waiter = || crate::waits::snapshot().into_iter().find(|w| !other_threads.contains(&w.thread) && w.holder == building && matches!(w.kind, crate::waits::Kind::Pump | crate::waits::Kind::Build)).map(|w| (w.thread, w.since_ns));
         while left.load(Ordering::SeqCst) != 0 {
             // (the same wait before and after: its promotion stands while the class is read)
             let before = waiter();
@@ -25704,7 +25974,7 @@ mod front_yield_tests {
             assert_ne!(job.join().unwrap(), 0);
         }
         stop.store(true, Ordering::SeqCst);
-        other.join().unwrap();
+        others.into_iter().for_each(|other| other.join().unwrap());
         assert!(u.fns[g as usize].build_err.is_none(), "{:?}", u.fns[g as usize].build_err);
         assert!(makepad_cpu_budget::tokens().holders.iter().all(|h| h.client != makepad_cpu_budget::APP), "the jobs' permits are released, none lent");
         // (the isolated process owns the runtime globals)
@@ -26232,9 +26502,8 @@ extern "C" fn __relax_realtime(root: usize, data: usize, meta: usize, wake: usiz
         // the wake also comes when the ticket is due (the reach may still run)
         if wake != 0 {
             let wait = rt_wait_ns();
-            let _ = std::thread::Builder::new().name("run-rt-wake".into()).spawn(move || {
-                std::thread::sleep(std::time::Duration::from_nanos(wait));
-                if RT_DONE.load(Ordering::Acquire) < ticket {
+            let _ = crate::run_threads::spawn("run-rt-wake", move || {
+                if crate::run_threads::sleep(std::time::Duration::from_nanos(wait)) && RT_DONE.load(Ordering::Acquire) < ticket {
                     if rt_trace() {
                         eprintln!("makepad-run rt: ticket {} due after {} ms with the reach still running: the callback starts now", ticket, wait / 1_000_000);
                     }
@@ -26612,7 +26881,7 @@ fn realtime_done() {
         now
     });
     if !wakes.is_empty() {
-        let _ = std::thread::Builder::new().name("run-rt-wake".into()).spawn(move || {
+        let _ = crate::run_threads::spawn("run-rt-wake", move || {
             for (_, scope, wake) in wakes {
                 call_wake(scope, wake);
             }
@@ -27343,4 +27612,205 @@ fn compile_checkpoint() {
     let held = front_reads_held() + u32::from(owner::is_owner());
     let site = if owner::is_owner() { "jit owner unit" } else { FRONT_READ_SITE.try_with(|site| site.get()).unwrap_or("jit front read") };
     crate::pool::checkpoint(held, site);
+}
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    use relax_session::reset_static as reset;
+    bmemo::reset_statics();
+    busy::reset_statics();
+    queue::reset_statics();
+    settle_rebuild::reset_statics();
+    #[cfg(all(target_arch = "aarch64", target_vendor = "apple"))]
+    static_glue::reset_statics();
+    UNIT = std::ptr::null_mut();
+    reset(&AUX_UNITS, relax_session::sync::Mutex::new(Vec::new()));
+    reset(&WATCHDOG_CALLS, relax_session::sync::Mutex::new(Vec::new()));
+    reset(&QUIT_SEEN, AtomicBool::new(false));
+    reset(&ORDER_UNTIL_NS, AtomicU64::new(0));
+    reset(&ORDER_PRESENT_LEN, std::sync::atomic::AtomicUsize::new(0));
+    reset(&TIER1_PANICS, AtomicU64::new(0));
+    reset(&O3_OPT_PANICS, [AtomicU64::new(0), AtomicU64::new(0)]);
+    reset(&O3_OPT_PANICKED, relax_session::sync::Mutex::new(std::collections::BTreeSet::new()));
+    reset(&FAULTS_FATAL, AtomicBool::new(false));
+    reset(&POISONED, relax_session::sync::Mutex::new(None));
+    reset(&APP_ENTER, AtomicU64::new(0));
+    reset(&PROGRAM_ARGS, relax_session::sync::Mutex::new(Vec::new()));
+    reset(&ARGV, relax_session::sync::Mutex::new(Vec::new()));
+    reset(&COMPILE_ERRORS_FATAL, std::sync::atomic::AtomicBool::new(false));
+    reset(&PARK_COMPILE_ERRORS, std::sync::atomic::AtomicBool::new(false));
+    reset(&HANG_TRAMP, AtomicU64::new(0));
+    reset(&MADE, relax_session::sync::Mutex::new(Vec::new()));
+    reset(&SCANNED, std::sync::atomic::AtomicUsize::new(0));
+    reset(&MAIN_TID, AtomicU64::new(0));
+    reset(&COMPILED_FNS, AtomicU64::new(0));
+    reset(&SPEC_FNS, AtomicU64::new(0));
+    reset(&TIER1_INSTALLS, AtomicU64::new(0));
+    reset(&TIER1_FINISHED, AtomicU64::new(0));
+    reset(&CODE_CACHE_EMPTY, AtomicBool::new(false));
+    reset(&MAIN_COMPILES, relax_session::sync::Mutex::new(Vec::new()));
+    reset(&RT_LAZY, AtomicU64::new(0));
+    reset(&RT_LAZY_NS, AtomicU64::new(0));
+    reset(&QUIT_COMPILES, [const { AtomicU64::new(0) }; 2]);
+    reset(&PENDING_RECORDS, std::sync::atomic::AtomicUsize::new(0));
+    reset(&PARK_NOTED, relax_session::sync::Mutex::new(Vec::new()));
+    reset(&FRAMES, relax_session::sync::Mutex::new(Vec::new()));
+    reset(&FRAME_SLOTS, relax_session::sync::Mutex::new(Vec::new()));
+    reset(&O2_LATER, relax_session::sync::Mutex::new(Vec::new()));
+    reset(&O2_SEEN, relax_session::sync::Mutex::new(None));
+    reset(&O2_STATS, [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)]);
+    reset(&O2_DROPS, [const { AtomicU64::new(0) }; 9]);
+    reset(&O2_NOOPS, [const { AtomicU64::new(0) }; 3]);
+    reset(&O2_TAKEN, AtomicU64::new(0));
+    reset(&O2_TAKE_DROPS, [const { AtomicU64::new(0) }; 7]);
+    reset(&O2_FRONT_FAILS, [[const { AtomicU64::new(0) }; 15], [const { AtomicU64::new(0) }; 15]]);
+    reset(&OFFERED, std::sync::OnceLock::new());
+    reset(&BASE, relax_session::sync::Mutex::new(BaseSlots { released: false, hit: Vec::new() }));
+    reset(&SLOW_BASE, relax_session::sync::Mutex::new(Vec::new()));
+    reset(&FORGET_SEEN, AtomicU64::new(u64::MAX));
+    reset(&FINAL_SLOTS, AtomicU64::new(0));
+    reset(&SETTLE_ENTRY_RANKS, [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)]);
+    reset(&SETTLE_TIER, relax_session::sync::Mutex::new(SettleTier { seen: [u64::MAX; 2], at_final: [0; 2], quiet_since: 0, window_at: 0, final_at: 0, rounds: 0, epoch: 0 }));
+    reset(&O1V_SEEN, relax_session::sync::Mutex::new(None));
+    reset(&O1V_STANDALONE, relax_session::sync::Mutex::new(None));
+    reset(&DONE_RIR_FNS, AtomicU64::new(0));
+    reset(&DONE_RIR_BYTES, AtomicU64::new(0));
+    reset(&DONE_BODY_BYTES, AtomicU64::new(0));
+    reset(&PUB_OPT, relax_session::sync::Mutex::new(None));
+    reset(&BENCH_CAPTURE, relax_session::sync::Mutex::new(Vec::new()));
+    reset(&WATCH, relax_session::sync::Mutex::new(Vec::new()));
+    reset(&DEFERRED_MISSING, relax_session::sync::Mutex::new(Vec::new()));
+    reset(&DEFERRED_STATICS, relax_session::sync::Mutex::new(std::collections::BTreeSet::new()));
+    reset(&DEFERRED_LOADS, AtomicU64::new(0));
+    reset(&RELOADING, std::sync::atomic::AtomicU32::new(0));
+    reset(&OWNER_LOWERS, [const { [const { AtomicU64::new(0) }; 2] }; 5]);
+    reset(&PREP_SHARED, std::sync::LazyLock::new(|| relax_session::sync::Mutex::new(HashMap::new())));
+    reset(&EXEC_LO, AtomicU64::new(0));
+    reset(&EXEC_HI, AtomicU64::new(0));
+    reset(&SAMPLED, relax_session::sync::Mutex::new(Vec::new()));
+    reset(&SAMPLER, std::sync::Once::new());
+    reset(&T, std::sync::OnceLock::new());
+    reset(&FIELD_SITES, relax_session::sync::Mutex::new(None));
+    reset(&FIELD_HIST, relax_session::sync::Mutex::new(None));
+    reset(&PROFILE, relax_session::sync::Mutex::new(None));
+    reset(&PC_PROFILE, relax_session::sync::Mutex::new(None));
+    reset(&PC_CODE, relax_session::sync::Mutex::new(None));
+    reset(&PROGRESS, std::sync::Once::new());
+    reset(&WRITTEN, relax_session::sync::Mutex::new(String::new()));
+    reset(&TRACE_WHY, relax_session::sync::Mutex::new(std::collections::BTreeMap::new()));
+    reset(&TRACE_BUILDS, relax_session::sync::Mutex::new(std::collections::BTreeMap::new()));
+    reset(&TIER1_ENABLED, std::sync::atomic::AtomicBool::new(false));
+    reset(&TIER_STOP, std::sync::atomic::AtomicBool::new(false));
+    reset(&TRAMP, std::sync::OnceLock::new());
+    reset(&TIER_UNIT, std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()));
+    reset(&TIER_ACTIVE, relax_session::sync::Mutex::new(Vec::new()));
+    reset(&TIER_INBOX, crate::lockfree::IdStack::new());
+    reset(&AWAIT_VERDICT, relax_session::sync::Mutex::new(Vec::new()));
+    reset(&SWEPT, AtomicU64::new(u64::MAX));
+    reset(&SWEEP_STATE, relax_session::sync::Mutex::new(SweepState { unit: 0, patches: 0, epoch: 0, flagged: Vec::new(), cleared: Vec::new() }));
+    reset(&SPECV_HOLD, std::sync::atomic::AtomicU8::new(u8::MAX));
+    reset(&O1V_HELD, relax_session::sync::Mutex::new(Vec::new()));
+    reset(&SPECV_BORROWS, AtomicU64::new(0));
+    reset(&SPECV_BORROWS_OWN, AtomicU64::new(0));
+    reset(&TWINS_RAN, AtomicU64::new(0));
+    reset(&LAZY_FRONTS, AtomicU64::new(0));
+    reset(&TWIN_RETARGETS, AtomicU64::new(0));
+    reset(&SPECV_PREBUILT, AtomicU64::new(0));
+    reset(&TWIN_BASE_BUILDS, AtomicU64::new(0));
+    reset(&TWIN_O3_BASES, relax_session::sync::Mutex::new(Vec::new()));
+    reset(&TWIN_USERS, std::sync::LazyLock::new(Default::default));
+    reset(&O3_BUILD_NOTES, std::sync::LazyLock::new(Default::default));
+    reset(&UNVERIFIED_LEFT, relax_session::sync::Mutex::new(Vec::new()));
+    reset(&UNVERIFIED_IN, relax_session::sync::Mutex::new(Vec::new()));
+    reset(&TWIN_AWAIT, relax_session::sync::Mutex::new(Vec::new()));
+    reset(&TWIN_PENDING, relax_session::sync::Mutex::new(Vec::new()));
+    reset(&TIER_REVALIDATED, AtomicU64::new(0));
+    reset(&TIER_PUSHES, AtomicU64::new(0));
+    reset(&SAMPLER_SETTLED, std::sync::atomic::AtomicBool::new(false));
+    reset(&SAMPLER_ACTIVITY, std::sync::Mutex::new(None));
+    reset(&TIER1_STATS, relax_session::sync::Mutex::new(None));
+    reset(&STARTUP_COMPILES, AtomicU64::new(0));
+    reset(&DEMAND_COMPILES, AtomicU64::new(0));
+    reset(&W0_IDLING, AtomicBool::new(false));
+    reset(&TIER_QUEUED, AtomicU64::new(0));
+    reset(&COUNTING, relax_session::sync::Mutex::new(Vec::new()));
+    reset(&PGO_DECIDES, std::sync::atomic::AtomicBool::new(false));
+    reset(&PGO_PARKED, AtomicU64::new(0));
+    reset(&PGO_STATS, [const { AtomicU64::new(0) }; 4]);
+    reset(&PGO_LOOP_UNFINALS, AtomicU64::new(0));
+    reset(&PROFILED_HEAT, relax_session::sync::Mutex::new(Vec::new()));
+    reset(&CHURN, std::sync::LazyLock::new(|| relax_session::sync::Mutex::new(Churn { per: std::collections::HashMap::new(), period_builds: 0, period_ns: 0, period_installed: 0, period_dropped: 0, last: None, start: None })));
+    reset(&CHURN_QUEUED_AT, relax_session::sync::Mutex::new(None));
+    reset(&STARTUP_PHASE, AtomicU64::new(0));
+    reset(&STARTUP_ROOTS, relax_session::sync::Mutex::new(Vec::new()));
+    reset(&STARTUP_CACHED, relax_session::sync::Mutex::new(Vec::new()));
+    reset(&FIRST_PRESENT_NS, AtomicU64::new(0));
+    reset(&FIRST_PRESENT, AtomicBool::new(false));
+    reset(&HEADLESS, AtomicBool::new(false));
+    reset(&LIVE_STARTUP_DONE, AtomicBool::new(false));
+    reset(&LIVE_NEEDS_PRESENT, AtomicBool::new(false));
+    reset(&STARTUP_THREAD, std::sync::OnceLock::new());
+    reset(&PIPELINE, AtomicBool::new(false));
+    reset(&PATCH_OPEN, AtomicBool::new(false));
+    reset(&AHEAD_LEVEL, std::sync::atomic::AtomicU8::new(1));
+    reset(&SPEC_UNIT, std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()));
+    reset(&SPEC_COLD_SKIPPED, AtomicU64::new(0));
+    reset(&SPLIT_NS, [const { AtomicU64::new(0) }; 6]);
+    reset(&AOT_DEFERRED, relax_session::sync::Mutex::new(Vec::new()));
+    reset(&SEED_INITIALIZERS_SKIPPED, AtomicU64::new(0));
+    reset(&SEED_RECURSIVE_SKIPPED, AtomicU64::new(0));
+    reset(&SEED_PROBE_NS, AtomicU64::new(0));
+    reset(&SEED_QUEUED, AtomicU64::new(0));
+    reset(&TEARDOWN_STATS, [AtomicU64::new(0), AtomicU64::new(0)]);
+    reset(&TEARDOWN_RUNNING, AtomicBool::new(false));
+    reset(&AHEAD_COMPLETE, AtomicBool::new(false));
+    reset(&AHEAD_SEEN, relax_session::sync::Mutex::new((u64::MAX, 0)));
+    reset(&TIER1_RIR_REBUILT, [AtomicU64::new(0), AtomicU64::new(0)]);
+    reset(&TIER1_PREP, [const { AtomicU64::new(0) }; 10]);
+    reset(&TIER1_SNAP_BUILT, [AtomicU64::new(0), AtomicU64::new(0)]);
+    reset(&TIER1_TAKE_PARTS, [const { AtomicU64::new(0) }; 6]);
+    reset(&TIER1_SNAP_FRONTS, [AtomicU64::new(0), AtomicU64::new(0)]);
+    reset(&TIER1_SNAP_OFF, [AtomicU64::new(0), AtomicU64::new(0)]);
+    reset(&CAND_SKIP, [const { AtomicU64::new(0) }; 27]);
+    reset(&O3_INSTALL_REC, [AtomicU64::new(0), AtomicU64::new(0)]);
+    reset(&O3_OWNER, [const { AtomicU64::new(0) }; 24]);
+    reset(&SPEC_BUILT, relax_session::sync::Mutex::new(Vec::new()));
+    reset(&SPEC_EXPIRED, [AtomicU64::new(0), AtomicU64::new(0)]);
+    reset(&SPEC_STOP, AtomicBool::new(false));
+    reset(&DRAIN_ANYWAY, AtomicBool::new(false));
+    reset(&SPEC_PANICS, AtomicU64::new(0));
+    reset(&BG_DRAINED, AtomicBool::new(false));
+    reset(&BG_PAUSE, AtomicBool::new(false));
+    reset(&BG_PAUSER, AtomicU64::new(0));
+    reset(&PAUSE_HOLDER, AtomicU64::new(0));
+    reset(&BG_ACTIVE, std::sync::atomic::AtomicU32::new(0));
+    reset(&PREFRONT_SITE, [const { [AtomicU64::new(0), AtomicU64::new(0)] }; 8]);
+    reset(&PREFRONTS, [const { AtomicU64::new(0) }; 5]);
+    reset(&PREFRONTED, std::sync::Mutex::new(None));
+    reset(&LAST_FRONT, relax_session::sync::Mutex::new(None));
+    reset(&PREFRONT_FAIL, [const { AtomicU64::new(0) }; 15]);
+    reset(&LOOK_QUEUED, AtomicU64::new(0));
+    reset(&AHEAD_STATS, [const { AtomicU64::new(0) }; 8]);
+    reset(&AHEAD_DROPPED, AtomicU64::new(0));
+    reset(&AHEAD_LATE, AtomicU64::new(0));
+    reset(&AHEAD_AT_PRESENT, [const { AtomicU64::new(0) }; 8]);
+    reset(&MAIN_AHEAD_WAIT, [const { AtomicU64::new(0) }; 6]);
+    reset(&MAIN_LOWER_WHY, [const { AtomicU64::new(0) }; 14]);
+    reset(&CODE_GROWTH, [const { AtomicU64::new(0) }; 5]);
+    reset(&CODE_INSTALLS, [const { AtomicU64::new(0) }; 5]);
+    reset(&CACHE_AHEAD, std::sync::atomic::AtomicU64::new(0));
+    #[cfg(all(target_arch = "aarch64", target_vendor = "apple"))]
+    reset(&NC_WINDOWS, relax_session::sync::Mutex::new(Vec::new()));
+    reset(&REALTIME, relax_session::sync::Mutex::new(None));
+    reset(&RT_DYNS, AtomicBool::new(false));
+    reset(&RT_ANY, AtomicBool::new(false));
+    reset(&RT_PENDING, relax_session::sync::Mutex::new(Vec::new()));
+    reset(&RT_PENDING_SLOTS, relax_session::sync::Mutex::new(Vec::new()));
+    reset(&RT_AHEAD, [AtomicU64::new(0), AtomicU64::new(0)]);
+    reset(&RT_TICKET, AtomicU64::new(0));
+    reset(&RT_DONE, AtomicU64::new(0));
+    reset(&RT_ARMED, std::sync::atomic::AtomicU32::new(0));
+    reset(&RT_DUE, std::sync::Mutex::new(Vec::new()));
+    reset(&CONSTS_WANTED, relax_session::sync::Mutex::new(Vec::new()));
+    reset(&TICK_STATE, relax_session::sync::Mutex::new(([0; 8], 0)));
 }

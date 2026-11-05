@@ -162,3 +162,9 @@ pub fn symbol(name: &[u8]) -> Option<usize> {
         _ => None,
     }
 }
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    use relax_session::reset_static as reset;
+    reset(&WAITERS, std::sync::Mutex::new(Vec::new()));
+}

@@ -53,7 +53,8 @@ pub fn main(args: &[String]) -> i32 {
     }
     if target == "list" {
         for a in apps() {
-            println!("{{\"pid\":{},\"app\":{},\"socket\":{}}}", a.pid, super::json_str(&a.app), super::json_str(&a.socket));
+            let error = a.text("socket_error").map_or(String::new(), |why| format!(",\"socket_error\":{}", super::json_str(&why)));
+            println!("{{\"pid\":{},\"app\":{},\"socket\":{}{}}}", a.pid, super::json_str(&a.app), super::json_str(&a.socket), error);
         }
         return 0;
     }
@@ -95,6 +96,10 @@ pub fn main(args: &[String]) -> i32 {
         eprintln!("makepad inspect: no running app `{}` (running: {})", target, list.iter().map(|a| format!("{} {}", a.pid, a.app)).collect::<Vec<_>>().join(", "));
         return 2;
     };
+    if let Some(why) = app.unreachable() {
+        eprintln!("makepad inspect: {why}");
+        return 2;
+    }
     if args.get(1).map(String::as_str) == Some("pf") {
         return super::pf::live_main(app, &args[2..]);
     }
@@ -138,6 +143,9 @@ fn json_wanted(words: &[String]) -> bool {
 /// Ok(true) when the answer had an error line.
 fn ask(app: &App, line: &str, each: &mut dyn FnMut(&str) -> bool) -> std::io::Result<bool> {
     let to_io = |e: makepad_remote::link::Error| std::io::Error::other(e.to_string());
+    if let Some(why) = app.unreachable() {
+        return Err(std::io::Error::other(why));
+    }
     let client = makepad_remote::Client::connect(&app.socket).map_err(to_io)?;
     // the commands that are images (`grab`, `gseq`, `gq`) are answered client side from the
     // `frames` service, like `makepad-remote app` does: the same library function

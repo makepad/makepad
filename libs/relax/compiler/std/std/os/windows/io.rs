@@ -3,6 +3,11 @@
 
 use core::fmt;
 use core::marker::PhantomData;
+use core::mem::ManuallyDrop;
+
+use alloc::boxed::Box;
+use alloc::rc::Rc;
+use alloc::sync::Arc;
 
 use crate::io;
 
@@ -78,6 +83,11 @@ pub struct HandleOrInvalid(RawHandle);
 #[repr(transparent)]
 pub struct HandleOrNull(RawHandle);
 
+unsafe impl Send for HandleOrInvalid {}
+unsafe impl Sync for HandleOrInvalid {}
+unsafe impl Send for HandleOrNull {}
+unsafe impl Sync for HandleOrNull {}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InvalidHandleError(());
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -93,35 +103,65 @@ impl fmt::Display for NullHandleError {
         f.write_str("A HandleOrNull could not be converted to a handle because it was null")
     }
 }
+impl crate::error::Error for InvalidHandleError {}
+impl crate::error::Error for NullHandleError {}
 
 impl HandleOrInvalid {
     pub unsafe fn from_raw_handle(handle: RawHandle) -> Self {
         HandleOrInvalid(handle)
+    }
+    fn is_valid(&self) -> bool {
+        self.0 != INVALID_HANDLE_VALUE
     }
 }
 impl HandleOrNull {
     pub unsafe fn from_raw_handle(handle: RawHandle) -> Self {
         HandleOrNull(handle)
     }
+    fn is_valid(&self) -> bool {
+        !self.0.is_null()
+    }
+}
+
+// a valid handle that was never taken is closed (real std: io_safety)
+impl Drop for HandleOrInvalid {
+    fn drop(&mut self) {
+        if self.is_valid() {
+            unsafe {
+                CloseHandle(self.0);
+            }
+        }
+    }
+}
+impl Drop for HandleOrNull {
+    fn drop(&mut self) {
+        if self.is_valid() {
+            unsafe {
+                CloseHandle(self.0);
+            }
+        }
+    }
 }
 
 impl TryFrom<HandleOrInvalid> for OwnedHandle {
     type Error = InvalidHandleError;
     fn try_from(h: HandleOrInvalid) -> Result<OwnedHandle, InvalidHandleError> {
-        if h.0 == INVALID_HANDLE_VALUE {
-            Err(InvalidHandleError(()))
-        } else {
+        let h = ManuallyDrop::new(h);
+        if h.is_valid() {
             Ok(OwnedHandle { handle: h.0 })
+        } else {
+            Err(InvalidHandleError(()))
         }
     }
 }
 impl TryFrom<HandleOrNull> for OwnedHandle {
     type Error = NullHandleError;
     fn try_from(h: HandleOrNull) -> Result<OwnedHandle, NullHandleError> {
-        if h.0.is_null() {
-            Err(NullHandleError(()))
-        } else {
+        let h = ManuallyDrop::new(h);
+        if h.is_valid() {
             Ok(OwnedHandle { handle: h.0 })
+        } else {
+            Err(NullHandleError(()))
         }
     }
 }
@@ -197,6 +237,95 @@ impl<T: AsHandle + ?Sized> AsHandle for &mut T {
         (**self).as_handle()
     }
 }
+impl<T: AsHandle + ?Sized> AsHandle for Box<T> {
+    fn as_handle(&self) -> BorrowedHandle<'_> {
+        (**self).as_handle()
+    }
+}
+impl<T: AsHandle + ?Sized> AsHandle for Rc<T> {
+    fn as_handle(&self) -> BorrowedHandle<'_> {
+        (**self).as_handle()
+    }
+}
+impl<T: AsHandle + ?Sized> AsHandle for Arc<T> {
+    fn as_handle(&self) -> BorrowedHandle<'_> {
+        (**self).as_handle()
+    }
+}
+
+// ---- the standard streams: GetStdHandle's handle, which may be null (no console attached)
+impl AsRawHandle for io::Stdin {
+    fn as_raw_handle(&self) -> RawHandle {
+        crate::sys::std_handle(0)
+    }
+}
+impl AsHandle for io::Stdin {
+    fn as_handle(&self) -> BorrowedHandle<'_> {
+        unsafe { BorrowedHandle::borrow_raw(self.as_raw_handle()) }
+    }
+}
+impl AsRawHandle for io::StdinLock<'_> {
+    fn as_raw_handle(&self) -> RawHandle {
+        crate::sys::std_handle(0)
+    }
+}
+impl AsHandle for io::StdinLock<'_> {
+    fn as_handle(&self) -> BorrowedHandle<'_> {
+        unsafe { BorrowedHandle::borrow_raw(self.as_raw_handle()) }
+    }
+}
+impl AsRawHandle for io::Stdout {
+    fn as_raw_handle(&self) -> RawHandle {
+        crate::sys::std_handle(1)
+    }
+}
+impl AsHandle for io::Stdout {
+    fn as_handle(&self) -> BorrowedHandle<'_> {
+        unsafe { BorrowedHandle::borrow_raw(self.as_raw_handle()) }
+    }
+}
+impl AsRawHandle for io::StdoutLock<'_> {
+    fn as_raw_handle(&self) -> RawHandle {
+        crate::sys::std_handle(1)
+    }
+}
+impl AsHandle for io::StdoutLock<'_> {
+    fn as_handle(&self) -> BorrowedHandle<'_> {
+        unsafe { BorrowedHandle::borrow_raw(self.as_raw_handle()) }
+    }
+}
+impl AsRawHandle for io::Stderr {
+    fn as_raw_handle(&self) -> RawHandle {
+        crate::sys::std_handle(2)
+    }
+}
+impl AsHandle for io::Stderr {
+    fn as_handle(&self) -> BorrowedHandle<'_> {
+        unsafe { BorrowedHandle::borrow_raw(self.as_raw_handle()) }
+    }
+}
+impl AsRawHandle for io::StderrLock<'_> {
+    fn as_raw_handle(&self) -> RawHandle {
+        crate::sys::std_handle(2)
+    }
+}
+impl AsHandle for io::StderrLock<'_> {
+    fn as_handle(&self) -> BorrowedHandle<'_> {
+        unsafe { BorrowedHandle::borrow_raw(self.as_raw_handle()) }
+    }
+}
+
+// ---- a thread's handle: owned by its JoinHandle until it is taken
+impl<T> AsHandle for crate::thread::JoinHandle<T> {
+    fn as_handle(&self) -> BorrowedHandle<'_> {
+        unsafe { BorrowedHandle::borrow_raw(self.as_raw_handle()) }
+    }
+}
+impl<T> From<crate::thread::JoinHandle<T>> for OwnedHandle {
+    fn from(join_handle: crate::thread::JoinHandle<T>) -> OwnedHandle {
+        OwnedHandle { handle: join_handle.into_raw_handle() }
+    }
+}
 
 impl fmt::Debug for OwnedHandle {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -270,6 +399,36 @@ impl<'s> AsRawSocket for BorrowedSocket<'s> {
 impl<'s> AsSocket for BorrowedSocket<'s> {
     fn as_socket(&self) -> BorrowedSocket<'_> {
         *self
+    }
+}
+impl<T: AsSocket> AsSocket for &T {
+    fn as_socket(&self) -> BorrowedSocket<'_> {
+        T::as_socket(self)
+    }
+}
+impl<T: AsSocket> AsSocket for &mut T {
+    fn as_socket(&self) -> BorrowedSocket<'_> {
+        T::as_socket(self)
+    }
+}
+impl<T: AsSocket> AsSocket for Box<T> {
+    fn as_socket(&self) -> BorrowedSocket<'_> {
+        (**self).as_socket()
+    }
+}
+impl<T: AsSocket> AsSocket for Rc<T> {
+    fn as_socket(&self) -> BorrowedSocket<'_> {
+        (**self).as_socket()
+    }
+}
+impl<T: AsSocket> AsSocket for Arc<T> {
+    fn as_socket(&self) -> BorrowedSocket<'_> {
+        (**self).as_socket()
+    }
+}
+impl<'s> fmt::Debug for BorrowedSocket<'s> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BorrowedSocket").field("socket", &self.socket).finish()
     }
 }
 impl fmt::Debug for OwnedSocket {

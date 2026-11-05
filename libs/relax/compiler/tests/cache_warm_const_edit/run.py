@@ -4,7 +4,7 @@ read directly or through other stored code, show the new value, or the edit asks
 a new run of the edited sources shows the new value. "Patched" with the old value is the one wrong
 answer, and a warm run with the old value the other.
 
-usage: run.py --makepad <makepad binary> [--only p1,p2] [--cold]   (MAKEPAD_RUN_STD in the environment)
+usage: run.py --makepad <makepad binary> [--only p1,p2] [--cold] [--window]   (MAKEPAD_RUN_STD in the environment)
 
 Copies pkg/ to a temporary dir with a fresh disk cache and fills it (a run, then a warm run that must
 prelink). Then each probe gets a live session of its own (`makepad run` of a working tree), started
@@ -21,6 +21,8 @@ A stored entry can be older than the manifest of the run that reads it: the edit
 reaching none of the late readers, writes its own manifest (its keys are "unchanged" from then on),
 and the next run's first late reads must still see that the entries they find are of the old text.
 --cold: the same sessions with the disk cache off, for comparison.
+--window: the same program with a window (hidden), so a restart keeps the process and the window: the
+new value must show in the same pid.
 Prints a row per probe and exits 1 on any stale one.
 """
 import os, re, shutil, signal, subprocess, sys, tempfile, threading, time
@@ -30,6 +32,8 @@ args = sys.argv[1:]
 relax = os.path.abspath(args[args.index("--makepad") + 1])
 only = args[args.index("--only") + 1].split(",") if "--only" in args else None
 cold = "--cold" in args
+window = "--window" in args
+ROOT = os.path.abspath(os.path.join(HERE, "../../../../.."))
 V = "src/values.rs"
 F = "src/fields.rs"
 M = "src/main.rs"
@@ -149,15 +153,34 @@ MUST = {
 }
 # A second edit in the same session: the first one's evaluations must not read as a type's.
 SECOND = {"field_nested": ("pub v: [u64; 3],\n}\nimpl Inner {\n    pub fn new() -> Inner {\n        Inner { v: [5; 3] }", "pub v: [u64; 4],\n}\nimpl Inner {\n    pub fn new() -> Inner {\n        Inner { v: [5; 4] }", 45), "const_nonliteral": ("CONST_NONLIT: u64 = 2 + 0;", "CONST_NONLIT: u64 = 3 + 0;", 3), "const_direct": ("CONST_DIRECT: u64 = 2;", "CONST_DIRECT: u64 = 3;", 3)}
-tmp = tempfile.mkdtemp(prefix="warm-const-edit-")
+if window:
+    # under the workspace: cargo reads .cargo/config.toml from the folder it runs in
+    os.makedirs(os.path.join(ROOT, "target"), exist_ok=True)
+tmp = tempfile.mkdtemp(prefix="warm-const-edit-", dir=os.path.join(ROOT, "target") if window else None)
 pkg = os.path.join(tmp, "pkg")
 shutil.copytree(os.path.join(HERE, "pkg"), pkg)
+if window:
+    # the window's dependency, and the workspace's [patch.crates-io] (the copy is a workspace of its
+    # own, and nodes run offline)
+    manifest = os.path.join(pkg, "Cargo.toml")
+    text = open(manifest).read().replace("window = []", 'window = ["dep:makepad-widgets"]').replace(
+        "[dependencies]\n", '[dependencies]\nmakepad-widgets = { path = "%s", default-features = false, optional = true }\n' % os.path.join(ROOT, "widgets"))
+    patch, on = [], False
+    for line in open(os.path.join(ROOT, "Cargo.toml")):
+        if line.startswith("["):
+            on = line.strip() == "[patch.crates-io]"
+        elif on and 'path = "' in line:
+            name, rest = line.split("=", 1)
+            patch.append('%s = { path = "%s" }' % (name.strip(), os.path.join(ROOT, rest.split('path = "', 1)[1].split('"', 1)[0])))
+    open(manifest, "w").write(text + "\n[patch.crates-io]\n" + "\n".join(patch) + "\n")
 env = dict(os.environ, MAKEPAD_RUN_CACHE_DIR=os.path.join(tmp, "cache"), MAKEPAD_RUN_TARGET_DIR=os.path.join(tmp, "target"))
+if window:
+    env.update(MAKEPAD_HIDE_WINDOWS="1", MAKEPAD_MUTE="1", SANDBOX_MUTE="1", MUSIC_MUTE="1")
 for k in ("MAKEPAD_RUN_CACHE", "MAKEPAD_RUN_PRELINK", "WARM_EDIT_ONCE", "WARM_EDIT_LATE"):
     env.pop(k, None)
 if cold:
     env["MAKEPAD_RUN_CACHE"] = "0"
-cmd = [relax, "run", "--verbose", "cache-warm-const-edit"]
+cmd = [relax, "run", "--verbose", "cache-warm-const-edit"] + (["--features", "window"] if window else [])
 
 
 def once(tag, mode, **more):
@@ -256,9 +279,12 @@ def session(probe, rel, old, new, want):
         elif restart:
             row["outcome"] = "restart"
             open(late, "w").close()
+            ends = sum("run's threads stayed" in l for l in err)
             subprocess.run([relax, "inspect", str(p.pid), "session", "relaunch"], env=env, capture_output=True, text=True)
             if not wait(lambda: shows_new(last() or "", probe, want, FRESH_READS), 60):
                 row["outcome"] = "RELAUNCH STALE"
+            elif window and not wait(lambda: sum("run's threads stayed" in l for l in err) == ends + 1, 60):
+                row["outcome"] = "RELAUNCH NOT IN PLACE"
             row["relaunch"] = value(last() or "", probe)
             row["ms"] = int((time.time() - t_save) * 1e3)
         elif not line:

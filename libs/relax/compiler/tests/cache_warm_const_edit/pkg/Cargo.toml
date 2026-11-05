@@ -10,6 +10,10 @@ publish = false
 name = "cache-warm-const-edit"
 path = "src/main.rs"
 
+# run.py --window makes this the same program with a window, adding makepad-widgets
+[features]
+window = []
+
 [dependencies]
 warm-const-dep = { path = "dep" }
 

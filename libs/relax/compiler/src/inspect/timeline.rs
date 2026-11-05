@@ -9,10 +9,10 @@
 //! - wakes: the program's futex wakes (mutex unlock with waiters, condvar notify, unpark) and
 //!   the owner finishing a request -- the edges that end waits.
 //!
-//! Analysis per frame (a frame = the UI thread's root spans between two `present`s, or each root
-//! span when nothing presents): busy and waiting time per thread, the critical path (from the
-//! frame's end back through each wait to the thread that ended it), total work vs critical path
-//! vs wall, and the waits on the path ranked. `timeline save` writes the capture as a `.mkpf`
+//! Analysis per frame (a frame = the UI thread's work that led up to a Draw, `frames_of`; a wake
+//! that drew nothing is an event-only beat, `beats_of`): busy and waiting time per thread, the
+//! critical path (from the frame's end back through each wait to the thread that ended it), total
+//! work vs critical path vs wall, and the waits on the path ranked. `timeline save` writes the capture as a `.mkpf`
 //! profile recording (makepad-prof-stream), the format Scope and `pf` queries read.
 //!
 //! The hitch watcher runs a frame from the first phase after the previous frame to the UI
@@ -75,6 +75,10 @@ pub enum Kind {
     Wake,
     /// the owner finished a request: `a` = the requester's handle
     Served,
+    /// the UI thread's event loop waits for events (makepad's `ui_idle`) / is woken: the turns of
+    /// the loop, in the rings only (`beats_of`)
+    IdleBegin,
+    IdleEnd,
 }
 
 #[derive(Clone, Copy)]
@@ -96,6 +100,8 @@ struct Ring {
     handle: u64,
     /// the capture this ring's records belong to (rings are reused across captures)
     epoch: AtomicU64,
+    /// its thread has ended: a run's end frees it (`reset_statics`)
+    ended: AtomicBool,
 }
 
 // a ring is written by its own thread only and read after the capture stopped
@@ -106,8 +112,17 @@ static EPOCH: AtomicU64 = AtomicU64::new(0);
 static STARTED_NS: AtomicU64 = AtomicU64::new(0);
 static STOPPED_NS: AtomicU64 = AtomicU64::new(0);
 
+struct RingEnds(&'static Ring);
+
+impl Drop for RingEnds {
+    fn drop(&mut self) {
+        self.0.ended.store(true, Relaxed);
+    }
+}
+
 thread_local! {
     static MY: Cell<*const Ring> = const { Cell::new(std::ptr::null()) };
+    static ENDS: Cell<Option<RingEnds>> = const { Cell::new(None) };
 }
 
 fn ring() -> Option<&'static Ring> {
@@ -123,9 +138,11 @@ fn ring() -> Option<&'static Ring> {
         os_id: super::threads::self_os_id(),
         handle: crate::waits::me(),
         epoch: AtomicU64::new(EPOCH.load(Relaxed)),
+        ended: AtomicBool::new(false),
     }));
     RINGS.lock().unwrap_or_else(|e| e.into_inner()).push(r);
     let _ = MY.try_with(|m| m.set(r));
+    let _ = ENDS.try_with(|e| e.set(Some(RingEnds(r))));
     Some(r)
 }
 
@@ -141,6 +158,12 @@ pub fn push(kind: Kind, label: &'static str, a: u64, b: u64) {
     if super::pstream::on() {
         super::pstream::push(kind as u8, label, a, b);
     }
+    ring_push(kind, label, a, b);
+}
+
+/// Appends a record to this thread's ring only (the idle markers, which the prof stream has no
+/// kind for).
+fn ring_push(kind: Kind, label: &'static str, a: u64, b: u64) {
     if !RINGS_ON.load(Relaxed) {
         return;
     }
@@ -205,6 +228,7 @@ impl Drop for Wait {
 pub extern "C" fn relax_span_begin(name: *const u8, len: usize) {
     let name = unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(name, len)) };
     if name == "idle" {
+        ring_push(Kind::IdleBegin, "idle", 0, 0);
         if FRAME_WATCH.load(Relaxed) || HITCH_NS.load(Relaxed) > 0 {
             frame_idle(true);
         }
@@ -221,6 +245,7 @@ pub extern "C" fn relax_span_begin(name: *const u8, len: usize) {
 pub extern "C" fn relax_span_end(name: *const u8, len: usize) {
     let name = unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(name, len)) };
     if name == "idle" {
+        ring_push(Kind::IdleEnd, "idle", 0, 0);
         if FRAME_WATCH.load(Relaxed) || HITCH_NS.load(Relaxed) > 0 {
             frame_idle(false);
         }
@@ -286,6 +311,66 @@ struct FrameLog {
     wait_in_compile: bool,
     cwait_ns: u64,
     cowner_ns: u64,
+    /// the turns of the event loop: what woke this one, and the wakes a Draw may still take in
+    turns: Turns,
+}
+
+/// The UI thread's turns of its event loop (from an idle wait's end to the next) as the frame
+/// watcher sees them go by, framed by `frames_of`'s rule: a turn that drew nothing is a wake of
+/// its own unless a Draw follows it with no gap over `FRAME_GAP_NS` between the root phases (the
+/// frame then starts at it). The timeline's `beats_of` and `why-slow` count the same wakes.
+#[derive(Default)]
+struct Turns {
+    /// this turn's first root phase: what woke the loop ("" before one)
+    woke: &'static str,
+    drew: bool,
+    /// turns since the last frame that drew nothing and that a Draw may still take in
+    chain: u64,
+    root_end: u64,
+}
+
+#[derive(Debug, PartialEq)]
+enum TurnEnd {
+    /// no phase ran
+    Idle,
+    /// drew nothing: a wake, unless a Draw takes it in later
+    Quiet(&'static str),
+    /// drew, and took in this many of the wakes before it
+    Drew(u64),
+}
+
+impl Turns {
+    fn root_begin(&mut self, now: u64, name: &'static str) {
+        if now.saturating_sub(self.root_end) > makepad_prof_stream::model::FRAME_GAP_NS {
+            // a gap: no Draw takes in the wakes before it
+            self.chain = 0;
+        }
+        if self.woke.is_empty() {
+            self.woke = name;
+        }
+    }
+
+    fn root_end(&mut self, now: u64) {
+        self.root_end = now;
+    }
+
+    fn draw(&mut self) {
+        self.drew = true;
+    }
+
+    fn end(&mut self) -> TurnEnd {
+        let woke = std::mem::take(&mut self.woke);
+        let end = if woke.is_empty() {
+            TurnEnd::Idle
+        } else if self.drew {
+            TurnEnd::Drew(std::mem::take(&mut self.chain))
+        } else {
+            self.chain += 1;
+            TurnEnd::Quiet(woke)
+        };
+        self.drew = false;
+        end
+    }
 }
 
 thread_local! {
@@ -293,6 +378,66 @@ thread_local! {
 }
 
 static HITCHES: AtomicU64 = AtomicU64::new(0);
+
+/// Turns of the UI thread's event loop that drew nothing (woken by a timer, a task, a signal and
+/// no Draw ran) while frame markers are on (`Turns`), of them the ones a Draw took in after
+/// (`QUIET_TAKEN`), and what woke the last `QUIET_RING` (each turn's first phase, a static str
+/// packed as `detail` reads it; 0 once taken in): `why-slow`'s count of wakes beside the frames
+/// that drew (`FRAMES`). A frame may take in wakes from before a reader's mark (`QUIET_CUT`, the
+/// latest mark): `QUIET_TAKEN_CUT` counts those, so a window counts its own wakes only.
+pub static QUIET: AtomicU64 = AtomicU64::new(0);
+pub static QUIET_TAKEN: AtomicU64 = AtomicU64::new(0);
+pub static QUIET_CUT: AtomicU64 = AtomicU64::new(0);
+pub static QUIET_TAKEN_CUT: AtomicU64 = AtomicU64::new(0);
+const QUIET_RING: usize = 64;
+static QUIET_WOKE: [AtomicU64; QUIET_RING] = [const { AtomicU64::new(0) }; QUIET_RING];
+
+fn quiet_wake(woke: &'static str) {
+    let n = QUIET.load(Relaxed) as usize;
+    QUIET_WOKE[n % QUIET_RING].store((woke.as_ptr() as u64 & ((1 << 47) - 1)) | ((woke.len().min(u16::MAX as usize) as u64) << 48), Release);
+    QUIET.store(n as u64 + 1, Release);
+}
+
+/// A frame took in the last `n` wakes (the UI thread's, the one that counts them).
+fn quiet_taken(n: u64) {
+    if n == 0 {
+        return;
+    }
+    let q = QUIET.load(Relaxed);
+    let from = q.saturating_sub(n);
+    for i in q.saturating_sub(n.min(QUIET_RING as u64))..q {
+        QUIET_WOKE[i as usize % QUIET_RING].store(0, Release);
+    }
+    let cut = QUIET_CUT.load(Acquire);
+    if from < cut && cut <= q {
+        QUIET_TAKEN_CUT.fetch_add(cut - from, Release);
+    }
+    QUIET_TAKEN.fetch_add(n, Release);
+}
+
+/// A mark for `ui_wakes_since`: frames that drew, wakes seen, taken in, taken in across a mark.
+pub fn ui_wakes_mark() -> [u64; 4] {
+    let seen = QUIET.load(Acquire);
+    QUIET_CUT.store(seen, Release);
+    [FRAMES.load(Relaxed), seen, QUIET_TAKEN.load(Acquire), QUIET_TAKEN_CUT.load(Acquire)]
+}
+
+/// The frames that drew and the wakes that drew nothing since `mark`, with what woke the wakes
+/// (of the last `QUIET_RING` seen): None while no frame markers run. The wakes a Draw may still
+/// take in count, as the timeline counts them at its stop.
+pub fn ui_wakes_since(mark: [u64; 4]) -> Option<(u64, u64, Vec<(&'static str, usize)>)> {
+    if !FRAME_WATCH.load(Relaxed) && HITCH_NS.load(Relaxed) == 0 {
+        return None;
+    }
+    let [frames0, seen0, taken0, cut0] = mark;
+    let (frames1, seen1) = (FRAMES.load(Relaxed), QUIET.load(Acquire));
+    let (taken1, cut1) = (QUIET_TAKEN.load(Acquire), QUIET_TAKEN_CUT.load(Acquire));
+    // the wakes seen since the mark that no frame took in
+    let taken = taken1.saturating_sub(taken0).saturating_sub(cut1.saturating_sub(cut0));
+    let first = seen0.max(seen1.saturating_sub(QUIET_RING as u64));
+    let woke = tally((first..seen1).map(|i| QUIET_WOKE[i as usize % QUIET_RING].load(Acquire)).filter(|&w| w != 0).map(detail));
+    Some((frames1.saturating_sub(frames0), seen1.saturating_sub(seen0).saturating_sub(taken), woke))
+}
 static HITCH_SKIPPED: AtomicU64 = AtomicU64::new(0);
 static HITCH_LAST_NS: AtomicU64 = AtomicU64::new(0);
 static HITCH_WINDOW: AtomicU64 = AtomicU64::new(0);
@@ -315,7 +460,7 @@ fn frame_watch(begin: bool, name: &'static str) {
     let _ = FL.try_with(|c| {
         let Ok(mut g) = c.try_borrow_mut() else { return };
         let l = g.get_or_insert_with(|| {
-            Box::new(FrameLog { depth: 0, start: 0, avg: 0, idle: 0, idle_t0: 0, in_idle: false, drew: false, recs: Vec::with_capacity(FRAME_RECS), dropped: 0, compile_depth: 0, compile_t0: 0, compile_ns: 0, compiles: 0, probes0: Vec::new(), wait_depth: 0, wait_t0: 0, wait_owner: false, wait_ns: 0, owner_ns: 0, waits: 0, wait_in_compile: false, cwait_ns: 0, cowner_ns: 0 })
+            Box::new(FrameLog { depth: 0, start: 0, avg: 0, idle: 0, idle_t0: 0, in_idle: false, drew: false, recs: Vec::with_capacity(FRAME_RECS), dropped: 0, compile_depth: 0, compile_t0: 0, compile_ns: 0, compiles: 0, probes0: Vec::new(), wait_depth: 0, wait_t0: 0, wait_owner: false, wait_ns: 0, owner_ns: 0, waits: 0, wait_in_compile: false, cwait_ns: 0, cowner_ns: 0, turns: Turns::default() })
         });
         if begin {
             if l.start == 0 {
@@ -341,6 +486,7 @@ fn frame_watch(begin: bool, name: &'static str) {
             }
             if l.depth == 0 {
                 super::flightrec::ui_root(now);
+                l.turns.root_begin(now, name);
             }
             l.depth += 1;
             frame_rec(l, 1, name, "");
@@ -352,9 +498,13 @@ fn frame_watch(begin: bool, name: &'static str) {
         }
         if l.depth == 0 {
             super::flightrec::ui_root(0);
+            l.turns.root_end(now);
         }
-        if name == "Draw" && l.start != 0 {
-            l.drew = true;
+        if name == "Draw" {
+            l.turns.draw();
+            if l.start != 0 {
+                l.drew = true;
+            }
         }
     });
 }
@@ -372,6 +522,12 @@ fn frame_idle(begin: bool) {
         if begin {
             if l.depth != 0 {
                 return;
+            }
+            // a turn ends: one that ran and drew nothing is a wake of its own until a Draw takes it in
+            match l.turns.end() {
+                TurnEnd::Quiet(woke) => quiet_wake(woke),
+                TurnEnd::Drew(n) => quiet_taken(n),
+                TurnEnd::Idle => {}
             }
             if l.start != 0 {
                 frame_rec(l, 7, "idle", "");
@@ -785,6 +941,7 @@ fn raw_now_ns() -> u64 {
 /// makepad's GPU backends: a pass (`name`, static) ran on the GPU from `begin` to `end` (raw
 /// monotonic ns). Recorded only while the timeline records.
 pub extern "C" fn relax_gpu_span(name: *const u8, len: usize, begin: u64, end: u64) {
+    let _kept = crate::zone_alloc::kept();
     if !recording() || end < begin {
         return;
     }
@@ -859,12 +1016,14 @@ struct Seg {
     open: bool,
 }
 
-/// Per thread: its spans and waits as segments, and the wakes it issued (time, futex address).
+/// Per thread: its spans and waits as segments, the wakes it issued (time, futex address) and its
+/// event loop's idle waits (the UI thread's; begin, end).
 struct Thread {
     os_id: u64,
     handle: u64,
     segs: Vec<Seg>,
     wakes: Vec<(u64, u64)>,
+    idles: Vec<(u64, u64)>,
 }
 
 fn build(recs: Vec<(u64, u64, Vec<Rec>)>, stop: u64) -> Vec<Thread> {
@@ -873,6 +1032,8 @@ fn build(recs: Vec<(u64, u64, Vec<Rec>)>, stop: u64) -> Vec<Thread> {
         let mut segs = Vec::new();
         let mut stack: Vec<(u64, String, bool, u64, u64)> = Vec::new();
         let mut wakes = Vec::new();
+        let mut idles = Vec::new();
+        let mut idle_from: Option<u64> = None;
         for r in &v {
             match r.kind {
                 1 => stack.push((r.t, label(r).to_string(), false, 0, 0)),
@@ -888,8 +1049,14 @@ fn build(recs: Vec<(u64, u64, Vec<Rec>)>, stop: u64) -> Vec<Thread> {
                 }
                 5 => wakes.push((r.t, r.a)),
                 6 => wakes.push((r.t, u64::MAX - r.a)),
+                7 => idle_from = Some(r.t),
+                // (an idle that began before the capture ends a turn all the same)
+                8 => idles.push((idle_from.take().unwrap_or(r.t), r.t)),
                 _ => {}
             }
+        }
+        if let Some(t0) = idle_from {
+            idles.push((t0, stop));
         }
         // still open at the stop: cut there
         for (k, (t0, what, wait, obj, _)) in stack.into_iter().enumerate() {
@@ -897,7 +1064,7 @@ fn build(recs: Vec<(u64, u64, Vec<Rec>)>, stop: u64) -> Vec<Thread> {
             segs.push(Seg { t0, t1: stop, what, wait, woke_by: None, key, depth: k as u32, open: true });
         }
         segs.sort_by_key(|s| (s.t0, s.depth));
-        out.push(Thread { os_id, handle, segs, wakes });
+        out.push(Thread { os_id, handle, segs, wakes, idles });
     }
     // edges: what ended a wait is a wake of its key by another thread (a waiter never wakes
     // itself: its own unlock just after it took the lock is no waker) after the wait began and
@@ -943,10 +1110,9 @@ pub fn cmd_timeline(req: &Req, out: &mut Out) {
             let e = EPOCH.load(Relaxed);
             // a forgotten recording stops itself
             { let _k = crate::zone_alloc::kept();
-            let _ = std::thread::Builder::new().name("run-inspect-tl".into()).spawn(move || {
+            let _ = crate::run_threads::spawn("run-inspect-tl", move || {
                 super::heap::exclude_this_thread();
-                std::thread::sleep(std::time::Duration::from_secs(max));
-                if EPOCH.load(Relaxed) == e && RINGS_ON.load(Relaxed) {
+                if crate::run_threads::sleep(std::time::Duration::from_secs(max)) && EPOCH.load(Relaxed) == e && RINGS_ON.load(Relaxed) {
                     stop();
                 }
             });
@@ -990,33 +1156,112 @@ fn ui_thread(ths: &[Thread]) -> Option<usize> {
     ths.iter().position(|t| t.handle == main && main != 0).or_else(|| ths.iter().enumerate().filter(|(_, t)| t.segs.iter().any(|s| !s.wait)).max_by_key(|(_, t)| t.segs.len()).map(|x| x.0))
 }
 
-/// Frames: windows on the UI thread. A makepad frame ends when its `Draw` dispatches end (the
-/// frame runs from the previous one's end: NextFrame, input, draw; Draw dispatches less than 1 ms
-/// apart belong to one frame); with no Draw dispatches, each root span is one. Frames still open
-/// at the stop are left out.
+/// Frames: the windows on the UI thread that drew. A frame ends when its `Draw` dispatches end
+/// (Draw dispatches less than 1 ms apart, one per window or pass, close one frame) and starts at
+/// the first of the UI thread's root spans leading up to it without an idle gap over
+/// `FRAME_GAP_NS`, never before the previous frame's end: the rule `pf` and Scope frame a saved
+/// capture by. A wake that draws nothing (a timer, a task, a signal) is no frame's (`beats_of`).
+/// Frames still open at the stop are left out.
 fn frames_of(ui: &Thread) -> Vec<(u64, u64)> {
-    let roots: Vec<&Seg> = ui.segs.iter().filter(|s| !s.wait && s.depth == 0).collect();
-    // Draw dispatches at any depth (a native event phase may wrap them)
-    let draws: Vec<&Seg> = ui.segs.iter().filter(|s| !s.wait && s.what == "Draw" && !s.open).collect();
-    if draws.len() >= 2 {
-        // back-to-back Draw dispatches (one per window or pass) close one frame
-        let mut ends: Vec<u64> = Vec::new();
-        for d in &draws {
-            match ends.last_mut() {
-                Some(e) if d.t0 < *e + 1_000_000 => *e = d.t1,
-                _ => ends.push(d.t1),
+    use makepad_prof_stream::model::FRAME_GAP_NS;
+    // depth 0 does not overlap: spans and waits in time order
+    let rows: Vec<&Seg> = ui.segs.iter().filter(|s| s.depth == 0).collect();
+    let mut v: Vec<(u64, u64)> = Vec::new();
+    // Draw dispatches at any depth (a native event phase may wrap them), in time order
+    for d in ui.segs.iter().filter(|s| !s.wait && s.what == "Draw" && !s.open) {
+        let prev_end = match v.last_mut() {
+            Some(last) if d.t0 < last.1 + 1_000_000 => {
+                last.1 = last.1.max(d.t1);
+                continue;
             }
+            Some(last) => last.1,
+            None => 0,
+        };
+        // the root holding the Draw
+        let k = rows.partition_point(|r| r.t0 <= d.t0);
+        let mut t0 = if k > 0 && rows[k - 1].t1 >= d.t1 { rows[k - 1].t0 } else { d.t0 };
+        let mut k = rows.partition_point(|r| r.t0 < t0);
+        while k > 0 {
+            let r = rows[k - 1];
+            if r.t0 < prev_end || t0.saturating_sub(r.t1) > FRAME_GAP_NS {
+                break;
+            }
+            if !r.wait {
+                t0 = r.t0;
+            }
+            k -= 1;
         }
-        let mut v = Vec::new();
-        let first = roots.first().map_or(draws[0].t0, |r| r.t0.min(draws[0].t0));
-        v.push((first, ends[0]));
-        for w in ends.windows(2) {
-            v.push((w[0], w[1]));
-        }
-        v
-    } else {
-        roots.iter().filter(|s| !s.open).map(|s| (s.t0, s.t1)).collect()
+        v.push((t0.max(prev_end), d.t1));
     }
+    v
+}
+
+/// A wake of the UI thread that drew nothing: the root spans of one turn of its event loop (from
+/// an idle wait's end to its next idle wait) when no Draw ran in that turn and no frame holds
+/// them. `woke` is the turn's first root span: the event or phase that woke the loop (a timer,
+/// a signal, the tasks, ...).
+struct Beat {
+    t0: u64,
+    t1: u64,
+    woke: String,
+    phases: Vec<String>,
+}
+
+fn beats_of(ui: &Thread, frames: &[(u64, u64)]) -> Vec<Beat> {
+    // a turn: the idle waits that ended before it
+    let turn = |t: u64| ui.idles.partition_point(|i| i.1 <= t);
+    let drew: std::collections::HashSet<usize> = ui.segs.iter().filter(|s| !s.wait && s.what == "Draw").map(|s| turn(s.t0)).collect();
+    let mut v: Vec<(usize, Beat)> = Vec::new();
+    for r in ui.segs.iter().filter(|s| s.depth == 0 && !s.wait && !s.open) {
+        let k = turn(r.t0);
+        let f = frames.partition_point(|f| f.1 <= r.t0);
+        if drew.contains(&k) || frames.get(f).is_some_and(|f| f.0 < r.t1) {
+            continue;
+        }
+        match v.last_mut() {
+            Some((kk, b)) if *kk == k => {
+                b.t1 = r.t1;
+                b.phases.push(r.what.clone());
+            }
+            _ => v.push((k, Beat { t0: r.t0, t1: r.t1, woke: r.what.clone(), phases: vec![r.what.clone()] })),
+        }
+    }
+    v.into_iter().map(|x| x.1).collect()
+}
+
+/// `n` of each name, most first (then by name).
+fn tally<'a>(names: impl Iterator<Item = &'a str>) -> Vec<(&'a str, usize)> {
+    let mut v: Vec<(&str, usize)> = Vec::new();
+    for n in names {
+        match v.iter_mut().find(|x| x.0 == n) {
+            Some(x) => x.1 += 1,
+            None => v.push((n, 1)),
+        }
+    }
+    v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+    v
+}
+
+fn tally_json(v: &[(&str, usize)]) -> String {
+    v.iter().map(|(n, c)| format!("[{},{}]", json_str(n), c)).collect::<Vec<_>>().join(",")
+}
+
+/// The line of a capture's event-only beats: how many, what woke them, the phases they ran and
+/// their UI time.
+fn beats_line(ui: &Thread, beats: &[Beat], wall_ns: u64) -> String {
+    let ranges: Vec<(u64, u64)> = beats.iter().map(|b| (b.t0, b.t1)).collect();
+    let mut busy: Vec<u64> = busy_per_range(ui, &ranges).into_iter().map(|x| x.0).collect();
+    busy.sort_unstable();
+    let at = |p: f64| busy.get(((busy.len() as f64 - 1.0) * p).round() as usize).copied().unwrap_or(0) as f64 / 1e6;
+    format!(
+        "{{\"event_only_beats\":{{\"n\":{},\"per_s\":{:.1},\"woken_by\":[{}],\"phases\":[{}],\"ui_busy_ms\":{{\"median\":{:.2},\"max\":{:.2}}},\"more\":[\"trace topics=frame_sources\",\"log\"]}}}}",
+        beats.len(),
+        beats.len() as f64 * 1e9 / wall_ns.max(1) as f64,
+        tally_json(&tally(beats.iter().map(|b| b.woke.as_str()))),
+        tally_json(&tally(beats.iter().flat_map(|b| b.phases.iter().map(String::as_str)))),
+        at(0.5),
+        at(1.0)
+    )
 }
 
 /// Busy and wait time of a thread in each of `ranges` (in time order, not overlapping), one walk of
@@ -1116,7 +1361,11 @@ fn frames_cmd(req: &Req, out: &mut Out) {
         return;
     };
     let fr = frames_of(&ths[ui]);
-    out.measured(&format!("{} frames on the UI thread, {} threads recorded", fr.len(), ths.len()), "timeline rings", &[]);
+    let beats = beats_of(&ths[ui], &fr);
+    out.measured(&format!("{} frames drew on the UI thread, {} wakes drew nothing, {} threads recorded", fr.len(), beats.len(), ths.len()), "timeline rings", &[]);
+    if !beats.is_empty() {
+        out.line(&beats_line(&ths[ui], &beats, stop.saturating_sub(STARTED_NS.load(Relaxed))));
+    }
     let durs: Vec<f64> = fr.iter().map(|f| (f.1 - f.0) as f64 / 1e6).collect();
     let mut sorted = durs.clone();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -1274,7 +1523,8 @@ fn frame_cmd(req: &Req, out: &mut Out) {
         w => w.trim_start_matches('F').parse::<usize>().ok().filter(|&i| i < fr.len()),
     };
     let Some(i) = i else {
-        out.err(&format!("no frame `{}` ({} frames)", which, fr.len()));
+        let beats = beats_of(&ths[ui], &fr).len();
+        out.err(&format!("no frame `{}` ({} frames drew, {} wakes drew nothing: `timeline frames`)", which, fr.len(), beats));
         return;
     };
     let (t0, t1) = fr[i];
@@ -1397,7 +1647,8 @@ fn save_cmd(out: &mut Out) {
         let nm = names.iter().find(|t| t.os_id == os_id).map(|t| t.name.clone()).unwrap_or_default();
         let sid = strings.id(&nm);
         let mut recs = Vec::with_capacity(v.len());
-        for r in &v {
+        // the idle markers are the rings' own (the recording's span kinds stop at Served)
+        for r in v.iter().filter(|r| r.kind <= Kind::Served as u8) {
             let name = if r.kind == Kind::WaitBegin as u8 {
                 let d = detail(r.b);
                 strings.id(&if d.is_empty() { label(r).to_string() } else { format!("{} {}", label(r), d) })
@@ -1448,7 +1699,7 @@ mod tests {
     fn a_frames_gpu_wait_is_not_ui_busy_and_a_span_counts_in_each_frame_it_crosses() {
         use super::{busy_in, busy_per_range, Seg, Thread};
         let seg = |t0, t1, what: &str| Seg { t0, t1, what: what.to_string(), wait: false, woke_by: None, key: 0, depth: 0, open: false };
-        let th = Thread { os_id: 0, handle: 0, segs: vec![seg(0, 10, "beat"), seg(10, 14, "gpu-wait"), seg(14, 20, "submit")], wakes: Vec::new() };
+        let th = Thread { os_id: 0, handle: 0, segs: vec![seg(0, 10, "beat"), seg(10, 14, "gpu-wait"), seg(14, 20, "submit")], wakes: Vec::new(), idles: Vec::new() };
         assert_eq!(busy_per_range(&th, &[(0, 16), (16, 30)]), vec![(12, 4), (4, 0)]);
         assert_eq!(busy_in(&th, 0, 30), (16, 4));
     }
@@ -1482,6 +1733,7 @@ mod tests {
             wait_in_compile: false,
             cwait_ns: 0,
             cowner_ns: 0,
+            turns: super::Turns::default(),
         };
         let s = super::analyse(&l, 0, 10_000_000);
         assert!(s.contains("\"owner_waits\":[{\"wait\":\"owner (main)\",\"at_ms\":0.0,\"ms\":3.00,"), "{s}");
@@ -1545,4 +1797,143 @@ mod tests {
             assert!(cp.iter().any(|p| p.0 == 0 && p.3 == "run"), "{steps:?}");
         }
     }
+
+    /// The UI thread of an idle app with a timer, as makepad's event loop records it: each wake
+    /// of the timer is a turn (idle wait, the Timer event, platform ops twice, the tasks, the
+    /// submit, idle again) and draws nothing. Such turns are no frames: the capture of an idle
+    /// Stage page counted each of their root spans as one (80 "frames" in 8 s and 0 draws).
+    fn timer_turn(v: &mut Vec<super::Rec>, t: u64) {
+        use super::Kind::*;
+        v.push(rec(t, IdleEnd, "idle", 0, ""));
+        for (i, name) in ["Timer", "platform-ops", "platform-ops", "tasks", "submit"].into_iter().enumerate() {
+            let at = t + 10_000 + i as u64 * 100_000;
+            v.push(rec(at, SpanBegin, name, 0, ""));
+            v.push(rec(at + 50_000, SpanEnd, name, 0, ""));
+        }
+        v.push(rec(t + 600_000, IdleBegin, "idle", 0, ""));
+    }
+
+    #[test]
+    fn an_idle_apps_timer_wakes_are_beats_not_frames() {
+        let mut ui = vec![rec(0, super::Kind::IdleBegin, "idle", 0, "")];
+        for k in 0..16u64 {
+            timer_turn(&mut ui, 500_000_000 * (k + 1));
+        }
+        let ths = super::build(vec![(1, 11, ui)], 8_600_000_000);
+        let fr = super::frames_of(&ths[0]);
+        assert!(fr.is_empty(), "{fr:?}");
+        let beats = super::beats_of(&ths[0], &fr);
+        assert_eq!(beats.len(), 16);
+        assert!(beats.iter().all(|b| b.woke == "Timer" && b.phases == ["Timer", "platform-ops", "platform-ops", "tasks", "submit"]));
+        let line = super::beats_line(&ths[0], &beats, 8_000_000_000);
+        assert!(line.starts_with("{\"event_only_beats\":{\"n\":16,\"per_s\":2.0,\"woken_by\":[[\"Timer\",16]],\"phases\":[[\"platform-ops\",32],[\"Timer\",16],[\"submit\",16],[\"tasks\",16]],\"ui_busy_ms\":{\"median\":0.25,"), "{line}");
+    }
+
+    /// A turn that draws is a frame from its first root span to its Draw; its work after the Draw
+    /// (the submit) is in no beat; the timer's turns before it stay beats.
+    #[test]
+    fn a_drawing_turn_is_a_frame_and_the_timer_turns_around_it_beats() {
+        use super::Kind::*;
+        let mut ui = vec![rec(0, IdleBegin, "idle", 0, "")];
+        timer_turn(&mut ui, 500_000_000);
+        let t = 1_000_000_000;
+        ui.extend([
+            rec(t, IdleEnd, "idle", 0, ""),
+            rec(t + 10_000, SpanBegin, "Timer", 0, ""),
+            rec(t + 60_000, SpanEnd, "Timer", 0, ""),
+            rec(t + 100_000, SpanBegin, "beat", 0, ""),
+            rec(t + 110_000, SpanBegin, "Draw", 0, ""),
+            rec(t + 4_000_000, SpanEnd, "Draw", 0, ""),
+            rec(t + 4_100_000, SpanEnd, "beat", 0, ""),
+            rec(t + 4_200_000, SpanBegin, "submit", 0, ""),
+            rec(t + 4_300_000, SpanEnd, "submit", 0, ""),
+            rec(t + 4_400_000, IdleBegin, "idle", 0, ""),
+        ]);
+        timer_turn(&mut ui, 1_500_000_000);
+        let ths = super::build(vec![(1, 11, ui)], 2_000_000_000);
+        let fr = super::frames_of(&ths[0]);
+        assert_eq!(fr, vec![(t + 10_000, t + 4_000_000)]);
+        let beats = super::beats_of(&ths[0], &fr);
+        assert_eq!(beats.iter().map(|b| (b.t0, b.woke.as_str())).collect::<Vec<_>>(), vec![(500_010_000, "Timer"), (1_500_010_000, "Timer")]);
+    }
+
+    /// The always-on frame watcher counts the same: a turn that ran and drew nothing is a quiet
+    /// wake, named by its first phase, unless a frame takes it in; a turn that drew is a frame
+    /// (`why-slow`'s UI line).
+    #[test]
+    fn the_frame_watcher_counts_quiet_wakes_by_what_woke_them() {
+        super::set_frame_watch(true);
+        let wakes = std::thread::spawn(|| {
+            let turn = |drew: bool| {
+                super::frame_idle(false);
+                super::frame_watch(true, "Timer");
+                super::frame_watch(false, "Timer");
+                if drew {
+                    super::frame_watch(true, "Draw");
+                    super::frame_watch(false, "Draw");
+                }
+                super::frame_watch(true, "tasks");
+                super::frame_watch(false, "tasks");
+                super::frame_idle(true);
+            };
+            // two wakes before the mark, one after it: the Draw right after takes in all three,
+            // the window's own one off its count; the wake after the Draw stands
+            turn(false);
+            turn(false);
+            let mark = super::ui_wakes_mark();
+            for drew in [false, true, false] {
+                turn(drew);
+            }
+            super::ui_wakes_since(mark)
+        })
+        .join()
+        .unwrap();
+        super::set_frame_watch(false);
+        assert_eq!(wakes, Some((1, 1, vec![("Timer", 1)])));
+    }
+
+    #[test]
+    fn a_draw_takes_in_the_wakes_up_to_it_not_those_before_a_gap() {
+        use super::TurnEnd::*;
+        let mut t = super::Turns::default();
+        let mut turn = |t0: u64, names: &[&'static str]| {
+            for (i, n) in names.iter().enumerate() {
+                let at = t0 + i as u64 * 100_000;
+                t.root_begin(at, n);
+                if *n == "Draw" {
+                    t.draw();
+                }
+                t.root_end(at + 50_000);
+            }
+            t.end()
+        };
+        let ms = 1_000_000;
+        // an idle app's timer: 500 ms apart, each wake stands
+        assert_eq!(turn(0, &["Timer", "tasks"]), Quiet("Timer"));
+        assert_eq!(turn(500 * ms, &["Timer", "tasks"]), Quiet("Timer"));
+        // 60 Hz: the wakes 5 ms before the Draw are its frame's (the first stood: 500 ms gap)
+        assert_eq!(turn(1000 * ms, &["platform-ops"]), Quiet("platform-ops"));
+        assert_eq!(turn(1005 * ms, &["platform-ops"]), Quiet("platform-ops"));
+        assert_eq!(turn(1010 * ms, &["platform-ops", "Draw", "submit"]), Drew(2));
+        // a wake 40 ms before a Draw stands (the gap is over FRAME_GAP_NS)
+        assert_eq!(turn(1020 * ms, &["Timer"]), Quiet("Timer"));
+        assert_eq!(turn(1060 * ms, &["Draw"]), Drew(0));
+        // a turn with no phase is no wake
+        assert_eq!(t.end(), Idle);
+    }
+
+}
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    use relax_session::reset_static as reset;
+    // the rings of the threads that stay go on with them; no one reads these rings outside a capture
+    RINGS.lock().unwrap_or_else(|e| e.into_inner()).retain(|r| {
+        let ended = r.ended.load(Relaxed);
+        if ended {
+            drop(Box::from_raw(*r as *const Ring as *mut Ring));
+        }
+        !ended
+    });
+    reset(&GPU, Mutex::new(Vec::new()));
 }

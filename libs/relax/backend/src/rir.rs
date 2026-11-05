@@ -2289,3 +2289,9 @@ static FORCE_VERIFY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBo
 pub fn force_verify_passes() {
     FORCE_VERIFY.store(true, std::sync::atomic::Ordering::Relaxed);
 }
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    use relax_session::reset_static as reset;
+    reset(&UNWIND_STATS, [const { std::sync::atomic::AtomicU64::new(0) }; 4]);
+}

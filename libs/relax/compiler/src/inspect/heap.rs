@@ -1482,3 +1482,16 @@ pub(crate) fn forget_range(base: usize, size: usize) {
         }
     }
 }
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    use relax_session::reset_static as reset;
+    // (no thread of the run is left, so no free in flight reads them)
+    PROGRAM.on.store(false, Release);
+    let tables = PROGRAM.tables.swap(std::ptr::null_mut(), AcqRel);
+    if !tables.is_null() {
+        drop(Box::from_raw(tables));
+    }
+    reset(&PROGRAM, Tracker { tables: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()), on: AtomicBool::new(false), dropped: AtomicU64::new(0), off_at_ms: AtomicU64::new(0) });
+    reset(&SNAPS, Mutex::new(Vec::new()));
+}

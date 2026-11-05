@@ -4,6 +4,7 @@
 
 /// Float operations that become single instructions.
 pub mod intrinsics {
+    pub use super::intrinsics_mem::{copy, copy_nonoverlapping};
     extern "relax-intrinsic" {
         pub fn sqrt_f64(x: f64) -> f64;
         pub fn sqrt_f32(x: f32) -> f32;

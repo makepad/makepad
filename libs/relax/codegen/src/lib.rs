@@ -42,3 +42,14 @@ pub mod web32;
 
 // This crate's source stamp (build.rs, libs/relax/self_stamp.rs): relax-compiler folds it into the codegen identity.
 include!(concat!(env!("OUT_DIR"), "/src_stamp.rs"));
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub unsafe fn reset_statics() {
+    exec_census::reset_statics();
+    fncost::reset_statics();
+    interp::reset_statics();
+    loops::reset_statics();
+    opt::reset_statics();
+    warm::reset_statics();
+    web32::reset_statics();
+}

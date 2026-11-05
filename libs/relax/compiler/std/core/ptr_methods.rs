@@ -24,6 +24,13 @@ impl<T: crate::marker::PointeeSized> *const T {
     pub const fn addr(self) -> usize {
         self as *const u8 as usize
     }
+    pub fn with_addr(self, addr: usize) -> Self {
+        let delta = (addr as isize).wrapping_sub(self.addr() as isize);
+        self.wrapping_byte_add(delta as usize)
+    }
+    pub fn map_addr(self, f: impl FnOnce(usize) -> usize) -> Self {
+        self.with_addr(f(self.addr()))
+    }
     pub const unsafe fn as_ref<'a>(self) -> Option<&'a T> {
         if self.is_null() {
             None
@@ -158,6 +165,13 @@ impl<T: crate::marker::PointeeSized> *mut T {
     }
     pub const fn addr(self) -> usize {
         self as *const u8 as usize
+    }
+    pub fn with_addr(self, addr: usize) -> Self {
+        let delta = (addr as isize).wrapping_sub(self.addr() as isize);
+        self.wrapping_byte_add(delta as usize)
+    }
+    pub fn map_addr(self, f: impl FnOnce(usize) -> usize) -> Self {
+        self.with_addr(f(self.addr()))
     }
     pub const unsafe fn as_ref<'a>(self) -> Option<&'a T> {
         if self.is_null() {

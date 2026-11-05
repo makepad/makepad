@@ -155,7 +155,7 @@ pub fn why_hung(req: &Req, out: &mut Out) {
             }
             Err(e) => return out.err(&e),
         }
-        std::thread::sleep(std::time::Duration::from_millis((probe / 10).max(5)));
+        crate::run_threads::sleep(std::time::Duration::from_millis((probe / 10).max(5)));
     }
     let caps = match super::capture_all(&|_| true) {
         Ok(c) => c,

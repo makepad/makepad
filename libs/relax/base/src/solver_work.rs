@@ -63,3 +63,9 @@ pub fn get(i: usize) -> u64 { COUNTS[i].load(Ordering::Relaxed) }
 
 /// Whether the counts are on (MAKEPAD_RUN_SOLVER_WORK_TRACE).
 pub fn enabled() -> bool { *ENABLED.get_or_init(|| std::env::var_os("MAKEPAD_RUN_SOLVER_WORK_TRACE").is_some()) }
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    use relax_session::reset_static as reset;
+    reset(&COUNTS, [const { AtomicU64::new(0) }; 30]);
+}

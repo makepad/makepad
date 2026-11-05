@@ -8,9 +8,9 @@ work = "7d8695372c6cd232c174a43ee12e1ee51ba72023"
 
 [tests.linux]
 date = "2026-11-05"
-digest = "185f8d47e2d70d6d086ed0efcfc3a4836e0ff97909bc19c1795fe3a1055c875b"
-main = "6aff3f7d4a7dc69809181ec243f85de10ec70841"
-work = "bc7950ba2a9ef116af414b0bd12331146b736804"
+digest = "5df4f800638d410026a4fc31c4edbacdd911f500cd4d1bc1f3fe80ec564f0aa7"
+main = "71832f8fa1c5a3f6f589b89749c6a99c189e3e8e"
+work = "5300f14ac2c7b3d5aa16bd89d98d789111fbbeb8"
 
 [tests.windows]
 date = "2026-11-02"

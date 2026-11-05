@@ -20,7 +20,7 @@ fn a01_parse_format() {
     for s in socks.iter() {
         println!("| sock {:?} -> {:?} / {:?} / {:?}", s, s.parse::<SocketAddr>(), s.parse::<SocketAddrV4>().map_err(|e| e.to_string()), s.parse::<SocketAddrV6>().map_err(|e| e.to_string()));
     }
-    let a = Ipv4Addr::new(10, 1, 2, 3);
+    let a = Ipv4Addr::new(10, 77, 0, 3);
     println!("| [{:>16}] [{:<16}] [{:^17}] {:?} {}", a, a, a, a.octets(), a.to_bits());
     println!("| {} {} {} {} {}", a.is_private(), a.is_loopback(), Ipv4Addr::LOCALHOST, Ipv4Addr::UNSPECIFIED.is_unspecified(), Ipv4Addr::BROADCAST);
     let b = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 1, 0, 0, 1);

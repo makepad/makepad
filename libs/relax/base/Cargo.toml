@@ -14,7 +14,6 @@ include = ["../self_stamp.rs"]
 makepad-cpu-budget = { workspace = true }
 relax-lex = { workspace = true }
 relax-session = { workspace = true }
-relax-backend = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 makepad-windows-sys = { path = "../../windows/sys", version = "0.1.0" }

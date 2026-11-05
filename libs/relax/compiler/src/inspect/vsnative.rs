@@ -217,7 +217,7 @@ mod imp {
         let stop_at = std::time::Instant::now() + std::time::Duration::from_secs_f64(secs);
         let spawned = {
             let _k = crate::zone_alloc::kept();
-            std::thread::Builder::new().name("run-inspect-vsnative".into()).spawn(move || {
+            crate::run_threads::spawn("run-inspect-vsnative", move || {
                 crate::inspect::heap::exclude_this_thread();
                 let mut v = Vec::new();
                 while std::time::Instant::now() < stop_at {
@@ -702,7 +702,7 @@ mod stacks {
         let ids: Vec<u64> = tids.iter().map(|t| t.0).collect();
         let spawned = {
             let _k = crate::zone_alloc::kept();
-            std::thread::Builder::new().name("run-inspect-vsnative".into()).spawn(move || {
+            crate::run_threads::spawn("run-inspect-vsnative", move || {
                 crate::inspect::heap::exclude_this_thread();
                 let r = crate::inspect::prof::collect_foreign(&ids, secs, hz, ev, &cfi, &|| false);
                 let _ = tx.send((r, cfi));

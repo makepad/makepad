@@ -201,17 +201,19 @@ mod imp {
         }
     }
 
-    /// The calling thread ends: its fault stack `sp` (this_thread's) is switched off and given
-    /// back (`free_altstack`), unless something else replaced it since.
+    /// The calling thread ends: its fault stack `sp` (this_thread's) is switched off if it is still
+    /// on and given back (`free_altstack`). It can be off already: std's thread end switches off
+    /// whichever stack is on, and something else may have replaced it; either way nothing uses it.
     pub fn this_thread_done(sp: u64) {
         const SS_DISABLE: i32 = 2;
         unsafe {
             let mut old = StackT { sp: std::ptr::null_mut(), flags: 0, pad: 0, size: 0 };
-            if sigaltstack(std::ptr::null(), &mut old) != 0 || old.sp as u64 != sp || old.flags & SS_DISABLE != 0 {
+            if sigaltstack(std::ptr::null(), &mut old) != 0 {
                 return;
             }
+            let on = old.sp as u64 == sp && old.flags & SS_DISABLE == 0;
             let off = StackT { sp: std::ptr::null_mut(), flags: SS_DISABLE, pad: 0, size: 0 };
-            if sigaltstack(&off, std::ptr::null_mut()) == 0 {
+            if !on || sigaltstack(&off, std::ptr::null_mut()) == 0 {
                 super::free_altstack(sp);
             }
         }
@@ -235,6 +237,15 @@ mod imp {
     /// Handlers a library of the program installed over ours (Chromium's in cef_initialize, as on
     /// macOS): (handler, flags) per signal, called for signals that are not faults in JIT code.
     static CHAINED: [[AtomicUsize; 2]; 32] = [const { [const { AtomicUsize::new(0) }; 2] }; 32];
+
+    /// A handler the ended run's program chained goes; a library's stays.
+    pub(crate) unsafe fn reset_statics() {
+        for handler in CHAINED.iter().flatten() {
+            if crate::stale::lookup(handler.load(Ordering::Relaxed) as u64).is_some() {
+                handler.store(0, Ordering::Relaxed);
+            }
+        }
+    }
 
     /// Puts our handlers back on top where the program replaced them, keeping the replacement as
     /// the next handler in the chain (the run monitor calls this every 100 ms). Without it a fault
@@ -380,17 +391,19 @@ mod imp {
         }
     }
 
-    /// The calling thread ends: its fault stack `sp` (this_thread's) is switched off and given
-    /// back (`free_altstack`), unless something else replaced it since.
+    /// The calling thread ends: its fault stack `sp` (this_thread's) is switched off if it is still
+    /// on and given back (`free_altstack`). It can be off already: std's thread end switches off
+    /// whichever stack is on, and something else may have replaced it; either way nothing uses it.
     pub fn this_thread_done(sp: u64) {
         const SS_DISABLE: i32 = 2;
         unsafe {
             let mut old = StackT { sp: std::ptr::null_mut(), flags: 0, pad: 0, size: 0 };
-            if sigaltstack(std::ptr::null(), &mut old) != 0 || old.sp as u64 != sp || old.flags & SS_DISABLE != 0 {
+            if sigaltstack(std::ptr::null(), &mut old) != 0 {
                 return;
             }
+            let on = old.sp as u64 == sp && old.flags & SS_DISABLE == 0;
             let off = StackT { sp: std::ptr::null_mut(), flags: SS_DISABLE, pad: 0, size: 0 };
-            if sigaltstack(&off, std::ptr::null_mut()) == 0 {
+            if !on || sigaltstack(&off, std::ptr::null_mut()) == 0 {
                 super::free_altstack(sp);
             }
         }
@@ -437,6 +450,15 @@ mod imp {
     /// Handlers a library of the program installed over ours (Chromium's in cef_initialize, as on
     /// macOS): (handler, flags) per signal, called for signals that are not faults in JIT code.
     static CHAINED: [[AtomicUsize; 2]; 65] = [const { [const { AtomicUsize::new(0) }; 2] }; 65];
+
+    /// A handler the ended run's program chained goes; a library's stays.
+    pub(crate) unsafe fn reset_statics() {
+        for handler in CHAINED.iter().flatten() {
+            if crate::stale::lookup(handler.load(Ordering::Relaxed) as u64).is_some() {
+                handler.store(0, Ordering::Relaxed);
+            }
+        }
+    }
 
     /// Puts our handlers back on top where the program replaced them, keeping the replacement as
     /// the next handler in the chain (the run monitor calls this every 100 ms). Without it a fault
@@ -668,17 +690,20 @@ mod imp {
         }
     }
 
-    /// The calling thread ends: its fault stack `sp` (this_thread's) is switched off and given
-    /// back (`free_altstack`), unless something else replaced it since.
+    /// The calling thread ends: its fault stack `sp` (this_thread's) is switched off if it is still
+    /// on and given back (`free_altstack`). It can be off already: std's thread end switches off
+    /// whichever stack is on, and something else may have replaced it; either way nothing uses it.
     pub fn this_thread_done(sp: u64) {
         const SS_DISABLE: i32 = 4;
         unsafe {
             let mut old = StackT { sp: std::ptr::null_mut(), size: 0, flags: 0 };
-            if sigaltstack(std::ptr::null(), &mut old) != 0 || old.sp as u64 != sp || old.flags & SS_DISABLE != 0 {
+            if sigaltstack(std::ptr::null(), &mut old) != 0 {
                 return;
             }
-            let off = StackT { sp: std::ptr::null_mut(), size: 0, flags: SS_DISABLE };
-            if sigaltstack(&off, std::ptr::null_mut()) == 0 {
+            let on = old.sp as u64 == sp && old.flags & SS_DISABLE == 0;
+            // (Darwin checks the size first, also when switching off: ENOMEM for less than its minimum)
+            let off = StackT { sp: std::ptr::null_mut(), size: super::ALTSTACK, flags: SS_DISABLE };
+            if !on || sigaltstack(&off, std::ptr::null_mut()) == 0 {
                 super::free_altstack(sp);
             }
         }
@@ -702,6 +727,15 @@ mod imp {
     /// SIGBUS, .. in CefInitialize): (handler, flags) per signal, called for signals that are not
     /// faults in JIT code -- the library keeps working, and faults in JIT code are still reported.
     static CHAINED: [[AtomicUsize; 2]; 32] = [const { [const { AtomicUsize::new(0) }; 2] }; 32];
+
+    /// A handler the ended run's program chained goes; a library's stays.
+    pub(crate) unsafe fn reset_statics() {
+        for handler in CHAINED.iter().flatten() {
+            if crate::stale::lookup(handler.load(Ordering::Relaxed) as u64).is_some() {
+                handler.store(0, Ordering::Relaxed);
+            }
+        }
+    }
 
     /// Puts our handlers back on top where the program replaced them, keeping the replacement as
     /// the next handler in the chain (the run monitor calls this every 100 ms).
@@ -925,6 +959,8 @@ mod imp {
             CloseHandle(h);
         }
     }
+
+    pub(crate) unsafe fn reset_statics() {}
 }
 
 #[cfg(not(target_os = "android"))]
@@ -1038,4 +1074,9 @@ pub fn die_by(sig: i32) -> ! {
     }
     let _ = sig;
     std::process::abort()
+}
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    imp::reset_statics();
 }

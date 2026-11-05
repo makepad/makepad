@@ -103,6 +103,7 @@ pub(crate) extern "C" fn relax_fork_exec() -> i32 {
 /// and died there seems to leave that pty revoked (EBADF in the next child), so the walk before the
 /// fork has to find this code; the line below says when it did not.
 pub(crate) extern "C" fn relax_fork_exec_done(pid: i32) -> u32 {
+    let _kept = crate::zone_alloc::kept();
     let _keep = crate::os::proc::KeepLastError::new();
     let Some(t) = table() else { return 0 };
     let mut unbuilt = None;

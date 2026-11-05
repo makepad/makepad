@@ -229,7 +229,7 @@ impl BodyCheck {
     fn check(&self, d: crate::program::DefId, impl_check: bool) -> Option<Vec<String>> {
         struct Cpu<'a>(&'a std::sync::atomic::AtomicU64, u64);
         impl Drop for Cpu<'_> {
-            fn drop(&mut self) { self.0.fetch_add(relax_backend::cpu_ns() - self.1, std::sync::atomic::Ordering::Relaxed); }
+            fn drop(&mut self) { self.0.fetch_add(relax_session::clock::cpu_ns() - self.1, std::sync::atomic::Ordering::Relaxed); }
         }
         let ice = |prog: &crate::program::Program, d: crate::program::DefId| -> Option<Vec<String>> {
             let def = prog.def(d);
@@ -238,11 +238,12 @@ impl BodyCheck {
         };
         let retry = |p: &(dyn std::any::Any + Send)| crate::preempt::is_preempted(p) || p.is::<crate::preempt::NeedsLoad>() || p.is::<crate::preempt::OwnerBusy>();
         let (strict, beside) = (self.strict, self.beside);
-        let _cpu = strict.then(|| Cpu(&self.cpu, relax_backend::cpu_ns()));
+        let _cpu = strict.then(|| Cpu(&self.cpu, relax_session::clock::cpu_ns()));
         let _quiet = strict.then(crate::lint::Suppress::new);
         let uu = unsafe { &*(self.upn as *const Unit) };
         let mut tries = 0;
         loop {
+            if crate::run_threads::run_ending() { return None; }
             let r = beside.then(|| jit::front_read("app check"));
             let (prog, tcx) = r.as_ref().map_or((&uu.prog, &uu.tcx), |r| r.of(&self.front));
             if !strict && tries >= 100 { return if impl_check { None } else { ice(prog, d) }; }
@@ -317,6 +318,9 @@ fn check_prepared(up: *mut Unit, p: AppCheck, beside: Option<&crate::options::Ru
     }
     let mut bodies: Vec<_> = owners.iter().zip(check_all(owners.clone(), false))
         .filter_map(|(&d, e)| e.filter(|e| !e.is_empty()).map(|e| (d, e))).collect();
+    // A run's end stops the check: what it did not reach has no verdict, and no error.
+    let run_ended = || PreparedErrors { errors: Vec::new(), cpu_ns: 0 };
+    if crate::run_threads::run_ending() { return run_ended(); }
     let skipped_left = {
         let r = beside.map(|_| jit::front_read("app check skipped"));
         !r.as_ref().map_or(unsafe { &(*up).prog }, |r| r.of(&front).0).skipped_files.is_empty()
@@ -331,6 +335,7 @@ fn check_prepared(up: *mut Unit, p: AppCheck, beside: Option<&crate::options::Ru
             .filter_map(|(&d, e)| e.filter(|e| !e.is_empty()).map(|e| (d, e))).collect();
     }
     failed.extend(bodies);
+    if crate::run_threads::run_ending() { return run_ended(); }
     let mut errors: Vec<(u32, String)> = {
         let r = beside.map(|_| jit::front_read("app check verdicts"));
         let prog = r.as_ref().map_or(unsafe { &(*up).prog }, |r| r.of(&front).0);
@@ -451,10 +456,10 @@ pub fn start_test_deps(up: *mut Unit, select: impl FnOnce(&crate::program::Progr
     let upn = up as usize;
     let runtime = crate::zone_alloc::kept_clone(runtime);
     let _k = crate::zone_alloc::kept();
-    let worker = std::thread::Builder::new().name("test-deps-check".into()).stack_size(256 << 20).spawn(move || {
+    let worker = crate::run_threads::spawn_sized("test-deps-check", 256 << 20, move || {
         let _z = crate::zone_alloc::compiler_thread();
         makepad_cpu_budget::set_thread_class(makepad_cpu_budget::BACKGROUND);
-        let (t0, cpu0) = (jit::wall_ns(), relax_backend::cpu_ns());
+        let (t0, cpu0) = (jit::wall_ns(), relax_session::clock::cpu_ns());
         let up = upn as *mut Unit;
         let front = unsafe { (*up).front.clone() };
         // per crate: its own text (the boot's files) and its dependency closure
@@ -497,7 +502,7 @@ pub fn start_test_deps(up: *mut Unit, select: impl FnOnce(&crate::program::Progr
         TestDepsResult {
             errors: crate::zone_alloc::kept_clone(&checked.errors), names,
             selected: crates.len(), stored, owners: count,
-            cpu_ns: checked.cpu_ns + relax_backend::cpu_ns() - cpu0, wall_ns: jit::wall_ns() - t0,
+            cpu_ns: checked.cpu_ns + relax_session::clock::cpu_ns() - cpu0, wall_ns: jit::wall_ns() - t0,
         }
     }).expect("test dependency check thread");
     assert!(TEST_DEPS.set(TestDeps { worker: relax_session::sync::Mutex::new(Some(worker)), failed: std::sync::OnceLock::new() }).is_ok(), "test dependency check already started");
@@ -556,7 +561,7 @@ static BESIDE: (relax_session::sync::Mutex<u8>, relax_session::sync::Condvar) = 
 pub fn start_app_check(up: *mut Unit, p: AppCheck, runtime: crate::options::RuntimeOptions, stop: Box<dyn Fn(&[String]) + Send>) {
     *BESIDE.0.lock().unwrap_or_else(|e| e.into_inner()) = 1;
     let upn = up as usize;
-    std::thread::Builder::new().name("run-app-check".into()).stack_size(256 << 20).spawn(move || {
+    crate::run_threads::spawn_sized("run-app-check", 256 << 20, move || {
         let _z = crate::zone_alloc::compiler_thread();
         makepad_cpu_budget::set_thread_class(makepad_cpu_budget::BACKGROUND);
         let errors = check_prepared(upn as *mut Unit, p, Some(&runtime), CheckMode::Typeck).strings();
@@ -1664,4 +1669,13 @@ fn static_self_access(up: *mut Unit, own: &[bool]) -> Vec<String> {
         }
     }
     out
+}
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    use relax_session::reset_static as reset;
+    reset(&BOOT_SKIPPED, std::sync::OnceLock::new());
+    reset(&CHECK_WAITED, std::sync::atomic::AtomicBool::new(false));
+    reset(&BESIDE, (relax_session::sync::Mutex::new(0), relax_session::sync::Condvar::new()));
+    reset(&RUN_CHECK, [const { std::sync::atomic::AtomicU64::new(0) }; 5]);
 }

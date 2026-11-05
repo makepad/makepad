@@ -285,7 +285,56 @@ fn many() -> u64 {
     many!(0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47 48 49)
 }
 
+// `--features window`: the same program as an app with a window (run.py --window): its restarts
+// keep the process and the window.
+#[cfg(feature = "window")]
+mod window {
+    use makepad_widgets::*;
+
+    script_mod! {
+        use mod.prelude.widgets.*
+        startup() do #(App::script_component(vm)){
+            ui: Root{
+                main_window := Window{
+                    window.inner_size: vec2(320, 200)
+                    body +: { Label{text: "const edits"} }
+                }
+            }
+        }
+    }
+
+    #[derive(Script, ScriptHook)]
+    pub struct App {
+        #[live]
+        ui: WidgetRef,
+    }
+
+    impl AppMain for App {
+        fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
+            makepad_widgets::script_mod(vm);
+            self::script_mod(vm)
+        }
+        fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+            if matches!(event, Event::Startup) {
+                std::thread::spawn(super::run);
+            }
+            self.ui.handle_event(cx, event, &mut Scope::empty());
+        }
+    }
+    app_main!(App);
+    pub fn main() {
+        app_main();
+    }
+}
+
 fn main() {
+    #[cfg(feature = "window")]
+    window::main();
+    #[cfg(not(feature = "window"))]
+    run();
+}
+
+fn run() {
     let once = std::env::var("WARM_EDIT_ONCE").ok();
     if once.as_deref() == Some("many") {
         black_box(many());
@@ -393,4 +442,7 @@ fn main() {
         n += 1;
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
+    // (this is a thread beside the window here)
+    #[cfg(feature = "window")]
+    std::process::exit(0);
 }

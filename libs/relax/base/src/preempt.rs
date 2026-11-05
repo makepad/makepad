@@ -165,3 +165,11 @@ mod tests {
         super::point();
     }
 }
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    use relax_session::reset_static as reset;
+    reset(&STOPPED, AtomicBool::new(false));
+    reset(&WRITERS, AtomicUsize::new(0));
+    reset(&URGENT, AtomicBool::new(false));
+}

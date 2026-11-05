@@ -110,6 +110,7 @@ pub mod postframe;
 mod nounwind;
 pub mod os;
 pub mod lower;
+pub mod simd;
 pub mod cabi;
 pub use relax_types::*;
 // This crate's own source stamp (build.rs, libs/relax/self_stamp.rs), the codegen identity's
@@ -121,6 +122,7 @@ mod first_frame;
 pub mod hot_failure;
 #[cfg(any(windows, test))]
 pub mod restart_parent;
+pub mod run_end;
 mod harness;
 mod test_pkg;
 pub mod tui;
@@ -185,10 +187,10 @@ pub const RUSTC_VERSION: &str = "1.98.0";
 /// --filter-platform` runs) answer from Relax's own target model (print_as_rustc). Returns whether
 /// it answered.
 pub fn relax_as_rustc() -> bool {
-    if std::env::var_os("MAKEPAD_RUN_AS_RUSTC").is_none() {
+    let args: Vec<String> = os::proc::args_bytes().iter().skip(1).map(|a| String::from_utf8_lossy(a).into_owned()).collect();
+    if std::env::var_os("MAKEPAD_RUN_AS_RUSTC").is_none() && !native::is_target_rustc_probe(&args) {
         return false;
     }
-    let args: Vec<String> = os::proc::args_bytes().iter().skip(1).map(|a| String::from_utf8_lossy(a).into_owned()).collect();
     // the script's own run (and a nested script's) is a Relax command, not a RUSTC question
     if args.first().is_some_and(|a| a == "run") {
         return false;
@@ -196,7 +198,7 @@ pub fn relax_as_rustc() -> bool {
     let sess = &session_from_env(&args);
     match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
         ["--version"] | ["-V"] => println!("rustc {} (makepad run {})", RUSTC_VERSION, PROVENANCE),
-        ["-vV"] | ["--version", "--verbose"] => {
+        ["-vV"] | ["--version", "--verbose"] | ["--verbose", "--version"] | ["-V", "--verbose"] | ["--verbose", "-V"] => {
             println!("rustc {} (makepad run {})", RUSTC_VERSION, PROVENANCE);
             println!("binary: rustc");
             println!("commit-hash: unknown");
@@ -394,7 +396,10 @@ pub fn session_from_env(args: &[String]) -> std::sync::Arc<crate::Session> {
     if args.get(1).map(String::as_str) == Some("fix") {
         options.relaxed = Some("all".to_string());
     }
-    options.cpu = relax_backend::x64::detect_cpu(&options);
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        options.cpu = relax_backend::x64::detect_cpu(&options);
+    }
     options.spec_hot = Some(options.spec_hot.unwrap_or_else(crate::jit::on_battery));
     let mut session = crate::Session { options, runtime: crate::options::RuntimeOptions::from_env() };
     session.options.target = match session.options.check_target {
@@ -1307,4 +1312,38 @@ fn round18_rpit_diagnostic() {
     eprintln!("{all}");
     assert!(output.status.success());
     assert!(all.contains("test result: 10 passed; 0 failed"), "{all}");
+}
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub unsafe fn reset_statics() {
+    cache::reset_statics();
+    check::reset_statics();
+    coverage::reset_statics();
+    domain::reset_statics();
+    domain_res::reset_statics();
+    first_frame::reset_statics();
+    front::reset_statics();
+    harness::reset_statics();
+    hot_failure::reset_statics();
+    inspect::reset_statics();
+    invalid::reset_statics();
+    jit::reset_statics();
+    mainprof::reset_statics();
+    modules::reset_statics();
+    native_macros::reset_statics();
+    os::reset_statics();
+    owner::reset_statics();
+    pmhost::reset_statics();
+    postframe::reset_statics();
+    provided::reset_statics();
+    reload::reset_statics();
+    run::reset_statics();
+    sandbox::reset_statics();
+    stale::reset_statics();
+    syms::reset_statics();
+    tui::reset_statics();
+    typeck_bg::reset_statics();
+    wasm_export::reset_statics();
+    web::reset_statics();
+    web32::reset_statics();
 }

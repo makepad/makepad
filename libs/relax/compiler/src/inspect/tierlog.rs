@@ -455,3 +455,12 @@ mod tests {
         assert_eq!(h.recent.len(), 4);
     }
 }
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    use relax_session::reset_static as reset;
+    // the ring stays (its slot numbers are the ended run's): the next run reads from its end
+    let cursor = STORE.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map_or(0, |st| st.cursor);
+    let cursor = RING.get().map_or(0, |r| r.read(cursor, &mut |_, _| {}).0);
+    reset(&STORE, Mutex::new(Some(Store { cursor, lost: 0, untracked: 0, by: HashMap::new() })));
+}

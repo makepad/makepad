@@ -649,6 +649,10 @@ mod imp {
         }
         slot.tid.store(0, Relaxed);
         slot.mode.store(HOLD_CAPTURE, Relaxed);
+        // (a free slot keeps none of the thread's registers: they name its stack and its heap)
+        for r in &slot.regs {
+            r.store(0, Relaxed);
+        }
         slot.state.store(0, Release);
     }
 

@@ -36,6 +36,9 @@ pub(super) fn is_builtin(name: &[u8]) -> bool {
             | b"assert"
             | b"assert_eq"
             | b"assert_ne"
+            | b"debug_assert"
+            | b"debug_assert_eq"
+            | b"debug_assert_ne"
             | b"vec"
             | b"smallvec"
             | b"dbg"
@@ -142,18 +145,25 @@ impl<'a> Parser<'a> {
             Some(m) => m.table.s2_fmt,
             None => false,
         };
-        if !s2 || path.segs.len() > 3 {
+        if !s2 {
             return Ok(None);
         }
         let (nlo, nhi) = match self.ast.segs(path.segs).last() {
             Some(s) => (s.name.lo, s.name.hi),
             None => return Ok(None),
         };
-        let name = self.bytes(nlo, nhi).to_vec();
-        if !is_builtin(&name) {
-            return Ok(None);
+        let mut name = String::from_utf8_lossy(self.bytes(nlo, nhi)).into_owned();
+        if path.segs.len() > 1 || path.global() {
+            let segs = self.ast.segs(path.segs);
+            let mut full = Vec::new();
+            if path.global() { full.push(String::new()); }
+            full.extend(segs.iter().map(|s| self.seg_text(s)));
+            let Some(resolved) = self.macros.as_ref().and_then(|m| m.builtin_macro_path(&self.krate, &self.cur_module(), &full, &mut Default::default())) else {
+                return Ok(None);
+            };
+            name = resolved;
         }
-        let name = String::from_utf8_lossy(&name).into_owned();
+        if !is_builtin(name.as_bytes()) { return Ok(None); }
         // rustc_resolve: `#[no_implicit_prelude]` (edition 2018 and later) takes the std prelude's macros away
         if self.no_prelude_hides(path, &name) {
             return Err(PErr { pos: nlo, msg: format!("cannot find macro `{name}` in this scope") });
@@ -172,6 +182,17 @@ impl<'a> Parser<'a> {
     }
 
     fn builtin_gen_inner(&mut self, name: &str, hi: usize, lo: u32) -> PResult<Gen> {
+        // core/src/macros/mod.rs: debug assertions expand to an ordinary
+        // assertion inside `if cfg!(debug_assertions)`. Both operands are
+        // type-checked through borrowed PartialEq even when execution is off.
+        if let Some(assertion) = name.strip_prefix("debug_") {
+            let inner = self.builtin_gen_inner(assertion, hi, lo)?;
+            let mut g = Gen::new(self.edition);
+            tg!(&mut g; if #core() :: cfg ! (debug_assertions) #open_brace());
+            g.append(&inner);
+            g.close_brace();
+            return Ok(g);
+        }
         let mut g = Gen::new(self.edition);
         match name {
             "format_args" => {
@@ -689,24 +710,47 @@ impl<'a> Parser<'a> {
         self.gen_pieces(g, out, srcs, flo)
     }
 
-    /// Whether the parsed expression `e` has an `.await` or a `yield` in it (a suspension point).
+    /// Whether evaluation suspends in this body. Expanded/interpolated expressions may
+    /// have spans outside this parser's token buffer, so inspect syntax rather than tokens.
     fn expr_may_yield(&self, e: ExprId) -> bool {
-        let ex = self.ast.expr(e);
-        let (lo, hi) = (ex.lo, ex.hi);
-        let n = self.toks.len();
-        let (mut a, mut b) = (0, n);
-        while a < b {
-            let mid = (a + b) / 2;
-            if self.toks.at(mid).lo < lo { a = mid + 1 } else { b = mid }
+        match self.ast.expr(e).kind {
+            ExprKind::Await(_) | ExprKind::Yield(_) => true,
+            ExprKind::Unary(_, x) | ExprKind::Cast(x, _) | ExprKind::Paren(x) | ExprKind::Box(x)
+            | ExprKind::Try(x) | ExprKind::Field(x, _) | ExprKind::TupleField(x, _)
+            | ExprKind::AddrOf(_, _, x) => self.expr_may_yield(x),
+            ExprKind::Binary(_, a, b) | ExprKind::Assign(a, b) | ExprKind::AssignOp(_, a, b)
+            | ExprKind::Index(a, b) | ExprKind::Repeat(a, b) => self.expr_may_yield(a) || self.expr_may_yield(b),
+            ExprKind::Call(f, args) => self.expr_may_yield(f) || self.ast.list(args).iter().any(|&x| self.expr_may_yield(x)),
+            ExprKind::MethodCall(recv, row) => self.expr_may_yield(recv) || self.ast.list(self.ast.row(row).args).iter().any(|&x| self.expr_may_yield(x)),
+            ExprKind::Block(b, _) | ExprKind::Unsafe(b) | ExprKind::Loop(b, _) => self.block_may_yield(b),
+            ExprKind::If(c, b, other) => self.expr_may_yield(c) || self.block_may_yield(b) || other.get().is_some_and(|x| self.expr_may_yield(x)),
+            ExprKind::Let(_, x) => self.expr_may_yield(x),
+            ExprKind::Match(x, arms) => self.expr_may_yield(x) || self.ast.list(arms).iter().any(|a| a.guard.is_some_and(|g| self.expr_may_yield(g)) || self.expr_may_yield(a.body)),
+            ExprKind::While(row) => { let w = self.ast.row(row); self.expr_may_yield(w.cond) || self.block_may_yield(w.body) }
+            ExprKind::For(row) => { let f = self.ast.row(row); self.expr_may_yield(f.iter) || self.block_may_yield(f.body) }
+            ExprKind::Break(_, x) | ExprKind::Return(x) => x.get().is_some_and(|x| self.expr_may_yield(x)),
+            ExprKind::Tuple(xs) | ExprKind::Array(xs) => self.ast.list(xs).iter().any(|&x| self.expr_may_yield(x)),
+            ExprKind::Struct(row) => { let s = self.ast.row(row); self.ast.list(s.fields).iter().any(|f| self.expr_may_yield(f.expr)) || s.base.get().is_some_and(|x| self.expr_may_yield(x)) }
+            ExprKind::Range(a, b, _) => a.get().is_some_and(|x| self.expr_may_yield(x)) || b.get().is_some_and(|x| self.expr_may_yield(x)),
+            ExprKind::Mac(row) => {
+                let m = self.ast.row(row);
+                if m.args == NO_MAC_ARGS { return true; }
+                let args = self.ast.mac_arg(m.args);
+                self.ast.list(args.exprs).iter().any(|&x| self.expr_may_yield(x)) || args.guard.is_some_and(|x| self.expr_may_yield(x))
+            }
+            // Nested async, closure and const bodies do not execute while evaluating this slot.
+            ExprKind::Async(..) | ExprKind::Closure(_) | ExprKind::ConstBlock(_)
+            | ExprKind::Lit(_) | ExprKind::Path(_) | ExprKind::Continue(_) | ExprKind::Underscore => false,
         }
-        let mut i = a;
-        while i < n {
-            let t = self.toks.at(i);
-            if t.lo >= hi { break; }
-            if matches!(t.kind, T::KwAwait | T::KwYield) { return true; }
-            i += 1;
-        }
-        false
+    }
+
+    fn block_may_yield(&self, b: BlockId) -> bool {
+        self.ast.stmts(b).iter().any(|s| match *s {
+            Stmt::Let(row) => { let l = self.ast.row(row); l.init.is_some_and(|x| self.expr_may_yield(x)) || l.else_.is_some_and(|b| self.block_may_yield(b)) }
+            Stmt::Expr(e, _) => self.expr_may_yield(e),
+            Stmt::Attrs(row) => self.expr_may_yield(self.ast.row(row).expr),
+            Stmt::Item(_) | Stmt::Empty => false,
+        })
     }
 
     /// Emits `Arguments::new_const / new_v1 / new_v1_formatted` for resolved pieces

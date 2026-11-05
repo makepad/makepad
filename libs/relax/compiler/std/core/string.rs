@@ -17,6 +17,8 @@ pub struct String {
 
 // ---------------------------------------------------------------- errors
 
+pub type ParseError = crate::convert::Infallible;
+
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct FromUtf8Error {
     bytes: Vec<u8>,
@@ -777,8 +779,8 @@ impl From<String> for Vec<u8> {
 }
 
 impl crate::str::FromStr for String {
-    type Err = crate::convert::Infallible;
-    fn from_str(s: &str) -> Result<String, crate::convert::Infallible> {
+    type Err = ParseError;
+    fn from_str(s: &str) -> Result<String, ParseError> {
         Ok(String::from(s))
     }
 }

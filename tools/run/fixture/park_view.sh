@@ -4,7 +4,8 @@
 # macOS the view was behind another window; its choices read "1 retry 2 restart 3 panic").
 #   main   : a panic on the UI thread: the view comes over the app with Retry, Restart app,
 #            Let it panic (in that order); on a backend with window layers it is drawn over the
-#            app's dimmed last frame in its own window; Esc (`session view dismiss`) hides it
+#            app's dimmed last frame in its own window; `session view dismiss` leaves it there
+#            (the UI thread is parked: nothing else answers the window)
 #   thread : a panic on a worker thread (`park-worker`): no Retry (its job does not wait for the
 #            rerun); Restart app and Unwind the thread lead; unwinding takes the view away and the
 #            app goes on
@@ -40,7 +41,7 @@ run_case() { # run_case <main|thread>
         echo "$view" | grep -q '"choices":\["retry","restart","panic"\]' || fail="$fail main-choices"
         ask session view dismiss > /dev/null
         sleep 1
-        ask session view | grep -q '"over_app":false' || fail="$fail main-not-dismissed"
+        ask session view | grep -q '"over_app":true' || fail="$fail main-dismissed"
     else
         echo "$view" | grep -q '"thread":"park-worker"' || fail="$fail thread-name"
         echo "$view" | grep -q '"choices":\["restart","panic"\]' || fail="$fail thread-choices"

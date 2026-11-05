@@ -303,7 +303,7 @@ fn prewarm(sess: &std::sync::Arc<crate::Session>) -> Result<(), String> {
     if hosted && world_now().is_none() {
         let sess = sess.clone();
         { let _k = crate::zone_alloc::kept();
-        let _ = std::thread::Builder::new().name("run-pm-world".to_string()).stack_size(64 << 20).spawn(move || { let _z = crate::zone_alloc::compiler_thread();
+        let _ = crate::run_threads::spawn_sized("run-pm-world", 64 << 20, move || { let _z = crate::zone_alloc::compiler_thread();
             let _ = world_inner(&sess, true);
         });
         }
@@ -672,24 +672,37 @@ const CALL_LIMIT_MS: u64 = 10_000;
 struct WatchSlot {
     tid: u64,
     start: std::sync::atomic::AtomicU64,
+    /// its thread has ended: a run's end frees it (`reset_statics`)
+    ended: std::sync::atomic::AtomicBool,
+}
+
+struct SlotEnds(&'static WatchSlot);
+
+impl Drop for SlotEnds {
+    fn drop(&mut self) {
+        self.0.start.store(0, std::sync::atomic::Ordering::Release);
+        self.0.ended.store(true, std::sync::atomic::Ordering::Release);
+    }
 }
 
 static WATCH: relax_session::sync::Mutex<Vec<&'static WatchSlot>> = relax_session::sync::Mutex::new(Vec::new());
 
 thread_local! {
     static MY_SLOT: Cell<Option<&'static WatchSlot>> = const { Cell::new(None) };
+    static SLOT_ENDS: Cell<Option<SlotEnds>> = const { Cell::new(None) };
 }
 
 fn watch_begin() -> &'static WatchSlot {
     let slot = MY_SLOT.with(|m| match m.get() {
         Some(s) => s,
         None => {
-            let s: &'static WatchSlot = Box::leak(Box::new(WatchSlot { tid: crate::os::thread::current(), start: std::sync::atomic::AtomicU64::new(0) }));
+            let s: &'static WatchSlot = Box::leak(Box::new(WatchSlot { tid: crate::os::thread::current(), start: std::sync::atomic::AtomicU64::new(0), ended: std::sync::atomic::AtomicBool::new(false) }));
+            SLOT_ENDS.with(|e| e.set(Some(SlotEnds(s))));
             m.set(Some(s));
             let mut v = WATCH.lock().unwrap();
             if v.is_empty() {
                 { let _k = crate::zone_alloc::kept();
-                let _ = std::thread::Builder::new().name("run-pm-watch".to_string()).spawn(watch_loop);
+                let _ = crate::run_threads::spawn("run-pm-watch", watch_loop);
                 }
             }
             v.push(s);
@@ -702,8 +715,7 @@ fn watch_begin() -> &'static WatchSlot {
 
 fn watch_loop() {
     let limit = CALL_LIMIT_MS * 1_000_000;
-    loop {
-        std::thread::sleep(std::time::Duration::from_millis(20));
+    while crate::run_threads::sleep(std::time::Duration::from_millis(20)) {
         let now = crate::jit::wall_ns();
         for s in WATCH.lock().unwrap().iter() {
             let t = s.start.load(std::sync::atomic::Ordering::Acquire);
@@ -770,9 +782,15 @@ fn call(sess: &std::sync::Arc<crate::Session>, entry: &Entry, attr: Option<&Toke
     };
     let mut io = BridgeIo { f: f as usize, kind, inp: bytes.as_ptr(), inp_len: bytes.len(), attr: ap, attr_len: al, out: std::ptr::null_mut(), out_len: 0 };
     let tj = std::time::Instant::now();
+    if trace() {
+        eprintln!("pmhost: enter {:?} unit={} fn={} crate={} input={}", std::thread::current().id(), entry.unit, entry.fname, call_krate, bytes.len());
+    }
     let slot = watch_begin();
     let r = unsafe { crate::jit::call_jit(w.u, w.bridge, &mut io as *mut BridgeIo as u64) };
     slot.start.store(0, std::sync::atomic::Ordering::Release);
+    if trace() {
+        eprintln!("pmhost: leave {:?} unit={} fn={} elapsed={:.1}ms", std::thread::current().id(), entry.unit, entry.fname, tj.elapsed().as_secs_f64() * 1e3);
+    }
     PH[1].fetch_add(tj.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
     match r {
         Ok(_) => {}
@@ -863,4 +881,20 @@ pub fn cache_line() -> String {
         }
         _ => "no world".to_string(),
     }
+}
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    use relax_session::reset_static as reset;
+    reset(&TL, [const { std::sync::atomic::AtomicU64::new(0) }; 6]);
+    reset(&PH, [const { std::sync::atomic::AtomicU64::new(0) }; 3]);
+    reset(&WORLD, relax_session::sync::Mutex::new(None));
+    reset(&BOOT_WORLDS, relax_session::sync::Mutex::new(Vec::new()));
+    WATCH.lock().unwrap_or_else(|e| e.into_inner()).retain(|s| {
+        let ended = s.ended.load(std::sync::atomic::Ordering::Acquire);
+        if ended {
+            drop(Box::from_raw(*s as *const WatchSlot as *mut WatchSlot));
+        }
+        !ended
+    });
 }

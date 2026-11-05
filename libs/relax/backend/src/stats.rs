@@ -32,7 +32,7 @@ pub fn pass_clock() -> u64 {
             static T0: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
             T0.get_or_init(std::time::Instant::now).elapsed().as_nanos() as u64 + 1
         } else {
-            crate::cpu_ns()
+            relax_session::clock::cpu_ns()
         }
     } else {
         0
@@ -74,3 +74,9 @@ pub fn pass_time(i: usize, t0: u64) {
 }
 
 pub const PASS_NAMES: [&str; 16] = ["fold", "cse", "lcopy", "dce", "jumps", "inline", "sink", "layout", "sroa", "live_dce", "licm", "regalloc", "emit", "verify", "compact", "thread_known"];
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    use relax_session::reset_static as reset;
+    reset(&PASS_NS, [const { std::sync::atomic::AtomicU64::new(0) }; 16]);
+}

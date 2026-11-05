@@ -1,0 +1,24 @@
+// The default smoke test, run for every app that has no `ci.splash` of its
+// own. devhub ci sets `ci.target` to the app it found ({package, binary, cwd}).
+// Nothing here touches the app beyond looking at it.
+
+use mod.std.*
+use mod.ci;
+
+ci.step("check other platforms", fn(){
+    ci.check_targets({packages: [ci.target.package] targets: ci.host.targets})
+})
+
+// The frame trace goes to the log, and `flag_idle_drawing` reads it from there.
+let app = ci.launch({package: ci.target.package binary: ci.target.binary cwd: ci.target.cwd app_env: {MAKEPAD_FRAME_TRACE: "1"}})
+
+ci.step("comes up", fn(){
+    ci.sleep(3.0)
+    app.no_errors()
+    app.flag_idle_drawing()
+    let shot = app.grab("start")
+    ci.accept(shot, "This is a screenshot of one application window. A thin bright red frame runs around the very edge of the picture; it is the test harness's marker and is not part of the application. Ignore it. The window should show a working application: panels, buttons, text, lists, a canvas, a map, a document or some other user interface. 1. Is the whole picture one flat colour from edge to edge, such as entirely black or entirely white? expected NO 2. Is any user interface visible, such as text labels, buttons, icons, panels, lists, input fields, a toolbar, a drawing or a picture? expected YES 3. Does an error panel cover the window: a large block of text with words such as panic, error, failed, backtrace or unwrap? expected NO")
+})
+
+app.quit()
+nil

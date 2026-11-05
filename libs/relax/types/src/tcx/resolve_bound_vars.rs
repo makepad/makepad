@@ -1335,6 +1335,35 @@ mod tests {
     }
 
     #[test]
+    fn a_body_edit_renews_the_lifetime_names_of_an_owner_without_a_body() {
+        // A struct's lifetime names are keyed by its file's nodes too (the anonymous `&` by its
+        // type node): an edit of a body before it renumbers them, so they follow the file's
+        // version as a fn's do. A Fab edit was refused with "lifetime resolved before
+        // bound-variable collection" for a struct like S: its names stayed the version before
+        // the edit's, its bound variables were resolved on the edited one.
+        let text = "#![no_std] fn f() { let _x = 1u8; } struct S<'s> { h: &'s (dyn Fn(&u8) + Sync) }";
+        let (mut prog, mut tcx) = source(text, 2021);
+        let (f, s) = (named(&prog, "f"), named(&prog, "S"));
+        let old = prog.def(s).file;
+        let before = tcx.resolve_lifetime_names(&prog, s);
+        let reference = |names: &LifetimeResolution| names.uses.keys().copied().find(|k| matches!(k, LifetimeKey::Reference(_))).expect("the anonymous reference");
+        let edited = text.replace("let _x = 1u8;", "let _x: u8 = 1;");
+        let version = prog.parse_version(old, "struct_names.rs", edited.into_bytes()).unwrap();
+        let pairs: Vec<_> = (0..version.pf.ast.items.len() as u32).map(|i| (i, i)).collect();
+        let new = prog.commit_body_version(version, &pairs).unwrap();
+        prog.lower_body_declarations(&[f], &[new]);
+        tcx.publish_file_bodies(&[old, new]);
+        assert_eq!(prog.def(s).file, new);
+        let fresh = crate::tcx::lifetime_resolve::resolve_lifetimes(&tcx, &prog, s, None);
+        assert_ne!(reference(&before), reference(&fresh), "the edit renumbers the struct's type nodes");
+        let after = tcx.resolve_bound_vars(&prog, s);
+        assert_eq!(reference(&after.names), reference(&fresh));
+        prog.revert_version(old, new, &pairs);
+        tcx.publish_file_bodies(&[old, new]);
+        assert_eq!(reference(&tcx.resolve_bound_vars(&prog, s).names), reference(&before));
+    }
+
+    #[test]
     fn round46_body_edit_changes_bound_variable_resolution() {
         // rustc_hir_analysis/src/collect/resolve_bound_vars.rs:430-442:
         // owner resolution includes the body, including local type binders.
@@ -1748,3 +1777,9 @@ crate::collected_enum!(LifetimeKey; 0 => Named(a,b), 1 => Reference(n), 2 => Sel
 crate::collected_enum!(ResolvedArg; 0 => StaticLifetime, 1 => EarlyBound(id), 2 => LateBound(d,v,id), 3 => Free(d,id), 4 => Error);
 crate::collected_fields!(ResolveBoundVars, names, named_variable_map, late_bound_vars_map, opaque_captured_lifetimes, early_indices, generic_indices);
 crate::collected_enum!(BoundVariableKind; 0 => Ty, 1 => Region(r), 2 => Const);
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    use relax_session::reset_static as reset;
+    reset(&TRIVIAL, relax_session::sync::Mutex::new(None));
+}

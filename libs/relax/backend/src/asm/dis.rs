@@ -4,7 +4,7 @@
 //! x86-64), so a decoded instruction assembles back to the same instruction ([`super::assemble`]);
 //! the tests check that round trip.
 //!
-//! The decoders ([`super::dis_x64`], [`super::dis_arm64`]) never fail: bytes they do not know
+//! The host's decoder (`dis_x64` on x86-64, `dis_arm64` on AArch64) never fails: bytes it does not know
 //! become one [`Class::Unknown`] instruction (`.byte` / `.word`) and decoding goes on.
 
 use super::Arch;
@@ -141,7 +141,9 @@ impl Insn {
 /// absolute addresses from it). Never fails: unknown bytes become `Class::Unknown` entries.
 pub fn decode(arch: Arch, code: &[u8], addr: u64) -> Vec<Insn> {
     match arch {
+        #[cfg(not(target_arch = "aarch64"))]
         Arch::X64 => super::dis_x64::decode(code, addr),
+        #[cfg(target_arch = "aarch64")]
         Arch::Arm64 => super::dis_arm64::decode(code, addr),
     }
 }

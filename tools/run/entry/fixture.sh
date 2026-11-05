@@ -44,7 +44,7 @@ write_sources() { # write_sources MAKEPAD_SHA COMMERCIAL_SHA
     mkdir -p "$data/apps/runner" "$data/apps/scope" || exit 2
     cat > "$data/apps/runner/source.json.new" <<EOF
 {"title":"Makepad","rust":"1.98.0","package":"makepad-runner","binary":"makepad-runner","workspace":"makepad/apps/commercial/runner",
- "platforms":["aarch64-apple-darwin","x86_64-apple-darwin","x86_64-pc-windows-gnu","x86_64-unknown-linux-gnu","aarch64-unknown-linux-gnu"],
+ "platforms":["aarch64-apple-darwin","x86_64-pc-windows-gnu","x86_64-unknown-linux-gnu"],
  "cuda":false,"public":true,"loader":{"repository":"makepad","roots":["makepad-run"]},
  "repositories":[
   {"name":"makepad","path":"makepad","url":"$mk"},

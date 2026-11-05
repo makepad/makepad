@@ -992,6 +992,16 @@ impl crate::io::IsTerminal for File {
         handle_is_console(self.raw())
     }
 }
+impl crate::io::IsTerminal for BorrowedHandle<'_> {
+    fn is_terminal(&self) -> bool {
+        handle_is_console(self.as_raw_handle())
+    }
+}
+impl crate::io::IsTerminal for OwnedHandle {
+    fn is_terminal(&self) -> bool {
+        handle_is_console(self.as_raw_handle())
+    }
+}
 
 // ---- Metadata / FileType / Permissions
 

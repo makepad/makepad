@@ -710,4 +710,29 @@ mod unix {
         let line = format!("{} {} ready in {}{}\n", style("1;32", "\u{2713}"), style("1;36", &pkg), secs(ms), style("2", &cache));
         out_all(st.out, line.as_bytes());
     }
+
+    /// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+    pub(crate) unsafe fn reset_statics() {
+        use relax_session::reset_static as reset;
+        reset(&READY_LINE, AtomicBool::new(false));
+        // (the clock starts over with the next run)
+        if let Some(st) = STATE.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+            st.last_draw_ms = 0.0;
+        }
+    }
+}
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    use relax_session::reset_static as reset;
+    #[cfg(unix)]
+    unix::reset_statics();
+    reset(&LOAD_DONE, AtomicU32::new(0));
+    reset(&LOAD_TOTAL, AtomicU32::new(0));
+    // (the bar is the process's, `start` ran once: the next run's load fills it again)
+    let shown = ACTIVE.load(Ordering::Relaxed);
+    reset(&PHASE, AtomicU8::new(shown as u8));
+    reset(&ACTIVE, AtomicBool::new(shown));
+    reset(&SLOW, relax_session::sync::Mutex::new(Vec::new()));
+    reset(&LOADING, relax_session::sync::Mutex::new((String::new(), 0.0)));
 }

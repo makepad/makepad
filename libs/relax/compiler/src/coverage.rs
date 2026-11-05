@@ -325,3 +325,11 @@ pub fn export_hits(u: &Unit, other: &HashMap<String, HashSet<(usize, usize)>>) -
     }
     hits
 }
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    use relax_session::reset_static as reset;
+    reset(&ON, AtomicBool::new(false));
+    reset(&RECORD, std::sync::LazyLock::new(|| Mutex::new(Record::default())));
+    reset(&PROBES, Mutex::new(Vec::new()));
+}

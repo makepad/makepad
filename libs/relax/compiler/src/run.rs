@@ -176,22 +176,59 @@ fn usage() -> i32 {
 
 static GANDALF_CONSOLE: relax_session::sync::Mutex<Option<crate::gandalf_out::Console>> = relax_session::sync::Mutex::new(None);
 
-pub fn cmd_run(sess: &std::sync::Arc<crate::Session>, args: &[String]) -> i32 {
-    // Restore before resolution so a failed replacement compile is a JIT verdict too.
-    if std::env::var_os("MAKEPAD_JIT_RECOVERY").is_some() {
-        crate::hot_failure::enable();
-        crate::hot_failure::restore();
+/// The borrow checker's printer, for each run (a run's end in place ends it: `end_console`).
+fn start_console(args: &[String]) {
+    if args.iter().any(|a| a == "--check") {
+        return;
     }
+    let _k = crate::zone_alloc::kept();
+    let mut console = GANDALF_CONSOLE.lock().unwrap();
+    if console.is_none() {
+        *console = Some(crate::gandalf_out::Console::start(crate::diag::enabled(), args.iter().any(|a| a == "--quiet" || a == "--silent")));
+    }
+}
+
+/// The printer stops taking events and ends.
+pub(crate) fn end_console() {
+    if let Some(console) = GANDALF_CONSOLE.lock().unwrap_or_else(|e| e.into_inner()).take() {
+        console.detach();
+    }
+}
+
+/// The unit of the run, which goes now (`run_end`): nothing finds it here any more.
+pub(crate) fn take_run_unit() -> *mut Unit {
+    unsafe { std::mem::replace(&mut *std::ptr::addr_of_mut!(RUN_UNIT), std::ptr::null_mut()) }
+}
+
+/// The host lets the ended app's session go (`run_end`).
+pub(crate) fn host_end_app() {
+    if let Some(host) = MAIN_HOST.get().filter(|_| HOSTED_RUN.load(Ordering::Acquire)) {
+        (host.end_app)();
+    }
+}
+
+/// The host starts the next run in this process (`run_end`).
+pub(crate) fn host_next_run() {
+    if let Some(host) = MAIN_HOST.get().filter(|_| HOSTED_RUN.load(Ordering::Acquire)) {
+        (host.next_run)();
+    }
+}
+
+/// The run is an app domain's, on the host's main loop: a restart keeps the process and its window.
+pub(crate) fn hosted_run() -> bool {
+    HOSTED_RUN.load(Ordering::Acquire)
+}
+
+pub fn cmd_run(sess: &std::sync::Arc<crate::Session>, args: &[String]) -> i32 {
+    #[cfg(any(target_os = "linux", target_vendor = "apple"))]
+    crate::run_end::leftovers::mark();
     let json = args.iter().any(|a| a == "--json") && args.iter().any(|a| a == "--check");
     let start = std::time::Instant::now();
     if json { crate::diag::enable(); }
     if args.iter().any(|a| a == "--watch") {
         session_cache_off();
     }
-    if !args.iter().any(|a| a == "--check") {
-        let _k = crate::zone_alloc::kept();
-        *GANDALF_CONSOLE.lock().unwrap() = Some(crate::gandalf_out::Console::start(crate::diag::enabled(), args.iter().any(|a| a == "--quiet" || a == "--silent")));
-    }
+    start_console(args);
     let host = MAIN_HOST.get().filter(|_| {
         !sess.runtime.boot_only && std::env::var_os("MAKEPAD_RUN_SCRIPT_DEPTH").is_none()
             && !args.iter().take_while(|a| a.as_str() != "--").any(|a| matches!(a.as_str(), "--check" | "--watch" | "--entry" | "--exports" | "--harness" | "--plain-test"))
@@ -200,12 +237,15 @@ pub fn cmd_run(sess: &std::sync::Arc<crate::Session>, args: &[String]) -> i32 {
         HOSTED_RUN.store(true, Ordering::Release);
         let sess = sess.clone();
         let args = args.to_vec();
-        (host.run)(Box::new(move || cmd_run_inner(&sess, &args, None)))
+        (host.run)(Box::new(move || {
+            start_console(&args);
+            cmd_run_inner(&sess, &args, None)
+        }))
     } else {
         cmd_run_inner(sess, args, None)
     };
     if crate::harness::live::enabled() && crate::hot_failure::recovering() {
-        crate::hot_failure::restart_failed(&format!("the replacement test harness ended before a verdict (exit {code})"));
+        crate::hot_failure::restart_failed(&format!("the replacement test harness ended before it started (exit {code})"));
         crate::hot_failure::pump();
     }
     let code = crate::hot_failure::verdict(code).code();
@@ -525,7 +565,7 @@ pub(crate) fn resolve_package(
         let _k = crate::zone_alloc::kept();
         // the start waits for the window's first present: it has the first frame's deadline
         if !HARNESS_RUN.load(Ordering::Acquire) { crate::first_frame::arm_window(&package); }
-        std::thread::Builder::new().name("run-open-window".into()).spawn(move || {
+        crate::run_threads::spawn("run-open-window", move || {
             let _z = crate::zone_alloc::compiler_thread();
             let opened = (MAIN_HOST.get().expect("run host").open)(&package, &dir);
             crate::first_frame::window_opened();
@@ -682,6 +722,11 @@ fn warm_front(images: &crate::cache::FrontImages, sess: &std::sync::Arc<crate::S
 
 
 fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session: Option<&mut Option<crate::serve::Session>>) -> i32 {
+    // Restore before resolution so a failed replacement compile is a JIT verdict too.
+    if std::env::var_os("MAKEPAD_JIT_RECOVERY").is_some() {
+        crate::hot_failure::enable();
+        crate::hot_failure::restore();
+    }
     PHASES.lock().unwrap().clear();
     ERRORS_SEEN.store(0, Ordering::Relaxed);
     crate::clock::mark_process_start();
@@ -1408,7 +1453,7 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
         // between the program's allocations: ~70 MB on counter), off the boot path
         let trace = crate::preload::trace();
         { let _k = crate::zone_alloc::kept();
-        std::thread::spawn(move || {
+        let _ = crate::run_threads::spawn("run-trim", move || {
             let (r0, t) = (if trace { crate::memstat::resident() } else { 0 }, Instant::now());
             crate::memstat::trim();
             if trace {
@@ -1931,7 +1976,13 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
     if !HAL_RUN.load(Ordering::Acquire) { crate::domain::register_boot(&package, u.syms.dom0()); }
     start_exit_summary();
     *RUN_DIAGNOSTICS.lock().unwrap() = Some(u.tcx.dcx.clone());
-    unsafe { atexit(at_exit) };
+    {
+        // (once in a process, whatever number of runs it has)
+        static AT_EXIT: std::sync::Once = std::sync::Once::new();
+        AT_EXIT.call_once(|| unsafe {
+            atexit(at_exit);
+        });
+    }
     start_monitor(runtime, options);
     // MAKEPAD_RUN_MEM_AT_MS=n[,m..]: the memory report (MAKEPAD_RUN_MEM_REPORT=1) n ms after main starts,
     // without ending the run's summary (programs that never reach their exit summary: Stage)
@@ -1939,11 +1990,13 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
         let mem_at_trim = runtime.mem_at_trim;
         let at: Vec<u64> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
         { let _k = crate::zone_alloc::kept();
-        std::thread::spawn(move || {
+        let _ = crate::run_threads::spawn("run-mem-samples", move || {
             let t0 = std::time::Instant::now();
             for ms in at {
                 let d = std::time::Duration::from_millis(ms).saturating_sub(t0.elapsed());
-                std::thread::sleep(d);
+                if !crate::run_threads::sleep(d) {
+                    return;
+                }
                 let up = unsafe { RUN_UNIT };
                 if up.is_null() || !crate::memstat::enabled() {
                     continue;
@@ -1969,9 +2022,10 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
     // that never exit: the counter's event loop)
     if let Some(ms) = std::env::var("MAKEPAD_RUN_STATS_AFTER_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
         { let _k = crate::zone_alloc::kept();
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(ms));
-            crate::owner::call(crate::owner::Class::Program, || summary("stats"));
+        let _ = crate::run_threads::spawn("run-stats-after", move || {
+            if crate::run_threads::sleep(std::time::Duration::from_millis(ms)) {
+                crate::owner::call(crate::owner::Class::Program, || summary("stats"));
+            }
         });
         }
     }
@@ -2040,6 +2094,9 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
         }));
     }
     relax_codegen::fncost::mark("boot done, calling main");
+    // a restarted run's program is in and its main is called next: the restart completed (a hosted
+    // app's, at its domain's load)
+    if !HAL_RUN.load(Ordering::Acquire) { crate::hot_failure::restored(); }
     let main_ms = crate::clock::ms_since_start();
     MAIN_START_MS.store(main_ms as u64, Ordering::Relaxed);
     crate::boot_stats::main_called();
@@ -2242,7 +2299,7 @@ pub(crate) fn exported_fns(prog: &crate::program::Program, prefixes: &[String]) 
                 symbol = Some(prog.name(DefId(di as u32)).to_string());
             } else if let Some(k) = toks.iter().position(|t| *t == "export_name") {
                 if let (Some(&"="), Some(lit)) = (toks.get(k + 1), toks.get(k + 2)) {
-                    symbol = Some(lit.trim_matches('"').to_string());
+                    symbol = Some(crate::lit::unescape_str(lit));
                 }
             }
         }
@@ -2308,6 +2365,11 @@ pub struct MainHost {
     pub start: fn(crate::domain::AppSpec) -> Result<(), String>,
     /// The program turned out to draw nothing (first_frame): its load screen closes, the run goes on.
     pub batch: fn(),
+    /// A run's threads have ended (`run_end`): the app's session goes, with what it held of the
+    /// GPU, and the window back to the host.
+    pub end_app: fn(),
+    /// A run ended in place (`run_end`): the host starts the next one, its window stays.
+    pub next_run: fn(),
 }
 
 /// The host's half of a batch program (`MainHost::batch`).
@@ -2533,7 +2595,7 @@ fn startup_defs(prog: &crate::program::Program, path: &str) -> Vec<DefId> {
 fn start_ahead(up: *mut Unit, defs: Vec<DefId>) {
     let upn = up as usize;
     { let _k = crate::zone_alloc::kept();
-    std::thread::spawn(move || { let _z = crate::zone_alloc::compiler_thread();
+    let _ = crate::run_threads::spawn("run-ahead", move || { let _z = crate::zone_alloc::compiler_thread();
         makepad_cpu_budget::set_thread_class(makepad_cpu_budget::BACKGROUND);
         let up = upn as *mut Unit;
         let t = Instant::now();
@@ -2625,7 +2687,7 @@ fn spill_cache() {
     if let Some(s) = spill {
         // its own thread: the monitor loop's other duties (errors, trims) do not wait for the disk
         { let _k = crate::zone_alloc::kept();
-        std::thread::spawn(move || { let _z = crate::zone_alloc::compiler_thread();
+        let _ = crate::run_threads::spawn("run-spill", move || { let _z = crate::zone_alloc::compiler_thread();
             let t = Instant::now();
             let r = s.write();
             if let Err(e) = &r { verbose!("makepad-run cache: spill: {}", e); }
@@ -2813,7 +2875,7 @@ fn try_settle(drops: &mut jit::SettleDrops, trim: bool) -> bool {
     // tick settles again
     let trim = trim && retired.is_some();
     { let _k = crate::zone_alloc::kept();
-    std::thread::spawn(move || { let _z = crate::zone_alloc::compiler_thread();
+    let _ = crate::run_threads::spawn("run-settle-spill", move || { let _z = crate::zone_alloc::compiler_thread();
         let result = spill.map(|s| s.write());
         // Borrowck already releases its body-owned queries at each completed check.
         let before = crate::memstat::process_rss();
@@ -2888,12 +2950,14 @@ fn start_monitor(runtime: &crate::options::RuntimeOptions, options: &crate::opti
         let mid_busy = std::sync::Arc::new(AtomicBool::new(false));
         let mut teardown_started = false;
         let _ = MONITOR.set(std::thread::current());
+        crate::run_threads::on_end(monitor_wake);
         let (mut activity, mut still) = (monitor_activity(), 0u32);
         loop {
             // idle: one look a second (a settle request wakes it at once)
             let idle = still >= MONITOR_QUIET && present.is_none() && mem_snapshot.is_none() && settle_stress.is_none()
                 && !mid_busy.load(Ordering::Relaxed) && FIRST_PRESENT_WALL.load(Ordering::Relaxed) != 0;
             if idle { std::thread::park_timeout(MONITOR_IDLE) } else { std::thread::sleep(MONITOR_TICK) }
+            if crate::run_threads::ending() { return; }
             // inspect's timeline names the monitor's work (its owner requests and its own time)
             let _tick = crate::inspect::timeline::span("run-monitor tick");
             let now = monitor_activity();
@@ -2964,7 +3028,7 @@ fn start_monitor(runtime: &crate::options::RuntimeOptions, options: &crate::opti
                 mid_last = main_ms;
                 let busy = mid_busy.clone();
                 let quiet = record || mid_still;
-                let _ = std::thread::Builder::new().name("run-cache-write".to_string()).spawn(move || { let _z = crate::zone_alloc::compiler_thread();
+                let _ = crate::run_threads::spawn("run-cache-write", move || { let _z = crate::zone_alloc::compiler_thread();
                     let _mem = crate::memstat::tag(crate::memstat::Tag::CacheStore);
                     let t = Instant::now();
                     let r = mid_flush(quiet, record);
@@ -3294,19 +3358,23 @@ fn start_exit_summary() {
         if let Some(dcx) = RUN_DIAGNOSTICS.lock().unwrap().as_ref() { dcx.flush_delayed(); }
         exit_mark("summary tail");
         exit_report();
-        crate::tui::finish(false);
+        // (a run's end in place: the terminal's display goes on with the next run)
+        if !crate::run_end::restarting() {
+            crate::tui::finish(false);
+        }
     });
     // Failure to start optional cleanup must not turn a successful run into a failure.
     if let Ok(worker) = worker { let _ = EXIT_SUMMARY.set(ExitSummary { request, worker, code: std::sync::OnceLock::new() }); }
 }
 
+// Only the first caller requests cleanup. In particular the later atexit hook
+// does not spend a second budget after a JIT exit hook ran.
+static DONE: AtomicBool = AtomicBool::new(false);
+
 fn finish_run(why: &'static str, code: Option<i32>) {
     jit::exec_check();
     crate::borrowck::lazy::stop();
     let Some(exit) = EXIT_SUMMARY.get() else { return };
-    // Only the first caller requests cleanup. In particular the later atexit hook
-    // does not spend a second budget after a JIT exit hook ran.
-    static DONE: AtomicBool = AtomicBool::new(false);
     if DONE.swap(true, Ordering::AcqRel) { return; }
     // ending on the owner thread itself (an initializer's process::exit): it cannot serve the
     // exit worker while it waits for it
@@ -3516,15 +3584,16 @@ pub fn quit_write_done() -> bool {
     QUIT_WRITE_DONE.load(Ordering::SeqCst)
 }
 
+static ONCE: AtomicBool = AtomicBool::new(false);
+
 fn quit_mark() {
-    static ONCE: AtomicBool = AtomicBool::new(false);
     jit::QUIT_SEEN.store(true, Ordering::Relaxed);
     if ONCE.swap(true, Ordering::SeqCst) || unsafe { RUN_UNIT }.is_null() { return; }
     if jit::FIRST_PRESENT.load(Ordering::Acquire) {
         jit::ORDER_UNTIL_NS.fetch_min(jit::wall_ns(), Ordering::Relaxed);
     }
     { let _k = crate::zone_alloc::kept();
-    let _ = std::thread::Builder::new().name("run-quit-write".to_string()).spawn(|| { let _z = crate::zone_alloc::compiler_thread();
+    let _ = crate::run_threads::spawn("run-quit-write", || { let _z = crate::zone_alloc::compiler_thread();
         let _mem = crate::memstat::tag(crate::memstat::Tag::CacheStore);
         let t = Instant::now();
         // the owner thread is busy while the app's shutdown compiles: retried until it is written
@@ -3554,6 +3623,7 @@ fn quit_mark() {
 /// than cold (a self-spawning test's first child type-checked and compiled the whole test crate
 /// again while its parent's code sat unwritten: 20 s of relax-compiler's 37 s first run).
 pub(crate) extern "C" fn relax_self_spawn() {
+    let _kept = crate::zone_alloc::kept();
     static ONE: relax_session::sync::Mutex<()> = relax_session::sync::Mutex::new(());
     if unsafe { RUN_UNIT }.is_null() {
         return;
@@ -3661,12 +3731,17 @@ impl YieldProbe {
     }
 }
 
+static LAST: relax_session::sync::Mutex<&'static str> = relax_session::sync::Mutex::new("");
+
 /// Why a mid-run pass did not record the collected program, said once per distinct reason (verbose).
 fn collected_skip(why: &'static str) {
-    static LAST: relax_session::sync::Mutex<&'static str> = relax_session::sync::Mutex::new("");
     let mut l = LAST.lock().unwrap_or_else(|e| e.into_inner());
     if *l != why { *l = why; verbose!("makepad-run collected: not recorded: {why}"); }
 }
+
+// the front images' line once the program presented (a process ended by its framework
+// never prints the exit summary): files mapped, images not matching, arrays copied back
+static FRONT_REPORTED: AtomicBool = AtomicBool::new(false);
 
 /// `wait`: the warm record's writes (after first present, at a quit) wait for the owner thread to
 /// complete its work (which a cold run's compiles fill nearly all the time); other writes skip a busy unit.
@@ -3765,9 +3840,6 @@ fn mid_flush(quiet: bool, wait: bool) -> Option<(usize, usize)> {
         Some(s) => s.write().ok()?,
         None => 0,
     };
-    // the front images' line once the program presented (a process ended by its framework
-    // never prints the exit summary): files mapped, images not matching, arrays copied back
-    static FRONT_REPORTED: AtomicBool = AtomicBool::new(false);
     if jit::FIRST_PRESENT.load(Ordering::Acquire) && !FRONT_REPORTED.swap(true, Ordering::Relaxed) {
         if let Some(s) = crate::front::summary() { verbose!("{} (after the first present)", s); }
     }
@@ -4421,4 +4493,51 @@ mod settle_tests {
 /// and write-then-map only frees each crate's front end after its load.
 fn mem_budget_mode() -> bool {
     std::env::var("MAKEPAD_RUN_MEM_BUDGET_MB").map_or(false, |v| v.parse::<u64>().map_or(false, |n| n > 0))
+}
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    use relax_session::reset_static as reset;
+    RUN_UNIT = std::ptr::null_mut();
+    reset(&PHASES, relax_session::sync::Mutex::new(Vec::new()));
+    reset(&MAIN_START_MS, AtomicU64::new(0));
+    reset(&ERRORS_SEEN, AtomicU64::new(0));
+    reset(&LIVE_SESSION, AtomicBool::new(false));
+    reset(&VERBOSE, AtomicBool::new(false));
+    reset(&STARTUP_PATH, relax_session::sync::Mutex::new(String::new()));
+    reset(&ROOT_DIR, relax_session::sync::Mutex::new(String::new()));
+    reset(&GANDALF_CONSOLE, relax_session::sync::Mutex::new(None));
+    reset(&BOOT_UNITS, relax_session::sync::Mutex::new(None));
+    reset(&PENDING_WINDOW, relax_session::sync::Mutex::new(None));
+    reset(&WINDOW_AWAITED, AtomicBool::new(false));
+    reset(&WINDOW_WAIT, relax_session::sync::Mutex::new(None));
+    reset(&HANDOFF, relax_session::sync::Mutex::new(None));
+    reset(&CRATE_DIRS, relax_session::sync::Mutex::new(Vec::new()));
+    reset(&EXPORTS, relax_session::sync::Mutex::new(Vec::new()));
+    reset(&HAL_RUN, AtomicBool::new(false));
+    reset(&APP_DOMAIN, std::sync::atomic::AtomicU32::new(0));
+    reset(&SETTLE_REQUESTED, AtomicBool::new(false));
+    reset(&FIRST_PRESENT_WALL, AtomicU64::new(0));
+    reset(&DOMAIN_PRESENT_WALL, AtomicU64::new(0));
+    remove_present_report();
+    reset(&PRESENT_PATH, relax_session::sync::Mutex::new(None));
+    reset(&MONITOR, std::sync::OnceLock::new());
+    reset(&RUN_DIAGNOSTICS, relax_session::sync::Mutex::new(None));
+    reset(&EXIT_SUMMARY, std::sync::OnceLock::new());
+    reset(&RUN_PANIC, std::sync::OnceLock::new());
+    reset(&EXIT_STAGE, std::sync::atomic::AtomicU8::new(0));
+    reset(&EXIT_CALLER_HOLDS, AtomicBool::new(false));
+    reset(&DONE, AtomicBool::new(false));
+    reset(&EXIT_MARKS, relax_session::sync::Mutex::new(Vec::new()));
+    reset(&COLLECTED_CURRENT, AtomicBool::new(false));
+    reset(&COLLECTED_RESTORED, AtomicBool::new(false));
+    reset(&COLLECTED_WRITTEN, relax_session::sync::Mutex::new(None));
+    reset(&MID_COLLECTED_TRIED, AtomicBool::new(false));
+    reset(&MID_MANIFEST_DONE, AtomicBool::new(false));
+    reset(&MID_MANIFEST_LEN, std::sync::atomic::AtomicUsize::new(0));
+    reset(&MAIN_START_WALL, AtomicU64::new(0));
+    reset(&QUIT_WRITE_DONE, AtomicBool::new(false));
+    reset(&ONCE, AtomicBool::new(false));
+    reset(&LAST, relax_session::sync::Mutex::new(""));
+    reset(&FRONT_REPORTED, AtomicBool::new(false));
 }

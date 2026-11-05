@@ -1054,3 +1054,11 @@ pub(crate) fn give_back_run(bases: &[u64]) -> Released {
     with_table(|t| t.extend(left.into_iter().map(|res| Owned { domain: OUTLIVED, res })));
     out
 }
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    use relax_session::reset_static as reset;
+    reset(&OWNED, Mutex::new(Vec::new()));
+    #[cfg(unix)]
+    reset(&ATFORK, Mutex::new(Vec::new()));
+}

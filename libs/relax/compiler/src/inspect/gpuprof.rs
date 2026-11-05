@@ -15,7 +15,8 @@ pub fn file_main(path: &str, words: &[String]) -> i32 {
     if w.first().map(String::as_str) == Some("prof") {
         w.remove(0);
     }
-    let rec = match std::fs::read(path).map_err(|e| format!("cannot read {path}: {e}")).and_then(|b| Recording::decode(&b)) {
+    let args = Args::parse(&w);
+    let rec = match load(path, &args) {
         Ok(r) => r,
         Err(e) => {
             println!("{{\"err\":{}}}", json_str(&e));
@@ -30,7 +31,7 @@ pub fn file_main(path: &str, words: &[String]) -> i32 {
         let bytes = std::fs::read(name).map_err(|e| format!("cannot read {name}: {e}"))?;
         Recording::decode(&bytes)
     };
-    match query::run(&rec, &Args::parse(&w), &load) {
+    match query::run(&rec, &args, &load) {
         Ok(a) if w.iter().any(|x| x == "as=md") => {
             for l in query::markdown(&a) {
                 println!("{l}");
@@ -51,5 +52,33 @@ pub fn file_main(path: &str, words: &[String]) -> i32 {
             println!("{{\"err\":{}}}", json_str(&e));
             1
         }
+    }
+}
+
+fn load(path: &str, args: &Args) -> Result<Recording, String> {
+    validate(args)?;
+    std::fs::read(path).map_err(|e| format!("cannot read {path}: {e}")).and_then(|b| Recording::decode(&b))
+}
+
+fn validate(args: &Args) -> Result<(), String> {
+    let sub = args.pos.first().map(String::as_str).unwrap_or("");
+    let schema = makepad_remote::params::gpu_profile(sub).ok_or_else(|| format!("unknown saved GPU-profile query {sub:?}"))?;
+    makepad_remote::params::validate(args.kv.iter().map(|(k, _)| k.as_str()), schema)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn saved_gpu_profile_rejects_unknown_parameters() {
+        // The file does not exist: validation must win over file I/O for every query.
+        for sub in ["frames", "frame", "top", "util", "lanes", "runs", "ablate", "diff"] {
+            let args = super::Args::parse(&[sub.into(), "typo=1".into()]);
+            let error = super::load("missing-profile.mkgp", &args).err().expect("invalid query");
+            assert!(error.contains("unknown parameter \"typo\"") && error.contains("known:"), "{sub}: {error}");
+        }
+        let args = super::Args::parse(&["top".into(), "by=shader".into(), "n=3".into()]);
+        assert!(super::validate(&args).is_ok());
+        assert!(super::validate(&super::Args::parse(&["top".into(), "sid=1".into()])).is_err());
+        assert!(super::validate(&super::Args::parse(&["frame".into(), "n=3".into()])).is_err());
     }
 }

@@ -81,7 +81,7 @@ mod imp {
             out.always("no hardware counters for this process (perf_event_paranoid > 2, or no PMU in this VM); CPU time only: prof, why-slow");
             return;
         }
-        std::thread::sleep(std::time::Duration::from_secs_f64(secs));
+        crate::run_threads::sleep(std::time::Duration::from_secs_f64(secs));
         let mut rows: Vec<(f64, String)> = Vec::new();
         let mut tot = [0f64; 4];
         for (k, v) in &fds {
@@ -159,7 +159,7 @@ mod imp {
             out.always("no counters: proc_pid_rusage failed");
             return;
         };
-        std::thread::sleep(std::time::Duration::from_secs_f64(secs));
+        crate::run_threads::sleep(std::time::Duration::from_secs_f64(secs));
         let Some(b) = sample() else {
             out.always("no counters: proc_pid_rusage failed");
             return;

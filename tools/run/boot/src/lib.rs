@@ -1070,6 +1070,7 @@ impl Boot {
         let mut writer = CmdWriter::new(HOST);
         let viewport = [self.geometry[2], self.geometry[3]];
         let dpi = self.dpi;
+        let pixels = makepad_hal::window_pixels(viewport.map(f64::from), dpi as f64).map(|n| n as f32);
         let time = renderer.began.elapsed().as_secs_f32();
         let field = renderer.field.frame(
             &mut writer,
@@ -1198,7 +1199,7 @@ impl Boot {
         writer.pass(Pass {
             load: [pass_load::CLEAR; 5],
             clear: [[0.0; 4]; 4],
-            viewport: [0.0, 0.0, viewport[0] * dpi, viewport[1] * dpi],
+            viewport: [0.0, 0.0, pixels[0], pixels[1]],
             dpi,
             ..Default::default()
         });
@@ -1734,6 +1735,7 @@ impl Boot {
         let Some(window) = self.window else { return };
         let viewport = [self.geometry[2], self.geometry[3]];
         let dpi = self.dpi;
+        let pixels = makepad_hal::window_pixels(viewport.map(f64::from), dpi as f64).map(|n| n as f32);
         let reduce_motion = self.environment.reduce_motion;
         let caption = self.caption();
         let focus = self.focused as u8 as f32;
@@ -1893,7 +1895,7 @@ impl Boot {
         common(&program.pipes[ERROR_BAND], &mut band_uniforms);
         self.frame += 1;
         let offscreen = if self.offscreen && !layered && veil.is_none() {
-            let size = [(viewport[0] * dpi) as u32, (viewport[1] * dpi) as u32];
+            let size = [pixels[0] as u32, pixels[1] as u32];
             Some((self.dump.as_mut().unwrap().target(&mut writer, size), size))
         } else {
             None
@@ -1961,11 +1963,11 @@ impl Boot {
             // (a badge layer's frame draws over the app's)
             load: [if veil.is_some() { pass_load::LOAD } else { pass_load::CLEAR }; 5],
             clear: [[0.0; 4]; 4],
-            viewport: [0.0, 0.0, viewport[0] * dpi, viewport[1] * dpi],
+            viewport: [0.0, 0.0, pixels[0], pixels[1]],
             dpi,
             ..Default::default()
         });
-        let scissor = [0.0, 0.0, viewport[0] * dpi, viewport[1] * dpi];
+        let scissor = [0.0, 0.0, pixels[0], pixels[1]];
         let mut app = |writer: &mut CmdWriter, texture: u32, opacity: f32, dim: f32, updating: bool| {
             if let Some(pipe) = layer_pipe.filter(|_| opacity > 0.0) {
                 let mut uniforms = Vec::new();
@@ -2121,7 +2123,8 @@ const TIP: f32 = 6.0;
 fn badge_frame(writer: &mut CmdWriter, frame: &mut u64, dump: Option<&mut dump::Dump>, window: Id, dpi: f32, size: [f32; 2], draw: impl FnOnce(&mut CmdWriter)) {
     *frame += 1;
     writer.frame_begin(*frame, FrameMeta { build_start_ns: makepad_hal::clock_ns(), ..Default::default() });
-    writer.pass(Pass { color: [Id::NONE; 4], load: [pass_load::LOAD; 5], viewport: [0.0, 0.0, size[0] * dpi, size[1] * dpi], dpi, ..Default::default() });
+    let pixels = makepad_hal::window_pixels(size.map(f64::from), dpi as f64).map(|n| n as f32);
+    writer.pass(Pass { color: [Id::NONE; 4], load: [pass_load::LOAD; 5], viewport: [0.0, 0.0, pixels[0], pixels[1]], dpi, ..Default::default() });
     draw(writer);
     writer.frame_set_build_end(makepad_hal::clock_ns());
     let snapshot = dump.and_then(|d| d.due());

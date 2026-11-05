@@ -111,3 +111,12 @@ pub fn report(first_present: bool) {
         let _ = writeln!(out, "exec-summary: at={at} group={name} files={} parse_cpu_ns={} lower_cpu_ns={} present_seen={} metric=compile-for-call", t[0], t[1], t[2], u8::from(PRESENT.load(Ordering::Acquire)));
     }
 }
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    use relax_session::reset_static as reset;
+    reset(&PRESENT, AtomicBool::new(false));
+    reset(&REPORTED_PRESENT, AtomicBool::new(false));
+    reset(&REPORTED_EXIT, AtomicBool::new(false));
+    reset(&FILES, Mutex::new(BTreeMap::new()));
+}

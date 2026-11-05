@@ -234,19 +234,20 @@ pub fn release_resident() -> usize {
     0
 }
 
-/// `len` bytes of `file` at `off`, mapped read-only for the rest of the process (the page cache's
-/// pages, nothing copied). The file is never truncated below `off + len` while this process runs
-/// (store.rs RunStore: append-only).
-pub fn map_pinned(file: &std::fs::File, off: u64, len: usize) -> Option<&'static [u8]> {
+/// `len` bytes of `file` at `off`, mapped read-only (the page cache's pages, nothing copied) for as
+/// long as the `Bytes` lives: the caller keeps it past every reader of the slice. The file is never
+/// truncated below `off + len` while it is mapped (store.rs RunStore: append-only).
+pub fn map_range(file: &std::fs::File, off: u64, len: usize) -> Option<(Option<Bytes>, &'static [u8])> {
     if len == 0 {
-        return Some(&[]);
+        return Some((None, &[]));
     }
     let align = view_align();
     let base = off & !(align - 1);
     let span = (off - base) as usize + len;
     let p = map_view(file, base, span)?;
     note_mapping(p as usize, span, file, base);
-    Some(unsafe { std::slice::from_raw_parts(p.add((off - base) as usize), len) })
+    let bytes = unsafe { std::slice::from_raw_parts(p.add((off - base) as usize), len) };
+    Some((Some(Bytes { ptr: p, len: span }), bytes))
 }
 
 /// Writes `image` to `dir/name` atomically: a fresh temp file (O_EXCL, 0600) in the same

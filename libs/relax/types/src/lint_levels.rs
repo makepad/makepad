@@ -359,3 +359,10 @@ pub fn finish(prog: &Program) {
         lint::emit_in(prog, e.def, &e.before, &UNFULFILLED_LINT_EXPECTATIONS, e.file, e.pos, "this lint expectation is unfulfilled");
     }
 }
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    use relax_session::reset_static as reset;
+    reset(&EXPECTATIONS, Mutex::new(Vec::new()));
+    reset(&RAISED, std::sync::atomic::AtomicBool::new(false));
+}

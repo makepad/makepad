@@ -368,3 +368,12 @@ mod tests {
         assert_eq!(std::mem::size_of::<TokenOrigin>(), 20);
     }
 }
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    use relax_session::reset_static as reset;
+    reset(&MAPPED_SOURCE_MISMATCH, std::sync::atomic::AtomicU64::new(0));
+    reset(&MAPPED_SOURCES, std::sync::atomic::AtomicU64::new(0));
+    reset(&MAPPED_SOURCE_NOT_FOUND, std::sync::atomic::AtomicU64::new(0));
+    reset(&MAPPED_SOURCE_NO_SNAPSHOT, std::sync::atomic::AtomicU64::new(0));
+}

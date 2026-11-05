@@ -556,3 +556,14 @@ unsafe fn replace(up: *mut Unit, sess: &std::sync::Arc<crate::Session>, mode: cr
     }
     Ok(old)
 }
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    use relax_session::reset_static as reset;
+    reset(&BOOT, relax_session::sync::Mutex::new(None));
+    reset(&STORED, relax_session::sync::Mutex::new(None));
+    reset(&REBUILDS, AtomicU32::new(0));
+    reset(&ENCODES, AtomicU32::new(0));
+    reset(&RUNNING, std::sync::atomic::AtomicBool::new(false));
+    reset(&REPLACED_FRONTS, relax_session::sync::Mutex::new(Vec::new()));
+}

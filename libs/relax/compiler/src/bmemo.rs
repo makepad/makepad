@@ -434,3 +434,10 @@ mod tests {
         assert!(lookup(&key(4, &pb, settings), &pb).is_none());
     }
 }
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    use relax_session::reset_static as reset;
+    reset(&MEMO, std::sync::LazyLock::new(|| relax_session::sync::Mutex::new(Memo::default())));
+    reset(&STATS, [const { AtomicU64::new(0) }; 7]);
+}

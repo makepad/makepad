@@ -2930,6 +2930,8 @@ pub fn sink_to_successor(f: &mut Func) -> bool {
     changed
 }
 
+static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 pub fn thread_known(f: &mut Func) -> bool {
     let n = f.blocks.len();
     // a branch on a vreg whose last definition in its own block is a constant (multi-def drop
@@ -3138,7 +3140,6 @@ pub fn thread_known(f: &mut Func) -> bool {
         {
             // MAKEPAD_RUN_THREAD_MAX=n: only the first n threads of the process (bisection)
             static MAX: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-            static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             let m = *MAX.get_or_init(|| std::env::var("MAKEPAD_RUN_THREAD_MAX").ok().and_then(|v| v.parse().ok()).unwrap_or(u64::MAX));
             if m != u64::MAX {
                 let k = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -8728,4 +8729,12 @@ mod tests {
         let s = crate::profile::structural_for_test(&f);
         assert!(s[4] < s[3] * 1e-2, "{s:?}");
     }
+}
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    use relax_session::reset_static as reset;
+    reset(&SINCOS, relax_session::sync::Mutex::new([None, None]));
+    reset(&MEM_FNS, std::sync::OnceLock::new());
+    reset(&N, std::sync::atomic::AtomicU64::new(0));
 }

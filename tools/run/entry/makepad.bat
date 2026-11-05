@@ -212,8 +212,11 @@ set "CARGO_INCREMENTAL=0"
 set "CARGO_TERM_COLOR=never"
 set "CARGO_TERM_PROGRESS_WHEN=never"
 for %%V in (RUSTUP_TOOLCHAIN RUSTFLAGS CARGO_ENCODED_RUSTFLAGS CARGO_BUILD_TARGET CARGO_BUILD_RUSTFLAGS CARGO_TARGET_DIR RUSTC_WRAPPER RUSTDOC) do set "%%V="
-rem [profile.host]: thin LTO, 16 codegen units; target-cpu=native for this computer's processor
-set "RUSTFLAGS=-Ctarget-cpu=native"
+rem [profile.host]: opt-level 3, 16 codegen units, LTO within each crate; target-cpu=native for this computer's processor
+rem and rustc's parallel frontend, which stable rustc takes under RUSTC_BOOTSTRAP=1, with an empty allow list so
+rem that no #![feature] builds (the runner's own flags: apps/commercial/runner build_work.rs RUSTFLAGS)
+set "RUSTFLAGS=-C target-cpu=native -Z threads=8 -Z allow-features="
+set "RUSTC_BOOTSTRAP=1"
 set "RUSTC=%RUST%\bin\rustc.exe"
 set "LOG=%LOGS%\build.log"
 set "BUILD_DONE=%CACHE%\loader\build.done"

@@ -384,3 +384,15 @@ pub(crate) fn hold_old_frames(u: &Unit, gen: u32, layout: &str, paused: bool) ->
     }
     n
 }
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    use relax_session::reset_static as reset;
+    reset(&GROUPS, AtomicU64::new(0));
+    reset(&CHUNK_BYTES, AtomicU64::new(0));
+    reset(&GROUP_CODE_BYTES, AtomicU64::new(0));
+    reset(&DEAD_GROUPS, AtomicU64::new(0));
+    reset(&DEAD_BYTES, AtomicU64::new(0));
+    reset(&WHYS, relax_session::sync::Mutex::new(Vec::new()));
+    reset(&PATCH_EVENTS, relax_session::sync::Mutex::new(Vec::new()));
+}

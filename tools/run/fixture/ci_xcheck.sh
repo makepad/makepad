@@ -4,9 +4,13 @@
 # targets the JIT does not build: the Apple-SDK targets (macOS x86_64, iOS, tvOS) on a Mac, Windows, web and Android
 # from a Linux pool node. `lib` checks the libs only (web and Android build an app as a library); `std` is a tier-3
 # target: nightly with -Z build-std=std. Compiler warnings fail the shard (devhub reads them from the short format).
+# --keep-going: one package's errors do not hide the others'.
 # Exit 75: this box cannot check the target (no std for it); the shard goes to another box.
-# The CI box's flags, as tools/ci ran them: RUSTFLAGS empty (the workspace config's target-cpu=native is the host's
-# CPU, which another target does not have) and MAKEPAD_BUILD " " (stable) or "lines" (nightly).
+# The CI's flags: no target-cpu (the workspace config's target-cpu=native is the host's CPU, which
+# another target does not have) and MAKEPAD_BUILD " " (stable) or "lines" (nightly). The stable shards
+# pass -Z allow-features= (stable rustc takes it under RUSTC_BOOTSTRAP=1): no #![feature] builds
+# there either, as in every host build (.cargo/config.toml). The std shard stays plain: build-std
+# compiles std, whose own crates need their features.
 set -u
 target=$1; mode=$2; shift 2
 export PATH=$HOME/.cargo/bin:$PATH CARGO_INCREMENTAL=0 RUSTFLAGS= CARGO_TERM_COLOR=never
@@ -26,9 +30,9 @@ for p in "$@"; do pargs+=(-p "$p"); done
 log=$(mktemp "${TMPDIR:-/tmp}/ci_xcheck.XXXXXX") || exit 2
 trap 'rm -f -- "$log"' EXIT
 case $mode in
-  bin) MAKEPAD_BUILD=" " nice -n 10 cargo check --release --target "$target" "${pargs[@]}" --message-format short 2>&1 | tee "$log" ;;
-  lib) MAKEPAD_BUILD=" " nice -n 10 cargo check --release --target "$target" --lib "${pargs[@]}" --message-format short 2>&1 | tee "$log" ;;
-  std) MAKEPAD_BUILD=lines nice -n 10 cargo +nightly check --release --target "$target" -Z build-std=std "${pargs[@]}" --message-format short 2>&1 | tee "$log" ;;
+  bin) MAKEPAD_BUILD=" " RUSTFLAGS="-Z allow-features=" RUSTC_BOOTSTRAP=1 nice -n 10 cargo check --release --target "$target" "${pargs[@]}" --keep-going --message-format short 2>&1 | tee "$log" ;;
+  lib) MAKEPAD_BUILD=" " RUSTFLAGS="-Z allow-features=" RUSTC_BOOTSTRAP=1 nice -n 10 cargo check --release --target "$target" --lib "${pargs[@]}" --keep-going --message-format short 2>&1 | tee "$log" ;;
+  std) MAKEPAD_BUILD=lines nice -n 10 cargo +nightly check --release --target "$target" -Z build-std=std "${pargs[@]}" --keep-going --message-format short 2>&1 | tee "$log" ;;
   *) echo "ci_xcheck.sh: mode is bin, lib or std, not $mode"; exit 2 ;;
 esac
 rc=${PIPESTATUS[0]}

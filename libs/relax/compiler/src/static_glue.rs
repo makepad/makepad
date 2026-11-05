@@ -281,3 +281,8 @@ pub(super) fn glue() -> Glue {
 pub(super) extern "C" fn tls_block_c() -> u64 {
     super::tls_block()
 }
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    MAKEPAD_RUN_SG_TABLE = [0; SLOTS];
+}

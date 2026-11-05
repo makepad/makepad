@@ -218,12 +218,12 @@ pub fn run(name: &str, policy: OnPanic, mut body: impl FnMut()) {
 /// Spawns the long-lived JIT thread `name` running `body` under `run`. A failed spawn is said
 /// (false), never ignored.
 pub fn spawn(name: String, policy: OnPanic, stack: Option<usize>, body: impl FnMut() + Send + 'static) -> bool {
-    let mut b = std::thread::Builder::new().name(name.clone());
-    if let Some(s) = stack {
-        b = b.stack_size(s);
-    }
     let n2 = crate::zone_alloc::kept_with(|| name.clone());
-    match b.spawn(move || run(&n2, policy, body)) {
+    let started = match stack {
+        Some(s) => crate::run_threads::spawn_sized(&name, s, move || run(&n2, policy, body)),
+        None => crate::run_threads::spawn(&name, move || run(&n2, policy, body)),
+    };
+    match started {
         Ok(_) => true,
         Err(e) => {
             eprintln!("makepad-run: cannot start JIT thread `{}`: {}", name, e);

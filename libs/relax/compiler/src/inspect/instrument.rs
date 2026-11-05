@@ -361,7 +361,7 @@ fn park_with(i: u64, site_tag: &str, label: &str, extra: &str, regs: Vec<u64>) {
         ),
     );
     let t0 = std::time::Instant::now();
-    while !p.go.load(SeqCst) && t0.elapsed().as_secs() < 600 {
+    while !p.go.load(SeqCst) && t0.elapsed().as_secs() < 600 && !crate::run_threads::run_ending() {
         list = GO.wait_timeout(list, std::time::Duration::from_millis(200)).unwrap_or_else(|e| e.into_inner()).0;
     }
     list.retain(|x| x.id != id);
@@ -733,7 +733,7 @@ pub fn auto_restartable(frames: &[u64]) {
         return;
     }
     { let _k = crate::zone_alloc::kept();
-    let _ = std::thread::Builder::new().name("run-inspect-restartable".into()).spawn(move || {
+    let _ = crate::run_threads::spawn("run-inspect-restartable", move || {
         super::heap::exclude_this_thread();
         let _ = add_to(Kind::Restart, Target::Slot(slot), false, false);
     });
@@ -1170,6 +1170,13 @@ pub fn hold_for_good(t: &super::threads::Thread) -> bool {
     pause_imp::keep(t)
 }
 
+/// A run's end began: the program's threads go on so they can be ended, and a parked hit stops
+/// waiting.
+pub(crate) fn run_ends() {
+    GO.notify_all();
+    resume_program();
+}
+
 /// Ends a pause (as `resume`).
 pub fn resume_program() -> usize {
     PAUSED.store(false, SeqCst);
@@ -1199,6 +1206,11 @@ pub(crate) fn program_thread(t: &super::threads::Thread) -> bool {
 #[cfg(target_vendor = "apple")]
 mod pause_imp {
     static HELD: relax_session::sync::Mutex<Vec<crate::inspect::threads::Thread>> = relax_session::sync::Mutex::new(Vec::new());
+
+    /// What this module holds of a run, as a fresh process has it (`run_end`).
+    pub(crate) unsafe fn reset_statics() {
+        relax_session::reset_static(&HELD, relax_session::sync::Mutex::new(Vec::new()));
+    }
     extern "C" {
         static mach_task_self_: u32;
         fn malloc_get_all_zones(task: u32, reader: *const u8, out: *mut *const usize, count: *mut u32) -> i32;
@@ -1295,18 +1307,22 @@ mod pause_imp {
 
 #[cfg(target_os = "linux")]
 mod pause_imp {
-    use std::sync::atomic::Ordering::Relaxed;
+    use std::sync::atomic::Ordering::{Relaxed, SeqCst};
     static HELD: relax_session::sync::Mutex<Vec<(u64, &'static crate::inspect::threads::HoldSlot)>> = relax_session::sync::Mutex::new(Vec::new());
+
+    /// What this module holds of a run, as a fresh process has it (`run_end`).
+    pub(crate) unsafe fn reset_statics() {
+        relax_session::reset_static(&HELD, relax_session::sync::Mutex::new(Vec::new()));
+    }
     /// Holds the running threads now and keeps holding threads as they start running (every
     /// 5 ms) until resume; blocked threads are never signalled.
     pub fn pause(want: &'static (dyn Fn(&crate::inspect::threads::Thread) -> bool + Sync)) -> usize {
         let n = sweep(want);
         { let _k = crate::zone_alloc::kept();
-        let _ = std::thread::Builder::new().name("run-inspect-pause".into()).spawn(move || {
+        let _ = crate::run_threads::spawn("run-inspect-pause", move || {
             crate::inspect::heap::exclude_this_thread();
-            while super::PAUSED.load(Relaxed) {
+            while super::PAUSED.load(Relaxed) && crate::run_threads::sleep(std::time::Duration::from_millis(5)) {
                 sweep(want);
-                std::thread::sleep(std::time::Duration::from_millis(5));
             }
         });
         }
@@ -1315,6 +1331,11 @@ mod pause_imp {
     fn sweep(want: &dyn Fn(&crate::inspect::threads::Thread) -> bool) -> usize {
         let skip = crate::inspect::SERVER_TIDS.lock().unwrap().clone();
         let mut held = HELD.lock().unwrap_or_else(|e| e.into_inner());
+        // (a resume clears the flag, then takes this lock: a sweep it did not wait for holds nothing,
+        // or a thread held here would stay held with nobody to release it)
+        if !super::PAUSED.load(SeqCst) {
+            return 0;
+        }
         let mut list = crate::inspect::threads::list();
         crate::inspect::name_handles(&mut list);
         for t in list {
@@ -1369,6 +1390,8 @@ mod pause_imp {
     pub fn keep(_t: &crate::inspect::threads::Thread) -> bool {
         false
     }
+
+    pub(crate) unsafe fn reset_statics() {}
 }
 
 fn site_letter(k: Kind) -> &'static str {
@@ -1529,4 +1552,15 @@ mod name_tests {
         assert_eq!(name_match(t, "crate::vector::Outline::move_to"), Match::Exact);
         assert_eq!(name_match("a::b::f", "crate::f"), Match::Tail);
     }
+}
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    use relax_session::reset_static as reset;
+    pause_imp::reset_statics();
+    reset(&SITES, Mutex::new(Vec::new()));
+    reset(&GROUPS, Mutex::new(Vec::new()));
+    reset(&SNAPS, Mutex::new(std::collections::VecDeque::new()));
+    reset(&PARKED, Mutex::new(Vec::new()));
+    reset(&PAUSED, AtomicBool::new(false));
 }

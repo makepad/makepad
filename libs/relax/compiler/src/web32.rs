@@ -168,11 +168,12 @@ pub fn alloc(size: usize) -> u64 {
     a
 }
 
+static NEXT: relax_session::sync::Mutex<(u64, u64)> = relax_session::sync::Mutex::new((0, 0));
+
 /// Zeroed 8-byte words in the window's misc region for the life of the process (native address):
 /// a counted body's block counters (profile::instrument), which the program's code increments
 /// through its window addressing. Carved from 64 KB `alloc` chunks (counted code is never freed).
 pub fn alloc_counters(words: usize) -> u64 {
-    static NEXT: relax_session::sync::Mutex<(u64, u64)> = relax_session::sync::Mutex::new((0, 0));
     let len = (words.max(1) * 8) as u64;
     let mut g = NEXT.lock().unwrap_or_else(|e| e.into_inner());
     if g.0 + len > g.1 {
@@ -370,4 +371,16 @@ pub fn symbol(name: &[u8]) -> Option<usize> {
 /// A runtime key whose destructor is program code (a code offset).
 extern "C" fn w32_key_create(dtor: u64, late: u32) -> u32 {
     crate::domain_threads::key_create(native(dtor) as usize, late)
+}
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    use relax_session::reset_static as reset;
+    reset(&ON, AtomicBool::new(false));
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    reset(&SLOTS_NEXT, AtomicU64::new(SLOTS_AT));
+    reset(&MISC_NEXT, AtomicU64::new(0));
+    reset(&FREE, relax_session::sync::Mutex::new(Vec::new()));
+    reset(&SS_OFF, AtomicU64::new(0));
+    reset(&NEXT, relax_session::sync::Mutex::new((0, 0)));
 }

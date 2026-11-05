@@ -88,9 +88,29 @@ pub fn eval_const_block(u: &mut Unit, body: &Body, bl: crate::ast::BlockId, t: T
         return None;
     }
     let mut cx = Ctx { u, steps: 0, depth: 0, trace: false, reason: None };
+    let pos = cx.u.prog.files[body.file as usize].ast.block(bl).lo;
+    if let Some(v) = cx.offset_of(body, pos, bl) {
+        return (v.len() == cx.size(t) as usize).then_some(v);
+    }
     let mut env: Vec<Option<Vec<u8>>> = Vec::new();
     let v = cx.block(body, &mut env, bl)?;
     (v.len() == cx.size(t) as usize).then_some(v)
+}
+
+/// The value of an `offset_of!` naming a field an edit added to a live-editable struct (M10):
+/// the field lives in the value's extension block and has no offset in the running layout.
+pub(crate) const NO_OFFSET: u64 = u64::MAX;
+
+/// Is `pos` of file `file` in an `offset_of!` expansion? Its inline const is answered from the
+/// layout (Ctx::offset_of), in a const and in a fn body alike.
+pub(crate) fn in_offset_of(prog: &crate::program::Program, file: u32, pos: u32) -> bool {
+    let file = &prog.files[file as usize];
+    let expansions = file.part_at(pos).map_or(&file.exp_map, |p| &p.exp_map);
+    let Some((_, (_, end, call))) = crate::origin_table::OSegRef::from(expansions).floor(pos) else { return false };
+    if pos >= end { return false; }
+    let invocation = file.bytes(call, u32::MAX);
+    let Some(bang) = invocation.iter().position(|c| *c == b'!') else { return false };
+    std::str::from_utf8(&invocation[..bang]).ok().and_then(|s| s.rsplit("::").next()).is_some_and(|s| s.trim() == "offset_of")
 }
 
 /// An already validated promoted rvalue. Reification uses fn_pointer's permanent JIT entries.
@@ -755,7 +775,12 @@ impl<'a> Ctx<'a> {
                 unsafe { std::ptr::copy_nonoverlapping(v.as_ptr(), a as *mut u8, v.len()) };
                 Some(a.to_le_bytes().to_vec())
             }
-            ExprKind::ConstBlock(bl) => self.offset_of(b, e, bl).or_else(|| self.block(b, env, bl)),
+            ExprKind::ConstBlock(bl) => {
+                // a field with no offset leaves the constant to its compiled initializer, which
+                // panics saying so where it runs (lowering's offset_of!)
+                let pos = self.u.prog.files[b.file as usize].ast.expr(e).lo;
+                self.offset_of(b, pos, bl).filter(|v| v[..] != NO_OFFSET.to_le_bytes()).or_else(|| self.block(b, env, bl))
+            }
             ExprKind::Block(bl, l) if l.is_none() => self.block(b, env, bl),
             ExprKind::Unsafe(bl) => self.block(b, env, bl),
             ExprKind::While(row) => {
@@ -1001,17 +1026,10 @@ impl<'a> Ctx<'a> {
     /// MaybeUninit<T>, then subtracting its base address. Recognize that entire typed
     /// computation and answer from the layout. Do not materialize uninitialized bytes or
     /// make general pointer-to-integer casts legal in CTFE (rustc's offset_of is a builtin).
-    fn offset_of(&mut self, b: &Body, e: ExprId, bl: crate::ast::BlockId) -> Option<Vec<u8>> {
-        let file = &self.u.prog.files[b.file as usize];
-        let ast = &file.ast;
+    fn offset_of(&mut self, b: &Body, pos: u32, bl: crate::ast::BlockId) -> Option<Vec<u8>> {
         // Only the macro expansion, never a user-written pointer-to-integer const.
-        let pos = ast.expr(e).lo;
-        let expansions = file.part_at(pos).map_or(&file.exp_map, |p| &p.exp_map);
-        let (_, (_, end, call)) = crate::origin_table::OSegRef::from(expansions).floor(pos)?;
-        if pos >= end { return None; }
-        let invocation = file.bytes(call, u32::MAX);
-        let bang = invocation.iter().position(|c| *c == b'!')?;
-        if std::str::from_utf8(&invocation[..bang]).ok()?.rsplit("::").next()?.trim() != "offset_of" { return None; }
+        if !in_offset_of(&self.u.prog, b.file, pos) { return None; }
+        let ast = &self.u.prog.files[b.file as usize].ast;
         let [Stmt::Let(r1), Stmt::Let(r2), Stmt::Let(r3), Stmt::Expr(tail, false)] = ast.stmts(bl) else { return None };
         let (crate::ast::LetStmt { pat: up, init: Some(ui), else_: None, .. },
              crate::ast::LetStmt { pat: bp, init: Some(bi), else_: None, .. },
@@ -1050,8 +1068,11 @@ impl<'a> Ctx<'a> {
         for e in [recv, *origin] {
             if !matches!(self.kind(b.ty(e)), TyKind::Ptr(false, p) if matches!(self.kind(p), TyKind::Int(crate::program::Prim::U8))) { return None; }
         }
-        let offset = self.place_offset(b, place, base)?;
-        Some((offset as u64).to_le_bytes().to_vec())
+        let offset = match self.place_offset(b, place, base)? {
+            u32::MAX => NO_OFFSET,
+            o => o as u64,
+        };
+        Some(offset.to_le_bytes().to_vec())
     }
 
     fn place_offset(&mut self, b: &Body, e: ExprId, base: u32) -> Option<u32> {
@@ -1074,10 +1095,23 @@ impl<'a> Ctx<'a> {
         if self.u.lay.is_unsized(&crate::layout::LayoutCx::new(&self.u.prog), &mut self.u.tcx, t) { return None; }
         let offset = match self.kind(t) {
             TyKind::Tuple(_) => *self.layout(t).fields.get(fi as usize)?,
-            TyKind::Adt(..) => self.struct_field_off(t, fi)?,
+            TyKind::Adt(d, _, _) => {
+                let offset = self.struct_field_off(t, fi)?;
+                if self.layout(t).ext.is_some() {
+                    self.u.offsets_computed.lock().unwrap_or_else(|e| e.into_inner()).insert(d);
+                    if offset == u32::MAX {
+                        return Some(u32::MAX);
+                    }
+                }
+                offset
+            }
             _ => return None,
         };
-        self.place_offset(b, x, base)?.checked_add(offset)
+        let outer = self.place_offset(b, x, base)?;
+        if outer == u32::MAX {
+            return Some(u32::MAX);
+        }
+        outer.checked_add(offset)
     }
 
     fn fn_pointer(&mut self, t: TyId) -> Option<Vec<u8>> {

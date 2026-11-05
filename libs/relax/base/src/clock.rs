@@ -1,4 +1,4 @@
-//! The front end's process-wide monotonic wall clock (thread CPU time is relax_backend::cpu_ns,
+//! The front end's process-wide monotonic wall clock (thread CPU time is relax_session::clock::cpu_ns,
 //! shared with the optimiser so build and pass totals use one calibration).
 
 /// Wall time in ns since the first call of it in this process.
@@ -80,4 +80,11 @@ pub fn process_start_epoch() -> f64 {
 pub fn ms_since_process_start() -> f64 {
     mark_process_start();
     PROCESS_START.get().unwrap().1.elapsed().as_secs_f64() * 1e3
+}
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    use relax_session::reset_static as reset;
+    reset(&T0, std::sync::OnceLock::new());
+    reset(&PROCESS_START, std::sync::OnceLock::new());
 }

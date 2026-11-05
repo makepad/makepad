@@ -120,7 +120,7 @@ impl State {
             buf,
             stack: Vec::new(),
             phase: 0,
-            cpu: relax_backend::cpu_ns(),
+            cpu: relax_session::clock::cpu_ns(),
             wall: mono(),
             tid: format!("{:?}", std::thread::current().id()),
         }
@@ -133,7 +133,7 @@ impl State {
         }
     }
     fn tick(&mut self) {
-        let c = relax_backend::cpu_ns();
+        let c = relax_session::clock::cpu_ns();
         let w = mono();
         if let Some(r) = self.stack.last_mut() {
             let dc = c.saturating_sub(self.cpu);
@@ -146,7 +146,7 @@ impl State {
                 id, self.tid, PHASES[self.phase], self.wall, w, dc
             ));
         }
-        self.cpu = relax_backend::cpu_ns();
+        self.cpu = relax_session::clock::cpu_ns();
         self.wall = mono();
     }
 }
@@ -418,7 +418,7 @@ pub fn type_detail(def: u32, args: &[u32], nodes: usize, name: &str, start: u64,
     if !enabled() {
         return;
     }
-    let dt = relax_backend::cpu_ns().saturating_sub(cpu);
+    let dt = relax_session::clock::cpu_ns().saturating_sub(cpu);
     local(|s| {
         let s = s.borrow();
         let row = s.stack.last();
@@ -480,4 +480,11 @@ impl Drop for State {
     fn drop(&mut self) {
         write(&mut self.buf.lock().unwrap_or_else(|e| e.into_inner()));
     }
+}
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    use relax_session::reset_static as reset;
+    reset(&TYPES, OnceLock::new());
+    reset(&HINTS, Mutex::new(Vec::new()));
 }

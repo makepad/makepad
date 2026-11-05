@@ -9,7 +9,7 @@ pub struct ClosureStorage {
     pub fields: Vec<TyId>,
     pub roots: Vec<u32>,
     pub by_value: Vec<bool>,
-    pub owned_fields: Vec<Option<Vec<u32>>>,
+    pub owned_paths: Vec<Option<Vec<Vec<u32>>>>,
     /// Per root: its field is a `&mut T` the closure only reads through (every capture is a
     /// shared borrow of a place behind it). rustc's capture there is a `&` of that place, which
     /// is Copy: a clone of the closure copies the pointer (the field keeps the `&mut T` value
@@ -75,16 +75,20 @@ impl ClosureStorage {
             let precise = value
                 && !deref_shared
                 && cs.iter().filter(|c| c.info.kind == crate::upvar::CaptureKind::ByValue).all(|c| {
-                    if let Some((Projection::Field(0, field), _)) = c.place.projections.first() {
-                        fs.push(*field);
-                        true
-                    } else {
-                        false
-                    }
+                    let path: Vec<_> = c.place.projections.iter().map_while(|(p, _)| {
+                        if let Projection::Field(0, field) = p { Some(*field) } else { None }
+                    }).collect();
+                    if path.is_empty() { false } else { fs.push(path); true }
                 });
             fs.sort_unstable();
             fs.dedup();
-            fields.push(precise.then_some(fs));
+            // Truncation at a dereference may leave a parent and its child.
+            // The parent already owns the whole subtree.
+            let mut minimal: Vec<Vec<u32>> = Vec::new();
+            for path in fs {
+                if !minimal.iter().any(|parent| path.starts_with(parent)) { minimal.push(path); }
+            }
+            fields.push(precise.then_some(minimal));
         }
         let result = &body.min_captures[&ce];
         let drop_flags = if result.suspension_points.is_some() {
@@ -96,6 +100,6 @@ impl ClosureStorage {
             upvars.push(tcx.tys.prim(if states <= 1 << 8 { crate::program::Prim::U8 }
                 else if states <= 1 << 16 { crate::program::Prim::U16 } else { crate::program::Prim::U32 }));
         }
-        Self { fields: upvars, roots, by_value, owned_fields: fields, shared_reborrow, drop_flags }
+        Self { fields: upvars, roots, by_value, owned_paths: fields, shared_reborrow, drop_flags }
     }
 }

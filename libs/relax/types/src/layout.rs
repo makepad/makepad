@@ -390,19 +390,21 @@ impl Layouts {
     /// A closure's environment. Its type names the file version whose body made it: the
     /// storages of every lowered body are recorded (`note_closure_storages`), so a closure of a
     /// version a live edit replaced keeps the environment that version gave it. Only the
-    /// current version is derived from the owner's type check here (a replaced version's
-    /// expression ids name other expressions, or none, in the current body).
+    /// current version is derived from the owner's type check here: a replaced version's
+    /// expression ids name other expressions, or none, in its owner's current body, and an owner
+    /// the edit removed has no body of the program at all (it keeps the replaced version's file,
+    /// and a check of it now resolves against names the edit took away).
     pub fn closure_storage(&self, prog: &crate::program::Program, tcx: &Tcx, ty: TyId) -> ClosureStorage {
         let ty = tcx.tys.erase_regions(ty);
         if let Some(storage) = self.closure_storage.get(&ty) { return storage; }
         let TyKind::Closure(file, ce, crate::types::ClosureArgs { parent_args: owner, .. }) = tcx.tys.kind(ty) else { panic!("closure storage for non-closure") };
         let TyKind::FnDef(def, args, _) = tcx.tys.kind(*owner) else { panic!("closure owner") };
-        let body = crate::typeck::codegen_body(prog, tcx, *def, tcx.tys.list(*args));
-        if body.file != *file {
+        if !prog.is_current_version(*file) {
             if let Some(storage) = self.version_storage.get(&ty) { return storage; }
             panic!("the environment of a closure of a replaced version of {} (expression {}) is unknown: no body of that version was lowered in this process",
                 prog.file_paths.get(*file as usize).map_or("?", |p| p.as_str()), ce & !crate::tcx::ASYNC_FN_BODY);
         }
+        let body = crate::typeck::codegen_body(prog, tcx, *def, tcx.tys.list(*args));
         let storage = ClosureStorage::for_codegen(prog, tcx, &body, *ce);
         self.closure_storage.insert(ty, storage.clone());
         storage
@@ -1357,7 +1359,10 @@ impl Layouts {
                         if !self.decl_maybe_unsized(lcx, tcx, d2, depth + 1) {
                             return false;
                         }
-                        let s = self.field_ty(lcx, tcx, d2, 0, adt2.variants[0].fields.len() as u32 - 1, tcx.tys.list(a2));
+                        // This is the declaration's generic sizedness, not a concrete layout.
+                        // Substitute its tail without normalizing projections in unrelated
+                        // generic arguments (e.g. RefCell<Vec<Rc<C::Node>>> is always Sized).
+                        let s = tcx.tys.subst(lt, tcx.tys.list(a2));
                         self.ty_maybe_unsized(lcx, tcx, s, params, depth + 1)
                     }
                 }
@@ -1492,4 +1497,11 @@ pub fn root_crate() -> u32 {
 /// `makepad live`: the crate under test is the program's own crate (live_editable).
 pub fn set_root_crate(c: u32) {
     ROOT_CRATE.store(c, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    use relax_session::reset_static as reset;
+    reset(&LIVE_SESSION, std::sync::atomic::AtomicBool::new(false));
+    reset(&ROOT_CRATE, std::sync::atomic::AtomicU32::new(0));
 }

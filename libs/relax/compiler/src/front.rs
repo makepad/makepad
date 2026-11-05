@@ -701,3 +701,15 @@ mod tests {
         assert!(!fp.toks.is_mapped());
     }
 }
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    use relax_session::reset_static as reset;
+    reset(&MAPPED_FILES, AtomicU64::new(0));
+    reset(&MAPPED_BYTES, AtomicU64::new(0));
+    reset(&RECORDED_FILES, AtomicU64::new(0));
+    reset(&RECORDED_BYTES, AtomicU64::new(0));
+    reset(&MISMATCHED, AtomicU64::new(0));
+    reset(&PARTS_MAPPED, AtomicU64::new(0));
+    reset(&PARTS_RECORDED, AtomicU64::new(0));
+}

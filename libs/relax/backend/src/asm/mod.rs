@@ -17,27 +17,34 @@
 //! left is linked by the caller (an inline block's symbol fixups become the function's
 //! relocations, a global block is linked where it is placed).
 
+// each host builds only its own architecture's assembler and disassembler
+#[cfg(target_arch = "aarch64")]
 pub mod arm64;
 pub mod dis;
+#[cfg(target_arch = "aarch64")]
 pub mod dis_arm64;
+#[cfg(not(target_arch = "aarch64"))]
 pub mod dis_x64;
+#[cfg(not(target_arch = "aarch64"))]
 pub mod x64;
 
 use std::collections::HashMap;
 
+/// The host's architecture: the one this build assembles, disassembles and reads native binaries for.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum Arch {
+    #[cfg(not(target_arch = "aarch64"))]
     X64,
+    #[cfg(target_arch = "aarch64")]
     Arm64,
 }
 
 impl Arch {
     pub fn host() -> Arch {
-        if cfg!(target_arch = "aarch64") {
-            Arch::Arm64
-        } else {
-            Arch::X64
-        }
+        #[cfg(target_arch = "aarch64")]
+        return Arch::Arm64;
+        #[cfg(not(target_arch = "aarch64"))]
+        return Arch::X64;
     }
 }
 
@@ -262,13 +269,17 @@ impl Lexer<'_> {
     /// `//` / `/* */` comments AsmLexer takes everywhere) and its statement separator.
     fn line_comment(&self) -> &'static [u8] {
         match (self.arch, self.format) {
+            #[cfg(not(target_arch = "aarch64"))]
             (Arch::X64, _) => b"#",
+            #[cfg(target_arch = "aarch64")]
             (Arch::Arm64, Format::MachO) => b";",
+            #[cfg(target_arch = "aarch64")]
             (Arch::Arm64, _) => b"//",
         }
     }
     fn separator(&self) -> &'static [u8] {
         match (self.arch, self.format) {
+            #[cfg(target_arch = "aarch64")]
             (Arch::Arm64, Format::MachO) => b"%%",
             _ => b";",
         }
@@ -872,7 +883,9 @@ pub fn assemble(arch: Arch, format: Format, kind: Kind, pieces: &[Piece], args: 
     let stmts = lexer.lex(pieces).map_err(|msg| AsmError { line: 0, msg })?;
     let mut ctx = Ctx::new(arch, format, att, kind == Kind::Inline);
     let mut enc: Box<dyn Encoder> = match arch {
+        #[cfg(not(target_arch = "aarch64"))]
         Arch::X64 => Box::new(x64::X64::default()),
+        #[cfg(target_arch = "aarch64")]
         Arch::Arm64 => Box::new(arm64::Arm64::default()),
     };
     let mut macros: HashMap<String, Macro> = HashMap::new();
@@ -1055,7 +1068,7 @@ fn run(ctx: &mut Ctx, enc: &mut dyn Encoder, stmts: &[Stmt], macros: &mut HashMa
                 let mut i = 0;
                 let a = parts.first().map(|p| ctx.const_expr(p, &mut i)).transpose().map_err(|m| err(line, m))?.unwrap_or(0);
                 // .align is a power of two on arm64 / Mach-O, bytes on x64 ELF (GNU as / LLVM)
-                let pow = d.starts_with(".p2") || (d == ".align" && (ctx.arch == Arch::Arm64 || ctx.format == Format::MachO));
+                let pow = d.starts_with(".p2") || (d == ".align" && (cfg!(target_arch = "aarch64") || ctx.format == Format::MachO));
                 let bytes: u64 = if pow {
                     if !(0..=16).contains(&a) {
                         return Err(err(line, "alignment too large"));
@@ -1081,7 +1094,7 @@ fn run(ctx: &mut Ctx, enc: &mut dyn Encoder, stmts: &[Stmt], macros: &mut HashMa
                     ".byte" => 1,
                     ".short" | ".hword" | ".2byte" | ".value" => 2,
                     // .word is 4 bytes on arm64 and 2 on x86 (GNU as / LLVM)
-                    ".word" if ctx.arch == Arch::X64 => 2,
+                    ".word" if cfg!(not(target_arch = "aarch64")) => 2,
                     ".word" | ".long" | ".int" | ".4byte" => 4,
                     _ => 8,
                 };
@@ -1422,11 +1435,11 @@ fn kind_len(k: FixKind) -> usize {
 
 #[cfg(test)]
 mod tests;
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "aarch64")))]
 mod tests_x64;
-#[cfg(test)]
+#[cfg(all(test, target_arch = "aarch64"))]
 mod tests_arm64;
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "aarch64")))]
 mod tests_dis_x64;
-#[cfg(test)]
+#[cfg(all(test, target_arch = "aarch64"))]
 mod tests_dis_arm64;

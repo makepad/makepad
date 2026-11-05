@@ -231,3 +231,65 @@ fn edited_async_code_runs_on_the_next_call() {
         });
     });
 }
+
+const OUTPUT_LIB: &str = r#"use std::future::Future;
+use std::pin::Pin;
+use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+
+pub struct Yield(pub bool);
+impl Future for Yield {
+    type Output = ();
+    fn poll(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<()> {
+        if self.0 { Poll::Ready(()) } else { self.0 = true; Poll::Pending }
+    }
+}
+
+pub async fn val() -> u64 {
+    Yield(false).await;
+    5
+}
+
+fn noop_raw() -> RawWaker {
+    fn clone(_: *const ()) -> RawWaker { noop_raw() }
+    fn noop(_: *const ()) {}
+    static VT: RawWakerVTable = RawWakerVTable::new(clone, noop, noop, noop);
+    RawWaker::new(std::ptr::null(), &VT)
+}
+
+static HELD: std::sync::Mutex<Option<Pin<Box<dyn Future<Output = u64> + Send>>>> = std::sync::Mutex::new(None);
+
+pub fn hold(out: &mut u64) {
+    let mut f: Pin<Box<dyn Future<Output = u64> + Send>> = Box::pin(async { val().await as u64 });
+    let waker = unsafe { Waker::from_raw(noop_raw()) };
+    *out = f.as_mut().poll(&mut Context::from_waker(&waker)).is_pending() as u64;
+    *HELD.lock().unwrap() = Some(f);
+}
+
+pub fn resume(out: &mut u64) {
+    let mut f = HELD.lock().unwrap().take().unwrap();
+    let waker = unsafe { Waker::from_raw(noop_raw()) };
+    loop {
+        if let Poll::Ready(v) = f.as_mut().poll(&mut Context::from_waker(&waker)) {
+            *out = v;
+            return;
+        }
+    }
+}
+"#;
+
+/// A suspended future is resumed in new code only when its output and captures keep their types:
+/// the same frame size and the same code up to the last await are not enough (an old caller
+/// still reads the old output).
+#[test]
+fn suspended_future_keeps_its_code_when_its_output_type_changes() {
+    in_child("reload_async_tests::suspended_future_keeps_its_code_when_its_output_type_changes", &["output"], |_| {
+        live_app("async-output", &[("lib.rs", OUTPUT_LIB)], &["hold", "resume"], |call, edit| {
+            assert_eq!(call("hold"), 1, "a future suspended inside val");
+            let outcome = edit("lib.rs", &[("pub async fn val() -> u64 {", "pub async fn val() -> u32 {"), ("    5\n}", "    6\n}")]);
+            assert!(!outcome.lines.iter().any(|l| l.contains("resume in the new code")), "{:?}", outcome.lines);
+            if outcome.rung == crate::reload::Rung::Patch {
+                assert_eq!(call("resume"), 5, "the suspended future finishes on its old code: {:?}", outcome.lines);
+            }
+        });
+    });
+}

@@ -1,6 +1,6 @@
 #!/bin/bash
 # tools/run/host/build.sh: the `makepad` JIT binary (Relax + makepad run) built for speed on the machine
-# that runs it: Cargo.toml [profile.host] (opt-level 3, thin LTO, codegen-units 16) + -Ctarget-cpu=native,
+# that runs it: Cargo.toml [profile.host] (opt-level 3, codegen-units 16, LTO within each crate) + -Ctarget-cpu=native,
 # optionally with PGO. The result and its tiny makepad-launcher companion are installed at target/host/.
 # target/release stays the distributable build and the one every gate, A/B and timing series uses.
 #

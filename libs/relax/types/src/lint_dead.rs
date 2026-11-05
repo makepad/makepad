@@ -1521,3 +1521,10 @@ fn unnameable_types(prog: &Program, own: &[bool], reach: &Reach) {
         lint::emit(prog, d, &UNNAMEABLE_TYPES, def.file, item.lo, &format!("{} `{}` is reachable but cannot be named", kind, name));
     }
 }
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    use relax_session::reset_static as reset;
+    reset(&BINDING_SITES, Mutex::new(None));
+    reset(&BODY_REFS, Mutex::new(None));
+}

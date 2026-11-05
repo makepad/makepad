@@ -514,6 +514,7 @@ fn watch() {
         if !on() {
             continue;
         }
+        let _at_the_run = crate::run_threads::process_work();
         let why = PENDING.swap(0, Relaxed);
         if why != 0 {
             let why = match why {
@@ -553,8 +554,8 @@ fn watch() {
         };
         if stalled() {
             let t0 = std::time::Instant::now();
-            while stalled() && t0.elapsed().as_secs() < 30 {
-                let run = super::prof::collect(0.1, 200, &is_ui_or_owner, &|| !stalled());
+            while stalled() && t0.elapsed().as_secs() < 30 && !crate::run_threads::ending() {
+                let run = super::prof::collect(0.1, 200, &is_ui_or_owner, &|| !stalled() || crate::run_threads::ending());
                 let mut log = SAMPLES.lock().unwrap_or_else(|e| e.into_inner());
                 for s in run.samples {
                     log.push(RawSample { os_id: s.os_id, t: s.t, pcs: s.frames, w: s.weight });
@@ -866,10 +867,11 @@ fn stamp(secs: u64) -> String {
     format!("{:04}{:02}{:02}-{:02}{:02}{:02}", y, m, d, rem / 3600, rem % 3600 / 60, rem % 60)
 }
 
+static ONCE: AtomicBool = AtomicBool::new(false);
+
 /// A fatal fault is ending the process: the recording is written now, on the faulting thread
 /// (no stall-sample names: they would ask the owner).
 pub fn fault_dump(what: &str) {
-    static ONCE: AtomicBool = AtomicBool::new(false);
     if !on() || ONCE.swap(true, Relaxed) {
         return;
     }
@@ -1017,4 +1019,11 @@ fn status(out: &mut super::Out) {
         out.line(&format!("recorded: {d}"));
     }
     out.line("more: rec save last=60s  rec save last=all");
+}
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    use relax_session::reset_static as reset;
+    reset(&UI_BUSY_SINCE, AtomicU64::new(0));
+    reset(&ONCE, AtomicBool::new(false));
 }

@@ -240,6 +240,7 @@ fn copy_out(s: &str, buf: *mut u8, cap: usize) -> usize {
 /// std::relax::post_engine_request: `p/n` is the record ([`post`]); writes the id, or `!` and the
 /// reason, into `buf` and returns the full length.
 pub extern "C" fn __relax_engine_request(p: *const u8, n: usize, buf: *mut u8, cap: usize) -> usize {
+    let _kept = crate::zone_alloc::kept();
     if p.is_null() {
         return copy_out("!no request", buf, cap);
     }

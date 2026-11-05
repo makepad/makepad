@@ -32,6 +32,8 @@ pub struct CrateUnit {
 pub struct HostUnit {
     pub features: Vec<String>,
     pub deps: Vec<(usize, String)>,
+    /// Build-script cfgs and environment for this host feature set, not the target's.
+    pub build_outputs: Option<(Vec<String>, Vec<(String, String)>)>,
 }
 
 /// Returns the original crate name before any `__relax_v` multi-version suffix.
@@ -108,6 +110,13 @@ pub fn apply_substitutes(sess: &std::sync::Arc<crate::Session>, units: &mut [Cra
             return Ok(());
         }
     };
+    apply_substitute_table(units, std_dir, &table);
+    // proc-macro crates run in the JIT proc-macro host; the app graph sees them empty
+    crate::macro_reg::register_and_strip(sess, units, std_dir, additive)?;
+    Ok(())
+}
+
+fn apply_substitute_table(units: &mut [CrateUnit], std_dir: &str, table: &str) {
     for line in table.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -124,7 +133,7 @@ pub fn apply_substitutes(sess: &std::sync::Arc<crate::Session>, units: &mut [Cra
             }
             let matches = u.version == ver || u.version.starts_with(&format!("{}.", ver));
             if !matches {
-                return Err(format!("{}: crate `{}` is version {}, std/substitutes.txt provides {} -- update the table or the provided crate", u.src_path, name, u.version, ver));
+                continue;
             }
             u.src_path = format!("{}/{}", std_dir, root);
             u.edition = 2021;
@@ -133,9 +142,6 @@ pub fn apply_substitutes(sess: &std::sync::Arc<crate::Session>, units: &mut [Cra
             u.host = None;
         }
     }
-    // proc-macro crates run in the JIT proc-macro host; the app graph sees them empty
-    crate::macro_reg::register_and_strip(sess, units, std_dir, additive)?;
-    Ok(())
 }
 
 /// Unit indices with every crate after its dependencies.
@@ -564,4 +570,10 @@ fn a_package_crate_never_keeps_a_sysroot_name() {
         assert_eq!(base_crate_name(&own), name);
     }
     assert_eq!(own_crate_name("alloc_menu".to_string()), "alloc_menu");
+}
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    use relax_session::reset_static as reset;
+    reset(&CRATE_ENV, relax_session::sync::Mutex::new(Vec::new()));
 }

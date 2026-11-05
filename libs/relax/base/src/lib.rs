@@ -57,6 +57,7 @@ pub mod vfs;
 pub mod packsrc;
 pub mod progress;
 pub mod run_state;
+pub mod run_threads;
 pub mod boot_stats;
 pub mod dirs;
 pub use relax_lex::tokens as pm_tokens;
@@ -65,7 +66,6 @@ pub mod zone_alloc;
 pub mod clock;
 pub mod relaxed;
 pub mod srchash;
-pub mod simd;
 pub mod thread_local_mac;
 pub mod tokbuf;
 pub mod cfg;
@@ -84,3 +84,19 @@ pub mod solver_work;
 
 // This crate's source stamp (build.rs, libs/relax/self_stamp.rs): relax-compiler folds it into the codegen identity.
 include!(concat!(env!("OUT_DIR"), "/src_stamp.rs"));
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub unsafe fn reset_statics() {
+    arena::reset_statics();
+    boot_stats::reset_statics();
+    clock::reset_statics();
+    diag::reset_statics();
+    preempt::reset_statics();
+    progress::reset_statics();
+    query::reset_statics();
+    relaxed::reset_statics();
+    solver_work::reset_statics();
+    vfs::reset_statics();
+    why::reset_statics();
+    zone_alloc::reset_statics();
+}

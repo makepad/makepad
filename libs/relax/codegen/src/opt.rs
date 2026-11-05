@@ -9643,3 +9643,12 @@ mod post_increment_tests {
         assert!(!fold_post_increments(&mut f));
     }
 }
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    use relax_session::reset_static as reset;
+    reset(&HIST, [const { std::sync::atomic::AtomicU64::new(0) }; 12]);
+    reset(&UNWIND_HOSTS, std::sync::OnceLock::new());
+    reset(&INVOKES_SEEN, std::sync::atomic::AtomicU64::new(0));
+    reset(&INVOKES_DEMOTED, std::sync::atomic::AtomicU64::new(0));
+}

@@ -15,6 +15,11 @@ use makepad_prof_stream::Profile;
 const SEP: char = '\u{1f}';
 
 pub fn file_main(path: &str, words: &[String]) -> i32 {
+    let (_, kv) = makepad_remote::app::split_args(words);
+    if let Err(e) = makepad_remote::params::validate(kv.iter().map(|(k, _)| k.as_str()), makepad_remote::params::REPLAY) {
+        println!("{e}");
+        return 1;
+    }
     let get = |k: &str| words.iter().find_map(|w| w.strip_prefix(k).and_then(|v| v.strip_prefix('='))).map(str::to_string);
     let bytes = match std::fs::read(path) {
         Ok(b) => b,

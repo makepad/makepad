@@ -287,3 +287,9 @@ extern "C" fn next_run(t: *mut Tests, ms: f64) -> u32 {
         })
     })
 }
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    live::reset_statics();
+    reach::reset_statics();
+}

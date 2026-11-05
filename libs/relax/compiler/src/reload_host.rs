@@ -493,6 +493,7 @@ pub(super) fn request(why: String, paths: Vec<String>) -> Result<(), String> {
 }
 
 fn fail(message: String) {
+    let _at_the_run = crate::run_threads::process_work();
     let asked = RESTART_AFTER_BUILD.swap(false, std::sync::atomic::Ordering::SeqCst);
     eprintln!("makepad live: {message}");
     super::note_restart_pending(&message);
@@ -733,6 +734,7 @@ fn build_loop() {
             Err(e) => return fail(format!("the rebuilt makepad does not start: {e}; the app runs the previous code")),
         }
         let secs = t0.elapsed().as_secs_f64();
+        let at_the_run = crate::run_threads::process_work();
         // the same binary as this process runs: the change did not reach makepad (a no-op
         // build), so there is nothing to restart into
         if STATE.lock().unwrap_or_else(|e| e.into_inner()).provided.is_none()
@@ -781,6 +783,7 @@ fn build_loop() {
             return;
         }
         eprintln!("makepad live: makepad rebuilt in {secs:.0} s; applying the requested restart");
+        drop(at_the_run);
         if let Err(e) = apply_ready(reason) { fail(e); }
         return;
     }
@@ -945,4 +948,10 @@ mod tests {
             assert_eq!(cargo_line(other), CargoLine::Other, "{other}");
         }
     }
+}
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    use relax_session::reset_static as reset;
+    reset(&DOT, Mutex::new(None));
 }

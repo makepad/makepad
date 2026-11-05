@@ -67,6 +67,9 @@ pub struct MacroDef {
     /// identifiers resolve local variables there (definition-site hygiene)
     pub def_file: String,
     pub def_pos: u32,
+    /// Authored invocation position for generated definitions. Keep def_pos for
+    /// definition-site hygiene, but order textual scope at the invocation.
+    pub scope_pos: Option<u32>,
     /// the module (path as `module_path!` prints it) the `macro_rules!` is written in; empty:
     /// unknown (made by an expansion, a built-in), visible wherever the crate is
     pub def_mod: String,
@@ -96,6 +99,12 @@ pub type MacroRef = std::sync::Arc<MacroDef>;
 /// The crate name of a macro-table crate key (`<name>\u{1}lib`: a lib shadowed by its bin).
 fn krate_name(k: &str) -> &str {
     k.split('\u{1}').next().unwrap_or(k)
+}
+
+/// Only a resolved crate can extend the extern prelude. Raw macro input may
+/// mention unavailable crates whose tokens never become Rust declarations.
+pub(crate) fn extern_target(externs: &HashMap<String, String>, name: &str) -> Option<String> {
+    externs.get(name).cloned().or_else(|| matches!(name, "std" | "core" | "alloc").then(|| name.to_string()))
 }
 
 /// `#[macro_export(local_inner_macros)]`: every single-segment macro call in the bodies is
@@ -224,8 +233,7 @@ impl CrateMods {
                 if u.path.len() == 1 && u.path[0] == "crate" {
                     self.externs.insert(b.clone(), self.root.clone());
                 } else if u.path.len() == 2 && u.path[0].is_empty() {
-                    let target = self.externs.get(&u.path[1]).cloned().unwrap_or_else(|| u.path[1].clone());
-                    self.externs.insert(b.clone(), target);
+                    if let Some(target) = extern_target(&self.externs, &u.path[1]) { self.externs.insert(b.clone(), target); }
                 }
             }
         }
@@ -271,7 +279,7 @@ impl CrateMods {
     pub fn in_textual_scope(&self, d: &MacroDef, from: &str, at: Option<u32>) -> bool {
         if d.def_mod.is_empty() { return true; }
         let mut m = d.def_mod.as_str();
-        let mut e = d.def_pos;
+        let mut e = d.scope_pos.unwrap_or(d.def_pos);
         loop {
             if from == m {
                 return at.map_or(true, |a| a > e);
@@ -837,8 +845,7 @@ impl MacroTable {
                 if path.len() == 1 && path[0] == "crate" {
                     externs.insert(b.clone(), k.to_string());
                 } else if path.len() == 2 && path[0].is_empty() {
-                    let target = externs.get(&path[1]).cloned().unwrap_or_else(|| path[1].clone());
-                    externs.insert(b.clone(), target);
+                    if let Some(target) = extern_target(&externs, &path[1]) { externs.insert(b.clone(), target); }
                 }
             }
             if v.iter().any(|u| u.bind.as_deref() == Some(b.as_str()) && &u.path == path) {
@@ -935,6 +942,13 @@ fn lookup_in_t<S: AsRef<str>>(table: &MacroTable, local: &[MacroRef], name: &str
     if let Some(d) = all().find(|d| d.krate == cur && cm.map_or(true, |c| c.in_textual_scope(d, module, None))) {
         return Some(d.clone());
     }
+    lookup_after_textual(table, name, cur, module)
+}
+
+/// Resolve the remaining scopes after the parser has rejected closed textual definitions.
+fn lookup_after_textual(table: &MacroTable, name: &str, cur: &str, module: &str) -> Option<MacroRef> {
+    let r = Res { table };
+    let cm = table.crates.get(cur);
     // the module's imports (non-glob, then glob)
     if let Some(d) = r.macro_in(cur, module, name) {
         return Some(d);
@@ -942,7 +956,8 @@ fn lookup_in_t<S: AsRef<str>>(table: &MacroTable, local: &[MacroRef], name: &str
     if let Some(us) = table.macro_use.get(cur) {
         for u in us.iter().rev() {
             let u_key = cm.and_then(|c| c.externs.get(u.as_str())).map(|s| s.as_str()).unwrap_or(u.as_str());
-            if let Some(d) = r.exported(u_key, name) {
+            let (_, root) = r.crate_root(u_key);
+            if let Some(d) = r.exported_in(u_key, root, name, &mut Default::default()) {
                 return Some(d);
             }
         }
@@ -1000,6 +1015,32 @@ impl<'a> Res<'a> {
     /// `#[macro_export] macro_rules! name` of crate `k` (an item of its root).
     fn exported(&self, k: &str, name: &str) -> Option<MacroRef> {
         self.table.defs.get(name)?.iter().rev().find(|d| d.krate == krate_name(k) && d.exported).cloned()
+    }
+
+    /// `#[macro_use] extern crate` imports public root macro bindings, including re-exports.
+    /// Resolve their public import paths rather than exposing private root imports through
+    /// `macro_in`. A renamed export can change the queried name while traversing a cycle.
+    fn exported_in(&self, k: &str, m: &str, name: &str, seen: &mut crate::fxhash::HashSet<(String, String, String)>) -> Option<MacroRef> {
+        if !seen.insert((k.into(), m.into(), name.into())) { return None; }
+        if self.crate_root(k).1 == m {
+            if let Some(d) = self.exported(k, name) { return Some(d); }
+        }
+        let uses = self.table.crates.get(k)?.uses.get(m)?;
+        for u in uses.iter().filter(|u| u.is_pub && u.bind.as_deref() == Some(name)) {
+            if let Some(d) = self.exported_path(k, m, &u.path, seen) { return Some(d); }
+        }
+        for u in uses.iter().filter(|u| u.is_pub && u.bind.is_none()) {
+            let mut path = u.path.clone();
+            path.push(name.into());
+            if let Some(d) = self.exported_path(k, m, &path, seen) { return Some(d); }
+        }
+        None
+    }
+
+    fn exported_path(&self, k: &str, m: &str, path: &[String], seen: &mut crate::fxhash::HashSet<(String, String, String)>) -> Option<MacroRef> {
+        let (name, prefix) = path.split_last()?;
+        let (k, m) = if prefix.is_empty() { (k, m) } else { self.resolve_mod(k, m, prefix)? };
+        self.exported_in(k, m, name, seen)
     }
 
     fn std_prelude(&self, name: &str) -> Option<MacroRef> {
@@ -1546,9 +1587,9 @@ impl MacroScope {
         MacroScope { table, local: Vec::new(), looked: Default::default(), local_uses: Default::default(), uses_base: Default::default(), uses_log: Default::default(), memo: Default::default(), forwarders: Default::default() }
     }
 
-    pub(crate) fn define_tokens(&mut self, name: &str, krate: &str, edition: u16, file: &str, module: &str, pos: u32, exported: bool, local_inner: bool, tokens: &[MTok]) -> Result<(), String> {
+    pub(crate) fn define_tokens(&mut self, name: &str, krate: &str, edition: u16, file: &str, module: &str, pos: u32, scope_pos: Option<u32>, exported: bool, local_inner: bool, tokens: &[MTok]) -> Result<(), String> {
         let same = self.table.defs.get(name).into_iter().flatten().rev().chain(self.local.iter().rev()).find(|d| {
-            d.name == name && d.krate == krate && d.def_file == file && d.def_pos == pos && d.exported == exported && d.builtin == 0
+            d.name == name && d.krate == krate && d.edition == edition && d.def_file == file && d.def_pos == pos && d.scope_pos == scope_pos && d.exported == exported && d.builtin == 0
                 && d.input.as_ref().is_some_and(|input| input.local_inner == local_inner && input.tokens == tokens)
         }).cloned();
         if let Some(d) = same {
@@ -1561,6 +1602,7 @@ impl MacroScope {
             if local_inner { local_inner_macros(&mut d); }
             d.def_file = file.into();
             d.def_pos = pos;
+            d.scope_pos = scope_pos;
             d.def_mod = module.into();
             self.define(d);
         }
@@ -1582,7 +1624,7 @@ impl MacroScope {
     pub fn define(&mut self, d: MacroDef) {
         uses::defined(&d);
         let same = self.table.defs.get(&d.name).and_then(|v| {
-            v.iter().rev().find(|x| x.krate == d.krate && x.exported == d.exported && x.builtin == d.builtin && x.arms == d.arms && x.def_file == d.def_file && x.def_pos == d.def_pos).cloned()
+            v.iter().rev().find(|x| x.krate == d.krate && x.exported == d.exported && x.edition == d.edition && x.builtin == d.builtin && x.arms == d.arms && x.def_file == d.def_file && x.def_pos == d.def_pos && x.scope_pos == d.scope_pos && x.def_mod == d.def_mod).cloned()
         });
         self.local.push(same.unwrap_or_else(|| std::sync::Arc::new(d)));
         *self.memo.get_mut() = LookupMemo::default();
@@ -1655,54 +1697,137 @@ impl MacroScope {
         self.resolve(names.id(name), names.id(cur), &path, names.id(module), true)
     }
 
+    /// The parser owns block positions; after excluding every textual candidate it must
+    /// continue through imports and both preludes, rather than retain the closed definition.
+    pub(crate) fn lookup_after_textual(&self, name: &str, cur: &str, module: &str) -> Option<MacroRef> {
+        lookup_after_textual(&self.table, name, cur, module).or_else(|| {
+            let names = &*self.table.names;
+            let mut memo = self.memo.borrow_mut();
+            let mut inputs = LookupInputs::new(&self.table);
+            self.lookup_via_local_use(names.id(name), names.id(cur), &[], names.id(module), &mut memo, &mut inputs)
+        })
+    }
+
     /// An explicit binding, or an attribute exported through a glob. The outer Option keeps
     /// an explicit import of the builtin from falling through to an outer scope's proc macro.
-    pub(crate) fn attr_import(&self, cur: &str, module: &str, uses: &[UseItem], name: &str) -> Option<Option<crate::macro_reg::Entry>> {
+    pub(crate) fn proc_macro_import(&self, cur: &str, module: &str, uses: &[UseItem], name: &str, kind: crate::macro_reg::Kind) -> Option<Option<crate::macro_reg::Entry>> {
         let mut seen = crate::fxhash::HashSet::default();
-        if let Some(u) = uses.iter().find(|u| u.bind.as_deref() == Some(name)) {
-            return Some(self.attr_path(cur, module, &u.path, &mut seen));
+        let mut explicit = false;
+        for u in uses.iter().filter(|u| u.bind.as_deref() == Some(name)) {
+            explicit = true;
+            if let Some(entry) = self.proc_macro_path(cur, module, &u.path, kind, &mut seen) { return Some(Some(entry)); }
         }
-        // a glob that brings the name conflicts with the prelude's builtin: rustc reports E0659
-        // (rustc_resolve ident.rs: AmbiguityKind::GlobVsOuter for macros). The builtin is kept
-        // (a check gap, not a choice of the macro)
+        if explicit { return Some(None); }
+        // A glob conflicts with a same-named prelude builtin (rustc_resolve ident.rs:
+        // AmbiguityKind::GlobVsOuter). Keep that builtin for now (a check gap), but a
+        // hosted macro with no builtin competitor is imported normally.
+        let builtin = match kind {
+            crate::macro_reg::Kind::Derive => crate::parser::derive::trait_path(name).is_some(),
+            crate::macro_reg::Kind::Attr => matches!(name, "test" | "bench" | "test_case"),
+            crate::macro_reg::Kind::Bang => false,
+        };
         for u in uses.iter().filter(|u| u.bind.is_none()) {
             let mut path = u.path.clone();
             path.push(name.into());
-            if self.attr_path(cur, module, &path, &mut seen).is_some() { return Some(None); }
+            if let Some(entry) = self.proc_macro_path(cur, module, &path, kind, &mut seen) { return Some(if builtin { None } else { Some(entry) }); }
         }
         None
     }
 
-    fn attr_path(&self, cur: &str, module: &str, path: &[String], seen: &mut crate::fxhash::HashSet<(String, String, String)>) -> Option<crate::macro_reg::Entry> {
+    pub(crate) fn attr_path(&self, cur: &str, module: &str, path: &[String], seen: &mut crate::fxhash::HashSet<(String, String, String)>) -> Option<crate::macro_reg::Entry> {
+        self.proc_macro_path(cur, module, path, crate::macro_reg::Kind::Attr, seen)
+    }
+
+    pub(crate) fn proc_macro_path(&self, cur: &str, module: &str, path: &[String], kind: crate::macro_reg::Kind, seen: &mut crate::fxhash::HashSet<(String, String, String)>) -> Option<crate::macro_reg::Entry> {
         let (name, prefix) = path.split_last()?;
         let r = Res { table: &self.table };
         let (k, m) = if prefix.is_empty() { (cur, module) } else { r.resolve_mod(cur, module, prefix)? };
-        self.attr_in(k, m, name, k != cur, seen)
+        self.proc_macro_in(k, m, name, kind, k != cur, seen)
     }
 
-    fn attr_in(&self, k: &str, m: &str, name: &str, public: bool, seen: &mut crate::fxhash::HashSet<(String, String, String)>) -> Option<crate::macro_reg::Entry> {
+    /// Follow standard macro re-exports as well as re-exported library modules.
+    pub(crate) fn builtin_macro_path(&self, cur: &str, module: &str, path: &[String], seen: &mut crate::fxhash::HashSet<(String, String, String)>) -> Option<String> {
+        let (name, prefix) = path.split_last()?;
+        let r = Res { table: &self.table };
+        let (k, m) = if prefix.is_empty() { (cur, module) } else { r.resolve_mod(cur, module, prefix)? };
+        if !seen.insert((k.into(), m.into(), name.clone())) { return None; }
+        // std's `dbg!` is expanded with the format macros, not listed in BUILTIN_MACROS
+        if matches!(k, "core" | "std" | "alloc") && m == k && (crate::program::BUILTIN_MACROS.contains(&name.as_str()) || (k == "std" && name == "dbg")) {
+            return Some(name.clone());
+        }
+        let uses = self.table.crates.get(k)?.uses.get(m)?;
+        for u in uses.iter().filter(|u| (k == cur || u.is_pub) && u.bind.as_deref() == Some(name)) {
+            if let Some(name) = self.builtin_macro_path(k, m, &u.path, seen) { return Some(name); }
+        }
+        uses.iter().filter(|u| (k == cur || u.is_pub) && u.bind.is_none()).find_map(|u| {
+            let mut path = u.path.clone();
+            path.push(name.clone());
+            self.builtin_macro_path(k, m, &path, seen)
+        })
+    }
+
+    /// core's test attribute macros live in each edition's prelude. Resolve the
+    /// container first so module aliases work and a local `core` cannot impersonate it.
+    pub(crate) fn builtin_test_path(&self, cur: &str, module: &str, path: &[String]) -> bool {
+        let Some((name, prefix)) = path.split_last() else { return false; };
+        if !matches!(name.as_str(), "test" | "bench" | "test_case") { return false; }
+        let r = Res { table: &self.table };
+        let Some((k, m)) = r.resolve_mod(cur, module, prefix) else { return false; };
+        matches!(k, "core" | "std") && m.strip_prefix(k).is_some_and(|m| matches!(m,
+            "::prelude::v1" | "::prelude::rust_2015" | "::prelude::rust_2018" | "::prelude::rust_2021" | "::prelude::rust_2024"))
+    }
+
+    /// Compiler derives are exported by core and re-exported alongside their traits.
+    /// Resolve the container and re-exports before recognizing the builtin spelling.
+    pub(crate) fn builtin_derive_path(&self, cur: &str, module: &str, path: &[String], seen: &mut crate::fxhash::HashSet<(String, String, String)>) -> bool {
+        let Some((name, prefix)) = path.split_last() else { return false; };
+        let r = Res { table: &self.table };
+        let is_builtin = |k: &str, suffix: &str| {
+            if !matches!(k, "core" | "std") { return false; }
+            let Some(trait_path) = crate::parser::derive::trait_path(name) else { return false; };
+            let container = trait_path.rsplit_once("::").map(|(m, _)| m).unwrap_or("");
+            suffix.is_empty() || suffix == container || matches!(suffix,
+                "prelude::v1" | "prelude::rust_2015" | "prelude::rust_2018" | "prelude::rust_2021" | "prelude::rust_2024")
+        };
+        let Some((k, m)) = (if prefix.is_empty() { Some((cur, module)) } else { r.resolve_mod(cur, module, prefix) }) else { return false; };
+        if !seen.insert((k.into(), m.into(), name.clone())) { return false; }
+        if is_builtin(k, m.strip_prefix(k).unwrap_or(m).trim_start_matches("::")) { return true; }
+        let Some(uses) = self.table.crates.get(k).and_then(|c| c.uses.get(m)) else { return false; };
+        for u in uses.iter().filter(|u| (k == cur || u.is_pub) && u.bind.as_deref() == Some(name)) {
+            if self.builtin_derive_path(k, m, &u.path, seen) { return true; }
+        }
+        uses.iter().filter(|u| (k == cur || u.is_pub) && u.bind.is_none()).any(|u| {
+            let mut path = u.path.clone();
+            path.push(name.clone());
+            self.builtin_derive_path(k, m, &path, seen)
+        })
+    }
+
+    fn proc_macro_in(&self, k: &str, m: &str, name: &str, kind: crate::macro_reg::Kind, public: bool, seen: &mut crate::fxhash::HashSet<(String, String, String)>) -> Option<crate::macro_reg::Entry> {
         if !seen.insert((k.into(), m.into(), name.into())) { return None; }
         let r = Res { table: &self.table };
         if r.crate_root(k).1 == m {
-            if let Some(e) = crate::macro_reg::exported_attr(krate_name(k), name) { return Some(e); }
+            if let Some(e) = crate::macro_reg::exported_proc_macro(krate_name(k), name, kind) { return Some(e); }
         }
         let uses = self.table.crates.get(k)?.uses.get(m)?;
-        if let Some(u) = uses.iter().find(|u| (!public || u.is_pub) && u.bind.as_deref() == Some(name)) {
-            return self.attr_path(k, m, &u.path, seen);
+        for u in uses.iter().filter(|u| (!public || u.is_pub) && u.bind.as_deref() == Some(name)) {
+            // Same-spelling imports in other namespaces cannot hide either an
+            // explicit or glob-imported macro. Try every binding in this namespace.
+            if let Some(entry) = self.proc_macro_path(k, m, &u.path, kind, seen) { return Some(entry); }
         }
         for u in uses.iter().filter(|u| (!public || u.is_pub) && u.bind.is_none()) {
             let mut path = u.path.clone();
             path.push(name.into());
-            if let Some(e) = self.attr_path(k, m, &path, seen) { return Some(e); }
+            if let Some(e) = self.proc_macro_path(k, m, &path, kind, seen) { return Some(e); }
         }
         None
     }
 
-    pub(crate) fn attr_macro_use(&self, cur: &str, name: &str) -> Option<crate::macro_reg::Entry> {
+    pub(crate) fn proc_macro_use(&self, cur: &str, name: &str, kind: crate::macro_reg::Kind) -> Option<crate::macro_reg::Entry> {
         let r = Res { table: &self.table };
         for dep in self.table.macro_use.get(cur)?.iter().rev() {
             let Some((k, m)) = r.extern_crate(cur, dep) else { continue };
-            if let Some(e) = self.attr_in(k, m, name, true, &mut Default::default()) { return Some(e); }
+            if let Some(e) = self.proc_macro_in(k, m, name, kind, true, &mut Default::default()) { return Some(e); }
         }
         None
     }
@@ -2178,7 +2303,7 @@ fn expansion_hash(d: &MacroDef) -> u128 {
     }
     let mut h = crate::sip::Sip128::new();
     h.str("macro-expansion");
-    h.str(&d.name); h.str(&d.krate); h.u32(d.builtin as u32);
+    h.str(&d.name); h.str(&d.krate); h.u32(d.builtin as u32); h.u32(d.edition as u32);
     h.u32(d.arms.len() as u32);
     for (a, b) in &d.arms { m(&mut h, a); t(&mut h, b); }
     h.finish128()
@@ -2217,7 +2342,7 @@ fn same_expansion(a: &MacroDef, b: &MacroDef) -> bool {
                 _ => false,
             })
     }
-    a.name == b.name && a.krate == b.krate && a.builtin == b.builtin && a.arms.len() == b.arms.len() && a.arms.iter().zip(&b.arms).all(|(x, y)| m(&x.0, &y.0) && t(&x.1, &y.1))
+    a.name == b.name && a.krate == b.krate && a.builtin == b.builtin && a.edition == b.edition && a.arms.len() == b.arms.len() && a.arms.iter().zip(&b.arms).all(|(x, y)| m(&x.0, &y.0) && t(&x.1, &y.1))
 }
 
 
@@ -2380,6 +2505,23 @@ pub mod uses {
     /// The recorded definitions and uses (file, definition position, rule or `RESOLVED`).
     pub fn take() -> (Vec<Defined>, HashSet<(String, u32, u32)>) {
         (std::mem::take(&mut *DEFS.lock().unwrap_or_else(|e| e.into_inner())), USED.lock().unwrap_or_else(|e| e.into_inner()).take().unwrap_or_default())
+    }
+
+    /// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+    pub(crate) unsafe fn reset_statics() {
+        use relax_session::reset_static as reset;
+        reset(&ON, AtomicBool::new(false));
+        reset(&DEFS, Mutex::new(Vec::new()));
+        reset(&USED, Mutex::new(None));
+        reset(&SYNTH, Mutex::new(None));
+        reset(&ABS_PATH_MACRO_CALLS, Mutex::new(Vec::new()));
+        reset(&PLAIN_MACRO_CALLS, Mutex::new(Vec::new()));
+        reset(&NAMED_POSITIONAL, Mutex::new(Vec::new()));
+        reset(&INCOMPLETE_INCLUDE, Mutex::new(Vec::new()));
+        reset(&VARARGS_WITHOUT_PATTERN, Mutex::new(Vec::new()));
+        reset(&MAC_CALL_ATTRS, Mutex::new(Vec::new()));
+        reset(&CFG_ATTR_EMPTY, Mutex::new(Vec::new()));
+        reset(&SEMIS, Mutex::new(Vec::new()));
     }
 }
 
@@ -2590,7 +2732,7 @@ pub fn parse_def(name: &str, krate: &str, edition: u16, toks: &[MTok]) -> Result
         i = bc + 1;
         arms.push((matcher, body));
     }
-    Ok(MacroDef { name: name.to_string(), krate: krate.to_string(), exported: false, arms, builtin: 0, def_file: String::new(), def_pos: 0, def_mod: String::new(),
+    Ok(MacroDef { name: name.to_string(), krate: krate.to_string(), exported: false, arms, builtin: 0, def_file: String::new(), def_pos: 0, scope_pos: None, def_mod: String::new(),
         edition: expansion_edition(krate, edition), input: Some(std::sync::Arc::new(RuleInput { tokens: toks.to_vec(), local_inner: false })) })
 }
 
@@ -2940,7 +3082,10 @@ impl<'a> Parser<'a> {
                     *i += 1;
                 }
                 MNode::Group(open, _, inner) => {
-                    if *i >= end || self.toks.at(*i).kind != open.kind {
+                    // rustc_expand mbe/macro_parser.rs: an interpolated expression
+                    // is an opaque nonterminal, not a written parenthesis group.
+                    if *i >= end || self.toks.at(*i).kind != open.kind
+                        || self.synth_parens.contains(&{ self.toks.at(*i).lo }) {
                         return false;
                     }
                     let c = match self.tok_close_of(*i, end) {
@@ -3039,6 +3184,13 @@ impl<'a> Parser<'a> {
                         let mut groups = Vec::new();
                         for k in *lo..*hi {
                             let t = self.toks.at(k);
+                            // A forwarded outer fragment must retain the invisible
+                            // expression groups nested inside it. Their synthetic
+                            // parentheses have no ordinary frag_groups entry.
+                            if self.synth_parens.contains(&{ t.lo }) {
+                                let at = out.s.len() as u32 + 1;
+                                out.groups.push((at, at | WRAP_PAREN | META_ONLY));
+                            }
                             // rustc_expand mbe/transcribe.rs: transcribe_pnr preserves
                             // invisible groups inside every captured fragment, including
                             // a path inside a type-macro call subsequently matched as tt.
@@ -3433,4 +3585,11 @@ mod replay_tests {
         let s1 = def("c::m::sib", 32);
         assert!(!cm.in_textual_scope(&s1, "c::m", None) && !cm.in_textual_scope(&s1, "c", None));
     }
+}
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    use relax_session::reset_static as reset;
+    uses::reset_statics();
+    reset(&SCOPE_NS, std::sync::atomic::AtomicU64::new(0));
 }

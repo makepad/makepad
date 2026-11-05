@@ -116,6 +116,10 @@ impl EvalCtxt<'_, '_> {
         let sig = self.delegate.instantiate_binder_with_infer(sig);
         let TyKind::FnPtr(params, output, _, _) = tcx.tys.kind(sig).clone() else { unreachable!() };
         self.eq_args(env, &tr.args, &[GenericArg::Type(ty), GenericArg::Type(tcx.tys.intern(TyKind::Tuple(params)))])?;
+        // Input projections can constrain the signature's late-bound regions.
+        // Resolve them before normalizing an opaque output for Sized, otherwise
+        // each retry registers a new hidden type under an unconstrained region.
+        self.try_evaluate_added_goals()?;
         if let Some(sized) = tcx.lang_items.get(LangItem::Sized) { self.add_trait_goal(env, sized, output)?; }
         if let GoalKind::NormalizesTo(p) = goal { self.instantiate_normalizes_to_term(env, p, Term::Ty(output))?; }
         self.evaluate_added_goals_and_make_canonical_response(Certainty::Yes)

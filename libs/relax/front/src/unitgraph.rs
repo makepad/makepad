@@ -194,7 +194,7 @@ pub fn load(g: &Units, check_all_bins: bool) -> Result<Graph, String> {
         if let Some(i) = crate_paths.iter().position(|p| *p == norm) {
             map[ui] = i;
             if u.host {
-                crates[i].host = Some(HostUnit { features, deps: udeps });
+                crates[i].host = Some(HostUnit { features, deps: udeps, build_outputs: None });
             }
             if is_root_bin || (root == usize::MAX && roots.contains(&ui)) { root = i; }
             continue;
@@ -549,6 +549,18 @@ pub fn run_build_scripts(sess: &std::sync::Arc<crate::Session>, g: &mut Graph, t
         for n in built.scripts {
             let also = g.build_scripts.iter().find(|b| b.krate == n.krate).map(|b| b.also.clone()).unwrap_or_default();
             for &k in std::iter::once(&n.krate).chain(&also) {
+                if n.host {
+                    if g.crates[k].host.is_some() {
+                        let (dir, name, ver) = &g.pkg[k];
+                        let mut env = pkg_env(dir, name, ver);
+                        env.push(("CARGO_CRATE_NAME".into(), g.crates[k].name.clone()));
+                        env.extend(n.env.iter().cloned());
+                        env.push(("OUT_DIR".into(), n.out_dir.clone()));
+                        // Keep host-feature cfgs out of the application crate.
+                        g.crates[k].host.as_mut().unwrap().build_outputs = Some((n.cfgs.clone(), env));
+                    }
+                    continue;
+                }
                 g.cfgs[k].extend(n.cfgs.iter().cloned());
                 g.env[k].extend(n.env.iter().cloned());
                 g.env[k].push(("OUT_DIR".to_string(), n.out_dir.clone()));
@@ -1227,16 +1239,20 @@ fn platform_answer(sess: &std::sync::Arc<crate::Session>, out_dir: &str) -> Resu
 #[cfg(test)]
 mod platform_script_tests {
     use super::platform_gen;
-    use std::path::Path;
     use std::process::Command;
 
     /// platform/build.rs, compiled and run for real, writes the bytes `makepad run` answers with
     /// natively (both call platform/build_gen.rs): app_meta_gen.rs, app_icon_gen.rs and the cfg lines.
+    /// The script is this crate's build input, not a file read beside its sources: under the JIT
+    /// those are a virtual tree, and rustc, another process, reads only files on disk.
     #[test]
     fn native_answer_is_byte_identical_to_the_build_script() {
-        let platform = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../platform");
         let tmp = std::env::temp_dir().join(format!("relax-platform-script-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
+        let platform = tmp.join("platform");
+        std::fs::create_dir_all(&platform).unwrap();
+        std::fs::write(platform.join("build.rs"), include_str!("../../../../platform/build.rs")).unwrap();
+        std::fs::write(platform.join("build_gen.rs"), include_str!("../../../../platform/build_gen.rs")).unwrap();
         let root = tmp.join("some app");
         std::fs::create_dir_all(root.join("resources")).unwrap();
         std::fs::write(root.join("resources/icon_64.png"), b"png").unwrap();
@@ -1263,4 +1279,11 @@ mod platform_script_tests {
         assert!(platform_gen::app_icon_gen(&out).source.contains("icon_64.png"));
         let _ = std::fs::remove_dir_all(&tmp);
     }
+}
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    use relax_session::reset_static as reset;
+    reset(&TO_REMOVE, Mutex::new(Vec::new()));
+    reset(&SCRIPT_RUNNING, Mutex::new(0));
 }

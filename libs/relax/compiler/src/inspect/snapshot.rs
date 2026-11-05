@@ -44,7 +44,7 @@ fn start(f: impl FnOnce() -> String + Send + 'static) -> (Receiver<String>, Inst
     let (tx, rx) = mpsc::channel();
     let error = tx.clone();
     let at = Instant::now();
-    if let Err(e) = std::thread::Builder::new().name("run-capture".into()).spawn(move || {
+    if let Err(e) = crate::run_threads::spawn("run-capture", move || {
         let _kept = crate::zone_alloc::kept();
         super::server_thread_enter();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))

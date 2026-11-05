@@ -5,7 +5,8 @@ A gate checks and presents what the diff reaches (user 2026-10-30, landing desig
 a change inside one app gates that app. The SMOKE apps all go when the diff reaches
 the JIT itself (makepad-run's dependencies) or a workspace-wide input; the other
 GATE_PACKAGES are checked when the diff reaches them, along with every changed
-package with a lib or bin target. A diff that reaches no gate package gates
+package with a lib or bin target. A diff that reaches the JIT checks JIT_CHECKS too, whatever
+uses the changed crates. A diff that reaches no gate package gates
 Calculator, the one canary; a diff only in devhub's own crate gates
 its build alone. The other repo's crates that use a changed crate get a `cargo` line each: the
 gate checks them all in one cargo check. Prints `jit yes|no`: whether the diff touches what the JIT binary
@@ -14,6 +15,9 @@ is built from; `devhub yes|no`: whether it touches devhub's own binary. A `check
 GATE_RETRY (units joined by `;`, from the hub's ledger) names what failed earlier and has not passed
 since: selected whatever the diff reaches, as a diff that never reaches it says nothing about it. A
 `gone <unit>` line: its package left the tree. A `suite <package>` line: a JIT suite failing since.
+A `tests <package> <dir>` line: a package whose test targets the diff reaches, the changed packages
+and every package that uses one (a dev-dependency too), in both repos: the gate type-checks them in
+one `cargo check --tests` ([`tested`]). `--tests` prints only those lines, in any cargo workspace.
 """
 import json
 import os
@@ -27,6 +31,11 @@ SMOKE = ("makepad-stage", "makepad-scope", "makepad-sandbox", "makepad-fab", "ma
 # smoke app does (its boot, the Android HAL paths): a change in any of them checks it on that
 # landing, not on the next one that happens to check it (11-03)
 GATE_PACKAGES = SMOKE + ("makepad-example-counter", "makepad-platform", "makepad-draw", "makepad-widgets", "makepad-run-android")
+# checked too when the diff reaches the JIT itself: a JIT change reaches every package the JIT checks or runs,
+# not its Rust dependents alone, and a smoke app's check covers only the app's own crates. A resolver change in
+# relax-compiler broke makepad-widgets-core's check, and the bucket ran that check two landings later (11-05).
+# A fixed set that stands for the rest (the smoke set's commercial apps for a commercial app)
+JIT_CHECKS = ("makepad-widgets-core", "makepad-platform", "makepad-draw", "makepad-example-counter", "makepad-story-web-export")
 CALC = "makepad-app-calculator"
 # the JIT binary; devhub's binary
 JIT_PACKAGE = "makepad-run"
@@ -86,9 +95,30 @@ def closure(start, edges):
     return seen
 
 
-def main():
-    root = Path.cwd().resolve()
-    base, cbase = sys.argv[1:3]
+def tested(packages, members, touched, retry):
+    """The packages whose test targets the diff reaches: the changed ones, those that use them
+    (normal and build edges, as `affected` follows), and those whose tests use one of these (a
+    dev-dependency reaches a package's tests, not its users), with a test target each, of the
+    root workspace (`members`: cargo tests no package outside it). No check
+    compiles a `#[cfg(test)]` body: two landings that merged cleanly broke makepad-fab's tests, one
+    adding a test that called `build_preview` with an argument the other took away, and every
+    bucket said ok (11-05). Sorted (name, dir) pairs."""
+    reverse, dev = {}, {}
+    for directory, pkg in packages.items():
+        for dep in pkg["dependencies"]:
+            if dep.get("path"):
+                (dev if dep["kind"] == "dev" else reverse).setdefault(Path(dep["path"]).resolve(), set()).add(directory)
+    reached = closure(touched, reverse)
+    reached |= {user for d in reached for user in dev.get(d, ())}
+    has_tests = {d for d in members if any(t.get("test", True) for t in packages[d]["targets"])}
+    names = {packages[d]["name"] for d in reached & has_tests}
+    by_name = {p["name"]: d for d, p in packages.items()}
+    names |= {words[1] for words in retry if words[0] == "tests" and by_name.get(words[1]) in has_tests}
+    return sorted((name, by_name[name]) for name in names)
+
+
+def changed(root, base, cbase):
+    """The paths the diff changed, both repos (commercial ones under apps/commercial/)."""
     # --no-renames includes both the removed and added path; NUL keeps spaces safe.
     files = [p for p in git(root, "diff", "--no-renames", "--name-only", "-z", base, "HEAD").split("\0") if p]
     commercial = root / "apps/commercial"
@@ -96,23 +126,64 @@ def main():
         if not (commercial / ".git").exists():
             raise RuntimeError("commercial base supplied but checkout is missing")
         files += ["apps/commercial/" + p for p in git(commercial, "diff", "--no-renames", "--name-only", "-z", cbase, "HEAD").split("\0") if p]
+    return files
+
+
+def owners(root, packages, files):
+    """The packages that hold the compiled paths of `files`: the gate's own scripts and docs
+    compile into nothing."""
+    def owner(path):
+        path = root / path
+        return next((parent for parent in (path.parent, *path.parents)
+                     if parent in packages), None)
+    compiled = [p for p in files if not p.startswith("tools/run/fixture/") and not p.endswith(".md")]
+    return compiled, {owner(path) for path in compiled} - {None}
+
+
+def retried():
+    """GATE_RETRY's units as word lists (a word that is no unit, `steps`, is the gate's own)."""
+    return [words for words in (unit.split() for unit in os.environ.get("GATE_RETRY", "").split(";")) if len(words) >= 2]
+
+
+def local(root, meta, packages):
+    """Adds the tree's own packages of one `cargo metadata` to `packages` (by directory); their
+    directories that are members of its workspace."""
+    members = set(meta["workspace_members"])
+    out = set()
+    for pkg in meta["packages"]:
+        directory = Path(pkg["manifest_path"]).resolve().parent
+        if pkg["source"] is None and root in directory.parents:
+            packages[directory] = pkg
+            if pkg["id"] in members:
+                out.add(directory)
+    return out
+
+
+def tests_only(root, base, cbase):
+    packages = {}
+    members = local(root, metadata(root / "Cargo.toml"), packages)
+    _, touched = owners(root, packages, changed(root, base, cbase))
+    for name, directory in tested(packages, members, touched, retried()):
+        print(f"tests {name} {directory.relative_to(root)}")
+
+
+def main():
+    root = Path.cwd().resolve()
+    if sys.argv[1] == "--tests":
+        return tests_only(root, *sys.argv[2:4])
+    base, cbase = sys.argv[1:3]
+    files = changed(root, base, cbase)
+    commercial = root / "apps/commercial"
 
     # Key by manifest directory, not Cargo package ID: separate workspaces can
     # assign different IDs to the same path dependency. Keep excluded path libs
     # too, so changes there propagate through the entire dependency chain.
     packages = {}
-
-    def load(manifest):
-        for pkg in metadata(manifest)["packages"]:
-            directory = Path(pkg["manifest_path"]).resolve().parent
-            if pkg["source"] is None and root in directory.parents:
-                packages[directory] = pkg
-
-    load(root / "Cargo.toml")
+    members = local(root, metadata(root / "Cargo.toml"), packages)
     # Older commercial tips keep Sandbox outside the enclosing workspace.
     sandbox = commercial / "sandbox/Cargo.toml"
     if sandbox.exists() and not any(p["name"] == "makepad-sandbox" for p in packages.values()):
-        load(sandbox)
+        local(root, metadata(sandbox), packages)
 
     reverse = {}
     for directory, pkg in packages.items():
@@ -122,19 +193,12 @@ def main():
             if dep.get("path") and dep["kind"] != "dev":
                 reverse.setdefault(Path(dep["path"]).resolve(), set()).add(directory)
 
-    def owner(path):
-        path = root / path
-        return next((parent for parent in (path.parent, *path.parents)
-                     if parent in packages), None)
-
-    # the gate's own scripts and docs compile into nothing
-    compiled = [p for p in files if not p.startswith("tools/run/fixture/") and not p.endswith(".md")]
-    touched = {owner(path) for path in compiled} - {None}
+    compiled, touched = owners(root, packages, files)
     affected = closure(touched, reverse)
     by_name = {p["name"]: d for d, p in packages.items()}
-    missing = [name for name in SMOKE if name not in by_name]
+    missing = [name for name in SMOKE + JIT_CHECKS if name not in by_name]
     if missing:
-        raise RuntimeError("smoke packages missing from metadata: " + " ".join(missing))
+        raise RuntimeError("smoke or JIT check packages missing from metadata: " + " ".join(missing))
 
     # What the JIT binary and devhub's are built from.
     forward = {}
@@ -147,8 +211,7 @@ def main():
     devhub_code = closure({devhub_dir}, forward) if devhub_dir else set()
     # Workspace-wide resolver/patch/profile inputs apply to every member.
     workspace = any(p in ("Cargo.toml", "Cargo.lock", ".cargo/config", ".cargo/config.toml") for p in compiled)
-    # (a word that is no unit, `steps`, is the gate's own)
-    retry = [words for words in (unit.split() for unit in os.environ.get("GATE_RETRY", "").split(";")) if len(words) >= 2]
+    retry = retried()
     gone = [words for words in retry if words[1] not in by_name or (words[0] == "present" and words[1] not in PRESENT_ARGS)]
     live = [words for words in retry if words not in gone]
     retry_presents = {words[1] for words in live if words[0] == "present"}
@@ -185,7 +248,7 @@ def main():
         affected.update(packages)
     selected = {name for name in GATE_PACKAGES if by_name.get(name) in affected}
     if workspace or touched & jit_code:
-        selected |= set(SMOKE)
+        selected |= set(SMOKE) | set(JIT_CHECKS)
     # devhub's crate alone reaches no app's code (the WM's and hub's links to it are not smoke apps)
     devhub_only = touched == {devhub_dir} and not workspace
     if not selected and not devhub_only:
@@ -302,7 +365,7 @@ def main():
     print("jit " + ("yes" if workspace or touched & jit_code else "no"))
     print("devhub " + ("yes" if workspace or touched & devhub_code or retry_devhub else "no"))
     print_retried()
-    for name in GATE_PACKAGES:
+    for name in GATE_PACKAGES + tuple(n for n in JIT_CHECKS if n not in GATE_PACKAGES):
         if name in selected:
             print(check_line(name))
     for name in sorted(set(also) - selected):
@@ -311,6 +374,8 @@ def main():
         print(f"check {name} {where(name)}")
     for name in sorted(other):
         print(f"cargo {name} {where(name)}")
+    for name, directory in tested(packages, members, touched, live):
+        print(f"tests {name} {directory.relative_to(root)}")
     for name in SMOKE:
         if name in PRESENT_ARGS and (name in selected or name in retry_presents):
             print(" ".join(["present", name, where(name), *PRESENT_ARGS[name]]))

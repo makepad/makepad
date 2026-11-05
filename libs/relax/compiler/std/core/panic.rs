@@ -121,3 +121,13 @@ impl<R, F: FnOnce() -> R> crate::ops::FnOnce<()> for AssertUnwindSafe<F> {
         (self.0)()
     }
 }
+
+impl<F: crate::future::Future> crate::future::Future for AssertUnwindSafe<F> {
+    type Output = F::Output;
+
+    fn poll(self: crate::pin::Pin<&mut Self>, cx: &mut crate::task::Context<'_>) -> crate::task::Poll<Self::Output> {
+        // SAFETY: pinning this wrapper pins its future. The
+        // projection neither moves the future nor exposes an unpinned borrow.
+        unsafe { self.map_unchecked_mut(|wrapper| &mut wrapper.0) }.poll(cx)
+    }
+}

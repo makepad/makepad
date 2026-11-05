@@ -68,7 +68,9 @@ fn be64(b: &[u8], o: usize) -> Option<u64> {
 
 pub(super) fn arch_of_cpu(cpu: u32) -> Option<Arch> {
     match cpu {
+        #[cfg(not(target_arch = "aarch64"))]
         0x0100_0007 => Some(Arch::X64),
+        #[cfg(target_arch = "aarch64")]
         0x0100_000c => Some(Arch::Arm64),
         _ => None,
     }
@@ -91,7 +93,9 @@ pub(super) fn fat_slice(b: &[u8], want: Arch) -> Option<(usize, usize)> {
 
 pub(super) fn parse_elf(b: &[u8]) -> Option<Elf> {
     let arch = match u16_at(b, 0x12)? {
+        #[cfg(not(target_arch = "aarch64"))]
         62 => Arch::X64,
+        #[cfg(target_arch = "aarch64")]
         183 => Arch::Arm64,
         _ => return None,
     };

@@ -74,6 +74,15 @@ pub struct Ready<T>(Option<T>);
 
 impl<T> Unpin for Ready<T> {}
 
+impl<T> Ready<T> {
+    pub fn into_inner(self) -> T {
+        match self.0 {
+            Some(value) => value,
+            None => panic!("`Ready` polled after completion"),
+        }
+    }
+}
+
 impl<T> Future for Ready<T> {
     type Output = T;
     fn poll(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<T> {

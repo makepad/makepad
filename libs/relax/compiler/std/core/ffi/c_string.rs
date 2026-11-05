@@ -22,6 +22,18 @@ pub struct CString {
 pub struct NulError(usize, Vec<u8>);
 
 #[derive(Clone, PartialEq, Eq, Debug)]
+pub struct FromVecWithNulError {
+    error_kind: FromVecWithNulErrorKind,
+    bytes: Vec<u8>,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+enum FromVecWithNulErrorKind {
+    InteriorNul(usize),
+    NotNulTerminated,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct IntoStringError {
     inner: CString,
     error: crate::str::Utf8Error,
@@ -44,6 +56,25 @@ impl CString {
     pub unsafe fn from_vec_unchecked(mut v: Vec<u8>) -> CString {
         v.reserve_exact(1);
         v.push(0);
+        CString { inner: v.into_boxed_slice() }
+    }
+
+    pub fn from_vec_with_nul(v: Vec<u8>) -> Result<CString, FromVecWithNulError> {
+        let mut i = 0;
+        while i < v.len() {
+            if v[i] == 0 {
+                if i + 1 == v.len() {
+                    return Ok(unsafe { CString::from_vec_with_nul_unchecked(v) });
+                }
+                return Err(FromVecWithNulError { error_kind: FromVecWithNulErrorKind::InteriorNul(i), bytes: v });
+            }
+            i += 1;
+        }
+        Err(FromVecWithNulError { error_kind: FromVecWithNulErrorKind::NotNulTerminated, bytes: v })
+    }
+
+    /// # Safety: `v` ends with one nul byte and has no interior nul.
+    pub unsafe fn from_vec_with_nul_unchecked(v: Vec<u8>) -> CString {
         CString { inner: v.into_boxed_slice() }
     }
 
@@ -175,6 +206,26 @@ impl fmt::Display for NulError {
 }
 
 impl crate::error::Error for NulError {}
+
+impl FromVecWithNulError {
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
+}
+
+impl fmt::Display for FromVecWithNulError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self.error_kind {
+            FromVecWithNulErrorKind::InteriorNul(position) => write!(f, "data provided contains an interior nul byte at pos {}", position),
+            FromVecWithNulErrorKind::NotNulTerminated => f.write_str("data provided is not nul terminated"),
+        }
+    }
+}
+
+impl crate::error::Error for FromVecWithNulError {}
 
 impl IntoStringError {
     pub fn into_cstring(self) -> CString {

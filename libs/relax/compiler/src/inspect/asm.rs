@@ -1618,12 +1618,15 @@ mod tests {
         assert_eq!(check_kind("core::option::unwrap_failed"), Some("unwrap"));
         assert_eq!(check_kind("alloc::vec::Vec::push"), None);
         // arm64: ret; udf (a noreturn call's end); then pool words
-        let words: [u32; 5] = [0xd65f03c0, 0x00000000, 0x00000000, 0x00000026, 0x00000000];
-        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
-        let mut v = dis::decode(Arch::Arm64, &bytes, 0x1000);
-        let dropped = trim_tail_data(&mut v);
-        assert_eq!(v.len(), 2, "{:?}", v.iter().map(|i| i.text()).collect::<Vec<_>>());
-        assert_eq!(dropped, 12);
+        #[cfg(target_arch = "aarch64")]
+        {
+            let words: [u32; 5] = [0xd65f03c0, 0x00000000, 0x00000000, 0x00000026, 0x00000000];
+            let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+            let mut v = dis::decode(Arch::Arm64, &bytes, 0x1000);
+            let dropped = trim_tail_data(&mut v);
+            assert_eq!(v.len(), 2, "{:?}", v.iter().map(|i| i.text()).collect::<Vec<_>>());
+            assert_eq!(dropped, 12);
+        }
     }
 
     #[test]

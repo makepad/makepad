@@ -225,7 +225,7 @@ fn place_all(u: &Unit) -> Result<HashMap<String, u64>, String> {
 
 /// The C name of an assembly symbol: Mach-O prefixes C names with `_` (dlsym, extern blocks and
 /// `#[no_mangle]` know them without it).
-fn c_name(n: &str) -> &str {
+pub(crate) fn c_name(n: &str) -> &str {
     if cfg!(target_vendor = "apple") {
         n.strip_prefix('_').unwrap_or(n)
     } else {
@@ -237,11 +237,13 @@ fn c_name(n: &str) -> &str {
 /// br x16; .quad target -- IP0, as AAPCS64 lets veneers use it).
 fn veneer(arch: Arch, b: &mut Vec<u8>, target: u64) {
     match arch {
+        #[cfg(not(target_arch = "aarch64"))]
         Arch::X64 => {
             b.extend_from_slice(&[0xff, 0x25, 0, 0, 0, 0]);
             b.extend_from_slice(&target.to_le_bytes());
             b.extend_from_slice(&[0xcc, 0xcc]);
         }
+        #[cfg(target_arch = "aarch64")]
         Arch::Arm64 => {
             b.extend_from_slice(&0x5800_0050u32.to_le_bytes());
             b.extend_from_slice(&0xd61f_0200u32.to_le_bytes());

@@ -513,3 +513,16 @@ pub unsafe fn remove_owner(up: *mut crate::jit::Unit, owner: Owner) -> usize {
     }
     ids.len()
 }
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    use relax_session::reset_static as reset;
+    reset(&SLOTS, Mutex::new(None));
+    reset(&INSTRUMENTED, std::sync::atomic::AtomicUsize::new(0));
+    reset(&ACTIVE, Mutex::new(Vec::new()));
+    reset(&WATCH, Mutex::new(Vec::new()));
+    reset(&WATCHING, std::sync::atomic::AtomicUsize::new(0));
+    reset(&INLINED_NEW, Mutex::new(Vec::new()));
+    reset(&REPLACED, Mutex::new(Vec::new()));
+    reset(&NOTES, Mutex::new(Vec::new()));
+}

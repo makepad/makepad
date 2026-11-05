@@ -152,3 +152,19 @@ mod tests {
         assert_eq!(o3_install(n), (2, 77));
     }
 }
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    use relax_session::reset_static as reset;
+    reset(&FNS, [ZERO32; ARMS]);
+    reset(&ARM_OF_CRATE, [UNSET8; CRATES]);
+    reset(&ARMS_OPEN, AtomicU32::new(0));
+    reset(&ARM_NAME, [NAME; ARMS]);
+    reset(&FILES_PARSED, AtomicU32::new(0));
+    reset(&LINES_PARSED, AtomicU64::new(0));
+    reset(&MAIN_AT_MS, AtomicU64::new(0));
+    reset(&O3_SUPERSEDED, AtomicU32::new(0));
+    reset(&SETTLE_END_MS, AtomicU64::new(0));
+    reset(&SETTLE_RSS_BEFORE_MB, AtomicU32::new(0));
+    reset(&SETTLE_RSS_AFTER_MB, AtomicU32::new(0));
+}

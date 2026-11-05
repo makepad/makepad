@@ -3654,3 +3654,25 @@ fn defs_of(i: &Inst, out: &mut Vec<VReg>) {
         Inst::VInsert(d, _, _, _) | Inst::Sel(d, _, _, _) | Inst::VX3(_, d, _, _, _) | Inst::VSel(d, _, _, _) | Inst::VFma(_, _, _, _, d, _, _, _) | Inst::FMulAdd(_, _, _, d, _, _, _) | Inst::AtomicCas(_, _, _, d, _, _, _) => out.push(*d),
     }
 }
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    use relax_session::reset_static as reset;
+    reset(&HIST, relax_session::sync::Mutex::new(Vec::new()));
+    reset(&HNAMES, relax_session::sync::Mutex::new(Vec::new()));
+    reset(&PAIRS, relax_session::sync::Mutex::new(Vec::new()));
+    reset(&COUNTS, [const { AtomicU64::new(0) }; 4]);
+    reset(&FUNCS, [const { AtomicPtr::new(std::ptr::null_mut()) }; POOL]);
+    reset(&NEXT, AtomicUsize::new(0));
+    reset(&COUNTERS, [const { AtomicPtr::new(std::ptr::null_mut()) }; POOL]);
+    reset(&TLS_GLUE, AtomicU64::new(0));
+    reset(&RESUME, AtomicU64::new(0));
+    reset(&SLOTS, AtomicUsize::new(0));
+    reset(&N_INTERP, AtomicU64::new(0));
+    reset(&N_REFUSED, AtomicU64::new(0));
+    reset(&N_WORDS, AtomicU64::new(0));
+    reset(&N_INSTS, AtomicU64::new(0));
+    reset(&LOWER_NS, AtomicU64::new(0));
+    reset(&NATIVE, [const { AtomicU64::new(0) }; 4]);
+    reset(&REFUSALS, relax_session::sync::Mutex::new(Vec::new()));
+}

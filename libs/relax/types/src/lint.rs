@@ -890,3 +890,11 @@ pub fn diagnostic_item(prog: &Program, d: DefId) -> Option<String> {
 pub fn is_diagnostic_item(prog: &Program, d: DefId, name: &str) -> bool {
     prog.name(d) == name && diagnostic_item(prog, d).as_deref() == Some(name)
 }
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    use relax_session::reset_static as reset;
+    reset(&FULFILLED, Mutex::new(Vec::new()));
+    reset(&ENABLED, AtomicBool::new(false));
+    reset(&SINK, Mutex::new(Vec::new()));
+}

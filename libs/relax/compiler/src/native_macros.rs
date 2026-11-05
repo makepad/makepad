@@ -348,3 +348,10 @@ mod tests {
         assert!(checked(&reg).is_ok());
     }
 }
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    use relax_session::reset_static as reset;
+    reset(&SOURCE_READS, std::sync::atomic::AtomicUsize::new(0));
+    reset(&GRAPH, std::sync::RwLock::new(None));
+}

@@ -9,6 +9,8 @@ pub use makepad_widgets;
 #[cfg(feature = "window")]
 use makepad_widgets::*;
 #[cfg(feature = "window")]
+mod swatch;
+#[cfg(feature = "window")]
 mod window;
 #[cfg(feature = "window")]
 use window::App;

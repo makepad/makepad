@@ -121,6 +121,7 @@ fn watch_app() -> f64 {
     let mut batch = false;
     loop {
         if let Some(ms) = APP_STARTED_MS.get() { return *ms; }
+        if crate::run_threads::ending() { return 0.0; }
         match MAIN_ENTERED_NS.get().filter(|_| !batch).map(|at| crate::jit::quiet_left(*at)) {
             None => std::thread::park(),
             Some(0) => {
@@ -141,10 +142,12 @@ pub(crate) fn arm(package: &str) {
     let _kept = crate::zone_alloc::kept();
     let state = if std::env::var("MAKEPAD_RUN_CACHE_STATE").as_deref() == Ok("warm") { "warm" } else { "cold" };
     let package = package.to_string();
-    if let Err(e) = std::thread::Builder::new().name("first-frame-watch".into()).spawn(move || {
+    if let Err(e) = crate::run_threads::spawn("first-frame-watch", move || {
         let _kept = crate::zone_alloc::kept();
         let _ = THREAD.set(std::thread::current());
+        crate::run_threads::on_end(|| if let Some(t) = THREAD.get() { t.unpark(); });
         let started = watch_app();
+        if crate::run_threads::ending() { return; }
         let (secs, basis) = deadline(&package, state);
         if !crate::run::silent() { eprintln!("makepad: first-frame timeout {secs} s ({basis})"); }
         watch(&package, state, started, secs, &basis);
@@ -179,7 +182,7 @@ pub(crate) fn window_opened() {
 pub(crate) fn arm_window(package: &str) {
     let _kept = crate::zone_alloc::kept();
     let package = package.to_string();
-    if let Err(e) = std::thread::Builder::new().name("boot-window-watch".into()).spawn(move || {
+    if let Err(e) = crate::run_threads::spawn("boot-window-watch", move || {
         let _kept = crate::zone_alloc::kept();
         let _ = WINDOW_THREAD.set(std::thread::current());
         watch_window(&package);
@@ -191,7 +194,7 @@ pub(crate) fn arm_window(package: &str) {
 
 fn watch_window(package: &str) {
     let (secs, basis) = loop {
-        if WINDOW_OPEN.load(Acquire) { return; }
+        if WINDOW_OPEN.load(Acquire) || crate::run_threads::ending() { return; }
         // a warm start that compiles most of its code fresh is judged as a cold one (`watch`)
         let state = if CACHE_STATE.load(Acquire) == 2 && !cold_like() { "warm" } else { "cold" };
         let (secs, basis) = deadline(package, state);
@@ -216,6 +219,7 @@ fn watch(package: &str, state: &str, started: f64, secs: u64, basis: &str) {
     let mut deadline_ms = started + secs as f64 * 1000.0;
     let mut wm = false;
     loop {
+        if crate::run_threads::ending() { return; }
         if let Some(ms) = snapshot::first_present_ms().filter(|ms| *ms <= deadline_ms) {
             let shell = snapshot::hal_shell();
             wm |= shell.as_ref().is_some_and(|s| s.get("backend").and_then(Value::as_str) == Some("wm"));
@@ -242,7 +246,7 @@ fn watch(package: &str, state: &str, started: f64, secs: u64, basis: &str) {
         }
         if left <= 0.0 { break; }
         if crate::jit::first_present_seen() {
-            std::thread::sleep(Duration::from_secs_f64((left / 1000.0).min(0.1)));
+            if !crate::run_threads::sleep(Duration::from_secs_f64((left / 1000.0).min(0.1))) { return; }
         } else {
             std::thread::park_timeout(Duration::from_secs_f64(left / 1000.0));
         }
@@ -281,4 +285,13 @@ fn persist(prefix: &str, outcome: Outcome, package: &str, reason: &str) {
 pub(crate) fn no_window(package: &str, reason: &str) {
     let _kept = crate::zone_alloc::kept();
     persist("nw", Outcome::NoWindow, package, reason);
+}
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    use relax_session::reset_static as reset;
+    reset(&THREAD, OnceLock::new());
+    reset(&MAIN_ENTERED_NS, OnceLock::new());
+    reset(&APP_STARTED_MS, OnceLock::new());
+    reset(&CACHE_STATE, AtomicU8::new(0));
 }

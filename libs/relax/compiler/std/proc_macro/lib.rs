@@ -70,11 +70,13 @@ impl Span {
     pub fn def_site() -> Span {
         Span::call_site()
     }
-    pub fn start(&self) -> LineColumn {
-        LineColumn { line: self.sl as usize, column: self.sc as usize }
+    /// A zero-width span immediately before this span, retaining its source context.
+    pub fn start(&self) -> Span {
+        Span { hi: self.lo, el: self.sl, ec: self.sc, ..*self }
     }
-    pub fn end(&self) -> LineColumn {
-        LineColumn { line: self.el as usize, column: self.ec as usize }
+    /// A zero-width span immediately after this span, retaining its source context.
+    pub fn end(&self) -> Span {
+        Span { lo: self.hi, sl: self.el, sc: self.ec, ..*self }
     }
     pub fn line(&self) -> usize {
         self.sl as usize

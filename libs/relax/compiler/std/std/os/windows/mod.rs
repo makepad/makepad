@@ -5,6 +5,7 @@ pub mod fs;
 pub mod io;
 pub mod process;
 pub mod raw;
+pub mod thread;
 pub mod prelude {
     pub use super::ffi::{OsStrExt, OsStringExt};
     pub use super::fs::{MetadataExt, OpenOptionsExt};

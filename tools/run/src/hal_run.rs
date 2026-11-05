@@ -37,6 +37,8 @@ enum Update {
     Relaunched,
     Compiler(run_state::Event),
     Domain(DomainState),
+    /// a run ended in place (`next_run`); `start_screen`: the window went to it for the restart
+    NextRun { start_screen: bool },
     /// a build that failed before the app started compiles again (retry)
     Begin,
     Failure(String),
@@ -461,6 +463,138 @@ fn panic_changed() {
     Hal::global().wake_session(HOST);
 }
 
+/// What compiles and starts the program: a run's, and the next run's in this process.
+static COMPILE: Mutex<Option<Box<dyn FnMut() -> i32 + Send>>> = Mutex::new(None);
+static COMPILE_THREAD: Mutex<Option<std::thread::JoinHandle<()>>> = Mutex::new(None);
+
+/// A run's compile thread: it boots and, for an app without the HAL, runs its main.
+fn start_compile_thread() {
+    // the handle (thread record, result packet) is joined at the end of the run, after the settle swap
+    // may have destroyed the compiler generation this frame runs in: it lives in the kept heap
+    let thread = relax_compiler::zone_alloc::kept_with(|| std::thread::Builder::new()
+        .name("run-compile".into())
+        .stack_size(8 << 20)
+        .spawn(|| {
+            // this thread boots and, for an app without the HAL, runs its main (what the loader's
+            // main thread did): a compiler phase, not a swap-quiesced compiler worker
+            let _compiler = relax_compiler::zone_alloc::compiler();
+            let mut compile = COMPILE.lock().unwrap_or_else(|e| e.into_inner()).take().expect("the run's compile");
+            compile_runs(&mut compile);
+            *COMPILE.lock().unwrap_or_else(|e| e.into_inner()) = Some(compile);
+        })
+        .expect("the compiler thread"));
+    *COMPILE_THREAD.lock().unwrap_or_else(|e| e.into_inner()) = Some(thread);
+}
+
+/// A run's threads have ended (`relax_compiler::run_end`): the ended app's session goes, with what it
+/// held of the GPU and its window back to this host. The window stays.
+pub fn end_app() {
+    let domain = {
+        let mut guard = state();
+        let Some(run) = guard.as_mut() else { return };
+        std::mem::replace(&mut run.domain, 0)
+    };
+    if domain != 0 {
+        Hal::global().report_domain(domain, makepad_hal::domain_state::EXITED, 0, 100.0, "restart");
+    }
+}
+
+/// A run ended in place (`relax_compiler::run_end`): the next one starts, in the same window.
+pub fn next_run() {
+    let thread = COMPILE_THREAD.lock().unwrap_or_else(|e| e.into_inner()).take();
+    if let Some(thread) = thread {
+        let _ = thread.join();
+    }
+    {
+        let mut guard = state();
+        let Some(run) = guard.as_mut() else { return };
+        run.spec = None;
+        run.initial_failed = false;
+        run.retry = false;
+    }
+    EXIT.store(0, Ordering::Release);
+    PANICS_CHANGED.store(false, Ordering::Release);
+    let start_screen = LEAVING.swap(false, Ordering::SeqCst);
+    QUIT.store(false, Ordering::Release);
+    UPDATES.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    post(Update::NextRun { start_screen });
+    post(Update::Begin);
+    start_compile_thread();
+}
+
+fn compile_runs(compile: &mut Box<dyn FnMut() -> i32 + Send>) {
+    loop {
+        relax_compiler::lifeline::clear_panic_at();
+        // a panic in the compiler (exit 101): its message and position go on the load
+        // screen, not only into a log nobody on the box sees
+        let (code, panicked) = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| compile())) {
+            Ok(code) => (code, None),
+            Err(p) => (101, Some(relax_compiler::lifeline::panic_line(&*p))),
+        };
+        // (a restart ended the run under it: `next_run` starts the next one)
+        if relax_compiler::run_end::restarting() {
+            return;
+        }
+        let mut guard = state();
+        let Some(run) = guard.as_mut() else {
+            EXIT.store(code, Ordering::Release);
+            QUIT.store(true, Ordering::Release);
+            makepad_hal::stop_main_loop();
+            return;
+        };
+        if code == 0 && run.spec.is_some() {
+            return;
+        }
+        if QUIT.load(Ordering::Acquire) {
+            return;
+        }
+        EXIT.store(code, Ordering::Release);
+        if run.window.is_none() || !relax_compiler::run::live_session() || unseen() {
+            // No native window backend: there is no run UI to retry from. A run that is
+            // no live session takes no edit that could fix the build: it ends with the
+            // code (a test's child under CARGO_BIN_EXE_* is waited for by its parent).
+            // A hidden window (MAKEPAD_HIDE_WINDOWS) shows the failure to nobody and nobody
+            // retries from it: the run ends with the code instead of waiting for a retry
+            // forever (a hidden Sandbox boot whose provided crates differed sat idle 4.6 h).
+            QUIT.store(true, Ordering::Release);
+            Hal::global().wake_session(HOST);
+            if PUMP.lock().unwrap_or_else(|e| e.into_inner()).is_none() {
+                makepad_hal::stop_main_loop();
+            }
+            return;
+        }
+        {
+            // With a unit already installed, a retry starts the process again (retry).
+            // A typed source mismatch has already posted UpdateReady. It is neither
+            // a compiler failure nor a retry of compilation against the stale loader.
+            let update_ready = code == 0 && panicked.is_none() && relax_compiler::reload::host::update_message().is_some();
+            run.initial_failed = !update_ready && run.spec.is_none();
+            if !update_ready {
+                post(Update::Failure(match &panicked {
+                    Some(line) => format!("Compilation failed: the compiler panicked: {line}"),
+                    None => format!("Compilation failed (exit {code})"),
+                }));
+            }
+            if run.spec.is_some() {
+                return;
+            }
+            while !QUIT.load(Ordering::Acquire) && !guard.as_ref().is_some_and(|r| r.retry)
+            {
+                guard = RETRY.wait(guard).unwrap_or_else(|e| e.into_inner());
+            }
+            if QUIT.load(Ordering::Acquire) {
+                return;
+            }
+            if let Some(run) = guard.as_mut() {
+                run.retry = false;
+                run.initial_failed = false;
+            }
+            drop(guard);
+            post(Update::Begin);
+        }
+    }
+}
+
 pub fn run(mut compile: Box<dyn FnMut() -> i32 + Send>) -> i32 {
     // Java owns Android's UI loop; this boot thread compiles and runs domain 0.
     if cfg!(target_os = "android") {
@@ -469,89 +603,15 @@ pub fn run(mut compile: Box<dyn FnMut() -> i32 + Send>) -> i32 {
         return makepad_hal::with_caps(makepad_hal::Caps { privileged }, || compile());
     }
     makepad_hal::expect_main_loop();
-    // the handle (thread record, result packet) is joined at the end of the run, after the settle swap
-    // may have destroyed the compiler generation this frame runs in: it lives in the kept heap
-    let thread = relax_compiler::zone_alloc::kept_with(move || std::thread::Builder::new()
-        .name("run-compile".into())
-        .stack_size(8 << 20)
-        .spawn(move || {
-            // this thread boots and, for an app without the HAL, runs its main (what the loader's
-            // main thread did): a compiler phase, not a swap-quiesced compiler worker
-            let _compiler = relax_compiler::zone_alloc::compiler();
-            loop {
-                relax_compiler::lifeline::clear_panic_at();
-                // a panic in the compiler (exit 101): its message and position go on the load
-                // screen, not only into a log nobody on the box sees
-                let (code, panicked) = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| compile())) {
-                    Ok(code) => (code, None),
-                    Err(p) => (101, Some(relax_compiler::lifeline::panic_line(&*p))),
-                };
-                let mut guard = state();
-                let Some(run) = guard.as_mut() else {
-                    EXIT.store(code, Ordering::Release);
-                    QUIT.store(true, Ordering::Release);
-                    makepad_hal::stop_main_loop();
-                    return;
-                };
-                if code == 0 && run.spec.is_some() {
-                    return;
-                }
-                if QUIT.load(Ordering::Acquire) {
-                    return;
-                }
-                EXIT.store(code, Ordering::Release);
-                if run.window.is_none() || !relax_compiler::run::live_session() || unseen() {
-                    // No native window backend: there is no run UI to retry from. A run that is
-                    // no live session takes no edit that could fix the build: it ends with the
-                    // code (a test's child under CARGO_BIN_EXE_* is waited for by its parent).
-                    // A hidden window (MAKEPAD_HIDE_WINDOWS) shows the failure to nobody and nobody
-                    // retries from it: the run ends with the code instead of waiting for a retry
-                    // forever (a hidden Sandbox boot whose provided crates differed sat idle 4.6 h).
-                    QUIT.store(true, Ordering::Release);
-                    Hal::global().wake_session(HOST);
-                    if PUMP.lock().unwrap_or_else(|e| e.into_inner()).is_none() {
-                        makepad_hal::stop_main_loop();
-                    }
-                    return;
-                }
-                {
-                    // With a unit already installed, a retry starts the process again (retry).
-                    // A typed source mismatch has already posted UpdateReady. It is neither
-                    // a compiler failure nor a retry of compilation against the stale loader.
-                    let update_ready = code == 0 && panicked.is_none() && relax_compiler::reload::host::update_message().is_some();
-                    run.initial_failed = !update_ready && run.spec.is_none();
-                    if !update_ready {
-                        post(Update::Failure(match &panicked {
-                            Some(line) => format!("Compilation failed: the compiler panicked: {line}"),
-                            None => format!("Compilation failed (exit {code})"),
-                        }));
-                    }
-                    if run.spec.is_some() {
-                        return;
-                    }
-                    while !QUIT.load(Ordering::Acquire) && !guard.as_ref().is_some_and(|r| r.retry)
-                    {
-                        guard = RETRY.wait(guard).unwrap_or_else(|e| e.into_inner());
-                    }
-                    if QUIT.load(Ordering::Acquire) {
-                        return;
-                    }
-                    if let Some(run) = guard.as_mut() {
-                        run.retry = false;
-                        run.initial_failed = false;
-                    }
-                    drop(guard);
-                    post(Update::Begin);
-                }
-            }
-        })
-        .expect("the compiler thread"));
+    *COMPILE.lock().unwrap_or_else(|e| e.into_inner()) = Some(compile);
+    start_compile_thread();
     // the app is a domain of this host: its platform installs no termination handler, so the
     // host answers SIGINT/SIGTERM/SIGHUP (quit_signal.rs): the cache's quit write, then the run
     // ends as closing its window ends it. Its worker thread (handle, name, result packet, closure)
     // waits for the whole run: it lives in the kept heap, not in the compiler generation the
     // settle swap destroys (it then faulted on its own packet as the signal woke it)
     relax_compiler::zone_alloc::kept_with(|| crate::quit_signal::install(|| {
+        let _at_the_run = relax_compiler::run_threads::process_work();
         relax_compiler::run::quit_requested();
         QUIT.store(true, Ordering::Release);
         RETRY.notify_all();
@@ -566,7 +626,8 @@ pub fn run(mut compile: Box<dyn FnMut() -> i32 + Send>) -> i32 {
     RETRY.notify_all();
     Hal::global().wake_session(HOST);
     let mut code = None;
-    if thread.join().is_err() {
+    let thread = COMPILE_THREAD.lock().unwrap_or_else(|e| e.into_inner()).take();
+    if thread.is_some_and(|thread| thread.join().is_err()) {
         quit_trace("the compile thread panicked");
         code = Some(101);
     }
@@ -840,8 +901,6 @@ static GEOMETRY: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 static LEAVING: AtomicBool = AtomicBool::new(false);
 /// The window shows the start screen (or cannot): the restart goes on.
 static LEFT: (std::sync::Mutex<bool>, std::sync::Condvar) = (std::sync::Mutex::new(false), std::sync::Condvar::new());
-/// The thread of the run window's loop (a restart it starts itself cannot wait for its frames).
-static PUMP_THREAD: std::sync::OnceLock<std::thread::ThreadId> = std::sync::OnceLock::new();
 /// The app's content fades to the start screen in this time, and in from it.
 const VEIL_IN: Duration = Duration::from_millis(250);
 const VEIL_OUT: Duration = Duration::from_millis(500);
@@ -853,7 +912,7 @@ const RESTART_SCREEN: &str = "MAKEPAD_RUN_RESTART_SCREEN";
 /// window that cannot show it (none yet, a panel over it, its loop gone) never holds up the restart.
 pub fn restart_begins() {
     // (an edit's restart keeps the app's last frame on the window until the new one replaces it)
-    if !relax_compiler::reload::relaunch_asked() || state().is_none() || PUMP_THREAD.get() == Some(&std::thread::current().id()) {
+    if !relax_compiler::reload::relaunch_asked() || state().is_none() {
         return;
     }
     *LEFT.0.lock().unwrap_or_else(|e| e.into_inner()) = false;
@@ -907,8 +966,8 @@ pub fn observe(id: u32, next: &DomainState) {
 }
 
 /// The run window's Restart (and a crashed app's saved fix): a build that failed before the app
-/// started compiles again in this process; a crashed app's process starts again; a running app
-/// restarts as `session relaunch` does (with its state when it restarts itself).
+/// started compiles again; a crashed app's next run starts; a running app restarts as `session
+/// relaunch` does (with its state when it restarts itself).
 fn retry(crashed: bool) -> Result<(), String> {
     {
         let mut guard = state();
@@ -923,7 +982,7 @@ fn retry(crashed: bool) -> Result<(), String> {
         }
     }
     if crashed {
-        return relax_compiler::reload::restart_process("restart after the app crashed");
+        return relax_compiler::reload::restart_run("restart after the app crashed");
     }
     relax_compiler::reload::relaunch_pending().map(|_| ())
 }
@@ -1159,15 +1218,14 @@ fn pump(
     if probe.is_some() {
         host.measure_input();
     }
-    // A process restarted by an edit (the exec restart, reload.rs exec_restart) draws nothing of
-    // its own while it compiles: its window shows with the app's first frame
-    // (HIDDEN_UNTIL_PRESENT), never with the boot field first -- no flash of another picture, and
-    // in a window manager that kept the window across the exec, the app's last frame stays until
-    // the new one replaces it. A failure, a parked thread or an offered update still shows. So its
-    // compile does not wait for the window's first present (there is none before the app's): the
-    // window is open now. A restart the person asked for went to the start screen first
-    // (`restart_begins`): that run shows it from its first frame, as a first start does.
-    let restarted = std::env::var_os("MAKEPAD_RUN_RESTART_T0").is_some()
+    // A run after a restart (a restart in this process keeps the window: `Update::NextRun`; a process
+    // restarted into a rebuilt makepad, reload_host) draws nothing of its own while it compiles: the
+    // app's last frame stays until the new one replaces it, with no flash of another picture. A
+    // failure, a parked thread or an offered update still shows. So its compile does not wait for
+    // the window's first present (there is none before the app's): the window is open now. A restart
+    // the person asked for went to the start screen first (`restart_begins`): that run shows it
+    // from its first frame, as a first start does.
+    let mut restarted = std::env::var_os("MAKEPAD_RUN_RESTART_T0").is_some()
         && std::env::var_os(RESTART_SCREEN).is_none_or(|v| v != "1");
     if !restarted && std::env::var_os("MAKEPAD_RUN_RESTART_T0").is_some() {
         host.continues_start_screen();
@@ -1206,7 +1264,6 @@ fn pump(
     let mut leave_at: Option<Instant> = None;
     let mut arrive_at: Option<Instant> = None;
     let mut dot_noted = None;
-    let _ = PUMP_THREAD.set(std::thread::current().id());
     let ring = ring_on();
     // A dump-only preview: after the running app's first half second, show the card for
     // three seconds and fade it out. No synthetic JIT wait or input change. Works hidden
@@ -1228,6 +1285,8 @@ fn pump(
     // MAKEPAD_RUN_POSTFRAME_LOG (the responsiveness trace): the JIT ring's UI blocks too
     let mut watch = Watch::new(std::env::var_os("MAKEPAD_RUN_POSTFRAME_LOG").is_some());
     relax_compiler::postframe::on_ui_wait(ui_wait_began);
+    // (it is at the run's state except while it waits for the window)
+    let mut gate = Some(relax_compiler::run_threads::process_work());
     loop {
         let (domain, window, initial_failed) = {
             let guard = state();
@@ -1248,6 +1307,17 @@ fn pump(
         for update in updates {
             dirty = true;
             match update {
+                Update::NextRun { start_screen } => {
+                    restarted = !start_screen;
+                    if start_screen {
+                        host.continues_start_screen();
+                    }
+                    ring_clicked = false;
+                    leave_at = None;
+                    arrive_at = None;
+                    inspect_open = false;
+                    view_shown = None;
+                }
                 Update::Begin => {
                     stage = Stage::Running;
                     progress.reset();
@@ -1837,7 +1907,9 @@ fn pump(
         } else {
             u64::MAX
         };
+        drop(gate.take());
         let alive = host.turn(timeout, draw);
+        gate = Some(relax_compiler::run_threads::process_work());
         if window.is_none() {
             if let Some(window) = host.window() {
                 if let Some(r) = state().as_mut() {

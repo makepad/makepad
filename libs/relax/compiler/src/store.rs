@@ -811,6 +811,8 @@ struct RunState {
     active: u32,
     /// the written payloads' mappings, by key
     mapped: std::collections::HashMap<u128, &'static [u8]>,
+    /// what keeps them mapped: as long as this store lives
+    views: Vec<crate::pack::Bytes>,
 }
 
 /// RunStore::append's outcome
@@ -857,7 +859,7 @@ impl RunStore {
             s.in_flight += 1;
             off
         };
-        let r = (|| -> std::io::Result<(u64, &'static [u8])> {
+        let r = (|| -> std::io::Result<(u64, Option<crate::pack::Bytes>, &'static [u8])> {
             let s = crate::load_profile::span(profiling(), "run-store-write", "");
             let mut out = PosWriter { file: &self.file, off, buf: Vec::with_capacity(64 * 1024), sum: Sum64::new() };
             write(&mut out)?;
@@ -868,13 +870,14 @@ impl RunStore {
                 return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "run store payload length"));
             }
             let sum = out.sum.finish();
-            let bytes = crate::pack::map_pinned(&self.file, off, len).ok_or_else(|| std::io::Error::other("cannot map a run store payload"))?;
-            Ok((sum, bytes))
+            let (view, bytes) = crate::pack::map_range(&self.file, off, len).ok_or_else(|| std::io::Error::other("cannot map a run store payload"))?;
+            Ok((sum, view, bytes))
         })();
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
         s.in_flight -= 1;
         match r {
-            Ok((sum, bytes)) => {
+            Ok((sum, view, bytes)) => {
+                s.views.extend(view);
                 let mut h = crate::sip::Sip128::new();
                 h.u128(key);
                 h.u64(len as u64);

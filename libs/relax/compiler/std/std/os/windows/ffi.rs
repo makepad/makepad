@@ -103,3 +103,25 @@ impl<'a> Iterator for EncodeWide<'a> {
         ((left + 2) / 3 + (self.extra != 0) as usize, Some(left + (self.extra != 0) as usize))
     }
 }
+
+impl core::iter::FusedIterator for EncodeWide<'_> {}
+
+impl core::fmt::Debug for EncodeWide<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        struct CodeUnit(u16);
+        impl core::fmt::Debug for CodeUnit {
+            fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                // real std: a unit that is a char on its own as a char, anything else (surrogate
+                // halves, paired or not) as a hex code unit
+                match char::from_u32(self.0 as u32) {
+                    Some(c) => write!(f, "{c:?}"),
+                    None => write!(f, "0x{:04X}", self.0),
+                }
+            }
+        }
+        write!(f, "EncodeWide(")?;
+        f.debug_list().entries(self.clone().map(CodeUnit)).finish()?;
+        write!(f, ")")?;
+        Ok(())
+    }
+}

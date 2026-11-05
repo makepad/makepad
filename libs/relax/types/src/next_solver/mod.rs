@@ -218,3 +218,9 @@ pub mod fast_reject;
 pub mod overlap;
 pub mod specialization_graph;
 pub mod inherent_impls_overlap;
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    collect::reset_statics();
+    search_graph::reset_statics();
+}

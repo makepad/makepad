@@ -46,8 +46,18 @@ pub unsafe fn _xgetbv(xcr: u32) -> u64 {
     crate::intrinsics_rt::xgetbv(xcr)
 }
 
-// There is no inline-assembly path in this module. Report failure so callers
-// use their entropy fallback; RDRAND also clears its destination on failure.
+/// Read the processor's timestamp counter without serializing execution.
+#[inline]
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+pub unsafe fn _rdtsc() -> u64 {
+    let low: u32;
+    let high: u32;
+    crate::arch::asm!("rdtsc", out("eax") low, out("edx") high, options(nomem, nostack, preserves_flags));
+    ((high as u64) << 32) | low as u64
+}
+
+// Report unavailable RDRAND so callers use their entropy fallback. RDRAND
+// also clears its destination on failure.
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "rdrand"))]
 pub unsafe fn _rdrand32_step(val: &mut u32) -> i32 {
@@ -807,6 +817,9 @@ pub unsafe fn _mm256_srli_epi32<const IMM8: i32>(a: __m256i) -> __m256i {
 pub unsafe fn _mm256_loadu_si256(mem_addr: *const __m256i) -> __m256i {
     i_join(vx::vx_load(mem_addr as *const u8), vx::vx_load((mem_addr as *const u8).add(16)))
 }
+pub unsafe fn _mm256_lddqu_si256(mem_addr: *const __m256i) -> __m256i {
+    _mm256_loadu_si256(mem_addr)
+}
 pub unsafe fn _mm256_load_si256(mem_addr: *const __m256i) -> __m256i {
     _mm256_loadu_si256(mem_addr)
 }
@@ -1165,6 +1178,11 @@ pub unsafe fn _mm_load_si128(mem_addr: *const __m128i) -> __m128i {
 #[inline(always)]
 pub unsafe fn _mm_loadu_si128(mem_addr: *const __m128i) -> __m128i {
     vx::vx_load(mem_addr as *const u8)
+}
+
+#[inline(always)]
+pub unsafe fn _mm_lddqu_si128(mem_addr: *const __m128i) -> __m128i {
+    _mm_loadu_si128(mem_addr)
 }
 
 #[inline(always)]

@@ -39,6 +39,8 @@ fn a64_bl_in_reach_and_through_veneer() {
     assert!(link_with(&mut c, base, &r, &|_| far, &|_, t, _| Some(t)).is_err());
 }
 
+// each host builds only its own back end: the x64 halves run on x86-64, the arm64 halves on AArch64
+#[cfg(not(target_arch = "aarch64"))]
 #[test]
 fn thunk_heads() {
     // x64: jmp rel32 at the thunk, else the table-word path at +8
@@ -50,7 +52,13 @@ fn thunk_heads() {
     assert_eq!(&relax_backend::x64::thunk_head(at, at + (3u64 << 30)).to_le_bytes(), &t[0..8]);
     assert_eq!(&relax_backend::x64::thunk_head(at, 0).to_le_bytes(), &t[0..8]);
     assert_eq!(t.len(), relax_backend::x64::THUNK_SIZE);
+}
+
+#[cfg(target_arch = "aarch64")]
+#[test]
+fn thunk_heads() {
     // arm64: b imm26, else b +4
+    let at = 0x7000_0000u64;
     let a = relax_backend::arm64::thunk_head(at, at - 8);
     assert_eq!(a, 0x1400_0000 | (((-8i32) >> 2) as u32 & 0x03FF_FFFF));
     let t = relax_backend::arm64::thunk(0x1234_5678_9abc);
@@ -59,6 +67,7 @@ fn thunk_heads() {
     assert_eq!(t.len(), relax_backend::arm64::THUNK_SIZE);
 }
 
+#[cfg(not(target_arch = "aarch64"))]
 #[test]
 fn count_stubs_jump_directly_in_reach() {
     let at = 0x7000_0000u64;
@@ -73,6 +82,12 @@ fn count_stubs_jump_directly_in_reach() {
     // unknown address: the absolute form
     let f = relax_backend::x64::count_stub(0, 0x1234_5678_9abc, 7, at + 0x1000, 0x5555_0000_0000, 300);
     assert_ne!(f[19], 0xe9);
+}
+
+#[cfg(target_arch = "aarch64")]
+#[test]
+fn count_stubs_jump_directly_in_reach() {
+    let at = 0x7000_0000u64;
     // arm64: 4 words counter, ldr/subs/str, b.le, then b code
     let s = relax_backend::arm64::count_stub(at, 0x1234_5678_9abc, 7, at + 0x1000, 0x5555_0000_0000, 300);
     let w = |k: usize| u32::from_le_bytes(s[4 * k..4 * k + 4].try_into().unwrap());

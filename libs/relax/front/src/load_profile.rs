@@ -39,7 +39,7 @@ pub fn span(enabled: bool, phase: &'static str, subject: &str) -> Option<Span> {
     enabled.then(|| {
         epoch();
         let file_cost = match phase {
-            "lower" | "parse-rs" | "parse-lowered" => Some((crate::exec_profile::file(subject), phase == "lower", relax_backend::cpu_ns())),
+            "lower" | "parse-rs" | "parse-lowered" => Some((crate::exec_profile::file(subject), phase == "lower", relax_session::clock::cpu_ns())),
             _ => None,
         };
         if file_cost.is_some() { FILE_CHILD_CPU.with(|s| s.borrow_mut().push(0)); }
@@ -56,7 +56,7 @@ impl Drop for Span {
     fn drop(&mut self) {
         let end = Instant::now();
         if let Some((file, lower, start)) = &self.file_cost {
-            let inclusive = relax_backend::cpu_ns().saturating_sub(*start);
+            let inclusive = relax_session::clock::cpu_ns().saturating_sub(*start);
             let own = FILE_CHILD_CPU.with(|s| {
                 let mut s = s.borrow_mut();
                 let children = s.pop().unwrap_or(0);
@@ -108,4 +108,10 @@ pub fn flush_current() {
         let _ = writeln!(out, "load-timeline: start_us={} dur_us={} thread={:?} worker={:?} phase={} subject={:?}",
             e.start_us, e.dur_us, thread, worker, e.phase, e.subject);
     }
+}
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    use relax_session::reset_static as reset;
+    reset(&BUFFERS, Mutex::new(Vec::new()));
 }

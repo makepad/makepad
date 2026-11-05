@@ -28,9 +28,13 @@ pub fn spills_of(id: u32) -> Vec<relax_backend::remark::SpillRemark> {
 /// Usable registers per class on this target (int, float) for the spill remarks' wording.
 pub fn usable_regs(flt: bool) -> u32 {
     match (relax_backend::asm::Arch::host(), flt) {
+        #[cfg(not(target_arch = "aarch64"))]
         (relax_backend::asm::Arch::X64, false) => 14,
+        #[cfg(not(target_arch = "aarch64"))]
         (relax_backend::asm::Arch::X64, true) => 16,
+        #[cfg(target_arch = "aarch64")]
         (relax_backend::asm::Arch::Arm64, false) => 27,
+        #[cfg(target_arch = "aarch64")]
         (relax_backend::asm::Arch::Arm64, true) => 32,
     }
 }
@@ -187,4 +191,13 @@ pub fn cmd_remarks(req: &Req, out: &mut Out) {
         Err(e) => out.err(&e),
     }
     let _ = json_str;
+}
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    use relax_session::reset_static as reset;
+    reset(&INLINE, relax_session::sync::Mutex::new(None));
+    reset(&SPILLS, relax_session::sync::Mutex::new(None));
+    reset(&LOOPS, relax_session::sync::Mutex::new(None));
+    reset(&COUNTS, relax_session::sync::Mutex::new(None));
 }

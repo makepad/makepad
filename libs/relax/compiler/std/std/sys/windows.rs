@@ -443,6 +443,17 @@ pub mod portable {
     unsafe impl Send for NativeThread {}
     unsafe impl Sync for NativeThread {}
 
+    impl NativeThread {
+        pub fn raw(&self) -> usize {
+            self.0 as usize
+        }
+        /// The handle, no longer closed by this value.
+        pub fn into_raw(self) -> usize {
+            let t = core::mem::ManuallyDrop::new(self);
+            t.0 as usize
+        }
+    }
+
     extern "C" {
         fn __relax_thread_spawn(out: *mut *mut c_void, stack_size: usize, f: fn(*mut u8), arg: *mut u8) -> i32;
     }
@@ -485,7 +496,8 @@ pub mod portable {
     pub fn key_get(key: Key) -> *mut c_void { unsafe { __relax_key_get(key) } }
     pub fn key_set(key: Key, value: *const c_void) { unsafe { __relax_key_set(key, value); } }
 
-    fn std_handle(fd: i32) -> HANDLE {
+    /// GetStdHandle for fd 0, 1 or 2 (null when no console is attached).
+    pub fn std_handle(fd: i32) -> HANDLE {
         let which = match fd {
             0 => STD_INPUT_HANDLE,
             1 => STD_OUTPUT_HANDLE,

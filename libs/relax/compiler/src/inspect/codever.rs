@@ -1019,7 +1019,7 @@ pub fn cmd_tier(req: &Req, out: &mut Out) {
         let upv = up as usize;
         let spawned = {
             let _k = crate::zone_alloc::kept();
-            std::thread::Builder::new().name("run-inspect-tier".into()).spawn(move || {
+            crate::run_threads::spawn("run-inspect-tier", move || {
                 super::heap::exclude_this_thread();
                 let up = upv as *mut Unit;
                 let mut rows = Vec::new();
@@ -1149,4 +1149,10 @@ pub fn cmd_cache(_req: &Req, out: &mut Out) {
         }
         None => out.err(&format!("the owner did not answer in 10 s ({})", crate::owner::serving_note())),
     }
+}
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    use relax_session::reset_static as reset;
+    reset(&PINS, relax_session::sync::Mutex::new(Vec::new()));
 }

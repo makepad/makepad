@@ -211,3 +211,11 @@ pub(super) fn resolve(dir: &Path, b: &[u8], check: bool) -> Option<(ImageLoc, &'
     let img: &'static [u8] = unsafe { std::slice::from_raw_parts(img.as_ptr(), img.len()) };
     Some((ImageLoc { store: name.into(), key }, img))
 }
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    use relax_session::reset_static as reset;
+    reset(&OPEN, Mutex::new(None));
+    reset(&RUNS, Mutex::new(Vec::new()));
+    reset(&SINKS, Mutex::new(None));
+}

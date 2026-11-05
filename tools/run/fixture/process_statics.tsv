@@ -1,0 +1,928 @@
+# Statics of a makepad run process that stay when a run ends in place, and why (restart_statics.py).
+makepad_cpu_budget::WAIT_HOOK	native host hook, set once
+makepad_cpu_budget::global::BUDGET	the machine's budget; end_run removes the rows of ended threads
+makepad_cpu_budget::os_class::BASE	nice base of this process
+makepad_font_core::intern::INTERNER	content-keyed Arc<str> interner
+makepad_font_core::system_fonts::font_scan::INDEX	the machine's fonts
+makepad_font_core::system_fonts::font_scan::PREWARMED	one-shot prewarm of the machine's font index
+makepad_font_core::system_fonts::imp::FC	handle of the system font library
+makepad_hal::BACKGROUND_HOOK	native hook set by android_host (boot.rs:137), set once
+makepad_hal::GLOBAL	HAL world stays with window and device
+makepad_hal::VIRTUAL_READ	one-shot host hook
+makepad_hal::a11y::UI_ROUTERS	a router in ended code goes at its next call (dispatch_across); a native one stays
+makepad_hal::a11y::completions::DONE	close_session removes the session's requests
+makepad_hal::a11y::consumer_bits::BITS	consumer bits: env MAKEPAD_A11Y, OS adapter and remote lease, not the app
+makepad_hal::a11y::inject_action_in::NEXT	action ids never reused
+makepad_hal::a11y::mirrors::MIRRORS	trees keyed by session, dropped when HAL frees the session
+makepad_hal::a11y::os_selfcheck::CHECK	adapter's self-check fn, set once
+makepad_hal::a11y::remote_activity::LEASE	lease timer thread of the process (a11y.rs:238)
+makepad_hal::backend::apple::appkit::MENU_BAR_APP	host API set before the window system starts (lib.rs:1158)
+makepad_hal::backend::apple::appkit::a11y::activate::START	clock start of the a11y activation log
+makepad_hal::backend::apple::appkit::app::APP	NSApplication of the process
+makepad_hal::backend::apple::appkit::app::APPEARANCE	system appearance of the OS
+makepad_hal::backend::apple::appkit::app::EXIT_REQUESTED	read once in the exit trace (app.rs:454)
+makepad_hal::backend::apple::appkit::app::IDLE_WAKE	idle wake of the main loop
+makepad_hal::backend::apple::appkit::app::load_webkit_cursor::CURSOR_ROOT	cursor folder of WebKit
+makepad_hal::backend::apple::appkit::drag_out::classes::C	ObjC classes
+makepad_hal::backend::apple::appkit::restack::KEY	key of the window that stays
+makepad_hal::backend::apple::appkit::restack::TAKEN	exec-restart handover guard; an in-process restart opens no first window (restack.rs:85)
+makepad_hal::backend::apple::appkit::restack::WINDOW	the window stays
+makepad_hal::backend::apple::appkit::test_resize::DRAGS	test only
+makepad_hal::backend::apple::appkit::test_resize::LOOP	test only
+makepad_hal::backend::apple::appkit::test_resize::LOOP_PRESENTED	test only
+makepad_hal::backend::apple::appkit::test_resize::STATE	test only
+makepad_hal::backend::apple::appkit::test_resize::enabled::ON	env MAKEPAD_TEST_LIVE_RESIZE read once, nothing sets it
+makepad_hal::backend::apple::appkit::window::focus_allowed::ALLOWED	env MAKEPAD_FOCUS read once, nothing sets it
+makepad_hal::backend::apple::appkit::window::windows_hidden::HIDDEN	env MAKEPAD_HIDE_WINDOWS read once, nothing sets it
+makepad_hal::backend::apple::media::audio_tap::delegate_class::CLASS	ObjC class
+makepad_hal::backend::apple::media::camera::delegate_class::CLASS	ObjC class
+makepad_hal::backend::apple::media::capture::SKIPPED	screen capture skip count, only incremented (capture.rs:128)
+makepad_hal::backend::apple::media::geo::delegate_class::CLASS	ObjC class
+makepad_hal::backend::apple::media::layers::COMMITS	trace total only printed
+makepad_hal::backend::apple::media::layers::UNPRESENTED	trace total only printed
+makepad_hal::backend::apple::media::layers::segment_class::CLASS	ObjC class
+makepad_hal::backend::apple::media::layers::trace_enabled::ENABLED	env MAKEPAD_NATIVE_LAYER_TRACE read once, nothing sets it
+makepad_hal::backend::apple::media::probe::video_h264_probe::PROBE	probe of the OS codec
+makepad_hal::backend::apple::media::video::url_from_source::NEXT	ids never reused
+makepad_hal::backend::apple::media::web_state::class::CLASS	ObjC class
+makepad_hal::backend::apple::metal::frame::encode_frame::FRAME_LOG	env MAKEPAD_HAL_FRAME_LOG read once, nothing sets it
+makepad_hal::backend::apple::metal::layers::pending::PENDING	the session's close cancels its frames
+makepad_hal::backend::apple::shell::global::SHARED	shell connection; session-keyed parts cleared by session_closed (shell.rs:306), ids never reused
+makepad_hal::backend::apple::shell::log_enabled::ON	env MAKEPAD_HAL_LOG read once, nothing sets it
+makepad_hal::backend::apple::uikit::app::APP	UIApplication of the process
+makepad_hal::backend::apple::uikit::app::APPEARANCE	system appearance of the OS
+makepad_hal::backend::apple::uikit::dialog::delegate_class::CLASS	ObjC class
+makepad_hal::backend::apple::uikit::menu::menu::MENU	UIKit menu object on the main thread; session_closed clears its session parts (menu.rs:71)
+makepad_hal::backend::apple::uikit::test_rotate::STARTED	test only
+makepad_hal::backend::apple::uikit::test_rotate::enabled::ON	env MAKEPAD_TEST_ROTATE read once, nothing sets it
+makepad_hal::backend::apple::uikit::text::add_compat_input_fallbacks::LOG_ONCE	compat lookup, constant
+makepad_hal::backend::apple::uikit::text::doc_keys::KEYS	constant keys
+makepad_hal::backend::apple::uikit::text::text::TEXT	UIKit text object on the main thread; session_closed clears its session parts (text.rs:249)
+makepad_hal::backend::gl::egl::CONTEXT_LIFECYCLE	EGL lifecycle fact of the driver
+makepad_hal::backend::gl::egl::load::EGL	EGL library of the process
+makepad_hal::backend::gl::egl::load::WAYLAND	Wayland EGL library of the process
+makepad_hal::backend::gl::render::new::COMPILER_THREADS	compiler threads from the CPU
+makepad_hal::backend::linux::HOST_DARK	host's dark setting, from the OS
+makepad_hal::backend::linux::atspi::WORKER	host a11y thread and bus identity stay
+makepad_hal::backend::linux::atspi::identity::IDENTITY	host a11y thread and bus identity stay
+makepad_hal::backend::linux::atspi::post::SAID	log once
+makepad_hal::backend::linux::command::SAID	log once
+makepad_hal::backend::linux::direct::STATE	display and input state of the host session
+makepad_hal::backend::linux::direct::render::PARKED_ACQUIRES	parked with the device
+makepad_hal::backend::linux::direct::render::SCANOUT	cap scanout reply of the display
+makepad_hal::backend::linux::direct::terminal::SIGNALS	VT signals of the process
+makepad_hal::backend::linux::direct::terminal::SIGNAL_FD	VT signal fd of the process
+makepad_hal::backend::linux::global::SHARED	host display connection stays
+makepad_hal::backend::linux::media::capture_surface::publish::NEXT	ids never reused
+makepad_hal::backend::linux::media::capture_surface::surfaces::SURFACES	close_session removes the session's surfaces
+makepad_hal::backend::linux::media::gstreamer_sys::load::LIBRARY	gstreamer library of the process
+makepad_hal::backend::linux::media::linux_video_playback::new::NEXT	ids never reused
+makepad_hal::backend::linux::media::v4l2_camera::fake_desc::FAKE	fake camera descriptor, constant
+makepad_hal::backend::linux::media::va_dmabuf_modifier::CACHE	driver fact per size
+makepad_hal::backend::linux::wayland::constraints::EVENTS	Wayland protocol table
+makepad_hal::backend::linux::wayland::constraints::REQUESTS	Wayland protocol table
+makepad_hal::backend::linux::wayland::shadow::CSD_SHADOW_UNAVAILABLE_LOGGED	log once
+makepad_hal::backend::linux::wm::HANDOVER	WM connection handed over at exec
+makepad_hal::backend::linux::wm::STATE	connection to the WM
+makepad_hal::backend::linux::wm::a11y::BRIDGE	a11y bridge of the WM connection
+makepad_hal::backend::linux::wm::a11y::post::SAID	log once
+makepad_hal::backend::linux::wm::native::trace_enabled::TRACE	env MAKEPAD_TRACE read once, nothing sets it
+makepad_hal::backend::log_enabled::ON	env MAKEPAD_HAL_LOG read once, nothing sets it
+makepad_hal::backend::shell::snapshot::SHELL	shell::end_run, through snapshot(); the window's fields stay with the window
+makepad_hal::backend::vulkan::device::SHARED	GPU device stays
+makepad_hal::backend::vulkan::frame::frame_stamp::ON	env MAKEPAD_FRAME_STAMP read once, nothing sets it
+makepad_hal::backend::vulkan::native_layer::prepare::FIRST	log once
+makepad_hal::backend::vulkan::native_layer::prepare::LOG	log once
+makepad_hal::backend::vulkan::native_layer::prepare::UNSYNCED	log once
+makepad_hal::backend::vulkan::resources::DENSITY_MAPS	density maps of the XR shell
+makepad_hal::backend::vulkan::share::NEXT_HANDLE	handles never reused
+makepad_hal::backend::vulkan::share::hardware_buffer::import_video::SEEN	log per format
+makepad_hal::backend::vulkan::share::lent_images::LENT	lent by the XR shell
+makepad_hal::backend::vulkan::share::shared_images::IMAGES	session_closed removes the session's images
+makepad_hal::backend::windows::d3d11::chain::latency::V	env MAKEPAD_WIN_LATENCY read once, nothing sets it
+makepad_hal::backend::windows::d3d11::dcomp::CHECK	device loss check
+makepad_hal::backend::windows::d3d11::dcomp::LOST	device loss flag
+makepad_hal::backend::windows::d3d11::dcomp::current::DEVICE	DirectComposition device of the process
+makepad_hal::backend::windows::d3d11::dcomp::lost::CHECKABLE	device loss check
+makepad_hal::backend::windows::d3d11::dcomp::natives::NATIVES	the session's trees let go of their layers (native_forget)
+makepad_hal::backend::windows::d3d11::device::process_pools::POOLS	device pools of the process
+makepad_hal::backend::windows::d3d11::leases::RETURNED	returned to device pools, drained next turn
+makepad_hal::backend::windows::d3d11::pipeline::cache_dir::DIR	pipeline cache dir of the process
+makepad_hal::backend::windows::d3d11::pipeline::compiler_identity::ID	compiler identity from the binary
+makepad_hal::backend::windows::d3d11::pipeline::publish::SEQ	seq never reused
+makepad_hal::backend::windows::d3d11::resources::export::SERIAL	serials never reused
+makepad_hal::backend::windows::d3d11::share_copy::converter::CONVERTER	self-validated by sizes
+makepad_hal::backend::windows::d3d11::share_copy::process_device::DEV	process-wide D3D device
+makepad_hal::backend::windows::d3d11::share_copy::read_lock::LOCK	lock
+makepad_hal::backend::windows::d3d11::share_copy::slots::SLOTS	share_copy::end_run, through slots()
+makepad_hal::backend::windows::d3d11::share_copy::staging::CACHE	staging by size on the process device
+makepad_hal::backend::windows::media::audio::NEXT_SERIAL	serials never reused
+makepad_hal::backend::windows::media::web_view_runtime::route_pointer::LOGGED	log once
+makepad_hal::backend::windows::win32::a11y::action_signal::SIGNAL	signal object of the watch
+makepad_hal::backend::windows::win32::a11y::action_watch::WATCH	a11y::end_run, through action_watch()
+makepad_hal::backend::windows::win32::a11y::ranges::RANGES	Weak, removed on drop
+makepad_hal::backend::windows::win32::a11y::selfcheck::CHECK	self-check of the adapter
+makepad_hal::backend::windows::win32::a11y::windows::WINDOWS	close_session drops the session's providers
+makepad_hal::backend::windows::win32::appearance::functions::FUNCTIONS	OS function table
+makepad_hal::backend::windows::win32::clipboard::convert::WORKER	clipboard worker thread
+makepad_hal::backend::windows::win32::clipboard::snapshot::PNG	clipboard format of the OS
+makepad_hal::backend::windows::win32::compositor_clock::CLOCK	compositor clock of the OS
+makepad_hal::backend::windows::win32::dialog::open::WORKER	dialog worker thread
+makepad_hal::backend::windows::win32::global::SHARED	win32 shell connection; session-keyed parts cleared by session_closed (d3d11/mod.rs:457)
+makepad_hal::backend::windows::win32::log_enabled::ON	env MAKEPAD_HAL_LOG read once, nothing sets it
+makepad_hal::backend::windows::win32::system_dpi::DPI	system DPI of the OS
+makepad_hal::before_exit_at_exit::ONCE	one-shot atexit install
+makepad_hal::call_scope::HOOKS	one-shot host hook install
+makepad_hal::clock::qpc_to_ns::FREQ	clock frequency
+makepad_hal::clock::raw_ns::START	clock epoch
+makepad_hal::completion::NEXT	ids never reused
+makepad_hal::compute::unsupported::ONCE	log once
+makepad_hal::frame_tap::NEXT_LOG	log pacing
+makepad_hal::framecap::DONE	finished capture seq, readers wait on it
+makepad_hal::framecap::STATE	framecap::end_run, through state(); next_seq stays so an old waiter never matches
+makepad_hal::gpu_limits::GPU_WORKING_SET_BYTES	device facts
+makepad_hal::gpu_limits::MAX_GPU_BUFFER_BYTES	device facts
+makepad_hal::gpu_pressure::ui_reserve::ENV	env MAKEPAD_GPU_UI_RESERVE_MB read once, nothing sets it
+makepad_hal::gpu_prof::DEVICE	profiler state of the device that stays
+makepad_hal::gpu_prof::EPOCH	clock epoch
+makepad_hal::gpu_prof::keep_sources::KEEP	env MAKEPAD_GPU_PROF read once, nothing sets it
+makepad_hal::lease::COPIES	read only by a test that diffs (platform/tests/buffer_leases.rs:30,67)
+makepad_hal::lease::LEASES	lease::end_run, through registry()
+makepad_hal::lease::NEXT	ids never reused
+makepad_hal::main_loop::STOP	stop of the process's main loop, only for hosts without one (lib.rs:1247)
+makepad_hal::media_results::RESULTS	Android: no in-place restart there
+makepad_hal::profile::HELD	button state of the input
+makepad_hal::profile::LAST_MOVE	input time, expires by RECENT_NS
+makepad_hal::profile::LAST_SCROLL	input time, expires by RECENT_NS
+makepad_hal::profile::SAMPLES	profile::end_run, through lock()
+makepad_hal::session::open::NEXT_SESSION	session ids are never reused
+makepad_hal::stream_decode::HELD	Android: no in-place restart there
+makepad_hal::stream_decode::NEXT	ids never reused
+makepad_hal::stream_encode::NEXT	ids never reused
+makepad_hal::user_input::AT_NS	record of the OS's user input
+makepad_hal::user_input::KIND	record of the OS's user input
+makepad_hal::user_input::SEQ	record of the OS's user input
+makepad_hal::user_input::TEST_TURN	test only
+makepad_hal::user_input::VIEWERS	Desk Link viewers, not the app
+makepad_hal::video_files::FILES	Android: no in-place restart there
+makepad_hal::window_controls::HOST_CAPTION	WM's sheet, set by the host
+makepad_hal::window_controls::HOST_CONTROLS	WM's sheet, set by the host
+makepad_hal::wm_socket::CLIENT_NAME	WM client name of this process
+makepad_hal::wm_socket::discovered::PROBE	WM socket probe
+makepad_hal::xr_remote::ENABLED	this process offers the headset slot once; stays with the HAL
+makepad_hal::xr_remote::remote::R	the headset link of the process; freeing the session clears its window and events
+makepad_relax_api::APP_CALL	host's call wrapper fn, "once per process" (relax_api lib.rs:31)
+makepad_relax_api::section::ANCHOR	section anchor in this binary, constant
+makepad_relax_api::section::START	linker section bound of this binary
+makepad_relax_api::section::STOP	linker section bound of this binary
+makepad_remote::cmd::START	clock epoch of this process
+makepad_remote::conn::mono_ns::START	clock epoch of this process
+makepad_run::HOST	host of the process
+makepad_run::hal_run::COMPILE	the compile closure of this process, the same for each run
+makepad_run::hal_run::ENVIRONMENT	safe area, appearance and a11y of the host shell, kept current, not the app (hal_run.rs:410, lib.rs:96)
+makepad_run::hal_run::GEOMETRY	path of the window's place: a restart runs the same workspace
+makepad_run::hal_run::LEFT	restart_begins sets false before waiting (hal_run.rs:859)
+makepad_run::hal_run::PUMP	run-window thread stays
+makepad_run::hal_run::RETRY	condvar
+makepad_run::hal_run::RUN	next_run, through state(); the window stays
+makepad_run::hal_run::UI_WAIT_ARMED	wake latch cleared at the window's next look
+makepad_run::hal_run::quit_trace::ON	env MAKEPAD_RUN_QUIT_TRACE read once, nothing sets it
+makepad_run::hal_run::quit_trace::T0	clock
+makepad_run::quit_signal::native::FIRST_NS	first quit signal, quitting is one way
+makepad_run::quit_signal::native::WAKE	signal pipe of this process
+makepad_run::quit_signal::native::WRITE_FD	signal pipe of this process
+makepad_script::base64::DECODE	constant decode table
+makepad_script::census::CENSUS_OTHER_VM	native fn of the census crate compiled into the loader, set once
+makepad_script::clock::monotonic_now::START	clock epoch of this process
+makepad_script::heap_tag::SERIAL	serials are never reused
+makepad_script::inspect_query::LINE_PROBE_GEN	generation only grows
+makepad_script::inspect_query::NEXT_JOB	ids never reused
+makepad_script::inspect_query::NEXT_LINE_PROBE	ids never reused
+makepad_script::inspect_registry::ENABLED	inspect stays enabled for the process
+makepad_script::inspect_registry::ERROR_HOOK	native host hook
+makepad_script::inspect_registry::NEXT_ID	ids are never reused
+makepad_script::touch::TOUCH_MAP	native census fn compiled into the loader, set once (top_use.rs:574)
+makepad_script::touch::TOUCH_SINK	native census fn compiled into the loader, set once (top_use.rs:575)
+makepad_script_compute::boundary::begin::NEXT	ids are never reused
+makepad_script_compute::boundary::registry::REGISTRY	boundary::end_run, through registry()
+makepad_script_compute::host::BUILTIN	constant
+makepad_script_compute::kcache::HOOK	native host hook, set once
+makepad_script_compute::kcache::HOST_OVERRIDE	tests only, set by no run
+makepad_script_compute::kcache::same::CHECKED	content-keyed: the code stored for this binary's kernels
+makepad_script_compute::kcache::verify::V	env read once, nothing sets it
+makepad_script_compute::kernel::PRECOMPILED	wasm host only: set before any kernel compiles
+makepad_script_compute::kernel::PRECOMPILED_HITS	wasm host only: counters
+makepad_script_compute::kernel::PRECOMPILED_MISSES	wasm host only: counters
+makepad_script_compute::kernel::recorded::Q	kernel::end_run empties it; the channel stays
+makepad_script_compute::kernel::wasm_queue::queue::Q	wasm host only
+makepad_script_compute::native::SEQ	monotone, names code images
+makepad_script_compute::native::options::O	env and CPU features, read once
+makepad_script_compute::native_vec::host::L	env and CPU, read once
+makepad_script_compute::vm_kernel::COMPILED	content-keyed kernels that own themselves
+makepad_shared_bytes::COW	lifetime counter
+makepad_shared_bytes::MMAP_FALLBACKS	lifetime counter
+makepad_shared_bytes::MMAP_HITS	lifetime counter
+makepad_shared_bytes::OWNED_LOADS	lifetime counter with no per-run reader
+relax_backend::arm64::RIR_MAP	switch set once by the driver
+relax_backend::arm64::lse_atomics::LSE	env MAKEPAD_RUN_NO_LSE read once, nothing sets it
+relax_session::clock::cpu_ns::NS_PER_CYCLE	machine fact; cfg-off: windows
+relax_backend::dbgloc::finish::TRACE	env MAKEPAD_RUN_VARS_TRACE read once, nothing sets it
+relax_backend::dbgloc::on::ON	env MAKEPAD_RUN_VARS_STATS read once, nothing sets it
+relax_backend::dbgloc::stats_on::ON	env MAKEPAD_RUN_VARS_STATS read once, nothing sets it
+relax_backend::frame::slot_colors_used::TRACE	env memo
+relax_backend::pair256::pair256_trace::ON	env MAKEPAD_RUN_PAIR256_TRACE read once, nothing sets it
+relax_backend::passes::T	env MAKEPAD_RUN_TRACE_OPT read once, nothing sets it
+relax_backend::passes::sroa_with::STATS	env MAKEPAD_RUN_SROA_STATS read once, nothing sets it
+relax_backend::passes::thread_known::MAX	env MAKEPAD_RUN_THREAD_MAX read once, nothing sets it
+relax_backend::probe::PROBE	the process's probe, first install stays
+relax_backend::regalloc::SIG_ON	switch set once by the driver
+relax_backend::rir::FORCE_VERIFY	switch set once by the driver
+relax_backend::rir::unwind_stats_on::ON	env MAKEPAD_RUN_UNWIND_STATS read once, nothing sets it
+relax_backend::rir::verify_passes_on::ON	env MAKEPAD_RUN_UNWIND_STATS read once, nothing sets it
+relax_backend::stats::fast_clock::F	env MAKEPAD_RUN_PASS_TIMES read once, nothing sets it
+relax_backend::stats::opt_env_off::T	env MAKEPAD_RUN_OPT read once, nothing sets it
+relax_backend::stats::pass_clock::T0	clock epoch of the pass timer
+relax_backend::tail::trace_on::P	env memo
+relax_backend::wasm::ctx_bytes_on::T	env MAKEPAD_RUN_WASM_EXPORT_FNLIST read once, nothing sets it
+relax_backend::x64::RIR_MAP	switch set once by the driver
+relax_base::boot_stats::O3_ARMS	ring; the field reads the delta from o3_base
+relax_base::boot_stats::O3_INSTALLED	ring; the field reads the delta from o3_base
+relax_base::boot_stats::O3_KEYS	ring; the field reads the delta from o3_base
+relax_base::clock::wall_ns::T0	wall_ns epoch, only compared with itself
+relax_base::conc::thread_id::NEXT	thread ids are never reused
+relax_base::dirs::DEFAULT	machine fact
+relax_base::dirs::SET	from args, same next run
+relax_base::dirs::SET_WORKSPACE	from args, same next run
+relax_base::git::fetch::HTTP	one-shot host hook
+relax_base::inflate::adler32::adler32_neon::MULTS	constant multiplier table
+relax_base::inflate::adler32::adler32_sse2::MULTS_A	constant multiplier table
+relax_base::inflate::adler32::adler32_sse2::MULTS_B	constant multiplier table
+relax_base::inflate::adler32::adler32_sse2::MULTS_C	constant multiplier table
+relax_base::inflate::adler32::adler32_sse2::MULTS_D	constant multiplier table
+relax_base::inflate::crc32::CRC32_SLICE8	constant CRC table (include)
+relax_base::inflate::crc32::CRC32_TABLE	constant CRC table
+relax_base::inflate::decompress::LITLEN_DECODE_RESULTS	constant decode table
+relax_base::inflate::decompress::OFFSET_DECODE_RESULTS	constant decode table
+relax_base::inflate::decompress::PRECODE_DECODE_RESULTS	constant decode table
+relax_base::inflate::decompress::deflate_decompress_with::PRECODE_PERM	constant permutation table
+relax_base::memstat::AT_PEAK	process memory stats
+relax_base::memstat::AT_PEAK_TOTAL	process memory stats
+relax_base::memstat::CTRS	process heap accounting by tag: frees decrement live, zeroing would go negative; siblings AT_PEAK etc process (memstat.rs:219)
+relax_base::memstat::LAST_TRIM_MS	process memory stats and trim rate limit
+relax_base::memstat::SIZE_LIVE	process memory stats
+relax_base::memstat::SNAP_BUSY	process memory stats
+relax_base::memstat::STATE	process memory stats and trim rate limit
+relax_base::memstat::TOTAL	process heap total, same as CTRS; frees decrement it (memstat.rs:227)
+relax_base::memstat::TRACK	inspect's host heap tracker switch; the host heap stays, set_tracker turns it off (memstat.rs:260)
+relax_base::memstat::TRACK_ALLOC	process memory stats
+relax_base::memstat::TRACK_FREE	process memory stats
+relax_base::memstat::TRIMS	process memory stats and trim rate limit
+relax_base::memstat::note_big::LIM	env MAKEPAD_RUN_MEM_BIG read once, nothing sets it
+relax_base::memstat::sites::BASE	dladdr base of this binary (memstat.rs:1040)
+relax_base::memstat::sites::COUNT	process memory stats
+relax_base::memstat::sites::FRAMES	call-site table of host allocations in this binary, Linux, under memory sites report (memstat.rs:1020)
+relax_base::memstat::sites::HASHES	hash table of the same host call sites (memstat.rs:1017)
+relax_base::memstat::sites::IV	process memory stats
+relax_base::memstat::sites::LIVE	live bytes per host call site, frees decrement it (memstat.rs:963)
+relax_base::memstat::sites::LOCK	process memory stats
+relax_base::memstat::sites::PEAK	process memory stats
+relax_base::memstat::sites::USED	process memory stats
+relax_base::pool::POOL	retire_idle ends its workers (run_end)
+relax_base::pool::THREAD_START	one-shot hook (ensure_altstack)
+relax_base::progress::REPORT	one-shot host hook
+relax_base::query::NEXT_ID	ids are never reused
+relax_base::query::job::WAIT_HOOK	one-shot native hook
+relax_base::registry::FETCH	one-shot host hook
+relax_base::relaxed::FIX	`makepad check` and `fix` only
+relax_base::relaxed::STRICT_REPORT	`makepad check` and `fix` only
+relax_base::run_state::OBSERVER	one-shot host observer
+relax_base::run_threads::CHANGED	condvar, no value
+relax_base::run_threads::ENDING	begin_run clears it
+relax_base::run_threads::GATE	the gate of run_end itself
+relax_base::run_threads::LIVE	begin_run: end_all leaves it empty
+relax_base::run_threads::NEXT	ids are never reused
+relax_base::run_threads::RUN_ENDS	begin_run clears it
+relax_base::run_threads::WAKE	condvar, no value
+relax_base::solver_work::ENABLED	env MAKEPAD_RUN_SOLVER_WORK_TRACE read once, nothing sets it
+relax_base::stack::SPARE_STACKS	spare stacks, reusable
+relax_base::stack::SWITCH_RETURN	native address
+relax_base::stack::program_stack_size::SIZE	env MAKEPAD_RUN_STACK_GB read once, nothing sets it
+relax_base::vfs::ANY	process state by design (vfs.rs:130), same env next run
+relax_base::vfs::BIND_SEQ	sequence is never reused
+relax_base::vfs::EDITS	process state by design (vfs.rs:130), same env next run
+relax_base::vfs::EDIT_LOCK	lock
+relax_base::vfs::FROZEN	process state by design (vfs.rs:130), same env next run
+relax_base::vfs::HELD_SEQ	process state by design (vfs.rs:130), same env next run
+relax_base::vfs::MOUNTS	process state by design (vfs.rs:130), same env next run
+relax_base::vfs::RECORDED	read log file and its seen set under MAKEPAD_RUN_READ_LOG: a union log, a repeat line is only skipped; sibling RECORDING process (vfs.rs:60)
+relax_base::vfs::RECORDING	process state by design (vfs.rs:130), same env next run
+relax_base::vfs::WHITEOUTS	cache validated by stat
+relax_base::waits::TABLE	row is freed by the Mine guard's drop
+relax_base::waits::TRACE	host fn (timeline flag_update)
+relax_base::zone_alloc::JOBS	lifetime counters, no outside reader found
+relax_base::zone_alloc::JOB_CHECK	allocator debug switch of this process
+relax_base::zone_alloc::OLD_MARKS	monotone, heap samples compare with it
+relax_base::zone_alloc::OWN_ZONE	allocator zone of the process; cfg-off: apple
+relax_base::zone_alloc::SURVIVOR_BYTES	lifetime counters, no outside reader found
+relax_base::zone_alloc::SURVIVOR_JOBS	lifetime counters, no outside reader found
+relax_base::zone_alloc::ZAP	allocator debug switch of this process
+relax_base::zone_alloc::burst::DEFAULT	default arena stays
+relax_base::zone_alloc::burst::DOMAIN_KEY	OS TLS key; cfg-off: apple arm64
+relax_base::zone_alloc::burst::DOMAIN_OFFSET	layout fact of the allocator
+relax_base::zone_alloc::burst::EVENTS	allocator state of arenas that stay
+relax_base::zone_alloc::burst::HAND_BACK	allocator state of arenas that stay
+relax_base::zone_alloc::burst::HEAP_CHECK	allocator debug switch of this process
+relax_base::zone_alloc::burst::NEXT_ARENA_ID	arena ids are never reused by design
+relax_base::zone_alloc::burst::alloc_failed::SAID	once-per-process report
+relax_base::zone_alloc::burst::bind_program_tls::ONCE	pthread TSD key of the process, not the program's (arena.rs:276)
+relax_base::zone_alloc::compiler::DEFAULT	default arena stays
+relax_base::zone_alloc::compiler::DOMAIN_KEY	OS TLS key; cfg-off: apple arm64
+relax_base::zone_alloc::compiler::DOMAIN_OFFSET	layout fact of the allocator
+relax_base::zone_alloc::compiler::EVENTS	allocator state of arenas that stay
+relax_base::zone_alloc::compiler::HAND_BACK	allocator state of arenas that stay
+relax_base::zone_alloc::compiler::HEAP_CHECK	allocator debug switch of this process
+relax_base::zone_alloc::compiler::NEXT_ARENA_ID	arena ids are never reused by design
+relax_base::zone_alloc::compiler::alloc_failed::SAID	once-per-process report
+relax_base::zone_alloc::compiler::bind_program_tls::ONCE	pthread TSD key of the process, not the program's (arena.rs:276)
+relax_base::zone_alloc::domain::HEAD	DomainHeap drop unlinks it
+relax_base::zone_alloc::domain::HELD	spin lock of the heap registry, held only under its RAII guard (domain.rs:27)
+relax_base::zone_alloc::domain::HIGH	address bounds, widen only
+relax_base::zone_alloc::domain::LOW	address bounds, widen only
+relax_base::zone_alloc::slots::DEFAULT	default arena stays
+relax_base::zone_alloc::slots::DOMAIN_KEY	OS TLS key; cfg-off: apple arm64
+relax_base::zone_alloc::slots::DOMAIN_OFFSET	layout fact of the allocator
+relax_base::zone_alloc::slots::EVENTS	allocator state of arenas that stay
+relax_base::zone_alloc::slots::HAND_BACK	allocator state of arenas that stay
+relax_base::zone_alloc::slots::HEAP_CHECK	allocator debug switch of this process
+relax_base::zone_alloc::slots::NEXT_ARENA_ID	arena ids are never reused by design
+relax_base::zone_alloc::slots::alloc_failed::SAID	once-per-process report
+relax_base::zone_alloc::slots::bind_program_tls::ONCE	pthread TSD key of the process, not the program's (arena.rs:276)
+relax_base::zone_alloc::system_held::SHARDS	allocator table
+relax_base::zone_alloc::test_serial::SERIAL	test only
+relax_base::zone_alloc::zone::ZONE	allocator zone of the process; cfg-off: apple
+relax_codegen::exec_census::enabled::ON	env MAKEPAD_RUN_PROFILE read once, nothing sets it
+relax_codegen::exec_census::new_unit::NEXT	unit ids never reused, keys in the census registry (exec_census.rs:17)
+relax_codegen::fncost::BUFFERS	per-thread buffers, flushed
+relax_codegen::fncost::FILE	one file per pid
+relax_codegen::fncost::IDS	ids are never reused
+relax_codegen::fncost::enabled::ON	env MAKEPAD_RUN_FN_COST read once, nothing sets it
+relax_codegen::fncost::init::START	Once of the run-fncost-flush thread, a loop that never ends and only flushes (fncost.rs:75)
+relax_codegen::fncost::mono::T	clock epoch of fn-cost timing
+relax_codegen::interp::HOT	native hook, rewritten with the same fn
+relax_codegen::interp::STATIC_THUNKS	thunks precompiled into the binary
+relax_codegen::interp::TLS_FN	native hook, rewritten with the same fn
+relax_codegen::interp::TRACE	env MAKEPAD_RUN_INTERP_TRACE read once, nothing sets it
+relax_codegen::interp::fold_on::ON	env MAKEPAD_RUN_INTERP_STATS read once, nothing sets it
+relax_codegen::interp::frame_fold_on::ON	env MAKEPAD_RUN_INTERP_STATS read once, nothing sets it
+relax_codegen::interp::interp_stats::ON	env MAKEPAD_RUN_INTERP_STATS read once, nothing sets it
+relax_codegen::interp::no_coalesce::ON	env MAKEPAD_RUN_INTERP_STATS read once, nothing sets it
+relax_codegen::interp::no_codegen::N	env MAKEPAD_RUN_INTERP_STATS read once, nothing sets it
+relax_codegen::interp::preload_on::ON	env MAKEPAD_RUN_INTERP_STATS read once, nothing sets it
+relax_codegen::interp::selection::S	env memo
+relax_codegen::loops::merge_trace::ON	env MAKEPAD_RUN_MERGE_TRACE read once, nothing sets it
+relax_codegen::loops::unroll_trace::VALUE	env MAKEPAD_RUN_UNROLL_TRACE read once, nothing sets it
+relax_codegen::loops::zerofill_dump_dir::VALUE	env MAKEPAD_RUN_UNROLL_TRACE read once, nothing sets it
+relax_codegen::loops::zerofill_trace::VALUE	env MAKEPAD_RUN_UNROLL_TRACE read once, nothing sets it
+relax_codegen::native::compile_freq_inner::DUMP	env MAKEPAD_RUN_DUMP read once, nothing sets it
+relax_codegen::native::compile_native::ON	env MAKEPAD_RUN_INTERP_STATS read once, nothing sets it
+relax_codegen::native::install_probe::P	unit struct, probe vtable only (native.rs:64)
+relax_codegen::opt::inline_trace::T	env memo
+relax_codegen::opt::slotcoal_dump::VALUE	env MAKEPAD_RUN_SLOTCOAL_DUMP read once, nothing sets it
+relax_codegen::opt::slotcoal_trace::T	env memo
+relax_codegen::ranges::iv_trace::E	env MAKEPAD_RUN_IV_TRACE read once, nothing sets it
+relax_codegen::version::trace::E	env MAKEPAD_RUN_VERSION_TRACE read once, nothing sets it
+relax_codegen::warm::enabled::ON	env MAKEPAD_RUN_WARM_STRICT read once, nothing sets it
+relax_compiler::GLOBAL_ALLOC	allocator, unit struct
+relax_compiler::PROVENANCE_MARK	constant provenance mark in the binary
+relax_compiler::boundary::AUDIT	`--boundary` audit mode, no in-place restart
+relax_compiler::boundary::AUDIT_ON	`--boundary` audit mode, no in-place restart
+relax_compiler::boundary::REQUESTED	`--boundary` audit mode, no in-place restart
+relax_compiler::cache::FRONT_GRAPH_WRITER	lock
+relax_compiler::cache::PATHS	cache path memo
+relax_compiler::cache::RECORDS	monotone, spill_cache::SEEN compares against it
+relax_compiler::cache::SPILL_IO	IO lock
+relax_compiler::cache::collected::new::ON	env MAKEPAD_RUN_COLLECTED_TRACE read once, nothing sets it
+relax_compiler::cache::dump_filter::F	env MAKEPAD_RUN_CACHE_DUMP read once, nothing sets it
+relax_compiler::cache::front_run::RUNS	per-process store, content keys
+relax_compiler::cache::front_run::SINKS	per-process store, content keys
+relax_compiler::cache::prune::REPORTED	once per process
+relax_compiler::cache::prune::RUNS_CHECKED	once per process
+relax_compiler::cache::trace_on::T	env MAKEPAD_RUN_CACHE_TRACE read once, nothing sets it
+relax_compiler::check::SUBJECTS	`makepad test` only, the harness restarts by exec
+relax_compiler::check::TEST_DEPS	`makepad test` only, the harness restarts by exec
+relax_compiler::check::borrowck_unchecked::ON	env MAKEPAD_RUN_CHECK_TRACE read once, nothing sets it
+relax_compiler::check::check_trace::ON	env MAKEPAD_RUN_CHECK_TRACE read once, nothing sets it
+relax_compiler::codegen_id::front_id::ID	ids of the loader build
+relax_compiler::codegen_id::id::ID	ids of the loader build
+relax_compiler::ctfe::trace_on::ON	env MAKEPAD_RUN_CTFE_TRACE read once, nothing sets it
+relax_compiler::domain::CALLED_IN	so-far count of threads stuck in ended runs
+relax_compiler::domain::CHANGED	observer of the host
+relax_compiler::domain::ENDING	a block stays until its last thread is gone, must span runs
+relax_compiler::domain::FREED	lifetime bytes, inspect mem prints it
+relax_compiler::domain::NEXT_THREAD	ids are never reused
+relax_compiler::domain::OBSERVER	observer of the host
+relax_compiler::domain::RUN_END_WAKE	native host fn, set once (hal_host.rs:209)
+relax_compiler::domain::SCOPES	leaked records, destroy zeroes each base
+relax_compiler::domain::TEST_SERIAL	test-only: fixture or lock of a test
+relax_compiler::domain_res::FORKED	atfork child latch
+relax_compiler::first_frame::WINDOW_OPEN	window stays, second arm_window returns at once; resetting trips watch_window's process-age deadline
+relax_compiler::first_frame::WINDOW_THREAD	watcher ended with WINDOW_OPEN true, nothing unparks it again
+relax_compiler::forkexec::ENV	Once reading MAKEPAD_RUN_VERBOSE into VERBOSE, nothing sets it (forkexec.rs:72)
+relax_compiler::forkexec::EXEC_CHILD	set in the fork child only
+relax_compiler::forkexec::VERBOSE	env switch
+relax_compiler::forkexec::table::T	pointer to the shared anonymous page for fork bookkeeping; slots follow child pids, not a Unit (forkexec.rs:56)
+relax_compiler::front::verify::ON	env MAKEPAD_RUN_FRONT_VERIFY read once, nothing sets it
+relax_compiler::hot_failure::ACTIVE	a recovery spans the restart: the replacement's completed restore (restored) ends it (STATE keeps recovery)
+relax_compiler::hot_failure::ERROR	a failed restart's JIT error verdict: no run follows it in place
+relax_compiler::hot_failure::PUMP	lock around pump (hot_failure.rs:240), holds no state
+relax_compiler::hot_failure::REPLACEMENT	a recovery spans the restart: the replacement's completed restore (restored) ends it (STATE keeps recovery)
+relax_compiler::hot_failure::REPORTING	enable latch
+relax_compiler::hot_failure::RESTART_ERROR	a recovery spans the restart: the replacement's completed restore (restored) ends it (STATE keeps recovery)
+relax_compiler::hot_failure::WRITER	lock
+relax_compiler::hot_failure::id::NEXT	ids never reused (hot_failure.rs:41)
+relax_compiler::hot_failure::id::START	clock epoch used in ids of this process (hot_failure.rs:40)
+relax_compiler::inspect::AGENT	from args
+relax_compiler::inspect::APP	inspect server of the process stays
+relax_compiler::inspect::ENDPOINT	native host registration
+relax_compiler::inspect::HOST_COMMANDS	native host registration
+relax_compiler::inspect::HOST_PROVIDERS	native host registration
+relax_compiler::inspect::HOST_SERVICES	native host registration
+relax_compiler::inspect::OWNER_SEQ	ids are never reused
+relax_compiler::inspect::SCRIPT_STACK_PROVIDER	native host registration
+relax_compiler::inspect::SERVER_TIDS	inspect server of the process stays
+relax_compiler::inspect::STARTED	inspect server of the process stays
+relax_compiler::inspect::TEST_RUN	test harness endpoint, restarts by exec
+relax_compiler::inspect::TIDS	T labels must not repeat
+relax_compiler::inspect::VM_PROVIDER	native host registration
+relax_compiler::inspect::WATCH	inspect server of the process stays
+relax_compiler::inspect::activity::ACTS	server activity log
+relax_compiler::inspect::activity::CMDS	server activity log
+relax_compiler::inspect::asm::BUILDING	native build child of this process
+relax_compiler::inspect::asm::NATIVE	native baseline binary keyed by path and mtime
+relax_compiler::inspect::asm::NATIVE_PATH	native baseline binary keyed by path and mtime
+relax_compiler::inspect::capture::HOLDER	capture lock of the server
+relax_compiler::inspect::capture::SINCE_NS	capture lock of the server
+relax_compiler::inspect::capture::WHAT	capture lock of the server
+relax_compiler::inspect::cfi::INDEX	unwinder index of the images
+relax_compiler::inspect::cfi::REFRESH	lock
+relax_compiler::inspect::codever::NEXT_PIN	ids are never reused
+relax_compiler::inspect::engine_req::REPLIES	by design: a program restarted in place rebuilds from engine_replies(0) (engine_req.rs:10)
+relax_compiler::inspect::engine_req::REQUESTS	by design: a program restarted in place rebuilds from engine_replies(0) (engine_req.rs:10)
+relax_compiler::inspect::engine_req::SEQ	request ids never reused, pid-qualified (engine_req.rs:115)
+relax_compiler::inspect::engine_req::node_name::NODE	host name of the machine (engine_req.rs:75)
+relax_compiler::inspect::eval::NEXT	eval ids never reused (eval.rs:202)
+relax_compiler::inspect::events::EVENTS	bounded event log, consumers keep their cursor
+relax_compiler::inspect::events::MAKEPAD_RUN_RETRY_ON	derived from WATCHERS and RUN_STATE_AVAILABLE, both process; only says retry boundaries are wanted, loader symbol address stays (events.rs:141)
+relax_compiler::inspect::events::NEW	bounded event log, consumers keep their cursor
+relax_compiler::inspect::events::PANIC_IDS	ids must not repeat for readers with a cursor
+relax_compiler::inspect::events::RESUME	condvar
+relax_compiler::inspect::events::RUN_STATE_AVAILABLE	one-shot observer install
+relax_compiler::inspect::events::RUN_STATE_OBSERVER	one-shot observer install
+relax_compiler::inspect::events::SEQ	bounded event log, consumers keep their cursor
+relax_compiler::inspect::events::WATCHERS	remote watchers stay attached, open and close pair up
+relax_compiler::inspect::flightrec::APP_EVENTS	bounded retro rings across runs; pcs of ended code name wrong only in a report
+relax_compiler::inspect::flightrec::COUNTERS	bounded retro rings across runs; pcs of ended code name wrong only in a report
+relax_compiler::inspect::flightrec::DUMPS	bounded retro rings across runs; pcs of ended code name wrong only in a report
+relax_compiler::inspect::flightrec::DUMP_MS	env
+relax_compiler::inspect::flightrec::EVENTS	bounded retro rings across runs; pcs of ended code name wrong only in a report
+relax_compiler::inspect::flightrec::FRAMES	bounded retro rings across runs; pcs of ended code name wrong only in a report
+relax_compiler::inspect::flightrec::IDLE_PARK	park flag of the recorder thread
+relax_compiler::inspect::flightrec::INPUTS	bounded retro rings across runs; pcs of ended code name wrong only in a report
+relax_compiler::inspect::flightrec::INPUT_CUT	counter beside the bounded input ring
+relax_compiler::inspect::flightrec::JITS	bounded retro rings across runs; pcs of ended code name wrong only in a report
+relax_compiler::inspect::flightrec::LAST_AUTO	bounded retro rings across runs; pcs of ended code name wrong only in a report
+relax_compiler::inspect::flightrec::ON	bounded retro rings across runs; pcs of ended code name wrong only in a report
+relax_compiler::inspect::flightrec::PENDING	wake request for the recorder thread that stays, rings span runs (flightrec.rs:482)
+relax_compiler::inspect::flightrec::RUN	bounded retro rings across runs; pcs of ended code name wrong only in a report
+relax_compiler::inspect::flightrec::SAMPLES	bounded retro rings across runs; pcs of ended code name wrong only in a report
+relax_compiler::inspect::flightrec::THREAD	bounded retro rings across runs; pcs of ended code name wrong only in a report
+relax_compiler::inspect::heap::AT_LOAD	from args
+relax_compiler::inspect::heap::CALLOC_T	one-shot veneers, native addresses
+relax_compiler::inspect::heap::FREE_T	one-shot veneers, native addresses
+relax_compiler::inspect::heap::HOST	host heap tracker: compiler's own heap sampled, blocks do get frees; sibling PROGRAM is the run's one (heap.rs:955)
+relax_compiler::inspect::heap::MALLOC_T	one-shot veneers, native addresses
+relax_compiler::inspect::heap::MEMALIGN_T	one-shot veneers, native addresses
+relax_compiler::inspect::heap::PENDING_PROGRAM	consumed once under init_real's ONCE
+relax_compiler::inspect::heap::REAL	one-shot veneers, native addresses
+relax_compiler::inspect::heap::REALLOC_T	one-shot veneers, native addresses
+relax_compiler::inspect::heap::RUST_ALLOC_T	one-shot veneers, native addresses
+relax_compiler::inspect::heap::RUST_FREE_T	one-shot veneers, native addresses
+relax_compiler::inspect::heap::RUST_REALLOC_T	one-shot veneers, native addresses
+relax_compiler::inspect::heap::RUST_ZERO_T	one-shot veneers, native addresses
+relax_compiler::inspect::heap::host_depth::D	env MAKEPAD_RUN_HEAP_DEPTH read once, nothing sets it
+relax_compiler::inspect::heap::init_real::ONCE	one-shot veneers, native addresses
+relax_compiler::inspect::instrument::GO	condvar
+relax_compiler::inspect::instrument::NEXT_GROUP	ids are never reused
+relax_compiler::inspect::instrument::PARK_IDS	ids are never reused
+relax_compiler::inspect::instrument::SNAP_SEQ	ids are never reused
+relax_compiler::inspect::mem::MARKS	bounded ring
+relax_compiler::inspect::mem::RING	bounded ring
+relax_compiler::inspect::mem::RING_STEP	stride of the bounded ring, which stays
+relax_compiler::inspect::mem::SNAPS	process memory snapshots, a diff across runs is valid
+relax_compiler::inspect::pe_unwind::INDEX	index of loaded OS modules, self-validating: replaced when modules change (pe_unwind.rs:173)
+relax_compiler::inspect::pe_unwind::REFRESH	lock; cfg-off: windows x64
+relax_compiler::inspect::probes::NEXT	probe ids never reused (probes.rs:536)
+relax_compiler::inspect::probes::SEQ	event sequence never reused (probes.rs:162)
+relax_compiler::inspect::pstream::ELIDE_NS	viewers and rings stay
+relax_compiler::inspect::pstream::FREE	stream rings, reusable
+relax_compiler::inspect::pstream::LABELS	closed only during a run's end, open again at its reset
+relax_compiler::inspect::pstream::JIT	bounded log, viewers keep their cursor
+relax_compiler::inspect::pstream::NAMES	stream rings, reusable
+relax_compiler::inspect::pstream::NO_RING	viewers and rings stay
+relax_compiler::inspect::pstream::RINGS	stream rings, reusable; a run's end cuts their records (Ring.floor)
+relax_compiler::inspect::pstream::RING_BYTES	stream rings, reusable
+relax_compiler::inspect::pstream::VIEWERS	viewers and rings stay
+relax_compiler::inspect::run_view::REQUEST	request of the server's view to the host loop
+relax_compiler::inspect::run_view::STATE	view of the server across runs
+relax_compiler::inspect::run_view::WAKE	view of the server across runs
+relax_compiler::inspect::symbols::IMAGES	native images
+relax_compiler::inspect::threads::imp::HOLDS	slot frees on release; a thread held for good keeps its slot
+relax_compiler::inspect::threads::imp::SIGNAL	signal number chosen once
+relax_compiler::inspect::threads::imp::tid_of_handle::OFF	pthread struct offset measured once, OS fact (threads.rs:473)
+relax_compiler::inspect::tierlog::RING	bounded ring; cursor must stay
+relax_compiler::inspect::timeline::EPOCH	the timeline session stays, readers diff
+relax_compiler::inspect::timeline::FRAMES	timeline counters, readers diff them
+relax_compiler::inspect::timeline::FRAME_WATCH	the timeline session stays, readers diff
+relax_compiler::inspect::timeline::HITCHES	timeline counters, readers diff them
+relax_compiler::inspect::timeline::HITCH_LAST_NS	timeline counters, readers diff them
+relax_compiler::inspect::timeline::HITCH_NS	timeline counters, readers diff them
+relax_compiler::inspect::timeline::HITCH_SKIPPED	the timeline session stays, readers diff
+relax_compiler::inspect::timeline::HITCH_WINDOW	timeline counters, readers diff them
+relax_compiler::inspect::timeline::MAKEPAD_RUN_RECORDING	marker flag from the timeline session, which stays; address given to code via loader symbol (timeline.rs:48)
+relax_compiler::inspect::timeline::QUIET	timeline counters, readers diff them
+relax_compiler::inspect::timeline::QUIET_CUT	the latest reader mark of the QUIET count
+relax_compiler::inspect::timeline::QUIET_TAKEN	timeline counters, readers diff them
+relax_compiler::inspect::timeline::QUIET_TAKEN_CUT	timeline counters, readers diff them
+relax_compiler::inspect::timeline::QUIET_WOKE	bounded ring under the QUIET count; readers diff it
+relax_compiler::inspect::timeline::RINGS_ON	the timeline session stays, readers diff
+relax_compiler::inspect::timeline::STARTED_NS	the timeline session stays, readers diff
+relax_compiler::inspect::timeline::STOPPED_NS	the timeline session stays, readers diff
+relax_compiler::inspect::watch::NEXT	watch ids never reused (watch.rs:314)
+relax_compiler::jit::ABANDONED_FRAMES	a frame's held lock stays held, the report says so far
+relax_compiler::jit::AHEAD_DONE	mutex and condvar pair, no value
+relax_compiler::jit::APP_CALLERS	caller count over host threads that stay
+relax_compiler::jit::APP_CALLERS_KICK	caller count over host threads that stay
+relax_compiler::jit::AUX_UNITS_ANY	gate, true is safe
+relax_compiler::jit::BACK_END_GATE	test only
+relax_compiler::jit::BACK_END_THREAD	test only
+relax_compiler::jit::BG_CV	condvar, no value
+relax_compiler::jit::BG_MX	lock
+relax_compiler::jit::BUDGET_RUN	program run flag; the restarted run is one too
+relax_compiler::jit::BUILD_GEN	monotone generation, waiters compare for change
+relax_compiler::jit::CHECK_FAILURES	`makepad check` only
+relax_compiler::jit::CHECK_FIRST	`--check-first` arg, same next run (run.rs:812)
+relax_compiler::jit::COMPILE_LAST	last-compile time on a monotonic clock; old is right
+relax_compiler::jit::DEMAND_BUSY_NS	tier_clock offset, slots of the new Unit only hold later readings
+relax_compiler::jit::DEMAND_LAST	last-compile time on a monotonic clock; old is right
+relax_compiler::jit::DEMAND_SINCE	tier_clock offset, slots of the new Unit only hold later readings
+relax_compiler::jit::EXEC_CHECK	no-codegen or env switch
+relax_compiler::jit::FRONT_RW	lock, no value; must be unheld when threads end, or the next run wedges
+relax_compiler::jit::LOWER_AHEAD_DONE	mutex and condvar pair, no value
+relax_compiler::jit::PATCH_EPOCH	monotone, only compared with captured epochs of itself
+relax_compiler::jit::SPARE_TLS_BLOCKS	zeroed spare blocks
+relax_compiler::jit::SPECV_RELEASES	monotone
+relax_compiler::jit::SWAP_T0	start time of one swap, overwritten
+relax_compiler::jit::TIER_GEN	monotone, compared for change
+relax_compiler::jit::TLS_KEY	OS key
+relax_compiler::jit::TLS_USED	fetch_max of a size, too large is safe
+relax_compiler::jit::WATCHDOG_ID	watchdog thread stays
+relax_compiler::jit::WATCHDOG_WAKE	watchdog thread stays
+relax_compiler::jit::WATCH_DUMP	env MAKEPAD_RUN_COMPILE_WATCH: its watcher is spawned once and stays, values compared only with themselves
+relax_compiler::jit::WATCH_LAST	env MAKEPAD_RUN_COMPILE_WATCH: its watcher is spawned once and stays, values compared only with themselves
+relax_compiler::jit::WATCH_PREV	env MAKEPAD_RUN_COMPILE_WATCH: its watcher is spawned once and stays, values compared only with themselves
+relax_compiler::jit::WATCH_ROUND	env MAKEPAD_RUN_COMPILE_WATCH: its watcher is spawned once and stays, values compared only with themselves
+relax_compiler::jit::WATCH_STEPS	env MAKEPAD_RUN_COMPILE_WATCH: its watcher is spawned once and stays, values compared only with themselves
+relax_compiler::jit::ahead_check_diag::ON	env MAKEPAD_RUN_MAIN_COMPILE_LOG read once, nothing sets it
+relax_compiler::jit::ahead_trace::ON	env MAKEPAD_RUN_MAIN_COMPILE_LOG read once, nothing sets it
+relax_compiler::jit::backend_bench_on::B	env MAKEPAD_RUN_PERF_MAP read once, nothing sets it
+relax_compiler::jit::bmemo::on::ENV	env MAKEPAD_RUN_INTERP read once, nothing sets it
+relax_compiler::jit::build_rir_lowered_as::SLOW	env MAKEPAD_RUN_SLOW_TYPECK_US read once, nothing sets it
+relax_compiler::jit::busy::ACTIVITY	monotone, the latch compares tick to tick
+relax_compiler::jit::canon_slots::ON	env MAKEPAD_RUN_MAIN_COMPILE_LOG read once, nothing sets it
+relax_compiler::jit::churn_on::E	env MAKEPAD_RUN_DUMP_RIR read once, nothing sets it
+relax_compiler::jit::code_sig::F	env MAKEPAD_RUN_CODE_SIG read once, nothing sets it
+relax_compiler::jit::compile_tier1::EACH	env MAKEPAD_RUN_DUMP_EACH read once, nothing sets it
+relax_compiler::jit::compile_watch::ON	env MAKEPAD_RUN_MAIN_COMPILE_LOG read once, nothing sets it
+relax_compiler::jit::debug_env::E	env MAKEPAD_RUN_DUMP_RIR read once, nothing sets it
+relax_compiler::jit::deferred_trace::ON	env MAKEPAD_RUN_MAIN_COMPILE_LOG read once, nothing sets it
+relax_compiler::jit::drain_slow_base::LAST_FORGET	rate limit on a monotonic clock
+relax_compiler::jit::dump_base::DUMP	env MAKEPAD_RUN_DUMP read once, nothing sets it
+relax_compiler::jit::dump_base::EACH	env MAKEPAD_RUN_DUMP_EACH read once, nothing sets it
+relax_compiler::jit::dump_base::N	file-name counter never reused (jit.rs:14945)
+relax_compiler::jit::dump_canon::VALUE	env MAKEPAD_RUN_DUMP_CANON read once, nothing sets it
+relax_compiler::jit::dump_input::VALUE	env MAKEPAD_RUN_DUMP_CANON read once, nothing sets it
+relax_compiler::jit::dump_ship::VALUE	env MAKEPAD_RUN_DUMP_CANON read once, nothing sets it
+relax_compiler::jit::enter::ON	env MAKEPAD_RUN_MAIN_COMPILE_LOG read once, nothing sets it
+relax_compiler::jit::exec_check::DONE	one-shot hook install
+relax_compiler::jit::field_prof_on::E	env MAKEPAD_RUN_DUMP_RIR read once, nothing sets it
+relax_compiler::jit::foreign_addr::SAID	log dedupe
+relax_compiler::jit::front_holders::SINCE	rows freed by guard or TLS drop, diagnostics only
+relax_compiler::jit::front_holders::SITE	rows freed by guard or TLS drop, diagnostics only
+relax_compiler::jit::front_holders::SITE_LEN	rows freed by guard or TLS drop, diagnostics only
+relax_compiler::jit::front_holders::TID	rows freed by guard or TLS drop, diagnostics only
+relax_compiler::jit::front_holders::UNLISTED	count of a table overflow
+relax_compiler::jit::front_trace::ON	env MAKEPAD_RUN_MAIN_COMPILE_LOG read once, nothing sets it
+relax_compiler::jit::history::EMPTY	empty constant returned when a slot has no history (jit.rs:198)
+relax_compiler::jit::install_ice_hook::DONE	one-shot hook install
+relax_compiler::jit::interp_trace::ON	env MAKEPAD_RUN_MAIN_COMPILE_LOG read once, nothing sets it
+relax_compiler::jit::is_realtime_thread::NAMES	env MAKEPAD_RUN_RT_THREADS read once, nothing sets it
+relax_compiler::jit::job_rows::SINCE	rows freed by guard or TLS drop, diagnostics only
+relax_compiler::jit::job_rows::TID	rows freed by guard or TLS drop, diagnostics only
+relax_compiler::jit::loops_on::ON	env MAKEPAD_RUN_MAIN_COMPILE_LOG read once, nothing sets it
+relax_compiler::jit::main_compile_log::ON	env MAKEPAD_RUN_MAIN_COMPILE_LOG read once, nothing sets it
+relax_compiler::jit::new::NEXT	checker ids never reused (jit.rs:23556)
+relax_compiler::jit::new::ONCE	atexit registration once per process (jit.rs:4270)
+relax_compiler::jit::o1_inline_limits::FNS	env MAKEPAD_RUN_O1_INLINE_FN read once, nothing sets it
+relax_compiler::jit::o2_trace::T	env MAKEPAD_RUN_O2_TRACE read once, nothing sets it
+relax_compiler::jit::o3_progress_write::PATH	env
+relax_compiler::jit::optimize_rir_inner::HIST_ON	env MAKEPAD_RUN_OPT_HIST read once, nothing sets it
+relax_compiler::jit::perf_map::MAP	env file
+relax_compiler::jit::perf_map_on::ON	env MAKEPAD_RUN_MAIN_COMPILE_LOG read once, nothing sets it
+relax_compiler::jit::pgo_hold::ON	env MAKEPAD_RUN_MAIN_COMPILE_LOG read once, nothing sets it
+relax_compiler::jit::prep_inline_stats::ON	env MAKEPAD_RUN_MAIN_COMPILE_LOG read once, nothing sets it
+relax_compiler::jit::prep_verify::ON	env MAKEPAD_RUN_MAIN_COMPILE_LOG read once, nothing sets it
+relax_compiler::jit::present_files::ON	env MAKEPAD_RUN_MAIN_COMPILE_LOG read once, nothing sets it
+relax_compiler::jit::profile_path::P	env memo
+relax_compiler::jit::profiled_heat::LAST	rate limit on a monotonic clock
+relax_compiler::jit::queue::FORKED	fork child latch
+relax_compiler::jit::queue::SOURCE	unit struct, drain source (jit_queue.rs:422)
+relax_compiler::jit::quit_compile_note::LOG	env MAKEPAD_RUN_QUIT_LOG read once, nothing sets it
+relax_compiler::jit::reloc_sig_on::ON	env MAKEPAD_RUN_MAIN_COMPILE_LOG read once, nothing sets it
+relax_compiler::jit::rt_trace::ON	env MAKEPAD_RUN_MAIN_COMPILE_LOG read once, nothing sets it
+relax_compiler::jit::rt_wait_ns::NS	env
+relax_compiler::jit::sample_periods::PERIODS	env
+relax_compiler::jit::sample_trace::T	env MAKEPAD_RUN_O2_TRACE read once, nothing sets it
+relax_compiler::jit::sampler_thread::T0	clock epoch of sampler log lines (jit.rs:15363)
+relax_compiler::jit::settle_div::D	env MAKEPAD_RUN_CODE_SIG_DIR read once, nothing sets it
+relax_compiler::jit::settle_rebuild::enabled::ON	env MAKEPAD_RUN_SETTLE_REBUILD read once, nothing sets it
+relax_compiler::jit::settle_rebuild::trace::ON	env MAKEPAD_RUN_SETTLE_REBUILD read once, nothing sets it
+relax_compiler::jit::settle_trace::T	env MAKEPAD_RUN_O2_TRACE read once, nothing sets it
+relax_compiler::jit::sig_dir::D	env MAKEPAD_RUN_CODE_SIG_DIR read once, nothing sets it
+relax_compiler::jit::site_file::FILES	file-name memo
+relax_compiler::jit::specv_hold_ms::MS	env MAKEPAD_RUN_SPECV_HOLD read once, nothing sets it
+relax_compiler::jit::specv_trace::T	env MAKEPAD_RUN_O2_TRACE read once, nothing sets it
+relax_compiler::jit::static_trace::ON	env MAKEPAD_RUN_MAIN_COMPILE_LOG read once, nothing sets it
+relax_compiler::jit::sweep_verdicts::SWEEP_AT	rate limit on a monotonic clock
+relax_compiler::jit::test_compile_panic::WANT	env MAKEPAD_RUN_TEST_HOT_BUILD_ERROR read once, nothing sets it
+relax_compiler::jit::test_hot_build_error::WANT	env MAKEPAD_RUN_TEST_HOT_BUILD_ERROR read once, nothing sets it
+relax_compiler::jit::test_hot_build_error::WANT_REPLACEMENT	env MAKEPAD_RUN_TEST_REPLACEMENT_BUILD_ERROR read once, nothing sets it
+relax_compiler::jit::test_hot_compile_panic::WANT	env MAKEPAD_RUN_TEST_HOT_BUILD_ERROR read once, nothing sets it
+relax_compiler::jit::tier1_install_trace::ON	env MAKEPAD_RUN_MAIN_COMPILE_LOG read once, nothing sets it
+relax_compiler::jit::tier1_optimize::INLINE_STATS	env MAKEPAD_RUN_INLINE_STATS read once, nothing sets it
+relax_compiler::jit::tier1_stats_on::ON	env MAKEPAD_RUN_MAIN_COMPILE_LOG read once, nothing sets it
+relax_compiler::jit::tier1_trace::T	env MAKEPAD_RUN_O2_TRACE read once, nothing sets it
+relax_compiler::jit::tls_key::CREATE	lock
+relax_compiler::jit::tls_trace::ON	env MAKEPAD_RUN_MAIN_COMPILE_LOG read once, nothing sets it
+relax_compiler::jit::trace::SPEC	env MAKEPAD_RUN_TRACE read once, nothing sets it
+relax_compiler::jit::trace_on::T	env MAKEPAD_RUN_O2_TRACE read once, nothing sets it
+relax_compiler::jit::trace_stored_verdict::ON	env MAKEPAD_RUN_MAIN_COMPILE_LOG read once, nothing sets it
+relax_compiler::jit::update_sampler_settled::SETTLE_ON	env MAKEPAD_RUN_SAMPLE_MS read once, nothing sets it
+relax_compiler::jit::watchdog::START	Once of the watchdog thread, a loop that stays and reads WATCHDOG_CALLS (jit.rs:7961)
+relax_compiler::kernel_store::KERNEL_COMPILER	source identity of the compute crate of this binary (kernel_store.rs:43)
+relax_compiler::kernel_store::STATE	kernel store of the process, content keys
+relax_compiler::lifeline::BEAT	appended per thread, survivors' TLS INDEX forbids clearing; past SLOTS new threads lose beats
+relax_compiler::lifeline::REG	appended per thread, survivors' TLS INDEX forbids clearing; past SLOTS new threads lose beats
+relax_compiler::lifeline::STATE	per thread-entry state next to process-kept REG and BEAT; rows are appended, survivors keep TLS indexes (lifeline.rs:134)
+relax_compiler::lower::coro_trace::ON	env MAKEPAD_RUN_TRACE read once, nothing sets it
+relax_compiler::lower::coro_trace_level::ON	env MAKEPAD_RUN_TRACE read once, nothing sets it
+relax_compiler::lower::coro_transform_trace::ON	env MAKEPAD_RUN_TRACE read once, nothing sets it
+relax_compiler::lower::coro_verify::V	env MAKEPAD_RUN_CORO_VERIFY read once, nothing sets it
+relax_compiler::mainprof::enabled::E	env MAKEPAD_RUN_PROFILE_MAIN read once, nothing sets it
+relax_compiler::modules::NEXT_HOST	ids are never reused
+relax_compiler::modules::load_src_inner::N	temp file counter never reused (modules.rs:1056)
+relax_compiler::modules::module_trace::ON	env MAKEPAD_RUN_MODULE_TRACE read once, nothing sets it
+relax_compiler::native_macros::UPDATE	lock
+relax_compiler::os::fault::SPARE_ALTSTACKS	spare stacks, reusable
+relax_compiler::os::fault::imp::FAULT_REGS	env; cfg-off: apple
+relax_compiler::os::fault::imp::WATCHDOG	signal number chosen once; cfg-off: android
+relax_compiler::os::fault::imp::trace::T	env MAKEPAD_RUN_FAULT_TRACE read once, nothing sets it
+relax_compiler::os::mem::NO_CODEGEN	env
+relax_compiler::os::mem::imp::BITS	committed code granules, code only grows; siblings REGIONS process (os/mem.rs:1135)
+relax_compiler::os::mem::imp::CODE_REGIONS	region table, a slot empties only on release: 64 slots, then panic; cfg-off: apple
+relax_compiler::os::mem::imp::CODE_REGIONS_LOCK	lock; cfg-off: apple
+relax_compiler::os::mem::imp::CODE_REGIONS_N	region table, a slot empties only on release: 64 slots, then panic; cfg-off: apple
+relax_compiler::os::mem::imp::ENDED_FROM	append-only reservation table, ended ranges must span runs; cfg-off: windows
+relax_compiler::os::mem::imp::FORK_FD	filled by fork_prepare around a fork
+relax_compiler::os::mem::imp::LAST	memfd region table, code only grows
+relax_compiler::os::mem::imp::REGIONS	memfd region table, code only grows
+relax_compiler::os::mem::imp::REGIONS_LOCK	lock
+relax_compiler::os::mem::imp::REGIONS_N	memfd region table, code only grows
+relax_compiler::os::mem::imp::REGION_FD	memfd region table, code only grows
+relax_compiler::os::mem::imp::RES	append-only reservation table, ended ranges must span runs; cfg-off: windows
+relax_compiler::os::mem::imp::RES_LOCK	lock; cfg-off: windows
+relax_compiler::os::mem::imp::RES_N	append-only reservation table, ended ranges must span runs; cfg-off: windows
+relax_compiler::os::mem::imp::WX_FAILED	machine fact; cfg-off: windows
+relax_compiler::os::mem::imp::code_alloc_at::ATFORK	one-shot install; cfg-off: apple
+relax_compiler::os::mem::imp::wx::ON	env MAKEPAD_RUN_WX read once, nothing sets it
+relax_compiler::os::mem::page_size::PAGE	machine fact
+relax_compiler::os::proc::ARGS	args of the process
+relax_compiler::os::proc::EMBEDDED	a host owns this process
+relax_compiler::os::proc::imp::HOST_LIBRARY	library handle of the host; cfg-off: android
+relax_compiler::os::proc::imp::LOADED	dlopen handles of the process; libraries stay loaded (os/proc.rs:506)
+relax_compiler::os::proc::imp::POOL	Android: no in-place restart there
+relax_compiler::os::proc::imp::find::UCRT	library handle; cfg-off: windows
+relax_compiler::os::thread::unix::names::TABLE	thread names by id
+relax_compiler::os::tls::fixed::BASE	offset of the reserve from the thread pointer, a fact of this binary (os/tls.rs:112)
+relax_compiler::os::tls::fixed::NEXT	handed out once per process, survivors hold old offsets; each run burns offsets and the 16 KB reserve falls to the block path
+relax_compiler::os::tls::imp::DTOR	native dtor, overwritten with the same fn; cfg-off: windows
+relax_compiler::owner::BETWEEN_REQUESTS	marker address, never read (owner.rs:261)
+relax_compiler::owner::CHILD	fork child latch
+relax_compiler::owner::NOW_CLASS	what the owner serves now, overwritten
+relax_compiler::owner::NOW_FROM	what the owner serves now, overwritten
+relax_compiler::owner::NOW_SITE	what the owner serves now, overwritten
+relax_compiler::owner::OWNER_ASLEEP	park flag of the owner
+relax_compiler::owner::OWNER_JOIN	owner::stop takes it
+relax_compiler::owner::OWN_WORK_TEST	test-only: fixture or lock of a test
+relax_compiler::owner::Q	owner queue, empty once threads ended
+relax_compiler::owner::RECENT	rings and monotone count
+relax_compiler::owner::RECENT_AT	rings and monotone count
+relax_compiler::owner::RECENT_LONG	rings and monotone count
+relax_compiler::owner::RECENT_LONG_AT	rings and monotone count
+relax_compiler::owner::SERVED	rings and monotone count
+relax_compiler::owner::SPIN_PER_US	machine fact
+relax_compiler::owner::WAKE	owner queue, empty once threads ended
+relax_compiler::owner::calibrate::PROBE	spin target of the calibration, always 0 (owner.rs:99)
+relax_compiler::pack::MAPPINGS	every cache mapping, removed at unmap (forget_mapping); outlives compiler generations
+relax_compiler::pmhost::BUILDING	lock
+relax_compiler::pmhost::JIT_RUNNER	unit struct, runner vtable (pmhost.rs:114)
+relax_compiler::pmhost::POLICY	one policy per process, chosen by the entry point
+relax_compiler::postframe::LOG	env log file
+relax_compiler::postframe::UI_WAIT_HOOK	native host fn
+relax_compiler::postframe::owner_long_all::ALL	env MAKEPAD_RUN_OWNER_LONG read once, nothing sets it
+relax_compiler::provided::REGISTRY	registered before cli_main, native shims
+relax_compiler::reload::BEFORE_EXEC	native host hand-over fns, still used by a real exec
+relax_compiler::reload::DOMAIN_REVISION	monotone; a new watcher starts from 0 and does one extra rescan
+relax_compiler::reload::RESTART_BEGINS	host hook fn set once, the window's start screen (reload.rs:4980)
+relax_compiler::reload::SESSION	this process's edits
+relax_compiler::reload::TRACE	unit struct, only a path to TRACE_CELL, which is env trace (reload.rs:58)
+relax_compiler::reload::TRACE_CELL	env trace
+relax_compiler::reload::TRANSACTIONS	monotone ids
+relax_compiler::reload::WATCH_READY	condvar, no value
+relax_compiler::reload::apply_mode::PATCHING	lock
+relax_compiler::reload::gate_note::LAST	log dedupe
+relax_compiler::reload::host::HANDOVER	handover to a rebuilt makepad, still an exec
+relax_compiler::reload::host::HARNESS_RESTART	live test session only, the harness restarts by exec
+relax_compiler::reload::host::LOADED	facts of the loader binary, which stays
+relax_compiler::reload::host::PACKAGE	facts of the loader binary, which stays
+relax_compiler::reload::host::STATE	the JIT's own update: the build under way and what waits belong to the process, which that update execs
+relax_compiler::reload::host::RESTART_AFTER_BUILD	the build belongs to the process and ends in an exec
+relax_compiler::reload::host::loader::LOADER	path of this binary, env set only at runner start (runner/src/lib.rs:148); "what this process runs" (reload_host.rs:40)
+relax_compiler::reload::inputs::add_runner::RUNNER	facts of the loader binary, which stays
+relax_compiler::reload::live_log::LOCK	lock
+relax_compiler::reload::live_trace::ON	env MAKEPAD_RUN_RELOAD_TRACE read once, nothing sets it
+relax_compiler::reload::reload_trace::ON	env MAKEPAD_RUN_RELOAD_TRACE read once, nothing sets it
+relax_compiler::reload::stream_timing::ON	env MAKEPAD_RUN_RELOAD_TRACE read once, nothing sets it
+relax_compiler::reload::trace_patch_wait::LAST	log dedupe
+relax_compiler::reload::verdict_key::VERDICT	verdict key counter never reused (reload.rs:5114)
+relax_compiler::reload::watch_events::native::KICK	wake of the OS watcher, a stale true costs one poll; cfg-off: macos
+relax_compiler::reload::watch_events::native::flush::N	flush marker counter never reused (reload_watch.rs:324)
+relax_compiler::reload::watch_events::native::kick_fd::FD	eventfd of the process
+relax_compiler::reload::watch_events::native::port::PORT	OS completion port; cfg-off: windows
+relax_compiler::run::CHECK_RECORDS_COLLECTED	`makepad check` only
+relax_compiler::run::HARNESS_RUN	`makepad test` only, the harness restarts by exec
+relax_compiler::run::HOSTED_RUN	set only in cmd_run, which restart skips
+relax_compiler::run::MAIN_HOST	native host, set once
+relax_compiler::run::ONE	lock
+relax_compiler::run::QUIET	from args, same next run, only ever set true
+relax_compiler::run::REPORT_FILE	launcher FIFO, reopened by --report-to
+relax_compiler::run::REPORT_PATH	env MAKEPAD_RUN_REPORT, same next run
+relax_compiler::run::SILENT	from args, same next run, only ever set true
+relax_compiler::run::YIELD_SECTION	static label, overwritten
+relax_compiler::run::cmd_run_inner::AT_EXIT	the process's atexit handler, installed once
+relax_compiler::run::exit_trace::ON	env MAKEPAD_RUN_LINK_TRACE read once, nothing sets it
+relax_compiler::run::flush_errors::FLUSHED	compared to monotone SERVED and RECORDS
+relax_compiler::run::link_trace::ON	env MAKEPAD_RUN_LINK_TRACE read once, nothing sets it
+relax_compiler::run::spill_cache::LIM	env MAKEPAD_RUN_CACHE_SPILL_MB read once, nothing sets it
+relax_compiler::run::spill_cache::SEEN	compared to monotone SERVED and RECORDS
+relax_compiler::run::start_monitor::STEP	env MAKEPAD_RUN_MEM_TRIM_GROWTH_MB read once, nothing sets it
+relax_compiler::run_end::NATIVE_END	native host hook, set once
+relax_compiler::run_end::RESTARTING	run_end's own latch
+relax_compiler::run_end::leftovers::START	the test's start image
+relax_compiler::sandbox::sandbox_dump::VALUE	env MAKEPAD_RUN_SANDBOX_DUMP read once, nothing sets it
+relax_compiler::serve_os::STOP	serve mode, stored false at its start, not a run
+relax_compiler::stale::RUN_ENDS	monotone gate of in_ended_run: the ended runs' ranges stay
+relax_compiler::stale::WAKE_R	pipe of the run-stale watcher, which its ONCE spawns once and which must stay
+relax_compiler::stale::WAKE_W	pipe of the run-stale watcher, which its ONCE spawns once and which must stay
+relax_compiler::stale::start_watcher::ONCE	Once of the run-stale watcher thread, which stays (stale.rs:251)
+relax_compiler::std_dir::HINT	path hint
+relax_compiler::std_source::SELECTED	std selection needs one check per process
+relax_compiler::store::GENS	current_gen rechecks the disk on every look
+relax_compiler::store::HELD	shared build lock, held until process exit by design
+relax_compiler::store::LIVE	files this process opened, kept from eviction; only grows, no wrong behaviour
+relax_compiler::store::OPEN_FILES	files this process opened, kept from eviction; only grows, no wrong behaviour
+relax_compiler::store::PROGRAMS	store sets by root identity, a later call replaces the same key
+relax_compiler::store::profiling::P	env MAKEPAD_RUN_PROFILE read once, nothing sets it
+relax_compiler::syms::reloc_sig::F	env MAKEPAD_RUN_RELOC_SIG read once, nothing sets it
+relax_compiler::syms::reloc_sig_code::VALUE	env MAKEPAD_RUN_RELOC_SIG_CODE read once, nothing sets it
+relax_compiler::syms::reloc_sig_verbose::ON	env MAKEPAD_RUN_RELOC_SIG_VERBOSE read once, nothing sets it
+relax_compiler::tui::ABNORMAL	the session log spans the runs: a bad run's part stays kept
+relax_compiler::tui::EXIT_CODE	read once at the real exit
+relax_compiler::tui::ITEMS	per-thread item slots, overwritten
+relax_compiler::tui::KEEP_LOG	the session log spans the runs: a bad run's part stays kept
+relax_compiler::tui::NEXT_SLOT	per-thread item slots, overwritten
+relax_compiler::tui::SESSION_LOG	tee and transcript stay, provided the restart path does not call tui::finish
+relax_compiler::tui::TRACK	set once with the tee
+relax_compiler::tui::VERBOSE_LIST	from args
+relax_compiler::tui::unix::FORWARD	tee and transcript stay, provided the restart path does not call tui::finish
+relax_compiler::tui::unix::OUT	tee and transcript stay, provided the restart path does not call tui::finish
+relax_compiler::tui::unix::READER	tee and transcript stay, provided the restart path does not call tui::finish
+relax_compiler::tui::unix::STATE	tee and transcript stay, provided the restart path does not call tui::finish
+relax_compiler::tui::unix::TEE	tee and transcript stay, provided the restart path does not call tui::finish
+relax_compiler::wasm_export::block_profile::ON	env MAKEPAD_RUN_WASM_EXPORT_STATS read once, nothing sets it
+relax_compiler::wasm_export::enabled::ON	env MAKEPAD_RUN_WASM_EXPORT_STATS read once, nothing sets it
+relax_compiler::wasm_export::full_o1::ON	env MAKEPAD_RUN_WASM_EXPORT_STATS read once, nothing sets it
+relax_compiler::wasm_export::hot_fraction::F	env MAKEPAD_RUN_WASM_EXPORT_HOT read once, nothing sets it
+relax_compiler::wasm_export::module_inline_on::ON	env MAKEPAD_RUN_WASM_EXPORT_STATS read once, nothing sets it
+relax_compiler::wasm_export::new_unit::NEXT	unit ids never reused (wasm_export.rs:33)
+relax_compiler::wasm_export::o1_folds::ON	env MAKEPAD_RUN_WASM_EXPORT_STATS read once, nothing sets it
+relax_compiler::wasm_export::o1_inline_limits::L	parsed env limits per var name, nothing sets those vars (wasm_export.rs:1446)
+relax_compiler::wasm_export::o3_cold_tiny::ON	env MAKEPAD_RUN_WASM_EXPORT_STATS read once, nothing sets it
+relax_compiler::wasm_export::o3_crate::C	env memo
+relax_compiler::wasm_export::o3_lto::ON	env MAKEPAD_RUN_WASM_EXPORT_STATS read once, nothing sets it
+relax_compiler::wasm_export::o3_policy::P	env MAKEPAD_RUN_WASM_EXPORT_INLINE read once, nothing sets it
+relax_compiler::wasm_export::prepare_shipping::PROFILE	env memo
+relax_compiler::wasm_export::size_first_on::ON	env MAKEPAD_RUN_WASM_EXPORT_STATS read once, nothing sets it
+relax_compiler::wasm_export::stats_on::ON	env MAKEPAD_RUN_WASM_EXPORT_STATS read once, nothing sets it
+relax_compiler::wasm_export::untraced_on::ON	env MAKEPAD_RUN_WASM_EXPORT_STATS read once, nothing sets it
+relax_compiler::web::EMBEDDER	native embedder lookup
+relax_front::def_collector::NO_NAMES	empty set constant (def_collector.rs:25)
+relax_front::feature_tables::ACCEPTED	constant table
+relax_front::feature_tables::GATED_ATTRS	constant table
+relax_front::feature_tables::GATED_CFGS	constant table
+relax_front::feature_tables::REMOVED	constant table
+relax_front::feature_tables::UNSTABLE	constant table
+relax_front::lang_items::LANG_ITEM_DATA	constant table
+relax_front::load_profile::epoch::EPOCH	clock epoch of load events
+relax_front::macro_reg::RUNNER	host hook, points to JitRunner, a unit struct (macro_reg.rs:43, pmhost.rs:114)
+relax_front::macro_reg::STATS	unit struct, access path to STATS_CELL (macro_reg.rs:323)
+relax_front::macros::LOOKUP_INPUT_IDS	lookup ids never reused (macros.rs:421)
+relax_front::macros::SCOPE_IDS	scope ids never reused (macros.rs:1071)
+relax_front::parser::lazy_stats_on::E	env MAKEPAD_RUN_LAZY_STATS read once, nothing sets it
+relax_front::parser::verify_tokens::V	env MAKEPAD_RUN_VERIFY_TOKENS read once, nothing sets it
+relax_front::preload::VERIFY	host hook, verify_file fn set once (run.rs:1142)
+relax_front::preload::lazy::forced_deferral::LIST	env MAKEPAD_RUN_LAZY_DEFER read once, nothing sets it
+relax_front::preload::relax_trace::T	env memo
+relax_front::preload::trace::T	env memo
+relax_front::program::SHARED_CV	condvar, no state
+relax_front::rs_outline::verify_elision::ON	env MAKEPAD_RUN_VERIFY_OUTLINE read once, nothing sets it
+relax_front::target_features::AARCH64_FEATURES	constant table
+relax_front::target_features::X86_FEATURES	constant table
+relax_front::unitgraph::SCRIPT_FREE	condvar, no state
+relax_front::unitgraph::SELF_EXE	path of Relax's own executable, host-given on Android (unitgraph.rs:805)
+relax_front::unitgraph::TMP_SEQ	temp name counter never reused (unitgraph.rs:849)
+relax_front::unitgraph::path_lock::LOCKS	leaked lock table by path, holds no value (unitgraph.rs:1131)
+relax_front::unitgraph::script_slots::N	CPU count (unitgraph.rs:1103)
+relax_runner::HOST	native host, set once
+relax_runner::PRIVILEGED	how this process started
+relax_runner::loader_exe::EXE	loader path
+relax_session::RESETS	the test's list
+relax_session::memo_local::EPOCH	monotone retire stamp
+relax_session::sip::LATE_NEW	monotone, the watcher compares for change
+relax_session::sip::LATE_WAKE	wake handle
+makepad_alloc_phase::sync::macos::os_sync::WAIT	cached OS fn pointers; cfg-off: apple
+makepad_alloc_phase::sync::macos::os_sync::WAIT_TIMEOUT	cached OS fn pointers; cfg-off: apple
+makepad_alloc_phase::sync::macos::os_sync::WAKE_ALL	cached OS fn pointers; cfg-off: apple
+makepad_alloc_phase::sync::macos::os_sync::WAKE_ONE	cached OS fn pointers; cfg-off: apple
+relax_trace::T	env memo
+relax_types::borrowck::check::verify_polonius_sample::COUNTER	one-in-N sample counter, any start value is right (check.rs:179)
+relax_types::borrowck::check::verify_polonius_sample::RATE	env MAKEPAD_RUN_POLONIUS_VERIFY read once, nothing sets it
+relax_types::borrowck::event::CHECK_ALL	`makepad check` only
+relax_types::borrowck::lazy::DISABLED	set by `makepad check`, serve and tests only, none restart in place
+relax_types::borrowck::lazy::NEXT_SUB	ids are never reused
+relax_types::borrowck::lazy::PANIC_SINK	native host hook
+relax_types::borrowck::lazy::RECORDED	monotone, paired with the SWEPT reset
+relax_types::borrowck::lazy::SEQ	event sequence never reused (lazy.rs:32)
+relax_types::borrowck::lazy::WAKE	wake handle
+relax_types::borrowck::lazy::front_trace::ON	env MAKEPAD_RUN_FRONT_TRACE read once, nothing sets it
+relax_types::borrowck::lazy::set_ranks::TRACE	env MAKEPAD_RUN_SPECV_TRACE read once, nothing sets it
+relax_types::borrowck::lazy::worker::COUNTS	env MAKEPAD_RUN_BODY_COUNTS read once, nothing sets it
+relax_types::feature_gate::stability_table::TABLE	table from include_str in the binary (feature_gate.rs:1231)
+relax_types::lint::cmdline::FLAGS	env MAKEPAD_RUN_LINT_FLAGS read once, nothing sets it
+relax_types::lint_table::GROUPS	constant table
+relax_types::lint_table::REMOVED	constant table
+relax_types::lint_table::RENAMED	constant table
+relax_types::next_solver::collect::count_query::ENABLED	env MAKEPAD_RUN_DECL_COUNTERS read once, nothing sets it
+relax_types::tcx::lifetime_resolve::share::EMPTY	shared empty value
+relax_types::type_queries::TYPECK_READS_T0	env mem report clock
+relax_types::type_queries::test_typeck_panic::WANT	env MAKEPAD_RUN_TEST_TYPECK_PANIC read once, nothing sets it
+relax_types::type_queries::with_misses::EMPTY	shared empty value
+relax_types::typeck::check_fn::ST	env MAKEPAD_RUN_TYSTATS read once, nothing sets it
+relax_types::typeck::check_fn_body::LAZY_STATS	env MAKEPAD_RUN_LAZY_STATS read once, nothing sets it
+relax_types::typeck::instantiate::try_normalize_body::COUNTS	env MAKEPAD_RUN_BODY_COUNTS read once, nothing sets it
+relax_types::typeck::side_table::EMPTY	constant empty header (side_table.rs:36)
+relax_types::typeck::try_instantiate_body::SAMPLE	env MAKEPAD_RUN_TYPECK_BACKTRACE read once, nothing sets it
+relax_types::unique_test_id::NEXT	test only
+relax_types::unique_test_suffix::NEXT	test only
+relax_compiler::jit::ENDED_LEAVE	the glue copy, for the process: a thread comes back into any run that ended
+relax_compiler::stale::GONE	ranges freed at the next run's end, read by a late fault until then
+makepad_alloc_phase::ROUTING	set once by the allocator's first routed call
+relax_compiler::run_end::leftovers::GONE	test only: the heaps that went, across runs
+makepad_live_id::live_id::UNIQUE_LIVE_ID	ids never reused
+makepad_live_id::live_id::with_table::IDMAP	the process's table of names, keyed by their hash: it holds what any run interned, in the process's heap (process_heap)
+makepad_live_id::live_id::with_table::ONCE	seeds IDMAP once
+makepad_script_audio_aot::wasm::RECORDING	wasm export only
+makepad_script_audio_aot::wasm::recorded::Q	wasm export only
+makepad_shader::shader_ir_spirv::spirv_val::SEQ	names validation files, only grows
+makepad_shader::shader_schema::POD_SWIZZLES	constant table
+relax_compiler::jit::RUNS_ENDED	counts the ends a staying thread compares with: never goes back
+relax_compiler::run_end::leftovers::ON	a test mode: set once, from the process's start

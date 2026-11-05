@@ -309,7 +309,7 @@ impl FrontImages {
                         // (detached: the restore takes its prefix as soon as the plan's early
                         // selection covers it, and the load goes on while the plan completes)
                         why = "demand worker not started";
-                        std::thread::Builder::new().name("run-demand".into()).spawn(move || {
+                        crate::run_threads::spawn("run-demand", move || {
                             crate::macro_reg::set_in_world(in_world);
                             worker.complete();
                             let mut r = release.lock().unwrap_or_else(|e| e.into_inner());

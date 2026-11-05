@@ -39,6 +39,7 @@ pub fn in_eval() -> bool {
 
 /// std::relax::probe::__eval's answer: tag 0 the type, 1 the value.
 pub extern "C" fn relax_probe_result(tag: u32, t: *const u8, n: usize) {
+    let _kept = crate::zone_alloc::kept();
     let s = String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(t, n) }).into_owned();
     let _ = RESULT.try_with(|r| {
         let mut r = r.borrow_mut();

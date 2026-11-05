@@ -387,6 +387,11 @@ struct Sleeper { thread: OnceLock<budget::Wake>, waiting: AtomicBool }
 static THREADS: OnceLock<Vec<Sleeper>> = OnceLock::new();
 static START: std::sync::Once = std::sync::Once::new();
 static NEXT_WORKER: AtomicUsize = AtomicUsize::new(0);
+/// The workers leave at their next pick (`stop_workers`).
+static WORKERS_STOP: AtomicBool = AtomicBool::new(false);
+/// Drains started and drains that came back.
+static DRAINS: AtomicUsize = AtomicUsize::new(0);
+static DRAINS_BACK: AtomicUsize = AtomicUsize::new(0);
 struct CompilerSource;
 static SOURCE: CompilerSource = CompilerSource;
 pub(super) fn queue() -> &'static relax_session::sync::Mutex<Queue> {
@@ -419,8 +424,23 @@ pub(super) fn start() {
         crate::pool::thread_start(ensure_altstack);
         let _kept = crate::zone_alloc::kept();
         THREADS.get_or_init(|| (0..budget::cores()).map(|_| Sleeper { thread: OnceLock::new(), waiting: AtomicBool::new(false) }).collect());
+        DRAINS.store(budget::cores() as usize, Ordering::SeqCst);
         for _ in 0..budget::cores() { crate::pool::drain(&SOURCE); }
     });
+}
+/// The workers leave at their next pick, a job in hand ending first (what compiles was told to stop
+/// by then: `jit::stop_compiling`). False: some were still in a job when `give_up` ran out.
+pub(super) fn stop_workers(give_up: std::time::Duration) -> bool {
+    WORKERS_STOP.store(true, Ordering::SeqCst);
+    let t = Instant::now();
+    while DRAINS_BACK.load(Ordering::SeqCst) < DRAINS.load(Ordering::SeqCst) {
+        if t.elapsed() >= give_up {
+            return false;
+        }
+        wake_all();
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    true
 }
 /// Callable from a hot stub: no queue lock, allocation or compiler work. Wakes the first parked
 /// worker: the work stays on the few workers it needs (a startup's checks ahead on as many as its
@@ -645,6 +665,7 @@ impl Source for CompilerSource {
         let index = NEXT_WORKER.fetch_add(1, Ordering::Relaxed);
         let name = crate::zone_alloc::kept_with(|| std::thread::current().name().unwrap_or("run-jit").to_owned());
         crate::lifeline::run(&name, crate::lifeline::OnPanic::Restart, || worker_loop(index));
+        DRAINS_BACK.fetch_add(1, Ordering::SeqCst);
     }
 }
 fn worker_loop(index: usize) {
@@ -660,6 +681,14 @@ fn worker_loop(index: usize) {
         let mut held: Option<BudgetJob> = None;
         let me = std::thread::current().id();
         loop {
+            if WORKERS_STOP.load(Ordering::Relaxed) {
+                if let Some((serial, tier)) = finished.take() {
+                    let _kept = crate::zone_alloc::kept();
+                    lock().running.retain(|r| r.serial != serial);
+                    RUNNING[tier].fetch_sub(1, Ordering::Relaxed);
+                }
+                return;
+            }
             worker.waiting.store(true, Ordering::SeqCst);
             // Atomics-only producers publish to the existing tier-record inbox.
             drain_tier_inbox();
@@ -873,11 +902,12 @@ mod tests {
     }
 }
 
+static LOOKS_GONE: AtomicBool = AtomicBool::new(false);
+
 /// Release unused burst results once no ahead job can still publish into them. The startup's
 /// look-ahead still queued goes when the startup ends.
 pub(super) fn cleanup_ahead() {
     if startup_phase() { return; }
-    static LOOKS_GONE: AtomicBool = AtomicBool::new(false);
     if !LOOKS_GONE.swap(true, Ordering::Relaxed) && LOOK_QUEUED.load(Ordering::Relaxed) != 0 {
         retain(|job| !matches!(job, Job::Ahead(_, AheadWork::Look(..))));
     }
@@ -897,4 +927,22 @@ pub(super) fn cleanup_ahead() {
         crate::postframe::ahead_over();
     }
     drop((keys, unused, lowered));
+}
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    use relax_session::reset_static as reset;
+    reset(&QUEUE, OnceLock::new());
+    reset(&COUNTS, [const { AtomicUsize::new(0) }; TIERS]);
+    reset(&RUNNING, [const { AtomicUsize::new(0) }; TIERS]);
+    reset(&THREADS, OnceLock::new());
+    reset(&START, std::sync::Once::new());
+    reset(&NEXT_WORKER, AtomicUsize::new(0));
+    reset(&WORKERS_STOP, AtomicBool::new(false));
+    reset(&DRAINS, AtomicUsize::new(0));
+    reset(&DRAINS_BACK, AtomicUsize::new(0));
+    reset(&LOCK_MAX_NS, AtomicU64::new(0));
+    reset(&AHEAD_INBOX, relax_session::sync::Mutex::new(Vec::new()));
+    reset(&AHEAD_PENDING, AtomicBool::new(false));
+    reset(&LOOKS_GONE, AtomicBool::new(false));
 }

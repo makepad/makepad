@@ -624,7 +624,6 @@ pub(crate) extern "C" fn relax_frame_done() {
     }
     episode_end();
     let compiled = MAIN_COMPILE_NS.load(Relaxed);
-    static COMPILED_AT_LAST: AtomicU64 = AtomicU64::new(0);
     let compiled_before = COMPILED_AT_LAST.swap(compiled, Relaxed);
     if fp == 0 || last < fp || crate::jit::QUIT_SEEN.load(Relaxed) {
         return;
@@ -660,11 +659,13 @@ fn served(a: &[AtomicU64; crate::owner::CLASSES]) -> String {
     (0..crate::owner::CLASSES).map(|c| format!("{} {:.0}", crate::owner::CLASS_NAMES[c], ms(a[c].load(Relaxed)))).collect::<Vec<_>>().join(", ")
 }
 
+static LAST: AtomicU64 = AtomicU64::new(u64::MAX);
+
+static LAST_AT: AtomicU64 = AtomicU64::new(0);
+
 /// A burst of the ahead helpers ended (jit::ahead_helper): their work since the present, when it
 /// changed since the last report.
 pub(crate) fn ahead_over() {
-    static LAST: AtomicU64 = AtomicU64::new(u64::MAX);
-    static LAST_AT: AtomicU64 = AtomicU64::new(0);
     let fp = present_ns();
     let n = crate::jit::AHEAD_STATS[0].load(Relaxed);
     let now = wall_ns();
@@ -714,4 +715,43 @@ pub fn summary() -> String {
         served(&SERVED),
         served(&SERVED_BLOCKING)
     )
+}
+
+/// The compile time the last frame saw.
+static COMPILED_AT_LAST: AtomicU64 = AtomicU64::new(0);
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    use relax_session::reset_static as reset;
+    reset(&COMPILES, [const { AtomicU64::new(0) }; 9]);
+    reset(&OWNER, [const { AtomicU64::new(0) }; 2]);
+    reset(&RT, [const { AtomicU64::new(0) }; 2]);
+    reset(&GAPS, [const { AtomicU64::new(0) }; 4]);
+    reset(&MAIN_COMPILE_NS, AtomicU64::new(0));
+    reset(&LAST_FRAME, AtomicU64::new(0));
+    reset(&LOGGED, AtomicU64::new(0));
+    reset(&HOW, [const { [const { AtomicU64::new(0) }; 2] }; 7]);
+    reset(&SUMMARY_DONE, AtomicBool::new(false));
+    reset(&SERVED, [const { AtomicU64::new(0) }; crate::owner::CLASSES]);
+    reset(&SERVED_BLOCKING, [const { AtomicU64::new(0) }; crate::owner::CLASSES]);
+    reset(&BEFORE, [const { AtomicU64::new(0) }; 11]);
+    reset(&BEFORE_HOW, [const { AtomicU64::new(0) }; 7]);
+    reset(&UI_WAITING, AtomicU64::new(0));
+    reset(&UI_WAIT_START, AtomicU64::new(0));
+    reset(&UI_WAIT_END, AtomicU64::new(0));
+    reset(&UI_WAIT_SUM, AtomicU64::new(0));
+    reset(&AHEAD_DONE, AtomicU64::new(0));
+    reset(&EP_SUM, AtomicU64::new(0));
+    reset(&EP_SHOWN, AtomicBool::new(false));
+    reset(&EP_MAX, AtomicU64::new(0));
+    reset(&EP_ALL, AtomicU64::new(0));
+    reset(&EP_BLOCKS, AtomicU64::new(0));
+    reset(&EP_BLOCKED_AT, AtomicU64::new(0));
+    reset(&LOG_KEY, std::sync::Mutex::new(String::new()));
+    reset(&FRAMES, AtomicU64::new(0));
+    reset(&FRAMES_AFTER_PRESENT, AtomicU64::new(0));
+    reset(&FRAME_PATCH, AtomicU64::new(0));
+    reset(&COMPILED_AT_LAST, AtomicU64::new(0));
+    reset(&LAST, AtomicU64::new(u64::MAX));
+    reset(&LAST_AT, AtomicU64::new(0));
 }

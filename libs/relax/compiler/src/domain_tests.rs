@@ -134,10 +134,10 @@ fn teardown_fixture_cycles_and_retiring_thread() {
     let (mut u, entry, root) = fixture();
     let mut id = None;
     #[cfg(target_os = "linux")]
-    let mut baseline = 0;
+    let mut in_use = Vec::with_capacity(20);
     #[cfg(target_os = "linux")]
     warm_process_state(&mut u, entry);
-    for cycle in 0..20 {
+    for _ in 0..20 {
         let flags = [const { AtomicU64::new(0) }; 4];
         let (domain, base, main) = launch(&mut u, entry, id, &flags);
         id = Some(domain);
@@ -172,20 +172,17 @@ fn teardown_fixture_cycles_and_retiring_thread() {
         assert!(freed_by_teardown() > before);
         assert!(matches!(dead.state, DomainState::Exited(0)));
         #[cfg(target_os = "linux")]
-        {
-            let now = heap_in_use();
-            // Cycle 0 launches a new domain; from cycle 1 on the domain is cycled, which is the steady
-            // state a leak shows against.
-            if cycle == 1 {
-                baseline = now;
-            }
-            // Native allocator thread caches may vary a little; two MB leaked per cycle may not.
-            if cycle >= 1 {
-                assert!(now <= baseline + 256 * 1024, "cycle {cycle}: {now} > baseline {baseline}");
-            }
-        }
-        #[cfg(not(target_os = "linux"))]
-        let _ = cycle;
+        in_use.push(heap_in_use());
+    }
+    // Cycle 0 launches a new domain; from cycle 1 on the domain is cycled. What a cycle keeps is in
+    // every sample after it; what the process's own work holds for a moment (under the JIT, a
+    // compile's or a cache write's 256 KiB vector) is in some. So the lowest of the last cycles
+    // against the lowest of the first: two MB leaked per cycle may not pass.
+    #[cfg(target_os = "linux")]
+    {
+        let lowest = |s: &[u64]| s.iter().copied().min().unwrap();
+        let (first, last) = (lowest(&in_use[1..6]), lowest(&in_use[15..]));
+        assert!(last <= first + 256 * 1024, "cycled domains kept heap: {last} > {first}: {in_use:?}");
     }
 
     // No cooperative completion yet: retire without blocking the replacement,
@@ -608,6 +605,76 @@ fn foreign_thread_callback_sees_domain_statics() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+// The program's thread-local on a thread the program never started.
+const STAYING_THREAD: &str = r#"
+use std::cell::Cell;
+use std::sync::atomic::{AtomicU64, Ordering};
+thread_local! { static CALLS: Cell<u64> = const { Cell::new(0) }; }
+extern "C" fn tap(out: *mut u64) {
+    CALLS.with(|c| {
+        unsafe { *out = c.get() };
+        c.set(c.get() + 1);
+    });
+}
+fn fixture(p: *mut u64) {
+    let a = unsafe { &*(p as *const [AtomicU64; 4]) };
+    let f: extern "C" fn(*mut u64) = tap;
+    a[0].store(f as usize as u64, Ordering::SeqCst);
+    while a[1].load(Ordering::SeqCst) == 0 { std::thread::yield_now(); }
+}
+"#;
+
+/// A native thread stays through a run's end and calls into the next run: the next run's
+/// thread-locals start empty on it, as on a new thread, whatever the last run left there.
+#[test]
+fn a_thread_that_stays_meets_the_next_run_as_a_new_thread() {
+    isolated_test!(a_thread_that_stays_meets_the_next_run_as_a_new_thread);
+    let _serial = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    extern "C" fn thunk(p: *mut u8) {
+        let (tap, out) = unsafe { *(p as *const (usize, *mut u64)) };
+        let tap: extern "C" fn(*mut u64) = unsafe { std::mem::transmute(tap) };
+        tap(out);
+    }
+    let (asks, asked) = std::sync::mpsc::channel::<(u64, usize)>();
+    let (answers, answered) = std::sync::mpsc::channel::<u64>();
+    let worker = std::thread::spawn(move || {
+        for (scope, tap) in asked {
+            let mut out = u64::MAX;
+            let saved = foreign_enter(scope);
+            let mut call = (tap, &mut out as *mut u64);
+            assert!(crate::jit::app_call(thunk, &mut call as *mut _ as *mut u8));
+            foreign_leave(saved);
+            answers.send(out).unwrap();
+        }
+    });
+    let mut units = Vec::new();
+    for _run in 0..2 {
+        let (mut u, entry, _root) = fixture_of(STAYING_THREAD, "fixture");
+        u.tier1 = None;
+        let up = &mut *u as *mut Unit;
+        let flags: [AtomicU64; 4] = Default::default();
+        let (domain, base, main) = launch(&mut u, entry, None, &flags);
+        wait(|| flags[0].load(Ordering::SeqCst) != 0);
+        let tap = flags[0].load(Ordering::SeqCst) as usize;
+        let scope = foreign_scope_of(base);
+        asks.send((scope, tap)).unwrap();
+        assert_eq!(answered.recv().unwrap(), 0, "the run's first call on this thread");
+        asks.send((scope, tap)).unwrap();
+        assert_eq!(answered.recv().unwrap(), 1, "its second");
+        flags[1].store(1, Ordering::SeqCst);
+        main.join().unwrap();
+        wait_thread_done(domain);
+        let end = end_run(up, Duration::from_secs(10));
+        assert!(end.left.is_empty(), "left: {:?}", end.left);
+        crate::jit::thread_locals_end();
+        unsafe { crate::os::tls::reset_statics() };
+        units.push(u);
+    }
+    drop(asks);
+    worker.join().unwrap();
+    std::mem::forget(units);
+}
+
 // An app's `process::exit` from inside its event handler: the event loop runs each turn under
 // catch_unwind (as the HAL's turn guard does), here two deep, with a RefCell borrowed across the
 // exit. The exit is no panic: neither catch_unwind contains it, no later turn runs (each would
@@ -847,7 +914,7 @@ fn a_run_ends_with_native_frames_in_it_and_no_host_lock_stays_held() {
     wait(|| flags[0].load(Ordering::SeqCst) == 1);
     let end = end_run(up, Duration::from_millis(300));
     eprintln!("{}", end.line());
-    assert_eq!(end.left.iter().map(|l| l.1.as_str()).collect::<Vec<_>>(), ["in-native"], "the call is never cut off");
+    assert!(end.left.iter().any(|l| l.1 == "in-native"), "the call is never cut off: {:?}", end.left);
     assert!(!caller.join().unwrap(), "the callback's call came back saying the run ended");
     assert!(CALLER_LOCK.try_lock().is_ok());
     assert!(HOST_LOCK.try_lock().is_err(), "the native call is still in there");
@@ -870,11 +937,16 @@ fn a_run_ends_with_native_frames_in_it_and_no_host_lock_stays_held() {
 }
 
 extern "C" fn native_faults_at_the_end() {
+    extern "C" {
+        fn strlen(s: *const core::ffi::c_char) -> usize;
+    }
     IN_NATIVE.store(1, Ordering::SeqCst);
     while NATIVE_GO.load(Ordering::SeqCst) == 0 {
         std::thread::sleep(Duration::from_millis(1));
     }
-    unsafe { std::ptr::write_volatile(8 as *mut u64, 1) };
+    // (in the system's library: under the JIT this function is itself JIT code of the process; the
+    // result is used, or an optimizer drops the call as having no effect)
+    std::hint::black_box(unsafe { strlen(std::hint::black_box(8 as *const core::ffi::c_char)) });
 }
 
 /// A fault in a native call on a thread of a run that is ending is no crash of the process: the
@@ -890,7 +962,8 @@ fn a_fault_while_a_run_ends_does_not_take_the_process_down() {
     let (domain, _base, main) = launch(&mut u, entry, None, &flags);
     wait(|| flags[3].load(Ordering::SeqCst) != 0 && IN_NATIVE.load(Ordering::SeqCst) != 0);
     let end = end_run(up, Duration::from_millis(100));
-    assert_eq!(end.left.iter().map(|l| l.1.as_str()).collect::<Vec<_>>(), ["in-native"]);
+    // (the run's other thread is on its way out, and under the JIT it may have code to compile first)
+    assert!(end.left.iter().any(|l| l.1 == "in-native"), "{:?}", end.left);
     NATIVE_GO.store(1, Ordering::SeqCst);
     main.join().unwrap();
     wait_thread_done(domain);

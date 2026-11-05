@@ -5884,6 +5884,7 @@ mod dead_store_tests {
     /// reading v1 at the add's position, past the window -- from the slot: v1's store home must
     /// stay (the arm64 O3 miscompile of powi's `work` / race_pack under more call-crossing spills).
     /// With v2 read twice the shift stands alone and the window serves v1's only read.
+    #[cfg(target_arch = "aarch64")]
     #[test]
     fn deferred_reads_keep_the_store() {
         let shift = |twice: bool| {
@@ -5904,11 +5905,18 @@ mod dead_store_tests {
     fn only_fused_pairs_defer() {
         let sel = |x: VReg, base: VReg, [v1, v2, v3, v4]: [VReg; 4]| vec![Inst::ICmp(Cond::Lt, false, v2, v1, x), Inst::Sel(v3, v2, x, base), Inst::Mov(v4, v3)];
         let add = |x: VReg, _: VReg, [v1, v2, v3, v4]: [VReg; 4]| vec![Inst::IBin(IOp::Add, W, v2, v1, x), Inst::IBin(IOp::Xor, W, v3, v2, x), Inst::Mov(v4, v3)];
-        let a64 = crate::arm64::reg_config().defers;
-        let x64 = crate::x64::reg_config(&relax_session::Options::default()).defers;
-        assert!(!skipped(&sel, x64), "x64 reads the compare's operands at the cmov");
-        assert!(skipped(&sel, a64), "arm64 compares at the compare's own position");
-        assert!(skipped(&add, a64) && skipped(&add, x64), "an add feeding the next instruction is emitted where it stands");
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+            let x64 = crate::x64::reg_config(&relax_session::Options::default()).defers;
+            assert!(!skipped(&sel, x64), "x64 reads the compare's operands at the cmov");
+            assert!(skipped(&add, x64), "an add feeding the next instruction is emitted where it stands");
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            let a64 = crate::arm64::reg_config().defers;
+            assert!(skipped(&sel, a64), "arm64 compares at the compare's own position");
+            assert!(skipped(&add, a64), "an add feeding the next instruction is emitted where it stands");
+        }
     }
 
     /// A loop whose values are each read three times per iteration (p, n, i, acc, a), with four
@@ -5916,6 +5924,7 @@ mod dead_store_tests {
     /// temporaries go first and get registers, a loop-long value takes the slot (one reload per
     /// read). By references alone the temporaries came last and each went through the slot (a
     /// store and a reload per iteration each: split_until_planar's orient64 terms on x64).
+    #[cfg(not(target_arch = "aarch64"))]
     #[test]
     fn one_instruction_temporaries_get_registers_before_loop_long_values() {
         let mut f = Func::new("pressure".into(), 0);

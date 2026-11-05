@@ -48,6 +48,8 @@ impl Program {
             // none: they define nothing)
             let mut ranges: Vec<Attr> = f.ast.root_attrs.iter().copied().collect();
             let n_root = ranges.len();
+            let scope = crate::macros::MacroScope::new(self.macros.clone());
+            let mut retained_helpers = crate::fxhash::HashSet::default();
             // what each attribute is on: 0 the crate, 1 a struct / enum / union, 2 another item, 3 a field or variant
             let mut targets: Vec<u8> = vec![0; n_root];
             for &d in &by_file[fi] {
@@ -57,6 +59,28 @@ impl Program {
                 }
                 let it = f.ast.item(def.item);
                 let tgt = if matches!(def.kind, DefKind::Struct | DefKind::Enum | DefKind::Union) { 1 } else { 2 };
+                let attrs_start = ranges.len();
+                let kname = self.syms.str(self.crates[krate as usize].name);
+                let mname = self.def_path(self.mods[self.mods[def.scope as usize].normal as usize].def);
+                let mut custom_helpers = Vec::new();
+                for a in f.ast.list(it.attrs) {
+                    let (lo, hi) = (a.toks.lo as usize, a.toks.hi as usize);
+                    if hi <= lo || text(lo as u32) != "derive" { continue; }
+                    let mut path = Vec::new();
+                    for i in lo + 2..hi {
+                        match f.tok(i as u32).kind {
+                            T::Ident | T::RawIdent | T::KwCrate | T::KwSelfValue | T::KwSuper => path.push(text(i as u32).to_string()),
+                            T::PathSep if path.is_empty() => path.push(String::new()),
+                            T::Comma | T::CloseParen => {
+                                if let Some(entry) = scope.proc_macro_path(kname, &mname, &path, crate::macro_reg::Kind::Derive, &mut Default::default()) {
+                                    custom_helpers.extend(crate::macro_reg::derive_helpers(&entry));
+                                }
+                                path.clear();
+                            }
+                            _ => {}
+                        }
+                    }
+                }
                 ranges.extend_from_slice(f.ast.list(it.attrs));
                 targets.resize(ranges.len(), tgt);
                 let fields = |data: VariantData, out: &mut Vec<Attr>| {
@@ -83,6 +107,11 @@ impl Program {
                         ranges.extend_from_slice(f.ast.list(p.attrs));
                     }
                     targets.resize(ranges.len(), 3);
+                }
+                for a in &ranges[attrs_start..] {
+                    if a.toks.hi > a.toks.lo && custom_helpers.iter().any(|name| name == text(a.toks.lo)) {
+                        retained_helpers.insert(a.toks.lo);
+                    }
                 }
             }
             // `macro_rules!`, `use` and `extern crate` items define nothing of the program's: their attributes are the item's own
@@ -275,7 +304,7 @@ impl Program {
                 let tool = |n: &str| BUILTIN_TOOLS.contains(&n) || tools.contains(&n);
                 let msg = if segs.len() == 1 && !global {
                     let n = segs[0];
-                    if is_builtin_attr(n) || std_helpers.contains(&n) || crate::macro_reg::has_attr(n) {
+                    if is_builtin_attr(n) || std_helpers.contains(&n) || retained_helpers.contains(&a.toks.lo) || crate::macro_reg::has_attr(n) {
                         continue;
                     }
                     // rustc_resolve smart_resolve_macro_path: an unresolved `rustc*` attribute is also reserved

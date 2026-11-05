@@ -199,3 +199,11 @@ pub fn emit(d: &Diagnostic) {
     println!("{}", d.to_json());
 }
 pub fn emitted_errors() -> usize { EMITTED.load(Ordering::Relaxed) }
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    use relax_session::reset_static as reset;
+    reset(&ENABLED, AtomicBool::new(false));
+    reset(&RECORDS, Mutex::new(None));
+    reset(&EMITTED, std::sync::atomic::AtomicUsize::new(0));
+}

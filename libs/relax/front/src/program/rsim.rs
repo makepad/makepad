@@ -13,7 +13,7 @@
 //! import errors; modules of crates that are not checked are answered by Relax's tables (a crate
 //! the checked crates import from is resolved completely).
 //!
-//! Not modelled (nothing in these crates' imports needs them): macro-namespace bindings, macro
+//! Not modelled (nothing in these crates' imports needs them): macro
 //! expansion rounds (every item exists from the start; `expansion` only orders the output of
 //! different macros), hygiene, tool modules, derive helpers.
 use super::*;
@@ -109,9 +109,9 @@ enum Warn { Glob, Vis }
 
 pub enum SimKind { Error, Lint(&'static str) }
 
-/// A macro the replay resolved: a definition, or a std-family built-in (name, std's `panic`).
+/// A macro the replay resolved: a definition, a std-family built-in, or a hosted entry identity.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum MacRes { Def(DefId), Builtin(Sym, bool) }
+pub enum MacRes { Def(DefId), Builtin(Sym, bool), ProcMacro(u32) }
 
 /// What a checked module binds in the macro namespace: its own binding (an item or a single import)
 /// and its glob binding, with the glob's ambiguity (0 none, 1 an error, 2 the lint ambiguous_glob_imports).
@@ -155,8 +155,9 @@ struct Sim<'a> {
     unexpanded: crate::fxhash::HashSet<u32>,
     indeterminate: Vec<u32>,
     determined: Vec<u32>,
-    /// the std-family built-in macros given an identity so far: (name, std's `panic`)
-    builtin: Vec<(Sym, bool)>,
+    /// Macros without a collected definition, given synthetic identities for namespace replay.
+    synthetic_macros: Vec<MacRes>,
+    proc_macros: Vec<(usize, String)>,
 }
 
 fn ns_type(ns: usize) -> bool { ns == 0 }
@@ -189,8 +190,8 @@ impl StdMacros {
     }
 }
 
-/// A synthetic definition id of a std-family built-in macro in the replay (index `k` of `Sim::builtin`).
-fn builtin_macro_id(k: usize) -> DefId { DefId(u32::MAX - 1 - k as u32) }
+/// A synthetic definition id of a built-in or hosted macro (index `k` of `Sim::synthetic_macros`).
+fn synthetic_macro_id(k: usize) -> DefId { DefId(u32::MAX - 1 - k as u32) }
 
 impl Program {
     /// What rustc's import resolution reports for the imports of the checked crates beyond the
@@ -336,7 +337,7 @@ impl<'a> Sim<'a> {
             busy: Default::default(), ext_names: Default::default(), ext_decls: Default::default(),
             amb: Vec::new(), cannot_determine: Vec::new(), unresolved: Vec::new(), privacy_errors: 0, priv_list: Vec::new(), hack_applied: false, cur_imp: 0,
             no_prelude: Default::default(), extern_items: Default::default(), dummy: 0, unexpanded: Default::default(),
-            indeterminate: Vec::new(), determined: Vec::new(), builtin: Vec::new(),
+            indeterminate: Vec::new(), determined: Vec::new(), synthetic_macros: Vec::new(), proc_macros: Vec::new(),
         };
         s.dummy = s.alloc(Decl { def: None, import: None, ambiguity: None, warn_ambiguity: false, vis: None, vis_max: None, vis_min: None, exp: 0 });
         s
@@ -461,19 +462,34 @@ impl<'a> Sim<'a> {
     }
 
     fn builtin_macro(&mut self, name: Sym, std_panic: bool) -> DefId {
-        let key = (name, std_panic);
-        let k = match self.builtin.iter().position(|x| *x == key) { Some(k) => k, None => { self.builtin.push(key); self.builtin.len() - 1 } };
-        builtin_macro_id(k)
+        self.synthetic_macro(MacRes::Builtin(name, std_panic))
+    }
+
+    fn synthetic_macro(&mut self, key: MacRes) -> DefId {
+        let k = match self.synthetic_macros.iter().position(|x| *x == key) { Some(k) => k, None => { self.synthetic_macros.push(key); self.synthetic_macros.len() - 1 } };
+        synthetic_macro_id(k)
     }
 
     /// The macro `name` of an unchecked module: a `#[macro_export]` macro_rules! of a crate root, or a
-    /// built-in of the std family.
+    /// built-in of the std family, or a registered proc macro through its public re-exports.
     fn ext_macro(&mut self, m: u32, name: Sym) -> Option<DefId> {
         if let Some(&d) = self.p.mods[m as usize].macros.get(&name) { return Some(d); }
-        let set = self.std_macro_module(m)?;
         let n = self.p.syms.str(name);
-        if !set.names().contains(&n) { return None; }
-        Some(self.builtin_macro(name, set == StdMacros::Std && n == "panic"))
+        if let Some(set) = self.std_macro_module(m) {
+            if set.names().contains(&n) { return Some(self.builtin_macro(name, set == StdMacros::Std && n == "panic")); }
+        }
+        let md = &self.p.mods[m as usize];
+        let krate = self.p.syms.str(self.p.crates[md.krate as usize].name);
+        let module = self.p.def_path(md.def);
+        let scope = crate::macros::MacroScope::new(self.p.macros.clone());
+        for kind in [crate::macro_reg::Kind::Bang, crate::macro_reg::Kind::Attr, crate::macro_reg::Kind::Derive] {
+            if let Some(entry) = scope.proc_macro_path(krate, &module, &[n.to_string()], kind, &mut Default::default()) {
+                let key = (entry.unit, entry.fname);
+                let k = match self.proc_macros.iter().position(|x| *x == key) { Some(k) => k, None => { self.proc_macros.push(key); self.proc_macros.len() - 1 } };
+                return Some(self.synthetic_macro(MacRes::ProcMacro(k as u32)));
+            }
+        }
+        None
     }
 
     /// rustc's MacroRules scopes at import `i`: a `macro_rules! name` written before it in its file, in its
@@ -819,6 +835,16 @@ impl<'a> Sim<'a> {
                     }
                     _ => {}
                 }
+            }
+        }
+        // the proc macros the module exports (its crate's own, or re-exported): `ext_macro` answers
+        // them, so a glob of the module binds them -- unlisted, a glob lookup of the name would find
+        // a binding the glob never planted and stay undetermined
+        for n in crate::macro_reg::proc_macro_names() {
+            let Some(name) = self.p.syms.get(&n) else { continue };
+            if !have.contains(&(name, 2)) && self.ext_macro(t, name).is_some() {
+                have.insert((name, 2));
+                names.push((name, 2));
             }
         }
         let r = std::rc::Rc::new(names);
@@ -1418,9 +1444,8 @@ impl<'a> Sim<'a> {
 
     fn mac_res(&self, d: DeclId) -> Option<MacRes> {
         let def = self.dres(d)?;
-        if def.0 < u32::MAX && ((u32::MAX - 1 - def.0) as usize) < self.builtin.len() {
-            let (n, std) = self.builtin[(u32::MAX - 1 - def.0) as usize];
-            return Some(MacRes::Builtin(n, std));
+        if def.0 < u32::MAX && ((u32::MAX - 1 - def.0) as usize) < self.synthetic_macros.len() {
+            return Some(self.synthetic_macros[(u32::MAX - 1 - def.0) as usize]);
         }
         Some(MacRes::Def(def))
     }
@@ -1533,8 +1558,8 @@ impl<'a> Sim<'a> {
         // `use a::{self}` has the source `self` in rustc, which names the module in the type namespace only
         let self_only = self.p.imports[self.imps[i as usize].pi].bound & BOUND_SELF_ONLY != 0;
         let mut all_ns_err = true;
-        for ns in 0..2 {
-            if self_only && ns == 1 { continue; }
+        for ns in 0..3 {
+            if self_only && ns != 0 { continue; }
             let fin = Fin { imp: Some(summ), report_private: false };
             let binding = self.resolve_ident_in_module(module, source, ns, ps, Some(fin), decls[ns].decl(), Some(i));
             if let Ok(b) = binding {

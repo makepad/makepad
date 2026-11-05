@@ -791,7 +791,7 @@ fn off_cpu_stacks(os_id: u64) -> (Vec<(String, usize)>, usize) {
                 }
             }
         }
-        std::thread::sleep(std::time::Duration::from_millis(15));
+        crate::run_threads::sleep(std::time::Duration::from_millis(15));
     }
     seen.sort_by(|a, b| b.1.cmp(&a.1));
     (seen, caps_n)
@@ -804,6 +804,7 @@ pub fn cmd_why_slow(req: &Req, out: &mut Out) {
     let cpu0 = super::threads::list();
     let busy0 = crate::owner::BUSY_NS.iter().map(|b| b.load(std::sync::atomic::Ordering::Relaxed)).collect::<Vec<_>>();
     let wait0 = crate::owner::MAIN_WAIT_MAX.load(std::sync::atomic::Ordering::Relaxed);
+    let wakes0 = super::timeline::ui_wakes_mark();
     let gone = out.gone();
     let run = collect(secs, 250, &*pick("all"), &*gone);
     if gone() {
@@ -899,6 +900,12 @@ pub fn cmd_why_slow(req: &Req, out: &mut Out) {
     findings.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal).then(a.1.cmp(&b.1)));
     for (i, (_, f)) in findings.iter().take(req.num("n", 12) as usize).enumerate() {
         out.line(&format!("{{\"rank\":{},\"finding\":{}}}", i + 1, json_str(f)));
+    }
+    // the UI thread's turns in the window: frames that drew, and wakes that drew nothing with what
+    // woke them (a timer or task that wakes an idle app is no frame to look for)
+    if let Some((drew, quiet, woke)) = super::timeline::ui_wakes_since(wakes0) {
+        let woke: Vec<String> = woke.iter().map(|(n, c)| format!("[{},{}]", json_str(n), c)).collect();
+        out.line(&format!("{{\"ui_frames_drew\":{},\"wakes_drew_nothing\":{},\"woken_by\":[{}],\"s\":{:.1}}}", drew, quiet, woke.join(","), run.secs));
     }
     out.line("{\"more\":[\"prof threads=main s=5\",\"prof save=1\",\"why-hung\",\"stacks thread=main\"]}");
 }

@@ -1801,3 +1801,11 @@ pub fn stats() -> (usize, usize, usize) {
     let g = SB.lock().unwrap_or_else(|e| e.into_inner());
     g.as_ref().map_or((0, 0, 0), |s| (s.ro.len(), s.rw.len(), s.arenas.len()))
 }
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    use relax_session::reset_static as reset;
+    reset(&SB, Mutex::new(None));
+    reset(&TLS_OFF, std::sync::atomic::AtomicU32::new(0));
+    reset(&ARENAS, [const { std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()) }; MAX_MODULES]);
+}

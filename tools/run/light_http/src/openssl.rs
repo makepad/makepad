@@ -54,6 +54,8 @@ impl Tls {
         let l = crate::h1::left(deadline)?;
         tcp.set_read_timeout(Some(l)).and_then(|_| tcp.set_write_timeout(Some(l))).map_err(|e| e.to_string())?;
         let name = CString::new(host.trim_start_matches('[').trim_end_matches(']')).map_err(|_| "bad host")?;
+        // the process's one OpenSSL setup, before this crate's first call into it
+        makepad_network::tls::init_openssl().map_err(|e| format!("OpenSSL: {e}"))?;
         unsafe {
             let ctx = SSL_CTX_new(TLS_client_method());
             if ctx.is_null() {

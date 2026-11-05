@@ -264,7 +264,7 @@ impl QueryCx {
         // (lead decision 52 R1); nothing reads the retired cache, so it is freed off the
         // edit's critical path. (rustc starts each incremental session with an empty cache.)
         if retired.len() > 4096 {
-            let _ = std::thread::Builder::new().name("run-solver-free".into()).spawn(move || drop(retired));
+            let _ = crate::run_threads::spawn("run-solver-free", move || drop(retired));
         }
     }
 
@@ -283,7 +283,7 @@ impl QueryCx {
         values += self.codegen_select.retire(&|_, _| false);
         let retired = std::mem::take(&mut self.solver);
         let entries = retired.cached_len();
-        let _ = std::thread::Builder::new().name("run-solver-free".into()).spawn(move || drop(retired));
+        let _ = crate::run_threads::spawn("run-solver-free", move || drop(retired));
         (values, entries)
     }
 
@@ -392,20 +392,12 @@ impl QueryCx {
 
     // Lead design rounds 47-48. Nightly resolve_bound_vars.rs:253-285,430-442
     // traverses whole owners. File-relative nodes require the entire edited file
-    // to change, including unchanged siblings; declarations keep their own input.
+    // to change, including unchanged siblings: an owner without a body too (a struct,
+    // an impl, a trait), whose lifetime uses are keyed by its file's nodes and positions,
+    // which an edit of any body in the file renumbers (an edited version is parsed whole).
     fn read_owner(&self, prog: &Program, owner: DefId) -> Result<(), QueryError> {
         self.read_def_declarations(prog, owner)?;
-        let def = prog.def(owner);
-        let pf = &prog.files[def.file as usize];
-        let has_body = match def.kind {
-            crate::program::DefKind::AnonConst | crate::program::DefKind::Closure => true,
-            _ => match pf.ast.item(def.item).kind {
-                crate::ast::ItemKind::Fn(sig, body, _) => body.is_some() || pf.ast.fn_sig(sig).lazy_body.is_some(),
-                crate::ast::ItemKind::Const(_, body) | crate::ast::ItemKind::Static(_, _, body) => body.is_some(),
-                _ => false,
-            },
-        };
-        if has_body { self.engine.input(FILE_BODIES, def.file)?; }
+        self.engine.input(FILE_BODIES, prog.def(owner).file)?;
         Ok(())
     }
 
@@ -1332,4 +1324,11 @@ impl Tcx {
             providers.crate_inherent_impls_overlap_check(DefId(krate)).expect("inherent coherence query");
         }
     }
+}
+
+/// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
+pub(crate) unsafe fn reset_statics() {
+    use relax_session::reset_static as reset;
+    reset(&TYPECK_READS, relax_session::sync::Mutex::new(None));
+    reset(&BODIES_CHECKED, std::sync::atomic::AtomicU64::new(0));
 }
