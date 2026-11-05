@@ -4495,13 +4495,25 @@ impl Unit {
     /// Reserves `size` bytes of every thread's thread-local block (zeroed per thread on
     /// first use); returns the offset for `Inst::TlsAddr`.
     pub fn tls_alloc(&mut self, size: u32, align: u32) -> u32 {
+        // One allocator for the process, not one per unit: the proc-macro world (pmhost.rs, its
+        // own Unit) and the program share every thread's block, and a per-unit counter made the
+        // program's first `#[thread_local]` land on a world variable's bytes (makepad #1386).
+        static TLS_NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(TLS_FIRST_FREE);
         let a = align.max(1);
-        let at = (self.tls_next + a - 1) / a * a;
-        if (at + size) as usize > TLS_CAP {
-            panic!("thread-local block full");
+        let mut cur = TLS_NEXT.load(Ordering::Relaxed);
+        loop {
+            let at = (cur + a - 1) / a * a;
+            if (at + size) as usize > TLS_CAP {
+                panic!("thread-local block full");
+            }
+            match TLS_NEXT.compare_exchange(cur, at + size, Ordering::AcqRel, Ordering::Relaxed) {
+                Ok(_) => {
+                    self.tls_next = at + size;
+                    return at;
+                }
+                Err(c) => cur = c,
+            }
         }
-        self.tls_next = at + size;
-        at
     }
 
     /// A `#[thread_local]` static's per-thread storage (Reference items/static-items: each thread
