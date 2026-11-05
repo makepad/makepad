@@ -1281,7 +1281,17 @@ impl AsRawFd for ChildStderr {
         self.fd.as_raw_fd()
     }
 }
+impl IntoRawFd for ChildStdin {
+    fn into_raw_fd(self) -> RawFd {
+        self.fd.into_raw_fd()
+    }
+}
 impl IntoRawFd for ChildStdout {
+    fn into_raw_fd(self) -> RawFd {
+        self.fd.into_raw_fd()
+    }
+}
+impl IntoRawFd for ChildStderr {
     fn into_raw_fd(self) -> RawFd {
         self.fd.into_raw_fd()
     }

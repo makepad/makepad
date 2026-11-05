@@ -118,7 +118,7 @@ pub fn run(core: &str) {
 
     let mut z = String::new();
     header(&mut z, "Per-type NonZero<T> API (constants, bit queries, checked/saturating arithmetic, conversions, BitOr), as real core's nonzero.rs macros generate it.");
-    z.push_str("use super::nonzero::NonZero;\nuse crate::ops::{BitOr, BitOrAssign, Div, DivAssign, Rem, RemAssign};\n\n");
+    z.push_str("use super::nonzero::NonZero;\nuse crate::num::TryFromIntError;\nuse crate::ops::{BitOr, BitOrAssign, Div, DivAssign, Rem, RemAssign};\n\n");
     for t in INTS.iter().filter(|t| t.pw != 32) {
         gen_nonzero(&mut z, t);
     }
@@ -127,6 +127,10 @@ pub fn run(core: &str) {
             if from.name != to.name && has_from(from, to) {
                 let (f, t) = (from.name, to.name);
                 let _ = writeln!(z, "impl From<NonZero<{f}>> for NonZero<{t}> {{ fn from(v: NonZero<{f}>) -> NonZero<{t}> {{ unsafe {{ NonZero::new_unchecked(v.get() as {t}) }} }} }}");
+            } else if from.name != to.name {
+                // A non-zero value never fails on the zero check, so only the integer conversion can.
+                let (f, t) = (from.name, to.name);
+                let _ = writeln!(z, "impl TryFrom<NonZero<{f}>> for NonZero<{t}> {{ type Error = TryFromIntError; fn try_from(v: NonZero<{f}>) -> Result<NonZero<{t}>, TryFromIntError> {{ Ok(unsafe {{ NonZero::new_unchecked({t}::try_from(v.get())?) }}) }} }}");
             }
         }
     }

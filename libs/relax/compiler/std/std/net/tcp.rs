@@ -274,6 +274,16 @@ mod os_impls {
             TcpStream { sock: Socket::from_owned(fd) }
         }
     }
+    impl From<TcpListener> for OwnedFd {
+        fn from(s: TcpListener) -> OwnedFd {
+            s.sock.into_owned()
+        }
+    }
+    impl From<OwnedFd> for TcpListener {
+        fn from(fd: OwnedFd) -> TcpListener {
+            TcpListener { sock: Socket::from_owned(fd) }
+        }
+    }
 }
 
 /// Windows: the socket traits of std::os::windows::io.

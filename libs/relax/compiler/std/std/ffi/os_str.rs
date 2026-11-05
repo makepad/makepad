@@ -367,6 +367,12 @@ impl From<&OsStr> for Box<OsStr> {
     }
 }
 
+impl Clone for Box<OsStr> {
+    fn clone(&self) -> Box<OsStr> {
+        Box::<OsStr>::from(&**self)
+    }
+}
+
 impl From<&OsStr> for alloc::sync::Arc<OsStr> {
     fn from(s: &OsStr) -> alloc::sync::Arc<OsStr> {
         let bytes: alloc::sync::Arc<[u8]> = alloc::sync::Arc::from(s.as_encoded_bytes());
