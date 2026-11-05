@@ -4,7 +4,7 @@
 // Enables fast O(n log n + k) overlap queries between two meshes, where k is
 // the number of overlapping triangle pairs.
 
-use makepad_csg_math::{thread_pool, BBox3d, Vec3d};
+use makepad_csg_math::{orient3d, thread_pool, BBox3d, Vec3d};
 
 /// A node in the AABB tree. Internal nodes have children; leaves have a triangle index.
 #[derive(Clone, Debug)]
@@ -128,7 +128,8 @@ impl AabbTree {
     }
 }
 
-/// Moller-Trumbore ray-triangle intersection (scalar, forward hits only).
+/// Forward ray hits with exact plane/edge sidedness. A positive hit must
+/// not be discarded just because the origin is very close to the surface.
 #[inline]
 fn ray_intersects_triangle(origin: Vec3d, dir: Vec3d, v0: Vec3d, v1: Vec3d, v2: Vec3d) -> bool {
     let edge1 = v1 - v0;
@@ -136,25 +137,12 @@ fn ray_intersects_triangle(origin: Vec3d, dir: Vec3d, v0: Vec3d, v1: Vec3d, v2: 
     let h = dir.cross(edge2);
     let a = edge1.dot(h);
 
-    if a.abs() < 1e-12 {
-        return false;
-    }
-
-    let f = 1.0 / a;
-    let s = origin - v0;
-    let u = f * s.dot(h);
-    if u < 0.0 || u > 1.0 {
-        return false;
-    }
-
-    let q = s.cross(edge1);
-    let v = f * dir.dot(q);
-    if v < 0.0 || u + v > 1.0 {
-        return false;
-    }
-
-    let t = f * edge2.dot(q);
-    t > 1e-10
+    if a == 0.0 { return false; }
+    let side = orient3d(v0, v1, v2, origin);
+    if side == 0.0 || (side > 0.0) != (a > 0.0) { return false; }
+    let end = origin + dir;
+    let sides = [orient3d(origin, end, v0, v1), orient3d(origin, end, v1, v2), orient3d(origin, end, v2, v0)];
+    !sides.iter().any(|&s| s < 0.0) || !sides.iter().any(|&s| s > 0.0)
 }
 
 fn build_recursive(
@@ -240,7 +228,18 @@ fn find_overlaps_recursive(
     let b = &b_nodes[b_idx as usize];
 
     if !a.bbox.intersects(b.bbox) {
-        return;
+        // Broad phase must admit the same rounded coincidence as the
+        // triangle-plane test; otherwise almost coplanar caps never reach it.
+        let tol = crate::tri_tri::plane_tolerance(
+            a.bbox.min, a.bbox.max, a.bbox.min,
+            b.bbox.min, b.bbox.max, b.bbox.min,
+        );
+        if a.bbox.min.x - b.bbox.max.x > tol || b.bbox.min.x - a.bbox.max.x > tol
+            || a.bbox.min.y - b.bbox.max.y > tol || b.bbox.min.y - a.bbox.max.y > tol
+            || a.bbox.min.z - b.bbox.max.z > tol || b.bbox.min.z - a.bbox.max.z > tol
+        {
+            return;
+        }
     }
 
     if a.is_leaf() && b.is_leaf() {

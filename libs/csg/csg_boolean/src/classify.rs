@@ -25,6 +25,7 @@ use makepad_csg_mesh::mesh::TriMesh;
 pub enum TriLocation {
     Inside,
     Outside,
+    /// A shared surface with the same outward winding.
     OnBoundary,
     /// A face lying on the other mesh's surface and facing into it: two
     /// solids touching face to face (a box standing on a plate, letters on
@@ -37,8 +38,7 @@ pub enum TriLocation {
 #[derive(Clone, Copy)]
 struct ClassifyWork {
     centroid: Vec3d,
-    normal: Vec3d,
-    is_boundary: bool,
+    coplanar: Option<bool>,
 }
 
 /// Shared data for AABB-accelerated classification.
@@ -49,13 +49,9 @@ struct ClassifyContext {
 
 /// Classify all triangles of mesh A as inside/outside mesh B using ray casting.
 ///
-/// For boundary triangles, we test both sides (+normal and -normal) to detect:
-/// - Non-coplanar boundary faces: only interior side is inside → Inside
-/// - Coplanar overlapping faces: both sides report inside → OnBoundary
-///   (kept from mesh A only to avoid double-counting)
-/// - Faces on the other mesh's surface facing into it (solids touching face
-///   to face): only the exterior side inside → Touching
-/// - Faces outside the other mesh: neither side inside → Outside
+/// Coplanar regions are classified by projected containment and winding.
+/// Other corefined regions are queried at their centroid, without offsets
+/// that could cross a nearby surface. Non-boundary patches share a result.
 ///
 /// Uses an AABB tree for O(log n) ray casting and thread pool for parallelism.
 pub fn classify_triangles(
@@ -69,6 +65,26 @@ pub fn classify_triangles(
 /// [`classify_triangles`] against a prepared mesh (its triangles and tree
 /// built once, for every boolean the mesh takes part in).
 pub fn classify_triangles_in(mesh_to_classify: &TriMesh, other: &MeshAccel, on_boundary: &[bool]) -> Vec<TriLocation> {
+    // The boolean pipeline already has these pairs from corefinement. This
+    // standalone entry point discovers them for callers with a refined mesh.
+    let prepared = MeshAccel::build(mesh_to_classify);
+    let source = prepared.triangles();
+    let target = other.triangles();
+    let mut pairs = vec![Vec::new(); source.len()];
+    for (a, b) in prepared.tree().find_overlaps(other.tree()) {
+        if !on_boundary[a as usize] { continue; }
+        let (a0,a1,a2) = source[a as usize];
+        let (b0,b1,b2) = target[b as usize];
+        if crate::tri_tri::tri_tri_intersection(a0,a1,a2,b0,b1,b2).coplanar {
+            pairs[a as usize].push(b);
+        }
+    }
+    let origins: Vec<_> = (0..source.len() as u32).collect();
+    let coplanar = crate::corefine::coplanar_regions(mesh_to_classify, &origins, &pairs, source, target);
+    classify_triangles_with_coplanar(mesh_to_classify, other, on_boundary, &coplanar)
+}
+
+pub(crate) fn classify_triangles_with_coplanar(mesh_to_classify: &TriMesh, other: &MeshAccel, on_boundary: &[bool], coplanar: &[Option<bool>]) -> Vec<TriLocation> {
     let n = mesh_to_classify.triangle_count();
     if n == 0 {
         return Vec::new();
@@ -106,7 +122,7 @@ pub fn classify_triangles_in(mesh_to_classify: &TriMesh, other: &MeshAccel, on_b
         .iter()
         .map(|&ti| {
             let ti = ti as usize;
-            ClassifyWork { centroid: tri_centroid(mesh_to_classify, ti), normal: mesh_to_classify.triangle_normal(ti), is_boundary: on_boundary[ti] }
+            ClassifyWork { centroid: tri_centroid(mesh_to_classify, ti), coplanar: coplanar.get(ti).copied().flatten() }
         })
         .collect();
 
@@ -115,7 +131,11 @@ pub fn classify_triangles_in(mesh_to_classify: &TriMesh, other: &MeshAccel, on_b
         chunk
             .iter()
             .take_while(|_| !thread_pool::cancelled())
-            .map(|w| classify_one(w.centroid, w.normal, w.is_boundary, &ctx))
+            .map(|w| match w.coplanar {
+                Some(true) => TriLocation::OnBoundary,
+                Some(false) => TriLocation::Touching,
+                None => classify_one(w.centroid, &ctx),
+            })
             .collect()
     });
     if found.len() != work.len() {
@@ -186,41 +206,13 @@ fn non_boundary_patches(mesh: &TriMesh, on_boundary: &[bool]) -> (Vec<u32>, usiz
     (patch, count)
 }
 
-/// Classify a single triangle given its centroid, normal, and boundary status.
-fn classify_one(
-    centroid: Vec3d,
-    normal: Vec3d,
-    is_boundary: bool,
-    ctx: &ClassifyContext,
-) -> TriLocation {
-    if is_boundary {
-        let eps = 1e-6;
-        let inside_point = centroid - normal * eps;
-        let outside_point = centroid + normal * eps;
-        let interior_in = point_inside_bvh(inside_point, &ctx.tree, &ctx.tris);
-        let exterior_in = point_inside_bvh(outside_point, &ctx.tree, &ctx.tris);
-
-        if interior_in && exterior_in {
-            TriLocation::OnBoundary
-        } else if interior_in {
-            TriLocation::Inside
-        } else if exterior_in {
-            TriLocation::Touching
-        } else {
-            TriLocation::Outside
-        }
+/// A corefined region not covered by a coplanar face lies wholly inside or
+/// outside. Query the region itself: an offset may cross a nearby surface.
+fn classify_one(centroid: Vec3d, ctx: &ClassifyContext) -> TriLocation {
+    if point_inside_bvh(centroid, &ctx.tree, &ctx.tris) {
+        TriLocation::Inside
     } else {
-        let inside = point_inside_bvh(centroid, &ctx.tree, &ctx.tris);
-        if inside {
-            TriLocation::Inside
-        } else {
-            let inward = centroid - normal * 1e-6;
-            if point_inside_bvh(inward, &ctx.tree, &ctx.tris) {
-                TriLocation::Inside
-            } else {
-                TriLocation::Outside
-            }
-        }
+        TriLocation::Outside
     }
 }
 

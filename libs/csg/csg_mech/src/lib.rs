@@ -17,6 +17,7 @@ pub mod bead;
 pub mod check;
 pub mod geom;
 pub mod joint;
+mod keep_out;
 pub mod mass;
 pub mod runner;
 pub mod sim;

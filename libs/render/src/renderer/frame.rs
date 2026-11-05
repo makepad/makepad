@@ -219,7 +219,9 @@ impl Renderer {
         // placed models for this frame. An aux draw resolves nothing and a
         // fork's draws resolve nothing (they draw the live renderer's,
         // mirrored); the stock decision then reads the texture that is
-        // bound, the scene's.
+        // bound, the scene's. First, after a live edit, what the renderer
+        // derived from the shaders' defaults is derived again (variants.rs).
+        self.follow_reload(cx.cx);
         self.resolve_ibl_for(cx.cx, &world.environment, scope);
         self.prepare_stock_ibl(cx.cx);
         self.push_item_instances(cx.cx, world);
@@ -391,8 +393,8 @@ impl Renderer {
                     &Mat4f::mul(&scene_state.view, &stage_matrix),
                 );
                 let inv = clip.invert();
-                let corner = |x: f32, y: f32| {
-                    let p = inv.transform_vec4(vec4(x, y, 1.0, 1.0));
+                let corner = |x: f32, y: f32, z: f32| {
+                    let p = inv.transform_vec4(vec4(x, y, z, 1.0));
                     if p.w.abs() < 1.0e-9 {
                         None
                     } else {
@@ -401,11 +403,17 @@ impl Renderer {
                 };
                 Some(crate::shadow_csm::CsmView {
                     cam: camera_pos,
+                    near_corners: [
+                        corner(-1.0, -1.0, 0.0)?,
+                        corner(1.0, -1.0, 0.0)?,
+                        corner(-1.0, 1.0, 0.0)?,
+                        corner(1.0, 1.0, 0.0)?,
+                    ],
                     far_corners: [
-                        corner(-1.0, -1.0)?,
-                        corner(1.0, -1.0)?,
-                        corner(-1.0, 1.0)?,
-                        corner(1.0, 1.0)?,
+                        corner(-1.0, -1.0, 1.0)?,
+                        corner(1.0, -1.0, 1.0)?,
+                        corner(-1.0, 1.0, 1.0)?,
+                        corner(1.0, 1.0, 1.0)?,
                     ],
                     focus_distance: self.csm_focus.unwrap_or(0.0),
                 })
@@ -707,6 +715,7 @@ impl Renderer {
             (super::variants::ModelLane::Terrain, draws.terrain.as_deref_mut().map(|d| &mut d.draw_vars)),
         ] {
             let Some(dv) = dv else { continue };
+            dv.refresh_after_reload(cx.cx);
             if let Some(id) = self.level_shader(cx.cx, lane, dv.draw_shader_id) {
                 dv.draw_shader_id = Some(id);
             }

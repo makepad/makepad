@@ -303,6 +303,9 @@ impl Renderer {
         if !pbr_lane {
             let hdr = self.hdr_output;
             // The PBR lane's shader for this frame's features (variants.rs).
+            if let Some(d) = self.pbr_draw.as_deref_mut() {
+                d.skinned.draw_vars.refresh_after_reload(cx.cx);
+            }
             let stock = self.pbr_draw.as_ref().and_then(|d| d.skinned.draw_vars.draw_shader_id);
             let shader = if stock.is_some() { self.lane_shaders(cx.cx, variants::ModelLane::Pbr, stock).0 } else { None };
             self.pbr_ready = shader.is_some_and(|id| cx.cx.draw_shader_ready(id, hdr));
@@ -334,6 +337,9 @@ impl Renderer {
         };
         let opaque = match (&mut draw, model_lane) {
             (_, Some(model_lane)) => {
+                // A lane draw held from before a live edit takes it first,
+                // so what follows binds and restores the edited shader.
+                draw.base().draw_vars.refresh_after_reload(cx.cx);
                 let stock = draw.base().draw_vars.draw_shader_id;
                 let (full, opaque) = self.lane_shaders(cx.cx, model_lane, stock);
                 draw.base().draw_vars.draw_shader_id = full;
@@ -533,6 +539,7 @@ impl Renderer {
                         }
                     }
                 }
+                draw.base().draw_vars.set_uniform(cx.cx, live_id!(host_clip), &self.clip_plane.unwrap_or([0.0; 4]));
                 if let Some(morph)=&loaded.morph{
                     let target=match lane{WorldModelLane::Placed=>ModelTarget::Instance(i),WorldModelLane::Attachment=>ModelTarget::Attachment(i)};
                     let weights=self.model_anim_state.morph_weights(&target,&inst.model,&morph.source);
@@ -762,7 +769,7 @@ impl Renderer {
                             draw.base().morph_weights0 = vec4(d.wind * 0.35, inv_height, self.sky_time, flutter);
                         }
                     }
-                    let cut = screen_clip || stand_in || layer_window > 0.0 || match &material.surface {
+                    let cut = screen_clip || stand_in || layer_window > 0.0 || self.clip_plane.is_some() || match &material.surface {
                         // Masked layers discard; blended ones need the stock
                         // pipeline too (the no-discard variant draws opaque).
                         Some(surface) if pbr_lane => surface.definition.alpha_mode != 0,

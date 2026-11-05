@@ -385,8 +385,9 @@ pub struct MechWorld {
     /// Body-to-body joints only: contacts and kinematic targets do not join throw islands.
     neighbours: Vec<Vec<usize>>,
     floor: Option<BodyId>,
-    /// The assembly's anchors as built: the held body and its joint (a weld or pin to the ground).
-    anchors: Vec<(usize, JointId)>,
+    /// The assembly's anchors as built: the held body, its joint (a weld or pin to the ground), and
+    /// whether it is welded.
+    anchors: Vec<(usize, JointId, bool)>,
     /// Bodies stopped in place by [`MechWorld::freeze`], with the damping they had.
     frozen: Vec<(usize, (f32, f32))>,
     pub gravity: P3,
@@ -400,6 +401,9 @@ pub struct MechWorld {
     sleeps: bool,
     /// The assembly's speed cap, mm/s (0: none).
     max_speed: f64,
+    /// Balls kept out of fields (none without both).
+    keep_out: Option<crate::keep_out::KeepOut>,
+    kept_out: usize,
 }
 
 /// How near the hand the held ground counts as there (mm).
@@ -427,6 +431,7 @@ impl MechWorld {
         let mut rest = Vec::new();
         let mut shapes = Vec::new();
         let mut reach = Vec::new();
+        let (mut fields, mut balled) = (Vec::new(), Vec::new());
         for (i, b) in asm.bodies.iter().enumerate() {
             let mut bd = default_body_def();
             bd.body_type = BodyType::Dynamic;
@@ -463,6 +468,10 @@ impl MechWorld {
                 sd.filter.mask_bits = CAT_BALL;
                 let solid: std::sync::Arc<dyn DistanceField> = std::sync::Arc::new(AtBody { field: field.clone(), centre: vf(b.mass.com) });
                 own.push(create_field_shape(&mut world, id, &sd, &solid));
+                fields.push((i, solid));
+            }
+            if !b.balls.is_empty() {
+                balled.push((i, b.balls.iter().map(|(c, _)| vf(sub(*c, b.mass.com))).collect()));
             }
             sd.filter.category_bits = CAT_BALL;
             sd.filter.mask_bits = CAT_FIELD;
@@ -529,7 +538,7 @@ impl MechWorld {
                     d.base.body_id_b = bodies[a.body];
                     d.base.local_frame_a = Transform { p: vf(a.pivot), q: Quat::IDENTITY };
                     d.base.local_frame_b = Transform { p: local(&rest, a.body, a.pivot), q: Quat::IDENTITY };
-                    anchors.push((a.body, makepad_box3d::joint::create_weld_joint(&mut world, &d)));
+                    anchors.push((a.body, makepad_box3d::joint::create_weld_joint(&mut world, &d), true));
                 }
                 AnchorKind::Pin(axis) => {
                     let q = quat_z_to(*axis);
@@ -539,7 +548,7 @@ impl MechWorld {
                     d.base.local_frame_a = Transform { p: vf(a.pivot), q };
                     d.base.local_frame_b = Transform { p: local(&rest, a.body, a.pivot), q };
                     d.base.friction = JointFriction { coefficient: a.friction.mu as f32, radius: a.friction.radius as f32, torque: a.friction.torque as f32 };
-                    anchors.push((a.body, create_revolute_joint(&mut world, &d)));
+                    anchors.push((a.body, create_revolute_joint(&mut world, &d), false));
                 }
             }
         }
@@ -562,7 +571,7 @@ impl MechWorld {
             neighbours[j.b].push(j.a);
         }
         let sliding = vec![false; bodies.len()];
-        let mut mw = MechWorld { world, ground, bodies, joints, rest, grab: None, pins: Vec::new(), neighbours, floor: floor_id, anchors, frozen: Vec::new(), gravity, time: 0.0, substeps: if asm.substeps > 0 { asm.substeps as i32 } else { 4 }, shapes, reach, sliding, sleeps: asm.sleep > 0.0, max_speed: asm.max_speed };
+        let mut mw = MechWorld { world, ground, bodies, joints, rest, grab: None, pins: Vec::new(), neighbours, floor: floor_id, anchors, frozen: Vec::new(), gravity, time: 0.0, substeps: if asm.substeps > 0 { asm.substeps as i32 } else { 4 }, shapes, reach, sliding, sleeps: asm.sleep > 0.0, max_speed: asm.max_speed, keep_out: crate::keep_out::KeepOut::new(fields, balled), kept_out: 0 };
         if let Some((c, r)) = asm.ball {
             mw.add_ball(c, r);
         }
@@ -577,8 +586,19 @@ impl MechWorld {
     pub fn step(&mut self, dt: f64) {
         self.update_sliding();
         self.damp_grip(dt);
+        if let Some(k) = &mut self.keep_out {
+            k.start(&self.world, &self.bodies);
+        }
         world_step(&mut self.world, dt as f32, self.substeps);
+        if let Some(k) = &mut self.keep_out {
+            self.kept_out += k.step(&mut self.world, &self.bodies);
+        }
         self.time += dt;
+    }
+
+    /// How many times a piece's ball had gone into a part and was moved back out, since the start.
+    pub fn kept_out(&self) -> usize {
+        self.kept_out
     }
 
     /// The grip damps the held part's velocity against the hand's, implicitly (stable at any rate).
@@ -674,7 +694,7 @@ impl MechWorld {
         let turn = 2.0 * (length(rel.v) as f64).atan2(rel.s.abs() as f64);
         self.anchors
             .iter()
-            .map(|&(i, _)| {
+            .map(|&(i, _, _)| {
                 let p = |t: WorldTransform| add(pf(to_vec3(t.p)), pf(rotate_vector(t.q, vf(self.rest[i]))));
                 len(sub(p(to), p(now))) + turn * self.reach[i]
             })
@@ -683,11 +703,22 @@ impl MechWorld {
 
     fn set_ground(&mut self, at: P3, q: Quat, dt: f64) {
         body_set_target_transform(&mut self.world, self.ground, WorldTransform { p: to_pos(vf(at)), q }, dt as f32, true);
-        // the ground's joints do not join islands: what hangs from it is woken to follow it
+        let (origin, v, w) = (pf(to_vec3(body_get_position(&self.world, self.ground))), pf(body_get_linear_velocity(&self.world, self.ground)), body_get_angular_velocity(&self.world, self.ground));
         for i in 0..self.anchors.len() {
-            let b = self.bodies[self.anchors[i].0];
+            let (body, _, welded) = self.anchors[i];
+            let b = self.bodies[body];
+            // the ground's joints do not join islands: what hangs from it is woken to follow it
             if !body_is_awake(&self.world, b) {
                 body_set_awake(&mut self.world, b, true);
+            }
+            // A welded body goes as the ground does from the step's start. Left to its weld, it would
+            // take up a change of the hand's speed only inside the step, after the contacts against it
+            // were made for the speed it had: a part lifted or shaken hard would go into what it
+            // carries, as far as the change takes it in a step.
+            if welded {
+                let at = pf(to_vec3(body_get_world_center_of_mass(&self.world, b)));
+                body_set_linear_velocity(&mut self.world, b, vf(add(v, cross(pf(w), sub(at, origin)))));
+                body_set_angular_velocity(&mut self.world, b, w);
             }
         }
     }
@@ -1377,7 +1408,7 @@ impl MechWorld {
             held = true;
         }
         while let Some(i) = self.anchors.iter().position(|a| a.0 == body) {
-            let (_, joint) = self.anchors.remove(i);
+            let (_, joint, _) = self.anchors.remove(i);
             destroy_joint(&mut self.world, joint, true);
             held = true;
         }
@@ -1429,6 +1460,7 @@ impl MechWorld {
                         let p = to_vec3(t.p);
                         let to = vec3(p.x - (g[0] * lift) as f32, p.y - (g[1] * lift) as f32, p.z - (g[2] * lift) as f32);
                         body_set_transform(&mut self.world, id, to_pos(to), t.q);
+                        self.put(b);
                         self.stand_still(b);
                     }
                 }
@@ -1455,6 +1487,7 @@ impl MechWorld {
                     let p = to_vec3(t.p);
                     let to = vec3(p.x + (up[0] * size) as f32, p.y + (up[1] * size) as f32, p.z + (up[2] * size) as f32);
                     body_set_transform(&mut self.world, id, to_pos(to), t.q);
+                    self.put(b);
                     self.stand_still(b);
                 }
                 let Some(&top) = bodies.iter().max_by(|a, b| self.top(**a, up).total_cmp(&self.top(**b, up))) else { return };
@@ -1493,6 +1526,7 @@ impl MechWorld {
                     self.freeze_one(b, false);
                     self.let_go(b);
                     body_set_transform(&mut self.world, self.bodies[b], to_pos(vf(self.rest[b])), Quat::IDENTITY);
+                    self.put(b);
                     self.stand_still(b);
                 }
             }
@@ -1501,6 +1535,13 @@ impl MechWorld {
                     self.freeze_one(b, *on);
                 }
             }
+        }
+    }
+
+    /// `body` was put where it is, not moved there: what its balls knew of their way is gone.
+    fn put(&mut self, body: usize) {
+        if let Some(k) = &mut self.keep_out {
+            k.forget(body);
         }
     }
 

@@ -157,7 +157,18 @@ pub fn register(vm: &mut ScriptVm) -> ScriptValue {
     // shared stdlib, the shadow sampling this build uses, ...): a second,
     // partial list here made different shaders (and shader-pack keys)
     // depending on which registration ran first.
-    if vm.heap().type_default_for_id(DrawScenePbr::script_type_id_static()).is_none() {
+    let scene = vm.heap().type_default_for_id(DrawScenePbr::script_type_id_static()).is_none();
+    // Outside any `script_mod` of the VM's: its live-edit reload passes run it
+    // again (the scene shaders too where this registered them), so the
+    // materials it builds after an edit build on the edited shaders.
+    vm.keep_for_reload(live_id!(render_materials), move |vm| {
+        register_with(vm, scene);
+    });
+    register_with(vm, scene)
+}
+
+fn register_with(vm: &mut ScriptVm, scene: bool) -> ScriptValue {
+    if scene {
         crate::script_mod(vm);
     }
     builtin::register(vm);
@@ -167,6 +178,27 @@ pub fn register(vm: &mut ScriptVm) -> ScriptValue {
 /// Runs `f` in the VM that owns a material's program (a level isolate's);
 /// false when that VM is busy. A material without one uses the Cx's VM.
 pub type MaterialVm = Rc<dyn Fn(&mut Cx, &mut dyn FnMut(&mut ScriptVm)) -> bool>;
+
+/// How a material was built: what builds it again on the lanes' defaults as
+/// they are after a live edit (`CustomMaterial::rebuild`). The objects it
+/// names live in the program's heap, held there by `_keep`.
+#[derive(Clone)]
+enum Recipe {
+    /// [`DrawSceneCustom::build_with`] (`build`, `unlit` and `from_surface`
+    /// come through it).
+    Hooks { desc: MaterialDesc, hooks: HookSet, mask: HookMask, params: Vec4f, helpers: Vec<(LiveId, ScriptObject)>, _keep: Rc<[ScriptObjectRef]> },
+    /// [`DrawSceneCustom::error_material`].
+    Error,
+}
+
+impl Recipe {
+    fn build(&self, vm: &mut ScriptVm) -> Result<CustomMaterial, MaterialError> {
+        match self {
+            Recipe::Hooks { desc, hooks, mask, params, helpers, .. } => DrawSceneCustom::build_with(vm, desc, hooks, *mask, *params, helpers),
+            Recipe::Error => DrawSceneCustom::error_material(vm),
+        }
+    }
+}
 
 /// A built material: the colour draw, and what its plan derived.
 pub struct CustomMaterial {
@@ -195,12 +227,18 @@ pub struct CustomMaterial {
     /// Problems that did not stop the colour program (a caster that did not
     /// compile casts the stock shadow instead).
     pub warnings: Vec<material::Diagnostic>,
+    /// What builds it again, and the reload walk (`Cx::reload_generation`)
+    /// it was built after.
+    recipe: Recipe,
+    pub(crate) built_at: u64,
 }
 
 impl CustomMaterial {
-    fn new(draw: DrawSceneCustom, plan: VariantPlan, program: Option<ScriptObjectRef>) -> Self {
+    fn new(vm: &mut ScriptVm, draw: DrawSceneCustom, plan: VariantPlan, program: Option<ScriptObjectRef>, recipe: Recipe) -> Self {
         Self {
             stock: draw.draw_vars.draw_shader_id,
+            recipe,
+            built_at: vm.cx().reload_generation,
             draw,
             plan,
             program,
@@ -274,13 +312,33 @@ impl CustomMaterial {
             None => (Some(stock), None),
         }
     }
-}
 
-impl From<DrawSceneCustom> for CustomMaterial {
-    /// A colour draw built elsewhere: the stock caster, no derived
-    /// variants.
-    fn from(draw: DrawSceneCustom) -> Self {
-        Self::new(draw, VariantPlan { builtins: Vec::new(), can_discard: true, shadow: ShadowVariant::Stock }, None)
+    /// The material built again from its recipe in the VM that owns its
+    /// program, on the lanes' defaults as a live edit left them, with what
+    /// its host set since (params, texture, its VM). `None` when that VM is
+    /// busy: the next frame.
+    pub(crate) fn rebuild(&self, cx: &mut Cx) -> Option<Result<CustomMaterial, MaterialError>> {
+        let params = self.draw.params(cx);
+        let heap = self.program.as_ref().map(|p| p.heap_key());
+        let mut built = None;
+        let mut run = |vm: &mut ScriptVm| {
+            // Only in the heap that owns the program (as `shaders`).
+            built = Some(match heap.is_none_or(|heap| heap == vm.heap_key()) {
+                true => self.recipe.build(vm),
+                false => Err(MaterialError::new("its VM entered another heap than its program's".to_string())),
+            })
+        };
+        let ran = match &self.host_vm {
+            Some(host) => host(cx, &mut run),
+            None => cx.try_with_vm(|vm| run(vm)).is_some(),
+        };
+        let built = built.filter(|_| ran)?;
+        Some(built.map(|mut m| {
+            m.draw.set_params(cx, params);
+            m.texture = self.texture.clone();
+            m.host_vm = self.host_vm.clone();
+            m
+        }))
     }
 }
 
@@ -383,7 +441,9 @@ impl DrawSceneCustom {
         };
         let ibl = plan.builtins.contains(&Builtin::Ibl);
         let program = vm.new_object_ref(obj);
-        Ok(CustomMaterial { ibl, shadow, cutoff, bounds_pad: hooks.bounds_pad, warnings, ..CustomMaterial::new(draw, plan, Some(program)) })
+        let keep = hooks.iter().map(|(_, f)| f).chain(helpers.iter().map(|(_, f)| *f)).map(|f| vm.new_object_ref(f)).collect();
+        let recipe = Recipe::Hooks { desc: *desc, hooks: hooks.clone(), mask, params, helpers: helpers.to_vec(), _keep: keep };
+        Ok(CustomMaterial { ibl, shadow, cutoff, bounds_pad: hooks.bounds_pad, warnings, ..CustomMaterial::new(vm, draw, plan, Some(program), recipe) })
     }
 
     fn build_shadow(vm: &mut ScriptVm, hooks: &HookSet, vertex: bool, mask: bool, helpers: &[(LiveId, ScriptObject)]) -> Result<DrawShaderId, MaterialError> {
@@ -431,7 +491,7 @@ impl DrawSceneCustom {
         let obj = material::build_program(vm, &material::ProgramRequest { base, kind: BaseKind::Unlit, hooks: &HookSet::new(), mask: HookMask::NONE, overrides: &overrides })?;
         let draw = instance_custom(vm, obj)?;
         let program = vm.new_object_ref(obj);
-        Ok(CustomMaterial::new(draw, VariantPlan { builtins: vec![Builtin::Error], can_discard: false, shadow: ShadowVariant::Stock }, Some(program)))
+        Ok(CustomMaterial::new(vm, draw, VariantPlan { builtins: vec![Builtin::Error], can_discard: false, shadow: ShadowVariant::Stock }, Some(program), Recipe::Error))
     }
 
     /// Sandbox's game.material: one albedo `surface(base: vec4) -> vec4`

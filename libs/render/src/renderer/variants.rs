@@ -84,11 +84,13 @@ pub(super) enum VariantShader {
     Built(DrawShaderId),
 }
 
-/// The variants built so far, and each lane's stock shader.
+/// The variants built so far, and each lane's stock shader, as of the
+/// reload walk (`Cx::reload_generation`) they were built after.
 #[derive(Default)]
 pub(super) struct LaneVariants {
     shaders: HashMap<(ModelLane, Features), VariantShader>,
     stock: HashMap<ModelLane, DrawShaderId>,
+    generation: u64,
 }
 
 script_mod! {
@@ -121,6 +123,36 @@ script_mod! {
 }
 
 impl Renderer {
+    /// After a live edit's reload walk, what this renderer derived from the
+    /// scene shaders' registered defaults is derived again: every installed
+    /// material (the engine's and the host's alike) is built again from its
+    /// recipe in the VM that owns it, and the lanes' stock shaders and
+    /// variants on their next use. Code the edit left alone compiles to the
+    /// shader (and pipeline) it had; an edited shader draws from the next
+    /// frame on. The lane draws held from before take the edit themselves
+    /// (`DrawVars::refresh_after_reload`), each where its lane picks its
+    /// shaders. A material whose VM is busy is built on the next frame.
+    pub(super) fn follow_reload(&mut self, cx: &mut Cx) {
+        let generation = cx.reload_generation;
+        if self.lane_variants.generation == generation {
+            return;
+        }
+        for (name, m) in self.custom_draws.iter_mut() {
+            if m.built_at == generation {
+                continue;
+            }
+            match m.rebuild(cx) {
+                None => return,
+                Some(Ok(built)) => **m = built,
+                Some(Err(e)) => log!("render: material {name} does not build on the edited shaders ({e}); it draws as it did"),
+            }
+            m.built_at = generation;
+        }
+        self.lane_variants = LaneVariants { generation, ..Default::default() };
+        self.stock_ibl_forget_failure();
+        self.item_materials_forget_failures();
+    }
+
     /// The features this frame's lane uniforms leave on (what
     /// `bind_model_lane` writes), with `clip` on.
     pub(super) fn lane_features(&self) -> Features {
@@ -132,11 +164,15 @@ impl Renderer {
     /// The lane's shaders for this frame's features: the one it draws
     /// through, and the one without `clip` for draws that cut no pixel.
     /// `None` when a variant is not available (the VM was busy: next frame;
-    /// or its layout differs): the lane then draws through its stock shader
-    /// (whose id it is given).
-    pub(super) fn lane_shaders(&mut self, cx: &mut Cx, lane: ModelLane, stock: Option<DrawShaderId>) -> (Option<DrawShaderId>, Option<DrawShaderId>) {
+    /// or its layout differs): the lane then draws through its stock shader.
+    /// `held` is the shader on the lane's draw: a draw that could not take a
+    /// live edit (its holder binds the old layout: a failed hot load, the
+    /// restart is coming) keeps drawing that until the restart.
+    pub(super) fn lane_shaders(&mut self, cx: &mut Cx, lane: ModelLane, held: Option<DrawShaderId>) -> (Option<DrawShaderId>, Option<DrawShaderId>) {
+        let fits = |cx: &Cx, id: DrawShaderId| held.is_none_or(|held| same_layout(cx, held, id));
         if std::env::var_os("MAKEPAD_SHADER_VARIANTS").is_some_and(|v| v == "0") {
-            return (self.lane_variants.stock.get(&lane).copied().or(stock), None);
+            let stock = self.lane_variants.stock.get(&lane).copied().filter(|id| fits(&*cx, *id));
+            return (stock.or(held), None);
         }
         let features = self.lane_features();
         let full = self.variant(cx, lane, features);
@@ -145,8 +181,8 @@ impl Renderer {
         } else {
             self.variant(cx, lane, Features { clip: false, ..features })
         };
-        let stock = self.lane_variants.stock.get(&lane).copied().or(stock);
-        (full.or(stock), opaque)
+        let full = full.or(self.lane_variants.stock.get(&lane).copied()).filter(|id| fits(&*cx, *id));
+        (full.or(held), opaque.filter(|id| fits(&*cx, *id)))
     }
 
     /// A level draw's shader (SceneDraws: slabs, blended slabs, terrain)
@@ -394,6 +430,48 @@ mod tests {
         assert!(!renderer.splat_ready && !renderer.foliage_ready);
         assert!(renderer.splat_draw.is_none() && renderer.foliage_draw.is_none());
         assert!(renderer.lane_variants.shaders.is_empty());
+    }
+
+    /// A live edit of a lane's shader (its default registered again with
+    /// another pixel, the reload walk counted) reaches the lane's next draw:
+    /// the lane draw held from before takes the edited default, and the
+    /// lane's variants are built again from it. A walk that runs the same
+    /// code again keeps the shaders, and so the pipelines, the lane had.
+    #[test]
+    fn a_live_edit_of_a_lane_shader_reaches_the_lanes_next_draw() {
+        let mut cx = shader_cx();
+        let mut renderer = Renderer::default();
+        let mut held = cx.with_vm(|vm| DrawScenePbr::script_new_with_default(vm));
+        // What a frame's PBR pass does with the lane's draw (draw_models.rs):
+        // (the held draw's own shader, the lane's, the lane's without clip).
+        let frame = |cx: &mut Cx, renderer: &mut Renderer, held: &mut DrawScenePbr| {
+            renderer.follow_reload(cx);
+            held.skinned.draw_vars.refresh_after_reload(cx);
+            let own = held.skinned.draw_vars.draw_shader_id.expect("the held draw's shader");
+            let (full, opaque) = renderer.lane_shaders(cx, ModelLane::Pbr, Some(own));
+            held.skinned.draw_vars.draw_shader_id = full;
+            (own, full.expect("the lane's shader"), opaque.expect("the lane's shader without clip"))
+        };
+        let before = frame(&mut cx, &mut renderer, &mut held);
+        cx.with_vm(|vm| vm.with_reload(|vm| crate::shaders::script_mod(vm)));
+        cx.reload_generation += 1;
+        assert_eq!(frame(&mut cx, &mut renderer, &mut held), before, "the same code run again: the same shaders");
+        cx.with_vm(|vm| {
+            script_eval!(vm, {
+                use mod.prelude.widgets_internal.*
+                mod.draw.DrawScenePbr = mod.std.set_type_default() do mod.draw.DrawScenePbr{
+                    pixel: fn() { return vec4(1.0, 0.0, 1.0, 1.0) }
+                }
+            });
+        });
+        cx.reload_generation += 1;
+        let edited = frame(&mut cx, &mut renderer, &mut held);
+        let features = renderer.lane_features();
+        let (stock, variant) = cx.with_vm(|vm| build(vm, ModelLane::Pbr, features)).expect("the edited lane builds");
+        assert!(stock != before.0 && variant != before.1, "premise: the edit is other code");
+        assert_eq!(edited.0, stock, "the held draw takes the edited default");
+        assert_eq!(edited.1, variant, "the lane draws the edited default's variant from the next frame on");
+        assert_ne!(edited.2, before.2, "and its variant without clip");
     }
 
     #[test]

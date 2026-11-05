@@ -46,6 +46,8 @@ pub const SIM_MESH_CONTACT: u32 = 0x00400000;
 pub const RELATIVE_TRANSFORM_VALID: u32 = 0x00800000;
 /// A tube contact can hold multiple segment-pair manifolds and uses no mesh cache.
 pub const SIM_TUBE_CONTACT: u32 = 0x01000000;
+/// PORT EXTENSION: a sphere against a distance field, whose manifold is swept along the step's motion.
+pub const SIM_FIELD_CONTACT: u32 = 0x02000000;
 
 /// A contact edge is used to connect bodies and contacts together
 /// in a contact graph where each body is a node and each contact
@@ -482,6 +484,8 @@ pub fn create_contact(world: &mut World, shape_id_a: i32, shape_id_b: i32, child
 
     if type_a == ShapeType::Tube {
         world.contacts[contact_id as usize].flags |= SIM_TUBE_CONTACT;
+    } else if type_a == ShapeType::Field {
+        world.contacts[contact_id as usize].flags |= SIM_FIELD_CONTACT;
     } else if type_a == ShapeType::Mesh || type_a == ShapeType::Height {
         world.contacts[contact_id as usize].flags |= SIM_MESH_CONTACT;
     } else if type_a == ShapeType::Compound {
@@ -713,7 +717,7 @@ pub fn destroy_contact(world: &mut World, contact_id: i32, wake_bodies: bool) {
 
 /// PORT EXTENSION: how far `point_b` of body B goes against body A in a step, in A's frame, from
 /// their velocities as they are.
-fn step_motion_in_a(world: &World, body_a: i32, xf_a: WorldTransform, body_b: i32, xf_b: WorldTransform, point_b: Vec3) -> Vec3 {
+pub(crate) fn step_motion_in_a(world: &World, body_a: i32, xf_a: WorldTransform, body_b: i32, xf_b: WorldTransform, point_b: Vec3) -> Vec3 {
     if world.inv_dt == 0.0 {
         return Vec3::ZERO;
     }

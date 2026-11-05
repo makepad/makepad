@@ -158,6 +158,11 @@ script_mod! {
         // `set_uniform(live_id!(elem_ctl), ..)` on its own draw struct.
         elem_map: texture_2d(float)
         elem_ctl: uniform(vec4(0.0, 0.0, 0.0, 0.0))
+        // ---- host clip plane (CAD hosts) — OFF by default ----
+        // A world half-space the host keeps (`Renderer::set_clip_plane`):
+        // a fragment where dot(xyz, p) + w < 0 is cut away. The zero plane
+        // (the default) keeps everything.
+        host_clip: uniform(vec4(0.0, 0.0, 0.0, 0.0))
         // ---- screen-space AO (ssao.rs) — slot 7, OFF by default ----
         // A host that runs `SsaoPass` hands its blurred output to
         // `Renderer::set_ssao`, which binds it here for BOTH model lanes.
@@ -217,15 +222,22 @@ script_mod! {
             return self.paint_texel(self.v_paint.w * self.elem_ctl.z + 1.0).w - 1.0
         }
 
-        // `albedo` with the element's paint at this fragment, edges a pixel wide.
-        paint_mix: fn(albedo: vec3) -> vec3 {
+        // `albedo` with the element's paint at this fragment, edges a pixel wide; in w its light
+        // floor (`PaintLookup::paint_shade`: see `paint_floor`).
+        paint_mix: fn(albedo: vec3) -> vec4 {
             let dx = dFdx(self.v_paint.xyz)
             let dy = dFdy(self.v_paint.xyz)
             let dw = length(dx) + length(dy)
             let hdr = self.paint_header()
-            if hdr < 0.0 { return albedo }
+            if hdr < 0.0 { return vec4(albedo, 0.0) }
             let s = length(self.paint_texel(hdr + 3.0).xyz)
-            return self.paint_albedo(hdr, self.paint_frame(hdr, self.v_paint.xyz), self.paint_turn(hdr + 3.0, cross(dx, dy)), dw * s, albedo)
+            return self.paint_shade(hdr, self.paint_frame(hdr, self.v_paint.xyz), self.paint_turn(hdr + 3.0, cross(dx, dy)), dw * s, albedo)
+        }
+
+        // The least light a floored paint shows at, scene-referred: `share` of its colour as the
+        // exposure shows it, whatever the exposure (as a prelit map keeps its brightness).
+        paint_floor: fn(albedo: vec3, share: f32) -> vec3 {
+            return albedo * (share * self.lin_ctl.z)
         }
 
         dl_term: fn(wp: vec3, n: vec3, lp: vec4, lc: vec4) -> vec3 {
@@ -570,6 +582,9 @@ script_mod! {
         // dither; else 1 + lo8 * 256 + hi8 and a pixel shows only while
         // lo <= noise < hi, so the two levels of a transition cover
         // complementary pixels.
+        host_cut: fn() {
+            if dot(self.host_clip.xyz, self.v_csm.xyz) + self.host_clip.w < 0.0 { self.clip() }
+        }
         door_window: fn() {
             if self.color_adjust_ctl.w > 0.5 {
                 let dsp = self.v_spos.xy / max(self.v_spos.w, 0.000001)
@@ -588,6 +603,7 @@ script_mod! {
         }
 
         pixel: fn() {
+            self.host_cut()
             self.door_window()
             if self.occ_focus.w > 0.0 {
                 let oe = self.occ_eye.xyz
@@ -622,7 +638,8 @@ script_mod! {
                 self.tint,
                 self.color_adjust_ctl
             )
-            albedo = self.paint_mix(albedo)
+            let painted = self.paint_mix(albedo)
+            albedo = painted.xyz
             // Detail: blendFunc GL_DST_COLOR GL_SRC_COLOR = 2 * dest * src.
             // Mean-127 overlay is identity; far mips go gray and drop out.
             if self.detail_st.x > 0.001 {
@@ -742,6 +759,8 @@ script_mod! {
                 let cap = max(max(lit.x, max(lit.y, lit.z)) * 3.0, 0.12)
                 lit = lit + glow * min(1.0, cap / max(glow.x, 0.0001))
             }
+            // A floored paint (a support tint) reads where the light falls short: under an overhang.
+            lit = max(lit, self.paint_floor(albedo, painted.w))
             // AO DEBUG: show baked occlusion alone, contrast-stretched. AO
             // lives in [AO_FLOOR, 1] (0.52..1), so raw it is a wash of pale
             // greys and judging whether a 90-degree corner actually darkens is

@@ -13,8 +13,8 @@
 use crate::aabb_tree::AabbTree;
 use crate::classify::MeshAccel;
 use crate::cdt::{Point2, CDT};
-use crate::tri_tri::{tri_tri_intersection_indexed, EdgeIsect};
-use makepad_csg_math::{thread_pool, Vec3d};
+use crate::tri_tri::{construct_edge_plane_intersection, tri_tri_intersection_indexed, EdgeIsect};
+use makepad_csg_math::{orient2d, thread_pool, Vec3d};
 use makepad_csg_mesh::mesh::TriMesh;
 use makepad_csg_math::fast_hash::FastMap as HashMap;
 
@@ -58,6 +58,10 @@ pub struct CorefinementResult {
     pub on_boundary_a: Vec<bool>,
     /// For each triangle in mesh_b, is it on the intersection boundary?
     pub on_boundary_b: Vec<bool>,
+    /// Coplanar coverage per refined face: true for equal winding, false
+    /// for opposite winding, None outside the shared surface.
+    pub coplanar_a: Vec<Option<bool>>,
+    pub coplanar_b: Vec<Option<bool>>,
     /// Number of intersection segments found between the two meshes.
     /// Zero means the meshes were copied through untouched (no triangle was
     /// split); the boolean's finishing passes can then be skipped entirely.
@@ -91,6 +95,8 @@ pub fn corefine_in(mesh_a: &TriMesh, prep_a: &MeshAccel, mesh_b: &TriMesh, prep_
     // (edge, other_triangle) intersection so it's computed exactly once.
     let mut segments: Vec<IntersectionSegment> = Vec::new();
     let mut shared_vert_grid = VertexGrid::new(1e-10);
+    let mut coplanar_a = vec![Vec::new(); mesh_a.triangle_count()];
+    let mut coplanar_b = vec![Vec::new(); mesh_b.triangle_count()];
     let mut edge_cache: HashMap<EdgeIsect, Vec3d> = HashMap::default();
 
     for &(ai, bi) in &pairs {
@@ -105,6 +111,8 @@ pub fn corefine_in(mesh_a: &TriMesh, prep_a: &MeshAccel, mesh_b: &TriMesh, prep_
         let result = tri_tri_intersection_indexed(a0, a1, a2, a_vi, ai, b0, b1, b2, b_vi, bi);
         if result.intersects {
             if result.coplanar {
+                coplanar_a[ai as usize].push(bi);
+                coplanar_b[bi as usize].push(ai);
                 // Coplanar overlapping triangles: compute the boundary of their
                 // 2D intersection polygon (Sutherland-Hodgman clipping) and add
                 // each edge as a constraint segment for both triangles.
@@ -126,12 +134,16 @@ pub fn corefine_in(mesh_a: &TriMesh, prep_a: &MeshAccel, mesh_b: &TriMesh, prep_
                         });
                     }
                 }
-            } else if let (Some((p0, p1)), Some((eid0, eid1))) = (result.segment, result.edge_ids) {
+            } else if let (Some(_), Some((eid0, eid1))) = (result.segment, result.edge_ids) {
                 // Use cached positions for edge-centric deduplication.
                 // If this (edge, other_tri) combo was already computed from a
                 // neighboring triangle, reuse that exact position.
-                let p0 = *edge_cache.entry(eid0).or_insert(p0);
-                let p1 = *edge_cache.entry(eid1).or_insert(p1);
+                let construct = |eid: EdgeIsect| {
+                    let (mesh, tris) = if eid.mesh_id == 0 { (mesh_a, tris_b) } else { (mesh_b, tris_a) };
+                    construct_edge_plane_intersection(mesh.vertices[eid.edge_v0 as usize], mesh.vertices[eid.edge_v1 as usize], tris[eid.other_tri as usize])
+                };
+                let p0 = *edge_cache.entry(eid0).or_insert_with(|| construct(eid0));
+                let p1 = *edge_cache.entry(eid1).or_insert_with(|| construct(eid1));
 
                 // Skip degenerate segments
                 if p0.distance(p1) < 1e-12 {
@@ -172,6 +184,8 @@ pub fn corefine_in(mesh_a: &TriMesh, prep_a: &MeshAccel, mesh_b: &TriMesh, prep_
     let (result_b, origin_b, boundary_b) =
         retriangulate_mesh(mesh_b, &segments, &tri_b_segments, &shared_verts, false);
 
+    let coplanar_a = coplanar_regions(&result_a, &origin_a, &coplanar_a, tris_a, tris_b);
+    let coplanar_b = coplanar_regions(&result_b, &origin_b, &coplanar_b, tris_b, tris_a);
     CorefinementResult {
         mesh_a: result_a,
         mesh_b: result_b,
@@ -179,8 +193,42 @@ pub fn corefine_in(mesh_a: &TriMesh, prep_a: &MeshAccel, mesh_b: &TriMesh, prep_
         origin_b,
         on_boundary_a: boundary_a,
         on_boundary_b: boundary_b,
+        coplanar_a,
+        coplanar_b,
         num_segments: segments.len(),
     }
+}
+
+/// Corefinement has already found the coplanar pairs and cut their boundaries.
+/// Classify each resulting region in that plane, retaining its source winding.
+/// A centroid query is sufficient only AFTER those constraints have been cut.
+pub(crate) fn coplanar_regions(
+    refined: &TriMesh,
+    origins: &[u32],
+    pairs: &[Vec<u32>],
+    source: &[(Vec3d, Vec3d, Vec3d)],
+    other: &[(Vec3d, Vec3d, Vec3d)],
+) -> Vec<Option<bool>> {
+    origins.iter().enumerate().map(|(ti, &origin)| {
+        let candidates = &pairs[origin as usize];
+        if candidates.is_empty() { return None; }
+        let (a, b, c) = source[origin as usize];
+        let normal = (b - a).cross(c - a);
+        let (i, j) = if normal.x.abs() >= normal.y.abs() && normal.x.abs() >= normal.z.abs() {
+            (1, 2)
+        } else if normal.y.abs() >= normal.z.abs() { (0, 2) } else { (0, 1) };
+        let project = |v: Vec3d| { let v = [v.x, v.y, v.z]; (v[i], v[j]) };
+        let winding = orient_2d_tuple(project(a), project(b), project(c));
+        let (u, v, w) = refined.triangle_vertices(ti);
+        let centroid = project((u + v + w) / 3.0);
+        candidates.iter().find_map(|&bi| {
+            let (a, b, c) = other[bi as usize];
+            let (a, b, c) = (project(a), project(b), project(c));
+            let other_winding = orient_2d_tuple(a, b, c);
+            (other_winding != 0.0 && point_in_triangle_2d(centroid, a, b, c))
+                .then_some((winding > 0.0) == (other_winding > 0.0))
+        })
+    }).collect()
 }
 
 /// Spatial hash grid for fast vertex deduplication during corefinement.
@@ -568,6 +616,29 @@ fn coplanar_intersection_edges(
         [c[pi], c[pj]]
     };
 
+    // Construct the homogeneous crossing before rounding, as for the
+    // non-coplanar edge/plane intersections. A rounded interpolation
+    // parameter can put a clipping vertex across a later constraint.
+    let intersect = |a: Vec3d, b: Vec3d, e0: [f64; 2], e1: [f64; 2]| {
+        use makepad_csg_exact::{ExactVec3, Expansion};
+        let cross = |p: Vec3d| {
+            let p = project(p);
+            let dx = Expansion::from_f64(e1[0]).sub_f64(e0[0]);
+            let dy = Expansion::from_f64(e1[1]).sub_f64(e0[1]);
+            dx.mul(&Expansion::from_f64(p[1]).sub_f64(e0[1]))
+                .sub(&dy.mul(&Expansion::from_f64(p[0]).sub_f64(e0[0])))
+        };
+        let da = cross(a);
+        let db = cross(b);
+        if da.is_zero() { return a; }
+        if db.is_zero() { return b; }
+        let a = ExactVec3::from_vec3d(a);
+        let b = ExactVec3::from_vec3d(b);
+        let num = b.scale(&da).sub(&a.scale(&db));
+        let den = da.sub(&db).estimate();
+        Vec3d::new(num.x.estimate()/den, num.y.estimate()/den, num.z.estimate()/den)
+    };
+
     // Sutherland-Hodgman: start with triangle A's vertices as polygon,
     // clip against each edge of B.
     let mut polygon: Vec<Vec3d> = vec![a0, a1, a2];
@@ -577,7 +648,7 @@ fn coplanar_intersection_edges(
     let bp0 = project(b0);
     let bp1 = project(b1);
     let bp2 = project(b2);
-    let b_orient = (bp1[0] - bp0[0]) * (bp2[1] - bp0[1]) - (bp1[1] - bp0[1]) * (bp2[0] - bp0[0]);
+    let b_orient = orient2d(bp0[0], bp0[1], bp1[0], bp1[1], bp2[0], bp2[1]);
     // sign > 0 means CCW; for each clip edge, "inside" is the left side
 
     for &(ce0, ce1) in &clip_edges {
@@ -596,9 +667,9 @@ fn coplanar_intersection_edges(
 
             // Signed distance from the clip edge (positive = inside for CCW B)
             let d_curr =
-                (e1[0] - e0[0]) * (curr_p[1] - e0[1]) - (e1[1] - e0[1]) * (curr_p[0] - e0[0]);
+                orient2d(e0[0], e0[1], e1[0], e1[1], curr_p[0], curr_p[1]);
             let d_prev =
-                (e1[0] - e0[0]) * (prev_p[1] - e0[1]) - (e1[1] - e0[1]) * (prev_p[0] - e0[0]);
+                orient2d(e0[0], e0[1], e1[0], e1[1], prev_p[0], prev_p[1]);
 
             // Adjust sign based on B's winding
             let d_curr = d_curr * b_orient.signum();
@@ -608,14 +679,12 @@ fn coplanar_intersection_edges(
                 // Current is inside
                 if d_prev < 0.0 {
                     // Previous was outside: add intersection
-                    let t = d_prev / (d_prev - d_curr);
-                    output.push(prev.lerp(curr, t));
+                    output.push(intersect(prev, curr, e0, e1));
                 }
                 output.push(curr);
             } else if d_prev >= 0.0 {
                 // Current is outside, previous was inside: add intersection
-                let t = d_prev / (d_prev - d_curr);
-                output.push(prev.lerp(curr, t));
+                output.push(intersect(prev, curr, e0, e1));
             }
         }
         polygon = output;
@@ -635,7 +704,7 @@ fn coplanar_intersection_edges(
 }
 
 fn orient_2d_tuple(a: (f64, f64), b: (f64, f64), c: (f64, f64)) -> f64 {
-    (b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0)
+    orient2d(a.0, a.1, b.0, b.1, c.0, c.1)
 }
 
 fn point_in_triangle_2d(p: (f64, f64), a: (f64, f64), b: (f64, f64), c: (f64, f64)) -> bool {

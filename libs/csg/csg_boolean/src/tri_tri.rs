@@ -15,13 +15,18 @@
 // 9. Check if the projected intervals overlap.
 // 10. If they do, compute the intersection segment.
 
-use makepad_csg_math::{orient3d, Vec3d};
+use makepad_csg_math::{orient2d, orient3d, Vec3d};
+use makepad_csg_exact::ExactVec3;
 
 /// Identifies which edge of which triangle produced an intersection point.
-/// The edge is defined by the two mesh-level vertex indices.
+/// The edge is defined by its operand and the two mesh-level vertex indices.
 /// `other_tri` is the triangle from the other mesh whose plane was intersected.
 #[derive(Clone, Debug, Copy, Hash, Eq, PartialEq)]
 pub struct EdgeIsect {
+    /// Operand owning the edge (0 = A, 1 = B). Vertex and triangle indices
+    /// are local to each operand, so the same indices in A and B must not
+    /// alias in corefinement's shared edge-plane intersection cache.
+    pub mesh_id: u8,
     /// Smaller vertex index of the edge
     pub edge_v0: u32,
     /// Larger vertex index of the edge
@@ -86,7 +91,7 @@ pub fn tri_tri_intersection(
 /// `a_ti`/`b_ti` are the mesh-level triangle indices.
 ///
 /// Returns `edge_ids` that uniquely identify each segment endpoint by the
-/// (mesh edge, other triangle) pair that produced it. This allows callers to
+/// (operand, mesh edge, other triangle) tuple that produced it. This allows callers to
 /// cache intersection points so the same edge-plane intersection is computed
 /// only once.
 pub fn tri_tri_intersection_indexed(
@@ -101,49 +106,26 @@ pub fn tri_tri_intersection_indexed(
     b_vi: [u32; 3],
     b_ti: u32,
 ) -> TriTriResult {
-    // Step 1-2: Classify A vertices against B's plane. A vertex within
-    // `plane_tolerance` of the plane counts as on it: faces that coincide in
-    // the model (a rounded edge shared by two rounded boxes, faces of shapes
-    // turned or moved by different transforms) are coplanar only up to
-    // rounding, and splitting one along a near-parallel "intersection" line
-    // tears the seam open.
+    let db = [orient3d(b0, b1, b2, a0), orient3d(b0, b1, b2, a1), orient3d(b0, b1, b2, a2)];
+    let da = [orient3d(a0, a1, a2, b0), orient3d(a0, a1, a2, b1), orient3d(a0, a1, a2, b2)];
+    // Keep the existing recognition of whole faces that coincide up to
+    // transform rounding. Never snap individual vertices of a crossing
+    // triangle: doing so erases a real interval next to a shared cap.
     let tol = plane_tolerance(a0, a1, a2, b0, b1, b2);
-    let nb_len = (b1 - b0).cross(b2 - b0).length();
-    let db0 = snap_to_plane(orient3d(b0, b1, b2, a0), nb_len, tol);
-    let db1 = snap_to_plane(orient3d(b0, b1, b2, a1), nb_len, tol);
-    let db2 = snap_to_plane(orient3d(b0, b1, b2, a2), nb_len, tol);
-
-    // All on same side? No intersection.
-    if db0 > 0.0 && db1 > 0.0 && db2 > 0.0 {
-        return TriTriResult::no_intersection();
-    }
-    if db0 < 0.0 && db1 < 0.0 && db2 < 0.0 {
-        return TriTriResult::no_intersection();
-    }
-
-    // Step 3-4: Classify B vertices against A's plane
     let na_len = (a1 - a0).cross(a2 - a0).length();
-    let da0 = snap_to_plane(orient3d(a0, a1, a2, b0), na_len, tol);
-    let da1 = snap_to_plane(orient3d(a0, a1, a2, b1), na_len, tol);
-    let da2 = snap_to_plane(orient3d(a0, a1, a2, b2), na_len, tol);
-
-    // All on same side? No intersection.
-    if da0 > 0.0 && da1 > 0.0 && da2 > 0.0 {
+    let nb_len = (b1 - b0).cross(b2 - b0).length();
+    if db.iter().all(|d| snap_to_plane(*d, nb_len, tol) == 0.0)
+        && da.iter().all(|d| snap_to_plane(*d, na_len, tol) == 0.0)
+    {
+        return if coplanar_tri_tri(a0, a1, a2, b0, b1, b2) {
+            TriTriResult::coplanar_intersection()
+        } else { TriTriResult::no_intersection() };
+    }
+    if [da, db].iter().any(|d| d.iter().all(|d| *d > 0.0) || d.iter().all(|d| *d < 0.0)) {
         return TriTriResult::no_intersection();
     }
-    if da0 < 0.0 && da1 < 0.0 && da2 < 0.0 {
-        return TriTriResult::no_intersection();
-    }
-
-    // Check for coplanar case
-    if db0 == 0.0 && db1 == 0.0 && db2 == 0.0 {
-        // Coplanar triangles: use 2D overlap test
-        if coplanar_tri_tri(a0, a1, a2, b0, b1, b2) {
-            return TriTriResult::coplanar_intersection();
-        } else {
-            return TriTriResult::no_intersection();
-        }
-    }
+    let [da0, da1, da2] = da;
+    let [db0, db1, db2] = db;
 
     // Step 5: Compute line of intersection of the two planes.
     // The direction is the cross product of the two normals.
@@ -166,10 +148,10 @@ pub fn tri_tri_intersection_indexed(
     // Step 6: Project triangles onto the intersection line.
     // Compute interval for triangle A (intersected by B's plane)
     let (a_min, a_max, a_p0, a_p1, a_edge0, a_edge1) =
-        compute_interval_indexed(a0, a1, a2, a_vi, db0, db1, db2, b_ti, dir, project);
+        compute_interval_indexed(a0, a1, a2, a_vi, db0, db1, db2, 0, b_ti, dir, project);
     // Compute interval for triangle B (intersected by A's plane)
     let (b_min, b_max, b_p0, b_p1, b_edge0, b_edge1) =
-        compute_interval_indexed(b0, b1, b2, b_vi, da0, da1, da2, a_ti, dir, project);
+        compute_interval_indexed(b0, b1, b2, b_vi, da0, da1, da2, 1, a_ti, dir, project);
 
     // Step 7: Check interval overlap
     if a_max <= b_min || b_max <= a_min {
@@ -211,6 +193,7 @@ fn compute_interval_indexed(
     d0: f64,
     d1: f64,
     d2: f64,
+    mesh_id: u8,
     other_ti: u32,
     dir: Vec3d,
     project: usize,
@@ -225,11 +208,13 @@ fn compute_interval_indexed(
 
     // Build edge identifiers (canonical: smaller index first)
     let edge_a = EdgeIsect {
+        mesh_id,
         edge_v0: iso_i.min(va_i),
         edge_v1: iso_i.max(va_i),
         other_tri: other_ti,
     };
     let edge_b = EdgeIsect {
+        mesh_id,
         edge_v0: iso_i.min(vb_i),
         edge_v1: iso_i.max(vb_i),
         other_tri: other_ti,
@@ -309,12 +294,31 @@ fn sign(x: f64) -> i32 {
 /// Compute the intersection point of edge (a->b) with a plane,
 /// given signed distances da, db of a, b from that plane.
 fn edge_plane_intersection(a: Vec3d, b: Vec3d, da: f64, db: f64) -> Vec3d {
-    let denom = da - db;
-    if denom.abs() < 1e-300 {
-        return a.lerp(b, 0.5);
-    }
-    let t = da / denom;
-    a.lerp(b, t)
+    if da == 0.0 { return a; }
+    if db == 0.0 { return b; }
+    a.lerp(b, da / (da - db))
+}
+
+/// Construct only accepted intersections, once per shared edge/plane pair.
+pub(crate) fn construct_edge_plane_intersection(a: Vec3d, b: Vec3d, plane: (Vec3d, Vec3d, Vec3d)) -> Vec3d {
+    let da = orient3d(plane.0, plane.1, plane.2, a);
+    let db = orient3d(plane.0, plane.1, plane.2, b);
+    if da == 0.0 { return a; }
+    if db == 0.0 { return b; }
+    // Construct the homogeneous intersection before rounding. Interpolating
+    // with a rounded t can put a cut vertex on the wrong side of its plane,
+    // so the next boolean's AABB search misses a coincident face altogether.
+    let a = ExactVec3::from_vec3d(a);
+    let b = ExactVec3::from_vec3d(b);
+    let p = ExactVec3::from_vec3d(plane.0);
+    let q = ExactVec3::from_vec3d(plane.1);
+    let r = ExactVec3::from_vec3d(plane.2);
+    let normal = q.sub(&p).cross(&r.sub(&p));
+    let da = normal.dot(&a.sub(&p));
+    let db = normal.dot(&b.sub(&p));
+    let numerator = b.scale(&da).sub(&a.scale(&db));
+    let denominator = da.sub(&db).estimate();
+    Vec3d::new(numerator.x.estimate() / denominator, numerator.y.estimate() / denominator, numerator.z.estimate() / denominator)
 }
 
 /// Project a point onto the intersection line direction using one coordinate.
@@ -329,7 +333,7 @@ fn project_onto(p: Vec3d, _dir: Vec3d, axis: usize) -> f64 {
 /// The distance (model units) within which a vertex counts as lying on the
 /// other triangle's plane: far below any feature a mesh models, far above the
 /// rounding of coordinates that went through different transforms.
-fn plane_tolerance(a0: Vec3d, a1: Vec3d, a2: Vec3d, b0: Vec3d, b1: Vec3d, b2: Vec3d) -> f64 {
+pub(crate) fn plane_tolerance(a0: Vec3d, a1: Vec3d, a2: Vec3d, b0: Vec3d, b1: Vec3d, b2: Vec3d) -> f64 {
     let scale = [a0, a1, a2, b0, b1, b2]
         .iter()
         .fold(1.0f64, |m, v| m.max(v.x.abs()).max(v.y.abs()).max(v.z.abs()));
@@ -424,7 +428,7 @@ fn segments_intersect_2d(a0: (f64, f64), a1: (f64, f64), b0: (f64, f64), b1: (f6
 }
 
 fn cross_2d(a: (f64, f64), b: (f64, f64), c: (f64, f64)) -> f64 {
-    (b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0)
+    orient2d(a.0, a.1, b.0, b.1, c.0, c.1)
 }
 
 fn on_segment_2d(a: (f64, f64), b: (f64, f64), p: (f64, f64)) -> bool {

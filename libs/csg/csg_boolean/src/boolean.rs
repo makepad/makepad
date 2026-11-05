@@ -10,7 +10,7 @@ use makepad_csg_math::portable::PortableFloat;
 // 2. Classify each triangle as inside/outside the other mesh
 // 3. Select faces based on the boolean operation
 
-use crate::classify::{classify_triangles_in, MeshAccel, TriLocation};
+use crate::classify::{classify_triangles_with_coplanar, MeshAccel, TriLocation};
 use crate::corefine::corefine_in;
 use crate::thread_pool;
 use makepad_csg_math::{dvec3, Vec3d};
@@ -80,8 +80,8 @@ pub fn mesh_boolean_in(
     }
 
     // Step 2: Classify triangles
-    let class_a = classify_triangles_in(&coref.mesh_a, prep_b, &coref.on_boundary_a);
-    let class_b = classify_triangles_in(&coref.mesh_b, prep_a, &coref.on_boundary_b);
+    let class_a = classify_triangles_with_coplanar(&coref.mesh_a, prep_b, &coref.on_boundary_a, &coref.coplanar_a);
+    let class_b = classify_triangles_with_coplanar(&coref.mesh_b, prep_a, &coref.on_boundary_b, &coref.coplanar_b);
     if thread_pool::cancelled()
         || class_a.len() != coref.mesh_a.triangle_count()
         || class_b.len() != coref.mesh_b.triangle_count()
@@ -89,26 +89,9 @@ pub fn mesh_boolean_in(
         return TriMesh::new();
     }
 
-    // Step 3: Select faces based on operation
-    //
-    // OnBoundary faces (where both +/- normal sides are inside the other mesh)
-    // are kept from mesh A only, dropped from mesh B.
-    //
-    // "Surface-coplanar" boundary faces: these are boundary faces classified
-    // as Inside where the face lies on the surface (not interior) of the other
-    // mesh. Both meshes contribute them, causing double-counting. We detect
-    // these by checking if +normal is outside the other mesh (surface face)
-    // vs inside (interior face). Surface-coplanar Inside faces from B are dropped.
-
-    // Did corefinement actually cut anything? With zero intersection segments
-    // both meshes were copied through untouched, no boundary faces exist, and
-    // the whole finishing tail (weld + T-junction repair + sliver removal)
-    // has nothing to repair.
-    let untouched = coref.num_segments == 0;
-
-    // Point-in-mesh queries for the coplanar checks during selection go to
-    // the prepared operands; they are only consulted for boundary faces.
-    let (accel_b, accel_a): (Option<&MeshAccel>, Option<&MeshAccel>) = if untouched { (None, None) } else { (Some(prep_b), Some(prep_a)) };
+    // Step 3: Select regions. Equal-facing shared surfaces belong to A
+    // in union/intersection; opposite-facing surfaces belong to A only in
+    // difference. B contributes only strictly inside/outside regions.
 
     let mut result = TriMesh::new();
     // Per-result-vertex flag: is this vertex referenced by any boundary
@@ -157,40 +140,11 @@ pub fn mesh_boolean_in(
         let c = class_a[ti];
         // A face of A touching B face to face: inside a union (dropped), no
         // volume of an intersection (dropped), still A's surface after A - B.
-        let mut keep = match op {
-            BoolOp::Union => c == TriLocation::Outside,
+        let keep = match op {
+            BoolOp::Union => c == TriLocation::Outside || c == TriLocation::OnBoundary,
             BoolOp::Difference => c == TriLocation::Outside || c == TriLocation::Touching,
             BoolOp::Intersection => c == TriLocation::Inside || c == TriLocation::OnBoundary,
         };
-
-        // For union and intersection: boundary faces classified Inside that
-        // are surface-coplanar (+normal outside the other mesh) need to be
-        // kept from A. These faces lie on the shared surface and A has
-        // priority (B's duplicates are dropped below).
-        // For difference A-B: these faces are cut away by B, not kept.
-        if !keep
-            && op != BoolOp::Difference
-            && coref.on_boundary_a[ti]
-            && (c == TriLocation::Inside || c == TriLocation::OnBoundary)
-        {
-            let centroid = {
-                let (v0, v1, v2) = coref.mesh_a.triangle_vertices(ti);
-                (v0 + v1 + v2) / 3.0
-            };
-            let normal = coref.mesh_a.triangle_normal(ti);
-            let eps = 1e-6;
-            let outside_point = centroid + normal * eps;
-            // accel_b exists whenever boundary faces exist (untouched == false).
-            let inside = accel_b
-                .as_ref()
-                .map(|acc| acc.point_inside(outside_point))
-                .unwrap_or(false);
-            if !inside {
-                // Surface-coplanar: this face is on B's surface.
-                // Keep it from A (B's duplicate will be dropped).
-                keep = true;
-            }
-        }
 
         if keep {
             emit_tri(
@@ -216,41 +170,10 @@ pub fn mesh_boolean_in(
         // operation: inside a union, not inside A for the others).
         let keep = match op {
             BoolOp::Union => c == TriLocation::Outside,
-            BoolOp::Intersection => c == TriLocation::Inside || c == TriLocation::OnBoundary,
-            BoolOp::Difference => c == TriLocation::Inside || c == TriLocation::OnBoundary,
+            BoolOp::Intersection | BoolOp::Difference => c == TriLocation::Inside,
         };
 
         if !keep {
-            continue;
-        }
-
-        // For boundary Inside faces from B: check if this is a surface-coplanar
-        // face. Surface-coplanar means +normal is outside the other mesh (the
-        // face is on A's surface). A already contributes these, so skip B's copy.
-        //
-        // OnBoundary faces (both sides inside A) are NOT surface-coplanar — they
-        // are genuinely inside A's volume. These are kept for intersection/difference.
-        if coref.on_boundary_b[ti] && c == TriLocation::Inside {
-            let centroid = {
-                let (v0, v1, v2) = coref.mesh_b.triangle_vertices(ti);
-                (v0 + v1 + v2) / 3.0
-            };
-            let normal = coref.mesh_b.triangle_normal(ti);
-            let eps = 1e-6;
-            let outside_point = centroid + normal * eps;
-            // accel_a exists whenever boundary faces exist (untouched == false).
-            let inside = accel_a
-                .as_ref()
-                .map(|acc| acc.point_inside(outside_point))
-                .unwrap_or(false);
-            if !inside {
-                // Surface-coplanar: A already has this face.
-                continue;
-            }
-        }
-
-        // For union: also drop OnBoundary faces (they're interior to the union)
-        if op == BoolOp::Union && c == TriLocation::OnBoundary {
             continue;
         }
 
@@ -469,7 +392,7 @@ fn fix_t_junctions_pass(mesh: &mut TriMesh, tol: f64, active: &[bool], from: usi
     // The half-edges (triangle * 3 + slot, slot k = corner k -> corner k+1)
     // of triangles reaching the active region, grouped by undirected edge.
     let mut half: Vec<(u64, u32)> = Vec::new();
-    for (ti, &[a, b, c]) in mesh.triangles.iter().enumerate().skip(from) {
+    for (ti, &[a, b, c]) in mesh.triangles.iter().enumerate() {
         let (va, vb, vc) = (mesh.vertices[a as usize], mesh.vertices[b as usize], mesh.vertices[c as usize]);
         if va.x.max(vb.x).max(vc.x) < reg_min.x
             || va.x.min(vb.x).min(vc.x) > reg_max.x
@@ -505,6 +428,24 @@ fn fix_t_junctions_pass(mesh: &mut TriMesh, tol: f64, active: &[bool], from: usi
         let mut j = i + 1;
         while j < half.len() && half[j].0 == half[i].0 {
             j += 1;
+        }
+        // Two opposite half-edges already close this edge. A nearby vertex
+        // on another edge is not a T-junction: splitting here can flatten a
+        // thin wall into zero-area faces or overlapping folds.
+        if j - i == 2 {
+            let h0 = half[i].1;
+            let h1 = half[i + 1].1;
+            let t0 = mesh.triangles[(h0 / 3) as usize];
+            let t1 = mesh.triangles[(h1 / 3) as usize];
+            if t0[(h0 % 3) as usize] != t1[(h1 % 3) as usize] {
+                i = j;
+                continue;
+            }
+        }
+        // Count both sides even when one triangle predates this round.
+        if half[i..j].iter().all(|&(_, h)| (h / 3) < from as u32) {
+            i = j;
+            continue;
         }
         let (u, v) = ((half[i].0 >> 32) as u32, half[i].0 as u32);
         let (pu, pv) = (mesh.vertices[u as usize], mesh.vertices[v as usize]);
@@ -651,13 +592,13 @@ fn point_on_edge(p: Vec3d, a: Vec3d, b: Vec3d, tol: f64) -> bool {
 fn remove_slivers(mesh: &mut TriMesh, tol: f64) {
     use makepad_csg_math::fast_hash::FastMap;
     mesh.clear_normals();
-    let thin = |m: &TriMesh, t: [u32; 3]| -> Option<usize> {
+    let altitude = |m: &TriMesh, t: [u32; 3]| -> (usize, f64) {
         let p = t.map(|i| m.vertices[i as usize]);
         let len = [(p[1] - p[0]).length(), (p[2] - p[1]).length(), (p[0] - p[2]).length()];
         let k = (0..3).max_by(|a, b| len[*a].total_cmp(&len[*b])).unwrap();
         let area2 = (p[1] - p[0]).cross(p[2] - p[0]).length();
         // Edge k runs from corner k to corner k + 1; its apex is corner k + 2.
-        (len[k] > 0.0 && area2 / len[k] < tol).then_some(k)
+        (k, if len[k] > 0.0 { area2 / len[k] } else { 0.0 })
     };
     mesh.triangles.retain(|&[a, b, c]| a != b && b != c && c != a);
     for _round in 0..8 {
@@ -675,7 +616,8 @@ fn remove_slivers(mesh: &mut TriMesh, tol: f64) {
                 continue;
             }
             let t = mesh.triangles[ti];
-            let Some(k) = thin(mesh, t) else { continue };
+            let (k, height) = altitude(mesh, t);
+            if height >= tol { continue; }
             let (a, b, c) = (t[k], t[(k + 1) % 3], t[(k + 2) % 3]);
             let Some(across) = half.get(&(b, a)).filter(|n| n.len() == 1).map(|n| n[0]) else { continue };
             if across == ti || done[across] {
@@ -684,6 +626,29 @@ fn remove_slivers(mesh: &mut TriMesh, tol: f64) {
             let n = mesh.triangles[across];
             let Some(j) = (0..3).find(|&j| n[j] == b && n[(j + 1) % 3] == a) else { continue };
             let d = n[(j + 2) % 3];
+            if d != c {
+                // A flip must improve the thin face and preserve winding.
+                // Flipping a non-convex or collinear quad creates a zero-area
+                // closing face, which disappears when a consumer emits it.
+                let replacements = [[a, d, c], [d, b, c]];
+                if replacements.iter().any(|&r| altitude(mesh, r).1 <= height) {
+                    continue;
+                }
+                let preserves = |old: [u32; 3], new: [u32; 3]| {
+                    let p = old.map(|v| mesh.vertices[v as usize]);
+                    let normal = (p[1] - p[0]).cross(p[2] - p[0]);
+                    let (i,j) = if normal.x.abs() >= normal.y.abs() && normal.x.abs() >= normal.z.abs() {
+                        (1,2)
+                    } else if normal.y.abs() >= normal.z.abs() { (0,2) } else { (0,1) };
+                    let orient = |t: [u32; 3]| {
+                        let p = t.map(|v| { let p = mesh.vertices[v as usize]; [p.x,p.y,p.z] });
+                        makepad_csg_math::orient2d(p[0][i],p[0][j],p[1][i],p[1][j],p[2][i],p[2][j])
+                    };
+                    let (before, after) = (orient(old), orient(new));
+                    after != 0.0 && (before > 0.0) == (after > 0.0)
+                };
+                if !preserves(t, replacements[0]) || !preserves(n, replacements[1]) { continue; }
+            }
             done[ti] = true;
             done[across] = true;
             changed = true;

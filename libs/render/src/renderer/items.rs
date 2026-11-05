@@ -397,6 +397,12 @@ impl Renderer {
         Some(id)
     }
 
+    /// Forget the built-in materials that did not build (a live edit's
+    /// reload walk: what did not build may build now).
+    pub(super) fn item_materials_forget_failures(&mut self) {
+        self.items.failed.clear();
+    }
+
     /// The custom material an item draws through, installed on first use.
     fn item_custom(&mut self, cx: &mut Cx, material: &MaterialFrame, ibl: bool) -> Option<String> {
         if let MaterialKind::Splash(s) = &material.kind {

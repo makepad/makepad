@@ -157,6 +157,19 @@ impl Links {
 
     /// Signed distance and the nearest link's slot.
     pub fn distance_slot(&self, p: Vec3d) -> (f64, u8) {
+        let (d, slot, _) = self.nearest(p);
+        (d, slot)
+    }
+
+    /// Signed distance and its gradient: away from the nearest link's nearest point where that
+    /// decides, else the bounds box's or the clip plane's (0 where only the search's reach does).
+    pub fn distance_gradient(&self, p: Vec3d) -> (f64, P3) {
+        let (d, _, g) = self.nearest(p);
+        (d, g)
+    }
+
+    /// Signed distance, the nearest link's slot and the distance's gradient.
+    fn nearest(&self, p: Vec3d) -> (f64, u8, P3) {
         let q = [p.x, p.y, p.z];
         let r = self.radius;
         // the search radius: the surface within `reach` of q is always found
@@ -165,6 +178,7 @@ impl Links {
         let hi: [isize; 3] = std::array::from_fn(|k| ((q[k] + reach + r - self.origin[k]) / self.cell).floor() as isize);
         let mut best = f64::INFINITY;
         let mut slot = 0u8;
+        let mut nearest = None;
         let mut seen_last = u32::MAX;
         for z in lo[2].max(0)..=hi[2].min(self.dims[2] as isize - 1) {
             for y in lo[1].max(0)..=hi[1].min(self.dims[1] as isize - 1) {
@@ -180,9 +194,18 @@ impl Links {
                         if d < best {
                             best = d;
                             slot = self.loops[li as usize].slot;
+                            nearest = Some((a, b));
                         }
                     }
                 }
+            }
+        }
+        let mut g = [0.0; 3];
+        if let Some((a, b)) = nearest.filter(|_| best < reach) {
+            let w = segment_away(q, a, b);
+            let l = (w[0] * w[0] + w[1] * w[1] + w[2] * w[2]).sqrt();
+            if l > 0.0 {
+                g = w.map(|c| c / l);
             }
         }
         // outside the bounds box: its distance is a lower bound everywhere
@@ -190,11 +213,19 @@ impl Links {
         let d_box = (out[0] * out[0] + out[1] * out[1] + out[2] * out[2]).sqrt();
         // (inside the box the local search decides; the box holds every link with its radius)
         let near = best.min(reach);
-        let mut d = if d_box > 0.0 { d_box.max(near) } else { near };
-        if let Some((n, off)) = self.clip {
-            d = d.max(off - (n[0] * q[0] + n[1] * q[1] + n[2] * q[2]));
+        let mut d = near;
+        if d_box > 0.0 && d_box >= near {
+            d = d_box;
+            g = std::array::from_fn(|k| if q[k] < self.min[k] { -out[k] / d_box } else { out[k] / d_box });
         }
-        (d, slot)
+        if let Some((n, off)) = self.clip {
+            let c = off - (n[0] * q[0] + n[1] * q[1] + n[2] * q[2]);
+            if c > d {
+                d = c;
+                g = n.map(|x| -x);
+            }
+        }
+        (d, slot, g)
     }
 
     pub fn distance(&self, p: Vec3d) -> f64 {
@@ -309,12 +340,17 @@ impl Links {
 }
 
 pub fn segment_distance(p: P3, a: P3, b: P3) -> f64 {
+    let d = segment_away(p, a, b);
+    (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
+}
+
+/// From the point of the segment a..b nearest `p` to `p`.
+fn segment_away(p: P3, a: P3, b: P3) -> P3 {
     let ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
     let ap = [p[0] - a[0], p[1] - a[1], p[2] - a[2]];
     let l2 = ab[0] * ab[0] + ab[1] * ab[1] + ab[2] * ab[2];
     let t = if l2 > 0.0 { ((ap[0] * ab[0] + ap[1] * ab[1] + ap[2] * ab[2]) / l2).clamp(0.0, 1.0) } else { 0.0 };
-    let d = [ap[0] - ab[0] * t, ap[1] - ab[1] * t, ap[2] - ab[2] * t];
-    (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
+    [ap[0] - ab[0] * t, ap[1] - ab[1] * t, ap[2] - ab[2] * t]
 }
 
 #[cfg(test)]

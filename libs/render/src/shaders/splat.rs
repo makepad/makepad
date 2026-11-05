@@ -215,7 +215,7 @@ script_mod! {
             }
             n = self.mat_normal(n)
             let mr = self.mat_metal_rough(vec2(clamp(p.z, 0.0, 1.0), clamp(p.y, 0.045, 1.0)))
-            return self.shade_mr(surf.xyz, surf.w, mr, n)
+            return self.shade_mr(surf.xyz, surf.w, mr, n, vec3(0.0, 0.0, 0.0))
         }
 
         fragment: fn() {

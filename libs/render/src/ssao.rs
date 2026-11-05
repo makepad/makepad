@@ -1,19 +1,23 @@
-//! Screen-space ambient occlusion, as three chained offscreen passes.
+//! Screen-space ambient occlusion, as chained offscreen passes.
 //!
 //! [`SsaoPass`] is a self-contained pass chain a host viewport parents into
-//! its own: `raw` (hemisphere taps) → `blur h` → `blur v` (separable
-//! bilateral). It reads ONE input: a linear-depth target whose red channel
-//! is the VIEW-SPACE DISTANCE in metres (0 = background) — a CAD host's aux
+//! its own: `depth` (the input's red channel at the pass's own size, one f32
+//! a texel, and three levels below it, each half the one before) → `raw`
+//! (hemisphere taps) → `blur h` → `blur v` (separable bilateral). It reads
+//! ONE input: a linear-depth target whose red channel is the VIEW-SPACE
+//! DISTANCE in metres (0 = background) — a CAD host's aux
 //! G-buffer already is one, and any depth prepass can produce one. View
 //! position is reconstructed by unprojecting that distance along the pixel's
 //! ray; the surface normal comes from depth differences (the tighter side
 //! per axis, so silhouettes do not bleed a false slope inward).
 //!
 //! What the result MEANS is pinned by the consumers, not here: occlusion is
-//! ambient light failing to arrive, so the factor multiplies the AMBIENT /
-//! sky fill only — never the direct sun, never the shadow-mapped light
-//! (`DrawSceneSkinned`'s `ssao_ctl` hook, and a CAD composite's unlit
-//! shading). A sunlit facade keeps its brightness while its creases darken.
+//! ambient light failing to arrive, so `DrawSceneSkinned`'s `ssao_ctl` hook
+//! multiplies the AMBIENT / sky fill only — never the direct sun, never the
+//! shadow-mapped light. A sunlit facade keeps its brightness while its
+//! creases darken. A CAD composite also gives its direct light the share the
+//! model lanes' baked AO takes of theirs (`ao_direct`), so a part's creases,
+//! pores and bed contact read under the key light too.
 //!
 //! Laws, in order of how much debugging they encode:
 //!
@@ -46,6 +50,59 @@ script_mod! {
     use mod.draw
 
     // =====================================================================
+    // DEPTH — the input's red channel at the pass's size, and its levels
+    // =====================================================================
+    // The taps read these, not the input. A close view's hemisphere spans
+    // hundreds of pixels, and each pixel turns its taps its own way, so the
+    // taps of neighbouring pixels land hundreds of pixels apart: read from
+    // one texture of the pass's size, every one of them misses the caches
+    // (a 2 cm radius seen from 7 cm took 12 ms at 2x from the host's
+    // G-buffer, 2.5 ms from an f32 copy of it). A tap reads the level whose
+    // texels are as far apart as the taps around it, an eighth of its
+    // offset, so a neighbourhood's taps share their cache lines at any zoom.
+    // Level 0 takes the input's texel nearest each pixel's centre (the one
+    // the taps read there before); a level below takes one of the four
+    // texels under each of its own, a different one by row and column: a
+    // level keeps real depths (the average of a silhouette's two sides is a
+    // surface that is nowhere).
+    mod.draw.DrawSsaoDepth = mod.std.set_type_default() do #(DrawSsaoDepth::script_shader(vm)){
+        ..mod.draw.DrawQuad
+        color_format: @Rf32
+        depth_tex: texture_2d(float)
+        // 0: copy the input; 1: subsample the level above
+        u_step: uniform(0.0)
+        frag: fragment_position()
+        depth_clip: 0.0
+
+        vertex: fn() {
+            self.pos = self.geom.pos
+            self.world = vec4(self.geom.pos.x, self.geom.pos.y, 0.0, 1.0)
+            self.vertex_pos = vec4(
+                self.geom.pos.x * 2.0 - 1.0
+                1.0 - self.geom.pos.y * 2.0
+                0.0
+                1.0
+            )
+        }
+
+        pixel: fn() -> vec4f {
+            if self.u_step < 0.5 {
+                return vec4(self.depth_tex.sample_nearest(self.pos).x, 0.0, 0.0, 1.0)
+            }
+            let ip = floor(self.frag.xy)
+            let above = self.depth_tex.size()
+            // (y & 1) ^ 1, (x & 1) ^ 1
+            let j = vec2(1.0 - (ip.y - floor(ip.y * 0.5) * 2.0), 1.0 - (ip.x - floor(ip.x * 0.5) * 2.0))
+            let t = min(ip * 2.0 + j, above - vec2(1.0, 1.0))
+            return vec4(self.depth_tex.sample_nearest((t + vec2(0.5, 0.5)) / above).x, 0.0, 0.0, 1.0)
+        }
+
+        fragment: fn() {
+            self.fb0 = self.pixel()
+        }
+    }
+
+    // =====================================================================
     // RAW — a dozen hemisphere taps against the reconstructed surface
     // =====================================================================
     // One AO core, two ways to rebuild a surface point from the input:
@@ -66,7 +123,11 @@ script_mod! {
         // that halved the blur's GPU time. f16 depth is for blur WEIGHTS
         // only (0.1% relative is plenty for a sigma), never for the taps.
         color_format: @Rgba16F
+        // the depth levels: the pass's size, then each half the one before
         depth_tex: texture_2d(float)
+        depth_1: texture_2d(float)
+        depth_2: texture_2d(float)
+        depth_3: texture_2d(float)
         // xy = 1 / pass pixels, zw = pass pixels
         u_texel: uniform(vec4(0.001, 0.001, 1000.0, 1000.0))
         // Distance mode's camera terms for unproject/reproject:
@@ -142,9 +203,28 @@ script_mod! {
             return vec3(0.0, 0.0, 0.0) - self.u_axis.xyz
         }
 
+        // The depth input at uv from level m.
+        depth_at: fn(uv: vec2f, m: float) -> float {
+            if m < 0.5 {
+                return self.depth_tex.sample_nearest(uv).x
+            }
+            if m < 1.5 {
+                return self.depth_1.sample_nearest(uv).x
+            }
+            if m < 2.5 {
+                return self.depth_2.sample_nearest(uv).x
+            }
+            return self.depth_3.sample_nearest(uv).x
+        }
+
         // The surface at uv: xyz = position, w = depth (0 = nothing there).
         fetch: fn(uv: vec2f) -> vec4f {
-            let raw = self.depth_tex.sample_nearest(uv).x
+            return self.fetch_at(uv, 0.0)
+        }
+
+        // The same from level m.
+        fetch_at: fn(uv: vec2f, m: float) -> vec4f {
+            let raw = self.depth_at(uv, m)
             if self.u_mode.x < 0.5 {
                 let p = self.view_pos(uv, raw)
                 return vec4(p.x, p.y, p.z, raw)
@@ -255,7 +335,10 @@ script_mod! {
                 let s = p + (t * (cos(ang) * r) + b * (sin(ang) * r) + n * z) * scale
                 let suv = self.project_uv(s)
                 if suv.x > 0.0 && suv.x < 1.0 && suv.y > 0.0 && suv.y < 1.0 {
-                    let sd = self.fetch(suv).w
+                    // Within 16 pixels level 0, then a level per doubling.
+                    let off = length((suv - uv) * self.u_texel.zw)
+                    let m = clamp(floor(log2(max(off, 1.0))) - 3.0, 0.0, 3.0)
+                    let sd = self.fetch_at(suv, m).w
                     if sd > 0.0 {
                         // How far the geometry there stands IN FRONT of the
                         // sample point. tap_occlusion in ssao.rs is this
@@ -289,7 +372,7 @@ script_mod! {
         // xy = one-texel step along the blur axis, zw unused
         u_dir: uniform(vec4(0.001, 0.0, 0.0, 0.0))
         // The depth sigma of the bilateral weight: x * distance + y, in the
-        // units of the distance channel.
+        // units of the distance channel (`run_impl`: a fifth of the radius).
         u_sigma: uniform(vec4(0.03, 0.04, 0.0, 0.0))
         depth_clip: 0.0
 
@@ -339,6 +422,13 @@ script_mod! {
             self.fb0 = self.pixel()
         }
     }
+}
+
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawSsaoDepth {
+    #[deref]
+    pub draw_super: DrawQuad,
 }
 
 #[derive(Script, ScriptHook)]
@@ -480,9 +570,9 @@ struct SsaoStage {
     list: DrawList,
 }
 
-/// The chain. Owns its passes, draw lists and three RGBA16F targets (x =
-/// occlusion, y = view distance): no pass writes a texture an earlier pass
-/// of the chain sampled, and each blur has its own draw, so a painted
+/// The chain. Owns its passes, draw lists, the f32 depth levels and three
+/// RGBA16F targets (x = occlusion, y = view distance): no pass writes a
+/// texture an earlier pass of the chain sampled, and each blur has its own draw, so a painted
 /// chain stays painted (a write-back made the blurs dirty each other on
 /// every paint, and a locked-time host waiting for a clean frame never
 /// got one);
@@ -491,33 +581,40 @@ struct SsaoStage {
 #[derive(Default)]
 pub struct SsaoPass {
     stages: Vec<SsaoStage>,
+    /// The input's depth at the pass's size and its levels (the taps' source).
+    tex_depth: Vec<Texture>,
     /// raw target.
     tex_a: Option<Texture>,
     /// h-blur intermediate.
     tex_b: Option<Texture>,
     /// The blurred output (v blur).
     tex_c: Option<Texture>,
+    draw_depth: Vec<Box<DrawSsaoDepth>>,
     draw_raw: Option<Box<DrawSsaoRaw>>,
     draw_blur: Option<Box<DrawSsaoBlur>>,
     draw_blur_v: Option<Box<DrawSsaoBlur>>,
-    /// Latest GPU duration per stage (raw, blur h, blur v), milliseconds.
-    /// Metal command-buffer times, arriving a frame or two behind.
-    pub stage_gpu_ms: [f64; 3],
+    /// Latest GPU duration per stage (`STAGE_NAMES`), milliseconds. Metal
+    /// command-buffer times, arriving a frame or two behind.
+    pub stage_gpu_ms: [f64; STAGES],
     /// Minimum observed per stage — the honest per-pass cost on a GPU that
     /// is also running other work: command-buffer wall time includes the
     /// neighbours' timeslices, and the floor is what the pass itself costs.
-    pub stage_gpu_min_ms: [f64; 3],
+    pub stage_gpu_min_ms: [f64; STAGES],
     pub gpu_samples: u64,
 }
 
-const STAGE_NAMES: [&str; 3] = ["ssao raw", "ssao blur h", "ssao blur v"];
+/// The depth levels: the pass's size, then each half the one before.
+const LEVELS: usize = 4;
+/// The stages: the depth levels, the taps, the two blurs.
+const STAGES: usize = LEVELS + 3;
+const STAGE_NAMES: [&str; STAGES] = ["ssao depth", "ssao depth 1", "ssao depth 2", "ssao depth 3", "ssao raw", "ssao blur h", "ssao blur v"];
 
 impl SsaoPass {
     /// Create passes, targets and draw structs. Returns false while the
     /// script VM is held elsewhere (try again next frame) — the pbr-lane
     /// convention for lazily built draw structs.
     pub fn ensure(&mut self, cx: &mut Cx) -> bool {
-        while self.stages.len() < 3 {
+        while self.stages.len() < STAGE_NAMES.len() {
             let name = STAGE_NAMES[self.stages.len()];
             let pass = DrawPass::new_with_name(cx, name);
             pass.set_gpu_timing_enabled(cx, true);
@@ -535,6 +632,9 @@ impl SsaoPass {
                 },
             )
         };
+        while self.tex_depth.len() < LEVELS {
+            self.tex_depth.push(Texture::new_with_format(cx, TextureFormat::RenderRf32 { size: TextureSize::Auto, initial: true }));
+        }
         if self.tex_a.is_none() {
             self.tex_a = Some(rgba16f(cx));
         }
@@ -543,6 +643,12 @@ impl SsaoPass {
         }
         if self.tex_c.is_none() {
             self.tex_c = Some(rgba16f(cx));
+        }
+        while self.draw_depth.len() < LEVELS {
+            match cx.try_with_vm(|vm| Box::new(DrawSsaoDepth::script_new_with_default(vm))) {
+                Some(d) => self.draw_depth.push(d),
+                None => break,
+            }
         }
         if self.draw_raw.is_none() {
             self.draw_raw = cx.try_with_vm(|vm| Box::new(DrawSsaoRaw::script_new_with_default(vm)));
@@ -555,7 +661,7 @@ impl SsaoPass {
             self.draw_blur_v =
                 cx.try_with_vm(|vm| Box::new(DrawSsaoBlur::script_new_with_default(vm)));
         }
-        self.draw_raw.is_some() && self.draw_blur.is_some() && self.draw_blur_v.is_some()
+        self.draw_depth.len() == LEVELS && self.draw_raw.is_some() && self.draw_blur.is_some() && self.draw_blur_v.is_some()
     }
 
     /// The deepest pass of the chain — the host parents its depth-producing
@@ -581,8 +687,8 @@ impl SsaoPass {
         self.stage_gpu_min_ms.iter().sum()
     }
 
-    /// Record the three passes, parenting them raw → h → v → `parent` so
-    /// the sort runs them between the depth producer and the consumer.
+    /// Record the passes, parenting them depth → its levels → raw → h → v →
+    /// `parent` so the sort runs them between the depth producer and the consumer.
     /// `depth_src`'s red channel is view distance in metres (0 = none).
     #[allow(clippy::too_many_arguments)]
     pub fn run(
@@ -626,6 +732,7 @@ impl SsaoPass {
         if !self.ensure(cx.cx) {
             return;
         }
+        let tex_depth = self.tex_depth.clone();
         let tex_a = self.tex_a.clone().unwrap();
         let tex_b = self.tex_b.clone().unwrap();
         let tex_c = self.tex_c.clone().unwrap();
@@ -638,6 +745,7 @@ impl SsaoPass {
         let run_stage = |cx: &mut Cx2d,
                              stages: &mut [SsaoStage],
                              i: usize,
+                             size: DVec2,
                              target: &Texture,
                              draw: &mut dyn FnMut(&mut Cx2d, Rect)| {
             let parent_id = if i + 1 < stages.len() {
@@ -674,11 +782,25 @@ impl SsaoPass {
             }
         };
 
+        // ---- depth and its levels ------------------------------------------
+        for m in 0..LEVELS {
+            let draw_depth = &mut self.draw_depth[m];
+            let dv = &mut draw_depth.draw_super.draw_vars;
+            dv.set_texture(0, if m == 0 { depth_src } else { &tex_depth[m - 1] });
+            dv.set_uniform(cx.cx, live_id!(u_step), &[if m == 0 { 0.0 } else { 1.0 }]);
+            let level_size = size * 0.5f64.powi(m as i32);
+            run_stage(cx, &mut self.stages, m, level_size, &tex_depth[m], &mut |cx, r| {
+                draw_depth.draw_abs(cx, r)
+            });
+        }
+
         // ---- raw ----------------------------------------------------------
         {
             let draw_raw = self.draw_raw.as_mut().unwrap();
             let dv = &mut draw_raw.draw_super.draw_vars;
-            dv.set_texture(0, depth_src);
+            for (m, t) in tex_depth.iter().enumerate() {
+                dv.set_texture(m, t);
+            }
             dv.set_uniform(
                 cx.cx,
                 live_id!(u_texel),
@@ -715,7 +837,7 @@ impl SsaoPass {
                     dv.set_uniform(cx.cx, live_id!(u_ref), &terms.reference);
                 }
             }
-            run_stage(cx, &mut self.stages, 0, &tex_a, &mut |cx, r| {
+            run_stage(cx, &mut self.stages, LEVELS, size, &tex_a, &mut |cx, r| {
                 draw_raw.draw_abs(cx, r)
             });
         }
@@ -732,12 +854,12 @@ impl SsaoPass {
             let dv = &mut draw_blur.draw_super.draw_vars;
             dv.set_texture(0, src);
             dv.set_uniform(cx.cx, live_id!(u_dir), &[dir[0], dir[1], 0.0, 0.0]);
-            if matches!(input, SsaoInput::General(_)) {
-                // The distance channel is a world length: a fifth of the
-                // radius is the step the blur must not average across.
-                dv.set_uniform(cx.cx, live_id!(u_sigma), &[0.0, 0.2 * params.radius, 0.0, 0.0]);
-            }
-            run_stage(cx, &mut self.stages, 1 + i, dst, &mut |cx, r| {
+            // The distance channel is a world length in either mode: a fifth
+            // of the radius is the step the blur must not average across (a
+            // fixed few centimetres would blur a plate's millimetre parts
+            // across their own edges).
+            dv.set_uniform(cx.cx, live_id!(u_sigma), &[0.0, 0.2 * params.radius, 0.0, 0.0]);
+            run_stage(cx, &mut self.stages, LEVELS + 1 + i, size, dst, &mut |cx, r| {
                 draw_blur.draw_abs(cx, r)
             });
         }

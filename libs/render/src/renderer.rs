@@ -423,6 +423,9 @@ pub struct Renderer {
     /// that hides or offsets elements through its static draw gets the same
     /// on the PBR lane.
     element_lookup: Option<(Texture, [f32; 4])>,
+    /// The host's clip plane (`host_clip`, see shaders/skinned.rs and
+    /// [`Self::set_clip_plane`]) for the model lanes.
+    clip_plane: Option<[f32; 4]>,
     /// See [`Self::set_element_reach`].
     element_reach: Option<(Vec3f, Vec3f)>,
     custom_draws: std::collections::BTreeMap<String, Box<CustomMaterial>>,
@@ -775,6 +778,7 @@ impl Default for Renderer {
             orm_fallback: None,
             pbr_draw: None,
             element_lookup: None,
+            clip_plane: None,
             element_reach: None,
             custom_draws: Default::default(),
             ibl: Default::default(),

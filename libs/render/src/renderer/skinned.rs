@@ -310,6 +310,7 @@ impl Renderer {
         // features, and parts that cut no pixel through the one without
         // `clip` (variants.rs): a discarding pipeline costs the tile GPU its
         // hidden-surface removal for every character it draws.
+        batch.skinned.draw_vars.refresh_after_reload(cx.cx);
         let stock = batch.skinned.draw_vars.draw_shader_id;
         let (full, opaque) = self.lane_shaders(cx.cx, variants::ModelLane::SkinnedGpu, stock);
         let opaque = opaque.filter(|id| cx.cx.draw_shader_ready(*id, self.hdr_output));

@@ -719,6 +719,100 @@ mod tests {
         }
     }
 
+    /// A live edit of what the program is built from (here a function its
+    /// IBL built-in calls, given other code) builds it again on the scene
+    /// draw after the reload walk, so the next frame draws the edit; a walk
+    /// that changed nothing gives back the shader (and pipeline) it had.
+    #[test]
+    fn a_live_edit_builds_the_stock_ibl_program_again() {
+        use makepad_scene::Environment;
+        let mut cx = headless();
+        cx.use_closed_task_pool();
+        let mut renderer = Renderer::default();
+        renderer.register_environment(TextureRef(1), std::sync::Arc::new(EnvMap::constant(16, [0.25; 3])));
+        let env = Environment { ibl: Some(Ibl { source: IblSource::Hdri(TextureRef(1)), intensity: 1.0, rotation_deg: 0.0 }), ..Default::default() };
+        renderer.resolve_ibl(&mut cx, &env);
+        let frame = |cx: &mut Cx, renderer: &mut Renderer| {
+            renderer.follow_reload(cx);
+            renderer.prepare_stock_ibl(cx);
+            renderer.custom_material_shader(STOCK_IBL_MATERIAL)
+        };
+        let first = frame(&mut cx, &mut renderer).expect("premise: the program is installed");
+        cx.reload_generation += 1;
+        assert_eq!(frame(&mut cx, &mut renderer), Some(first), "a walk that changed nothing: the shader the program had");
+        cx.with_vm(|vm| {
+            script_eval!(vm, {
+                use mod.prelude.widgets_internal.*
+                mod.draw.mat_ibl_coat_treeline = fn(env: vec3, r: vec3) -> vec3 {
+                    return env * 0.5
+                }
+            });
+        });
+        assert_eq!(frame(&mut cx, &mut renderer), Some(first), "premise: no walk yet, the program stays");
+        cx.reload_generation += 1;
+        let edited = frame(&mut cx, &mut renderer).expect("the program is built again");
+        assert_ne!(edited, first, "the edited function is in the program the next frame draws");
+    }
+
+    /// A host's materials take a live edit of the lane they are built on as
+    /// the engine's do: after the reload walk each is built again from what
+    /// built it, in the VM that owns its program (a level isolate's, through
+    /// its `host_vm`), keeping what the host set since (its params). A walk
+    /// that changed nothing gives back the shaders they had.
+    #[test]
+    fn a_live_edit_builds_the_hosts_materials_again() {
+        use crate::custom_material::MaterialVm;
+        let mut cx = headless();
+        let mut renderer = Renderer::default();
+        let entered = std::rc::Rc::new(std::cell::Cell::new(0));
+        let host_vm: MaterialVm = {
+            let entered = entered.clone();
+            std::rc::Rc::new(move |cx: &mut Cx, f: &mut dyn FnMut(&mut ScriptVm)| {
+                entered.set(entered.get() + 1);
+                cx.with_vm(|vm| f(vm));
+                true
+            })
+        };
+        let params = vec4(1.0, 2.0, 3.0, 4.0);
+        cx.with_vm(|vm| {
+            let paint = DrawSceneCustom::unlit(vm, &HookSet::new(), HookMask::ALL, 0.0).unwrap_or_else(|e| panic!("{e}"));
+            let mut level = DrawSceneCustom::build(vm, &MaterialDesc::default(), &HookSet::new(), HookMask::ALBEDO, Vec4f::default()).unwrap_or_else(|e| panic!("{e}"));
+            level.draw.set_params(vm.cx(), params);
+            level.host_vm = Some(host_vm.clone());
+            assert!(renderer.install_custom_material("paint".to_string(), paint));
+            assert!(renderer.install_custom_material("level".to_string(), level));
+        });
+        let shaders = |renderer: &Renderer| ["paint", "level"].map(|name| renderer.custom_material_shader(name).expect("installed"));
+        let first = shaders(&renderer);
+        cx.reload_generation += 1;
+        renderer.follow_reload(&mut cx);
+        assert_eq!(shaders(&renderer), first, "a walk that changed nothing: the shaders they had");
+        assert_eq!(entered.get(), 1, "the level's material was built in its own VM");
+        cx.with_vm(|vm| {
+            vm.with_reload(|vm| {
+                script_eval!(vm, {
+                    use mod.prelude.widgets_internal.*
+                    mod.draw.DrawSceneCustom = mod.std.set_type_default() do mod.draw.DrawSceneCustom{
+                        surface: fn(base: vec4) -> vec4 {
+                            return base * 0.5
+                        }
+                    }
+                });
+            })
+        });
+        assert_eq!(shaders(&renderer), first, "premise: no walk yet, the materials stay");
+        cx.reload_generation += 1;
+        renderer.follow_reload(&mut cx);
+        let edited = shaders(&renderer);
+        assert!(edited.iter().zip(first.iter()).all(|(e, f)| e != f), "both draw the edited lane: {first:?} -> {edited:?}");
+        let level = renderer.custom_material("level").unwrap();
+        assert_eq!(level.draw.params(&cx), params, "the host's params stay");
+        assert!(level.host_vm.is_some(), "and its VM");
+        assert_eq!(entered.get(), 2);
+        renderer.follow_reload(&mut cx);
+        assert_eq!(entered.get(), 2, "once per walk");
+    }
+
     // ---- the lanes' control value (`ibl_ctl`) ----
 
     use makepad_render_material::ibl::EnvMap;

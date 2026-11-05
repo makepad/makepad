@@ -470,6 +470,22 @@ impl Renderer {
         self.element_lookup = lookup;
     }
 
+    /// A world half-space the model lanes keep (`host_clip`: a fragment where
+    /// dot(xyz, p) + w < 0 is cut away), for the draws recorded from now on. `None` keeps
+    /// everything. A model drawn while a plane is set takes its lane's discarding shader.
+    pub fn set_clip_plane(&mut self, plane: Option<[f32; 4]>) {
+        self.clip_plane = plane;
+    }
+
+    /// Moves the clip plane in the draws already recorded into `list` and the lists it holds:
+    /// each call whose shader takes `host_clip` gets the new plane in place and its pass paints
+    /// again; nothing records. The plane must have been set when they recorded (or the calls
+    /// may have no discard).
+    pub fn move_clip_plane(&mut self, cx: &mut Cx, list: DrawListId, plane: [f32; 4]) {
+        self.clip_plane = Some(plane);
+        cx.set_uniform_in_draw_lists(list, live_id!(host_clip), &plane);
+    }
+
     /// World bounds the lookup's moved elements reach past their model's own bounds, so a
     /// cascade does not cull a model whose moved element still casts into it. `None`: at rest.
     pub fn set_element_reach(&mut self, reach: Option<(Vec3f, Vec3f)>) {

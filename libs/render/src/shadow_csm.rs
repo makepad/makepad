@@ -132,13 +132,18 @@ pub struct CsmCascade {
     /// the receiver converts its world-space slope bias with this.
     pub z_per_world: f32,
     /// The view frustum's footprint in this tile (ndc x, y; convex,
-    /// counter-clockwise): the eye and the far-plane corners projected
+    /// counter-clockwise): the eye and the frustum's corners projected
     /// along the sun. Every receiver on screen lies inside it, so a caster
     /// whose footprint misses it (by more than the receivers' filter
     /// reach) shadows nothing anyone sees ([`cascade_sees`]). `view_hull_n`
     /// below 3 (no view: XR rings, a degenerate projection) culls nothing.
-    pub view_hull: [[f32; 2]; 5],
+    pub view_hull: [[f32; 2]; VIEW_POINTS],
     pub view_hull_n: u8,
+    /// The same frustum in the world: its four sides and far plane, outward
+    /// (`n.dot(p) + w > 0` is outside), set with `view_hull`.
+    pub view_planes: [Vec4f; 5],
+    /// The scene's lowest point: nothing below it receives a shadow.
+    pub floor: f32,
 }
 
 /// The frame's fitted cascade set.
@@ -153,9 +158,14 @@ pub struct CsmFrame {
     pub seed: f32,
 }
 
+/// The eye and the frustum's corners: what a view's footprint in a tile is the hull of.
+const VIEW_POINTS: usize = 9;
+
 /// The camera slice the cascades cover: eye position plus the four far-plane
 /// corners (unprojected clip corners at z = far, which both depth
-/// conventions put at +w). `None` at the call site (XR — the runtime owns
+/// conventions put at +w) and the four where the picture starts (clip z = 0:
+/// on the same rays in perspective, a whole picture's width from the eye in
+/// an orthographic view). `None` at the call site (XR — the runtime owns
 /// the eye matrices) falls back to view-independent rings around the eye.
 ///
 /// `focus_distance` is the look-at depth along the view axis (orbit zoom,
@@ -166,6 +176,7 @@ pub struct CsmFrame {
 #[derive(Clone, Copy, Debug)]
 pub struct CsmView {
     pub cam: Vec3f,
+    pub near_corners: [Vec3f; 4],
     pub far_corners: [Vec3f; 4],
     pub focus_distance: f32,
 }
@@ -296,19 +307,21 @@ fn fit_cascade(
         texel_world: texel,
         bias01: bias_world / zr,
         z_per_world: 1.0 / zr,
-        view_hull: [[0.0; 2]; 5],
+        view_hull: [[0.0; 2]; VIEW_POINTS],
         view_hull_n: 0,
+        view_planes: [Vec4f::default(); 5],
+        floor: scene_min.y,
     }
 }
 
 /// Record the view frustum's footprint in cascade `c` (see
-/// [`CsmCascade::view_hull`]): the convex hull of the eye and the four
-/// far-plane corners, projected along the sun into the tile's ndc. The
-/// frustum is their convex hull, and an orthographic projection of a convex
-/// hull is the hull of the projected points.
+/// [`CsmCascade::view_hull`]): the convex hull of the eye and the frustum's
+/// corners, projected along the sun into the tile's ndc. The frustum lies in
+/// their convex hull, and an orthographic projection of a convex hull is the
+/// hull of the projected points.
 fn set_view_hull(c: &mut CsmCascade, view: &CsmView) {
-    let mut pts = [[0.0f32; 2]; 5];
-    for (i, p) in std::iter::once(view.cam).chain(view.far_corners).enumerate() {
+    let mut pts = [[0.0f32; 2]; VIEW_POINTS];
+    for (i, p) in std::iter::once(view.cam).chain(view.near_corners).chain(view.far_corners).enumerate() {
         let q = cascade_project(c, p);
         if !(q.x.is_finite() && q.y.is_finite()) {
             return;
@@ -319,9 +332,9 @@ fn set_view_hull(c: &mut CsmCascade, view: &CsmView) {
     pts.sort_by(|a, b| a[0].total_cmp(&b[0]).then(a[1].total_cmp(&b[1])));
     let cross = |o: [f32; 2], a: [f32; 2], b: [f32; 2]| (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
     let chain = |forward: bool| {
-        let (mut out, mut n) = ([[0.0f32; 2]; 5], 0usize);
-        for k in 0..5 {
-            let p = pts[if forward { k } else { 4 - k }];
+        let (mut out, mut n) = ([[0.0f32; 2]; VIEW_POINTS], 0usize);
+        for k in 0..VIEW_POINTS {
+            let p = pts[if forward { k } else { VIEW_POINTS - 1 - k }];
             while n >= 2 && cross(out[n - 2], out[n - 1], p) <= 0.0 {
                 n -= 1;
             }
@@ -331,12 +344,12 @@ fn set_view_hull(c: &mut CsmCascade, view: &CsmView) {
         (out, n)
     };
     let ((lower, nl), (upper, nu)) = (chain(true), chain(false));
-    let (mut hull, mut n) = ([[0.0f32; 2]; 8], 0usize);
+    let (mut hull, mut n) = ([[0.0f32; 2]; 2 * VIEW_POINTS], 0usize);
     for p in lower[..nl - 1].iter().chain(&upper[..nu - 1]) {
         hull[n] = *p;
         n += 1;
     }
-    if !(3..=5).contains(&n) {
+    if !(3..=VIEW_POINTS).contains(&n) {
         return;
     }
     let hull = &hull[..n];
@@ -344,6 +357,16 @@ fn set_view_hull(c: &mut CsmCascade, view: &CsmView) {
         c.view_hull[i] = *p;
     }
     c.view_hull_n = hull.len() as u8;
+    // The corners go (-,-) (+,-) (-,+) (+,+): the sides run around them.
+    let (near, far) = (view.near_corners, view.far_corners);
+    let mid = (far[0] + far[1] + far[2] + far[3]) * 0.25;
+    let plane = |a: Vec3f, b: Vec3f, on: Vec3f, inside: Vec3f| {
+        let n = Vec3f::cross(a, b).normalize();
+        let n = if n.dot(inside - on) > 0.0 { n * -1.0 } else { n };
+        Vec4f { x: n.x, y: n.y, z: n.z, w: -n.dot(on) }
+    };
+    let side = |i: usize, j: usize| plane(far[i] - near[i], far[j] - near[i], near[i], mid);
+    c.view_planes = [side(0, 1), side(1, 3), side(3, 2), side(2, 0), plane(far[1] - far[0], far[2] - far[0], far[0], near[0])];
 }
 
 /// Shadow-map texels a receiver's filter can reach from its own position:
@@ -404,6 +427,26 @@ pub fn cascade_sees(c: &CsmCascade, min: Vec3f, max: Vec3f) -> bool {
         }
     }
     true
+}
+
+/// Can a caster with this world AABB shadow anything on screen? Tighter than
+/// [`cascade_sees`], which takes the sun's whole line through the caster: a
+/// shadow only runs away from the sun and ends at the scene's floor, so the
+/// volume it can reach is the box swept along the light down to there. False
+/// when one plane of the view has that whole volume outside it, with the
+/// receivers' filter reach to spare. No view culls nothing.
+pub fn cascade_shadow_in_view(c: &CsmCascade, min: Vec3f, max: Vec3f) -> bool {
+    let light = v3(c.rz.x, c.rz.y, c.rz.z).normalize();
+    if c.view_hull_n < 3 || light.y >= 0.0 {
+        return true;
+    }
+    let m = VIEW_HULL_MARGIN_TEXELS * c.texel_world;
+    let center = (min + max) * 0.5;
+    let half = (max - min) * 0.5;
+    // Every corner lands at or below the floor once the top ones do.
+    let end = center + light * ((max.y - c.floor + m) / -light.y).max(0.0);
+    let distance = |p: Vec4f, at: Vec3f| p.x * at.x + p.y * at.y + p.z * at.z + p.w - (p.x.abs() * half.x + p.y.abs() * half.y + p.z.abs() * half.z);
+    c.view_planes.iter().all(|p| distance(*p, center) <= m || distance(*p, end) <= m)
 }
 
 /// Fit the frame's cascades. `range` is the detail range (the third
@@ -616,6 +659,12 @@ mod tests {
         let cam = v3(3.0, 1.7, -5.0);
         CsmView {
             cam,
+            near_corners: [
+                cam + v3(-0.58, -0.4, 1.0),
+                cam + v3(0.58, -0.4, 1.0),
+                cam + v3(-0.58, 0.4, 1.0),
+                cam + v3(0.58, 0.4, 1.0),
+            ],
             far_corners: [
                 cam + v3(-58.0, -40.0, 100.0),
                 cam + v3(58.0, -40.0, 100.0),
@@ -652,6 +701,56 @@ mod tests {
         // No view (XR rings): nothing is dropped.
         let rings = fit_cascades(None, view.cam, sun(), v3(-400.0, -2.0, -400.0), v3(400.0, 40.0, 400.0), 80.0, 2048.0);
         assert!(rings.cascades.iter().all(|c| cascade_sees(c, behind.0, behind.1)));
+    }
+
+    /// A shadow counts from the caster down to the scene's floor. [`cascade_sees`]
+    /// keeps both dropped casters here, since the sun's line through each crosses
+    /// the view: on the sun's side of the caster, and below the floor.
+    #[test]
+    fn a_shadow_counts_from_the_caster_to_the_floor() {
+        let view = test_view();
+        let fit = |floor: f32| fit_cascades(Some(&view), view.cam, sun(), v3(-400.0, view.cam.y + floor, -400.0), v3(400.0, 40.0, 400.0), 80.0, 2048.0).cascades[0];
+        let boxed = |p: Vec3f| (p - v3(0.2, 0.2, 0.2), p + v3(0.2, 0.2, 0.2));
+        let in_view = |c: &CsmCascade, b: (Vec3f, Vec3f)| cascade_shadow_in_view(c, b.0, b.1);
+
+        // Out of view toward the sun, its shadow on the floor in view: it stays.
+        let (high, low) = (fit(-30.0), fit(-1.0));
+        let on_floor = view.cam + v3(0.0, -1.0, 20.0);
+        assert!(in_view(&low, boxed(on_floor)), "a caster in view stays");
+        assert!(in_view(&low, boxed(on_floor + sun() * 30.0)), "a caster out of view shadowing into it stays");
+
+        // The view is on its sun side, its shadow runs the other way.
+        let away = boxed(view.cam + v3(0.0, -1.2, 20.0) - sun() * 30.0);
+        assert!(cascade_sees(&high, away.0, away.1));
+        assert!(!in_view(&high, away), "the view lies toward the sun from this caster");
+
+        // Its shadow's line enters the view only below the floor.
+        let below = view.cam + v3(10.6, -6.0, 20.0);
+        let beside = boxed(below + sun() * (5.8 / sun().y));
+        assert!(cascade_sees(&low, beside.0, beside.1));
+        assert!(!in_view(&low, beside), "this shadow ends on the floor beside the view");
+        assert!(in_view(&fit(-10.0), beside), "with the floor lower the same shadow reaches the view");
+
+        // No view (XR rings): nothing is dropped.
+        let rings = fit_cascades(None, view.cam, sun(), v3(-400.0, -2.0, -400.0), v3(400.0, 40.0, 400.0), 80.0, 2048.0);
+        assert!(rings.cascades.iter().all(|c| cascade_shadow_in_view(c, away.0, away.1)));
+    }
+
+    /// An orthographic view is as wide at the eye as at the far plane: a shadow
+    /// falling in its corner, near the eye and far from the eye's rays to the far
+    /// corners, keeps its caster.
+    #[test]
+    fn an_orthographic_views_corner_keeps_its_caster() {
+        let cam = v3(0.0, 40.0, -40.0);
+        let side = |z: f32| [v3(-30.0, -20.0, z), v3(30.0, -20.0, z), v3(-30.0, 20.0, z), v3(30.0, 20.0, z)].map(|p| cam + p);
+        let view = CsmView { cam, near_corners: side(1.0), far_corners: side(100.0), focus_distance: 0.0 };
+        let frame = fit_cascades(Some(&view), cam, sun(), v3(-400.0, -2.0, -400.0), v3(400.0, 60.0, 400.0), 80.0, 2048.0);
+        let at = cam + v3(28.0, -18.0, 5.0) + sun() * 10.0;
+        let (lo, hi) = (at - v3(0.2, 0.2, 0.2), at + v3(0.2, 0.2, 0.2));
+        for (i, c) in frame.cascades.iter().enumerate() {
+            assert!(cascade_sees(c, lo, hi), "cascade {i}: its footprint holds the corner");
+            assert!(cascade_shadow_in_view(c, lo, hi), "cascade {i}: the corner is in view");
+        }
     }
 
     /// The fitted z interval is expressed in absolute light-space world
@@ -770,6 +869,7 @@ mod tests {
         let fit = |cam_off: Vec3f| {
             let moved = CsmView {
                 cam: view.cam + cam_off,
+                near_corners: view.near_corners.map(|p| p + cam_off),
                 far_corners: [
                     view.far_corners[0] + cam_off,
                     view.far_corners[1] + cam_off,

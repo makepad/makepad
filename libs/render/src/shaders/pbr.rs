@@ -197,6 +197,7 @@ script_mod! {
         }
 
         pixel: fn() {
+            self.host_cut()
             self.door_window()
             if self.occ_focus.w > 0.0 {
                 let oe = self.occ_eye.xyz
@@ -294,8 +295,8 @@ script_mod! {
                 cut = self.cut_coverage(surf.w, self.alpha_cutoff)
                 if cut<=0.0 {self.clip()}
             }
-            let albedo = self.paint_mix(surf.xyz)
-            let out = self.shade(albedo, surf.w)
+            let painted = self.paint_mix(surf.xyz)
+            let out = self.shade(painted.xyz, surf.w, self.paint_floor(painted.xyz, painted.w))
             return vec4(out.xyz, out.w * self.cut_alpha(cut))
         }
 
@@ -317,7 +318,8 @@ script_mod! {
         cut_alpha: fn(cut: float) -> float {
             return mix(1.0, cut, step(1.5, self.draw_pass.msaa_samples))
         }
-        shade: fn(albedo: vec3, surf_w: float) -> vec4 {
+        // `least`: see shade_mr.
+        shade: fn(albedo: vec3, surf_w: float, least: vec3) -> vec4 {
             // The material. Factor x map, per the glTF spec; orm_on is 0 for
             // a factors-only material so the sample folds out to 1.
             // Factors only (orm_on 0): the map would fold out, so it is not read.
@@ -349,14 +351,15 @@ script_mod! {
                 }
             }
             n = self.mat_normal(n)
-            return self.shade_mr(albedo, surf_w, mr, n)
+            return self.shade_mr(albedo, surf_w, mr, n, least)
         }
 
         // Occlusion, sun, lamps, GI and the material's composition of them,
         // then emission, the finish, fog and the debug views, for a surface
         // of metal/roughness `mr` and shading normal `n` (true world): the
-        // splat lane (shaders/splat.rs) comes here with its own.
-        shade_mr: fn(albedo: vec3, surf_w: float, mr: vec2, n: vec3) -> vec4 {
+        // splat lane (shaders/splat.rs) comes here with its own. `least`: the
+        // least light the surface shows at (a floored paint's, `paint_floor`).
+        shade_mr: fn(albedo: vec3, surf_w: float, mr: vec2, n: vec3, least: vec3) -> vec4 {
             let rough = mr.y
             let metal = mr.x
             // Occlusion, sun visibility and lamps: verbatim from
@@ -481,6 +484,7 @@ script_mod! {
             if self.tex_mag.y > 0.5 {
                 lit = self.clear_coat(lit, n, v, l, albedo, surface_direct * (sun_lit * ao_direct), ao * sao)
             }
+            lit = max(lit, least)
             let fin=self.mat_finish(vec4(self.to_display(lit),mix(1.0,surf_w,step(1.5,self.alpha_mode))))
             let coverage=fin.w
             return self.csm_debug_view(self.gi_display(vec4(self.scene_fogged(fin.xyz, self.v_fog, self.v_csm.xyz, self.fog_density)*coverage,coverage),self.v_csm.xyz,n),self.v_csm.xyz,n)
@@ -490,7 +494,7 @@ script_mod! {
         // Flat, the error material): the same normal, emission, finish, fog
         // and debug views, without computing the light it would ignore (nor
         // a clear coat: an unlit surface reflects nothing).
-        shade_unlit: fn(albedo: vec3, surf_w: float) -> vec4 {
+        shade_unlit: fn(albedo: vec3, surf_w: float, least: vec3) -> vec4 {
             var n=normalize(self.v_csm_n)
             if self.double_sided>0.5 && dot(n,self.eye.xyz-self.v_csm.xyz)<0.0 {n=n*(-1.0)}
             if self.surface_on>0.5 && abs(self.normal_scale)>0.00001 {
@@ -515,7 +519,7 @@ script_mod! {
             if max(self.emissive.x,max(self.emissive.y,self.emissive.z))>0.0 {emission=self.to_scene(self.emissive_map.sample_repeat(self.v_uv).xyz)*self.emissive}
             emission = self.mat_emission(emission)
             let none = vec3(0.0,0.0,0.0)
-            let lit = self.fur_shade(self.mat_compose(albedo, 0.0, none, none, none, none, none, none, n, l, v, none, none, 0.0), n, self.eye.xyz-self.v_csm.xyz) + emission
+            let lit = max(self.fur_shade(self.mat_compose(albedo, 0.0, none, none, none, none, none, none, n, l, v, none, none, 0.0), n, self.eye.xyz-self.v_csm.xyz) + emission, least)
             let fin=self.mat_finish(vec4(self.to_display(lit),mix(1.0,surf_w,step(1.5,self.alpha_mode))))
             let coverage=fin.w
             return self.csm_debug_view(self.gi_display(vec4(self.scene_fogged(fin.xyz, self.v_fog, self.v_csm.xyz, self.fog_density)*coverage,coverage),self.v_csm.xyz,n),self.v_csm.xyz,n)

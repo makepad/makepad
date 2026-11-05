@@ -581,8 +581,7 @@ impl Renderer {
 
     /// Install only a successfully frontend-compiled material. Failure keeps
     /// the previous draw (or the stock fallback), never a blank model.
-    pub fn install_custom_material(&mut self, name: String, material: impl Into<CustomMaterial>) -> bool {
-        let material = material.into();
+    pub fn install_custom_material(&mut self, name: String, material: CustomMaterial) -> bool {
         if !material.draw.draw_vars.can_instance() { return false; }
         self.custom_draws.insert(name, Box::new(material));
         true
@@ -678,6 +677,9 @@ impl Renderer {
             self.splat_draw = cx.try_with_vm(|vm| Box::new(crate::shaders::DrawSceneSplat::script_new_with_default(vm)));
         }
         let hdr = self.hdr_output;
+        if let Some(d) = self.splat_draw.as_deref_mut() {
+            d.pbr.skinned.draw_vars.refresh_after_reload(cx);
+        }
         let stock = self.splat_draw.as_ref().and_then(|d| d.pbr.skinned.draw_vars.draw_shader_id);
         let shader = if stock.is_some() { self.lane_shaders(cx, super::variants::ModelLane::Splat, stock).0 } else { None };
         self.splat_ready = shader.is_some_and(|id| cx.draw_shader_ready(id, hdr));
@@ -699,6 +701,9 @@ impl Renderer {
         }
         let hdr = self.hdr_output;
         // Ready: the foliage lane's shader for this frame's features (variants.rs).
+        if let Some(d) = self.foliage_draw.as_deref_mut() {
+            d.pbr.skinned.draw_vars.refresh_after_reload(cx);
+        }
         let stock = self.foliage_draw.as_ref().and_then(|d| d.pbr.skinned.draw_vars.draw_shader_id);
         let shader = if stock.is_some() { self.lane_shaders(cx, super::variants::ModelLane::Foliage, stock).0 } else { None };
         self.foliage_ready = shader.is_some_and(|id| cx.draw_shader_ready(id, hdr));

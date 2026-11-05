@@ -332,7 +332,7 @@ use crate::constants::{
 use crate::constraint_graph::{add_contact_to_graph, remove_contact_from_graph, OVERFLOW_INDEX};
 use crate::contact::{
     update_contact, CONTACT_ENABLE_CONTACT_EVENTS, CONTACT_TOUCHING_FLAG, RELATIVE_TRANSFORM_VALID,
-    CONTACT_RECYCLE_FLAG, SIM_DISJOINT, SIM_MESH_CONTACT, SIM_TUBE_CONTACT, SIM_STARTED_TOUCHING, SIM_STOPPED_TOUCHING,
+    CONTACT_RECYCLE_FLAG, SIM_DISJOINT, SIM_FIELD_CONTACT, SIM_MESH_CONTACT, SIM_TUBE_CONTACT, SIM_STARTED_TOUCHING, SIM_STOPPED_TOUCHING,
     SIM_TOUCHING_FLAG,
 };
 use crate::core::{get_byte_count, NULL_INDEX, SECRET_COOKIE};
@@ -614,6 +614,16 @@ unsafe fn collide_task_trampoline(start_index: i32, end_index: i32, worker_index
     collide_task(ctx, start_index, end_index, worker_index);
 }
 
+/// PORT EXTENSION: a field contact's manifold is swept along the step's motion, so a recycled one
+/// holds only while the sphere's motion against the field is as small as the pose's change may be.
+/// Two bodies going together keep their contact; a change of speed between them (a hand shaking
+/// the part) sweeps it again before the step can carry the sphere into a wall it doesn't hold.
+fn field_motion_is_within(world: &World, contact: &Contact, transform_a: crate::math_functions::WorldTransform, transform_b: crate::math_functions::WorldTransform, tolerance: f32) -> bool {
+    let (shape_a, shape_b) = (&world.shapes[contact.shape_id_a as usize], &world.shapes[contact.shape_id_b as usize]);
+    let motion = crate::contact::step_motion_in_a(world, shape_a.body_id, transform_a, shape_b.body_id, transform_b, shape_b.as_sphere().center);
+    crate::math_functions::length_squared(motion) < tolerance * tolerance
+}
+
 fn collide_task(ctx: &CollideCtx, start_index: i32, end_index: i32, worker_index: i32) {
     b3_assert!(start_index < end_index);
 
@@ -699,6 +709,7 @@ fn collide_task(ctx: &CollideCtx, start_index: i32, end_index: i32, worker_index
             && recycle_distance > 0.0
             && (contact_flags & RELATIVE_TRANSFORM_VALID) != 0
             && (contact_flags & CONTACT_RECYCLE_FLAG) != 0
+            && ((contact_flags & SIM_FIELD_CONTACT) == 0 || field_motion_is_within(world, contact, transform_a, transform_b, recycle_tolerance))
         {
             let angle_a = dot_quat(transform_a.q, contact.cached_rotation_a);
             let angle_b = dot_quat(transform_b.q, contact.cached_rotation_b);

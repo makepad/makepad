@@ -627,6 +627,9 @@ impl Renderer {
         // rather than not at all.
         let hdr = self.hdr_output;
         // Ready: the city lane's shader for this frame's features (variants.rs).
+        if let Some(c) = city.as_deref_mut() {
+            c.pbr.skinned.draw_vars.refresh_after_reload(cx.cx);
+        }
         let stock = city.as_ref().and_then(|c| c.pbr.skinned.draw_vars.draw_shader_id);
         let shader = if stock.is_some() { self.lane_shaders(cx.cx, super::variants::ModelLane::City, stock).0 } else { None };
         let ready = shader.is_some_and(|id| cx.cx.draw_shader_ready(id, hdr));
@@ -651,6 +654,7 @@ impl Renderer {
         };
         let opaque = match model_lane {
             Some(model_lane) => {
+                draw.base().draw_vars.refresh_after_reload(cx.cx);
                 let stock = draw.base().draw_vars.draw_shader_id;
                 let (full, opaque) = self.lane_shaders(cx.cx, model_lane, stock);
                 draw.base().draw_vars.draw_shader_id = full;
