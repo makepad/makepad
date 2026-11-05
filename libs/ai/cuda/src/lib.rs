@@ -14,6 +14,12 @@ mod link_gate;
 #[allow(unused_imports)] // launch.rs is an empty stub off linux/windows-with-kernels
 use makepad_ai_loader::{accel, prof, quant};
 
+// build.rs's toolkit decision, compiled here only so its tests run: a build
+// script has no tests of its own.
+#[cfg(test)]
+#[path = "../build_toolkit.rs"]
+mod build_toolkit;
+
 pub mod cudnn;
 pub mod cudnn_v8_bench;
 pub mod driver;

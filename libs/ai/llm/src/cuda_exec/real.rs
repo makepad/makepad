@@ -10,7 +10,7 @@
 //! not the production prefill path until it matches slab+cuBLAS speed.
 
 use std::cell::{Cell, RefCell};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ffi::c_void;
 use std::rc::Rc;
 use std::time::Instant;
@@ -1109,6 +1109,9 @@ struct GraphPlan {
     fused_unary: usize,
     fused_ssm: usize,
     fused_gdn_state: usize,
+    /// Host time this plan took, printed with the capture: a pass that grows
+    /// with the graph shows here first, as a stall on a new shape.
+    plan_ms: f64,
     options: super::CudaGraphOptions,
 }
 
@@ -1692,18 +1695,28 @@ fn mmq_kind_ok(kind: i32) -> bool {
     unsafe { quant_kind_routes(kind) & ROUTE_MMQ != 0 }
 }
 
-fn tensor_used_elsewhere(tensors: &[Tensor], nodes: &[TensorId], id: TensorId, except: TensorId) -> bool {
-    for &node_id in nodes {
-        if node_id == except {
-            continue;
-        }
-        if let Some(t) = tensors.get(node_id) {
-            if t.src.iter().flatten().any(|&src| src == id) {
-                return true;
+/// The nodes that name each tensor as a source, built once per plan: the
+/// fusion passes ask "does anything else read this" once per candidate, and a
+/// walk over the graph each time made them quadratic in its size.
+struct Readers(HashMap<TensorId, Vec<TensorId>>);
+
+impl Readers {
+    fn new(tensors: &[Tensor], graph_nodes: &[TensorId]) -> Self {
+        let mut readers: HashMap<TensorId, Vec<TensorId>> = HashMap::new();
+        for &node_id in graph_nodes {
+            if let Some(t) = tensors.get(node_id) {
+                for &src in t.src.iter().flatten() {
+                    readers.entry(src).or_default().push(node_id);
+                }
             }
         }
+        Self(readers)
     }
-    false
+
+    /// Whether a node other than `except` takes `id` as a source.
+    fn used_elsewhere(&self, id: TensorId, except: TensorId) -> bool {
+        self.0.get(&id).is_some_and(|nodes| nodes.iter().any(|&node| node != except))
+    }
 }
 
 // ggml-cuda.cu:3678 skips VIEW/RESHAPE/TRANSPOSE/PERMUTE/NONE before fusion.
@@ -1718,7 +1731,7 @@ fn next_compute(nodes: &[PlannedNode], from: usize) -> Option<usize> {
 // llama.cpp ggml_cuda_should_fuse_mul_mat_vec_q: MUL_MAT + MUL_MAT + GLU
 // with shared activations, same weight type/shape, SiLU/SwiGLU, M=1.
 // Evaluate: ggml-cuda.cu:3887-3921.
-fn fuse_mmvq_swiglu(tensors: &[Tensor], graph_nodes: &[TensorId], nodes: &mut [PlannedNode]) -> usize {
+fn fuse_mmvq_swiglu(tensors: &[Tensor], readers: &Readers, nodes: &mut [PlannedNode]) -> usize {
     let mut fused = 0usize;
     let mut i = 0;
     while i < nodes.len() {
@@ -1783,8 +1796,8 @@ fn fuse_mmvq_swiglu(tensors: &[Tensor], graph_nodes: &[TensorId], nodes: &mut [P
             i += 1;
             continue;
         }
-        if tensor_used_elsewhere(tensors, graph_nodes, gate_id, glu_id)
-            || tensor_used_elsewhere(tensors, graph_nodes, up_id, glu_id)
+        if readers.used_elsewhere(gate_id, glu_id)
+            || readers.used_elsewhere(up_id, glu_id)
         {
             i += 1;
             continue;
@@ -1804,7 +1817,7 @@ const UNARY_SOFTPLUS: i32 = 15;
 
 // llama.cpp ggml-cuda.cu:3371-3410 / 3994-4004: RMS_NORM + MUL (+ ADD).
 // Intermediate nodes must have a single use (ggml_can_fuse_ext n_uses==1).
-fn fuse_rms_norm_mul(tensors: &[Tensor], graph_nodes: &[TensorId], nodes: &mut [PlannedNode]) -> usize {
+fn fuse_rms_norm_mul(tensors: &[Tensor], readers: &Readers, nodes: &mut [PlannedNode]) -> usize {
     let mut fused = 0usize;
     let mut i = 0;
     while i < nodes.len() {
@@ -1843,7 +1856,7 @@ fn fuse_rms_norm_mul(tensors: &[Tensor], graph_nodes: &[TensorId], nodes: &mut [
             i += 1;
             continue;
         }
-        if tensor_used_elsewhere(tensors, graph_nodes, rms_id, mul_id) {
+        if readers.used_elsewhere(rms_id, mul_id) {
             i += 1;
             continue;
         }
@@ -1857,7 +1870,7 @@ fn fuse_rms_norm_mul(tensors: &[Tensor], graph_nodes: &[TensorId], nodes: &mut [
                         let add1 = &tensors[ab];
                         add0.is_contiguous()
                             && add1.is_contiguous_rows()
-                            && !tensor_used_elsewhere(tensors, graph_nodes, mul_id, add_id)
+                            && !readers.used_elsewhere(mul_id, add_id)
                     }
                     _ => false,
                 }
@@ -1879,7 +1892,7 @@ fn fuse_rms_norm_mul(tensors: &[Tensor], graph_nodes: &[TensorId], nodes: &mut [
 }
 
 // llama.cpp ggml-cuda.cu:3425-3450 / 4012-4017: UNARY + MUL.
-fn fuse_unary_mul(tensors: &[Tensor], graph_nodes: &[TensorId], nodes: &mut [PlannedNode]) -> usize {
+fn fuse_unary_mul(tensors: &[Tensor], readers: &Readers, nodes: &mut [PlannedNode]) -> usize {
     let mut fused = 0usize;
     let mut i = 0;
     while i < nodes.len() {
@@ -1923,7 +1936,7 @@ fn fuse_unary_mul(tensors: &[Tensor], graph_nodes: &[TensorId], nodes: &mut [Pla
         if !unary_src.is_contiguous_1()
             || !other.is_contiguous_1()
             || !other.are_same_shape(unary)
-            || tensor_used_elsewhere(tensors, graph_nodes, unary_id, mul_id)
+            || readers.used_elsewhere(unary_id, mul_id)
         {
             i += 1;
             continue;
@@ -1946,7 +1959,7 @@ fn fuse_unary_mul(tensors: &[Tensor], graph_nodes: &[TensorId], nodes: &mut [Pla
 // audited without finding the mechanism, so the fusion stays opt-in
 // (MKLLM_ENABLE_SSM_SILU_FUSION=1) until the root cause is nailed; it only
 // saves one elementwise SiLU launch per recurrent layer.
-fn fuse_ssm_conv_silu(tensors: &[Tensor], graph_nodes: &[TensorId], nodes: &mut [PlannedNode]) -> usize {
+fn fuse_ssm_conv_silu(tensors: &[Tensor], readers: &Readers, nodes: &mut [PlannedNode]) -> usize {
     let force_on = std::env::var_os("MKLLM_ENABLE_SSM_SILU_FUSION")
         .map(|v| v == "1")
         .unwrap_or(false);
@@ -1971,7 +1984,7 @@ fn fuse_ssm_conv_silu(tensors: &[Tensor], graph_nodes: &[TensorId], nodes: &mut 
         let silu_id = nodes[j].node_id;
         let silu = &tensors[silu_id];
         if silu.src[0] != Some(conv_id)
-            || tensor_used_elsewhere(tensors, graph_nodes, conv_id, silu_id)
+            || readers.used_elsewhere(conv_id, silu_id)
         {
             i += 1;
             continue;
@@ -1984,21 +1997,19 @@ fn fuse_ssm_conv_silu(tensors: &[Tensor], graph_nodes: &[TensorId], nodes: &mut 
     fused
 }
 
-/// Whether two tensors can share bytes: the same root storage with
-/// overlapping extents, or two resident tensors whose context offsets overlap.
-/// An alias it cannot rule out counts as an overlap.
-fn tensors_overlap(tensors: &[Tensor], a: TensorId, b: TensorId) -> bool {
-    let (Ok((ar, ao)), Ok((br, bo))) = (resolve_root(tensors, a), resolve_root(tensors, b)) else {
-        return true;
+/// The bytes a tensor covers: its storage and its byte range there.
+///
+/// Two tensors can share bytes only in the same storage: the same root, or
+/// two resident roots, which can alias through their context offsets. So a
+/// resident tensor's range is in context offsets (storage `None`), and any
+/// other tensor's is within its root (storage `Some(root)`).
+fn extent(tensors: &[Tensor], id: TensorId) -> Result<(Option<TensorId>, usize, usize)> {
+    let (root, offset) = resolve_root(tensors, id)?;
+    let (storage, start) = match tensors[root].data_offset {
+        Some(base) => (None, base + offset),
+        None => (Some(root), offset),
     };
-    let (a0, b0) = if ar == br {
-        (ao, bo)
-    } else if let (Some(ap), Some(bp)) = (tensors[ar].data_offset, tensors[br].data_offset) {
-        (ap + ao, bp + bo)
-    } else {
-        return false;
-    };
-    a0 < b0 + tensors[b].nbytes() && b0 < a0 + tensors[a].nbytes()
+    Ok((storage, start, start + tensors[id].nbytes()))
 }
 
 /// A node that only re-describes bytes. Every other node counts as touching
@@ -2008,24 +2019,101 @@ fn metadata_only(t: &Tensor) -> bool {
     matches!(t.op, Op::None | Op::View | Op::Reshape | Op::Permute | Op::Transpose)
 }
 
-/// Whether nothing but `allowed` reads bytes of `id`: no other node's
-/// source and no pinned output overlaps it.
-fn read_only_by(
-    tensors: &[Tensor],
-    nodes: &[PlannedNode],
-    pinned: &[TensorId],
-    id: TensorId,
-    allowed: &[TensorId],
-) -> bool {
-    pinned
-        .iter()
-        .all(|&p| allowed.contains(&p) || !tensors_overlap(tensors, id, p))
-        && nodes.iter().all(|node| {
-            let t = &tensors[node.node_id];
-            allowed.contains(&node.node_id)
-                || metadata_only(t)
-                || !t.src.iter().flatten().any(|&src| tensors_overlap(tensors, id, src))
-        })
+/// One way the graph touches bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Touch {
+    /// A node's own bytes, which it writes.
+    Output(TensorId),
+    /// A source of a node, which it reads.
+    Source(TensorId),
+    /// A graph output, read after the graph.
+    Pinned(TensorId),
+}
+
+/// The byte ranges in one storage, sorted by start.
+#[derive(Default)]
+struct Spans {
+    spans: Vec<(usize, usize, Touch)>,
+    /// `reach[i]`: the furthest end among `spans[..=i]`.
+    reach: Vec<usize>,
+}
+
+/// Every byte range the graph touches, built once per plan: each node's
+/// output and sources (metadata-only nodes touch nothing of their own) and
+/// each pinned output.
+///
+/// The fusion passes ask "what else touches these bytes" once per
+/// candidate. A walk over the graph each time made planning quadratic in its
+/// size, and every new shape pays for its plan before it runs.
+struct Touches(HashMap<Option<TensorId>, Spans>);
+
+impl Touches {
+    fn new(tensors: &[Tensor], graph_nodes: &[TensorId], pinned: &[TensorId]) -> Result<Self> {
+        let mut storages: HashMap<Option<TensorId>, Spans> = HashMap::new();
+        let mut add = |id: TensorId, touch: Touch| -> Result<()> {
+            let (storage, start, end) = extent(tensors, id)?;
+            storages.entry(storage).or_default().spans.push((start, end, touch));
+            Ok(())
+        };
+        for &node_id in graph_nodes {
+            let t = &tensors[node_id];
+            if metadata_only(t) {
+                continue;
+            }
+            add(node_id, Touch::Output(node_id))?;
+            for &src in t.src.iter().flatten() {
+                add(src, Touch::Source(node_id))?;
+            }
+        }
+        for &id in pinned {
+            add(id, Touch::Pinned(id))?;
+        }
+        for spans in storages.values_mut() {
+            spans.spans.sort_unstable();
+            let mut reach = 0;
+            spans.reach = spans
+                .spans
+                .iter()
+                .map(|&(_, end, _)| {
+                    reach = reach.max(end);
+                    reach
+                })
+                .collect();
+        }
+        Ok(Self(storages))
+    }
+
+    /// Every touch of bytes `id` covers.
+    fn of(&self, tensors: &[Tensor], id: TensorId) -> Result<impl Iterator<Item = Touch> + '_> {
+        static NONE: Spans = Spans { spans: Vec::new(), reach: Vec::new() };
+        let (storage, start, end) = extent(tensors, id)?;
+        let spans = self.0.get(&storage).unwrap_or(&NONE);
+        // Spans that start before `end`, walked back for as long as one of
+        // them can still reach past `start`.
+        let before_end = spans.spans.partition_point(|&(span_start, ..)| span_start < end);
+        Ok((0..before_end)
+            .rev()
+            .take_while(move |&i| spans.reach[i] > start)
+            .filter(move |&i| spans.spans[i].1 > start)
+            .map(move |i| spans.spans[i].2))
+    }
+
+    /// Whether nothing but `allowed` reads bytes of `id`: no other node's
+    /// source and no pinned output covers any of them.
+    fn read_only_by(&self, tensors: &[Tensor], id: TensorId, allowed: &[TensorId]) -> Result<bool> {
+        Ok(!self.of(tensors, id)?.any(|touch| match touch {
+            Touch::Source(by) | Touch::Pinned(by) => !allowed.contains(&by),
+            Touch::Output(_) => false,
+        }))
+    }
+
+    /// Whether no node but `allowed` reads or writes bytes of `id`.
+    fn private_to(&self, tensors: &[Tensor], id: TensorId, allowed: &[TensorId]) -> Result<bool> {
+        Ok(!self.of(tensors, id)?.any(|touch| match touch {
+            Touch::Output(by) | Touch::Source(by) => !allowed.contains(&by),
+            Touch::Pinned(_) => false,
+        }))
+    }
 }
 
 /// The layout the official scan kernel takes (`mkllm_gated_delta_net`'s
@@ -2050,11 +2138,7 @@ fn gated_delta_net_official(q: &Tensor, k: &Tensor, g: &Tensor, sv: i64) -> bool
 /// feed only the scan, the planes feed only the scatter, nothing else touches
 /// the cache, and the row selectors are inputs. Each thread reads its own
 /// state elements before writing any, so a resume row may also be a write row.
-fn fuse_gated_delta_state(
-    tensors: &[Tensor],
-    pinned: &[TensorId],
-    nodes: &mut [PlannedNode],
-) -> Result<usize> {
+fn fuse_gated_delta_state(tensors: &[Tensor], touches: &Touches, nodes: &mut [PlannedNode]) -> Result<usize> {
     let mut fused = 0usize;
     for i in 0..nodes.len() {
         if !matches!(nodes[i].kernel, KernelSel::GatedDeltaNet) {
@@ -2106,7 +2190,7 @@ fn fuse_gated_delta_state(
             || cache_t.nb[1] % 4 != 0
             || !rows_ok(read_rows, n_seqs)
             || !resolve_root(tensors, cache).is_ok_and(|(root, _)| tensors[root].op == Op::None)
-            || !read_only_by(tensors, nodes, pinned, get, &[scan_id])
+            || !touches.read_only_by(tensors, get, &[scan_id])?
         {
             continue;
         }
@@ -2134,22 +2218,14 @@ fn fuse_gated_delta_state(
             || resolve_root(tensors, set_id).ok() != resolve_root(tensors, cache).ok()
             || set_t.ne != cache_t.ne
             || set_t.nb != cache_t.nb
-            || !read_only_by(tensors, nodes, pinned, planes_id, &[set_id])
+            || !touches.read_only_by(tensors, planes_id, &[set_id])?
         {
             continue;
         }
         // Nothing but the gather and the scatter may touch the cache: the
         // scan now reads it where the gather ran and writes it where the
         // scatter would have.
-        let cache_private = nodes.iter().all(|node| {
-            let id = node.node_id;
-            id == get
-                || id == set_id
-                || metadata_only(&tensors[id])
-                || (!tensors_overlap(tensors, cache, id)
-                    && !tensors[id].src.iter().flatten().any(|&src| tensors_overlap(tensors, cache, src)))
-        });
-        if !cache_private {
+        if !touches.private_to(tensors, cache, &[get, set_id])? {
             continue;
         }
         nodes[gi].kernel = KernelSel::Skip;
@@ -2163,7 +2239,7 @@ fn fuse_gated_delta_state(
 // llama.cpp writes recurrent conv state with one CPY into a cache view
 // (qwen35.cpp:267-276, ggml-cuda.cu:2520). We still build CONT+SET_ROWS;
 // collapse that pair to the same single strided copy.
-fn fuse_cont_set_rows(tensors: &[Tensor], graph_nodes: &[TensorId], nodes: &mut [PlannedNode]) {
+fn fuse_cont_set_rows(tensors: &[Tensor], readers: &Readers, nodes: &mut [PlannedNode]) {
     let mut i = 0;
     while i + 1 < nodes.len() {
         match (nodes[i].kernel, nodes[i + 1].kernel) {
@@ -2183,7 +2259,7 @@ fn fuse_cont_set_rows(tensors: &[Tensor], graph_nodes: &[TensorId], nodes: &mut 
         let cont = &tensors[cont_id];
         if cont.src[0].is_none()
             || cont.desc.ty != set.desc.ty
-            || tensor_used_elsewhere(tensors, graph_nodes, cont_id, set_id)
+            || readers.used_elsewhere(cont_id, set_id)
         {
             i += 1;
             continue;
@@ -2244,6 +2320,7 @@ fn plan_raw_graph(
     pinned: &[TensorId],
     options: super::CudaGraphOptions,
 ) -> Result<GraphPlan> {
+    let started = Instant::now();
     let tensors = ctx.tensors();
 
     // Kernel selection + validation first: fail closed before any memory
@@ -2258,12 +2335,15 @@ fn plan_raw_graph(
             kernel: select_kernel(tensors, t, options)?,
         });
     }
-    let fused_mmvq = fuse_mmvq_swiglu(tensors, &graph.nodes, &mut nodes);
-    let fused_rms = fuse_rms_norm_mul(tensors, &graph.nodes, &mut nodes);
-    let fused_unary = fuse_unary_mul(tensors, &graph.nodes, &mut nodes);
-    let fused_ssm = fuse_ssm_conv_silu(tensors, &graph.nodes, &mut nodes);
-    let fused_gdn_state = fuse_gated_delta_state(tensors, pinned, &mut nodes)?;
-    fuse_cont_set_rows(tensors, &graph.nodes, &mut nodes);
+    // Who reads and touches what never changes while the passes pick kernels.
+    let readers = Readers::new(tensors, &graph.nodes);
+    let touches = Touches::new(tensors, &graph.nodes, pinned)?;
+    let fused_mmvq = fuse_mmvq_swiglu(tensors, &readers, &mut nodes);
+    let fused_rms = fuse_rms_norm_mul(tensors, &readers, &mut nodes);
+    let fused_unary = fuse_unary_mul(tensors, &readers, &mut nodes);
+    let fused_ssm = fuse_ssm_conv_silu(tensors, &readers, &mut nodes);
+    let fused_gdn_state = fuse_gated_delta_state(tensors, &touches, &mut nodes)?;
+    fuse_cont_set_rows(tensors, &readers, &mut nodes);
     fuse_set_rows_cpy(tensors, &mut nodes);
 
     // Lifetimes over root storage: def = first producing node, last_use =
@@ -2428,6 +2508,7 @@ fn plan_raw_graph(
         fused_unary,
         fused_ssm,
         fused_gdn_state,
+        plan_ms: started.elapsed().as_secs_f64() * 1e3,
         options,
     })
 }
@@ -2771,7 +2852,7 @@ impl Compiled {
                         eprintln!(
                             "cuda.graph: captured launched={} plan_nodes={} \
                              fused_mmvq={} fused_rms={} fused_unary={} fused_ssm={} \
-                             fused_gdn_state={} extras={:?} glu_prev={:?}",
+                             fused_gdn_state={} plan_ms={:.1} extras={:?} glu_prev={:?}",
                             launched,
                             self.plan.nodes.len(),
                             self.plan.fused_mmvq,
@@ -2779,6 +2860,7 @@ impl Compiled {
                             self.plan.fused_unary,
                             self.plan.fused_ssm,
                             self.plan.fused_gdn_state,
+                            self.plan.plan_ms,
                             extras,
                             glu_prev
                         );
@@ -5299,5 +5381,128 @@ mod gated_delta_state_tests {
             .filter_map(|(i, case)| run(&runtime, case, 0x6d17 + i as u64))
             .collect();
         assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+}
+
+#[cfg(test)]
+mod touch_index_tests {
+    //! The planner's indexes stand in for walks over the whole graph. They
+    //! must answer exactly what the walks would, or a fusion sees a reader or
+    //! a writer that is not there, or misses one that is.
+    use super::{metadata_only, resolve_root, Readers, Touch, Touches};
+    use crate::{BufferUsage, Context, Graph, InitParams, Tensor, TensorId, TensorType};
+
+    /// The pairwise rule: the same root with overlapping ranges, or two
+    /// resident roots whose context offsets overlap.
+    fn overlap(tensors: &[Tensor], a: TensorId, b: TensorId) -> bool {
+        let (ar, ao) = resolve_root(tensors, a).unwrap();
+        let (br, bo) = resolve_root(tensors, b).unwrap();
+        let (a0, b0) = if ar == br {
+            (ao, bo)
+        } else if let (Some(ap), Some(bp)) = (tensors[ar].data_offset, tensors[br].data_offset) {
+            (ap + ao, bp + bo)
+        } else {
+            return false;
+        };
+        a0 < b0 + tensors[b].nbytes() && b0 < a0 + tensors[a].nbytes()
+    }
+
+    /// Every touch of `id`, by a walk over the graph and the pinned outputs.
+    fn walk(tensors: &[Tensor], graph_nodes: &[TensorId], pinned: &[TensorId], id: TensorId) -> Vec<Touch> {
+        let mut found = Vec::new();
+        for &node in graph_nodes {
+            let t = &tensors[node];
+            if metadata_only(t) {
+                continue;
+            }
+            if overlap(tensors, id, node) {
+                found.push(Touch::Output(node));
+            }
+            for &src in t.src.iter().flatten() {
+                if overlap(tensors, id, src) {
+                    found.push(Touch::Source(node));
+                }
+            }
+        }
+        found.extend(pinned.iter().filter(|&&p| overlap(tensors, id, p)).map(|&p| Touch::Pinned(p)));
+        found.sort_unstable();
+        found
+    }
+
+    #[test]
+    fn the_indexes_find_exactly_what_a_walk_over_the_graph_finds() {
+        let mut ctx = Context::new(InitParams { mem_size: 1 << 20, mem_buffer: None, no_alloc: false });
+        // Two resident roots side by side: a range at the end of one must not
+        // reach into the other.
+        let a = ctx.new_named_tensor("a", TensorType::F32, 1, &[1024], BufferUsage::State).unwrap();
+        let b = ctx.new_named_tensor("b", TensorType::F32, 1, &[256], BufferUsage::State).unwrap();
+        ctx.set_no_alloc(true);
+        let x = ctx.new_named_tensor("x", TensorType::F32, 1, &[1024], BufferUsage::Activations).unwrap();
+        let full = ctx.view_1d(x, 1024, 0).unwrap();
+        let y = ctx.scale(full, 2.0, BufferUsage::Activations).unwrap();
+        // One node writes all of `a`, so a query deep inside it has to walk
+        // back past many short ranges that end before it.
+        let mut outputs = vec![y, ctx.cpy(y, a, BufferUsage::State).unwrap()];
+        let roots = [(a, 1024i64), (b, 256), (x, 1024), (y, 1024)];
+        let mut seed = 0x51ce_u64;
+        let mut next = |n: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % n
+        };
+        for _ in 0..120 {
+            let (root, len) = roots[next(4) as usize];
+            let n = 1 + next(len as u64 / 4) as i64;
+            let at = next((len - n) as u64 + 1) as usize * 4;
+            let view = ctx.view_1d(root, n, at).unwrap();
+            let node = if next(3) == 0 {
+                // A write into a resident root, from a range of `y`.
+                let (dst, dst_len) = roots[next(2) as usize];
+                let n = n.min(dst_len);
+                let dst = ctx.view_1d(dst, n, next((dst_len - n) as u64 + 1) as usize * 4).unwrap();
+                let src = ctx.view_1d(y, n, next((1024 - n) as u64 + 1) as usize * 4).unwrap();
+                ctx.cpy(src, dst, BufferUsage::State).unwrap()
+            } else {
+                ctx.scale(view, 0.5, BufferUsage::Activations).unwrap()
+            };
+            outputs.push(node);
+        }
+        let mut graph = Graph::new();
+        for &id in &outputs {
+            graph.build_forward_expand(&ctx, id).unwrap();
+        }
+        let pinned = [outputs[5], outputs[40], ctx.view_1d(a, 16, 2048).unwrap(), ctx.view_1d(x, 8, 64).unwrap()];
+        let tensors = ctx.tensors();
+        let touches = Touches::new(tensors, &graph.nodes, &pinned).unwrap();
+        let readers = Readers::new(tensors, &graph.nodes);
+
+        let (mut resident_hits, mut planned_hits, mut deep_hits) = (0, 0, 0);
+        for id in 0..tensors.len() {
+            let mut got: Vec<Touch> = touches.of(tensors, id).unwrap().collect();
+            got.sort_unstable();
+            let want = walk(tensors, &graph.nodes, &pinned, id);
+            assert_eq!(got, want, "touches of tensor {id}");
+            let (root, offset) = resolve_root(tensors, id).unwrap();
+            if tensors[root].data_offset.is_some() {
+                resident_hits += want.len();
+                if root == a && offset > 2048 && want.contains(&Touch::Output(outputs[1])) {
+                    deep_hits += 1;
+                }
+            } else {
+                planned_hits += want.len();
+            }
+            for &except in &graph.nodes {
+                let walked = graph.nodes.iter().any(|&node| {
+                    node != except && tensors[node].src.iter().flatten().any(|&src| src == id)
+                });
+                assert_eq!(readers.used_elsewhere(id, except), walked, "readers of {id} but {except}");
+            }
+        }
+        // The case has to exercise both storages and the long range.
+        assert!(
+            resident_hits > 100 && planned_hits > 100 && deep_hits > 5,
+            "resident {resident_hits} planned {planned_hits} deep {deep_hits}"
+        );
     }
 }

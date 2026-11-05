@@ -5,6 +5,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{Duration, Instant};
 
+#[path = "build_toolkit.rs"]
+mod build_toolkit;
+use build_toolkit::{dir_has_file_starting_with, named_toolkit, Toolkit};
+
 // The nvcc build for THE CUDA store (aiarch.md §1 + §4, lane T4), and the
 // single authority on whether this machine gets CUDA at all.
 //
@@ -12,11 +16,13 @@ use std::time::{Duration, Instant};
 //   * kernels compiled and archived -> `cargo:rustc-cfg=makepad_ai_cuda_kernels`
 //     + the `rustc-link-search` / `rustc-link-lib` lines for cudart, cuBLAS
 //     and cuBLASLt, taken from the toolkit we actually found;
-//   * no usable toolkit (or MAKEPAD_GGML_NO_CUDA) -> none of the above, and
-//     `src/link_gate.rs` turns every extern block into a link-clean stub, so
-//     the build SUCCEEDS with no CUDA;
-//   * MAKEPAD_GGML_REQUIRE_CUDA=1 -> the second case panics instead, which is
-//     how a fleet box refuses to silently lose its GPU.
+//   * no toolkit named (MAKEPAD_CUDA_ROOT unset or empty) or
+//     MAKEPAD_GGML_NO_CUDA -> none of the above, and `src/link_gate.rs` turns
+//     every extern block into a link-clean stub, so the build SUCCEEDS with
+//     no CUDA (MAKEPAD_GGML_REQUIRE_CUDA=1 makes an unnamed toolkit fatal,
+//     which is how a fleet box refuses to silently lose its GPU);
+//   * a named toolkit that cannot build (not a toolkit, nvcc fails, the libs
+//     are missing) -> the build fails. See build_toolkit.rs.
 //
 // Because this crate sets `links = "makepad_ai_cuda"`, the answer travels to
 // its immediate dependents as `DEP_MAKEPAD_AI_CUDA_KERNELS` (=1) and
@@ -133,42 +139,17 @@ fn build_cuda_backends(target_os: &str, require_cuda: bool) {
     rerun_if_changed_tree(&manifest_dir.join("kernels/llm"));
     println!("cargo:rerun-if-changed={}", manifest_dir.join("kernels/launch_profile.cuh").display());
 
-    let Some(cuda_root) = cuda_root(target_os) else {
-        // No toolkit is the normal case of a machine without an NVIDIA GPU: built without CUDA,
-        // silently (no cargo warning on every build). A toolkit that fails still warns below.
-        if require_cuda {
-            cuda_unavailable(true, "CUDA toolkit root not found");
-        }
-        return;
+    // No toolkit named is the normal case of a machine without an NVIDIA GPU:
+    // built without CUDA, silently. A named one must build: its libs are
+    // resolved here, BEFORE minutes in nvcc, because a toolkit whose libs we
+    // cannot find would compile kernels and then fail the final link with
+    // `unresolved external symbol cudaFree`.
+    let toolkit = match named_toolkit(env::var_os("MAKEPAD_CUDA_ROOT").as_deref(), require_cuda, target_os) {
+        Ok(Some(toolkit)) => toolkit,
+        Ok(None) => return,
+        Err(why) => cuda_failed(&why),
     };
-
-    let nvcc = nvcc_path(&cuda_root, target_os);
-    if !nvcc.exists() {
-        cuda_unavailable(
-            require_cuda,
-            &format!("CUDA nvcc not found at {}", nvcc.display()),
-        );
-        return;
-    }
-    // Resolve the import/shared libs BEFORE spending minutes in nvcc: a
-    // toolkit whose libs we cannot find would compile kernels and then fail
-    // the final link with `unresolved external symbol cudaFree`, which is
-    // the failure this whole path exists to prevent.
-    let Some(lib_dir) = cuda_lib_dir(&cuda_root, target_os) else {
-        cuda_unavailable(
-            require_cuda,
-            &format!(
-                "CUDA link libraries not found under {} (looked for {})",
-                cuda_root.display(),
-                lib_dir_candidates(&cuda_root, target_os)
-                    .iter()
-                    .map(|path| path.display().to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-        );
-        return;
-    };
+    let Toolkit { root: cuda_root, nvcc, lib_dir } = toolkit;
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let lib_path = if target_os == "windows" {
         out_dir.join("ggml_cuda_affine.lib")
@@ -202,10 +183,7 @@ fn build_cuda_backends(target_os: &str, require_cuda: bool) {
     let lib_exe = if target_os == "windows" {
         match find_msvc_tool("lib.exe") {
             Some(path) => Some(path),
-            None => {
-                cuda_unavailable(require_cuda, "MSVC lib.exe not found");
-                return;
-            }
+            None => cuda_failed("MSVC lib.exe not found"),
         }
     } else {
         None
@@ -325,15 +303,11 @@ fn build_cuda_backends(target_os: &str, require_cuda: bool) {
         if let Ok(out) = &result {
             report_tool_output("nvcc", out);
         }
-        cuda_unavailable(
-            require_cuda,
-            &format!(
-                "failed to compile CUDA backend source {} for sm_{arch} \
-                 (override the arch with MAKEPAD_GGML_CUDA_ARCH)",
-                src_path.display()
-            ),
-        );
-        return;
+        cuda_failed(&format!(
+            "failed to compile CUDA backend source {} for sm_{arch} \
+             (override the arch with MAKEPAD_GGML_CUDA_ARCH)",
+            src_path.display()
+        ));
     }
 
     let archive = if target_os == "windows" {
@@ -356,8 +330,7 @@ fn build_cuda_backends(target_os: &str, require_cuda: bool) {
         if let Ok(out) = &archive {
             report_tool_output("archiver", out);
         }
-        cuda_unavailable(require_cuda, "failed to archive CUDA backends");
-        return;
+        cuda_failed("failed to archive CUDA backends");
     }
 
     let kernels_took = fmt_duration(kernels_started.elapsed());
@@ -610,17 +583,6 @@ const REPORTED_TOOL_LINES: usize = 30;
 /// And how much of its tail, where the summary line lives.
 const REPORTED_TOOL_TAIL_LINES: usize = 15;
 
-fn dir_has_file_starting_with(dir: &Path, prefix: &str) -> bool {
-    fs::read_dir(dir).is_ok_and(|entries| {
-        entries.flatten().any(|entry| {
-            entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with(prefix)
-        })
-    })
-}
-
 fn rerun_if_changed_tree(path: &Path) {
     println!("cargo:rerun-if-changed={}", path.display());
     let Ok(entries) = fs::read_dir(path) else {
@@ -636,72 +598,16 @@ fn rerun_if_changed_tree(path: &Path) {
     }
 }
 
-/// The one exit for "this machine gets no CUDA". Loud and fatal when a fleet
-/// box asked for CUDA; otherwise a warning and a stub build that still LINKS
-/// — see `src/link_gate.rs` for why that is the same decision.
-fn cuda_unavailable(required: bool, reason: &str) {
-    if required {
-        panic!("MAKEPAD_GGML_REQUIRE_CUDA=1, but the CUDA backend build failed: {reason}");
-    }
-    println!("cargo:warning=makepad-ai-cuda: {reason}");
-    println!(
-        "cargo:warning=makepad-ai-cuda: building WITHOUT CUDA — GPU inference is unavailable, \
-         everything else builds and runs normally (set MAKEPAD_GGML_REQUIRE_CUDA=1 to make this fatal)"
+/// The one exit for a CUDA build that cannot build: a toolkit was named (or
+/// MAKEPAD_GGML_REQUIRE_CUDA asked for one), so building zero kernels would
+/// hide the failure until a model fails to load. Building without CUDA on
+/// purpose is MAKEPAD_GGML_NO_CUDA=1 or no MAKEPAD_CUDA_ROOT at all.
+fn cuda_failed(reason: &str) -> ! {
+    panic!(
+        "makepad-ai-cuda: the CUDA backend build failed: {reason} \
+         (MAKEPAD_GGML_NO_CUDA=1 builds without CUDA on purpose)"
     );
 }
-
-fn nvcc_path(cuda_root: &Path, target_os: &str) -> PathBuf {
-    if target_os == "windows" {
-        cuda_root.join("bin").join("nvcc.exe")
-    } else {
-        cuda_root.join("bin").join("nvcc")
-    }
-}
-
-/// Where a toolkit of this version keeps the libs we link against. Ordered
-/// most-specific first; every CUDA major version so far uses one of these,
-/// and an unknown future layout simply reads as "no usable toolkit" (a
-/// stub build) instead of a link failure.
-fn lib_dir_candidates(cuda_root: &Path, target_os: &str) -> Vec<PathBuf> {
-    if target_os == "windows" {
-        vec![cuda_root.join("lib").join("x64"), cuda_root.join("lib")]
-    } else {
-        vec![
-            cuda_root.join("lib64"),
-            cuda_root.join("targets").join("x86_64-linux").join("lib"),
-            cuda_root.join("lib"),
-        ]
-    }
-}
-
-fn cuda_lib_dir(cuda_root: &Path, target_os: &str) -> Option<PathBuf> {
-    let prefix = if target_os == "windows" {
-        "cudart.lib"
-    } else {
-        "libcudart.so"
-    };
-    lib_dir_candidates(cuda_root, target_os)
-        .into_iter()
-        .find(|dir| dir_has_file_starting_with(dir, prefix))
-}
-
-/// A directory is a usable toolkit root only if it has BOTH the compiler and
-/// the libs. A bare `CUDA_PATH` left behind by an uninstall, or a driver-only
-/// install, is not one — and falling through to the version scan finds the
-/// real toolkit next to it instead of disabling CUDA.
-fn is_toolkit_root(path: &Path, target_os: &str) -> bool {
-    nvcc_path(path, target_os).exists() && cuda_lib_dir(path, target_os).is_some()
-}
-
-/// The one toolkit a build may use: the root named by `MAKEPAD_CUDA_ROOT`
-/// (a build box that opts in). A system install is never picked up: CUDA_PATH, CUDA_HOME and the
-/// usual install folders are ignored, because an exe linked against a system
-/// toolkit then needs that toolkit's DLLs on PATH wherever it runs.
-fn cuda_root(target_os: &str) -> Option<PathBuf> {
-    let path = PathBuf::from(env::var_os("MAKEPAD_CUDA_ROOT")?);
-    is_toolkit_root(&path, target_os).then_some(path)
-}
-
 
 fn find_msvc_tool(tool_name: &str) -> Option<PathBuf> {
     if let Some(paths) = env::var_os("PATH") {
