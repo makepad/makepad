@@ -177,6 +177,18 @@ pub struct ScriptHeap {
 
     pub(crate) type_check: Vec<ScriptTypeCheck>,
     pub(crate) type_index: HashMap<ScriptTypeId, ScriptTypeIndex>,
+    /// The pod type of each Rust type (`ScriptNew::script_pod`). A Rust type's layout is fixed
+    /// for the process, so it has one pod type, static (never collected). A module's
+    /// `#(T::script_pod(vm))` then gives the same value on every run: a changed `#(..)` value
+    /// parses the module again with new content keys for its functions, and a design re-run
+    /// compiled every shader of the module again (13 of a large app's on each edit, 11-04).
+    pub(crate) rust_pod_types: HashMap<ScriptTypeId, ScriptPodType>,
+    /// Handles their host interned under a key (`intern_handle`): one per key, static.
+    pub(crate) interned_handles: HashMap<u64, ScriptHandle>,
+    /// Whether a name is a module's private key (`__forms`, `__tag`: it starts with `__`), by id.
+    /// A name's text never changes, and a glob `use` asks for every key it brings in: the
+    /// interner's lookup per key was 7% of a design re-run's main thread (a large app, 11-04).
+    pub(crate) private_names: HashMap<LiveId, bool, LiveIdHasherBuilder>,
 
     pub(crate) handles: GenVec<Option<ScriptHandleData>>,
     pub(crate) handles_free: Vec<ScriptHandle>,
@@ -971,9 +983,10 @@ impl ScriptHeap {
     }
 
     /// The size of every root the collector marks from, in the order it
-    /// marks them: type slots, type defaults, pod types, Rust-held object
-    /// refs, Rust-held array refs, Rust-held handles. Two readings apart in
-    /// time say which root a leak hangs off.
+    /// marks them: type slots, type defaults, the live pod types (not a
+    /// root: a pod type lives while its owner object is reached), Rust-held
+    /// object refs, Rust-held array refs, Rust-held handles. Two readings
+    /// apart in time say which root a leak hangs off.
     pub fn root_counts(&self) -> [usize; 6] {
         [
             self.heap_stat(HEAP_STAT_TYPE_SLOTS) as usize,
@@ -993,7 +1006,7 @@ impl ScriptHeap {
             HEAP_STAT_KEY => self.roots.ptr() as usize as u64,
             HEAP_STAT_TYPE_SLOTS => self.type_check.len() as u64,
             HEAP_STAT_TYPE_DEFAULTS => self.type_defaults.len() as u64,
-            HEAP_STAT_POD_TYPES => self.pod_types.len() as u64,
+            HEAP_STAT_POD_TYPES => (self.pod_types.len() - self.pod_types_free.len()) as u64,
             HEAP_STAT_ROOTED_OBJECTS => self.roots.get().rooted_len(crate::roots::ROOT_OBJECT) as u64,
             HEAP_STAT_ROOTED_ARRAYS => self.roots.get().rooted_len(crate::roots::ROOT_ARRAY) as u64,
             HEAP_STAT_ROOTED_HANDLES => self.roots.get().rooted_len(crate::roots::ROOT_HANDLE) as u64,

@@ -16,6 +16,7 @@ use crate::ir::{self, Bin, Block, Cmp, Op, Program, Region, Stmt as IS, Ty, Un, 
 pub mod kernel;
 mod portable;
 mod front;
+pub mod trace;
 pub use front::{AirBuilder, MathFn};
 
 /// Which front end a program is lowered for.
@@ -927,6 +928,8 @@ struct Lowerer {
     /// `math: portable`: f32 math functions evaluate in f64 with the
     /// fdlibm kernels of `makepad_csg_math::portable` and round once.
     portable: bool,
+    /// `let ranges = whole`: a run-time `for` range has no cap.
+    whole_ranges: bool,
     /// Helpers lowered as functions (the program's `funcs`), each with
     /// what its calls need ([`FnMeta`]).
     funcs_out: Vec<(Program, FnMeta)>,
@@ -945,6 +948,8 @@ struct Lowerer {
     lenient_objects: bool,
     /// Edit mode: the kernel's live literals (see [`LiveLift`]).
     live: Option<LiveLift>,
+    /// A traced lowering: the calls so far (`trace.rs`).
+    trace: Option<trace::TraceScope>,
 }
 
 /// Edit mode's live literals in a kernel: the source offsets of the number
@@ -1649,6 +1654,8 @@ impl Lowerer {
                         ExprKind::Num(x, _) => *x,
                         ExprKind::Ident(n) => match l.lookup(n) {
                             Some(Bind::Const(V::Lit(x))) => x,
+                            // An unrolled kernel loop counter is an i32 constant.
+                            Some(Bind::Const(V::I(v))) => l.b.cst64(v)? as u32 as i32 as f64,
                             _ => return None,
                         },
                         _ => return None,
@@ -2190,7 +2197,20 @@ impl Lowerer {
         self.rets.push(Ret { vars: None, used: false });
         self.loops.push(LoopKind::Wrapper);
         self.b.open();
-        let r = self.stmts(&f.body);
+        // A traced lowering lowers a helper whose one return is its last statement as that
+        // value, no wrapper: its calls stay in the block (`trace.rs`).
+        let r = match f.body.split_last() {
+            Some((Stmt::Return(Some(e), _), rest)) if self.trace.is_some() && !trace::has_return(rest) && !trace::returns_in(e) => {
+                self.stmts(rest).and_then(|_| {
+                    let v = self.expr(e)?;
+                    if !matches!(v, V::Unit) && Self::value_t(&v).is_none() {
+                        return err(e.span, "functions return f32, i32, bool, vec2/3/4 or mat4 (structs and arrays are passed by reference instead)");
+                    }
+                    Ok(v)
+                })
+            }
+            _ => self.stmts(&f.body),
+        };
         let body = self.b.close();
         self.loops.pop();
         let ret = self.rets.pop().unwrap();
@@ -2343,8 +2363,9 @@ impl Lowerer {
     /// A call of a helper lowered as a function (once per argument kinds),
     /// when it is big and called from several places; None: inline it.
     fn try_outline(&mut self, f: &FnDecl, args: &[V], span: Span) -> LResult<Option<V>> {
-        // Only helpers of kernel element code (not the entry itself).
-        if self.domain != Domain::Kernel || self.kernel.element.is_none() || self.in_init || self.call_stack.is_empty() {
+        // Only helpers of kernel element code (not the entry itself); a traced lowering
+        // inlines every helper (`trace.rs`).
+        if self.domain != Domain::Kernel || self.kernel.element.is_none() || self.in_init || self.call_stack.is_empty() || self.trace.is_some() {
             return Ok(None);
         }
         if self.globals.values().any(|b| matches!(b, Bind::Value(_) | Bind::Local(..))) {
@@ -2713,7 +2734,12 @@ impl Lowerer {
                         }
                         _ => v,
                     };
-                    let bind = self.new_local(&v, *span)?;
+                    // A traced lowering's values lead to their defs (`trace.rs`): a let never
+                    // assigned again names its value, as a parameter does.
+                    let bind = match v {
+                        V::Lit(_) | V::F(_) | V::I(_) | V::B(_) | V::D(_) | V::Vec(..) if self.trace.is_some() && !assigns(&stmts[k + 1..], name) => Bind::Value(v),
+                        _ => self.new_local(&v, *span)?,
+                    };
                     self.bind(name, bind);
                 }
                 Stmt::Assign { target, op, value, span } => self.assign(target, *op, value, *span)?,
@@ -3112,6 +3138,7 @@ impl Lowerer {
         }
         let cap = match (&a, &z) {
             (V::Lit(a), V::Lit(z)) => ((z.floor() - a.floor()).max(0.0) as u32).saturating_add(1),
+            _ if self.whole_ranges => u32::MAX,
             _ => LOOP_CAP,
         };
         let av = self.to_i(&a, from.span)?;
@@ -4009,7 +4036,12 @@ impl Lowerer {
             for a in args {
                 vals.push(self.expr(a)?);
             }
-            return self.call(&f, vals, span);
+            let noted = self.traced_args(&mut vals);
+            let v = self.call(&f, vals, span)?;
+            if let Some(args) = noted {
+                self.note_call(&f, args, &v);
+            }
+            return Ok(v);
         }
         // `p.length()` on a plain path that names no module fn: the value
         // method, the receiver as the first argument.
@@ -4623,12 +4655,14 @@ fn new_lowerer(prelude_base: usize, domain: Domain) -> Lowerer {
         domain,
         kernel: Default::default(),
         portable: false,
+        whole_ranges: false,
         funcs_out: Vec::new(),
         func_cache: HashMap::new(),
         call_sites: None,
         object_tables: HashMap::new(),
         lenient_objects: false,
         live: None,
+        trace: None,
     }
 }
 

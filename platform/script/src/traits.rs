@@ -760,6 +760,10 @@ impl ScriptVm<'_> {
 #[relax_api]
 pub fn script_pod_inner(vm: &mut ScriptVm, type_id: ScriptTypeId, type_name: &str) -> Option<ScriptPodType> {
     use crate::pod::*;
+    // one pod type per Rust type (`ScriptHeap::rust_pod_types`)
+    if let Some(pt) = vm.bx.heap.rust_pod_types.get(&type_id).copied() {
+        return Some(pt);
+    }
     use makepad_math::{
         F16x2, F16x4, I16x2, Mat4f, Quat, SNorm16x2, SNorm8x4, U16x2, UNorm16x2, UNorm8x4,
         Vec2f, Vec3f, Vec4f,
@@ -930,6 +934,8 @@ pub fn script_pod_inner(vm: &mut ScriptVm, type_id: ScriptTypeId, type_name: &st
     let pt = vm.bx.heap.new_pod_type(pod_obj, None, pod_ty, NIL);
     vm.bx.heap.set_object_pod_type(pod_obj, pt);
     vm.bx.heap.freeze(pod_obj);
+    vm.bx.heap.set_static(pod_obj.into());
+    vm.bx.heap.rust_pod_types.insert(type_id, pt);
 
     Some(pt)
 }

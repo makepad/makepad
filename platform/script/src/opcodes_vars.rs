@@ -298,28 +298,14 @@ impl<'a> ScriptVm<'a> {
                 if obj == self.bx.heap.modules {
                     self.expand_all_lazy();
                 }
-                let mut items = Vec::new();
                 let obj_data = &self.bx.heap.objects[obj];
-                for (k, v) in obj_data.map.iter() {
-                    items.push((*k, v.value));
-                }
-                for item in &obj_data.vec {
-                    items.push((item.key, item.value));
-                }
-                for (k, v) in items {
-                    if let Some(id) = k.as_id() {
-                        // A module's private keys (`__forms`, `__tag`) are its own:
-                        // a glob never brings them into a file's scope.
-                        let mut head = [0u8; 2];
-                        if LiveId::lut_name_copy(id, &mut head) == 2 && head == *b"__" {
-                            continue;
-                        }
-                        self.bx
-                            .threads
-                            .cur()
-                            .def_scope_value(&mut self.bx.heap, id, v);
-                    }
-                }
+                let mut items: Vec<(LiveId, ScriptValue)> = Vec::with_capacity(obj_data.map.len() + obj_data.vec.len());
+                let named = obj_data.map.iter().map(|(k, v)| (*k, v.value)).chain(obj_data.vec.iter().map(|item| (item.key, item.value)));
+                items.extend(named.filter_map(|(k, v)| Some((k.as_id()?, v))));
+                // A module's private keys (`__forms`, `__tag`) are its own: a glob never brings
+                // them into a file's scope.
+                items.retain(|(id, _)| !self.bx.heap.is_private_name(*id));
+                self.bx.threads.cur().def_scope_values(&mut self.bx.heap, &items);
             } else {
                 let mut value = self
                     .bx

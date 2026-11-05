@@ -1593,7 +1593,7 @@ impl<'a> Vx<'a> {
                 };
                 let (av, bv, cv) = (self.v(a), self.v(b), self.v(c));
                 for q in 0..self.np {
-                    self.emit(Inst::VFma(np, na, d[q], av[q], bv[q], cv[q]));
+                    self.emit(Inst::VFma(np, na, false, false, d[q], av[q], bv[q], cv[q]));
                 }
             }
             Op::Wrap(x, len) => {

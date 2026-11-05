@@ -2483,3 +2483,45 @@ impl<'a> ScriptIpsOut<'a> {
         unsafe { (self.push)(self.ctx, value) }
     }
 }
+
+// The VM's own (no relax API: the JIT never calls them)
+impl ScriptHeap {
+    /// A module's private key (`__forms`, `__tag`): a glob `use` leaves it behind.
+    #[inline]
+    pub fn is_private_name(&mut self, id: LiveId) -> bool {
+        *self.private_names.entry(id).or_insert_with(|| {
+            let mut head = [0u8; 2];
+            LiveId::lut_name_copy(id, &mut head) == 2 && head == *b"__"
+        })
+    }
+
+    /// `use <object>.*`: the names of `items` into scope `ptr` at once, as [`Self::def_scope_value`]
+    /// one by one would put them, up to the first the scope has already: that one shadows it in a
+    /// new scope, returned with how many items went in. With no allocation budget (every Makepad
+    /// host) one reserve and no charge per name: a design re-run brings ~600 names into each of
+    /// ~280 module scopes, and the per-name path was 12% of its main thread (a large app, 11-04).
+    pub fn def_scope_values(&mut self, ptr: ScriptObject, items: &[(LiveId, ScriptValue)]) -> (usize, Option<ScriptObject>) {
+        if self.has_allocation_budget() || self.is_allocation_poison_object(ptr) {
+            for (n, (id, value)) in items.iter().enumerate() {
+                if let Some(scope) = self.def_scope_value(ptr, *id, *value) {
+                    return (n + 1, Some(scope));
+                }
+            }
+            return (items.len(), None);
+        }
+        self.objects[ptr].map.reserve(items.len());
+        for (n, (id, value)) in items.iter().enumerate() {
+            self.escape_value(*value);
+            let key: ScriptValue = (*id).into();
+            let entry = ScriptMapValue { tag: Default::default(), value: *value };
+            if let Some(had) = self.objects[ptr].map.insert(key, entry) {
+                // the scope had the name: it keeps its value, the new one shadows it
+                self.objects[ptr].map.insert(key, had);
+                let scope = self.new_with_proto(ptr.into());
+                self.objects[scope].map.insert(key, ScriptMapValue { tag: Default::default(), value: *value });
+                return (n + 1, Some(scope));
+            }
+        }
+        (items.len(), None)
+    }
+}

@@ -73,6 +73,24 @@ impl ScriptHeap {
         unsafe { self.handle_edit(HANDLE_EDIT_MUT, handle, ScriptHandleType::default(), std::ptr::null()).boxed.as_mut() }
     }
 
+    /// The handle interned under `key` (`intern_handle`).
+    #[relax_api]
+    pub fn interned_handle(&self, key: u64) -> Option<ScriptHandle> {
+        self.interned_handles.get(&key).copied()
+    }
+
+    /// Makes `handle` the one handle for `key`, for a host object that has one identity for the
+    /// heap's life (a Cx-owned shared geometry): static, so it is never collected, and a module's
+    /// `#(..)` that names it gives the same value on every run (`ScriptHeap::rust_pod_types` says
+    /// why that matters).
+    #[relax_api]
+    pub fn intern_handle(&mut self, key: u64, handle: ScriptHandle) {
+        if let Some(h) = self.handles[handle].as_mut() {
+            h.tag.set_static();
+        }
+        self.interned_handles.insert(key, handle);
+    }
+
     /// Registers a handle object (the closure-free part of a handle type's state).
     #[inline(always)]
     pub fn new_handle<T: ScriptHandleGc>(&mut self, ty: ScriptHandleType, hgc: Box<T>) -> ScriptHandle {

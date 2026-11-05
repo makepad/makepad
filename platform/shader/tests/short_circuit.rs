@@ -91,7 +91,7 @@ fn guarded_reads_and_pure_operands() {
 }
 
 #[test]
-fn calls_division_and_vectors() {
+fn calls_and_vectors() {
     for op in [BinOp::LogicOr, BinOp::LogicAnd] {
         let mut m = module(op, true, false);
         let mut first = IrFunction::new("first".into(), TY_BOOL);
@@ -108,23 +108,13 @@ fn calls_division_and_vectors() {
         assert_eq!(text.matches("first(").count(), 1, "{text}");
         assert!(text.find("first(").unwrap() < text.find("[branch] if").unwrap(), "left call must precede RHS branch: {text}");
 
-        // A call or division is guarded even when it has no resource operand.
-        for division in [false, true] {
-            let f = &mut m.functions[0];
-            let rhs = if division {
-                let one = f.expr(ExprKind::Lit(IrLit::F32(1.0)), TY_F32);
-                let div = f.expr(ExprKind::Binary(BinOp::Div, one, one), TY_F32);
-                f.expr(ExprKind::Binary(BinOp::Gt, div, one), TY_BOOL)
-            } else { call };
-            let a = f.expr(ExprKind::Lit(IrLit::Bool(true)), TY_BOOL);
-            let result = f.expr(ExprKind::Binary(op, a, rhs), TY_BOOL);
-            f.body[0] = Stmt::Return(result);
-            let words = ir_to_spirv(&m, 1, false).unwrap();
-            assert!(instructions(&words).iter().any(|i| i[0] & 0xffff == OP_PHI));
-            let mut text = String::new();
-            TextCx::new(&m, Dialect::Hlsl, false).function(0, &mut text);
-            assert!(text.contains("[branch] if"), "{text}");
-        }
+        // A call is guarded even when it has no resource operand: it may write (`a || f() || g()`
+        // with f and g each writing one slot raced when both ran).
+        let f = &mut m.functions[0];
+        let a = f.expr(ExprKind::Lit(IrLit::Bool(true)), TY_BOOL);
+        let result = f.expr(ExprKind::Binary(op, a, call), TY_BOOL);
+        f.body[0] = Stmt::Return(result);
+        assert_eq!(branches(&m), (1, 1));
 
         // Boolean vectors remain componentwise even for a nontrivial RHS.
         let vector = m.vec_ty(2, IrScalar::Bool);
@@ -146,5 +136,70 @@ fn calls_division_and_vectors() {
         TextCx::new(&m, Dialect::Hlsl, false).function(0, &mut text);
         assert!(!text.contains("[branch]"), "{text}");
         assert!(text.contains(op.text()), "{text}");
+    }
+}
+
+/// `guard(i, n)` as `i >= n <op> rhs`, with the right operand `case`.
+fn with_rhs(op: BinOp, case: &str) -> IrModule {
+    let mut m = module(op, false, false);
+    let vec2 = m.vec_ty(2, IrScalar::F32);
+    let f = &mut m.functions[0];
+    let i = f.expr(ExprKind::Param(0), TY_U32);
+    let n = f.expr(ExprKind::Param(1), TY_U32);
+    let x = f.expr(ExprKind::Convert(i), TY_F32);
+    let y = f.expr(ExprKind::Convert(n), TY_F32);
+    let one = f.expr(ExprKind::Lit(IrLit::F32(1.0)), TY_F32);
+    let zero = f.expr(ExprKind::Lit(IrLit::U32(0)), TY_U32);
+    let rhs = match case {
+        "a > b" => f.expr(ExprKind::Binary(BinOp::Gt, n, i), TY_BOOL),
+        "dot" => {
+            let v = f.expr(ExprKind::Construct(vec![x, y]), vec2);
+            let d = f.expr(ExprKind::Builtin(Builtin::Dot, vec![v, v]), TY_F32);
+            f.expr(ExprKind::Binary(BinOp::Lt, d, one), TY_BOOL)
+        }
+        "float division" => {
+            let q = f.expr(ExprKind::Binary(BinOp::Div, x, y), TY_F32);
+            f.expr(ExprKind::Binary(BinOp::Gt, q, one), TY_BOOL)
+        }
+        "odd" => {
+            let two = f.expr(ExprKind::Lit(IrLit::U32(2)), TY_U32);
+            let r = f.expr(ExprKind::Binary(BinOp::Rem, i, two), TY_U32);
+            f.expr(ExprKind::Binary(BinOp::Ne, r, zero), TY_BOOL)
+        }
+        "integer division" => {
+            let q = f.expr(ExprKind::Binary(BinOp::Div, i, n), TY_U32);
+            f.expr(ExprKind::Binary(BinOp::Gt, q, zero), TY_BOOL)
+        }
+        _ => unreachable!(),
+    };
+    let a = f.expr(ExprKind::Binary(BinOp::Ge, i, n), TY_BOOL);
+    let result = f.expr(ExprKind::Binary(op, a, rhs), TY_BOOL);
+    f.body[0] = Stmt::Return(result);
+    m
+}
+
+/// `guard`'s branches: (SPIR-V selection merges, HLSL `[branch]` ifs).
+fn branches(m: &IrModule) -> (usize, usize) {
+    let words = ir_to_spirv(m, 1, false).unwrap();
+    let merges = instructions(&words).iter().filter(|i| i[0] & 0xffff == OP_SELECTION_MERGE).count();
+    let mut text = String::new();
+    TextCx::new(m, Dialect::Hlsl, false).function(0, &mut text);
+    (merges, text.matches("[branch] if").count())
+}
+
+/// What cannot fault keeps the plain logical op, as before short-circuiting: hot loops are full
+/// of comparisons, math builtins and float or constant divisions, and a branch for each costs
+/// far more than evaluating it. An integer division by a variable is guarded.
+#[test]
+fn arithmetic_and_math_stay_plain() {
+    for op in [BinOp::LogicOr, BinOp::LogicAnd] {
+        for case in ["a > b", "dot", "float division", "odd"] {
+            let m = with_rhs(op, case);
+            assert_eq!(branches(&m), (0, 0), "{case}");
+            let words = ir_to_spirv(&m, 1, false).unwrap();
+            let plain = if op == BinOp::LogicOr { OP_LOGICAL_OR } else { OP_LOGICAL_AND };
+            assert_eq!(instructions(&words).iter().filter(|i| i[0] & 0xffff == plain).count(), 1, "{case}");
+        }
+        assert_eq!(branches(&with_rhs(op, "integer division")), (1, 1));
     }
 }

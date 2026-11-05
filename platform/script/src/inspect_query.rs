@@ -69,6 +69,30 @@ pub fn serve_idle() {
     }
 }
 
+/// What wakes the app event loops of this process: `(wake, arg)`, called as `wake(arg)` from the
+/// asking thread, so a query for a VM whose thread waits for events is answered at once by
+/// `serve_idle`, not at its next event (an app at rest has none). The wake must touch no
+/// statics of the app: under relax they are per domain, and the asking thread is not the app's.
+static WAKERS: Mutex<Vec<(extern "C" fn(u32), u32)>> = Mutex::new(Vec::new());
+
+/// An event loop that calls `serve_idle` is open: `wake(arg)` wakes it.
+#[makepad_relax_api::relax_api]
+pub fn add_idle_waker(wake: extern "C" fn(u32), arg: u32) {
+    if let Ok(mut w) = WAKERS.lock() {
+        if !w.contains(&(wake, arg)) {
+            w.push((wake, arg));
+        }
+    }
+}
+
+/// The loop `add_idle_waker` named has ended.
+#[makepad_relax_api::relax_api]
+pub fn remove_idle_waker(wake: extern "C" fn(u32), arg: u32) {
+    if let Ok(mut w) = WAKERS.lock() {
+        w.retain(|x| *x != (wake, arg));
+    }
+}
+
 /// Runs `job` on VM `id`'s thread at its next safe point, waiting up to `wait_ms`.
 fn run_on(id: u32, wait_ms: u64, job: Job) -> Vec<String> {
     let (tx, rx) = channel();
@@ -76,6 +100,15 @@ fn run_on(id: u32, wait_ms: u64, job: Job) -> Vec<String> {
     if let Ok(mut p) = PENDING.lock() {
         p.push((id, me, job, tx));
         ANY_PENDING.store(true, Relaxed);
+    }
+    let wakers: Vec<(extern "C" fn(u32), u32)> = WAKERS.lock().map(|w| w.clone()).unwrap_or_default();
+    for (wake, arg) in wakers {
+        if !makepad_relax_api::app_call(|| wake(arg)) {
+            // its code's run has ended
+            if let Ok(mut w) = WAKERS.lock() {
+                w.retain(|x| *x != (wake, arg));
+            }
+        }
     }
     match rx.recv_timeout(std::time::Duration::from_millis(wait_ms)) {
         Ok(lines) => lines,
@@ -539,6 +572,115 @@ fn get_job(path: String, file: Option<String>, depth: usize) -> Job {
 })
 }
 
+/// What roots the heap, a leak hunt's reading: each kind of root the marker starts from, with
+/// what it reaches beyond the kinds before it; the Rust-held object refs last, each with its own
+/// reach beyond everything else, the `top` largest with their type and where they were made. Two
+/// readings around an edit: the root whose reach grew keeps the old objects.
+fn roots_job(top: usize) -> Job {
+    Box::new(move |base: &ScriptVmBase| {
+        use crate::thread::ScriptMe;
+        let heap = &base.heap;
+        let (mut objects, mut arrays) = (std::collections::HashSet::new(), std::collections::HashSet::new());
+        let mut rows = Vec::new();
+        let mut kind = |name: &str, seeds: Vec<ScriptValue>, objects: &mut std::collections::HashSet<ScriptObject>, arrays: &mut std::collections::HashSet<ScriptArray>| {
+            let n = heap.reach_values(seeds, objects, arrays);
+            rows.push(format!("{{\"root\":{},\"reaches\":{}}}", json_str(name), n));
+        };
+        kind("type protos", heap.type_check.iter().filter_map(|t| t.object.as_ref().map(|o| o.proto)).collect(), &mut objects, &mut arrays);
+        kind("type defaults", heap.type_defaults.values().map(|&o| o.into()).collect(), &mut objects, &mut arrays);
+        let mut stacks = Vec::new();
+        let mut labels = std::collections::HashMap::new();
+        for i in 0..base.threads.len() {
+            let Some(t) = base.threads.get(i) else { continue };
+            if let Some(end) = &t.root_end_scope {
+                labels.insert(end.as_object(), format!("T{i} root end scope"));
+            }
+            stacks.extend(t.stack.iter().copied());
+            stacks.extend(t.slots.iter().copied());
+            stacks.extend(t.scopes.iter().map(|&o| ScriptValue::from(o)));
+            for me in t.mes.iter() {
+                match me {
+                    ScriptMe::Object(o) => stacks.push((*o).into()),
+                    ScriptMe::Call { sself, args, .. } => {
+                        stacks.extend(*sself);
+                        stacks.push((*args).into());
+                    }
+                    ScriptMe::Array(a) => stacks.push((*a).into()),
+                    ScriptMe::Pod { .. } => {}
+                }
+            }
+            stacks.extend(t.loops.iter().filter_map(|l| l.values.as_ref().map(|v| v.source)));
+            stacks.extend(t.trap.err_borrow().iter().map(|e| e.value));
+            if let Some(ScriptTrapOn::Return(v)) | Some(ScriptTrapOn::Bail(v)) = t.trap.get_on() {
+                stacks.push(v);
+            }
+        }
+        kind("thread stacks", stacks, &mut objects, &mut arrays);
+        {
+            let bodies = base.code.bodies.borrow();
+            let mut values = Vec::new();
+            for (i, b) in bodies.iter().enumerate() {
+                if b.transient {
+                    continue;
+                }
+                if let ScriptSource::Mod(m) = &b.source {
+                    values.extend(m.values.iter().copied());
+                }
+                labels.insert(b.scope.as_object(), format!("B{i} scope {}", body_file(b)));
+                labels.insert(b.me.as_object(), format!("B{i} me {}", body_file(b)));
+                if let Some(end) = &b.end_scope {
+                    labels.insert(end.as_object(), format!("B{i} end scope {}", body_file(b)));
+                }
+            }
+            kind("script_mod values", values, &mut objects, &mut arrays);
+        }
+        kind("native type tables", base.code.native.borrow().type_table.iter().flat_map(|m| m.iter().map(|(_, &o)| ScriptValue::from(o))).collect(), &mut objects, &mut arrays);
+        let roots = heap.roots.get();
+        kind("Rust array refs", roots.rooted_slots(crate::roots::ROOT_ARRAY).map(|i| ScriptArray::new(i, heap.arrays.generation(i as usize)).into()).collect(), &mut objects, &mut arrays);
+        let refs: Vec<ScriptObject> = roots.rooted_slots(crate::roots::ROOT_OBJECT).map(|i| ScriptObject::new(i, heap.objects.generation(i as usize))).collect();
+        let mut each: Vec<(usize, ScriptObject)> = refs.iter().map(|&o| (heap.reach_values(vec![o.into()], &mut objects, &mut arrays), o)).collect();
+        rows.push(format!("{{\"root\":\"Rust object refs\",\"refs\":{},\"reaches\":{}}}", refs.len(), each.iter().map(|e| e.0).sum::<usize>()));
+        // the allocated objects none of these reach: garbage the next collection takes, or kept
+        // by what the marker adds (live transient bodies), by where they were made
+        let mut unreached: std::collections::HashMap<ScriptIp, usize> = std::collections::HashMap::new();
+        let alloced = heap.alloced_object_ids();
+        for o in &alloced {
+            if !objects.contains(o) {
+                *unreached.entry(heap.made_at(*o)).or_default() += 1;
+            }
+        }
+        rows.push(format!("{{\"reachable\":{},\"arrays\":{},\"alloced\":{},\"unreached\":{},\"threads\":{}}}", objects.len(), arrays.len(), alloced.len(), alloced.len() - alloced.iter().filter(|o| objects.contains(o)).count(), base.threads.len()));
+        let mut sites: Vec<(ScriptIp, usize)> = unreached.into_iter().collect();
+        sites.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+        for (ip, n) in sites.into_iter().take(top) {
+            let at = if ip.is_unknown() { "native".to_string() } else { base.code.ip_to_loc_plain(ip).map_or_else(|| "?".to_string(), |l| l.to_string()) };
+            rows.push(format!("{{\"unreached_made\":{},\"objects\":{}}}", json_str(&at), n));
+        }
+        // the refs by what they hold (type, where made): a group that grows by one per design
+        // re-run is a holder that keeps each run's object
+        let mut groups: std::collections::HashMap<(String, ScriptIp), usize> = std::collections::HashMap::new();
+        for &o in &refs {
+            let ty = heap.object_type_name_in_chain(o).map_or_else(|| "-".to_string(), |t| t.to_string());
+            *groups.entry((ty, heap.made_at(o))).or_default() += 1;
+        }
+        let mut groups: Vec<((String, ScriptIp), usize)> = groups.into_iter().filter(|g| g.1 > 1).collect();
+        groups.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+        for ((ty, made), n) in groups.into_iter().take(top * 4) {
+            let made = if made.is_unknown() { "native".to_string() } else { base.code.ip_to_loc_plain(made).map_or_else(|| "?".to_string(), |l| l.to_string()) };
+            rows.push(format!("{{\"refs_to\":{},\"made\":{},\"refs\":{}}}", json_str(&ty), json_str(&made), n));
+        }
+        each.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+        for (n, o) in each.into_iter().take(top) {
+            let ty = heap.object_type_name_in_chain(o).map_or_else(|| "-".to_string(), |t| t.to_string());
+            let made = heap.made_at(o);
+            let made = if made.is_unknown() { "native".to_string() } else { base.code.ip_to_loc_plain(made).map_or_else(|| "?".to_string(), |l| l.to_string()) };
+            let label = labels.get(&o).cloned().unwrap_or_default();
+            rows.push(format!("{{\"ref\":{},\"reaches\":{},\"type\":{},\"made\":{},\"is\":{}}}", o.index(), n, json_str(&ty), json_str(&made), json_str(&label)));
+        }
+        rows
+    })
+}
+
 // ------------------------------------------------------------------ the commands
 
 /// The commands this module answers (first word), for the host's command table.
@@ -880,6 +1022,12 @@ pub fn query(words: &[String], kv: &[(String, String)]) -> Option<Vec<String>> {
             // (a search asks every VM; `id` is the default for the rest)
             let file = get("in");
             match words.get(1).map(String::as_str) {
+                Some("roots") => {
+                    let top = get("top").and_then(|v| v.parse::<usize>().ok()).unwrap_or(12).clamp(1, 200);
+                    let mut out = vec![format!("{{\"vm\":\"V{}\"}}", id)];
+                    out.extend(run_on(id, wait, roots_job(top)));
+                    out
+                }
                 Some("get") => {
                     let Some(path) = words.get(2).cloned() else { return Some(vec![err("usage: vm get <path> (`companions`, `companions[0].near`)")]) };
                     let depth = get("depth").and_then(|v| v.parse::<usize>().ok()).unwrap_or(3).clamp(0, 8);
@@ -908,7 +1056,7 @@ pub fn query(words: &[String], kv: &[(String, String)]) -> Option<Vec<String>> {
                     })));
                     out
                 }
-                _ => vec![err("usage: vm globals [in=<file>] | vm get <path> [in=<file>] [depth=3]")],
+                _ => vec![err("usage: vm globals [in=<file>] | vm get <path> [in=<file>] [depth=3] | vm roots [top=12]")],
             }
         }
         _ => return None,

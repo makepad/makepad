@@ -117,7 +117,7 @@ pub(crate) fn prepare(vm: &ScriptVm, object: ScriptObject, name: &str, host_fiel
     }
     let (entry, entry_fn) = entry.ok_or_else(|| format!("Kernel `{name}`: no entry (`element: fn(i) {{ .. }}`)"))?;
     let declared: Vec<String> = decls.iter().map(|d| d.name().to_string()).collect();
-    let mut kernel = VmKernel { decls, entry, entry_fn, math, uses: Vec::new(), bind };
+    let mut kernel = VmKernel { decls, entry, entry_fn, math, whole_ranges: false, uses: Vec::new(), bind };
     let first = vm_kernel::kernel_program(vm, &kernel, false).map_err(|e| format!("Kernel `{name}`: {}", e.message))?;
     for param in implicit {
         if first.free.iter().any(|f| f == param.name) && !declared.iter().any(|d| d == param.name) {
@@ -150,7 +150,7 @@ pub(crate) fn prepare(vm: &ScriptVm, object: ScriptObject, name: &str, host_fiel
             let name = format!("{buffer}{}", counts.record_suffix);
             if !params.iter().any(|p| p.name() == name) { decls.push(Decl::Param { name, default: 0.0, range: None }); }
         }
-        let k = VmKernel { decls, entry: Entry::Element, entry_fn: counts.entry, math, uses: Vec::new(), bind: vec![(counts.binding.into(), function)] };
+        let k = VmKernel { decls, entry: Entry::Element, entry_fn: counts.entry, math, whole_ranges: false, uses: Vec::new(), bind: vec![(counts.binding.into(), function)] };
         let program = vm_kernel::kernel_program(vm, &k, false).map_err(|e| at(&field, e.message))?;
         programs.push(CountProgram { field, value: None, program: Some(PreparedProgram::new(program)), records: buffers.clone() });
     }

@@ -7,8 +7,7 @@ use makepad_script_compute::kernel::{compile, compile_with, KernelRef};
 use makepad_script_compute_sched::kernel::{KernelError};
 use makepad_script_compute_sched::sched::{Executor, FnExecutor, InlineExecutor, Job, JobError, Priority, Scheduler, SchedulerConfig, Stream, ThreadExecutor};
 use makepad_script_compute::Backend;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Condvar, Mutex};
 
 const FIELD: &str = "let W = 512\nlet pos = output(vec3)\nlet amp = param(4.0)\nfn vertex(i) { let x = float(i % W)\n let z = float(i / W)\n pos[i] = vec3(x, fbm2(vec2(x, z) * 0.03, 4, 2.0, 0.5) * amp, z) }";
 /// About 20 µs per element natively.
@@ -33,6 +32,86 @@ fn field_job(k: &KernelRef, n: usize) -> Job {
 
 fn bits(v: &[f32]) -> Vec<u32> {
     v.iter().map(|x| x.to_bits()).collect()
+}
+
+/// Holds each thread that passes it (a job's fan-out before its first
+/// element, or a scheduler driver before it takes a job) until the test
+/// lets it go: a cancel, a pre-emption or a request then lands at a known
+/// point of the run.
+struct Gate {
+    /// Passes arrived, passes let go.
+    count: Mutex<(usize, usize)>,
+    cv: Condvar,
+}
+
+/// Lets every pass go when dropped: a failed assertion while a thread is
+/// held ends the test instead of hanging it.
+struct Open(Arc<Gate>);
+
+impl Drop for Open {
+    fn drop(&mut self) {
+        self.0.release(usize::MAX);
+    }
+}
+
+impl Gate {
+    fn new() -> (Arc<Gate>, Open) {
+        let gate = Arc::new(Gate { count: Mutex::new((0, 0)), cv: Condvar::new() });
+        (gate.clone(), Open(gate))
+    }
+
+    fn pass(&self) {
+        let mut c = self.count.lock().unwrap();
+        c.0 += 1;
+        let me = c.0;
+        self.cv.notify_all();
+        while c.1 < me {
+            c = self.cv.wait(c).unwrap();
+        }
+    }
+
+    /// Waits for the `k`th pass.
+    fn arrived(&self, k: usize) {
+        let mut c = self.count.lock().unwrap();
+        while c.0 < k {
+            c = self.cv.wait(c).unwrap();
+        }
+    }
+
+    /// Lets the passes up to the `k`th go.
+    fn release(&self, k: usize) {
+        self.count.lock().unwrap().1 = k;
+        self.cv.notify_all();
+    }
+}
+
+/// A host pool of 3 workers through closures (the TaskPool wiring), each
+/// fan-out passing `gate` first.
+fn gated(gate: &Arc<Gate>) -> Arc<dyn Executor> {
+    let pool = Arc::new(ThreadExecutor::new(3));
+    let (p1, p2, g) = (pool.clone(), pool, gate.clone());
+    Arc::new(FnExecutor::new(3, move |t| p1.spawn(t), move |n, f| {
+        g.pass();
+        p2.fan_out(n, f)
+    }))
+}
+
+/// The same pool, each scheduler driver passing `gate` before it takes a
+/// job (a kernel too cheap to split never fans out).
+fn gated_drivers(gate: &Arc<Gate>) -> Arc<dyn Executor> {
+    let pool = Arc::new(ThreadExecutor::new(3));
+    let (p1, p2, g) = (pool.clone(), pool, gate.clone());
+    Arc::new(FnExecutor::new(
+        3,
+        move |t: Arc<dyn Fn() + Send + Sync>| {
+            let g = g.clone();
+            p1.spawn(Arc::new(move || {
+                g.pass();
+                t()
+            }))
+        },
+        move |n, f| p2.fan_out(n, f),
+    ))
 }
 
 #[test]
@@ -89,47 +168,56 @@ fn results_do_not_depend_on_scheduling() {
 fn near_jobs_preempt_far_ones_which_resume_and_finish_identically() {
     let slow = compile(SLOW).unwrap();
     let fast = compile(FIELD).unwrap();
-    let exec: Arc<dyn Executor> = Arc::new(ThreadExecutor::new(3));
-    let s = sched(exec, 1);
-    // Long enough to still be running when the near job finishes, on the fastest machine
-    // that runs this (the mini's compiled kernel finished 20 k elements before the near job did).
-    let n = 200_000;
+    assert!(slow.parallel_safe(), "the far job fans out, so the gate holds its runs");
+    let (gate, _open) = Gate::new();
+    let s = sched(gated(&gate), 1);
+    // Some 1000 sines an element: far more work than a split needs, so
+    // every run of it fans out.
+    let n = 4 * 4096;
     let mut far = Job::new(slow.clone(), n);
     far.output("o", vec![0.0; n]).unwrap();
     let far = s.submit(far, Priority::Far, Origin::Host, ANY).map_err(|(_, e)| e).unwrap();
-    std::thread::sleep(Duration::from_millis(20));
-    let t0 = Instant::now();
-    let near = s.submit(field_job(&fast, 4096), Priority::Near, Origin::Host, ANY).map_err(|(_, e)| e).unwrap();
+    // The far job runs on the one driver, held before its first element.
+    gate.arrived(1);
+    // Four elements are one chunk, run by the driver without a fan-out.
+    let near = s.submit(field_job(&fast, 4), Priority::Near, Origin::Host, ANY).map_err(|(_, e)| e).unwrap();
+    gate.release(1);
     let near = near.wait().map_err(|(_, e)| e).unwrap();
-    let near_ms = t0.elapsed().as_secs_f64() * 1e3;
-    assert!(!far.is_done(), "the far job was re-queued, not dropped");
-    let far = far.wait().map_err(|(_, e)| e).unwrap();
     assert!(near.out("pos").unwrap().iter().any(|x| *x != 0.0));
+    // The far job's next run is held at the gate: the near job finished
+    // before it resumed, and it was re-queued, not dropped.
+    assert!(!far.is_done(), "the far job was re-queued, not dropped");
+    let st = s.stats();
+    assert_eq!((st.preempted, st.completed, st.cancelled), (1, 1, 0), "{st:?}");
+    gate.release(2);
+    let far = far.wait().map_err(|(_, e)| e).unwrap();
     let mut reference = Job::new(slow, n);
     reference.output("o", vec![0.0; n]).unwrap();
     reference.run(&InlineExecutor, 1).unwrap();
     assert_eq!(bits(far.out("o").unwrap()), bits(reference.out("o").unwrap()));
     let st = s.stats();
-    eprintln!("near job done {:.2} ms after it was submitted behind a running far job; {:?}", near_ms, st);
-    assert_eq!(st.preempted, 1);
-    assert!(near_ms < 100.0, "the near job waited {:.1} ms", near_ms);
+    assert_eq!((st.preempted, st.completed), (1, 2), "{st:?}");
 }
 
 #[test]
 fn cancel_and_the_work_limit_stop_running_jobs() {
     let slow = compile(SLOW).unwrap();
-    let exec: Arc<dyn Executor> = Arc::new(ThreadExecutor::new(3));
-    let s = sched(exec, 2);
-    let n = 400_000;
+    assert!(slow.parallel_safe(), "the job fans out, so the gate holds its run");
+    let (gate, _open) = Gate::new();
+    let s = sched(gated(&gate), 2);
+    let n = 4 * 4096;
     let mut j = Job::new(slow.clone(), n);
     j.output("o", vec![0.0; n]).unwrap();
     let h = s.submit(j, Priority::Near, Origin::Host, ANY).map_err(|(_, e)| e).unwrap();
-    std::thread::sleep(Duration::from_millis(30));
-    let t0 = Instant::now();
+    // Running, held before its first element.
+    gate.arrived(1);
     h.cancel();
-    let (_, e) = h.wait().err().expect("stopped");
+    gate.release(1);
+    let (j, e) = h.wait().err().expect("stopped");
     assert_eq!(e, JobError::Cancelled);
-    assert!(t0.elapsed() < Duration::from_millis(25), "cancel took {:?}", t0.elapsed());
+    // Every worker polls the cancel before each slice: the first poll saw
+    // it, and no element ran.
+    assert!(j.out("o").unwrap().iter().all(|x| *x == 0.0), "elements ran after the cancel");
     // The work limit: what one element counts, times 1000, stops the job
     // after its thousandth element, on any machine and thread count.
     let mut one = Job::new(slow.clone(), 1);
@@ -153,8 +241,8 @@ fn cancel_and_the_work_limit_stop_running_jobs() {
 #[test]
 fn a_stream_keeps_the_last_result_and_counts_dropped_frames() {
     let k = compile("let o = output(f32)\nlet t0 = param(0.0)\nfn element(i) { o[i] = t0 + float(i) }").unwrap();
-    let exec: Arc<dyn Executor> = Arc::new(ThreadExecutor::new(2));
-    let s = sched(exec, 1);
+    let (gate, _open) = Gate::new();
+    let s = sched(gated_drivers(&gate), 1);
     let n = 10_000;
     let mk = || {
         let mut j = Job::new(k.clone(), n);
@@ -162,29 +250,40 @@ fn a_stream_keeps_the_last_result_and_counts_dropped_frames() {
         j
     };
     let mut stream = Stream::new(mk(), mk());
-    assert!(stream.latest().is_none());
-    let mut frames = 0;
-    for f in 0..200 {
-        let _ = stream.request(&s, Priority::Near, Origin::Host, ANY, |j| {
-            j.set_param("t0", f as f32);
-        });
-        if let Some(j) = stream.latest() {
-            // Whatever frame it is, it is a whole frame.
-            let o = j.out("o").unwrap();
-            assert_eq!(o[1] - o[0], 1.0);
-            frames += 1;
+    let request = |stream: &mut Stream, t0: f32| stream.request(&s, Priority::Near, Origin::Host, ANY, |j| assert!(j.set_param("t0", t0))).unwrap();
+    let drain = |stream: &mut Stream| {
+        while stream.busy() {
+            stream.poll();
+            std::thread::yield_now();
         }
-        // A frame's worth of other work.
-        std::thread::sleep(Duration::from_micros(500));
-    }
-    while stream.busy() {
-        stream.poll();
+    };
+    // A whole frame: every element from that frame's t0.
+    let frame = |stream: &Stream| {
+        let o = stream.latest().unwrap().out("o").unwrap();
+        assert!(o.iter().enumerate().all(|(i, x)| *x == o[0] + i as f32), "a mixed frame");
+        o[0]
+    };
+    assert!(stream.latest().is_none());
+    // Frame 0 is queued, its driver held before it takes it: frames 1 and
+    // 2 find it in flight and are dropped.
+    assert!(request(&mut stream, 0.0));
+    gate.arrived(1);
+    assert!(!request(&mut stream, 1.0));
+    assert!(!request(&mut stream, 2.0));
+    assert!(stream.latest().is_none());
+    gate.release(usize::MAX);
+    drain(&mut stream);
+    assert_eq!(frame(&stream), 0.0);
+    // Frame 3 runs on the other job: once it has finished, and until the
+    // stream takes it, frame 0 stays whole.
+    assert!(request(&mut stream, 3.0));
+    while s.stats().completed < 2 {
         std::thread::yield_now();
     }
-    let last = stream.latest().unwrap().out("o").unwrap()[0];
-    assert!(last >= 0.0 && last < 200.0);
-    eprintln!("200 requests: {} dropped, {} frames read", stream.dropped, frames);
-    assert!(frames > 100 && stream.dropped < 100, "{} frames, {} dropped", frames, stream.dropped);
+    assert_eq!(frame(&stream), 0.0);
+    drain(&mut stream);
+    assert_eq!(frame(&stream), 3.0);
+    assert_eq!(stream.dropped, 2);
 }
 
 #[test]

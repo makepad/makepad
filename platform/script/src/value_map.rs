@@ -207,6 +207,25 @@ where
         None
     }
 
+    /// Room for `additional` more entries in one allocation (a bulk insert: a glob `use`). Past
+    /// SPILL_AT the map spills now, at its final size, instead of growing table by table.
+    pub fn reserve(&mut self, additional: usize) {
+        if let Some(spill) = &mut self.spill {
+            spill.reserve(additional);
+            return;
+        }
+        let want = self.vec.len() + additional;
+        if want <= SPILL_AT {
+            self.vec.reserve(additional);
+            return;
+        }
+        let mut map = Box::new(HashMap::with_capacity_and_hasher(want, ValueHasherBuilder {}));
+        for (k, v) in self.vec.drain(..) {
+            map.insert(k, v);
+        }
+        self.spill = Some(map);
+    }
+
     /// Insert a key the caller has just checked is absent: the same result
     /// as `insert`, without scanning for it again.
     #[inline]

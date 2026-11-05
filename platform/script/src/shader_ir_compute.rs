@@ -22,7 +22,7 @@
 //! and every target resource binding; no backend infers offsets from source.
 
 pub use makepad_shader::shader_ir_compute::*;
-use makepad_shader::shader_ir::CooperativeMatrix;
+use makepad_shader::shader_ir::{CooperativeMatrix, FuncId, IrModule};
 use crate::{
     shader::{ShaderMode, ShaderType},
     shader_lower::IrFnCompiler,
@@ -46,6 +46,12 @@ pub fn compile_compute_kernel_result(vm: &mut ScriptVm, kernel: ScriptObject, ta
     CompiledKernelResult { result: compile_compute_kernel(vm, kernel, target) }
 }
 
+impl CompiledKernelResult {
+    /// A result compiled on this side ([`compile_compute_ir`]), for JIT code to `view`.
+    pub fn new(result: Result<CompiledKernel, String>) -> CompiledKernelResult {
+        CompiledKernelResult { result }
+    }
+}
 #[relax_api]
 impl CompiledKernelResult {
     /// Target code and complete binding/layout reflection as plain data, or the error.
@@ -185,6 +191,12 @@ pub fn compile_compute_kernel(vm: &mut ScriptVm, kernel: ScriptObject, target: C
     let ir = &mut output.compiled.ir;
     ir.workgroup = workgroup;
     ir.precise = vm.bx.heap.value(kernel, id!(precise_math).into(), NoTrap).as_bool().unwrap_or(false);
+    compile_compute_ir(ir, main, target)
+}
+
+/// Compiles a kernel already in shader IR (`main`: its body, no params, void; the module's
+/// workgroup and precision set) to the explicit target.
+pub fn compile_compute_ir(ir: &mut IrModule, main: FuncId, target: ComputeTarget) -> Result<CompiledKernel, String> {
     let entry = build_compute_entry(ir, main);
     let layout = compute_target_layout(ir, target)?;
     makepad_shader::shader_ir_precise::lower_precise(ir, target != ComputeTarget::Msl);

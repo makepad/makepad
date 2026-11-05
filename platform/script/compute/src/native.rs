@@ -201,22 +201,21 @@ pub(crate) fn load(key: u128) -> Option<Code> {
 static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 /// The back end's options, read once per process from the environment (`MAKEPAD_RUN_OPT`,
-/// `MAKEPAD_RUN_NO_AVX`, ...), with the host CPU's features. Kernels allocate registers by
-/// weighted references over the square root of the live range's length: by references alone (Relax's default) a kernel's
+/// `MAKEPAD_RUN_NO_AVX`, ...), with the host CPU's features. (Registers go by weighted references
+/// over the square root of the live range's length, regalloc prio: by references alone a kernel's
 /// long-lived values took every register and its short temporaries -- a noise hash, x64's 12
-/// vector registers -- went through spill slots (x64 cycles per element: one-pass heightfield
-/// x4 -23%, instances scalar -12%, x4 -13%; no kernel slower). On AArch64 the quick round
+/// vector registers -- went through spill slots; x64 cycles per element: one-pass heightfield
+/// x4 -23%, instances scalar -12%, x4 -13%; no kernel slower.) On AArch64 the quick round
 /// (four-wide kernels) coalesces copies too (`MAKEPAD_RUN_NO_COALESCE` turns it off): a loop
 /// variable's update `x' = x * k; x = x'` and the fbm accumulator kept two registers and a copy
 /// per iteration (instructions per element, x4 heights 211 -> 199, one pass 612 -> 580). Not on
 /// x86-64: there it removed register moves the core eliminates anyway (heights x4 -3%
-/// instructions) and measured +1.3% cycles on heights x4 (165, two tq tickets). Float identities
+/// instructions) and measured +1.3% cycles on heights x4 (a node, two tq tickets). Float identities
 /// that would drop a signaling NaN's quieting stay ops (`Options::nan_exact`).
 pub(crate) fn options() -> &'static relax_session::Options {
     static O: std::sync::OnceLock<relax_session::Options> = std::sync::OnceLock::new();
     O.get_or_init(|| {
         let mut o = relax_session::Options::from_env();
-        o.ra_prio = relax_session::options::Priority::Sqrt;
         o.ra_quick_coalesce = cfg!(target_arch = "aarch64");
         // results are the interpreter's bits: `x * 1.0` quiets a signaling NaN there
         o.nan_exact = true;

@@ -117,6 +117,23 @@ fn out_of_range_accesses_clamp_never_escape() {
 }
 
 #[test]
+fn whole_ranges_run_past_the_cap_and_only_them() {
+    let range = "let ranges = whole\nlet o = output(f32)\nlet n = param(10)\nfn element(i) { let s = 0.0\n for k in 0..int(n) { s = s + 1.0 }\n o[i] = s }";
+    let stop = "let ranges = whole\nlet o = output(f32)\nlet n = param(10)\nfn element(i) { let k: int = 0\n while float(k) < n { k = k + 1 }\n o[i] = float(k) }";
+    for backend in [Backend::Interp, Backend::Native] {
+        for (src, n, got, over) in [(range, 5000.0, 5000.0, false), (stop, 1024.0, 1024.0, false), (stop, 5000.0, 1024.0, true)] {
+            let k = compile_with(src, &[], backend).unwrap();
+            let mut o = vec![0.0f32; 4];
+            let mut c = k.call();
+            c.set_param("n", n);
+            c.output("o", &mut o).unwrap();
+            let s = if backend == Backend::Interp { c.run_interp(4) } else { c.run(4) }.unwrap();
+            assert_eq!((o[3], s.overflowed), (got, over), "{backend:?} n {n}: {src}");
+        }
+    }
+}
+
+#[test]
 fn a_run_time_loop_past_its_cap_is_reported_not_cut_silently() {
     // for over a run-time range, while and loop: 1024 iterations at most,
     // and a loop that wanted more sets the call's overflow word.

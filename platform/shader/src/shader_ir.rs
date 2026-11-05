@@ -373,6 +373,24 @@ pub enum Builtin {
 }
 
 impl Builtin {
+    /// Safe to evaluate where the program skips it: no memory access, no effect, nothing
+    /// that depends on which lanes run it. (No wildcard: a new builtin decides here.)
+    pub fn speculatable(self) -> bool {
+        use Builtin::*;
+        match self {
+            Abs | Acos | Acosh | Asin | Asinh | Atan | Atanh | Atan2 | Ceil | Clamp | Cos | Cosh | Cross
+            | Degrees | Distance | Dot | Exp | Exp2 | Floor | Fma | Fract | Inverse | InverseSqrt | Length
+            | Log | Log2 | Max | Min | Mix | FMod | Normalize | Pow | Radians | Round | Sign | Sin | Sinh
+            | Smoothstep | Sqrt | Step | Tan | Tanh | Trunc | Dpdx | Dpdy | Unpack2f16 | Unpack4u8
+            | Unpack2x16Float | Unpack2x16Unorm | Unpack2x16Snorm | Unpack4x8Unorm | Unpack4x8Snorm
+            | GlobalId | LocalId | GroupId | GroupCount | LocalIndex | SubgroupSize | SubgroupLane
+            | SubgroupId | PackHalf2 | ExtractBits | Dot4U8 => true,
+            Barrier | SubgroupAdd | SubgroupMin | SubgroupMax | SubgroupShuffle | SubgroupShuffleXor
+            | SubgroupFirst | AtomicAdd | AtomicMin | AtomicMax | StorageTextureWrite | CooperativeLoad
+            | CooperativeStore | CooperativeMulAdd | CooperativeScale => false,
+        }
+    }
+
     pub fn from_name(name: LiveId) -> Option<Builtin> {
         use makepad_live_id::id;
         Some(match name {
@@ -698,17 +716,38 @@ impl IrFunction {
         self.exprs[e as usize].ty
     }
 
-    /// Expressions safe to evaluate even when a scalar logical guard skips them.
-    /// Be conservative: indexing, resource access, calls and division can fault
-    /// or have effects even when their result is discarded.
+    /// Expressions safe to evaluate even when a scalar logical guard skips them,
+    /// so a logical op keeps its plain (eager, branch-free) form: arithmetic,
+    /// comparisons, math builtins, uniform reads and filtered samples. What can
+    /// fault or has effects is guarded: an indexed read, a texel fetch, a call,
+    /// an atomic, barrier or cross-lane op, an integer division by a variable.
     pub fn trivially_pure(&self, e: ExprId) -> bool {
+        let pure = |e: ExprId| e == NO_EXPR || self.trivially_pure(e);
         match &self.exprs[e as usize].kind {
-            ExprKind::Lit(_) | ExprKind::Local(_) | ExprKind::Param(_) => true,
-            ExprKind::Field(a, _) | ExprKind::Swizzle(a, _, _)
-            | ExprKind::Unary(_, a) | ExprKind::Convert(a) | ExprKind::Bitcast(a) => self.trivially_pure(*a),
-            ExprKind::Binary(BinOp::Div | BinOp::Rem, _, _) => false,
-            ExprKind::Binary(_, a, b) => self.trivially_pure(*a) && self.trivially_pure(*b),
-            ExprKind::Construct(args) => args.iter().all(|a| self.trivially_pure(*a)),
+            ExprKind::Lit(_) | ExprKind::Local(_) | ExprKind::Param(_) | ExprKind::Global(_)
+            | ExprKind::PassMatrix(_) | ExprKind::InstanceIndex | ExprKind::InstanceTexWord(_)
+            | ExprKind::EntryIn(_) | ExprKind::EntryOut(_) => true,
+            ExprKind::Field(a, _) | ExprKind::Swizzle(a, _, _) | ExprKind::Deref(a) | ExprKind::TexSize(a)
+            | ExprKind::Unary(_, a) | ExprKind::Convert(a) | ExprKind::Bitcast(a) => pure(*a),
+            ExprKind::Binary(BinOp::Div | BinOp::Rem, a, b) => pure(*a) && pure(*b) && self.defined_divisor(*b),
+            ExprKind::Binary(_, a, b) => pure(*a) && pure(*b),
+            ExprKind::Select(a, b, c) | ExprKind::DepthClip(a, b, c) => pure(*a) && pure(*b) && pure(*c),
+            ExprKind::Construct(args) => args.iter().all(|a| pure(*a)),
+            ExprKind::Builtin(op, args) => op.speculatable() && args.iter().all(|a| pure(*a)),
+            // A sampler clamps or wraps; implicit derivatives also want it outside divergent flow.
+            ExprKind::Sample(s) => [s.coord, s.lod, s.dx, s.dy, s.reference].into_iter().all(pure),
+            _ => false,
+        }
+    }
+
+    /// A divisor no value of which makes the division undefined: a float, or a nonzero literal.
+    fn defined_divisor(&self, b: ExprId) -> bool {
+        let ex = &self.exprs[b as usize];
+        matches!(ex.ty, TY_F32 | TY_F16 | TY_AFLOAT) || match ex.kind {
+            ExprKind::Lit(IrLit::I32(v)) => v != 0,
+            ExprKind::Lit(IrLit::U32(v)) => v != 0,
+            ExprKind::Lit(IrLit::AbstractInt(v)) => v != 0,
+            ExprKind::Lit(IrLit::F32(_) | IrLit::F16(_) | IrLit::AbstractFloat(_)) => true,
             _ => false,
         }
     }

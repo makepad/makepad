@@ -176,6 +176,7 @@ pub struct LiftedView<'a> {
 #[derive(Clone, Copy)]
 pub struct CompilationView<'a> {
     pub kernel: Option<&'a KernelRef>,
+    pub trace: Option<&'a crate::lower::trace::KernelTrace>,
     pub errors: &'a [ErrorView<'a>],
     /// Per error, its document place (kernels compiled from Splash values).
     pub places: &'a [ErrorPlaceView<'a>],
@@ -215,6 +216,8 @@ pub(crate) struct CompileData {
     constants: Vec<String>,
     /// A lifted compile's parameters made from document numbers.
     lifted: Vec<(String, f32)>,
+    /// A traced lowering's result.
+    trace: Option<crate::lower::trace::KernelTrace>,
     #[cfg(feature = "vm")]
     object: Option<crate::object::ObjectData>,
     views: std::sync::OnceLock<Views>,
@@ -246,6 +249,7 @@ impl CompileData {
             fn_places: Vec::new(),
             constants: Vec::new(),
             lifted: Vec::new(),
+            trace: None,
             #[cfg(feature = "vm")]
             object: None,
             views: std::sync::OnceLock::new(),
@@ -297,6 +301,7 @@ impl KernelCompilation {
         let views = data.views();
         CompilationView {
             kernel: data.kernel.as_ref(),
+            trace: data.trace.as_ref(),
             errors: &views.errors,
             places: &views.places,
             fn_places: &views.fn_places,
@@ -318,6 +323,11 @@ impl KernelCompilation {
     /// its own until dropped).
     pub fn take_kernel(&mut self) -> Option<KernelRef> {
         self.view().kernel.cloned()
+    }
+
+    /// A traced lowering's result (another reference to it).
+    pub fn take_trace(&mut self) -> Option<crate::lower::trace::KernelTrace> {
+        self.view().trace.cloned()
     }
 
     pub fn error_count(&self) -> usize {
@@ -427,6 +437,7 @@ pub struct VmKernelView<'a> {
     pub entry: crate::vm_kernel::Entry,
     pub entry_fn: makepad_script::ScriptObject,
     pub math: crate::kernel::MathMode,
+    pub whole_ranges: bool,
     pub uses: &'a [&'a str],
     pub bind_names: &'a [&'a str],
     pub bind_fns: &'a [makepad_script::ScriptObject],
@@ -444,6 +455,9 @@ pub enum CompileReq<'a> {
     /// returns, and only the originating compiler's callback dereferences it
     /// (it must accept every source byte offset).
     Source { src: &'a str, layouts: &'a [LayoutView<'a>], backend: Backend, modules: &'a [crate::module::Module<'a>], live: LiveFilter },
+    /// Splash text lowered for a host to read and not compiled (`kernel::trace`): the
+    /// compilation's trace.
+    Traced { src: &'a str },
     /// A kernel made from Splash values: its syntax tree comes from the
     /// declarations and the fns the entry reaches through the VM. The errors
     /// name the document place.
@@ -454,6 +468,10 @@ pub enum CompileReq<'a> {
     /// the compilation's `lifted` names them with the document's values.
     #[cfg(feature = "vm")]
     VmLifted { vm: &'a makepad_script::ScriptVm<'a>, kernel: &'a VmKernelView<'a>, backend: Backend, max: u32 },
+    /// The same kernel lowered for a host to read and not compiled (`vm_kernel::trace_lifted`):
+    /// the compilation's trace.
+    #[cfg(feature = "vm")]
+    VmTraced { vm: &'a makepad_script::ScriptVm<'a>, kernel: &'a VmKernelView<'a>, max: u32 },
     /// A VM Kernel object: its complete lexical closure, with the host's
     /// implicit parameters, and every scalar helper program prepared in one
     /// operation (compile the programs with `Prepared`).
@@ -488,9 +506,9 @@ impl Compiling {
     fn begin(req: &CompileReq<'_>) -> Compiling {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let kind = match req {
-            CompileReq::Source { .. } => "source kernel".to_string(),
+            CompileReq::Source { .. } | CompileReq::Traced { .. } => "source kernel".to_string(),
             #[cfg(feature = "vm")]
-            CompileReq::Vm { .. } | CompileReq::VmLifted { .. } => "splash kernel".to_string(),
+            CompileReq::Vm { .. } | CompileReq::VmLifted { .. } | CompileReq::VmTraced { .. } => "splash kernel".to_string(),
             #[cfg(feature = "vm")]
             CompileReq::Object { name, .. } => format!("kernel object {name}"),
             #[cfg(feature = "vm")]
@@ -516,6 +534,7 @@ pub fn kernel_compile(req: &CompileReq<'_>) -> KernelCompilation {
     let _compiling = Compiling::begin(req);
     let data = match req {
         CompileReq::Source { src, layouts, backend, modules, live } => compile_source(src, layouts, *backend, modules, *live),
+        CompileReq::Traced { src } => traced_data(crate::kernel::trace_source_impl(src)),
         #[cfg(feature = "vm")]
         CompileReq::Vm { vm, kernel, layouts, backend, modules } => compile_vm(vm, kernel, layouts, *backend, modules),
         #[cfg(feature = "vm")]
@@ -527,6 +546,8 @@ pub fn kernel_compile(req: &CompileReq<'_>) -> KernelCompilation {
             }
             Err(errors) => CompileData::new(None, errors),
         },
+        #[cfg(feature = "vm")]
+        CompileReq::VmTraced { vm, kernel, max } => traced_data(crate::vm_kernel::trace_lifted_impl(vm, &from_view(kernel), *max as usize)),
         #[cfg(feature = "vm")]
         CompileReq::Object { vm, object, name, host_fields, implicit, dynamic_names, counts, math } => match crate::object::prepare(vm, *object, name, host_fields, implicit, dynamic_names, *counts, *math) {
             Ok(object) => {
@@ -543,6 +564,13 @@ pub fn kernel_compile(req: &CompileReq<'_>) -> KernelCompilation {
         },
     };
     KernelCompilation(Box::new(data))
+}
+
+/// Lowers a kernel made from Splash values for a host to read, wholly inside the provided crate.
+#[cfg(feature = "vm")]
+#[inline(always)]
+pub fn trace_vm_kernel_lifted(vm: &makepad_script::ScriptVm<'_>, kernel: &VmKernelView<'_>, max: u32) -> KernelCompilation {
+    kernel_compile(&CompileReq::VmTraced { vm, kernel, max })
 }
 
 /// Compiles Splash text.
@@ -569,6 +597,18 @@ pub fn compile_vm_kernel(vm: &makepad_script::ScriptVm<'_>, kernel: &VmKernelVie
 #[inline(always)]
 pub fn compile_vm_kernel_lifted(vm: &makepad_script::ScriptVm<'_>, kernel: &VmKernelView<'_>, backend: Backend, max: u32) -> KernelCompilation {
     kernel_compile(&CompileReq::VmLifted { vm, kernel, backend, max })
+}
+
+/// A traced lowering's result as a compilation's.
+fn traced_data(result: Result<crate::lower::trace::KernelTrace, Vec<ShaderError>>) -> CompileData {
+    match result {
+        Ok(trace) => {
+            let mut data = CompileData::new(None, Vec::new());
+            data.trace = Some(trace);
+            data
+        }
+        Err(errors) => CompileData::new(None, errors),
+    }
 }
 
 fn compile_source(src: &str, layouts: &[LayoutView<'_>], backend: Backend, modules: &[crate::module::Module<'_>], live: LiveFilter) -> CompileData {
@@ -655,6 +695,7 @@ fn from_view(k: &VmKernelView<'_>) -> crate::vm_kernel::VmKernel {
         entry: k.entry,
         entry_fn: k.entry_fn,
         math: k.math,
+        whole_ranges: k.whole_ranges,
         uses: k.uses.iter().map(|u| u.to_string()).collect(),
         bind: k.bind_names.iter().zip(k.bind_fns).map(|(n, f)| (n.to_string(), *f)).collect(),
     }

@@ -35,3 +35,27 @@ fn a_glob_skips_private_keys() {
     let direct = eval(&mut vm, "mod.lib.__hidden");
     assert_eq!(direct.as_number(), Some(2.0));
 }
+
+/// A glob's names come in at once (one reserve, no charge per name), with the order rules of
+/// one `let` per name: a later glob shadows an earlier one and a name defined before it, a name
+/// defined after it shadows the glob, and a budgeted VM (each name charged) reads the same.
+#[test]
+fn a_glob_shadows_and_is_shadowed_in_order() {
+    let names = |m: &str, n: usize, v: usize| (0..n).map(|i| format!("mod.{m}.n{i} = {v}")).collect::<Vec<_>>().join("\n");
+    let code = "let n3 = 7\nuse mod.one.*\nlet before = n3 + n29\nuse mod.two.*\nlet n5 = 9\n[before, n3, n29, n30, n5, n0]";
+    let check = |vm: &mut ScriptVm| {
+        vm.new_module(id!(one));
+        vm.new_module(id!(two));
+        // 40 names: past the scope map's spill point; two holds the first 30 of them again
+        eval(vm, &format!("{}\n{}\nnil", names("one", 40, 1), names("two", 30, 2)));
+        let v = eval(vm, code);
+        let arr = v.as_array().expect("an array");
+        let got: Vec<Option<f64>> = (0..6).map(|i| vm.array_index_trap(arr, i).as_number()).collect();
+        // before: one's n3 and n29 (1 + 1); then two's n3, n29; one's n30; the let's n5; two's n0
+        assert_eq!(got, [Some(2.0), Some(2.0), Some(2.0), Some(1.0), Some(9.0), Some(2.0)]);
+    };
+    check(&mut test_vm());
+    let mut vm = test_vm();
+    let ((), report) = vm.with_heap_allocation_limit(64 << 20, |vm| check(vm));
+    assert!(!report.exceeded, "{report:?}");
+}

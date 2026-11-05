@@ -945,6 +945,7 @@ impl Default for ScriptParser {
 /// Snapshot of parser state that can be restored for incremental parsing.
 /// Captures the state before auto-close so we can undo those synthetic closings
 /// when more source arrives.
+#[relax_api(handle)]
 pub struct ParserCheckpoint {
     pub opcodes_len: usize,
     pub source_map_len: usize,
@@ -5505,6 +5506,7 @@ impl ScriptParser {
 
     /// Restore parser state from a checkpoint, undoing any auto-close opcodes
     /// that were appended after the checkpoint was taken.
+    #[relax_api]
     pub fn restore_checkpoint(&mut self, cp: ParserCheckpoint) {
         self.opcodes.truncate(cp.opcodes_len);
         self.source_map.truncate(cp.source_map_len);
@@ -5534,6 +5536,7 @@ impl ScriptParser {
     /// pass the interned value here so the parser emits the real partial string
     /// into opcodes (for incremental UI rendering). The tokenizer token is NOT
     /// modified, preserving its state machine for the next `tokenize()` call.
+    #[relax_api]
     pub fn parse_streaming(
         &mut self,
         tokenizer: &ScriptTokenizer,

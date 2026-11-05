@@ -118,7 +118,9 @@ impl B {
         let h = self.bin(BinOp::Lt, a, hi);
         self.and(l, h)
     }
-    /// `a - q * b` exactly (for `q * b` within a factor two of `a`), into `body`.
+    /// `a - q * b` exactly (for `q * b` within a factor two of `a`), into `body`. Both splits
+    /// stay here, inside the correcting loop: the divisor's hoisted before the loop measured
+    /// 0.95 ms slower in a march pass of 5.7 ms (a 24 GB GPU, Vulkan).
     fn remainder(&mut self, a: ExprId, q: ExprId, b: ExprId, body: &mut Vec<Stmt>) -> ExprId {
         let p = self.bin(BinOp::Mul, q, b);
         let p = self.val(p, body);
@@ -270,6 +272,11 @@ fn build_sqrt() -> IrFunction {
 /// but Metal, whose IEEE mode without fast math already rounds both correctly: measured on
 /// Apple M-series, 0 of 65536 differing over 31 binades), every f32 division and square root
 /// through the correcting helpers. Each backend lowers its own copy of the module once.
+///
+/// A vector form becomes a call of a helper taking its operands (`Forms`): the operands are
+/// evaluated once at the call. Spread over lanes inline, every lane's expression read the
+/// operand expression again, and backends emit an expression where it is read: `normalize(v)`
+/// evaluated `v` nine times and its corrected root three times.
 pub fn lower_precise(m: &mut IrModule, correct_div_sqrt: bool) {
     if !m.precise {
         return;
@@ -282,10 +289,105 @@ pub fn lower_precise(m: &mut IrModule, correct_div_sqrt: bool) {
     } else {
         Helpers { correct: None }
     };
+    let mut forms = Forms { first: m.functions.len() as FuncId, built: Vec::new() };
     for fi in 0..count {
         let mut f = std::mem::replace(&mut m.functions[fi], IrFunction::new(String::new(), TY_VOID));
-        lower_function(m, &mut f, &h);
+        lower_function(m, &mut f, &h, &mut forms);
         m.functions[fi] = f;
+    }
+    m.functions.extend(forms.built.into_iter().map(|(_, f)| f));
+}
+
+/// A vector form a helper computes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Form {
+    Div,
+    Sqrt,
+    InverseSqrt,
+    Dot,
+    Length,
+    Distance,
+    Normalize,
+}
+
+/// The helpers of the vector forms, built as the lowering meets them: one per form and
+/// operand types (the result's type follows from them), appended to the module after its
+/// functions at ids from `first`.
+struct Forms {
+    first: FuncId,
+    built: Vec<((Form, TyId, TyId), IrFunction)>,
+}
+
+impl Forms {
+    /// The helper computing `form` of operands of types `a` and `b` (`TY_VOID`: none) into `ret`.
+    fn get(&mut self, m: &IrModule, h: &Helpers, form: Form, a: TyId, b: TyId, ret: TyId) -> FuncId {
+        let key = (form, a, b);
+        if let Some(i) = self.built.iter().position(|(k, _)| *k == key) {
+            return self.first + i as FuncId;
+        }
+        let name = format!("_mp_precise_{}_{}_{}", format!("{form:?}").to_lowercase(), lanes(m, a), if b == TY_VOID { 0 } else { lanes(m, b) });
+        let mut f = IrFunction::new(name, ret);
+        f.params.push(IrParam { name: id!(a), shadow: 0, ty: a, inout: false });
+        if b != TY_VOID {
+            f.params.push(IrParam { name: id!(b), shadow: 0, ty: b, inout: false });
+        }
+        let pa = f.expr(ExprKind::Param(0), a);
+        let pb = if b == TY_VOID { NO_EXPR } else { f.expr(ExprKind::Param(1), b) };
+        let mut body = Vec::new();
+        let out = match form {
+            Form::Div => {
+                let kind = per_lane(m, &mut f, ret, |f, i| {
+                    let (x, y) = (lane(m, f, pa, i), lane(m, f, pb, i));
+                    h.div(f, x, y)
+                });
+                f.expr(kind, ret)
+            }
+            Form::Sqrt => {
+                let kind = per_lane(m, &mut f, ret, |f, i| {
+                    let x = lane(m, f, pa, i);
+                    h.sqrt(f, x)
+                });
+                f.expr(kind, ret)
+            }
+            Form::InverseSqrt => {
+                let kind = per_lane(m, &mut f, ret, |f, i| {
+                    let x = lane(m, f, pa, i);
+                    let s = h.sqrt(f, x);
+                    let one = f.expr(ExprKind::Lit(IrLit::F32(1.0)), TY_F32);
+                    h.div(f, one, s)
+                });
+                f.expr(kind, ret)
+            }
+            Form::Dot => dot_chain(m, &mut f, pa, pb),
+            Form::Length => {
+                let d = dot_chain(m, &mut f, pa, pa);
+                h.sqrt(&mut f, d)
+            }
+            Form::Distance => {
+                let diff = f.expr(ExprKind::Binary(BinOp::Sub, pa, pb), a);
+                let l = f.local(id!(_mp_d), 0, a, false, LocalKind::Temp);
+                body.push(Stmt::Local(l, diff));
+                let dv = f.expr(ExprKind::Local(l), a);
+                let d = dot_chain(m, &mut f, dv, dv);
+                h.sqrt(&mut f, d)
+            }
+            Form::Normalize => {
+                let d = dot_chain(m, &mut f, pa, pa);
+                let len = h.sqrt(&mut f, d);
+                let l = f.local(id!(_mp_len), 0, TY_F32, false, LocalKind::Temp);
+                body.push(Stmt::Local(l, len));
+                let kind = per_lane(m, &mut f, ret, |f, i| {
+                    let x = lane(m, f, pa, i);
+                    let len = f.expr(ExprKind::Local(l), TY_F32);
+                    h.div(f, x, len)
+                });
+                f.expr(kind, ret)
+            }
+        };
+        body.push(Stmt::Return(out));
+        f.body = body;
+        self.built.push((key, f));
+        self.first + (self.built.len() - 1) as FuncId
     }
 }
 
@@ -331,7 +433,7 @@ fn dot_chain(m: &IrModule, f: &mut IrFunction, a: ExprId, b: ExprId) -> ExprId {
     sum
 }
 
-fn lower_function(m: &IrModule, f: &mut IrFunction, h: &Helpers) {
+fn lower_function(m: &IrModule, f: &mut IrFunction, h: &Helpers, forms: &mut Forms) {
     // a compound `x /= y` becomes `x = x / y` first, then the expression pass lowers the division
     let mut body = std::mem::take(&mut f.body);
     lower_compound(m, f, &mut body);
@@ -342,54 +444,44 @@ fn lower_function(m: &IrModule, f: &mut IrFunction, h: &Helpers) {
         if !is_f32(m, ty) {
             continue;
         }
+        let vector = lanes(m, ty) > 1;
+        let call = |forms: &mut Forms, form: Form, args: Vec<ExprId>, f: &IrFunction| {
+            let a = f.ty_of(args[0]);
+            let b = args.get(1).map_or(TY_VOID, |&b| f.ty_of(b));
+            Some(ExprKind::Call(forms.get(m, h, form, a, b, ty), args))
+        };
         let new_kind = match f.exprs[e].kind.clone() {
+            // a scalar's operands are read once already: the correcting helper directly
             ExprKind::Binary(BinOp::Div, a, b) if h.correct.is_some() => {
-                Some(per_lane(m, f, ty, |f, i| {
-                    let (x, y) = (lane(m, f, a, i), lane(m, f, b, i));
-                    h.div(f, x, y)
-                }))
+                if vector || lanes(m, f.ty_of(a)) > 1 || lanes(m, f.ty_of(b)) > 1 {
+                    call(forms, Form::Div, vec![a, b], f)
+                } else {
+                    let d = h.div(f, a, b);
+                    Some(f.exprs[d as usize].kind.clone())
+                }
             }
             ExprKind::Builtin(Builtin::Sqrt, args) if args.len() == 1 && h.correct.is_some() => {
-                let a = args[0];
-                Some(per_lane(m, f, ty, |f, i| {
-                    let x = lane(m, f, a, i);
-                    h.sqrt(f, x)
-                }))
+                if vector {
+                    call(forms, Form::Sqrt, args, f)
+                } else {
+                    let s = h.sqrt(f, args[0]);
+                    Some(f.exprs[s as usize].kind.clone())
+                }
             }
             ExprKind::Builtin(Builtin::InverseSqrt, args) if args.len() == 1 => {
-                let a = args[0];
-                Some(per_lane(m, f, ty, |f, i| {
-                    let x = lane(m, f, a, i);
-                    let s = h.sqrt(f, x);
+                if vector {
+                    call(forms, Form::InverseSqrt, args, f)
+                } else {
+                    let s = h.sqrt(f, args[0]);
                     let one = f.expr(ExprKind::Lit(IrLit::F32(1.0)), TY_F32);
-                    h.div(f, one, s)
-                }))
+                    let d = h.div(f, one, s);
+                    Some(f.exprs[d as usize].kind.clone())
+                }
             }
-            ExprKind::Builtin(Builtin::Dot, args) if args.len() == 2 => {
-                let d = dot_chain(m, f, args[0], args[1]);
-                Some(f.exprs[d as usize].kind.clone())
-            }
-            ExprKind::Builtin(Builtin::Length, args) if args.len() == 1 => {
-                let d = dot_chain(m, f, args[0], args[0]);
-                let r = h.sqrt(f, d);
-                Some(f.exprs[r as usize].kind.clone())
-            }
-            ExprKind::Builtin(Builtin::Distance, args) if args.len() == 2 => {
-                let vt = f.ty_of(args[0]);
-                let diff = f.expr(ExprKind::Binary(BinOp::Sub, args[0], args[1]), vt);
-                let d = dot_chain(m, f, diff, diff);
-                let r = h.sqrt(f, d);
-                Some(f.exprs[r as usize].kind.clone())
-            }
-            ExprKind::Builtin(Builtin::Normalize, args) if args.len() == 1 => {
-                let v = args[0];
-                let d = dot_chain(m, f, v, v);
-                let len = h.sqrt(f, d);
-                Some(per_lane(m, f, ty, |f, i| {
-                    let x = lane(m, f, v, i);
-                    h.div(f, x, len)
-                }))
-            }
+            ExprKind::Builtin(Builtin::Dot, args) if args.len() == 2 => call(forms, Form::Dot, args, f),
+            ExprKind::Builtin(Builtin::Length, args) if args.len() == 1 => call(forms, Form::Length, args, f),
+            ExprKind::Builtin(Builtin::Distance, args) if args.len() == 2 => call(forms, Form::Distance, args, f),
+            ExprKind::Builtin(Builtin::Normalize, args) if args.len() == 1 => call(forms, Form::Normalize, args, f),
             _ => None,
         };
         if let Some(kind) = new_kind {

@@ -18,6 +18,7 @@
 //!     entry: Entry::Element,
 //!     entry_fn: element_fn_object,
 //!     math: MathMode::Fast,
+//!     whole_ranges: false,
 //!     uses: vec![],
 //!     bind: vec![],
 //! }, &layouts, Backend::Native, &[])?;
@@ -113,6 +114,10 @@ pub struct VmKernel {
     /// The entry: a script fn of one parameter (the element index).
     pub entry_fn: ScriptObject,
     pub math: MathMode,
+    /// `for` loops over run-time ranges run to their end, however long: no cap, no overflow word. For
+    /// a host that takes a dear element over a cut one, as a field whose every reader must agree.
+    /// `while` and `loop` keep the language's stop, the one thing that ends them.
+    pub whole_ranges: bool,
     /// Compiler modules (passed to [`compile`]) the program imports
     /// unqualified (`use path.*`).
     pub uses: Vec<String>,
@@ -169,6 +174,14 @@ impl KernelProgram {
             Some((file, line, col)) => format!("{} ({file}:{line}:{col})", e.message),
             None => e.message.clone(),
         }
+    }
+
+    /// Lowers the program for a host to read; the errors' messages name the document place.
+    pub(crate) fn trace(&self) -> Result<crate::lower::trace::KernelTrace, Vec<ShaderError>> {
+        if let Some((start, end, message)) = &self.error {
+            return Err(vec![ShaderError::new(*start, *end, message.clone())]);
+        }
+        kernel::trace_items_impl(self.items.clone(), self.end).map_err(|errors| errors.into_iter().map(|e| ShaderError { message: self.describe(&e), ..e }).collect())
     }
 
     /// Compiles the program; the errors' messages name the document place.
@@ -640,6 +653,9 @@ pub(crate) fn kernel_program_lifting(vm: &ScriptVm, k: &VmKernel, whole_values: 
         MathMode::Exact32 => items.push(let_item("math", None, ident("exact32"))),
         MathMode::Fast => {}
     }
+    if k.whole_ranges {
+        items.push(let_item("ranges", None, ident("whole")));
+    }
     for m in &k.uses {
         items.push(Item::Use { path: m.clone(), glob: true, alias: None, span: NOWHERE });
     }
@@ -731,12 +747,14 @@ pub(crate) fn kernel_program_lifting(vm: &ScriptVm, k: &VmKernel, whole_values: 
             }
         }
     }
-    // Constants go first (a kernel's lets are in order); the fns last.
-    consts.extend(items);
-    consts.extend(fns);
+    // The declarations first, so the host's parameters come before the lifted ones (their
+    // indices do not move with what a document's fns reach); then the constants (a kernel's
+    // lets are in order); the fns last.
+    items.extend(consts);
+    items.extend(fns);
     // A free name that is a compiled-in fn is not free.
     free.retain(|n| !emitted.contains(n));
-    Ok(KernelProgram { items: consts, end: base, places, error, free, constants })
+    Ok(KernelProgram { items, end: base, places, error, free, constants })
 }
 
 /// [`compile`] with the document's plain numbers the kernel reaches made
@@ -769,6 +787,27 @@ pub(crate) fn compile_lifted_impl(vm: &ScriptVm, k: &VmKernel, backend: Backend,
             let program = kernel_program(vm, k, false).map_err(|e| vec![e])?;
             program.compile(&[], backend, &[]).map(|kernel| (kernel, Vec::new()))
         }
+        Err(e) => Err(e),
+    }
+}
+
+/// A kernel's lowering for a host to read (`lower::trace`), with up to `max` of the document's
+/// numbers made parameters as [`compile_lifted`] makes them. Nothing is compiled.
+#[inline(always)]
+pub fn trace_lifted(vm: &ScriptVm, k: &VmKernel, max: usize) -> Result<crate::lower::trace::KernelTrace, Vec<ShaderError>> {
+    with_view(k, |view| {
+        let mut compiled = crate::boundary::trace_vm_kernel_lifted(vm, view, max as u32);
+        compiled.take_trace().ok_or_else(|| compile_errors(&compiled))
+    })
+}
+
+/// The lifted trace, inside the compiler (`boundary::kernel_compile`).
+pub(crate) fn trace_lifted_impl(vm: &ScriptVm, k: &VmKernel, max: usize) -> Result<crate::lower::trace::KernelTrace, Vec<ShaderError>> {
+    let mut lifted = Vec::new();
+    let program = kernel_program_lifting(vm, k, false, Some((&mut lifted, max))).map_err(|e| vec![e])?;
+    match program.trace() {
+        Ok(trace) => Ok(trace),
+        Err(_) if !lifted.is_empty() => kernel_program(vm, k, false).map_err(|e| vec![e])?.trace(),
         Err(e) => Err(e),
     }
 }
@@ -835,7 +874,7 @@ fn with_view<R>(k: &VmKernel, f: impl FnOnce(&crate::boundary::VmKernelView<'_>)
     let uses: Vec<&str> = k.uses.iter().map(|u| u.as_str()).collect();
     let bind_names: Vec<&str> = k.bind.iter().map(|(n, _)| n.as_str()).collect();
     let bind_fns: Vec<ScriptObject> = k.bind.iter().map(|(_, f)| *f).collect();
-    let view = VmKernelView { decls: &decls, entry: k.entry, entry_fn: k.entry_fn, math: k.math, uses: &uses, bind_names: &bind_names, bind_fns: &bind_fns, whole_values: false };
+    let view = VmKernelView { decls: &decls, entry: k.entry, entry_fn: k.entry_fn, math: k.math, whole_ranges: k.whole_ranges, uses: &uses, bind_names: &bind_names, bind_fns: &bind_fns, whole_values: false };
     f(&view)
 }
 
@@ -1041,7 +1080,7 @@ pub fn from_object(vm: &ScriptVm, obj: ScriptObject) -> Result<VmKernel, String>
         }
     }
     let (entry, entry_fn) = entry.ok_or("missing kernel entry: element, vertex, instance, primitive or reduce_sum / reduce_min / reduce_max")?;
-    Ok(VmKernel { decls, entry, entry_fn, math, uses: Vec::new(), bind: Vec::new() })
+    Ok(VmKernel { decls, entry, entry_fn, math, whole_ranges: false, uses: Vec::new(), bind: Vec::new() })
 }
 
 

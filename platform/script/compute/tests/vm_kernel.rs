@@ -42,6 +42,7 @@ fn entry_reaches_document_fns_and_constants_through_the_vm() {
         entry: Entry::Element,
         entry_fn: field(&vm, k, id!(element)),
         math: MathMode::Portable,
+        whole_ranges: false,
         uses: Vec::new(),
         bind: Vec::new(),
     };
@@ -67,6 +68,7 @@ fn errors_name_the_document_line() {
         entry: Entry::Element,
         entry_fn: field(&vm, k, id!(element)),
         math: MathMode::Fast,
+        whole_ranges: false,
         uses: Vec::new(),
         bind: Vec::new(),
     };
@@ -116,6 +118,7 @@ fn closures_and_colours_compile_from_the_vm_tokens() {
         entry: Entry::Element,
         entry_fn: field(&vm, k, id!(element)),
         math: MathMode::Fast,
+        whole_ranges: false,
         uses: Vec::new(),
         bind: Vec::new(),
     };
@@ -139,6 +142,7 @@ fn a_kernel_made_from_values_is_recorded_for_build_tools() {
         entry: Entry::Element,
         entry_fn: field(&vm, k, id!(element)),
         math: MathMode::Fast,
+        whole_ranges: false,
         uses: Vec::new(),
         bind: Vec::new(),
     };
@@ -164,6 +168,7 @@ fn a_kernel_object_compiled_with_a_drifted_layout_is_an_error() {
         entry: Entry::Element,
         entry_fn: field(vm, k, id!(element)),
         math: MathMode::Fast,
+        whole_ranges: false,
         uses: Vec::new(),
         bind: Vec::new(),
     };

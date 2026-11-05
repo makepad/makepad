@@ -8,7 +8,7 @@ use crate::{
         ScopeUniformSource, ShaderIo, ShaderOutput, ShaderSampler, ShaderTableConst,
         UniformBufferBindings,
     },
-    value::ScriptObject,
+    value::{ScriptObject, ScriptValue},
     vm::ScriptVm,
 };
 use makepad_live_id::*;
@@ -348,6 +348,33 @@ impl CompiledShader {
             .iter()
             .filter_map(|f| self.state.function_object(f.fnobj))
     }
+    /// The script bodies whose functions this compile reached, one of those functions' ips per
+    /// body, appended to `out`: with `shader_reached_key`, what a shader cached by its draw
+    /// object's own functions (`shader_functions_hash`) also depends on (a helper fn in another
+    /// module is reached, but not in that hash).
+    #[cfg(not(all(target_arch = "wasm32", makepad_precompiled_shaders)))]
+    #[relax_api]
+    pub fn reached_bodies_into(&self, heap: &ScriptHeap, out: &mut crate::object_heap::ScriptIpsOut) {
+        let mut bodies = Vec::new();
+        for ip in self.reached_functions().filter_map(|f| heap.as_fn(f)?.script_ip()) {
+            if !bodies.contains(&ip.body) {
+                bodies.push(ip.body);
+                out.push(&ip);
+            }
+        }
+    }
+}
+
+/// What the code at `ips` is now (`ScriptCode::fn_content_key` of each, folded): equal to the
+/// key taken at a compile while none of their bodies got new text since
+/// (`CompiledShader::reached_bodies_into`).
+#[relax_api]
+pub fn shader_reached_key(code: &crate::vm::ScriptCode, ips: &[crate::value::ScriptIp]) -> u64 {
+    let mut key = LiveId(LiveId::SEED);
+    for &ip in ips {
+        key = key.bytes_append(&code.fn_content_key(ip).to_le_bytes());
+    }
+    key.0
 }
 
 #[relax_api]
@@ -366,6 +393,19 @@ pub fn shader_functions_hash(
     if heap.value(obj, id!(precise_math).into(), crate::trap::NoTrap).as_bool() == Some(true) {
         hash = hash.id_append(id!(precise_math));
     }
+    // The shader inputs the object declares (`instance(..)`, `uniform(..)`, ..), each by its
+    // nearest declaration: the kind and type of each are code too (`color: instance(..)` made
+    // `uniform(..)` in a module that defines none of these functions is another shader). A plain
+    // value is not: objects that only set values share their base's shader.
+    let mut declared: Vec<(LiveId, u64, u64)> = Vec::new();
+    let pods = &code.builtins.pod;
+    // the pod type the shader gives a value (`get_scope_value_pod_type`)
+    let type_of = |v: ScriptValue| -> u64 {
+        let ty = pods.value_to_exact_type(v)
+            .or_else(|| v.is_color().then_some(pods.pod_vec4f))
+            .or_else(|| v.as_pod().map(|p| heap.pods[p].ty));
+        ty.map_or(0, |ty| 1 + ty.index as u64)
+    };
     let mut current = Some(obj);
     while let Some(obj) = current {
         for entry in heap.map_entries(obj) {
@@ -380,10 +420,21 @@ pub fn shader_functions_hash(
                     if let Some(ext) = code.shader_ir_fns.borrow().get(&fn_obj) {
                         hash = hash.bytes_append(&ext.key().to_le_bytes());
                     }
+                    continue;
                 }
+            }
+            let Some(key) = entry.key.as_id() else { continue };
+            let Some((io, proto)) = entry.value.as_object().and_then(|o| Some((heap.as_shader_io(o)?, heap.proto(o)))) else { continue };
+            if !declared.iter().any(|d| d.0 == key) {
+                declared.push((key, io.0 as u64, type_of(proto)));
             }
         }
         current = heap.proto(obj).as_object();
+    }
+    // by name: where in the chain a declaration sits is not code
+    declared.sort_unstable_by_key(|d| d.0 .0);
+    for (key, io, ty) in declared {
+        hash = hash.id_append(key).bytes_append(&io.to_le_bytes()).bytes_append(&ty.to_le_bytes());
     }
     hash
 }

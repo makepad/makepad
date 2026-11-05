@@ -453,6 +453,17 @@ impl ScriptThread {
             self.scopes.push(new_scope);
         }
     }
+
+    /// [`Self::def_scope_value`] for each of `items` in order (a glob `use`).
+    pub fn def_scope_values(&mut self, heap: &mut ScriptHeap, mut items: &[(LiveId, ScriptValue)]) {
+        while !items.is_empty() {
+            let (taken, shadow) = heap.def_scope_values(*self.scopes.last().unwrap(), items);
+            if let Some(scope) = shadow {
+                self.scopes.push(scope);
+            }
+            items = &items[taken..];
+        }
+    }
 }
 
 /// Wrapper around Vec<ScriptThread> with a current thread index.

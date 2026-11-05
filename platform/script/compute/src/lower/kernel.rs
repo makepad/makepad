@@ -161,8 +161,8 @@ pub enum MathMode {
     Portable,
     /// The f32 polynomials of `Fast`, unfused: only IEEE f32 operations,
     /// each rounded once (no f64, no fused multiply-add), so a GPU shader
-    /// with precise math computes the same bits (the SDF engine bakes a
-    /// distance kernel on the GPU and checks it against this one); NaN
+    /// with precise math computes the same bits (a host can bake a
+    /// distance kernel on the GPU and check it against this one); NaN
     /// results are stored as one canonical quiet NaN.
     Exact32,
 }
@@ -194,6 +194,8 @@ pub struct KernelLowered {
     /// ones that stayed constants (source offsets).
     pub live: Vec<crate::lower::LiveParam>,
     pub folded: Vec<usize>,
+    /// A traced lowering's result (`trace.rs`).
+    pub trace: Option<crate::lower::trace::TraceParts>,
 }
 
 /// A host-defined record layout (a GPU vertex or instance struct from the
@@ -570,7 +572,7 @@ impl Lowerer {
 }
 
 /// Lowers a kernel.
-pub fn lower_kernel(items: &[Item], prelude_base: usize, layouts: &[Layout], live: Option<crate::lower::LiveLift>) -> Result<KernelLowered, ShaderError> {
+pub fn lower_kernel(items: &[Item], prelude_base: usize, layouts: &[Layout], live: Option<crate::lower::LiveLift>, trace: bool) -> Result<KernelLowered, ShaderError> {
     let mut l = new_lowerer(prelude_base, Domain::Kernel);
     l.live = live;
     l.add_layouts(layouts)?;
@@ -588,12 +590,21 @@ pub fn lower_kernel(items: &[Item], prelude_base: usize, layouts: &[Layout], liv
                 };
                 continue;
             }
+            // `let ranges = whole`: run-time `for` ranges run to their end.
+            if name == "ranges" {
+                if !matches!(&value.kind, ExprKind::Ident(m) if m == "whole") {
+                    return err(*span, "`let ranges = whole` (run-time `for` ranges run to their end, past the loop cap)");
+                }
+                l.whole_ranges = true;
+                continue;
+            }
         }
         rest.push(item.clone());
     }
     let items = &rest[..];
     l.portable = math == MathMode::Portable;
     l.top(items)?;
+    l.trace = trace.then(Default::default);
     let entries: Vec<&str> = ENTRIES.iter().copied().filter(|e| l.fns.contains_key(*e)).collect();
     let entry_name = match entries[..] {
         [e] => e.to_string(),
@@ -700,6 +711,7 @@ pub fn lower_kernel(items: &[Item], prelude_base: usize, layouts: &[Layout], liv
     program.body = l.b.blocks.into_iter().next().unwrap();
     program.frame_words = l.frame_words;
     program.funcs = l.funcs_out.into_iter().map(|(g, _)| g).collect();
+    let trace = l.trace.take().map(|scope| scope.finish(&program));
     if math != MathMode::Fast {
         canonical_nan_stores(&mut program.body, &mut program.vals);
         for g in &mut program.funcs {
@@ -712,7 +724,8 @@ pub fn lower_kernel(items: &[Item], prelude_base: usize, layouts: &[Layout], liv
         crate::opt::fuse_fma(&mut program);
     }
     let cost = program.cost();
-    if program.air_cost() > MAX_COST_PER_ELEMENT {
+    // A whole range has no worst case to weigh: its host took the cost.
+    if !l.whole_ranges && program.air_cost() > MAX_COST_PER_ELEMENT {
         return Err(ShaderError::new(0, 1, format!("too much work per element (worst case {} ops); reduce loop sizes", cost)));
     }
     // Every kernel counts the ops it runs (its budget is counted work): its
@@ -742,7 +755,7 @@ pub fn lower_kernel(items: &[Item], prelude_base: usize, layouts: &[Layout], liv
         }
         None => (Vec::new(), Vec::new()),
     };
-    Ok(KernelLowered { kind, math, entry: entry_name, program, flat, init, params: l.params, buffers: l.kernel.buffers, shared_init: l.shared_init, cost, element_work, parallel_safe, live, folded })
+    Ok(KernelLowered { kind, math, entry: entry_name, program, flat, init, params: l.params, buffers: l.kernel.buffers, shared_init: l.shared_init, cost, element_work, parallel_safe, live, folded, trace })
 }
 
 /// Every f32 stored to a host buffer goes through `x != x ? NaN : x`, so

@@ -8,6 +8,7 @@ use crate::makepad_error_log::*;
 
 use crate::object::*;
 use crate::object_heap::*;
+use crate::pod::*;
 use crate::regex::*;
 use crate::thread::*;
 use crate::trap::*;
@@ -48,7 +49,13 @@ macro_rules! queue_static_val {
         } else if let Some(ptr) = $val.as_array() {
             $self.mark_vec.push(ScriptGcMark::Array(ptr));
         } else if let Some(ptr) = $val.as_pod() {
-            $self.pods[ptr].tag.set_static();
+            let pod = &mut $self.pods[ptr];
+            pod.tag.set_static();
+            for pt in [Some(pod.ty), pod.tag.as_array_builder()].into_iter().flatten() {
+                if let Some(owner) = pod_type_owner(&$self.pod_types, pt) {
+                    $self.mark_vec.push(ScriptGcMark::Object(owner));
+                }
+            }
         } else if let Some(ptr) = $val.as_handle() {
             if let Some(handle_data) = $self.handles[ptr].as_mut() {
                 handle_data.tag.set_static();
@@ -56,6 +63,10 @@ macro_rules! queue_static_val {
         } else if let Some(ptr) = $val.as_regex() {
             if let Some(regex_data) = $self.regexes[ptr].as_mut() {
                 regex_data.tag.set_static();
+            }
+        } else if let Some(pt) = $val.as_pod_type() {
+            if let Some(owner) = pod_type_owner(&$self.pod_types, pt) {
+                $self.mark_vec.push(ScriptGcMark::Object(owner));
             }
         }
     };
@@ -77,7 +88,13 @@ macro_rules! set_static_val {
                 $self.mark_vec.push(ScriptGcMark::Array(ptr));
             }
         } else if let Some(ptr) = $val.as_pod() {
-            $self.pods[ptr].tag.set_static();
+            let pod = &mut $self.pods[ptr];
+            pod.tag.set_static();
+            for pt in [Some(pod.ty), pod.tag.as_array_builder()].into_iter().flatten() {
+                if let Some(owner) = pod_type_owner(&$self.pod_types, pt) {
+                    $self.mark_vec.push(ScriptGcMark::Object(owner));
+                }
+            }
         } else if let Some(ptr) = $val.as_handle() {
             if let Some(handle_data) = $self.handles[ptr].as_mut() {
                 handle_data.tag.set_static();
@@ -85,6 +102,10 @@ macro_rules! set_static_val {
         } else if let Some(ptr) = $val.as_regex() {
             if let Some(regex_data) = $self.regexes[ptr].as_mut() {
                 regex_data.tag.set_static();
+            }
+        } else if let Some(pt) = $val.as_pod_type() {
+            if let Some(owner) = pod_type_owner(&$self.pod_types, pt) {
+                $self.mark_vec.push(ScriptGcMark::Object(owner));
             }
         }
     };
@@ -102,9 +123,58 @@ fn foreign_value_skip(kind: &str, index: u32, len: usize) {
     );
 }
 
+/// The object pod type `pt` belongs to: it is collected with that object (`sweep`), so a pod,
+/// a pod type value or a type built on it keeps the object, and with it the type, alive.
+#[inline]
+fn pod_type_owner(pod_types: &[ScriptPodTypeData], pt: ScriptPodType) -> Option<ScriptObject> {
+    let owner = pod_types.get(pt.index as usize)?.object;
+    (owner != ScriptObject::ZERO).then_some(owner)
+}
+
+/// What a live pod type holds: its default and, for a struct, enum or array, each field's
+/// default and the owner of each field or element type (an inline type's `self_ref`).
+fn pod_type_refs(pod_types: &[ScriptPodTypeData], pt: ScriptPodType, value: &mut dyn FnMut(ScriptValue)) {
+    let Some(data) = pod_types.get(pt.index as usize) else { return };
+    value(data.default);
+    let owner = |t: &ScriptPodTypeInline| pod_type_owner(pod_types, t.self_ref).map_or(NIL, ScriptValue::from);
+    let fields = |fields: &[ScriptPodField], value: &mut dyn FnMut(ScriptValue)| {
+        for f in fields {
+            value(f.default);
+            value(owner(&f.ty));
+        }
+    };
+    match &data.ty {
+        ScriptPodTy::Struct { fields: f, .. } => fields(f, value),
+        ScriptPodTy::Enum { variants, .. } => {
+            for v in variants {
+                match &v.variant {
+                    ScriptPodEnumVariant::Bare => {}
+                    ScriptPodEnumVariant::Tuple { items } => items.iter().for_each(|t| value(owner(t))),
+                    ScriptPodEnumVariant::Named { fields: f } => fields(f, value),
+                }
+            }
+        }
+        ScriptPodTy::FixedArray { ty, .. } | ScriptPodTy::VariableArray { ty, .. } => value(owner(ty)),
+        _ => {}
+    }
+}
+
+// Queue the owner of pod type `pt` for marking (a stale owner is skipped: its type is freed)
+macro_rules! mark_pod_type_owner {
+    ($objects:expr, $pod_types:expr, $mark_vec:expr, $pt:expr) => {
+        if let Some(owner) = pod_type_owner($pod_types, $pt) {
+            if let Some(object) = $objects.get_checked(owner) {
+                if !object.tag.is_static() && !object.tag.is_marked() && object.tag.is_alloced() {
+                    $mark_vec.push(ScriptGcMark::Object(owner));
+                }
+            }
+        }
+    };
+}
+
 // Mark a value using split field borrows (so callers can iterate maps without snapshot Vecs)
 macro_rules! mark_value_fields {
-    ($objects:expr, $arrays:expr, $strings:expr, $pods:expr, $handles:expr, $regexes:expr, $mark_vec:expr, $val:expr) => {
+    ($objects:expr, $arrays:expr, $strings:expr, $pods:expr, $handles:expr, $regexes:expr, $pod_types:expr, $mark_vec:expr, $val:expr) => {
         if let Some(ptr) = $val.as_object() {
             if let Some(object) = $objects.get_checked(ptr) {
                 if !object.tag.is_static() && object.tag.is_alloced() {
@@ -133,8 +203,12 @@ macro_rules! mark_value_fields {
             }
         } else if let Some(ptr) = $val.as_pod() {
             if let Some(pod) = $pods.get_checked_mut(ptr) {
-                if !pod.tag.is_static() && pod.tag.is_alloced() {
+                if !pod.tag.is_static() && pod.tag.is_alloced() && !pod.tag.is_marked() {
                     pod.tag.set_mark();
+                    mark_pod_type_owner!($objects, $pod_types, $mark_vec, pod.ty);
+                    if let Some(elem) = pod.tag.as_array_builder() {
+                        mark_pod_type_owner!($objects, $pod_types, $mark_vec, elem);
+                    }
                 }
             } else {
                 foreign_value_skip("pod", ptr.index, $pods.len());
@@ -162,6 +236,8 @@ macro_rules! mark_value_fields {
             } else {
                 foreign_value_skip("regex", ptr.index, $regexes.len());
             }
+        } else if let Some(pt) = $val.as_pod_type() {
+            mark_pod_type_owner!($objects, $pod_types, $mark_vec, pt);
         }
     };
 }
@@ -210,6 +286,18 @@ impl ScriptHeap {
                     let val = object.vec[j].value;
                     set_static_val!(self, key);
                     set_static_val!(self, val);
+                }
+                // A static pod type keeps what it holds; an object carrying one keeps its owner
+                if let Some(pt) = self.objects[obj].tag.as_pod_type() {
+                    if pod_type_owner(&self.pod_types, pt) == Some(obj) {
+                        let mut held = Vec::new();
+                        pod_type_refs(&self.pod_types, pt, &mut |v| held.push(v));
+                        for v in held {
+                            set_static_val!(self, v);
+                        }
+                    } else if let Some(owner) = pod_type_owner(&self.pod_types, pt) {
+                        self.mark_vec.push(ScriptGcMark::Object(owner));
+                    }
                 }
             }
             ScriptGcMark::Array(arr) => {
@@ -270,41 +358,36 @@ impl ScriptHeap {
                 object.tag.set_mark();
 
                 // Mark proto/map/vec entries directly without temporary Vec snapshots.
-                let (objects, arrays, strings, pods, handles, regexes, mark_vec) = (
+                let (objects, arrays, strings, pods, handles, regexes, pod_types, mark_vec) = (
                     &self.objects,
                     &self.arrays,
                     &mut self.strings,
                     &mut self.pods,
                     &mut self.handles,
                     &mut self.regexes,
+                    &self.pod_types,
                     &mut self.mark_vec,
                 );
                 let object = &objects[obj];
-                mark_value_fields!(
-                    objects,
-                    arrays,
-                    strings,
-                    pods,
-                    handles,
-                    regexes,
-                    mark_vec,
-                    object.proto
-                );
+                mark_value_fields!(objects, arrays, strings, pods, handles, regexes, pod_types, mark_vec, object.proto);
                 for (key, val) in object.map.iter() {
-                    mark_value_fields!(
-                        objects, arrays, strings, pods, handles, regexes, mark_vec, *key
-                    );
-                    mark_value_fields!(
-                        objects, arrays, strings, pods, handles, regexes, mark_vec, val.value
-                    );
+                    mark_value_fields!(objects, arrays, strings, pods, handles, regexes, pod_types, mark_vec, *key);
+                    mark_value_fields!(objects, arrays, strings, pods, handles, regexes, pod_types, mark_vec, val.value);
                 }
                 for kv in object.vec.iter() {
-                    mark_value_fields!(
-                        objects, arrays, strings, pods, handles, regexes, mark_vec, kv.key
-                    );
-                    mark_value_fields!(
-                        objects, arrays, strings, pods, handles, regexes, mark_vec, kv.value
-                    );
+                    mark_value_fields!(objects, arrays, strings, pods, handles, regexes, pod_types, mark_vec, kv.key);
+                    mark_value_fields!(objects, arrays, strings, pods, handles, regexes, pod_types, mark_vec, kv.value);
+                }
+                // A pod type lives while its owner object does: the owner keeps what the type
+                // holds, and an object made from the owner (which carries its type) keeps the owner.
+                if let Some(pt) = object.tag.as_pod_type() {
+                    if pod_type_owner(pod_types, pt) == Some(obj) {
+                        pod_type_refs(pod_types, pt, &mut |v| {
+                            mark_value_fields!(objects, arrays, strings, pods, handles, regexes, pod_types, mark_vec, v);
+                        });
+                    } else {
+                        mark_pod_type_owner!(objects, pod_types, mark_vec, pt);
+                    }
                 }
             }
             ScriptGcMark::Array(arr) => {
@@ -315,19 +398,18 @@ impl ScriptHeap {
                 self.arrays[arr].tag.set_mark();
 
                 if let ScriptArrayStorage::ScriptValue(values) = &self.arrays[arr].storage {
-                    let (objects, arrays, strings, pods, handles, regexes, mark_vec) = (
+                    let (objects, arrays, strings, pods, handles, regexes, pod_types, mark_vec) = (
                         &self.objects,
                         &self.arrays,
                         &mut self.strings,
                         &mut self.pods,
                         &mut self.handles,
                         &mut self.regexes,
+                        &self.pod_types,
                         &mut self.mark_vec,
                     );
                     for v in values.iter() {
-                        mark_value_fields!(
-                            objects, arrays, strings, pods, handles, regexes, mark_vec, *v
-                        );
+                        mark_value_fields!(objects, arrays, strings, pods, handles, regexes, pod_types, mark_vec, *v);
                     }
                 }
             }
@@ -337,16 +419,17 @@ impl ScriptHeap {
     /// Mark a single value - adds objects/arrays to work list, marks primitives directly
     #[inline]
     fn mark_value(&mut self, val: ScriptValue) {
-        let (objects, arrays, strings, pods, handles, regexes, mark_vec) = (
+        let (objects, arrays, strings, pods, handles, regexes, pod_types, mark_vec) = (
             &self.objects,
             &self.arrays,
             &mut self.strings,
             &mut self.pods,
             &mut self.handles,
             &mut self.regexes,
+            &self.pod_types,
             &mut self.mark_vec,
         );
-        mark_value_fields!(objects, arrays, strings, pods, handles, regexes, mark_vec, val);
+        mark_value_fields!(objects, arrays, strings, pods, handles, regexes, pod_types, mark_vec, val);
     }
 
     /// How many objects the given seeds reach, following what the marker
@@ -361,6 +444,42 @@ impl ScriptHeap {
         }
         // SAFETY: the callback touches only visited during this synchronous walk.
         unsafe { self.reach_count_with(seeds, visited as *mut _ as *mut u8, insert) }
+    }
+
+    /// What `seeds` (objects and arrays) reach as the marker follows them, beyond what the
+    /// shared visited sets already hold: inspect `vm roots`, one root kind after another.
+    pub(crate) fn reach_values(&self, seeds: Vec<ScriptValue>, objects: &mut std::collections::HashSet<ScriptObject>, arrays: &mut std::collections::HashSet<ScriptArray>) -> usize {
+        let mut count = 0usize;
+        let mut stack = seeds;
+        while let Some(val) = stack.pop() {
+            if let Some(obj) = val.as_object() {
+                if !self.objects.is_valid(obj) || !objects.insert(obj) {
+                    continue;
+                }
+                count += 1;
+                let object = &self.objects[obj];
+                stack.push(object.proto);
+                for (key, entry) in object.map.iter() {
+                    stack.push(*key);
+                    stack.push(entry.value);
+                }
+                for kv in object.vec.iter() {
+                    stack.push(kv.key);
+                    stack.push(kv.value);
+                }
+                self.pod_type_reach(obj, &mut stack);
+            } else if let Some(arr) = val.as_array() {
+                if !self.arrays.is_valid(arr) || !arrays.insert(arr) {
+                    continue;
+                }
+                for i in 0..self.array_len(arr) {
+                    stack.push(self.array_index_unchecked(arr, i));
+                }
+            } else {
+                self.pod_value_reach(val, &mut stack);
+            }
+        }
+        count
     }
 
     /// [`Self::reach_count`] with the visited set behind `insert`, which
@@ -389,6 +508,7 @@ impl ScriptHeap {
                     stack.push(kv.key);
                     stack.push(kv.value);
                 }
+                self.pod_type_reach(obj, &mut stack);
             } else if let Some(arr) = val.as_array() {
                 if !arrays_seen.insert(arr) {
                     continue;
@@ -397,11 +517,46 @@ impl ScriptHeap {
                 for i in 0..len {
                     stack.push(self.array_index_unchecked(arr, i));
                 }
+            } else {
+                self.pod_value_reach(val, &mut stack);
             }
         }
         count
     }
 
+    /// The marker's pod type edges for a reach walk: object `obj` carrying a pod type reaches
+    /// what the type holds (its owner) or its owner (an object made from the owner).
+    fn pod_type_reach(&self, obj: ScriptObject, stack: &mut Vec<ScriptValue>) {
+        if let Some(pt) = self.objects[obj].tag.as_pod_type() {
+            match pod_type_owner(&self.pod_types, pt) {
+                Some(owner) if owner == obj => pod_type_refs(&self.pod_types, pt, &mut |v| stack.push(v)),
+                Some(owner) => stack.push(owner.into()),
+                None => {}
+            }
+        }
+    }
+
+    /// The marker's pod type edges for a reach walk: a pod or a pod type value reaches the
+    /// owner of its type.
+    fn pod_value_reach(&self, val: ScriptValue, stack: &mut Vec<ScriptValue>) {
+        let types = if let Some(pod) = val.as_pod() {
+            match self.pods.get_checked(pod) {
+                Some(p) => [Some(p.ty), p.tag.as_array_builder()],
+                None => return,
+            }
+        } else if let Some(pt) = val.as_pod_type() {
+            [Some(pt), None]
+        } else {
+            return;
+        };
+        for pt in types.into_iter().flatten() {
+            if let Some(owner) = pod_type_owner(&self.pod_types, pt) {
+                stack.push(owner.into());
+            }
+        }
+    }
+
+    #[relax_api]
     #[relax(keep_reachable)]
     pub fn mark(&mut self, threads: &ScriptThreads, code: &ScriptCode) {
         self.mark_vec.clear();
@@ -418,18 +573,6 @@ impl ScriptHeap {
             let (type_defaults, mark_vec) = (&self.type_defaults, &mut self.mark_vec);
             for obj in type_defaults.values().copied() {
                 mark_vec.push(ScriptGcMark::Object(obj));
-            }
-        }
-
-        // Mark pod_types default values and objects
-        for i in 0..self.pod_types.len() {
-            let (default, pod_obj) = {
-                let pod_type = &self.pod_types[i];
-                (pod_type.default, pod_type.object)
-            };
-            self.mark_value(default);
-            if pod_obj != ScriptObject::ZERO {
-                self.mark_value(pod_obj.into());
             }
         }
 
@@ -481,7 +624,7 @@ impl ScriptHeap {
                             self.mark_value((*args).into());
                         }
                         ScriptMe::Pod { pod, .. } => {
-                            self.pods[*pod].tag.set_mark();
+                            self.mark_value((*pod).into());
                         }
                         ScriptMe::Array(arr) => {
                             self.mark_value((*arr).into());
@@ -649,6 +792,7 @@ impl ScriptHeap {
         }
     }
 
+    #[relax_api]
     #[relax(keep_reachable)]
     pub fn sweep(&mut self, log_stats: bool) {
         let start = crate::clock::monotonic_now();
@@ -670,10 +814,11 @@ impl ScriptHeap {
                 continue;
             }
             if !obj.tag.is_marked() && obj.tag.is_alloced() {
-                if let Some(pod_ty) = obj.tag.as_pod_type() {
-                    self.pod_types_free.push(pod_ty);
-                }
+                let pod_ty = obj.tag.as_pod_type();
                 obj.clear();
+                if let Some(pt) = pod_ty {
+                    self.free_pod_type_of(ScriptObject::new(i as u32, self.objects.generation(i)), pt);
+                }
                 // Increment generation so stale references will be detected
                 self.objects.free_slot(i as u32);
                 // Push ref with NEW generation to free list - ready to reuse
@@ -959,12 +1104,14 @@ impl ScriptHeap {
     }
 
     /// Diagnostic/test accessor for the escape barrier.
+    #[relax_api]
     pub fn is_object_reffed(&self, obj: ScriptObject) -> bool {
         self.objects.is_valid(obj) && self.objects[obj].tag.is_reffed()
     }
 
     /// Live (allocated, non-free) object slot count — the flat-heap metric
     /// for host transient tests.
+    #[relax_api]
     pub fn live_object_len(&self) -> usize {
         self.objects.len() - self.objects_free.len()
     }
@@ -987,10 +1134,11 @@ impl ScriptHeap {
         let obj = &mut self.objects[ptr];
         // Must check is_alloced to avoid double-freeing
         if obj.tag.is_alloced() && !obj.tag.is_reffed() {
-            if let Some(pod_ty) = obj.tag.as_pod_type() {
-                self.pod_types_free.push(pod_ty);
-            }
+            let pod_ty = obj.tag.as_pod_type();
             obj.clear();
+            if let Some(pt) = pod_ty {
+                self.free_pod_type_of(ptr, pt);
+            }
             // Increment generation so stale references will be detected
             self.objects.free_slot(ptr.index);
             // Push ref with NEW generation to free list - ready to reuse
@@ -999,6 +1147,19 @@ impl ScriptHeap {
                 .push(ScriptObject::new(ptr.index, new_gen));
             self.bump_object_reuse_epoch();
         }
+    }
+
+    /// The object `owner`, which carried pod type `pt`, is freed: when it is the type's owner
+    /// the type goes too (an object made from the owner carries its type but does not own it).
+    /// The slot is emptied, so a scan for an equal type (`new_pod_array_type`) never finds it.
+    fn free_pod_type_of(&mut self, owner: ScriptObject, pt: ScriptPodType) {
+        let index = pt.index as usize;
+        if pod_type_owner(&self.pod_types, pt) != Some(owner) {
+            return;
+        }
+        self.pod_types[index] = ScriptPodTypeData::default();
+        self.shader_types[index].take();
+        self.pod_types_free.push(pt);
     }
 }
 

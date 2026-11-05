@@ -1765,12 +1765,12 @@ impl<'a> Gen<'a> {
                 self.compute_builtin(bi, ty)
             }
             Builtin::Barrier => {
-                let execution = self.b.const_u32(SCOPE_WORKGROUP);
-                let memory = self.b.const_u32(SCOPE_DEVICE);
-                // Match Metal's mem_device | mem_threadgroup and HLSL's
-                // AllMemoryBarrierWithGroupSync: publish storage writes too.
+                // The workgroup's storage writes are published to the workgroup too, as Metal's
+                // threadgroup_barrier(mem_device | mem_threadgroup) does: workgroup scope, never a
+                // device-wide fence (no barrier synchronizes workgroups; across them, atomics).
+                let scope = self.b.const_u32(SCOPE_WORKGROUP);
                 let sem = self.b.const_u32(SEMANTICS_ACQUIRE_RELEASE | SEMANTICS_WORKGROUP_MEMORY | SEMANTICS_UNIFORM_MEMORY);
-                self.emit(OP_CONTROL_BARRIER, &[execution, memory, sem]);
+                self.emit(OP_CONTROL_BARRIER, &[scope, scope, sem]);
                 0
             }
             Builtin::StorageTextureWrite => {

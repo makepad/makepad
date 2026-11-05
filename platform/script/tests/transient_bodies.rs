@@ -95,3 +95,42 @@ fn fn_content_key_follows_the_text() {
     assert_eq!(ip_c, fn_ip(&vm, a, id!(f)));
     assert_ne!(vm.bx.code.fn_content_key(ip_c), key_a);
 }
+
+/// A draw shader cached by its object's own functions and fields (`shader_functions_hash`)
+/// stands while the code its compile reached is the same (`shader_reached_key`): a helper fn in
+/// another module is reached but not in that hash, so its new text must change the reached key.
+/// A field made another kind of input in a module that defines none of the functions is
+/// another hash; a new value of the same type, or a plain value over the declaration, is not.
+#[test]
+fn a_cached_shader_follows_its_helpers_and_field_kinds() {
+    use makepad_script::shader_compile::{compile_shader, shader_functions_hash, shader_reached_key, ShaderCompileOptions};
+    let mut vm = test_vm();
+    vm.capture_errors();
+    vm.new_module(id!(lib));
+    let helper = |vm: &mut ScriptVm, k: &str| {
+        vm.eval(module("gen://helper", &format!("use mod.pod.*\nmod.lib.shade = fn(v: f32) {{ return v * {k} }}\nnil")));
+    };
+    helper(&mut vm, "2.0");
+    vm.eval(module("gen://base", "use mod.pod.*\nuse mod.math.*\nuse mod.shader\nuse mod.lib.*\nmod.lib.Base = {\nvertex_pos: shader.vertex_position(vec4f)\npixel: shader.fragment_output(0, vec4f)\ntint: shader.uniform(1.0)\nvertex: fn() { self.vertex_pos = vec4(0.0) }\nfragment: fn() { self.pixel = vec4(shade(self.tint)) }\n}\nnil"));
+    let mut keep = Vec::new();
+    let mut derived = |vm: &mut ScriptVm, tint: &str| {
+        let o = vm.eval(module(&format!("gen://derived/{}", keep.len()), &format!("use mod.shader\nuse mod.lib.*\nBase{{tint: {tint}}}"))).as_object().expect("an object");
+        keep.push(vm.bx.heap.new_object_ref(o));
+        (o, shader_functions_hash(vm.heap(), vm.bx.code_ref(), o))
+    };
+    let (shader, uniform) = derived(&mut vm, "shader.uniform(1.0)");
+    assert_eq!(derived(&mut vm, "shader.uniform(3.0)").1, uniform);
+    assert_eq!(derived(&mut vm, "2.0").1, uniform);
+    assert_ne!(derived(&mut vm, "shader.instance(1.0)").1, uniform);
+    let output = compile_shader(&mut vm, shader, &ShaderCompileOptions::new(makepad_script::shader_backend::ShaderBackend::Glsl, false, false, true, false));
+    assert!(!output.has_errors(), "{}", output.error_report());
+    let mut ips = Vec::new();
+    output.reached_bodies_into(vm.heap(), &mut makepad_script::object_heap::ScriptIpsOut::new(&mut ips));
+    let key = shader_reached_key(vm.bx.code_ref(), &ips);
+    helper(&mut vm, "2.0");
+    assert_eq!(shader_reached_key(vm.bx.code_ref(), &ips), key);
+    helper(&mut vm, "3.0");
+    assert_ne!(shader_reached_key(vm.bx.code_ref(), &ips), key);
+    let errors = vm.take_errors();
+    assert!(errors.is_empty(), "{errors:?}");
+}

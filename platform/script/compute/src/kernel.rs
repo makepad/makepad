@@ -272,6 +272,16 @@ pub fn compile(src: &str) -> Result<KernelRef, Vec<ShaderError>> {
     compile_with(src, &[], Backend::Native)
 }
 
+/// A kernel's text lowered for a host to read and not compiled (`lower::trace`).
+#[inline(always)]
+pub fn trace(src: &str) -> Result<crate::lower::trace::KernelTrace, Vec<ShaderError>> {
+    let mut compiled = crate::boundary::kernel_compile(&crate::boundary::CompileReq::Traced { src });
+    compiled.take_trace().ok_or_else(|| (0..compiled.error_count()).map(|index| {
+        let error = compiled.error(index);
+        ShaderError::new(error.start, error.end, error.message.to_string())
+    }).collect())
+}
+
 /// Compiles with host layouts (GPU vertex/instance structs a kernel may
 /// write by field) for a backend.
 #[inline(always)]
@@ -335,11 +345,8 @@ pub(crate) fn compile_live_impl(src: &str, layouts: &[Layout], backend: Backend,
     compile_items_impl(items, src.len(), src, layouts, backend, modules, lift)
 }
 
-/// Compiles a kernel's syntax tree: `items` (the kernel's own items, their
-/// spans below `src_len`) with the prelude and the modules they use.
-/// `source` is the kernel's text when it was written as text (empty for
-/// a kernel built from Splash values), kept by the recorder.
-pub(crate) fn compile_items_impl(items: Vec<crate::parse::Item>, src_len: usize, source: &str, layouts: &[Layout], backend: Backend, modules: &[crate::module::Module], lift: Option<crate::lower::LiveLift>) -> Result<Arc<KernelBody>, Vec<ShaderError>> {
+/// The kernel's items with the prelude and the modules they use, pruned to what they reach.
+fn program_items(items: Vec<crate::parse::Item>, src_len: usize, modules: &[crate::module::Module]) -> Result<Vec<crate::parse::Item>, Vec<ShaderError>> {
     let prelude = crate::parse_prelude(KERNEL_PRELUDE, src_len);
     // Module spans go past the prelude's, so errors inside them are
     // reported at the kernel's call like the prelude's.
@@ -347,22 +354,11 @@ pub(crate) fn compile_items_impl(items: Vec<crate::parse::Item>, src_len: usize,
     // prelude) are compiled in only when reached.
     let roots: std::collections::HashSet<String> = items.iter().filter(|i| !matches!(i, crate::parse::Item::Use { .. })).map(|i| i.name().to_string()).collect();
     let items = crate::module::resolve(items, src_len + 1 + KERNEL_PRELUDE.len() + 1, modules, &prelude).map_err(|e| vec![e])?;
-    let all = crate::module::prune(crate::with_prelude(&items, prelude, &roots), &roots);
-    let lowered = kl::lower_kernel(&all, src_len + 1, layouts, lift).map_err(|e| vec![e])?;
-    let ctx_words = K_PARAMS as usize + lowered.params.len();
-    let shared_words = lowered.shared_init.len().max(1);
-    let regions = ir::Regions {
-        ctx: ctx_words as u32,
-        state: 1,
-        shared: shared_words as u32,
-        frame: lowered.program.frame_words,
-        shared_writable: false,
-        bufs: lowered.buffers.iter().map(|b| b.access != Access::Read).collect(),
-        io: false,
-    };
-    if let Err(e) = ir::validate(&lowered.program, &regions) {
-        return Err(vec![ShaderError::new(0, 1, format!("internal compiler error: {}", e))]);
-    }
+    Ok(crate::module::prune(crate::with_prelude(&items, prelude, &roots), &roots))
+}
+
+/// The shared tables a run reads: the lowered image, then the program's `init` over it.
+fn initial_shared(lowered: &kl::KernelLowered, ctx_words: usize) -> Result<Vec<u32>, Vec<ShaderError>> {
     let mut shared = lowered.shared_init.clone();
     if shared.is_empty() {
         shared.push(0);
@@ -371,7 +367,7 @@ pub(crate) fn compile_items_impl(items: Vec<crate::parse::Item>, src_len: usize,
         let init_regions = ir::Regions {
             ctx: ctx_words as u32,
             state: 1,
-            shared: shared_words as u32,
+            shared: lowered.shared_init.len().max(1) as u32,
             frame: init.frame_words,
             shared_writable: true,
             bufs: Vec::new(),
@@ -389,6 +385,46 @@ pub(crate) fn compile_items_impl(items: Vec<crate::parse::Item>, src_len: usize,
         let mut io = ir::Io { ins: [&zeros, &zeros], outs: [&mut o0, &mut o1] };
         ir::run(init, &mut scratch, &mut mem, &mut io, 1);
     }
+    Ok(shared)
+}
+
+/// A kernel's text lowered for a host to read (`lower/trace.rs`): nothing is compiled.
+pub(crate) fn trace_source_impl(src: &str) -> Result<crate::lower::trace::KernelTrace, Vec<ShaderError>> {
+    let toks = crate::parse::lex(src).map_err(|e| vec![e])?;
+    let items = crate::parse::Parser::new(&toks).items().map_err(|e| vec![e])?;
+    trace_items_impl(items, src.len())
+}
+
+/// A kernel's syntax tree lowered for a host to read (`lower/trace.rs`): nothing is compiled.
+pub(crate) fn trace_items_impl(items: Vec<crate::parse::Item>, src_len: usize) -> Result<crate::lower::trace::KernelTrace, Vec<ShaderError>> {
+    let all = program_items(items, src_len, &[])?;
+    let lowered = kl::lower_kernel(&all, src_len + 1, &[], None, true).map_err(|e| vec![e])?;
+    let shared = initial_shared(&lowered, K_PARAMS as usize + lowered.params.len())?;
+    crate::lower::trace::KernelTrace::new(lowered, shared).map_err(|e| vec![ShaderError::new(0, 1, format!("internal compiler error: {e}"))])
+}
+
+/// Compiles a kernel's syntax tree: `items` (the kernel's own items, their
+/// spans below `src_len`) with the prelude and the modules they use.
+/// `source` is the kernel's text when it was written as text (empty for
+/// a kernel built from Splash values), kept by the recorder.
+pub(crate) fn compile_items_impl(items: Vec<crate::parse::Item>, src_len: usize, source: &str, layouts: &[Layout], backend: Backend, modules: &[crate::module::Module], lift: Option<crate::lower::LiveLift>) -> Result<Arc<KernelBody>, Vec<ShaderError>> {
+    let all = program_items(items, src_len, modules)?;
+    let lowered = kl::lower_kernel(&all, src_len + 1, layouts, lift, false).map_err(|e| vec![e])?;
+    let ctx_words = K_PARAMS as usize + lowered.params.len();
+    let shared_words = lowered.shared_init.len().max(1);
+    let regions = ir::Regions {
+        ctx: ctx_words as u32,
+        state: 1,
+        shared: shared_words as u32,
+        frame: lowered.program.frame_words,
+        shared_writable: false,
+        bufs: lowered.buffers.iter().map(|b| b.access != Access::Read).collect(),
+        io: false,
+    };
+    if let Err(e) = ir::validate(&lowered.program, &regions) {
+        return Err(vec![ShaderError::new(0, 1, format!("internal compiler error: {}", e))]);
+    }
+    let shared = initial_shared(&lowered, ctx_words)?;
     let flat = lowered.flat;
     #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
     let native = if backend == Backend::Native {

@@ -83,7 +83,7 @@ fn value(f: &mut IrFunction, e: ExprId, out: &mut Vec<Stmt>) -> ExprId {
         ExprKind::Call(fun, args) => ExprKind::Call(fun, args.into_iter().map(|a| value(f, a, out)).collect()),
         ExprKind::Builtin(op, args) => {
             let args = args.into_iter().enumerate().map(|(i, a)| {
-                if i == 0 && matches!(op, Builtin::AtomicAdd | Builtin::CooperativeLoad | Builtin::CooperativeStore | Builtin::StorageTextureWrite) {
+                if i == 0 && matches!(op, Builtin::AtomicAdd | Builtin::AtomicMin | Builtin::AtomicMax | Builtin::CooperativeLoad | Builtin::CooperativeStore | Builtin::StorageTextureWrite) {
                     place(f, a, out)
                 } else { value(f, a, out) }
             }).collect();

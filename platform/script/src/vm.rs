@@ -3692,8 +3692,7 @@ impl ScriptVmBase {
         let scope = self.code.bodies.borrow()[body as usize].scope.obj;
         for (key, value) in self.object_entries(from) {
             let Some(id) = key.as_id() else { continue };
-            let mut head = [0u8; 2];
-            if LiveId::lut_name_copy(id, &mut head) == 2 && head == *b"__" {
+            if self.heap.is_private_name(id) {
                 continue;
             }
             self.heap.set_value_def(scope, key, value);
@@ -3735,8 +3734,7 @@ impl ScriptVmBase {
         let exports = self.heap.new_object();
         for (key, value) in entries {
             let Some(id) = key.as_id() else { continue };
-            let mut head = [0u8; 2];
-            if id == id!(mod) || (LiveId::lut_name_copy(id, &mut head) == 2 && head == *b"__") {
+            if id == id!(mod) || self.heap.is_private_name(id) {
                 continue;
             }
             if self.injected_globals.get(&id) == Some(&value) {

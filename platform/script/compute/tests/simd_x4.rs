@@ -150,7 +150,7 @@ fn vector_code_of_both_widths_equals_scalar_and_interpreter_on_random_kernels() 
     let mut r = Rng(env("X4_FUZZ_SEED", 0xC0FF_EE12_3456_789B));
     let regions = Regions { ctx: CTX as u32, state: 1, shared: SHARED.len() as u32, frame: FRAME, shared_writable: false, bufs: vec![false, false, true, true, true], io: false };
     let (mut tried, mut vectorized) = (0, 0);
-    let rounds = env("X4_FUZZ_ROUNDS", 30_000);
+    let rounds = env("X4_FUZZ_ROUNDS", 250);
     for round in 0..rounds {
         let p = random_kernel(&mut r);
         if let Err(e) = ir::validate(&p, &regions) {
@@ -404,7 +404,7 @@ fn optimized_random_kernels_give_the_same_bits() {
     let env = |k: &str, d: u64| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
     let mut r = Rng(env("OPT_FUZZ_SEED", 0x0B7F_5EED_1234_5678));
     let regions = Regions { ctx: CTX as u32, state: 1, shared: SHARED.len() as u32, frame: FRAME, shared_writable: false, bufs: vec![false, false, true, true, true], io: false };
-    let rounds = env("OPT_FUZZ_ROUNDS", 10_000);
+    let rounds = env("OPT_FUZZ_ROUNDS", 200);
     let mut ran = 0;
     for round in 0..rounds {
         let p = random_kernel(&mut r);

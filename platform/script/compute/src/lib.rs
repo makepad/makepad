@@ -52,6 +52,10 @@ pub mod rand;
 pub mod work;
 mod spmd;
 #[cfg(feature = "vm")]
+mod air_shader;
+#[cfg(feature = "vm")]
+pub mod element_route;
+#[cfg(feature = "vm")]
 pub mod shader_route;
 #[cfg(feature = "vm")]
 pub mod vm_kernel;
