@@ -1,6 +1,6 @@
 use std::{
     fmt, io,
-    ops::Deref,
+    ops::{Deref, Range},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -30,6 +30,8 @@ scalars!(u8, u16, u32, u64, u128, usize, i8, i16, i32, i64, i128, isize, f32, f6
 #[derive(Clone)]
 pub struct HostBuf<T: Scalar = u8> {
     store: Arc<Store<T>>,
+    // None tracks the whole allocation, including changes through the Vec API.
+    range: Option<Range<usize>>,
 }
 
 enum Store<T: Scalar> {
@@ -62,6 +64,7 @@ impl<T: Scalar> From<Vec<T>> for HostBuf<T> {
         OWNED_LOADS.fetch_add(1, Ordering::Relaxed);
         Self {
             store: Arc::new(Store::Heap(data)),
+            range: None,
         }
     }
 }
@@ -89,11 +92,26 @@ impl<T: Scalar> HostBuf<T> {
                 token,
                 release,
             }),
+            range: None,
+        }
+    }
+
+    /// Shares a bounds-checked subrange without copying, retaining the whole store.
+    /// Mutable access through `make_mut` detaches only the visible elements.
+    pub fn slice(&self, range: Range<usize>) -> Self {
+        assert!(
+            range.start <= range.end && range.end <= self.len(),
+            "HostBuf slice out of bounds"
+        );
+        let start = self.range.as_ref().map_or(0, |range| range.start);
+        Self {
+            store: self.store.clone(),
+            range: Some(start + range.start..start + range.end),
         }
     }
 
     pub fn as_slice(&self) -> &[T] {
-        match self.store.as_ref() {
+        let data = match self.store.as_ref() {
             Store::Heap(data) => data.as_slice(),
             Store::File(data) => {
                 // SAFETY: File is constructed only for T = u8.
@@ -104,6 +122,10 @@ impl<T: Scalar> HostBuf<T> {
                 // until the last Arc drops, after every reference to this slice.
                 unsafe { std::slice::from_raw_parts(*ptr, *len) }
             }
+        };
+        match &self.range {
+            Some(range) => &data[range.clone()],
+            None => data,
         }
     }
 
@@ -126,8 +148,11 @@ impl<T: Scalar> HostBuf<T> {
         Arc::ptr_eq(&self.store, &other.store)
     }
 
-    /// Mutable heap storage, only when no other buffer shares it.
+    /// Mutable whole heap storage, only when unique and not a subrange view.
     pub fn get_mut(&mut self) -> Option<&mut Vec<T>> {
+        if self.range.is_some() {
+            return None;
+        }
         match Arc::get_mut(&mut self.store)? {
             Store::Heap(data) => Some(data),
             _ => None,
@@ -139,6 +164,7 @@ impl<T: Scalar> HostBuf<T> {
         if self.get_mut().is_none() {
             let data = self.as_slice().to_vec();
             self.store = Arc::new(Store::Heap(data));
+            self.range = None;
             COW.fetch_add(1, Ordering::Relaxed);
         }
         self.get_mut().expect("unique heap storage")
@@ -158,6 +184,7 @@ impl HostBuf<u8> {
     pub fn from_mapped(mapped: Arc<MappedBytes>) -> Self {
         Self {
             store: Arc::new(Store::File(mapped)),
+            range: None,
         }
     }
 
@@ -668,6 +695,18 @@ mod tests {
         assert_eq!(DATA, [7, 8]);
         drop(lease);
         assert_eq!(RELEASED.load(Ordering::SeqCst), 1);
+
+        let original = HostBuf::from(vec![10u32, 20, 30, 40]);
+        let mut view = original.slice(1..3);
+        assert!(view.get_mut().is_none());
+        drop(original);
+        assert!(
+            view.get_mut().is_none(),
+            "a view must not expose the whole Vec"
+        );
+        view.make_mut().push(50);
+        assert_eq!(&*view, &[20, 30, 50], "detaching copies only the view");
+        assert_eq!(HostBuf::stats().cow, 4);
     }
 
     #[test]
@@ -684,6 +723,10 @@ mod tests {
         // sole ownership is transferred to the lease, including across threads.
         let buffer: HostBuf<u32> =
             unsafe { HostBuf::from_lease(ptr.cast(), 3, ptr as usize as u64, release) };
+        let view = buffer.slice(1..3);
+        let nested = view.slice(1..2);
+        assert!(buffer.ptr_eq(&nested), "nested views share the lease owner");
+        assert_eq!(&*nested, &[13]);
         let shared = Arc::new(buffer.clone());
         let reader = shared.clone();
         thread::spawn(move || {
@@ -694,6 +737,7 @@ mod tests {
         .join()
         .unwrap();
         drop(buffer);
+        drop(view);
         assert_eq!(
             RELEASED.load(Ordering::SeqCst),
             0,
@@ -702,9 +746,48 @@ mod tests {
         thread::spawn(move || drop(shared)).join().unwrap();
         assert_eq!(
             RELEASED.load(Ordering::SeqCst),
-            1,
-            "the last thread releases once"
+            0,
+            "the UI view retains the lease"
         );
+        drop(nested);
+        assert_eq!(
+            RELEASED.load(Ordering::SeqCst),
+            1,
+            "the last view releases once"
+        );
+        let ptr = Box::into_raw(Box::new([21u32, 22, 23]));
+        // SAFETY: the same owned immutable allocation and release hook as above.
+        let buffer: HostBuf<u32> =
+            unsafe { HostBuf::from_lease(ptr.cast(), 3, ptr as usize as u64, release) };
+        thread::spawn(move || drop(buffer)).join().unwrap();
+        assert_eq!(
+            RELEASED.load(Ordering::SeqCst),
+            2,
+            "a final worker-side drop also releases exactly once"
+        );
+    }
+
+    #[test]
+    fn views_share_heap_and_file_storage_and_check_bounds() {
+        let heap = HostBuf::from(vec![10u32, 20, 30, 40]);
+        let view = heap.slice(1..4);
+        let nested = view.slice(1..2);
+        assert!(heap.ptr_eq(&nested));
+        assert_eq!(nested.as_ptr(), heap.as_slice()[2..].as_ptr());
+        assert_eq!(&*nested, &[30]);
+        assert_eq!(nested.len(), 1);
+        assert!(view.slice(3..3).is_empty());
+        assert!(std::panic::catch_unwind(|| view.slice(0..4)).is_err());
+        let reversed = 2..1;
+        assert!(std::panic::catch_unwind(|| view.slice(reversed)).is_err());
+
+        let file = HostBuf::from_file_mmap_or_read(bundled_font_path()).unwrap();
+        let view = file.slice(1..8).slice(2..5);
+        assert!(file.ptr_eq(&view));
+        assert_eq!(view.as_ptr(), file.as_slice()[3..].as_ptr());
+        assert_eq!(view.as_slice(), &file[3..6]);
+        assert_eq!(view.path(), file.path());
+        assert!(Arc::ptr_eq(file.mapped().unwrap(), view.mapped().unwrap()));
     }
 
     fn bundled_font_path() -> PathBuf {

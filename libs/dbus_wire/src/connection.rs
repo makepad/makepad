@@ -416,8 +416,13 @@ impl Connection {
         }
         let deadline = deadline(timeout)?;
         remaining(deadline)?;
+        self.call_until(message, deadline)
+    }
+    /// `deadline` may have passed since the caller checked it: the request is written first, as far
+    /// as the socket takes it without waiting, so a timeout never leaves it unsent.
+    fn call_until(&mut self, message: Message, deadline: Instant) -> Result<Message> {
         let serial = self.send(message)?;
-        let result = (|| loop {
+        let result = self.flush_until(None).and_then(|()| loop {
             if let Some(reply) = self.take_reply(serial) {
                 return reply.into_result();
             }
@@ -428,7 +433,7 @@ impl Connection {
                 return reply.into_result();
             }
             self.wait(deadline)?;
-        })();
+        });
         self.pending.remove(&serial);
         result
     }
@@ -539,4 +544,23 @@ type Nfds = std::os::raw::c_ulong;
 type Nfds = u32;
 extern "C" {
     fn poll(fds: *mut PollFd, nfds: Nfds, timeout: i32) -> i32;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::net::UnixStream;
+
+    /// A slow path to the first write (a first run under the JIT compiles it) can use up the whole
+    /// timeout; the request goes out all the same, so its late reply has something to answer.
+    #[test]
+    fn a_deadline_passed_before_the_first_write_still_sends_the_request() {
+        let (a, b) = UnixStream::pair().unwrap();
+        let mut a = Connection::from_authenticated_stream(a).unwrap();
+        let mut b = Connection::from_authenticated_stream(b).unwrap();
+        let call = Message::method_call("", "/object", "org.example.Test", "Echo", Body::default());
+        assert!(matches!(a.call_until(call, Instant::now()), Err(Error::Timeout)));
+        b.read_ready().unwrap();
+        assert!(b.pop_message().is_some(), "the request was never written");
+    }
 }

@@ -342,6 +342,11 @@ fn collect_loose_refs(
         // built from the components walked, never from the OS path.
         let file_name = entry.file_name();
         let file_name = file_name.to_string_lossy();
+        // `<ref>.lock` is a ref update in flight, never a ref (no ref name
+        // ends in `.lock`): read as one it was an empty or a phantom ref
+        if file_name.ends_with(".lock") {
+            continue;
+        }
         let name = if dir_name.is_empty() || dir_name.ends_with('/') {
             format!("{dir_name}{file_name}")
         } else {
@@ -350,7 +355,12 @@ fn collect_loose_refs(
         if path.is_dir() {
             collect_loose_refs(&path, &name, result)?;
         } else if path.is_file() {
-            let content = fs::read_to_string(&path)?;
+            // deleted or packed since the listing: not a loose ref any more
+            let content = match fs::read_to_string(&path) {
+                Ok(c) => c,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(GitError::Io(e)),
+            };
             let content = content.trim_end();
             let target = if let Some(rest) = content.strip_prefix("ref: ") {
                 RefTarget::Symbolic(rest.to_string())
@@ -378,6 +388,21 @@ pub fn delete_ref(git_dir: &Path, name: &str) -> Result<(), GitError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A ref update in flight (git's `<ref>.lock`, empty while it is created, then holding the
+    /// new id until its rename) is no ref: the listing neither fails on it nor names it.
+    #[test]
+    fn a_ref_update_in_flight_is_not_listed() {
+        let dir = crate::test_support::tempdir().unwrap();
+        let git_dir = dir.path();
+        let id = "552e2a0e14dd313f5f572118a18fba67ad99699c";
+        fs::create_dir_all(git_dir.join("refs/heads")).unwrap();
+        fs::write(git_dir.join("refs/heads/work"), format!("{id}\n")).unwrap();
+        fs::write(git_dir.join("refs/heads/rc-a.lock"), "").unwrap();
+        fs::write(git_dir.join("refs/heads/rc-b.lock"), format!("{id}\n")).unwrap();
+        let names: Vec<String> = list_refs_in(git_dir, git_dir, "refs/").unwrap().into_iter().map(|r| r.name).collect();
+        assert_eq!(names, ["refs/heads/work"]);
+    }
 
     #[test]
     fn test_read_head_symbolic() {

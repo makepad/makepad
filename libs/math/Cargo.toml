@@ -12,4 +12,9 @@ metadata.makepad-auto-version = "C4VIsC4byWBjPFWeuGD2ZHHSRRs="
 [features] 
 [dependencies]
 makepad-micro-serde = { path = "../../libs/micro_serde", version = "1.0.0" }
-bytemuck = { path = "../bytemuck", version = "1.25.0", features = ["min_const_generics"] }
+# extern_crate_alloc: the feature the workspace's bytemuck carries anyway (rustybuzz asks for it),
+# asked for here too, so a program's crate graph without the text stack (a command-line tool over
+# makepad-script) resolves bytemuck to the same features as the workspace-wide `cargo metadata`
+# that fixes the identity of relax's provided crates; else `makepad run` says the JIT changed
+# and runs nothing.
+bytemuck = { path = "../bytemuck", version = "1.25.0", features = ["min_const_generics", "extern_crate_alloc"] }

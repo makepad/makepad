@@ -291,7 +291,8 @@ fn log_with_level_rustc(
     message: String,
     level: LogLevel,
 ) {
-    println!(
+    // stderr: stdout is the program's own output and carries nothing else
+    eprintln!(
         "{}",
         level.make_rustc_json(
             file_name,

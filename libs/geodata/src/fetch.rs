@@ -21,7 +21,7 @@ use std::process::Command;
 use std::time::{Duration, UNIX_EPOCH};
 
 pub const USER_AGENT: &str =
-    "makepad-geodata/0.1 (bulk open-data fetcher; contact: rik@n4.io)";
+    "makepad-geodata/0.1 (bulk open-data fetcher; contact: info@makepad.nl)";
 const PAUSE_AFTER_TRANSFER: Duration = Duration::from_secs(1);
 
 /// A bulk-downloadable source file. All fields static: the registry is code.

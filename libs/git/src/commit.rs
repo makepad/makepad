@@ -18,7 +18,8 @@ impl Signature {
     }
 }
 
-fn parse_signature(s: &str) -> Result<Signature, GitError> {
+/// `Name <email> timestamp tz`, as a commit header and `git var` write it.
+pub fn parse_signature(s: &str) -> Result<Signature, GitError> {
     // Format: "Name <email> timestamp tz"
     let lt = s
         .find('<')

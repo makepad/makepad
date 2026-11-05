@@ -15,7 +15,7 @@
 //! | `id=1a2` / `#1a2` | the node id |
 //! | `class=Button` | the widget type |
 //! | `path=a.b` | the widget path ends with these segments |
-//! | `nth=2` | (selection) the third match in tree order |
+//! | `nth=2` | (selection) the third match of the terms before it, in tree order; the terms after it test that node |
 //! | bare word | `text~=word` |
 //!
 //! Values with spaces are quoted: `name="Save as"`.
@@ -42,6 +42,8 @@ enum Term {
 pub struct Query {
     terms: Vec<Term>,
     pub nth: Option<usize>,
+    /// How many of `terms` came before `nth`: those choose among the nodes, the rest test the chosen one.
+    before_nth: usize,
 }
 
 /// Splits on spaces, keeping `key="a b"` together.
@@ -141,6 +143,7 @@ impl Query {
                 "path" => Term::Path(val.split('.').map(str::to_string).collect()),
                 "nth" => {
                     q.nth = Some(val.parse().map_err(|_| format!("nth wants a number, got `{val}`"))?);
+                    q.before_nth = q.terms.len();
                     continue;
                 }
                 _ => return Err(format!("unknown query key `{key}` (role name value text state action id class path nth)")),
@@ -155,44 +158,57 @@ impl Query {
     }
 
     pub fn matches(&self, n: &Node) -> bool {
-        self.terms.iter().all(|t| match t {
-            Term::Roles(r) => r.contains(&n.role),
-            Term::Name(s, true) => n.name.to_lowercase().contains(s),
-            Term::Name(s, false) => n.name == *s,
-            Term::Value(s, c) => {
-                let v = if n.value.is_empty() { n.text.as_ref().map(|t| t.content.as_str()).unwrap_or("") } else { &n.value };
-                if *c { v.to_lowercase().contains(s) } else { v == s }
-            }
-            Term::Text(s) => {
-                n.name.to_lowercase().contains(s) || n.value.to_lowercase().contains(s) || n.description.to_lowercase().contains(s)
-                    || n.text.as_ref().map(|t| t.content.to_lowercase().contains(s)).unwrap_or(false)
-            }
-            Term::State(on, off) => (on.is_empty() || n.states.contains(*on)) && !n.states.intersects(*off),
-            Term::Visible(expected) => (!n.bounds.is_empty() && !n.states.intersects(States::HIDDEN | States::OFFSCREEN)) == *expected,
-            Term::Toggle(toggle, neg) => (n.toggle == *toggle) != *neg,
-            Term::Action(a) => n.actions.contains(*a),
-            Term::Id(id) => n.id == *id,
-            Term::Class(c) => n.class == *c,
-            Term::Path(segs) => {
-                let p: Vec<&str> = n.path.split('.').collect();
-                p.len() >= segs.len() && p[p.len() - segs.len()..].iter().zip(segs).all(|(a, b)| a == b)
-            }
-        })
+        terms_match(&self.terms, n)
     }
 
     /// Matching nodes in tree order (all of them; `nth` picks one).
     pub fn find<'a>(&self, tree: &'a Tree) -> Vec<&'a Node> {
+        self.find_in([((), tree)]).into_iter().map(|(_, n)| n).collect()
+    }
+
+    /// [`Query::find`] over several trees in their order (`nth` counts across them), each node with
+    /// its tree's key.
+    pub fn find_in<'a, K: Copy>(&self, trees: impl IntoIterator<Item = (K, &'a Tree)>) -> Vec<(K, &'a Node)> {
+        let (choose, test) = if self.nth.is_some() { self.terms.split_at(self.before_nth) } else { (&self.terms[..], &[][..]) };
         let mut out = Vec::new();
-        tree.walk(|n, _| {
-            if self.matches(n) {
-                out.push(n)
-            }
-        });
+        for (key, tree) in trees {
+            tree.walk(|n, _| {
+                if terms_match(choose, n) {
+                    out.push((key, n))
+                }
+            });
+        }
         match self.nth {
-            Some(i) => out.into_iter().nth(i).into_iter().collect(),
+            Some(i) => out.into_iter().nth(i).filter(|(_, n)| terms_match(test, n)).into_iter().collect(),
             None => out,
         }
     }
+}
+
+fn terms_match(terms: &[Term], n: &Node) -> bool {
+    terms.iter().all(|t| match t {
+        Term::Roles(r) => r.contains(&n.role),
+        Term::Name(s, true) => n.name.to_lowercase().contains(s),
+        Term::Name(s, false) => n.name == *s,
+        Term::Value(s, c) => {
+            let v = if n.value.is_empty() { n.text.as_ref().map(|t| t.content.as_str()).unwrap_or("") } else { &n.value };
+            if *c { v.to_lowercase().contains(s) } else { v == s }
+        }
+        Term::Text(s) => {
+            n.name.to_lowercase().contains(s) || n.value.to_lowercase().contains(s) || n.description.to_lowercase().contains(s)
+                || n.text.as_ref().map(|t| t.content.to_lowercase().contains(s)).unwrap_or(false)
+        }
+        Term::State(on, off) => (on.is_empty() || n.states.contains(*on)) && !n.states.intersects(*off),
+        Term::Visible(expected) => (!n.bounds.is_empty() && !n.states.intersects(States::HIDDEN | States::OFFSCREEN)) == *expected,
+        Term::Toggle(toggle, neg) => (n.toggle == *toggle) != *neg,
+        Term::Action(a) => n.actions.contains(*a),
+        Term::Id(id) => n.id == *id,
+        Term::Class(c) => n.class == *c,
+        Term::Path(segs) => {
+            let p: Vec<&str> = n.path.split('.').collect();
+            p.len() >= segs.len() && p[p.len() - segs.len()..].iter().zip(segs).all(|(a, b)| a == b)
+        }
+    })
 }
 
 #[cfg(test)]
@@ -231,5 +247,18 @@ mod tests {
         assert!(Query::parse("role=nope").is_err());
         assert!(Query::parse("bogus=1").is_err());
         assert_eq!(Query::parse("nth=2").unwrap().nth, Some(2));
+    }
+
+    #[test]
+    fn nth_chooses_among_the_terms_before_it_and_the_rest_test_that_node() {
+        let check = |id: u64, toggle: Toggle| Node { id: NodeId(id), class: "CheckBox".into(), toggle, ..Default::default() };
+        let root = Node { id: NodeId(1), children: vec![NodeId(2), NodeId(3), NodeId(4)], ..Default::default() };
+        let mut tree = Tree::new();
+        tree.apply(TreeUpdate { root: NodeId(1), nodes: vec![root, check(2, Toggle::Off), check(3, Toggle::On), check(4, Toggle::On)], ..Default::default() });
+        let ids = |q: &str| Query::parse(q).unwrap().find(&tree).iter().map(|n| n.id).collect::<Vec<_>>();
+        assert_eq!(ids("class=CheckBox nth=1 state=checked"), vec![NodeId(3)]);
+        assert_eq!(ids("class=CheckBox nth=2 state=checked"), vec![NodeId(4)], "not the third checked one");
+        assert_eq!(ids("class=CheckBox nth=0 state=checked"), vec![], "the first one is not checked");
+        assert_eq!(ids("class=CheckBox state=checked nth=1"), vec![NodeId(4)], "the second checked one");
     }
 }
