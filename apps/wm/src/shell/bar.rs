@@ -406,7 +406,7 @@ pub fn start_status_sampler(
     ),
     makepad_widgets::makepad_platform::thread::SpawnError,
 > {
-    use makepad_widgets::makepad_platform::thread::{CancellationToken, SignalToUI, ThreadOptions};
+    use makepad_widgets::makepad_platform::thread::{CancellationToken, ThreadOptions};
     let (tx, rx) = std::sync::mpsc::channel();
     let worker = spawner.spawn_worker(
         ThreadOptions {
@@ -429,10 +429,12 @@ pub fn start_status_sampler(
                     status.network = sample_network();
                     status.bluetooth = sample_bluetooth();
                 }
+                // No UI signal: the WM's second tick takes the newest
+                // sample (`update_status`); waking it for each one woke an
+                // idle desktop once a second for nothing.
                 if tx.send(status.clone()).is_err() {
                     break;
                 }
-                SignalToUI::set_ui_signal();
                 round = round.wrapping_add(1);
                 let _ = wait.wait_until(makepad_widgets::Cx::monotonic_now() + 1.0);
             }

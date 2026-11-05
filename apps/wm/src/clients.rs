@@ -13,8 +13,7 @@
 //! like studio launches run targets.
 //!
 //! **wm compiles nothing behind the person's back.** A child is always an
-//! existing binary: out of a checkout (a developer's clone, or the source
-//! a Makepad Builder downloaded and starts wm in) the release binary
+//! existing binary: out of a checkout the release binary
 //! cargo built, else the sibling of an installed wm. The warm pool, the
 //! AI pane at startup and previews start only apps that are built and up
 //! to date, so no build of wm's own ever holds cargo's lock. The person
@@ -231,7 +230,7 @@ pub fn find_app(id: &str) -> Option<AppDef> {
     // With), the pacing/protocol rigs (splash, counter) and the assistant,
     // which the WM seats in the pane slot through its own path, never
     // `launch_app` (AlwaysNew keeps launch-or-focus from "focusing" a
-    // pane). Builder-only entries are not WM clients.
+    // pane). Runner-only entries are not WM clients.
     makepad_app_registry::find(id)
         .filter(|entry| entry.wm_launchable && !entry.menu_visible)
         .map(registry_app)
@@ -287,14 +286,14 @@ pub fn with_app_artwork(mut sheet: makepad_widgets::desktop_style::StyleSheet) -
 }
 
 /// The checkout root (`makepad_app_registry::repo_root`: `MAKEPAD_WM_ROOT`,
-/// else a Builder installation's sources, else the checkout above the
+/// else the checkout above the
 /// running exe or at/above the cwd). The WM and Stage share this answer.
 pub fn repo_root() -> Option<PathBuf> {
     makepad_app_registry::repo_root()
 }
 
 /// The binary that starts `app` without compiling anything
-/// (`makepad_app_registry::built_binary`: a Builder's published one, the
+/// (`makepad_app_registry::built_binary`: the
 /// checkout's release build, or an installed sibling). None: not built.
 pub fn built_binary(app: &AppDef, root: Option<&Path>) -> Option<PathBuf> {
     makepad_app_registry::built_binary(&app.target(), root)
@@ -506,6 +505,11 @@ impl WarmPool {
 
     /// Every warm client, whatever the app — the shutdown / close-all
     /// paths walk this so no pooled process is ever left behind.
+    /// No standby instance at all.
+    pub fn is_empty(&self) -> bool {
+        self.ready.values().all(|v| v.is_empty())
+    }
+
     pub fn clients(&self) -> Vec<ClientId> {
         let mut all: Vec<ClientId> = self.ready.values().flatten().copied().collect();
         all.sort_unstable();
@@ -1110,12 +1114,12 @@ mod tests {
         assert!(args.windows(2).any(|w| w == ["-p", "makepad-app-terminal"]), "{:?}", args);
         assert!(args.windows(2).any(|w| w == ["--bin", "makepad-app-terminal"]), "{:?}", args);
         // Starting it runs the release binary in the checkout's target
-        // (CARGO_TARGET_DIR when set: the Builder's shared one).
+        // (CARGO_TARGET_DIR when set).
         let binary = makepad_app_registry::checkout_binary(&app.target(), &root, None);
         let exe = if cfg!(windows) { "makepad-app-terminal.exe" } else { "makepad-app-terminal" };
         assert_eq!(binary, root.join("target/release").join(exe));
-        let shared = makepad_app_registry::checkout_binary(&app.target(), &root, Some(std::ffi::OsStr::new("/builder/target")));
-        assert_eq!(shared, std::path::Path::new("/builder/target/release").join(exe));
+        let shared = makepad_app_registry::checkout_binary(&app.target(), &root, Some(std::ffi::OsStr::new("/shared/target")));
+        assert_eq!(shared, std::path::Path::new("/shared/target/release").join(exe));
         let missing = std::env::temp_dir().join(format!("wm-release-test-{}", std::process::id()));
         // A checkout without the build has nothing to start, unless an absolute CARGO_TARGET_DIR
         // (a target shared by checkouts) already holds the binary: then that one starts.
@@ -1128,8 +1132,8 @@ mod tests {
 
     #[test]
     fn dep_info_paths_keep_escaped_spaces() {
-        let paths: Vec<String> = dep_info_paths(r"C:\b\makepad-builder\ (2)\a.rs /x/b.rs  C:\c.rs").collect();
-        assert_eq!(paths, [r"C:\b\makepad-builder (2)\a.rs", "/x/b.rs", r"C:\c.rs"]);
+        let paths: Vec<String> = dep_info_paths(r"C:\b\makepad-runner\ (2)\a.rs /x/b.rs  C:\c.rs").collect();
+        assert_eq!(paths, [r"C:\b\makepad-runner (2)\a.rs", "/x/b.rs", r"C:\c.rs"]);
     }
 
     #[test]
@@ -1161,9 +1165,8 @@ mod tests {
     }
 
     #[test]
-    fn a_builder_source_without_local_is_a_checkout() {
-        // The Makepad Builder starts wm in the source it downloaded: the
-        // workspace with apps/wm in it, and no developer's local/.
+    fn a_source_without_local_is_a_checkout() {
+        // The workspace with apps/wm in it, and no developer's local/.
         let root = std::env::temp_dir().join(format!("wm-checkout-test-{}", std::process::id()));
         let app = root.join("apps/terminal/src");
         std::fs::create_dir_all(&app).unwrap();

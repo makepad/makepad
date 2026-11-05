@@ -1106,9 +1106,9 @@ mod tests {
 
     #[test]
     fn tabs_have_short_names() {
-        assert_eq!(short_name("n165", "192.0.2.76"), "n165");
-        assert_eq!(short_name("192.0.2.76:8790", "192.0.2.76"), "n165");
-        assert_eq!(short_name("192.0.2.59", "192.0.2.59"), "n123");
+        assert_eq!(short_name("studio", "192.0.2.76"), "studio");
+        assert_eq!(short_name("192.0.2.76:8790", "192.0.2.76"), "n76");
+        assert_eq!(short_name("192.0.2.59", "192.0.2.59"), "n59");
         assert_eq!(short_name("127.0.0.1:18796", "127.0.0.1"), "local");
         assert_eq!(short_name("mini.lan", "mini.lan"), "mini");
     }

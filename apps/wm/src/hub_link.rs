@@ -98,6 +98,12 @@ impl HubLink {
         None
     }
 
+    /// The WM session restart its app's start needs (the user's service manager is down).
+    #[cfg(target_os = "linux")]
+    pub fn session_restart(&self) -> Option<crate::hub_app::SessionRestart> {
+        self.link.as_ref()?.as_ref()?.app.session_restart().cloned()
+    }
+
     /// The hub is off in the node's settings (`enabled = off`, its Quit): the bar keeps a dim
     /// slot whose click starts it. False for a WM that runs none of its own (hidden, in-process).
     pub fn is_off(&self, processes: bool) -> bool {

@@ -37,6 +37,12 @@ impl DevhubLink {
         None
     }
 
+    /// The WM session restart its start needs (the user's service manager is down).
+    #[cfg(target_os = "linux")]
+    pub fn session_restart(&self) -> Option<crate::hub_app::SessionRestart> {
+        self.app.as_ref()?.as_ref()?.session_restart().cloned()
+    }
+
     /// Its off slot was pressed: on again in its settings, and started.
     pub fn start_from_launcher(&mut self, processes: bool, now: f64) -> bool {
         #[cfg(not(target_arch = "wasm32"))]

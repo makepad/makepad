@@ -2,20 +2,26 @@
 
 [app.linux]
 capture = ""
-date = "2026-11-03"
-digest = "24be3a533f8384b8cc1f953488286c93856c9bfc220bcd9f2c16714f5d2cf13a"
-main = "19f51e11f550a7350a096a33669c713308d2d8a5"
-work = "699beed5cba1931f3164b4dc8fdc57e884bc09f0"
+date = "2026-11-05"
+digest = "f0f852e91372bb9437eb22096aa2d84fb461dcec7f201848ce5c28fa98f14be5"
+main = "bac634fd1103ed3453797a04fb1bdf0dd8a1ba9c"
+work = "7954fb8a65f663048b1ea7dfcbc6e4a8c5d65464"
 
 [app.windows]
 capture = ""
-date = "2026-11-03"
-digest = "8bae74f517e6c6a90cd774105d71d4a0c9dd8f533c3e2dd3ff58917ad205a5fb"
-main = "3514cd6f8a9c6c0ce8c7f0fb2289cd47dbd720e2"
-work = "056c349d41c58b1eb1d4e8bfc7080a940dc0ed18"
+date = "2026-11-04"
+digest = "eede253d654c5dc7c4608233d8ff498b66487e542ebec60fec4e108794cc2f12"
+main = "8d8eb5056ab18d05787445affd1865dfdc0c3e9a"
+work = "3df32488ecf3a9bad5517836b05b71a6ea89d16b"
+
+[job.jit_05.linux]
+date = "2026-11-04"
+digest = "593eb196bb2bcdeed11d0a556635f4bbb8da06d265e5c14cbef37236f192434d"
+main = "5f4597d2fb65f354696542829214d4c6b99c39ab"
+work = "7d8695372c6cd232c174a43ee12e1ee51ba72023"
 
 [tests.linux]
-date = "2026-11-02"
-digest = "d62add338a3c4ed550c8ebaf4b4188f18fcf7df5ae06eb327e2ba7f05a84b312"
-main = "f74166da6dfdb67f974ba0643cae2eab1c598535"
-work = "887855c1f9abe2cff0add968d8cc4fa6c79fc716"
+date = "2026-11-04"
+digest = "8b7d51826e3494a84394cd380e64c7a06e0f9c9a4a75a1515735b4e4b81496ec"
+main = "34d2bfcf5593f48147a9bf8d7368e5a5a71e19d8"
+work = "a8bafff9f9ccd73f40684985e39d86f3435d8ea1"

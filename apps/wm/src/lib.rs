@@ -608,6 +608,13 @@ pub struct App {
     hub_link: HubLink,
     #[rust]
     devhub_link: DevhubLink,
+    /// The WM quits to restart its session for its services (`restart_session_for_services`):
+    /// its exit is 75, which its unit restarts.
+    #[rust]
+    session_restart: bool,
+    /// What the session restart waits for, as last told.
+    #[rust]
+    session_restart_said: Option<String>,
     /// The apps' tray icons in the bar's tray area (`trays`).
     #[rust]
     trays: WmTrays,
@@ -789,10 +796,15 @@ pub struct App {
     /// a tile (see `WarmFrame`).
     #[rust]
     warm_frames: HashMap<ClientId, WarmFrame>,
-    /// Drives the dormant instances (see `pump_warm`).
+    /// Drives the dormant instances (see `pump_warm`): a one-shot timer
+    /// for the earliest Tick a connected warm instance is owed, off while
+    /// none is (`arm_warm_pump`).
     #[rust]
     warm_tick: Timer,
-    /// What the bar last showed (`update_bar`): it redraws only when that
+    /// When `warm_tick` fires.
+    #[rust]
+    warm_tick_due: f64,
+    /// What the bar last showed (`refresh_bar`): it redraws only when that
     /// changes, not on every second's tick — an idle phone repainted once a
     /// second for a clock that shows minutes.
     #[rust]
@@ -1481,7 +1493,7 @@ impl App {
     /// `StudioToApp::Tick` — it flushes its platform ops there (which is
     /// how a window is ANNOUNCED at all), runs its timers, draws and
     /// repaints — and between ticks it blocks on its socket at no cost
-    /// whatsoever. A tile pumps its child every 8ms; a warm instance has
+    /// whatsoever. A tile ticks its child at the WM's frames; a warm instance has
     /// no tile, so the WM pumps it here instead: at the pump rate until it
     /// has drawn its first frame — without those first ticks it would
     /// never even send `CreateWindow`, and the pool would deadlock waiting
@@ -1490,7 +1502,7 @@ impl App {
     /// own half of the deal: no samplers, no refresh while dormant) that
     /// is what keeps a cached task manager from burning a core in the
     /// background.
-    fn pump_warm(&mut self, _cx: &mut Cx) {
+    fn pump_warm(&mut self, cx: &mut Cx) {
         let now = host::now();
         // A retired framebuffer outlives adoption only long enough for any
         // frame still in flight against it.
@@ -1502,24 +1514,11 @@ impl App {
         });
         let warm = self.warm_pool.clients();
         self.warm_last_tick.retain(|client, _| warm.contains(client));
-        let due: Vec<ClientId> = warm
-            .into_iter()
-            .filter(|client| {
-                // Still coming up (no window yet), or it has a framebuffer
-                // and has not drawn into it: full rate. Anything else —
-                // drawn, or a platform where a warm instance cannot be
-                // handed a framebuffer at all — only needs the heartbeat.
-                let warming = match self.warm_frames.get(client) {
-                    None => true,
-                    Some(frame) => frame.swapchain.is_some() && !frame.presented,
-                };
-                match self.warm_last_tick.get(client) {
-                    Some(t) if !warming => now - *t >= WARM_HEARTBEAT,
-                    _ => true,
-                }
-            })
-            .collect();
-        for client in due {
+        for client in warm {
+            // A timer may fire a little early: within a few ms counts as due.
+            if self.warm_due(client) > now + 0.005 {
+                continue;
+            }
             let Some(sender) = self
                 .state_mut()
                 .clients
@@ -1527,13 +1526,14 @@ impl App {
                 .and_then(|s| s.sender.clone())
             else {
                 // Not connected yet (still building, still starting): the
-                // pump has nothing to send it down.
+                // pump has nothing to send it down. Its connection arms the
+                // pump again (`arm_warm_pump` at the end of `drain_hub`).
                 continue;
             };
             #[cfg(not(target_os = "linux"))]
             if let Some(frame) = self.warm_frames.get(&client).filter(|frame| !frame.presented) {
                 if let Some(swapchain) = frame.swapchain.as_ref() {
-                    if let Some(shared) = shared_swapchain_from_host_swapchain(swapchain, _cx) {
+                    if let Some(shared) = shared_swapchain_from_host_swapchain(swapchain, cx) {
                         send_to_app(&sender, vec![StudioToApp::Swapchain(shared)]);
                     }
                 }
@@ -1541,6 +1541,55 @@ impl App {
             self.warm_last_tick.insert(client, now);
             send_to_app(&sender, vec![StudioToApp::Tick]);
         }
+        self.arm_warm_pump(cx);
+    }
+
+    /// When the warm instance `client` is next owed a Tick: at once if it
+    /// was never ticked; at the pump rate while it is still coming up (no
+    /// window yet), or has a framebuffer it has not drawn into; at the
+    /// heartbeat once it has drawn, or on a platform where a warm instance
+    /// cannot be handed a framebuffer at all.
+    fn warm_due(&self, client: ClientId) -> f64 {
+        let warming = match self.warm_frames.get(&client) {
+            None => true,
+            Some(frame) => frame.swapchain.is_some() && !frame.presented,
+        };
+        match self.warm_last_tick.get(&client) {
+            Some(t) => t + if warming { WARM_PUMP } else { WARM_HEARTBEAT },
+            None => 0.0,
+        }
+    }
+
+    /// Arm the pump for the earliest Tick a connected warm instance is owed,
+    /// and leave it off while none is: no pool, an empty one, or instances
+    /// still building (their connection arms it).
+    fn arm_warm_pump(&mut self, cx: &mut Cx) {
+        let next = match self.state.as_ref() {
+            Some(state) if !self.warm_pool.is_empty() => self
+                .warm_pool
+                .clients()
+                .into_iter()
+                .filter(|client| state.clients.get(client).is_some_and(|slot| slot.sender.is_some()))
+                .map(|client| self.warm_due(client))
+                .reduce(f64::min),
+            _ => None,
+        };
+        let Some(due) = next else {
+            if !self.warm_tick.is_empty() {
+                cx.stop_timer(self.warm_tick);
+                self.warm_tick = Timer::empty();
+            }
+            return;
+        };
+        // Armed for this moment or a sooner one already: that firing re-arms.
+        if !self.warm_tick.is_empty() && self.warm_tick_due <= due + 0.0005 {
+            return;
+        }
+        if !self.warm_tick.is_empty() {
+            cx.stop_timer(self.warm_tick);
+        }
+        self.warm_tick_due = due;
+        self.warm_tick = cx.start_timeout((due - host::now()).max(0.0));
     }
 
     /// The pool's honest measurement: how long from the launch gesture to
@@ -3381,6 +3430,8 @@ impl App {
                 }
             }
         }
+        // a warm instance connected, announced its window or drew
+        self.arm_warm_pump(cx);
     }
 
     /// The app `client` made another window (`window_id`): a window of its own on the desk,
@@ -4084,11 +4135,17 @@ impl App {
         }
         // MAKEPAD_WM_BACKDROP names the procedural background to start on;
         // the warp desktop's own is the warp grid.
+        // No procedural layer on the phone: its desk paints its own wallpaper over the whole
+        // screen (mobile_surface.rs draw_wallpaper, opaque), so the layer under it is never seen,
+        // and on an Adreno 610 the warp grid alone was 44 ms of GPU a frame (13 fps; 28 without).
+        // MAKEPAD_WM_BACKDROP=plain asks for the same anywhere; a named kind still overrides.
+        let mobile = self.state_mut().style.target.mobile();
+        let plain = mobile || std::env::var("MAKEPAD_WM_BACKDROP").is_ok_and(|n| n == "plain");
         let choice = backdrop::env_kind()
             .filter(|_| index == 0 && !classic)
-            .or_else(|| (index == 0 && !classic).then_some(backdrop::Kind::WarpGrid))
+            .or_else(|| (index == 0 && !classic && !plain).then_some(backdrop::Kind::WarpGrid))
             .map(backdrop::Choice::Procedural)
-            .unwrap_or_else(|| choices[index % choices.len()].clone());
+            .unwrap_or_else(|| if plain && index == 0 { backdrop::Choice::Plain } else { choices[index % choices.len()].clone() });
         let kind = match &choice {
             backdrop::Choice::Procedural(kind) => Some(*kind),
             _ => None,
@@ -4461,6 +4518,36 @@ impl App {
         self.update_bar(cx);
     }
 
+    /// A service of the WM cannot start: the user's service manager is down (`hub_app::Manager`),
+    /// and only a new login session starts it again. The WM restarts its session for it (exit 75,
+    /// which its unit restarts; the new session's scope pulls the manager in) once no app holds
+    /// unsaved work; until then the person at the screen is told what it waits for.
+    #[cfg(target_os = "linux")]
+    fn restart_session_for_services(&mut self, cx: &mut Cx) {
+        if self.session_restart {
+            return;
+        }
+        let Some(want) = self.hub_link.session_restart().or_else(|| self.devhub_link.session_restart()) else { return };
+        let said = match hub_app::session_step(&want, &makepad_app_registry::machine::unsaved_work()) {
+            hub_app::SessionStep::Restart(why) => match hub_app::begin_session_restart(&crate::theme::makepad_home().join("wm"), &want) {
+                Ok(()) => {
+                    log!("wm: restarting the desktop session: {why}");
+                    self.session_restart = true;
+                    cx.quit();
+                    return;
+                }
+                // unrecorded, the next WM could restart again for the same outage
+                Err(e) => format!("{why}, but the WM cannot record the restart ({e}): not restarted"),
+            },
+            hub_app::SessionStep::Waits(text) => text,
+        };
+        if self.session_restart_said.as_deref() != Some(said.as_str()) {
+            log!("wm: desktop session restart: {said}");
+            self.notify(cx, "Desktop session restart", &said);
+            self.session_restart_said = Some(said);
+        }
+    }
+
     /// This node's AI hub: the app's start and restart, the yield report, and whether a game
     /// is being played. Once a second (the status tick).
     fn hub_poll(&mut self, cx: &mut Cx) {
@@ -4468,6 +4555,8 @@ impl App {
         let pool = cx.task_pool();
         self.hub_link.tick(processes, host::now(), &pool);
         self.devhub_link.tick(processes, host::now());
+        #[cfg(target_os = "linux")]
+        self.restart_session_for_services(cx);
         // Off (its Quit): the bar keeps a dim slot to start it again, until its own tray is back.
         let has_tray = |app: &str| self.state.as_ref().is_some_and(|s| s.clients.iter().any(|(id, c)| c.service && c.app == app && self.trays.has_tray(*id as u64)));
         let (hub_tray, devhub_tray) = (has_tray(clients::HUB_SERVICE_APP), has_tray(clients::DEVHUB_SERVICE_APP));
@@ -4684,9 +4773,24 @@ impl App {
         }
     }
 
+    /// The bar follows a change of the desktop (a window, a workspace, a style): when what it
+    /// shows changed, the desktop records again with it.
     fn update_bar(&mut self, cx: &mut Cx) {
+        if self.refresh_bar(cx) {
+            self.redraw_all(cx);
+        }
+    }
+
+    /// The bar takes the current readings and redraws on its own when what it shows changed
+    /// (true then): the second's tick, where a new clock minute or meter reading changes the
+    /// bar and nothing else, so the rest of the desktop and the scene's cached content stay.
+    fn refresh_bar(&mut self, cx: &mut Cx) -> bool {
         self.sync_bar_placement(cx);
         if let Some(clock)=self.bar_sample.clock.split_whitespace().find(|s|s.contains(':')).map(str::to_string) {
+            // a phone draws its clock on its own surface, not in the bar
+            if self.state_mut().phone.clock != clock && self.state_mut().style.target.mobile() {
+                self.redraw_all(cx);
+            }
             self.state_mut().phone.clock=clock;
         }
         // One segment per live screen on a multi-screen desktop, else the
@@ -4739,7 +4843,7 @@ impl App {
         let launcher = self.state.as_ref().is_some_and(|s| s.style.target == desktop::DesktopStyle::Omarchy);
         let shown = format!("{:?} {:?} {} {}", data, segments, window_controls, launcher);
         if shown == self.bar_shown {
-            return;
+            return false;
         }
         self.bar_shown = shown;
         let bar = self.ui.widget(cx, ids!(shell_bar));
@@ -4753,7 +4857,8 @@ impl App {
                 b.launcher = launcher;
             }
         }
-        self.redraw_all(cx);
+        bar.redraw(cx);
+        true
     }
 
     /// Put the bar where `shell::bar::bar_placement` says: on one screen
@@ -6521,15 +6626,9 @@ impl MatchEvent for App {
         let manifest = AiBus::os_manifest(&self.registry_apps());
         self.pane_links.open_os(cx, manifest);
         self.tick = cx.start_interval(1.0);
-        // The warm pool's pump. Started even when the pool is off: it
-        // costs one no-op wakeup and keeps the timer id stable.
-        self.warm_tick = cx.start_interval(WARM_PUMP);
-        // Nothing to pump (no pool, or a phone, which keeps none): no 20 Hz
-        // wakeup of an idle WM.
-        if !self.warm_pool.enabled() || cfg!(target_os = "android") {
-            cx.stop_timer(self.warm_tick);
-            self.warm_tick = Timer::empty();
-        }
+        // The warm pool's pump runs only while a warm instance is owed a
+        // Tick (`arm_warm_pump`): an idle WM with no standby instances
+        // wakes for none.
         if !self.warm_pool.enabled() {
             if self.processes() {
                 log!("wm: warm pool disabled (MAKEPAD_WM_NO_WARM)");
@@ -7360,7 +7459,7 @@ impl AppMain for App {
                 // restart (`RestartForceExitStatus`/`SuccessExitStatus`).
                 // An ordinary quit is left alone and still exits 0 through
                 // the platform's own shutdown path.
-                let code = linux_controls::exit_code(self.restart_requested());
+                let code = linux_controls::exit_code(self.restart_requested() || self.session_restart);
                 if code != 0 {
                     std::process::exit(code);
                 }
@@ -7404,7 +7503,7 @@ impl AppMain for App {
                 // A hotplug published since, or a lost screen's removal
                 // debounce running out.
                 self.sync_screens(cx);
-                self.update_bar(cx);
+                self.refresh_bar(cx);
                 // The pool fills itself here: at startup, after an
                 // adoption, and after any death it healed from. One spawn
                 // per second, so a cold desktop never forks four cargo
@@ -7413,8 +7512,12 @@ impl AppMain for App {
                     self.top_up_warm_pool(cx);
                 }
             }
-            if self.warm_tick.is_timer(te).is_some() && self.state.is_some() {
-                self.pump_warm(cx);
+            if self.warm_tick.is_timer(te).is_some() {
+                // one-shot: spent; the pump arms the next one it needs
+                self.warm_tick = Timer::empty();
+                if self.state.is_some() {
+                    self.pump_warm(cx);
+                }
             }
         }
         if let Event::Signal = event {

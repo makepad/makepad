@@ -322,7 +322,9 @@ impl App {
         self.history_place(cx);
         let snap = self.history_capture();
         let h = &mut self.state_mut().history;
-        if h.ring.snaps.last().is_some_and(|l| l.same(&snap)) {
+        // An empty desktop is never stored (`Ring::push`): settling it only
+        // re-armed the timer on every tick of an idle desktop.
+        if snap.wins.is_empty() || h.ring.snaps.last().is_some_and(|l| l.same(&snap)) {
             h.seen = None;
             return;
         }

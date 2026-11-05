@@ -2,16 +2,22 @@
 
 [app.linux]
 capture = ""
-date = "2026-11-03"
-digest = "a3df4c782acf0caca02e69ef3a52f85f9659792ca94d8d1498c3ed59e5a74035"
-main = "19f51e11f550a7350a096a33669c713308d2d8a5"
-work = "699beed5cba1931f3164b4dc8fdc57e884bc09f0"
+date = "2026-11-05"
+digest = "e96eeede4e4d95d98bb439cbcd69405b7a2b084c7ec056b2c6958616b46efcb5"
+main = "bac634fd1103ed3453797a04fb1bdf0dd8a1ba9c"
+work = "7954fb8a65f663048b1ea7dfcbc6e4a8c5d65464"
 
 [ci]
 box = "whole"
 
+[job.jit_05.linux]
+date = "2026-11-04"
+digest = "3ce9f489a0d2804d066050e511ed8907786598915f7c8a3d67552445e7fbbfed"
+main = "5f4597d2fb65f354696542829214d4c6b99c39ab"
+work = "7d8695372c6cd232c174a43ee12e1ee51ba72023"
+
 [tests.linux]
-date = "2026-11-02"
-digest = "a8866afe52639266418d64efda654dd20f47a769bf635fd8d89cd13212b92402"
-main = "f74166da6dfdb67f974ba0643cae2eab1c598535"
-work = "887855c1f9abe2cff0add968d8cc4fa6c79fc716"
+date = "2026-11-05"
+digest = "4dbd0695023c25b5ec5f559c4e4b971b24c89cee9c8489625323f170ce50cef2"
+main = "d47583cbdaf8c9b01e43ac1218a7b8fde373f93c"
+work = "76947602e9bddae66de9d80bd8a393a6c8073a17"

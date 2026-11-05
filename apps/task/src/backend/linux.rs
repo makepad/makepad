@@ -932,8 +932,8 @@ mod tests {
 
     #[test]
     fn passwd_maps_uid_to_name() {
-        let map = parse_passwd("root:x:0:0:root:/root:/bin/bash\nrik:x:1000:1000::/home/me:/bin/zsh\n#bad\n");
+        let map = parse_passwd("root:x:0:0:root:/root:/bin/bash\nsomeone:x:1000:1000::/home/me:/bin/zsh\n#bad\n");
         assert_eq!(map.get(&0).map(String::as_str), Some("root"));
-        assert_eq!(map.get(&1000).map(String::as_str), Some("rik"));
+        assert_eq!(map.get(&1000).map(String::as_str), Some("someone"));
     }
 }

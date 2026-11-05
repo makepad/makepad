@@ -21,7 +21,7 @@
 //! ground with a 2 px edge on its RIGHT. Open, the pane takes the pointer
 //! inside its card and the keyboard; closed, the strip is zero and the
 //! card sits just off the desk's left edge, still drawn and ticking (the
-//! child's 8 ms tick, the module's engine), so the assistant — started
+//! child's frame-paced Ticks, the module's engine), so the assistant — started
 //! with the desktop, never on the first F10 — is configured, presenting
 //! and answering before the pane ever slides in, and a turn in flight
 //! finishes behind a hidden one.
@@ -339,21 +339,22 @@ impl Widget for ShellAiPane {
             // not just this widget.
             cx.redraw_all();
         }
-        // The body is ticked whether or not the pane shows (the child's
-        // 8 ms tick timer is what makes it run at all; the module's engine
-        // pumps on every event); pointer and keys reach it only while the
-        // pane is on screen, so a hidden pane's stale area can never
-        // swallow a click meant for a tile.
-        if let Some(overlay) = self.overlay.clone() {
-            let pointer = matches!(event, Event::MouseMove(_) | Event::MouseDown(_) | Event::MouseUp(_) | Event::Scroll(_));
-            let keys = matches!(event, Event::KeyDown(_) | Event::KeyUp(_) | Event::TextInput(_));
-            if (!pointer && !keys) || self.showing() {
-                overlay.handle_event(cx, event, scope);
-            }
+        // The body hears every event whether or not the pane shows: the
+        // child's run view sends its Ticks at the WM's next frame (and polls
+        // its transport on a timer), the module's engine pumps on every
+        // event. A hidden run view that missed its frame event never ticked
+        // its child again: no frame ever came, and its "starting…" card
+        // kept the whole desktop redrawing. Pointer and keys reach the body
+        // only while the pane is on screen, so a hidden pane's stale area
+        // can never swallow a click meant for a tile.
+        let pointer = matches!(event, Event::MouseMove(_) | Event::MouseDown(_) | Event::MouseUp(_) | Event::Scroll(_));
+        let keys = matches!(event, Event::KeyDown(_) | Event::KeyUp(_) | Event::TextInput(_));
+        if (pointer || keys) && !self.showing() {
             return;
         }
-        if self.showing() || matches!(event, Event::Timer(_)) {
-            self.view.handle_event(cx, event, scope);
+        match self.overlay.clone() {
+            Some(overlay) => overlay.handle_event(cx, event, scope),
+            None => self.view.handle_event(cx, event, scope),
         }
     }
 

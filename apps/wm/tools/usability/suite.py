@@ -797,7 +797,7 @@ def main():
     ap.add_argument("root")
     ap.add_argument("--only", default="")
     ap.add_argument("--out", default=os.path.expanduser("~/lanes/wm-review-runs/usability"))
-    # A desk like the real screens (149, a laptop): apps open at the size they ask for
+    # A desk like real screens (a laptop): apps open at the size they ask for
     # (955d138a8b) -- Notes 1240x800, Code 1440x900 -- and fit on it beside each other.
     ap.add_argument("--desk", default="1920x1200", help="the WM window's size in points (the Rig's weston output)")
     ap.add_argument("--screens", default=None, help="fake per-screen desk like Linux direct ('' = nested single desk; default: one screen the size of --desk)")

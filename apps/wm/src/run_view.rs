@@ -338,6 +338,7 @@ impl MpRunView {
         self.redraw(cx);
     }
 
+    #[track_caller]
     fn redraw(&mut self, cx: &mut Cx) {
         self.draw_bg.redraw(cx);
         self.draw_app.redraw(cx);
@@ -597,12 +598,12 @@ impl Widget for MpRunView {
         }
         self.sync_quad(cx);
 
-        // A cargo build has no protocol target yet. Its launch panel must
-        // still be visible before the application connects.
+        // A cargo build has no protocol target yet: its launch panel shows
+        // until the application presents. The panel is still; it draws again
+        // when its status line changes (`set_status_line`) or the first frame
+        // lands (`presented_frame`), never on every frame while it waits.
         let waiting_for_framebuffer = !self.hosted.has_frame();
-        if waiting_for_framebuffer {
-            self.redraw(cx);
-        } else if self.redraw_countdown > 0 {
+        if !waiting_for_framebuffer && self.redraw_countdown > 0 {
             self.redraw_countdown -= 1;
             self.redraw(cx);
         }

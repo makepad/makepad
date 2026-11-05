@@ -180,7 +180,7 @@ mod win {
         ) -> Handle;
         fn SetServiceStatus(handle: Handle, status: *const ServiceStatus) -> i32;
     }
-    #[link(name = "wtsapi32")]
+    #[link(name = "wtsapi32", kind = "raw-dylib")]
     extern "system" {
         fn WTSQueryUserToken(session: u32, token: *mut Handle) -> i32;
     }

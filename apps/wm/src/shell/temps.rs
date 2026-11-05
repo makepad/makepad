@@ -519,7 +519,7 @@ pub fn start_sampler(
     ),
     makepad_widgets::makepad_platform::thread::SpawnError,
 > {
-    use makepad_widgets::makepad_platform::thread::{CancellationToken, SignalToUI, ThreadOptions};
+    use makepad_widgets::makepad_platform::thread::{CancellationToken, ThreadOptions};
     let (tx, rx) = std::sync::mpsc::channel();
     let worker = spawner.spawn_worker(
         ThreadOptions { name: Some("wm-temps".into()), ..Default::default() },
@@ -539,10 +539,11 @@ pub fn start_sampler(
                 let changed = sent.as_ref().is_none_or(|s| !Arc::ptr_eq(s, &sensors));
                 let frame = Frame { at, sensors: changed.then(|| sensors.clone()), values };
                 sent = Some(sensors);
+                // No UI signal: the WM's second tick takes the frames
+                // (`update_temps`).
                 if tx.send(frame).is_err() {
                     break;
                 }
-                SignalToUI::set_ui_signal();
                 round = round.wrapping_add(1);
                 let _ = wait.wait_until(at + 1.0);
             }

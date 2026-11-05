@@ -2,8 +2,9 @@
 // `ci.splash` in the checkout and runs it with the `ci` module in scope.
 //
 // The rule: this script decides every input. The vision model never chooses
-// what to send; `ci.accept(image, text)` hands it one grab and one acceptance
-// text, and it answers YES or NO with its reasons. Keep it basic: does the
+// what to send; `ci.accept(image, text)` hands it one grab and numbered
+// questions, each ending in the answer that passes it (`expected YES` or
+// `expected NO`, which the model never sees); it answers each YES or NO. Keep it basic: does the
 // WM come up, switch to macOS, and launch a terminal and a browser.
 
 // Any Linux or Mac box. Windows: the terminal step fails (open: the judge sees no terminal on the desk).
@@ -14,8 +15,6 @@ use mod.ci;
 
 // Said in every acceptance: hidden test instances draw this on every grab.
 let FRAME = "This is a screenshot of one application window. A thin bright red frame runs around the very edge of the picture; it is the test harness's marker and is not part of the application. Ignore it. "
-
-let VERDICT = " Write one short bullet line for each numbered point saying what you see. Then write the verdict as the last line, in exactly this form: VERDICT: YES or VERDICT: NO"
 
 ci.step("check other platforms", fn(){
     ci.check_targets({packages: ["makepad-app-wm"] targets: ci.host.targets})
@@ -36,8 +35,8 @@ ci.step("desktop is up", fn(){
     ci.sleep(3.0)
     wm.no_errors()
     let start = wm.grab("start")
-    ci.accept(start, FRAME + "The application is a desktop window manager: it draws a whole desktop inside its own window. A desktop is being shown when ALL of these are true: 1. The picture is not blank: it is not a single flat colour edge to edge. 2. There is a bar or panel along the top edge or the bottom edge, running most of the width, that contains small icons or text. 3. There is a large background region, a wallpaper or a flat desktop colour, taking most of the remaining area." + VERDICT)
-    ci.accept(start, FRAME + "Some failures paint text over the whole window: a red or black panel with words such as panic, error, thread, unwrap, failed, backtrace, or a long block of monospace text filling the screen. 1. Name the largest block of text you can see and where it is. 2. Say whether any of those words appear in it. YES means the window shows NO error panel and NO error words. NO means an error panel or those words are visible." + VERDICT)
+    ci.accept(start, FRAME + "The application is a desktop window manager: it draws a whole desktop inside its own window. 1. Is the whole picture one flat colour from edge to edge? expected NO 2. Is there a bar or panel along the top edge or the bottom edge, running most of the width, with small icons or text in it? expected YES 3. Does a wallpaper or a flat desktop colour fill most of the remaining area? expected YES")
+    ci.accept(start, FRAME + "Some failures paint text over the whole window: a red or black panel with words such as panic, error, thread, unwrap, failed or backtrace, or a long block of monospace text filling the screen. 1. Does such an error panel or block of text cover the window? expected NO 2. Do any of the words panic, error, thread, unwrap, failed or backtrace appear in the picture? expected NO")
 })
 
 ci.step("switch to the macOS style", fn(){
@@ -49,9 +48,9 @@ ci.step("switch to the macOS style", fn(){
     // still tweening: settle before looking.
     ci.sleep(2.5)
     let mac = wm.grab("macos")
-    ci.accept(mac, FRAME + "The application is a desktop window manager that can imitate several desktop styles. A macOS-style desktop has these features: 1. A thin menu bar across the very top of the picture, light or dark, with small text or a small mark at its left end and small status icons such as wifi, sound and battery at its right end; a clock may sit in the middle or at the right. 2. A dock: a single row of many colourful square app icons with rounded corners along the bottom edge, sitting on a translucent rounded shelf that is wider than it is tall. 3. It does NOT have a Windows-style taskbar with a Start button at the bottom-left. YES means points 1, 2 and 3 are all satisfied." + VERDICT)
-    ci.accept(mac, FRAME + "Look only at the top edge of this macOS-style desktop. Describe in three bullet lines: the strip's height compared to the picture, what is at its left end, and what is at its right end. YES means a thin bar runs across the full top edge with something at both ends. NO means no such bar." + VERDICT)
-    ci.accept(mac, FRAME + "Look only at the bottom quarter of this macOS-style desktop. Describe in two bullet lines: whether there is a single row of app icons, and whether that row sits on a rounded shelf or panel near the bottom edge. The row may be short and centred or long and nearly as wide as the picture; both are fine. YES means a row of at least four icons on a shelf near the bottom edge. NO otherwise." + VERDICT)
+    ci.accept(mac, FRAME + "The application is a desktop window manager that can imitate several desktop styles; this is its macOS style. 1. Is there a thin menu bar across the very top of the picture, light or dark, with small text or a small mark at its left end and small status icons such as wifi, sound and battery at its right end, and maybe a clock in the middle or at the right? expected YES 2. Is there a dock along the bottom edge: a single row of many colourful square app icons with rounded corners, sitting on a translucent rounded shelf that is wider than it is tall? expected YES 3. Is there a Windows-style taskbar with a Start button at the bottom-left? expected NO")
+    ci.accept(mac, FRAME + "Look only at the top edge of this macOS-style desktop. 1. Does a thin bar run across the full top edge? expected YES 2. Is there something at its left end, such as a small mark or text? expected YES 3. Is there something at its right end, such as status icons or a clock? expected YES")
+    ci.accept(mac, FRAME + "Look only at the bottom quarter of this macOS-style desktop. The row of icons may be short and centred or long and nearly as wide as the picture; both are fine. 1. Is there a single row of at least four app icons? expected YES 2. Does that row sit on a rounded shelf or panel near the bottom edge? expected YES")
 
 })
 
@@ -73,7 +72,7 @@ ci.step("launch the terminal", fn(){
     wm.key("ReturnKey")
     ci.sleep(2.0)
     let shot = wm.grab("terminal")
-    ci.accept(shot, FRAME + "It shows a desktop with app windows on it. A terminal window is a rectangular window whose content area is mostly one dark or one light flat colour with lines of monospace text starting at the left edge, usually with a prompt symbol such as $ or % or > on the last line, and a title bar above it. 1. For each window you can see, say its rough position and what its content looks like. 2. Say whether at least one of them is a terminal as described. YES means at least one terminal window is open." + VERDICT)
+    ci.accept(shot, FRAME + "It shows a desktop with app windows on it. A terminal window is a rectangular window whose content area is mostly one dark or one light flat colour with lines of monospace text starting at the left edge, usually with a prompt symbol such as $ or % or > on the last line, and a title bar above it. 1. Is at least one terminal window open, as described? expected YES")
 })
 
 ci.step("launch the browser", fn(){
@@ -85,7 +84,7 @@ ci.step("launch the browser", fn(){
     wm.wait_log("browser client * first frame in", 240.0)
     ci.sleep(4.0)
     let shot = wm.grab("browser")
-    ci.accept(shot, FRAME + "It shows a desktop with app windows on it. A web browser window has an address bar, a wide rounded text field near its top containing a web address or a search field, possibly a row of tabs above it, and a web page below it with headings, paragraphs, images or a search box. 1. For each window you can see, say its rough position and whether it has an address bar near its top. 2. Say whether at least one of them is a web browser as described. YES means at least one browser window is open." + VERDICT)
+    ci.accept(shot, FRAME + "It shows a desktop with app windows on it. A web browser window has an address bar, a wide rounded text field near its top containing a web address or a search field, possibly a row of tabs above it, and a page area below it. 1. Is at least one web browser window open, as described? expected YES")
 })
 
 // A hosted window keeps presenting and answering grabs through maximise, restore and resize,
@@ -107,7 +106,7 @@ ci.step("a hosted window presents and grabs through maximise, restore and resize
     wm.wait_log("calculator client * first frame in", 240.0)
     ci.sleep(2.0)
     let calc = wm.hosted("makepad-app-calculator")
-    let width = fn(){ calc.cmd("status").parse_json().w[0].sz[0] }
+    let width = fn(){ calc.size()[0] }
     let grabs = fn(step){ calc.grab("calculator-" + step) }
     let normal = width()
     grabs("normal")
@@ -120,7 +119,7 @@ ci.step("a hosted window presents and grabs through maximise, restore and resize
     ci.sleep(1.0)
     wm.hosted("makepad-app-clock").grab("clock-covered")
     let shot = wm.grab("desktop-calculator-maximised")
-    ci.accept(shot, FRAME + "It shows a desktop with one calculator window enlarged to fill most of the screen: a number display above a grid of round or square buttons with digits and operators. YES means the keypad is visible and large. NO means the screen is a flat colour, or the calculator is small." + VERDICT)
+    ci.accept(shot, FRAME + "It shows a desktop with app windows on it. 1. Does one calculator window fill most of the screen: a number display above a grid of round or square buttons with digits and operators? expected YES 2. Is the whole picture one flat colour? expected NO")
     calc.cmd("window k=maximize wait=1")
     ci.sleep(1.5)
     ci.check(width() < big - 50.0, "restore did not shrink the window")
