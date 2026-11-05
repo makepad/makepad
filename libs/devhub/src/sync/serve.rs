@@ -38,7 +38,7 @@ pub struct Sync {
     pub ctx: Arc<NodeCtx>,
     pub conf: Arc<SyncConf>,
     seen: Seen,
-    busy: Mutex<()>,
+    busy: crate::held::Held<()>,
     last: Mutex<String>,
     /// the JITs already told to restart onto the new binary: said once each, not every sync
     stale_said: Mutex<std::collections::BTreeSet<(u32, String)>>,
@@ -54,7 +54,7 @@ fn err_line(e: &str) -> String {
 
 impl Sync {
     pub fn new(ctx: Arc<NodeCtx>, conf: SyncConf) -> Arc<Sync> {
-        Arc::new(Sync { ctx, conf: Arc::new(conf), seen: Seen::default(), busy: Mutex::new(()), last: Mutex::new("null".into()), stale_said: Mutex::new(Default::default()) })
+        Arc::new(Sync { ctx, conf: Arc::new(conf), seen: Seen::default(), busy: crate::held::Held::new("sync apply", ()), last: Mutex::new("null".into()), stale_said: Mutex::new(Default::default()) })
     }
 
     fn event(&self, sev: Sev, line: String, detail: String) {
@@ -187,16 +187,25 @@ impl Sync {
     /// the order's safe restart rules; warm the work tree only when idle.
     fn apply(self: &Arc<Self>, o: &Order, out: &mut Vec<String>) {
         let Ok(_busy) = self.busy.try_lock() else { return out.push(err_line("an apply is running on this node")) };
-        // its hub does not restart under it (the build would start over, 10-30)
-        APPLYING.store(true, std::sync::atomic::Ordering::Release);
+        // its hub does not restart under it (the build would start over, 10-30). Said before it
+        // looks for a timed lease: a timed start marks first and looks at this after, so one of
+        // the two always sees the other.
+        APPLYING.store(true, std::sync::atomic::Ordering::SeqCst);
         struct Applying;
         impl Drop for Applying {
             fn drop(&mut self) {
-                APPLYING.store(false, std::sync::atomic::Ordering::Release);
+                APPLYING.store(false, std::sync::atomic::Ordering::SeqCst);
                 *BUILDING_JIT.lock().unwrap_or_else(|e| e.into_inner()) = None;
             }
         }
         let _applying = Applying;
+        // a timed lease runs alone: the deployment moves after it. Moved under it, the tree
+        // rebuilds under the run: this apply's build, and the hosted JIT apps' (the WM, the AI hub)
+        // own rebuilds of the makepad they run (rustc at 265% of a core outside a timed lease on a
+        // bench box, 11-03). The master asks again (`waits:`).
+        if let Some(timed) = timed_here() {
+            return out.push(err_line(&format!("waits: {timed} runs here: the deployment moves after it")));
+        }
         // the commits this apply builds the box's JIT of: a gate of exactly them waits for it
         if self.conf.jit_app().is_some() && o.get("build") != Some("off") {
             let at = |repo| o.get(repo).map(str::to_string).or_else(|| git::fleet_revision(&self.conf.checkout, repo));
@@ -361,7 +370,7 @@ impl Sync {
             let jit = self.conf.jit_app().is_some() && std::fs::create_dir_all(target.join("host")).and_then(|_| std::fs::write(target.join(crate::lease::loaders::MARK), "")).is_ok();
             let jit_built = || {
                 if jit {
-                    match crate::lease::loaders::publish(&self.conf.checkout, &target) {
+                    match crate::lease::loaders::publish(&self.conf.checkout, &target, None) {
                         Ok(Some(k)) => self.event(Sev::Info, format!("sync: kept the JIT binary {k} for this box's tree leases"), String::new()),
                         Ok(None) => {}
                         Err(e) => self.event(Sev::Info, format!("sync: the deployment's JIT is not kept: {e}"), String::new()),
@@ -579,14 +588,18 @@ impl Sync {
     /// runs here (a landing's gate must not see its node go away). The wait is reported once; one
     /// waiter per node, which restarts the moment the node is clear.
     fn wm_restart(self: &Arc<Self>, why: &str) -> Result<String, String> {
-        let blockers = restart_blockers();
-        if blockers.is_empty() {
-            return self.restart_wm_now(why);
+        if restart_blockers().is_empty() {
+            match self.restart_wm_now(why) {
+                Ok(line) => return Ok(line),
+                Err(NotRestarted::Failed(e)) => return Err(e),
+                // a lease that started while the hub built: waited for like any other
+                Err(NotRestarted::Blocked(_)) => {}
+            }
         }
         if !crate::lease::exec::writes_allowed() {
             return Err(format!("{} is not available for dev: WM restarts need its dev switch on", self.ctx.machine));
         }
-        let list = blockers.join("; ");
+        let list = restart_blockers().join("; ");
         if WM_RESTART_WAITING.swap(true, std::sync::atomic::Ordering::AcqRel) {
             return Ok(format!("{{\"wm_restart\":\"waiting\",\"for\":{}}}", json_str(&list)));
         }
@@ -596,13 +609,18 @@ impl Sync {
         let spawned = std::thread::Builder::new().name("devhub-wm-restart-wait".into()).spawn(move || {
             loop {
                 std::thread::sleep(Duration::from_secs(30));
-                if restart_blockers().is_empty() {
-                    break;
+                if !restart_blockers().is_empty() {
+                    continue;
                 }
-            }
-            let _busy = me.busy.lock().unwrap();
-            if let Err(e) = me.restart_wm_now(&format!("{why}, after the wait")) {
-                me.event(Sev::Err, format!("sync: WM restart refused: {e}"), String::new());
+                let _busy = me.busy.lock().unwrap();
+                match me.restart_wm_now(&format!("{why}, after the wait")) {
+                    Ok(_) => break,
+                    Err(NotRestarted::Blocked(list)) => me.event(Sev::Info, format!("sync: the WM restart ({why}) waits on: {list} (it started while the hub built)"), String::new()),
+                    Err(NotRestarted::Failed(e)) => {
+                        me.event(Sev::Err, format!("sync: WM restart refused: {e}"), String::new());
+                        break;
+                    }
+                }
             }
             WM_RESTART_WAITING.store(false, std::sync::atomic::Ordering::Release);
         });
@@ -616,30 +634,38 @@ impl Sync {
     /// Restarts the WM (and with it the AI Hub it starts) through its systemd service, with the
     /// sudoers rule's exact command (no password prompt). The services the WM supervises (this
     /// hub, the AI Hub) run in scopes of their own and outlive it; the marker lets a hub that
-    /// does restart report it.
-    fn restart_wm_now(&self, why: &str) -> Result<String, String> {
+    /// does restart report it. Its last look at what the restart ends and the restart run while
+    /// no lease starts here.
+    fn restart_wm_now(&self, why: &str) -> Result<String, NotRestarted> {
+        let failed = NotRestarted::Failed;
         if !crate::lease::exec::writes_allowed() {
-            return Err(format!("{} is not available for dev: WM restarts need its dev switch on", self.ctx.machine));
+            return Err(failed(format!("{} is not available for dev: WM restarts need its dev switch on", self.ctx.machine)));
         }
-        let svc = self.conf.wm_service.clone().ok_or("this node has no WM service (wm_service = none)")?;
+        let svc = self.conf.wm_service.clone().ok_or_else(|| failed("this node has no WM service (wm_service = none)".into()))?;
         // The new WM starts this hub again when the deployment moved its binary: built first, that
         // start is a no-op `cargo run` (a node's compiled 13 s behind a package-cache lock while its
         // hub refused connections, 11-02). A hub that does not build keeps the WM and this hub.
         #[cfg(feature = "checkout")]
-        crate::lease::exec::build_hub(&self.conf.checkout).map_err(|e| format!("the hub does not build at this deployment ({e}): the WM is not restarted, this hub keeps running"))?;
-        let _ = std::fs::create_dir_all(proto::home().join("sync"));
-        let _ = std::fs::write(Self::marker(), format!("{} {why}\n", proto::wall_ms()));
-        self.event(Sev::Info, format!("sync: restarting the WM ({svc}): {why}"), String::new());
-        let st = makepad_remote::group::command("sudo").args(["-n", "/usr/bin/systemctl", "restart", &svc]).stdin(std::process::Stdio::null()).output().map_err(|e| format!("sudo: {e}"))?;
-        if !st.status.success() {
+        crate::lease::exec::build_hub(&self.conf.checkout).map_err(|e| failed(format!("the hub does not build at this deployment ({e}): the WM is not restarted, this hub keeps running")))?;
+        crate::lease::exec::with_no_lease_starting(|| {
+            let blockers = restart_blockers();
+            if !blockers.is_empty() {
+                return Err(NotRestarted::Blocked(blockers.join("; ")));
+            }
+            let _ = std::fs::create_dir_all(proto::home().join("sync"));
+            let _ = std::fs::write(Self::marker(), format!("{} {why}\n", proto::wall_ms()));
+            self.event(Sev::Info, format!("sync: restarting the WM ({svc}): {why}"), String::new());
+            let st = makepad_remote::group::command("sudo").args(["-n", "/usr/bin/systemctl", "restart", &svc]).stdin(std::process::Stdio::null()).output().map_err(|e| failed(format!("sudo: {e}")))?;
+            if !st.status.success() {
+                let _ = std::fs::remove_file(Self::marker());
+                return Err(failed(format!("sudo -n systemctl restart {svc}: {}", proto::clean(String::from_utf8_lossy(&st.stderr).trim(), 300))));
+            }
+            let active = makepad_remote::group::command("systemctl").args(["is-active", &svc]).output().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
             let _ = std::fs::remove_file(Self::marker());
-            return Err(format!("sudo -n systemctl restart {svc}: {}", proto::clean(String::from_utf8_lossy(&st.stderr).trim(), 300)));
-        }
-        let active = makepad_remote::group::command("systemctl").args(["is-active", &svc]).output().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
-        let _ = std::fs::remove_file(Self::marker());
-        let line = format!("sync: WM restarted ({svc} {active})");
-        self.event(if active == "active" { Sev::Info } else { Sev::Err }, line, String::new());
-        Ok(format!("{{\"wm_restarted\":{},\"active\":{}}}", json_str(&svc), json_str(&active)))
+            let line = format!("sync: WM restarted ({svc} {active})");
+            self.event(if active == "active" { Sev::Info } else { Sev::Err }, line, String::new());
+            Ok(format!("{{\"wm_restarted\":{},\"active\":{}}}", json_str(&svc), json_str(&active)))
+        })
     }
 
     /// A hub that started after a WM restart it asked for reports it.
@@ -710,8 +736,16 @@ impl Sync {
 /// An apply (its tree's move, its build) runs on this node.
 static APPLYING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// The timed lease that runs on this node, if one does: the quiet mark its hub keeps while it
+/// lives (`<home>/quiet/<id>.cmd`, lease/exec.rs).
+fn timed_here() -> Option<String> {
+    std::fs::read_dir(proto::home().join("quiet")).into_iter().flatten().flatten()
+        .find(|e| e.path().extension().is_some_and(|x| x == "cmd"))
+        .map(|e| e.path().file_stem().map_or_else(|| "a timed lease".to_string(), |id| format!("timed lease {}", id.to_string_lossy())))
+}
+
 pub fn applying() -> bool {
-    APPLYING.load(std::sync::atomic::Ordering::Acquire)
+    APPLYING.load(std::sync::atomic::Ordering::SeqCst)
 }
 
 /// The commits (makepad, commercial) whose JIT this node's apply is building now.
@@ -725,6 +759,13 @@ pub fn building_jit(makepad: &str, commercial: Option<&str>) -> bool {
 
 /// A WM restart is waiting on this node (`Sync::wm_restart`).
 static WM_RESTART_WAITING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Why a WM restart did not happen.
+enum NotRestarted {
+    /// what it would end, seen in its last look (a lease that started after the wait's look)
+    Blocked(String),
+    Failed(String),
+}
 
 /// What a WM restart would cost now: the leases using the WM or landing ([`crate::lease::exec::on_the_wm`]), a user at the node,
 /// the unsaved work of its apps ([`crate::lease::exec::user_blockers`]), a viewer watching and any

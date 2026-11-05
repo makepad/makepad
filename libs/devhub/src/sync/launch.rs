@@ -373,12 +373,12 @@ mod tests {
 
     #[test]
     fn specs_and_env_policy() {
-        let s = parse(&["visible", "lan", "SANDBOX_HOST=1", "SANDBOX_BIND_IP=192.0.2.89", "sandbox", "--x"]).unwrap();
+        let s = parse(&["visible", "lan", "FOO_HOST=1", "FOO_BIND_IP=192.0.2.89", "foo", "--x"]).unwrap();
         assert!(s.visible && s.lan);
-        assert_eq!(s.env, vec![("SANDBOX_HOST".to_string(), "1".to_string()), ("SANDBOX_BIND_IP".to_string(), "192.0.2.89".to_string())]);
-        assert_eq!((s.app.as_str(), s.args.clone()), ("sandbox", vec!["--x".to_string()]));
+        assert_eq!(s.env, vec![("FOO_HOST".to_string(), "1".to_string()), ("FOO_BIND_IP".to_string(), "192.0.2.89".to_string())]);
+        assert_eq!((s.app.as_str(), s.args.clone()), ("foo", vec!["--x".to_string()]));
         for bad in ["LD_PRELOAD=x", "PATH=/tmp", "CARGO_HOME=/x", "RUSTFLAGS=-x", "MAKEPAD_HIDE_WINDOWS=0"] {
-            assert!(parse(&[bad, "sandbox"]).is_err(), "{bad}");
+            assert!(parse(&[bad, "foo"]).is_err(), "{bad}");
         }
         assert!(parse(&["hidden"]).is_err());
     }

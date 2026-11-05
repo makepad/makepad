@@ -24,25 +24,31 @@ pub fn git(cwd: Option<&Path>, git_dir: Option<&Path>, args: &[&str]) -> Result<
         cmd.arg("--git-dir").arg(g);
     }
     cmd.args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    if let Some(d) = cwd {
+    // git reads its working directory at start: never the hub's (proto::settle_cwd)
+    if let Some(d) = cwd.or(git_dir) {
         cmd.current_dir(d);
     }
     cmd.env("GIT_TERMINAL_PROMPT", "0").env_remove("GIT_DIR").env_remove("GIT_WORK_TREE").env_remove("GIT_INDEX_FILE");
-    let out = cmd.output().map_err(|e| format!("git: {e}"))?;
+    let out = cmd.output().map_err(|e| {
+        let err = format!("git: {e}");
+        crate::lease::caps::git_failed(&err);
+        err
+    })?;
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     } else {
         let err = String::from_utf8_lossy(&out.stderr);
         let err: Vec<&str> = err.lines().filter(|l| !l.trim().is_empty()).take(6).collect();
-        Err(format!("git {}: {}", args.first().unwrap_or(&""), err.join(" | ")))
+        let err = format!("git {}: {}", args.first().unwrap_or(&""), err.join(" | "));
+        crate::lease::caps::git_failed(&err);
+        Err(err)
     }
 }
 
 /// Whether HEAD of the worktree at `dir` has commits no ref of its repository holds (a worktree's
 /// HEAD is not a ref, so this is "work only this checkout has").
 pub fn unique_commits(dir: &Path) -> bool {
-    // every ref by glob (HEAD is not under refs/), not one argument per ref: repos hold thousands
-    git(Some(dir), None, &["rev-list", "-n", "1", "HEAD", "--not", "--glob=refs/*"]).map_or(true, |o| !o.trim().is_empty())
+    crate::gitread::head_unreferenced(dir)
 }
 
 /// Whether everything `rev` holds is in `work`: an ancestor of it, or content-equal (merging `rev` into

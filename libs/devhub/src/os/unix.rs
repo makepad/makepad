@@ -1,5 +1,5 @@
 //! Unix (Linux, macOS): a lease run is its own session (setsid), under `systemd-run --user --scope`
-//! when there is a user bus, at `nice -n 10`, optionally pinned with taskset; it is ended through
+//! when there is a user bus, at its kind's nice level, optionally pinned with taskset; it is ended through
 //! its process group.
 
 use std::path::{Path, PathBuf};
@@ -14,6 +14,28 @@ impl Hold {
     pub fn none() -> Hold {
         Hold
     }
+
+    /// A run an earlier hub started: its group is its leader's pid, nothing to open.
+    pub fn taken_back(_exit: &Path) -> Hold {
+        Hold
+    }
+}
+
+/// The words that take a run to nice `level` from this thread's: `nice` adds to what it starts from,
+/// and `nice -n 10` under the hub the WM ran at 10 capped every run at 19, where a program's thread
+/// classes are all one level (11-04). Nothing goes below this thread's level.
+fn nice_words(level: i32) -> Option<[String; 3]> {
+    let add = level - own_nice();
+    (add > 0).then(|| ["nice".to_string(), "-n".to_string(), add.to_string()])
+}
+
+/// This thread's nice level.
+pub fn own_nice() -> i32 {
+    extern "C" {
+        fn getpriority(which: i32, who: u32) -> i32;
+    }
+    // SAFETY: no pointers; who 0 is the calling thread (Linux levels are per thread).
+    unsafe { getpriority(0, 0) }
 }
 
 /// The argv a lease run executes: the scope (collected even on failure), nice and pinning wrappers, then `argv`.
@@ -23,10 +45,12 @@ impl Hold {
 /// sized themselves to that one CPU.
 /// `ram_max_gb`: the RAM the lease asked for itself (`--ram-gb`), the only hard memory cap; a
 /// measured ask only schedules, never kills a run that needs more than it measured.
-pub fn lease_argv(argv: Vec<String>, unit: Option<&str>, cpus: &str, share: Option<crate::lease::Cost>, ram_max_gb: Option<f64>) -> Vec<String> {
+pub fn lease_argv(argv: Vec<String>, unit: Option<&str>, nice: i32, cpus: &str, share: Option<crate::lease::Cost>, ram_max_gb: Option<f64>) -> Vec<String> {
     let mut full: Vec<String> = Vec::new();
     if let Some(u) = unit {
-        full.extend(["systemd-run", "--user", "--scope", "--collect", "--quiet"].map(String::from));
+        // the command's words stay its own: left to expand, systemd takes `$$` for `$` and `${X}`
+        // for its value before the shell they are written for sees them
+        full.extend(["systemd-run", "--user", "--scope", "--collect", "--quiet", "--expand-environment=no"].map(String::from));
         full.push(format!("--unit={u}"));
         if let Some(cost) = share.filter(|_| cfg!(target_os = "linux")) {
             full.extend(["-p".into(), format!("CPUWeight={}", (cost.cores * 100.0).round().clamp(1.0, 10_000.0) as u32)]);
@@ -34,7 +58,7 @@ pub fn lease_argv(argv: Vec<String>, unit: Option<&str>, cpus: &str, share: Opti
         }
         full.push("--".into());
     }
-    full.extend(["nice", "-n", "10"].map(String::from));
+    full.extend(nice_words(nice).into_iter().flatten());
     if !cpus.is_empty() {
         full.extend(["taskset".to_string(), "-c".to_string(), cpus.to_string()]);
     }
@@ -52,8 +76,9 @@ pub fn reset_failed_units(pattern: &str) {
 /// (`<id>-<n>.exit` beside `<id>-<n>.usage`) as it ends: a restarted hub (its self-update, at any moment) reads it, so no
 /// run waits for a hub restart and no restart loses an exit. In a scope it also keeps the scope
 /// alive until its final counters are saved, including runs shorter than a heartbeat. Arguments
-/// are positional shell parameters, never interpolated shell source (and never `${..}`, which
-/// `systemd-run` expands itself).
+/// are positional shell parameters, never interpolated shell source. The run's command goes first under a global OOM (Linux
+/// `oom_score_adj` 500, the wrapper keeps its own): the kernel took the user manager (100) and the
+/// session bus (200) before any lease process, and every service of the box died with them (11-03).
 pub fn metered_argv(argv: Vec<String>, unit: Option<&str>, usage: &Path) -> Vec<String> {
     let script = r#"usage=$1
 exitf=$2
@@ -76,9 +101,12 @@ record() {
         fi
     fi
 }
-trap 'status=$?; record > "$usage"; printf "%s\n" "$status" > "$exitf"' 0
+trap 'status=$?; record > "$usage"; printf "%s\n" "$status" > "$exitf.part"; mv -f "$exitf.part" "$exitf"' 0
 trap 'exit 143' TERM
-"$@" &
+(
+    if [ -w /proc/self/oom_score_adj ]; then printf '500\n' > /proc/self/oom_score_adj; fi
+    exec "$@"
+) &
 child=$!
 printf '%s\n' "$child" > "$usage.pid"
 wait "$child"
@@ -94,16 +122,187 @@ exit "$?"
 /// Current scope high-water mark and cumulative CPU. The in-scope wrapper saves these again
 /// at exit because systemd removes an empty scope before its parent can read the cgroup.
 pub fn scope_usage(pid: u32, start: u64, unit: Option<&str>, usage: &Path) -> (Option<u64>, Option<f64>) {
-    if !cfg!(target_os = "linux") { return (None, None); }
-    let Some(unit) = unit else { return (None, None) };
+    let Some(group) = scope_dir(pid, start, unit, usage) else { return (None, None) };
+    let peak = std::fs::read_to_string(group.join("memory.peak")).ok().and_then(|s| s.trim().parse().ok());
+    let cpu = std::fs::read_to_string(group.join("cpu.stat")).ok().and_then(|s| s.lines().find_map(|s| s.strip_prefix("usage_usec ").and_then(|s| s.parse::<f64>().ok()))).map(|us| us / 1_000_000.0);
+    (peak, cpu)
+}
+
+/// A run's scope cgroup (Linux, a run under `systemd-run --scope`): the path its wrapper wrote,
+/// else the live leader's own.
+fn scope_dir(pid: u32, start: u64, unit: Option<&str>, usage: &Path) -> Option<PathBuf> {
+    if !cfg!(target_os = "linux") { return None; }
+    let unit = unit?;
     let group = std::fs::read_to_string(usage.with_extension("usage.cgroup")).ok().map(|s| PathBuf::from(s.trim())).or_else(|| {
         if proc_start(pid) != Some(start) { return None; }
         std::fs::read_to_string(format!("/proc/{pid}/cgroup")).ok().and_then(|s| s.lines().find_map(|s| s.strip_prefix("0::").map(|s| Path::new("/sys/fs/cgroup").join(s.trim_start_matches('/')))))
     });
-    let Some(group) = group.filter(|g| g.starts_with("/sys/fs/cgroup") && g.file_name().is_some_and(|n| n == format!("{unit}.scope").as_str())) else { return (None, None) };
-    let peak = std::fs::read_to_string(group.join("memory.peak")).ok().and_then(|s| s.trim().parse().ok());
-    let cpu = std::fs::read_to_string(group.join("cpu.stat")).ok().and_then(|s| s.lines().find_map(|s| s.strip_prefix("usage_usec ").and_then(|s| s.parse::<f64>().ok()))).map(|us| us / 1_000_000.0);
-    (peak, cpu)
+    group.filter(|g| g.starts_with("/sys/fs/cgroup") && g.file_name().is_some_and(|n| n == format!("{unit}.scope").as_str()))
+}
+
+/// What a run has done so far ([`super::Activity`]): a scoped run its scope's (`cpu.stat`, and
+/// `io.stat`'s bytes), any other the processes of its group and their descendants; one measure
+/// per run, as two are not comparable. None: nothing (yet, or left) to measure.
+pub fn activity(pid: u32, start: u64, unit: Option<&str>, usage: &Path, _hold: &Hold) -> Option<super::Activity> {
+    if cfg!(target_os = "linux") && unit.is_some() {
+        let group = scope_dir(pid, start, unit, usage)?;
+        let cpu = std::fs::read_to_string(group.join("cpu.stat")).ok()?.lines().find_map(|s| s.strip_prefix("usage_usec ").and_then(|s| s.trim().parse().ok()))?;
+        let io = std::fs::read_to_string(group.join("io.stat")).unwrap_or_default().split_whitespace().filter_map(|w| w.strip_prefix("rbytes=").or_else(|| w.strip_prefix("wbytes="))).filter_map(|n| n.parse::<u64>().ok()).sum();
+        return Some(super::Activity { cpu_us: cpu, io_bytes: io });
+    }
+    let members = group_members(&[(pid, start)])?;
+    Some(members.into_iter().filter_map(proc_activity).fold(super::Activity::default(), |a, b| a + b))
+}
+
+/// One process's [`super::Activity`]: `stat`'s utime, stime, cutime and cstime (in the fixed
+/// 100 Hz of `/proc`), and `io`'s rchar and wchar.
+#[cfg(target_os = "linux")]
+fn proc_activity(pid: u32) -> Option<super::Activity> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let f: Vec<&str> = stat[stat.rfind(')')? + 2..].split_whitespace().collect();
+    // f[11..15] = fields 14-17
+    let ticks: u64 = f.get(11..15)?.iter().filter_map(|t| t.parse::<u64>().ok()).sum();
+    let io = std::fs::read_to_string(format!("/proc/{pid}/io")).unwrap_or_default().lines().filter_map(|l| l.strip_prefix("rchar: ").or_else(|| l.strip_prefix("wchar: "))).filter_map(|n| n.trim().parse::<u64>().ok()).sum();
+    Some(super::Activity { cpu_us: ticks * 10_000, io_bytes: io })
+}
+
+/// One process's [`super::Activity`] (`rusage_info_v2`): its own and its reaped children's CPU,
+/// in Mach time units the timebase turns into ns, and its disk bytes.
+#[cfg(target_os = "macos")]
+fn proc_activity(pid: u32) -> Option<super::Activity> {
+    /// `struct rusage_info_v2` (sys/resource.h).
+    #[repr(C)]
+    #[allow(dead_code)] // the C layout
+    struct RusageInfoV2 {
+        uuid: [u8; 16],
+        user_time: u64,
+        system_time: u64,
+        pkg_idle_wkups: u64,
+        interrupt_wkups: u64,
+        pageins: u64,
+        wired_size: u64,
+        resident_size: u64,
+        phys_footprint: u64,
+        proc_start_abstime: u64,
+        proc_exit_abstime: u64,
+        child_user_time: u64,
+        child_system_time: u64,
+        child_pkg_idle_wkups: u64,
+        child_interrupt_wkups: u64,
+        child_pageins: u64,
+        child_elapsed_abstime: u64,
+        diskio_bytesread: u64,
+        diskio_byteswritten: u64,
+    }
+    #[repr(C)]
+    struct Timebase {
+        numer: u32,
+        denom: u32,
+    }
+    extern "C" {
+        fn proc_pid_rusage(pid: i32, flavor: i32, buffer: *mut core::ffi::c_void) -> i32;
+        fn mach_timebase_info(info: *mut Timebase) -> i32;
+    }
+    let mut r: RusageInfoV2 = unsafe { std::mem::zeroed() };
+    // RUSAGE_INFO_V2 = 2
+    if unsafe { proc_pid_rusage(pid as i32, 2, &mut r as *mut RusageInfoV2 as *mut _) } != 0 { return None; }
+    let mut tb = Timebase { numer: 1, denom: 1 };
+    unsafe { mach_timebase_info(&mut tb) };
+    let ticks = (r.user_time + r.system_time + r.child_user_time + r.child_system_time) as u128;
+    let ns = ticks * tb.numer as u128 / tb.denom.max(1) as u128;
+    Some(super::Activity { cpu_us: (ns / 1000) as u64, io_bytes: r.diskio_bytesread + r.diskio_byteswritten })
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn proc_activity(_pid: u32) -> Option<super::Activity> {
+    None
+}
+
+/// This user's live processes in the groups `groups` leads or descended from one (a member may
+/// move to a group of its own). A departed leader can still have members; a reused pid is
+/// excluded. None: no group to look at.
+fn group_members(groups: &[(u32, u64)]) -> Option<Vec<u32>> {
+    let leaders: Vec<u32> = groups.iter().filter(|(pid, start)| *pid != 0 && proc_start(*pid).is_none_or(|s| s == *start)).map(|(pid, _)| *pid).collect();
+    if leaders.is_empty() {
+        return None;
+    }
+    // pid -> (parent, in one of the groups)
+    let table = process_table(&leaders);
+    // its own group or an ancestor's; the walk is bounded, as one look at the table is no
+    // consistent snapshot
+    let member = |pid: u32| {
+        let mut p = pid;
+        for _ in 0..64 {
+            match table.get(&p) {
+                Some((_, true)) => return true,
+                Some((parent, _)) if *parent != p => p = *parent,
+                _ => return false,
+            }
+        }
+        false
+    };
+    Some(table.keys().copied().filter(|pid| member(*pid)).collect())
+}
+
+/// pid -> (parent, in one of the `leaders`' groups), of this user's live processes.
+#[cfg(target_os = "macos")]
+fn process_table(leaders: &[u32]) -> std::collections::HashMap<u32, (u32, bool)> {
+    extern "C" {
+        fn proc_listallpids(buffer: *mut core::ffi::c_void, size: i32) -> i32;
+        fn getuid() -> u32;
+    }
+    let mut pids = vec![0i32; 8192];
+    let n = unsafe { proc_listallpids(pids.as_mut_ptr() as *mut _, (pids.len() * 4) as i32) };
+    let uid = unsafe { getuid() };
+    let mut table = std::collections::HashMap::new();
+    for pid in pids.iter().take(n.max(0) as usize).filter(|p| **p > 0).map(|p| *p as u32) {
+        if let Some(b) = bsd_info(pid).filter(|b| b.uid == uid && b.status != 5) {
+            table.insert(pid, (b.ppid, leaders.contains(&b.pgid)));
+        }
+    }
+    table
+}
+
+/// pid -> (parent, in one of the `leaders`' groups), of the live processes `/proc` shows.
+#[cfg(target_os = "linux")]
+fn process_table(leaders: &[u32]) -> std::collections::HashMap<u32, (u32, bool)> {
+    let mut table = std::collections::HashMap::new();
+    for e in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
+        let Some(pid) = e.file_name().to_str().and_then(|n| n.parse::<u32>().ok()) else { continue };
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else { continue };
+        let Some(at) = stat.rfind(')') else { continue };
+        let f: Vec<&str> = stat[at + 2..].split_whitespace().collect();
+        // f[0] = state, f[1] = ppid, f[2] = pgrp
+        let (Some(ppid), Some(pgrp)) = (f.get(1).and_then(|p| p.parse::<u32>().ok()), f.get(2).and_then(|p| p.parse::<u32>().ok())) else { continue };
+        if f.first() != Some(&"Z") { table.insert(pid, (ppid, leaders.contains(&pgrp))); }
+    }
+    table
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn process_table(_leaders: &[u32]) -> std::collections::HashMap<u32, (u32, bool)> {
+    std::collections::HashMap::new()
+}
+
+/// What a scoped run holds now that the kernel cannot reclaim, bytes: its scope's anonymous and
+/// shared memory (`memory.stat`), not its page cache. None: no scope (or it is gone).
+pub fn scope_now(pid: u32, start: u64, unit: Option<&str>, usage: &Path) -> Option<u64> {
+    let stat = std::fs::read_to_string(scope_dir(pid, start, unit, usage)?.join("memory.stat")).ok()?;
+    Some(parse_held(&stat))
+}
+
+/// `anon` + `shmem` of a cgroup's `memory.stat`.
+pub fn parse_held(stat: &str) -> u64 {
+    stat.lines().filter_map(|l| l.split_once(' ')).filter(|(k, _)| matches!(*k, "anon" | "shmem")).filter_map(|(_, v)| v.trim().parse::<u64>().ok()).sum()
+}
+
+/// Whether [`groups_held`] measures a run's processes (a run's memory can be told from the box's).
+pub const MEASURES_GROUPS: bool = true;
+
+/// What the runs whose process groups `groups` leads hold, bytes: their resident set.
+#[cfg(not(target_os = "macos"))]
+pub fn groups_held(groups: &[(u32, u64)]) -> Option<u64> {
+    groups_rss(groups)
 }
 
 /// RSS in bytes across recorded process groups (ps reports KiB), in one process-table
@@ -117,9 +316,11 @@ pub fn groups_rss(groups: &[(u32, u64)]) -> Option<u64> {
     (!rss.is_empty()).then(|| rss.iter().sum::<u64>() * 1024)
 }
 
-/// Reap just this child, retaining user + system CPU including its waited-for descendants.
-/// `Child::wait` discards rusage; a process-wide RUSAGE_CHILDREN delta would mix leases.
-pub fn wait_usage(child: &mut Child) -> std::io::Result<(ExitStatus, Option<f64>)> {
+/// Reap just this child, retaining user + system CPU including its waited-for descendants, and
+/// the largest resident set (bytes) one of them reached: the one measure of a run that ended
+/// before anything looked at it. `Child::wait` discards rusage; a process-wide RUSAGE_CHILDREN
+/// delta would mix leases.
+pub fn wait_usage(child: &mut Child) -> std::io::Result<(ExitStatus, Option<f64>, Option<u64>)> {
     use std::os::raw::c_long;
     use std::os::unix::process::ExitStatusExt;
     #[repr(C)]
@@ -140,15 +341,18 @@ pub fn wait_usage(child: &mut Child) -> std::io::Result<(ExitStatus, Option<f64>
     loop {
         if unsafe { wait4(child.id() as i32, &mut status, 0, &mut usage) } >= 0 {
             let cpu = (usage.user.sec + usage.system.sec) as f64 + (usage.user.usec + usage.system.usec) as f64 / 1_000_000.0;
-            return Ok((ExitStatus::from_raw(status), Some(cpu)));
+            // ru_maxrss: bytes on macOS, KiB on Linux
+            let maxrss = usage.rest[0].max(0) as u64 * if cfg!(target_os = "macos") { 1 } else { 1024 };
+            return Ok((ExitStatus::from_raw(status), Some(cpu), (maxrss > 0).then_some(maxrss)));
         }
         let e = std::io::Error::last_os_error();
         if e.kind() != std::io::ErrorKind::Interrupted { return Err(e); }
     }
 }
 
-/// Starts a lease run in its own session and process group (the group is what end signals).
-pub fn lease_spawn(cmd: &mut Command) -> std::io::Result<(Child, Hold)> {
+/// Starts a lease run in its own session and process group (the group is what end signals; `exit`
+/// names the run's job on Windows).
+pub fn lease_spawn(cmd: &mut Command, _exit: Option<&Path>) -> std::io::Result<(Child, Hold)> {
     use std::os::unix::process::CommandExt;
     extern "C" {
         fn setsid() -> i32;
@@ -218,49 +422,100 @@ fn proc_stat(pid: u32) -> Option<Stat> {
     Some(Stat { start: f.get(19)?.parse().ok()?, pgrp: f.get(2)?.parse().ok()?, zombie: f.first() == Some(&"Z") })
 }
 
+/// `struct proc_bsdinfo` (sys/proc_info.h).
 #[cfg(target_os = "macos")]
-fn proc_stat(pid: u32) -> Option<Stat> {
-    #[repr(C)]
-    struct BsdInfo {
-        flags: u32,
-        status: u32,
-        xstatus: u32,
-        pid: u32,
-        ppid: u32,
-        uid: u32,
-        gid: u32,
-        ruid: u32,
-        rgid: u32,
-        svuid: u32,
-        svgid: u32,
-        rfu: u32,
-        comm: [u8; 16],
-        name: [u8; 32],
-        nfiles: u32,
-        pgid: u32,
-        pjobc: u32,
-        tdev: u32,
-        tpgid: u32,
-        nice: i32,
-        start_sec: u64,
-        start_usec: u64,
-    }
+#[repr(C)]
+#[allow(dead_code)] // the C layout: every field is there so the kernel's writes land in place
+struct BsdInfo {
+    flags: u32,
+    status: u32,
+    xstatus: u32,
+    pid: u32,
+    ppid: u32,
+    uid: u32,
+    gid: u32,
+    ruid: u32,
+    rgid: u32,
+    svuid: u32,
+    svgid: u32,
+    rfu: u32,
+    comm: [u8; 16],
+    name: [u8; 32],
+    nfiles: u32,
+    pgid: u32,
+    pjobc: u32,
+    tdev: u32,
+    tpgid: u32,
+    nice: i32,
+    start_sec: u64,
+    start_usec: u64,
+}
+
+#[cfg(target_os = "macos")]
+fn bsd_info(pid: u32) -> Option<BsdInfo> {
     extern "C" {
         fn proc_pidinfo(pid: i32, flavor: i32, arg: u64, buffer: *mut core::ffi::c_void, size: i32) -> i32;
     }
     let mut b: BsdInfo = unsafe { std::mem::zeroed() };
     let size = std::mem::size_of::<BsdInfo>() as i32;
     // PROC_PIDTBSDINFO = 3
-    if unsafe { proc_pidinfo(pid as i32, 3, 0, &mut b as *mut BsdInfo as *mut _, size) } != size {
-        return None;
-    }
+    (unsafe { proc_pidinfo(pid as i32, 3, 0, &mut b as *mut BsdInfo as *mut _, size) } == size).then_some(b)
+}
+
+#[cfg(target_os = "macos")]
+fn proc_stat(pid: u32) -> Option<Stat> {
+    let b = bsd_info(pid)?;
     // SZOMB = 5
     Some(Stat { start: b.start_sec * 1_000_000 + b.start_usec, pgrp: b.pgid, zombie: b.status == 5 })
+}
+
+/// A process's physical footprint, bytes (`phys_footprint`, Activity Monitor's Memory column):
+/// its dirty memory, compressed or not, and its GPU memory; not its file cache, nor purgeable or
+/// reusable (`MADV_FREE_REUSABLE`) pages the kernel takes back at will.
+#[cfg(target_os = "macos")]
+fn footprint(pid: u32) -> Option<u64> {
+    /// `struct rusage_info_v0` (sys/resource.h).
+    #[repr(C)]
+    #[allow(dead_code)] // the C layout
+    struct RusageInfoV0 {
+        uuid: [u8; 16],
+        user_time: u64,
+        system_time: u64,
+        pkg_idle_wkups: u64,
+        interrupt_wkups: u64,
+        pageins: u64,
+        wired_size: u64,
+        resident_size: u64,
+        phys_footprint: u64,
+        proc_start_abstime: u64,
+        proc_exit_abstime: u64,
+    }
+    extern "C" {
+        fn proc_pid_rusage(pid: i32, flavor: i32, buffer: *mut core::ffi::c_void) -> i32;
+    }
+    let mut r: RusageInfoV0 = unsafe { std::mem::zeroed() };
+    // RUSAGE_INFO_V0 = 0
+    (unsafe { proc_pid_rusage(pid as i32, 0, &mut r as *mut RusageInfoV0 as *mut _) } == 0).then_some(r.phys_footprint)
+}
+
+/// What the runs whose process groups `groups` leads hold, bytes: the footprints ([`footprint`])
+/// of this user's processes in those groups or descended from one (a member may move to a group
+/// of its own). A departed leader can still have members; a reused pid is excluded. Their
+/// resident set counted the file pages they map (their binaries), which the kernel's in-use
+/// count ([`crate::procinfo::in_use`]) leaves out. None: no group to measure.
+#[cfg(target_os = "macos")]
+pub fn groups_held(groups: &[(u32, u64)]) -> Option<u64> {
+    Some(group_members(groups)?.into_iter().filter_map(footprint).sum())
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn proc_stat(_pid: u32) -> Option<Stat> {
     None
+}
+
+/// Whether `pid` has ended and waits to be reaped (a zombie answers `kill(pid, 0)` as alive).
+pub fn zombie(pid: u32) -> bool {
+    proc_stat(pid).is_some_and(|s| s.zombie)
 }
 
 /// Whether `pid` is in the process group led by `leader` (a lease run is its own session).
@@ -293,6 +548,22 @@ pub fn group_alive(pid: u32, start: u64, _hold: &Hold) -> bool {
                     return true;
                 }
             }
+        }
+    }
+    // the members too, as on Linux: a run's leader is the usage wrapper's `sh`, which a TERM ends
+    // at once while the program it waits for winds down. Asking only the leader, a lease's end
+    // took the group for gone, never KILLed it, and found the JIT app it ran as a process "that
+    // had left its process groups" (a show pre-boot's Fab on a Mac, 11-03)
+    #[cfg(target_os = "macos")]
+    {
+        extern "C" {
+            fn proc_listpids(kind: u32, typeinfo: u32, buffer: *mut core::ffi::c_void, size: i32) -> i32;
+        }
+        let mut pids = vec![0i32; 4096];
+        // PROC_PGRP_ONLY = 2; the answer is in bytes
+        let n = unsafe { proc_listpids(2, pid, pids.as_mut_ptr() as *mut _, (pids.len() * 4) as i32) };
+        if pids.iter().take(n.max(0) as usize / 4).any(|&p| p > 0 && p as u32 != pid && proc_stat(p as u32).is_some_and(|s| s.pgrp == pid && !s.zombie)) {
+            return true;
         }
     }
     false
@@ -376,9 +647,26 @@ pub fn signal_group(pid: u32, hard: bool, _hold: &Hold) {
     makepad_remote::group::signal(pid, hard);
 }
 
+/// A lease's end asks the run to exit: TERM to its group; whether the group got it.
+pub fn term_group(pid: u32, _hold: &Hold) -> bool {
+    makepad_remote::group::signal(pid, false)
+}
 
-/// The measuring walk runs at nice 10 (Linux: per thread).
+
+/// The measuring walk runs at nice 10 (Linux: per thread). A Mac's level is the whole process's:
+/// its thread takes the utility class there, behind the person's apps.
 pub fn nice_this_thread() {
+    #[cfg(target_os = "macos")]
+    {
+        extern "C" {
+            fn pthread_set_qos_class_self_np(class: u32, relative: i32) -> i32;
+        }
+        const QOS_CLASS_UTILITY: u32 = 0x11;
+        // SAFETY: no pointers; it changes the calling thread only.
+        unsafe {
+            pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0);
+        }
+    }
     #[cfg(target_os = "linux")]
     {
         extern "C" {
@@ -391,6 +679,30 @@ pub fn nice_this_thread() {
     }
 }
 
+
+/// The descriptors this process got from its parent stay its own: every one above stdio is
+/// close-on-exec from here on, so a run gets only the descriptors it is given (its stdio), never
+/// the hub's. A hub under the WM had three of the WM's GPU buffers (dmabuf) open without
+/// close-on-exec, and every run inherited them, a run that outlived its hub too (11-04). Called
+/// at the hub's start, before it starts anything; what Rust opens is close-on-exec already.
+pub fn keep_handles_to_self() {
+    extern "C" {
+        fn fcntl(fd: i32, cmd: i32, ...) -> i32;
+    }
+    // the same values on Linux and macOS
+    const F_GETFD: i32 = 1;
+    const F_SETFD: i32 = 2;
+    const FD_CLOEXEC: i32 = 1;
+    let listing = if cfg!(target_os = "linux") { "/proc/self/fd" } else { "/dev/fd" };
+    // (the listing's own descriptor is among them: close-on-exec already)
+    let fds: Vec<i32> = std::fs::read_dir(listing).map(|d| d.flatten().filter_map(|e| e.file_name().to_str()?.parse().ok()).filter(|&fd| fd > 2).collect()).unwrap_or_default();
+    for fd in fds {
+        let flags = unsafe { fcntl(fd, F_GETFD) };
+        if flags >= 0 && flags & FD_CLOEXEC == 0 {
+            unsafe { fcntl(fd, F_SETFD, flags | FD_CLOEXEC) };
+        }
+    }
+}
 
 /// Raises the soft open-files limit to the hard one (macOS caps it at 10240), as hygiene: a hub
 /// holds a descriptor or two per link and per lease, and a 256 soft limit is a small ceiling.
@@ -425,6 +737,43 @@ pub fn raise_fd_limit() -> u64 {
     r.cur
 }
 
+/// (a Unix run's wrapper is a shell script: see the Windows one)
+#[cfg(test)]
+pub fn no_image_roles() -> bool {
+    false
+}
+
+/// A run's level is the one asked for, whatever level its hub runs at.
+#[cfg(all(test, target_os = "linux"))]
+#[test]
+fn a_runs_nice_does_not_stack_on_its_hubs() {
+    let ni = |level: i32| {
+        let argv = lease_argv(["sh", "-c", "ps -o ni= -p $$"].map(String::from).to_vec(), None, level, "", None, None);
+        let out = Command::new(&argv[0]).args(&argv[1..]).output().unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().parse::<i32>().unwrap()
+    };
+    let own = ni(-20);
+    let level = (own + 3).min(19);
+    assert_eq!(ni(level), level, "from {own}");
+    assert_eq!(ni(own - 1), own, "nothing goes below the hub's level");
+}
+
+/// A run's words reach it as written: a shell's `$$` and `${X}` are the shell's.
+#[cfg(all(test, target_os = "linux"))]
+#[test]
+fn a_scope_leaves_a_runs_dollars_to_its_shell() {
+    let argv = lease_argv(["sh", "-c", "echo $$ ${X}y"].map(String::from).to_vec(), Some("devhub-test-dollars"), 10, "", None, None);
+    assert!(argv.iter().any(|a| a == "--expand-environment=no"), "{argv:?}");
+    if !crate::lease::exec::user_bus() { return; }
+    let unit = format!("devhub-test-dollars-{}", std::process::id());
+    let argv = lease_argv(["sh", "-c", "echo $$ ${X}y"].map(String::from).to_vec(), Some(&unit), 10, "", None, None);
+    let out = Command::new(&argv[0]).args(&argv[1..]).env("X", "from-the-run").output().unwrap();
+    let out = String::from_utf8_lossy(&out.stdout);
+    let (pid, x) = out.trim().split_once(' ').unwrap_or_else(|| panic!("{out}"));
+    assert!(pid.parse::<u32>().is_ok(), "the shell's own pid, not a lone dollar: {out}");
+    assert_eq!(x, "from-the-runy");
+}
+
 #[cfg(all(test, target_os = "linux"))]
 #[test]
 fn safety_raised_limit_is_the_open_file_limit() {
@@ -433,4 +782,51 @@ fn safety_raised_limit_is_the_open_file_limit() {
     let soft = limits.lines().find_map(|l| l.strip_prefix("Max open files")).unwrap()
         .split_whitespace().next().unwrap().parse::<u64>().unwrap();
     assert_eq!(actual, soft);
+}
+
+/// A run's group and what descends from it count, by footprint; this process does not.
+#[cfg(all(test, target_os = "macos"))]
+#[test]
+fn groups_held_counts_a_groups_members_and_their_descendants() {
+    use std::os::unix::process::CommandExt;
+    // a run's leader in its own group with two members; another run's group of one
+    let mut run = Command::new("sh").args(["-c", "sleep 30 & sleep 30; wait"]).process_group(0).spawn().unwrap();
+    let mut other = Command::new("sleep").arg("30").process_group(0).spawn().unwrap();
+    let start = proc_start(run.id()).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let looks = [groups_held(&[(run.id(), start)]), groups_held(&[(other.id(), proc_start(other.id()).unwrap())]), groups_held(&[(run.id(), start + 1)]), groups_held(&[])];
+    for c in [&mut run, &mut other] {
+        signal_group(c.id(), true, &Hold);
+        let _ = c.wait();
+    }
+    let [run_held, other_held, reused, none] = looks;
+    assert!(run_held.unwrap() > other_held.unwrap() && other_held.unwrap() > 0, "{looks:?}");
+    assert_eq!((reused, none), (None, None), "{looks:?}");
+}
+
+/// A descriptor the hub got from its parent without close-on-exec (the WM's GPU buffers) reaches
+/// no run once the hub keeps its handles to itself; before, every run held it.
+#[test]
+fn a_run_gets_none_of_the_hubs_descriptors() {
+    use std::os::fd::AsRawFd;
+    extern "C" {
+        fn fcntl(fd: i32, cmd: i32, ...) -> i32;
+    }
+    let dir = std::env::temp_dir().join(format!("devhub-descriptors-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = std::fs::File::create(dir.join("passed")).unwrap();
+    let fd = file.as_raw_fd();
+    // as a parent passes it: not close-on-exec (F_SETFD, no flags)
+    assert_eq!(unsafe { fcntl(fd, 2, 0) }, 0);
+    let in_run = || {
+        // no redirection in the probe: a shell saves stderr at the first free descriptor from 10
+        // on, so `{ true >&10; } 2>/dev/null` found its own copy when the file was 10 (11-04)
+        let out = Command::new("sh").arg("-c").arg(format!("if [ -e /dev/fd/{fd} ]; then echo held; else echo free; fi")).output().unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    assert_eq!(in_run(), "held", "a run sees a descriptor passed to it");
+    keep_handles_to_self();
+    assert_eq!(in_run(), "free");
+    drop(file);
+    let _ = std::fs::remove_dir_all(&dir);
 }

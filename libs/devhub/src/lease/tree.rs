@@ -3,7 +3,10 @@
 //!   from it. Only sync apply moves it, to landed work + commercial main; leases never hold it.
 //!   A sync checkout that is someone's own clone ([`ours`] is false) is not a deployment tree.
 //! - Work: `<work>/ci-tree` + `<work>/ci-target`. CI, gates and user boxes keep this detached
-//!   worktree. Same-pin leases share it; another pin waits for its holders to end.
+//!   worktree.
+//! - One lease at a time holds a tree, at its pin too; another waits for it to end (two leases of
+//!   one lane at one pin shared its native tree, and a script patching a file left the other's
+//!   build half-patched, 11-03).
 //! - Native: `<work>/native/<lane>` + `<work>/native-target/<lane>`. Other pinned lane leases
 //!   hold only their lane's tree. All trees share the bare stores' objects. Native moves use
 //!   `read-tree -m -u`, preserving unchanged files' mtimes. At the configured cap, the oldest
@@ -34,15 +37,11 @@ fn lock() -> MutexGuard<'static, BTreeMap<PathBuf, Holders>> {
 }
 
 impl Holders {
-    /// Why `pin` cannot take the tree now (another pin holds it), if it cannot.
-    pub fn conflict(&self, pin: &Pin) -> Option<String> {
-        self.conflict_with(pin, false)
-    }
-
-    fn conflict_with(&self, pin: &Pin, native: bool) -> Option<String> {
-        let other: Vec<&String> = self.0.iter().filter(|(_, p)| if native { *p != pin } else { !p.fits(pin) }).map(|(id, _)| id).collect();
+    /// Why lease `id` cannot take the tree now (another lease holds it), if it cannot.
+    pub fn conflict(&self, id: &str) -> Option<String> {
+        let other: Vec<&String> = self.0.keys().filter(|held| *held != id).collect();
         let first = other.first()?;
-        Some(format!("the tree is at {} for {}", self.0[*first].short(), other.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(" ")))
+        Some(format!("the tree is at {} for {}: one lease at a time in a tree", self.0[*first].short(), other.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(" ")))
     }
 }
 
@@ -175,10 +174,10 @@ pub struct Taken {
     pub cleared: Released,
 }
 
-/// Takes the work tree at `pin`; another pin's holders refuse the move.
+/// Takes the work tree at `pin`; another lease holding it refuses the take.
 pub fn take(id: &str, pin: &Pin, root: &Path, out: &Path) -> Result<Taken, String> {
     let mut h = lock();
-    if let Some(why) = h.get(root).and_then(|h| h.conflict(pin)) {
+    if let Some(why) = h.get(root).and_then(|h| h.conflict(id)) {
         return Err(why);
     }
     let t = prepare(id, pin, root, out, false)?;
@@ -194,7 +193,7 @@ pub fn take_native(id: &str, pin: &Pin, work: &Path, lane: &str, limit: usize, f
     let root = native_root(work, lane);
     let out = work.join("recovered");
     let mut h = lock();
-    if let Some(why) = h.get(&root).and_then(|h| h.conflict_with(pin, true)) { return Err(why); }
+    if let Some(why) = h.get(&root).and_then(|h| h.conflict(id)) { return Err(why); }
     let mut cleared = Released::default();
     if !root.exists() {
         if limit == 0 { return Err("native trees busy: capacity is zero".into()); }
@@ -208,6 +207,7 @@ pub fn take_native(id: &str, pin: &Pin, work: &Path, lane: &str, limit: usize, f
             cleared.bundles.extend(r.bundles);
             cleared.removed.extend(r.removed);
             h.remove(&native_root(work, &old));
+            super::disk::empty_trash_soon(work);
         }
     }
     if super::caps::disk_space(work).map_or(0, |(free, _)| free) < floor { return Err("native trees busy: disk below its floor".into()); }
@@ -224,29 +224,43 @@ fn remove_native_idle(work: &Path, lane: &str) -> Result<Released, String> {
     let root = native_root(work, lane);
     let r = scrub_tree(&root, "reclaim", &work.join("recovered"), &format!("{lane}-reclaim-{}", crate::proto::wall_ms()));
     if !r.unclean.is_empty() { return Err(r.unclean.join("; ")); }
-    // The nested commercial worktree must go before its containing makepad worktree.
+    let mut stores = Vec::new();
     for (repo, dir) in [("commercial", root.join("apps/commercial")), ("makepad", root.clone())] {
         if !dir.join(".git").exists() { continue; }
         let store = Store::open(repo)?;
         if store.admin_of(&dir).is_none() { return Err(format!("{} is not this node's worktree", dir.display())); }
-        run(None, Some(&store.git_dir), &[], &["worktree", "remove", "--force", &dir.to_string_lossy()])?;
+        stores.push(store);
     }
+    // to the trash in one move each, a delete under a lock no more: the stores forget the
+    // worktrees that left
     for path in [&root, &native_target(work, lane)] {
-        if path.exists() { super::disk::remove(path).map_err(|e| e.to_string())?; }
+        super::disk::to_trash(work, path).map_err(|e| format!("{}: {e}", path.display()))?;
+    }
+    for store in stores {
+        run(None, Some(&store.git_dir), &[], &["worktree", "prune"])?;
     }
     let _ = std::fs::remove_file(root.with_file_name(format!(".last-{lane}")));
     Ok(r)
 }
 
-/// Reclaim a native tree and its target, checking its holds again at deletion time.
+/// Who holds a native tree while [`remove_native`] takes it apart.
+const REMOVING: &str = "its-removal";
+
+/// Reclaim a native tree and its target (to the trash: the caller empties it), checking its holds
+/// again at deletion time. Its scrub and its moves hold the tree alone: the other trees' leases
+/// go on.
 pub fn remove_native(work: &Path, lane: &str) -> Result<Released, String> {
     if !super::exec::valid_name(lane) { return Err("invalid native lane".into()); }
-    let mut h = lock();
     let root = native_root(work, lane);
-    if h.get(&root).is_some_and(|h| !h.0.is_empty()) { return Err(format!("native tree {lane} is held")); }
-    let r = remove_native_idle(work, lane)?;
-    h.remove(&root);
-    Ok(r)
+    {
+        let mut h = lock();
+        let holds = h.entry(root.clone()).or_default();
+        if !holds.0.is_empty() { return Err(format!("native tree {lane} is held")); }
+        holds.0.insert(REMOVING.to_string(), Pin { makepad: String::new(), commercial: None });
+    }
+    let r = remove_native_idle(work, lane);
+    lock().remove(&root);
+    r
 }
 
 /// A sync warms the idle work tree without waiting for a lease's tree operation.
@@ -403,7 +417,7 @@ mod tests {
     }
 
     #[test]
-    fn pins_share_the_tree_only_at_the_same_commits() {
+    fn pins_parse_and_one_lease_holds_a_tree() {
         let a = pin('a', Some('c'));
         assert!(a.fits(&pin('a', Some('c'))) && a.fits(&pin('a', None)) && pin('a', None).fits(&a));
         assert!(!a.fits(&pin('b', Some('c'))) && !a.fits(&pin('a', Some('d'))));
@@ -413,14 +427,14 @@ mod tests {
         assert_eq!(Pin::of_rev(&format!("rc-x@{},main@{}", "a".repeat(40), "c".repeat(40))), Some(a.clone()));
         let mut h = Holders::default();
         h.0.insert("L1".into(), a.clone());
-        assert_eq!(h.conflict(&pin('a', None)), None);
-        let why = h.conflict(&pin('b', None)).unwrap();
-        assert!(why.contains("aaaaaaaaaa,cccccccccc") && why.contains("L1"), "{why}");
+        assert_eq!(h.conflict("L1"), None, "its own hold");
+        let why = h.conflict("L2").unwrap();
+        assert!(why.contains("aaaaaaaaaa,cccccccccc") && why.contains("L1") && why.contains("one lease at a time"), "{why}");
     }
 
-    /// Same-pin leases share; release and startup scrub without moving the pin or its target.
+    /// One lease at a time, at its pin too; release and startup scrub without moving the pin or its target.
     #[test]
-    fn leases_share_the_one_tree_and_leave_it_warm() {
+    fn leases_take_the_one_tree_in_turn_and_leave_it_warm() {
         let _env = crate::sync::git::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let base = std::env::temp_dir().join(format!("devhub-tree-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
@@ -459,21 +473,19 @@ mod tests {
         std::fs::create_dir_all(root.join("target")).unwrap();
         std::fs::write(root.join("target/ignored"), "kept").unwrap();
 
-        // two leases at `two`: no file moves; a lease at `one` waits for both
+        // a lease at `two`: no file moves; another lease waits for it, at `two` as at `one`
         let t = take("L1", &at(&two), &root, &out).unwrap();
         assert_eq!((t.root.clone(), t.moved.clone()), (root.clone(), vec![("makepad".to_string(), 0)]));
-        take("L2", &at(&two), &root, &out).unwrap();
-        let why = take("L3", &at(&one), &root, &out).unwrap_err();
-        assert!(why.contains("L1 L2"), "{why}");
+        let why = take("L2", &at(&two), &root, &out).unwrap_err();
+        assert!(why.contains("for L1: one lease at a time"), "{why}");
+        assert!(take("L3", &at(&one), &root, &out).unwrap_err().contains("L1"));
         assert!(sync(&work, &at(&one)).unwrap().is_none(), "sync leaves a held work tree alone");
         store.move_checkout(&deployment, Some(&one), &two).unwrap();
         store.set_ref(SYNCED_REF, &two).unwrap();
         assert_eq!(deploy(&deployment), Some(at(&two)), "deployment applies while leases hold the work tree");
-        std::fs::write(root.join("b.rs"), "edited by L2").unwrap();
-        std::fs::write(root.join("scratch.txt"), "left by L2").unwrap();
-        assert!(release("L1", &root, &out, "x-L1").bundles.is_empty());
-        assert_eq!(std::fs::read_to_string(root.join("b.rs")).unwrap(), "edited by L2", "a holder is still on the tree");
-        let b = release("L2", &root, &out, "x-L2");
+        std::fs::write(root.join("b.rs"), "edited by L1").unwrap();
+        std::fs::write(root.join("scratch.txt"), "left by L1").unwrap();
+        let b = release("L1", &root, &out, "x-L1");
         assert_eq!(b.bundles.len(), 1);
         assert!(b.bundles[0].is_file() && b.unclean.is_empty(), "{b:?}");
         assert_eq!(current(&root), Some(at(&two)));

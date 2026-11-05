@@ -102,7 +102,7 @@ impl Recorder {
         if jobs.is_empty() { return Ok(()); }
         let nodes = ctx.leases.nodes();
         for primary in jobs.iter().filter(|j| j.shadow && j.shadow_job.is_empty() && j.granted_ms > 0) {
-            // Class follows the granted box, even when the user's soft pin fell to a twin.
+            // Class follows the granted box.
             let mut needs = super::sched::parse_needs(&primary.needs);
             if let Some(node) = nodes.iter().find(|n| n.name == primary.node) {
                 if let Some(caps) = &node.caps {

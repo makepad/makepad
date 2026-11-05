@@ -16,7 +16,8 @@ thread_local! {
     static HERE: Cell<u64> = const { Cell::new(0) };
 }
 
-/// `git`, counted (in its own process group, like every child devhub starts).
+/// `git`, counted. It stays in this process's group: a TERM that stops the hub ends it too, and git
+/// removes what it was making (the master asks the next hub again, `lease::master::unreachable`).
 #[track_caller]
 pub fn command() -> std::process::Command {
     let at = std::panic::Location::caller();

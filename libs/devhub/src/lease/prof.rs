@@ -117,6 +117,7 @@ pub fn blocker(reason: &str) -> String {
     if r.starts_with("every node is one you cancelled") { return "cancel exclusion".into(); }
     if r.contains("without input") { return "user present".into(); }
     if r.contains("toolchain cannot link") { return "toolchain".into(); }
+    if r.contains("git fails on its stores") { return "git".into(); }
     if r.is_empty() { return "unobserved".into(); }
     // Future reasons still group without lease ids, numbers or a lane suffix.
     r.split(" of ").next().unwrap_or(r).split_whitespace().filter(|w| !w.chars().any(|c| c.is_ascii_digit())).collect::<Vec<_>>().join(" ")
@@ -250,7 +251,7 @@ pub fn report(home: &Path, leases: &[Lease], q: &Query, now: u64, summary: bool)
         if let Some(ms) = times.get("run") {
             let class = v.get("req").map(|r| s(r, "class")).filter(|c| !c.is_empty()).unwrap_or_else(|| s(v, "class"));
             let class = if class.is_empty() { s(v, "kind") } else { class };
-            let c = classes.entry(class.into()).or_default();
+            let c = classes.entry(super::class_command(class).into()).or_default();
             c.0 += ms;
             c.1 += 1;
             if let Some(peak) = v.get("peak_ram_gb").and_then(super::num).filter(|n| n.is_finite() && *n >= 0.0) { c.2 = Some(c.2.unwrap_or(0.0).max(peak)); }
@@ -329,12 +330,16 @@ struct LaneNative {
     verdicts: BTreeMap<String, usize>,
     pkgs: BTreeSet<String>,
     reasons: Vec<String>,
+    /// its choices that say nothing of passing the JIT by, per why (`not_over`, lease/native.rs)
+    not_over: BTreeMap<String, usize>,
     saves: usize,
 }
 
 /// Per lane since `since`: native builds the JIT-first gate saw (`native.jsonl`, lease/native.rs)
 /// vs saves the JIT patched in live sessions (`waits.jsonl`). OVER: a lane that chose native (a
-/// refused try or `--native`) at least twice and more often than it saved into a live session.
+/// refused try or `--native`) at least twice and more often than it saved into a live session,
+/// leaving out what the JIT cannot stand in for: crates of its own binary and baselines against it
+/// (JIT lanes were OVER for those alone, their one way to work, 11-04).
 fn jit_first(home: &Path, since: u64, lane: Option<&str>) -> Result<String, String> {
     let mut lanes = BTreeMap::<String, LaneNative>::new();
     let ours = |v: &Value| n(v, "ms").max(n(v, "end_ms")) >= since && lane.is_none_or(|l| s(v, "lane") == l);
@@ -344,21 +349,24 @@ fn jit_first(home: &Path, since: u64, lane: Option<&str>) -> Result<String, Stri
         *l.verdicts.entry(s(&v, "verdict").into()).or_default() += 1;
         let pkgs: Vec<&str> = v.get("pkgs").and_then(Value::as_arr).unwrap_or(&[]).iter().filter_map(Value::as_str).collect();
         l.pkgs.extend(pkgs.iter().map(|p| p.to_string()));
-        if s(&v, "verdict") == "reason" { l.reasons.push(format!("--native \"{}\" ({})", s(&v, "reason"), pkgs.join(","))); }
+        let not_over = s(&v, "not_over");
+        if matches!(s(&v, "verdict"), "reason" | "refused") && !not_over.is_empty() { *l.not_over.entry(not_over.into()).or_default() += 1; }
+        else if s(&v, "verdict") == "reason" { l.reasons.push(format!("--native \"{}\" ({})", s(&v, "reason"), pkgs.join(","))); }
     })?;
     read(&home.join("waits.jsonl"), |v| {
         if s(&v, "kind") == "live" && ours(&v) { lanes.entry(s(&v, "lane").into()).or_default().saves += 1; }
     })?;
-    let mut out = "jit first (lane: native builds the gate let run, by why; refused ones; saves patched live; OVER = 2+ refused or --native, more than live):\n".to_string();
+    let mut out = "jit first (lane: native builds the gate let run, by why; refused ones; saves patched live; OVER = 2+ refused or --native, more than live, not counting JIT crates and baselines):\n".to_string();
     let count = |l: &LaneNative, k: &str| l.verdicts.get(k).copied().unwrap_or(0);
     // what the lane chose: --native or a refused try (misses, measured routing and no-JIT platforms are devhub's call)
-    let chose = |l: &LaneNative| count(l, "reason") + count(l, "refused");
+    let chose = |l: &LaneNative| (count(l, "reason") + count(l, "refused")).saturating_sub(l.not_over.values().sum());
     let mut rows: Vec<_> = lanes.iter().collect();
     rows.sort_by(|a, b| chose(b.1).cmp(&chose(a.1)).then_with(|| b.1.saves.cmp(&a.1.saves)).then_with(|| a.0.cmp(b.0)));
     for (name, l) in &rows {
         let ran = l.verdicts.values().sum::<usize>() - count(l, "refused");
         let pkgs = if l.pkgs.is_empty() { String::new() } else { format!("; {}", l.pkgs.iter().cloned().collect::<Vec<_>>().join(",")) };
-        out += &format!("  {name}: native {ran} (--native {}, measured {}, no JIT platform {}, JIT miss {}{pkgs}), refused {}; live saves {}{}\n",
+        let not_over = l.not_over.iter().map(|(why, n)| format!("; {why} {n}")).collect::<String>();
+        out += &format!("  {name}: native {ran} (--native {}, measured {}, no JIT platform {}, JIT miss {}{pkgs}), refused {}{not_over}; live saves {}{}\n",
             count(l, "reason"), count(l, "measured"), count(l, "platform"), count(l, "miss"), count(l, "refused"), l.saves, if chose(l) >= 2 && chose(l) > l.saves { "; OVER" } else { "" });
         for r in &l.reasons { out += &format!("    {r}\n"); }
     }
@@ -497,11 +505,14 @@ mod tests {
         let home = std::env::temp_dir().join(format!("devhub-prof-{}", std::process::id()));
         std::fs::create_dir_all(&home).unwrap();
         let native = |lane: &str, verdict: &str, reason: &str| format!("{{\"ms\":2000,\"lane\":\"{lane}\",\"pkgs\":[\"app\"],\"verdict\":\"{verdict}\",\"reason\":\"{reason}\"}}\n");
-        std::fs::write(home.join("native.jsonl"), [native("a", "refused", ""), native("a", "refused", ""), native("a", "reason", "perf"), native("b", "miss", ""), native("b", "platform", ""), native("old", "refused", "")].concat().replace("\"ms\":2000,\"lane\":\"old\"", "\"ms\":10,\"lane\":\"old\"")).unwrap();
+        let spared = |lane: &str, verdict: &str, why: &str| native(lane, verdict, "fixture").replace("\"reason\":", &format!("\"not_over\":\"{why}\",\"reason\":"));
+        std::fs::write(home.join("native.jsonl"), [native("a", "refused", ""), native("a", "refused", ""), native("a", "reason", "perf"), native("b", "miss", ""), native("b", "platform", ""), native("old", "refused", ""),
+            spared("jit", "reason", "jit crate"), spared("jit", "reason", "jit crate"), spared("jit", "refused", "jit crate"), spared("jit", "reason", "baseline"), native("jit", "reason", "one of its own")].concat().replace("\"ms\":2000,\"lane\":\"old\"", "\"ms\":10,\"lane\":\"old\"")).unwrap();
         std::fs::write(home.join("waits.jsonl"), "{\"kind\":\"live\",\"lane\":\"b\",\"start_ms\":1500,\"end_ms\":2500}\n{\"kind\":\"job\",\"lane\":\"a\",\"start_ms\":1500,\"end_ms\":2500}\n").unwrap();
         let out = super::jit_first(&home, 1000, None).unwrap();
         assert!(out.contains("  a: native 1 (--native 1, measured 0, no JIT platform 0, JIT miss 0; app), refused 2; live saves 0; OVER\n    --native \"perf\" (app)\n"), "{out}");
         assert!(out.contains("  b: native 2 (--native 0, measured 0, no JIT platform 1, JIT miss 1; app), refused 0; live saves 1\n"), "{out}");
+        assert!(out.contains("  jit: native 4 (--native 4, measured 0, no JIT platform 0, JIT miss 0; app), refused 1; baseline 1; jit crate 3; live saves 0\n    --native \"one of its own\" (app)\n"), "the JIT's own work is no OVER, and only the rest is listed: {out}");
         assert!(!out.contains("old"), "{out}");
         std::fs::remove_dir_all(&home).unwrap();
     }

@@ -19,7 +19,7 @@ use super::leg::{self, Held, Spec};
 use super::Ctx;
 use crate::lease::client::ALL_TESTS;
 use crate::lease::sched::NodeView;
-use crate::lease::{Caps, Kind, Src, PREBUILD_LANE_PREFIX, WARM_LANE_PREFIX};
+use crate::lease::{Caps, Kind, Role, Src, PREBUILD_LANE_PREFIX, WARM_LANE_PREFIX};
 use crate::proto::{wall_ms, Sev};
 use crate::state::Pair;
 use makepad_strict_json::{obj, s, Value};
@@ -172,15 +172,25 @@ struct Progress {
     lease: Option<String>,
     started_ms: u64,
     ended_ms: u64,
+    /// a prebuild's test listings so far (its plan's bucket verdict)
+    listed: Vec<Listed>,
+}
+
+/// One test listing of a prebuild: its unit (`suite <pkg>`), whether it listed, its output.
+#[derive(Clone)]
+struct Listed {
+    unit: String,
+    ok: bool,
+    text: String,
 }
 
 impl Progress {
     fn waiting(id: &str, now: u64) -> Self {
-        Self { state: "waiting".into(), note: String::new(), id: id.into(), lease: None, started_ms: now, ended_ms: 0 }
+        Self { state: "waiting".into(), note: String::new(), id: id.into(), lease: None, started_ms: now, ended_ms: 0, listed: Vec::new() }
     }
 
     /// A failure its box outgrew: the JIT it failed on is in the box's store now, however it got
-    /// there (a warm, a JIT run, a lane build). 105's failure stayed in the health report after a
+    /// there (a warm, a JIT run, a lane build). One box's failure stayed in the health report after a
     /// job built that JIT (11-03).
     fn clear_if_stored(&mut self, stored: &[String], now: u64) -> bool {
         if self.state != "failed" || self.id.is_empty() || !stored.contains(&self.id) { return false; }
@@ -211,9 +221,13 @@ struct Node {
 struct Plan {
     generation: u64,
     pair: Pair,
+    /// the previous plan's tip: the landings since are the ones its listings judge
+    base: Option<Pair>,
     ids: Vec<String>,
     started_ms: u64,
     nodes: Vec<Node>,
+    /// its listings went to the `prebuild` bucket
+    judged: bool,
 }
 
 struct Spare {
@@ -410,19 +424,30 @@ fn plan_tick(ctx: &Arc<Ctx>, seen: &mut Option<(String, Vec<String>)>, nodes: &[
     let ids: Vec<_> = ids.into_iter().collect::<BTreeSet<_>>().into_iter().collect();
     if PLAN.lock().unwrap().as_ref().is_some_and(|p| p.ids == ids) { return; }
     let nodes = plan_nodes(nodes, &by_compiler, activity, &pair.rev(), started_ms);
-    let (plan, previous) = {
+    let (plan, previous, followed) = {
         let mut p = PLAN.lock().unwrap();
         let generation = p.as_ref().map_or(1, |p| p.generation + 1);
-        let plan = Plan { generation, pair, ids, started_ms, nodes };
+        let plan = Plan { generation, pair, base: p.as_ref().map(|p| p.pair.clone()), ids, started_ms, nodes, judged: false };
         let previous = p.replace(plan.clone());
-        (plan, previous)
+        // a box whose leg still asks: that leg follows this plan in its place ([`ASKING`])
+        let asking = ASKING.lock().unwrap();
+        let followed: BTreeSet<String> = plan.nodes.iter().filter(|n| asking.contains_key(&n.name)).map(|n| n.name.clone()).collect();
+        (plan, previous, followed)
     };
     // Registration and generation changes share the lock; no held old leg is missed.
     if let Some(p) = previous {
         for id in p.nodes.iter().filter_map(|n| n.progress.lease.as_deref()) { ctx.leases.release_live(id); }
+        // the listings it got to before the next JIT came are its verdict (off this thread: the
+        // landings' attribution reads their trees)
+        if !p.judged {
+            let c = ctx.clone();
+            if let Err(e) = std::thread::Builder::new().name("warm-judge".into()).spawn(move || judge(&c, &p, true)) {
+                ctx.store.event("warm", Sev::Warn, format!("warm: judging a superseded plan: {e}"), None);
+            }
+        }
     }
     ctx.store.event("warm", Sev::Info, format!("warm {}: {} on {}", super::short(&plan.pair.work), plan.ids.join(", "), plan.nodes.iter().map(|n| n.name.as_str()).collect::<Vec<_>>().join(", ")), None);
-    for (rank, node) in plan.nodes.iter().enumerate() {
+    for (rank, node) in plan.nodes.iter().enumerate().filter(|(_, n)| !followed.contains(&n.name)) {
         // Keep every timestamp in the past: the scheduler clamps future queue times to now.
         let since_ms = Some(plan.started_ms.saturating_sub((plan.nodes.len() - rank) as u64));
         spawn(ctx, Run { generation: plan.generation, lane: None, native: false, node: node.name.clone(), os: node.os.clone(), key: node.key.clone(), started_ms, since_ms });
@@ -431,7 +456,8 @@ fn plan_tick(ctx: &Arc<Ctx>, seen: &mut Option<(String, Vec<String>)>, nodes: &[
 
 /// The boxes a new JIT id is built on: every up dev box that lacks it, per OS/arch group the most
 /// lane-active first. A box no lane used lately builds it too (the next session may come to it),
-/// listing no tests.
+/// listing no tests; so does a bench box, whose tests are its timed runs' own (the listing held
+/// it a minute more per landing while timed work waited "held for interactive", 11-03).
 fn plan_nodes(nodes: &[NodeView], by_compiler: &BTreeMap<String, String>, activity: &Activity, rev: &str, started_ms: u64) -> Vec<Node> {
     let mut groups: BTreeMap<(String, String), Vec<Node>> = BTreeMap::new();
     for n in nodes.iter().filter(|n| n.up && n.dev && !n.role().users()) {
@@ -440,7 +466,7 @@ fn plan_nodes(nodes: &[NodeView], by_compiler: &BTreeMap<String, String>, activi
         let Some(id) = by_compiler.get(&store.compiler) else { continue };
         if store.ids.contains(id) { continue; }
         let b = activity.boxes.get(&n.name);
-        let packages = b.map(BoxActivity::packages).unwrap_or_default();
+        let packages = if n.role() == Role::Bench { Vec::new() } else { b.map(BoxActivity::packages).unwrap_or_default() };
         groups.entry((caps.os.clone(), caps.arch.clone())).or_default().push(Node { name: n.name.clone(), os: caps.os.clone(), activity: b.map_or(0, |b| b.lanes.len()), key: Key { id: id.clone(), rev: rev.to_string(), packages }, progress: Progress::waiting(id, started_ms) });
     }
     let mut out = Vec::new();
@@ -453,8 +479,16 @@ fn plan_nodes(nodes: &[NodeView], by_compiler: &BTreeMap<String, String>, activi
 
 fn same_group(a: &Caps, b: &Caps) -> bool { a.os == b.os && a.arch == b.arch }
 
-fn spare_ok(n: &NodeView, l: &LaneActivity, group: &Caps) -> bool {
-    n.up && n.dev && !n.role().users() && !l.boxes.contains(&n.name) && n.caps.as_ref().is_some_and(|c| same_group(c, group) && c.hub_proto >= if l.src == Src::Tree { 7 } else { 5 })
+/// A box that may warm a lane's spare. A bench box only in a group with no pool box: the lane's
+/// work goes to the pool boxes (the scheduler's pool_takes), and a spare there held a bench box
+/// for nothing.
+fn spare_ok(n: &NodeView, l: &LaneActivity, group: &Caps, pool_in_group: bool) -> bool {
+    n.up && n.dev && !n.role().users() && !(pool_in_group && n.role() == Role::Bench) && !l.boxes.contains(&n.name) && n.caps.as_ref().is_some_and(|c| same_group(c, group) && c.hub_proto >= if l.src == Src::Tree { 7 } else { 5 })
+}
+
+/// The group (OS, arch) has an up pool box.
+fn pool_in_group(nodes: &[NodeView], group: &Caps) -> bool {
+    nodes.iter().any(|n| n.up && matches!(n.role(), Role::Pool | Role::Long) && n.caps.as_ref().is_some_and(|c| same_group(c, group)))
 }
 
 fn native_room(c: &Caps, activity: &Activity) -> bool {
@@ -472,9 +506,12 @@ fn spare_tick(ctx: &Arc<Ctx>, nodes: &[NodeView], compilers: &[String], activity
     let mut done = BTreeMap::new();
     let needing: BTreeMap<_, _> = activity.lanes.iter().filter_map(|(lane, l)| {
         if !agent_lane(lane) { return None; }
-        if let Some((branch, _)) = l.rev.split(',').next().unwrap_or("").split_once('@') {
+        let first = l.rev.split(',').next().unwrap_or("");
+        if let Some((branch, _)) = first.split_once('@') {
             if !matches!(branch, "" | "work" | "main") && *done.entry(branch).or_insert_with(|| crate::gitread::rev(&ctx.repo, &format!("refs/heads/{branch}")).is_none()) { return None; }
         }
+        // (a lane in a nested repository names that repository's commit: the root cannot build it)
+        if crate::gitread::lacks_commit(&ctx.repo, first.rsplit('@').next().unwrap_or("")) { return None; }
         let group = nodes.iter().find(|n| n.name == l.node)?.caps.as_ref()?;
         let used = nodes.iter().filter(|n| n.up && l.boxes.contains(&n.name) && n.caps.as_ref().is_some_and(|c| same_group(c, group))).count();
         (used < 2).then_some((lane, (l, group)))
@@ -483,7 +520,7 @@ fn spare_tick(ctx: &Arc<Ctx>, nodes: &[NodeView], compilers: &[String], activity
     let mut release = Vec::new();
     let mut runs = Vec::new();
     let remove: Vec<_> = spares.lanes.iter().filter(|(lane, s)| {
-        !needing.get(lane).is_some_and(|(l, group)| s.native == (l.src == Src::Tree) && nodes.iter().any(|n| n.name == s.node && spare_ok(n, l, group)))
+        !needing.get(lane).is_some_and(|(l, group)| s.native == (l.src == Src::Tree) && nodes.iter().any(|n| n.name == s.node && spare_ok(n, l, group, pool_in_group(nodes, group))))
     }).map(|(lane, _)| lane.clone()).collect();
     for lane in remove {
         let s = spares.lanes.remove(&lane).unwrap();
@@ -497,7 +534,8 @@ fn spare_tick(ctx: &Arc<Ctx>, nodes: &[NodeView], compilers: &[String], activity
     for (lane, (l, group)) in needing {
         let native = l.src == Src::Tree;
         if !spares.lanes.contains_key(lane) {
-            let candidate = nodes.iter().filter(|n| spare_ok(n, l, group) && n.caps.as_ref().is_some_and(|c| c.ram_avail_gb >= 8.0 && (!native || native_room(c, activity)))).min_by(|a, b| {
+            let pooled = pool_in_group(nodes, group);
+            let candidate = nodes.iter().filter(|n| spare_ok(n, l, group, pooled) && n.caps.as_ref().is_some_and(|c| c.ram_avail_gb >= 8.0 && (!native || native_room(c, activity)))).min_by(|a, b| {
                 let (ac, bc) = (a.caps.as_ref().unwrap(), b.caps.as_ref().unwrap());
                 assigned.get(&a.name).copied().unwrap_or(0).cmp(&assigned.get(&b.name).copied().unwrap_or(0))
                     .then_with(|| ac.cpu_pct.unwrap_or(100.0).total_cmp(&bc.cpu_pct.unwrap_or(100.0)))
@@ -561,6 +599,9 @@ fn spare_tick(ctx: &Arc<Ctx>, nodes: &[NodeView], compilers: &[String], activity
     for run in runs { spawn(ctx, run); }
 }
 
+/// The measurement class of the JIT warm legs (prebuilds and lane warms), whatever they run.
+const WARM_CLASS: &str = "build jit warm";
+
 fn spawn(ctx: &Arc<Ctx>, run: Run) {
     let (c, r) = (ctx.clone(), run.clone());
     if let Err(e) = std::thread::Builder::new().name(format!("{AGENT}-{}", run.lane.as_deref().unwrap_or(&run.node))).spawn(move || run_leg(&c, &r)) {
@@ -572,71 +613,160 @@ fn log_name(run: &Run) -> String {
     match &run.lane { Some(lane) => format!("lane-{lane}.log"), None => format!("{}.log", run.node) }
 }
 
+/// A box prebuild's leg asks while registered here (box → the plan generation it asks for), so
+/// that a newer plan leaves the box to it: the queued request follows the new target in place
+/// ([`Held::acquire_following`]) and keeps its place and age, where a new leg's ask started over
+/// at the back of the queue (one box's prebuild was asked again ten times an evening and never
+/// ran, 11-04). Touched only under [`PLAN`]'s lock, which orders it with plan changes.
+static ASKING: Mutex<BTreeMap<String, u64>> = Mutex::new(BTreeMap::new());
+
+/// Takes the newest plan's generation and target for the leg's box, when that plan has it;
+/// false: it does not (the box got its JIT another way, or went down). Under [`PLAN`]'s lock.
+fn adopt(plan: &Option<Plan>, run: &mut Run) -> bool {
+    let Some(p) = plan.as_ref() else { return false };
+    if p.generation == run.generation { return true; }
+    let Some(n) = p.nodes.iter().find(|n| n.name == run.node) else { return false };
+    (run.generation, run.key) = (p.generation, n.key.clone());
+    true
+}
+
 fn run_leg(ctx: &Ctx, run: &Run) {
+    let run = std::cell::RefCell::new(run.clone());
+    let prebuild = run.borrow().lane.is_none() && !run.borrow().native;
     let mut dropped = String::new();
     let result = (|| -> Result<String, String> {
         let dir = ctx.logs("warm");
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         // Append: an old generation can still be returning when its successor starts.
-        let mut log = std::fs::OpenOptions::new().create(true).append(true).open(dir.join(log_name(run))).map_err(|e| e.to_string())?;
-        let _ = writeln!(log, "warm generation {}: {} {}", run.generation, run.key.rev, run.key.id);
-        let (packages, note) = resolve(&ctx.repo, &run.key.rev, &run.key.packages);
-        dropped = note;
-        if !dropped.is_empty() { let _ = writeln!(log, "{dropped}"); }
-        let (lane, prio) = match &run.lane {
-            Some(lane) => (format!("{WARM_LANE_PREFIX}{lane}"), leg::BACKGROUND_PRIO),
-            None => (format!("{PREBUILD_LANE_PREFIX}{}", run.node), leg::OWED_PRIO),
+        let mut log = std::fs::OpenOptions::new().create(true).append(true).open(dir.join(log_name(&run.borrow()))).map_err(|e| e.to_string())?;
+        {
+            let r = run.borrow();
+            let _ = writeln!(log, "warm generation {}: {} {}", r.generation, r.key.rev, r.key.id);
+        }
+        let spec_of = |r: &Run| {
+            let (lane, prio) = match &r.lane {
+                Some(lane) => (format!("{WARM_LANE_PREFIX}{lane}"), leg::BACKGROUND_PRIO),
+                None => (format!("{PREBUILD_LANE_PREFIX}{}", r.node), leg::OWED_PRIO),
+            };
+            Spec { lane, agent: AGENT.into(), kind: Kind::Build, needs: String::new(), prio, rev: r.key.rev.clone(), repo_dir: ctx.repo.to_string_lossy().into_owned(), node: Some(r.node.clone()), since_ms: r.since_ms }
         };
-        let spec = Spec { lane, agent: AGENT.into(), kind: Kind::Build, needs: String::new(), prio, rev: run.key.rev.clone(), repo_dir: ctx.repo.to_string_lossy().into_owned(), node: Some(run.node.clone()), only: true, since_ms: run.since_ms };
-        if run.native { return native_leg(run, &spec, &packages, &mut log); }
+        if run.borrow().native {
+            let r = run.borrow().clone();
+            let (packages, note) = resolve(&ctx.repo, &r.key.rev, &r.key.packages);
+            dropped = note;
+            if !dropped.is_empty() { let _ = writeln!(log, "{dropped}"); }
+            return native_leg(&r, &spec_of(&r), &packages, &mut log);
+        }
         // A JIT appearing in caps is no longer completion: the code cache still needs warming.
-        let stale = || !set(run, |_| {});
+        let stale = || !set(&run.borrow(), |_| {});
+        // a box prebuild still asking is given up only when the newest plan has no work for its box
+        let gone = || {
+            let r = run.borrow();
+            let plan = PLAN.lock().unwrap();
+            plan.as_ref().is_none_or(|p| p.generation != r.generation && !p.nodes.iter().any(|n| n.name == r.node))
+        };
         // a request still queued gives way to a master restart's drain and asks again after it
-        let give_up = || stale() || super::roll::draining();
+        let give_up = || (if prebuild { gone() } else { stale() }) || super::roll::draining();
         loop {
             if stale() { return Ok(String::new()); }
+            if prebuild {
+                let r = run.borrow();
+                let plan = PLAN.lock().unwrap();
+                if !plan.as_ref().is_some_and(|p| p.generation == r.generation) { return Ok(String::new()); }
+                ASKING.lock().unwrap().insert(r.node.clone(), r.generation);
+            }
+            let spec = spec_of(&run.borrow());
             // counted while it asks and runs; waits out a drain (the exec ends this thread)
             let _drain = super::roll::holding();
             let mut on_wait = |line: &str| {
                 let _ = writeln!(log, "{line}");
-                set(run, |p| p.note = line.into());
+                set(&run.borrow(), |p| p.note = line.into());
             };
-            let held = match Held::acquire_with(&spec, &|r| {
+            // a newer plan's target for its box, taken in place while it asks
+            let mut follow = || {
+                if !prebuild { return None; }
+                let mut r = run.borrow_mut();
+                let plan = PLAN.lock().unwrap();
+                if plan.as_ref().is_none_or(|p| p.generation == r.generation) { return None; }
+                let before = r.key.rev.clone();
+                if !adopt(&plan, &mut r) { return None; }
+                ASKING.lock().unwrap().insert(r.node.clone(), r.generation);
+                (r.key.rev != before).then(|| r.key.rev.clone())
+            };
+            let asked = Held::acquire_following(&spec, &|r| {
                 r.src = Src::Overlay;
-                r.cores = Some(if run.lane.is_none() { 4.0 } else { 2.0 });
+                r.cores = Some(if prebuild { 4.0 } else { 2.0 });
                 // RAM as measured (a dev JIT build and a test listing peak at 2.4 GB): an 8 GB ask
-                // kept prebuilds off the 16 GB boxes beside a live session for minutes (11-02)
-                if run.lane.is_none() { r.priority = crate::lease::Priority::Interactive; }
-                if run.os == "macos" { r.needs.push(("os".into(), "macos".into())); }
-            }, &mut on_wait, &give_up) {
+                // kept prebuilds off the 16 GB boxes beside a live session for minutes (11-02).
+                // Measured under a class of their own: unnamed, they were measured as nothing and
+                // took a build's 12 GB default (three pool boxes' prebuilds waited 23 min an hour
+                // on RAM, holding their box meanwhile, 11-03)
+                r.class = WARM_CLASS.into();
+                if prebuild { r.priority = crate::lease::Priority::Interactive; }
+                if run.borrow().os == "macos" { r.needs.push(("os".into(), "macos".into())); }
+            }, &mut on_wait, &give_up, &mut follow);
+            if prebuild {
+                // out of the asking legs; a plan that came meanwhile left its box to this leg
+                let mut r = run.borrow_mut();
+                let plan = PLAN.lock().unwrap();
+                let mut asking = ASKING.lock().unwrap();
+                if asking.get(&r.node) == Some(&r.generation) { asking.remove(&r.node); }
+                drop(asking);
+                if !adopt(&plan, &mut r) {
+                    drop((plan, r));
+                    if let Ok(held) = asked { held.release(None); }
+                    return Ok(String::new());
+                }
+            }
+            let held = match asked {
                 Ok(held) => held,
                 Err(_) if stale() => return Ok(String::new()),
                 Err(_) if super::roll::draining() => continue,
                 Err(e) if e.split_whitespace().next().is_some_and(leg::was_preempted) => continue,
                 Err(e) if missing_commit(&e) => {
                     let _ = writeln!(log, "{e}; retrying in {} s", RETRY.as_secs());
-                    set(run, |p| p.note = format!("waiting for commit: {e}"));
-                    ctx.store.event("warm", Sev::Warn, format!("warm {} on {}: {e}; retrying", run.key.rev, run.node), None);
+                    let r = run.borrow().clone();
+                    set(&r, |p| p.note = format!("waiting for commit: {e}"));
+                    ctx.store.event("warm", Sev::Warn, format!("warm {} on {}: {e}; retrying", r.key.rev, r.node), None);
                     let until = Instant::now() + RETRY;
                     while Instant::now() < until && !stale() { std::thread::sleep(Duration::from_secs(1)); }
                     continue;
                 }
                 Err(e) => return Err(e),
             };
-            if !set(run, |p| { p.state = "held".into(); p.note.clear(); p.lease = Some(held.id.clone()); }) { return Ok(String::new()); }
+            // granted at a target a newer plan replaced before it could follow: asked again at the
+            // newest, keeping its age (`since_ms`)
+            if held.rev != run.borrow().key.rev {
+                let _ = writeln!(log, "{} granted at {}, superseded by {}: asking again in its place", held.id, held.rev, run.borrow().key.rev);
+                held.release(None);
+                continue;
+            }
+            let r = run.borrow().clone();
+            if !set(&r, |p| { p.state = "held".into(); p.note.clear(); p.lease = Some(held.id.clone()); p.listed.clear(); }) { return Ok(String::new()); }
+            let (packages, note) = resolve(&ctx.repo, &r.key.rev, &r.key.packages);
+            dropped = note;
+            if !dropped.is_empty() { let _ = writeln!(log, "{dropped}"); }
             let mut failures = Vec::new();
             let result = held.ship_nothing().and_then(|_| {
                 if stale() { return Ok(0); }
-                set(run, |p| p.state = "building".into());
+                set(&r, |p| p.state = "building".into());
                 let argv = ["cargo", "run", "--profile", "host", "-p", "makepad-run", "--bin", "makepad", "--", "--version"].map(String::from);
                 let code = held.run(&argv, &mut log)?;
                 if code != 0 { return Ok(code); }
                 for package in &packages {
                     if stale() { break; }
                     let label = package.label();
-                    set(run, |p| p.state = format!("warming {label}"));
+                    set(&r, |p| p.state = format!("warming {label}"));
                     let _ = writeln!(log, "warming {label}");
-                    let failure = match held.run(&package.argv(), &mut log) {
+                    let mut tee = Tee(&mut log, Vec::new());
+                    let result = held.run(&package.argv(), &mut tee);
+                    // a listing that ran is a verdict on the tip (a lease's error is none); a failed
+                    // one keeps its output (its errors), a passing one only its line
+                    if let Ok(code) = result {
+                        let output = if code == 0 { String::new() } else { String::from_utf8_lossy(&tee.1).into_owned() };
+                        set(&r, |p| p.listed.push(Listed { unit: format!("suite {}", package.pkg), ok: code == 0, text: format!("{label} on {}: exit {code}\n{output}", r.node) }));
+                    }
+                    let failure = match result {
                         Ok(0) => None,
                         Ok(code) => Some(format!("{label}: exit {code}")),
                         Err(e) => Some(format!("{label}: {e}")),
@@ -651,17 +781,18 @@ fn run_leg(ctx: &Ctx, run: &Run) {
             });
             let preempted = leg::was_preempted(&held.id);
             held.release(result.as_ref().ok().copied());
-            set(run, |p| p.lease = None);
+            set(&r, |p| p.lease = None);
             if stale() { return Ok(String::new()); }
             if preempted {
                 let _ = writeln!(log, "preempted for lane work; asking again");
-                set(run, |p| { p.state = "waiting".into(); p.note = "preempted for lane work".into(); });
+                set(&r, |p| { p.state = "waiting".into(); p.note = "preempted for lane work".into(); });
                 continue;
             }
             return match result { Ok(0) => Ok(failures.join("; ")), Ok(code) => Err(format!("exit {code}")), Err(e) => Err(e) };
         }
     })();
-    finish(ctx, run, &dropped, result);
+    let run = run.into_inner();
+    finish(ctx, &run, &dropped, result);
 }
 
 fn native_leg(run: &Run, spec: &Spec, packages: &[Package], log: &mut dyn Write) -> Result<String, String> {
@@ -744,6 +875,10 @@ fn finish(ctx: &Ctx, run: &Run, dropped: &str, result: Result<String, String>) {
             true
         } else { false }
     } else { set(run, update) };
+    if changed && run.lane.is_none() {
+        let done = listings_done(PLAN.lock().unwrap().as_mut(), run.generation);
+        if let Some(plan) = done { judge(ctx, &plan, false); }
+    }
     if changed {
         let who = run.lane.as_deref().unwrap_or(&run.key.rev);
         let line = |note: &str| format!("warm {who} on {}: {state} in {seconds} s{}", run.node, if note.is_empty() { String::new() } else { format!(": {note}") });
@@ -753,6 +888,55 @@ fn finish(ctx: &Ctx, run: &Run, dropped: &str, result: Result<String, String>) {
         }
         ctx.store.event("warm", sev, line(&note), None);
     }
+}
+
+/// The plan of `generation` once every box of it that lists tests has ended: judged once, by the
+/// last of them to end. A box that lists none (idle, bench) is not waited for.
+fn listings_done(plan: Option<&mut Plan>, generation: u64) -> Option<Plan> {
+    let plan = plan.filter(|p| p.generation == generation && !p.judged && p.nodes.iter().all(|n| n.key.packages.is_empty() || n.progress.ended_ms != 0))?;
+    plan.judged = true;
+    Some(plan.clone())
+}
+
+/// A plan's test listings as the `prebuild` bucket's verdict on its tip: every box's that listed
+/// (`superseded`: the next JIT came before the rest did). A plan that listed nothing is no verdict.
+fn judge(ctx: &Ctx, plan: &Plan, superseded: bool) {
+    let listed: Vec<&Listed> = plan.nodes.iter().flat_map(|n| &n.progress.listed).collect();
+    if listed.is_empty() { return; }
+    let mut failing: Vec<String> = listed.iter().filter(|l| !l.ok).map(|l| l.unit.clone()).collect();
+    failing.sort();
+    failing.dedup();
+    let boxes = plan.nodes.iter().filter(|n| !n.progress.listed.is_empty()).count();
+    let summary = format!("{} test listings on {boxes} boxes under JIT {}{}", listed.len(), plan.ids.join(", "), if superseded { "; the next JIT came before the rest" } else { "" });
+    let mut text = format!("prebuild {}: {summary}\n", plan.pair.short());
+    for l in &listed {
+        text.push_str(&l.text);
+        if !text.ends_with('\n') { text.push('\n'); }
+        text.push_str(&format!("GATEUNIT {} {}\n", if l.ok { "ok" } else { "fail" }, l.unit));
+    }
+    let logs = ctx.home.join("bucket-logs");
+    let log = logs.join(format!("prebuild-{}.log", plan.started_ms));
+    let written = std::fs::create_dir_all(&logs).and_then(|_| std::fs::write(&log, &text));
+    if let Err(e) = written {
+        ctx.store.event("warm", Sev::Warn, format!("prebuild {}: its listings' log: {e}", plan.pair.short()), None);
+        return;
+    }
+    let outcome = crate::bucket::Outcome { ok: failing.is_empty(), failing, log: log.display().to_string(), summary, no_verdict: None };
+    if let Err(e) = crate::bucket::prebuild(&ctx.home, &ctx.repo, &ctx.store, plan.started_ms, plan.base.clone(), &plan.pair, outcome) {
+        ctx.store.event("warm", Sev::Warn, format!("prebuild {}: no verdict: {e}", plan.pair.short()), None);
+    }
+}
+
+/// Writes through to the leg's log and keeps a copy: a listing's own output.
+struct Tee<'a>(&'a mut dyn Write, Vec<u8>);
+
+impl Write for Tee<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let n = self.0.write(buf)?;
+        self.1.extend_from_slice(&buf[..n]);
+        Ok(n)
+    }
+    fn flush(&mut self) -> std::io::Result<()> { self.0.flush() }
 }
 
 /// `warm [status]`: the current box plan and spares, never a persisted run ledger.
@@ -802,7 +986,7 @@ pub fn render(v: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::Progress;
+    use super::{Key, Listed, Node, Package, Plan, Progress};
 
     /// Every dev box that lacks the new JIT builds it, the lane-active ones first; one that has it,
     /// one with another compiler, a box down or with dev off is left alone.
@@ -826,7 +1010,7 @@ mod tests {
     #[test]
     fn a_failure_clears_once_its_boxs_store_holds_the_jit() {
         let id = "66f764de1aae36f89242ec4f";
-        let mut p = Progress { state: "failed".into(), note: "refused: 105: x".into(), ..Progress::waiting(id, 1) };
+        let mut p = Progress { state: "failed".into(), note: "refused: node-a: x".into(), ..Progress::waiting(id, 1) };
         assert!(!p.clear_if_stored(&["0".repeat(24)], 5), "another JIT in the store is no fix");
         assert_eq!(p.state, "failed");
         assert!(p.clear_if_stored(&["0".repeat(24), id.into()], 5));
@@ -840,5 +1024,67 @@ mod tests {
         // a failure before any JIT was named never clears
         let mut p = Progress { state: "failed".into(), ..Progress::waiting("", 1) };
         assert!(!p.clear_if_stored(&[String::new()], 5));
+    }
+
+    fn plan(nodes: Vec<Node>) -> Plan {
+        Plan { generation: 7, pair: crate::state::Pair::new(&"a".repeat(40), &"b".repeat(40)), base: None, ids: vec!["new".into()], started_ms: 1, nodes, judged: false }
+    }
+
+    fn node(name: &str, packages: &[&str], ended_ms: u64, listed: Vec<Listed>) -> Node {
+        let packages = packages.iter().map(|p| Package::from_class(&format!("test:{p}")).unwrap()).collect();
+        Node { name: name.into(), os: "linux".into(), activity: 0, key: Key { id: "new".into(), rev: "work@x".into(), packages }, progress: Progress { ended_ms, listed, ..Progress::waiting("new", 1) } }
+    }
+
+    /// The last box that lists tests to end judges the plan, once; a box that lists none is not
+    /// waited for, nor is a plan of another generation judged.
+    #[test]
+    fn a_plan_is_judged_once_its_listing_boxes_ended() {
+        let listed = |ok| vec![Listed { unit: "suite x".into(), ok, text: "x on a: exit 0\n".into() }];
+        let mut p = plan(vec![node("a", &["x"], 5, listed(true)), node("b", &["y"], 0, Vec::new()), node("idle", &[], 0, Vec::new())]);
+        assert!(super::listings_done(Some(&mut p), 7).is_none(), "b still lists");
+        p.nodes[1].progress.ended_ms = 6;
+        assert!(super::listings_done(Some(&mut p), 6).is_none(), "another generation's run");
+        let judged = super::listings_done(Some(&mut p), 7).expect("both listing boxes ended; the idle one is not waited for");
+        assert!(judged.judged && p.judged);
+        assert!(super::listings_done(Some(&mut p), 7).is_none(), "judged once");
+    }
+
+    /// A listing that fails on a landed tip is a red row of the `prebuild` bucket with its errors
+    /// and a failed feed line; one that lists is an ok row.
+    #[test]
+    fn a_failed_listing_is_a_red_prebuild_bucket_row() {
+        use crate::proto::{Record, Sev};
+        use std::sync::{Arc, Mutex};
+        let home = std::env::temp_dir().join(format!("devhub-warm-test-prebuild-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let fed: Arc<Mutex<Vec<Record>>> = Arc::default();
+        let feed = fed.clone();
+        let leases = Arc::new(crate::lease::master::LeaseMaster::new("mac", home.clone(), Arc::new(|_: &str, _: &str, _: &str| Err("no nodes".to_string())), Arc::new(|_| {}), Arc::new(|| 1), None, true));
+        let store = crate::state::Store::open(&home, "mac", Arc::new(move |r: Record| { feed.lock().unwrap().push(r); 0 })).unwrap();
+        let ctx = super::Ctx { store, leases, machine: "mac".into(), monitor: crate::monitor::Monitor::start(&[]), repo: home.clone(), home: home.clone() };
+        let broken = Listed { unit: "suite x".into(), ok: false, text: "x:lib on a: exit 1\n/n/tree/libs/x/src/lib.rs:3:9: E0425: cannot find value `z`\n".into() };
+        let fine = Listed { unit: "suite y".into(), ok: true, text: "y on b: exit 0\n".into() };
+        super::judge(&ctx, &plan(vec![node("a", &["x"], 5, vec![broken]), node("b", &["y"], 5, vec![fine.clone()])]), false);
+        let rows: Vec<_> = crate::bucket::ledger(&home, 10).iter().map(|l| makepad_strict_json::parse(l.as_bytes()).unwrap()).collect();
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.get("bucket").and_then(|v| v.as_str()), Some("prebuild"));
+        assert_eq!(row.get("ok").and_then(|v| v.as_bool()), Some(false));
+        assert_eq!(row.get("failing").and_then(|v| v.as_arr()).map(|f| f.iter().filter_map(|u| u.as_str()).collect::<Vec<_>>()), Some(vec!["suite x"]));
+        assert_eq!(row.get("errors").and_then(|e| e.get("suite x")).and_then(|v| v.as_arr()).map(|e| e.len()), Some(1), "{}", row.to_json());
+        assert!(row.get("passed").and_then(|v| v.as_arr()).is_some_and(|p| p.iter().any(|u| u.as_str() == Some("suite y"))));
+        {
+            let fed = fed.lock().unwrap();
+            let red = fed.iter().find(|r| r.kind == "bucket").expect("a bucket line on the feed");
+            assert!(red.sev == Sev::Err && red.line.contains("bucket prebuild") && red.line.contains("FAILED suite x"), "{}", red.line);
+        }
+        // the next JIT's listings pass: an ok row; a plan that listed nothing is none
+        super::judge(&ctx, &plan(vec![node("b", &["y"], 5, vec![fine])]), false);
+        super::judge(&ctx, &plan(vec![node("idle", &[], 5, Vec::new())]), true);
+        let rows = crate::bucket::ledger(&home, 10);
+        assert_eq!(rows.len(), 2);
+        assert!(rows[0].contains("\"ok\":true"), "{}", rows[0]);
+        let _ = std::fs::remove_dir_all(&home);
     }
 }

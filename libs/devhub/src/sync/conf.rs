@@ -130,17 +130,17 @@ mod tests {
 
     #[test]
     fn conf_parses() {
-        let c = SyncConf::parse("checkout = /x/makepad\nbuild = apps\nprebuild = sandbox\nwm_flags = --jit sandbox,code\njobs = 4\nwm_service = none\n");
+        let c = SyncConf::parse("checkout = /x/makepad\nbuild = apps\nprebuild = foo\nwm_flags = --jit foo,code\njobs = 4\nwm_service = none\n");
         assert_eq!(c.checkout, PathBuf::from("/x/makepad"));
         assert_eq!(c.build, Build::Apps);
-        assert_eq!(c.prebuild, vec!["sandbox"]);
-        assert_eq!(c.wm_flags, vec!["--jit", "sandbox,code"]);
+        assert_eq!(c.prebuild, vec!["foo"]);
+        assert_eq!(c.wm_flags, vec!["--jit", "foo,code"]);
         assert_eq!(c.jobs, 4);
         assert_eq!(c.wm_service, None);
         assert_eq!(c.repo_dir("commercial"), Some(PathBuf::from("/x/makepad/apps/commercial")));
-        assert_eq!(c.jit_app().as_deref(), Some("sandbox"), "the prebuild builds the JIT for its first JIT app");
-        assert_eq!(SyncConf::parse("build = off\nprebuild = sandbox\nwm_flags = --jit sandbox\n").jit_app(), None);
-        assert_eq!(SyncConf::parse("prebuild = hub terminal\nwm_flags = --jit sandbox\n").jit_app(), None, "no JIT app in the prebuild");
+        assert_eq!(c.jit_app().as_deref(), Some("foo"), "the prebuild builds the JIT for its first JIT app");
+        assert_eq!(SyncConf::parse("build = off\nprebuild = foo\nwm_flags = --jit foo\n").jit_app(), None);
+        assert_eq!(SyncConf::parse("prebuild = hub terminal\nwm_flags = --jit foo\n").jit_app(), None, "no JIT app in the prebuild");
     }
 
     #[test]
@@ -148,8 +148,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("devhub-sync-conf-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let f = dir.join("session.sh");
-        std::fs::write(&f, "#!/bin/bash\n# The WM's own flags\nwm_flags=(--jit sandbox)\nexec cargo run -- \"${wm_flags[@]}\"\n").unwrap();
-        assert_eq!(session_wm_flags(&f), Some(vec!["--jit".to_string(), "sandbox".to_string()]));
+        std::fs::write(&f, "#!/bin/bash\n# The WM's own flags\nwm_flags=(--jit foo)\nexec cargo run -- \"${wm_flags[@]}\"\n").unwrap();
+        assert_eq!(session_wm_flags(&f), Some(vec!["--jit".to_string(), "foo".to_string()]));
         let _ = std::fs::remove_file(&f);
         let _ = std::fs::remove_dir(&dir);
     }

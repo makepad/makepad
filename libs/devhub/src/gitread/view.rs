@@ -55,13 +55,21 @@ struct View {
     refs: BTreeMap<String, RefTarget>,
 }
 impl View {
-    fn capture(common: &Path) -> Option<Self> {
-        let read = || refs::list_refs_in(common, common, "refs/").ok().map(|v| v.into_iter().map(|r| (r.name, r.target)).collect::<BTreeMap<_, _>>());
-        let first = read()?;
-        // A racing ref publication defers this pass. No answer mixes names
-        // captured before and after an observed change; the next pass retries.
-        if first != read()? { return None; }
-        Some(Self { repo: handle(common)?, query: queries(common)?, refs: first })
+    /// Why not: the line a pass that needed these refs reports.
+    fn capture(common: &Path) -> Result<Self, String> {
+        let read = || refs::list_refs_in(common, common, "refs/").map(|v| v.into_iter().map(|r| (r.name, r.target)).collect::<BTreeMap<_, _>>()).map_err(|e| format!("its refs do not read: {e}"));
+        // No answer mixes names captured before and after a ref update: two
+        // reads in a row agree, or refs that keep moving defer this pass.
+        let mut refs = read()?;
+        let mut reads = 1;
+        loop {
+            let again = read()?;
+            reads += 1;
+            if again == refs { break; }
+            if reads == CAPTURE_READS { return Err(format!("its refs moved under each of {reads} reads (ref updates racing; the next pass retries)")); }
+            refs = again;
+        }
+        Ok(Self { repo: handle(common).ok_or("its object store does not open")?, query: queries(common).ok_or("its shallow file does not read")?, refs })
     }
     fn reference(&self, name: &str) -> Option<ObjectId> {
         let mut at = name;
@@ -92,15 +100,18 @@ impl View {
     }
 }
 
+/// Reads of the refs until two in a row agree.
+const CAPTURE_READS: usize = 4;
+
 #[derive(Default)]
 pub struct Pass {
-    views: HashMap<PathBuf, Option<View>>,
+    views: HashMap<PathBuf, Result<View, String>>,
     heads: HashMap<PathBuf, Option<ObjectId>>,
 }
 impl Pass {
     fn view(&mut self, p: &RepositoryPaths) -> Option<&View> {
         let common = p.common_dir.canonicalize().ok()?;
-        self.views.entry(common.clone()).or_insert_with(|| View::capture(&common)).as_ref()
+        self.views.entry(common.clone()).or_insert_with(|| View::capture(&common)).as_ref().ok()
     }
     fn oid(&mut self, p: &RepositoryPaths, name: &str) -> Option<ObjectId> {
         let name = name.strip_suffix("^{commit}").unwrap_or(name);
@@ -126,6 +137,22 @@ impl Pass {
         let oid = self.oid(&p, name)?;
         self.view(&p)?.repo.lock().unwrap_or_else(|e| e.into_inner()).read_commit(&oid).ok()?;
         Some(oid.to_hex())
+    }
+    /// Why [`Self::rev`] of `name` in `dir` answered nothing (the cause its error line names).
+    pub fn why_not(&mut self, dir: &Path, name: &str) -> String {
+        let Some(p) = paths(dir) else { return format!("{} is not a git directory", dir.display()) };
+        if self.view(&p).is_none() {
+            return match p.common_dir.canonicalize() {
+                Ok(common) => self.views.get(&common).and_then(|v| v.as_ref().err()).cloned().unwrap_or_else(|| "its refs were not read".into()),
+                Err(e) => format!("{}: {e}", p.common_dir.display()),
+            };
+        }
+        let Some(oid) = self.oid(&p, name) else { return format!("no ref {name}") };
+        let read = self.view(&p).map(|v| v.repo.lock().unwrap_or_else(|e| e.into_inner()).read_commit(&oid).map(|_| ()));
+        match read {
+            Some(Err(e)) => format!("its commit {} does not read: {e}", oid.to_hex()),
+            _ => format!("{name} read on a second look ({})", oid.to_hex()),
+        }
     }
     /// Direct refs from this pass, in Git's refname order.
     pub fn direct_refs(&mut self, dir: &Path, prefix: &str) -> Option<Vec<(String, ObjectId)>> {
@@ -288,6 +315,29 @@ fn best_base(repo: &mut Repository, a: ObjectId, b: ObjectId) -> Result<Option<O
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A ref update in flight (git's `<ref>.lock`) leaves a pass's refs readable, and a ref that is
+    /// not there is named as the cause.
+    #[test]
+    fn a_pass_reads_refs_past_an_update_in_flight_and_names_what_it_misses() {
+        let temp = makepad_git::test_support::tempdir().unwrap();
+        let dir = temp.path();
+        let init = std::process::Command::new("git").args(["init", "-q", "--template="]).arg(dir).status().unwrap();
+        assert!(init.success());
+        let git = dir.join(".git");
+        let tree = makepad_git::object::write_loose_object(&git, makepad_git::ObjectKind::Tree, &[]).unwrap();
+        let sig = makepad_git::Signature { name: "test".into(), email: String::new(), timestamp: 100, tz_offset: "+0000".into() };
+        let c = makepad_git::Commit { tree, parents: vec![], author: sig.clone(), committer: sig, message: "root".into() };
+        let commit = makepad_git::object::write_loose_object(&git, makepad_git::ObjectKind::Commit, &makepad_git::commit::serialize_commit(&c)).unwrap();
+        std::fs::create_dir_all(git.join("refs/heads")).unwrap();
+        std::fs::write(git.join("refs/heads/work"), format!("{}\n", commit.to_hex())).unwrap();
+        std::fs::write(git.join("refs/heads/rc-a.lock"), "").unwrap();
+        let mut pass = Pass::default();
+        assert_eq!(pass.rev(dir, "refs/heads/work"), Some(commit.to_hex()));
+        assert!(pass.direct_refs(dir, "refs/heads/rc-").unwrap().is_empty(), "an update in flight is no ref");
+        assert_eq!(pass.why_not(dir, "refs/heads/main"), "no ref refs/heads/main");
+    }
+
     #[test]
     fn retired_merge_bases_match_git_on_forks_merges_and_clock_skew() {
         let temp = makepad_git::test_support::tempdir().unwrap();

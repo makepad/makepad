@@ -1,6 +1,10 @@
 //! Buckets check landed tips on their own timers.
 //! One run covers all landings since that bucket's last tip.
 //! Failures name the lanes whose inputs changed; they never control landing.
+//! A unit failing the way it failed at the bucket's last look at it is a break already on the
+//! branch: it names who broke it then, not the later landings that changed its inputs.
+//! A failed unit stays red until it passes: the next run of its bucket looks at it again whatever
+//! that run's diff reaches, and a run that did not get to it is no pass.
 //! A restarted master adopts its bucket's unfinished run instead of starting it again.
 //! When a bucket is due comes from what outlives the master: its last start (its ledger, or the
 //! runs of its kind it knows of) and the landings since. A master restart never moves it: CI was
@@ -13,7 +17,7 @@ use crate::land::{Entry, St};
 use crate::proto::{hub_record, wall_ms, Sev};
 use crate::state::{Pair, Store};
 use makepad_strict_json::{obj, s, Value};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -70,8 +74,9 @@ pub struct Outcome {
     pub failing: Vec<String>,
     pub log: String,
     pub summary: String,
-    /// its lease was lost under it twice (the fleet, not the code): no verdict
-    pub lost: bool,
+    /// why this run says nothing about the tip (its lease lost twice, a CI run that stopped before
+    /// its legs ran): nothing here is a failure of the landings, and it runs again at its next turn
+    pub no_verdict: Option<String>,
 }
 
 /// The log's line before a bucket runs its gate once more after a lost lease; an adopted run
@@ -99,7 +104,7 @@ fn read_run(path: &Path) -> Option<(u32, u64, Pair, Pair)> {
     Some((pid, v.get("started_ms")?.as_u64()?, read_pair(v.get("base")?)?, read_pair(v.get("tip")?)?))
 }
 
-fn entry_pair(text: &str) -> Option<Pair> {
+pub(crate) fn entry_pair(text: &str) -> Option<Pair> {
     let words: Vec<_> = text.split_whitespace().collect();
     let ["work", work, "main", main] = words.as_slice() else { return None };
     let pair = Pair::new(work, main);
@@ -140,7 +145,7 @@ fn append(home: &Path, value: Value) -> std::io::Result<()> {
 fn is_unit(unit: &str) -> bool {
     let mut words = unit.split_whitespace();
     match (words.next(), words.next()) {
-        (Some("check" | "present"), Some(_)) => true,
+        (Some("check" | "present" | "cargo"), Some(_)) => true,
         (Some("suite"), Some(_)) => words.next().is_none(),
         (Some("devhub"), Some("makepad-devhub")) => words.next().is_none(),
         _ => false,
@@ -190,6 +195,255 @@ fn attribute(repo: &Path, entries: &[Entry], failing: &[String]) -> (Vec<Vec<Str
     (attributed, ambiguous)
 }
 
+/// A unit's package: `check <pkg>` without its `--also=` flips (one break shows under both).
+fn unit_key(unit: &str) -> String {
+    unit.split_whitespace().take(2).collect::<Vec<_>>().join(" ")
+}
+
+/// A compile error line as `<file>: <message>`: rustc's `<path>:<line>:<col>: ` gives way to the
+/// file's name (the node's tree path, or an edit shifting the line, is no new error).
+fn error_key(line: &str) -> Option<String> {
+    let digits = |s: &str| s.bytes().take_while(u8::is_ascii_digit).count();
+    let mut from = 0;
+    while let Some(c) = line[from..].find(':') {
+        let at = from + c;
+        let rest = &line[at + 1..];
+        let row = digits(rest);
+        if row > 0 && rest[row..].starts_with(':') {
+            let col = &rest[row + 1..];
+            let n = digits(col);
+            if n > 0 && col[n..].starts_with(": ") {
+                let path = &line[..at];
+                return Some(format!("{}: {}", path.rsplit('/').next().unwrap_or(path), &col[n + 2..]));
+            }
+        }
+        from = at + 1;
+    }
+    None
+}
+
+/// A run's failing units with their compile errors (each unit's own output: the lines after the
+/// unit before it), and the units that passed, by package (a proven one passed at these inputs).
+fn unit_lines(text: &str) -> (BTreeMap<String, Vec<String>>, BTreeSet<String>) {
+    let (mut errors, mut passed, mut own) = (BTreeMap::new(), BTreeSet::new(), Vec::new());
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("GATEUNIT ") {
+            match rest.split_once(' ') {
+                Some(("fail", unit)) if !own.is_empty() => {
+                    let mut e = std::mem::take(&mut own);
+                    e.sort();
+                    e.dedup();
+                    errors.insert(unit.to_string(), e);
+                }
+                // (`gone`: its package left the tree, nothing is left to fail)
+                Some(("ok" | "proven" | "gone", unit)) => { passed.insert(unit_key(unit)); }
+                _ => {}
+            }
+            own.clear();
+        } else if line.starts_with("STEP ") {
+            own.clear();
+        } else if let Some(e) = error_key(line) {
+            own.push(e);
+        }
+    }
+    (errors, passed)
+}
+
+/// The failing units already broken at this bucket's last look at them, with who broke them: a
+/// unit whose every error now was in its last failure, with no run of the bucket passing it
+/// since. A later landing that changed such a unit's inputs did not break it (one landing broke a
+/// phone host check, and each later devhub landing was named for it, 11-03). A unit with no
+/// compile error (a present, a test run) failing again is the same break, and so is a failure in
+/// a row that kept no errors to compare with: rechecked a day later, one was named for whatever
+/// had just landed (11-04). `rows`: the bucket's earlier rows, newest first.
+fn carried_since(rows: &[Value], failing: &[String], errors: &BTreeMap<String, Vec<String>>) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    for unit in failing.iter().filter(|u| is_unit(u)) {
+        let key = unit_key(unit);
+        let now = errors.get(unit).map_or(&[][..], Vec::as_slice);
+        for row in rows {
+            if row.get("passed").and_then(Value::as_arr).is_some_and(|p| p.iter().any(|k| k.as_str() == Some(key.as_str()))) { break; }
+            let failed = match row.get("errors") {
+                Some(Value::Obj(failed)) => failed.iter().find(|(u, _)| unit_key(u) == key),
+                _ => None,
+            };
+            let listed = row.get("failing").and_then(Value::as_arr).is_some_and(|f| f.iter().any(|u| u.as_str().is_some_and(|u| unit_key(u) == key)));
+            if failed.is_none() && !listed { continue; }
+            let before: Vec<&str> = failed.and_then(|(_, b)| b.as_arr()).unwrap_or_default().iter().filter_map(Value::as_str).collect();
+            if row.get("errors").is_none() || now.iter().all(|e| before.contains(&e.as_str())) {
+                out.insert(unit.clone(), origin(rows, &key));
+            }
+            break;
+        }
+    }
+    out
+}
+
+/// Who broke unit `key`, failing with no pass since: what the first run to fail it said, else that
+/// nobody knows, with that run's log. A later run's name is no better: it named who changed the
+/// unit then. `rows`: the bucket's earlier rows, newest first.
+fn origin(rows: &[Value], key: &str) -> String {
+    let lists = |list: &str, row: &Value| row.get(list).and_then(Value::as_arr).is_some_and(|l| l.iter().any(|u| u.as_str().is_some_and(|u| unit_key(u) == key)));
+    let failed = |row: &Value| lists("failing", row) || matches!(row.get("errors"), Some(Value::Obj(e)) if e.iter().any(|(u, _)| unit_key(u) == key));
+    let first = rows.iter().take_while(|row| !lists("passed", row)).filter(|row| failed(row)).last();
+    if let Some(who) = first.and_then(|row| row.get("broke")).and_then(|b| b.get(key)).and_then(Value::as_str) {
+        return who.to_string();
+    }
+    let log = first.and_then(|row| row.get("log")).and_then(Value::as_str).and_then(|l| Path::new(l).file_name()).map(|l| l.to_string_lossy().into_owned());
+    log.map_or(ORIGIN_UNKNOWN.to_string(), |log| format!("{ORIGIN_UNKNOWN}, first failed in {log}"))
+}
+
+/// A failure older than what the ledger can name a landing for.
+pub const ORIGIN_UNKNOWN: &str = "origin unknown";
+
+/// `<unit> still failing since <who>`, for a `who` from [`origin`] or a row.
+pub fn still_since(who: &str) -> String {
+    if who.starts_with(ORIGIN_UNKNOWN) { who.to_string() } else { format!("since {who}") }
+}
+
+/// The buckets whose next run looks again at what failed (land_gate.sh's GATE_RETRY). CI needs no
+/// telling: a shard with no proof at its inputs runs; prebuild lists its legs under each new JIT.
+const RERUNS: [&str; 2] = ["fast", "hot"];
+
+/// Bucket `name`'s rows, newest first.
+fn rows_of(home: &Path, name: &str) -> Vec<Value> {
+    ledger(home, 2_000).iter().filter_map(|l| makepad_strict_json::parse(l.as_bytes()).ok())
+        .filter(|v| v.get("bucket").and_then(Value::as_str) == Some(name)).collect()
+}
+
+/// The units whose last look ended in a failure, by package, with who broke them. A run that
+/// never looked at a unit says nothing about it: one whose diff touched nothing said ok and a
+/// real failure looked fixed (11-04). `rows`: the bucket's rows, newest first.
+fn still_failing(rows: &[Value]) -> BTreeMap<String, (String, String)> {
+    let (mut settled, mut out) = (BTreeSet::new(), BTreeMap::new());
+    for (i, row) in rows.iter().enumerate() {
+        for unit in row.get("failing").and_then(Value::as_arr).unwrap_or_default().iter().filter_map(Value::as_str).filter(|u| is_unit(u)) {
+            let key = unit_key(unit);
+            if settled.contains(&key) { continue; }
+            let who = origin(&rows[i..], &key);
+            out.insert(key, (unit.to_string(), who));
+        }
+        settled.extend(out.keys().cloned());
+        settled.extend(row.get("passed").and_then(Value::as_arr).unwrap_or_default().iter().filter_map(Value::as_str).map(str::to_string));
+    }
+    out
+}
+
+/// What the next run of a bucket looks at whatever its diff reaches, as land_gate.sh's GATE_RETRY:
+/// the units still failing and, after a step that failed with no unit to name (the JIT that did not
+/// build), `steps`: the gate takes the JIT even if every unit is proven.
+fn retry_env(rows: &[Value]) -> String {
+    let mut units: Vec<String> = still_failing(rows).into_values().map(|(unit, _)| unit).collect();
+    let step = rows.first().and_then(|r| r.get("failing")).and_then(Value::as_arr).unwrap_or_default().iter().filter_map(Value::as_str).any(|u| !is_unit(u));
+    if step { units.push("steps".to_string()); }
+    format!("GATE_RETRY={}", units.join(";"))
+}
+
+/// `devhub bucket`'s lines: what each bucket still owes a pass, then the last runs, newest first.
+pub fn status(home: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    for name in RERUNS {
+        let still = still_failing(&rows_of(home, name));
+        if still.is_empty() { continue; }
+        out.push(obj(vec![("still_failing", s(name)), ("units", Value::Obj(still.into_values().map(|(unit, who)| (unit, s(&who))).collect()))]).to_json());
+    }
+    out.extend(ledger(home, 10));
+    out
+}
+
+/// Bucket `name`'s verdict on `tip`, from the outcome `run` reaches from the base (the last tip it
+/// judged, else the oldest base of the last hour's landings): the landings since the base named
+/// for the units they changed, a ledger row and a feed line (`emit`). Err: no verdict.
+#[allow(clippy::too_many_arguments)]
+fn judge(name: &str, home: &Path, repo: &Path, store: &Store, emit: &dyn Fn(Sev, String, String), started: u64, base: Option<Pair>, tip: &Pair,
+    run: impl FnOnce(Option<&Pair>) -> Result<Outcome, String>) -> Result<(), String> {
+    let history = store.history("land")?.iter().filter_map(|v| Entry::parse(&v.to_json())).filter(|e| e.state == St::Landed).collect::<Vec<_>>();
+    let entries = || history.clone();
+    let base = base.or_else(|| {
+        let recent = Duration::from_secs(60 * 60).as_millis();
+        let mut entries = entries();
+        entries.sort_by_key(|e| (e.changed_ms, e.id));
+        entries.iter().filter(|e| u128::from(started.saturating_sub(e.changed_ms)) <= recent).find_map(|e| entry_pair(&e.pre))
+    });
+    let mut outcome = run(base.as_ref())?;
+    if let Some(why) = &outcome.no_verdict {
+        emit(Sev::Warn, format!("bucket {name} {}: no verdict: {why} ({}); it runs again at its next turn", tip.short(), outcome.log), String::new());
+        return Err(format!("no verdict on {}: {why}", tip.short()));
+    }
+    let ended = wall_ms();
+    let (entries, attribution_error) = match &base {
+        Some(base) => match landings(repo, base, tip, &entries()) {
+            Ok(entries) => (entries, None),
+            Err(e) => (Vec::new(), Some(format!("landing attribution: {e}"))),
+        },
+        None => (Vec::new(), None),
+    };
+    if let Some(e) = &attribution_error {
+        outcome.summary.push_str(&format!("; {e}"));
+    }
+    let text = std::fs::read_to_string(&outcome.log).unwrap_or_default();
+    let (errors, passed) = unit_lines(last_run(&text));
+    let earlier = rows_of(home, name);
+    let carried = carried_since(&earlier, &outcome.failing, &errors);
+    // what this run did not get to (a gate that stopped at the JIT): red still, whatever else it says
+    let still: BTreeMap<String, String> = if RERUNS.contains(&name) {
+        still_failing(&earlier).into_iter().filter(|(key, _)| !passed.contains(key) && !outcome.failing.iter().any(|u| unit_key(u) == *key)).map(|(_, open)| open).collect()
+    } else { BTreeMap::new() };
+    outcome.ok &= still.is_empty();
+    let blame: Vec<String> = outcome.failing.iter().filter(|u| !carried.contains_key(*u)).cloned().collect();
+    let (units, mut ambiguous) = if blame.is_empty() { (vec![Vec::new(); entries.len()], false) }
+        else { attribute(repo, &entries, &blame) };
+    ambiguous |= attribution_error.is_some();
+    // who broke each failing unit: for the next run of the bucket to name, should it still fail
+    let mut broke: BTreeMap<String, String> = BTreeMap::new();
+    for unit in outcome.failing.iter().filter(|u| is_unit(u)) {
+        let who = carried.get(unit).cloned().unwrap_or_else(|| entries.iter().zip(&units).filter(|(_, us)| us.contains(unit))
+            .map(|(e, _)| format!("{} ({}) #{}", e.label(), e.agent, e.id)).collect::<Vec<_>>().join(", "));
+        if !who.is_empty() { broke.entry(unit_key(unit)).or_insert(who); }
+    }
+    let rows = entries.iter().zip(&units).map(|(e, units)| obj(vec![
+        ("id", Value::Int(e.id as i64)), ("label", s(&e.label())), ("agent", s(&e.agent)),
+        ("land_to_verdict_ms", Value::Int(ended.saturating_sub(e.changed_ms) as i64)),
+        ("units", Value::Arr(units.iter().map(|u| s(u)).collect())),
+    ])).collect();
+    append(home, obj(vec![
+        ("bucket", s(name)), ("base", base.as_ref().map_or(Value::Null, pair_value)), ("tip", pair_value(tip)),
+        ("started_ms", Value::Int(started as i64)), ("ended_ms", Value::Int(ended as i64)),
+        ("ok", Value::Bool(outcome.ok)), ("failing", Value::Arr(outcome.failing.iter().map(|u| s(u)).collect())),
+        ("summary", s(&outcome.summary)), ("log", s(&outcome.log)), ("landings", Value::Arr(rows)),
+        ("ambiguous", Value::Bool(ambiguous)),
+        ("errors", Value::Obj(errors.iter().map(|(u, e)| (u.clone(), Value::Arr(e.iter().map(s).collect()))).collect())),
+        ("passed", Value::Arr(passed.iter().map(s).collect())),
+        ("carried", Value::Obj(carried.iter().map(|(u, who)| (u.clone(), s(who))).collect())),
+        ("still", Value::Obj(still.iter().map(|(u, who)| (u.clone(), s(who))).collect())),
+        ("broke", Value::Obj(broke.into_iter().map(|(k, who)| (k, s(who))).collect())),
+    ])).map_err(|e| format!("bucket ledger: {e}"))?;
+    let latency = entries.iter().map(|e| e.changed_ms).max().map(|landed| {
+        format!("land->verdict {} s; ", ended.saturating_sub(landed) / 1000)
+    }).unwrap_or_default();
+    let (sev, line, detail) = if outcome.ok {
+        (Sev::Info, format!("bucket {name} {} ok ({latency}{})", tip.short(), outcome.summary), String::new())
+    } else {
+        let blamed = entries.iter().zip(&units).flat_map(|(e, units)| units.iter().map(move |u| {
+            format!("{} ({}) changed {u}", e.label(), e.agent)
+        })).chain(carried.iter().chain(&still).map(|(u, who)| format!("{u} still failing {}", still_since(who)))).collect::<Vec<_>>().join("; ");
+        let mut detail = crate::land::failure_lines(&text);
+        if let Some(e) = attribution_error { detail.push(e); }
+        (Sev::Err, format!("bucket {name} {} FAILED {}: {blamed}{} ({latency}{})", tip.short(), outcome.failing.join(", "), if ambiguous { " (ambiguous)" } else { "" }, outcome.summary), detail.join("\n"))
+    };
+    emit(sev, line, detail);
+    Ok(())
+}
+
+/// The prebuild legs' test listings of a landed tip under the JIT it brought (orch/warm.rs), as
+/// bucket `prebuild`'s verdict: a listing that fails there is a break on the branch, named for the
+/// landings that changed its package (only a warm WARN before, 11-03). `outcome.log` holds each
+/// listing's output and its `GATEUNIT` line; `base` is the previous prebuild's tip.
+pub fn prebuild(home: &Path, repo: &Path, store: &Store, started: u64, base: Option<Pair>, tip: &Pair, outcome: Outcome) -> Result<(), String> {
+    let emit = |sev: Sev, line: String, detail: String| store.event("bucket", sev, line, Some(detail));
+    judge("prebuild", home, repo, store, &emit, started, base, tip, |_| Ok(outcome))
+}
+
 /// Each bucket owns one timer and runs synchronously on its own thread.
 pub fn spawn(name: &str, timing: Timing, repo: PathBuf, home: PathBuf, publish: Publish, run: Run, prior: Prior) {
     let name = name.to_string();
@@ -204,66 +458,15 @@ pub fn spawn(name: &str, timing: Timing, repo: PathBuf, home: PathBuf, publish: 
         let mut last = latest.as_ref().and_then(|v| read_pair(v.get("tip")?));
         let mut last_start = latest.as_ref().and_then(|v| v.get("started_ms")?.as_u64()).unwrap_or(0);
         let logs = home.join("bucket-logs");
+        let emit = |sev: Sev, line: String, detail: String| publish(hub_record(&machine, "", 0, "bucket", sev, line, detail));
         let record = |started: u64, base: Option<Pair>, tip: Pair, log: PathBuf| -> Result<Pair, String> {
-            let history = store.history("land")?.iter().filter_map(|v| Entry::parse(&v.to_json())).filter(|e| e.state == St::Landed).collect::<Vec<_>>();
-            let entries = || history.clone();
-            let base = base.or_else(|| {
-                let recent = Duration::from_secs(60 * 60).as_millis();
-                let mut entries = entries();
-                entries.sort_by_key(|e| (e.changed_ms, e.id));
-                entries.iter().filter(|e| u128::from(started.saturating_sub(e.changed_ms)) <= recent).find_map(|e| entry_pair(&e.pre))
-            });
-            let mut outcome = if base.is_some() {
-                std::fs::create_dir_all(&logs).map_err(|e| format!("bucket logs: {e}"))?;
-                run(base.as_ref(), &tip, &log)
-            } else {
-                Outcome { ok: true, failing: Vec::new(), log: String::new(), summary: "baseline".into(), lost: false }
-            };
-            if outcome.lost {
-                publish(hub_record(&machine, "", 0, "bucket", Sev::Warn, format!("bucket {name} {}: no verdict: its lease was lost under the gate twice (the fleet, not the landings; {}); it runs again at its next turn", tip.short(), outcome.log), String::new()));
-                return Err(format!("no verdict on {}: lease lost twice", tip.short()));
-            }
-            let ended = wall_ms();
-            let (entries, attribution_error) = match &base {
-                Some(base) => match landings(&repo, base, &tip, &entries()) {
-                    Ok(entries) => (entries, None),
-                    Err(e) => (Vec::new(), Some(format!("landing attribution: {e}"))),
-                },
-                None => (Vec::new(), None),
-            };
-            if let Some(e) = &attribution_error {
-                outcome.summary.push_str(&format!("; {e}"));
-            }
-            let (units, mut ambiguous) = if outcome.ok { (vec![Vec::new(); entries.len()], false) }
-                else { attribute(&repo, &entries, &outcome.failing) };
-            ambiguous |= attribution_error.is_some();
-            let rows = entries.iter().zip(&units).map(|(e, units)| obj(vec![
-                ("id", Value::Int(e.id as i64)), ("label", s(&e.label())), ("agent", s(&e.agent)),
-                ("land_to_verdict_ms", Value::Int(ended.saturating_sub(e.changed_ms) as i64)),
-                ("units", Value::Arr(units.iter().map(|u| s(u)).collect())),
-            ])).collect();
-            append(&home, obj(vec![
-                ("bucket", s(&name)), ("base", base.as_ref().map_or(Value::Null, pair_value)), ("tip", pair_value(&tip)),
-                ("started_ms", Value::Int(started as i64)), ("ended_ms", Value::Int(ended as i64)),
-                ("ok", Value::Bool(outcome.ok)), ("failing", Value::Arr(outcome.failing.iter().map(|u| s(u)).collect())),
-                ("summary", s(&outcome.summary)), ("log", s(&outcome.log)), ("landings", Value::Arr(rows)),
-                ("ambiguous", Value::Bool(ambiguous)),
-            ])).map_err(|e| format!("bucket ledger: {e}"))?;
-            let latency = entries.iter().map(|e| e.changed_ms).max().map(|landed| {
-                format!("land->verdict {} s; ", ended.saturating_sub(landed) / 1000)
-            }).unwrap_or_default();
-            let (sev, line, detail) = if outcome.ok {
-                (Sev::Info, format!("bucket {name} {} ok ({latency}{})", tip.short(), outcome.summary), String::new())
-            } else {
-                let blamed = entries.iter().zip(&units).flat_map(|(e, units)| units.iter().map(move |u| {
-                    format!("{} ({}) changed {u}", e.label(), e.agent)
-                })).collect::<Vec<_>>().join("; ");
-                let log = std::fs::read_to_string(&outcome.log).unwrap_or_default();
-                let mut detail = crate::land::failure_lines(&log);
-                if let Some(e) = attribution_error { detail.push(e); }
-                (Sev::Err, format!("bucket {name} {} FAILED {}: {blamed}{} ({latency}{})", tip.short(), outcome.failing.join(", "), if ambiguous { " (ambiguous)" } else { "" }, outcome.summary), detail.join("\n"))
-            };
-            publish(hub_record(&machine, "", 0, "bucket", sev, line, detail));
+            judge(&name, &home, &repo, &store, &emit, started, base, &tip, |base| match base {
+                Some(base) => {
+                    std::fs::create_dir_all(&logs).map_err(|e| format!("bucket logs: {e}"))?;
+                    Ok(run(Some(base), &tip, &log))
+                }
+                None => Ok(Outcome { ok: true, failing: Vec::new(), log: String::new(), summary: "baseline".into(), no_verdict: None }),
+            })?;
             Ok(tip)
         };
         let prefix = format!("{name}-");
@@ -318,14 +521,15 @@ pub fn spawn(name: &str, timing: Timing, repo: PathBuf, home: PathBuf, publish: 
     }) { eprintln!("bucket thread: {e}"); }
 }
 
-pub fn fast(repo: PathBuf, proofs: Arc<crate::gateproof::Store>) -> Run {
+pub fn fast(repo: PathBuf, home: PathBuf, proofs: Arc<crate::gateproof::Store>) -> Run {
     Arc::new(move |base, tip, log| {
         let (units, why) = proofs.proven(&repo, tip);
+        let retry = retry_env(&rows_of(&home, "fast"));
         let base = base.expect("fast bucket needs a base");
         // its presents share these cores (land_gate.sh step_qpresent): what the box sets aside for them
-        let lease = ["lease", "gate", "--needs", GATE_NEEDS, "--cores", "8", "--lane", "landq-fast", "--prio", "0", "--rev", &tip.rev(), "--"];
+        let lease = ["lease", "gate", "--needs", GATE_NEEDS, "--cores", "8", "--lane", "landq-fast", "--prio", "0", "--rev", &tip.rev()];
         let proven = format!("GATE_PROVEN={}", units.join(";"));
-        let gate = ["env", &proven, "bash", "tools/run/fixture/land_gate.sh", "fast", &base.work, &base.main];
+        let gate = ["env", &proven, &retry, "bash", "tools/run/fixture/land_gate.sh", "fast", &base.work, &base.main];
         let (status, text) = lease_run(&repo, &lease, &gate, &why, log, base, tip);
         proofs.record_log(&repo, tip, &text, &format!("bucket fast {}", tip.short()));
         verdict(status, &text, log)
@@ -334,21 +538,23 @@ pub fn fast(repo: PathBuf, proofs: Arc<crate::gateproof::Store>) -> Run {
 
 /// Boots the apps the landings touched on a Linux node's warm JIT (one that presents), right
 /// after each landing. The Macs take only work that requires macOS.
-pub fn hot(repo: PathBuf) -> Run {
+pub fn hot(repo: PathBuf, home: PathBuf) -> Run {
     Arc::new(move |base, tip, log| {
         let base = base.expect("hot bucket needs a base");
+        let retry = retry_env(&rows_of(&home, "hot"));
         // a warm boot of one or two apps needs far less than a test lease's default 6 cores / 7 GB
         let needs = format!("{GATE_NEEDS},gui=1");
-        let lease = ["lease", "test", "--needs", &needs, "--cost", "small", "--cores", "3", "--ram-gb", "5", "--priority", "interactive", "--lane", "landq-hot", "--rev", &tip.rev(), "--"];
-        let gate = ["bash", "tools/run/fixture/land_gate.sh", "hot", &base.work, &base.main];
+        let lease = ["lease", "test", "--needs", &needs, "--cost", "small", "--cores", "3", "--ram-gb", "5", "--priority", "interactive", "--lane", "landq-hot", "--rev", &tip.rev()];
+        let gate = ["env", &retry, "bash", "tools/run/fixture/land_gate.sh", "hot", &base.work, &base.main];
         let (status, text) = lease_run(&repo, &lease, &gate, &[], log, base, tip);
         verdict(status, &text, log)
     })
 }
 
-/// Runs land_gate.sh under a devhub lease, its output in `log` after the `why` lines. A lost
-/// lease ([`crate::lease::client::LOST_EXIT`]) runs it once more in the same log, after
-/// [`RERUN`]; the text is the last run's.
+/// Runs land_gate.sh under a devhub lease, its output in `log` after the `why` lines; a failed
+/// step's logs, which go with the node's scratch at the lease's end, in `<log>.keep` beside it
+/// (`lease --keep`). A lost lease ([`crate::lease::client::LOST_EXIT`]) runs it once more in the
+/// same log, after [`RERUN`]; the text is the last run's.
 fn lease_run(repo: &Path, lease: &[&str], gate: &[&str], why: &[String], log: &Path, base: &Pair, tip: &Pair) -> (Result<Option<i32>, String>, String) {
     let sidecar = log.with_extension("log.run");
     let execute = |again: bool| -> Result<Option<i32>, String> {
@@ -364,7 +570,7 @@ fn lease_run(repo: &Path, lease: &[&str], gate: &[&str], why: &[String], log: &P
         let mut file = if again { std::fs::OpenOptions::new().append(true).open(log) } else { std::fs::File::create(log) }.map_err(|e| e.to_string())?;
         if !again { for line in why { writeln!(file, "{line}").map_err(|e| e.to_string())?; } }
         let err = file.try_clone().map_err(|e| e.to_string())?;
-        let mut child = std::process::Command::new(&own[0]).args(&own[1..]).args(lease).args(gate)
+        let mut child = std::process::Command::new(&own[0]).args(&own[1..]).args(lease).arg("--keep").arg(log.with_extension("keep")).arg("--").args(gate)
             .current_dir(repo).env("DEVHUB_AGENT", "devhub-bucket")
             .stdin(std::process::Stdio::null()).stdout(file).stderr(err).spawn().map_err(|e| e.to_string())?;
         let saved = save_run(log, child.id(), started, base, tip);
@@ -415,7 +621,7 @@ fn verdict(status: Result<Option<i32>, String>, text: &str, log: &Path) -> Outco
     failing.sort();
     failing.dedup();
     let summary = text.lines().filter(|l| l.starts_with("STEP ")).collect::<Vec<_>>().join(", ");
-    Outcome { ok, failing, log: log.display().to_string(), summary, lost: lost_run }
+    Outcome { ok, failing, log: log.display().to_string(), summary, no_verdict: lost_run.then(|| "its lease was lost under the gate twice (the fleet, not the landings)".to_string()) }
 }
 
 #[cfg(test)]
@@ -425,17 +631,98 @@ mod tests {
     #[test]
     fn a_lost_lease_runs_the_gate_once_more_and_lost_again_is_no_verdict() {
         let lost_exit = Ok(Some(crate::lease::client::LOST_EXIT));
-        assert!(again(&lost_exit, "why\nL1 test@101: granted\n"));
-        assert!(!again(&lost_exit, &format!("why\n{RERUN}\nL2 test@102: granted\n")), "only once, also for a run adopted after a master restart");
+        assert!(again(&lost_exit, "why\nL1 test@node-a: granted\n"));
+        assert!(!again(&lost_exit, &format!("why\n{RERUN}\nL2 test@node-b: granted\n")), "only once, also for a run adopted after a master restart");
         assert!(!again(&Ok(Some(1)), "GATEUNIT fail check x\n"), "a failed gate is a verdict");
         // the verdict reads the last run only: the lost run's lines are gone with it
         let text = format!("why\nSTEP jit 9 s\n{RERUN}\nSTEP jit 3 s\nNODEGATE-OK\n");
         assert_eq!(last_run(&text), "STEP jit 3 s\nNODEGATE-OK\n");
         let o = verdict(Ok(Some(0)), last_run(&text), Path::new("x.log"));
-        assert!(o.ok && !o.lost && o.summary == "STEP jit 3 s", "{:?} {}", o.failing, o.summary);
+        assert!(o.ok && o.no_verdict.is_none() && o.summary == "STEP jit 3 s", "{:?} {}", o.failing, o.summary);
         // lost twice: no verdict, nothing for the landings to answer for
-        assert!(verdict(lost_exit, "STEP affected 0 s\n", Path::new("x.log")).lost);
-        assert!(!verdict(Ok(Some(1)), "", Path::new("x.log")).lost);
+        assert!(verdict(lost_exit, "STEP affected 0 s\n", Path::new("x.log")).no_verdict.is_some());
+        assert!(verdict(Ok(Some(1)), "", Path::new("x.log")).no_verdict.is_none());
+    }
+
+    #[test]
+    fn a_break_already_on_the_branch_names_who_broke_it_not_the_next_lander() {
+        let err = |at: &str| format!("/n/tree/tools/x/src/boot.rs:{at}: E0433: failed to resolve: use of undeclared type `crate::logcat`");
+        // the landing that broke it: its run's errors and who it named
+        let first = format!("STEP qcheck 1 s\nm: 0 errors\nGATEUNIT ok check m\n{}\n{}\nx: 2 errors\nGATEUNIT fail check x\nSTEP qpresent 1 s\n", err("102:9"), err("110:5"));
+        let (errors, passed) = unit_lines(&first);
+        assert_eq!(errors["check x"], vec!["boot.rs: E0433: failed to resolve: use of undeclared type `crate::logcat`".to_string()], "path and line give way to the file");
+        assert!(passed.contains("check m") && !passed.contains("check x"));
+        let row = |errors: &BTreeMap<String, Vec<String>>, passed: &[&str], broke: &str| obj(vec![
+            ("errors", Value::Obj(errors.iter().map(|(u, e)| (u.clone(), Value::Arr(e.iter().map(s).collect()))).collect())),
+            ("passed", Value::Arr(passed.iter().map(|p| s(*p)).collect())),
+            ("broke", obj(vec![("check x", s(broke))])),
+        ]);
+        let broke = row(&errors, &["check m"], "rc-a (A) #970");
+        // a later run checks it as a flip of another lib's build, an edit moved the line: the same break
+        let later = format!("{}\nx: 1 errors\nGATEUNIT fail check x --also=y\n", err("130:9"));
+        let (now, _) = unit_lines(&later);
+        let failing = |e: &BTreeMap<String, Vec<String>>| e.keys().cloned().collect::<Vec<_>>();
+        let carried = carried_since(&[obj(vec![]), broke.clone()], &failing(&now), &now);
+        assert_eq!(carried.get("check x --also=y").map(String::as_str), Some("rc-a (A) #970"), "rows that never looked at it are skipped");
+        // a run that passed it since: a failure now is new
+        assert!(carried_since(&[row(&BTreeMap::new(), &["check x"], ""), broke.clone()], &failing(&now), &now).is_empty());
+        // an error it did not have: new, the landings that changed its inputs answer for it
+        let more = format!("{}\n/n/tree/tools/x/src/main.rs:3:1: E0425: cannot find value `z`\nGATEUNIT fail check x\n", err("102:9"));
+        let more = unit_lines(&more).0;
+        assert!(carried_since(&[broke], &failing(&more), &more).is_empty());
+        assert_eq!(error_key("no position: here"), None);
+        assert_eq!(error_key("C:/t/a.rs:1:2: warning: unused").as_deref(), Some("a.rs: warning: unused"));
+    }
+
+    #[test]
+    fn a_failed_unit_stays_red_until_it_passes() {
+        let row = |failing: &[&str], passed: &[&str], broke: &[(&str, &str)]| obj(vec![
+            ("failing", Value::Arr(failing.iter().map(|u| s(*u)).collect())),
+            ("passed", Value::Arr(passed.iter().map(|u| s(*u)).collect())),
+            ("broke", Value::Obj(broke.iter().map(|(k, who)| (k.to_string(), s(*who))).collect())),
+        ]);
+        let failed = row(&["check x --also=y", "present p", "devhub makepad-devhub"], &["check m"], &[("check x", "rc-a (A) #970")]);
+        // a later run that only looked at Calculator: its diff touched nothing, and it is no pass
+        let quiet = row(&[], &["present makepad-app-calculator"], &[]);
+        let still = still_failing(&[quiet.clone(), failed.clone()]);
+        assert_eq!(still.keys().map(String::as_str).collect::<Vec<_>>(), ["check x", "devhub makepad-devhub", "present p"]);
+        assert_eq!(still["check x"], ("check x --also=y".to_string(), "rc-a (A) #970".to_string()), "the unit as it failed, with its flips");
+        assert_eq!(still["present p"].1, ORIGIN_UNKNOWN);
+        assert_eq!(retry_env(&[quiet.clone(), failed.clone()]), "GATE_RETRY=check x --also=y;devhub makepad-devhub;present p");
+        // a pass settles it, also under other flips; an older failure stays settled
+        let fixed = row(&[], &["check x", "present p"], &[]);
+        assert_eq!(still_failing(&[fixed.clone(), quiet.clone(), failed.clone()]).keys().map(String::as_str).collect::<Vec<_>>(), ["devhub makepad-devhub"]);
+        // failing again after a pass: open again
+        assert!(still_failing(&[row(&["present p"], &[], &[]), fixed, failed.clone()]).contains_key("present p"));
+        // a package that left the tree has nothing left to fail
+        let (_, passed) = unit_lines("GATEUNIT gone check x --also=y\n");
+        assert!(passed.contains("check x"));
+        // a step's failure names no unit: the gate takes the JIT once more, and any verdict settles it
+        assert_eq!(retry_env(&[row(&["build"], &[], &[])]), "GATE_RETRY=steps");
+        assert_eq!(retry_env(&[quiet, row(&["build"], &[], &[])]), "GATE_RETRY=");
+        // a present failing again is the same break: who broke it, not the landings since
+        let now = ["present p".to_string()];
+        assert_eq!(carried_since(&[failed], &now, &BTreeMap::new()).get("present p").map(String::as_str), Some(ORIGIN_UNKNOWN));
+    }
+
+    /// The first recheck of a failure from before rows kept errors named whatever had just landed,
+    /// and each later run carried that name. Its first run's word stands, and it had none.
+    #[test]
+    fn a_failure_older_than_the_ledgers_names_is_of_unknown_origin() {
+        let old = obj(vec![("failing", Value::Arr(vec![s("check z")])), ("log", s("/h/bucket-logs/fast-1.log"))]);
+        let quiet = obj(vec![("failing", Value::Arr(vec![])), ("errors", obj(vec![])), ("passed", Value::Arr(vec![s("check m")]))]);
+        let unknown = "origin unknown, first failed in fast-1.log";
+        let now = BTreeMap::from([("check z".to_string(), vec!["a.rs: warning: unused".to_string()])]);
+        let failing = ["check z".to_string()];
+        assert_eq!(carried_since(&[quiet.clone(), old.clone()], &failing, &now).get("check z").map(String::as_str), Some(unknown), "no errors to compare with: the same break");
+        // a wrong name a later run wrote does not stand either
+        let named = obj(vec![("failing", Value::Arr(vec![s("check z")])), ("errors", Value::Obj([("check z".to_string(), Value::Arr(vec![s("a.rs: warning: unused")]))].into_iter().collect())), ("broke", obj(vec![("check z", s("rc-late (L) #9"))]))]);
+        assert_eq!(carried_since(&[named.clone(), quiet.clone(), old.clone()], &failing, &now).get("check z").map(String::as_str), Some(unknown));
+        assert_eq!(still_failing(&[named.clone(), quiet, old])["check z"].1, unknown);
+        // where the first failure has a name, that is who
+        assert_eq!(still_failing(&[named])["check z"].1, "rc-late (L) #9");
+        assert_eq!(still_since(unknown), unknown);
+        assert_eq!(still_since("rc-a (A) #9"), "since rc-a (A) #9");
     }
 
     #[test]

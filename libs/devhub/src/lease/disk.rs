@@ -244,6 +244,12 @@ pub fn list(r: &Roots, live: &Live) -> Vec<Item> {
     let current = jit.iter().max_by_key(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok()).cloned();
     for p in jit {
         let cur = Some(&p) == current.as_ref();
+        // a running process of that cache holds its live lock (relax store.rs hold_build): never
+        // taken, whatever its step (an embedded node's own loader runs from one of these)
+        if !crate::jitcache::held_locks(&p).is_empty() {
+            add(Cat::JitCache, p, None, false, "in use: a running process holds its live lock");
+            continue;
+        }
         add(Cat::JitCache, p, Some(if cur { 5 } else { 2 }), false, if cur { "current JIT cache" } else { "" });
     }
     add(Cat::JitCache, r.run_home.join("cache"), None, false, "source stores: imports stay stored");
@@ -304,6 +310,47 @@ pub fn mac_items(repo: &Path) -> Vec<Item> {
 
 fn gb(b: u64) -> f64 {
     b as f64 / GB
+}
+
+/// Where what goes waits for its delete (`<work>/trash`): a rename takes no time whatever it holds,
+/// so no lock is held over a delete, and a hub that stops halfway leaves whole trees or none at
+/// their places.
+fn trash(work: &Path) -> PathBuf {
+    work.join("trash")
+}
+
+/// Moves `p` to the trash (a missing one is gone already).
+pub fn to_trash(work: &Path, p: &Path) -> std::io::Result<()> {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    if std::fs::symlink_metadata(p).is_err() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(trash(work))?;
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    std::fs::rename(p, trash(work).join(format!("{}-{}-{}-{n}", name(p), crate::proto::wall_ms(), std::process::id())))
+}
+
+/// Deletes what is in the trash: what it freed (what could not go stays for the next time).
+pub fn empty_trash(work: &Path) -> u64 {
+    let mut freed = 0;
+    for p in children(&trash(work)) {
+        let bytes = dir_size(&p).0;
+        match remove(&p) {
+            Ok(()) => freed += bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => eprintln!("devhub disk: {}: {e}", p.display()),
+        }
+    }
+    freed
+}
+
+/// [`empty_trash`] on a thread of its own, at low priority: nobody waits for it.
+pub fn empty_trash_soon(work: &Path) {
+    let work = work.to_path_buf();
+    let _ = std::thread::Builder::new().name("devhub-trash".into()).spawn(move || {
+        crate::os::nice_this_thread();
+        empty_trash(&work);
+    });
 }
 
 /// Deletes exactly `p` (a directory tree or one file); never follows a symlink out.
@@ -369,8 +416,12 @@ impl Guard {
         self.state.lock().unwrap().dirty = true;
     }
 
+    /// Free bytes on the work dir's filesystem. Unknown (no probe for this OS, or a failed
+    /// probe) reads as unlimited: a guard that cannot measure must not reclaim. (Android had no
+    /// probe; 0 read as "below the floor" and the running loader's own JIT cache was deleted
+    /// every 60 s, so no launch ever started warm.)
     pub fn free(&self) -> u64 {
-        caps::disk_space(&self.roots.work).map_or(0, |(f, _)| f)
+        caps::disk_space(&self.roots.work).map_or(u64::MAX, |(f, _)| f)
     }
 
     /// The cached listing, measured again when stale or changed (or `force`).
@@ -394,8 +445,9 @@ impl Guard {
         (self.publish)(hub_record(&self.machine, "", 0, "disk", sev, line, String::new()));
     }
 
-    /// The periodic look: floor / warn crossings, and automatic reclaim below the floor.
-    pub fn check(&self, live: &dyn Fn() -> Live) {
+    /// The periodic look: floor / warn crossings, and automatic reclaim below the floor; `quiet`
+    /// (a timed lease runs) skips the walk that refreshes what the roots hold.
+    pub fn check(&self, live: &dyn Fn() -> Live, quiet: bool) {
         let free = self.free();
         let (floor_cross, warn_cross) = {
             let mut st = self.state.lock().unwrap();
@@ -413,7 +465,7 @@ impl Guard {
                 self.emit(Sev::Warn, format!("disk_floor: {} has {:.0} GB free, floor {:.0} GB: reclaiming", self.machine, gb(free), gb(self.floor())));
             }
             self.reclaim(&live(), false, 0);
-        } else {
+        } else if !quiet {
             let _ = self.items(&live(), false);
         }
     }
@@ -475,6 +527,7 @@ impl Guard {
                 }
                 super::tree::remove_native(&self.roots.work, &name(&i.path)).map(|r| {
                     for b in r.bundles { self.emit(Sev::Warn, format!("ws_recovered: native tree {} bundled to {}", i.path.display(), b.display())); }
+                    empty_trash(&self.roots.work);
                 })
             } else { remove(&i.path).map_err(|e| e.to_string()) };
             #[cfg(not(feature = "checkout"))]

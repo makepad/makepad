@@ -318,12 +318,12 @@ mod tests {
     #[test]
     fn ps_lines_become_rows() {
         let lines = vec![
-            r#"{"machine":"217","os":"linux","cpus":16,"load1":2.5,"mem_total_mb":61000,"mem_avail_mb":40000,"uptime_s":5,"jits":1}"#.to_string(),
-            r#"{"pid":42,"app":"sandbox","up_s":90,"cpu_pct":12.5,"rss_mb":900,"threads":80,"jit":true,"observe":true,"run":"x","state":"idle"}"#.to_string(),
+            r#"{"machine":"node-e","os":"linux","cpus":16,"load1":2.5,"mem_total_mb":61000,"mem_avail_mb":40000,"uptime_s":5,"jits":1}"#.to_string(),
+            r#"{"pid":42,"app":"foo","up_s":90,"cpu_pct":12.5,"rss_mb":900,"threads":80,"jit":true,"observe":true,"run":"x","state":"idle"}"#.to_string(),
             r#"{"pid":43,"app":"wm","up_s":9,"cpu_pct":null,"rss_mb":300,"threads":60,"jit":false,"observe":false,"run":"","state":""}"#.to_string(),
         ];
         let m = super::parse_ps("x", &lines);
-        assert_eq!(m.name, "217");
+        assert_eq!(m.name, "node-e");
         assert_eq!(m.jits.len(), 2);
         assert_eq!(m.jits[0].cpu_pct, Some(12.5));
         assert_eq!(m.jits[1].cpu_pct, None);
@@ -333,7 +333,7 @@ mod tests {
 
     #[test]
     fn ps_ai_hub_becomes_a_row_and_compact_text() {
-        let lines = vec![r#"{"machine":"101","ai_hub":{"running":true,"serving":true,"models":["trellis-2 ready","qwen installing"],"peers":6,"peers_ok":5,"why":""}}"#.to_string()];
+        let lines = vec![r#"{"machine":"node-a","ai_hub":{"running":true,"serving":true,"models":["trellis-2 ready","qwen installing"],"peers":6,"peers_ok":5,"why":""}}"#.to_string()];
         let m = super::parse_ps("", &lines);
         assert_eq!(m.ai_hub, Some(AiHub {
             running: Some(true), serving: Some(true),
@@ -348,7 +348,7 @@ mod tests {
 
     #[test]
     fn ps_ai_hub_outage_keeps_its_reason() {
-        let lines = vec![r#"{"machine":"102","ai_hub":{"running":true,"serving":false,"models":[],"peers":0,"peers_ok":0,"why":"listening on loopback only (networking off on this node)"}}"#.to_string()];
+        let lines = vec![r#"{"machine":"node-b","ai_hub":{"running":true,"serving":false,"models":[],"peers":0,"peers_ok":0,"why":"listening on loopback only (networking off on this node)"}}"#.to_string()];
         let mut out = String::new();
         crate::cli::render_ps(None, &lines, &mut out);
         assert!(out.contains("  AI hub: serving NO (listening on loopback only (networking off on this node)), models: none\n"));
@@ -357,16 +357,16 @@ mod tests {
 
     #[test]
     fn ps_ai_hub_missing_fields_stay_unknown() {
-        let lines = vec![r#"{"machine":"103","ai_hub":{"running":true,"peers":6}}"#.to_string()];
+        let lines = vec![r#"{"machine":"node-c","ai_hub":{"running":true,"peers":6}}"#.to_string()];
         let m = super::parse_ps("", &lines);
         let h = m.ai_hub.unwrap();
         assert_eq!(h.serving, None);
         assert_eq!(h.models, None);
         assert_eq!(h.peers_ok, None);
         assert_eq!(h.line(), "AI hub: serving unknown, models: unknown, peers ?/6 answer");
-        let lines = vec![format!("{{\"machine\":\"103\",\"ai_hub\":{}}}", h.to_json())];
+        let lines = vec![format!("{{\"machine\":\"node-c\",\"ai_hub\":{}}}", h.to_json())];
         assert_eq!(super::parse_ps("", &lines).ai_hub, Some(h));
-        assert!(super::parse_ps("", &[r#"{"machine":"104","ai_hub":null}"#.to_string()]).ai_hub.is_none());
+        assert!(super::parse_ps("", &[r#"{"machine":"node-d","ai_hub":null}"#.to_string()]).ai_hub.is_none());
     }
 
     #[test]
@@ -376,7 +376,7 @@ mod tests {
             models: Some((0..15).map(|i| format!("model-{i} ready")).collect()),
             ..AiHub::default()
         };
-        let lines = vec![format!("{{\"machine\":\"101\",\"ai_hub\":{}}}", hub.to_json())];
+        let lines = vec![format!("{{\"machine\":\"node-a\",\"ai_hub\":{}}}", hub.to_json())];
         let mut out = String::new();
         crate::cli::render_ps(None, &lines, &mut out);
         assert!(out.contains("model-11 ready, +3 more"));
@@ -385,15 +385,15 @@ mod tests {
 
     #[test]
     fn ai_hub_summary_counts_known_configured_hubs() {
-        let mut machines: Vec<_> = (101..=106).map(|n| MachineRow {
-            name: n.to_string(),
-            ai_hub: Some(AiHub { running: Some(n != 104), serving: Some(n > 104), ..AiHub::default() }),
+        let mut machines: Vec<_> = (1..=6).map(|n| MachineRow {
+            name: format!("node-{n}"),
+            ai_hub: Some(AiHub { running: Some(n != 4), serving: Some(n > 4), ..AiHub::default() }),
             ..MachineRow::default()
         }).collect();
         machines.push(MachineRow { name: "no-hub".into(), ..MachineRow::default() });
         machines.push(MachineRow { name: "old-hub".into(), ai_hub: Some(AiHub::default()), ..MachineRow::default() });
         machines.push(MachineRow { name: "unreachable".into(), err: Some("link down".into()), ai_hub: machines[0].ai_hub.clone(), ..MachineRow::default() });
-        assert_eq!(crate::cli::ai_hub_summary(&machines).as_deref(), Some("AI hub: 4 of 6 nodes not serving the fleet: 101, 102, 103, 104"));
+        assert_eq!(crate::cli::ai_hub_summary(&machines).as_deref(), Some("AI hub: 4 of 6 nodes not serving the fleet: node-1, node-2, node-3, node-4"));
         assert_eq!(crate::cli::ai_hub_summary(&machines[4..]), None);
         assert_eq!(crate::cli::ai_hub_summary(&[]), None);
     }
@@ -431,7 +431,7 @@ mod tests {
         let parse = |s: &str| makepad_strict_json::parse(s.as_bytes()).unwrap();
         let health = parse(r#"{"serving_fleet":true,"lan_listening":true,"role":"compute"}"#);
         let models = parse(r#"[{"id":"trellis-2","state":"ready"},{"id":"qwen","state":"installing"}]"#);
-        let fleet = parse(r#"{"serving_fleet":true,"lan_listening":true,"networked_ai_hub":true,"peers":[{"name":"102","addr":"192.0.2.40:8123","answers":true,"models":[],"heard_s":1},{"name":"103","addr":"192.0.2.41:8123","answers":false,"models":[],"heard_s":2}]}"#);
+        let fleet = parse(r#"{"serving_fleet":true,"lan_listening":true,"networked_ai_hub":true,"peers":[{"name":"node-b","addr":"192.0.2.40:8123","answers":true,"models":[],"heard_s":1},{"name":"node-c","addr":"192.0.2.41:8123","answers":false,"models":[],"heard_s":2}]}"#);
         let h = crate::local::ai_hub_status(&health, Some(&models), Some(&fleet));
         assert_eq!(h.running, Some(true));
         assert_eq!(h.serving, Some(true));

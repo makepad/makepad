@@ -2,7 +2,9 @@
 //! pair (tools/run/fixture/allapps_check.sh; makepad-app-wm-all is not checked), a scheduled
 //! master job (was allapps.sh and allapps.last.txt): hourly, only while no lease waits in the
 //! queue, at the lowest priority on one x64 pool box, and only for a pair it has not checked.
-//! `devhub allapps kick` runs it now. The result is state and an event.
+//! `devhub allapps kick` runs it now. The result is state and an event. A master restart ends no
+//! run: the new master follows it on its lease, or, its lease gone, asks again at once with the
+//! run's age.
 
 use super::leg::{Held, Spec};
 use super::{age, snapshot, stamp, Ctx};
@@ -52,16 +54,31 @@ pub fn parse(text: &str) -> (String, Vec<PkgErrors>) {
 }
 
 pub fn start(ctx: Arc<Ctx>) {
-    if ctx.store.update(|d| d.allapps.running.take()).unwrap_or_else(|e| { eprintln!("devhub state: {e}"); Default::default() }).is_some() {
-        ctx.store.event("allapps", Sev::Warn, "allapps: the run ended with the master; again when due".into(), None);
-    }
+    // the run a previous master did not see end: its record names its lease, so the restore keeps
+    // that lease for it ([`super::go`])
+    let mut back = ctx.store.read(|d| d.allapps.running.clone());
     let _ = std::thread::Builder::new().name("devhub-allapps".into()).spawn(move || loop {
-        if let Some(pair) = due(&ctx) {
-            run(&ctx, pair);
+        if let Some(r) = back.take() {
+            run(&ctx, r.pair.clone(), Some(r));
+        } else if let Some(pair) = due(&ctx) {
+            run(&ctx, pair, None);
         }
         ctx.store.wait(TICK);
     });
 }
+
+/// What it leases and runs ([`DEVHUB_TEST_ALLAPPS`]: a test's command, on any box).
+fn command(ctx: &Ctx, pair: &Pair, since_ms: Option<u64>) -> (Spec, Vec<String>) {
+    let spec = Spec { since_ms, lane: "allapps".into(), agent: "devhub-allapps".into(), kind: Kind::Long, needs: "arch=x64,os=linux,role=pool".into(), prio: super::verify::PRIO, rev: pair.rev(), repo_dir: ctx.repo.to_string_lossy().into_owned(), node: None };
+    #[cfg(test)]
+    if let Ok(cmd) = std::env::var("DEVHUB_TEST_ALLAPPS") {
+        return (Spec { needs: String::new(), ..spec }, vec![cmd]);
+    }
+    (spec, ["env", "CARGO_INCREMENTAL=0", "bash", "tools/run/fixture/allapps_check.sh"].iter().map(|s| s.to_string()).collect())
+}
+
+/// The run of its lease (one per lease).
+const RUN_N: u64 = 1;
 
 /// The pair to check now: asked, or an hour since the last run, a pair it has not checked (or
 /// checked incompletely), and nobody waiting for a lease.
@@ -82,32 +99,67 @@ fn due(ctx: &Ctx) -> Option<Pair> {
     (!busy).then_some(pair)
 }
 
-fn run(ctx: &Ctx, pair: Pair) {
+/// One run of `pair`; `back`: a previous master's run of it, followed on its lease when that is
+/// still held, asked for again at once (with its age) when not.
+fn run(ctx: &Ctx, pair: Pair, back: Option<AllappsRun>) {
     let dir = ctx.logs("allapps");
     let _ = std::fs::create_dir_all(&dir);
     super::prune(&dir, 30);
-    let started = wall_ms();
-    let log = dir.join(format!("{}.log", stamp(started)));
-    let mut r = AllappsRun { pair: pair.clone(), at_ms: started, verdict: "running".into(), log: log.to_string_lossy().into_owned(), ..Default::default() };
+    let resumed = back.is_some();
+    let mut r = back.unwrap_or_else(|| {
+        let started = wall_ms();
+        AllappsRun { pair: pair.clone(), at_ms: started, verdict: "running".into(), log: dir.join(format!("{}.log", stamp(started))).to_string_lossy().into_owned(), ..Default::default() }
+    });
+    let started = r.at_ms;
+    let log = std::path::PathBuf::from(&r.log);
+    let save = |r: &AllappsRun| ctx.store.update(|d| d.allapps.running = Some(r.clone())).unwrap_or_else(|e| { eprintln!("devhub state: {e}"); Default::default() });
     ctx.store.update(|d| {
         d.allapps.asked = false;
         d.allapps.running = Some(r.clone());
     }).unwrap_or_else(|e| { eprintln!("devhub state: {e}"); Default::default() });
-    ctx.store.event("allapps", Sev::Info, format!("allapps {} started", pair.short()), None);
-    let spec = Spec { since_ms: None, only: false, lane: "allapps".into(), agent: "devhub-allapps".into(), kind: Kind::Long, needs: "arch=x64,os=linux,role=pool".into(), prio: super::verify::PRIO, rev: pair.rev(), repo_dir: ctx.repo.to_string_lossy().into_owned(), node: None };
+    let (spec, argv) = command(ctx, &pair, Some(started));
+    // its lease, taken back from the previous master: its run is followed from where the log
+    // stops (the node may have started it before that master noted it), or started on it
+    let mut kept = if resumed && super::leg::lease_held(ctx, &r.lease) { Some(Held::attach(&r.lease, &r.node)) } else { None };
+    let mut following = kept.as_ref().is_some_and(|h| r.run_n > 0 || h.has_run(RUN_N) == Ok(true));
+    if resumed {
+        let how = match &kept {
+            Some(_) if following => "its run goes on",
+            Some(_) => "its lease is kept: the run starts on it",
+            None => "its lease ended: it asks again at once, with its age",
+        };
+        ctx.store.event("allapps", Sev::Info, format!("allapps {}: the master restarted; {how}", pair.short()), None);
+    } else {
+        ctx.store.event("allapps", Sev::Info, format!("allapps {} started", pair.short()), None);
+    }
     let outcome = (|| -> Result<(), String> {
         // preempted by lane work, it asks again (a fresh log)
         loop {
-            let mut file = std::fs::File::create(&log).map_err(|e| format!("{}: {e}", log.display()))?;
-            let held = Held::acquire(&spec, &mut |_| {}, &|| false)?;
+            let held = match kept.take() {
+                Some(h) => h,
+                None => {
+                    (r.run_n, following) = (0, false);
+                    Held::acquire(&spec, &mut |_| {}, &|| false)?
+                }
+            };
             r.lease = held.id.clone();
             r.node = held.node.clone();
-            ctx.store.update(|d| d.allapps.running = Some(r.clone())).unwrap_or_else(|e| { eprintln!("devhub state: {e}"); Default::default() });
-            let argv: Vec<String> = ["env", "CARGO_INCREMENTAL=0", "bash", "tools/run/fixture/allapps_check.sh"].iter().map(|s| s.to_string()).collect();
+            save(&r);
+            let res = if following {
+                let off = std::fs::metadata(&log).map_or(0, |m| m.len());
+                let mut file = std::fs::OpenOptions::new().append(true).create(true).open(&log).map_err(|e| format!("{}: {e}", log.display()))?;
+                held.follow(RUN_N, off, &mut file)
+            } else {
+                let mut file = std::fs::File::create(&log).map_err(|e| format!("{}: {e}", log.display()))?;
+                held.run_asked("allapps", ".", &argv, &mut file, &mut |n| {
+                    r.run_n = n;
+                    save(&r);
+                })
+            };
             let id = held.id.clone();
-            let res = held.run(&argv, &mut file);
             held.release(res.as_ref().ok().copied());
             if res.is_err() && super::leg::was_preempted(&id) {
+                (r.run_n, following) = (0, false);
                 continue;
             }
             return res.map(|_| ());

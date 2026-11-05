@@ -287,7 +287,7 @@ mod tests {
     fn waiters_are_added_met_and_cancelled() {
         let c = ctx("a");
         let add = |cond: &str, cmd: &str| serve(&c, &format!("after add {{\"by\":\"lane x\",\"cond\":[{cond}],\"cmd\":[{cmd}]}}"));
-        let a = add("\"verified\"", "\"launch\",\"mac\",\"makepad-fab\"").unwrap();
+        let a = add("\"verified\"", "\"launch\",\"mac\",\"makepad-foo\"").unwrap();
         assert!(a.contains("\"id\":\"A1\"") && a.contains("\"waiting\""), "{a}");
         assert!(add("\"free\",\"nope\"", "\"verify\"").unwrap_err().contains("no node nope"));
         assert!(add("\"verified\"", "").unwrap_err().contains("no words"));
@@ -305,6 +305,7 @@ mod tests {
         assert_eq!(serve(&c, "after list").unwrap(), "[]");
         assert!(serve(&c, "after list all").unwrap().contains("cancelled"));
         let _ = std::fs::remove_file(c.repo.join("state.json"));
+        let _ = std::fs::remove_file(c.repo.join("state.journal"));
     }
 
     fn g(dir: &std::path::Path, args: &[&str]) -> String {
@@ -347,6 +348,7 @@ mod tests {
         assert_eq!(cond, Cond::Landed { branch: "rc-x".into(), repo: "makepad".into(), sha: own });
         let _ = std::fs::remove_dir_all(&base);
         let _ = std::fs::remove_file(c.home.join("state.json"));
+        let _ = std::fs::remove_file(c.home.join("state.journal"));
     }
     #[test]
     fn readiness_passes_observe_refs_and_spawn_no_git() {

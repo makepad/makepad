@@ -796,8 +796,8 @@ mod tests {
 
     #[test]
     fn failure_lines_keep_errors_and_drop_progress() {
-        let log = "L7095 gate@106: granted, setting up\nSTEP tree 0 s [1-2]\nmakepad-stage: 0 errors\nmakepad-fab: 2 errors\napps/commercial/fab/src/a.rs:3:4: cannot find value `x`\nmakepad-app-calculator present: 1\nmakepad-scope present: 0\nmakepad-scope: no present within 30 s; its last log lines:\n  panicked at x\nNODEGATE-FAIL: makepad-fab\nL7095 gate@106 (lane landq1) released; 106 cleaned up";
-        assert_eq!(failure_lines(log), vec!["makepad-fab: 2 errors", "apps/commercial/fab/src/a.rs:3:4: cannot find value `x`", "makepad-scope present: 0", "makepad-scope: no present within 30 s; its last log lines:", "  panicked at x"]);
+        let log = "L7095 gate@node-a: granted, setting up\nSTEP tree 0 s [1-2]\nmakepad-bar: 0 errors\nmakepad-foo: 2 errors\napps/commercial/foo/src/a.rs:3:4: cannot find value `x`\nmakepad-app-calculator present: 1\nmakepad-baz present: 0\nmakepad-baz: no present within 30 s; its last log lines:\n  panicked at x\nNODEGATE-FAIL: makepad-foo\nL7095 gate@node-a (lane landq1) released; node-a cleaned up";
+        assert_eq!(failure_lines(log), vec!["makepad-foo: 2 errors", "apps/commercial/foo/src/a.rs:3:4: cannot find value `x`", "makepad-baz present: 0", "makepad-baz: no present within 30 s; its last log lines:", "  panicked at x"]);
     }
 
     /// merge_onto: a clean merge is a two-parent commit on the base; a conflict names its files.
@@ -831,6 +831,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    #[cfg(unix)]
     fn train(home: &Path, repo: &Path, exe: &Path, events: Arc<Mutex<Vec<String>>>) -> Arc<Train> {
         Arc::new(Train {
             machine: "mac".into(),

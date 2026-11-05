@@ -12,9 +12,9 @@
 //! Mac node), keeps it up for the settle window ([`SETTLE`]) and requires no panic, pause, hang,
 //! deadlock, patch or script error on any thread and no early exit. A failed pre-boot is an error
 //! on the running show: a `show_failed` event (the inbox: the manager, and the lane that asked, by
-//! name). A pair that passed is not booted again for later shows of that app. At a landing that
-//! changes the JIT's sources, the JIT is built on the Mac and the Mac devboxes in the background
-//! ([`prewarm_jit`]), so neither a show nor its pre-boot pays for the build.
+//! name). A pair that passed is not booted again for later shows of that app. A landing builds
+//! nothing on the Mac: a show builds the JIT first, then opens, and a running app offers the update
+//! (reload_host). The devboxes have theirs from the prebuild ([`super::warm`]).
 //!
 //! A show that is running is never replaced silently: it may hold unsaved work, so `show` refuses
 //! and says so (ask the user, then `--replace`). When the user closes the app (its process ends
@@ -89,7 +89,7 @@ pub fn device(ctx: &Ctx, on: &str) -> Result<String, String> {
     }
 }
 
-/// The JIT's app name for a package (`makepad-app-fab` and `makepad-fab` are `fab`).
+/// The JIT's app name for a package (`makepad-app-foo` and `makepad-foo` are `foo`).
 fn short_app(pkg: &str) -> &str {
     pkg.strip_prefix("makepad-app-").or_else(|| pkg.strip_prefix("makepad-")).unwrap_or(pkg)
 }
@@ -148,7 +148,6 @@ fn tick(ctx: &Arc<Ctx>, work: &mut String) {
     let landed = !now_work.is_empty() && now_work != *work;
     if landed {
         *work = now_work.clone();
-        prewarm_jit(ctx, &now_work);
     }
     let mut ps: HashMap<String, Option<crate::explorer::MachineRow>> = HashMap::new();
     for x in shows {
@@ -171,8 +170,15 @@ fn tick(ctx: &Arc<Ctx>, work: &mut String) {
             "running" | "paused" => {
                 // pinned: an operation runs on it; the JIT holds still and is told so again after a restart
                 if x.pinned && x.pid > 0 {
-                    let _ = pin_jit(ctx, &x, true);
+                    let _ = pin_jit(&x, true);
                 }
+                // (a pin set in the JIT itself, `devhub inspect .. pin on`, is a pin: it read as
+                // updated while it held still)
+                let x = if landed && x.device != "quest" && !x.pinned && x.pid > 0 && jit_pinned(&x) {
+                    set(ctx, &x.id, |s| s.pinned = true).unwrap_or(x)
+                } else {
+                    x
+                };
                 let x = if landed && x.device != "quest" && !x.pinned {
                     let x = set(ctx, &x.id, |s| s.sha = now_work.clone()).unwrap_or(x);
                     event(ctx, Sev::Info, format!("show {} on {}: work moved to {}; the JIT patches it live (`devhub show {} --on {} --replace` restarts it)", x.app, x.device, super::short(&now_work), x.app, x.device), Some(&x));
@@ -423,91 +429,6 @@ fn preboot_alongside(ctx: &Arc<Ctx>, x: Show, work: String, main: String) {
     });
 }
 
-/// The newest JIT inputs a prewarm was started for.
-static PREWARMED: Mutex<String> = Mutex::new(String::new());
-
-/// The Mac's own prewarm build running now (the group its cargo leads), and whether a master
-/// restart stopped it: the restart's build waits on the same cargo lock (17 min behind three
-/// prewarms, the master down meanwhile, 11-02).
-static PREWARM: Mutex<(Option<u32>, bool)> = Mutex::new((None, false));
-
-/// Stops the Mac's prewarm build for a master restart (`roll::restart_master`, which holds its
-/// lock: no prewarm starts until the master has exec'd). The next landing prewarms again.
-pub fn stop_mac_prewarm() -> bool {
-    let mut p = PREWARM.lock().unwrap();
-    let Some(pid) = p.0 else { return false };
-    p.1 = true;
-    makepad_remote::group::signal(pid, false)
-}
-
-/// A landing that changes the JIT's sources: built here and on each Mac devbox now, in the
-/// background, so that a show finds it ready. A box that is busy gets it when it is free.
-fn prewarm_jit(ctx: &Arc<Ctx>, work: &str) {
-    let main = crate::gitread::rev(&ctx.commercial(), "refs/heads/main").unwrap_or_default();
-    let key = inputs_key(ctx, &super::roll::crate_dirs(&ctx.repo, "tools/run"), work, &main);
-    if std::mem::replace(&mut *PREWARMED.lock().unwrap(), key.clone()) == key {
-        return;
-    }
-    let (local, mine) = (ctx.clone(), key.clone());
-    let _ = std::thread::Builder::new().name("devhub-show-prewarm".into()).spawn(move || {
-        // the user's own machine: a prewarm waits until the person has left the keyboard and mouse
-        // for 2 min, then builds in the background QoS class at the lowest priority on 2 jobs
-        // (a show the user asks for builds on demand anyway)
-        while hid_idle_s().is_some_and(|s| s < 120) {
-            std::thread::sleep(std::time::Duration::from_secs(30));
-        }
-        let mut build = if cfg!(target_os = "macos") { let mut c = makepad_remote::group::command("taskpolicy"); c.args(["-b", "nice", "-n", "19"]); c } else { let mut c = makepad_remote::group::command("nice"); c.args(["-n", "19"]); c };
-        build.arg(cargo()).args(["build", "--profile", "host", "-q", "-j2", "-p", "makepad-run", "--bin", "makepad"]).current_dir(&local.repo).env("CARGO_INCREMENTAL", "0").stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
-        makepad_remote::group::detach(&mut build);
-        // not while the master restarts; one at a time; the newest landing's only (three
-        // queued behind each other on the cargo lock, 11-02)
-        let child = loop {
-            {
-                let _restart = super::roll::RESTARTING.lock().unwrap_or_else(|e| e.into_inner());
-                let mut p = PREWARM.lock().unwrap();
-                if *PREWARMED.lock().unwrap() != mine {
-                    return;
-                }
-                if p.0.is_none() {
-                    let child = build.spawn();
-                    *p = (child.as_ref().ok().map(|c| c.id()), false);
-                    break child;
-                }
-            }
-            std::thread::sleep(std::time::Duration::from_secs(30));
-        };
-        let t = std::time::Instant::now();
-        let built = child.and_then(|c| c.wait_with_output());
-        let stopped = std::mem::replace(&mut *PREWARM.lock().unwrap(), (None, false)).1;
-        match built {
-            _ if stopped => event(&local, Sev::Info, "show: the JIT's prewarm on the Mac gave way to the master's restart; the next landing prewarms again".to_string(), None),
-            Ok(o) if o.status.success() => event(&local, Sev::Info, format!("show: the JIT is prewarmed on the Mac in {} s", t.elapsed().as_secs()), None),
-            Ok(o) => event(&local, Sev::Warn, format!("show: the JIT's prewarm on the Mac failed: {}", String::from_utf8_lossy(&o.stderr).lines().find(|l| l.starts_with("error")).unwrap_or("")), None),
-            Err(e) => event(&local, Sev::Warn, format!("show: the JIT's prewarm on the Mac: {e}"), None),
-        }
-    });
-    let rev = if main.is_empty() { format!("work@{work}") } else { format!("work@{work},main@{main}") };
-    let macs: Vec<String> = ctx.leases.nodes().into_iter().filter(|n| n.up && n.dev && !matches!(n.role(), crate::lease::Role::Bench) && n.caps.as_ref().is_some_and(|c| c.os == "macos")).map(|n| n.name).collect();
-    for node in macs {
-        let (ctx, rev, key) = (ctx.clone(), rev.clone(), key.clone());
-        let _ = std::thread::Builder::new().name("devhub-show-prewarm".into()).spawn(move || {
-            let spec = super::leg::Spec { since_ms: None, only: true, lane: "show-prewarm".into(), agent: "devhub-show".into(), kind: crate::lease::Kind::Build, needs: "os=macos".into(), prio: super::leg::BACKGROUND_PRIO, rev, repo_dir: ctx.repo.to_string_lossy().into_owned(), node: Some(node.clone()) };
-            // (a newer landing's prewarm takes over; a master restart's drain: the next landing's)
-            let stale = || *PREWARMED.lock().unwrap() != key;
-            let _drain = super::roll::holding();
-            let Ok(held) = super::leg::Held::acquire_with(&spec, &|r| r.src = crate::lease::Src::Overlay, &mut |_| {}, &|| stale() || super::roll::draining()) else { return };
-            let t = std::time::Instant::now();
-            let log = ctx.logs("show").join(format!("prewarm-{node}.log"));
-            let r = std::fs::File::create(&log).map_err(|e| e.to_string()).and_then(|mut f| ensure_jit(&held, &mut f));
-            let _ = crate::cli::ask(&ctl(), None, "release", &held.id);
-            match r {
-                Ok(()) => event(&ctx, Sev::Info, format!("show: the JIT is prewarmed on {node} in {} s", t.elapsed().as_secs()), None),
-                Err(e) => event(&ctx, Sev::Warn, format!("show: the JIT's prewarm on {node}: {e}"), None),
-            }
-        });
-    }
-}
-
 /// The box's dev JIT of the lease's pin, from its store: built once per (box, JIT id), so the
 /// prebuild of the same landing and this share one build (the second waits for the first's, two
 /// a landing on a Mac devbox, 11-02).
@@ -539,12 +460,12 @@ fn preboot(ctx: &Ctx, x: &Show, work: &str, main: &str) -> Result<(), String> {
     try_set(ctx, &x.id, |s| s.note = format!("pre-boot at {},{} on a macOS devbox", super::short(work), super::short(main)))?;
     event(ctx, Sev::Info, format!("show {} on mac: pre-boot at {},{} on a macOS devbox first", x.app, super::short(work), super::short(main)), Some(x));
     let rev = if main.is_empty() { format!("work@{work}") } else { format!("work@{work},main@{main}") };
-    let spec = super::leg::Spec { since_ms: None, only: false, lane: "show-preboot".into(), agent: "devhub-show".into(), kind: crate::lease::Kind::Test, needs: "os=macos".into(), prio: SHOW_PRIO, rev, repo_dir: ctx.repo.to_string_lossy().into_owned(), node: None };
+    let spec = super::leg::Spec { since_ms: None, lane: "show-preboot".into(), agent: "devhub-show".into(), kind: crate::lease::Kind::Test, needs: "os=macos".into(), prio: SHOW_PRIO, rev, repo_dir: ctx.repo.to_string_lossy().into_owned(), node: None };
     // a box that refuses the start (its tree still held for another lease) is no verdict on the
     // app: ask again (another box, or the same once it is free)
     let mut tries = 0;
     let held = loop {
-        match super::leg::Held::acquire_with(&spec, &|r| r.src = crate::lease::Src::Overlay, &mut |_| {}, &|| false) {
+        match super::leg::Held::acquire_with(&spec, &|r| { r.src = crate::lease::Src::Overlay; r.class = format!("leg:{}", spec.lane); }, &mut |_| {}, &|| false) {
             Ok(h) => break h,
             Err(e) if e.contains("refused") && tries < 5 => {
                 tries += 1;
@@ -708,6 +629,9 @@ fn mac_launch(ctx: &Ctx, x: &Show) -> Result<(u32, String), String> {
     let err = out.try_clone().map_err(|e| e.to_string())?;
     let mut cmd = makepad_remote::group::command(cargo());
     cmd.args(["run", "--profile", "host", "-p", "makepad-run", "--bin", "makepad", "--", "run", &x.app]).current_dir(&ctx.repo).env("CARGO_INCREMENTAL", "0").stdin(std::process::Stdio::null()).stdout(out).stderr(err);
+    if !x.args.is_empty() {
+        cmd.arg("--").args(&x.args);
+    }
     // the Mac's own settings for the app (`~/.makepad/apps/<id>.conf`, jit.env), as the dock's launch
     if let Some(app) = makepad_app_registry::apps().iter().find(|a| a.package == x.app) {
         cmd.envs(makepad_app_registry::machine::launch_env(app.id, true));
@@ -752,23 +676,54 @@ fn quest_launch(ctx: &Ctx, x: &Show) -> Result<(u32, String), String> {
     Ok((0, path.to_string_lossy().into_owned()))
 }
 
-/// Stops a show by its recorded pid (the Mac: its process group; a node or the Quest: the
-/// device's own stop).
-/// Tells the show's JIT its pin.
-fn pin_jit(ctx: &Ctx, x: &Show, on: bool) -> Result<(), String> {
-    let at = if x.device == "mac" { ctx.machine.as_str() } else { x.device.as_str() };
-    let mut said = String::new();
-    makepad_remote::hub::ask(&ctl(), &format!("{at}:{}", x.pid), "cmd", "", if on { "pin on" } else { "pin off" }, &mut |l| {
-        said = l.to_string();
+/// One inspect command in the show's JIT, its answer lines. The Mac's own by its socket: the hub
+/// routes to other machines' apps (`mac:<pid>` read "unknown host `mac`").
+fn ask_jit(x: &Show, line: &str) -> Result<Vec<String>, String> {
+    if x.device == "mac" {
+        let jit = makepad_remote::link::Client::connect(&x.pid.to_string()).map_err(|e| e.to_string())?;
+        return jit.cmd(line).map_err(|e| e.to_string())?.map(|l| l.map_err(|e| e.to_string())).collect();
+    }
+    let mut out = Vec::new();
+    makepad_remote::hub::ask(&ctl(), &format!("{}:{}", x.device, x.pid), "cmd", "", line, &mut |l| {
+        out.push(l.to_string());
         true
     })?;
-    if said.contains("\"pinned\"") {
+    Ok(out)
+}
+
+/// Tells the show's JIT its pin.
+fn pin_jit(x: &Show, on: bool) -> Result<(), String> {
+    let said = ask_jit(x, if on { "pin on" } else { "pin off" })?;
+    if said.iter().any(|l| l.contains("\"pinned\"")) {
         Ok(())
     } else {
-        Err(format!("its JIT does not take a pin ({})", crate::proto::clean(&said, 160)))
+        Err(format!("its JIT does not take a pin ({})", crate::proto::clean(&said.join(" "), 160)))
     }
 }
 
+/// The show's JIT holds a pin.
+fn jit_pinned(x: &Show) -> bool {
+    ask_jit(x, "pin").is_ok_and(|l| l.iter().any(|l| l.contains("\"pinned\":true")))
+}
+
+/// Pins or unpins a show that is there.
+fn pin_show(ctx: &Ctx, x: &Show, on: bool) -> Result<String, String> {
+    if x.pid > 0 {
+        pin_jit(x, on)?;
+    }
+    let shown = try_set(ctx, &x.id, |s| s.pinned = on)?;
+    event(ctx, Sev::Info, format!("show {} on {}: {}", x.app, x.device, if on { "pinned: landings go on, it stays as it is until the unpin" } else { "unpinned: it catches up" }), shown.as_ref());
+    Ok(format!("{{\"app\":{},\"device\":{},\"pinned\":{on}}}", json_str(&x.app), json_str(&x.device)))
+}
+
+/// A registry name (`calculator`, what the dock calls it) as its package
+/// (`makepad-app-calculator`): `makepad run` takes packages.
+fn package_of(app: &str) -> String {
+    makepad_app_registry::find(app).map_or(app.to_string(), |a| a.package.to_string())
+}
+
+/// Stops a show by its recorded pid (the Mac: its process group; a node or the Quest: the
+/// device's own stop).
 fn stop(x: &Show) -> Result<(), String> {
     match x.device.as_str() {
         "mac" if x.pid > 0 => {
@@ -831,9 +786,7 @@ pub fn serve(ctx: &Arc<Ctx>, line: &str) -> Result<String, String> {
             if app.is_empty() || !app.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
                 return Err(format!("show: `{app}` is not a package name"));
             }
-            // a registry name (`calculator`, what the dock calls it) is its package
-            // (`makepad-app-calculator`): `makepad run` takes packages
-            let app = makepad_app_registry::find(&app).map_or(app, |a| a.package.to_string());
+            let app = package_of(&app);
             let after: Vec<String> = v.get("after").and_then(|a| a.as_arr()).unwrap_or(&[]).iter().filter_map(|x| x.as_str().map(str::to_string)).collect();
             // nothing starts on a device for a name no Cargo.toml has, landed or in a branch the
             // show waits for (`show 518` started a pre-boot on the Mac)
@@ -845,12 +798,22 @@ pub fn serve(ctx: &Arc<Ctx>, line: &str) -> Result<String, String> {
             let cond = if after.is_empty() { Cond::None } else { super::after::parse_cond(ctx, &after.iter().map(String::as_str).collect::<Vec<_>>())? };
             let replace = v.get("replace").and_then(|x| x.as_bool()).unwrap_or(false);
             let pin = v.get("pin").and_then(|x| x.as_bool()).unwrap_or(false);
+            let args: Vec<String> = v.get("args").and_then(|a| a.as_arr()).unwrap_or(&[]).iter().filter_map(|x| x.as_str().map(str::to_string)).collect();
+            // (a node's show asks its WM's dock to launch or focus, the Quest's starts its activity:
+            // neither takes arguments)
+            if !args.is_empty() && dev != "mac" {
+                return Err(format!("show: `-- <args>` reaches an app on the Mac only, not on {dev}"));
+            }
             // one instance per app per device; a running one may hold unsaved work
             // one that ended since the last look is not running
             if let Some(old) = ctx.store.read(|d| d.shows.iter().find(|x| x.active() && x.app == app && x.device == dev && x.device == "mac" && x.state == "running").cloned()) {
                 mac_watch(ctx, &old);
             }
             if let Some(old) = ctx.store.read(|d| d.shows.iter().find(|x| x.active() && x.app == app && x.device == dev).cloned()) {
+                // (a pin leaves it running: nothing of it is at risk)
+                if matches!(old.state.as_str(), "running" | "paused") && !replace && pin && args.is_empty() {
+                    return pin_show(ctx, &old, true);
+                }
                 if matches!(old.state.as_str(), "running" | "paused") && !replace {
                     return Err(format!("{app} already runs on {dev} ({}, pid {}, {} s): it may hold unsaved work; ask the user, then `devhub show {app} --on {dev} --replace`", old.state, old.pid, wall_ms().saturating_sub(old.started_ms) / 1000));
                 }
@@ -864,7 +827,7 @@ pub fn serve(ctx: &Arc<Ctx>, line: &str) -> Result<String, String> {
             }
             let x = ctx.store.update(|d| {
                 d.shows_next += 1;
-                let x = Show { id: format!("V{}", d.shows_next), app: app.clone(), device: dev.clone(), state: if cond == Cond::None { "starting" } else { "waiting" }.into(), cond: cond.clone(), added_ms: wall_ms(), by: s("by"), pinned: pin, ..Default::default() };
+                let x = Show { id: format!("V{}", d.shows_next), app: app.clone(), device: dev.clone(), state: if cond == Cond::None { "starting" } else { "waiting" }.into(), cond: cond.clone(), added_ms: wall_ms(), by: s("by"), pinned: pin, args: args.clone(), ..Default::default() };
                 d.shows.push(x.clone());
                 x
             })?;
@@ -883,7 +846,8 @@ pub fn serve(ctx: &Arc<Ctx>, line: &str) -> Result<String, String> {
             let mut w = rest.split_whitespace();
             let (Some(app), dev) = (w.next(), w.next().unwrap_or("mac")) else { return Err("show stop <app> [<device>]".into()) };
             let dev = device(ctx, dev)?;
-            let x = ctx.store.read(|d| d.shows.iter().find(|x| x.active() && x.app == app && x.device == dev).cloned()).ok_or_else(|| format!("{app} is not shown on {dev}"))?;
+            let app = &package_of(app);
+            let x = ctx.store.read(|d| d.shows.iter().find(|x| x.active() && x.app == *app && x.device == dev).cloned()).ok_or_else(|| format!("{app} is not shown on {dev}"))?;
             if matches!(x.state.as_str(), "running" | "paused") {
                 stop(&x)?;
             }
@@ -897,15 +861,10 @@ pub fn serve(ctx: &Arc<Ctx>, line: &str) -> Result<String, String> {
         "pin" => {
             let mut w = rest.split_whitespace();
             let (Some(app), Some(dev), Some(on)) = (w.next(), w.next(), w.next()) else { return Err("show pin <app> <device> on|off".into()) };
-            let on = on == "on";
             let dev = device(ctx, dev)?;
-            let x = ctx.store.read(|d| d.shows.iter().find(|x| x.active() && x.app == app && x.device == dev).cloned()).ok_or_else(|| format!("{app} is not shown on {dev}"))?;
-            if x.pid > 0 {
-                pin_jit(ctx, &x, on)?;
-            }
-            let x = try_set(ctx, &x.id, |s| s.pinned = on)?;
-            event(ctx, Sev::Info, format!("show {app} on {dev}: {}", if on { "pinned: landings go on, it stays as it is until the unpin" } else { "unpinned: it catches up" }), x.as_ref());
-            Ok(format!("{{\"app\":{},\"device\":{},\"pinned\":{on}}}", json_str(app), json_str(&dev)))
+            let app = &package_of(app);
+            let x = ctx.store.read(|d| d.shows.iter().find(|x| x.active() && x.app == *app && x.device == dev).cloned()).ok_or_else(|| format!("{app} is not shown on {dev}"))?;
+            pin_show(ctx, &x, on == "on")
         }
         "list" => {
             let all = rest == "all";
@@ -953,13 +912,13 @@ mod tests {
         g(&["config", "user.name", "t"]);
         g(&["commit", "-q", "--allow-empty", "-m", "base"]);
         g(&["branch", "rc-x"]);
-        std::fs::create_dir_all(repo.join("apps/fab")).unwrap();
-        std::fs::write(repo.join("apps/fab/Cargo.toml"), "[package]\nname = \"makepad-fab\"\n").unwrap();
+        std::fs::create_dir_all(repo.join("apps/foo")).unwrap();
+        std::fs::write(repo.join("apps/foo/Cargo.toml"), "[package]\nname = \"makepad-foo\"\n").unwrap();
         g(&["add", "-A"]);
-        g(&["commit", "-q", "-m", "fab"]);
+        g(&["commit", "-q", "-m", "foo"]);
         let leases = Arc::new(LeaseMaster::new("mac", home.clone(), Arc::new(|_: &str, _: &str, _: &str| Err("no nodes".to_string())), Arc::new(|_| {}), Arc::new(|| 1), None, true));
         let ctx = Arc::new(Ctx { store: Store::open(&home, "mac", Arc::new(|_| 0)).unwrap(), leases, machine: "mymac".into(), monitor: crate::monitor::Monitor::start(&[]), repo: repo.clone(), home: home.clone() });
-        let add = |on: &str| serve(&ctx, &format!("show add {{\"app\":\"makepad-fab\",\"on\":\"{on}\",\"after\":[\"landed\",\"rc-x\"],\"by\":\"t\"}}"));
+        let add = |on: &str| serve(&ctx, &format!("show add {{\"app\":\"makepad-foo\",\"on\":\"{on}\",\"after\":[\"landed\",\"rc-x\"],\"by\":\"t\"}}"));
         // a name no Cargo.toml has starts nothing (`devhub show 518`)
         assert!(serve(&ctx, "show add {\"app\":\"518\",\"on\":\"mac\",\"by\":\"t\"}").unwrap_err().contains("no package `518`"));
         let r = add("mymac").unwrap();
@@ -979,7 +938,7 @@ mod tests {
             d.shows[1].state = "waiting".into();
             d.shows[1].pid = 0;
         }).unwrap_or_else(|e| { eprintln!("devhub state: {e}"); Default::default() });
-        assert!(serve(&ctx, "show stop makepad-fab mac").unwrap().contains("stopped"));
+        assert!(serve(&ctx, "show stop makepad-foo mac").unwrap().contains("stopped"));
         assert_eq!(ctx.store.read(|d| d.shows[1].state.clone()), "cancelled");
         // what became of the recent ones stays listed (its outcome), not only the running ones
         let list = serve(&ctx, "show list").unwrap();
@@ -994,21 +953,10 @@ mod tests {
 
     #[test]
     fn app_names_match_their_packages() {
-        assert!(super::same_app("fab", "makepad-fab"));
+        assert!(super::same_app("foo", "makepad-foo"));
         assert!(super::same_app("makepad-app-calculator", "makepad-app-calculator"));
         assert!(super::same_app("calculator", "makepad-app-calculator"));
-        assert!(!super::same_app("stage", "makepad-fab"));
+        assert!(!super::same_app("bar", "makepad-foo"));
     }
 }
 
-/// Seconds since the last keyboard or mouse input on this Mac (IOHIDSystem's HIDIdleTime; no
-/// permission prompt); None elsewhere or when it cannot be read.
-fn hid_idle_s() -> Option<u64> {
-    if !cfg!(target_os = "macos") {
-        return None;
-    }
-    let o = std::process::Command::new("ioreg").args(["-c", "IOHIDSystem", "-d", "4"]).stdin(std::process::Stdio::null()).output().ok()?;
-    let text = String::from_utf8_lossy(&o.stdout);
-    let ns: u64 = text.lines().find_map(|l| l.split("\"HIDIdleTime\" = ").nth(1))?.trim().parse().ok()?;
-    Some(ns / 1_000_000_000)
-}

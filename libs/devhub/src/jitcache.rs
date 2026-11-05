@@ -86,6 +86,12 @@ fn run_home() -> PathBuf {
     })
 }
 
+/// Where the dev store keeps its run dirs: every overlay lease of this box runs on it
+/// (lease/relaxgit.rs), under a run home of its own.
+fn dev_runs() -> PathBuf {
+    crate::lease::caps::LeaseConf::load().work.join("dev/run-home/target")
+}
+
 fn remembered_file() -> PathBuf {
     crate::proto::home().join("jit-caches")
 }
@@ -153,11 +159,11 @@ pub fn checked(dir: &Path) -> Result<(PathBuf, Kind), String> {
         }
         return Ok((real, Kind::Workspace));
     }
-    let git_runs = std::fs::canonicalize(run_home().join("target")).ok();
-    if name.len() == 8 && name.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()) && real.parent() == git_runs.as_deref() {
+    let in_runs = |runs: PathBuf| std::fs::canonicalize(runs).is_ok_and(|r| real.parent() == Some(&*r));
+    if name.len() == 8 && name.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()) && (in_runs(run_home().join("target")) || in_runs(dev_runs())) {
         return Ok((real, Kind::GitRun));
     }
-    Err(format!("{} is neither a `makepad-run` folder nor a git run's dir under {}", real.display(), run_home().join("target").display()))
+    Err(format!("{} is neither a `makepad-run` folder nor a git run's dir under {} or {}", real.display(), run_home().join("target").display(), dev_runs().display()))
 }
 
 /// Every run dir of this machine (checked, each once).
@@ -169,8 +175,10 @@ pub fn caches() -> Vec<(PathBuf, Kind)> {
     if let Ok(cwd) = std::env::current_dir() {
         cand.push(cwd.join("target").join("makepad-run"));
     }
-    if let Ok(rd) = std::fs::read_dir(run_home().join("target")) {
-        cand.extend(rd.flatten().map(|e| e.path()));
+    for runs in [run_home().join("target"), dev_runs()] {
+        if let Ok(rd) = std::fs::read_dir(runs) {
+            cand.extend(rd.flatten().map(|e| e.path()));
+        }
     }
     for (_, _, dir) in announced() {
         cand.extend(dir);
@@ -188,7 +196,7 @@ pub fn caches() -> Vec<(PathBuf, Kind)> {
 }
 
 /// The live locks of `dir` that a running process holds.
-fn held_locks(dir: &Path) -> Vec<PathBuf> {
+pub(crate) fn held_locks(dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     for e in std::fs::read_dir(dir.join("cache").join("live")).into_iter().flatten().flatten() {
         let p = e.path();
@@ -201,7 +209,7 @@ fn held_locks(dir: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// The package names `app` may mean (`stage` is `makepad-app-stage`).
+/// The package names `app` may mean (`foo` is `makepad-app-foo`).
 fn app_names(app: &str) -> Vec<String> {
     let mut v = vec![app.to_string()];
     if !app.starts_with("makepad-") {
@@ -430,7 +438,9 @@ pub fn service(machine: &str, line: &str, out: &mut Vec<String>, publish: &dyn F
         "plan" => {
             out.extend(plans.iter().map(CachePlan::json));
             let bytes: u64 = plans.iter().map(|p| p.bytes).sum();
-            out.push(format!("{{\"total_bytes\":{bytes},\"caches\":{},\"in_use\":{}}}", plans.len(), plans.iter().any(CachePlan::in_use)));
+            let dev = std::fs::canonicalize(dev_runs()).ok();
+            let dev_bytes: u64 = plans.iter().filter(|p| dev.is_some() && p.dir.parent() == dev.as_deref()).map(|p| p.bytes + p.kept_bytes).sum();
+            out.push(format!("{{\"total_bytes\":{bytes},\"caches\":{},\"in_use\":{},\"dev_bytes\":{dev_bytes}}}", plans.len(), plans.iter().any(CachePlan::in_use)));
         }
         "clear" => {
             let busy: Vec<&CachePlan> = plans.iter().filter(|p| p.in_use()).collect();
@@ -475,7 +485,7 @@ pub fn service(machine: &str, line: &str, out: &mut Vec<String>, publish: &dyn F
     }
 }
 
-/// The processes on the busy caches, for a line: `stage#4412, makepad-app-x#981`.
+/// The processes on the busy caches, for a line: `foo#4412, makepad-app-x#981`.
 fn who(busy: &[&CachePlan]) -> String {
     let mut names: Vec<String> = busy.iter().flat_map(|p| p.users.iter().map(|(pid, a)| format!("{a}#{pid}"))).collect();
     names.dedup();

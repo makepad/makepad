@@ -102,16 +102,16 @@ mod board_tests {
         let _ = std::fs::remove_dir_all(&home);
         let b = Board::new(home.clone());
         let rec = |node: &str, kind: &str, line: &str| proto::hub_record(node, "", 0, kind, Sev::Info, line.into(), String::new());
-        b.see(&rec("101", "prewarm", "prewarm: started at a/b"));
-        b.see(&rec("101", "sync", "sync: not a prewarm"));
-        b.see(&rec("101", "prewarm", "prewarm: done at a/b in 90 s"));
-        b.see(&rec("107", "prewarm", "prewarm: cancelled after 3 s at a/b (lease L7 (x)): 1 of 12 steps done"));
+        b.see(&rec("node-a", "prewarm", "prewarm: started at a/b"));
+        b.see(&rec("node-a", "sync", "sync: not a prewarm"));
+        b.see(&rec("node-a", "prewarm", "prewarm: done at a/b in 90 s"));
+        b.see(&rec("node-b", "prewarm", "prewarm: cancelled after 3 s at a/b (lease L7 (x)): 1 of 12 steps done"));
         let b = Board::new(home.clone());
         let mut out = Vec::new();
         b.serve(&mut out);
         let r = rows(&out);
         assert_eq!(r.len(), 2);
-        assert!(r[0].1.starts_with("101      done at a/b in 90 s"), "{r:?}");
+        assert!(r[0].1.starts_with("node-a   done at a/b in 90 s"), "{r:?}");
         assert!(r[1].1.contains("cancelled") && r[1].1.contains("L7"));
         let _ = std::fs::remove_dir_all(&home);
     }
@@ -241,9 +241,28 @@ mod node {
         cmd
     }
 
+    /// The sockets of the JITs announced in `registry` (their discovery files) that run in the
+    /// process group `leader` leads: a step's JIT under its `cargo run`. Read without
+    /// `discovery::apps`, which deletes the files of ended processes (the crash watch needs them).
+    fn group_sockets(registry: &Path, leader: u32, hold: &crate::os::Hold) -> Vec<String> {
+        let Ok(dir) = std::fs::read_dir(registry) else { return Vec::new() };
+        dir.flatten().filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let pid = name.strip_prefix("makepad-remote-")?.strip_suffix(".json")?.parse::<u32>().ok()?;
+            if !crate::os::in_group(pid, leader, hold) { return None; }
+            let app = makepad_remote::discovery::parse(&std::fs::read_to_string(e.path()).ok()?)?;
+            (!app.socket.is_empty()).then_some(app.socket)
+        }).collect()
+    }
+
     /// Runs one step in its own process group, logging to `log`; Ok(true) when it did its job,
     /// Err on cancel or failure.
     fn run_step(step: &Step, log: &Path, cancel: &AtomicBool) -> Result<(), String> {
+        run_step_in(step, log, cancel, &makepad_remote::discovery::registry_dir())
+    }
+
+    /// [`run_step`] with the JITs announcing themselves in `registry`.
+    fn run_step_in(step: &Step, log: &Path, cancel: &AtomicBool, registry: &Path) -> Result<(), String> {
         use std::io::Write;
         let mut file = std::fs::OpenOptions::new().create(true).append(true).open(log).map_err(|e| format!("{}: {e}", log.display()))?;
         let _ = writeln!(file, "== {} {}: {}", step.app, step.what, step.argv.join(" "));
@@ -255,10 +274,15 @@ mod node {
         if cancel.load(Ordering::Acquire) {
             return Err("cancelled".into());
         }
-        let (mut child, hold) = crate::os::lease_spawn(&mut cmd).map_err(|e| format!("{} {}: {e}", step.app, step.what))?;
+        let (mut child, hold) = crate::os::lease_spawn(&mut cmd, None).map_err(|e| format!("{} {}: {e}", step.app, step.what))?;
         let pid = child.id();
         let t0 = Instant::now();
         let stop = |child: &mut std::process::Child| {
+            // what it started ends by this stop, not by a crash: said before the TERM, while
+            // their discovery files still name their sockets
+            for socket in group_sockets(registry, pid, &hold) {
+                crate::lease::exec::note_stopped("by prewarm", Path::new(&socket), Vec::new());
+            }
             crate::os::signal_group(pid, false, &hold);
             let end = Instant::now() + TERM_GRACE;
             loop {
@@ -426,6 +450,27 @@ mod node {
             let calc = steps.last().unwrap();
             assert_eq!(calc.argv[head.len()..], ["run", "--report-to", &report, "makepad-app-calculator", "--no-default-features", "--features", "standalone", "--", "--remote"]);
             assert!(calc.env.contains(&("MAKEPAD_HIDE_WINDOWS".into(), "1".into())) && calc.env.contains(&("SANDBOX_MUTE".into(), "1".into())));
+        }
+
+        /// A present step's JIT, stopped once it presented, ended by that stop: the node's crash
+        /// watch reads it as stopped by prewarm, not as a crash (each landing's prewarm of stage
+        /// "crashed" on three boxes, 11-04). Its socket is the one its discovery file names.
+        #[cfg(unix)]
+        #[test]
+        fn a_prewarm_stop_is_no_crash() {
+            let base = std::env::temp_dir().join(format!("devhub-prewarm-stop-{}", std::process::id()));
+            let registry = base.join("registry");
+            std::fs::create_dir_all(&registry).unwrap();
+            let (report, socket) = (base.join("app.report"), base.join("app.sock"));
+            // the JIT: announces itself in the registry, reports present, and runs on
+            let script = format!(
+                "printf '{{\"pid\":%s,\"app\":\"makepad-app\",\"socket\":\"{}\",\"started_ms\":1,\"caps\":[]}}\\n' $$ > {}/makepad-remote-$$.json; echo present > {}; exec sleep 60",
+                socket.display(), registry.display(), report.display());
+            let step = Step { app: "app".into(), what: "present", program: "sh".into(), dir: base.clone(), argv: vec!["-c".into(), script], env: Vec::new(), report: Some(report) };
+            run_step_in(&step, &base.join("log"), &AtomicBool::new(false), &registry).unwrap();
+            assert_eq!(crate::lease::exec::stopped_with(0, &socket.display().to_string()).as_deref(), Some("by prewarm"), "{}", std::fs::read_to_string(base.join("log")).unwrap_or_default());
+            assert_eq!(crate::lease::exec::stopped_with(0, &base.join("other.sock").display().to_string()), None, "only what it stopped");
+            let _ = std::fs::remove_dir_all(&base);
         }
 
         /// A lease preempts at once: the running step sees the cancel, the thread is joined before

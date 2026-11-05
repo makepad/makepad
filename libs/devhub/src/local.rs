@@ -51,6 +51,8 @@ pub struct Jit {
     pub session_log: Option<String>,
     /// serves the passive event feed
     pub observe: bool,
+    /// `makepad test`'s run: its result is its verdict
+    pub test_run: bool,
     client: Client,
 }
 
@@ -227,14 +229,15 @@ impl Local {
                 Vec::new()
             };
             for app in apps {
-                if (app.pid == me && !self.include_self) || app.socket.starts_with("tcp:") {
+                if app.pid == me && !self.include_self {
                     continue;
                 }
                 let mut st = self.state.lock().unwrap();
                 if st.jits.contains_key(&app.pid) {
                     continue;
                 }
-                let client = Client::new(Target::Unix(app.socket.clone().into()), "devhub");
+                // a Windows JIT announces its loopback port and token (no Unix sockets there)
+                let client = Client::new(Target::of(&app), "devhub");
                 client.set_timeout(Some(CMD_TIMEOUT));
                 let jit = Jit {
                     pid: app.pid,
@@ -244,6 +247,7 @@ impl Local {
                     run: app.text("run"),
                     session_log: app.text("session_log"),
                     observe: app.serves("observe"),
+                    test_run: app.fields.iter().any(|f| f.0 == "test_run" && f.1 == "true"),
                     client,
                 };
                 st.jits.insert(app.pid, jit.clone());
@@ -318,11 +322,19 @@ impl Local {
             st.crashed.remove(&jit.pid) || registry_file(jit.pid).exists()
         };
         let up = proto::wall_ms().saturating_sub(jit.started_ms) / 1000;
-        // its lease ended and the hub stopped it: no exit cleanup, and no crash either
-        let stopped = crashed.then(|| crate::lease::exec::stopped_with(&jit.socket)).flatten();
-        let rec = if let Some(lease) = stopped {
+        // the hub stopped it (its lease ended, a prewarm got what it wanted): no exit cleanup, and
+        // no crash either
+        let stopped = crashed.then(|| crate::lease::exec::stopped_with(jit.pid, &jit.socket)).flatten();
+        // a test's program: some end on purpose (crash injection kills its writers at each durable
+        // write, a CI leg kills the app it checks), and the test's result is the verdict: 56 such
+        // "crashes" of one passing test in 8 min buried the real ones in the inbox (11-04)
+        let tested = crashed && (jit.test_run || crate::lease::exec::in_test_lease(&jit.socket));
+        let rec = if let Some(by) = stopped {
             let _ = std::fs::remove_file(registry_file(jit.pid));
-            hub_record(&self.machine, &jit.app, jit.pid, "exit", Sev::Info, format!("stopped with its lease {lease} after {up} s"), String::new())
+            hub_record(&self.machine, &jit.app, jit.pid, "exit", Sev::Info, format!("stopped {by} after {up} s"), String::new())
+        } else if tested {
+            let _ = std::fs::remove_file(registry_file(jit.pid));
+            hub_record(&self.machine, &jit.app, jit.pid, "exit", Sev::Info, format!("ended without its exit cleanup after {up} s: a test's program, its result says"), String::new())
         } else if crashed {
             let _ = std::fs::remove_file(registry_file(jit.pid));
             let tail = jit.session_log.as_deref().map(log_tail).unwrap_or_default();

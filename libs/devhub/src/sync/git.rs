@@ -58,7 +58,8 @@ fn run_with(dir: Option<&Path>, git_dir: Option<&Path>, env: &[(&str, &Path)], a
         cmd.arg("--git-dir").arg(g);
     }
     cmd.args(args).stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::piped()).stderr(Stdio::piped());
-    if let Some(d) = dir {
+    // git reads its working directory at start: never the hub's (proto::settle_cwd)
+    if let Some(d) = dir.or(git_dir) {
         cmd.current_dir(d);
     }
     // the hub's own environment never steers git; `env` is the call's
@@ -76,14 +77,26 @@ fn run_with(dir: Option<&Path>, git_dir: Option<&Path>, env: &[(&str, &Path)], a
             wrote.and(out)
         }),
     }
-    .map_err(|e| format!("git: {e}"))?;
+    .map_err(|e| {
+        let err = format!("git: {e}");
+        crate::lease::caps::git_failed(&err);
+        err
+    })?;
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     } else {
-        let err = String::from_utf8_lossy(&out.stderr);
-        let err: Vec<&str> = err.lines().filter(|l| !l.trim().is_empty()).take(12).collect();
-        Err(format!("git {}: {}", args.first().unwrap_or(&""), err.join(" | ")))
+        let err = format!("git {}: {}", args.first().unwrap_or(&""), failure(out.status, &out.stderr));
+        crate::lease::caps::git_failed(&err);
+        Err(err)
     }
+}
+
+/// What a failed git said: its stderr's lines, and how it ended (one a signal ended says nothing:
+/// an overlay feed's failure read `bare rev-list: ` and no more, 11-04).
+pub fn failure(status: std::process::ExitStatus, stderr: &[u8]) -> String {
+    let err = String::from_utf8_lossy(stderr);
+    let lines: Vec<&str> = err.lines().map(str::trim).filter(|l| !l.is_empty()).take(12).collect();
+    if lines.is_empty() { status.to_string() } else { format!("{} ({status})", lines.join(" | ")) }
 }
 
 /// One repo's store on a node.
@@ -354,6 +367,15 @@ pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_git_says_how_it_ended() {
+        use std::os::unix::process::ExitStatusExt;
+        let (killed, exited) = (std::process::ExitStatus::from_raw(9), std::process::ExitStatus::from_raw(128 << 8));
+        assert_eq!(failure(killed, b""), "signal: 9 (SIGKILL)", "a signal leaves no stderr: its end is the reason");
+        assert_eq!(failure(exited, b"fatal: bad object x\n\n  hint: y\n"), "fatal: bad object x | hint: y (exit status: 128)");
+    }
 
     #[test]
     fn names_that_cannot_turn_into_options() {

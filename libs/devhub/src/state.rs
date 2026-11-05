@@ -1,6 +1,7 @@
 //! devhub's workflow state: what `devhub land`, `lanes`, `verify`, `jitlegs`, `after`, `allapps` and `push`
-//! know, in one master-owned document (`~/.makepad/devhub/state.json`). Large output and completed
-//! records live in append-only files referenced by byte slices; unchanged updates write nothing. Every change is also a record on the master's event stream (its kind
+//! know, in one master-owned document (`~/.makepad/devhub/state.json`, a checkpoint, and the
+//! `state.journal` of its edits since: [`journal`]). Large output and completed records live in
+//! append-only files referenced by byte slices; unchanged updates write nothing. Every change is also a record on the master's event stream (its kind
 //! is the section's name), so an agent blocks on `devhub watch <kinds>` instead of polling.
 //!
 //! The sections are typed. A command that keeps state adds its struct here, a field on [`Doc`] and
@@ -13,6 +14,8 @@ use std::path::{Path, PathBuf};
 use std::io::{Read, Seek, Write};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
+
+pub(crate) mod journal;
 
 /// Copy-on-write history: taking a transaction snapshot shares the immutable completed
 /// runs. Only a mutation of that history clones it; ordinary job updates never do.
@@ -179,10 +182,13 @@ pub struct Run {
     pub tries: u32,
 }
 
+/// The state of a leg its run ended without: it never ran, so it passed nothing and failed nothing.
+pub const NOT_RUN: &str = "not run";
+
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct Leg {
     pub name: String,
-    /// `wait` (queued), `run`, `ok`, `fail`, `incomplete`
+    /// `wait` (queued), `run`, `ok`, `fail`, `incomplete`, [`NOT_RUN`]
     pub state: String,
     pub lease: String,
     pub node: String,
@@ -253,6 +259,8 @@ pub struct AllappsRun {
     pub lease: String,
     pub node: String,
     pub log: String,
+    /// the run on its lease: a restarted master follows it from there
+    pub run_n: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Default)]
@@ -270,7 +278,7 @@ pub struct PkgErrors {
 pub struct Waiter {
     pub id: String,
     pub cond: Cond,
-    /// devhub words (`launch mac makepad-fab`, `verify kick`, ...)
+    /// devhub words (`launch mac makepad-foo`, `verify kick`, ...)
     pub cmd: Vec<String>,
     /// the agent or lane that asked
     pub by: String,
@@ -334,11 +342,12 @@ impl Cond {
 
 // ---- push ----
 
-/// One collapsed push of a selected tip to origin/work (`devhub push`).
+/// One push of a selected tip to origin/work (`devhub push`). A record of what was sent: nothing
+/// decides from it, origin's own ref says where origin is.
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct Pushed {
     pub pair: Pair,
-    /// the pushed commit (parent: `origin_was`)
+    /// the last pushed commit (the set stands on `origin_was`)
     pub commit: String,
     pub origin_was: String,
     pub at_ms: u64,
@@ -419,6 +428,9 @@ pub struct CiRun {
     pub plan_timings: Vec<(String, f64)>,
     /// the sweep (every crate's tests, `devhub ci sweep`), not the gate's app checks
     pub sweep: bool,
+    /// in the sweep's slot, the tests of the crates whose own files changed only: what goes after
+    /// each regression run ([`crate::orch::ci`])
+    pub own_tests: bool,
     /// `ci stop` was asked: a master restart resumes it only to finish its running shards
     pub stopping: bool,
 }
@@ -457,6 +469,9 @@ pub struct CiShard {
     /// the attempt in progress: when its lease was asked for and granted (ms)
     pub asked_ms: u64,
     pub granted_ms: u64,
+    /// the pair its attempt ran: its run's, or for a sweep leg the newest rolling run's (empty:
+    /// none ran, a kept result)
+    pub at: Pair,
     /// every attempt of this run on a box: what the run's critical path and fleet time are read from
     pub spans: Vec<CiSpan>,
     /// the boxes it came back incomplete from, and how often (twice there: it goes elsewhere)
@@ -501,6 +516,7 @@ fn ci_shard_value(c: &CiShard) -> Value {
         ("failed_why", s(&c.failed_why)),
         ("asked_ms", int(c.asked_ms)),
         ("granted_ms", int(c.granted_ms)),
+        ("at", c.at.to_value()),
         ("spans", Value::Arr(c.spans.iter().map(|x| obj(vec![("node", s(&x.node)), ("asked_ms", int(x.asked_ms)), ("granted_ms", int(x.granted_ms)), ("ended_ms", int(x.ended_ms))])).collect())),
         ("lost", Value::Obj(c.lost.iter().map(|(n, k)| (n.clone(), int(*k as u64))).collect())),
     ])
@@ -528,6 +544,7 @@ fn ci_shard_from(v: &Value) -> CiShard {
         failed_why: text(o, "failed_why"),
         asked_ms: uint(o, "asked_ms"),
         granted_ms: uint(o, "granted_ms"),
+        at: Pair::from_value(v.get("at")),
         spans: arr(o, "spans")
             .iter()
             .map(|x| {
@@ -559,6 +576,7 @@ pub(crate) fn ci_run_value(r: &CiRun) -> Value {
         ("rotation", int(r.rotation)),
         ("plan_timings", Value::Obj(r.plan_timings.iter().map(|(k, v)| (k.clone(), Value::F64(*v))).collect())),
         ("sweep", Value::Bool(r.sweep)),
+        ("own_tests", Value::Bool(r.own_tests)),
         ("stopping", Value::Bool(r.stopping)),
     ])
 }
@@ -580,6 +598,7 @@ fn ci_run_from(v: &Value) -> CiRun {
         boxes: strs_from(o, "boxes"),
         rotation: uint(o, "rotation"),
         sweep: flag(o, "sweep", false),
+        own_tests: flag(o, "own_tests", false),
         stopping: flag(o, "stopping", false),
         plan_timings: match v.get("plan_timings") {
             Some(Value::Obj(f)) => f.iter().filter_map(|(k, x)| f64_of(x).map(|s| (k.clone(), s))).collect(),
@@ -655,7 +674,7 @@ pub struct LaneRec {
 pub struct Show {
     /// `V<n>`
     pub id: String,
-    /// the package (`makepad-fab`)
+    /// the package (`makepad-foo`)
     pub app: String,
     /// `mac`, a WM node, or `quest`
     pub device: String,
@@ -681,6 +700,8 @@ pub struct Show {
     pub launch_ms: u64,
     /// what the launch took, stage by stage (`box 3 s, jit reused, first frame 6 s, settle 8 s`)
     pub stages: String,
+    /// `devhub show <app> -- <args>`: the app's own arguments, kept for every start of this show
+    pub args: Vec<String>,
 }
 
 impl Show {
@@ -715,6 +736,8 @@ pub struct Live {
     pub tree: String,
     pub rev: String,
     pub needs: String,
+    /// `--node`: the box it runs on, or waits for (empty: any that fits)
+    pub pin: String,
     pub visible: bool,
     pub lease: String,
     pub node: String,
@@ -723,6 +746,9 @@ pub struct Live {
     /// the run in its lease (a new master follows it from there)
     pub run_n: u64,
     pub run_log_start: u64,
+    /// the name of the run it asked for last: a new master that finds no run of it asks again
+    /// under it (`Held::run_asked` in orch::leg)
+    pub ask: String,
     /// Content last shipped, including whiteouts (`-`).
     pub sources: std::collections::BTreeMap<String, String>,
     /// `starting`, `running`, `paused` (a parked panic), then `ended`, `failed`
@@ -744,7 +770,9 @@ impl Live {
         match &x.patch {
             Some(p) if p.outcome == "jit_error" => 3,
             Some(p) if matches!(p.outcome.as_str(), "none" | "failed") => 2,
-            Some(p) if x.state != "paused" && p.tests.as_ref().is_some_and(|t| t.failed == 0) => 0,
+            // (a run with none to rerun after this edit passes; one that has no test to run does
+            // not; a session no longer running has no answer on what the caller has now)
+            Some(p) if x.state == "running" && p.tests.as_ref().is_some_and(|t| t.failed == 0 && (t.ran > 0 || t.skipped > 0)) => 0,
             _ => 1,
         }
     }
@@ -756,8 +784,19 @@ impl Live {
         let Some(p) = &x.patch else { return format!("devhub test: {} {}: {}\n", x.app, x.state, x.note) };
         if p.outcome == "jit_error" { return jit_error_verdict(p); }
         let Some(t) = &p.tests else { return format!("{}\n{}", if p.reason.is_empty() { &x.note } else { &p.reason }, p.output) };
-        let mut out = format!("devhub test: {} {}/{} ran ({} skipped, selected {}) in {seconds:.3} s (ship {} ms, patch {:.0} ms, tests {:.0} ms) on {} [live {}]\n", x.app, t.passed, t.ran, t.skipped, if t.selected == "affected" { "affected" } else { "all" }, p.shipped_ms.saturating_sub(p.edit_ms.max(p.called_ms)), t.compile_ms, t.ms, x.node, x.id);
+        if x.state != "running" { return format!("devhub test: {} {}: {}; no verdict on this source state\n", x.app, x.state, x.note); }
+        let queued = if p.queued_ms > 0 { format!("queued {} ms behind {}, ", p.queued_ms, p.behind) } else { String::new() };
+        let mut out = format!("devhub test: {} {}/{} ran ({} skipped, selected {}) in {seconds:.3} s ({queued}ship {} ms, patch {:.0} ms, tests {:.0} ms) on {} [live {}]\n", x.app, t.passed, t.ran, t.skipped, if t.selected == "affected" { "affected" } else { "all" }, p.shipped_ms.saturating_sub(p.edit_ms.max(p.called_ms) + p.queued_ms), t.compile_ms, t.ms, x.node, x.id);
+        // an edit that reached no compiled code: a pass says little about it
+        if let Some((items, 0)) = t.patch.filter(|p| p.0 > 0) {
+            out.push_str(&format!("the JIT took {items} changed item(s) and replaced no code: nothing compiled so far used them\n"));
+        }
         for name in &t.failures { out.push_str(&format!("  {name}\n")); }
+        if t.ran == 0 && t.skipped == 0 {
+            out.push_str("no test ran");
+            if let Some(hint) = crate::testlog::bin_hint(&x.app, &x.test_args) { out.push_str(&format!(": {hint}")); }
+            out.push('\n');
+        }
         out.push_str(&p.output);
         out
     }
@@ -787,6 +826,12 @@ pub struct LivePatch {
     /// when the call that shipped it came (a test session ships on its call: a save the agent
     /// made minutes before it is no ship time)
     pub called_ms: u64,
+    /// How long the call waited for the session's previous call, whose tests ran: the JIT applies
+    /// an edit only after the running tests end, so the call ships when their verdict comes
+    /// (a live session: save → shipped 63 s, 60 s of it behind the previous edit's tests, 11-04).
+    pub queued_ms: u64,
+    /// what it waited behind (`queued_ms`): the previous edit, by when it was saved and its group
+    pub behind: String,
     pub shipped_ms: u64,
     /// Patch state, including `recovering` and terminal `jit_error`.
     pub outcome: String,
@@ -890,7 +935,7 @@ impl Doc {
         compact.ci.runs = self.ci.runs.iter().map(|r| CiRun {
             id: r.id.clone(), pair: r.pair.clone(), dry: r.dry, checkout: r.checkout.clone(), lock_digest: r.lock_digest.clone(),
             started_ms: r.started_ms, ended_ms: r.ended_ms, verdict: r.verdict.clone(), critical: r.critical.clone(), fleet: r.fleet.clone(),
-            rotation: r.rotation, sweep: r.sweep, stopping: r.stopping, ..Default::default()
+            rotation: r.rotation, sweep: r.sweep, own_tests: r.own_tests, stopping: r.stopping, ..Default::default()
         }).collect();
         for job in self.jobs.iter().filter(|j| j.done()) {
             save(format!("jobs/{}", job.id), old.jobs.iter().find(|j| j.id == job.id) == Some(job), &|| job_value(job))?;
@@ -997,6 +1042,8 @@ pub struct LiveTests {
     pub ms: f64,
     pub compile_ms: f64,
     pub restarted: bool,
+    /// the patch these tests ran on: the items it changed and the fns it installed
+    pub patch: Option<(u64, u64)>,
 }
 
 // ---- job ----
@@ -1009,7 +1056,7 @@ pub struct Job {
     pub id: String,
     /// its run on its lease: a restarted master follows it from there
     pub run_n: u64,
-    /// its log's bytes before that run's output (the node's waits it noted: `L1 104: selecting`),
+    /// its log's bytes before that run's output (the node's waits it noted: `L1 node-a: selecting`),
     /// so a restarted master follows the run from where the log stands
     pub log_base: u64,
     /// the batch it came in (`B<n>`), or empty
@@ -1029,10 +1076,8 @@ pub struct Job {
     pub kind: String,
     /// `arch=x64,os=linux`, or empty
     pub needs: String,
-    /// a preferred node, or empty
+    /// the node it runs on (`--node`; it waits for it), or empty
     pub node_pref: String,
-    /// `--only`: that node or wait, no twin
-    pub only: bool,
     pub prio: i32,
     /// the pinned `--rev` (`branch@sha[,branch@sha]`): the snapshot's base commits
     pub rev: String,
@@ -1042,6 +1087,8 @@ pub struct Job {
     pub snap: String,
     /// files shipped and deleted on top of `rev`
     pub snap_files: u32,
+    /// which source its box took (`lease::ship::source_id`): what it ran
+    pub source: String,
     /// placements so far (a box lost under it places it again)
     pub attempts: u32,
     pub cmd: Vec<String>,
@@ -1084,6 +1131,8 @@ pub struct Job {
     /// when a `job wait` first asked for it while it ran (an agent is blocked on it); 0 once its
     /// wait went to the agent-wait ledger
     pub waited_ms: u64,
+    /// the lease whose idle verdict a `job wait` told its owner: told once a lease
+    pub idle_told: String,
     pub note: String,
 }
 
@@ -1453,6 +1502,7 @@ fn allapps_value(r: &AllappsRun) -> Value {
         ("lease", s(&r.lease)),
         ("node", s(&r.node)),
         ("log", s(&r.log)),
+        ("run_n", int(r.run_n)),
     ])
 }
 
@@ -1467,6 +1517,7 @@ fn allapps_from(v: &Value) -> AllappsRun {
         lease: text(o, "lease"),
         node: text(o, "node"),
         log: text(o, "log"),
+        run_n: uint(o, "run_n"),
     }
 }
 
@@ -1528,14 +1579,14 @@ fn panic_from(v: Option<&Value>) -> Option<JobPanic> {
 }
 
 fn live_tests_value(t: &LiveTests) -> Value {
-    obj(vec![("edit", s(&t.edit)), ("group", int(t.group)), ("ran", int(t.ran)), ("passed", int(t.passed)), ("failed", int(t.failed)), ("ignored", int(t.ignored)), ("skipped", int(t.skipped)), ("selected", s(&t.selected)), ("failures", strs(&t.failures)), ("ms", Value::F64(t.ms)), ("compile_ms", Value::F64(t.compile_ms)), ("restarted", Value::Bool(t.restarted))])
+    obj(vec![("edit", s(&t.edit)), ("group", int(t.group)), ("ran", int(t.ran)), ("passed", int(t.passed)), ("failed", int(t.failed)), ("ignored", int(t.ignored)), ("skipped", int(t.skipped)), ("selected", s(&t.selected)), ("failures", strs(&t.failures)), ("ms", Value::F64(t.ms)), ("compile_ms", Value::F64(t.compile_ms)), ("restarted", Value::Bool(t.restarted)), ("items_changed", t.patch.map_or(Value::Null, |p| int(p.0))), ("fns_installed", t.patch.map_or(Value::Null, |p| int(p.1)))])
 }
 
 pub fn live_tests_from(v: &Value) -> Option<LiveTests> {
     let edit = v.get("edit").map(|v| v.as_str().map(str::to_string).unwrap_or_else(|| v.to_json())).unwrap_or_default();
     // Initial runs and some restarts have no patch compile time.
     let compile_ms = match v.get("compile_ms") { None | Some(Value::Null) => 0.0, Some(v) => f64_of(v)? };
-    Some(LiveTests { edit, group: v.get("group")?.as_u64()?, ran: v.get("ran")?.as_u64()?, passed: v.get("passed")?.as_u64()?, failed: v.get("failed")?.as_u64()?, ignored: uint(Some(v), "ignored"), skipped: uint(Some(v), "skipped"), selected: text(Some(v), "selected"), failures: strs_from(Some(v), "failures"), ms: v.get("ms").and_then(f64_of)?, compile_ms, restarted: flag(Some(v), "restarted", false) })
+    Some(LiveTests { edit, group: v.get("group")?.as_u64()?, ran: v.get("ran")?.as_u64()?, passed: v.get("passed")?.as_u64()?, failed: v.get("failed")?.as_u64()?, ignored: uint(Some(v), "ignored"), skipped: uint(Some(v), "skipped"), selected: text(Some(v), "selected"), failures: strs_from(Some(v), "failures"), ms: v.get("ms").and_then(f64_of)?, compile_ms, restarted: flag(Some(v), "restarted", false), patch: v.get("items_changed").and_then(Value::as_u64).zip(v.get("fns_installed").and_then(Value::as_u64)) })
 }
 
 pub fn live_value(x: &Live) -> Value {
@@ -1553,12 +1604,13 @@ pub fn live_value(x: &Live) -> Value {
 
 fn live_state_value(x: &Live) -> Value {
     let patch = x.patch.as_ref().map_or(Value::Null, |p| {
-        obj(vec![("files", strs(&p.files)), ("edit", s(&p.edit)), ("group", p.group.map_or(Value::Null, int)), ("seq", int(p.seq)), ("cursor", s(&p.cursor)), ("edit_ms", int(p.edit_ms)), ("called_ms", int(p.called_ms)), ("shipped_ms", int(p.shipped_ms)), ("outcome", s(&p.outcome)), ("outcome_ms", int(p.outcome_ms)), ("frame_ms", int(p.frame_ms)), ("tests", p.tests.as_ref().map_or(Value::Null, live_tests_value)), ("verdict_ms", int(p.verdict_ms)),  ("log_start", int(p.log_start)), ("log_end", int(p.log_end)), ("output_ref", p.output_ref.to_value()), ("reason_ref", p.reason_ref.to_value()), ("retried", Value::Bool(p.retried)), ("jit_error", int(p.jit_error))])
+        obj(vec![("files", strs(&p.files)), ("edit", s(&p.edit)), ("group", p.group.map_or(Value::Null, int)), ("seq", int(p.seq)), ("cursor", s(&p.cursor)), ("edit_ms", int(p.edit_ms)), ("called_ms", int(p.called_ms)), ("queued_ms", int(p.queued_ms)), ("behind", s(&p.behind)), ("shipped_ms", int(p.shipped_ms)), ("outcome", s(&p.outcome)), ("outcome_ms", int(p.outcome_ms)), ("frame_ms", int(p.frame_ms)), ("tests", p.tests.as_ref().map_or(Value::Null, live_tests_value)), ("verdict_ms", int(p.verdict_ms)),  ("log_start", int(p.log_start)), ("log_end", int(p.log_end)), ("output_ref", p.output_ref.to_value()), ("reason_ref", p.reason_ref.to_value()), ("retried", Value::Bool(p.retried)), ("jit_error", int(p.jit_error))])
     });
     obj(vec![
         ("id", s(&x.id)),
         ("run_n", int(x.run_n)),
         ("run_log_start", int(x.run_log_start)),
+        ("ask", s(&x.ask)),
         ("sources", Value::Obj(x.sources.iter().map(|(k, v)| (k.clone(), s(v))).collect())),
         ("app", s(&x.app)),
         ("test", Value::Bool(x.test)),
@@ -1576,6 +1628,7 @@ fn live_state_value(x: &Live) -> Value {
         ("tree", s(&x.tree)),
         ("rev", s(&x.rev)),
         ("needs", s(&x.needs)),
+        ("pin", s(&x.pin)),
         ("visible", Value::Bool(x.visible)),
         ("lease", s(&x.lease)),
         ("node", s(&x.node)),
@@ -1607,6 +1660,7 @@ fn live_state_from(v: &Value) -> Live {
         id: text(o, "id"),
         run_n: uint(o, "run_n"),
         run_log_start: uint(o, "run_log_start"),
+        ask: text(o, "ask"),
         sources: match v.get("sources") { Some(Value::Obj(fields)) => fields.iter().filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_string()))).collect(), _ => Default::default() },
         app: text(o, "app"),
         test: flag(o, "test", false),
@@ -1627,6 +1681,7 @@ fn live_state_from(v: &Value) -> Live {
         tree: text(o, "tree"),
         rev: text(o, "rev"),
         needs: text(o, "needs"),
+        pin: text(o, "pin"),
         visible: flag(o, "visible", false),
         lease: text(o, "lease"),
         node: text(o, "node"),
@@ -1635,7 +1690,7 @@ fn live_state_from(v: &Value) -> Live {
         started_ms: uint(o, "started_ms"),
         touched_ms: uint(o, "touched_ms"),
         ended_ms: uint(o, "ended_ms"),
-        patch: p.map(|p| LivePatch { files: strs_from(Some(p), "files"), edit: text(Some(p), "edit"), group: p.get("group").and_then(Value::as_u64), seq: uint(Some(p), "seq"), cursor: text(Some(p), "cursor"), edit_ms: uint(Some(p), "edit_ms"), called_ms: uint(Some(p), "called_ms"), shipped_ms: uint(Some(p), "shipped_ms"), outcome: text(Some(p), "outcome"), outcome_ms: uint(Some(p), "outcome_ms"), frame_ms: uint(Some(p), "frame_ms"), tests: p.get("tests").and_then(live_tests_from), verdict_ms: uint(Some(p), "verdict_ms"), log_start: uint(Some(p), "log_start"), log_end: uint(Some(p), "log_end"), output: String::new(), output_ref: TextRef::from_value(p.get("output_ref")), reason_ref: TextRef::from_value(p.get("reason_ref")), retried: flag(Some(p), "retried", false), jit_error: uint(Some(p), "jit_error"), reason: String::new() }),
+        patch: p.map(|p| LivePatch { files: strs_from(Some(p), "files"), edit: text(Some(p), "edit"), group: p.get("group").and_then(Value::as_u64), seq: uint(Some(p), "seq"), cursor: text(Some(p), "cursor"), edit_ms: uint(Some(p), "edit_ms"), called_ms: uint(Some(p), "called_ms"), queued_ms: uint(Some(p), "queued_ms"), behind: text(Some(p), "behind"), shipped_ms: uint(Some(p), "shipped_ms"), outcome: text(Some(p), "outcome"), outcome_ms: uint(Some(p), "outcome_ms"), frame_ms: uint(Some(p), "frame_ms"), tests: p.get("tests").and_then(live_tests_from), verdict_ms: uint(Some(p), "verdict_ms"), log_start: uint(Some(p), "log_start"), log_end: uint(Some(p), "log_end"), output: String::new(), output_ref: TextRef::from_value(p.get("output_ref")), reason_ref: TextRef::from_value(p.get("reason_ref")), retried: flag(Some(p), "retried", false), jit_error: uint(Some(p), "jit_error"), reason: String::new() }),
         panic: panic_from(v.get("panic")),
         log: text(o, "log"),
         note: text(o, "note"),
@@ -1648,6 +1703,7 @@ pub fn show_value(x: &Show) -> Value {
         ("pinned", Value::Bool(x.pinned)),
         ("launch_ms", int(x.launch_ms)),
         ("stages", s(&x.stages)),
+        ("args", strs(&x.args)),
         ("app", s(&x.app)),
         ("device", s(&x.device)),
         ("state", s(&x.state)),
@@ -1672,6 +1728,7 @@ pub fn show_from(v: &Value) -> Show {
         pinned: flag(o, "pinned", false),
         launch_ms: uint(o, "launch_ms"),
         stages: text(o, "stages"),
+        args: strs_from(o, "args"),
         app: text(o, "app"),
         device: text(o, "device"),
         state: text(o, "state"),
@@ -1708,12 +1765,12 @@ pub fn job_value(j: &Job) -> Value {
         ("kind", s(&j.kind)),
         ("needs", s(&j.needs)),
         ("node_pref", s(&j.node_pref)),
-        ("only", Value::Bool(j.only)),
         ("prio", Value::Int(j.prio as i64)),
         ("rev", s(&j.rev)),
         ("repo_dir", s(&j.repo_dir)),
         ("snap", s(&j.snap)),
         ("snap_files", int(j.snap_files as u64)),
+        ("source", s(&j.source)),
         ("run_n", int(j.run_n)),
         ("log_base", int(j.log_base)),
         ("attempts", int(j.attempts as u64)),
@@ -1744,6 +1801,7 @@ pub fn job_value(j: &Job) -> Value {
         ("panic", panic),
         ("touched_ms", int(j.touched_ms)),
         ("waited_ms", int(j.waited_ms)),
+        ("idle_told", s(&j.idle_told)),
         ("note", s(&j.note)),
     ])
 }
@@ -1768,12 +1826,12 @@ pub fn job_from(v: &Value) -> Job {
         kind: text(o, "kind"),
         needs: text(o, "needs"),
         node_pref: text(o, "node_pref"),
-        only: flag(o, "only", false),
         prio: v.get("prio").and_then(|x| x.as_i64()).unwrap_or(5) as i32,
         rev: text(o, "rev"),
         repo_dir: text(o, "repo_dir"),
         snap: text(o, "snap"),
         snap_files: uint(o, "snap_files") as u32,
+        source: text(o, "source"),
         run_n: uint(o, "run_n"),
         log_base: uint(o, "log_base"),
         attempts: uint(o, "attempts") as u32,
@@ -1804,6 +1862,7 @@ pub fn job_from(v: &Value) -> Job {
         panic: p.map(|p| JobPanic { id: text(Some(p), "id"), pid: uint(Some(p), "pid") as u32, message: text(Some(p), "message"), thread: text(Some(p), "thread"), location: text(Some(p), "location"), at_ms: uint(Some(p), "at_ms") }),
         touched_ms: uint(o, "touched_ms"),
         waited_ms: uint(o, "waited_ms"),
+        idle_told: text(o, "idle_told"),
         note: text(o, "note"),
     }
 }
@@ -1833,6 +1892,26 @@ struct Versioned {
     revision: u64,
     records: std::collections::BTreeMap<String, TextRef>,
     history_len: u64,
+    /// the committed document as written (without `revision` and `history_len`): what the next
+    /// journal line is the edit of; Null before the first checkpoint
+    disk: Value,
+    /// the journal's committed bytes
+    journal_len: u64,
+}
+
+/// The committed document at `home` as written (`state.json` replayed through its journal), for
+/// a reader beside the master (`lane audit`, tests): a checkpoint between its two reads is read
+/// again. None: no state yet.
+pub fn committed(home: &Path) -> Result<Option<Value>, String> {
+    let path = home.join("state.json");
+    let mut tries = 0;
+    loop {
+        match journal::load(&path) {
+            Ok(v) => return Ok(v.map(|(value, ..)| value)),
+            Err(_) if tries < 3 => tries += 1,
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 /// A subscription belongs only to the requested job/session ids. Subscribe before reading.
@@ -1909,25 +1988,16 @@ impl Store {
             }
             return Ok(s);
         }
-        let mut revision = 0;
-        let mut history_len = 0;
         let mut records = std::collections::BTreeMap::new();
-        let doc = match std::fs::read_to_string(&path) {
-            Ok(text) => {
-                let value = makepad_strict_json::parse_depth(text.as_bytes(), 16).map_err(|e| format!("invalid workflow state {}; file kept: {e:?}", path.display()))?;
-                if !matches!(value, Value::Obj(_)) { return Err(format!("invalid workflow state {}; expected object; file kept", path.display())); }
-                revision = uint(Some(&value), "revision");
-                history_len = uint(Some(&value), "history_len");
-                Doc::from_disk(value, &mut records)?
-            },
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Doc::default(),
-            Err(e) => return Err(format!("read workflow state {}: {e}; file kept", path.display())),
+        let (doc, disk, revision, history_len, journal_len) = match journal::load(&path)? {
+            Some((value, revision, history_len, journal_len)) => (Doc::from_disk(value.clone(), &mut records)?, value, revision, history_len, journal_len),
+            None => (Doc::default(), Value::Null, 0, 0, 0),
         };
         if history_len > 0 {
             let len = std::fs::metadata(home.join("history.jsonl")).map_err(|e| format!("workflow history: {e}; state kept"))?.len();
             if len < history_len { return Err("truncated workflow history; state kept".into()); }
         }
-        let store = Arc::new(Store { path: path.clone(), machine: Mutex::new(machine.to_string()), doc: Mutex::new(Versioned { doc, revision, records, history_len }), signals: Mutex::new(Default::default()), publish: Mutex::new(publish), changed: Condvar::new(), generation: Mutex::new(0) });
+        let store = Arc::new(Store { path: path.clone(), machine: Mutex::new(machine.to_string()), doc: Mutex::new(Versioned { doc, revision, records, history_len, disk, journal_len }), signals: Mutex::new(Default::default()), publish: Mutex::new(publish), changed: Condvar::new(), generation: Mutex::new(0) });
         store.migrate(home)?;
         open.push((path, Arc::downgrade(&store)));
         Ok(store)
@@ -2005,20 +2075,40 @@ impl Store {
         let mut history_len = state.history_len;
         if !archived.is_empty() {
             std::fs::create_dir_all(self.path.parent().unwrap()).map_err(|e| e.to_string())?;
-            let mut file = std::fs::OpenOptions::new().create(true).append(true)
+            // (not opened to append: on Windows such a handle cannot set its length)
+            let mut file = std::fs::OpenOptions::new().create(true).truncate(false).write(true)
                 .open(self.path.with_file_name("history.jsonl")).map_err(|e| e.to_string())?;
             // Discard only an uncommitted tail from an interrupted attempt. Committed
             // history is append-only; state.json records its durable byte boundary.
             file.set_len(history_len).map_err(|e| e.to_string())?;
+            file.seek(std::io::SeekFrom::End(0)).map_err(|e| e.to_string())?;
             for (section, value) in archived {
                 writeln!(file, "{}", obj(vec![("revision", int(revision)), ("section", s(section)), ("record", value)]).to_json()).map_err(|e| e.to_string())?;
             }
             file.sync_all().map_err(|e| e.to_string())?;
             history_len = file.metadata().map_err(|e| e.to_string())?.len();
         }
-        let (mut value, records) = next.disk_value(&state.doc, &state.records, self.path.parent().unwrap())?;
-        if let Value::Obj(fields) = &mut value { fields.push(("revision".into(), int(revision))); fields.push(("history_len".into(), int(history_len))); }
-        durable_write(&self.path, value.to_json().as_bytes())?;
+        let (value, records) = next.disk_value(&state.doc, &state.records, self.path.parent().unwrap())?;
+        // the edit as one journal line; the whole document only as a checkpoint: the first
+        // write, and once the journal would pass its bound
+        let line = (state.disk != Value::Null).then(|| journal::line(revision, history_len, &journal::diff(&state.disk, &value)));
+        let journal_len = match line {
+            Some(line) if state.journal_len + line.len() as u64 <= journal::CHECKPOINT_BYTES => {
+                journal::append(&self.path, state.journal_len, &line)?;
+                state.journal_len + line.len() as u64
+            }
+            _ => {
+                let mut full = value.clone();
+                if let Value::Obj(fields) = &mut full { fields.push(("revision".into(), int(revision))); fields.push(("history_len".into(), int(history_len))); }
+                durable_write(&self.path, full.to_json().as_bytes())?;
+                // the checkpoint holds every line: a journal not emptied keeps only lines at or
+                // below its revision, which a load skips
+                match journal::clear(&self.path) {
+                    Ok(()) => 0,
+                    Err(_) => std::fs::metadata(self.path.with_extension("journal")).map_or(0, |m| m.len()),
+                }
+            }
+        };
         let mut signals = self.signals.lock().unwrap();
         signals.retain(|_, subscribers| { subscribers.retain(|w| w.strong_count() > 0); !subscribers.is_empty() });
         for (key, subscribers) in signals.iter() {
@@ -2033,6 +2123,8 @@ impl Store {
         state.revision = revision;
         state.records = records;
         state.history_len = history_len;
+        state.disk = value;
+        state.journal_len = journal_len;
         drop(signals);
         drop(state);
         self.kick();
@@ -2170,6 +2262,24 @@ mod tests {
         assert!(path.is_dir());
     }
 
+    /// What a call tells its lane: a session no longer running has no answer on the caller's
+    /// source state, whatever its last run said.
+    #[test]
+    fn only_a_running_session_passes() {
+        let tests = LiveTests { ran: 1, passed: 1, ..Default::default() };
+        let mut x = Live { app: "a".into(), state: "running".into(), note: "released".into(), patch: Some(LivePatch { tests: Some(tests), ..Default::default() }), ..Default::default() };
+        assert_eq!(x.test_code(), 0);
+        assert!(x.test_result(1.0).starts_with("devhub test: a 1/1 ran"), "{}", x.test_result(1.0));
+        // an edit that reached no compiled code says so beside the pass
+        x.patch.as_mut().unwrap().tests.as_mut().unwrap().patch = Some((1, 0));
+        assert!(x.test_result(1.0).contains("the JIT took 1 changed item(s) and replaced no code"), "{}", x.test_result(1.0));
+        x.patch.as_mut().unwrap().tests.as_mut().unwrap().patch = Some((1, 2));
+        assert!(!x.test_result(1.0).contains("replaced no code"), "{}", x.test_result(1.0));
+        x.state = "ended".into();
+        assert_eq!(x.test_code(), 1);
+        assert_eq!(x.test_result(1.0), "devhub test: a ended: released; no verdict on this source state\n");
+    }
+
     #[test]
     fn large_live_output_and_finished_records_are_file_slices() {
         let dir = Scratch::new("output");
@@ -2208,9 +2318,39 @@ mod tests {
         }).collect();
         barrier.wait();
         for h in handles { h.join().unwrap(); }
-        let value = makepad_strict_json::parse(std::fs::read(dir.0.join("state.json")).unwrap().as_slice()).unwrap();
+        let (value, revision, ..) = journal::load(&dir.0.join("state.json")).unwrap().unwrap();
         assert_eq!(value.get("jobs_next").and_then(Value::as_u64), Some(2));
-        assert_eq!(value.get("revision").and_then(Value::as_u64), Some(2));
+        assert_eq!(revision, 2);
+    }
+
+    /// A job's step appends its edit to the journal (the size of that job, not of the document)
+    /// and leaves state.json alone; a reopen replays it. A journal at its bound is folded into a
+    /// new state.json and emptied.
+    #[test]
+    fn a_step_is_a_journal_line_and_reopens_the_same() {
+        let dir = Scratch::new("journal");
+        let store = dir.store();
+        store.update(|d| for i in 0..600 { d.jobs.push(Job { id: format!("J{i}"), state: "queued".into(), lane: "lane".into(), cmd: vec!["cargo".into(), "test".into()], ..Default::default() }); }).unwrap();
+        let checkpoint = std::fs::read(dir.0.join("state.json")).unwrap();
+        assert!(checkpoint.len() > 50_000, "{}", checkpoint.len());
+        store.update(|d| { d.jobs[300].state = "running".into(); d.jobs[300].run_n = 1; }).unwrap();
+        store.update(|d| { d.jobs.remove(0); d.jobs.push(Job { id: "J600".into(), state: "queued".into(), ..Default::default() }); d.jobs_next = 601; }).unwrap();
+        let journal = std::fs::metadata(dir.0.join("state.journal")).unwrap().len();
+        assert!(journal < 2_000, "two steps wrote {journal} bytes");
+        assert_eq!(std::fs::read(dir.0.join("state.json")).unwrap(), checkpoint, "state.json is not rewritten");
+        let doc = store.read(|d| d.clone());
+        drop(store);
+        let store = dir.store();
+        assert_eq!(store.read(|d| d.clone()), doc);
+        assert_eq!(store.doc.lock().unwrap().revision, 3);
+        store.doc.lock().unwrap().journal_len = journal::CHECKPOINT_BYTES;
+        store.update(|d| d.jobs_next = 602).unwrap();
+        assert_eq!(std::fs::metadata(dir.0.join("state.journal")).unwrap().len(), 0, "a checkpoint empties the journal");
+        let (value, revision, ..) = journal::load(&dir.0.join("state.json")).unwrap().unwrap();
+        assert_eq!((value.get("jobs_next").and_then(Value::as_u64), revision), (Some(602), 4));
+        let doc = store.read(|d| d.clone());
+        drop(store);
+        assert_eq!(dir.store().read(|d| d.clone()), doc);
     }
 
     #[test]
@@ -2256,7 +2396,7 @@ mod tests {
 
     #[test]
     fn doc_round_trip() {
-        let leg = Leg { name: "full-a".into(), state: "fail".into(), lease: "L9".into(), node: "107".into(), summary: "NODEGATE-FAIL: fuzz".into(), errors: vec!["fuzz: seed 7 disagrees".into()], log: "/x/full-a.log".into(), run_n: 4 };
+        let leg = Leg { name: "full-a".into(), state: "fail".into(), lease: "L9".into(), node: "node-c".into(), summary: "NODEGATE-FAIL: fuzz".into(), errors: vec!["fuzz: seed 7 disagrees".into()], log: "/x/full-a.log".into(), run_n: 4 };
         let doc = Doc {
             devhub_shadow: false,
             ci: Default::default(),
@@ -2275,14 +2415,14 @@ mod tests {
             },
             allapps: Allapps {
                 on: true,
-                last: Some(AllappsRun { pair: pair('a'), at_ms: 1, secs: 600, verdict: "errors".into(), errors: vec![PkgErrors { pkg: "makepad-app-x".into(), errors: 2, first: vec!["E0425 a".into()] }], lease: "L1".into(), node: "101".into(), log: "l".into() }),
+                last: Some(AllappsRun { pair: pair('a'), at_ms: 1, secs: 600, verdict: "errors".into(), errors: vec![PkgErrors { pkg: "makepad-app-x".into(), errors: 2, first: vec!["E0425 a".into()] }], lease: "L1".into(), node: "node-a".into(), log: "l".into(), run_n: 1 }),
                 running: None,
                 asked: true,
             },
             after: vec![
-                Waiter { id: "A1".into(), cond: Cond::Landed { branch: "rc-foo".into(), repo: "makepad".into(), sha: "a".repeat(40) }, cmd: vec!["launch".into(), "mac".into(), "makepad-fab".into()], by: "lane".into(), added_ms: 3, state: "waiting".into(), fired_ms: 0, exit: None, note: String::new(), log: String::new() },
+                Waiter { id: "A1".into(), cond: Cond::Landed { branch: "rc-foo".into(), repo: "makepad".into(), sha: "a".repeat(40) }, cmd: vec!["launch".into(), "mac".into(), "makepad-foo".into()], by: "lane".into(), added_ms: 3, state: "waiting".into(), fired_ms: 0, exit: None, note: String::new(), log: String::new() },
                 Waiter { id: "A2".into(), cond: Cond::Verified { contains: Some("abc".into()) }, cmd: vec!["verify".into()], by: String::new(), added_ms: 3, state: "done".into(), fired_ms: 4, exit: Some(0), note: "n".into(), log: "l".into() },
-                Waiter { id: "A3".into(), cond: Cond::Free { node: "107".into() }, cmd: vec![], by: String::new(), added_ms: 0, state: "cancelled".into(), fired_ms: 0, exit: Some(-1), note: String::new(), log: String::new() },
+                Waiter { id: "A3".into(), cond: Cond::Free { node: "node-c".into() }, cmd: vec![], by: String::new(), added_ms: 0, state: "cancelled".into(), fired_ms: 0, exit: Some(-1), note: String::new(), log: String::new() },
                 Waiter { id: "A4".into(), cond: Cond::Verified { contains: None }, ..Default::default() },
             ],
             after_next: 5,
@@ -2292,9 +2432,9 @@ mod tests {
                 Job { id: "J2".into(), state: "failed".into(), exit: Some(101), errors: vec!["error[E1]".into()], tail: vec!["x".into()], prio: 9, ..Default::default() },
             ],
             lanes: vec![LaneRec { name: "x".into(), path: "/w/x".into(), branch: "rc-x".into(), cbranch: "rc-x".into(), created_ms: 1, adopted: true, state: "live".into(), landed_ms: 4, keep: true, waited: true, ended_ms: 0, note: "n".into() }],
-            shows: vec![Show { id: "V1".into(), app: "makepad-fab".into(), device: "mac".into(), state: "paused".into(), cond: Cond::Landed { branch: "rc-x".into(), repo: "makepad".into(), sha: String::new() }, pid: 4, sha: "s".into(), exit: Some(0), panic: Some(JobPanic { id: "P2".into(), ..Default::default() }), ..Default::default() }],
+            shows: vec![Show { id: "V1".into(), app: "makepad-foo".into(), args: vec!["--plate".into(), "a b.foo".into()], device: "mac".into(), state: "paused".into(), cond: Cond::Landed { branch: "rc-x".into(), repo: "makepad".into(), sha: String::new() }, pid: 4, sha: "s".into(), exit: Some(0), panic: Some(JobPanic { id: "P2".into(), ..Default::default() }), ..Default::default() }],
             shows_next: 1,
-            lives: vec![Live { id: "W1".into(), app: "makepad-app-calculator".into(), state: "running".into(), visible: true, pid: 7, patch: Some(LivePatch { files: vec!["a.rs".into()], edit_ms: 1, shipped_ms: 2, outcome: "patched".into(), outcome_ms: 3, frame_ms: 4, reason: String::new(), ..Default::default() }), ..Default::default() }],
+            lives: vec![Live { id: "W1".into(), app: "makepad-app-calculator".into(), state: "running".into(), visible: true, pid: 7, ask: "18a-7-1".into(), patch: Some(LivePatch { files: vec!["a.rs".into()], edit_ms: 1, shipped_ms: 2, outcome: "patched".into(), outcome_ms: 3, frame_ms: 4, reason: String::new(), ..Default::default() }), ..Default::default() }],
             lives_next: 1,
             land_next: 1,
             submissions: std::collections::BTreeMap::from([("request-one".into(), "{\"jobs\":[\"J1\"]}".into())]),
@@ -2305,7 +2445,7 @@ mod tests {
             land_paused: "user review".into(),
             merges: vec![makepad_strict_json::parse(br#"{"branch":"rc-x","repo":"makepad","result":"merged"}"#).unwrap()],
             held: vec![("rc-h".into(), "a viewer rebuild".into())],
-            prewarm: vec![makepad_strict_json::parse(br#"{"node":"101","sev":"info","line":"prewarm: done","at_ms":5}"#).unwrap()],
+            prewarm: vec![makepad_strict_json::parse(br#"{"node":"node-a","sev":"info","line":"prewarm: done","at_ms":5}"#).unwrap()],
         };
         let text = doc.to_value().to_json();
         assert_eq!(Doc::parse(&text), Some(doc.clone()));
@@ -2317,8 +2457,8 @@ mod tests {
 
     #[test]
     fn ci_round_trip_and_timings_average() {
-        let shard = CiShard { id: "smoke:apps/calc".into(), state: "fail".into(), node: "106".into(), lease: "L2".into(), secs: 12.5, summary: "exit 1".into(), errors: vec!["error: x".into()], log: "/l".into(), sig: "ab".into(), step: 1, run_n: 2, steps_ok: vec![0], failed: vec!["x".into()], kept: "k".into(), failed_on: "101".into(), failed_os: "linux".into(), failed_why: "exit 1".into(), asked_ms: 5, granted_ms: 6, spans: vec![CiSpan { node: "106".into(), asked_ms: 1, granted_ms: 2, ended_ms: 3 }], lost: vec![("104".into(), 1)] };
-        let run = CiRun { lock_digest: "lock".into(), checkout: String::new(), id: "R1".into(), pair: pair('a'), dry: true, started_ms: 1, ended_ms: 2, verdict: "fail".into(), shards: vec![shard], critical: "106 ends at 12 s".into(), fleet: "wall 12 s".into(), boxes: vec!["106 12 s busy, 1 shards".into()], rotation: 2, plan_timings: vec![("test:x".into(), 7.0)], sweep: true, stopping: true };
+        let shard = CiShard { id: "smoke:apps/calc".into(), state: "fail".into(), node: "node-b".into(), lease: "L2".into(), secs: 12.5, summary: "exit 1".into(), errors: vec!["error: x".into()], log: "/l".into(), sig: "ab".into(), step: 1, run_n: 2, steps_ok: vec![0], failed: vec!["x".into()], kept: "k".into(), failed_on: "node-a".into(), failed_os: "linux".into(), failed_why: "exit 1".into(), asked_ms: 5, granted_ms: 6, at: pair('b'), spans: vec![CiSpan { node: "node-b".into(), asked_ms: 1, granted_ms: 2, ended_ms: 3 }], lost: vec![("node-d".into(), 1)] };
+        let run = CiRun { own_tests: true, lock_digest: "lock".into(), checkout: String::new(), id: "R1".into(), pair: pair('a'), dry: true, started_ms: 1, ended_ms: 2, verdict: "fail".into(), shards: vec![shard], critical: "node-b ends at 12 s".into(), fleet: "wall 12 s".into(), boxes: vec!["node-b 12 s busy, 1 shards".into()], rotation: 2, plan_timings: vec![("test:x".into(), 7.0)], sweep: true, stopping: true };
         let mut ci = Ci { timings: vec![("jit:01".into(), 40.0)], run: None, sweep_run: Some(run.clone()), runs: vec![run].into(), rotation: 3 };
         ci.measured("jit:01", 20.0);
         ci.measured("test:x:lib", 5.0);
@@ -2357,7 +2497,7 @@ mod tests {
         std::fs::write(home.join("land.paused"), "user review\n").unwrap();
         std::fs::write(home.join("lanes.state"), "{\"branch\":\"rc-b\",\"repo\":\"makepad\",\"result\":\"landed\"}\n").unwrap();
         std::fs::write(home.join("lanes.held"), "rc-h needs a rebuild\n").unwrap();
-        std::fs::write(home.join("prewarm.state"), "{\"node\":\"101\",\"sev\":\"info\",\"line\":\"prewarm: done\",\"at_ms\":5}\n").unwrap();
+        std::fs::write(home.join("prewarm.state"), "{\"node\":\"node-a\",\"sev\":\"info\",\"line\":\"prewarm: done\",\"at_ms\":5}\n").unwrap();
         {
             let st = Store::open_quiet(&home, "mac").expect("workflow state must open before services start");
             let (land, paused, merges, held, prewarm) = st.read(|d| (d.land.len(), d.land_paused.clone(), d.merges.len(), d.held.clone(), d.prewarm.len()));

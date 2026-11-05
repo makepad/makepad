@@ -40,6 +40,14 @@ pub fn machine() -> Machine {
     m
 }
 
+/// The memory in use that the kernel cannot hand out without paging out or compressing what holds
+/// it, bytes: Linux and Windows total less available; macOS app memory (anonymous, less purgeable
+/// and reusable), wired and compressed (at its compressed size), as the file cache is not in use.
+/// None: not measured here.
+pub fn in_use() -> Option<u64> {
+    os::in_use()
+}
+
 /// Whether a process has ended, reaping it if it is this process's own child (a child of an
 /// earlier image of this process after an exec is a zombie until then, and `alive` calls a zombie
 /// alive): None while it runs; `Some(code)`, its exit code when it can be known (None: a signal).
@@ -54,23 +62,35 @@ pub fn exited(pid: u32) -> Option<Option<i32>> {
         return Some(code);
     }
     #[cfg(unix)]
-    INHERITED.lock().unwrap().retain(|p| *p != pid);
-    #[cfg(unix)]
     {
         extern "C" {
             fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
         }
         const WNOHANG: i32 = 1;
         let mut st = 0i32;
-        if unsafe { waitpid(pid as i32, &mut st, WNOHANG) } == pid as i32 {
-            return Some((st & 0x7f == 0).then_some((st >> 8) & 0xff));
+        match unsafe { waitpid(pid as i32, &mut st, WNOHANG) } {
+            r if r == pid as i32 => {
+                INHERITED.lock().unwrap().retain(|p| *p != pid);
+                return Some((st & 0x7f == 0).then_some((st >> 8) & 0xff));
+            }
+            // a child of this process that runs: the inherited reaper keeps it until it ends (a show
+            // a restarted master followed by its pid stayed a zombie once `--replace` ended it: this
+            // call had dropped it from the reaper's list while it ran, 11-03)
+            0 => return None,
+            _ => {}
         }
     }
-    (!alive(pid)).then_some(Some(0))
+    let gone = !alive(pid);
+    #[cfg(unix)]
+    if gone {
+        INHERITED.lock().unwrap().retain(|p| *p != pid);
+    }
+    gone.then_some(Some(0))
 }
 
 /// Children of an earlier image of this process (an exec restart keeps the pid and its children,
 /// but not the `Child` handles that would have waited for them).
+#[cfg(unix)]
 static INHERITED: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());
 /// Exits of inherited children the reaper took, for [`exited`] to answer from (for 10 min: then
 /// the pid may be another process's).
@@ -131,7 +151,8 @@ pub fn alive(pid: u32) -> bool {
         extern "C" {
             fn kill(pid: i32, sig: i32) -> i32;
         }
-        unsafe { kill(pid as i32, 0) == 0 }
+        // a zombie answers the signal: an ended show stayed "running" while it waited for a reap (11-03)
+        unsafe { kill(pid as i32, 0) == 0 && !crate::os::zombie(pid) }
     }
     #[cfg(not(unix))]
     {
@@ -202,6 +223,12 @@ mod os {
         m.cpus = std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(1);
         m
     }
+
+    pub fn in_use() -> Option<u64> {
+        let t = std::fs::read_to_string("/proc/meminfo").ok()?;
+        let kb = |key: &str| t.lines().find(|l| l.starts_with(key)).and_then(|l| l.split_whitespace().nth(1)).and_then(|v| v.parse::<u64>().ok());
+        Some(kb("MemTotal:")?.saturating_sub(kb("MemAvailable:")?) * 1024)
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -270,7 +297,7 @@ mod os {
 
     /// Available pages: free + inactive (clean file cache the kernel reclaims first) + speculative
     /// + purgeable. Counting only free (+ speculative, purgeable) read a Mac whose RAM is file cache
-    /// and compressed memory as full ("ram 15.7/16 GB used", every mini lease "node busy" 10-30).
+    /// and compressed memory as full ("ram 15.7/16 GB used", every lease on it "node busy" 10-30).
     fn available_pages() -> Option<u64> {
         let mut v = VmStats64::default();
         let mut count = (std::mem::size_of::<VmStats64>() / 4) as u32;
@@ -278,6 +305,20 @@ mod os {
             return None;
         }
         Some(v.free_count as u64 + v.inactive_count as u64 + v.speculative_count as u64 + v.purgeable_count as u64)
+    }
+
+    pub fn in_use() -> Option<u64> {
+        let mut v = VmStats64::default();
+        let mut count = (std::mem::size_of::<VmStats64>() / 4) as u32;
+        if unsafe { host_statistics64(mach_host_self(), HOST_VM_INFO64, &mut v as *mut _ as *mut i32, &mut count) } != 0 {
+            return None;
+        }
+        // reusable: pages malloc freed (`MADV_FREE_REUSABLE`), still anonymous and resident until
+        // the kernel takes them, which it does before it compresses anything; 1.2 GB of an idle
+        // 16 GB Mac's 6.6 GB "residents" (11-04)
+        let reusable = sysctl_u64("vm.page_reusable_count");
+        let app = (v.internal_page_count as u64).saturating_sub(v.purgeable_count as u64 + reusable);
+        Some((app + v.wire_count as u64 + v.compressor_page_count as u64) * sysctl_u64("hw.pagesize").max(4096))
     }
 
     const PROC_PIDTASKINFO: i32 = 4;
@@ -329,6 +370,10 @@ mod os {
         let (total, avail) = crate::os::memory();
         Machine { os: "windows", load1: 0.0, mem_total_mb: total >> 20, mem_avail_mb: avail >> 20, uptime_s: crate::os::uptime_s(), cpus: std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(1), battery: None }
     }
+    pub fn in_use() -> Option<u64> {
+        let (total, avail) = crate::os::memory();
+        (total > 0).then(|| total.saturating_sub(avail))
+    }
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos", windows)))]
@@ -339,6 +384,9 @@ mod os {
     }
     pub fn machine() -> Machine {
         Machine { os: std::env::consts::OS, ..Machine::default() }
+    }
+    pub fn in_use() -> Option<u64> {
+        None
     }
 }
 
@@ -401,5 +449,8 @@ mod macos_tests {
         assert_eq!(std::mem::size_of::<super::os::VmStats64>(), 38 * 4);
         let m = super::machine();
         assert!(m.mem_avail_mb > 0 && m.mem_avail_mb <= m.mem_total_mb, "{} of {} MB", m.mem_avail_mb, m.mem_total_mb);
+        // in use: the kernel's wired pages at least, never more than the machine has
+        let used = super::in_use().unwrap() >> 20;
+        assert!(used > 0 && used <= m.mem_total_mb, "in use {used} of {} MB", m.mem_total_mb);
     }
 }

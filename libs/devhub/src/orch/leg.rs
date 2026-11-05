@@ -39,9 +39,8 @@ pub struct Spec {
     /// the pair's `--rev` (pinned here)
     pub rev: String,
     pub repo_dir: String,
-    /// a preferred node (a twin of the same arch and os may take it, unless `only`)
+    /// the node it runs on (it waits for it)
     pub node: Option<String>,
-    pub only: bool,
     /// when the work first asked for a box (None: now): its place in the queue
     pub since_ms: Option<u64>,
 }
@@ -55,12 +54,14 @@ pub const BACKGROUND_PRIO: i32 = 9;
 /// The fair share: a background run going this long is owed boxes. Its work stops stepping back for
 /// waiting lane work and asks at [`OWED_PRIO`], so it takes the next free box ahead of new lane
 /// leases (landing gates still go first); running lane leases are never ended for it, and as it is
-/// no longer background it is not preempted. Verify first and past the N-2 cap too, allapps later.
+/// no longer background it is not preempted. Verify first and past the N-2 cap too, then jitlegs,
+/// allapps later.
 /// CI shards always stay behind lane work. Counted from the run's start in the state: no
 /// master restart, preemption or re-ask starts it over.
 fn owed_after(agent: &str) -> Duration {
     match agent {
         "devhub-verify" => Duration::from_secs(20 * 60),
+        "devhub-jitlegs" => Duration::from_secs(30 * 60),
         _ => Duration::from_secs(40 * 60),
     }
 }
@@ -70,6 +71,7 @@ fn run_started_ms(agent: &str) -> Option<u64> {
     super::ctx()?.store.read(|d| match agent {
         "devhub-verify" => d.verify.run.as_ref().map(|r| r.started_ms),
         "devhub-allapps" => d.allapps.running.as_ref().map(|r| r.at_ms),
+        "devhub-jitlegs" => d.jitlegs.runs.last().filter(|r| r.ended_ms == 0).map(|r| r.started_ms),
         _ => None,
     })
 }
@@ -78,7 +80,7 @@ fn run_started_ms(agent: &str) -> Option<u64> {
 pub const OWED_PRIO: i32 = crate::lease::sched::DEFAULT_PRIO - 1;
 
 /// The agents whose leases are background work (also once owed: they count to the N-2 cap).
-const BACKGROUND_AGENTS: [&str; 3] = ["devhub-verify", "devhub-ci", "devhub-allapps"];
+const BACKGROUND_AGENTS: [&str; 4] = ["devhub-verify", "devhub-ci", "devhub-allapps", "devhub-jitlegs"];
 
 /// Background leases the master ended for waiting lane work: their legs ask again.
 static PREEMPTED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
@@ -109,7 +111,7 @@ pub fn background_block(lm: &crate::lease::master::LeaseMaster, mine: Option<&st
     let view = lm.view();
     let nodes = lm.nodes();
     let other = |id: &str| mine != Some(id);
-    // lane work holds background work back only on boxes both could use, including the asking request's --only pin
+    // lane work holds background work back only on boxes both could use, including the asking request's --node pin
     let usable = |want: &[(String, String)], pin: Option<&str>, n: &crate::lease::sched::NodeView| n.up && n.dev && !n.role().users() && pin.is_none_or(|p| p == n.name) && super::fits(want, n.caps.as_ref());
     let shared = |l: &crate::lease::sched::Lease| nodes.iter().any(|n| usable(needs, pin, n) && usable(&l.req.needs, l.req.node.as_deref(), n));
     // lane work goes first, and a box beyond what it waits for is not taken from it
@@ -142,10 +144,18 @@ pub fn lease_held(ctx: &super::Ctx, id: &str) -> bool {
     !id.is_empty() && ctx.leases.view().iter().any(|l| l.id == id && l.state == crate::lease::sched::State::Granted)
 }
 
+/// What a run's holder hears of a lease that ended under it. Disk: why too, it is the job's result.
+fn ended_error(id: &str, st: &Value) -> String {
+    let how = s(st, "how");
+    if how == "disk" { format!("{id} ended (disk): {}", s(st, "reason")) } else { format!("{id} ended ({how})") }
+}
+
 /// A granted lease this process holds; released on drop.
 pub struct Held {
     pub id: String,
     pub node: String,
+    /// the `--rev` it was granted for: its spec's, or the one its queued request followed to
+    pub rev: String,
     ctl: Client,
     released: bool,
     /// its own thread beats the lease: a slow node call must not cost it
@@ -198,19 +208,31 @@ fn first(lines: Result<Vec<String>, String>, what: &str) -> Result<Value, String
 
 impl Held {
     /// Asks for the lease and waits for its grant; `on_wait` hears each queue state line, and
-    /// `stop` (asked every beat) gives the request up.
+    /// `stop` (asked every beat) gives the request up. A leg's lane is its class: asked with none,
+    /// its runs were measured under their first command (`git rev-parse HEAD`, every leg's) and
+    /// its asks looked under the bare kind, so a leg never got its measured RAM (a jitlegs leg
+    /// asked 6 GB for a 4.3 GB peak, 11-03).
     pub fn acquire(spec: &Spec, on_wait: &mut dyn FnMut(&str), stop: &dyn Fn() -> bool) -> Result<Held, String> {
-        Self::acquire_with(spec, &|_| {}, on_wait, stop)
+        Self::acquire_with(spec, &|r| r.class = format!("leg:{}", spec.lane), on_wait, stop)
     }
 
     /// Applies run-specific source and cost wishes before the request enters the queue.
     pub fn acquire_with(spec: &Spec, configure: &dyn Fn(&mut Req), on_wait: &mut dyn FnMut(&str), stop: &dyn Fn() -> bool) -> Result<Held, String> {
+        Self::acquire_following(spec, configure, on_wait, stop, &mut || None)
+    }
+
+    /// [`Self::acquire_with`] for work whose target moves while it waits (a box's prebuild or
+    /// prewarm, which each landing supersedes): `follow` (asked every beat) names the newer
+    /// `--rev`, and the queued request takes it in place, keeping its id, its place in the queue
+    /// and its age ([`crate::lease::sched::Sched::retarget`]). Granted meanwhile, it keeps the
+    /// grant; [`Held::rev`] says which target that was.
+    pub fn acquire_following(spec: &Spec, configure: &dyn Fn(&mut Req), on_wait: &mut dyn FnMut(&str), stop: &dyn Fn() -> bool, follow: &mut dyn FnMut() -> Option<String>) -> Result<Held, String> {
+        let mut rev = spec.rev.clone();
         let ctl = Client::new(Target::Unix(crate::proto::control_socket()), "devhub-orch");
         let mut req = Req::new(&spec.lane, spec.kind);
         req.needs = parse_needs(&spec.needs);
         req.prio = spec.prio;
         req.node = spec.node.clone();
-        req.only = spec.only;
         req.repo_dir = Some(spec.repo_dir.clone());
         req.rev = Some(crate::lease::pin_revs(std::path::Path::new(&spec.repo_dir), &spec.rev)?);
         // the master's own ask (no holder pid): a restart keeps it once granted, and asks again
@@ -233,7 +255,7 @@ impl Held {
             // background work asks only while no lane work waits and it holds under N-2 boxes;
             // owed, only the cap holds it back, and it asks ahead of new lane leases
             if let (true, Some(lm)) = (background, &lm) {
-                while let Some(why) = if owed() { (spec.agent != "devhub-verify").then(|| background_cap(lm, None)).flatten() } else { background_block(lm, None, &req.needs, req.node.as_deref().filter(|_| req.only)) } {
+                while let Some(why) = if owed() { (spec.agent != "devhub-verify").then(|| background_cap(lm, None)).flatten() } else { background_block(lm, None, &req.needs, req.node.as_deref()) } {
                     let line = format!("held back: {why}");
                     if line != last {
                         on_wait(&line);
@@ -267,7 +289,7 @@ impl Held {
                     "granted" => {
                         if !note.is_empty() { on_wait(&format!("{id} granted{note}")); }
                         let beats = Beats::start(&id);
-                        return Ok(Held { id, node: s(&v, "node"), ctl, released: false, _beats: beats });
+                        return Ok(Held { id, node: s(&v, "node"), rev, ctl, released: false, _beats: beats });
                     }
                     "queued" | "starting" => {
                         let line = format!("{} {} {}", id, s(&v, "state"), s(&v, "reason"));
@@ -291,6 +313,25 @@ impl Held {
                     let _ = ask(&ctl, None, "release", &id);
                     return Err(format!("{id}: given up"));
                 }
+                if s(&v, "state") == "queued" {
+                    if let Some(newer) = follow() {
+                        let mut moved = req.clone();
+                        let asked = crate::lease::pin_revs(std::path::Path::new(&spec.repo_dir), &newer).and_then(|pin| {
+                            (moved.rev, moved.hint) = (Some(pin), Vec::new());
+                            first(ask(&ctl, None, "retarget", &format!("{id} {}", moved.to_json())), "retarget")
+                        });
+                        match asked {
+                            Ok(x) => {
+                                on_wait(&format!("{id} follows {newer} in its place"));
+                                (req, v, rev) = (moved, x, newer);
+                                continue;
+                            }
+                            // granted meanwhile: the grant (for `rev`) is the answer, and the
+                            // caller sees it is not the newest
+                            Err(e) => on_wait(&format!("{id} keeps {rev}: {e}")),
+                        }
+                    }
+                }
                 // lane work started waiting: a queued background request steps back
                 // owed now: asked again at the owed priority
                 if background && owed() && req.prio != OWED_PRIO && s(&v, "state") == "queued" {
@@ -298,7 +339,7 @@ impl Held {
                     continue 'ask;
                 }
                 if let (true, false, Some(lm), "queued") = (background, owed(), &lm, s(&v, "state").as_str()) {
-                    if background_block(lm, Some(&id), &req.needs, req.node.as_deref().filter(|_| req.only)).is_some() {
+                    if background_block(lm, Some(&id), &req.needs, req.node.as_deref()).is_some() {
                         let _ = ask(&ctl, None, "release", &id);
                         continue 'ask;
                     }
@@ -320,7 +361,7 @@ impl Held {
 
     /// A lease this process took before its exec (the same pid holds it): held again.
     pub fn attach(id: &str, node: &str) -> Held {
-        Held { id: id.to_string(), node: node.to_string(), ctl: Client::new(Target::Unix(crate::proto::control_socket()), "devhub-orch"), released: false, _beats: Beats::start(id) }
+        Held { id: id.to_string(), node: node.to_string(), rev: String::new(), ctl: Client::new(Target::Unix(crate::proto::control_socket()), "devhub-orch"), released: false, _beats: Beats::start(id) }
     }
 
     /// Runs `argv` in the lease's tree; its output goes to `log`; its exit code.
@@ -330,21 +371,27 @@ impl Held {
 
     /// As [`Self::run`], telling `started` the run's number.
     pub fn run_noted(&self, argv: &[String], log: &mut dyn Write, started: &mut dyn FnMut(u64)) -> Result<i32, String> {
-        self.run_at(".", argv, log, started)
+        self.run_asked(&crate::proto::request_id(), ".", argv, log, started)
     }
 
     /// A live job holds its run until the JIT ends; a hub restart may lose the exit status.
-    pub fn run_live(&self, argv: &[String], log: &mut dyn Write, started: &mut dyn FnMut(u64)) -> Result<i32, String> {
-        self.run_at_live(".", argv, true, log, started)
+    /// `named` as in [`Self::run_asked`].
+    pub fn run_live(&self, named: &str, argv: &[String], log: &mut dyn Write, started: &mut dyn FnMut(u64)) -> Result<i32, String> {
+        self.run_at_live(named, ".", argv, true, log, started)
     }
 
-    pub fn run_at(&self, cwd: &str, argv: &[String], log: &mut dyn Write, started: &mut dyn FnMut(u64)) -> Result<i32, String> {
-        self.run_at_live(cwd, argv, false, log, started)
+    /// As [`Self::run_noted`] in `cwd`, asked under `named`: the run's name among its lease's asks. A
+    /// master that took the lease back from a previous one, and finds no run of it, asks again
+    /// under the same name: the node answers from the run, or the JIT resolution, the first ask
+    /// started, never a second one beside it (a fresh name was refused as "resolving another
+    /// cwd or argv" while the lane's dev JIT built, and the job or live start failed, 11-03).
+    pub fn run_asked(&self, named: &str, cwd: &str, argv: &[String], log: &mut dyn Write, started: &mut dyn FnMut(u64)) -> Result<i32, String> {
+        self.run_at_live(named, cwd, argv, false, log, started)
     }
 
-    fn run_at_live(&self, cwd: &str, argv: &[String], live: bool, log: &mut dyn Write, started: &mut dyn FnMut(u64)) -> Result<i32, String> {
+    fn run_at_live(&self, named: &str, cwd: &str, argv: &[String], live: bool, log: &mut dyn Write, started: &mut dyn FnMut(u64)) -> Result<i32, String> {
         let b64 = makepad_network::digest::base64_encode(argv.join("\0").as_bytes());
-        let extra = format!(" {{\"live\":{live},\"request_id\":{}}}", makepad_remote::json_str(&crate::proto::request_id()));
+        let extra = format!(" {{\"live\":{live},\"request_id\":{}}}", makepad_remote::json_str(named));
         // the node's hub restarting for its self-update (at a run boundary: this one) takes the
         // lease back from its ledger: the run starts on the new hub
         let (mut failing, mut last, mut beat) = (None::<Instant>, String::new(), Instant::now());
@@ -361,7 +408,7 @@ impl Held {
                     if beat.elapsed() >= BEAT {
                         beat = Instant::now();
                         let st = first(ask(&self.ctl, None, "beat", &self.id), "beat")?;
-                        if s(&st, "state") == "ended" { return Err(format!("{} ended ({})", self.id, s(&st, "how"))); }
+                        if s(&st, "state") == "ended" { return Err(ended_error(&self.id, &st)); }
                     }
                     std::thread::sleep(Duration::from_secs(1));
                 }
@@ -425,7 +472,7 @@ impl Held {
                 beat = Instant::now();
                 let st = first(ask(&self.ctl, None, "beat", &self.id), "beat")?;
                 if s(&st, "state") == "ended" {
-                    return Err(format!("{} ended ({})", self.id, s(&st, "how")));
+                    return Err(ended_error(&self.id, &st));
                 }
             }
         }
@@ -440,7 +487,7 @@ impl Held {
         if code != 0 {
             let st = first(ask(&self.ctl, None, "beat", &self.id), "beat")?;
             if s(&st, "state") == "ended" {
-                return Err(format!("{} ended ({})", self.id, s(&st, "how")));
+                return Err(ended_error(&self.id, &st));
             }
         }
         Ok(code)
@@ -514,6 +561,15 @@ impl Held {
     /// Lets go of the lease here without ending it (another holder follows its run).
     pub fn keep(mut self) {
         self.released = true;
+    }
+
+    /// What the lease's runs put in its keep dir (a failed step's logs, [`crate::lease::KEEP_DIR`])
+    /// copied into `dst` before the lease ends and the node's scratch goes, said in `log`.
+    pub fn save_kept(&self, lane: &str, dst: &Path, log: &mut dyn Write) {
+        let r = crate::lease::client::kept(&self.ctl, &self.node, lane, &self.id, dst);
+        if let Some(line) = crate::lease::client::kept_line(&self.id, dst, &r) {
+            let _ = writeln!(log, "{line}");
+        }
     }
 
     pub fn release(mut self, exit: Option<i32>) {

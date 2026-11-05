@@ -18,21 +18,51 @@ use std::time::{Duration, Instant};
 /// An exclusive request's expected wait, as the asker reads it (minutes; 5-minute steps past 10).
 fn eta(ms: u64) -> String {
     if ms == 0 { return String::new(); }
-    let min = ms.div_ceil(60_000);
-    let min = if min > 10 { min.div_ceil(5) * 5 } else { min };
-    format!("; expected start in ~{min} min")
+    format!("; expected start in ~{} min", eta_min(ms))
 }
 
-pub const HELP: &str = "  lease <kind> [--node N|--only N|--needs k=v,..] [--lane L] [--prio P] [--rev <branch>[@sha][,<commercial>[@sha]]]
+fn eta_min(ms: u64) -> u64 {
+    let min = ms.div_ceil(60_000);
+    if min > 10 { min.div_ceil(5) * 5 } else { min }
+}
+
+/// The timed queue per box: what runs timed there, then who waits for it, in order, with their
+/// expected starts (a box's prebuild waited 19 min behind timed leases nobody could see lined up
+/// for its box, 11-03).
+fn timed_boxes(leases: &[Value]) -> Vec<String> {
+    let mut boxes: std::collections::BTreeMap<String, (Vec<String>, Vec<(u64, String)>)> = Default::default();
+    for v in leases.iter().filter(|v| s(v, "kind") == "timed") {
+        let who = format!("{} {}", s(v, "id"), s(v, "lane"));
+        match s(v, "state").as_str() {
+            "queued" => {
+                let at = s(v, "eta_box");
+                let ms = n(v, "eta_ms") as u64;
+                let when = if ms == 0 { "next".to_string() } else { format!("in ~{} min", eta_min(ms)) };
+                boxes.entry(if at.is_empty() { "(no box yet)".into() } else { at }).or_default().1.push((ms, format!("{who} {when}")));
+            }
+            "ended" => {}
+            st => { boxes.entry(s(v, "node")).or_default().0.push(format!("{who} {st} {} s", n(v, "granted_s"))); }
+        }
+    }
+    boxes.into_iter().map(|(name, (running, mut waiting))| {
+        waiting.sort();
+        let waiting: Vec<String> = waiting.into_iter().map(|(_, w)| w).collect();
+        let now = if running.is_empty() { String::new() } else { format!("{}; ", running.join(", ")) };
+        format!("  {name}: {now}{}", if waiting.is_empty() { "none waiting".to_string() } else { format!("then {}", waiting.join(", ")) })
+    }).collect()
+}
+
+pub const HELP: &str = "  lease <kind> [--node N|--needs k=v,..] [--lane L] [--prio P] [--rev <branch>[@sha][,<commercial>[@sha]]]
         [--repo-dir D] [--watch-pid P] [--cost small|medium|large] [--est-min N] [--cores N] [--ram-gb N] [--whole]
-        [--class name] [--priority interactive|background] [--jit key] [--native <reason>] [-- cmd...]
+        [--class name] [--priority interactive|background] [--jit key] [--native <reason>] [--keep <dir>] [-- cmd...]
                                           hold a lease (kinds: build test screen long timed gpu inspect gate ci;
                                           ci: its own tree and target, beside ordinary work, never timed or user boxes;
-                                          --needs gui=1: a test that opens windows, only nodes that take screen leases);
-                                          with a cmd: run it there and exit with its code. --node N: N when it can
-                                          take it, else (after 2 min, or at once when N is held/busy/off) a node of
-                                          the same arch and os (the grant line names it); --only N: N or wait
-                                          (timed, screen, ci and inspect leases always wait for the named node)
+                                          --needs gui=1: a test that opens windows, only nodes that take screen leases;
+                                          gpu=1: a box with a GPU, gpu=<name>: one with that in its name);
+                                          with a cmd: run it there and exit with its code. --node N: N or wait for
+                                          it, never another box (refused, saying why, when N can never take it);
+                                          --keep <dir>: what the cmd put in $DEVHUB_KEEP (a failed step's logs) is
+                                          copied into <dir> before the lease ends
   run <lane> <kind> [--node N|--needs ..] [--with-uncommitted] [--tree]
         [--cost small|medium|large] [--est-min N] [--cores N] [--ram-gb N] [--whole]
         [--class name] [--priority interactive|background] [--jit key] [--native <reason>] -- cmd...
@@ -50,7 +80,9 @@ pub const HELP: &str = "  lease <kind> [--node N|--only N|--needs k=v,..] [--lan
   overlay shadow on|off|status           background tree/overlay comparisons of JIT tests; last 24 h of evidence
   test <lane> <pkg> [--lib|--bin B|--test T|--tests] [--features F] [--needs k=v,..] [--node N] [--cost small|medium|large] [--est-min N] [--class name] [--priority interactive|background] [--jit key] [--native [<reason>]|--live] [--tree] [-- args...]
                                           --live: THE lane check; one warm process per lane, package, target and args,
-                                          small cost on a hot box; overlay by default, --tree opts out; only affected tests rerun.
+                                          small cost on a hot box; overlay by default, --tree opts out; only affected tests rerun,
+                                          a changed file in a package of its graph the tests' program does not read starts
+                                          them again, one in no package keeps the last verdict and says so.
                                           Without --live: one JIT run, the lane's final check; devhub's measured routing may
                                           pick cargo (saying both walls). --native <reason>: cargo test --release (a tree),
                                           only for native-vs-JIT baselines and timed perf series (or an open JIT miss).
@@ -87,12 +119,15 @@ pub const HELP: &str = "  lease <kind> [--node N|--only N|--needs k=v,..] [--lan
   node <n> [role pool|hot|suite|bench|user-wm|device] [set slots.screen=0 disk_floor_gb=40 ...]
                                           the node's role and budgets (its lease.conf, kept on the node)
   disk <node> [--dry-run]                 the node's disk categories and reclaim
+  heap <node>|master [top]                its hub's (or the master's) heap: live, peak and resident
+                                          MB, then the call sites holding the most (sampled), top 12
   desk <node> [on|off]                    the Desk Link endpoint of a JIT host (its own render, app input)
   landed <lane> | clean <lane>            delete the lane's dirs on every node and its merged Mac worktree";
 
 /// Exit code of a `run`/`lease` whose lease the user cancelled (0 ok, 1 failed, 2 usage or denied).
-/// Stderr then says `LEASE CANCELLED by user on <node>: pick another node ...`; a lane's agent
-/// reads that as: choose another node and retry, and not retry on this one unless asked.
+/// Stderr then says `LEASE CANCELLED by user on <node>: pick another node ...` (or `while queued
+/// [for <node>]` when it never got one); a lane's agent reads that as: choose another node and
+/// retry, and not retry on this one unless asked (with no node: not ask again unless asked).
 pub const CANCELLED_EXIT: i32 = 3;
 
 /// Exit code of a `run`/`lease` whose lease was lost under its command (it expired, the master
@@ -111,8 +146,24 @@ fn lost_error(e: &str) -> bool {
     e.contains("no lease ") || e.contains("stayed unreachable")
 }
 
-fn cancelled_notice(id: &str, node: &str) -> String {
-    format!("LEASE CANCELLED by user on {node} ({id}): pick another node (devhub nodes) and retry; don't retry on {node} unless asked. Exit code {CANCELLED_EXIT}.")
+/// Where the user cancelled it: `Ran(node)` once granted there, `Queued(named)` before any grant
+/// (the node the ask named, if it named one).
+enum CancelledAt<'a> {
+    Ran(&'a str),
+    Queued(Option<&'a str>),
+}
+
+fn cancelled_notice(id: &str, at: CancelledAt) -> String {
+    let (at, node) = match at {
+        CancelledAt::Ran(node) => (format!("on {node}"), Some(node)),
+        CancelledAt::Queued(Some(node)) => (format!("while queued for {node}"), Some(node)),
+        CancelledAt::Queued(None) => ("while queued".to_string(), None),
+    };
+    let next = match node {
+        Some(node) => format!("pick another node (devhub nodes) and retry; don't retry on {node} unless asked"),
+        None => "don't ask again unless asked".to_string(),
+    };
+    format!("LEASE CANCELLED by user {at} ({id}): {next}. Exit code {CANCELLED_EXIT}.")
 }
 
 const BEAT: Duration = Duration::from_secs(2);
@@ -249,10 +300,29 @@ fn cwd() -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
+/// The lane's worktree and this shell's place in it (`.` at its top): the makepad worktree, also
+/// from inside its nested commercial checkout, a repo of its own (its top pinned the commercial
+/// HEAD as the makepad commit, and the lease failed on a commit no makepad store has, 11-03).
+fn lane_root() -> Option<(PathBuf, String)> {
+    lane_root_of(&cwd())
+}
+
+fn lane_root_of(dir: &Path) -> Option<(PathBuf, String)> {
+    let top = PathBuf::from(git(dir, &["rev-parse", "--show-toplevel"])?);
+    let prefix = git(dir, &["rev-parse", "--show-prefix"]).unwrap_or_default();
+    let outer = top.parent().and_then(Path::parent).filter(|outer| top.ends_with("apps/commercial") && outer.join(".git").exists());
+    let (root, rel) = match outer {
+        Some(outer) => (outer.to_path_buf(), format!("apps/commercial/{prefix}")),
+        None => (top, prefix),
+    };
+    let rel = rel.trim_end_matches('/');
+    Some((root, if rel.is_empty() { ".".into() } else { rel.to_string() }))
+}
+
 /// `--lane`, else `DEVHUB_LANE`, else the worktree's directory name.
 fn default_lane() -> String {
     std::env::var("DEVHUB_LANE").ok().filter(|l| !l.is_empty()).unwrap_or_else(|| {
-        let top = git(&cwd(), &["rev-parse", "--show-toplevel"]).map(PathBuf::from).unwrap_or_else(cwd);
+        let top = lane_root().map(|(root, _)| root).unwrap_or_else(cwd);
         top.file_name().map(|f| f.to_string_lossy().to_lowercase()).unwrap_or_default()
     })
 }
@@ -264,6 +334,9 @@ fn pid_alive(pid: i32) -> bool {
 struct Opts {
     req: Req,
     watch: Option<i32>,
+    /// `--keep <dir>`: what the command put in the lease's keep dir is copied there before the
+    /// lease ends ([`kept`])
+    keep: Option<PathBuf>,
     cmd: Vec<String>,
     tree: bool,
     /// `--native "<reason>"`: why this command builds natively (lease/native.rs)
@@ -275,12 +348,13 @@ fn parse(kind: &str, lane: Option<&str>, args: &[&str]) -> Result<Opts, String> 
     let kind = Kind::parse(kind).ok_or_else(|| format!("unknown kind `{kind}`"))?;
     let mut req = Req::new(lane.unwrap_or(""), kind);
     let mut watch = None;
+    let mut keep = None;
     let mut tree = false;
     let mut native = String::new();
     let mut i = 0;
     let mut cmd = Vec::new();
     while i < args.len() {
-        let val = |i: usize| args.get(i + 1).copied().ok_or_else(|| format!("{} needs a value", args[i]));
+        let val = |i: usize| args.get(i + 1).copied().filter(|v| !v.starts_with("--")).ok_or_else(|| format!("{} needs a value", args[i]));
         match args[i] {
             "--" => {
                 cmd = args[i + 1..].iter().map(|a| a.to_string()).collect();
@@ -294,10 +368,6 @@ fn parse(kind: &str, lane: Option<&str>, args: &[&str]) -> Result<Opts, String> 
             "--ram-gb" => req.ram_gb = Some(val(i)?.parse::<f64>().ok().filter(|n| n.is_finite() && *n > 0.0).ok_or("--ram-gb is a positive number")?),
             "--class" => req.class = val(i)?.to_string(),
             "--node" => req.node = Some(val(i)?.to_string()),
-            "--only" => {
-                req.node = Some(val(i)?.to_string());
-                req.only = true;
-            }
             "--needs" => req.needs = parse_needs(val(i)?),
             "--lane" => req.lane = val(i)?.to_string(),
             "--priority" => req.priority = Priority::parse(val(i)?).ok_or("--priority is interactive or background")?,
@@ -305,6 +375,7 @@ fn parse(kind: &str, lane: Option<&str>, args: &[&str]) -> Result<Opts, String> 
             "--rev" => req.rev = Some(val(i)?.to_string()),
             "--repo-dir" => req.repo_dir = Some(val(i)?.to_string()),
             "--watch-pid" => watch = Some(val(i)?.parse().map_err(|_| "--watch-pid takes a pid")?),
+            "--keep" => keep = Some(PathBuf::from(val(i)?)),
             "--jit" => req.loader = Some(val(i)?.to_string()),
             "--native" => native = val(i)?.to_string(),
             a => return Err(format!("unknown flag `{a}`")),
@@ -316,7 +387,7 @@ fn parse(kind: &str, lane: Option<&str>, args: &[&str]) -> Result<Opts, String> 
     }
     // the lane's repo: revisions are looked up and recovered work lands there
     if req.repo_dir.is_none() {
-        req.repo_dir = git(&cwd(), &["rev-parse", "--show-toplevel"]);
+        req.repo_dir = lane_root().map(|(root, _)| root.to_string_lossy().into_owned());
     }
     // branch names become commits here, once: what ships is what was ordered, however long the
     // lease queues and whatever other landings do to the branches meanwhile
@@ -324,8 +395,8 @@ fn parse(kind: &str, lane: Option<&str>, args: &[&str]) -> Result<Opts, String> 
         let dir = req.repo_dir.as_deref().ok_or("--rev needs a git repo (--repo-dir)")?;
         req.rev = Some(pin_lane_rev(Path::new(dir), spec, &req.lane)?);
     }
-    if req.class.is_empty() && !cmd.is_empty() { req.class = super::run_class(kind, &cmd); }
-    Ok(Opts { req, watch, cmd, tree, native })
+    if req.class.is_empty() && !cmd.is_empty() { req.class = super::run_class(&req.lane, kind, &cmd); }
+    Ok(Opts { req, watch, keep, cmd, tree, native })
 }
 
 /// A granted lease as the holder knows it.
@@ -340,7 +411,7 @@ struct Held {
 /// The holder's beat: a thread of its own beats the master every [`BEAT`] while the lease is
 /// held, whatever the node calls wait on. Beats in the loop of the node calls stopped for as long
 /// as one call waited: a `lease-log` OPEN a busy node left unanswered for 10 s (the expiry) let
-/// a landing's lease expire (L243081, 11-03). Through master restarts it keeps trying; it stops
+/// a landing's lease expire (11-03). Through master restarts it keeps trying; it stops
 /// once the master says the lease ended ([`Beat::ended`]) or the holder drops it.
 struct Beat {
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -357,6 +428,7 @@ impl Beat {
         let thread = std::thread::Builder::new().name("devhub-beat".into()).spawn(move || {
             let mut client: Option<Client> = None;
             let mut lost = false;
+            let mut told = false;
             loop {
                 let t = Instant::now();
                 while t.elapsed() < BEAT {
@@ -372,8 +444,13 @@ impl Beat {
                         *end.lock().unwrap() = Some((s(&v, "how"), s(&v, "reason")));
                         return;
                     }
-                    Ok(_) => {
+                    Ok(v) => {
                         if std::mem::take(&mut lost) { eprintln!("{id}: the master is back; still held"); }
+                        // the lease runs on: only its owner can tell a wait from a hang
+                        if !told && v.get("idle").is_some() {
+                            told = true;
+                            eprintln!("{}", s(&v, "idle"));
+                        }
                     }
                     // a restarting master keeps its granted leases (leases.live): only "no lease" ends it
                     Err(e) if e.starts_with("no lease") => {
@@ -437,10 +514,17 @@ fn acquire(c: &Client, req: &Req) -> Result<Held, i32> {
         let note = s(&v, "class_note");
         let note = if class_notified || note.is_empty() { String::new() } else { format!("; {note}") };
         let line = match state.as_str() {
+            // not ranked yet (the master just took it back after a restart): no "0th in queue ()"
+            "queued" if n(&v, "pos") < 1.0 => format!("{id} {}: queued, not ranked yet", req.kind.as_str()),
             "queued" => format!("{id} {}: {} in queue ({}){}", req.kind.as_str(), ordinal(n(&v, "pos") as usize), s(&v, "reason"), eta(n(&v, "eta_ms") as u64)),
             "starting" => format!("{id} {}@{}: granted, setting up", req.kind.as_str(), s(&v, "node")),
             "granted" => {
                 if !note.is_empty() { eprintln!("{id} {}@{}: granted{note}", req.kind.as_str(), s(&v, "node")); }
+                let deployment = s(&v, "deployment");
+                if req.kind == Kind::Timed && !deployment.is_empty() {
+                    let short = deployment.split(',').map(|sha| &sha[..sha.len().min(10)]).collect::<Vec<_>>().join(",");
+                    eprintln!("{id} timed@{}: runs on deployment {short}", s(&v, "node"));
+                }
                 let start = v.get("start");
                 let env = match start.and_then(|st| st.get("env")) {
                     Some(Value::Obj(pairs)) => pairs.iter().map(|(k, x)| (k.clone(), x.as_str().unwrap_or("").to_string())).collect(),
@@ -454,7 +538,9 @@ fn acquire(c: &Client, req: &Req) -> Result<Held, i32> {
                 let how = s(&v, "how");
                 let why = s(&v, "reason");
                 if how == "cancelled" {
-                    eprintln!("{}", cancelled_notice(&id, &s(&v, "node")));
+                    let node = s(&v, "node");
+                    let at = if node.is_empty() { CancelledAt::Queued(req.node.as_deref()) } else { CancelledAt::Ran(&node) };
+                    eprintln!("{}", cancelled_notice(&id, at));
                     return Err(CANCELLED_EXIT);
                 }
                 eprintln!("{id} {}: {how}{}", req.kind.as_str(), if why.is_empty() { String::new() } else { format!(": {why}") });
@@ -555,8 +641,8 @@ fn follow_there(c: &Client, held: &Held, run: u64, out: &mut dyn Write) -> Resul
 /// Err(2) when the master refuses the native build.
 fn native_gate(c: &Client, o: &Opts) -> Result<(), i32> {
     if o.cmd.is_empty() { return Ok(()); }
-    let root = o.req.repo_dir.clone().or_else(|| git(&cwd(), &["rev-parse", "--show-toplevel"])).unwrap_or_default();
-    let rel = git(&cwd(), &["rev-parse", "--show-prefix"]).filter(|p| !p.is_empty()).unwrap_or_else(|| ".".into());
+    let (top, rel) = lane_root().unwrap_or_else(|| (PathBuf::new(), ".".into()));
+    let root = o.req.repo_dir.clone().unwrap_or_else(|| top.to_string_lossy().into_owned());
     let j = makepad_remote::json_str;
     let needs = o.req.needs.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(",");
     let body = format!("{{\"lane\":{},\"agent\":{},\"kind\":{},\"cmd\":[{}],\"repo_dir\":{},\"cwd\":{},\"rev\":{},\"reason\":{},\"class\":{},\"needs\":{},\"node\":{}}}",
@@ -604,6 +690,10 @@ fn lease(args: &[&str]) -> i32 {
             eprintln!("{}: runs in lane {}'s dir on {} as earlier ships left it (a lease ships nothing; `devhub run {} {} [--with-uncommitted] -- ..` ships this worktree)", held.id, o.req.lane, held.node, o.req.lane, o.req.kind.as_str());
         }
         let r = run_there(&c, &held, ".", &o.cmd);
+        // a failed step's logs, before the lease's end takes its tmp
+        if let (Ok(_), Some(dst)) = (&r, &o.keep) {
+            if let Some(line) = kept_line(&held.id, dst, &kept(&c, &held.node, &o.req.lane, &held.id, dst)) { eprintln!("{line}"); }
+        }
         return finish(&c, &held, r);
     }
     println!("{} granted {}@{} work={}", held.id, o.req.kind.as_str(), held.node, held.work);
@@ -622,7 +712,7 @@ fn lease(args: &[&str]) -> i32 {
         }
         match held.beat.ended() {
             Some((how, _)) if how == "cancelled" => {
-                eprintln!("{}", cancelled_notice(&held.id, &held.node));
+                eprintln!("{}", cancelled_notice(&held.id, CancelledAt::Ran(&held.node)));
                 return CANCELLED_EXIT;
             }
             Some((how, why)) if how == "lost" && why.starts_with("no lease") => return fail(format!("beat {}: {why}", held.id)),
@@ -636,11 +726,16 @@ fn lease(args: &[&str]) -> i32 {
 }
 
 fn finish(c: &Client, held: &Held, r: Result<i32, String>) -> i32 {
-    let ended = one(c, "beat", &held.id).ok().filter(|v| s(v, "state") == "ended").map(|v| s(&v, "how"));
+    let end = one(c, "beat", &held.id).ok().filter(|v| s(v, "state") == "ended");
+    let ended = end.as_ref().map(|v| s(v, "how"));
     // the user cancelled it: its processes were stopped, so the run's own result is just the fallout
     if ended.as_deref() == Some("cancelled") {
-        eprintln!("{}", cancelled_notice(&held.id, &held.node));
+        eprintln!("{}", cancelled_notice(&held.id, CancelledAt::Ran(&held.node)));
         return CANCELLED_EXIT;
+    }
+    // a verdict on the command, not a lost box: run again, it hangs again
+    if let Some(how) = ended.as_deref().filter(|h| matches!(*h, "hung" | "disk")) {
+        return fail(format!("{} on {} ended ({how}): {}", held.id, held.node, end.as_ref().map_or(String::new(), |v| s(v, "reason"))));
     }
     let (exit, code) = match r {
         Ok(code) => (Some(code), code),
@@ -662,7 +757,7 @@ fn finish(c: &Client, held: &Held, r: Result<i32, String>) -> i32 {
     code
 }
 
-/// `L3 screen@100 (lane x) released; 100 cleaned up: 2 processes stopped, 120 MB freed`.
+/// `L3 screen@node-a (lane x) released; node-a cleaned up: 2 processes stopped, 120 MB freed`.
 fn released_line(v: &Value) -> String {
     let node = s(v, "node");
     let at = if node.is_empty() { String::new() } else { format!("@{node}") };
@@ -678,7 +773,11 @@ fn released_line(v: &Value) -> String {
         "ok" => format!("{head}; {} cleaned up: {} stopped, {} MB freed{}", s(c, "node"), super::master::plural(n(c, "stopped") as usize, "process", "processes"), n(c, "freed_mb"), if n(c, "leak") > 0.0 { format!(", {} LEFT (see the inbox)", super::master::plural(n(c, "leak") as usize, "process", "processes")) } else { String::new() }),
         other => format!("{head}; {other}"),
     };
-    format!("{line}{ended}")
+    // a timed run: what shared its box
+    let quiet = c.get("box").filter(|b| b.get("samples").is_some()).map_or(String::new(), |b| format!("\nbox {}: {}", s(c, "node"), super::master::box_line(b)));
+    let failed = super::master::strs(c.get("failed_tests"));
+    let failed = if failed.is_empty() { String::new() } else { format!("\nfailed tests: {}; their output: `devhub job result {} --tail`", failed.join(", "), s(v, "id")) };
+    format!("{line}{ended}{quiet}{failed}")
 }
 
 fn shell_quote(v: &str) -> String {
@@ -752,14 +851,15 @@ fn ship(c: &Client, root: &Path, held: &Held, pin: &super::Pin, uncommitted: boo
     entries.sort_by(|a, b| a.path.cmp(&b.path));
     entries.dedup_by(|a, b| a.path == b.path);
     let t = Instant::now();
-    let sent = if entries.is_empty() { Ok(super::ship::Shipped::default()) } else { super::ship::send(c, &held.node, &held.id, root, &entries) };
+    let sent = if entries.is_empty() { Ok(super::ship::Shipped::default()) } else { super::ship::send(c, &held.node, &held.id, root, &entries, false) };
     let sent = sent?;
     let paths: Vec<String> = entries.iter().map(|e| e.path.clone()).collect();
     let list = |v: &[String]| v.iter().map(|p| makepad_remote::json_str(p)).collect::<Vec<_>>().join(",");
     let bases = super::ship::bases_json(root, pin, &paths.iter().chain(&deleted).cloned().collect::<Vec<_>>())?;
     let body = format!("{{\"shipped\":[{}],\"deleted\":[{}],\"bases\":{bases}}}", list(&paths), list(&deleted));
-    node_one(c, &held.node, "ship-done", &format!("ship-done {} {}", held.id, makepad_network::digest::base64_encode(body.as_bytes())))?;
-    eprintln!("{} {}: sources at the worktree's HEAD; shipped {} changed file(s) ({} KB, {} sent) and {} deletion(s) on top in {:.1} s", held.id, held.node, paths.len(), sent.bytes >> 10, sent.sent, deleted.len(), t.elapsed().as_secs_f64());
+    let done = node_one(c, &held.node, "ship-done", &format!("ship-done {} {}", held.id, makepad_network::digest::base64_encode(body.as_bytes())))?;
+    let source = done.get("source").and_then(|s| s.as_str()).unwrap_or("").to_string();
+    eprintln!("{} {}: sources at the worktree's HEAD, source {source}; shipped {} changed file(s) ({} KB, {} sent) and {} deletion(s) on top in {:.1} s", held.id, held.node, paths.len(), sent.bytes >> 10, sent.sent, deleted.len(), t.elapsed().as_secs_f64());
     Ok(())
 }
 
@@ -792,11 +892,10 @@ fn run_worktree(mut o: Opts, uncommitted: bool, test: Option<&str>) -> i32 {
 fn run_worktree_into(o: &mut Opts, uncommitted: bool, test: Option<&str>, out: &mut dyn Write) -> (i32, bool) {
     let t = Instant::now();
     let word = if test.is_some() { "test" } else { "run" };
-    let Some(root) = git(&cwd(), &["rev-parse", "--show-toplevel"]).map(PathBuf::from) else {
+    let Some((root, rel)) = lane_root() else {
         eprintln!("makepad devhub {word}: run it from inside the lane's worktree");
         return (2, false);
     };
-    let rel = git(&cwd(), &["rev-parse", "--show-prefix"]).filter(|p| !p.is_empty()).unwrap_or_else(|| ".".into());
     match o.req.rev.clone().map_or_else(|| head_rev(&root, &o.req.lane), Ok) {
         Ok(rev) => {
             o.req.rev = Some(rev);
@@ -825,19 +924,41 @@ fn run_worktree_into(o: &mut Opts, uncommitted: bool, test: Option<&str>, out: &
     let shipped = through_restarts(&held.id, &mut c.clone(), |c| ship(c, &root, &held, &pin, uncommitted), &master);
     let ship = shipping.elapsed();
     let running = Instant::now();
-    let r = shipped.and_then(|_| run_there_into(&c, &held, rel.trim_end_matches('/'), &o.cmd, out));
+    let mut tally = crate::testlog::Tally::default();
+    let r = shipped.and_then(|_| run_there_into(&c, &held, rel.trim_end_matches('/'), &o.cmd, &mut Tee { out: &mut *out, tally: &mut tally }));
     let run = running.elapsed();
     let completed = r.is_ok();
-    let code = finish(&c, &held, r);
+    let mut code = finish(&c, &held, r);
     if let Some(pkg) = test {
-        let verdict = match code { 0 => "passed", CANCELLED_EXIT => "cancelled", LOST_EXIT => "had no verdict (its lease was lost)", _ => "failed" };
+        // a test run that executed no test is no pass
+        let none = if code == 0 { tally.no_pass(&o.cmd) } else { None };
+        if none.is_some() { code = 1; }
+        let verdict = match (code, &none) { (0, _) => "passed".into(), (CANCELLED_EXIT, _) => "cancelled".into(), (LOST_EXIT, _) => "had no verdict (its lease was lost)".into(), (_, Some(why)) => format!("failed: {why}"), _ => "failed".to_string() };
         let _ = writeln!(out, "devhub test: {pkg} {verdict} in {:.3}s (queue {:.3}s, ship {:.3}s, run {:.3}s) on {}", t.elapsed().as_secs_f64(), queue.as_secs_f64(), ship.as_secs_f64(), run.as_secs_f64(), held.node);
     }
     (code, completed)
 }
 
+/// The run's output on its way out, tallied for its tests.
+struct Tee<'a> {
+    out: &'a mut dyn Write,
+    tally: &'a mut crate::testlog::Tally,
+}
+
+impl Write for Tee<'_> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let n = self.out.write(bytes)?;
+        self.tally.feed(&bytes[..n]);
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.out.flush()
+    }
+}
+
 fn test_miss(o: &Opts, pkg: &str, args: &[String], verb: &str, errors: &[String]) -> Result<Value, String> {
-    let repo = o.req.repo_dir.clone().or_else(|| git(&cwd(), &["rev-parse", "--show-toplevel"])).unwrap_or_default();
+    let repo = o.req.repo_dir.clone().or_else(|| lane_root().map(|(root, _)| root.to_string_lossy().into_owned())).unwrap_or_default();
     let req = format!("{{\"pkg\":{},\"target\":{},\"lane\":{},\"rev\":{},\"repo\":{},\"error\":[{}]}}", makepad_remote::json_str(pkg), makepad_remote::json_str(&crate::jit_misses::target(args)), makepad_remote::json_str(&o.req.lane), makepad_remote::json_str(o.req.rev.as_deref().unwrap_or("")), makepad_remote::json_str(&repo), errors.iter().take(5).map(|e| makepad_remote::json_str(e)).collect::<Vec<_>>().join(","));
     retry_master(|| master().and_then(|c| one(&c, "jit", &format!("jit misses {verb} {req}"))))
 }
@@ -874,10 +995,11 @@ fn cargo_test(mut o: Opts, pkg: &str, args: &[String], errors: &[String], known:
     let _ = std::io::stdout().flush();
     o.cmd = ["cargo", "test", "--release", "--message-format=json-render-diagnostics", "-p", pkg].iter().map(|s| s.to_string()).chain(args.iter().cloned()).collect();
     o.tree = true;
-    o.req.needs.retain(|(k, _)| k != "role");
-    o.req.needs.push(("role".into(), "pool".into()));
-    o.req.node = None;
-    o.req.only = false;
+    // a named box stays the box (its cargo run is the one asked for); else a pool box
+    if o.req.node.is_none() {
+        o.req.needs.retain(|(k, _)| k != "role");
+        o.req.needs.push(("role".into(), "pool".into()));
+    }
     o.req.loader = None;
     o.req.class = format!("native:{}", o.req.class);
     o.req.cost = CostClass::Medium;
@@ -1021,7 +1143,7 @@ fn test(lane: &str, pkg: &str, rest: &[&str]) -> i32 {
         if !native && !live {
             let own = crate::jit_misses::jit_own(&root, &crate::state::Pair::new(&pin.makepad, pin.commercial.as_deref().unwrap_or("")), pkg)?;
             let cargo_class = format!("native:{}", o.req.class);
-            let v = retry_master(|| master().and_then(|c| one(&c, "stats", &format!("stats class {} {} {cargo_class}", o.req.kind.as_str(), o.req.class))))?;
+            let v = retry_master(|| master().and_then(|c| one(&c, "stats", &format!("stats class {} {}\t{cargo_class}", o.req.kind.as_str(), o.req.class))))?;
             let runs = v.get("runs");
             let (use_jit, reason) = test_route(own, runs.and_then(|r| r.get(&o.req.class)).and_then(Value::as_u64), runs.and_then(|r| r.get(&cargo_class)).and_then(Value::as_u64));
             eprintln!("devhub test: {}: {reason}", o.req.class);
@@ -1081,8 +1203,8 @@ fn test(lane: &str, pkg: &str, rest: &[&str]) -> i32 {
 fn shadow_test(c: &Client, o: &mut Opts, pkg: &str, output: &mut Vec<u8>) -> (i32, bool) {
     let mut run = || -> Result<(i32, bool), String> {
         use makepad_remote::json_str;
-        let root = git(&cwd(), &["rev-parse", "--show-toplevel"]).ok_or("test: run inside the lane's worktree")?;
-        let rel = git(&cwd(), &["rev-parse", "--show-prefix"]).filter(|p| !p.is_empty()).unwrap_or_else(|| ".".into());
+        let (root, rel) = lane_root().ok_or("test: run inside the lane's worktree")?;
+        let root = root.to_string_lossy().into_owned();
         let optional = |n: Option<f64>| n.map_or("null".into(), |n| n.to_string());
         let body = format!("{{\"tree\":{},\"also\":[{}],\"jobs\":[{{\"kind\":\"test\",\"holder\":{},\"lane\":{},\"agent\":{},\"cmd\":[{}],\"cwd\":{},\"shadow\":true,\"tree\":{},\"cost\":{},\"est_min\":{},\"cores\":{},\"ram_gb\":{},\"whole\":{},\"class\":{},\"priority\":{},\"loader\":{},\"needs\":{},\"node\":{},\"prio\":{}}}]}}",
             json_str(&root), std::env::var("DEVHUB_ALSO").unwrap_or_default().split_whitespace().map(json_str).collect::<Vec<_>>().join(","), std::process::id(), json_str(&o.req.lane), json_str(o.req.agent.as_deref().unwrap_or("devhub-test")), o.cmd.iter().map(|s| json_str(s)).collect::<Vec<_>>().join(","), json_str(rel.trim_end_matches('/')),
@@ -1106,8 +1228,10 @@ fn shadow_test(c: &Client, o: &mut Opts, pkg: &str, output: &mut Vec<u8>) -> (i3
             output.extend_from_slice(&bytes);
             off = v.get("off").and_then(Value::as_u64).ok_or("test: missing output offset")?;
             if bytes.is_empty() && j.done() {
-                let code = if j.state == "cancelled" { CANCELLED_EXIT } else { j.exit.unwrap_or(1) };
+                // the job's state is the verdict (one that ran no test failed with exit 0)
+                let code = match j.state.as_str() { "cancelled" => CANCELLED_EXIT, "ok" => 0, _ => j.exit.filter(|e| *e != 0).unwrap_or(1) };
                 if j.exit.is_none() && !j.note.is_empty() { eprintln!("test: {}", j.note); }
+                if code != 0 && j.exit == Some(0) { if let Some(why) = j.errors.first() { eprintln!("test: {why}"); } }
                 let seconds = |a: u64, b: u64| b.saturating_sub(a) as f64 / 1000.0;
                 let _ = writeln!(output, "devhub test: {pkg} {} in {:.3}s (queue {:.3}s, ship {:.3}s, run {:.3}s) on {}", if code == 0 { "passed" } else if code == CANCELLED_EXIT { "cancelled" } else { "failed" }, seconds(j.submitted_ms, j.ended_ms), seconds(j.submitted_ms, j.granted_ms), seconds(j.granted_ms, j.shipped_ms), seconds(j.shipped_ms, j.ended_ms), j.node);
                 o.req.rev = Some(j.rev.clone());
@@ -1145,7 +1269,7 @@ fn live_test(mut o: Opts, pkg: &str, args: &[String]) -> i32 {
     let started = Instant::now();
     let mut said = false;
     let result = (|| -> Result<crate::state::Live, String> {
-        let root = git(&cwd(), &["rev-parse", "--show-toplevel"]).map(PathBuf::from).ok_or("test --live: run it inside the lane's worktree")?;
+        let (root, _) = lane_root().ok_or("test --live: run it inside the lane's worktree")?;
         let c = retry_master(master)?;
         let loader = o.req.loader.clone().unwrap_or_default();
         let needs = o.req.needs.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(",");
@@ -1272,6 +1396,32 @@ fn lane_node(c: &Client, lane: &str, lease: Option<&str>) -> Result<String, Stri
 /// Copies `rel` (a file or folder) from the lane's dir on `node`, or from live lease `lease`'s
 /// (`-`: none), into `dst`: the files written and their sizes.
 pub(crate) fn fetch(c: &Client, node: &str, lane: &str, lease: &str, rel: &str, dst: &Path) -> Result<Vec<(PathBuf, u64)>, String> {
+    let files = fetch_under(c, node, lane, lease, rel, dst, false)?;
+    if files.is_empty() {
+        return Err(format!("{node}: nothing under {rel} for lane {lane}"));
+    }
+    Ok(files)
+}
+
+/// What a run of live lease `lease` put in its keep dir (`DEVHUB_KEEP`: a failed step's logs,
+/// tools/run/fixture/keep_logs.sh), copied into `dst` before the lease ends and its scratch goes:
+/// the files and their sizes, none when it kept nothing.
+pub(crate) fn kept(c: &Client, node: &str, lane: &str, lease: &str, dst: &Path) -> Result<Vec<(PathBuf, u64)>, String> {
+    fetch_under(c, node, lane, lease, &format!("tmp/{}", super::KEEP_DIR), dst, true)
+}
+
+/// A line for a holder's log: what [`kept`] copied, or why it could not (nothing when nothing was kept).
+pub(crate) fn kept_line(id: &str, dst: &Path, r: &Result<Vec<(PathBuf, u64)>, String>) -> Option<String> {
+    match r {
+        Ok(files) if files.is_empty() => None,
+        Ok(files) => Some(format!("{id}: kept {} ({:.1} MB) of its failed steps' logs in {}", super::master::plural(files.len(), "file", "files"), files.iter().map(|(_, n)| n).sum::<u64>() as f64 / 1048576.0, dst.display())),
+        Err(e) => Some(format!("{id}: its failed steps' logs could not be kept: {e}")),
+    }
+}
+
+/// [`fetch`]'s copy, none an empty list; `inside`: `rel`'s own folder is left out of the paths
+/// written under `dst`.
+fn fetch_under(c: &Client, node: &str, lane: &str, lease: &str, rel: &str, dst: &Path, inside: bool) -> Result<Vec<(PathBuf, u64)>, String> {
     let list = ask(c, Some(node), "get-ls", &format!("get-ls {lane} {lease} {rel}")).map_err(|e| format!("{node}: {e}"))?;
     let mut files = Vec::new();
     for l in list {
@@ -1280,6 +1430,7 @@ pub(crate) fn fetch(c: &Client, node: &str, lane: &str, lease: &str, rel: &str, 
             return Err(format!("{node}: {e}"));
         }
         let (p, r) = (s(&v, "p"), s(&v, "r"));
+        let p = if inside { p.split_once('/').map_or(p.clone(), |(_, under)| under.to_string()) } else { p };
         let out = dst.join(&p);
         if Path::new(&p).components().any(|c| !matches!(c, std::path::Component::Normal(_))) {
             return Err(format!("{node}: bad path {p}"));
@@ -1298,9 +1449,6 @@ pub(crate) fn fetch(c: &Client, node: &str, lane: &str, lease: &str, rel: &str, 
         }
         std::fs::write(&out, &data).map_err(|e| format!("{}: {e}", out.display()))?;
         files.push((out, data.len() as u64));
-    }
-    if files.is_empty() {
-        return Err(format!("{node}: nothing under {rel} for lane {lane}"));
     }
     Ok(files)
 }
@@ -1350,20 +1498,23 @@ fn queue(c: &Client, all: bool) -> i32 {
     if lines.is_empty() {
         println!("no leases");
     }
-    for l in lines {
-        let Some(v) = json(&l) else { continue };
+    let leases: Vec<Value> = lines.iter().filter_map(|l| json(l)).collect();
+    for v in &leases {
+        let v = v.clone();
         let node = s(&v, "node");
         let at = if node.is_empty() { String::new() } else { format!("@{node}") };
         let tail = match s(&v, "state").as_str() {
+            "queued" if n(&v, "pos") < 1.0 => format!("queued, not ranked yet, waiting {} s", n(&v, "wait_s")),
             "queued" => format!("{} in queue ({}) waiting {} s{}", ordinal(n(&v, "pos") as usize), s(&v, "reason"), n(&v, "wait_s"), eta(n(&v, "eta_ms") as u64)),
             "ended" => format!("ended ({}){}", s(&v, "how"), if s(&v, "reason").is_empty() { String::new() } else { format!(": {}", s(&v, "reason")) }),
             st => {
                 let info = v.get("info").filter(|i| !i.is_null());
                 let run = info.map(|i| s(i, "running")).filter(|r| !r.is_empty()).map_or(String::new(), |r| format!(" running `{r}`"));
+                let ram = info.and_then(|i| i.get("held_mb")).and_then(super::num).map_or(String::new(), |m| format!(" ram {:.1} GB", m / 1024.0));
                 let disk = info.and_then(|i| i.get("disk_mb")).and_then(super::num).map_or(String::new(), |m| format!(" disk {:.1} GB", m / 1024.0));
                 let agent = s(&v, "agent");
                 format!(
-                    "{st} {}s ago, beat {}s ago{}{run}{disk}{}",
+                    "{st} {}s ago, beat {}s ago{}{run}{ram}{disk}{}",
                     n(&v, "granted_s"),
                     n(&v, "beat_s"),
                     if agent.is_empty() { String::new() } else { format!(" agent {agent}") },
@@ -1375,6 +1526,11 @@ fn queue(c: &Client, all: bool) -> i32 {
         let loader = s(&v, "loader");
         let target = if loader.is_empty() { jit } else { loader };
         println!("{:<6} {:<8} {:<10} {} {} ({}) {} {}{}: {tail}", s(&v, "id"), s(&v, "lane"), format!("{}{at}", s(&v, "kind")), s(&v, "priority"), s(&v, "cost"), s(&v, "cost_source"), s(&v, "src"), if target.is_empty() { "" } else { "jit " }, target);
+    }
+    let timed = timed_boxes(&leases);
+    if !timed.is_empty() {
+        println!("timed queue per box:");
+        for line in timed { println!("{line}"); }
     }
     0
 }
@@ -1496,6 +1652,21 @@ fn disk(c: &Client, node: &str, dry: bool) -> i32 {
     }
 }
 
+fn heap(c: &Client, node: &str, top: &str) -> i32 {
+    // the master's own heap: its control socket, no node
+    match ask(c, Some(node).filter(|n| *n != "master"), "heap", &format!("heap {top}")) {
+        Ok(lines) => {
+            let mut code = 0;
+            for l in lines {
+                code |= l.starts_with("{\"err\":") as i32;
+                println!("{l}");
+            }
+            code
+        }
+        Err(e) => fail(e),
+    }
+}
+
 /// `landed <lane>`: the lane's dirs on every node (`disk clean <lane>`), then its Mac worktree
 /// and branch when the branch is merged into `work`.
 fn landed(c: &Client, lane: &str) -> i32 {
@@ -1597,7 +1768,7 @@ pub fn cli(args: &[&str]) -> Option<i32> {
         }
         return inspect(args.get(1)?, &args[2..]);
     }
-    if !matches!(word, "prof" | "stats" | "jit" | "overlay" | "lease" | "run" | "test" | "get" | "release" | "cancel" | "queue" | "leases" | "why-queued" | "nodes" | "node" | "disk" | "desk" | "landed" | "clean" | "evict" | "unblock" | "override" | "blocked") {
+    if !matches!(word, "prof" | "stats" | "jit" | "overlay" | "lease" | "run" | "test" | "get" | "release" | "cancel" | "queue" | "leases" | "why-queued" | "nodes" | "node" | "disk" | "heap" | "desk" | "landed" | "clean" | "evict" | "unblock" | "override" | "blocked") {
         return None;
     }
     if matches!(args, ["run", _, _, ..] | ["test", _, _, ..]) {
@@ -1744,6 +1915,7 @@ pub fn cli(args: &[&str]) -> Option<i32> {
         ["node", node, "role", role] => node_conf(&c, node, &format!("set role={role}")),
         ["node", node, "set", kvs @ ..] if !kvs.is_empty() => node_conf(&c, node, &format!("set {}", kvs.join(" "))),
         ["disk", node, rest @ ..] => disk(&c, node, rest.contains(&"--dry-run")),
+        ["heap", node, rest @ ..] => heap(&c, node, rest.first().copied().unwrap_or("12")),
         ["desk", node, rest @ ..] => match rest {
             [] | ["state"] => desk(&c, node, "state"),
             [v @ ("on" | "off")] => desk(&c, node, v),
@@ -1814,12 +1986,56 @@ mod restart_tests {
         let r: Result<(), String> = through_restarts("L1", &mut c, |_| Err("no lease L1".into()), &up);
         assert_eq!(r, Err("no lease L1".to_string()));
         // a live master's other error stands at once when there was no outage
-        let r: Result<(), String> = through_restarts("L1", &mut c, |_| Err("103: lease-log: bad".into()), &up);
+        let r: Result<(), String> = through_restarts("L1", &mut c, |_| Err("node-a: lease-log: bad".into()), &up);
         assert!(r.is_err());
         // the lease's end (its beat heard it) stands at once, even while its node does not answer
         let mut n = 0;
-        let r: Result<(), String> = through_restarts("L1", &mut c, |_| { n += 1; Err(if n == 1 { "103: link lost: no answer to OPEN" } else { "L1 ended (expired)" }.into()) }, &up);
+        let r: Result<(), String> = through_restarts("L1", &mut c, |_| { n += 1; Err(if n == 1 { "node-a: link lost: no answer to OPEN" } else { "L1 ended (expired)" }.into()) }, &up);
         assert_eq!((r, n), (Err("L1 ended (expired)".to_string()), 2));
-        assert!(lost_how("expired") && lost_how("lost") && !lost_how("cancelled") && lost_error("103: no lease L1 on a node") && !lost_error("103: lease-log: bad"));
+        assert!(lost_how("expired") && lost_how("lost") && !lost_how("cancelled") && lost_error("node-a: no lease L1 on a node") && !lost_error("node-a: lease-log: bad"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_cancel_names_its_node_or_says_it_was_still_queued() {
+        assert_eq!(cancelled_notice("L7", CancelledAt::Ran("a")), "LEASE CANCELLED by user on a (L7): pick another node (devhub nodes) and retry; don't retry on a unless asked. Exit code 3.");
+        assert_eq!(cancelled_notice("L7", CancelledAt::Queued(Some("a"))), "LEASE CANCELLED by user while queued for a (L7): pick another node (devhub nodes) and retry; don't retry on a unless asked. Exit code 3.");
+        assert_eq!(cancelled_notice("L7", CancelledAt::Queued(None)), "LEASE CANCELLED by user while queued (L7): don't ask again unless asked. Exit code 3.");
+    }
+
+    #[test]
+    fn the_timed_queue_reads_per_box_in_expected_order() {
+        let leases: Vec<Value> = [
+            r#"{"id":"L1","lane":"one","kind":"timed","state":"running","node":"a","granted_s":40}"#,
+            r#"{"id":"L3","lane":"three","kind":"timed","state":"queued","eta_box":"a","eta_ms":900000}"#,
+            r#"{"id":"L2","lane":"two","kind":"timed","state":"queued","eta_box":"a","eta_ms":120000}"#,
+            r#"{"id":"L4","lane":"four","kind":"timed","state":"queued","eta_box":null,"eta_ms":0}"#,
+            r#"{"id":"L5","lane":"five","kind":"test","state":"queued","eta_box":null,"eta_ms":0}"#,
+        ].iter().filter_map(|l| json(l)).collect();
+        assert_eq!(timed_boxes(&leases), [
+            "  (no box yet): then L4 four next",
+            "  a: L1 one running 40 s; then L2 two in ~2 min, L3 three in ~15 min",
+        ]);
+    }
+
+    #[test]
+    fn a_lane_is_its_makepad_worktree_also_from_inside_its_commercial_checkout() {
+        let d = std::env::temp_dir().join(format!("devhub-laneroot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let inner = d.join("lane/apps/commercial/foo/app");
+        std::fs::create_dir_all(&inner).unwrap();
+        for repo in [d.join("lane"), d.join("lane/apps/commercial")] {
+            assert!(git(&repo, &["init", "-q"]).is_some(), "git init {}", repo.display());
+        }
+        // as git spells it (forward slashes on Windows, where canonicalize says `\\?\`)
+        let lane = PathBuf::from(git(&d.join("lane"), &["rev-parse", "--show-toplevel"]).unwrap());
+        assert_eq!(lane_root_of(&inner), Some((lane.clone(), "apps/commercial/foo/app".to_string())));
+        assert_eq!(lane_root_of(&d.join("lane/apps/commercial")), Some((lane.clone(), "apps/commercial".to_string())));
+        assert_eq!(lane_root_of(&d.join("lane/apps")), Some((lane, "apps".to_string())));
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

@@ -79,7 +79,8 @@ pub(crate) fn compile_errors(log: &str) -> Vec<String> {
         }
         if summary_line(line) || line.starts_with("error: aborting") {
             summary.push(line.to_string());
-        } else if line.starts_with("error: test failed") || line.contains("panicked at") || line.contains("internal compiler error") || line.contains("makepad run bug") || line.contains("jit panic") || line.contains("jit ice")
+        // a filter that matched no test: the run's verdict, not a build's (makepad test)
+        } else if line.starts_with("error: test failed") || line.starts_with("error: no test matched") || line.contains("panicked at") || line.contains("internal compiler error") || line.contains("makepad run bug") || line.contains("jit panic") || line.contains("jit ice")
             || line.ends_with("restart the app") // A live restart notice, not a build error.
         {
             continue;
@@ -177,6 +178,16 @@ pub(crate) fn jit_own(repo: &Path, pair: &crate::state::Pair, pkg: &str) -> Resu
         let _ = (repo, pair, pkg);
         Ok(false)
     }
+}
+
+/// The packages the JIT binary is built from.
+#[cfg(feature = "checkout")]
+pub(crate) fn jit_binary_packages(repo: &Path, pair: &crate::state::Pair) -> Result<std::collections::BTreeSet<String>, String> {
+    use crate::orch::ci::{jit_binary_dirs, package_dirs, Tree};
+    let repo = if repo.as_os_str().is_empty() { crate::orch::repo() } else { repo.to_path_buf() };
+    let tree = Tree::at(&repo, pair)?;
+    let dirs = jit_binary_dirs(&tree);
+    Ok(package_dirs(&tree).into_iter().filter(|(_, dir)| dirs.contains(dir)).map(|(pkg, _)| pkg).collect())
 }
 
 /// The old CI refusal seeds a miss once. A closed row overrides the stale mark, allowing the
@@ -377,12 +388,12 @@ mod tests {
     fn a_miss_filed_by_hand_is_listed_and_counted() {
         let home = std::env::temp_dir().join(format!("devhub-miss-add-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
-        let add = r#"misses add {"pkg":"makepad-fab","error":"src/a.rs:3:1: unsupported intrinsic\nmore","repro":"devhub test x makepad-fab --lib","lane":"wp"}"#;
+        let add = r#"misses add {"pkg":"makepad-foo","error":"src/a.rs:3:1: unsupported intrinsic\nmore","repro":"devhub test x makepad-foo --lib","lane":"wp"}"#;
         let first = serve(&home, add, 1, &|_, _| {}).unwrap();
         assert!(first.contains("\"id\":\"M1\"") && first.contains("\"target\":\"manual\""), "{first}");
         assert!(serve(&home, add, 2, &|_, _| {}).unwrap().contains("\"count\":2"));
         let list = serve(&home, "misses", 3, &|_, _| {}).unwrap();
-        assert!(list.contains("M1 open makepad-fab manual (2 times, lane wp") && list.contains("unsupported intrinsic (repro: devhub test x makepad-fab --lib)"), "{list}");
+        assert!(list.contains("M1 open makepad-foo manual (2 times, lane wp") && list.contains("unsupported intrinsic (repro: devhub test x makepad-foo --lib)"), "{list}");
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -412,6 +423,8 @@ test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; 
 makepad-run: main panic report: {"kind":"panic","location":"/tree/src/main.rs:3:5"}
 "#;
         assert!(compile_errors(log).is_empty(), "{:?}", compile_errors(log));
+        let none = "running 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.01s\n\nerror: no test matched no_such_test\n";
+        assert!(compile_errors(none).is_empty(), "{:?}", compile_errors(none));
     }
 
     #[test]

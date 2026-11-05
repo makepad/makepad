@@ -9,7 +9,9 @@
 //! - `--native "<reason>"`: native-vs-JIT baselines and timed perf series.
 //!
 //! Every verdict but the JIT's own crates is a line of `native.jsonl` (what `devhub prof` counts
-//! per lane). CI, gates, inspect leases and devhub's own lanes (landings, buckets, prebuilds, legs,
+//! per lane; `not_over` says why a lane's choice is no sign it passes the JIT by: it builds crates
+//! of the JIT binary, which only a rebuild of that binary tries, or it is a baseline, a timed
+//! series or a command that runs the JIT beside its native build). CI, gates, inspect leases and devhub's own lanes (landings, buckets, prebuilds, legs,
 //! shows, live sessions) keep their own rules.
 
 use super::sched::NodeView;
@@ -61,11 +63,28 @@ pub struct Built {
 /// What `cmd` builds with cargo: each `cargo build|run|test|bench` (never check, clippy or doc)
 /// in its words, a `-c` text, or a `.sh`/`.py` script it names, read with `script` (one level).
 pub fn builds(cmd: &[String], script: &dyn Fn(&str) -> Option<String>) -> Vec<Built> {
+    built_in(&words(&command_text(cmd, script)))
+}
+
+/// A command's text with the `.sh`/`.py` scripts it names (one level).
+fn command_text(cmd: &[String], script: &dyn Fn(&str) -> Option<String>) -> String {
     let mut text = cmd.join(" ");
     for w in cmd.iter().filter(|w| w.ends_with(".sh") || w.ends_with(".py")) {
         if let Some(t) = script(w) { text.push('\n'); text.push_str(&t); }
     }
-    let w = words(&text);
+    text
+}
+
+/// The command also runs something under the JIT: `makepad test|run`, by any path, or its cargo
+/// form.
+fn runs_jit(w: &[String]) -> bool {
+    w.windows(2).any(|p| {
+        let binary = p[0].rsplit(['/', '\\']).next().is_some_and(|b| b == "makepad" || b == "makepad.exe");
+        (binary && matches!(p[1].as_str(), "test" | "run")) || (p[0] == "-p" && p[1] == "makepad-run")
+    })
+}
+
+fn built_in(w: &[String]) -> Vec<Built> {
     let mut out: Vec<Built> = Vec::new();
     let mut i = 0;
     while i < w.len() {
@@ -210,12 +229,14 @@ pub fn check(home: &Path, a: &Ask, now: u64) -> Result<String, String> {
         if p.is_absolute() || p.components().any(|c| matches!(c, std::path::Component::ParentDir)) { return None; }
         std::fs::read_to_string(dir.join(p)).ok()
     };
-    let mut built = builds(a.cmd, &read);
+    let words = words(&command_text(a.cmd, &read));
+    let mut built = built_in(&words);
     if built.is_empty() { return Ok(String::new()); }
     if let Some(here) = package_at(&dir) {
         for b in built.iter_mut().filter(|b| b.pkg == "*") { b.pkg = here.clone(); }
     }
     let on_jit = |b: &Built| if b.target.is_empty() { jit_runs(a.os, a.arch) } else { let (os, arch) = target_platform(&b.target); jit_runs(&os, &arch) };
+    let mut not_over = if a.kind == Kind::Timed || runs_jit(&words) { "baseline" } else { "" };
     if built.iter().any(on_jit) {
         let pair = pair_of(a.repo_dir, a.rev)?;
         let mut own = BTreeSet::new();
@@ -224,14 +245,18 @@ pub fn check(home: &Path, a: &Ask, now: u64) -> Result<String, String> {
         }
         built.retain(|b| !(on_jit(b) && own.contains(&b.pkg)));
         if built.is_empty() { return Ok(String::new()); }
+        if not_over.is_empty() {
+            let binary = crate::jit_misses::jit_binary_packages(a.repo_dir, &pair)?;
+            if built.iter().filter(|b| on_jit(b)).all(|b| binary.contains(&b.pkg)) { not_over = "jit crate"; }
+        }
     }
     let (gated, elsewhere): (Vec<Built>, Vec<Built>) = built.into_iter().partition(on_jit);
-    verdict(home, a, &gated, &elsewhere, now)
+    verdict(home, a, &gated, &elsewhere, not_over, now)
 }
 
 /// The verdict on what the command builds natively on a JIT platform (`gated`) and elsewhere,
 /// appended to the ledger.
-fn verdict(home: &Path, a: &Ask, gated: &[Built], elsewhere: &[Built], now: u64) -> Result<String, String> {
+fn verdict(home: &Path, a: &Ask, gated: &[Built], elsewhere: &[Built], not_over: &str, now: u64) -> Result<String, String> {
     let names = |bs: &[Built]| bs.iter().map(|b| b.pkg.clone()).fold(Vec::<String>::new(), |mut v, p| { if !v.contains(&p) { v.push(p); } v });
     let reason = a.reason.trim();
     let mut miss = None;
@@ -258,9 +283,9 @@ fn verdict(home: &Path, a: &Ask, gated: &[Built], elsewhere: &[Built], now: u64)
         };
         (word, pkgs, answer)
     };
-    let line = format!("{{\"ms\":{now},\"lane\":{},\"agent\":{},\"kind\":{},\"pkgs\":[{}],\"platform\":{},\"verdict\":{},\"reason\":{},\"class\":{},\"miss\":{},\"cmd\":{}}}\n",
+    let line = format!("{{\"ms\":{now},\"lane\":{},\"agent\":{},\"kind\":{},\"pkgs\":[{}],\"platform\":{},\"verdict\":{},\"reason\":{},\"not_over\":{},\"class\":{},\"miss\":{},\"cmd\":{}}}\n",
         json_str(a.lane), json_str(a.agent), json_str(a.kind.as_str()), pkgs.iter().map(|p| json_str(p)).collect::<Vec<_>>().join(","), json_str(&format!("{} {}", a.os, a.arch)),
-        json_str(word), json_str(reason), json_str(a.class), json_str(miss.as_ref().map_or("", |(_, id)| id.as_str())), json_str(&crate::proto::clean(&a.cmd.join(" "), 200)));
+        json_str(word), json_str(reason), json_str(not_over), json_str(a.class), json_str(miss.as_ref().map_or("", |(_, id)| id.as_str())), json_str(&crate::proto::clean(&a.cmd.join(" "), 200)));
     use std::io::Write;
     let path = home.join(LEDGER);
     std::fs::OpenOptions::new().create(true).append(true).open(&path).and_then(|mut f| f.write_all(line.as_bytes())).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -300,19 +325,32 @@ mod tests {
         let route = |class: &str| (class == "test:demo-model:lib").then(|| "cargo (cargo 2m, JIT 4m)".to_string());
         let ask = |reason, class, os| Ask { lane: "l1", agent: "", kind: Kind::Test, cmd: &cmd, repo_dir: &home, cwd: ".", rev: "", reason, class, route: &route, os, arch: "x64" };
         let test = [built("demo-model", "test", "")];
-        let refused = verdict(&home, &ask("", "", "linux"), &test, &[], 1).unwrap_err();
+        let refused = verdict(&home, &ask("", "", "linux"), &test, &[], "", 1).unwrap_err();
         assert!(refused.contains("`devhub test l1 demo-model --live`") && refused.contains("--native"), "{refused}");
-        assert!(verdict(&home, &ask("perf baseline", "", "linux"), &test, &[], 2).unwrap().contains("perf baseline"));
-        assert!(verdict(&home, &ask("", "native:test:other:lib", "linux"), &test, &[], 3).is_err(), "another package's class routes nothing");
-        assert!(verdict(&home, &ask("", "native:test:demo-model:lib", "linux"), &test, &[], 3).unwrap().contains("cargo 2m, JIT 4m"));
-        assert!(verdict(&home, &ask("", "", "windows"), &[], &test, 4).unwrap().contains("for windows x64: no JIT runs there"));
-        assert!(verdict(&home, &ask("", "", "linux"), &[], &[built("app", "build", "wasm32-unknown-unknown")], 5).unwrap().contains("for wasm32-unknown-unknown: no JIT runs there"));
+        assert!(verdict(&home, &ask("perf baseline", "", "linux"), &test, &[], "baseline", 2).unwrap().contains("perf baseline"));
+        assert!(verdict(&home, &ask("", "native:test:other:lib", "linux"), &test, &[], "", 3).is_err(), "another package's class routes nothing");
+        assert!(verdict(&home, &ask("", "native:test:demo-model:lib", "linux"), &test, &[], "", 3).unwrap().contains("cargo 2m, JIT 4m"));
+        assert!(verdict(&home, &ask("", "", "windows"), &[], &test, "", 4).unwrap().contains("for windows x64: no JIT runs there"));
+        assert!(verdict(&home, &ask("", "", "linux"), &[], &[built("app", "build", "wasm32-unknown-unknown")], "", 5).unwrap().contains("for wasm32-unknown-unknown: no JIT runs there"));
         std::fs::write(home.join("jit_misses.jsonl"), "{\"id\":\"M7\",\"pkg\":\"demo-model\",\"target\":\"--lib\",\"error\":[\"e\"],\"closed_ms\":0}\n").unwrap();
-        assert!(verdict(&home, &ask("", "", "linux"), &test, &[], 6).unwrap().contains("open JIT miss M7"));
+        assert!(verdict(&home, &ask("", "", "linux"), &test, &[], "", 6).unwrap().contains("open JIT miss M7"));
         let ledger = std::fs::read_to_string(home.join(LEDGER)).unwrap();
         let verdicts: Vec<&str> = ledger.lines().map(|l| l.split("\"verdict\":\"").nth(1).unwrap().split('"').next().unwrap()).collect();
         assert_eq!(verdicts, ["refused", "reason", "refused", "measured", "platform", "platform", "miss"]);
+        assert!(ledger.lines().nth(1).unwrap().contains(r#""not_over":"baseline""#), "{ledger}");
         std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    /// A native build beside the JIT, by any path to it, is a baseline; the word in a path or an
+    /// argument is not.
+    #[test]
+    fn a_command_that_runs_the_jit_too_is_seen() {
+        let jit = |t: &str| runs_jit(&words(t));
+        assert!(jit("cargo test --release -p a\n/x/target/host/makepad test a --lib"));
+        assert!(jit("cargo build -p a; makepad run a"));
+        assert!(jit("cargo run --profile host -p makepad-run --bin makepad -- test a"));
+        assert!(!jit("cargo test --release -p a; cd makepad; ls test"));
+        assert!(!jit("cargo test --release -p makepad-foo"));
     }
 
     #[test]

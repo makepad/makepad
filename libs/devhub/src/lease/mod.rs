@@ -4,7 +4,8 @@
 //! schedules ([`sched`], [`master`]); the node starts, watches and cleans up what runs under a
 //! lease ([`exec`]), measures what it has ([`caps`]) and guards its disk ([`disk`]). Leases end
 //! on release or when their holder stops beating, never for running long. Native lane leases
-//! use bounded per-lane trees; CI, gates and user boxes share the work tree per pin.
+//! use bounded per-lane trees; CI, gates and user boxes keep the work tree. One lease at a time
+//! holds a tree.
 //! Overlay JITs mount pinned stores and lane edits without moving a tree.
 //! Dev stores, overlays, run home, build tree and target live in `<work>/dev`, separate
 //! from deployment. [`jitstore`] owns dev binaries and coalesces builds of pinned inputs.
@@ -29,6 +30,7 @@ pub mod exec;
 pub mod master;
 #[cfg(feature = "checkout")]
 pub mod native;
+pub mod panel;
 pub mod prof;
 pub mod sched;
 pub mod ship;
@@ -44,6 +46,11 @@ pub const WARM_LANE_PREFIX: &str = "warm-";
 
 /// The master's per-box dev JIT prebuild of the landed tip: lane-priority, one per box.
 pub const PREBUILD_LANE_PREFIX: &str = "prebuild-";
+
+/// The folder in a lease's tmp where its runs put the logs worth keeping (`DEVHUB_KEEP`: a failed
+/// step's, tools/run/fixture/keep_logs.sh): the holder copies it next to its own log before the
+/// lease ends and the tmp goes ([`client::kept`]).
+pub const KEEP_DIR: &str = "keep";
 
 /// What a lease guards (DESIGN.md §10.1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -84,6 +91,14 @@ impl Kind {
     /// dev switch is off.
     pub fn writes(self) -> bool {
         self != Kind::Inspect
+    }
+
+    /// The nice level of this kind's runs: 10 leaves a program's thread classes their offsets (up to
+    /// +8, platform/cpu_budget), and timed work runs at the level a person's app gets, so its numbers
+    /// are theirs. Linux only: a run's scope keeps the box's desktop ahead of it there. A Mac has no
+    /// scopes, and its classes are QoS, not nice.
+    pub fn nice(self) -> i32 {
+        if self == Kind::Timed && cfg!(target_os = "linux") { 0 } else { 10 }
     }
 
     /// Shares the node with other leases, counted against its slots.
@@ -141,11 +156,60 @@ pub fn base_class(class: &str) -> &str {
     class.split_once('?').map_or(class, |(base, _)| base)
 }
 
-/// Default measurement class: kind and three command words, with paths stripped.
-pub fn run_class(kind: Kind, argv: &[String]) -> String {
-    // an `env [-u K] K=V ..` prefix only sets the run's environment: the class is its command (a
-    // fast gate's GATE_PROVEN list made every gate a class of its own, never measured)
-    std::iter::once(kind.as_str().to_string()).chain(loaders::command_of(argv).iter().take(3).map(|s| s.rsplit(['/', '\\']).next().unwrap_or(s).to_string())).collect::<Vec<_>>().join(" ")
+/// Default measurement class: kind and three command words, with paths stripped; for the JIT
+/// (`makepad <args>`, through cargo or not) what it runs: `<kind> makepad <subcommand> <package>
+/// [<target>]` ([`jit_class_words`]). Under three words every JIT command was one class, `test
+/// cargo run --profile`: CI shards, minute-long live tests and hour-long sessions measured as one,
+/// whose median moved with whichever ended last (3m07s, then 6m15s, while CI legs ran 6-31 min,
+/// 11-04). Stall warnings and RAM asks read the class. A JIT class names what runs, so lanes share
+/// it; any other command's words say little of what it does (`bash sweep.sh`, `cargo test -p`), so
+/// it is measured per lane, `<kind> <words> @<lane>`, but for devhub's own gates and CI, the same
+/// script whichever lane asks. Over the last 3100 such runs that took the runs a stall check would
+/// call past their measure from 129 to 80.
+pub fn run_class(lane: &str, kind: Kind, argv: &[String]) -> String {
+    let (words, lane): (Vec<String>, Option<&str>) = match loaders::cargo_run_args(argv) {
+        Some(args) => (std::iter::once("makepad".to_string()).chain(jit_class_words(args)).collect(), None),
+        // an `env [-u K] K=V ..` prefix only sets the run's environment: the class is its command
+        // (a fast gate's GATE_PROVEN list made every gate a class of its own, never measured)
+        None => (loaders::command_of(argv).iter().take(3).map(|s| s.rsplit(['/', '\\']).next().unwrap_or(s).to_string()).collect(), (!matches!(kind, Kind::Gate | Kind::Ci)).then_some(lane)),
+    };
+    let class = std::iter::once(kind.as_str().to_string()).chain(words).collect::<Vec<_>>().join(" ");
+    lane.map_or(class.clone(), |lane| format!("{class} @{lane}"))
+}
+
+/// A run class without the lane [`run_class`] measures it under: what tables across lanes group by.
+pub fn class_command(class: &str) -> &str {
+    class.rsplit_once(" @").map_or(class, |(command, _)| command)
+}
+
+/// A run class that is a lane's own script: its name says nothing of its work (one `bash sweep.sh`
+/// ran 9 s, the next 14 min), so its walls judge no run ([`sched::Sched::say_stalled`]). devhub's
+/// own scripts (a gate, a CI leg) do one job: their classes have no lane.
+pub fn lane_script(class: &str) -> bool {
+    class.rsplit_once(" @").is_some_and(|(command, _)| matches!(command.split(' ').nth(1), Some("bash" | "sh" | "zsh" | "cmd" | "powershell" | "pwsh" | "python" | "python3" | "node")))
+}
+
+/// The JIT's flags that take a value (the value is no package).
+const JIT_VALUE_FLAGS: &[&str] = &["--report-to", "--run-dir", "--cfg", "--boundary", "--workspace-dir", "--features", "-F", "--target", "--logfile", "--agent", "--domain", "--idle-min", "--print", "--crate-name", "--crate-type", "--check-cfg", "--cap-lints", "--harness", "--manifest-path"];
+
+/// What a JIT command runs, from its arguments (before any `--`): its subcommand, its package (the
+/// first word that is no flag and no flag's value, or `-p`'s), and the test, bin or example it
+/// names (`--lib`, `--tests` too). Its test filters and app arguments are no part of it.
+fn jit_class_words(args: &[String]) -> Vec<String> {
+    let mut it = args.iter().take_while(|a| *a != "--");
+    let Some(sub) = it.next() else { return Vec::new() };
+    let (mut package, mut target) = (None, None);
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--test" | "--bin" | "--example" => target = it.next().map(|v| format!("{a} {v}")),
+            "--lib" | "--tests" | "--bins" => target = Some(a.clone()),
+            "-p" | "--package" => package = package.or(it.next().cloned()),
+            f if JIT_VALUE_FLAGS.contains(&f) => { it.next(); }
+            f if f.starts_with('-') => {}
+            p => package = package.or(Some(p.to_string())),
+        }
+    }
+    std::iter::once(sub.clone()).chain(package).chain(target).collect()
 }
 
 /// Reserved cores, RAM and disk in GB, and GPUs. Concurrent leases sum these costs.
@@ -226,6 +290,10 @@ pub struct Caps {
     pub load1: f64,
     pub ram_gb: f64,
     pub ram_avail_gb: f64,
+    /// What the box holds in RAM outside its leases (its WM, services, hub, kernel, tmpfs; on a
+    /// Mac the OS's own and every app's too): the memory in use, less the leases' own at the same
+    /// look, measured each caps poll (0: an older hub)
+    pub ram_resident_gb: f64,
     pub disk_free_gb: f64,
     pub disk_total_gb: f64,
     /// `name:vram_gb` per GPU
@@ -263,10 +331,30 @@ pub struct Caps {
     pub native_trees: u32,
     /// the deployment checkout's commits, in the same form as `tree`; empty: no deployment
     pub deploy: String,
+    /// a sync apply moves and builds the deployment now: no timed lease starts until it ends
+    pub applying: bool,
+    /// the hub builds itself now ([`exec::build_hub`]): the master charges it like a build lease of
+    /// its measured size
+    pub hub_building: bool,
     /// the commit the node's hub was started from (empty: a hub from before it said so)
     pub hub_rev: String,
+    /// the hub's resident memory and its live heap ([`crate::heap`]), MB (0: not said)
+    pub hub_rss_mb: u64,
+    pub hub_heap_mb: u64,
     /// why this box cannot link a program (its toolchain probe); empty: it can
     pub sick: String,
+    /// the kernel's clock source on an x86 Linux box (`tsc`, `hpet`); empty elsewhere
+    /// ([`caps::slow_clock`])
+    pub clocksource: String,
+    /// a Mac's memory pressure (`kern.memorystatus_vm_pressure_level`: 1 normal, 2 warn, 4
+    /// critical); 0 elsewhere ([`caps::mac_pressure`])
+    pub mem_pressure: u32,
+    /// the outage of this hub its WM recorded before it ran ([`makepad_devhub_conf::Trouble`]):
+    /// handed out in one caps answer, which the master says as a warning; empty: none
+    pub trouble: String,
+    /// what the node's hub waits on now, one line each ([`crate::held::stalls`]): `<waiter>
+    /// waits on <lock> held by <holder>` (a deadlock said as one)
+    pub stalls: Vec<String>,
     /// the node's rustc (`1.97.1`; empty: not known)
     pub rustc: String,
     /// the master-node protocol the hub speaks ([`HUB_PROTO`]; 0: an older hub)
@@ -278,6 +366,29 @@ pub struct Caps {
     /// a person at the node, as its WM saw their input ([`UserSense`]); None: no WM of ours
     /// runs there (the Macs, Windows): the dev switch alone decides
     pub user: Option<UserSense>,
+}
+
+/// One hub build that finished on a node: when (wall ms), how long, the CPU seconds of its
+/// processes and the most RAM they held at once (None: not measured there, Windows). Its hub's
+/// restart answer carries it to the master's ledger, the measure of its class.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct HubMeasure {
+    pub end_ms: u64,
+    pub wall_ms: u64,
+    pub cpu_s: Option<f64>,
+    pub peak_gb: Option<f64>,
+}
+
+impl HubMeasure {
+    pub fn to_json(&self) -> String {
+        let n = |x: Option<f64>| x.map_or("null".to_string(), |x| format!("{x:.3}"));
+        format!("{{\"end_ms\":{},\"wall_ms\":{},\"cpu_s\":{},\"peak_gb\":{}}}", self.end_ms, self.wall_ms, n(self.cpu_s), n(self.peak_gb))
+    }
+
+    pub fn parse(v: &makepad_strict_json::Value) -> Option<HubMeasure> {
+        let n = |k: &str| v.get(k).and_then(num).filter(|x| x.is_finite() && *x >= 0.0);
+        Some(HubMeasure { end_ms: n("end_ms")? as u64, wall_ms: n("wall_ms")? as u64, cpu_s: n("cpu_s"), peak_gb: n("peak_gb") })
+    }
 }
 
 /// A person using a node with our WM: the node hub asks the WM (`makepad-wm activity`) how long
@@ -331,7 +442,10 @@ impl UserSense {
 /// ends nothing, so it restarts for its update at once; 7: warm leases use another lane's native
 /// tree and target). Only requests needing a newer facility wait for its self-update; other
 /// leases keep using the hub.
-pub const HUB_PROTO: u32 = 7;
+pub const HUB_PROTO: u32 = 8;
+/// In a box's refusal of a timed lease's start: something builds there, and the master places the
+/// lease again on a new look at the box.
+pub const TIMED_AFTER: &str = "timed work starts after it";
 /// The first protocol whose hub restarts at once for its update (a restart ends nothing).
 pub const HANDOVER_PROTO: u32 = 6;
 
@@ -356,7 +470,7 @@ impl Caps {
             .collect();
         let slots: Vec<String> = self.slots.iter().map(|(k, n)| format!("\"{}\":{n}", k.as_str())).collect();
         format!(
-            "{{\"rustc\":{},\"node\":{},\"arch\":{},\"os\":{},\"cpu\":{},\"cores\":{},\"cpu_pct\":{},\"load1\":{:.2},\"ram_gb\":{:.1},\"ram_avail_gb\":{:.1},\"disk_free_gb\":{:.1},\"disk_total_gb\":{:.1},\"gpus\":[{}],\"display\":{},\"battery\":{},\"role\":\"{}\",\"spec\":{},\"slots\":{{{}}},\"disk_floor_gb\":{:.0},\"disk_warn_gb\":{:.0},\"timed\":{},\"apply\":{},\"desk_link\":{},\"dev_req\":{},\"tree\":{},\"deploy\":{},\"sick\":{},\"wm_wire\":{},\"hub_rev\":{},\"hub_proto\":{}{},\"services\":{{{}}},\"user\":{}}}",
+            "{{\"rustc\":{},\"node\":{},\"arch\":{},\"os\":{},\"cpu\":{},\"cores\":{},\"cpu_pct\":{},\"load1\":{:.2},\"ram_gb\":{:.1},\"ram_avail_gb\":{:.1},\"ram_resident_gb\":{:.1},\"disk_free_gb\":{:.1},\"disk_total_gb\":{:.1},\"gpus\":[{}],\"display\":{},\"battery\":{},\"role\":\"{}\",\"spec\":{},\"slots\":{{{}}},\"disk_floor_gb\":{:.0},\"disk_warn_gb\":{:.0},\"timed\":{},\"apply\":{},\"desk_link\":{},\"dev_req\":{},\"tree\":{},\"deploy\":{},\"applying\":{},\"stalls\":[{}],\"sick\":{},\"clocksource\":{},\"mem_pressure\":{},\"trouble\":{},\"wm_wire\":{},\"hub_rev\":{},\"hub_rss_mb\":{},\"hub_heap_mb\":{},\"hub_proto\":{}{},\"services\":{{{}}},\"user\":{}}}",
             json_str(&self.rustc),
             json_str(&self.node),
             json_str(&self.arch),
@@ -367,6 +481,7 @@ impl Caps {
             self.load1,
             self.ram_gb,
             self.ram_avail_gb,
+            self.ram_resident_gb,
             self.disk_free_gb,
             self.disk_total_gb,
             gpus.join(","),
@@ -383,11 +498,18 @@ impl Caps {
             match self.dev_req { Some(true) => "true", Some(false) => "false", None => "null" },
             json_str(&self.tree),
             json_str(&self.deploy),
+            self.applying,
+            self.stalls.iter().map(|l| json_str(l)).collect::<Vec<_>>().join(","),
             json_str(&self.sick),
+            json_str(&self.clocksource),
+            self.mem_pressure,
+            json_str(&self.trouble),
             json_str(&self.wm_wire),
             json_str(&self.hub_rev),
+            self.hub_rss_mb,
+            self.hub_heap_mb,
             self.hub_proto,
-            format!(",\"native\":[{}],\"native_trees\":{}{}", self.native.iter().map(|l| json_str(l)).collect::<Vec<_>>().join(","), self.native_trees, self.jit_store.as_ref().map_or(String::new(), |v| format!(",\"jit_store\":{}", v.to_json()))),
+            format!(",\"native\":[{}],\"native_trees\":{}{},\"hub_building\":{}", self.native.iter().map(|l| json_str(l)).collect::<Vec<_>>().join(","), self.native_trees, self.jit_store.as_ref().map_or(String::new(), |v| format!(",\"jit_store\":{}", v.to_json())), self.hub_building),
             self.services.iter().map(|(n, t)| format!("{}:{t}", json_str(n))).collect::<Vec<_>>().join(","),
             self.user.as_ref().map_or("null".to_string(), |u| u.to_json()),
         )
@@ -407,6 +529,7 @@ impl Caps {
             load1: f("load1"),
             ram_gb: f("ram_gb"),
             ram_avail_gb: f("ram_avail_gb"),
+            ram_resident_gb: f("ram_resident_gb"),
             disk_free_gb: f("disk_free_gb"),
             disk_total_gb: f("disk_total_gb"),
             display: v.get("display").and_then(|x| x.as_str()).map(str::to_string),
@@ -422,8 +545,16 @@ impl Caps {
             native: v.get("native").and_then(|v| v.as_arr()).unwrap_or(&[]).iter().filter_map(|v| v.as_str().map(str::to_string)).collect(),
             native_trees: v.get("native_trees").and_then(num).map_or(caps::NATIVE_TREES, |n| n as u32),
             deploy: s("deploy"),
+            applying: v.get("applying").and_then(|x| x.as_bool()).unwrap_or(false),
+            hub_building: v.get("hub_building").and_then(|x| x.as_bool()).unwrap_or(false),
             hub_rev: s("hub_rev"),
+            hub_rss_mb: f("hub_rss_mb") as u64,
+            hub_heap_mb: f("hub_heap_mb") as u64,
             sick: s("sick"),
+            clocksource: s("clocksource"),
+            mem_pressure: f("mem_pressure") as u32,
+            trouble: s("trouble"),
+            stalls: v.get("stalls").and_then(|v| v.as_arr()).unwrap_or(&[]).iter().filter_map(|v| v.as_str().map(str::to_string)).collect(),
             wm_wire: s("wm_wire"),
             rustc: s("rustc"),
             hub_proto: f("hub_proto") as u32,
@@ -482,8 +613,9 @@ pub struct Pin {
 }
 
 impl Pin {
-    /// Two leases can share the tree: the same makepad commit, and the same commercial one when
-    /// both name one (a lease without commercial takes the tree's as it is).
+    /// A tree at this pin serves a lease at `other` without moving: the same makepad commit, and
+    /// the same commercial one when both name one (a lease without commercial takes the tree's as
+    /// it is).
     pub fn fits(&self, other: &Pin) -> bool {
         self.makepad == other.makepad && (self.commercial.is_none() || other.commercial.is_none() || self.commercial == other.commercial)
     }
@@ -527,6 +659,9 @@ fn hex40(s: &str) -> bool {
 }
 
 /// One side of a lease's `--rev`: the branch and the commit it named when the lease was ordered.
+/// A node's word for a pinned commit its store does not hold (a push the master thought done).
+pub const NO_COMMIT: &str = "this box's store has no commit";
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RevPin {
     pub branch: String,
@@ -601,10 +736,25 @@ mod tests {
     #[test]
     fn a_runs_class_is_its_command_past_an_env_prefix() {
         let argv = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        let gate = |proven: &str| run_class(Kind::Gate, &argv(&["env", proven, "-u", "X", "bash", "tools/run/fixture/land_gate.sh", "fast", "a1"]));
+        let gate = |proven: &str| run_class("lane", Kind::Gate, &argv(&["env", proven, "-u", "X", "bash", "tools/run/fixture/land_gate.sh", "fast", "a1"]));
         assert_eq!(gate("GATE_PROVEN=check a"), "gate bash land_gate.sh fast");
         assert_eq!(gate("GATE_PROVEN=check a"), gate("GATE_PROVEN=check b;suite c"), "one class whatever is proven");
-        assert_eq!(run_class(Kind::Test, &argv(&["cargo", "run", "--profile"])), "test cargo run --profile");
+        assert_eq!(run_class("lane", Kind::Test, &argv(&["cargo", "run", "--profile"])), "test cargo run --profile @lane", "no JIT invocation: its words, in its lane");
+        assert_ne!(run_class("a", Kind::Long, &argv(&["bash", "sweep.sh"])), run_class("b", Kind::Long, &argv(&["bash", "sweep.sh"])), "one script's name in two lanes is two commands");
+        assert_eq!(class_command(&run_class("a", Kind::Long, &argv(&["bash", "sweep.sh"]))), "long bash sweep.sh");
+        assert_eq!(run_class("a", Kind::Ci, &argv(&["bash", "ci.sh"])), run_class("b", Kind::Ci, &argv(&["bash", "ci.sh"])), "devhub's own scripts: one class");
+        assert!(lane_script(&run_class("a", Kind::Long, &argv(&["bash", "sweep.sh"]))));
+        assert!(!lane_script(&run_class("a", Kind::Ci, &argv(&["bash", "ci.sh"]))), "devhub's own script");
+        assert!(!lane_script(&run_class("a", Kind::Long, &argv(&["cargo", "build"]))));
+        // the JIT: what it runs, whichever way it is called; its filters and app args are no part
+        let cargo = |args: &[&str]| run_class("lane", Kind::Test, &argv(&[&["cargo", "run", "--profile", "host", "-q", "-p", "makepad-run", "--bin", "makepad", "--"][..], args].concat()));
+        assert_eq!(cargo(&["test", "makepad-baz", "--lib", "--", "--exact", "a::b"]), "test makepad test makepad-baz --lib");
+        assert_eq!(cargo(&["test", "makepad-baz"]), "test makepad test makepad-baz");
+        assert_eq!(cargo(&["test", "-p", "makepad-foo", "--test", "it", "--features", "gpu"]), "test makepad test makepad-foo --test it");
+        assert_eq!(cargo(&["run", "--report-to", "/s/calculator.report", "makepad-app-calculator", "--no-default-features", "--features", "standalone", "--", "--remote"]), "test makepad run makepad-app-calculator");
+        assert_eq!(run_class("lane", Kind::Build, &argv(&["env", "FOO_MUTE=1", "makepad", "check", "makepad-bar"])), "build makepad check makepad-bar", "lanes share what names its package");
+        assert_eq!(run_class("lane", Kind::Build, &argv(&["makepad", "--version"])), "build makepad --version");
+        assert_ne!(cargo(&["test", "makepad-baz"]), cargo(&["run", "makepad-app-foo"]), "a CI shard and a session are measured apart");
         // and the JIT past an env prefix runs on the overlay, never a native checkout's build
         let jit = argv(&["env", "MAKEPAD_RUN_O3=1", "cargo", "run", "--profile", "host", "-q", "-p", "makepad-run", "--bin", "makepad", "--", "live", "a"]);
         assert_eq!(Src::for_run(Kind::Test, &jit, false), Src::Overlay);
@@ -614,14 +764,15 @@ mod tests {
     #[test]
     fn caps_round_trip() {
         let c = Caps {
-            node: "217".into(),
+            node: "node-a".into(),
             arch: "x86_64".into(),
             os: "linux".into(),
-            cpu: "AMD Ryzen 7 CPU-B".into(),
+            cpu: "CPU-B".into(),
             cores: 16,
             load1: 3.5,
             ram_gb: 60.0,
             ram_avail_gb: 40.0,
+            ram_resident_gb: 4.5,
             disk_free_gb: 105.0,
             disk_total_gb: 1200.0,
             gpus: vec![("GPU-B".into(), 32.0)],
@@ -642,9 +793,17 @@ mod tests {
             native: vec!["lane-a".into()],
             native_trees: caps::NATIVE_TREES,
             deploy: format!("{},{}", "b".repeat(40), "d".repeat(40)),
+            applying: true,
+            hub_building: true,
             rustc: "1.97.1".into(),
             hub_rev: "b".repeat(40),
+            hub_rss_mb: 3_840,
+            hub_heap_mb: 410,
             sick: String::new(),
+            clocksource: "hpet".into(),
+            mem_pressure: 2,
+            trouble: "devhub on node-a could not run for 12 s (2 tries): exited (signal: 9 (SIGKILL))".into(),
+            stalls: vec!["lease/exec.rs:1184 (makepad-remote-7) waits on lease start held by lease/exec.rs:1763 (makepad-remote-3) (for 12 s)".into()],
             wm_wire: "makepad-wm-0 answered \"makepad-wm mismatch 0123\"".into(),
             hub_proto: HUB_PROTO,
             jit_store: None,

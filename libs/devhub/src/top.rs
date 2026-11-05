@@ -80,6 +80,10 @@ pub fn cpu_pct(a: (u64, u64), b: (u64, u64)) -> f64 {
 #[derive(Clone, Debug, Default)]
 struct ProcRow {
     pid: u32,
+    /// its parent (Windows: unknown, 0)
+    ppid: u32,
+    /// its process group (Windows: itself)
+    pgid: u32,
     name: String,
     cpu_pct: f64,
     rss_mb: f64,
@@ -89,7 +93,7 @@ struct ProcRow {
 #[cfg(target_os = "linux")]
 fn sample() -> (f64, Vec<ProcRow>) {
     use std::collections::HashMap;
-    fn procs() -> HashMap<u32, (String, u64, u64)> {
+    fn procs() -> HashMap<u32, (String, u32, u32, u64, u64)> {
         let mut out = HashMap::new();
         for e in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
             let Some(pid) = e.file_name().to_str().and_then(|n| n.parse::<u32>().ok()) else { continue };
@@ -98,7 +102,7 @@ fn sample() -> (f64, Vec<ProcRow>) {
             let name = stat[a + 1..b].to_string();
             let f: Vec<&str> = stat[b + 2..].split_whitespace().collect();
             let num = |i: usize| f.get(i).and_then(|x| x.parse::<u64>().ok()).unwrap_or(0);
-            out.insert(pid, (name, num(11) + num(12), num(21) * 4096));
+            out.insert(pid, (name, num(1) as u32, num(2) as u32, num(11) + num(12), num(21) * 4096));
         }
         out
     }
@@ -121,9 +125,9 @@ fn sample() -> (f64, Vec<ProcRow>) {
     };
     let rows = p1
         .into_iter()
-        .map(|(pid, (name, ticks, rss))| {
-            let before = p0.get(&pid).map_or(ticks, |p| p.1);
-            ProcRow { pid, name, cpu_pct: (ticks.saturating_sub(before)) as f64 / tck / secs * 100.0, rss_mb: rss as f64 / 1048576.0, gpu_mb: 0.0 }
+        .map(|(pid, (name, ppid, pgid, ticks, rss))| {
+            let before = p0.get(&pid).map_or(ticks, |p| p.3);
+            ProcRow { pid, ppid, pgid, name, cpu_pct: (ticks.saturating_sub(before)) as f64 / tck / secs * 100.0, rss_mb: rss as f64 / 1048576.0, gpu_mb: 0.0 }
         })
         .collect();
     (cpu, rows)
@@ -147,7 +151,7 @@ fn sample() -> (f64, Vec<ProcRow>) {
         .into_iter()
         .map(|(pid, (name, t, rss))| {
             let before = p0.get(&pid).map_or(t, |p| p.1);
-            ProcRow { pid, name, cpu_pct: t.saturating_sub(before) as f64 / ns * 100.0, rss_mb: rss as f64 / 1048576.0, gpu_mb: 0.0 }
+            ProcRow { pid, ppid: 0, pgid: pid, name, cpu_pct: t.saturating_sub(before) as f64 / ns * 100.0, rss_mb: rss as f64 / 1048576.0, gpu_mb: 0.0 }
         })
         .collect();
     (cpu, rows)
@@ -157,18 +161,20 @@ fn sample() -> (f64, Vec<ProcRow>) {
 fn sample() -> (f64, Vec<ProcRow>) {
     // macOS (and the rest): `ps` gives a decaying CPU average per process; the machine's use is
     // their sum over the cores
-    let out = makepad_remote::group::command("/bin/ps").args(["-Ao", "pid=,pcpu=,rss=,comm="]).stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null()).output();
+    let out = makepad_remote::group::command("/bin/ps").args(["-Ao", "pid=,ppid=,pgid=,pcpu=,rss=,comm="]).stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null()).output();
     let text = out.map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
     let rows: Vec<ProcRow> = text
         .lines()
         .filter_map(|l| {
             let mut w = l.split_whitespace();
             let pid = w.next()?.parse().ok()?;
+            let ppid = w.next()?.parse().ok()?;
+            let pgid = w.next()?.parse().ok()?;
             let cpu = w.next()?.parse().ok()?;
             let rss: f64 = w.next()?.parse().ok()?;
             let comm = w.collect::<Vec<_>>().join(" ");
             let name = comm.rsplit('/').next().unwrap_or(&comm).to_string();
-            Some(ProcRow { pid, name, cpu_pct: cpu, rss_mb: rss / 1024.0, gpu_mb: 0.0 })
+            Some(ProcRow { pid, ppid, pgid, name, cpu_pct: cpu, rss_mb: rss / 1024.0, gpu_mb: 0.0 })
         })
         .collect();
     let cores = std::thread::available_parallelism().map(|n| n.get() as f64).unwrap_or(1.0);
@@ -238,6 +244,43 @@ pub fn label(_pid: u32) -> Option<String> {
     None
 }
 
+/// Whose a process is, by its process group or an ancestor's: `whose(pgid)` names a group's
+/// owner ("" for the timed lease's own work, else a lease's tag); a process this hub started
+/// (its own builds) is the hub's, with what the hub started; None: neither (the OS, the user).
+fn owner(rows: &std::collections::HashMap<u32, &ProcRow>, r: &ProcRow, me: u32, whose: &dyn Fn(u32) -> Option<String>) -> Option<String> {
+    let mut at = r;
+    // a parent chain is short; the bound only guards a cycle in a racy sample
+    for _ in 0..64 {
+        if let Some(w) = whose(at.pgid) {
+            return Some(w);
+        }
+        if at.ppid == me {
+            return Some(format!("the hub's {}", label(at.pid).unwrap_or_else(|| at.name.clone())));
+        }
+        at = rows.get(&at.ppid)?;
+    }
+    None
+}
+
+/// What else the box ran: its load and the processes outside the timed lease's (`whose` says ""
+/// for its groups and their children) and this hub, using at least 1% of a core, by CPU (% of
+/// one core), the busiest first, each with its owner when known: another lease, or the hub's own
+/// work (`rustc (L12 a-lane)`, `rustc (the hub's cargo build)`). A timed lease's report says
+/// what shared its box (a Mac's Spotlight indexing what the last builds wrote; a rustc at 145%
+/// that the report could not place, 11-03).
+pub fn outside(whose: &dyn Fn(u32) -> Option<String>) -> (f64, Vec<(String, f64)>) {
+    let (_, rows) = sample();
+    let me = std::process::id();
+    let by_pid: std::collections::HashMap<u32, &ProcRow> = rows.iter().map(|r| (r.pid, r)).collect();
+    let mut v: Vec<(String, f64)> = rows.iter().filter(|r| r.pid != me && r.cpu_pct >= 1.0).filter_map(|r| match owner(&by_pid, r, me, whose) {
+        Some(w) if w.is_empty() => None,
+        Some(w) => Some((format!("{} ({w})", r.name), r.cpu_pct)),
+        None => Some((r.name.clone(), r.cpu_pct)),
+    }).collect();
+    v.sort_by(|a, b| b.1.total_cmp(&a.1));
+    (crate::procinfo::machine().load1, v)
+}
+
 /// The `top` answer: a machine line, a line per GPU, then the `n` busiest processes.
 pub fn top(machine: &str, n: usize) -> Vec<String> {
     let (cpu, mut rows) = sample();
@@ -262,7 +305,14 @@ pub fn top(machine: &str, n: usize) -> Vec<String> {
         out.push(format!("{{\"gpu\":{i},\"name\":{},\"util_pct\":{:.0},\"mem_used_gb\":{:.1},\"mem_total_gb\":{:.1},\"temp_c\":{:.0},\"power_w\":{:.0}}}", json_str(&g.name), g.util_pct, g.mem_used_gb, g.mem_total_gb, g.temp_c, g.power_w));
     }
     rows.sort_by(|a, b| (b.cpu_pct + b.gpu_mb / 1000.0).total_cmp(&(a.cpu_pct + a.gpu_mb / 1000.0)));
-    rows.truncate(n);
+    // the box's resident apps are listed busy or not, after the busiest: the WM is what an idle-CPU
+    // hunt looks for, and a busy box's short list left it out (11-03)
+    let services = service_pids();
+    let mut i = 0;
+    rows.retain(|r| {
+        i += 1;
+        i <= n || services.contains(&r.pid) || label(r.pid).is_some_and(|l| l.contains("makepad-app-wm"))
+    });
     for r in rows.iter_mut() {
         if let Some(l) = label(r.pid) {
             r.name = l;
@@ -272,6 +322,15 @@ pub fn top(machine: &str, n: usize) -> Vec<String> {
         out.push(format!("{{\"pid\":{},\"name\":{},\"cpu_pct\":{:.1},\"rss_mb\":{:.0},\"gpu_mb\":{:.0}}}", r.pid, json_str(&crate::proto::clean(&r.name, 60)), r.cpu_pct, r.rss_mb, r.gpu_mb));
     }
     out
+}
+
+/// The pids of the services the box's WM supervises (`wm/<name>.state`).
+fn service_pids() -> Vec<u32> {
+    let Ok(dir) = std::fs::read_dir(makepad_network::fleet::makepad_home().join("wm")) else { return Vec::new() };
+    dir.flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "state"))
+        .filter_map(|e| std::fs::read_to_string(e.path()).ok()?.lines().find_map(|l| l.strip_prefix("pid = ")?.trim().parse().ok()))
+        .collect()
 }
 
 /// `top` lines as text.
@@ -309,7 +368,7 @@ mod tests {
 
     #[test]
     fn gpu_and_cpu_numbers() {
-        let g = parse_gpu_use("NVIDIA GeForce GPU-A, 37, 4096, 24564, 51, 120.33\n");
+        let g = parse_gpu_use("NVIDIA GeForce GPU-A, 37, 4096, 25000, 51, 120.33\n");
         assert_eq!(g.len(), 1);
         assert_eq!((g[0].util_pct, g[0].mem_used_gb, g[0].temp_c), (37.0, 4.0, 51.0));
         assert!(parse_gpu_use("").is_empty());

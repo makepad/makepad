@@ -10,6 +10,7 @@ use std::time::Duration;
 
 const HELP: &str = "makepad devhub (or observe): the local devhub (start it with `cargo run --release -p makepad-app-devhub`)
 call $DH; a landing's CLI goes live when its rebuild finishes
+  help [<command..>] | <command..> --help  that command's entry (`job result --help`); no words: all of them
   stream [--json] [--all]                 one line per event, live (--all: info lines too)
   ls [machine]                            machines and their JITs, each with what it is up to
   hot [--json]                            hot failures / hot loads, causes and apps (24h and all time)
@@ -17,15 +18,20 @@ call $DH; a landing's CLI goes live when its rebuild finishes
   top <node>                              CPU, GPU, RAM, disk and the busiest processes of a node
   log <node>/<pid|app> [n]                the tail of a JIT's log (its session log, or its launch log)
   reply <request-id> <status> <message>   answer an engine request (received working deployed declined note)
-  inbox [--all]                           what needs a look (master), newest first
+  inbox [--all] [--since <n>s|m|h]        what needs a look (master), newest first; --since: only entries
+                                          seen in that window (by full time: a line shows its time of day only)
   show <id>                               an event with its detail (master inbox)
   clear <id|all>                          remove from the inbox (seen <id|all> marks it read)
   hubs [--json]                           the node hubs this one links to (nodes.conf + the nodes they heard)
   cache [ls|clear] [--node <n>] [--app <package>] [--dir <run dir>] [--force]
                                           the JIT cache (makepad run's compiled code): what a clear frees, or
                                           clear it (the next start is cold; --dir: that one cache); refused
-                                          while JITs run on it unless --force (they keep running)
+                                          while JITs run on it unless --force (they keep running). `ls` with
+                                          no --node adds a line per fleet machine, its dev store named
   serve [--node <conf>]                   run a hub here without its app (master, or a node with that conf)
+  master start                            a master in a session of its own, at this shell's priority; its log
+                                          is master.log in devhub's home. A niced shell is refused (zsh runs
+                                          `&` jobs at +5; restarts keep a level and shown apps inherit it)
   land [<branch|-> [<commercial worktree> <commercial branch>]]
                                           hand in for landing (no args: this worktree's branch and its nested
                                           commercial branch); merges onto the current tips in queue order;
@@ -41,7 +47,7 @@ call $DH; a landing's CLI goes live when its rebuild finishes
 
 pub(crate) fn control() -> Result<Client, String> {
     let c = Client::new(Target::Unix(proto::control_socket()), "observe");
-    c.conn().map_err(|e| format!("no devhub master at {} (connect: {e})", proto::control_socket().display()))?;
+    c.conn().map_err(|e| format!("no devhub master at {} (connect: {e}); `makepad devhub master start` starts one", proto::control_socket().display()))?;
     Ok(c)
 }
 
@@ -307,19 +313,123 @@ fn reply(c: &Client, id: &str, status: &str, msg: &str) -> i32 {
     lines_out(ask(c, None, "reply", &format!("{id} {status} {msg}")), false)
 }
 
+fn help_text() -> String {
+    #[cfg(feature = "checkout")]
+    let orch = format!("{}\n{}", crate::orch::cli::HELP, crate::orch::ci::HELP);
+    #[cfg(not(feature = "checkout"))]
+    let orch = String::new();
+    format!("{HELP}\n{}\n{}\n{orch}", crate::lease::client::HELP, crate::sync::help())
+}
+
+/// The words a help request asks about: `help <words>`, `<words> --help`, `<word> help`; they end
+/// at the first flag. None: no help asked. What follows `--` is the command's, and so is what
+/// follows the name of a command that hands its words on (an app's own `help`).
+fn help_words<'a>(a: &[&'a str]) -> Option<Vec<&'a str>> {
+    match a {
+        ["help", words @ ..] => return Some(words.to_vec()),
+        [word, "help"] => return Some(vec![*word]),
+        _ => {}
+    }
+    let own = &a[..a.iter().position(|w| *w == "--").unwrap_or(a.len())];
+    let at = own.iter().position(|w| matches!(*w, "--help" | "-h"))?;
+    let hands_on: [&[&str]; 5] = [&["inspect"], &["job", "inspect"], &["live", "act"], &["launch"], &["reply"]];
+    if hands_on.iter().any(|name| own.starts_with(name) && at > name.len()) {
+        return None;
+    }
+    Some(own[..at].iter().take_while(|w| !w.starts_with('-')).copied().collect())
+}
+
+/// One command's entry in the help: its lines, and the names it answers to.
+struct HelpEntry<'a> {
+    lines: Vec<&'a str>,
+    names: Vec<Vec<&'a str>>,
+}
+
+/// An entry starts two spaces in; deeper lines continue it. `makepad ci:` starts a section whose
+/// entries leave out that word.
+fn help_entries(text: &str) -> Vec<HelpEntry<'_>> {
+    let mut entries: Vec<HelpEntry> = Vec::new();
+    let (mut section, mut open) = (None, false);
+    for line in text.lines() {
+        match line.strip_prefix("  ") {
+            Some(rest) if rest.starts_with(' ') => {
+                if open { entries.last_mut().unwrap().lines.push(line); }
+            }
+            Some(rest) if !rest.is_empty() => {
+                entries.push(HelpEntry { lines: vec![line], names: help_names(rest, section) });
+                open = true;
+            }
+            _ => {
+                open = false;
+                section = line.strip_prefix("makepad ").and_then(|l| l.strip_suffix(':'));
+            }
+        }
+    }
+    entries
+}
+
+/// The names in an entry's head (up to the gap before its description): each ` | ` form's words
+/// up to its first argument; a later form may leave out the first word (`land hold <b> | unhold <b>`).
+fn help_names<'a>(head: &'a str, section: Option<&'a str>) -> Vec<Vec<&'a str>> {
+    let mut names: Vec<Vec<&str>> = Vec::new();
+    for form in head.split("  ").next().unwrap_or("").split(" | ") {
+        let name: Vec<&str> = form.split_whitespace().take_while(|w| !w.starts_with(['<', '[', '-'])).collect();
+        if let Some(first) = names.first().and_then(|n| n.first()).copied().filter(|f| name.first() != Some(f)) {
+            names.push(std::iter::once(first).chain(name.iter().copied()).collect());
+        }
+        names.push(name);
+    }
+    if let Some(section) = section {
+        for name in &mut names { name.insert(0, section); }
+    }
+    names
+}
+
+/// The lines of every entry that answers to the words; arguments after a command's name
+/// (`test <lane> <pkg> --help`) fall away: the longest run of the words that names something.
+fn help_for<'a>(text: &'a str, words: &[&str]) -> Vec<&'a str> {
+    let entries = help_entries(text);
+    for n in (1..=words.len()).rev() {
+        let words = &words[..n];
+        let lines: Vec<&str> = entries.iter()
+            .filter(|e| e.names.iter().any(|name| words.len() <= name.len() && words.iter().zip(name).all(|(w, part)| part.split('|').any(|p| p == *w))))
+            .flat_map(|e| e.lines.iter().copied()).collect();
+        if !lines.is_empty() { return lines; }
+    }
+    Vec::new()
+}
+
+fn help(words: &[&str]) -> i32 {
+    let text = help_text();
+    if words.is_empty() {
+        println!("{text}");
+        return 0;
+    }
+    let lines = help_for(&text, words);
+    if lines.is_empty() {
+        eprintln!("makepad devhub: no command `{}`; `makepad devhub help` lists them all", words.join(" "));
+        return 2;
+    }
+    println!("{}", lines.join("\n"));
+    0
+}
+
 /// `makepad observe <args>`; returns the exit code.
 pub fn main(args: &[String]) -> i32 {
     let a: Vec<&str> = args.iter().map(String::as_str).collect();
-    if matches!(a.first().copied(), None | Some("-h") | Some("--help") | Some("help")) {
-        #[cfg(feature = "checkout")]
-        let orch = format!("{}\n{}", crate::orch::cli::HELP, crate::orch::ci::HELP);
-        #[cfg(not(feature = "checkout"))]
-        let orch = String::new();
-        println!("{HELP}\n{}\n{}\n{orch}", crate::lease::client::HELP, crate::sync::help());
-        return if a.is_empty() { 2 } else { 0 };
+    if a.is_empty() {
+        println!("{}", help_text());
+        return 2;
+    }
+    if let Some(words) = help_words(&a) {
+        return help(&words);
     }
     if a.first() == Some(&"serve") {
         return serve(&a[1..]);
+    }
+    #[cfg(all(unix, feature = "checkout"))]
+    if a == ["master", "start"] {
+        return master_start();
     }
     // the master's jobs first: `lanes` (the lane view) is theirs, `lanes now` the merge bot's
     #[cfg(feature = "checkout")]
@@ -361,7 +471,13 @@ pub fn main(args: &[String]) -> i32 {
         ["stream", rest @ ..] => stream(&c, rest.contains(&"--json"), rest.contains(&"--all")),
         ["inspect", target, cmd @ ..] if !cmd.is_empty() => inspect(&c, target, &args[2..]),
         ["reply", id, status, msg @ ..] => reply(&c, id, status, &msg.join(" ")),
-        ["inbox", rest @ ..] => lines_out(ask(&c, None, "inbox", if rest.contains(&"--all") { "list all" } else { "list" }), true),
+        ["inbox", rest @ ..] => match inbox_window(rest) {
+            Ok(window) => lines_out(ask(&c, None, "inbox", if rest.contains(&"--all") { "list all" } else { "list" }).map(|l| seen_within(l, window, proto::wall_ms())), true),
+            Err(e) => {
+                eprintln!("makepad devhub inbox: {e}");
+                2
+            }
+        },
         ["show", id] => lines_out(ask(&c, None, "inbox", &format!("show {}", id.trim_start_matches("id="))), false),
         ["clear", id] => lines_out(ask(&c, None, "inbox", &format!("clear {id}")), false),
         ["seen", id] => lines_out(ask(&c, None, "inbox", &format!("seen {id}")), false),
@@ -445,6 +561,28 @@ pub fn main(args: &[String]) -> i32 {
 }
 
 /// Prints a lines answer (`text`: inbox rows as their stream line).
+/// `inbox`'s `--since <n>s|m|h`: the window in ms (None: every entry).
+fn inbox_window(args: &[&str]) -> Result<Option<u64>, String> {
+    let Some(at) = args.iter().position(|a| *a == "--since") else { return Ok(None) };
+    let arg = args.get(at + 1).ok_or("--since needs a window: 20m, 2h, 90s")?;
+    let (n, unit) = arg.split_at(arg.find(|c: char| !c.is_ascii_digit()).unwrap_or(arg.len()));
+    let n: u64 = n.parse().map_err(|_| format!("--since {arg}: not <n>s|m|h"))?;
+    let ms = match unit {
+        "s" => 1_000,
+        "m" => 60_000,
+        "h" => 3_600_000,
+        _ => return Err(format!("--since {arg}: not <n>s|m|h")),
+    };
+    Ok(Some(n * ms))
+}
+
+/// The inbox lines last seen within `window` ms of `now_ms` (an entry's `last_ms`, a full time:
+/// its line's time of day cannot tell yesterday from today).
+fn seen_within(lines: Vec<String>, window: Option<u64>, now_ms: u64) -> Vec<String> {
+    let Some(window) = window else { return lines };
+    lines.into_iter().filter(|l| makepad_strict_json::parse(l.as_bytes()).ok().and_then(|v| v.get("last_ms").and_then(|t| t.as_u64())).is_some_and(|t| t + window >= now_ms)).collect()
+}
+
 fn lines_out(r: Result<Vec<String>, String>, text: bool) -> i32 {
     match r {
         Ok(lines) => {
@@ -479,9 +617,18 @@ fn serve(args: &[&str]) -> i32 {
             }
         }
     };
+    // the conf is read before the hub settles in its home (a relative path names the caller's dir)
+    let conf = match args {
+        ["--node", conf] => Some(makepad_devhub_conf::NodeConf::load(std::path::Path::new(conf))),
+        _ => None,
+    };
+    if let Err(e) = proto::settle_cwd() {
+        eprintln!("devhub: {e}");
+        return 1;
+    }
     match args {
-        ["--node", conf] => {
-            let conf = makepad_devhub_conf::NodeConf::load(std::path::Path::new(conf));
+        ["--node", _] => {
+            let conf = conf.expect("read above");
             let t = trust(&conf.name);
             match crate::node::Node::start(conf, t, log) {
                 Ok(n) => {
@@ -597,7 +744,40 @@ fn cache(args: &[&str]) -> i32 {
             println!("{who}: {}", s("line"));
         }
     }
+    #[cfg(feature = "checkout")]
+    if verb == "plan" && node.is_none() && app.is_none() && dir.is_none() {
+        if let Ok(c) = control() {
+            cache_fleet(&c);
+        }
+    }
     code
+}
+
+/// The other machines' JIT caches, one line each, with the dev store of their overlay leases:
+/// what grows on the boxes, without asking them one by one.
+#[cfg(feature = "checkout")]
+fn cache_fleet(c: &Client) {
+    let Ok(nodes) = crate::sync::fleet_nodes(c) else { return };
+    let local = local_name(c);
+    let answers: Vec<(String, Result<Vec<String>, String>)> = std::thread::scope(|s| {
+        let asks: Vec<_> = nodes.into_iter().filter(|n| *n != local).map(|n| s.spawn(move || {
+            let a = ask(c, Some(&n), "jitcache", "jitcache plan");
+            (n, a)
+        })).collect();
+        asks.into_iter().filter_map(|a| a.join().ok()).collect()
+    });
+    let human = crate::jitcache::human;
+    for (n, a) in answers {
+        let sum = a.as_ref().ok().and_then(|l| l.iter().filter_map(|l| makepad_strict_json::parse(l.as_bytes()).ok()).find(|v| v.get("total_bytes").is_some()));
+        match (sum, a) {
+            (Some(v), _) => {
+                let bytes = |k: &str| v.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+                println!("{n}: {} in {} caches, of it the dev store {} (cap {} GB)", human(bytes("total_bytes")), bytes("caches"), human(bytes("dev_bytes")), crate::lease::relaxgit::DEV_STORE_MB / 1024);
+            }
+            (None, Err(e)) => println!("{n}: {e}"),
+            (None, Ok(_)) => println!("{n}: no answer"),
+        }
+    }
 }
 
 #[cfg(feature = "checkout")]
@@ -613,13 +793,23 @@ fn bucket(c: &Client, args: &[&str]) -> i32 {
     for line in lines {
         let Ok(v) = makepad_strict_json::parse(line.as_bytes()) else { continue };
         let text = |v: &Value, k: &str| v.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+        let since = |units: Option<&Value>| match units {
+            Some(Value::Obj(units)) => units.iter().map(|(unit, who)| format!("{unit} ({})", crate::bucket::still_since(who.as_str().unwrap_or("?")))).collect::<Vec<_>>().join(", "),
+            _ => String::new(),
+        };
+        if let Some(name) = v.get("still_failing").and_then(Value::as_str) {
+            println!("{name} STILL FAILING: {}", since(v.get("units")));
+            continue;
+        }
         let tip = v.get("tip").map(|p| crate::state::Pair::new(&text(p, "work"), &text(p, "main")).short()).unwrap_or_default();
         let ok = v.get("ok").and_then(Value::as_bool) == Some(true);
         let failing = v.get("failing").and_then(Value::as_arr).map(|a| a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")).unwrap_or_default();
         let labels = v.get("landings").and_then(Value::as_arr).map(|a| a.iter()
             .filter(|l| l.get("units").and_then(Value::as_arr).is_some_and(|u| !u.is_empty()))
             .map(|l| text(l, "label")).collect::<Vec<_>>().join(", ")).unwrap_or_default();
-        println!("{} {tip} {} {failing}{}", text(&v, "bucket"), if ok { "ok" } else { "FAILED" }, if labels.is_empty() { String::new() } else { format!(": {labels}") });
+        let still = since(v.get("still"));
+        let still = if still.is_empty() { still } else { format!("; not rerun: {still}") };
+        println!("{} {tip} {} {failing}{}{still}", text(&v, "bucket"), if ok { "ok" } else { "FAILED" }, if labels.is_empty() { String::new() } else { format!(": {labels}") });
     }
     0
 }
@@ -815,6 +1005,51 @@ fn land(c: &Client, a: &[&str]) -> i32 {
     }
 }
 
+/// `devhub master start`: `serve` in a session of its own, so it outlives this shell, at this shell's
+/// priority. It waits until the master answers or its start has failed. A `serve &` by hand in zsh
+/// ran at nice 5 from then on ([`crate::master::start_level`]).
+#[cfg(all(unix, feature = "checkout"))]
+fn master_start() -> i32 {
+    let fail = |why: String| {
+        eprintln!("devhub: {why}");
+        1
+    };
+    let socket = proto::control_socket();
+    let answers = || Client::new(Target::Unix(socket.clone()), "probe").conn().is_ok();
+    if answers() {
+        return fail(format!("a devhub already serves {}", socket.display()));
+    }
+    if let Err(why) = crate::master::start_level() {
+        return fail(why);
+    }
+    let home = proto::home();
+    let log = home.join("master.log");
+    let out = std::fs::create_dir_all(&home).and_then(|()| {
+        // (the last master's log says why a new one had to be started)
+        let _ = std::fs::rename(&log, home.join("master.log.old"));
+        std::fs::File::create(&log)
+    });
+    let Ok((out, err)) = out.and_then(|o| o.try_clone().map(|e| (o, e))).map_err(|e| fail(format!("{}: {e}", log.display()))) else { return 1 };
+    let own = own_argv(&crate::lease::wt::default_repo());
+    let mut cmd = std::process::Command::new(&own[0]);
+    cmd.args(&own[1..]).arg("serve").env_remove("DEVHUB_AGENT").env_remove("DEVHUB_LANE").stdin(std::process::Stdio::null()).stdout(out).stderr(err);
+    let mut child = match crate::os::lease_spawn(&mut cmd, None) {
+        Ok((child, _hold)) => child,
+        Err(e) => return fail(format!("{}: {e}", own[0])),
+    };
+    loop {
+        if answers() {
+            println!("devhub: master up, pid {}; its log is {}", child.id(), log.display());
+            return 0;
+        }
+        match child.try_wait() {
+            Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+            Ok(Some(status)) => return fail(format!("the master ended at its start ({status}); see {}", log.display())),
+            Err(e) => return fail(format!("the master's start: {e}")),
+        }
+    }
+}
+
 /// How devhub runs its own words as a child: this very binary when it is `makepad-devhub` (the
 /// master, the CLI), else (devhub linked into an app) the built one in `repo` (the master swaps a
 /// landing's in when its rebuild finishes); cargo only builds it when there is none yet.
@@ -830,4 +1065,90 @@ pub fn own_argv(repo: &std::path::Path) -> Vec<String> {
     v.push(repo.join("Cargo.toml").display().to_string());
     v.extend(["-p", "makepad-devhub", "--bin", "makepad-devhub", "--"].iter().map(|s| s.to_string()));
     v
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Lanes piped the whole help through grep 777 times in 36 h; `job result --help` answered
+    /// "no job --help" (11-04).
+    #[cfg(feature = "checkout")]
+    #[test]
+    fn a_commands_help_is_its_own_entry() {
+        let text = help_text();
+        let lines = |words: &[&str]| help_for(&text, words);
+        for (words, head) in [
+            (&["job", "result"][..], "  job wait <id..>"),
+            (&["job", "submit"], "  job submit [--kind"),
+            (&["job", "wait"], "  job wait <id..>"),
+            (&["job", "cancel"], "  job cancel <id..>"),
+            (&["test"], "  test <lane> <pkg>"),
+            (&["run"], "  run <lane> <kind>"),
+            (&["lane", "new"], "  lane new <name>"),
+            (&["lane", "keep"], "  lane keep|unkeep"),
+            (&["lane", "unkeep"], "  lane keep|unkeep"),
+            (&["live", "start"], "  live start <app>"),
+            (&["live", "look"], "  live look <id>"),
+            (&["live", "release"], "  live sync <id>"),
+            (&["land", "wait"], "  land wait <branch>"),
+            (&["land", "retry"], "  land hold <branch>"),
+            (&["queue"], "  queue | leases"),
+            (&["leases"], "  queue | leases"),
+            (&["nodes"], "  nodes "),
+            (&["why-queued"], "  why-queued <lease>"),
+            (&["ci", "status"], "  status [--json]"),
+            // arguments after the name fall away
+            (&["test", "my-lane", "my-pkg"], "  test <lane> <pkg>"),
+            (&["job", "result", "J1"], "  job wait <id..>"),
+        ] {
+            let got = lines(words);
+            assert!(got.first().is_some_and(|l| l.starts_with(head)), "{words:?}: {got:?}");
+            assert!(got.len() < 40, "{words:?}: {} lines", got.len());
+        }
+        // an entry's continuation lines come with it, a command's every form too, and a group
+        // word names its commands
+        assert!(lines(&["job", "submit"]).iter().any(|l| l.contains("[--whole]")));
+        assert!(lines(&["live", "start"]).iter().any(|l| l.starts_with("  live start <pkg> --test")));
+        assert!(lines(&["job"]).iter().any(|l| l.starts_with("  job submit")) && lines(&["job"]).iter().any(|l| l.starts_with("  job cancel")));
+        assert!(lines(&["no-such-command"]).is_empty());
+    }
+
+    #[test]
+    fn help_words_leave_what_goes_to_the_command() {
+        fn w(line: &str) -> Option<Vec<&str>> {
+            help_words(&line.split(' ').collect::<Vec<_>>())
+        }
+        assert_eq!(w("--help"), Some(vec![]));
+        assert_eq!(w("help"), Some(vec![]));
+        assert_eq!(w("help job result"), Some(vec!["job", "result"]));
+        assert_eq!(w("job result --help"), Some(vec!["job", "result"]));
+        assert_eq!(w("job result J1 -h"), Some(vec!["job", "result", "J1"]));
+        assert_eq!(w("job help"), Some(vec!["job"]));
+        assert_eq!(w("test a-lane a-pkg --lib --help"), Some(vec!["test", "a-lane", "a-pkg"]));
+        assert_eq!(w("live act --help"), Some(vec!["live", "act"]));
+        assert_eq!(w("job list"), None);
+        assert_eq!(w("test a-lane a-pkg -- --help"), None);
+        assert_eq!(w("job submit -- cargo --help"), None);
+        assert_eq!(w("inspect n1/12 help"), None);
+        assert_eq!(w("inspect n1/12 --help"), None);
+        assert_eq!(w("live act W1 help"), None);
+        assert_eq!(w("live act W1 --help"), None);
+    }
+
+    /// A check-in's "last 20 min" compared time-of-day strings: an entry 23 h old (23:06:31Z
+    /// against a window from 21:50Z) showed as recent.
+    #[test]
+    fn inbox_since_is_by_full_time() {
+        assert_eq!(inbox_window(&["--all", "--since", "20m"]), Ok(Some(20 * 60_000)));
+        assert_eq!(inbox_window(&["--since", "2h"]), Ok(Some(2 * 3_600_000)));
+        assert_eq!(inbox_window(&["--all"]), Ok(None));
+        assert!(inbox_window(&["--since"]).is_err() && inbox_window(&["--since", "20"]).is_err() && inbox_window(&["--since", "m"]).is_err());
+        let now = 1_793_744_000_000u64;
+        let entry = |id: &str, last_ms: u64| format!("{{\"id\":\"{id}\",\"count\":1,\"seen\":false,\"last_ms\":{last_ms},\"line\":\"23:06:31Z WARN x\"}}");
+        let lines = vec![entry("old", now - 23 * 3_600_000), entry("new", now - 5 * 60_000), entry("edge", now - 20 * 60_000)];
+        let kept: Vec<String> = seen_within(lines.clone(), Some(20 * 60_000), now).iter().map(|l| l.split('"').nth(3).unwrap().to_string()).collect();
+        assert_eq!(kept, ["new", "edge"]);
+        assert_eq!(seen_within(lines.clone(), None, now), lines);
+    }
 }

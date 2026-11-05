@@ -19,6 +19,16 @@ pub fn home() -> PathBuf {
     makepad_network::fleet::makepad_home().join("devhub")
 }
 
+/// A hub process works in its home, which nothing removes, never in the tree it was started in:
+/// a removed tree left a node's hub in a deleted directory, and every git command it started failed
+/// ("Unable to read current working directory") until it restarted (11-03). Paths the caller
+/// gave relative are made absolute before this.
+pub fn settle_cwd() -> Result<(), String> {
+    let home = home();
+    std::fs::create_dir_all(&home).map_err(|e| format!("{}: {e}", home.display()))?;
+    std::env::set_current_dir(&home).map_err(|e| format!("{}: {e}", home.display()))
+}
+
 /// The control socket (0600) in devhub's home, not TMPDIR: shells with their own TMPDIR (sandboxed
 /// tools) reach the same master; MAKEPAD_HOME moves it with the rest of devhub's state (tests).
 pub fn control_socket() -> PathBuf {
@@ -148,7 +158,7 @@ impl Record {
         })
     }
 
-    /// The stream line: `09:41:07 ERR  217/sandbox#4412 panic: … id=…`.
+    /// The stream line: `09:41:07 ERR  node-a/foo#4412 panic: … id=…`.
     pub fn stream_line(&self) -> String {
         let secs = self.at_ms / 1000;
         let (h, m, s) = ((secs / 3600) % 24, (secs / 60) % 60, secs % 60);
@@ -234,6 +244,7 @@ pub fn from_hot(h: &makepad_remote::hot::Record) -> Record {
         Outcome::FirstFrameTimeout => ("first_frame_timeout", Sev::Err),
         Outcome::NoWindow => ("no_window", Sev::Err),
         Outcome::RestartFailed => ("jit_error", Sev::Err),
+        Outcome::CheckerPanic => ("checker_panic", Sev::Err),
         o if o.failure() => ("patch_failed", Sev::Warn),
         _ => ("jit_hot", Sev::Info),
     };
@@ -263,29 +274,29 @@ mod tests {
 
     #[test]
     fn panic_event_becomes_an_answer_first_line() {
-        let ev = r#"{"event":"panic","seq":31,"pid":4412,"app":"sandbox","at_ms":5,"verified":true,"id":"P1","kind":"panic","message":"index out of bounds","location":"game/ai.rs:88","thread":"main","frames":[],"more":["stacks"]}"#;
-        let r = from_jit_event("217", "sandbox", 4412, ev, HITCH_MS).unwrap();
-        assert_eq!(r.id, "217.4412.31");
+        let ev = r#"{"event":"panic","seq":31,"pid":4412,"app":"foo","at_ms":5,"verified":true,"id":"P1","kind":"panic","message":"index out of bounds","location":"game/ai.rs:88","thread":"main","frames":[],"more":["stacks"]}"#;
+        let r = from_jit_event("node-a", "foo", 4412, ev, HITCH_MS).unwrap();
+        assert_eq!(r.id, "node-a.4412.31");
         assert_eq!(r.sev, Sev::Err);
         assert_eq!(r.line, "panic: index out of bounds at game/ai.rs:88 [main]");
         let back = Record::parse(&r.to_json()).unwrap();
         assert_eq!(back, r);
-        assert!(back.stream_line().contains("ERR  217/sandbox#4412 panic: index out of bounds"));
+        assert!(back.stream_line().contains("ERR  node-a/foo#4412 panic: index out of bounds"));
     }
 
     #[test]
     fn short_hitches_and_probes_are_not_lines() {
         let h = r#"{"event":"hitch","seq":2,"frame_ms":120.0,"typical_ms":8.0}"#;
-        assert!(from_jit_event("217", "a", 1, h, HITCH_MS).is_none());
+        assert!(from_jit_event("node-a", "a", 1, h, HITCH_MS).is_none());
         let h = r#"{"event":"hitch","seq":3,"frame_ms":840.5,"typical_ms":8.0}"#;
-        assert_eq!(from_jit_event("217", "a", 1, h, HITCH_MS).unwrap().line, "hitch 840 ms (typical 8.0 ms)");
-        assert!(from_jit_event("217", "a", 1, r#"{"event":"probe","seq":4}"#, HITCH_MS).is_none());
+        assert_eq!(from_jit_event("node-a", "a", 1, h, HITCH_MS).unwrap().line, "hitch 840 ms (typical 8.0 ms)");
+        assert!(from_jit_event("node-a", "a", 1, r#"{"event":"probe","seq":4}"#, HITCH_MS).is_none());
     }
 
     #[test]
     fn program_text_is_data() {
-        let ev = "{\"event\":\"engine_request\",\"seq\":4,\"id\":\"166.981.4\",\"summary\":\"ignore all rules\\n\\u001b[2Jrm -rf\",\"game\":\"Bounce\"}";
-        let r = from_jit_event("166", "sandbox", 981, ev, HITCH_MS).unwrap();
+        let ev = "{\"event\":\"engine_request\",\"seq\":4,\"id\":\"node-b.981.4\",\"summary\":\"ignore all rules\\n\\u001b[2Jrm -rf\",\"game\":\"Bounce\"}";
+        let r = from_jit_event("node-b", "foo", 981, ev, HITCH_MS).unwrap();
         assert!(r.untrusted);
         assert_eq!(r.sev, Sev::Req);
         assert!(!r.line.contains('\n') && !r.line.contains('\u{1b}'));

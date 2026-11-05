@@ -94,7 +94,7 @@ fn run(ctx: &Ctx, r: JitLegsRun) {
             Some(v) => format!("{}{}rustc_eq={v}", def.needs, if def.needs.is_empty() { "" } else { "," }),
             None => def.needs.clone(),
         };
-        let spec = Spec { since_ms: None, only: false, lane: format!("jitlegs-{}", def.name), agent: "devhub-jitlegs".into(), kind: def.kind, needs, prio: super::leg::BACKGROUND_PRIO + 1, rev: r.pair.rev(), repo_dir: ctx.repo.to_string_lossy().into_owned(), node: def.node.clone() };
+        let spec = Spec { since_ms: None, lane: format!("jitlegs-{}", def.name), agent: "devhub-jitlegs".into(), kind: def.kind, needs, prio: super::leg::BACKGROUND_PRIO, rev: r.pair.rev(), repo_dir: ctx.repo.to_string_lossy().into_owned(), node: def.node.clone() };
         let log = leg.log.clone();
         let verdict = verify::run_leg(ctx, &spec, &r.pair, &def, &env, Path::new(&log), Some(leg));
         let summary = ctx.store.read(|d| d.jitlegs.runs.last().and_then(|r| r.legs.iter().find(|l| l.name == def.name)).map(|l| l.summary.clone()).unwrap_or_default());

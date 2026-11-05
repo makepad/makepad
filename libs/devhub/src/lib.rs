@@ -21,6 +21,8 @@ macro_rules! print {
 
 pub mod proto;
 pub mod procinfo;
+pub mod heap;
+pub mod held;
 pub mod os;
 pub mod embed;
 pub mod inbox;
@@ -44,6 +46,9 @@ pub mod gitread;
 pub mod jitcache;
 mod jit_misses;
 pub mod state;
+pub mod testlog;
+#[cfg(test)]
+mod testenv;
 #[cfg(feature = "checkout")]
 pub mod monitor;
 #[cfg(feature = "checkout")]

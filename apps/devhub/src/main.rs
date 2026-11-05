@@ -23,6 +23,10 @@
 
 pub use makepad_widgets;
 
+/// counted, so `devhub heap <node>` can say what holds the hub's memory
+#[global_allocator]
+static HEAP: makepad_devhub::heap::Counted = makepad_devhub::heap::Counted;
+
 use makepad_devhub_conf::tray_glyph as glyph;
 mod graph;
 mod installed;
@@ -361,8 +365,12 @@ fn start_node(conf_path: PathBuf) -> Result<Option<NodeCore>, String> {
 }
 
 fn start_core() -> Result<Option<Core>, String> {
-    match std::env::var_os(NODE_CONF_ENV).filter(|p| !p.is_empty()) {
-        Some(p) => Ok(start_node(PathBuf::from(p))?.map(Core::Node)),
+    // before it starts anything: a run gets the handles it is given, never one of the hub's
+    makepad_devhub::os::keep_handles_to_self();
+    let conf = std::env::var_os(NODE_CONF_ENV).filter(|p| !p.is_empty()).map(|p| std::path::absolute(PathBuf::from(p)).map_err(|e| format!("{NODE_CONF_ENV}: {e}"))).transpose()?;
+    proto::settle_cwd()?;
+    match conf {
+        Some(p) => Ok(start_node(p)?.map(Core::Node)),
         // the master is the Mac's: on Windows devhub is always a node (its logon task's tray)
         None if cfg!(windows) => Ok(start_node(proto::home().join("node.conf"))?.map(Core::Node)),
         None => Ok(Some(Core::Master(start_master()?))),

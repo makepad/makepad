@@ -78,7 +78,7 @@ pub fn cleanup(work: &Path, lease: &str) -> Result<(), String> {
     relaxgit::forget(work, &format!("overlay-selftest-{lease}"))?;
     let store = Store::open("makepad")?;
     git::run(None, Some(&store.git_dir), &[], &["update-ref", "-d", &format!("{}overlay-selftest-{lease}", git::PUSHED)])?;
-    for p in [work.join("dev/lane").join(format!("overlay-selftest-{lease}")), relaxgit::overlay(work, &format!("overlay-selftest-{lease}"))] {
+    for p in [work.join("dev/lane").join(format!("overlay-selftest-{lease}")), relaxgit::lane_overlays(work, &format!("overlay-selftest-{lease}"))] {
         if p.exists() { std::fs::remove_dir_all(p).map_err(io)?; }
     }
     Ok(())
@@ -115,10 +115,11 @@ impl<'a> Rig<'a> {
         if import(&repo, lease)? != committed { return Err("fixture bundle imported a different commit".into()); }
         let pin = Pin { makepad: Store::open("makepad")?.rev(git::SYNCED_REF).ok_or("selftest: box has no synced makepad pin")?, commercial: Store::open("commercial")?.rev(git::SYNCED_REF) };
         let lane = format!("overlay-selftest-{lease}");
-        relaxgit::prepare(work, &lane, &pin)?;
+        relaxgit::prepare(work, &lane, lease, &pin)?;
         let empty = makepad_strict_json::Value::Obj(Vec::new());
-        relaxgit::finish(work, &lane, &pin, &root.join("empty"), &[], &[], &empty)?;
-        let selected = super::loaders::find_overlay(work, &lane, lease, &pin, None, build).map_err(|e| format!("JIT error selecting the dev JIT: {e}"))?;
+        let edits = relaxgit::overlay(work, &lane, lease);
+        relaxgit::finish(work, &edits, &pin, &root.join("empty"), &[], &[], &empty)?;
+        let selected = super::loaders::find_overlay(work, &lane, &edits, lease, &pin, None, build).map_err(|e| format!("JIT error selecting the dev JIT: {e}"))?;
         Ok(Self { work: root.join("box"), box_work: work.to_path_buf(), root, repo, binary: selected.binary, base, committed, cores, lease: lease.into(), build, spawn })
     }
 
@@ -156,7 +157,7 @@ impl<'a> Rig<'a> {
             _ => return Err(format!("unknown case {case}")),
         }
         let pin = Pin { makepad: sha.clone(), commercial: None };
-        let mut env = relaxgit::prepare(&self.work, lane, &pin)?;
+        let mut env = relaxgit::prepare(&self.work, lane, &self.lease, &pin)?;
         let (shipped, deleted) = super::ship::uncommitted(&tree, &pin)?;
         let bases = super::ship::bases_json(&tree, &pin, &shipped.iter().chain(&deleted).cloned().collect::<Vec<_>>())?;
         let bases = makepad_strict_json::parse(bases.as_bytes()).map_err(|e| format!("fixture bases: {e:?}"))?;
@@ -167,7 +168,7 @@ impl<'a> Rig<'a> {
             let dst = staged.join(path);
             std::fs::create_dir_all(dst.parent().unwrap()).and_then(|_| std::fs::copy(tree.join(path), dst)).map_err(io)?;
         }
-        relaxgit::finish(&self.work, lane, &pin, &staged, &shipped, &deleted, &bases)?;
+        relaxgit::finish(&self.work, &relaxgit::overlay(&self.work, lane, &self.lease), &pin, &staged, &shipped, &deleted, &bases)?;
         std::fs::create_dir_all(self.work.join("dev/target")).map_err(io)?;
         env.push(("CARGO_TARGET_DIR".into(), self.work.join("dev/target").to_string_lossy().into_owned()));
         Ok((tree, env))
@@ -184,12 +185,12 @@ impl<'a> Rig<'a> {
             .env("DEVHUB_FIXTURE_VALUE", if case == "build-env" { "env2" } else { "env1" });
         if case == "concurrent" {
             let jobs = (self.cores / 2).max(1);
-            cmd.env("MAKEPAD_RUN_JOBS", jobs.to_string()).env("MAKEPAD_RUN_O3_THREADS", (jobs / 2).max(1).to_string());
+            cmd.env("MAKEPAD_RUN_JOBS", jobs.to_string());
         }
         // The fixture repositories hold no makepad run std: both sides name the box's own explicitly, so
         // the overlay's automatic std check (which would print a disk-std notice) is not part of the diff.
         cmd.env("MAKEPAD_RUN_STD", self.box_work.join("dev/tree/libs/relax/compiler/std"));
-        for key in ["MAKEPAD_RUN_VFS", "MAKEPAD_RUN_WORKSPACE", "MAKEPAD_RUN_EDITS", "MAKEPAD_RUN_HOME", "MAKEPAD_RUN_CACHE_DIR"] { cmd.env_remove(key); }
+        for key in ["MAKEPAD_RUN_VFS", "MAKEPAD_RUN_WORKSPACE", "MAKEPAD_RUN_EDITS", "MAKEPAD_RUN_HOME", "MAKEPAD_RUN_CACHE_DIR", "MAKEPAD_RUN_CACHE_MAX"] { cmd.env_remove(key); }
         if overlay {
             cmd.envs(env.iter().cloned()).current_dir(self.work.join("dev/lane").join(tree.file_name().unwrap()).join("run"));
         } else {

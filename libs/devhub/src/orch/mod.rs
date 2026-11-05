@@ -6,7 +6,7 @@
 //! - [`jitlegs`]: long JIT correctness legs after input changes, outside every gate;
 //! - [`warm`]: warm dev JITs and test code caches on active lane boxes and one spare per lane;
 //! - [`allapps`]: `makepad check` of every app, example and WM package, hourly when idle;
-//! - [`push`]: the collapsed push of a requested commit or newest landed tip to origin/work;
+//! - [`push`]: a requested commit or the newest landed tip to origin/work, one commit per area ([`group`]);
 //! - [`live`]: a long-running app on a box that the worktree's edits hot-patch into;
 //! - [`roll`]: the self-update of the hubs, the WM-supervised services and the master itself;
 //! - [`show`]: the latest landed build of an app on one of the user's display devices, tracked;
@@ -22,6 +22,7 @@ pub mod arm;
 pub mod ci;
 pub mod ci_status;
 pub mod cli;
+pub mod group;
 pub mod jitlegs;
 pub mod warm;
 pub mod job;
@@ -109,7 +110,7 @@ pub fn start(ep: &makepad_remote::Endpoint, machine: &str, leases: Arc<LeaseMast
 }
 
 /// Starts the workflow threads, once the control socket listens: they ask for leases on it, and a
-/// job that asked before it was there failed for good (J389-J393, 2026-10-31).
+/// job that asked before it was there failed for good (five jobs, 2026-10-31).
 pub fn go() {
     let Some(ctx) = ctx().cloned() else { return };
     let c = ctx.clone();
@@ -133,7 +134,26 @@ pub fn go() {
     warm::start(ctx.clone());
     ci_status::start(ctx.clone());
     after::start(ctx.clone());
-    allapps::start(ctx);
+    allapps::start(ctx.clone());
+    // the workflows read their records back above: a lease of the master's own work that no
+    // record names has nothing that follows it, and frees its box now
+    let named = ctx.store.read(|d| {
+        let mut ids = std::collections::HashSet::new();
+        strings_of(&d.to_value(), &mut ids);
+        ids
+    });
+    ctx.leases.end_unfollowed(&|id| named.contains(id));
+}
+
+/// Every string in `v` (a record names a lease by its id, wherever it sits).
+fn strings_of(v: &makepad_strict_json::Value, out: &mut std::collections::HashSet<String>) {
+    use makepad_strict_json::Value;
+    match v {
+        Value::Str(s) => { out.insert(s.clone()); }
+        Value::Arr(a) => a.iter().for_each(|x| strings_of(x, out)),
+        Value::Obj(o) => o.iter().for_each(|(_, x)| strings_of(x, out)),
+        _ => {}
+    }
 }
 
 static CTX: std::sync::OnceLock<Arc<Ctx>> = std::sync::OnceLock::new();
@@ -198,25 +218,30 @@ pub(crate) fn fits(needs: &[(String, String)], caps: Option<&crate::lease::Caps>
 }
 
 /// Preempts background work for lane work that waited [`PREEMPT_AFTER_MS`]: the youngest running
-/// background lease on a box the waiting lease fits ends cleanly; its leg asks again.
+/// background lease on a box the waiting lease then starts on ends cleanly; its leg asks again.
+/// Ending one for anything less loses its work and gains nothing: a timed lease waiting for
+/// another box, and screen leases behind another lane's, ended CI leases every 30 s, so one 47 s
+/// shard took 171 attempts and three hours (11-04).
 pub fn preempt(ctx: &Ctx, last: &mut u64) {
     use crate::lease::sched::State;
     let now = crate::proto::wall_ms();
     let view: Vec<_> = ctx.leases.view().into_iter().filter(|l| l.priority != crate::lease::Priority::Interactive).collect();
     if now.saturating_sub(*last) < PREEMPT_AFTER_MS { return; }
     // Interactive work drains successors in the scheduler; only background work uses this path.
-    let mut cands: Vec<_> = view.iter().filter(|l| l.state == State::Queued && crate::lease::sched::owed_verify(l)).collect();
+    let mut cands: Vec<_> = view.iter().filter(|l| l.state == State::Queued && crate::lease::sched::owed_leg(l)).collect();
     cands.extend(view.iter().filter(|l| l.state == State::Queued && !leg::is_background(l) && now.saturating_sub(l.asked_ms) > PREEMPT_AFTER_MS));
-    cands.sort_by_key(|l| (!crate::lease::sched::owed_verify(l), l.asked_ms));
-    let nodes = ctx.leases.nodes();
+    cands.sort_by_key(|l| (!crate::lease::sched::owed_leg(l), l.asked_ms));
+    // what may end, by box (owed background work asked at OWED_PRIO: it keeps its box)
+    let mut boxes: std::collections::BTreeMap<&str, Vec<&crate::lease::sched::Lease>> = Default::default();
+    for l in view.iter().filter(|l| matches!(l.state, State::Granted | State::Starting) && l.req.prio >= leg::BACKGROUND_PRIO) {
+        if let (false, Some(node)) = (matches!(l.req.kind, crate::lease::Kind::Long | crate::lease::Kind::Test | crate::lease::Kind::Screen | crate::lease::Kind::Timed), l.node.as_deref()) {
+            boxes.entry(node).or_default().push(l);
+        }
+    }
     let victim_for = |starved: &crate::lease::sched::Lease| {
-        view.iter()
-            .filter(|l| matches!(l.state, State::Granted | State::Starting) && l.req.prio >= leg::BACKGROUND_PRIO)
-            .filter(|l| !matches!(l.req.kind, crate::lease::Kind::Long | crate::lease::Kind::Test | crate::lease::Kind::Screen | crate::lease::Kind::Timed) && starved.req.conflicts(&l.req))
-            // owed background work (it asked at OWED_PRIO) keeps its box
-            .filter(|l| l.node.as_ref().is_some_and(|n| nodes.iter().any(|x| &x.name == n && fits(&starved.req.needs, x.caps.as_ref()))))
-            // (a request pinned to a box frees only that box)
-            .filter(|l| starved.req.node.is_none() || starved.req.node == l.node)
+        boxes.iter()
+            .filter(|(node, here)| ctx.leases.starts_without(&starved.id, node, &here.iter().map(|l| l.id.clone()).collect::<Vec<_>>()))
+            .flat_map(|(_, here)| here.iter().copied())
             .max_by_key(|l| l.granted_ms.unwrap_or(0))
     };
     let Some((starved, victim)) = cands.into_iter().find_map(|c| victim_for(c).map(|v| (c, Some(v)))) else { return };

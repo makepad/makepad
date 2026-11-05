@@ -1,5 +1,5 @@
 //! The CI status for other programs: `GET /ci/v1/status`, read-only JSON, served by the master from
-//! its verify state (was tools/ci's status endpoint on the CI mini; same route, same version-1
+//! its verify state (was tools/ci's status endpoint on the CI Mac; same route, same version-1
 //! document, so Scope's CI strip reads it with only its `url` changed).
 //!
 //! The branch `work` twice: CI's own result first, then verify's, each with its tip (the pair
@@ -125,6 +125,7 @@ fn script_verdict(leg: &str) -> &'static str {
         "ok" => "green",
         "fail" => "red",
         "run" => "running",
+        crate::state::NOT_RUN => crate::state::NOT_RUN,
         _ => "waiting",
     }
 }
@@ -134,6 +135,7 @@ fn step_state(leg: &str) -> &'static str {
         "ok" => "passed",
         "fail" => "failed",
         "run" => "running",
+        crate::state::NOT_RUN => crate::state::NOT_RUN,
         _ => "waiting",
     }
 }
@@ -265,7 +267,7 @@ mod tests {
     use crate::state::{Blame, Failure, Run, Tip};
 
     fn leg(name: &str, state: &str, log: &str) -> Leg {
-        Leg { name: name.into(), state: state.into(), lease: "L1".into(), node: "101".into(), summary: format!("CI-{state}"), errors: Vec::new(), log: log.into(), run_n: 0 }
+        Leg { name: name.into(), state: state.into(), lease: "L1".into(), node: "node-a".into(), summary: format!("CI-{state}"), errors: Vec::new(), log: log.into(), run_n: 0 }
     }
 
     fn get<'a>(v: &'a Value, path: &[&str]) -> &'a Value {
@@ -333,7 +335,7 @@ mod tests {
         use crate::state::{CiRun, CiShard};
         let mut d = Doc::default();
         let p = Pair::new(&"e".repeat(40), &"c".repeat(40));
-        let shard = |id: &str, state: &str, errors: Vec<String>| CiShard { id: id.into(), state: state.into(), node: "106".into(), summary: "x".into(), errors, ..Default::default() };
+        let shard = |id: &str, state: &str, errors: Vec<String>| CiShard { id: id.into(), state: state.into(), node: "node-c".into(), summary: "x".into(), errors, ..Default::default() };
         d.ci.run = Some(CiRun { id: "R".into(), pair: p.clone(), started_ms: 10_000, verdict: "running".into(), shards: vec![shard("smoke:apps/calc", "fail", vec!["error[E1]: boom".into()]), shard("jit:01", "run", vec![])], ..Default::default() });
         let v = status_value(&d, 1, &|_| String::new());
         let br = get(&v, &["branches", "0"]);
@@ -354,7 +356,7 @@ mod tests {
         use crate::state::{CiRun, CiShard};
         let mut d = Doc::default();
         let (old, red, newer) = (Pair::new(&"1".repeat(40), &"c".repeat(40)), Pair::new(&"2".repeat(40), &"c".repeat(40)), Pair::new(&"3".repeat(40), &"c".repeat(40)));
-        let shard = |state: &str| CiShard { id: "smoke:windows:apps/x".into(), state: state.into(), node: "105".into(), summary: "x".into(), errors: vec!["E0433: failed to resolve".into()], ..Default::default() };
+        let shard = |state: &str| CiShard { id: "smoke:windows:apps/x".into(), state: state.into(), node: "node-b".into(), summary: "x".into(), errors: vec!["E0433: failed to resolve".into()], ..Default::default() };
         let run = |id: &str, pair: &Pair, verdict: &str, ended_ms: u64| CiRun { id: id.into(), pair: pair.clone(), started_ms: ended_ms - 1, ended_ms, verdict: verdict.into(), shards: vec![shard(if verdict == "ok" { "ok" } else { "fail" })], ..Default::default() };
         d.ci.runs.push(run("128", &old, "ok", 1_000));
         d.ci.runs.push(run("129", &red, "fail", 2_000));

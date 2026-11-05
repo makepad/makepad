@@ -226,7 +226,7 @@ mod tests {
 
     #[test]
     fn jit_flags() {
-        let f: Vec<String> = ["--jit", "sandbox,code", "--module", "x", "--jit=files"].iter().map(|s| s.to_string()).collect();
-        assert_eq!(super::jit_apps(&f), vec!["sandbox", "code", "files"]);
+        let f: Vec<String> = ["--jit", "foo,code", "--module", "x", "--jit=files"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(super::jit_apps(&f), vec!["foo", "code", "files"]);
     }
 }

@@ -37,8 +37,9 @@ makepad-filesystem-watcher = { path = "../filesystem_watcher", optional = true }
 default = ["checkout"]
 checkout = ["dep:relax-base", "dep:makepad-app-registry", "dep:makepad-filesystem-watcher", "dep:makepad-ci-judge"]
 
-# the hosted wire's fingerprint: a box's WM must speak it for gui work (caps::display)
-[target.'cfg(target_os = "linux")'.dependencies]
+# the hosted wire's fingerprint: a box's WM must speak it for gui work (caps::display; Android
+# shares the Linux probes)
+[target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
 makepad-studio-protocol = { path = "../../platform/studio" }
 
 [target.'cfg(windows)'.dependencies.windows]

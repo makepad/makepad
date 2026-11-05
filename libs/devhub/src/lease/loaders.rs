@@ -25,6 +25,8 @@
 //! `loader_build.sh` or a lease's plain `cargo run` of the JIT. They leave [`MARK`]; [`publish`]
 //! records Cargo's dep-info and workspace-wide inputs only if the tree still holds that build's
 //! sources. [`find`] selects a held binary for those same blobs, without rebuilding for mtimes.
+//! A native tree with edits has no blobs to key: its run reads [`tree_id`] before its cargo starts
+//! and the binary goes to the dev JIT store under it ([`TreeBuild`]), where its next run finds it.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -130,6 +132,16 @@ pub fn find(root: &Path, target: &Path) -> Option<(String, PathBuf)> {
         let p = path(target, &k);
         (!inputs.iter().any(|i| dirty.contains(i)) && p.is_file() && key(compiler(), &inputs, &|f| index.get(f).cloned()).as_deref() == Some(k.as_str())).then_some((k, p))
     })
+    .map(|(k, p)| {
+        used(target, &k);
+        (k, p)
+    })
+}
+
+/// A loader in use is the newest: pruning goes by `.inputs` mtime.
+fn used(target: &Path, key: &str) {
+    let p = path(target, key).with_file_name(format!("{PREFIX}{key}.inputs"));
+    let _ = std::fs::File::options().append(true).open(p).and_then(|f| f.set_modified(std::time::SystemTime::now()));
 }
 
 /// Pinned manifests define the JIT's path-package closure, including added and deleted files.
@@ -322,55 +334,16 @@ pub(crate) fn inputs(index: &std::collections::BTreeMap<String, String>, bytes: 
     Ok(Inputs { files: files.into_iter().collect(), crate_dirs: dirs, extra_dirs, root_manifest })
 }
 
-/// The dev JIT ids a pinned makepad commit selects, in compiler order.
+/// The dev JIT ids a pinned makepad commit selects, in compiler order (its tree read in process).
 #[cfg(feature = "checkout")]
 pub(crate) fn commit_ids(repo: &Path, sha: &str, compilers: &[String]) -> Result<Vec<String>, String> {
-    use std::cell::RefCell;
-    use std::collections::BTreeMap;
-    use std::io::{BufRead, BufReader, Read, Write};
-    use std::process::Stdio;
     if compilers.iter().all(|c| c.is_empty()) { return Ok(Vec::new()); }
-    let out = crate::git_exec::command().arg("-C").arg(repo).args(["ls-tree", "-r", "-z", "--full-tree", sha])
-        .stdin(Stdio::null()).output().map_err(|e| format!("git ls-tree: {e}"))?;
-    if !out.status.success() { return Err(format!("git ls-tree: {}", String::from_utf8_lossy(&out.stderr).trim())); }
-    let listing = String::from_utf8(out.stdout).map_err(|e| e.to_string())?;
-    let index: BTreeMap<String, String> = listing.split('\0').filter_map(|e| {
-        let (meta, path) = e.split_once('\t')?;
-        let mut words = meta.split_whitespace();
-        words.next()?;
-        if words.next()? != "blob" { return None; }
-        Some((path.to_string(), words.next()?.to_string()))
-    }).collect();
-    let mut child = crate::git_exec::command().arg("-C").arg(repo).args(["cat-file", "--batch"])
-        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().map_err(|e| format!("git cat-file: {e}"))?;
-    let result = (|| -> Result<Vec<String>, String> {
-        let input = child.stdin.take().ok_or("git cat-file: no stdin")?;
-        let output = BufReader::new(child.stdout.take().ok_or("git cat-file: no stdout")?);
-        let batch = RefCell::new((input, output));
-        let bytes = |path: &str| -> Result<Vec<u8>, String> {
-            let oid = index.get(path).ok_or_else(|| format!("JIT manifest missing from pin: {path}"))?;
-            let (input, output) = &mut *batch.borrow_mut();
-            let io = |e| format!("git cat-file: {e}");
-            writeln!(input, "{oid}").map_err(io)?;
-            input.flush().map_err(io)?;
-            let mut head = String::new();
-            output.read_line(&mut head).map_err(io)?;
-            let words: Vec<_> = head.split_whitespace().collect();
-            if words.len() != 3 || words[0] != oid.as_str() || words[1] != "blob" { return Err(format!("git cat-file: {}", head.trim())); }
-            let size = words[2].parse::<usize>().map_err(|e| e.to_string())?;
-            let mut bytes = vec![0; size];
-            output.read_exact(&mut bytes).map_err(io)?;
-            let mut end = [0];
-            output.read_exact(&mut end).map_err(io)?;
-            if end != [b'\n'] { return Err("git cat-file: missing blob terminator".into()); }
-            Ok(bytes)
-        };
-        let inputs = inputs(&index, &bytes)?;
-        compilers.iter().filter(|c| !c.is_empty()).map(|c| inputs.key(c, &|p| index.get(p).cloned()).ok_or_else(|| "JIT input missing from pin".to_string())).collect()
-    })();
-    let _ = child.kill();
-    let _ = child.wait();
-    result
+    let index = crate::gitread::files_at(repo, sha)?;
+    let bytes = |path: &str| -> Result<Vec<u8>, String> {
+        crate::gitread::blob(repo, index.get(path).ok_or_else(|| format!("JIT manifest missing from pin: {path}"))?)
+    };
+    let inputs = inputs(&index, &bytes)?;
+    compilers.iter().filter(|c| !c.is_empty()).map(|c| inputs.key(c, &|p| index.get(p).cloned()).ok_or_else(|| "JIT input missing from pin".to_string())).collect()
 }
 
 /// The native tree's current content key in the dev JIT store. Use the same manifest closure
@@ -407,7 +380,7 @@ pub fn tree_id(root: &Path) -> Option<String> {
 /// The lane pin's base JIT key and its inputs, from RELAXGIT only.
 #[cfg(feature = "checkout")]
 pub fn overlay_id(work: &Path, pin: &super::Pin) -> Result<(String, Vec<String>), String> {
-    let index = super::relaxgit::bases(work, pin)?;
+    let index = super::relaxgit::bases(work, pin, &|_| true)?;
     let inputs = pinned_inputs(work, pin, &index)?;
     if compiler().is_empty() { return Err("dev JIT: rustc did not report its compiler commit".into()); }
     let id = inputs.key(compiler(), &|p| index.get(p).cloned()).ok_or("overlay: missing JIT input blob")?;
@@ -425,7 +398,7 @@ pub struct Overlay {
 /// the requester's check only cancels its own resolution and wait for the per-id lock.
 #[cfg(feature = "checkout")]
 pub struct OverlayBuild<'a> {
-    /// Cargo parallelism, independent of a prebuild lease's small reservation.
+    /// Cargo parallelism: the box's cores, independent of the asking lease's reservation.
     pub jobs: u32,
     /// The store build runs at nice 19 (a Unix prebuild).
     pub niced: bool,
@@ -433,6 +406,8 @@ pub struct OverlayBuild<'a> {
     pub cancelled: &'a std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub say: &'a dyn Fn(&str),
     pub pending: &'a dyn Fn(&str),
+    /// a warning for the master's inbox (a store build that died or failed)
+    pub warn: &'a dyn Fn(&str),
     pub active: &'a dyn Fn() -> Result<(), String>,
 }
 
@@ -442,14 +417,14 @@ pub struct OverlayBuild<'a> {
 /// built from the pin with those edits in the lane's own build tree. A lane never runs a JIT
 /// older than its tree (its app stopped at startup: "The JIT itself changed").
 #[cfg(feature = "checkout")]
-pub fn find_overlay(work: &Path, lane: &str, lease: &str, pin: &super::Pin, requested: Option<&str>, build: &OverlayBuild<'_>) -> Result<Overlay, String> {
+pub fn find_overlay(work: &Path, lane: &str, edits: &Path, lease: &str, pin: &super::Pin, requested: Option<&str>, build: &OverlayBuild<'_>) -> Result<Overlay, String> {
     (build.active)()?;
     let store = super::jitstore::Store::new(work);
-    let index = super::relaxgit::bases(work, pin)?;
+    let index = super::relaxgit::bases(work, pin, &|_| true)?;
     let inputs = pinned_inputs(work, pin, &index)?;
     if compiler().is_empty() { return Err("dev JIT: rustc did not report its compiler commit".into()); }
     let pinned = inputs.key(compiler(), &|p| index.get(p).cloned()).ok_or("overlay: missing JIT input blob")?;
-    let edits = lane_edits(work, lane, &index)?;
+    let edits = lane_edits(edits, &index)?;
     // Only an edit the pin's inputs could see (one of them, a new file in one of its crates or
     // named directories) can change the JIT; the lane's tree's own inputs say whether it does.
     let input = |p: &String| inputs.files.binary_search(p).is_ok() || crate_input(p, &inputs.crate_dirs, &|m| edits.tree.contains_key(m))
@@ -478,7 +453,7 @@ pub fn find_overlay(work: &Path, lane: &str, lease: &str, pin: &super::Pin, requ
     let selected = requested.unwrap_or(&id);
     (build.active)()?;
     let binary = if selected == id {
-        store.ensure(&id, lease, build.say, build.pending, build.active, build.cancelled, |dst, active| build_dev(&base, pin, &files, &id, dst, apply.as_ref().map(|e| (e, &index)), build, active))?
+        store.ensure(&id, lease, build.say, build.pending, build.warn, build.active, build.cancelled, |dst, active, step| build_dev(&store, &base, pin, &files, &id, dst, apply.as_ref().map(|e| (e, &index)), build, active, step))?
     } else {
         store.hold(selected, lease)?;
         store.lookup(selected).ok_or_else(|| format!("overlay: dev JIT {selected} is not on this box; held keys: {}", store.snapshot().ids.join(", ")))?
@@ -498,15 +473,22 @@ struct LaneEdits {
 }
 
 #[cfg(feature = "checkout")]
-fn lane_edits(work: &Path, lane: &str, index: &std::collections::BTreeMap<String, String>) -> Result<LaneEdits, String> {
-    let dir = super::relaxgit::overlay(work, lane);
+fn lane_edits(dir: &Path, index: &std::collections::BTreeMap<String, String>) -> Result<LaneEdits, String> {
+    let dir = dir.to_path_buf();
     let deleted: HashSet<String> = std::fs::read_to_string(dir.join(".makepad-run-deleted")).unwrap_or_default().lines().map(str::to_string).collect();
     let records = std::fs::read_to_string(dir.join(".makepad-run-edits")).map_err(|e| format!("overlay: edit records: {e}"))?;
     let mut tree = index.clone();
     for p in &deleted { tree.remove(p); }
     let mut edited = HashSet::new();
     for p in records.lines().filter_map(|l| l.split_once('\t').map(|(p, _)| p)).filter(|p| !deleted.contains(*p)) {
-        let bytes = edit_bytes(&dir, p)?;
+        let bytes = match read_edit(&dir.join(p)) {
+            Ok(bytes) => bytes,
+            // no file, no edit (the VFS's own rule, `reconcile_edits`): the app wrote a temp file
+            // into its virtual folder, which recorded it, and renamed it away (a Fab project's
+            // thumbnail refused its live session for good, 11-04)
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(format!("overlay: {p}: {e}")),
+        };
         let mut object = format!("blob {}\0", bytes.len()).into_bytes();
         object.extend_from_slice(&bytes);
         let blob = relax_base::gitstore::hex(&relax_base::gitstore::sha1(&object));
@@ -519,9 +501,12 @@ fn lane_edits(work: &Path, lane: &str, index: &std::collections::BTreeMap<String
 /// An edit's bytes as git hashes them (a symlink: its target).
 #[cfg(feature = "checkout")]
 fn edit_bytes(dir: &Path, p: &str) -> Result<Vec<u8>, String> {
-    let file = dir.join(p);
-    let m = std::fs::symlink_metadata(&file).map_err(|e| format!("overlay: {p}: {e}"))?;
-    if m.file_type().is_symlink() { std::fs::read_link(&file).map(|t| t.to_string_lossy().as_bytes().to_vec()) } else { std::fs::read(&file) }.map_err(|e| format!("overlay: {p}: {e}"))
+    read_edit(&dir.join(p)).map_err(|e| format!("overlay: {p}: {e}"))
+}
+
+#[cfg(feature = "checkout")]
+fn read_edit(file: &Path) -> std::io::Result<Vec<u8>> {
+    if std::fs::symlink_metadata(file)?.file_type().is_symlink() { std::fs::read_link(file).map(|t| t.to_string_lossy().as_bytes().to_vec()) } else { std::fs::read(file) }
 }
 
 /// The lane's edits, put on the pin in the lane's own build tree.
@@ -589,25 +574,68 @@ fn apply_edits(base: &Path, root: &Path, e: &Edits, index: &std::collections::BT
     Ok(())
 }
 
+/// The pin's files back at each applied edit outside `covered`, which leaves the list before the
+/// tree moves: a build that dies on the way must not leave a path to restore that the new pin lacks.
+#[cfg(feature = "checkout")]
+fn restore_uncovered(base: &Path, root: &Path, applied: &[(bool, String)], covered: &HashSet<&str>) -> Result<(), String> {
+    restore(root, &applied.iter().filter(|(_, p)| !covered.contains(p.as_str())).collect::<Vec<_>>())?;
+    let rest: String = applied.iter().filter(|(_, p)| covered.contains(p.as_str())).map(|(t, p)| format!("{}\t{p}\n", if *t { "t" } else { "u" })).collect();
+    std::fs::write(base.join(TREE_EDITS), rest).map_err(|e| format!("{}: {e}", base.join(TREE_EDITS).display()))
+}
+
+/// A git killed in this tree leaves its lock, and every later git refuses. Builds hold the tree
+/// lock, so the only other git here is one a dead hub left finishing, for seconds (the build that
+/// meets its lock fails, the next one goes on): a lock this old has no owner.
+#[cfg(feature = "checkout")]
+fn clear_dead_locks(dir: &Path) -> Result<(), String> {
+    const OWNERLESS: std::time::Duration = std::time::Duration::from_secs(60);
+    for lock in crate::sync::git::run(Some(dir), None, &[], &["rev-parse", "--git-path", "index.lock", "--git-path", "HEAD.lock"])?.lines() {
+        let lock = dir.join(lock.trim());
+        if std::fs::metadata(&lock).and_then(|m| m.modified()).is_ok_and(|t| t.elapsed().is_ok_and(|age| age >= OWNERLESS)) {
+            std::fs::remove_file(&lock).map_err(|e| format!("{}: {e}", lock.display()))?;
+        }
+    }
+    Ok(())
+}
+
+/// `dir` at `sha`, from wherever it stands. Only this tree's builds touch it, one at a time, so
+/// what differs from its HEAD is a move that died half way (`read-tree` moved the index, its hub
+/// ended before `update-ref` moved HEAD) and nobody's work. Files already as `sha` has them are
+/// not written, so cargo's fingerprints hold.
+#[cfg(feature = "checkout")]
+fn move_tree(dir: &Path, sha: &str, dirty: &dyn Fn(&Path) -> Result<Option<String>, String>, say: &dyn Fn(&str)) -> Result<(), String> {
+    use crate::sync::git::run;
+    let from = run(Some(dir), None, &[], &["rev-parse", "HEAD"])?;
+    let stray = dirty(dir)?;
+    if let Some(p) = &stray { say(&format!("devhub: {} was left by a dead move ({p}); moving it to {sha}", dir.display())); }
+    if from.trim() != sha || stray.is_some() {
+        run(Some(dir), None, &[], &["read-tree", "--reset", "-u", sha])?;
+        run(Some(dir), None, &[], &["update-ref", "--no-deref", "HEAD", sha])?;
+    }
+    Ok(())
+}
+
 /// Only committed states enter a build tree, and in a lane's own tree its edits. The tree lock
 /// covers moving, building and publishing. `base` is `<work>/dev` (the pins' JITs) or
 /// [`lane_jit_dir`] (a lane's own, with `edits`).
 #[cfg(feature = "checkout")]
-fn build_dev(base: &Path, pin: &super::Pin, inputs: &[String], id: &str, dst: &Path, edits: Option<(&Edits, &std::collections::BTreeMap<String, String>)>, build: &OverlayBuild<'_>, active: &dyn Fn() -> Result<(), String>) -> Result<(), String> {
+#[allow(clippy::too_many_arguments)]
+fn build_dev(jits: &super::jitstore::Store, base: &Path, pin: &super::Pin, inputs: &[String], id: &str, dst: &Path, edits: Option<(&Edits, &std::collections::BTreeMap<String, String>)>, build: &OverlayBuild<'_>, active: &dyn Fn() -> Result<(), String>, step: &dyn Fn(&str)) -> Result<(), String> {
     use crate::sync::git::{run, Store};
     std::fs::create_dir_all(base).map_err(|e| format!("{}: {e}", base.display()))?;
-    let _tree = super::jitstore::lock_while(&base.join("tree.lock"), false, active, &|| {})?;
+    let _tree = super::jitstore::lock_tree(jits, &base.join("tree.lock"), id, active, step)?;
     active()?;
+    step(&format!("checking out {}", pin.short()));
     let root = base.join("tree");
     let target = base.join("target");
     let commercial = root.join("apps/commercial");
+    for dir in [&root, &commercial] { if dir.join(".git").exists() { clear_dead_locks(dir)?; } }
     // the edits the tree holds stay where the next ones cover them on the same pin
     let head = |dir: &Path| dir.join(".git").exists().then(|| git(dir, &["rev-parse", "HEAD"]).ok()).flatten().map(|h| h.trim().to_string());
     let at_pin = head(&root).as_deref() == Some(pin.makepad.as_str()) && head(&commercial) == pin.commercial;
     let covered: HashSet<&str> = edits.filter(|_| at_pin).map(|(e, _)| e.write.iter().chain(&e.remove).map(String::as_str).collect()).unwrap_or_default();
     let applied = applied_edits(base);
-    restore(&root, &applied.iter().filter(|(_, p)| !covered.contains(p.as_str())).collect::<Vec<_>>())?;
-    if edits.is_none() { let _ = std::fs::remove_file(base.join(TREE_EDITS)); }
+    restore_uncovered(base, &root, &applied, &covered)?;
     let kept: HashSet<&str> = applied.iter().filter(|(t, p)| *t && covered.contains(p.as_str())).map(|(_, p)| p.as_str()).collect();
     if pin.commercial.is_none() && commercial.join(".git").exists() {
         let store = Store::open("commercial")?;
@@ -621,25 +649,21 @@ fn build_dev(base: &Path, pin: &super::Pin, inputs: &[String], id: &str, dst: &P
         };
         if dir.join(".git").exists() {
             if store.admin_of(&dir).is_none() { return Err(format!("dev JIT: {} is not owned by the bare store", dir.display())); }
-            let from = run(Some(&dir), None, &[], &["rev-parse", "HEAD"])?;
-            if let Some(p) = dirty(&dir)? { return Err(format!("dev JIT: {} has uncommitted files ({p})", dir.display())); }
             let lockfile = dir.join("Cargo.lock");
             if lockfile.exists() && run(Some(&dir), None, &[], &["ls-files", "--", "Cargo.lock"])?.trim().is_empty() { std::fs::remove_file(&lockfile).map_err(|e| format!("{}: {e}", lockfile.display()))?; }
-            if from.trim() != sha {
-                run(Some(&dir), None, &[], &["read-tree", "-m", "-u", from.trim(), sha])?;
-                run(Some(&dir), None, &[], &["update-ref", "--no-deref", "HEAD", sha])?;
-            }
+            move_tree(&dir, sha, &dirty, build.say)?;
         } else {
             std::fs::create_dir_all(dir.parent().ok_or("dev tree parent")?).map_err(|e| format!("{}: {e}", dir.display()))?;
             // a tree removed with its directory (lane cleanup, disk reclaim) is still registered
             run(None, Some(&store.git_dir), &[], &["worktree", "prune"])?;
             run(None, Some(&store.git_dir), &[], &["worktree", "add", "--detach", &dir.to_string_lossy(), sha])?;
         }
-        if let Some(p) = dirty(&dir)? { return Err(format!("dev JIT: {} has uncommitted files ({p})", dir.display())); }
+        if let Some(p) = dirty(&dir)? { return Err(format!("dev JIT: {} still differs from {sha} after moving to it ({p})", dir.display())); }
     }
     // The lockfile is generated locally when it is not tracked; never carry another pin's resolution.
     if !inputs.iter().any(|p| p == "Cargo.lock") && root.join("Cargo.lock").exists() { std::fs::remove_file(root.join("Cargo.lock")).map_err(|e| format!("{}: {e}", root.join("Cargo.lock").display()))?; }
     if let Some((e, index)) = edits { apply_edits(base, &root, e, index)?; }
+    step("cargo");
     build_tree(&root, &target, pin, inputs, id, dst, build, active)
 }
 
@@ -678,8 +702,7 @@ fn build_tree(root: &Path, target: &Path, pin: &super::Pin, inputs: &[String], i
 }
 
 /// Publish by rename; Cargo can replace its output without changing a held binary.
-#[cfg(feature = "checkout")]
-fn publish_binary(binary: &Path, dst: &Path, publish: &dyn Fn(&Path, &Path) -> Result<(), String>) -> Result<(), String> {
+pub(super) fn publish_binary(binary: &Path, dst: &Path, publish: &dyn Fn(&Path, &Path) -> Result<(), String>) -> Result<(), String> {
     let tmp = dst.with_file_name(format!("{}.part", dst.file_name().unwrap().to_string_lossy()));
     let _ = std::fs::remove_file(&tmp);
     let result = std::fs::hard_link(binary, &tmp).or_else(|_| std::fs::copy(binary, &tmp).map(|_| ()))
@@ -732,14 +755,8 @@ pub fn cargo_form(cmd: Vec<String>) -> Vec<String> {
 /// What cargo's dep-info names under the tree: tracked files only (it also lists folders, and what
 /// is outside the tree comes with the compiler or Cargo.lock), plus the workspace-wide files.
 fn inputs_of(depinfo: &str, root: &Path, index: &HashMap<String, String>) -> Vec<String> {
-    let list = depinfo.split_once(": ").map_or("", |(_, l)| l).replace("\\ ", "\0");
-    let mut out: Vec<String> = list
-        .split_whitespace()
-        .map(|p| p.replace('\0', " "))
-        .filter_map(|p| match Path::new(&p).strip_prefix(root) {
-            Ok(r) => Some(r.display().to_string()),
-            Err(_) => (!p.starts_with('/')).then_some(p),
-        })
+    let mut out: Vec<String> = dep_files(depinfo, root)
+        .into_iter()
         .chain(["Cargo.toml", "Cargo.lock", ".cargo/config.toml"].iter().map(|s| s.to_string()))
         .filter(|p| index.contains_key(p))
         .collect();
@@ -748,9 +765,33 @@ fn inputs_of(depinfo: &str, root: &Path, index: &HashMap<String, String>) -> Vec
     out
 }
 
+/// The files under `root` a dep-info file names, from the root.
+fn dep_files(depinfo: &str, root: &Path) -> Vec<String> {
+    let list = depinfo.split_once(": ").map_or("", |(_, l)| l).replace("\\ ", "\0");
+    list.split_whitespace()
+        .map(|p| p.replace('\0', " "))
+        .filter_map(|p| match Path::new(&p).strip_prefix(root) {
+            Ok(r) => Some(r.display().to_string()),
+            Err(_) => (!p.starts_with('/')).then_some(p),
+        })
+        .collect()
+}
+
+/// A run's cargo build of a native tree, by what the tree held before it started.
+pub struct TreeBuild {
+    pub store: super::jitstore::Store,
+    /// [`tree_id`] of the tree
+    pub key: String,
+    /// taken before the key was read: a file written later is not what the key says
+    pub asked: std::time::SystemTime,
+}
+
 /// Publishes the binary a run built, when it left [`MARK`]. Ok(Some(key)): published; Ok(None): no
-/// mark; Err: why it is not shared (the tree no longer holds what it was built from).
-pub fn publish(root: &Path, target: &Path) -> Result<Option<String>, String> {
+/// mark; Err: why it is not shared (the tree no longer holds what it was built from). A tree with
+/// edited inputs goes to the dev JIT store by `own`, its key from before the build: with shipped
+/// edits, each lease's undo and ship move the mtimes, and its cargo builds again (2.5 min of
+/// relax crates for the same sources).
+pub fn publish(root: &Path, target: &Path, own: Option<&TreeBuild>) -> Result<Option<String>, String> {
     let mark = target.join(MARK);
     if !mark.exists() {
         return Ok(None);
@@ -767,7 +808,14 @@ pub fn publish(root: &Path, target: &Path) -> Result<Option<String>, String> {
         return Err(format!("makepad.d names only {} tracked files", inputs.len()));
     }
     if let Some(p) = inputs.iter().find(|p| dirty.contains(*p)) {
-        return Err(format!("{p} is edited"));
+        let Some(own) = own else { return Err(format!("{p} is edited")) };
+        let generated = |f: &String| Path::new(f).starts_with(target) || root.join(f).starts_with(target);
+        // newer than the binary: cargo failed, the binary is an earlier tree's; newer than the key: not what it says
+        if let Some(p) = dep_files(&dep, root).iter().find(|f| !generated(f) && std::fs::metadata(root.join(f)).and_then(|m| m.modified()).map_or(true, |t| t > built || t > own.asked)) {
+            return Err(format!("{p} changed after the build started"));
+        }
+        own.store.keep(&own.key, &bin)?;
+        return Ok(Some(own.key.clone()));
     }
     // cargo's own rule: an input newer than the binary means it was not built from this
     if let Some(p) = inputs.iter().find(|p| std::fs::metadata(root.join(p)).and_then(|m| m.modified()).map_or(true, |t| t > built)) {
@@ -775,9 +823,17 @@ pub fn publish(root: &Path, target: &Path) -> Result<Option<String>, String> {
     }
     let k = key(compiler(), &inputs, &|f| index.get(f).cloned()).ok_or("an input is not tracked")?;
     let dst = path(target, &k);
-    let _ = std::fs::remove_file(&dst);
-    // a link: cargo replaces target/host/makepad by a new file, never writes into it
-    std::fs::hard_link(&bin, &dst).or_else(|_| std::fs::copy(&bin, &dst).map(|_| ())).map_err(|e| format!("{}: {e}", dst.display()))?;
+    // one key is one build: a published binary is never unlinked or replaced, since a loader that
+    // runs from it would lose its own path (current_exe)
+    if !dst.is_file() {
+        let part = dst.with_file_name(format!("{PREFIX}{k}.new"));
+        let _ = std::fs::remove_file(&part);
+        // a link: cargo replaces target/host/makepad by a new file, never writes into it
+        std::fs::hard_link(&bin, &part)
+            .or_else(|_| std::fs::copy(&bin, &part).map(|_| ()))
+            .and_then(|_| std::fs::rename(&part, &dst))
+            .map_err(|e| format!("{}: {e}", dst.display()))?;
+    }
     write_inputs(target, &k, &(inputs.join("\n") + "\n"))?;
     prune(target);
     Ok(Some(k))
@@ -849,6 +905,22 @@ mod tests {
         assert_eq!(inputs_of(dep, Path::new("/r"), &index), vec!["Cargo.lock", "a/b c", "tools/x.rs"]);
     }
 
+    /// An app writes a temp file into its virtual folder and renames it: the record stays, the
+    /// file does not, and the lane's session goes on.
+    #[test]
+    fn a_recorded_edit_whose_file_is_gone_is_no_edit() {
+        let work = std::env::temp_dir().join(format!("devhub-edit-gone-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&work);
+        let dir = crate::lease::relaxgit::overlay(&work, "lane", "L1");
+        std::fs::create_dir_all(dir.join("vase")).unwrap();
+        std::fs::write(dir.join("vase/a.thumb.png"), "png").unwrap();
+        std::fs::write(dir.join(".makepad-run-edits"), "vase/a.thumb.png\tnew\nvase/a.thumb.png.tmp\tnew\n").unwrap();
+        let e = lane_edits(&dir, &Default::default()).unwrap();
+        assert_eq!(e.edited.iter().map(String::as_str).collect::<Vec<_>>(), ["vase/a.thumb.png"]);
+        assert_eq!(e.tree.keys().map(String::as_str).collect::<Vec<_>>(), ["vase/a.thumb.png"]);
+        let _ = std::fs::remove_dir_all(&work);
+    }
+
     /// A lane's own build tree writes only the edits that changed (cargo rebuilds only their crates)
     /// and gives the pin's files back where the lane dropped its edit.
     #[test]
@@ -880,11 +952,70 @@ mod tests {
         // the lane drops its a.rs and b.rs edits: the next build gives the pin's files back
         let next = Edits { dir, write: s(&["src/new.rs"]), remove: Vec::new() };
         let covered: HashSet<&str> = next.write.iter().chain(&next.remove).map(String::as_str).collect();
-        let applied = applied_edits(&base);
-        restore(&root, &applied.iter().filter(|(_, p)| !covered.contains(p.as_str())).collect::<Vec<_>>()).unwrap();
+        restore_uncovered(&base, &root, &applied_edits(&base), &covered).unwrap();
+        assert_eq!(applied_edits(&base), vec![(false, "src/new.rs".to_string())], "what went back is off the list before the tree moves");
         apply_edits(&base, &root, &next, &index).unwrap();
         assert_eq!((read("src/a.rs").as_deref(), read("src/b.rs").as_deref(), read("src/new.rs").as_deref()), (Some("pin a"), Some("pin b"), Some("lane new")));
         assert_eq!(applied_edits(&base), vec![(false, "src/new.rs".to_string())]);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A move that died half way is nobody's work: the index ahead of HEAD, or a lock a dead git
+    /// left, and the next build takes the tree where its pin says, back or on.
+    #[test]
+    fn a_move_that_died_half_way_does_not_stop_the_next_build() {
+        let d = std::env::temp_dir().join(format!("devhub-deadmove-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let root = d.join("tree");
+        std::fs::create_dir_all(&root).unwrap();
+        let g = |a: &[&str]| -> String {
+            let o = std::process::Command::new("git").args(a).current_dir(&root).output().unwrap();
+            assert!(o.status.success(), "{a:?}: {}", String::from_utf8_lossy(&o.stderr));
+            String::from_utf8_lossy(&o.stdout).trim().to_string()
+        };
+        let commit = || { g(&["add", "-A"]); g(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "x"]); g(&["rev-parse", "HEAD"]) };
+        g(&["init", "-q"]);
+        std::fs::write(root.join("a.rs"), "a1").unwrap();
+        std::fs::write(root.join("gone.rs"), "gone").unwrap();
+        let a = commit();
+        std::fs::write(root.join("a.rs"), "a2").unwrap();
+        std::fs::write(root.join("new.rs"), "new").unwrap();
+        std::fs::remove_file(root.join("gone.rs")).unwrap();
+        let b = commit();
+        let die = || { g(&["checkout", "-qf", "--detach", &a]); g(&["read-tree", "-m", "-u", &a, &b]); };
+        let dirty = |dir: &Path| -> Result<Option<String>, String> { Ok(crate::sync::git::run(Some(dir), None, &[], &["diff", "--name-only", "HEAD"])?.lines().next().map(str::to_string)) };
+        let read = |p: &str| std::fs::read_to_string(root.join(p)).ok();
+        let said = std::cell::RefCell::new(Vec::new());
+        let say = |line: &str| said.borrow_mut().push(line.to_string());
+
+        die();
+        assert!(dirty(&root).unwrap().is_some(), "HEAD still at the old pin, the index at the new one");
+        move_tree(&root, &a, &dirty, &say).unwrap();
+        assert_eq!((g(&["rev-parse", "HEAD"]), dirty(&root).unwrap(), read("a.rs").as_deref(), read("gone.rs").as_deref(), read("new.rs")), (a.clone(), None, Some("a1"), Some("gone"), None), "back to where HEAD stood");
+        assert_eq!(said.borrow().len(), 1, "the build's log says so: {:?}", said.borrow());
+
+        die();
+        move_tree(&root, &b, &dirty, &say).unwrap();
+        assert_eq!((g(&["rev-parse", "HEAD"]), dirty(&root).unwrap(), read("a.rs").as_deref(), read("gone.rs"), read("new.rs").as_deref()), (b.clone(), None, Some("a2"), None, Some("new")), "on to the pin it was moving to");
+
+        // a tree on its pin is not written, so cargo builds nothing again
+        let written = std::fs::metadata(root.join("a.rs")).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        said.borrow_mut().clear();
+        move_tree(&root, &b, &dirty, &say).unwrap();
+        assert_eq!(std::fs::metadata(root.join("a.rs")).unwrap().modified().unwrap(), written);
+        assert!(said.borrow().is_empty(), "{:?}", said.borrow());
+
+        // a git killed holding its lock: an old lock goes, a young one can be a git still finishing
+        for name in ["index.lock", "HEAD.lock"] {
+            let lock = root.join(".git").join(name);
+            let file = std::fs::File::create(&lock).unwrap();
+            clear_dead_locks(&root).unwrap();
+            assert!(lock.exists(), "{name}: young");
+            file.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(120)).unwrap();
+            clear_dead_locks(&root).unwrap();
+            assert!(!lock.exists(), "{name}: old");
+        }
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -909,17 +1040,48 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(20));
         std::fs::write(built_binary(&target), "bin").unwrap();
         std::fs::write(target.join("host/makepad.d"), &dep).unwrap();
-        assert_eq!(publish(&root, &target).unwrap(), None, "no mark");
+        assert_eq!(publish(&root, &target, None).unwrap(), None, "no mark");
         std::fs::write(target.join(MARK), "").unwrap();
-        let k = publish(&root, &target).unwrap().unwrap();
+        let k = publish(&root, &target, None).unwrap().unwrap();
         assert!(!target.join(MARK).exists());
         assert_eq!(find(&root, &target).unwrap().0, k);
+        // the same build again as a new file: the published loader stays, a running one keeps its path
+        std::fs::remove_file(built_binary(&target)).unwrap();
+        std::fs::write(built_binary(&target), "bin again").unwrap();
+        std::fs::write(target.join(MARK), "").unwrap();
+        assert_eq!(publish(&root, &target, None).unwrap().as_deref(), Some(k.as_str()));
+        assert_eq!(std::fs::read_to_string(path(&target, &k)).unwrap(), "bin");
         // an edited input: no binary for this tree
         std::fs::write(root.join("f3.rs"), "edit").unwrap();
         assert!(find(&root, &target).is_none());
         // and this build is not published
         std::fs::write(target.join(MARK), "").unwrap();
-        assert!(publish(&root, &target).unwrap_err().contains("f3.rs"));
+        assert!(publish(&root, &target, None).unwrap_err().contains("f3.rs"));
+        // with the key its run read before the build: cargo failed, the binary is the earlier tree's
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let key = "0123456789abcdef01234567";
+        let own = TreeBuild { store: super::super::jitstore::Store::new(&d), key: key.to_string(), asked: std::time::SystemTime::now() };
+        std::fs::write(target.join(MARK), "").unwrap();
+        assert!(publish(&root, &target, Some(&own)).unwrap_err().contains("f3.rs"));
+        assert!(own.store.lookup(key).is_none());
+        // cargo built it: the store keeps it, and the key finds it
+        std::fs::remove_file(built_binary(&target)).unwrap();
+        std::fs::write(built_binary(&target), "bin built").unwrap();
+        std::fs::write(target.join(MARK), "").unwrap();
+        assert_eq!(publish(&root, &target, Some(&own)).unwrap().as_deref(), Some(key));
+        let kept = own.store.lookup(key).unwrap();
+        assert_eq!(std::fs::read_to_string(&kept).unwrap(), "bin built");
+        assert!(own.store.snapshot().ids.iter().any(|i| i == key), "pruning sees it");
+        // a file written after the key was read: the build is not what the key says
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(root.join("f4.rs"), "edit during the build").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::remove_file(built_binary(&target)).unwrap();
+        std::fs::write(built_binary(&target), "bin of either").unwrap();
+        let late = TreeBuild { store: own.store, key: "89abcdef0123456789abcdef".to_string(), asked: std::time::SystemTime::now() - std::time::Duration::from_millis(30) };
+        std::fs::write(target.join(MARK), "").unwrap();
+        assert!(publish(&root, &target, Some(&late)).unwrap_err().contains("f4.rs"));
+        assert!(late.store.lookup(&late.key).is_none());
         let _ = std::fs::remove_dir_all(&d);
     }
 }

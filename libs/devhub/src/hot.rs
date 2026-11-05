@@ -62,7 +62,7 @@ pub fn ingest(r: Record) -> Result<bool, String> { with(|l| l.add(r)) }
 /// publication. Inbox identities and clear tombstones make replay idempotent.
 pub fn replay_failures(publish: &dyn Fn(crate::proto::Record)) -> Result<(), String> {
     let records = with(|l| Ok(l.records.iter().filter(|r| r.outcome.failure()
-        || matches!(r.outcome, Outcome::RestartFailed | Outcome::FirstFrameTimeout | Outcome::NoWindow)).cloned().collect::<Vec<_>>()))?;
+        || matches!(r.outcome, Outcome::RestartFailed | Outcome::FirstFrameTimeout | Outcome::NoWindow | Outcome::CheckerPanic)).cloned().collect::<Vec<_>>()))?;
     for record in records { publish(crate::proto::from_hot(&record)); }
     Ok(())
 }
@@ -87,23 +87,25 @@ pub fn collect(node: &str, publish: &dyn Fn(crate::proto::Record)) {
 }
 
 #[derive(Default, Debug, PartialEq, Eq)]
-struct Counts { loads: usize, failures: usize, restart_errors: usize }
+struct Counts { loads: usize, failures: usize, restart_errors: usize, checker_panics: usize }
 
 fn counts(records: &[Record], since: u64, app: Option<&str>) -> Counts {
     let mut loads = HashSet::new();
     let mut failed = HashSet::new();
     let mut restart_errors = 0;
+    let mut checker_panics = 0;
     for r in records.iter().filter(|r| r.at_ms >= since && app.is_none_or(|a| r.app == a)) {
         if r.outcome == Outcome::Verified || r.outcome.failure() { loads.insert(&r.load); }
         if r.outcome.failure() { failed.insert(&r.load); }
         if r.outcome == Outcome::RestartFailed { restart_errors += 1; }
+        if r.outcome == Outcome::CheckerPanic { checker_panics += 1; }
     }
-    Counts { loads: loads.len(), failures: failed.len(), restart_errors }
+    Counts { loads: loads.len(), failures: failed.len(), restart_errors, checker_panics }
 }
 
 fn counts_json(c: &Counts) -> String {
-    format!("{{\"loads\":{},\"failures\":{},\"rate\":{},\"restart_errors\":{}}}", c.loads, c.failures,
-        if c.loads == 0 { "null".into() } else { (c.failures as f64 / c.loads as f64).to_string() }, c.restart_errors)
+    format!("{{\"loads\":{},\"failures\":{},\"rate\":{},\"restart_errors\":{},\"checker_panics\":{}}}", c.loads, c.failures,
+        if c.loads == 0 { "null".into() } else { (c.failures as f64 / c.loads as f64).to_string() }, c.restart_errors, c.checker_panics)
 }
 
 fn summary(records: &[Record], now: u64) -> String {
@@ -114,7 +116,7 @@ fn summary(records: &[Record], now: u64) -> String {
         // Startup alerts reach the inbox but do not enter the hot-load ledger's statistics.
         if matches!(r.outcome, Outcome::FirstFrameTimeout | Outcome::NoWindow) { continue; }
         apps.insert(r.app.as_str());
-        if r.outcome.failure() || r.outcome == Outcome::RestartFailed {
+        if r.outcome.failure() || matches!(r.outcome, Outcome::RestartFailed | Outcome::CheckerPanic) {
             causes.entry(cause_key(&r.reason)).or_default().push(r);
         }
     }
@@ -123,7 +125,7 @@ fn summary(records: &[Record], now: u64) -> String {
         let for_window = |since, app: Option<&str>| {
             let selected: Vec<_> = rows.iter().filter(|r| r.at_ms >= since && app.is_none_or(|a| r.app == a)).collect();
             let failed: HashSet<_> = selected.iter().filter(|r| r.outcome.failure()).map(|r| &r.load).collect();
-            counts_json(&Counts { loads: counts(records, since, app).loads, failures: failed.len(), restart_errors: selected.iter().filter(|r| r.outcome == Outcome::RestartFailed).count() })
+            counts_json(&Counts { loads: counts(records, since, app).loads, failures: failed.len(), restart_errors: selected.iter().filter(|r| r.outcome == Outcome::RestartFailed).count(), checker_panics: selected.iter().filter(|r| r.outcome == Outcome::CheckerPanic).count() })
         };
         let by_app = apps.iter().filter(|app| rows.iter().any(|r| r.app == **app)).map(|app| {
             format!("{{\"app\":{},\"all_time\":{},\"last_24h\":{}}}", json_str(app), for_window(0, Some(app)), for_window(day, Some(app)))
@@ -159,7 +161,7 @@ pub fn render(json: &str, brief: bool) -> String {
         format!("{n}/{d}{}", if d == 0 { String::new() } else { format!(" ({:.2}%)", n as f64 * 100.0 / d as f64) })
     };
     let Some(all) = v.get("all_time") else { return json.into() };
-    let mut out = format!("hot failures: 24h {}; all time {}; warm restart errors {}\n", rate(v.get("last_24h").unwrap_or(all)), rate(all), number(all, "restart_errors"));
+    let mut out = format!("hot failures: 24h {}; all time {}; warm restart errors {}; checker panics {}\n", rate(v.get("last_24h").unwrap_or(all)), rate(all), number(all, "restart_errors"), number(all, "checker_panics"));
     if brief { return out; }
     if let Some(apps) = v.get("apps").and_then(|v| v.as_arr()) {
         for app in apps {
@@ -192,10 +194,16 @@ mod tests {
         r.id = "three".into(); r.outcome = Outcome::RestartFailed;
         l.add(r.clone()).unwrap();
         r.id = "four".into(); r.load = "load-b".into(); r.app = "other-app".into(); r.at_ms = 100; r.outcome = Outcome::Verified;
+        l.add(r.clone()).unwrap();
+        // a checker panic is no hot load: its own count, and it is a cause in the summary
+        r.id = "five".into(); r.load = "check-only".into(); r.outcome = Outcome::CheckerPanic; r.reason = "checker panic in `a::b`: anonymous const type of `a::C::{constant#0}`".into();
         l.add(r).unwrap();
         let l = Ledger::open(path.clone()).unwrap();
-        assert_eq!(counts(&l.records, 0, None), Counts { loads: 2, failures: 1, restart_errors: 1 });
-        assert_eq!(counts(&l.records, 2, None), Counts { loads: 1, failures: 0, restart_errors: 0 });
+        assert_eq!(counts(&l.records, 0, None), Counts { loads: 2, failures: 1, restart_errors: 1, checker_panics: 1 });
+        assert_eq!(counts(&l.records, 2, None), Counts { loads: 1, failures: 0, restart_errors: 0, checker_panics: 1 });
+        let text = render(&summary(&l.records, 200), false);
+        assert!(text.starts_with("hot failures: 24h 1/2 (50.00%); all time 1/2 (50.00%); warm restart errors 1; checker panics 1\n"), "{text}");
+        assert!(text.contains("anonymous const type of"), "{text}");
         assert_eq!(counts(&l.records, 0, Some("test-app")).loads, 1);
         std::fs::remove_file(path).unwrap();
     }

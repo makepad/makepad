@@ -40,10 +40,15 @@ pub fn list() -> Vec<Jit> {
     out
 }
 
-/// Whether `pid` announced itself (its discovery file exists).
+/// Whether `pid` announced itself (a discovery file answers to it): what started a run holds a pid
+/// that on Windows is the parent the run stands behind.
 pub fn announced(pid: u32) -> Option<String> {
-    let f = discovery::registry_dir().join(format!("makepad-remote-{pid}.json"));
-    std::fs::read_to_string(f).ok().and_then(|t| discovery::parse(&t)).map(|a| a.app)
+    let dir = std::fs::read_dir(discovery::registry_dir()).ok()?;
+    dir.flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with("makepad-remote-"))
+        .filter_map(|e| discovery::parse(&std::fs::read_to_string(e.path()).ok()?))
+        .find(|a| a.answers_to(pid))
+        .map(|a| a.app)
 }
 
 fn environ(pid: u32, key: &str) -> Option<String> {

@@ -179,6 +179,8 @@ impl Node {
     pub fn start(conf: NodeConf, trust: Option<Arc<dyn Trust>>, log: crate::trust::Log) -> Result<Node, String> {
         // now, the commit it was built at: a lease this hub takes back moves the tree to its pin
         let _ = crate::lease::caps::hub_rev();
+        // what holds its memory, by call site (`devhub heap <node>`)
+        crate::heap::sample();
         crate::os::raise_fd_limit();
         let peers = Arc::new(Mutex::new(Peers::default()));
         let sink_slot: Arc<Mutex<Option<makepad_remote::watch::WatchSink>>> = Arc::new(Mutex::new(None));

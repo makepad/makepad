@@ -4,6 +4,8 @@
 //! Smoke boots use the separate CI tree;
 //! sweep shards use their own lease kinds at background priority, with the background cap and
 //! preemption. A sweep never holds the gate's run slot or takes priority over lane work.
+//! After each regression run the sweep's slot takes the tests of the crates whose own files changed
+//! ([`own_tests_after`]): a sweep's terms, on the Linux CI box, never gating a push.
 //!
 //! The shards (everything under the JIT, `makepad check|test|run`, except where it cannot be yet):
 //! - `jit:<n>`: `makepad check` of the workspace members, in groups (Linux); `mjit:<n>` the apps'
@@ -39,7 +41,7 @@ use crate::state::{Ci, CiRun, CiShard, CiSpan, Pair};
 use makepad_strict_json::{obj, s, Value};
 use makepad_toml_parser::{parse_toml, Toml};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, LazyLock, Mutex};
 use std::time::{Duration, Instant};
@@ -191,95 +193,26 @@ impl Tree {
         Tree { id: String::new(), cache: Mutex::new(BTreeMap::new()), blobs: map.iter().map(|(p, t)| (p.clone(), hex_digest(t.as_bytes()))).collect(), files: names, read: Box::new(move |p| map.get(p).cloned()) }
     }
 
-    /// The tree of `pair` in `repo` (and `repo/apps/commercial`).
+    /// The tree of `pair` in `repo` (and `repo/apps/commercial`), read in process (gitread).
     pub fn at(repo: &Path, pair: &Pair) -> Result<Tree, String> {
         let com = repo.join(COMMERCIAL);
-        let mut blobs = ls_tree(repo, &pair.work)?;
+        let mut blobs = crate::gitread::files_at(repo, &pair.work)?;
         let has_com = !pair.main.is_empty() && com.join(".git").exists();
         if has_com {
-            blobs.extend(ls_tree(&com, &pair.main)?.into_iter().map(|(p, h)| (format!("{COMMERCIAL}/{p}"), h)));
+            blobs.extend(crate::gitread::files_at(&com, &pair.main)?.into_iter().map(|(p, h)| (format!("{COMMERCIAL}/{p}"), h)));
         }
         let files = blobs.keys().cloned().collect();
-        let main = Batch::start(repo)?;
-        let commercial = if has_com { Some(Batch::start(&com)?) } else { None };
-        let (work, cmain) = (pair.work.clone(), pair.main.clone());
-        let main = Mutex::new(main);
-        let commercial = commercial.map(Mutex::new);
+        let (oids, repo) = (blobs.clone(), repo.to_path_buf());
         Ok(Tree {
             id: format!("{},{}", pair.work, pair.main),
             cache: Mutex::new(BTreeMap::new()),
             files,
             blobs,
-            read: Box::new(move |p| match (p.strip_prefix("apps/commercial/"), &commercial) {
-                (Some(rest), Some(c)) => c.lock().ok()?.blob(&cmain, rest),
-                _ => main.lock().ok()?.blob(&work, p),
+            read: Box::new(move |p| {
+                let dir = if p.starts_with(&format!("{COMMERCIAL}/")) { &com } else { &repo };
+                crate::gitread::blob(dir, oids.get(p)?).ok().map(|b| String::from_utf8_lossy(&b).into_owned())
             }),
         })
-    }
-}
-
-fn ls_tree(dir: &Path, sha: &str) -> Result<BTreeMap<String, String>, String> {
-    let o = crate::git_exec::command()
-        .arg("-C")
-        .arg(dir)
-        .args(["ls-tree", "-r", "-z", sha])
-        .stdin(std::process::Stdio::null())
-        .output()
-        .map_err(|e| format!("git ls-tree: {e}"))?;
-    if !o.status.success() {
-        return Err(format!("git ls-tree {}: {}", crate::state::short(sha), String::from_utf8_lossy(&o.stderr).trim()));
-    }
-    Ok(String::from_utf8_lossy(&o.stdout).split('\0').filter_map(|line| {
-        let (head, path) = line.split_once('\t')?;
-        (head.split_whitespace().nth(1) == Some("blob")).then(|| (path.to_string(), head.split_whitespace().nth(2).unwrap_or("").to_string()))
-    }).collect())
-}
-
-/// One `git cat-file --batch` per repository: blobs by `<sha>:<path>`.
-struct Batch {
-    child: std::process::Child,
-    out: BufReader<std::process::ChildStdout>,
-}
-
-impl Batch {
-    fn start(dir: &Path) -> Result<Batch, String> {
-        let mut child = crate::git_exec::command()
-            .arg("-C")
-            .arg(dir)
-            .args(["cat-file", "--batch"])
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .map_err(|e| format!("git cat-file: {e}"))?;
-        let out = BufReader::new(child.stdout.take().ok_or("git cat-file: no stdout")?);
-        Ok(Batch { child, out })
-    }
-
-    fn blob(&mut self, sha: &str, path: &str) -> Option<String> {
-        if path.contains('\n') {
-            return None;
-        }
-        let stdin = self.child.stdin.as_mut()?;
-        writeln!(stdin, "{sha}:{path}").ok()?;
-        stdin.flush().ok()?;
-        let mut head = String::new();
-        self.out.read_line(&mut head).ok()?;
-        // `<oid> <type> <size>` or `<name> missing`
-        let mut w = head.split_whitespace();
-        let (_, kind, size) = (w.next()?, w.next()?, w.next());
-        let size: usize = size?.parse().ok()?;
-        let mut body = vec![0u8; size + 1];
-        self.out.read_exact(&mut body).ok()?;
-        body.pop();
-        (kind == "blob").then(|| String::from_utf8_lossy(&body).into_owned())
-    }
-}
-
-impl Drop for Batch {
-    fn drop(&mut self) {
-        drop(self.child.stdin.take());
-        let _ = self.child.wait();
     }
 }
 
@@ -668,6 +601,8 @@ fn groups(items: Vec<(String, f64)>, per: f64) -> Vec<Vec<String>> {
 const GROUP_SECS: f64 = 240.0;
 /// A crate's tests with no measured time yet.
 const GUESS_CRATE_SECS: f64 = 20.0;
+/// A named check's first guess (an export matrix runs for minutes).
+const GUESS_CHECK_SECS: f64 = 600.0;
 
 /// The dirs of the crates whose path dependencies reach the HAL or a GPU runtime (their tests may
 /// draw or compute on a GPU).
@@ -792,6 +727,9 @@ pub struct CiConf {
     pub test_features: Vec<String>,
     /// `os = "linux,windows"`: the OSes its tests run on (empty: every OS)
     pub os: Vec<Os>,
+    /// `checks = "a::b,c::d"`: ignored lib tests the sweep runs on every pass, each its own shard
+    /// (too heavy for the crate's tests, such as a whole export matrix)
+    pub checks: Vec<String>,
 }
 
 impl CiConf {
@@ -813,6 +751,9 @@ impl CiConf {
         if !self.os.is_empty() {
             out.push(("os", self.os.iter().map(|os| os.as_str()).collect::<Vec<_>>().join(",")));
         }
+        if !self.checks.is_empty() {
+            out.push(("checks", self.checks.join(",")));
+        }
         out
     }
 }
@@ -827,13 +768,14 @@ pub fn read_conf(text: &str) -> Result<CiConf, String> {
             "box" if v == "whole" => c.whole = true,
             "cores" => c.cores = Some(v.parse::<f64>().ok().filter(|n| *n > 0.0).ok_or_else(|| format!("ci.toml: [ci] cores = {v:?}: a positive number"))?),
             "test_features" => c.test_features = v.split(',').map(str::trim).filter(|f| !f.is_empty()).map(str::to_string).collect(),
+            "checks" => c.checks = v.split(',').map(str::trim).filter(|t| !t.is_empty()).map(str::to_string).collect(),
             "os" => {
                 c.os = v.split(',').map(str::trim).filter(|os| !os.is_empty()).map(Os::of).collect();
                 if c.os.contains(&Os::Any) {
                     return Err(format!("ci.toml: [ci] os = {v:?}: linux, macos or windows"));
                 }
             }
-            _ => return Err(format!("ci.toml: [ci] {k} = {v:?}: unknown (box = \"whole\", cores, test_features, os)")),
+            _ => return Err(format!("ci.toml: [ci] {k} = {v:?}: unknown (box = \"whole\", cores, test_features, os, checks)")),
         }
     }
     Ok(c)
@@ -1100,7 +1042,9 @@ fn units_of(shard: &Shard) -> Vec<Unit> {
         else if shard.id.starts_with("test:") || shard.id.starts_with("wtest:") { "tests".to_string() }
         else { format!("job.{}", safe(&shard.id).replace('.', "_")) };
     if shard.id.starts_with("live:") {
-        return vec![Unit { dir: JIT_DIR.into(), section }];
+        // the JIT, and the crates the leg names (it runs when either changes)
+        let named = shard.dirs.iter().flatten().map(|d| Unit { dir: d.clone(), section: section.clone() }).collect::<Vec<_>>();
+        return std::iter::once(Unit { dir: JIT_DIR.into(), section }).chain(named).collect();
     }
     shard.dirs.iter().flatten().map(|d| Unit { dir: d.clone(), section: section.clone() }).collect()
 }
@@ -1117,10 +1061,71 @@ fn changed_paths(repo: &Path, pair: &Pair, last: Option<&Proof>, dirs: Option<&B
     input.as_ref().map(|x| x.changed.iter().filter(|p| dirs.iter().any(|d| under(p, d))).cloned().collect()).unwrap_or_default()
 }
 
+/// How soon a shard no proof keeps runs: its own crates' files changed since their proof first,
+/// then units with no proof, then those whose dependencies alone changed; the longest first
+/// within each ([`Pool::next_for`]). Nearly every unit depends on something that changed since its
+/// proof (a shared lib), so "changed since the proof" alone orders nothing: the 11-03 compute
+/// change waited behind the whole sweep, its tests untried 21 h later.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Urgency {
+    #[default]
+    Deps,
+    New,
+    Own,
+}
+
+/// What changed in a unit since `proof`: the first of its own crate's paths that changed (a
+/// package nested in its directory is not its own), else the first changed path it reads, else
+/// `Cargo.lock`.
+fn stale_path(repo: &Path, pair: &Pair, unit: &Unit, proof: &Proof, closure: Option<&BTreeSet<String>>, cache: &mut Changes) -> (bool, String) {
+    let paths = changed_paths(repo, pair, Some(proof), closure, cache);
+    let nested: Vec<&String> = closure.into_iter().flatten().filter(|d| **d != unit.dir && under(d, &unit.dir)).collect();
+    if let Some(p) = paths.iter().find(|p| under(p, &unit.dir) && !nested.iter().any(|n| under(p, n))) {
+        return (true, p.clone());
+    }
+    (false, paths.into_iter().next().unwrap_or_else(|| "Cargo.lock".into()))
+}
+
+/// Why a shard no proof keeps runs, and its [`Urgency`].
+fn runs_why(repo: &Path, pair: &Pair, tree: &Tree, dg: &Digests, sh: &Shard, cache: &mut Changes) -> Result<(String, Urgency), String> {
+    let oses = if sh.os == Os::Any { vec![Os::Linux, Os::Macos] } else { vec![sh.os] };
+    let units = units_of(sh);
+    if units.is_empty() {
+        return Ok(("runs: on every pass".into(), Urgency::Deps));
+    }
+    let (mut own, mut deps, mut new) = (None, None, false);
+    for unit in units {
+        let proofs = proofs_at(tree, &unit)?;
+        let mine: Vec<(Os, &Proof)> = oses.iter().filter_map(|&os| proofs.get(&(unit.section.clone(), os)).map(|p| (os, p))).collect();
+        if mine.iter().any(|(os, p)| p.digest == dg.of(&unit, *os)) {
+            continue;
+        }
+        let Some((_, proof)) = mine.into_iter().max_by(|a, b| a.1.date.cmp(&b.1.date)) else {
+            new = true;
+            continue;
+        };
+        let (is_own, path) = stale_path(repo, pair, &unit, proof, dg.closures.get(&unit), cache);
+        let line = format!("runs: proof {} stale: {path} changed", proof.date);
+        if is_own && own.is_none() {
+            own = Some(line);
+        } else if deps.is_none() {
+            deps = Some(line);
+        }
+    }
+    Ok(match (own, new, deps) {
+        (Some(line), _, _) => (line, Urgency::Own),
+        (None, true, _) => ("runs: no proof".into(), Urgency::New),
+        (None, false, Some(line)) => (line, Urgency::Deps),
+        (None, false, None) => ("runs: no proof".into(), Urgency::New),
+    })
+}
+
 /// An app runs on one OS only; a matching proof on any shipped OS keeps it. All available
-/// platforms, including Macs, rotate by oldest proof date, then load per box.
-pub fn select(repo: &Path, pair: &Pair, tree: &Tree, digests: &Digests, candidates: Vec<Shard>, boxes_of: &dyn Fn(Os) -> usize, going: &BTreeSet<String>) -> Result<(Vec<Shard>, Vec<(String, String)>), String> {
+/// platforms, including Macs, rotate by oldest proof date, then load per box. The picks, why each
+/// runs or is kept, and how soon each that runs goes.
+pub fn select(repo: &Path, pair: &Pair, tree: &Tree, digests: &Digests, candidates: Vec<Shard>, boxes_of: &dyn Fn(Os) -> usize, going: &BTreeSet<String>) -> Result<(Vec<Shard>, Vec<(String, String)>, BTreeMap<String, Urgency>), String> {
     let mut changes = Changes::new();
+    let mut urgency = BTreeMap::new();
     let mut by_unit: BTreeMap<Unit, Vec<Shard>> = BTreeMap::new();
     for shard in candidates {
         if let Some(unit) = units_of(&shard).into_iter().next() {
@@ -1149,11 +1154,18 @@ pub fn select(repo: &Path, pair: &Pair, tree: &Tree, digests: &Digests, candidat
             }
         };
         *assigned.entry(pick.os).or_default() += 1;
-        let why = changed.first().map_or_else(|| format!("runs on {}: no proof", pick.os.as_str()), |p| format!("runs on {}: {p} changed", pick.os.as_str()));
+        let (why, soon) = match newest(&proofs, &unit.section) {
+            Some(proof) => {
+                let (own, path) = stale_path(repo, pair, &unit, proof, digests.closures.get(&unit), &mut changes);
+                (format!("runs on {}: proof {} stale: {path} changed", pick.os.as_str(), proof.date), if own { Urgency::Own } else { Urgency::Deps })
+            }
+            None => (format!("runs on {}: no proof", pick.os.as_str()), Urgency::New),
+        };
+        urgency.insert(pick.id.clone(), soon);
         lines.push((pick.id.clone(), why));
         out.push(pick);
     }
-    Ok((out, lines))
+    Ok((out, lines, urgency))
 }
 
 /// Every shard of the sweep on `tree` (`devhub ci sweep`: background work alongside the gate,
@@ -1291,6 +1303,19 @@ pub fn sweep_plan(tree: &Tree, timing: &dyn Fn(&str) -> Option<f64>, rotation: u
             }
         }
     }
+    // the checks a crate's ci.toml names: ignored lib tests, too heavy for its tests above, each
+    // its own shard on Linux on every pass (`--ignored --exact`: a check that is gone fails)
+    for k in all.iter().filter(|k| crate_runs_on(tree, &k.dir, Os::Linux)) {
+        for name in conf_at(tree, &k.dir).checks {
+            let id = format!("checks:{}:{}", k.package, name.rsplit("::").next().unwrap_or(&name));
+            let with = test_features(tree, &k.dir, default_features(tree, k)).1;
+            let mut args: Vec<&str> = vec!["test", &k.package];
+            args.extend(with.iter().map(String::as_str));
+            args.extend(["--lib", "--", "--ignored", "--exact", &name]);
+            let est = timing(&id).unwrap_or(GUESS_CHECK_SECS);
+            extra.push(Shard { id, kind: Kind::Test, os: Os::Linux, gui: false, gpu: gpu_dirs.contains(&k.dir), steps: vec![test_step(&k.dir, &args)], judge: Judge::Tests, est, dirs: Some(vec![k.dir.clone()]), whole: false, cores: None });
+        }
+    }
     // what runs through ci-leg: a tree from before it (a bisect's baseline) has none to ask
     if !tree.has("tools/ci_leg/Cargo.toml") {
         shards.extend(extra);
@@ -1328,6 +1353,18 @@ pub fn sweep_plan(tree: &Tree, timing: &dyn Fn(&str) -> Option<f64>, rotation: u
     // a restart-rung edit is the exec restart: one process, the app's state kept, no leftover threads
     if tree.has("tools/run/fixture/restart_exec.py") {
         push("live:restart".to_string(), Kind::Screen, Os::Linux, true, vec![argv(&["python3", "tools/run/fixture/restart_exec.py"])], Judge::Exit, 240.0, None);
+    }
+    // a failed hot load is a warm restart and a ledger report, never a parked panic
+    if tree.has("tools/run/fixture/hot_fail.py") {
+        push("live:hot-fail".to_string(), Kind::Screen, Os::Linux, false, vec![argv(&["python3", "tools/run/fixture/hot_fail.py"])], Judge::Exit, 60.0, None);
+    }
+    // the same on Windows, where a restart is another process under one parent
+    if tree.has("tools/run/fixture/hot_fail.ps1") {
+        push("live:hot-fail-windows".to_string(), Kind::Screen, Os::Windows, false, vec![argv(&["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "tools/run/fixture/hot_fail.ps1"])], Judge::Exit, 180.0, None);
+    }
+    // Runner on Windows: its list, a live run and Stop, in real windows
+    if tree.has("tools/run/fixture/runner_windows.ps1") && tree.has("apps/commercial/runner/Cargo.toml") {
+        push("live:runner-windows".to_string(), Kind::Screen, Os::Windows, true, vec![argv(&["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "tools/run/fixture/runner_windows.ps1"])], Judge::Exit, 240.0, Some(vec!["apps/commercial/runner".to_string()]));
     }
     if tree.has("tools/run/fixture/live_replay.py") {
         // the apps in turn: the newest landings as live edits, measured (old landings' bugs are no
@@ -1498,7 +1535,8 @@ pub fn judge(judge: Judge, step: &str, exit: i32, log: &str) -> (bool, String) {
         return (true, log.lines().rev().find(|l| l.contains("pass rate")).unwrap_or(step).to_string());
     }
     if exit != 0 {
-        return (false, format!("{step}: exit {exit}"));
+        let names = if judge == Judge::Tests { crate::lease::master::failed_names(log) } else { Vec::new() };
+        return (false, if names.is_empty() { format!("{step}: exit {exit}") } else { format!("{step}: exit {exit}: {}", names.join(", ")) });
     }
     match judge {
         Judge::Exit => (true, String::new()),
@@ -1582,10 +1620,26 @@ fn takes_ci(n: &crate::lease::sched::NodeView) -> bool {
 
 /// The allowed CI boxes that are up, dev on, with capabilities.
 pub fn boxes(ctx: &Ctx) -> Vec<BoxInfo> {
+    ci_boxes(ctx, true)
+}
+
+/// The CI boxes that are down (their caps as last heard): a shard only they could take does not
+/// run this round ([`no_box`]).
+fn down_boxes(ctx: &Ctx) -> Vec<BoxInfo> {
+    ci_boxes(ctx, false)
+}
+
+/// Whether `node` is up for CI work now: a worker asks nothing of a box that is down (its asks
+/// sat "node down" in the queue and kept the run from ending, 11-04).
+fn box_up(ctx: &Ctx, node: &str) -> bool {
+    ctx.leases.nodes().iter().any(|n| n.name == node && n.up && n.dev)
+}
+
+fn ci_boxes(ctx: &Ctx, up: bool) -> Vec<BoxInfo> {
     ctx.leases
         .nodes()
         .into_iter()
-        .filter(|n| n.up && n.dev && takes_ci(n))
+        .filter(|n| n.up == up && n.dev && takes_ci(n))
         .filter_map(|n| {
             let c = n.caps?;
             if c.role().users() {
@@ -1613,13 +1667,15 @@ struct Pool {
     stopped: bool,
     /// the lease priority of the run's shards
     prio: i32,
-    /// boxes the run may hold at once
-    max_active: usize,
+    /// how soon each shard goes ([`Urgency`])
+    urgency: Vec<Urgency>,
     /// shards given the overdue verdict while their step still runs ([`OVERDUE_TIMES`])
     overdue: Vec<bool>,
     /// the run's id: a step that ends after its run did updates that run's record only
     run_id: String,
     sweep: bool,
+    /// a sweep's newest leg tree ([`sweep_leg`])
+    leg: Option<Arc<LegTree>>,
 }
 
 impl Pool {
@@ -1672,22 +1728,48 @@ impl Pool {
         true
     }
 
-    /// The longest pending shard this box can run (none while the run holds its most boxes).
+    /// The pending shard this box runs next: the most urgent ([`Urgency`]), then the longest. None
+    /// while the box holds one of the run's shards (running there, or asked for there): one shard
+    /// per box, and a shard queued on a busy box holds no other box. (A count of the run's shards
+    /// across its boxes, boxes less two for a sweep, ran a sweep one shard at a time on the two CI
+    /// boxes: the Linux box idled while a Windows shard waited in its queue, 11-03.)
     fn next_for(&self, b: &BoxInfo) -> Option<usize> {
-        // the boxes the run holds: a request queued on a busy box holds none (counting those left a
-        // free box idle while three asks waited elsewhere, 11-01)
-        let active = (0..self.shards.len()).filter(|&i| self.state[i].state == "run").count();
-        if active >= self.max_active {
+        if (0..self.shards.len()).any(|i| self.reserved[i].as_deref() == Some(b.node.as_str()) || (self.state[i].state == "run" && self.state[i].node == b.node)) {
             return None;
         }
+        // an ask that gave up here goes behind the rest: a whole-box shard on a busy box kept the
+        // 31 shards that fit beside lane work waiting for 97 min (11-04)
+        let gave_up = |i: usize| self.state[i].spans.iter().filter(|x| x.node == b.node && x.granted_ms == 0).count();
         (0..self.shards.len())
             .filter(|&i| self.state[i].state == "wait" && self.reserved[i].is_none() && self.can(b, i))
-            .max_by(|&a, &c| self.shards[a].est.partial_cmp(&self.shards[c].est).unwrap_or(std::cmp::Ordering::Equal))
+            .max_by(|&a, &c| gave_up(c).cmp(&gave_up(a)).then_with(|| (self.urgency[a], self.shards[a].est).partial_cmp(&(self.urgency[c], self.shards[c].est)).unwrap_or(std::cmp::Ordering::Equal)))
     }
 }
 
 fn lost_on(s: &CiShard, node: &str) -> u32 {
     s.lost.iter().find(|(n, _)| n == node).map_or(0, |(_, k)| *k)
+}
+
+/// Lane work is queued for `node`: a lease that is no CI's names the box (`--node`), or holds it
+/// reserved (`hold`). A sweep starts no shard there until that went: a shard holds its box through
+/// all its steps (one of 12 steps kept a whole-box drain and an interactive screen lease waiting on
+/// the Windows box, 11-04).
+fn lane_queued_for(leases: &[crate::lease::sched::Lease], hold: Option<&str>, node: &str) -> bool {
+    leases.iter().any(|l| l.state == crate::lease::sched::State::Queued && !l.req.ci() && (l.req.node.as_deref() == Some(node) || hold == Some(l.id.as_str())))
+}
+
+/// A shard the run ended without (it waited, or no box could finish it) says so at the end of its
+/// log: every shard of a run has its output or a line saying why there is none. A shard still
+/// running (a stopped run, an overdue step) writes its own end.
+fn did_not_run(st: &CiShard, stopped: bool) -> Result<(), String> {
+    let line = match st.state.as_str() {
+        "ok" | "fail" | "run" => return Ok(()),
+        "wait" if stopped => format!("did not run: the run stopped while it waited ({})", st.summary),
+        _ if !st.spans.iter().any(|s| s.granted_ms > 0) => format!("did not run: {}", st.summary),
+        _ => format!("did not finish: {}", st.summary),
+    };
+    let mut f = std::fs::OpenOptions::new().append(true).create(true).open(&st.log).map_err(|e| format!("{}: {e}", st.log))?;
+    writeln!(f, "{line}").map_err(|e| format!("{}: {e}", st.log))
 }
 
 /// The attempt in progress on `node` ends now.
@@ -1705,7 +1787,7 @@ fn close_span(s: &mut CiShard, node: &str) {
 /// or None while it waits. `here`: the boxes of its kind in the run now. `waited`: how long nothing
 /// else has been running, `heard`: whether this master has heard its nodes, `gone`: a box of the
 /// fleet is away now (it may be the one that can).
-fn no_box(shard: &Shard, s: &CiShard, here: &[&BoxInfo], out: &[String], waited: Duration, heard: bool, gone: bool) -> Option<(&'static str, String)> {
+fn no_box(shard: &Shard, s: &CiShard, here: &[&BoxInfo], down: &[&str], out: &[String], waited: Duration, heard: bool, gone: bool) -> Option<(&'static str, String)> {
     let kind = format!("{}{}", shard.os.as_str(), if shard.gui { " with a display" } else { "" });
     if !heard {
         return None;
@@ -1728,6 +1810,10 @@ fn no_box(shard: &Shard, s: &CiShard, here: &[&BoxInfo], out: &[String], waited:
         }
         let lost = s.lost.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(", ");
         return Some(("incomplete", format!("lost on {lost} ({})", s.summary)));
+    }
+    // the boxes that could take it are down: it does not run this round (its log says so)
+    if !down.is_empty() {
+        return (waited >= NO_BOX_WAIT).then(|| ("incomplete", format!("box down: {} (not back in {} min)", down.join(", "), NO_BOX_WAIT.as_secs() / 60)));
     }
     (waited >= NO_BOX_WAIT).then(|| ("incomplete", format!("no box of {kind} came in {} min", NO_BOX_WAIT.as_secs() / 60)))
 }
@@ -1809,6 +1895,13 @@ const SHARED_PATHS: [&str; 5] = ["Cargo.lock", "Cargo.toml", "tools/ci", "tools/
 const JIT_DIR: &str = "tools/run";
 /// Not read by any shard through the JIT.
 const NOT_JIT: [&str; 2] = ["libs/devhub", "apps/devhub"];
+
+/// The crates the JIT binary is built from: a change to one changes the JIT itself.
+pub fn jit_binary_dirs(tree: &Tree) -> BTreeSet<String> {
+    let mut dirs = super::roll::crate_dirs_from(JIT_DIR, &|p| tree.read(p));
+    dirs.retain(|d| !NOT_JIT.iter().any(|n| under(d, n)));
+    dirs
+}
 
 /// Crates compiled only into the JIT binary: closure(JIT_DIR) minus the union of the
 /// closures of workspace members outside it that do not embed the JIT. Shared dependencies still test under the JIT.
@@ -1899,7 +1992,7 @@ pub fn start(ctx: &Arc<Ctx>) {
             // a run stopped before the restart only finishes what runs (nothing new starts)
             run_stop(run.sweep).store(run.stopping, std::sync::atomic::Ordering::SeqCst);
             let _ = held.send(());
-            let _ = gate_held(one, &c, &run.pair, run.dry, run.sweep, !run.checkout.is_empty());
+            let _ = gate_held(one, &c, &run.pair, run.dry, run.sweep, !run.checkout.is_empty(), run.own_tests);
         });
         slots.push(slot);
     }
@@ -1919,7 +2012,85 @@ fn rolling(r: &CiRun) -> bool {
 /// The newest rolling run's start and pair: the CI bucket's last run when its ledger has none
 /// newer (the bucket that asked for it ended with a master; the run went on).
 pub fn last_rolling(d: &crate::state::Doc) -> Option<(u64, Pair)> {
-    d.ci.run.iter().chain(&d.ci.runs).filter(|r| rolling(r)).max_by_key(|r| r.started_ms).map(|r| (r.started_ms, r.pair.clone()))
+    newest_rolling(d).map(|r| (r.started_ms, r.pair.clone()))
+}
+
+fn newest_rolling(d: &crate::state::Doc) -> Option<&CiRun> {
+    d.ci.run.iter().chain(&d.ci.runs).filter(|r| rolling(r)).max_by_key(|r| r.started_ms)
+}
+
+/// A sweep leg's tree when it is not the sweep's own ([`sweep_leg`]).
+struct LegTree {
+    pair: Pair,
+    /// holds the Cargo.lock the leg ships: the one its rolling run shipped
+    dir: PathBuf,
+    tree: Tree,
+}
+
+/// Where a sweep leg runs: the newest rolling run's pair when the sweep's own is older (on both
+/// repos an ancestor of it) and that tree still has every crate the leg tests, with the
+/// Cargo.lock that run shipped. A box that ran that run has its tree built, so the leg builds
+/// nothing new there, and it tests code as new as the rolling runs do. Sweep 140's legs started
+/// a median 41 landings (4.6 h) behind work: a Windows leg re-found a hang fixed 73 min before,
+/// and each switch of a box's CI tree between the two pairs rebuilt for ~10 min. None: its own.
+fn sweep_leg(ctx: &Ctx, own: &Pair, dir: &Path, shard: &Shard, pool: &Mutex<Pool>) -> Option<Arc<LegTree>> {
+    let (pair, run_id) = ctx.store.read(|d| newest_rolling(d).map(|r| (r.pair.clone(), r.id.clone())))?;
+    if pair == *own {
+        return None;
+    }
+    let known = pool.lock().unwrap().leg.clone().filter(|l| l.pair == pair);
+    let leg = match known {
+        Some(leg) => leg,
+        None => {
+            let leg = Arc::new(leg_tree(ctx, own, dir, &pair, &ctx.logs("ci").join(run_id).join("Cargo.lock"))?);
+            pool.lock().unwrap().leg = Some(leg.clone());
+            leg
+        }
+    };
+    units_of(shard).iter().all(|u| leg.tree.has(&format!("{}/Cargo.toml", u.dir))).then_some(leg)
+}
+
+/// The leg tree of `pair` for a sweep at `own` whose logs are `dir`, with `lock` (its rolling
+/// run's) kept beside them; None when `pair` does not descend from `own` or the lock is gone.
+fn leg_tree(ctx: &Ctx, own: &Pair, dir: &Path, pair: &Pair, lock: &Path) -> Option<LegTree> {
+    let descends = crate::gitread::is_ancestor(&ctx.repo, &own.work, &pair.work)
+        && (own.main == pair.main || crate::gitread::is_ancestor(&ctx.commercial(), &own.main, &pair.main));
+    if !descends {
+        return None;
+    }
+    let at = leg_dir(dir, pair);
+    if !at.join("Cargo.lock").exists() {
+        std::fs::create_dir_all(&at).ok()?;
+        std::fs::copy(lock, at.join("Cargo.lock")).ok()?;
+    }
+    Some(LegTree { pair: pair.clone(), dir: at, tree: Tree::at(&ctx.repo, pair).ok()? })
+}
+
+/// Where a sweep keeps the Cargo.lock of a leg pair.
+fn leg_dir(dir: &Path, pair: &Pair) -> PathBuf {
+    dir.join(format!("at-{}", pair.short().replace(',', "-")))
+}
+
+/// Input digests by leg pair ([`Pair::rev`]); None: they could not be read (its legs prove nothing).
+type LegDigests = BTreeMap<String, Option<Digests>>;
+
+/// The input digests of `units` at each pair a leg of `state` ran other than the run's: what a
+/// leg's proof names.
+fn leg_digests(ctx: &Ctx, run: &Pair, dir: &Path, units: &[Unit], state: &[CiShard], have: &mut LegDigests) {
+    for at in state.iter().map(|s| &s.at).filter(|at| !at.work.is_empty() && *at != run) {
+        if have.contains_key(&at.rev()) {
+            continue;
+        }
+        let read = Tree::at(&ctx.repo, at).and_then(|tree| {
+            let lock = std::fs::read_to_string(leg_dir(dir, at).join("Cargo.lock")).map_err(|e| format!("its Cargo.lock: {e}"))?;
+            let here: Vec<Unit> = units.iter().filter(|u| tree.has(&format!("{}/Cargo.toml", u.dir))).cloned().collect();
+            Digests::with_lock(&tree, &here, lock)
+        });
+        if let Err(e) = &read {
+            ctx.store.event("ci", Sev::Warn, format!("ci {}: the inputs at {}: {e}; its legs there prove nothing", run.short(), at.short()), None);
+        }
+        have.insert(at.rev(), read.ok());
+    }
 }
 
 /// A finished rolling run of `tip` with a verdict that started at or after `since`.
@@ -1933,7 +2104,7 @@ fn judged<'a>(ci: &'a Ci, tip: &Pair, since: u64) -> Option<&'a CiRun> {
 pub fn ci(repo: PathBuf) -> crate::bucket::Run {
     Arc::new(move |base, tip, log| {
         let Some(ctx) = super::ctx() else {
-            return crate::bucket::Outcome { ok: false, failing: vec!["CI: master not started".into()], log: String::new(), summary: "CI incomplete: master not started".into(), lost: false };
+            return crate::bucket::Outcome { ok: false, failing: Vec::new(), log: String::new(), summary: "CI incomplete: master not started".into(), no_verdict: Some("the master has not started".into()) };
         };
         let ctx = calling_ctx(ctx, repo.clone());
         while !RESUMED.load(std::sync::atomic::Ordering::Acquire) { std::thread::sleep(Duration::from_millis(200)); }
@@ -1951,18 +2122,12 @@ pub fn ci(repo: PathBuf) -> crate::bucket::Run {
                 Some(judged) => judged,
                 None => {
                     run_stop(false).store(false, std::sync::atomic::Ordering::SeqCst);
-                    gate_held(one, &ctx, tip, false, false, false)
+                    gate_held(one, &ctx, tip, false, false, false, false)
                 }
             }
         };
-        let ok = legs.iter().filter(|l| l.state == "ok").count();
-        let fail = legs.iter().filter(|l| l.state == "fail").count();
-        let word = match verdict { Verdict::Ok => "ok", Verdict::Fail => "fail", Verdict::Incomplete => "incomplete" };
-        let mut summary = format!("{} shards: {ok} ok, {fail} fail, {} incomplete; {word}", legs.len(), legs.len() - ok - fail);
-        let mut failing: Vec<String> = legs.iter().filter(|l| l.state != "ok").map(|l| l.name.clone()).collect();
-        if verdict != Verdict::Ok && failing.is_empty() {
-            failing.push(format!("CI {word}: see ci events"));
-        }
+        let mut outcome = bucket_outcome(verdict, &legs, log);
+        let summary = &mut outcome.summary;
         let mut text = format!("CI {}: {summary}\n", tip.short());
         for leg in &legs {
             text.push_str(&format!("{} {}: {} ({})\n", leg.state, leg.name, leg.summary, leg.log));
@@ -1971,19 +2136,96 @@ pub fn ci(repo: PathBuf) -> crate::bucket::Run {
         if let Err(e) = std::fs::write(log, text) {
             summary.push_str(&format!("; log: {e}"));
         }
-        crate::bucket::Outcome { ok: verdict == Verdict::Ok, failing, log: log.display().to_string(), summary, lost: false }
+        outcome
     })
+}
+
+/// The CI bucket's run: [`ci`], then the tests of the crates that changed ([`own_tests_after`]),
+/// unless someone stopped it.
+pub fn regression(repo: PathBuf) -> crate::bucket::Run {
+    let run = ci(repo.clone());
+    Arc::new(move |base, tip, log| {
+        let outcome = run(base, tip, log);
+        if let (Some(ctx), false) = (super::ctx(), run_stop(false).load(std::sync::atomic::Ordering::SeqCst)) {
+            own_tests_after(&calling_ctx(ctx, repo.clone()), tip);
+        }
+        outcome
+    })
+}
+
+/// A run's verdict and legs as a bucket's: only a leg that failed is a failure. Legs that did not
+/// run say so with their reason, and a run with nothing else against it has no verdict (stopped
+/// CI runs read FAILED with their unrun legs as the failures: a regression hunt for nothing, 11-04).
+fn bucket_outcome(verdict: Verdict, legs: &[crate::state::Leg], log: &Path) -> crate::bucket::Outcome {
+    let count = |st: &str| legs.iter().filter(|l| l.state == st).count();
+    let (ok, fail, not_run) = (count("ok"), count("fail"), count(crate::state::NOT_RUN));
+    let word = match verdict { Verdict::Ok => "ok", Verdict::Fail => "fail", Verdict::Incomplete => "incomplete" };
+    let summary = format!("{} shards: {ok} ok, {fail} fail, {} incomplete, {not_run} not run; {word}", legs.len(), legs.len() - ok - fail - not_run);
+    let failing: Vec<String> = legs.iter().filter(|l| l.state == "fail").map(|l| l.name.clone()).collect();
+    let no_verdict = (verdict != Verdict::Ok && failing.is_empty()).then(|| match legs.iter().find(|l| l.state != "ok") {
+        Some(l) => format!("{} of {} shards have no verdict, {}: {}", legs.len() - ok, legs.len(), l.name, l.summary),
+        None => "the run ended before its shards: see ci events".to_string(),
+    });
+    crate::bucket::Outcome { ok: verdict == Verdict::Ok, failing, log: log.display().to_string(), summary, no_verdict }
 }
 
 fn gate_for(ctx: &Arc<Ctx>, pair: &Pair, dry: bool, sweep: bool, calling: bool) -> (Verdict, Vec<crate::state::Leg>) {
     let one = run_slot(sweep).lock().unwrap_or_else(|e| e.into_inner());
     run_stop(sweep).store(false, std::sync::atomic::Ordering::SeqCst);
-    gate_held(one, ctx, pair, dry, sweep, calling)
+    gate_held(one, ctx, pair, dry, sweep, calling, false)
 }
 
+/// What the own-units run goes for next, and whether its thread is up.
+struct OwnTests {
+    tip: Option<Pair>,
+    going: bool,
+}
+static OWN_TESTS: Mutex<OwnTests> = Mutex::new(OwnTests { tip: None, going: false });
+
+/// A regression run ended at `tip`: the crates whose own files changed get their tests, in the
+/// sweep's slot. Crate tests ran only in sweeps, so a landing that broke one went unseen until the
+/// next sweep (none of regression runs 141 to 147 tested a crate). One at a time: the newest tip
+/// wins, and the tips a run did not get to are skipped, so runs never pile up; a sweep goes first
+/// (it runs these first anyway).
+fn own_tests_after(ctx: &Arc<Ctx>, tip: &Pair) {
+    let mut own = OWN_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+    own.tip = Some(tip.clone());
+    if std::mem::replace(&mut own.going, true) {
+        return;
+    }
+    drop(own);
+    let ctx = ctx.clone();
+    let spawned = std::thread::Builder::new().name("devhub-ci-own".into()).spawn(move || loop {
+        let one = run_slot(true).lock().unwrap_or_else(|e| e.into_inner());
+        let tip = {
+            let mut own = OWN_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+            let tip = own.tip.take();
+            own.going = tip.is_some();
+            tip
+        };
+        let Some(tip) = tip else { return };
+        run_stop(true).store(false, std::sync::atomic::Ordering::SeqCst);
+        let _ = gate_held(one, &ctx, &tip, true, true, false, true);
+    });
+    if spawned.is_err() {
+        OWN_TESTS.lock().unwrap_or_else(|e| e.into_inner()).going = false;
+    }
+}
+
+/// The units a run of [`own_tests_after`] takes, of what the plan's digests left to run: its own
+/// crate's files changed since its proof ([`Urgency::Own`]), a box of the run can take it, and the
+/// same inputs did not fail already (they would fail again every run, until their crate changes).
+fn own_tests_picked(shards: Vec<Shard>, urgency: &BTreeMap<String, Urgency>, fits: &dyn Fn(&Shard) -> bool, failed_as_is: &dyn Fn(&Shard) -> bool) -> Vec<Shard> {
+    shards.into_iter().filter(|s| urgency.get(&s.id) == Some(&Urgency::Own) && fits(s) && !failed_as_is(s)).collect()
+}
+
+/// The inputs a unit of [`own_tests_after`] last failed with. A master that starts over reports
+/// such a failure once more.
+static OWN_FAILED: LazyLock<Mutex<BTreeMap<Unit, String>>> = LazyLock::new(Default::default);
+
 /// Keep a matching run in its slot while planning; archive only that slot's superseded run.
-fn resume_run(ci: &mut Ci, pair: &Pair, dry: bool, sweep: bool, lock_digest: &str, checkout: &str) -> Option<CiRun> {
-    if let Some(r) = ci.slot(sweep).as_ref().filter(|r| r.lock_digest == lock_digest && r.pair == *pair && r.dry == dry && r.sweep == sweep && Path::new(&r.checkout) == Path::new(checkout)) {
+fn resume_run(ci: &mut Ci, pair: &Pair, dry: bool, sweep: bool, own: bool, lock_digest: &str, checkout: &str) -> Option<CiRun> {
+    if let Some(r) = ci.slot(sweep).as_ref().filter(|r| r.lock_digest == lock_digest && r.pair == *pair && r.dry == dry && r.sweep == sweep && r.own_tests == own && Path::new(&r.checkout) == Path::new(checkout)) {
         return Some(r.clone());
     }
     if let Some(mut r) = ci.slot_mut(sweep).take() {
@@ -2004,30 +2246,32 @@ fn prune_runs(ctx: &Ctx) {
 }
 
 /// Runs the shards of `pair` with its slot held through proof publication.
-fn gate_held(_one: std::sync::MutexGuard<'static, ()>, ctx: &Arc<Ctx>, pair: &Pair, dry: bool, sweep: bool, calling: bool) -> (Verdict, Vec<crate::state::Leg>) {
+fn gate_held(_one: std::sync::MutexGuard<'static, ()>, ctx: &Arc<Ctx>, pair: &Pair, dry: bool, sweep: bool, calling: bool, own: bool) -> (Verdict, Vec<crate::state::Leg>) {
     let checkout = if calling { ctx.repo.to_string_lossy().into_owned() } else { String::new() };
-    let prior_lock = ctx.store.read(|d| d.ci.slot(sweep).as_ref().filter(|r| r.pair == *pair && r.dry == dry && r.sweep == sweep && Path::new(&r.checkout) == Path::new(&checkout)).map(|r| ctx.logs("ci").join(&r.id).join("Cargo.lock")));
+    let prior_lock = ctx.store.read(|d| d.ci.slot(sweep).as_ref().filter(|r| r.pair == *pair && r.dry == dry && r.sweep == sweep && r.own_tests == own && Path::new(&r.checkout) == Path::new(&checkout)).map(|r| ctx.logs("ci").join(&r.id).join("Cargo.lock")));
     let lock = prior_lock.and_then(|p| std::fs::read_to_string(p).ok()).or_else(|| std::fs::read_to_string(ctx.repo.join("Cargo.lock")).ok());
     let Some(lock) = lock else {
         ctx.store.event("ci", Sev::Err, "Cargo.lock is missing; no CI proof can be computed".into(), None);
         return (Verdict::Incomplete, Vec::new());
     };
     let lock_digest = hex_digest(lock.as_bytes());
-    let going = ctx.store.read(|d| d.ci.slot(sweep).as_ref().filter(|r| r.lock_digest == lock_digest && r.pair == *pair && r.dry == dry && r.sweep == sweep && Path::new(&r.checkout) == Path::new(&checkout)).cloned());
+    let going = ctx.store.read(|d| d.ci.slot(sweep).as_ref().filter(|r| r.lock_digest == lock_digest && r.pair == *pair && r.dry == dry && r.sweep == sweep && r.own_tests == own && Path::new(&r.checkout) == Path::new(&checkout)).cloned());
     if going.is_none() {
-        if let Err(e) = ctx.store.update(|d| resume_run(&mut d.ci, pair, dry, sweep, &lock_digest, &checkout)) {
+        if let Err(e) = ctx.store.update(|d| resume_run(&mut d.ci, pair, dry, sweep, own, &lock_digest, &checkout)) {
             ctx.store.event("ci", Sev::Err, e, None);
             return (Verdict::Incomplete, Vec::new());
         }
     }
     let rotation = match &going {
         Some(r) => r.rotation,
+        // (the rotation is the smoke scripts': an own-units run has none, and leaves it where it is)
+        None if own => ctx.store.read(|d| d.ci.rotation),
         None => match ctx.store.update(|d| { d.ci.rotation += 1; d.ci.rotation }) {
             Ok(rotation) => rotation,
             Err(e) => { ctx.store.event("ci", Sev::Err, e, None); return (Verdict::Incomplete, Vec::new()); }
         },
     };
-    let id = going.as_ref().map_or_else(|| format!("{}-{rotation}", stamp(wall_ms())), |r| r.id.clone());
+    let id = going.as_ref().map_or_else(|| format!("{}-{rotation}{}", stamp(wall_ms()), if own { "-own" } else { "" }), |r| r.id.clone());
     let dir = ctx.logs("ci").join(&id);
     let _ = std::fs::create_dir_all(&dir);
     prune_runs(ctx);
@@ -2043,7 +2287,7 @@ fn gate_held(_one: std::sync::MutexGuard<'static, ()>, ctx: &Arc<Ctx>, pair: &Pa
     let timings: Vec<(String, f64)> = ctx.store.read(|d| going.as_ref().map(|r| r.plan_timings.clone()).unwrap_or_else(|| d.ci.timings.clone()));
     let timing_of = |id: &str| timings.iter().find(|(k, _)| k == id).map(|(_, s)| *s);
     let arm = going.as_ref().and_then(|_| super::arm::Decision::read(&dir.join("arm64.log"))).unwrap_or_else(|| arm_decision(ctx, pair));
-    let mut shards = if sweep { sweep_plan(&tree, &timing_of, rotation) } else { plan(&tree, &timing_of, rotation) };
+    let mut shards = if own { Vec::new() } else if sweep { sweep_plan(&tree, &timing_of, rotation) } else { plan(&tree, &timing_of, rotation) };
     if !sweep && arm.full {
         shards.extend(sweep_plan(&tree, &timing_of, rotation).into_iter().filter(|s| s.id.starts_with("mjit:")));
     }
@@ -2051,6 +2295,9 @@ fn gate_held(_one: std::sync::MutexGuard<'static, ()>, ctx: &Arc<Ctx>, pair: &Pa
         // Whole crate proofs need every test target, independently of sweep rotation.
         shards.retain(|s| !s.id.starts_with("test:") && !s.id.starts_with("wtest:"));
         shards.extend(test_shards(&tree, &timing_of));
+    }
+    if own {
+        shards.retain(|s| s.id.starts_with("test:") && matches!(s.os, Os::Linux | Os::Any));
     }
     let units: Vec<Unit> = shards.iter().flat_map(units_of).collect();
     let digests = match Digests::with_lock(&tree, &units, lock) {
@@ -2071,6 +2318,7 @@ fn gate_held(_one: std::sync::MutexGuard<'static, ()>, ctx: &Arc<Ctx>, pair: &Pa
         }
     }
     let mut why_lines = Vec::new();
+    let mut urgency: BTreeMap<String, Urgency> = BTreeMap::new();
     let classified = arm_plan(&tree, &mut shards, &arm);
     ctx.store.event("ci", Sev::Info, format!("ci {}: {}", pair.short(), arm.summary), None);
     let _ = std::fs::write(dir.join("arm64.log"), format!("{}\n", arm.summary));
@@ -2080,7 +2328,7 @@ fn gate_held(_one: std::sync::MutexGuard<'static, ()>, ctx: &Arc<Ctx>, pair: &Pa
         let (apps, others): (Vec<Shard>, Vec<Shard>) = shards.into_iter().partition(|s| s.id.starts_with("smoke:"));
         let (macs, apps): (Vec<Shard>, Vec<Shard>) = apps.into_iter().partition(|s| arm.full && s.os == Os::Macos);
         match select(&ctx.repo, pair, &tree, &digests, apps, &|os| bs.iter().filter(|b| b.os == os).count(), &was) {
-            Ok((picked, lines)) => { shards = picked; why_lines = lines; }
+            Ok((picked, lines, soon)) => { shards = picked; why_lines = lines; urgency = soon; }
             Err(e) => {
                 ctx.store.event("ci", Sev::Err, e, None);
                 return (Verdict::Incomplete, Vec::new());
@@ -2107,8 +2355,42 @@ fn gate_held(_one: std::sync::MutexGuard<'static, ()>, ctx: &Arc<Ctx>, pair: &Pa
             }
         }
     }
+    // why the rest run, and how soon ([`Urgency`])
+    let mut changes = Changes::new();
+    for sh in &shards {
+        if why_lines.iter().any(|(id, _)| id == &sh.id) { continue; }
+        match runs_why(&ctx.repo, pair, &tree, &digests, sh, &mut changes) {
+            Ok((why, soon)) => {
+                why_lines.push((sh.id.clone(), why));
+                urgency.insert(sh.id.clone(), soon);
+            }
+            Err(e) => {
+                ctx.store.event("ci", Sev::Err, e, None);
+                return (Verdict::Incomplete, Vec::new());
+            }
+        }
+    }
+    // what an own-units run picked stays in its plan's marks: a run that goes on keeps its batches
+    let mut own_marks = Vec::new();
+    if own {
+        if going.is_some() {
+            shards.retain(|s| timing_of(&format!("own:{}", s.id)).is_some());
+        } else {
+            let bs = boxes(ctx);
+            let failed = OWN_FAILED.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            let failed_as_is = |s: &Shard| { let units = units_of(s); !units.is_empty() && units.iter().all(|u| failed.get(u).is_some_and(|d| d == digests.of(u, Os::Linux))) };
+            shards = own_tests_picked(shards, &urgency, &|s| bs.iter().any(|b| b.fits(s)), &failed_as_is);
+            own_marks = shards.iter().map(|s| (format!("own:{}", s.id), 0.0)).collect();
+            let names: Vec<&str> = shards.iter().take(8).filter_map(|s| s.id.strip_prefix("test:")).collect();
+            ctx.store.event("ci", Sev::Info, format!("own tests {}: {} of {} units{}{}", pair.short(), shards.len(), units.len(), if names.is_empty() { "" } else { ": " }, names.join(" ")), None);
+            if shards.is_empty() {
+                let _ = std::fs::remove_dir_all(&dir);
+                return (Verdict::Ok, Vec::new());
+            }
+        }
+    }
     if sweep || calling {
-        shards = batch_tests(shards, &mut why_lines, &timing_of);
+        shards = batch_tests(shards, &mut why_lines, &mut urgency, &timing_of);
     }
     let state: Vec<CiShard> = shards
         .iter()
@@ -2172,24 +2454,36 @@ fn gate_held(_one: std::sync::MutexGuard<'static, ()>, ctx: &Arc<Ctx>, pair: &Pa
     for st in state.iter_mut().filter(|s| s.state == "wait" && s.summary.is_empty()) {
         st.summary = "runs: no proof".into();
     }
+    // every shard's log says from the plan on why it runs or is kept (its run's output replaces
+    // the line); a run that ends without running it adds why ([`did_not_run`])
+    let unwritten: Vec<String> = state.iter().filter(|st| !Path::new(&st.log).exists()).filter_map(|st| {
+        let line = if st.kept.is_empty() { format!("waits: {}", st.summary) } else { st.kept.clone() };
+        std::fs::write(&st.log, format!("{line}\n")).err().map(|e| format!("{}: {e}", st.log))
+    }).collect();
+    if let Some(e) = unwritten.first() {
+        ctx.store.event("ci", Sev::Warn, format!("ci {}: {} shard logs could not be written ({e})", pair.short(), unwritten.len()), None);
+    }
     let n = shards.len();
     let started = going.as_ref().map_or_else(wall_ms, |r| r.started_ms);
-    ctx.store.update(|d| *d.ci.slot_mut(sweep) = Some(CiRun { lock_digest, checkout, id: id.clone(), pair: pair.clone(), dry, started_ms: started, verdict: "running".into(), shards: state.clone(), rotation, plan_timings: timings.clone(), sweep, stopping: going.as_ref().is_some_and(|r| r.stopping), ..Default::default() })).unwrap_or_else(|e| { eprintln!("devhub state: {e}"); Default::default() });
+    ctx.store.update(|d| *d.ci.slot_mut(sweep) = Some(CiRun { lock_digest, checkout, id: id.clone(), pair: pair.clone(), dry, started_ms: started, verdict: "running".into(), shards: state.clone(), rotation, plan_timings: timings.iter().cloned().chain(own_marks).collect(), sweep, own_tests: own, stopping: going.as_ref().is_some_and(|r| r.stopping), ..Default::default() })).unwrap_or_else(|e| { eprintln!("devhub state: {e}"); Default::default() });
     for l in stray {
         let _ = crate::cli::ask(&makepad_remote::link::Client::new(makepad_remote::link::Target::Unix(crate::proto::control_socket()), "devhub-ci"), None, "release", &l);
     }
     let word = if going.is_some() { "goes on" } else { "started" };
     ctx.store.event("ci", Sev::Info, format!("ci {} {word}: {n} shards, {kept} kept, {} on their boxes (run {id})", pair.short(), back.len()), None);
-    let max_active = boxes(ctx).len().saturating_sub(if sweep { 2 } else { 0 }).max(1);
-    let pool = Arc::new((Mutex::new(Pool { proofs_collected: false, reserved: vec![None; n], shards, state, stopped: false, prio: PRIO, max_active, overdue: vec![false; n], run_id: id.clone(), sweep }), Condvar::new()));
+    let urgency = shards.iter().map(|s| urgency.get(&s.id).copied().unwrap_or_default()).collect();
+    let pool = Arc::new((Mutex::new(Pool { proofs_collected: false, reserved: vec![None; n], shards, state, stopped: false, prio: PRIO, urgency, overdue: vec![false; n], run_id: id.clone(), sweep, leg: None }), Condvar::new()));
     let master_t0 = Instant::now();
     let mut nothing_left: Option<Instant> = None;
     let mut last_ran = Instant::now();
+    // why the run ended with shards left (none asked for or none here: it ended by itself)
+    let mut stop_why = String::new();
     // the alert of a run that goes nowhere: no shard ended for this long, whatever still "runs"
     let (mut ended, mut last_end) = (0usize, Instant::now());
     // passes are committed as proofs while the run goes (a failure elsewhere, a stop or a master
     // restart never throws them away); the run's end commits the rest
     let (mut published, mut last_batch): (BTreeSet<(Unit, Os)>, Instant) = (BTreeSet::new(), Instant::now());
+    let mut leg_dg = LegDigests::new();
     let mut workers = Vec::new();
     let mut seen: BTreeSet<String> = BTreeSet::new();
     // the steps a previous master left on their boxes go on
@@ -2213,6 +2507,7 @@ fn gate_held(_one: std::sync::MutexGuard<'static, ()>, ctx: &Arc<Ctx>, pair: &Pa
             let (p, cv) = &*pool;
             let mut g = p.lock().unwrap();
             if run_stop(sweep).load(std::sync::atomic::Ordering::SeqCst) {
+                stop_why = "the run was stopped".into();
                 g.stopped = true;
             }
             if g.all_done() || g.stopped {
@@ -2222,7 +2517,6 @@ fn gate_held(_one: std::sync::MutexGuard<'static, ()>, ctx: &Arc<Ctx>, pair: &Pa
             // a shard no box can take waits while anything else runs, and then for a box to come
             // back (a master just started has not heard its boxes yet: that is no box gone)
             let bs = boxes(ctx);
-            g.max_active = bs.len().saturating_sub(if sweep { 2 } else { 0 }).max(1);
             let now_ended = (0..g.state.len()).filter(|&i| g.finished(i)).count();
             if now_ended != ended {
                 (ended, last_end) = (now_ended, Instant::now());
@@ -2252,7 +2546,9 @@ fn gate_held(_one: std::sync::MutexGuard<'static, ()>, ctx: &Arc<Ctx>, pair: &Pa
                 last_ran = Instant::now();
             } else if last_ran.elapsed() >= STALLED {
                 let asks: Vec<String> = g.state.iter().filter(|s| s.summary.starts_with(QUEUED)).map(|s| format!("{}: {}", s.id, s.summary)).take(4).collect();
-                ctx.store.event("ci", Sev::Err, format!("ci {}: stalled, no shard got a box in {} min: {}", pair.short(), STALLED.as_secs() / 60, asks.join("; ")), None);
+                let stall = format!("stalled, no shard got a box in {} min", STALLED.as_secs() / 60);
+                ctx.store.event("ci", Sev::Err, format!("ci {}: {stall}: {}", pair.short(), asks.join("; ")), None);
+                stop_why = format!("the run {stall}");
                 g.stopped = true;
                 cv.notify_all();
                 break;
@@ -2266,13 +2562,16 @@ fn gate_held(_one: std::sync::MutexGuard<'static, ()>, ctx: &Arc<Ctx>, pair: &Pa
                 let waited = nothing_left.get_or_insert_with(Instant::now).elapsed();
                 let out: Vec<String> = bs.iter().filter(|b| g.out(&b.node)).map(|b| b.node.clone()).collect();
                 let gone = ctx.leases.nodes().iter().any(|n| !n.up || !n.dev);
+                let downs = down_boxes(ctx);
                 for i in stuck {
                     let here: Vec<&BoxInfo> = bs.iter().filter(|b| b.fits(&g.shards[i])).collect();
-                    match no_box(&g.shards[i], &g.state[i], &here, &out, waited, master_t0.elapsed() >= HEAR, gone) {
+                    let down: Vec<&str> = downs.iter().filter(|b| b.fits(&g.shards[i])).map(|b| b.node.as_str()).collect();
+                    match no_box(&g.shards[i], &g.state[i], &here, &down, &out, waited, master_t0.elapsed() >= HEAR, gone) {
                         Some((state, summary)) => {
                             g.state[i].state = state.into();
                             g.state[i].summary = summary;
                         }
+                        None if here.is_empty() && !down.is_empty() => g.state[i].summary = format!("waits for {} to come back (box down, {} s)", down.join(", "), waited.as_secs()),
                         None if here.is_empty() => g.state[i].summary = format!("waits for a box of {} ({} s)", g.shards[i].os.as_str(), waited.as_secs()),
                         None => {}
                     }
@@ -2293,8 +2592,10 @@ fn gate_held(_one: std::sync::MutexGuard<'static, ()>, ctx: &Arc<Ctx>, pair: &Pa
         publish_changed(ctx, &g);
         if last_batch.elapsed() >= PROOF_BATCH {
             last_batch = Instant::now();
-            let fresh: Updates = passed_units(ctx, pair, &digests, &g.shards, &g.state, wall_ms()).into_iter().filter(|(k, _)| !published.contains(k)).collect();
+            let (shards, state) = (g.shards.clone(), g.state.clone());
             drop(g);
+            leg_digests(ctx, pair, &dir, &units, &state, &mut leg_dg);
+            let fresh: Updates = passed_units(ctx, pair, &digests, &leg_dg, &shards, &state, wall_ms()).into_iter().filter(|(k, _)| !published.contains(k)).collect();
             if !fresh.is_empty() {
                 match publish_proofs(ctx, pair, &fresh, calling) {
                     Ok(_) => published.extend(fresh.into_keys()),
@@ -2332,6 +2633,24 @@ fn gate_held(_one: std::sync::MutexGuard<'static, ()>, ctx: &Arc<Ctx>, pair: &Pa
             ctx.store.event("ci", Sev::Err, format!("ci gate {} FAILED at {} on {} ({}): {}{}", st.id, pair.short(), st.node, st.log, st.summary, if errors.is_empty() { String::new() } else { format!(" | {}", errors.join(" | ")) }), None);
         }
     }
+    // an own-units failure goes to the inbox with its crate and its tests (the step's name and
+    // [`judge`]'s line); its inputs do not run again until they change
+    if own {
+        for st in g.state.iter().filter(|s| s.state == "fail") {
+            ctx.store.event("ci", Sev::Err, format!("own tests FAILED at {} on {} ({}): {}", if st.at.work.is_empty() { pair } else { &st.at }.short(), st.node, st.log, st.summary), None);
+        }
+        let mut failed = OWN_FAILED.lock().unwrap_or_else(|e| e.into_inner());
+        for (sh, st) in g.shards.iter().zip(&g.state) {
+            for (k, unit) in units_of(sh).into_iter().enumerate() {
+                if unit_passed(sh, st, k) {
+                    failed.remove(&unit);
+                } else if st.state == "fail" {
+                    let digest = digests.of(&unit, Os::Linux).to_string();
+                    failed.insert(unit, digest);
+                }
+            }
+        }
+    }
     let mut verdict = if g.state.iter().any(|s| s.state == "fail") {
         Verdict::Fail
     } else if g.stopped || g.state.iter().any(|s| s.state != "ok") {
@@ -2343,14 +2662,28 @@ fn gate_held(_one: std::sync::MutexGuard<'static, ()>, ctx: &Arc<Ctx>, pair: &Pa
     let (crit, boxes, fleet) = critical(&g.state, started, ended);
     let failed: Vec<String> = g.state.iter().filter(|s| s.state == "fail").map(|s| s.id.clone()).collect();
     let mut state = g.state.clone();
+    let unwritten: Vec<String> = state.iter().filter_map(|st| did_not_run(st, g.stopped).err()).collect();
+    if let Some(e) = unwritten.first() {
+        ctx.store.event("ci", Sev::Warn, format!("ci {}: {} shard logs could not say why they did not run ({e})", pair.short(), unwritten.len()), None);
+    }
     for (id, why) in &why_lines {
-        if let Some(st) = state.iter_mut().find(|st| &st.id == id && st.kept.is_empty()) {
+        // (one that waited has it as its summary since the start)
+        if let Some(st) = state.iter_mut().find(|st| &st.id == id && st.kept.is_empty() && !st.summary.starts_with(why.as_str())) {
             st.summary = format!("{why}; {}", st.summary);
         }
     }
+    // what the run ended without: neither passed nor failed, with why
+    for st in state.iter_mut().filter(|s| s.state == "wait") {
+        st.state = crate::state::NOT_RUN.into();
+        if !stop_why.is_empty() { st.summary = format!("{stop_why}; {}", st.summary); }
+    }
+    let not_run = state.iter().filter(|s| s.state == crate::state::NOT_RUN).count();
     let one_box = one_box_failures(&state);
     let legs = state.iter().map(CiShard::leg).collect();
-    let updates: Updates = passed_units(ctx, pair, &digests, &g.shards, &state, ended).into_iter().filter(|(k, _)| !published.contains(k)).collect();
+    // a sweep's legs follow the rolling runs ([`sweep_leg`]): the newest pair one ran
+    let upto = state.iter().filter(|s| !s.at.work.is_empty() && s.at != *pair).max_by_key(|s| s.granted_ms).map(|s| format!(" (legs up to {})", s.at.short())).unwrap_or_default();
+    leg_digests(ctx, pair, &dir, &units, &state, &mut leg_dg);
+    let updates: Updates = passed_units(ctx, pair, &digests, &leg_dg, &g.shards, &state, ended).into_iter().filter(|(k, _)| !published.contains(k)).collect();
     g.proofs_collected = true;
     drop(g);
     let published = publish_proofs(ctx, pair, &updates, calling);
@@ -2377,13 +2710,15 @@ fn gate_held(_one: std::sync::MutexGuard<'static, ()>, ctx: &Arc<Ctx>, pair: &Pa
         }
     }).unwrap_or_else(|e| { eprintln!("devhub state: {e}"); Default::default() });
     let line = format!(
-        "ci {} {word}: {n} shards, {fleet}{}{}; critical path {crit}; {}",
+        "ci {}{upto} {word}: {n} shards, {fleet}{}{}{}; critical path {crit}; {}",
         pair.short(),
         if failed.is_empty() { String::new() } else { format!("; failed {}", failed.join(" ")) },
+        if not_run == 0 { String::new() } else { format!("; {not_run} did not run") },
         if one_box.is_empty() { String::new() } else { format!("; FAILED ON ONE BOX ONLY: {}", one_box.join("; ")) },
         arm.summary
     );
-    ctx.store.event("ci", if verdict == Verdict::Fail || !one_box.is_empty() { Sev::Err } else { Sev::Info }, line, None);
+    // (an own-units run's failures have their lines above)
+    ctx.store.event("ci", if (verdict == Verdict::Fail && !own) || !one_box.is_empty() { Sev::Err } else { Sev::Info }, line, None);
     (verdict, legs)
 }
 
@@ -2400,43 +2735,48 @@ fn safe(id: &str) -> String {
 fn worker(ctx: &Arc<Ctx>, pool: &Arc<(Mutex<Pool>, Condvar)>, pair: &Pair, dir: &Path, b: BoxInfo) {
     let (p, cv) = &**pool;
     let mut idle_until: Option<Instant> = None;
+    let sweep = p.lock().unwrap().sweep;
     loop {
-        let i = {
+        let i = loop {
+            // lane work goes first between a sweep's shards
+            let lanes_first = sweep && lane_queued_for(&ctx.leases.view(), ctx.leases.nodes().iter().find(|n| n.name == b.node).and_then(|n| n.hold.as_deref()), &b.node);
             let mut g = p.lock().unwrap();
-            loop {
-                if g.all_done() || g.stopped {
-                    return;
-                }
-                if idle_until.is_none_or(|t| Instant::now() >= t) {
-                    if let Some(i) = g.next_for(&b) {
-                        g.reserved[i] = Some(b.node.clone());
-                        break i;
-                    }
-                }
-                g = cv.wait_timeout(g, Duration::from_secs(5)).unwrap().0;
+            if g.all_done() || g.stopped {
+                return;
             }
+            if !lanes_first && idle_until.is_none_or(|t| Instant::now() >= t) && box_up(ctx, &b.node) {
+                if let Some(i) = g.next_for(&b) {
+                    g.reserved[i] = Some(b.node.clone());
+                    break i;
+                }
+            }
+            drop(cv.wait_timeout(g, Duration::from_secs(5)).unwrap());
         };
         let (shard, prio, sweep) = {
             let g = p.lock().unwrap();
             (g.shards[i].clone(), g.prio, g.sweep)
         };
+        let leg = if sweep { sweep_leg(ctx, pair, dir, &shard, p) } else { None };
+        let (at, lock_dir) = leg.as_ref().map_or_else(|| (pair.clone(), dir.to_path_buf()), |l| (l.pair.clone(), l.dir.clone()));
         let spec = Spec {
             since_ms: None,
-            // each box asks for itself: a soft pin could fall back to a twin, also one that failed
-            // the shard or called itself unfit for it
-            only: true,
+            // each box asks for itself
             lane: LANE.into(),
             agent: if sweep { SWEEP_AGENT } else { AGENT }.into(),
             kind: shard.kind,
             needs: b.needs(&shard),
             prio,
-            rev: pair.rev(),
+            rev: at.rev(),
             repo_dir: ctx.repo.to_string_lossy().into_owned(),
             node: Some(b.node.clone()),
         };
         let asked = Instant::now();
         let asked_ms = wall_ms();
-        let stop = || asked.elapsed() > QUEUE_WAIT || p.lock().map(|g| g.stopped).unwrap_or(true);
+        let down = std::cell::Cell::new(false);
+        let stop = || {
+            down.set(!box_up(ctx, &b.node));
+            asked.elapsed() > QUEUE_WAIT || down.get() || p.lock().map(|g| g.stopped).unwrap_or(true)
+        };
         let mut queued = |line: &str| {
             if let Ok(mut g) = p.lock() {
                 g.state[i].summary = format!("{QUEUED}{}: {line}", b.node);
@@ -2452,12 +2792,16 @@ fn worker(ctx: &Arc<Ctx>, pool: &Arc<(Mutex<Pool>, Condvar)>, pair: &Pair, dir: 
                 let mut g = p.lock().unwrap();
                 g.reserved[i] = None;
                 g.state[i].spans.push(CiSpan { node: b.node.clone(), asked_ms, granted_ms: 0, ended_ms: wall_ms() });
+                // its box went down: the ask goes, and the box is asked nothing until it is back
+                if down.get() {
+                    g.state[i].summary = format!("box down: {}", b.node);
+                }
                 idle_until = (!e.ends_with("given up")).then(|| Instant::now() + BACKOFF);
                 cv.notify_all();
                 continue;
             }
         };
-        if let Err(e) = ship_lock(&held, dir, false) {
+        if let Err(e) = ship_lock(&held, &lock_dir, false) {
             held.release(None);
             let mut g = p.lock().unwrap();
             g.reserved[i] = None;
@@ -2475,6 +2819,7 @@ fn worker(ctx: &Arc<Ctx>, pool: &Arc<(Mutex<Pool>, Condvar)>, pair: &Pair, dir: 
             s.lease = held.id.clone();
             s.asked_ms = asked_ms;
             s.granted_ms = wall_ms();
+            s.at = at;
             s.step = 0;
             s.run_n = 0;
             s.failed.clear();
@@ -2491,7 +2836,7 @@ fn worker(ctx: &Arc<Ctx>, pool: &Arc<(Mutex<Pool>, Condvar)>, pair: &Pair, dir: 
 pub(crate) fn ship_lock(held: &Held, dir: &Path, overlay: bool) -> Result<(), String> {
     let mut entries = Vec::new();
     crate::lease::ship::entries(dir, "Cargo.lock", &mut entries)?;
-    crate::lease::ship::send(held.client(), &held.node, &held.id, dir, &entries)?;
+    crate::lease::ship::send(held.client(), &held.node, &held.id, dir, &entries, false)?;
     if overlay {
         let body = br#"{"shipped":["Cargo.lock"],"deleted":[],"bases":{"Cargo.lock":"new"}}"#;
         let a = crate::cli::ask(held.client(), Some(&held.node), "ship-done", &format!("ship-done {} {}", held.id, makepad_network::digest::base64_encode(body)))?;
@@ -2620,8 +2965,11 @@ fn run_shard(ctx: &Ctx, pool: &(Mutex<Pool>, Condvar), i: usize, held: Held) -> 
             let run = ctx.store.read(|d| d.ci.slot(sweep).iter().chain(d.ci.runs.iter()).find(|r| r.id == run_id && r.sweep == sweep).cloned());
             if let Some(run) = run {
                 let wanted = units_of(&shard);
-                let result = Tree::at(&ctx.repo, &run.pair).and_then(|tree| Digests::at(&ctx.logs("ci").join(&run_id), &tree, &wanted)).and_then(|dg| {
-                    let mut updates = passed_units(ctx, &run.pair, &dg, &shards, &states, wall_ms());
+                let dir = ctx.logs("ci").join(&run_id);
+                let mut legs = LegDigests::new();
+                leg_digests(ctx, &run.pair, &dir, &wanted, &states, &mut legs);
+                let result = Tree::at(&ctx.repo, &run.pair).and_then(|tree| Digests::at(&dir, &tree, &wanted)).and_then(|dg| {
+                    let mut updates = passed_units(ctx, &run.pair, &dg, &legs, &shards, &states, wall_ms());
                     updates.retain(|(u, _), _| wanted.contains(u));
                     publish_proofs(ctx, &run.pair, &updates, !run.checkout.is_empty())
                 });
@@ -2742,6 +3090,42 @@ fn copy_deferred(held: &Held, log: &Path, dst: &Path) -> Result<Vec<DeferredGrab
     Ok(grabs)
 }
 
+/// Why a judged grab is no pass: the questions answered otherwise than expected; a reply that
+/// cannot be read, with the reply.
+fn failure(v: &makepad_ci_judge::Verdict) -> String {
+    match (v.parse_error, v.why.is_empty()) {
+        (true, _) => format!("vision parse failed: {}; the reply:\n{}", v.why, v.raw),
+        (false, true) => v.raw.clone(),
+        (false, false) => v.why.clone(),
+    }
+}
+
+/// `ci judge <dir>...`: each saved grab `NN.png` of the dirs judged again against its `NN.txt`
+/// (a CI run's `deferred` dir, or a copy with the acceptance texts rewritten); nothing is written.
+fn judge_saved(dirs: &[&str]) -> Result<String, String> {
+    if dirs.is_empty() {
+        return Err("ci judge <dir>...: judges each NN.png there against its NN.txt".into());
+    }
+    let judge = makepad_ci_judge::Judge::start();
+    if let Some(why) = judge.unreachable() {
+        return Err(why);
+    }
+    let mut rows = Vec::new();
+    for dir in dirs {
+        let mut grabs: Vec<PathBuf> = std::fs::read_dir(dir).map_err(|e| format!("{dir}: {e}"))?.filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.extension().is_some_and(|x| x == "png")).collect();
+        grabs.sort();
+        for image in grabs {
+            let text = std::fs::read_to_string(image.with_extension("txt")).map_err(|e| format!("{}: {e}", image.with_extension("txt").display()))?;
+            let grab = s(image.display().to_string());
+            rows.push(match judge.judge(&image, &text) {
+                Ok(v) => obj(vec![("grab", grab), ("yes", Value::Bool(v.yes)), ("why", s(if v.yes { String::new() } else { failure(&v) })), ("raw", s(&v.raw)), ("hub", s(&v.hub))]),
+                Err(e) => obj(vec![("grab", grab), ("err", s(e))]),
+            });
+        }
+    }
+    Ok(obj(vec![("judged", Value::Arr(rows))]).to_json())
+}
+
 /// Runs only on a shard worker, with its lease released and no pool lock held.
 fn judge_deferred(grabs: &[DeferredGrab], log: &Path) -> Result<usize, String> {
     let mut f = std::fs::OpenOptions::new().append(true).open(log).map_err(|e| format!("{}: {e}", log.display()))?;
@@ -2760,8 +3144,7 @@ fn judge_deferred(grabs: &[DeferredGrab], log: &Path) -> Result<usize, String> {
                 let evidence = grab.image.with_extension("verdict.json");
                 std::fs::write(&evidence, verdict.json().to_json()).map_err(|e| format!("{}: {}: {e}", grab.step, evidence.display()))?;
                 if !verdict.yes {
-                    let why = if verdict.parse_error { format!("vision parse failed\n{}", verdict.raw) } else { verdict.raw };
-                    failed.push(format!("{}: {why}", grab.step));
+                    failed.push(format!("{}: {}", grab.step, failure(&verdict)));
                 }
             }
             Err(e) => failed.push(format!("{}: {e}", grab.step)),
@@ -2805,7 +3188,7 @@ fn run_steps(held: &Held, shard: &Shard, log: &Path, at: &CiShard, note: &mut dy
             held.follow(n, 0, &mut out)
         } else {
             let _ = writeln!(f, "$ {}", step.join(" "));
-            held.run_noted(step, &mut out, &mut |n| note(k, n, &failed, took))
+            held.run_asked(&format!("step-{k}"), ".", step, &mut out, &mut |n| note(k, n, &failed, took))
         };
         let _ = f.write_all(&out);
         let text = String::from_utf8_lossy(&out);
@@ -2830,6 +3213,23 @@ fn run_steps(held: &Held, shard: &Shard, log: &Path, at: &CiShard, note: &mut dy
                     failed.push(why);
                 }
                 note(k + 1, 0, &failed, took);
+            }
+            // a result, not a lost box: run again, it hangs again
+            Err(e) if e.ends_with(" ended (hung)") => {
+                let why = format!("{}: hung, every process idle (the hub's inbox has its stacks: `{} stalled`)", step_name(step), e.split(' ').next().unwrap_or(""));
+                let _ = writeln!(f, "== hung: {e}");
+                took.push((k, 0.0, false));
+                failed.push(why);
+                note(k + 1, 0, &failed, took);
+                return ("fail", failed.join("; "));
+            }
+            // a result too: it took its box's disk, and would take the next one's
+            Err(e) if e.contains(" ended (disk): ") => {
+                let _ = writeln!(f, "== ended: {e}");
+                took.push((k, 0.0, false));
+                failed.push(format!("{}: {e}", step_name(step)));
+                note(k + 1, 0, &failed, took);
+                return ("fail", failed.join("; "));
             }
             Err(e) => {
                 let _ = writeln!(f, "== lost: {e}");
@@ -2861,8 +3261,10 @@ fn unit_passed(sh: &Shard, st: &CiShard, k: usize) -> bool {
     }
 }
 
-/// A crate's tests pass only when every planned target of it passed on that OS.
-fn passed_units(ctx: &Ctx, pair: &Pair, dg: &Digests, shards: &[Shard], state: &[CiShard], at_ms: u64) -> Updates {
+/// A crate's tests pass only when every planned target of it passed on that OS, all with the same
+/// inputs: a proof names the pair its legs ran (a sweep leg's own, [`sweep_leg`]); targets that
+/// ran at different inputs prove none of them.
+fn passed_units(ctx: &Ctx, pair: &Pair, dg: &Digests, legs: &LegDigests, shards: &[Shard], state: &[CiShard], at_ms: u64) -> Updates {
     let oses: BTreeMap<String, Os> = ctx.leases.nodes().into_iter().filter_map(|n| n.caps.map(|c| (n.name, Os::of(&c.os)))).collect();
     let mut groups: BTreeMap<(Unit, Os), Vec<(&CiShard, bool)>> = BTreeMap::new();
     for (sh, st) in shards.iter().zip(state) {
@@ -2878,7 +3280,18 @@ fn passed_units(ctx: &Ctx, pair: &Pair, dg: &Digests, shards: &[Shard], state: &
         if states.iter().any(|(_, ok)| !ok) || states.iter().all(|(s, _)| !s.kept.is_empty()) {
             return None;
         }
-        Some(((unit.clone(), os), Proof { digest: dg.of(&unit, os).to_string(), pair: pair.clone(), capture: String::new(), date: date(at_ms) }))
+        // each target's inputs: at its run's pair (a kept result too) or its leg's
+        let mut ran: Vec<(u64, &Pair, &str)> = Vec::new();
+        for (s, _) in &states {
+            let at = if s.at.work.is_empty() { pair } else { &s.at };
+            let digests = if at == pair { Some(dg) } else { legs.get(&at.rev()).and_then(Option::as_ref) };
+            ran.push((s.granted_ms, at, digests.map(|d| d.of(&unit, os)).filter(|d| !d.is_empty())?));
+        }
+        if ran.iter().any(|(_, _, d)| *d != ran[0].2) {
+            return None;
+        }
+        let (_, at, digest) = ran.into_iter().max_by_key(|(granted, _, _)| *granted)?;
+        Some(((unit.clone(), os), Proof { digest: digest.to_string(), pair: at.clone(), capture: String::new(), date: date(at_ms) }))
     }).collect()
 }
 
@@ -2971,7 +3384,9 @@ pub fn commit_proofs(ctx: &Ctx, pair: &Pair, updates: &Updates) -> Result<String
     // the identity git itself would commit with (a checkout with no user.name gets the system's)
     let ident = super::git(&ctx.repo, &["var", "GIT_AUTHOR_IDENT"])?;
     let (who, email) = ident.split_once(" <").and_then(|(n, r)| r.split_once('>').map(|(e, _)| (n.trim().to_string(), e.to_string()))).ok_or_else(|| format!("git var GIT_AUTHOR_IDENT: {ident}"))?;
-    let message = format!("ci proofs: {} units at {}\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>", updates.len(), pair.short());
+    // (a sweep's legs ran on the pairs of the rolling runs: each one its proofs name)
+    let pairs: BTreeSet<String> = updates.values().map(|p| p.pair.short()).collect();
+    let message = format!("ci proofs: {} units at {}", updates.len(), pairs.into_iter().collect::<Vec<_>>().join(" "));
     let mut branches = ["-".to_string(), String::new()];
     for (i, prefix) in ["", "apps/commercial/"].iter().enumerate() {
         let changed: Vec<&str> = files.iter().filter(|f| f.starts_with("apps/commercial/") == (i == 1)).map(|f| f.strip_prefix(*prefix).unwrap_or(f)).collect();
@@ -2986,7 +3401,7 @@ pub fn commit_proofs(ctx: &Ctx, pair: &Pair, updates: &Updates) -> Result<String
         if staged.lines().any(|p| !changed.contains(&p) || !proof_path(p)) {
             return Err("ci proof commit contains other files".into());
         }
-        super::git(&repo, &["-c", "core.hooksPath=/dev/null", "-c", &format!("user.name={who}"), "-c", &format!("user.email={email}"), "-c", "commit.gpgsign=false", "commit", "--author", &format!("{who} <{email}>"), "-m", &message])?;
+        super::git(&repo, &["-c", &format!("user.name={who}"), "-c", &format!("user.email={email}"), "-c", "commit.gpgsign=false", "commit", "--author", &format!("{who} <{email}>"), "-m", &message])?;
         super::git(&repo, &["branch", &name, "HEAD"])?;
         branches[i] = name.clone();
     }
@@ -3053,7 +3468,9 @@ fn test_shards(tree: &Tree, timing: &dyn Fn(&str) -> Option<f64>) -> Vec<Shard> 
     out
 }
 
-fn batch_tests(shards: Vec<Shard>, lines: &mut Vec<(String, String)>, timing: &dyn Fn(&str) -> Option<f64>) -> Vec<Shard> {
+/// The crates' test shards that run, batched by OS and GPU into shards of about [`GROUP_SECS`]; a
+/// batch is as urgent as its most urgent crate.
+fn batch_tests(shards: Vec<Shard>, lines: &mut Vec<(String, String)>, urgency: &mut BTreeMap<String, Urgency>, timing: &dyn Fn(&str) -> Option<f64>) -> Vec<Shard> {
     let why: BTreeMap<String, String> = lines.iter().cloned().collect();
     let mut pending: BTreeMap<(Os, bool), Vec<Shard>> = BTreeMap::new();
     let mut out = Vec::new();
@@ -3077,8 +3494,10 @@ fn batch_tests(shards: Vec<Shard>, lines: &mut Vec<(String, String)>, timing: &d
             sh.steps = members.iter().flat_map(|s| s.steps.iter().cloned()).collect();
             sh.dirs = Some(members.iter().flat_map(|s| s.dirs.iter().flatten().cloned()).collect());
             sh.est = members.iter().map(|s| s.est).sum();
-            let reasons: Vec<String> = members.iter().map(|s| format!("{}: {}", s.id.split_once(':').unwrap().1, why.get(&s.id).map_or("no proof", String::as_str))).collect();
+            let reasons: Vec<String> = members.iter().map(|s| format!("{}: {}", s.id.split_once(':').unwrap().1, why.get(&s.id).map_or("no proof", |w| w.strip_prefix("runs: ").unwrap_or(w)))).collect();
             lines.push((sh.id.clone(), format!("runs: {}", reasons.join("; "))));
+            let soon = members.iter().filter_map(|s| urgency.get(&s.id).copied()).max().unwrap_or_default();
+            urgency.insert(sh.id.clone(), soon);
             out.push(sh);
         }
     }
@@ -3112,7 +3531,7 @@ pub fn status(repo: &Path) -> Result<Value, String> {
         if proofs_at(&tree, &unit)?.keys().any(|(section, _)| *section == unit.section) { units.push(unit); }
     }
     let dg = Digests::at(repo, &tree, &units)?;
-    let (picked, lines) = select(repo, &pair, &tree, &dg, apps, &|_| 1, &BTreeSet::new())?;
+    let (picked, lines, _) = select(repo, &pair, &tree, &dg, apps, &|_| 1, &BTreeSet::new())?;
     let mut dirty = BTreeMap::new();
     let mut changes = Changes::new();
     for sh in picked.iter().chain(&tests) {
@@ -3124,8 +3543,10 @@ pub fn status(repo: &Path) -> Result<Value, String> {
             if proofs.get(&(unit.section.clone(), sh.os)).is_some_and(|p| p.digest == dg.of(&unit, sh.os)) {
                 continue;
             }
-            let paths = changed_paths(repo, &pair, newest(&proofs, &unit.section), dg.closures.get(&unit), &mut changes);
-            let why = paths.first().map_or("no proof".to_string(), |p| format!("{p} changed"));
+            let why = match newest(&proofs, &unit.section) {
+                Some(proof) => format!("proof {} stale: {} changed", proof.date, stale_path(repo, &pair, &unit, proof, dg.closures.get(&unit), &mut changes).1),
+                None => "no proof".to_string(),
+            };
             dirty.insert((unit, sh.os), why);
         }
     }
@@ -3147,7 +3568,7 @@ pub fn seed(ctx: &Ctx) -> Result<String, String> {
         let timings = |id: &str| run.plan_timings.iter().find(|(k, _)| k == id).map(|(_, t)| *t);
         let planned = sweep_tests(&old, &timings);
         let mut kept: Vec<(String, String)> = run.shards.iter().filter(|s| !s.kept.is_empty()).map(|s| (s.id.clone(), s.kept.clone())).collect();
-        let batched = batch_tests(test_shards(&old, &timings), &mut kept, &timings);
+        let batched = batch_tests(test_shards(&old, &timings), &mut kept, &mut BTreeMap::new(), &timings);
         let packages: BTreeMap<String, String> = workspace_crates(&old).into_iter().map(|k| (k.package, k.dir)).collect();
         let mut rows: BTreeMap<(Unit, Os), Vec<(&CiShard, bool)>> = BTreeMap::new();
         for st in run.shards.iter().filter(|s| s.kept.is_empty()) {
@@ -3202,7 +3623,8 @@ pub const HELP: &str = "makepad ci:
   seed                                  seed committed proofs from the master's passing runs
   sweep [<work> <main>]                  start a background sweep alongside the gate
   plan [<work> <main>] [--sweep]         show shards, boxes and estimates
-  stop [--sweep]                         stop the gate (or sweep); running shards finish";
+  stop [--sweep]                         stop the gate (or sweep); running shards finish
+  judge <dir>...                         judge each saved grab NN.png there again against its NN.txt";
 
 static STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static SWEEP_STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -3287,6 +3709,7 @@ pub fn serve(ctx: &Arc<Ctx>, line: &str) -> Result<String, String> {
             Ok(obj(vec![("pair", s(pair.short())), ("arm64", s(&arm.summary)), ("classified", Value::Arr(skipped.iter().map(|sh| s(&sh.id)).collect())), ("shards", Value::Arr(rows))]).to_json())
         }
         Some("run") => Err("ci run needs the calling checkout (use makepad ci run)".into()),
+        Some("judge") => judge_saved(&w[1..]),
         Some("sweep") => {
             let rest: Vec<&str> = w[1..].iter().copied().filter(|x| *x != "--dry").collect();
             let pair = pair_of(ctx, &rest)?;
@@ -3294,14 +3717,22 @@ pub fn serve(ctx: &Arc<Ctx>, line: &str) -> Result<String, String> {
             let p = pair.clone();
             let (held, slot) = std::sync::mpsc::channel();
             let _ = std::thread::Builder::new().name("devhub-ci-sweep".into()).spawn(move || {
-                let one = match SWEEP.try_lock() {
-                    Ok(one) => one,
-                    Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
-                    Err(std::sync::TryLockError::WouldBlock) => { let _ = held.send(false); return; }
+                // a sweep goes before own-units tests: they stop (what runs finishes) and it starts
+                let own_going = c.store.read(|d| d.ci.sweep_run.as_ref().is_some_and(|r| r.own_tests));
+                let one = if own_going {
+                    OWN_TESTS.lock().unwrap_or_else(|e| e.into_inner()).tip = None;
+                    SWEEP_STOP.store(true, std::sync::atomic::Ordering::SeqCst);
+                    SWEEP.lock().unwrap_or_else(|e| e.into_inner())
+                } else {
+                    match SWEEP.try_lock() {
+                        Ok(one) => one,
+                        Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
+                        Err(std::sync::TryLockError::WouldBlock) => { let _ = held.send(false); return; }
+                    }
                 };
                 SWEEP_STOP.store(false, std::sync::atomic::Ordering::SeqCst);
                 let _ = held.send(true);
-                let _ = gate_held(one, &c, &p, true, true, false);
+                let _ = gate_held(one, &c, &p, true, true, false, false);
             }).map_err(|e| format!("sweep: {e}"))?;
             if !slot.recv().map_err(|e| format!("sweep: {e}"))? {
                 return Err("a sweep is going (makepad ci stop --sweep)".into());
@@ -3315,7 +3746,7 @@ pub fn serve(ctx: &Arc<Ctx>, line: &str) -> Result<String, String> {
             ctx.store.update(|d| if let Some(r) = d.ci.slot_mut(sweep) { r.stopping = true; })?;
             Ok(obj(vec![("stopping", Value::Bool(run_slot(sweep).try_lock().is_err()))]).to_json())
         }
-        Some(x) => Err(format!("ci: unknown word {x} (ci status | run | seed | sweep | plan | stop)")),
+        Some(x) => Err(format!("ci: unknown word {x} (ci status | run | seed | sweep | plan | stop | judge)")),
     }
 }
 
@@ -3331,12 +3762,22 @@ pub fn render(v: &Value) -> String {
     let count = |st: &str| shards.iter().filter(|x| x.get("state").and_then(|y| y.as_str()) == Some(st)).count();
     let (start, end) = (num(v, "started_ms"), num(v, "ended_ms"));
     let wall = if end > 0 { format!("{:.0} s", (end - start) as f64 / 1000.0) } else { format!("{} running", super::age(start)) };
-    let pair = v.get("pair").map(|p| crate::state::Pair::new(p.get("work").and_then(|x| x.as_str()).unwrap_or(""), p.get("main").and_then(|x| x.as_str()).unwrap_or("")).short()).unwrap_or_default();
+    let pair_of = |p: &Value| crate::state::Pair::new(p.get("work").and_then(|x| x.as_str()).unwrap_or(""), p.get("main").and_then(|x| x.as_str()).unwrap_or(""));
+    let run_pair = v.get("pair").map(pair_of).unwrap_or_default();
+    let mut pair = run_pair.short();
+    // a sweep's legs follow the rolling runs ([`sweep_leg`]): the newest pair one ran
+    let legs = shards.iter().filter_map(|x| Some((num(x, "granted_ms"), pair_of(x.get("at")?)))).filter(|(_, at)| !at.work.is_empty() && *at != run_pair).max_by_key(|(granted, _)| *granted);
+    if let Some((_, at)) = legs {
+        pair = format!("{pair} (legs up to {})", at.short());
+    }
+    // (only a run that ended has any)
+    let not_run = match count(crate::state::NOT_RUN) { 0 => String::new(), n => format!(", {n} not run") };
     let mut out = if v.get("sweep").and_then(Value::as_bool) == Some(true) {
-        format!("sweep {} {pair}: {} of {} shards ok, {} fail, {} running, {} waiting, {} incomplete, wall {wall}\n", t("id"), count("ok"), shards.len(), count("fail"), count("run"), count("wait"), count("incomplete"))
+        let word = if v.get("own_tests").and_then(Value::as_bool) == Some(true) { "own tests" } else { "sweep" };
+        format!("{word} {} {pair}: {} of {} shards ok, {} fail, {} running, {} waiting, {} incomplete{not_run}, wall {wall}\n", t("id"), count("ok"), shards.len(), count("fail"), count("run"), count("wait"), count("incomplete"))
     } else {
         format!(
-            "ci {} {pair}: {} ({} shards: {} ok, {} fail, {} running, {} waiting, {} incomplete), wall {wall}\n",
+            "ci {} {pair}: {} ({} shards: {} ok, {} fail, {} running, {} waiting, {} incomplete{not_run}), wall {wall}\n",
             t("id"),
             t("verdict"),
             shards.len(),
@@ -3347,6 +3788,16 @@ pub fn render(v: &Value) -> String {
             count("incomplete")
         )
     };
+    // what waits, by kind (`test`, `wtest`, `smoke`, ...): the list below leaves those out
+    let mut waits: BTreeMap<&str, usize> = BTreeMap::new();
+    for x in shards.iter().filter(|x| x.get("state").and_then(|y| y.as_str()) == Some("wait")) {
+        *waits.entry(x.get("id").and_then(|y| y.as_str()).unwrap_or("").split(':').next().unwrap_or("")).or_default() += 1;
+    }
+    if !waits.is_empty() {
+        let mut by: Vec<(&str, usize)> = waits.into_iter().collect();
+        by.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+        out.push_str(&format!("  waiting: {}\n", by.iter().map(|(k, n)| format!("{n} {k}")).collect::<Vec<_>>().join(", ")));
+    }
     if !t("critical").is_empty() {
         out.push_str(&format!("critical path: {}\n", t("critical")));
     }
@@ -3386,10 +3837,6 @@ pub fn cli(args: &[&str]) -> Option<i32> {
         return None;
     }
     let rest: Vec<&str> = args[1..].to_vec();
-    if rest.first().is_some_and(|a| matches!(*a, "-h" | "--help" | "help")) {
-        println!("{HELP}");
-        return Some(0);
-    }
     let json = rest.contains(&"--json");
     let words: Vec<&str> = rest.into_iter().filter(|a| *a != "--json").collect();
     let checkout = || -> Result<std::path::PathBuf, String> {
@@ -3470,13 +3917,13 @@ mod tests {
         assert_eq!(ci, doc.ci);
         for sweep in [false, true] {
             let r = doc.ci.slot(sweep).as_ref().unwrap();
-            let going = resume_run(&mut ci, &r.pair, r.dry, sweep, &r.lock_digest, &r.checkout);
+            let going = resume_run(&mut ci, &r.pair, r.dry, sweep, false, &r.lock_digest, &r.checkout);
             assert_eq!(going.as_ref(), Some(r));
             assert_eq!(ci, doc.ci);
         }
         let mut pool = Pool {
             proofs_collected: false, shards: Vec::new(), state: vec![CiShard { id: "gate".into(), state: "ok".into(), ..Default::default() }],
-            reserved: Vec::new(), stopped: false, prio: PRIO, max_active: 1, overdue: Vec::new(), run_id: "gate".into(), sweep: false,
+            reserved: Vec::new(), stopped: false, prio: PRIO, urgency: Vec::new(), overdue: Vec::new(), run_id: "gate".into(), sweep: false, leg: None,
         };
         let sweep = ci.sweep_run.clone();
         publish(&mut ci, &pool);
@@ -3496,7 +3943,7 @@ mod tests {
         assert!(shown.contains("tests failed"), "{shown}");
 
         let sweep = ci.sweep_run.as_ref().unwrap().clone();
-        assert!(resume_run(&mut ci, &sweep.pair, sweep.dry, true, "new lock", "").is_none());
+        assert!(resume_run(&mut ci, &sweep.pair, sweep.dry, true, false, "new lock", "").is_none());
         assert_eq!(ci.run, gate);
         assert!(ci.sweep_run.is_none());
         assert_eq!(ci.runs.last().unwrap().id, "sweep");
@@ -3559,7 +4006,7 @@ mod tests {
             ("apps/gone/Cargo.toml", "[package]\nname = \"gone\"\n"),
             ("ci.splash", "ci.check_targets({\n    packages: [\"makepad-platform\", \"makepad-widgets\"]\n    targets: ci.host.targets\n})\n"),
             (DEFAULT_SCRIPT, "ci.check_targets({packages: [ci.target.package] targets: ci.host.targets})\n"),
-            ("apps/commercial/slices.json", "{\"scope\": [\"makepad-scope\"]}"),
+            ("apps/commercial/slices.json", "{\"foo\": [\"makepad-foo\"]}"),
             (".claude/x/ci.splash", "nil"),
         ])
     }
@@ -3631,12 +4078,32 @@ mod tests {
     }
 
     #[test]
+    fn a_named_check_is_its_own_linux_shard_and_its_setting_round_trips() {
+        let t = Tree::mem(vec![
+            ("Cargo.toml", "[workspace]\nmembers = [\"apps/story\"]\n"),
+            ("apps/story/Cargo.toml", "[package]\nname = \"story\"\n"),
+            ("apps/story/ci.toml", "[ci]\nchecks = \"export::tests::every_profile\"\n"),
+            ("apps/story/src/lib.rs", "#[test]\nfn one_profile() {}\n#[test]\n#[ignore]\nfn every_profile() {}\n"),
+        ]);
+        let p = sweep_plan(&t, &|_| None, 0);
+        let check = p.iter().find(|s| s.id == "checks:story:every_profile").unwrap_or_else(|| panic!("{:?}", p.iter().map(|s| &s.id).collect::<Vec<_>>()));
+        assert_eq!((check.os, check.kind, check.est), (Os::Linux, Kind::Test, GUESS_CHECK_SECS));
+        assert_eq!(check.steps, vec![jit(&["test", "story", "--lib", "--", "--ignored", "--exact", "export::tests::every_profile"])]);
+        // its own proof: the crate's tests are another unit, so a pass runs both
+        assert_eq!(units_of(check)[0].section, "job.checks_story_every_profile");
+        assert!(p.iter().any(|s| s.id.starts_with("test:") && s.steps.contains(&jit(&["test", "story"]))));
+        let conf = read_conf("[ci]\nchecks = \"a::b, c\"\n").unwrap();
+        assert_eq!(conf.checks, ["a::b", "c"]);
+        assert_eq!(read_conf(&write_proofs(&conf, &Proofs::new())).unwrap(), conf);
+    }
+
+    #[test]
     fn the_sweep_has_every_kind_of_shard_on_the_right_os() {
         let t = tree();
         let p = sweep_plan(&t, &|_| None, 0);
         assert!(p.iter().all(|s| s.kind != Kind::Ci));
         let ids: Vec<&str> = p.iter().map(|s| s.id.as_str()).collect();
-        for want in ["jit:01", "mjit:01", "wjit:01", "check:wasm32-unknown-unknown", "check:aarch64-apple-tvos", "test:makepad-platform:lib", "test:makepad-platform:remote", "test:makepad-widgets:ui", "slice:scope", "smoke:apps/calc", "smoke:apps/tool"] {
+        for want in ["jit:01", "mjit:01", "wjit:01", "check:wasm32-unknown-unknown", "check:aarch64-apple-tvos", "test:makepad-platform:lib", "test:makepad-platform:remote", "test:makepad-widgets:ui", "slice:foo", "smoke:apps/calc", "smoke:apps/tool"] {
             assert!(ids.contains(&want), "{want} in {ids:?}");
         }
         assert!(!ids.iter().any(|i| i.starts_with("check:x86_64-unknown-linux-gnu") || i.starts_with("check:aarch64-apple-darwin") || *i == "smoke:."));
@@ -3683,13 +4150,142 @@ mod tests {
         assert_ne!(digest_lines(a, &[], Os::Linux), digest_lines(a, &["external@1 checksum".into()], Os::Linux));
     }
 
+    /// A sweep on the two CI boxes (one Linux, one Windows): a Windows shard waiting in its box's
+    /// queue holds no slot of the Linux box, a box takes one shard at a time (an ask counts), and a
+    /// crate whose own files changed goes before longer ones whose dependencies alone changed.
+    #[test]
+    fn each_box_pulls_its_own_shard_and_changed_crates_go_first() {
+        let bx = |n: &str, os: Os| BoxInfo { node: n.into(), os, arch: "x86_64".into(), gui: false, gpu: true, ci: true };
+        let (lin, win) = (bx("l", Os::Linux), bx("w", Os::Windows));
+        let shard = |id: &str, os: Os, est: f64| Shard { id: id.into(), kind: Kind::Test, os, gui: false, gpu: false, steps: Vec::new(), judge: Judge::Tests, est, dirs: None, whole: false, cores: None };
+        let shards = vec![shard("wtest:a", Os::Windows, 60.0), shard("test:deps", Os::Linux, 300.0), shard("test:own", Os::Linux, 20.0), shard("test:new", Os::Linux, 10.0)];
+        let n = shards.len();
+        let state = shards.iter().map(|s| CiShard { id: s.id.clone(), state: "wait".into(), ..Default::default() }).collect();
+        let mut p = Pool { proofs_collected: false, shards, state, reserved: vec![None; n], stopped: false, prio: 0, urgency: vec![Urgency::Deps, Urgency::Deps, Urgency::Own, Urgency::New], overdue: vec![false; n], run_id: "S".into(), sweep: true, leg: None };
+        // the Windows shard is stuck in its box's queue
+        assert_eq!(p.next_for(&win), Some(0));
+        p.reserved[0] = Some("w".into());
+        p.state[0].state = "run".into();
+        p.state[0].node = "w".into();
+        p.state[0].summary = format!("{QUEUED}w: L1 queued");
+        assert_eq!(p.next_for(&win), None, "one shard per box");
+        assert_eq!(p.next_for(&lin), Some(2), "the Linux box works on, the crate whose own files changed first");
+        p.reserved[2] = Some("l".into());
+        assert_eq!(p.next_for(&lin), None, "its ask holds the box: no second shard races past it");
+        p.reserved[2] = None;
+        p.state[2].state = "ok".into();
+        assert_eq!(p.next_for(&lin), Some(3), "then a crate with no proof");
+        p.state[3].state = "ok".into();
+        assert_eq!(p.next_for(&lin), Some(1));
+    }
+
+    /// Run 146: one leg failed and 18 never ran, all 19 read as failed; only the one is.
+    #[test]
+    fn a_leg_that_did_not_run_is_no_failure() {
+        let leg = |name: &str, state: &str, summary: &str| crate::state::Leg { name: name.into(), state: state.into(), summary: summary.into(), ..Default::default() };
+        let log = Path::new("x.log");
+        let unrun = leg("smoke:a", crate::state::NOT_RUN, "the run stalled, no shard got a box in 30 min; runs: proof stale");
+        let mixed = bucket_outcome(Verdict::Fail, &[leg("t", "ok", ""), leg("smoke:b", "fail", "exit 1"), unrun.clone()], log);
+        assert_eq!(mixed.failing, vec!["smoke:b".to_string()]);
+        assert!(!mixed.ok && mixed.no_verdict.is_none(), "a real failure stands");
+        assert_eq!(mixed.summary, "3 shards: 1 ok, 1 fail, 0 incomplete, 1 not run; fail");
+        let stopped = bucket_outcome(Verdict::Incomplete, &[leg("t", "ok", ""), unrun], log);
+        assert!(stopped.failing.is_empty() && !stopped.ok);
+        let why = stopped.no_verdict.expect("nothing failed: no verdict");
+        assert!(why.starts_with("1 of 2 shards have no verdict, smoke:a: the run stalled"), "{why}");
+        assert!(bucket_outcome(Verdict::Ok, &[leg("t", "ok", "")], log).no_verdict.is_none());
+        assert!(bucket_outcome(Verdict::Incomplete, &[], log).no_verdict.is_some(), "no legs at all");
+    }
+
+    #[test]
+    fn a_shard_that_could_not_get_its_box_goes_behind_the_rest() {
+        let lin = BoxInfo { node: "l".into(), os: Os::Linux, arch: "x86_64".into(), gui: false, gpu: true, ci: true };
+        let shard = |id: &str, est: f64| Shard { id: id.into(), kind: Kind::Test, os: Os::Linux, gui: false, gpu: false, steps: Vec::new(), judge: Judge::Tests, est, dirs: None, whole: false, cores: None };
+        let shards = vec![shard("whole", 300.0), shard("small", 20.0)];
+        let state = shards.iter().map(|s| CiShard { id: s.id.clone(), state: "wait".into(), ..Default::default() }).collect();
+        let mut p = Pool { proofs_collected: false, shards, state, reserved: vec![None; 2], stopped: false, prio: 0, urgency: vec![Urgency::Deps; 2], overdue: vec![false; 2], run_id: "r".into(), sweep: false, leg: None };
+        assert_eq!(p.next_for(&lin), Some(0), "the longest first");
+        p.state[0].spans.push(CiSpan { node: "l".into(), asked_ms: 1, granted_ms: 0, ended_ms: 2 });
+        assert_eq!(p.next_for(&lin), Some(1), "its ask gave up: the other goes");
+        p.state[1].state = "ok".into();
+        assert_eq!(p.next_for(&lin), Some(0), "and it asks again when nothing else can run");
+    }
+
+    #[test]
+    fn own_tests_take_the_changed_crates_a_box_can_run_that_did_not_fail_as_they_are() {
+        let shard = |id: &str| Shard { id: id.into(), kind: Kind::Test, os: Os::Linux, gui: false, gpu: false, steps: Vec::new(), judge: Judge::Tests, est: 1.0, dirs: None, whole: false, cores: None };
+        let urgency: BTreeMap<String, Urgency> = [("test:own", Urgency::Own), ("test:gpu", Urgency::Own), ("test:broken", Urgency::Own), ("test:deps", Urgency::Deps), ("test:new", Urgency::New)].map(|(k, v)| (k.to_string(), v)).into();
+        let all = ["test:own", "test:gpu", "test:broken", "test:deps", "test:new", "test:kept"].map(shard).to_vec();
+        let picked = own_tests_picked(all, &urgency, &|s| s.id != "test:gpu", &|s| s.id == "test:broken");
+        assert_eq!(picked.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), ["test:own"]);
+    }
+
+    #[test]
+    fn a_failed_test_step_names_its_tests() {
+        let log = "test a::b ... FAILED\n\nfailures:\n\n---- a::b stdout ----\npanicked\n\nfailures:\n    a::b\n    c::d\n\ntest result: FAILED. 1 passed; 2 failed\n";
+        assert_eq!(judge(Judge::Tests, "test makepad-x --lib", 101, log), (false, "test makepad-x --lib: exit 101: a::b, c::d".to_string()));
+        assert_eq!(judge(Judge::Tests, "test makepad-x --lib", 1, "error: could not compile `x`\n"), (false, "test makepad-x --lib: exit 1".to_string()));
+    }
+
+    #[test]
+    fn a_stale_proof_names_the_crates_own_change_first() {
+        let proof = Proof { digest: "d".into(), pair: Pair::new("a", "b"), capture: String::new(), date: "2026-11-02".into() };
+        let unit = Unit { dir: "platform/script/compute".into(), section: "tests".into() };
+        let closure: BTreeSet<String> = ["platform/script/compute", "platform/script/compute/shim", "libs/error_log"].map(String::from).into();
+        let stale = |changed: &[&str]| {
+            let mut cache = Changes::new();
+            cache.insert(("a".into(), "b".into()), Some(Inputs { changed: changed.iter().map(|p| p.to_string()).collect(), jit_changed: false }));
+            stale_path(Path::new("."), &Pair::new("c", "d"), &unit, &proof, Some(&closure), &mut cache)
+        };
+        let (dep, nested, own) = ("libs/error_log/src/lib.rs", "platform/script/compute/shim/src/lib.rs", "platform/script/compute/src/kernel.rs");
+        assert_eq!(stale(&[dep, nested, own]), (true, own.to_string()));
+        assert_eq!(stale(&[dep, nested]), (false, dep.to_string()), "a package nested in its directory is not its own");
+        assert_eq!(stale(&["apps/x/src/main.rs"]), (false, "Cargo.lock".to_string()), "nothing it reads changed: its locked dependencies did");
+    }
+
+    #[test]
+    fn a_shard_the_run_ended_without_says_why_in_its_log() {
+        let dir = std::env::temp_dir().join(format!("devhub-ci-did-not-run-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let at = |id: &str, state: &str, summary: &str| CiShard { id: id.into(), state: state.into(), summary: summary.into(), log: dir.join(format!("{id}.log")).to_string_lossy().into_owned(), ..Default::default() };
+        let (waits, lost, ok) = (at("w", "wait", "runs: no proof"), at("i", "incomplete", "lost twice"), at("o", "ok", "1 step ok"));
+        std::fs::write(&waits.log, "waits: runs: no proof\n").unwrap();
+        let mut lost = lost;
+        lost.spans.push(CiSpan { node: "l".into(), asked_ms: 1, granted_ms: 2, ended_ms: 3 });
+        for st in [&waits, &lost, &ok] {
+            did_not_run(st, true).unwrap();
+        }
+        assert_eq!(std::fs::read_to_string(&waits.log).unwrap(), "waits: runs: no proof\ndid not run: the run stopped while it waited (runs: no proof)\n");
+        assert_eq!(std::fs::read_to_string(&lost.log).unwrap(), "did not finish: lost twice\n");
+        assert!(!Path::new(&ok.log).exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_sweep_starts_no_shard_where_lane_work_is_queued() {
+        use crate::lease::sched::{Req, Sched};
+        let mut s = Sched::new("m", 1);
+        s.add_node("w", "w", Some(true));
+        let mut lane = Req::new("foo", Kind::Screen);
+        lane.node = Some("w".into());
+        let id = s.request(lane, 0);
+        let mut ci = Req::new(LANE, Kind::Test);
+        ci.node = Some("l".into());
+        s.request(ci, 0);
+        let v = s.view();
+        assert!(lane_queued_for(&v, None, "w"), "a lane lease names the box");
+        assert!(!lane_queued_for(&v, None, "l"), "CI's own asks do not hold a sweep back");
+        assert!(!lane_queued_for(&v, None, "x"));
+        assert!(lane_queued_for(&v, Some(&id), "x"), "a lane lease holding the box reserved");
+    }
+
     #[test]
     fn a_failure_asks_a_second_box_and_a_box_failing_several_is_out() {
         let bx = |n: &str, os: Os| BoxInfo { node: n.into(), os, arch: "x86_64".into(), gui: true, gpu: true, ci: true };
         let boxes = [bx("a", Os::Linux), bx("b", Os::Linux), bx("m", Os::Macos)];
         let shard = |id: &str| Shard { id: id.into(), kind: Kind::Test, os: Os::Any, gui: false, gpu: false, steps: Vec::new(), judge: Judge::Exit, est: 1.0, dirs: None, whole: false, cores: None };
         let n = BOX_OUT + 1;
-        let mut p = Pool { proofs_collected: false, shards: (0..n).map(|i| shard(&format!("s{i}"))).collect(), state: (0..n).map(|i| CiShard { id: format!("s{i}"), state: "wait".into(), ..Default::default() }).collect(), reserved: vec![None; n], stopped: false, prio: 0, max_active: 8, overdue: vec![false; n], run_id: String::new(), sweep: false };
+        let mut p = Pool { proofs_collected: false, shards: (0..n).map(|i| shard(&format!("s{i}"))).collect(), state: (0..n).map(|i| CiShard { id: format!("s{i}"), state: "wait".into(), ..Default::default() }).collect(), reserved: vec![None; n], stopped: false, prio: 0, urgency: vec![Urgency::Deps; n], overdue: vec![false; n], run_id: String::new(), sweep: false, leg: None };
         // the same OS only, never the box that failed it (an `Any` shard failing on Linux says
         // nothing about a Mac)
         assert!(p.second_box(0, "a", &boxes, "exit 1", vec!["error: x".into()]));
@@ -3736,21 +4332,21 @@ mod tests {
 
     #[test]
     fn boxes_take_what_fits_and_the_critical_path_is_the_last_box() {
-        let lin = BoxInfo { node: "101".into(), os: Os::Linux, arch: "x86_64".into(), gui: false, gpu: true, ci: true };
-        let win = BoxInfo { node: "105".into(), os: Os::Windows, arch: "x86_64".into(), gui: true, gpu: true, ci: true };
+        let lin = BoxInfo { node: "node-a".into(), os: Os::Linux, arch: "x86_64".into(), gui: false, gpu: true, ci: true };
+        let win = BoxInfo { node: "node-b".into(), os: Os::Windows, arch: "x86_64".into(), gui: true, gpu: true, ci: true };
         let sh = |os, gui| Shard { id: "s".into(), kind: Kind::Build, os, gui, gpu: false, steps: Vec::new(), judge: Judge::Exit, est: 1.0, dirs: None, whole: false, cores: None };
         assert!(lin.fits(&sh(Os::Linux, false)) && !lin.fits(&sh(Os::Any, true)) && !win.fits(&sh(Os::Any, true)) && win.fits(&sh(Os::Windows, false)));
         let shard = |id: &str, spans: Vec<(&str, u64, u64, u64)>| CiShard { id: id.into(), spans: spans.into_iter().map(|(n, a, g, e)| CiSpan { node: n.into(), asked_ms: a, granted_ms: g, ended_ms: e }).collect(), ..Default::default() };
         let state = vec![
-            shard("s0", vec![("101", 1000, 1000, 31_000)]),
+            shard("s0", vec![("node-a", 1000, 1000, 31_000)]),
             // asked on one box, never granted: it went to another
-            shard("s1", vec![("101", 31_000, 0, 41_000), ("101", 41_000, 41_000, 61_000)]),
-            shard("s2", vec![("106", 0, 0, 5000), ("106", 5000, 11_000, 71_000)]),
+            shard("s1", vec![("node-a", 31_000, 0, 41_000), ("node-a", 41_000, 41_000, 61_000)]),
+            shard("s2", vec![("node-c", 0, 0, 5000), ("node-c", 5000, 11_000, 71_000)]),
             shard("kept", Vec::new()),
         ];
         let (crit, boxes, fleet) = critical(&state, 1000, 81_000);
-        assert_eq!(crit, "106 ends at 70 s: s2 60 s");
-        assert_eq!(boxes, vec!["101 50 s busy, 2 shards, 10 s queued", "106 60 s busy, 1 shards, 11 s queued"]);
+        assert_eq!(crit, "node-c ends at 70 s: s2 60 s");
+        assert_eq!(boxes, vec!["node-a 50 s busy, 2 shards, 10 s queued", "node-c 60 s busy, 1 shards, 11 s queued"]);
         assert_eq!(fleet, "wall 80 s: 110 s on 2 boxes (1.6 at once), 21 s queued for leases, 10 s with nothing on any box");
         assert_eq!(groups(vec![("a".into(), 30.0), ("b".into(), 30.0), ("c".into(), 30.0)], 60.0), vec![vec!["a".to_string(), "b".into()], vec!["c".into()]]);
     }
@@ -3758,25 +4354,36 @@ mod tests {
     #[test]
     fn a_shard_no_box_can_take_waits_or_says_why() {
         let sh = Shard { id: "s".into(), kind: Kind::Build, os: Os::Macos, gui: false, gpu: false, steps: Vec::new(), judge: Judge::Exit, est: 1.0, dirs: None, whole: false, cores: None };
-        let mac = BoxInfo { node: "mini".into(), os: Os::Macos, arch: "aarch64".into(), gui: true, gpu: true, ci: true };
+        let mac = BoxInfo { node: "node-d".into(), os: Os::Macos, arch: "aarch64".into(), gui: true, gpu: true, ci: true };
         let wait = CiShard::default();
         // a master that just started has not heard its boxes: no box is gone
-        assert_eq!(no_box(&sh, &wait, &[], &[], Duration::from_secs(3600), false, false), None);
+        assert_eq!(no_box(&sh, &wait, &[], &[], &[], Duration::from_secs(3600), false, false), None);
         // heard, none of its kind here: it waits, within a bound
-        assert_eq!(no_box(&sh, &wait, &[], &[], Duration::from_secs(60), true, false), None);
-        let (state, why) = no_box(&sh, &wait, &[], &[], NO_BOX_WAIT, true, false).unwrap();
+        assert_eq!(no_box(&sh, &wait, &[], &[], &[], Duration::from_secs(60), true, false), None);
+        let (state, why) = no_box(&sh, &wait, &[], &[], &[], NO_BOX_WAIT, true, false).unwrap();
         assert_eq!((state, why.as_str()), ("incomplete", "no box of macos came in 15 min"));
         // every box of its kind said it cannot run it: a failure that names them
-        let unfit = CiShard { summary: "unfit: xcheck x: no nightly".into(), lost: vec![("mini".into(), LOST_TRIES)], ..Default::default() };
-        let (state, why) = no_box(&sh, &unfit, &[&mac], &[], Duration::ZERO, true, false).unwrap();
-        assert_eq!((state, why.as_str()), ("fail", "no box can run it (mini): unfit: xcheck x: no nightly"));
+        let unfit = CiShard { summary: "unfit: xcheck x: no nightly".into(), lost: vec![("node-d".into(), LOST_TRIES)], ..Default::default() };
+        let (state, why) = no_box(&sh, &unfit, &[&mac], &[], &[], Duration::ZERO, true, false).unwrap();
+        assert_eq!((state, why.as_str()), ("fail", "no box can run it (node-d): unfit: xcheck x: no nightly"));
         // ... unless a box that may be able to is away: it gets its time
-        assert_eq!(no_box(&sh, &unfit, &[&mac], &[], Duration::ZERO, true, true), None);
-        assert_eq!(no_box(&sh, &unfit, &[&mac], &[], NO_BOX_WAIT, true, true).unwrap().0, "fail");
+        assert_eq!(no_box(&sh, &unfit, &[&mac], &[], &[], Duration::ZERO, true, true), None);
+        assert_eq!(no_box(&sh, &unfit, &[&mac], &[], &[], NO_BOX_WAIT, true, true).unwrap().0, "fail");
         // the box is out of the run, or the shard's first failure has no second box
-        assert_eq!(no_box(&sh, &wait, &[&mac], &["mini".to_string()], Duration::ZERO, true, false).unwrap().0, "incomplete");
-        let failed = CiShard { failed_on: "mini".into(), failed_why: "exit 1".into(), ..Default::default() };
-        assert_eq!(no_box(&sh, &failed, &[], &[], Duration::ZERO, true, false), Some(("fail", "exit 1".to_string())));
+        assert_eq!(no_box(&sh, &wait, &[&mac], &[], &["node-d".to_string()], Duration::ZERO, true, false).unwrap().0, "incomplete");
+        let failed = CiShard { failed_on: "node-d".into(), failed_why: "exit 1".into(), ..Default::default() };
+        assert_eq!(no_box(&sh, &failed, &[], &[], &[], Duration::ZERO, true, false), Some(("fail", "exit 1".to_string())));
+        // the box of its kind is down: it waits for it a while, then does not run this round
+        assert_eq!(no_box(&sh, &wait, &[], &["node-d"], &[], Duration::from_secs(60), true, true), None);
+        let (state, why) = no_box(&sh, &wait, &[], &["node-d"], &[], NO_BOX_WAIT, true, true).unwrap();
+        assert_eq!((state, why.as_str()), ("incomplete", "box down: node-d (not back in 15 min)"));
+        let dir = std::env::temp_dir().join(format!("devhub-ci-box-down-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // only ever asked for there (its asks withdrawn as the box went down): it did not run
+        let asked = CiShard { state: state.into(), summary: why, log: dir.join("s.log").to_string_lossy().into_owned(), spans: vec![CiSpan { node: "node-d".into(), asked_ms: 1, granted_ms: 0, ended_ms: 2 }], ..Default::default() };
+        did_not_run(&asked, false).unwrap();
+        assert_eq!(std::fs::read_to_string(&asked.log).unwrap(), "did not run: box down: node-d (not back in 15 min)\n");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -3816,5 +4423,80 @@ mod tests {
         assert!(judged(&d.ci, &pair("a"), 0).is_some() && judged(&d.ci, &pair("b"), 0).is_none());
         d.ci.runs.push(run("130", &pair("e"), 500, "incomplete"));
         assert!(judged(&d.ci, &pair("e"), 0).is_none(), "incomplete is no verdict: the bucket runs it");
+    }
+
+    /// A sweep started behind a newer rolling run runs its legs on that run's pair with that
+    /// run's Cargo.lock: a box that ran that run has that tree built and builds nothing new. A leg
+    /// whose crate is gone there keeps the sweep's pair, as does a sweep the rolling run is not
+    /// newer than. A proof names the pair its legs ran; targets that ran at different inputs
+    /// prove nothing.
+    #[test]
+    fn a_sweep_leg_takes_the_newest_rolling_runs_pair_and_lock() {
+        let home = std::env::temp_dir().join(format!("devhub-ci-sweep-leg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let repo = home.join("tree");
+        std::fs::create_dir_all(repo.join("libs/a/src")).unwrap();
+        std::fs::create_dir_all(repo.join("libs/gone")).unwrap();
+        let git = |args: &[&str]| {
+            let o = std::process::Command::new("git").current_dir(&repo).args(args).output().unwrap();
+            assert!(o.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&o.stderr));
+            String::from_utf8_lossy(&o.stdout).trim().to_string()
+        };
+        let commit = |what: &str| {
+            git(&["add", "-A"]);
+            git(&["commit", "-q", "-m", what]);
+            Pair::new(&git(&["rev-parse", "HEAD"]), "")
+        };
+        std::fs::write(repo.join("libs/a/Cargo.toml"), "[package]\nname = \"a\"\n").unwrap();
+        std::fs::write(repo.join("libs/a/src/lib.rs"), "// old\n").unwrap();
+        std::fs::write(repo.join("libs/gone/Cargo.toml"), "[package]\nname = \"gone\"\n").unwrap();
+        git(&["init", "-q", "-b", "work"]);
+        git(&["config", "user.name", "CI Test"]);
+        git(&["config", "user.email", "ci@example.invalid"]);
+        let old = commit("old");
+        std::fs::write(repo.join("libs/a/src/lib.rs"), "// new\n").unwrap();
+        std::fs::remove_dir_all(repo.join("libs/gone")).unwrap();
+        let new = commit("new");
+        std::fs::write(repo.join("libs/a/src/lib.rs"), "// newer\n").unwrap();
+        let newer = commit("newer");
+        let leases = Arc::new(crate::lease::master::LeaseMaster::new("mac", home.clone(), Arc::new(|_: &str, _: &str, _: &str| Err("no nodes".to_string())), Arc::new(|_| {}), Arc::new(|| 1), None, true));
+        let ctx = Ctx { store: crate::state::Store::open(&home, "mac", Arc::new(|_| 0)).unwrap(), leases, machine: "mac".into(), monitor: crate::monitor::Monitor::start(&[]), repo: repo.clone(), home: home.clone() };
+        // the rolling run of `new`, with the Cargo.lock it shipped
+        let lock = "[[package]]\nname = \"a\"\nversion = \"0.1.0\"\n";
+        std::fs::create_dir_all(ctx.logs("ci").join("R")).unwrap();
+        std::fs::write(ctx.logs("ci").join("R/Cargo.lock"), lock).unwrap();
+        ctx.store.update(|d| d.ci.runs.push(CiRun { id: "R".into(), pair: new.clone(), started_ms: 10, ended_ms: 20, verdict: "ok".into(), ..Default::default() })).unwrap();
+        let dir = ctx.logs("ci").join("S");
+        let shard = |id: &str, dir: &str| Shard { id: id.into(), kind: Kind::Test, os: Os::Linux, gui: false, gpu: false, steps: Vec::new(), judge: Judge::Tests, est: 1.0, dirs: Some(vec![dir.into()]), whole: false, cores: None };
+        let (a, gone) = (shard("wtest:a", "libs/a"), shard("wtest:gone", "libs/gone"));
+        // (a sweep's pool: its legs share the leg tree it found)
+        let sweep = || Mutex::new(Pool { proofs_collected: false, shards: Vec::new(), state: Vec::new(), reserved: Vec::new(), stopped: false, prio: 0, urgency: Vec::new(), overdue: Vec::new(), run_id: "S".into(), sweep: true, leg: None });
+        let pool = sweep();
+        let leg = sweep_leg(&ctx, &old, &dir, &a, &pool).expect("a leg of a sweep behind the rolling run takes its pair");
+        assert_eq!(leg.pair, new);
+        assert_eq!(std::fs::read_to_string(leg.dir.join("Cargo.lock")).unwrap(), lock, "and ships the Cargo.lock that run shipped");
+        assert!(Arc::ptr_eq(&leg, &sweep_leg(&ctx, &old, &dir, &a, &pool).unwrap()), "the next leg reads no tree again");
+        assert!(sweep_leg(&ctx, &old, &dir, &gone, &pool).is_none(), "a crate gone at the newer tree keeps the sweep's pair");
+        assert!(sweep_leg(&ctx, &new, &dir, &a, &sweep()).is_none(), "a sweep at the rolling run's pair runs its own");
+        assert!(sweep_leg(&ctx, &newer, &dir, &a, &sweep()).is_none(), "a sweep newer than the rolling run runs its own");
+
+        // the proof of a leg at `new`: its inputs there, not the sweep's
+        let units = units_of(&a);
+        let dg = Digests::with_lock(&Tree::at(&repo, &old).unwrap(), &units, lock.to_string()).unwrap();
+        let at_new = Digests::with_lock(&Tree::at(&repo, &new).unwrap(), &units, lock.to_string()).unwrap();
+        let ran = |at: &Pair, granted_ms: u64| CiShard { id: "wtest:a".into(), state: "ok".into(), at: at.clone(), granted_ms, ..Default::default() };
+        let state = vec![ran(&new, 5)];
+        let mut legs = LegDigests::new();
+        leg_digests(&ctx, &old, &dir, &units, &state, &mut legs);
+        let proofs = passed_units(&ctx, &old, &dg, &legs, std::slice::from_ref(&a), &state, 7);
+        let proof = &proofs[&(units[0].clone(), Os::Linux)];
+        assert_eq!((&proof.pair, proof.digest.as_str()), (&new, at_new.of(&units[0], Os::Linux)));
+        assert_ne!(proof.digest, dg.of(&units[0], Os::Linux));
+        // two targets of the crate, one at each pair: neither inputs passed whole
+        let two = [a.clone(), Shard { id: "wtest:a:2".into(), ..a.clone() }];
+        let state = vec![ran(&new, 5), ran(&old, 6)];
+        leg_digests(&ctx, &old, &dir, &units, &state, &mut legs);
+        assert!(passed_units(&ctx, &old, &dg, &legs, &two, &state, 7).is_empty());
+        let _ = std::fs::remove_dir_all(&home);
     }
 }

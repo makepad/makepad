@@ -474,7 +474,7 @@ impl Verifier {
                     Some(v) => format!("{}{}rustc_eq={v}", def.needs, if def.needs.is_empty() { "" } else { "," }),
                     None => def.needs.clone(),
                 };
-                let spec = Spec { since_ms: None, only: false, lane: format!("verify-{}", def.name), agent: "devhub-verify".into(), kind: def.kind, needs, prio: leg_prio, rev: pair.rev(), repo_dir: ctx.repo.to_string_lossy().into_owned(), node: def.node.clone() };
+                let spec = Spec { since_ms: None, lane: format!("verify-{}", def.name), agent: "devhub-verify".into(), kind: def.kind, needs, prio: leg_prio, rev: pair.rev(), repo_dir: ctx.repo.to_string_lossy().into_owned(), node: def.node.clone() };
                 let v = run_leg(&ctx, &spec, &pair, &def, &env, &log, Some(leg));
                 results.lock().unwrap().push(v);
             }));
@@ -654,7 +654,11 @@ pub(crate) fn run_leg(ctx: &Ctx, spec: &Spec, pair: &Pair, def: &LegDef, env: &[
             let held = Held::attach(&l.lease, &l.node);
             ctx.store.event(job, Sev::Info, format!("{job} leg {name} of {} on {} ({}): the master restarted, its run goes on", pair.short(), l.node, l.lease), None);
             let r = match std::fs::OpenOptions::new().append(true).create(true).open(log) {
-                Ok(mut f) => held.follow(l.run_n, off, &mut f),
+                Ok(mut f) => {
+                    let r = held.follow(l.run_n, off, &mut f);
+                    if r.is_ok() { held.save_kept(&spec.lane, &log.with_extension("keep"), &mut f); }
+                    r
+                }
                 Err(e) => Err(format!("{}: {e}", log.display())),
             };
             let exit = r.as_ref().ok().copied();
@@ -711,6 +715,8 @@ pub(crate) fn run_leg(ctx: &Ctx, spec: &Spec, pair: &Pair, def: &LegDef, env: &[
                 }
             }).unwrap_or_else(|e| { eprintln!("devhub state: {e}"); Default::default() });
         });
+        // a failed step's logs (settle_stress's run.log, the gate's own), before the lease's end takes them
+        if r.is_ok() { held.save_kept(&spec.lane, &log.with_extension("keep"), &mut file); }
         let exit = r.as_ref().ok().copied();
         held.release(exit);
         if r.is_err() && super::leg::was_preempted(&id) {

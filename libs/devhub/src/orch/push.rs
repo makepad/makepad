@@ -1,15 +1,25 @@
-//! `devhub push`: the collapsed push of the requested commit or newest landed tip to origin/work.
-//! One commit whose tree is the selected work commit's tree and whose parent is origin/work (plus
-//! any merged PR heads named as extra parents, which must be in the tip). CI reports regressions
-//! independently. A delta with credential-like text is refused (said as file:line, never the text).
+//! `devhub push`: the requested commit or newest landed tip to origin/work, as one commit per area
+//! ([`super::group`], the blocks of `devhub promote`): on origin/work, each with the files of its
+//! block and a message that says what they are, the last with the tip's tree and any merged PR heads
+//! named as extra parents, which must be in the tip. Only the tip is promised to build: promote
+//! generates a root manifest for each commit because it checks each one, a push does not.
+//! `--dry` builds the same set, lists it and every crate that is new since origin with who depends
+//! on it, the commercial checkout's crates included; nothing moves.
+//! CI reports regressions independently. A delta with credential-like text is refused (said as
+//! file:line, never the text), and the pre-push hook checks what goes out.
 //! Nothing pushes on its own: the manager runs it after the daily review.
 
+use super::group::{self, Groups, NewCrate};
 use super::{git, is_ancestor, Ctx};
 use crate::proto::{wall_ms, Sev};
 use crate::state::{Pair, Pushed};
 use makepad_remote::json_str;
 
 pub const TRAILER: &str = "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>";
+/// The most new commits the pre-push hook takes in one push.
+const HOOK_COMMITS: usize = 20;
+/// Where the commercial checkout's crates stand in the tree (`Ctx::commercial`).
+const COMMERCIAL: &str = "apps/commercial";
 
 /// A credential-like line in the delta.
 #[derive(Debug, PartialEq)]
@@ -64,6 +74,9 @@ fn has_fleet_key(l: &str) -> bool {
 /// never matches its own scan.
 const NAMED: [(&str, &str, &str); 2] = [("pass", "word=", "a password"), ("sec", "ret=", "a secret")];
 
+/// The project's own address, public in its manifests: git's `user.email` here, so every run named it.
+const PUBLIC_ADDRESS: &str = "info@makepad.nl";
+
 /// The added lines of a unified diff with credential-like text: the user's address, an assigned
 /// password or secret, a fleet credential (push-tree.sh's scan, case-insensitive).
 pub fn scan(diff: &str, stem: Option<&(String, String)>) -> Vec<Hit> {
@@ -85,7 +98,7 @@ pub fn scan(diff: &str, stem: Option<&(String, String)>) -> Vec<Hit> {
         if let Some(added) = l.strip_prefix('+') {
             let low = added.to_ascii_lowercase();
             let named = NAMED.iter().find(|(a, b, _)| low.contains(&format!("{a}{b}"))).map(|n| n.2);
-            let what = if stem.is_some_and(|s| has_email(&low, s)) {
+            let what = if stem.is_some_and(|s| has_email(&low.replace(PUBLIC_ADDRESS, ""), s)) {
                 Some("the user's email")
             } else if named.is_some() {
                 named
@@ -123,6 +136,30 @@ fn public_parent(repo: &std::path::Path, parent: &str) -> Result<String, String>
     Ok(oid)
 }
 
+/// The set as JSON rows, for the list `devhub push` prints.
+fn commit_rows(groups: &Groups, set: &[(usize, String)]) -> String {
+    let rows: Vec<String> = set
+        .iter()
+        .map(|(at, sha)| {
+            let stat = &groups.stats[*at];
+            let areas: Vec<String> = groups.areas(*at).iter().map(|a| json_str(a)).collect();
+            format!("{{\"sha\":{},\"title\":{},\"files\":{},\"added\":{},\"removed\":{},\"areas\":[{}]}}", json_str(sha), json_str(&groups.blocks[*at].title), stat.files.len(), stat.added, stat.removed, areas.join(","))
+        })
+        .collect();
+    rows.join(",")
+}
+
+fn crate_rows(crates: &[NewCrate]) -> String {
+    let rows: Vec<String> = crates
+        .iter()
+        .map(|c| {
+            let users: Vec<String> = c.users.iter().map(|u| json_str(u)).collect();
+            format!("{{\"dir\":{},\"name\":{},\"users\":[{}],\"only_commercial\":{}}}", json_str(&c.dir), json_str(&c.name), users.join(","), c.only_private)
+        })
+        .collect();
+    rows.join(",")
+}
+
 /// `push {"sha"?,"message"?,"parents"?:[..],"dry"?}`.
 pub fn serve(ctx: &Ctx, line: &str) -> Result<String, String> {
     let json = line.split_once(' ').map_or("{}", |(_, j)| j.trim());
@@ -137,15 +174,14 @@ pub fn serve(ctx: &Ctx, line: &str) -> Result<String, String> {
     let sha = tip.work.clone();
     git(repo, &["fetch", "-q", "origin", "work"])?;
     let origin = git(repo, &["rev-parse", "refs/remotes/origin/work"])?;
-    let tree = |c: &str| git(repo, &["rev-parse", &format!("{c}^{{tree}}")]);
-    if tree(&origin)? == tree(&sha)? {
+    let groups = Groups::between(repo, &origin, &sha)?;
+    if groups.is_empty() {
         return Ok(format!("{{\"pushed\":false,\"why\":\"origin/work already has the tree of {}\",\"origin\":{}}}", super::short(&sha), json_str(&origin)));
     }
-    let files = git(repo, &["diff", "--name-only", &origin, &sha])?.lines().count() as u32;
-    let diff = git(repo, &["diff", "--unified=0", "--no-color", "--no-ext-diff", &origin, &sha])?;
+    let files = groups.files() as u32;
     let stem = git(repo, &["config", "user.email"]).ok().and_then(|e| email_stem(&e));
     // a line that already stands in origin's tree is public, whatever it looks like
-    let hits: Vec<Hit> = scan(&diff, stem.as_ref()).into_iter().filter(|h| !git(repo, &["grep", "-h", "-F", "-e", &h.text, "refs/remotes/origin/work"]).is_ok_and(|found| found.lines().any(|l| l.trim() == h.text.trim()))).collect();
+    let hits: Vec<Hit> = scan(&groups.diff, stem.as_ref()).into_iter().filter(|h| !git(repo, &["grep", "-h", "-F", "-e", &h.text, "refs/remotes/origin/work"]).is_ok_and(|found| found.lines().any(|l| l.trim() == h.text.trim()))).collect();
     if !hits.is_empty() {
         let list: Vec<String> = hits.iter().take(20).map(|h| format!("{}:{} ({})", h.file, h.line, h.what)).collect();
         ctx.store.event("push", Sev::Err, format!("push REFUSED {}: credential-like text in the delta: {}", super::short(&sha), list.join(", ")), None);
@@ -156,23 +192,28 @@ pub fn serve(ctx: &Ctx, line: &str) -> Result<String, String> {
             return Err(format!("push: extra parent {p} is not in {}", super::short(&sha)));
         }
     }
-    let message = st("message").unwrap_or_else(|| format!("work: tip {} (with commercial {})", super::short(&sha), super::short(&tip.main)));
+    if groups.commits() > HOOK_COMMITS {
+        return Err(format!("push: {} groups, the pre-push hook takes {HOOK_COMMITS} commits: join blocks in {}", groups.commits(), group::BLOCKS_FILE));
+    }
+    let message = st("message");
+    let from = format!("work tip {} (with commercial {})", super::short(&sha), super::short(&tip.main));
+    let note = |n: usize, of: usize| Some(format!("Part {n} of {of} of {from}.{}", message.as_deref().map_or(String::new(), |m| format!("\n\n{m}"))));
+    let set = groups.build(repo, &parents, &note, &|_| None)?;
+    let commits = commit_rows(&groups, &set);
+    let last = set.last().map(|(_, sha)| sha.clone()).ok_or("push: no commits")?;
     if dry {
-        return Ok(format!("{{\"pushed\":false,\"dry\":true,\"tip\":{},\"origin\":{},\"files\":{files},\"scan\":\"clean\"}}", json_str(&sha), json_str(&origin)));
+        let commercial = ctx.commercial();
+        let private = if commercial.is_dir() { group::manifests_at(&commercial, &tip.main, COMMERCIAL)? } else { group::Manifests::default() };
+        let new = crate_rows(&groups.new_crates(&private.docs));
+        let unread: Vec<String> = groups.manifests.unread.iter().chain(&private.unread).map(|p| json_str(p)).collect();
+        let main = if commercial.is_dir() { json_str(&tip.main) } else { "null".into() };
+        return Ok(format!("{{\"pushed\":false,\"dry\":true,\"tip\":{},\"origin\":{},\"files\":{files},\"scan\":\"clean\",\"commits\":[{commits}],\"new_crates\":[{new}],\"commercial\":{main},\"unread\":[{}]}}", json_str(&sha), json_str(&origin), unread.join(",")));
     }
-    let mut args: Vec<String> = vec!["commit-tree".into(), format!("{sha}^{{tree}}"), "-p".into(), origin.clone()];
-    for p in &parents {
-        args.push("-p".into());
-        args.push(p.clone());
-    }
-    args.push("-m".into());
-    args.push(format!("{message}\n\n{TRAILER}"));
-    let commit = git(repo, &args.iter().map(String::as_str).collect::<Vec<_>>())?;
-    git(repo, &["push", "-q", "origin", &format!("{commit}:refs/heads/work")])?;
-    let p = Pushed { pair: tip.clone(), commit: commit.clone(), origin_was: origin.clone(), at_ms: wall_ms(), files };
+    git(repo, &["push", "-q", "origin", &format!("{last}:refs/heads/work")])?;
+    let p = Pushed { pair: tip.clone(), commit: last.clone(), origin_was: origin.clone(), at_ms: wall_ms(), files };
     ctx.store.update(|d| d.pushes.push(p))?;
-    ctx.store.event("push", Sev::Info, format!("push: origin/work {} -> {} (tree of tip {}, {files} files)", super::short(&origin), super::short(&commit), tip.short()), None);
-    Ok(format!("{{\"pushed\":true,\"commit\":{},\"origin_was\":{},\"tip\":{},\"files\":{files}}}", json_str(&commit), json_str(&origin), json_str(&sha)))
+    ctx.store.event("push", Sev::Info, format!("push: origin/work {} -> {}, {} commits (tree of tip {}, {files} files)", super::short(&origin), super::short(&last), set.len(), tip.short()), None);
+    Ok(format!("{{\"pushed\":true,\"commit\":{},\"origin_was\":{},\"tip\":{},\"files\":{files},\"commits\":[{commits}]}}", json_str(&last), json_str(&origin), json_str(&sha)))
 }
 
 #[cfg(test)]
@@ -231,5 +272,10 @@ diff --git a/a.rs b/a.rs
         let clean = "+++ b/x\n@@ -0,0 +1,3 @@\n+someonex@example.io\n+MK.box.lan.1.short\n+other@example.io\n".replace("MK", &["mkc", "2"].concat());
         assert!(scan(&clean, Some(&stem)).is_empty());
         assert_eq!(scan("+++ b/x\n@@ -0,0 +1 @@\n+someone@example.io\n", Some(&stem)).len(), 1);
+        let public = email_stem(PUBLIC_ADDRESS).unwrap();
+        let line = |l: &str| format!("+++ b/x\n@@ -0,0 +1 @@\n+{l}\n");
+        assert!(scan(&line("authors = [\"Makepad <INFO@makepad.nl>\"]"), Some(&public)).is_empty(), "the public address");
+        // (in two parts: whole, this line is what a push's own scan refuses)
+        assert_eq!(scan(&line(concat!("info7", "@makepad.nl <info@makepad.nl>")), Some(&public)).len(), 1, "beside it, another still counts");
     }
 }

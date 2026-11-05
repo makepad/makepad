@@ -8,14 +8,25 @@
 //! round starts at once and reaches every node that needs the new tips, the first listed node
 //! (the user's WM node) alone first, then the rest together. The order carries the landing's
 //! time, so the node can say how long landing -> visible took.
+//!
+//! A node whose apply answered `waits:` (a timed lease runs there) is told to the scheduler
+//! ([`Waits`]). A node with a timed ask first in line ([`crate::lease::sched::Sched::update_pin`])
+//! stays at what it has until the ask starts; one that fell behind moves to that ask's catch-up
+//! and no further. That move is not part of a round: a round's batches each wait for their nodes'
+//! builds, minutes per batch, and an ask whose box had nothing to do but this one update sat
+//! behind them ([`follow_pins`]).
 use super::cli::{ask_local, branch_sha, fleet_nodes, push_and_apply};
 use super::git::valid_sha;
+use crate::lease::sched::{deploy_to, DeployTo};
 use crate::proto;
 use makepad_remote::link::{Client, Target};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Condvar, Mutex};
-use std::time::Duration;
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
+
+/// How soon a node that answered `waits:` is asked again.
+const WAITS_RETRY_S: u64 = 5;
 
 /// A landing's kick: the wall-clock ms of the newest landing not taken by a round yet.
 static KICK: (Mutex<Option<u64>>, Condvar) = (Mutex::new(None), Condvar::new());
@@ -117,8 +128,8 @@ pub fn prewarm_suits(v: &makepad_strict_json::Value) -> bool {
     b("up") && b("dev") && !b("draining") && !b("user") && leases == 0 && caps.is_some_and(|c| !loaded(&c))
 }
 
-/// Deployments behind the tips, and which nodes can pre-warm after applying.
-fn nodes_to_apply(nodes: &[String], status: &[String], tips: &str) -> (Vec<String>, BTreeMap<String, bool>) {
+/// Deployments behind the tips, which nodes can pre-warm after applying, and each node's deployment.
+fn nodes_to_apply(nodes: &[String], status: &[String], tips: &str) -> (Vec<String>, BTreeMap<String, bool>, BTreeMap<String, String>) {
     let mut deploys = BTreeMap::<String, String>::new();
     let mut idle = BTreeMap::<String, bool>::new();
     for line in status {
@@ -131,48 +142,269 @@ fn nodes_to_apply(nodes: &[String], status: &[String], tips: &str) -> (Vec<Strin
         }
     }
     let todo = nodes.iter().filter(|n| deploys.get(*n).map(String::as_str) != Some(tips)).cloned().collect();
-    (todo, idle)
+    (todo, idle, deploys)
 }
 
-pub fn start(control_socket: PathBuf) {
-    if let Err(e) = std::thread::Builder::new().name("devhub-autosync".into()).spawn(move || {
-        let c = Client::new(Target::Unix(control_socket), "devhub-autosync");
-        let home = proto::home();
-        let path = home.join("autosync.state");
-        let mut applied = BTreeMap::<String, (String, String)>::new();
+/// Says to the scheduler which nodes' applies a timed run made wait (`Some(why)`) and when one
+/// waits no more (`None`: applied, at the tips some other way, or no longer followed).
+pub type SayWaits = Box<dyn Fn(&str, Option<String>) + Send>;
+
+/// The timed ask first in line on a node and the deployment it holds or catches up to until that
+/// ask starts ([`crate::lease::sched::Sched::update_pin`]).
+pub type PinOf = Arc<dyn Fn(&str) -> Option<(String, String)> + Send + Sync>;
+
+/// The nodes whose apply waits for a timed run, as said through [`SayWaits`].
+struct Waits {
+    on: BTreeSet<String>,
+    say: SayWaits,
+}
+
+impl Waits {
+    fn wait(&mut self, node: &str, why: String) {
+        self.on.insert(node.to_string());
+        (self.say)(node, Some(why));
+    }
+
+    fn done(&mut self, node: &str) {
+        if self.on.remove(node) {
+            (self.say)(node, None);
+        }
+    }
+
+    /// Every node not in `keep` waits no more.
+    fn keep(&mut self, keep: &[String]) {
+        let gone: Vec<String> = self.on.iter().filter(|n| !keep.contains(n)).cloned().collect();
+        for n in gone {
+            self.done(&n);
+        }
+    }
+}
+
+/// The nodes' last successful applies (`autosync.state`, read by `devhub autosync status`).
+struct Applied {
+    path: PathBuf,
+    revs: BTreeMap<String, (String, String)>,
+    dirty: bool,
+}
+
+impl Applied {
+    fn load(path: PathBuf) -> Self {
+        let mut revs = BTreeMap::new();
         match std::fs::read_to_string(&path) {
             Ok(text) => for line in text.lines() {
                 let words: Vec<_> = line.split_whitespace().collect();
                 if let [node, mp, cm] = words.as_slice() {
                     if valid_sha(mp) && valid_sha(cm) {
-                        applied.insert(node.to_string(), (mp.to_string(), cm.to_string()));
+                        revs.insert(node.to_string(), (mp.to_string(), cm.to_string()));
                     }
                 }
             },
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => eprintln!("devhub autosync: {}: {e}", path.display()),
         }
-        let mut dirty = false;
-        let mut last_node = None;
-        let mut summaries = BTreeMap::<String, String>::new();
-        let mut report = |node: &str, line: String| {
-            if summaries.get(node) != Some(&line) {
-                eprintln!("devhub autosync: {node} {line}");
-                summaries.insert(node.to_string(), line);
+        Self { path, revs, dirty: false }
+    }
+
+    fn save(&mut self) -> std::io::Result<()> {
+        let text: String = self.revs.iter().map(|(n, (mp, cm))| format!("{n} {mp} {cm}\n")).collect();
+        let tmp = self.path.with_extension("state.tmp");
+        std::fs::create_dir_all(self.path.parent().unwrap_or(Path::new("."))).and_then(|_| std::fs::write(&tmp, text)).and_then(|_| std::fs::rename(&tmp, &self.path))?;
+        self.dirty = false;
+        Ok(())
+    }
+}
+
+/// Says a node's state when it changes (a repeated failure once), to the master's stderr.
+#[derive(Default)]
+struct Report(BTreeMap<String, String>);
+
+impl Report {
+    fn say(&mut self, node: &str, line: String) {
+        if self.0.get(node) != Some(&line) {
+            eprintln!("devhub autosync: {node} {line}");
+            self.0.insert(node.to_string(), line);
+        }
+    }
+}
+
+/// What a node did with an apply order.
+#[derive(Debug, PartialEq)]
+enum Answer {
+    Applied,
+    /// a timed lease runs there
+    Waits,
+    Failed,
+}
+
+/// What the rounds and the pins' moves share.
+struct Follow {
+    waits: Mutex<Waits>,
+    applied: Mutex<Applied>,
+}
+
+impl Follow {
+    fn waits(&self) -> std::sync::MutexGuard<'_, Waits> {
+        self.waits.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Takes in what `node` answered an order to move to `to` (`work`, `commercial`).
+    fn answer(&self, report: &mut Report, node: &str, to: (&str, &str), after: &str, result: Result<(String, String), String>) -> Answer {
+        match result {
+            Ok(revs) => {
+                report.say(node, format!("applied work={} commercial={}{after}", revs.0, revs.1));
+                self.waits().done(node);
+                let mut applied = self.applied.lock().unwrap_or_else(|e| e.into_inner());
+                applied.revs.insert(node.to_string(), revs);
+                applied.dirty = true;
+                // (a failed save stays dirty: the watcher's next round says it and tries again)
+                let _ = applied.save();
+                Answer::Applied
             }
-        };
+            Err(e) => {
+                let waits = e.contains("\"waits: ");
+                if waits {
+                    self.waits().wait(node, format!("its deployment moves to {}", &to.0[..to.0.len().min(10)]));
+                } else {
+                    // it failed or was unreachable: it waits for no timed run
+                    self.waits().done(node);
+                }
+                report.say(node, format!("skip work={} commercial={}: {e}", to.0, to.1));
+                if waits { Answer::Waits } else { Answer::Failed }
+            }
+        }
+    }
+}
+
+/// The moves to pins: which run, and what the last ones said.
+#[derive(Default)]
+struct PinMoves {
+    /// the nodes whose move runs now
+    running: BTreeSet<String>,
+    /// the pin each node moved to last: its `caps.deploy` says it a few seconds later
+    moved: BTreeMap<String, String>,
+    /// no new order before this after a failed one (each one that fails says so on the node)
+    not_before: BTreeMap<String, Instant>,
+    report: Report,
+}
+
+/// A node's move to a pin (`makepad,commercial`): the revisions it applied, or why not.
+type MoveTo<'a> = Arc<dyn Fn(&str, &str) -> Result<(String, String), String> + Send + Sync + 'a>;
+
+/// One look at the pinned nodes (node, its pin): a node that holds its pin waits for no update,
+/// whatever an earlier order said (it reached the pin some other way: a move by hand, a round's
+/// order sent before the pin); any other moves to the pin now, on its own thread.
+fn pin_pass<'s>(scope: &'s std::thread::Scope<'s, '_>, follow: &'s Follow, moves: &'s Mutex<PinMoves>, pinned: Vec<(String, (String, String))>, deploys: &BTreeMap<String, String>, has: impl Fn(&str, &str) -> bool, failed_wait: Duration, apply: MoveTo<'s>) {
+    for (node, pin) in pinned {
+        let mut m = moves.lock().unwrap_or_else(|e| e.into_inner());
+        if m.running.contains(&node) {
+            continue;
+        }
+        let deploy = deploys.get(&node).map_or("", String::as_str);
+        match deploy_to(Some(pin), deploy, |d, a| m.moved.get(&node).is_some_and(|at| at == a) || has(d, a)) {
+            DeployTo::Tips => {}
+            DeployTo::Held { .. } => {
+                drop(m);
+                follow.waits().done(&node);
+            }
+            DeployTo::Pin(_) if m.not_before.get(&node).is_some_and(|t| *t > Instant::now()) => {}
+            DeployTo::Pin(at) => {
+                m.running.insert(node.clone());
+                drop(m);
+                let apply = apply.clone();
+                scope.spawn(move || {
+                    let result = apply(&node, &at);
+                    let (mp, cm) = at.split_once(',').unwrap_or((&at, ""));
+                    let mut m = moves.lock().unwrap_or_else(|e| e.into_inner());
+                    let answer = follow.answer(&mut m.report, &node, (mp, cm), "", result);
+                    m.not_before.remove(&node);
+                    match answer {
+                        Answer::Applied => { m.moved.insert(node.clone(), at.clone()); }
+                        Answer::Waits => {}
+                        Answer::Failed => { m.not_before.insert(node.clone(), Instant::now() + failed_wait); }
+                    }
+                    m.running.remove(&node);
+                });
+            }
+        }
+    }
+}
+
+/// A box that catches up for a timed ask moves to that ask's pin now, whatever the rounds are doing: asked again
+/// every [`WAITS_RETRY_S`] while a timed run there says `waits:`, so the gap after that run is
+/// its update's. In a round it came after that round's batches, each waiting for its nodes'
+/// builds: the box sat idle with its ask 11 min behind them (11-04), and a landing's kick does
+/// not reach a round that runs.
+fn follow_pins(control_socket: PathBuf, follow: Arc<Follow>, pin_of: PinOf) {
+    let c = Client::new(Target::Unix(control_socket), "devhub-autosync-pins");
+    let home = proto::home();
+    let moves = Mutex::new(PinMoves::default());
+    let c = &c;
+    std::thread::scope(|s| loop {
+        let look = (|| -> Result<(), String> {
+            let conf = read_conf(&home)?;
+            if !conf.enabled || conf.repo.as_os_str().is_empty() {
+                return Ok(());
+            }
+            let nodes = match conf.nodes {
+                Some(nodes) => nodes,
+                None => fleet_nodes(c)?,
+            };
+            let pinned: Vec<_> = nodes.iter().filter_map(|n| Some((n.clone(), pin_of(n)?))).collect();
+            if pinned.is_empty() {
+                return Ok(());
+            }
+            let status = ask_local(c, "nodes", "nodes").unwrap_or_default();
+            let (_, _, deploys) = nodes_to_apply(&nodes, &status, "");
+            let repo = conf.repo;
+            let order = repo.clone();
+            let apply: MoveTo = Arc::new(move |node: &str, at: &str| {
+                let mut lines = Vec::new();
+                let code = push_and_apply(c, &order, "work", Some("main"), Some(at), &[node.to_string()], "on", "auto", false, "", &mut |n, l| if n == node { lines.push(l.to_string()) });
+                apply_result(code, &lines)
+            });
+            pin_pass(s, &follow, &moves, pinned, &deploys, |d, a| super::deploy_has(&repo, d, a), Duration::from_secs(conf.interval_s), apply);
+            Ok(())
+        })();
+        if let Err(e) = look {
+            moves.lock().unwrap_or_else(|e| e.into_inner()).report.say("pins", e);
+        }
+        std::thread::sleep(Duration::from_secs(WAITS_RETRY_S));
+    })
+}
+
+fn read_conf(home: &Path) -> Result<AutoConf, String> {
+    let text = match std::fs::read_to_string(home.join("autosync.conf")) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(format!("autosync.conf: {e}")),
+    };
+    Ok(AutoConf::parse(&text, &makepad_app_registry::repo_root().unwrap_or_default()))
+}
+
+pub fn start(control_socket: PathBuf, say_waits: SayWaits, pin_of: PinOf) {
+    let home = proto::home();
+    let follow = Arc::new(Follow { waits: Mutex::new(Waits { on: BTreeSet::new(), say: say_waits }), applied: Mutex::new(Applied::load(home.join("autosync.state"))) });
+    {
+        let (socket, follow, pin_of) = (control_socket.clone(), follow.clone(), pin_of.clone());
+        if let Err(e) = std::thread::Builder::new().name("devhub-autosync-pins".into()).spawn(move || follow_pins(socket, follow, pin_of)) {
+            eprintln!("devhub autosync: cannot start the pins' watcher: {e}");
+        }
+    }
+    if let Err(e) = std::thread::Builder::new().name("devhub-autosync".into()).spawn(move || {
+        let c = Client::new(Target::Unix(control_socket), "devhub-autosync");
+        let mut last_node = None;
+        let mut report = Report::default();
         let mut interval_s = 30;
         let mut landed: Option<u64> = None;
         loop {
+            // a node that answered `waits:` (a timed lease runs there) is asked again soon: the
+            // gap between two timed runs is seconds
+            let mut waiting = false;
             let round = (|| -> Result<(), String> {
-                let text = match std::fs::read_to_string(home.join("autosync.conf")) {
-                    Ok(text) => text,
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-                    Err(e) => return Err(format!("autosync.conf: {e}")),
-                };
-                let conf = AutoConf::parse(&text, &makepad_app_registry::repo_root().unwrap_or_default());
+                let conf = read_conf(&home)?;
                 interval_s = conf.interval_s;
                 if !conf.enabled {
+                    follow.waits().keep(&[]);
                     return Ok(());
                 }
                 if conf.repo.as_os_str().is_empty() {
@@ -184,10 +416,27 @@ pub fn start(control_socket: PathBuf) {
                     None => fleet_nodes(&c)?,
                 };
                 if nodes.is_empty() {
+                    follow.waits().keep(&[]);
                     return Ok(());
                 }
                 let status = ask_local(&c, "nodes", "nodes").unwrap_or_default();
-                let (todo, idle) = nodes_to_apply(&nodes, &status, &format!("{},{}", shas.0, shas.1));
+                let (todo, idle, deploys) = nodes_to_apply(&nodes, &status, &format!("{},{}", shas.0, shas.1));
+                // a node a timed ask pinned moves to its pin ([`follow_pins`]), or holds it until
+                // the ask starts
+                let mut pinned: Vec<String> = Vec::new();
+                let todo: Vec<String> = todo.into_iter().filter(|n| {
+                    let deploy = deploys.get(n).map_or("", String::as_str);
+                    match deploy_to(pin_of(n), deploy, |d, a| super::deploy_has(&conf.repo, d, a)) {
+                        DeployTo::Tips => true,
+                        DeployTo::Pin(_) => {
+                            pinned.push(n.clone());
+                            false
+                        }
+                        DeployTo::Held { .. } => false,
+                    }
+                }).collect();
+                // at the tips, held at a pin, or no longer followed: its apply waits for nothing
+                follow.waits().keep(&todo.iter().chain(pinned.iter()).cloned().collect::<Vec<_>>());
                 let suits = |n: &String| conf.prewarm && idle.get(n).copied().unwrap_or(false);
                 let batches: Vec<Vec<String>> = if landed.is_some() {
                     // a landing: the first listed node (the user's) alone, then every other at once
@@ -204,40 +453,37 @@ pub fn start(control_socket: PathBuf) {
                 };
                 let extra = landed.map_or(String::new(), |ms| format!(" landed={ms}"));
                 for batch in batches {
+                    // a timed ask that got first in line since the round began: its pin's
+                    let batch: Vec<String> = batch.into_iter().filter(|n| pin_of(n).is_none()).collect();
+                    if batch.is_empty() {
+                        continue;
+                    }
                     last_node = batch.last().cloned();
                     let prewarm = batch.iter().all(|n| suits(n));
                     let mut lines = BTreeMap::<String, Vec<String>>::new();
-                    let code = push_and_apply(&c, &conf.repo, "work", Some("main"), &batch, "on", "auto", prewarm, &extra, &mut |n, l| lines.entry(n.to_string()).or_default().push(l.to_string()));
+                    let code = push_and_apply(&c, &conf.repo, "work", Some("main"), None, &batch, "on", "auto", prewarm, &extra, &mut |n, l| lines.entry(n.to_string()).or_default().push(l.to_string()));
                     for node in &batch {
                         let mine = lines.remove(node).unwrap_or_default();
                         // a batch's exit code is every node's: one node's is its own error lines
                         let code = if batch.len() == 1 { code } else { mine.iter().any(|l| l.starts_with("{\"err\":")) as i32 };
-                        match apply_result(code, &mine) {
-                            Ok(revs) => {
-                                let after = landed.map_or(String::new(), |ms| format!(" ({} ms after the landing)", proto::wall_ms().saturating_sub(ms)));
-                                report(node, format!("applied work={} commercial={}{after}", revs.0, revs.1));
-                                applied.insert(node.clone(), revs);
-                                dirty = true;
-                            }
-                            Err(e) => report(node, format!("skip work={} commercial={}: {e}", shas.0, shas.1)),
-                        }
+                        let after = landed.map_or(String::new(), |ms| format!(" ({} ms after the landing)", proto::wall_ms().saturating_sub(ms)));
+                        waiting |= follow.answer(&mut report, node, (&shas.0, &shas.1), &after, apply_result(code, &mine)) == Answer::Waits;
                     }
                 }
                 Ok(())
             })();
             if let Err(e) = round {
-                report("", e);
+                report.say("", e);
             }
             // Retry a failed save even when no further node needs an apply.
-            if dirty {
-                let text: String = applied.iter().map(|(n, (mp, cm))| format!("{n} {mp} {cm}\n")).collect();
-                let tmp = home.join("autosync.state.tmp");
-                match std::fs::create_dir_all(&home).and_then(|_| std::fs::write(&tmp, text)).and_then(|_| std::fs::rename(&tmp, &path)) {
-                    Ok(()) => dirty = false,
-                    Err(e) => report("state", format!("could not save autosync.state: {e}")),
+            let mut applied = follow.applied.lock().unwrap_or_else(|e| e.into_inner());
+            if applied.dirty {
+                if let Err(e) = applied.save() {
+                    report.say("state", format!("could not save autosync.state: {e}"));
                 }
             }
-            landed = wait_kick(Duration::from_secs(interval_s));
+            drop(applied);
+            landed = wait_kick(Duration::from_secs(if waiting { WAITS_RETRY_S.min(interval_s) } else { interval_s }));
         }
     }) {
         eprintln!("devhub autosync: cannot start watcher: {e}");
@@ -274,11 +520,92 @@ mod tests {
         };
         let nodes = vec!["busy".into(), "current".into(), "idle".into(), "unknown".into()];
         let lines = vec![status("busy", &old, &tips, 3, true), status("current", &tips, &old, 2, false), status("idle", &old, &old, 0, false)];
-        let (todo, idle) = nodes_to_apply(&nodes, &lines, &tips);
+        let (todo, idle, deploys) = nodes_to_apply(&nodes, &lines, &tips);
         assert_eq!(todo, vec!["busy", "idle", "unknown"]);
+        assert_eq!(deploys.get("current"), Some(&tips));
         assert_eq!(idle.get("busy"), Some(&false), "the deployment applies under leases and user input, but pre-warm stays off");
         assert_eq!(idle.get("current"), Some(&false), "a held work tree at another pin does not trigger an apply");
         assert_eq!(idle.get("idle"), Some(&true));
+    }
+
+    /// A node sat idle 11 min with a timed ask first in line (11-04): the run before it had ended,
+    /// the node would take the update, and the order came after a round's batches, each waiting
+    /// for its nodes' builds. Its move runs beside them, once at a time per box.
+    #[test]
+    fn a_timed_asks_box_moves_to_its_pin_now_and_says_when_it_has() {
+        let dir = std::env::temp_dir().join(format!("devhub-autosync-pin-{}", std::process::id()));
+        let said = Arc::new(Mutex::new(Vec::<(String, Option<String>)>::new()));
+        let s2 = said.clone();
+        let follow = Follow {
+            waits: Mutex::new(Waits { on: BTreeSet::new(), say: Box::new(move |n, why| s2.lock().unwrap().push((n.to_string(), why))) }),
+            applied: Mutex::new(Applied { path: dir.join("autosync.state"), revs: BTreeMap::new(), dirty: false }),
+        };
+        let moves = Mutex::new(PinMoves::default());
+        let (pin, later) = (format!("{},{}", "a".repeat(40), "c".repeat(40)), format!("{},{}", "b".repeat(40), "c".repeat(40)));
+        let revs = |at: &str| at.split_once(',').map(|(m, c)| (m.to_string(), c.to_string())).unwrap();
+        let on = || follow.waits().on.contains("node-a");
+        let (order_tx, order_rx) = std::sync::mpsc::channel::<String>();
+        let (answer_tx, answer_rx) = std::sync::mpsc::channel::<Result<(String, String), String>>();
+        let (order_tx, answer_rx) = (Mutex::new(order_tx), Mutex::new(answer_rx));
+        let settled = || while moves.lock().unwrap().running.contains("node-a") { std::thread::sleep(Duration::from_millis(1)); };
+        // (the box's caps have not said a move yet)
+        let deploys = BTreeMap::from([("node-a".to_string(), "old".to_string())]);
+        std::thread::scope(|s| {
+            let apply: MoveTo = Arc::new(|_: &str, at: &str| {
+                order_tx.lock().unwrap().send(at.to_string()).unwrap();
+                answer_rx.lock().unwrap().recv().unwrap()
+            });
+            let pass = |at: &str, holds: bool| pin_pass(s, &follow, &moves, vec![("node-a".to_string(), ("L2".to_string(), at.to_string()))], &deploys, |_, _| holds, Duration::from_secs(3600), apply.clone());
+            // a round's order had said the box's timed run made it wait; that round builds on
+            follow.waits().wait("node-a", "its deployment moves to old".into());
+            pass(&pin, false);
+            assert_eq!(order_rx.recv().unwrap(), pin, "the move does not wait for the round");
+            pass(&pin, false);
+            assert!(order_rx.try_recv().is_err(), "one order at a time per box");
+            // the run there has not ended: asked again by the next look, and timed work still waits
+            answer_tx.send(Err("{\"err\":\"waits: timed lease L1 runs here\"}".into())).unwrap();
+            settled();
+            assert!(on(), "the box says its update waits");
+            pass(&pin, false);
+            assert_eq!(order_rx.recv().unwrap(), pin, "the gap after the run is the update's");
+            answer_tx.send(Ok(revs(&pin))).unwrap();
+            settled();
+            assert!(!on(), "moved: timed work starts");
+            assert_eq!(follow.applied.lock().unwrap().revs.get("node-a"), Some(&revs(&pin)));
+            pass(&pin, false);
+            assert!(order_rx.try_recv().is_err(), "the caps are late: moved is moved");
+            // the box holds the pin by some other way (a push by hand) and an old order's word
+            // still stands: nothing is left to wait for
+            follow.waits().wait("node-a", "its deployment moves to old".into());
+            pass(&later, true);
+            assert!(!on(), "a target the box passed holds nothing up");
+            assert!(order_rx.try_recv().is_err(), "and takes no order");
+            // a failed move holds no timed work, and its next order waits a while
+            follow.waits().wait("node-a", "its deployment moves to old".into());
+            pass(&later, false);
+            assert_eq!(order_rx.recv().unwrap(), later);
+            answer_tx.send(Err("link lost".into())).unwrap();
+            settled();
+            assert!(!on(), "it failed: it waits for no timed run");
+            pass(&later, false);
+            assert!(order_rx.try_recv().is_err(), "no order every few seconds to a box that fails them");
+        });
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_apply_that_waits_is_said_until_it_applies_or_needs_nothing() {
+        let said = std::sync::Arc::new(Mutex::new(Vec::<(String, Option<String>)>::new()));
+        let s2 = said.clone();
+        let mut w = Waits { on: BTreeSet::new(), say: Box::new(move |n, why| s2.lock().unwrap().push((n.to_string(), why))) };
+        w.wait("a", "x".into());
+        w.wait("b", "y".into());
+        w.done("a");
+        w.done("a");
+        // `b` is at the tips now (or no longer followed): its mark goes too
+        w.keep(&["c".to_string()]);
+        let none = None::<String>;
+        assert_eq!(*said.lock().unwrap(), vec![("a".into(), Some("x".into())), ("b".into(), Some("y".into())), ("a".into(), none.clone()), ("b".into(), none)]);
     }
 
     #[test]

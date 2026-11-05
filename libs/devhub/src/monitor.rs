@@ -11,6 +11,11 @@
 //! refusing `lane remove`, 11-02). Lost events (an overflow, the root changing) re-baseline every
 //! tree. Nothing here runs git. One monitor serves the master's lane worktrees and a node's tree
 //! alike.
+//!
+//! The OS delivers events late (FSEvents after its 0.1 s window), so a set read right after a write
+//! can miss it: a snapshot first asks [`Monitor::settle`], which writes a cookie file into the
+//! watched root and waits to hear it. A root's events come in order, so every earlier write of
+//! the tree has been heard by then.
 
 mod tracked;
 
@@ -38,6 +43,8 @@ struct Tree {
     tracked_stale: bool,
     head: String,
     base: BTreeSet<String>,
+    /// `base` was read at `head` (a tree asked about for the first time has none yet)
+    based: bool,
     /// paths with events since their status was last read, and the event's number
     touched: BTreeMap<String, u64>,
     /// file events so far
@@ -54,15 +61,28 @@ pub type Listener = Arc<dyn Fn(&Path, &str) + Send + Sync>;
 struct Inner {
     trees: BTreeMap<PathBuf, Tree>,
     listeners: Vec<Listener>,
+    /// cookies heard that their [`Monitor::settle`] has not taken yet
+    cookies: BTreeSet<u64>,
 }
+
+/// A cookie's file name is this and its number.
+const COOKIE_PREFIX: &str = ".devhub-settle-";
+/// What a cookie unheard this long says: the monitor lost its events, so the trees are read again.
+const COOKIE_LOST: std::time::Duration = std::time::Duration::from_secs(10);
 
 pub struct Monitor {
     inner: Arc<Mutex<Inner>>,
+    /// a cookie was heard
+    heard: Arc<std::sync::Condvar>,
+    next_cookie: std::sync::atomic::AtomicU64,
     watcher: Option<FileSystemWatcher>,
     /// what it watches: a tree outside them is re-baselined on every ask
     roots: Vec<PathBuf>,
     /// why the OS monitor is not running (every ask then re-baselines)
     pub error: Option<String>,
+    /// the trees whose baseline a background read reads next, and whether that reader runs
+    /// ([`Self::dirty_known`])
+    reads: Mutex<(Vec<PathBuf>, bool)>,
 }
 
 /// The tree's `.git` dir (a linked worktree's `.git` is a file naming it) and its common dir.
@@ -126,19 +146,20 @@ impl Monitor {
     /// Watches `roots` (directories holding worktrees, or a tree itself).
     pub fn start(roots: &[PathBuf]) -> Arc<Monitor> {
         let inner = Arc::new(Mutex::new(Inner::default()));
-        let i2 = inner.clone();
+        let heard = Arc::new(std::sync::Condvar::new());
+        let (i2, h2) = (inner.clone(), heard.clone());
         let dirs: Vec<PathBuf> = roots.iter().filter(|r| r.is_dir()).map(|r| r.canonicalize().unwrap_or_else(|_| r.clone())).collect();
         let roots: Vec<WatchRoot> = dirs.iter().map(|d| WatchRoot { mount: "lanes".into(), path: d.clone() }).collect();
         let config = WatcherConfig { exclude: ExcludePolicy::default().dir_name("local").dir_name("node_modules"), startup_rescan: false, ..WatcherConfig::default() };
         let started = FileSystemWatcher::start_with_journal(roots, config, move |e: &FileSystemEvent| {
-            on_event(&i2, e);
+            if !on_cookie(&i2, &h2, e) { on_event(&i2, e); }
             true
         });
         let (watcher, error) = match started {
             Ok((w, _)) => (Some(w), None),
             Err(e) => (None, Some(e)),
         };
-        Arc::new(Monitor { inner, watcher, roots: dirs, error })
+        Arc::new(Monitor { inner, heard, next_cookie: Default::default(), watcher, roots: dirs, error, reads: Mutex::new((Vec::new(), false)) })
     }
 
     /// Calls `f` on every file event in a followed tree, as it comes (live jobs ship edits so).
@@ -148,6 +169,22 @@ impl Monitor {
 
     pub fn watching(&self) -> bool {
         self.watcher.is_some()
+    }
+
+    /// The tree's file events so far, as a mark for [`Self::quiet_since`]; the tree is followed
+    /// from now on. None: the OS monitor does not watch it (nothing it says can be trusted then).
+    pub fn mark(&self, tree: &Path) -> Option<u64> {
+        let root = tree.canonicalize().ok()?;
+        if self.watcher.is_none() || !self.roots.iter().any(|r| root.starts_with(r)) {
+            return None;
+        }
+        Some(self.inner.lock().unwrap().trees.entry(root).or_default().seq)
+    }
+
+    /// No file event in the tree since `mark` (lost events count as one in every tree).
+    pub fn quiet_since(&self, tree: &Path, mark: u64) -> bool {
+        let Ok(root) = tree.canonicalize() else { return false };
+        self.inner.lock().unwrap().trees.get(&root).is_some_and(|t| t.seq == mark)
     }
 
     /// The trees asked about so far.
@@ -165,6 +202,70 @@ impl Monitor {
     pub fn forget(&self, tree: &Path) {
         let t = tree.canonicalize().unwrap_or_else(|_| tree.to_path_buf());
         self.inner.lock().unwrap().trees.remove(&t);
+    }
+
+    /// [`Self::dirty`] once the tree's baseline is known; until then None, and one background
+    /// reader reads the baselines asked for, one tree after another. A command answers from what
+    /// is known: after a master restart, `devhub lanes` first read every lane's baseline in a row
+    /// (4.5 min, 11-03). A tree the OS monitor does not follow has no lasting baseline: it is read
+    /// at the ask.
+    pub fn dirty_known(self: &Arc<Self>, tree: &Path) -> Option<Result<Dirty, String>> {
+        let root = match tree.canonicalize() {
+            Ok(r) => r,
+            Err(e) => return Some(Err(format!("{}: {e}", tree.display()))),
+        };
+        let Some((head, _)) = read_head(&root) else { return Some(Err(format!("{}: not a git worktree", root.display()))) };
+        let watched = self.watcher.is_some() && self.roots.iter().any(|r| root.starts_with(r));
+        if !watched || self.inner.lock().unwrap().trees.get(&root).is_some_and(|t| t.based && t.head == head && !t.stale) {
+            return Some(self.dirty(&root));
+        }
+        let mut reads = self.reads.lock().unwrap();
+        if !reads.0.contains(&root) {
+            reads.0.push(root);
+        }
+        if !reads.1 {
+            reads.1 = true;
+            let me = self.clone();
+            let spawned = std::thread::Builder::new().name("devhub-dirty-read".into()).spawn(move || loop {
+                let next = {
+                    let mut r = me.reads.lock().unwrap();
+                    if r.0.is_empty() {
+                        r.1 = false;
+                        return;
+                    }
+                    r.0.remove(0)
+                };
+                let _ = me.dirty(&next);
+            });
+            if spawned.is_err() {
+                reads.1 = false;
+            }
+        }
+        None
+    }
+
+    /// Returns with every write made under `tree` before this call heard: a snapshot taken next
+    /// holds them (a file written 100-260 ms before a job submit was left out of its snapshot on
+    /// the Mac). A tree outside the watch is read at each ask anyway. Should the cookie not come,
+    /// the events are lost: every tree is read again at its next ask.
+    pub fn settle(&self, tree: &Path) -> Result<(), String> {
+        let root = tree.canonicalize().map_err(|e| format!("{}: {e}", tree.display()))?;
+        let Some(watched) = self.roots.iter().find(|r| root.starts_with(r)).filter(|_| self.watcher.is_some()) else { return Ok(()) };
+        let n = self.next_cookie.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let cookie = watched.join(format!("{COOKIE_PREFIX}{}-{n}", std::process::id()));
+        std::fs::write(&cookie, b"").map_err(|e| format!("{}: {e}", cookie.display()))?;
+        let mut g = self.inner.lock().unwrap();
+        let start = std::time::Instant::now();
+        while !g.cookies.remove(&n) {
+            let Some(left) = COOKIE_LOST.checked_sub(start.elapsed()) else {
+                for t in g.trees.values_mut() { t.stale = true; t.tracked_stale = true; t.seq += 1; }
+                break;
+            };
+            g = self.heard.wait_timeout(g, left).unwrap().0;
+        }
+        drop(g);
+        let _ = std::fs::remove_file(&cookie);
+        Ok(())
     }
 
     /// The tree's dirty set now (`tree`: a worktree root; for the makepad tree, paths under a
@@ -190,6 +291,7 @@ impl Monitor {
             let mut g = self.inner.lock().unwrap();
             if let Some(t) = g.trees.get_mut(&root).filter(|t| t.head == head) {
                 t.base = base;
+                t.based = true;
             }
         }
         let nested = root.join("apps/commercial/.git").exists();
@@ -240,6 +342,18 @@ impl Monitor {
         d.changed.sort();
         Ok(d)
     }
+}
+
+/// A cookie's event ([`Monitor::settle`]) goes no further: no tree holds it. Its removal says nothing.
+fn on_cookie(inner: &Mutex<Inner>, heard: &std::sync::Condvar, e: &FileSystemEvent) -> bool {
+    let Some(name) = e.path.file_name().and_then(|n| n.to_str()).and_then(|n| n.strip_prefix(COOKIE_PREFIX)) else { return false };
+    if !matches!(e.kind, FileSystemEventKind::Removed) {
+        if let Some(n) = name.split_once('-').filter(|(pid, _)| *pid == std::process::id().to_string()).and_then(|(_, n)| n.parse().ok()) {
+            inner.lock().unwrap().cookies.insert(n);
+            heard.notify_all();
+        }
+    }
+    true
 }
 
 fn on_event(inner: &Mutex<Inner>, e: &FileSystemEvent) {
@@ -295,6 +409,41 @@ mod tests {
         assert!(ok, "git {args:?}");
     }
 
+    /// Written, settled, read: no write of a moment ago is left out, whatever the OS's latency,
+    /// and the cookie is nobody's file.
+    #[test]
+    fn a_settled_tree_holds_the_write_of_a_moment_ago() {
+        let base = std::env::temp_dir().join(format!("devhub-monitor-settle-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let tree = base.join("lane");
+        std::fs::create_dir_all(&tree).unwrap();
+        g(&tree, &["init", "-q", "-b", "rc-x"]);
+        g(&tree, &["config", "user.email", "t@t"]);
+        g(&tree, &["config", "user.name", "t"]);
+        std::fs::write(tree.join("a.rs"), "a").unwrap();
+        g(&tree, &["add", "."]);
+        g(&tree, &["commit", "-q", "-m", "x"]);
+        let m = Monitor::start(&[base.clone()]);
+        assert_eq!(m.dirty(&tree).unwrap().changed.len(), 0);
+        for i in 0..8 {
+            let name = format!("new{i}.rs");
+            std::fs::write(tree.join(&name), "u").unwrap();
+            m.settle(&tree).unwrap();
+            let changed = m.dirty(&tree).unwrap().changed;
+            assert!(changed.contains(&name), "{name}: {changed:?}");
+            assert_eq!(changed.len(), i + 1, "{changed:?}");
+        }
+        // inside a tree that is itself the root too
+        let m = Monitor::start(&[tree.clone()]);
+        let before = m.dirty(&tree).unwrap().changed;
+        std::fs::write(tree.join("last.rs"), "u").unwrap();
+        m.settle(&tree).unwrap();
+        let after = m.dirty(&tree).unwrap().changed;
+        assert_eq!(after.len(), before.len() + 1, "{after:?}");
+        assert!(!std::fs::read_dir(&base).unwrap().flatten().chain(std::fs::read_dir(&tree).unwrap().flatten()).any(|e| e.file_name().to_string_lossy().starts_with(COOKIE_PREFIX)), "no cookie stays");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     #[test]
     fn dirty_sets_follow_edits_without_a_rescan() {
         let base = std::env::temp_dir().join(format!("devhub-monitor-test-{}", std::process::id()));
@@ -348,6 +497,41 @@ mod tests {
         assert_eq!((d.changed.len(), d.deleted.len()), (0, 0), "{d:?}");
         // baselines, edits, ignored output and a HEAD move: no git process
         assert_eq!(crate::git_exec::on_this_thread(), spawned);
+        drop(m);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A tree asked about for the first time answers at once ("not known yet") and its baseline
+    /// is read behind the answer; the next ask answers from it.
+    #[test]
+    fn a_first_ask_answers_at_once_and_reads_the_baseline_behind_it() {
+        let base = std::env::temp_dir().join(format!("devhub-monitor-known-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let tree = base.join("lane");
+        std::fs::create_dir_all(&tree).unwrap();
+        g(&tree, &["init", "-q", "-b", "rc-y"]);
+        g(&tree, &["config", "user.email", "t@t"]);
+        g(&tree, &["config", "user.name", "t"]);
+        std::fs::write(tree.join("a.rs"), "a").unwrap();
+        g(&tree, &["add", "."]);
+        g(&tree, &["commit", "-q", "-m", "x"]);
+        std::fs::write(tree.join("new.rs"), "n").unwrap();
+        let m = Monitor::start(&[base.clone()]);
+        let first = m.dirty_known(&tree);
+        if m.watching() {
+            assert!(first.is_none(), "not known yet: {first:?}");
+            let mut known = None;
+            for _ in 0..100 {
+                known = m.dirty_known(&tree);
+                if known.is_some() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            assert_eq!(known.unwrap().unwrap().changed, ["new.rs"]);
+        } else {
+            assert_eq!(first.unwrap().unwrap().changed, ["new.rs"], "an unwatched tree is read at the ask");
+        }
         drop(m);
         let _ = std::fs::remove_dir_all(&base);
     }

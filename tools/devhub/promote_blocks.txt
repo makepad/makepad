@@ -76,7 +76,6 @@ libs/a11y/*
 libs/xkb_keymap/*
 libs/mp4_index/*
 libs/texcomp/*
-libs/loader_bundle/*
 
 block Relax JIT and makepad run
 libs/relax/*
@@ -238,5 +237,5 @@ libs/flow*/*
 libs/flowgraph/*
 libs/calendar/*
 
-block Workspace, cargo-makepad, builder and docs
+block Workspace, cargo-makepad and docs
 *

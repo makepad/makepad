@@ -28,6 +28,8 @@ pub const PAUSE_IDLE_MS: u64 = 10 * 60 * 1000;
 const TICK: Duration = Duration::from_secs(2);
 const ERRORS: usize = 12;
 const TAIL: usize = 15;
+/// What a running job's view reads of its log: its end (the whole log is read once, as it ends).
+const LIVE_READ: u64 = 256 << 10;
 
 fn ctl() -> Client {
     Client::new(Target::Unix(crate::proto::control_socket()), "devhub-job")
@@ -40,7 +42,7 @@ fn event(ctx: &Ctx, sev: Sev, line: String, j: Option<&Job>) {
 pub fn start(ctx: Arc<Ctx>) {
     // what a previous master ran goes on: the run lives on its node, and the lease came back with
     // the master. So does a run it had asked for (shipped): the node may be building its JIT for
-    // it (J3752 lost two placements' JIT builds to two master restarts, 11-02). A job whose
+    // it (one job lost two placements' JIT builds to two master restarts, 11-02). A job whose
     // lease is still going or whose snapshot is still shipping, or whose lease ended meanwhile,
     // is placed again; one still waiting for a box asks again.
     let held = |j: &Job| super::leg::lease_held(&ctx, &j.lease) && (j.run_n > 0 || j.granted_ms > 0 && j.shipped_ms >= j.granted_ms);
@@ -57,16 +59,20 @@ pub fn start(ctx: Arc<Ctx>) {
                     if j.run_n == 0 {
                         j.attempts = j.attempts.saturating_sub(1);
                     }
-                    if super::leg::lease_held(&ctx, &j.lease) {
+                    // (a lease that outlived the restart but had nothing running yet ends here)
+                    let what = if super::leg::lease_held(&ctx, &j.lease) {
                         stray.push(j.lease.clone());
-                    }
+                        "the master restarted while it was setting up its lease, so that lease ended"
+                    } else {
+                        "its lease did not outlive the master's restart"
+                    };
                     if j.attempts < ATTEMPTS {
                         j.state = "queued".into();
-                        j.note = "its lease did not outlive the master's restart; placed again".into();
+                        j.note = format!("{what}; placed again");
                     } else {
                         j.state = "lost".into();
                         j.ended_ms = wall_ms();
-                        j.note = "its lease did not outlive the master's restart (no placements left)".into();
+                        j.note = format!("{what} (no placements left)");
                     }
                     j.lease.clear();
                     j.node.clear();
@@ -98,8 +104,19 @@ pub fn start(ctx: Arc<Ctx>) {
     });
 }
 
-/// Removes the logs and snapshots of jobs the state no longer keeps.
+/// What lease ends keep (lease/master.rs), and how many of them stay.
+const LEASE_LOGS: &str = "lease-logs";
+const LEASE_LOGS_KEPT: usize = 500;
+
+/// Removes the logs and snapshots of jobs the state no longer keeps, and all but the newest lease logs.
 fn prune_logs(ctx: &Ctx) {
+    if let Ok(rd) = std::fs::read_dir(ctx.logs(LEASE_LOGS)) {
+        let mut logs: Vec<_> = rd.flatten().filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path()))).collect();
+        logs.sort_by(|a, b| b.0.cmp(&a.0));
+        for (_, old) in logs.iter().skip(LEASE_LOGS_KEPT) {
+            let _ = std::fs::remove_file(old);
+        }
+    }
     let snaps: Vec<String> = ctx.store.read(|d| d.jobs.iter().map(|j| j.snap.clone()).filter(|s| !s.is_empty()).collect());
     if let Ok(rd) = std::fs::read_dir(ctx.logs("jobs").join("snap")) {
         for e in rd.flatten() {
@@ -178,16 +195,40 @@ fn try_set(ctx: &Ctx, id: &str, f: impl FnOnce(&mut Job)) -> Result<Option<Job>,
     })
 }
 
-/// The first error lines and the last lines of a job's output.
+/// The first error lines and the last lines of a job's output. A test program that passed comes
+/// last: what its tests panicked with, they asked for (a result led with `injected part job panic`
+/// from one, the failing program's assertion further down, 11-04).
 pub fn digest(text: &str) -> (Vec<String>, Vec<String>) {
     let is_err = |l: &str| {
         let t = l.trim_start();
         t.starts_with("error") || t.contains("panicked at") || t.starts_with("FAILED") || t.contains(" FAILED") || t.contains("-FAIL") || t.starts_with("test result: FAILED") || t.contains(": error:")
     };
-    let errors = text.lines().filter(|l| is_err(l)).take(ERRORS).map(|l| crate::proto::clean(l, 240)).collect();
+    let (mut errors, mut block, mut passed) = (Vec::new(), Vec::new(), Vec::new());
+    for l in text.lines() {
+        let t = l.trim_start();
+        if t.starts_with("running ") && (t.ends_with(" test") || t.ends_with(" tests")) {
+            errors.append(&mut block);
+        } else if t.starts_with("test result: ok") {
+            passed.append(&mut block);
+        }
+        block.extend(report_line(l).or_else(|| is_err(l).then(|| crate::proto::clean(l, 240))));
+    }
+    errors.append(&mut block);
+    errors.append(&mut passed);
+    errors.truncate(ERRORS);
     let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
     let tail = lines[lines.len().saturating_sub(TAIL)..].iter().map(|l| crate::proto::clean(l, 240)).collect();
     (errors, tail)
+}
+
+/// A JIT's report of a panic or fault (`  report: {"kind":"panic","message":..,"location":..}`):
+/// what ended the thread, and where. It says no "panicked at", so a failed test's result had only
+/// its FAILED lines, and the tail of a `--verbose` run is the JIT's end-of-run summary: the panic
+/// was in the log and in no result (11-04).
+fn report_line(line: &str) -> Option<String> {
+    let v = makepad_strict_json::parse(line.trim_start().strip_prefix("report: ")?.as_bytes()).ok()?;
+    let text = |k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_string);
+    Some(crate::proto::clean(&format!("{}: {} at {}", text("kind")?, text("message")?, text("location").unwrap_or_default()), 800))
 }
 
 /// The output file of a job: the first bytes stamp `first_out_ms`.
@@ -228,26 +269,40 @@ fn snap_paths(ctx: &Ctx, snap: &str) -> Result<(Vec<String>, Vec<String>), Strin
 
 /// Ships the snapshot into the lease's tree (already at the snapshot's base commits): only the
 /// files the box lacks as they are go; then `ship-done` names them and the deletions.
-pub(super) fn ship_snap(ctx: &Ctx, held: &Held, snap: &str) -> Result<usize, String> {
+pub(super) fn ship_snap(ctx: &Ctx, held: &Held, snap: &str) -> Result<String, String> {
     let (changed, deleted) = if snap.is_empty() { (Vec::new(), Vec::new()) } else { snap_paths(ctx, snap)? };
     let files = snap_dir(ctx, snap).join("files");
     let mut entries = Vec::new();
     for p in &changed {
         crate::lease::ship::entries(&files, p, &mut entries)?;
     }
-    let sent = if entries.is_empty() { 0 } else { crate::lease::ship::send(held.client(), &held.node, &held.id, &files, &entries)?.sent };
+    if !entries.is_empty() { crate::lease::ship::send(held.client(), &held.node, &held.id, &files, &entries, false)?; }
     let list = |v: &[String]| v.iter().map(|p| json_str(p)).collect::<Vec<_>>().join(",");
-    let bases = if snap.is_empty() { "{}".to_string() } else {
+    let manifest = if snap.is_empty() { None } else {
         let text = std::fs::read_to_string(snap_dir(ctx, snap).join("manifest.json")).map_err(|e| e.to_string())?;
-        let v = makepad_strict_json::parse(text.as_bytes()).map_err(|e| format!("snapshot {snap}: {e:?}"))?;
-        v.get("bases").ok_or("snapshot lacks pinned base blobs")?.to_json()
+        Some(makepad_strict_json::parse(text.as_bytes()).map_err(|e| format!("snapshot {snap}: {e:?}"))?)
+    };
+    let bases = match &manifest {
+        Some(v) => v.get("bases").ok_or("snapshot lacks pinned base blobs")?.to_json(),
+        None => "{}".to_string(),
     };
     let body = format!("{{\"shipped\":[{}],\"deleted\":[{}],\"bases\":{bases}}}", list(&changed), list(&deleted));
     let r = ask(held.client(), Some(&held.node), "ship-done", &format!("ship-done {} {}", held.id, makepad_network::digest::base64_encode(body.as_bytes())))?;
     if let Some(e) = r.first().filter(|l| l.starts_with("{\"err\":")) {
         return Err(format!("{}: {e}", held.node));
     }
-    Ok(sent)
+    let source = r.first().and_then(|l| makepad_strict_json::parse(l.as_bytes()).ok()).and_then(|v| v.get("source").and_then(|s| s.as_str()).map(str::to_string)).unwrap_or_default();
+    // it runs what was submitted, or not at all
+    if let Some(v) = &manifest {
+        let hashes: std::collections::BTreeMap<&str, &str> = v.get("changed").and_then(|a| a.as_arr()).unwrap_or(&[]).iter().filter_map(|x| Some((x.get("path")?.as_str()?, x.get("hash")?.as_str()?))).collect();
+        let files: Vec<(String, String)> = changed.iter().map(|p| (p.clone(), hashes.get(p.as_str()).unwrap_or(&"").to_string())).collect();
+        let pin = v.get("rev").and_then(|r| r.as_str()).and_then(crate::lease::Pin::of_rev).map_or(String::new(), |p| p.key());
+        let want = crate::lease::ship::source_id(&pin, &files, &deleted);
+        if !source.is_empty() && source != want {
+            return Err(format!("{}: took source {source}, snapshot {snap} is {want}: its files differ on the box", held.node));
+        }
+    }
+    Ok(source)
 }
 
 /// How often a job is placed again when its box is lost under it.
@@ -266,7 +321,7 @@ fn run(ctx: &Arc<Ctx>, id: &str) {
             j.asked_ms = wall_ms();
         }
     }).map_or(0, |j| j.asked_ms);
-    let spec = Spec { since_ms: (asked > 0).then_some(asked), only: j.only, lane: if j.shadow_of.is_empty() { j.lane.clone() } else { format!("shadow-{}", j.id) }, agent: j.agent.clone(), kind, needs: j.needs.clone(), prio: j.prio, rev: j.rev.clone(), repo_dir: j.repo_dir.clone(), node: (!j.node_pref.is_empty()).then(|| j.node_pref.clone()) };
+    let spec = Spec { since_ms: (asked > 0).then_some(asked), lane: if j.shadow_of.is_empty() { j.lane.clone() } else { format!("shadow-{}", j.id) }, agent: j.agent.clone(), kind, needs: j.needs.clone(), prio: j.prio, rev: j.rev.clone(), repo_dir: j.repo_dir.clone(), node: (!j.node_pref.is_empty()).then(|| j.node_pref.clone()) };
     let cancelled = || get(ctx, id).is_none_or(|j| j.state == "cancelled");
     let configure = |r: &mut crate::lease::sched::Req| {
         r.run_options(Src::parse(&j.src).unwrap_or(Src::Tree), CostClass::parse(&j.cost), j.est_min, &j.class, &j.cmd);
@@ -277,7 +332,15 @@ fn run(ctx: &Arc<Ctx>, id: &str) {
         r.whole = j.whole;
         r.holder = j.holder;
     };
-    let held = match Held::acquire_with(&spec, &configure, &mut |_| {}, &cancelled) {
+    // what it waits for shows in the job (a job waited 23 min on its lane's own lease, its queue
+    // reason in no output its lane read, 11-05)
+    let said = std::cell::RefCell::new(String::new());
+    let mut waiting = |line: &str| {
+        let line = crate::proto::clean(line, 400);
+        set(ctx, id, |j| j.note = line.clone());
+        *said.borrow_mut() = line;
+    };
+    let held = match Held::acquire_with(&spec, &configure, &mut waiting, &cancelled) {
         Ok(h) => h,
         // the master's socket or a box's link went away: no verdict on the job
         Err(e) if crate::lease::master::unreachable(&e) && again(ctx, id, &format!("no lease ({})", crate::proto::clean(&e, 160))) => return,
@@ -288,6 +351,7 @@ fn run(ctx: &Arc<Ctx>, id: &str) {
     });
     let j = set(ctx, id, |j| {
         if j.state == "leasing" {
+            if j.note == *said.borrow() { j.note.clear(); }
             j.state = "running".into();
             j.lease = held.id.clone();
             j.node = held.node.clone();
@@ -301,25 +365,25 @@ fn run(ctx: &Arc<Ctx>, id: &str) {
             }
         }
     });
-    // a soft pin that fell to a twin says so: the job's artifacts and timing are that box's
-    if !spec.only && spec.node.as_deref().is_some_and(|n| n != held.node) {
-        event(ctx, Sev::Warn, format!("job {id}: --node {} was held, so it runs on {} (`--only {}` waits for it)", spec.node.as_deref().unwrap_or(""), held.node, spec.node.as_deref().unwrap_or("")), None);
-    }
     let Some(j) = j.filter(|j| j.state == "running") else {
         // cancelled while the grant came
         held.release(None);
         return finish(ctx, id, Err("cancelled".into()), &log);
     };
+    let mut source = String::new();
     if !j.snap.is_empty() || j.src == "overlay" {
-        if let Err(e) = ship_snap(ctx, &held, &j.snap) {
-            held.release(None);
-            if crate::lease::master::unreachable(&e) && again(ctx, id, &format!("shipping to {} failed ({})", j.node, crate::proto::clean(&e, 160))) {
-                return;
+        match ship_snap(ctx, &held, &j.snap) {
+            Ok(s) => source = s,
+            Err(e) => {
+                held.release(None);
+                if crate::lease::master::unreachable(&e) && again(ctx, id, &format!("shipping to {} failed ({})", j.node, crate::proto::clean(&e, 160))) {
+                    return;
+                }
+                return finish(ctx, id, Err(format!("shipping {}: {e}", j.snap)), &log);
             }
-            return finish(ctx, id, Err(format!("shipping {}: {e}", j.snap)), &log);
         }
     }
-    let j = set(ctx, id, |j| j.shipped_ms = wall_ms()).unwrap_or(j);
+    let j = set(ctx, id, |j| { j.shipped_ms = wall_ms(); j.source = source.clone(); }).unwrap_or(j);
     event(ctx, Sev::Info, format!("job {id} running on {} ({}{}): {}", held.node, held.id, if j.snap.is_empty() { String::new() } else { format!(", {} {} file(s)", j.snap, j.snap_files) }, crate::proto::clean(&spec_cmd(&j), 160)), Some(&j));
     // (only now: an earlier placement's output stays until this one has its own)
     let file = match std::fs::File::create(&log) {
@@ -341,7 +405,9 @@ fn run(ctx: &Arc<Ctx>, id: &str) {
 /// in the log are noted for a restarted master.
 fn run_on(ctx: &Ctx, held: &Held, j: &Job, log: &std::path::Path, out: &mut Out) -> Result<i32, String> {
     let mut persistence_error = None;
-    let result = held.run_at(if j.cwd.is_empty() { "." } else { &j.cwd }, &j.cmd, out, &mut |n| {
+    // one run per lease, asked under the job's name: a master that took the lease back asks
+    // again under it ([`Held::run_asked`])
+    let result = held.run_asked(&format!("job-{}", j.id), if j.cwd.is_empty() { "." } else { &j.cwd }, &j.cmd, out, &mut |n| {
         let base = std::fs::metadata(log).map_or(0, |m| m.len());
         if let Err(e) = try_set(ctx, &j.id, |j| { j.run_n = n; j.log_base = base; }) {
             eprintln!("devhub job run record: {e}");
@@ -406,9 +472,15 @@ fn ended(ctx: &Ctx, id: &str, held: Held, r: Result<i32, String>, log: &std::pat
     }
     // (a run the node refused is the job's result: another box refuses it too)
     if let Some(e) = r.as_ref().err().filter(|e| !e.starts_with(super::leg::REFUSED)) {
-        let node = get(ctx, id).map_or(String::new(), |j| j.node);
-        if again(ctx, id, &format!("box {node} lost ({})", crate::proto::clean(e, 160))) {
-            return;
+        // someone ended its lease (`devhub cancel L..`, what the hung warning says): the job ends
+        // with it. Placed again, a hung job came straight back and hung again (J6015, 11-04)
+        if e.ends_with("ended (cancelled)") {
+            set(ctx, id, |j| j.state = "cancelled".into());
+        } else if !e.contains(" ended (disk): ") {
+            let node = get(ctx, id).map_or(String::new(), |j| j.node);
+            if again(ctx, id, &format!("box {node} lost ({})", crate::proto::clean(e, 160))) {
+                return;
+            }
         }
     }
     finish(ctx, id, r, log);
@@ -434,6 +506,14 @@ fn again(ctx: &Ctx, id: &str, why: &str) -> bool {
     }
 }
 
+/// Why a failed job failed, for its event line: its first error line; else, when its run exited
+/// by itself, the last line of its output (a script's `bash: x.sh: No such file or directory` has
+/// no error word: the line read "failed exit=127 in 0 s on <box>:", 11-04); else what ended it.
+fn fail_reason(j: &Job, ended_by_exit: bool) -> String {
+    let said = j.errors.first().or(if ended_by_exit { j.tail.last() } else { None });
+    said.cloned().filter(|l| !l.is_empty()).unwrap_or_else(|| j.note.clone())
+}
+
 fn spec_cmd(j: &Job) -> String {
     j.cmd.join(" ")
 }
@@ -445,6 +525,8 @@ fn finish(ctx: &Ctx, id: &str, r: Result<i32, String>, log: &std::path::Path) {
     let j = set(ctx, id, |j| {
         j.ended_ms = wall_ms();
         j.errors = errors;
+        // a test run that executed no test is no pass, whatever its exit
+        let none = matches!(r, Ok(0)).then(|| crate::testlog::Tally::of(&text).no_pass(&j.cmd)).flatten();
         if matches!(r, Ok(makepad_remote::hot::JIT_ERROR_EXIT)) {
             j.errors.clear();
             j.note = makepad_remote::hot::Verdict::from_output(makepad_remote::hot::JIT_ERROR_EXIT, &text)
@@ -456,6 +538,7 @@ fn finish(ctx: &Ctx, id: &str, r: Result<i32, String>, log: &std::path::Path) {
             ("cancelled", _) => "cancelled".into(),
             (_, Ok(makepad_remote::hot::JIT_ERROR_EXIT)) => "jit-error".into(),
             ("paused", _) => "panicked".into(),
+            (_, Ok(0)) if none.is_some() => "failed".into(),
             (_, Ok(0)) => "ok".into(),
             (_, Ok(_)) => "failed".into(),
             (_, Err(_)) => "failed".into(),
@@ -463,19 +546,23 @@ fn finish(ctx: &Ctx, id: &str, r: Result<i32, String>, log: &std::path::Path) {
         if let Ok(code) = &r {
             j.exit = Some(*code);
         }
+        if let Some(why) = none {
+            j.errors.insert(0, why);
+        }
         if let Err(e) = &r {
             // what ended it, also over what an earlier placement noted
             j.note = crate::proto::clean(e, 240);
         }
     });
     let Some(j) = j else { return };
+    let ended_by_exit = r.is_ok();
     let secs = j.ended_ms.saturating_sub(if j.started_ms > 0 { j.started_ms } else { j.submitted_ms }) / 1000;
     let what = match j.state.as_str() {
         "ok" => format!("job {id} ok in {secs} s on {}", j.node),
         "panicked" => format!("job {id} panicked: {}", j.panic.as_ref().map_or(String::new(), |p| format!("{} at {}", p.message, p.location))),
         "cancelled" => format!("job {id} cancelled"),
         "jit-error" => j.note.clone(),
-        _ => format!("job {id} failed{} in {secs} s on {}: {}", j.exit.map_or(String::new(), |e| format!(" exit={e}")), j.node, j.errors.first().cloned().unwrap_or_else(|| j.note.clone())),
+        _ => format!("job {id} failed{} in {secs} s on {}: {}", j.exit.map_or(String::new(), |e| format!(" exit={e}")), j.node, fail_reason(&j, ended_by_exit)),
     };
     let sev = match j.state.as_str() {
         "ok" | "cancelled" | "jit-error" => Sev::Info,
@@ -541,17 +628,53 @@ pub fn on_record(ctx: &Arc<Ctx>, r: &Record) {
     });
 }
 
-/// A job as the CLI sees it: a running one with its output so far (errors, tail) from its log.
+/// A job as the CLI sees it: a running one with its latest output (errors, tail) from its log's
+/// end, so a view that asks every few seconds never reads a whole log.
 fn live(ctx: &Ctx, j: &Job) -> String {
     let mut j = j.clone();
     if !j.done() {
         let log = ctx.logs("jobs").join(format!("{}.log", j.id));
-        if let Ok(text) = std::fs::read_to_string(&log) {
+        if let Some(text) = log_end(&log, LIVE_READ) {
             (j.errors, j.tail) = digest(&text);
             j.log = log.to_string_lossy().into_owned();
         }
     }
     crate::state::job_value(&j).to_json()
+}
+
+/// A file's last `max` bytes, from the first whole line in them.
+fn log_end(path: &std::path::Path, max: u64) -> Option<String> {
+    use std::io::{Read, Seek};
+    let mut f = std::fs::File::open(path).ok()?;
+    let len = f.metadata().ok()?.len();
+    f.seek(std::io::SeekFrom::Start(len.saturating_sub(max))).ok()?;
+    let mut bytes = Vec::new();
+    f.take(max).read_to_end(&mut bytes).ok()?;
+    let start = if len > max { bytes.iter().position(|b| *b == b'\n').map_or(bytes.len(), |i| i + 1) } else { 0 };
+    Some(String::from_utf8_lossy(&bytes[start..]).into_owned())
+}
+
+/// A `job wait`'s wake-up: the idle verdict on a waited job's lease, once a lease. A background
+/// wait heard nothing but the job's end: a hung script held a timed box and the queue behind it
+/// for 28 min while its lane sat in `job wait` and only the inbox was told (11-04). The job runs
+/// on: only its owner can tell a wait from a hang.
+fn told_idle(ctx: &Ctx, ids: &[String], word: &dyn Fn(&str) -> Option<String>, behind: &dyn Fn(&str) -> Option<(String, String)>) -> Result<String, String> {
+    let mut told = Vec::new();
+    for id in ids {
+        let Some(j) = get(ctx, id).filter(|j| !j.done()) else { continue };
+        // waiting for a box: what it waits behind, once per hung lease
+        if j.lease.is_empty() {
+            let Some((hung, word)) = behind(&j.lane).filter(|(hung, _)| j.idle_told != *hung) else { continue };
+            try_set(ctx, id, |j| j.idle_told = hung)?;
+            told.push(format!("{{\"id\":{},\"queued\":true,\"word\":{}}}", json_str(id), json_str(&word)));
+            continue;
+        }
+        if j.idle_told == j.lease { continue }
+        let Some(word) = word(&j.lease) else { continue };
+        try_set(ctx, id, |j| j.idle_told = j.lease.clone())?;
+        told.push(format!("{{\"id\":{},\"word\":{}}}", json_str(id), json_str(&word)));
+    }
+    Ok(format!("[{}]", told.join(",")))
 }
 
 /// `job …` requests from the CLI.
@@ -563,22 +686,43 @@ pub fn serve(ctx: &Ctx, line: &str) -> Result<String, String> {
     let ids = || -> Vec<String> { rest.split([' ', ',']).filter(|s| !s.is_empty()).map(str::to_string).collect() };
     match verb {
         "submit" => submit(ctx, rest),
+        // what a lease's end kept (`job result L<id>`): it outlives the lease, not the prune below
+        "lease-log" => {
+            if rest.len() < 2 || !rest.starts_with('L') || !rest[1..].bytes().all(|b| b.is_ascii_digit()) {
+                return Err("job lease-log L<id>".into());
+            }
+            let path = ctx.logs(LEASE_LOGS).join(format!("{rest}.log"));
+            let bytes = std::fs::read(&path).map_err(|_| format!("{rest} kept no output: only a failed test run or an abnormal end keeps any"))?;
+            Ok(format!("{{\"text\":{},\"path\":{}}}", json_str(&String::from_utf8_lossy(&bytes)), json_str(&path.display().to_string())))
+        }
         "output" => {
             use std::io::{Read, Seek};
             let (id, offset) = rest.split_once(' ').ok_or("job output <id> <offset>")?;
-            let off: u64 = offset.parse().map_err(|_| "job output: invalid offset")?;
+            // a negative offset counts from the end: `-16384` is the log's last 16 KB (a panel's
+            // tail), and the answer's `off` is where to ask from next
+            let off: i64 = offset.parse().map_err(|_| "job output: invalid offset")?;
             let j = get(ctx, id).ok_or_else(|| format!("no job {id}"))?;
             let path = ctx.logs("jobs").join(format!("{id}.log"));
             let mut bytes = Vec::new();
+            let mut at = off.max(0) as u64;
             match std::fs::File::open(&path) {
                 Ok(mut f) => {
-                    f.seek(std::io::SeekFrom::Start(off)).map_err(|e| e.to_string())?;
+                    if off < 0 {
+                        let len = f.metadata().map_err(|e| e.to_string())?.len();
+                        at = len.saturating_sub(off.unsigned_abs());
+                    }
+                    f.seek(std::io::SeekFrom::Start(at)).map_err(|e| e.to_string())?;
                     f.take(64 << 10).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => return Err(e.to_string()),
             }
-            Ok(format!("{{\"job\":{},\"data\":{},\"off\":{}}}", crate::state::job_value(&j).to_json(), json_str(&makepad_network::digest::base64_encode(&bytes)), off + bytes.len() as u64))
+            Ok(format!("{{\"job\":{},\"data\":{},\"off\":{}}}", crate::state::job_value(&j).to_json(), json_str(&makepad_network::digest::base64_encode(&bytes)), at + bytes.len() as u64))
+        }
+        // `brief`: the open jobs as the store has them, no log read (a panel asks every few seconds)
+        "list" if rest == "brief" => {
+            let list: Vec<String> = ctx.store.read(|d| d.jobs.iter().filter(|j| !j.done()).map(|j| crate::state::job_value(j).to_json()).collect());
+            Ok(format!("[{}]", list.join(",")))
         }
         "list" => {
             let all = rest == "all";
@@ -593,6 +737,7 @@ pub fn serve(ctx: &Ctx, line: &str) -> Result<String, String> {
             })?;
             Ok("{}".into())
         }
+        "idle" => told_idle(ctx, &ids(), &|lease| ctx.leases.idle_word(lease), &|lane| ctx.leases.behind_hung(lane).or_else(|| ctx.leases.behind_own(lane))),
         "get" | "wait" => {
             let rest = rest.strip_prefix("--wait").unwrap_or(rest).trim();
             let (any, rest) = rest.strip_prefix("--any").map_or((false, rest), |r| (true, r.trim()));
@@ -727,6 +872,7 @@ pub fn snapshot(ctx: &Ctx, tree: &std::path::Path, lane: &str) -> Result<(String
 
 /// The worktree's pinned base and its uncommitted paths, without what never ships.
 fn dirty_set(ctx: &Ctx, tree: &std::path::Path, lane: &str) -> Result<(String, Vec<String>, Vec<String>), String> {
+    ctx.monitor.settle(tree)?;
     let d = ctx.monitor.dirty(tree)?;
     let mut rev = format!("{}@{}", label(&d.branch, lane), d.head);
     let (mut changed, mut deleted) = (d.changed, d.deleted);
@@ -813,7 +959,7 @@ fn submit(ctx: &Ctx, json: &str) -> Result<String, String> {
         if cmd.is_empty() || cmd[0].is_empty() {
             return Err(format!("job {}: no command", i + 1));
         }
-        let lane = s(r, "lane");
+        let lane = makepad_devhub_conf::lane_name(&s(r, "lane"));
         if !makepad_devhub_conf::valid_name(&lane) {
             return Err(format!("job {}: lane `{lane}` is not a name", i + 1));
         }
@@ -835,7 +981,7 @@ fn submit(ctx: &Ctx, json: &str) -> Result<String, String> {
         let gate = crate::lease::native::Ask { lane: &lane, agent: &agent, kind: Kind::parse(&kind).unwrap(), cmd: &cmd, repo_dir: &tree, cwd: if cwd.is_empty() { "." } else { &cwd }, rev: &rev, reason: &reason, class: &s(r, "class"), route: &|class| { let (jit, why) = ctx.leases.test_route("test", class, false); (!jit).then_some(why) }, os: &os, arch: &arch };
         let note = crate::lease::native::check(&ctx.home, &gate, wall_ms()).map_err(|e| format!("job {}: {e}", i + 1))?;
         if !note.is_empty() { notes.push(note); }
-        jobs.push(Job { cwd, holder, shadow, priority: priority.as_str().into(), loader: s(r, "loader"), src: src.as_str().into(), cost: cost.as_str().into(), est_min, cores, ram_gb, whole, class: s(r, "class"), kind, needs: s(r, "needs"), node_pref: s(r, "node"), only: r.get("only").and_then(|o| o.as_bool()).unwrap_or(false), prio, repo_dir: tree.to_string_lossy().into_owned(), lane, agent: s(r, "agent"), cmd, after: list(r, "after"), state: "queued".into(), ..Default::default() });
+        jobs.push(Job { cwd, holder, shadow, priority: priority.as_str().into(), loader: s(r, "loader"), src: src.as_str().into(), cost: cost.as_str().into(), est_min, cores, ram_gb, whole, class: s(r, "class"), kind, needs: s(r, "needs"), node_pref: s(r, "node"), prio, repo_dir: tree.to_string_lossy().into_owned(), lane, agent: s(r, "agent"), cmd, after: list(r, "after"), state: "queued".into(), ..Default::default() });
     }
     // the base and the snapshot: one for the whole request
     let lane = jobs[0].lane.clone();
@@ -925,7 +1071,7 @@ fn rerun(ctx: &Ctx, id: &str) -> Result<String, String> {
     }
     let n = ctx.store.update(|d| {
         d.jobs_next += 1;
-        let n = Job { id: format!("J{}", d.jobs_next), cwd: j.cwd.clone(), priority: j.priority.clone(), loader: j.loader.clone(), src: j.src.clone(), cost: j.cost.clone(), est_min: j.est_min, cores: j.cores, ram_gb: j.ram_gb, whole: j.whole, class: j.class.clone(), kind: j.kind.clone(), needs: j.needs.clone(), node_pref: j.node_pref.clone(), only: j.only, prio: j.prio, rev: j.rev.clone(), repo_dir: j.repo_dir.clone(), snap: j.snap.clone(), snap_files: j.snap_files, lane: j.lane.clone(), agent: j.agent.clone(), cmd: j.cmd.clone(), state: "queued".into(), submitted_ms: wall_ms(), note: format!("rerun of {id}"), ..Default::default() };
+        let n = Job { id: format!("J{}", d.jobs_next), cwd: j.cwd.clone(), priority: j.priority.clone(), loader: j.loader.clone(), src: j.src.clone(), cost: j.cost.clone(), est_min: j.est_min, cores: j.cores, ram_gb: j.ram_gb, whole: j.whole, class: j.class.clone(), kind: j.kind.clone(), needs: j.needs.clone(), node_pref: j.node_pref.clone(), prio: j.prio, rev: j.rev.clone(), repo_dir: j.repo_dir.clone(), snap: j.snap.clone(), snap_files: j.snap_files, lane: j.lane.clone(), agent: j.agent.clone(), cmd: j.cmd.clone(), state: "queued".into(), submitted_ms: wall_ms(), note: format!("rerun of {id}"), ..Default::default() };
         d.jobs.push(n.clone());
         n
     })?;
@@ -933,7 +1079,7 @@ fn rerun(ctx: &Ctx, id: &str) -> Result<String, String> {
     Ok(format!("{{\"jobs\":[{}],\"rerun_of\":{}}}", json_str(&n.id), json_str(id)))
 }
 
-/// One job, answer first: `J12 ok exit=0 34s test@107 L7300: cargo test ...`, then its error
+/// One job, answer first: `J12 ok exit=0 34s test@node-a L7300: cargo test ...`, then its error
 /// lines (and the tail with `tail`), or the panic and what to do about it.
 pub fn render(j: &Job, tail: bool) -> String {
     let secs = match (j.started_ms, j.ended_ms) {
@@ -953,6 +1099,9 @@ pub fn render(j: &Job, tail: bool) -> String {
     if !j.note.is_empty() {
         out.push_str(&format!("  note: {}\n", j.note));
     }
+    if !j.source.is_empty() {
+        out.push_str(&format!("  source {} ({})\n", j.source, if j.snap.is_empty() { "the commits alone".to_string() } else { format!("snapshot {}, {} file(s) on top", j.snap, j.snap_files) }));
+    }
     if !j.after.is_empty() && j.state == "queued" {
         out.push_str(&format!("  after {}\n", j.after.join(",")));
     }
@@ -964,6 +1113,9 @@ pub fn render(j: &Job, tail: bool) -> String {
             out.push_str(&format!("  | {l}\n"));
         }
     }
+    if !j.log.is_empty() && !matches!(j.state.as_str(), "ok" | "queued" | "leasing" | "running") {
+        out.push_str(&format!("  whole log: {}\n", j.log));
+    }
     out
 }
 
@@ -972,6 +1124,38 @@ mod tests {
     use super::*;
     use crate::lease::master::LeaseMaster;
     use crate::state::Store;
+
+    #[test]
+    fn an_idle_lease_wakes_its_jobs_wait_once() {
+        let c = ctx("idle");
+        c.store.update(|d| d.jobs.push(Job { id: "J1".into(), state: "running".into(), lease: "L1".into(), ..Default::default() })).unwrap();
+        let ids = ["J1".to_string()];
+        let no = |_: &str| None;
+        assert_eq!(told_idle(&c, &ids, &|_| None, &no).unwrap(), "[]", "it works");
+        let word = |lease: &str| Some(format!("{lease} idle"));
+        assert_eq!(told_idle(&c, &ids, &word, &no).unwrap(), r#"[{"id":"J1","word":"L1 idle"}]"#);
+        assert_eq!(told_idle(&c, &ids, &word, &no).unwrap(), "[]", "the next wait sits it out");
+        set(&c, "J1", |j| j.lease = "L2".into());
+        assert_eq!(told_idle(&c, &ids, &word, &no).unwrap(), r#"[{"id":"J1","word":"L2 idle"}]"#, "a new box is a new verdict");
+        set(&c, "J1", |j| { j.lease = "L3".into(); j.state = "ok".into(); });
+        assert_eq!(told_idle(&c, &ids, &word, &no).unwrap(), "[]", "an ended job's wait returns its result");
+        // queued behind a hung lease of its lane: its wait wakes too, once per hung lease
+        set(&c, "J1", |j| { j.lease.clear(); j.state = "leasing".into(); });
+        let behind = |_: &str| Some(("L9".to_string(), "L10 waits behind L9".to_string()));
+        assert_eq!(told_idle(&c, &ids, &word, &behind).unwrap(), r#"[{"id":"J1","queued":true,"word":"L10 waits behind L9"}]"#);
+        assert_eq!(told_idle(&c, &ids, &word, &behind).unwrap(), "[]");
+        let _ = std::fs::remove_dir_all(&c.home);
+    }
+
+    #[test]
+    fn a_failed_job_says_why_from_its_output() {
+        let (errors, tail) = digest("bash: zz_d/cpuinfo.sh: No such file or directory\n");
+        let j = Job { errors, tail, note: "placed on box-a".into(), ..Default::default() };
+        assert_eq!(fail_reason(&j, true), "bash: zz_d/cpuinfo.sh: No such file or directory");
+        assert_eq!(fail_reason(&j, false), "placed on box-a", "a run its box lost: what ended it");
+        let (errors, tail) = digest("compiling\nerror[E0425]: cannot find value `x`\nwarning: 1 warning\n");
+        assert_eq!(fail_reason(&Job { errors, tail, ..Default::default() }, true), "error[E0425]: cannot find value `x`");
+    }
 
     fn g(dir: &std::path::Path, args: &[&str]) -> String {
         let o = std::process::Command::new("git").arg("-C").arg(dir).args(args).output().unwrap();
@@ -1028,10 +1212,48 @@ mod tests {
         assert_eq!(c.store.read(|d| d.jobs.len()), 1, "lost reply must not create another job");
         assert_ne!(serve(&c, &line.replace("submission-one", "submission-two")).unwrap(), first);
         assert_eq!(c.store.read(|d| d.jobs.len()), 2, "intentional new submission still runs");
-        // A failed durable write must not accept a job that can be duplicated after restart.
+        // A failed durable write must not accept a job that can be duplicated after restart
+        // (both writes refused: the checkpoint's temporary and the journal are directories).
         std::fs::create_dir(c.home.join("state.new")).unwrap();
+        let _ = std::fs::remove_file(c.home.join("state.journal"));
+        std::fs::create_dir(c.home.join("state.journal")).unwrap();
         assert!(serve(&c, &line.replace("submission-one", "submission-three")).is_err());
         assert_eq!(c.store.read(|d| d.jobs.len()), 2);
+        std::fs::remove_dir_all(&c.home).unwrap();
+    }
+
+    /// `job list brief` lists the open jobs as stored; only the full list reads their logs.
+    #[test]
+    fn a_brief_list_reads_no_log() {
+        let c = ctx("brief");
+        serve(&c, &format!("job submit {{\"tree\":{},\"rev\":\"\",\"batch\":false,\"jobs\":[{}]}}", json_str(&c.repo.to_string_lossy()), req("check", &[]))).unwrap();
+        let id = c.store.read(|d| d.jobs[0].id.clone());
+        std::fs::create_dir_all(c.logs("jobs")).unwrap();
+        std::fs::write(c.logs("jobs").join(format!("{id}.log")), "error: one\nthe last line\n").unwrap();
+        let brief = serve(&c, "job list brief").unwrap();
+        assert!(brief.contains(&format!("\"id\":\"{id}\"")) && !brief.contains("the last line"), "{brief}");
+        assert!(serve(&c, "job list").unwrap().contains("the last line"), "the full list reads the log");
+        std::fs::remove_dir_all(&c.home).unwrap();
+    }
+
+    /// `job output <id> -n` reads the log's last n bytes; the answer's `off` asks on from there.
+    #[test]
+    fn output_from_the_end_reads_only_the_tail() {
+        let c = ctx("tail");
+        serve(&c, &format!("job submit {{\"tree\":{},\"rev\":\"\",\"batch\":false,\"jobs\":[{}]}}", json_str(&c.repo.to_string_lossy()), req("check", &[]))).unwrap();
+        let id = c.store.read(|d| d.jobs[0].id.clone());
+        std::fs::create_dir_all(c.logs("jobs")).unwrap();
+        let log = c.logs("jobs").join(format!("{id}.log"));
+        std::fs::write(&log, "first line\nthe last line\n").unwrap();
+        let ask = |line: &str| makepad_strict_json::parse(serve(&c, line).unwrap().as_bytes()).unwrap();
+        let data = |v: &makepad_strict_json::Value| String::from_utf8(crate::lease::master::b64_decode(v.get("data").unwrap().as_str().unwrap()).unwrap()).unwrap();
+        let tail = ask(&format!("job output {id} -14"));
+        assert_eq!((data(&tail).as_str(), tail.get("off").and_then(|v| v.as_u64())), ("the last line\n", Some(25)));
+        let all = ask(&format!("job output {id} -1000"));
+        assert_eq!(data(&all), "first line\nthe last line\n", "a tail longer than the log is the log");
+        std::fs::write(&log, "first line\nthe last line\nmore\n").unwrap();
+        let next = ask(&format!("job output {id} 25"));
+        assert_eq!((data(&next).as_str(), next.get("off").and_then(|v| v.as_u64())), ("more\n", Some(30)));
         std::fs::remove_dir_all(&c.home).unwrap();
     }
 
@@ -1101,9 +1323,33 @@ mod tests {
         c.store.update(|d| d.jobs[5].state = "cancelled".into()).unwrap_or_else(|e| { eprintln!("devhub state: {e}"); Default::default() });
         assert!(serve(&c, "job get J5 J9").unwrap().contains("\"state\":\"unknown\""));
         assert!(serve(&c, "job resume J5 P1 retry").unwrap_err().contains("not paused"));
+        // a lane named in upper case is the same lane: folded at submit
+        submit_line(&c, "rc-t", false, &[req("x", &[]).replace("\"lane1\"", "\"LANE1\"")]).unwrap();
+        assert_eq!(c.store.read(|d| d.jobs.last().map(|j| j.lane.clone())), Some("lane1".to_string()));
         let home = c.repo.parent().unwrap().to_path_buf();
         drop(c);
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn a_running_jobs_log_is_read_from_its_end() {
+        let p = std::env::temp_dir().join(format!("devhub-log-end-{}", std::process::id()));
+        std::fs::write(&p, "first line\nsecond\nthird\n").unwrap();
+        assert_eq!(log_end(&p, 12).as_deref(), Some("third\n"), "from the first whole line");
+        assert_eq!(log_end(&p, 100).as_deref(), Some("first line\nsecond\nthird\n"));
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn a_failing_test_programs_panic_leads_over_a_passing_ones() {
+        let report = |m: &str| format!("  report: {{\"kind\":\"panic\",\"message\":\"{m}\",\"location\":\"a.rs:1:1\"}}");
+        let text = format!("running 57 tests\n{}\ntest result: ok. 57 passed; 0 failed\n\nrunning 3 tests\n{}\ntest a ... FAILED\ntest result: FAILED. 0 passed; 3 failed\n", report("injected"), report("left != right"));
+        let (errors, _) = digest(&text);
+        assert!(errors[0].contains("left != right"), "{errors:?}");
+        assert!(errors.last().is_some_and(|e| e.contains("injected")), "{errors:?}");
+        // a program that never reached its result crashed: nothing it said was expected
+        let (errors, _) = digest(&format!("running 2 tests\n{}\n", report("crash")));
+        assert!(errors[0].contains("crash"), "{errors:?}");
     }
 
     #[test]
@@ -1112,7 +1358,12 @@ mod tests {
         let (e, t) = digest(text);
         assert_eq!(e, vec!["error[E0425]: cannot find `x`".to_string(), "thread 'main' panicked at a.rs:3".to_string()]);
         assert_eq!(t.last().map(String::as_str), Some("ok"));
+        // the JIT's panic is its report line; a later `report:` that is no report stays out
+        let text = "  report: {\"kind\":\"panic\",\"message\":\"not in 5 s\",\"build\":\"b\",\"location\":\"a.rs:89:13\",\"backtrace\":[]}\ntest x ... FAILED\nmakepad: report: /a/capture.txt\n";
+        assert_eq!(digest(text).0, vec!["panic: not in 5 s at a.rs:89:13".to_string(), "test x ... FAILED".to_string()]);
         let j = Job { id: "J1".into(), state: "paused".into(), cmd: vec!["cargo".into()], panic: Some(JobPanic { id: "P1".into(), pid: 7, message: "boom".into(), thread: "main".into(), location: "a.rs:3".into(), at_ms: 0 }), ..Default::default() };
         assert!(render(&j, false).contains("job resume J1 P1 retry|restart|unwind"));
+        let j = Job { id: "J2".into(), state: "failed".into(), log: "/h/jobs/J2.log".into(), ..Default::default() };
+        assert!(render(&j, false).contains("whole log: /h/jobs/J2.log"));
     }
 }

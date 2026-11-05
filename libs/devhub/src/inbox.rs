@@ -118,6 +118,12 @@ impl Inbox {
         self.entries.iter().filter(|e| !e.seen).count()
     }
 
+    /// The unseen entries by severity: `{"unseen","err","warn","req"}` (the control panel's strip).
+    pub fn counts(&self) -> String {
+        let n = |sev: crate::proto::Sev| self.entries.iter().filter(|e| !e.seen && e.record.sev == sev).count();
+        format!("{{\"unseen\":{},\"err\":{},\"warn\":{},\"req\":{}}}", self.unseen(), n(crate::proto::Sev::Err), n(crate::proto::Sev::Warn), n(crate::proto::Sev::Req))
+    }
+
     pub fn mark_seen(&mut self, id: &str) {
         let mut hit = false;
         for e in self.entries.iter_mut().filter(|e| id == "all" || e.record.id == id) {
@@ -176,13 +182,13 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("devhub-inbox-test-{}", std::process::id()));
         let path = dir.join("inbox.jsonl");
         let mut ib = Inbox::open(path.clone());
-        let h = |line: &str| hub_record("217", "sandbox", 7, "hitch", Sev::Warn, line.to_string(), String::new());
+        let h = |line: &str| hub_record("node-a", "foo", 7, "hitch", Sev::Warn, line.to_string(), String::new());
         assert!(ib.add(h("hitch 840 ms (typical 8.0 ms)")));
         assert!(ib.add(h("hitch 900 ms (typical 8.0 ms)")));
-        assert!(!ib.add(hub_record("217", "", 0, "hub", Sev::Info, "hub: up".into(), String::new())));
+        assert!(!ib.add(hub_record("node-a", "", 0, "hub", Sev::Info, "hub: up".into(), String::new())));
         assert_eq!(ib.entries.len(), 1);
         assert_eq!(ib.entries[0].count, 2);
-        let crash = hub_record("217", "sandbox", 7, "crash", Sev::Err, "crash: ended".into(), String::new());
+        let crash = hub_record("node-a", "foo", 7, "crash", Sev::Err, "crash: ended".into(), String::new());
         let id = crash.id.clone();
         ib.add(crash);
         assert_eq!(ib.unseen(), 2);

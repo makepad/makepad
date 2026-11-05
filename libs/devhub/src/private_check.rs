@@ -164,10 +164,13 @@ fn scan(staged: &Staged, root: &Path, mode: &str, input: &str) -> Result<Vec<Str
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     fn root() -> PathBuf {
         std::env::temp_dir()
     }
 
+    // (the scan is a shell script; landings run on the master, a Windows box may have no `sh`)
+    #[cfg(unix)]
     #[test]
     fn a_clean_diff_and_message_pass_and_hits_name_file_line_and_rule() {
         let clean = "+++ b/a.rs\n@@ -0,0 +1,2 @@\n+fn main() {}\n+// on 192.0.2.10 and 10.77.0.3\n";

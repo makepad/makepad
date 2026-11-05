@@ -55,7 +55,7 @@ pub const HELP: &str = "  sync words (the master; nodes by hub name, `all` = eve
 
 fn control() -> Result<Client, String> {
     let c = Client::new(Target::Unix(proto::control_socket()), "devhub-sync");
-    c.conn().map_err(|e| format!("no devhub master at {} (connect: {e})", proto::control_socket().display()))?;
+    c.conn().map_err(|e| format!("no devhub master at {} (connect: {e}); `makepad devhub master start` starts one", proto::control_socket().display()))?;
     Ok(c)
 }
 
@@ -89,7 +89,7 @@ fn nodes(c: &Client, spec: &str) -> Result<Vec<String>, String> {
     fleet_nodes(c)
 }
 
-pub(super) fn fleet_nodes(c: &Client) -> Result<Vec<String>, String> {
+pub(crate) fn fleet_nodes(c: &Client) -> Result<Vec<String>, String> {
     let mut out = Vec::new();
     for h in ask_local(c, "hosts", "hosts")? {
         let Ok(v) = makepad_strict_json::parse(h.as_bytes()) else { continue };
@@ -311,7 +311,7 @@ fn make_bundle(p: &Push, bases: &[String]) -> Result<(PathBuf, String, u64), Str
     // objects (alternates), so nothing is written to the user's repo and no ref is read twice
     let scratch = path.with_extension("git");
     let made = (|| {
-        let common = git(&p.dir, &["rev-parse", "--path-format=absolute", "--git-common-dir"])?;
+        let common = crate::gitread::paths(&p.dir).ok_or_else(|| format!("{}: no repository", p.dir.display()))?.common_dir.to_string_lossy().into_owned();
         git(&p.dir, &["init", "-q", "--bare", &scratch.to_string_lossy()])?;
         std::fs::write(scratch.join("objects/info/alternates"), format!("{common}/objects\n")).map_err(|e| format!("{}: {e}", scratch.display()))?;
         git(&scratch, &["update-ref", &format!("refs/heads/{}", p.branch), &p.sha])?;
@@ -582,11 +582,15 @@ fn retired_refusal(repo: &Path, line: &str) -> Option<&'static str> {
     (crate::gitread::Pass::default().retired_holds(repo, from) == Some(true)).then_some("makepad")
 }
 
-pub(super) fn push_and_apply(c: &Client, repo: &Path, makepad_branch: &str, commercial: Option<&str>, nodes: &[String], build: &str, restart: &str, prewarm: bool, extra: &str, out: &mut dyn FnMut(&str, &str)) -> i32 {
+/// `at`: the commits to move to (`makepad,commercial`, a timed ask's pin) in place of the branches'
+/// tips; the branches name them on the node.
+pub(super) fn push_and_apply(c: &Client, repo: &Path, makepad_branch: &str, commercial: Option<&str>, at: Option<&str>, nodes: &[String], build: &str, restart: &str, prewarm: bool, extra: &str, out: &mut dyn FnMut(&str, &str)) -> i32 {
     let mut pushes = Vec::new();
+    let mut pinned = at.map(|a| a.split(','));
     for (name, dir, branch) in [("makepad", repo.to_path_buf(), Some(makepad_branch)), ("commercial", repo.join("apps/commercial"), commercial)] {
+        let pin = pinned.as_mut().map(|p| p.next().filter(|sha| valid_sha(sha)).map(str::to_string).ok_or_else(|| format!("`{}` names no {name} commit", at.unwrap_or(""))));
         let Some(branch) = branch else { continue };
-        match branch_sha(&dir, branch) {
+        match pin.unwrap_or_else(|| branch_sha(&dir, branch)) {
             Ok(sha) => pushes.push(Push { repo: name, dir, branch: branch.to_string(), sha }),
             Err(e) => {
                 for n in nodes {
@@ -713,7 +717,7 @@ fn sync_push(c: &Client, args: &[&str]) -> i32 {
     };
     let Some(session) = flag(args, "--session") else {
         let commercial = (!args.contains(&"--no-commercial")).then(|| flag(args, "--commercial").unwrap_or("main"));
-        return push_and_apply(c, &repo, flag(args, "--makepad").unwrap_or("work"), commercial, &nodes, build, restart, args.contains(&"--prewarm"), "", &mut out);
+        return push_and_apply(c, &repo, flag(args, "--makepad").unwrap_or("work"), commercial, None, &nodes, build, restart, args.contains(&"--prewarm"), "", &mut out);
     };
     let revs: String = pushes.iter().map(|p| format!(" {}={}", p.repo, p.sha)).collect();
     for p in &pushes {
@@ -869,9 +873,9 @@ pub fn main(args: &[&str]) -> Option<i32> {
     if verb == "show" && args.len() != 3 {
         return None;
     }
-    if args.len() < 2 || matches!(args[1], "-h" | "--help" | "help") {
+    if args.len() < 2 {
         println!("{HELP}");
-        return Some(if args.len() < 2 { 2 } else { 0 });
+        return Some(2);
     }
     // Last successful applies remain readable when the master is stopped.
     if let ("autosync", ["status"]) = (verb, &args[1..]) {
@@ -1114,13 +1118,13 @@ mod tests {
 
     #[test]
     fn node_store_listing() {
-        let st = r#"{"machine":"217","repos":{"makepad":{"checkout":"d8cb46d6c1a69041cd12c5822fc2f89a46fedc81","refs":[{"ref":"refs/devhub/pushed/work","sha":"374efe9d7f0000000000000000000000000000aa"}]},"commercial":{"checkout":null,"refs":[]}}}"#;
+        let st = r#"{"machine":"node-a","repos":{"makepad":{"checkout":"d8cb46d6c1a69041cd12c5822fc2f89a46fedc81","refs":[{"ref":"refs/devhub/pushed/work","sha":"374efe9d7f0000000000000000000000000000aa"}]},"commercial":{"checkout":null,"refs":[]}}}"#;
         assert_eq!(super::node_has(st, "makepad").len(), 2);
         assert!(super::node_has(st, "commercial").is_empty());
         let shipped = r#"{"repos":{"makepad":{"checkout":"d8cb46d6c1a69041cd12c5822fc2f89a46fedc81","held":false,"refs":[]}}}"#;
         assert!(super::node_has(shipped, "makepad").is_empty());
-        assert_eq!(super::jit_id("217/sandbox#4412"), Some(("217".to_string(), 4412)));
-        assert_eq!(super::jit_id("100/981"), Some(("100".to_string(), 981)));
+        assert_eq!(super::jit_id("node-a/foo#4412"), Some(("node-a".to_string(), 4412)));
+        assert_eq!(super::jit_id("node-b/981"), Some(("node-b".to_string(), 981)));
     }
 
     #[test]

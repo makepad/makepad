@@ -37,6 +37,8 @@ mod build;
 #[cfg(feature = "checkout")]
 mod cli;
 #[cfg(feature = "checkout")]
+pub(crate) use cli::fleet_nodes;
+#[cfg(feature = "checkout")]
 mod conf;
 pub mod files;
 #[cfg(feature = "checkout")]
@@ -93,13 +95,20 @@ pub fn autosync_covers(home: &std::path::Path, node: &str) -> bool {
 }
 
 /// Moves `node`'s tree to the tips of work and commercial main, with no build and no restart (a
-/// node the auto-sync does not follow: the self-update brings its code itself). Returns the exit
-/// code and the node's lines.
+/// node the auto-sync does not follow: the self-update brings its code itself), or to `at`
+/// (`makepad,commercial`: a timed ask's pin). Returns the exit code and the node's lines.
 #[cfg(feature = "checkout")]
-pub fn push_tree(control: &makepad_remote::Client, repo: &std::path::Path, node: &str) -> (i32, Vec<String>) {
+pub fn push_tree(control: &makepad_remote::Client, repo: &std::path::Path, node: &str, at: Option<&str>) -> (i32, Vec<String>) {
     let mut lines = Vec::new();
-    let code = cli::push_and_apply(control, repo, "work", Some("main"), &[node.to_string()], "off", "none", false, "", &mut |n, l| lines.push(format!("{n} {l}")));
+    let code = cli::push_and_apply(control, repo, "work", Some("main"), at, &[node.to_string()], "off", "none", false, "", &mut |n, l| lines.push(format!("{n} {l}")));
     (code, lines)
+}
+
+/// Whether deployment `deploy` holds `at` (both `makepad,commercial`; the commercial checkout
+/// sits in `repo`'s apps/commercial): a move there would be none, or one back.
+pub fn deploy_has(repo: &std::path::Path, deploy: &str, at: &str) -> bool {
+    let (Some((dm, dc)), Some((am, ac))) = (deploy.split_once(','), at.split_once(',')) else { return false };
+    crate::gitread::is_ancestor(repo, am, dm) && crate::gitread::is_ancestor(&repo.join("apps/commercial"), ac, dc)
 }
 
 /// The node's bare store of `repo` (`~/devhub/git/<repo>.git`): where lease worktrees come from.
@@ -169,12 +178,14 @@ pub fn register_flow(ep: &Endpoint, machine: &str, board: std::sync::Arc<prewarm
     }
 }
 
-/// Starts the master's watcher when this hub has checkout support.
-pub fn start_autosync(sock: std::path::PathBuf) {
+/// Starts the master's watcher when this hub has checkout support; `say_waits` tells the
+/// scheduler which nodes' applies wait for a timed run (Some) and when one waits no more (None);
+/// `pin_of` asks it which node a timed ask pinned, and where.
+pub fn start_autosync(sock: std::path::PathBuf, say_waits: Box<dyn Fn(&str, Option<String>) + Send>, pin_of: std::sync::Arc<dyn Fn(&str) -> Option<(String, String)> + Send + Sync>) {
     #[cfg(feature = "checkout")]
-    autosync::start(sock);
+    autosync::start(sock, say_waits, pin_of);
     #[cfg(not(feature = "checkout"))]
-    let _ = sock;
+    let _ = (sock, say_waits, pin_of);
 }
 
 /// The log of a running launch of this node (None: not one of its launches).

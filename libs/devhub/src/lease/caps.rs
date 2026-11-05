@@ -4,7 +4,7 @@
 //! `lease.conf` is `key = value` lines: `role = pool|hot|suite|bench|user-wm|device` (`bench`: the
 //! boxes timed leases go to), `slots.<kind> = 0|1` (one write lease per kind; CI only with `slots.ci`),
 //! `disk_floor_gb`, `disk_warn_gb`, `timed = on|off`, `spec = <text>`, `work = <dir>` (default
-//! `~/devhub`), CPU pinning for leases (`cpus.shared = 8-15,24-31`, `cpus.timed = 0-7,16-23`) and
+//! [`WORK_DIR`] in home), CPU pinning for leases (`cpus.shared = 8-15,24-31`, `cpus.timed = 0-7,16-23`) and
 //! `user_idle_min` (default 3: minutes without a person's input before a node with our WM
 //! takes work again, [`super::UserSense`]).
 //! `native_trees` (default 3) bounds per-lane native trees and their targets.
@@ -41,6 +41,10 @@ pub fn home_dir() -> PathBuf {
     crate::os::home_dir()
 }
 
+/// The default work dir under home. Spotlight skips a `.noindex` dir on macOS: it indexed build
+/// output beside timed leases at over a core and a half (11-03).
+pub const WORK_DIR: &str = if cfg!(target_os = "macos") { "devhub.noindex" } else { "devhub" };
+
 pub fn conf_path() -> PathBuf {
     crate::proto::home().join("lease.conf")
 }
@@ -59,7 +63,7 @@ impl LeaseConf {
             disk_warn_gb: 50.0,
             timed: true,
             spec: String::new(),
-            work: home.join("devhub"),
+            work: home.join(WORK_DIR),
             native_trees: NATIVE_TREES,
             cpus_shared: String::new(),
             cpus_timed: String::new(),
@@ -202,15 +206,46 @@ pub fn measure(node: &str, conf: &LeaseConf, apply: &str) -> Caps {
     c.timed = conf.timed;
     c.apply = apply.to_string();
     c.hub_rev = hub_rev().to_string();
+    c.hub_rss_mb = crate::procinfo::proc(std::process::id()).map_or(0, |p| p.rss_bytes >> 20);
+    c.hub_heap_mb = (crate::heap::live() >> 20) as u64;
     c.sick = sick();
+    c.clocksource = clocksource();
     c.rustc = rustc_version();
     c.hub_proto = super::HUB_PROTO;
     c.services = services();
+    c.hub_building = super::exec::hub_building();
     c.jit_store = Some(std::sync::Arc::new(super::jitstore::Store::new(&conf.work).snapshot()));
     c.native_trees = conf.native_trees;
     #[cfg(feature = "checkout")]
     { c.native = super::tree::natives(&conf.work).into_iter().map(|(lane, _)| lane).collect(); }
     c
+}
+
+/// The kernel's current clock source on an x86 Linux box (`tsc`; `hpet` or `acpi_pm` when the
+/// kernel marked the TSC unstable); empty elsewhere.
+pub fn clocksource() -> String {
+    if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        std::fs::read_to_string("/sys/devices/system/clocksource/clocksource0/current_clocksource").map(|s| s.trim().to_string()).unwrap_or_default()
+    } else {
+        String::new()
+    }
+}
+
+/// Why a box takes no timed leases for its clock, if so: off the TSC every clock read is a slow
+/// syscall, which inflates what a timed run measures (a slicing run's wall 35.2 s against 15.8 s
+/// on the same hardware on the TSC, the same commit, 11-04). The name only: no per-box setting.
+pub fn slow_clock(clocksource: &str) -> Option<String> {
+    (!clocksource.is_empty() && clocksource != "tsc").then(|| format!("no timed leases: clocksource {clocksource} (TSC unstable since boot; a reboot restores it)"))
+}
+
+/// Why a Mac starts no new lease now, if so: its memory pressure is past normal. What runs there
+/// goes on; a lease that starts beside a box at warn pushes it into swap (11-04).
+pub fn mac_pressure(level: u32) -> Option<&'static str> {
+    match level {
+        0 | 1 => None,
+        2 => Some("mac pressure warn"),
+        _ => Some("mac pressure critical"),
+    }
 }
 
 /// The WM-supervised services of this node (`~/.makepad/wm/<name>.state`, written at each start):
@@ -233,9 +268,60 @@ pub fn services() -> Vec<(String, u64)> {
 
 /// Why this box's toolchain cannot link, from its last probe (see [`probe_toolchain`]).
 static SICK: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+/// Why git cannot work this box's stores: its last store command that failed for the box, not
+/// for the request ([`git_failed`]), until a probe of the stores passes ([`probe_git`]).
+static GIT_SICK: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
 
+/// Why this box takes no lease (empty: it takes them).
 pub fn sick() -> String {
-    SICK.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    let t = SICK.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let g = GIT_SICK.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let mut why = Vec::new();
+    if !t.is_empty() { why.push(format!("its toolchain cannot link: {t}")); }
+    if !g.is_empty() { why.push(format!("git fails on its stores: {g}")); }
+    why.join("; ")
+}
+
+/// A git error that is the box's, not the request's: git could not start, read its working
+/// directory or write the disk. Every later lease there would fail the same way at its start (a
+/// node whose hub sat in a removed tree failed every timed job sent to it, 11-03).
+fn box_git_error(err: &str) -> bool {
+    err.starts_with("git: ") || ["Unable to read current working directory", "No space left on device", "Read-only file system"].iter().any(|p| err.contains(p))
+}
+
+/// Why git fails on this box's stores (empty: it works them).
+pub fn git_sick() -> String {
+    GIT_SICK.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// Notes a failed store command: one that is the box's takes it out of rotation until
+/// [`probe_git`] passes.
+pub fn git_failed(err: &str) {
+    if box_git_error(err) {
+        *GIT_SICK.lock().unwrap_or_else(|e| e.into_inner()) = crate::proto::clean(err, 200);
+    }
+}
+
+/// Whether git works this box's stores again: a read of each (no write, nothing fetched), only
+/// while it is out of rotation for git (no git process otherwise). Returns (why, changed).
+pub fn probe_git() -> (Option<String>, bool) {
+    let before = GIT_SICK.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    if before.is_empty() {
+        return (None, false);
+    }
+    #[cfg(feature = "checkout")]
+    let why = {
+        let stores = crate::sync::git::stores_dir();
+        ["makepad", "commercial"].iter().map(|r| stores.join(format!("{r}.git"))).filter(|s| s.is_dir())
+            .find_map(|s| crate::sync::git::run(None, Some(&s), &[], &["rev-parse", "--git-dir"]).err())
+    };
+    // a hub without the checkout keeps no stores: git starting again is the probe
+    #[cfg(not(feature = "checkout"))]
+    let why = crate::lease::wt::git(None, None, &["--version"]).err();
+    let mut g = GIT_SICK.lock().unwrap_or_else(|e| e.into_inner());
+    *g = why.clone().map(|w| crate::proto::clean(&w, 200)).unwrap_or_default();
+    let changed = *g != before;
+    (why, changed)
 }
 
 /// Links a small program the way a build does, system libraries included (a damaged SDK fails every
@@ -269,6 +355,9 @@ pub fn probe_toolchain(dir: &std::path::Path) -> (Option<String>, bool) {
 pub fn hub_rev() -> &'static str {
     static REV: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     REV.get_or_init(|| {
+        if let Ok(rev) = std::env::var(BUILT_AT) {
+            return rev;
+        }
         let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         // a tree a deploy script or sync wrote with no `.git` of its own (a node's) names its commit in
         // FLEET-REVISION.txt
@@ -278,6 +367,11 @@ pub fn hub_rev() -> &'static str {
         }).unwrap_or_default()
     })
 }
+
+/// What a master that restarts itself tells the build it execs into: the commit it built. Its
+/// checkout's HEAD has moved on when a landing came during the build or the drain, and a master
+/// that took that HEAD for its own never built the landing (its CLI stayed behind, 11-04).
+pub const BUILT_AT: &str = "DEVHUB_BUILT_AT";
 
 /// HEAD's commit of a checkout, from its files (a linked worktree's `.git` file, a loose ref or
 /// packed-refs).
@@ -347,6 +441,29 @@ pub fn parse_battery(capacity: &str, status: &str) -> Option<(u32, bool)> {
     Some((pct, matches!(status.trim(), "Charging" | "Full")))
 }
 
+/// How long [`load_now`] measures the CPU for.
+pub const LOAD_WINDOW: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// The box's load now: (CPU use in percent over [`LOAD_WINDOW`], available RAM in GB). A lease-end
+/// answers it after the teardown: the caps the master holds are a 10 s average from up to 10 s ago
+/// and still count the ended lease's work (a medium lease waited 23 s, two caps rounds, after two
+/// small tests that pegged its box had ended, 11-04).
+pub fn load_now() -> Option<(f64, f64)> {
+    os::load_now()
+}
+
+/// (this box's RAM, what its swap files take of its disk), bytes, where swap grows on the volume
+/// it swaps to: macOS. A Linux box swaps to a fixed file or partition, so memory cannot fill its
+/// disk (the kernel's OOM killer ends what outgrows the RAM).
+#[cfg(target_os = "macos")]
+pub fn swap_on_disk() -> Option<(u64, u64)> {
+    os::swap_on_disk()
+}
+#[cfg(not(target_os = "macos"))]
+pub fn swap_on_disk() -> Option<(u64, u64)> {
+    None
+}
+
 /// (free, total) bytes of the volume holding `path` (its nearest existing ancestor).
 pub fn disk_space(path: &Path) -> Option<(u64, u64)> {
     let mut p = path.to_path_buf();
@@ -356,7 +473,8 @@ pub fn disk_space(path: &Path) -> Option<(u64, u64)> {
     os::disk_space(&p)
 }
 
-#[cfg(target_os = "linux")]
+// Android: bionic shares the /proc files, statvfs layout and power-supply nodes
+#[cfg(any(target_os = "linux", target_os = "android"))]
 mod os {
     use super::*;
 
@@ -376,7 +494,7 @@ mod os {
             cpu_pct,
             gpu_busy: gpu.iter().map(|g| (g.util_pct, g.mem_used_gb)).collect(),
             arch: std::env::consts::ARCH.to_string(),
-            os: "linux".into(),
+            os: std::env::consts::OS.to_string(),
             cpu,
             cores: cores.max(1),
             load1: parse_loadavg(&read("/proc/loadavg")),
@@ -389,6 +507,14 @@ mod os {
             battery: battery(),
             ..Default::default()
         }
+    }
+
+    pub fn load_now() -> Option<(f64, f64)> {
+        let read = |p: &str| std::fs::read_to_string(p).unwrap_or_default();
+        let a = crate::top::parse_proc_stat(&read("/proc/stat"))?;
+        std::thread::sleep(LOAD_WINDOW);
+        let b = crate::top::parse_proc_stat(&read("/proc/stat"))?;
+        (b.1 > a.1).then(|| (crate::top::cpu_pct(a, b), parse_meminfo(&read("/proc/meminfo")).1))
     }
 
     /// The box's live makepad WM session. An arbitrary Wayland compositor (including a
@@ -526,6 +652,19 @@ mod os {
         if len == 4 { v & 0xffff_ffff } else { v }
     }
 
+    pub(super) fn swap_on_disk() -> Option<(u64, u64)> {
+        // struct xsw_usage (sys/sysctl.h)
+        #[repr(C)]
+        #[derive(Default)]
+        struct Usage { total: u64, avail: u64, used: u64, pagesize: u32, encrypted: u32 }
+        let mut u = Usage::default();
+        let mut len = std::mem::size_of::<Usage>();
+        if unsafe { sysctlbyname(b"vm.swapusage\0".as_ptr(), &mut u as *mut Usage as *mut _, &mut len, std::ptr::null_mut(), 0) } != 0 {
+            return None;
+        }
+        Some((sysctl_u64("hw.memsize"), u.total))
+    }
+
     fn sysctl_str(name: &str) -> String {
         let n = format!("{name}\0");
         let mut buf = [0u8; 256];
@@ -554,6 +693,13 @@ mod os {
         Some((busy, busy + t[2] as u64))
     }
 
+    pub fn load_now() -> Option<(f64, f64)> {
+        let a = cpu_ticks()?;
+        std::thread::sleep(LOAD_WINDOW);
+        let b = cpu_ticks()?;
+        (b.1 > a.1).then(|| (crate::top::cpu_pct(a, b), crate::procinfo::machine().mem_avail_mb as f64 / 1024.0))
+    }
+
     pub fn hardware() -> Caps {
         let m = crate::procinfo::machine();
         // CPU use since the previous measure (the master asks every 10 s): what decides "busy", not
@@ -580,6 +726,7 @@ mod os {
             load1: m.load1,
             ram_gb: sysctl_u64("hw.memsize") as f64 / GB,
             ram_avail_gb: m.mem_avail_mb as f64 / 1024.0,
+            mem_pressure: sysctl_u64("kern.memorystatus_vm_pressure_level") as u32,
             // a Mac shows windows on its own session; the GPU is the SoC's (not a lease resource)
             display: Some("macos".into()),
             ..Default::default()
@@ -625,6 +772,13 @@ mod os {
 mod os {
     use super::*;
 
+    pub fn load_now() -> Option<(f64, f64)> {
+        let a = crate::os::cpu_times()?;
+        std::thread::sleep(LOAD_WINDOW);
+        let b = crate::os::cpu_times()?;
+        (b.1 > a.1).then(|| (crate::top::cpu_pct(a, b), crate::os::memory().1 as f64 / GB))
+    }
+
     pub fn hardware() -> Caps {
         let (total, avail) = crate::os::memory();
         // CPU use since the previous measure (the master asks every 10 s)
@@ -659,12 +813,16 @@ mod os {
     }
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+#[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos", windows)))]
 mod os {
     use super::*;
 
     pub fn hardware() -> Caps {
         Caps { arch: std::env::consts::ARCH.to_string(), os: std::env::consts::OS.to_string(), cores: 1, ..Default::default() }
+    }
+
+    pub fn load_now() -> Option<(f64, f64)> {
+        None
     }
 
     pub fn disk_space(_path: &Path) -> Option<(u64, u64)> {
@@ -674,29 +832,41 @@ mod os {
 
 #[cfg(test)]
 mod tests {
+    /// Only a git error that is the box's takes it out of rotation: one about the request (a
+    /// commit it does not have) is the request's.
+    #[test]
+    fn a_box_git_error_is_told_from_a_request_error() {
+        assert!(super::box_git_error("git bundle: fatal: Unable to read current working directory"));
+        assert!(super::box_git_error("git: No such file or directory (os error 2)"));
+        assert!(super::box_git_error("git fetch: error: unable to write file: No space left on device"));
+        assert!(!super::box_git_error("git rev-parse: fatal: bad revision 'deadbeef'"));
+        assert!(!super::box_git_error("git read-tree: error: Entry 'x' not uptodate. Cannot merge."));
+    }
 
     /// macOS measures CPU use like Linux (two samples of all cores' ticks): the busy check uses it.
     #[cfg(target_os = "macos")]
     #[test]
-    fn macos_measures_cpu_use() {
+    fn macos_measures_cpu_use_and_memory_pressure() {
         let _ = os::hardware();
         std::thread::sleep(std::time::Duration::from_millis(300));
-        let p = os::hardware().cpu_pct.expect("a second measure has the CPU use");
+        let c = os::hardware();
+        let p = c.cpu_pct.expect("a second measure has the CPU use");
         assert!((0.0..=100.0).contains(&p), "{p}");
+        assert!(matches!(c.mem_pressure, 1 | 2 | 4), "{}", c.mem_pressure);
     }
     use super::*;
 
     #[test]
     fn cpuinfo_meminfo_loadavg_nvidia_battery() {
-        let cpu = "processor\t: 0\nvendor_id\t: AuthenticAMD\nmodel name\t: AMD Ryzen 7 CPU-B 8-Core Processor\n\nprocessor\t: 1\nmodel name\t: AMD Ryzen 7 CPU-B 8-Core Processor\n";
-        assert_eq!(parse_cpuinfo(cpu), ("AMD Ryzen 7 CPU-B 8-Core Processor".to_string(), 2));
+        let cpu = "processor\t: 0\nvendor_id\t: AuthenticAMD\nmodel name\t: CPU-B 8-Core Processor\n\nprocessor\t: 1\nmodel name\t: CPU-B 8-Core Processor\n";
+        assert_eq!(parse_cpuinfo(cpu), ("CPU-B 8-Core Processor".to_string(), 2));
         let (t, a) = parse_meminfo("MemTotal:       65536000 kB\nMemFree:  100 kB\nMemAvailable:   32768000 kB\n");
         assert!((t - 62.5).abs() < 0.01 && (a - 31.25).abs() < 0.01);
         assert_eq!(parse_loadavg("3.52 2.10 1.00 2/900 1234\n"), 3.52);
-        let g = parse_nvidia("NVIDIA GeForce GPU-B, 32607\nNVIDIA GeForce GPU-A, 24564\n");
+        let g = parse_nvidia("NVIDIA GeForce GPU-B, 33000\nNVIDIA GeForce GPU-A, 25000\n");
         assert_eq!(g.len(), 2);
         assert_eq!(g[0].0, "NVIDIA GeForce GPU-B");
-        assert!((g[1].1 - 23.99).abs() < 0.01);
+        assert!((g[1].1 - 24.41).abs() < 0.01);
         assert!(parse_nvidia("").is_empty());
         assert_eq!(parse_battery("87\n", "Discharging\n"), Some((87, false)));
         assert_eq!(parse_battery("100", "Full"), Some((100, true)));
@@ -712,9 +882,9 @@ mod tests {
         let home = Path::new("/home/me");
         let d = LeaseConf::parse("", home);
         assert_eq!((d.role, d.disk_floor_gb, d.disk_warn_gb, d.timed), (Role::Pool, 25.0, 50.0, true));
-        assert_eq!(d.work, PathBuf::from("/home/me/devhub"));
+        assert_eq!(d.work, home.join(WORK_DIR));
         assert_eq!(d.slots(2), vec![(Kind::Build, 1), (Kind::Test, 1), (Kind::Screen, 1), (Kind::Long, 1), (Kind::Gate, 1), (Kind::Gpu, 1), (Kind::Timed, 1), (Kind::Ci, 0)]);
-        let c = LeaseConf::parse("# the 166 conf\nrole = user-wm\nslots.build = 1\nslots.nope = 4\nslots.test=6\ndisk_floor_gb = 40\ntimed = off\nspec = CPU-A+GPU-A  # comment\nwork = ~/scratch/dh\ncpus.shared = 8-15,24-31\ncpus.timed = rm -rf\n", home);
+        let c = LeaseConf::parse("# a node's conf\nrole = user-wm\nslots.build = 1\nslots.nope = 4\nslots.test=6\ndisk_floor_gb = 40\ntimed = off\nspec = CPU-A+GPU-A  # comment\nwork = ~/scratch/dh\ncpus.shared = 8-15,24-31\ncpus.timed = rm -rf\n", home);
         assert_eq!(c.role, Role::UserWm);
         assert_eq!(c.disk_floor_gb, 40.0);
         assert!(!c.timed);
@@ -731,8 +901,8 @@ mod tests {
         assert!(settable("role", "user-wm").is_ok() && settable("role", "boss").is_err());
         assert!(settable("slots.build", "3").is_ok() && settable("slots.build", "x").is_err() && settable("slots.nope", "1").is_err());
         assert!(settable("work", "/tmp").is_err() && settable("cpus.shared", "rm -rf").is_err());
-        let t = conf_with("# 165\nrole = pool  # was\nslots.build = 2\n", &[("role".into(), "user-wm".into()), ("cpus.shared".into(), "8-15,24-31".into())]);
-        assert_eq!(t, "# 165\nrole = user-wm  # was\nslots.build = 2\ncpus.shared = 8-15,24-31\n");
+        let t = conf_with("# a node\nrole = pool  # was\nslots.build = 2\n", &[("role".into(), "user-wm".into()), ("cpus.shared".into(), "8-15,24-31".into())]);
+        assert_eq!(t, "# a node\nrole = user-wm  # was\nslots.build = 2\ncpus.shared = 8-15,24-31\n");
         let c = LeaseConf::parse(&t, Path::new("/h"));
         assert_eq!((c.role, c.cpus_shared.as_str()), (Role::UserWm, "8-15,24-31"));
     }

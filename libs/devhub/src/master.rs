@@ -50,6 +50,31 @@ pub struct Master {
     pub land: Arc<crate::land::Train>,
 }
 
+/// A master's nice level is handed to what it starts without a level of its own: the apps
+/// `devhub show` opens on the Mac. Only root can lower a level there, so nothing can undo it later,
+/// and an exec restart keeps it. A fresh start at a level refuses; a restart goes on, since refusing
+/// would end the running master, and names the way back.
+fn niced_start(nice: i32, restart: bool, pid: u32) -> Result<Option<String>, String> {
+    if nice <= 0 {
+        return Ok(None);
+    }
+    if restart {
+        return Ok(Some(format!("the master runs at nice {nice}, and the apps it shows start at that level: `sudo renice 0 -p {pid}` brings it back without a restart")));
+    }
+    Err(format!("the master would run at nice {nice} for good, and the apps it shows with it. A background job in zsh (`&`) adds 5: start it from a foreground shell with `makepad devhub master start`"))
+}
+
+/// [`niced_start`] for this process, on the Mac (a node's hub runs where its service puts it). A
+/// restart is the same pid in the pid file: exec keeps the pid.
+pub(crate) fn start_level() -> Result<Option<String>, String> {
+    if !cfg!(target_os = "macos") {
+        return Ok(None);
+    }
+    let pid = std::process::id();
+    let restart = std::fs::read_to_string(pid_file()).is_ok_and(|p| p.trim().parse() == Ok(pid));
+    niced_start(crate::os::own_nice(), restart, pid)
+}
+
 /// The running master's pid (`~/.makepad/devhub/master.pid`): what a switch-over stops it by.
 pub fn pid_file() -> PathBuf {
     proto::home().join("master.pid")
@@ -98,7 +123,7 @@ pub struct Heard {
 /// The machines the master dials: every `nodes.conf` seed, then each heard node that is not one
 /// of them. Machines are matched by fleet identity (a seed's identity is what its certificate
 /// proved when it was dialled: `identity(addr)`), and by address before a seed was reached, so
-/// `n1` in nodes.conf and the node announcing itself as `100` are one machine.
+/// `n1` in nodes.conf and the node announcing itself as `node-a` are one machine.
 pub fn merge(seeds: &Hosts, heard: &[Heard], identity: &dyn Fn(&str) -> Option<String>) -> Hosts {
     let mut out = seeds.clone();
     let seed_ids: Vec<String> = seeds.hosts.iter().filter_map(|h| identity(fleet_addr(h))).collect();
@@ -122,9 +147,12 @@ impl Master {
         if Client::new(Target::Unix(proto::control_socket()), "probe").conn().is_ok() {
             return Err(format!("a devhub already serves {}", proto::control_socket().display()));
         }
+        let niced = start_level()?;
         // Validate and retain the shared state before starting any master services.
         let _state = crate::state::Store::open_quiet(&proto::home(), name)?;
         crate::os::raise_fd_limit();
+        // its heap's large holders, as the node hubs' (`devhub heap master`): its RSS climbs
+        crate::heap::sample();
         let inbox = Arc::new(Mutex::new(Inbox::open(proto::home().join("inbox.jsonl"))));
         let (ib, user) = (inbox.clone(), on_record);
         let recent: Arc<Mutex<std::collections::VecDeque<Record>>> = Arc::new(Mutex::new(std::collections::VecDeque::new()));
@@ -176,6 +204,9 @@ impl Master {
         let sink = ep.register_watch();
         let l = local.clone();
         ep.register("ps", 1, makepad_remote::lines::service("ps", Arc::new(move |_, out| l.ps(out))));
+        ep.register("heap", 1, makepad_remote::lines::service("heap", Arc::new(|line, out| {
+            out.extend(crate::heap::report(line.strip_prefix("heap").unwrap_or(line).trim().parse().unwrap_or(12)));
+        })));
         // `reply <id> <status> <message>`: to the JIT that posted request <id>, on whichever
         // machine its record came from (request ids carry the poster's host name, not the hub's)
         let (l, ib, me) = (local.clone(), inbox.clone(), name.to_string());
@@ -222,6 +253,12 @@ impl Master {
                 o(&r);
                 seq
             }));
+            if let (Some(line), Some(ctx)) = (&niced, crate::orch::ctx()) {
+                ctx.store.event("update", Sev::Warn, line.clone(), None);
+            }
+        }
+        if let Some(line) = &niced {
+            eprintln!("devhub: {line}");
         }
         // the landing train: `land` (DESIGN: devhub land), its records on the same feed
         let (s, o) = (sink.clone(), on_record.clone());
@@ -234,21 +271,21 @@ impl Master {
             let home = proto::home();
             let repo = crate::lease::wt::default_repo();
             let proofs = Arc::new(crate::gateproof::Store::open(&home));
-            let run = crate::bucket::fast(repo.clone(), proofs);
+            let run = crate::bucket::fast(repo.clone(), home.clone(), proofs);
             let (s, o) = (sink.clone(), on_record.clone());
             let timing = crate::bucket::Timing { every: Duration::ZERO, quiet: Duration::from_secs(60), cap: Duration::from_secs(10 * 60) };
             crate::bucket::spawn("fast", timing, repo.clone(), home.clone(), Arc::new(move |r: Record| {
                 s.emit(&r.to_json());
                 o(&r);
             }), run, |_| None);
-            let run = crate::bucket::hot(repo.clone());
+            let run = crate::bucket::hot(repo.clone(), home.clone());
             let (s, o) = (sink.clone(), on_record.clone());
             let timing = crate::bucket::Timing { every: Duration::ZERO, quiet: Duration::ZERO, cap: Duration::ZERO };
             crate::bucket::spawn("hot", timing, repo.clone(), home.clone(), Arc::new(move |r: Record| {
                 s.emit(&r.to_json());
                 o(&r);
             }), run, |_| None);
-            let run = crate::orch::ci::ci(repo.clone());
+            let run = crate::orch::ci::regression(repo.clone());
             let (s, o) = (sink.clone(), on_record.clone());
             let timing = crate::bucket::Timing { every: Duration::ZERO, quiet: Duration::from_secs(15 * 60), cap: Duration::from_secs(3 * 3600) };
             crate::bucket::spawn("ci", timing, repo, home.clone(), Arc::new(move |r: Record| {
@@ -256,7 +293,7 @@ impl Master {
                 o(&r);
             }), run, crate::orch::ci::last_rolling);
             ep.register("bucket", 1, makepad_remote::lines::service("bucket", Arc::new(move |_, out| {
-                out.extend(crate::bucket::ledger(&home, 10));
+                out.extend(crate::bucket::status(&home));
             })));
         }
         // `jitcache plan|clear`: this Mac's JIT caches (a node's through `route <node> jitcache`)
@@ -291,6 +328,8 @@ impl Master {
         let m = Arc::new(Master { name: name.to_string(), local, hub, sink, followed: Mutex::new(HashSet::new()), heard, heard_from: Mutex::new(Default::default()), asking_peers: Mutex::new(HashSet::new()), on_record, inbox, leases, recent, flow, land });
         let m2 = m.clone();
         let _ = std::thread::Builder::new().name("devhub-master".into()).spawn(move || m2.follow_loop());
+        let m2 = m.clone();
+        let _ = std::thread::Builder::new().name("devhub-trim".into()).spawn(move || m2.trim_loop());
         let m3 = m.clone();
         m.leases.start(Arc::new(move || {
             m3.hosts()
@@ -304,8 +343,9 @@ impl Master {
                     (h.name, addr)
                 })
                 .collect()
-        }));
-        crate::sync::start_autosync(proto::control_socket());
+        }), crate::lease::master::Pace::FLEET);
+        let (leases, pins) = (m.leases.clone(), m.leases.clone());
+        crate::sync::start_autosync(proto::control_socket(), Box::new(move |node: &str, why: Option<String>| leases.update_waits(node, "deployment", why)), Arc::new(move |node: &str| pins.update_pin(node)));
         Ok(m)
     }
 
@@ -361,6 +401,20 @@ impl Master {
                 let _ = std::thread::Builder::new().name("devhub-follow".into()).spawn(move || m.follow(h.name));
             }
             std::thread::sleep(Duration::from_secs(10));
+        }
+    }
+
+    /// What a burst of work freed goes back to the system once the heap fell 64 MB below its high
+    /// mark (a node hub trims at every lease end; the master's work has no such end). Without it
+    /// a landing burst left the master's freed pages resident: 380 to 780 MB with its heap back
+    /// down (11-03).
+    fn trim_loop(self: Arc<Self>) {
+        loop {
+            std::thread::sleep(Duration::from_secs(10));
+            if crate::heap::burst_freed() < 64 << 20 { continue; }
+            if let Some(held) = crate::heap::trim() {
+                self.publish(hub_record(&self.name, "", 0, "hub", Sev::Warn, format!("master memory: {held} (devhub heap master)"), String::new()));
+            }
         }
     }
 
@@ -438,6 +492,7 @@ fn inbox_cmd(ib: &Mutex<Inbox>, line: &str, out: &mut Vec<String>) {
     let mut ib = ib.lock().unwrap();
     match (w.next(), w.next()) {
         (Some("list"), all) => ib.list(all == Some("all"), out),
+        (Some("counts"), None) => out.push(ib.counts()),
         (Some("show"), Some(id)) => match ib.get(id) {
             Some(e) => out.push(e.record.to_json()),
             None => out.push(format!("{{\"err\":{}}}", makepad_remote::json_str(&format!("no inbox entry {id}")))),
@@ -450,7 +505,7 @@ fn inbox_cmd(ib: &Mutex<Inbox>, line: &str, out: &mut Vec<String>) {
             let n = ib.clear(id);
             out.push(format!("{{\"cleared\":{n},\"left\":{}}}", ib.entries.len()));
         }
-        _ => out.push("{\"err\":\"inbox list [all] | show <id> | seen <id|all> | clear <id|all>\"}".into()),
+        _ => out.push("{\"err\":\"inbox list [all] | counts | show <id> | seen <id|all> | clear <id|all>\"}".into()),
     }
 }
 
@@ -459,24 +514,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_fresh_master_refuses_a_nice_level_and_a_restart_names_the_way_back() {
+        assert_eq!(niced_start(0, false, 7), Ok(None));
+        assert_eq!(niced_start(0, true, 7), Ok(None));
+        let why = niced_start(5, false, 7).unwrap_err();
+        assert!(why.contains("nice 5") && why.contains("`makepad devhub master start`"), "{why}");
+        let line = niced_start(5, true, 7).unwrap().unwrap();
+        assert!(line.contains("`sudo renice 0 -p 7`"), "{line}");
+    }
+
+    #[test]
     fn one_machine_one_host_by_fleet_identity() {
-        let seeds = Hosts { hosts: vec![Host { name: "n1".into(), via: Via::Fleet { addr: "192.0.2.38:8797".into() } }, Host { name: "mini".into(), via: Via::Fleet { addr: "192.0.2.92:8797".into() } }] };
+        let seeds = Hosts { hosts: vec![Host { name: "n1".into(), via: Via::Fleet { addr: "192.0.2.38:8797".into() } }, Host { name: "n2".into(), via: Via::Fleet { addr: "192.0.2.92:8797".into() } }] };
         let heard = vec![
             // n1 announcing under its default name: same address
-            Heard { name: "100".into(), addr: "192.0.2.38:8797".into(), fleet: "fleet-a".into() },
-            // the mini on its Wi-Fi address: same fleet identity as the dialled seed
-            Heard { name: "mini".into(), addr: "192.0.2.75:8797".into(), fleet: "mini".into() },
+            Heard { name: "node-a".into(), addr: "192.0.2.38:8797".into(), fleet: "fleet-a".into() },
+            // n2 on another address of its own: same fleet identity as the dialled seed
+            Heard { name: "n2".into(), addr: "192.0.2.75:8797".into(), fleet: "fleet-n2".into() },
             // a machine nodes.conf lacks
-            Heard { name: "217".into(), addr: "192.0.2.89:8797".into(), fleet: "fleet-b".into() },
+            Heard { name: "node-c".into(), addr: "192.0.2.89:8797".into(), fleet: "fleet-b".into() },
             // the same machine heard twice
-            Heard { name: "217b".into(), addr: "192.0.2.90:8797".into(), fleet: "fleet-b".into() },
+            Heard { name: "node-c2".into(), addr: "192.0.2.90:8797".into(), fleet: "fleet-b".into() },
         ];
         let identity = |addr: &str| match addr {
-            "192.0.2.92:8797" => Some("mini".to_string()),
+            "192.0.2.92:8797" => Some("fleet-n2".to_string()),
             _ => None,
         };
         let names: Vec<String> = merge(&seeds, &heard, &identity).hosts.into_iter().map(|h| h.name).collect();
-        assert_eq!(names, vec!["n1", "mini", "217"]);
+        assert_eq!(names, vec!["n1", "n2", "node-c"]);
     }
 
     /// The open fds of this process.

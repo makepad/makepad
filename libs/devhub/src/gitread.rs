@@ -163,6 +163,84 @@ pub fn entries_at(dir: &Path, at: &str, paths: &[&str]) -> Option<Vec<String>> {
     .flatten()
 }
 
+/// Every file of the tree of commit `at` (`git ls-tree -r`: blobs and symlinks, no submodule), path
+/// to object id, for the repository of `dir`.
+pub fn files_at(dir: &Path, at: &str) -> Result<std::collections::BTreeMap<String, String>, String> {
+    with(dir, |p, repo| {
+        let c = resolve(p, repo, at).ok_or_else(|| format!("{}: no commit {at}", dir.display()))?;
+        let tree = repo.read_commit(&c).map_err(|e| format!("commit {at}: {e}"))?.tree;
+        let files = repo.flatten_tree_with_mode(&tree).map_err(|e| format!("tree of {at}: {e}"))?;
+        // a submodule's entry (mode 160000) names a commit of another repository
+        Ok(files.into_iter().filter(|(_, (_, mode))| *mode != 0o160000).map(|(path, (oid, _))| (path, oid.to_hex())).collect())
+    })
+    .unwrap_or_else(|| Err(format!("{}: no repository", dir.display())))
+}
+
+/// The bytes of blob `oid` in the repository of `dir` (`git cat-file blob`).
+pub fn blob(dir: &Path, oid: &str) -> Result<Vec<u8>, String> {
+    let oid = ObjectId::from_hex(oid).map_err(|e| format!("blob {oid}: {e}"))?;
+    with(dir, |_, repo| repo.read_blob(&oid).map_err(|e| format!("blob {}: {e}", oid.to_hex())))
+        .unwrap_or_else(|| Err(format!("{}: no repository", dir.display())))
+}
+
+/// Whether HEAD of the worktree at `dir` is in no ref's history (`git rev-list -n 1 HEAD --not
+/// --glob=refs/*` prints a commit; a worktree's HEAD is not a ref): work only this checkout has.
+/// A repository, HEAD or ref that cannot be read keeps the answer "unique": the work is kept.
+pub fn head_unreferenced(dir: &Path) -> bool {
+    with(dir, |p, repo| {
+        let Some(head) = resolve(p, repo, "HEAD") else { return true };
+        let Ok(refs) = refs::list_refs_in(&p.git_dir, &p.common_dir, "refs/") else { return true };
+        let tips: Vec<ObjectId> = refs.iter().filter_map(|r| match r.target { refs::RefTarget::Direct(oid) => Some(oid), refs::RefTarget::Symbolic(_) => None }).collect();
+        if tips.contains(&head) { return false; }
+        !in_history(repo, head, &tips).unwrap_or(false)
+    })
+    .unwrap_or(true)
+}
+
+/// Whether commit `target` is in the history of any of `tips` (commits or tags of them): one walk
+/// from all of them, newest commit first, that stops a day of clock skew below `target`'s time.
+fn in_history(repo: &mut Repository, target: ObjectId, tips: &[ObjectId]) -> Result<bool, GitError> {
+    const SKEW_S: i64 = 24 * 3600;
+    let floor = repo.read_commit(&target)?.committer.timestamp - SKEW_S;
+    type Queue = std::collections::BinaryHeap<(i64, ObjectId, Vec<ObjectId>)>;
+    fn push(repo: &mut Repository, heap: &mut Queue, oid: ObjectId) -> Result<(), GitError> {
+        let c = repo.read_commit(&oid)?;
+        heap.push((c.committer.timestamp, oid, c.parents));
+        Ok(())
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut heap = Queue::new();
+    for &tip in tips {
+        let Some(commit) = peel(repo, tip) else { continue };
+        if seen.insert(commit) { push(repo, &mut heap, commit)?; }
+    }
+    while let Some((time, oid, parents)) = heap.pop() {
+        if oid == target { return Ok(true); }
+        // newest first: every commit left is older
+        if time < floor { break; }
+        for parent in parents {
+            if seen.insert(parent) { push(repo, &mut heap, parent)?; }
+        }
+    }
+    Ok(false)
+}
+
+/// The commit `oid` is or tags (None: neither).
+fn peel(repo: &mut Repository, mut oid: ObjectId) -> Option<ObjectId> {
+    for _ in 0..8 {
+        let object = repo.read_object(&oid).ok()?;
+        match object.kind {
+            makepad_git::ObjectKind::Commit => return Some(oid),
+            makepad_git::ObjectKind::Tag => {
+                let text = std::str::from_utf8(&object.data).ok()?;
+                oid = ObjectId::from_hex(text.lines().next()?.strip_prefix("object ")?).ok()?;
+            }
+            _ => return None,
+        }
+    }
+    None
+}
+
 /// Whether the trees of `from` and `to` differ under any of `paths` (`git diff --quiet from to --
 /// <paths>` failing; no paths: anywhere). A commit that cannot be read counts as a difference.
 pub fn differ_under<'a>(dir: &Path, from: &str, to: &str, paths: impl IntoIterator<Item = &'a str>) -> bool {
@@ -196,6 +274,45 @@ mod tests {
         let o = std::process::Command::new("git").arg("-C").arg(dir).args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args).env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", "/dev/null").output().unwrap();
         assert!(o.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&o.stderr));
         String::from_utf8_lossy(&o.stdout).trim().to_string()
+    }
+
+    /// A tree's files and blobs, and whether HEAD is work only this checkout has, as `git ls-tree
+    /// -r`, `cat-file` and `rev-list HEAD --not --glob=refs/*` answer, without starting git.
+    #[test]
+    fn reads_trees_and_tells_unreferenced_heads_as_git_does() {
+        let d = std::env::temp_dir().join(format!("devhub-gitread-unref-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("sub")).unwrap();
+        g(&d, &["init", "-q", "-b", "main"]);
+        std::fs::write(d.join("a.txt"), "one\n").unwrap();
+        std::fs::write(d.join("sub/b.txt"), "two\n").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("a.txt", d.join("link")).unwrap();
+        g(&d, &["add", "."]);
+        g(&d, &["commit", "-q", "-m", "1"]);
+        let one = g(&d, &["rev-parse", "HEAD"]);
+        let before = crate::git_exec::on_this_thread();
+        let files = super::files_at(&d, &one).unwrap();
+        let listed: std::collections::BTreeMap<String, String> = g(&d, &["ls-tree", "-r", &one]).lines().filter_map(|l| {
+            let (meta, path) = l.split_once('\t')?;
+            (meta.split_whitespace().nth(1) == Some("blob")).then(|| (path.to_string(), meta.split_whitespace().nth(2).unwrap().to_string()))
+        }).collect();
+        assert_eq!(files, listed);
+        assert_eq!(super::blob(&d, &files["sub/b.txt"]).unwrap(), b"two\n");
+        assert!(super::files_at(&d, &"ab".repeat(20)).is_err());
+        // on its branch: the branch holds HEAD
+        assert!(!super::head_unreferenced(&d));
+        // detached, a commit ahead of every ref: only this checkout has it
+        g(&d, &["checkout", "-q", "--detach"]);
+        g(&d, &["commit", "-q", "--allow-empty", "-m", "2"]);
+        assert!(super::head_unreferenced(&d));
+        // an annotated tag of a later commit holds it too
+        g(&d, &["commit", "-q", "--allow-empty", "-m", "3"]);
+        g(&d, &["tag", "-a", "t", "-m", "t"]);
+        g(&d, &["checkout", "-q", "HEAD~1"]);
+        assert!(!super::head_unreferenced(&d));
+        assert_eq!(crate::git_exec::on_this_thread(), before, "a read started git");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     /// The questions loops ask, answered as git answers them, without starting git, from a
