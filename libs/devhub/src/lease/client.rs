@@ -125,6 +125,8 @@ pub const HELP: &str = "  lease <kind> [--node N|--needs k=v,..] [--lane L] [--p
                                           on 2+ refused or --native builds above the live saves; --agent: per lane
   stats queue [--hour]                   the last hour's agent wait, then live counts and average/max queue
                                           wait per class
+  stats cores                             each box's cores as charged past its cores in the last hour
+                                          (share of samples over, peak)
   queue | leases [--all]                  live and waiting leases, positions and reasons
   why-queued <lease>                     each candidate box's start blocker and reservation expiry
   nodes                                   capabilities, dev switch and leases per node
@@ -1848,7 +1850,11 @@ pub fn cli(args: &[&str]) -> Option<i32> {
             Ok(v) => { print!("{}", s(&v, "text")); 0 }
             Err(e) => fail(e),
         },
-        ["stats", ..] => { eprintln!("makepad devhub stats queue [--hour]"); 2 },
+        ["stats", "cores"] => match one(&c, "stats", "stats cores") {
+            Ok(v) => { print!("{}", s(&v, "text")); 0 }
+            Err(e) => fail(e),
+        },
+        ["stats", ..] => { eprintln!("makepad devhub stats queue [--hour] | stats cores"); 2 },
         ["jit", "stats", rest @ ..] if rest.is_empty() || rest == ["--day"] => match one(&c, "jit", &format!("jit stats {}", rest.join(" "))) {
             Ok(v) => { print!("{}", s(&v, "text")); 0 }
             Err(e) => fail(e),

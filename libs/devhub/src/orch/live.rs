@@ -100,7 +100,7 @@ fn call<'a>(ctx: &'a Ctx, id: &'a str) -> Result<Option<Call<'a>>, String> {
         calls.count += 1;
     }
     let call = Call(ctx, id, r);
-    admit(ctx, &call.2, true);
+    admit(ctx, id, &call.2)?;
     Ok(Some(call))
 }
 
@@ -120,20 +120,31 @@ fn finish_call(ctx: &Ctx, id: &str, r: &Running) {
     ctx.store.notify("live", id);
 }
 
-/// How long a call waits for room on its box before it runs anyway (an agent waits on it).
-const ADMIT_WAIT: Duration = Duration::from_secs(30);
+/// How often a call that finds no room on its box looks again.
+const ADMIT_LOOK: Duration = Duration::from_millis(100);
 
-/// A call takes its session's full charge back, admitted like a lease: it waits up to
-/// [`ADMIT_WAIT`] for room on its box (`wait`), then runs.
-fn admit(ctx: &Ctx, r: &Running, wait: bool) {
+/// A call takes its session's full charge back, admitted like a lease: it runs once that fits its
+/// box, never past the box's cores. Taken anyway (an edit at once, a call after 30 s), calls kept
+/// a box over its cores 30% of an hour (11-05). Its box keeps room for one call of its largest
+/// idle session (`Sched::call_room`): a call waits beside another call or on a box measured busy,
+/// and says so, with its box, its wait and why (`live call <id> waited <ms> ms for room on
+/// <node>: ...`). Err: its session parks meanwhile, or its client has gone.
+fn admit(ctx: &Ctx, id: &str, r: &Running) -> Result<(), String> {
     let t = Instant::now();
-    while wait && t.elapsed() < ADMIT_WAIT {
-        if ctx.leases.live_admit(&r.lease, false).is_ok() {
-            return;
+    let mut why = String::new();
+    loop {
+        match ctx.leases.live_admit(&r.lease) {
+            Ok(()) => break,
+            Err(e) => why = e,
         }
-        std::thread::sleep(Duration::from_millis(500));
+        if let Some(note) = &r.calls.lock().unwrap().park { return Err(format!("{id}: {note}")); }
+        if makepad_remote::lines::client_gone() { return Err(format!("{id}: this call's client has gone")); }
+        std::thread::sleep(ADMIT_LOOK);
     }
-    let _ = ctx.leases.live_admit(&r.lease, true);
+    if !why.is_empty() {
+        event(ctx, Sev::Info, format!("live call {id} waited {} ms for room on {}: {why}", t.elapsed().as_millis(), r.node), None);
+    }
+    Ok(())
 }
 
 /// No call runs and no edit is on its way: the session's box charges it its resident share.
@@ -306,7 +317,6 @@ fn inspect(node: &str, pid: u32, line: &str) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
-/// A frame presented: the app is up and drawing.
 /// `live wait patched` is done: the newest edit saved before the call (the OS monitor hears it
 /// within ~0.1 s, so `waited` 300 ms covers it) has its verdict; a session that has none after
 /// that has no edit to wait for. Before, a session's first edit had no patch yet and `live look`
@@ -319,6 +329,7 @@ fn patched_done(patch: Option<&LivePatch>, asked: u64, waited: Duration) -> bool
     }
 }
 
+/// A frame presented: the app is up and drawing.
 fn drawing(x: &Live) -> bool {
     x.pid > 0 && inspect(&x.node, x.pid, "live").ok().and_then(|l| frames_of(&l)).is_some_and(|f| f > 0)
 }
@@ -479,12 +490,10 @@ pub fn start(ctx: Arc<Ctx>) {
                 let _ = std::thread::Builder::new().name("devhub-live-patch".into()).spawn(move || {
                     let _inflight = Inflight(&c2, &id2, &r);
                     let called = wall_ms();
-                    // the box charges the session as active again: its scheduler's lock is no
-                    // step of the ship (it waited 25 ms for it before the edit went, 11-04)
-                    std::thread::scope(|s| {
-                        s.spawn(|| admit(&c2, &r, false));
-                        ship_edit(&c2, &id2, &r, files.into_iter().collect(), edit_ms, called, None, None);
-                    });
+                    // the box charges the session as active again before the edit runs: beside the
+                    // ship, an edit ran past its box's cores (11-05). A session parking ships no more.
+                    if admit(&c2, &id2, &r).is_err() { return; }
+                    ship_edit(&c2, &id2, &r, files.into_iter().collect(), edit_ms, called, None, None);
                 });
             }
         }
@@ -1572,7 +1581,17 @@ fn run_processes(ctx: &Arc<Ctx>, id: &str, r: &Arc<Running>, mut follow: Option<
                 p.jit_error = ctx.store.event_seq("jit_error", Sev::Err, p.reason.clone(), None);
                 set_patch(ctx, id, &p);
             } else if let Some(reason) = fault {
-                if begin_call(r) { r.resuming.store(true, std::sync::atomic::Ordering::SeqCst); admit(ctx, r, false); }
+                if begin_call(r) {
+                    r.resuming.store(true, std::sync::atomic::Ordering::SeqCst);
+                    // a session parking meanwhile restarts nothing: the fault is its edit's answer
+                    if admit(ctx, id, r).is_err() {
+                        r.resuming.store(false, std::sync::atomic::Ordering::SeqCst);
+                        (p.tests, p.outcome, p.reason, p.verdict_ms) = (None, "failed".into(), reason, wall_ms());
+                        set_patch(ctx, id, &p);
+                        finish_call(ctx, id, r);
+                        return res;
+                    }
+                }
                 p.tests = None;
                 p.reason = reason;
                 recover(ctx, id, &x, &mut p, false);
@@ -2117,7 +2136,7 @@ fn test_call(ctx: &Arc<Ctx>, id: &str) -> Result<Option<String>, String> {
             } else {
                 let queued = behind.take().map(|b| (wall_ms().saturating_sub(called), b));
                 let _inflight = Inflight(ctx, id, &r);
-                admit(ctx, &r, true);
+                admit(ctx, id, &r)?;
                 let mut x = get(ctx, id).ok_or("live job disappeared")?;
                 let fault = r.fault.lock().unwrap().clone();
                 if let Some(reason) = fault {

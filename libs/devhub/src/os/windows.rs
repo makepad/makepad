@@ -219,6 +219,11 @@ pub fn reset_failed_units(_pattern: &str) {}
 /// its exit instead of starting ([`wrapper`]).
 const WRAP: &str = "--makepad-devhub-run-wrapper";
 
+/// `program` as the launch runs it: Windows' own search finds it (the unix hub searches its PATH).
+pub fn hub_program(program: &str, _path: &std::ffi::OsStr) -> Result<std::path::PathBuf, String> {
+    Ok(program.into())
+}
+
 /// Every run goes under a small wrapper, as on Unix: it writes the run's pid beside its usage
 /// file (`<id>-<n>.usage.pid`, what [`crate::lease`] says it runs) and its exit code beside its
 /// ledger (`<id>-<n>.exit`) as it ends, so a restarted hub reads the exit of a run that ended

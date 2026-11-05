@@ -66,6 +66,17 @@ pub fn lease_argv(argv: Vec<String>, unit: Option<&str>, nice: i32, cpus: &str, 
     full
 }
 
+/// `program` as execvp finds it on `path`: itself when it names a path, else the first
+/// executable file of that name in `path`'s directories. The hub finds a launch's wrapper so,
+/// on its own PATH, under rustc's std and the JIT's alike ([`crate::lease::exec::Exec::launch`]).
+pub fn hub_program(program: &str, path: &std::ffi::OsStr) -> Result<std::path::PathBuf, String> {
+    use std::os::unix::fs::PermissionsExt;
+    if program.contains('/') { return Ok(program.into()); }
+    std::env::split_paths(path).filter(|d| !d.as_os_str().is_empty()).map(|d| d.join(program))
+        .find(|p| std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0))
+        .ok_or_else(|| format!("{program}: not on the hub's PATH ({})", path.to_string_lossy()))
+}
+
 /// Clear failed transient units left by earlier hubs; an unloaded unit is harmless.
 pub fn reset_failed_units(pattern: &str) {
     let _ = Command::new("systemctl").args(["--user", "reset-failed", pattern])

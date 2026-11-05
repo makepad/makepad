@@ -104,11 +104,13 @@ pub struct Opts {
     pub grace: Duration,
     /// run under `systemd-run --user --scope` (None: when the user bus exists)
     pub scopes: Option<bool>,
+    /// the PATH a launch's wrappers are found on ([`Exec::launch`]; None: the hub's own)
+    pub path: Option<std::ffi::OsString>,
 }
 
 impl Default for Opts {
     fn default() -> Opts {
-        Opts { tree: None, no_beat: Duration::from_secs(60), tick: Duration::from_secs(5), grace: Duration::from_secs(10), scopes: None }
+        Opts { tree: None, no_beat: Duration::from_secs(60), tick: Duration::from_secs(5), grace: Duration::from_secs(10), scopes: None, path: None }
     }
 }
 
@@ -2106,6 +2108,10 @@ impl Exec {
     /// scope's name until it ended.) `cmd`'s environment changes and directory are kept. The
     /// answer waits for the wrapper to start the command: its pid is the app's. `ended`: the
     /// app's pid (0: never started) and the run's exit, once it ends under this hub.
+    /// The wrappers are the hub's, found on its PATH ([`Opts::path`]), never on the command's: a
+    /// command's PATH chose its wrapper under rustc's std and went unread under the JIT's, which
+    /// searched the hub's (11-05). A PATH the command sets is its own lookup's: `env` sets it
+    /// right before the command starts.
     pub fn launch(&self, id: &str, cmd: &std::process::Command, log: &Path, ended: Box<dyn FnOnce(u32, i32) + Send>) -> Result<Launched, String> {
         let out = std::fs::File::create(log).map_err(|e| format!("{}: {e}", log.display()))?;
         let mut leases = self.leases.lock().unwrap();
@@ -2119,29 +2125,35 @@ impl Exec {
         let unit = self.scopes.then(|| format!("devhub-lease-{id}-{n}"));
         let conf = self.conf();
         let cpus = if l.kind == Kind::Timed { &conf.cpus_timed } else { &conf.cpus_shared };
-        let argv = std::iter::once(cmd.get_program()).chain(cmd.get_args()).map(|s| s.to_string_lossy().into_owned()).collect();
+        let mut argv: Vec<String> = std::iter::once(cmd.get_program()).chain(cmd.get_args()).map(|s| s.to_string_lossy().into_owned()).collect();
+        let hub_path = self.opts.path.clone().or_else(|| std::env::var_os("PATH")).unwrap_or_default();
+        let own_path = cfg!(unix).then(|| cmd.get_envs().find(|(k, _)| *k == "PATH").map(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()))).flatten();
+        match &own_path {
+            Some(Some(p)) => { argv.splice(0..0, ["env".to_string(), format!("PATH={p}")]); }
+            Some(None) => { argv.splice(0..0, ["env", "-u", "PATH"].map(String::from)); }
+            None => {}
+        }
         let argv = os::metered_argv(argv, unit.as_deref(), &exit.with_extension("usage"));
         let full = os::lease_argv(argv, unit.as_deref(), l.kind.nice(), cpus, l.kind.shared().then_some(l.cost), l.ram_max_gb);
-        let mut run_cmd = std::process::Command::new(&full[0]);
+        let wrapper = os::hub_program(&full[0], &hub_path).map_err(|e| format!("launch under {id}: {e}"))?;
+        let mut run_cmd = std::process::Command::new(wrapper);
         run_cmd.args(&full[1..]).stdin(std::process::Stdio::null()).stdout(out.try_clone().map_err(|e| e.to_string())?).stderr(out);
         if let Some(dir) = cmd.get_current_dir() { run_cmd.current_dir(dir); }
-        for (k, v) in cmd.get_envs() {
+        for (k, v) in cmd.get_envs().filter(|(k, _)| own_path.is_none() || *k != "PATH") {
             match v { Some(v) => { run_cmd.env(k, v); }, None => { run_cmd.env_remove(k); } }
         }
+        // (the wrappers inside the first one find theirs on it too)
+        if own_path.is_some() { run_cmd.env("PATH", &hub_path); }
         // what it starts carries the lease's mark, as a run's processes do ([`Exec::run_env`])
         run_cmd.env(LEASE_ENV, lease_mark(&self.state, id));
         if let Some(outer) = std::env::var_os(LEASE_OUTER_ENV).or_else(|| std::env::var_os(LEASE_ENV)) {
             run_cmd.env(LEASE_OUTER_ENV, outer);
         }
-        let (mut child, hold) = os::lease_spawn(&mut run_cmd, Some(&exit)).map_err(|e| format!("launch under {id}: {}: {e}", full[0]))?;
-        let pid = child.id();
-        let now = crate::proto::wall_ms();
-        let run = Arc::new(Run { request: String::new(), started_ms: now, spawned_ms: now, ended_ms: AtomicU64::new(0), n, pid, start: os::proc_start(pid).unwrap_or(0), unit, log: log.to_path_buf(), exit: Mutex::new(None), ours: true, detachable: false, hold, exit_file: exit, cache: Mutex::new(None), usage: Mutex::new(Usage::default()), stopped: AtomicBool::new(false) });
-        l.runs.push(run.clone());
-        self.save(l);
-        drop(leases);
-        let waited = run.clone();
-        let _ = std::thread::Builder::new().name("devhub-launch-wait".into()).spawn(move || {
+        // Start the waiter before the process: a thread spawn error leaves no child to reap,
+        // and a process spawn error closes the channel so the waiter exits too.
+        let (tx, rx) = std::sync::mpsc::sync_channel::<(std::process::Child, Arc<Run>)>(1);
+        std::thread::Builder::new().name("devhub-launch-wait".into()).spawn(move || {
+            let Ok((mut child, waited)) = rx.recv() else { return };
             let code = match os::wait_usage(&mut child) {
                 Ok((status, cpu, maxrss)) => { waited.reaped(cpu, maxrss); os::exit_code(status) }
                 Err(_) => -1,
@@ -2149,7 +2161,15 @@ impl Exec {
             waited.ended_ms.store(crate::proto::wall_ms(), Ordering::Release);
             waited.finished(code);
             ended(waited.app_pid().unwrap_or(0), code);
-        });
+        }).map_err(|e| format!("launch under {id}: cannot start its waiter: {e}"))?;
+        let (child, hold) = os::lease_spawn(&mut run_cmd, Some(&exit)).map_err(|e| format!("launch under {id}: {}: {e}", full[0]))?;
+        let pid = child.id();
+        let now = crate::proto::wall_ms();
+        let run = Arc::new(Run { request: String::new(), started_ms: now, spawned_ms: now, ended_ms: AtomicU64::new(0), n, pid, start: os::proc_start(pid).unwrap_or(0), unit, log: log.to_path_buf(), exit: Mutex::new(None), ours: true, detachable: false, hold, exit_file: exit, cache: Mutex::new(None), usage: Mutex::new(Usage::default()), stopped: AtomicBool::new(false) });
+        l.runs.push(run.clone());
+        self.save(l);
+        drop(leases);
+        tx.send((child, run.clone())).expect("the launch waiter receives its child");
         // the wrapper writes the pid of what it started at once (Linux: after systemd-run made its scope)
         loop {
             if let Some(app) = run.app_pid() {
@@ -5291,6 +5311,73 @@ mod tests {
         let e = y.handle("lease-end", "L4 released");
         assert!(e[0].contains(&format!("{app}")), "{e:?}");
         assert!(!os::same(app, started), "its lease's end ended it");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A launch whose wrapper cannot start, or ends before it reports the app's pid, answers an
+    /// error at once. The hub finds its wrappers on its own PATH ([`Opts::path`], here a private
+    /// one), never on the command's: the test set the command's PATH, the JIT's std searched the
+    /// hub's, found the box's `sh`, and the launch started (11-05). The command's own PATH is
+    /// its own lookup's.
+    #[cfg(unix)]
+    #[test]
+    fn a_launch_that_cannot_start_returns_an_error() {
+        use std::os::unix::fs::PermissionsExt;
+        let script = |path: &Path, body: &str| {
+            std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        };
+        let launch = |x: &Arc<Exec>, cmd: std::process::Command, log: PathBuf| {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let (ended_tx, ended_rx) = std::sync::mpsc::channel();
+            let y = Arc::clone(x);
+            let worker = std::thread::spawn(move || {
+                let _ = tx.send(y.launch("F1", &cmd, &log, Box::new(move |app, code| { let _ = ended_tx.send((app, code)); })));
+            });
+            let result = rx.recv_timeout(Duration::from_secs(5)).expect("a launch answers without waiting on its app");
+            worker.join().unwrap();
+            (result, ended_rx)
+        };
+        let start = r#"{"id":"F1","lane":"b","kind":"timed","rev":null}"#;
+        let bin = std::env::temp_dir().join(format!("devhub-exec-launch-error-{}", std::process::id())).join("bin");
+        let (x, base, _) = test_exec("launch-error", Opts { scopes: Some(false), path: Some(bin.clone().into_os_string()), ..Opts::default() });
+        std::fs::create_dir_all(&bin).unwrap();
+        assert!(!x.handle("lease-start", start)[0].starts_with("{\"err\""));
+        // the command's PATH holds a wrapper that would start: the hub's has none
+        let decoy = base.join("decoy");
+        std::fs::create_dir_all(&decoy).unwrap();
+        script(&decoy.join("sh"), "exec /bin/sh \"$@\"");
+        let mut cmd = std::process::Command::new("true");
+        cmd.env("PATH", &decoy).current_dir(&base);
+        let (result, _) = launch(&*x, cmd, base.join("launch.log"));
+        let error = result.unwrap_err();
+        assert!(error.starts_with("launch under F1: sh: not on the hub's PATH"), "{error}");
+        assert!(x.leases.lock().unwrap()["F1"].runs.is_empty(), "a wrapper that never started records no run");
+        // a wrapper that ends before it reports the app's pid
+        script(&bin.join("sh"), "exit 7");
+        let mut cmd = std::process::Command::new("true");
+        cmd.current_dir(&base);
+        let (result, ended) = launch(&*x, cmd, base.join("launch.log"));
+        let error = result.unwrap_err();
+        assert!(error.starts_with("launch under F1:") && error.contains("exit 7"), "the wrapper's exit is said: {error}");
+        assert_eq!(ended.recv_timeout(Duration::from_secs(5)).unwrap(), (0, 7));
+        drop(x);
+        let _ = std::fs::remove_dir_all(&base);
+
+        // on the hub's PATH the wrappers start; the command finds what it runs on its own PATH
+        let (x, base, _) = test_exec("launch-path", Opts { scopes: Some(false), ..Opts::default() });
+        std::fs::create_dir_all(&base).unwrap();
+        assert!(!x.handle("lease-start", start)[0].starts_with("{\"err\""));
+        let own = base.join("own");
+        std::fs::create_dir_all(&own).unwrap();
+        script(&own.join("devhub-test-app"), &format!("echo found > {}", base.join("found").display()));
+        let mut cmd = std::process::Command::new("devhub-test-app");
+        cmd.env("PATH", &own).current_dir(&base);
+        let (result, ended) = launch(&*x, cmd, base.join("launch.log"));
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(ended.recv_timeout(Duration::from_secs(10)).map(|(_, code)| code), Ok(0), "{:?}", std::fs::read_to_string(base.join("launch.log")));
+        assert_eq!(std::fs::read_to_string(base.join("found")).unwrap(), "found\n");
+        drop(x);
         let _ = std::fs::remove_dir_all(&base);
     }
 

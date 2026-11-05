@@ -2703,6 +2703,26 @@ impl Sched {
         Some(cost)
     }
 
+    /// `devhub stats cores`: each box's cores as charged past its cores in the last hour, from its
+    /// pressure samples (one a caps report): the share of samples over and the peak. Charged as the
+    /// grants count it (a live session between calls at its idle share, a hub build at its charge),
+    /// not leases' sizes summed: that counted idle sessions whole (11-05).
+    pub fn cores_over(&self, now: u64) -> String {
+        let since = now.saturating_sub(3_600_000);
+        let oldest = self.nodes.values().filter_map(|n| n.pressure.iter().find(|s| s.t_ms >= since)).map(|s| s.t_ms).min();
+        let Some(oldest) = oldest else { return "cores charged past a box's cores: no samples in the last hour\n".to_string() };
+        let mut out = format!("cores charged past each box's cores, the last {} min:\n", now.saturating_sub(oldest).div_ceil(60_000));
+        for (name, n) in &self.nodes {
+            let Some(c) = n.caps.as_ref() else { continue };
+            let xs: Vec<f32> = n.pressure.iter().filter(|s| s.t_ms >= since).map(|s| s.res_cores).collect();
+            if xs.is_empty() { continue; }
+            let over = xs.iter().filter(|r| **r as f64 > c.cores as f64).count();
+            let peak = xs.iter().copied().fold(0.0, f32::max);
+            out.push_str(&format!("  {name}: {}% of {} samples over, peak {peak:.0} of {}\n", over * 100 / xs.len(), xs.len(), c.cores));
+        }
+        out
+    }
+
     /// Each node's pressure samples since `since`, oldest first (the panel's view).
     pub fn pressure_since(&self, since: u64) -> Vec<(String, Vec<super::panel::Sample>)> {
         self.nodes.iter().map(|(name, n)| (name.clone(), n.pressure.iter().filter(|s| s.t_ms >= since).copied().collect())).collect()
@@ -2733,12 +2753,27 @@ impl Sched {
         let (in_use, measured) = self.cores_in_use(name, cores - l.cost.cores + self.charged(l).cores, others);
         let in_use = in_use - self.charged(l).cores;
         if in_use + l.cost.cores > c.cores as f64 {
-            let how = if measured { " (the box measured busy)" } else { "" };
-            return Err(format!("{name}: budget cores {}, in use {in_use:.0}{how}, asked {:.0}", c.cores, l.cost.cores));
+            // why its box's room for a call was not enough ([`Self::call_room`]): another session's
+            // call took it, or the box measured busy, or neither (the room is too small)
+            let calling: Vec<&str> = self.live_on_node(name, id).filter(|r| self.is_live_job(r) && !self.live_idle.contains(&r.id)).map(|r| r.id.as_str()).collect();
+            let why = if measured { "the box measured busy".to_string() }
+                else if !calling.is_empty() { format!("beside the call of {}", calling.join(", ")) }
+                else { "beside the work granted there".to_string() };
+            return Err(format!("{name}: budget cores {}, in use {in_use:.0}, asked {:.0}: {why}", c.cores, l.cost.cores));
         }
         let budget = l.req.ram_budget(c);
         if ram > budget { return Err(format!("{name}: budget ram {budget:.1} GB, in use {:.1} GB, asked {:.1} GB ({})", ram - l.cost.ram_gb, l.cost.ram_gb, l.req.ram_budget_why(c))); }
         Ok(())
+    }
+
+    /// The cores a box keeps for a call of its idle live sessions: the largest one's full charge
+    /// back, its cost past its idle share. Work granted beside idle sessions filled their box, and
+    /// a call then ran past the box's cores (a box over them 30% of an hour, 11-05) or would have
+    /// waited for that work to end (a median 40 s on that box). Two calls at once: the second waits
+    /// for the first. `except`: the lease asking; `removed`: sessions parking to make room.
+    fn call_room(&self, name: &str, except: &str, removed: &[String]) -> f64 {
+        self.live_on_node(name, except).filter(|r| !removed.contains(&r.id) && self.is_live_job(r) && self.live_idle.contains(&r.id))
+            .map(|r| (r.cost.cores - self.charged(r).cores).max(0.0)).fold(0.0, f64::max)
     }
 
     fn warm_on(&self, name: &str, l: &Lease) -> bool {
@@ -2894,12 +2929,14 @@ impl Sched {
         // (parking `removed` frees what they were charged: the box's measure still holds their use)
         let (in_use, measured) = self.cores_in_use(name, used.cores, running && removed.is_empty() && !held.is_empty());
         let measured = if measured { format!(" (the box measured busy; charged {:.0})", used.cores) } else { String::new() };
-        for (what, have, total, add) in [("cores", in_use, c.cores as f64, cost.cores), ("ram", used.ram_gb, l.req.ram_budget(c), cost.ram_gb), ("gpu", used.gpus as f64, c.gpus.len() as f64, cost.gpus as f64)] {
+        let room = if running { self.call_room(name, &l.id, removed) } else { 0.0 };
+        let kept = if room > 0.0 { format!(", kept for a live call {room:.0}") } else { String::new() };
+        for (what, have, total, add) in [("cores", in_use + room, c.cores as f64, cost.cores), ("ram", used.ram_gb, l.req.ram_budget(c), cost.ram_gb), ("gpu", used.gpus as f64, c.gpus.len() as f64, cost.gpus as f64)] {
             if have + add > total {
                 let reason = if what == "ram" {
                     format!("budget ram {total:.1} GB, in use {have:.1} GB, asked {add:.1} GB ({}){hub}", l.req.ram_budget_why(c))
                 } else if what == "cores" {
-                    format!("budget cores {total:.0}, in use {have:.0}{measured}, asked {add:.0}{hub}")
+                    format!("budget cores {total:.0}, in use {:.0}{measured}{kept}, asked {add:.0}{hub}", have - room)
                 } else {
                     format!("budget {what} {total:.0}, in use {have:.0}, asked {add:.0}{hub}")
                 };
@@ -6353,6 +6390,56 @@ mod tests {
         busy.cpu_pct = Some(50.0);
         s.set_caps("a", busy, 2);
         assert_eq!(grants(&s.tick(2)), vec![second], "8 measured and 4 asked fit");
+    }
+
+    /// A live session's call is admitted like a lease, never past its box's cores, and the box
+    /// keeps room for one call of its largest idle session. Work granted beside idle sessions
+    /// filled their box and their calls were taken anyway: a box was over its cores 30% of an hour
+    /// (11-05). A second call at once waits for the first, as does one on a box measured busy.
+    #[test]
+    fn a_live_call_never_runs_past_its_box_and_the_box_keeps_it_room() {
+        let mut busy = caps(16, 64.0, Role::Pool);
+        let mut s = sched(&[("a", busy.clone())]);
+        let overlay = |lane: &str, live: bool, cores: f64| {
+            let mut r = req(lane, Kind::Test, None);
+            r.src = Src::Overlay;
+            r.rev = Some(format!("work@{}", "a".repeat(40)));
+            (r.live, r.cores) = (live, Some(cores));
+            r
+        };
+        let sessions: Vec<String> = (0..2).map(|i| s.request(overlay(&format!("live-W{i}"), true, 6.0), 0)).collect();
+        assert_eq!(grants(&s.tick(0)), sessions);
+        s.live_idle.extend(sessions.iter().cloned());
+        // two idle sessions charged a core each, and 5 kept for a call: 8 fit, then 4 more do not
+        let work = s.request(overlay("work", false, 8.0), 1);
+        assert_eq!(grants(&s.tick(1)), vec![work.clone()]);
+        let more = s.request(overlay("more", false, 4.0), 2);
+        assert!(grants(&s.tick(2)).is_empty());
+        assert_eq!(state(&s, &more), ("queued".to_string(), "budget cores 16, in use 10, kept for a live call 5, asked 4".to_string()));
+        // a call takes the room kept for it; a second at once waits for the first
+        assert_eq!(s.live_room(&sessions[0]), Ok(()));
+        s.live_idle.remove(&sessions[0]);
+        assert_eq!(s.live_room(&sessions[1]), Err(format!("a: budget cores 16, in use 14, asked 6: beside the call of {}", sessions[0])));
+        assert!(grants(&s.tick(3)).is_empty(), "nothing more fits while it calls");
+        s.live_idle.insert(sessions[0].clone());
+        assert_eq!(s.live_room(&sessions[1]), Ok(()));
+        // a box measured busy: the call waits, and says so
+        busy.cpu_pct = Some(95.0);
+        s.set_caps("a", busy, 4);
+        assert_eq!(s.live_room(&sessions[1]), Err("a: budget cores 16, in use 14, asked 6: the box measured busy".to_string()));
+        invariants(&s);
+    }
+
+    /// `devhub stats cores` says each box's charged cores past its cores in the last hour.
+    #[test]
+    fn stats_cores_says_each_box_over_its_cores() {
+        let mut s = sched(&[("a", caps(16, 64.0, Role::Pool))]);
+        s.nodes.get_mut("a").unwrap().pressure.clear();
+        assert_eq!(s.cores_over(0), "cores charged past a box's cores: no samples in the last hour\n");
+        let sample = |t_ms: u64, res_cores: f32| super::super::panel::Sample { t_ms, res_cores, ..super::super::panel::Sample::of(t_ms, &caps(16, 64.0, Role::Pool), Cost { cores: 0.0, ram_gb: 0.0, disk_gb: 0.0, gpus: 0 }) };
+        s.nodes.get_mut("a").unwrap().pressure.extend([sample(0, 20.0), sample(1_000_000, 18.0), sample(2_000_000, 12.0), sample(3_000_000, 16.0)]);
+        // the first sample is older than the hour
+        assert_eq!(s.cores_over(3_700_000), "cores charged past each box's cores, the last 45 min:\n  a: 33% of 3 samples over, peak 18 of 16\n");
     }
 
     /// Busy nodes wait; after pressure clears the warm and longest-idle preferences apply.

@@ -399,17 +399,18 @@ fn rows_of(home: &Path, name: &str) -> Vec<Value> {
         .filter(|v| v.get("bucket").and_then(Value::as_str) == Some(name)).collect()
 }
 
-/// The units whose last look ended in a failure, by package, with who broke them. A run that
-/// never looked at a unit says nothing about it: one whose diff touched nothing said ok and a
-/// real failure looked fixed (11-04). `rows`: the bucket's rows, newest first.
-fn still_failing(rows: &[Value]) -> BTreeMap<String, (String, String)> {
+/// The units whose last look ended in a failure, by package, with who broke them and the log of
+/// that look. A run that never looked at a unit says nothing about it: one whose diff touched
+/// nothing said ok and a real failure looked fixed (11-04). `rows`: the bucket's rows, newest first.
+fn still_failing(rows: &[Value]) -> BTreeMap<String, (String, String, String)> {
     let (mut settled, mut out) = (BTreeSet::new(), BTreeMap::new());
     for (i, row) in rows.iter().enumerate() {
         for unit in row.get("failing").and_then(Value::as_arr).unwrap_or_default().iter().filter_map(Value::as_str).filter(|u| is_unit(u)) {
             let key = unit_key(unit);
             if settled.contains(&key) { continue; }
             let who = origin(&rows[i..], &key);
-            out.insert(key, (unit.to_string(), who));
+            let log = row.get("log").and_then(Value::as_str).unwrap_or("").to_string();
+            out.insert(key, (unit.to_string(), who, log));
         }
         settled.extend(out.keys().cloned());
         settled.extend(row.get("passed").and_then(Value::as_arr).unwrap_or_default().iter().filter_map(Value::as_str).map(str::to_string));
@@ -421,7 +422,7 @@ fn still_failing(rows: &[Value]) -> BTreeMap<String, (String, String)> {
 /// the units still failing and, after a step that failed with no unit to name (the JIT that did not
 /// build), `steps`: the gate takes the JIT even if every unit is proven.
 fn retry_env(rows: &[Value]) -> String {
-    let mut units: Vec<String> = still_failing(rows).into_values().map(|(unit, _)| unit).collect();
+    let mut units: Vec<String> = still_failing(rows).into_values().map(|(unit, _, _)| unit).collect();
     let step = rows.first().and_then(|r| r.get("failing")).and_then(Value::as_arr).unwrap_or_default().iter().filter_map(Value::as_str).any(|u| !is_unit(u));
     if step { units.push("steps".to_string()); }
     format!("GATE_RETRY={}", units.join(";"))
@@ -433,7 +434,9 @@ pub fn status(home: &Path) -> Vec<String> {
     for name in RERUNS {
         let still = still_failing(&rows_of(home, name));
         if still.is_empty() { continue; }
-        out.push(obj(vec![("still_failing", s(name)), ("units", Value::Obj(still.into_values().map(|(unit, who)| (unit, s(&who))).collect()))]).to_json());
+        // and where each failed last: a green kept log beside a red bucket read as a miscount (11-05)
+        out.push(obj(vec![("still_failing", s(name)), ("units", Value::Obj(still.values().map(|(unit, who, _)| (unit.clone(), s(who))).collect())),
+            ("logs", Value::Obj(still.into_values().map(|(unit, _, log)| (unit, s(&log))).collect()))]).to_json());
     }
     out.extend(ledger(home, 10));
     out
@@ -475,8 +478,8 @@ fn judge(name: &str, home: &Path, repo: &Path, store: &Store, emit: &dyn Fn(Sev,
     let earlier = rows_of(home, name);
     let carried = carried_since(&earlier, &outcome.failing, &errors);
     // what this run did not get to (a gate that stopped at the JIT): red still, whatever else it says
-    let still: BTreeMap<String, String> = if RERUNS.contains(&name) {
-        still_failing(&earlier).into_iter().filter(|(key, _)| !passed.contains(key) && !outcome.failing.iter().any(|u| unit_key(u) == *key)).map(|(_, open)| open).collect()
+    let still: BTreeMap<String, (String, String)> = if RERUNS.contains(&name) {
+        still_failing(&earlier).into_iter().filter(|(key, _)| !passed.contains(key) && !outcome.failing.iter().any(|u| unit_key(u) == *key)).map(|(_, (unit, who, log))| (unit, (who, log))).collect()
     } else { BTreeMap::new() };
     outcome.ok &= still.is_empty();
     let blame: Vec<String> = outcome.failing.iter().filter(|u| !carried.contains_key(*u)).cloned().collect();
@@ -525,7 +528,7 @@ fn judge(name: &str, home: &Path, repo: &Path, store: &Store, emit: &dyn Fn(Sev,
         ("errors", Value::Obj(errors.iter().map(|(u, e)| (u.clone(), Value::Arr(e.iter().map(s).collect()))).collect())),
         ("passed", Value::Arr(passed.iter().map(s).collect())),
         ("carried", Value::Obj(carried.iter().map(|(u, who)| (u.clone(), s(who))).collect())),
-        ("still", Value::Obj(still.iter().map(|(u, who)| (u.clone(), s(who))).collect())),
+        ("still", Value::Obj(still.iter().map(|(u, (who, _))| (u.clone(), s(who))).collect())),
         ("broke", Value::Obj(broke.into_iter().map(|(k, who)| (k, s(who))).collect())),
         ("warned", Value::Obj(warned.iter().map(|(u, w)| (u.clone(), Value::Arr(w.iter().map(|(k, _)| s(k)).collect()))).collect())),
         ("proven", Value::Arr(proven.iter().map(s).collect())),
@@ -547,7 +550,9 @@ fn judge(name: &str, home: &Path, repo: &Path, store: &Store, emit: &dyn Fn(Sev,
     } else {
         let blamed = entries.iter().zip(&units).flat_map(|(e, units)| units.iter().map(move |u| {
             format!("{} ({}) changed {u}", e.label(), e.agent)
-        })).chain(carried.iter().chain(&still).map(|(u, who)| format!("{u} still failing {}", still_since(who)))).collect::<Vec<_>>().join("; ");
+        // each with the log of its last look: this run's when it failed here, else the run that last looked
+        })).chain(carried.iter().map(|(u, who)| (u, who, &outcome.log)).chain(still.iter().map(|(u, (who, log))| (u, who, log)))
+            .map(|(u, who, log)| format!("{u} still failing {} (log {log})", still_since(who)))).collect::<Vec<_>>().join("; ");
         let mut detail = crate::land::failure_lines(&text);
         if let Some(e) = attribution_error { detail.push(e); }
         (Sev::Err, format!("bucket {name} {} FAILED {}: {blamed}{} ({latency}{})", tip.short(), outcome.failing.join(", "), if ambiguous { " (ambiguous)" } else { "" }, outcome.summary), detail.join("\n"))
@@ -872,7 +877,7 @@ mod tests {
         let quiet = row(&[], &["present makepad-app-calculator"], &[]);
         let still = still_failing(&[quiet.clone(), failed.clone()]);
         assert_eq!(still.keys().map(String::as_str).collect::<Vec<_>>(), ["check x", "devhub makepad-devhub", "present p", "tests t"]);
-        assert_eq!(still["check x"], ("check x --also=y".to_string(), "rc-a (A) #970".to_string()), "the unit as it failed, with its flips");
+        assert_eq!((still["check x"].0.as_str(), still["check x"].1.as_str()), ("check x --also=y", "rc-a (A) #970"), "the unit as it failed, with its flips");
         assert_eq!(still["present p"].1, ORIGIN_UNKNOWN);
         assert_eq!(retry_env(&[quiet.clone(), failed.clone()]), "GATE_RETRY=check x --also=y;devhub makepad-devhub;present p;tests t");
         // a pass settles it, also under other flips; an older failure stays settled
@@ -909,6 +914,42 @@ mod tests {
         assert_eq!(still_failing(&[named])["check z"].1, "rc-late (L) #9");
         assert_eq!(still_since(unknown), unknown);
         assert_eq!(still_since("rc-a (A) #9"), "since rc-a (A) #9");
+    }
+
+    /// A unit still failing names the log of its last look, in the bucket's FAILED line and in
+    /// `devhub bucket`'s STILL FAILING: a kept log holding only a green present of the unit, beside
+    /// a red bucket, read as a miscount (11-05).
+    #[test]
+    fn a_still_failing_unit_names_the_log_of_its_last_look() {
+        use crate::proto::Record;
+        let home = std::env::temp_dir().join(format!("devhub-bucket-test-log-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let fed: Arc<Mutex<Vec<Record>>> = Arc::default();
+        let feed = fed.clone();
+        let store = Store::open(&home, "mac", Arc::new(move |r: Record| { feed.lock().unwrap().push(r); 0 })).unwrap();
+        let tip = Pair::new("a1", "b1");
+        let judged = |n: u32, text: &str| {
+            let log = home.join(format!("fast-{n}.log"));
+            std::fs::write(&log, text).unwrap();
+            let outcome = verdict(Ok(Some(if text.contains("NODEGATE-OK") { 0 } else { 1 })), text, &log);
+            judge("fast", &home, &home, &store, &|sev, line, detail| store.event("bucket", sev, line, Some(detail)), 1, None, &tip, |_| Ok(outcome)).unwrap();
+            let red: Vec<String> = fed.lock().unwrap().drain(..).filter(|r| r.kind == "bucket" && r.sev == Sev::Err).map(|r| r.line).collect();
+            (log.display().to_string(), red)
+        };
+        let failed = "/n/tree/a/src/s.rs:134:12: warning: method `s` is never used [dead_code]\nf: 1 warnings\nGATEUNIT fail check f\nNODEGATE-FAIL: f-warnings\n";
+        let (first, _) = judged(1, failed);
+        // a run that did not look at it: red, with the log of the run that did
+        let (_, quiet) = judged(2, "GATEUNIT ok check c\nNODEGATE-OK\n");
+        assert_eq!(quiet.len(), 1, "{quiet:?}");
+        assert!(quiet[0].contains(&format!("check f still failing origin unknown, first failed in fast-1.log (log {first})")), "{}", quiet[0]);
+        // failing again: this run's log
+        let (third, again) = judged(3, failed);
+        assert!(again[0].contains(&format!("check f still failing origin unknown, first failed in fast-1.log (log {third})")), "{}", again[0]);
+        let status = status(&home);
+        let still = status.iter().filter_map(|l| makepad_strict_json::parse(l.as_bytes()).ok()).find(|v| v.get("still_failing").is_some()).expect("a STILL FAILING line");
+        assert_eq!(still.get("logs").and_then(|l| l.get("check f")).and_then(Value::as_str), Some(third.as_str()));
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]

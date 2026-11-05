@@ -4569,8 +4569,8 @@ mod tests {
     fn a_shards_log_says_where_its_time_went_and_what_its_jit_did() {
         let smoke = "STEP running apps/x / launch\n  owned x\nSTEP passed apps/x / launch (12.5 s)\nSTEP passed apps/x / comes up (3.0 s)\nSTEP failed apps/x / judge (1.5 s)\n";
         assert_eq!(time_went(smoke, 31.0), "17 s in 3 steps (longest apps/x / launch 12.5 s), 14 s outside them");
-        let tests = "$ cargo run --profile host -q -p makepad-run --bin makepad -- test fab-loose --features x\ndevhub: kept the JIT binary k\n     Running unittests src/lib.rs\ntest result: ok. 7 passed; 0 failed; finished in 4.29s\n     Running tests/plates.rs\ntest result: ok. 8 passed; 0 failed; finished in 10.30s\n== exit 0\n";
-        assert_eq!(time_went(tests, 800.0), "15 s in 2 steps (longest fab-loose tests/plates.rs 10.3 s), 785 s outside them (it built the JIT)");
+        let tests = "$ cargo run --profile host -q -p makepad-run --bin makepad -- test demo-model --features x\ndevhub: kept the JIT binary k\n     Running unittests src/lib.rs\ntest result: ok. 7 passed; 0 failed; finished in 4.29s\n     Running tests/plates.rs\ntest result: ok. 8 passed; 0 failed; finished in 10.30s\n== exit 0\n";
+        assert_eq!(time_went(tests, 800.0), "15 s in 2 steps (longest demo-model tests/plates.rs 10.3 s), 785 s outside them (it built the JIT)");
         assert_eq!(time_went("== exit 0\n", 5.0), "no step times in its log");
         assert_eq!(tool_how("devhub: the JIT is this box's binary k, no cargo\nmakepad 0.1\n"), "the box had it");
         assert_eq!(tool_how("devhub: kept the JIT binary k\nmakepad 0.1\n"), "built");
@@ -4763,9 +4763,6 @@ mod tests {
         assert!(judged(&d.ci, &pair("e"), 0).is_none(), "incomplete is no verdict: the bucket runs it");
     }
 
-    /// A sweep started behind a newer rolling run runs its legs on that run's pair with that
-    /// run's Cargo.lock: a box that ran that run has that tree built and builds nothing new. A leg
-    /// whose crate is gone there keeps the sweep's pair, as does a sweep the rolling run is not
     /// The JIT legs and a lane's JIT pin skip a pair whose JIT inputs did not change: a document no
     /// source of its crate names is none, as for proofs.
     #[test]
@@ -4805,6 +4802,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&repo);
     }
 
+    /// A sweep started behind a newer rolling run runs its legs on that run's pair with that
+    /// run's Cargo.lock: a box that ran that run has that tree built and builds nothing new. A leg
+    /// whose crate is gone there keeps the sweep's pair, as does a sweep the rolling run is not
     /// newer than. A proof names the pair its legs ran; targets that ran at different inputs
     /// prove nothing.
     #[test]

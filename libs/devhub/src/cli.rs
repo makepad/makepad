@@ -820,7 +820,15 @@ fn bucket(c: &Client, args: &[&str]) -> i32 {
             _ => String::new(),
         };
         if let Some(name) = v.get("still_failing").and_then(Value::as_str) {
-            println!("{name} STILL FAILING: {}", since(v.get("units")));
+            // each with the log of its last look, the failure's own lines in it
+            let units = match v.get("units") {
+                Some(Value::Obj(units)) => units.iter().map(|(unit, who)| {
+                    let log = v.get("logs").and_then(|l| l.get(unit)).and_then(Value::as_str).filter(|l| !l.is_empty()).map_or(String::new(), |l| format!("; log {l}"));
+                    format!("{unit} ({}{log})", crate::bucket::still_since(who.as_str().unwrap_or("?")))
+                }).collect::<Vec<_>>().join(", "),
+                _ => String::new(),
+            };
+            println!("{name} STILL FAILING: {units}");
             continue;
         }
         let tip = v.get("tip").map(|p| crate::state::Pair::new(&text(p, "work"), &text(p, "main")).short()).unwrap_or_default();

@@ -737,15 +737,13 @@ impl LeaseMaster {
     }
 
     /// A live session's call starts: its full charge again, if its box has room (`Err`: why
-    /// not; `force`: taken anyway, a call that cannot wait).
-    pub fn live_admit(&self, id: &str, force: bool) -> Result<(), String> {
+    /// not). Never past the box's cores: a call taken anyway ran past them (11-05).
+    pub fn live_admit(&self, id: &str) -> Result<(), String> {
         let mut s = self.sched.lock().unwrap();
         if !s.live_idle.contains(id) {
             return Ok(());
         }
-        if !force {
-            s.live_room(id)?;
-        }
+        s.live_room(id)?;
         s.live_idle.remove(id);
         Ok(())
     }
@@ -1583,7 +1581,11 @@ impl LeaseMaster {
                         Err(e) => out.push(err(&e)),
                     }
                 }
-                _ => out.push(err("stats queue [--hour] | class <kind> <class>...")),
+                ["cores"] => {
+                    let text = self.sched.lock().unwrap().cores_over(now);
+                    out.push(format!("{{\"text\":{}}}", json_str(&text)));
+                }
+                _ => out.push(err("stats queue [--hour] | cores | class <kind> <class>...")),
             },
             "prof" => {
                 let summary = line == "--summary";
