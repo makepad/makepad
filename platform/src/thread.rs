@@ -1185,7 +1185,8 @@ pub fn current_class() -> Option<Class> {
 
 /// A job that takes task after task (a crew's helper) gives its worker back at its next task
 /// boundary: a job of a higher class waits in this worker's pool (every worker is busy, so none can
-/// admit it until one leaves), or for this job's CPU permit. The rule fan-out helpers follow
+/// admit it until one leaves), or for this job's CPU permit (of a higher class, or the JIT's below
+/// its floor while the machine is full: that one wait ends with the floor met). The rule fan-out helpers follow
 /// (`FanOut::work`): a checkpoint alone yields the permit, never the thread.
 pub fn worker_wanted() -> bool {
     let Some((class, permit)) = JOB.with(|j| j.borrow().as_ref().map(|j| (j.class, j.permit))) else {
@@ -3152,6 +3153,61 @@ mod tests {
         }
     }
 
+    /// `wait_for` that stays awake: under the JIT a thread asleep (on a lock, a channel, the clock, a
+    /// build) lends every CPU token it holds.
+    fn spin_for(what: &str, mut ready: impl FnMut() -> bool) {
+        let deadline = Cx::monotonic_now() + 10.0;
+        while !ready() {
+            assert!(Cx::monotonic_now() < deadline, "timed out waiting for {what}");
+            std::thread::yield_now();
+        }
+    }
+
+    /// CPU tokens a test keeps out of the budget, on a thread of their own that stays awake (see
+    /// `spin_for`): a test's own thread sleeps all the time. Dropped, it gives back what it still
+    /// holds, so a test that failed leaves the budget as it found it.
+    struct HeldTokens {
+        shared: Arc<(AtomicUsize, AtomicBool)>,
+        holder: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl HeldTokens {
+        fn new(count: usize, label: &'static str) -> Self {
+            fn hold(permits: &mut Vec<u32>, keep: &AtomicUsize) -> bool {
+                while permits.len() > keep.load(Ordering::Relaxed) {
+                    makepad_cpu_budget::release(permits.pop().unwrap());
+                }
+                std::thread::yield_now();
+                !permits.is_empty()
+            }
+            let shared = Arc::new((AtomicUsize::new(count), AtomicBool::new(false)));
+            let theirs = shared.clone();
+            let holder = std::thread::spawn(move || {
+                let (keep, held) = &*theirs;
+                let mut permits = Vec::new();
+                // (built before it holds a token: a thread waiting for a build lends them)
+                hold(&mut permits, keep);
+                permits.extend((0..count).map(|_| {
+                    makepad_cpu_budget::admit(makepad_cpu_budget::INTERACTIVE, makepad_cpu_budget::APP, label)
+                }));
+                held.store(true, Ordering::Release);
+                while hold(&mut permits, keep) {}
+            });
+            wait_for("the test's tokens to be held", || shared.1.load(Ordering::Acquire));
+            Self { shared, holder: Some(holder) }
+        }
+        fn give_back_one(&self) {
+            self.shared.0.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+
+    impl Drop for HeldTokens {
+        fn drop(&mut self) {
+            self.shared.0.store(0, Ordering::Relaxed);
+            let _ = self.holder.take().unwrap().join();
+        }
+    }
+
     fn test_pool(workers: usize) -> TaskPool {
         makepad_cpu_budget::end_warmup();
         TaskPool::create(ThreadSpawner::for_current_thread(workers + 1), workers).unwrap()
@@ -4029,13 +4085,11 @@ mod tests {
                         && !caller_started.swap(true, Ordering::Relaxed)
                     {
                         barrier.wait();
-                        let permits: Vec<_> = (helpers + 1..makepad_cpu_budget::cores() as usize).map(|_| {
-                            makepad_cpu_budget::admit(makepad_cpu_budget::INTERACTIVE, makepad_cpu_budget::APP, "batch occupancy")
-                        }).collect();
+                        let held = HeldTokens::new((makepad_cpu_budget::cores() as usize).saturating_sub(helpers + 1), "batch occupant");
                         let (release, released) = mpsc::channel();
                         let waiter = std::thread::spawn(move || {
                             let permit = makepad_cpu_budget::admit(makepad_cpu_budget::VISIBLE, makepad_cpu_budget::APP, "batch waiter");
-                            released.recv().unwrap();
+                            let _ = released.recv();
                             makepad_cpu_budget::release(permit);
                         });
                         let permit = JOB.with(|j| j.borrow().as_ref().unwrap().permit.unwrap());
@@ -4055,16 +4109,14 @@ mod tests {
                                 .count()
                                 == 1
                         });
-                        for permit in permits { makepad_cpu_budget::release(permit); }
+                        drop(held);
                         release.send(()).unwrap();
                         waiter.join().unwrap();
                     } else if std::thread::current().id() != caller
                         && arrived.fetch_add(1, Ordering::SeqCst) < helpers
                     {
                         barrier.wait();
-                        while !pressure_ready.load(Ordering::Acquire) {
-                            std::thread::yield_now();
-                        }
+                        spin_for("the pressure on the batch", || pressure_ready.load(Ordering::Acquire));
                     }
                 });
                 // The contract: every index ran exactly once and the caller returned (here). The
@@ -4127,15 +4179,7 @@ mod tests {
     #[test]
     fn admission_waiters_leave_a_worker_for_higher_classes() {
         let _serial = POOL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
-        let permits: Vec<_> = (0..makepad_cpu_budget::cores())
-            .map(|_| {
-                makepad_cpu_budget::admit(
-                    makepad_cpu_budget::INTERACTIVE,
-                    makepad_cpu_budget::APP,
-                    "admission gate",
-                )
-            })
-            .collect();
+        let held = HeldTokens::new(makepad_cpu_budget::cores() as usize, "admission gate");
         let pool = test_pool(3);
         let (began, started) = mpsc::channel();
         let bg = pool.submit(Class::Background, || ()).unwrap();
@@ -4152,13 +4196,10 @@ mod tests {
         wait_for("Interactive admission waiter", || {
             pool.inner.state.lock().unwrap().waiting[0]
         });
-        let mut permits = permits;
-        makepad_cpu_budget::release(permits.pop().unwrap());
+        held.give_back_one();
         started.recv_timeout(Duration::from_secs(5)).unwrap();
         worker_join(interactive).unwrap();
-        for permit in permits {
-            makepad_cpu_budget::release(permit);
-        }
+        drop(held);
         worker_join(visible).unwrap();
         worker_join(bg).unwrap();
         worker_join(pool.shutdown_pool(ShutdownMode::Drain)).unwrap();
@@ -4171,15 +4212,7 @@ mod tests {
         if makepad_cpu_budget::cores() < 2 {
             return;
         }
-        let permits: Vec<_> = (2..makepad_cpu_budget::cores())
-            .map(|_| {
-                makepad_cpu_budget::admit(
-                    makepad_cpu_budget::INTERACTIVE,
-                    makepad_cpu_budget::APP,
-                    "scope gate",
-                )
-            })
-            .collect();
+        let held = HeldTokens::new(makepad_cpu_budget::cores() as usize - 2, "scope gate");
         let pool = test_pool(3);
         let child_pool = pool.clone();
         let job = pool
@@ -4204,9 +4237,7 @@ mod tests {
             })
             .unwrap();
         worker_join(job).unwrap();
-        for permit in permits {
-            makepad_cpu_budget::release(permit);
-        }
+        drop(held);
         worker_join(pool.shutdown_pool(ShutdownMode::Drain)).unwrap();
     }
 

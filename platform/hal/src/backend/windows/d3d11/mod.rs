@@ -145,7 +145,6 @@ impl D3d11 {
             storage_formats: (0..format::COUNT).filter(|f| device::dxgi(*f).is_some_and(|fmt| unsafe { dev.device.CheckFormatSupport(fmt.resource) }.unwrap_or(0) & 0x02000000 != 0)).fold(0, |bits, f| bits | (1u64 << f)),
             max_texture: 16384,
             max_window: [16384, 16384],
-            // the D3D11 functional spec's texture filtering precision
             max_buffer: (u32::MAX as u64) & !15,
             working_set: budget,
             ..Default::default()

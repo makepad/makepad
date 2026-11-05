@@ -30,7 +30,9 @@ fn main() {
     let ready = Arc::new(AtomicUsize::new(0));
     let start = Arc::new(std::sync::OnceLock::<Instant>::new());
     let mut jobs = Vec::new();
-    for seed in 0..pool.worker_count().saturating_sub(2).max(1) {
+    // as many as Background may run at once: the rest would wait for a permit and never start
+    let burners = pool.worker_count().saturating_sub(2).max(1).min(makepad_cpu_budget::background_limit() as usize);
+    for seed in 0..burners {
         let ready = ready.clone();
         let start = start.clone();
         jobs.push(
@@ -53,7 +55,7 @@ fn main() {
         );
     }
     let startup_deadline = Instant::now() + Duration::from_secs(10);
-    while ready.load(Ordering::Acquire) != pool.worker_count().saturating_sub(2).max(1) {
+    while ready.load(Ordering::Acquire) != burners {
         assert!(Instant::now() < startup_deadline, "workers did not start");
         std::thread::sleep(Duration::from_millis(1));
     }
@@ -69,7 +71,7 @@ fn main() {
     let p95 = samples[(samples.len() * 95 / 100).min(samples.len() - 1)];
     println!("pool_latency mode={} logical={} background={} workers={} duration_s=4 samples={} wake_ms_p50={:.3} wake_ms_p95={p95:.3} wake_ms_max={:.3}",
         if baseline { "baseline" } else { "gate" }, std::thread::available_parallelism().unwrap(),
-        pool.worker_count().saturating_sub(2).max(1), pool.worker_count(), samples.len(), samples[samples.len()/2], samples[samples.len()-1]);
+        burners, pool.worker_count(), samples.len(), samples[samples.len()/2], samples[samples.len()-1]);
     let mut shutdown = pool.shutdown(ShutdownMode::Drain);
     let shutdown_deadline = Instant::now() + Duration::from_secs(10);
     while shutdown.try_take().is_none() {

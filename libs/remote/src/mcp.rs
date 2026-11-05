@@ -10,7 +10,7 @@
 //! `--caller-env NAME` passes the capability in that environment variable with every call (an
 //! agent lane's `MAKEPAD_SCOPE_MCP_TOKEN`); the app checks it.
 //!
-//! The target is a pid, an app name or `<host>:<app|pid>` (through the hub). With `--launch
+//! The target is a pid, an app name or `<host>:<pid>` (through the hub). With `--launch
 //! <program> [args..]` an app that is not running is started (detached) when a request needs it.
 
 use crate::conn::{Event, CLOSE_LINK_LOST, CLOSE_NORMAL};
@@ -240,7 +240,7 @@ fn connect(target: &str) -> Result<Client, String> {
         #[cfg(not(unix))]
         return Err("remote hosts are not available on this platform yet".into());
     }
-    let c = Client::connect(target).map_err(|e| e.to_string())?;
+    let c = Client::connect_as(target, &crate::discovery::Caller::set_up_for_app()).map_err(|e| e.to_string())?;
     c.set_timeout(Some(CALL_WAIT));
     Ok(c)
 }

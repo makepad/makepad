@@ -388,6 +388,7 @@ impl Vulkan {
         // what the driver says this process holds (VK_EXT_memory_budget), `None` without it
         let device = self.dev.memory_budget(false).map(|b| b.process);
         self.dev.pools.set_count(crate::ledger::Pool::CommandBuffers, self.spares.slots());
+        self.dev.pools.set_count(crate::ledger::Pool::DescriptorPools, self.spares.descriptor_pools());
         if let Some(host) = world.session_mut(HOST) {
             let frame = host.frame;
             host.ledger.set_pools(&self.dev.pools, frame, now);

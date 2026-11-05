@@ -106,7 +106,7 @@ mod imp {
             crate::cmd::json_str(&sock.display().to_string()),
             crate::cmd::wall_ms(),
             caps.join(","),
-            extra
+            format!("{extra}{}", crate::discovery::lease_field())
         );
         let _ = std::fs::write(&disc, info);
         ep.set_discovery(disc.clone());
@@ -182,7 +182,7 @@ mod imp {
             crate::cmd::json_str(&token),
             crate::cmd::wall_ms(),
             caps.join(","),
-            extra
+            format!("{extra}{}", crate::discovery::lease_field())
         );
         std::fs::write(paths(pid).1, info)?;
         ep.set_discovery(paths(pid).1);

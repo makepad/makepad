@@ -1,5 +1,65 @@
 //! Finding running endpoints by their discovery files (`makepad-remote-<pid>.json` in the user's
 //! registry dir, [`registry_dir`]). Files of processes that ended are removed when listed.
+//!
+//! A pid says which process is meant. A bare name or `all` does not: on a machine where someone
+//! works it would pick their app (one that drives a real printer, say) for whoever mistypes a
+//! command. So those reach only what the [`Caller`] started, and everything else is named by pid.
+
+/// Marks every process a lease's runs start: a process that moved to its own session is still
+/// stopped with the lease, a WM with it is a lane's test desktop, not its node's, and an app with
+/// it says so in its discovery file (`lease`), which makes it that lease's own.
+pub const LEASE_ENV: &str = "MAKEPAD_DEVHUB_LEASE";
+
+/// Who asks for an app without saying which one.
+pub struct Caller {
+    /// may reach any app by name
+    any: bool,
+    lease: Option<String>,
+}
+
+impl Caller {
+    /// A program, which reaches by name only what its own lease started.
+    pub fn program() -> Caller {
+        Caller { any: false, lease: own_lease() }
+    }
+
+    /// A command line. Someone typing at a terminal sees what they mean; an agent's shell has no
+    /// terminal, and one that does still has `DEVHUB_AGENT`. So nothing here can be set to reach
+    /// further, only to reach less.
+    pub fn command_line() -> Caller {
+        use std::io::IsTerminal;
+        Caller { any: std::io::stdin().is_terminal() && std::env::var_os("DEVHUB_AGENT").is_none(), lease: own_lease() }
+    }
+
+    /// An adapter set up once for one app (`makepad-remote mcp <app> --launch ..`, an installed
+    /// bundle): the name is its configuration, not a command somebody typed.
+    pub fn set_up_for_app() -> Caller {
+        Caller { any: true, lease: None }
+    }
+
+    /// Whether `app` is one this caller may reach without naming its pid.
+    pub fn reaches(&self, app: &App) -> bool {
+        self.any || (self.lease.is_some() && app.text("lease") == self.lease)
+    }
+
+    /// Why `all` is refused: with no lease and no terminal it has no apps of its own to mean.
+    pub fn all_refused(&self, list: &[App]) -> Option<String> {
+        if self.any || self.lease.is_some() {
+            return None;
+        }
+        let there: Vec<String> = list.iter().map(|a| format!("{} {}", a.pid, a.app)).collect();
+        Some(format!("`all` would reach every app here ({}), and this command started none of them. Say which you mean: a pid", there.join(", ")))
+    }
+}
+
+fn own_lease() -> Option<String> {
+    std::env::var(LEASE_ENV).ok().filter(|l| !l.is_empty())
+}
+
+/// This process's `,"lease":..` discovery field (none outside a lease).
+pub(crate) fn lease_field() -> String {
+    own_lease().map_or(String::new(), |l| format!(",\"lease\":{}", crate::cmd::json_str(&l)))
+}
 
 
 #[derive(Debug, Clone)]
@@ -244,17 +304,87 @@ pub fn apps_in(registry: &std::path::Path) -> Vec<App> {
     out
 }
 
-/// `spec` is a pid (of the process or the parent it stands behind: [`App::answers_to`]), an app name (of several with that name the most recent: highest pid) or a
+/// The running endpoint of `pid`, or of the parent it stands behind: [`App::answers_to`].
+pub fn by_pid(pid: u32) -> Option<App> {
+    apps().into_iter().find(|a| a.answers_to(pid))
+}
+
+/// The app `name` reaches for `caller`: of several with that name the most recent (highest pid)
+/// it may reach.
+/// Err: no app has that name, or the one it would reach is not this caller's, and says which.
+pub fn named(list: &[App], name: &str, caller: &Caller) -> Result<App, String> {
+    let same: Vec<&App> = list.iter().filter(|a| a.app == name).collect();
+    if let Some(a) = same.iter().rev().find(|a| caller.reaches(a)) {
+        return Ok((*a).clone());
+    }
+    let Some(newest) = same.last() else { return Err(no_endpoint(name)) };
+    let mins = crate::cmd::wall_ms().saturating_sub(newest.started_ms) / 60_000;
+    let more = match same.len() {
+        1 => String::new(),
+        n => format!(", the newest of {n}"),
+    };
+    Err(format!(
+        "`{name}` would reach pid {} (running {mins} min{more}), which this command did not start. Say which you mean: the pid in place of the name, `<node>:<pid>` for another machine; `list` shows them",
+        newest.pid
+    ))
+}
+
+fn no_endpoint(spec: &str) -> String {
+    format!("no running makepad-remote endpoint `{spec}`")
+}
+
+/// `spec` is a pid, an app name for `caller` ([`named`]), or a
 /// `tcp:` socket a discovery file names.
-pub fn find(spec: &str) -> Option<App> {
+pub fn find(spec: &str, caller: &Caller) -> Result<App, String> {
     let list = apps();
     // a loopback endpoint as its discovery file names it (Windows): the file carries its token
     if spec.starts_with("tcp:") {
-        return list.into_iter().rfind(|a| a.socket == spec);
+        return list.into_iter().rfind(|a| a.socket == spec).ok_or_else(|| no_endpoint(spec));
     }
     match spec.parse::<u32>() {
-        Ok(pid) => list.into_iter().find(|a| a.answers_to(pid)),
-        Err(_) => list.into_iter().rfind(|a| a.app == spec),
+        Ok(pid) => list.into_iter().find(|a| a.answers_to(pid)).ok_or_else(|| no_endpoint(spec)),
+        Err(_) => named(&list, spec, caller),
+    }
+}
+
+#[cfg(test)]
+mod caller_tests {
+    use super::{named, parse, App, Caller};
+
+    fn app(pid: u32, name: &str, lease: Option<&str>) -> App {
+        let lease = lease.map_or(String::new(), |l| format!(",\"lease\":\"{l}\""));
+        parse(&format!("{{\"pid\":{pid},\"app\":\"{name}\",\"socket\":\"/s\",\"caps\":[]{lease}}}\n")).unwrap()
+    }
+
+    fn caller(any: bool, lease: Option<&str>) -> Caller {
+        Caller { any, lease: lease.map(str::to_string) }
+    }
+
+    /// An agent's mistyped command on a machine where someone works: it must not reach their app.
+    #[test]
+    fn a_bare_name_refuses_an_app_the_caller_did_not_start_and_says_which() {
+        let list = [app(7, "fab", None), app(9, "fab", Some("L1"))];
+        for who in [caller(false, None), caller(false, Some("L2"))] {
+            let why = named(&list, "fab", &who).unwrap_err();
+            assert!(why.contains("pid 9") && why.contains("newest of 2") && why.contains("the pid in place of the name"), "{why}");
+        }
+        assert!(named(&[app(7, "fab", None)], "fab", &caller(false, None)).unwrap_err().contains("would reach pid 7"));
+        assert!(named(&[], "fab", &caller(false, None)).unwrap_err().contains("no running"));
+    }
+
+    #[test]
+    fn a_lease_reaches_its_own_by_name_and_a_person_the_newest() {
+        let list = [app(7, "fab", Some("L1")), app(9, "fab", Some("L2")), app(11, "fab", None)];
+        assert_eq!(named(&list, "fab", &caller(false, Some("L1"))).unwrap().pid, 7);
+        assert_eq!(named(&list, "fab", &caller(true, None)).unwrap().pid, 11);
+    }
+
+    #[test]
+    fn all_needs_a_terminal_or_a_lease_of_its_own() {
+        let list = [app(7, "fab", None)];
+        assert!(caller(false, None).all_refused(&list).unwrap().contains("7 fab"));
+        assert!(caller(false, Some("L1")).all_refused(&list).is_none() && !caller(false, Some("L1")).reaches(&list[0]));
+        assert!(caller(true, None).all_refused(&list).is_none() && caller(true, None).reaches(&list[0]));
     }
 }
 

@@ -100,7 +100,7 @@ fn cmd_goes_to_the_endpoint() {
     let _relay_conn = link(&hub, &relay_endpoint());
     let c = client(&hub);
     let me = std::process::id();
-    for target in [format!("d:makepad-remote-test"), format!("d:{me}"), format!("d:x#{me}")] {
+    for target in [format!("d:{me}"), format!("d:x#{me}")] {
         let ch = c.open("route", &format!("{target} cmd")).unwrap();
         ch.send(b"ping".to_vec()).unwrap();
         let reply = lines_of(&ch);

@@ -159,6 +159,8 @@ pub(super) struct Program {
     pub vertex_stride: u32,
     pub layout: vk::PipelineLayout,
     pub descriptors: vk::DescriptorSetLayout,
+    /// Held while the layout is: what is kept for it (a batch slot's descriptor pool) goes after it.
+    pub alive: Arc<()>,
     pub descriptor_types: Vec<(u32, vk::DescriptorType)>,
     /// The bindings fed from the batch's upload arena (the uniform blocks, the pick block and
     /// the instance storage), by binding number: dynamic, so one written set serves every draw
@@ -191,7 +193,7 @@ impl Program {
             None => vec![dev.video_sampler(0, None)?; slots],
         };
         let mut out = Self { dev, desc, code, bindings, storage, vertex_stride, layout: vk::PipelineLayout::null(),
-            descriptors: vk::DescriptorSetLayout::null(), descriptor_types: Vec::new(), dynamic: Vec::new(), samplers: Vec::new(), video,
+            descriptors: vk::DescriptorSetLayout::null(), alive: Arc::new(()), descriptor_types: Vec::new(), dynamic: Vec::new(), samplers: Vec::new(), video,
             vertex: vk::ShaderModule::null(), fragment: vk::ShaderModule::null(),
             xr_vertex: vk::ShaderModule::null(), xr_fragment: vk::ShaderModule::null() };
         for (i, slot) in out.bindings.iter().enumerate() {

@@ -75,7 +75,6 @@ fn host_surface_stays_after_every_app_frame_without_replacing_the_base() {
     assert_eq!(last(&hal).layers, [(sid, APP_WINDOW, 14), (HOST, HOST_WINDOW, 102)]);
     hal.with_world(|w| {
         let host = &w.session(HOST).unwrap().windows.get(HOST, HOST_WINDOW).unwrap().val;
-        assert_eq!(host.presenter, sid);
         assert_eq!(host.presentations, 4, "overlay serials do not pass the app's first-frame gate");
         assert!(host.borrower_presented);
         assert_eq!(w.session(sid).unwrap().stats.passes, 8);

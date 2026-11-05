@@ -11,7 +11,7 @@ use makepad_vulkan::vk;
 use crate::FastMap;
 use std::collections::HashSet;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 #[derive(Clone)]
 pub(super) struct Token { pub sid: u32, pub incarnation: Arc<FrameProgress> }
@@ -93,13 +93,15 @@ pub(super) struct Slot {
     fence: vk::Fence,
     /// the timestamp pool and how many queries it holds (a profiled frame's batch grew it)
     query: (vk::QueryPool, u32),
-    /// Per layout: the pool and how many sets it holds.
-    descriptors: FastMap<vk::DescriptorSetLayout, (vk::DescriptorPool, u32)>,
+    /// Per program (`Program::alive`'s address: taken while the `Weak` holds it, so another program
+    /// never finds this pool, whatever handles the driver gives): the pool, how many sets it holds,
+    /// and whether its program is still there.
+    descriptors: FastMap<usize, (vk::DescriptorPool, u32, Weak<()>)>,
 }
 
 impl Drop for Slot {
     fn drop(&mut self) { unsafe {
-        for (_, (pool, _)) in self.descriptors.drain() { self.dev.raw.destroy_descriptor_pool(pool, None); }
+        for (_, (pool, _, _)) in self.descriptors.drain() { self.dev.raw.destroy_descriptor_pool(pool, None); }
         if self.query.0 != vk::QueryPool::null() { self.dev.raw.destroy_query_pool(self.query.0, None); }
         self.dev.raw.destroy_fence(self.fence, None);
         self.dev.raw.destroy_command_pool(self.pool, None);
@@ -124,6 +126,11 @@ impl Spare {
     /// (each with its command, descriptor and timestamp pools).
     pub fn slots(&self) -> u64 {
         (self.in_flight() + lock(&self.slots).len()) as u64
+    }
+
+    /// The descriptor pools the reset slots keep for the next frames.
+    pub fn descriptor_pools(&self) -> u64 {
+        lock(&self.slots).iter().map(|slot| slot.descriptors.len() as u64).sum()
     }
 
     /// Batches made and not yet dropped.
@@ -239,9 +246,10 @@ pub(super) struct Batch {
     pub compute_descriptors: Vec<super::compute::Descriptors>,
     pub passes: Vec<Arc<RenderPass>>,
     pub framebuffers: Vec<vk::Framebuffer>,
-    /// Per layout: the pool, how many sets it holds, and whether this batch sized it (a reused
-    /// pool is checked against this batch's draws once).
-    descriptors: FastMap<vk::DescriptorSetLayout, (vk::DescriptorPool, u32, bool)>,
+    /// Per program (`Slot::descriptors`): the pool, how many sets it holds, whether this batch sized
+    /// it (a reused pool is checked against this batch's draws once), and whether its program is
+    /// still there.
+    descriptors: FastMap<usize, (vk::DescriptorPool, u32, bool, Weak<()>)>,
     pub tickets: Vec<Ticket>,
     pub scanout: Option<(Arc<dyn super::surface::FramePresenter>, Arc<Image>, Token, u32, Id, Id, u32, u64)>,
     pub present: Option<Present>,
@@ -359,7 +367,12 @@ impl Batch {
             b.cb = slot.cb;
             b.fence = std::mem::replace(&mut slot.fence, vk::Fence::null());
             b.idle_query = std::mem::replace(&mut slot.query, (vk::QueryPool::null(), 0));
-            b.descriptors = slot.descriptors.drain().map(|(layout, (pool, sets))| (layout, (pool, sets, false))).collect();
+            // A pool goes with its program: nothing else would free it, and a slot would reset it
+            // every batch for good.
+            for (program, (pool, sets, alive)) in slot.descriptors.drain() {
+                if alive.strong_count() == 0 { unsafe { b.dev.raw.destroy_descriptor_pool(pool, None); } }
+                else { b.descriptors.insert(program, (pool, sets, false, alive)); }
+            }
         }
         unsafe {
             if b.pool == vk::CommandPool::null() {
@@ -499,17 +512,18 @@ impl Batch {
     }
 
     fn descriptors(&mut self, p: &Program, state: usize) -> Result<vk::DescriptorSet, String> {
-        // a reused pool that holds fewer sets than this batch draws with the layout is replaced
-        if let Some((pool, sets, sized)) = self.descriptors.get_mut(&p.descriptors).filter(|(_, _, sized)| !*sized) {
+        let program = Arc::as_ptr(&p.alive) as usize;
+        // a reused pool that holds fewer sets than this batch draws with the program is replaced
+        if let Some((pool, sets, sized, _)) = self.descriptors.get_mut(&program).filter(|(_, _, sized, _)| !*sized) {
             let draws = *self.draw_counts.get(&state).ok_or("pipeline missing from frame descriptor counts")?;
             *sized = true;
             if *sets < draws {
                 crate::profile::count("vk descriptor pool too small: remade");
                 unsafe { self.dev.raw.destroy_descriptor_pool(*pool, None); }
-                self.descriptors.remove(&p.descriptors);
+                self.descriptors.remove(&program);
             }
         }
-        let pool = if let Some((pool, _, _)) = self.descriptors.get(&p.descriptors) { *pool } else {
+        let pool = if let Some((pool, _, _, _)) = self.descriptors.get(&program) { *pool } else {
             // Sized to the next power of two: a slot's pool serves the frames after this one, and a
             // frame drawing one more than its pool holds remade it (a destroy and a create, both
             // driver round trips) every few frames as a view's draw count wandered.
@@ -523,7 +537,7 @@ impl Batch {
             }
             let sizes: Vec<_> = counts.into_iter().map(|(ty, count)| vk::DescriptorPoolSize::default().ty(ty).descriptor_count(count)).collect();
             let pool = unsafe { self.dev.raw.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::default().max_sets(draws).pool_sizes(&sizes), None) }.map_err(error)?;
-            self.descriptors.insert(p.descriptors, (pool, draws, true)); pool
+            self.descriptors.insert(program, (pool, draws, true, Arc::downgrade(&p.alive))); pool
         };
         let layouts = [p.descriptors];
         // one set, written in place (the wrapper returns a Vec per call)
@@ -907,7 +921,7 @@ impl Drop for Batch {
         for framebuffer in self.framebuffers.drain(..) { self.dev.raw.destroy_framebuffer(framebuffer, None); }
         let slot = Slot { dev: self.dev.clone(), pool: self.pool, cb: self.cb, fence: self.fence,
             query: if self.query.0 != vk::QueryPool::null() { self.query } else { self.idle_query },
-            descriptors: self.descriptors.drain().map(|(layout, (pool, sets, _))| (layout, (pool, sets))).collect() };
+            descriptors: self.descriptors.drain().map(|(program, (pool, sets, _, alive))| (program, (pool, sets, alive))).collect() };
         if self.query.0 != vk::QueryPool::null() && self.idle_query.0 != vk::QueryPool::null() { self.dev.raw.destroy_query_pool(self.idle_query.0, None); }
         if !self.reusable { crate::profile::count("vk batch slot destroyed (not reusable)"); return; } // dropping the slot destroys its objects
         // the arenas go back once nothing else holds them (freed here, outside the lock, if the
@@ -918,7 +932,7 @@ impl Drop for Batch {
         drop(released);
         let reset = self.dev.raw.reset_command_buffer(slot.cb, vk::CommandBufferResetFlags::default())
             .and_then(|_| self.dev.raw.reset_fences(&[slot.fence]))
-            .and_then(|_| slot.descriptors.values().try_for_each(|(pool, _)| self.dev.raw.reset_descriptor_pool(*pool, vk::DescriptorPoolResetFlags::default())));
+            .and_then(|_| slot.descriptors.values().try_for_each(|(pool, _, _)| self.dev.raw.reset_descriptor_pool(*pool, vk::DescriptorPoolResetFlags::default())));
         if reset.is_err() { crate::profile::count("vk batch slot destroyed (reset failed)"); return; }
         let mut slots = lock(&self.spares.slots);
         if slots.len() < SPARE_SLOTS { slots.push(slot); } else { crate::profile::count("vk batch slot destroyed (spares full)"); }

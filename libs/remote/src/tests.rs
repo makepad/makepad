@@ -295,16 +295,53 @@ pub(crate) fn shared() -> &'static (Endpoint, crate::watch::WatchSink) {
     })
 }
 
+/// A handler that waits long can see that its client has gone.
+#[test]
+fn a_request_sees_its_client_go() {
+    let ep = Endpoint::new("makepad-remote-client-gone");
+    let (told, gone) = std::sync::mpsc::channel();
+    let told = std::sync::Mutex::new(told);
+    ep.register("slow", 1, crate::lines::service("slow", std::sync::Arc::new(move |_, _| {
+        while !crate::lines::client_gone() {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        told.lock().unwrap().send(()).unwrap();
+    })));
+    let conn = pair(&ep);
+    let ch = conn.open("slow", "").unwrap();
+    ch.send(b"wait\n".to_vec()).unwrap();
+    assert!(gone.recv_timeout(Duration::from_millis(100)).is_err(), "the client is still there");
+    conn.close("client ended");
+    gone.recv_timeout(WAIT).unwrap();
+    assert!(!crate::lines::client_gone(), "no request on this thread");
+}
+
+/// A late follower gets what came before it only when it asks from there, and once.
+#[test]
+fn a_feed_from_a_record_gets_what_came_before_it() {
+    let _turn = WATCH_TURN.lock().unwrap_or_else(|e| e.into_inner());
+    let (_, watch) = shared();
+    let early = watch.emit("{\"event\":\"early\"}");
+    let client = Client::connect(&std::process::id().to_string()).unwrap();
+    let mut now = client.watch();
+    assert!(now.next(Duration::from_millis(100), 3).unwrap().is_none());
+    let mut from = client.feed_from("watch", early - 1);
+    assert_eq!(from.next(WAIT, 3).unwrap().unwrap().1, b"{\"event\":\"early\"}");
+    client.conn().unwrap().close("test drop");
+    watch.emit("{\"event\":\"later\"}");
+    assert_eq!(from.next(WAIT, 20).unwrap().unwrap().1, b"{\"event\":\"later\"}");
+}
+
 #[test]
 fn unix_end_to_end_with_discovery_and_reconnect() {
     let _turn = WATCH_TURN.lock().unwrap_or_else(|e| e.into_inner());
     let (_, watch) = shared();
     let me = std::process::id();
-    let app = crate::discovery::find(&me.to_string()).expect("discovery file");
+    let app = crate::discovery::by_pid(me).expect("discovery file");
     assert_eq!(app.app, "makepad-remote-test");
     assert!(app.serves("cmd") && app.serves("watch") && app.serves("stream"));
     assert_eq!(app.text("extra").as_deref(), Some("x"));
-    let client = Client::connect("makepad-remote-test").unwrap();
+    let client = Client::connect(&std::process::id().to_string()).unwrap();
     assert!(client.caps().contains(&"cmd/1".to_string()));
     let mut lines = client.cmd("ping").unwrap();
     assert!(lines.next().unwrap().unwrap().starts_with("{\"pong\":1"));
@@ -465,7 +502,7 @@ fn fake_frames() -> Factory {
 
 fn run_app(argv: &[&str]) -> (Vec<String>, bool) {
     shared();
-    let client = Client::connect("makepad-remote-test").unwrap();
+    let client = Client::connect(&std::process::id().to_string()).unwrap();
     let argv: Vec<String> = argv.iter().map(|s| s.to_string()).collect();
     let mut lines = Vec::new();
     let err = crate::app::run(&client, &argv, &mut |l| {

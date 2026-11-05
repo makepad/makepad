@@ -81,6 +81,12 @@ pub fn typed_line(words: &[String]) -> String {
             kv.push(("code".to_string(), rest.join(" ")));
             json(&format!("probe add {}", words[2]), &kv)
         }
+        // a value with spaces (`q=Save as`): a plain line is split on them, a JSON one keeps them
+        _ if words.iter().any(|w| w.contains('=') && w.contains(char::is_whitespace)) => {
+            let (kv, cmd): (Vec<&String>, Vec<&String>) = words.iter().partition(|w| w.contains('='));
+            let kv: Vec<(String, String)> = kv.iter().filter_map(|w| w.split_once('=')).map(|(k, v)| (k.to_string(), v.to_string())).collect();
+            json(&cmd.iter().map(|w| w.as_str()).collect::<Vec<_>>().join(" "), &kv)
+        }
         _ => words.join(" "),
     }
 }
@@ -262,7 +268,8 @@ fn grab_dir(client: &Client) -> Result<PathBuf, String> {
         Some(pid) => format!("{app}-{pid}"),
         None => app,
     };
-    let dir = std::env::temp_dir().join("makepad-remote").join(name);
+    // (a lease's scratch dir, which Windows' own temp dir does not follow: its holder fetches the file there)
+    let dir = std::env::var_os("TMPDIR").map_or_else(std::env::temp_dir, PathBuf::from).join("makepad-remote").join(name);
     std::fs::create_dir_all(&dir).map_err(|e| format!("grab dir: {e}"))?;
     Ok(dir)
 }
@@ -574,5 +581,7 @@ mod tests {
         );
         assert_eq!(typed_line(&words("eval mutate=1 a == b")), r#"{"cmd":"eval","mutate":"1","expr":"a == b"}"#);
         assert_eq!(typed_line(&words("vm roots top=12")), "vm roots top=12");
+        let spaced = ["ui".to_string(), "find".to_string(), "q=Save as".to_string(), "nth=1".to_string()];
+        assert_eq!(typed_line(&spaced), r#"{"cmd":"ui find","q":"Save as","nth":"1"}"#);
     }
 }

@@ -54,6 +54,9 @@ pub enum Pool {
     /// descriptor and timestamp pools); on Metal the most made and not completed at once, which
     /// the queue keeps driver memory for
     CommandBuffers,
+    /// the descriptor pools Vulkan's reset slots keep for the next frames, one per live program
+    /// each slot drew with
+    DescriptorPools,
     /// the 1x1 texture bound in an empty slot
     Fallback,
     /// the multisampled images MSAA passes render into
@@ -67,12 +70,13 @@ pub enum Pool {
 }
 
 impl Pool {
-    pub const ALL: [Pool; 10] = [
+    pub const ALL: [Pool; 11] = [
         Pool::UploadArena,
         Pool::Staging,
         Pool::Leases,
         Pool::Timestamps,
         Pool::CommandBuffers,
+        Pool::DescriptorPools,
         Pool::Fallback,
         Pool::Multisample,
         Pool::WindowCopies,
@@ -86,6 +90,7 @@ impl Pool {
             Pool::Leases => "compute leases",
             Pool::Timestamps => "timestamps",
             Pool::CommandBuffers => "command buffers",
+            Pool::DescriptorPools => "descriptor pools",
             Pool::Fallback => "fallback texture",
             Pool::Multisample => "multisample",
             Pool::WindowCopies => "window copies",

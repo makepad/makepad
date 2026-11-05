@@ -277,6 +277,72 @@ fn dmabuf_export_import_second_session_samples_identical_pixels() {
     assert!(hal.close(reader.session));
 }
 
+/// A program that goes takes its descriptor pools with it: live edits and restarts replace programs
+/// for as long as the device lives, and a batch slot keeps a pool per program for the next frames.
+/// The programs take turns between two shapes: a layout's handle may come back for the other shape,
+/// and a pool of the old shape would not serve it, so each turn's pixels are checked.
+#[cfg(target_os = "linux")]
+#[test]
+fn programs_that_go_leave_no_descriptor_pools() {
+    const TURNS: u32 = 40;
+    let (hal, info) = open();
+    let sid = info.session;
+    resources(&hal, sid);
+    let source = Id::new(2, 1);
+    let mut w = CmdWriter::new(sid);
+    w.texture_create(source, usage::SAMPLED, format::RGBA8, 1, 1, [1, 1], Attr::default());
+    w.texture_update(source, 0, [0, 0, 1, 1], 0, &[0, 255, 0, 255]);
+    w.pipeline_destroy(PIPE);
+    hal.submit(&w.buf());
+    let bindings = |textures| [u32::MAX, u32::MAX, u32::MAX, u32::MAX, u32::MAX, textures];
+    let plain = CmdWriter::pipeline_blob(PipelineDesc { outputs: 1, ..Default::default() }, &shader(), &bindings(0), &[16]);
+    let sampled = CmdWriter::pipeline_blob(PipelineDesc { outputs: 1, ..Default::default() }, &sampled_shader(), &bindings(1), &[16]);
+    let mut frame = 0;
+    for turn in 0..TURNS {
+        let (blob, color) = if turn % 2 == 0 { (&plain, [255, 255, 255, 255]) } else { (&sampled, [0, 255, 0, 255]) };
+        let id = Id::new(PIPE.index, PIPE.gen + 1 + turn);
+        let mut w = CmdWriter::new(sid);
+        w.pipeline_create(id, dialect::SPIRV, Attr::default(), blob);
+        hal.submit(&w.buf());
+        until(&hal, sid, |e| matches!(e, HalEvent::PipelineReady { pipeline } if pipeline == id));
+        loop {
+            frame += 1;
+            let before = hal.with_world(|world| world.session(sid).unwrap().stats);
+            w.clear();
+            w.frame_begin(frame, FrameMeta::default());
+            w.pass(pass(TEX, 32, 32, [0.0, 0.0, 0.0, 1.0]));
+            let mut d = draw();
+            d.pipeline = id;
+            if turn % 2 == 1 { d.tex = w.put_ids(&[source]); }
+            w.draw(d);
+            w.frame_end(TEX, target::TEXTURE);
+            hal.submit(&w.buf());
+            frame_done(&hal, sid, frame);
+            let after = hal.with_world(|world| world.session(sid).unwrap().stats);
+            assert_eq!(after.bad_args, 0);
+            if before.skipped_draws == after.skipped_draws { break; }
+        }
+        w.clear();
+        w.texture_readback(TEX, turn + 1, [0, 0, 32, 32]);
+        w.pipeline_destroy(id);
+        hal.submit(&w.buf());
+        let image = pixels(&hal, sid, turn + 1);
+        assert_eq!(&image[(27 * 32 + 16) * 4..][..4], &color, "turn {turn}");
+    }
+    // (the row is written at a frame, at most every 250 ms)
+    std::thread::sleep(Duration::from_millis(300));
+    frame += 1;
+    let mut w = CmdWriter::new(sid);
+    w.frame_begin(frame, FrameMeta::default());
+    w.pass(pass(TEX, 32, 32, [0.0; 4]));
+    w.frame_end(TEX, target::TEXTURE);
+    hal.submit(&w.buf());
+    frame_done(&hal, sid, frame);
+    let kept = hal.with_world(|world| world.session(makepad_hal::session::HOST).unwrap().ledger.get(Kind::Backend, makepad_hal::ledger::Pool::DescriptorPools as u32).map_or(0, |row| row.objects));
+    assert!(kept <= 8, "descriptor pools kept after {TURNS} programs: {kept}");
+    assert!(hal.close(sid));
+}
+
 #[test]
 fn offscreen_two_passes_three_draws_and_timestamp() {
     let (hal, info) = open();

@@ -112,12 +112,17 @@ impl Client {
     }
 
     /// Dials a local endpoint: `spec` is a socket path, a discovery file's `tcp:` socket (Windows),
-    /// a pid or an app name (discovery files).
+    /// a pid or the name of an app this program's lease started.
     pub fn connect(spec: &str) -> Result<Client, Error> {
+        Client::connect_as(spec, &crate::discovery::Caller::program())
+    }
+
+    /// [`Client::connect`], with what an app name reaches decided for `caller`.
+    pub fn connect_as(spec: &str, caller: &crate::discovery::Caller) -> Result<Client, Error> {
         let target = if spec.contains('/') || spec.ends_with(".sock") {
             Target::Unix(PathBuf::from(spec))
         } else {
-            let app = crate::discovery::find(spec).ok_or_else(|| Error::Refused(CLOSE_LINK_LOST, format!("no running makepad-remote endpoint `{spec}`")))?;
+            let app = crate::discovery::find(spec, caller).map_err(|why| Error::Refused(CLOSE_LINK_LOST, why))?;
             Target::of(&app)
         };
         let c = Client::new(target, "client");
@@ -259,7 +264,13 @@ impl Client {
 
     /// Follows the `watch` service (events) or `stream` service (chunks).
     pub fn feed(&self, service: &str) -> Feed {
-        Feed { client: self.clone(), service: service.to_string(), ch: None }
+        Feed { client: self.clone(), service: service.to_string(), ch: None, from: None }
+    }
+
+    /// [`Client::feed`] from record `from` on, as far as the endpoint's ring still holds them,
+    /// instead of from now.
+    pub fn feed_from(&self, service: &str, from: u64) -> Feed {
+        Feed { client: self.clone(), service: service.to_string(), ch: None, from: Some(from) }
     }
 
     pub fn watch(&self) -> Feed {
@@ -346,6 +357,8 @@ pub struct Feed {
     client: Client,
     service: String,
     ch: Option<Channel>,
+    /// where the first channel starts (a reconnect goes on from the last record read)
+    from: Option<u64>,
 }
 
 impl Feed {
@@ -356,8 +369,12 @@ impl Feed {
         let mut tries = 0u32;
         loop {
             if self.ch.is_none() {
-                match self.client.open(&self.service, "") {
-                    Ok(ch) => self.ch = Some(ch),
+                let args = self.from.map_or(String::new(), |from| format!("from={from}"));
+                match self.client.open(&self.service, &args) {
+                    Ok(ch) => {
+                        self.ch = Some(ch);
+                        self.from = None;
+                    }
                     Err(Error::LinkLost(w)) => {
                         tries += 1;
                         if tries > retries {
