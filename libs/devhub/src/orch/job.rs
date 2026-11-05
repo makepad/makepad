@@ -8,8 +8,10 @@
 //!
 //! A program that parks on a panic under the JIT turns its job interactive: the job becomes
 //! `paused` with the panic (id, message, thread, location), the box stays held with the process
-//! alive, and the agent acts through the job (`job inspect`, `job resume`, `job release`). Ten
-//! minutes with no agent action release the box; the result is the panic (`panicked`).
+//! alive, and the agent acts through the job (`job inspect`, `job resume`, `job release`). The
+//! pause lasts while the process holds that panic parked: one that went on (an edit fixed the call,
+//! the park's own limit unwound it, a script killed it) leaves the job running, and the verdict is
+//! the job's own exit. A box released while the panic is parked ends the job `panicked`.
 
 use super::leg::{Held, Spec};
 use super::{age, Ctx};
@@ -23,8 +25,9 @@ use makepad_strict_json::Value;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// A paused job with no agent action for this long releases its box.
-pub const PAUSE_IDLE_MS: u64 = 10 * 60 * 1000;
+/// A paused job with no agent action for this long releases its box: past the JIT's own 600 s
+/// limit on a park, so a park ending at its limit reaches [`runs_on`] first.
+pub const PAUSE_IDLE_MS: u64 = 630 * 1000;
 const TICK: Duration = Duration::from_secs(2);
 const ERRORS: usize = 12;
 const TAIL: usize = 15;
@@ -97,6 +100,12 @@ pub fn start(ctx: Arc<Ctx>) {
     }
     prune_logs(&ctx);
     crate::lease::shadow::start(ctx.clone());
+    // (its own thread: it asks the boxes, and a box slow to answer holds no dispatch)
+    let c = ctx.clone();
+    let _ = std::thread::Builder::new().name("devhub-job-parks".into()).spawn(move || loop {
+        runs_on(&c, &holds_parked);
+        std::thread::sleep(TICK);
+    });
     let _ = std::thread::Builder::new().name("devhub-jobs".into()).spawn(move || loop {
         dispatch(&ctx);
         idle(&ctx);
@@ -537,7 +546,7 @@ fn finish(ctx: &Ctx, id: &str, r: Result<i32, String>, log: &std::path::Path) {
         j.state = match (j.state.as_str(), &r) {
             ("cancelled", _) => "cancelled".into(),
             (_, Ok(makepad_remote::hot::JIT_ERROR_EXIT)) => "jit-error".into(),
-            ("paused", _) => "panicked".into(),
+            ("paused", Err(_)) => "panicked".into(),
             (_, Ok(0)) if none.is_some() => "failed".into(),
             (_, Ok(0)) => "ok".into(),
             (_, Ok(_)) => "failed".into(),
@@ -571,13 +580,60 @@ fn finish(ctx: &Ctx, id: &str, r: Result<i32, String>, log: &std::path::Path) {
     event(ctx, sev, what, Some(&j));
 }
 
+/// Whether the panic's process still holds it parked; None: no answer, for now. A panic with no id
+/// is not the JIT's, and nothing parks on it.
+fn holds_parked(j: &Job, p: &JobPanic) -> Option<bool> {
+    if p.id.is_empty() || !owned(j, p.pid)? {
+        return Some(false);
+    }
+    let mut parked = false;
+    let id = format!("\"id\":{}", json_str(&p.id));
+    makepad_remote::hub::ask(&ctl(), &format!("{}:{}", j.node, p.pid), "cmd", "", "panics", &mut |l| {
+        parked |= l.contains(&id);
+        true
+    }).ok()?;
+    Some(parked)
+}
+
+/// Whether the process is one of the job's, by the node's answer.
+fn owned(j: &Job, pid: u32) -> Option<bool> {
+    let answer = ask(&ctl(), Some(&j.node), "lease-owns", &format!("lease-owns {} {pid}", j.lease)).ok()?;
+    let answer = answer.first()?;
+    // (a lease that ended is no answer about its process)
+    answer.contains("\"owns\":").then(|| answer.contains("\"owns\":true"))
+}
+
+/// A job paused on a panic its process no longer holds parked runs on: a child's expected failure
+/// inside a script that carries on is the script's business (J6931's fixture fixed its parked call,
+/// and the pause's timer then ended the script two steps later).
+fn runs_on(ctx: &Ctx, holds: &dyn Fn(&Job, &JobPanic) -> Option<bool>) {
+    // (a job whose box is being released stays paused: running, its ended lease would place it again)
+    let paused: Vec<Job> = ctx.store.read(|d| d.jobs.iter().filter(|j| j.state == "paused" && !j.released).cloned().collect());
+    for j in paused {
+        let Some(p) = j.panic.as_ref().filter(|p| holds(&j, p) == Some(false)) else { continue };
+        let Some(now) = set(ctx, &j.id, |j| {
+            if j.state == "paused" && !j.released && j.panic.as_ref() == Some(p) {
+                j.state = "running".into();
+                j.jit_error.clear();
+                j.note = format!("{} of pid {} parked, then went on: the job's exit decides", p.id, p.pid);
+            }
+        }) else { continue };
+        if now.state == "running" {
+            event(ctx, Sev::Info, format!("job {} runs on: {} of pid {} is no longer parked", j.id, p.id, p.pid), Some(&now));
+        }
+    }
+}
+
 /// Releases the box of a job paused too long with no agent action.
 fn idle(ctx: &Ctx) {
     let now = wall_ms();
     let stale: Vec<Job> = ctx.store.read(|d| d.jobs.iter().filter(|j| j.state == "paused" && now.saturating_sub(j.touched_ms) >= PAUSE_IDLE_MS).cloned().collect());
     for j in stale {
-        set(ctx, &j.id, |j| j.note = "released after 10 min paused with no agent action".into());
-        event(ctx, Sev::Warn, format!("job {} paused 10 min with no agent action: its box is released", j.id), Some(&j));
+        set(ctx, &j.id, |j| {
+            j.released = true;
+            j.note = format!("released after {} min paused with no agent action", PAUSE_IDLE_MS / 60_000);
+        });
+        event(ctx, Sev::Warn, format!("job {} paused {} min with no agent action: its box is released", j.id, PAUSE_IDLE_MS / 60_000), Some(&j));
         end_lease(&j.lease);
     }
 }
@@ -598,7 +654,7 @@ pub fn on_record(ctx: &Arc<Ctx>, r: &Record) {
     let (ctx, r) = (ctx.clone(), r.clone());
     // the node says whether the panicking process is one of the job's (never on the record path)
     let _ = std::thread::Builder::new().name("devhub-job-panic".into()).spawn(move || {
-        let Some(j) = candidates.into_iter().find(|j| ask(&ctl(), Some(&j.node), "lease-owns", &format!("lease-owns {} {}", j.lease, r.pid)).ok().and_then(|l| l.first().cloned()).is_some_and(|l| l.contains("\"owns\":true"))) else { return };
+        let Some(j) = candidates.into_iter().find(|j| owned(j, r.pid) == Some(true)) else { return };
         if r.kind != "panic" {
             set(&ctx, &j.id, |j| j.jit_error = format!("{}: {}", r.kind, crate::proto::clean(&r.detail, 300)));
             return;
@@ -692,7 +748,7 @@ pub fn serve(ctx: &Ctx, line: &str) -> Result<String, String> {
                 return Err("job lease-log L<id>".into());
             }
             let path = ctx.logs(LEASE_LOGS).join(format!("{rest}.log"));
-            let bytes = std::fs::read(&path).map_err(|_| format!("{rest} kept no output: only a failed test run or an abnormal end keeps any"))?;
+            let bytes = std::fs::read(&path).map_err(|_| format!("{rest} kept no output: a lease released normally keeps none, unless a test run failed or a run ended abnormally"))?;
             Ok(format!("{{\"text\":{},\"path\":{}}}", json_str(&String::from_utf8_lossy(&bytes)), json_str(&path.display().to_string())))
         }
         "output" => {
@@ -774,6 +830,7 @@ pub fn serve(ctx: &Ctx, line: &str) -> Result<String, String> {
                         }
                         j.state = "cancelled".into();
                     } else {
+                        j.released = true;
                         j.note = "released by the agent".into();
                     }
                 })?
@@ -1207,7 +1264,7 @@ mod tests {
                 return Err("link lost after accepting submission".into());
             }
             Ok(reply)
-        }, || {}).unwrap();
+        }, || true).unwrap();
         assert_eq!(serve(&c, &line).unwrap(), first);
         assert_eq!(c.store.read(|d| d.jobs.len()), 1, "lost reply must not create another job");
         assert_ne!(serve(&c, &line.replace("submission-one", "submission-two")).unwrap(), first);
@@ -1365,5 +1422,48 @@ mod tests {
         assert!(render(&j, false).contains("job resume J1 P1 retry|restart|unwind"));
         let j = Job { id: "J2".into(), state: "failed".into(), log: "/h/jobs/J2.log".into(), ..Default::default() };
         assert!(render(&j, false).contains("whole log: /h/jobs/J2.log"));
+    }
+
+    /// A pause lasts while the panic stays parked, and the job's verdict is its own exit: a released
+    /// box is the only end that reads `panicked`.
+    #[test]
+    fn a_pause_lasts_while_the_panic_is_parked_and_the_exit_decides() {
+        let c = Arc::new(ctx("parks"));
+        let p = JobPanic { id: "P1".into(), pid: 7, message: "expected".into(), ..Default::default() };
+        let paused = |id: &str| Job { id: id.into(), state: "paused".into(), panic: Some(p.clone()), jit_error: "JIT panic: expected".into(), ..Default::default() };
+        c.store.update(|d| {
+            d.jobs.extend(["J1", "J2", "J3", "J4"].map(paused));
+            d.jobs.push(Job { id: "J5".into(), state: "running".into(), ..Default::default() });
+        }).unwrap();
+        let state = |id: &str| c.store.read(|d| d.jobs.iter().find(|j| j.id == id).map(|j| j.state.clone())).unwrap();
+        // still parked, or no answer from the box: paused
+        super::runs_on(&c, &|_, _| Some(true));
+        super::runs_on(&c, &|_, _| None);
+        assert_eq!(state("J1"), "paused");
+        // the park ended: the job runs on, the panic stays on its record
+        super::runs_on(&c, &|j, _| (j.id == "J1").then_some(false).or(Some(true)));
+        assert_eq!((state("J1"), state("J2")), ("running".to_string(), "paused".to_string()));
+        let j1 = super::get(&c, "J1").unwrap();
+        assert!(j1.jit_error.is_empty() && j1.panic == Some(p.clone()) && j1.note.contains("P1 of pid 7"), "{j1:?}");
+        assert!(render(&j1, false).contains("panic P1: expected") && !render(&j1, false).contains("job resume"));
+        let log = c.repo.join("job.log");
+        std::fs::write(&log, "ran\n").unwrap();
+        // its script went on to pass, or to fail on its own
+        super::finish(&c, "J1", Ok(0), &log);
+        assert_eq!(state("J1"), "ok");
+        // a script that ended in the moment before the park's end is seen: its exit, too
+        super::finish(&c, "J2", Ok(0), &log);
+        super::finish(&c, "J3", Ok(101), &log);
+        assert_eq!((state("J2"), state("J3")), ("ok".to_string(), "failed".to_string()));
+        // the agent or the limit released the box with the panic parked: the process it kills is
+        // no park that ended, and a job back to running would be placed again by its ended lease
+        serve(&c, "job release J4").unwrap();
+        super::runs_on(&c, &|_, _| Some(false));
+        assert_eq!(state("J4"), "paused");
+        super::finish(&c, "J4", Err("L1 ended (released)".into()), &log);
+        assert_eq!(state("J4"), "panicked");
+        // a job not paused is not asked about
+        super::runs_on(&c, &|_, _| panic!("asked about a job with nothing parked"));
+        assert_eq!(state("J5"), "running");
     }
 }

@@ -1427,17 +1427,25 @@ fn run(ctx: &Arc<Ctx>, id: &str, first_call: bool) {
         r.priority = Priority::parse(&x.priority).unwrap_or(Priority::Interactive);
         r.loader = (!x.loader.is_empty()).then(|| x.loader.clone());
     };
-    let held = match Held::acquire_with(&spec, &configure, &mut |_| {}, &|| get(ctx, id).is_none_or(|x| !x.active())) {
-        Ok(h) => h,
-        Err(e) => return fail(e),
-    };
-    let ship_started = wall_ms();
-    if !snap.is_empty() || src == Src::Overlay {
-        if let Err(e) = super::job::ship_snap(ctx, &held, &snap) {
-            held.release(None);
+    // A box that goes away while the sources ship is no verdict on the session (its hub restarts
+    // for its self-update, most often): the lease goes back and it is placed again, as a job is.
+    let mut placed = 0;
+    let (held, ship_started) = loop {
+        let held = match Held::acquire_with(&spec, &configure, &mut |_| {}, &|| get(ctx, id).is_none_or(|x| !x.active())) {
+            Ok(h) => h,
+            Err(e) => return fail(e),
+        };
+        placed += 1;
+        let ship_started = wall_ms();
+        let shipped = if !snap.is_empty() || src == Src::Overlay { super::job::ship_snap(ctx, &held, &snap).map(drop) } else { Ok(()) };
+        let Err(e) = shipped else { break (held, ship_started) };
+        let node = held.node.clone();
+        held.release(None);
+        if placed >= super::job::ATTEMPTS || !crate::lease::master::unreachable(&e) {
             return fail(format!("shipping {snap}: {e}"));
         }
-    }
+        event(ctx, Sev::Warn, format!("live {id}: shipping to {node} failed ({}); placed again", crate::proto::clean(&e, 160)), Some(&x));
+    };
     let sources = if snap.is_empty() { BTreeMap::new() } else {
         let dir = super::job::snap_dir(ctx, &snap);
         let captured = (|| -> Result<_, String> {
@@ -1655,6 +1663,14 @@ mod join_tests {
 
 #[cfg(test)]
 mod owner_tests {
+    #[test]
+    fn a_grab_names_its_file_on_every_os() {
+        let lines = |l: &str| vec!["{\"frame\":3}".to_string(), l.to_string()];
+        assert_eq!(super::grab_file(&lines(r#"{"png":"/h/devhub/tmp/L7/g/a.png"}"#), "L7").as_deref(), Some("g/a.png"));
+        assert_eq!(super::grab_file(&lines(r#"{"png":"C:\\Users\\u\\devhub\\tmp\\L7\\g\\a.png"}"#), "L7").as_deref(), Some("g/a.png"));
+        assert_eq!(super::grab_file(&lines(r#"{"png":"/h/devhub/tmp/L70/g/a.png"}"#), "L7"), None);
+    }
+
     #[test]
     fn the_jit_is_idle_by_its_activity_line_not_its_header() {
         let answer = |line: &str| vec![r#"{"measured":"JIT compile activity","at_ms":1,"source":"two looks","partial":[]}"#.to_string(), line.to_string(), "(101 ms)".to_string()];
@@ -1883,8 +1899,7 @@ pub fn serve(ctx: &Arc<Ctx>, line: &str) -> Result<String, String> {
                     if waiting > 0 {
                         lines.insert(0, format!("STALE: {waiting} edit(s) wait for a restart: this frame shows the code before them (`makepad devhub live act {id} session relaunch` applies them)"));
                     }
-                    let tmp = format!("/tmp/{}/", r.lease);
-                    if let Some(rel) = lines.iter().find_map(|l| l.split('"').find(|w| w.contains(&tmp) && w.ends_with(".png")).and_then(|w| w.split(&tmp).nth(1)).map(str::to_string)) {
+                    if let Some(rel) = grab_file(&lines, &r.lease) {
                         lines.push(format!("copy it here: makepad devhub get {} tmp/{rel} <dir> --node {} --lease {} (or `live look {id}`)", x.lane, x.node, r.lease));
                         let drawn = drawn.map_or(String::new(), |(frame, patch)| format!(",\"frame\":{frame},\"patch\":{patch}"));
                         png = Some(format!("{{\"node\":{},\"lease\":{},\"rel\":{}{drawn}}}", json_str(&x.node), json_str(&r.lease), json_str(&format!("tmp/{rel}"))));
@@ -2007,6 +2022,17 @@ pub fn serve(ctx: &Arc<Ctx>, line: &str) -> Result<String, String> {
 }
 
 /// The first caller owns the initial run until its verdict is copied.
+/// A grab's png under its lease's tmp dir, from the lines that name it (a JSON string; Windows
+/// paths come with escaped backslashes).
+fn grab_file(lines: &[String], lease: &str) -> Option<String> {
+    let tmp = format!("/tmp/{lease}/");
+    lines.iter().find_map(|l| {
+        let l = l.replace("\\\\", "/");
+        let path = l.split('"').find(|w| w.contains(&tmp) && w.ends_with(".png"))?;
+        path.split(&tmp).nth(1).map(str::to_string)
+    })
+}
+
 fn initial_call(ctx: &Ctx, id: &str) -> Result<String, String> {
     let signal = ctx.store.subscribe("live", &[id]);
     loop {
@@ -2031,6 +2057,9 @@ fn test_call(ctx: &Arc<Ctx>, id: &str) -> Result<Option<String>, String> {
     // (the JIT applies an edit only after the running tests end)
     let mut behind = None;
     loop {
+        // a call still queued whose client has gone ships nothing: nobody asked for that edit any
+        // more (a stopped client's call shipped a save made after it stopped, 11-05)
+        if makepad_remote::lines::client_gone() { return Err(format!("{id}: this call's client has gone")); }
         let seen = signal.generation();
         let x = get(ctx, id).ok_or_else(|| format!("no live job {id}"))?;
         // (a session that ended has no verdict on what the caller has now: a new one does)

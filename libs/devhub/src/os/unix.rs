@@ -244,6 +244,71 @@ fn group_members(groups: &[(u32, u64)]) -> Option<Vec<u32>> {
     Some(table.keys().copied().filter(|pid| member(*pid)).collect())
 }
 
+/// The processes of one run: its group and what descended from it.
+pub fn group_pids(pid: u32, start: u64, _hold: &Hold) -> Vec<u32> {
+    group_members(&[(pid, start)]).unwrap_or_default()
+}
+
+/// What `pids` do now, for someone reading a stuck run: each one's command, its threads by name,
+/// state and kernel wait, then gdb's stacks of those with no child among them, or why it gave none.
+#[cfg(target_os = "linux")]
+pub fn processes_view(pids: &[u32]) -> String {
+    let mut out = String::new();
+    let mut parents = Vec::new();
+    for &pid in pids {
+        let cmd = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+        // (a run's wrapper is a whole script: its first line says enough)
+        let cmd = String::from_utf8_lossy(&cmd).replace('\0', " ");
+        let cmd: String = cmd.trim().lines().next().unwrap_or("").chars().take(200).collect();
+        out.push_str(&format!("pid {pid}: {cmd}\n"));
+        let mut alike = std::collections::BTreeMap::<(String, String, String), usize>::new();
+        for t in std::fs::read_dir(format!("/proc/{pid}/task")).into_iter().flatten().flatten() {
+            let Ok(stat) = std::fs::read_to_string(t.path().join("stat")) else { continue };
+            let Some((name, rest)) = stat.split_once('(').and_then(|(_, r)| r.rsplit_once(')')) else { continue };
+            let f: Vec<&str> = rest.split_whitespace().collect();
+            if t.file_name().to_string_lossy() == pid.to_string() { parents.extend(f.get(1).and_then(|p| p.parse::<u32>().ok())); }
+            let state = f.first().copied().unwrap_or("?");
+            // (`0`: on a CPU, or closed to this process: a JIT is not dumpable)
+            let wait = std::fs::read_to_string(t.path().join("wchan")).unwrap_or_default();
+            let wait = match wait.trim() {
+                "" | "0" if state == "R" => "on cpu",
+                "" | "0" => "?",
+                w => w,
+            };
+            *alike.entry((name.to_string(), state.to_string(), wait.to_string())).or_default() += 1;
+        }
+        for ((name, state, wait), n) in alike {
+            out.push_str(&format!("  {n}x {name} {state} {wait}\n"));
+        }
+    }
+    for &pid in pids.iter().filter(|p| !parents.contains(p)) {
+        match stacks(pid) {
+            Ok(frames) => out.push_str(&format!("stacks of {pid}:\n{frames}\n")),
+            // it is the box's answer, the same for the next one
+            Err(why) => { out.push_str(&format!("stacks of {pid}: {why}\n")); break; }
+        }
+    }
+    out
+}
+
+/// gdb's stacks of a process. Yama's default lets a process trace only its own descendants, so on
+/// such a box only the user's `sysctl kernel.yama.ptrace_scope=0` opens this (and nothing does for a
+/// process that is not dumpable).
+#[cfg(target_os = "linux")]
+fn stacks(pid: u32) -> Result<String, String> {
+    let o = std::process::Command::new("gdb").args(["-q", "-n", "-batch", "-p", &pid.to_string(), "-ex", "thread apply all bt 20"]).stdin(std::process::Stdio::null()).output().map_err(|e| format!("no gdb here: {e}"))?;
+    let text = format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
+    let frames: Vec<&str> = text.lines().filter(|l| l.starts_with("Thread ") || l.starts_with('#')).collect();
+    if !frames.is_empty() { return Ok(frames.join("\n")); }
+    let scope = std::fs::read_to_string("/proc/sys/kernel/yama/ptrace_scope").unwrap_or_default();
+    Err(format!("{} (kernel.yama.ptrace_scope={})", text.lines().find(|l| l.contains("ptrace:")).unwrap_or("gdb gave none"), scope.trim()))
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn processes_view(pids: &[u32]) -> String {
+    pids.iter().map(|p| format!("pid {p}\n")).collect()
+}
+
 /// pid -> (parent, in one of the `leaders`' groups), of this user's live processes.
 #[cfg(target_os = "macos")]
 fn process_table(leaders: &[u32]) -> std::collections::HashMap<u32, (u32, bool)> {

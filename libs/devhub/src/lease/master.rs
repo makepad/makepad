@@ -875,6 +875,9 @@ impl LeaseMaster {
                     let list = |v: &[String]| v.iter().map(|s| json_str(s)).collect::<Vec<_>>().join(",");
                     parts.push(format!("\"inspect\":{{\"pid\":{},\"breaks\":[{}],\"probes\":[{}],\"paused\":{}}}", m.pid, list(&m.breaks), list(&m.probes), m.paused));
                 }
+                // a lease something else ended (a cancel, the hung check, the disk guard; `released`
+                // on the wire): its node gives how far its last run got
+                if how != "released" { parts.push("\"tail\":true".to_string()); }
                 let payload = if parts.is_empty() { String::new() } else { format!(" {{{}}}", parts.join(",")) };
                 let t0 = std::time::Instant::now();
                 let end_line = format!("lease-end {id} {wire_how}{payload}");
@@ -917,17 +920,24 @@ impl LeaseMaster {
                         // a run that ended without its normal end: how, in the lane's output (the
                         // release answer) and the inbox, and its last lines kept under the lease id
                         let ended = v.get("abnormal").filter(|_| !matches!(how, "cancelled" | "hung" | "disk")).and_then(|a| Some((a.get("line")?.as_str()?.to_string(), a.get("serious").and_then(|s| s.as_bool()).unwrap_or(false), a.get("tail").and_then(|t| t.as_str()).unwrap_or("").to_string())));
-                        if let Some((line, serious, tail)) = &ended {
+                        let keep = |text: &str| {
                             let path = self.home.join("lease-logs").join(format!("{id}.log"));
-                            let kept = std::fs::create_dir_all(path.parent().unwrap()).and_then(|_| std::fs::write(&path, format!("{line}\n{tail}\n")));
-                            let at = if kept.is_ok() { format!("; its last lines: {}", path.display()) } else { String::new() };
+                            std::fs::create_dir_all(path.parent().unwrap()).and_then(|_| std::fs::write(&path, text)).map(|_| path)
+                        };
+                        if let Some((line, serious, tail)) = &ended {
+                            let at = keep(&format!("{line}\n{tail}\n")).map_or(String::new(), |path| format!("; its last lines: {}", path.display()));
                             (self.publish)(hub_record(&self.machine, "", 0, "lease", if *serious { Sev::Warn } else { Sev::Info }, format!("{line} ({} of {} on {node}{at})", l.tag(), l.req.lane), tail.clone()));
                         }
                         // a failed test run: its output outlives the lease under the lease's id, its
                         // names in the release answer
+                        // a lease something else ended: how far its last run got, under the same id
+                        let cut = v.get("tail").and_then(|t| t.as_str()).filter(|_| ended.is_none());
+                        let kept_tail = cut.is_some_and(|text| match keep(text) {
+                            Ok(_) => true,
+                            Err(e) => { self.event(Sev::Warn, format!("{} of {}: its last lines are not kept: {e}", l.tag(), l.req.lane)); false }
+                        });
                         let failed: Vec<String> = v.get("failed_tests").and_then(|t| t.as_str()).map_or(Vec::new(), |text| {
-                            let path = self.home.join("lease-logs").join(format!("{id}.log"));
-                            if let Err(e) = std::fs::create_dir_all(path.parent().unwrap()).and_then(|_| std::fs::write(&path, text)) {
+                            if let Err(e) = keep(text) {
                                 self.event(Sev::Warn, format!("{} of {}: its failed tests' output is not kept: {e}", l.tag(), l.req.lane));
                             }
                             failed_names(text)
@@ -937,7 +947,7 @@ impl LeaseMaster {
                         if let Some(b) = noise.filter(|b| b.get("outside_cpu_pct").and_then(super::num).is_some_and(|c| c >= NOISY_CPU_PCT)) {
                             self.event(Sev::Warn, format!("{} of {} on {node} was not quiet: {}", l.tag(), l.req.lane, box_line(b)));
                         }
-                        summary = format!("{{\"cleanup\":{},\"node\":{},\"stopped\":{},\"freed_mb\":{freed:.0},\"leak\":{},\"ended\":{},\"box\":{},\"failed_tests\":[{}]}}", json_str(if cleanup_ok { "ok" } else { "unconfirmed: capacity unknown" }), json_str(node), killed.len(), leak.len(), ended.as_ref().map_or("null".to_string(), |e| json_str(&e.0)), noise.map_or("null".to_string(), |b| b.to_json()), failed.iter().map(|n| json_str(n)).collect::<Vec<_>>().join(","));
+                        summary = format!("{{\"cleanup\":{},\"node\":{},\"stopped\":{},\"freed_mb\":{freed:.0},\"leak\":{},\"ended\":{},\"kept_tail\":{kept_tail},\"box\":{},\"failed_tests\":[{}]}}", json_str(if cleanup_ok { "ok" } else { "unconfirmed: capacity unknown" }), json_str(node), killed.len(), leak.len(), ended.as_ref().map_or("null".to_string(), |e| json_str(&e.0)), noise.map_or("null".to_string(), |b| b.to_json()), failed.iter().map(|n| json_str(n)).collect::<Vec<_>>().join(","));
                         if let Some(path) = v.get("recovered").and_then(|r| r.as_str()) {
                             self.fetch_recovered(node, path, l);
                         }
@@ -1880,7 +1890,8 @@ mod tests {
                     let id = line.split_whitespace().nth(1).unwrap();
                     if let Some(extra) = line.splitn(4, ' ').nth(3) {
                         let v = makepad_strict_json::parse(extra.as_bytes()).unwrap();
-                        let i = v.get("inspect").unwrap();
+                        let none = makepad_strict_json::parse(b"{\"pid\":42}").unwrap();
+                        let i = v.get("inspect").unwrap_or(&none);
                         assert_eq!(i.get("pid").and_then(|p| p.as_u64()), Some(42));
                         for cmd in super::super::exec::inspect_commands(&strs(i.get("breaks")), &strs(i.get("probes")), i.get("paused").and_then(|p| p.as_bool()).unwrap_or(false)) {
                             if cmd == "resume" { self.paused.store(false, Ordering::SeqCst); }
@@ -2013,6 +2024,31 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A cancel's end asks its node how far the last run got and keeps that under the lease's id;
+    /// the node hears `released` either way. A plain release asks for nothing.
+    #[test]
+    fn a_cancel_keeps_how_far_the_run_got() {
+        let dir = std::env::temp_dir().join(format!("devhub-lease-cancel-tail-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (m, node, ..) = master(&dir);
+        m.refresh(&[("node-a".to_string(), "192.0.2.89:8797".to_string())]);
+        serve(&m, "lease", &Req::new("gapx", Kind::Build).to_json());
+        *node.end_answer.lock().unwrap() = Some("{\"ended\":\"L1\",\"killed\":[],\"freed_mb\":0,\"recovered\":null,\"leak\":[],\"tail\":\"run 1: still running\\nrunning for over a minute: a::hung\\n\"}".into());
+        let answer = serve(&m, "cancel", "L1 by=test");
+        assert!(answer.contains("\"kept_tail\":true"), "{answer}");
+        assert!(std::fs::read_to_string(dir.join("lease-logs/L1.log")).unwrap().contains("a::hung"));
+        let ends = |id: &str| node.calls.lock().unwrap().iter().filter(|(_, s, l)| s == "lease-end" && l.contains(id)).map(|(_, _, l)| l.clone()).collect::<Vec<_>>();
+        assert_eq!(ends("L1"), [r#"lease-end L1 released {"tail":true}"#]);
+        *node.end_answer.lock().unwrap() = None;
+        serve(&m, "lease", &Req::new("gapy", Kind::Build).to_json());
+        let answer = serve(&m, "release", "L2");
+        assert!(answer.contains("\"kept_tail\":false"), "{answer}");
+        assert_eq!(ends("L2"), ["lease-end L2 released"]);
+        assert!(!dir.join("lease-logs/L2.log").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The idle verdict reaches whoever holds the lease through its beat, not the inbox alone.
     #[test]
     fn an_idle_leases_beat_says_so() {
@@ -2109,7 +2145,7 @@ mod tests {
         m1.refresh(&hosts);
         assert_eq!(m1.end_unfollowed(&|x| x == followed), vec![gone.clone()]);
         assert!(serve(&m1, "beat", &gone).contains("\"how\":\"holder-dead\""));
-        assert!(node1.calls.lock().unwrap().iter().any(|c| c.1 == "lease-end" && c.2 == format!("lease-end {gone} holder-dead")), "its box cleans up now");
+        assert!(node1.calls.lock().unwrap().iter().any(|c| c.1 == "lease-end" && c.2 == format!("lease-end {gone} holder-dead {{\"tail\":true}}")), "its box cleans up now");
         assert!(recs.lock().unwrap().iter().any(|r| r.kind == "lease" && r.sev == Sev::Info && r.line.contains(&format!("{gone} ")) && r.line.contains("released: its run ended with the previous master")));
         assert!(serve(&m1, "beat", &followed).contains("\"state\":\"granted\""), "a record names it: its run is followed");
         assert!(serve(&m1, "beat", &lane).contains("\"state\":\"granted\""), "a lane's holder re-attaches itself");

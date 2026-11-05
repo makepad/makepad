@@ -270,6 +270,24 @@ fn a_master_restart_ends_nothing() {
     let allapps_lease = text(&allapps_running(&s).unwrap(), "lease");
     let (shard_id, shard_lease) = (text(&shard, "id"), text(&shard, "lease"));
 
+    // a client waits for the job: the kill cuts its call, and it asks again until it has the result
+    let socket = home.join("devhub/devhub.sock");
+    let waiter = std::thread::spawn(move || {
+        let client = makepad_remote::link::Client::new(makepad_remote::link::Target::Unix(socket.clone()), "observe");
+        let (mut cut, mut lines) = (0, Vec::new());
+        while !lines.iter().any(|l: &String| l.contains("\"state\":\"failed\"")) {
+            lines = crate::cli::retry_master_wait(|| {
+                let answer = crate::cli::ask(&client, None, "job", "job wait J1");
+                cut += answer.is_err() as u32;
+                answer
+            }, || {
+                std::thread::sleep(Duration::from_millis(50));
+                makepad_remote::link::Client::new(makepad_remote::link::Target::Unix(socket.clone()), "observe").conn().is_ok()
+            }).unwrap();
+        }
+        cut
+    });
+
     // the master dies under all three, and comes back on its state
     let _ = master.kill();
     let _ = master.wait();
@@ -288,6 +306,7 @@ fn a_master_restart_ends_nothing() {
     assert_eq!((text(&j, "state").as_str(), num(&j, "exit"), text(&j, "lease"), num(&j, "attempts")), ("failed", 7, job_lease, 1), "{}", j.to_json());
     let log = std::fs::read_to_string(home.join("devhub/jobs/J1.log")).unwrap();
     assert_eq!(log, "before\nafter\n", "the job's whole output, once");
+    assert!(waiter.join().unwrap() >= 1, "the kill cut the waiting client's call");
     // a run its node refuses is the job's result on its first box, not a lost box placed again
     let refused = |s: &makepad_strict_json::Value| s.get("jobs").and_then(|j| j.as_arr()).and_then(|j| j.iter().find(|j| text(j, "lane") == "refused").cloned());
     until("the refused job's result", &|s| refused(s).is_some_and(|j| !matches!(text(&j, "state").as_str(), "queued" | "leasing" | "running")));

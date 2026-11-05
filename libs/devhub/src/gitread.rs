@@ -266,6 +266,36 @@ pub fn differ_under<'a>(dir: &Path, from: &str, to: &str, paths: impl IntoIterat
     .unwrap_or(true)
 }
 
+/// The files that differ between commits `from` and `to` below each of `paths` (`git diff
+/// --name-only`), as (that path, the file below it; "" when the path itself came or went), for the
+/// repository of `dir`. None: a commit is not known here.
+pub fn files_differing_under<'a>(dir: &Path, from: &str, to: &str, paths: impl IntoIterator<Item = &'a str>) -> Option<Vec<(&'a str, String)>> {
+    let paths: Vec<&str> = paths.into_iter().collect();
+    with(dir, |p, repo| {
+        let f = resolve(p, repo, from)?;
+        let t = resolve(p, repo, to)?;
+        let (f, t) = (repo.read_commit(&f).ok()?.tree, repo.read_commit(&t).ok()?.tree);
+        let mut out = Vec::new();
+        for path in paths {
+            let bare = path.trim_end_matches('/');
+            match (repo.entry_at(&f, bare), repo.entry_at(&t, bare)) {
+                (Ok(None), Ok(None)) => {}
+                (Ok(Some(a)), Ok(Some(b))) if a == b => {}
+                (Ok(Some(a)), Ok(Some(b))) => match repo.diff_trees(&a, &b) {
+                    Ok(changes) => out.extend(changes.into_iter().map(|c| match c {
+                        makepad_git::TreeChange::Added { path: file, .. } | makepad_git::TreeChange::Deleted { path: file, .. } | makepad_git::TreeChange::Modified { path: file, .. } => (path, file),
+                    })),
+                    // (a file at the path, on either side)
+                    Err(_) => out.push((path, String::new())),
+                },
+                _ => out.push((path, String::new())),
+            }
+        }
+        Some(out)
+    })
+    .flatten()
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
@@ -360,6 +390,10 @@ mod tests {
         assert!(!super::differ_under(&d, &one, &two, ["libs/a"]) && super::differ_under(&d, &one, &two, ["libs/a", "libs/b/"]));
         assert!(super::differ_under(&d, &one, &two, []) && !super::differ_under(&d, &one, "rc-x", []));
         assert!(super::differ_under(&d, &one, &"ab".repeat(20), ["libs/a"]));
+        assert_eq!(super::files_differing_under(&d, &one, &one, ["libs/b"]), Some(Vec::new()));
+        assert_eq!(super::files_differing_under(&d, &one, &two, ["libs/a", "libs/b"]), Some(vec![("libs/b", "y.rs".to_string())]));
+        assert_eq!(super::files_differing_under(&d, &one, &two, ["libs/new"]), Some(Vec::new()));
+        assert!(super::files_differing_under(&d, &one, &"ab".repeat(20), ["libs/a"]).is_none());
         let e = super::entries_at(&d, &two, &["libs/b/y.rs", "nope", "big.bin"]).unwrap();
         assert_eq!(e[0], g(&d, &["rev-parse", &format!("{two}:libs/b/y.rs")]));
         assert_eq!((e[1].as_str(), e[2].len()), ("", 40));

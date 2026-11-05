@@ -36,7 +36,7 @@ pub const HELP: &str = "  job submit [--kind test] [--needs k=v,..] [--node N] [
   job bump <job|lease id..>             the manager's unstick: a waiting job or queued lease goes to the front of its queue class
   job inspect <id> <cmd..> | job resume <id> <P1> retry|restart|unwind | job release <id>
                                           a job paused on a parked panic keeps its box: look, resume or let go
-                                          (10 min with no action release it)
+                                          (while the panic stays parked; 10 min with no action release it)
   live start <app> [--node N|--needs k=v,..] [--visible] [--lane L] [--tree] [--env K=V ..] [--bin B] [-- args...]
         [--cost small|medium|large] [--est-min N] [--class name] [--priority interactive|background] [--jit key]
                                           the app under the JIT on a box (headless, or visible on a screen box), held
@@ -123,11 +123,13 @@ pub const HELP: &str = "  job submit [--kind test] [--needs k=v,..] [--node N] [
                                           fails is the answer (exit 1, also in the inbox) and the master keeps running
   master rollback                         the master execs back into the build its last restart replaced (kept
                                           beside it): a deploy rollback when a new build misbehaves
+  rolls [--node N] [n]                    the self-update's record, oldest first (default the last 30): what each box's
+                                          service rolled to and why (the files that changed), and how it ended
   promote --dry | --go                    work onto main as one commit per logical block
                                           (tools/devhub/promote_blocks.txt), then work re-points at main's tip;
                                           --dry prints the blocks and the scan, --go validates, pushes and moves";
 
-const WORDS: [&str; 17] = ["promote", "job", "live", "show", "shows", "lane", "lanes", "verify", "jitlegs", "warm", "after", "allapps", "push", "state", "watch", "timeline", "master"];
+const WORDS: [&str; 18] = ["rolls", "promote", "job", "live", "show", "shows", "lane", "lanes", "verify", "jitlegs", "warm", "after", "allapps", "push", "state", "watch", "timeline", "master"];
 
 fn master() -> Result<Client, String> {
     let c = control()?;
@@ -188,6 +190,10 @@ pub fn main(args: &[&str]) -> Option<i32> {
         return None;
     }
     let rest = &args[1..];
+    // (its home's file: no master needed)
+    if verb == "rolls" {
+        return Some(super::roll::rolls_cli(rest));
+    }
     // `lanes now` is the merge bot's
     if verb == "lanes" && rest.iter().any(|a| *a != "--json") {
         return None;
@@ -544,7 +550,8 @@ fn job(c: &Client, words: &[&str], json: bool) -> i32 {
                 if !told.is_empty() { return 3; }
             }
         }
-        // what a lease's end kept: a failed test run's output, or the last lines of an abnormal end
+        // what a lease's end kept: a failed test run's output, the last lines of an abnormal end, or
+        // how far a lease something else ended got
         ["result", id, rest @ ..] if id.starts_with('L') => match one(c, "job", &format!("job lease-log {id}")) {
             Ok(v) => {
                 let text = v.get("text").and_then(Value::as_str).unwrap_or("");
@@ -587,7 +594,12 @@ fn job(c: &Client, words: &[&str], json: bool) -> i32 {
             if list.is_empty() {
                 return "no open jobs\n".into();
             }
-            list.iter().map(|j| format!("{}\n", super::job::render(j, false).lines().next().unwrap_or(""))).collect()
+            list.iter().map(|j| {
+                let row = super::job::render(j, false);
+                let first = row.lines().next().unwrap_or("");
+                // what a waiting job waits for (a lane read `leasing` for 10 min behind its own tree's lease, 11-05)
+                if j.state == "leasing" && !j.note.is_empty() { format!("{first}\n  note: {}\n", j.note) } else { format!("{first}\n") }
+            }).collect()
         }),
         [verb @ ("cancel" | "release" | "bump"), ids @ ..] if !ids.is_empty() => done(one(c, "job", &format!("job {verb} {}", ids.join(" "))), json, &|v| v.as_arr().unwrap_or(&[]).iter().map(flat).collect()),
         ["rerun", id] => done(one(c, "job", &format!("job rerun {id}")), json, &flat),
@@ -687,7 +699,7 @@ fn live_as(c: &Client, words: &[&str], json: bool, me: Option<String>) -> i32 {
             let req = format!("{{\"loader\":{},\"priority\":{},\"cost\":{},\"class\":{},\"est_min\":{est_min},\"tree\":{use_tree},\"app\":{},\"repo_dir\":{},\"lane\":{},\"agent\":{},\"needs\":{},\"node\":{},\"visible\":{visible},\"test\":{test},\"test_args\":[{}],\"env\":[{}],\"also\":[{}]}}", json_str(&loader), json_str(priority), json_str(&cost), json_str(&class), json_str(app), json_str(&tree.to_string_lossy()), json_str(&lane), json_str(&std::env::var("DEVHUB_AGENT").unwrap_or_default()), json_str(&needs), json_str(&node), test_args.iter().map(|a| json_str(a)).collect::<Vec<_>>().join(","), env.join(","), std::env::var("DEVHUB_ALSO").unwrap_or_default().split_whitespace().map(json_str).collect::<Vec<_>>().join(","));
             done(retry_master(|| one(c, "live", &format!("live start {req}"))), json, &flat)
         }
-        ["act", id, cmd @ ..] if !cmd.is_empty() => done(one(c, "live", &format!("{lv} act {id} {}", cmd.join(" "))), json, &|v| {
+        ["act", id, cmd @ ..] if !cmd.is_empty() => done(one(c, "live", &format!("{lv} act {id} {}", makepad_remote::app::typed_line(&cmd.iter().map(|w| w.to_string()).collect::<Vec<_>>()))), json, &|v| {
             let mut out: String = v.get("lines").and_then(|a| a.as_arr()).unwrap_or(&[]).iter().map(|l| format!("{}\n", l.as_str().unwrap_or(""))).collect();
             out.push_str(&format!("({} ms)\n", v.get("ms").and_then(|m| m.as_u64()).unwrap_or(0)));
             out

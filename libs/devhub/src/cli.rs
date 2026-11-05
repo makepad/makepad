@@ -53,17 +53,30 @@ pub(crate) fn control() -> Result<Client, String> {
 
 /// Submission waits out master restarts; application errors still stand.
 pub(crate) fn retry_master<T>(call: impl FnMut() -> Result<T, String>) -> Result<T, String> {
-    retry_master_wait(call, || std::thread::sleep(Duration::from_secs(2)))
+    retry_master_wait(call, || {
+        std::thread::sleep(Duration::from_secs(2));
+        control().is_ok()
+    })
 }
 
-pub(crate) fn retry_master_wait<T>(mut call: impl FnMut() -> Result<T, String>, mut wait: impl FnMut()) -> Result<T, String> {
-    let mut said = false;
+/// `beat` waits a while and says whether the master answers now. Each change is said once, because
+/// a call that stays open (`job wait`, `test --live`) can run for long after the master is back:
+/// "waiting" as its last line read as a client stuck on a master that had been up for 18 min (11-05).
+pub(crate) fn retry_master_wait<T>(mut call: impl FnMut() -> Result<T, String>, mut beat: impl FnMut() -> bool) -> Result<T, String> {
+    let mut told = None;
     loop {
         match call() {
             Ok(v) => return Ok(v),
             Err(e) if e.starts_with("no devhub master at ") || e.contains("link lost") || e.contains("hub connection ended") => {
-                if !said { eprintln!("master not reachable: waiting"); said = true; }
-                wait();
+                if told.is_none() {
+                    eprintln!("master not reachable: waiting");
+                    told = Some(false);
+                }
+                let up = beat();
+                if told != Some(up) {
+                    eprintln!("{}", if up { "the master is back: asking again" } else { "master not reachable: waiting" });
+                    told = Some(up);
+                }
             }
             Err(e) => return Err(e),
         }

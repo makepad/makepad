@@ -1128,6 +1128,8 @@ pub struct Job {
     pub panic: Option<JobPanic>,
     /// when an agent last acted on it while paused (inspect, resume): the idle timeout counts from it
     pub touched_ms: u64,
+    /// its box is being released while it is paused: it ends `panicked`
+    pub released: bool,
     /// when a `job wait` first asked for it while it ran (an agent is blocked on it); 0 once its
     /// wait went to the agent-wait ledger
     pub waited_ms: u64,
@@ -1800,6 +1802,7 @@ pub fn job_value(j: &Job) -> Value {
         ("tail", strs(&j.tail)),
         ("panic", panic),
         ("touched_ms", int(j.touched_ms)),
+        ("released", Value::Bool(j.released)),
         ("waited_ms", int(j.waited_ms)),
         ("idle_told", s(&j.idle_told)),
         ("note", s(&j.note)),
@@ -1861,6 +1864,7 @@ pub fn job_from(v: &Value) -> Job {
         tail: strs_from(o, "tail"),
         panic: p.map(|p| JobPanic { id: text(Some(p), "id"), pid: uint(Some(p), "pid") as u32, message: text(Some(p), "message"), thread: text(Some(p), "thread"), location: text(Some(p), "location"), at_ms: uint(Some(p), "at_ms") }),
         touched_ms: uint(o, "touched_ms"),
+        released: flag(o, "released", false),
         waited_ms: uint(o, "waited_ms"),
         idle_told: text(o, "idle_told"),
         note: text(o, "note"),

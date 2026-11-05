@@ -21,6 +21,12 @@ fn eta(ms: u64) -> String {
     format!("; expected start in ~{} min", eta_min(ms))
 }
 
+/// [`eta`] of a queued lease's row.
+fn eta_of(v: &Value) -> String {
+    if v.get("eta_late").and_then(Value::as_bool).unwrap_or(false) { return "; no expected start: what it waits on is past its estimate".into(); }
+    eta(n(v, "eta_ms") as u64)
+}
+
 fn eta_min(ms: u64) -> u64 {
     let min = ms.div_ceil(60_000);
     if min > 10 { min.div_ceil(5) * 5 } else { min }
@@ -37,7 +43,7 @@ fn timed_boxes(leases: &[Value]) -> Vec<String> {
             "queued" => {
                 let at = s(v, "eta_box");
                 let ms = n(v, "eta_ms") as u64;
-                let when = if ms == 0 { "next".to_string() } else { format!("in ~{} min", eta_min(ms)) };
+                let when = if v.get("eta_late").and_then(Value::as_bool).unwrap_or(false) { "behind a run past its estimate".to_string() } else if ms == 0 { "next".to_string() } else { format!("in ~{} min", eta_min(ms)) };
                 boxes.entry(if at.is_empty() { "(no box yet)".into() } else { at }).or_default().1.push((ms, format!("{who} {when}")));
             }
             "ended" => {}
@@ -96,7 +102,11 @@ pub const HELP: &str = "  lease <kind> [--node N|--needs k=v,..] [--lane L] [--p
                                           work, `target/..`, `tmp/..`)
   release <id>                            end a lease (says how its node cleaned up)
   lease <id> cancel | cancel <id>         the user's cancel of ONE lease: its processes stop, its slot frees, the
-                                          lane is kept off that node for 30 min (unless it names it with --node)
+                                          lane is kept off that node for 30 min (unless it names it with --node);
+                                          how far its last run got stays: `job result L<id> --tail`
+  lease <id> why                          what a running lease does now, on that lease (a second lease on its tree
+                                          waits for it): processes, threads and kernel waits, gdb's stacks where the
+                                          box lets it attach, tests running over a minute, the last lines
   override <node> [--to <lane>]           take the node now: its leases end; to the user (dev off) or a lane
   evict <lane|agent>                      end every lease of it, clean up, block new ones; unblock <lane|agent>
   blocked                                 the lanes and agents the user blocked
@@ -167,6 +177,8 @@ fn cancelled_notice(id: &str, at: CancelledAt) -> String {
 }
 
 const BEAT: Duration = Duration::from_secs(2);
+/// How often a call waiting for its tests says it still does (silence read as a hang, 11-05).
+const STILL_RUNNING_EVERY: Duration = Duration::from_secs(300);
 /// How long a holder waits for its node hub to reattach after a restart.
 const REATTACH_FOR: Duration = Duration::from_secs(900);
 /// After the master is back, how long its errors may still be its node links coming up.
@@ -516,7 +528,7 @@ fn acquire(c: &Client, req: &Req) -> Result<Held, i32> {
         let line = match state.as_str() {
             // not ranked yet (the master just took it back after a restart): no "0th in queue ()"
             "queued" if n(&v, "pos") < 1.0 => format!("{id} {}: queued, not ranked yet", req.kind.as_str()),
-            "queued" => format!("{id} {}: {} in queue ({}){}", req.kind.as_str(), ordinal(n(&v, "pos") as usize), s(&v, "reason"), eta(n(&v, "eta_ms") as u64)),
+            "queued" => format!("{id} {}: {} in queue ({}){}", req.kind.as_str(), ordinal(n(&v, "pos") as usize), s(&v, "reason"), eta_of(&v)),
             "starting" => format!("{id} {}@{}: granted, setting up", req.kind.as_str(), s(&v, "node")),
             "granted" => {
                 if !note.is_empty() { eprintln!("{id} {}@{}: granted{note}", req.kind.as_str(), s(&v, "node")); }
@@ -777,7 +789,8 @@ fn released_line(v: &Value) -> String {
     let quiet = c.get("box").filter(|b| b.get("samples").is_some()).map_or(String::new(), |b| format!("\nbox {}: {}", s(c, "node"), super::master::box_line(b)));
     let failed = super::master::strs(c.get("failed_tests"));
     let failed = if failed.is_empty() { String::new() } else { format!("\nfailed tests: {}; their output: `devhub job result {} --tail`", failed.join(", "), s(v, "id")) };
-    format!("{line}{ended}{quiet}{failed}")
+    let kept = if failed.is_empty() && c.get("kept_tail").and_then(Value::as_bool) == Some(true) { format!("\nhow far it got: `devhub job result {} --tail`", s(v, "id")) } else { String::new() };
+    format!("{line}{ended}{quiet}{failed}{kept}")
 }
 
 fn shell_quote(v: &str) -> String {
@@ -1267,7 +1280,6 @@ fn overlay_selftest(args: &[&str]) -> i32 {
 
 fn live_test(mut o: Opts, pkg: &str, args: &[String]) -> i32 {
     let started = Instant::now();
-    let mut said = false;
     let result = (|| -> Result<crate::state::Live, String> {
         let (root, _) = lane_root().ok_or("test --live: run it inside the lane's worktree")?;
         let c = retry_master(master)?;
@@ -1280,7 +1292,7 @@ fn live_test(mut o: Opts, pkg: &str, args: &[String]) -> i32 {
             v.as_arr()?.iter().map(crate::state::live_from).find(|x| x.test && x.lane == o.req.lane && x.app == pkg && x.test_args == selected)
         };
         let measured_ms = status().and_then(|x| x.patch).and_then(|p| p.tests).map_or(0, |t| t.ms.max(0.0) as u64);
-        let notice_after = Duration::from_millis(measured_ms.saturating_add(120_000));
+        let mut notice_after = Duration::from_millis(measured_ms.saturating_add(120_000));
         let v = retry_master(|| {
             // Keep the request open without a deadline. A separate channel reads its phase
             // once it exceeds the previous test time plus two minutes.
@@ -1302,7 +1314,7 @@ fn live_test(mut o: Opts, pkg: &str, args: &[String]) -> i32 {
                     Ok(makepad_remote::Event::Closed(_, why)) => return Err(why),
                     Err(false) => return Err("the hub connection ended".into()),
                 }
-                if !said && started.elapsed() > notice_after {
+                if started.elapsed() > notice_after {
                     let x = status();
                     let phase = match x.as_ref() {
                         None => "waiting for a live job",
@@ -1316,8 +1328,8 @@ fn live_test(mut o: Opts, pkg: &str, args: &[String]) -> i32 {
                             _ => "patching",
                         },
                     };
-                    eprintln!("still running: {phase}");
-                    said = true;
+                    eprintln!("still running: {phase} ({} min)", started.elapsed().as_secs() / 60);
+                    notice_after = started.elapsed() + STILL_RUNNING_EVERY;
                 }
             }
         })?;
@@ -1505,7 +1517,7 @@ fn queue(c: &Client, all: bool) -> i32 {
         let at = if node.is_empty() { String::new() } else { format!("@{node}") };
         let tail = match s(&v, "state").as_str() {
             "queued" if n(&v, "pos") < 1.0 => format!("queued, not ranked yet, waiting {} s", n(&v, "wait_s")),
-            "queued" => format!("{} in queue ({}) waiting {} s{}", ordinal(n(&v, "pos") as usize), s(&v, "reason"), n(&v, "wait_s"), eta(n(&v, "eta_ms") as u64)),
+            "queued" => format!("{} in queue ({}) waiting {} s{}", ordinal(n(&v, "pos") as usize), s(&v, "reason"), n(&v, "wait_s"), eta_of(&v)),
             "ended" => format!("ended ({}){}", s(&v, "how"), if s(&v, "reason").is_empty() { String::new() } else { format!(": {}", s(&v, "reason")) }),
             st => {
                 let info = v.get("info").filter(|i| !i.is_null());
@@ -1756,6 +1768,21 @@ fn cancel(id: &str) -> i32 {
     }
 }
 
+/// `lease <id> why`: what a running lease does now, asked on that lease.
+fn why(id: &str) -> i32 {
+    let c = match master() {
+        Ok(c) => c,
+        Err(e) => return fail(e),
+    };
+    match lane_node(&c, "", Some(id)).and_then(|node| node_one(&c, &node, "lease-why", &format!("lease-why {id}"))) {
+        Ok(v) => {
+            print!("{}", s(&v, "text"));
+            0
+        }
+        Err(e) => fail(e),
+    }
+}
+
 /// The lease words; None: not one of them.
 pub fn cli(args: &[&str]) -> Option<i32> {
     let word = *args.first()?;
@@ -1780,6 +1807,7 @@ pub fn cli(args: &[&str]) -> Option<i32> {
     match args {
         ["prof", rest @ ..] => if let Err(e) = super::prof::Query::parse(rest) { eprintln!("makepad devhub {e}"); return Some(2); },
         ["lease", id, "cancel"] | ["cancel", id] => return Some(cancel(id)),
+        ["lease", id, "why"] => return Some(why(id)),
         ["lease", rest @ ..] => return Some(lease(rest)),
         ["overlay", "selftest", rest @ ..] => return Some(overlay_selftest(rest)),
         ["overlay", word @ ("status" | "why"), lane, rest @ ..] => return Some(overlay_inspect(word, lane, rest)),

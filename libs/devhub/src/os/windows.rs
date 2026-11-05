@@ -422,6 +422,15 @@ pub fn in_group(pid: u32, leader: u32, hold: &Hold) -> bool {
 }
 
 /// The processes in the run's job (none for a run with no job left).
+pub fn group_pids(_pid: u32, _start: u64, hold: &Hold) -> Vec<u32> {
+    job_pids(hold)
+}
+
+/// (No thread view here: the processes alone.)
+pub fn processes_view(pids: &[u32]) -> String {
+    pids.iter().map(|p| format!("pid {p}\n")).collect()
+}
+
 pub fn job_pids(hold: &Hold) -> Vec<u32> {
     hold.0.as_ref().map(Job::pids).unwrap_or_default()
 }

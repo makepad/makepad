@@ -92,6 +92,8 @@ pub struct Local {
     /// programs run in the hub's own process
     include_self: bool,
     hitch_ms: f64,
+    /// When this hub started: which JITs' first records nobody has seen.
+    started_ms: u64,
     publish: Publish,
     state: Mutex<State>,
     /// Serialized by the scanner, outside the lock; `ps` never waits on the HTTP probe.
@@ -111,6 +113,7 @@ impl Local {
             machine: machine.to_string(),
             include_self,
             hitch_ms,
+            started_ms: proto::wall_ms(),
             publish,
             state: Mutex::new(State { jits: BTreeMap::new(), jit_state: BTreeMap::new(), recent: BTreeMap::new(), cpu: CpuMeter::default(), crashed: Default::default() }),
             ai_hub: Mutex::new(ai_hub_endpoint().map(|_| AiHub { why: "health probe pending".into(), ..AiHub::default() }.to_json())),
@@ -266,17 +269,23 @@ impl Local {
     /// One JIT's life: its events while it runs, then how it ended.
     fn follow(self: Arc<Self>, jit: Jit) {
         if jit.observe {
-            // requests posted before this hub attached (the feed starts now): the JIT keeps them
-            if let Ok(lines) = jit.client.cmd("engine-requests after=0") {
-                for l in lines.flatten() {
-                    let Some(body) = l.strip_prefix('{').filter(|_| l.contains("\"summary\"")) else { continue };
-                    let ev = format!("{{\"event\":\"engine_request\",{body}");
-                    if let Some(r) = proto::from_jit_event(&self.machine, &jit.app, jit.pid, &ev, self.hitch_ms) {
-                        self.emit(r);
+            // A JIT that started under this hub: the scan finds it up to `SCAN` late, after its first
+            // records (a compile error parks 0.3 s in), and no hub has seen those: its feed starts at
+            // its first record. An older JIT's were another hub's: the feed starts now.
+            let born_here = jit.started_ms >= self.started_ms;
+            // requests posted before an older JIT's feed: the JIT keeps them
+            if !born_here {
+                if let Ok(lines) = jit.client.cmd("engine-requests after=0") {
+                    for l in lines.flatten() {
+                        let Some(body) = l.strip_prefix('{').filter(|_| l.contains("\"summary\"")) else { continue };
+                        let ev = format!("{{\"event\":\"engine_request\",{body}");
+                        if let Some(r) = proto::from_jit_event(&self.machine, &jit.app, jit.pid, &ev, self.hitch_ms) {
+                            self.emit(r);
+                        }
                     }
                 }
             }
-            let mut feed = jit.client.feed("observe");
+            let mut feed = if born_here { jit.client.feed_from("observe", 0) } else { jit.client.feed("observe") };
             let mut log_off = 0u64;
             let mut log_look = Instant::now();
             loop {

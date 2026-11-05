@@ -61,12 +61,12 @@ fn with_load(answer: String, load: impl FnOnce() -> Option<(f64, f64)>) -> Strin
     }
 }
 
-pub const WORDS: &[&str] = &["overlay-selftest", "overlay-status", "overlay-why", "lease-start", "lease-run", "lease-log", "lease-end", "lease-beat", "lease-jits", "lease-kill", "ship-have", "ship-put", "ship-link", "ship-done", "lease-owns", "hub-restart", "service-restart", "service-health", "get-ls", "get-read", "policy", "lease-conf", "caps", "disk", "heap", "recover-get", "recover-del"];
+pub const WORDS: &[&str] = &["overlay-selftest", "overlay-status", "overlay-why", "lease-start", "lease-run", "lease-log", "lease-end", "lease-beat", "lease-jits", "lease-kill", "lease-why", "ship-have", "ship-put", "ship-link", "ship-done", "lease-owns", "hub-restart", "service-restart", "service-health", "get-ls", "get-read", "policy", "lease-conf", "caps", "disk", "heap", "recover-get", "recover-del"];
 
 /// Marks every process a lease's runs start ([`lease_mark`]): a process that moved to its own session (a
 /// WM's apps, a detached helper) is still stopped with the lease. One that outlives its lease on
 /// purpose (the check server) removes it.
-const LEASE_ENV: &str = "MAKEPAD_DEVHUB_LEASE";
+use makepad_remote::discovery::LEASE_ENV;
 /// The mark of the lease a hub itself runs in (a devhub test on a box), passed on to its runs: the
 /// box's end of that lease finds what they left too, though they carry their own hub's mark in
 /// their own session (a killed test's busy loop burned a core for four hours, 11-04).
@@ -604,6 +604,8 @@ pub(super) fn valid_name(s: &str) -> bool {
 
 /// The lines of a run's log an abnormal end keeps.
 const TAIL_LINES: usize = 20;
+/// The lines of a run's log `lease-why` shows.
+const WHY_LINES: usize = 12;
 
 /// How a run ended when that was not its normal end: a signal, an exit nobody saw, or a test run
 /// whose output ends without libtest's summary. (its line, whether it is more than a failure, the
@@ -623,6 +625,30 @@ fn failed_tests(runs: &[Arc<Run>]) -> Option<String> {
         let tail = log_tail(&r.log, usize::MAX);
         tail.lines().any(|l| l.starts_with("test result: FAILED")).then_some(tail)
     })
+}
+
+/// The tests of a libtest log that said they have run for over a minute, with no result since.
+fn tests_running(log: &str) -> Vec<&str> {
+    let mut running = Vec::new();
+    for test in log.lines().filter_map(|l| l.strip_prefix("test ")) {
+        if let Some(name) = test.strip_suffix(" has been running for over 60 seconds") {
+            running.push(name);
+        } else if let Some((name, _)) = test.split_once(" ... ") {
+            running.retain(|n| *n != name);
+        }
+    }
+    running
+}
+
+/// How far a run got: its state, the tests running long, and the last `n` lines of its log.
+fn got_to(r: &Run, n: usize) -> String {
+    r.adopted_exit();
+    let state = (*r.exit.lock().unwrap()).map_or("still running".to_string(), |e| format!("ended with exit {e}"));
+    let tail = log_tail(&r.log, usize::MAX);
+    let long = tests_running(&tail);
+    let long = if long.is_empty() { String::new() } else { format!("\nrunning for over a minute: {}", long.join(", ")) };
+    let lines: Vec<&str> = tail.lines().collect();
+    format!("run {}: {state}{long}\n{}\n", r.n, lines[lines.len().saturating_sub(n)..].join("\n"))
 }
 
 /// The last `n` lines of a log (its last 64 KB at most).
@@ -1347,6 +1373,7 @@ impl Exec {
             "lease-beat" => vec![self.beat(rest)],
             "lease-jits" => vec![lease_jits_of(self, rest)],
             "lease-kill" => vec![lease_kill(self, rest)],
+            "lease-why" => vec![lease_why(self, rest)],
             "overlay-status" | "overlay-why" => self.overlay_inspect(word, rest),
             "overlay-selftest" => vec![self.overlay_selftest(rest)],
             "ship-done" => {
@@ -2389,8 +2416,9 @@ impl Exec {
         self.disk_use.lock().unwrap().get(id).and_then(|u| Some(u.own_mb.saturating_sub(u.first_own_mb?) << 20)).unwrap_or(0)
     }
 
-    /// `lease-end <id> <how> [{"inspect":{"pid":N,"breaks":[..],"probes":[..],"paused":true}}]`;
-    /// the answer carries the box's load measured after the teardown ([`with_load`]).
+    /// `lease-end <id> <how> [{"inspect":{"pid":N,"breaks":[..],"probes":[..],"paused":true},"tail":true}]`;
+    /// the answer carries the box's load measured after the teardown ([`with_load`]). `tail`: a
+    /// lease something else ended, whose `how` here may well read `released`: the master knows.
     fn end_cmd(&self, rest: &str) -> String {
         let mut w = rest.splitn(3, ' ');
         let (id, how, extra) = (w.next().unwrap_or(""), w.next().unwrap_or("released"), w.next().unwrap_or("").trim());
@@ -2439,7 +2467,10 @@ impl Exec {
         }
         let l = self.leases.lock().unwrap().remove(id);
         let e = match l {
-            Some(l) => return self.end_with_inspect(l, how, &inspect),
+            Some(l) => {
+                let keep_tail = extra.as_ref().and_then(|v| v.get("tail")).and_then(|t| t.as_bool()) == Some(true);
+                return self.end_with_inspect(l, how, &inspect, keep_tail);
+            }
             None if !inspect.is_empty() => format!("{{\"ended\":{},\"killed\":[],\"freed_mb\":0,\"recovered\":null,\"leak\":[]}}", json_str(id)),
             // no record of it here (never started, or the node's state went): its marked
             // processes are what can be left of it
@@ -2486,10 +2517,10 @@ impl Exec {
 
     /// Ends a lease taken out of the table: processes, scratch, workspace; the answer line.
     fn end(&self, l: Lease, how: &str) -> String {
-        self.end_with_inspect(l, how, "")
+        self.end_with_inspect(l, how, "", how != "released")
     }
 
-    fn end_with_inspect(&self, mut l: Lease, how: &str, inspect: &str) -> String {
+    fn end_with_inspect(&self, mut l: Lease, how: &str, inspect: &str, keep_tail: bool) -> String {
         self.endings.lock().unwrap().entry(l.id.clone()).or_insert_with(|| "{\"pending\":\"lease cleanup in progress\"}".into());
         let ended = crate::proto::wall_ms();
         if let Some(peak) = sample_runs(&l.runs) { l.peak_ram_bytes = Some(l.peak_ram_bytes.unwrap_or(0).max(peak)); }
@@ -2502,6 +2533,9 @@ impl Exec {
         let abnormal = l.runs.last().and_then(|r| { r.adopted_exit(); let exit = *r.exit.lock().unwrap(); exit.and_then(|e| abnormal_end(&l.id, l.kind, r, e)) });
         // (and before the cleanup below removes the run logs)
         let failed = failed_tests(&l.runs).map_or("null".into(), |t| json_str(&t));
+        // a lease something else ended keeps how far its last run got: a cancelled hung test left
+        // nothing that named it (11-05)
+        let cut = l.runs.last().filter(|_| keep_tail).map_or("null".into(), |r| json_str(&got_to(r, usize::MAX)));
         note_stopping(&l.id, &l.tmp, job_pids(&l.runs));
         let (mut killed, mut leak) = stop_runs(&l.runs, &makepad_remote::discovery::registry_dir(), false);
         let (strays, stray_leak) = stop_strays(&lease_mark(&self.state, &l.id), self.opts.grace);
@@ -2589,7 +2623,7 @@ impl Exec {
         let noise = self.noise.lock().unwrap().remove(&l.id).filter(|n| n.samples > 0).map_or(String::new(), |n| format!(",\"box\":{}", n.json()));
         #[cfg(not(unix))]
         let noise = "";
-        let receipt = format!("{},\"source\":{},\"class\":{},\"phases\":{},\"peak_ram_gb\":{},\"cpu_seconds\":{},\"abnormal\":{abnormal},\"failed_tests\":{failed}{inspect}{noise}}}", line.trim_end_matches('}'), json_str(&l.source), json_str(&l.first_run), profile.json(), l.peak_ram_bytes.map_or("null".into(), |n| (n as f64 / (1u64 << 30) as f64).to_string()), cpu.map_or("null".into(), |n| n.to_string()));
+        let receipt = format!("{},\"source\":{},\"class\":{},\"phases\":{},\"peak_ram_gb\":{},\"cpu_seconds\":{},\"abnormal\":{abnormal},\"failed_tests\":{failed},\"tail\":{cut}{inspect}{noise}}}", line.trim_end_matches('}'), json_str(&l.source), json_str(&l.first_run), profile.json(), l.peak_ram_bytes.map_or("null".into(), |n| (n as f64 / (1u64 << 30) as f64).to_string()), cpu.map_or("null".into(), |n| n.to_string()));
         if let Err(e) = self.save_end(&l.id, &receipt) { return err(e); }
         receipt
     }
@@ -3294,7 +3328,7 @@ pub fn inspect_release(pid: u32, breaks: &[String], probes: &[String], paused: b
     if cmds.is_empty() {
         return Vec::new();
     }
-    let Some(app) = makepad_remote::discovery::find(&pid.to_string()) else {
+    let Some(app) = makepad_remote::discovery::by_pid(pid) else {
         return if os::proc_start(pid).is_some() { vec![format!("pid {pid}: no JIT (failed)")] } else { Vec::new() };
     };
     let client = makepad_remote::link::Client::new(makepad_remote::link::Target::of(&app), "devhub");
@@ -3454,6 +3488,23 @@ fn lease_kill(x: &Exec, rest: &str) -> String {
     }
     os::signal_one(pid, true);
     format!("{{\"killed\":{pid}}}")
+}
+
+/// `lease-why <id>`: what a lease's processes do now and how far its last run got, on that lease:
+/// a second lease on its tree waits for this very one (three capture leases did, 11-05).
+fn lease_why(x: &Exec, id: &str) -> String {
+    // no process walks under the lease table lock
+    let Some(runs) = x.leases.lock().unwrap().get(id).map(|l| l.runs.clone()) else { return err(format!("no lease {id} on {}", x.machine)) };
+    let (mark, me) = (lease_mark(&x.state, id), std::process::id());
+    let mut pids: Vec<u32> = runs.iter().filter(|r| r.pid != 0).flat_map(|r| os::group_pids(r.pid, r.start, &r.hold))
+        .chain(os::with_env(&format!("{LEASE_ENV}={mark}")))
+        .chain(os::with_env(&format!("{LEASE_OUTER_ENV}={mark}")))
+        .filter(|p| *p != me)
+        .collect();
+    pids.sort_unstable();
+    pids.dedup();
+    let got = runs.last().map_or("no run yet\n".to_string(), |r| got_to(r, WHY_LINES));
+    format!("{{\"text\":{}}}", json_str(&format!("{}{got}", os::processes_view(&pids))))
 }
 
 /// Whether `pid` (a JIT app) runs in a headless lease here, which a WM restart leaves alone: in
@@ -4660,6 +4711,49 @@ mod tests {
         assert!(text.contains("test a::b ... FAILED") && text.contains("test result: FAILED"), "{text}");
         assert!(x.handle("lease-start", r#"{"id":"L2","lane":"t","kind":"test","rev":null}"#)[0].contains("\"ok\":1"));
         assert!(field(&end("L2"), "failed_tests").is_some_and(|v| v.is_null()));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_long_test_with_no_result_is_still_running() {
+        let log = "test a::quick ... ok\ntest b::hung has been running for over 60 seconds\ntest c::slow has been running for over 60 seconds\ntest c::slow ... ok\n";
+        assert_eq!(tests_running(log), ["b::hung"]);
+    }
+
+    /// A run that went quiet: its holder reads it on its own lease, and only a lease something else
+    /// ended keeps how far it got.
+    #[cfg(unix)]
+    #[test]
+    fn a_hung_run_can_be_read_and_a_cancel_keeps_its_last_lines() {
+        let (x, base, _events) = test_exec("why", Opts::default());
+        let hang = |id: &str| {
+            assert!(x.handle("lease-start", &format!(r#"{{"id":"{id}","lane":"t","kind":"test","rev":null}}"#))[0].contains("\"ok\":1"));
+            let hung: &[&str] = &["/bin/sh", "-c", "echo 'test a::hung has been running for over 60 seconds'; exec sleep 100"];
+            let n = field(&x.handle("lease-run", &format!("{id} . {}", b64(hung)))[0], "n").and_then(|v| super::super::num(&v)).unwrap();
+            loop {
+                let a = x.handle("lease-log", &format!("{id} {n} 0"));
+                if !a[0].contains("\"data\":\"\"") { break; }
+                assert!(a[0].contains("\"exit\":null"), "{a:?}");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        // (the end runs behind the first ask; a refused one is no pending one: this test hung on that)
+        let end = |line: &str| loop {
+            let a = x.handle("lease-end", line);
+            assert!(field(&a[0], "err").is_none(), "{a:?}");
+            if field(&a[0], "tail").is_some() { return a[0].clone(); }
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        hang("WH1");
+        let why = field(&x.handle("lease-why", "WH1")[0], "text").and_then(|v| v.as_str().map(str::to_string)).unwrap();
+        assert!(why.contains("run 1: still running\nrunning for over a minute: a::hung\n"), "{why}");
+        #[cfg(target_os = "linux")]
+        assert!(why.contains("sleep 100"), "{why}");
+        let kept = field(&end(r#"WH1 released {"tail":true}"#), "tail").and_then(|v| v.as_str().map(str::to_string)).unwrap();
+        assert!(kept.starts_with("run 1: still running\nrunning for over a minute: a::hung\n") && kept.contains("test a::hung has been"), "{kept}");
+        hang("WH2");
+        assert!(field(&end("WH2 released"), "tail").is_some_and(|v| v.is_null()));
+        assert!(x.handle("lease-why", "L404")[0].contains("no lease L404"));
         let _ = std::fs::remove_dir_all(&base);
     }
 

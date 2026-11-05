@@ -2,7 +2,7 @@
 # `block <title>` starts a block; each line after is a path pattern (* matches anything, / too).
 # A path belongs to the first block that matches; the last block takes the rest.
 
-block Vendored and generated: bindings, compression, physics, text
+block Vendored and generated
 libs/brotli/*
 libs/windows/*
 libs/vulkan/*
@@ -38,7 +38,7 @@ tools/wayland_codegen/*
 tools/dbus_codegen/*
 tools/bindgen_xml.rs
 
-block Foundation crates: core utilities, fonts, accessibility, shared API crates
+block Foundation crates
 platform/build_gen.rs
 libs/web_manifest/*
 libs/csg/csg_math/*
@@ -89,7 +89,7 @@ tools/ci/*
 tools/ci_leg/*
 ci.splash
 
-block Script and Splash: compute kernels, shader compiler, wasm tools
+block Script and Splash
 platform/script/*
 platform/shader/*
 platform/live_*
@@ -100,7 +100,7 @@ libs/stitch/*
 splash.md
 makepad.splash
 
-block Platform and HAL: backends move out of platform/src/os
+block Platform and HAL
 platform/*
 libs/remote/*
 libs/gpu_trace/*
@@ -109,7 +109,7 @@ libs/app_host/*
 libs/prof_stream/*
 libs/system_speech/*
 
-block Draw and widgets: families, style sheets, core, text
+block Draw and widgets
 draw/*
 widgets/*
 code_editor/*
@@ -131,13 +131,13 @@ libs/media_view/*
 libs/live_frame/*
 libs/change_report/*
 
-block devhub: leases, jobs, landing train, verifier, CI
+block devhub
 libs/devhub/*
 apps/devhub/*
 tools/devhub/*
 tools/fleet-identity.md
 
-block Render and modelling: render graph, CSG, SDF, scene, tween
+block Render and modelling
 libs/render/*
 libs/render_*/*
 libs/scene/*
@@ -164,7 +164,7 @@ libs/fab/*
 libs/fab_tour/*
 libs/mb3d/*
 
-block Audio and Score: synth kit, live scores, players, MIDI
+block Audio and Score
 libs/audio_*/*
 libs/score*/*
 libs/midi_library/*
@@ -175,7 +175,7 @@ libs/piano_model/*
 libs/synth_panel/*
 libs/video_flow/*
 
-block AI and hubs: hub, models, CUDA, chat, translator
+block AI and hubs
 libs/ai/*
 apps/aihub/*
 apps/ai-hub/*
@@ -190,7 +190,7 @@ apps/translator/*
 examples/aichat/*
 examples/teamtalk/*
 
-block Browser: out-of-process web engine and web_pack
+block Browser
 libs/cef/*
 libs/browser_view/*
 libs/web_pack/*
@@ -200,7 +200,7 @@ apps/browser_host/*
 tools/cef_fetch/*
 examples/browser*
 
-block XR: stream, UI, navigation, the Quest remote and a Linux OpenXR runtime
+block XR
 apps/xr_bridge/*
 tools/xr_proton/*
 tools/linux/build-xr-proton.sh
@@ -211,7 +211,7 @@ apps/xr_remote/*
 examples/xr/*
 tools/cargo_makepad/quest/*
 
-block WM and Desk Link: window manager, Wayland server, deskhost, terminal, task
+block WM and Desk Link
 apps/wm*
 apps/desklink/*
 apps/deskhost/*

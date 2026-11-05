@@ -102,6 +102,12 @@ const UNMEASURED_RUN_MS: u64 = 300_000;
 /// How long every process of a lease's runs may do nothing (under [`super::exec::IDLE_CPU_PCT`] of
 /// a core, no I/O) before it says so, whatever its class's length.
 pub const QUIET_STALL_MS: u64 = 600_000;
+
+/// Under this load a box does nothing: one thread at work holds it near 1.
+const BOX_IDLE_LOAD: f64 = 0.5;
+
+/// How long a box stays near idle under a lease, with someone queued on it, before that is said.
+const HOLDER_IDLE_MS: u64 = 600_000;
 /// The idle verdict as its reader sees it: the inbox and the lease's owner read the same words.
 fn idle_line(l: &Lease, node: &str, quiet_ms: u64) -> String {
     format!("{} of {} on {node}: every process idle (under {}% of a core, no I/O) for {}: hung? `devhub cancel {}` frees the box", l.tag(), l.req.lane, super::exec::IDLE_CPU_PCT, dur(quiet_ms), l.id)
@@ -552,6 +558,8 @@ pub struct Lease {
     /// an exclusive request's expected wait for its box (its running work, then the exclusive
     /// requests ahead of it there); 0: none known
     pub eta_ms: u64,
+    /// It waits behind a run past its estimate: no start can be told ([`Sched::behind_overrun`]).
+    pub eta_late: bool,
     /// the box that wait is for
     pub eta_box: Option<String>,
     warned: bool,
@@ -629,7 +637,7 @@ impl Lease {
             _ => "null".into(),
         };
         format!(
-            "{{\"id\":{},\"deployment\":{},\"lane\":{},\"kind\":\"{}\",\"cost\":\"{}\",\"cost_source\":{},\"measured_ms\":{},\"class_note\":{},\"src\":\"{}\",\"class\":{},\"state\":\"{}\",\"node\":{},\"addr\":{},\"pos\":{},\"reason\":{},\"eta_ms\":{},\"eta_box\":{},\"prio\":{},\"priority\":\"{}\",\"wait_s\":{},\"how\":{},\"jit\":{},\"loader\":{},\"agent\":{},\"beat_s\":{},\"granted_s\":{},\"info\":{},\"start\":{}}}",
+            "{{\"id\":{},\"deployment\":{},\"lane\":{},\"kind\":\"{}\",\"cost\":\"{}\",\"cost_source\":{},\"measured_ms\":{},\"class_note\":{},\"src\":\"{}\",\"class\":{},\"state\":\"{}\",\"node\":{},\"addr\":{},\"pos\":{},\"reason\":{},\"eta_ms\":{},\"eta_late\":{},\"eta_box\":{},\"prio\":{},\"priority\":\"{}\",\"wait_s\":{},\"how\":{},\"jit\":{},\"loader\":{},\"agent\":{},\"beat_s\":{},\"granted_s\":{},\"info\":{},\"start\":{}}}",
             json_str(&self.id),
             json_str(&self.deployment),
             json_str(&self.req.lane),
@@ -646,6 +654,7 @@ impl Lease {
             self.pos,
             json_str(&self.reason),
             self.eta_ms,
+            self.eta_late,
             opt(&self.eta_box),
             self.req.prio,
             self.priority.as_str(),
@@ -1106,6 +1115,10 @@ pub struct Sched {
     parking_ram: HashSet<String>,
     /// Running leases already said to be past twice their measured run ([`Sched::say_stalled`]), and when.
     stalled: HashMap<String, u64>,
+    /// Since when each box has been near idle ([`BOX_IDLE_LOAD`]).
+    box_idle_since: HashMap<String, u64>,
+    /// Running leases already said to hold a near idle box someone waits on ([`Sched::say_idle_holders`]).
+    idle_said: HashSet<String>,
     out: Vec<Action>,
     pub lane_cap: u32,
     /// lanes and agents the user evicted: no new leases until unblocked
@@ -1262,6 +1275,8 @@ impl Sched {
             live_idle: HashSet::new(),
             parking_ram: HashSet::new(),
             stalled: HashMap::new(),
+            box_idle_since: HashMap::new(),
+            idle_said: HashSet::new(),
             out: Vec::new(),
             lane_cap: LANE_CAP,
             blocked: Vec::new(),
@@ -1571,6 +1586,7 @@ impl Sched {
             pos: 0,
             reason: String::new(),
             eta_ms: 0,
+            eta_late: false,
             eta_box: None,
             warned: false,
             start: String::new(),
@@ -1992,6 +2008,7 @@ impl Sched {
             pos: 0,
             reason: String::new(),
             eta_ms: 0,
+            eta_late: false,
             eta_box: None,
             warned: false,
             start: v.get("start").and_then(|x| x.as_str()).unwrap_or("").to_string(),
@@ -2522,6 +2539,37 @@ impl Sched {
         }
     }
 
+    /// A running lease of any kind whose box stayed near idle for [`HOLDER_IDLE_MS`] while someone
+    /// is queued on it says so, once. Only said: what it waits for may be real, but with someone
+    /// behind it nobody may be watching (a timed script waited on a hidden app at load 0.3 for 93
+    /// min with a queue head behind it, and no measure of its class to run past, 11-05). Nobody
+    /// behind it: a quiet wait is its own business.
+    fn say_idle_holders(&mut self, now: u64) {
+        for (name, n) in &self.nodes {
+            if n.up && n.caps.as_ref().is_some_and(|c| c.load1 < BOX_IDLE_LOAD) {
+                self.box_idle_since.entry(name.clone()).or_insert(now);
+            } else {
+                self.box_idle_since.remove(name);
+            }
+        }
+        let said: Vec<(String, String)> = self.leases.iter().filter(|h| h.state == State::Granted && !self.idle_said.contains(&h.id) && !self.is_live_job(h)).filter_map(|h| {
+            let node = h.node.as_deref()?;
+            let idle = now.saturating_sub((*self.box_idle_since.get(node)?).max(h.granted_ms.unwrap_or(now)));
+            if idle < HOLDER_IDLE_MS {
+                return None;
+            }
+            let on_it = |q: &&Lease| q.state == State::Queued && (names_lease(&q.reason, &h.id) || q.eta_box.as_deref() == Some(node) || q.req.node.as_deref() == Some(node));
+            let head = self.leases.iter().filter(on_it).min_by_key(|q| Self::exclusive_order(q))?;
+            let load = self.nodes[node].caps.as_ref().map_or(0.0, |c| c.load1);
+            Some((h.id.clone(), format!("{} of {} on {node}: the box near idle (load {load:.1}) for {} while {} of {} waits on it; if it hung, `devhub cancel {}` frees the box", h.tag(), h.req.lane, dur(idle), head.id, head.req.lane, h.id)))
+        }).collect();
+        for (id, line) in said {
+            let l = self.get(&id).cloned();
+            self.event(Sev::Warn, line, l.as_ref());
+            self.idle_said.insert(id);
+        }
+    }
+
     /// A CI leg whose every process did nothing for [`QUIET_STALL_MS`] ends as a failure once its
     /// stall's capture had its time: nobody drives a leg, nothing wakes a parked JIT, and it holds
     /// its tree's one lease (one hung test held all of Windows CI for 30 min, 11-04). The verdict
@@ -2700,7 +2748,13 @@ impl Sched {
         // a box catching up ([`Self::pin_updates`]) takes its update first; else a timed lease
         // starts on what the box has, whatever waits for it
         if let Some(w) = self.update_waits.get(name).filter(|_| l.req.kind == Kind::Timed && l.deploy_pin.is_some()) {
-            return Err(Block::new(format!("the box fell over 30 min behind and catches up first ({}): timed work starts after it", w.values().cloned().collect::<Vec<_>>().join("; "))));
+            let what = w.values().cloned().collect::<Vec<_>>().join("; ");
+            // the update itself waits for what runs there: that is what this ask waits on (a timed
+            // ask read "catches up first" for 2 h behind a hung timed lease nothing named, 11-05)
+            if let Some(r) = self.live_on_node(name, &l.id).find(|r| l.req.conflicts_on(&r.req, c.role())) {
+                return Err(Block::by(format!("held by {} ({} of {}); then the box catches up first ({what}): timed work starts after it", r.id, r.req.kind.as_str(), r.req.lane), &r.id));
+            }
+            return Err(Block::new(format!("the box fell over 30 min behind and catches up first ({what}): timed work starts after it")));
         }
         // its windows would fail there (four visible live apps exited 1 on a node while new ones kept
         // its WM restart waiting, 11-02): the restart runs once the ones there end
@@ -2804,6 +2858,14 @@ impl Sched {
             && (r.req.node.as_deref() == Some(name.as_str()) || self.holds.get(&name).is_some_and(|h| h.id == r.id))).map(|r| self.run_ms(r)).sum();
         let wait = self.remaining_ms(&name, l, &self.cost_on(&name, l)).saturating_add(ahead);
         Some((name, wait))
+    }
+
+    /// Whether `l` waits on `name` behind a run past its estimate. [`Self::remaining_ms`] counts
+    /// such a run as starting over, which serves placing work; told to the asker, the same "~20
+    /// min" stood for 2 h behind a hung lease (11-05).
+    fn behind_overrun(&self, name: &str, l: &Lease) -> bool {
+        let Some(c) = self.nodes[name].caps.as_ref() else { return false };
+        self.live_on_node(name, &l.id).any(|r| !self.is_live_job(r) && l.req.conflicts_on(&r.req, c.role()) && self.clock.saturating_sub(r.granted_ms.unwrap_or(self.clock)) >= self.run_ms(r))
     }
 
     /// Work that can coexist with the reservation's owner never waits for that reservation.
@@ -3361,9 +3423,10 @@ impl Sched {
     /// Expires silent holders, places what fits, recomputes positions and reasons; the actions
     /// for the master (grants, ends, reclaims, one event per change).
     pub fn tick(&mut self, now: u64) -> Vec<Action> {
-        { let live: HashSet<&String> = self.leases.iter().filter(|l| l.state.live()).map(|l| &l.id).collect(); self.live_idle.retain(|id| live.contains(id)); self.parking_ram.retain(|id| live.contains(id)); self.stalled.retain(|id, _| live.contains(id)); }
+        { let live: HashSet<&String> = self.leases.iter().filter(|l| l.state.live()).map(|l| &l.id).collect(); self.live_idle.retain(|id| live.contains(id)); self.idle_said.retain(|id| live.contains(id)); self.parking_ram.retain(|id| live.contains(id)); self.stalled.retain(|id, _| live.contains(id)); }
         self.end_hung_legs(now);
         self.say_stalled(now);
+        self.say_idle_holders(now);
         // Close the previous tick's wait interval once, before placement can grant or end it.
         for l in &mut self.leases { l.sample_queue(now); }
         self.clock = now;
@@ -3527,8 +3590,10 @@ impl Sched {
             let p = per_kind.entry(self.leases[i].req.kind).or_insert(0);
             *p += 1;
             let (eta_box, eta) = if self.leases[i].req.exclusive() { self.eta(&self.leases[i]).map_or((None, 0), |(n, ms)| (Some(n), ms)) } else { (None, 0) };
+            let late = eta_box.as_deref().is_some_and(|n| self.behind_overrun(n, &self.leases[i]));
             let l = &mut self.leases[i];
-            l.eta_ms = eta;
+            l.eta_ms = if late { 0 } else { eta };
+            l.eta_late = late;
             l.eta_box = eta_box;
             // Keep attribution from the final pass, even when the displayed reason is unchanged.
             l.queue_boxes = boxes;
@@ -4160,6 +4225,67 @@ mod tests {
         assert_eq!(state(&s, &ci).0, "queued");
         release_clean(&mut s, &timed, 4);
         assert_eq!(grants(&s.tick(4)), vec![ci]);
+    }
+
+    #[test]
+    fn a_holder_on_an_idle_box_is_said_once_when_someone_waits_on_it() {
+        let idle_lines = |a: &[Action]| a.iter().filter_map(|a| match a { Action::Event(r) if r.line.contains("near idle") => Some(r.line.clone()), _ => None }).collect::<Vec<_>>();
+        let mut s = sched(&[("node-c", caps(16, 64.0, Role::Bench))]);
+        s.nodes.get_mut("node-c").unwrap().caps.as_mut().unwrap().load1 = 0.3;
+        let holder = s.request(req("quiet", Kind::Timed, Some("node-c")), 0);
+        assert_eq!(grants(&s.tick(0)), vec![holder.clone()]);
+        s.started(&holder, "{}");
+        const MIN: u64 = 60_000;
+        beat_all(&mut s, 30 * MIN);
+        assert!(idle_lines(&s.tick(30 * MIN)).is_empty(), "a quiet wait with nobody behind it is its own business");
+        let head = s.request(req("behind", Kind::Timed, Some("node-c")), 30 * MIN);
+        beat_all(&mut s, 30 * MIN + 1);
+        let said = idle_lines(&s.tick(30 * MIN + 1));
+        assert!(said.len() == 1 && said[0].contains(&holder) && said[0].contains(&head) && said[0].contains("load 0.3"), "{said:?}");
+        beat_all(&mut s, 31 * MIN);
+        let later = s.tick(31 * MIN);
+        assert!(idle_lines(&later).is_empty(), "once");
+        assert_eq!(state(&s, &holder).0, "granted", "only said");
+
+        // a working box, or a holder that has only just got it, is not said
+        let mut s = sched(&[("node-c", caps(16, 64.0, Role::Bench))]);
+        s.nodes.get_mut("node-c").unwrap().caps.as_mut().unwrap().load1 = 1.2;
+        let holder = s.request(req("works", Kind::Timed, Some("node-c")), 0);
+        grants(&s.tick(0));
+        s.started(&holder, "{}");
+        s.request(req("behind", Kind::Timed, Some("node-c")), 0);
+        beat_all(&mut s, 30 * MIN);
+        assert!(idle_lines(&s.tick(30 * MIN)).is_empty(), "{holder} works");
+        let mut s = sched(&[("node-c", caps(16, 64.0, Role::Bench))]);
+        s.nodes.get_mut("node-c").unwrap().caps.as_mut().unwrap().load1 = 0.3;
+        s.tick(0);
+        let holder = s.request(req("new", Kind::Timed, Some("node-c")), 30 * MIN);
+        grants(&s.tick(30 * MIN));
+        s.started(&holder, "{}");
+        s.request(req("behind", Kind::Timed, Some("node-c")), 30 * MIN);
+        beat_all(&mut s, 31 * MIN);
+        assert!(idle_lines(&s.tick(31 * MIN)).is_empty(), "{holder} just got it");
+    }
+
+    #[test]
+    fn a_timed_ask_behind_a_run_names_it_and_tells_no_start_past_its_estimate() {
+        let mut s = sched(&[("node-c", caps(16, 64.0, Role::Bench))]);
+        let running = s.request(req("holder", Kind::Timed, Some("node-c")), 0);
+        grants(&s.tick(0));
+        s.update_waits.entry("node-c".into()).or_default().insert("deployment", "its deployment moves to abc".into());
+        let timed = s.request(req("bench", Kind::Timed, Some("node-c")), 0);
+        s.leases.iter_mut().find(|l| l.id == timed).unwrap().deploy_pin = Some("abc,def".into());
+        s.tick(1);
+        let reason = state(&s, &timed).1;
+        assert!(reason.starts_with(&format!("held by {running} (timed of holder)")) && reason.contains("catches up first (its deployment moves to abc)"), "{reason}");
+        assert_eq!(super::super::prof::blocker(&reason), "held by timed");
+        assert!(s.get(&timed).unwrap().eta_ms > 0 && !s.get(&timed).unwrap().eta_late, "within its estimate: a start is told");
+        let past = s.run_ms(s.get(&running).unwrap()) + 1;
+        beat_all(&mut s, past);
+        s.tick(past);
+        let waits = s.get(&timed).unwrap();
+        assert!(waits.eta_late && waits.eta_ms == 0, "past it: none is ({}, {})", waits.eta_late, waits.eta_ms);
+        assert_eq!(super::super::prof::blocker("the box fell over 30 min behind and catches up first (its deployment moves to abc): timed work starts after it"), "box catches up");
     }
 
     #[test]

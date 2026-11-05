@@ -110,6 +110,7 @@ pub fn blocker(reason: &str) -> String {
         if r.starts_with(key) { return key.into(); }
     }
     if r.starts_with("scrubbing") { return "teardown".into(); }
+    if r.contains("catches up first") { return "box catches up".into(); }
     if r.contains("estimated finish") { return "class".into(); }
     if r.contains("protocol") { return "self-update".into(); }
     if r.contains("unreachable") || r.starts_with("node ") && r.ends_with(" down") { return "node down".into(); }

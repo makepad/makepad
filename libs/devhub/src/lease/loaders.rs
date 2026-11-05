@@ -667,6 +667,16 @@ fn build_dev(jits: &super::jitstore::Store, base: &Path, pin: &super::Pin, input
     build_tree(&root, &target, pin, inputs, id, dst, build, active)
 }
 
+/// The end of a cargo error's `Caused by:` chain, what a shortened error line must not lose: its
+/// first line only names the workspace member that led there (a commercial checkout whose crates
+/// need a makepad crate the pinned commit predates read as commercial's manifest missing, 11-05).
+#[cfg(feature = "checkout")]
+fn cargo_cause(text: &str) -> Option<String> {
+    let lines: Vec<&str> = text.lines().collect();
+    let causes: Vec<&str> = lines.windows(2).filter(|w| w[0].trim() == "Caused by:").map(|w| w[1].trim()).collect();
+    (!causes.is_empty()).then(|| causes[causes.len().saturating_sub(2)..].join(": "))
+}
+
 /// Cargo's build of the dev tree as it stands, published to `dst`.
 #[cfg(feature = "checkout")]
 fn build_tree(root: &Path, target: &Path, pin: &super::Pin, inputs: &[String], id: &str, dst: &Path, build: &OverlayBuild<'_>, active: &dyn Fn() -> Result<(), String>) -> Result<(), String> {
@@ -683,7 +693,7 @@ fn build_tree(root: &Path, target: &Path, pin: &super::Pin, inputs: &[String], i
     if !status.success() {
         let text = std::fs::read_to_string(&log).unwrap_or_default();
         let tail = text.lines().rev().take(40).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n");
-        return Err(format!("dev JIT cargo failed ({status}):\n{tail}"));
+        return Err(format!("dev JIT cargo failed ({status}){}:\n{tail}", cargo_cause(&text).map_or(String::new(), |c| format!(": {c}"))));
     }
     let dep_info = target.join("host/makepad.d");
     let dep = std::fs::read_to_string(&dep_info).map_err(|e| format!("{}: {e}", dep_info.display()))?;
@@ -789,8 +799,7 @@ pub struct TreeBuild {
 /// Publishes the binary a run built, when it left [`MARK`]. Ok(Some(key)): published; Ok(None): no
 /// mark; Err: why it is not shared (the tree no longer holds what it was built from). A tree with
 /// edited inputs goes to the dev JIT store by `own`, its key from before the build: with shipped
-/// edits, each lease's undo and ship move the mtimes, and its cargo builds again (2.5 min of
-/// relax crates for the same sources).
+/// edits, each lease's undo and ship move the mtimes, and its cargo builds the same sources again.
 pub fn publish(root: &Path, target: &Path, own: Option<&TreeBuild>) -> Result<Option<String>, String> {
     let mark = target.join(MARK);
     if !mark.exists() {
@@ -853,7 +862,7 @@ fn prune(target: &Path) {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "checkout"))]
 mod tests {
     use super::*;
 
@@ -919,6 +928,13 @@ mod tests {
         assert_eq!(e.edited.iter().map(String::as_str).collect::<Vec<_>>(), ["vase/a.thumb.png"]);
         assert_eq!(e.tree.keys().map(String::as_str).collect::<Vec<_>>(), ["vase/a.thumb.png"]);
         let _ = std::fs::remove_dir_all(&work);
+    }
+
+    #[test]
+    fn a_cargo_error_says_what_its_chain_ends_in() {
+        let text = "error: failed to load manifest for workspace member `/t/apps/c/src/..`\nreferenced via `apps/*/src/..` by workspace at `/t/Cargo.toml`\n\nCaused by:\n  failed to load manifest for dependency `r`\n\nCaused by:\n  failed to read `/t/libs/gone/Cargo.toml`\n\nCaused by:\n  No such file or directory (os error 2)\n";
+        assert_eq!(super::cargo_cause(text).as_deref(), Some("failed to read `/t/libs/gone/Cargo.toml`: No such file or directory (os error 2)"));
+        assert_eq!(super::cargo_cause("error: could not compile `x`\n"), None);
     }
 
     /// A lane's own build tree writes only the edits that changed (cargo rebuilds only their crates)

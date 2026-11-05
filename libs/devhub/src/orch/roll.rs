@@ -1,9 +1,12 @@
 //! The self-update: when a landing changes a service's code, devhub updates it on every box by
 //! itself, with no rollout script. Hub updates never stop lease placement.
-//! A service is affected when the landing touches a crate in its dependency closure (read from the
-//! Cargo.toml path dependencies).
+//! A service is affected when the landing changes a file its package's binary is built from: the
+//! crates of cargo's resolved graph ([`linked_dirs`]), minus what no build reads ([`builds`]).
 //! A roll starts once the service's code has been still for [`SETTLE_MS`]: landings come in bursts.
-//! - the node hubs (apps/devhub): their target is the newest devhub build the master completed (its
+//! Each roll leaves two lines in `rolls.jsonl` (`devhub rolls`): its target and why, then how it ended.
+//! - the node hubs (they run apps/devhub, libs/devhub with its panel; only libs/devhub's graph rolls
+//!   them, and what changed in the panel's alone comes along with the next roll): their target is
+//!   the newest devhub build the master completed (its
 //!   per-landing CLI build, [`prebuild_cli`]: never a tip that did not build, never older than a hub
 //!   runs, the same for every box), so they never wait for the master's own restart (Mac hubs lagged
 //!   the deployment for its 30 min uptime, 11-03). A hub newer than the master works with it; a
@@ -104,8 +107,137 @@ impl Drop for Slot {
     }
 }
 
-/// The services the self-update restarts on nodes: (name, its package dir).
-pub const SERVICES: [(&str, &str); 2] = [("devhub", "apps/devhub"), ("ai-hub", "apps/aihub")];
+/// The services the self-update restarts on nodes: (name, the package whose graph rolls it).
+pub const SERVICES: [(&str, &str); 2] = [("devhub", "libs/devhub"), ("ai-hub", "apps/aihub")];
+
+/// The repo dirs of the crates the binary of the package at `pkg` is built from: cargo's resolved
+/// graph, for every target. Reading `path` lines is not enough for this: an optional dependency
+/// no feature turns on reads as one (libs/ai/hub's took platform, draw and 100 more crates into
+/// libs/devhub's closure, 157 crates to the 48 it builds).
+fn linked_dirs(repo: &Path, pkg: &str) -> Result<BTreeSet<String>, String> {
+    // (no --locked: the lockfile is not tracked; each checkout's own goes stale with a landing's new
+    // crate, and cargo refreshes it here as any build in this checkout would)
+    let o = std::process::Command::new(cargo_bin()).current_dir(repo).args(["tree", "--offline", "-e", "normal,build", "--prefix", "none", "--target", "all", "--manifest-path"]).arg(format!("{pkg}/Cargo.toml")).output().map_err(|e| format!("cargo: {e}"))?;
+    if !o.status.success() {
+        return Err(crate::proto::clean(&String::from_utf8_lossy(&o.stderr), 300));
+    }
+    let root = repo.canonicalize().map_err(|e| format!("{}: {e}", repo.display()))?;
+    Ok(tree_dirs(&String::from_utf8_lossy(&o.stdout), &root.to_string_lossy()))
+}
+
+/// The crates under `root` of a `cargo tree --prefix none` listing, relative to it.
+fn tree_dirs(listing: &str, root: &str) -> BTreeSet<String> {
+    let marker = format!(" ({}/", root.trim_end_matches('/'));
+    listing.lines().filter_map(|l| {
+        let rest = &l[l.find(&marker)? + marker.len()..];
+        Some(rest[..rest.find(')')?].to_string())
+    }).collect()
+}
+
+/// Whether a build reads this file of a crate (its path below the crate's dir): a CI proof's stamp,
+/// the crate's tests and its notes are no code a service runs.
+fn builds(file: &str) -> bool {
+    let name = file.rsplit('/').next().unwrap_or(file);
+    name != "ci.toml" && !name.ends_with(".md") && !["tests/", "benches/", "examples/"].iter().any(|d| file.starts_with(d))
+}
+
+/// What the commits from `from` to `to` change of what `dirs` build, as repo paths ("" in `dirs`:
+/// the whole repo, [`service_dirs`]). None: a commit is not known here.
+fn built_changes(repo: &Path, from: &str, to: &str, dirs: &BTreeSet<String>) -> Option<Vec<String>> {
+    let changed = crate::gitread::files_differing_under(repo, from, to, dirs.iter().map(String::as_str))?;
+    Some(changed.into_iter().filter(|(_, file)| builds(file)).map(|(dir, file)| if dir.is_empty() { file } else { format!("{dir}/{file}") }).collect())
+}
+
+/// Each service's crates at this landing, and why they are the whole repo. A landing whose graph
+/// cargo cannot read rolls every service: a missed update is the worse error.
+fn service_dirs(repo: &Path) -> (HashMap<String, BTreeSet<String>>, Option<String>) {
+    match SERVICES.iter().map(|(n, d)| Ok((n.to_string(), linked_dirs(repo, d)?))).collect::<Result<HashMap<_, _>, String>>() {
+        Ok(dirs) => (dirs, None),
+        Err(e) => (SERVICES.iter().map(|(n, _)| (n.to_string(), BTreeSet::from([String::new()]))).collect(), Some(format!("cargo does not read the services' crates ({e}): the whole repo counts"))),
+    }
+}
+
+/// `rolls.jsonl` in devhub's home.
+fn rolls_path() -> PathBuf {
+    crate::proto::home().join("rolls.jsonl")
+}
+
+/// Past this `rolls.jsonl` is cut to half of it when a master starts: over a week of rolls at
+/// 100 a day on 10 boxes.
+const ROLLS_KEEP: usize = 8 << 20;
+
+/// The tail of a record that grew past [`ROLLS_KEEP`], from a whole line.
+fn rolls_kept(text: &str) -> Option<&str> {
+    if text.len() <= ROLLS_KEEP {
+        return None;
+    }
+    let mut at = text.len() - ROLLS_KEEP / 2;
+    while !text.is_char_boundary(at) {
+        at += 1;
+    }
+    Some(text[at..].split_once('\n').map_or("", |(_, whole)| whole))
+}
+
+/// What `rolls.jsonl` says of a change: its count and the first few files.
+fn why_of(changed: &[String]) -> String {
+    const NAMED: usize = 3;
+    let mut why = format!("{} file{}: {}", changed.len(), if changed.len() == 1 { "" } else { "s" }, changed.iter().take(NAMED).cloned().collect::<Vec<_>>().join(", "));
+    if changed.len() > NAMED {
+        why.push_str(&format!(" +{}", changed.len() - NAMED));
+    }
+    why
+}
+
+/// A line of the roll's record, kept when a master restarts in the middle of a roll or a box is
+/// gone for good. `fields`: the line's own, by name.
+fn note_roll(node: &str, svc: &str, fields: &[(&str, &str)]) {
+    use std::io::Write;
+    let rest: String = fields.iter().map(|(k, v)| format!(",{}:{}", makepad_remote::json_str(k), makepad_remote::json_str(v))).collect();
+    let line = format!("{{\"ms\":{},\"node\":{},\"svc\":{}{rest}}}\n", wall_ms(), makepad_remote::json_str(node), makepad_remote::json_str(svc));
+    let wrote = std::fs::OpenOptions::new().create(true).append(true).open(rolls_path()).and_then(|mut f| f.write_all(line.as_bytes()));
+    if let Err(e) = wrote {
+        eprintln!("devhub: {}: {e}", rolls_path().display());
+    }
+}
+
+/// `devhub rolls [--node N] [n]`.
+pub fn rolls_cli(args: &[&str]) -> i32 {
+    let at = args.iter().position(|a| *a == "--node");
+    let node = at.and_then(|i| args.get(i + 1)).copied();
+    let n = args.iter().enumerate().filter(|(i, _)| at.is_none_or(|a| *i != a + 1)).find_map(|(_, a)| a.parse().ok()).unwrap_or(30);
+    match std::fs::read_to_string(rolls_path()) {
+        Ok(text) => {
+            println!("{}", rolls_text(&text, node, n, &super::stamp));
+            0
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            println!("no rolls yet");
+            0
+        }
+        Err(e) => {
+            eprintln!("makepad devhub rolls: {}: {e}", rolls_path().display());
+            2
+        }
+    }
+}
+
+/// The newest `n` lines of the record, oldest first.
+fn rolls_text(text: &str, node: Option<&str>, n: usize, clock: &dyn Fn(u64) -> String) -> String {
+    let lines: Vec<String> = text.lines().filter_map(|l| {
+        let v = makepad_strict_json::parse(l.as_bytes()).ok()?;
+        let field = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+        if node.is_some_and(|w| w != field("node")) {
+            return None;
+        }
+        let short = |k: &str| { let f = field(k); f[..f.len().min(10)].to_string() };
+        let at = clock(v.get("ms").and_then(|x| x.as_u64()).unwrap_or(0));
+        Some(match field("ended").as_str() {
+            "" => format!("{at} {} {}: {} -> {}: {}", field("node"), field("svc"), short("from"), short("to"), field("why")),
+            ended => format!("{at} {} {}: {} ended: {ended}", field("node"), field("svc"), short("to")),
+        })
+    }).collect();
+    lines[lines.len().saturating_sub(n)..].join("\n")
+}
 
 /// The repo dirs of `pkg` and every crate it depends on by path (workspace deps resolved through
 /// the root Cargo.toml), relative to `repo`.
@@ -188,13 +320,13 @@ fn lacks(repo: &Path, at: &str, to: &str, dirs: &BTreeSet<String>) -> bool {
     touches(repo, at, to, dirs)
 }
 
-/// Whether the commits from `from` to `to` change any of `dirs`.
+/// Whether the commits from `from` to `to` change anything `dirs` build.
 fn touches(repo: &Path, from: &str, to: &str, dirs: &BTreeSet<String>) -> bool {
     if from == to {
         return false;
     }
     // (an unknown commit counts as a change)
-    crate::gitread::differ_under(repo, from, to, dirs.iter().map(String::as_str))
+    built_changes(repo, from, to, dirs).is_none_or(|c| !c.is_empty())
 }
 
 /// The newest commit of `to` that touched `dirs`, as wall ms (its commit time). The answer for one
@@ -210,7 +342,7 @@ fn last_change_ms(repo: &Path, to: &str, dirs: &BTreeSet<String>) -> u64 {
         return *ms;
     }
     let mut args = vec!["log", "-1", "--format=%ct", to, "--"];
-    args.extend(dirs.iter().map(String::as_str));
+    args.extend(dirs.iter().map(|d| if d.is_empty() { "." } else { d.as_str() }));
     let ms = git(repo, &args).ok().and_then(|s| s.trim().parse::<u64>().ok()).map_or(0, |s| s * 1000);
     by_dirs.insert(dirs.clone(), ms);
     ms
@@ -222,6 +354,11 @@ fn event(ctx: &Ctx, sev: Sev, line: String) {
 
 pub fn start(ctx: Arc<Ctx>) {
     let started = Instant::now();
+    if let Some(kept) = std::fs::read_to_string(rolls_path()).ok().as_deref().and_then(rolls_kept) {
+        if let Err(e) = std::fs::write(rolls_path(), kept) {
+            event(&ctx, Sev::Warn, format!("update: {}: {e}", rolls_path().display()));
+        }
+    }
     // the hubs' target: the commit this master was built at, read now (lazily it would be
     // whatever the checkout moved to since)
     let _ = crate::lease::caps::hub_rev();
@@ -229,6 +366,9 @@ pub fn start(ctx: Arc<Ctx>) {
         let busy: Arc<Mutex<BTreeSet<String>>> = Arc::new(Mutex::new(BTreeSet::new()));
         // node -> the deployment its new hub did not build at: no roll again until it moves
         let broken: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
+        // (box, service) that said it runs the deployment's build already, at which last change and
+        // deployment: asked again when one of them moves, not every tick
+        let current: Arc<Mutex<HashMap<(String, String), (u64, String)>>> = Arc::new(Mutex::new(HashMap::new()));
         let drains = Arc::new(AtomicUsize::new(0));
         // a self-update whose build failed is said loudly and tried again later, not every tick
         let (mut master_next, mut master_wait) = (None::<Instant>, MASTER_RETRY);
@@ -246,7 +386,8 @@ pub fn start(ctx: Arc<Ctx>) {
         let mut said: BTreeSet<String> = BTreeSet::new();
         let mut closures: HashMap<String, BTreeSet<String>> = HashMap::new();
         let mut closures_at = String::new();
-        let mut master_dirs: BTreeSet<String> = BTreeSet::new();
+        // why this landing's closures are the whole repo
+        let mut closures_why: Option<String> = None;
         let mut wait_since: Option<Instant> = None;
         let mut fds_said = 1000;
         // the commit the CLI binary was last built at (this master's build at first), and the
@@ -274,11 +415,13 @@ pub fn start(ctx: Arc<Ctx>) {
                 }
             }
             if closures_at != work {
-                closures = SERVICES.iter().map(|(n, d)| (n.to_string(), crate_dirs(&ctx.repo, d))).collect();
-                master_dirs = crate_dirs(&ctx.repo, "libs/devhub");
+                (closures, closures_why) = service_dirs(&ctx.repo);
                 closures_at = work.clone();
+                if let Some(why) = &closures_why {
+                    event(&ctx, Sev::Warn, format!("update: {} at {why}", super::short(&work)));
+                }
             }
-            prebuild_cli(&ctx, &work, &master_dirs, &mut cli_at);
+            prebuild_cli(&ctx, &work, &closures["devhub"], &mut cli_at);
             // the hubs' target: the newest devhub build the master completed, once its protocol is
             // one this master speaks (a hub newer than the master works with it otherwise)
             let good = cli_good();
@@ -332,17 +475,41 @@ pub fn start(ctx: Arc<Ctx>) {
                         let started = c.services.iter().find(|(x, _)| x == s)?.1;
                         let dirs = &closures[*s];
                         let at = changed[*s];
-                        (started < at && at + SETTLE_MS <= wall_ms()).then(|| (*s, dirs.clone()))
+                        let asked = current.lock().unwrap().get(&(n.name.clone(), s.to_string())) == Some(&(at, c.deploy.clone()));
+                        (started < at && !asked && at + SETTLE_MS <= wall_ms()).then(|| (*s, dirs.clone()))
                     })
                 };
                 let Some((svc, dirs)) = job else { continue };
                 busy.lock().unwrap().insert(n.name.clone());
                 let target = if svc == "devhub" { good.clone() } else { work.clone() };
-                let (c2, b2, d2, node, br) = (ctx.clone(), busy.clone(), drains.clone(), n.name.clone(), broken.clone());
+                let from = if svc == "devhub" { c.hub_rev.clone() } else { String::new() };
+                let why = if svc == "devhub" {
+                    built_changes(&ctx.repo, &from, &target, &dirs).map_or("the commit it runs is not known here".to_string(), |c| why_of(&c))
+                } else {
+                    "its code changed after it started".to_string()
+                };
+                let why = closures_why.as_ref().map_or(why.clone(), |c| format!("{c}: {why}"));
+                let (c2, b2, d2, node, br, cur) = (ctx.clone(), busy.clone(), drains.clone(), n.name.clone(), broken.clone(), current.clone());
+                let (at, deploy) = (changed.get(svc).copied().unwrap_or(0), c.deploy.clone());
                 let _ = std::thread::Builder::new().name("devhub-update-node".into()).spawn(move || {
-                    match roll_node(&c2, &node, svc, &dirs, &target, d2) {
-                        Some(at) => br.lock().unwrap().insert(node.clone(), at),
-                        None => br.lock().unwrap().remove(&node),
+                    let end = roll_node(&c2, &node, svc, &dirs, &target, d2, &|| note_roll(&node, svc, &[("from", &from), ("to", &target), ("why", &why)]));
+                    let now = c2.leases.nodes().into_iter().find(|n| n.name == node).and_then(|n| n.caps).map_or(String::new(), |c| c.hub_rev);
+                    let ended = match &end {
+                        RollEnd::Broke(at) => Some(format!("its new hub does not build at {}; it runs on at {}", super::short(at), super::short(&now))),
+                        RollEnd::Back if svc == "devhub" => Some(format!("runs {}", super::short(&now))),
+                        RollEnd::Back => Some("restarted".to_string()),
+                        RollEnd::Late => Some("did not come back in 25 min".to_string()),
+                        RollEnd::Current | RollEnd::NoRestart => None,
+                    };
+                    if let Some(ended) = ended {
+                        note_roll(&node, svc, &[("to", &target), ("ended", &ended)]);
+                    }
+                    if matches!(end, RollEnd::Current) {
+                        cur.lock().unwrap().insert((node.clone(), svc.to_string()), (at, deploy));
+                    }
+                    match end {
+                        RollEnd::Broke(at) => br.lock().unwrap().insert(node.clone(), at),
+                        _ => br.lock().unwrap().remove(&node),
                     };
                     c2.leases.set_updating(&node, None, false);
                     b2.lock().unwrap().remove(&node);
@@ -354,8 +521,8 @@ pub fn start(ctx: Arc<Ctx>) {
             // for them all never updated (18:18 → 19:05, 2026-10-30). A roll it cuts short starts
             // over from the new master.
             {
-                // (the master is libs/devhub's own binary: the hub app's UI crates are not its code)
-                let dirs = &master_dirs;
+                // (the master is libs/devhub's own binary)
+                let dirs = &closures["devhub"];
                 if !mine.is_empty() && touches(&ctx.repo, mine, &work, dirs) {
                     let since = *wait_since.get_or_insert_with(Instant::now);
                     // A restart is cheap (nothing is lost, whatever the leases are doing) but not
@@ -580,7 +747,7 @@ impl Drop for UpdateWaits<'_> {
 
 /// One node: wait for the deployment code, then ask for its hub's restart (which ends no run). Some: the
 /// deployment its new hub does not build at (the hub runs on; said once per commit).
-fn roll_node(ctx: &Ctx, node: &str, svc: &str, dirs: &BTreeSet<String>, work: &str, drains: Arc<AtomicUsize>) -> Option<String> {
+fn roll_node(ctx: &Ctx, node: &str, svc: &str, dirs: &BTreeSet<String>, work: &str, drains: Arc<AtomicUsize>, restarts: &dyn Fn()) -> RollEnd {
     let short = super::short(work);
     let ctl = makepad_remote::link::Client::new(makepad_remote::link::Target::Unix(crate::proto::control_socket()), "devhub-update");
     let caps = || ctx.leases.nodes().into_iter().find(|n| n.name == node).and_then(|n| n.caps);
@@ -609,7 +776,7 @@ fn roll_node(ctx: &Ctx, node: &str, svc: &str, dirs: &BTreeSet<String>, work: &s
         let c = caps().unwrap_or_default();
         if has_it() {
             done(&c);
-            return None;
+            return RollEnd::NoRestart;
         }
         // Older hubs share the sync checkout with leases: wait for apply without draining them.
         let leased_checkout = svc == "devhub" && c.deploy.is_empty();
@@ -702,11 +869,11 @@ fn roll_node(ctx: &Ctx, node: &str, svc: &str, dirs: &BTreeSet<String>, work: &s
         // a hub that came back from a restart at the deployment already: never restarted twice
         if svc == "devhub" && down.is_some() && caps().is_some_and(|c| !deploy.is_empty() && c.hub_rev == deploy) {
             event(ctx, Sev::Info, format!("update: {node} runs devhub at {}", super::short(&deploy)));
-            return None;
+            return RollEnd::NoRestart;
         }
         if has_it() {
             done(&caps().unwrap_or_default());
-            return None;
+            return RollEnd::NoRestart;
         }
         let line = if svc == "devhub" { format!("hub-restart {deploy}") } else { format!("service-restart {svc}") };
         let answer = if present { Ok(vec![format!("{{\"err\":\"waits: a user is at {node}\"}}")]) } else { crate::cli::ask(&ctl, Some(node), word, &line) };
@@ -746,28 +913,30 @@ fn roll_node(ctx: &Ctx, node: &str, svc: &str, dirs: &BTreeSet<String>, work: &s
                 } else {
                     event(ctx, Sev::Info, format!("update: {node}: {why}"));
                 }
-                return Some(deploy);
+                restarts();
+                return RollEnd::Broke(deploy);
             }
             Ok(l) if l.first().is_some_and(|x| x.starts_with("{\"err\":")) => {
                 event(ctx, Sev::Warn, format!("update: {node} {svc}: {}", l[0]));
-                return None;
+                return RollEnd::NoRestart;
             }
             Err(e) => {
                 let gone = down.map(|d| format!(" (no answer for {} s)", d.elapsed().as_secs())).unwrap_or_default();
                 event(ctx, Sev::Warn, format!("update: {node} {svc}: {e}{gone}"));
-                return None;
+                return RollEnd::NoRestart;
             }
             // its service already runs the deployment's build (the WM's restart took it there,
             // or the landing changed nothing it is built of): never restarted for nothing
             Ok(l) if svc != "devhub" && l.first().is_some_and(|x| x.starts_with("{\"current\":")) => {
                 event(ctx, Sev::Info, format!("update: {node} runs {svc} at {short} already: no restart"));
-                return None;
+                return RollEnd::Current;
             }
             Ok(l) => {
                 // the hub build it restarts for, measured there: its class's measure in the ledger
                 if let Some(b) = l.first().and_then(|x| makepad_strict_json::parse(x.as_bytes()).ok()).and_then(|v| v.get("built").and_then(crate::lease::HubMeasure::parse)) {
                     ctx.leases.ledger_hub_build(node, &b);
                 }
+                restarts();
                 event(ctx, Sev::Info, format!("update: {node} restarts {svc} for {short}"));
                 break;
             }
@@ -791,11 +960,26 @@ fn roll_node(ctx: &Ctx, node: &str, svc: &str, dirs: &BTreeSet<String>, work: &s
         if back {
             let at = if svc == "devhub" { super::short(&c.hub_rev).to_string() } else { short.to_string() };
             event(ctx, Sev::Info, format!("update: {node} runs {svc} at {at}{}", if svc == "devhub" { "" } else { ", and it answers" }));
-            return None;
+            return RollEnd::Back;
         }
     }
     event(ctx, Sev::Err, format!("update: {node} {svc} did not come back in 25 min (its log on the node)"));
-    None
+    RollEnd::Late
+}
+
+/// How a box's roll ended. Only a restart that was asked for goes on the record: a service that
+/// runs that build already is not one (the AI hub said so to an ask every 15 s, read as 24 rolls a minute).
+enum RollEnd {
+    /// restarted, and back
+    Back,
+    /// restarted, and not back
+    Late,
+    /// its new hub does not build at this commit
+    Broke(String),
+    /// the service runs the deployment's build already
+    Current,
+    /// nothing to do any more, or it would not: said in the update's events
+    NoRestart,
 }
 
 /// The deployments a hub did not build at, said loudly once (each box refuses it on its own).
@@ -916,13 +1100,17 @@ pub fn restart_master(ctx: &Arc<Ctx>, work: &str, by: &str) -> Result<String, St
     }
 }
 
+fn cargo_bin() -> PathBuf {
+    std::env::var_os("HOME").map(PathBuf::from).map(|h| h.join(".cargo/bin/cargo")).filter(|c| c.exists()).unwrap_or_else(|| PathBuf::from("cargo"))
+}
+
 /// devhub's binary, built in a target dir of its own (never the lock of `target/host`, where the
 /// apps and the JIT build) and swapped in at `target/host/makepad-devhub` through a rename: a
 /// caller runs the old build or the new one, never a missing or half-written file. Niced on 4
 /// jobs, the master's own restart too: the running master beats on while it builds, and only
 /// the exec's gap counts (no full-speed builds on the user's Mac).
 pub fn build_devhub(repo: &Path) -> Result<(), String> {
-    let cargo = std::env::var_os("HOME").map(PathBuf::from).map(|h| h.join(".cargo/bin/cargo")).filter(|c| c.exists()).unwrap_or_else(|| PathBuf::from("cargo"));
+    let cargo = cargo_bin();
     let mut cmd = std::process::Command::new("nice");
     cmd.args(["-n", "10"]).arg(&cargo).args(["build", "-j4", "--profile", "host", "-p", "makepad-devhub", "--bin", "makepad-devhub", "--target-dir"]).arg(repo.join("target/devhub")).current_dir(repo).env("CARGO_INCREMENTAL", "0").env_remove(RUSTUP_DEPTH).stdin(std::process::Stdio::null());
     match cmd.output() {
@@ -1162,6 +1350,76 @@ mod tests {
         assert_eq!(super::push_waits(&refused).as_deref(), Some("timed lease L287466 runs here: the deployment moves after it"));
         assert_eq!(super::push_waits(&["node-a {\"err\":\"push: connection reset\"}".to_string()]), None);
         assert_eq!(super::push_waits(&[r#"{"err":"waits: a timed lease runs on node-a: its new hub builds after it"}"#.to_string()]).as_deref(), Some("a timed lease runs on node-a: its new hub builds after it"));
+    }
+
+    #[test]
+    fn a_service_rolls_for_what_cargo_builds_of_it() {
+        let listing = "makepad-devhub v0.1.0 (/repo/libs/devhub)\nmakepad-remote v0.1.0 (/repo/libs/remote) (*)\nmacro-thing v0.1.0 (proc-macro) (/repo/libs/macro/impl)\nlibc v0.2.1\nother v0.1.0 (/elsewhere/other)\n";
+        let dirs: Vec<String> = super::tree_dirs(listing, "/repo").into_iter().collect();
+        assert_eq!(dirs, ["libs/devhub", "libs/macro/impl", "libs/remote"]);
+        for file in ["src/lib.rs", "src/tests/a.rs", "Cargo.toml", "build.rs", ""] {
+            assert!(super::builds(file), "{file}");
+        }
+        for file in ["ci.toml", "README.md", "src/notes.md", "tests/a.rs", "benches/b.rs", "examples/c/main.rs"] {
+            assert!(!super::builds(file), "{file}");
+        }
+    }
+
+    /// A landing cargo cannot read rolls, for whatever changed, and says why.
+    #[test]
+    fn a_landing_cargo_cannot_read_rolls_for_any_file() {
+        let d = std::env::temp_dir().join(format!("devhub-roll-unread-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("libs/a/tests")).unwrap();
+        let g = |args: &[&str]| {
+            let o = std::process::Command::new("git").arg("-C").arg(&d).args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args).output().unwrap();
+            assert!(o.status.success(), "git {args:?}");
+            String::from_utf8_lossy(&o.stdout).trim().to_string()
+        };
+        let save = |from: &str| {
+            for f in ["top.rs", "libs/a/x.rs", "libs/a/ci.toml", "libs/a/tests/t.rs"] {
+                std::fs::write(d.join(f), from).unwrap();
+            }
+            g(&["add", "."]);
+            g(&["commit", "-q", "-m", from]);
+            g(&["rev-parse", "HEAD"])
+        };
+        g(&["init", "-q", "-b", "work"]);
+        let (one, two) = (save("1"), save("2"));
+        let (dirs, why) = super::service_dirs(&d);
+        assert!(why.as_deref().is_some_and(|w| w.contains("the whole repo counts")), "{why:?}");
+        for (svc, _) in super::SERVICES {
+            let mut changed = super::built_changes(&d, &one, &two, &dirs[svc]).unwrap();
+            changed.sort();
+            assert_eq!(changed, ["libs/a/tests/t.rs", "libs/a/x.rs", "top.rs"], "{svc}: the whole repo, less what no crate reads");
+            assert!(super::touches(&d, &one, &two, &dirs[svc]) && !super::touches(&d, &two, &two, &dirs[svc]));
+            assert!(super::last_change_ms(&d, &two, &dirs[svc]) > 0, "{svc}");
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The rule's point: what a hub builds of devhub is far from its panel's widgets.
+    #[test]
+    fn devhub_rolls_for_its_own_graph_and_not_its_panels() {
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let d = super::linked_dirs(&repo, "libs/devhub").unwrap();
+        assert!(d.contains("libs/devhub") && d.contains("libs/remote") && d.contains("libs/strict_json"), "{d:?}");
+        for not_built in ["apps/devhub", "widgets", "draw", "platform"] {
+            assert!(!d.contains(not_built), "{not_built}: {d:?}");
+        }
+    }
+
+    #[test]
+    fn a_roll_can_be_read_back_with_its_target_and_why() {
+        assert_eq!(super::rolls_kept("short\n"), None);
+        let long = format!("{}\nlast\n", "x".repeat(super::ROLLS_KEEP));
+        assert_eq!(super::rolls_kept(&long), Some("last\n"));
+        assert_eq!(super::why_of(&["a".into()]), "1 file: a");
+        assert_eq!(super::why_of(&["a".into(), "b".into(), "c".into(), "d".into(), "e".into()]), "5 files: a, b, c +2");
+        let text = "{\"ms\":1,\"node\":\"n1\",\"svc\":\"devhub\",\"from\":\"aaaaaaaaaaaaaa\",\"to\":\"bbbbbbbbbbbbbb\",\"why\":\"1 file: a\"}\n{\"ms\":2,\"node\":\"n2\",\"svc\":\"devhub\",\"from\":\"a\",\"to\":\"b\",\"why\":\"w\"}\n{\"ms\":3,\"node\":\"n1\",\"svc\":\"devhub\",\"to\":\"bbbbbbbbbbbbbb\",\"ended\":\"runs bbbbbbbbbb\"}\nnot a whole li";
+        let clock = |ms: u64| format!("t{ms}");
+        assert_eq!(super::rolls_text(text, Some("n1"), 10, &clock), "t1 n1 devhub: aaaaaaaaaa -> bbbbbbbbbb: 1 file: a\nt3 n1 devhub: bbbbbbbbbb ended: runs bbbbbbbbbb");
+        assert_eq!(super::rolls_text(text, None, 1, &clock), "t3 n1 devhub: bbbbbbbbbb ended: runs bbbbbbbbbb");
     }
 
     #[test]
