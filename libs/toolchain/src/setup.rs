@@ -417,13 +417,13 @@ impl Folder {
         Ok(path.iter().map(|p| PathBuf::from(plain_paths(&p.to_string_lossy()))).collect())
     }
 
-    /// The environment of a build with Microsoft's tools and this folder's Rust, and the toolkit
-    /// when `with_cuda`. Its paths are plain: cl.exe does not take the verbatim `\\?\` prefix (with
-    /// it in INCLUDE, nvcc's host compiler cannot open crtdefs.h and every kernel fails).
     fn rust_linker(&self, rust_version: &str) -> Result<PathBuf, String> {
         let linker = self.rust(rust_version).join("lib/rustlib").join(MSVC_TRIPLE).join("bin").join(exe("rust-lld"));
         if linker.is_file() { Ok(linker) } else { Err("The MSVC Rust is missing its bundled linker".into()) }
     }
+    /// The environment of a build with Microsoft's tools and this folder's Rust, and the toolkit
+    /// when `with_cuda`. Its paths are plain: cl.exe does not take the verbatim `\\?\` prefix (with
+    /// it in INCLUDE, nvcc's host compiler cannot open crtdefs.h and every kernel fails).
     fn msvc_vars(&self, rust_version: &str, with_cuda: bool) -> Result<Vec<(String, String)>, String> {
         let rust = self.rust(rust_version);
         let linker = self.rust_linker(rust_version)?;

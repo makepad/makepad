@@ -41,13 +41,18 @@ P=9931   # the pid from your own launch's startup line
 ./target/release/makepad-remote app $P status
 ```
 
-`makepad-remote app <pid|app-name|socket> <command> [k=v ...]`; `makepad
-inspect <pid> <command>` speaks the same commands. The exit status is 1 when
-the answer has an error line and 2 when the app is unreachable.
+`makepad-remote app <pid|socket> <command> [k=v ...]`; `makepad inspect <pid>
+<command>` speaks the same commands. The exit status is 1 when the answer has an
+error line and 2 when the app is unreachable.
 
 Do not discover an instance by taking over another running one. Retain your
 own launch's PID and socket. On code changes, close that instance, rebuild,
 and relaunch before inspecting again.
+
+An app's name (and `makepad inspect all`) reaches only the apps of your own
+lease, or anything for someone typing at a terminal. Otherwise it is refused,
+with the pid it would have reached: on the user's Mac a name is their app, so
+name the pid you mean. `<node>:<name>` through the hub is refused the same way.
 
 ## Common commands
 

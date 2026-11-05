@@ -283,8 +283,6 @@ fn file_with<R: Send + 'static>(
     });
     pending
 }
-/// A manifest or catalog: not cached, ahead of every payload, and in
-/// segments when large.
 /// `bytes` that are what the publisher's hash says, or the error that names them.
 pub fn check_sha256(name: &str, bytes: &[u8], expect: &str) -> Result<(), String> {
     let mut hasher = sha256::Sha256::new();
@@ -293,6 +291,8 @@ pub fn check_sha256(name: &str, bytes: &[u8], expect: &str) -> Result<(), String
     if got.eq_ignore_ascii_case(expect) { Ok(()) } else { Err(format!("sha256 mismatch for {name}: got {got} want {expect}")) }
 }
 
+/// A manifest or catalog: not cached, ahead of every payload, and in
+/// segments when large.
 pub fn bytes(url: &str) -> Result<Vec<u8>, String> {
     let Some(env) = jobs::env() else {
         return http::fetch_bytes(url);

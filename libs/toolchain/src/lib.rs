@@ -52,8 +52,6 @@ pub fn plain_paths(text: &str) -> String {
     text.replace(r"\\?\UNC\", r"\\").replace(r"\\?\", "")
 }
 
-/// Deletes what an install left, only strictly inside `root`. The last component of `path` is not
-/// followed, so a link is removed, never what it points to. A path that does not exist is gone.
 /// Removes what says a step finished; one that isn't there is what was asked for.
 pub(crate) fn remove_marker(path: &Path) -> Result<(), String> {
     match std::fs::remove_file(path) {
@@ -62,6 +60,8 @@ pub(crate) fn remove_marker(path: &Path) -> Result<(), String> {
     }
 }
 
+/// Deletes what an install left, only strictly inside `root`. The last component of `path` is not
+/// followed, so a link is removed, never what it points to. A path that does not exist is gone.
 pub fn remove_inside(root: &Path, path: &Path) -> Result<(), String> {
     let Ok(root) = fs::canonicalize(root) else { return Ok(()) };
     let refuse = || format!("Refusing to delete {}: it is not inside {}", path.display(), root.display());

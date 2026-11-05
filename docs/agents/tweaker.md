@@ -35,6 +35,9 @@ Or merge a Splash chunk onto the selected instance:
 makepad-remote app $P tweak apply path=main_window.body.panel 'splash={draw_bg +: {border_radius: 8}}'
 ```
 
+`tweak apply` leaves the overlay as it is: an edit through the bridge opens no
+panel and takes no pointer events. Send `tweak on=1` to see the selection.
+
 Use the selected widget's reflected property names; not every draw type
 exposes the same radius/color fields. In `tweak state`, `set:1` means a
 property was explicitly applied.
