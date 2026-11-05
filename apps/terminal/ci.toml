@@ -10,9 +10,9 @@ work = "7954fb8a65f663048b1ea7dfcbc6e4a8c5d65464"
 [app.windows]
 capture = ""
 date = "2026-11-05"
-digest = "b82f48427aadcc49aea9d5ae7f678588fd7846bb9f81408c7a8060b779fa52d6"
-main = "6aff3f7d4a7dc69809181ec243f85de10ec70841"
-work = "bc7950ba2a9ef116af414b0bd12331146b736804"
+digest = "4e9bfbe8a50fbd7ecb10fc3623722a98ba6e0659b782c26b8f8510396e8c2efc"
+main = "71832f8fa1c5a3f6f589b89749c6a99c189e3e8e"
+work = "5300f14ac2c7b3d5aa16bd89d98d789111fbbeb8"
 
 [job.jit_05.linux]
 date = "2026-11-04"
@@ -22,6 +22,6 @@ work = "7d8695372c6cd232c174a43ee12e1ee51ba72023"
 
 [tests.linux]
 date = "2026-11-05"
-digest = "ddddf334f42baf91d5981e7340344bcf477f4f48b5a79e966759b9b77cbe4d75"
-main = "f8b30e3e6c67708763fe2bef9ae80fa8f7eb0a3a"
-work = "8ab7761fc8fcd495fc5bb589ce486a61f33965f7"
+digest = "deae37a1f71aa8562b170218d499ef4bf86bf888fe561ef321d2bea929ec5cfe"
+main = "71832f8fa1c5a3f6f589b89749c6a99c189e3e8e"
+work = "5300f14ac2c7b3d5aa16bd89d98d789111fbbeb8"

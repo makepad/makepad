@@ -755,8 +755,9 @@ impl<C: ServiceConf> Supervised<C> {
                 return;
             }
         };
+        // It is to outlive this WM's run (adopt_or_replace): a session of its own says so.
         #[cfg(unix)]
-        makepad_app_host::launch::own_process_group(&mut cmd);
+        makepad_app_host::launch::own_session(&mut cmd);
         crate::host::no_console_window(&mut cmd);
         if let Some(dir) = self.log.parent() {
             let _ = std::fs::create_dir_all(dir);

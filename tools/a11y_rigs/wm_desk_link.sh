@@ -242,7 +242,7 @@ target/release/makepad-remote app "$wm_pid" ui app=shell wait q=role=menu
 target/release/makepad-remote app "$wm_pid" ui app=shell find role=menu_item | tee target/c10/menu.log
 grep -q menu_item target/c10/menu.log
 target/release/makepad-remote app "$wm_pid" key k=press c=Escape if_user_seq=0
-target/release/makepad-remote app "$wm_pid" key k=press c=Space cmd=1 alt=1 if_user_seq=0
+target/release/makepad-remote app "$wm_pid" key k=press c=Space logo=1 alt=1 if_user_seq=0
 target/release/makepad-remote app "$wm_pid" ui app=shell wait 'q=role=list_box name=Applications'
 target/release/makepad-remote app "$wm_pid" ui app=shell find role=option | tee target/c10/launcher.log
 grep -q option target/c10/launcher.log

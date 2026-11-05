@@ -17,6 +17,7 @@ pub(crate) fn register() {
         "tiles",
         "[remove <client>]",
         "the WM's client tiles (client, app, title, pid, connected, alive); remove <client>: drop a dead tile (socket gone); a connected one is refused",
+        |_| "",
         query,
     );
 }

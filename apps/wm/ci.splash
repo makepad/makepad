@@ -1,11 +1,12 @@
-// CI smoke test for the window manager. Run by tools/ci, which finds every
+// CI smoke test for the window manager. Run by devhub ci, which finds every
 // `ci.splash` in the checkout and runs it with the `ci` module in scope.
 //
 // The rule: this script decides every input. The vision model never chooses
 // what to send; `ci.accept(image, text)` hands it one grab and numbered
 // questions, each ending in the answer that passes it (`expected YES` or
 // `expected NO`, which the model never sees); it answers each YES or NO. Keep it basic: does the
-// WM come up, switch to macOS, and launch a terminal and a browser.
+// WM come up, switch to macOS, and launch a terminal (a hosted launch; the browser's own smoke
+// covers the browser).
 
 // Any Linux or Mac box. Windows: the terminal step fails (open: the judge sees no terminal on the desk).
 // ci os: any
@@ -26,7 +27,6 @@ ci.step("build the apps the desk will open", fn(){
     ci.build({package: "makepad-app-terminal" binary: "makepad-app-terminal"})
     // The terminal starts its shell through this helper, next to it.
     ci.build({package: "makepad-agents" binary: "agents"})
-    ci.build({package: "makepad-app-browser" binary: "makepad-app-browser"})
 })
 
 let wm = ci.launch({package: "makepad-app-wm" binary: "makepad-app-wm" cwd: "."})
@@ -73,18 +73,6 @@ ci.step("launch the terminal", fn(){
     ci.sleep(2.0)
     let shot = wm.grab("terminal")
     ci.accept(shot, FRAME + "It shows a desktop with app windows on it. A terminal window is a rectangular window whose content area is mostly one dark or one light flat colour with lines of monospace text starting at the left edge, usually with a prompt symbol such as $ or % or > on the last line, and a title bar above it. 1. Is at least one terminal window open, as described? expected YES")
-})
-
-ci.step("launch the browser", fn(){
-    wm.key("Space", {cmd: true})
-    wm.type_text("browser")
-    wm.key("ReturnKey")
-    wm.wait_log("shell menu activate apps.browser", 20.0)
-    wm.wait_log("browser client * app first frame", 240.0)
-    wm.wait_log("browser client * first frame in", 240.0)
-    ci.sleep(4.0)
-    let shot = wm.grab("browser")
-    ci.accept(shot, FRAME + "It shows a desktop with app windows on it. A web browser window has an address bar, a wide rounded text field near its top containing a web address or a search field, possibly a row of tabs above it, and a page area below it. 1. Is at least one web browser window open, as described? expected YES")
 })
 
 // A hosted window keeps presenting and answering grabs through maximise, restore and resize,

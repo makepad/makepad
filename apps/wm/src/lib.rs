@@ -1451,8 +1451,9 @@ impl App {
             let (w, h) = (rect.w.max(1.0), rect.h.max(1.0));
             // The tile's own allocation rule, so a warm instance warms up
             // at the size a full-desk tile would have asked for.
-            let alloc = |px: f64| ((px * dpi).ceil() as u32).max(64).next_power_of_two();
-            let swapchain = HostSwapchain::new(window_id, alloc(w), alloc(h), cx);
+            let alloc = |px: u32| px.max(64).next_power_of_two();
+            let [pw, ph] = makepad_hal::window_pixels([w, h], dpi);
+            let swapchain = HostSwapchain::new(window_id, alloc(pw), alloc(ph), cx);
             let shared = shared_swapchain_from_host_swapchain(&swapchain, cx);
             let mut msgs = vec![
                 StudioToApp::WindowGeomChange {
@@ -2986,17 +2987,19 @@ impl App {
 
     /// The WM is going down: the pane's child has no window of its own
     /// and no tile, so nothing else would reap it.
-    fn kill_pane_child(&mut self, cx: &mut Cx) {
-        let Some(client) = self.ai_bus.pane_client else {
-            return;
-        };
-        let pool = cx.task_pool();
-        if let Some(slot) = self.state_mut().clients.get_mut(&client) {
-            if let Some(child) = slot.child.as_mut() {
-                log!("wm: shutdown kills the AI pane's child {}", client);
-                makepad_app_host::launch::kill_child_group(child, makepad_app_host::launch::GROUP_KILL_GRACE, &pool);
-            }
+    /// The WM goes and its apps go with it: each is asked what a closed tile is (`request_close`)
+    /// and has the time to save and leave, then what is left is killed. A kept service stays for
+    /// the next WM, and a client not connected yet has nothing to save (its slot's drop ends it).
+    fn end_apps_at_shutdown(&mut self) {
+        let mut children = Vec::new();
+        for slot in self.state_mut().clients.values_mut() {
+            let Some(sender) = slot.sender.as_ref().filter(|_| slot.parent.is_none() && !slot.service) else {
+                continue;
+            };
+            send_to_app(sender, vec![StudioToApp::Custom(WmEvent::CloseRequested.to_json()), StudioToApp::Kill]);
+            children.extend(slot.child.take());
         }
+        makepad_app_host::launch::end_asked_children(&mut children, makepad_app_host::launch::CLOSE_GRACE);
     }
 
     // ---- in-process instances (module_host.rs) ----
@@ -7078,6 +7081,9 @@ impl AppMain for App {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        if let Event::LiveEdit = event {
+            self.module_host.follow_live_edit(cx);
+        }
         self.native_app_tick(cx, event);
         self.desk_link.handle_event(cx, event);
         // a virtual desktop that follows its viewer takes the window size of the viewer that connected last
@@ -7449,7 +7455,7 @@ impl AppMain for App {
             self.devhub_link.shutdown(&pool);
             if self.state.is_some() {
                 self.kill_warm_previews(cx);
-                self.kill_pane_child(cx);
+                self.end_apps_at_shutdown();
             }
             self.wifi_shutdown();
             #[cfg(target_os = "linux")]

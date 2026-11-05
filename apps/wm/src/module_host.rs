@@ -82,8 +82,12 @@ impl ModuleHost {
         // With the WM's system theme sheet the isolate registers its library once, styled, as for
         // a child process (not the stock library first and the sheet's over it).
         let vm_id = match self.style.clone() {
-            Some(sheet) => cx.alloc_splash_vm_with_ui(false, Box::new(move |vm: &mut ScriptVm| {
-                desktop_style::install(vm, sheet);
+            Some(sheet) => cx.alloc_splash_vm_with_ui(false, std::rc::Rc::new(move |vm: &mut ScriptVm| {
+                // A live edit's reload pass keeps the sheet the isolate wears now
+                // (`apply_style` may have restyled it since).
+                if !vm.is_reload() {
+                    desktop_style::install(vm, sheet.clone());
+                }
                 makepad_widgets::theme_mod(vm);
                 makepad_widgets::isolate_widgets_mod(vm);
                 desktop_style::apply_widgets(vm);
@@ -98,6 +102,8 @@ impl ModuleHost {
             // themes), load through it. Back in before anything evaluates.
             makepad_widgets::makepad_platform::script::res::script_mod(vm);
             module.register(vm);
+            // Registered after the isolate's UI: its reload passes register it again after theirs.
+            vm.keep_for_reload(id!(wm_module), move |vm| module.register(vm));
             module.create(vm, open, handles)
         });
         log!(
@@ -123,6 +129,19 @@ impl ModuleHost {
             },
         );
         Ok(())
+    }
+
+    /// After a live edit: each instance's isolate registers its UI and its module again (its
+    /// reload pass, on this first entry), and its root takes them as `apply_style` applies a
+    /// sheet, so the instance draws the edited code.
+    pub fn follow_live_edit(&mut self, cx: &mut Cx) {
+        for instance in self.instances.values_mut() {
+            cx.with_script_vm_id(instance.vm_id, |vm| {
+                let source = instance.root.widget_type_id().and_then(|ty| vm.heap().type_default_for_id(ty)).unwrap_or_else(|| instance.root.script_source());
+                instance.root.script_apply(vm, &Apply::ScriptReapply, &mut Scope::empty(), source.into());
+            });
+            instance.root.redraw(cx);
+        }
     }
 
     pub fn apply_style(&mut self,cx:&mut Cx,sheet:&desktop_style::StyleSheet) {
