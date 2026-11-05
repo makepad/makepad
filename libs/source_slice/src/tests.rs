@@ -421,7 +421,7 @@ fn paths_resolve_lexically_and_never_leave_the_repository() {
 }
 
 /// A root's optional dependencies are in the slice only when its features
-/// turn them on, with no default features, as the Builder builds it.
+/// turn them on, with no default features, as the Runner builds it.
 #[test]
 fn a_roots_optional_dependencies_follow_the_slice_features() {
     let f = commercial("features");

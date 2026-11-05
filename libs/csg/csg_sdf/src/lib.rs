@@ -23,15 +23,15 @@ pub mod strokes;
 pub mod surface_mesh;
 pub mod texture;
 
-pub use bounds::{changed, cull, culls_alike, deform_bounds, node_bounds, same, Bounds};
+pub use bounds::{changed, cull, culls_alike, deform_bounds, node_bounds, same, tight_bounds, Bounds};
 pub use combinators::*;
-pub use extent::surface_bounds;
+pub use extent::{shape_bounds, surface_bounds, Extent};
 pub use links::{LinkLoop, Links};
 pub use field_mesh::{default_cell, mesh_field, sdf_to_mesh};
 pub use surface_mesh::meshes_built;
 pub use primitives::*;
 pub use sdf::Sdf3;
-pub use shape::{distance, distance_id, distance_many, distance_slot, part_id, quat_from_degrees, quat_rotate, transform_into, SdfDeform, SdfKernel, SdfMaterial, SdfNode, SdfOp, SdfPlace, SdfShape, SdfSplat};
+pub use shape::{distance, distance_id, distance_many, distance_slot, part_id, transform_out_of, TAPER_MIN, quat_from_degrees, quat_rotate, transform_into, SdfDeform, SdfKernel, SdfMaterial, SdfNode, SdfOp, SdfPlace, SdfShape, SdfSplat};
 pub use grid::SdfGrid;
 pub use splash_field::{SdfSplashExpr, SplashPoint, GRID_INPUT, GRID_PARAM, MAX_LIFTED};
 pub use texture::{SdfTexture, TexProject};

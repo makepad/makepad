@@ -13,8 +13,7 @@
 //!   the displaced surface exactly, and everything that steps by the value (a brick's
 //!   classification, a march, a layer trace's crossing search) needs nothing more.
 //!
-//! The SDF engine's program runs the same steps in f32 (its TEX op), bit for bit with its CPU
-//! twin.
+//! A GPU program lowered from a field runs the same steps in f32, bit for bit with a CPU twin.
 
 use crate::shape::{SdfKernel, SdfNode, P3};
 use makepad_csg_math::Vec3d;
@@ -54,6 +53,12 @@ pub struct SdfTexture {
     /// The narrowest feature the pattern prints (mm in the node's units): what a printer's
     /// line width is checked against. 0: not known.
     pub feature: f64,
+    /// The pattern stays in [0, 1] by its construction (the library's do; a user's `Pattern{}`
+    /// only promises to). The displacement `depth M S` is then within [min(0, depth), max(0,
+    /// depth)] everywhere, whatever the masks and the triplanar blend do (each in [0, 1], the
+    /// blend's weights summing to at most 1), so the source's field bounds the distance to the
+    /// displaced surface ([`SdfTexture::displacement_range`]).
+    pub unit_pattern: bool,
 }
 
 /// A mask ramp: 1 at or below `lo`, 0 at or above `hi`, a smoothstep between (no kink at
@@ -91,7 +96,15 @@ impl SdfTexture {
         let overlap = matches!((top, bottom), (Some(t), Some(b)) if t.0 + b.0 < 0.0);
         slope += if overlap { mask(top) + mask(bottom) } else { mask(top).max(mask(bottom)) };
         let lipschitz = 1.0 + depth.abs() * slope;
-        SdfTexture { kernel, project, kscale, depth, lipschitz, step, top, bottom, feature }
+        SdfTexture { kernel, project, kscale, depth, lipschitz, step, top, bottom, feature, unit_pattern: false }
+    }
+
+    /// The least and the most the displacement `depth M S` can be, when the pattern is known to
+    /// stay in [0, 1] ([`SdfTexture::unit_pattern`]). With `lo` the least, the 1-Lipschitz
+    /// `g + lo` is at most the field's undivided value, and at most 0 on the displaced surface:
+    /// it bounds the distance to that surface from outside, unshrunk by [`SdfTexture::lipschitz`].
+    pub fn displacement_range(&self) -> Option<(f64, f64)> {
+        self.unit_pattern.then_some((self.depth.min(0.0), self.depth.max(0.0)))
     }
 
     /// Whether the smoothed gradient is taken (four more evaluations of the source).
@@ -243,7 +256,7 @@ mod tests {
         assert_eq!((ramp(Some(m), 0.0), ramp(Some(m), 1.0), ramp(None, 1.0)), (1.0, 0.0, 1.0));
         assert!((ramp(Some(m), 0.5 * (m.0 + m.1)) - 0.5).abs() < 1e-12);
         assert_eq!(angle_mask(0.0, 0.3), None);
-        let k = || SdfKernel { key: 0, field: std::sync::Arc::new(crate::primitives::SdfSphere::new(Vec3d::new(0.0, 0.0, 0.0), 1.0)), splash: None, bounds: None };
+        let k = || SdfKernel { key: 0, field: std::sync::Arc::new(crate::primitives::SdfSphere::new(Vec3d::new(0.0, 0.0, 0.0), 1.0)), splash: None, bounds: None, solid: None };
         let t = SdfTexture::new(k(), TexProject::Axis(1), 1.0, 0.5, 2.0, None, None, 3.0, 0.0);
         assert_eq!((t.lipschitz, t.needs_gradient(), t.reach()), (2.5, false, 0.5));
         let t = SdfTexture::new(k(), TexProject::Triplanar, 1.0, -0.5, 2.0, Some(m), Some(m), 3.0, 0.0);

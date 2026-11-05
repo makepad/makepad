@@ -197,7 +197,7 @@ script_mod! {
         ..mod.draw.ClusteredLighting,
         ..mod.draw.FastGiSampling,
         ..mod.draw.SceneOutputDither,
-        // ---- material paint (libs/paint_field), OFF by default ----
+        // ---- material paint, OFF by default ----
         // A CAD host's paint atlas sits in the element lookup's texture, after its table: an
         // element's texel 1 `.w` is its volume's header texel + 1 (0: unpainted). The vertex
         // stage keeps the position before the element move and the element index, so paint stays
@@ -211,14 +211,21 @@ script_mod! {
             return self.elem_map.sample_nearest(vec2((modf(i, ew) + 0.5) / ew, (floor(i / ew) + 0.5) / eh))
         }
 
+        // The element's paint header texel, -1 for none.
+        paint_header: fn() -> f32 {
+            if self.elem_ctl.w < 0.5 || self.elem_ctl.z < 3.5 || self.v_paint.w < 0.0 { return 0.0 - 1.0 }
+            return self.paint_texel(self.v_paint.w * self.elem_ctl.z + 1.0).w - 1.0
+        }
+
         // `albedo` with the element's paint at this fragment, edges a pixel wide.
         paint_mix: fn(albedo: vec3) -> vec3 {
-            let dw = length(dFdx(self.v_paint.xyz)) + length(dFdy(self.v_paint.xyz))
-            if self.elem_ctl.w < 0.5 || self.elem_ctl.z < 3.5 || self.v_paint.w < 0.0 { return albedo }
-            let hdr = self.paint_texel(self.v_paint.w * self.elem_ctl.z + 1.0).w - 1.0
+            let dx = dFdx(self.v_paint.xyz)
+            let dy = dFdy(self.v_paint.xyz)
+            let dw = length(dx) + length(dy)
+            let hdr = self.paint_header()
             if hdr < 0.0 { return albedo }
             let s = length(self.paint_texel(hdr + 3.0).xyz)
-            return self.paint_albedo(hdr, self.paint_frame(hdr, self.v_paint.xyz), dw * s, albedo)
+            return self.paint_albedo(hdr, self.paint_frame(hdr, self.v_paint.xyz), self.paint_turn(hdr + 3.0, cross(dx, dy)), dw * s, albedo)
         }
 
         dl_term: fn(wp: vec3, n: vec3, lp: vec4, lc: vec4) -> vec3 {

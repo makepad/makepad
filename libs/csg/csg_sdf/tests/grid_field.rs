@@ -61,6 +61,20 @@ fn points(n: usize, lo: [f64; 3], hi: [f64; 3]) -> Vec<[f64; 3]> {
     (0..n).map(|_| std::array::from_fn(|a| lo[a] + r() * (hi[a] - lo[a]))).collect()
 }
 
+/// A grid's table follows its samples, where word 14 says, and such a grid stays whole.
+#[test]
+fn a_grids_table_follows_its_samples_and_keeps_it_whole() {
+    let region = ([-0.7, 0.1, -1.2], [0.4, 0.9, 0.3]);
+    let g = grid().with_table(vec![7.0, 8.0, 9.0].into());
+    assert_eq!(grid().words()[14], 0.0, "no table");
+    let w = g.words();
+    let at = w[14] as usize;
+    assert_eq!((w[13] as usize, &w[at..]), (w.len(), &[7.0, 8.0, 9.0][..]));
+    assert_ne!(g.hash(), grid().hash(), "the table is in the grid's hash");
+    assert_eq!(g.crop(&region).hash(), g.hash(), "no piece");
+    assert!(g.crops_alike(&region, &([1.0, 0.1, -1.2], [2.0, 0.9, 0.3])));
+}
+
 #[test]
 fn a_grid_reads_back_trilinear_and_its_crop_reads_the_same_bits() {
     let mut vm = make_vm();

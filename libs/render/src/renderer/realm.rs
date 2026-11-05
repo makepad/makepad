@@ -654,21 +654,46 @@ impl Renderer {
         self.splat_draw = Some(draw);
     }
 
+    /// Whether a resident model has a layer `holds` says yes to, in any of
+    /// its levels of detail: a lane's shaders are built for a model that
+    /// draws through them, no sooner.
+    pub(super) fn a_resident_layer(&self, holds: impl Fn(&crate::material_surface::UploadedSurface) -> bool) -> bool {
+        fn any(model: &LoadedModel, holds: &impl Fn(&crate::material_surface::UploadedSurface) -> bool) -> bool {
+            std::iter::once(&model.material).chain(model.extra_draws.iter().map(|l| &l.4))
+                .any(|m| m.surface.as_ref().is_some_and(holds))
+                || model.lods.iter().any(|(_, lod)| any(lod, holds))
+        }
+        self.static_models.iter().any(|(_, model)| any(model, &holds))
+    }
+
     /// Decide once per frame, before any model pass, whether painted
-    /// terrain takes its own lane this frame.
+    /// terrain takes its own lane this frame. Its shaders are built when a
+    /// resident model has a painted layer.
     pub(super) fn prepare_splat_lane(&mut self, cx: &mut Cx) {
+        self.splat_ready = false;
+        if !self.pbr_materials_enabled || !self.a_resident_layer(|s| s.splat.is_some()) {
+            return;
+        }
         if self.splat_draw.is_none() {
             self.splat_draw = cx.try_with_vm(|vm| Box::new(crate::shaders::DrawSceneSplat::script_new_with_default(vm)));
         }
         let hdr = self.hdr_output;
         let stock = self.splat_draw.as_ref().and_then(|d| d.pbr.skinned.draw_vars.draw_shader_id);
         let shader = if stock.is_some() { self.lane_shaders(cx, super::variants::ModelLane::Splat, stock).0 } else { None };
-        self.splat_ready = self.pbr_materials_enabled && shader.is_some_and(|id| cx.draw_shader_ready(id, hdr));
+        self.splat_ready = shader.is_some_and(|id| cx.draw_shader_ready(id, hdr));
     }
 
     /// Decide once per frame, before any model pass, whether foliage takes
-    /// its own lane this frame.
+    /// its own lane this frame. Its shaders are built when a resident model
+    /// has a layer in the wind.
     pub(super) fn prepare_foliage_lane(&mut self, cx: &mut Cx) {
+        self.foliage_ready = false;
+        if !self.pbr_materials_enabled
+            || std::env::var_os("MAKEPAD_FOLIAGE_LANE").is_some_and(|v| v == "0")
+            || !self.a_resident_layer(|s| s.definition.wind > 0.0)
+        {
+            return;
+        }
         if self.foliage_draw.is_none() {
             self.foliage_draw = cx.try_with_vm(|vm| Box::new(crate::shaders::DrawSceneFoliageLit::script_new_with_default(vm)));
         }
@@ -676,9 +701,7 @@ impl Renderer {
         // Ready: the foliage lane's shader for this frame's features (variants.rs).
         let stock = self.foliage_draw.as_ref().and_then(|d| d.pbr.skinned.draw_vars.draw_shader_id);
         let shader = if stock.is_some() { self.lane_shaders(cx, super::variants::ModelLane::Foliage, stock).0 } else { None };
-        self.foliage_ready = self.pbr_materials_enabled
-            && std::env::var_os("MAKEPAD_FOLIAGE_LANE").is_none_or(|v| v != "0")
-            && shader.is_some_and(|id| cx.draw_shader_ready(id, hdr));
+        self.foliage_ready = shader.is_some_and(|id| cx.draw_shader_ready(id, hdr));
     }
 
     pub(super) fn draw_custom_models(

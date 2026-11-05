@@ -153,3 +153,34 @@ fn parametric_radius_remesh() {
         assert!(out[0].abs() < 1e-6);
     }
 }
+
+/// A field is never cut for what it costs: a range known only at run time runs to its end. A
+/// `while` keeps the language's stop, and says it reached it.
+#[test]
+fn a_long_range_runs_whole_and_a_while_says_it_stopped() {
+    let mut vm = make_vm();
+    vm.capture_errors();
+    let mut field = |name: &str, source: &str| {
+        let f = vm.eval(ScriptMod::new("", "", name, 0, 0, source, &[]));
+        assert!(vm.take_errors().is_empty());
+        let f = f.as_object().expect("a fn");
+        let _keep = vm.new_object_ref(f);
+        f
+    };
+    let r = field("long_range", "let f = fn(p, n) { let s = 0.0\n for k in 0..int(n) { s = s + 1.0 }\n return s }\n(f)");
+    let w = field("long_while", "let f = fn(p, n) { let s = 0.0\n while s < n { s = s + 1.0 }\n return s }\n(f)");
+    let mut range = SdfSplashExpr::compile(&mut vm, r, SplashPoint::Vec3, &[1]).unwrap_or_else(|e| panic!("{e:?}"));
+    range.set_uniforms(&[3000.0]);
+    assert_eq!(range.distance(Vec3d::new(0.0, 0.0, 0.0)), 3000.0);
+    assert!(!range.stopped());
+    let mut stops = SdfSplashExpr::compile(&mut vm, w, SplashPoint::Vec3, &[1]).unwrap_or_else(|e| panic!("{e:?}"));
+    stops.set_uniforms(&[100.0]);
+    assert_eq!(stops.distance(Vec3d::new(0.0, 0.0, 0.0)), 100.0);
+    assert!(!stops.stopped());
+    stops.set_uniforms(&[3000.0]);
+    assert_eq!(stops.distance(Vec3d::new(0.0, 0.0, 0.0)), 1024.0);
+    assert!(stops.stopped());
+    stops.set_uniforms(&[100.0]);
+    assert_eq!(stops.distance(Vec3d::new(0.0, 0.0, 0.0)), 100.0);
+    assert!(!stops.stopped(), "other values, another field");
+}

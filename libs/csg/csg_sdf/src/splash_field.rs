@@ -10,7 +10,7 @@
 //!
 //! Precision contract: points are rounded to f32, the function runs with
 //! the kernel compiler's f32 semantics in `exact32` math (f32 polynomials,
-//! unfused arithmetic: only IEEE f32 operations, so the SDF engine's GPU
+//! unfused arithmetic: only IEEE f32 operations, so a GPU
 //! bake computes the same bits), and the distance is that f32 result.
 //!
 //! Wiring a surface verb (which owns the VM and the fn value):
@@ -32,14 +32,24 @@
 //! the flat buffer `sdf_grid` (an [`SdfGrid`]'s words: the header, then the
 //! samples), and the kernel's first parameter, `sdf_grid_at`, is where a GPU
 //! route finds those words (unused on the CPU, which binds the buffer).
+//!
+//! A field compiled with its trace ([`SdfSplashExpr::compile_traced`]) keeps its lowering for a
+//! host's own analysis of it (`makepad_script_compute::lower::trace`).
+//!
+//! A field is never cut for what it costs, so all its readers agree: a `for` over a range known only
+//! at run time runs to its end (a list of seeds is as long as its table says), and a run has no work
+//! limit. A `while` or `loop` keeps the language's stop, the one thing that ends it: reaching that
+//! leaves the value there and shows in [`SdfSplashExpr::stopped`].
 
 use makepad_script_compute_sched::kernel::KernelExt;
 use crate::grid::SdfGrid;
 use crate::sdf::Sdf3;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use makepad_csg_math::Vec3d;
 use makepad_script::*;
 use makepad_script_compute::kernel::{KernelRef, MathMode};
+use makepad_script_compute::lower::trace::KernelTrace;
 use makepad_script_compute::vm_kernel::{self, Decl, Entry, VmKernel};
 use makepad_script_compute::{Backend, ShaderError};
 use std::fmt::Write;
@@ -82,6 +92,11 @@ pub struct SdfSplashExpr {
     structure: u64,
     /// The grid the fn reads (a gridded field), and its words as the kernel reads them.
     grid: Option<(Arc<SdfGrid>, Arc<[f32]>)>,
+    /// The field's trace (its parameters are the field's, by name), or why it has none; None: the
+    /// field was compiled without one.
+    trace: Option<Result<KernelTrace, Arc<str>>>,
+    /// A `while` or `loop` reached the language's stop in a run of this field.
+    stopped: Arc<AtomicBool>,
 }
 
 /// The most document numbers a field lifts to parameters (the rest stay
@@ -97,15 +112,20 @@ impl SdfSplashExpr {
     /// Compiles `f` (a script fn) as a field. `uniforms` holds the lane
     /// count (1-4) of each parameter after the point.
     pub fn compile(vm: &mut ScriptVm, f: ScriptObject, point: SplashPoint, uniforms: &[usize]) -> Result<SdfSplashExpr, Vec<ShaderError>> {
-        Self::compile_inner(vm, f, point, uniforms, None)
+        Self::compile_inner(vm, f, point, uniforms, None, false)
+    }
+
+    /// [`SdfSplashExpr::compile`] with the field's trace (see the module docs).
+    pub fn compile_traced(vm: &mut ScriptVm, f: ScriptObject, point: SplashPoint, uniforms: &[usize]) -> Result<SdfSplashExpr, Vec<ShaderError>> {
+        Self::compile_inner(vm, f, point, uniforms, None, true)
     }
 
     /// [`SdfSplashExpr::compile`] for a fn that reads `grid` as `sdf_grid`.
     pub fn compile_gridded(vm: &mut ScriptVm, f: ScriptObject, point: SplashPoint, uniforms: &[usize], grid: SdfGrid) -> Result<SdfSplashExpr, Vec<ShaderError>> {
-        Self::compile_inner(vm, f, point, uniforms, Some(grid))
+        Self::compile_inner(vm, f, point, uniforms, Some(grid), false)
     }
 
-    fn compile_inner(vm: &mut ScriptVm, f: ScriptObject, point: SplashPoint, uniforms: &[usize], grid: Option<SdfGrid>) -> Result<SdfSplashExpr, Vec<ShaderError>> {
+    fn compile_inner(vm: &mut ScriptVm, f: ScriptObject, point: SplashPoint, uniforms: &[usize], grid: Option<SdfGrid>, traced: bool) -> Result<SdfSplashExpr, Vec<ShaderError>> {
         let mut decls = vec![
             Decl::Input { name: "sdf_points".into(), ty: "vec3".into(), stride: None, offset: None, buffer: None },
             Decl::Output { name: "sdf_dist".into(), ty: "f32".into(), stride: None, offset: None, buffer: None },
@@ -146,6 +166,7 @@ impl SdfSplashExpr {
             entry: Entry::Element,
             entry_fn,
             math: MathMode::Exact32,
+            whole_ranges: true,
             uses: Vec::new(),
             bind: vec![("sdf_field".into(), f)],
         };
@@ -162,11 +183,25 @@ impl SdfSplashExpr {
         if grid.is_some() && kernel.param_index(GRID_PARAM) != Some(0) {
             return Err(vec![ShaderError::new(0, 1, format!("the grid's parameter is not the kernel's first ({:?})", kernel.param_index(GRID_PARAM)))]);
         }
+        let trace = (traced && grid.is_none()).then(|| Self::trace_of(vm, &k, &kernel));
         let grid = grid.map(|g| {
             let words: Arc<[f32]> = g.words().into();
             (Arc::new(g), words)
         });
-        Ok(SdfSplashExpr { kernel, params, values, lifted, slots, structure, grid })
+        Ok(SdfSplashExpr { kernel, params, values, lifted, slots, structure, grid, trace, stopped: Arc::new(AtomicBool::new(false)) })
+    }
+
+    /// The trace of the field kernel `k` (compiled as `field`).
+    fn trace_of(vm: &ScriptVm, k: &VmKernel, field: &KernelRef) -> Result<KernelTrace, Arc<str>> {
+        let trace = vm_kernel::trace_lifted(vm, k, MAX_LIFTED).map_err(|e| e.iter().map(|e| e.message.clone()).collect::<Vec<_>>().join("; "))?;
+        // the same parameters as the field (a number lifted in one and a constant in the other
+        // would not follow a drag)
+        let of_field: std::collections::BTreeSet<&str> = (0..field.param_count()).map(|i| field.param_view(i).name).collect();
+        let of_trace: std::collections::BTreeSet<&str> = trace.view().params.iter().copied().collect();
+        if of_trace != of_field {
+            return Err(format!("its parameters {of_trace:?} are not the field's {of_field:?}").into());
+        }
+        Ok(trace)
     }
 
     /// The grid a gridded field reads.
@@ -216,11 +251,18 @@ impl SdfSplashExpr {
         &self.kernel
     }
 
+    /// The field's trace (see the module docs), or why it has none; None: the field was compiled
+    /// without one.
+    pub fn trace(&self) -> Option<Result<&KernelTrace, &str>> {
+        self.trace.as_ref().map(|t| t.as_ref().map_err(|e| &**e))
+    }
+
     /// Sets the uniform values, lane-flattened in declaration order.
     /// Re-sample after this for the parametric-model loop — no recompile.
     pub fn set_uniforms(&mut self, lanes: &[f32]) -> &mut Self {
         assert!(lanes.len() == self.params.len(), "{} uniform lanes, the field takes {}", lanes.len(), self.params.len());
         self.values.copy_from_slice(lanes);
+        self.stopped = Arc::new(AtomicBool::new(false));
         self
     }
 
@@ -253,7 +295,20 @@ impl SdfSplashExpr {
         }
         call.input("sdf_points", xyz).expect("the field's point input");
         call.output("sdf_dist", out).expect("the field's distance output");
-        call.run(count).expect("the field kernel runs");
+        call.set_work_limit(u64::MAX);
+        self.note(call.run(count).expect("the field kernel runs").overflowed);
+    }
+
+    fn note(&self, overflowed: bool) {
+        if overflowed {
+            self.stopped.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// Whether a run so far, of this field or a copy at the same values, had a `while` or `loop`
+    /// reach the language's stop: its value there is what the loop had by then.
+    pub fn stopped(&self) -> bool {
+        self.stopped.load(Ordering::Relaxed)
     }
 }
 

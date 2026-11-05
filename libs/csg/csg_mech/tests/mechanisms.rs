@@ -193,6 +193,13 @@ fn runner_publishes_poses_and_takes_a_grab() {
     let s0 = r.latest();
     assert_eq!(s0.poses.len(), 3);
     r.send(Command::Play);
+    // the answer to a command is a snapshot that has taken it up
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while !r.answered() {
+        assert!(std::time::Instant::now() < until, "the runner did not answer Play");
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert!(r.latest().running, "answered, and not running");
     std::thread::sleep(std::time::Duration::from_millis(400));
     let s1 = r.latest();
     assert!(s1.frame > 40, "frames {}", s1.frame);

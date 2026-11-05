@@ -5,7 +5,7 @@
 //!
 //! Coordinates are the part's model frame (mm), the frame its paint program, its bake and its
 //! shape use; the brick grid ([`BRICK`], origin at 0) is the paint program's grid, which the paint
-//! bake's bricks nest in (`makepad_paint_field`). Paint strokes colour a part; shape strokes
+//! bake's bricks nest in. Paint strokes colour a part; shape strokes
 //! (raise, lower, crease) sculpt its field through [`crate::SdfNode::Sculpt`].
 //!
 //! # File layout (little-endian, every section 8-byte aligned)
@@ -628,13 +628,31 @@ impl Strokes {
     }
 
     /// The capsule boxes that differ between two logs of one file: the strokes past their
-    /// common applied prefix in either (an appended stroke, an undo, a redo).
+    /// common applied prefix in either (an appended stroke, an undo, a redo). A stroke that one
+    /// log holds with more points than the other (a stroke being drawn) adds only the capsules
+    /// its new points close.
     /// Only the paint strokes (`paint`) or only the shape strokes: a sculpt leaves the paint
     /// as it is and a paint stroke the shape.
     pub fn changed_boxes(&self, other: &Strokes, paint: bool) -> Vec<(P3, P3)> {
         let n = self.cursor.min(other.cursor) as usize;
-        let common = (0..n).take_while(|&k| self.hashes.get(k) == other.hashes.get(k)).count();
+        let mut common = (0..n).take_while(|&k| self.hashes.get(k) == other.hashes.get(k)).count();
         let mut out = Vec::new();
+        if common < n {
+            let (a, b) = (self.stroke(common), other.stroke(common));
+            let (short, long) = if a.points <= b.points { (self, other) } else { (other, self) };
+            let (pa, pb) = (self.stroke_points(common), other.stroke_points(common));
+            let shorter = pa.len().min(pb.len());
+            if a.op == b.op && a.radius == b.radius && a.strength == b.strength && shorter > 0 && pa[..shorter] == pb[..shorter] {
+                // the capsules from the shorter one's last point on (a lone point: its sphere,
+                // inside the first capsule)
+                if a.op.is_paint() == paint {
+                    let (from, to) = (short.stroke(common).points as usize - 1, long.stroke(common).points as usize);
+                    let reach = a.reach();
+                    out.extend((from..to.saturating_sub(1).max(from + 1)).map(|s| long.seg_box(common, s, reach)));
+                }
+                common += 1;
+            }
+        }
         for (log, end) in [(self, self.cursor as usize), (other, other.cursor as usize)] {
             for si in common..end {
                 if log.stroke(si).op.is_paint() == paint {
@@ -744,11 +762,12 @@ impl Strokes {
         self.applied().any(|(_, s)| s.tube().is_some())
     }
 
-    /// The tubes' boxes (grown by their reach) of the applied shape strokes.
-    pub fn shape_bounds(&self) -> Option<(P3, P3)> {
+    /// The tubes' boxes (grown by their reach) of the applied raising strokes: where the strokes
+    /// can add to the solid (a lowering stroke or a crease only takes away).
+    pub fn raised_bounds(&self) -> Option<(P3, P3)> {
         let mut out: Option<(P3, P3)> = None;
         for (si, s) in self.applied() {
-            if s.tube().is_none() {
+            if !s.tube().is_some_and(|t| t.raise) {
                 continue;
             }
             for (lo, hi) in self.boxes(si..si + 1) {
@@ -757,7 +776,6 @@ impl Strokes {
                     Some((a, b)) => (std::array::from_fn(|k| a[k].min(lo[k])), std::array::from_fn(|k| b[k].max(hi[k]))),
                 });
             }
-            let _ = s;
         }
         out
     }

@@ -33,13 +33,25 @@ pub struct SdfKernel {
     /// A box holding the solid in the kernel's own frame (the document's
     /// declared bounds); `None`: unbounded.
     pub bounds: Option<crate::bounds::Bounds>,
+    /// The grid whose read `field` is and nothing more ([`SdfKernel::grid_read`]): its solid is
+    /// known from its samples, without reading the field.
+    pub solid: Option<Arc<crate::SdfGrid>>,
 }
 
 impl SdfKernel {
     /// A Splash field as a kernel node, its solid inside `bounds`.
     pub fn splash(field: crate::SdfSplashExpr, bounds: Option<crate::bounds::Bounds>) -> SdfKernel {
         let field = Arc::new(field);
-        SdfKernel { key: field.key(), field: field.clone(), splash: Some(field), bounds }
+        SdfKernel { key: field.key(), field: field.clone(), splash: Some(field), bounds, solid: None }
+    }
+
+    /// A Splash field that is its grid's read and nothing more (`sdf_grid3(p)`), read inside
+    /// `within`: its bounds are the box of the grid's solid there.
+    pub fn grid_read(field: crate::SdfSplashExpr, within: crate::bounds::Bounds) -> SdfKernel {
+        let grid = field.grid().expect("a field that reads a grid").clone();
+        let centre: crate::shape::P3 = std::array::from_fn(|k| 0.5 * (within.0[k] + within.1[k]));
+        let bounds = grid.solid_box().and_then(|b| crate::bounds::meet(&b, &within)).unwrap_or((centre, centre));
+        SdfKernel { solid: Some(grid), ..SdfKernel::splash(field, Some(bounds)) }
     }
 
     /// The kernel as points in `region` (its frame) read it: a gridded field with the piece of
@@ -51,7 +63,7 @@ impl SdfKernel {
         if piece.hash() == g.hash() {
             return self.clone();
         }
-        SdfKernel::splash(s.with_grid(piece), self.bounds)
+        SdfKernel { solid: self.solid.clone(), ..SdfKernel::splash(s.with_grid(piece), self.bounds) }
     }
 }
 
@@ -176,7 +188,7 @@ pub enum SdfDeform {
 }
 
 /// The smallest taper scale used: a taper that reaches zero is clamped here.
-const TAPER_MIN: f64 = 1e-3;
+pub const TAPER_MIN: f64 = 1e-3;
 
 impl SdfDeform {
     /// A bound on how much the warp stretches distances over a node with
@@ -223,6 +235,22 @@ impl SdfDeform {
 }
 
 impl SdfNode {
+    /// Whether a run so far of a program under this node, for any reader, had a `while` or `loop`
+    /// reach the language's stop ([`crate::SdfSplashExpr::stopped`]): its value there is what the
+    /// loop had by then.
+    pub fn loop_stopped(&self) -> bool {
+        use SdfNode::*;
+        let kernel = |k: &SdfKernel| k.splash.as_ref().is_some_and(|s| s.stopped());
+        match self {
+            Sphere { .. } | Box { .. } | Cylinder { .. } | Torus { .. } | Capsule { .. } | Ellipsoid { .. } | Gyroid { .. } | Mesh(_) | Links(_) => false,
+            Kernel(k) => kernel(k),
+            Combine { of, .. } => of.iter().any(SdfNode::loop_stopped),
+            Material { within, of, .. } => of.loop_stopped() || within.as_deref().is_some_and(SdfNode::loop_stopped),
+            Texture { tex, of } => kernel(&tex.kernel) || of.loop_stopped(),
+            Shell { of, .. } | Round { of, .. } | Transform { of, .. } | Instance { of, .. } | Bone { of, .. } | Deform { of, .. } | Id { of, .. } | Sculpt { of, .. } => of.loop_stopped(),
+        }
+    }
+
     /// `of` warped by `deform`, with its Lipschitz bound.
     pub fn deform(deform: SdfDeform, of: SdfNode) -> SdfNode {
         let lipschitz = deform.lipschitz(crate::bounds::node_bounds(&of).as_ref());
@@ -494,6 +522,25 @@ impl SdfShape {
     pub fn field(&self) -> Arc<dyn Sdf3 + Send + Sync> {
         Arc::new(Eval(self.root.clone()))
     }
+
+    /// This shape sculpted by a strokes log's shape strokes (in its own frame): its solid under
+    /// one [`SdfNode::Sculpt`] of `strokes` (a sculpt at its root takes the new log in place of
+    /// its own), its box grown by the raised tubes. A shape sculpted by a log, then by that log
+    /// with strokes added, equals the unsculpted shape sculpted by the longer log, key included.
+    pub fn sculpted(self, strokes: Arc<crate::strokes::Strokes>) -> SdfShape {
+        let of = match self.root {
+            SdfNode::Sculpt { of, .. } => of,
+            root => Box::new(root),
+        };
+        let (mut min, mut max) = (self.min, self.max);
+        if let Some((lo, hi)) = strokes.raised_bounds() {
+            for k in 0..3 {
+                min[k] = min[k].min(lo[k]);
+                max[k] = max[k].max(hi[k]);
+            }
+        }
+        SdfShape { root: SdfNode::Sculpt { strokes, of }, min, max, materials: self.materials }
+    }
 }
 
 struct Eval(SdfNode);
@@ -741,6 +788,12 @@ pub fn transform_into(at: P3, rotate: P3, scale: f64, p: Vec3d) -> Vec3d {
     let d = p - Vec3d::new(at[0], at[1], at[2]);
     // The inverse rotation is the transpose.
     Vec3d::new(r[0][0] * d.x + r[1][0] * d.y + r[2][0] * d.z, r[0][1] * d.x + r[1][1] * d.y + r[2][1] * d.z, r[0][2] * d.x + r[1][2] * d.y + r[2][2] * d.z) * (1.0 / scale)
+}
+
+/// A point of a [`SdfNode::Transform`]'s frame into its parent's: [`transform_into`] undone.
+pub fn transform_out_of(at: P3, rotate: P3, scale: f64, q: P3) -> P3 {
+    let r = rot(rotate);
+    std::array::from_fn(|i| (r[i][0] * q[0] + r[i][1] * q[1] + r[i][2] * q[2]) * scale + at[i])
 }
 
 fn smin(a: f64, b: f64, k: f64) -> f64 {

@@ -38,13 +38,18 @@ mod gi_scene;
 /// The host widget's themed draw structs, lent to the renderer per frame.
 /// They stay `#[live]` fields on the widget so script-side styling applies.
 pub struct SceneDraws<'a> {
-    pub cube: &'a mut DrawSceneCube,
-    pub alpha: &'a mut DrawSceneAlpha,
+    /// A world's opaque boxes, parts and beams. Optional so a host whose worlds have none builds
+    /// no pipeline for them.
+    pub cube: Option<&'a mut DrawSceneCube>,
+    /// A world's blended boxes, blob shadows, and a mixed-reality stage's shadow catcher and box
+    /// edges. Optional the same way.
+    pub alpha: Option<&'a mut DrawSceneAlpha>,
     pub sky: &'a mut DrawSceneSky,
     /// The analytic (Preetham) sky + stars, drawn for default-sky worlds.
     /// Optional so a host that has not adopted it keeps the gradient dome.
     pub sky_analytic: Option<&'a mut DrawSceneSkyAnalytic>,
-    pub terrain: &'a mut DrawSceneTerrain,
+    /// A world's terrain. Optional the same way.
+    pub terrain: Option<&'a mut DrawSceneTerrain>,
     /// Silhouette shadow mesh (shadow_mesh.rs). Optional so a host that has
     /// not adopted it yet keeps the blob tier.
     pub shadow: Option<&'a mut DrawSceneShadow>,

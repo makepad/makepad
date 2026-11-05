@@ -327,7 +327,7 @@ script_mod! {
             // GGX denominator collapses to a single blown-out pixel that
             // aliases into a crawling white dot as the camera moves.
             let mr = self.mat_metal_rough(vec2(
-                clamp(self.metallic * mix(1.0, orm.z, self.orm_on), 0.0, 1.0),
+                clamp(self.paint_metal(self.paint_header(), self.metallic * mix(1.0, orm.z, self.orm_on)), 0.0, 1.0),
                 clamp(self.roughness * mix(1.0, orm.y, self.orm_on), 0.045, 1.0)
             ))
             var n=normalize(self.v_csm_n)

@@ -7,7 +7,7 @@
 
 use crate::geom::*;
 use crate::sim::{Assembly, BodyAction, JointKind, MechWorld, Pose};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -67,6 +67,8 @@ pub enum Event {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Snapshot {
+    /// The commands the sim had taken up when it published this.
+    pub commands: u64,
     pub frame: u64,
     pub time: f64,
     pub running: bool,
@@ -101,6 +103,8 @@ impl Snapshot {
 
 pub struct Runner {
     tx: Sender<Command>,
+    /// The commands sent so far.
+    sent: AtomicU64,
     latest: Arc<Mutex<Arc<Snapshot>>>,
     events: Arc<Mutex<Vec<Event>>>,
     held: Arc<Snapshot>,
@@ -108,8 +112,9 @@ pub struct Runner {
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
-fn snapshot(w: &mut MechWorld, asm: &Assembly, frame: u64, running: bool, speed: f64) -> Snapshot {
+fn snapshot(w: &mut MechWorld, asm: &Assembly, frame: u64, commands: u64, running: bool, speed: f64) -> Snapshot {
     Snapshot {
+        commands,
         frame,
         time: w.time(),
         running,
@@ -135,6 +140,7 @@ impl Runner {
         // The print pose is known without constructing collision hulls on the caller's UI thread.
         // The physics world is built once, by its owning worker.
         let first = Arc::new(Snapshot {
+            commands: 0,
             frame: 0,
             time: 0.0,
             running: false,
@@ -156,11 +162,19 @@ impl Runner {
                 run(asm, gravity, floor, w, rx, latest, events, stop)
             }).ok()
         };
-        Runner { tx, latest, events, held: first, stop, thread }
+        Runner { tx, sent: AtomicU64::new(0), latest, events, held: first, stop, thread }
     }
 
     pub fn send(&self, c: Command) {
+        self.sent.fetch_add(1, Ordering::Relaxed);
         let _ = self.tx.send(c);
+    }
+
+    /// The newest snapshot has taken up every command sent, or no sim is left to. Building the
+    /// sim's world comes first and can take a long while (a big assembly, a cold start), so a
+    /// view that waits for an answer waits for this, not for a number of frames.
+    pub fn answered(&mut self) -> bool {
+        self.latest().commands == self.sent.load(Ordering::Relaxed) || self.thread.as_ref().is_none_or(|t| t.is_finished())
     }
 
     /// The newest snapshot; never waits on the sim (keeps the last one when the sim holds the lock).
@@ -196,6 +210,7 @@ fn run(asm: Assembly, gravity: P3, floor: Option<f64>, mut w: MechWorld, rx: Rec
     let mut gravity = gravity;
     let mut shake = false;
     let mut frame = 0u64;
+    let mut commands = 0u64;
     let mut owed = 0.0;
     let mut last = Instant::now();
     let mut at_limit = vec![false; asm.joints.len()];
@@ -208,6 +223,7 @@ fn run(asm: Assembly, gravity: P3, floor: Option<f64>, mut w: MechWorld, rx: Rec
         let mut changed = false;
         while let Ok(c) = rx.try_recv() {
             changed = true;
+            commands += 1;
             match c {
                 Command::Play => running = true,
                 Command::Pause => running = false,
@@ -313,7 +329,7 @@ fn run(asm: Assembly, gravity: P3, floor: Option<f64>, mut w: MechWorld, rx: Rec
             if steps == 0 {
                 frame += 1;
             }
-            let snap = Arc::new(snapshot(&mut w, &asm, frame, running, speed));
+            let snap = Arc::new(snapshot(&mut w, &asm, frame, commands, running, speed));
             if let Ok(mut l) = latest.lock() {
                 *l = snap;
             }

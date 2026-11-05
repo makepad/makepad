@@ -362,9 +362,10 @@ impl Renderer {
         // the foliage/PBR lanes' layout: the lane swaps only the shader id
         // for that layer. Without it (the diffuse lane, or before its
         // pipeline exists) the model draws its own layers at every distance:
-        // the stand-in's quad is not a picture on its own.
+        // the stand-in's quad is not a picture on its own. Its pipelines are built when a resident
+        // model has a stand-in.
         let lane_shader = draw.base().draw_vars.draw_shader_id;
-        let impostor_shader = if matches!(draw, ModelDraw::Foliage(_) | ModelDraw::Pbr(_)) {
+        let impostor_shader = if matches!(draw, ModelDraw::Foliage(_) | ModelDraw::Pbr(_)) && self.a_resident_layer(|s| s.definition.impostor > 0.0) {
             self.lane_shaders(cx.cx, variants::ModelLane::Impostor, None).0.filter(|id| cx.cx.draw_shader_ready(*id, self.hdr_output))
         } else {
             None

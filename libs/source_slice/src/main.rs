@@ -11,7 +11,7 @@
 //! package names, `--features` the features the app is built with (with no
 //! default features), both comma separated or repeated. `--app` names the app in the
 //! commit message (default: the first root without its `makepad-` prefix);
-//! the server and the Builder's publish pass their app ID, so the same
+//! the server passes its app ID, so the same
 //! source, roots and app give the same commit everywhere.
 use makepad_source_slice as slicer;
 use std::path::PathBuf;

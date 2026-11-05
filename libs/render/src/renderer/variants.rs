@@ -360,8 +360,8 @@ mod tests {
     use super::*;
     use makepad_draw::makepad_platform::makepad_script::script_eval;
 
-    #[test]
-    fn every_lane_builds_its_variants_with_the_stock_layout() {
+    /// A Cx whose VM has the renderer's shaders.
+    fn shader_cx() -> Cx {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.with_vm(|vm| {
             makepad_draw::script_mod(vm);
@@ -379,6 +379,27 @@ mod tests {
             crate::shaders::script_mod(vm);
             crate::local_shadows::script_mod(vm);
             script_mod(vm);
+        });
+        cx
+    }
+
+    /// The painted-terrain and foliage lanes are built for a model that draws through them: with
+    /// none resident, nothing of theirs reaches the VM or the compiler.
+    #[test]
+    fn a_lane_without_a_model_builds_nothing() {
+        let mut cx = shader_cx();
+        let mut renderer = Renderer::default();
+        renderer.prepare_splat_lane(&mut cx);
+        renderer.prepare_foliage_lane(&mut cx);
+        assert!(!renderer.splat_ready && !renderer.foliage_ready);
+        assert!(renderer.splat_draw.is_none() && renderer.foliage_draw.is_none());
+        assert!(renderer.lane_variants.shaders.is_empty());
+    }
+
+    #[test]
+    fn every_lane_builds_its_variants_with_the_stock_layout() {
+        let mut cx = shader_cx();
+        cx.with_vm(|vm| {
             let draw = vm.value(vm.modules(), id!(draw)).as_object().unwrap();
             // `build` checks the layout against the stock shader itself; the
             // GLSL program must define every function it calls (a stub

@@ -160,14 +160,21 @@ impl StillAa {
     /// being drawn and return it. The host then parents the producer of its
     /// frame under it (that draw only), so the frame paints before the blend
     /// reads it, and calls [`StillAa::add`]. `None` while the draw cannot be
-    /// built yet (the script VM is busy): no sample this draw.
+    /// built yet (the script VM is busy) or its pipeline is still compiling (a
+    /// sample then would paint nothing and leave black in the average): no
+    /// sample this draw, the host asks again on its next frame.
     pub fn attach(&mut self, cx: &mut Cx2d) -> Option<DrawPassId> {
-        if !self.ensure(cx.cx) {
+        if !self.ensure(cx.cx) || !self.blend_ready(cx.cx) {
             return None;
         }
         let (pass, _) = self.pass.as_ref()?;
         cx.make_child_pass(pass);
         Some(pass.draw_pass_id())
+    }
+
+    fn blend_ready(&self, cx: &Cx) -> bool {
+        let shader = self.draw.as_ref().and_then(|draw| draw.draw_super.draw_vars.draw_shader_id);
+        shader.is_some_and(|shader| cx.draw_shader_ready(shader, true))
     }
 
     fn ensure(&mut self, cx: &mut Cx) -> bool {

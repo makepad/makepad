@@ -13,7 +13,7 @@
 //!   both; never `dev-dependencies`) that resolve inside the repository;
 //!   paths that leave it point into Makepad, which the public repository
 //!   provides. A root's optional dependencies count only when the slice's
-//!   features turn them on, as the Builder builds the app: `cargo build -p
+//!   features turn them on, as the Runner builds the app: `cargo build -p
 //!   <root> --no-default-features --features <features>` (see
 //!   [`Crate::enabled_deps`]); every other crate's optional dependencies
 //!   count, since which of their features the build enables is not

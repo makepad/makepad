@@ -624,9 +624,9 @@ impl Renderer {
                 csm.as_ref().map(|(_, t, _)| t.texture_id())
             );
             for dv in [
-                &mut draws.cube.cube.draw_vars,
-                &mut draws.alpha.cube.cube.draw_vars,
-            ] {
+                draws.cube.as_deref_mut().map(|d| &mut d.cube.draw_vars),
+                draws.alpha.as_deref_mut().map(|d| &mut d.cube.cube.draw_vars),
+            ].into_iter().flatten() {
                 dv.set_texture(0, &lm_tex);
                 dv.set_texture(1, &top_tex);
                 Self::write_csm_uniforms(cx.cx, dv, &csm, &lm_tex, 2, self.shadow_debug);
@@ -677,10 +677,10 @@ impl Renderer {
                 &mut self.light_sel,
             );
             for dv in [
-                &mut draws.cube.cube.draw_vars,
-                &mut draws.alpha.cube.cube.draw_vars,
-                &mut draws.terrain.draw_vars,
-            ] {
+                draws.cube.as_deref_mut().map(|d| &mut d.cube.draw_vars),
+                draws.alpha.as_deref_mut().map(|d| &mut d.cube.cube.draw_vars),
+                draws.terrain.as_deref_mut().map(|d| &mut d.draw_vars),
+            ].into_iter().flatten() {
                 write_light_uniforms(
                     cx.cx,
                     dv,
@@ -690,7 +690,11 @@ impl Renderer {
                 );
             }
         }
-        for dv in [&mut draws.cube.cube.draw_vars, &mut draws.alpha.cube.cube.draw_vars, &mut draws.terrain.draw_vars] {
+        for dv in [
+            draws.cube.as_deref_mut().map(|d| &mut d.cube.draw_vars),
+            draws.alpha.as_deref_mut().map(|d| &mut d.cube.cube.draw_vars),
+            draws.terrain.as_deref_mut().map(|d| &mut d.draw_vars),
+        ].into_iter().flatten() {
             self.clustered.bind(cx.cx, dv, self.clustered_enabled);
             self.gi.bind(cx.cx, dv);
             self.bind_output_dither(cx.cx, dv);
@@ -698,10 +702,11 @@ impl Renderer {
         // The level draws go through the shader variant for this frame's
         // features while the host keeps their stock programs (variants.rs).
         for (lane, dv) in [
-            (super::variants::ModelLane::Cube, &mut draws.cube.cube.draw_vars),
-            (super::variants::ModelLane::Alpha, &mut draws.alpha.cube.cube.draw_vars),
-            (super::variants::ModelLane::Terrain, &mut draws.terrain.draw_vars),
+            (super::variants::ModelLane::Cube, draws.cube.as_deref_mut().map(|d| &mut d.cube.draw_vars)),
+            (super::variants::ModelLane::Alpha, draws.alpha.as_deref_mut().map(|d| &mut d.cube.cube.draw_vars)),
+            (super::variants::ModelLane::Terrain, draws.terrain.as_deref_mut().map(|d| &mut d.draw_vars)),
         ] {
+            let Some(dv) = dv else { continue };
             if let Some(id) = self.level_shader(cx.cx, lane, dv.draw_shader_id) {
                 dv.draw_shader_id = Some(id);
             }
@@ -806,22 +811,22 @@ impl Renderer {
         // Terrain can be megabytes at 257². It is immutable for the whole
         // draw, so borrow it from the world; cloning here turned a steady
         // landscape into frame-rate-scaled memory bandwidth.
-        if let Some(terrain) = world.terrain.as_deref().filter(|_| shows_environment) {
+        if let (Some(terrain), Some(draw_terrain)) = (world.terrain.as_deref().filter(|_| shows_environment), draws.terrain.as_deref_mut()) {
             self.ensure_terrain_tiles(cx.cx, terrain, world.terrain_materials.as_deref());
-            draws.terrain.transform = Mat4f::identity();
-            draws.terrain.depth_clip = 1.0;
-            draws.terrain.fog_color = fog_color;
-            draws.terrain.fog_density = fog_density;
-            draws.terrain.lm_debug = self.lm_debug;
+            draw_terrain.transform = Mat4f::identity();
+            draw_terrain.depth_clip = 1.0;
+            draw_terrain.fog_color = fog_color;
+            draw_terrain.fog_density = fog_density;
+            draw_terrain.lm_debug = self.lm_debug;
             // One planar lightmap region serves every tile: tile uvs derive
             // from world xz, so all tiles share one rect pair.
             let (lm_rect, lm_world) = self.lm_ground.unwrap_or_default();
-            draws.terrain.lm_rect = lm_rect;
-            draws.terrain.lm_world = lm_world;
+            draw_terrain.lm_rect = lm_rect;
+            draw_terrain.lm_world = lm_world;
             let lm_tex = self.lightmap_texture(cx.cx);
-            draws.terrain.draw_vars.set_texture(0, &lm_tex);
+            draw_terrain.draw_vars.set_texture(0, &lm_tex);
             let csm = self.gpu_baker.csm_binding();
-            Self::write_csm_uniforms(cx.cx, &mut draws.terrain.draw_vars, &csm, &lm_tex, 1, self.shadow_debug);
+            Self::write_csm_uniforms(cx.cx, &mut draw_terrain.draw_vars, &csm, &lm_tex, 1, self.shadow_debug);
             for tile in &self.terrain_tiles {
                 if let Some(frustum) = frustum {
                     if !frustum.intersects_aabb(tile.min, tile.max) {
@@ -829,11 +834,11 @@ impl Renderer {
                         continue;
                     }
                 }
-                draws.terrain.draw_vars.geometry_id = Some(tile.geometry.geometry_id());
-                if draws.terrain.draw_vars.can_instance() {
-                    let new_area = cx.add_instance(&mut draws.terrain.draw_vars);
-                    draws.terrain.draw_vars.area =
-                        cx.update_area_refs(draws.terrain.draw_vars.area, new_area);
+                draw_terrain.draw_vars.geometry_id = Some(tile.geometry.geometry_id());
+                if draw_terrain.draw_vars.can_instance() {
+                    let new_area = cx.add_instance(&mut draw_terrain.draw_vars);
+                    draw_terrain.draw_vars.area =
+                        cx.update_area_refs(draw_terrain.draw_vars.area, new_area);
                 }
                 stats.terrain_tiles_drawn += 1;
                 stats.terrain_drawn = true;
@@ -845,19 +850,19 @@ impl Renderer {
         // region as the tiles — the render path the heightfield already
         // earned, reused rather than reinvented. One item per visible chunk.
         self.ensure_voxel_tiles(cx.cx, world.voxel.as_deref());
-        if !self.voxel_tiles.is_empty() && shows_environment {
-            draws.terrain.transform = Mat4f::identity();
-            draws.terrain.depth_clip = 1.0;
-            draws.terrain.fog_color = fog_color;
-            draws.terrain.fog_density = fog_density;
-            draws.terrain.lm_debug = self.lm_debug;
+        if let Some(draw_terrain) = draws.terrain.as_deref_mut().filter(|_| !self.voxel_tiles.is_empty() && shows_environment) {
+            draw_terrain.transform = Mat4f::identity();
+            draw_terrain.depth_clip = 1.0;
+            draw_terrain.fog_color = fog_color;
+            draw_terrain.fog_density = fog_density;
+            draw_terrain.lm_debug = self.lm_debug;
             let (lm_rect, lm_world) = self.lm_ground.unwrap_or_default();
-            draws.terrain.lm_rect = lm_rect;
-            draws.terrain.lm_world = lm_world;
+            draw_terrain.lm_rect = lm_rect;
+            draw_terrain.lm_world = lm_world;
             let lm_tex = self.lightmap_texture(cx.cx);
-            draws.terrain.draw_vars.set_texture(0, &lm_tex);
+            draw_terrain.draw_vars.set_texture(0, &lm_tex);
             let csm = self.gpu_baker.csm_binding();
-            Self::write_csm_uniforms(cx.cx, &mut draws.terrain.draw_vars, &csm, &lm_tex, 1, self.shadow_debug);
+            Self::write_csm_uniforms(cx.cx, &mut draw_terrain.draw_vars, &csm, &lm_tex, 1, self.shadow_debug);
             for tile in &self.voxel_tiles {
                 if let Some(frustum) = frustum {
                     if !frustum.intersects_aabb(tile.min, tile.max) {
@@ -865,11 +870,11 @@ impl Renderer {
                         continue;
                     }
                 }
-                draws.terrain.draw_vars.geometry_id = Some(tile.geometry.geometry_id());
-                if draws.terrain.draw_vars.can_instance() {
-                    let new_area = cx.add_instance(&mut draws.terrain.draw_vars);
-                    draws.terrain.draw_vars.area =
-                        cx.update_area_refs(draws.terrain.draw_vars.area, new_area);
+                draw_terrain.draw_vars.geometry_id = Some(tile.geometry.geometry_id());
+                if draw_terrain.draw_vars.can_instance() {
+                    let new_area = cx.add_instance(&mut draw_terrain.draw_vars);
+                    draw_terrain.draw_vars.area =
+                        cx.update_area_refs(draw_terrain.draw_vars.area, new_area);
                 }
                 stats.terrain_tiles_drawn += 1;
                 stats.terrain_drawn = true;
@@ -883,8 +888,12 @@ impl Renderer {
         // frame. One draw call per shape per pass; empty batches are skipped.
         // fog_color is a uniform now (set in apply_sun); only the density
         // stays per-instance, because shadows switch it off individually.
-        draws.cube.fog_density = fog_density;
-        draws.alpha.cube.fog_density = fog_density;
+        if let Some(draw) = draws.cube.as_deref_mut() {
+            draw.fog_density = fog_density;
+        }
+        if let Some(draw) = draws.alpha.as_deref_mut() {
+            draw.cube.fog_density = fog_density;
+        }
 
         // CPU light bake (bake.rs). Geometry-dependent occlusion is baked
         // once per world edit; the sun term is one ray per target and
@@ -896,8 +905,8 @@ impl Renderer {
         }
         stats.bake = self.bake.stats();
 
-        let vars_ready = draws.cube.cube.draw_vars.can_instance()
-            && draws.alpha.cube.cube.draw_vars.can_instance();
+        let vars_ready = draws.cube.as_ref().is_some_and(|d| d.cube.draw_vars.can_instance())
+            && draws.alpha.as_ref().is_some_and(|d| d.cube.cube.draw_vars.can_instance());
         let slab_key = static_slab_key(world, self.bake.generation());
         if vars_ready && self.slab_key != Some(slab_key) {
             let t0 = Cx::monotonic_now();
@@ -908,7 +917,7 @@ impl Renderer {
         }
         stats.static_instances = self.slab_instance_count;
         stats.dyn_instances = 0;
-        stats.instance_floats = draws.cube.cube.draw_vars.as_slice().len() as u32;
+        stats.instance_floats = draws.cube.as_ref().map_or(0, |d| d.cube.draw_vars.as_slice().len() as u32);
 
         // Slab chunk visibility, once per frame — both passes below memcpy
         // only the chunks whose content bounds touch the frustum. The chunks
@@ -1026,205 +1035,207 @@ impl Renderer {
         // 3. Opaque pass, one batch per shape. Statics stream in from the
         // VISIBLE chunks only — still the same single draw item per shape,
         // the culling just shrinks what gets memcpy'd into it.
-        for shape in Shape::ALL {
-            let shape_index = shape.index();
-            let has_static = self
-                .static_chunks
-                .iter()
-                .zip(&self.chunk_visible)
-                .any(|(c, v)| *v && !c.slab[shape_index].is_empty());
-            let has_dynamic_entity = dyn_entity_shapes[shape_index];
-            let has_dynamic_part = dyn_part_shapes[shape_index];
-            let has_beams = shape == Shape::Box && !world.beams.is_empty();
-            if !has_static && !has_dynamic_entity && !has_dynamic_part && !has_beams {
-                continue;
-            }
-            let geometry_id = self.ensure_shape_geometry(cx.cx, shape);
-            draws.cube.cube.draw_vars.geometry_id = Some(geometry_id);
-            draws.cube.cube.many_instances =
-                cx.begin_many_instances(&mut draws.cube.cube.draw_vars);
-            if has_static {
-                if let Some(mi) = &mut draws.cube.cube.many_instances {
-                    for (chunk, visible) in self.static_chunks.iter().zip(&self.chunk_visible) {
-                        if *visible {
-                            mi.instances.extend_from_slice(&chunk.slab[shape_index]);
+        if let Some(draw_cube) = draws.cube.as_deref_mut() {
+            for shape in Shape::ALL {
+                let shape_index = shape.index();
+                let has_static = self
+                    .static_chunks
+                    .iter()
+                    .zip(&self.chunk_visible)
+                    .any(|(c, v)| *v && !c.slab[shape_index].is_empty());
+                let has_dynamic_entity = dyn_entity_shapes[shape_index];
+                let has_dynamic_part = dyn_part_shapes[shape_index];
+                let has_beams = shape == Shape::Box && !world.beams.is_empty();
+                if !has_static && !has_dynamic_entity && !has_dynamic_part && !has_beams {
+                    continue;
+                }
+                let geometry_id = self.ensure_shape_geometry(cx.cx, shape);
+                draw_cube.cube.draw_vars.geometry_id = Some(geometry_id);
+                draw_cube.cube.many_instances =
+                    cx.begin_many_instances(&mut draw_cube.cube.draw_vars);
+                if has_static {
+                    if let Some(mi) = &mut draw_cube.cube.many_instances {
+                        for (chunk, visible) in self.static_chunks.iter().zip(&self.chunk_visible) {
+                            if *visible {
+                                mi.instances.extend_from_slice(&chunk.slab[shape_index]);
+                            }
                         }
                     }
                 }
-            }
-            // Dynamic entities: movers/kinematics/projectiles of this shape.
-            for e in world
-                .entities
-                .iter()
-                .filter(|e| {
-                    primitive_bucket(e) == Some(PrimitiveBucket::Opaque)
-                        && !e.hidden
-                        && e.kind != BodyKind::Static
-                        && e.shape == shape
-                })
-            {
-                // Every shape geometry spans [-0.5, 0.5] scaled by cube_size,
-                // so |half*scale| bounds the visual under ANY rotation. The
-                // entity's cast shadow is not tied to this instance — blobs
-                // and silhouettes draw from their own loops below.
-                if let Some(frustum) = frustum {
-                    let r = vec3f(
-                        e.half.x * e.scale.x,
-                        e.half.y * e.scale.y,
-                        e.half.z * e.scale.z,
-                    )
-                    .length();
-                    if !frustum.intersects_sphere(e.pos, r) {
-                        stats.dyn_culled += 1;
-                        continue;
-                    }
-                }
-                let mut transform = Self::entity_rotation(e);
-                transform.v[12] = e.pos.x;
-                transform.v[13] = e.pos.y;
-                transform.v[14] = e.pos.z;
-                let size = vec3(
-                    e.half.x * 2.0 * e.scale.x,
-                    e.half.y * 2.0 * e.scale.y,
-                    e.half.z * 2.0 * e.scale.z,
-                );
-                // Movers sample the baked probe lattice, so a crate rolling
-                // under a bridge darkens without a shadow map or a pass.
-                let color = shade_color(e.color, self.bake.dynamic_shade(e.pos), e.glow);
-                if color.w < 0.999 {
-                    deferred_alpha[shape_index].push(DeferredAlphaCube {
-                        transform,
-                        size,
-                        color,
-                        glow: e.glow,
-                        color_adjust_ctl: e.color_adjust.instance(),
-                    });
-                    continue;
-                }
-                draws.cube.cube.transform = transform;
-                draws.cube.cube.cube_pos = vec3(0.0, 0.0, 0.0);
-                draws.cube.cube.cube_size = size;
-                draws.cube.cube.color = color;
-                draws.cube.cube.depth_clip = 1.0;
-                draws.cube.glow = e.glow;
-                draws.cube.color_adjust_ctl = e.color_adjust.instance();
-                draws.cube.cube.draw(cx);
-                stats.dyn_instances += 1;
-            }
-            // Parts that are NOT in the slab: dynamic owner, or mid-animation.
-            for (part_index, owner_index) in dyn_parts.iter().copied() {
-                let part = &world.parts[part_index];
-                if part.shape != shape {
-                    continue;
-                }
-                let owner = &world.entities[owner_index];
-                let transform = Self::part_transform(owner, part);
-                // Both frames are pure rotations, so the composed transform's
-                // translation is the part's world centre and |half*scale|
-                // bounds it, exactly as for the entity above.
-                if let Some(frustum) = frustum {
-                    let center = vec3f(transform.v[12], transform.v[13], transform.v[14]);
-                    let r = vec3f(
-                        part.half.x * owner.scale.x,
-                        part.half.y * owner.scale.y,
-                        part.half.z * owner.scale.z,
-                    )
-                    .length();
-                    if !frustum.intersects_sphere(center, r) {
-                        stats.dyn_culled += 1;
-                        continue;
-                    }
-                }
-                let size = vec3(
-                    part.half.x * 2.0 * owner.scale.x,
-                    part.half.y * 2.0 * owner.scale.y,
-                    part.half.z * 2.0 * owner.scale.z,
-                );
-                let color = shade_color(part.color, self.bake.dynamic_shade(owner.pos), part.glow);
-                if color.w < 0.999 {
-                    deferred_alpha[shape_index].push(DeferredAlphaCube {
-                        transform,
-                        size,
-                        color,
-                        glow: part.glow,
-                        color_adjust_ctl: owner.color_adjust.instance(),
-                    });
-                    continue;
-                }
-                draws.cube.cube.transform = transform;
-                draws.cube.cube.cube_pos = vec3(0.0, 0.0, 0.0);
-                draws.cube.cube.cube_size = size;
-                draws.cube.cube.color = color;
-                draws.cube.cube.depth_clip = 1.0;
-                draws.cube.glow = part.glow;
-                draws.cube.color_adjust_ctl = owner.color_adjust.instance();
-                draws.cube.cube.draw(cx);
-                stats.dyn_instances += 1;
-            }
-            // Immediate-mode beams (box batch): a box stretched between two
-            // points (grapple cables, lasers). Cable axis on local z.
-            if has_beams {
-                for beam in &world.beams {
-                    let d = beam.to - beam.from;
-                    let len = d.length();
-                    if len < 1.0e-4 {
-                        continue;
-                    }
-                    // Sphere around the beam's midpoint; the box is size x
-                    // size x len, so half the length plus the full cross
-                    // section covers it under any orientation.
+                // Dynamic entities: movers/kinematics/projectiles of this shape.
+                for e in world
+                    .entities
+                    .iter()
+                    .filter(|e| {
+                        primitive_bucket(e) == Some(PrimitiveBucket::Opaque)
+                            && !e.hidden
+                            && e.kind != BodyKind::Static
+                            && e.shape == shape
+                    })
+                {
+                    // Every shape geometry spans [-0.5, 0.5] scaled by cube_size,
+                    // so |half*scale| bounds the visual under ANY rotation. The
+                    // entity's cast shadow is not tied to this instance — blobs
+                    // and silhouettes draw from their own loops below.
                     if let Some(frustum) = frustum {
-                        let mid = beam.from + d * 0.5;
-                        if !frustum.intersects_sphere(mid, len * 0.5 + beam.size) {
+                        let r = vec3f(
+                            e.half.x * e.scale.x,
+                            e.half.y * e.scale.y,
+                            e.half.z * e.scale.z,
+                        )
+                        .length();
+                        if !frustum.intersects_sphere(e.pos, r) {
                             stats.dyn_culled += 1;
                             continue;
                         }
                     }
-                    let f = d * (1.0 / len);
-                    let upv = if f.y.abs() > 0.99 {
-                        vec3f(1.0, 0.0, 0.0)
-                    } else {
-                        vec3f(0.0, 1.0, 0.0)
-                    };
-                    let r = Vec3f::cross(upv, f).normalize();
-                    let u = Vec3f::cross(f, r);
-                    let mid = beam.from + d * 0.5;
-                    let mut m = Mat4f::identity();
-                    m.v[0] = r.x;
-                    m.v[1] = r.y;
-                    m.v[2] = r.z;
-                    m.v[4] = u.x;
-                    m.v[5] = u.y;
-                    m.v[6] = u.z;
-                    m.v[8] = f.x;
-                    m.v[9] = f.y;
-                    m.v[10] = f.z;
-                    m.v[12] = mid.x;
-                    m.v[13] = mid.y;
-                    m.v[14] = mid.z;
-                    if beam.color.w < 0.999 {
+                    let mut transform = Self::entity_rotation(e);
+                    transform.v[12] = e.pos.x;
+                    transform.v[13] = e.pos.y;
+                    transform.v[14] = e.pos.z;
+                    let size = vec3(
+                        e.half.x * 2.0 * e.scale.x,
+                        e.half.y * 2.0 * e.scale.y,
+                        e.half.z * 2.0 * e.scale.z,
+                    );
+                    // Movers sample the baked probe lattice, so a crate rolling
+                    // under a bridge darkens without a shadow map or a pass.
+                    let color = shade_color(e.color, self.bake.dynamic_shade(e.pos), e.glow);
+                    if color.w < 0.999 {
                         deferred_alpha[shape_index].push(DeferredAlphaCube {
-                            transform: m,
-                            size: vec3(beam.size, beam.size, len),
-                            color: beam.color,
-                            glow: beam.glow,
-                            color_adjust_ctl: vec4(0.0, 1.0, 1.0, 0.0),
+                            transform,
+                            size,
+                            color,
+                            glow: e.glow,
+                            color_adjust_ctl: e.color_adjust.instance(),
                         });
                         continue;
                     }
-                    draws.cube.cube.transform = m;
-                    draws.cube.cube.cube_pos = vec3(0.0, 0.0, 0.0);
-                    draws.cube.cube.cube_size = vec3(beam.size, beam.size, len);
-                    draws.cube.cube.color = beam.color;
-                    draws.cube.cube.depth_clip = 1.0;
-                    draws.cube.glow = beam.glow;
-                    draws.cube.color_adjust_ctl = vec4(0.0, 1.0, 1.0, 0.0);
-                    draws.cube.cube.draw(cx);
+                    draw_cube.cube.transform = transform;
+                    draw_cube.cube.cube_pos = vec3(0.0, 0.0, 0.0);
+                    draw_cube.cube.cube_size = size;
+                    draw_cube.cube.color = color;
+                    draw_cube.cube.depth_clip = 1.0;
+                    draw_cube.glow = e.glow;
+                    draw_cube.color_adjust_ctl = e.color_adjust.instance();
+                    draw_cube.cube.draw(cx);
                     stats.dyn_instances += 1;
                 }
-            }
-            if let Some(mi) = draws.cube.cube.many_instances.take() {
-                cx.end_many_instances(mi);
+                // Parts that are NOT in the slab: dynamic owner, or mid-animation.
+                for (part_index, owner_index) in dyn_parts.iter().copied() {
+                    let part = &world.parts[part_index];
+                    if part.shape != shape {
+                        continue;
+                    }
+                    let owner = &world.entities[owner_index];
+                    let transform = Self::part_transform(owner, part);
+                    // Both frames are pure rotations, so the composed transform's
+                    // translation is the part's world centre and |half*scale|
+                    // bounds it, exactly as for the entity above.
+                    if let Some(frustum) = frustum {
+                        let center = vec3f(transform.v[12], transform.v[13], transform.v[14]);
+                        let r = vec3f(
+                            part.half.x * owner.scale.x,
+                            part.half.y * owner.scale.y,
+                            part.half.z * owner.scale.z,
+                        )
+                        .length();
+                        if !frustum.intersects_sphere(center, r) {
+                            stats.dyn_culled += 1;
+                            continue;
+                        }
+                    }
+                    let size = vec3(
+                        part.half.x * 2.0 * owner.scale.x,
+                        part.half.y * 2.0 * owner.scale.y,
+                        part.half.z * 2.0 * owner.scale.z,
+                    );
+                    let color = shade_color(part.color, self.bake.dynamic_shade(owner.pos), part.glow);
+                    if color.w < 0.999 {
+                        deferred_alpha[shape_index].push(DeferredAlphaCube {
+                            transform,
+                            size,
+                            color,
+                            glow: part.glow,
+                            color_adjust_ctl: owner.color_adjust.instance(),
+                        });
+                        continue;
+                    }
+                    draw_cube.cube.transform = transform;
+                    draw_cube.cube.cube_pos = vec3(0.0, 0.0, 0.0);
+                    draw_cube.cube.cube_size = size;
+                    draw_cube.cube.color = color;
+                    draw_cube.cube.depth_clip = 1.0;
+                    draw_cube.glow = part.glow;
+                    draw_cube.color_adjust_ctl = owner.color_adjust.instance();
+                    draw_cube.cube.draw(cx);
+                    stats.dyn_instances += 1;
+                }
+                // Immediate-mode beams (box batch): a box stretched between two
+                // points (grapple cables, lasers). Cable axis on local z.
+                if has_beams {
+                    for beam in &world.beams {
+                        let d = beam.to - beam.from;
+                        let len = d.length();
+                        if len < 1.0e-4 {
+                            continue;
+                        }
+                        // Sphere around the beam's midpoint; the box is size x
+                        // size x len, so half the length plus the full cross
+                        // section covers it under any orientation.
+                        if let Some(frustum) = frustum {
+                            let mid = beam.from + d * 0.5;
+                            if !frustum.intersects_sphere(mid, len * 0.5 + beam.size) {
+                                stats.dyn_culled += 1;
+                                continue;
+                            }
+                        }
+                        let f = d * (1.0 / len);
+                        let upv = if f.y.abs() > 0.99 {
+                            vec3f(1.0, 0.0, 0.0)
+                        } else {
+                            vec3f(0.0, 1.0, 0.0)
+                        };
+                        let r = Vec3f::cross(upv, f).normalize();
+                        let u = Vec3f::cross(f, r);
+                        let mid = beam.from + d * 0.5;
+                        let mut m = Mat4f::identity();
+                        m.v[0] = r.x;
+                        m.v[1] = r.y;
+                        m.v[2] = r.z;
+                        m.v[4] = u.x;
+                        m.v[5] = u.y;
+                        m.v[6] = u.z;
+                        m.v[8] = f.x;
+                        m.v[9] = f.y;
+                        m.v[10] = f.z;
+                        m.v[12] = mid.x;
+                        m.v[13] = mid.y;
+                        m.v[14] = mid.z;
+                        if beam.color.w < 0.999 {
+                            deferred_alpha[shape_index].push(DeferredAlphaCube {
+                                transform: m,
+                                size: vec3(beam.size, beam.size, len),
+                                color: beam.color,
+                                glow: beam.glow,
+                                color_adjust_ctl: vec4(0.0, 1.0, 1.0, 0.0),
+                            });
+                            continue;
+                        }
+                        draw_cube.cube.transform = m;
+                        draw_cube.cube.cube_pos = vec3(0.0, 0.0, 0.0);
+                        draw_cube.cube.cube_size = vec3(beam.size, beam.size, len);
+                        draw_cube.cube.color = beam.color;
+                        draw_cube.cube.depth_clip = 1.0;
+                        draw_cube.glow = beam.glow;
+                        draw_cube.color_adjust_ctl = vec4(0.0, 1.0, 1.0, 0.0);
+                        draw_cube.cube.draw(cx);
+                        stats.dyn_instances += 1;
+                    }
+                }
+                if let Some(mi) = draw_cube.cube.many_instances.take() {
+                    cx.end_many_instances(mi);
+                }
             }
         }
 
@@ -1667,190 +1678,192 @@ impl Renderer {
         // 4. Alpha pass, one batch per shape: static sensors from the slab,
         // then blob shadows (box batch) and dynamic sensors — drawn after all
         // opaque geometry so blending sees depth.
-        for shape in Shape::ALL {
-            let shape_index = shape.index();
-            let has_static = self
-                .static_chunks
-                .iter()
-                .zip(&self.chunk_visible)
-                .any(|(c, v)| *v && !c.slab_alpha[shape_index].is_empty());
-            let has_dynamic_sensor = dyn_sensor_shapes[shape_index];
-            // Entity casters (crates, movers): runtime-spawned primitive
-            // bodies with no offline atlas, so in OnChange their ONLY tier
-            // is the hull drape / blob quad below. In Realtime they are in
-            // the tiles (collect_lm_movers) and this tier is off.
-            let has_shadows = shape == Shape::Box
-                && tiers.sdf_quads
-                && world.entities.iter().any(|e| {
-                    matches!(e.kind, BodyKind::Mover | BodyKind::Rigid)
-                        && !e.alpha_primitive
-                        && !e.hidden
-                        && e.parent == 0
-                });
-            let has_deferred = !deferred_alpha[shape_index].is_empty();
-            if !has_static && !has_dynamic_sensor && !has_shadows && !has_deferred {
-                continue;
-            }
-            let geometry_id = self.ensure_shape_geometry(cx.cx, shape);
-            draws.alpha.cube.cube.draw_vars.geometry_id = Some(geometry_id);
-            draws.alpha.cube.cube.many_instances =
-                cx.begin_many_instances(&mut draws.alpha.cube.cube.draw_vars);
-            if has_static {
-                if let Some(mi) = &mut draws.alpha.cube.cube.many_instances {
-                    for (chunk, visible) in self.static_chunks.iter().zip(&self.chunk_visible) {
-                        if *visible {
-                            mi.instances.extend_from_slice(&chunk.slab_alpha[shape_index]);
+        if let Some(draw_alpha) = draws.alpha.as_deref_mut() {
+            for shape in Shape::ALL {
+                let shape_index = shape.index();
+                let has_static = self
+                    .static_chunks
+                    .iter()
+                    .zip(&self.chunk_visible)
+                    .any(|(c, v)| *v && !c.slab_alpha[shape_index].is_empty());
+                let has_dynamic_sensor = dyn_sensor_shapes[shape_index];
+                // Entity casters (crates, movers): runtime-spawned primitive
+                // bodies with no offline atlas, so in OnChange their ONLY tier
+                // is the hull drape / blob quad below. In Realtime they are in
+                // the tiles (collect_lm_movers) and this tier is off.
+                let has_shadows = shape == Shape::Box
+                    && tiers.sdf_quads
+                    && world.entities.iter().any(|e| {
+                        matches!(e.kind, BodyKind::Mover | BodyKind::Rigid)
+                            && !e.alpha_primitive
+                            && !e.hidden
+                            && e.parent == 0
+                    });
+                let has_deferred = !deferred_alpha[shape_index].is_empty();
+                if !has_static && !has_dynamic_sensor && !has_shadows && !has_deferred {
+                    continue;
+                }
+                let geometry_id = self.ensure_shape_geometry(cx.cx, shape);
+                draw_alpha.cube.cube.draw_vars.geometry_id = Some(geometry_id);
+                draw_alpha.cube.cube.many_instances =
+                    cx.begin_many_instances(&mut draw_alpha.cube.cube.draw_vars);
+                if has_static {
+                    if let Some(mi) = &mut draw_alpha.cube.cube.many_instances {
+                        for (chunk, visible) in self.static_chunks.iter().zip(&self.chunk_visible) {
+                            if *visible {
+                                mi.instances.extend_from_slice(&chunk.slab_alpha[shape_index]);
+                            }
                         }
                     }
                 }
-            }
-            if has_shadows {
-                // Tiered cast shadows: the nearest casters get a real
-                // silhouette MESH (shadow_mesh.rs, accumulated below and
-                // drawn as one geometry); everything else falls back to a
-                // blob quad in this batch. So the budget buys fidelity, and
-                // the whole shadow layer is at most two draw calls.
-                for (e, ground, projected) in
-                    Self::shadow_casters(world, camera_pos, shadow_budget)
-                {
-                    let half = vec3f(
-                        e.half.x * e.scale.x,
-                        e.half.y * e.scale.y,
-                        e.half.z * e.scale.z,
-                    );
-                    if projected && shadow_mesh_enabled {
-                        // Silhouette tier: hull of the caster's own points,
-                        // draped over whatever it lands on.
-                        let mut transform = Self::entity_rotation(e);
-                        transform.v[12] = e.pos.x;
-                        transform.v[13] = e.pos.y;
-                        transform.v[14] = e.pos.z;
-                        caster_points(
-                            e.shape,
-                            &transform,
-                            vec3f(half.x * 2.0, half.y * 2.0, half.z * 2.0),
-                            &mut self.shadow_points,
+                if has_shadows {
+                    // Tiered cast shadows: the nearest casters get a real
+                    // silhouette MESH (shadow_mesh.rs, accumulated below and
+                    // drawn as one geometry); everything else falls back to a
+                    // blob quad in this batch. So the budget buys fidelity, and
+                    // the whole shadow layer is at most two draw calls.
+                    for (e, ground, projected) in
+                        Self::shadow_casters(world, camera_pos, shadow_budget)
+                    {
+                        let half = vec3f(
+                            e.half.x * e.scale.x,
+                            e.half.y * e.scale.y,
+                            e.half.z * e.scale.z,
                         );
-                        let receiver = Receiver {
-                            base_y: ground,
-                            terrain: world.terrain.as_deref(),
-                            statics: &self.receiver_boxes,
-                        };
-                        if crate::shadow_mesh::build_caster_shadow(
-                            &self.shadow_points,
-                            &sun,
-                            &receiver,
-                            &mut self.shadow_mesh,
-                        ) {
-                            stats.shadows += 1;
-                            stats.projected_shadows += 1;
+                        if projected && shadow_mesh_enabled {
+                            // Silhouette tier: hull of the caster's own points,
+                            // draped over whatever it lands on.
+                            let mut transform = Self::entity_rotation(e);
+                            transform.v[12] = e.pos.x;
+                            transform.v[13] = e.pos.y;
+                            transform.v[14] = e.pos.z;
+                            caster_points(
+                                e.shape,
+                                &transform,
+                                vec3f(half.x * 2.0, half.y * 2.0, half.z * 2.0),
+                                &mut self.shadow_points,
+                            );
+                            let receiver = Receiver {
+                                base_y: ground,
+                                terrain: world.terrain.as_deref(),
+                                statics: &self.receiver_boxes,
+                            };
+                            if crate::shadow_mesh::build_caster_shadow(
+                                &self.shadow_points,
+                                &sun,
+                                &receiver,
+                                &mut self.shadow_mesh,
+                            ) {
+                                stats.shadows += 1;
+                                stats.projected_shadows += 1;
+                            }
+                            continue;
                         }
-                        continue;
-                    }
-                    // Blob tier: the soft round contact blob in the shadow
-                    // mesh. The box-batch quad below is a hard dark SQUARE,
-                    // so every caster past the budget (or all of them once
-                    // the thermometer drops projected shadows) cast a cube —
-                    // a marble included. The quad stays only for a host
-                    // with no shadow-mesh draw.
-                    if draws.shadow.is_some() {
-                        let receiver = Receiver {
-                            base_y: ground,
-                            terrain: world.terrain.as_deref(),
-                            statics: &self.receiver_boxes,
-                        };
-                        if crate::shadow_mesh::build_blob_shadow(
-                            vec3f(e.pos.x, e.pos.y - half.y, e.pos.z),
-                            half.x * 1.1,
-                            half.z * 1.1,
-                            &sun,
-                            &receiver,
-                            &mut self.shadow_mesh,
-                        ) {
-                            stats.shadows += 1;
+                        // Blob tier: the soft round contact blob in the shadow
+                        // mesh. The box-batch quad below is a hard dark SQUARE,
+                        // so every caster past the budget (or all of them once
+                        // the thermometer drops projected shadows) cast a cube —
+                        // a marble included. The quad stays only for a host
+                        // with no shadow-mesh draw.
+                        if draws.shadow.is_some() {
+                            let receiver = Receiver {
+                                base_y: ground,
+                                terrain: world.terrain.as_deref(),
+                                statics: &self.receiver_boxes,
+                            };
+                            if crate::shadow_mesh::build_blob_shadow(
+                                vec3f(e.pos.x, e.pos.y - half.y, e.pos.z),
+                                half.x * 1.1,
+                                half.z * 1.1,
+                                &sun,
+                                &receiver,
+                                &mut self.shadow_mesh,
+                            ) {
+                                stats.shadows += 1;
+                            }
+                            continue;
                         }
-                        continue;
+                        let quad = crate::shadow::blob_shadow(e.pos, half, ground, &sun);
+                        let Some(quad) = quad else { continue };
+                        // No fog on a shadow. It lies ON ground that is already
+                        // fogged, so fogging it again mixes its RGB toward the
+                        // bright horizon colour and a distant shadow comes out
+                        // LIGHTER than the surface it darkens.
+                        draw_alpha.cube.fog_density = 0.0;
+                        draw_alpha.cube.cube.transform = quad.transform();
+                        draw_alpha.cube.cube.cube_pos = vec3(0.0, 0.0, 0.0);
+                        draw_alpha.cube.cube.cube_size = quad.size();
+                        // The pipeline blends PREMULTIPLIED (src*1 + dst*(1-a)),
+                        // so a shadow must be premultiplied black: RGB 0 leaves
+                        // exactly ground*(1-a) — a true multiplicative shadow.
+                        // Unpremultiplied dark RGB adds light instead of removing
+                        // it, which is why the old blob shadows read as pale.
+                        draw_alpha.cube.cube.color = vec4(0.0, 0.0, 0.0, quad.alpha);
+                        draw_alpha.cube.cube.depth_clip = 1.0;
+                        draw_alpha.cube.glow = 0.0;
+                        draw_alpha.cube.color_adjust_ctl = vec4(0.0, 1.0, 1.0, 0.0);
+                        draw_alpha.cube.cube.draw(cx);
+                        stats.dyn_instances += 1;
+                        stats.shadows += 1;
                     }
-                    let quad = crate::shadow::blob_shadow(e.pos, half, ground, &sun);
-                    let Some(quad) = quad else { continue };
-                    // No fog on a shadow. It lies ON ground that is already
-                    // fogged, so fogging it again mixes its RGB toward the
-                    // bright horizon colour and a distant shadow comes out
-                    // LIGHTER than the surface it darkens.
-                    draws.alpha.cube.fog_density = 0.0;
-                    draws.alpha.cube.cube.transform = quad.transform();
-                    draws.alpha.cube.cube.cube_pos = vec3(0.0, 0.0, 0.0);
-                    draws.alpha.cube.cube.cube_size = quad.size();
-                    // The pipeline blends PREMULTIPLIED (src*1 + dst*(1-a)),
-                    // so a shadow must be premultiplied black: RGB 0 leaves
-                    // exactly ground*(1-a) — a true multiplicative shadow.
-                    // Unpremultiplied dark RGB adds light instead of removing
-                    // it, which is why the old blob shadows read as pale.
-                    draws.alpha.cube.cube.color = vec4(0.0, 0.0, 0.0, quad.alpha);
-                    draws.alpha.cube.cube.depth_clip = 1.0;
-                    draws.alpha.cube.glow = 0.0;
-                    draws.alpha.cube.color_adjust_ctl = vec4(0.0, 1.0, 1.0, 0.0);
-                    draws.alpha.cube.cube.draw(cx);
+                    draw_alpha.cube.fog_density = fog_density;
+                }
+                for e in world
+                    .entities
+                    .iter()
+                    .filter(|e| e.alpha_primitive && !e.hidden && e.kind != BodyKind::Static && e.shape == shape)
+                {
+                    if let Some(frustum) = frustum {
+                        let r = vec3f(
+                            e.half.x * e.scale.x,
+                            e.half.y * e.scale.y,
+                            e.half.z * e.scale.z,
+                        )
+                        .length();
+                        if !frustum.intersects_sphere(e.pos, r) {
+                            stats.dyn_culled += 1;
+                            continue;
+                        }
+                    }
+                    let mut transform = Self::entity_rotation(e);
+                    transform.v[12] = e.pos.x;
+                    transform.v[13] = e.pos.y;
+                    transform.v[14] = e.pos.z;
+                    draw_alpha.cube.cube.transform = transform;
+                    draw_alpha.cube.cube.cube_pos = vec3(0.0, 0.0, 0.0);
+                    draw_alpha.cube.cube.cube_size = vec3(
+                        e.half.x * 2.0 * e.scale.x,
+                        e.half.y * 2.0 * e.scale.y,
+                        e.half.z * 2.0 * e.scale.z,
+                    );
+                    let mut color = e.color;
+                    if color.w >= 0.99 {
+                        // Sensors are see-through by default; explicit alpha wins.
+                        color.w = 0.35;
+                    }
+                    draw_alpha.cube.cube.color = color;
+                    draw_alpha.cube.cube.depth_clip = 1.0;
+                    draw_alpha.cube.glow = e.glow;
+                    draw_alpha.cube.color_adjust_ctl = e.color_adjust.instance();
+                    draw_alpha.cube.cube.draw(cx);
                     stats.dyn_instances += 1;
-                    stats.shadows += 1;
                 }
-                draws.alpha.cube.fog_density = fog_density;
-            }
-            for e in world
-                .entities
-                .iter()
-                .filter(|e| e.alpha_primitive && !e.hidden && e.kind != BodyKind::Static && e.shape == shape)
-            {
-                if let Some(frustum) = frustum {
-                    let r = vec3f(
-                        e.half.x * e.scale.x,
-                        e.half.y * e.scale.y,
-                        e.half.z * e.scale.z,
-                    )
-                    .length();
-                    if !frustum.intersects_sphere(e.pos, r) {
-                        stats.dyn_culled += 1;
-                        continue;
-                    }
+                // Dynamic entities, parts and beams with fractional alpha, held
+                // back from the opaque batch above.
+                for deferred in deferred_alpha[shape_index].drain(..) {
+                    draw_alpha.cube.cube.transform = deferred.transform;
+                    draw_alpha.cube.cube.cube_pos = vec3(0.0, 0.0, 0.0);
+                    draw_alpha.cube.cube.cube_size = deferred.size;
+                    draw_alpha.cube.cube.color = deferred.color;
+                    draw_alpha.cube.cube.depth_clip = 1.0;
+                    draw_alpha.cube.glow = deferred.glow;
+                    draw_alpha.cube.color_adjust_ctl = deferred.color_adjust_ctl;
+                    draw_alpha.cube.cube.draw(cx);
+                    stats.dyn_instances += 1;
                 }
-                let mut transform = Self::entity_rotation(e);
-                transform.v[12] = e.pos.x;
-                transform.v[13] = e.pos.y;
-                transform.v[14] = e.pos.z;
-                draws.alpha.cube.cube.transform = transform;
-                draws.alpha.cube.cube.cube_pos = vec3(0.0, 0.0, 0.0);
-                draws.alpha.cube.cube.cube_size = vec3(
-                    e.half.x * 2.0 * e.scale.x,
-                    e.half.y * 2.0 * e.scale.y,
-                    e.half.z * 2.0 * e.scale.z,
-                );
-                let mut color = e.color;
-                if color.w >= 0.99 {
-                    // Sensors are see-through by default; explicit alpha wins.
-                    color.w = 0.35;
+                if let Some(mi) = draw_alpha.cube.cube.many_instances.take() {
+                    cx.end_many_instances(mi);
                 }
-                draws.alpha.cube.cube.color = color;
-                draws.alpha.cube.cube.depth_clip = 1.0;
-                draws.alpha.cube.glow = e.glow;
-                draws.alpha.cube.color_adjust_ctl = e.color_adjust.instance();
-                draws.alpha.cube.cube.draw(cx);
-                stats.dyn_instances += 1;
-            }
-            // Dynamic entities, parts and beams with fractional alpha, held
-            // back from the opaque batch above.
-            for deferred in deferred_alpha[shape_index].drain(..) {
-                draws.alpha.cube.cube.transform = deferred.transform;
-                draws.alpha.cube.cube.cube_pos = vec3(0.0, 0.0, 0.0);
-                draws.alpha.cube.cube.cube_size = deferred.size;
-                draws.alpha.cube.cube.color = deferred.color;
-                draws.alpha.cube.cube.depth_clip = 1.0;
-                draws.alpha.cube.glow = deferred.glow;
-                draws.alpha.cube.color_adjust_ctl = deferred.color_adjust_ctl;
-                draws.alpha.cube.cube.draw(cx);
-                stats.dyn_instances += 1;
-            }
-            if let Some(mi) = draws.alpha.cube.cube.many_instances.take() {
-                cx.end_many_instances(mi);
             }
         }
 

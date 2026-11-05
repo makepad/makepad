@@ -311,26 +311,29 @@ impl Renderer {
             chunk.max.y.max(center.y + r),
             chunk.max.z.max(center.z + r),
         );
+        // (the caller rebuilds slabs only for a host with both draws)
         if bucket == PrimitiveBucket::Alpha {
-            draws.alpha.cube.cube.transform = transform;
-            draws.alpha.cube.cube.cube_pos = vec3(0.0, 0.0, 0.0);
-            draws.alpha.cube.cube.cube_size = size;
-            draws.alpha.cube.cube.color = color;
-            draws.alpha.cube.cube.depth_clip = 1.0;
-            draws.alpha.cube.glow = glow;
-            draws.alpha.cube.color_adjust_ctl = color_adjust;
-            let slice = draws.alpha.cube.cube.draw_vars.as_slice();
+            let Some(draw) = draws.alpha.as_deref_mut() else { return };
+            draw.cube.cube.transform = transform;
+            draw.cube.cube.cube_pos = vec3(0.0, 0.0, 0.0);
+            draw.cube.cube.cube_size = size;
+            draw.cube.cube.color = color;
+            draw.cube.cube.depth_clip = 1.0;
+            draw.cube.glow = glow;
+            draw.cube.color_adjust_ctl = color_adjust;
+            let slice = draw.cube.cube.draw_vars.as_slice();
             chunk.slab_alpha[out_index].extend_from_slice(slice);
             self.slab_instance_count += 1;
         } else {
-            draws.cube.cube.transform = transform;
-            draws.cube.cube.cube_pos = vec3(0.0, 0.0, 0.0);
-            draws.cube.cube.cube_size = size;
-            draws.cube.cube.color = color;
-            draws.cube.cube.depth_clip = 1.0;
-            draws.cube.glow = glow;
-            draws.cube.color_adjust_ctl = color_adjust;
-            let slice = draws.cube.cube.draw_vars.as_slice();
+            let Some(draw) = draws.cube.as_deref_mut() else { return };
+            draw.cube.transform = transform;
+            draw.cube.cube_pos = vec3(0.0, 0.0, 0.0);
+            draw.cube.cube_size = size;
+            draw.cube.color = color;
+            draw.cube.depth_clip = 1.0;
+            draw.glow = glow;
+            draw.color_adjust_ctl = color_adjust;
+            let slice = draw.cube.draw_vars.as_slice();
             match bucket {
                 PrimitiveBucket::Opaque => chunk.slab[out_index].extend_from_slice(slice),
                 PrimitiveBucket::Alpha => unreachable!(),

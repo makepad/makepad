@@ -607,28 +607,21 @@ pub(crate) fn apply_sun(cx: &Cx, draws: &mut SceneDraws, sun: &SunLight, fog_col
     // The cube family batches thousands of instances, so its sun and fog
     // colour ride in uniforms; only the direction stays per-instance (it
     // belongs to DrawCube, shared with consumers outside this crate).
-    draws.cube.cube.light_dir = sun.dir;
-    sun.write_uniforms(cx, &mut draws.cube.cube.draw_vars);
-    draws
-        .cube
-        .cube
-        .draw_vars
-        .set_uniform(cx, live_id!(fog_color), &[fog_color.x, fog_color.y, fog_color.z]);
-    draws.alpha.cube.cube.light_dir = sun.dir;
-    sun.write_uniforms(cx, &mut draws.alpha.cube.cube.draw_vars);
-    draws.alpha.cube.cube.draw_vars.set_uniform(
-        cx,
-        live_id!(fog_color),
-        &[fog_color.x, fog_color.y, fog_color.z],
-    );
+    if let Some(draw) = draws.cube.as_deref_mut() {
+        draw.cube.light_dir = sun.dir;
+        sun.write_uniforms(cx, &mut draw.cube.draw_vars);
+        draw.cube.draw_vars.set_uniform(cx, live_id!(fog_color), &[fog_color.x, fog_color.y, fog_color.z]);
+    }
+    if let Some(draw) = draws.alpha.as_deref_mut() {
+        draw.cube.cube.light_dir = sun.dir;
+        sun.write_uniforms(cx, &mut draw.cube.cube.draw_vars);
+        draw.cube.cube.draw_vars.set_uniform(cx, live_id!(fog_color), &[fog_color.x, fog_color.y, fog_color.z]);
+    }
     // Terrain and skinned draw one instance each, so there is nothing to
     // save by moving their sun off the instance stream.
-    sun.write_into(
-        &mut draws.terrain.light_dir,
-        &mut draws.terrain.sun_color,
-        &mut draws.terrain.sun_sky,
-        &mut draws.terrain.sun_ground,
-    );
+    if let Some(draw) = draws.terrain.as_deref_mut() {
+        sun.write_into(&mut draw.light_dir, &mut draw.sun_color, &mut draw.sun_sky, &mut draw.sun_ground);
+    }
 }
 
 /// Does this script-configured sky take the ANALYTIC (Preetham) dome? Yes
