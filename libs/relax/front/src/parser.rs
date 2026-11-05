@@ -804,7 +804,7 @@ impl<'a> Parser<'a> {
                     };
                     // rustc_builtin_macros asm.rs validate_asm_args: an option given twice (in one
                     // `options(..)` or across several)
-                    if spec.options & option != 0 && crate::lexer::validation_enabled() {
+                    if spec.options & option != 0 {
                         let name = String::from_utf8_lossy(self.text_of(t)).into_owned();
                         return Err(PErr { pos: t.lo, msg: format!("the `{}` option was already provided", name) });
                     }
@@ -920,7 +920,8 @@ impl<'a> Parser<'a> {
             self.pos += 1;
             let (_, toks) = self.delim_tt()?;
             self.unraw_attr(toks);
-            if crate::lexer::validation_enabled() { self.meta_frags_in_attr(toks)?; self.attr_shape_now_or_later(toks)?; }
+            self.meta_frags_in_attr(toks)?;
+            self.attr_shape_now_or_later(toks)?;
             v.push(Attr { inner: false, toks });
         }
         Ok(self.expand_cfg_attrs(v))
@@ -944,7 +945,7 @@ impl<'a> Parser<'a> {
     /// rustc_attr_parsing parser.rs: expr_to_lit checks the expanded value.
     fn attr_value_macro(&mut self, toks: TokRange) -> PResult<()> {
         let (lo, hi) = (toks.lo as usize, toks.hi as usize);
-        if !crate::lexer::validation_enabled() || hi <= lo + 3 || hi > self.toks.len() { return Ok(()); }
+        if hi <= lo + 3 || hi > self.toks.len() { return Ok(()); }
         // the attribute's path, then `=`, then its expression
         let mut i = lo;
         while i < hi && matches!(self.toks.at(i).kind, T::Ident | T::RawIdent | T::PathSep) { i += 1; }
@@ -1169,7 +1170,8 @@ impl<'a> Parser<'a> {
             self.pos += 2;
             let (_, toks) = self.delim_tt()?;
             self.unraw_attr(toks);
-            if crate::lexer::validation_enabled() { self.meta_frags_in_attr(toks)?; self.attr_shape_now_or_later(toks)?; }
+            self.meta_frags_in_attr(toks)?;
+            self.attr_shape_now_or_later(toks)?;
             new.push(Attr { inner: true, toks });
         }
         v.extend(self.expand_cfg_attrs(new));
@@ -1239,7 +1241,7 @@ impl<'a> Parser<'a> {
         if self.macros.is_none() {
             return Ok(());
         }
-        if crate::lexer::validation_enabled() { self.macro_rules_syntax(toks)?; }
+        self.macro_rules_syntax(toks)?;
         // a raw identifier names the same macro (`macro_rules! r#try` is `try!`)
         let n = String::from_utf8_lossy(self.bytes(name.lo, name.hi)).trim_start_matches("r#").to_string();
         let mt = crate::macros::mtoks(self, &self.toks.range(toks.lo as usize, toks.hi as usize));
@@ -1252,10 +1254,8 @@ impl<'a> Parser<'a> {
         let scope = self.macros.as_mut().unwrap();
         scope.define_tokens(&n, &self.krate, self.edition, file, &def_mod, name.lo, exported, local_inner, &mt)
             .map_err(|msg| PErr { pos: name.lo, msg })?;
-        if crate::lexer::validation_enabled() {
-            if let Some(d) = scope.local.last() {
-                crate::macros::check_rules(d, edition).map_err(|msg| PErr { pos: name.lo, msg })?;
-            }
+        if let Some(d) = scope.local.last() {
+            crate::macros::check_rules(d, edition).map_err(|msg| PErr { pos: name.lo, msg })?;
         }
         Ok(())
     }
@@ -1430,7 +1430,7 @@ impl<'a> Parser<'a> {
             [seg] if !path.global() => seg,
             _ => return false,
         };
-        if self.no_prelude == 0 || self.edition < 2018 || !crate::lexer::validation_enabled() || (seg.name.lo as usize) >= self.src.len()
+        if self.no_prelude == 0 || self.edition < 2018 || (seg.name.lo as usize) >= self.src.len()
             || !STD_PRELUDE_MACROS.contains(&name) || self.name_imported(name) {
             return false;
         }
@@ -1460,7 +1460,7 @@ impl<'a> Parser<'a> {
     /// The arms of a `cfg_select!` that were not chosen are parsed as the chosen one is (rustc cfg_select.rs):
     /// their syntax errors are reported. `how`: 0 an expression, 1 statements, 2 items.
     fn parse_cfg_select_rest(&mut self, rest: Vec<(usize, usize)>, how: u8) -> PResult<()> {
-        if rest.is_empty() || !crate::lexer::validation_enabled() || self.cfg_out > 0 { return Ok(()); }
+        if rest.is_empty() || self.cfg_out > 0 { return Ok(()); }
         for (lo, hi) in rest {
             let save = self.pos;
             self.pos = lo;
@@ -1575,7 +1575,7 @@ impl<'a> Parser<'a> {
         // macro this file defines further down is not in scope (check only; the call must be written
         // code, not an expansion)
         let out_of_scope = r.as_ref().is_some_and(|d| {
-            let written = qual.is_none() && d.builtin == 0 && !d.exported && crate::lexer::validation_enabled() && (seg.name.lo as usize) < self.src.len();
+            let written = qual.is_none() && d.builtin == 0 && !d.exported && (seg.name.lo as usize) < self.src.len();
             // defined further down in this file (textual scope: only after its definition)
             let later = written && self.bctx.as_ref().is_some_and(|c| c.path == d.def_file) && seg.name.lo < d.def_pos && (d.def_pos as usize) < self.src.len();
             // its block or module closed (rustc legacy scope) and no other one of the name is in scope
@@ -1870,10 +1870,10 @@ impl<'a> Parser<'a> {
                 self.path_frags.insert(base + a);
                 self.ty_frags.remove(&(base + a));
             }
-            if b & crate::macros::BLOCK_FRAG != 0 && crate::lexer::validation_enabled() {
+            if b & crate::macros::BLOCK_FRAG != 0 {
                 self.block_frags.insert(base + a);
             }
-            if b & (crate::macros::EXPR_FRAG | crate::macros::LIT_FRAG) != 0 && crate::lexer::validation_enabled() {
+            if b & (crate::macros::EXPR_FRAG | crate::macros::LIT_FRAG) != 0 {
                 self.meta_frags.insert(base + a, if b & crate::macros::EXPR_FRAG != 0 { "expr" } else { "literal" });
             }
             if b & crate::macros::WRAP_PAREN != 0 {
@@ -2458,7 +2458,7 @@ impl<'a> Parser<'a> {
 
     fn item(&mut self, attrs: Vec<Attr>) -> PResult<Option<ItemId>> {
         // rustc_passes check_attr `check_doc_inline`: `doc(inline)` and `doc(no_inline)` on one item conflict
-        if self.cfg_out == 0 && attrs.len() > 1 && crate::lexer::validation_enabled() {
+        if self.cfg_out == 0 && attrs.len() > 1 {
             let (mut inline, mut no_inline) = (false, false);
             for a in &attrs {
                 let (lo, hi) = (a.toks.lo as usize, a.toks.hi as usize);
@@ -2774,7 +2774,7 @@ impl<'a> Parser<'a> {
                 }
                 // `name! ident { }` (macro 2.0 style) not supported
                 // rustc_expand: an expression macro of the std prelude does not expand to items
-                if self.macros.is_some() && self.cfg_out == 0 && crate::lexer::validation_enabled() && (path_lo as usize) < self.src.len() && self.no_item_macro(&path) {
+                if self.macros.is_some() && self.cfg_out == 0 && (path_lo as usize) < self.src.len() && self.no_item_macro(&path) {
                     return Err(PErr { pos: path_lo, msg: "expected one of `!` or `::`, found `(`: this macro does not expand to items".into() });
                 }
                 let (delim, toks) = self.delim_tt()?;
@@ -3336,7 +3336,7 @@ impl<'a> Parser<'a> {
                 } else {
                     let rename = if self.eat(T::KwAs) { Some(self.ident_or_underscore()?) } else { None };
                     // rustc_resolve: importing a path keyword without renaming it
-                    if rename.is_none() && crate::lexer::validation_enabled() && self.cfg_out == 0 {
+                    if rename.is_none() && self.cfg_out == 0 {
                         let named = if seg.kind() == SegKind::SelfValue && (in_group || prefix.is_some()) { prefix.unwrap_or(seg.kind()) } else { seg.kind() };
                         if matches!(named, SegKind::SelfValue | SegKind::Super | SegKind::Crate) {
                             let e = PErr { pos: seg.name.lo, msg: "imports need to be explicitly named".to_string() };
@@ -3693,8 +3693,7 @@ impl<'a> Parser<'a> {
                 _ => GenericArg::Type(self.ty_plus()?),
             };
             // rustc_ast_passes: generic arguments come before the first constraint
-            if crate::lexer::validation_enabled()
-                && !matches!(arg, GenericArg::Binding(..) | GenericArg::Constraint(..))
+            if !matches!(arg, GenericArg::Binding(..) | GenericArg::Constraint(..))
                 && v.iter().any(|a| matches!(a, GenericArg::Binding(..) | GenericArg::Constraint(..)))
             {
                 // an AST validation error: only reported once the enclosing item is configured in
@@ -3792,9 +3791,14 @@ impl<'a> Parser<'a> {
         };
         // a literal of an expansion was not cooked by the file's token validation (it was a macro
         // argument): rustc reports its suffix when the parser consumes it
-        if self.exp_depth > 0 && matches!(k, LitKind::Int | LitKind::Float) {
+        if self.exp_depth > 0 {
             let t = self.tok();
-            if let Err(msg) = crate::lexer::validate_number(self.tok_text(t), k == LitKind::Float) {
+            let cooked = match k {
+                LitKind::Int | LitKind::Float => crate::lexer::validate_number(self.tok_text(t), k == LitKind::Float),
+                LitKind::Bool(_) => Ok(()),
+                _ => crate::lexer::validate_quoted(self.tok_text(t)),
+            };
+            if let Err(msg) = cooked {
                 return Err(PErr { pos: t.lo, msg });
             }
         }
@@ -4124,7 +4128,7 @@ impl<'a> Parser<'a> {
     }
 
     pub fn pat_no_or(&mut self) -> PResult<PatId> {
-        if self.exp_depth > 0 && crate::lexer::validation_enabled() && (!self.meta_frags.is_empty() || self.kind() == T::OpenParen) {
+        if self.exp_depth > 0 && (!self.meta_frags.is_empty() || self.kind() == T::OpenParen) {
             self.expr_fragment_pat()?;
         }
         let p = match self.kind() {
@@ -5193,7 +5197,7 @@ impl<'a> Parser<'a> {
                 let path = self.path(true)?;
                 if self.kind() == T::Not && matches!(self.nth(1), T::OpenParen | T::OpenBracket | T::OpenBrace) {
                     // rustc_parse expr.rs parse_expr_path_start: MacroInvocationWithQualifiedPath
-                    if !path.no_qself() && crate::lexer::validation_enabled() {
+                    if !path.no_qself() {
                         return Err(PErr { pos: lo, msg: "macros cannot use qualified paths".to_string() });
                     }
                     self.pos += 1;

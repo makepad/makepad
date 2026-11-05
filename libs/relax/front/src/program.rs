@@ -730,6 +730,10 @@ pub struct Program {
     pub legacy_const_args: crate::collected::ImageMap<DefId, std::sync::Arc<crate::def_collector::LegacyOwner>>,
     pub(crate) legacy_const_attrs: std::sync::Arc<HashMap<DefId, Vec<u32>>>,
     declaration_versions: HashMap<u32, DeclarationState>,
+    /// per file version: the import changes it made to the macro table (revert_version)
+    import_versions: HashMap<u32, Vec<crate::macros::ImportEdit>>,
+    /// the file version whose added items are being collected (add_items)
+    adding_to: Option<u32>,
     pub def_id_to_node_id: crate::collected::ImageMap<DefId, (u32, crate::def_collector::NodeId)>,
     pub impl_trait_in_trait_data: crate::collected::ImageMap<DefId, crate::assoc::ImplTraitInTraitData>,
     pub associated_types_for_impl_traits: crate::collected::ImageMap<DefId, Vec<DefId>>,
@@ -909,6 +913,8 @@ impl Program {
             legacy_const_args: Default::default(),
             legacy_const_attrs: Default::default(),
             declaration_versions: Default::default(),
+            import_versions: Default::default(),
+            adding_to: None,
             def_id_to_node_id: Default::default(),
             impl_trait_in_trait_data: Default::default(),
             associated_types_for_impl_traits: Default::default(),
@@ -1763,6 +1769,13 @@ impl Program {
                     (None, Some((s, t))) => (s, Some(t)),
                     (None, None) => (self.crates[krate as usize].context.read_source(path)?.src.to_vec(), None),
                 };
+                if let Some(version) = self.adding_to {
+                    let c = &self.crates[krate as usize];
+                    if let Some(e) = crate::preload::new_file_imports(path, &self.cur_mod_path, &kname, c.root_path(), edition, &c.cfg, &src, &c.context) {
+                        std::sync::Arc::make_mut(&mut self.macros).apply_import_edit(&e);
+                        self.import_versions.entry(version).or_default().push(e);
+                    }
+                }
                 let bctx = std::rc::Rc::new(crate::builtins::FileCtx::new(&kname, path, &self.cur_mod_path, &self.crates[krate as usize].cfg));
                 let (pf, used) = self.crates[krate as usize].context.parse_input(src, pre, edition,
                     Some(crate::macros::MacroScope::new(self.macros.clone())), bctx, crate::parser::lazy_auto())?;
@@ -1838,7 +1851,9 @@ impl Program {
         let krate = self.file_crate[old as usize];
         let kname = self.syms.str(self.crates[krate as usize].name).to_string();
         // the module path the file was loaded under (module_path!())
-        let mod_path = match self.reload_files().mods.get(&old).into_iter().flatten().map(|&m| &self.mods[m as usize]).find(|m| m.lexical_parent.is_none()) {
+        let own_module = self.reload_files().mods.get(&old).into_iter().flatten().copied().find(|&m| self.mods[m as usize].lexical_parent.is_none());
+        let dir = own_module.map_or_else(|| dir_of(path).to_string(), |m| self.module_source_directory(m).0);
+        let mod_path = match own_module.map(|m| &self.mods[m as usize]) {
             Some(m) if m.def.0 != u32::MAX && (m.def.0 as usize) < self.defs.len() && self.defs[m.def.0 as usize].kind == DefKind::Mod && self.defs[m.def.0 as usize].file != old => {
                 self.def_path(m.def)
             }
@@ -1851,7 +1866,7 @@ impl Program {
                 std::sync::Arc::make_mut(&mut macros).crates.insert(kname.clone(), context);
             }
         }
-        ParseSnapshot { old, path: path.to_string(), edition, kname, mod_path,
+        ParseSnapshot { old, path: path.to_string(), edition, kname, mod_path, dir, root: root.to_string(), together: Vec::new(),
             cfg: self.crates[krate as usize].cfg.clone(), macros,
             reuse: self.parse_reuse.get(&old).cloned().unwrap_or_default(),
             previous: Some(self.files[old as usize].clone()), context: self.crates[krate as usize].context.clone() }
@@ -1866,6 +1881,7 @@ impl Program {
         let normal = self.mods[parent as usize].normal;
         let mod_path = format!("{}::{}", self.def_path(self.mods[normal as usize].def), child);
         ParseSnapshot { old: self.mods[normal as usize].file, path: path.to_string(), edition: self.crates[krate as usize].edition, kname, mod_path,
+            dir: dir_of(path).to_string(), root: self.crates[krate as usize].root_path().to_string(), together: Vec::new(),
             cfg: self.crates[krate as usize].cfg.clone(), macros: self.macros.clone(), reuse: Default::default(), previous: None,
             context: self.crates[krate as usize].context.clone() }
     }
@@ -1903,7 +1919,7 @@ impl Program {
         self.defs[d.0 as usize].sub = m;
         self.mods[m as usize].globs.push((pdef, false));
         if self.imports_done {
-            self.scope_cache.clear();
+            self.forget_bindings();
         }
         let dir = dir_of(&self.file_paths[f as usize]).to_string();
         let items: Vec<ItemId> = self.files[f as usize].ast.root_items.iter().copied().collect();
@@ -2073,6 +2089,14 @@ impl Program {
         self.scope_cache.reclaim();
         self.path_seg_cache.reclaim();
         self.trait_bind_cache.reclaim();
+        self.trait_scope.reclaim();
+    }
+
+    /// A module's bindings changed: what name lookups and the traits in scope answered goes.
+    fn forget_bindings(&self) {
+        self.scope_cache.clear();
+        self.trait_bind_cache.clear();
+        self.trait_scope.clear();
     }
 
     /// Hot reload: makes a parsed version current. `pairs`: (old item, new item) for every item
@@ -2127,11 +2151,15 @@ impl Program {
         if !same_scopes && visible.is_none() {
             self.path_seg_cache.clear();
         }
+        let new = self.files.len() as u32;
         let table = std::sync::Arc::make_mut(&mut self.macros);
         for d in v.macros {
             table.push(d);
         }
-        let new = self.files.len() as u32;
+        if let Some(e) = v.imports {
+            table.apply_import_edit(&e);
+            self.import_versions.insert(new, vec![e]);
+        }
         let fwd: HashMap<u32, u32> = pairs.iter().copied().collect();
         // block modules: the same (paired) items under a block (block ids shift with the edit)
         let mut by_items: HashMap<Vec<u32>, u32> = HashMap::default();
@@ -2272,7 +2300,10 @@ impl Program {
         }
         self.parse_reuse.remove(&new);
         self.path_seg_cache.clear();
-        self.scope_cache.clear();
+        self.forget_bindings();
+        for e in self.import_versions.remove(&new).unwrap_or_default().into_iter().rev() {
+            std::sync::Arc::make_mut(&mut self.macros).apply_import_edit(&e.undone());
+        }
         let back: Vec<(u32, u32)> = pairs.iter().map(|&(a, b)| (b, a)).collect();
         self.retarget_file(new, old, &back);
         self.collect_version_definitions(old, false, false, None).expect("previously collected definition body");
@@ -2323,6 +2354,13 @@ impl Program {
         if items.is_empty() {
             return Ok(Vec::new());
         }
+        self.adding_to = Some(file);
+        let added = self.collect_added_items(file, items);
+        self.adding_to = None;
+        added
+    }
+
+    fn collect_added_items(&mut self, file: u32, items: &[(ItemId, Result<u32, DefId>)]) -> Result<Vec<DefId>, String> {
         let first = self.defs.len();
         for &(iid, at) in items {
             match at {
@@ -2343,7 +2381,7 @@ impl Program {
             }
         }
         if self.imports_done {
-            self.scope_cache.clear();
+            self.forget_bindings();
             self.glob_cache.clear(); self.glob_amb_cache.clear(); self.glob_prec_cache.clear();
         }
         // only the crates that can see `file` can see what it added (lead decision 52 R1)
@@ -2483,7 +2521,7 @@ impl Program {
                 }
             }
         }
-        self.scope_cache.clear();
+        self.forget_bindings();
         self.glob_cache.clear(); self.glob_amb_cache.clear(); self.glob_prec_cache.clear();
     }
 
@@ -2520,7 +2558,7 @@ impl Program {
             self.imports[i].bound &= !(BOUND_TYPES | BOUND_VALUES);
             out.push(UseUndo { index: i, module: m, bind, done, glob, bound, gone });
         }
-        self.scope_cache.clear();
+        self.forget_bindings();
         self.glob_cache.clear(); self.glob_amb_cache.clear(); self.glob_prec_cache.clear();
         out
     }
@@ -2539,7 +2577,7 @@ impl Program {
                 md.import_pub.insert((name, is_type), flags);
             }
         }
-        self.scope_cache.clear();
+        self.forget_bindings();
         self.glob_cache.clear(); self.glob_amb_cache.clear(); self.glob_prec_cache.clear();
     }
 
@@ -2567,7 +2605,7 @@ impl Program {
         for (j, im) in self.imports.iter().enumerate() {
             self.imports_of_module.entry(im.module).or_default().push(j as u32);
         }
-        self.scope_cache.clear();
+        self.forget_bindings();
         self.glob_cache.clear(); self.glob_amb_cache.clear(); self.glob_prec_cache.clear();
     }
 
@@ -2590,7 +2628,7 @@ impl Program {
                 _ => {}
             }
         }
-        self.scope_cache.clear();
+        self.forget_bindings();
         self.glob_cache.clear(); self.glob_amb_cache.clear(); self.glob_prec_cache.clear();
     }
 
@@ -2642,6 +2680,14 @@ impl Program {
         }
         for id in reload(&mut self.reload).mods.remove(&from).unwrap_or_default() {
             self.set_mod_file(id, to);
+        }
+        // An import sits at its `use` item, which a later edit finds it by (unbind_use).
+        let (was, now) = (&self.files[from as usize].ast, &self.files[to as usize].ast);
+        let moved: HashMap<u32, u32> = m.iter()
+            .filter(|(&a, _)| matches!(was.items[a as usize].kind, ItemKind::Use { .. } | ItemKind::ExternCrate(_)))
+            .map(|(&a, &b)| (was.items[a as usize].lo, now.items[b as usize].lo)).collect();
+        for im in self.imports.iter_mut().filter(|im| im.file == from) {
+            if let Some(&pos) = moved.get(&im.pos) { im.file = to; im.pos = pos; }
         }
         for (&a, &b) in m.iter() {
             if let Some(&d) = self.item_defs.get(&(from, a)) {
@@ -2880,7 +2926,7 @@ impl Program {
                                 }
                                 if exists {
                                     // rustc_expand module.rs `default_submod_path`: both `x.rs` and `x/mod.rs` exist
-                                    if path_attr.is_empty() && cands.len() == 2 && *c == cands[0] && crate::lexer::validation_enabled() {
+                                    if path_attr.is_empty() && cands.len() == 2 && *c == cands[0] {
                                         let other = &cands[1];
                                         let other_exists = self.check_files.as_ref().map_or(false, |m| m.contains_key(other)) || self.crates[krate as usize].context.exists(other);
                                         self.module_probes.push((other.clone(), other_exists));
@@ -3299,8 +3345,7 @@ impl Program {
     fn resolve_imports_in(&mut self, visible: Option<&[bool]>) {
         self.imports_done = false;
         self.glob_cache.clear(); self.glob_amb_cache.clear(); self.glob_prec_cache.clear();
-        self.trait_bind_cache.clear();
-        self.scope_cache.clear();
+        self.forget_bindings();
         self.resolve_imports_fixpoint(0);
         self.imports_done = true;
         crate::assoc::collect_in(self, visible);
@@ -3342,6 +3387,7 @@ impl Program {
         self.imports_done = false;
         self.resolve_imports_fixpoint(i0);
         self.imports_done = true;
+        self.forget_bindings();
         crate::assoc::collect_in(self, Some(visible));
     }
 
@@ -5628,12 +5674,26 @@ pub struct ParseSnapshot {
     pub edition: u16,
     pub kname: String,
     pub mod_path: String,
+    /// where the file's `mod x;` items look for their files
+    pub dir: String,
+    /// the crate's root file
+    pub root: String,
+    /// the import changes of the files edited together with this one (share_import_edits)
+    pub together: Vec<crate::macros::ImportEdit>,
     pub cfg: CfgSet,
     pub macros: std::sync::Arc<crate::macros::MacroTable>,
     pub reuse: std::sync::Arc<crate::parse_work::Reuse>,
     pub previous: Option<std::sync::Arc<ParsedFile>>,
     pub context: std::sync::Arc<crate::source_context::Context>,
 }
+/// Files edited together: each parse sees the imports the others write.
+pub fn share_import_edits<'a>(snapshots: &mut [Option<ParseSnapshot>], sources: impl Iterator<Item = &'a [u8]>) {
+    if snapshots.len() < 2 { return; }
+    let together: Vec<_> = snapshots.iter().zip(sources).filter_map(|(s, src)| crate::preload::import_edit(s.as_ref()?, src)).collect();
+    if together.is_empty() { return; }
+    for s in snapshots.iter_mut().flatten() { s.together = together.clone(); }
+}
+
 impl ParseSnapshot {
     pub fn parse(&self, src: Vec<u8>) -> Result<FileVersion, String> {
         // classify may ask for old lazy bodies. Complete their OnceLock off the unit lock
@@ -5679,18 +5739,24 @@ impl ParseSnapshot {
             .map_err(|(span, m)| format!("{}:{}: {}", path, span.lo, m))?;
         let prep = prepare_file(&mut pf, cfg);
         let local = used.map(|u| u.local).unwrap_or_default();
-        Ok(FileVersion { old: *old, path: path.clone(), pf, blocks: prep.blocks, idents: prep.idents, macros: local, reuse: Default::default(), context })
+        Ok(FileVersion { old: *old, path: path.clone(), pf, blocks: prep.blocks, idents: prep.idents, macros: local, imports: None, reuse: Default::default(), context })
     }
 
     pub fn parse_full(&self, src: Vec<u8>) -> Result<FileVersion, String> {
         let Self { old, path, edition, kname, mod_path, cfg, macros, .. } = self;
         let bctx = std::rc::Rc::new(crate::builtins::FileCtx::new(kname, path, mod_path, cfg));
+        let imports = crate::preload::import_edit(self, &src);
+        let mut macros = macros.clone();
+        if imports.is_some() || !self.together.is_empty() {
+            let table = std::sync::Arc::make_mut(&mut macros);
+            for e in self.together.iter().chain(&imports) { table.apply_import_edit(e); }
+        }
         let context = if self.context.sources().find(path).and_then(|id| self.context.sources().get(id).ok()).is_some_and(|old| old.src.as_ref() == src) { self.context.clone() } else { self.context.edited(path, src.clone().into()) };
         let (mut pf, used) = context.parse(src, None, *edition,
-            Some(crate::macros::MacroScope::new(macros.clone())), bctx, false)?;
+            Some(crate::macros::MacroScope::new(macros)), bctx, false)?;
         let used = used.unwrap();
         let prep = prepare_file(&mut pf, cfg);
-        Ok(FileVersion { old: *old, path: path.clone(), pf, blocks: prep.blocks, idents: prep.idents, macros: used.local, reuse: Default::default(), context })
+        Ok(FileVersion { old: *old, path: path.clone(), pf, blocks: prep.blocks, idents: prep.idents, macros: used.local, imports, reuse: Default::default(), context })
     }
 }
 
@@ -5702,6 +5768,7 @@ pub struct FileVersion {
     blocks: BodyBlocks,
     idents: Vec<(u32, u32)>,
     macros: Vec<crate::macros::MacroRef>,
+    imports: Option<crate::macros::ImportEdit>,
     pub reuse: std::sync::Arc<crate::parse_work::Reuse>,
     pub context: std::sync::Arc<crate::source_context::Context>,
 }

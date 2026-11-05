@@ -1,6 +1,7 @@
 // M10: two thread-local holders share one Rc<RefCell<Item>> across edits.
-// RefCell<Item> embeds Item outside the app scope, so both layout edits require
-// a restart. The old shared values keep running. Rc requires thread-local storage.
+// RefCell<Item> embeds Item outside the app scope, whose layout stays: the added
+// field lives in Item's extension block, so both edits patch and the shared value
+// keeps running. Rc requires thread-local storage.
 
 use std::cell::RefCell;
 use std::rc::Rc;

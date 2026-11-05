@@ -130,6 +130,7 @@ pub struct ProcessInformation {
 extern "system" {
     pub fn RtlAddFunctionTable(table: *const u32, count: u32, base: u64) -> u8;
     pub fn RtlDeleteFunctionTable(table: *const u32) -> u8;
+    pub fn RtlDllShutdownInProgress() -> u8;
 }
 
 #[link(name = "advapi32")]

@@ -73,10 +73,10 @@ const NONE: usize = usize::MAX;
 // Compatible with 4/16/64 KB OS pages and Windows allocation granularity.
 const PAGE: usize = 64 << 10;
 /// What a small chunk commits at first (a slot of any class fits). Windows charges a committed page
-/// whether or not it is ever touched, and a thread has one chunk per size class it has used: Fab's
-/// 31 program threads held 1.38 GB of chunks with 45 MB touched (a pool worker: 17 chunks, 108 KB).
-/// A chunk carved past this commits the rest at once: at most one more call per chunk. Elsewhere
-/// only touched pages count, so a chunk commits whole.
+/// whether or not it is ever touched, and a thread has one chunk per size class it has used: a
+/// program's threads hold many chunks they barely touch. A chunk carved past this commits the rest
+/// at once: at most one more call per chunk. Elsewhere only touched pages count, so a chunk commits
+/// whole.
 const FIRST_COMMIT: usize = if cfg!(windows) { 1 << MAX_SHIFT } else { CHUNK };
 // A warm chunk was never carved past its first commit, so it serves any class as it is.
 const _: () = assert!(WARM_TOUCHED_MAX <= FIRST_COMMIT);

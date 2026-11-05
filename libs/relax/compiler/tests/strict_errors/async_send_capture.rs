@@ -1,4 +1,5 @@
-//~ msg: unsatisfied obligation core::marker::Send<
+//~ E0277
+//~ help: cannot be sent between threads safely
 fn needs_send<T: Send>(_: T) {}
 async fn captured(value: std::rc::Rc<u32>) { let _ = *value; }
 fn main() {

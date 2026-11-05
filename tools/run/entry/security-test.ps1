@@ -54,6 +54,10 @@ try {
         Require ([IO.File]::Exists((Join-Path $base 'apps\runner.launch.part'))) 'launch record missing'
         foreach ($bad in @(
             $release.Replace('"fixture"', '"..\\evil"'),
+            $release.Replace('"fixture"', '"fixture\n"'),
+            $release.Replace('"loader.zip"', '"loader.zip\n"'),
+            $release.Replace('"sha256":"' + ('a' * 64), '"sha256":"' + ('a' * 64) + '\n'),
+            $release.Replace('[]', '[{"name":"a\n","path":"makepad","commit":""}]'),
             $release.Replace('"loader.zip"', '"..\\evil.zip"'),
             $release.Replace('"loader.zip"', '".."'),
             $release.Replace('"sha256":"a', '"sha256":"&a'),
@@ -73,6 +77,24 @@ try {
             Require ($code[-1] -ne 0) 'locked source replacement reported success'
         } finally { $lock.Dispose() }
         Require ([IO.File]::ReadAllText($target) -eq 'old') 'failed update changed the locked file'
+        # A name that changes kind between versions, both ways; target\ and the stamps stay.
+        foreach ($old in 'was_folder\deep\old.rs', 'was_file', 'target\stays', '.version', 'gone\empty\old.rs') {
+            $path = Join-Path $env:SRC $old
+            [IO.Directory]::CreateDirectory((Split-Path $path)) | Out-Null
+            [IO.File]::WriteAllText($path, 'old', $utf8)
+        }
+        foreach ($now in 'was_folder', 'was_file\inner.rs') {
+            $path = Join-Path $new $now
+            [IO.Directory]::CreateDirectory((Split-Path $path)) | Out-Null
+            [IO.File]::WriteAllText($path, 'new', $utf8)
+        }
+        $code = Run-Fragment ($update + "`nexit /b 0")
+        Require ($code[-1] -eq 0) 'update failed on a name that changed between file and folder'
+        Require ([IO.File]::ReadAllText((Join-Path $env:SRC 'was_folder')) -eq 'new') 'folder not replaced by the file'
+        Require ([IO.File]::ReadAllText((Join-Path $env:SRC 'was_file\inner.rs')) -eq 'new') 'file not replaced by the folder'
+        Require ([IO.File]::ReadAllText((Join-Path $env:SRC 'target\stays')) -eq 'old') 'update touched target'
+        Require ([IO.File]::ReadAllText((Join-Path $env:SRC '.version')) -eq 'old') 'update touched a stamp'
+        Require (-not (Test-Path -LiteralPath (Join-Path $env:SRC 'gone'))) 'a folder the new version has no more stayed'
     }
     if ($Case -eq 'Rust') {
         $env:RUST = Join-Path $base 'rust'

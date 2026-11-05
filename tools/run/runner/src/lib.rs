@@ -298,14 +298,14 @@ fn run(raw_args: Vec<Vec<u8>>) {
             }
         },
         // `run --src <store>[@<offset>+<len>] <package> ...`: from a packed source archive, no checkout
-        Some("run") if args[2..].iter().any(|a| a == "--src") => std::process::exit(run_src(&args[2..])),
+        Some("run") if args[2..].iter().any(|a| a == "--src") => relax_compiler::os::proc::exit(run_src(&args[2..])),
         // `check --src <store>[@<offset>+<len>] <package> ...`: type/borrow-check what `run --src` would
         // compile, reading only the archive (an archive that misses a file the app needs fails here,
         // not on the phone); never through the check server
         Some("check") if args[2..].iter().any(|a| a == "--src") => {
             let mut words = vec!["--check".to_string()];
             words.extend(args[2..].iter().filter(|a| !matches!(a.as_str(), "--serve" | "--no-serve")).cloned());
-            std::process::exit(run_src(&words))
+            relax_compiler::os::proc::exit(run_src(&words))
         }
         // `run <git url>[#ref] [--mount <dir>=<git url>[#ref]]... [--cached] <package> ...`
         Some("run") => match fetch::split_args(&args[2..]) {
@@ -314,7 +314,7 @@ fn run(raw_args: Vec<Vec<u8>>) {
                 eprintln!("makepad: {e}");
                 std::process::exit(2);
             }
-            Some(Ok((opts, spec, cached, rest))) => std::process::exit(run_spec(opts, &spec, cached, rest)),
+            Some(Ok((opts, spec, cached, rest))) => relax_compiler::os::proc::exit(run_spec(opts, &spec, cached, rest)),
         },
         // `fetch <git url>[#ref] [--mount ..]`: the snapshot's folder on stdout
         Some("fetch") => match fetch::split_args(&args[2..]) {

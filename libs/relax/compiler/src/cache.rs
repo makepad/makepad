@@ -589,6 +589,10 @@ pub struct Cache {
     /// per crate: a const edit reached it, so its startup fingerprint no longer vouches for its
     /// keys (`cert_fps`)
     keys_moved_crates: Vec<bool>,
+    /// the crates that can see a struct field list a live edit changed. Values of that struct have
+    /// a layout no new run gives them (dead slots, the extension block), so no key says what such
+    /// code is made for: these crates' slots neither link stored code nor store their own
+    layout_edited: Vec<bool>,
     /// (crate, name) -> what the name finds from the crate (deps.rs name_closure)
     name_memo: HashMap<(u32, deps::Name), u128>,
     /// per definition: its body's names, as one closure hash (code keys)
@@ -946,6 +950,7 @@ impl Cache {
             bound: Vec::new(),
             keys_moved: 0,
             keys_moved_crates: Vec::new(),
+            layout_edited: Vec::new(),
             name_memo: HashMap::new(),
             body_names: HashMap::new(),
             digests: Vec::new(),
@@ -3180,6 +3185,11 @@ impl Cache {
             self.remember_outcome(u, id, None, "cold record-rejected:fn key");
             return;
         };
+        if self.layout_edit_reaches(id) {
+            trace_lookup(u, id, "norecord:layout edit");
+            if o3.is_some() { warm_count::add(warm_count::O3_DROPPED, 1); }
+            return;
+        }
         // a body the borrow checker rejected (reject_verdict): never stored
         if self.verdict_rejected.contains(&key) {
             trace_lookup(u, id, "norecord:verdict failed");
@@ -3663,7 +3673,8 @@ impl Cache {
     pub fn record_manifest(&mut self, u: &Unit, root: u32, order: &[u32], present: usize, stop: &dyn Fn() -> bool) -> bool {
         // past a const edit the slots' code is of two texts: the image would hold new values under
         // the crate fingerprints of the start, and the next start keeps the manifest it has
-        if self.keys_moved != 0 {
+        // (past a struct's edit, of two layouts)
+        if self.keys_moved != 0 || !self.layout_edited.is_empty() {
             self.manifest_done = true;
             self.manifest_len = order.len();
             return true;
@@ -8259,6 +8270,13 @@ impl Linker {
             return None;
         };
         let key = key0;
+        if self.cache().layout_edit_reaches(id) {
+            relax_codegen::warm::reason(id, "a live edit changed the layout of a struct its crates see");
+            self.cache().missed.insert(id);
+            self.cache().stats.misses += 1;
+            trace_lookup(u, id, "miss:layout edit");
+            return None;
+        }
         let mut r = None;
         let mut found = false;
         // the pack stays alive by its Arc: the payload is read in place
@@ -8552,6 +8570,20 @@ pub(crate) unsafe fn rekey_after_const_edit(up: *mut Unit, before: &[(DefId, Opt
     Rekeyed { readers: c.linked_readers(&mut *up), blind }
 }
 
+/// A live edit changed a struct's field list in `files`: see `Cache::layout_edited`. It stays when
+/// the edit is rolled back: what then compiles anew is only compiled more often than needed.
+pub(crate) unsafe fn layout_edit_committed(up: *mut Unit, files: impl Iterator<Item = u32>) {
+    let Some(c) = (&*up).cache.as_ref().map(|c| c.get()) else { return };
+    let c = &mut *c;
+    let seeing = (&*up).prog.crates_seeing_files(files);
+    if c.layout_edited.len() < seeing.len() {
+        c.layout_edited.resize(seeing.len(), false);
+    }
+    for (k, v) in seeing.into_iter().enumerate() {
+        c.layout_edited[k] |= v;
+    }
+}
+
 /// A const edit's text went away (refused at the gate, rolled back): the keys follow it back.
 pub(crate) unsafe fn rekey_after_revert(up: *mut Unit) {
     if let Some(c) = (&*up).cache.as_ref().map(|c| c.get()) {
@@ -8560,6 +8592,11 @@ pub(crate) unsafe fn rekey_after_revert(up: *mut Unit) {
 }
 
 impl Cache {
+    /// Whether a struct's live edit reaches this slot's crates (unknown crates: it may).
+    fn layout_edit_reaches(&self, id: u32) -> bool {
+        !self.layout_edited.is_empty() && self.slot_crates.get(&id).is_none_or(|v| v.iter().any(|&c| self.layout_edited.get(c as usize).is_none_or(|e| *e)))
+    }
+
     /// The program's text changed under the code keys: from here on a slot's key is the one a new
     /// run of this text computes, so a late reader's lookup never finds code of the old value
     /// and what compiles from here is recorded under what it was made from. Keys are made from

@@ -1,0 +1,2 @@
+# one file's new `pub use` is what the other file's new import names, in one edit
+v1 patch|reinst

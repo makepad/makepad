@@ -221,7 +221,7 @@ mod tests {
         table.s2_fmt = true;
         let mut s = crate::program::ParseSnapshot {
             old: 0, path: "/tmp/relax-parse-reuse.rs".into(), edition: 2021,
-            kname: "test".into(), mod_path: "test".into(),
+            kname: "test".into(), mod_path: "test".into(), dir: "/tmp".into(), root: "/tmp/relax-parse-reuse.rs".into(), together: Vec::new(),
             cfg: crate::cfg::CfgSet::host(sess, &[]), macros: std::sync::Arc::new(table),
             reuse: Default::default(), previous: None,
             context: crate::source_context::Context::new("/tmp/relax-parse-reuse.rs", Default::default(), sess),

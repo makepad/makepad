@@ -1060,11 +1060,46 @@ fn scan_text_mode(path: &str, dir: &str, mpath: &str, krate: &str, edition: u16,
     if declarations_only && !cfg.session.options.rs_lazy {
         toks = lazy::demand::active_tokens(&src, &toks, cfg);
     }
-    scan_tokens(path, dir, mpath, krate, edition, cfg, src_len, src, toks, context, macro_surface)
+    scan_tokens(path, dir, mpath, krate, edition, cfg, src_len, src, toks, context, if macro_surface { ScanSurface::Macros } else { ScanSurface::Modules })
+}
+
+/// What an edit to the snapshot's file changes in its crate's imports (None: nothing, or text
+/// the lexer refuses, which the parse reports). The macro definitions it adds come from the parse.
+pub(crate) fn import_edit(s: &crate::program::ParseSnapshot, src: &[u8]) -> Option<crate::macros::ImportEdit> {
+    let previous = s.previous.as_ref()?;
+    let old = &previous.src[..previous.src_len as usize];
+    if old == src { return None; }
+    let imports = |text: &[u8]| file_imports(&s.path, &s.dir, &s.mod_path, &s.kname, s.edition, &s.cfg, text, &s.context);
+    let (was, now) = (imports(old)?, imports(src)?);
+    if was.same_as(&now) { return None; }
+    Some(crate::macros::ImportEdit { krate: s.kname.clone(), root: s.root.clone(), was, now })
+}
+
+/// A module file a live edit declared: no prescan read its imports.
+pub(crate) fn new_file_imports(path: &str, mpath: &str, krate: &str, root: &str, edition: u16, cfg: &CfgSet, src: &[u8], context: &crate::source_context::Context) -> Option<crate::macros::ImportEdit> {
+    let dir = if path.ends_with("/mod.rs") { crate::program::dir_of(path).to_string() } else { format!("{}/{}", crate::program::dir_of(path), crate::program::stem_of(path)) };
+    let now = file_imports(path, &dir, mpath, krate, edition, cfg, src, context)?;
+    Some(crate::macros::ImportEdit { krate: krate.to_string(), root: root.to_string(), was: Default::default(), now })
+}
+
+fn file_imports(path: &str, dir: &str, mpath: &str, krate: &str, edition: u16, cfg: &CfgSet, src: &[u8], context: &crate::source_context::Context) -> Option<crate::macros::FileImports> {
+    let mut toks = Vec::with_capacity(src.len() / 4);
+    crate::lexer::lex(src, edition, &mut toks).ok()?;
+    let scan = scan_tokens(path, dir, mpath, krate, edition, cfg, src.len(), src.to_vec().into(), toks, context, ScanSurface::Imports)?;
+    Some(crate::macros::FileImports { uses: scan.uses, aliases: scan.aliases, macro_use: scan.macro_use, mods: scan.mods, mod_items: scan.mod_items })
+}
+
+/// What a scan reads besides the file's modules.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum ScanSurface {
+    Modules,
+    Imports,
+    /// imports and macro definitions, running the hosted item macros that can define them
+    Macros,
 }
 
 fn scan_tokens(path: &str, dir: &str, mpath: &str, krate: &str, edition: u16, cfg: &CfgSet, src_len: usize,
-    src: ScanBytes, toks: Vec<Tok>, context: &crate::source_context::Context, macro_surface: bool,
+    src: ScanBytes, toks: Vec<Tok>, context: &crate::source_context::Context, surface: ScanSurface,
 ) -> Option<Scanned> {
     let mut defs = Vec::new();
     let mut children = Vec::new();
@@ -1132,7 +1167,7 @@ fn scan_tokens(path: &str, dir: &str, mpath: &str, krate: &str, edition: u16, cf
                     };
                     // Demand discovery extracts module bindings in Names::scan;
                     // it never consumes this macro prescan's imports or aliases.
-                    if !macro_surface { i = j + 1; continue; }
+                    if surface == ScanSurface::Modules { i = j + 1; continue; }
                     let attrs = decl_attrs(&src, &toks, i, cfg);
                     // its bindings, for the module (an import in a fn body is block-scoped in
                     // rustc; macro calls inside that body see it -- the module's lookups also do
@@ -1180,7 +1215,7 @@ fn scan_tokens(path: &str, dir: &str, mpath: &str, krate: &str, edition: u16, cf
                 }
                 // `#[macro_use] extern crate dep;`: dep's exported macros in scope (rustc's
                 // macro_use prelude)
-                T::KwExtern if macro_surface && i + 2 < toks.len() && toks[i + 1].kind == T::KwCrate && matches!(toks[i + 2].kind, T::Ident | T::RawIdent | T::KwSelfValue) => {
+                T::KwExtern if surface != ScanSurface::Modules && i + 2 < toks.len() && toks[i + 1].kind == T::KwCrate && matches!(toks[i + 2].kind, T::Ident | T::RawIdent | T::KwSelfValue) => {
                     let attrs = decl_attrs(&src, &toks, i, cfg);
                     let n = String::from_utf8_lossy(text(i + 2)).trim_start_matches("r#").to_string();
                     if attrs.active && dirs.last().map_or(true, |l| l.3) {
@@ -1266,7 +1301,7 @@ fn scan_tokens(path: &str, dir: &str, mpath: &str, krate: &str, edition: u16, cf
                     while close < toks.len() && toks[close].kind != T::CloseParen {
                         close += 1;
                     }
-                    if close < toks.len() && macro_surface && decl_attrs(&src, &toks, i, cfg).active {
+                    if close < toks.len() && surface == ScanSurface::Macros && decl_attrs(&src, &toks, i, cfg).active {
                         let arg = &src[toks[i + 2].hi as usize..toks[close].lo as usize];
                         defs.extend(crate::builtins::prescan_defs(cfg, &String::from_utf8_lossy(text(i)), arg, krate));
                     }
@@ -1292,7 +1327,7 @@ fn scan_tokens(path: &str, dir: &str, mpath: &str, krate: &str, edition: u16, cf
                     }
                     // The demand outline only needs the definition's tokens.
                     // Building matcher trees here duplicates the real preload.
-                    if !macro_surface { i = close + 1; continue; }
+                    if surface != ScanSurface::Macros { i = close + 1; continue; }
                     // A cfg-false definition must never reach either textual scope or
                     // the crate-root export table, including inside an inactive module.
                     let attrs = decl_attrs(&src, &toks, i, cfg);
@@ -1542,20 +1577,7 @@ pub fn check_macros(prog: &mut crate::program::Program, krate: u32, files: &[(u3
             table.macro_use.entry(name.clone()).or_default().extend(scan.macro_use);
             mods.mods.extend(scan.mods);
             mods.items.extend(scan.mod_items);
-            for u in scan.uses {
-                if let Some(b) = &u.bind {
-                    if u.path.last() != Some(b) { mods.renames.insert(b.clone()); }
-                    if u.module == name {
-                        if u.path.len() == 1 && u.path[0] == "crate" {
-                            mods.externs.insert(b.clone(), name.clone());
-                        } else if u.path.len() == 2 && u.path[0].is_empty() {
-                            let target = mods.externs.get(&u.path[1]).cloned().unwrap_or_else(|| u.path[1].clone());
-                            mods.externs.insert(b.clone(), target);
-                        }
-                    }
-                }
-                mods.uses.entry(u.module.clone()).or_default().push(u);
-            }
+            for u in scan.uses { mods.add_use(u); }
         }
         table.add_crate(name.clone(), std::sync::Arc::new(mods));
         reached.push((k, reachable));

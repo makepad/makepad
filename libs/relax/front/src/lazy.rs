@@ -465,7 +465,7 @@ impl Plan {
                             let dir = directories.get(path).cloned().unwrap_or_else(|| crate::program::dir_of(path).into());
                             let _profile = crate::load_profile::span(profile, "rust-demand-outline-scan", path);
                             if let Some(expanded) = scan_tokens(path, &dir, module, &c.name, c.edition, &c.cfg, scan.src_len,
-                                expanded_src, surface.toks, &contexts[*ci], false) { *scan = expanded; }
+                                expanded_src, surface.toks, &contexts[*ci], ScanSurface::Modules) { *scan = expanded; }
                         }
                         let mut chain = chains.get(&(path.clone(), module.clone())).cloned().unwrap_or_default();
                         chain.push(path.clone());
@@ -1104,20 +1104,7 @@ fn crate_modules(c: &PreCrate, scans: &[part::Scan]) -> crate::macros::CrateMods
         }
         modules.mods.extend(scan.mods.iter().cloned());
         modules.items.extend(scan.mod_items.iter().cloned());
-        for u in &scan.uses {
-            if let Some(bind) = &u.bind {
-                if u.path.last() != Some(bind) { modules.renames.insert(bind.clone()); }
-                if u.module == c.name {
-                    if u.path == ["crate"] {
-                        modules.externs.insert(bind.clone(), c.name.clone());
-                    } else if u.path.len() == 2 && u.path[0].is_empty() {
-                        let target = modules.externs.get(&u.path[1]).cloned().unwrap_or_else(|| u.path[1].clone());
-                        modules.externs.insert(bind.clone(), target);
-                    }
-                }
-            }
-            modules.uses.entry(u.module.clone()).or_default().push(u.clone());
-        }
+        for u in &scan.uses { modules.add_use(u.clone()); }
     }
     modules
 }

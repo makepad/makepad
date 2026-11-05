@@ -145,7 +145,7 @@ if "%~1"=="" set "ASK=1"
 if not exist "%SRC%\.built" set "ASK=1"
 if defined ASK curl.exe -fsS --proto %SVCPROTO% -m 60 "%SERVICE%/public/app/runner/latest" -o "%RUNNER%" 2>>"%LOGS%\download.log"
 set "REL=" & set "VERSION=" & set "ZIPNAME=" & set "ZIPBYTES=" & set "ZIPSHA="
-if exist "%RUNNER%" for /f "tokens=1-5" %%A in ('powershell -NoProfile -Command "$j = Get-Content -Raw -LiteralPath $env:RUNNER | ConvertFrom-Json; if ($j.release -cmatch '^[A-Za-z0-9_-]+$' -and $j.loader.name -cmatch '^[A-Za-z0-9_-]([A-Za-z0-9_.-]*[A-Za-z0-9_-])?$' -and $j.loader.bytes -cmatch '^[0-9]+$' -and $j.loader.sha256 -cmatch '^[0-9a-f]{64}$' -and -not ($j.repositories | Where-Object { $_.name -cnotmatch '^[A-Za-z0-9_-]+$' -or $_.path -cnotmatch '^[A-Za-z0-9_/-]+$' -or $_.commit -cnotmatch '^([0-9a-f]{40})?$' })) { '{0} {1} {2} {3} {4}' -f $j.release, $j.loader.sha256, $j.loader.name, $j.loader.bytes, $j.loader.sha256 }"') do (
+if exist "%RUNNER%" for /f "tokens=1-5" %%A in ('powershell -NoProfile -Command "$j = Get-Content -Raw -LiteralPath $env:RUNNER | ConvertFrom-Json; if ($j.release -cmatch '\A[A-Za-z0-9_-]+\z' -and $j.loader.name -cmatch '\A[A-Za-z0-9_-]([A-Za-z0-9_.-]*[A-Za-z0-9_-])?\z' -and $j.loader.bytes -cmatch '\A[0-9]+\z' -and $j.loader.sha256 -cmatch '\A[0-9a-f]{64}\z' -and -not ($j.repositories | Where-Object { $_.name -cnotmatch '\A[A-Za-z0-9_-]+\z' -or $_.path -cnotmatch '\A[A-Za-z0-9_/-]+\z' -or $_.commit -cnotmatch '\A([0-9a-f]{40})?\z' })) { '{0} {1} {2} {3} {4}' -f $j.release, $j.loader.sha256, $j.loader.name, $j.loader.bytes, $j.loader.sha256 }"') do (
     set "REL=%%A" & set "VERSION=%%B" & set "ZIPNAME=%%C" & set "ZIPBYTES=%%D" & set "ZIPSHA=%%E"
 )
 rem What a release names ends up in paths and URLs: anything makepad.sh would not take is no release.
@@ -174,16 +174,19 @@ if not "!HAVE_VERSION!"=="!VERSION!" if not "!HAVE_LOADER_SHA!"=="!VERSION!" (
         if exist "%SRC%" rmdir /s /q "%SRC%"
         move "%CACHE%\loader\.unpack\%REL%" "%SRC%" >nul || exit /b 1
     ) else (
-        rem an update: changed files replaced (with the time of now, so cargo sees them as changed),
-        rem files the new version no longer has removed, the rest (and target\) left as they are
+        rem an update: files and folders the new version no longer has removed first (deepest first),
+        rem so a name that went from file to folder or back is free; then changed files replaced
+        rem (with the time of now, so cargo sees them as changed); the rest (and target\) left as they are
         echo   Makepad's loader: updating its source to %VERSION:~0,10%
         powershell -NoProfile -Command ^
             "$ErrorActionPreference = 'Stop'; $new = Join-Path $env:CACHE ('loader\.unpack\' + $env:REL); $src = $env:SRC; $now = Get-Date; $keep = @{};" ^
-            "foreach ($f in Get-ChildItem -LiteralPath $new -Recurse -File) { $rel = $f.FullName.Substring($new.Length + 1); $keep[$rel] = 1; $dst = Join-Path $src $rel;" ^
+            "foreach ($f in Get-ChildItem -LiteralPath $new -Recurse) { $keep[$f.FullName.Substring($new.Length + 1)] = $f.PSIsContainer };" ^
+            "$gone = Get-ChildItem -LiteralPath $src -Recurse | Where-Object { $rel = $_.FullName.Substring($src.Length + 1);" ^
+            "  $rel -ne 'target' -and -not $rel.StartsWith('target\') -and $rel -ne '.version' -and $rel -ne '.built' -and $rel -ne '.loader-sha256' -and $keep[$rel] -ne $_.PSIsContainer };" ^
+            "foreach ($f in $gone | Sort-Object { $_.FullName.Length } -Descending) { Remove-Item -Recurse -Force -LiteralPath $f.FullName };" ^
+            "foreach ($f in Get-ChildItem -LiteralPath $new -Recurse -File) { $dst = Join-Path $src $f.FullName.Substring($new.Length + 1);" ^
             "  if (-not (Test-Path -LiteralPath $dst) -or (Get-FileHash -LiteralPath $f.FullName).Hash -ne (Get-FileHash -LiteralPath $dst).Hash) {" ^
-            "    New-Item -ItemType Directory -Force -Path (Split-Path $dst) | Out-Null; Move-Item -Force -LiteralPath $f.FullName -Destination $dst; (Get-Item -LiteralPath $dst).LastWriteTime = $now } };" ^
-            "foreach ($f in Get-ChildItem -LiteralPath $src -Recurse -File) { $rel = $f.FullName.Substring($src.Length + 1);" ^
-            "  if (-not $rel.StartsWith('target\') -and $rel -ne '.version' -and $rel -ne '.built' -and $rel -ne '.loader-sha256' -and -not $keep.ContainsKey($rel)) { Remove-Item -Force -LiteralPath $f.FullName } }" ^
+            "    New-Item -ItemType Directory -Force -Path (Split-Path $dst) | Out-Null; Move-Item -Force -LiteralPath $f.FullName -Destination $dst; (Get-Item -LiteralPath $dst).LastWriteTime = $now } }" ^
             || (echo   Could not update the loader's source in !SRC!. & exit /b 1)
     )
     >"!SRC!\.version.part" echo !VERSION!|| exit /b 1

@@ -1,0 +1,2 @@
+# a std macro under a name only the edit's import gives it
+v1 patch|reinst

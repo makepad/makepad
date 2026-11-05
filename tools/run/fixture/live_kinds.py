@@ -26,6 +26,7 @@ import json, os, shutil, subprocess, sys, tempfile, threading, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PKG = os.path.join(HERE, "live_kinds")
+ROOT = os.path.abspath(os.path.join(HERE, "../../.."))
 args = sys.argv[1:]
 def opt(name, default):
     return args[args.index(name) + 1] if name in args else default
@@ -268,11 +269,20 @@ def run_kind(slot, kind):
     if os.path.isdir(pkg):
         shutil.rmtree(pkg)
     shutil.copytree(PKG, pkg)
-    # The copied fixture's optional native window uses this checkout's widgets.
+    # The copied fixture's optional native window uses this checkout's widgets, and the workspace's
+    # [patch.crates-io] (third-party crates carried in libs/): the copy is a workspace of its own,
+    # and without them its window's dependencies would be looked up in the registry (nodes run offline).
     manifest = os.path.join(pkg, "Cargo.toml")
-    widgets = os.path.relpath(os.path.abspath(os.path.join(HERE, "../../../widgets")), pkg)
-    text = open(manifest).read().replace('"../../../../widgets"', json.dumps(widgets))
-    open(manifest, "w").write(text)
+    text = open(manifest).read().replace('"../../../../widgets"', json.dumps(os.path.relpath(os.path.join(ROOT, "widgets"), pkg)))
+    patch, on = [], False
+    for line in open(os.path.join(ROOT, "Cargo.toml")):
+        if line.startswith("["):
+            on = line.strip() == "[patch.crates-io]"
+        elif on and 'path = "' in line:
+            crate, rest = line.split("=", 1)
+            path = rest.split('path = "', 1)[1].split('"', 1)[0]
+            patch.append("%s = { path = %s }" % (crate.strip(), json.dumps(os.path.relpath(os.path.join(ROOT, path), pkg))))
+    open(manifest, "w").write(text + "\n[patch.crates-io]\n" + "\n".join(patch) + "\n")
     ready = os.path.join(work, "ready")
     if os.path.exists(ready):
         os.remove(ready)
@@ -414,7 +424,11 @@ def run_kind(slot, kind):
     p.wait()
     return res
 
-root = tempfile.mkdtemp(prefix="live-kinds-")
+# The copies live under the workspace: cargo reads .cargo/config.toml from the folder it runs in. In
+# a copy outside it, each `cargo run` built makepad without the workspace's rustflags and an inspect
+# from here built it with them, past inspect's limit: the restart rows read as no effect on a new tree.
+os.makedirs(os.path.join(ROOT, "target"), exist_ok=True)
+root = tempfile.mkdtemp(prefix="live-kinds-", dir=os.path.join(ROOT, "target"))
 filled = set()
 results = [None] * len(KINDS)
 lock = threading.Lock()
@@ -452,4 +466,5 @@ warm = subprocess.run([sys.executable, "libs/relax/compiler/tests/live_closure_o
 print(warm.stdout[-3000:], flush=True)
 consts = subprocess.run([sys.executable, "libs/relax/compiler/tests/cache_warm_const_edit/run.py", "--makepad", binary], capture_output=True, text=True)
 print(consts.stdout[-3000:], flush=True)
+shutil.rmtree(root, ignore_errors=True)
 sys.exit(0 if landed == len(results) and warm.returncode == 0 and consts.returncode == 0 else 1)

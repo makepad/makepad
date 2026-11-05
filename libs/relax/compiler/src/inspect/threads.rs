@@ -1217,8 +1217,10 @@ mod tests {
 
 /// A program thread's walk crosses the program stack's switch (relax_base::stack): a thread
 /// parked on a program stack shows the function that switched to it, which runs on the thread's
-/// own stack. Host frames only (no JIT here): the module's unwind tables, both sides.
-#[cfg(all(test, target_arch = "x86_64", any(target_os = "linux", windows)))]
+/// own stack. Host frames only (no JIT here): the module's unwind tables, both sides. So only in a
+/// rustc build: under the JIT these frames are JIT code, which no loaded module's CFI covers, and
+/// the walk rightly stops at its first frame and says why.
+#[cfg(all(test, not(relax), target_arch = "x86_64", any(target_os = "linux", windows)))]
 mod switch_tests {
     use super::{capture, list, Raw};
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::{Acquire, Release}};

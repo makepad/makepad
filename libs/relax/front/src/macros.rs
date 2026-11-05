@@ -134,7 +134,7 @@ pub fn local_inner_macros(d: &mut MacroDef) {
 /// as `module_path!` prints it, `krate::a::b`), the path `path` (first segment as written:
 /// `crate`, `self`, `super`, `$crate` as `__relax_crate_<name>`, `""` for a leading `::`) is
 /// bound under `bind`, or glob-imported (`bind` None). `extern crate x as y` is `["", x]` as `y`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct UseItem {
     pub module: String,
     pub path: Vec<String>,
@@ -178,7 +178,88 @@ pub struct CrateMods {
     pub scope: std::sync::OnceLock<CrateScope>,
 }
 
+/// A file's imports as the prescan reads them: what it gives its crate's macro path resolution.
+#[derive(Clone, Debug, Default)]
+pub struct FileImports {
+    pub uses: Vec<UseItem>,
+    /// (alias, first path segment, original name): MacroTable::aliases
+    pub aliases: Vec<(String, String, String)>,
+    pub macro_use: Vec<String>,
+    pub mods: Vec<String>,
+    pub mod_items: Vec<(String, ModItem)>,
+}
+
+impl FileImports {
+    /// The same imports (`mod` items only move with the text around them).
+    pub fn same_as(&self, other: &FileImports) -> bool {
+        let items = |f: &'_ FileImports| f.mod_items.iter().map(|(m, i)| (m.clone(), i.macro_use)).collect::<Vec<_>>();
+        self.uses == other.uses && self.aliases == other.aliases && self.macro_use == other.macro_use && self.mods == other.mods && items(self) == items(other)
+    }
+}
+
+/// A live edit that changed a file's imports. rustc resolves macro paths with the same imports as
+/// items; the crate's copy of them was read at load, and no load runs for an edit.
+#[derive(Clone, Debug)]
+pub struct ImportEdit {
+    pub krate: String,
+    /// the crate's root file (CrateMods::src): a package's lib and bin share the name
+    pub root: String,
+    pub was: FileImports,
+    pub now: FileImports,
+}
+
+impl ImportEdit {
+    /// What takes a refused or rolled-back edit's imports out again.
+    pub fn undone(self) -> ImportEdit {
+        ImportEdit { krate: self.krate, root: self.root, was: self.now, now: self.was }
+    }
+}
+
 impl CrateMods {
+    /// One scanned `use` / `extern crate` binding joins the crate.
+    pub fn add_use(&mut self, u: UseItem) {
+        if let Some(b) = &u.bind {
+            if u.path.last() != Some(b) { self.renames.insert(b.clone()); }
+            if u.module == self.root {
+                if u.path.len() == 1 && u.path[0] == "crate" {
+                    self.externs.insert(b.clone(), self.root.clone());
+                } else if u.path.len() == 2 && u.path[0].is_empty() {
+                    let target = self.externs.get(&u.path[1]).cloned().unwrap_or_else(|| u.path[1].clone());
+                    self.externs.insert(b.clone(), target);
+                }
+            }
+        }
+        self.uses.entry(u.module.clone()).or_default().push(u);
+    }
+
+    /// A copy whose scopes are computed afresh on next use.
+    fn unresolved(&self) -> CrateMods {
+        CrateMods { root: self.root.clone(), src: self.src.clone(), mods: self.mods.clone(), items: self.items.clone(), uses: self.uses.clone(),
+            externs: self.externs.clone(), renames: self.renames.clone(), recursion_limit: self.recursion_limit, scope: Default::default() }
+    }
+
+    fn replace_imports(&mut self, e: &ImportEdit) {
+        for u in &e.was.uses {
+            if let Some(v) = self.uses.get_mut(&u.module) { v.retain(|x| x != u); }
+            // `extern crate x as y;` at the root named `y`; a dependency's own name stays
+            let names_a_crate = u.path.len() == 1 && u.path[0] == "crate" || u.path.len() == 2 && u.path[0].is_empty();
+            if let (true, Some(b)) = (u.module == self.root && names_a_crate && u.path.last() != u.bind.as_ref(), &u.bind) {
+                if !e.now.uses.iter().any(|n| n.module == u.module && n.bind.as_ref() == Some(b)) { self.externs.remove(b); }
+            }
+        }
+        for u in &e.now.uses {
+            if !self.uses.get(&u.module).is_some_and(|v| v.contains(u)) { self.add_use(u.clone()); }
+        }
+        for m in &e.was.mods {
+            if !e.now.mods.contains(m) { self.mods.remove(m); }
+        }
+        self.mods.extend(e.now.mods.iter().cloned());
+        for (m, _) in &e.was.mod_items {
+            if !e.now.mod_items.iter().any(|(n, _)| n == m) { self.items.remove(m); }
+        }
+        self.items.extend(e.now.mod_items.iter().cloned());
+    }
+
     /// Is the `macro_rules!` `d` of this crate in rustc's legacy (textual) scope in module `from`
     /// at source position `at` (None: at any position of it)? A definition is in scope after it
     /// in its module and in the modules declared after it inside that module; it leaves its module
@@ -677,6 +758,41 @@ impl MacroTable {
         self.expansion_snapshot.aliases.get_mut().unwrap().clear();
     }
 
+    /// `e`'s file has its new imports. Every crate's scopes are computed afresh on next use: a
+    /// `pub use` chains into the crates that glob or name it (rustc_resolve's import fixpoint
+    /// covers them all).
+    pub fn apply_import_edit(&mut self, e: &ImportEdit) {
+        let contexts: Vec<String> = self.crates.iter().filter(|(_, c)| c.src == e.root).map(|(k, _)| k.clone()).collect();
+        for k in contexts {
+            let mut cm = self.crates[&k].unresolved();
+            cm.replace_imports(e);
+            self.add_crate(k, std::sync::Arc::new(cm));
+        }
+        // An alias map is per crate: another file's import can hold the same one.
+        for (alias, qual, target) in &e.was.aliases {
+            let bound = self.crates.values().filter(|c| c.root == e.krate).flat_map(|c| c.uses.values().flatten())
+                .any(|u| u.bind.as_ref() == Some(alias) && u.path.last() == Some(target));
+            if !bound && self.alias(&e.krate, alias).is_some_and(|(q, t)| q == qual && t == target) {
+                if let Some(map) = self.aliases.get_mut(&e.krate) { std::sync::Arc::make_mut(map).remove(alias); }
+            }
+        }
+        for (alias, qual, target) in &e.now.aliases {
+            self.add_alias(e.krate.clone(), alias.clone(), (qual.clone(), target.clone()));
+        }
+        let macro_use = self.macro_use.entry(e.krate.clone()).or_default();
+        macro_use.retain(|m| !e.was.macro_use.contains(m));
+        macro_use.extend(e.now.macro_use.iter().cloned());
+        self.forget_scopes();
+    }
+
+    fn forget_scopes(&mut self) {
+        let computed: Vec<String> = self.crates.iter().filter(|(_, c)| c.scope.get().is_some()).map(|(n, _)| n.clone()).collect();
+        for n in computed {
+            let fresh = self.crates[&n].unresolved();
+            self.crates.insert(n, std::sync::Arc::new(fresh));
+        }
+    }
+
     /// Crate `k` is loaded: the imports its macro expansions wrote (`exp_uses`: derive output's
     /// `use Base as alias;`, `pub use self::m::ancestry as Name;`) join its prescanned ones, with
     /// the modules they sit in, so the crates loaded after it resolve macro paths through them
@@ -743,8 +859,7 @@ impl MacroTable {
         // lookups) copied this crate's names as they were: computed afresh on next use
         let stale: Vec<String> = self.crates.iter().filter(|(n, c)| !self.sealed.contains(n.as_str()) && c.scope.get().is_some()).map(|(n, _)| n.clone()).collect();
         for n in stale {
-            let c = self.crates[&n].clone();
-            let fresh = CrateMods { root: c.root.clone(), src: c.src.clone(), mods: c.mods.clone(), items: c.items.clone(), uses: c.uses.clone(), externs: c.externs.clone(), renames: c.renames.clone(), recursion_limit: c.recursion_limit, scope: Default::default() };
+            let fresh = self.crates[&n].unresolved();
             self.crates.insert(n, std::sync::Arc::new(fresh));
         }
     }
@@ -2357,7 +2472,7 @@ fn parse_matcher(toks: &[MTok], edition: u16) -> Result<Vec<MNode>, String> {
                 let (lo, hi, sep, op, next) = rep_at(toks, i).ok_or("bad repetition in macro matcher")?;
                 let inner = parse_matcher(&toks[lo..hi], edition)?;
                 // mbe/macro_rules.rs check_lhs_no_empty_seq: a repetition without separator must not match nothing
-                if sep.is_none() && crate::lexer::validation_enabled()
+                if sep.is_none()
                     && inner.iter().all(|n| matches!(n, MNode::Var(_, Frag::Vis) | MNode::Rep(_, _, b'*' | b'?'))) {
                     return Err("repetition matches empty token tree".to_string());
                 }
@@ -2372,7 +2487,7 @@ fn parse_matcher(toks: &[MTok], edition: u16) -> Result<Vec<MNode>, String> {
                     i += 4;
                     continue;
                 }
-                if matches!(n.kind, T::Ident | T::RawIdent) && crate::lexer::validation_enabled() {
+                if matches!(n.kind, T::Ident | T::RawIdent) {
                     return Err(format!("missing fragment specifier for `${}`", n.text));
                 }
             }

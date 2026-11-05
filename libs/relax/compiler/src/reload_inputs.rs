@@ -196,6 +196,7 @@ impl Inputs {
             let Some(exe) = super::host::loader() else { return Vec::new() };
             let built = std::fs::metadata(&exe).and_then(|m| m.modified()).ok();
             let target = super::host::target_dir(&exe);
+            let picked = exe.file_name().is_some_and(|n| n.to_string_lossy().starts_with("makepad.jit-"));
             let Ok(text) = std::fs::read_to_string(exe.with_extension("d")) else { return Vec::new() };
             let mut out = Vec::new();
             for path in dep_info_paths(&text) {
@@ -203,7 +204,11 @@ impl Inputs {
                 // the devhub linked into the binary (its CLI) is no part of a running app: no
                 // "Update ready" on every app for a devhub landing
                 if path.contains("/libs/devhub/") { continue; }
-                let stamp = super::stamp(&path).filter(|s| built.is_none_or(|b| s.0 <= b));
+                // a file newer than this binary: an edit it was built before, so its first look
+                // says changed. Not for a binary picked by the content of its inputs: there the
+                // time only says a checkout rewrote the file (CI flips a tree between pins, and
+                // every leg offered a restart for sources its JIT was built from)
+                let stamp = super::stamp(&path).filter(|s| picked || built.is_none_or(|b| s.0 <= b));
                 out.push((path, stamp));
             }
             out

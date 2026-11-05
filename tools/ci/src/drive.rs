@@ -17,12 +17,17 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// How long the last grabs of a close may take; the 10 s for the exit start after them.
+const LAST_GRAB: Duration = Duration::from_secs(60);
+
 struct AppHandle {
     child: ChildLog,
     remote: Option<Remote>,
     interrupted: bool,
     closed: bool,
     name: String,
+    /// Where the log stood when the app finished starting up.
+    started_at: usize,
 }
 /// An app a launched app hosts (a WM's windows), found among its descendants: the launched app
 /// owns it, so it is never quit from here.
@@ -212,6 +217,7 @@ impl Runtime {
             interrupted: false,
             closed: false,
             name: name,
+            started_at: 0,
         });
         let deadline = Instant::now() + Duration::from_secs(60);
         loop {
@@ -267,6 +273,7 @@ impl Runtime {
             }
             self.run.control.sleep(0.2)?;
         }
+        self.apps[index].started_at = self.apps[index].child.text.len();
         let activity = self.request_json(index, &argv(&["activity"]), false)?;
         let seq = activity
             .get("user_seq")
@@ -309,6 +316,15 @@ impl Runtime {
         let mut lines = Vec::new();
         collect_log(&v, &mut lines);
         Ok(lines.join("\n"))
+    }
+    /// A warning, never a failure, and it only reads what is already captured.
+    fn flag_idle_drawing(&mut self, i: usize) -> Result<()> {
+        self.drain_app(i)?;
+        let app = &self.apps[i];
+        if let Some(warning) = idle_drawing(&app.child.text[app.started_at..]) {
+            self.warning = warning;
+        }
+        Ok(())
     }
     fn no_errors(&mut self, i: usize) -> Result<()> {
         if !self.alive(i)? {
@@ -398,6 +414,10 @@ impl Runtime {
             self.apps[i].closed = true;
             return Ok(());
         }
+        // A grab that never finishes must not keep the quit from going out.
+        if let Some(remote) = &self.apps[i].remote {
+            remote.client.set_timeout(Some(LAST_GRAB));
+        }
         // A failed launch can have an endpoint but not yet have pinned ownership.
         if self.apps[i]
             .remote
@@ -449,7 +469,11 @@ impl Runtime {
             self.run.log(&format!(
                 "killed exact owned pid={pid} after graceful shutdown timeout"
             ));
-            error = Some(format!("pid={pid} required forced cleanup"));
+            let forced = format!("pid={pid} required forced cleanup");
+            error = Some(match error {
+                Some(e) => format!("{e}; {forced}"),
+                None => forced,
+            });
         }
         self.apps[i].child.child.wait().map_err(|e| e.to_string())?;
         let run = &mut self.run;
@@ -1188,6 +1212,17 @@ fn app_object(vm: &mut ScriptVm, index: usize) -> ScriptValue {
         };
         result(vm, r)
     });
+    vm.add_method(obj, id_lut!(flag_idle_drawing), script_args!(), move |vm, _| {
+        if !allow(vm) {
+            return NIL;
+        }
+        let r = if rt(vm).validate {
+            Ok(Value::Null)
+        } else {
+            rt(vm).flag_idle_drawing(index).map(|_| Value::Null)
+        };
+        result(vm, r)
+    });
     vm.add_method(obj, id_lut!(alive), script_args!(), move |vm, _| {
         if !allow(vm) {
             return NIL;
@@ -1577,6 +1612,39 @@ fn log_has(log: &str, text: &str) -> bool {
             None => false,
         })
     })
+}
+
+/// The last two `[frame-sources]` readings (`MAKEPAD_FRAME_TRACE`) of an app
+/// nobody is touching, when both are a rate only something animating needs.
+/// A quiet app prints none, and a gap shows as a long reading at a low rate.
+fn idle_drawing(log: &str) -> Option<String> {
+    let mut rates = log.lines().rev().filter_map(|line| {
+        let reading = line.trim_start().strip_prefix("[frame-sources] ")?;
+        let (seconds, counts) = reading.split_once("s beats=")?;
+        let beats: f64 = counts.split(' ').next()?.parse().ok()?;
+        Some(beats / seconds.parse::<f64>().ok()?)
+    });
+    let (last, before) = (rates.next()?, rates.next()?);
+    (last >= IDLE_FRAMES_PER_S && before >= IDLE_FRAMES_PER_S).then(|| {
+        format!("keeps drawing untouched: {before:.0}, then {last:.0} frames/s ([frame-sources] in the log says who asks). An app that animates on purpose carries its own ci.splash.")
+    })
+}
+const IDLE_FRAMES_PER_S: f64 = 30.0;
+
+#[cfg(test)]
+mod idle_drawing_tests {
+    use super::idle_drawing;
+
+    #[test]
+    fn only_two_full_seconds_in_a_row_at_the_end_are_flagged() {
+        let busy = "[frame-sources] 1.00s beats=60 next_frame=60 redraw=2 timer_fire=0 timer_start=0 signal=0 lists=2 items=9\n    60 next_frame  a.rs:1\n";
+        let gap = "[frame-sources] 7.50s beats=2 next_frame=1 redraw=1 timer_fire=0 timer_start=0 signal=0 lists=1 items=1\n";
+        assert!(idle_drawing("").is_none(), "a quiet app prints nothing");
+        assert!(idle_drawing(busy).is_none(), "one second may be starting up");
+        assert!(idle_drawing(&format!("{busy}{busy}")).is_some());
+        assert!(idle_drawing(&format!("{busy}{busy}{gap}")).is_none(), "it went quiet");
+        assert!(idle_drawing(&format!("{busy}{gap}{busy}")).is_none());
+    }
 }
 
 #[cfg(test)]

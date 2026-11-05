@@ -138,7 +138,7 @@ impl BudgetJob {
             children.retain(|child| child.strong_count() != 0);
             children.push(Arc::downgrade(&job));
         }
-        let p = budget::admit_following(&job.desired, budget::JIT, label);
+        let p = budget::admit_following(job.desired.as_ptr(), budget::JIT, label);
         {
             let mut permit = job.permit.lock().unwrap_or_else(|e| e.into_inner());
             budget::reclass(p, job.class());
@@ -175,7 +175,7 @@ pub fn checkpoint(extra_locks: u32, extra_site: &str) {
     if let Some(p) = permit {
         budget::reclass(p, job.class());
         let site = if extra_locks != 0 { extra_site.to_owned() } else { site.map_or_else(String::new, |s| format!("{}:{}", s.file(), s.line())) };
-        let p = budget::checkpoint_following(p, held, &site, &job.desired);
+        let p = budget::checkpoint_following(p, held, &site, job.desired.as_ptr());
         let mut slot = job.permit.lock().unwrap_or_else(|e| e.into_inner());
         budget::reclass(p, job.class());
         budget::set_thread_class(job.class());
@@ -189,17 +189,26 @@ pub fn checkpoint(extra_locks: u32, extra_site: &str) {
 /// comes back without a wait.
 pub struct BudgetWait { job: Option<Arc<JobClass>>, lent: bool }
 /// The token of the job the owner serves, back in the budget meanwhile (see `lend_served`).
-pub struct LentJob(Option<u32>);
+pub struct LentJob(Option<(Arc<JobClass>, u32)>);
 /// The owner is about to wait for a build for the job it serves: the job sleeps, and with one token
-/// in the machine that build could get no other. The owner never waits to take it back.
+/// in the machine that build could get no other. The permit moves out of the job, as at a checkpoint:
+/// its thread suspending at the same moment (a `Program` request) finds none to give up, and if it
+/// gave it up first there is none to lend. The owner never waits to take it back.
 pub fn lend_served() -> LentJob {
-    let permit = current_job().and_then(|job| *job.permit.lock().unwrap_or_else(|e| e.into_inner()));
-    if let Some(permit) = permit { budget::lend_permit(permit); }
-    LentJob(permit)
+    LentJob(current_job().and_then(|job| {
+        let permit = job.permit.lock().unwrap_or_else(|e| e.into_inner()).take()?;
+        budget::lend_permit(permit);
+        Some((job, permit))
+    }))
 }
 impl Drop for LentJob {
     fn drop(&mut self) {
-        if let Some(permit) = self.0 { budget::take_back_permit(permit); }
+        let Some((job, permit)) = self.0.take() else { return };
+        let mut slot = job.permit.lock().unwrap_or_else(|e| e.into_inner());
+        budget::take_back_permit(permit);
+        // (a reclass meanwhile found no permit)
+        budget::reclass(permit, job.class());
+        *slot = Some(permit);
     }
 }
 /// `suspend` for a wait a compile job sits out with its permit (its readmission could keep what the
@@ -225,7 +234,7 @@ impl Drop for BudgetWait {
         if self.lent { budget::take_back(); }
         if let Some(job) = &self.job {
             let _kept = zone_alloc::kept();
-            let p = budget::admit_following(&job.desired, budget::JIT, job.label);
+            let p = budget::admit_following(job.desired.as_ptr(), budget::JIT, job.label);
             let mut slot = job.permit.lock().unwrap_or_else(|e| e.into_inner());
             budget::reclass(p, job.class());
             budget::set_thread_class(job.class());
@@ -588,6 +597,36 @@ impl<'scope, T> ScopedJoinHandle<'scope, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// The owner lends the token of the job it serves while that job's thread may suspend at the same
+    /// moment (a `Program` request's `owner::wait`). Whichever comes first has the permit and the
+    /// other finds none: the row goes once, and comes back on who took it.
+    #[test]
+    fn a_served_job_lent_and_suspended_at_once_keeps_one_permit() {
+        const LABEL: &str = "lent and suspended";
+        let rows = || budget::tokens().holders.into_iter().filter(|h| h.label == LABEL).map(|h| h.lent).collect::<Vec<_>>();
+        let job = BudgetJob::from_permit(budget::admit(budget::VISIBLE, budget::JIT, LABEL), budget::VISIBLE, LABEL);
+        // the owner first: the requester has nothing to give up
+        let lent = lend_served();
+        assert_eq!(rows(), [true]);
+        let wait = suspend();
+        assert_eq!(rows(), [true], "the row is the owner's until it takes the token back");
+        drop(lent);
+        assert_eq!(rows(), [false]);
+        drop(wait);
+        assert_eq!(rows(), [false], "the requester gave up nothing, so nothing more comes back");
+        // the requester first: the owner has nothing to lend
+        let wait = suspend();
+        assert!(rows().is_empty());
+        let lent = lend_served();
+        assert!(rows().is_empty());
+        drop(lent);
+        assert!(rows().is_empty());
+        drop(wait);
+        assert_eq!(rows(), [false]);
+        drop(job);
+        assert!(rows().is_empty());
+    }
+
     use std::sync::atomic::AtomicU64;
 
     #[test]

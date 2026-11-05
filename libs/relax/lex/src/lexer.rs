@@ -423,30 +423,20 @@ pub fn keyword(s: &[u8], edition: u16) -> Option<T> {
     Some(k)
 }
 
-/// The diagnostic validation of the literals and identifiers of a written source file's tokens
-/// (rustc_parse's lexer cooking): `makepad check` only. Macro text lexed on the side is not held to it.
+/// The validation of the literals and identifiers of a written source file's tokens (rustc_parse's
+/// lexer cooking). Macro text lexed on the side is not held to it.
 pub fn validate_file(src: &[u8], toks: &[Tok], edition: u16) -> Result<(), LexError> {
-    if !crate::validate::enabled() {
-        return Ok(());
-    }
     crate::validate::validate(src, toks, edition).map_err(|(pos, msg)| LexError { pos, msg })
 }
 
-/// A number literal cooked by the parser outside the file validation (an expansion's): `makepad check` only.
+/// A number literal cooked by the parser outside the file validation (an expansion's).
 pub fn validate_number(text: &[u8], float: bool) -> Result<(), String> {
-    if !crate::validate::enabled() {
-        return Ok(());
-    }
     crate::validate::cooked_number(text, float)
 }
 
-pub fn validation_enabled() -> bool {
-    crate::validate::enabled()
-}
-
-/// Turns the diagnostic validation of literals and identifiers on (`makepad check`).
-pub fn set_validation(on: bool) {
-    crate::validate::set_enabled(on);
+/// A quoted literal cooked by the parser outside the file validation (an expansion's): its suffix.
+pub fn validate_quoted(text: &[u8]) -> Result<(), String> {
+    crate::validate::cooked_quoted(text)
 }
 
 pub fn lex(src: &[u8], edition: u16, out: &mut Vec<Tok>) -> Result<(), LexError> {

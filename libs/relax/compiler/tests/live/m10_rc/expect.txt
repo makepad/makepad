@@ -1,3 +1,4 @@
-# RefCell<T> is outside the app scope and embeds T by value: both edits must restart.
-v1 restart out=file note=embedded by value in `core::cell::RefCell<live::Item>` outside the app scope
-v2 restart out=file note=embedded by value in `core::cell::RefCell<live::Item>` outside the app scope
+# RefCell<T> is outside the app scope and embeds T by value: its layout stays, the added field
+# goes in the extension block, and both holders see the same value.
+v1 patch out=file note=field `done` added to `live::Item` (running values get its default)
+v2 patch out=file

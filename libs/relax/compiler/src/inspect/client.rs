@@ -5,10 +5,14 @@
 //!
 //! `all`: every running app, including ones started later: `watch` returns the first event of any
 //! of them; `events follow=1` streams all of them; other commands run on each in turn.
+//!
+//! An app name and `all` reach only what this caller started, or anything for someone at a
+//! terminal; other apps are named by pid ([`makepad_remote::discovery::Caller`]).
 
 use std::io::Write;
 
 pub use makepad_remote::discovery::App;
+use makepad_remote::discovery::{named, Caller};
 
 /// The running apps (discovery files `makepad-remote-<pid>.json`; stale ones of ended processes are removed).
 pub fn apps() -> Vec<App> {
@@ -16,8 +20,9 @@ pub fn apps() -> Vec<App> {
 }
 
 fn usage() -> i32 {
-    eprintln!("usage: makepad inspect <pid|app|all|list> <command> [args]   (makepad inspect <pid> help: the commands)");
-    eprintln!("       makepad inspect <host>:<app|pid> <command> | <host>:list | <host>:session <launch|kill> .. | hosts | all:list");
+    eprintln!("usage: makepad inspect <pid|list> <command> [args]   (makepad inspect <pid> help: the commands)");
+    eprintln!("       makepad inspect <app|all> <command> [args]   (at a terminal, or the apps of your own lease; anything else is named by pid)");
+    eprintln!("       makepad inspect <host>:<pid> <command> | <host>:list | <host>:session <launch|kill> .. | hosts | all:list");
     eprintln!("       makepad inspect <pid|app> pf <query> [s=3] [save=x.mkpf] | file=<x.mkpf> pf <query> [base=y.mkpf]   (pf help: the profiler queries)");
     2
 }
@@ -66,21 +71,29 @@ pub fn main(args: &[String]) -> i32 {
     let line = makepad_remote::app::typed_line(&args[1..]);
     let cmd = line.split_whitespace().next().unwrap_or("").to_string();
     let text = text_out;
-    if target == "all" {
-        return all(&line, &cmd, text);
-    }
+    let caller = Caller::command_line();
     let list = apps();
-    let chosen: Vec<&App> = match target.parse::<u32>() {
-        Ok(pid) => list.iter().filter(|a| a.answers_to(pid)).collect(),
-        Err(_) => list.iter().filter(|a| &a.app == target).collect(),
-    };
-    let app = match chosen.as_slice() {
-        [] => {
-            eprintln!("makepad inspect: no running app `{}` (running: {})", target, list.iter().map(|a| format!("{} {}", a.pid, a.app)).collect::<Vec<_>>().join(", "));
+    if target == "all" {
+        if let Some(why) = caller.all_refused(&list) {
+            eprintln!("makepad inspect: {why}");
             return 2;
         }
-        // the most recent of several with that name
-        many => many[many.len() - 1],
+        return all(&line, &cmd, text, &caller);
+    }
+    let chosen = match target.parse::<u32>() {
+        Ok(pid) => list.iter().rfind(|a| a.answers_to(pid)).cloned(),
+        Err(_) if list.iter().any(|a| &a.app == target) => match named(&list, target, &caller) {
+            Ok(a) => Some(a),
+            Err(why) => {
+                eprintln!("makepad inspect: {why}");
+                return 2;
+            }
+        },
+        Err(_) => None,
+    };
+    let Some(app) = &chosen else {
+        eprintln!("makepad inspect: no running app `{}` (running: {})", target, list.iter().map(|a| format!("{} {}", a.pid, a.app)).collect::<Vec<_>>().join(", "));
+        return 2;
     };
     if args.get(1).map(String::as_str) == Some("pf") {
         return super::pf::live_main(app, &args[2..]);
@@ -131,12 +144,12 @@ fn ask(app: &App, line: &str, each: &mut dyn FnMut(&str) -> bool) -> std::io::Re
     makepad_remote::app::run_line(&client, line, each).map_err(to_io)
 }
 
-/// `all`: every app now and every app that starts while this runs.
-fn all(line: &str, cmd: &str, text: bool) -> i32 {
+/// `all`: every app of `caller` now and every one that starts while this runs.
+fn all(line: &str, cmd: &str, text: bool, caller: &Caller) -> i32 {
     let streaming = cmd == "watch" || (cmd == "events" && line.contains("follow=1"));
     if !streaming {
         let mut code = 0;
-        for a in apps() {
+        for a in apps().into_iter().filter(|a| caller.reaches(a)) {
             if text {
                 println!("## {} (pid {})", a.app, a.pid);
             } else {
@@ -167,7 +180,7 @@ fn all(line: &str, cmd: &str, text: bool) -> i32 {
     let mut seen: Vec<u32> = Vec::new();
     let once = cmd == "watch";
     loop {
-        for a in apps() {
+        for a in apps().into_iter().filter(|a| caller.reaches(a)) {
             if seen.contains(&a.pid) {
                 continue;
             }

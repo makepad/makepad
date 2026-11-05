@@ -1,0 +1,8 @@
+# v1: the edit that imports the macro also calls it
+v1 patch|reinst
+# v2: a later edit of the file still has it
+v2 patch
+# v3: the import goes, the call stays
+v3 refuse note=logit
+# v4: the refused edit took nothing away
+v4 patch

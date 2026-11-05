@@ -48,6 +48,17 @@ const STARTUP: Duration = Duration::from_secs(300);
 /// first frames, with a floor): a leg shares its box, and elapsed time there says nothing of a
 /// boot that goes on (4 of 16 legs of one run read as hung, the 12 others took 16 to 55 s).
 const FIRST_FRAME: Duration = Duration::from_secs(60);
+/// From a close's quit request to the end of the app's exit work: its `makepad-run exit:` line, or
+/// for an app that prints none (not under the JIT) the process gone. The grab before it does not
+/// count: a slow frame of a big cold window is not a slow exit.
+const CLOSE_EXIT: Duration = Duration::from_secs(10);
+/// From that line to its process tree gone. No code of the app runs by then and a kill would not
+/// shorten it: the OS ends the process, in under a second with CPU free. A GPU driver's idle-priority
+/// threads have to get CPU to end, so with every core busy it takes seconds (56 s seen, a WM's several
+/// processes). A reported number; this limit is for a tree that never goes.
+const TREE_GONE: Duration = Duration::from_secs(120);
+/// A close's last frames: as for the first frame, an app that has none by then is hung.
+const LAST_GRAB: Duration = FIRST_FRAME;
 
 /// The lines of an app's output that fail it: panics (parked or not), JIT compile errors, fatal
 /// JIT errors, the app's own `[E]` errors.
@@ -181,6 +192,57 @@ impl Remote {
         }
         Ok(text)
     }
+
+    /// A frame of every window, as `gq` takes them. An answer other than a frame still lets the
+    /// close go on (the app has no picture to give); no answer within `limit` is a failure of its own.
+    fn last_grabs(&self, limit: Duration) -> std::result::Result<(), Failure> {
+        let end = Instant::now() + limit;
+        let ask = |words: &[String]| {
+            self.client.set_timeout(Some(end.saturating_duration_since(Instant::now())));
+            let answer = self.request(words, false)?;
+            if answer.starts_with("{\"err\":") && Instant::now() >= end {
+                return Err(Failure::Message(format!("the last grab did not finish in {} s: {}: {answer}", limit.as_secs(), words.join(" "))));
+            }
+            Ok(answer)
+        };
+        let status = ask(&argv(&["status"]))?;
+        for window in makepad_remote::app::drawn_window_ids(&status) {
+            ask(&argv(&["grab", &format!("w={window}")]))?;
+        }
+        Ok(())
+    }
+
+    /// The close: the last frames, then the quit; `steps` hears when the quit goes out. A grab
+    /// that fails does not keep the app from being asked to quit; a person using it does.
+    fn close(&mut self, grab_limit: Duration, steps: &std::sync::mpsc::Sender<CloseStep>) -> std::result::Result<(), Failure> {
+        if self.user_seq.is_none() {
+            self.client.set_timeout(Some(grab_limit));
+            let a = self.request(&argv(&["activity"]), false)?;
+            let a = json::parse_depth(a.as_bytes(), 64).map_err(|e| Failure::Message(e.to_string()))?;
+            let seq = a.get("user_seq").and_then(Value::as_u64).ok_or_else(|| Failure::Message("cleanup missing user_seq".into()))?;
+            self.user_seq = Some(seq);
+        }
+        let grab_failed = match self.last_grabs(grab_limit) {
+            Ok(()) => None,
+            Err(Failure::Message(e)) => Some(e),
+            Err(interrupted) => return Err(interrupted),
+        };
+        self.client.set_timeout(None);
+        let _ = steps.send(CloseStep::Quitting(grab_failed));
+        match self.request(&argv(&["quit"]), true) {
+            Err(Failure::Interrupted(e)) => Err(Failure::Interrupted(e)),
+            // the answer can go with the app: whether it ended is the process's to say
+            _ => Ok(()),
+        }
+    }
+}
+
+/// What a close's thread tells the leg.
+enum CloseStep {
+    /// The quit request goes out now; `Some`: why the grab before it failed.
+    Quitting(Option<String>),
+    /// The thread is done.
+    Done(std::result::Result<(), Failure>),
 }
 
 struct AppHandle {
@@ -191,6 +253,8 @@ struct AppHandle {
     interrupted: bool,
     closed: bool,
     name: String,
+    /// Where the log stood when the app finished starting up.
+    started_at: usize,
     report: PathBuf,
     /// the line of a parked panic ([`watch_parks`], which killed the app for it)
     parked: Arc<Mutex<Option<String>>>,
@@ -385,6 +449,10 @@ impl Runtime {
     }
 
     fn drain_app(&mut self, i: usize) -> Result<()> {
+        // (a launch that failed hands out this handle, and the script's next steps still run)
+        if i >= self.apps.len() {
+            return Err("no app: its launch failed".into());
+        }
         self.apps[i].child.drain()?;
         self.parked_panic(i)?;
         if self.apps[i].child.text.contains("[makepad-remote] user closed") || self.apps[i].child.text.contains("app exit: user closed") {
@@ -429,6 +497,8 @@ impl Runtime {
             .env("SANDBOX_MUTE", "1")
             .env("MAKEPAD_MUTE", "1")
             .env("MUSIC_MUTE", "1")
+            // a close's bound ends at the line this prints
+            .env("MAKEPAD_RUN_EXIT_TRACE", "1")
             .env_remove("MAKEPAD_FOCUS")
             .env_remove("MAKEPAD_LAN")
             // the smoke boots this tree: a WM it starts runs its apps from here, not from the
@@ -448,7 +518,7 @@ impl Runtime {
         let (parked, left) = (Arc::new(Mutex::new(None)), Arc::new(AtomicBool::new(false)));
         watch_parks(child.child.id(), File::open(&log).map_err(|e| e.to_string())?, parked.clone(), left.clone());
         if let Some(why) = &script_errors { self.run.log(&format!("{name}: its script errors do not fail it ({why})")); }
-        self.apps.push(AppHandle { run_pid: child.child.id(), child, remote: None, interrupted: false, closed: false, name: name.clone(), report, parked, left, script_errors, data });
+        self.apps.push(AppHandle { run_pid: child.child.id(), child, remote: None, interrupted: false, closed: false, name: name.clone(), started_at: 0, report, parked, left, script_errors, data });
         let deadline = Instant::now() + STARTUP;
         let socket = loop {
             self.drain_app(index)?;
@@ -576,6 +646,7 @@ impl Runtime {
             return Err("human active at startup; leaving app running".into());
         }
         self.settle(index)?;
+        self.apps[index].started_at = self.apps[index].child.text.len();
         Ok(index)
     }
 
@@ -642,6 +713,16 @@ impl Runtime {
     }
 
     /// No `[E]` line, panic or JIT compile error in the app's log and output, and alive.
+    /// A warning, never a failure, and it only reads what is already captured.
+    fn flag_idle_drawing(&mut self, i: usize) -> Result<()> {
+        self.drain_app(i)?;
+        let app = &self.apps[i];
+        if let Some(warning) = app.child.text.get(app.started_at..).and_then(idle_drawing) {
+            self.warning = warning;
+        }
+        Ok(())
+    }
+
     fn no_errors(&mut self, i: usize) -> Result<()> {
         if !self.alive(i)? {
             return Err("app process is dead".into());
@@ -774,6 +855,16 @@ impl Runtime {
     }
 
     fn quit(&mut self, i: usize) -> Result<()> {
+        self.quit_within(i, LAST_GRAB, CLOSE_EXIT, TREE_GONE)
+    }
+
+    /// The apps it hosts, by pid (a WM's tiles).
+    fn hosted_pids(&mut self, i: usize) -> Vec<u32> {
+        let Ok(tiles) = self.request(i, &argv(&["tiles"]), false) else { return Vec::new() };
+        tile_pids(&tiles, self.apps[i].run_pid).into_iter().map(|(_, pid)| pid).collect()
+    }
+
+    fn quit_within(&mut self, i: usize, last_grab: Duration, close_exit: Duration, tree_gone: Duration) -> Result<()> {
         if self.apps[i].interrupted {
             return Err("human intervention; app left running".into());
         }
@@ -791,58 +882,99 @@ impl Runtime {
         // what it and the apps it hosts reported while they ran, asked before it quits
         let script = self.script_errors(i).err();
         let hosted = self.hosted_script_errors(i).err();
+        let hosted_pids = self.hosted_pids(i);
         // the graceful quit on a thread of its own: an app that no longer answers (its UI thread
-        // stuck) waits the deadline out, and is killed, however long its answer would take
+        // stuck) waits the deadlines out, and is killed, however long its answer would take
         let asked = self.apps[i].remote.take().map(|mut remote| {
             let (tx, rx) = std::sync::mpsc::channel();
             std::thread::spawn(move || {
-                let r = (|| {
-                    if remote.user_seq.is_none() {
-                        let a = remote.request(&argv(&["activity"]), false)?;
-                        let a = json::parse_depth(a.as_bytes(), 64).map_err(|e| Failure::Message(e.to_string()))?;
-                        let seq = a.get("user_seq").and_then(Value::as_u64).ok_or_else(|| Failure::Message("cleanup missing user_seq".into()))?;
-                        remote.user_seq = Some(seq);
-                    }
-                    remote.request(&argv(&["gq"]), true).map(|_| ())
-                })();
-                if matches!(r, Err(Failure::Message(_))) && remote.user_seq.is_some() {
-                    let _ = remote.request(&argv(&["quit"]), true);
-                }
-                let _ = tx.send(r);
+                let r = remote.close(last_grab, &tx);
+                let _ = tx.send(CloseStep::Done(r));
             });
             rx
         });
         let mut error = None;
+        let mut grab_failed = None;
+        let mut grabbing = asked.is_some();
         let mut answered = asked.is_none();
-        let end = Instant::now() + Duration::from_secs(10);
+        let exit_line = format!("makepad-run exit: pid={} ", self.apps[i].run_pid);
+        let mut exit_done = None;
+        let mut quit_at = Instant::now();
+        let mut end = quit_at + if grabbing { last_grab + close_exit } else { close_exit };
         while self.apps[i].child.alive()? && Instant::now() < end {
             self.drain_app(i)?;
-            if let Some(r) = asked.as_ref().filter(|_| !answered).and_then(|rx| rx.try_recv().ok()) {
-                answered = true;
-                match r {
-                    Ok(()) => {}
-                    Err(Failure::Message(e)) => error = Some(e),
-                    Err(Failure::Interrupted(e)) => {
-                        self.apps[i].leave_to_human();
-                        self.fatal = true;
-                        return Err(e);
+            while let Some(step) = asked.as_ref().filter(|_| !answered).and_then(|rx| rx.try_recv().ok()) {
+                if grabbing {
+                    grabbing = false;
+                    quit_at = Instant::now();
+                    end = quit_at + close_exit;
+                }
+                match step {
+                    CloseStep::Quitting(failed) => grab_failed = failed,
+                    CloseStep::Done(r) => {
+                        answered = true;
+                        match r {
+                            Ok(()) => {}
+                            Err(Failure::Message(e)) => error = Some(e),
+                            Err(Failure::Interrupted(e)) => {
+                                self.apps[i].leave_to_human();
+                                self.fatal = true;
+                                return Err(e);
+                            }
+                        }
                     }
                 }
             }
+            if exit_done.is_none() && self.apps[i].child.text.contains(&exit_line) {
+                let now = Instant::now();
+                exit_done = Some(now);
+                end = now + tree_gone;
+            }
             std::thread::sleep(Duration::from_millis(100));
         }
-        if self.apps[i].child.alive()? {
+        let forced = self.apps[i].child.alive()?;
+        if forced {
             let pid = self.apps[i].child.child.id();
             self.apps[i].child.kill_exact()?;
             self.run.log(&format!("killed exact owned pid={pid} after graceful shutdown timeout"));
-            error = Some(format!("pid={pid} required forced cleanup"));
+            error = Some(if grabbing {
+                format!("pid={pid} never finished its last grab")
+            } else if exit_done.is_some() {
+                format!("pid={pid} ended its exit work, then was still there {} s later", tree_gone.as_secs())
+            } else {
+                format!("pid={pid} required forced cleanup")
+            });
         } else {
             let _ = self.apps[i].child.child.wait();
         }
         self.drain_app(i)?;
+        if exit_done.is_none() && self.apps[i].child.text.contains(&exit_line) {
+            let now = Instant::now();
+            exit_done = Some(now);
+            end = now + tree_gone;
+        }
+        if !forced {
+            // what it hosts ends after it
+            while hosted_pids.iter().any(|pid| makepad_remote::procs::is_alive(*pid)) && Instant::now() < end {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            let left: Vec<u32> = hosted_pids.iter().copied().filter(|pid| makepad_remote::procs::is_alive(*pid)).collect();
+            if !left.is_empty() {
+                for pid in &left {
+                    let _ = makepad_remote::procs::kill_pid(*pid);
+                }
+                error = Some(format!("{} ended, the apps it hosts were not: {left:?}", self.apps[i].name));
+            }
+        }
+        // a hosted app's output goes to the WM's per-client log, not here: the WM's own line is the bound
+        let of_hosted = if hosted_pids.is_empty() { String::new() } else { format!(", the {} app(s) it hosts included", hosted_pids.len()) };
+        self.run.log(&match exit_done {
+            Some(at) => format!("  {} close: exit line {} ms after the quit, tree gone {} ms after that{of_hosted}", self.apps[i].name, at.duration_since(quit_at).as_millis(), at.elapsed().as_millis()),
+            None => format!("  {} close: no exit line, gone {} ms after the quit{of_hosted}", self.apps[i].name, quit_at.elapsed().as_millis()),
+        });
         self.apps[i].closed = true;
         self.drop_data(i);
-        match [script, hosted, error].into_iter().flatten().collect::<Vec<_>>() {
+        match [script, hosted, grab_failed, error].into_iter().flatten().collect::<Vec<_>>() {
             e if e.is_empty() => Ok(()),
             e => Err(e.join("\n")),
         }
@@ -1136,6 +1268,24 @@ fn result(vm: &mut ScriptVm, r: Result<Value>) -> ScriptValue {
     }
 }
 
+/// The last two `[frame-sources]` readings (`MAKEPAD_FRAME_TRACE`) of an app nobody is touching,
+/// when both are a rate only something animating needs. A quiet app prints none, and a gap shows as
+/// a long reading at a low rate.
+fn idle_drawing(log: &str) -> Option<String> {
+    let mut rates = log.lines().rev().filter_map(|line| {
+        let reading = line.trim_start().strip_prefix("[frame-sources] ")?;
+        let (seconds, counts) = reading.split_once("s beats=")?;
+        let beats: f64 = counts.split(' ').next()?.parse().ok()?;
+        Some(beats / seconds.parse::<f64>().ok()?)
+    });
+    let (last, before) = (rates.next()?, rates.next()?);
+    (last >= IDLE_FRAMES_PER_S && before >= IDLE_FRAMES_PER_S).then(|| {
+        format!("keeps drawing untouched: {before:.0}, then {last:.0} frames/s ([frame-sources] in the log says who asks)")
+    })
+}
+
+const IDLE_FRAMES_PER_S: f64 = 30.0;
+
 fn allow(vm: &mut ScriptVm) -> bool {
     if vm.has_captured_errors() {
         let e = vm.take_errors().join("\n");
@@ -1412,6 +1562,13 @@ fn app_object(vm: &mut ScriptVm, index: usize) -> ScriptValue {
         let r = rt(vm).log_text(index).map(json::s);
         result(vm, r)
     });
+    vm.add_method(obj, id_lut!(flag_idle_drawing), script_args!(), move |vm, _| {
+        if !allow(vm) {
+            return NIL;
+        }
+        let r = rt(vm).flag_idle_drawing(index).map(|_| Value::Null);
+        result(vm, r)
+    });
     vm.add_method(obj, id_lut!(no_errors), script_args!(), move |vm, _| {
         if !allow(vm) {
             return NIL;
@@ -1554,6 +1711,113 @@ pub fn run(root: PathBuf, path: &str, dir: &str, target: Option<Target>) -> i32 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_two_full_seconds_in_a_row_at_the_end_are_flagged() {
+        let busy = "[frame-sources] 1.00s beats=60 next_frame=60 redraw=2\n    60 next_frame  a.rs:1\n";
+        let gap = "[frame-sources] 7.50s beats=2 next_frame=1 redraw=1\n";
+        assert!(idle_drawing("").is_none(), "a quiet app prints nothing");
+        assert!(idle_drawing(busy).is_none(), "one second may be starting up");
+        assert!(idle_drawing(&format!("{busy}{busy}")).is_some());
+        assert!(idle_drawing(&format!("{busy}{busy}{gap}")).is_none(), "it went quiet");
+        assert!(idle_drawing(&format!("{busy}{gap}{busy}")).is_none());
+    }
+
+    /// One app for a close (an endpoint per process): a drawn window, the quit noted, and a frame
+    /// that comes after 400 ms, or not at all.
+    #[cfg(unix)]
+    static QUIT: AtomicBool = AtomicBool::new(false);
+    #[cfg(unix)]
+    static NO_FRAME: AtomicBool = AtomicBool::new(false);
+
+    #[cfg(unix)]
+    fn close_app() -> Remote {
+        let ep = makepad_remote::Endpoint::new("ci-leg-close");
+        ep.register_cmd(|req, out| match req.cmd.as_str() {
+            "ping" => out.line(&format!("{{\"pong\":1,\"pid\":{},\"app\":\"ci-leg-close\"}}", std::process::id())),
+            "status" => out.line("{\"app\":\"x\",\"pid\":1,\"w\":[{\"i\":0,\"t\":\"a\",\"sz\":[4,3],\"pass_dpi\":1}]}"),
+            "quit" => {
+                QUIT.store(true, Ordering::SeqCst);
+                out.line("{\"ok\":1}");
+            }
+            c => out.err(&format!("unknown command `{c}`")),
+        });
+        ep.register(
+            "frames",
+            1,
+            Arc::new(|_, open| {
+                std::thread::spawn(move || {
+                    if NO_FRAME.load(Ordering::SeqCst) {
+                        // the channel stays open
+                        std::thread::sleep(Duration::from_secs(600));
+                    }
+                    std::thread::sleep(Duration::from_millis(400));
+                    assert!(!QUIT.load(Ordering::SeqCst), "the quit went out before the frame");
+                    let head = "{\"seq\":0,\"w\":4,\"h\":3,\"window\":0,\"t_ns\":5,\"codec\":\"png\",\"capture_ms\":1.5,\"encode_ms\":0.5,\"capture_kind\":\"pixels\"}";
+                    let _ = open.channel.send(makepad_remote::frames::encode_record(head, b"PNG"));
+                    open.channel.close(makepad_remote::conn::CLOSE_NORMAL, "");
+                });
+                Ok(())
+            }),
+        );
+        ep.listen_unix("").unwrap();
+        // it serves for as long as the test process runs
+        std::mem::forget(ep);
+        Remote { client: Client::connect("ci-leg-close").unwrap(), user_seq: Some(7) }
+    }
+
+    /// `quit_within` on a shell script with no endpoint, 500 ms for the exit line.
+    #[cfg(unix)]
+    fn close_script(case: &str, script: &str, tree_gone: Duration) -> Result<()> {
+        let dir = std::env::temp_dir().join(format!("ci-leg-close-{}-{case}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("app.sh"), script).unwrap();
+        let child = ChildLog::spawn(Command::new("/bin/sh").arg("app.sh").current_dir(&dir), dir.join("log")).unwrap();
+        let run_pid = child.child.id();
+        let app = AppHandle { child, run_pid, remote: None, interrupted: false, closed: false, name: case.into(), started_at: 0, report: dir.join("report"), parked: Arc::default(), left: Arc::default(), script_errors: Some("a test".into()), data: dir.join("data") };
+        let run = Run::new(dir.clone(), dir.clone());
+        let mut runtime = Runtime { run, deferred: 0, apps: vec![app], hosted: Vec::new(), images: Vec::new(), group: case.into(), step: None, suppressed: false, fatal: false, warning: String::new(), held_pids: Vec::new() };
+        let result = runtime.quit_within(0, Duration::ZERO, Duration::from_millis(500), tree_gone);
+        let _ = std::fs::remove_dir_all(&dir);
+        result
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_close_bounds_the_exit_line_and_then_the_tree_gone_apart() {
+        let line = "echo \"makepad-run exit: pid=$$ total_ms=1\"\n";
+        let long = Duration::from_secs(20);
+        assert_eq!(close_script("late-gone", &format!("{line}sleep 1\n"), long), Ok(()), "past the first limit, after its line");
+        let e = close_script("no-line", "sleep 30\n", long).unwrap_err();
+        assert!(e.contains("required forced cleanup"), "{e}");
+        let e = close_script("other-pid", "echo 'makepad-run exit: pid=1 total_ms=1'\nsleep 30\n", long).unwrap_err();
+        assert!(e.contains("required forced cleanup"), "another process's line says nothing of this one: {e}");
+        let e = close_script("never-gone", &format!("{line}sleep 30\n"), Duration::from_millis(300)).unwrap_err();
+        assert!(e.contains("ended its exit work, then was still there"), "{e}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_close_asks_the_quit_after_the_grab_and_a_stuck_grab_is_its_own_failure() {
+        let mut remote = close_app();
+        // slow: the quit goes out after the frame, and the leg hears when
+        let (tx, rx) = std::sync::mpsc::channel();
+        let t = Instant::now();
+        assert!(remote.close(Duration::from_secs(30), &tx).is_ok());
+        assert!(matches!(rx.try_recv(), Ok(CloseStep::Quitting(None))));
+        assert!(t.elapsed() >= Duration::from_millis(400));
+        assert!(QUIT.swap(false, Ordering::SeqCst));
+        // stuck: a failure of its own, and the app is still asked to quit
+        NO_FRAME.store(true, Ordering::SeqCst);
+        let (tx, rx) = std::sync::mpsc::channel();
+        assert!(remote.close(Duration::from_millis(300), &tx).is_ok());
+        match rx.try_recv() {
+            Ok(CloseStep::Quitting(Some(e))) => assert!(e.contains("the last grab did not finish") && e.contains("grab w=0"), "{e}"),
+            _ => panic!("no failure for the stuck grab"),
+        }
+        assert!(QUIT.load(Ordering::SeqCst));
+        let _ = std::fs::remove_dir_all(std::env::temp_dir().join("makepad-remote").join(format!("ci-leg-close-{}", std::process::id())));
+    }
 
     #[test]
     fn only_a_ui_thread_getting_first_compiles_is_not_hung() {

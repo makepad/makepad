@@ -19,6 +19,7 @@ A case is a directory under tests/live/ (the files directly in tests/live/ are t
   env (optional)             KEY=VALUE lines for both the live session and the oracle runs
                               MAKEPAD_RUN_LIVE_STREAM=1 feeds single-file edits through apply_stream, 17 ms apart.
   xfail (optional)           the case is expected to FAIL today; its first line names the gap (G1..G10)
+  timed (optional)           the case has a wall-time bound: it runs only when --only names it, on a quiet box
   forbid (optional)          substrings (one per line) that must not appear in the live session's output from the
                               first edit on
 
@@ -285,6 +286,8 @@ def main():
     counts = {"PASS": 0, "FAIL": 0, "XFAIL": 0, "XPASS": 0}
     for name, d in cases():
         if a["only"] and name not in a["only"]:
+            continue
+        if not a["only"] and os.path.exists(os.path.join(d, "timed")):
             continue
         tmp = tempfile.mkdtemp(prefix="live-%s-" % name, dir=a["keep"])
         msgs, text = check_case(name, d, a, tmp)

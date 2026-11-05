@@ -1092,8 +1092,13 @@ fn realtime_strict_ready_lazy_and_patch_freeze() {
     };
     // the strict ready: false (lazy > 0) until the reach is compiled, then true with nothing lazy
     let ticket = crate::owner::call(crate::owner::Class::Program, || unsafe { crate::jit::realtime_mark_slots(up, vec![root]) });
-    while !crate::jit::__relax_realtime_compiled(ticket) {
-        assert!(crate::jit::__relax_realtime_lazy(ticket) > 0, "not compiled, yet nothing lazy");
+    loop {
+        // (in this order: the reach finishing between the two reads is no failure)
+        let lazy = crate::jit::__relax_realtime_lazy(ticket);
+        if crate::jit::__relax_realtime_compiled(ticket) {
+            break;
+        }
+        assert!(lazy > 0, "not compiled, yet nothing lazy");
         std::thread::sleep(std::time::Duration::from_millis(2));
     }
     assert_eq!(crate::jit::__relax_realtime_lazy(ticket), 0, "compiled with lazy fns left");

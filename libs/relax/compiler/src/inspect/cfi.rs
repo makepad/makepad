@@ -485,8 +485,8 @@ pub enum Step {
     /// the outermost frame: its CFI leaves the return address undefined (a thread's start, the
     /// process's entry) or the return address is 0; `r` is unchanged
     End,
-    /// the frame's CFA is rbp-based and `r.rbp` is 0 (unknown: a walk that started from a
-    /// syscall's sp and pc); `r` is unchanged
+    /// the frame's CFA is rbp-based, `r.rbp` is 0 (unknown: a walk that started from a syscall's
+    /// sp and pc) and no call found on the stack proves it ([`rbp_of_its_call`]); `r` is unchanged
     NeedRbp,
     /// the step cannot be proven, and why (no FDE, a rule this walker does not follow, an
     /// unreadable stack); `r` is unchanged
@@ -503,6 +503,61 @@ pub fn step(r: &mut Regs, is_top: bool, read: &dyn Fn(u64) -> Option<u64>) -> St
         Some(m) => step_in(m, pc, r, read),
         None => Step::Fail("no loaded module with CFI covers it"),
     }
+}
+
+/// The frame pointer of the function at [lo, hi) when no frame below saved it (a thread blocked in
+/// a syscall gives its sp and pc only, and a libc built with frame pointers bases its CFA on it): the
+/// slot above `rsp` holding a return address whose call calls this very function. Earlier calls
+/// leave frame records on the stack, so the shape of one proves nothing; the call does. `ra_off`:
+/// where the return address is from the frame pointer.
+fn rbp_of_its_call(lo: u64, hi: u64, rsp: u64, ra_off: i64, read: &dyn Fn(u64) -> Option<u64>) -> Option<u64> {
+    // past a frame's locals: what a libc function blocking in a syscall keeps
+    const REACH: u64 = 512;
+    (0..REACH).map(|k| rsp.wrapping_add(k * 8)).find(|p| read(p.wrapping_add(ra_off as u64)).is_some_and(|ret| call_reaches(ret, lo, hi, read)))
+}
+
+/// Whether the call before return address `ret` goes to [lo, hi), directly or through jump stubs
+/// (a PLT entry, a JIT veneer).
+fn call_reaches(ret: u64, lo: u64, hi: u64, read: &dyn Fn(u64) -> Option<u64>) -> bool {
+    let Some(before) = read(ret.wrapping_sub(8)) else { return false };
+    let b = before.to_le_bytes();
+    let disp = |at: usize| i32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]]) as i64 as u64;
+    let mut target = if b[3] == 0xe8 {
+        ret.wrapping_add(disp(4))
+    } else if b[2] == 0xff && b[3] == 0x15 {
+        // call [rip + disp]
+        match read(ret.wrapping_add(disp(4))) {
+            Some(t) => t,
+            None => return false,
+        }
+    } else {
+        return false;
+    };
+    for _ in 0..3 {
+        if (lo..hi).contains(&target) {
+            return true;
+        }
+        match jump_stub_target(target, read) {
+            Some(t) => target = t,
+            None => return false,
+        }
+    }
+    false
+}
+
+/// Where a stub at `t` jumps: `[endbr64] [bnd] jmp [rip + disp]`.
+fn jump_stub_target(t: u64, read: &dyn Fn(u64) -> Option<u64>) -> Option<u64> {
+    let mut at = t;
+    if read(at)? as u32 == 0xfa1e_0ff3 {
+        at = at.wrapping_add(4);
+    }
+    let w = read(at)?.to_le_bytes();
+    let skip = (w[0] == 0xf2) as usize;
+    if w[skip] != 0xff || w[skip + 1] != 0x25 {
+        return None;
+    }
+    let disp = i32::from_le_bytes([w[skip + 2], w[skip + 3], w[skip + 4], w[skip + 5]]) as i64 as u64;
+    read(at.wrapping_add(skip as u64 + 6).wrapping_add(disp))
 }
 
 /// One step of the frame at `pc` (the lookup pc: rip, or rip - 1 for a return address) in module `m`.
@@ -540,7 +595,13 @@ fn step_in(m: &Module, pc: u64, r: &mut Regs, read: &dyn Fn(u64) -> Option<u64>)
     // the CFA from rsp or rbp only (the rules rustc, gcc and clang emit); rbp 0 is not known
     let cfa = match row.cfa_reg {
         7 => r.rsp,
-        6 if r.rbp == 0 => return Step::NeedRbp,
+        6 if r.rbp == 0 => {
+            let Rule::Offset(o) = row.rules[cie.ra as usize % NREG] else { return Step::NeedRbp };
+            match rbp_of_its_call(start.wrapping_add(m.delta), start.wrapping_add(m.delta).wrapping_add(range), r.rsp, row.cfa_off as i64 + o as i64, read) {
+                Some(rbp) => rbp,
+                None => return Step::NeedRbp,
+            }
+        }
         6 => r.rbp,
         _ => return Step::Fail("its CFA is based on a register other than rsp or rbp"),
     }
@@ -645,5 +706,79 @@ impl Foreign {
             Some(m) => step_in(m, pc, r, read),
             None => Step::Fail("no mapped file with CFI covers it"),
         }
+    }
+}
+
+#[cfg(test)]
+mod frame_of_its_call_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    /// Bytes at addresses, read as `read` reads them: 8 bytes, None past what is mapped.
+    fn memory(parts: &[(u64, Vec<u8>)]) -> impl Fn(u64) -> Option<u64> {
+        let mut m = HashMap::new();
+        for (at, bytes) in parts {
+            for (k, b) in bytes.iter().enumerate() {
+                m.insert(at + k as u64, *b);
+            }
+        }
+        move |a| {
+            let mut w = [0u8; 8];
+            for (k, b) in w.iter_mut().enumerate() {
+                *b = *m.get(&(a + k as u64))?;
+            }
+            Some(u64::from_le_bytes(w))
+        }
+    }
+
+    fn call_to(ret: u64, target: u64) -> (u64, Vec<u8>) {
+        let mut code = vec![0x90, 0x90, 0x90, 0xe8];
+        code.extend_from_slice(&(target.wrapping_sub(ret) as u32).to_le_bytes());
+        (ret - 8, code)
+    }
+
+    const FUNC: (u64, u64) = (0x5000, 0x5100);
+    const SP: u64 = 0x9000;
+
+    fn stack(words: &[u64]) -> (u64, Vec<u8>) {
+        (SP, words.iter().flat_map(|w| w.to_le_bytes()).collect())
+    }
+
+    #[test]
+    fn the_frame_record_is_the_one_whose_call_calls_this_function() {
+        // locals, then a stale record of a call to something else, then the function's own
+        let (stale, own) = (0x7000u64, 0x7100u64);
+        let read = memory(&[stack(&[1, 2, 0xa000, stale, 0xa010, own, 3]), call_to(stale, 0x6000), call_to(own, 0x5010)]);
+        assert_eq!(rbp_of_its_call(FUNC.0, FUNC.1, SP, 8, &read), Some(SP + 4 * 8));
+    }
+
+    #[test]
+    fn the_call_may_go_through_stubs_or_a_slot() {
+        // a JIT veneer: jmp [rip + 0], then the target
+        let (ret, veneer) = (0x7000u64, 0x6000u64);
+        let mut stub = vec![0xff, 0x25, 0, 0, 0, 0];
+        stub.extend_from_slice(&0x5008u64.to_le_bytes());
+        stub.extend_from_slice(&[0; 8]);
+        let read = memory(&[stack(&[0xa000, ret, 0]), call_to(ret, veneer), (veneer, stub)]);
+        assert_eq!(rbp_of_its_call(FUNC.0, FUNC.1, SP, 8, &read), Some(SP));
+        // a PLT entry with its endbr64 and bnd prefix
+        let mut plt = vec![0xf3, 0x0f, 0x1e, 0xfa, 0xf2, 0xff, 0x25];
+        plt.extend_from_slice(&0x100i32.to_le_bytes());
+        plt.extend_from_slice(&[0; 16]);
+        let read = memory(&[stack(&[0xa000, ret, 0]), call_to(ret, veneer), (veneer, plt), (veneer + 11 + 0x100, 0x5020u64.to_le_bytes().to_vec())]);
+        assert_eq!(rbp_of_its_call(FUNC.0, FUNC.1, SP, 8, &read), Some(SP));
+        // call [rip + disp]
+        let mut code = vec![0x90, 0x90, 0xff, 0x15];
+        code.extend_from_slice(&0x40i32.to_le_bytes());
+        let read = memory(&[stack(&[0xa000, ret, 0]), (ret - 8, code), (ret + 0x40, 0x5030u64.to_le_bytes().to_vec())]);
+        assert_eq!(rbp_of_its_call(FUNC.0, FUNC.1, SP, 8, &read), Some(SP));
+    }
+
+    #[test]
+    fn nothing_proven_is_not_a_frame_pointer() {
+        // a call through a register says nothing of where it went, and words that are no code
+        let ret = 0x7000u64;
+        let read = memory(&[stack(&[0xa000, ret, 5, 6]), (ret - 8, vec![0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0xff, 0xd0])]);
+        assert_eq!(rbp_of_its_call(FUNC.0, FUNC.1, SP, 8, &read), None);
     }
 }

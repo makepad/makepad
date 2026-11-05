@@ -1019,13 +1019,29 @@ fn frames_of(ui: &Thread) -> Vec<(u64, u64)> {
     }
 }
 
-/// Busy time of a thread in [t0, t1): time inside its non-wait root spans minus the waits inside
-/// them (threads without spans of their own count their wait-free time between waits as unknown).
+/// Busy and wait time of a thread in each of `ranges` (in time order, not overlapping), one walk of
+/// its spans: time inside its non-wait root spans minus the waits inside them (threads without
+/// spans of their own count their wait-free time between waits as unknown). The UI thread marks
+/// its wait for a frame on the GPU as a phase: that time is a wait too.
+fn busy_per_range(th: &Thread, ranges: &[(u64, u64)]) -> Vec<(u64, u64)> {
+    let mut spans = vec![0u64; ranges.len()];
+    let mut waits = vec![0u64; ranges.len()];
+    for s in &th.segs {
+        let root = !s.wait && s.depth == 0;
+        let wait = s.wait || s.what == "gpu-wait";
+        if !root && !wait { continue; }
+        let first = ranges.partition_point(|r| r.1 <= s.t0);
+        for (i, r) in ranges.iter().enumerate().skip(first).take_while(|(_, r)| r.0 < s.t1) {
+            let clipped = s.t1.min(r.1).saturating_sub(s.t0.max(r.0));
+            if root { spans[i] += clipped; }
+            if wait { waits[i] += clipped; }
+        }
+    }
+    spans.iter().zip(&waits).map(|(s, w)| (s.saturating_sub(*w), *w)).collect()
+}
+
 fn busy_in(th: &Thread, t0: u64, t1: u64) -> (u64, u64) {
-    let clip = |s: &Seg| s.t1.min(t1).saturating_sub(s.t0.max(t0));
-    let spans: u64 = th.segs.iter().filter(|s| !s.wait && s.depth == 0).map(clip).sum();
-    let waits: u64 = th.segs.iter().filter(|s| s.wait).map(clip).sum();
-    (spans.saturating_sub(waits), waits)
+    busy_per_range(th, &[(t0, t1)])[0]
 }
 
 /// The critical path of [t0, t1) ending on thread `ui`: walking back from t1, the UI thread's
@@ -1108,6 +1124,14 @@ fn frames_cmd(req: &Req, out: &mut Out) {
     // every frame's duration in order (a sparkline's data), 0.1 ms resolution
     let series: Vec<String> = durs.iter().map(|d| format!("{:.1}", d)).collect();
     out.line(&format!("{{\"frame_ms\":{{\"n\":{},\"median\":{:.2},\"p95\":{:.2},\"max\":{:.2}}},\"series_ms\":[{}]}}", durs.len(), pct(0.5), pct(0.95), pct(1.0), series.join(",")));
+    // over every frame: the frames listed below are the slowest, not a sample of them
+    let of_all = busy_per_range(&ths[ui], &fr);
+    let ms_at = |mut v: Vec<u64>, p: f64| { v.sort_unstable(); v.get(((v.len() as f64 - 1.0) * p).round() as usize).copied().unwrap_or(0) as f64 / 1e6 };
+    let (busy_all, wait_all): (Vec<u64>, Vec<u64>) = of_all.into_iter().unzip();
+    out.line(&format!(
+        "{{\"ui_busy_ms\":{{\"median\":{:.2},\"p95\":{:.2}}},\"ui_wait_ms\":{{\"median\":{:.2},\"p95\":{:.2}}},\"frames_listed\":\"slowest first\"}}",
+        ms_at(busy_all.clone(), 0.5), ms_at(busy_all, 0.95), ms_at(wait_all.clone(), 0.5), ms_at(wait_all, 0.95)
+    ));
     let n = req.num("n", 30) as usize;
     let mut idx: Vec<usize> = (0..fr.len()).collect();
     idx.sort_by(|a, b| durs[*b].partial_cmp(&durs[*a]).unwrap().then(a.cmp(b)));
@@ -1420,6 +1444,15 @@ fn save_cmd(out: &mut Out) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_frames_gpu_wait_is_not_ui_busy_and_a_span_counts_in_each_frame_it_crosses() {
+        use super::{busy_in, busy_per_range, Seg, Thread};
+        let seg = |t0, t1, what: &str| Seg { t0, t1, what: what.to_string(), wait: false, woke_by: None, key: 0, depth: 0, open: false };
+        let th = Thread { os_id: 0, handle: 0, segs: vec![seg(0, 10, "beat"), seg(10, 14, "gpu-wait"), seg(14, 20, "submit")], wakes: Vec::new() };
+        assert_eq!(busy_per_range(&th, &[(0, 16), (16, 30)]), vec![(12, 4), (4, 0)]);
+        assert_eq!(busy_in(&th, 0, 30), (16, 4));
+    }
+
     /// A hitch's owner_waits come from the UI thread's waits of kind owner (the end record carries
     /// no kind: the begin's names it).
     #[test]

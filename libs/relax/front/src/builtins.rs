@@ -629,7 +629,13 @@ fn stringify_o(buf: Buf, toks: &(impl TokSeq + ?Sized), lo: usize, hi: usize, or
     let mut i = lo;
     while i < hi {
         let t = toks.at(i);
-        out.push_str(std::str::from_utf8(buf.get(t.lo, t.hi)).unwrap_or("?"));
+        let text = std::str::from_utf8(buf.get(t.lo, t.hi)).unwrap_or("?");
+        // rustc_span `normalize_newlines`: the source rustc reads has no CRLF
+        if text.contains('\r') {
+            out.push_str(&text.replace("\r\n", "\n"));
+        } else {
+            out.push_str(text);
+        }
         if i + 1 < hi {
             let n = toks.at(i + 1);
             // tokens that stand for source tokens: the source's spacing

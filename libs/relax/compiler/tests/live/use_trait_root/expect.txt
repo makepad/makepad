@@ -1,0 +1,6 @@
+# v1: the edit that adds the trait's import also calls its method
+v1 patch|reinst
+# v2: the import goes, the call stays: rustc says E0599
+v2 refuse note=E0599
+# v3: the refused edit took nothing away
+v3 patch|reinst

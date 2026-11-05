@@ -3221,6 +3221,14 @@ pub(crate) fn set_diagnostics(dcx: relax_types::infer::diagnostics::DiagCtxt) {
 
 
 extern "C" fn at_exit() {
+    // Windows: a native std::process::exit is ExitProcess, which ends every other thread and only
+    // then, in the C runtime's DLL detach, calls this. The exit worker is gone, so the wait for it
+    // could only run into its hang guard (a closed app's process stayed 30 s on a GNU build).
+    // os::proc::exit comes here with the threads alive.
+    #[cfg(windows)]
+    if unsafe { crate::os::win32::RtlDllShutdownInProgress() } != 0 {
+        return;
+    }
     if jit::QUIT_SEEN.load(Ordering::Relaxed) {
         verbose!("makepad-run quit: {} lazy compiles after the quit request, {:.0} ms",
             jit::QUIT_COMPILES[0].load(Ordering::Relaxed), jit::QUIT_COMPILES[1].load(Ordering::Relaxed) as f64 / 1e6);
@@ -3325,7 +3333,8 @@ fn finish_run(why: &'static str, code: Option<i32>) {
     }
 }
 
-/// MAKEPAD_RUN_EXIT_TRACE=1: wall ms of each part of the exit work (at_exit), one line at the end.
+/// MAKEPAD_RUN_EXIT_TRACE=1: wall ms of each part of the exit work (at_exit), one line at the end;
+/// the CI leg bounds a close by this line, so it names its process (a WM's apps share its output).
 fn exit_trace() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("MAKEPAD_RUN_EXIT_TRACE").is_some())
@@ -3346,7 +3355,7 @@ fn exit_report() {
     let Some(&(_, t0)) = marks.first() else { return };
     let mut prev = t0;
     let parts: Vec<String> = marks.iter().skip(1).map(|&(n, t)| { let d = t.saturating_sub(prev); prev = t; format!("{}={:.1}", n.replace(' ', "_"), d as f64 / 1e6) }).collect();
-    eprintln!("makepad-run exit: total_ms={:.1} {} (thread {:?}, t={:.0} ms)", prev.saturating_sub(t0) as f64 / 1e6, parts.join(" "), std::thread::current().name().unwrap_or("?"), crate::clock::ms_since_start());
+    eprintln!("makepad-run exit: pid={} total_ms={:.1} {} (thread {:?}, t={:.0} ms)", std::process::id(), prev.saturating_sub(t0) as f64 / 1e6, parts.join(" "), std::thread::current().name().unwrap_or("?"), crate::clock::ms_since_start());
 }
 
 /// The boot's collected program is restored or recorded: neither the mid-run writes nor the

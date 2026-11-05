@@ -13,9 +13,21 @@ expect() { # expect <label> <dir> <args...>: the command fails and names E0597
     fail="$fail $label"
   fi
 }
+# a parser diagnostic: `makepad run` and `makepad test` refuse it too, not only `makepad check`
+expect_syntax() { # expect_syntax <label> <dir> <args...>: the command fails and says so
+  label=$1; dir=$2; shift 2
+  out=$(cd "$dir" && $J "$@" 2>&1); rc=$?
+  if [ $rc = 0 ] || ! printf '%s\n' "$out" | grep -q 'missing fragment specifier'; then
+    printf '%s\n' "$out" | cut -c1-200 | head -20
+    fail="$fail $label"
+  fi
+}
 fx=tools/run/fixture/check_reject
 expect check-no-serve "$fx" check --no-serve check-reject-tail
 expect check-serve "$fx" check check-reject-tail
 expect test-package "$fx" test check-reject-tail
+expect_syntax syntax-check "$fx" check check-reject-syntax
+expect_syntax syntax-test "$fx" test check-reject-syntax
+expect_syntax syntax-run "$fx" run check-reject-syntax
 if [ -n "$fail" ]; then echo "check_reject FAILED:$fail"; exit 1; fi
 echo "check_reject: ok"

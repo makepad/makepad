@@ -10,7 +10,7 @@ use std::collections::BTreeSet;
 // (Fx: the maps are looked up under the queue's lock at every pick and push; their keys are serials and slots)
 use crate::fxhash::HashMap;
 
-type TierEntry = (u32, u8, u64, u64);
+pub(super) type TierEntry = (u32, u8, u64, u64);
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum O2Kind { Normal, Base, Borrow, Verified }
 
@@ -770,6 +770,15 @@ pub(super) fn tier_position(id: u32) -> Option<(TierEntry, usize, usize)> {
         Job::O3(t) if t.0 == id => Some((t, position, order.len())),
         _ => None,
     })
+}
+/// The slots with an O3 job in the queue: one walk of it, where `tier_position` walks all of it per slot.
+pub(super) fn tier_queued() -> std::collections::HashSet<u32> {
+    let _kept = crate::zone_alloc::kept();
+    drain_tier_inbox();
+    lock().entries.iter().filter_map(|e| match e.job {
+        Job::O3(t) => Some(t.0),
+        _ => None,
+    }).collect()
 }
 pub(super) fn view(n: usize) -> Vec<String> {
     let _kept = crate::zone_alloc::kept();

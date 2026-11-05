@@ -5,6 +5,8 @@
 // startup manifest of its own.
 // Otherwise the late readers run once the file WARM_EDIT_LATE names exists: their stored code is
 // first linked after the edit.
+mod fields;
+mod readers;
 mod values;
 use std::hint::black_box;
 
@@ -292,6 +294,12 @@ fn main() {
         std::thread::sleep(std::time::Duration::from_millis(5500));
     }
     let late_file = std::env::var("WARM_EDIT_LATE").unwrap_or_default();
+    std::thread::spawn(fields::blocked_reader);
+    std::thread::spawn(fields::short_walk_reader);
+    // (the rows read what those threads stored)
+    while fields::BLOCKED_READ.load(std::sync::atomic::Ordering::Relaxed) == 0 || fields::SHORT_WALK_READ.load(std::sync::atomic::Ordering::Relaxed) == 0 {
+        std::thread::yield_now();
+    }
     let mut n: u64 = 0;
     loop {
         if once.as_deref() == Some("fill") {
@@ -301,7 +309,12 @@ fn main() {
         let late = once.as_deref() == Some("fill") || (!late_file.is_empty() && std::path::Path::new(&late_file).exists());
         let every_late = if late { warm_const_dep::every_late() } else { 0 };
         let (const_late, static_late, body_late, always_late) = if late { (const_late(), static_late(), body_late(), always_late()) } else { (0, 0, 0, 0) };
+        let running = fields::Running::new();
+        let field_running_frame = running.u[0] + running.u.len() as u64 * 10;
         let row = [
+            ("field_running_frame", field_running_frame),
+            ("field_blocked_frame", fields::BLOCKED_READ.load(std::sync::atomic::Ordering::Relaxed)),
+            ("field_short_walk", fields::SHORT_WALK_READ.load(std::sync::atomic::Ordering::Relaxed)),
             ("const_direct", const_direct()),
             ("const_through", const_through()),
             ("const_inlined", const_inlined()),
@@ -370,7 +383,7 @@ fn main() {
             ("always_late", always_late),
         ];
         let mut line = format!("out tick {n}");
-        for (name, v) in row {
+        for (name, v) in row.into_iter().chain(readers::row(late)) {
             line += &format!(" {name}={v}");
         }
         println!("{line}");

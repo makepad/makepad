@@ -135,17 +135,25 @@ def drag(viewer, x=30000, y=30000):
     viewer.emit((EV_KEY, BTN_LEFT, 0))
 
 
+def pid_of(app):
+    # the box's own WM and apps: this run did not start them, so they go by pid
+    pids = [str(a["pid"]) for a in map(json.loads, makepad("inspect", "list").splitlines()) if a["app"] == app]
+    assert pids, f"no running {app}"
+    return pids[-1]
+
+
 def record(apps, tmp, action):
     path_of = lambda app: os.path.join(tmp, app + ".rec")
+    pids = {app: pid_of(app) for app in apps}
     for app in apps:
-        makepad("inspect", app, "input", "record", f"path={path_of(app)}")
+        makepad("inspect", pids[app], "input", "record", f"path={path_of(app)}")
     try:
         time.sleep(0.2)
         action()
         time.sleep(0.5)
     finally:
         for app in apps:
-            makepad("inspect", app, "input", "stop")
+            makepad("inspect", pids[app], "input", "stop")
     got = {}
     for app in apps:
         with open(path_of(app)) as rec:

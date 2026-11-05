@@ -1703,6 +1703,93 @@ fn struct_head<'a>(pf: &'a crate::parser::ParsedFile, it: &crate::ast::Item) -> 
     out
 }
 
+/// A struct item's named fields: each name and the tokens of its type.
+fn struct_fields<'a>(pf: &'a crate::parser::ParsedFile, it: &crate::ast::Item) -> Vec<(&'a [u8], Vec<&'a [u8]>)> {
+    let crate::ast::ItemKind::Struct(r) = &it.kind else { return Vec::new() };
+    let crate::ast::VariantData::Struct(fs) = pf.ast.row(*r).data else { return Vec::new() };
+    pf.ast.list(fs).iter().filter_map(|f| f.name.map(|n| (pf.text(n).as_bytes(), toks(pf, f.ty_span.0, f.ty_span.1, &[])))).collect()
+}
+
+/// `names` and the macros whose definitions name one of them, or such a macro: what a fn's text
+/// reaches them through. A body not yet expanded (its code came from the disk cache) has no
+/// expansion text to look at.
+fn through_macros(prog: &Program, visible: &[bool], names: &[&[u8]]) -> Vec<Vec<u8>> {
+    let mut all: Vec<Vec<u8>> = names.iter().map(|n| n.to_vec()).collect();
+    let macros: Vec<DefId> = (0..prog.defs.len()).map(|i| DefId(i as u32)).filter(|d| prog.def(*d).kind == DefKind::MacroRules && visible.get(prog.def(*d).krate as usize).copied().unwrap_or(true)).collect();
+    loop {
+        let refs: Vec<&[u8]> = all.iter().map(|n| n.as_slice()).collect();
+        let more: Vec<Vec<u8>> = macros.iter().filter(|m| item_mentions(prog, **m, &refs)).map(|m| def_name(prog, *m).into_bytes()).filter(|n| !all.contains(n)).collect();
+        if more.is_empty() {
+            return all;
+        }
+        all.extend(more);
+    }
+}
+
+/// Whether `d`'s text can hold a `T { a, ..base }` of the struct `types` names, which takes the
+/// other fields without naming them: `..` and a name of it, or `Self` in an impl naming it, or a
+/// macro naming it.
+fn may_update_struct(prog: &Program, d: DefId, types: &[&[u8]], macros: &[&[u8]]) -> bool {
+    let def = prog.def(d);
+    let pf = &prog.files[def.file as usize];
+    let it = pf.ast.item(def.item);
+    let text = toks(pf, it.lo, it.hi, &[]);
+    if text.iter().any(|t| macros.contains(t) && !types.contains(t)) {
+        return true;
+    }
+    if !text.iter().any(|t| *t == b"..") {
+        return false;
+    }
+    if text.iter().any(|t| types.contains(t)) {
+        return true;
+    }
+    def.parent != crate::program::NO_DEF && prog.def(def.parent).kind == DefKind::Impl && text.iter().any(|t| *t == b"Self") && {
+        let (ipf, imp) = (&prog.files[prog.def(def.parent).file as usize], &prog.files[prog.def(def.parent).file as usize].ast.item(prog.def(def.parent).item));
+        let hi = ipf.src.get(imp.lo as usize..imp.hi as usize).and_then(|t| t.iter().position(|b| *b == b'{')).map_or(imp.hi, |at| imp.lo + at as u32);
+        toks(ipf, imp.lo, hi, &[]).iter().any(|t| types.contains(t))
+    }
+}
+
+/// Constant-evaluated code using a field of `d` that leaves its slot: its value holds the old
+/// layout or what the old type gave it, and it is not evaluated again. An initializer whose own
+/// text changed is another edit's answer; a const fn counts when a constant-evaluated context names
+/// it (at run time it is rebuilt like any fn). The restart line.
+fn const_code_using(u: &Unit, d: DefId, gone: &[u32], names: &[&[u8]], visible: &[bool], changes: &[Change]) -> Option<String> {
+    use crate::def_collector::NodeId;
+    let prog = &u.prog;
+    for i in 0..prog.defs.len() {
+        let c = DefId(i as u32);
+        let def = prog.def(c);
+        if !visible.get(def.krate as usize).copied().unwrap_or(true) {
+            continue;
+        }
+        let konst_fn = matches!(def.kind, DefKind::Fn | DefKind::AssocFn) && matches!(prog.files[def.file as usize].ast.item(def.item).kind, crate::ast::ItemKind::Fn(sig, _, _) if prog.files[def.file as usize].ast.fn_sig(sig).konst);
+        let text_names = match def.kind {
+            DefKind::AnonConst => match prog.def_id_to_node_id.get(&c) {
+                Some(&(file, NodeId::AnonConst(e) | NodeId::InlineConst(e))) => {
+                    let pf = &prog.files[file as usize];
+                    let x = pf.ast.expr(e);
+                    toks(pf, x.lo, x.hi, &[]).iter().any(|t| names.contains(t))
+                }
+                _ => true,
+            },
+            DefKind::Const | DefKind::AssocConst | DefKind::Static => item_mentions(prog, c, names),
+            _ => konst_fn && item_mentions(prog, c, names),
+        };
+        if !text_names || changes.iter().any(|x| matches!(x, Change::Const(y) | Change::StaticInit(y) if *y == c)) {
+            continue;
+        }
+        let body = u.tcx.typeck(prog, c);
+        let Some((_, k)) = body.field_uses.iter().find(|(ud, k)| *ud == d && gone.contains(k)) else { continue };
+        if konst_fn && !const_contexts_mention(prog, &[c]) {
+            continue;
+        }
+        let field = u.tcx.adts.get(&d).and_then(|a| a.variants[0].fields.get(*k as usize)).map_or("?", |f| prog.syms.str(f.name));
+        return Some(format!("`{}` is evaluated at compile time and uses field `{}` of `{}`, which leaves its slot in this edit: its value is not made again -- restart the app", prog.def_path(c), field, def_name(prog, d)));
+    }
+    None
+}
+
 /// The running struct `d` (its fields in slot order) and its new version (`fresh`, fields in
 /// declaration order) reconciled into the struct the running values can be (M10): a field keeps
 /// its slot by name and type (a renamed one by type, when exactly one field went and one came
@@ -2428,10 +2515,11 @@ unsafe fn apply_mode(up: *mut Unit, edits: Vec<Edit>, sources: &[Edit], partial:
             (edits, cur)
         });
         loop {
-            let (macro_table, epoch, snapshots) = cur;
+            let (macro_table, epoch, mut snapshots) = cur;
             // Only owned snapshots are reachable here; never retain a Unit/Program reference
             // across the unlock. Lazy stubs and background/spec workers can compile meanwhile.
             trace_stage("snapshot");
+            crate::program::share_import_edits(&mut snapshots, edits.iter().map(|e| e.src.as_slice()));
             let pre: Vec<Option<Result<crate::program::FileVersion, String>>> = edits.iter().zip(snapshots).map(|(e, s)| s.map(|s| s.parse(e.src.clone()))).collect();
             trace_stage("reparse");
             let step = call_traced("relock", || {
@@ -2626,46 +2714,61 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
     }
     // names a removed or edited `use` bound: every fn naming one is type-checked against what
     // the name means now (M13)
+    let mut use_names: Vec<Vec<u8>> = Vec::new();
     for (v, plan) in &versions {
         for &pos in &plan.removed_uses {
             for im in u.prog.imports.iter().filter(|im| im.file == v.old && im.pos == pos) {
                 if let Some(b) = im.bind {
                     set_names.push(u.prog.syms.str(b).as_bytes().to_vec());
+                    use_names.push(u.prog.syms.str(b).as_bytes().to_vec());
                 }
             }
         }
     }
-    // a struct's field-list edit (M10): every fn naming the struct, or a field that came, went or
-    // was renamed, is type-checked and rebuilt with it
+    // a struct's field-list edit (M10): a field that went, was renamed or changed its type leaves
+    // its slot (layout_edit), and every fn using it is type-checked and rebuilt with the edit. An
+    // added one, or one that only moved in the declaration, concerns only code that names it
+    // (its text changed)
     let layout_defs: Vec<DefId> = changes.iter().filter_map(|c| if let Change::Layout(d) = c { Some(*d) } else { None }).collect();
+    let mut moved_fields: Vec<(DefId, Vec<u32>)> = Vec::new();
     for &d in &layout_defs {
-        // an enum's matches see the new variants; a struct's added fields concern only code
-        // that names them (its text changed); removed or renamed ones every fn naming them
+        // an enum's matches see the new variants
         if u.prog.def(d).kind == DefKind::Enum {
             set_names.push(def_name(&u.prog, d).into_bytes());
+            continue;
         }
         let old_names: Vec<Vec<u8>> = u.tcx.adts.get(&d).map(|a| a.variants[0].fields.iter().map(|f| u.prog.syms.str(f.name).as_bytes().to_vec()).collect()).unwrap_or_default();
-        let mut new_names: Vec<Vec<u8>> = Vec::new();
+        // what the text shows; the commit compares the resolved types (layout_edit), and a field
+        // that left its slot with no change here restarts there
+        let (mut old_fields, mut new_fields) = (Vec::new(), Vec::new());
         for (v, plan) in &versions {
             for &(i, j) in &plan.pairs {
                 if u.prog.item_defs.get(&(v.old, i)) != Some(&d) {
                     continue;
                 }
-                if let Some(crate::ast::VariantData::Struct(fs)) = match &v.pf.ast.items[j as usize].kind { crate::ast::ItemKind::Struct(r) => Some(v.pf.ast.row(*r).data), _ => None } {
-                    for f in v.pf.ast.list(fs) {
-                        if let Some(n) = f.name {
-                            new_names.push(v.pf.text(n).as_bytes().to_vec());
-                        }
-                    }
-                }
+                let old_pf = &u.prog.files[v.old as usize];
+                old_fields.extend(struct_fields(old_pf, &old_pf.ast.items[i as usize]));
+                new_fields.extend(struct_fields(&v.pf, &v.pf.ast.items[j as usize]));
             }
         }
-        // a removed or renamed field: the fns that use it (resolved field uses on this struct,
-        // found by type-checking the fns that name it), not every fn naming a same-named thing
-        let gone: Vec<u32> = old_names.iter().enumerate().filter(|(_, n)| !new_names.contains(n)).map(|(k, _)| k as u32).collect();
+        let stays = |n: &[u8]| n.starts_with(b"__relax_dead_") || new_fields.iter().any(|(m, t)| *m == n && old_fields.iter().any(|(o, ot)| *o == n && ot == t));
+        // a field that left its slot: the fns that use it (resolved field uses on this struct,
+        // found by type-checking the fns whose text can reach it), not every fn naming a
+        // same-named thing
+        let gone: Vec<u32> = old_names.iter().enumerate().filter(|(_, n)| !stays(n)).map(|(k, _)| k as u32).collect();
+        moved_fields.push((d, gone.clone()));
         if !gone.is_empty() {
-            let names: Vec<&[u8]> = gone.iter().map(|&k| old_names[k as usize].as_slice()).collect();
-            let mut seen: Vec<DefId> = Vec::new();
+            let fields: Vec<&[u8]> = gone.iter().map(|&k| old_names[k as usize].as_slice()).collect();
+            let names = through_macros(&u.prog, &visible_crates, &fields);
+            let names: Vec<&[u8]> = names.iter().map(|n| n.as_slice()).collect();
+            let types = renames_of(&u.prog, vec![def_name(&u.prog, d).into_bytes()]);
+            let types: Vec<&[u8]> = types.iter().map(|n| n.as_slice()).collect();
+            let type_macros = through_macros(&u.prog, &visible_crates, &types);
+            let type_macros: Vec<&[u8]> = type_macros.iter().map(|n| n.as_slice()).collect();
+            if let Some(line) = const_code_using(u, d, &gone, &names, &visible_crates, &changes) {
+                restart.push(line);
+            }
+            let mut seen: crate::fxhash::HashSet<DefId> = Default::default();
             let mut named = 0usize;
             for f in u.fns.iter() {
             trace_count("slot_visits", 1);
@@ -2673,19 +2776,19 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
                     if !visible_crates[u.prog.def(*fd).krate as usize] { continue; }
                     // (a fn an earlier edit replaced keeps its slots for code in flight; it is no
                     // longer the program's and is never checked against the new definitions)
-                    if !(f.compiled || f.rir.is_some()) || seen.contains(fd) || !matches!(u.prog.def(*fd).kind, DefKind::Fn | DefKind::AssocFn) || body_defs.contains(fd) || !def_is_bound(&u.prog, *fd) {
+                    // (code of a reader only ever inlined, as stored code holds it, has no build of its own)
+                    if !(f.compiled || f.rir.is_some() || !f.history().inlined_into.is_empty()) || !seen.insert(*fd) || !matches!(u.prog.def(*fd).kind, DefKind::Fn | DefKind::AssocFn) || body_defs.contains(fd) || !def_is_bound(&u.prog, *fd) {
                         continue;
                     }
-                    seen.push(*fd);
-                    if !item_mentions(&u.prog, *fd, &names) {
+                    if !item_mentions(&u.prog, *fd, &names) && !may_update_struct(&u.prog, *fd, &types, &type_macros) {
                         continue;
                     }
                     named += 1;
                     // typeck resolves a field use (rustc: no field is reached through a generic);
                     // its body as typeck left it, never instantiated: a generic fn at its own
                     // parameters has no codegen answer (`<impl IntoIterator>::IntoIter`: NoSolution)
-                    let uses = u.tcx.typeck(&u.prog, *fd).field_uses.clone();
-                    if uses.iter().any(|(ud, k)| *ud == d && gone.contains(k)) {
+                    let body = u.tcx.typeck(&u.prog, *fd);
+                    if body.field_uses.iter().any(|(ud, k)| *ud == d && gone.contains(k)) || body.struct_updates.contains(&d) {
                         body_defs.push(*fd);
                         field_deps += 1;
                     }
@@ -3458,6 +3561,13 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
             trace_sub("layout_edit");
             match edited {
                 Ok((adt, notes)) => {
+                    if let (Some(old), Some((_, moved))) = (u.tcx.adts.get(&d), moved_fields.iter().find(|m| m.0 == d)) {
+                        for (k, (o, n)) in old.variants[0].fields.iter().zip(&adt.variants[0].fields).enumerate() {
+                            if o.name != n.name && !u.prog.syms.str(o.name).starts_with("__relax_dead_") && !moved.contains(&(k as u32)) {
+                                layout_restart.push(format!("struct `{}`: field `{}` changed its type though its text did not (what the type names changed), and its readers are not known -- restart the app", def_name(&u.prog, d), u.prog.syms.str(o.name)));
+                            }
+                        }
+                    }
                     if let Some(old) = u.tcx.adts.insert(d, adt) {
                         if !old.is_enum {
                             for f in &u.tcx.adts[&d].variants[0].fields {
@@ -3475,6 +3585,20 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
             }
         }
         trace_sub("layout_fresh");
+        // an edited `use`: a type declared through the name it bound can mean another type now
+        let use_refs: Vec<&[u8]> = use_names.iter().map(|n| n.as_slice()).collect();
+        for i in 0..u.prog.defs.len() {
+            let d = DefId(i as u32);
+            if use_refs.is_empty() || layout_defs.contains(&d) || !matches!(u.prog.def(d).kind, DefKind::Struct | DefKind::Enum | DefKind::Union) || !visible_crates[u.prog.def(d).krate as usize] || !item_mentions(&u.prog, d, &use_refs) {
+                continue;
+            }
+            let (fresh_adt, _) = u.tcx.adt_fresh(&crate::tcx::EvalCx::new(&u.prog, &u.tcx, crate::tcx::TypingEnv::fully_monomorphized(&u.prog), &crate::tcx::EvalState::new()), &u.prog, d);
+            let (Some(fresh_adt), Some(old)) = (fresh_adt, u.tcx.adts.get(&d)) else { continue };
+            let retyped = old.variants.iter().zip(&fresh_adt.variants).flat_map(|(o, n)| o.fields.iter().zip(&n.fields)).find(|(o, n)| o.ty != n.ty);
+            if let Some((o, _)) = retyped {
+                layout_restart.push(format!("struct `{}`: field `{}` changed its type though its text did not (what the type names changed), and its readers are not known -- restart the app", def_name(&u.prog, d), u.prog.syms.str(o.name)));
+            }
+        }
         if !saved_adts.is_empty() {
             u.tcx.publish_declarations(scope.as_deref());
             trace_sub("layout_publish");
@@ -3503,6 +3627,10 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
         }
         drop(fw);
         trace_sub("reclaim");
+        if !saved_adts.is_empty() {
+            let files: Vec<u32> = saved_adts.iter().map(|(d, _)| u.prog.def(*d).file).collect();
+            crate::cache::layout_edit_committed(up, files.into_iter());
+        }
     }
     let added_impls: Vec<DefId> = added_defs.iter().copied().filter(|d| u.prog.def(*d).kind == DefKind::Impl).collect();
     // an added `impl Drop`: the type now needs dropping where code compiled before left it alone
@@ -4248,6 +4376,9 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
     }
     let u = &mut *up;
     // the patch event (flight recorder `reload.patch`; inspect `stale` names it)
+    if !saved_adts.is_empty() {
+        LAYOUT_GROUP.store(gen, std::sync::atomic::Ordering::Relaxed);
+    }
     let layout_names: Vec<String> = saved_adts.iter().map(|(d, _)| def_name(&u.prog, *d)).collect();
     {
         let mut shown: Vec<&str> = out.names.iter().take(4).map(String::as_str).collect();
@@ -4867,6 +4998,9 @@ fn restart_for_edit(what: &str, lines: &[String]) {
 /// with them. Cleared when a run loads the sources again (`domain_loaded`, a relaunch).
 static SOURCES_WAIT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// The newest patch group that changed a struct's layout (0: none yet).
+static LAYOUT_GROUP: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
 /// How long a patch's old code may stay on a program thread's stack before the edit counts as
 /// not landed there (a call made before the patch that does not return: a loop).
 const LANDING: std::time::Duration = std::time::Duration::from_secs(1);
@@ -4875,28 +5009,68 @@ const LANDING: std::time::Duration = std::time::Duration::from_secs(1);
 /// before the patch, if any. A call that started before the patch finishes in its old code; one
 /// still there a while later never picks the edit up (a loop in it, or in a caller that inlined
 /// the edited code).
+///
+/// Code from before a struct's layout changed reads the dead slots, so after such an edit a walk
+/// that ended short (a thread blocked in a libc call whose caller its CFI does not give) is not
+/// enough: the rest of that thread's stack is read for return addresses into the old code. A
+/// stale word there costs a restart; a frame missed would draw wrong data with no word said.
 fn running_old_code(u: &Unit, gen: u32) -> Option<String> {
     let slots: std::collections::HashSet<u32> = u.patch_log.iter().filter(|(_, g)| *g == gen).map(|(id, _)| *id).collect();
     if slots.is_empty() {
         return None;
     }
-    let caps = crate::inspect::capture_all(&crate::inspect::instrument::program_thread).ok()?;
+    let layout = gen <= LAYOUT_GROUP.load(std::sync::atomic::Ordering::Relaxed);
+    let caps = match crate::inspect::capture_all(&crate::inspect::instrument::program_thread) {
+        Ok(caps) => caps,
+        Err(e) => {
+            if layout {
+                eprintln!("makepad live: the landing check after a field's change could not read the stacks ({e}): a frame still running code from before the edit reads the old layout -- restart the app if it misbehaves");
+            }
+            return None;
+        }
+    };
     let code = u.code.read().unwrap_or_else(|e| e.into_inner());
+    // the fn whose code from before the patch holds `a`
+    let old = |a: u64| -> Option<String> {
+        let (start, _, slot) = code.entry_at(a)?;
+        if !slots.contains(&slot) || crate::stale::lookup(a).is_some() {
+            return None;
+        }
+        let f = &u.fns[slot as usize];
+        // the patch group that made this code (a replaced version keeps it in the history)
+        let made = if start == f.code { f.patch_gen } else { f.history().prev.iter().find(|p| p.0 == start).map_or(gen, |p| p.3) };
+        (made < gen).then(|| f.name.to_string())
+    };
     for c in caps {
         for (k, &a) in c.frames.iter().enumerate() {
             // pc, then return addresses (the call is the byte before)
-            let a = if k == 0 { a } else { a.wrapping_sub(1) };
-            let Some((start, _, slot)) = code.entry_at(a) else { continue };
-            if !slots.contains(&slot) || crate::stale::lookup(a).is_some() {
-                continue;
-            }
-            let f = &u.fns[slot as usize];
-            // the patch group that made this code (a replaced version keeps it in the history)
-            let made = if start == f.code { f.patch_gen } else { f.history().prev.iter().find(|p| p.0 == start).map_or(gen, |p| p.3) };
-            if made < gen {
-                return Some(f.name.to_string());
+            if let Some(name) = old(if k == 0 { a } else { a.wrapping_sub(1) }) {
+                return Some(name);
             }
         }
+        if layout && c.stop.is_some() && c.sp != 0 {
+            if let Some(name) = return_address_above(c.sp, &old) {
+                return Some(name);
+            }
+        }
+    }
+    None
+}
+
+/// What `old` says of the first word of the stack above `sp` it knows as a return address. A
+/// stack ends where its mapping does (or at a size no thread here has).
+fn return_address_above(sp: u64, old: &dyn Fn(u64) -> Option<String>) -> Option<String> {
+    const PAGE: u64 = 4096;
+    const MOST: u64 = 64 << 20;
+    let mut at = sp & !7;
+    while at - sp < MOST {
+        let len = PAGE - at % PAGE;
+        for word in crate::inspect::threads::read_mem(at, len as usize)?.chunks_exact(8) {
+            if let Some(name) = old(u64::from_le_bytes(word.try_into().unwrap()).wrapping_sub(1)) {
+                return Some(name);
+            }
+        }
+        at += len;
     }
     None
 }

@@ -1,0 +1,2 @@
+# the same call now names another macro: no answer of the old import stays
+v1 patch|reinst

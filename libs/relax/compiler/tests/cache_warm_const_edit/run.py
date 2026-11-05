@@ -16,6 +16,7 @@ and in both a fresh run of the edited sources (read-only on the cache) prints th
 A probe that reads late first calls its reader after the edit: that code comes from the store then.
 A const that only values read must land, and a const a type uses must restart, saying why (MUST).
 const_every: one const of a dependency, every way code reads it, all from the warm cache.
+field_*: a struct's field list edited with no reader's text changing; field_every reads one field every way.
 A stored entry can be older than the manifest of the run that reads it: the edited text's first run,
 reaching none of the late readers, writes its own manifest (its keys are "unchanged" from then on),
 and the next run's first late reads must still see that the entries they find are of the old text.
@@ -30,6 +31,7 @@ relax = os.path.abspath(args[args.index("--makepad") + 1])
 only = args[args.index("--only") + 1].split(",") if "--only" in args else None
 cold = "--cold" in args
 V = "src/values.rs"
+F = "src/fields.rs"
 M = "src/main.rs"
 # probe -> (the printed name, file, old text, new text, the value it prints after the edit)
 PROBES = [
@@ -96,11 +98,39 @@ PROBES += [
     ("static_through_fn", V, "CONST_FOR_FN: u64 = 1;", "CONST_FOR_FN: u64 = 2;", 2),
     ("const_every", "dep/src/lib.rs", "EVERY: u64 = 1;", "EVERY: u64 = 2;", 2),
 ]
+# A struct's field list edited; no reader's text changes.
+PROBES += [
+    ("field_every", F, "pub u: [u64; 3],\n    pub after: u64,\n}\nimpl Frame {\n    pub fn new() -> Frame {\n        Frame { before: 1, u: [7; 3], after: 2 }",
+     "pub u: [u64; 4],\n    pub after: u64,\n}\nimpl Frame {\n    pub fn new() -> Frame {\n        Frame { before: 1, u: [7; 4], after: 2 }", 47),
+    ("field_same_size", F, "pub s: u64,\n    pub t: u64,", "pub s: i64,\n    pub t: u64,", 56),
+    ("field_two_kinds", F, "pub a: u64,\n    pub b: u32,", "pub a: u32,\n    pub b: u64,", 12),
+    ("field_order", F, "pub struct Order {\n    pub a: u64,\n    pub b: u64,", "pub struct Order {\n    pub b: u64,\n    pub a: u64,", 12),
+    ("field_widen", F, "pub w: u32,", "pub w: u64,", 55),
+    ("field_nested", F, "pub v: [u64; 2],\n}\nimpl Inner {\n    pub fn new() -> Inner {\n        Inner { v: [5; 2] }", "pub v: [u64; 3],\n}\nimpl Inner {\n    pub fn new() -> Inner {\n        Inner { v: [5; 3] }", 35),
+    ("field_generic", F, "pub x: [T; 2],\n}\nimpl Gen<u64> {\n    pub fn new() -> Gen<u64> {\n        Gen { x: [5; 2] }", "pub x: [T; 3],\n}\nimpl Gen<u64> {\n    pub fn new() -> Gen<u64> {\n        Gen { x: [5; 3] }", 35),
+    ("field_const_read", F, "pub struct ConstRead {\n    pub u: u32,", "pub struct ConstRead {\n    pub u: u64,", 8),
+    ("field_const_fn", F, "pub struct ConstFn {\n    pub u: u32,", "pub struct ConstFn {\n    pub u: u64,", 8),
+    ("field_static", F, "pub struct InStatic {\n    pub s: u64,", "pub struct InStatic {\n    pub s: i64,", 3),
+    ("field_import", F, "use ia::T as Imported;", "use ib::T as Imported;", 8),
+    ("field_blocked_frame", F, "pub struct Blocked {\n    pub u: [u64; 3],\n}\nimpl Blocked {\n    pub fn new() -> Blocked {\n        Blocked { u: [7; 3] }", "pub struct Blocked {\n    pub u: [u64; 4],\n}\nimpl Blocked {\n    pub fn new() -> Blocked {\n        Blocked { u: [7; 4] }", 47),
+    ("field_short_walk", F, "pub struct ShortWalk {\n    pub u: [u64; 3],\n}\nimpl ShortWalk {\n    pub fn new() -> ShortWalk {\n        ShortWalk { u: [7; 3] }", "pub struct ShortWalk {\n    pub u: [u64; 4],\n}\nimpl ShortWalk {\n    pub fn new() -> ShortWalk {\n        ShortWalk { u: [7; 4] }", 47),
+    ("field_running_frame", F, "pub struct Running {\n    pub u: [u64; 3],\n}\nimpl Running {\n    pub fn new() -> Running {\n        Running { u: [7; 3] }", "pub struct Running {\n    pub u: [u64; 4],\n}\nimpl Running {\n    pub fn new() -> Running {\n        Running { u: [7; 4] }", 47),
+    ("field_offset", F, "pub struct OffsetRead {\n    pub pad: u64,\n    pub u: u32,", "pub struct OffsetRead {\n    pub pad: u64,\n    pub u: u64,", 5),
+    ("field_enum", F, "A([u64; 2]),\n    B,\n}\nuse Pay::*;\n#[inline(never)]\npub fn pay_new() -> Pay {\n    if std::env::var(\"NEVER_SET\").is_ok() {\n        return B;\n    }\n    A([5; 2])",
+     "A([u64; 3]),\n    B,\n}\nuse Pay::*;\n#[inline(never)]\npub fn pay_new() -> Pay {\n    if std::env::var(\"NEVER_SET\").is_ok() {\n        return B;\n    }\n    A([5; 3])", 3),
+]
 # every value a probe prints, when it is more than its own
 READS = {"const_every": {"every_direct": 2, "every_fn": 2, "every_inlined": 2, "every_generic": 2, "every_closure": 2, "every_assoc": 2, "every_derived": 3, "every_late": 2}}
+READS["field_every"] = {n: 47 for n in ("fe_method", "fe_free", "fe_pattern", "fe_closure", "fe_generic", "fe_inlined", "fe_macro", "fe_update", "fe_update_self", "fe_clone", "fe_nested", "fe_dyn", "fe_late")}
+READS["field_every"].update(fe_eq=1, fe_debug=4, fe_write=48, fe_held=40, fe_rest=3)
+# (a new run makes the held value with the new layout)
+FRESH_READS = dict(READS, field_every=dict(READS["field_every"], fe_held=47))
 LAND = "landed"
 IN_TYPE = r"used in a type"
 RUNS_ONCE = r"an initializer runs once"
+EVALUATED = r"evaluated at compile time"
+TYPE_NAMES = r"though its text did not"
+STILL_RUNS = r"still runs the code from before the edit"
 # what an edit must do: consts only values read land, consts a type uses restart with their reason
 MUST = {
     "const_direct": LAND, "const_through": LAND, "const_inlined": LAND, "const_derived": LAND, "const_assoc": LAND,
@@ -112,10 +142,13 @@ MUST = {
     "const_array_ty": IN_TYPE, "const_len": IN_TYPE, "const_array_derived": IN_TYPE, "const_discr": IN_TYPE,
     "const_array_fn": IN_TYPE, "const_array_macro": IN_TYPE, "const_array_alias": IN_TYPE,
     "const_dep_array": IN_TYPE, "const_dep_in_main_type": IN_TYPE, "const_dep_generic_field": IN_TYPE, "const_dep_generic_alias": IN_TYPE,
+    "field_every": LAND, "field_same_size": LAND, "field_two_kinds": LAND, "field_order": LAND, "field_widen": LAND,
+    "field_nested": LAND, "field_const_read": EVALUATED, "field_const_fn": EVALUATED, "field_static": EVALUATED,
+    "field_import": TYPE_NAMES, "field_offset": EVALUATED, "field_running_frame": STILL_RUNS, "field_blocked_frame": STILL_RUNS, "field_short_walk": STILL_RUNS,
     "const_other_new": LAND, "static_from_const": RUNS_ONCE, "static_through_fn": RUNS_ONCE, "static_through_new": RUNS_ONCE,
 }
 # A second edit in the same session: the first one's evaluations must not read as a type's.
-SECOND = {"const_nonliteral": ("CONST_NONLIT: u64 = 2 + 0;", "CONST_NONLIT: u64 = 3 + 0;", 3), "const_direct": ("CONST_DIRECT: u64 = 2;", "CONST_DIRECT: u64 = 3;", 3)}
+SECOND = {"field_nested": ("pub v: [u64; 3],\n}\nimpl Inner {\n    pub fn new() -> Inner {\n        Inner { v: [5; 3] }", "pub v: [u64; 4],\n}\nimpl Inner {\n    pub fn new() -> Inner {\n        Inner { v: [5; 4] }", 45), "const_nonliteral": ("CONST_NONLIT: u64 = 2 + 0;", "CONST_NONLIT: u64 = 3 + 0;", 3), "const_direct": ("CONST_DIRECT: u64 = 2;", "CONST_DIRECT: u64 = 3;", 3)}
 tmp = tempfile.mkdtemp(prefix="warm-const-edit-")
 pkg = os.path.join(tmp, "pkg")
 shutil.copytree(os.path.join(HERE, "pkg"), pkg)
@@ -138,12 +171,12 @@ def value(line, probe):
     return int(m.group(1)) if m else None
 
 
-def shows_new(line, probe, want):
-    return all(value(line, n) == w for n, w in READS.get(probe, {probe: want}).items())
+def shows_new(line, probe, want, reads=READS):
+    return all(value(line, n) == w for n, w in reads.get(probe, {probe: want}).items())
 
 
-def stale_reads(line, probe, want):
-    return ", ".join("%s=%s want %d" % (n, value(line, n), w) for n, w in READS.get(probe, {probe: want}).items() if value(line, n) != w)
+def stale_reads(line, probe, want, reads=READS):
+    return ", ".join("%s=%s want %d" % (n, value(line, n), w) for n, w in reads.get(probe, {probe: want}).items() if value(line, n) != w)
 
 
 def save(path, text):
@@ -197,7 +230,13 @@ def session(probe, rel, old, new, want):
         if not restart:
             # the late readers' first call, once the edit is in
             open(late, "w").close()
-        landed = wait(lambda: last() is not None and shows_new(last(), probe, want), 2 if line else 0)
+        # a tick from after the patch: a value the edit keeps must be read by the new code
+        tick = lambda: int(last().split()[2]) if last() else -1
+        since = tick()
+        landed = not restart and wait(lambda: tick() > since + 1 and shows_new(last(), probe, want), 2 if line else 0)
+        # the landing check: old code still on a stack a second after the patch asks for a restart
+        if not landed and not restart and line:
+            restart = wait(lambda: any(re.search(STILL_RUNS, l) for l in err), 5)
         row["ms"] = int((time.time() - t_save) * 1e3)
         row["value"] = stale_reads(last() or "", probe, want) or want if probe in READS else value(last() or "", probe)
         row["patch"] = re.sub(r"^.*?: ", "", line)[:96]
@@ -218,7 +257,7 @@ def session(probe, rel, old, new, want):
             row["outcome"] = "restart"
             open(late, "w").close()
             subprocess.run([relax, "inspect", str(p.pid), "session", "relaunch"], env=env, capture_output=True, text=True)
-            if not wait(lambda: shows_new(last() or "", probe, want), 60):
+            if not wait(lambda: shows_new(last() or "", probe, want, FRESH_READS), 60):
                 row["outcome"] = "RELAUNCH STALE"
             row["relaunch"] = value(last() or "", probe)
             row["ms"] = int((time.time() - t_save) * 1e3)
@@ -237,8 +276,8 @@ def session(probe, rel, old, new, want):
             open(late, "w").close()
             r = once("fresh-" + probe, "1", MAKEPAD_RUN_CACHE="readonly", WARM_EDIT_LATE=late) if not cold else once("fresh-" + probe, "1", WARM_EDIT_LATE=late)
             line = next((l for l in r.stdout.splitlines() if l.startswith("out tick ")), "")
-            row["fresh"] = want if shows_new(line, probe, want) else stale_reads(line, probe, want)
-            if not shows_new(line, probe, want):
+            row["fresh"] = want if shows_new(line, probe, want, FRESH_READS) else stale_reads(line, probe, want, FRESH_READS)
+            if not shows_new(line, probe, want, FRESH_READS):
                 row["outcome"] += " + FRESH RUN STALE"
         save(path, base)
 
@@ -286,6 +325,9 @@ for probe, rel, old, new, want in PROBES:
         continue
     row, err = session(probe, rel, old, new, want)
     ok = row["outcome"] in ("landed", "restart")
+    # what an edit rebuilt is checked like any code: a struct literal with a dead slot is no MIR bug
+    if ok and any("the borrow checker did not check" in l for l in err):
+        row["outcome"], ok = "NOT BORROW CHECKED", False
     must = MUST.get(probe)
     if ok and must == LAND and row["outcome"] != "landed":
         row["outcome"], ok = "RESTART, MUST LAND", False

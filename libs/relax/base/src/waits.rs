@@ -167,11 +167,11 @@ impl Drop for Guard {
     }
 }
 
-/// What wraps a wait for a CPU token (makepad_cpu_budget::set_wait_hook).
-pub fn token_wait(class: u8, park: &dyn Fn()) {
+/// What a wait for a CPU token runs (makepad_cpu_budget::set_wait_hook).
+pub extern "C" fn token_wait(class: u8) {
     const CLASSES: [&str; 3] = ["interactive", "visible", "background"];
     let _w = begin(Kind::Token, class as u64, 0, CLASSES[class as usize]);
-    park();
+    makepad_cpu_budget::park();
 }
 
 /// Starts a wait with no guard (program futex waits enter and leave through two C calls).

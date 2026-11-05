@@ -1,0 +1,9 @@
+[package]
+name = "check-reject-syntax"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "check-reject-syntax"
+path = "src/main.rs"

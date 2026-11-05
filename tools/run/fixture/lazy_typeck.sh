@@ -17,6 +17,8 @@ J="cargo run --profile host -q --manifest-path $ROOT/Cargo.toml -p makepad-run -
 # the copies live under the workspace (as agree.sh's): cargo reads .cargo/config.toml from the folder
 # it runs in, and a copy outside the workspace built makepad again without its rustflags (250 s a gate)
 mkdir -p "$ROOT/target"
+# makepad itself first: a fresh tree's build is not on the clock of the runs below
+cargo build --profile host -q --manifest-path "$ROOT/Cargo.toml" -p makepad-run --bin makepad || exit 1
 dir=$(mktemp -d "$ROOT/target/lazy_typeck.XXXXXX") || exit 1
 cp -R tools/run/fixture/lazy_typeck "$dir/fx" || exit 1
 mkdir -p "$dir/tmp"

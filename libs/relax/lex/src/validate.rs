@@ -43,17 +43,6 @@ fn char_at(src: &[u8], i: usize) -> Option<char> {
     std::str::from_utf8(src.get(i..i + n)?).ok()?.chars().next()
 }
 
-static ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-/// Literal validation is a diagnostic: `makepad check` turns it on; a run never pays for it.
-pub fn set_enabled(on: bool) {
-    ENABLED.store(on, std::sync::atomic::Ordering::Relaxed);
-}
-
-pub fn enabled() -> bool {
-    ENABLED.load(std::sync::atomic::Ordering::Relaxed)
-}
-
 /// rustc_parse lexer `cook_doc_comment`: a doc comment holds no bare CR (one not followed by LF).
 /// The comments are the gaps between tokens (and after the last one).
 fn doc_comment_crs(src: &[u8], toks: &[Tok]) -> Result<(), VErr> {
@@ -102,8 +91,17 @@ fn doc_comment_crs(src: &[u8], toks: &[Tok]) -> Result<(), VErr> {
     check(prev_hi, src.len())
 }
 
+/// `toks[name]` is the single-segment name right after an attribute's `#[` or `#![`.
+fn attr_start(toks: &[Tok], name: usize) -> bool {
+    name >= 2 && toks[name].kind == T::Ident && toks[name - 1].kind == T::OpenBracket && (toks[name - 2].kind == T::Pound || (name >= 3 && toks[name - 2].kind == T::Not && toks[name - 3].kind == T::Pound))
+}
+
 /// Validates the tokens `toks[from..]` of `src`; the first error is returned.
 pub fn validate(src: &[u8], toks: &[Tok], edition: u16) -> Result<(), VErr> {
+    // rustc_span source_map `read_file`: a source file is read as a `String`
+    if let Err(e) = std::str::from_utf8(src) {
+        return err(e.valid_up_to(), "stream did not contain valid UTF-8");
+    }
     doc_comment_crs(src, toks)?;
     // Delimiter stack: true inside a macro invocation/definition or an attribute, whose tokens are
     // not literals yet. rustc cooks a literal's value and suffix when the parser consumes it
@@ -112,7 +110,8 @@ pub fn validate(src: &[u8], toks: &[Tok], edition: u16) -> Result<(), VErr> {
     let mut stack: Vec<bool> = Vec::new();
     for (k, t) in toks.iter().enumerate() {
         let (lo, hi) = (t.lo as usize, t.hi as usize);
-        let parse_level = !stack.last().copied().unwrap_or(false);
+        // (`#[name = value]`: rustc parses the value as an expression)
+        let parse_level = !stack.last().copied().unwrap_or(false) || (k >= 2 && toks[k - 1].kind == T::Eq && attr_start(toks, k - 2));
         match t.kind {
             T::OpenParen | T::OpenBracket | T::OpenBrace => {
                 let prev = |n: usize| if k >= n { Some(toks[k - n].kind) } else { None };
@@ -121,8 +120,11 @@ pub fn validate(src: &[u8], toks: &[Tok], edition: u16) -> Result<(), VErr> {
                 // (the std macros that parse their arguments as expressions consume the literals)
                 let parsed_args = bang && prev(1) == Some(T::Not) && k >= 2 && toks[k - 2].kind == T::Ident && matches!(&src[toks[k - 2].lo as usize..toks[k - 2].hi as usize],
                     b"println" | b"print" | b"eprintln" | b"eprint" | b"format" | b"format_args" | b"write" | b"writeln" | b"panic" | b"assert" | b"assert_eq" | b"assert_ne"
-                    | b"debug_assert" | b"debug_assert_eq" | b"debug_assert_ne" | b"vec" | b"unreachable" | b"todo" | b"unimplemented" | b"dbg");
-                stack.push(!parse_level || (bang && !parsed_args) || attr);
+                    | b"debug_assert" | b"debug_assert_eq" | b"debug_assert_ne" | b"vec" | b"unreachable" | b"todo" | b"unimplemented" | b"dbg"
+                    | b"concat" | b"env" | b"option_env" | b"include" | b"include_str" | b"include_bytes" | b"compile_error" | b"cfg");
+                // (rustc parses `#[cfg(..)]` as a predicate; any other attribute's list is its macro's tokens)
+                let cfg = t.kind == T::OpenParen && prev(1) == Some(T::Ident) && &src[toks[k - 1].lo as usize..toks[k - 1].hi as usize] == b"cfg" && attr_start(toks, k - 1);
+                stack.push(!cfg && (!parse_level || (bang && !parsed_args) || attr));
             }
             T::CloseParen | T::CloseBracket | T::CloseBrace => {
                 stack.pop();
@@ -133,7 +135,7 @@ pub fn validate(src: &[u8], toks: &[Tok], edition: u16) -> Result<(), VErr> {
             T::Str => quoted(src, lo, hi, 0, b'"', Mode::Str, parse_level)?,
             T::ByteStr if src[lo + 1] == b'"' => quoted(src, lo, hi, 1, b'"', Mode::ByteStr, parse_level)?,
             T::CStr if src[lo + 1] == b'"' => quoted(src, lo, hi, 1, b'"', Mode::CStr, parse_level)?,
-            T::ByteStr | T::CStr | T::RawStr => raw(src, lo, hi, t.kind)?,
+            T::ByteStr | T::CStr | T::RawStr => raw(src, lo, hi, t.kind, parse_level)?,
             T::Char => quoted(src, lo, hi, 0, b'\'', Mode::Char, parse_level)?,
             T::Byte => quoted(src, lo, hi, 1, b'\'', Mode::Byte, parse_level)?,
             T::Int | T::Float => number(src, lo, hi, t.kind == T::Float, parse_level)?,
@@ -288,7 +290,7 @@ fn number(src: &[u8], lo: usize, hi: usize, float: bool, parse_level: bool) -> R
     Ok(())
 }
 
-fn raw(src: &[u8], lo: usize, hi: usize, kind: T) -> Result<(), VErr> {
+fn raw(src: &[u8], lo: usize, hi: usize, kind: T, parse_level: bool) -> Result<(), VErr> {
     // prefix: r | br | cr, then #*, then the quote
     let mut i = lo;
     while src[i] != b'#' && src[i] != b'"' {
@@ -309,6 +311,11 @@ fn raw(src: &[u8], lo: usize, hi: usize, kind: T) -> Result<(), VErr> {
         end -= 1;
     }
     let body_hi = end.saturating_sub(1).max(body_lo);
+    suffix(src, (end + hashes).min(hi), hi, parse_level, match kind {
+        T::ByteStr => "byte string",
+        T::CStr => "C string",
+        _ => "string",
+    })?;
     let mut j = body_lo;
     while j < body_hi {
         let c = src[j];
@@ -327,6 +334,38 @@ fn raw(src: &[u8], lo: usize, hi: usize, kind: T) -> Result<(), VErr> {
     Ok(())
 }
 
+/// A quoted literal's suffix `src[lo..hi]`: `_` is the lexer's error, any other is judged when the
+/// parser consumes the literal (rustc_session `InvalidLiteralSuffix`, `kind` = `LitKind::descr`).
+fn suffix(src: &[u8], lo: usize, hi: usize, parse_level: bool, kind: &str) -> Result<(), VErr> {
+    if lo == hi {
+        return Ok(());
+    }
+    if &src[lo..hi] == b"_" {
+        return err(lo, "underscore literal suffix is not allowed");
+    }
+    if parse_level {
+        return err(lo, format!("suffixes on {kind} literals are invalid"));
+    }
+    Ok(())
+}
+
+/// The suffix of a quoted literal cooked by the parser outside the file validation (an expansion's).
+pub fn cooked_quoted(text: &[u8]) -> Result<(), String> {
+    // a suffix holds no quotes, and comes after a raw string's hashes
+    let Some(q) = text.iter().rposition(|c| matches!(c, b'"' | b'\'')) else {
+        return Ok(());
+    };
+    let lo = q + 1 + text[q + 1..].iter().take_while(|c| **c == b'#').count();
+    let kind = match (text[0], text.get(1)) {
+        (b'\'', _) => "char",
+        (b'b', Some(b'\'')) => "byte",
+        (b'b', _) => "byte string",
+        (b'c', _) => "C string",
+        _ => "string",
+    };
+    suffix(text, lo, text.len(), true, kind).map_err(|(_, msg)| msg.into_owned())
+}
+
 fn quoted(src: &[u8], lo: usize, hi: usize, prefix: usize, q: u8, mode: Mode, parse_level: bool) -> Result<(), VErr> {
     let body_lo = lo + prefix + 1;
     // the closing quote is the last one of the token (a suffix holds no quotes)
@@ -335,16 +374,13 @@ fn quoted(src: &[u8], lo: usize, hi: usize, prefix: usize, q: u8, mode: Mode, pa
         end -= 1;
     }
     let body_hi = end.saturating_sub(1).max(body_lo);
-    if end < hi {
-        let suffix = String::from_utf8_lossy(&src[end..hi]).into_owned();
-        if suffix == "_" {
-            return err(end, "underscore literal suffix is not allowed");
-        }
-        // (any other suffix on a quoted literal is judged when the parser consumes it)
-        if parse_level {
-            return err(end, format!("suffixes on {} literals are invalid", if mode.is_single() { "char" } else { "string" }));
-        }
-    }
+    suffix(src, end, hi, parse_level, match mode {
+        Mode::Char => "char",
+        Mode::Byte => "byte",
+        Mode::Str => "string",
+        Mode::ByteStr => "byte string",
+        Mode::CStr => "C string",
+    })?;
     // fast path: nothing to check in plain ASCII text without escapes
     let body = &src[body_lo..body_hi];
     if !mode.is_single() && !body.iter().any(|&c| c == b'\\' || c == b'\r' || c >= 0x80 || c == 0) {
@@ -440,6 +476,10 @@ fn quoted(src: &[u8], lo: usize, hi: usize, prefix: usize, q: u8, mode: Mode, pa
                         if (0xD800..=0xDFFF).contains(&value) || value > 0x10FFFF {
                             return err(start, "invalid unicode character escape");
                         }
+                        // rustc_literal_escaper `CStr::char2unit`
+                        if mode == Mode::CStr && value == 0 {
+                            return err(start, "null characters in C string literals are not supported");
+                        }
                     }
                     b'\n' if !mode.is_single() => {
                         while i < body_hi && matches!(src[i], b' ' | b'\n' | b'\t' | b'\r') {
@@ -473,8 +513,14 @@ fn quoted(src: &[u8], lo: usize, hi: usize, prefix: usize, q: u8, mode: Mode, pa
                     return err(i, "bare CR not allowed in string, use `\\r` instead");
                 }
             }
-            b'\n' | b'\t' if mode.is_single() => {
-                return err(i, format!("{} constant must be escaped: `{}`", if mode == Mode::Byte { "byte" } else { "character" }, if c == b'\n' { "\\n" } else { "\\t" }));
+            // rustc_literal_escaper `unescape_single`: EscapeOnlyChar
+            b'\n' | b'\t' | b'\'' if mode.is_single() => {
+                let shown = match c {
+                    b'\n' => "\\n",
+                    b'\t' => "\\t",
+                    _ => "'",
+                };
+                return err(i, format!("{} constant must be escaped: `{shown}`", if mode == Mode::Byte { "byte" } else { "character" }));
             }
             0 if mode == Mode::CStr => return err(i, "null characters in C string literals are not supported"),
             c if c >= 0x80 => {

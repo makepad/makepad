@@ -349,7 +349,7 @@ fn inspect_page(st: &Style) -> String {
     let mut p = Page::new(st, 34);
     title(&mut p, "ask a running app about itself");
     p.blank();
-    p.usage("makepad inspect <pid|app|all|list> <command> [k=v]...");
+    p.usage("makepad inspect <pid|list> <command> [k=v]...");
     p.blank();
     p.text("Every `makepad run` listens on a local socket. Answers are JSON lines,");
     p.text("pre-analysed and bounded, each starting with what was measured.");
@@ -360,9 +360,11 @@ fn inspect_page(st: &Style) -> String {
     p.row("threads | stacks | waits", "Threads, symbolised stacks, waits");
     p.row("panics | resume <id> panic", "Parked panics");
     p.row("help schema", "Tool definition for agents");
-    p.text("`all` covers every running app, also ones started later.");
+    p.text("At a terminal, or for the apps of your own lease, an app's name works in place of");
+    p.text("its pid, and `all` covers every such app, also ones started later. Anything else is");
+    p.text("refused and says which pid it would have reached: an agent names the pid.");
     p.section("Other machines:");
-    p.row("<host>:<app|pid> <command>", "Ask an app on a host of hosts.toml (via the hub)");
+    p.row("<host>:<pid> <command>", "Ask an app on a host of hosts.toml (via the hub)");
     p.row("<host>:list", "That host's running apps");
     p.row("<host>:session launch <app>", "Start a hidden session there (kill <pid> ends it, also after the hub restarted)");
     p.row("<host>:session relaunch <pid>", "Restart its app (a fresh process; an app that restarts itself keeps its state)");

@@ -1,0 +1,9 @@
+# an import stays findable after other edits of its file
+v1 patch
+# v2: edited after a body edit: the name means the other fn now
+v2 patch|reinst
+v3 patch
+# v4: removed after a body edit, the call stays
+v4 refuse note=pick
+# v5: the refused edit took nothing away
+v5 patch

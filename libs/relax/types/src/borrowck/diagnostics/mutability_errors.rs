@@ -107,5 +107,8 @@ fn report_illegal_reassignment(cx: &DiagCx<'_>, place: &Place, span: Span, err_p
         err.span_label(assigned_span, format!("first assignment to {place_description}"));
     }
     err.span_label(span, if from_arg { "cannot assign to immutable argument" } else { "cannot assign twice to immutable variable" });
+    if local.is_some_and(|l| cx.body.local_decls[l.0 as usize].can_be_made_mutable()) {
+        err.help(format!("consider making this binding mutable: `mut {}`", cx.describe_any_place(err_place).trim_matches('`')));
+    }
     err
 }

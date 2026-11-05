@@ -28,11 +28,14 @@ BAD = ("panicked", "panic parked", "stale access parked", "internal compiler err
 os.environ.setdefault("MAKEPAD_RUN_STD", os.path.abspath("libs/relax/compiler/std"))
 visible = "--visible" in sys.argv
 
-tmp = tempfile.mkdtemp(prefix="restart-exec-")
+ROOT = os.path.abspath(os.path.join(HERE, "../../.."))
+# under the workspace, as lazy_typeck's copies: cargo reads .cargo/config.toml from the folder it
+# runs in, and a copy outside it built makepad again without its rustflags (294 s of a 308 s run)
+os.makedirs(os.path.join(ROOT, "target"), exist_ok=True)
+tmp = tempfile.mkdtemp(prefix="restart-exec-", dir=os.path.join(ROOT, "target"))
 pkg = os.path.join(tmp, "pkg")
 shutil.copytree(os.path.join(HERE, "live_kinds"), pkg)
 manifest = os.path.join(pkg, "Cargo.toml")
-ROOT = os.path.abspath(os.path.join(HERE, "../../.."))
 text = open(manifest).read().replace('"../../../../widgets"', json.dumps(os.path.relpath(os.path.join(ROOT, "widgets"), pkg)))
 # the workspace's [patch.crates-io] (third-party crates carried in libs/): the copy is a workspace
 # of its own, and without them its window's dependencies would be looked up in the registry
@@ -60,6 +63,8 @@ def owned():
     if sys.platform.startswith("linux"):
         import ctypes
         ctypes.CDLL(None, use_errno=True).prctl(1, signal.SIGKILL, 0, 0, 0)
+# makepad itself first: a fresh tree's build is not on the clock of the run below
+subprocess.check_call(["cargo", "build", "--profile", "host", "-q", "--manifest-path", os.path.join(ROOT, "Cargo.toml"), "-p", "makepad-run", "--bin", "makepad"], cwd=ROOT)
 p = subprocess.Popen(JIT + ["run", "--ahead=minimal", "relax-live-kinds", "--features", "window"], cwd=pkg, env=env,
                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True, preexec_fn=owned)
 

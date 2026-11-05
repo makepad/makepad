@@ -1,0 +1,2 @@
+# a glob import the edit adds reaches the macro through a module's `pub use`
+v1 patch|reinst
