@@ -1982,7 +1982,9 @@ impl Widget for ScoreShell {
             // fifth of the way along, disagreeing with the page.
             let end = state.playback.end_quarter();
             let mut scrub = self.view.slider(cx, ids!(transport_scrub));
-            script_apply_eval!(cx, scrub, { max: #(end) });
+            if scrub.max() != Some(end) {
+                script_apply_eval!(cx, scrub, { max: #(end) });
+            }
             self.view.slider(cx, ids!(transport_scrub)).set_value(cx, quarter);
             let bar = (quarter / 4.0).floor() as usize + 1;
             let beat = (quarter.rem_euclid(4.0)).floor() as usize + 1;
