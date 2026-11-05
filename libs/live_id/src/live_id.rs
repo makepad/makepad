@@ -6,9 +6,9 @@ use std::{
     fmt,
     ops::{Deref, DerefMut, Index, IndexMut},
     sync::atomic::{AtomicU64, Ordering},
-    sync::Mutex,
     sync::Once,
 };
+use makepad_relax_api::sync::Mutex;
 
 impl LiveIdInterner {
     pub fn add(&mut self, val: &str) {
@@ -21,6 +21,14 @@ impl LiveIdInterner {
     }
 
     pub fn with<F, R>(f: F) -> R
+    where
+        F: FnOnce(&mut Self) -> R,
+    {
+        // (the process's table, whichever program's op interns a name)
+        makepad_relax_api::process_heap(|| Self::with_table(f))
+    }
+
+    fn with_table<F, R>(f: F) -> R
     where
         F: FnOnce(&mut Self) -> R,
     {

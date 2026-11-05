@@ -442,6 +442,22 @@ fn spawn_sibling(id: &str, args: &[&str]) -> bool {
         use std::os::windows::process::CommandExt;
         command.creation_flags(makepad_platform::windows::session::Win32::System::Threading::DETACHED_PROCESS.0);
     }
+    // A sibling lives on its own: a session of its own says so to a `makepad run` that ends what its
+    // run started.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        extern "C" {
+            fn setsid() -> i32;
+        }
+        // SAFETY: setsid is async-signal-safe.
+        unsafe {
+            command.pre_exec(|| {
+                setsid();
+                Ok(())
+            });
+        }
+    }
     command
         .args(args)
         .stdin(std::process::Stdio::null())
