@@ -360,10 +360,12 @@ pub enum ShapeType {
     Sphere = 5,
     /// A closed polyline swept by a sphere.
     Tube = 6,
+    /// A solid given by a distance query.
+    Field = 7,
 }
 
 /// The number of shape types.
-pub const SHAPE_TYPE_COUNT: usize = 7;
+pub const SHAPE_TYPE_COUNT: usize = 8;
 
 /// Used to create a shape.
 #[derive(Clone, Debug)]

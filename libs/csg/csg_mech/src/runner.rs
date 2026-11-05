@@ -17,6 +17,14 @@ pub const HZ: f64 = 240.0;
 /// real time lets the sim fall behind (slow motion) instead of spending ever longer catching up while the
 /// view waits for a snapshot.
 pub const MAX_CATCH_UP: u64 = 4;
+/// A shake starts and stops over this long, seconds.
+const SHAKE_EASE: f64 = 0.25;
+/// [`Assembly::lift`] starts this long after the start (seconds) and rises this fast (mm/s).
+const LIFT_AFTER: f64 = 0.6;
+const LIFT_SPEED: f64 = 60.0;
+/// A hand's frames come slower than the steps: the held ground goes at the speed that gets it to
+/// the hand in this long (seconds), so it doesn't jump and wait.
+const CARRY_EASE: f64 = 1.0 / 90.0;
 
 /// A pointer's firm hold (60 Hz against the default 240 Hz * 4 substeps).
 pub const POINTER_HZ: f64 = 60.0;
@@ -50,6 +58,10 @@ pub enum Command {
     Release { velocity: Option<P3> },
     /// Shake the held anchors (on/off).
     Shake(bool),
+    /// Carry the held anchors, as a hand does: from their start, this turn about `axis` through
+    /// the origin, then this move. They stay where the last one left them and no longer lift until
+    /// a reset; a shake shakes them there.
+    Carry { at: P3, axis: P3, angle: f64 },
     /// One step while paused.
     Step,
     /// Do something to these bodies only.
@@ -209,6 +221,9 @@ fn run(asm: Assembly, gravity: P3, floor: Option<f64>, mut w: MechWorld, rx: Rec
     let mut speed = 1.0;
     let mut gravity = gravity;
     let mut shake = false;
+    let mut shaking = 0.0;
+    let mut settling = false;
+    let mut lift = 0.0;
     let mut frame = 0u64;
     let mut commands = 0u64;
     let mut owed = 0.0;
@@ -216,6 +231,8 @@ fn run(asm: Assembly, gravity: P3, floor: Option<f64>, mut w: MechWorld, rx: Rec
     let mut at_limit = vec![false; asm.joints.len()];
     let mut pending: Vec<Event> = Vec::new();
     let mut drag_target: Option<P3> = None;
+    let mut carry: Option<(P3, P3, f64)> = None;
+    let mut following = false;
     let mut behind = 0.0;
     let mut behind_logged = Instant::now();
     while !stop.load(Ordering::Relaxed) {
@@ -233,6 +250,11 @@ fn run(asm: Assembly, gravity: P3, floor: Option<f64>, mut w: MechWorld, rx: Rec
                     owed = 0.0;
                     at_limit.iter_mut().for_each(|a| *a = false);
                     shake = false;
+                    shaking = 0.0;
+                    settling = false;
+                    lift = 0.0;
+                    carry = None;
+                    following = false;
                     drag_target = None;
                 }
                 Command::Speed(s) => speed = s.clamp(0.01, 4.0),
@@ -271,6 +293,10 @@ fn run(asm: Assembly, gravity: P3, floor: Option<f64>, mut w: MechWorld, rx: Rec
                     drag_target = None;
                 }
                 Command::Shake(on) => shake = on,
+                Command::Carry { at, axis, angle } => {
+                    carry = Some((at, axis, angle));
+                    following = true;
+                }
                 Command::Step => single = true,
                 Command::Bodies { bodies, action } => w.apply(&bodies, &action),
             }
@@ -299,11 +325,25 @@ fn run(asm: Assembly, gravity: P3, floor: Option<f64>, mut w: MechWorld, rx: Rec
             if let Some(p) = drag_target {
                 w.drag(p, dt);
             }
-            if shake {
+            let lift_to = if w.time() >= LIFT_AFTER { asm.lift } else { 0.0 };
+            let lifting = carry.is_none() && lift != lift_to;
+            if following || shake || shaking > 0.0 || settling || lifting {
+                // It eases in and out, and the last move leaves the held ground at rest.
+                settling = following || shaking > 0.0 || lifting;
+                shaking = (shaking + if shake { dt } else { -dt } / SHAKE_EASE).clamp(0.0, 1.0);
+                if lifting {
+                    lift += (lift_to - lift).clamp(-LIFT_SPEED * dt, LIFT_SPEED * dt);
+                }
                 let t = w.time();
                 let up = norm(asm.up);
                 let side = basis(up).0;
-                w.move_ground(scale(side, 12.0 * (std::f64::consts::TAU * 2.2 * t).sin()), up, 18f64.to_radians() * (std::f64::consts::TAU * 1.6 * t).sin(), dt);
+                let tempo = if asm.shake_tempo > 0.0 { asm.shake_tempo } else { 1.0 };
+                let ang = shaking * 18f64.to_radians() * (std::f64::consts::TAU * 1.6 * t).sin();
+                let by = add(scale(side, shaking * 12.0 * (std::f64::consts::TAU * 2.2 * tempo * t).sin()), sub(asm.shake_about, rotate(asm.shake_about, up, ang)));
+                match carry {
+                    Some(hand) => following = w.carry_ground(hand, (by, up, ang), CARRY_EASE, dt),
+                    None => w.move_ground(add(by, scale(up, lift)), up, ang, dt),
+                }
             }
             w.step(dt);
             frame += 1;

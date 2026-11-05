@@ -39,6 +39,7 @@ pub mod dynamic_tree;
 pub mod height_field;
 pub mod hull;
 pub mod mesh;
+pub mod field;
 pub mod sphere;
 pub mod tube;
 

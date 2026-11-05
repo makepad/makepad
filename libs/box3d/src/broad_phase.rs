@@ -433,6 +433,7 @@ fn query_tree_for_pairs(
     pair_count: &crate::sync::AtomicIndex,
     pair_capacity: i32,
     fat_aabb: AABB,
+    mask_bits: u64,
     query_tree_type: BodyType,
     query_proxy_key: i32,
     query_shape_index: i32,
@@ -443,7 +444,7 @@ fn query_tree_for_pairs(
     dynamic_tree_query(
         &world.broad_phase.trees[query_tree_type as usize],
         fat_aabb,
-        DEFAULT_MASK_BITS,
+        mask_bits,
         require_all_bits,
         &mut |proxy_id, user_data| {
             // Outer query: userData is a shape index.
@@ -562,8 +563,13 @@ fn find_pairs_task(ctx: &FindPairsCtx, start_index: i32, end_index: i32, worker_
         // Compound shape collision invocation is not supported
         b3_validate!(world.shapes[query_shape_index as usize].shape_type() != ShapeType::Compound);
 
+        // PORT EXTENSION: the mover's own mask prunes the trees, so thousands of a body's shapes that
+        // can't collide with each other aren't visited for each other. A shape in a group may
+        // collide against its mask, so it sees everything (upstream's DEFAULT_MASK_BITS for all).
+        let query_filter = world.shapes[query_shape_index as usize].filter;
+        let mask_bits = if query_filter.group_index == 0 { query_filter.mask_bits } else { DEFAULT_MASK_BITS };
+
         // Query trees. Only dynamic proxies collide with kinematic and static proxies.
-        // Using DEFAULT_MASK_BITS so that Filter::group_index works.
         if query_proxy_type == BodyType::Dynamic {
             query_tree_for_pairs(
                 world,
@@ -572,6 +578,7 @@ fn find_pairs_task(ctx: &FindPairsCtx, start_index: i32, end_index: i32, worker_
                 ctx.pair_count,
                 ctx.move_pair_capacity,
                 fat_aabb,
+                mask_bits,
                 BodyType::Kinematic,
                 query_proxy_key,
                 query_shape_index,
@@ -584,6 +591,7 @@ fn find_pairs_task(ctx: &FindPairsCtx, start_index: i32, end_index: i32, worker_
                 ctx.pair_count,
                 ctx.move_pair_capacity,
                 fat_aabb,
+                mask_bits,
                 BodyType::Static,
                 query_proxy_key,
                 query_shape_index,
@@ -599,6 +607,7 @@ fn find_pairs_task(ctx: &FindPairsCtx, start_index: i32, end_index: i32, worker_
             ctx.pair_count,
             ctx.move_pair_capacity,
             fat_aabb,
+            mask_bits,
             BodyType::Dynamic,
             query_proxy_key,
             query_shape_index,
@@ -763,10 +772,10 @@ fn per_mover_pair_keys(world: &World) -> std::collections::BTreeSet<u64> {
         let fat_aabb = dynamic_tree_get_aabb(base_tree, query_proxy_id);
         let query_shape_index = dynamic_tree_get_user_data(base_tree, query_proxy_id) as i32;
         if query_proxy_type == BodyType::Dynamic {
-            query_tree_for_pairs(world, &mut no_filter, &mut result, &pair_count, capacity, fat_aabb, BodyType::Kinematic, query_proxy_key, query_shape_index, &mut child_hits);
-            query_tree_for_pairs(world, &mut no_filter, &mut result, &pair_count, capacity, fat_aabb, BodyType::Static, query_proxy_key, query_shape_index, &mut child_hits);
+            query_tree_for_pairs(world, &mut no_filter, &mut result, &pair_count, capacity, fat_aabb, DEFAULT_MASK_BITS, BodyType::Kinematic, query_proxy_key, query_shape_index, &mut child_hits);
+            query_tree_for_pairs(world, &mut no_filter, &mut result, &pair_count, capacity, fat_aabb, DEFAULT_MASK_BITS, BodyType::Static, query_proxy_key, query_shape_index, &mut child_hits);
         }
-        query_tree_for_pairs(world, &mut no_filter, &mut result, &pair_count, capacity, fat_aabb, BodyType::Dynamic, query_proxy_key, query_shape_index, &mut child_hits);
+        query_tree_for_pairs(world, &mut no_filter, &mut result, &pair_count, capacity, fat_aabb, DEFAULT_MASK_BITS, BodyType::Dynamic, query_proxy_key, query_shape_index, &mut child_hits);
     }
     result.pair_list.iter().map(|p| shape_pair_key(p.shape_index_a, p.shape_index_b, p.child_index)).collect()
 }

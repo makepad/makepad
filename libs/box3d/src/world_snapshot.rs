@@ -1455,6 +1455,7 @@ fn shape_geo_kind(geom: &ShapeGeometry) -> i32 {
         ShapeGeometry::Mesh(_) => 4,
         ShapeGeometry::Sphere(_) => 5,
         ShapeGeometry::Tube(_) => 6,
+        ShapeGeometry::Field(_) => 7,
     }
 }
 
@@ -1517,6 +1518,7 @@ fn ser_shapes(buf: &mut RecBuffer, world: &World, rec: &mut Recording) {
                 buf.w_f32(capsule.radius);
             }
             ShapeGeometry::Tube(tube) => buf.w_tube(tube),
+            ShapeGeometry::Field(_) => {}
             ShapeGeometry::Hull(hull) => {
                 let gid = rec_intern_hull(rec, hull);
                 buf.w_u32(gid);
@@ -1621,6 +1623,11 @@ fn des_shapes(r: &mut RecCursor, world: &mut World, rdr: &RecReader) {
                     break;
                 }
                 shape.geom = ShapeGeometry::Tube(Arc::new(tube));
+            }
+            // A field is code, with nothing written to read back.
+            7 => {
+                r.ok = false;
+                break;
             }
             3 => {
                 // hull: cloned into the world DB via the registry slot

@@ -2560,6 +2560,7 @@ pub fn world_explode(world: &mut World, explosion_def: &ExplosionDef) {
 
         let (witness_point, distance) = match &shape.geom {
             crate::shape::ShapeGeometry::Tube(tube) => crate::tube::closest_point_on_tube(tube, local_position, true),
+            crate::shape::ShapeGeometry::Field(field) => crate::field::closest_point_on_field(&**field, local_position),
             _ => {
                 let mut proxy_buffer = [MVec3::ZERO; 2];
                 let local_points = [local_position];

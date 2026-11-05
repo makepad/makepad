@@ -427,6 +427,11 @@ impl Renderer {
         self.csm_fit_projection = projection;
     }
 
+    /// Casters the host draws into the Realtime cascades itself.
+    pub fn set_cascade_casters(&mut self, casters: Option<std::rc::Rc<std::cell::RefCell<dyn crate::gpu_lightmap::CascadeCasters>>>) {
+        self.gpu_baker.set_cascade_casters(casters);
+    }
+
     /// Supply the complete caster/receiver bound for Realtime cascade
     /// fitting. This is presentation state and is especially useful for an
     /// imported editor model that is intentionally submitted as a dynamic

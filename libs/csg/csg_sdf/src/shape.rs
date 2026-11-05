@@ -852,10 +852,7 @@ pub fn distance(n: &SdfNode, p: Vec3d) -> f64 {
             (q * q + p.y * p.y).sqrt() - tube
         }
         SdfNode::Capsule { a, b, radius } => {
-            let (a, b) = (Vec3d::new(a[0], a[1], a[2]), Vec3d::new(b[0], b[1], b[2]));
-            let (pa, ba) = (p - a, b - a);
-            let h = (pa.dot(ba) / ba.dot(ba)).clamp(0.0, 1.0);
-            (pa - ba * h).length() - radius
+            crate::strokes::capsule([p.x, p.y, p.z], *a, *b) - radius
         }
         SdfNode::Ellipsoid { radii: r } => {
             let k0 = Vec3d::new(p.x / r[0], p.y / r[1], p.z / r[2]).length();
@@ -900,6 +897,20 @@ mod tests {
 
     fn ball(r: f64, at: P3) -> SdfNode {
         SdfNode::Transform { at, rotate: [0.0; 3], scale: 1.0, of: Box::new(SdfNode::Sphere { radius: r }) }
+    }
+
+    /// A capsule with no length is the sphere at its point, anywhere, in `distance` and `distance_many`.
+    #[test]
+    fn a_capsule_with_no_length_is_a_sphere() {
+        let at = [1.0, 2.0, 3.0];
+        let (capsule, sphere) = (SdfNode::Capsule { a: at, b: at, radius: 1.5 }, ball(1.5, at));
+        let ps = lattice(&([-4.0; 3], [6.0; 3]), 5);
+        let mut many = vec![0.0; ps.len()];
+        distance_many(&capsule, &ps, &mut many);
+        for (p, m) in ps.iter().zip(&many) {
+            let want = distance(&sphere, *p);
+            assert_eq!((distance(&capsule, *p), *m), (want, want), "at {p:?}");
+        }
     }
 
     /// Points on a lattice through `b`, grown a little.

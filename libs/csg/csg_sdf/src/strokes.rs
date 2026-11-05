@@ -448,6 +448,7 @@ fn quant(v: f64) -> i32 {
 }
 
 pub fn capsule(p: P3, a: P3, b: P3) -> f64 {
+    // A segment with no length (a one-point stroke) is its one point.
     let ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
     let ap = [p[0] - a[0], p[1] - a[1], p[2] - a[2]];
     let l = ab[0] * ab[0] + ab[1] * ab[1] + ab[2] * ab[2];

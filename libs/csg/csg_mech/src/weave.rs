@@ -1086,6 +1086,9 @@ pub fn assembly(w: &Weave, density: f64, hz: f64) -> crate::sim::Assembly {
         contact_hertz: 240.0,
         substeps: 8,
         ball: None,
+        shake_about: [0.0; 3],
+        shake_tempo: 0.0,
+        lift: 0.0,
     }
 }
 
@@ -1099,6 +1102,9 @@ pub fn bodies(w: &Weave, density: f64) -> Vec<crate::sim::BodySpec> {
             mass: link_mass(l, density),
             hulls: Vec::new(),
             tubes: vec![(l.pts.clone(), l.r)],
+            balls: Vec::new(),
+            rods: Vec::new(),
+            field: None,
         })
         .collect()
 }

@@ -333,13 +333,13 @@ pub fn assembly(plan: &Plan, parts: &[FinalPart], checks: &[JointCheck], fill: f
             friction: sim::Friction { mu, radius: a.hole.map_or(0.0, |h| h.1), torque: 0.0 },
         })
         .collect();
-    sim::Assembly { bodies, joints, anchors, up: plan.profile.up, sleep: sim::SLEEP_SPEED, workers: 1, contact_margin: 0.0, max_speed: 0.0, contact_hertz: 0.0, substeps: 0, ball: None }
+    sim::Assembly { bodies, joints, anchors, up: plan.profile.up, sleep: sim::SLEEP_SPEED, workers: 1, contact_margin: 0.0, max_speed: 0.0, contact_hertz: 0.0, substeps: 0, ball: None, shake_about: [0.0; 3], shake_tempo: 0.0, lift: 0.0 }
 }
 
 /// A rigid part from its final mesh: the same mass and collision proxies for free and jointed
 /// bodies. All vertices are in the assembly's common frame (mm); free parts have no keep-outs.
 pub fn mesh_body(name: &str, vertices: &[P3], triangles: &[[u32; 3]], density: f64, fill: f64, keep_out: &[(P3, f64)]) -> sim::BodySpec {
-    sim::BodySpec { name: name.into(), mass: mass::mesh_mass(vertices, triangles, density, fill), hulls: proxy_hulls(vertices, keep_out), tubes: Vec::new() }
+    sim::BodySpec { name: name.into(), mass: mass::mesh_mass(vertices, triangles, density, fill), hulls: proxy_hulls(vertices, keep_out), tubes: Vec::new(), balls: Vec::new(), rods: Vec::new(), field: None }
 }
 
 /// A distance-field part as a body, straight from its field: the field is sampled on a grid of cells
@@ -393,7 +393,7 @@ pub fn field_body(name: &str, shape: &makepad_csg_graph::SdfShape, to_frame: &[[
     if centres.is_empty() {
         return Err(format!("{name} has no solid volume to simulate"));
     }
-    Ok(sim::BodySpec { name: name.into(), mass: mass::voxel_mass(&centres, voxel, density, fill), hulls: proxy_hulls(&skin, &[]), tubes: Vec::new() })
+    Ok(sim::BodySpec { name: name.into(), mass: mass::voxel_mass(&centres, voxel, density, fill), hulls: proxy_hulls(&skin, &[]), tubes: Vec::new(), balls: Vec::new(), rods: Vec::new(), field: None })
 }
 
 /// Cells along the longest side of a field part sampled for its body.

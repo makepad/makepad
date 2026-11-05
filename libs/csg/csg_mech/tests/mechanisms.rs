@@ -240,5 +240,37 @@ fn runner_publishes_poses_and_takes_a_grab() {
         assert!(std::time::Instant::now() < until, "Reset must clear the pin and resume");
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
+    // carried: the anchored link goes where the hand takes it and stays there, on the sim's own time
+    let start = r.latest().poses[0].com;
+    r.send(Command::Carry { at: [0.0, 0.0, 30.0], axis: [1.0, 0.0, 0.0], angle: 0.0 });
+    let began = r.latest().time;
+    loop {
+        let s = r.latest();
+        let by = makepad_csg_mech::geom::len(makepad_csg_mech::geom::sub(s.poses[0].com, start));
+        if (by - 30.0).abs() < 1.0 {
+            break;
+        }
+        assert!(s.time < began + 2.0, "the carried link is {by} mm from where it was, after {} s", s.time - began);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    // shaken where the hand left it, and back there when the shake stops
+    let carried = r.latest().poses[0].com;
+    let off = |at: makepad_csg_mech::geom::P3| makepad_csg_mech::geom::len(makepad_csg_mech::geom::sub(at, carried));
+    r.send(Command::Shake(true));
+    let began = r.latest().time;
+    while off(r.latest().poses[0].com) < 2.0 {
+        assert!(r.latest().time < began + 2.0, "a shake doesn't move the carried link");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    r.send(Command::Shake(false));
+    let began = r.latest().time;
+    loop {
+        let s = r.latest();
+        if off(s.poses[0].com) <= 1.0 {
+            break;
+        }
+        assert!(s.time < began + 2.0, "the shake left the link {} mm from where the hand did", off(s.poses[0].com));
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
     let _ = r.take_events();
 }

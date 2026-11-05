@@ -269,8 +269,8 @@ use crate::id::{ContactId, ShapeId};
 use crate::id_pool::{alloc_id, free_id};
 use crate::manifold::make_feature_id;
 use crate::math_functions::{
-    add, inv_mul_world_transforms, make_matrix_from_quat, max_float, mul_mv, mul_world_transforms, neg, offset_pos,
-    rotate_vector, sub, sub_pos, Vec3 as MVec3, WorldTransform,
+    add, cross, inv_mul_world_transforms, inv_rotate_vector, make_matrix_from_quat, max_float, mul_mv, mul_sv, mul_world_transforms, neg, offset_pos,
+    rotate_vector, sub, sub_pos, transform_world_point, Vec3 as MVec3, WorldTransform,
 };
 use crate::physics_world::{World, AWAKE_SET, DISABLED_SET, STATIC_SET};
 use crate::shape::{get_shape_materials, Shape, ShapeGeometry};
@@ -334,7 +334,7 @@ pub(crate) fn mix_restitution(
 // b3AddType calls in b3InitializeContactRegisters.
 fn contact_register(type_a: ShapeType, type_b: ShapeType) -> (bool, bool) {
     use ShapeType::*;
-    const PAIRS: [(ShapeType, ShapeType); 19] = [
+    const PAIRS: [(ShapeType, ShapeType); 20] = [
         (Sphere, Sphere),
         (Capsule, Sphere),
         (Capsule, Capsule),
@@ -354,6 +354,7 @@ fn contact_register(type_a: ShapeType, type_b: ShapeType) -> (bool, bool) {
         (Tube, Sphere),
         (Tube, Capsule),
         (Tube, Hull),
+        (Field, Sphere),
     ];
 
     for &(t1, t2) in PAIRS.iter() {
@@ -710,6 +711,25 @@ pub fn destroy_contact(world: &mut World, contact_id: i32, wake_bodies: bool) {
     }
 }
 
+/// PORT EXTENSION: how far `point_b` of body B goes against body A in a step, in A's frame, from
+/// their velocities as they are.
+fn step_motion_in_a(world: &World, body_a: i32, xf_a: WorldTransform, body_b: i32, xf_b: WorldTransform, point_b: Vec3) -> Vec3 {
+    if world.inv_dt == 0.0 {
+        return Vec3::ZERO;
+    }
+    let at = transform_world_point(xf_b, point_b);
+    let velocity = |id: i32| {
+        let body = &world.bodies[id as usize];
+        if body.set_index != AWAKE_SET {
+            return Vec3::ZERO;
+        }
+        let set = &world.solver_sets[AWAKE_SET as usize];
+        let (state, sim) = (&set.body_states[body.local_index as usize], &set.body_sims[body.local_index as usize]);
+        add(state.linear_velocity, cross(state.angular_velocity, sub_pos(at, sim.center)))
+    };
+    inv_rotate_vector(xf_a.q, mul_sv(1.0 / world.inv_dt, sub(velocity(body_b), velocity(body_a))))
+}
+
 // Standalone like C (see the note on collide_hulls).
 #[inline(never)]
 fn compute_convex_manifold(
@@ -756,6 +776,17 @@ fn compute_convex_manifold(
             shape_a.as_sphere(),
             shape_b.as_sphere(),
             transform_b_to_a,
+            world.speculative_distance,
+        );
+    } else if type_a == ShapeType::Field {
+        b3_assert!(type_b == ShapeType::Sphere);
+        crate::field::collide_field_and_sphere(
+            &mut geom_manifold,
+            point_capacity,
+            shape_a.as_field(),
+            shape_b.as_sphere(),
+            transform_b_to_a,
+            step_motion_in_a(world, shape_a.body_id, xf_a, shape_b.body_id, xf_b, shape_b.as_sphere().center),
             world.speculative_distance,
         );
     } else if type_a == ShapeType::Capsule {

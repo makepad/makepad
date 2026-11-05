@@ -105,7 +105,7 @@ fn run(scene: Scene, w: &Weave, seconds: f64, workers: u32, margin: f64, cap: bo
             floor = Some(if scene == Scene::Drop { -20.0 } else { -60.0 });
         }
     }
-    let asm = Assembly { bodies, joints: Vec::new(), anchors, up, sleep: 2.0, workers, contact_margin: margin, max_speed: if cap { base.max_speed } else { 0.0 }, contact_hertz: hertz, substeps, ball: None };
+    let asm = Assembly { bodies, joints: Vec::new(), anchors, up, sleep: 2.0, workers, contact_margin: margin, max_speed: if cap { base.max_speed } else { 0.0 }, contact_hertz: hertz, substeps, ball: None, shake_about: [0.0; 3], shake_tempo: 0.0, lift: 0.0 };
     let mut mw = MechWorld::new(&asm, gravity, floor);
     if scene == Scene::Drape {
         // a static ball under the middle of the cloth

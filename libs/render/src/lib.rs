@@ -72,7 +72,7 @@ pub use clustered::{ClusterConfig, ClusterStats};
 pub use fast_gi::{GiMode, GiConfig, GiStats, GiDebug, GiInstance, GiMesh, GiField};
 pub use local_shadows::{LocalShadowConfig, LocalShadowStats};
 pub use gpu_lightmap::{
-    dynamic_shadow_tiers, CsmConfig, DynamicShadowTiers, GpuLightmapMode, GpuLmMover,
+    dynamic_shadow_tiers, CascadeCasters, CascadeTile, CsmConfig, DynamicShadowTiers, GpuLightmapMode, GpuLmMover,
     GpuLmSkin, DEFAULT_CSM_CONFIG,
 };
 pub use geometry::*;

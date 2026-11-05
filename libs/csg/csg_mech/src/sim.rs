@@ -11,13 +11,14 @@
 use crate::geom::*;
 use crate::mass::MassProps;
 use makepad_box3d::body::*;
+use makepad_box3d::field::DistanceField;
 use makepad_box3d::hull::create_hull;
 use makepad_box3d::id::{BodyId, JointId};
 use makepad_box3d::joint::*;
-use makepad_box3d::math_functions::{make_quat_from_axis_angle, to_pos, to_vec3, vec3, Matrix3, Quat, Transform, Vec3, WorldTransform};
+use makepad_box3d::math_functions::{conjugate, length, make_quat_from_axis_angle, mul_quat, rotate_vector, to_pos, to_vec3, vec3, Matrix3, Quat, Transform, Vec3, WorldTransform, AABB};
 use makepad_box3d::physics_world::*;
 use makepad_box3d::revolute_joint::*;
-use makepad_box3d::shape::{create_hull_shape, create_tube_shape, shape_get_body};
+use makepad_box3d::shape::{create_capsule_shape, create_field_shape, create_hull_shape, create_sphere_shape, create_tube_shape, shape_get_body};
 use makepad_box3d::spherical_joint::*;
 use makepad_box3d::types::*;
 
@@ -114,7 +115,49 @@ pub struct BodySpec {
     pub hulls: Vec<Vec<P3>>,
     /// Closed tubes (model frame: centreline loop, radius) for collision: the exact solid of a link.
     pub tubes: Vec<(Vec<P3>, f64)>,
+    /// Balls (model frame: centre, radius): the body's solid against a [`field`](Self::field).
+    pub balls: Vec<(P3, f64)>,
+    /// Capsules (model frame: ends, radius) that meet only other rods: a coarse solid that keeps
+    /// bodies made of balls from passing through each other.
+    pub rods: Vec<(P3, P3, f64)>,
+    /// The body's solid against other bodies' balls. Its hulls and tubes then meet only other
+    /// hulls and tubes and the floor.
+    pub field: Option<SolidField>,
 }
+
+/// A solid given by its distance (model frame, mm), as [`BodySpec::field`].
+#[derive(Clone, Debug)]
+pub struct SolidField(pub std::sync::Arc<dyn DistanceField>);
+
+/// The one solid is equal to itself; two queries can't be compared.
+impl PartialEq for SolidField {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+/// A field's solid in its body's frame.
+#[derive(Debug)]
+struct AtBody {
+    field: SolidField,
+    centre: Vec3,
+}
+
+impl DistanceField for AtBody {
+    fn distance(&self, p: Vec3) -> (f32, Vec3) {
+        self.field.0.distance(vec3(p.x + self.centre.x, p.y + self.centre.y, p.z + self.centre.z))
+    }
+    fn bounds(&self) -> AABB {
+        let b = self.field.0.bounds();
+        let c = self.centre;
+        AABB { lower_bound: vec3(b.lower_bound.x - c.x, b.lower_bound.y - c.y, b.lower_bound.z - c.z), upper_bound: vec3(b.upper_bound.x - c.x, b.upper_bound.y - c.y, b.upper_bound.z - c.z) }
+    }
+}
+
+const CAT_SOLID: u64 = 1;
+const CAT_BALL: u64 = 2;
+const CAT_FIELD: u64 = 4;
+const CAT_ROD: u64 = 8;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum JointKind {
@@ -175,6 +218,13 @@ pub struct Assembly {
     pub substeps: u32,
     /// A fixed ball (centre, radius) to drape over.
     pub ball: Option<(P3, f64)>,
+    /// A shake's turn is about this point.
+    pub shake_about: P3,
+    /// A shake's side to side runs this many times faster (0: 1): a shake is about 0.2 g at 1.
+    pub shake_tempo: f64,
+    /// A moment after the start, the held anchors rise this far (mm): what they carry comes off the floor,
+    /// and what only stood there stays behind.
+    pub lift: f64,
 }
 
 impl Assembly {
@@ -341,7 +391,6 @@ pub struct MechWorld {
     frozen: Vec<(usize, (f32, f32))>,
     pub gravity: P3,
     time: f64,
-    ground_pose: (P3, f64),
     substeps: i32,
     /// Per body: its shapes, its reach from its centre of mass (mm), and whether it is sliding.
     shapes: Vec<Vec<makepad_box3d::id::ShapeId>>,
@@ -352,6 +401,9 @@ pub struct MechWorld {
     /// The assembly's speed cap, mm/s (0: none).
     max_speed: f64,
 }
+
+/// How near the hand the held ground counts as there (mm).
+const CARRY_THERE: f64 = 0.01;
 
 impl MechWorld {
     pub fn new(asm: &Assembly, gravity: P3, floor: Option<f64>) -> MechWorld {
@@ -390,6 +442,10 @@ impl MechWorld {
             sd.enable_hit_events = true;
             sd.update_body_mass = false;
             sd.user_data = i as u64;
+            if b.field.is_some() {
+                sd.filter.category_bits = CAT_SOLID;
+                sd.filter.mask_bits = CAT_SOLID;
+            }
             let mut own = Vec::new();
             for h in &b.hulls {
                 let pts: Vec<Vec3> = h.iter().map(|p| vf(sub(*p, b.mass.com))).collect();
@@ -399,9 +455,29 @@ impl MechWorld {
                 let tube = Tube { points: pts.iter().map(|p| vf(sub(*p, b.mass.com))).collect(), radius: *r as f32 };
                 own.push(create_tube_shape(&mut world, id, &sd, &tube));
             }
+            // These come in the thousands: nothing listens for each one's contacts.
+            sd.enable_contact_events = false;
+            sd.enable_hit_events = false;
+            if let Some(field) = &b.field {
+                sd.filter.category_bits = CAT_FIELD;
+                sd.filter.mask_bits = CAT_BALL;
+                let solid: std::sync::Arc<dyn DistanceField> = std::sync::Arc::new(AtBody { field: field.clone(), centre: vf(b.mass.com) });
+                own.push(create_field_shape(&mut world, id, &sd, &solid));
+            }
+            sd.filter.category_bits = CAT_BALL;
+            sd.filter.mask_bits = CAT_FIELD;
+            for (c, r) in &b.balls {
+                own.push(create_sphere_shape(&mut world, id, &sd, &Sphere { center: vf(sub(*c, b.mass.com)), radius: *r as f32 }));
+            }
+            sd.filter.category_bits = CAT_ROD;
+            sd.filter.mask_bits = CAT_ROD;
+            for (p, q, r) in &b.rods {
+                own.push(create_capsule_shape(&mut world, id, &sd, &Capsule { center1: vf(sub(*p, b.mass.com)), center2: vf(sub(*q, b.mass.com)), radius: *r as f32 }));
+            }
             shapes.push(own);
             let far = b.hulls.iter().flatten().map(|p| len(sub(*p, b.mass.com))).fold(0.0, f64::max);
-            reach.push(b.tubes.iter().flat_map(|(pts, r)| pts.iter().map(move |p| len(sub(*p, b.mass.com)) + r)).fold(far, f64::max));
+            let far = b.tubes.iter().flat_map(|(pts, r)| pts.iter().map(move |p| len(sub(*p, b.mass.com)) + r)).fold(far, f64::max);
+            reach.push(b.balls.iter().map(|(c, r)| len(sub(*c, b.mass.com)) + r).fold(far, f64::max));
             let m = &b.mass;
             let inertia = Matrix3 {
                 cx: vec3(m.inertia[0][0] as f32, m.inertia[1][0] as f32, m.inertia[2][0] as f32),
@@ -476,6 +552,7 @@ impl MechWorld {
             let mut sd = default_shape_def();
             sd.base_material = material(MAT_PLATE);
             sd.user_data = u64::MAX;
+            sd.filter.mask_bits = !CAT_ROD;
             create_hull_shape(&mut world, id, &sd, &makepad_box3d::hull::make_box_hull(GROUND_HALF_SIZE, GROUND_HALF_SIZE, GROUND_HALF_THICKNESS as f32));
             id
         });
@@ -485,7 +562,7 @@ impl MechWorld {
             neighbours[j.b].push(j.a);
         }
         let sliding = vec![false; bodies.len()];
-        let mut mw = MechWorld { world, ground, bodies, joints, rest, grab: None, pins: Vec::new(), neighbours, floor: floor_id, anchors, frozen: Vec::new(), gravity, time: 0.0, ground_pose: ([0.0; 3], 0.0), substeps: if asm.substeps > 0 { asm.substeps as i32 } else { 4 }, shapes, reach, sliding, sleeps: asm.sleep > 0.0, max_speed: asm.max_speed };
+        let mut mw = MechWorld { world, ground, bodies, joints, rest, grab: None, pins: Vec::new(), neighbours, floor: floor_id, anchors, frozen: Vec::new(), gravity, time: 0.0, substeps: if asm.substeps > 0 { asm.substeps as i32 } else { 4 }, shapes, reach, sliding, sleeps: asm.sleep > 0.0, max_speed: asm.max_speed };
         if let Some((c, r)) = asm.ball {
             mw.add_ball(c, r);
         }
@@ -566,9 +643,46 @@ impl MechWorld {
 
     /// Move the held ground (anchors): a translation and a turn about `axis` through the origin.
     pub fn move_ground(&mut self, at: P3, axis: P3, ang: f64, dt: f64) {
-        let q = make_quat_from_axis_angle(vf(norm(axis)), ang as f32);
+        self.set_ground(at, make_quat_from_axis_angle(vf(norm(axis)), ang as f32), dt);
+    }
+
+    /// The held ground where a hand has it (`hand`: a move, and a turn about an axis through the
+    /// origin), shaken there (`shake`: the same, done first). It goes at the speed that gets it
+    /// there in `ease` seconds, and what it holds no faster than anything may go: past that it
+    /// would drag on its welds. Answers whether it is still on its way: when it isn't, it lands in
+    /// this step and one more such call stops it.
+    pub fn carry_ground(&mut self, hand: (P3, P3, f64), shake: (P3, P3, f64), ease: f64, dt: f64) -> bool {
+        let (at, axis, ang) = (hand.0, norm(hand.1), hand.2);
+        let turn = |axis: P3, ang: f64| make_quat_from_axis_angle(vf(norm(axis)), ang as f32);
+        let (at, q) = (add(at, rotate(shake.0, axis, ang)), mul_quat(turn(axis, ang), turn(shake.1, shake.2)));
+        let left = self.held_move(WorldTransform { p: to_pos(vf(at)), q });
+        let time = if left < CARRY_THERE {
+            dt
+        } else if self.max_speed > 0.0 {
+            ease.max(left / self.max_speed)
+        } else {
+            ease
+        };
+        self.set_ground(at, q, time);
+        left >= CARRY_THERE
+    }
+
+    /// The furthest what the ground holds goes on the way to `to` (mm).
+    fn held_move(&self, to: WorldTransform) -> f64 {
+        let now = body_get_transform(&self.world, self.ground);
+        let rel = mul_quat(conjugate(now.q), to.q);
+        let turn = 2.0 * (length(rel.v) as f64).atan2(rel.s.abs() as f64);
+        self.anchors
+            .iter()
+            .map(|&(i, _)| {
+                let p = |t: WorldTransform| add(pf(to_vec3(t.p)), pf(rotate_vector(t.q, vf(self.rest[i]))));
+                len(sub(p(to), p(now))) + turn * self.reach[i]
+            })
+            .fold(0.0, f64::max)
+    }
+
+    fn set_ground(&mut self, at: P3, q: Quat, dt: f64) {
         body_set_target_transform(&mut self.world, self.ground, WorldTransform { p: to_pos(vf(at)), q }, dt as f32, true);
-        self.ground_pose = (at, ang);
         // the ground's joints do not join islands: what hangs from it is woken to follow it
         for i in 0..self.anchors.len() {
             let b = self.bodies[self.anchors[i].0];

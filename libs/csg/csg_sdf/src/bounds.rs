@@ -502,6 +502,18 @@ mod tests {
         SdfNode::Transform { at: p, rotate: [0.0; 3], scale: 1.0, of: Box::new(of) }
     }
 
+    /// A one-point stroke culls to a dab on the solid: its capsule has no length.
+    #[test]
+    fn a_one_point_stroke_culls_to_a_dab() {
+        let mut strokes = crate::strokes::Strokes::new();
+        strokes.push(crate::strokes::StrokeOp::Raise, 2.0, 1.0, &[[10.0, 0.0, 0.0]]);
+        let node = sculpt_in(&strokes, &SdfNode::Sphere { radius: 10.0 }, &([-20.0; 3], [20.0; 3])).expect("the solid");
+        let d = |x: f64| distance(&node, Vec3d::new(x, 0.0, 0.0));
+        assert!(d(0.0) < -9.0, "inside the solid: {}", d(0.0));
+        assert!(d(10.0) < 0.0, "the dab holds the stroke's point: {}", d(10.0));
+        assert!(d(30.0) > 15.0, "far off: {}", d(30.0));
+    }
+
     /// A blended union, a shell and a cut: a small vase.
     fn vase(neck: f64) -> SdfNode {
         let body = SdfNode::Combine {

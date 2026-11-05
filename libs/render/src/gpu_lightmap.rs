@@ -325,6 +325,28 @@ pub struct CasterSlice<'a> {
     pub blocks: &'a [CasterBlock],
 }
 
+/// Casters a host draws itself: geometry the renderer holds no mesh of. The cascade pass asks
+/// them per cascade, after its own casters.
+pub trait CascadeCasters {
+    /// Changes when what they draw changes: the cascades are kept while this and their fit hold.
+    fn revision(&self) -> u64;
+    /// Draws into one cascade's tile of the open pass; how many draws it added.
+    fn draw_cascade(&mut self, cx: &mut CxDraw, at: &CascadeTile) -> usize;
+}
+
+/// One cascade of the pass being drawn. With z01 the cascade's own depth, a caster's clip position
+/// is `(ndc_x * tile.x + tile.z, ndc_y * tile.y + tile.w, z01 * depth.0 + depth.1, 1)`.
+pub struct CascadeTile<'a> {
+    pub cascade: &'a crate::shadow_csm::CsmCascade,
+    /// The next finer cascade, which may already hold a caster's whole shadow
+    /// ([`crate::shadow_csm::cascade_holds_shadow`]).
+    pub finer: Option<&'a crate::shadow_csm::CsmCascade>,
+    pub tile: Vec4f,
+    pub depth: (f32, f32),
+    /// The tile in target pixels, where the backend applies it.
+    pub scissor: Option<[u32; 4]>,
+}
+
 /// Runs of up to 32 consecutive casters.
 pub fn caster_blocks(casters: &[GpuBakeMesh]) -> Vec<CasterBlock> {
     casters.chunks(32).enumerate().map(|(k, run)| {
@@ -819,6 +841,8 @@ pub struct GpuLightmapBaker {
     /// shadow, a settled view drawn for anything else). Anything that
     /// changes what a caster draws clears it ([`Self::csm_casters_changed`]).
     csm_drawn: Option<(CsmDrawn, u64)>,
+    /// What the host draws into the cascades itself.
+    cascade_casters: Option<std::rc::Rc<std::cell::RefCell<dyn CascadeCasters>>>,
 }
 
 /// The inputs of one cascade drawing, compared whole: the fitted cascades
@@ -829,6 +853,7 @@ struct CsmDrawn {
     frame: [crate::shadow_csm::CsmCascade; CSM_CASCADES],
     res: usize,
     lookup: Option<(TextureId, [u32; 4], u64)>,
+    casters: u64,
 }
 
 
@@ -870,6 +895,7 @@ impl Default for GpuLightmapBaker {
             element_lookup: None,
             element_lookup_casters: 0,
             csm_drawn: None,
+            cascade_casters: None,
         }
     }
 }
@@ -1426,6 +1452,11 @@ impl GpuLightmapBaker {
     /// GPU device (`Renderer::gpu_reset`), whose targets came back empty.
     pub fn debug_redirty(&mut self) {
         self.dirty = true;
+        self.csm_drawn = None;
+    }
+
+    pub(crate) fn set_cascade_casters(&mut self, casters: Option<std::rc::Rc<std::cell::RefCell<dyn CascadeCasters>>>) {
+        self.cascade_casters = casters;
         self.csm_drawn = None;
     }
 
@@ -1994,6 +2025,7 @@ impl GpuLightmapBaker {
                 frame: frame.cascades,
                 res: self.csm_res,
                 lookup: self.element_lookup.as_ref().map(|(t, c)| (t.texture_id(), c.map(f32::to_bits), self.element_lookup_casters)),
+                casters: self.cascade_casters.as_ref().map_or(0, |c| c.borrow().revision()),
             };
             let kept = movers.is_empty() && self.csm_drawn.as_ref().is_some_and(|(d, _)| *d == drawn);
             if kept {
@@ -2900,6 +2932,7 @@ impl GpuLightmapBaker {
         self.csm_mover_bounds.extend(
             movers.iter().map(|m| crate::lightmap::world_bounds(&m.transform, (m.min, m.max))),
         );
+        let host_casters = self.cascade_casters.clone();
         let mut draws_n = 0usize;
         // Casters that reach past their cascade's tile (drawn after the rest
         // through the discarding pipeline), by index.
@@ -3145,6 +3178,10 @@ impl GpuLightmapBaker {
                 if ds.draw_vars.can_instance() {
                     cx.add_instance(&mut ds.draw_vars);
                 }
+            }
+            if let Some(casters) = &host_casters {
+                let finer = (ci > 0).then(|| &frame.cascades[ci - 1]);
+                draws_n += casters.borrow_mut().draw_cascade(cx, &CascadeTile { cascade: casc, finer, tile, depth: CSM_DEPTH_WINDOW, scissor });
             }
         }
         cx.exit_draw_label(outer_owner);

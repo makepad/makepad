@@ -14,6 +14,8 @@ pub enum ShapeGeometry {
     Capsule(Capsule),
     /// A closed loop of capsule segments sharing one shape and contact per pair.
     Tube(Arc<Tube>),
+    /// A solid given by a distance query.
+    Field(Arc<dyn crate::field::DistanceField>),
     Sphere(Sphere),
     Hull(Arc<HullData>),
     Mesh(Mesh),
@@ -100,6 +102,7 @@ impl Shape {
         match &self.geom {
             ShapeGeometry::Capsule(_) => ShapeType::Capsule,
             ShapeGeometry::Tube(_) => ShapeType::Tube,
+            ShapeGeometry::Field(_) => ShapeType::Field,
             ShapeGeometry::Sphere(_) => ShapeType::Sphere,
             ShapeGeometry::Hull(_) => ShapeType::Hull,
             ShapeGeometry::Mesh(_) => ShapeType::Mesh,
@@ -199,6 +202,13 @@ impl Shape {
         }
     }
     #[inline]
+    pub fn as_field(&self) -> &dyn crate::field::DistanceField {
+        match &self.geom {
+            ShapeGeometry::Field(f) => &**f,
+            _ => panic!("shape is not a field"),
+        }
+    }
+    #[inline]
     pub fn as_hull(&self) -> &Arc<HullData> {
         match &self.geom {
             ShapeGeometry::Hull(h) => h,
@@ -276,6 +286,11 @@ fn compute_shape_margin(shape: &Shape) -> f32 {
             margin = max_extent_sqr.sqrt() + tube.radius;
         }
 
+        ShapeGeometry::Field(field) => {
+            let bounds = field.bounds();
+            margin = 0.5 * crate::math_functions::distance(bounds.upper_bound, bounds.lower_bound);
+        }
+
         ShapeGeometry::Hull(hull) => {
             let points = &hull.points;
             let mut max_extent_sqr = 0.0;
@@ -327,6 +342,8 @@ pub enum ShapeGeometryInput<'a> {
     Capsule(&'a Capsule),
     /// Closed capsule loop copied into shared geometry on creation.
     Tube(&'a Tube),
+    /// Shared with the caller.
+    Field(&'a Arc<dyn crate::field::DistanceField>),
     Sphere(&'a Sphere),
     Hull(&'a Arc<HullData>),
     Mesh(&'a Arc<crate::types::MeshData>),
@@ -339,6 +356,7 @@ impl ShapeGeometryInput<'_> {
         match self {
             ShapeGeometryInput::Capsule(_) => ShapeType::Capsule,
             ShapeGeometryInput::Tube(_) => ShapeType::Tube,
+            ShapeGeometryInput::Field(_) => ShapeType::Field,
             ShapeGeometryInput::Sphere(_) => ShapeType::Sphere,
             ShapeGeometryInput::Hull(_) => ShapeType::Hull,
             ShapeGeometryInput::Mesh(_) => ShapeType::Mesh,
@@ -375,6 +393,7 @@ fn create_shape_internal(
     let geom = match geometry {
         ShapeGeometryInput::Capsule(capsule) => ShapeGeometry::Capsule(**capsule),
         ShapeGeometryInput::Tube(tube) => ShapeGeometry::Tube(Arc::new((**tube).clone())),
+        ShapeGeometryInput::Field(field) => ShapeGeometry::Field(Arc::clone(field)),
 
         ShapeGeometryInput::Compound(compound) => {
             // Compounds must be a static and not a sensor
@@ -645,6 +664,12 @@ pub fn create_tube_shape(world: &mut World, body_id: BodyId, def: &ShapeDef, tub
         });
     }
     shape_id
+}
+
+/// Create a shape for a solid given by a distance query. It collides with spheres. A recording or
+/// snapshot of its world can't hold it: the query is code, with no data to write.
+pub fn create_field_shape(world: &mut World, body_id: BodyId, def: &ShapeDef, field: &Arc<dyn crate::field::DistanceField>) -> ShapeId {
+    create_shape(world, body_id, def, &ShapeGeometryInput::Field(field), Transform::IDENTITY, Vec3::ONE, false)
 }
 
 pub fn create_hull_shape(world: &mut World, body_id: BodyId, def: &ShapeDef, hull: &Arc<HullData>) -> ShapeId {
@@ -948,6 +973,7 @@ pub fn compute_shape_aabb(shape: &Shape, transform: Transform) -> AABB {
     match &shape.geom {
         ShapeGeometry::Capsule(capsule) => crate::capsule::compute_capsule_aabb(capsule, transform),
         ShapeGeometry::Tube(tube) => crate::tube::compute_tube_aabb(tube, transform),
+        ShapeGeometry::Field(field) => crate::field::compute_field_aabb(&**field, transform),
         ShapeGeometry::Compound(compound) => crate::compound::compute_compound_aabb(compound, transform),
         ShapeGeometry::HeightField(height_field) => {
             crate::height_field::compute_height_field_aabb(height_field, transform)
@@ -992,6 +1018,9 @@ pub fn compute_swept_shape_aabb(shape: &Shape, sweep: &Sweep, time: f32) -> AABB
     match &shape.geom {
         ShapeGeometry::Capsule(capsule) => crate::capsule::compute_swept_capsule_aabb(capsule, xf1, xf2),
         ShapeGeometry::Tube(tube) => crate::tube::compute_swept_tube_aabb(tube, xf1, xf2),
+        ShapeGeometry::Field(field) => {
+            crate::math_functions::aabb_union(crate::field::compute_field_aabb(&**field, xf1), crate::field::compute_field_aabb(&**field, xf2))
+        }
         ShapeGeometry::Hull(hull) => crate::hull::compute_swept_hull_aabb(hull, xf1, xf2),
         ShapeGeometry::Sphere(sphere) => crate::sphere::compute_swept_sphere_aabb(sphere, xf1, xf2),
         _ => {
@@ -1005,6 +1034,7 @@ pub fn get_shape_centroid(shape: &Shape) -> Vec3 {
     match &shape.geom {
         ShapeGeometry::Capsule(capsule) => lerp(capsule.center1, capsule.center2, 0.5),
         ShapeGeometry::Tube(tube) => crate::tube::compute_tube_mass(tube, 1.0).center,
+        ShapeGeometry::Field(field) => crate::math_functions::aabb_center(field.bounds()),
         ShapeGeometry::Compound(compound) => {
             let aabb = crate::compound::compute_compound_aabb(compound, Transform::IDENTITY);
             crate::math_functions::aabb_center(aabb)
@@ -1091,6 +1121,13 @@ pub fn compute_shape_extent(shape: &Shape, local_center: Vec3) -> ShapeExtent {
             extent.max_extent = add(extent.max_extent, vec3(tube.radius, tube.radius, tube.radius));
         }
 
+        ShapeGeometry::Field(field) => {
+            let bounds = field.bounds();
+            let size = sub(bounds.upper_bound, bounds.lower_bound);
+            extent.min_extent = 0.5 * min_float(min_float(size.x, size.y), size.z);
+            extent.max_extent = abs(sub(crate::aabb::farthest_point_on_aabb(bounds, local_center), local_center));
+        }
+
         ShapeGeometry::Compound(compound) => {
             // This shouldn't be needed but here for completeness
             let aabb = crate::compound::compute_compound_aabb(compound, Transform::IDENTITY);
@@ -1139,6 +1176,7 @@ pub fn ray_cast_shape(shape: &Shape, transform: Transform, input: &RayCastInput)
     let mut output = match &shape.geom {
         ShapeGeometry::Capsule(capsule) => crate::capsule::ray_cast_capsule(capsule, &local_input),
         ShapeGeometry::Tube(tube) => crate::tube::ray_cast_tube(tube, &local_input),
+        ShapeGeometry::Field(field) => crate::field::ray_cast_field(&**field, &local_input),
         ShapeGeometry::Compound(compound) => crate::compound::ray_cast_compound(compound, &local_input),
         ShapeGeometry::Sphere(sphere) => crate::sphere::ray_cast_sphere(sphere, &local_input),
         ShapeGeometry::Hull(hull) => crate::hull::ray_cast_hull(hull, &local_input),
@@ -1174,6 +1212,7 @@ pub fn shape_cast_shape(shape: &Shape, transform: Transform, input: &ShapeCastIn
     let mut output = match &shape.geom {
         ShapeGeometry::Capsule(capsule) => crate::capsule::shape_cast_capsule(capsule, &local_input),
         ShapeGeometry::Tube(tube) => crate::tube::shape_cast_tube(tube, &local_input),
+        ShapeGeometry::Field(_) => CastOutput::default(),
         ShapeGeometry::Compound(compound) => crate::compound::shape_cast_compound(compound, &local_input),
         ShapeGeometry::HeightField(height_field) => {
             crate::height_field::shape_cast_height_field(height_field, &local_input)
@@ -1192,6 +1231,7 @@ pub fn overlap_shape(shape: &Shape, transform: Transform, proxy: &ShapeProxy) ->
     match &shape.geom {
         ShapeGeometry::Capsule(capsule) => crate::capsule::overlap_capsule(capsule, transform, proxy),
         ShapeGeometry::Tube(tube) => crate::tube::overlap_tube(tube, transform, proxy),
+        ShapeGeometry::Field(field) => crate::field::overlap_field(&**field, transform, proxy),
         ShapeGeometry::Compound(compound) => crate::compound::overlap_compound(compound, transform, proxy),
         ShapeGeometry::HeightField(height_field) => {
             crate::height_field::overlap_height_field(height_field, transform, proxy)
@@ -1222,6 +1262,7 @@ pub fn collide_mover(
     let plane_count = match &shape.geom {
         ShapeGeometry::Capsule(capsule) => crate::capsule::collide_mover_and_capsule(&mut planes[0], capsule, &local_mover),
         ShapeGeometry::Tube(tube) => crate::tube::collide_mover_and_tube(&mut planes[..plane_capacity as usize], tube, &local_mover),
+        ShapeGeometry::Field(_) => 0,
         ShapeGeometry::Compound(compound) => {
             crate::compound::collide_mover_and_compound(&mut planes[..plane_capacity as usize], compound, &local_mover)
         }
@@ -1298,7 +1339,7 @@ fn destroy_shape_allocation_for_shape_change(world: &mut World, shape_id: i32) {
         remove_hull_from_database(world, &hull);
     }
 
-    if matches!(&world.shapes[shape_id as usize].geom, ShapeGeometry::Tube(_)) {
+    if matches!(&world.shapes[shape_id as usize].geom, ShapeGeometry::Tube(_) | ShapeGeometry::Field(_)) {
         world.shapes[shape_id as usize].geom = ShapeGeometry::default();
     }
 
@@ -1332,6 +1373,8 @@ pub fn make_shape_proxy<'a>(shape: &'a Shape, buffer: &'a mut [Vec3; 2]) -> Shap
         ShapeGeometry::Hull(hull) => ShapeProxy { points: &hull.points, radius: 0.0 },
 
         ShapeGeometry::Tube(_) => panic!("a tube requires one convex proxy per segment"),
+
+        ShapeGeometry::Field(_) => panic!("a field has no convex proxy"),
 
         _ => {
             b3_assert!(false);
@@ -2067,6 +2110,11 @@ pub fn shape_get_closest_point(world: &World, shape_id: ShapeId, target: Vec3) -
         return transform_point(transform, point);
     }
 
+    if let ShapeGeometry::Field(field) = &shape.geom {
+        let (point, _) = crate::field::closest_point_on_field(&**field, inv_transform_point(transform, target));
+        return transform_point(transform, point);
+    }
+
     let mut buffer = [Vec3::ZERO; 2];
     let input = DistanceInput {
         proxy_a: make_shape_proxy(shape, &mut buffer),
@@ -2388,6 +2436,11 @@ fn mesh_time_of_impact_fcn(ctx: &mut MeshImpactContext, a: Vec3, b: Vec3, c: Vec
 }
 
 pub fn shape_time_of_impact(shape_a: &Shape, shape_b: &Shape, sweep_a: &Sweep, sweep_b: &Sweep, max_fraction: f32, speculative: f32) -> TOIOutput {
+    // A field has no surface to sweep against: its contacts catch what moves, ahead by the speculative distance.
+    if shape_a.shape_type() == ShapeType::Field || shape_b.shape_type() == ShapeType::Field {
+        return TOIOutput { state: crate::types::TOIState::Separated, fraction: max_fraction, ..Default::default() };
+    }
+
     if shape_a.shape_type() == ShapeType::Tube || shape_b.shape_type() == ShapeType::Tube {
         return crate::tube::tube_time_of_impact(shape_a, shape_b, sweep_a, sweep_b, max_fraction);
     }

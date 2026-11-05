@@ -69,6 +69,10 @@ use crate::shape::{should_shapes_collide, Shape, ShapeGeometry};
 use crate::types::{CustomFilterFcn, SensorBeginTouchEvent, SensorEndTouchEvent, ShapeProxy, ShapeType};
 
 fn overlap_sensor(sensor_shape: &Shape, sensor_transform: Transform, visitor_shape: &Shape, visitor_transform: Transform) -> bool {
+    if matches!(&sensor_shape.geom, ShapeGeometry::Field(_)) || matches!(&visitor_shape.geom, ShapeGeometry::Field(_)) {
+        return false;
+    }
+
     if matches!(&sensor_shape.geom, ShapeGeometry::Tube(_))
         && matches!(&visitor_shape.geom, ShapeGeometry::Mesh(_) | ShapeGeometry::HeightField(_) | ShapeGeometry::Compound(_))
     {
@@ -110,6 +114,8 @@ fn overlap_sensor(sensor_shape: &Shape, sensor_transform: Transform, visitor_sha
         ShapeGeometry::Capsule(capsule) => crate::capsule::overlap_capsule(capsule, Transform::IDENTITY, &local_proxy),
 
         ShapeGeometry::Tube(tube) => crate::tube::overlap_tube(tube, Transform::IDENTITY, &local_proxy),
+
+        ShapeGeometry::Field(field) => crate::field::overlap_field(&**field, Transform::IDENTITY, &local_proxy),
 
         ShapeGeometry::Compound(compound) => crate::compound::overlap_compound(compound, Transform::IDENTITY, &local_proxy),
 
