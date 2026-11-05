@@ -83,7 +83,18 @@ fn host() -> &'static Host {
 /// The runner's host, once, before `main`/`init_embedded`/`run_checkout`.
 pub fn set_host(host: &'static Host) {
     if HOST.set(host).is_ok() {
-        relax_compiler::pmhost::set_policy(host.proc_macros);
+        // MAKEPAD_RUN_TRUST_MACROS=1: a developer's own checkout whose dependencies' proc macros
+        // need std (serde_derive uses std::thread) runs them as cargo would, under `makepad run`
+        // too; the default for apps for users stays the host's (sandboxed).
+        let policy = if std::env::var_os("MAKEPAD_RUN_TRUST_MACROS").is_some_and(|v| v == "1") {
+            if host.proc_macros != relax_compiler::pmhost::Policy::Open {
+                eprintln!("makepad run: MAKEPAD_RUN_TRUST_MACROS=1: third-party proc macros run unsandboxed");
+            }
+            relax_compiler::pmhost::Policy::Open
+        } else {
+            host.proc_macros
+        };
+        relax_compiler::pmhost::set_policy(policy);
         relax_compiler::reload::set_loader_package(host.package, host.manifest);
         // the entry point's ahead level, unless the environment names one; MAKEPAD_RUN_AHEAD
         // carries it to the session (options.rs) and to every process this one starts
