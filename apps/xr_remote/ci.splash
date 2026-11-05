@@ -15,7 +15,7 @@ ci.step("says it has no headset", fn(){
     ci.sleep(3.0)
     app.no_errors()
     let shot = app.grab("start")
-    ci.accept(shot, "This is a screenshot of one application window. A thin bright red frame runs around the very edge of the picture; it is the test harness's marker and is not part of the application. Ignore it. This application only works on a headset, so on a computer its window is a dark background with one line of light text saying there is no headset. YES means ALL of these are true: 1. The background is dark. 2. There is a line of text containing the words no headset. 3. No error panel covers the window: there is no large block of text with words such as panic, error, failed, backtrace or unwrap. Write one short bullet line for each numbered point saying what you see. Then write the verdict as the last line, in exactly this form: VERDICT: YES or VERDICT: NO")
+    ci.accept(shot, "This is a screenshot of one application window. A thin bright red frame runs around the very edge of the picture; it is the test harness's marker and is not part of the application. Ignore it. This application only works on a headset, so on a computer its window is a dark background with one line of light text saying there is no headset. 1. Is the background dark? expected YES 2. Is there a line of text with the words \"no headset\"? expected YES 3. Does an error panel cover the window: a large block of text with words such as panic, error, failed, backtrace or unwrap? expected NO")
 })
 
 app.quit()
