@@ -167,6 +167,24 @@ pub enum JointKind {
     Spherical { cone: f64, twist: Option<(f64, f64)> },
 }
 
+impl JointKind {
+    /// A hinge whose range is a whole turn (no limits declared or measured): it has no limit, and
+    /// only contact between its parts, away from the hinge's own region, stops it.
+    pub fn turns_freely(&self) -> bool {
+        matches!(self, JointKind::Revolute { lower, upper } if upper - lower >= 2.0 * std::f64::consts::PI - 1e-9)
+    }
+
+    /// Within a degree of a limit at this angle (a revolute angle, a ball's cone angle).
+    pub fn near_limit(&self, angle: f64) -> bool {
+        let d = 1f64.to_radians();
+        match self {
+            _ if self.turns_freely() => false,
+            JointKind::Revolute { lower, upper } => angle < lower + d || angle > upper - d,
+            JointKind::Spherical { cone, .. } => angle > cone - d,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct JointSpec {
     pub name: String,
@@ -508,7 +526,7 @@ impl MechWorld {
                     let mut d = default_revolute_joint_def();
                     base.fill(&mut d.base);
                     d.base.friction = friction;
-                    d.enable_limit = true;
+                    d.enable_limit = !j.kind.turns_freely();
                     d.lower_angle = *lower as f32;
                     d.upper_angle = *upper as f32;
                     create_revolute_joint(&mut world, &d)
@@ -1290,8 +1308,7 @@ pub fn simulate(asm: &Assembly, opts: &SimOptions, cancelled: &dyn Fn() -> bool)
         for j in 0..n {
             lo[j] = lo[j].min(ang[j]);
             hi[j] = hi[j].max(ang[j]);
-            let (l, u) = limits_of(&asm.joints[j].kind);
-            let near = ang[j] > u - 1f64.to_radians() || (matches!(asm.joints[j].kind, JointKind::Revolute { .. }) && ang[j] < l + 1f64.to_radians());
+            let near = asm.joints[j].kind.near_limit(ang[j]);
             if near && !at_limit[j] {
                 hits[j] += 1;
             }

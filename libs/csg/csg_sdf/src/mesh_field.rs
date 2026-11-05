@@ -219,6 +219,26 @@ pub struct MeshField {
 
 const LEAF: usize = 8;
 
+// The median tree has at most 32 levels for its u32 triangle addressing
+// (see query_words). A depth-first traversal needs one pending node per level.
+struct NodeStack {
+    nodes: [u32; 32],
+    len: usize,
+}
+
+impl NodeStack {
+    fn root() -> Self { Self { nodes: [0; 32], len: 1 } }
+    fn pop(&mut self) -> Option<u32> {
+        if self.len == 0 { return None; }
+        self.len -= 1;
+        Some(self.nodes[self.len])
+    }
+    fn push(&mut self, node: u32) {
+        self.nodes[self.len] = node;
+        self.len += 1;
+    }
+}
+
 impl MeshField {
     /// Prepare `data` (welded positions, indexed triangles; degenerate ones dropped).
     pub fn new(mut data: MeshData) -> MeshField {
@@ -370,7 +390,7 @@ impl MeshField {
         let mut best = f32::INFINITY;
         let mut at = p;
         let mut tri = 0u32;
-        let mut stack = vec![0u32];
+        let mut stack = NodeStack::root();
         while let Some(i) = stack.pop() {
             let n = &self.nodes[i as usize];
             if Self::box_dist2(n, p) >= best * best {
@@ -409,7 +429,7 @@ impl MeshField {
             return 0.0;
         }
         let mut w = 0.0f32;
-        let mut stack = vec![0u32];
+        let mut stack = NodeStack::root();
         while let Some(i) = stack.pop() {
             let n = &self.nodes[i as usize];
             let d = sub(n.center, p);
@@ -434,8 +454,7 @@ impl MeshField {
     /// The nearest triangle's distance when it is under `bound` (else `bound`).
     fn unsigned_under(&self, p: V3, bound: f32) -> f32 {
         let mut best = bound;
-        let mut stack = Vec::with_capacity(64);
-        stack.push(0u32);
+        let mut stack = NodeStack::root();
         while let Some(i) = stack.pop() {
             let n = &self.nodes[i as usize];
             if Self::box_dist2(n, p) >= best * best {
@@ -505,7 +524,7 @@ impl MeshField {
         }
         let pf = [p[0] as f32, p[1] as f32, p[2] as f32];
         let mut best = f64::INFINITY;
-        let mut stack = vec![0u32];
+        let mut stack = NodeStack::root();
         while let Some(i) = stack.pop() {
             let n = &self.nodes[i as usize];
             if (Self::box_dist2(n, pf) as f64) >= best * best * 1.0001 + 1e-9 {
@@ -537,6 +556,29 @@ impl MeshField {
 impl Sdf3 for MeshField {
     fn distance(&self, p: Vec3d) -> f64 {
         self.signed64(p)
+    }
+
+    fn distance_bounded(&self, p: Vec3d, lower: f64, upper: f64, hint: Option<(Vec3d, f64)>) -> f64 {
+        let d = self.unsigned64([p.x, p.y, p.z]);
+        // Both possible signs give the same clamped answer.
+        if d <= lower { return lower; }
+        if -d >= upper { return upper; }
+        if self.watertight {
+            if let Some((q, dq)) = hint {
+                let pf = [p.x as f32, p.y as f32, p.z as f32];
+                let qf = [q.x as f32, q.y as f32, q.z as f32];
+                let w = |v: V3| [v[0] as f64, v[1] as f64, v[2] as f64];
+                // The sign is evaluated at f32 points. Include the reference's
+                // conversion error in the radius of its surface-free ball.
+                let step = f64s::len(f64s::sub(w(pf), w(qf)))
+                    + f64s::len(f64s::sub(w(qf), [q.x, q.y, q.z]));
+                if step < dq.abs() {
+                    return d.copysign(dq).clamp(lower, upper);
+                }
+            }
+        }
+        let inside = self.winding([p.x as f32, p.y as f32, p.z as f32]) > 0.5;
+        (if inside { -d } else { d }).clamp(lower, upper)
     }
 
     /// The gradient: away from the nearest point (into the solid's outside), or the
@@ -609,6 +651,33 @@ mod tests {
         assert!(f.signed([1.8, 0.0, 0.0]) < 0.0);
         assert!(f.signed([-0.8, 0.0, 0.0]) < 0.0);
         assert!(f.signed([2.5, 0.0, 0.0]) > 0.0);
+    }
+
+    #[test]
+    fn bounded_queries_preserve_signed_distances_and_overlap() {
+        for open in [false, true] {
+            let f = MeshField::new(cube(open));
+            let mut hint = None;
+            // Cross the surface, travel inside it, and leave through the
+            // (possibly open) lid. The bounds cover both signs and contact.
+            for p in [[3.0, 0.0, 0.0], [2.8, 0.0, 0.0], [1.05, 0.0, 0.0], [0.95, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.2, 0.0], [0.0, 1.2, 0.0]] {
+                let p = Vec3d::new(p[0], p[1], p[2]);
+                let expected = f.distance(p);
+                for (lower, upper) in [(f64::NEG_INFINITY, f64::INFINITY), (-0.2, 0.2), (0.1, 0.4), (-0.4, -0.1)] {
+                    assert_eq!(f.distance_bounded(p, lower, upper, hint), expected.clamp(lower, upper), "open={open}, {p:?}, {lower}..{upper}");
+                }
+                hint = Some((p, expected));
+            }
+        }
+        let mut data = cube(false);
+        let count = data.positions.len() as u32;
+        data.positions.extend(data.positions.clone().iter().map(|p| [p[0] + 1.0, p[1], p[2]]));
+        data.triangles.extend(data.triangles.clone().iter().map(|t| [t[0] + count, t[1] + count, t[2] + count]));
+        let f = MeshField::new(data);
+        let q = Vec3d::new(0.4, 0.0, 0.0);
+        let p = Vec3d::new(0.5, 0.0, 0.0);
+        assert_eq!(f.distance_bounded(p, -1.0, 1.0, Some((q, f.distance(q)))), f.distance(p));
+        assert!(f.distance(p) < 0.0, "overlapping closed shells remain inside");
     }
 
     #[test]

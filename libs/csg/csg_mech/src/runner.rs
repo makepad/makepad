@@ -6,7 +6,7 @@
 //! the events (hard contacts, limit hits) for haptics.
 
 use crate::geom::*;
-use crate::sim::{Assembly, BodyAction, JointKind, MechWorld, Pose};
+use crate::sim::{Assembly, BodyAction, MechWorld, Pose};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -354,10 +354,7 @@ fn run(asm: Assembly, gravity: P3, floor: Option<f64>, mut w: MechWorld, rx: Rec
             }
             let ang = w.angles(&asm);
             for (j, js) in asm.joints.iter().enumerate() {
-                let near = match js.kind {
-                    JointKind::Revolute { lower, upper } => ang[j] < lower + 1f64.to_radians() || ang[j] > upper - 1f64.to_radians(),
-                    JointKind::Spherical { cone, .. } => ang[j] > cone - 1f64.to_radians(),
-                };
+                let near = js.kind.near_limit(ang[j]);
                 if near && !at_limit[j] {
                     pending.push(Event::Limit { joint: j });
                 }

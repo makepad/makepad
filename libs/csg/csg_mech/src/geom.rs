@@ -249,6 +249,42 @@ impl Solid {
         }
     }
 
+    /// The same solid distance, restricted to the interval the caller needs.
+    pub fn distance_bounded(&self, parts: &[&(dyn Sdf3 + Sync)], p: P3, lower: f64, upper: f64) -> f64 {
+        match self {
+            Solid::Part(i) => parts[*i].distance_bounded(v3(p), lower, upper, None),
+            Solid::Prim(q) => q.distance(p).clamp(lower, upper),
+            Solid::Union(l) => {
+                let mut best = upper;
+                // Added joint primitives follow the original part. They are
+                // cheap and often already establish the union's distance.
+                for s in l.iter().rev() {
+                    best = s.distance_bounded(parts, p, lower, best);
+                    if best == lower { break; }
+                }
+                best
+            }
+            Solid::Inter(l) => {
+                let mut best = lower;
+                for s in l.iter().rev() {
+                    best = s.distance_bounded(parts, p, best, upper);
+                    if best == upper { break; }
+                }
+                best
+            }
+            Solid::Diff(a, cuts) => {
+                // The joint's cuts often exclude a point without querying the
+                // original mesh at all. Negation also reverses the interval.
+                let mut best = lower;
+                for s in cuts {
+                    best = -s.distance_bounded(parts, p, -upper, -best);
+                    if best == upper { return best; }
+                }
+                a.distance_bounded(parts, p, best, upper)
+            }
+        }
+    }
+
     /// A csg_sdf node with `parts[i]` the original parts' nodes.
     pub fn to_node(&self, parts: &[SdfNode]) -> SdfNode {
         let combine = |op: SdfOp, of: Vec<SdfNode>| SdfNode::Combine { op, blend: 0.0, of };
@@ -342,6 +378,22 @@ mod tests {
             let y = [back[0][1], back[1][1], back[2][1]];
             let dn = norm(d);
             assert!(len(sub(y, dn)) < 1e-9, "{d:?} -> {y:?}");
+        }
+    }
+
+    #[test]
+    fn bounded_csg_matches_the_full_signed_expression() {
+        let original = FnField(|p| len(p) - 2.0);
+        let sphere = |c, r| Solid::Prim(Prim::Sphere { c, r });
+        let solid = Solid::Inter(vec![
+            Solid::Union(vec![Solid::Part(0), sphere([2.0, 0.0, 0.0], 1.0)]),
+            Solid::diff(sphere([0.0; 3], 3.0), vec![sphere([0.0; 3], 0.5), sphere([0.0, 1.0, 0.0], 0.4)]),
+        ]);
+        let parts: &[&(dyn Sdf3 + Sync)] = &[&original];
+        for p in [[0.0; 3], [0.3, 0.2, 0.1], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0], [3.1, 0.0, 0.0]] {
+            for (lo, hi) in [(f64::NEG_INFINITY, f64::INFINITY), (-0.2, 0.2), (-0.4, -0.1), (0.01, 0.04)] {
+                assert_eq!(solid.distance_bounded(parts, p, lo, hi), solid.distance(parts, p).clamp(lo, hi), "{p:?}, {lo}..{hi}");
+            }
         }
     }
 }

@@ -60,7 +60,7 @@ fn finals<'a>(b: &'a Built, f: &'a [SolidField<'a>]) -> Vec<FinalPart<'a>> {
 fn report_checks(checks: &[JointCheck]) {
     for c in checks {
         println!(
-            "  {} {}-{}: gap {:.3} (built {:.2}) | layer gap {:.2} | tack n0 {:.1} n1 {:.1} n2 {:.1} n3 {:.1} | risk {} ({:.1}) | field limits -{:.1}/+{:.1} deg, effective {:.1}..{:.1} | retention {:?} | {:.0} ms (gap {:.0} layers {:.0} limits {:.0})",
+            "  {} {}-{}: gap {:.9} (built {:.2}) | layer gap {:.2} | tack n0 {:.1} n1 {:.1} n2 {:.1} n3 {:.1} | risk {} ({:.1}) | field limits -{:.9}/+{:.9} deg, effective {:.1}..{:.1} | retention {:?} | {:.0} ms (gap {:.0} layers {:.0} limits {:.0})",
             c.kind,
             c.a,
             c.b,
@@ -107,9 +107,13 @@ fn chain_of_three_hangs_and_articulates() {
     let checks = check_joints(&plan, &parts, Geometry::Design, &|| false);
     report_checks(&checks);
     for c in &checks {
-        assert!((c.gap.gap - c.clearance).abs() < 0.05, "gap {} vs {}", c.gap.gap, c.clearance);
-        assert!(c.risk <= Risk::Medium, "{:?}", c.risk);
-        assert!(c.field.0 > 45f64.to_radians() && c.field.1 > 45f64.to_radians());
+        assert!((c.gap.gap - c.clearance).abs() < 0.036, "gap {} vs {}", c.gap.gap, c.clearance);
+        assert_eq!(c.risk, Risk::Medium, "the checked chain's fuse verdict");
+        // Measured on the original signed-field checker. The advance may
+        // change its bracket, but not the limit beyond one angular sample.
+        for (actual, before) in [(c.field.0, 99.9140625f64), (c.field.1, 99.75f64)] {
+            assert!((actual - before.to_radians()).abs() <= 3f64.to_radians() / 128.0 + 1e-12, "chain sweep: {actual} vs {before} degrees");
+        }
         assert!(c.ok());
     }
     let asm = assembly(&plan, &parts, &checks, 1.0);
@@ -156,9 +160,13 @@ fn puppet_arm_ball_shoulder_hinge_elbow() {
     let checks = check_joints(&plan, &parts, Geometry::Design, &|| false);
     println!("puppet:");
     report_checks(&checks);
-    for c in &checks {
-        assert!(c.gap.gap > 0.25, "{} gap {}", c.kind, c.gap.gap);
-        assert!(c.risk <= Risk::Medium, "{} {:?}", c.kind, c.risk);
+    let before = [(0.301000529, (0.0f64, 2.484375f64), Risk::Low), (0.350009176, (126.3046875f64, 126.515625f64), Risk::Medium)];
+    for (c, (gap, limits, risk)) in checks.iter().zip(before) {
+        assert!((c.gap.gap - gap).abs() < 0.036, "{} gap {} vs {gap}", c.kind, c.gap.gap);
+        assert_eq!(c.risk, risk, "{} fuse verdict", c.kind);
+        for (actual, old) in [(c.field.0, limits.0), (c.field.1, limits.1)] {
+            assert!((actual - old.to_radians()).abs() <= 3f64.to_radians() / 128.0 + 1e-12, "{} sweep: {actual} vs {old} degrees", c.kind);
+        }
         assert!(c.ok(), "{c:?}");
     }
     let asm = assembly(&plan, &parts, &checks, 1.0);

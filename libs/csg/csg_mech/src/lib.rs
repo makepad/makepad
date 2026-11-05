@@ -88,6 +88,9 @@ impl<'a> Sdf3 for SolidField<'a> {
     fn distance(&self, p: makepad_csg_math::Vec3d) -> f64 {
         self.solid.distance(&self.parts, p3(p))
     }
+    fn distance_bounded(&self, p: makepad_csg_math::Vec3d, lower: f64, upper: f64, _hint: Option<(makepad_csg_math::Vec3d, f64)>) -> f64 {
+        self.solid.distance_bounded(&self.parts, p3(p), lower, upper)
+    }
 }
 
 /// A final part as the checks and the sim read it.

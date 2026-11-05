@@ -23,6 +23,26 @@ pub struct Gap {
 
 const SQ3: f64 = 1.7320508075688772;
 
+#[derive(Default)]
+struct Query {
+    hint: Option<(makepad_csg_math::Vec3d, f64)>,
+}
+
+impl Query {
+    fn at(&mut self, field: Field, p: P3, lower: f64, upper: f64) -> f64 {
+        let p = v3(p);
+        let d = field.distance_bounded(p, lower, upper, self.hint);
+        // A clamped answer is a bound, not a signed sample. Never reuse its
+        // sign. Keep the larger empty ball while sampling inside it.
+        if d > lower && d < upper {
+            if self.hint.is_none_or(|(q, dq)| len(sub(p3(p), p3(q))) >= dq.abs()) {
+                self.hint = Some((p, d));
+            }
+        }
+        d
+    }
+}
+
 fn roots(lo: P3, hi: P3, s0: f64) -> Vec<(P3, f64)> {
     let n = |i: usize| (((hi[i] - lo[i]) / s0).ceil() as usize).max(1);
     let mut out = Vec::new();
@@ -53,12 +73,17 @@ pub fn min_gap(a: Field, b: Field, lo: P3, hi: P3, tol: f64) -> Gap {
     let mut best = f64::INFINITY;
     let mut at = lo;
     let mut evals = 0u64;
+    let (mut qa, mut qb) = (Query::default(), Query::default());
     let s0 = (hi[0] - lo[0]).max(hi[1] - lo[1]).max(hi[2] - lo[2]).min(1.0).max(tol * 4.0);
     let mut stack = roots(lo, hi, s0);
     while let Some((c, h)) = stack.pop() {
-        let p = v3(c);
-        let g = a.distance(p).max(b.distance(p));
+        let cutoff = (best + h * SQ3 - tol * 0.25).next_up();
+        let da = qa.at(a, c, f64::NEG_INFINITY, cutoff);
         evals += 1;
+        if da == cutoff { continue; }
+        let db = qb.at(b, c, da, cutoff);
+        if db == cutoff { continue; }
+        let g = da.max(db);
         if g < best {
             best = g;
             at = c;
@@ -75,8 +100,15 @@ pub fn closer_than(a: Field, b: Field, lo: P3, hi: P3, gap: f64) -> bool {
     let target = 0.5 * gap;
     let s0 = (hi[0] - lo[0]).max(hi[1] - lo[1]).max(hi[2] - lo[2]).min(2.0);
     let mut stack = roots(lo, hi, s0);
+    let (mut qa, mut qb) = (Query::default(), Query::default());
     while let Some((c, h)) = stack.pop() {
-        let g = a.distance(v3(c)).max(b.distance(v3(c)));
+        let cutoff = (target + h * SQ3).next_up();
+        let lower = target.next_down();
+        let da = qa.at(a, c, lower, cutoff);
+        if da == cutoff { continue; }
+        let db = qb.at(b, c, lower, cutoff);
+        if db == cutoff { continue; }
+        let g = da.max(db);
         if g < target {
             return true;
         }
@@ -88,32 +120,178 @@ pub fn closer_than(a: Field, b: Field, lo: P3, hi: P3, gap: f64) -> bool {
 }
 
 /// `f` turned by `ang` about the unit `axis` through `pivot`.
-pub fn posed<'a>(f: Field<'a>, pivot: P3, axis: P3, ang: f64) -> FnField<impl Fn(P3) -> f64 + Sync + 'a> {
-    FnField(move |p: P3| f.distance(v3(add(pivot, rotate(sub(p, pivot), axis, -ang)))))
+pub fn posed<'a>(f: Field<'a>, pivot: P3, axis: P3, ang: f64) -> impl Sdf3 + Sync + 'a {
+    struct Posed<'a> {
+        field: Field<'a>,
+        pivot: P3,
+        axis: P3,
+        ang: f64,
+    }
+    impl Posed<'_> {
+        fn local(&self, p: makepad_csg_math::Vec3d) -> makepad_csg_math::Vec3d {
+            let p = sub(p3(p), self.pivot);
+            v3(add(self.pivot, rotate(p, self.axis, -self.ang)))
+        }
+    }
+    impl Sdf3 for Posed<'_> {
+        fn distance(&self, p: makepad_csg_math::Vec3d) -> f64 {
+            self.field.distance(self.local(p))
+        }
+        fn distance_bounded(&self, p: makepad_csg_math::Vec3d, lower: f64, upper: f64, hint: Option<(makepad_csg_math::Vec3d, f64)>) -> f64 {
+            self.field.distance_bounded(self.local(p), lower, upper, hint.map(|(q, d)| (self.local(q), d)))
+        }
+    }
+    Posed { field: f, pivot, axis, ang }
 }
 
-/// How far B turns about `axis` (sign `dir`) before it comes within `contact` of A inside the box, to
-/// `tol_angle`; `max` when it never does.
+#[derive(Clone, Copy)]
+struct SweepCell {
+    center: P3,
+    half: f64,
+    radius: f64,
+    a: Option<f64>,
+    // Angle and bounds on B's distance at this cell's centre.
+    b: Option<(f64, f64, f64)>,
+    children: Option<usize>,
+}
+
+struct SweepSearch<'a> {
+    a: Field<'a>,
+    b: Field<'a>,
+    pivot: P3,
+    axis: P3,
+    dir: f64,
+    cells: Vec<SweepCell>,
+    roots: usize,
+    qa: Query,
+    radius: f64,
+}
+
+impl<'a> SweepSearch<'a> {
+    fn new(a: Field<'a>, b: Field<'a>, pivot: P3, axis: P3, dir: f64, lo: P3, hi: P3) -> Self {
+        let s0 = (hi[0] - lo[0]).max(hi[1] - lo[1]).max(hi[2] - lo[2]).min(2.0);
+        let mut search = Self { a, b, pivot, axis, dir, cells: Vec::new(), roots: 0, qa: Query::default(), radius: 0.0 };
+        for (center, half) in roots(lo, hi, s0) {
+            search.add_cell(center, half);
+            // Include the entire root cubes, including the existing grid's
+            // overhang at hi, in the angular displacement certificate.
+            for dx in [-half, half] {
+                for dy in [-half, half] {
+                    for dz in [-half, half] {
+                        search.radius = search.radius.max(len(cross(sub(add(center, [dx, dy, dz]), pivot), axis)) * dir.abs());
+                    }
+                }
+            }
+        }
+        search.roots = search.cells.len();
+        search
+    }
+
+    fn add_cell(&mut self, center: P3, half: f64) {
+        self.cells.push(SweepCell {
+            center, half, radius: len(cross(sub(center, self.pivot), self.axis)) * self.dir.abs(),
+            a: None, b: None, children: None,
+        });
+    }
+
+    // Ok: no sampled hit, with a lower bound on min(max(dA,dB)) over
+    // every cell. Err: an upper bound at a witness below target.
+    fn clearance(&mut self, angle: f64, target: f64) -> Result<f64, f64> {
+        let posed = posed(self.b, self.pivot, self.axis, angle * self.dir);
+        let mut qb = Query::default();
+        let mut stack: Vec<usize> = (0..self.roots).collect();
+        let mut lower = f64::INFINITY;
+        while let Some(i) = stack.pop() {
+            let cell = self.cells[i];
+            let radius = cell.half * SQ3;
+            let da = match cell.a {
+                Some(d) => d,
+                None => {
+                    let d = self.qa.at(self.a, cell.center, f64::NEG_INFINITY, f64::INFINITY);
+                    self.cells[i].a = Some(d);
+                    d
+                }
+            };
+            if da - radius >= target {
+                lower = lower.min(da - radius);
+                continue;
+            }
+            let (mut bl, mut bu) = cell.b.map_or((f64::NEG_INFINITY, f64::INFINITY), |(at, l, u)| {
+                // A point at radius r moves at most r * delta_angle. Reuse
+                // both exact samples and clamped bounds across poses.
+                let motion = cell.radius * (angle - at).abs();
+                (l - motion, u + motion)
+            });
+            if da.max(bl) - radius < target && da.max(bu) >= target {
+                let floor = target.next_down();
+                let ceiling = (target + radius).next_up();
+                let d = qb.at(&posed, cell.center, floor, ceiling);
+                bl = bl.max(if d == floor { f64::NEG_INFINITY } else { d });
+                bu = bu.min(if d == ceiling { f64::INFINITY } else { d });
+                self.cells[i].b = Some((angle, bl, bu));
+            }
+            if da.max(bu) < target {
+                return Err(da.max(bu));
+            }
+            let bound = da.max(bl) - radius;
+            if bound >= target || cell.half <= 0.01 {
+                lower = lower.min(bound);
+                continue;
+            }
+            let children = match cell.children {
+                Some(start) => start,
+                None => {
+                    let start = self.cells.len();
+                    let q = cell.half * 0.5;
+                    for dx in [-q, q] {
+                        for dy in [-q, q] {
+                            for dz in [-q, q] {
+                                self.add_cell(add(cell.center, [dx, dy, dz]), q);
+                            }
+                        }
+                    }
+                    self.cells[i].children = Some(start);
+                    start
+                }
+            };
+            stack.extend(children..children + 8);
+        }
+        Ok(lower)
+    }
+}
+
+/// Sweep the original three-degree sampling lattice, refining the first hit
+/// with seven bisections. Skip lattice sites only when the clearance bound
+/// certifies the entire angular interval as contact-free.
 pub fn sweep_limit(a: Field, b: Field, pivot: P3, axis: P3, dir: f64, lo: P3, hi: P3, contact: f64, max: f64) -> f64 {
     let step = 3f64.to_radians();
-    let hits = |ang: f64| closer_than(a, &posed(b, pivot, axis, ang * dir), lo, hi, contact);
+    let target = contact * 0.5;
+    let mut search = SweepSearch::new(a, b, pivot, axis, dir, lo, hi);
     let mut prev = 0.0;
     let mut ang = step;
     while ang <= max + 1e-9 {
-        if hits(ang) {
-            let (mut l, mut h) = (prev, ang);
-            for _ in 0..7 {
-                let m = 0.5 * (l + h);
-                if hits(m) {
-                    h = m
-                } else {
-                    l = m
+        match search.clearance(ang, target) {
+            Err(_) => {
+                let (mut l, mut h) = (prev, ang);
+                for _ in 0..7 {
+                    let m = 0.5 * (l + h);
+                    if search.clearance(m, target).is_err() { h = m; } else { l = m; }
+                }
+                return l;
+            }
+            Ok(lower) => {
+                let safe = if search.radius > 0.0 { (lower - target) / search.radius } else { 0.0 };
+                let until = ang + safe;
+                prev = ang;
+                ang += step;
+                // Keep the original additions and last three-degree bracket.
+                // This loop visits no fields, and never steps past max.
+                while ang + step < until && ang + step <= max + 1e-9 {
+                    prev = ang;
+                    ang += step;
                 }
             }
-            return l;
         }
-        prev = ang;
-        ang += step;
     }
     max
 }
@@ -331,5 +509,20 @@ mod tests {
         let lim = sweep_limit(&block, &bar, [0.0; 3], [0.0, 0.0, 1.0], 1.0, [-5.0, -5.0, -2.0], [5.0, 5.0, 2.0], 0.02, std::f64::consts::PI);
         let expect = (3.0f64).atan2(2.5) - (0.8f64 / (2.5f64 * 2.5 + 9.0).sqrt()).asin();
         assert!((lim - expect).abs() < 2f64.to_radians(), "{} vs {}", lim.to_degrees(), expect.to_degrees());
+    }
+
+    #[test]
+    fn sweep_has_a_known_contact_angle() {
+        let a = P(Prim::Sphere { c: [0.0, 4.0, 0.0], r: 0.5 });
+        let b = P(Prim::Sphere { c: [4.0, 0.0, 0.0], r: 0.5 });
+        // Centres on a radius-4 circle: their chord is 8*sin(delta/2).
+        // Contact occurs at chord 0.5 + 0.5 + 0.05.
+        let expected = std::f64::consts::FRAC_PI_2 - 2.0 * (1.05f64 / 8.0).asin();
+        let (lo, hi) = ([-1.0; 3], [5.0, 5.0, 1.0]);
+        let limit = sweep_limit(&a, &b, [0.0; 3], [0.0, 0.0, 1.0], 1.0, lo, hi, 0.05, std::f64::consts::PI);
+        println!("known sweep: {limit:.12}, analytic {expected:.12}");
+        assert!((limit - expected).abs() <= 3f64.to_radians() / 128.0, "{limit} vs {expected}");
+        assert_eq!(sweep_limit(&a, &b, [0.0; 3], [0.0, 0.0, 1.0], -1.0, lo, hi, 0.05, 0.4), 0.4, "rotation away from the obstacle is free");
+        assert_eq!(sweep_limit(&a, &a, [0.0; 3], [0.0, 0.0, 1.0], 1.0, lo, hi, 0.05, 1.0), 0.0, "initial overlap has no free sweep");
     }
 }

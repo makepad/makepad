@@ -47,7 +47,8 @@ pub struct Evaluator {
     pub built: usize,
     /// What builds exact bodies; `None` in a host without them.
     pub brep: Option<Arc<dyn BrepEngine>>,
-    /// Display chord of an exact body (mm), times `draft`.
+    /// The chord of an exact body's mesh (mm), times `draft`: what the meshes made from it
+    /// (and their checks) see. A view shows it at its own ([`Self::brep_mesh`]).
     pub brep_chord: f64,
 }
 
@@ -178,7 +179,10 @@ impl Evaluator {
     /// The mesh of `id` (model frame).
     pub fn mesh(&mut self, g: &Graph, id: NodeId, cancelled: Option<&dyn Fn() -> bool>) -> Result<Arc<TriMesh>, Failure> {
         let node = g.node(id);
-        // An exact body's mesh follows the view's detail too: both make its chord.
+        // An exact body's mesh follows the draft too: both make its chord.
+        if let Op::Brep { .. } = &node.op {
+            return self.brep_at(g, id, self.brep_chord * self.draft_scale(), cancelled);
+        }
         let draft = if self.drafted(g, id) { (self.draft_scale() * self.brep_chord).to_bits() } else { 0 };
         if let Some((m, used)) = self.cache.get_mut(&(node.key, draft)) {
             *used = self.round;
@@ -186,19 +190,6 @@ impl Evaluator {
         }
         if cancelled.is_some_and(|c| c()) {
             return Err(Failure { node: id, op: node.op.name(), message: "cancelled".into() });
-        }
-        if let Op::Brep { .. } = &node.op {
-            // A recipe for the engine: bodies, no meshes of the steps before.
-            let engine = self.brep.clone().ok_or_else(|| Failure { node: id, op: node.op.name(), message: "this build has no B-rep engine".into() })?;
-            let chord = self.brep_chord * self.draft_scale();
-            let m = engine.mesh(brep_steps(g, id), chord, cancelled).map_err(|f| {
-                // The failure belongs at the step's own line, not the last op's.
-                let at = f.step.and_then(|k| g.nodes.iter().position(|n| n.key == k)).map_or(id, |i| NodeId(i as u32));
-                Failure { node: at, op: g.node(at).op.name(), message: f.message }
-            })?;
-            self.built += 1;
-            self.cache.insert((node.key, draft), (m.clone(), self.round));
-            return Ok(m);
         }
         let mut inputs = Vec::new();
         for i in node.op.inputs() {
@@ -214,6 +205,34 @@ impl Evaluator {
         let m = Arc::new(m);
         self.built += 1;
         self.cache.insert((node.key, draft), (m.clone(), self.round));
+        Ok(m)
+    }
+
+    /// An exact body's mesh at `chord` (mm), whatever `brep_chord` is: what a view shows it at.
+    /// `None`: `id` is no exact body. Kept with the meshes [`Self::mesh`] makes (one chord's
+    /// mesh is the same mesh whichever asked for it).
+    pub fn brep_mesh(&mut self, g: &Graph, id: NodeId, chord: f64, cancelled: Option<&dyn Fn() -> bool>) -> Option<Result<Arc<TriMesh>, Failure>> {
+        matches!(g.node(id).op, Op::Brep { .. }).then(|| self.brep_at(g, id, chord, cancelled))
+    }
+
+    fn brep_at(&mut self, g: &Graph, id: NodeId, chord: f64, cancelled: Option<&dyn Fn() -> bool>) -> Result<Arc<TriMesh>, Failure> {
+        let node = g.node(id);
+        if let Some((m, used)) = self.cache.get_mut(&(node.key, chord.to_bits())) {
+            *used = self.round;
+            return Ok(m.clone());
+        }
+        if cancelled.is_some_and(|c| c()) {
+            return Err(Failure { node: id, op: node.op.name(), message: "cancelled".into() });
+        }
+        // A recipe for the engine: bodies, no meshes of the steps before.
+        let engine = self.brep.clone().ok_or_else(|| Failure { node: id, op: node.op.name(), message: "this build has no B-rep engine".into() })?;
+        let m = engine.mesh(brep_steps(g, id), chord, cancelled).map_err(|f| {
+            // The failure belongs at the step's own line, not the last op's.
+            let at = f.step.and_then(|k| g.nodes.iter().position(|n| n.key == k)).map_or(id, |i| NodeId(i as u32));
+            Failure { node: at, op: g.node(at).op.name(), message: f.message }
+        })?;
+        self.built += 1;
+        self.cache.insert((node.key, chord.to_bits()), (m.clone(), self.round));
         Ok(m)
     }
 

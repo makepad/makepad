@@ -33,6 +33,9 @@ fn union_all_scaling() {
 
     // Overlapping grid: every neighbor intersects.
     let over = spheres(n, 0.5);
+    // One untimed union of the same shape first: the bounds below are the algorithm's scaling,
+    // not a first call's latency (under the JIT a first call compiles the code it runs).
+    let _ = union_all(&over);
     let t = Instant::now();
     let r_over = union_all(&over);
     let t_over = t.elapsed().as_secs_f64();

@@ -241,9 +241,9 @@ pub enum Op {
     Mesh { mesh: Arc<TriMesh> },
     /// A body of the exact engine; as a mesh, its tessellation.
     Brep { op: BrepOp, inputs: Vec<NodeId> },
-    /// Separate links (chains, chainmail) as tubes of `sides` facets round; a link's slot indexes
-    /// `materials` as in an [`SdfShape`] (outside the key).
-    Links { links: Arc<makepad_csg_sdf::Links>, sides: u32, materials: Vec<makepad_csg_sdf::SdfMaterial> },
+    /// Separate links (chains, chainmail) as tubes of `sides` facets round. Their colours are
+    /// paint, not shape: a fill gives each link one material.
+    Links { links: Arc<makepad_csg_sdf::Links>, sides: u32 },
 }
 
 impl Op {

@@ -1,6 +1,6 @@
 use crate::boolean::{difference, union, mesh_boolean_with, BoolOp, FinishParams};
 use makepad_csg_math::{dvec3, Mat4d};
-use makepad_csg_mesh::{validate::validate_mesh, volume::mesh_volume, TriMesh};
+use makepad_csg_mesh::{validate::validate_mesh, volume::{mesh_surface_area, mesh_volume}, TriMesh};
 use makepad_csg_primitives::{cube, cylinder, sphere};
 use std::f64::consts::PI;
 
@@ -120,3 +120,74 @@ fn coplanar_boolean_orientation() {
         }
     }
 }
+
+fn face_touching_boxes(op: BoolOp) {
+    let a = cube(dvec3(4.0, 4.0, 4.0), true);
+    let mut b = cube(dvec3(2.0, 2.0, 2.0), true);
+    b.transform(Mat4d::translation(dvec3(0.0, -3.0, 0.0)));
+    for (left, right, volume) in [(&a, &b, 64.0), (&b, &a, 8.0)] {
+        let mesh = crate::mesh_boolean(left, right, op);
+        let report = validate_mesh(&mesh);
+        eprintln!("{op:?}: {report:?} volume={}", mesh_volume(&mesh));
+        assert_eq!((report.boundary_edges, report.non_manifold_edges, report.degenerate_triangles), (0, 0, 0), "{op:?}: {report:?}");
+        assert!(report.is_consistently_oriented, "{op:?}: {report:?}");
+        let expected = match op {
+            BoolOp::Union => 72.0,
+            BoolOp::Difference => volume,
+            BoolOp::Intersection => 0.0,
+        };
+        assert_eq!(mesh_volume(&mesh), expected, "{op:?}: volume");
+        let expected_area = match op {
+            BoolOp::Union => 112.0,
+            BoolOp::Difference => mesh_surface_area(left),
+            BoolOp::Intersection => 0.0,
+        };
+        assert_eq!(mesh_surface_area(&mesh), expected_area, "{op:?}: surface area");
+        if op == BoolOp::Difference {
+            assert_eq!(mesh.bounding_box().min, left.bounding_box().min);
+            assert_eq!(mesh.bounding_box().max, left.bounding_box().max);
+        }
+        if op == BoolOp::Intersection {
+            assert!(mesh.triangles.is_empty(), "touching solids have no volume intersection");
+            continue;
+        }
+        // Follow triangle edges, so two closed but disconnected operands cannot
+        // pass merely by having the correct sum of their volumes.
+        let mut edges = std::collections::HashMap::new();
+        let mut adjacent = vec![Vec::new(); mesh.triangle_count()];
+        for (ti, &[a, b, c]) in mesh.triangles.iter().enumerate() {
+            for (a, b) in [(a, b), (b, c), (c, a)] {
+                if let Some(other) = edges.insert((a.min(b), a.max(b)), ti) {
+                    adjacent[ti].push(other);
+                    adjacent[other].push(ti);
+                }
+            }
+        }
+        let mut seen = vec![false; mesh.triangle_count()];
+        let mut pending = vec![0];
+        while let Some(ti) = pending.pop() {
+            if !seen[ti] {
+                seen[ti] = true;
+                pending.extend(&adjacent[ti]);
+            }
+        }
+        assert!(seen.into_iter().all(|s| s), "{op:?}: expected one closed shell");
+        if op == BoolOp::Union {
+            assert!(!mesh.triangles.iter().any(|t| {
+                t.iter().all(|&i| {
+                    let p = mesh.vertices[i as usize];
+                    p.y == -2.0 && p.x.abs() <= 1.0 && p.z.abs() <= 1.0
+                })
+            }), "union retained a shared face");
+        }
+    }
+}
+
+#[test]
+fn face_touching_boxes_union() { face_touching_boxes(BoolOp::Union); }
+
+#[test]
+fn face_touching_boxes_difference() { face_touching_boxes(BoolOp::Difference); }
+
+#[test]
+fn face_touching_boxes_intersection() { face_touching_boxes(BoolOp::Intersection); }
