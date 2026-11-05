@@ -14,7 +14,8 @@ if [[ ! -d "$xr_libdir" || ! -x "$xr_lld" ]]; then
 fi
 cd "$xr_root"
 # This is a cross-target build: the repository's host-native CPU flags cannot
-# describe an x86 Windows executable when building on an ARM host.
+# describe an x86 Windows executable when building on an ARM host. The workspace's
+# RUSTC_BOOTSTRAP=1 reaches it too: -Z allow-features= keeps #![feature] out.
 CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER="$xr_lld" \
-RUSTFLAGS='-C target-cpu=x86-64 -C panic=abort' \
+RUSTFLAGS='-C target-cpu=x86-64 -C panic=abort -Z allow-features=' \
     cargo build --offline --release -p makepad-xr-proton --target "$xr_target"
