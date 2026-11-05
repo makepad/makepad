@@ -72,8 +72,9 @@ impl Adoptions {
             log!("wm: XDG_RUNTIME_DIR is not set: apps started outside the WM cannot find it");
             return None;
         };
-        // A hidden WM (tests, agents) never takes the path apps find by default.
-        let first = if std::env::var_os("MAKEPAD_HIDE_WINDOWS").is_some() { 1 } else { 0 };
+        // A test desktop never takes the path apps find by default: the node's next WM would be
+        // second to it.
+        let first = if hub_app::test_wm() { 1 } else { 0 };
         let socket = match WmSocket::bind(&dir, first) {
             Ok(socket) => socket,
             Err(e) => {

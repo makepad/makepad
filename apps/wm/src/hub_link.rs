@@ -69,9 +69,9 @@ impl HubLink {
         {
             let (path, conf) = crate::hub_app::load_conf();
             if !(processes && conf.enabled) {
-                makepad_widgets::log!("wm: the WM starts no AI Hub (off in {}, or a hidden or in-process WM)", path.display());
-                // Only the settings' own `enabled = off`: a hidden test WM leaves the real one alone.
-                self.stop_leftover = processes && std::env::var_os("MAKEPAD_HIDE_WINDOWS").is_none();
+                makepad_widgets::log!("wm: the WM starts no AI Hub (off in {}, or a hidden, leased, second or in-process WM)", path.display());
+                // Only the settings' own `enabled = off`: a guest WM leaves the real one alone.
+                self.stop_leftover = processes && !crate::hub_app::guest_wm();
                 return Made::None;
             }
             let Some(base) = conf.base_url() else { return Made::NoLanYet };
@@ -109,7 +109,7 @@ impl HubLink {
     pub fn is_off(&self, processes: bool) -> bool {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            if !processes || std::env::var_os("MAKEPAD_HIDE_WINDOWS").is_some() && std::env::var_os(makepad_ai_hub::node_conf::CONF_ENV).is_none() {
+            if !processes || crate::hub_app::stays_out(makepad_ai_hub::node_conf::CONF_ENV) {
                 return false;
             }
             !makepad_ai_hub::node_conf::NodeConf::load_from(&makepad_ai_hub::node_conf::NodeConf::path()).enabled
@@ -123,12 +123,12 @@ impl HubLink {
 
     /// The person asked for the AI Hub from the launcher: after its Quit (or with the settings
     /// off) it is turned on again (`enabled = on` in `ai-hub.conf`) and starts; with it running
-    /// there is nothing to do. False where this WM runs no hub of its own (a hidden or
+    /// there is nothing to do. False where this WM runs no hub of its own (a guest or
     /// in-process WM), so the launcher falls back to its ordinary start.
     pub fn start_from_launcher(&mut self, processes: bool, now: f64) -> bool {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            if !processes || std::env::var_os("MAKEPAD_HIDE_WINDOWS").is_some() && std::env::var_os(makepad_ai_hub::node_conf::CONF_ENV).is_none() {
+            if !processes || crate::hub_app::stays_out(makepad_ai_hub::node_conf::CONF_ENV) {
                 return false;
             }
             let path = makepad_ai_hub::node_conf::NodeConf::path();

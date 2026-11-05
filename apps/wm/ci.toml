@@ -3,9 +3,9 @@
 [app.linux]
 capture = ""
 date = "2026-11-05"
-digest = "e96eeede4e4d95d98bb439cbcd69405b7a2b084c7ec056b2c6958616b46efcb5"
-main = "bac634fd1103ed3453797a04fb1bdf0dd8a1ba9c"
-work = "7954fb8a65f663048b1ea7dfcbc6e4a8c5d65464"
+digest = "14da6c46f77a7a2458996f80f4a22c0a232601c8708993bbedf1e64d5a463420"
+main = "6aff3f7d4a7dc69809181ec243f85de10ec70841"
+work = "bc7950ba2a9ef116af414b0bd12331146b736804"
 
 [ci]
 box = "whole"

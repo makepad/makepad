@@ -2,7 +2,7 @@
 //! with the same supervisor as the AI Hub (`hub_app::Supervised`): `cargo run --release -p
 //! makepad-app-devhub` in the checkout (never a stale binary), restarted with backoff after an
 //! exit, kept across WM restarts, off after its Quit until its dim off slot in the tray area starts it again. Its
-//! settings are `~/.makepad/wm/devhub.conf` (`MAKEPAD_WM_DEVHUB_CONF`; a hidden WM without one
+//! settings are `~/.makepad/wm/devhub.conf` (`MAKEPAD_WM_DEVHUB_CONF`; a guest WM without one
 //! starts none). Its tray icon sits in the WM's tray area; it has no tile, no dock item and no
 //! launcher row.
 
@@ -21,7 +21,7 @@ impl DevhubLink {
             self.app = Some(if processes && conf.enabled {
                 Some(crate::hub_app::DevhubApp::new(&crate::hub_app::DEVHUB, path, conf))
             } else {
-                makepad_widgets::log!("wm: the WM starts no devhub (off in {}, or a hidden or in-process WM)", path.display());
+                makepad_widgets::log!("wm: the WM starts no devhub (off in {}, or a hidden, leased, second or in-process WM)", path.display());
                 None
             });
         }
@@ -47,7 +47,7 @@ impl DevhubLink {
     pub fn start_from_launcher(&mut self, processes: bool, now: f64) -> bool {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            if !processes || std::env::var_os("MAKEPAD_HIDE_WINDOWS").is_some() && std::env::var_os("MAKEPAD_WM_DEVHUB_CONF").is_none() {
+            if !processes || crate::hub_app::stays_out("MAKEPAD_WM_DEVHUB_CONF") {
                 return false;
             }
             let (path, _) = crate::hub_app::load_devhub_conf();
@@ -80,7 +80,7 @@ impl DevhubLink {
     pub fn is_off(&self, processes: bool) -> bool {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            if !processes || std::env::var_os("MAKEPAD_HIDE_WINDOWS").is_some() && std::env::var_os("MAKEPAD_WM_DEVHUB_CONF").is_none() {
+            if !processes || crate::hub_app::stays_out("MAKEPAD_WM_DEVHUB_CONF") {
                 return false;
             }
             !crate::hub_app::load_devhub_conf().1.enabled

@@ -38,9 +38,10 @@
 //! there reaches the master, so each failed start or exit of the devhub goes into its trouble
 //! record (`makepad_devhub_conf::Trouble`), which the devhub reports to the master once it runs.
 //!
-//! A hidden WM (`MAKEPAD_HIDE_WINDOWS`, the test runs) starts no hub unless
-//! `MAKEPAD_WM_AI_HUB_CONF` names its settings: test desktops must not take the GPU or the port
-//! of the real one. Its output goes to `~/.makepad/wm/ai-hub.log`.
+//! A WM that is not its node's ([`guest_wm`]: hidden, under a lease, or second on the session)
+//! starts no hub and leaves the node's alone, unless `MAKEPAD_WM_AI_HUB_CONF` names its settings:
+//! test desktops must not take the GPU or the port of the real one. The hub's output goes to
+//! `~/.makepad/wm/ai-hub.log`.
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -145,7 +146,7 @@ impl ServiceConf for makepad_devhub_conf::NodeConf {
 pub fn load_devhub_conf() -> (PathBuf, makepad_devhub_conf::NodeConf) {
     let path = std::env::var_os("MAKEPAD_WM_DEVHUB_CONF").filter(|p| !p.is_empty()).map(PathBuf::from).unwrap_or_else(|| crate::theme::makepad_home().join("wm/devhub.conf"));
     let mut conf = makepad_devhub_conf::NodeConf::load(&path);
-    if std::env::var_os("MAKEPAD_HIDE_WINDOWS").is_some() && std::env::var_os("MAKEPAD_WM_DEVHUB_CONF").is_none() {
+    if stays_out("MAKEPAD_WM_DEVHUB_CONF") {
         conf.enabled = false;
     }
     (path, conf)
@@ -156,10 +157,48 @@ pub fn load_devhub_conf() -> (PathBuf, makepad_devhub_conf::NodeConf) {
 pub fn load_conf() -> (PathBuf, NodeConf) {
     let path = NodeConf::path();
     let mut conf = NodeConf::load_from(&path);
-    if std::env::var_os("MAKEPAD_HIDE_WINDOWS").is_some() && std::env::var_os(CONF_ENV).is_none() {
+    if stays_out(CONF_ENV) {
         conf.enabled = false;
     }
     (path, conf)
+}
+
+/// A WM started as a test desktop: hidden (tests, agents) or under a lease (a lane's own). It
+/// never takes the socket path apps find by default.
+pub fn test_wm() -> bool {
+    std::env::var_os("MAKEPAD_HIDE_WINDOWS").is_some() || std::env::var_os(makepad_remote::discovery::LEASE_ENV).is_some()
+}
+
+/// A WM that is not its node's: a test desktop, or a second one on this session (a live WM holds
+/// the default path, so it got another). It keeps none of the node's services and leaves them
+/// alone: two that keep them stop each other's hubs as rivals, under the node's leases (11-05).
+/// The update's WM comes after the old one is gone, so it holds the default path and adopts them.
+pub fn guest_wm() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        use makepad_widgets::makepad_platform::makepad_hal::wm_socket;
+        let exported = std::env::var_os(wm_socket::SOCKET_ENV).filter(|p| !p.is_empty()).map(PathBuf::from);
+        test_wm() || second_on_session(exported.as_deref(), wm_socket::runtime_dir().as_deref())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        test_wm()
+    }
+}
+
+/// Whether the path this WM published (`MAKEPAD_WM_SOCKET`) is not the default one in `dir`.
+#[cfg(target_os = "linux")]
+fn second_on_session(exported: Option<&Path>, dir: Option<&Path>) -> bool {
+    use makepad_widgets::makepad_platform::makepad_hal::wm_socket;
+    match (exported, dir) {
+        (Some(path), Some(dir)) => path != wm_socket::socket_path(dir, 0),
+        _ => false,
+    }
+}
+
+/// A guest WM stays out of the service `conf_env` would name settings for, unless it does.
+pub fn stays_out(conf_env: &str) -> bool {
+    guest_wm() && std::env::var_os(conf_env).is_none()
 }
 
 /// Seconds before the `n`th restart in a row (n >= 1).
@@ -455,8 +494,23 @@ fn hub_scope<'a>(cgroup: &'a str, file: &str, port: u16) -> Option<&'a str> {
     })
 }
 
+/// When `pid` started (clock ticks since boot).
+#[cfg(target_os = "linux")]
+fn proc_start(pid: u32) -> Option<u64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    stat[stat.rfind(')')? + 2..].split_whitespace().nth(19)?.parse().ok()
+}
+
+/// Whether the WM a hub's scope names is another live one, which keeps it. A pid reused since then
+/// started after the process in that scope, so it is not that WM.
+#[cfg(target_os = "linux")]
+fn kept_by_another_wm(scope: &str, pid: u32, me: u32, start: &dyn Fn(u32) -> Option<u64>) -> bool {
+    let Some(wm) = scope.strip_suffix(".scope").and_then(|s| s.rsplit('-').next()).and_then(|p| p.parse::<u32>().ok()) else { return false };
+    wm != me && matches!((start(wm), start(pid)), (Some(w), Some(p)) if w <= p)
+}
+
 /// This user's processes in a hub scope for `port` other than `keep`'s (its own children, the
-/// sandboxed Claude, share its scope).
+/// sandboxed Claude, share its scope) and no other live WM's.
 #[cfg(target_os = "linux")]
 fn rival_hubs(file: &str, port: u16, keep: Option<u32>) -> Vec<u32> {
     use std::os::unix::fs::MetadataExt;
@@ -468,7 +522,7 @@ fn rival_hubs(file: &str, port: u16, keep: Option<u32>) -> Vec<u32> {
         .filter_map(|e| e.ok()?.file_name().to_str()?.parse::<u32>().ok())
         .filter(|pid| Some(*pid) != keep && *pid != std::process::id())
         .filter(|pid| std::fs::metadata(format!("/proc/{pid}")).is_ok_and(|m| m.uid() == me))
-        .filter(|pid| scope_of(*pid).is_some_and(|scope| kept.as_deref() != Some(scope.as_str())))
+        .filter(|pid| scope_of(*pid).is_some_and(|scope| kept.as_deref() != Some(scope.as_str()) && !kept_by_another_wm(&scope, *pid, std::process::id(), &proc_start)))
         .collect();
     out.sort_unstable();
     out
@@ -1214,6 +1268,46 @@ mod tests {
         assert!(!rival_hubs("devhub", 8797, None).contains(&sleeper.id()));
         let _ = sleeper.kill();
         let _ = sleeper.wait();
+    }
+
+    /// Two WMs on one session: the first holds the default path and keeps the node's services, the
+    /// second gets another and keeps none. After the first goes (its file stays, as a crash leaves
+    /// it), the next WM holds the default path again: the update's handover.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_second_wm_keeps_nothing_and_the_next_after_the_first_does() {
+        use makepad_widgets::makepad_platform::makepad_hal::wm_socket::{self, WmSocket};
+        let dir = scratch("two-wms");
+        let second_at = |path: &Path| second_on_session(Some(path), Some(&dir));
+        let first = WmSocket::bind(&dir, 0).unwrap();
+        let second = WmSocket::bind(&dir, 0).unwrap();
+        assert_eq!(first.path, wm_socket::socket_path(&dir, 0));
+        assert!(!second_at(&first.path));
+        assert!(second_at(&second.path));
+        drop(first);
+        let next = WmSocket::bind(&dir, 0).unwrap();
+        assert!(!second_at(&next.path), "{:?}", next.path);
+        // no socket published: no other WM to tell it from
+        assert!(!second_on_session(None, Some(&dir)));
+        assert!(!second_on_session(Some(&second.path), None));
+    }
+
+    /// The hub another live WM keeps is no rival; one whose WM is gone, or this WM's own leftover,
+    /// is. A process that took the dead WM's pid since is not that WM.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_hub_another_live_wm_keeps_is_no_rival() {
+        let start = |pid: u32| match pid {
+            10 => Some(100),
+            20 => Some(200),
+            30 => Some(300),
+            _ => None,
+        };
+        let scope = |wm: u32| format!("makepad-devhub-8797-{wm}.scope");
+        assert!(kept_by_another_wm(&scope(10), 20, 1, &start));
+        assert!(!kept_by_another_wm(&scope(99), 20, 1, &start), "its WM is gone");
+        assert!(!kept_by_another_wm(&scope(10), 20, 10, &start), "this WM's own");
+        assert!(!kept_by_another_wm(&scope(30), 20, 1, &start), "a reused pid");
     }
 
     #[test]
