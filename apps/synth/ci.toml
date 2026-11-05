@@ -17,9 +17,9 @@ work = "628527fcd4f9b89ec0203bce6b2266b7d8e8fe55"
 [app.windows]
 capture = ""
 date = "2026-11-05"
-digest = "d9b24d44a0cf3abd397dc039d41c95bbbac5f49068042c107fb0398dc1b576f1"
-main = "f8b30e3e6c67708763fe2bef9ae80fa8f7eb0a3a"
-work = "8ab7761fc8fcd495fc5bb589ce486a61f33965f7"
+digest = "ccc852b17c1e0e6d0da6856b39ce93ac003b379e903d875e68ced4eaf60ca2dc"
+main = "71832f8fa1c5a3f6f589b89749c6a99c189e3e8e"
+work = "5300f14ac2c7b3d5aa16bd89d98d789111fbbeb8"
 
 [job.jit_05.linux]
 date = "2026-11-04"

@@ -307,7 +307,7 @@ fn drive(q: &QueueHandle, node: &KernelNode, id: u16, stop: &AtomicBool, quit: &
     while running() {
         let opened = KernelStream::open(node).map_err(|e| format!("{e:?}")).and_then(|stream| {
             // The node caps these at its own ceilings: a long zoom is one session.
-            let limits = Limits { fuel: usize::MAX, work: u64::MAX, ..Limits::default() };
+            let limits = Limits { fuel: u64::MAX, work: u64::MAX, ..Limits::default() };
             RemoteSession::open(&Arc::new(stream), &program, RemoteConfig { limits, class: Class::Interactive, ..RemoteConfig::default() }).map_err(|e| format!("{e:?}"))
         });
         match opened {

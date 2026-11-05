@@ -2,7 +2,6 @@
 
 use makepad_ai_services::port::{AiServicePort, PortEvent};
 use makepad_app_notes::{ai, view::NotesView};
-use makepad_strict_json::{self as json, Value};
 pub use makepad_widgets;
 use makepad_widgets::*;
 
@@ -27,15 +26,6 @@ script_mod! {
                 }
             }
         }
-    }
-}
-
-fn is_close_requested(json: &str) -> bool {
-    match json::parse(json.as_bytes()) {
-        Ok(Value::Obj(fields)) => fields
-            .iter()
-            .any(|(k, v)| k == "wm" && v.as_str() == Some("CloseRequested")),
-        _ => false,
     }
 }
 
@@ -138,7 +128,7 @@ impl AppMain for App {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         if let Event::Custom(json) = event {
-            if is_close_requested(json) {
+            if let Some(makepad_wm_api::WmEvent::CloseRequested) = makepad_wm_api::WmEvent::parse(json) {
                 if let Some(mut view) = self.notes(cx).borrow_mut::<NotesView>() {
                     if view.request_close(cx) {
                         cx.quit();

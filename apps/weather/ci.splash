@@ -1,4 +1,4 @@
-// CI smoke test for apps/weather. Run by tools/ci, which finds every `ci.splash`
+// CI smoke test for apps/weather. Run by devhub ci, which finds every `ci.splash`
 // in the checkout. The script decides every input; the vision model only
 // judges the grab against the acceptance text below. Basic on purpose: does
 // it check everywhere, build and come up here, and look like what it is.

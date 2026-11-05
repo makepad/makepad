@@ -177,9 +177,10 @@ pub fn prepare_isolate(vm: &mut ScriptVm, appearance: &Appearance, force: bool) 
 /// `alloc_splash_vm_with_ui`): the theme, the base, the sheet's theme phase
 /// and the main VM's tokens, then the widget library ONCE over them -- what
 /// allocating with the stock library and [`prepare_isolate`] on top did with
-/// two registrations. Errors land in `errors`.
-pub fn isolate_ui(appearance: Rc<Appearance>, errors: Rc<std::cell::RefCell<Vec<String>>>) -> Box<dyn FnOnce(&mut ScriptVm)> {
-    Box::new(move |vm: &mut ScriptVm| {
+/// two registrations. Errors land in `errors`. Run at allocation only: a
+/// face host follows a live edit itself (`FaceHost::apply_appearance`).
+pub fn isolate_ui(appearance: Rc<Appearance>, errors: Rc<std::cell::RefCell<Vec<String>>>) -> Rc<dyn Fn(&mut ScriptVm)> {
+    Rc::new(move |vm: &mut ScriptVm| {
         vm.capture_errors();
         makepad_widgets::theme_mod(vm);
         let mut out = vm.take_errors();

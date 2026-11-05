@@ -67,7 +67,7 @@ impl FlowVm {
         vm.set_script_domain("flow");
         vm.capture_errors();
         let (result, allocation) = vm.with_heap_allocation_limit(HEAP_LIMIT, |vm| {
-            vm.with_instruction_limit(INSTRUCTION_LIMIT, |vm| {
+            vm.with_instruction_limit(INSTRUCTION_LIMIT as u64, |vm| {
                 install_prelude(vm, registry)?;
                 let declared = install_declared(vm, closure, "", registry)?;
                 let value = evaluate_in(vm, source, file_name)?;
@@ -203,7 +203,7 @@ impl FlowVm {
                 );
             }
             vm.capture_errors();
-            let returned = vm.with_instruction_limit(FN_INSTRUCTION_LIMIT, |vm| {
+            let returned = vm.with_instruction_limit(FN_INSTRUCTION_LIMIT as u64, |vm| {
                 vm.call(run, &[args.into()])
             });
             let errors = vm.take_errors();
@@ -601,7 +601,7 @@ pub fn install_prelude(vm: &mut ScriptVm<'_>, registry: &Registry) -> Result<(),
 
 /// Run `f` on `vm` under the flow evaluator's instruction and heap budgets.
 pub fn within_limits<R>(vm: &mut ScriptVm<'_>, file_name: &str, f: impl FnOnce(&mut ScriptVm<'_>) -> R) -> Result<R, EvalError> {
-    let (result, allocation) = vm.with_heap_allocation_limit(HEAP_LIMIT, |vm| vm.with_instruction_limit(INSTRUCTION_LIMIT, f));
+    let (result, allocation) = vm.with_heap_allocation_limit(HEAP_LIMIT, |vm| vm.with_instruction_limit(INSTRUCTION_LIMIT as u64, f));
     if allocation.exceeded {
         return Err(at(file_name, 1, 1, "flow exceeded the 64 MiB heap allocation limit"));
     }
@@ -885,7 +885,7 @@ pub(crate) fn evaluate_manifest(source: &str, file_name: &str) -> Result<Vec<(St
     };
     vm.capture_errors();
     let (result, allocation) = vm.with_heap_allocation_limit(MANIFEST_HEAP_LIMIT, |vm| {
-        vm.with_instruction_limit(MANIFEST_INSTRUCTION_LIMIT, |vm| {
+        vm.with_instruction_limit(MANIFEST_INSTRUCTION_LIMIT as u64, |vm| {
             vm.new_module(id!(app));
             vm.eval(make_mod(MANIFEST_PRELUDE_FILE, MANIFEST_PRELUDE));
             let prelude_errors = vm.take_errors();

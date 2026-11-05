@@ -24,7 +24,7 @@ default = ["tweaker", "standalone"]
 # builds; the Runner's releases build without it (--no-default-features).
 tweaker = ["dep:makepad-widgets-tweaker", "makepad-widgets/data", "makepad-widgets/dock", "makepad-widgets/fab"]
 # The standalone window (src/main.rs); a host that links the module leaves it off.
-standalone = []
+standalone = ["dep:makepad-wm-api"]
 
 [dependencies]
 makepad-widgets = { path = "../../widgets", default-features = false, features = ["glass"] }
@@ -32,4 +32,5 @@ makepad-widgets-tweaker = { path = "../../widgets/families/tweaker", optional = 
 makepad-ai-services = { path = "../../libs/ai/services" }
 makepad-app-module = { path = "../../libs/app_module" }
 makepad-strict-json = { path = "../../libs/strict_json" }
+makepad-wm-api = { path = "../../libs/wm_api", optional = true }
 makepad-civil-time = { path = "../../libs/civil_time" }

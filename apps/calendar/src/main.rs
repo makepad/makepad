@@ -3,7 +3,6 @@
 pub use makepad_widgets;
 use makepad_ai_services::port::{AiServicePort, PortEvent};
 use makepad_app_calendar::{ai, view::CalendarView};
-use makepad_strict_json::Value;
 use makepad_widgets::*;
 
 app_main!(App);
@@ -24,16 +23,6 @@ script_mod! {
                 }
             }
         }
-    }
-}
-
-fn is_wm_close_requested(json: &str) -> bool {
-    let Ok(value) = makepad_strict_json::parse(json.as_bytes()) else {
-        return false;
-    };
-    match value.get("wm") {
-        Some(Value::Str(s)) => s == "CloseRequested",
-        _ => false,
     }
 }
 
@@ -131,7 +120,7 @@ impl AppMain for App {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         if let Event::Custom(json) = event {
-            if is_wm_close_requested(json) {
+            if let Some(makepad_wm_api::WmEvent::CloseRequested) = makepad_wm_api::WmEvent::parse(json) {
                 cx.quit();
                 return;
             }
