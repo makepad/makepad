@@ -944,6 +944,11 @@ impl Hal {
         }
     }
 
+    /// A quit request waits for `session`'s next pump (World::quit_on_its_way).
+    pub fn quit_on_its_way(&self, session: u32) -> bool {
+        lock(&self.state).world.quit_on_its_way(session)
+    }
+
     /// Wakes one session's pump (a `Wake` event for it alone).
     pub fn wake_session(&self, session: u32) {
         let mut s = lock(&self.sig.signal);
@@ -1214,7 +1219,6 @@ pub fn expect_main_loop() {
     main_loop::expect()
 }
 
-/// Ends [`run_main_loop`] (any thread), as the app does when it is done.
 /// A run of this process's app ended in place (`makepad run`): what the HAL holds of it outside its
 /// session goes, as a fresh process has it. The session's close frees the rest (`free_session`);
 /// the window, the GPU device and the host's own session stay.
@@ -1235,6 +1239,7 @@ pub fn end_run() {
     backend::end_run();
 }
 
+/// Ends [`run_main_loop`] (any thread), as the app does when it is done.
 pub fn stop_main_loop() {
     main_loop::stop()
 }
@@ -1379,6 +1384,14 @@ pub fn hal_wake() {
 #[relax_api]
 pub fn hal_wake_session(session: u32) {
     Hal::global().wake_session(session)
+}
+
+/// A quit request waits for `session`'s next `hal_pump` (asked for since its last one: a window
+/// manager's DomainStop, the system's quit). The session's own thread asks before it draws, so a
+/// quit that came while a handler ran is taken before the next frame.
+#[relax_api]
+pub fn hal_quit_on_its_way(session: u32) -> bool {
+    Hal::global().quit_on_its_way(session)
 }
 
 /// One texture or buffer of a session's GPU ledger (`hal_allocations`).

@@ -328,6 +328,8 @@ impl Cx {
         // a frame asked for and not yet announced: when, so a lost request is asked again
         let mut requested: Option<std::time::Instant> = None;
         let mut host_poll_due = hosted;
+        // a quit came while this turn's handlers ran (hal_quit_on_its_way): the next pump takes it at once
+        let mut quit_due = false;
         #[cfg(target_os = "android")]
         let mut performance_hint = if hosted { None } else { makepad_hal::backend::android::performance_hint::PerformanceHint::for_this_thread() };
         'turns: loop {
@@ -337,13 +339,14 @@ impl Cx {
             // edge, so left pending it silenced every later wake (a hosted child then slept
             // through its host's messages: the cold `makepad run` Browser showed no page).
             let signal_pending = SignalToUI::any_pending();
+            let quit_now = std::mem::take(&mut quit_due);
             // Terminated while hosted: the host's Ticks are not what the shutdown waits for
             // (the host may be gone, or hung), so the child runs its own timers until it quits.
             let quitting = hosted && termination_requested();
             // a close on its way: wait for its answer (or the wait's end), not for the next beat
             let close_wait = self.hal.close_pending.filter(|_| !hosted).map(|t| CLOSE_WAIT.saturating_sub(t.elapsed())).filter(|w| !w.is_zero());
             let mut gpu_wait = false;
-            let timeout = if host_poll_due || signal_pending {
+            let timeout = if host_poll_due || signal_pending || quit_now {
                 0
             } else if let Some(wait) = close_wait {
                 wait.as_nanos() as u64
@@ -431,6 +434,26 @@ impl Cx {
                     hint.mark_frame_drawn();
                 }
                 self.hal_submit_batch();
+            }
+            // A quit asked for while this turn's handlers ran (a window manager's DomainStop, the
+            // system's quit, a termination signal) is taken before anything more is drawn: a cold
+            // app asked to quit during its Startup drew its first frame first, which compiled its
+            // whole tree's draw code after the quit (5,300 lazy compiles of a counter's 14,600).
+            if !hosted {
+                #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+                if crate::os::termination_signal::requested() {
+                    self.handle_termination_signal();
+                    if !self.hal_handle_platform_ops() {
+                        self.call_event_handler(&Event::Shutdown);
+                        self.hal_submit_batch();
+                        break 'turns;
+                    }
+                }
+                if makepad_hal::hal_quit_on_its_way(info.session) {
+                    quit_due = true;
+                    self.hal_submit_batch();
+                    continue 'turns;
+                }
             }
             retire_in_flight(self, &mut in_flight);
             let gpu_ready = in_flight.len() < FRAMES_IN_FLIGHT;

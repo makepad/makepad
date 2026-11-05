@@ -121,14 +121,14 @@ fn an_app_request_goes_to_the_app_service_through_the_hub() {
     let _relay_conn = link(&hub, &relay_endpoint());
     let c = client(&hub);
     let me = std::process::id();
-    let request = crate::app::app_request_of("call fab.support {\"at\": 1}").unwrap().unwrap();
+    let request = crate::app::app_request_of("call demo.support {\"at\": 1}").unwrap().unwrap();
     let ch = c.open("route", &format!("d:{me} app {request}")).unwrap();
     let mut lines = Vec::new();
     let err = crate::hub::app_answer(ch, &mut |l| {
         lines.push(l.to_string());
         true
     });
-    assert_eq!((err, lines), (Ok(false), vec![r#"{"asked":"call fab.support\n{\"at\": 1}"}"#.to_string()]));
+    assert_eq!((err, lines), (Ok(false), vec![r#"{"asked":"call demo.support\n{\"at\": 1}"}"#.to_string()]));
 }
 
 #[test]

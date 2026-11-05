@@ -32,6 +32,16 @@ pub fn socket_dir() -> PathBuf {
     std::env::temp_dir()
 }
 
+/// [`socket_dir`], made this user's own first (0700; one that is not this user's own directory is
+/// refused): for files of this user's processes no other user may read, replace or link (a restart's
+/// state for the next run).
+#[cfg(unix)]
+pub fn own_socket_dir() -> std::io::Result<PathBuf> {
+    let dir = socket_dir();
+    imp::make_own(&dir)?;
+    Ok(dir)
+}
+
 /// Removes the socket and discovery file of this process (at exit).
 extern "C" fn cleanup() {
     let (sock, disc) = paths(std::process::id());
@@ -49,15 +59,19 @@ mod imp {
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::path::Path;
 
-    /// Makes [`socket_dir`] this user's own directory (0700) before a socket goes in it. In /tmp
-    /// anyone may make one: a directory (or link) that is not this user's is refused, never used.
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    /// Makes [`socket_dir`] this user's own directory (0700) before a socket goes in it.
     fn own_dir(sock: &Path) -> io::Result<()> {
+        make_own(sock.parent().unwrap_or(Path::new("/")))
+    }
+
+    /// Makes `dir` this user's own directory (0700). In /tmp anyone may make one: a directory (or
+    /// link) that is not this user's is refused, never used.
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    pub(super) fn make_own(dir: &Path) -> io::Result<()> {
         use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
         extern "C" {
             fn getuid() -> u32;
         }
-        let dir = sock.parent().unwrap_or(Path::new("/"));
         match std::fs::DirBuilder::new().mode(0o700).create(dir) {
             Err(e) if e.kind() != io::ErrorKind::AlreadyExists => return Err(io::Error::new(e.kind(), format!("its socket dir {} could not be made: {e}", dir.display()))),
             _ => {}
@@ -74,7 +88,7 @@ mod imp {
 
     /// A phone's app temp dir is its own already.
     #[cfg(any(target_os = "android", target_os = "ios"))]
-    fn own_dir(_: &Path) -> io::Result<()> {
+    pub(super) fn make_own(_: &Path) -> io::Result<()> {
         Ok(())
     }
 

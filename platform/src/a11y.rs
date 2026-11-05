@@ -41,6 +41,9 @@ struct Record {
     generated_labels: Vec<NodeId>,
     parts: HashMap<u64, NodeId>,
     drawn_parts: Vec<NodeId>,
+    /// Where the node's area stood when its text geometry (absolute line boxes and glyph
+    /// positions) was measured; see [`CxA11y::set_text_origin`].
+    text_at: Option<[f32; 2]>,
 }
 #[derive(Default)]
 struct WindowTree {
@@ -167,6 +170,7 @@ impl CxA11y {
         if rec.seen != frame {
             rec.drawn_children.clear();
             rec.drawn_parts.clear();
+            rec.text_at = None;
         }
         rec.seen = frame;
         rec.parent = parent;
@@ -221,6 +225,17 @@ impl CxA11y {
         let token = self.stack.len() as u32;
         self.stack.push(Frame { id, window, list });
         token
+    }
+    /// Where the node's area stands as its semantics measure its text. A widget's semantics run
+    /// right after it draws, before the parents around it align their children, so its line
+    /// boxes and glyph positions (absolute, unlike its bounds, which come from its area once
+    /// every turtle has finished) would keep the place it was drawn at; `finish_frame` moves
+    /// them as far as the area has moved since.
+    pub fn set_text_origin(&mut self, token: u32, at: [f32; 2]) {
+        let f = self.stack[token as usize];
+        if let Some(rec) = f.window.and_then(|w| self.windows.get_mut(&w)).and_then(|t| t.records.get_mut(&f.id)) {
+            rec.text_at = Some(at);
+        }
     }
     /// Reuse the previous draw's strings and vectors. Semantics implementations overwrite the
     /// fields they own and compare strings before copying; class/path are computed only once.
@@ -372,11 +387,13 @@ impl CxA11y {
 
     /// `list_redraw` excludes freed lists, including pool slots awaiting reuse. `bounds` runs
     /// after all turtles finish, also updating cached nodes when their view transform moves.
+    /// `origin` is an area's unclipped top-left then, which a node's text follows.
     pub fn finish_frame(
         &mut self,
         focus: Area,
         mut list_redraw: impl FnMut(DrawListId) -> Option<u64>,
         mut bounds: impl FnMut(Area) -> Option<makepad_a11y::Rect>,
+        mut origin: impl FnMut(Area) -> Option<[f32; 2]>,
         mut emit: impl FnMut(WindowId, Vec<u8>),
     ) {
         if !self.on {
@@ -395,10 +412,16 @@ impl CxA11y {
                 if rec.alive {
                     if !rec.owner.is_none() {
                         // Parts carry their own bounds, but focus belongs to the owner's real Area.
-                    } else if let Some(b) = bounds(rec.area) {
-                        rec.next.bounds = b;
-                    } else if !rec.area.is_empty() {
-                        rec.next.bounds = Default::default();
+                    } else {
+                        if let Some(b) = bounds(rec.area) {
+                            rec.next.bounds = b;
+                        } else if !rec.area.is_empty() {
+                            rec.next.bounds = Default::default();
+                        }
+                        if let (Some(at), Some(now)) = (rec.text_at, origin(rec.area)) {
+                            follow_origin(&mut rec.next, [now[0] - at[0], now[1] - at[1]]);
+                            rec.text_at = Some(now);
+                        }
                     }
                     if let Some(r) = redraw {
                         rec.redraw = r;
@@ -584,6 +607,23 @@ fn ancestor(tree: &WindowTree, candidate: NodeId, mut child: NodeId) -> bool {
     false
 }
 
+/// A node's text geometry moved with its area (a parent aligned it after its semantics ran).
+fn follow_origin(node: &mut Node, [dx, dy]: [f32; 2]) {
+    if dx == 0.0 && dy == 0.0 {
+        return;
+    }
+    if let Some(text) = node.text.as_mut() {
+        for line in &mut text.lines {
+            line.rect.x += dx;
+            line.rect.y += dy;
+            line.baseline += dy;
+        }
+        for x in &mut text.glyph_x {
+            *x += dx;
+        }
+    }
+}
+
 // Derived Node::clone_from would replace every String. Cached records copy into their
 // spare buffers instead, so an unchanged active frame allocates nothing after warmup.
 fn reuse_node(to: &mut Node, from: &Node) {
@@ -734,6 +774,10 @@ impl Cx {
                     .map(|l| l.redraw_id)
             },
             |area| snapshot_rect(&area, self).map(semantic_rect),
+            |area| area.is_valid(self).then(|| {
+                let pos = area.rect(self).pos;
+                [pos.x as f32, pos.y as f32]
+            }),
             |window, bytes| ops.push_back(CxOsOp::A11yUpdate { window, bytes }),
         );
         self.platform_ops = ops;
@@ -932,6 +976,7 @@ mod tests {
             focus,
             redraw,
             |_| None,
+            |_| None,
             |w, bytes| messages.push((w, bytes)),
         );
         messages
@@ -947,6 +992,34 @@ mod tests {
         let mut b = CxA11y::default();
         assert!(b.set_consumers(4));
         b
+    }
+
+    #[test]
+    fn text_follows_an_alignment_that_moves_its_node_after_its_semantics() {
+        let mut pool = CxDrawListPool::default();
+        let list = pool.alloc();
+        let mut b = active();
+        b.begin_frame();
+        let r = root(&mut b, WindowId(0, 1), 1, list.id());
+        let t = b.begin_node(2, Some(list.id()));
+        // the field drew at y 66 and measured its line there; the row it sits in then centred it
+        // 9 lower and the list moved it 2 right
+        let mut field = node(Role::TextField, "Search");
+        field.text = Some(TextInfo {
+            content: "ab".into(),
+            lines: vec![makepad_a11y::LineBox { start: 0, rect: makepad_a11y::Rect { x: 104.0, y: 68.5, w: 12.0, h: 13.0 }, baseline: 78.5 }],
+            glyph_x: vec![104.0, 110.0, 116.0],
+            ..Default::default()
+        });
+        b.set_text_origin(t, [104.0, 66.0]);
+        b.end_node(t, field, Area::Empty);
+        end_root(&mut b, r);
+        let mut messages = Vec::new();
+        b.finish_frame(Area::Empty, |_| Some(1), |_| None, |_| Some([106.0, 75.0]), |w, bytes| messages.push((w, bytes)));
+        let update = makepad_a11y::wire::decode_update(&messages[0].1).unwrap();
+        let text = update.nodes.iter().find(|n| n.id == NodeId::widget(2)).and_then(|n| n.text.clone()).expect("the field's text");
+        let line = text.lines[0];
+        assert_eq!((line.rect.x, line.rect.y, line.baseline, text.glyph_x), (106.0, 77.5, 87.5, vec![106.0, 112.0, 118.0]), "the line box and glyphs are where the field was put, not where it drew");
     }
 
     #[test]
@@ -1297,6 +1370,7 @@ mod tests {
                     h: 10.0,
                 })
             },
+            |_| None,
             |_, bytes| updates.push(makepad_a11y::wire::decode_update(&bytes).unwrap()),
         );
         assert_eq!(
@@ -1426,6 +1500,7 @@ mod tests {
                 Area::Empty,
                 |_| panic!("list lookup while off"),
                 |_| panic!("bounds lookup while off"),
+                |_| panic!("origin lookup while off"),
                 |_, _| panic!("update while off"),
             );
         }
@@ -1492,6 +1567,7 @@ mod allocation_tests {
                     Area::Empty,
                     |_| unreachable!(),
                     |_| unreachable!(),
+                    |_| unreachable!(),
                     |_, _| unreachable!(),
                 );
             }
@@ -1522,6 +1598,7 @@ mod allocation_tests {
                 Area::Empty,
                 |_| Some(1),
                 |_| None,
+                |_| None,
                 |w, bytes| payload = Some((w, bytes)),
             );
             if let Some((w, bytes)) = payload {
@@ -1540,7 +1617,7 @@ mod allocation_tests {
         let cached = measured(|| {
             for _ in 0..1_000 {
                 builder.begin_frame();
-                builder.finish_frame(Area::Empty, |_| Some(1), |_| None, |_, _| unreachable!());
+                builder.finish_frame(Area::Empty, |_| Some(1), |_| None, |_| None, |_, _| unreachable!());
             }
         });
         assert_eq!(cached, 0);

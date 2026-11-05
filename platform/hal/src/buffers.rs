@@ -1053,6 +1053,12 @@ impl EventQueue {
         other.arena.clear();
     }
 
+    /// A quit request is queued here, not yet delivered.
+    pub fn quit_queued(&self) -> bool {
+        self.events.iter().any(|e| e.tag == crate::events::event_tag::Lifecycle
+            && matches!(e.decode(&[]), Some(HalEvent::Lifecycle { kind: lifecycle::QUIT_REQUESTED })))
+    }
+
     /// Moves queued events into the caller's buffer while they fit (events and arena); returns
     /// how many were delivered. An event whose payload alone exceeds an empty arena is delivered
     /// with the payload cut (counted in `truncated`), never stuck.

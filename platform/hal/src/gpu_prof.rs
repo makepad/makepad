@@ -924,9 +924,6 @@ fn sessions() -> Vec<(u32, usize)> {
     v
 }
 
-/// Session `sid` ended (it exits, or relaunches empty under the same id): its frames, the ones
-/// still on the GPU and the backend names it gave leave the recording. The default session
-/// (the busiest) and an app's own readout follow the sessions that draw now, never a closed one.
 /// (`hal::end_run`) The recording and its subscribers go with the run; the device's facts stay.
 pub(crate) fn end_run() {
     REC.store(false, Ordering::Relaxed);
@@ -937,6 +934,9 @@ pub(crate) fn end_run() {
     drop((state, stopped, subs));
 }
 
+/// Session `sid` ended (it exits, or relaunches empty under the same id): its frames, the ones
+/// still on the GPU and the backend names it gave leave the recording. The default session
+/// (the busiest) and an app's own readout follow the sessions that draw now, never a closed one.
 pub fn session_closed(sid: u32) {
     let mut g = lock();
     let Some(st) = g.as_mut() else { return };

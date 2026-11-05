@@ -446,3 +446,35 @@ fn a_covered_child_cx_holds_its_frames() {
     wait_for("the child's run to end", &|| host.threads.lock().unwrap().is_empty());
     wait_for("every session freed", &|| Hal::global().with_world(|w| w.session_ids() == [0]));
 }
+
+/// A quit that comes while a handler runs (a window manager's DomainStop for an app still in its
+/// Startup, the system's quit) is taken before anything more is drawn: the loop had drawn the
+/// first frame first, so a cold app quit during its Startup compiled its whole tree's draw code
+/// after the quit. Here the quit is queued from inside Startup, which asks for a redraw.
+#[test]
+fn a_quit_asked_for_during_startup_draws_nothing() {
+    let _one = take_headless_hal();
+    let seen = std::thread::spawn(|| {
+        let seen: Rc<RefCell<Vec<&'static str>>> = Rc::new(RefCell::new(Vec::new()));
+        let log = seen.clone();
+        let cx = Rc::new(RefCell::new(Cx::new(Box::new(move |cx: &mut Cx, event: &Event| match event {
+            Event::Startup => {
+                log.borrow_mut().push("startup");
+                let _window = WindowHandle::new(cx);
+                cx.redraw_all();
+                let session = cx.hal.info.expect("the session is open at Startup").session;
+                Hal::global().with_world(|w| w.to_session(session, |q| q.lifecycle(makepad_hal::lifecycle::QUIT_REQUESTED)));
+            }
+            Event::Draw(_) => log.borrow_mut().push("draw"),
+            Event::QuitRequested(_) => log.borrow_mut().push("quit requested"),
+            Event::Shutdown => log.borrow_mut().push("shutdown"),
+            _ => {}
+        }))));
+        cx.borrow_mut().init_cx_os();
+        Cx::event_loop(cx.clone());
+        cx.borrow_mut().self_ref = None;
+        let seen = seen.borrow().clone();
+        seen
+    }).join().unwrap();
+    assert_eq!(seen, ["startup", "quit requested", "shutdown"]);
+}

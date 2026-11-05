@@ -995,6 +995,15 @@ impl World {
         v
     }
 
+    /// A quit request waits for session `id`'s next pump: queued (a DomainStop, the system's quit,
+    /// automation), or the session ended under its app, which that pump tells it.
+    pub fn quit_on_its_way(&self, id: u32) -> bool {
+        match self.sessions.get(&id) {
+            Some(s) => s.events.quit_queued(),
+            None => self.ended.contains(&id),
+        }
+    }
+
     /// Whether the session was ended by the HAL and its app has not been told (once).
     pub fn take_ended(&mut self, id: u32) -> bool {
         match self.ended.iter().position(|e| *e == id) {

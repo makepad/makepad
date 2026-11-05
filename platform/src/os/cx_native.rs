@@ -124,10 +124,11 @@ impl Cx {
     ) {
         let sender = self.storage_state.sender();
         let held = self.storage_state.hold(request);
+        let root = self.storage_state.root.clone();
         match self.task_pool().submit_internal(crate::thread::Class::Background, move || {
             let mut held = held.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(request) = held.take() {
-                let response = crate::storage::native::execute(&crate::home::storage_dir(), request);
+                let response = crate::storage::native::execute(&root, request);
                 let _ = sender.send(response);
             }
         }) {
@@ -143,7 +144,7 @@ impl Cx {
         for write in self.storage_state.take_writes() {
             let mut held = write.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(request) = held.take() {
-                let _ = crate::storage::native::execute(&crate::home::storage_dir(), request);
+                let _ = crate::storage::native::execute(&self.storage_state.root, request);
             }
         }
     }

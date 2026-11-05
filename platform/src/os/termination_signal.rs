@@ -49,6 +49,11 @@ pub(crate) fn take_requested() -> bool {
     REQUESTED.swap(false, Ordering::AcqRel)
 }
 
+/// A termination asked for and not yet taken (`take_requested`).
+pub(crate) fn requested() -> bool {
+    REQUESTED.load(Ordering::Acquire)
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod native {
     use super::*;

@@ -419,6 +419,8 @@ struct PendingStorageRequest {
 }
 
 pub(crate) struct StorageState {
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) root: std::path::PathBuf,
     next_request_id: u64,
     pending: HashMap<StorageRequestId, PendingStorageRequest>,
     responses: ToUIReceiver<StorageWorkerResponse>,
@@ -430,7 +432,18 @@ pub(crate) struct StorageState {
 
 impl Default for StorageState {
     fn default() -> Self {
+        Self::new(
+            #[cfg(not(target_arch = "wasm32"))]
+            crate::home::storage_dir(),
+        )
+    }
+}
+
+impl StorageState {
+    fn new(#[cfg(not(target_arch = "wasm32"))] root: std::path::PathBuf) -> Self {
         Self {
+            #[cfg(not(target_arch = "wasm32"))]
+            root,
             next_request_id: 1,
             pending: HashMap::new(),
             responses: ToUIReceiver::default(),
@@ -1376,8 +1389,8 @@ mod tests {
     #[test]
     fn what_an_app_asked_to_write_is_on_disk_after_its_shutdown() {
         let root = std::env::temp_dir().join(format!("makepad-storage-shutdown-{}", std::process::id()));
-        std::env::set_var("MAKEPAD_STORAGE_DIR", &root);
         let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.storage_state = StorageState::new(root.clone());
         let storage = cx.storage("ending");
         for i in 0..256 {
             storage.set(&mut cx, &format!("key-{i}"), vec![7u8; 64]);
