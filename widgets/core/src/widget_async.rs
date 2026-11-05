@@ -2164,11 +2164,6 @@ mod isolate_entry_tests {
     use super::*;
     use std::panic::{catch_unwind, AssertUnwindSafe};
 
-    /// A guest panics while its isolate is installed — through
-    /// `with_isolate` (a tile's dispatch) and through
-    /// `with_script_vm_id` (a host's own entry): the main VM is
-    /// back on `Cx`, the isolate is back in the table with its heap, and
-    /// both keep working.
     /// A live edit's reload pass (a later `Cx::reload_generation`) reaches an
     /// isolate at its first entry after the edit: its UI library is registered
     /// again (fresh widget prototypes) and what its host kept for the pass runs
@@ -2213,6 +2208,11 @@ mod isolate_entry_tests {
         cx.free_splash_vm(by_host);
     }
 
+    /// A guest panics while its isolate is installed — through
+    /// `with_isolate` (a tile's dispatch) and through
+    /// `with_script_vm_id` (a host's own entry): the main VM is
+    /// back on `Cx`, the isolate is back in the table with its heap, and
+    /// both keep working.
     #[test]
     fn a_panic_inside_an_installed_isolate_restores_the_outer_vm_and_the_table() {
         let mut cx = Cx::new(Box::new(|_, _| {}));

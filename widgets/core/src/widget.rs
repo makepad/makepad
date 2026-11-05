@@ -2508,6 +2508,7 @@ fn semantic_draw(widget: &mut (dyn Widget + 'static), source: Option<&ScriptObje
     let needs_metadata = node.id.is_none();
     node.states.remove(a11y_tree::States::HIDDEN);
     widget.semantics(cx, &mut node);
+    crate::semantics::text_origin(widget, cx, token, &node);
     if needs_metadata {
         {
             let registry = cx.components.get::<WidgetRegistry>();

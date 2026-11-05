@@ -5213,7 +5213,7 @@ mod tests {
         builder.end_node(token, Node { role: Role::Window, states: if hidden { States::HIDDEN } else { States::empty() }, ..Default::default() }, Area::Empty);
         builder.end_window();
         let mut tree = a11y_tree::mirror::Tree::default();
-        builder.finish_frame(Area::Empty, |_| None, |_| None, |_, bytes| { tree.apply(a11y_tree::wire::decode_update(&bytes).unwrap()); });
+        builder.finish_frame(Area::Empty, |_| None, |_| None, |_| None, |_, bytes| { tree.apply(a11y_tree::wire::decode_update(&bytes).unwrap()); });
         tree
     }
 
@@ -5352,7 +5352,7 @@ mod tests {
                 nodes.insert(node.id, node);
                 expected.insert(window, nodes);
             }
-            builder.finish_frame(Area::Empty, |_| None, |_| None, |window, bytes| {
+            builder.finish_frame(Area::Empty, |_| None, |_| None, |_| None, |window, bytes| {
                 mirrors.entry(window.0).or_default().apply(a11y_tree::wire::decode_update(&bytes).unwrap());
             });
             for (window, nodes) in expected { assert_eq!(mirrors[&window].nodes, nodes, "window {window}, frame {frame}"); }

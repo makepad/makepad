@@ -154,12 +154,23 @@ pub fn text_layout(
     }
 }
 
+/// A widget's text is measured where it drew, and the parents around it may still align it:
+/// the builder moves its line boxes and glyph positions with its area (`set_text_origin`).
+pub fn text_origin(widget: &dyn Widget, cx: &mut Cx2d, token: u32, node: &a11y_tree::Node) {
+    let area = widget.area();
+    if node.text.as_ref().is_some_and(|t| !t.lines.is_empty() || !t.glyph_x.is_empty()) && area.is_valid(cx) {
+        let pos = area.rect(cx).pos;
+        cx.a11y.set_text_origin(token, [pos.x as f32, pos.y as f32]);
+    }
+}
+
 /// Directly drawn controls (such as a scroll bar) enter the same builder as WidgetRef leaves.
 pub fn record_leaf(widget: &dyn Widget, cx: &mut Cx2d) {
     let list = cx.draw_list_stack.last().copied();
     let token = cx.a11y.begin_node(widget.widget_uid().0, list);
     let mut node = cx.a11y.take_node(token);
     widget.semantics(cx, &mut node);
+    text_origin(widget, cx, token, &node);
     apply_overrides(widget, None, cx, &mut node);
     if let Some(rect) = makepad_platform::a11y::snapshot_rect(&widget.area(), cx) {
         node.bounds = makepad_platform::a11y::semantic_rect(rect);
