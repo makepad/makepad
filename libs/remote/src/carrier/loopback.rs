@@ -7,6 +7,7 @@
 use super::Carrier;
 use crate::endpoint::Endpoint;
 use crate::frame::FrameReader;
+use makepad_network::clone_tcp;
 use std::io;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::time::Duration;
@@ -20,8 +21,8 @@ pub fn new_token() -> io::Result<String> {
 
 fn carrier(s: TcpStream) -> io::Result<Carrier> {
     let _ = s.set_nodelay(true);
-    let r = s.try_clone()?;
-    let w = s.try_clone()?;
+    let r = clone_tcp(&s)?;
+    let w = clone_tcp(&s)?;
     Ok(Carrier {
         reader: FrameReader::new(Box::new(r)),
         writer: Box::new(w),
@@ -40,7 +41,7 @@ pub fn dial(addr: &str) -> io::Result<(Carrier, TcpStream)> {
     }
     let s = TcpStream::connect_timeout(&target, Duration::from_secs(2))?;
     s.set_read_timeout(Some(Duration::from_secs(1)))?;
-    let keep = s.try_clone()?;
+    let keep = clone_tcp(&s)?;
     Ok((carrier(s)?, keep))
 }
 
@@ -62,7 +63,7 @@ pub fn serve(ep: &Endpoint, token: &str) -> io::Result<SocketAddr> {
             let Ok(conn) = conn else { continue };
             let (ep, token) = (ep.clone(), token.clone());
             let _ = std::thread::Builder::new().name("makepad-remote-hello".into()).spawn(move || {
-                let (hooks, keep) = (ep.hooks(), conn.try_clone());
+                let (hooks, keep) = (ep.hooks(), clone_tcp(&conn));
                 (hooks.enter)();
                 let _ = conn.set_read_timeout(Some(Duration::from_secs(1)));
                 if let Ok(c) = carrier(conn) {

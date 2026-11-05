@@ -23,6 +23,7 @@ pub(super) enum Event {
     /// frame timer orders a frame's passes by it).
     Frame { target: Id, kind: u32, frame: u64, window: bool, gpu_ns: u64, gpu_span: [f64; 2] },
     DispatchTime { name: String, gpu_ns: u64 },
+    BufferLeases { req: u32, status: u32, leases: Vec<crate::lease::Lease> },
     Readback { req: u32, status: u32, rect: [u32; 4], pixels: Vec<u8> },
     Pick { req: u32, ids: Vec<u32> },
     Shared { id: Id, handle: u64 },
@@ -43,6 +44,7 @@ impl Mailbox {
 }
 
 pub(super) enum Ticket {
+    BufferLeases { token: Token, req: u32, ranges: Vec<(Arc<Buffer>, u64, u64, crate::lease::Lease)> },
     #[cfg(target_os = "linux")]
     Capture { token: Token, window: Id, size: [u32;2], format: u32, buffer: Arc<Buffer> },
     Frame { token: Token, target: Id, kind: u32, frame: u64, window: bool },
@@ -110,10 +112,43 @@ impl Drop for Slot {
 pub(super) struct Spare {
     slots: Mutex<Vec<Slot>>,
     arenas: Mutex<Arenas>,
+    /// batches made and not yet dropped (completed or abandoned): at `IN_FLIGHT_MAX` the
+    /// renderer waits for room (`Batch::new`) instead of recording ahead of the submit worker
+    in_flight: Mutex<usize>,
+    room: std::sync::Condvar,
 }
 pub(super) type Spares = Arc<Spare>;
-/// More frames than this in flight at once are not kept for reuse.
-const SPARE_SLOTS: usize = 256;
+
+impl Spare {
+    /// Command buffer slots alive: the batches in flight and the reset ones kept for reuse
+    /// (each with its command, descriptor and timestamp pools).
+    pub fn slots(&self) -> u64 {
+        (self.in_flight() + lock(&self.slots).len()) as u64
+    }
+
+    /// Batches made and not yet dropped.
+    pub fn in_flight(&self) -> usize {
+        *lock(&self.in_flight)
+    }
+
+    /// Releases the free arenas no batch took for `ARENA_IDLE` (an idle app frees its uploads).
+    pub fn trim(&self) {
+        let released = lock(&self.arenas).give(std::iter::empty());
+        drop(released);
+    }
+}
+
+/// More slots than this are not kept for reuse: twice the batches that may be in flight.
+const SPARE_SLOTS: usize = 2 * IN_FLIGHT_MAX;
+/// Batches recorded and not yet completed at once; the renderer waits for room at this many
+/// (every target frame of a beat is a batch: a window frame with its effect passes is a few).
+/// Without the bound a submit worker slower than the renderer queued seconds of frames, and the
+/// backlog fed itself: every batch took a fresh slot, descriptor pools and arena (a Snapdragon
+/// 685 swipe: 1,439 slots made in 27 s, none reused, each frame shown 21 s after its recording).
+const IN_FLIGHT_MAX: usize = 8;
+/// The longest one wait for room: the worker may itself wait on the host freeing GPU memory
+/// (`submit_until_room`), which needs the renderer running.
+const IN_FLIGHT_WAIT: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// The smallest upload arena; arenas grow by powers of two up to `ARENA_MAX`.
 const ARENA_MIN: u64 = 256 * 1024;
@@ -208,7 +243,7 @@ pub(super) struct Batch {
     /// pool is checked against this batch's draws once).
     descriptors: FastMap<vk::DescriptorSetLayout, (vk::DescriptorPool, u32, bool)>,
     pub tickets: Vec<Ticket>,
-    pub scanout: Option<(Arc<dyn super::surface::FramePresenter>, Arc<Image>, Token, Id, Id, u32, u64)>,
+    pub scanout: Option<(Arc<dyn super::surface::FramePresenter>, Arc<Image>, Token, u32, Id, Id, u32, u64)>,
     pub present: Option<Present>,
     #[cfg(target_os = "android")]
     pub native_frame: Option<(crate::backend::android::native_layer::Frame, Option<Arc<super::share::sync::Semaphore>>)>,
@@ -280,7 +315,7 @@ impl Batch {
             let sid = match ticket {
                 #[cfg(target_os = "linux")]
                 Ticket::Capture { token, .. } => token.sid,
-                Ticket::Frame { token, .. } | Ticket::Read { token, .. } | Ticket::Shared { token, .. } | Ticket::Copy { token, .. } => token.sid,
+                Ticket::Frame { token, .. } | Ticket::Read { token, .. } | Ticket::Shared { token, .. } | Ticket::Copy { token, .. } | Ticket::BufferLeases { token, .. } => token.sid,
                 Ticket::Host { .. } | Ticket::FrameCap { .. } => continue,
             };
             if !sids.contains(&sid) { sids.push(sid); }
@@ -292,6 +327,19 @@ impl Batch {
     /// A batch on a reset slot. `queries`: timestamps it writes (0: none; 2: its own start and
     /// end; more: a profiled frame's passes, `prof`).
     pub fn new(dev: Arc<Device>, spares: &Spares, queries: u32, reserve: u64) -> Result<Self, String> {
+        {
+            let mut n = lock(&spares.in_flight);
+            if *n >= IN_FLIGHT_MAX {
+                crate::profile::count("vk batch waited for room");
+                let waited = std::time::Instant::now();
+                while *n >= IN_FLIGHT_MAX {
+                    let (guard, timeout) = spares.room.wait_timeout(n, IN_FLIGHT_WAIT.saturating_sub(waited.elapsed())).unwrap_or_else(|e| e.into_inner());
+                    n = guard;
+                    if timeout.timed_out() && *n >= IN_FLIGHT_MAX { crate::profile::count("vk batch waited for room: timed out"); break; }
+                }
+            }
+            *n += 1;
+        }
         let spare = lock(&spares.slots).pop();
         if spare.is_none() { crate::profile::count("vk batch slot made"); }
         let mut b = Self { dev, spares: spares.clone(), reusable: false, pool: vk::CommandPool::null(), cb: vk::CommandBuffer::null(), fence: vk::Fence::null(),
@@ -389,7 +437,7 @@ impl Batch {
                     None => {
                         self.allocs += 1;
                         crate::profile::count("upload arena allocs");
-                        match Buffer::scratch(self.dev.clone(), want, buffer_usage()) {
+                        match Buffer::scratch(self.dev.clone(), crate::ledger::Pool::UploadArena, want, buffer_usage()) {
                             Ok(b) => b,
                             // out of memory: the pool's free arenas go first (and the host is
                             // asked for room), then one more try
@@ -397,7 +445,7 @@ impl Batch {
                                 let released = lock(&self.spares.arenas).release_all();
                                 drop(released);
                                 self.dev.refused("upload arena");
-                                Buffer::scratch(self.dev.clone(), want, buffer_usage())?
+                                Buffer::scratch(self.dev.clone(), crate::ledger::Pool::UploadArena, want, buffer_usage())?
                             }
                             Err(e) => return Err(e),
                         }
@@ -629,7 +677,10 @@ impl Batch {
     /// its FrameDone follows the present (or the frame's end: superseded by a newer frame,
     /// swapchain replaced, worker closing, SHOW_TRIES exhausted -- then it is not presented).
     fn show(self, present: Present, tries: u32, later: super::device::Later, complete: Arc<Worker>, mailbox: Mailbox) {
+        // (profiled: the acquire, copy and present of one frame on the submit worker)
+        let at = if crate::profile::on() { crate::clock_ns() } else { 0 };
         let shown = present.chain.show(&present.image);
+        if at != 0 { crate::profile::since(crate::profile::Metric::ToPresent, at); }
         crate::profile::count(match &shown {
             Ok(Shown::Presented) => "vk show: presented",
             Ok(Shown::Dropped) => "vk show: dropped",
@@ -738,6 +789,15 @@ impl Batch {
         }
         for ticket in self.tickets.drain(..) {
             match ticket {
+                Ticket::BufferLeases { token, req, ranges } => {
+                    let status = if self.dev.lost.load(Ordering::Acquire) { readback::DEVICE_LOST }
+                        else if failed { readback::FAILED }
+                        else if ranges.iter().all(|(buffer, offset, len, _)| buffer.invalidate_range(*offset, *len).is_ok()) { readback::OK }
+                        else { readback::FAILED };
+                    let leases = if status == readback::OK { ranges.into_iter().map(|(_, _, _, lease)| lease).collect() } else { Vec::new() };
+                    push(token, Event::BufferLeases { req, status, leases });
+                }
+
                 #[cfg(target_os = "linux")]
                 Ticket::Capture { token, window, size, format, buffer } => {
                     if !failed {
@@ -817,7 +877,7 @@ impl Batch {
         if let Some((sid, window, image)) = tap { crate::frame_tap::offer(sid, window, &image); }
         if let Some(scanout) = scanout {
             if failed {
-                scanout.0.dropped(scanout.5, scanout.4);
+                scanout.0.dropped(scanout.6, scanout.5);
             } else {
                 hand_over(scanout, self_prof_key, mailbox);
             }
@@ -826,9 +886,9 @@ impl Batch {
 }
 
 /// A frame for a presenter: its image, and what reports it shown to its session.
-fn hand_over(scanout: (Arc<dyn super::surface::FramePresenter>, Arc<Image>, Token, Id, Id, u32, u64), prof_key: Option<crate::gpu_prof::FrameKey>, mailbox: Mailbox) {
-    let (presenter, image, token, target, native, owner, frame) = scanout;
-    presenter.submit(owner, native, token.sid, image, Box::new(move |time| {
+fn hand_over(scanout: (Arc<dyn super::surface::FramePresenter>, Arc<Image>, Token, u32, Id, Id, u32, u64), prof_key: Option<crate::gpu_prof::FrameKey>, mailbox: Mailbox) {
+    let (presenter, image, token, from, target, native, owner, frame) = scanout;
+    presenter.submit(owner, native, from, image, Box::new(move |time| {
         // the presenter's time is when the frame reached the display
         if let Some(key) = prof_key { crate::gpu_prof::shown(key, time); }
         let sid = token.sid;
@@ -839,6 +899,9 @@ fn hand_over(scanout: (Arc<dyn super::surface::FramePresenter>, Arc<Image>, Toke
 
 impl Drop for Batch {
     fn drop(&mut self) { unsafe {
+        // room for the renderer's next batch, whatever this one's end
+        { let mut n = lock(&self.spares.in_flight); *n = n.saturating_sub(1); }
+        self.spares.room.notify_all();
         // a batch dropped before it completed (never submitted): its timed passes answer nothing
         if let Some(prof) = self.prof.take() { prof.finish(&self.dev, vk::QueryPool::null(), true); }
         for framebuffer in self.framebuffers.drain(..) { self.dev.raw.destroy_framebuffer(framebuffer, None); }

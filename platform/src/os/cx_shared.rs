@@ -1292,10 +1292,18 @@ impl Cx {
     /// Wake and redraw after an installed compiler patch, including while idle.
     #[cfg(relax)]
     fn poll_live_patch(&mut self) {
+        self.take_in_live_patches(false);
+    }
+
+    /// Takes in the installed compiler patches this context has not (re-runs the designs they
+    /// changed, redraws). On a patch's wake; `now`: also before its wake is served, for a grab,
+    /// whose frame shows every patch installed before it was asked for.
+    #[cfg(relax)]
+    pub(crate) fn take_in_live_patches(&mut self, now: bool) {
         use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
         static INSTALLED: AtomicBool = AtomicBool::new(false);
         static CHANGED: AtomicBool = AtomicBool::new(false);
-        // the patch count the designs were last re-run for (std::relax::patched_files)
+        // the patch count the designs were last re-run for (std::relax::patched)
         static SEEN: AtomicU64 = AtomicU64::new(0);
         extern "C" fn wake() {
             CHANGED.store(true, Ordering::Release);
@@ -1305,21 +1313,33 @@ impl Cx {
             std::relax::on_patch(wake);
             // patches before this run's first look built nothing of this run: skip them
             let mut seen = 0;
-            std::relax::patched_files(&mut seen);
+            std::relax::patched(&mut seen);
             SEEN.store(seen, Ordering::Relaxed);
+            self.live_patches = seen;
         }
-        if CHANGED.swap(false, Ordering::AcqRel) {
-            // a design (script_mod!) is evaluated from its fn once: a patched file's designs
-            // run again, from the patched code
-            let mut seen = SEEN.load(Ordering::Relaxed);
-            for file in std::relax::patched_files(&mut seen) {
-                self.live_code_patched(&file);
+        let woke = CHANGED.swap(false, Ordering::AcqRel);
+        if !woke && !now {
+            return;
+        }
+        // a design (script_mod!) is evaluated once, from its `script_mod` fn: when a patch
+        // changed that code, the patched files' designs run again from it. Any other edit
+        // only redraws (a handle_event edit in an app's main.rs re-ran the whole app's design:
+        // 330 ms from patch to frame, 1.3 s the first time)
+        let mut seen = SEEN.load(Ordering::Relaxed);
+        let patched = std::relax::patched(&mut seen);
+        if !woke && seen == SEEN.load(Ordering::Relaxed) {
+            return;
+        }
+        if patched.items.as_ref().is_none_or(|items| items.iter().any(|i| i == "script_mod")) {
+            for file in &patched.files {
+                self.live_code_patched(file);
             }
-            SEEN.store(seen, Ordering::Relaxed);
-            self.redraw_all();
-            // the wake may be a restart request (std::relax::restart_requested)
-            crate::restart::poll_requested();
         }
+        SEEN.store(seen, Ordering::Relaxed);
+        self.live_patches = seen;
+        self.redraw_all();
+        // the wake may be a restart request (std::relax::restart_requested)
+        crate::restart::poll_requested();
     }
 
     /// Drain the global control channel and dispatch each message as an event.
@@ -1362,8 +1382,10 @@ impl Cx {
         //
         // 1. `LiveEditTrigger::FileChange` — file watcher delivered a
         //    hot-reloaded `script_mod!` block (or studio websocket sent
-        //    a `LiveChange`). The DSL itself changed; shader caches may
-        //    be stale, so `reset_for_live_reload` runs. Any preference
+        //    a `LiveChange`). The DSL itself changed: its draw objects
+        //    are new, so `reset_for_design_rerun` drops the object-keyed
+        //    shader cache (the content-keyed function cache stays, and
+        //    only the edited module's shaders generate again). Any preference
         //    re-broadcast in the LiveEdit handler propagates immediately
         //    via the same-tick `ScriptReapply` follow-up — file changes
         //    are a live-coding scenario where the user wants to see the
@@ -1392,11 +1414,13 @@ impl Cx {
         use crate::live_reload::LiveEditTrigger;
         match self.handle_live_edit() {
             LiveEditTrigger::FileChange => {
-                self.draw_shaders.reset_for_live_reload();
+                let t0 = Cx::time_now();
+                self.draw_shaders.reset_for_design_rerun();
                 self.pending_script_reapply = false;
                 self.live_edit_apply = crate::makepad_script::Apply::Reload;
                 self.call_event_handler(&Event::LiveEdit);
                 self.redraw_all();
+                crate::trace!("design", "live edit event {:.1} ms; {} shader(s), {} to compile", (Cx::time_now() - t0) * 1e3, self.draw_shaders.shaders.len(), self.draw_shaders.compile_set.len());
                 if self.pending_script_reapply {
                     self.pending_script_reapply = false;
                     self.call_event_handler(&Event::ScriptReapply);

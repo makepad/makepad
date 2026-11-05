@@ -57,17 +57,26 @@ fn wake_sessions() -> std::sync::MutexGuard<'static, Vec<u32>> {
     WAKE_SESSIONS.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// The session's loop is one this code's signals wake.
+/// The session's loop is one this code's signals wake, and so do makepad inspect's queries for
+/// its VMs (`serve_idle` answers them at the woken turn).
 pub(crate) fn register_wake_session(session: u32) {
     let mut sessions = wake_sessions();
     if !sessions.contains(&session) {
         sessions.push(session);
     }
+    crate::makepad_script::inspect_query::add_idle_waker(wake_session_for_inspect, session);
 }
 
 /// The session's loop has ended.
 pub(crate) fn unregister_wake_session(session: u32) {
     wake_sessions().retain(|s| *s != session);
+    crate::makepad_script::inspect_query::remove_idle_waker(wake_session_for_inspect, session);
+}
+
+/// An inspect query's wake, from the asking thread: the HAL's, which reads no statics of this
+/// code (a domain's statics are its own under relax, and the asking thread is in another).
+extern "C" fn wake_session_for_inspect(session: u32) {
+    makepad_hal::hal_wake_session(session);
 }
 
 /// Any thread (signals, actions, audio and network threads) wakes the loops blocked in
@@ -152,6 +161,10 @@ pub struct HalClient {
     pub(crate) ime_height: f64,
     /// a window announced a frame (`FrameReady`)
     pub(crate) beat: bool,
+    /// the flip (HAL ns, 0: unknown) the last `FrameReady` aims at, until a beat takes it
+    pub(crate) ready_flip: Option<u64>,
+    /// `MAKEPAD_TRACE=frames`: what woke each beat, the next-frame and present gaps
+    pub(crate) frame_trace: crate::frame_trace::FrameTrace,
     /// A window close is on its way (asked of the window system, or accepted and sent):
     /// since when. Until the HAL answers, the loop sends at once and draws nothing, so a close
     /// never waits behind a slow frame. Bounded by `CLOSE_WAIT` should no answer come.
@@ -244,6 +257,8 @@ impl Default for HalClient {
             ime_visible: false,
             ime_height: 0.0,
             beat: false,
+            ready_flip: None,
+            frame_trace: crate::frame_trace::FrameTrace::new(),
             close_pending: None,
             xr_beat: false,
             profile_beat: 0,
@@ -558,8 +573,14 @@ impl Cx {
 impl Cx {
     /// A shader can draw once the HAL said its pipeline is ready; a caller with a fallback asks
     /// this and keeps drawing the fallback until then.
+    /// Asking counts: a pipeline asked for while it compiles is one the frame would draw (a frame
+    /// that waits waits for it, and it goes ahead in the HAL's compile queue).
     pub fn is_draw_shader_window_ready(&self, shader_id: crate::draw_shader::DrawShaderId) -> bool {
-        self.draw_shaders.shaders[shader_id.index].pipeline_id.is_some_and(|pipe| self.hal.frames.pipeline_is_ready(pipe))
+        self.draw_shaders.shaders[shader_id.index].pipeline_id.is_some_and(|pipe| {
+            let ready = self.hal.frames.pipeline_is_ready(pipe);
+            if !ready { self.hal.frames.probed_unready(pipe); }
+            ready
+        })
     }
 
     pub(crate) fn poll_texture_lifetimes(&mut self) {

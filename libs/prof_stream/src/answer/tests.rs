@@ -68,6 +68,18 @@ fn why_hung_leads_with_the_deadlock_and_keeps_the_parked_panic() {
 }
 
 #[test]
+fn a_stack_walk_cut_short_says_where_and_why() {
+    let r = render(
+        "why-hung",
+        &lines(r#"{"measured":"49 threads","at_ms":1,"source":"x","partial":[]}
+{"verdict":"idle","why":"main is not stuck: 0% CPU, waiting for events or sleeping in libc.so.6+0x7c952","findings":[{"kind":"idle","why":"main is not stuck: 0% CPU, waiting for events or sleeping in libc.so.6+0x7c952"}],"owner":{"serving":"idle","queued":{"total":0}}}
+{"thread":"makepad","id":"T1","state":"waiting","cpu_pct":0,"stops":"walk stops at 0x7f3a1c27c952: its caller is found through the frame pointer","frames":[{"fn":"libc.so.6+0x7c952","in":"libc.so.6"},{"fn":"__poll","in":"libc.so.6"}]}"#),
+    );
+    let stop = r.find("\n  walk stops at 0x7f3a1c27c952: its caller is found through the frame pointer\n").expect(&r);
+    assert!(r.find("__poll").is_some_and(|p| p < stop), "{}", r);
+}
+
+#[test]
 fn heap_sites_merge_their_stacks_and_say_growth_or_churn() {
     let r = render(
         "heap top by=alloc",

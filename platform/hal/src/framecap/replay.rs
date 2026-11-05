@@ -283,7 +283,7 @@ impl Replayer {
                     let tex_ids: Vec<Id> = d.tex.iter().map(|t| self.map_tex(*t)).collect();
                     let tex = w.put_ids(&tex_ids);
                     let draw = Draw {
-                        storage_buffers: Range::default(), indirect_buffer: Id::NONE, indirect_offset: 0,
+                        storage_buffers: Range::default(),
                         pipeline,
                         vb: self.map_buf(d.vb),
                         ib: self.map_buf(d.ib),

@@ -7,7 +7,6 @@
 
 use crate::{
     cx::Cx,
-    draw_list::CxDrawKind,
     texture::{TextureFormat, TextureId},
 };
 
@@ -413,6 +412,7 @@ impl Cx {
                 .and_then(|p| pass_names.get(p.0).cloned())
                 .unwrap_or_default();
             let mut buffers = GpuDrawListBuffers { draw_list: index, pass: pass.clone(), ..Default::default() };
+            // what the list holds, up to its high-water mark of items
             for item in &list.draw_items.buffer {
                 if let Some(instances) = &item.instances {
                     buffers.instance_cpu_bytes += (instances.capacity() * 4) as u64;
@@ -420,13 +420,17 @@ impl Cx {
                 if let Some(retained) = &item.retained_instances {
                     buffers.instance_cpu_bytes += (retained.float_len() * 4) as u64;
                 }
-                if let CxDrawKind::DrawCall(call) = &item.kind {
-                    buffers.draw_calls += 1;
-                    for texture in call.texture_slots.iter().flatten() {
-                        if let Some(list) = sampled.get_mut(texture.texture_id().0) {
-                            if !pass.is_empty() && !list.contains(&pass) {
-                                list.push(pass.clone());
-                            }
+            }
+            // what it draws this frame: its recorded items that draw
+            for order in 0..list.draw_item_order_len() {
+                let Some(id) = list.draw_item_id_at_order_index(order) else { continue };
+                let item = &list.draw_items[id];
+                let Some(call) = item.kind.draw_call().filter(|call| self.drawn_instances(item, call) > 0) else { continue };
+                buffers.draw_calls += 1;
+                for texture in call.texture_slots.iter().flatten() {
+                    if let Some(list) = sampled.get_mut(texture.texture_id().0) {
+                        if !pass.is_empty() && !list.contains(&pass) {
+                            list.push(pass.clone());
                         }
                     }
                 }

@@ -8,6 +8,7 @@ use super::surface::EglSurfaceSource;
 use super::sys::{self, GLenum, GLsync, GLuint};
 use super::{PipeState, TexObj};
 use crate::font::FrameProgress;
+use crate::ledger::{Charge, Pool, Pools};
 use crate::session::TextureObj;
 use crate::types::*;
 use std::collections::{HashMap, VecDeque};
@@ -52,6 +53,7 @@ pub(super) struct Token {
 
 pub(super) enum Event {
     Frame { target: Id, kind: u32, frame: u64, window: bool },
+    BufferLeases { req: u32, status: u32, leases: Vec<crate::lease::Lease> },
     Readback { req: u32, status: u32, rect: [u32; 4], pixels: Vec<u8> },
     Pick { req: u32, ids: Vec<u32> },
 }
@@ -155,7 +157,7 @@ fn half(b: &[u8]) -> [u8; 2] {
 
 pub(super) enum Then {
     Frame { token: Token, target: Id, kind: u32, frame: u64, window: bool },
-    Read { token: Token, req: u32, rect: [u32; 4], read: ReadFormat, pbo: GLuint, pick: Option<[f32; 2]> },
+    Read { token: Token, req: u32, rect: [u32; 4], read: ReadFormat, pbo: GLuint, pick: Option<[f32; 2]>, _charge: Charge },
     Copy { token: Token, req: u32, rect: [u32; 4] },
 }
 
@@ -171,8 +173,17 @@ pub(super) struct GlBuf {
     pub name: GLuint,
     pub size: u64,
     /// the words as an R32UI texture, for programs that fetch instances by id (made on use)
-    pub words: Option<(GLuint, u32)>,
+    pub words: Option<Words>,
     pub words_stale: bool,
+}
+
+/// Instance words as an R32UI texture of `WORD_ROW`-wide rows (`Renderer::words_texture`), and
+/// its ledger charge.
+#[derive(Default)]
+pub(super) struct Words {
+    pub tex: GLuint,
+    rows: u32,
+    _charge: Option<Charge>,
 }
 
 /// The size of the instance word textures' rows (GLES 3 guarantees 2048 texels).
@@ -193,17 +204,22 @@ pub(super) struct Renderer {
     /// the frame's uniform blocks and inline instances, and the instance words as a texture
     pub uniform_arena: GLuint,
     pub instance_arena: GLuint,
-    pub arena_words: (GLuint, u32),
+    pub arena_words: Words,
+    /// what this thread allocates for itself, on the HAL's ledger as backend rows
+    pub pools: Arc<Pools>,
+    /// the arenas' sizes as last specified, and their charges
+    pub arena_charges: Option<([u64; 2], [Charge; 2])>,
+    _fallback_charges: [Charge; 5],
     pending: VecDeque<(GLsync, Then)>,
     pub mailbox: Mailbox,
     exit: bool,
 }
 
-pub(super) fn start(source: Box<dyn EglSurfaceSource>, mailbox: Mailbox) -> Result<(Queue, Arc<Caps>, std::thread::JoinHandle<()>), String> {
+pub(super) fn start(source: Box<dyn EglSurfaceSource>, mailbox: Mailbox, pools: Arc<Pools>) -> Result<(Queue, Arc<Caps>, std::thread::JoinHandle<()>), String> {
     let (tx, rx) = mpsc::channel::<Job>();
     let (ready, made) = mpsc::sync_channel(1);
     let thread = std::thread::Builder::new().name("makepad-gl-render".into()).spawn(move || {
-        match Renderer::new(source, mailbox) {
+        match Renderer::new(source, mailbox, pools) {
             Ok(r) => {
                 let _ = ready.send(Ok(r.caps.clone()));
                 r.run(rx);
@@ -219,7 +235,7 @@ pub(super) fn start(source: Box<dyn EglSurfaceSource>, mailbox: Mailbox) -> Resu
 }
 
 impl Renderer {
-    fn new(source: Box<dyn EglSurfaceSource>, mailbox: Mailbox) -> Result<Self, String> {
+    fn new(source: Box<dyn EglSurfaceSource>, mailbox: Mailbox, pools: Arc<Pools>) -> Result<Self, String> {
         // Drop the guard before ctx on errors; Context::drop takes the same lock.
         let ctx;
         let _context_lifecycle = lock_context_lifecycle();
@@ -236,8 +252,12 @@ impl Renderer {
         if has("GL_EXT_texture_compression_bptc") { formats |= 1 << format::BC7; }
         if has("GL_EXT_texture_compression_rgtc") { formats |= 1 << format::BC5; }
         if has("GL_KHR_texture_compression_astc_ldr") { formats |= 1 << format::ASTC4X4; }
+        // A quarter off a cold compile, and the driver keeps it for every later context. Only the
+        // process's first context may ask: NVIDIA's driver can sleep in this call for good when
+        // another context is up, here under the lock every other context waits on.
+        static COMPILER_THREADS: std::sync::Once = std::sync::Once::new();
         if let Some(threads) = gl.glMaxShaderCompilerThreadsKHR {
-            if has("GL_KHR_parallel_shader_compile") { unsafe { threads(u32::MAX) } }
+            if has("GL_KHR_parallel_shader_compile") { COMPILER_THREADS.call_once(|| unsafe { threads(u32::MAX) }) }
         }
         let caps = Arc::new(Caps {
             formats,
@@ -264,13 +284,16 @@ impl Renderer {
             (gl.glCullFace)(sys::BACK);
             (gl.glBlendFuncSeparate)(sys::ONE, sys::ONE_MINUS_SRC_ALPHA, sys::ONE, sys::ONE_MINUS_SRC_ALPHA);
         }
-        let fallback = [0, 1, 2, 3, 4].map(|shape| fallback(gl, shape));
+        let made = [0, 1, 2, 3, 4].map(|shape| fallback(gl, shape));
+        let fallback = made.map(|(name, _)| name);
+        let fallback_charges = made.map(|(_, bytes)| pools.charge(Pool::Fallback, bytes));
         if super::super::log_enabled() {
             eprintln!("[hal-gl] context: {} ubo_align={} extensions={}", caps.renderer, caps.ubo_align, ext.len());
         }
         Ok(Self { ctx, caps, textures: HashMap::new(), buffers: HashMap::new(), programs: HashMap::new(), linking: Vec::new(),
             fbos: HashMap::new(), read_fbo: names[0], copy_fbo: names[1], fallback,
-            uniform_arena: names[2], instance_arena: names[3], arena_words: (0, 0), pending: VecDeque::new(), mailbox, exit: false })
+            uniform_arena: names[2], instance_arena: names[3], arena_words: Words::default(), pools, arena_charges: None,
+            _fallback_charges: fallback_charges, pending: VecDeque::new(), mailbox, exit: false })
     }
 
     pub fn exit(&mut self) {
@@ -335,7 +358,7 @@ impl Renderer {
             Then::Copy { token, req, rect } => {
                 self.mailbox.push(token, Event::Readback { req, rect, status: if failed { readback::FAILED } else { readback::OK }, pixels: Vec::new() });
             }
-            Then::Read { token, req, rect, read, pbo, pick } => {
+            Then::Read { token, req, rect, read, pbo, pick, .. } => {
                 let len = rect[2] as usize * rect[3] as usize * read.texel;
                 let mut bytes = Vec::new();
                 unsafe {
@@ -459,6 +482,33 @@ impl Renderer {
         }
     }
 
+    pub fn read_buffers(&mut self, token: Token, req: u32, ranges: &[(u64, u64, u64)]) {
+        let result = (|| {
+            let gl = &self.ctx.gl;
+            let mut leases = Vec::with_capacity(ranges.len());
+            for (order, (key, offset, len)) in ranges.iter().enumerate() {
+                let source = self.buffers.get(key)?;
+                let mut bytes = Vec::new();
+                bytes.try_reserve_exact(*len as usize).ok()?;
+                bytes.resize(*len as usize, 0);
+                if *len != 0 { unsafe {
+                    (gl.glBindBuffer)(sys::ARRAY_BUFFER, source.name);
+                    let ptr = (gl.glMapBufferRange)(sys::ARRAY_BUFFER, *offset as isize, *len as isize, sys::MAP_READ_BIT);
+                    if ptr.is_null() { (gl.glBindBuffer)(sys::ARRAY_BUFFER, 0); return None; }
+                    // GLES has no GetBufferSubData: this is the driver's one read into the heap lease.
+                    std::ptr::copy_nonoverlapping(ptr as *const u8, bytes.as_mut_ptr(), bytes.len());
+                    let valid = (gl.glUnmapBuffer)(sys::ARRAY_BUFFER);
+                    (gl.glBindBuffer)(sys::ARRAY_BUFFER, 0);
+                    if valid == 0 { return None; }
+                } }
+                leases.push(crate::lease::Lease::from_vec(bytes, order as u32));
+            }
+            Some(leases)
+        })();
+        let status = if result.is_some() { readback::OK } else { readback::FAILED };
+        self.mailbox.push(token, Event::BufferLeases { req, status, leases: result.unwrap_or_default() });
+    }
+
     pub fn create_buffer(&mut self, key: u64, size: u64) {
         let gl = &self.ctx.gl;
         let mut name = 0;
@@ -475,7 +525,7 @@ impl Renderer {
         let gl = &self.ctx.gl;
         unsafe {
             (gl.glDeleteBuffers)(1, &b.name);
-            if let Some((tex, _)) = b.words { (gl.glDeleteTextures)(1, &tex) }
+            if let Some(words) = &b.words { (gl.glDeleteTextures)(1, &words.tex) }
         }
     }
 
@@ -495,19 +545,21 @@ impl Renderer {
     }
 
     /// Copies `words` 32-bit words of a GL buffer into an R32UI texture of WORD_ROW-wide rows
-    /// (a GPU copy through the unpack binding); grows the texture when it is too small.
-    pub fn words_texture(gl: &sys::Gl, buffer: GLuint, words: u64, tex: &mut (GLuint, u32)) {
+    /// (a GPU copy through the unpack binding); grows the texture when it is too small, charged
+    /// to `pool`.
+    pub fn words_texture(gl: &sys::Gl, pools: &Arc<Pools>, pool: Pool, buffer: GLuint, words: u64, tex: &mut Words) {
         let rows = (words.div_ceil(WORD_ROW as u64) as u32).max(1);
         unsafe {
-            if tex.0 == 0 || tex.1 < rows {
-                if tex.0 != 0 { (gl.glDeleteTextures)(1, &tex.0) }
+            if tex.tex == 0 || tex.rows < rows {
+                if tex.tex != 0 { (gl.glDeleteTextures)(1, &tex.tex) }
                 let rows = rows.next_power_of_two();
-                (gl.glGenTextures)(1, &mut tex.0);
-                (gl.glBindTexture)(sys::TEXTURE_2D, tex.0);
+                (gl.glGenTextures)(1, &mut tex.tex);
+                (gl.glBindTexture)(sys::TEXTURE_2D, tex.tex);
                 (gl.glTexStorage2D)(sys::TEXTURE_2D, 1, sys::R32UI, WORD_ROW as i32, rows as i32);
-                *tex = (tex.0, rows);
+                tex.rows = rows;
+                tex._charge = Some(pools.charge(pool, WORD_ROW as u64 * rows as u64 * 4));
             } else {
-                (gl.glBindTexture)(sys::TEXTURE_2D, tex.0);
+                (gl.glBindTexture)(sys::TEXTURE_2D, tex.tex);
             }
             (gl.glBindBuffer)(sys::PIXEL_UNPACK_BUFFER, buffer);
             let full = (words / WORD_ROW as u64) as i32;
@@ -576,7 +628,8 @@ impl Renderer {
             (gl.glBindBuffer)(sys::PIXEL_PACK_BUFFER, 0);
             (gl.glBindFramebuffer)(sys::READ_FRAMEBUFFER, 0);
         }
-        self.after_gpu(Then::Read { token, req, rect, read, pbo, pick });
+        let charge = self.pools.charge(Pool::Staging, rect[2] as u64 * rect[3] as u64 * read.texel as u64);
+        self.after_gpu(Then::Read { token, req, rect, read, pbo, pick, _charge: charge });
     }
 
     /// The host's synchronous read of a whole RGBA8/BGRA8 image as RGBA rows, top first.
@@ -644,8 +697,9 @@ fn pick_ids(rgba: &[u8], rect: [u32; 4], pos: [f32; 2]) -> Vec<u32> {
     ids
 }
 
-/// The 1x1 texture of a sampled shape: transparent black colour, depth at the far plane.
-fn fallback(gl: &sys::Gl, shape: u32) -> GLuint {
+/// The 1x1 texture of a sampled shape: transparent black colour, depth at the far plane; and
+/// its bytes.
+fn fallback(gl: &sys::Gl, shape: u32) -> (GLuint, u64) {
     let (target, layers) = match shape {
         1 => (sys::TEXTURE_CUBE_MAP, 6),
         2 | 4 => (sys::TEXTURE_2D_ARRAY, 2),
@@ -667,7 +721,7 @@ fn fallback(gl: &sys::Gl, shape: u32) -> GLuint {
         }
         (gl.glBindTexture)(target, 0);
     }
-    name
+    (name, 4 * layers as u64)
 }
 
 fn attach(gl: &sys::Gl, fb: GLenum, attachment: GLenum, t: &GlTex, layer: u32) {

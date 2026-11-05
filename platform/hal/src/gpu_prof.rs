@@ -1123,7 +1123,7 @@ mod tests {
     }
 
     /// A relaunch closes the app's session: the app's readout and the busiest default follow the
-    /// session that draws now (before, Fab's readout stayed on the closed one).
+    /// session that draws now (before, the readout stayed on the closed one).
     #[test]
     fn closed_session_leaves_the_recording() {
         use super::*;

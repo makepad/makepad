@@ -32,6 +32,59 @@ pub fn split_args(argv: &[String]) -> (Vec<String>, Vec<(String, String)>) {
     (words, kv)
 }
 
+/// The request line of a typed command's words. Code an agent passes (`eval <expr>`, `probe add
+/// <hook> <code>`) keeps its text: it goes as a JSON request (`key=value` words split it
+/// otherwise, and `=`/`=>` are lost). Every other command is its words.
+pub fn typed_line(words: &[String]) -> String {
+    if words.is_empty() {
+        return "help".to_string();
+    }
+    let opt = |w: &str| -> Option<(String, String)> {
+        let w = w.trim_start_matches("--");
+        let (k, v) = w.split_once('=').unwrap_or((w, ""));
+        matches!(k, "in" | "mutate" | "panic" | "domain").then(|| (k.to_string(), if v.is_empty() && k == "mutate" { "1".to_string() } else { v.to_string() }))
+    };
+    let json = |cmd: &str, kv: &[(String, String)]| {
+        let mut s = format!("{{\"cmd\":{}", crate::json_str(cmd));
+        for (k, v) in kv {
+            s.push_str(&format!(",{}:{}", crate::json_str(k), crate::json_str(v)));
+        }
+        s.push('}');
+        s
+    };
+    match words[0].as_str() {
+        "eval" => {
+            // options first (`--in path` or `in=path`, `mutate=1`, `panic=P1`), then the expression
+            let mut kv = Vec::new();
+            let mut i = 1;
+            while i < words.len() {
+                if words[i] == "--in" && i + 1 < words.len() {
+                    kv.push(("in".to_string(), words[i + 1].clone()));
+                    i += 2;
+                } else if let Some(o) = words[i].contains('=').then(|| opt(&words[i])).flatten().or_else(|| (words[i] == "--mutate").then(|| ("mutate".to_string(), "1".to_string()))) {
+                    kv.push(o);
+                    i += 1;
+                } else {
+                    break;
+                }
+            }
+            kv.push(("expr".to_string(), words[i..].join(" ")));
+            json("eval", &kv)
+        }
+        "probe" if words.get(1).map(String::as_str) == Some("add") && words.len() > 3 => {
+            let mut rest: Vec<String> = words[3..].to_vec();
+            let mut kv = Vec::new();
+            while rest.last().is_some_and(|w| w == "mutate=1" || w == "--mutate") {
+                rest.pop();
+                kv.push(("mutate".to_string(), "1".to_string()));
+            }
+            kv.push(("code".to_string(), rest.join(" ")));
+            json(&format!("probe add {}", words[2]), &kv)
+        }
+        _ => words.join(" "),
+    }
+}
+
 /// The request line for the `cmd` service: one flat JSON object, so values keep their spaces.
 pub fn request_line(words: &[String], kv: &[(String, String)]) -> String {
     let mut line = format!("{{\"cmd\":{}", crate::json_str(&words.join(" ")));
@@ -214,19 +267,21 @@ fn grab_dir(client: &Client) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-/// Writes `png` as the next `grab-w<window>-<seq>.png` of `dir` and deletes the older ones past
-/// [`KEPT_PER_WINDOW`], except the paths in `pinned`.
-fn write_grab(dir: &Path, window: usize, png: &[u8], pinned: &[PathBuf]) -> Result<PathBuf, String> {
+/// Writes `png` as the next `grab-w<window>-<seq>[-f<frame>-p<patch>].png` of `dir` (the frame
+/// it was drawn in and the live patches applied by then, when the app says) and deletes the older
+/// ones past [`KEPT_PER_WINDOW`], except the paths in `pinned`.
+fn write_grab(dir: &Path, window: usize, png: &[u8], pinned: &[PathBuf], drawn: Option<(u64, u64)>) -> Result<PathBuf, String> {
     let prefix = format!("grab-w{window}-");
     let existing = |dir: &Path| -> Vec<PathBuf> {
         std::fs::read_dir(dir)
             .map(|d| d.flatten().map(|e| e.path()).filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with(&prefix))).collect())
             .unwrap_or_default()
     };
-    let seq = |p: &Path| p.file_stem().and_then(|n| n.to_str()).and_then(|n| n.rsplit('-').next()).and_then(|n| n.parse::<u64>().ok()).unwrap_or(0);
+    let seq = |p: &Path| p.file_stem().and_then(|n| n.to_str()).and_then(|n| n.strip_prefix(&prefix)).and_then(|n| n.split('-').next()).and_then(|n| n.parse::<u64>().ok()).unwrap_or(0);
+    let tag = drawn.map_or(String::new(), |(frame, patch)| format!("-f{frame}-p{patch}"));
     let mut next = existing(dir).iter().map(|p| seq(p)).max().unwrap_or(0) + 1;
     let path = loop {
-        let path = dir.join(format!("{prefix}{next:05}.png"));
+        let path = dir.join(format!("{prefix}{next:05}{tag}.png"));
         match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
             Ok(_) => break path,
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => next += 1,
@@ -245,10 +300,15 @@ fn write_grab(dir: &Path, window: usize, png: &[u8], pinned: &[PathBuf]) -> Resu
     Ok(path)
 }
 
-/// `{"png":path,"w":window,"sz":[w,h],"capture_ms":..,"encode_ms":..,"capture_kind":..}`
+/// The frame a record was drawn in and the live patches applied by then, when the app says.
+fn drawn(r: &Record) -> Option<(u64, u64)> {
+    Some((r.num("frame")? as u64, r.num("patch")? as u64))
+}
+
+/// `{"png":path,"w":window,"sz":[w,h],"capture_ms":..,"encode_ms":..,"capture_kind":..[,"frame":n,"patch":n]}`
 fn grab_json(r: &Record, path: &Path) -> String {
     format!(
-        "{{\"png\":{},\"w\":{},\"sz\":[{},{}],\"capture_ms\":{:.3},\"encode_ms\":{:.3},\"capture_kind\":{}}}",
+        "{{\"png\":{},\"w\":{},\"sz\":[{},{}],\"capture_ms\":{:.3},\"encode_ms\":{:.3},\"capture_kind\":{}{}}}",
         crate::json_str(&path.display().to_string()),
         r.num("window").unwrap_or(0.0),
         r.num("w").unwrap_or(0.0),
@@ -256,6 +316,7 @@ fn grab_json(r: &Record, path: &Path) -> String {
         r.num("capture_ms").unwrap_or(0.0),
         r.num("encode_ms").unwrap_or(0.0),
         crate::json_str(&r.text("capture_kind").unwrap_or_default()),
+        drawn(r).map_or(String::new(), |(frame, patch)| format!(",\"frame\":{frame},\"patch\":{patch}")),
     )
 }
 
@@ -273,7 +334,7 @@ fn grab_one(client: &Client, window: Option<usize>, scale: f64, out: Option<&str
             std::fs::write(file, &record.bytes).map_err(|e| format!("grab write: {e}"))?;
             PathBuf::from(file)
         }
-        None => write_grab(&grab_dir(client)?, record.num("window").unwrap_or(0.0) as usize, &record.bytes, &[])?,
+        None => write_grab(&grab_dir(client)?, record.num("window").unwrap_or(0.0) as usize, &record.bytes, &[], drawn(&record))?,
     };
     Ok((record, path))
 }
@@ -375,7 +436,7 @@ fn gseq(client: &Client, kv: &[(String, String)]) -> Result<String, String> {
     let (mut paths, mut frame_json, mut pinned) = (Vec::new(), Vec::new(), Vec::new());
     frames::fetch(client, &req, &mut |r| {
         let index = frame_json.len();
-        let path = write_grab(&dir, r.num("window").unwrap_or(0.0) as usize, &r.bytes, &pinned)?;
+        let path = write_grab(&dir, r.num("window").unwrap_or(0.0) as usize, &r.bytes, &pinned, drawn(&r))?;
         paths.push(crate::json_str(&path.display().to_string()));
         let mut frame = grab_json(&r, &path);
         frame.pop();
@@ -388,11 +449,11 @@ fn gseq(client: &Client, kv: &[(String, String)]) -> Result<String, String> {
     Ok(format!("{{\"png\":[{}],\"n\":{n},\"every_ms\":{every_ms},\"frames\":[{}]}}", paths.join(","), frame_json.join(",")))
 }
 
-/// The window ids of a `status` answer (`"w":[{"i":ID,...},...]`).
-pub fn window_ids(status: &str) -> Vec<usize> {
+/// The windows of a `status` answer (`"w":[{"i":ID,"pass_dpi":N,...},...]`): (id, pass dpi).
+fn windows_of(status: &str) -> Vec<(usize, f64)> {
     let Some(start) = status.find("\"w\":[") else { return Vec::new() };
     let b = status.as_bytes();
-    let (mut i, mut depth, mut ids) = (start + 5, 1i32, Vec::new());
+    let (mut i, mut depth, mut windows) = (start + 5, 1i32, Vec::new());
     while i < b.len() && depth > 0 {
         match b[i] {
             b'"' => {
@@ -402,11 +463,21 @@ pub fn window_ids(status: &str) -> Vec<usize> {
                 while i < b.len() && b[i] != b'"' {
                     i += if b[i] == b'\\' { 2 } else { 1 };
                 }
-                // `"i":` directly inside a window object (depth 2)
-                if depth == 2 && &status[begin..=i.min(b.len() - 1)] == "\"i\"" && b.get(i + 1) == Some(&b':') {
-                    let digits: String = status[i + 2..].chars().take_while(char::is_ascii_digit).collect();
-                    if let Ok(id) = digits.parse() {
-                        ids.push(id);
+                // a key directly inside a window object (depth 2)
+                if depth == 2 && b.get(i + 1) == Some(&b':') {
+                    let number: String = status[i + 2..].chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
+                    match &status[begin..=i.min(b.len() - 1)] {
+                        "\"i\"" => {
+                            if let Ok(id) = number.parse() {
+                                windows.push((id, 0.0));
+                            }
+                        }
+                        "\"pass_dpi\"" => {
+                            if let (Some(window), Ok(dpi)) = (windows.last_mut(), number.parse()) {
+                                window.1 = dpi;
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -416,7 +487,13 @@ pub fn window_ids(status: &str) -> Vec<usize> {
         }
         i += 1;
     }
-    ids
+    windows
+}
+
+/// The ids of the windows of a `status` answer that have drawn: one that never did (a window
+/// only a headset's frames go to) has no frame to grab.
+pub fn drawn_window_ids(status: &str) -> Vec<usize> {
+    windows_of(status).into_iter().filter(|(_, dpi)| *dpi > 0.0).map(|(id, _)| id).collect()
 }
 
 /// A frame of every window (or `w=`), then `quit`: the last call of a session.
@@ -424,7 +501,7 @@ fn gq(client: &Client, kv: &[(String, String)]) -> Result<String, String> {
     let scale = scale_of(kv);
     let targets = match window_of(kv) {
         Some(w) => vec![w],
-        None => window_ids(&ask_one(client, "status").unwrap_or_default()),
+        None => drawn_window_ids(&ask_one(client, "status").unwrap_or_default()),
     };
     let (mut paths, mut problems) = (Vec::new(), Vec::new());
     for window in targets {
@@ -479,4 +556,23 @@ fn tweak_final(client: &Client, words: &[String], kv: &[(String, String)], each:
         }
     }
     Ok((err, end))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::typed_line;
+
+    fn words(s: &str) -> Vec<String> {
+        s.split_whitespace().map(str::to_string).collect()
+    }
+
+    #[test]
+    fn typed_code_keeps_its_equals_signs() {
+        assert_eq!(
+            typed_line(&words("probe add f fn probe(x: u32) { let y = x; match y { 0 => (), _ => () } } mutate=1")),
+            r#"{"cmd":"probe add f","mutate":"1","code":"fn probe(x: u32) { let y = x; match y { 0 => (), _ => () } }"}"#
+        );
+        assert_eq!(typed_line(&words("eval mutate=1 a == b")), r#"{"cmd":"eval","mutate":"1","expr":"a == b"}"#);
+        assert_eq!(typed_line(&words("vm roots top=12")), "vm roots top=12");
+    }
 }

@@ -4,16 +4,53 @@ use crate::{
     draw_pass::DrawPassId,
     frame_build::FrameBuilder,
     texture::{ReadbackCompletion, ReadbackError, ReadbackRequest, Texture, TextureId},
-    thread::{Class, TaskHandle},
+    thread::{Class, TaskHandle, TaskPool},
     window::WindowId,
 };
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    sync::Arc,
+    sync::{Arc, Mutex, MutexGuard},
 };
+
+use crate::{HostBuf, gpu_admission::ReadbackReservation};
+use makepad_hal::buffers::Wire;
 
 type RawPixels = Result<(usize, usize, Arc<[u8]>), ReadbackError>;
 type RawCallback = Box<dyn FnOnce(RawPixels) + Send>;
+
+/// Callbacks run one at a time, in the order they came, by one pool worker that drains them:
+/// the next never waits for a UI turn to start it.
+#[derive(Clone, Default)]
+struct Strand(Arc<Mutex<StrandQueue>>);
+#[derive(Default)]
+struct StrandQueue { jobs: VecDeque<Box<dyn FnOnce() + Send>>, running: bool }
+impl Strand {
+    fn lock(&self) -> MutexGuard<'_, StrandQueue> { self.0.lock().unwrap_or_else(|e| e.into_inner()) }
+    fn push(&self, job: Box<dyn FnOnce() + Send>) { self.lock().jobs.push_back(job); }
+    /// A worker at `class` unless one runs or nothing waits.
+    fn start(&self, pool: &TaskPool, class: Class) {
+        {
+            let mut q = self.lock();
+            if q.running || q.jobs.is_empty() || !pool.is_open() { return; }
+            q.running = true;
+        }
+        // a callback that panics ends its worker: the next start runs the rest
+        struct Stop(Strand);
+        impl Drop for Stop {
+            fn drop(&mut self) { if std::thread::panicking() { self.0.lock().running = false; } }
+        }
+        let stop = Stop(self.clone());
+        let run = move || loop {
+            let job = {
+                let mut q = stop.0.lock();
+                let Some(job) = q.jobs.pop_front() else { q.running = false; return };
+                job
+            };
+            job();
+        };
+        if pool.submit(class, run).map(TaskHandle::detach).is_err() { self.lock().running = false; }
+    }
+}
 
 #[derive(Default)]
 pub(crate) struct Readbacks {
@@ -28,14 +65,62 @@ pub(crate) struct Readbacks {
     images: VecDeque<(Vec<u64>, u32, u32, Arc<[u8]>)>,
     workers: Vec<TaskHandle<()>>,
     raw: HashMap<u32, (Texture, usize, usize, usize, RawCallback)>,
-    jobs: VecDeque<Box<dyn FnOnce() + Send>>,
-    raw_worker: Option<TaskHandle<()>>,
+    jobs: Strand,
     texture_pending: Vec<(crate::TextureId, makepad_hal::Id, u32, usize, usize)>,
-    buffer_pending: Vec<(makepad_hal::Id, u32, u64, u64)>,
-    buffers: HashMap<u32, (crate::GpuBuffer, usize, Box<dyn FnOnce(Result<Arc<[u8]>, ReadbackError>) + Send>)>,
-    /// Buffer reads' callbacks, run one at a time at Interactive class: someone waits on each.
-    buffer_jobs: VecDeque<Box<dyn FnOnce() + Send>>,
-    buffer_worker: Option<TaskHandle<()>>,
+    buffer_pending: Vec<(u32, Vec<makepad_hal::BufferReadRange>)>,
+    buffers: HashMap<u32, BufferRequest>,
+    /// A backend that never sends DeviceReset keeps these bytes charged for the rest of the session.
+    retired_buffers: HashMap<u32, ReadbackReservation>,
+
+}
+
+type BufferResult = Result<Vec<HostBuf>, ReadbackError>;
+type BufferCallback = Box<dyn FnOnce(BufferResult) + Send>;
+type UiBufferCallback = Box<dyn FnOnce(&mut Cx, BufferResult)>;
+enum BufferCompletion {
+    Ui(UiBufferCallback),
+    Pool(Answer),
+}
+struct BufferRequest {
+    _buffers: Vec<crate::GpuBuffer>,
+    ranges: Vec<makepad_hal::BufferReadRange>,
+    reservation: ReadbackReservation,
+    class: Option<Class>,
+    done: BufferCompletion,
+}
+struct Answer {
+    done: Option<BufferCallback>,
+    error: ReadbackError,
+    cancel_pool: Option<(crate::thread::TaskPool, Class)>,
+}
+impl Drop for Answer {
+    fn drop(&mut self) {
+        let Some(done) = self.done.take() else { return };
+        if let Some((pool, class)) = self.cancel_pool.take() {
+            // Even session/context teardown keeps an accepted heavy answer off the UI.
+            // Refusal drops this second guard with no resubmission and answers here.
+            let delivery = Delivery {
+                answer: Answer { done: Some(done), error: self.error.clone(), cancel_pool: None },
+                result: Some(Err(self.error.clone())),
+            };
+            if let Ok(handle) = pool.submit(class, move || delivery.run()) { handle.detach(); }
+        } else { done(Err(self.error.clone())); }
+    }
+}
+struct Delivery { answer: Answer, result: Option<BufferResult> }
+impl Delivery { fn run(mut self) { let result = self.result.take().unwrap(); if let Some(done) = self.answer.done.take() { done(result); } } }
+impl Drop for Delivery { fn drop(&mut self) { drop(self.result.take()); } }
+
+// The last HostBuf view returns its charge without a Cx-side token registry or lock.
+fn release_buffer_lease(token: u64) {
+    crate::gpu_admission::release_readback_bytes(makepad_hal::hal_lease_release(token));
+}
+
+impl Drop for Cx {
+    fn drop(&mut self) {
+        self.hal.device_lost = true;
+        self.hal_cancel_buffer_reads();
+    }
 }
 
 impl Cx {
@@ -89,21 +174,82 @@ impl Cx {
         Ok(())
     }
 
-    /// Read a storage buffer's bytes once the queued compute that binds it has run. `done` runs
-    /// on the worker pool at Interactive class, one read at a time in completion order: keep it
-    /// short (hand the bytes on), so it never waits behind a queue of background work.
-    pub fn read_gpu_buffer(&mut self, buffer: &crate::GpuBuffer, offset: u64, len: u64,
-        done: impl FnOnce(Result<Arc<[u8]>, ReadbackError>) + Send + 'static) -> Result<(), ReadbackError> {
+    /// Read ordered ranges from one submission. The completion runs directly on the pool at
+    /// `class`. An accepted request always answers once; a refused call never invokes `done`.
+    pub fn read_to_pool(&mut self, ranges: &[(&crate::GpuBuffer, std::ops::Range<u64>)], class: Class,
+        done: impl FnOnce(BufferResult) + Send + 'static) -> Result<(), ReadbackError> {
+        self.read_buffers(ranges, Some(class), Some(Box::new(done)), None)
+    }
+
+    /// Light readback: wrap the leases and invoke `done` at UI event intake.
+    pub fn read(&mut self, ranges: &[(&crate::GpuBuffer, std::ops::Range<u64>)],
+        done: impl FnOnce(&mut Cx, BufferResult) + 'static) -> Result<(), ReadbackError> {
+        self.read_buffers(ranges, None, None, Some(Box::new(done)))
+    }
+
+    fn read_buffers(&mut self, ranges: &[(&crate::GpuBuffer, std::ops::Range<u64>)], class: Option<Class>, pool_done: Option<BufferCallback>, ui_done: Option<UiBufferCallback>) -> Result<(), ReadbackError> {
         if self.hal.device_lost { return Err(ReadbackError::DeviceLost); }
-        if buffer.hal_id().is_none() || offset.checked_add(len).is_none_or(|n| n > buffer.size()) { return Err(ReadbackError::InvalidSize); }
+        if ranges.is_empty() { return Err(ReadbackError::InvalidSize); }
+        let mut bytes = 0u64;
+        let mut reads = Vec::with_capacity(ranges.len());
+        for (buffer, range) in ranges {
+            if buffer.hal_id().is_none() || range.start >= range.end || range.end > buffer.size() || range.end - range.start > isize::MAX as u64 {
+                return Err(ReadbackError::InvalidSize);
+            }
+            let len = range.end - range.start;
+            bytes = bytes.checked_add(len).ok_or(ReadbackError::InvalidSize)?;
+            reads.push(makepad_hal::BufferReadRange { id: buffer.hal_id(), offset: range.start, len });
+        }
+        let record_bytes = reads.len().checked_mul(makepad_hal::lease::Record::SIZE).filter(|n| *n <= u32::MAX as usize).ok_or(ReadbackError::InvalidSize)?;
+        let reservation = self.gpu_admission().admit_readback(bytes).map_err(|_| ReadbackError::Backpressure)?;
         let req = self.hal_readback_request();
-        self.hal.event_arena_min = self.hal.event_arena_min.max(len as usize);
-        if self.hal.compute.binds_buffer(buffer.hal_id()) {
-            self.hal.readbacks.buffer_pending.push((buffer.hal_id(), req, offset, len));
-        } else { self.hal.frames.w.buffer_readback(buffer.hal_id(), req, offset, len); }
-        self.hal.readbacks.buffers.insert(req, (buffer.clone(), len as usize, Box::new(done)));
+        // Only the small lease records go into the event arena.
+        self.hal.event_arena_min = self.hal.event_arena_min.max(record_bytes);
+        if reads.iter().any(|r| self.hal.compute.binds_buffer(r.id)) {
+            self.hal.readbacks.buffer_pending.push((req, reads.clone()));
+        } else { encode_buffer_reads(&mut self.hal.frames.w, req, &reads); }
+        let cancel_pool = class.map(|class| (self.task_pool(), class));
+        self.hal.readbacks.buffers.insert(req, BufferRequest {
+            _buffers: ranges.iter().map(|(b, _)| (*b).clone()).collect(), ranges: reads, reservation, class,
+            done: if let Some(done) = ui_done { BufferCompletion::Ui(done) } else {
+                BufferCompletion::Pool(Answer { done: pool_done, error: ReadbackError::Cancelled, cancel_pool })
+            },
+        });
         crate::thread::SignalToUI::set_internal_signal();
         Ok(())
+    }
+
+    pub(crate) fn hal_buffer_leases(&mut self, req: u32, status: u32, records: &[u8]) {
+        assert_eq!(records.len() % makepad_hal::lease::Record::SIZE, 0, "truncated lease records");
+        let records: Vec<_> = records.chunks_exact(makepad_hal::lease::Record::SIZE).map(makepad_hal::lease::Record::read).collect();
+        self.hal.readbacks.active.remove(&req);
+        let Some(mut request) = self.hal.readbacks.buffers.remove(&req) else {
+            for record in records { makepad_hal::hal_lease_release(record.token); }
+            self.hal.readbacks.retired_buffers.remove(&req);
+            return;
+        };
+        let valid = status == makepad_hal::readback::OK && records.len() == request.ranges.len()
+            && records.iter().zip(&request.ranges).enumerate().all(|(i, (r, range))| r.order as usize == i && r.len == range.len && r.ptr != 0);
+        let result = if valid {
+            Ok(records.into_iter().map(|record| {
+                request.reservation.transfer(record.len);
+                // SAFETY: HAL completion transfers immutable storage and one release obligation.
+                unsafe { HostBuf::from_lease(record.ptr as *const u8, record.len as usize, record.token, release_buffer_lease) }
+            }).collect())
+        } else {
+            for record in records { makepad_hal::hal_lease_release(record.token); }
+            Err(if status == makepad_hal::readback::DEVICE_LOST { ReadbackError::DeviceLost } else { ReadbackError::Failed })
+        };
+        match request.done {
+            BufferCompletion::Ui(done) => done(self, result),
+            BufferCompletion::Pool(mut answer) => {
+                answer.cancel_pool = None;
+                answer.error = result.as_ref().err().cloned().unwrap_or(ReadbackError::Backpressure);
+                let delivery = Delivery { answer, result: Some(result) };
+                // Refusal releases the leases and answers here, preserving an existing error.
+                if let Ok(handle) = self.task_pool().submit(request.class.unwrap(), move || delivery.run()) { handle.detach(); }
+            }
+        }
     }
 
     /// Encodes the reads whose producers this build encoded: a read waits only for the queued
@@ -117,11 +263,27 @@ impl Cx {
             if !held { fb.w.texture_readback(id, req, [0, 0, width as u32, height as u32]); }
             held
         });
-        r.buffer_pending.retain(|&(id, req, offset, len)| {
-            let held = compute.binds_buffer(id);
-            if !held { fb.w.buffer_readback(id, req, offset, len); }
+        r.buffer_pending.retain(|(req, ranges)| {
+            let held = ranges.iter().any(|r| compute.binds_buffer(r.id));
+            if !held { encode_buffer_reads(&mut fb.w, *req, ranges); }
             held
         });
+    }
+
+    pub(crate) fn hal_retire_device_reads(&mut self) {
+        // DeviceReset follows every old-device completion. Requests that never encoded
+        // have no lease to release, so their retained admission can now be returned too.
+        self.hal.readbacks.retired_buffers.clear();
+    }
+
+    pub(crate) fn hal_cancel_buffer_reads(&mut self) {
+        self.hal.readbacks.buffer_pending.clear();
+        let requests = std::mem::take(&mut self.hal.readbacks.buffers);
+        for (req, request) in requests {
+            self.hal.readbacks.active.remove(&req);
+            if let BufferCompletion::Ui(done) = request.done { done(self, Err(ReadbackError::Cancelled)); }
+        }
+        self.hal.readbacks.retired_buffers.clear();
     }
 
     pub(crate) fn hal_readback_request(&mut self) -> u32 {
@@ -192,6 +354,12 @@ impl Cx {
             fb.w.snapshot(crate::event::hal_intake::hal_window_id(window), req);
             self.hal.readbacks.captures.insert(req, window.id());
         }
+        // A grab is of a whole paint: one that left a draw out (its pipeline or shader still
+        // compiling, a picture it samples unfinished) keeps the grabs waiting for the paint the
+        // answer brings. A failed pipeline's draws are left out for good and wait for nothing.
+        if !fb.paint_whole() {
+            return;
+        }
         let mut ids = Vec::new();
         self.screenshot_requests.retain(|request| {
             if crate::remote::grab_targets_window(request.request_id, Some(window.id())) {
@@ -204,6 +372,7 @@ impl Cx {
         if ids.is_empty() {
             return;
         }
+        crate::remote::note_grabs_drawn(&ids, self.repaint_id, self.live_patches);
         let req = self.hal_readback_request();
         self.hal.event_arena_min = self.hal.event_arena_min.max(width * height * 4);
         fb.w.snapshot(crate::event::hal_intake::hal_window_id(window), req);
@@ -248,8 +417,16 @@ impl Cx {
     /// Readback commands queued before replacement refer to the old device's
     /// contents. Fail them before any later completion can publish empty bytes.
     pub(crate) fn hal_fail_device_readbacks(&mut self) {
+        let buffer_requests: Vec<_> = self.hal.readbacks.buffers.keys().copied().collect();
+        for req in buffer_requests {
+            let request = self.hal.readbacks.buffers.get_mut(&req).unwrap();
+            let bytes = request.ranges.iter().map(|r| r.len).sum();
+            let reservation = request.reservation.split(bytes);
+            self.hal.readbacks.retired_buffers.insert(req, reservation);
+            self.hal_buffer_leases(req, makepad_hal::readback::DEVICE_LOST, &[]);
+        }
         let r = &mut self.hal.readbacks;
-        let requests: HashSet<_> = r.buffers.keys().chain(r.raw.keys()).chain(r.textures.keys())
+        let requests: HashSet<_> = r.raw.keys().chain(r.textures.keys())
             .chain(r.windows.keys()).chain(r.snapshots.keys()).chain(r.captures.keys())
             .chain(r.picks.keys()).copied().collect();
         r.buffer_pending.clear();
@@ -259,12 +436,6 @@ impl Cx {
 
     pub(crate) fn hal_readback(&mut self, req: u32, status: u32, rect: [u32; 4], pixels: &[u8]) {
         self.hal.readbacks.active.remove(&req);
-        if let Some((_buffer, len, done)) = self.hal.readbacks.buffers.remove(&req) {
-            let result = if status == makepad_hal::readback::OK && pixels.len() == len { Ok(Arc::from(pixels)) } else { Err(ReadbackError::Failed) };
-            self.hal.readbacks.buffer_jobs.push_back(Box::new(move || done(result)));
-            self.hal_poll_readback_images();
-            return;
-        }
         if self.hal_encoder_readback(req, status, rect, pixels) {
             return;
         }
@@ -292,6 +463,8 @@ impl Cx {
                 && pixels.len() == bytes
             {
                 let mut pixels = pixels.to_vec();
+                // 8-bit colour comes from the HAL as RGBA and goes out BGRA; every other
+                // format's texels as the GPU packed them
                 if status == makepad_hal::readback::OK {
                     for px in pixels.chunks_exact_mut(4) {
                         px.swap(0, 2);
@@ -304,7 +477,7 @@ impl Cx {
             self.hal
                 .readbacks
                 .jobs
-                .push_back(Box::new(move || done(result)));
+                .push(Box::new(move || done(result)));
             self.hal_poll_readback_images();
             return;
         }
@@ -314,7 +487,7 @@ impl Cx {
             // Same RGBA top-left rows as a grab; sinks run off the Cx thread, in frame order.
             if ok {
                 let pixels: Arc<[u8]> = Arc::from(pixels);
-                self.hal.readbacks.jobs.push_back(Box::new(move || {
+                self.hal.readbacks.jobs.push(Box::new(move || {
                     crate::screen_capture::deliver_capture_frame(Some(window), w, h, &pixels)
                 }));
                 self.hal_poll_readback_images();
@@ -429,32 +602,8 @@ impl Cx {
             .readbacks
             .workers
             .retain_mut(|worker| worker.try_take().is_none());
-        if self
-            .hal
-            .readbacks
-            .raw_worker
-            .as_mut()
-            .is_some_and(|w| w.try_take().is_some())
-        {
-            self.hal.readbacks.raw_worker = None;
-        }
-        if self.hal.readbacks.raw_worker.is_none() && !self.hal.readbacks.jobs.is_empty() {
-            let pool = self.task_pool();
-            if pool.is_open() {
-                let job = self.hal.readbacks.jobs.pop_front().unwrap();
-                self.hal.readbacks.raw_worker = pool.submit(Class::Visible, job).ok();
-            }
-        }
-        if self.hal.readbacks.buffer_worker.as_mut().is_some_and(|w| w.try_take().is_some()) {
-            self.hal.readbacks.buffer_worker = None;
-        }
-        if self.hal.readbacks.buffer_worker.is_none() && !self.hal.readbacks.buffer_jobs.is_empty() {
-            let pool = self.task_pool();
-            if pool.is_open() {
-                let job = self.hal.readbacks.buffer_jobs.pop_front().unwrap();
-                self.hal.readbacks.buffer_worker = pool.submit(Class::Interactive, job).ok();
-            }
-        }
+        let pool = self.task_pool();
+        self.hal.readbacks.jobs.start(&pool, Class::Visible);
         while let Some((ids, ..)) = self.hal.readbacks.images.front() {
             let class = if crate::remote::grab_ids_only(ids) { Class::Interactive } else { Class::Visible };
             let pool = self.task_pool();
@@ -494,5 +643,216 @@ impl Cx {
                 }
             }) { self.hal.readbacks.workers.push(handle); }
         }
+    }
+}
+
+fn encode_buffer_reads(writer: &mut makepad_hal::CmdWriter, req: u32, ranges: &[makepad_hal::BufferReadRange]) {
+    writer.read_buffers(req, ranges);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{sync::{atomic::{AtomicUsize, Ordering}, mpsc}, time::{Duration, Instant}};
+
+    static READS: Mutex<()> = Mutex::new(());
+
+    struct Probe { bytes: Vec<u8>, released: Arc<AtomicUsize> }
+    impl Drop for Probe { fn drop(&mut self) { self.released.fetch_add(1, Ordering::SeqCst); } }
+    fn records(count: usize) -> (Vec<u8>, Vec<Arc<AtomicUsize>>) {
+        let mut records = Vec::new();
+        let mut counts = Vec::new();
+        for order in 0..count {
+            let released = Arc::new(AtomicUsize::new(0));
+            let probe = Probe { bytes: vec![10, 20, 30, 40], released: released.clone() };
+            let ptr = probe.bytes.as_ptr();
+            // SAFETY: the probe owns immutable bytes until its one release.
+            let lease = unsafe { makepad_hal::lease::Lease::new(probe, ptr, 4, order as u32) };
+            lease.into_record().write(&mut records);
+            counts.push(released);
+        }
+        (records, counts)
+    }
+    fn cx() -> (Cx, crate::GpuBuffer) {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.hal.info = Some(makepad_hal::HalInfo { flags: makepad_hal::info_flags::COMPUTE, ..Default::default() });
+        let buffer = crate::GpuBuffer::new(&mut cx, 16, Default::default()).unwrap();
+        (cx, buffer)
+    }
+    fn receive<T>(rx: &mpsc::Receiver<T>) -> T {
+        let start = Instant::now();
+        loop {
+            if let Ok(value) = rx.try_recv() { return value; }
+            assert!(start.elapsed() < Duration::from_secs(5), "readback callback was not answered");
+            std::thread::yield_now();
+        }
+    }
+
+    #[test]
+    fn buffer_lease_release_is_once_across_views_workers_and_refusals() {
+        let _reads = READS.lock().unwrap();
+        let released = Arc::new(AtomicUsize::new(0));
+        let probe = Probe { bytes: vec![1, 2, 3, 4], released: released.clone() };
+        let ptr = probe.bytes.as_ptr();
+        // SAFETY: the queue owns the immutable probe until delivery or shutdown.
+        let lease = unsafe { makepad_hal::lease::Lease::new(probe, ptr, 4, 0) };
+        let mut queue = makepad_hal::EventQueue::new();
+        queue.buffer_leases(1, makepad_hal::readback::OK, vec![lease]);
+        let mut destination = makepad_hal::EventQueue::new();
+        destination.append(&mut queue);
+        drop(queue);
+        assert_eq!(released.load(Ordering::SeqCst), 0, "moving an event transfers its release obligation");
+        drop(destination);
+        assert_eq!(released.load(Ordering::SeqCst), 1, "queue shutdown releases an undelivered record once");
+
+        let (mut cx, buffer) = cx();
+        let (tx, rx) = mpsc::channel();
+        let ui = std::thread::current().id();
+        cx.read_to_pool(&[(&buffer, 0..4)], Class::Interactive, move |result| {
+            assert_ne!(std::thread::current().id(), ui, "pool delivery ran on the UI");
+            let bytes = result.unwrap().remove(0);
+            let view = bytes.slice(1..4).slice(1..2);
+            assert_eq!(&*view, &[30]);
+            let clone = bytes.clone();
+            drop(bytes);
+            drop(clone);
+            tx.send(view).unwrap();
+        }).unwrap();
+        let (payload, counts) = records(1);
+        cx.hal_buffer_leases(cx.hal.readbacks.next, makepad_hal::readback::OK, &payload);
+        let view = receive(&rx);
+        assert_eq!(crate::gpu_admission::GpuLedger::new(Default::default()).snapshot().in_use, 4, "every Cx sees outstanding lease bytes");
+        assert_eq!(counts[0].load(Ordering::SeqCst), 0, "UI view must retain its whole lease");
+        drop(view);
+        assert_eq!(counts[0].load(Ordering::SeqCst), 1, "last UI view releases once");
+
+        let (tx, rx) = mpsc::channel();
+        cx.read_to_pool(&[(&buffer, 0..4)], Class::Visible, move |result| { drop(result); tx.send(()).unwrap(); }).unwrap();
+        let (payload, counts) = records(1);
+        cx.hal_buffer_leases(cx.hal.readbacks.next, makepad_hal::readback::OK, &payload);
+        receive(&rx);
+        assert_eq!(counts[0].load(Ordering::SeqCst), 1, "untouched results release on the worker");
+
+        let (tx, rx) = mpsc::channel();
+        cx.read_to_pool(&[(&buffer, 0..4)], Class::Interactive, move |result| {
+            tx.send((result.unwrap_err(), std::thread::current().id())).unwrap();
+        }).unwrap();
+        cx.hal_cancel_buffer_reads();
+        let (error, thread) = receive(&rx);
+        assert_eq!(error, ReadbackError::Cancelled, "teardown answers an accepted request");
+        assert_ne!(thread, ui, "teardown preserves the heavy callback's pool");
+
+        cx.use_closed_task_pool();
+        for (status, expected) in [
+            (makepad_hal::readback::OK, ReadbackError::Backpressure),
+            (makepad_hal::readback::FAILED, ReadbackError::Failed),
+            (makepad_hal::readback::DEVICE_LOST, ReadbackError::DeviceLost),
+        ] {
+            let (tx, rx) = mpsc::channel();
+            if status != makepad_hal::readback::FAILED {
+                cx.read_to_pool(&[(&buffer, 0..4)], Class::Interactive, move |result| { tx.send((result.unwrap_err(), std::thread::current().id())).unwrap(); }).unwrap();
+            } else {
+                cx.read(&[(&buffer, 0..4)], move |_, result| { tx.send((result.unwrap_err(), std::thread::current().id())).unwrap(); }).unwrap();
+            }
+            let (payload, counts) = records(1);
+            cx.hal_buffer_leases(cx.hal.readbacks.next, status, &payload);
+            assert_eq!(receive(&rx), (expected, ui));
+            assert_eq!(counts[0].load(Ordering::SeqCst), 1, "refusal/error releases every supplied lease");
+        }
+        let called = Arc::new(AtomicUsize::new(0));
+        let next = cx.hal.readbacks.next;
+        for range in [4..20, 0..0, 8..8] {
+            let call = called.clone();
+            assert_eq!(cx.read(&[(&buffer, range.clone())], move |_, _| { call.fetch_add(1, Ordering::SeqCst); }), Err(ReadbackError::InvalidSize));
+            let call = called.clone();
+            assert_eq!(cx.read_to_pool(&[(&buffer, range)], Class::Interactive, move |_| { call.fetch_add(1, Ordering::SeqCst); }), Err(ReadbackError::InvalidSize));
+        }
+        assert_eq!(cx.hal.readbacks.next, next, "invalid ranges never reach the HAL");
+        let budget = cx.gpu_admission().budget();
+        cx.gpu_admission().set_device_bytes(0);
+        let call = called.clone();
+        assert_eq!(cx.read(&[(&buffer, 0..4)], move |_, _| { call.fetch_add(1, Ordering::SeqCst); }), Err(ReadbackError::Backpressure));
+        assert_eq!(cx.gpu_admission().take_reclaim(), 4, "read refusal asks the ledger to yield");
+        assert!(cx.gpu_admission().update(0, budget.device_bytes, 0), "read refusal retains retry state like a document refusal");
+        assert_eq!(called.load(Ordering::SeqCst), 0, "refused calls never invoke done");
+        // The light callback can own UI-only state and receives the live Cx.
+        let called = std::rc::Rc::new(std::cell::Cell::new(0));
+        let call = called.clone();
+        cx.read(&[(&buffer, 0..4)], move |cx, result| {
+            assert_eq!(std::thread::current().id(), ui);
+            assert!(cx.hal.info.is_some());
+            drop(result.unwrap());
+            call.set(call.get() + 1);
+        }).unwrap();
+        let (payload, counts) = records(1);
+        cx.hal_buffer_leases(cx.hal.readbacks.next, makepad_hal::readback::OK, &payload);
+        assert_eq!(called.get(), 1);
+        assert_eq!(counts[0].load(Ordering::SeqCst), 1);
+        let call = called.clone();
+        cx.read(&[(&buffer, 0..4)], move |_, result| {
+            assert_eq!(result.unwrap_err(), ReadbackError::Cancelled);
+            call.set(call.get() + 1);
+        }).unwrap();
+        cx.hal_cancel_buffer_reads();
+        assert_eq!(called.get(), 2, "closing the session answers UI requests");
+        let call = called.clone();
+        cx.read(&[(&buffer, 0..4)], move |_, result| {
+            assert_eq!(result.unwrap_err(), ReadbackError::Cancelled);
+            call.set(call.get() + 1);
+        }).unwrap();
+        drop(cx);
+        assert_eq!(called.get(), 3, "dropping Cx answers an accepted UI request");
+        assert_eq!(crate::gpu_admission::GpuLedger::new(Default::default()).snapshot().in_use, 0, "all readback reservations returned");
+    }
+
+    #[test]
+    fn a_texture_readback_swaps_red_and_blue_of_8_bit_colour_only() {
+        let _reads = READS.lock().unwrap();
+        let (mut cx, _) = cx();
+        let texture = crate::Texture::new_with_format(&mut cx, crate::TextureFormat::RenderRGBAf32 { size: crate::TextureSize::Auto, initial: true });
+        let texels: Vec<u8> = (0..8).collect();
+        // an RGBA32F texel (NATIVE) is its bytes as the GPU wrote them; RGBA8 (OK) goes out BGRA
+        for (status, expected) in [(makepad_hal::readback::NATIVE, [0, 1, 2, 3, 4, 5, 6, 7]), (makepad_hal::readback::OK, [2, 1, 0, 3, 6, 5, 4, 7])] {
+            let (tx, rx) = mpsc::channel();
+            let req = cx.hal_readback_request();
+            cx.hal.readbacks.raw.insert(req, (texture.clone(), 2, 1, 8, Box::new(move |r: RawPixels| { tx.send(r.unwrap().2.to_vec()).unwrap(); })));
+            cx.hal_readback(req, status, [0, 0, 2, 1], &texels);
+            assert_eq!(receive(&rx), expected, "status {status}");
+        }
+    }
+
+    #[test]
+    fn buffer_device_loss_answers_every_request_and_retains_delivered_leases() {
+        let _reads = READS.lock().unwrap();
+        let (mut cx, buffer) = cx();
+        let (tx, rx) = mpsc::channel();
+        cx.read(&[(&buffer, 0..4)], move |_, result| { tx.send(result.unwrap().remove(0)).unwrap(); }).unwrap();
+        let (payload, kept_count) = records(1);
+        cx.hal_buffer_leases(cx.hal.readbacks.next, makepad_hal::readback::OK, &payload);
+        let kept = receive(&rx);
+        let (tx, rx) = mpsc::channel();
+        let mut pending = Vec::new();
+        for i in 0..4 {
+            let tx = tx.clone();
+            let ranges = if i % 2 == 0 { vec![(&buffer, 0..4), (&buffer, 4..8)] } else { vec![(&buffer, 0..4)] };
+            if i < 2 { cx.read_to_pool(&ranges, Class::Interactive, move |r| { tx.send((i, r.unwrap_err())).unwrap(); }).unwrap(); }
+            else { cx.read(&ranges, move |_, r| { tx.send((i, r.unwrap_err())).unwrap(); }).unwrap(); }
+            pending.push((cx.hal.readbacks.next, ranges.len()));
+        }
+        cx.hal_intake(0, makepad_hal::HalEvent::DeviceLost { generation: 1, dispatches: b"readback fixture" });
+        let mut answers = [0; 4];
+        for _ in 0..4 { let (i, error) = receive(&rx); assert_eq!(error, ReadbackError::DeviceLost); answers[i] += 1; }
+        assert_eq!(answers, [1; 4], "every UI/pool request answers once");
+        for (req, count) in pending {
+            let (payload, counts) = records(count);
+            cx.hal_buffer_leases(req, makepad_hal::readback::OK, &payload);
+            assert!(counts.iter().all(|n| n.load(Ordering::SeqCst) == 1), "late records must be released");
+        }
+        assert!(rx.try_recv().is_err(), "late completions cannot answer twice");
+        assert_eq!(&*kept, &[10, 20, 30, 40], "a pre-loss lease remains readable");
+        assert_eq!(kept_count[0].load(Ordering::SeqCst), 0);
+        drop(kept);
+        assert_eq!(kept_count[0].load(Ordering::SeqCst), 1);
+        assert_eq!(cx.gpu_admission.snapshot().in_use, 0);
     }
 }

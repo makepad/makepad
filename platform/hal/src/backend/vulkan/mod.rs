@@ -42,7 +42,10 @@ use crate::types::*;
 pub(crate) use device::Worker;
 use device::{compile_rank, Compilers};
 use pipeline::{PassKey, RenderPass, State};
-pub(crate) use resources::{buffer_usage, Buffer};
+pub(crate) use resources::Buffer;
+// the Linux direct renderer's staging buffers (linux/direct/render.rs)
+#[cfg(target_os = "linux")]
+pub(crate) use resources::buffer_usage;
 use submit::{Batch, Event, Mailbox, Token};
 use crate::FastMap;
 use std::collections::HashSet;
@@ -82,6 +85,7 @@ pub struct Vulkan {
     /// the Android shell (Activity surface, lifecycle, input)
     #[cfg(target_os = "android")]
     shell: Option<Box<dyn Shell>>,
+    leases: crate::lease::Pool<Buffer>,
     dev: Arc<Device>,
     info: HalInfo,
     tex: FastMap<(u32, u32), Texture>,
@@ -95,6 +99,15 @@ pub struct Vulkan {
     draw_bins: Vec<(u32, makepad_vulkan::vk::DescriptorType, makepad_vulkan::vk::DescriptorBufferInfo)>,
     draw_images: Vec<(u32, makepad_vulkan::vk::DescriptorType, makepad_vulkan::vk::DescriptorImageInfo)>,
     passes: FastMap<PassKey, Arc<RenderPass>>,
+    /// Framebuffers kept across frames by (render pass, attachment views, size): on the Adreno
+    /// driver vkCreateFramebuffer is a kernel round trip (GPU memory), and one made and
+    /// destroyed per pass per frame took 14 % of a swipe frame's CPU (`frame::encode_pass`).
+    fbs: FastMap<frame::FbKey, frame::Fb>,
+    /// Framebuffers the cache let go while batches were in flight (`sweep`): destroyed once
+    /// none is.
+    dead_fbs: Vec<makepad_vulkan::vk::Framebuffer>,
+    /// when `sweep` runs next (HAL clock ns)
+    sweep_at: u64,
     /// The multisampled images of MSAA passes, by the attachment they resolve into (its raw
     /// image) and sample count; dropped with that attachment (`frame::msaa_image`).
     msaa: FastMap<(u64, u8), (std::sync::Weak<resources::Image>, Arc<resources::Image>)>,
@@ -151,6 +164,9 @@ pub struct Vulkan {
     /// before and after)
     simulate_at_ns: Option<u64>,
 }
+
+/// How often `Vulkan::sweep` looks for what the backend keeps and nothing uses.
+const SWEEP_NS: u64 = 250_000_000;
 
 /// The first wait before another attempt at a replacement device, and the longest.
 const RESET_RETRY_NS: u64 = 250_000_000;
@@ -230,9 +246,9 @@ impl Vulkan {
         info.set_device_name(&unsafe { std::ffi::CStr::from_ptr(dev.properties.device_name.as_ptr()) }.to_string_lossy());
         crate::gpu_limits::set_max_gpu_buffer_bytes(info.max_buffer);
         crate::gpu_limits::set_gpu_working_set_bytes(info.working_set);
-        Ok(Self { #[cfg(target_os = "linux")] native_apps: Default::default(), #[cfg(any(target_os = "linux", target_os = "android"))] media: Default::default(), #[cfg(target_os = "linux")] capture_pool: FastMap::default(), #[cfg(any(target_os = "linux", target_os = "android"))] shell: None, dev, info, tex: FastMap::default(), buf: FastMap::default(), zero_owed: Vec::new(), pipe: FastMap::default(), compute: FastMap::default(), programs: FastMap::default(), draw_bins: Vec::new(), draw_images: Vec::new(),
+        Ok(Self { #[cfg(target_os = "linux")] native_apps: Default::default(), #[cfg(any(target_os = "linux", target_os = "android"))] media: Default::default(), #[cfg(target_os = "linux")] capture_pool: FastMap::default(), #[cfg(any(target_os = "linux", target_os = "android"))] shell: None, leases: Default::default(), dev, info, tex: FastMap::default(), buf: FastMap::default(), zero_owed: Vec::new(), pipe: FastMap::default(), compute: FastMap::default(), programs: FastMap::default(), draw_bins: Vec::new(), draw_images: Vec::new(),
             #[cfg(target_os = "android")] native_layers: Default::default(),
-            passes: FastMap::default(), msaa: FastMap::default(), win: FastMap::default(), hosted_sizes: FastMap::default(), scanout_images: FastMap::default(), #[cfg(target_os = "linux")] stamp: None, #[cfg(target_os = "linux")] window_px: [0, 0], badged: FastMap::default(), retained_stale: Default::default(), direct_frame: FastMap::default(), compose: None, aliases: FastMap::default(), pick_ids: FastMap::default(), pick_pending: HashSet::new(),
+            passes: FastMap::default(), fbs: FastMap::default(), dead_fbs: Vec::new(), sweep_at: 0, msaa: FastMap::default(), win: FastMap::default(), hosted_sizes: FastMap::default(), scanout_images: FastMap::default(), #[cfg(target_os = "linux")] stamp: None, #[cfg(target_os = "linux")] window_px: [0, 0], badged: FastMap::default(), retained_stale: Default::default(), direct_frame: FastMap::default(), compose: None, aliases: FastMap::default(), pick_ids: FastMap::default(), pick_pending: HashSet::new(),
             fallback: FastMap::default(), windows: surface::Windows::new(source), sharing,
             #[cfg(target_os = "linux")] foreign_support,
             batch: None, spares: Default::default(), mailbox: Mailbox::new(sessions),
@@ -329,6 +345,7 @@ impl Vulkan {
                     }
                     world.frame_done(sid, target, kind, frame, gpu_ns, done.time, gpu_span);
                 }
+                Event::BufferLeases { req, status, leases } => world.to_session(sid, |q| q.buffer_leases(req, status, leases)),
                 Event::Readback { req, status, rect, pixels } => world.to_session(sid, |q| q.readback(req, status, rect, &pixels)),
                 Event::Pick { req, ids } => world.to_session(sid, |q| q.pick_result(req, &ids.into_iter().flat_map(u32::to_le_bytes).collect::<Vec<_>>())),
                 Event::Shared { id, handle } => world.to_session(sid, |q| q.texture_shared(id, handle)),
@@ -348,27 +365,57 @@ impl Vulkan {
             }
         }
         self.announce_compute(world);
-        let allocated = self.dev.allocated.load(Ordering::Relaxed);
-        let scratch = self.dev.scratch_allocated.load(Ordering::Relaxed);
         for ((sid, index), texture) in &self.win {
             let id = Id::new(*index, texture.gen);
             if *sid != HOST && !self.scanout_images.contains_key(&(*sid,id)) { continue; }
             let Some(owner) = world.session_mut(*sid) else { continue };
-            let extra: u64 = self.scanout_images.get(&(*sid,id)).into_iter().flatten().map(|image| image.bytes).sum();
-            let bytes = texture.image.bytes + extra;
-            if owner.ledger.get(Kind::Window, *index).is_none_or(|r| r.gen != texture.gen || r.bytes != bytes
+            let spares = self.scanout_images.get(&(*sid,id)).map_or(&[][..], |v| v.as_slice());
+            let bytes = texture.image.bytes + spares.iter().map(|image| image.bytes).sum::<u64>();
+            let objects = 1 + spares.len() as u64;
+            if owner.ledger.get(Kind::Window, *index).is_none_or(|r| r.gen != texture.gen || r.bytes != bytes || r.objects != objects
                 || r.width != texture.image.desc.w || r.height != texture.image.desc.h) {
                 let mut row = window_row(id, &texture.image, crate::clock_ns(), owner.frame);
                 row.bytes = bytes;
+                row.objects = objects;
                 owner.ledger.add(row);
             }
         }
+        let now = crate::clock_ns();
+        if now >= self.sweep_at {
+            self.sweep_at = now + SWEEP_NS;
+            self.sweep(now);
+        }
+        // what the driver says this process holds (VK_EXT_memory_budget), `None` without it
+        let device = self.dev.memory_budget(false).map(|b| b.process);
+        self.dev.pools.set_count(crate::ledger::Pool::CommandBuffers, self.spares.slots());
+        if let Some(host) = world.session_mut(HOST) {
+            let frame = host.frame;
+            host.ledger.set_pools(&self.dev.pools, frame, now);
+        }
         for sid in world.session_ids() {
             if let Some(s) = world.session_mut(sid) {
-                s.ledger.device_allocated = Some(allocated);
-                s.ledger.scratch_allocated = Some(scratch);
+                s.ledger.device_allocated = device;
             }
         }
+    }
+
+    /// What the backend keeps for reuse goes once nothing uses it: cached framebuffers that name
+    /// a dropped image (a destroyed or resized texture, a closed session's targets) or went
+    /// unused, the multisampled images of gone targets, idle lease blocks and arenas, and
+    /// programs no pipeline holds.
+    fn sweep(&mut self, now: u64) {
+        let gone: Vec<frame::FbKey> = self.fbs.iter().filter(|(_, fb)| fb.idle(now) || fb.stale()).map(|(key, _)| key.clone()).collect();
+        for key in gone {
+            if let Some(fb) = self.fbs.remove(&key) { self.dead_fbs.push(fb.raw); }
+        }
+        // a framebuffer may be in a batch still on the GPU: destroyed once no batch is
+        if !self.dead_fbs.is_empty() && self.batch.is_none() && self.spares.in_flight() == 0 {
+            for fb in self.dead_fbs.drain(..) { unsafe { self.dev.raw.destroy_framebuffer(fb, None) }; }
+        }
+        self.msaa.retain(|_, (target, _)| target.strong_count() > 0);
+        self.leases.trim(now);
+        self.spares.trim();
+        self.programs.retain(|_, state| state.strong_count() > 0);
     }
 
     /// A CPU implementation (lavapipe, SwiftShader): the default selection prefers hardware GL.
@@ -616,7 +663,7 @@ impl Backend for Vulkan {
         self.win.retain(|k, _| k.0 != sid); self.hosted_sizes.retain(|k, _| k.0 != sid); self.aliases.retain(|k, _| k.0 != sid);
         self.scanout_images.retain(|k, _| k.0 != sid);
         self.pick_ids.retain(|k, _| k.0 != sid); self.pick_pending.retain(|k| k.0 != sid);
-        self.programs.retain(|_, state| state.strong_count() > 0);
+        self.sweep(crate::clock_ns());
         self.sharing.session_closed(sid);
         self.pressure.forget_session(sid);
         exec::free_session(world, sid);
@@ -632,6 +679,7 @@ impl Backend for Vulkan {
     /// stop in dependency order -- compiles; the queue (its submits, presents and retirements,
     /// which hand completions on); the completions (fence waits, frees) -- each joined.
     fn before_exit(&mut self) {
+        self.dev.save_pipeline_cache();
         self.flush();
         if let Some(queue) = self.queue.as_ref() { self.windows.clear(queue); }
         self.compiler.stop();
@@ -738,6 +786,8 @@ impl exec::DeviceReset for Vulkan {
         for b in self.badged.values_mut() { *b = Default::default(); }
         self.scanout_images.clear();
         self.fallback.clear();
+        for (_, f) in self.fbs.drain() { unsafe { self.dev.raw.destroy_framebuffer(f.raw, None) }; }
+        for fb in self.dead_fbs.drain(..) { unsafe { self.dev.raw.destroy_framebuffer(fb, None) }; }
         self.passes.clear();
         self.pick_ids.clear();
         self.pick_pending.clear();
@@ -748,6 +798,7 @@ impl exec::DeviceReset for Vulkan {
             self.foreign_support = share::foreign_support(&dev);
             share::copy::device_replaced();
         }
+        self.leases = Default::default();
         self.dev = dev;
         Ok(())
     }
@@ -798,6 +849,8 @@ impl exec::DeviceReset for Vulkan {
 impl Drop for Vulkan {
     fn drop(&mut self) {
         self.flush();
+        for (_, f) in self.fbs.drain() { unsafe { self.dev.raw.destroy_framebuffer(f.raw, None) }; }
+        for fb in self.dead_fbs.drain(..) { unsafe { self.dev.raw.destroy_framebuffer(fb, None) }; }
         self.windows.clear(self.queue.as_ref().unwrap());
         // Queue jobs retain the completion worker; both drain after the HAL lets them go.
         self.queue.take();
@@ -987,7 +1040,7 @@ impl Gpu for Vulkan {
         })();
         if let Err(e) = result { eprintln!("[hal-vulkan] buffer update: {e}"); s.bad(); }
     }
-    fn buffer_readback(&mut self, s: &mut Session, id: Id, req: u32, offset: u64, len: u64) { self.read_compute_buffer(s, id, req, offset, len); }
+    fn buffer_readbacks(&mut self, s: &mut Session, req: u32, ranges: &[BufferReadRange]) { self.read_compute_buffers(s, req, ranges); }
     fn buffer_destroy(&mut self, sid: u32, id: Id) { if self.buf.get(&(sid, id.index)).is_some_and(|b| b.gen <= id.gen) { self.buf.remove(&(sid, id.index)); } }
     fn buffer_evictable(&mut self, sid: u32, id: Id) { if let Some(b) = self.buf.get_mut(&(sid, id.index)).filter(|b| b.gen == id.gen) { b.evictable = true; } }
     fn pipeline_create(&mut self, s: &mut Session, id: Id, dialect: u32, blob: &PipelineBlob, _: Attr) -> PipeStatus {
@@ -1018,6 +1071,11 @@ impl Gpu for Vulkan {
         if self.pipe.get(&(sid, id.index)).is_some_and(|p| p.gen <= id.gen) { return self.pipe.remove(&(sid, id.index)).is_some_and(|p| !p.announced); } false
     }
     fn frame(&mut self, s: &mut Session, sid: u32, target: Id, kind: u32, packet: u32, view: &CmdView, now: u64) -> Option<exec::SubmittedFrame> {
+        // pipelines were made and none for two seconds: the cache goes to its file (compile worker)
+        if self.dev.pipelines_made.load(std::sync::atomic::Ordering::Relaxed) > 0 && now.saturating_sub(self.dev.pipeline_made_ns.load(std::sync::atomic::Ordering::Relaxed)) > 2_000_000_000 {
+            let dev = self.dev.clone();
+            self.compiler.push(Compilers::rank(compile_rank::SAVE), move || dev.save_pipeline_cache());
+        }
         #[cfg(target_os = "android")]
         if kind & !target::FLAGS == target::WINDOW && kind & (target::PICK | target::BADGES | target::REPLAY) == 0 {
             self.media.native_frame(s, target, packet, view);
@@ -1084,5 +1142,5 @@ impl Gpu for Vulkan {
 fn window_row(id: Id, image: &Image, now: u64, frame: u64) -> LedgerEntry {
     LedgerEntry { kind: Kind::Window, detail: "window surface", index: id.index, gen: id.gen, bytes: image.bytes,
         format: image.desc.format, width: image.desc.w, height: image.desc.h, mips: 1, attr: Attr::default(),
-        created_ns: now, created_frame: frame, last_used_frame: frame, last_used_ns: now }
+        created_ns: now, created_frame: frame, last_used_frame: frame, last_used_ns: now, objects: 1, note: "" }
 }

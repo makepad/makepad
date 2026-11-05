@@ -849,10 +849,11 @@ impl Cx {
             HalEvent::XrDepth { window: _, display_ns, depth } => {
                 self.hal_xr_depth(display_ns, depth);
             }
-            HalEvent::FrameReady { window, next_ns: _ } => {
+            HalEvent::FrameReady { window, next_ns } => {
                 let window_id = window_id(window);
                 if self.windows.is_valid(window_id) {
                     self.hal.beat = true;
+                    self.hal.ready_flip = Some(next_ns);
                     if self.hal.xr.as_ref().is_some_and(|xr| xr.window == window_id) {
                         self.hal.xr_beat = true;
                     }
@@ -888,7 +889,7 @@ impl Cx {
             HalEvent::DispatchTime { name, gpu_ns } => {
                 if let Ok(name) = std::str::from_utf8(name) { crate::gpu_frame_timer::record_dispatch(name, gpu_ns); }
             }
-            HalEvent::FrameDone { window, frame, gpu_ns, present_ns: _, gpu_start, gpu_end } => {
+            HalEvent::FrameDone { window, frame, gpu_ns, present_ns, gpu_start, gpu_end } => {
                 self.pass_load.done(frame, gpu_ns);
                 if let Some((group, name, closes)) = self.hal.frames.timings.remove(&frame) {
                     if gpu_ns > 0 {
@@ -896,7 +897,8 @@ impl Cx {
                     }
                     if closes { crate::gpu_frame_timer::finish_frame(group); }
                 }
-                let window_frame = self.hal.frames.frame_done(window, frame);
+                let presented = self.hal.frames.frame_done(window, frame);
+                let window_frame = presented.is_some();
                 // PerfMonitor "gpu" channel: a presented window frame's GPU time
                 // (a no-op unless the monitor is enabled)
                 if window_frame && gpu_ns > 0 {
@@ -915,7 +917,7 @@ impl Cx {
                     Some(crate::os::hal::HostedDone::Publish(draw)) => {
                         use std::sync::atomic::{AtomicBool, Ordering};
                         static APP_DRAWN: AtomicBool = AtomicBool::new(false);
-                        if window_frame { crate::frame_trace::note_presented(); }
+                        if window_frame { self.hal_window_presented(present_ns); }
                         #[cfg(target_os = "linux")]
                         self.hal.frames.w.hosted_presented(window, frame);
                         Self::send_studio_message(crate::studio::AppToStudio::DrawCompleteAndFlip(draw));
@@ -927,13 +929,19 @@ impl Cx {
                     #[cfg(target_os = "linux")]
                     Some(crate::os::hal::HostedDone::Dropped) => self.hal_repaint_all(),
                     // the HAL presented the window's frame itself (other targets' frames are passes)
-                    Some(crate::os::hal::HostedDone::Unknown) | None => if window_frame { crate::frame_trace::note_presented() },
+                    Some(crate::os::hal::HostedDone::Unknown) | None => if window_frame { self.hal_window_presented(present_ns) },
                 }
                 // (the first frame the HAL finished is the first one on the glass; once per app)
                 crate::startup_trace_first_present();
                 // the JIT's fps (devhub, `jit`): under XR the frames on the glass are the stereo
                 // window's; the panel's and offscreen frames do not count
                 if self.hal.xr.as_ref().map_or(true, |xr| hal_window_id(xr.window) == window) {
+                    // the patches the frame on the glass was built with: a tool's "→ frame" of a
+                    // live edit is the first one that has it (an animating app's frame count says
+                    // nothing about the edit)
+                    if let Some(patches) = presented {
+                        crate::cx::relax_frame_patch(patches);
+                    }
                     crate::cx::relax_frame_done();
                 }
             }
@@ -1017,6 +1025,7 @@ impl Cx {
             HalEvent::Readback { req, status, rect, pixels } => {
                 self.hal_readback(req, status, rect, pixels);
             }
+            HalEvent::BufferLeases { req, status, records } => self.hal_buffer_leases(req, status, records),
             // Cx asks for full pick images through TextureReadback; point picks belong to the host.
             HalEvent::PickResult { .. } => {},
 
@@ -1066,6 +1075,7 @@ impl Cx {
     /// `DeviceReset`: the HAL made a new GPU device and kept every id; what the old device held
     /// is uploaded again and every target painted again. Frames the old device dropped are done.
     pub(crate) fn hal_device_reset(&mut self, generation: u32) {
+        self.hal_retire_device_reads();
         crate::log!("hal: GPU device {generation} is up; uploading and painting again");
         self.hal.device_lost = false;
         self.hal.device_generation += 1;
@@ -1250,6 +1260,15 @@ impl Cx {
     /// The time the app clock reads, for events the loop makes itself.
     pub(crate) fn hal_now(&self) -> f64 {
         self.seconds_since_app_start()
+    }
+
+    /// A window frame reached the window system (or the host): counted, and traced at the
+    /// backend's present time (`present_ns`, 0 for a frame the backend never presented).
+    fn hal_window_presented(&mut self, present_ns: u64) {
+        crate::frame_trace::note_presented();
+        if present_ns != 0 {
+            self.hal.frame_trace.present(present_ns as f64 * 1e-9);
+        }
     }
 }
 

@@ -20,11 +20,13 @@ struct Endpoint {
     wait: vk::Semaphore,
     signal: vk::Semaphore,
     submitted: std::cell::Cell<bool>,
+    /// the image's place on the ledger (the device's window copies)
+    _charge: crate::ledger::Charge,
 }
 
 impl Endpoint {
     fn new(gpu: &Device, image: dma_buf::Image) -> Result<Self, String> {
-        gpu.charge(image.layout.allocation_size);
+        let charge = gpu.pools.charge(crate::ledger::Pool::WindowCopies, image.layout.allocation_size);
         let mut endpoint = Self {
             image: Some(image),
             pool: vk::CommandPool::null(),
@@ -33,6 +35,7 @@ impl Endpoint {
             wait: vk::Semaphore::null(),
             signal: vk::Semaphore::null(),
             submitted: std::cell::Cell::new(false),
+            _charge: charge,
         };
         let result = (|| unsafe {
             endpoint.pool = gpu
@@ -143,7 +146,6 @@ impl Endpoint {
                 gpu.raw.destroy_semaphore(self.signal, None);
             }
             if let Some(image) = self.image.take() {
-                gpu.uncharge(image.layout.allocation_size);
                 image.destroy(&gpu.raw);
             }
         }

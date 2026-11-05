@@ -30,6 +30,17 @@ fn r64(b: &[u8], at: usize) -> u64 {
     r32(b, at) as u64 | (r32(b, at + 4) as u64) << 32
 }
 
+impl Wire for BufferReadRange {
+    const SIZE: usize = 24;
+    fn write(&self, out: &mut Vec<u8>) { w32(out, self.id.index); w32(out, self.id.gen); w64(out, self.offset); w64(out, self.len); }
+    fn read(b: &[u8]) -> Self { Self { id: Id::new(r32(b, 0), r32(b, 4)), offset: r64(b, 8), len: r64(b, 16) } }
+}
+impl Wire for crate::lease::Record {
+    const SIZE: usize = 32;
+    fn write(&self, out: &mut Vec<u8>) { w64(out, self.ptr); w64(out, self.len); w64(out, self.token); w32(out, self.order); w32(out, self.reserved); }
+    fn read(b: &[u8]) -> Self { Self { ptr: r64(b, 0), len: r64(b, 8), token: r64(b, 16), order: r32(b, 24), reserved: r32(b, 28) } }
+}
+
 impl Wire for DragItem {
     const SIZE: usize = 8;
     fn write(&self, out: &mut Vec<u8>) {
@@ -639,6 +650,13 @@ impl CmdWriter {
         self.push(Cmd::texture_update(id, mip, rect, layer, Slice::from_bytes(&bytes[..bytes.len().min(u32::MAX as usize)])));
     }
 
+    /// One ordered buffer-read request; only its range metadata is copied into the command.
+    pub fn read_buffers(&mut self, req: u32, ranges: &[BufferReadRange]) {
+        let mut bytes = Vec::with_capacity(ranges.len() * BufferReadRange::SIZE);
+        for range in ranges { range.write(&mut bytes); }
+        self.buffer_readbacks(req, &bytes);
+    }
+
     /// Copies a typed record array into the arena.
     pub fn put_items<T: Wire>(&mut self, items: &[T]) -> Range {
         let off = self.arena.len();
@@ -946,9 +964,20 @@ pub struct EventQueue {
     now_ns: u64,
     /// events delivered with a payload cut because the caller's arena was too small
     pub truncated: u64,
+    leases: std::collections::HashSet<u64>,
 }
 
 impl EventQueue {
+    pub fn buffer_leases(&mut self, req: u32, status: u32, leases: Vec<crate::lease::Lease>) {
+        let mut records = Vec::with_capacity(leases.len() * crate::lease::Record::SIZE);
+        for lease in leases {
+            let record = lease.into_record();
+            self.leases.insert(record.token);
+            record.write(&mut records);
+        }
+        self.buffer_lease_records(req, status, &records);
+    }
+
     pub fn new() -> EventQueue {
         EventQueue::default()
     }
@@ -1001,6 +1030,9 @@ impl EventQueue {
             let start = event.data.off as usize;
             let payload = start.checked_add(event.data.len as usize)
                 .and_then(|end| self.arena.get(start..end)).unwrap_or(&[]);
+            if event.tag == crate::events::event_tag::BufferLeases {
+                for record in payload.chunks_exact(crate::lease::Record::SIZE).map(crate::lease::Record::read) { self.leases.remove(&record.token); }
+            }
             deliver(event, payload);
         }
         self.arena.clear();
@@ -1017,6 +1049,7 @@ impl EventQueue {
             }
             self.events.push_back(e);
         }
+        self.leases.extend(other.leases.drain());
         other.arena.clear();
     }
 
@@ -1035,8 +1068,12 @@ impl EventQueue {
                 if n > 0 {
                     break;
                 }
+                assert_ne!(e.tag, crate::events::event_tag::BufferLeases, "buffer lease records must never be truncated");
                 len = out.arena_cap as usize;
                 self.truncated += 1;
+            }
+            if e.tag == crate::events::event_tag::BufferLeases {
+                for record in payload.chunks_exact(crate::lease::Record::SIZE).map(crate::lease::Record::read) { self.leases.remove(&record.token); }
             }
             let mut e = *e;
             // SAFETY: the caller's EventBuf names `cap` events and `arena_cap` bytes it owns
@@ -1058,6 +1095,10 @@ impl EventQueue {
         }
         n
     }
+}
+
+impl Drop for EventQueue {
+    fn drop(&mut self) { for token in self.leases.drain() { crate::hal_lease_release(token); } }
 }
 
 impl ArenaSink for EventQueue {

@@ -30,6 +30,7 @@ pub enum Event {
     /// clock for every frame of the device: the frame timer orders passes by it).
     DispatchTime { name: String, gpu_ns: u64 },
     Frame { target: Id, kind: u32, frame: u64, window: bool, gpu_ns: u64, gpu_span: [f64; 2] },
+    BufferLeases { req: u32, status: u32, leases: Vec<crate::lease::Lease> },
     Readback { req: u32, status: u32, rect: [u32; 4], pixels: Vec<u8> },
     Pick { req: u32, ids: Vec<u32> },
 }
@@ -65,6 +66,8 @@ pub struct Staged {
     pub format: u32,
     pub w: u32,
     pub h: u32,
+    /// on the ledger until the pixels are read
+    pub _charge: crate::ledger::Charge,
 }
 
 /// A frame's GPU timing queries, reused through `Timers`.
@@ -166,7 +169,7 @@ fn prof_passes(dev: &Device, t: &Timer, clock: Option<(u64, u64, u64)>, key: cra
 }
 
 pub enum Ticket {
-    Buffer { token: Token, req: u32, staging: ID3D11Buffer, len: usize },
+    BufferLeases { token: Token, req: u32, staging: super::leases::Staging, ranges: Vec<(u64, u64)> },
     Frame { token: Token, target: Id, kind: u32, frame: u64, window: bool, timer: Option<Timer> },
     Read { token: Token, req: u32, rect: [u32; 4], staged: Staged, pick: Option<[f32; 2]> },
     Copy { token: Token, req: u32, rect: [u32; 4] },
@@ -337,16 +340,12 @@ fn complete(dev: &Device, mut batch: Batch, lost: bool, mailbox: &Mailbox, timer
     let mut out: Vec<(Token, Event)> = Vec::new();
     for ticket in batch.tickets.drain(..) {
         match ticket {
-            Ticket::Buffer { token, req, staging, len } => {
-                let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
-                let ok = !lost && unsafe { dev.ctx.Map(staging.as_ID3D11Resource(), 0, D3D11_MAP_READ, 0, Some(&mut mapped)) }.is_ok();
-                let pixels = if ok {
-                    let pixels = unsafe { std::slice::from_raw_parts(mapped.pData as *const u8, len).to_vec() };
-                    unsafe { dev.ctx.Unmap(staging.as_ID3D11Resource(), 0); }
-                    pixels
-                } else { Vec::new() };
-                out.push((token, Event::Readback { req, status: if ok { readback::OK } else { readback::FAILED }, rect: [0; 4], pixels }));
+            Ticket::BufferLeases { token, req, staging, ranges } => {
+                let result = if lost { Err("device lost".to_string()) } else { staging.map(&ranges) };
+                let status = if lost || (result.is_err() && dev.check_lost()) { readback::DEVICE_LOST } else if result.is_ok() { readback::OK } else { readback::FAILED };
+                out.push((token, Event::BufferLeases { req, status, leases: result.unwrap_or_default() }));
             }
+
             Ticket::Frame { token, target, kind, frame, window, timer } => {
                 token.incarnation.done(frame);
                 let (gpu_ns, gpu_span) = match timer {

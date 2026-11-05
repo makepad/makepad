@@ -5,7 +5,8 @@ use super::device::{error, lock, Device};
 use crate::session::TextureObj;
 use crate::types::{format, usage};
 use makepad_vulkan::vk;
-use std::sync::{Arc, Mutex};
+use crate::ledger::{Charge, Pool};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 pub fn vk_format(f: u32) -> Option<vk::Format> {
@@ -83,9 +84,18 @@ pub struct Image {
     pub external: Option<Arc<dyn std::any::Any + Send + Sync>>,
     #[cfg(target_os = "linux")]
     pub(crate) timeline: Option<Arc<super::share::sync::Timeline>>,
+    /// The backend pool an image the backend made for itself is charged to (`in_pool`); a
+    /// handle's image is on its session's ledger instead.
+    pool: OnceLock<Charge>,
 }
 
 impl Image {
+    /// Charges this image to a backend pool: a ledger row of its own (`Ledger::set_pools`).
+    pub fn in_pool(self: Arc<Self>, pool: Pool) -> Arc<Self> {
+        let _ = self.pool.set(self.dev.pools.charge(pool, self.bytes));
+        self
+    }
+
     /// XRGB external buffers have undefined alpha. Sampling them must still be opaque.
     #[cfg(target_os = "linux")]
     pub(super) fn sample_alpha_one(&mut self) -> Result<(), String> {
@@ -191,7 +201,7 @@ impl Image {
         };
         Ok(Arc::new(Self { dev, image, memory: vk::DeviceMemory::null(), view, array_view, cube_view: vk::ImageView::null(), layers: Vec::new(), desc, bytes: 0,
             aspect: vk::ImageAspectFlags::DEPTH, layout: Mutex::new(vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL), external_owner: AtomicBool::new(false), borrowed: true,
-            video: Default::default(), external: None, #[cfg(target_os = "linux")] timeline: None }))
+            video: Default::default(), external: None, #[cfg(target_os = "linux")] timeline: None, pool: OnceLock::new() }))
     }
 
     /// A bound external-format image (a decoder's picture) sampled through `video`'s Y'CbCr
@@ -207,7 +217,7 @@ impl Image {
             // (the decoder's contents, acquired from the foreign queue in GENERAL: an acquire from
             // UNDEFINED lets the driver drop them; a compressed (UBWC) picture read so was noise)
             aspect: vk::ImageAspectFlags::COLOR, layout: Mutex::new(vk::ImageLayout::GENERAL), external_owner: AtomicBool::new(false), borrowed: false, video, external,
-            #[cfg(target_os = "linux")] timeline: None }))
+            #[cfg(target_os = "linux")] timeline: None, pool: OnceLock::new() }))
     }
 
     /// The layout the image is in now, as its owner says (an acquired swapchain image).
@@ -220,10 +230,9 @@ impl Image {
         bytes: u64, layout: vk::ImageLayout, external: Option<Arc<dyn std::any::Any + Send + Sync>>, borrowed: bool) -> Result<Arc<Self>, String> {
         let aspect = if desc.format == format::DEPTH24_STENCIL8 { vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL }
             else if format::is_depth(desc.format) { vk::ImageAspectFlags::DEPTH } else { vk::ImageAspectFlags::COLOR };
-        dev.charge(bytes);
         let mut out = Self { dev, image, memory, view: vk::ImageView::null(), array_view: vk::ImageView::null(), cube_view: vk::ImageView::null(),
             layers: Vec::new(), desc, bytes, aspect, layout: Mutex::new(layout), external_owner: AtomicBool::new(false), borrowed, video: Default::default(), external,
-            #[cfg(target_os = "linux")] timeline: None };
+            #[cfg(target_os = "linux")] timeline: None, pool: OnceLock::new() };
         let sampled_aspect = if format::is_depth(out.desc.format) { vk::ImageAspectFlags::DEPTH } else { aspect };
         let info = vk::ImageViewCreateInfo::default().image(image).format(vk_format(out.desc.format).ok_or("unknown image format")?)
             .view_type(vk::ImageViewType::TYPE_2D_ARRAY).subresource_range(vk::ImageSubresourceRange::default()
@@ -336,7 +345,6 @@ impl Drop for Image {
                 self.dev.raw.free_memory(self.memory, None);
             }
         }
-        self.dev.uncharge(self.bytes);
     }
 }
 
@@ -348,7 +356,8 @@ pub(crate) struct Buffer {
     pub bytes: u64,
     mapped: usize,
     coherent: bool,
-    scratch: bool,
+    /// a scratch buffer's backend pool (`scratch`); a handle's buffer is on its session's ledger
+    _charge: Option<Charge>,
 }
 
 impl Buffer {
@@ -416,9 +425,8 @@ impl Buffer {
             }
         })();
         let (memory, ty) = match result { Ok(v) => v, Err(e) => { unsafe { dev.raw.destroy_buffer(buffer, None); } return Err(e); } };
-        dev.charge(req.size);
         let coherent = dev.memory.memory_types[ty as usize].property_flags.contains(vk::MemoryPropertyFlags::HOST_COHERENT);
-        let out = Self { dev, buffer, memory, size: logical_size, bytes: req.size, mapped: 0, coherent, scratch: false };
+        let out = Self { dev, buffer, memory, size: logical_size, bytes: req.size, mapped: 0, coherent, _charge: None };
         unsafe { out.dev.raw.bind_buffer_memory(buffer, memory, 0).map_err(error)?; }
         Ok(out)
     }
@@ -437,8 +445,8 @@ impl Buffer {
     }
 
     /// A buffer whose bytes are undefined until written: upload arenas and readback staging,
-    /// which are read only where they were written (by the CPU or a GPU copy).
-    pub fn scratch(dev: Arc<Device>, size: u64, usage: vk::BufferUsageFlags) -> Result<Arc<Self>, String> {
+    /// which are read only where they were written (by the CPU or a GPU copy). Charged to `pool`.
+    pub fn scratch(dev: Arc<Device>, pool: Pool, size: u64, usage: vk::BufferUsageFlags) -> Result<Arc<Self>, String> {
         let logical_size = size;
         let size = size.max(16);
         let buffer = unsafe { dev.raw.create_buffer(&vk::BufferCreateInfo::default().size(size).usage(usage)
@@ -459,9 +467,9 @@ impl Buffer {
             Ok::<_, String>((memory, ty))
         })();
         let (memory, ty) = match result { Ok(v) => v, Err(e) => { unsafe { dev.raw.destroy_buffer(buffer, None); } return Err(e); } };
-        dev.charge_scratch(req.size);
+        let charge = Some(dev.pools.charge(pool, req.size));
         let mut out = Self { dev, buffer, memory, size: logical_size, bytes: req.size, mapped: 0,
-            coherent: false, scratch: true };
+            coherent: false, _charge: charge };
         out.coherent = out.dev.memory.memory_types[ty as usize].property_flags.contains(vk::MemoryPropertyFlags::HOST_COHERENT);
         unsafe {
             out.dev.raw.bind_buffer_memory(buffer, memory, 0).map_err(error)?;
@@ -523,6 +531,21 @@ impl Buffer {
         Ok(out)
     }
 
+    pub(super) fn lease_ptr(&self, offset: u64) -> *const u8 {
+        assert!(self.mapped != 0 && offset < self.size);
+        (self.mapped + offset as usize) as *const u8
+    }
+
+    pub(super) fn invalidate_range(&self, offset: u64, len: u64) -> Result<(), String> {
+        if self.coherent || len == 0 { return Ok(()); }
+        let atom = self.dev.properties.limits.non_coherent_atom_size.max(1);
+        let start = offset / atom * atom;
+        let end = (offset + len).div_ceil(atom) * atom;
+        unsafe { self.dev.raw.invalidate_mapped_memory_ranges(&[
+            vk::MappedMemoryRange::default().memory(self.memory).offset(start).size(end.min(self.bytes) - start)
+        ]) }.map_err(error)
+    }
+
     #[cfg(target_os = "linux")]
     pub(super) fn invalidate(&self) -> Result<(), String> {
         if self.mapped == 0 {
@@ -552,11 +575,6 @@ impl Drop for Buffer {
             if self.mapped != 0 { self.dev.raw.unmap_memory(self.memory); }
             self.dev.raw.destroy_buffer(self.buffer, None);
             self.dev.raw.free_memory(self.memory, None);
-        }
-        if self.scratch {
-            self.dev.uncharge_scratch(self.bytes);
-        } else {
-            self.dev.uncharge(self.bytes);
         }
     }
 }

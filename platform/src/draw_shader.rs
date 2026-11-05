@@ -99,6 +99,28 @@ impl CxDrawShaderOptions {
     }
 }
 
+/// A shader cached by its draw object's own functions and fields (`shader_functions_hash`). The
+/// functions its compile reached beyond those (a helper fn in another module) are not in that
+/// key: `reached` names their bodies with what their code was (`shader_reached_key`), and the
+/// shader stands for a later object with that key while that code is the same: a design re-run
+/// that gave one of those bodies new text compiles again. (None: not known, a shader pack's
+/// entry, which a design re-run drops.)
+pub struct FnCachedShader {
+    pub shader: DrawShaderId,
+    pub reached: Option<(Box<[ScriptIp]>, u64)>,
+}
+
+impl FnCachedShader {
+    /// What a compile reached: its bodies, and their code now.
+    #[cfg(not(all(target_arch = "wasm32", makepad_precompiled_shaders)))]
+    pub fn reached(vm: &ScriptVm, output: &crate::makepad_script::shader_compile::CompiledShader) -> (Box<[ScriptIp]>, u64) {
+        let mut ips = Vec::new();
+        output.reached_bodies_into(vm.heap(), &mut crate::makepad_script::object_heap::ScriptIpsOut::new(&mut ips));
+        let key = crate::makepad_script::shader_compile::shader_reached_key(vm.bx.code_ref(), &ips);
+        (ips.into_boxed_slice(), key)
+    }
+}
+
 /*
 #[derive(Default)]
 pub struct CxDrawShaderItem {
@@ -120,7 +142,7 @@ pub struct CxDrawShaders {
     /// Keyed by (heap key, object): an isolate's objects share index space
     /// with the app heap's and must never hit its entries.
     pub cache_object_id_to_shader: HashMap<(usize, ScriptObject), DrawShaderId>,
-    pub cache_functions_to_shader: LiveIdMap<LiveId, DrawShaderId>,
+    pub cache_functions_to_shader: LiveIdMap<LiveId, FnCachedShader>,
     /// Keyed by the generated code and the pipeline state
     /// (`DrawVars::pipeline_state_hash`): one code with another colour
     /// format or blend op is another shader.
@@ -139,6 +161,27 @@ impl CxDrawShaders {
     pub fn reset_for_live_reload(&mut self) {
         self.cache_object_id_to_shader.clear();
         self.cache_functions_to_shader.clear();
+    }
+
+    /// After a design re-run (a `script_mod!` edit): its draw objects are new objects, so the
+    /// object-keyed cache goes. The function-keyed cache stays: its keys are the functions'
+    /// content (their module's text and their place in it, `fn_content_key`) and the fields'
+    /// kinds and types, and an entry stands only while the code its compile reached is the same
+    /// (`FnCachedShader`), so a draw object the edit left alone gets the shader it had, and only
+    /// the edited modules' shaders generate their code again.
+    pub fn reset_for_design_rerun(&mut self) {
+        self.cache_object_id_to_shader.clear();
+        self.cache_functions_to_shader.retain(|_, e| e.reached.is_some());
+    }
+
+    /// The shader cached for draw objects with these functions and fields
+    /// (`shader_functions_hash`), while the code its compile reached is the same.
+    pub fn fn_cached(&self, code: &crate::makepad_script::vm::ScriptCode, fnhash: LiveId) -> Option<DrawShaderId> {
+        let e = self.cache_functions_to_shader.get(&fnhash)?;
+        match &e.reached {
+            Some((ips, key)) => (crate::makepad_script::shader_compile::shader_reached_key(code, ips) == *key).then_some(e.shader),
+            None => Some(e.shader),
+        }
     }
 }
 

@@ -186,6 +186,7 @@ hal_events! {
     BufferEvicted = 54, buffer_evicted { buffer: id };
     TextureShared = 55, texture_shared { texture: id, handle: u64 };
     /// `status`: `readback::*`; `rect` is x, y, w, h of the pixels (RGBA8 rows).
+    BufferLeases = 158, buffer_lease_records { req: u32, status: u32, records: rng };
     Readback = 56, readback { req: u32, status: u32, rect: urect, pixels: rng };
     PickResult = 57, pick_result { req: u32, ids: rng };
     /// The GPU device `generation` was lost (removed, reset, driver update, adapter switch). Every

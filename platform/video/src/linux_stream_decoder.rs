@@ -225,9 +225,12 @@ mod tests {
         for (i, unit) in units.iter().enumerate() {
             frames.extend(decoder.push_packet(unit, i as i64 * 333_333).expect("push"));
         }
-        for _ in 0..50 {
-            if frames.len() >= units.len() { break; }
-            frames.extend(decoder.flush().expect("flush"));
+        // every picture, until the decoder has gone 10 s (500 flushes of 20 ms) without one
+        let mut quiet = 0;
+        while frames.len() < units.len() && quiet < 500 {
+            let more = decoder.flush().expect("flush");
+            quiet = if more.is_empty() { quiet + 1 } else { 0 };
+            frames.extend(more);
         }
         assert!(frames.len() >= 25, "decoded {} of {} pictures", frames.len(), units.len());
         let f = &frames[0];

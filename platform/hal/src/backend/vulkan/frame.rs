@@ -11,12 +11,30 @@ use crate::backend::exec::{self, LentState};
 use crate::backend::log_enabled;
 use crate::buffers::{id_at, read_ids, read_pairs, CmdView};
 use crate::gpu_prof::{self, ShaderFacts, SplitRuns};
-use crate::ledger::Kind;
+use crate::ledger::{Kind, Pool};
 use crate::session::{LentRef, Session, TextureObj, HOST};
 use crate::types::*;
 use makepad_gpu_trace::kind as pass_kind;
 use makepad_vulkan::vk;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
+
+/// A cached framebuffer's key: the render pass, the attachment views in order, the size.
+pub(super) type FbKey = (vk::RenderPass, Vec<vk::ImageView>, u32, u32);
+/// A framebuffer kept across frames, with the images whose views it names and when it was last
+/// used. The cache never keeps an image alive: a pool's free image (a badge layer's, a scanout
+/// copy) is one nothing else holds, and a dropped target's memory goes back at once.
+pub(super) struct Fb { pub raw: vk::Framebuffer, images: Vec<Weak<Image>>, used: u64 }
+
+impl Fb {
+    /// Unused for `FB_IDLE_NS`.
+    pub(super) fn idle(&self, now: u64) -> bool { now.saturating_sub(self.used) > FB_IDLE_NS }
+    /// An image it names is gone: its views are destroyed, and a new image may get the same
+    /// handles, so the framebuffer is never used again.
+    pub(super) fn stale(&self) -> bool { self.images.iter().any(|image| image.strong_count() == 0) }
+}
+/// How many framebuffers stay cached, and how long an unused one stays.
+const FB_CACHE: usize = 32;
+const FB_IDLE_NS: u64 = 3_000_000_000;
 
 /// A badge layer's composed images (`Vulkan::badged`): the free and held ones of the window's
 /// size, and the newest (what a snapshot of the window reads).
@@ -171,7 +189,7 @@ impl Vulkan {
         if w < 2 * 48 + 128 || h < 32 { return; }
         if self.stamp.is_none() {
             let block = |dev: &Arc<super::device::Device>| Image::new(dev.clone(), TextureObj { format: format::BGRA8, w: 8, h: 8, depth: 1, mips: 1,
-                usage: usage::RENDER_TARGET | usage::SAMPLED, bytes: 0, imported: false, uploaded: 0, lent: None });
+                usage: usage::RENDER_TARGET | usage::SAMPLED, bytes: 0, imported: false, uploaded: 0, lent: None }).map(|i| i.in_pool(Pool::WindowCopies));
             match (block(&self.dev), block(&self.dev)) {
                 (Ok(red), Ok(blue)) => self.stamp = Some([blue, red]),
                 (Err(e), _) | (_, Err(e)) => { eprintln!("[hal-vulkan] frame stamp: {e}"); return; }
@@ -220,7 +238,7 @@ impl Vulkan {
             None => {
                 let image = Image::new(self.dev.clone(), TextureObj { format: format::BGRA8, w: base.desc.w, h: base.desc.h,
                     depth: 1, mips: 1, usage: usage::RENDER_TARGET | usage::SAMPLED, bytes: 0, imported: false, uploaded: 0, lent: None })
-                    .map_err(|e| eprintln!("[hal-vulkan] badge layer image: {e}")).ok()?;
+                    .map_err(|e| eprintln!("[hal-vulkan] badge layer image: {e}")).ok()?.in_pool(Pool::WindowCopies);
                 badged.pool.push(image.clone());
                 image
             }
@@ -278,7 +296,7 @@ impl Vulkan {
         let fmt = if matches!(shape, 3 | 4) { format::DEPTH32F } else if shape == 5 { format::R32UINT } else { format::RGBA8 };
         let desc = TextureObj { format: fmt, w: 1, h: 1, depth: if shape == 1 { 6 } else if matches!(shape, 2 | 4) { 2 } else { 1 },
             mips: 1, usage: usage::SAMPLED, bytes: 0, imported: false, uploaded: 0, lent: None };
-        let image = Image::new(self.dev.clone(), desc)?;
+        let image = Image::new(self.dev.clone(), desc)?.in_pool(Pool::Fallback);
         batch.images.push(image.clone());
         image.transition(batch.cb, vk::ImageLayout::TRANSFER_DST_OPTIMAL);
         let range = vk::ImageSubresourceRange::default().aspect_mask(image.aspect).level_count(1).layer_count(image.desc.depth);
@@ -495,7 +513,10 @@ impl Vulkan {
                                 if !self.windows.source.is_target(&image) && crate::frame_tap::wanted(key.0, key.1) {
                                     batch.tap = Some((key.0, key.1, image.clone()));
                                 }
-                                batch.scanout = Some((presenter, image, Self::token(s), target, key.1, key.0, packet.frame));
+                                // whose frame this is for the host: under a badge layer the borrower's
+                                // reaches it in session 0's composed image
+                                let from = s.windows.get(sid, target).ok().filter(|w| badges && w.lent_to != 0 && w.val.borrower_frame).map_or(sid, |w| w.lent_to);
+                                batch.scanout = Some((presenter, image, Self::token(s), from, target, key.1, key.0, packet.frame));
                             }
                             Err(e) => { eprintln!("[hal-vulkan] scanout target: {e}"); s.bad(); }
                         }
@@ -568,7 +589,7 @@ impl Vulkan {
         self.msaa.retain(|_, (t, _)| t.strong_count() > 0);
         let key = (target.image.as_raw(), samples);
         if let Some((_, ms)) = self.msaa.get(&key) { return Ok(ms.clone()); }
-        let ms = Image::multisampled(self.dev.clone(), &target.desc, samples as u32)?;
+        let ms = Image::multisampled(self.dev.clone(), &target.desc, samples as u32)?.in_pool(Pool::Multisample);
         self.msaa.insert(key, (Arc::downgrade(target), ms.clone()));
         Ok(ms)
     }
@@ -656,7 +677,7 @@ impl Vulkan {
         batch.forget_blocks();
         for d in draws {
             s.stats.draws += 1;
-            if d.indirect_buffer.is_none() && (d.index[1] == 0 || d.inst.count == 0) { continue; }
+            if d.index[1] == 0 || d.inst.count == 0 { continue; }
             if let Some(t) = ablate.as_deref() {
                 if self.pipe.get(&(s.id, d.pipeline.index)).is_some_and(|p| gpu_prof::ablates(s, &p.desc, d.owner, t)) { continue; }
             }
@@ -671,6 +692,7 @@ impl Vulkan {
         }
         let mut attachment_views = Vec::new();
         let mut clear = Vec::new();
+        let mut named: Vec<Weak<Image>> = attachments.iter().map(Arc::downgrade).collect();
         batch.images.extend(attachments);
         // an MSAA pass: the multisampled images first (the render pass's order: colours, their
         // resolve targets, depth, its resolve target)
@@ -682,6 +704,7 @@ impl Vulkan {
                 ms.transition(batch.cb, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
                 attachment_views.push(view_of(&ms, pass.layer[*i]));
                 clear.push(vk::ClearValue { color: vk::ClearColorValue { float32: pass.clear[*i] } });
+                named.push(Arc::downgrade(&ms));
                 batch.images.push(ms);
             }
             if let Some(depth) = &depth {
@@ -700,6 +723,7 @@ impl Vulkan {
         if let Some(ms) = msaa_depth {
             attachment_views.push(view_of(&ms, 0));
             clear.push(vk::ClearValue { depth_stencil: vk::ClearDepthStencilValue { depth: pass.clear_depth, stencil: 0 } });
+            named.push(Arc::downgrade(&ms));
             batch.images.push(ms);
         }
         if let Some(depth) = &depth {
@@ -709,9 +733,34 @@ impl Vulkan {
             s.ledger.touch(Kind::Texture, pass.depth.index, pass.depth.gen, s.frame, now);
         }
         if let Some(view) = density { attachment_views.push(view); }
-        let framebuffer = unsafe { self.dev.raw.create_framebuffer(&vk::FramebufferCreateInfo::default().render_pass(render_pass.raw)
-            .attachments(&attachment_views).width(target_size[0]).height(target_size[1]).layers(1), None) }.map_err(error)?;
-        batch.framebuffers.push(framebuffer); batch.passes.push(render_pass.clone());
+        // The framebuffer, kept across frames (`Vulkan::fbs`) while every image it names lives; one
+        // the cache drops goes with this batch, destroyed after the GPU is done with everything
+        // submitted before it.
+        let fb_key: FbKey = (render_pass.raw, attachment_views.clone(), target_size[0], target_size[1]);
+        if let Some(fb) = self.fbs.get(&fb_key).filter(|fb| fb.stale()) {
+            batch.framebuffers.push(fb.raw);
+            self.fbs.remove(&fb_key);
+        }
+        let framebuffer = match self.fbs.get_mut(&fb_key) {
+            Some(fb) => { fb.used = now; fb.raw }
+            None => {
+                let raw = unsafe { self.dev.raw.create_framebuffer(&vk::FramebufferCreateInfo::default().render_pass(render_pass.raw)
+                    .attachments(&attachment_views).width(target_size[0]).height(target_size[1]).layers(1), None) }.map_err(error)?;
+                crate::profile::count("vk framebuffer made");
+                let idle: Vec<FbKey> = self.fbs.iter().filter(|(_, f)| f.idle(now) || f.stale()).map(|(k, _)| k.clone()).collect();
+                for k in idle { if let Some(f) = self.fbs.remove(&k) { batch.framebuffers.push(f.raw); } }
+                // what the sweep let go waits no longer than this batch
+                batch.framebuffers.append(&mut self.dead_fbs);
+                if self.fbs.len() >= FB_CACHE {
+                    if let Some(k) = self.fbs.iter().min_by_key(|(_, f)| f.used).map(|(k, _)| k.clone()) {
+                        if let Some(f) = self.fbs.remove(&k) { batch.framebuffers.push(f.raw); }
+                    }
+                }
+                self.fbs.insert(fb_key, Fb { raw, images: named, used: now });
+                raw
+            }
+        };
+        batch.passes.push(render_pass.clone());
         // a viewport origin (one eye of a side-by-side stereo target) starts the render area: what
         // lies before it is neither cleared nor stored over
         let origin = [((v[0] - offset[0] as f32).max(0.0) as u32).min(target_size[0]), ((v[1] - offset[1] as f32).max(0.0) as u32).min(target_size[1])];
@@ -830,14 +879,6 @@ impl Vulkan {
                 }
                 if !valid { s.bad(); continue; }
                 if !push.is_empty() { self.dev.raw.cmd_push_constants(batch.cb, p.pipeline.program.layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, &push); }
-                if !d.indirect_buffer.is_none() {
-                    let id = d.indirect_buffer;
-                    let Some(buffer) = self.buf.get(&(s.id, id.index)).filter(|b| b.gen == id.gen).map(|b| b.buffer.clone()) else { s.bad(); continue; };
-                    if d.indirect_offset % 4 != 0 || d.indirect_offset.checked_add(20).is_none_or(|n| n > buffer.size) { s.bad(); continue; }
-                    self.dev.raw.cmd_draw_indexed_indirect(batch.cb, buffer.buffer, d.indirect_offset, 1, 20);
-                    batch.buffers.push(buffer);
-                    continue;
-                }
                 if d.inst_ranges.len != 0 && read_pairs(view.arena, d.inst_ranges).count() != d.inst_ranges.len as usize { s.bad(); continue; }
                 let whole = (d.inst_ranges.len == 0).then_some([0, d.inst.count]);
                 for [start, count] in whole.into_iter().chain(read_pairs(view.arena, d.inst_ranges)) {
@@ -933,24 +974,8 @@ impl Vulkan {
                 let end = (d.inst.off as u64 + d.inst.count as u64).checked_mul(stride).ok_or("instance range overflow")?;
                 if stride == 0 || end > buffer.size { return Err("instance range exceeds storage".into()); }
                 if buffer.size > max_range { return Err("instance storage exceeds device range".into()); }
-                if !d.indirect_buffer.is_none() && d.inst.off != 0 {
-                    // Indirect firstInstance is GPU-owned. Rebase the instance storage,
-                    // rather than changing its arguments or assuming the base is aligned
-                    // to minStorageBufferOffsetAlignment.
-                    let start = d.inst.off as u64 * stride;
-                    let length = buffer.size - start;
-                    let rebased = Buffer::scratch(self.dev.clone(), length,
-                        vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST)?;
-                    super::compute::barrier(batch);
-                    unsafe { self.dev.raw.cmd_copy_buffer(batch.cb, buffer.buffer, rebased.buffer,
-                        &[vk::BufferCopy { src_offset: start, dst_offset: 0, size: length }]); }
-                    super::compute::barrier(batch);
-                    batch.buffers.push(buffer);
-                    (rebased, 0, length)
-                } else {
-                    first_instance = d.inst.off;
-                    let length = buffer.size; (buffer, 0, length)
-                }
+                first_instance = d.inst.off;
+                let length = buffer.size; (buffer, 0, length)
             } else if d.inst.kind == Inst::INLINE {
                 let data = unsafe { d.inst.data.as_bytes() };
                 if stride == 0 || d.inst.count as u64 * stride > data.len() as u64 { return Err("inline instance range exceeds data".into()); }

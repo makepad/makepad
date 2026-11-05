@@ -61,6 +61,8 @@ pub mod codec;
 pub mod events;
 pub mod font;
 pub mod ledger;
+pub mod lease;
+pub use lease::hal_lease_release;
 pub mod gpu_limits;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod gpu_prof;
@@ -321,7 +323,7 @@ pub struct Hal {
 /// one file descriptor on /dev/nvidiaN per memory allocation, and the usual soft limit is 1024:
 /// a game with a few hundred buffers, textures and upload arenas reached it, and from then on every create on the device -- fences, command pools, upload
 /// arenas, descriptor pools -- failed with OUT_OF_HOST/DEVICE_MEMORY while the GPU had 16 GB free
-/// (149, Sandbox at ~1 fps). The hard limit is the system's real bound (524288 on a node).
+/// (a node, an app at ~1 fps). The hard limit is the system's real bound (524288 on a node).
 /// Hosted children inherit the raised limit from their host.
 #[cfg(any(target_os = "linux", target_os = "android"))]
 pub fn raise_open_file_limit() {
@@ -498,7 +500,7 @@ impl Hal {
                 backend_id::HEADLESS => {
                     #[cfg(not(target_arch = "wasm32"))]
                     { *backend::shell::snapshot() = backend::shell::Snapshot::new("headless", "headless backend requested".into()); }
-                    Some(Box::new(Headless))
+                    Some(Box::new(Headless::default()))
                 },
                 #[cfg(target_vendor = "apple")]
                 backend_id::METAL => backend::apple::Metal::new(req.flags, sessions.clone(), notify.clone()).map(|m| Box::new(m) as Box<dyn Backend>),
@@ -966,8 +968,17 @@ impl Hal {
 
     /// Puts an event into the session's queue, as if the OS had delivered it.
     pub fn inject(&self, session: u32, e: RawEvent) {
-        if let Some(s) = lock(&self.state).world.session_mut(session) {
-            s.events.push(e);
+        {
+            let mut st = lock(&self.state);
+            // (a badge's press is the host session's, as the OS's would be)
+            if st.world.injected_on_badge(session, &e) {
+                drop(st);
+                self.sig.notify(&[session::HOST]);
+                return;
+            }
+            if let Some(s) = st.world.session_mut(session) {
+                s.events.push(e);
+            }
         }
         self.sig.notify(&[session]);
     }
@@ -2067,4 +2078,18 @@ pub fn hal_fleet_tls_free(handle: i64) {
 #[relax_api]
 pub fn hal_battery() -> i64 {
     backend::android::fleet::battery().map_or(-1, |(level, charging)| level as i64 | (charging as i64) << 8)
+}
+
+/// The host's hook for the Android BACKGROUND lifecycle (the activity stopped): an Android process
+/// is killed, never exited, so the makepad run host writes its compile cache from here (the loader's
+/// quit write) instead of at an exit that never comes. Set once, before the first stop.
+static BACKGROUND_HOOK: std::sync::OnceLock<fn()> = std::sync::OnceLock::new();
+pub fn set_background_hook(f: fn()) {
+    let _ = BACKGROUND_HOOK.set(f);
+}
+#[cfg(target_os = "android")]
+pub(crate) fn background_hook() {
+    if let Some(f) = BACKGROUND_HOOK.get() {
+        f();
+    }
 }

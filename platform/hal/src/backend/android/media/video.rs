@@ -75,7 +75,7 @@ fn row(s: &mut Session, id: Id, desc: &TextureObj) {
     if let Some(row) = s.ledger.get_mut(Kind::Texture, id.index).filter(|row| row.gen == id.gen) {
         row.bytes = desc.bytes; row.width = desc.w; row.height = desc.h; row.format = desc.format;
     } else {
-        s.ledger.add(LedgerEntry { kind: Kind::Texture, detail: "Android media frame", index: id.index, gen: id.gen, bytes: desc.bytes, format: desc.format, width: desc.w, height: desc.h, mips: 1, attr: Attr::default(), created_ns: crate::clock_ns(), created_frame: s.frame, last_used_frame: 0, last_used_ns: 0 });
+        s.ledger.add(LedgerEntry { kind: Kind::Texture, detail: "Android media frame", index: id.index, gen: id.gen, bytes: desc.bytes, format: desc.format, width: desc.w, height: desc.h, mips: 1, attr: Attr::default(), created_ns: crate::clock_ns(), created_frame: s.frame, last_used_frame: 0, last_used_ns: 0, objects: 1, note: "" });
     }
 }
 pub(super) fn declare(s: &mut Session, ids: [Id; 4]) -> Result<(), String> {

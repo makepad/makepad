@@ -60,17 +60,22 @@ impl ComputeKernel {
     /// Lowers Splash on the same path as draw shaders. Native pipeline creation is lazy,
     /// and the HAL performs driver compilation on its existing compiler worker.
     pub fn new(vm: &mut ScriptVm, object: ScriptObject, name: &str) -> Result<Self, String> {
-        let cx = vm.host.cx();
-        if !cx.compute_supported() { return Err("compute is unavailable on this backend".into()); }
-        let target = match cx.hal.info.unwrap().dialect {
-            hal::dialect::MSL => ComputeTarget::Msl, hal::dialect::HLSL => ComputeTarget::Hlsl,
-            hal::dialect::SPIRV => ComputeTarget::Spirv, _ => return Err("unsupported compute dialect".into()),
-        };
+        let target = vm.host.cx().compute_target()?;
         let result = compiler::compile_compute_kernel_result(vm, object, target);
         let compiled = result.view().to_kernel()?;
+        Ok(Self::install(vm.host.cx_mut(), compiled, name))
+    }
+    /// A kernel compiled elsewhere for this Cx's [`Cx::compute_target`] (a compute program's
+    /// element kernel, compiled on its driver thread), installed as [`ComputeKernel::new`]'s are.
+    pub fn from_compiled(cx: &mut Cx, compiled: CompiledKernel, name: &str) -> Result<Self, String> {
+        let target = cx.compute_target()?;
+        if compiled.layout.target != target { return Err(format!("kernel {name} is compiled for {:?}, this GPU takes {target:?}", compiled.layout.target)); }
+        Ok(Self::install(cx, compiled, name))
+    }
+    fn install(cx: &mut Cx, compiled: CompiledKernel, name: &str) -> Self {
         let inner = Rc::new(KernelInner { name: name.into(), compiled, pipeline: Rc::new(Cell::new(Id::NONE)) });
-        vm.host.cx_mut().hal.compute.kernels.push((inner.pipeline.clone(), Rc::downgrade(&inner)));
-        Ok(Self(inner))
+        cx.hal.compute.kernels.push((inner.pipeline.clone(), Rc::downgrade(&inner)));
+        Self(inner)
     }
     pub fn layout(&self) -> &ComputeLayout { &self.0.compiled.layout }
     pub fn params(&self) -> ComputeParams { ComputeParams { kernel: self.clone(), bytes: vec![0; self.layout().push_size as usize] } }
@@ -187,6 +192,14 @@ impl Cx {
     /// a lost device stays lost, and work waiting for it is to be answered as failed.
     pub fn gpu_device_recovers(&self) -> bool { self.hal.info.is_some_and(|i| i.flags & hal::info_flags::DEVICE_RESET != 0) }
     pub fn compute_supported(&self) -> bool { self.hal.info.is_some_and(|i| i.flags & hal::info_flags::COMPUTE != 0) }
+    /// What this GPU's compute kernels compile to.
+    pub fn compute_target(&self) -> Result<ComputeTarget, String> {
+        if !self.compute_supported() { return Err("compute is unavailable on this backend".into()); }
+        match self.hal.info.unwrap().dialect {
+            hal::dialect::MSL => Ok(ComputeTarget::Msl), hal::dialect::HLSL => Ok(ComputeTarget::Hlsl),
+            hal::dialect::SPIRV => Ok(ComputeTarget::Spirv), _ => Err("unsupported compute dialect".into()),
+        }
+    }
     pub fn storage_texture_supported(&self, format: compiler::StorageTextureFormat) -> bool { self.hal.info.is_some_and(|i| i.storage_formats & (1 << storage_format(format)) != 0) }
     /// Whether the compute passes encoded before `before` (None: the unattached ones, ahead of
     /// every draw pass) have their pipelines. Unattached passes still queued when a draw pass

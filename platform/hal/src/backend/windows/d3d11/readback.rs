@@ -64,7 +64,8 @@ impl D3d11 {
         let staging: ID3D11Texture2D = staging.ok_or("CreateTexture2D(staging) returned nothing")?;
         let bx = D3D11_BOX { left: rect[0], top: rect[1], front: 0, right: rect[0] + rect[2], bottom: rect[1] + rect[3], back: 1 };
         unsafe { self.dev.ctx.CopySubresourceRegion(staging.as_ID3D11Resource(), 0, 0, 0, 0, t.res.as_ID3D11Resource(), 0, Some(&bx)) };
-        Ok(Staged { tex: staging, format: t.desc.format, w: rect[2], h: rect[3] })
+        let charge = self.dev.pools.charge(crate::ledger::Pool::Staging, rect[2] as u64 * rect[3] as u64 * format::texel_bytes(t.desc.format));
+        Ok(Staged { tex: staging, format: t.desc.format, w: rect[2], h: rect[3], _charge: charge })
     }
 
     pub(super) fn read(&mut self, s: &mut Session, tex: Option<Arc<Texture>>, req: u32, rect: [u32; 4], pick: Option<[f32; 2]>) {

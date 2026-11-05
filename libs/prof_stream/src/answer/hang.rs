@@ -43,6 +43,7 @@ pub fn why_hung(a: &mut Answer) {
         let state = if w.is_empty() { format!("{}, {}% CPU", s(t, "state"), f(t, "cpu_pct") as i64) } else { format!("waits {}", a.names.text(w)) };
         a.line(&format!("\n{} ({}): {}", s(t, "thread"), s(t, "id"), state));
         a.body.push_str(&fr.compact(&mut a.names, "  "));
+        stops(a, t);
         ids.push(s(t, "id").to_string());
     }
     if let Some(o) = a.take1("other_threads") {
@@ -283,6 +284,7 @@ pub fn stacks(a: &mut Answer) {
         let doing = fr.doing(&mut a.names);
         a.line(&format!("\n{} -- {}: {}", names.join(", "), s(g, "state"), doing));
         a.body.push_str(&fr.compact(&mut a.names, "  "));
+        stops(a, g);
     }
     a.head = if picked {
         format!("Stack{} of {}:", if n_threads == 1 { "" } else { "s" }, groups.iter().flat_map(|g| arr(g, "threads").iter().filter_map(Value::as_str)).collect::<Vec<_>>().join(", "))
@@ -298,4 +300,13 @@ pub fn stacks(a: &mut Answer) {
     }
     a.more("stacks thread=<id> depth=24");
     a.more("why-hung");
+}
+
+/// Where a stack walk ended short of the stack's outermost frame, and why ("walk stops at <pc>:
+/// <why>"; the walker never guesses a caller: the frames above are all it could prove).
+fn stops(a: &mut Answer, t: &Value) {
+    let stops = s(t, "stops");
+    if !stops.is_empty() {
+        a.body.push_str(&format!("  {}\n", stops));
+    }
 }

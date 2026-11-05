@@ -79,7 +79,7 @@ pub use crate::ui_signal::{
     ReceiverAlreadyTaken, SignalFromUI, SignalToUI, ToUIOneshotReceiver, ToUIOneshotSender,
     ToUIReceiver, ToUISender, UiWaker,
 };
-pub use crate::utils::HttpServerHeaders;
+pub use crate::utils::{clone_tcp, HttpServerHeaders};
 pub use crate::web_socket_parser::{
     ServerWebSocketError, ServerWebSocketMessage, ServerWebSocketMessageFormat,
     ServerWebSocketMessageHeader, WebSocketError, WebSocketMessage as ParsedWebSocketMessage,

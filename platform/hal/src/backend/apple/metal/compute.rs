@@ -14,6 +14,12 @@ pub(super) struct Pipe {
     pub announced: bool,
 }
 
+pub(super) struct LeaseBlock(super::device::PoolBuffer);
+// Shared-mode MTLBuffers are reference-counted by Metal. Disjoint ranges are written only
+// before completion, and application leases retain the buffer independently of the device.
+unsafe impl Send for LeaseBlock {}
+unsafe impl Sync for LeaseBlock {}
+
 impl Metal {
     pub(super) fn compute_ready(&self, sid: u32, passes: &[Pass], view: &CmdView) -> bool {
         for pass in passes.iter().filter(|p| p.kind == pass_kind::COMPUTE) {
@@ -194,31 +200,49 @@ impl Metal {
         result
     }
 
-    pub(super) fn read_compute_buffer(&mut self, s: &mut Session, id: Id, req: u32, offset: u64, len: u64) {
-        let Some(source) = self.buf.get(&(s.id, id.index)).filter(|b| b.gen == id.gen).map(|b| b.buffer.clone()) else { s.events.readback(req, readback::STALE, [0; 4], &[]); return; };
-        let staging: ObjcId = unsafe { msg_send![self.dev.device, newBufferWithLength: len.max(4) options: MTLResourceOptions::StorageModeShared] };
-        let Some(staging) = NonNull::new(staging).map(RcObjcId::from_owned) else { s.events.readback(req, readback::FAILED, [0; 4], &[]); return; };
-        let (cb, seq) = self.ensure_batch();
-        self.buf.get_mut(&(s.id, id.index)).unwrap().last_bound = seq;
-        self.flush_uploads();
-        unsafe {
-            let encoder: ObjcId = msg_send![cb, blitCommandEncoder];
-            if len != 0 { let _: () = msg_send![encoder, copyFromBuffer: source.as_id() sourceOffset: offset toBuffer: staging.as_id() destinationOffset: 0u64 size: len]; }
-            let _: () = msg_send![encoder, endEncoding];
-        }
-        let resources = Mutex::new(Some((source, staging)));
-        let mailbox = self.dev.mailbox.clone();
-        let sid = s.id;
-        let incarnation = s.font_frames.clone();
-        unsafe { let _: () = msg_send![cb, addCompletedHandler: &objc_block!(move |cb: ObjcId| {
-            if let Some((_source, staging)) = resources.lock().unwrap_or_else(|e| e.into_inner()).take() {
-                let status: u64 = unsafe { msg_send![cb, status] };
-                let pixels = if status == 4 {
-                    let ptr: *const u8 = unsafe { msg_send![staging.as_id(), contents] };
-                    unsafe { std::slice::from_raw_parts(ptr, len as usize).to_vec() }
-                } else { Vec::new() };
-                mailbox.push(Done::Readback { sid, incarnation: incarnation.clone(), req, status: if status == 4 { readback::OK } else { readback::FAILED }, rect: [0; 4], pixels });
+    pub(super) fn read_compute_buffers(&mut self, s: &mut Session, req: u32, ranges: &[BufferReadRange]) {
+        let result = (|| {
+            let dev = &self.dev;
+            let mut reads = Vec::with_capacity(ranges.len());
+            for (order, range) in ranges.iter().enumerate() {
+                let source = self.buf.get(&(s.id, range.id.index)).filter(|b| b.gen == range.id.gen).ok_or("stale buffer")?.buffer.clone();
+                // macOS blits require four-byte offsets and sizes. Keep the padding in
+                // the lease allocation, and expose only the requested byte range.
+                let prefix = range.offset % 4;
+                let copy_len = if range.len == 0 { 0 } else { (prefix + range.len).checked_add(3).ok_or("lease size overflow")? / 4 * 4 };
+                let (block, offset) = self.leases.alloc(copy_len.max(prefix + 1), 256, |size| {
+                    dev.pool_buffer(crate::ledger::Pool::Leases, size).map(|b| Arc::new(LeaseBlock(b))).ok_or_else(|| "lease allocation failed".to_string())
+                })?;
+                let ptr: *const u8 = unsafe { msg_send![block.0.as_id(), contents] };
+                let len = usize::try_from(range.len).map_err(|_| "lease exceeds address space")?;
+                // SAFETY: disjoint allocation, retained shared memory, delivered after completion.
+                let lease = unsafe { crate::lease::Lease::new(block.clone(), ptr.add((offset + prefix) as usize), len, order as u32) }.in_block(ptr, unsafe { msg_send![block.0.as_id(), length] });
+                reads.push((source, range.offset - prefix, block, offset, copy_len, lease));
             }
-        })]; }
+            let (cb, seq) = self.ensure_batch();
+            for range in ranges { self.buf.get_mut(&(s.id, range.id.index)).unwrap().last_bound = seq; }
+            self.flush_uploads();
+            unsafe {
+                let encoder: ObjcId = msg_send![cb, blitCommandEncoder];
+                for (source, src, block, dst, len, _) in &reads {
+                    if *len != 0 { let _: () = msg_send![encoder, copyFromBuffer: source.as_id() sourceOffset: *src toBuffer: block.0.as_id() destinationOffset: *dst size: *len]; }
+                }
+                let _: () = msg_send![encoder, endEncoding];
+            }
+            let resources = Mutex::new(Some(reads));
+            let mailbox = self.dev.mailbox.clone();
+            let sid = s.id;
+            let incarnation = s.font_frames.clone();
+            unsafe { let _: () = msg_send![cb, addCompletedHandler: &objc_block!(move |cb: ObjcId| {
+                if let Some(reads) = resources.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                    let status: u64 = unsafe { msg_send![cb, status] };
+                    let leases = if status == 4 { reads.into_iter().map(|(_, _, _, _, _, lease)| lease).collect() } else { Vec::new() };
+                    mailbox.push(Done::BufferLeases { sid, incarnation: incarnation.clone(), req, status: if status == 4 { readback::OK } else { readback::DEVICE_LOST }, leases });
+                }
+            })]; }
+            Ok::<_, String>(())
+        })();
+        if let Err(e) = result { eprintln!("[hal-metal] buffer readback: {e}"); s.events.buffer_leases(req, readback::FAILED, Vec::new()); }
     }
+
 }

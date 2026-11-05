@@ -50,12 +50,18 @@ pub fn write_frame(w: &mut dyn Write, chan: u16, kind: u8, flags: u8, payload: &
     w.write_all(payload)
 }
 
+/// One read's most bytes.
+const CHUNK: usize = 64 << 10;
+
 /// Reads frames from a byte stream. A read that times out (`WouldBlock` / `TimedOut`, as on the TLS
 /// carrier) is retried, so a frame may arrive in pieces with pauses between them; `cancel` ends
 /// the wait, as does `deadline`.
 pub struct FrameReader {
     r: Box<dyn Read + Send>,
     buf: Vec<u8>,
+    /// what one read lands in, zeroed once: a 64 KB stack chunk zeroed per read kept a busy
+    /// connection's reader thread in memset for a quarter of its time
+    chunk: Box<[u8]>,
     start: usize,
     pub cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     pub deadline: Option<std::time::Instant>,
@@ -63,7 +69,7 @@ pub struct FrameReader {
 
 impl FrameReader {
     pub fn new(r: Box<dyn Read + Send>) -> Self {
-        Self { r, buf: Vec::new(), start: 0, cancel: None, deadline: None }
+        Self { r, buf: Vec::new(), chunk: vec![0u8; CHUNK].into_boxed_slice(), start: 0, cancel: None, deadline: None }
     }
 
     fn take(&mut self) -> io::Result<Option<Frame>> {
@@ -105,10 +111,9 @@ impl FrameReader {
             if self.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
                 return Err(io::Error::new(io::ErrorKind::TimedOut, "timed out waiting for the peer"));
             }
-            let mut chunk = [0u8; 64 << 10];
-            match self.r.read(&mut chunk) {
+            match self.r.read(&mut self.chunk) {
                 Ok(0) => return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "connection closed by the peer")),
-                Ok(n) => self.buf.extend_from_slice(&chunk[..n]),
+                Ok(n) => self.buf.extend_from_slice(&self.chunk[..n]),
                 Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted) => {}
                 Err(e) => return Err(e),
             }

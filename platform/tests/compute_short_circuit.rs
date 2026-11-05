@@ -71,14 +71,18 @@ fn tail_threads_skip_reads_and_effects() {
     w.compute_pass(0, 0, &[Dispatch { pipeline, groups: [1, 1, 1], params,
         buffers: Range { off: buffers.off * 8, len: buffers.len * 8 }, ..Default::default() }]);
     w.frame_end(Id::NONE, target::COMPUTE);
-    w.buffer_readback(dst, 1, 0, 128);
-    w.buffer_readback(calls, 2, 0, 8);
+    w.read_buffers(1, &[BufferReadRange { id: dst, offset: 0, len: 128 }]);
+    w.read_buffers(2, &[BufferReadRange { id: calls, offset: 0, len: 8 }]);
     hal.submit(&w.buf());
     let mut results = std::collections::HashMap::new();
     until(&hal, info.session, |e| {
-        if let HalEvent::Readback { req, status, pixels, .. } = e {
+        if let HalEvent::BufferLeases { req, status, records } = e {
+            use makepad_hal::buffers::Wire;
+            let record = makepad_hal::lease::Record::read(records);
+            let pixels = unsafe { std::slice::from_raw_parts(record.ptr as *const u8, record.len as usize) };
             assert_eq!(status, readback::OK);
             results.insert(req, pixels.chunks_exact(4).map(|b| u32::from_le_bytes(b.try_into().unwrap())).collect::<Vec<_>>());
+            hal_lease_release(record.token);
         }
         results.len() == 2
     });

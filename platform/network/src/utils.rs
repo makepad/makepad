@@ -1,5 +1,5 @@
 use std::io::prelude::*;
-use std::net::{Shutdown, SocketAddr, TcpStream};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpStream};
 use std::time::{Duration, Instant};
 
 pub const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(30);
@@ -7,6 +7,19 @@ const HTTP_ERROR_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(crate) const LOW_LEVEL_SECURITY_HEADERS: &str = "Cross-Origin-Opener-Policy: same-origin\r\n\
 Cross-Origin-Embedder-Policy: require-corp\r\n";
+
+/// Where a connection to a listener bound at `bound` goes, such as the one that wakes its
+/// blocking `accept` on stop: its own address, or its family's loopback for a wildcard bind.
+/// A connect to 0.0.0.0 or :: is no dial on every OS (Windows refuses it at once, so an
+/// accept woken that way never wakes).
+pub(crate) fn dial_addr(bound: SocketAddr) -> SocketAddr {
+    let ip = match bound.ip() {
+        IpAddr::V4(ip) if ip.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
+        IpAddr::V6(ip) if ip.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
+        ip => ip,
+    };
+    SocketAddr::new(ip, bound.port())
+}
 
 pub fn write_bytes_to_tcp_stream_no_error(tcp_stream: &mut TcpStream, bytes: &[u8]) -> bool {
     let bytes_total = bytes.len();
@@ -432,5 +445,51 @@ mod tests {
             Some(("/ui/index.html".to_string(), Some("x=1".to_string())))
         );
         assert_eq!(parse_url_path("/x HTTP/1.1?q", true), None);
+    }
+}
+
+/// A second handle on a TCP socket that stays in this process. Every other socket std makes is
+/// not inheritable, but what `try_clone` returns is on Windows, and `Command` passes every
+/// inheritable handle on: a run that outlived its devhub hub kept that hub's links open, so the
+/// peer heard no close and called a process that was gone until the run ended (a Windows node
+/// "down" for up to 10 min per hub restart, 11-04). Elsewhere a clone closes on exec.
+pub fn clone_tcp(s: &std::net::TcpStream) -> std::io::Result<std::net::TcpStream> {
+    let clone = s.try_clone()?;
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawSocket;
+        use windows::Win32::Foundation::{SetHandleInformation, HANDLE, HANDLE_FLAGS, HANDLE_FLAG_INHERIT};
+        unsafe { SetHandleInformation(HANDLE(clone.as_raw_socket() as *mut core::ffi::c_void), HANDLE_FLAG_INHERIT.0, HANDLE_FLAGS(0)) }
+            .map_err(|_| std::io::Error::last_os_error())?;
+    }
+    Ok(clone)
+}
+
+#[cfg(all(test, windows))]
+mod clone_tcp_tests {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+
+    /// The peer of a connection hears its close at once, whatever this process started while it
+    /// held a clone of it. A run that inherited the clone holds the connection open instead.
+    #[test]
+    fn a_run_holds_no_clone_of_a_socket() {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let closes = |clone: fn(&std::net::TcpStream) -> std::io::Result<std::net::TcpStream>| {
+            let mut peer = std::net::TcpStream::connect(addr).unwrap();
+            let (accepted, _) = listener.accept().unwrap();
+            let cloned = clone(&accepted).unwrap();
+            let mut run = Command::new("ping").args(["-n", "30", "127.0.0.1"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+            drop(cloned);
+            drop(accepted);
+            peer.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
+            let closed = peer.read(&mut [0u8; 1]).is_ok_and(|n| n == 0);
+            let _ = run.kill();
+            let _ = run.wait();
+            closed
+        };
+        assert!(!closes(std::net::TcpStream::try_clone), "what try_clone returns is inheritable here: the run holds it");
+        assert!(closes(super::clone_tcp));
     }
 }

@@ -161,7 +161,7 @@ impl PlainWebSocket {
                 stream: None,
             };
         }
-        let mut read_stream = match stream.try_clone() {
+        let mut read_stream = match crate::clone_tcp(&stream) {
             Ok(stream) => stream,
             Err(err) => {
                 let _ = rx_sender.send(WebSocketMessage::Error(format!(
@@ -173,7 +173,7 @@ impl PlainWebSocket {
                 };
             }
         };
-        let mut write_stream = match stream.try_clone() {
+        let mut write_stream = match crate::clone_tcp(&stream) {
             Ok(stream) => stream,
             Err(err) => {
                 let _ = rx_sender.send(WebSocketMessage::Error(format!(

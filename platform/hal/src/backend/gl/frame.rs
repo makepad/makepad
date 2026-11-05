@@ -9,7 +9,7 @@ use super::sys::{self, GLenum, GLuint};
 use super::{BufObj, GlBackend, PipeState, Tex, TexObj};
 use crate::backend::exec::{self, LentState};
 use crate::buffers::{id_at, read_ids, read_pairs, CmdView};
-use crate::ledger::Kind;
+use crate::ledger::{Kind, Pool};
 use crate::session::{LentRef, Session, TextureObj};
 use crate::types::*;
 use std::sync::Arc;
@@ -256,7 +256,7 @@ impl GlBackend {
         }
         let mut prepared = Vec::new();
         for d in draws {
-            if d.storage_buffers.len != 0 || !d.indirect_buffer.is_none() { crate::compute::unsupported(); continue; }
+            if d.storage_buffers.len != 0 { crate::compute::unsupported(); continue; }
             s.stats.draws += 1;
             if d.index[1] == 0 || d.inst.count == 0 { continue; }
             match self.prepare(s, pass, d, view.arena, pick, &colors, &depth, target_size, bytes, instance_words, now, deps) {
@@ -459,8 +459,12 @@ impl Renderer {
             (gl.glBufferData)(sys::ARRAY_BUFFER, job.instances.len() as isize, job.instances.as_ptr() as _, sys::STREAM_DRAW);
             (gl.glBindBuffer)(sys::ARRAY_BUFFER, 0);
         }
+        let sizes = [job.uniforms.len() as u64, job.instances.len() as u64];
+        if self.arena_charges.as_ref().is_none_or(|(was, _)| *was != sizes) {
+            self.arena_charges = Some((sizes, sizes.map(|bytes| self.pools.charge(Pool::UploadArena, bytes))));
+        }
         if job.instance_words {
-            Self::words_texture(&self.ctx.gl, self.instance_arena, job.instances.len() as u64 / 4, &mut self.arena_words);
+            Self::words_texture(&self.ctx.gl, &self.pools, Pool::UploadArena, self.instance_arena, job.instances.len() as u64 / 4, &mut self.arena_words);
         }
         for pass in &job.passes {
             if let Err(e) = self.run_pass(pass) { eprintln!("[hal-gl] pass: {e}"); }
@@ -531,14 +535,14 @@ impl Renderer {
             words = match &d.instances {
                 Some(Instances::Buffer(b, _)) => self.buffers.get_mut(&b.key).map(|g| {
                     if g.words_stale || g.words.is_none() {
-                        let mut tex = g.words.unwrap_or((0, 0));
-                        Self::words_texture(&self.ctx.gl, g.name, g.size / 4, &mut tex);
+                        let mut tex = g.words.take().unwrap_or_default();
+                        Self::words_texture(&self.ctx.gl, &self.pools, Pool::WordTextures, g.name, g.size / 4, &mut tex);
                         g.words = Some(tex);
                         g.words_stale = false;
                     }
-                    (unit, g.words.unwrap().0)
+                    (unit, g.words.as_ref().map_or(0, |w| w.tex))
                 }),
-                _ => Some((unit, self.arena_words.0)),
+                _ => Some((unit, self.arena_words.tex)),
             };
         }
         let gl = &self.ctx.gl;

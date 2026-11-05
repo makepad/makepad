@@ -36,9 +36,10 @@ impl Scope {
         Scope(HOOKS.get().map_or(0, |h| (h.capture)()))
     }
 
-    /// Runs `f` (a call into the callback) in this scope, on the calling thread.
+    /// Runs `f` (a call into the callback) in this scope, on the calling thread. It comes back when
+    /// the host ended the app's run under it, too (`makepad_relax_api::app_call`).
     #[inline]
-    pub fn call<R>(self, f: impl FnOnce() -> R) -> R {
+    pub fn call(self, f: impl FnOnce()) {
         if self.0 == 0 {
             return f();
         }
@@ -50,6 +51,6 @@ impl Scope {
             }
         }
         let _leave = Leave(h.leave, (h.enter)(self.0));
-        f()
+        makepad_relax_api::app_call(f);
     }
 }

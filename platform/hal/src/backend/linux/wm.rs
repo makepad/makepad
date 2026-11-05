@@ -658,8 +658,16 @@ impl App {
                 if log_enabled() { eprintln!("[hal-wm] window {} has {} shared images of {}x{}", swapchain.window_id, images.len(), swapchain.alloc_width, swapchain.alloc_height); }
                 let pixels = self.windows.get(&key).and_then(|w| w.geom).map_or([swapchain.alloc_width, swapchain.alloc_height], |(g, dpi, _)| pixels(g, dpi));
                 let mut rings = lock(&self.state.rings);
-                rings.insert(key, Ring { window_id: swapchain.window_id, alloc: [swapchain.alloc_width, swapchain.alloc_height],
-                    pixels, images, next: 0, starved: None });
+                // The host says a swapchain again until a frame confirms it: the same allocations
+                // stay as they are. A new ring would strand the frames in flight: they no longer
+                // find their image, never reach the WM, and the image they took never comes back,
+                // so a few such frames in a row leave a window that draws and never presents.
+                let same = rings.get(&key).is_some_and(|ring| ring.images.len() == images.len()
+                    && ring.images.iter().zip(&images).all(|(old, new)| old.id == new.id));
+                if !same {
+                    rings.insert(key, Ring { window_id: swapchain.window_id, alloc: [swapchain.alloc_width, swapchain.alloc_height],
+                        pixels, images, next: 0, starved: None });
+                }
                 if let Some(w) = shell::snapshot().windows.get_mut(&swapchain.window_id) {
                     w.pixels = pixels;
                     w.starved = None;

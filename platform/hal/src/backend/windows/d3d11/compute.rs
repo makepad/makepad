@@ -5,6 +5,10 @@ use std::sync::{Arc, OnceLock};
 
 pub(super) struct Program { layout: KernelLayout, shader: ID3D11ComputeShader }
 pub(super) struct Pipe { pub gen: u32, state: Arc<OnceLock<Result<Program, String>>>, pub announced: bool }
+impl Pipe {
+    /// What its compile job is queued under (`CompilePool::hurry`).
+    pub(super) fn compile_key(&self) -> usize { Arc::as_ptr(&self.state) as usize }
+}
 
 impl D3d11 {
     pub(super) fn compute_ready(&self, sid: u32, passes: &[Pass], view: &CmdView) -> bool {
@@ -28,8 +32,7 @@ impl D3d11 {
         let state = Arc::new(OnceLock::new());
         self.compute.insert((s.id, id.index), Pipe { gen: id.gen, state: state.clone(), announced: false });
         let dev = self.dev.clone(); let wake = self.mailbox.wake.clone();
-        self.next_compiler = (self.next_compiler + 1) % self.compilers.len();
-        self.compilers[self.next_compiler].push(move || {
+        self.compilers.push(Arc::as_ptr(&state) as usize, move || {
             let result = (|| {
                 let bytes = super::pipeline::compile_stage("cs_5_0", "kernel_main", &source, layout.desc.precise_math != 0)?;
                 let mut shader = None;
@@ -136,22 +139,30 @@ impl D3d11 {
         self.unbind_compute();
         result
     }
-    pub(super) fn read_compute_buffer(&mut self, s: &mut Session, id: Id, req: u32, offset: u64, len: u64) {
+    pub(super) fn read_compute_buffers(&mut self, s: &mut Session, req: u32, ranges: &[BufferReadRange]) {
         self.unbind_compute();
         let result = (|| {
-            let source = self.buf.get(&(s.id, id.index)).filter(|b| b.gen == id.gen).ok_or("stale buffer")?.buf.clone();
-            let desc = D3D11_BUFFER_DESC { ByteWidth: len.max(4) as u32, Usage: D3D11_USAGE_STAGING, CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32, ..Default::default() };
-            let mut staging = None;
-            unsafe { self.dev.device.CreateBuffer(&desc, None, Some(&mut staging)) }.map_err(|e| hr("buffer readback staging", e))?;
-            let staging = staging.ok_or("no staging buffer")?;
-            let region = D3D11_BOX { left: offset as u32, right: (offset + len) as u32, top: 0, bottom: 1, front: 0, back: 1 };
-            if len != 0 { unsafe { self.dev.ctx.CopySubresourceRegion(staging.as_ID3D11Resource(), 0, 0, 0, 0, source.buf.as_ID3D11Resource(), 0, Some(&region)); } }
+            let mut sources = Vec::with_capacity(ranges.len());
+            let mut layout = Vec::with_capacity(ranges.len());
+            let mut bytes = 0u64;
+            for range in ranges {
+                let source = self.buf.get(&(s.id, range.id.index)).filter(|b| b.gen == range.id.gen).ok_or("stale buffer")?.buf.clone();
+                layout.push((bytes, range.len));
+                bytes = bytes.checked_add(range.len.max(1)).ok_or("lease size overflow")?;
+                sources.push(source);
+            }
+            let staging = self.leases.alloc(bytes)?;
             let mut batch = Batch::default();
-            batch.keep.push(Box::new(source));
-            batch.tickets.push(Ticket::Buffer { token: Self::token(s), req, staging, len: len as usize });
+            for ((source, range), (offset, _)) in sources.into_iter().zip(ranges).zip(&layout) {
+                let region = D3D11_BOX { left: range.offset as u32, right: (range.offset + range.len) as u32, top: 0, bottom: 1, front: 0, back: 1 };
+                if range.len != 0 { unsafe { self.dev.ctx.CopySubresourceRegion(staging.buffer().as_ID3D11Resource(), 0, *offset as u32, 0, 0, source.buf.as_ID3D11Resource(), 0, Some(&region)); } }
+                batch.keep.push(Box::new(source));
+            }
+            batch.tickets.push(Ticket::BufferLeases { token: Self::token(s), req, staging, ranges: layout });
             self.complete.submit(batch);
             Ok::<_, String>(())
         })();
-        if let Err(e) = result { eprintln!("[hal-d3d11] buffer readback: {e}"); s.events.readback(req, readback::FAILED, [0; 4], &[]); }
+        if let Err(e) = result { eprintln!("[hal-d3d11] buffer readback: {e}"); s.events.buffer_leases(req, readback::FAILED, Vec::new()); }
     }
+
 }

@@ -1,18 +1,18 @@
 //! The frame clock, measured: `MAKEPAD_TRACE=frames` prints a histogram every
-//! two seconds of what paced each tick and how evenly frames land, on every
-//! desktop backend (the sources differ per backend, the gaps read the same).
+//! two seconds of what paced each beat of the HAL loop and how evenly frames
+//! land, on every backend (the gaps read the same on each).
 //!
 //! Three gaps matter for smooth animation and each has its own clock: the
-//! gap between the ticks that DISPATCH `NextFrame` (the app steps its
-//! animations here), the gap between `Present`s (what the compositor
-//! receives), and — for a beat-driven tick — how far ahead of the wake the
-//! flip it is aimed at lies. Every tick also says what woke it: a window's
-//! frame-latency waitable, the wait timing out, an input message, a timer,
-//! or the drain-then-paint fallback when nothing is being composited. A
-//! judder that shows as an even present histogram and an uneven next-frame
-//! histogram is the app clock's; the reverse is the compositor's.
+//! gap between the beats that DISPATCH `NextFrame` (the app steps its
+//! animations here), the gap between window frames the backend presented
+//! (what the compositor receives), and — for a display-paced beat — how far
+//! ahead of the beat the flip it is aimed at lies. Every beat also says what
+//! woke it: a window's display announcing a frame, the loop's own period
+//! when no display paces it, or a host's turn. A judder that shows as an even
+//! present histogram and an uneven next-frame histogram is the app clock's;
+//! the reverse is the compositor's.
 //!
-//! Off, this is one `bool` check per tick.
+//! Off, each call is one atomic load.
 
 use crate::makepad_error_log::trace_enabled;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -47,21 +47,15 @@ pub fn drawn_frames() -> u64 {
     DRAWN.load(Ordering::Relaxed)
 }
 
-/// What woke a paint tick.
+/// What woke a beat of the HAL loop.
 #[derive(Clone, Copy)]
 pub enum TickSource {
-    /// A window's DXGI frame-latency waitable fired: a present retired.
-    Waitable,
-    /// The beat wait timed out: nothing was being composited.
-    Timeout,
-    /// An input message arrived while in `Wait` flow and a paint followed it.
-    Message,
-    /// A Win32 timer (resize / drag-drop heartbeat).
-    Timer,
-    /// No beat source to wait on: the drain-then-paint fallback.
-    Drain,
-    /// A display link fired (macOS): the flip's target timestamp is known.
-    Link,
+    /// A window's display announced a frame (`FrameReady`): the flip it aims at is known.
+    Display,
+    /// The loop's own period: no display paces this app (offscreen windows, none yet).
+    Cadence,
+    /// A host's turn: the window manager's `Tick` for a hosted app, an embedder's turn.
+    Host,
 }
 
 const EDGES_MS: [f64; 9] = [4.0, 6.0, 8.0, 10.0, 12.0, 15.0, 18.0, 25.0, 40.0];
@@ -114,38 +108,37 @@ impl Hist {
 }
 
 pub struct FrameTrace {
-    enabled: bool,
     last_print: Option<f64>,
-    sources: [u32; 6],
+    sources: [u32; 3],
     next_frame: Hist,
     present: Hist,
     /// How far ahead of the wake the beat's target flip lies.
     flip_lead: Hist,
     last_next_frame: Option<f64>,
     last_present: Option<f64>,
-    /// Presents the compositor refused (`DXGI_STATUS_OCCLUDED` and kin).
-    occluded: u32,
+}
+
+fn on() -> bool {
+    trace_enabled("frames")
 }
 
 impl FrameTrace {
     pub fn new() -> Self {
         FrameTrace {
-            enabled: trace_enabled("frames"),
             last_print: None,
-            sources: [0; 6],
+            sources: [0; 3],
             next_frame: Hist::default(),
             present: Hist::default(),
             flip_lead: Hist::default(),
             last_next_frame: None,
             last_present: None,
-            occluded: 0,
         }
     }
 
-    /// A tick woke; `wake` and `flip` are app seconds (the flip is the beat's
-    /// target present time, `None` for an unpaced tick).
+    /// A beat woke; `wake` and `flip` are seconds of one clock (the flip is the
+    /// beat's target present time, `None` for a beat no display paced).
     pub fn tick(&mut self, source: TickSource, wake: f64, flip: Option<f64>) {
-        if !self.enabled {
+        if !on() {
             return;
         }
         self.sources[source as usize] += 1;
@@ -154,17 +147,9 @@ impl FrameTrace {
         }
     }
 
-    /// A beat's target flip, once the window's frame statistics gave it.
-    pub fn flip_lead(&mut self, wake: f64, flip: f64) {
-        if !self.enabled {
-            return;
-        }
-        self.flip_lead.add((flip - wake) * 1000.0);
-    }
-
     /// The app clock stepped: `NextFrame` was dispatched with this time.
     pub fn next_frame(&mut self, time: f64) {
-        if !self.enabled {
+        if !on() {
             return;
         }
         if let Some(prev) = self.last_next_frame {
@@ -173,9 +158,9 @@ impl FrameTrace {
         self.last_next_frame = Some(time);
     }
 
-    /// A frame was handed to `Present` at this wall time.
+    /// A window frame was presented at this time (seconds of the backend's clock).
     pub fn present(&mut self, now: f64) {
-        if !self.enabled {
+        if !on() {
             return;
         }
         if let Some(prev) = self.last_present {
@@ -184,17 +169,9 @@ impl FrameTrace {
         self.last_present = Some(now);
     }
 
-    /// A present the compositor refused: the window is not reaching glass.
-    pub fn present_occluded(&mut self) {
-        if !self.enabled {
-            return;
-        }
-        self.occluded += 1;
-    }
-
     /// Print and reset every two seconds of wall time.
     pub fn maybe_print(&mut self, now: f64) {
-        if !self.enabled {
+        if !on() {
             return;
         }
         let Some(start) = self.last_print else {
@@ -204,20 +181,15 @@ impl FrameTrace {
         if now - start < 2.0 {
             return;
         }
-        let [waitable, timeout, message, timer, drain, link] = self.sources;
-        let occluded = self.occluded;
-        crate::trace!(
-            "frames",
-            "ticks/2s: waitable={waitable} timeout={timeout} message={message} timer={timer} drain={drain} link={link} occluded_presents={occluded}"
-        );
+        let [display, cadence, host] = self.sources;
+        crate::trace!("frames", "ticks/2s: display={display} cadence={cadence} host={host}");
         crate::trace!("frames", "{}", self.next_frame.line("next_frame gap"));
         crate::trace!("frames", "{}", self.present.line("present gap"));
         crate::trace!("frames", "{}", self.flip_lead.line("flip lead"));
-        self.sources = [0; 6];
+        self.sources = [0; 3];
         self.next_frame = Hist::default();
         self.present = Hist::default();
         self.flip_lead = Hist::default();
-        self.occluded = 0;
         self.last_print = Some(now);
     }
 }

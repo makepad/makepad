@@ -5,6 +5,7 @@ use std::os::raw::{c_char, c_int, c_long, c_ulong, c_void};
 pub type off_t = i64;
 pub const O_RDWR: c_int = 2;
 pub const O_NONBLOCK: c_int = 0o4000;
+pub const O_CLOEXEC: c_int = 0o2000000;
 pub const F_GETFL: c_int = 3;
 pub const F_SETFL: c_int = 4;
 pub const PROT_READ: c_int = 1;
@@ -13,6 +14,10 @@ pub const MAP_SHARED: c_int = 1;
 pub const MAP_FAILED: *mut c_void = !0 as *mut c_void;
 pub const RTLD_LAZY: c_int = 1;
 pub const RTLD_LOCAL: c_int = 0;
+pub const IN_ATTRIB: u32 = 0x0004;
+pub const IN_CREATE: u32 = 0x0100;
+pub const IN_DELETE: u32 = 0x0200;
+pub const IN_Q_OVERFLOW: u32 = 0x4000;
 
 #[repr(C)]
 pub struct timeval {
@@ -35,6 +40,8 @@ extern "C" {
         offset: off_t,
     ) -> *mut c_void;
     pub fn munmap(addr: *mut c_void, length: usize) -> c_int;
+    pub fn inotify_init1(flags: c_int) -> c_int;
+    pub fn inotify_add_watch(fd: c_int, pathname: *const c_char, mask: u32) -> c_int;
 }
 #[link(name = "dl")]
 extern "C" {

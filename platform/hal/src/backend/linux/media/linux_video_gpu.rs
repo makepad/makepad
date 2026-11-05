@@ -60,6 +60,8 @@ fn row(s: &mut Session, id: Id, desc: &TextureObj) {
             created_frame: s.frame,
             last_used_frame: 0,
             last_used_ns: 0,
+            objects: 1,
+            note: "",
         });
     }
 }

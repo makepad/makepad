@@ -19,6 +19,11 @@ harness = false
 name = "ui_hang"
 harness = false
 
+# Run the app loop on the process main thread, with a hidden window.
+[[test]]
+name = "frame_trace"
+harness = false
+
 [dependencies]
 makepad-cpu-budget = { workspace = true }
 makepad-a11y = { path = "../libs/a11y", version = "0.1.0" }

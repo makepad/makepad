@@ -168,8 +168,9 @@ impl FrontHandle {
         let Some(join) = self.join.take() else { return };
         self.stop.store(true, Ordering::SeqCst);
         // The acceptor blocks in accept (no polling while idle): one local
-        // connection wakes it to see the flag.
-        let _ = TcpStream::connect_timeout(&self.addr, Duration::from_secs(1));
+        // connection wakes it to see the flag (a LAN front's wildcard bind is
+        // dialled at its loopback).
+        let _ = TcpStream::connect_timeout(&crate::utils::dial_addr(self.addr), Duration::from_secs(1));
         let _ = join.join();
     }
 }
@@ -357,7 +358,15 @@ fn serve(config: &FrontConfig, tcp: TcpStream, peer: SocketAddr) -> Result<(), R
                 "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
             );
-            let _ = tcp.shutdown(Shutdown::Both);
+            // A close with the request still unread resets the connection,
+            // and on Windows the reset drops the answer from the client's
+            // buffer before it reads it. End the write side, read what the
+            // client sent until it closes (within the head deadline), then
+            // close.
+            let _ = tcp.shutdown(Shutdown::Write);
+            let deadline = Instant::now() + HEAD_DEADLINE;
+            let mut sink = [0u8; 1024];
+            while Instant::now() < deadline && matches!(tcp.read(&mut sink), Ok(n) if n > 0) {}
             return Err(Refusal::Other("plain HTTP refused".into()));
         }
         Ok(1) => {}
@@ -522,6 +531,37 @@ pub fn is_loopback(ip: IpAddr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A LAN front listens on every interface; its stop still returns: the wake-up connection
+    /// dials its loopback (Windows refuses a connect to 0.0.0.0, and accept never woke).
+    #[test]
+    fn a_front_on_every_interface_stops() {
+        use super::super::id::{generate_key, point_of, Fleet, Me, Root};
+        let root = Root::generate().unwrap();
+        let key = generate_key().unwrap();
+        let me = Me::new(key, root.issue("stop-test", Role::Node, now_secs() + 3600, None, &point_of(&key)).unwrap()).unwrap();
+        let identity = me.tls_identity("stop-test").unwrap();
+        let verifier = Arc::new(Verifier::new(Fleet::new(root.point(), Default::default()), identity.fingerprint, &me.cred));
+        let inner: SocketAddr = "127.0.0.1:9".parse().unwrap();
+        let mut front = start_front(FrontConfig {
+            listen: "0.0.0.0:0".parse().unwrap(),
+            inner: Arc::new(move |_: &str| inner),
+            inner_headers: Vec::new(),
+            tls: TlsServer::new(identity).unwrap(),
+            verifier,
+            front_secret: "s".into(),
+            policy: Arc::new(|_: &Peer, _: &str, _: &str| false),
+            max_total: LAN_MAX_TOTAL,
+            max_per_ip: LAN_MAX_PER_IP,
+            label: "stop-test",
+        })
+        .unwrap();
+        let bound = front.local_addr();
+        assert!(bound.ip().is_unspecified());
+        front.stop();
+        assert!(TcpStream::connect(crate::utils::dial_addr(bound)).is_err(), "the port is closed after stop");
+        assert_eq!(crate::utils::dial_addr("[::]:7".parse().unwrap()), "[::1]:7".parse().unwrap());
+    }
 
     #[test]
     fn head_rewrite_strips_credentials_and_spoofed_identity() {

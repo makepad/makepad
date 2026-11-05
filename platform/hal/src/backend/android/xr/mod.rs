@@ -791,6 +791,7 @@ impl Chain {
     fn staging(dev: &Arc<Device>, size: [u32; 2], layers: u32, layered: bool) -> Result<Arc<Image>, String> {
         Image::new(dev.clone(), crate::session::TextureObj { format: crate::format::RGBA8, w: size[0] * if layered { 1 } else { layers }, h: size[1],
             depth: if layered { layers } else { 1 }, mips: 1, usage: crate::usage::RENDER_TARGET | crate::usage::SAMPLED, bytes: 0, imported: false, uploaded: 0, lent: None })
+            .map(|i| i.in_pool(crate::ledger::Pool::WindowCopies))
     }
 
     /// The staging image (when the chain swizzles) for a frame laid out as `frame`.

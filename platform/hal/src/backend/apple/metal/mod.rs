@@ -47,7 +47,6 @@ const HOUSEKEEPING_NS: u64 = 250_000_000;
 /// device holds more than this fraction of its recommended working set, down to the low mark.
 const RESIDENCY_HIGH: (u64, u64) = (3, 4);
 const RESIDENCY_LOW: (u64, u64) = (5, 8);
-
 /// The autorelease pool of a call into the backend: the thread that drives it has no run loop.
 struct Pool(ObjcId);
 
@@ -75,6 +74,7 @@ struct Win {
 }
 
 pub struct Metal {
+    leases: crate::lease::Pool<compute::LeaseBlock>,
     dev: Device,
     info: HalInfo,
     tex: FastMap<(u32, u32), Tex>,
@@ -109,7 +109,7 @@ pub struct Metal {
     native_windows: layers::Windows,
     native_sync: bool,
     /// the size the ledger last saw of each real window's drawables
-    layer_sizes: FastMap<(u32, u32), (u32, u32, u32)>,
+    layer_sizes: FastMap<(u32, u32), LayerSize>,
     /// video playback, audio, camera ...: everything of os/apple that is not Metal or AppKit
     media: Media,
     /// the pool of capture buffers a recorder's frames are copied into, and when it was last used
@@ -187,6 +187,7 @@ impl Metal {
             dev,
             info,
             tex: FastMap::default(),
+            leases: Default::default(),
             buf: FastMap::default(),
             pipe: FastMap::default(),
             compute: FastMap::default(),
@@ -259,13 +260,13 @@ impl Metal {
         let completions = self.dev.mailbox.take();
         // Announce loss before any completion in the same drain can retire its
         // dispatch metadata or publish bytes from a later command buffer.
-        if !self.lost_posted && completions.iter().any(|done| matches!(done, Done::Frame { failed: true, .. })) {
+        if !self.lost_posted && completions.iter().any(|done| matches!(done, Done::Frame { failed: true, .. } | Done::BufferLeases { status: crate::readback::DEVICE_LOST, .. })) {
             exec::device_lost(world);
             self.lost_posted = true;
         }
         for done in completions {
             let (sid, incarnation) = match &done {
-                Done::Frame { sid, incarnation, .. } | Done::DispatchTime { sid, incarnation, .. } | Done::Readback { sid, incarnation, .. }
+                Done::Frame { sid, incarnation, .. } | Done::DispatchTime { sid, incarnation, .. } | Done::Readback { sid, incarnation, .. } | Done::BufferLeases { sid, incarnation, .. }
                 | Done::Pick { sid, incarnation, .. } | Done::PipelineReady { sid, incarnation, .. }
                 | Done::PipelineFailed { sid, incarnation, .. } | Done::Surface { sid, incarnation, .. } => (*sid, incarnation),
             };
@@ -306,6 +307,7 @@ impl Metal {
                     // the session is gone: nobody takes the buffer
                     None => unsafe { CFRelease(buffer as *const std::ffi::c_void) },
                 },
+                Done::BufferLeases { sid, req, status, leases, .. } => world.to_session(sid, |q| q.buffer_leases(req, status, leases)),
                 Done::Readback { sid, req, status, rect, pixels, .. } => {
                     if let Some(s) = world.session_mut(sid) {
                         s.events.readback(req, status, rect, &pixels);
@@ -356,11 +358,24 @@ impl Metal {
         if self.capture.is_some() && now.saturating_sub(self.capture_ns) > CAPTURE_IDLE_NS {
             self.capture = None;
         }
+        // what the backend keeps and nothing uses goes; what it holds goes on the host's ledger
+        let clock = crate::clock_ns();
+        self.dev.arena_trim(clock);
+        self.leases.trim(clock);
+        if let Some(Some(pass_clock)) = &self.dev.clock { pass_clock.trim(clock); }
+        // the queue keeps driver memory for the most command buffers it had at once
+        self.dev.pools.set_count(crate::ledger::Pool::CommandBuffers, self.dev.peak_in_flight);
+        if let Some(host) = world.session_mut(HOST) {
+            let frame = host.frame;
+            host.ledger.set_pools(&self.dev.pools, frame, now);
+        }
         let allocated = self.dev.device_allocated();
+        let os_graphics = device::graphics_footprint();
         let completed = self.dev.completed.load(std::sync::atomic::Ordering::Acquire);
         for sid in world.session_ids() {
             let Some(s) = world.session_mut(sid) else { continue };
             s.ledger.device_allocated = Some(allocated);
+            s.ledger.os_graphics = os_graphics;
             // transient render targets idle for a while give their storage back; the app is told
             // and produces them again when they are next needed
             let idle: Vec<Id> = s
@@ -668,7 +683,7 @@ impl Gpu for Metal {
         if let Err(error) = fill(buf, off, data) { eprintln!("[hal-metal] {error}"); s.bad(); }
     }
 
-    fn buffer_readback(&mut self, s: &mut Session, id: Id, req: u32, offset: u64, len: u64) { self.read_compute_buffer(s, id, req, offset, len); }
+    fn buffer_readbacks(&mut self, s: &mut Session, req: u32, ranges: &[BufferReadRange]) { self.read_compute_buffers(s, req, ranges); }
 
     fn buffer_destroy(&mut self, sid: u32, id: Id) {
         if self.buf.get(&(sid, id.index)).is_some_and(|b| b.gen <= id.gen) {
@@ -786,6 +801,17 @@ impl Gpu for Metal {
     }
 }
 
+/// What a real window's layer holds (`Metal::layer_sizes`): its drawables' size, how many it
+/// keeps (`maximumDrawableCount`) and the bytes of each (the drawable texture's `allocatedSize`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LayerSize {
+    pub gen: u32,
+    pub w: u32,
+    pub h: u32,
+    pub drawables: u64,
+    pub drawable_bytes: u64,
+}
+
 /// A window's ledger row: what the offscreen target holds.
 pub(crate) fn window_row(index: u32, gen: u32, bytes: u64, w: u32, h: u32, now: u64, frame: u64) -> LedgerEntry {
     LedgerEntry {
@@ -803,5 +829,7 @@ pub(crate) fn window_row(index: u32, gen: u32, bytes: u64, w: u32, h: u32, now: 
         created_frame: frame,
         last_used_frame: 0,
         last_used_ns: 0,
+        objects: 1,
+        note: "",
     }
 }

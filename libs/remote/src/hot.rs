@@ -16,6 +16,9 @@ pub enum Outcome {
     RestartFailed,
     FirstFrameTimeout,
     NoWindow,
+    /// A panic in a background or gate check of a body: no hot load failed, no restart follows and
+    /// the app runs on, so it stays out of the hot-load statistics, with its own count.
+    CheckerPanic,
 }
 
 impl Outcome {
@@ -30,6 +33,7 @@ impl Outcome {
             Self::RestartFailed => "restart_failed",
             Self::FirstFrameTimeout => "first_frame_timeout",
             Self::NoWindow => "no_window",
+            Self::CheckerPanic => "checker_panic",
         }
     }
 
@@ -44,6 +48,7 @@ impl Outcome {
             "restart_failed" => Self::RestartFailed,
             "first_frame_timeout" => Self::FirstFrameTimeout,
             "no_window" => Self::NoWindow,
+            "checker_panic" => Self::CheckerPanic,
             _ => return None,
         })
     }
@@ -155,6 +160,18 @@ pub fn cause_key(reason: &str) -> String {
 /// An infrastructure result has its own exit code; it must not become a failed
 /// test assertion or a successful application run.
 pub const JIT_ERROR_EXIT: i32 = 86;
+
+/// A test run whose filter matched no test: no pass (the JIT harness, and `makepad test` over
+/// all its targets).
+pub const NO_TESTS_EXIT: i32 = 87;
+
+/// A test target whose program did not load (a file that does not parse): `makepad test` stops,
+/// as the package's other targets of that program would end the same way.
+pub const LOAD_ERROR_EXIT: i32 = 88;
+
+/// `makepad test` tells each target's harness it sums the verdict over the targets: one of
+/// several may match no test.
+pub const TEST_PACKAGE_ENV: &str = "MAKEPAD_TEST_PACKAGE";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Verdict {

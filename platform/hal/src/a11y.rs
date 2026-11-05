@@ -408,7 +408,13 @@ fn dispatch_routed(req: &makepad_remote::Req, out: &mut makepad_remote::Out) -> 
     if !routers.is_empty() {
         let wire = req.to_wire();
         for route in routers {
-            let r = route(wire.as_ptr(), wire.len(), out.remaining(), out as *mut makepad_remote::Out as *mut u8, relay_to_out);
+            let mut r = 0;
+            let (remaining, reply) = (out.remaining(), out as *mut makepad_remote::Out as *mut u8);
+            if !makepad_relax_api::app_call(|| r = route(wire.as_ptr(), wire.len(), remaining, reply, relay_to_out)) {
+                // its code's run has ended
+                lock(&UI_ROUTERS).retain(|existing| *existing as usize != route as usize);
+                continue;
+            }
             out.truncated |= r & UI_TRUNCATED != 0;
             if r & UI_ANSWERED != 0 {
                 return true;

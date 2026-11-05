@@ -200,7 +200,7 @@ pub use crate::app_main::{
 };
 // Working-tree startup instrumentation (`MAKEPAD_TRACE=startup`).
 pub use crate::cx::{
-    first_present_seen, launched_hidden_until_first_present,startup_trace_first_present,
+    first_present_seen, launched_hidden_until_first_present, relax_app_main, startup_trace_first_present,
     startup_acc, startup_since_exec_ms, startup_trace, startup_trace_enabled, startup_trace_flush,
 };
 pub use crate::cx_api::can_play_type;
@@ -437,7 +437,7 @@ pub use {
     app_main::*,
     arc_string_mut::ArcStringMut,
     component_list::ComponentList,
-    component_map::ComponentMap,
+    component_map::{ComponentMap, FastHashMap, FastHashSet},
     //makepad_image_formats::image,
     log::*,
     makepad_math::makepad_micro_serde,

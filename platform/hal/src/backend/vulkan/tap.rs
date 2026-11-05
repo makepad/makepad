@@ -31,8 +31,8 @@ impl Reader {
     /// A reader of frames scaled to `size` on `dev`.
     pub fn new(dev: Arc<Device>, size: [u32; 2]) -> Result<Reader, String> {
         let scaled = Image::new(dev.clone(), TextureObj { format: format::RGBA8, w: size[0], h: size[1], depth: 1, mips: 1,
-            usage: usage::RENDER_TARGET | usage::SAMPLED, bytes: 0, imported: false, uploaded: 0, lent: None })?;
-        let staging = Buffer::scratch(dev.clone(), size[0] as u64 * size[1] as u64 * 4, vk::BufferUsageFlags::TRANSFER_DST)?;
+            usage: usage::RENDER_TARGET | usage::SAMPLED, bytes: 0, imported: false, uploaded: 0, lent: None })?.in_pool(crate::ledger::Pool::Capture);
+        let staging = Buffer::scratch(dev.clone(), crate::ledger::Pool::Capture, size[0] as u64 * size[1] as u64 * 4, vk::BufferUsageFlags::TRANSFER_DST)?;
         unsafe {
             let pool = dev.raw.create_command_pool(&vk::CommandPoolCreateInfo::default().queue_family_index(dev.family)
                 .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER), None).map_err(|e| format!("tap command pool: {e:?}"))?;

@@ -707,13 +707,16 @@ fn a_retained_buffer_reads_zero_where_it_was_not_written() {
     w.buffer_update(whole, 16, &[0x01; 16]);
     w.buffer_update(prefix, 0, &[0x77; 1000]);
     w.buffer_update(prefix, 1000, &[0x78; 24]);
-    for (req, id) in [(1, never), (2, part), (3, whole), (4, prefix)] { w.buffer_readback(id, req, 0, 4096); }
+    for (req, id) in [(1, never), (2, part), (3, whole), (4, prefix)] { w.read_buffers(req, &[BufferReadRange { id: id, offset: 0, len: 4096 }]); }
     hal.submit(&w.buf());
     let mut got: [Vec<u8>; 4] = Default::default();
     until(&hal, sid, |e| {
-        if let HalEvent::Readback { req: req @ 1..=4, status, pixels, .. } = e {
+        if let HalEvent::BufferLeases { req: req @ 1..=4, status, records } = e {
             assert_eq!(status, readback::OK);
-            got[req as usize - 1] = pixels.to_vec();
+            use makepad_hal::buffers::Wire;
+            let record = makepad_hal::lease::Record::read(records);
+            got[req as usize - 1] = unsafe { std::slice::from_raw_parts(record.ptr as *const u8, record.len as usize) }.to_vec();
+            hal_lease_release(record.token);
         }
         got.iter().all(|g| !g.is_empty())
     });
@@ -743,13 +746,20 @@ fn uploads_from_freed_temporaries_land_the_bytes_of_the_call() {
     w.buffer_update(buffer, 0, &want_buffer.clone());
     w.texture_update(texture, 0, [0, 0, 16, 16], 0, &want_texels.clone());
     let scribble = [vec![0xeeu8; 4096], vec![0xee; 1024]];
-    w.buffer_readback(buffer, 1, 0, 4096);
+    w.read_buffers(1, &[BufferReadRange { id: buffer, offset: 0, len: 4096 }]);
     w.texture_readback(texture, 2, [0, 0, 16, 16]);
     hal.submit(&w.buf());
     drop(scribble);
     let mut got: [Vec<u8>; 2] = Default::default();
     until(&hal, sid, |e| {
-        if let HalEvent::Readback { req: req @ 1..=2, status, pixels, .. } = e {
+        if let HalEvent::BufferLeases { req: 1, status, records } = e {
+                use makepad_hal::buffers::Wire;
+                assert_eq!(status, readback::OK);
+                let record = makepad_hal::lease::Record::read(records);
+                got[0] = unsafe { std::slice::from_raw_parts(record.ptr as *const u8, record.len as usize) }.to_vec();
+                hal_lease_release(record.token);
+            }
+            if let HalEvent::Readback { req: req @ 1..=2, status, pixels, .. } = e {
             assert_eq!(status, readback::OK);
             got[req as usize - 1] = pixels.to_vec();
         }

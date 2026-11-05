@@ -21,7 +21,7 @@ fn uploads_from_freed_temporaries_land_the_bytes_of_the_call() {
     w.buffer_update(buffer, 0, &want_buffer.clone());
     w.texture_update(texture, 0, [0, 0, 16, 16], 0, &want_texels.clone());
     let scribble = [vec![0xeeu8; 4096], vec![0xee; 1024]];
-    w.buffer_readback(buffer, 1, 0, 4096);
+    w.read_buffers(1, &[BufferReadRange { id: buffer, offset: 0, len: 4096 }]);
     w.texture_readback(texture, 2, [0, 0, 16, 16]);
     hal.submit(&w.buf());
     drop(scribble);
@@ -33,6 +33,13 @@ fn uploads_from_freed_temporaries_land_the_bytes_of_the_call() {
         let mut buf = store.buf();
         let n = hal.pump(10_000_000, &mut buf);
         for (_, e) in store.reader(n, buf.arena_len) {
+            if let HalEvent::BufferLeases { req: 1, status, records } = e {
+                use makepad_hal::buffers::Wire;
+                assert_eq!(status, readback::OK);
+                let record = makepad_hal::lease::Record::read(records);
+                got[0] = unsafe { std::slice::from_raw_parts(record.ptr as *const u8, record.len as usize) }.to_vec();
+                hal_lease_release(record.token);
+            }
             if let HalEvent::Readback { req: req @ 1..=2, status, pixels, .. } = e {
                 assert_eq!(status, readback::OK);
                 got[req as usize - 1] = pixels.to_vec();

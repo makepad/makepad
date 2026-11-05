@@ -5,17 +5,19 @@
 
 use super::timing::*;
 use makepad_apple_sys::*;
+use crate::ledger::{Charge, Pool, Pools};
 use crate::FastMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
-use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 /// What a finished piece of GPU work tells the backend thread. Completion handlers run on
 /// Metal's threads: they push here and wake the pump; `Metal::step` turns them into events.
 pub(crate) enum Done {
     Frame { sid: u32, target: crate::Id, frame: u64, gpu_ns: u64, present_ns: u64, gpu_span: [f64; 2], failed: bool, partial: bool, window: bool, kind: u32, incarnation: Arc<crate::font::FrameProgress> },
     DispatchTime { sid: u32, incarnation: Arc<crate::font::FrameProgress>, name: String, gpu_ns: u64 },
+    BufferLeases { sid: u32, incarnation: Arc<crate::font::FrameProgress>, req: u32, status: u32, leases: Vec<crate::lease::Lease> },
     Readback { sid: u32, incarnation: Arc<crate::font::FrameProgress>, req: u32, status: u32, rect: [u32; 4], pixels: Vec<u8> },
     Pick { sid: u32, incarnation: Arc<crate::font::FrameProgress>, req: u32, ids: Vec<u32> },
     PipelineReady { sid: u32, incarnation: Arc<crate::font::FrameProgress>, id: crate::Id },
@@ -27,7 +29,7 @@ pub(crate) enum Done {
 impl Done {
     fn sid(&self) -> u32 {
         match self {
-            Done::Frame { sid, .. } | Done::DispatchTime { sid, .. } | Done::Readback { sid, .. } | Done::Pick { sid, .. } | Done::PipelineReady { sid, .. }
+            Done::Frame { sid, .. } | Done::DispatchTime { sid, .. } | Done::Readback { sid, .. } | Done::BufferLeases { sid, .. } | Done::Pick { sid, .. } | Done::PipelineReady { sid, .. }
             | Done::PipelineFailed { sid, .. } | Done::Surface { sid, .. } => *sid,
         }
     }
@@ -75,11 +77,32 @@ pub struct Submission {
 /// own backpressure; past it `commandBuffer` waits inside the driver). Metal's default of 64
 /// holds barely two frames of per-pass buffers for a compositor with a 30-pass frame.
 const QUEUE_MAX_COMMAND_BUFFERS: u64 = 256;
+/// Command buffers made and not completed at once: past it a new one waits for the GPU
+/// (`IN_FLIGHT_WAIT` at most). The queue keeps driver memory for the most command buffers it
+/// ever had alive (1 MB and up each, outside `currentAllocatedSize`, given back only with the
+/// queue): a panel that once had 48 at once held 384 MB of it for the rest of its life.
+const IN_FLIGHT_MAX: u64 = 16;
+const IN_FLIGHT_WAIT: Duration = Duration::from_millis(100);
 
 /// The arena's chunk size: the uniforms, inline instances and upload staging of a batch.
 const CHUNK_BYTES: usize = 4 * 1024 * 1024;
 /// Free arena bytes kept for the next batches; beyond it the largest free chunks are released.
 const ARENA_KEEP_BYTES: usize = 64 << 20;
+/// A free chunk no batch wrote for this long is released (`arena_trim`), down to the first two.
+const ARENA_IDLE_NS: u64 = 5_000_000_000;
+
+/// A buffer the backend made for itself (an arena chunk, readback staging, a lease block),
+/// charged to its ledger pool while it lives.
+pub struct PoolBuffer {
+    obj: RcObjcId,
+    _charge: Charge,
+}
+
+impl PoolBuffer {
+    pub fn as_id(&self) -> ObjcId {
+        self.obj.as_id()
+    }
+}
 
 /// A place in the arena.
 #[derive(Clone, Copy)]
@@ -89,12 +112,14 @@ pub struct Loc {
 }
 
 struct Chunk {
-    buffer: RcObjcId,
+    buffer: PoolBuffer,
     contents: *mut u8,
     capacity: usize,
     used: usize,
     /// the newest command buffer that reads it: reusable from offset 0 once that one completed
     lease: u64,
+    /// when a batch last wrote it (HAL clock ns)
+    used_ns: u64,
 }
 
 pub struct Device {
@@ -103,6 +128,9 @@ pub struct Device {
     /// 1x1 transparent texture bound where a draw's texture slot has no storage (sampling nil is
     /// a GPU fault)
     pub fallback: ObjcId,
+    /// What the backend made for itself: the ledger's backend rows (`Ledger::set_pools`).
+    pub pools: Arc<Pools>,
+    _fallback_charge: Charge,
     pub name: String,
     /// The GPU shares memory with the CPU (Apple silicon).
     pub unified_memory: bool,
@@ -111,6 +139,10 @@ pub struct Device {
     pub completed: Arc<AtomicU64>,
     /// the sequence number of the newest command buffer created
     pub seq: u64,
+    /// signalled by every completion: a new command buffer waiting for room (`IN_FLIGHT_MAX`)
+    room: Arc<(Mutex<()>, Condvar)>,
+    /// the most command buffers made and not completed at once (what the queue keeps memory for)
+    pub peak_in_flight: u64,
     /// frame completions waiting for a command buffer number (`when_completed`)
     waiters: Arc<Mutex<Vec<(u64, crate::completion::CompletionReply)>>>,
     pub mailbox: Mailbox,
@@ -207,15 +239,21 @@ impl Device {
         };
         crate::gpu_limits::set_max_gpu_buffer_bytes(unsafe { msg_send![device, maxBufferLength] });
         crate::gpu_limits::set_gpu_working_set_bytes(if recommended != 0 { recommended } else { physical / 2 });
+        let pools: Arc<Pools> = Default::default();
+        let _fallback_charge = pools.charge(Pool::Fallback, super::resources::allocated_size(fallback));
         let mut dev = Device {
             device,
             queue,
             fallback,
+            pools,
+            _fallback_charge,
             name,
             unified_memory,
             completed,
             waiters: Default::default(),
             seq: 0,
+            room: Default::default(),
+            peak_in_flight: 0,
             mailbox,
             alloc_tx: Some(alloc_tx),
             alloc_thread: Some(alloc_thread),
@@ -245,7 +283,7 @@ impl Device {
     /// The pass clock of this device, probed once.
     pub fn pass_clock(&mut self) -> Option<Arc<PassClock>> {
         if self.clock.is_none() {
-            self.clock = Some(PassClock::new(self.device));
+            self.clock = Some(PassClock::new(self.device, self.pools.clone()));
         }
         self.clock.clone().flatten()
     }
@@ -275,17 +313,39 @@ impl Device {
     /// completion handler that publishes its number. Returns the buffer (owned by the caller)
     /// and its number.
     pub fn new_command_buffer(&mut self) -> (RcObjcId, u64) {
+        if self.seq.saturating_sub(self.completed.load(Ordering::Acquire)) >= IN_FLIGHT_MAX {
+            // what is encoded goes to the GPU first: the wait is for it
+            self.flush_submissions();
+            crate::profile::count("metal batch waited for room");
+            let deadline = Instant::now() + IN_FLIGHT_WAIT;
+            let (lock, room) = &*self.room;
+            let mut guard = crate::lock(lock);
+            while self.seq.saturating_sub(self.completed.load(Ordering::Acquire)) >= IN_FLIGHT_MAX {
+                let now = Instant::now();
+                if now >= deadline {
+                    crate::profile::count("metal batch waited for room: timed out");
+                    break;
+                }
+                guard = room.wait_timeout(guard, deadline - now).unwrap_or_else(|e| e.into_inner()).0;
+            }
+        }
         let buffer: ObjcId = unsafe { msg_send![self.queue, commandBuffer] };
         let buffer = RcObjcId::from_unowned(NonNull::new(buffer).expect("Metal command buffer"));
         let () = unsafe { msg_send![buffer.as_id(), enqueue] };
         self.seq += 1;
         let seq = self.seq;
+        self.peak_in_flight = self.peak_in_flight.max(seq.saturating_sub(self.completed.load(Ordering::Acquire)));
         let completed = self.completed.clone();
         let in_flight = self.in_flight.clone();
         let waiters = self.waiters.clone();
+        let room = self.room.clone();
         let () = unsafe {
             msg_send![buffer.as_id(), addCompletedHandler: &objc_block!(move |cb: ObjcId| {
                 completed.fetch_max(seq, Ordering::AcqRel);
+                {
+                    let _held = crate::lock(&room.0);
+                    room.1.notify_all();
+                }
                 answer_waiters(&waiters, completed.load(Ordering::Acquire));
                 let entry = {
                     let mut queue = lock_in_flight(&in_flight);
@@ -318,10 +378,17 @@ impl Device {
 
     // ---- the arena
 
+    /// A shared-storage buffer of `length` bytes, charged to `pool`.
+    pub fn pool_buffer(&self, pool: Pool, length: u64) -> Option<PoolBuffer> {
+        let obj = RcObjcId::from_owned(NonNull::new(unsafe { msg_send![self.device, newBufferWithLength: length options: MTLResourceOptions::StorageModeShared] })?);
+        let charge = self.pools.charge(pool, super::resources::allocated_size(obj.as_id()));
+        Some(PoolBuffer { obj, _charge: charge })
+    }
+
     fn add_chunk(&mut self, capacity: usize) -> Option<usize> {
         // allocated right here and its pages touched, so no draw is skipped while a chunk sits
         // with a worker
-        let buffer = NonNull::new(unsafe { msg_send![self.device, newBufferWithLength: capacity as u64 options: nil] }).map(RcObjcId::from_owned)?;
+        let buffer = self.pool_buffer(Pool::UploadArena, capacity as u64)?;
         let contents: *mut u8 = unsafe { msg_send![buffer.as_id(), contents] };
         if contents.is_null() {
             return None;
@@ -329,7 +396,7 @@ impl Device {
         for offset in (0..capacity).step_by(4096) {
             unsafe { contents.add(offset).write_volatile(0) };
         }
-        self.chunks.push(Chunk { buffer, contents, capacity, used: 0, lease: 0 });
+        self.chunks.push(Chunk { buffer, contents, capacity, used: 0, lease: 0, used_ns: crate::clock_ns() });
         Some(self.chunks.len() - 1)
     }
 
@@ -396,6 +463,10 @@ impl Device {
     pub fn arena_end_batch(&mut self) {
         self.dedup.clear();
         let completed = self.completed.load(Ordering::Acquire);
+        let now = crate::clock_ns();
+        for chunk in self.chunks.iter_mut().filter(|c| c.lease > completed) {
+            chunk.used_ns = now;
+        }
         let mut free: Vec<(usize, usize)> = self.chunks.iter().enumerate().filter(|(_, c)| c.lease <= completed).map(|(i, c)| (c.capacity, i)).collect();
         let mut total: usize = free.iter().map(|f| f.0).sum();
         if total <= ARENA_KEEP_BYTES {
@@ -414,6 +485,25 @@ impl Device {
         for i in drop_idx {
             let chunk = self.chunks.swap_remove(i);
             self.retire(Box::new(chunk.buffer));
+        }
+    }
+
+    /// Releases the free chunks no batch wrote for `ARENA_IDLE_NS`, keeping two (what the
+    /// device starts with): an idle app gives back what a burst of uploads made.
+    pub fn arena_trim(&mut self, now: u64) {
+        let completed = self.completed.load(Ordering::Acquire);
+        let mut kept = 0;
+        let mut i = 0;
+        while i < self.chunks.len() {
+            let c = &self.chunks[i];
+            let idle = c.lease <= completed && now.saturating_sub(c.used_ns) > ARENA_IDLE_NS;
+            if idle && kept >= 2 {
+                let chunk = self.chunks.swap_remove(i);
+                self.retire(Box::new(chunk.buffer));
+            } else {
+                kept += usize::from(idle);
+                i += 1;
+            }
         }
     }
 
@@ -451,6 +541,28 @@ impl Device {
         // a buffer that completed meanwhile answered nobody: answer it here
         answer_waiters(&self.waiters, self.completed.load(Ordering::Acquire));
     }
+}
+
+/// What the OS charges this process for graphics memory: the task's graphics footprint
+/// (`task_info(TASK_VM_INFO)`, `ledger_tag_graphics_footprint`). Unlike `currentAllocatedSize` it
+/// holds the driver's own allocations for the process and IOSurfaces (drawables) too.
+pub fn graphics_footprint() -> Option<u64> {
+    /// `ledger_tag_graphics_footprint` sits at byte 272 of `task_vm_info`: natural_t words 68
+    /// and 69. The kernel fills the revision-3 fields only for a count of at least
+    /// `TASK_VM_INFO_REV3_COUNT` (84 words).
+    const AT: usize = 68;
+    const REV3_COUNT: usize = 84;
+    extern "C" {
+        fn mach_task_self() -> u32;
+        fn task_info(task: u32, flavor: u32, out: *mut u32, count: *mut u32) -> i32;
+    }
+    const TASK_VM_INFO: u32 = 22;
+    let mut words = [0u32; REV3_COUNT];
+    let mut count = words.len() as u32;
+    // SAFETY: `words` has room for `count` natural_t; the kernel writes at most that many
+    let kr = unsafe { task_info(mach_task_self(), TASK_VM_INFO, words.as_mut_ptr(), &mut count) };
+    let graphics = (words[AT] as u64 | (words[AT + 1] as u64) << 32) as i64;
+    (kr == 0 && count as usize >= REV3_COUNT).then(|| graphics.max(0) as u64)
 }
 
 /// Answers the waiters whose command buffers completed (`done` and below).

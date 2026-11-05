@@ -230,7 +230,7 @@ unsafe impl Send for Buf {}
 
 impl Buf {
     pub fn new(device: ObjcId, gen: u32, size: u64) -> Option<Buf> {
-        let alloc = size.max(16);
+        let alloc = size.max(16).checked_add(3)? / 4 * 4;
         let buffer = RcObjcId::from_owned(NonNull::new(unsafe { msg_send![device, newBufferWithLength: alloc options: MTLResourceOptions::StorageModeShared] })?);
         let contents: *mut u8 = unsafe { msg_send![buffer.as_id(), contents] };
         if contents.is_null() {

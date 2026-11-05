@@ -11,8 +11,12 @@
 //! The header also counts what drawing cost: `lists` draw lists re-recorded and `items` draw
 //! items they recorded (a list reused from the last frame counts nothing).
 //!
+//! A running app is traced the same way with the `frame_sources` trace topic (`makepad inspect
+//! <pid> trace topics=frame_sources`), no restart: the report then goes to the app's log
+//! (`makepad inspect <pid> log`), where a process without a terminal can be read.
+//!
 //! An idle app prints nothing (a second with no requests has no line). Off, each hook is one
-//! cached `bool` load.
+//! cached `bool` load and one atomic load.
 
 use std::{
     cell::RefCell,
@@ -22,9 +26,19 @@ use std::{
     time::Instant,
 };
 
-pub fn on() -> bool {
+/// `MAKEPAD_FRAME_TRACE=1` at start: the report goes to stderr.
+fn env_on() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("MAKEPAD_FRAME_TRACE").is_some_and(|v| v != "0" && !v.is_empty()))
+}
+
+/// The `frame_sources` trace topic, switched on in the running app: the report goes to its log.
+fn topic_on() -> bool {
+    crate::makepad_error_log::trace_enabled("frame_sources")
+}
+
+pub fn on() -> bool {
+    env_on() || topic_on()
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -149,5 +163,9 @@ fn flush_if_due(t: &mut Trace) {
         let at = loc.map(|l| format!("{}:{}", l.file(), l.line())).unwrap_or_else(|| "-".into());
         out.push_str(&format!("    {n:5} {:<11} {at}\n", kind.name()));
     }
-    eprint!("{out}");
+    if env_on() {
+        eprint!("{out}");
+    } else {
+        crate::makepad_error_log::log!("{}", out.trim_end());
+    }
 }

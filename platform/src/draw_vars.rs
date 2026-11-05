@@ -83,9 +83,6 @@ pub struct DrawVars {
     #[cfg(not(target_arch = "wasm32"))]
     #[rust]
     pub storage_buffers: Vec<(LiveId, crate::GpuBuffer)>,
-    #[cfg(not(target_arch = "wasm32"))]
-    #[rust]
-    pub indirect_draw: Option<(crate::GpuBuffer, u64)>,
     #[rust([0f32; DRAW_VARS_TAIL_PAD])]
     pub dyn_instances_pad: [f32; DRAW_VARS_TAIL_PAD],
     #[rust([0f32; DRAW_CALL_DYN_INSTANCES])]
@@ -286,7 +283,6 @@ impl DrawVars {
         #[cfg(not(target_arch = "wasm32"))]
         {
             self.storage_buffers = saved.storage_buffers;
-            self.indirect_draw = saved.indirect_draw;
         }
         self.area = saved.area;
         self.append_group_id = saved.append_group_id;
@@ -1373,7 +1369,7 @@ impl DrawVars {
             let pipe = DrawVars::pipeline_state_hash(vm.heap(), io_self);
             {
                 let cx = vm.host.cx();
-                if let Some(&shader_id) = cx.draw_shaders.cache_functions_to_shader.get(&fnhash) {
+                if let Some(shader_id) = cx.draw_shaders.fn_cached(vm.bx.code_ref(), fnhash) {
                     let cx = vm.host.cx_mut();
                     cx.draw_shaders
                         .cache_object_id_to_shader
@@ -1391,7 +1387,7 @@ impl DrawVars {
                 if let Some(entry) = lookup.entry() {
                     let desc = entry.to_desc(vm.heap(), io_self);
                     let code = CxDrawShaderCode::Separate { vertex: entry.vertex().to_owned(), fragment: entry.fragment().to_owned() };
-                    self.register_compiled_shader(vm, io_self, code, &desc, heap_key, fnhash, pipe);
+                    self.register_compiled_shader(vm, io_self, code, &desc, heap_key, (fnhash, None), pipe);
                     return;
                 }
                 Self::log_shader_pack_miss(vm, io_self, key);
@@ -1405,7 +1401,8 @@ impl DrawVars {
                     return;
                 };
                 let desc = DrawShaderDesc::from_output(vm.heap(), &output);
-                self.register_compiled_shader(vm, io_self, code, &desc, heap_key, fnhash, pipe);
+                let reached = crate::draw_shader::FnCachedShader::reached(vm, &output);
+                self.register_compiled_shader(vm, io_self, code, &desc, heap_key, (fnhash, Some(reached)), pipe);
             }
         }
     }
@@ -1481,7 +1478,7 @@ impl DrawVars {
         code: CxDrawShaderCode,
         desc: &DrawShaderDesc,
         heap_key: usize,
-        fnhash: LiveId,
+        (fnhash, reached): (LiveId, Option<(Box<[crate::makepad_script::value::ScriptIp]>, u64)>),
         pipe: LiveId,
     ) {
         {
@@ -1493,7 +1490,7 @@ impl DrawVars {
                     .insert((heap_key, io_self), shader_id);
                 cx.draw_shaders
                     .cache_functions_to_shader
-                    .insert(fnhash, shader_id);
+                    .insert(fnhash, crate::draw_shader::FnCachedShader { shader: shader_id, reached });
                 self.finalize_cached_shader(vm, shader_id);
                 return;
             }
@@ -1545,7 +1542,7 @@ impl DrawVars {
             .insert((heap_key, io_self), shader_id);
         cx.draw_shaders
             .cache_functions_to_shader
-            .insert(fnhash, shader_id);
+            .insert(fnhash, crate::draw_shader::FnCachedShader { shader: shader_id, reached });
         cx.draw_shaders.cache_code_to_shader.insert((code, pipe), shader_id);
         cx.draw_shaders.compile_set.insert(index);
 
@@ -1705,8 +1702,6 @@ mod tests {
                 dyn_uniforms: vec![0.0; 4],
                 #[cfg(not(target_arch = "wasm32"))]
                 storage_buffers: Vec::new(),
-                #[cfg(not(target_arch = "wasm32"))]
-                indirect_draw: None,
                 texture_slots: Default::default(),
                 uniform_buffer_slots: Default::default(),
                 instance_dirty: false,
@@ -1737,8 +1732,6 @@ mod tests {
             dyn_uniforms: Vec::new(),
             #[cfg(not(target_arch = "wasm32"))]
             storage_buffers: Vec::new(),
-            #[cfg(not(target_arch = "wasm32"))]
-            indirect_draw: None,
             texture_slots: Default::default(),
             uniform_buffer_slots: Default::default(),
             dyn_instances_pad: Default::default(),
@@ -1801,6 +1794,4 @@ impl DrawVars {
         if let Some(slot) = self.storage_buffers.iter_mut().find(|b| b.0 == name) { slot.1 = buffer.clone(); }
         else { self.storage_buffers.push((name, buffer.clone())); }
     }
-    pub fn set_indirect_draw(&mut self, buffer: &crate::GpuBuffer, offset: u64) { self.indirect_draw = Some((buffer.clone(), offset)); }
-    pub fn clear_indirect_draw(&mut self) { self.indirect_draw = None; }
 }

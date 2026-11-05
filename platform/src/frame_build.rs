@@ -32,7 +32,7 @@ use crate::{
 use makepad_hal::{
     format, pass_load as load, pipeline_binding as binding, pipeline_blend, pipeline_flags, usage, Attr, CmdWriter, Draw, FrameMeta, HalInfo, Id, Inst, Pass, PipelineDesc, Slice, StrId,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 struct TexRec {
     id: Id,
@@ -97,6 +97,17 @@ pub(crate) struct PipeRec {
     drawn_unready: bool,
     failed: bool,
     pick: Option<usize>,
+    /// the HAL was told a frame draws it while it compiles (`PipelineWanted`, sent once)
+    wanted: bool,
+    /// a caller with a fallback asked whether it can draw while it compiled
+    /// ([`FrameBuilder::probed_unready`]): the frame would draw it
+    probed: std::cell::Cell<bool>,
+}
+
+impl PipeRec {
+    fn new(id: Id, first_shader: usize) -> Self {
+        Self { id, first_shader, ready: false, drawn_unready: false, failed: false, pick: None, wanted: false, probed: Default::default() }
+    }
 }
 
 /// Counters of the last build, for the check run and the traces.
@@ -142,12 +153,15 @@ impl BufIds {
 #[derive(Default)]
 pub(crate) struct FrameBuilder {
     pub(crate) w: CmdWriter,
+    /// a pipeline was probed while it compiled since the last `want_probed`
+    probes: std::cell::Cell<bool>,
     /// Window targets in the current batch, recorded during the existing pass walk.
     pub(crate) window_frames: Vec<Id>,
     window_submitted: HashMap<Id, u64>,
     window_completed: HashMap<Id, u64>,
-    /// Window frames (target, serial) handed to the HAL to present and not done yet.
-    window_presenting: HashSet<(Id, u64)>,
+    /// Window frames (target, serial) handed to the HAL to present and not done yet, each with the
+    /// live patches (`Cx::live_patches`) it was built with.
+    window_presenting: HashMap<(Id, u64), u64>,
     /// Packet serial -> (window/repaint group, pass name, closes the presented frame).
     pub(crate) timings: HashMap<u64, (u64, String, bool)>,
     pub(crate) info: HalInfo,
@@ -256,8 +270,9 @@ impl FrameBuilder {
         self.window_completed.get(&window).copied().unwrap_or(0)
     }
 
-    /// Whether `serial` was a window frame submitted to `target` for presenting (a frame on the glass).
-    pub(crate) fn frame_done(&mut self, target: Id, serial: u64) -> bool {
+    /// When `serial` was a window frame submitted to `target` for presenting (a frame on the
+    /// glass): the live patches it was built with.
+    pub(crate) fn frame_done(&mut self, target: Id, serial: u64) -> Option<u64> {
         // Texture targets may reuse a window's numeric id; only a submitted window frame counts.
         if self.window_submitted.get(&target) == Some(&serial) {
             self.window_completed.insert(target, serial);
@@ -268,7 +283,7 @@ impl FrameBuilder {
     pub(crate) fn window_closed(&mut self, window: Id) {
         self.window_submitted.remove(&window);
         self.window_completed.remove(&window);
-        self.window_presenting.retain(|(target, _)| *target != window);
+        self.window_presenting.retain(|(target, _), _| *target != window);
     }
 
     /// Logs a gap in the HAL's command set once per reason.
@@ -514,7 +529,7 @@ impl FrameBuilder {
         let id = Id::new(self.pipes.len() as u32, 1);
         let label = self.intern(name);
         self.w.pipeline_create(id, self.info.dialect, Attr { label, ..Default::default() }, blob);
-        self.pipes.push(PipeRec { id, first_shader: usize::MAX, ready: false, drawn_unready: false, failed: false, pick: None });
+        self.pipes.push(PipeRec::new(id, usize::MAX));
         id
     }
     pub(crate) fn owned_texture_update(&mut self, id: Id, rect: [u32; 4], bytes: Vec<u8>) {
@@ -545,7 +560,34 @@ impl FrameBuilder {
         let Some(p) = self.pipes.get_mut(pipe) else { return false };
         if p.ready || p.failed { return false; }
         p.drawn_unready = true;
+        self.want(pipe);
         true
+    }
+
+    /// A frame draws pipeline `pipe` while the HAL compiles it: the HAL hears so once, and its
+    /// compile goes ahead of those no frame draws.
+    pub(crate) fn want(&mut self, pipe: usize) {
+        let p = &mut self.pipes[pipe];
+        if !p.ready && !p.failed && !std::mem::replace(&mut p.wanted, true) {
+            self.w.pipeline_wanted(p.id);
+        }
+    }
+
+    /// A caller with a fallback asked whether pipeline `pipe` can draw, and it cannot yet: the
+    /// frame would draw it. A frame that waits counts it as drawn
+    /// ([`Cx::fb_frame_pipelines_pending`]); the next submit wants it.
+    pub(crate) fn probed_unready(&self, pipe: usize) {
+        if let Some(p) = self.pipes.get(pipe).filter(|p| !p.ready && !p.failed) {
+            if !p.probed.replace(true) { self.probes.set(true); }
+        }
+    }
+
+    /// Wants the pipelines probed since the last call that still compile.
+    pub(crate) fn want_probed(&mut self) {
+        if !self.probes.replace(false) { return; }
+        for pipe in 0..self.pipes.len() {
+            if self.pipes[pipe].probed.get() { self.want(pipe); }
+        }
     }
 
     /// Whether the HAL said the pipeline is ready (a draw built for it before is skipped by the HAL).
@@ -567,6 +609,11 @@ impl FrameBuilder {
         self.pass_whole = false;
     }
 
+    /// Whether the pass just built left no draw out: only such a paint of a window is grabbed.
+    pub(crate) fn paint_whole(&self) -> bool {
+        self.pass_whole
+    }
+
     /// A draw of the pass being built uses pipeline `pipe`: whether to send it. One the HAL has
     /// not answered yet is sent and skipped by the HAL, so this paint is not whole and the
     /// answer repaints; a failed one is never drawn, and its picture is final without it.
@@ -575,8 +622,9 @@ impl FrameBuilder {
         if !p.ready && !p.failed {
             p.drawn_unready = true;
             self.pass_whole = false;
+            self.want(pipe);
         }
-        !p.failed
+        !self.pipes[pipe].failed
     }
 
     /// A draw of the pass being built sampled a render target in state `picture`, and `got`
@@ -1149,7 +1197,7 @@ impl Cx {
             let attr = Attr { label: name, site: source, ..Default::default() };
             fb.w.pipeline_create(id, dialect, attr, &blob);
             fb.stats.pipeline_creates += 1;
-            fb.pipes.push(PipeRec { id, first_shader: index, ready: false, drawn_unready: false, failed: false, pick: None });
+            fb.pipes.push(PipeRec::new(id, index));
             let pick_bytes = mapping.hal_pick_code.as_deref().or_else(|| mapping.pick_code.as_ref().map(|s| s.as_bytes()));
             if let Some(code) = pick_bytes {
                 let pick_index = fb.pipes.len();
@@ -1159,7 +1207,7 @@ impl Cx {
                 pick_desc.blend = pipeline_blend::RAW;
                 let pick_blob = CmdWriter::draw_pipeline_blob(pick_desc, code, &bindings, &layout, &storage);
                 fb.w.pipeline_create(pick_id, dialect, attr, &pick_blob);
-                fb.pipes.push(PipeRec { id: pick_id, first_shader: index, ready: false, drawn_unready: false, failed: false, pick: None });
+                fb.pipes.push(PipeRec::new(pick_id, index));
                 fb.pipes[pipe].pick = Some(pick_index);
                 fb.stats.pipeline_creates += 1;
             }
@@ -1229,6 +1277,7 @@ impl Cx {
                 }
                 if !fb.pipes[pipe].ready {
                     fb.pipes[pipe].drawn_unready = true;
+                    fb.want(pipe);
                     return;
                 }
             }
@@ -1254,7 +1303,12 @@ impl Cx {
     /// One pass into one FramePacket. None when the pass paints nothing now.
     fn fb_pass(&mut self, fb: &mut FrameBuilder, pass_id: DrawPassId, input_ns: u64) -> Option<u64> {
         let picking = self.pick.paint.is_some();
-        if !picking && !self.compute_prepare(fb, Some(pass_id)) { return None; }
+        if !picking && !self.compute_prepare(fb, Some(pass_id)) {
+            // Its compute waits for a pipeline the HAL compiles (a part's field still to bake): it
+            // keeps its older picture, which is not what it recorded, and the answer repaints.
+            self.passes[pass_id].incomplete = true;
+            return None;
+        }
         let build_start = makepad_hal::clock_ns();
         let Some(list_id) = self.passes[pass_id].main_draw_list_id else {
             // a frozen texture: its producer detached and dropped its list
@@ -1514,7 +1568,7 @@ impl Cx {
         }
         let end = makepad_hal::clock_ns();
         let (target, kind) = match (window.filter(|_| is_window), self.passes[pass_id].color_textures.first()) {
-            (Some(w), _) => (Id::new(w.0 as u32, w.1 as u32), makepad_hal::target::WINDOW | capture_flag(w.0) | if self.window_snapshot_wanted(w.0) || self.hal_capture_due(w) || self.screenshot_requests.iter().any(|request| crate::remote::grab_waits_on_window(request.request_id, w.id())) { makepad_hal::target::SNAPSHOT } else { 0 }),
+            (Some(w), _) => (Id::new(w.0 as u32, w.1 as u32), makepad_hal::target::WINDOW | capture_flag(w.0) | if self.window_snapshot_wanted(w.0) || self.hal_capture_due(w) || (fb.pass_whole && self.screenshot_requests.iter().any(|request| crate::remote::grab_waits_on_window(request.request_id, w.id()))) { makepad_hal::target::SNAPSHOT } else { 0 }),
             (None, Some(_)) => (pass.color[0], makepad_hal::target::TEXTURE),
             (None, None) => (Id::NONE, makepad_hal::target::TEXTURE),
         };
@@ -1548,7 +1602,7 @@ impl Cx {
             fb.window_frames.push(target);
             fb.window_submitted.insert(target, serial);
             if !picking {
-                fb.window_presenting.insert((target, serial));
+                fb.window_presenting.insert((target, serial), self.live_patches);
             }
             if let (Some(window), Some((index, _))) = (window, hosted_target) {
                 self.hal.hosted.as_mut().unwrap().submitted(window, index, serial, [tw as u32, th as u32]);
@@ -1677,6 +1731,32 @@ impl Cx {
         fb.owner = outer_owner;
     }
 
+    /// The pipelines a frame that waits (a window's first, a host-driven one) waits for: those
+    /// its live draw lists draw, and those a caller with a fallback asked for, while the HAL
+    /// still compiles them. A pipeline nothing draws (a hidden panel's, a renderer lane without
+    /// geometry) compiles on behind them without holding the frame. Each is wanted: it goes
+    /// ahead in the HAL's compile queue.
+    pub(crate) fn fb_frame_pipelines_pending(&mut self, fb: &mut FrameBuilder) -> usize {
+        fb.want_probed();
+        if fb.pipelines_pending() == 0 { return 0; }
+        let mut drawn = vec![false; fb.pipes.len()];
+        for list in self.draw_lists.iter_live() {
+            for index in 0..list.draw_items.len() {
+                let Some(call) = list.draw_items[index].kind.draw_call() else { continue };
+                if let Some(pipe) = self.draw_shaders[call.draw_shader_id.index].pipeline_id { drawn[pipe] = true; }
+            }
+        }
+        let mut pending = 0;
+        for (pipe, drawn) in drawn.into_iter().enumerate() {
+            let p = &fb.pipes[pipe];
+            if (drawn || p.probed.get()) && !p.ready && !p.failed {
+                pending += 1;
+                fb.want(pipe);
+            }
+        }
+        pending
+    }
+
     /// What the draws of `list` (and its sub-lists) wait for: a shader still queued for
     /// compilation, or a pipeline the HAL is still compiling (marked, so its PipelineReady
     /// repaints). Failed pipelines wait for nothing: their draws are left out for good.
@@ -1734,7 +1814,6 @@ impl Cx {
             self.passes[pass_id].repaint_next = true;
         }
         let slots = sh.mapping.instances.total_slots;
-        let indirect = self.draw_lists[list_id].draw_items[item_id].kind.draw_call().is_some_and(|c| c.indirect_draw.is_some());
 
         // the paint-order counter: update the call's zbias uniform, then step
         let z = *zbias;
@@ -1755,7 +1834,7 @@ impl Cx {
                 item.instances.as_ref().map_or(0, |v| v.len() / slots)
             };
         }
-        if (instances == 0 || slots == 0) && !(indirect && slots == 0) {
+        if instances == 0 || slots == 0 {
             // nothing to draw, nothing owed: the content is consumed as it is, and a buffer the
             // item drew from before goes
             fb.inst_release((list_id.index(), item_id));
@@ -1858,15 +1937,16 @@ impl Cx {
         }
 
         // the instances: inline floats, a retained publication's buffer, or a shared block's
-        let inst = if indirect && slots == 0 { Inst::inline(Slice::EMPTY, 1) } else {
-            match self.fb_instances(fb, list_id, item_id, slots, instances, serial) { Some(inst) => inst, None => return }
+        let inst = match self.fb_instances(fb, list_id, item_id, slots, instances, serial) {
+            Some(inst) => inst,
+            None => return,
         };
 
         // the instance ranges, clamped to what is resident
         let (list, _) = self.draw_lists.list_and_upload_budget(list_id);
         let item = list.draw_items.binding_mut(item_id);
         let mut inst_ranges = makepad_hal::Range::default();
-        if !indirect && !item.instance_ranges.is_empty() {
+        if !item.instance_ranges.is_empty() {
             fb.ranges.clear();
             let count = instances as u32;
             for r in &item.instance_ranges {
@@ -1912,9 +1992,8 @@ impl Cx {
         let scissor = call.options.scissor.map_or([f32::NAN; 4], |s| s.map(|v| v as f32));
         let storage: Vec<_> = sh.mapping.storage_buffers.iter().map(|binding| call.storage_buffers.iter().find(|b| b.0 == binding.name).map_or(Id::NONE, |b| b.1.hal_id())).collect();
         let storage_buffers = fb.w.put_ids(&storage);
-        let (indirect_buffer, indirect_offset) = call.indirect_draw.as_ref().map_or((Id::NONE, 0), |b| (b.0.hal_id(), b.1));
         let draw = Draw {
-            storage_buffers, indirect_buffer, indirect_offset,
+            storage_buffers,
             pipeline: fb.pipes[pipe_index].id,
             vb,
             ib,
@@ -1939,7 +2018,7 @@ impl Cx {
             list: list_id.index() as u32,
             item: item_id as u32,
             list_name,
-            bounds: if indirect { [f32::NAN; 4] } else { instance_bounds(&sh.mapping, &list.draw_list_uniforms, item, slots, instances, fb.pass_px) },
+            bounds: instance_bounds(&sh.mapping, &list.draw_list_uniforms, item, slots, instances, fb.pass_px),
         };
         if dump || sh.mapping.flags.debug_draw {
             let data = item.retained_instances.as_ref().map(|v| v.data()).or(item.instances.as_deref()).unwrap_or(&[]);
@@ -2195,8 +2274,8 @@ mod tests {
         let mut fb = FrameBuilder::default();
         let new_id = Id::new(0, 1);
         let bad_id = Id::new(1, 1);
-        fb.pipes.push(PipeRec { id: new_id, first_shader: 0, ready: false, drawn_unready: false, failed: false, pick: None });
-        fb.pipes.push(PipeRec { id: bad_id, first_shader: 1, ready: false, drawn_unready: false, failed: false, pick: None });
+        fb.pipes.push(PipeRec::new(new_id, 0));
+        fb.pipes.push(PipeRec::new(bad_id, 1));
         assert_eq!(fb.pipelines_pending(), 2);
         // compiling: the pass waits for it (keeps its picture) and its answer repaints
         assert!(fb.pipeline_waited_for(0));
@@ -2212,7 +2291,7 @@ mod tests {
     #[test]
     fn a_draw_whose_pipeline_compiles_leaves_the_paint_not_whole() {
         let mut fb = FrameBuilder::default();
-        let rec = |id: Id, ready: bool, failed: bool| PipeRec { id, first_shader: 0, ready, drawn_unready: false, failed, pick: None };
+        let rec = |id: Id, ready: bool, failed: bool| PipeRec { ready, failed, ..PipeRec::new(id, 0) };
         fb.pipes.push(rec(Id::new(0, 1), true, false));
         fb.pipes.push(rec(Id::new(1, 1), false, false));
         fb.pipes.push(rec(Id::new(2, 1), false, true));
@@ -2309,8 +2388,6 @@ mod tests {
             dyn_uniforms: vec![0.0; 4],
             #[cfg(not(target_arch = "wasm32"))]
             storage_buffers: Vec::new(),
-            #[cfg(not(target_arch = "wasm32"))]
-            indirect_draw: None,
             texture_slots: Default::default(),
             uniform_buffer_slots: Default::default(),
             instance_dirty: true,
@@ -2320,6 +2397,30 @@ mod tests {
             pick_id: 0,
         }));
         items.draw_items.finish_recording();
+    }
+
+    /// A window's first frame waits for the pipelines it draws, not for every pipeline made:
+    /// with the one it draws ready it presents while one nothing draws still compiles. The one
+    /// it draws was wanted while it compiled (it jumps the HAL's compile queue); one a caller
+    /// with a fallback asked for counts as drawn.
+    #[test]
+    fn a_first_frame_waits_only_for_the_pipelines_it_draws() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut fb = FrameBuilder::default();
+        let (_pass, list, _target) = texture_pass(&mut cx);
+        fb.pipes.push(PipeRec::new(Id::new(0, 1), 0));
+        fb.pipes.push(PipeRec::new(Id::new(1, 1), 1));
+        let drawn = shader(&mut cx, Some(0));
+        shader(&mut cx, Some(1));
+        record_draw(&mut cx, &list, drawn);
+        assert_eq!(cx.fb_frame_pipelines_pending(&mut fb), 1, "the one it draws, compiling");
+        assert!(fb.pipes[0].wanted && !fb.pipes[1].wanted, "only what it draws jumps the queue");
+        fb.pipeline_ready(Id::new(0, 1));
+        assert_eq!(fb.pipelines_pending(), 1, "the other still compiles");
+        assert_eq!(cx.fb_frame_pipelines_pending(&mut fb), 0, "and the frame presents without it");
+        fb.probed_unready(1);
+        assert_eq!(cx.fb_frame_pipelines_pending(&mut fb), 1, "a probed one would be drawn");
+        assert!(fb.pipes[1].wanted);
     }
 
     #[test]
@@ -2353,7 +2454,7 @@ mod tests {
         assert!(cx.fb_pass(&mut fb, id, 0).is_some());
         assert_eq!(cx.passes[id].painted_serial, 4);
         // recorded again with a draw whose pipeline the HAL is compiling
-        fb.pipes.push(PipeRec { id: Id::new(0, 1), first_shader: 0, ready: false, drawn_unready: false, failed: false, pick: None });
+        fb.pipes.push(PipeRec::new(Id::new(0, 1), 0));
         let compiling = shader(&mut cx, Some(0));
         record_draw(&mut cx, &list, compiling);
         cx.passes[id].paint_dirty = true;
@@ -2364,17 +2465,81 @@ mod tests {
         assert_eq!(cx.passes[id].painted_serial, 4);
     }
 
+    /// A grab is of a whole paint: a window frame that left out a draw whose shader is queued, or
+    /// whose pipeline the HAL still compiles, is not grabbed (the grab waits), and the paint the
+    /// answer brings takes it.
+    #[test]
+    fn a_grab_waits_for_a_paint_that_skipped_no_draw() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut fb = FrameBuilder::default();
+        let (pass, list, _target) = texture_pass(&mut cx);
+        let id = pass.draw_pass_id();
+        let window = crate::window::WindowId(0, 0);
+        let grab = makepad_studio_protocol::ScreenshotRequest { request_id: 1, kind_id: 0 };
+        // a paint that left out a draw whose shader is still queued for compilation
+        cx.screenshot_requests.push(grab.clone());
+        let queued = shader(&mut cx, None);
+        record_draw(&mut cx, &list, queued);
+        cx.repaint_id = 4;
+        assert!(cx.fb_pass(&mut fb, id, 0).is_some(), "the paint goes ahead without the draw");
+        cx.hal_window_readbacks(&mut fb, window, 4, 4);
+        assert_eq!(cx.screenshot_requests.len(), 1, "the grab waits");
+        // the shader compiled and its pipeline is ready: the next paint is whole and is grabbed
+        cx.draw_shaders.compile_set.remove(&queued);
+        cx.draw_shaders.shaders[queued].pipeline_id = Some(0);
+        fb.pipes.push(PipeRec { ready: true, ..PipeRec::new(Id::new(0, 1), queued) });
+        cx.repaint_id = 5;
+        assert!(cx.fb_pass(&mut fb, id, 0).is_some());
+        cx.hal_window_readbacks(&mut fb, window, 4, 4);
+        assert!(cx.screenshot_requests.is_empty(), "the whole paint is grabbed");
+        // the same for a draw sent while the HAL compiles its pipeline (the HAL skips it)
+        cx.screenshot_requests.push(grab);
+        fb.pipes.push(PipeRec::new(Id::new(1, 1), queued));
+        assert!(fb.draw_with(1));
+        cx.hal_window_readbacks(&mut fb, window, 4, 4);
+        assert_eq!(cx.screenshot_requests.len(), 1, "the grab waits for the pipeline");
+        assert!(fb.pipeline_ready(Id::new(1, 1)), "its answer repaints");
+        cx.repaint_id = 6;
+        assert!(cx.fb_pass(&mut fb, id, 0).is_some());
+        cx.hal_window_readbacks(&mut fb, window, 4, 4);
+        assert!(cx.screenshot_requests.is_empty(), "the whole paint is grabbed");
+    }
+
+    /// A pass whose compute waits for a pipeline keeps its older picture, unfinished: what samples
+    /// it is not whole either, so no grab takes it. (An app's march and its grabs went on over a part's
+    /// field whose bake waited for its kernel, and the part was missing from a "whole" frame.)
+    #[test]
+    fn a_pass_waiting_for_its_compute_keeps_an_unfinished_picture() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut fb = FrameBuilder::default();
+        let (pass, _list, target) = texture_pass(&mut cx);
+        let (consumer, _consumer_list, _consumer_target) = texture_pass(&mut cx);
+        let id = pass.draw_pass_id();
+        cx.repaint_id = 4;
+        assert!(cx.fb_pass(&mut fb, id, 0).is_some());
+        cx.passes[id].paint_dirty = false;
+        assert!(!cx.passes[id].incomplete);
+        // an unattached compute pass still queued: it was held for a pipeline, and the pass
+        // attached behind it waits with it
+        crate::gpu_compute::ComputePass::new("held", None).submit(&mut cx);
+        crate::gpu_compute::ComputePass::new("bake", Some(id)).submit(&mut cx);
+        assert!(cx.fb_pass(&mut fb, id, 0).is_none(), "no paint before its compute");
+        assert!(cx.passes[id].incomplete, "the picture it keeps is not what it recorded");
+        let picture = crate::os::cx_shared::sampled_picture(&cx.passes, &cx.textures, target.texture_id(), consumer.draw_pass_id());
+        assert!(picture.unfinished, "and what samples it is not whole");
+    }
+
     /// A list recorded again holds only what it draws: a slot that drew a retained publication
     /// and now draws nothing, and a slot past a shorter recording (a spare), let go of their
-    /// buffers. (Fab showed its timed print preview while the live tiles it replaced stayed
-    /// resident, and two previews of one slice at once.)
+    /// buffers. (An app showed its timed preview while the live tiles it replaced stayed
+    /// resident, and two previews of one part at once.)
     #[test]
     fn slots_that_stop_drawing_a_publication_let_go_of_its_buffer() {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         let mut fb = FrameBuilder::default();
         let (pass, list, _target) = texture_pass(&mut cx);
         let id = pass.draw_pass_id();
-        fb.pipes.push(PipeRec { id: Id::new(0, 1), first_shader: 0, ready: true, drawn_unready: false, failed: false, pick: None });
+        fb.pipes.push(PipeRec { ready: true, ..PipeRec::new(Id::new(0, 1), 0) });
         let ready = shader(&mut cx, Some(0));
         // one draw of no instances, where the last recording's two slots drew publications
         record_draw(&mut cx, &list, ready);

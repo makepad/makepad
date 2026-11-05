@@ -220,6 +220,11 @@ pub struct Cx {
     /// preserved because the source-defined defaults aren't re-asserted.
     pub pending_script_reapply: bool,
 
+    /// A design re-run left the previous module tree behind as garbage: the event loop collects
+    /// right after this beat's draw (`app_main!`), so the frame that shows the edit does not wait
+    /// for the collection (8-15 ms of every design edit in a large app, 11-04).
+    pub gc_after_draw: bool,
+
     /// When true, the next event-loop iteration will fire `Event::LiveEdit`,
     /// which re-runs `script_mod` and re-applies with `Apply::Rebake`. Use
     /// this when a primitive heap value (e.g. `mod.widgets.SAFE_INSET_PAD_TOP`)
@@ -248,6 +253,10 @@ pub struct Cx {
     /// otherwise every safe-area inset change wipes each `set_text`,
     /// `set_visible` and animator state in the tree.
     pub(crate) live_edit_apply: Apply,
+
+    /// How many live patches (`std::relax::patched`) this context has taken in: what a grab's
+    /// frame was drawn with.
+    pub(crate) live_patches: u64,
 
     /// `WindowGeomChange` events queued up during an event dispatch.
     pub(crate) pending_window_geom_changes: Vec<WindowGeomChangeEvent>,
@@ -1123,11 +1132,13 @@ impl Cx {
 
             display_context: Default::default(),
             pending_script_reapply: false,
+            gc_after_draw: false,
             pending_style_reload: false,
             reload_generation: 0,
             pending_live_edit_request: false,
             live_edit_errors: Vec::new(),
             live_edit_apply: Apply::Reload,
+            live_patches: 0,
             pending_window_geom_changes: Default::default(),
             clear_hover_queued: false,
 
@@ -1530,6 +1541,23 @@ pub(crate) fn relax_first_present() {
 #[cfg(not(any(unix, windows)))]
 pub(crate) fn relax_first_present() {}
 
+/// `app_main!`'s entry: under Relax the loader starts its first frame's deadline here (a batch
+/// program that links the platform never gets here, and draws no frame). A rustc build has no
+/// such symbol.
+#[cfg(any(unix, windows))]
+#[doc(hidden)]
+pub fn relax_app_main() {
+    let hook = relax_host_symbol(c"relax_app_main");
+    if !hook.is_null() {
+        let hook = unsafe { std::mem::transmute::<*mut std::ffi::c_void, extern "C" fn()>(hook) };
+        hook();
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+#[doc(hidden)]
+pub fn relax_app_main() {}
+
 /// Before the first window frame is submitted: the loader may hold it (`makepad run` checks the
 /// app's own crates beside main, and an error there ends the run before any frame). A rustc
 /// build has no such symbol.
@@ -1583,3 +1611,18 @@ pub(crate) fn relax_frame_done() {
 
 #[cfg(not(any(unix, windows, target_arch = "wasm32")))]
 pub(crate) fn relax_frame_done() {}
+
+/// A window frame on the glass was built with `patches` live patches (`Cx::live_patches`), under
+/// Relax: the loader's `inspect live` says so (`frame_patch`). The symbol is looked up once.
+#[cfg(any(unix, windows))]
+pub(crate) fn relax_frame_patch(patches: u64) {
+    static HOOK: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    let hook = *HOOK.get_or_init(|| relax_host_symbol(c"relax_frame_patch") as usize);
+    if hook != 0 {
+        let hook = unsafe { std::mem::transmute::<usize, extern "C" fn(u64)>(hook) };
+        hook(patches);
+    }
+}
+
+#[cfg(not(any(unix, windows, target_arch = "wasm32")))]
+pub(crate) fn relax_frame_patch(_patches: u64) {}

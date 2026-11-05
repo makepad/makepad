@@ -120,7 +120,7 @@ pub(crate) fn validate_draw(s: &crate::session::Session, d: &Draw, arena: &[u8],
         let id = crate::buffers::id_at(arena, d.storage_buffers, i);
         if !s.buffers.get(s.id, id).is_ok_and(|b| b.val.kind & buffer_kind::KIND_MASK == buffer_kind::STORAGE) { return Err("invalid draw storage buffer".into()); }
     }
-    validate_indirect(s, d.indirect_buffer, d.indirect_offset, 20)
+    Ok(())
 }
 
 fn append<T: Wire>(out: &mut Vec<u8>, records: &[T]) -> Range {

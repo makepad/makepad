@@ -162,6 +162,7 @@ pub struct WinInfo {
 }
 
 pub struct GrabSink {
+    pub id: u64,
     pub window: Option<usize>,
     pub requested_at: Instant,
     pub scale: f64,
@@ -171,8 +172,36 @@ pub struct GrabSink {
     pub tx: SyncSender<Result<Grabbed, String>>,
 }
 
+/// A grab's frame: its number (`Cx::repaint_id`, counting drawn frames) and how many live patches
+/// (`std::relax::patched`) the app had applied when it drew it. A grab after a patch shows the
+/// patch's frame or a later one: the grab's command is served after the app took in every patch
+/// installed before it (`Cx::poll_live_patch`), and its snapshot is a frame drawn after that.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Drawn {
+    pub frame: u64,
+    pub patch: u64,
+}
+
+/// The armed grabs whose snapshot a frame build took, until they are delivered.
+static GRAB_DRAWN: Mutex<Vec<(u64, Drawn)>> = Mutex::new(Vec::new());
+
+/// The frame build put a snapshot of `ids` in frame `frame` (the UI thread).
+pub fn grabs_drawn(ids: &[u64], drawn: Drawn) {
+    let mut d = GRAB_DRAWN.lock().unwrap_or_else(|e| e.into_inner());
+    d.extend(ids.iter().filter(|id| is_grab_id(**id)).map(|id| (*id, drawn)));
+}
+
+/// The frame grab `id`'s snapshot was taken in (taken out: the grab is being delivered).
+pub fn take_grab_drawn(id: u64) -> Option<Drawn> {
+    let mut d = GRAB_DRAWN.lock().unwrap_or_else(|e| e.into_inner());
+    let i = d.iter().position(|x| x.0 == id)?;
+    Some(d.swap_remove(i).1)
+}
+
 impl Drop for GrabSink {
     fn drop(&mut self) {
+        // a grab that failed or was cancelled after its frame was drawn
+        take_grab_drawn(self.id);
         PENDING_GRABS.fetch_sub(1, Ordering::Relaxed);
     }
 }
@@ -229,6 +258,7 @@ pub fn start_encoder() -> Result<(), String> {
                     capture_ms: job.capture_ms,
                     encode_ms: started.elapsed().as_secs_f64() * 1000.0,
                     backend_png: job.backend_png,
+                    drawn: take_grab_drawn(job.sink.id),
                     _bytes: job.bytes.take(),
                 });
                 let _ = job.sink.tx.try_send(result);
@@ -436,6 +466,9 @@ pub enum Cmd {
         tx: Sender<Reply>,
     },
     Quit(Sender<Reply>),
+    /// The run ends either way (a hub stopping its lease's run): the app's exit, whatever the person
+    /// is doing to it. Refused, the hub ended it on the spot, without its exit write.
+    QuitForced(Sender<Reply>),
     /// The hot-patchable constant tables of the compiled shaders (one
     /// shader, or all that have entries).
     ShaderConsts {
@@ -804,7 +837,7 @@ pub const COMMANDS: &[Command] = &[
     Command { words: "shader consts", args: "[shader=ID]", answers: "the compiled shaders' hot-patchable constants", service: "edit", risk: CmdRisk::Read, params: "\"shader\":{\"type\":\"integer\"}", required: &[], positional: &[] },
     Command { words: "shader const", args: "shader=ID i=N v=VALUE | reset=1", answers: "patch one constant on the GPU (no recompile)", service: "edit", risk: CmdRisk::Act, params: "\"shader\":{\"type\":\"integer\"},\"i\":{\"type\":\"integer\"},\"v\":{\"type\":\"number\"},\"reset\":{\"type\":\"boolean\"}", required: &[], positional: &[] },
     Command { words: "gpu_inventory", args: "[n=15]", answers: "Cx GPU and CPU-retained graphics memory (textures, free pool slots, draw-list instances, geometries)", service: "inspect", risk: CmdRisk::Read, params: "\"n\":{\"type\":\"integer\"}", required: &[], positional: &[] },
-    Command { words: "quit", args: "", answers: "shut the app down gracefully (no final grab)", service: "ui", risk: CmdRisk::Destructive, params: "", required: &[], positional: &[] },
+    Command { words: "quit", args: "[force=1]", answers: "shut the app down gracefully (no final grab); force=1: even while the person is using it", service: "ui", risk: CmdRisk::Destructive, params: "\"force\":{\"type\":\"integer\"}", required: &[], positional: &[] },
 ];
 
 /// The commands the client side answers by opening the `frames` service.
@@ -1306,6 +1339,7 @@ pub struct Grabbed {
     pub capture_ms: f64,
     pub encode_ms: f64,
     pub backend_png: bool,
+    pub drawn: Option<Drawn>,
     pub _bytes: Option<GrabBytes>,
 }
 
@@ -1376,6 +1410,7 @@ pub fn arm_grabs(
             sinks.insert(
                 id,
                 GrabSink {
+                    id,
                     window,
                     requested_at: started + every * index as u32,
                     scale,
@@ -1561,8 +1596,9 @@ pub fn parse_frames_args(args: &str) -> Result<FramesArgs, String> {
 
 /// The header of one `frames` record (see `makepad_remote::frames`).
 pub fn frame_header(seq: u64, g: &Grabbed, raw: bool) -> String {
+    let drawn = g.drawn.map_or(String::new(), |d| format!(",\"frame\":{},\"patch\":{}", d.frame, d.patch));
     format!(
-        "{{\"seq\":{seq},\"w\":{},\"h\":{},\"window\":{},\"t_ns\":{},\"codec\":\"{}\",\"capture_ms\":{:.3},\"encode_ms\":{:.3},\"capture_kind\":{}}}",
+        "{{\"seq\":{seq},\"w\":{},\"h\":{},\"window\":{},\"t_ns\":{},\"codec\":\"{}\",\"capture_ms\":{:.3},\"encode_ms\":{:.3},\"capture_kind\":{}{drawn}}}",
         g.width,
         g.height,
         g.window_id,

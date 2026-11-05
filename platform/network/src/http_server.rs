@@ -312,13 +312,7 @@ pub fn start_http_server(http_server: HttpServer) -> Option<HttpServerThread> {
         println!("Cannot bind http server port");
         return None;
     };
-    let mut wake = listener.local_addr().ok()?;
-    if wake.ip().is_unspecified() {
-        wake.set_ip(match wake.ip() {
-            IpAddr::V4(_) => IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
-            IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::LOCALHOST),
-        });
-    }
+    let wake = dial_addr(listener.local_addr().ok()?);
     let stop = Arc::new(AtomicBool::new(false));
     let stopped = stop.clone();
 
@@ -670,7 +664,7 @@ fn handle_web_socket(
     let _ = tcp_stream.set_read_timeout(None);
     let _ = tcp_stream.set_write_timeout(None);
 
-    let mut write_tcp_stream = tcp_stream.try_clone().unwrap();
+    let mut write_tcp_stream = crate::clone_tcp(&tcp_stream).unwrap();
     let _ = write_tcp_stream.set_nodelay(true);
     let (tx_socket, rx_socket) = mpsc::channel::<Vec<u8>>();
 

@@ -210,8 +210,8 @@ impl Hub {
         c.len()
     }
 
-    /// (kept, still open) clients, without pruning (tests).
-    #[cfg(test)]
+    /// (kept, still open) clients, without pruning (the Unix hub tests).
+    #[cfg(all(test, unix))]
     pub(crate) fn kept_clients(&self) -> (usize, usize) {
         let c = self.0.clients.lock().unwrap();
         (c.len(), c.iter().filter(|c| !c.is_closed()).count())
@@ -622,23 +622,51 @@ pub fn ask(client: &Client, target: &str, service: &str, args: &str, line: &str,
     ch.send(line.as_bytes().to_vec()).map_err(|e| e.to_string())?;
     let mut had_err = false;
     loop {
-        match ch.recv() {
-            Some(Event::Data(d)) => {
-                for l in String::from_utf8_lossy(&d).lines().filter(|l| !l.is_empty()) {
-                    if l.starts_with("{\"end\":") {
-                        return Ok(had_err);
-                    }
-                    had_err |= l.starts_with("{\"err\":");
-                    if !each(l) {
-                        return Ok(had_err);
-                    }
+        let Some(event) = ch.recv() else { return Err("the hub connection ended".into()) };
+        if let Some(done) = answer_event(event, &mut had_err, each) {
+            return done;
+        }
+    }
+}
+
+/// [`ask`] that gives the answer up once `keep` says no (asked every 20 ms while no line comes):
+/// `Ok(None)` then. The request's channel closes with it, which ends the request at the far end
+/// too (an app's `watch` stops waiting).
+pub fn ask_while(client: &Client, target: &str, service: &str, args: &str, line: &str, each: &mut dyn FnMut(&str) -> bool, keep: &dyn Fn() -> bool) -> Result<Option<bool>, String> {
+    let ch = client.open("route", &format!("{target} {service} {args}")).map_err(|e| e.to_string())?;
+    ch.send(line.as_bytes().to_vec()).map_err(|e| e.to_string())?;
+    let mut had_err = false;
+    loop {
+        let event = match ch.recv_timeout(Duration::from_millis(20)) {
+            Ok(event) => event,
+            Err(true) if keep() => continue,
+            Err(true) => return Ok(None),
+            Err(false) => return Err("the hub connection ended".into()),
+        };
+        if let Some(done) = answer_event(event, &mut had_err, each) {
+            return done.map(Some);
+        }
+    }
+}
+
+/// One event of an answer to [`ask`]: Some once it ends the answer.
+fn answer_event(event: Event, had_err: &mut bool, each: &mut dyn FnMut(&str) -> bool) -> Option<Result<bool, String>> {
+    match event {
+        Event::Data(d) => {
+            for l in String::from_utf8_lossy(&d).lines().filter(|l| !l.is_empty()) {
+                if l.starts_with("{\"end\":") {
+                    return Some(Ok(*had_err));
+                }
+                *had_err |= l.starts_with("{\"err\":");
+                if !each(l) {
+                    return Some(Ok(*had_err));
                 }
             }
-            Some(Event::Opened(_)) => {}
-            Some(Event::Closed(CLOSE_NORMAL, _)) => return Err("the answer ended without an end line".into()),
-            Some(Event::Closed(_, why)) => return Err(why),
-            None => return Err("the hub connection ended".into()),
+            None
         }
+        Event::Opened(_) => None,
+        Event::Closed(CLOSE_NORMAL, _) => Some(Err("the answer ended without an end line".into())),
+        Event::Closed(_, why) => Some(Err(why)),
     }
 }
 

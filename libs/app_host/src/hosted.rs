@@ -362,23 +362,28 @@ impl HostedApp {
     /// Whether the beat has anything to drive: a Tick the child asked for
     /// or input waits for, one still unanswered, the startup handshake, or
     /// the swapchain transport.
+    ///
+    /// The handshake and the first frame are owed only to a window the owner
+    /// gave a size: one it never laid out (a service's run view with its
+    /// dropdown closed) has no geometry to send and nothing to present, and
+    /// ticking it for that first frame woke owner and child every frame for
+    /// good. Its first layout wakes the beat (`ensure_swapchain_for_rect`).
     fn beat_needed(&self) -> bool {
         if self.at_rest() {
             return false;
         }
+        let sized = self.last_rect.size.x > 0.0 && self.last_rect.size.y > 0.0;
         if !self.paces_ticks {
             // The pacing window ticks the child; this one only owes it its
             // bootstrap and the pointer it holds.
             return self.pending_move.is_some()
-                || (self.app_ready_for_swapchain && !self.presenting())
-                || self.bootstrap_pending
+                || (sized && ((self.app_ready_for_swapchain && !self.presenting()) || self.bootstrap_pending))
                 || self.transport_busy();
         }
         self.tick_wanted
             || self.tick_outstanding.is_some()
             || self.pending_move.is_some()
-            || !self.presenting()
-            || self.bootstrap_pending
+            || (sized && (!self.presenting() || self.bootstrap_pending))
             || self.transport_busy()
     }
 
@@ -1691,6 +1696,24 @@ mod pacing_tests {
         assert!(!app.beat_needed(), "nothing asked, nothing owed: no timer, no tick");
         app.tick_wanted = true;
         assert!(app.beat_needed());
+    }
+
+    /// A window the owner never laid out (a service's run view while its dropdown is closed)
+    /// is not ticked towards a first frame it cannot present: only what the child asks for
+    /// drives it. Once it has a size the handshake and the first frame are owed again.
+    #[test]
+    fn an_unsized_window_is_not_ticked_for_its_first_frame() {
+        at_ms(300.0);
+        let mut app = app();
+        app.bootstrap_pending = true;
+        app.tick_wanted = false;
+        assert!(!app.presenting());
+        assert!(!app.beat_needed(), "no size: no handshake, no first frame to wait for");
+        app.tick_wanted = true;
+        assert!(app.beat_needed(), "the child's own request is served");
+        app.tick_wanted = false;
+        app.last_rect = Rect { pos: dvec2(0.0, 0.0), size: dvec2(320.0, 200.0) };
+        assert!(app.beat_needed(), "laid out: the first frame is owed");
     }
 }
 

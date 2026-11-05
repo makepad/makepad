@@ -101,6 +101,11 @@ impl Chains {
         Ok(Chain { swap, native, size, waitable, buffers: desc.BufferCount, logged_present: false, logged_composed: false, alpha, tree, composed: false, failed_uppers: Vec::new() })
     }
 
+    /// The bytes and count of the back buffers of window `key`'s swapchain, if it has one.
+    pub fn back_buffers(&self, key: Key) -> Option<(u64, u32)> {
+        self.map.get(&key).map(|c| (c.size[0].max(1) as u64 * c.size[1].max(1) as u64 * 4 * c.buffers as u64, c.buffers))
+    }
+
     /// Copies `image` into the window's back buffer and presents it. False when the window has
     /// no native surface (yet / any more) or DXGI did not take the frame.
     pub fn present(&mut self, dev: &Device, shell: &Shared, key: Key, image: &Texture, layered: Option<Layered>) -> bool {

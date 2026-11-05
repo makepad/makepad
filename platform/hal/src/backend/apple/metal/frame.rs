@@ -7,7 +7,7 @@ use super::device::{Done, Loc};
 use super::pipeline::Select;
 use super::resources::*;
 use super::timing::*;
-use super::{window_row, Metal};
+use super::{window_row, LayerSize, Metal};
 use crate::buffers::{id_at, read_ids, read_pairs, CmdView};
 use crate::ledger::Kind;
 use crate::session::{LentRef, Session, TextureObj, HOST};
@@ -459,7 +459,8 @@ impl Metal {
     }
 
     /// Every physical host window accounts for all of its layers, including the
-    /// pristine app image and a pending restore. App aliases do not own these bytes.
+    /// pristine app image, a pending restore and a badge layer's composed image. App
+    /// aliases do not own these bytes.
     pub(super) fn account_host_layers(&self, world: &mut crate::session::World) {
         let now = world.now();
         let Some(s) = world.session_mut(HOST) else { return };
@@ -469,23 +470,32 @@ impl Metal {
             let layers = final_image.into_iter()
                 .chain(overlay.and_then(|o| o.base.as_ref()))
                 .chain(overlay.and_then(|o| o.image.as_ref()))
-                .chain(self.restores.get(&id));
+                .chain(self.restores.get(&id))
+                .chain(self.badged.get(&id.index).and_then(Option::as_ref));
             let mut size = None;
             let mut bytes = 0;
+            let mut layers_count = 0;
             for layer in layers {
                 size = Some((layer.w, layer.h));
                 bytes += allocated_size(layer.tex.obj.as_id());
+                layers_count += 1;
             }
-            if let Some((gen, w, h)) = self.layer_sizes.get(&(HOST, id.index)) {
-                if *gen == id.gen { bytes += *w as u64 * *h as u64 * 4 * 3; size = Some((*w, *h)); }
+            let mut objects = layers_count;
+            if let Some(l) = self.layer_sizes.get(&(HOST, id.index)).filter(|l| l.gen == id.gen) {
+                bytes += l.drawables * l.drawable_bytes;
+                objects += l.drawables;
+                size = Some((l.w, l.h));
             }
             if let Some((w, h)) = size {
                 if let Some(row) = s.ledger.get_mut(Kind::Window, id.index).filter(|row| row.gen == id.gen) {
                     row.bytes = bytes;
+                    row.objects = objects;
                     row.width = w;
                     row.height = h;
                 } else {
-                    s.ledger.add(window_row(id.index, id.gen, bytes, w, h, now, s.frame));
+                    let mut row = window_row(id.index, id.gen, bytes, w, h, now, s.frame);
+                    row.objects = objects;
+                    s.ledger.add(row);
                 }
             }
         }
@@ -779,11 +789,18 @@ impl Metal {
         if !self.native_sync {
             unsafe { let () = msg_send![cb, presentDrawable: drawable.as_id()]; }
         }
-        // the ledger's row of the window: three drawables of this size
-        let now_size = (window.gen, w, h);
-        if self.layer_sizes.insert((owner, physical.index), now_size) != Some(now_size) {
+        // the ledger's row of the physical window (`account_host_layers`): the layer's drawables,
+        // each the size Metal gives its texture, whichever session presents (an app drawing a
+        // lent window presents its host's layer)
+        let known = self.layer_sizes.get(&(owner, physical.index)).filter(|l| (l.gen, l.w, l.h) == (physical.gen, w, h)).is_some();
+        if !known {
+            let drawables: u64 = unsafe { msg_send![layer_id, maximumDrawableCount] };
+            let now_size = LayerSize { gen: physical.gen, w, h, drawables, drawable_bytes: allocated_size(texture) };
+            self.layer_sizes.insert((owner, physical.index), now_size);
             if owner == s.id {
-                s.ledger.add(window_row(window.index, window.gen, w as u64 * h as u64 * 4 * 3, w, h, now, s.frame));
+                let mut row = window_row(physical.index, physical.gen, drawables * now_size.drawable_bytes, w, h, now, s.frame);
+                row.objects = drawables;
+                s.ledger.add(row);
             }
         }
         if self.composing {
@@ -1405,7 +1422,7 @@ impl Metal {
                 continue;
             };
             let index_count = d.index[1] as u64;
-            if d.indirect_buffer.is_none() && (index_count == 0 || d.inst.count == 0) {
+            if index_count == 0 || d.inst.count == 0 {
                 continue;
             }
 
@@ -1563,14 +1580,6 @@ impl Metal {
             if prof_key.is_some() {
                 let size = |id: Id| self.buf.get(&(sid, id.index)).filter(|b| b.gen == id.gen).map_or(0, |b| b.size);
                 prof_draws.push(gpu_prof::DrawRecord::new(s, d, view.arena, vw, vh, depth.is_some(), stride, size(d.vb) + size(d.ib), ntex));
-            }
-            if !d.indirect_buffer.is_none() {
-                let id = d.indirect_buffer;
-                let Some(args) = self.buf.get_mut(&(sid, id.index)).filter(|b| b.gen == id.gen) else { s.bad(); continue; };
-                if d.indirect_offset % 4 != 0 || d.indirect_offset.checked_add(20).is_none_or(|n| n > args.size) { s.bad(); continue; }
-                args.last_bound = seq;
-                unsafe { let _: () = msg_send![enc.id, drawIndexedPrimitives: MTLPrimitiveType::Triangle indexType: index_type indexBuffer: ib indexBufferOffset: 0u64 indirectBuffer: args.buffer.as_id() indirectBufferOffset: d.indirect_offset]; }
-                continue;
             }
             for [start, count] in whole.into_iter().chain(read_pairs(view.arena, d.inst_ranges)) {
                 let start = start.min(d.inst.count) as u64;

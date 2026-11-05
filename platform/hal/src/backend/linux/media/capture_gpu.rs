@@ -64,6 +64,7 @@ impl Vulkan {
         } else {
             let buffer = Buffer::scratch(
                 batch.dev.clone(),
+                crate::ledger::Pool::Capture,
                 length,
                 vk::BufferUsageFlags::TRANSFER_DST,
             )?;

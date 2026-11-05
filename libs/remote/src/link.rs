@@ -94,6 +94,18 @@ fn link_id() -> String {
     format!("{}-{:x}", std::process::id(), crate::cmd::wall_ms())
 }
 
+impl Target {
+    /// The endpoint a discovery file names: its Unix socket, or where there are none (Windows)
+    /// its `tcp:` loopback port and the file's token.
+    pub fn of(app: &crate::discovery::App) -> Target {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(addr) = app.socket.strip_prefix("tcp:") {
+            return Target::Loopback(addr.to_string(), app.text("token").unwrap_or_default());
+        }
+        Target::Unix(PathBuf::from(&app.socket))
+    }
+}
+
 impl Client {
     pub fn new(target: Target, name: &str) -> Client {
         Client(Arc::new(Inner { target, name: name.to_string(), link_id: link_id(), conn: Mutex::new(None), ever: Mutex::new(false), seqs: Mutex::new(HashMap::new()), caps: Mutex::new(Vec::new()), timeout: Mutex::new(None) }))
@@ -106,10 +118,7 @@ impl Client {
             Target::Unix(PathBuf::from(spec))
         } else {
             let app = crate::discovery::find(spec).ok_or_else(|| Error::Refused(CLOSE_LINK_LOST, format!("no running makepad-remote endpoint `{spec}`")))?;
-            match app.socket.strip_prefix("tcp:") {
-                Some(addr) => Target::Loopback(addr.to_string(), app.text("token").unwrap_or_default()),
-                None => Target::Unix(PathBuf::from(app.socket)),
-            }
+            Target::of(&app)
         };
         let c = Client::new(target, "client");
         c.conn()?;

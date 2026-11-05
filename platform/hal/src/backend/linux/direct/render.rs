@@ -331,7 +331,7 @@ impl Peer {
             return Err("display peer requires DMA-BUF modifiers and SYNC_FD on both GPUs".into());
         }
         let local = Image::new(destination.clone(),TextureObj { format:format::BGRA8,w:size[0],h:size[1],depth:1,mips:1,
-            usage:usage::RENDER_TARGET | usage::SAMPLED,bytes:0,imported:false,uploaded:0,lent:None })?;
+            usage:usage::RENDER_TARGET | usage::SAMPLED,bytes:0,imported:false,uploaded:0,lent:None })?.in_pool(crate::ledger::Pool::WindowCopies);
         let bridge = GpuBridge::new(&source,&destination,vk::Extent2D { width:size[0],height:size[1] })?;
         Ok(Self { source,destination,bridge:Some(bridge),local,sent:0,received:0,keep:None,valid:false,sent_op:None,sent_at:0,received_at:0 })
     }
@@ -520,7 +520,7 @@ impl Output {
             return Ok(None);
         }
         let [w,h] = self.size();
-        let staging = Buffer::scratch(self.dev.clone(),w as u64 * h as u64 * 4,buffer_usage())?;
+        let staging = Buffer::scratch(self.dev.clone(),crate::ledger::Pool::Staging,w as u64 * h as u64 * 4,buffer_usage())?;
         transition(&self.dev,self.job.cb,destination,vk::ImageLayout::TRANSFER_DST_OPTIMAL,vk::ImageLayout::TRANSFER_SRC_OPTIMAL);
         let region = vk::BufferImageCopy::default()
             .image_subresource(vk::ImageSubresourceLayers::default().aspect_mask(vk::ImageAspectFlags::COLOR).layer_count(1))
@@ -528,7 +528,7 @@ impl Output {
         // the frame the copy read, on the same GPU: for the pixel-identity check
         let source = if self.peer.is_none() && matches!(frame.image.desc.format,format::BGRA8 | format::RGBA8) {
             let [fw,fh] = [frame.image.desc.w,frame.image.desc.h];
-            let staging = Buffer::scratch(self.dev.clone(),fw as u64 * fh as u64 * 4,buffer_usage())?;
+            let staging = Buffer::scratch(self.dev.clone(),crate::ledger::Pool::Staging,fw as u64 * fh as u64 * 4,buffer_usage())?;
             let region = region.image_extent(vk::Extent3D { width:fw,height:fh,depth:1 });
             unsafe { self.dev.raw.cmd_copy_image_to_buffer(self.job.cb,frame.image.image,vk::ImageLayout::TRANSFER_SRC_OPTIMAL,staging.buffer,&[region]); }
             Some(staging)

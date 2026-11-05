@@ -23,6 +23,7 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// The limits the ledger admits against. Host settings; the device budget
 /// is set from the device when the backend knows it (Metal's recommended
@@ -156,6 +157,7 @@ struct LedgerState {
     pending_bytes: u64,
     #[cfg(not(target_arch = "wasm32"))]
     refused: bool,
+    pressure: bool,
 }
 
 impl LedgerState {
@@ -163,6 +165,7 @@ impl LedgerState {
         self.device_used
             .saturating_add(self.pending_bytes)
             .max(self.reserved)
+            .saturating_add(READBACK_BYTES.load(Ordering::Acquire))
     }
 }
 
@@ -198,7 +201,44 @@ pub struct GpuLedgerSnapshot {
     pub documents: Vec<(String, u64)>,
 }
 
+/// Readback accounting is released by the last lease view, possibly on a worker.
+#[derive(Debug)]
+pub(crate) struct ReadbackReservation { bytes: u64 }
+static READBACK_BYTES: AtomicU64 = AtomicU64::new(0);
+pub(crate) fn release_readback_bytes(bytes: u64) { READBACK_BYTES.fetch_sub(bytes, Ordering::AcqRel); }
+impl ReadbackReservation {
+    /// Transfer the charge to a HAL token; its final HostBuf release returns these bytes.
+    pub(crate) fn transfer(&mut self, bytes: u64) {
+        assert!(bytes <= self.bytes);
+        self.bytes -= bytes;
+    }
+    pub(crate) fn split(&mut self, bytes: u64) -> Self {
+        assert!(bytes <= self.bytes);
+        self.bytes -= bytes;
+        Self { bytes }
+    }
+}
+impl Drop for ReadbackReservation {
+    fn drop(&mut self) { release_readback_bytes(self.bytes); }
+}
+
 impl GpuLedger {
+    pub(crate) fn admit_readback(&self, bytes: u64) -> Result<ReadbackReservation, GpuRefusal> {
+        let mut state = self.state.borrow_mut();
+        let base = state.device_used.saturating_add(state.pending_bytes).max(state.reserved);
+        // Reserve atomically across Cx instances; release hooks run on arbitrary threads.
+        if let Err(held) = READBACK_BYTES.try_update(Ordering::AcqRel, Ordering::Acquire, |held| {
+            let total = held.checked_add(bytes)?;
+            base.checked_add(total).filter(|n| *n <= state.budget.device_bytes).map(|_| total)
+        }) {
+            state.reclaim = state.reclaim.max(bytes);
+            // A refused read is memory pressure: yield just as for a document refusal.
+            #[cfg(not(target_arch = "wasm32"))] { state.refused = true; }
+            return Err(GpuRefusal::Device { document: "readback".into(), wanted: bytes, in_use: base.saturating_add(held), limit: state.budget.device_bytes });
+        }
+        Ok(ReadbackReservation { bytes })
+    }
+
     pub fn new(budget: GpuBudget) -> Self {
         Self {
             state: Rc::new(RefCell::new(LedgerState {
@@ -215,6 +255,7 @@ impl GpuLedger {
                 submitted_epoch: 0,
                 #[cfg(not(target_arch = "wasm32"))]
                 refused: false,
+                pressure: false,
             })),
         }
     }
@@ -263,6 +304,18 @@ impl GpuLedger {
     /// limits.
     pub fn set_budget(&self, budget: GpuBudget) {
         self.state.borrow_mut().budget = budget;
+    }
+
+    /// Whether the person is interacting with what this GPU draws (a drag, an edit, a study
+    /// they wait on): the app (or, on a node, its host) sets it, and every GPU user that sizes
+    /// its own submissions (compute programs, an app's own GPU core) reads it as it sizes the next
+    /// one, keeping each short and one in flight while it holds.
+    pub fn set_pressure(&self, pressure: bool) {
+        self.state.borrow_mut().pressure = pressure;
+    }
+
+    pub fn pressure(&self) -> bool {
+        self.state.borrow().pressure
     }
 
     /// Set only the device-wide byte budget (the backend's measured size).

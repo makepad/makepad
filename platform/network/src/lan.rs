@@ -13,7 +13,7 @@
 //! - `MAKEPAD_LAN=1`: on; `MAKEPAD_LAN=0`: off (a test machine sets it for every job);
 //! - otherwise a hidden instance (`MAKEPAD_HIDE_WINDOWS` set: tests, agent captures, harness runs)
 //!   and a lane's test instance (`MAKEPAD_TEST_LANE` set: devhub's lease runs, visible or not)
-//!   are off, and a visible run is on. So a lane's Fab or Sandbox never takes the headset link,
+//!   are off, and a visible run is on. So a lane's app never takes the headset link,
 //!   the printer or LAN rooms from the dock's app unless the lane asks (`MAKEPAD_LAN=1`).
 //!
 //! `MAKEPAD_NET_AUDIT=1` logs every decision (`[net-audit] lan allow-lan|refuse|pass <site> <target>`) and, from

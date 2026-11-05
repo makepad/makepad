@@ -58,11 +58,12 @@ pub struct SignalToUI(Arc<AtomicBool>);
 
 static UI_SIGNAL: AtomicBool = AtomicBool::new(false);
 
-/// `MAKEPAD_FRAME_TRACE=1`: who raised the app signal, by source line, for the
-/// platform's frame-source report (`take_signal_sources`).
+/// `MAKEPAD_FRAME_TRACE=1` or the `frame_sources` trace topic: who raised the app
+/// signal, by source line, for the platform's frame-source report (`take_signal_sources`).
 fn signal_trace_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("MAKEPAD_FRAME_TRACE").is_some_and(|v| v != "0" && !v.is_empty()))
+        || makepad_error_log::trace_enabled("frame_sources")
 }
 
 type SignalSources = std::collections::HashMap<&'static std::panic::Location<'static>, u32>;

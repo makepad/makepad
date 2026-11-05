@@ -149,13 +149,16 @@ pub trait Gpu {
     fn buffer_create(&mut self, s: &mut Session, id: Id, b: &mut BufferObj) -> Result<(), String>;
     fn buffer_update(&mut self, s: &mut Session, id: Id, b: &mut BufferObj, off: u64, data: &[u8]);
     fn buffer_destroy(&mut self, sid: u32, id: Id);
-    fn buffer_readback(&mut self, s: &mut Session, _id: Id, req: u32, _offset: u64, _len: u64) {
-        s.events.readback(req, readback::NO_RASTER, [0; 4], &[]);
+    fn buffer_readbacks(&mut self, s: &mut Session, req: u32, _ranges: &[BufferReadRange]) {
+        s.events.buffer_leases(req, readback::NO_RASTER, Vec::new());
     }
     fn buffer_evictable(&mut self, sid: u32, id: Id);
     fn pipeline_create(&mut self, s: &mut Session, id: Id, dialect: u32, blob: &PipelineBlob, attr: Attr) -> PipeStatus;
     /// Whether the pipeline was still compiling (it no longer counts as pending).
     fn pipeline_destroy(&mut self, sid: u32, id: Id) -> bool;
+    /// A frame draws the pipeline while it compiles: a backend with a compile queue starts it
+    /// ahead of the pipelines no frame draws.
+    fn pipeline_wanted(&mut self, _sid: u32, _id: Id) {}
     /// Executes one frame packet for a live target and answers `FrameDone`. `None` = the packet
     /// was malformed (no `FrameDone`); otherwise the surfaces lent by other sessions that the
     /// frame sampled and whether it encoded a window pass (see [`lent_state`]).
@@ -1576,6 +1579,8 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
                 created_frame: s.frame,
                 last_used_frame: 0,
                 last_used_ns: 0,
+                objects: 1,
+                note: "",
             });
         }
         HalCmd::BufferUpdate { id, off, bytes } => {
@@ -1604,12 +1609,12 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
                 Err(_) => s.stale(),
             }
         }
-        HalCmd::BufferReadback { id, req, offset, len } => {
-            match s.buffers.get(sid, id) {
-                Ok(b) if offset.checked_add(len).is_some_and(|end| end <= b.val.size) => gpu.buffer_readback(s, id, req, offset, len),
-                Ok(_) => { s.bad(); s.events.readback(req, readback::FAILED, [0; 4], &[]); }
-                Err(_) => { s.stale(); s.events.readback(req, readback::STALE, [0; 4], &[]); }
-            }
+        HalCmd::BufferReadbacks { req, ranges } => {
+            let ranges = crate::compute::records::<BufferReadRange>(ranges, Range { off: 0, len: ranges.len() as u32 });
+            let valid = ranges.as_ref().is_some_and(|ranges| !ranges.is_empty() && ranges.iter().all(|r|
+                r.len != 0 && s.buffers.get(sid, r.id).is_ok_and(|b| r.offset.checked_add(r.len).is_some_and(|end| end <= b.val.size))));
+            if valid { gpu.buffer_readbacks(s, req, &ranges.unwrap()); }
+            else { s.bad(); s.events.buffer_leases(req, readback::FAILED, Vec::new()); }
         }
         HalCmd::BufferDestroy { id } => match s.buffers.remove(sid, id) {
             Ok(_) => {
@@ -1658,6 +1663,8 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
                             created_frame: s.frame,
                             last_used_frame: 0,
                             last_used_ns: 0,
+                            objects: 1,
+                            note: crate::ledger::NO_SIZE,
                         });
                         match gpu.pipeline_create(s, id, dialect, &b, attr) {
                             PipeStatus::Ready => s.events.pipeline_ready(id),
@@ -1672,6 +1679,10 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
                 s.bad();
                 s.events.pipeline_failed(id, b"malformed pipeline blob");
             }
+        },
+        HalCmd::PipelineWanted { id } => match s.pipelines.get(sid, id) {
+            Ok(_) => gpu.pipeline_wanted(sid, id),
+            Err(_) => s.stale(),
         },
         HalCmd::PipelineDestroy { id } => match s.pipelines.remove(sid, id) {
             Ok(_) => {
@@ -1824,6 +1835,8 @@ pub(crate) fn insert_texture(gpu: &mut dyn Gpu, s: &mut Session, id: Id, obj: Te
         created_frame: s.frame,
         last_used_frame: 0,
         last_used_ns: 0,
+        objects: 1,
+        note: "",
     });
 }
 

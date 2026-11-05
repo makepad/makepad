@@ -282,6 +282,7 @@ mod imp {
                 let n = p.get(&["n"]).and_then(|v| v.parse::<usize>().ok()).unwrap_or(15);
                 reply_to_answer(ask(move |tx| Cmd::GpuInventory { n, tx }, 4))
             }
+            "quit" if p.get(&["force"]).is_some() => reply_to_answer(ask(|tx| Cmd::QuitForced(tx), 4)),
             "quit" => reply_to_answer(ask(|tx| Cmd::Quit(tx), 4)),
             // `cap start`, `cap stop`, `cursor`, `midi`, `log`: commands that
             // need platform state are answered by platform.
@@ -1045,6 +1046,12 @@ mod imp {
             return CAPTURE.with_borrow(|capture| capture.as_ref().map(|c| c.window)) == Some(window_id);
         }
         CAPTURES.with_borrow(|captures| captures.windows.get(&request_id).is_none_or(|want| *want == window_id))
+    }
+
+    /// The frame build took the snapshot of `ids` in frame `frame` (`Cx::repaint_id`), with
+    /// `patch` live patches applied: the grabs' records carry both.
+    pub(crate) fn note_grabs_drawn(ids: &[u64], frame: u64, patch: u64) {
+        grabs_drawn(ids, Drawn { frame, patch });
     }
 
     /// Hand a finished PNG to whichever grab requests asked for it. Returns the
@@ -2167,6 +2174,11 @@ mod imp {
                 cancelled,
                 tx,
             } => {
+                // its frame shows every live patch installed before it was asked for, the ones
+                // whose wake the loop has not served yet too (a look right after a patch got the
+                // frame from before it, 11-04)
+                #[cfg(relax)]
+                cx.take_in_live_patches(true);
                 let window = match resolve_window(cx, window) {
                     Ok(window) => window,
                     Err(err) => {
@@ -2518,7 +2530,7 @@ mod imp {
                     }
                 }
             }
-            Cmd::Quit(tx) => {
+            Cmd::Quit(tx) | Cmd::QuitForced(tx) => {
                 let line = "[makepad-remote] remote quit".to_string();
                 println!("{line}");
                 let _ = std::io::stdout().flush();

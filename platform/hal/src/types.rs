@@ -964,6 +964,12 @@ pub mod lifecycle {
     pub const SURFACE_AVAILABLE: u32 = 9;
 }
 
+/// One range of a grouped buffer read, in request order.
+#[relax_api(plain)]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BufferReadRange { pub id: Id, pub offset: u64, pub len: u64 }
+
 /// `Readback` event status.
 pub mod readback {
     pub const OK: u32 = 0;
@@ -978,6 +984,7 @@ pub mod readback {
     pub const FAILED: u32 = 4;
     /// A pick replay skipped a pending pipeline or sampled an incomplete pick target. Retry it.
     pub const INCOMPLETE: u32 = 5;
+    pub const DEVICE_LOST: u32 = 6;
 }
 
 /// One element of `DragStart` / `DragMove` item arrays.
@@ -1218,8 +1225,6 @@ impl Inst {
 pub struct Draw {
     /// Storage ids in reflection order, encoded like `tex`.
     pub storage_buffers: Range,
-    pub indirect_buffer: Id,
-    pub indirect_offset: u64,
     pub pipeline: Id,
     pub vb: Id,
     pub ib: Id,

@@ -357,7 +357,7 @@ fn relaunch(st: &State, pid: u32, out: &mut Vec<String>) {
     // The configured `makepad run` launcher is also authoritative before discovery starts.
     // An unavailable inspect endpoint must never turn a warm relaunch into a process kill.
     if st.cfg.launch.get(1).is_some_and(|arg| arg == "run")
-        || crate::discovery::apps().iter().any(|a| a.pid == pid && a.text("run").is_some())
+        || crate::discovery::apps().iter().any(|a| a.answers_to(pid) && a.text("run").is_some())
     {
         adopt(st);
         {

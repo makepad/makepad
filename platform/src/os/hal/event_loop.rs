@@ -159,6 +159,7 @@ impl Cx {
         self.hal_submit_batch();
         super::unregister_wake_session(info.session);
         self.hal.info = None;
+        self.hal_cancel_buffer_reads();
     }
 
     pub fn event_loop(cx: Rc<RefCell<Cx>>) {
@@ -582,6 +583,7 @@ impl Cx {
         // a Draw/NextFrame event. Flush it on this turn, even with paint withheld.
         let mut fb = std::mem::take(&mut self.hal.frames);
         self.fb_compute(&mut fb);
+        fb.want_probed();
         self.hal.frames = fb;
         #[cfg(relax)]
         self.hal_audio_waiting_ready();
@@ -623,7 +625,9 @@ impl Cx {
     pub(super) fn hal_beat(&mut self) -> bool {
         let _phase = crate::thread::ui_phase(crate::thread::UiPhase::Beat);
         self.hal.beat_phases = [[0; 2]; 6];
-        self.hal.beat_phases[0][0] = makepad_hal::clock_ns();
+        let wake = makepad_hal::clock_ns();
+        self.hal.beat_phases[0][0] = wake;
+        self.hal_trace_beat(wake);
         frame_log::beat();
         crate::frame_sources::beat();
         if makepad_hal::profile::on() {
@@ -667,14 +671,20 @@ impl Cx {
         let mut gc_heap_live = None;
         let perf_gc = self.perf_monitor.enabled().then(std::time::Instant::now);
         let mut did_gc = false;
+        // (a design re-run's garbage: collected after the draw that shows the edit)
+        let rerun = std::mem::take(&mut self.gc_after_draw);
+        let t_gc = rerun.then(Cx::time_now);
         self.with_vm(|vm| {
-            if vm.heap().needs_gc() {
+            if rerun || vm.heap().needs_gc() {
                 let _phase = crate::thread::ui_phase(crate::thread::UiPhase::ScriptGc);
                 vm.gc();
                 did_gc = true;
                 if gc_start.is_some() { gc_heap_live = Some(vm.heap().gc_live_len() as u64); }
             }
         });
+        if let Some(t0) = t_gc {
+            crate::trace!("design", "re-run gc after the draw {:.1} ms", (Cx::time_now() - t0) * 1e3);
+        }
         if let (true, Some(t0)) = (did_gc, perf_gc) {
             self.perf_monitor.add(crate::perf_monitor::PERF_CHANNEL_GC, t0.elapsed().as_micros() as u64);
         }
@@ -684,6 +694,20 @@ impl Cx {
             ));
         }
         true
+    }
+
+    /// `MAKEPAD_TRACE=frames`: what woke this beat (at `wake`, HAL ns), and the histograms every
+    /// two seconds.
+    fn hal_trace_beat(&mut self, wake: u64) {
+        use crate::frame_trace::TickSource;
+        let (source, flip) = match self.hal.ready_flip.take() {
+            Some(flip) => (TickSource::Display, (flip != 0).then(|| flip as f64 * 1e-9)),
+            None if self.hal.hosted.is_some() || self.hal.externally_driven => (TickSource::Host, None),
+            None => (TickSource::Cadence, None),
+        };
+        let trace = &mut self.hal.frame_trace;
+        trace.tick(source, wake as f64 * 1e-9, flip);
+        trace.maybe_print(wake as f64 * 1e-9);
     }
 
     /// Visible frame work: hidden hosted children keep callbacks and dirty passes pending.
@@ -707,6 +731,7 @@ impl Cx {
         let next_start = makepad_hal::clock_ns();
         self.hal.beat_phases[0][1] = next_start;
         if !self.new_next_frames.is_empty() {
+            self.hal.frame_trace.next_frame(time_now);
             self.call_next_frame_event(time_now);
             // the frame saw this beat's game input taps (held for it); later frames see them released
             #[cfg(any(target_vendor = "apple", target_os = "windows", target_os = "linux"))]
@@ -736,16 +761,20 @@ impl Cx {
                 self.hal.frames = fb;
             }
             // Embedders must remain responsive while resources arrive. Keep the last
-            // complete frame until every glyph and pipeline of this draw is ready;
-            // submit just requests/resources, then rebuild on a later turn. In
-            // particular, never display a partial first frame or a timeout fallback.
+            // complete frame until every glyph of this draw and every pipeline it draws is
+            // ready (pipelines nothing draws compile on behind it); submit just
+            // requests/resources, then rebuild on a later turn. In particular, never display
+            // a partial first frame or a timeout fallback.
             let first_frame = self.windows.id_iter().any(|id| self.hal.window_ready(id)
                 && !self.hal.glyph_wait.presented.contains(&hal_window_id(id)));
             if self.hal.externally_driven || first_frame {
                 let pending_glyphs = self.hal.glyph_wait.pending.len();
                 // Later glyph waits already hold the gate; only the first frame needs both counts.
                 let pending_pipelines = if first_frame || pending_glyphs == 0 {
-                    self.hal.frames.pipelines_pending()
+                    let mut fb = std::mem::take(&mut self.hal.frames);
+                    let pending = self.fb_frame_pipelines_pending(&mut fb);
+                    self.hal.frames = fb;
+                    pending
                 } else { 0 };
                 if pending_glyphs != 0 || pending_pipelines != 0 {
                     if first_frame {

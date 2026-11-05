@@ -1,4 +1,4 @@
-use super::{device::{Device, error}, resources::Buffer, submit::{Batch, Ticket, Event}, Vulkan};
+use super::{device::{Device, error}, resources::Buffer, submit::{Batch, Ticket}, Vulkan};
 use crate::{backend::exec::PipeStatus, buffers::{CmdView, PipelineBlob}, compute::{self, KernelLayout}, session::{Session, World}, types::*};
 use makepad_vulkan::vk;
 use std::sync::{Arc, OnceLock};
@@ -150,24 +150,36 @@ impl Vulkan {
         }
         Ok(())
     }
-    pub(super) fn read_compute_buffer(&mut self, s: &mut Session, id: Id, req: u32, offset: u64, len: u64) {
-        let mailbox = self.mailbox.clone(); let token = Self::token(s);
+    pub(super) fn read_compute_buffers(&mut self, s: &mut Session, req: u32, ranges: &[BufferReadRange]) {
         let result = (|| {
-            let source = self.buf.get(&(s.id, id.index)).filter(|b| b.gen == id.gen).ok_or("stale buffer")?.buffer.clone();
-            let staging = Buffer::scratch(self.dev.clone(), len, vk::BufferUsageFlags::TRANSFER_DST)?;
+            let mut reads = Vec::with_capacity(ranges.len());
+            let dev = self.dev.clone();
+            let align = dev.properties.limits.non_coherent_atom_size.max(256);
+            // Reserve the entire request before encoding any copy.
+            for (order, range) in ranges.iter().enumerate() {
+                let source = self.buf.get(&(s.id, range.id.index)).filter(|b| b.gen == range.id.gen).ok_or("stale buffer")?.buffer.clone();
+                let (block, offset) = self.leases.alloc(range.len, align, |size| Buffer::scratch(dev.clone(), crate::ledger::Pool::Leases, size, vk::BufferUsageFlags::TRANSFER_DST))?;
+                let len = usize::try_from(range.len).map_err(|_| "lease exceeds address space")?;
+                // SAFETY: the guard retains the mapped block; the range is disjoint from all
+                // live allocations and is delivered only after the transfer fence and invalidate.
+                let lease = unsafe { crate::lease::Lease::new(block.clone(), block.lease_ptr(offset), len, order as u32) }.in_block(block.lease_ptr(0), block.size);
+                reads.push((source, range.offset, block, offset, range.len, lease));
+            }
             let batch = self.ensure_batch()?;
             barrier(batch);
-            unsafe {
-                if len != 0 { batch.dev.raw.cmd_copy_buffer(batch.cb, source.buffer, staging.buffer, &[vk::BufferCopy { src_offset: offset, dst_offset: 0, size: len }]); }
-                batch.dev.raw.cmd_pipeline_barrier(batch.cb, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::HOST, vk::DependencyFlags::empty(),
-                    &[vk::MemoryBarrier::default().src_access_mask(vk::AccessFlags::TRANSFER_WRITE).dst_access_mask(vk::AccessFlags::HOST_READ)], &[], &[]);
+            let mut completed = Vec::with_capacity(reads.len());
+            for (source, source_offset, block, offset, len, lease) in reads {
+                if len != 0 { unsafe { batch.dev.raw.cmd_copy_buffer(batch.cb, source.buffer, block.buffer,
+                    &[vk::BufferCopy { src_offset: source_offset, dst_offset: offset, size: len }]); } }
+                batch.buffers.push(source);
+                completed.push((block, offset, len, lease));
             }
-            batch.buffers.push(source);
-            batch.tickets.push(Ticket::FrameCap { staging, len: len as usize, done: Box::new(move |bytes| {
-                mailbox.push(token, Event::Readback { req, status: if bytes.is_some() { readback::OK } else { readback::FAILED }, rect: [0; 4], pixels: bytes.unwrap_or_default() });
-            }) });
+            unsafe { batch.dev.raw.cmd_pipeline_barrier(batch.cb, vk::PipelineStageFlags::TRANSFER, vk::PipelineStageFlags::HOST, vk::DependencyFlags::empty(),
+                &[vk::MemoryBarrier::default().src_access_mask(vk::AccessFlags::TRANSFER_WRITE).dst_access_mask(vk::AccessFlags::HOST_READ)], &[], &[]); }
+            batch.tickets.push(Ticket::BufferLeases { token: Self::token(s), req, ranges: completed });
             Ok::<_, String>(())
         })();
-        if let Err(e) = result { eprintln!("[hal-vulkan] buffer readback: {e}"); s.events.readback(req, readback::FAILED, [0; 4], &[]); }
+        if let Err(e) = result { eprintln!("[hal-vulkan] buffer readback: {e}"); s.events.buffer_leases(req, readback::FAILED, Vec::new()); }
     }
+
 }

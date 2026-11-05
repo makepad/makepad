@@ -243,7 +243,6 @@ pub struct WindowObj {
     pub embedded: Option<Embedded>,
     /// Completed presentations of this physical window, across loans and relaunches.
     pub presentations: u64,
-    pub presenter: u32,
     /// Lending transfers drawing when the borrower submits its first complete frame,
     /// and input when that frame reaches the window.
     pub borrower_frame: bool,
@@ -966,7 +965,6 @@ impl World {
         let Some(host) = self.sessions.get_mut(&HOST) else { return };
         let Ok(w) = host.windows.get_mut(HOST, wid) else { return };
         w.val.presentations += 1;
-        w.val.presenter = sid;
         if w.lent_to == sid && sid != HOST { w.val.borrower_presented = true; }
         // The owner reads the presentation record above. Do not give its native Cx
         // another session's frame serial: it could retire its own buffers too early.
@@ -1164,6 +1162,8 @@ impl World {
             created_frame: s.frame,
             last_used_frame: 0,
             last_used_ns: 0,
+            objects: 1,
+            note: "",
         });
         let p = self.sessions.get_mut(&parent)?;
         let lent = TextureObj { lent: Some(LentRef { child: sid, tex, window: win }), ..obj };
@@ -1468,6 +1468,15 @@ impl World {
         });
     }
 
+    /// An injected pointer event on a borrowed window (`Hal::inject`) meets the window's badges as
+    /// the OS's does ([`Self::window_event`]). True: it was a press on one, no longer the session's.
+    pub(crate) fn injected_on_badge(&mut self, sid: u32, event: &RawEvent) -> bool {
+        let alias = self.session(sid).and_then(|s| s.windows.get(sid, event.window).ok()).and_then(|w| w.val.alias_of);
+        let Some(hid) = alias else { return false };
+        self.badge_hover(hid, event, &[]);
+        self.badge_pressed(hid, event, &[])
+    }
+
     /// A press on lent window `hid`'s badge that takes presses (`window_style::BADGE_PRESS`): it
     /// goes to session 0 as an event of the badge. True: it is not the window owner's.
     fn badge_pressed(&mut self, hid: Id, event: &RawEvent, payload: &[u8]) -> bool {
@@ -1527,6 +1536,8 @@ impl World {
                 Kind::Buffer => s.buffers.len(),
                 Kind::Pipeline => s.pipelines.len(),
                 Kind::Window => s.windows.len(),
+                // no table: the backend's pools are rows only
+                Kind::Backend => 0,
             })
             .sum()
     }

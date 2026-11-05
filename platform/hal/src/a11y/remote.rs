@@ -72,13 +72,7 @@ fn query(req: &Req, verb: &str) -> Result<Query, String> {
 }
 
 pub fn find(trees: &Trees, q: &Query) -> Vec<(u64, Node)> {
-    let mut all = q.clone();
-    all.nth = None;
-    let rows: Vec<_> = trees.iter().flat_map(|(k, t)| all.find(t).into_iter().map(|n| (*k, n.clone()))).collect();
-    match q.nth {
-        Some(n) => rows.into_iter().nth(n).into_iter().collect(),
-        None => rows,
-    }
+    q.find_in(trees.iter().map(|(k, t)| (*k, t))).into_iter().map(|(k, n)| (k, n.clone())).collect()
 }
 
 pub fn resolve(trees: &Trees, q: &Query) -> Result<(u64, Node), String> {

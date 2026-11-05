@@ -166,7 +166,7 @@ const BUS_VIRTUAL: u16 = 0x06;
 /// (`crate::user_input`): a key press or release (below the button range 0x100..0x160), a
 /// button press or release, a wheel step, or motion while a button or touch is down (a drag).
 /// The kernel's autorepeat (value 2) never counts, for keys or buttons: a stuck or lost-release
-/// button repeats for ever with nobody there (103's mouse pinned it "present" all day). Bare
+/// button repeats for ever with nobody there (one node's mouse pinned it "present" all day). Bare
 /// pointer motion never counts either: a stray move from a Desk Link viewer or a bumped mouse is
 /// not a person needing the box. `down` is the device's held-button state across reports.
 fn note_presence(origin: crate::user_input::Origin, report: &[InputEvent], down: &mut bool) {

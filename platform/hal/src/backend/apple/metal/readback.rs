@@ -91,8 +91,7 @@ impl Metal {
         let (row, rows) = row_layout(fmt, w, h);
         let stride = (row + 255) & !255;
         let length = stride * rows;
-        let staging = NonNull::new(unsafe { msg_send![self.dev.device, newBufferWithLength: length options: MTLResourceOptions::StorageModeShared] }).map(RcObjcId::from_owned);
-        let Some(staging) = staging else {
+        let Some(staging) = self.dev.pool_buffer(crate::ledger::Pool::Staging, length) else {
             finish(readback::FAILED, Vec::new());
             return;
         };
@@ -153,8 +152,7 @@ impl Metal {
                 length += stride * rows;
             }
         }
-        let staging = NonNull::new(unsafe { msg_send![self.dev.device, newBufferWithLength: length.max(16) options: MTLResourceOptions::StorageModeShared] }).map(RcObjcId::from_owned);
-        let Some(staging) = staging else { return done(None) };
+        let Some(staging) = self.dev.pool_buffer(crate::ledger::Pool::Staging, length.max(16)) else { return done(None) };
         let (cb, _) = self.ensure_batch();
         self.flush_uploads();
         unsafe {
@@ -292,7 +290,7 @@ impl Metal {
         let (row, rows) = row_layout(format::BGRA8, w, h);
         let stride = (row + 255) & !255;
         let length = stride * rows;
-        let staging = RcObjcId::from_owned(NonNull::new(unsafe { msg_send![self.dev.device, newBufferWithLength: length options: MTLResourceOptions::StorageModeShared] })?);
+        let staging = self.dev.pool_buffer(crate::ledger::Pool::Staging, length)?;
         unsafe {
             let cb: ObjcId = msg_send![self.dev.queue, commandBuffer];
             let blit: ObjcId = msg_send![cb, blitCommandEncoder];

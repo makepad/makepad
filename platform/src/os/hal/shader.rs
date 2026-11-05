@@ -4,7 +4,7 @@
 //! receives the complete GLSL ES 3.00 stages with their reflection (`makepad_hal::glsl`).
 
 use crate::{
-    draw_shader::{CxDrawShader, CxDrawShaderCode, CxDrawShaderMapping, DrawShaderId},
+    draw_shader::{CxDrawShader, CxDrawShaderCode, CxDrawShaderMapping, DrawShaderId, FnCachedShader},
     draw_vars::DrawVars,
     geometry::Geometry,
     makepad_live_id::*,
@@ -24,13 +24,19 @@ impl DrawVars {
         }
         let fnhash = crate::makepad_script::shader_compile::shader_functions_hash(vm.heap(), vm.bx.code_ref(), io_self);
         let pipe = DrawVars::pipeline_state_hash(vm.heap(), io_self);
-        if let Some(&shader_id) = vm.host.cx().draw_shaders.cache_functions_to_shader.get(&fnhash) {
+        if let Some(shader_id) = vm.host.cx().draw_shaders.fn_cached(vm.bx.code_ref(), fnhash) {
             vm.host.cx_mut().draw_shaders.cache_object_id_to_shader.insert((heap_key, io_self), shader_id);
             self.finalize_cached_shader(vm, shader_id);
             return;
         }
 
         let _phase = crate::thread::ui_phase(crate::thread::UiPhase::ShaderCompile);
+        // MAKEPAD_TRACE=shader: why the function cache missed (a design edit that changes no
+        // shader should miss none)
+        crate::trace!("shader", "compile {} ({}): {}",
+            vm.heap().object_type_name_in_chain(io_self).map(|id| format!("{}", id)).unwrap_or_else(|| format!("<script object {}>", io_self.index())),
+            fnhash,
+            if vm.host.cx().draw_shaders.cache_functions_to_shader.contains_key(&fnhash) { "its functions' reached bodies changed" } else { "functions not seen" });
         // not seen: compile. Uniform buffer indices start at 3 (0 = geometry, 1 = instances,
         // 2 = dyn uniforms)
         let dialect = vm.host.cx().hal.info.map_or(makepad_hal::dialect::NONE, |i| i.dialect);
@@ -61,9 +67,10 @@ impl DrawVars {
             CxDrawShaderCode::Separate { vertex: view.glsl_vertex.to_owned(), fragment: view.glsl_fragment.to_owned() }
         } else { CxDrawShaderCode::Combined { code: output.combined().to_owned() } };
         if let Some(shader_id) = vm.host.cx().draw_shaders.code_hit(&code, pipe, output.table_consts()) {
+            let entry = FnCachedShader { shader: shader_id, reached: Some(FnCachedShader::reached(vm, &output)) };
             let cx = vm.host.cx_mut();
             cx.draw_shaders.cache_object_id_to_shader.insert((heap_key, io_self), shader_id);
-            cx.draw_shaders.cache_functions_to_shader.insert(fnhash, shader_id);
+            cx.draw_shaders.cache_functions_to_shader.insert(fnhash, entry);
             self.finalize_cached_shader(vm, shader_id);
             return;
         }
@@ -166,13 +173,14 @@ impl DrawVars {
             return;
         }
 
+        let index = vm.host.cx().draw_shaders.shaders.len();
+        let shader_id = DrawShaderId { index };
+        let entry = FnCachedShader { shader: shader_id, reached: Some(FnCachedShader::reached(vm, &output)) };
         let cx = vm.host.cx_mut();
         mapping.scope_uniforms_gen = cx.next_uniform_gen();
-        let index = cx.draw_shaders.shaders.len();
         cx.draw_shaders.shaders.push(CxDrawShader { debug_id: LiveId(0), pipeline_id: None, mapping });
-        let shader_id = DrawShaderId { index };
         cx.draw_shaders.cache_object_id_to_shader.insert((heap_key, io_self), shader_id);
-        cx.draw_shaders.cache_functions_to_shader.insert(fnhash, shader_id);
+        cx.draw_shaders.cache_functions_to_shader.insert(fnhash, entry);
         cx.draw_shaders.cache_code_to_shader.insert((code, pipe), shader_id);
         // the frame builder creates the HAL pipeline at the next beat
         cx.draw_shaders.compile_set.insert(index);

@@ -9,8 +9,9 @@ use crate::types::*;
 use makepad_windows_sys::Win32::Graphics::Direct3D::*;
 use makepad_windows_sys::Win32::Graphics::Direct3D11::*;
 use makepad_windows_sys::Win32::Graphics::Dxgi::Common::*;
+use crate::ledger::{Charge, Pool};
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// Shapes a texture is sampled as (`hlsl::HlslPipeline::textures`).
 pub mod shape {
@@ -81,15 +82,17 @@ pub struct Texture {
     /// made with D3D11_RESOURCE_MISC_TEXTURECUBE
     pub cube: bool,
     pub shared: Option<Shared>,
-}
-
-impl Drop for Texture {
-    fn drop(&mut self) {
-        self.dev.allocated.fetch_sub(self.bytes, Ordering::Relaxed);
-    }
+    /// the backend pool a texture the backend made for itself is charged to (`in_pool`)
+    pool: OnceLock<Charge>,
 }
 
 impl Texture {
+    /// Charges this texture to a backend pool: a ledger row of its own (`Ledger::set_pools`).
+    pub fn in_pool(self: Arc<Self>, pool: Pool) -> Arc<Self> {
+        let _ = self.pool.set(self.dev.pools.charge(pool, self.bytes));
+        self
+    }
+
     pub fn new(dev: Arc<Device>, desc: TextureObj) -> Result<Arc<Texture>, String> {
         let fmt = dxgi(desc.format).ok_or_else(|| format!("format {} has no D3D11 equivalent", format::name(desc.format)))?;
         if desc.w == 0 || desc.h == 0 {
@@ -178,8 +181,7 @@ impl Texture {
             }
         }
         let bytes = crate::backend::exec::texture_bytes(desc.format, desc.w, desc.h, layers, mips);
-        dev.allocated.fetch_add(bytes, Ordering::Relaxed);
-        Ok(Arc::new(Texture { dev, desc, res, uav, rtv, dsv, srv: Mutex::new(Vec::new()), bytes, cube, shared }))
+        Ok(Arc::new(Texture { dev, desc, res, uav, rtv, dsv, srv: Mutex::new(Vec::new()), bytes, cube, shared, pool: OnceLock::new() }))
     }
 
     /// Opens another process's shared texture by its wire handle.
@@ -203,7 +205,7 @@ impl Texture {
         let desc = TextureObj { format: format::BGRA8, w: td.Width, h: td.Height, depth: 1, mips: 1, usage: usage::SAMPLED | usage::RENDER_TARGET,
             bytes: 0, imported: true, uploaded: 0, lent: None };
         Ok(Arc::new(Texture { dev, desc, res, uav: None, rtv, dsv: Vec::new(), srv: Mutex::new(Vec::new()), bytes: 0, cube: false,
-            shared: Some(Shared { key, handle: None, mutex }) }))
+            shared: Some(Shared { key, handle: None, mutex }), pool: OnceLock::new() }))
     }
 
     /// A texture made elsewhere (the media module's present textures): `res` is sampled as `fmt`
@@ -211,8 +213,7 @@ impl Texture {
     pub fn wrap(dev: Arc<Device>, res: ID3D11Texture2D, fmt: u32, w: u32, h: u32) -> Arc<Texture> {
         let desc = TextureObj { format: fmt, w, h, depth: 1, mips: 1, usage: usage::SAMPLED, bytes: format::level_bytes(fmt, w, h), imported: true, uploaded: 0, lent: None };
         let bytes = desc.bytes;
-        dev.allocated.fetch_add(bytes, Ordering::Relaxed);
-        Arc::new(Texture { dev, desc, res, uav: None, rtv: Vec::new(), dsv: Vec::new(), srv: Mutex::new(Vec::new()), bytes, cube: false, shared: None })
+        Arc::new(Texture { dev, desc, res, uav: None, rtv: Vec::new(), dsv: Vec::new(), srv: Mutex::new(Vec::new()), bytes, cube: false, shared: None, pool: OnceLock::new() })
     }
 
     /// The view a draw samples this texture by, for the shape the pipeline declares.
@@ -265,12 +266,6 @@ pub struct Buffer {
     pub kind: u16,
 }
 
-impl Drop for Buffer {
-    fn drop(&mut self) {
-        self.dev.allocated.fetch_sub(self.bytes, Ordering::Relaxed);
-    }
-}
-
 impl Buffer {
     /// A retained buffer of `kind` (`buffer_kind`). Uniform buffers are constant buffers (sized up
     /// to 16 bytes); instance buffers are read by the vertex shader as words.
@@ -307,7 +302,6 @@ impl Buffer {
             unsafe { dev.device.CreateUnorderedAccessView(buf.as_ID3D11Resource(), Some(&view), Some(&mut uav)) }.map_err(|e| hr("raw UAV", e))?;
             srv
         } else if kind == buffer_kind::INSTANCE { Some(word_view(&dev, &buf, (bytes / 4) as u32)?) } else { None };
-        dev.allocated.fetch_add(bytes, Ordering::Relaxed);
         Ok(Arc::new(Buffer { dev, buf, words, uav, size, bytes, kind }))
     }
 
@@ -359,6 +353,7 @@ pub struct Arena {
     pub words: Option<ID3D11ShaderResourceView>,
     pub size: u64,
     constant: bool,
+    _charge: Charge,
 }
 
 impl Arena {
@@ -380,7 +375,7 @@ impl Arena {
         unsafe { dev.device.CreateBuffer(&desc, None, Some(&mut buf)) }.map_err(|e| hr("CreateBuffer(frame arena)", e))?;
         let buf: ID3D11Buffer = buf.ok_or("CreateBuffer(frame arena) returned nothing")?;
         let words = if constant { None } else { Some(word_view(dev, &buf, (size / 4) as u32)?) };
-        Ok(Arena { buf, words, size, constant })
+        Ok(Arena { buf, words, size, constant, _charge: dev.pools.charge(Pool::UploadArena, size) })
     }
 
     /// Replaces the arena's contents with `bytes` (a discard map: frames in flight keep theirs).

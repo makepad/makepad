@@ -25,7 +25,7 @@ use makepad_network::tunnel::{connect_with_credentials, server_authenticate, Cli
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, ToSocketAddrs};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const POLL: Duration = Duration::from_millis(20);
 /// The longest wait for input on the socket (a queued frame or input ends it at once).
@@ -34,6 +34,11 @@ const WAIT: Duration = Duration::from_millis(500);
 const HANDSHAKE: Duration = Duration::from_secs(10);
 /// outgoing bytes the connection's writer may have queued for the I/O thread
 const OUT_CAP: usize = 256 << 10;
+/// A link that hears nothing for this long is over: each end says something every few seconds
+/// (a PING when it has nothing else, `conn.rs`). A peer that is gone without a close (a box off
+/// the network, a socket some other process holds open) otherwise looks connected until TCP
+/// gives up, and a client keeps calling it instead of dialling again.
+const SILENCE: Duration = Duration::from_secs(20);
 
 fn would_block(e: &io::Error) -> bool {
     matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted)
@@ -224,12 +229,15 @@ impl Write for PipeWrite {
 
 /// The I/O thread: owns `s` until the pipe closes or the stream fails; `close` shuts it down.
 /// `sock`: the stream's TCP socket, waited on for input (with the pipe's wake) between writes.
-fn io_loop<S: Read + Write>(mut s: S, sock: Option<std::net::TcpStream>, pipe: Arc<Pipe>, close: impl FnOnce(&mut S)) {
+fn io_loop<S: Read + Write>(mut s: S, sock: Option<std::net::TcpStream>, pipe: Arc<Pipe>, silence: Duration, close: impl FnOnce(&mut S)) {
     let mut cur: Vec<u8> = Vec::new();
     let mut pos = 0;
     let mut buf = vec![0u8; 64 << 10];
     // the last read filled the buffer: the TLS stack may hold more than the socket shows
     let mut full = false;
+    // since when it looks for input and none comes (a send that fills the socket reads nothing
+    // meanwhile: that is no silence)
+    let mut silent: Option<Instant> = None;
     loop {
         if pos == cur.len() {
             cur.clear();
@@ -266,7 +274,13 @@ fn io_loop<S: Read + Write>(mut s: S, sock: Option<std::net::TcpStream>, pipe: A
             blocked = pipe.st.lock().unwrap().out.is_empty();
         }
         // read when the write would block (drains the peer) or there is nothing to write
-        if blocked {
+        if !blocked {
+            silent = None;
+        } else {
+            if silent.get_or_insert_with(Instant::now).elapsed() >= silence {
+                eprintln!("makepad-remote: {} said nothing for {} s: the link is over", sock.as_ref().and_then(|s| s.peer_addr().ok()).map_or("the peer".to_string(), |a| a.to_string()), silence.as_secs());
+                break;
+            }
             #[cfg(unix)]
             if let (Some(sock), Some(wake), false) = (&sock, &pipe.wake, full) {
                 match wait::wait(sock, wake, pos < cur.len(), WAIT) {
@@ -279,6 +293,7 @@ fn io_loop<S: Read + Write>(mut s: S, sock: Option<std::net::TcpStream>, pipe: A
             match s.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
+                    silent = None;
                     full = n == buf.len();
                     pipe.st.lock().unwrap().inb.extend_from_slice(&buf[..n]);
                     pipe.cv_in.notify_all();
@@ -295,6 +310,10 @@ fn io_loop<S: Read + Write>(mut s: S, sock: Option<std::net::TcpStream>, pipe: A
 /// Wraps an authenticated stream (TLS done, any pre-HELLO exchange done) as a carrier: one I/O
 /// thread owns it (see the module doc). Set short read/write timeouts on it first.
 pub fn carrier<S: Read + Write + Socket + Send + 'static>(s: S, hooks: crate::conn::Hooks, close: impl FnOnce(&mut S) + Send + 'static) -> Carrier {
+    carrier_silence(s, hooks, SILENCE, close)
+}
+
+fn carrier_silence<S: Read + Write + Socket + Send + 'static>(s: S, hooks: crate::conn::Hooks, silence: Duration, close: impl FnOnce(&mut S) + Send + 'static) -> Carrier {
     let sock = s.tcp();
     #[cfg(unix)]
     let wake = sock.as_ref().and_then(|_| wait::Wake::new());
@@ -304,7 +323,7 @@ pub fn carrier<S: Read + Write + Socket + Send + 'static>(s: S, hooks: crate::co
     let p = pipe.clone();
     let _ = std::thread::Builder::new().name("makepad-remote-io".into()).spawn(move || {
         (hooks.enter)();
-        io_loop(s, sock, p, close);
+        io_loop(s, sock, p, silence, close);
         (hooks.exit)();
     });
     let closer = pipe.clone();
@@ -397,4 +416,71 @@ fn accept_one(ep: &Endpoint, tls: &TlsServer, keys: &KeySource, bound: Option<&(
         b(&proved, &conn);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A stream with a peer that sends `every` (None: nothing) and takes all it is sent.
+    struct Quiet {
+        every: Option<Duration>,
+        last: Instant,
+    }
+
+    impl Read for Quiet {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            std::thread::sleep(Duration::from_millis(1));
+            if self.every.is_some_and(|e| self.last.elapsed() >= e) {
+                self.last = Instant::now();
+                buf[0] = 0;
+                return Ok(1);
+            }
+            Err(io::Error::new(io::ErrorKind::WouldBlock, "nothing"))
+        }
+    }
+
+    impl Write for Quiet {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Socket for Quiet {
+        fn tcp(&self) -> Option<std::net::TcpStream> {
+            None
+        }
+    }
+
+    const LIMIT: Duration = Duration::from_millis(500);
+
+    fn carrier_of(every: Option<Duration>) -> Carrier {
+        carrier_silence(Quiet { every, last: Instant::now() }, crate::conn::Hooks::default(), LIMIT, |_| {})
+    }
+
+    /// A peer gone without a close (a socket some other process holds open) ends the link, which
+    /// the reader hears, its own PINGs going out or not; while it hears its peer the link stays.
+    #[test]
+    fn a_link_that_hears_nothing_ends() {
+        let mut gone = carrier_of(None);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let shutdown = gone.shutdown;
+        std::thread::spawn(move || {
+            let _ = tx.send(gone.reader.next().map(|_| ()).map_err(|e| e.kind()));
+        });
+        for _ in 0..4 {
+            gone.writer.write_all(b"ping").unwrap();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(rx.recv_timeout(Duration::from_secs(10)), Ok(Err(io::ErrorKind::UnexpectedEof)), "over, with pings going out");
+        shutdown();
+
+        let mut there = carrier_of(Some(LIMIT / 4));
+        std::thread::sleep(LIMIT * 2);
+        assert!(there.writer.write_all(b"x").is_ok(), "it hears its peer: the link stays");
+        (there.shutdown)();
+    }
 }

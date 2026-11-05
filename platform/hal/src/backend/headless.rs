@@ -16,12 +16,13 @@ use crate::types::*;
 pub use super::exec::texture_bytes;
 
 #[derive(Default)]
-pub struct Headless;
+pub struct Headless { buffers: crate::FastMap<(u32, Id), Vec<u8>> }
 
 impl Backend for Headless {
     fn session_closed(&mut self, world: &mut World, sid: u32) {
         // the objects are table entries: drop them and their ledger rows (lent windows go back
         // to the host in World::close)
+        self.buffers.retain(|(owner, _), _| *owner != sid);
         exec::free_session(world, sid);
     }
 
@@ -84,11 +85,30 @@ impl Gpu for Headless {
     fn texture_import(&mut self, _s: &mut Session, _id: Id, _handle: u64, _kind: u32) -> Option<TextureObj> {
         Some(TextureObj { format: format::RGBA8, w: 0, h: 0, depth: 1, mips: 1, usage: usage::SAMPLED, bytes: 0, imported: true, uploaded: 0, lent: None })
     }
-    fn buffer_create(&mut self, _s: &mut Session, _id: Id, _b: &mut BufferObj) -> Result<(), String> {
+    fn buffer_create(&mut self, s: &mut Session, id: Id, b: &mut BufferObj) -> Result<(), String> {
+        let len = usize::try_from(b.size).map_err(|_| "buffer size overflow")?;
+        let mut bytes = Vec::new();
+        bytes.try_reserve_exact(len).map_err(|e| e.to_string())?;
+        bytes.resize(len, 0);
+        self.buffers.insert((s.id, id), bytes);
         Ok(())
     }
-    fn buffer_update(&mut self, _s: &mut Session, _id: Id, _b: &mut BufferObj, _off: u64, _data: &[u8]) {}
-    fn buffer_destroy(&mut self, _sid: u32, _id: Id) {}
+    fn buffer_update(&mut self, s: &mut Session, id: Id, _b: &mut BufferObj, off: u64, data: &[u8]) {
+        if let Some(bytes) = self.buffers.get_mut(&(s.id, id)) { bytes[off as usize..off as usize + data.len()].copy_from_slice(data); }
+    }
+    fn buffer_destroy(&mut self, sid: u32, id: Id) { self.buffers.remove(&(sid, id)); }
+    fn buffer_readbacks(&mut self, s: &mut Session, req: u32, ranges: &[BufferReadRange]) {
+        let result: Option<Vec<_>> = ranges.iter().enumerate().map(|(order, r)| {
+            let source = self.buffers.get(&(s.id, r.id))?.get(r.offset as usize..(r.offset + r.len) as usize)?;
+            // The headless driver's read into heap storage is the producer, not a copy after it.
+            let mut bytes = Vec::new();
+            bytes.try_reserve_exact(source.len()).ok()?;
+            bytes.extend_from_slice(source);
+            Some(crate::lease::Lease::from_vec(bytes, order as u32))
+        }).collect();
+        let status = if result.is_some() { readback::OK } else { readback::FAILED };
+        s.events.buffer_leases(req, status, result.unwrap_or_default());
+    }
     fn buffer_evictable(&mut self, _sid: u32, _id: Id) {}
     fn pipeline_create(&mut self, _s: &mut Session, _id: Id, _dialect: u32, _blob: &PipelineBlob, _attr: Attr) -> PipeStatus {
         PipeStatus::Ready
@@ -162,7 +182,7 @@ fn frame(s: &mut Session, sid: u32, _target: Id, _kind: u32, packet: u32, view: 
             continue;
         };
         for d in &view.draws[dr] {
-            if d.storage_buffers.len != 0 || !d.indirect_buffer.is_none() { crate::compute::unsupported(); continue; }
+            if d.storage_buffers.len != 0 { crate::compute::unsupported(); continue; }
             s.stats.draws += 1;
             // a surface lent by a session that is gone (or relaunched) is never sampled
             let mut dead_lent = false;
@@ -213,7 +233,7 @@ fn touch(s: &mut Session, sid: u32, kind: Kind, id: Id, frame: u64, now: u64) {
         Kind::Texture => s.textures.get(sid, id).is_ok(),
         Kind::Buffer => s.buffers.get(sid, id).is_ok(),
         Kind::Pipeline => s.pipelines.get(sid, id).is_ok(),
-        Kind::Window => false,
+        Kind::Window | Kind::Backend => false,
     };
     if ok {
         s.ledger.touch(kind, id.index, id.gen, frame, now);

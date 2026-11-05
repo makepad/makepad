@@ -7,10 +7,11 @@
 use super::device::{hr, Device};
 use crate::hlsl::HlslPipeline;
 use crate::types::*;
-use makepad_windows_sys::core::PCSTR;
+use makepad_windows_sys::core::{PCSTR, PCWSTR, PWSTR};
 use makepad_windows_sys::Win32::Graphics::Direct3D::Fxc::D3DCompile;
 use makepad_windows_sys::Win32::Graphics::Direct3D11::*;
 use makepad_windows_sys::Win32::Graphics::Dxgi::Common::*;
+use makepad_windows_sys::Win32::System::LibraryLoader::{GetModuleFileNameW, GetModuleHandleW};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
@@ -159,17 +160,49 @@ fn cache_dir() -> Option<&'static std::path::Path> {
     .as_deref()
 }
 
-/// FNV-1a of the source, seeded with a version that changes with the compile flags/entries.
-fn cache_key(hlsl: &str) -> u64 {
-    const VERSION: u8 = 3;
-    let mut hash: u64 = 0xcbf29ce484222325;
-    hash ^= VERSION as u64;
-    hash = hash.wrapping_mul(0x100000001b3);
-    for byte in hlsl.bytes() {
-        hash ^= byte as u64;
+const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+
+/// FNV-1a over `bytes`, continuing from `hash`.
+fn fnv(mut hash: u64, bytes: &[u8]) -> u64 {
+    for byte in bytes {
+        hash ^= *byte as u64;
         hash = hash.wrapping_mul(0x100000001b3);
     }
     hash
+}
+
+/// The compiler the process loaded: a hash of the D3DCOMPILER_47.dll file's bytes (a Windows
+/// update replaces it, and the bytecode it makes with it). `None` (it cannot be read): no cache.
+fn compiler_identity() -> Option<u64> {
+    static ID: OnceLock<Option<u64>> = OnceLock::new();
+    *ID.get_or_init(|| {
+        let name: Vec<u16> = "D3DCOMPILER_47.dll\0".encode_utf16().collect();
+        let module = unsafe { GetModuleHandleW(Some(PCWSTR(name.as_ptr()))) }.ok()?;
+        let mut path = vec![0u16; 2048];
+        let len = unsafe { GetModuleFileNameW(Some(module), PWSTR(path.as_mut_ptr()), path.len() as u32) } as usize;
+        if len == 0 || len >= path.len() {
+            return None;
+        }
+        let bytes = std::fs::read(String::from_utf16(&path[..len]).ok()?).ok()?;
+        Some(fnv(FNV_OFFSET, &bytes))
+    })
+}
+
+/// The cache key of one stage: everything its bytecode depends on (the compiler, the target, the
+/// entry point, the flag word, the source).
+fn stage_key(compiler: u64, target: &str, entry: &str, flags: u32, hlsl: &str) -> u64 {
+    let mut hash = fnv(FNV_OFFSET, &compiler.to_le_bytes());
+    for part in [target.as_bytes(), entry.as_bytes(), &flags.to_le_bytes()] {
+        hash = fnv(hash, &(part.len() as u32).to_le_bytes());
+        hash = fnv(hash, part);
+    }
+    fnv(hash, hlsl.as_bytes())
+}
+
+/// Where one stage's bytecode is cached.
+fn cache_path(target: &str, entry: &str, hlsl: &str, precise: bool) -> Option<std::path::PathBuf> {
+    let key = stage_key(compiler_identity()?, target, entry, compile_flags(precise), hlsl);
+    Some(cache_dir()?.join(format!("{key:016x}.dxbc")))
 }
 
 /// A complete DXBC container: `DXBC`, digest, version, its own total size. The cache is shared
@@ -195,9 +228,6 @@ fn publish(path: &std::path::Path, bytes: &[u8]) {
 /// `precise`: a precise-math pipeline (`pipeline_flags::PRECISE`) also compiles with IEEE
 /// strictness (its source marks its float locals `precise`, so no op fuses into a mad).
 pub(super) fn compile_stage(target: &str, entry: &str, hlsl: &str, precise: bool) -> Result<Vec<u8>, String> {
-    const SKIP_OPTIMIZATION: u32 = 1 << 2;
-    const BACKWARDS_COMPATIBILITY: u32 = 1 << 12;
-    const IEEE_STRICTNESS: u32 = 1 << 13;
     let target = format!("{target}\0");
     let entry = format!("{entry}\0");
     unsafe {
@@ -211,7 +241,7 @@ pub(super) fn compile_stage(target: &str, entry: &str, hlsl: &str, precise: bool
             None,
             Some(PCSTR(entry.as_ptr())),
             PCSTR(target.as_ptr()),
-            SKIP_OPTIMIZATION | BACKWARDS_COMPATIBILITY | if precise { IEEE_STRICTNESS } else { 0 },
+            compile_flags(precise),
             0,
             &mut blob,
             Some(&mut errors),
@@ -226,9 +256,16 @@ pub(super) fn compile_stage(target: &str, entry: &str, hlsl: &str, precise: bool
     }
 }
 
-fn stage_bytes(key: u64, suffix: &str, target: &str, entry: &str, hlsl: &str, precise: bool) -> Result<Vec<u8>, String> {
-    if let Some(dir) = cache_dir() {
-        let path = dir.join(format!("{key:016x}{suffix}.dxbc"));
+/// The D3DCompile flag word of a stage (see [`compile_stage`]).
+fn compile_flags(precise: bool) -> u32 {
+    const SKIP_OPTIMIZATION: u32 = 1 << 2;
+    const BACKWARDS_COMPATIBILITY: u32 = 1 << 12;
+    const IEEE_STRICTNESS: u32 = 1 << 13;
+    SKIP_OPTIMIZATION | BACKWARDS_COMPATIBILITY | if precise { IEEE_STRICTNESS } else { 0 }
+}
+
+fn stage_bytes(target: &str, entry: &str, hlsl: &str, precise: bool) -> Result<Vec<u8>, String> {
+    if let Some(path) = cache_path(target, entry, hlsl, precise) {
         if let Ok(bytes) = std::fs::read(&path) {
             if is_complete_dxbc(&bytes) {
                 return Ok(bytes);
@@ -253,14 +290,12 @@ const E_OUTOFMEMORY: makepad_windows_sys::core::HRESULT = makepad_windows_sys::c
 pub fn build(dev: &Device, code: &HlslPipeline, desc: PipelineDesc, bindings: Vec<u32>, vertex_layout: Vec<u32>, storage: Vec<StorageBinding>, name: &str) -> Result<Arc<Program>, String> {
     let hlsl = &code.source;
     let precise = desc.flags & pipeline_flags::PRECISE != 0;
-    // the compile flags are part of the bytecode: a precise build never shares a cache entry
-    let key = cache_key(hlsl) ^ if precise { 0x9e37_79b9_7f4a_7c15 } else { 0 };
-    // `MAKEPAD_HLSL_DUMP=<dir>`: every pipeline's source, by its cache key (compile diagnosis)
+    // `MAKEPAD_HLSL_DUMP=<dir>`: every pipeline's source, by a hash of it (compile diagnosis)
     if let Some(dir) = std::env::var_os("MAKEPAD_HLSL_DUMP") {
-        let _ = std::fs::write(std::path::Path::new(&dir).join(format!("{key:016x}.hlsl")), hlsl);
+        let _ = std::fs::write(std::path::Path::new(&dir).join(format!("{:016x}.hlsl", fnv(FNV_OFFSET, hlsl.as_bytes()))), hlsl);
     }
-    let mut vs_bytes = stage_bytes(key, "_vs", "vs_5_0", "vertex_main", hlsl, precise).map_err(|e| format!("vertex shader `{name}`:\n{e}\n{}", numbered(hlsl)))?;
-    let mut ps_bytes = stage_bytes(key, "_ps", "ps_5_0", "pixel_main", hlsl, precise).map_err(|e| format!("pixel shader `{name}`:\n{e}\n{}", numbered(hlsl)))?;
+    let mut vs_bytes = stage_bytes("vs_5_0", "vertex_main", hlsl, precise).map_err(|e| format!("vertex shader `{name}`:\n{e}\n{}", numbered(hlsl)))?;
+    let mut ps_bytes = stage_bytes("ps_5_0", "pixel_main", hlsl, precise).map_err(|e| format!("pixel shader `{name}`:\n{e}\n{}", numbered(hlsl)))?;
     let create = |vs_bytes: &[u8], ps_bytes: &[u8]| unsafe {
         let (mut vs, mut ps) = (None, None);
         dev.device.CreateVertexShader(vs_bytes, None, Some(&mut vs)).and_then(|_| dev.device.CreatePixelShader(ps_bytes, None, Some(&mut ps))).map(|_| (vs, ps))
@@ -273,9 +308,9 @@ pub fn build(dev: &Device, code: &HlslPipeline, desc: PipelineDesc, bindings: Ve
             // a live device rejected the bytecode itself (a stale or foreign cache entry):
             // drop the entries and compile once more without the cache
             eprintln!("[hal-d3d11] the device rejected cached bytecode of `{name}` ({e}); recompiling");
-            if let Some(dir) = cache_dir() {
-                for suffix in ["_vs", "_ps"] {
-                    let _ = std::fs::remove_file(dir.join(format!("{key:016x}{suffix}.dxbc")));
+            for (target, entry) in [("vs_5_0", "vertex_main"), ("ps_5_0", "pixel_main")] {
+                if let Some(path) = cache_path(target, entry, hlsl, precise) {
+                    let _ = std::fs::remove_file(path);
                 }
             }
             vs_bytes = compile_stage("vs_5_0", "vertex_main", hlsl, precise).map_err(|e| format!("vertex shader `{name}`:\n{e}\n{}", numbered(hlsl)))?;
@@ -364,4 +399,29 @@ pub fn build(dev: &Device, code: &HlslPipeline, desc: PipelineDesc, bindings: Ve
         stride,
         desc,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A stage's cache entry is exact: nothing its bytecode depends on can change and still hit it.
+    #[test]
+    fn a_stage_key_changes_with_everything_the_bytecode_depends_on() {
+        let base = stage_key(1, "vs_5_0", "vertex_main", 0, "a");
+        assert_eq!(base, stage_key(1, "vs_5_0", "vertex_main", 0, "a"));
+        assert_ne!(base, stage_key(2, "vs_5_0", "vertex_main", 0, "a"), "the compiler");
+        assert_ne!(base, stage_key(1, "ps_5_0", "vertex_main", 0, "a"), "the target");
+        assert_ne!(base, stage_key(1, "vs_5_0", "pixel_main", 0, "a"), "the entry point");
+        assert_ne!(base, stage_key(1, "vs_5_0", "vertex_main", 1, "a"), "the flag word");
+        assert_ne!(base, stage_key(1, "vs_5_0", "vertex_main", 0, "b"), "the source");
+        assert_ne!(stage_key(1, "ab", "c", 0, "a"), stage_key(1, "a", "bc", 0, "a"), "a byte moved between parts");
+    }
+
+    /// The process has the compiler it compiles with loaded, so the cache has its identity: without
+    /// one, nothing is cached and every start compiles every pipeline again.
+    #[test]
+    fn the_compiler_has_an_identity() {
+        assert!(compiler_identity().is_some());
+    }
 }

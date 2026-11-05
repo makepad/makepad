@@ -1047,8 +1047,9 @@ impl Cx {
             self.poll_texture_lifetimes();
             // The script heap's collection, once a frame when it is due, as
             // the desktop loop runs it (the web loop never collected).
+            let rerun = std::mem::take(&mut self.gc_after_draw);
             self.with_vm(|vm| {
-                if vm.heap().needs_gc() {
+                if rerun || vm.heap().needs_gc() {
                     vm.gc();
                 }
             });

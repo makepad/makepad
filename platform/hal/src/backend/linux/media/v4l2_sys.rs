@@ -2,7 +2,7 @@
 #![allow(non_snake_case)]
 
 pub use super::libc_sys::ioctl;
-use std::os::raw::{c_char, c_int, c_long, c_ulong, c_void};
+use std::os::raw::{c_int, c_long, c_ulong, c_void};
 
 // ioctl direction bits
 const IOC_WRITE: u32 = 1;
@@ -49,11 +49,6 @@ pub const V4L2_FRMIVAL_TYPE_DISCRETE: u32 = 1;
 pub const V4L2_CAP_TIMEPERFRAME: u32 = 0x1000;
 
 // poll
-
-// inotify
-pub const IN_CREATE: u32 = 0x00000100;
-pub const IN_DELETE: u32 = 0x00000200;
-pub const IN_NONBLOCK: c_int = 0o4000;
 
 // --- Structs ---
 
@@ -249,15 +244,6 @@ pub struct v4l2_streamparm {
     pub parm: v4l2_streamparm_parm,
 }
 
-#[repr(C)]
-pub struct inotify_event {
-    pub wd: c_int,
-    pub mask: u32,
-    pub cookie: u32,
-    pub len: u32,
-    // variable-length name follows
-}
-
 // --- ioctl constants ---
 
 pub const VIDIOC_QUERYCAP: c_ulong = ioc(IOC_READ, 0x56, 0, std::mem::size_of::<v4l2_capability>());
@@ -331,10 +317,3 @@ pub const VIDIOC_ENUM_FRAMEINTERVALS: c_ulong = ioc(
     75,
     std::mem::size_of::<v4l2_frmivalenum>(),
 );
-
-// --- extern "C" ---
-
-extern "C" {
-    pub fn inotify_init1(flags: c_int) -> c_int;
-    pub fn inotify_add_watch(fd: c_int, pathname: *const c_char, mask: u32) -> c_int;
-}

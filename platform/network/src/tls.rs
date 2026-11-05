@@ -657,7 +657,7 @@ impl TlsStream {
     /// A handle on the underlying socket, to shut it down from another
     /// thread.
     pub fn try_clone_tcp(&self) -> io::Result<TcpStream> {
-        self.inner.tcp().try_clone()
+        crate::clone_tcp(self.inner.tcp())
     }
 
     pub fn shutdown(&mut self) {

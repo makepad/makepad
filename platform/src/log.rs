@@ -60,7 +60,7 @@ pub fn trace_log_dir(topic: &str) -> std::path::PathBuf {
     base.join(".makepad").join("logs").join(topic)
 }
 
-// The only native stdout/remote/Studio writer is this long-lived consumer.
+// The only native stderr/remote/Studio writer is this long-lived consumer.
 // Producers never wait for a pipe, a remote ring lock, or logger capacity.
 // The channel stays std mpsc: its bounded try_send takes no lock (the
 // makepad_network::mpsc one does), and a real-time callback may log.
@@ -279,7 +279,7 @@ fn write_log_record(
 
     // Every line, always: the app's own console reads this ring, and so does
     // the remote surface's /log route. It costs a lock and a small
-    // allocation, well under the `println!` below.
+    // allocation, well under the terminal write below.
     crate::log_ring::push(
         level,
         format!(
@@ -299,9 +299,11 @@ fn write_log_record(
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
         {
             use std::io::Write;
+            // Log lines go to stderr: stdout is the program's own output (a
+            // CLI's report, a headless tool's JSON) and carries nothing else.
             // A closed reader must not kill the consumer and strand every
             // subsequent record. This lock is taken only on the logger.
-            let _ = writeln!(std::io::stdout().lock(), "{} {}:{}:{} - {}",
+            let _ = writeln!(std::io::stderr().lock(), "{} {}:{}:{} - {}",
                 log_level_prefix(level), file_name, line_start + 1, column_start + 1, message);
         }
         #[cfg(target_os = "ios")]

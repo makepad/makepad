@@ -15,7 +15,7 @@ use super::chain::Layered;
 use super::dcomp::{self, Item, Segment};
 use crate::buffers::{id_at, read_ids, read_pairs, read_rects, CmdView};
 use crate::gpu_prof::{self, ShaderFacts};
-use crate::ledger::Kind;
+use crate::ledger::{Kind, Pool};
 use crate::session::{LentRef, Session, TextureObj, HOST};
 use crate::types::*;
 use makepad_windows_sys::Win32::Foundation::RECT;
@@ -112,7 +112,6 @@ struct Prepared {
     cull: usize,
     scissor: RECT,
     storage: Vec<(u32, Option<ID3D11ShaderResourceView>)>,
-    indirect: Option<(ID3D11Buffer, u32)>,
     index_first: u32,
     index_count: u32,
 }
@@ -206,7 +205,7 @@ impl D3d11 {
                 Some(t) => t.clone(),
                 None => {
                     let t = Texture::new(self.dev.clone(), TextureObj { format: format::BGRA8, w: size[0], h: size[1], depth: 1, mips: 1,
-                        usage: usage::RENDER_TARGET | usage::SAMPLED, bytes: 0, imported: false, uploaded: 0, lent: None })?;
+                        usage: usage::RENDER_TARGET | usage::SAMPLED, bytes: 0, imported: false, uploaded: 0, lent: None })?.in_pool(Pool::WindowCopies);
                     self.segments.insert(key, t.clone());
                     t
                 }
@@ -218,7 +217,8 @@ impl D3d11 {
                 match self.segment_depths.get(&key).filter(|t| [t.desc.w, t.desc.h] == size && t.desc.format == source.desc.format) {
                     Some(t) => Some(t.clone()),
                     None => {
-                        let t = Texture::new(self.dev.clone(), TextureObj { w: size[0], h: size[1], depth: 1, mips: 1, bytes: 0, imported: false, uploaded: 0, lent: None, ..source.desc.clone() })?;
+                        let t = Texture::new(self.dev.clone(), TextureObj { w: size[0], h: size[1], depth: 1, mips: 1, bytes: 0, imported: false, uploaded: 0, lent: None, ..source.desc.clone() })?
+                            .in_pool(Pool::WindowCopies);
                         self.segment_depths.insert(key, t.clone());
                         Some(t)
                     }
@@ -283,9 +283,9 @@ impl D3d11 {
             makepad_windows_sys::core::add_ref(t.as_raw());
             makepad_windows_sys::core::release(t.as_raw()) == 1
         };
-        self.captures.retain(|(size, _)| *size == [w, h]);
-        let cap = match self.captures.iter().find(|(_, t)| free(t)) {
-            Some((_, t)) => t.clone(),
+        self.captures.retain(|(size, ..)| *size == [w, h]);
+        let cap = match self.captures.iter().find(|(_, t, _)| free(t)) {
+            Some((_, t, _)) => t.clone(),
             None if self.captures.len() < 3 => {
                 let desc = D3D11_TEXTURE2D_DESC {
                     Width: w,
@@ -304,7 +304,7 @@ impl D3d11 {
                     return;
                 }
                 let Some(t) = t else { return };
-                self.captures.push(([w, h], t.clone()));
+                self.captures.push(([w, h], t.clone(), self.dev.pools.charge(Pool::Capture, w as u64 * h as u64 * 4)));
                 t
             }
             None => return,
@@ -378,7 +378,7 @@ impl D3d11 {
             None => {
                 let tex = Texture::new(self.dev.clone(), TextureObj { format: format::BGRA8, w: base.desc.w, h: base.desc.h, depth: 1, mips: 1,
                     usage: usage::RENDER_TARGET | usage::SAMPLED, bytes: 0, imported: false, uploaded: 0, lent: None })
-                    .map_err(|e| eprintln!("[hal-d3d11] badge layer image: {e}")).ok()?;
+                    .map_err(|e| eprintln!("[hal-d3d11] badge layer image: {e}")).ok()?.in_pool(Pool::WindowCopies);
                 self.badged.insert(key.1.index, Some(Tex { gen: key.1.gen, tex: tex.clone() }));
                 tex
             }
@@ -404,7 +404,7 @@ impl D3d11 {
         };
         let desc = TextureObj { format: fmt, w: 1, h: 1, depth: layers, mips: 1, usage: if format::is_depth(fmt) { usage::SAMPLED | usage::RENDER_TARGET } else { usage::SAMPLED },
             bytes: 0, imported: false, uploaded: 0, lent: None };
-        let t = Texture::new(self.dev.clone(), desc)?;
+        let t = Texture::new(self.dev.clone(), desc)?.in_pool(Pool::Fallback);
         if format::is_depth(fmt) {
             for v in &t.dsv {
                 unsafe { self.dev.ctx.ClearDepthStencilView(v, D3D11_CLEAR_DEPTH.0 as u32, 1.0, 0) };
@@ -740,7 +740,7 @@ impl D3d11 {
         sc.clear();
         for d in draws {
             s.stats.draws += 1;
-            if d.indirect_buffer.is_none() && (d.index[1] == 0 || d.inst.count == 0) {
+            if d.index[1] == 0 || d.inst.count == 0 {
                 continue;
             }
             match self.prepare(s, pass, d, view.arena, pick, &colors, &depth, target_size, &mut sc, now, deps) {
@@ -840,15 +840,6 @@ impl D3d11 {
                 for (slot, srv) in &p.storage {
                     ctx.VSSetShaderResources(*slot, Some(std::slice::from_ref(srv)));
                     ctx.PSSetShaderResources(*slot, Some(std::slice::from_ref(srv)));
-                }
-                if let Some((buffer, offset)) = &p.indirect {
-                    if p.program.instance_slot().is_some() {
-                        if let Some((_, _, base)) = sc.ranges[p.ranges.clone()].first() {
-                            ctx1.VSSetConstantBuffers1(INST_BASE_SLOT, 1, Some(&arena as *const _), Some(base as *const u32), Some(&WINDOW_CONSTANTS as *const u32));
-                        }
-                    }
-                    ctx.DrawIndexedInstancedIndirect(buffer, *offset);
-                    continue;
                 }
                 for (_, count, base_cb) in &sc.ranges[p.ranges.clone()] {
                     if p.program.instance_slot().is_some() {
@@ -1078,14 +1069,8 @@ impl D3d11 {
             storage.push((binding.index, b.buf.words.clone()));
             s.ledger.touch(Kind::Buffer, id.index, id.gen, s.frame, now);
         }
-        let indirect = if d.indirect_buffer.is_none() { None } else {
-            let id = d.indirect_buffer;
-            let b = self.buf.get(&(s.id, id.index)).filter(|b| b.gen == id.gen).ok_or("stale draw indirect buffer")?;
-            if d.indirect_offset % 4 != 0 || d.indirect_offset.checked_add(20).is_none_or(|n| n > b.buf.size) { return Err("invalid indirect draw offset".into()); }
-            Some((b.buf.buf.clone(), d.indirect_offset as u32))
-        };
         Ok(Some(Prepared {
-            storage, indirect, program,
+            storage, program,
             vb: vb.map(|b| b.buf.clone()),
             ib: ib.buf.clone(),
             index_format,

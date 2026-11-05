@@ -1,5 +1,5 @@
 //! The D3D11 device: factory, adapter, device and immediate context, the fixed-function states
-//! every draw picks from, the HAL format map and the worker threads. Moved from
+//! every draw picks from, the HAL format map and the HLSL compile threads. Moved from
 //! os/windows/d3d11.rs (`D3d11Cx::create_device_tier`, `CxOsPass::set_states`,
 //! `texture_pixel_to_dx11_pixel`); the device is shared by every session of the process.
 //!
@@ -13,11 +13,10 @@ use makepad_windows_sys::Win32::Graphics::Direct3D::*;
 use makepad_windows_sys::Win32::Graphics::Direct3D11::*;
 use makepad_windows_sys::Win32::Graphics::Dxgi::Common::*;
 use makepad_windows_sys::Win32::Graphics::Dxgi::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
 pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
@@ -31,45 +30,90 @@ pub(crate) fn hr(what: &str, e: HRESULT) -> String {
     format!("{what}: {e}")
 }
 
-/// A long-lived thread running boxed jobs in order (compiles, retirement).
-pub struct Worker {
-    tx: Option<mpsc::Sender<Box<dyn FnOnce() + Send>>>,
-    thread: Option<std::thread::JoinHandle<()>>,
+/// The HLSL compile threads. They take jobs from one queue, so a long compile holds up only
+/// the thread running it, never the jobs queued behind it. A job a frame draws goes ahead of
+/// those no frame draws ([`CompilePool::hurry`]).
+pub struct CompilePool {
+    queue: Arc<(Mutex<CompileQueue>, Condvar)>,
+    threads: Vec<std::thread::JoinHandle<()>>,
 }
 
-impl Worker {
-    pub fn new(name: &str) -> Result<Self, String> {
-        let (tx, rx) = mpsc::channel::<Box<dyn FnOnce() + Send>>();
-        let thread = std::thread::Builder::new()
-            .name(name.into())
-            .spawn(move || {
-                for job in rx {
-                    job();
-                }
-            })
-            .map_err(|e| format!("{name}: {e}"))?;
-        Ok(Self { tx: Some(tx), thread: Some(thread) })
+type CompileJob = (usize, Box<dyn FnOnce() + Send>);
+
+struct CompileQueue {
+    /// jobs a frame draws, in the order they were wanted
+    wanted: VecDeque<CompileJob>,
+    jobs: VecDeque<CompileJob>,
+    /// false once `stop` ran: later pushes are dropped
+    open: bool,
+}
+
+impl CompilePool {
+    pub fn new(name: &str, threads: usize) -> Result<Self, String> {
+        let queue = Arc::new((Mutex::new(CompileQueue { wanted: VecDeque::new(), jobs: VecDeque::new(), open: true }), Condvar::new()));
+        // a failed spawn drops `pool`: the threads already running end
+        let mut pool = Self { queue, threads: Vec::new() };
+        for i in 0..threads {
+            let queue = pool.queue.clone();
+            let thread = std::thread::Builder::new()
+                .name(format!("{name}-{i}"))
+                .spawn(move || {
+                    let (jobs, wake) = &*queue;
+                    loop {
+                        let job = {
+                            let mut q = lock(jobs);
+                            loop {
+                                let next = match q.wanted.pop_front() {
+                                    Some(job) => Some(job),
+                                    None => q.jobs.pop_front(),
+                                };
+                                if let Some((_, job)) = next { break job; }
+                                if !q.open { return; }
+                                q = wake.wait(q).unwrap_or_else(|e| e.into_inner());
+                            }
+                        };
+                        job();
+                    }
+                })
+                .map_err(|e| format!("{name}-{i}: {e}"))?;
+            pool.threads.push(thread);
+        }
+        Ok(pool)
     }
 
-    pub fn push(&self, job: impl FnOnce() + Send + 'static) {
-        if let Some(tx) = &self.tx {
-            let _ = tx.send(Box::new(job));
+    /// Queues `job` under `key` (what [`CompilePool::hurry`] names it by).
+    pub fn push(&self, key: usize, job: impl FnOnce() + Send + 'static) {
+        let (jobs, wake) = &*self.queue;
+        let mut q = lock(jobs);
+        if q.open {
+            q.jobs.push_back((key, Box::new(job)));
+            wake.notify_one();
         }
     }
-}
 
-impl Worker {
-    /// The worker runs the jobs queued so far and ends; this returns once it has. Later
+    /// A frame draws what the job queued under `key` compiles: it goes ahead of every job no
+    /// frame asked for. Nothing when it is running or done.
+    pub fn hurry(&self, key: usize) {
+        let (jobs, _) = &*self.queue;
+        let mut q = lock(jobs);
+        if let Some(job) = q.jobs.iter().position(|(k, _)| *k == key).and_then(|at| q.jobs.remove(at)) {
+            q.wanted.push_back(job);
+        }
+    }
+
+    /// The threads run the jobs queued so far and end; this returns once they have. Later
     /// pushes are dropped. The end of the process (`D3d11::before_exit`) and `Drop`.
     pub fn stop(&mut self) {
-        self.tx.take();
-        if let Some(t) = self.thread.take() {
-            if t.join().is_err() { eprintln!("[hal-d3d11] a worker panicked"); }
+        let (jobs, wake) = &*self.queue;
+        lock(jobs).open = false;
+        wake.notify_all();
+        for thread in self.threads.drain(..) {
+            if thread.join().is_err() { eprintln!("[hal-d3d11] a compile thread panicked"); }
         }
     }
 }
 
-impl Drop for Worker {
+impl Drop for CompilePool {
     fn drop(&mut self) { self.stop(); }
 }
 
@@ -137,8 +181,15 @@ pub struct Device {
     /// bit per HAL format the device blends
     pub blendable: u64,
     pub lost: AtomicBool,
-    /// device-local bytes allocated by this backend (textures and buffers it made)
-    pub allocated: AtomicU64,
+    /// what the backend allocates for itself (arenas, staging, leases, window copies), on the
+    /// HAL's ledger as backend rows: one for the process, as the device counter counts it (every
+    /// device of it: the HAL's, a replaced one's leftovers, the shared-texture copier's)
+    pub pools: Arc<crate::ledger::Pools>,
+}
+
+fn process_pools() -> Arc<crate::ledger::Pools> {
+    static POOLS: std::sync::OnceLock<Arc<crate::ledger::Pools>> = std::sync::OnceLock::new();
+    POOLS.get_or_init(Default::default).clone()
 }
 
 impl Device {
@@ -265,7 +316,7 @@ impl Device {
                 renderable,
                 blendable,
                 lost: AtomicBool::new(false),
-                allocated: AtomicU64::new(0),
+                pools: process_pools(),
             }))
         }
     }
@@ -275,6 +326,15 @@ impl Device {
         let a = self.adapter3.as_ref()?;
         let info = unsafe { a.QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL) }.ok()?;
         Some((info.Budget, info.CurrentUsage))
+    }
+
+    /// The device's own count of this process's video memory (local plus non-local), when
+    /// DXGI 1.4 reports it: what the ledger is checked against.
+    pub fn usage(&self) -> Option<u64> {
+        let a = self.adapter3.as_ref()?;
+        let local = unsafe { a.QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL) }.ok()?;
+        let non_local = unsafe { a.QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL) }.ok()?;
+        Some(local.CurrentUsage + non_local.CurrentUsage)
     }
 
     /// Whether the device was removed or reset (asked of the device itself).
@@ -325,5 +385,49 @@ impl Device {
         let out = out?;
         cache.insert(key, out.clone());
         Some(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CompilePool;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    /// A long compile holds up only the thread running it: the jobs queued behind it run on the
+    /// other threads (a queue per thread, filled round robin, left every other job behind it).
+    #[test]
+    fn a_long_compile_holds_up_only_its_own_thread() {
+        let pool = CompilePool::new("test-compile", 2).unwrap();
+        let (release, released) = mpsc::channel::<()>();
+        let (done, finished) = mpsc::channel::<usize>();
+        // the long one runs until the jobs queued after it are done
+        pool.push(0, move || { let _ = released.recv_timeout(Duration::from_secs(10)); });
+        for i in 1..=4 {
+            let done = done.clone();
+            pool.push(i, move || { let _ = done.send(i); });
+        }
+        for _ in 0..4 {
+            finished.recv_timeout(Duration::from_secs(10)).expect("a job queued behind the long compile waited for it");
+        }
+        let _ = release.send(());
+    }
+
+    /// A compile a frame draws runs before the ones queued ahead of it that no frame draws.
+    #[test]
+    fn a_wanted_compile_goes_ahead_of_the_queue() {
+        let pool = CompilePool::new("test-compile", 1).unwrap();
+        let (release, released) = mpsc::channel::<()>();
+        let (done, finished) = mpsc::channel::<usize>();
+        // the one thread is busy while the queue fills
+        pool.push(0, move || { let _ = released.recv_timeout(Duration::from_secs(10)); });
+        for key in 1..=3 {
+            let done = done.clone();
+            pool.push(key, move || { let _ = done.send(key); });
+        }
+        pool.hurry(3);
+        let _ = release.send(());
+        let order: Vec<usize> = (0..3).map(|_| finished.recv_timeout(Duration::from_secs(10)).expect("every job runs")).collect();
+        assert_eq!(order, [3, 1, 2]);
     }
 }

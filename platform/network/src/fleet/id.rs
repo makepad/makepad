@@ -790,7 +790,7 @@ mod tests {
         let mac = machine(&root, "my-mac", Role::Device, Some("10.77.0.91".parse().unwrap()));
         let text = mac.cred.text();
         assert_eq!(Credential::parse(&text), Some(mac.cred.clone()));
-        assert!(text.starts_with("mkid1.my-mac.device.4000000000.0a4d00de."));
+        assert!(text.starts_with("mkid1.my-mac.device.4000000000.0a4d005b."));
         let six = machine(&root, "n6", Role::Node, Some("fd00::1".parse().unwrap()));
         assert_eq!(Credential::parse(&six.cred.text()), Some(six.cred.clone()));
         assert!(Credential::parse("mkc2.a.lan.1.00").is_none());

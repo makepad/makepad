@@ -57,16 +57,9 @@ pub(crate) fn load_package_paths() -> std::collections::HashMap<String, PathBuf>
     {
         let mut packages = HashMap::new();
         let Some(root) = exe_dir() else { return packages };
-        // The app's own map beside it, or in the Builder's folder beside it
-        // (a Windows installation keeps only executables in its top folder),
-        // or the shared map of older installations. Rows are relative to the
-        // executable's folder either way.
+        // The app's own map beside it. Rows are relative to the executable's folder.
         let exe_name = std::env::current_exe().ok().and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()));
-        let text = exe_name.and_then(|n| {
-            std::fs::read_to_string(root.join(format!("{}.makepad-package-paths", n)))
-                .or_else(|_| std::fs::read_to_string(root.join("builder").join(format!("{}.makepad-package-paths", n))))
-                .ok()
-        }).or_else(|| std::fs::read_to_string(root.join("makepad-package-paths")).ok());
+        let text = exe_name.and_then(|n| std::fs::read_to_string(root.join(format!("{}.makepad-package-paths", n))).ok());
         let Some(text) = text else { return packages };
         for line in text.lines() {
             let Some((name, relative)) = line.split_once('\t') else { continue };
@@ -144,7 +137,7 @@ impl Cx {
             if let Some(buffer) = read_file_cwd_or_exe_relative(&self.package_paths, path) {
                 dep.data = Some(Ok(Rc::new(buffer)));
             } else {
-                println!("Could not load resource {}", path);
+                eprintln!("Could not load resource {}", path);
                 dep.data = Some(Err(format!("Could not read resource {}", path)));
             }
         }

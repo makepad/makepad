@@ -118,6 +118,8 @@ impl Sink<'_> {
                 created_frame: frame,
                 last_used_frame: 0,
                 last_used_ns: 0,
+                objects: 1,
+                note: "",
             }),
         }
     }

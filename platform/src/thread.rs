@@ -678,8 +678,11 @@ impl ThreadSpawner {
             self.runtime_open.store(false, Ordering::Release);
             std::mem::take(&mut *workers)
         };
-        // No registry lock spans cancellation, job drops or waking a worker.
-        for pool in workers.pools.into_iter().filter_map(|pool| pool.upgrade()) {
+        // The process's pool is not this runtime's, whichever Cx happened to start it: other Cx
+        // run on it (`Cx::close_task_pool`). No registry lock spans cancellation, job drops or
+        // waking a worker.
+        let shared = app_pool().lock().unwrap().clone();
+        for pool in workers.pools.into_iter().filter(|pool| !pool.ptr_eq(&shared)).filter_map(|pool| pool.upgrade()) {
             pool.close(ShutdownMode::CancelPending);
         }
         for inner in workers.tokens.into_iter().filter_map(|token| token.upgrade()) {
@@ -1040,10 +1043,12 @@ impl Cx {
         }
     }
 
+    /// This Cx's end: the jobs it submitted stop and it submits no more. The process's pool goes
+    /// on for the other Cx, and closes with its last handle.
     pub(crate) fn close_task_pool(&self) {
         if let Some(pool) = self.task_pool.get() {
             crate::trace!("pool", "{}", pool.summary());
-            pool.close_pool(ShutdownMode::CancelPending);
+            pool.close(ShutdownMode::CancelPending);
         }
     }
 
@@ -1161,6 +1166,9 @@ struct JobContext {
 }
 thread_local! {
     static JOB: std::cell::RefCell<Option<JobContext>> = const { std::cell::RefCell::new(None) };
+    /// The pool whose worker this thread is (pool_worker): its queue says whether a higher-class
+    /// job waits for a worker (worker_wanted).
+    static WORKER_POOL: std::cell::RefCell<Option<std::sync::Weak<PoolInner>>> = const { std::cell::RefCell::new(None) };
 }
 /// Shared dispatch policy: a gesture, not hover or ordinary pointer motion.
 pub(crate) fn ends_warmup(event: &Event) -> bool {
@@ -1173,6 +1181,18 @@ pub(crate) fn ends_warmup(event: &Event) -> bool {
 
 pub fn current_class() -> Option<Class> {
     JOB.with(|j| j.borrow().as_ref().map(|j| j.class))
+}
+
+/// A job that takes task after task (a crew's helper) gives its worker back at its next task
+/// boundary: a job of a higher class waits in this worker's pool (every worker is busy, so none can
+/// admit it until one leaves), or for this job's CPU permit. The rule fan-out helpers follow
+/// (`FanOut::work`): a checkpoint alone yields the permit, never the thread.
+pub fn worker_wanted() -> bool {
+    let Some((class, permit)) = JOB.with(|j| j.borrow().as_ref().map(|j| (j.class, j.permit))) else {
+        return false;
+    };
+    permit.is_some_and(makepad_cpu_budget::should_yield)
+        || WORKER_POOL.with(|p| p.borrow().as_ref().and_then(std::sync::Weak::upgrade).is_some_and(|p| p.higher_queued(class)))
 }
 
 pub fn checkpoint() -> Result<(), Stale> {
@@ -1277,8 +1297,10 @@ impl Drop for JobGuard {
         JOB.with(|j| *j.borrow_mut() = self.previous.take());
     }
 }
-// Waiting for a child never retains a CPU permit. Restore it even on unwind.
-fn without_permit<R>(f: impl FnOnce() -> R) -> R {
+/// Runs `f`, which waits for other jobs, without the calling job's CPU permit: waiting never
+/// retains one. The job is admitted again once `f` returns (or unwinds). Hold no lock across it
+/// that a job admitted meanwhile needs: admission may wait for one of them.
+pub fn without_permit<R>(f: impl FnOnce() -> R) -> R {
     struct Restore(bool);
     impl Drop for Restore {
         fn drop(&mut self) {
@@ -1422,7 +1444,7 @@ where
 /// The jobs submitted through one pool handle and its clones (each `Cx::task_pool` handle has
 /// its own): what that handle's [`TaskPool::close`] and [`TaskPool::shutdown`] act on. The pool
 /// the handles share (the process's pool: every Cx's) is closed by no handle: it closes when
-/// its last handle drops, or when the app ends (`Cx::close_task_pool`).
+/// its last handle drops.
 #[derive(Default)]
 struct JobSet {
     state: Mutex<JobSetState>,
@@ -1653,6 +1675,7 @@ impl PoolInner {
 }
 fn pool_worker(inner: Arc<PoolInner>, index: usize) {
     let _ = inner.workers[index].thread.set(std::thread::current());
+    WORKER_POOL.with(|p| *p.borrow_mut() = Some(Arc::downgrade(&inner)));
     inner.started.fetch_add(1, Ordering::AcqRel);
     loop {
         inner.workers[index].idle.store(true, Ordering::SeqCst);
@@ -1942,13 +1965,9 @@ impl TaskPool {
             native_join: None,
         }
     }
-    /// Closes the pool itself, for every handle (the app's end: `Cx::close_task_pool`).
-    pub(crate) fn close_pool(&self, mode: ShutdownMode) {
-        self.inner.close(mode);
-    }
     #[cfg(test)]
     fn shutdown_pool(&self, mode: ShutdownMode) -> TaskHandle<()> {
-        self.close_pool(mode);
+        self.inner.close(mode);
         self.shutdown_handle()
     }
     /// Finishes once the pool's workers have exited.
@@ -3543,7 +3562,7 @@ mod tests {
     #[test]
     fn fan_out_runs_every_index_after_its_job_goes_stale() {
         // A non-cancellable map inside a job a newer version made stale still gets every
-        // result: fan_out never drops indices (the slicer's par::map panicked on one).
+        // result: fan_out never drops indices (an app's par::map panicked on one).
         let _serial = POOL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
         let pool = test_pool(3);
         let version = Version::new();
@@ -3634,6 +3653,17 @@ mod tests {
             8
         );
         worker_join(pool.shutdown_pool(ShutdownMode::Drain)).unwrap();
+    }
+
+    #[test]
+    fn a_cx_that_ends_leaves_the_process_pool_to_the_others() {
+        let mut ending = crate::Cx::new(Box::new(|_, _| {}));
+        let going_on = crate::Cx::new(Box::new(|_, _| {}));
+        let (ended, pool) = (ending.task_pool(), going_on.task_pool());
+        ending.call_event_handler(&crate::event::Event::Shutdown);
+        assert!(!ended.is_open(), "its own jobs are over");
+        assert!(pool.is_open(), "the other Cx's are not");
+        assert_eq!(worker_join(pool.submit(Class::Visible, || 5).unwrap()).unwrap(), 5);
     }
 
     #[test]
@@ -3943,6 +3973,36 @@ mod tests {
         worker_join(pool.shutdown_pool(ShutdownMode::Drain)).unwrap();
     }
 
+    /// A crew helper (a job taking task after task on a worker) learns at its task boundary that a
+    /// higher-class job waits for a worker, though no permit waits: every worker is busy. Before
+    /// it, an Interactive job waited 8 s behind 14 Visible helpers that checkpointed
+    /// every few ms.
+    #[test]
+    fn a_long_job_learns_a_higher_class_job_waits_for_its_worker() {
+        let _serial = POOL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
+        if makepad_cpu_budget::limit() < 2 {
+            return;
+        }
+        let pool = test_pool(1);
+        let started = Arc::new(AtomicBool::new(false));
+        let seen = started.clone();
+        let helper = pool
+            .submit(Class::Visible, move || {
+                let before = worker_wanted();
+                seen.store(true, Ordering::SeqCst);
+                // its task boundaries: it leaves once it learns of the queued job
+                wait_for("the helper to learn a higher-class job waits for its worker", worker_wanted);
+                before
+            })
+            .unwrap();
+        wait_for("the helper on the only worker", || started.load(Ordering::SeqCst));
+        let interactive = pool.submit(Class::Interactive, worker_wanted).unwrap();
+        assert!(!worker_join(helper).unwrap(), "nothing waited when the helper started");
+        assert!(!worker_join(interactive).unwrap(), "the Interactive job itself is not asked to leave");
+        assert!(!worker_wanted(), "off a pool worker, with no job, nothing is wanted");
+        worker_join(pool.shutdown_pool(ShutdownMode::Drain)).unwrap();
+    }
+
     #[test]
     fn fan_out_finishes_when_all_helpers_yield_to_visible_work() {
         let _serial = POOL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
@@ -4049,7 +4109,7 @@ mod tests {
         cx.call_event_handler(&press);
         makepad_cpu_budget::begin_warmup();
         assert!(!makepad_cpu_budget::warming(), "later compilation cannot restart warm-up");
-        let width = makepad_cpu_budget::limit().saturating_sub(2).clamp(1, 3) as usize;
+        let width = makepad_cpu_budget::background_limit().clamp(1, 3) as usize;
         let pool = test_pool(width);
         let (started, began) = mpsc::channel();
         let mut jobs = Vec::new();

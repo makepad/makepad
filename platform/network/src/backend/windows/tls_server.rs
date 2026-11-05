@@ -172,7 +172,7 @@ extern "system" {
     fn CertSetCertificateContextProperty(cert: *const c_void, prop: u32, flags: u32, data: *const c_void) -> i32;
 }
 
-#[link(name = "ncrypt")]
+#[link(name = "ncrypt", kind = "raw-dylib")]
 extern "system" {
     fn NCryptOpenStorageProvider(provider: *mut usize, name: *const u16, flags: u32) -> SecurityStatus;
     fn NCryptImportKey(
@@ -966,7 +966,7 @@ pub fn connect_capture(mut tcp: TcpStream, host: &str, resume: Option<&ServerStr
     let target = wide(host);
     // The stream owns ctx (and a share of cred) from here; its Drop frees them.
     let mut stream = ServerStream {
-        tcp: tcp.try_clone()?,
+        tcp: crate::clone_tcp(&tcp)?,
         cred: cred.0,
         ctx: SecHandle::default(),
         client: Some(ClientSide { target: target.clone(), cred }),

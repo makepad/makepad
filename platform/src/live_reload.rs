@@ -175,10 +175,13 @@ impl Cx {
             return 0;
         };
         let file_name = normalize_path_string(Path::new(file_name));
-        let keys: Vec<ScriptModKey> = collect_compiled_sites_for_file(script_vm, &file_name)
-            .into_iter()
-            .map(|site| site.key)
-            .collect();
+        let sites = collect_compiled_sites_for_file(script_vm, &file_name);
+        self.drop_live_edit_overrides(sites)
+    }
+
+    /// Drops the hot-reload overrides of `sites`; how many there were.
+    fn drop_live_edit_overrides(&mut self, sites: Vec<CompiledScriptModSite>) -> usize {
+        let keys = sites.into_iter().map(|site| site.key);
         let mut removed = 0;
         {
             let overrides = &self.script_data.live_reload.script_mod_overrides;
@@ -576,10 +579,15 @@ fn resolve_matching_script_mod_file(
     script_mod: &ScriptMod,
     changed_file_name: &str,
 ) -> Option<String> {
-    let changed_file_name = normalize_path_string(Path::new(changed_file_name));
-    if script_mod.view().file.is_empty() {
+    // every match below has the changed file's name: another file's body is none, without the
+    // path work (it ran for each of the program's bodies, twice per patch: ~6 ms each in a large app)
+    fn name(p: &str) -> &str {
+        p.rsplit(['/', '\\']).next().unwrap_or("")
+    }
+    if script_mod.view().file.is_empty() || name(script_mod.view().file) != name(changed_file_name) {
         return None;
     }
+    let changed_file_name = normalize_path_string(Path::new(changed_file_name));
 
     let raw_file = normalize_relative_path_string(Path::new(script_mod.view().file));
     if raw_file == changed_file_name {
@@ -653,11 +661,12 @@ impl Cx {
     pub(crate) fn live_code_patched(&mut self, file_name: &str) {
         let Some(script_vm) = self.script_vm.as_ref() else { return };
         let file_name = normalize_path_string(Path::new(file_name));
-        if collect_compiled_sites_for_file(script_vm, &file_name).is_empty() {
+        let sites = collect_compiled_sites_for_file(script_vm, &file_name);
+        if sites.is_empty() {
             return;
         }
         crate::log!("live design: {} was patched: its script_mod! design runs again", file_name);
-        self.revert_live_edit_file(&file_name);
+        self.drop_live_edit_overrides(sites);
         self.script_data.live_reload.overrides_changed = true;
     }
 }

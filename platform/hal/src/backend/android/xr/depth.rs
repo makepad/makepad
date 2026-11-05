@@ -76,7 +76,7 @@ impl DepthSource {
         let bytes = size[0] as u64 * size[1] as u64 * 2 * LAYERS as u64;
         let mut slots = Vec::with_capacity(SLOTS);
         for _ in 0..SLOTS {
-            let buffer = Buffer::scratch(dev.clone(), bytes, vk::BufferUsageFlags::TRANSFER_DST)?;
+            let buffer = Buffer::scratch(dev.clone(), crate::ledger::Pool::Staging, bytes, vk::BufferUsageFlags::TRANSFER_DST)?;
             unsafe {
                 let pool = dev.raw.create_command_pool(&vk::CommandPoolCreateInfo::default().queue_family_index(dev.family)
                     .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER), None).map_err(|e| format!("XR depth command pool: {e:?}"))?;

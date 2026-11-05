@@ -5,8 +5,10 @@ use crate::{
 };
 use std::collections::{HashMap, HashSet};
 
+/// A geometry slot, and whether it is borrowed (`new_borrowed`: a Cx-owned shared slot this
+/// handle never frees).
 #[derive(Debug)]
-pub struct Geometry(PoolId);
+pub struct Geometry(PoolId, bool);
 
 impl ScriptHandleGc for Geometry {
     fn gc(&mut self) {
@@ -26,7 +28,7 @@ impl Geometry {
             id: id.0,
             generation: id.1,
             free: IdPoolFree::default(),
-        })
+        }, true)
     }
 }
 
@@ -78,7 +80,7 @@ impl Default for CxGeometryPool {
 
 impl CxGeometryPool {
     pub fn alloc(&mut self) -> Geometry {
-        Geometry(self.0.alloc())
+        Geometry(self.0.alloc(), false)
     }
 
     /// Whether any dropped geometry is waiting to be freed.
@@ -357,8 +359,18 @@ impl IndexData {
 
 impl Geometry {
     pub fn into_script_handle(self, vm: &mut ScriptVm) -> ScriptValue {
+        // A borrowed (shared) geometry has one handle per heap: a module's `#(..)` that names it
+        // gives the same value on every run, so a design re-run does not parse the module again
+        // and its shaders keep their cache entries (`ScriptHeap::rust_pod_types`).
+        let key = self.1.then(|| LiveId::from_str("geometry").bytes_append(&(self.0.id as u64).to_le_bytes()).bytes_append(&self.0.generation.to_le_bytes()).0);
+        if let Some(handle) = key.and_then(|k| vm.heap().interned_handle(k)) {
+            return handle.into();
+        }
         let ty = vm.handle_type(id!(geometry));
         let handle = vm.heap_mut().new_handle(ty, Box::new(self));
+        if let Some(k) = key {
+            vm.heap_mut().intern_handle(k, handle);
+        }
         handle.into()
     }
 

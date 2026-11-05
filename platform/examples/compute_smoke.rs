@@ -105,11 +105,11 @@ pub fn run() {
     let mut vm = ScriptVm { host: host.host_context(), bx: Box::new(ScriptVmBase::new()) };
     vm.capture_errors();
     let fill = kernel(&mut vm, "precise_math: true\nworkgroup_size: 4\nbase: shader.uniform(u32)\ndata: shader.buffer_rw(u32)\nhalf_image: shader.texture_2d_rw(@r16f)\nbyte_image: shader.texture_2d_rw(@r8unorm)\nmain: fn() { let i = global_id().x\nlet old = atomic_add(self.data[0], u32(1))\nself.data[i + u32(1)] = i + self.base\nif i != u32(0) { let p = vec2u(i % u32(4), i / u32(4))\nself.half_image.write(p, f32(1.0))\nself.byte_image.write(p, f32(0.0)) } }", target);
-    let reduce = kernel(&mut vm, "data: shader.buffer(u32)\nresult: shader.buffer_rw(u32)\nargs: shader.buffer_rw(u32)\nmain: fn() { var sum = u32(0)\nfor i in 1..17 { sum += self.data[i] }\nself.result[0] = sum\nself.args[0] = u32(2)\nself.args[1] = u32(1)\nself.args[2] = u32(1)\nself.args[3] = u32(3)\nself.args[4] = u32(1)\nself.args[5] = u32(0)\nself.args[6] = u32(0)\nself.args[7] = u32(0) }", target);
+    let reduce = kernel(&mut vm, "data: shader.buffer(u32)\nresult: shader.buffer_rw(u32)\nargs: shader.buffer_rw(u32)\nmain: fn() { var sum = u32(0)\nfor i in 1..17 { sum += self.data[i] }\nself.result[0] = sum\nself.args[0] = u32(2)\nself.args[1] = u32(1)\nself.args[2] = u32(1) }", target);
     let indirect = kernel(&mut vm, "workgroup_size: 4\nresult: shader.buffer_rw(u32)\nmain: fn() { self.result[global_id().x + u32(1)] = global_id().x + group_count().x }", target);
     let (draw_blob, storage, sampled) = draw_pipeline(&mut vm, info.dialect);
     let mut w = CmdWriter::new(info.session);
-    for (id, size, flags) in [(DATA, 68, 0), (RESULT, 36, 0), (ARGS, 32, buffer_kind::INDIRECT)] {
+    for (id, size, flags) in [(DATA, 68, 0), (RESULT, 36, 0), (ARGS, 12, buffer_kind::INDIRECT)] {
         w.buffer_create(id, buffer_kind::STORAGE | buffer_kind::READBACK | flags, size, Attr::default());
     }
     let zero = [0u8; 68]; w.buffer_update(DATA, 0, &zero);
@@ -139,9 +139,9 @@ pub fn run() {
     w.compute_pass(2, 2, &dispatches);
     w.pass(Pass { color: [TARGET, Id::NONE, Id::NONE, Id::NONE], viewport: [0., 0., 4., 4.], load: [pass_load::CLEAR; 5], ..Default::default() });
     let buffers = w.put_ids(&storage); let textures = w.put_ids(&sampled);
-    w.draw(Draw { pipeline: DRAW, vb: VB, ib: IB, index: [0, 3], inst: Inst::inline(Slice::EMPTY, 1), scissor: [f32::NAN; 4], storage_buffers: buffers, tex: textures, indirect_buffer: ARGS, indirect_offset: 12, ..Default::default() });
+    w.draw(Draw { pipeline: DRAW, vb: VB, ib: IB, index: [0, 3], inst: Inst::inline(Slice::EMPTY, 1), scissor: [f32::NAN; 4], storage_buffers: buffers, tex: textures, ..Default::default() });
     w.frame_end(TARGET, target::TEXTURE);
-    w.buffer_readback(DATA, 1, 0, 68); w.buffer_readback(RESULT, 2, 0, 36); w.texture_readback(TARGET, 3, [0, 0, 4, 4]);
+    w.read_buffers(1, &[BufferReadRange { id: DATA, offset: 0, len: 68 }]); w.read_buffers(2, &[BufferReadRange { id: RESULT, offset: 0, len: 36 }]); w.texture_readback(TARGET, 3, [0, 0, 4, 4]);
     let submitted = Instant::now();
     hal.submit(&w.buf());
     println!("CPU encode+submit three dispatches and one draw: {} us", submitted.elapsed().as_micros());
@@ -149,6 +149,13 @@ pub fn run() {
     let mut times = std::collections::HashMap::new();
     until(&hal, info.session, |e| {
         match e {
+            HalEvent::BufferLeases { req, status, records } => {
+                use makepad_hal::buffers::Wire;
+                assert_eq!(status, readback::OK);
+                let record = makepad_hal::lease::Record::read(records);
+                read.insert(req, unsafe { std::slice::from_raw_parts(record.ptr as *const u8, record.len as usize) }.to_vec());
+                hal_lease_release(record.token);
+            }
             HalEvent::Readback { req, status, pixels, .. } => { assert_eq!(status, readback::OK); read.insert(req, pixels.to_vec()); }
             HalEvent::FrameDone { frame, gpu_ns, .. } => { times.insert(frame, gpu_ns); }
             _ => {}
@@ -161,7 +168,7 @@ pub fn run() {
     check("dispatch visibility and indirect group counts", words(&read[&2]) == std::iter::once(280).chain(2..10).collect::<Vec<_>>());
     check("compute-only packet completion and GPU timestamp", times[&1] > 0 && times[&2] > 0);
     if read[&3] != [255, 0, 255, 255].repeat(16) { eprintln!("render target bytes: {:?}", read[&3]); }
-    check("storage-buffer draw, R16F/R8 sampling, CPU subrect and indirect draw", read[&3] == [255, 0, 255, 255].repeat(16));
+    check("storage-buffer draw, R16F/R8 sampling and CPU subrect", read[&3] == [255, 0, 255, 255].repeat(16));
     check("no rejected HAL commands", hal.with_world(|w| w.session(info.session).unwrap().stats.bad_args) == 0);
     hal.close(info.session);
 }

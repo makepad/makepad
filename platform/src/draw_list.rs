@@ -639,6 +639,19 @@ impl Cx {
         }
     }
 
+    /// The instances a draw call draws this frame: 0 for one that is not drawn (no instance
+    /// slots, no instances or no geometry).
+    pub(crate) fn drawn_instances(&self, draw_item: &CxDrawItem, draw_call: &CxDrawCall) -> usize {
+        let instance_slots = self.draw_shaders[draw_call.draw_shader_id.index].mapping.instances.total_slots;
+        if instance_slots == 0 || draw_call.geometry_id.is_none() {
+            return 0;
+        }
+        draw_item.retained_instances.as_ref().map_or_else(
+            || draw_item.instances.as_ref().map_or(0, |instances| instances.len() / instance_slots),
+            |_| draw_item.retained_instance_count,
+        )
+    }
+
     fn collect_gpu_metrics_for_draw_list(
         &self,
         draw_list_id: DrawListId,
@@ -669,28 +682,14 @@ impl Cx {
             let Some(draw_call) = draw_item.kind.draw_call() else {
                 continue;
             };
-
-            let sh = &self.draw_shaders[draw_call.draw_shader_id.index];
-            let instance_slots = sh.mapping.instances.total_slots;
-            if instance_slots == 0 {
-                continue;
-            }
-            let instance_count = draw_item.retained_instances.as_ref().map_or_else(
-                || {
-                    draw_item
-                        .instances
-                        .as_ref()
-                        .map_or(0, |instances| instances.len() / instance_slots)
-                },
-                |_| draw_item.retained_instance_count,
-            );
+            let instance_count = self.drawn_instances(draw_item, draw_call);
             if instance_count == 0 {
                 continue;
             }
-
             let Some(geometry_id) = draw_call.geometry_id else {
                 continue;
             };
+            let sh = &self.draw_shaders[draw_call.draw_shader_id.index];
             let geometry = &self.geometries[geometry_id];
             let index_count = geometry.index_count as u64;
 
@@ -1737,8 +1736,6 @@ pub struct CxDrawCall {
     pub uniform_buffer_slots: [Option<UniformBuffer>; DRAW_CALL_UNIFORM_BUFFER_SLOTS],
     #[cfg(not(target_arch = "wasm32"))]
     pub storage_buffers: Vec<(LiveId, crate::GpuBuffer)>,
-    #[cfg(not(target_arch = "wasm32"))]
-    pub indirect_draw: Option<(crate::GpuBuffer, u64)>,
     /// Replaced with a process-wide generation whenever either uniform block
     /// owned by this draw call changes.
     pub uniforms_gen: u64,
@@ -1794,7 +1791,7 @@ impl CxDrawCall {
         sized_dyn_uniforms(&mut self.dyn_uniforms, &draw_vars.dyn_uniforms, mapping.dyn_uniforms.total_slots);
         self.texture_slots.clone_from(&draw_vars.texture_slots);
         #[cfg(not(target_arch = "wasm32"))]
-        { self.storage_buffers.clone_from(&draw_vars.storage_buffers); self.indirect_draw.clone_from(&draw_vars.indirect_draw); }
+        self.storage_buffers.clone_from(&draw_vars.storage_buffers);
         self.uniform_buffer_slots
             .clone_from(&draw_vars.uniform_buffer_slots);
         self.instance_dirty = true;
@@ -1824,8 +1821,6 @@ impl CxDrawCall {
             },
             #[cfg(not(target_arch = "wasm32"))]
             storage_buffers: draw_vars.storage_buffers.clone(),
-            #[cfg(not(target_arch = "wasm32"))]
-            indirect_draw: draw_vars.indirect_draw.clone(),
             texture_slots: draw_vars.texture_slots.clone(),
             uniform_buffer_slots: draw_vars.uniform_buffer_slots.clone(),
             instance_dirty: true,
@@ -2053,9 +2048,8 @@ impl CxDrawItems {
             .expect("retained presentation requires a draw call");
         assert_eq!(Some(call.draw_shader_id), vars.draw_shader_id);
         #[cfg(not(target_arch = "wasm32"))]
-        if call.storage_buffers != vars.storage_buffers || call.indirect_draw != vars.indirect_draw {
+        if call.storage_buffers != vars.storage_buffers {
             call.storage_buffers.clone_from(&vars.storage_buffers);
-            call.indirect_draw.clone_from(&vars.indirect_draw);
             call.mark_uniforms_dirty(generation);
         }
         if dyn_uniforms_differ(&call.dyn_uniforms, &vars.dyn_uniforms)
@@ -2694,7 +2688,7 @@ impl CxDrawList {
                     });
                 } else if draw_call.append_group_id == target_group {
                     #[cfg(not(target_arch = "wasm32"))]
-                    if draw_call.storage_buffers != draw_vars.storage_buffers || draw_call.indirect_draw != draw_vars.indirect_draw {
+                    if draw_call.storage_buffers != draw_vars.storage_buffers {
                         if can_cross { continue; } else { break; }
                     }
                     // lets compare uniforms and textures..
@@ -3362,8 +3356,6 @@ mod uniform_generation_tests {
             dyn_uniforms: vec![0.0; 4],
             #[cfg(not(target_arch = "wasm32"))]
             storage_buffers: Vec::new(),
-            #[cfg(not(target_arch = "wasm32"))]
-            indirect_draw: None,
             texture_slots: Default::default(),
             uniform_buffer_slots: Default::default(),
             instance_dirty: true,
@@ -3713,8 +3705,6 @@ mod uniform_generation_tests {
             dyn_uniforms: call.dyn_uniforms.clone(),
             #[cfg(not(target_arch = "wasm32"))]
             storage_buffers: call.storage_buffers.clone(),
-            #[cfg(not(target_arch = "wasm32"))]
-            indirect_draw: call.indirect_draw.clone(),
             texture_slots: call.texture_slots.clone(),
             uniform_buffer_slots: call.uniform_buffer_slots.clone(),
             dyn_instances_pad: Default::default(),

@@ -620,10 +620,13 @@ macro_rules! _app_main_event_closure {
                     cx.live_edit_capture_begin();
                     cx.reload_generation += 1;
                     cx.with_vm(|vm| {
+                        // MAKEPAD_TRACE=design: what a design re-run costs, by part
+                        let t0 = $crate::Cx::time_now();
                         let value = vm.with_reload(|vm| <$app as AppMain>::script_mod(vm));
                         if let Some(obj) = value.as_object() {
                             app_value = Some(vm.heap_mut().new_object_ref(obj));
                         }
+                        let t1 = $crate::Cx::time_now();
                         <$app as $crate::ScriptApply>::script_apply(
                             app,
                             vm,
@@ -631,15 +634,16 @@ macro_rules! _app_main_event_closure {
                             &mut $crate::Scope::empty(),
                             value,
                         );
-                        // A module run leaves the whole previous module tree
-                        // behind it, and the collector is paced by growth, so
-                        // one rebuild is never enough to make it run: the
-                        // garbage sat until the heap had doubled. A rebuild is
-                        // the one allocation spike whose size is known in
-                        // advance; collect on the way out, now that the app
-                        // value is held and the tree has been applied.
-                        vm.gc();
+                        let t2 = $crate::Cx::time_now();
+                        $crate::trace!("design", "re-run: script_mod {:.1} ms, apply {:.1} ms", (t1 - t0) * 1e3, (t2 - t1) * 1e3);
                     });
+                    // A module run leaves the whole previous module tree
+                    // behind it, and the collector is paced by growth, so one
+                    // rebuild is never enough to make it run: the garbage sat
+                    // until the heap had doubled. A rebuild is the one
+                    // allocation spike whose size is known in advance: the
+                    // loop collects right after this beat's draw.
+                    cx.gc_after_draw = true;
                     cx.live_edit_capture_end();
                 }
             }
@@ -864,6 +868,11 @@ macro_rules! app_main {
 
         #[cfg(not(target_arch = "wasm32"))]
         pub fn app_main() {
+            // the packager reads this section from the linked binary: `#[used]` is no GC root on
+            // COFF outside MSVC, so GNU ld drops a section nothing references
+            #[cfg(all(windows, target_env = "gnu"))]
+            let _ = ::core::hint::black_box(&MAKEPAD_FONT_ASSETS_V1);
+            $crate::relax_app_main();
             $crate::attach_parent_console();
             Cx::init_log();
             // MAKEPAD_NET_AUDIT=1: log every socket from the first instruction on

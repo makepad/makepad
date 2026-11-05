@@ -68,19 +68,25 @@ fn key(item: &ReportItem) -> String {
 
 fn item(item: &ReportItem, out: &mut Out) {
     out.line(&format!(
-        "{{\"id\":{},\"session\":{},\"kind\":{},\"bytes\":{},\"owner\":{},\"site\":{},\"created_frame\":{},\"last_used_frame\":{}}}",
-        json_str(&key(item)), item.session, json_str(item.detail), item.bytes, json_str(&item.owner),
-        json_str(&item.site), item.created_frame, item.last_used_frame,
+        "{{\"id\":{},\"session\":{},\"kind\":{},\"bytes\":{},\"objects\":{},\"owner\":{},\"site\":{},\"created_frame\":{},\"last_used_frame\":{}{}}}",
+        json_str(&key(item)), item.session, json_str(item.detail), item.bytes, item.objects, json_str(&item.owner),
+        json_str(&item.site), item.created_frame, item.last_used_frame, note(item.note),
     ));
+}
+
+/// A row's note (`ledger::NO_SIZE`) as a trailing field, or nothing.
+fn note(note: &str) -> String {
+    if note.is_empty() { String::new() } else { format!(",\"note\":{}", json_str(note)) }
 }
 
 fn groups(groups: &[Group], n: usize, out: &mut Out) {
     for g in groups.iter().take(n) {
         out.line(&format!(
-            "{{\"name\":{},\"bytes\":{},\"count\":{}}}",
+            "{{\"name\":{},\"bytes\":{},\"count\":{}{}}}",
             json_str(&g.key),
             g.bytes,
-            g.count
+            g.count,
+            note(g.note)
         ));
     }
 }
@@ -146,19 +152,16 @@ pub fn dispatch(req: &Req, out: &mut Out) -> bool {
     let n = req.get("n").and_then(|n| n.parse().ok()).unwrap_or(15);
     match sub {
         "" => {
-            let device = snap
-                .device_allocated
-                .map(|b| b.to_string())
-                .unwrap_or_else(|| "null".into());
-            let scratch = snap
-                .scratch_allocated
-                .map(|b| b.to_string())
-                .unwrap_or_else(|| "null".into());
+            let opt = |b: Option<u64>| b.map_or_else(|| "null".into(), |b| b.to_string());
+            // what a counter holds beyond the ledger (negative: the ledger counts more)
+            let signed = |b: Option<u64>, ledger: u64| b.map_or_else(|| "null".into(), |b| (b as i128 - ledger as i128).to_string());
             out.line(&format!(
-                "{{\"ledger_bytes\":{},\"scratch_bytes\":{},\"device_bytes\":{},\"items\":{}}}",
+                "{{\"ledger_bytes\":{},\"device_bytes\":{},\"device_gap\":{},\"os_graphics_bytes\":{},\"os_gap\":{},\"items\":{}}}",
                 snap.total_bytes,
-                scratch,
-                device,
+                opt(snap.device_allocated),
+                signed(snap.device_allocated, snap.total_bytes),
+                opt(snap.os_graphics),
+                signed(snap.os_graphics, snap.total_bytes),
                 snap.items.len()
             ));
             for session in &snap.by_session {

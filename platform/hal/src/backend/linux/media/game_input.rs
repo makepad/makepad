@@ -9,10 +9,9 @@ use std::{
     collections::HashSet,
     fs::{File, OpenOptions},
     io::{self, Read},
-    os::{fd::AsRawFd, raw::c_long, unix::{fs::OpenOptionsExt, net::UnixStream}},
+    os::{fd::{AsRawFd, FromRawFd}, raw::c_long, unix::{ffi::OsStrExt, fs::OpenOptionsExt, net::UnixStream}},
     path::PathBuf,
     sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex},
-    time::{Duration, Instant},
 };
 
 #[derive(Default)]
@@ -35,40 +34,25 @@ impl GameInput {
         let stop = Arc::new(AtomicBool::new(false));
         let stopped = stop.clone();
         std::thread::Builder::new().name("hal-linux-gamepad".into()).spawn(move || {
+            // Idle, the thread sleeps: /dev/input's changes wake a scan, a pad's reports wake a drain.
+            let dir = InputDir::watch().map_err(|e| eprintln!("[hal-gamepad] watching /dev/input: {e}; the pads present now only")).ok();
             let mut pads: Vec<Pad> = Vec::new();
-            let mut denied = HashSet::new();
+            // Event nodes probed that hold no pad or did not open: probed again only when /dev/input
+            // says that node changed (udev grants a new node's access after it creates it).
+            let mut probed: HashSet<PathBuf> = HashSet::new();
             let mut serial = 0;
-            let mut scan = Instant::now();
+            let mut scan = true;
             while !stopped.load(Ordering::Acquire) {
                 let mut changed = false;
-                if Instant::now() >= scan {
-                    scan = Instant::now() + Duration::from_secs(1);
-                    if let Ok(entries) = std::fs::read_dir("/dev/input") {
-                        let mut paths: Vec<_> = entries.flatten().map(|e| e.path()).filter(|p| {
-                            p.file_name().and_then(|s| s.to_str()).and_then(|s| s.strip_prefix("event"))
-                                .is_some_and(|s| !s.is_empty() && s.bytes().all(|c| c.is_ascii_digit()))
-                        }).collect();
-                        paths.sort();
-                        denied.retain(|p| paths.contains(p));
-                        for path in paths {
-                            if pads.iter().any(|p| p.path == path) { continue; }
-                            match Pad::open(path.clone(), serial + 1) {
-                                Ok(Some(pad)) => {
-                                    serial += 1;
-                                    eprintln!("[hal-gamepad] connected {} ({:04x}:{:04x}) at {}", pad.info.name, pad.info.vendor, pad.info.product, path.display());
-                                    pads.push(pad);
-                                    changed = true;
-                                }
-                                Ok(None) => {}
-                                Err(e) => {
-                                    if denied.insert(path.clone()) {
-                                        eprintln!("[hal-gamepad] open {}: {e}", path.display());
-                                    }
-                                }
-                            }
-                        }
+                if let Some(dir) = &dir {
+                    match dir.changes() {
+                        Ok(Some(paths)) => for path in paths { probed.remove(&path); scan = true; },
+                        Ok(None) => { probed.clear(); scan = true; }
+                        Err(e) => eprintln!("[hal-gamepad] /dev/input changes: {e}"),
                     }
                 }
+                // Drains before the scan: the kernel hangs up a pad's readers before it removes its
+                // node, so a pad replugged at once is gone from `pads` when its new node is scanned.
                 pads.retain_mut(|pad| match pad.drain() {
                     Ok(dirty) => { changed |= dirty; true }
                     Err(e) => {
@@ -77,6 +61,32 @@ impl GameInput {
                         false
                     }
                 });
+                if std::mem::take(&mut scan) {
+                    if let Ok(entries) = std::fs::read_dir(INPUT_DIR) {
+                        let mut paths: Vec<_> = entries.flatten().map(|e| e.path()).filter(|p| {
+                            p.file_name().and_then(|s| s.to_str()).and_then(|s| s.strip_prefix("event"))
+                                .is_some_and(|s| !s.is_empty() && s.bytes().all(|c| c.is_ascii_digit()))
+                        }).collect();
+                        paths.sort();
+                        probed.retain(|p| paths.contains(p));
+                        for path in paths {
+                            if probed.contains(&path) || pads.iter().any(|p| p.path == path) { continue; }
+                            match Pad::open(path.clone(), serial + 1) {
+                                Ok(Some(pad)) => {
+                                    serial += 1;
+                                    eprintln!("[hal-gamepad] connected {} ({:04x}:{:04x}) at {}", pad.info.name, pad.info.vendor, pad.info.product, path.display());
+                                    pads.push(pad);
+                                    changed = true;
+                                }
+                                Ok(None) => { probed.insert(path); }
+                                Err(e) => {
+                                    eprintln!("[hal-gamepad] open {}: {e}", path.display());
+                                    probed.insert(path);
+                                }
+                            }
+                        }
+                    }
+                }
                 if changed {
                     let snapshot = Arc::new(Snapshot {
                         devices: pads.iter().map(|p| p.info.clone()).collect(),
@@ -87,8 +97,9 @@ impl GameInput {
                     drop(old);
                     signal.set();
                 }
-                let mut fds: Vec<_> = pads.iter().map(|p| PollFd {fd: p.file.as_raw_fd(), events: READ, revents: 0}).collect();
-                if let Err(e) = poll_io::wait(read.as_raw_fd(), &mut fds, Some(scan)) {
+                let mut fds: Vec<_> = pads.iter().map(|p| p.file.as_raw_fd()).chain(dir.as_ref().map(|d| d.file.as_raw_fd()))
+                    .map(|fd| PollFd {fd, events: READ, revents: 0}).collect();
+                if let Err(e) = poll_io::wait(read.as_raw_fd(), &mut fds, None) {
                     eprintln!("[hal-gamepad] poll: {e}");
                     break;
                 }
@@ -103,6 +114,46 @@ impl Drop for GameInput {
         self.stop.store(true, Ordering::Release);
         // HUP wakes poll without a blocking send or a UI-thread join.
         let _ = self.wake.shutdown(std::net::Shutdown::Both);
+    }
+}
+
+const INPUT_DIR: &str = "/dev/input";
+
+/// /dev/input's changes through inotify: a node created, removed, or its access changed.
+struct InputDir { file: File }
+impl InputDir {
+    fn watch() -> io::Result<Self> {
+        let fd = unsafe { libc_sys::inotify_init1(libc_sys::O_NONBLOCK | libc_sys::O_CLOEXEC) };
+        if fd < 0 { return Err(io::Error::last_os_error()); }
+        let file = unsafe { File::from_raw_fd(fd) };
+        let mask = libc_sys::IN_CREATE | libc_sys::IN_DELETE | libc_sys::IN_ATTRIB;
+        if unsafe { libc_sys::inotify_add_watch(fd, c"/dev/input".as_ptr(), mask) } < 0 { return Err(io::Error::last_os_error()); }
+        Ok(Self { file })
+    }
+    /// The nodes changed since the last call; None when the kernel dropped changes (any may have).
+    fn changes(&self) -> io::Result<Option<Vec<PathBuf>>> {
+        let mut paths = Vec::new();
+        let mut words = [0u32; 1024];
+        loop {
+            let bytes = unsafe { std::slice::from_raw_parts_mut(words.as_mut_ptr().cast::<u8>(), std::mem::size_of_val(&words)) };
+            let n = match (&self.file).read(bytes) {
+                Ok(n) => n,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(Some(paths)),
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e),
+            };
+            let mut at = 0;
+            // each record: wd, mask, cookie, name length, then the NUL-padded name
+            while at + 16 <= n {
+                let word = |i: usize| u32::from_ne_bytes(bytes[at + 4 * i..at + 4 * i + 4].try_into().unwrap());
+                let (mask, len) = (word(1), word(3) as usize);
+                if mask & libc_sys::IN_Q_OVERFLOW != 0 { return Ok(None); }
+                let name = &bytes[(at + 16).min(n)..(at + 16 + len).min(n)];
+                let name = &name[..name.iter().position(|b| *b == 0).unwrap_or(name.len())];
+                if !name.is_empty() { paths.push(PathBuf::from(INPUT_DIR).join(std::ffi::OsStr::from_bytes(name))); }
+                at += 16 + len;
+            }
+        }
     }
 }
 

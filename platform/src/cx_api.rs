@@ -3245,7 +3245,7 @@ mod tests {
     /// window size: the target sized with `pass_pixel_size` of the logical size the pass is set
     /// to, the pass by `get_pass_rect` (snapped to `pass_logical_size`) and then the frame's
     /// pass size (`pass_pixel_size` again). A target floored where the pass was ceiled was a
-    /// pixel short at 1.25 / 1.41 / 1.75 and the GPU refused the pass (149, Scope's Glass).
+    /// pixel short at 1.25 / 1.41 / 1.75 and the GPU refused the pass (a node, an app's Glass).
     #[test]
     fn a_pass_is_exactly_its_target_at_every_scale_and_size() {
         let sizes = [1.0, 7.0, 99.5, 333.0, 640.0, 875.25, 876.0, 1179.0, 1180.0, 1235.7, 1920.0, 2559.0, 4097.3];
