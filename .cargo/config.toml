@@ -5,6 +5,18 @@
 # baselines. A RUSTFLAGS environment variable replaces these flags entirely, so a build for distribution or a
 # benchmark baseline that must stay generic sets RUSTFLAGS explicitly (rwbench's "shipping rustc" baseline does).
 #
+# Host builds also run rustc's parallel frontend (user, 2026-11-05): `-Z threads=8`, which stable rustc takes
+# under RUSTC_BOOTSTRAP=1 ([env] below; cargo hands it to every rustc it runs). For the JIT on a 16-CPU box a clean
+# build goes from 74 to 68-71 s, a relax-compiler edit from 33 to 25 s and a relax-types edit from 47 to 35 s; the
+# binary and its speed are unchanged. `-Z allow-features=` (an empty list) keeps the bootstrap from letting a
+# `#![feature]` through: one fails with E0725, as it would on stable (tools/run/src/build_flags.rs tests both).
+# Every host build here (cargo run/build/test/check by hand, devhub, CI and the land gate) gets this one flag set;
+# a different set builds and stores its own copy of every crate. Cross targets keep plain flags, and builds that
+# set RUSTFLAGS (Runner, the CI's cross checks) replace these flags along with target-cpu=native. A rustc without
+# `-Z threads` stops at cargo's first call: "unknown unstable option: `threads`".
+[env]
+RUSTC_BOOTSTRAP = "1"
+
 # PGO data for makepad-box3d is trained by libs/box3d/pgo.sh (not checked in).
 # Do not enable it here with a relative -Cprofile-use path:
 # Cargo applies rustflags to every crate in the graph, and rustc resolves
@@ -17,19 +29,19 @@
 rustflags = []
 
 [target.x86_64-unknown-linux-gnu]
-rustflags = ["-C", "target-cpu=native"]
+rustflags = ["-C", "target-cpu=native", "-Z", "threads=8", "-Z", "allow-features="]
 
 [target.aarch64-unknown-linux-gnu]
-rustflags = ["-C", "target-cpu=native"]
+rustflags = ["-C", "target-cpu=native", "-Z", "threads=8", "-Z", "allow-features="]
 
 [target.aarch64-apple-darwin]
-rustflags = ["-C", "target-cpu=native"]
+rustflags = ["-C", "target-cpu=native", "-Z", "threads=8", "-Z", "allow-features="]
 
 [target.x86_64-apple-darwin]
-rustflags = ["-C", "target-cpu=native"]
+rustflags = ["-C", "target-cpu=native", "-Z", "threads=8", "-Z", "allow-features="]
 
 [target.x86_64-pc-windows-msvc]
-rustflags = ["-C", "target-cpu=native"]
+rustflags = ["-C", "target-cpu=native", "-Z", "threads=8", "-Z", "allow-features="]
 
 [target.aarch64-pc-windows-msvc]
-rustflags = ["-C", "target-cpu=native"]
+rustflags = ["-C", "target-cpu=native", "-Z", "threads=8", "-Z", "allow-features="]

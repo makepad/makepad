@@ -1416,7 +1416,7 @@ pub fn build_host(stable: bool, org: &str, product: &str, package: &str, flags: 
         rust_env.push(("IPHONEOS_DEPLOYMENT_TARGET", IOS_DEPLOYMENT_TARGET));
         rust_env.push(("IPHONESIMULATOR_DEPLOYMENT_TARGET", IOS_DEPLOYMENT_TARGET));
     }
-    // the JIT's own build profile (thin LTO, the desktop `makepad`'s): smaller and faster than release
+    // the JIT's own build profile, the desktop `makepad`'s (opt-level 3, LTO within each crate)
     let mut args = vec!["run", apple_target.rust_channel(stable), "cargo", "build", "--profile", "host", "-p", "makepad-run", "--bin", "makepad", &target_opt, &target_dir_arg];
     if apple_target.needs_build_std() {
         args.extend(["-Z", "build-std=std"]);

@@ -56,7 +56,7 @@ impl Input {
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
     /// VM instructions over the whole run (the document's load included).
-    pub fuel: usize,
+    pub fuel: u64,
     /// The live VM heap.
     pub heap_bytes: usize,
     pub stack_values: usize,

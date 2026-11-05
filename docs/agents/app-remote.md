@@ -23,8 +23,11 @@ Capture the launch output using your process tool. The startup line contains
 everything needed to address and clean up that instance:
 
 ```text
-[makepad-remote] pid=9931 app=makepad-example-splash socket=/tmp/makepad-remote/9931.sock
+[makepad-remote] pid=9931 app=makepad-example-splash socket=/tmp/makepad-501/makepad-remote-9931.sock
 ```
+
+The socket is in the user's socket dir, `/tmp/makepad-<uid>` (0700), whatever the
+process's TMPDIR: a deep TMPDIR cannot hold a Unix socket's path.
 
 `--remote` (no value) or `MAKEPAD_REMOTE=1` opens a Unix-socket endpoint. No
 TCP port exists and nothing listens on the network. `--remote=PORT`,
@@ -122,10 +125,11 @@ With no window specified, commands generally use the first window.
 
 Mouse buttons: `b=0` left, `b=1` right, `b=2` middle. Scroll takes `dx`
 and `dy`. Add `hw=1` when testing the hardware pointer-lock/pin transform.
-Keyboard modifiers are `shift=1`, `ctrl=1`, `alt=1`, and `cmd=1`.
+Keyboard modifiers are `shift=1`, `ctrl=1`, `alt=1`, and `logo=1`.
 
-The input parser also accepts long names such as `window`, `kind`, `button`,
-`text`, and `code`. Quote values with spaces as ordinary shell arguments.
+Use the keys in each command’s schema (`w`, `k`, `b`, `t`, and `c` for
+input commands); unknown keys are rejected. Quote values with spaces as
+ordinary shell arguments.
 
 File drops require an absolute path (at most 4096 bytes) and finite,
 nonnegative `x`/`y` inside the window. Optional parameters are `w`/`window`

@@ -47,6 +47,7 @@ workspace.members = [
     "libs/relax_api",
     "libs/relax_api/macro",
     "libs/relax_api/macro_impl",
+    "libs/relax_api/phase",
     "libs/civil_time",
     "libs/wm_api",
     "libs/shell_kit",
@@ -288,7 +289,6 @@ workspace.members = [
     "libs/stack",
     "tools/service_host",
     "tools/agents",
-    "tools/ci",
     "tools/ci_leg",
     "libs/ci_judge",
     # === makepad run: the app-VM host (tools/run, package makepad-run, binary makepad)
@@ -549,10 +549,14 @@ lto = "off"
 # Output goes to target/host/ (or target/<triple>/host/), never over target/release: release stays the
 # distributable build and the build every gate, A/B and timing series uses.
 # local/agent_state/relax-campaign/build-host.sh adds -Ctarget-cpu=native and the PGO profile.
+# lto = false: LTO within each crate, no whole-program link step. On a 16-core Linux box (2026-11-05,
+# against thin LTO) a relax-compiler edit rebuilds in 33 s instead of 59 s, a relax-types edit in 47 s
+# instead of 70 s, a tools/run edit in 3 s instead of 39 s and a clean build in 73 s instead of 87 s;
+# the JIT compiles about 1.5% slower (selftest CPU 61.5 s -> 62.5 s), settles the same.
 [profile.host]
 inherits = "release"
 opt-level = 3
-lto = "thin"
+lto = false
 codegen-units = 16
 incremental = false
 

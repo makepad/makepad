@@ -273,12 +273,15 @@ it used (this one and any build or bench node):
   muted Stage (H.264-only sites such as X via the media file behind the page)
   and writes the clip, provenance and frames. See
   `apps/commercial/stage/WEB-GRABS.md`.
-- The parallel rustc frontend is a local opt-in, never for CI or shipped
-  builds. It needs `RUSTC_BOOTSTRAP` on stable and roughly halves a clean
-  dev build. Put it in the user config, `~/.cargo/config.toml`, so every
-  build on the machine gets the same flags (a flag difference rebuilds
-  every crate); do not set it per shell with `RUSTFLAGS`:
-  `[env]` `RUSTC_BOOTSTRAP = "1"` and `[build]` `rustflags = ["-Zthreads=8"]`.
+- Every host build in the workspace uses the parallel rustc frontend:
+  hand builds, devhub, CI and the land gate alike. The repo's
+  `.cargo/config.toml` gives each host target `-Z threads=8` and
+  `-Z allow-features=`, and sets `RUSTC_BOOTSTRAP = "1"` in `[env]` so that
+  stable rustc takes them. The empty allow list keeps the bootstrap from
+  letting a `#![feature]` through, so stable's guarantee still holds. Do not
+  add these flags in `~/.cargo/config.toml` or override them per shell with
+  `RUSTFLAGS`: a different flag set builds a second copy of every crate.
+  Cross targets keep plain flags.
 - Use the WM’s Cargo launch path for its hosted apps: `cargo run --release`
   builds each app on demand, and the WM shows compilation while it starts.
   Do not collect prebuilt app binaries for a WM session.

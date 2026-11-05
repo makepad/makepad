@@ -1,5 +1,5 @@
 use crate::toml::{self, Table, Token};
-use makepad_ci_merge::{digest_input, digest_platform};
+use makepad_ci_merge::{digest_input, digest_platform, inert_by_crate};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -28,7 +28,7 @@ fn dependencies(table: &Table) -> Option<Option<&str>> {
 pub struct Digests {
     root: Option<PathBuf>,
     dir: PathBuf,
-    inputs: BTreeMap<bool, Option<String>>,
+    inputs: BTreeMap<&'static str, Option<String>>,
 }
 
 impl Digests {
@@ -44,12 +44,12 @@ impl Digests {
 
     pub fn get(&mut self, section: &str) -> Option<String> {
         let (unit, os) = section.rsplit_once('.')?;
-        let app = unit == "app";
-        if !self.inputs.contains_key(&app) {
-            let input = self.root.as_ref().and_then(|r| input(r, &self.dir, app));
-            self.inputs.insert(app, input);
+        let kind = match unit { "app" => "app", "tests" => "tests", _ => "job" };
+        if !self.inputs.contains_key(kind) {
+            let input = self.root.as_ref().and_then(|r| input(r, &self.dir, kind));
+            self.inputs.insert(kind, input);
         }
-        self.inputs.get(&app)?.as_ref().map(|s| digest_platform(s, os))
+        self.inputs.get(kind)?.as_ref().map(|s| digest_platform(s, os))
     }
 }
 
@@ -85,7 +85,22 @@ fn closure(root: &Path, start: &Path, workspace: &BTreeMap<String, PathBuf>) -> 
     Some(dirs)
 }
 
-fn input(root: &Path, dir: &Path, app: bool) -> Option<String> {
+/// `git grep -l` at HEAD: the files naming `name` under `dirs`.
+fn naming(repo: &Path, name: &str, dirs: &[&str]) -> Option<Vec<String>> {
+    let mut args = vec!["grep", "-l", "-F", "-e", name, "HEAD", "--"];
+    args.extend(dirs.iter().copied());
+    let out = Command::new("git").current_dir(repo).args(&args)
+        .env_remove("GIT_DIR").env_remove("GIT_WORK_TREE").env_remove("GIT_INDEX_FILE")
+        .output().ok()?;
+    match out.status.code() {
+        Some(0) => Some(String::from_utf8(out.stdout).ok()?.lines().filter_map(|l| l.strip_prefix("HEAD:")).map(str::to_string).collect()),
+        Some(1) => Some(Vec::new()),
+        _ => None,
+    }
+}
+
+fn input(root: &Path, dir: &Path, kind: &str) -> Option<String> {
+    let app = kind == "app";
     let root = root.canonicalize().ok()?;
     let commercial = root.join("apps/commercial");
     let mut workspace = BTreeMap::new();
@@ -106,12 +121,14 @@ fn input(root: &Path, dir: &Path, app: bool) -> Option<String> {
     }
     let mut names = BTreeSet::new();
     let mut by_repo: BTreeMap<PathBuf, Vec<String>> = BTreeMap::new();
+    let mut crates = BTreeSet::new();
     for dir in &dirs {
         for table in manifest(dir)? {
             if table.name == "package" { names.insert(get(&table, "name")?.to_string()); }
         }
         let repo = if dir.starts_with(&commercial) { &commercial } else { &root };
         let rel = dir.strip_prefix(repo).ok()?.to_str()?.replace('\\', "/");
+        crates.insert(if repo == &commercial { format!("apps/commercial/{rel}").trim_end_matches('/').to_string() } else { rel.clone() });
         by_repo.entry(repo.clone()).or_default().push(if rel.is_empty() { ".".into() } else { rel });
     }
     let mut lines = String::new();
@@ -133,6 +150,23 @@ fn input(root: &Path, dir: &Path, app: bool) -> Option<String> {
             if !listed.contains(manifest.as_str()) { return None; }
         }
     }
+    // Same documents (and tests' ci.splash) left out as devhub's proofs: those no Rust source of
+    // their crate names.
+    let rows: Vec<&str> = lines.lines().filter_map(|l| l.split_once('\t').map(|(_, p)| p)).collect();
+    let mut out = BTreeSet::new();
+    for (krate, files) in inert_by_crate(rows.into_iter(), &crates, kind == "tests") {
+        let (repo, rel) = match krate.strip_prefix("apps/commercial/") { Some(r) => (&commercial, r), None => (&root, krate.as_str()) };
+        let mut named: BTreeMap<&str, bool> = BTreeMap::new();
+        for file in &files {
+            let name = file.rsplit('/').next().unwrap_or(file);
+            if !named.contains_key(name) {
+                let found = naming(repo, name, &[if rel.is_empty() { "." } else { rel }])?;
+                named.insert(name, found.iter().any(|p| p.ends_with(".rs")));
+            }
+            if !named[name] { out.insert(file.to_string()); }
+        }
+    }
+    let lines: String = lines.lines().filter(|l| l.split_once('\t').is_none_or(|(_, p)| !out.contains(p))).map(|l| format!("{l}\n")).collect();
     // A missing or ambiguous lock file is not a digest with an empty external set.
     let external = external(&std::fs::read_to_string(root.join("Cargo.lock")).ok()?, &names)?;
     Some(digest_input(&lines, &external))

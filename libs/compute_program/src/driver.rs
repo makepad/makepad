@@ -279,7 +279,7 @@ fn run_program(vm: &mut ScriptVm, program: &Program, config: &SessionConfig) -> 
 }
 
 /// Runs `f` under the session's stack, call and instruction limits, charging its instructions.
-fn limited<R>(vm: &mut ScriptVm, limits: &Limits, fuel: &mut usize, f: impl FnOnce(&mut ScriptVm) -> R) -> R {
+fn limited<R>(vm: &mut ScriptVm, limits: &Limits, fuel: &mut u64, f: impl FnOnce(&mut ScriptVm) -> R) -> R {
     let budget = *fuel;
     let r = vm.with_stack_value_limit(limits.stack_values, |vm| vm.with_call_frame_limit(limits.call_frames, |vm| vm.with_instruction_limit(budget, f)));
     *fuel = fuel.saturating_sub(vm.last_limit_consumed());

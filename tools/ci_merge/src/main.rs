@@ -55,11 +55,9 @@ fn merge(ancestor: &Proofs, current: &Proofs, other: &Proofs, mut digest: impl F
                 match (matches(a), matches(b)) {
                     (true, false) => a,
                     (false, true) => b,
-                    _ => match (a.and_then(|p| p.get("date")), b.and_then(|p| p.get("date"))) {
-                        (Some(ad), Some(bd)) if ad > bd => a,
-                        (Some(ad), Some(bd)) if bd > ad => b,
-                        _ => None,
-                    },
+                    // neither is the tree's: the newer stands, and one of a tie stands too (a
+                    // lost proof took its crate out of the runs that test what changed)
+                    _ => [a, b].into_iter().flatten().max_by_key(|p| (p.get("date"), *p)),
                 }
             };
         if let Some(section) = chosen { out.insert(key.clone(), section.clone()); }
@@ -118,7 +116,7 @@ mod tests {
     }
 
     #[test]
-    fn conflicting_proofs_prefer_digest_then_date_and_drop_ties() {
+    fn conflicting_proofs_prefer_digest_then_date_and_a_tie_keeps_one() {
         let base: Proofs = [("app.linux".into(), proof("old", "2026-10-01"))].into();
         let left: Proofs = [("app.linux".into(), proof("left", "2026-10-02"))].into();
         let right: Proofs = [("app.linux".into(), proof("right", "2026-10-03"))].into();
@@ -126,7 +124,10 @@ mod tests {
         assert_eq!(merge(&base, &left, &right, |_| None), right);
         assert_eq!(merge(&base, &right, &left, |_| None), right);
         let tie: Proofs = [("app.linux".into(), proof("tie", "2026-10-02"))].into();
-        assert!(merge(&base, &left, &tie, |_| None).is_empty());
+        let kept = merge(&base, &left, &tie, |_| None);
+        assert_eq!(kept["app.linux"]["digest"], "tie", "two of a day: never lost, and whichever side merges");
+        assert_eq!(kept, merge(&base, &tie, &left, |_| None));
+        assert_eq!(merge(&base, &Proofs::new(), &left, |_| None), left, "gone on one side, new on the other");
         assert_eq!(merge(&base, &left, &left, |_| None), left);
     }
 

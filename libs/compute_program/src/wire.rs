@@ -117,7 +117,7 @@ pub fn encode_open(open: &Open, threads: usize, kept: &dyn Fn(u128) -> bool) -> 
     put_str(&mut w, &open.program.source);
     put_value(&mut w, &open.params);
     let l = &open.limits;
-    for x in [l.fuel as u64, l.heap_bytes as u64, l.stack_values as u64, l.call_frames as u64, l.work, l.buffer_bytes, l.read_words as u64, l.kernels as u64] {
+    for x in [l.fuel, l.heap_bytes as u64, l.stack_values as u64, l.call_frames as u64, l.work, l.buffer_bytes, l.read_words as u64, l.kernels as u64] {
         w.extend_from_slice(&x.to_le_bytes());
     }
     w.extend_from_slice(&open.seed.to_le_bytes());
@@ -167,7 +167,7 @@ pub fn decode_open(bytes: &[u8], max_input_words: usize, threads: usize) -> Resu
     }
     let size = |x: u64| usize::try_from(x).unwrap_or(usize::MAX);
     let limits = Limits {
-        fuel: size(n[0]),
+        fuel: n[0],
         heap_bytes: size(n[1]),
         stack_values: size(n[2]),
         call_frames: size(n[3]),

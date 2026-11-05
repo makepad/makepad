@@ -1,5 +1,5 @@
 //! The proof hash format, shared with devhub. No Cargo dependencies.
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Sorted blob paths/object IDs and external package checksums; proofs exclude themselves.
 pub fn digest_input(lines: &str, external: &[String]) -> String {
@@ -12,6 +12,46 @@ pub fn digest_input(lines: &str, external: &[String]) -> String {
     }).collect();
     rows.extend(external.iter().cloned());
     rows.into_iter().map(|line| format!("{line}\n")).collect()
+}
+
+/// Documents: licences, readmes, credits, notes (`*.md`, `*.rst`, `LICENSE*` and the like),
+/// outside a `resources/` folder (an app loads its resources at run time).
+pub fn doc_file(path: &str) -> bool {
+    const DOCS: [&str; 13] = ["license", "licence", "copying", "unlicense", "notice", "notices", "authors", "credits", "changelog", "readme", "contributing", "attribution", "third_party_notices"];
+    if path.split('/').any(|c| c == "resources") {
+        return false;
+    }
+    let name = path.rsplit('/').next().unwrap_or(path).to_ascii_lowercase();
+    if [".md", ".markdown", ".rst"].iter().any(|e| name.ends_with(e)) {
+        return true;
+    }
+    let stem = name.split('.').next().unwrap_or("");
+    DOCS.iter().any(|d| stem.strip_prefix(d).is_some_and(|rest| rest.is_empty() || rest.starts_with(['-', '_'])))
+}
+
+/// A file of a crate its proofs leave out unless a Rust source of that crate names it
+/// ([`names`]; `include_str!("../README.md")` names `README.md`): a document ([`doc_file`]), and
+/// for the crate's tests its `ci.splash`, the app's smoke script, which no test runs.
+pub fn inert(path: &str, tests: bool) -> bool {
+    doc_file(path) || (tests && path.rsplit('/').next() == Some("ci.splash"))
+}
+
+/// Whether a Rust source names a file: its text holds the file's name.
+pub fn names(source: &str, path: &str) -> bool {
+    source.contains(path.rsplit('/').next().unwrap_or(path))
+}
+
+/// Of a unit's [`inert`] files, the crate each is in: the deepest of the unit's crate dirs
+/// (repo paths, no trailing `/`) that holds it.
+pub fn inert_by_crate<'a>(paths: impl Iterator<Item = &'a str>, crates: &BTreeSet<String>, tests: bool) -> BTreeMap<String, Vec<&'a str>> {
+    let mut out: BTreeMap<String, Vec<&'a str>> = BTreeMap::new();
+    for path in paths.filter(|p| inert(p, tests)) {
+        let holds = |d: &&String| d.is_empty() || (path.starts_with(d.as_str()) && path.as_bytes().get(d.len()) == Some(&b'/'));
+        if let Some(dir) = crates.iter().filter(holds).max_by_key(|d| d.len()) {
+            out.entry(dir.clone()).or_default().push(path);
+        }
+    }
+    out
 }
 
 pub fn digest_platform(input: &str, os: &str) -> String {
@@ -58,4 +98,30 @@ pub fn sha256(bytes: &[u8]) -> String {
         for (v, add) in h.iter_mut().zip([a, b, c, d, e, f, g, hh]) { *v = v.wrapping_add(add); }
     }
     h.iter().map(|v| format!("{v:08x}")).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn documents_and_a_tests_ci_splash_are_left_to_their_deepest_crate() {
+        for doc in ["README.md", "libs/a/LICENSE-MIT", "libs/a/LICENSE", "libs/a/COPYING", "libs/a/docs/notes.MD", "libs/a/CREDITS.md", "libs/a/LICENSE.txt", "libs/a/THIRD_PARTY_NOTICES.md", "libs/a/README.rst", "libs/a/LICENSE_APACHE"] {
+            assert!(doc_file(doc), "{doc}");
+        }
+        // an app's resources load at run time; data, sources and manifests are code
+        for code in ["apps/x/resources/help.md", "libs/a/src/lib.rs", "libs/a/data.txt", "libs/a/src/licenses.rs", "libs/a/LICENSEE", "libs/a/ci.splash", "libs/a/Cargo.toml"] {
+            assert!(!doc_file(code), "{code}");
+        }
+        assert!(inert("apps/x/ci.splash", true) && !inert("apps/x/ci.splash", false) && !inert("apps/x/main.splash", true));
+        let crates: BTreeSet<String> = ["libs/a", "libs/a/b", "apps/x"].map(String::from).into();
+        let by = inert_by_crate(["libs/a/README.md", "libs/a/b/README.md", "libs/ab/README.md", "libs/a/src/lib.rs", "apps/x/ci.splash"].into_iter(), &crates, true);
+        assert_eq!(by.into_iter().collect::<Vec<_>>(), vec![
+            ("apps/x".to_string(), vec!["apps/x/ci.splash"]),
+            ("libs/a".to_string(), vec!["libs/a/README.md"]),
+            ("libs/a/b".to_string(), vec!["libs/a/b/README.md"]),
+        ]);
+        assert!(names("#![doc = include_str!(\"../README.md\")]", "libs/a/README.md"));
+        assert!(!names("// see the docs", "libs/a/README.md"));
+    }
 }

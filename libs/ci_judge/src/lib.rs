@@ -410,7 +410,7 @@ mod tests {
     fn every_acceptance_text_in_the_tree_asks_plainly() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let mut files = vec![root.join("ci.splash")];
-        for dir in ["apps", "tools/ci"] {
+        for dir in ["apps", "tools/ci_leg"] {
             for entry in std::fs::read_dir(root.join(dir)).unwrap().flatten() {
                 let p = entry.path();
                 files.push(if p.extension().is_some_and(|x| x == "splash") { p } else { p.join("ci.splash") });
