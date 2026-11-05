@@ -898,6 +898,14 @@ impl ::core::cmp::Eq for HINSTANCE {}
 impl ::core::fmt::Debug for HINSTANCE { fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result { ::core::fmt::Debug::fmt(&self.0, f) } }
 #[repr(transparent)]
 #[derive(Clone, Copy)]
+pub struct HLOCAL(pub *mut ::core::ffi::c_void);
+impl HLOCAL { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } pub fn is_invalid(self) -> bool { self.0 as isize == 0 || self.0 as isize == -1 } }
+impl ::core::default::Default for HLOCAL { fn default() -> Self {Self::default()} }
+impl ::core::cmp::PartialEq for HLOCAL { fn eq(&self, other: &Self) -> bool { self.0 == other.0 } }
+impl ::core::cmp::Eq for HLOCAL {}
+impl ::core::fmt::Debug for HLOCAL { fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result { ::core::fmt::Debug::fmt(&self.0, f) } }
+#[repr(transparent)]
+#[derive(Clone, Copy)]
 pub struct HMODULE(pub *mut ::core::ffi::c_void);
 impl HMODULE { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } pub fn is_invalid(self) -> bool { self.0 as isize == 0 || self.0 as isize == -1 } }
 impl ::core::default::Default for HMODULE { fn default() -> Self {Self::default()} }
@@ -938,6 +946,12 @@ pub HighPart: i32,
 }
 impl LUID { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } }
 impl ::core::default::Default for LUID { fn default() -> Self {Self::default()} }
+mod import_LocalFree { #[link(name = "KERNEL32", kind = "raw-dylib")] extern "system" { #[link_name = "LocalFree"] pub fn call(hMem: crate::Win32::Foundation::HLOCAL) -> crate::Win32::Foundation::HLOCAL; } }
+pub use import_LocalFree::call as LocalFree_raw;
+#[inline]
+pub unsafe fn LocalFree(hMem: Option<crate::Win32::Foundation::HLOCAL>) -> Result<crate::Win32::Foundation::HLOCAL, crate::core::HRESULT> {
+let hr__ = import_LocalFree::call(hMem.unwrap_or(unsafe { ::core::mem::zeroed() })); if hr__.is_invalid() {return Err(crate::core::HRESULT::from_thread());} return Ok(hr__);
+}
 pub const NO_ERROR: crate::Win32::Foundation::WIN32_ERROR = crate::Win32::Foundation::WIN32_ERROR(0u64 as _);
 #[repr(transparent)]
 #[derive(Clone, Copy)]
@@ -7481,6 +7495,7 @@ impl ::core::ops::BitAnd for DXGI_MEMORY_SEGMENT_GROUP { type Output = Self; fn 
 impl ::core::ops::BitXor for DXGI_MEMORY_SEGMENT_GROUP { type Output = Self; fn bitxor(self, rhs: Self) -> Self { Self(self.0 ^ rhs.0) } }
 impl ::core::ops::Not for DXGI_MEMORY_SEGMENT_GROUP { type Output = Self; fn not(self) -> Self { Self(!self.0) } }
 pub const DXGI_MEMORY_SEGMENT_GROUP_LOCAL: crate::Win32::Graphics::Dxgi::DXGI_MEMORY_SEGMENT_GROUP = crate::Win32::Graphics::Dxgi::DXGI_MEMORY_SEGMENT_GROUP(0i64 as _);
+pub const DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL: crate::Win32::Graphics::Dxgi::DXGI_MEMORY_SEGMENT_GROUP = crate::Win32::Graphics::Dxgi::DXGI_MEMORY_SEGMENT_GROUP(1i64 as _);
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct DXGI_MODE_DESC1 {
@@ -15786,6 +15801,17 @@ pub const FILE_ACTION_REMOVED: crate::Win32::Storage::FileSystem::FILE_ACTION = 
 pub const FILE_ACTION_RENAMED_NEW_NAME: crate::Win32::Storage::FileSystem::FILE_ACTION = crate::Win32::Storage::FileSystem::FILE_ACTION(5u64 as _);
 pub const FILE_ACTION_RENAMED_OLD_NAME: crate::Win32::Storage::FileSystem::FILE_ACTION = crate::Win32::Storage::FileSystem::FILE_ACTION(4u64 as _);
 pub const FILE_ATTRIBUTE_REPARSE_POINT: crate::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES = crate::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES(1024u64 as _);
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FILE_BASIC_INFO {
+pub CreationTime: i64,
+pub LastAccessTime: i64,
+pub LastWriteTime: i64,
+pub ChangeTime: i64,
+pub FileAttributes: u32,
+}
+impl FILE_BASIC_INFO { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } }
+impl ::core::default::Default for FILE_BASIC_INFO { fn default() -> Self {Self::default()} }
 pub const FILE_BEGIN: crate::Win32::Storage::FileSystem::SET_FILE_POINTER_MOVE_METHOD = crate::Win32::Storage::FileSystem::SET_FILE_POINTER_MOVE_METHOD(0u64 as _);
 #[repr(transparent)]
 #[derive(Clone, Copy)]
@@ -15816,6 +15842,18 @@ pub const FILE_FLAG_NO_BUFFERING: crate::Win32::Storage::FileSystem::FILE_FLAGS_
 pub const FILE_FLAG_OPEN_REPARSE_POINT: crate::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES = crate::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES(2097152u64 as _);
 pub const FILE_FLAG_OVERLAPPED: crate::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES = crate::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES(1073741824u64 as _);
 pub const FILE_FLAG_SEQUENTIAL_SCAN: crate::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES = crate::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES(134217728u64 as _);
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+pub struct FILE_INFO_BY_HANDLE_CLASS(pub i32);
+impl FILE_INFO_BY_HANDLE_CLASS { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } pub fn is_invalid(self) -> bool { self.0 as isize == 0 || self.0 as isize == -1 } }
+impl ::core::default::Default for FILE_INFO_BY_HANDLE_CLASS { fn default() -> Self {Self::default()} }
+impl ::core::cmp::PartialEq for FILE_INFO_BY_HANDLE_CLASS { fn eq(&self, other: &Self) -> bool { self.0 == other.0 } }
+impl ::core::cmp::Eq for FILE_INFO_BY_HANDLE_CLASS {}
+impl ::core::fmt::Debug for FILE_INFO_BY_HANDLE_CLASS { fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result { ::core::fmt::Debug::fmt(&self.0, f) } }
+impl ::core::ops::BitOr for FILE_INFO_BY_HANDLE_CLASS { type Output = Self; fn bitor(self, rhs: Self) -> Self { Self(self.0 | rhs.0) } }
+impl ::core::ops::BitAnd for FILE_INFO_BY_HANDLE_CLASS { type Output = Self; fn bitand(self, rhs: Self) -> Self { Self(self.0 & rhs.0) } }
+impl ::core::ops::BitXor for FILE_INFO_BY_HANDLE_CLASS { type Output = Self; fn bitxor(self, rhs: Self) -> Self { Self(self.0 ^ rhs.0) } }
+impl ::core::ops::Not for FILE_INFO_BY_HANDLE_CLASS { type Output = Self; fn not(self) -> Self { Self(!self.0) } }
 pub const FILE_LIST_DIRECTORY: crate::Win32::Storage::FileSystem::FILE_ACCESS_RIGHTS = crate::Win32::Storage::FileSystem::FILE_ACCESS_RIGHTS(1u64 as _);
 #[repr(transparent)]
 #[derive(Clone, Copy)]
@@ -15850,6 +15888,7 @@ impl ::core::ops::BitXor for FILE_SHARE_MODE { type Output = Self; fn bitxor(sel
 impl ::core::ops::Not for FILE_SHARE_MODE { type Output = Self; fn not(self) -> Self { Self(!self.0) } }
 pub const FILE_SHARE_READ: crate::Win32::Storage::FileSystem::FILE_SHARE_MODE = crate::Win32::Storage::FileSystem::FILE_SHARE_MODE(1u64 as _);
 pub const FILE_SHARE_WRITE: crate::Win32::Storage::FileSystem::FILE_SHARE_MODE = crate::Win32::Storage::FileSystem::FILE_SHARE_MODE(2u64 as _);
+pub const FileBasicInfo: crate::Win32::Storage::FileSystem::FILE_INFO_BY_HANDLE_CLASS = crate::Win32::Storage::FileSystem::FILE_INFO_BY_HANDLE_CLASS(0i64 as _);
 mod import_GetDiskFreeSpaceExW { #[link(name = "KERNEL32", kind = "raw-dylib")] extern "system" { #[link_name = "GetDiskFreeSpaceExW"] pub fn call(lpDirectoryName: crate::core::PCWSTR,lpFreeBytesAvailableToCaller: *mut u64,lpTotalNumberOfBytes: *mut u64,lpTotalNumberOfFreeBytes: *mut u64) -> crate::core::BOOL; } }
 pub use import_GetDiskFreeSpaceExW::call as GetDiskFreeSpaceExW_raw;
 #[inline]
@@ -15862,6 +15901,13 @@ pub use import_GetFileInformationByHandle::call as GetFileInformationByHandle_ra
 #[inline]
 pub unsafe fn GetFileInformationByHandle(hFile: crate::Win32::Foundation::HANDLE,lpFileInformation: *mut crate::Win32::Storage::FileSystem::BY_HANDLE_FILE_INFORMATION) -> Result<(), crate::core::HRESULT> {
 let hr__ = import_GetFileInformationByHandle::call(hFile,lpFileInformation); hr__.ok()?;
+Ok(())
+}
+mod import_GetFileInformationByHandleEx { #[link(name = "KERNEL32", kind = "raw-dylib")] extern "system" { #[link_name = "GetFileInformationByHandleEx"] pub fn call(hFile: crate::Win32::Foundation::HANDLE,FileInformationClass: crate::Win32::Storage::FileSystem::FILE_INFO_BY_HANDLE_CLASS,lpFileInformation: *mut ::core::ffi::c_void,dwBufferSize: u32) -> crate::core::BOOL; } }
+pub use import_GetFileInformationByHandleEx::call as GetFileInformationByHandleEx_raw;
+#[inline]
+pub unsafe fn GetFileInformationByHandleEx(hFile: crate::Win32::Foundation::HANDLE,FileInformationClass: crate::Win32::Storage::FileSystem::FILE_INFO_BY_HANDLE_CLASS,lpFileInformation: *mut ::core::ffi::c_void,dwBufferSize: u32) -> Result<(), crate::core::HRESULT> {
+let hr__ = import_GetFileInformationByHandleEx::call(hFile,FileInformationClass,lpFileInformation,dwBufferSize); hr__.ok()?;
 Ok(())
 }
 mod import_GetVolumePathNameW { #[link(name = "KERNEL32", kind = "raw-dylib")] extern "system" { #[link_name = "GetVolumePathNameW"] pub fn call(lpszFileName: crate::core::PCWSTR,lpszVolumePathName: crate::core::PWSTR,cchBufferLength: u32) -> crate::core::BOOL; } }
@@ -18504,6 +18550,126 @@ let hr__ = import_SetClipboardData::call(uFormat,hMem.unwrap_or(unsafe { ::core:
 }
 pub mod Diagnostics {
 pub mod Debug {
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct CONTEXT {
+pub P1Home: u64,
+pub P2Home: u64,
+pub P3Home: u64,
+pub P4Home: u64,
+pub P5Home: u64,
+pub P6Home: u64,
+pub ContextFlags: crate::Win32::System::Diagnostics::Debug::CONTEXT_FLAGS,
+pub MxCsr: u32,
+pub SegCs: u16,
+pub SegDs: u16,
+pub SegEs: u16,
+pub SegFs: u16,
+pub SegGs: u16,
+pub SegSs: u16,
+pub EFlags: u32,
+pub Dr0: u64,
+pub Dr1: u64,
+pub Dr2: u64,
+pub Dr3: u64,
+pub Dr6: u64,
+pub Dr7: u64,
+pub Rax: u64,
+pub Rcx: u64,
+pub Rdx: u64,
+pub Rbx: u64,
+pub Rsp: u64,
+pub Rbp: u64,
+pub Rsi: u64,
+pub Rdi: u64,
+pub R8: u64,
+pub R9: u64,
+pub R10: u64,
+pub R11: u64,
+pub R12: u64,
+pub R13: u64,
+pub R14: u64,
+pub R15: u64,
+pub Rip: u64,
+pub Anonymous: crate::Win32::System::Diagnostics::Debug::CONTEXT_0,
+pub VectorRegister: [crate::Win32::System::Diagnostics::Debug::M128A; 26],
+pub VectorControl: u64,
+pub DebugControl: u64,
+pub LastBranchToRip: u64,
+pub LastBranchFromRip: u64,
+pub LastExceptionToRip: u64,
+pub LastExceptionFromRip: u64,
+}
+impl CONTEXT { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } }
+impl ::core::default::Default for CONTEXT { fn default() -> Self {Self::default()} }
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub union CONTEXT_0 {
+pub FltSave: crate::Win32::System::Diagnostics::Debug::XSAVE_FORMAT,
+pub Anonymous: crate::Win32::System::Diagnostics::Debug::CONTEXT_0_0,
+}
+impl CONTEXT_0 { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } }
+impl ::core::default::Default for CONTEXT_0 { fn default() -> Self {Self::default()} }
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct CONTEXT_0_0 {
+pub Header: [crate::Win32::System::Diagnostics::Debug::M128A; 2],
+pub Legacy: [crate::Win32::System::Diagnostics::Debug::M128A; 8],
+pub Xmm0: crate::Win32::System::Diagnostics::Debug::M128A,
+pub Xmm1: crate::Win32::System::Diagnostics::Debug::M128A,
+pub Xmm2: crate::Win32::System::Diagnostics::Debug::M128A,
+pub Xmm3: crate::Win32::System::Diagnostics::Debug::M128A,
+pub Xmm4: crate::Win32::System::Diagnostics::Debug::M128A,
+pub Xmm5: crate::Win32::System::Diagnostics::Debug::M128A,
+pub Xmm6: crate::Win32::System::Diagnostics::Debug::M128A,
+pub Xmm7: crate::Win32::System::Diagnostics::Debug::M128A,
+pub Xmm8: crate::Win32::System::Diagnostics::Debug::M128A,
+pub Xmm9: crate::Win32::System::Diagnostics::Debug::M128A,
+pub Xmm10: crate::Win32::System::Diagnostics::Debug::M128A,
+pub Xmm11: crate::Win32::System::Diagnostics::Debug::M128A,
+pub Xmm12: crate::Win32::System::Diagnostics::Debug::M128A,
+pub Xmm13: crate::Win32::System::Diagnostics::Debug::M128A,
+pub Xmm14: crate::Win32::System::Diagnostics::Debug::M128A,
+pub Xmm15: crate::Win32::System::Diagnostics::Debug::M128A,
+}
+impl CONTEXT_0_0 { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } }
+impl ::core::default::Default for CONTEXT_0_0 { fn default() -> Self {Self::default()} }
+pub const CONTEXT_CONTROL_AMD64: crate::Win32::System::Diagnostics::Debug::CONTEXT_FLAGS = crate::Win32::System::Diagnostics::Debug::CONTEXT_FLAGS(1048577u64 as _);
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+pub struct CONTEXT_FLAGS(pub u32);
+impl CONTEXT_FLAGS { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } pub fn is_invalid(self) -> bool { self.0 as isize == 0 || self.0 as isize == -1 } }
+impl ::core::default::Default for CONTEXT_FLAGS { fn default() -> Self {Self::default()} }
+impl ::core::cmp::PartialEq for CONTEXT_FLAGS { fn eq(&self, other: &Self) -> bool { self.0 == other.0 } }
+impl ::core::cmp::Eq for CONTEXT_FLAGS {}
+impl ::core::fmt::Debug for CONTEXT_FLAGS { fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result { ::core::fmt::Debug::fmt(&self.0, f) } }
+impl ::core::ops::BitOr for CONTEXT_FLAGS { type Output = Self; fn bitor(self, rhs: Self) -> Self { Self(self.0 | rhs.0) } }
+impl ::core::ops::BitAnd for CONTEXT_FLAGS { type Output = Self; fn bitand(self, rhs: Self) -> Self { Self(self.0 & rhs.0) } }
+impl ::core::ops::BitXor for CONTEXT_FLAGS { type Output = Self; fn bitxor(self, rhs: Self) -> Self { Self(self.0 ^ rhs.0) } }
+impl ::core::ops::Not for CONTEXT_FLAGS { type Output = Self; fn not(self) -> Self { Self(!self.0) } }
+pub const CONTEXT_INTEGER_AMD64: crate::Win32::System::Diagnostics::Debug::CONTEXT_FLAGS = crate::Win32::System::Diagnostics::Debug::CONTEXT_FLAGS(1048578u64 as _);
+mod import_GetThreadContext { #[link(name = "KERNEL32", kind = "raw-dylib")] extern "system" { #[link_name = "GetThreadContext"] pub fn call(hThread: crate::Win32::Foundation::HANDLE,lpContext: *mut crate::Win32::System::Diagnostics::Debug::CONTEXT) -> crate::core::BOOL; } }
+pub use import_GetThreadContext::call as GetThreadContext_raw;
+#[inline]
+pub unsafe fn GetThreadContext(hThread: crate::Win32::Foundation::HANDLE,lpContext: *mut crate::Win32::System::Diagnostics::Debug::CONTEXT) -> Result<(), crate::core::HRESULT> {
+let hr__ = import_GetThreadContext::call(hThread,lpContext); hr__.ok()?;
+Ok(())
+}
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct M128A {
+pub Low: u64,
+pub High: i64,
+}
+impl M128A { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } }
+impl ::core::default::Default for M128A { fn default() -> Self {Self::default()} }
+mod import_ReadProcessMemory { #[link(name = "KERNEL32", kind = "raw-dylib")] extern "system" { #[link_name = "ReadProcessMemory"] pub fn call(hProcess: crate::Win32::Foundation::HANDLE,lpBaseAddress: *const ::core::ffi::c_void,lpBuffer: *mut ::core::ffi::c_void,nSize: usize,lpNumberOfBytesRead: *mut usize) -> crate::core::BOOL; } }
+pub use import_ReadProcessMemory::call as ReadProcessMemory_raw;
+#[inline]
+pub unsafe fn ReadProcessMemory(hProcess: crate::Win32::Foundation::HANDLE,lpBaseAddress: *const ::core::ffi::c_void,lpBuffer: *mut ::core::ffi::c_void,nSize: usize,lpNumberOfBytesRead: Option<*mut usize>) -> Result<(), crate::core::HRESULT> {
+let hr__ = import_ReadProcessMemory::call(hProcess,lpBaseAddress,lpBuffer,nSize,lpNumberOfBytesRead.unwrap_or(::core::ptr::null_mut())); hr__.ok()?;
+Ok(())
+}
 mod import_SetThreadErrorMode { #[link(name = "KERNEL32", kind = "raw-dylib")] extern "system" { #[link_name = "SetThreadErrorMode"] pub fn call(dwNewMode: crate::Win32::System::Diagnostics::Debug::THREAD_ERROR_MODE,lpOldMode: *mut crate::Win32::System::Diagnostics::Debug::THREAD_ERROR_MODE) -> crate::core::BOOL; } }
 pub use import_SetThreadErrorMode::call as SetThreadErrorMode_raw;
 #[inline]
@@ -18523,6 +18689,28 @@ impl ::core::ops::BitOr for THREAD_ERROR_MODE { type Output = Self; fn bitor(sel
 impl ::core::ops::BitAnd for THREAD_ERROR_MODE { type Output = Self; fn bitand(self, rhs: Self) -> Self { Self(self.0 & rhs.0) } }
 impl ::core::ops::BitXor for THREAD_ERROR_MODE { type Output = Self; fn bitxor(self, rhs: Self) -> Self { Self(self.0 ^ rhs.0) } }
 impl ::core::ops::Not for THREAD_ERROR_MODE { type Output = Self; fn not(self) -> Self { Self(!self.0) } }
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct XSAVE_FORMAT {
+pub ControlWord: u16,
+pub StatusWord: u16,
+pub TagWord: u8,
+pub Reserved1: u8,
+pub ErrorOpcode: u16,
+pub ErrorOffset: u32,
+pub ErrorSelector: u16,
+pub Reserved2: u16,
+pub DataOffset: u32,
+pub DataSelector: u16,
+pub Reserved3: u16,
+pub MxCsr: u32,
+pub MxCsr_Mask: u32,
+pub FloatRegisters: [crate::Win32::System::Diagnostics::Debug::M128A; 8],
+pub XmmRegisters: [crate::Win32::System::Diagnostics::Debug::M128A; 16],
+pub Reserved4: [u8; 96],
+}
+impl XSAVE_FORMAT { pub fn default() -> Self { unsafe { ::core::mem::zeroed() } } }
+impl ::core::default::Default for XSAVE_FORMAT { fn default() -> Self {Self::default()} }
 }
 pub mod ToolHelp {
 #[repr(transparent)]
@@ -18961,6 +19149,13 @@ pub use import_VirtualFree::call as VirtualFree_raw;
 #[inline]
 pub unsafe fn VirtualFree(lpAddress: *mut ::core::ffi::c_void,dwSize: usize,dwFreeType: crate::Win32::System::Memory::VIRTUAL_FREE_TYPE) -> Result<(), crate::core::HRESULT> {
 let hr__ = import_VirtualFree::call(lpAddress,dwSize,dwFreeType); hr__.ok()?;
+Ok(())
+}
+mod import_VirtualUnlock { #[link(name = "KERNEL32", kind = "raw-dylib")] extern "system" { #[link_name = "VirtualUnlock"] pub fn call(lpAddress: *const ::core::ffi::c_void,dwSize: usize) -> crate::core::BOOL; } }
+pub use import_VirtualUnlock::call as VirtualUnlock_raw;
+#[inline]
+pub unsafe fn VirtualUnlock(lpAddress: *const ::core::ffi::c_void,dwSize: usize) -> Result<(), crate::core::HRESULT> {
+let hr__ = import_VirtualUnlock::call(lpAddress,dwSize); hr__.ok()?;
 Ok(())
 }
 }
@@ -19504,6 +19699,16 @@ impl SYSTEM_POWER_STATUS { pub fn default() -> Self { unsafe { ::core::mem::zero
 impl ::core::default::Default for SYSTEM_POWER_STATUS { fn default() -> Self {Self::default()} }
 }
 pub mod ProcessStatus {
+mod import_K32EnumProcessModules { #[link(name = "KERNEL32", kind = "raw-dylib")] extern "system" { #[link_name = "K32EnumProcessModules"] pub fn call(hProcess: crate::Win32::Foundation::HANDLE,lphModule: *mut crate::Win32::Foundation::HMODULE,cb: u32,lpcbNeeded: *mut u32) -> crate::core::BOOL; } }
+pub use import_K32EnumProcessModules::call as K32EnumProcessModules_raw;
+#[inline]
+pub unsafe fn K32EnumProcessModules(hProcess: crate::Win32::Foundation::HANDLE,lphModule: *mut crate::Win32::Foundation::HMODULE,cb: u32,lpcbNeeded: *mut u32) -> crate::core::BOOL {
+import_K32EnumProcessModules::call(hProcess,lphModule,cb,lpcbNeeded)}
+mod import_K32GetModuleFileNameExW { #[link(name = "KERNEL32", kind = "raw-dylib")] extern "system" { #[link_name = "K32GetModuleFileNameExW"] pub fn call(hProcess: crate::Win32::Foundation::HANDLE,hModule: crate::Win32::Foundation::HMODULE,lpFilename: crate::core::PWSTR,nSize: u32) -> u32; } }
+pub use import_K32GetModuleFileNameExW::call as K32GetModuleFileNameExW_raw;
+#[inline]
+pub unsafe fn K32GetModuleFileNameExW(hProcess: Option<crate::Win32::Foundation::HANDLE>,hModule: Option<crate::Win32::Foundation::HMODULE>,lpFilename: crate::core::PWSTR,nSize: u32) -> u32 {
+import_K32GetModuleFileNameExW::call(hProcess.unwrap_or(unsafe { ::core::mem::zeroed() }),hModule.unwrap_or(unsafe { ::core::mem::zeroed() }),lpFilename,nSize)}
 mod import_K32GetProcessMemoryInfo { #[link(name = "KERNEL32", kind = "raw-dylib")] extern "system" { #[link_name = "K32GetProcessMemoryInfo"] pub fn call(Process: crate::Win32::Foundation::HANDLE,ppsmemCounters: *mut crate::Win32::System::ProcessStatus::PROCESS_MEMORY_COUNTERS,cb: u32) -> crate::core::BOOL; } }
 pub use import_K32GetProcessMemoryInfo::call as K32GetProcessMemoryInfo_raw;
 #[inline]
@@ -19899,6 +20104,11 @@ pub use import_ExitProcess::call as ExitProcess_raw;
 #[inline]
 pub unsafe fn ExitProcess(uExitCode: u32) -> () {
 import_ExitProcess::call(uExitCode)}
+mod import_GetCurrentProcess { #[link(name = "KERNEL32", kind = "raw-dylib")] extern "system" { #[link_name = "GetCurrentProcess"] pub fn call() -> crate::Win32::Foundation::HANDLE; } }
+pub use import_GetCurrentProcess::call as GetCurrentProcess_raw;
+#[inline]
+pub unsafe fn GetCurrentProcess() -> crate::Win32::Foundation::HANDLE {
+import_GetCurrentProcess::call()}
 mod import_GetCurrentProcessId { #[link(name = "KERNEL32", kind = "raw-dylib")] extern "system" { #[link_name = "GetCurrentProcessId"] pub fn call() -> u32; } }
 pub use import_GetCurrentProcessId::call as GetCurrentProcessId_raw;
 #[inline]
@@ -19928,6 +20138,21 @@ pub use import_GetSystemTimes::call as GetSystemTimes_raw;
 #[inline]
 pub unsafe fn GetSystemTimes(lpIdleTime: Option<*mut crate::Win32::Foundation::FILETIME>,lpKernelTime: Option<*mut crate::Win32::Foundation::FILETIME>,lpUserTime: Option<*mut crate::Win32::Foundation::FILETIME>) -> Result<(), crate::core::HRESULT> {
 let hr__ = import_GetSystemTimes::call(lpIdleTime.unwrap_or(::core::ptr::null_mut()),lpKernelTime.unwrap_or(::core::ptr::null_mut()),lpUserTime.unwrap_or(::core::ptr::null_mut())); hr__.ok()?;
+Ok(())
+}
+mod import_GetThreadDescription { #[link(name = "KERNEL32", kind = "raw-dylib")] extern "system" { #[link_name = "GetThreadDescription"] pub fn call(hThread: crate::Win32::Foundation::HANDLE,ppszThreadDescription: *mut crate::core::PWSTR) -> crate::core::HRESULT; } }
+pub use import_GetThreadDescription::call as GetThreadDescription_raw;
+#[inline]
+pub unsafe fn GetThreadDescription(hThread: crate::Win32::Foundation::HANDLE) -> Result<crate::core::PWSTR, crate::core::HRESULT> {
+let mut result__ = ::core::mem::zeroed();
+let hr__ = import_GetThreadDescription::call(hThread,&mut result__); hr__.ok()?;
+Ok(result__)
+}
+mod import_GetThreadTimes { #[link(name = "KERNEL32", kind = "raw-dylib")] extern "system" { #[link_name = "GetThreadTimes"] pub fn call(hThread: crate::Win32::Foundation::HANDLE,lpCreationTime: *mut crate::Win32::Foundation::FILETIME,lpExitTime: *mut crate::Win32::Foundation::FILETIME,lpKernelTime: *mut crate::Win32::Foundation::FILETIME,lpUserTime: *mut crate::Win32::Foundation::FILETIME) -> crate::core::BOOL; } }
+pub use import_GetThreadTimes::call as GetThreadTimes_raw;
+#[inline]
+pub unsafe fn GetThreadTimes(hThread: crate::Win32::Foundation::HANDLE,lpCreationTime: *mut crate::Win32::Foundation::FILETIME,lpExitTime: *mut crate::Win32::Foundation::FILETIME,lpKernelTime: *mut crate::Win32::Foundation::FILETIME,lpUserTime: *mut crate::Win32::Foundation::FILETIME) -> Result<(), crate::core::HRESULT> {
+let hr__ = import_GetThreadTimes::call(hThread,lpCreationTime,lpExitTime,lpKernelTime,lpUserTime); hr__.ok()?;
 Ok(())
 }
 #[repr(C)]
@@ -20116,6 +20341,11 @@ pub use import_Sleep::call as Sleep_raw;
 #[inline]
 pub unsafe fn Sleep(dwMilliseconds: u32) -> () {
 import_Sleep::call(dwMilliseconds)}
+mod import_SuspendThread { #[link(name = "KERNEL32", kind = "raw-dylib")] extern "system" { #[link_name = "SuspendThread"] pub fn call(hThread: crate::Win32::Foundation::HANDLE) -> u32; } }
+pub use import_SuspendThread::call as SuspendThread_raw;
+#[inline]
+pub unsafe fn SuspendThread(hThread: crate::Win32::Foundation::HANDLE) -> u32 {
+import_SuspendThread::call(hThread)}
 #[repr(transparent)]
 #[derive(Clone, Copy)]
 pub struct THREAD_ACCESS_RIGHTS(pub u32);
@@ -20128,6 +20358,8 @@ impl ::core::ops::BitOr for THREAD_ACCESS_RIGHTS { type Output = Self; fn bitor(
 impl ::core::ops::BitAnd for THREAD_ACCESS_RIGHTS { type Output = Self; fn bitand(self, rhs: Self) -> Self { Self(self.0 & rhs.0) } }
 impl ::core::ops::BitXor for THREAD_ACCESS_RIGHTS { type Output = Self; fn bitxor(self, rhs: Self) -> Self { Self(self.0 ^ rhs.0) } }
 impl ::core::ops::Not for THREAD_ACCESS_RIGHTS { type Output = Self; fn not(self) -> Self { Self(!self.0) } }
+pub const THREAD_GET_CONTEXT: crate::Win32::System::Threading::THREAD_ACCESS_RIGHTS = crate::Win32::System::Threading::THREAD_ACCESS_RIGHTS(8u64 as _);
+pub const THREAD_QUERY_LIMITED_INFORMATION: crate::Win32::System::Threading::THREAD_ACCESS_RIGHTS = crate::Win32::System::Threading::THREAD_ACCESS_RIGHTS(2048u64 as _);
 pub const THREAD_SUSPEND_RESUME: crate::Win32::System::Threading::THREAD_ACCESS_RIGHTS = crate::Win32::System::Threading::THREAD_ACCESS_RIGHTS(2u64 as _);
 mod import_TerminateProcess { #[link(name = "KERNEL32", kind = "raw-dylib")] extern "system" { #[link_name = "TerminateProcess"] pub fn call(hProcess: crate::Win32::Foundation::HANDLE,uExitCode: u32) -> crate::core::BOOL; } }
 pub use import_TerminateProcess::call as TerminateProcess_raw;

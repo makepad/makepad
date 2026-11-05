@@ -1,7 +1,6 @@
 mod emit;
 mod model;
 // Shared dependency-free readers/digest; public modules keep their complete reusable APIs.
-#[path = "../../makepad_builder/src/sha256.rs"]
 pub mod sha256;
 #[path = "../../bindgen_xml.rs"]
 pub mod xml;

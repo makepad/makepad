@@ -116,10 +116,19 @@ impl Generator {
                     id,
                     owner: id,
                 };
-                if let Some(a) = f.attribute(2, id, "SupportedArchitectureAttribute") {
-                    if metadata::u32_at(a, 2) & 2 == 0 {
-                        continue;
+                // x64 only. A nested type belongs to its enclosing type's architecture: the x64
+                // CONTEXT and the arm64 one both have a nested union named CONTEXT_0 (the arm64
+                // one's would otherwise stand in the x64 CONTEXT, at another size)
+                let mut level = Some(id);
+                let mut other_arch = false;
+                while let Some(at) = level {
+                    if let Some(a) = f.attribute(2, at, "SupportedArchitectureAttribute") {
+                        other_arch |= metadata::u32_at(a, 2) & 2 == 0;
                     }
+                    level = f.nested.get(&at).copied();
+                }
+                if other_arch {
+                    continue;
                 }
                 if short(&name) == "Apis" {
                     for m in f.range(2, id, 5, 6) {

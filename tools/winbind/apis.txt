@@ -1027,6 +1027,9 @@ Windows.Win32.Storage.FileSystem.FILE_SHARE_READ
 Windows.Win32.Storage.FileSystem.FILE_SHARE_WRITE
 Windows.Win32.Storage.FileSystem.GetDiskFreeSpaceExW
 Windows.Win32.Storage.FileSystem.GetFileInformationByHandle
+Windows.Win32.Storage.FileSystem.GetFileInformationByHandleEx
+Windows.Win32.Storage.FileSystem.FILE_BASIC_INFO
+Windows.Win32.Storage.FileSystem.FileBasicInfo
 Windows.Win32.Storage.FileSystem.GetVolumePathNameW
 Windows.Win32.Storage.FileSystem.LOCKFILE_EXCLUSIVE_LOCK
 Windows.Win32.Storage.FileSystem.LOCKFILE_FAIL_IMMEDIATELY
@@ -1065,6 +1068,7 @@ Windows.Win32.System.Memory.PAGE_READONLY
 Windows.Win32.System.Memory.PAGE_READWRITE
 Windows.Win32.System.Memory.VirtualAlloc
 Windows.Win32.System.Memory.VirtualFree
+Windows.Win32.System.Memory.VirtualUnlock
 Windows.Win32.System.Performance.PDH_FMT_COUNTERVALUE
 Windows.Win32.System.Performance.PDH_FMT_DOUBLE
 Windows.Win32.System.Performance.PDH_MORE_DATA
@@ -1179,6 +1183,7 @@ Windows.Win32.Graphics.Direct3D11.D3D11_COMPARISON_NEVER
 Windows.Win32.Graphics.Dxgi.Common.DXGI_ALPHA_MODE_PREMULTIPLIED
 Windows.Win32.Graphics.Dxgi.DXGI_SCALING_STRETCH
 Windows.Win32.Graphics.Dxgi.DXGI_MEMORY_SEGMENT_GROUP_LOCAL
+Windows.Win32.Graphics.Dxgi.DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL
 Windows.Win32.Graphics.Dxgi.IDXGIDevice2
 # hal-win: the Win32 shell (windows, input, raw mouse, IMM, clipboard, menus, pointer lock)
 Windows.Win32.UI.WindowsAndMessaging.PostQuitMessage
@@ -1479,6 +1484,22 @@ Windows.Win32.System.SystemInformation.SYSTEM_INFO
 Windows.Win32.System.SystemInformation.GetTickCount64
 Windows.Win32.System.Power.GetSystemPowerStatus
 Windows.Win32.System.Power.SYSTEM_POWER_STATUS
+# relax inspect: stack capture of another thread and the walk of its frames (threads.rs,
+# pe_unwind.rs), the loaded modules (symbols.rs)
+Windows.Win32.System.Threading.SuspendThread
+Windows.Win32.System.Threading.GetThreadTimes
+Windows.Win32.System.Threading.GetThreadDescription
+Windows.Win32.System.Threading.GetCurrentProcess
+Windows.Win32.System.Threading.THREAD_GET_CONTEXT
+Windows.Win32.System.Threading.THREAD_QUERY_LIMITED_INFORMATION
+Windows.Win32.System.Diagnostics.Debug.GetThreadContext
+Windows.Win32.System.Diagnostics.Debug.CONTEXT
+Windows.Win32.System.Diagnostics.Debug.CONTEXT_CONTROL_AMD64
+Windows.Win32.System.Diagnostics.Debug.CONTEXT_INTEGER_AMD64
+Windows.Win32.System.Diagnostics.Debug.ReadProcessMemory
+Windows.Win32.System.ProcessStatus.K32EnumProcessModules
+Windows.Win32.System.ProcessStatus.K32GetModuleFileNameExW
+Windows.Win32.Foundation.LocalFree
 
 # UI Automation providers are called concurrently, including destruction.
 # Explicit bounds preserve apartment-local implementations of other interfaces.

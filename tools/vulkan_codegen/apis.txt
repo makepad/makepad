@@ -867,4 +867,3 @@ value VkBufferUsageFlags INDIRECT_BUFFER
 value VkImageUsageFlags STORAGE
 value VkFormatFeatureFlags STORAGE_IMAGE
 device vkCmdDispatchIndirect
-device vkCmdDrawIndexedIndirect
