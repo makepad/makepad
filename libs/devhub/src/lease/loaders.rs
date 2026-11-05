@@ -775,14 +775,18 @@ fn inputs_of(depinfo: &str, root: &Path, index: &HashMap<String, String>) -> Vec
     out
 }
 
-/// The files under `root` a dep-info file names, from the root.
+/// The files under `root` a dep-info file names, from the root, as git names them (a Windows
+/// build's come with backslashes: none matched the index, so that box kept no binary and each new
+/// tree built its JIT again in whichever run came first, 11-05).
 fn dep_files(depinfo: &str, root: &Path) -> Vec<String> {
     let list = depinfo.split_once(": ").map_or("", |(_, l)| l).replace("\\ ", "\0");
+    let root = root.display().to_string().replace('\\', "/");
+    let root = format!("{}/", root.strip_prefix("//?/").unwrap_or(&root).trim_end_matches('/'));
     list.split_whitespace()
-        .map(|p| p.replace('\0', " "))
-        .filter_map(|p| match Path::new(&p).strip_prefix(root) {
-            Ok(r) => Some(r.display().to_string()),
-            Err(_) => (!p.starts_with('/')).then_some(p),
+        .map(|p| p.replace('\0', " ").replace('\\', "/"))
+        .filter_map(|p| match p.get(..root.len()).filter(|head| head.eq_ignore_ascii_case(&root)) {
+            Some(_) => Some(p[root.len()..].to_string()),
+            None => (!p.starts_with('/') && p.get(1..3) != Some(":/")).then_some(p),
         })
         .collect()
 }
@@ -912,6 +916,11 @@ mod tests {
         let index: HashMap<String, String> = ["a/b c", "Cargo.lock", "tools/x.rs"].iter().map(|p| (p.to_string(), "1".to_string())).collect();
         let dep = "/r/target/host/makepad: /r/a/b\\ c /r/libs/dir tools/x.rs /other/z.rs\n";
         assert_eq!(inputs_of(dep, Path::new("/r"), &index), vec!["Cargo.lock", "a/b c", "tools/x.rs"]);
+        // a Windows build's, under its root whichever way that is spelled; another drive is outside
+        let windows = "C:\\w\\target\\host\\makepad.exe: C:\\w\\a\\b\\ c C:\\w\\tools\\x.rs c:\\w\\tools\\y.rs D:\\o\\z.rs tools\\r.rs\n";
+        for root in ["C:\\w", "\\\\?\\C:\\w", "C:/w/"] {
+            assert_eq!(dep_files(windows, Path::new(root)), ["a/b c", "tools/x.rs", "tools/y.rs", "tools/r.rs"], "{root}");
+        }
     }
 
     /// An app writes a temp file into its virtual folder and renames it: the record stays, the

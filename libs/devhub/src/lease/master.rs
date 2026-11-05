@@ -25,6 +25,8 @@ pub type Clock = Arc<dyn Fn() -> u64 + Send + Sync>;
 pub type EnsureRev = Arc<dyn Fn(&str, &str, &Path, &super::RevPin, bool) -> Result<String, String> + Send + Sync>;
 /// The nodes the master dials: (name, address).
 pub type Hosts = Arc<dyn Fn() -> Vec<(String, String)> + Send + Sync>;
+/// The worktree the lane registry holds for a live lane (`devhub lane new|adopt`), by name.
+pub type LaneTrees = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
 pub const SERVICES: [&str; 20] = ["lease", "retarget", "beat", "release", "cancel", "leases", "why-queued", "nodes", "node-dev", "linspect", "evict", "stop", "unblock", "override", "blocked", "jit", "stats", "prof", "native", super::panel::SERVICE];
 /// How long a commit sent to a node's store counts as there without asking again.
@@ -95,6 +97,8 @@ pub struct LeaseMaster {
     restored_own: Mutex<Vec<String>>,
     /// per node: the stalls its last caps answer named, and the ones said already ([`Self::say_stalls`])
     stalls: Mutex<HashMap<String, (Vec<String>, Vec<String>)>>,
+    /// the lane registry's worktrees ([`from_the_lanes_worktree`]); none: no lane is checked
+    lane_trees: Mutex<Option<LaneTrees>>,
 }
 
 /// How long a lease's start waits for its box's hub to come back (a restart for its update takes
@@ -107,6 +111,20 @@ pub fn unreachable(e: &str) -> bool {
     // call reading its answer, "channel closed" for a ship writing a chunk; the TERM that stops it
     // reaches the git it runs, in its process group: "signal: 15" while it still answers)
     ["link lost", "cannot reach", "Connection refused", "not connected", "no route to", "connection closed", "channel closed", "Connection reset", "Broken pipe", "signal: 15"].iter().any(|w| e.contains(w))
+}
+
+/// A registered lane's lease comes from the lane's own worktree, the one the lane registry holds
+/// for it (not by its name: a lane and its folder may be named apart): asked from another checkout
+/// under the lane's name it ships that checkout's tree as the lane's, a wrong-tree run (`devhub run
+/// dhf19 ...` from a shell in the main checkout did, 11-05). A lane the registry has no worktree
+/// for (the master's own, CI's) and one whose worktree is gone are not checked.
+fn from_the_lanes_worktree(registered: Option<&str>, req: &Req) -> Result<(), String> {
+    let (Some(dir), Some(lane_dir), false) = (&req.repo_dir, registered, req.kind == super::Kind::Inspect) else { return Ok(()) };
+    let canon = |p: &str| std::fs::canonicalize(p).unwrap_or_else(|_| PathBuf::from(p));
+    if !Path::new(lane_dir).is_dir() || canon(dir) == canon(lane_dir) {
+        return Ok(());
+    }
+    Err(format!("lane {}'s worktree is {lane_dir}, and this was asked from {dir}: run it from {lane_dir} (from here it would ship this checkout's tree as lane {})", req.lane, req.lane))
 }
 
 /// A lane's node dirs (`lane/<lane>/src`, its target) hold the tree of ONE Mac worktree: a lease
@@ -424,7 +442,19 @@ impl LeaseMaster {
             ends_later: Mutex::new(ends_later),
             restored_own: Mutex::new(restored_own),
             stalls: Mutex::new(HashMap::new()),
+            lane_trees: Mutex::new(None),
         }
+    }
+
+    /// Where the lane registry says each live lane's worktree is: a lease of such a lane comes
+    /// from there or is refused ([`from_the_lanes_worktree`]).
+    pub fn set_lane_trees(&self, trees: LaneTrees) {
+        *self.lane_trees.lock().unwrap() = Some(trees);
+    }
+
+    fn from_its_worktree(&self, req: &Req) -> Result<(), String> {
+        let trees = self.lane_trees.lock().unwrap().clone();
+        from_the_lanes_worktree(trees.and_then(|t| t(&req.lane)).as_deref(), req)
     }
 
     /// The master's own leases a previous master granted that no record of this master's work
@@ -656,6 +686,11 @@ impl LeaseMaster {
                     let _ = (leases, note);
                 }
                 Action::Capture { id, node, why } => self.spawn(move |m| m.capture(&id, &node, &why)),
+                Action::Yield { id, node, why } => self.spawn(move |m| {
+                    if let Err(e) = m.ask1(&node, "lease-yield", &format!("lease-yield {id} {why}")) {
+                        m.event(Sev::Warn, format!("{id} on {node}: its $DEVHUB_YIELD file was not made: {e}"));
+                    }
+                }),
                 Action::Reclaim { node, need_gb } => self.spawn(move |m| {
                     if let Err(e) = m.ask1(&node, "disk", &format!("disk need {need_gb:.0}")) {
                         m.event(Sev::Warn, format!("node {node}: disk reclaim failed: {e}"));
@@ -1327,9 +1362,10 @@ impl LeaseMaster {
         self.sched.lock().unwrap().behind_own(lane)
     }
 
-    /// The idle verdict on a running lease ([`super::sched::Sched::idle_word`]).
-    pub fn idle_word(&self, id: &str) -> Option<String> {
-        self.sched.lock().unwrap().idle_word(id)
+    /// What a running lease's owner is to hear: its idle verdict or its yield
+    /// ([`super::sched::Sched::owner_word`]).
+    pub fn owner_word(&self, id: &str) -> Option<String> {
+        self.sched.lock().unwrap().owner_word(id)
     }
 
     pub fn nodes(&self) -> Vec<NodeView> {
@@ -1430,7 +1466,7 @@ impl LeaseMaster {
         let now = self.now();
         let line = line.strip_prefix(service).filter(|r| r.is_empty() || r.starts_with(' ')).map_or(line, str::trim_start);
         match service {
-            "lease" => match Req::parse(line).and_then(|req| bind_lane(&self.home, &req).map(|_| req)) {
+            "lease" => match Req::parse(line).and_then(|req| self.from_its_worktree(&req).and_then(|_| bind_lane(&self.home, &req)).map(|_| req)) {
                 Ok(req) => {
                     let req = self.with_hint(req);
                     let accepted = {
@@ -1461,8 +1497,8 @@ impl LeaseMaster {
                 let exists = self.sched.lock().unwrap().beat(line.trim(), now).is_some();
                 if exists {
                     match self.durable_state_line(line.trim()) {
-                        // its holder hears the idle verdict too, not the inbox alone (`Beat`)
-                        Ok(Some(state)) => out.push(match self.idle_word(line.trim()) {
+                        // its holder hears the idle verdict or its yield too, not the inbox alone (`Beat`)
+                        Ok(Some(state)) => out.push(match self.owner_word(line.trim()) {
                             Some(word) => format!("{},\"idle\":{}}}", state.strip_suffix('}').unwrap_or(&state), json_str(&word)),
                             None => state,
                         }),
@@ -1938,6 +1974,35 @@ mod tests {
         let mut out = Vec::new();
         m.serve(svc, line, &mut out);
         out.join("\n")
+    }
+
+    /// A registered lane's lease from another checkout is refused with the lane's worktree, before
+    /// anything is queued or bound; from the lane's worktree, and for a lane the registry does not
+    /// hold, it goes in.
+    #[test]
+    fn a_lane_lease_from_another_checkout_is_refused_with_the_lanes_worktree() {
+        let dir = std::env::temp_dir().join(format!("devhub-lane-tree-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // the lane's folder is named apart from the lane: the registry's path decides
+        let (home, lane_wt, other) = (dir.join("home"), dir.join("wt/another-name"), dir.join("checkout"));
+        for d in [&home, &lane_wt, &other] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let (master, ..) = master(&home);
+        let registered = lane_wt.to_string_lossy().into_owned();
+        master.set_lane_trees(Arc::new(move |lane: &str| (lane == "dhf19").then(|| registered.clone())));
+        let ask = |lane: &str, from: &Path| {
+            let mut r = Req::new(lane, Kind::Build);
+            r.repo_dir = Some(from.to_string_lossy().into_owned());
+            serve(&master, "lease", &r.to_json())
+        };
+        let refused = ask("dhf19", &other);
+        assert!(refused.contains("\"err\"") && refused.contains(&format!("worktree is {}", lane_wt.display())), "{refused}");
+        assert!(master.sched.lock().unwrap().view().is_empty(), "nothing queued");
+        assert!(!std::fs::read_to_string(home.join("lanes.conf")).unwrap_or_default().contains("dhf19"), "nothing bound");
+        assert!(!ask("dhf19", &lane_wt).contains("\"err\""));
+        assert!(!ask("ci-sweep", &other).contains("\"err\""), "a lane the registry does not hold");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

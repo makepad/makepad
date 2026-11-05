@@ -85,7 +85,6 @@ libs/rmeta/*
 libs/ondevice_build/*
 tools/check_loader_removable.sh
 libs/sysroot/*
-tools/ci/*
 tools/ci_leg/*
 ci.splash
 

@@ -9,6 +9,8 @@
 //! When a bucket is due comes from what outlives the master: its last start (its ledger, or the
 //! runs of its kind it knows of) and the landings since. A master restart never moves it: CI was
 //! due again at each of them (every ~30 min) and never ran for 8 h (11-02).
+//! The CI bucket runs once a night ([`Timing::daily`]): a run every ~3 h of a moving tip proved
+//! little a night's run of the day's tip does not, and took the fleet's day (user, 11-05).
 //! A run whose lease was lost under it (expired, its node lost it) has no verdict: it runs once
 //! more at once, and lost again it is no verdict on the landings, only a warn: the bucket takes the
 //! tip again at its next turn.
@@ -32,15 +34,41 @@ pub struct Timing {
     pub quiet: Duration,
     /// Start anyway after being due this long.
     pub cap: Duration,
+    /// Once a day at this hour of the local clock, after a landing it has not checked: in place
+    /// of `every`, `quiet` and `cap`.
+    pub daily: Option<u32>,
+}
+
+impl Timing {
+    /// Due at once after the last landing, waiting `quiet` for the tip to settle, at most `cap`.
+    pub fn after(quiet: Duration, cap: Duration) -> Timing {
+        Timing { every: Duration::ZERO, quiet, cap, daily: None }
+    }
 }
 
 /// When a bucket starts its next run: due at `every` after its last start and not before the
 /// first landing it has not checked; then once the tip stayed `quiet` since it last changed, and
 /// at the latest `cap` after it was due, quiet or not. All of them outlive the master.
 fn starts_at(t: &Timing, last_start: u64, first_landed: u64, last_changed: u64) -> u64 {
+    if let Some(hour) = t.daily {
+        return daily_after(last_start.max(first_landed), hour, &|secs| makepad_civil_time::local_or_utc(secs).offset);
+    }
     let ms = |d: Duration| d.as_millis() as u64;
     let due = last_start.saturating_add(ms(t.every)).max(first_landed);
     due.max(last_changed.saturating_add(ms(t.quiet))).min(due.saturating_add(ms(t.cap)))
+}
+
+/// The first `hour`:00 on the local clock after `after_ms` (`offset`: seconds east of UTC at an
+/// instant), with the offset at that hour (a daylight saving change in between).
+fn daily_after(after_ms: u64, hour: u32, offset: &dyn Fn(i64) -> i32) -> u64 {
+    let after = (after_ms / 1000) as i64;
+    let local = after + offset(after) as i64;
+    let mut at = local.div_euclid(86_400) * 86_400 + hour as i64 * 3600;
+    if at <= local {
+        at += 86_400;
+    }
+    let utc = at - offset(at - offset(after) as i64) as i64;
+    utc.max(0) as u64 * 1000
 }
 
 /// A bucket's last run that its ledger may not have: the start and tip of the newest run of its
@@ -145,7 +173,8 @@ fn append(home: &Path, value: Value) -> std::io::Result<()> {
 fn is_unit(unit: &str) -> bool {
     let mut words = unit.split_whitespace();
     match (words.next(), words.next()) {
-        (Some("check" | "present" | "cargo"), Some(_)) => true,
+        // `tests <pkg>`: its test targets' one cargo check (land_gate.sh step_testcheck)
+        (Some("check" | "present" | "cargo" | "tests"), Some(_)) => true,
         (Some("suite"), Some(_)) => words.next().is_none(),
         (Some("devhub"), Some("makepad-devhub")) => words.next().is_none(),
         _ => false,
@@ -247,6 +276,65 @@ fn unit_lines(text: &str) -> (BTreeMap<String, Vec<String>>, BTreeSet<String>) {
         }
     }
     (errors, passed)
+}
+
+/// A run's units with warnings of their own (`GATEUNIT warn <unit>`, after its warning lines), by
+/// package: each warning's key and its line, and the units it took as proven, not compiled: such a
+/// run says nothing of their warnings.
+fn warn_lines(text: &str) -> (BTreeMap<String, Vec<(String, String)>>, BTreeSet<String>) {
+    let (mut warned, mut proven, mut own) = (BTreeMap::new(), BTreeSet::new(), Vec::new());
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("GATEUNIT ") {
+            match rest.split_once(' ') {
+                Some(("warn", unit)) => {
+                    let mut w: Vec<(String, String)> = std::mem::take(&mut own);
+                    w.sort();
+                    w.dedup_by(|a, b| a.0 == b.0);
+                    warned.insert(unit_key(unit), w);
+                }
+                Some(("proven", unit)) => { proven.insert(unit_key(unit)); }
+                _ => {}
+            }
+            own.clear();
+        } else if line.starts_with("STEP ") {
+            own.clear();
+        } else if let Some(key) = error_key(line) {
+            own.push((key, line.to_string()));
+        }
+    }
+    (warned, proven)
+}
+
+/// Unit `key`'s warnings `now` that it did not have at the bucket's last look at it (a run that
+/// took it as proven did not look), or None when no row says what it had: its first look, or a
+/// look from before rows kept warnings. Such a warning is of unknown origin, no landing's: a unit
+/// that warned for weeks would name whoever changed its inputs next. `rows`: newest first.
+fn new_warnings(rows: &[Value], key: &str, now: &[String]) -> Option<Vec<String>> {
+    let lists = |list: &str, row: &Value| row.get(list).and_then(Value::as_arr).is_some_and(|l| l.iter().any(|u| u.as_str().is_some_and(|u| unit_key(u) == key)));
+    let of = |map: Option<&Value>| match map {
+        Some(Value::Obj(m)) => m.iter().find(|(u, _)| unit_key(u) == key).map(|(_, w)| w.as_arr().unwrap_or_default().iter().filter_map(Value::as_str).map(str::to_string).collect::<Vec<_>>()),
+        _ => None,
+    };
+    for row in rows {
+        let before = if row.get("warned").is_none() {
+            if lists("passed", row) || lists("failing", row) { return None; }
+            continue;
+        } else if let Some(warned) = of(row.get("warned")) {
+            warned
+        } else if lists("proven", row) {
+            continue;
+        } else if lists("passed", row) {
+            Vec::new()
+        } else if let Some(errors) = of(row.get("errors")) {
+            errors
+        } else if lists("failing", row) {
+            return None;
+        } else {
+            continue;
+        };
+        return Some(now.iter().filter(|w| !before.contains(w)).cloned().collect());
+    }
+    None
 }
 
 /// The failing units already broken at this bucket's last look at them, with who broke them: a
@@ -383,6 +471,7 @@ fn judge(name: &str, home: &Path, repo: &Path, store: &Store, emit: &dyn Fn(Sev,
     }
     let text = std::fs::read_to_string(&outcome.log).unwrap_or_default();
     let (errors, passed) = unit_lines(last_run(&text));
+    let (warned, proven) = warn_lines(last_run(&text));
     let earlier = rows_of(home, name);
     let carried = carried_since(&earlier, &outcome.failing, &errors);
     // what this run did not get to (a gate that stopped at the JIT): red still, whatever else it says
@@ -401,6 +490,27 @@ fn judge(name: &str, home: &Path, repo: &Path, store: &Store, emit: &dyn Fn(Sev,
             .map(|(e, _)| format!("{} ({}) #{}", e.label(), e.agent, e.id)).collect::<Vec<_>>().join(", "));
         if !who.is_empty() { broke.entry(unit_key(unit)).or_insert(who); }
     }
+    // a warning a unit did not have at its last look: zero warnings is the rule, so a WARN to the
+    // landings that changed the unit, the bucket green (a test target's unused const, 11-05)
+    let mut fresh: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut unknown: Vec<String> = Vec::new();
+    for (key, lines) in &warned {
+        let now: Vec<String> = lines.iter().map(|(k, _)| k.clone()).collect();
+        match new_warnings(&earlier, key, &now) {
+            Some(new) if new.is_empty() => {}
+            Some(new) => { fresh.insert(key.clone(), new); }
+            None => unknown.push(key.clone()),
+        }
+    }
+    let warn_units: Vec<String> = fresh.keys().cloned().collect();
+    let (warn_by, warn_ambiguous) = if warn_units.is_empty() || attribution_error.is_some() { (vec![Vec::new(); entries.len()], attribution_error.is_some()) }
+        else { attribute(repo, &entries, &warn_units) };
+    let mut warns: BTreeMap<String, String> = unknown.iter().map(|k| (k.clone(), ORIGIN_UNKNOWN.to_string())).collect();
+    for key in &warn_units {
+        let who = entries.iter().zip(&warn_by).filter(|(_, us)| us.contains(key))
+            .map(|(e, _)| format!("{} ({}) #{}", e.label(), e.agent, e.id)).collect::<Vec<_>>().join(", ");
+        warns.insert(key.clone(), if who.is_empty() { ORIGIN_UNKNOWN.to_string() } else { who });
+    }
     let rows = entries.iter().zip(&units).map(|(e, units)| obj(vec![
         ("id", Value::Int(e.id as i64)), ("label", s(&e.label())), ("agent", s(&e.agent)),
         ("land_to_verdict_ms", Value::Int(ended.saturating_sub(e.changed_ms) as i64)),
@@ -417,7 +527,18 @@ fn judge(name: &str, home: &Path, repo: &Path, store: &Store, emit: &dyn Fn(Sev,
         ("carried", Value::Obj(carried.iter().map(|(u, who)| (u.clone(), s(who))).collect())),
         ("still", Value::Obj(still.iter().map(|(u, who)| (u.clone(), s(who))).collect())),
         ("broke", Value::Obj(broke.into_iter().map(|(k, who)| (k, s(who))).collect())),
+        ("warned", Value::Obj(warned.iter().map(|(u, w)| (u.clone(), Value::Arr(w.iter().map(|(k, _)| s(k)).collect()))).collect())),
+        ("proven", Value::Arr(proven.iter().map(s).collect())),
+        ("warns", Value::Obj(warns.iter().map(|(u, who)| (u.clone(), s(who))).collect())),
     ])).map_err(|e| format!("bucket ledger: {e}"))?;
+    if !warns.is_empty() {
+        let named = warns.iter().map(|(u, who)| if who == ORIGIN_UNKNOWN { format!("{u}: {ORIGIN_UNKNOWN} (its first look)") } else { format!("{who} changed {u}") }).collect::<Vec<_>>().join("; ");
+        // each new warning as rustc said it; one of unknown origin, all of its unit's
+        let fresh = &fresh;
+        let detail = warned.iter().filter(|(u, _)| warns.contains_key(*u)).flat_map(|(u, lines)| lines.iter()
+            .filter(move |(k, _)| fresh.get(u).is_none_or(|new| new.contains(k))).map(|(_, l)| crate::proto::clean(l, 300))).collect::<Vec<_>>();
+        emit(Sev::Warn, format!("bucket {name} {} WARN new warnings in {}: {named}{}", tip.short(), warns.keys().cloned().collect::<Vec<_>>().join(", "), if warn_ambiguous { " (ambiguous)" } else { "" }), detail.join("\n"));
+    }
     let latency = entries.iter().map(|e| e.changed_ms).max().map(|landed| {
         format!("land->verdict {} s; ", ended.saturating_sub(landed) / 1000)
     }).unwrap_or_default();
@@ -674,6 +795,71 @@ mod tests {
         assert_eq!(error_key("C:/t/a.rs:1:2: warning: unused").as_deref(), Some("a.rs: warning: unused"));
     }
 
+    /// Zero warnings is the rule: a test target's new warning is a WARN to who brought it, the bucket
+    /// green. One it had at its last look is nobody's news; a first look cannot say whose it is.
+    #[test]
+    fn a_new_warning_warns_once_and_the_bucket_stays_green() {
+        let warn = |at: &str, what: &str| format!("/n/tree/apps/f/tests/common/p.rs:{at}: warning: {what}");
+        let log = format!("STEP depcheck 1 s\n{}\n{}\nGATEUNIT warn tests f\nGATEUNIT ok tests f\nGATEUNIT proven tests g\nGATEUNIT ok tests h\n",
+            warn("5:11", "constant `MACHINE` is never used"), warn("5:11", "constant `MACHINE` is never used"));
+        let (warned, proven) = warn_lines(&log);
+        assert_eq!(warned["tests f"].iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(), ["p.rs: warning: constant `MACHINE` is never used"], "each once");
+        assert!(warned["tests f"][0].1.contains("p.rs:5:11"), "its line as rustc said it");
+        assert!(proven.contains("tests g") && !warned.contains_key("tests h"));
+        let (errors, passed) = unit_lines(&log);
+        assert!(errors.is_empty() && passed.contains("tests f"), "a warning is no failure");
+        let had = vec!["p.rs: warning: constant `MACHINE` is never used".to_string()];
+        let more = vec![had[0].clone(), "q.rs: warning: unused import".to_string()];
+        let row = |warned: &[(&str, &[String])], passed: &[&str], proven: &[&str]| obj(vec![
+            ("warned", Value::Obj(warned.iter().map(|(u, w)| (u.to_string(), Value::Arr(w.iter().map(s).collect()))).collect())),
+            ("passed", Value::Arr(passed.iter().map(|u| s(*u)).collect())),
+            ("proven", Value::Arr(proven.iter().map(|u| s(*u)).collect())),
+        ]);
+        let looked = row(&[("tests f", &had)], &["tests f"], &[]);
+        assert_eq!(new_warnings(&[looked.clone()], "tests f", &had), Some(Vec::new()), "it had it at its last look");
+        assert_eq!(new_warnings(&[looked.clone()], "tests f", &more), Some(vec!["q.rs: warning: unused import".to_string()]));
+        // a run that took it as proven did not look; one that never reached it says nothing either
+        let skipped = [row(&[], &["tests f"], &["tests f"]), row(&[], &["tests z"], &[]), looked.clone()];
+        assert_eq!(new_warnings(&skipped, "tests f", &had), Some(Vec::new()));
+        // a clean look since: the warning is new
+        assert_eq!(new_warnings(&[row(&[], &["tests f"], &[]), looked], "tests f", &had), Some(had.clone()));
+        // its first look, or a look from before rows kept warnings: nobody's to name
+        assert_eq!(new_warnings(&[], "tests f", &had), None);
+        assert_eq!(new_warnings(&[obj(vec![("passed", Value::Arr(vec![s("tests f")]))])], "tests f", &had), None);
+
+        // the bucket's verdict: the first look warns of unknown origin, green; the same warning again is quiet
+        use crate::proto::Record;
+        let home = std::env::temp_dir().join(format!("devhub-bucket-test-warn-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let fed: Arc<Mutex<Vec<Record>>> = Arc::default();
+        let feed = fed.clone();
+        let store = Store::open(&home, "mac", Arc::new(move |r: Record| { feed.lock().unwrap().push(r); 0 })).unwrap();
+        let tip = Pair::new("a1", "b1");
+        let judged = |text: &str| {
+            let log = home.join("fast.log");
+            std::fs::write(&log, text).unwrap();
+            let outcome = verdict(Ok(Some(0)), text, &log);
+            assert!(outcome.ok, "{:?}", outcome.failing);
+            judge("fast", &home, &home, &store, &|sev, line, detail| store.event("bucket", sev, line, Some(detail)), 1, None, &tip, |_| Ok(outcome)).unwrap();
+            let warns: Vec<(Sev, String, String)> = fed.lock().unwrap().drain(..).filter(|r| r.kind == "bucket" && r.sev == Sev::Warn)
+                .map(|r| (r.sev, r.line, r.detail)).collect();
+            warns
+        };
+        let first = judged(&format!("{log}NODEGATE-OK\n"));
+        assert_eq!(first.len(), 1, "{first:?}");
+        assert!(first[0].1.contains("WARN new warnings in tests f: tests f: origin unknown"), "{}", first[0].1);
+        assert!(first[0].2.contains("p.rs:5:11: warning: constant `MACHINE` is never used"), "{}", first[0].2);
+        assert!(judged(&format!("{log}NODEGATE-OK\n")).is_empty(), "the same warning at its next look is no news");
+        let again = judged(&format!("{}\n{}\nGATEUNIT warn tests f\nGATEUNIT ok tests f\nNODEGATE-OK\n", warn("5:11", "constant `MACHINE` is never used"), warn("9:1", "unused import: `x`")));
+        assert_eq!(again.len(), 1, "{again:?}");
+        assert!(again[0].2.contains("p.rs:9:1: warning: unused import") && !again[0].2.contains("MACHINE"), "only the new one: {}", again[0].2);
+        let rows: Vec<Value> = rows_of(&home, "fast");
+        assert!(rows.iter().all(|r| r.get("ok").and_then(Value::as_bool) == Some(true)), "a warning never turns it red");
+        assert_eq!(rows[0].get("warns").and_then(|w| w.get("tests f")).and_then(Value::as_str), Some(ORIGIN_UNKNOWN), "no landing in its range to name");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
     #[test]
     fn a_failed_unit_stays_red_until_it_passes() {
         let row = |failing: &[&str], passed: &[&str], broke: &[(&str, &str)]| obj(vec![
@@ -681,16 +867,16 @@ mod tests {
             ("passed", Value::Arr(passed.iter().map(|u| s(*u)).collect())),
             ("broke", Value::Obj(broke.iter().map(|(k, who)| (k.to_string(), s(*who))).collect())),
         ]);
-        let failed = row(&["check x --also=y", "present p", "devhub makepad-devhub"], &["check m"], &[("check x", "rc-a (A) #970")]);
+        let failed = row(&["check x --also=y", "present p", "devhub makepad-devhub", "tests t"], &["check m"], &[("check x", "rc-a (A) #970")]);
         // a later run that only looked at Calculator: its diff touched nothing, and it is no pass
         let quiet = row(&[], &["present makepad-app-calculator"], &[]);
         let still = still_failing(&[quiet.clone(), failed.clone()]);
-        assert_eq!(still.keys().map(String::as_str).collect::<Vec<_>>(), ["check x", "devhub makepad-devhub", "present p"]);
+        assert_eq!(still.keys().map(String::as_str).collect::<Vec<_>>(), ["check x", "devhub makepad-devhub", "present p", "tests t"]);
         assert_eq!(still["check x"], ("check x --also=y".to_string(), "rc-a (A) #970".to_string()), "the unit as it failed, with its flips");
         assert_eq!(still["present p"].1, ORIGIN_UNKNOWN);
-        assert_eq!(retry_env(&[quiet.clone(), failed.clone()]), "GATE_RETRY=check x --also=y;devhub makepad-devhub;present p");
+        assert_eq!(retry_env(&[quiet.clone(), failed.clone()]), "GATE_RETRY=check x --also=y;devhub makepad-devhub;present p;tests t");
         // a pass settles it, also under other flips; an older failure stays settled
-        let fixed = row(&[], &["check x", "present p"], &[]);
+        let fixed = row(&[], &["check x", "present p", "tests t"], &[]);
         assert_eq!(still_failing(&[fixed.clone(), quiet.clone(), failed.clone()]).keys().map(String::as_str).collect::<Vec<_>>(), ["devhub makepad-devhub"]);
         // failing again after a pass: open again
         assert!(still_failing(&[row(&["present p"], &[], &[]), fixed, failed.clone()]).contains_key("present p"));
@@ -728,7 +914,7 @@ mod tests {
     #[test]
     fn a_bucket_starts_from_its_last_start_and_landings_and_the_cap_is_a_cap() {
         let (min, h) = (60_000u64, 3_600_000u64);
-        let ci = Timing { every: Duration::ZERO, quiet: Duration::from_secs(15 * 60), cap: Duration::from_secs(3 * 3600) };
+        let ci = Timing::after(Duration::from_secs(15 * 60), Duration::from_secs(3 * 3600));
         // last run at 0, a landing every 10 min from 10 min on: never 15 min quiet, so it starts
         // 3 h after that first landing (a master restart changes none of the inputs)
         let first_start = (10 * min..5 * h).step_by(min as usize).find(|now| *now >= starts_at(&ci, 0, 10 * min, now / (10 * min) * (10 * min)));
@@ -738,14 +924,36 @@ mod tests {
         // a run with no ledger row and no run of its kind known: due since its first landing, long
         // past, so now
         assert!(starts_at(&ci, 0, 1, 1_000 * min) <= 3 * h + 1);
-        let hot = Timing { every: Duration::ZERO, quiet: Duration::ZERO, cap: Duration::ZERO };
+        let hot = Timing::after(Duration::ZERO, Duration::ZERO);
         assert_eq!(starts_at(&hot, 5, 9, 9), 9, "hot: at the landing");
-        let fast = Timing { every: Duration::ZERO, quiet: Duration::from_secs(60), cap: Duration::from_secs(600) };
+        let fast = Timing::after(Duration::from_secs(60), Duration::from_secs(600));
         assert_eq!(starts_at(&fast, 0, 100, 100), 100 + min, "a minute after the last landing");
         assert_eq!(starts_at(&fast, 0, 100, 100 + 20 * min), 100 + 10 * min, "at most 10 min after the first");
-        let every = Timing { every: Duration::from_secs(3600), quiet: Duration::ZERO, cap: Duration::ZERO };
+        let every = Timing { every: Duration::from_secs(3600), quiet: Duration::ZERO, cap: Duration::ZERO, daily: None };
         assert_eq!(starts_at(&every, 1_000, 2_000, 2_000), 1_000 + h, "not before every after its last start");
         assert_eq!(log_started(Path::new("/x/bucket-logs/ci-1793673952236.log")), Some(1793673952236));
+    }
+
+    /// The night's run: at 02:00 local after the first landing it has not checked, once a day
+    /// however many landings follow, whatever the zone and its daylight saving.
+    #[test]
+    fn the_nightly_run_starts_at_two_after_a_landing_once_a_day() {
+        let (min, h, day) = (60_000u64, 3_600_000u64, 86_400_000u64);
+        let cet = |_: i64| 3600;
+        // 2026-11-05 00:00 UTC is 01:00 CET
+        let midnight = 1_793_836_800_000u64;
+        assert_eq!(daily_after(midnight, 2, &cet), midnight + h, "02:00 CET the same night");
+        assert_eq!(daily_after(midnight + h, 2, &cet), midnight + h + day, "at 02:00 itself: the next night");
+        assert_eq!(daily_after(midnight + 9 * h, 2, &cet), midnight + h + day, "a landing at 10:00: the next night");
+        assert_eq!(daily_after(midnight + 23 * h, 2, &|_| 0), midnight + day + 2 * h, "in UTC");
+        // a zone that leaves summer time before the night's 02:00: UTC+2 at the landing, UTC+1 then
+        let dst = |secs: i64| if secs < (midnight / 1000) as i64 - 3600 { 7200 } else { 3600 };
+        assert_eq!(daily_after(midnight - 6 * h, 2, &dst), midnight + h, "02:00 on the clock after the change");
+        let nightly = Timing { every: Duration::ZERO, quiet: Duration::ZERO, cap: Duration::ZERO, daily: Some(2) };
+        let at = starts_at(&nightly, midnight - day, midnight + 10 * min, midnight + 50 * min);
+        assert_eq!(at % (h / 60), 0, "on the minute");
+        assert!(at > midnight + 10 * min && at <= midnight + 10 * min + day, "within a day of the landing");
+        assert_eq!(starts_at(&nightly, at, at + min, at + min), daily_after(at + min, 2, &|s| makepad_civil_time::local_or_utc(s).offset), "the next night, not again at once");
         assert_eq!(log_started(Path::new("/x/ci.log")), None);
     }
 }

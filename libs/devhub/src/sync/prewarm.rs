@@ -281,7 +281,7 @@ mod node {
             // what it started ends by this stop, not by a crash: said before the TERM, while
             // their discovery files still name their sockets
             for socket in group_sockets(registry, pid, &hold) {
-                crate::lease::exec::note_stopped("by prewarm", Path::new(&socket), Vec::new());
+                crate::lease::exec::note_stopped("by prewarm", Path::new(&socket));
             }
             crate::os::signal_group(pid, false, &hold);
             let end = Instant::now() + TERM_GRACE;
@@ -468,8 +468,8 @@ mod node {
                 socket.display(), registry.display(), report.display());
             let step = Step { app: "app".into(), what: "present", program: "sh".into(), dir: base.clone(), argv: vec!["-c".into(), script], env: Vec::new(), report: Some(report) };
             run_step_in(&step, &base.join("log"), &AtomicBool::new(false), &registry).unwrap();
-            assert_eq!(crate::lease::exec::stopped_with(0, &socket.display().to_string()).as_deref(), Some("by prewarm"), "{}", std::fs::read_to_string(base.join("log")).unwrap_or_default());
-            assert_eq!(crate::lease::exec::stopped_with(0, &base.join("other.sock").display().to_string()), None, "only what it stopped");
+            assert_eq!(crate::lease::exec::stopped_with(0, None, &socket.display().to_string()).as_deref(), Some("by prewarm"), "{}", std::fs::read_to_string(base.join("log")).unwrap_or_default());
+            assert_eq!(crate::lease::exec::stopped_with(0, None, &base.join("other.sock").display().to_string()), None, "only what it stopped");
             let _ = std::fs::remove_dir_all(&base);
         }
 

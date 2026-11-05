@@ -567,8 +567,9 @@ fn carry_good(good: &mut String, from: &str, to: &str) {
 }
 
 /// Lanes call the built binary (`target/host/makepad-devhub`, through `makepad devhub`): right
-/// after a landing that changes its inputs the master builds it once, niced on 4 jobs, and swaps
-/// it in when done ([`build_devhub`]); a landing's CLI goes live when its rebuild finishes.
+/// after a landing that changes its inputs the master builds it once, a background build on 4
+/// jobs, and swaps it in when done ([`build_devhub`]); a landing's CLI goes live when its rebuild
+/// finishes.
 /// Landings during a build get one more after it. A build that succeeds is the hubs' target
 /// ([`CLI_GOOD`]).
 fn prebuild_cli(ctx: &Arc<Ctx>, work: &str, dirs: &BTreeSet<String>, at: &mut String) {
@@ -1079,6 +1080,8 @@ pub fn restart_master(ctx: &Arc<Ctx>, work: &str, by: &str) -> Result<String, St
     };
     #[cfg(unix)]
     {
+        // the dials of the exec's gap queue for the new build instead of being refused
+        crate::node::keep_control_over_exec(&mut cmd);
         let c2 = ctx.clone();
         let _ = std::thread::Builder::new().name("devhub-master-exec".into()).spawn(move || {
             std::thread::sleep(Duration::from_millis(300));
@@ -1106,13 +1109,12 @@ fn cargo_bin() -> PathBuf {
 
 /// devhub's binary, built in a target dir of its own (never the lock of `target/host`, where the
 /// apps and the JIT build) and swapped in at `target/host/makepad-devhub` through a rename: a
-/// caller runs the old build or the new one, never a missing or half-written file. Niced on 4
-/// jobs, the master's own restart too: the running master beats on while it builds, and only
-/// the exec's gap counts (no full-speed builds on the user's Mac).
+/// caller runs the old build or the new one, never a missing or half-written file. A background
+/// build ([`crate::os::background`]: background QoS on the person's Mac) on 4 jobs, the master's
+/// own restart too: the running master beats on while it builds, and only the exec's gap counts.
 pub fn build_devhub(repo: &Path) -> Result<(), String> {
-    let cargo = cargo_bin();
-    let mut cmd = std::process::Command::new("nice");
-    cmd.args(["-n", "10"]).arg(&cargo).args(["build", "-j4", "--profile", "host", "-p", "makepad-devhub", "--bin", "makepad-devhub", "--target-dir"]).arg(repo.join("target/devhub")).current_dir(repo).env("CARGO_INCREMENTAL", "0").env_remove(RUSTUP_DEPTH).stdin(std::process::Stdio::null());
+    let mut cmd = crate::os::background(cargo_bin().as_os_str());
+    cmd.args(["build", "-j4", "--profile", "host", "-p", "makepad-devhub", "--bin", "makepad-devhub", "--target-dir"]).arg(repo.join("target/devhub")).current_dir(repo).env("CARGO_INCREMENTAL", "0").env_remove(RUSTUP_DEPTH).stdin(std::process::Stdio::null());
     match cmd.output() {
         Ok(o) if o.status.success() => {}
         Ok(o) => return Err(format!("does not build: {}", build_failure(&o))),
@@ -1185,6 +1187,7 @@ pub fn rollback_master(ctx: &Arc<Ctx>, by: &str) -> Result<String, String> {
     cmd.args(&args).current_dir(&ctx.repo).env_remove(crate::lease::caps::BUILT_AT);
     #[cfg(unix)]
     {
+        crate::node::keep_control_over_exec(&mut cmd);
         let c2 = ctx.clone();
         let _ = std::thread::Builder::new().name("devhub-master-exec".into()).spawn(move || {
             std::thread::sleep(Duration::from_millis(300));

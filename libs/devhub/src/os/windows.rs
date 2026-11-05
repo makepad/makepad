@@ -461,7 +461,7 @@ pub fn term_group(_pid: u32, _hold: &Hold) -> bool {
 }
 
 /// `program` at BELOW_NORMAL priority (background builds), without a console window.
-pub fn niced(program: &std::ffi::OsStr) -> Command {
+pub fn background(program: &std::ffi::OsStr) -> Command {
     let mut cmd = Command::new(program);
     windows::process::no_window(&mut cmd, BELOW_NORMAL_PRIORITY_CLASS.0);
     cmd

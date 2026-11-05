@@ -449,10 +449,15 @@ pub fn home_dir() -> PathBuf {
     std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"))
 }
 
-/// `program` at nice 15 (background builds).
-pub fn niced(program: &std::ffi::OsStr) -> Command {
-    let mut cmd = Command::new("nice");
-    cmd.arg("-n").arg("15").arg(program);
+/// `program` as a background build. On macOS at background QoS: efficiency cores and throttled
+/// I/O, a clamp cargo's rustc inherit and cannot lift, so a build never competes with the apps the
+/// person works in (nice only orders it behind them: after a landing a nice-10 build beside another
+/// took rustc to ~1000% of a core and the person's Mac to a load of 45, 11-05). It only takes
+/// longer. Elsewhere at nice 15.
+pub fn background(program: &std::ffi::OsStr) -> Command {
+    let (low, words): (&str, &[&str]) = if cfg!(target_os = "macos") { ("/usr/sbin/taskpolicy", &["-c", "background"]) } else { ("nice", &["-n", "15"]) };
+    let mut cmd = Command::new(low);
+    cmd.args(words).arg(program);
     cmd
 }
 

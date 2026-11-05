@@ -80,7 +80,15 @@ impl Seen {
         let bytes = unhex(signed_hex).ok_or("the order is not hex")?;
         // the address check of `Need::Admin` happened on the connection; here the credential
         // must be the admin one (role device, bound to an address)
-        let (peer, service, payload) = fleet.check_announcement(&bytes, std::net::IpAddr::from([0, 0, 0, 0]), now).map_err(|e| format!("order signature: {e}"))?;
+        let (peer, service, payload) = fleet.check_announcement(&bytes, std::net::IpAddr::from([0, 0, 0, 0]), now).map_err(|e| match e {
+            // which key the node expected: a machine holding another root, or a root the check
+            // could not use, reads apart from a forged order
+            id::Rejection::NotFleet => {
+                let signer = id::announcement_credential(&bytes).map_or("its credential".to_string(), |c| format!("{} ({})", c.name, c.role.as_str()));
+                format!("order signature: {e}: {signer} is not signed by the fleet root this node holds (its root.pub begins {})", fleet.root_hint())
+            }
+            e => format!("order signature: {e}"),
+        })?;
         if service != SERVICE {
             return Err(format!("not a sync order ({service})"));
         }
@@ -117,7 +125,7 @@ mod tests {
             let cred = root.issue(name, role, now + 3600, from, &id::point_of(&key)).unwrap();
             id::Me::new(key, cred).unwrap()
         };
-        let master = mk("mac", Role::Device, Some([10, 0, 0, 222].into()));
+        let master = mk("mac", Role::Device, Some([192, 0, 2, 1].into()));
         let node = mk("n5", Role::Node, None);
         let seen = Seen::default();
         let order = hex(&master.announce(SERVICE, b"apply makepad=abc nonce=01").unwrap());
@@ -132,6 +140,13 @@ mod tests {
         assert!(seen.check_with(&fleet, &stale, now + 3000).is_err());
         let other = hex(&master.announce("other", b"apply nonce=04").unwrap());
         assert!(seen.check_with(&fleet, &other, now).is_err());
+        // another fleet's master: the refusal names the root this node expected
+        let other = id::Root::generate().unwrap();
+        let key = id::generate_key().unwrap();
+        let foreign = id::Me::new(key, other.issue("mac", Role::Device, now + 3600, Some([192, 0, 2, 1].into()), &id::point_of(&key)).unwrap()).unwrap();
+        let e = seen.check_with(&fleet, &hex(&foreign.announce(SERVICE, b"prune makepad a nonce=06").unwrap()), now).unwrap_err();
+        assert!(e.contains("not a credential of this fleet: mac (device) is not signed") && e.contains(&format!("begins {}", fleet.root_hint())), "{e}");
+        assert!(fleet.root_hint().starts_with(&hex(&root.point()[..8])), "{}", fleet.root_hint());
         let mut bad = unhex(&hex(&master.announce(SERVICE, b"apply makepad=abc nonce=05").unwrap())).unwrap();
         let n = bad.len() - 70;
         bad[n] ^= 1;

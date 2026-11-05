@@ -288,9 +288,17 @@ fn ctl() -> makepad_remote::link::Client {
     makepad_remote::link::Client::new(makepad_remote::link::Target::Unix(crate::proto::control_socket()), "devhub-live")
 }
 
-/// One inspect command in the live app: its answer lines.
+/// One inspect command in the live app: its answer lines. Its AI tools (`tools`, `call
+/// <service>.<tool> ..`) are its `app` service's ([`makepad_remote::app::app_request_of`]).
 fn inspect(node: &str, pid: u32, line: &str) -> Result<Vec<String>, String> {
     let mut out = Vec::new();
+    if let Some(request) = makepad_remote::app::app_request_of(line) {
+        makepad_remote::hub::ask_app(&ctl(), &format!("{node}:{pid}"), &request?, &mut |l| {
+            out.push(l.to_string());
+            true
+        })?;
+        return Ok(out);
+    }
     makepad_remote::hub::ask(&ctl(), &format!("{node}:{pid}"), "cmd", "", line, &mut |l| {
         out.push(l.to_string());
         true
@@ -299,6 +307,18 @@ fn inspect(node: &str, pid: u32, line: &str) -> Result<Vec<String>, String> {
 }
 
 /// A frame presented: the app is up and drawing.
+/// `live wait patched` is done: the newest edit saved before the call (the OS monitor hears it
+/// within ~0.1 s, so `waited` 300 ms covers it) has its verdict; a session that has none after
+/// that has no edit to wait for. Before, a session's first edit had no patch yet and `live look`
+/// skipped the wait: its grab was the frame from before the edit, drawn with no patch (11-05).
+fn patched_done(patch: Option<&LivePatch>, asked: u64, waited: Duration) -> bool {
+    let heard = waited > Duration::from_millis(300);
+    match patch {
+        Some(p) => !p.outcome.is_empty() && (p.edit_ms.saturating_add(300) >= asked || heard),
+        None => heard,
+    }
+}
+
 fn drawing(x: &Live) -> bool {
     x.pid > 0 && inspect(&x.node, x.pid, "live").ok().and_then(|l| frames_of(&l)).is_some_and(|f| f > 0)
 }
@@ -1672,6 +1692,20 @@ mod owner_tests {
     }
 
     #[test]
+    fn a_wait_for_the_patch_waits_out_a_save_the_monitor_has_not_heard_yet() {
+        use std::time::Duration;
+        let (soon, heard) = (Duration::from_millis(100), Duration::from_millis(301));
+        // a session's first edit: no patch yet when the wait starts
+        assert!(!super::patched_done(None, 1_000, soon));
+        assert!(super::patched_done(None, 1_000, heard), "no save at all: nothing to wait for");
+        let patch = |edit_ms: u64, outcome: &str| crate::state::LivePatch { edit_ms, outcome: outcome.into(), ..Default::default() };
+        assert!(!super::patched_done(Some(&patch(900, "")), 1_000, heard), "no verdict yet");
+        assert!(super::patched_done(Some(&patch(900, "patched")), 1_000, soon), "the save just before the call");
+        assert!(!super::patched_done(Some(&patch(100, "patched")), 1_000, soon), "an older edit: a newer save may come");
+        assert!(super::patched_done(Some(&patch(100, "patched")), 1_000, heard));
+    }
+
+    #[test]
     fn the_jit_is_idle_by_its_activity_line_not_its_header() {
         let answer = |line: &str| vec![r#"{"measured":"JIT compile activity","at_ms":1,"source":"two looks","partial":[]}"#.to_string(), line.to_string(), "(101 ms)".to_string()];
         assert!(super::jit_idle(&answer("idle; running: nothing; queued: ahead 0, O2 0, O3 0")));
@@ -1876,6 +1910,8 @@ pub fn serve(ctx: &Arc<Ctx>, line: &str) -> Result<String, String> {
                     let installed = live.as_ref().and_then(|l| l.iter().find_map(|l| num(l, "patches")));
                     // saved edits that wait for a restart: the frame shows the code before them
                     let waiting = live.as_ref().and_then(|l| l.iter().find_map(|l| num(l, "restart_pending"))).unwrap_or(0);
+                    // a save not shipped yet or without its verdict: nor does it show that one
+                    let unpatched = !r.pending.lock().unwrap().0.is_empty() || r.inflight.load(std::sync::atomic::Ordering::SeqCst) || x.patch.as_ref().is_some_and(|p| p.outcome.is_empty());
                     let mut argv = vec!["cargo", "run", "--profile", "host", "-q", "-p", "makepad-run", "--bin", "makepad", "--", "inspect", &pid];
                     argv.extend(arg.split_whitespace());
                     let (code, text) = r.held.output(&argv)?;
@@ -1899,6 +1935,9 @@ pub fn serve(ctx: &Arc<Ctx>, line: &str) -> Result<String, String> {
                     if waiting > 0 {
                         lines.insert(0, format!("STALE: {waiting} edit(s) wait for a restart: this frame shows the code before them (`makepad devhub live act {id} session relaunch` applies them)"));
                     }
+                    if unpatched {
+                        lines.insert(0, format!("STALE: a save waits to ship or for its verdict: this frame shows the code before it (`makepad devhub live look {id}` waits for it)"));
+                    }
                     if let Some(rel) = grab_file(&lines, &r.lease) {
                         lines.push(format!("copy it here: makepad devhub get {} tmp/{rel} <dir> --node {} --lease {} (or `live look {id}`)", x.lane, x.node, r.lease));
                         let drawn = drawn.map_or(String::new(), |(frame, patch)| format!(",\"frame\":{frame},\"patch\":{patch}"));
@@ -1906,6 +1945,8 @@ pub fn serve(ctx: &Arc<Ctx>, line: &str) -> Result<String, String> {
                     }
                     lines
                 }
+                // the app's AI tools: its JSON arguments as typed
+                Some("call" | "tools") => inspect(&x.node, x.pid, arg)?,
                 // code (`eval <expr>`, `probe add <hook> <code>`) goes as JSON, as `makepad
                 // inspect` sends it: typed, its `=` and `=>` were taken for `key=value` words
                 _ if arg.trim_start().starts_with('{') => inspect(&x.node, x.pid, arg)?,
@@ -1947,7 +1988,7 @@ pub fn serve(ctx: &Arc<Ctx>, line: &str) -> Result<String, String> {
                 let done = match what {
                     // the newest edit has its verdict: nothing waits to ship or for a verdict, and an
                     // edit saved before this call (the OS monitor hears it within ~0.1 s) is in
-                    "patched" => quiet && x.patch.as_ref().is_some_and(|p| !p.outcome.is_empty() && (p.edit_ms.saturating_add(300) >= asked || t.elapsed() > Duration::from_millis(300))),
+                    "patched" => quiet && patched_done(x.patch.as_ref(), asked, t.elapsed()),
                     "verdict" => quiet && x.patch.as_ref().is_some_and(|p| terminal(p)) && t.elapsed() >= Duration::from_millis(300),
                     "settled" => settled(&x),
                     "frame" => drawing(&x),

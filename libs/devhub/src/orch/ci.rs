@@ -93,10 +93,10 @@ pub const SKIP_APPS: &[&str] = &["source-library", "mixer", "mail", "wm-all", "w
 /// The platform's own crates: their tests run in every CI run.
 pub const TEST_DIRS: &[&str] = &["platform", "draw", "widgets", "tools/ci_leg", "libs/remote", "libs/devhub", "libs/ai/services"];
 /// The default smoke script of an app without its own.
-pub const DEFAULT_SCRIPT: &str = "tools/ci/default.ci.splash";
+pub const DEFAULT_SCRIPT: &str = "tools/ci_leg/default.ci.splash";
 pub const COMMERCIAL: &str = "apps/commercial";
 
-/// The target matrix (tools/ci cargo.rs, mirrored from cargo_makepad): target, how it is checked.
+/// How a target is checked.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Build {
     Bin,
@@ -106,22 +106,24 @@ pub enum Build {
     Std,
 }
 
-pub const TARGETS: [(&str, Build); 15] = [
-    ("aarch64-apple-darwin", Build::Bin),
-    ("x86_64-pc-windows-msvc", Build::Bin),
-    ("x86_64-unknown-linux-gnu", Build::Bin),
-    ("wasm32-unknown-unknown", Build::Lib),
-    ("aarch64-linux-android", Build::Lib),
-    ("aarch64-apple-ios", Build::Bin),
-    ("x86_64-linux-android", Build::Lib),
-    ("aarch64-apple-tvos", Build::Std),
-    ("aarch64-apple-tvos-sim", Build::Std),
-    ("i686-linux-android", Build::Lib),
-    ("aarch64-apple-ios-sim", Build::Bin),
-    ("x86_64-apple-ios", Build::Bin),
-    ("x86_64-apple-tvos", Build::Std),
-    ("x86_64-apple-darwin", Build::Bin),
-    ("x86_64-pc-windows-gnu", Build::Bin),
+/// The target matrix (mirrored from cargo_makepad): target, how it is checked, its platform (the
+/// word a package's `[package.metadata.makepad] platforms` uses).
+pub const TARGETS: [(&str, Build, &str); 15] = [
+    ("aarch64-apple-darwin", Build::Bin, "desktop"),
+    ("x86_64-pc-windows-msvc", Build::Bin, "desktop"),
+    ("x86_64-unknown-linux-gnu", Build::Bin, "desktop"),
+    ("wasm32-unknown-unknown", Build::Lib, "web"),
+    ("aarch64-linux-android", Build::Lib, "mobile"),
+    ("aarch64-apple-ios", Build::Bin, "mobile"),
+    ("x86_64-linux-android", Build::Lib, "mobile"),
+    ("aarch64-apple-tvos", Build::Std, "mobile"),
+    ("aarch64-apple-tvos-sim", Build::Std, "mobile"),
+    ("i686-linux-android", Build::Lib, "mobile"),
+    ("aarch64-apple-ios-sim", Build::Bin, "mobile"),
+    ("x86_64-apple-ios", Build::Bin, "mobile"),
+    ("x86_64-apple-tvos", Build::Std, "mobile"),
+    ("x86_64-apple-darwin", Build::Bin, "desktop"),
+    ("x86_64-pc-windows-gnu", Build::Bin, "desktop"),
 ];
 
 /// The targets the JIT checks natively on a box of that OS (`makepad check` there) instead of
@@ -413,7 +415,7 @@ pub struct Script {
 
 /// The apps (`apps/<x>/Cargo.toml` with a binary) and the scripts: every `ci.splash` outside
 /// hidden, `target` and `local` folders and outside skipped apps, then the default script for each
-/// app without one (ported from tools/ci smoke.rs `discover`).
+/// app without one.
 pub fn discover(tree: &Tree) -> (Vec<Krate>, Vec<Script>) {
     let hidden = |p: &str| p.split('/').any(|s| s.starts_with('.') || s == "target" || s == "local" || s.starts_with("target-"));
     let mut apps = Vec::new();
@@ -437,7 +439,8 @@ pub fn discover(tree: &Tree) -> (Vec<Krate>, Vec<Script>) {
         scripts.push(Script { path: f.clone(), dir: if dir.is_empty() { ".".into() } else { dir }, target: None });
     }
     for a in &apps {
-        if covered.contains(&a.dir) {
+        // (a tree from before the script moved, a bisect's baseline, has no default to ask)
+        if covered.contains(&a.dir) || !tree.has(DEFAULT_SCRIPT) {
             continue;
         }
         let bin = a.bins.iter().find(|b| !SKIP_APPS.iter().any(|s| s == b || Some(*s) == b.strip_prefix("makepad-"))).unwrap_or(&a.bins[0]);
@@ -481,16 +484,32 @@ pub fn check_specs(text: &str, default_package: Option<&str>) -> Vec<(Vec<String
     out
 }
 
-/// target -> the packages checked there (from every script's `check_targets`).
+/// What packages say they are built for: `[package.metadata.makepad] platforms`. A package not
+/// here is built for all of them, as is one whose list has a word that names no platform (a typo
+/// must not drop its checks).
+fn declared_platforms(tree: &Tree) -> BTreeMap<String, Vec<String>> {
+    let declared = |manifest: &String| {
+        let doc = parse_toml(&tree.read(manifest)?).ok()?;
+        let list: Vec<String> = doc.get_path(&["package", "metadata", "makepad", "platforms"])?.as_array()?.iter().filter_map(|v| v.as_str().map(str::to_string)).collect();
+        let known = list.iter().all(|word| TARGETS.iter().any(|(_, _, platform)| platform == word));
+        known.then_some((doc.get_path(&["package", "name"])?.as_str()?.to_string(), list))
+    };
+    tree.files.iter().filter(|f| f.ends_with("/Cargo.toml")).filter_map(declared).collect()
+}
+
+/// target -> the packages checked there (from every script's `check_targets`), but for a package
+/// not built for that target's platform.
 pub fn matrix(tree: &Tree, scripts: &[Script]) -> BTreeMap<String, BTreeSet<String>> {
+    let declared = declared_platforms(tree);
     let mut m: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for sc in scripts {
         let Some(text) = tree.read(&sc.path) else { continue };
         let default = sc.target.as_deref().and_then(|t| t.split(':').next());
         for (packages, targets) in check_specs(&text, default) {
-            for (t, _) in TARGETS {
+            for (t, _, platform) in TARGETS {
                 if targets.as_ref().is_none_or(|ts| ts.iter().any(|x| x == t)) {
-                    m.entry(t.to_string()).or_default().extend(packages.iter().cloned());
+                    let built = |p: &&String| declared.get(*p).is_none_or(|list| list.iter().any(|word| word == platform));
+                    m.entry(t.to_string()).or_default().extend(packages.iter().filter(built).cloned());
                 }
             }
         }
@@ -939,11 +958,45 @@ impl Lock {
     }
 }
 
-/// A unit's digests (Linux, macOS, Windows) and its closure, by (pair, lock, dir, app section).
-type DigestKey = (String, String, String, bool);
+/// A unit's digests (Linux, macOS, Windows) and its closure, by (pair, lock, dir, [`digest_kind`]).
+type DigestKey = (String, String, String, &'static str);
 static DIGESTS: LazyLock<Mutex<HashMap<DigestKey, ([String; 3], BTreeSet<String>)>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 /// Entries kept before the cache starts over (about a hundred pairs of every unit).
 const DIGESTS_KEPT: usize = 100_000;
+/// Whether a Rust source (by object id) names a file (by name), for [`Digests`]' left-out
+/// documents ([`makepad_ci_merge::inert`]); an object's text never changes.
+static NAMES: LazyLock<Mutex<HashMap<(String, String), bool>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+const NAMES_KEPT: usize = 500_000;
+
+/// The sections whose units hash the same files: an app's (with the JIT), its tests' (no
+/// `ci.splash`), and its jobs'.
+fn digest_kind(section: &str) -> &'static str {
+    match section { "app" => "app", "tests" => "tests", _ => "job" }
+}
+
+/// Whether a Rust source of `tree` under `krate` names `file` ([`makepad_ci_merge::names`]).
+fn named_in(tree: &Tree, krate: &str, file: &str) -> bool {
+    let name = file.rsplit('/').next().unwrap_or(file).to_string();
+    let prefix = if krate.is_empty() { String::new() } else { format!("{krate}/") };
+    for (path, oid) in tree.blobs.range(prefix.clone()..).take_while(|(p, _)| p.starts_with(&prefix)).filter(|(p, _)| p.ends_with(".rs")) {
+        let key = (oid.clone(), name.clone());
+        let known = NAMES.lock().unwrap().get(&key).copied();
+        let hit = match known {
+            Some(hit) => hit,
+            None => {
+                let hit = (tree.read)(path).is_some_and(|text| makepad_ci_merge::names(&text, file));
+                let mut kept = NAMES.lock().unwrap();
+                if kept.len() >= NAMES_KEPT { kept.clear(); }
+                kept.insert(key, hit);
+                hit
+            }
+        };
+        if hit {
+            return true;
+        }
+    }
+    false
+}
 
 /// One tree walk per repo, shared by discovery and every unit; no per-app git processes.
 pub struct Digests {
@@ -970,10 +1023,10 @@ impl Digests {
         let jit: BTreeSet<String> = super::roll::crate_dirs_from(JIT_DIR, &read).into_iter().filter(|d| !NOT_JIT.iter().any(|n| under(d, n))).collect();
         let mut hashes: BTreeMap<(Unit, Os), String> = BTreeMap::new();
         let mut closures: BTreeMap<Unit, BTreeSet<String>> = BTreeMap::new();
-        let mut computed: BTreeMap<(String, bool), Unit> = BTreeMap::new();
+        let mut computed: BTreeMap<(String, &'static str), Unit> = BTreeMap::new();
         for unit in units.iter().collect::<BTreeSet<_>>() {
-            let key = (unit.dir.clone(), unit.section == "app");
-            let kept_key = (tree.id.clone(), lock_id.clone(), unit.dir.clone(), unit.section == "app");
+            let key = (unit.dir.clone(), digest_kind(&unit.section));
+            let kept_key = (tree.id.clone(), lock_id.clone(), unit.dir.clone(), digest_kind(&unit.section));
             if !tree.id.is_empty() {
                 if let Some((h, dirs)) = DIGESTS.lock().unwrap().get(&kept_key) {
                     for (os, hash) in [Os::Linux, Os::Macos, Os::Windows].into_iter().zip(h) {
@@ -1012,6 +1065,15 @@ impl Digests {
                 for (path, hash) in tree.blobs.range(prefix.clone()..).take_while(|(p, _)| p.starts_with(&prefix)) {
                     if !proof_path(path) && !nested.iter().any(|n| under(path, n)) {
                         files.insert(path, hash);
+                    }
+                }
+            }
+            // a document (and a test's ci.splash) is no input unless a source of its crate names it
+            let crates: BTreeSet<String> = dirs.iter().map(|d| d.trim_end_matches('/').to_string()).collect();
+            for (krate, inert) in makepad_ci_merge::inert_by_crate(files.keys().map(|p| p.as_str()), &crates, unit.section == "tests") {
+                for file in inert.into_iter().map(str::to_string).collect::<Vec<_>>() {
+                    if !named_in(tree, &krate, &file) {
+                        files.remove(&file);
                     }
                 }
             }
@@ -1076,14 +1138,22 @@ pub enum Urgency {
 
 /// What changed in a unit since `proof`: the first of its own crate's paths that changed (a
 /// package nested in its directory is not its own), else the first changed path it reads, else
-/// `Cargo.lock`.
+/// `Cargo.lock`. A document is the cause only when no code changed: most are no input
+/// ([`makepad_ci_merge::inert`]), and one beside code that did made its crate's tests look like its
+/// own change (11-05: a CREDITS.md edit named as the cause of 9 units stale by a dependency).
 fn stale_path(repo: &Path, pair: &Pair, unit: &Unit, proof: &Proof, closure: Option<&BTreeSet<String>>, cache: &mut Changes) -> (bool, String) {
     let paths = changed_paths(repo, pair, Some(proof), closure, cache);
     let nested: Vec<&String> = closure.into_iter().flatten().filter(|d| **d != unit.dir && under(d, &unit.dir)).collect();
-    if let Some(p) = paths.iter().find(|p| under(p, &unit.dir) && !nested.iter().any(|n| under(p, n))) {
-        return (true, p.clone());
+    let own = |p: &String| under(p, &unit.dir) && !nested.iter().any(|n| under(p, n));
+    for docs in [false, true] {
+        if let Some(p) = paths.iter().find(|p| makepad_ci_merge::doc_file(p) == docs && own(p)) {
+            return (true, p.clone());
+        }
+        if let Some(p) = paths.iter().find(|p| makepad_ci_merge::doc_file(p) == docs) {
+            return (false, p.clone());
+        }
     }
-    (false, paths.into_iter().next().unwrap_or_else(|| "Cargo.lock".into()))
+    (false, "Cargo.lock".into())
 }
 
 /// Why a shard no proof keeps runs, and its [`Urgency`].
@@ -1209,7 +1279,7 @@ pub fn sweep_plan(tree: &Tree, timing: &dyn Fn(&str) -> Option<f64>, rotation: u
         }
     }
     // the cross targets under cargo: one shard per target
-    for (target, build) in TARGETS {
+    for (target, build, _) in TARGETS {
         if JIT_TARGETS.iter().any(|(t, _)| *t == target) {
             continue;
         }
@@ -1350,9 +1420,14 @@ pub fn sweep_plan(tree: &Tree, timing: &dyn Fn(&str) -> Option<f64>, rotation: u
     if tree.has("tools/run/fixture/live_kinds.py") {
         push("live:kinds".to_string(), Kind::Screen, Os::Linux, true, vec![argv(&["python3", "tools/run/fixture/live_kinds.py", "--jobs", "6"])], Judge::Exit, 300.0, None);
     }
-    // a restart-rung edit is the exec restart: one process, the app's state kept, no leftover threads
-    if tree.has("tools/run/fixture/restart_exec.py") {
-        push("live:restart".to_string(), Kind::Screen, Os::Linux, true, vec![argv(&["python3", "tools/run/fixture/restart_exec.py"])], Judge::Exit, 240.0, None);
+    // a restart keeps the process and the window: a restart-rung edit, a panic, a repeated relaunch; the state kept, no leftovers
+    if tree.has("tools/run/fixture/restart_in_place.py") {
+        push("live:restart".to_string(), Kind::Screen, Os::Linux, true, vec![argv(&["python3", "tools/run/fixture/restart_in_place.py"])], Judge::Exit, 240.0, None);
+    }
+    // every static of the JIT's crates is reset at a run's end or stays with a reason: a new one is a
+    // decision, or the next run sees the last one's
+    if tree.has("tools/run/fixture/restart_statics.py") {
+        push("live:restart-statics".to_string(), Kind::Build, Os::Linux, false, vec![argv(&["python3", "tools/run/fixture/restart_statics.py"])], Judge::Exit, 5.0, None);
     }
     // a failed hot load is a warm restart and a ledger report, never a parked panic
     if tree.has("tools/run/fixture/hot_fail.py") {
@@ -1589,6 +1664,9 @@ pub struct BoxInfo {
     pub gpu: bool,
     /// it takes a lease on the separate CI tree
     pub ci: bool,
+    /// a bench box (its quiet windows go to timed work): it lends the run only the cross-target
+    /// checks, the shards of its OS no pool box can take (a Mac's Apple targets)
+    pub checks_only: bool,
 }
 
 impl BoxInfo {
@@ -1597,7 +1675,7 @@ impl BoxInfo {
     }
 
     pub fn fits(&self, s: &Shard) -> bool {
-        (s.kind != Kind::Ci || self.ci) && (s.os == Os::Any || s.os == self.os) && (!Self::needs_gui(s) || self.gui) && (s.os != Os::Any || self.os != Os::Windows) && (!s.gpu || self.gpu)
+        (!self.checks_only || s.id.starts_with("check:")) && (s.kind != Kind::Ci || self.ci) && (s.os == Os::Any || s.os == self.os) && (!Self::needs_gui(s) || self.gui) && (s.os != Os::Any || self.os != Os::Windows) && (!s.gpu || self.gpu)
     }
 
     fn needs(&self, s: &Shard) -> String {
@@ -1653,7 +1731,7 @@ fn ci_boxes(ctx: &Ctx, up: bool) -> Vec<BoxInfo> {
             // Reject older nodes' generic Wayland capability too: Linux boots belong to the
             // real WM session, even while the fleet is updating its capability probe.
             let gui = c.display.as_deref().is_some_and(|d| os != Os::Linux || d.strip_prefix("wm:makepad-wm-").is_some_and(|n| n.parse::<u32>().is_ok()));
-            (os != Os::Any).then(|| BoxInfo { node: n.name.clone(), os, arch: c.arch.clone(), gui, gpu: !c.gpus.is_empty(), ci: crate::lease::sched::slots(&c, Kind::Ci) > 0 })
+            (os != Os::Any).then(|| BoxInfo { node: n.name.clone(), os, arch: c.arch.clone(), gui, gpu: !c.gpus.is_empty(), ci: crate::lease::sched::slots(&c, Kind::Ci) > 0, checks_only: c.role() == crate::lease::Role::Bench })
         })
         .collect()
 }
@@ -1676,6 +1754,8 @@ struct Pool {
     sweep: bool,
     /// a sweep's newest leg tree ([`sweep_leg`])
     leg: Option<Arc<LegTree>>,
+    /// per box, what its JIT build before its shards did ([`tool_first`])
+    tools: Vec<(String, String)>,
 }
 
 impl Pool {
@@ -1890,7 +1970,7 @@ pub fn critical(state: &[CiShard], started_ms: u64, ended_ms: u64) -> (String, V
 const ENDED_WITH_MASTER: &str = "ended with the master";
 
 /// What every shard reads, whatever its crates: a change here is the JIT's too.
-const SHARED_PATHS: [&str; 5] = ["Cargo.lock", "Cargo.toml", "tools/ci", "tools/ci_leg", "tools/run"];
+const SHARED_PATHS: [&str; 4] = ["Cargo.lock", "Cargo.toml", "tools/ci_leg", "tools/run"];
 /// The crate whose closure the JIT is.
 const JIT_DIR: &str = "tools/run";
 /// Not read by any shard through the JIT.
@@ -1946,7 +2026,17 @@ impl Inputs {
         changed.dedup();
         let jit = super::roll::crate_dirs(repo, JIT_DIR);
         let read_by_jit = |p: &String| jit.iter().any(|d| under(p, d)) && !NOT_JIT.iter().any(|d| under(p, d));
-        let jit_changed = changed.iter().any(|p| read_by_jit(p) || SHARED_PATHS.iter().any(|d| under(p, d)));
+        // a document is no JIT input unless a source of its crate names it, as for proofs
+        // ([`makepad_ci_merge::inert`]); the tree is read only when one changed
+        let doc = |p: &String| makepad_ci_merge::doc_file(p);
+        let code = changed.iter().any(|p| (read_by_jit(p) || SHARED_PATHS.iter().any(|d| under(p, d))) && !doc(p));
+        let jit_changed = code || {
+            let docs: Vec<&String> = changed.iter().filter(|p| read_by_jit(p) && doc(p)).collect();
+            !docs.is_empty() && Tree::at(repo, to).map_or(true, |tree| {
+                let crates: BTreeSet<String> = jit.iter().map(|d| d.trim_end_matches('/').to_string()).collect();
+                makepad_ci_merge::inert_by_crate(docs.iter().map(|p| p.as_str()), &crates, false).iter().any(|(krate, files)| files.iter().any(|f| named_in(&tree, krate, f)))
+            })
+        };
         Some(Inputs { changed, jit_changed })
     }
 }
@@ -1962,14 +2052,16 @@ fn arm_decision(ctx: &Ctx, pair: &Pair) -> super::arm::Decision {
 }
 
 /// Leave classified Mac shards as explicit passes, outside the runnable candidates. Rotating
-/// smoke scripts still run on x64; a script pinned to macOS cannot be moved to Linux.
+/// smoke scripts still run on x64; a script pinned to macOS cannot be moved to Linux. The Apple
+/// cross-target checks go by their proofs: a bench Mac lends its quiet time to them only (the
+/// user's call, 11-05).
 fn arm_plan(tree: &Tree, shards: &mut Vec<Shard>, arm: &super::arm::Decision) -> Vec<Shard> {
     if arm.required { return Vec::new(); }
     let (_, scripts) = discover(tree);
     let mut skipped = Vec::new();
     shards.retain_mut(|s| {
         if s.os == Os::Any { s.os = Os::Linux; }
-        if s.os != Os::Macos { return true; }
+        if s.os != Os::Macos || s.id.starts_with("check:") { return true; }
         if let Some(dir) = s.id.strip_prefix("smoke:").filter(|d| !d.starts_with("macos:")) {
             let pinned = scripts.iter().find(|sc| sc.dir == dir).and_then(|sc| tree.read(&sc.path)).as_deref().and_then(pinned_os);
             if pinned != Some(Os::Macos) { s.os = Os::Linux; return true; }
@@ -2213,10 +2305,12 @@ fn own_tests_after(ctx: &Arc<Ctx>, tip: &Pair) {
 }
 
 /// The units a run of [`own_tests_after`] takes, of what the plan's digests left to run: its own
-/// crate's files changed since its proof ([`Urgency::Own`]), a box of the run can take it, and the
-/// same inputs did not fail already (they would fail again every run, until their crate changes).
+/// crate's files changed since its proof ([`Urgency::Own`]) or it has no proof at all
+/// ([`Urgency::New`]: a new crate, or one whose proof a merge lost, which no later change names), a
+/// box of the run can take it, and the same inputs did not fail already (they would fail again
+/// every run, until their crate changes).
 fn own_tests_picked(shards: Vec<Shard>, urgency: &BTreeMap<String, Urgency>, fits: &dyn Fn(&Shard) -> bool, failed_as_is: &dyn Fn(&Shard) -> bool) -> Vec<Shard> {
-    shards.into_iter().filter(|s| urgency.get(&s.id) == Some(&Urgency::Own) && fits(s) && !failed_as_is(s)).collect()
+    shards.into_iter().filter(|s| matches!(urgency.get(&s.id), Some(Urgency::Own | Urgency::New)) && fits(s) && !failed_as_is(s)).collect()
 }
 
 /// The inputs a unit of [`own_tests_after`] last failed with. A master that starts over reports
@@ -2472,7 +2566,7 @@ fn gate_held(_one: std::sync::MutexGuard<'static, ()>, ctx: &Arc<Ctx>, pair: &Pa
     let word = if going.is_some() { "goes on" } else { "started" };
     ctx.store.event("ci", Sev::Info, format!("ci {} {word}: {n} shards, {kept} kept, {} on their boxes (run {id})", pair.short(), back.len()), None);
     let urgency = shards.iter().map(|s| urgency.get(&s.id).copied().unwrap_or_default()).collect();
-    let pool = Arc::new((Mutex::new(Pool { proofs_collected: false, reserved: vec![None; n], shards, state, stopped: false, prio: PRIO, urgency, overdue: vec![false; n], run_id: id.clone(), sweep, leg: None }), Condvar::new()));
+    let pool = Arc::new((Mutex::new(Pool { tools: Vec::new(), proofs_collected: false, reserved: vec![None; n], shards, state, stopped: false, prio: PRIO, urgency, overdue: vec![false; n], run_id: id.clone(), sweep, leg: None }), Condvar::new()));
     let master_t0 = Instant::now();
     let mut nothing_left: Option<Instant> = None;
     let mut last_ran = Instant::now();
@@ -2659,7 +2753,14 @@ fn gate_held(_one: std::sync::MutexGuard<'static, ()>, ctx: &Arc<Ctx>, pair: &Pa
         Verdict::Ok
     };
     let ended = wall_ms();
-    let (crit, boxes, fleet) = critical(&g.state, started, ended);
+    let (crit, mut boxes, fleet) = critical(&g.state, started, ended);
+    for (node, line) in &g.tools {
+        match boxes.iter_mut().find(|b| b.split(' ').next() == Some(node.as_str())) {
+            Some(b) => *b = format!("{b}; {line}"),
+            None => boxes.push(format!("{node} 0 shards; {line}")),
+        }
+    }
+    let slow = slowest(&g.state, 5);
     let failed: Vec<String> = g.state.iter().filter(|s| s.state == "fail").map(|s| s.id.clone()).collect();
     let mut state = g.state.clone();
     let unwritten: Vec<String> = state.iter().filter_map(|st| did_not_run(st, g.stopped).err()).collect();
@@ -2706,15 +2807,17 @@ fn gate_held(_one: std::sync::MutexGuard<'static, ()>, ctx: &Arc<Ctx>, pair: &Pa
             r.critical = crit.clone();
             r.fleet = fleet.clone();
             r.boxes = boxes.clone();
+            r.slow = slow.clone();
             d.ci.runs.push(r);
         }
     }).unwrap_or_else(|e| { eprintln!("devhub state: {e}"); Default::default() });
     let line = format!(
-        "ci {}{upto} {word}: {n} shards, {fleet}{}{}{}; critical path {crit}; {}",
+        "ci {}{upto} {word}: {n} shards, {fleet}{}{}{}; critical path {crit}; slowest {}; {}",
         pair.short(),
         if failed.is_empty() { String::new() } else { format!("; failed {}", failed.join(" ")) },
         if not_run == 0 { String::new() } else { format!("; {not_run} did not run") },
         if one_box.is_empty() { String::new() } else { format!("; FAILED ON ONE BOX ONLY: {}", one_box.join("; ")) },
+        slow.iter().map(|l| l.split(':').next().unwrap_or(l)).collect::<Vec<_>>().join(", "),
         arm.summary
     );
     // (an own-units run's failures have their lines above)
@@ -2736,6 +2839,7 @@ fn worker(ctx: &Arc<Ctx>, pool: &Arc<(Mutex<Pool>, Condvar)>, pair: &Pair, dir: 
     let (p, cv) = &**pool;
     let mut idle_until: Option<Instant> = None;
     let sweep = p.lock().unwrap().sweep;
+    tool_first(ctx, pool, pair, dir, &b);
     loop {
         let i = loop {
             // lane work goes first between a sweep's shards
@@ -2831,6 +2935,101 @@ fn worker(ctx: &Arc<Ctx>, pool: &Arc<(Mutex<Pool>, Condvar)>, pair: &Pair, dir: 
     }
 }
 
+/// Builds the JIT the box's shards run through (`cargo run` of makepad-run at the run's pair, kept
+/// by content on the box) before its first shard, a stage of its own: a box's first shard paid
+/// for that build and was blamed for it (run 153's route smoke on Windows: 800 s, 31 s of it the
+/// smoke). A box that keeps that binary already answers in a second or two.
+fn tool_first(ctx: &Arc<Ctx>, pool: &Arc<(Mutex<Pool>, Condvar)>, pair: &Pair, dir: &Path, b: &BoxInfo) {
+    let (p, _) = &**pool;
+    let (prio, sweep) = {
+        let g = p.lock().unwrap();
+        if !(0..g.shards.len()).any(|i| !g.finished(i) && g.can(b, i) && g.shards[i].steps.iter().flatten().any(|w| w == "makepad-run")) {
+            return;
+        }
+        (g.prio, g.sweep)
+    };
+    let spec = Spec {
+        since_ms: None,
+        lane: LANE.into(),
+        agent: if sweep { SWEEP_AGENT } else { AGENT }.into(),
+        kind: Kind::Ci,
+        needs: format!("os={},arch={}", b.os.as_str(), b.arch),
+        prio,
+        rev: pair.rev(),
+        repo_dir: ctx.repo.to_string_lossy().into_owned(),
+        node: Some(b.node.clone()),
+    };
+    let asked = Instant::now();
+    let stop = || asked.elapsed() > QUEUE_WAIT || !box_up(ctx, &b.node) || p.lock().map(|g| g.stopped).unwrap_or(true);
+    let line = match Held::acquire_with(&spec, &|_| {}, &mut |_| {}, &stop) {
+        Err(e) => format!("its JIT before its shards: no lease ({e}); its first shard builds it"),
+        Ok(held) => {
+            let started = Instant::now();
+            let mut out = Vec::new();
+            let r = ship_lock(&held, dir, false).and_then(|_| held.run_asked("jit", ".", &jit(&["--version"]), &mut out, &mut |_| {}));
+            held.release(Some(if matches!(r, Ok(0)) { 0 } else { 1 }));
+            let _ = std::fs::write(dir.join(format!("jit_{}.log", safe(&b.node))), &out);
+            let how = match r {
+                Ok(0) => tool_how(&String::from_utf8_lossy(&out)),
+                Ok(code) => format!("failed (exit {code}): its first shard builds it"),
+                Err(e) => format!("failed ({e}): its first shard builds it"),
+            };
+            format!("its JIT before its shards: {how} in {:.0} s", started.elapsed().as_secs_f64())
+        }
+    };
+    p.lock().unwrap().tools.push((b.node.clone(), line));
+}
+
+/// What a JIT run's log says the lease did for its binary ([`tool_first`]).
+fn tool_how(log: &str) -> String {
+    if log.lines().any(|l| l.starts_with("devhub: kept the JIT binary")) {
+        return "built".into();
+    }
+    match log.lines().find_map(|l| l.strip_prefix("devhub: this JIT binary is not kept: ")) {
+        Some(why) => format!("built, not kept ({why})"),
+        None => "the box had it".into(),
+    }
+}
+
+/// The run's `n` slowest shards on their boxes and what their time went to ([`time_went`]).
+fn slowest(state: &[CiShard], n: usize) -> Vec<String> {
+    let held = |s: &CiShard| s.spans.iter().filter(|x| x.granted_ms > 0).map(|x| x.ended_ms.saturating_sub(x.granted_ms)).sum::<u64>() as f64 / 1000.0;
+    let mut by: Vec<(f64, &CiShard)> = state.iter().map(|s| (held(s), s)).filter(|(t, _)| *t > 0.0).collect();
+    by.sort_by(|a, b| b.0.total_cmp(&a.0));
+    by.into_iter().take(n).map(|(t, s)| format!("{} {t:.0} s on {}: {}", s.id, s.node, time_went(&std::fs::read_to_string(&s.log).unwrap_or_default(), t))).collect()
+}
+
+/// What a shard's log says its time went to: its steps (ci-leg's `STEP` lines, each test binary's
+/// `finished in`), the longest of them, and the rest, outside them (the lease, compiling, a JIT
+/// build, which it names).
+fn time_went(log: &str, held: f64) -> String {
+    let mut steps: Vec<(String, f64)> = Vec::new();
+    let (mut package, mut binary) = ("", "");
+    for line in log.lines() {
+        if let Some(cmd) = line.strip_prefix("$ ") {
+            let mut words = cmd.split_whitespace().skip_while(|w| *w != "test");
+            package = words.nth(1).unwrap_or("");
+        } else if let Some(b) = line.trim_start().strip_prefix("Running ") {
+            binary = b.split(" (").next().unwrap_or(b);
+        } else if let Some(rest) = line.strip_prefix("STEP ").and_then(|r| r.split_once(' ')).filter(|(state, _)| *state != "running").map(|(_, r)| r) {
+            if let Some((name, secs)) = rest.strip_suffix(" s)").and_then(|r| r.rsplit_once(" (")) {
+                if let Ok(secs) = secs.parse::<f64>() {
+                    steps.push((name.to_string(), secs));
+                }
+            }
+        } else if let Some(secs) = line.strip_prefix("test result: ").and_then(|r| r.rsplit_once("finished in ")).and_then(|(_, t)| t.trim().trim_end_matches('s').parse::<f64>().ok()) {
+            steps.push((format!("{package} {binary}"), secs));
+        }
+    }
+    let inside: f64 = steps.iter().map(|(_, s)| s).sum();
+    let built = log.lines().any(|l| l.starts_with("devhub: kept the JIT binary") || l.starts_with("devhub: this JIT binary is not kept"));
+    let built = if built { " (it built the JIT)" } else { "" };
+    match steps.iter().max_by(|a, b| a.1.total_cmp(&b.1)) {
+        Some((name, secs)) => format!("{inside:.0} s in {} steps (longest {name} {secs:.1} s), {:.0} s outside them{built}", steps.len(), (held - inside).max(0.0)),
+        None => format!("no step times in its log{built}"),
+    }
+}
+
 /// A shard on its lease, from the step its state names, to its result; whether lane work took the
 /// box back (the box rests a while: the shard waits again).
 pub(crate) fn ship_lock(held: &Held, dir: &Path, overlay: bool) -> Result<(), String> {
@@ -2881,7 +3080,7 @@ fn run_shard(ctx: &Ctx, pool: &(Mutex<Pool>, Condvar), i: usize, held: Held) -> 
     }
     // Copy while the lease still resolves its target. Nothing on the node uses the LAN;
     // the master does all model work after release, on this box's worker without the pool lock.
-    let grabs = if state == "ok" && shard.kind == Kind::Ci {
+    let grabs = if state == "ok" && saves_grabs(&shard) {
         let dst = ctx.logs("ci").join(&run_id).join(safe(&shard.id));
         match copy_deferred(&held, Path::new(&log_path), &dst) {
             Ok(grabs) => grabs,
@@ -3028,6 +3227,12 @@ fn run_shard(ctx: &Ctx, pool: &(Mutex<Pool>, Condvar), i: usize, held: Held) -> 
     publish_changed(ctx, &g);
     cv.notify_all();
     false
+}
+
+/// A smoke's zero exit covers its script's flow; the acceptances it saved still need the judge, in
+/// the gate's shards and the sweep's alike.
+fn saves_grabs(shard: &Shard) -> bool {
+    shard.steps.iter().any(|step| step.iter().any(|word| word == "smoke"))
 }
 
 struct DeferredGrab {
@@ -3543,7 +3748,9 @@ pub fn status(repo: &Path) -> Result<Value, String> {
             if proofs.get(&(unit.section.clone(), sh.os)).is_some_and(|p| p.digest == dg.of(&unit, sh.os)) {
                 continue;
             }
-            let why = match newest(&proofs, &unit.section) {
+            // its own OS's proof says what changed since: another's is newer (a Windows unit read
+            // "Cargo.lock changed" since the Linux proof of its crate, 11-05)
+            let why = match proofs.get(&(unit.section.clone(), sh.os)).or_else(|| newest(&proofs, &unit.section)) {
                 Some(proof) => format!("proof {} stale: {} changed", proof.date, stale_path(repo, &pair, &unit, proof, dg.closures.get(&unit), &mut changes).1),
                 None => "no proof".to_string(),
             };
@@ -3807,6 +4014,9 @@ pub fn render(v: &Value) -> String {
     for b in v.get("boxes").and_then(|x| x.as_arr()).unwrap_or(&[]) {
         out.push_str(&format!("  box {}\n", b.as_str().unwrap_or("")));
     }
+    for (i, l) in v.get("slow").and_then(|x| x.as_arr()).unwrap_or(&[]).iter().enumerate() {
+        out.push_str(&format!("{} {}\n", if i == 0 { "slowest:" } else { "        " }, l.as_str().unwrap_or("")));
+    }
     let waits_for_a_box = |x: &Value| x.get("summary").and_then(|y| y.as_str()).is_some_and(|y| y.starts_with("waits for a box") || y.starts_with(QUEUED));
     let one_box = |x: &Value| x.get("state").and_then(|y| y.as_str()) == Some("ok") && x.get("failed_on").and_then(|y| y.as_str()).is_some_and(|y| !y.is_empty()) && x.get("kept").and_then(|y| y.as_str()).is_some_and(str::is_empty);
     for sh in shards.iter().filter(|x| one_box(x) || waits_for_a_box(x) || !matches!(x.get("state").and_then(|y| y.as_str()), Some("ok") | Some("wait"))) {
@@ -3922,7 +4132,7 @@ mod tests {
             assert_eq!(ci, doc.ci);
         }
         let mut pool = Pool {
-            proofs_collected: false, shards: Vec::new(), state: vec![CiShard { id: "gate".into(), state: "ok".into(), ..Default::default() }],
+            tools: Vec::new(), proofs_collected: false, shards: Vec::new(), state: vec![CiShard { id: "gate".into(), state: "ok".into(), ..Default::default() }],
             reserved: Vec::new(), stopped: false, prio: PRIO, urgency: Vec::new(), overdue: Vec::new(), run_id: "gate".into(), sweep: false, leg: None,
         };
         let sweep = ci.sweep_run.clone();
@@ -4155,13 +4365,13 @@ mod tests {
     /// crate whose own files changed goes before longer ones whose dependencies alone changed.
     #[test]
     fn each_box_pulls_its_own_shard_and_changed_crates_go_first() {
-        let bx = |n: &str, os: Os| BoxInfo { node: n.into(), os, arch: "x86_64".into(), gui: false, gpu: true, ci: true };
+        let bx = |n: &str, os: Os| BoxInfo { node: n.into(), os, arch: "x86_64".into(), gui: false, gpu: true, ci: true, checks_only: false };
         let (lin, win) = (bx("l", Os::Linux), bx("w", Os::Windows));
         let shard = |id: &str, os: Os, est: f64| Shard { id: id.into(), kind: Kind::Test, os, gui: false, gpu: false, steps: Vec::new(), judge: Judge::Tests, est, dirs: None, whole: false, cores: None };
         let shards = vec![shard("wtest:a", Os::Windows, 60.0), shard("test:deps", Os::Linux, 300.0), shard("test:own", Os::Linux, 20.0), shard("test:new", Os::Linux, 10.0)];
         let n = shards.len();
         let state = shards.iter().map(|s| CiShard { id: s.id.clone(), state: "wait".into(), ..Default::default() }).collect();
-        let mut p = Pool { proofs_collected: false, shards, state, reserved: vec![None; n], stopped: false, prio: 0, urgency: vec![Urgency::Deps, Urgency::Deps, Urgency::Own, Urgency::New], overdue: vec![false; n], run_id: "S".into(), sweep: true, leg: None };
+        let mut p = Pool { tools: Vec::new(), proofs_collected: false, shards, state, reserved: vec![None; n], stopped: false, prio: 0, urgency: vec![Urgency::Deps, Urgency::Deps, Urgency::Own, Urgency::New], overdue: vec![false; n], run_id: "S".into(), sweep: true, leg: None };
         // the Windows shard is stuck in its box's queue
         assert_eq!(p.next_for(&win), Some(0));
         p.reserved[0] = Some("w".into());
@@ -4199,11 +4409,11 @@ mod tests {
 
     #[test]
     fn a_shard_that_could_not_get_its_box_goes_behind_the_rest() {
-        let lin = BoxInfo { node: "l".into(), os: Os::Linux, arch: "x86_64".into(), gui: false, gpu: true, ci: true };
+        let lin = BoxInfo { node: "l".into(), os: Os::Linux, arch: "x86_64".into(), gui: false, gpu: true, ci: true, checks_only: false };
         let shard = |id: &str, est: f64| Shard { id: id.into(), kind: Kind::Test, os: Os::Linux, gui: false, gpu: false, steps: Vec::new(), judge: Judge::Tests, est, dirs: None, whole: false, cores: None };
         let shards = vec![shard("whole", 300.0), shard("small", 20.0)];
         let state = shards.iter().map(|s| CiShard { id: s.id.clone(), state: "wait".into(), ..Default::default() }).collect();
-        let mut p = Pool { proofs_collected: false, shards, state, reserved: vec![None; 2], stopped: false, prio: 0, urgency: vec![Urgency::Deps; 2], overdue: vec![false; 2], run_id: "r".into(), sweep: false, leg: None };
+        let mut p = Pool { tools: Vec::new(), proofs_collected: false, shards, state, reserved: vec![None; 2], stopped: false, prio: 0, urgency: vec![Urgency::Deps; 2], overdue: vec![false; 2], run_id: "r".into(), sweep: false, leg: None };
         assert_eq!(p.next_for(&lin), Some(0), "the longest first");
         p.state[0].spans.push(CiSpan { node: "l".into(), asked_ms: 1, granted_ms: 0, ended_ms: 2 });
         assert_eq!(p.next_for(&lin), Some(1), "its ask gave up: the other goes");
@@ -4212,12 +4422,12 @@ mod tests {
     }
 
     #[test]
-    fn own_tests_take_the_changed_crates_a_box_can_run_that_did_not_fail_as_they_are() {
+    fn own_tests_take_the_changed_and_unproven_crates_a_box_can_run_that_did_not_fail_as_they_are() {
         let shard = |id: &str| Shard { id: id.into(), kind: Kind::Test, os: Os::Linux, gui: false, gpu: false, steps: Vec::new(), judge: Judge::Tests, est: 1.0, dirs: None, whole: false, cores: None };
         let urgency: BTreeMap<String, Urgency> = [("test:own", Urgency::Own), ("test:gpu", Urgency::Own), ("test:broken", Urgency::Own), ("test:deps", Urgency::Deps), ("test:new", Urgency::New)].map(|(k, v)| (k.to_string(), v)).into();
         let all = ["test:own", "test:gpu", "test:broken", "test:deps", "test:new", "test:kept"].map(shard).to_vec();
         let picked = own_tests_picked(all, &urgency, &|s| s.id != "test:gpu", &|s| s.id == "test:broken");
-        assert_eq!(picked.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), ["test:own"]);
+        assert_eq!(picked.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), ["test:own", "test:new"]);
     }
 
     #[test]
@@ -4241,6 +4451,9 @@ mod tests {
         assert_eq!(stale(&[dep, nested, own]), (true, own.to_string()));
         assert_eq!(stale(&[dep, nested]), (false, dep.to_string()), "a package nested in its directory is not its own");
         assert_eq!(stale(&["apps/x/src/main.rs"]), (false, "Cargo.lock".to_string()), "nothing it reads changed: its locked dependencies did");
+        let doc = "platform/script/compute/CREDITS.md";
+        assert_eq!(stale(&[dep, doc]), (false, dep.to_string()), "its own document beside a dependency's code is no own change");
+        assert_eq!(stale(&[doc]), (true, doc.to_string()), "only a document changed: one its sources name");
     }
 
     #[test]
@@ -4281,11 +4494,11 @@ mod tests {
 
     #[test]
     fn a_failure_asks_a_second_box_and_a_box_failing_several_is_out() {
-        let bx = |n: &str, os: Os| BoxInfo { node: n.into(), os, arch: "x86_64".into(), gui: true, gpu: true, ci: true };
+        let bx = |n: &str, os: Os| BoxInfo { node: n.into(), os, arch: "x86_64".into(), gui: true, gpu: true, ci: true, checks_only: false };
         let boxes = [bx("a", Os::Linux), bx("b", Os::Linux), bx("m", Os::Macos)];
         let shard = |id: &str| Shard { id: id.into(), kind: Kind::Test, os: Os::Any, gui: false, gpu: false, steps: Vec::new(), judge: Judge::Exit, est: 1.0, dirs: None, whole: false, cores: None };
         let n = BOX_OUT + 1;
-        let mut p = Pool { proofs_collected: false, shards: (0..n).map(|i| shard(&format!("s{i}"))).collect(), state: (0..n).map(|i| CiShard { id: format!("s{i}"), state: "wait".into(), ..Default::default() }).collect(), reserved: vec![None; n], stopped: false, prio: 0, urgency: vec![Urgency::Deps; n], overdue: vec![false; n], run_id: String::new(), sweep: false, leg: None };
+        let mut p = Pool { tools: Vec::new(), proofs_collected: false, shards: (0..n).map(|i| shard(&format!("s{i}"))).collect(), state: (0..n).map(|i| CiShard { id: format!("s{i}"), state: "wait".into(), ..Default::default() }).collect(), reserved: vec![None; n], stopped: false, prio: 0, urgency: vec![Urgency::Deps; n], overdue: vec![false; n], run_id: String::new(), sweep: false, leg: None };
         // the same OS only, never the box that failed it (an `Any` shard failing on Linux says
         // nothing about a Mac)
         assert!(p.second_box(0, "a", &boxes, "exit 1", vec!["error: x".into()]));
@@ -4314,6 +4527,77 @@ mod tests {
         assert!(!p.out("a") && one_box_failures(&p.state).is_empty());
     }
 
+    /// A licence, a readme or a test's `ci.splash` re-proved every crate holding one (11-05: 26
+    /// stale units from two CREDITS.md and 12 tests units from a comment in a ci.splash).
+    #[test]
+    fn a_document_no_source_names_and_a_tests_ci_splash_are_no_proof_input() {
+        let base = [
+            ("tools/run/Cargo.toml", "[package]\nname = \"makepad-run\"\n"),
+            ("tools/run/src/main.rs", "fn main() {}\n"),
+            ("apps/x/Cargo.toml", "[package]\nname = \"x\"\n"),
+            ("apps/x/src/main.rs", "const CREDITS: &str = include_str!(\"../CREDITS.md\");\n"),
+            ("apps/x/README.md", "old\n"),
+            ("apps/x/LICENSE-MIT", "old\n"),
+            ("apps/x/CREDITS.md", "old\n"),
+            ("apps/x/resources/help.md", "old\n"),
+            ("apps/x/ci.splash", "old\n"),
+        ];
+        let units: Vec<Unit> = ["app", "tests", "job.check"].iter().map(|s| Unit { dir: "apps/x".into(), section: s.to_string() }).collect();
+        let digests = |changed: &str| {
+            let tree = Tree::mem(base.iter().map(|(p, t)| (*p, if *p == changed { "new\n" } else { *t })).collect());
+            let lock = "[[package]]\nname = \"x\"\nversion = \"0.1.0\"\n\n[[package]]\nname = \"makepad-run\"\nversion = \"0.1.0\"\n";
+            let dg = Digests::with_lock(&tree, &units, lock.to_string()).unwrap();
+            units.iter().map(|u| dg.of(u, Os::Linux).to_string()).collect::<Vec<_>>()
+        };
+        let before = digests("");
+        assert!(before.iter().all(|d| !d.is_empty()));
+        for doc in ["apps/x/README.md", "apps/x/LICENSE-MIT"] {
+            assert_eq!(digests(doc), before, "{doc}: no unit's input");
+        }
+        // a document a source includes, an app's resources, a source: every unit's
+        for input in ["apps/x/CREDITS.md", "apps/x/resources/help.md", "apps/x/src/main.rs"] {
+            assert!(digests(input).iter().zip(&before).all(|(a, b)| a != b), "{input}");
+        }
+        // the smoke script: the app's and its jobs', not its tests'
+        let script = digests("apps/x/ci.splash");
+        assert!(script[0] != before[0] && script[1] == before[1] && script[2] != before[2]);
+    }
+
+    /// Run 153's route smoke on Windows: 800 s, 770 s of it building the JIT before its first
+    /// step; the summary names where a slow shard's time went.
+    #[test]
+    fn a_shards_log_says_where_its_time_went_and_what_its_jit_did() {
+        let smoke = "STEP running apps/x / launch\n  owned x\nSTEP passed apps/x / launch (12.5 s)\nSTEP passed apps/x / comes up (3.0 s)\nSTEP failed apps/x / judge (1.5 s)\n";
+        assert_eq!(time_went(smoke, 31.0), "17 s in 3 steps (longest apps/x / launch 12.5 s), 14 s outside them");
+        let tests = "$ cargo run --profile host -q -p makepad-run --bin makepad -- test fab-loose --features x\ndevhub: kept the JIT binary k\n     Running unittests src/lib.rs\ntest result: ok. 7 passed; 0 failed; finished in 4.29s\n     Running tests/plates.rs\ntest result: ok. 8 passed; 0 failed; finished in 10.30s\n== exit 0\n";
+        assert_eq!(time_went(tests, 800.0), "15 s in 2 steps (longest fab-loose tests/plates.rs 10.3 s), 785 s outside them (it built the JIT)");
+        assert_eq!(time_went("== exit 0\n", 5.0), "no step times in its log");
+        assert_eq!(tool_how("devhub: the JIT is this box's binary k, no cargo\nmakepad 0.1\n"), "the box had it");
+        assert_eq!(tool_how("devhub: kept the JIT binary k\nmakepad 0.1\n"), "built");
+        assert_eq!(tool_how("devhub: this JIT binary is not kept: makepad.d names only 2 tracked files\n"), "built, not kept (makepad.d names only 2 tracked files)");
+        let shard = |id: &str, granted: u64, ended: u64| CiShard { id: id.into(), node: "n".into(), log: "/nonexistent/x.log".into(), spans: vec![CiSpan { granted_ms: granted, ended_ms: ended, ..Default::default() }], ..Default::default() };
+        let slow = slowest(&[shard("a", 1000, 2000), shard("b", 1000, 61_000), shard("never", 0, 5000)], 5);
+        assert_eq!(slow, vec!["b 60 s on n: no step times in its log".to_string(), "a 1 s on n: no step times in its log".to_string()]);
+    }
+
+    /// A bench box takes only cross-target checks, its OS's shards no pool box can;
+    /// those stay in a run with no arm64-relevant change (their proofs say whether they run).
+    #[test]
+    fn a_bench_box_takes_only_the_cross_target_checks() {
+        let mac = |id: &str| Shard { id: id.into(), kind: Kind::Build, os: Os::Macos, gui: false, gpu: false, steps: Vec::new(), judge: Judge::Cargo, est: 1.0, dirs: None, whole: false, cores: None };
+        let mut shards = vec![mac("check:aarch64-apple-ios"), mac("mjit"), Shard { os: Os::Linux, ..mac("test:a:lib") }];
+        let skipped = arm_plan(&Tree::mem(Vec::new()), &mut shards, &super::super::arm::Decision { required: false, full: false, summary: String::new() });
+        assert_eq!(skipped.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), ["mjit"]);
+        assert_eq!(shards.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), ["check:aarch64-apple-ios", "test:a:lib"]);
+        let bench = BoxInfo { node: "m".into(), os: Os::Macos, arch: "aarch64".into(), gui: true, gpu: true, ci: true, checks_only: true };
+        let sh = |id: &str, kind: Kind| Shard { id: id.into(), kind, os: Os::Macos, gui: false, gpu: false, steps: Vec::new(), judge: Judge::Cargo, est: 1.0, dirs: None, whole: false, cores: None };
+        assert!(bench.fits(&sh("check:aarch64-apple-ios", Kind::Build)));
+        for other in ["smoke:macos:apps/x", "test:a:lib", "mjit"] {
+            assert!(!bench.fits(&sh(other, Kind::Test)), "{other}");
+        }
+        assert!(BoxInfo { checks_only: false, ..bench.clone() }.fits(&sh("test:a:lib", Kind::Test)));
+    }
+
     #[test]
     fn steps_are_judged_by_exit_warnings_and_error_counts() {
         assert_eq!(judge(Judge::Exit, "x", 1, "").0, false);
@@ -4332,8 +4616,8 @@ mod tests {
 
     #[test]
     fn boxes_take_what_fits_and_the_critical_path_is_the_last_box() {
-        let lin = BoxInfo { node: "node-a".into(), os: Os::Linux, arch: "x86_64".into(), gui: false, gpu: true, ci: true };
-        let win = BoxInfo { node: "node-b".into(), os: Os::Windows, arch: "x86_64".into(), gui: true, gpu: true, ci: true };
+        let lin = BoxInfo { node: "node-a".into(), os: Os::Linux, arch: "x86_64".into(), gui: false, gpu: true, ci: true, checks_only: false };
+        let win = BoxInfo { node: "node-b".into(), os: Os::Windows, arch: "x86_64".into(), gui: true, gpu: true, ci: true, checks_only: false };
         let sh = |os, gui| Shard { id: "s".into(), kind: Kind::Build, os, gui, gpu: false, steps: Vec::new(), judge: Judge::Exit, est: 1.0, dirs: None, whole: false, cores: None };
         assert!(lin.fits(&sh(Os::Linux, false)) && !lin.fits(&sh(Os::Any, true)) && !win.fits(&sh(Os::Any, true)) && win.fits(&sh(Os::Windows, false)));
         let shard = |id: &str, spans: Vec<(&str, u64, u64, u64)>| CiShard { id: id.into(), spans: spans.into_iter().map(|(n, a, g, e)| CiSpan { node: n.into(), asked_ms: a, granted_ms: g, ended_ms: e }).collect(), ..Default::default() };
@@ -4354,7 +4638,7 @@ mod tests {
     #[test]
     fn a_shard_no_box_can_take_waits_or_says_why() {
         let sh = Shard { id: "s".into(), kind: Kind::Build, os: Os::Macos, gui: false, gpu: false, steps: Vec::new(), judge: Judge::Exit, est: 1.0, dirs: None, whole: false, cores: None };
-        let mac = BoxInfo { node: "node-d".into(), os: Os::Macos, arch: "aarch64".into(), gui: true, gpu: true, ci: true };
+        let mac = BoxInfo { node: "node-d".into(), os: Os::Macos, arch: "aarch64".into(), gui: true, gpu: true, ci: true, checks_only: false };
         let wait = CiShard::default();
         // a master that just started has not heard its boxes: no box is gone
         assert_eq!(no_box(&sh, &wait, &[], &[], &[], Duration::from_secs(3600), false, false), None);
@@ -4393,6 +4677,60 @@ mod tests {
     }
 
     #[test]
+    fn the_target_matrix_matches_cargo_makepad() {
+        let source = include_str!("../../../../tools/cargo_makepad/src/check/mod.rs");
+        let table = source.split_once("const TOOLCHAINS:").unwrap().1.split_once("= [").unwrap().1.split_once("];").unwrap().0;
+        let table = table.lines().map(|line| line.split("//").next().unwrap()).collect::<Vec<_>>().join("\n");
+        let rows: Vec<(String, String, String)> = table.split('(').skip(1).map(|tuple| {
+            let fields: Vec<&str> = tuple.split_once(')').unwrap().0.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+            assert_eq!(fields.len(), 3);
+            (fields[0].trim_matches('"').to_string(), fields[1].strip_prefix("BuildTy::").unwrap().to_string(), fields[2].strip_prefix("Platform::").unwrap().to_lowercase())
+        }).collect();
+        let mirror: Vec<(String, String, String)> = TARGETS.iter().map(|(target, build, platform)| {
+            let build = match build {
+                Build::Bin => "Binary",
+                Build::Lib => "Lib",
+                Build::Std => "BinaryBuildStd",
+            };
+            (target.to_string(), build.to_string(), platform.to_string())
+        }).collect();
+        assert_eq!(rows, mirror, "update the target matrix with cargo_makepad");
+    }
+
+    #[test]
+    fn a_package_is_checked_only_on_the_platforms_it_declares() {
+        let script = |package: &str| format!("ci.check_targets({{packages: [\"{package}\"] targets: ci.host.targets}})\n");
+        let (wm, flow, calc, typo) = (script("wm"), script("flow"), script("calc"), script("typo"));
+        let t = Tree::mem(vec![
+            ("apps/wm/Cargo.toml", "[package]\nname = \"wm\"\n[package.metadata.makepad]\nplatforms = [\"desktop\"]\n"),
+            ("apps/wm/ci.splash", wm.as_str()),
+            ("apps/flow/Cargo.toml", "[package]\nname = \"flow\"\n[package.metadata.makepad]\nplatforms = [\"desktop\", \"mobile\"]\n"),
+            ("apps/flow/ci.splash", flow.as_str()),
+            ("apps/calc/Cargo.toml", "[package]\nname = \"calc\"\n"),
+            ("apps/calc/ci.splash", calc.as_str()),
+            ("apps/typo/Cargo.toml", "[package]\nname = \"typo\"\n[package.metadata.makepad]\nplatforms = [\"browser\"]\n"),
+            ("apps/typo/ci.splash", typo.as_str()),
+        ]);
+        let (_, scripts) = discover(&t);
+        let m = matrix(&t, &scripts);
+        let at = |target: &str| m[target].iter().map(String::as_str).collect::<Vec<_>>();
+        assert_eq!(at("x86_64-pc-windows-gnu"), ["calc", "flow", "typo", "wm"]);
+        assert_eq!(at("aarch64-linux-android"), ["calc", "flow", "typo"]);
+        assert_eq!(at("wasm32-unknown-unknown"), ["calc", "typo"]);
+    }
+
+    #[test]
+    fn every_smoke_gets_judged_in_the_gate_and_the_sweep() {
+        let t = tree();
+        for shards in [plan(&t, &|_| None, 0), sweep_plan(&t, &|_| None, 0)] {
+            let (smokes, others): (Vec<&Shard>, Vec<&Shard>) = shards.iter().partition(|s| s.id.starts_with("smoke:"));
+            assert!(!smokes.is_empty());
+            assert!(smokes.iter().all(|s| saves_grabs(s)));
+            assert!(!others.iter().any(|s| saves_grabs(s)));
+        }
+    }
+
+    #[test]
     fn a_tree_from_before_ci_leg_plans_no_smokes() {
         let t = Tree::mem(vec![("Cargo.toml", "[workspace]\nmembers = [\"apps/*\"]\n"), ("apps/calc/Cargo.toml", "[package]\nname = \"makepad-app-calc\"\n"), ("apps/calc/src/main.rs", ""), ("apps/calc/ci.splash", "nil\n")]);
         assert!(plan(&t, &|_| None, 0).iter().all(|s| !s.gui));
@@ -4428,6 +4766,45 @@ mod tests {
     /// A sweep started behind a newer rolling run runs its legs on that run's pair with that
     /// run's Cargo.lock: a box that ran that run has that tree built and builds nothing new. A leg
     /// whose crate is gone there keeps the sweep's pair, as does a sweep the rolling run is not
+    /// The JIT legs and a lane's JIT pin skip a pair whose JIT inputs did not change: a document no
+    /// source of its crate names is none, as for proofs.
+    #[test]
+    fn a_document_no_source_names_leaves_the_jit_unchanged() {
+        let repo = std::env::temp_dir().join(format!("devhub-ci-jit-docs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&repo);
+        std::fs::create_dir_all(repo.join("tools/run/src")).unwrap();
+        let git = |args: &[&str]| {
+            let o = std::process::Command::new("git").current_dir(&repo).args(args).output().unwrap();
+            assert!(o.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&o.stderr));
+            String::from_utf8_lossy(&o.stdout).trim().to_string()
+        };
+        let commit = |what: &str| {
+            git(&["add", "-A"]);
+            git(&["commit", "-q", "-m", what]);
+            Pair::new(&git(&["rev-parse", "HEAD"]), "")
+        };
+        let write = |p: &str, t: &str| std::fs::write(repo.join(p), t).unwrap();
+        write("tools/run/Cargo.toml", "[package]\nname = \"makepad-run\"\n");
+        write("tools/run/src/main.rs", "const CREDITS: &str = include_str!(\"../CREDITS.md\");\n");
+        write("tools/run/README.md", "old\n");
+        write("tools/run/CREDITS.md", "old\n");
+        git(&["init", "-q", "-b", "work"]);
+        git(&["config", "user.name", "CI Test"]);
+        git(&["config", "user.email", "ci@example.invalid"]);
+        let mut at = commit("old");
+        let mut changed = |p: &str| {
+            write(p, &format!("{}\n", std::fs::read_to_string(repo.join(p)).unwrap()));
+            let next = commit(p);
+            let jit = Inputs::between(&repo, &at, &next).unwrap().jit_changed;
+            at = next;
+            jit
+        };
+        assert!(!changed("tools/run/README.md"), "a readme nothing includes");
+        assert!(changed("tools/run/CREDITS.md"), "a document its source includes");
+        assert!(changed("tools/run/src/main.rs"));
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
     /// newer than. A proof names the pair its legs ran; targets that ran at different inputs
     /// prove nothing.
     #[test]
@@ -4470,7 +4847,7 @@ mod tests {
         let shard = |id: &str, dir: &str| Shard { id: id.into(), kind: Kind::Test, os: Os::Linux, gui: false, gpu: false, steps: Vec::new(), judge: Judge::Tests, est: 1.0, dirs: Some(vec![dir.into()]), whole: false, cores: None };
         let (a, gone) = (shard("wtest:a", "libs/a"), shard("wtest:gone", "libs/gone"));
         // (a sweep's pool: its legs share the leg tree it found)
-        let sweep = || Mutex::new(Pool { proofs_collected: false, shards: Vec::new(), state: Vec::new(), reserved: Vec::new(), stopped: false, prio: 0, urgency: Vec::new(), overdue: Vec::new(), run_id: "S".into(), sweep: true, leg: None });
+        let sweep = || Mutex::new(Pool { tools: Vec::new(), proofs_collected: false, shards: Vec::new(), state: Vec::new(), reserved: Vec::new(), stopped: false, prio: 0, urgency: Vec::new(), overdue: Vec::new(), run_id: "S".into(), sweep: true, leg: None });
         let pool = sweep();
         let leg = sweep_leg(&ctx, &old, &dir, &a, &pool).expect("a leg of a sweep behind the rolling run takes its pair");
         assert_eq!(leg.pair, new);

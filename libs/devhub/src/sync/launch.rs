@@ -11,9 +11,12 @@
 //! registry's one launch definition, no lease, env or args), what a lane does to show the user
 //! something it landed.
 //!
-//! Every launch is in the ledger (`~/.makepad/devhub/sync/launched/<pid>.json`, with the process
-//! start time); `stop` signals only a ledger pid whose start time still matches (never a pattern),
-//! its whole process group, SIGTERM then SIGKILL.
+//! A launch is a run of its lease ([`crate::lease::exec::launch`]): under the run wrapper, in its
+//! own session and scope, so its exit is the lease's to tell, through a hub restart too.
+//!
+//! Every launch is in the ledger (`~/.makepad/devhub/sync/launched/<pid>.json`: the app's pid, its
+//! start time and its run's group); `stop` signals only for a ledger pid whose start time still
+//! matches (never a pattern), its run's whole process group, SIGTERM then SIGKILL.
 
 use super::conf::SyncConf;
 use super::jits;
@@ -84,11 +87,11 @@ fn ledger_file(pid: u32) -> PathBuf {
     ledger_dir().join(format!("{pid}.json"))
 }
 
-fn spec_json(pid: u32, start: u64, s: &Spec, log: &std::path::Path) -> String {
+fn spec_json(pid: u32, start: u64, group: u32, s: &Spec, log: &std::path::Path) -> String {
     let env: Vec<String> = s.env.iter().map(|(k, v)| json_str(&format!("{k}={v}"))).collect();
     let args: Vec<String> = s.args.iter().map(|a| json_str(a)).collect();
     format!(
-        "{{\"pid\":{pid},\"start\":{start},\"app\":{},\"visible\":{},\"lan\":{},\"env\":[{}],\"args\":[{}],\"log\":{},\"lease\":{}}}",
+        "{{\"pid\":{pid},\"start\":{start},\"group\":{group},\"app\":{},\"visible\":{},\"lan\":{},\"env\":[{}],\"args\":[{}],\"log\":{},\"lease\":{}}}",
         json_str(&s.app),
         s.visible,
         s.lan,
@@ -99,8 +102,9 @@ fn spec_json(pid: u32, start: u64, s: &Spec, log: &std::path::Path) -> String {
     )
 }
 
-/// A ledger entry whose process still runs (same pid, same start time).
-pub fn ledger(pid: u32) -> Option<(Spec, u64, PathBuf)> {
+/// A ledger entry whose process still runs (same pid, same start time): its launch, start time,
+/// log and the process group its run leads.
+pub fn ledger(pid: u32) -> Option<(Spec, u64, PathBuf, u32)> {
     let text = std::fs::read_to_string(ledger_file(pid)).ok()?;
     let v = makepad_strict_json::parse(text.as_bytes()).ok()?;
     let start = v.get("start")?.as_u64()?;
@@ -117,7 +121,8 @@ pub fn ledger(pid: u32) -> Option<(Spec, u64, PathBuf)> {
         args: strs("args"),
         lease: v.get("lease").and_then(|l| l.as_str()).map(str::to_string),
     };
-    Some((spec, start, PathBuf::from(v.get("log").and_then(|l| l.as_str()).unwrap_or(""))))
+    let group = v.get("group")?.as_u64()? as u32;
+    Some((spec, start, PathBuf::from(v.get("log").and_then(|l| l.as_str()).unwrap_or("")), group))
 }
 
 pub fn launched() -> Vec<u32> {
@@ -152,17 +157,20 @@ fn allowlisted(cmd: &mut std::process::Command) {
     }
 }
 
-/// Starts `s` from the checkout; returns the pid (the JIT's) and its log.
-pub fn start(conf: &SyncConf, s: &Spec, publish: &crate::local::Publish, machine: &str) -> Result<(u32, PathBuf), String> {
+/// Starts `s` from the checkout as a run of lease `lease`; returns the app's pid (the JIT's) and its log.
+pub fn start(conf: &SyncConf, s: &Spec, lease: &str, publish: &crate::local::Publish, machine: &str) -> Result<(u32, PathBuf), String> {
     let app = find_app(&s.app).ok_or_else(|| format!("no app `{}` in the registry (a registry name like `calculator` or a package like `makepad-app-calculator`)", s.app))?;
     let _ = std::fs::create_dir_all(ledger_dir());
     let log = ledger_dir().join(format!("{}-{}.log", s.app, proto::wall_ms()));
-    let file = std::fs::File::create(&log).map_err(|e| format!("{}: {e}", log.display()))?;
-    let file2 = file.try_clone().map_err(|e| e.to_string())?;
     let (visible, lan, env) = (s.visible, s.lan, s.env.clone());
-    let lane = s.lease.as_deref().map(|id| crate::lease::exec::lease_lane(id).unwrap_or_else(|| format!("lease-{id}")));
-    let mut files = Some((file, file2));
-    let (_launch, mut child) = AppLaunch::start(app, Runner::Jit, Some(conf.checkout.clone()), s.args.clone(), BuildPolicy::IfMissing, false, move |mut cmd, _kind| {
+    let lane = crate::lease::exec::lease_lane(lease).unwrap_or_else(|| format!("lease-{lease}"));
+    // what it ended with, said once its run ends ([`crate::lease::exec::launch`] waits for it)
+    let (publish_end, machine_end, app_id) = (publish.clone(), machine.to_string(), s.app.clone());
+    let mut ended: Option<Box<dyn FnOnce(u32, i32) + Send>> = Some(Box::new(move |pid: u32, code: i32| {
+        let _ = std::fs::remove_file(ledger_file(pid));
+        publish_end(hub_record(&machine_end, &app_id, pid, "launch", Sev::Info, format!("launch: {app_id}#{pid} ended (exit {code})"), String::new()));
+    }));
+    let (_launch, run) = AppLaunch::start(app, Runner::Jit, Some(conf.checkout.clone()), s.args.clone(), BuildPolicy::IfMissing, false, |mut cmd, _kind| {
         allowlisted(&mut cmd);
         if visible {
             // as the WM's spawn_jit: the window becomes the WM's tile through its socket
@@ -170,26 +178,15 @@ pub fn start(conf: &SyncConf, s: &Spec, publish: &crate::local::Publish, machine
         } else {
             cmd.env("MAKEPAD_HIDE_WINDOWS", "1").env("SANDBOX_MUTE", "1");
         }
-        if let Some(lane) = &lane {
-            cmd.env("MAKEPAD_TEST_LANE", lane);
-        }
+        cmd.env("MAKEPAD_TEST_LANE", &lane);
         cmd.env("MAKEPAD_LAN", if lan { "1" } else { "0" });
         cmd.envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
-        let (out, err) = files.take().ok_or("spawned twice")?;
-        cmd.stdin(std::process::Stdio::null()).stdout(out).stderr(err);
-        makepad_remote::group::detach(&mut cmd);
-        cmd.spawn().map_err(|e| e.to_string())
+        crate::lease::exec::launch(lease, &cmd, &log, ended.take().ok_or("spawned twice")?)
     })?;
-    let pid = child.id();
-    let start = makepad_remote::relay::proc_start(pid).unwrap_or(0);
-    let _ = makepad_network::tls::write_private(&ledger_file(pid), spec_json(pid, start, s, &log).as_bytes());
-    let (publish, machine, app_id) = (publish.clone(), machine.to_string(), s.app.clone());
-    let _ = std::thread::Builder::new().name("devhub-sync-reap".into()).spawn(move || {
-        let st = child.wait().map_or_else(|e| format!("lost: {e}"), |s| s.to_string());
-        let _ = std::fs::remove_file(ledger_file(pid));
-        publish(hub_record(&machine, &app_id, pid, "launch", Sev::Info, format!("launch: {app_id}#{pid} ended ({st})"), String::new()));
-    });
-    Ok((pid, log))
+    // (a run that ended already leaves an entry `ledger` drops: its start no longer matches)
+    let start = makepad_remote::relay::proc_start(run.app).unwrap_or(0);
+    let _ = makepad_network::tls::write_private(&ledger_file(run.app), spec_json(run.app, start, run.leader, s, &log).as_bytes());
+    Ok((run.app, log))
 }
 
 /// Waits until `pid` announces its inspect endpoint (the JIT is up) or ends.
@@ -207,10 +204,12 @@ pub fn wait_announced(pid: u32, wait: Duration) -> Option<String> {
     None
 }
 
-/// Stops a ledger pid's process group; Err when the pid is not one of ours.
+/// Stops a ledger pid's launch: its run's process group, on purpose (its lease's end says no
+/// abnormal end for it); Err when the pid is not one of ours.
 pub fn stop(pid: u32) -> Result<String, String> {
-    let (_, start, _) = ledger(pid).ok_or_else(|| format!("pid {pid} is not a running launch of this hub"))?;
-    makepad_remote::group::signal(pid, false);
+    let (_, start, _, group) = ledger(pid).ok_or_else(|| format!("pid {pid} is not a running launch of this hub"))?;
+    crate::lease::exec::launch_stopped(group);
+    makepad_remote::group::signal(group, false);
     let end = Instant::now() + Duration::from_secs(10);
     while Instant::now() < end {
         if makepad_remote::relay::proc_start(pid) != Some(start) {
@@ -220,7 +219,7 @@ pub fn stop(pid: u32) -> Result<String, String> {
         std::thread::sleep(Duration::from_millis(100));
     }
     if makepad_remote::relay::proc_start(pid) == Some(start) {
-        makepad_remote::group::signal(pid, true);
+        makepad_remote::group::signal(group, true);
     }
     let _ = std::fs::remove_file(ledger_file(pid));
     Ok("SIGKILL after 10 s".into())
@@ -269,7 +268,7 @@ pub fn service(conf: Arc<SyncConf>, publish: crate::local::Publish, machine: Str
                 if !guard(out) {
                     return;
                 }
-                let Some((spec, _, _)) = pid.parse().ok().and_then(ledger) else { return err(out, &format!("pid {pid} is not a running launch of this hub")) };
+                let Some((spec, _, _, _)) = pid.parse().ok().and_then(ledger) else { return err(out, &format!("pid {pid} is not a running launch of this hub")) };
                 if !leased(out, &spec) {
                     return;
                 }
@@ -304,14 +303,14 @@ pub fn service(conf: Arc<SyncConf>, publish: crate::local::Publish, machine: Str
             }
             ["list"] => {
                 for pid in launched() {
-                    if let Some((s, _, log)) = ledger(pid) {
+                    if let Some((s, _, log, _)) = ledger(pid) {
                         out.push(format!("{{\"pid\":{pid},\"id\":{},\"app\":{},\"visible\":{},\"jit\":{},\"log\":{}}}", json_str(&format!("{machine}/{}#{pid}", s.app)), json_str(&s.app), s.visible, jits::announced(pid).is_some(), json_str(&log.display().to_string())));
                     }
                 }
             }
             ["log", pid, rest @ ..] => {
                 let n = rest.first().and_then(|n| n.parse::<usize>().ok()).unwrap_or(40).min(400);
-                let Some((_, _, log)) = pid.parse().ok().and_then(ledger) else { return err(out, &format!("pid {pid} is not a running launch of this hub")) };
+                let Some((_, _, log, _)) = pid.parse().ok().and_then(ledger) else { return err(out, &format!("pid {pid} is not a running launch of this hub")) };
                 let text = std::fs::read_to_string(&log).unwrap_or_default();
                 let lines: Vec<&str> = text.lines().collect();
                 for l in &lines[lines.len().saturating_sub(n)..] {
@@ -341,14 +340,9 @@ pub fn show(app: &str) -> Result<String, String> {
 }
 
 fn launch_reply(conf: &SyncConf, spec: &Spec, publish: &crate::local::Publish, machine: &str, out: &mut Vec<String>) {
-    match start(conf, spec, publish, machine) {
+    let Some(lease) = spec.lease.as_deref() else { return out.push(format!("{{\"err\":{}}}", json_str("launch: needs a write lease"))) };
+    match start(conf, spec, lease, publish, machine) {
         Ok((pid, log)) => {
-            if let Some(id) = &spec.lease {
-                if let Err(e) = crate::lease::exec::adopt(id, pid, log.clone()) {
-                    let _ = stop(pid);
-                    return out.push(format!("{{\"err\":{}}}", json_str(&format!("launch: {e}"))));
-                }
-            }
             let jit = wait_announced(pid, Duration::from_secs(180));
             let id = format!("{machine}/{}#{pid}", spec.app);
             let mode = if spec.visible { "visible" } else { "hidden" };

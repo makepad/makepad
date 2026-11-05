@@ -710,10 +710,11 @@ fn log_end(path: &std::path::Path, max: u64) -> Option<String> {
     Some(String::from_utf8_lossy(&bytes[start..]).into_owned())
 }
 
-/// A `job wait`'s wake-up: the idle verdict on a waited job's lease, once a lease. A background
-/// wait heard nothing but the job's end: a hung script held a timed box and the queue behind it
-/// for 28 min while its lane sat in `job wait` and only the inbox was told (11-04). The job runs
-/// on: only its owner can tell a wait from a hang.
+/// A `job wait`'s wake-up: the idle verdict on a waited job's lease, or its yield (a timed run
+/// past twice its estimate while a timed ask waits on its box), once a lease. A background wait
+/// heard nothing but the job's end: a hung script held a timed box and the queue behind it for 28
+/// min while its lane sat in `job wait` and only the inbox was told (11-04). The job runs on: only
+/// its owner can tell a wait from a hang.
 fn told_idle(ctx: &Ctx, ids: &[String], word: &dyn Fn(&str) -> Option<String>, behind: &dyn Fn(&str) -> Option<(String, String)>) -> Result<String, String> {
     let mut told = Vec::new();
     for id in ids {
@@ -793,7 +794,7 @@ pub fn serve(ctx: &Ctx, line: &str) -> Result<String, String> {
             })?;
             Ok("{}".into())
         }
-        "idle" => told_idle(ctx, &ids(), &|lease| ctx.leases.idle_word(lease), &|lane| ctx.leases.behind_hung(lane).or_else(|| ctx.leases.behind_own(lane))),
+        "idle" => told_idle(ctx, &ids(), &|lease| ctx.leases.owner_word(lease), &|lane| ctx.leases.behind_hung(lane).or_else(|| ctx.leases.behind_own(lane))),
         "get" | "wait" => {
             let rest = rest.strip_prefix("--wait").unwrap_or(rest).trim();
             let (any, rest) = rest.strip_prefix("--any").map_or((false, rest), |r| (true, r.trim()));

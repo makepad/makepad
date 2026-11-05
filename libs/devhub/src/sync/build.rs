@@ -60,8 +60,8 @@ fn clear_build_env(cmd: &mut Command) {
     }
 }
 
-fn niced(program: &Path, args: &[String]) -> Command {
-    let mut cmd = crate::os::niced(program.as_os_str());
+fn background(program: &Path, args: &[String]) -> Command {
+    let mut cmd = crate::os::background(program.as_os_str());
     cmd.args(args);
     cmd
 }
@@ -149,7 +149,7 @@ pub fn prebuild(conf: &SyncConf, jit_built: &dyn Fn()) -> Built {
             if let Some(id) = conf.jit_app() {
                 let app = makepad_app_registry::find(&id).ok_or_else(|| format!("prebuild: no app `{id}` in the registry"))?;
                 let cmd = AppLaunch::build_command(app, Runner::Jit, root.clone())?;
-                let mut jit = niced(Path::new(cmd.get_program()), &cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>());
+                let mut jit = background(Path::new(cmd.get_program()), &cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect::<Vec<_>>());
                 // what makepad-wm-build inherits (step 2), then the launch's own environment over it
                 clear_build_env(&mut jit);
                 jit.current_dir(cmd.get_current_dir().unwrap_or(root)).envs(wm_env()).env("MAKEPAD", "linux_direct").env("MAKEPAD_WM_ROOT", root).env("CARGO_NET_OFFLINE", "true").env("CARGO_BUILD_JOBS", conf.jobs.to_string());
@@ -167,7 +167,7 @@ pub fn prebuild(conf: &SyncConf, jit_built: &dyn Fn()) -> Built {
             // 1. the WM, with its session's environment
             let jobs = conf.jobs.to_string();
             let wm_args: Vec<String> = ["build", "--offline", "--release", "-j", jobs.as_str(), "-p", "makepad-app-wm"].iter().map(|s| s.to_string()).collect();
-            let mut wm = niced(&cargo, &wm_args);
+            let mut wm = background(&cargo, &wm_args);
             clear_build_env(&mut wm);
             wm.current_dir(root).envs(wm_env()).env("MAKEPAD", "linux_direct").env("MAKEPAD_WM_ROOT", root).env("CARGO_NET_OFFLINE", "true").env("CARGO_INCREMENTAL", "0");
             step(wm, "makepad-app-wm", &log, &mut b.compiled)?;
@@ -175,7 +175,7 @@ pub fn prebuild(conf: &SyncConf, jit_built: &dyn Fn()) -> Built {
             let mut args: Vec<String> = conf.wm_flags.clone();
             args.push("--".into());
             args.extend(conf.prebuild.iter().cloned());
-            let mut apps = niced(&root.join("target/release/makepad-wm-build"), &args);
+            let mut apps = background(&root.join("target/release/makepad-wm-build"), &args);
             clear_build_env(&mut apps);
             apps.current_dir(root).envs(wm_env()).env("MAKEPAD", "linux_direct").env("MAKEPAD_WM_ROOT", root).env("CARGO_NET_OFFLINE", "true").env("CARGO_BUILD_JOBS", conf.jobs.to_string());
             step(apps, "makepad-wm-build", &log, &mut b.compiled)
@@ -186,8 +186,8 @@ pub fn prebuild(conf: &SyncConf, jit_built: &dyn Fn()) -> Built {
                 let Some(app) = makepad_app_registry::find(id) else { return Err(format!("prebuild: no app `{id}` in the registry")) };
                 let runner = if jit.iter().any(|j| j == id) { Runner::Jit } else { Runner::Native };
                 let cmd = AppLaunch::build_command(app, runner, root.clone())?;
-                // the launch's own command and env, niced, offline, with the job count
-                let mut n = crate::os::niced(cmd.get_program());
+                // the launch's own command and env, as a background build, offline, with the job count
+                let mut n = crate::os::background(cmd.get_program());
                 n.args(cmd.get_args());
                 for (k, v) in cmd.get_envs() {
                     match v {

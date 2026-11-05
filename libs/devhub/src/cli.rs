@@ -62,19 +62,21 @@ pub(crate) fn retry_master<T>(call: impl FnMut() -> Result<T, String>) -> Result
 /// `beat` waits a while and says whether the master answers now. Each change is said once, because
 /// a call that stays open (`job wait`, `test --live`) can run for long after the master is back:
 /// "waiting" as its last line read as a client stuck on a master that had been up for 18 min (11-05).
+/// A cut call whose master answers at once (its restart in place: the dial waited on the socket it
+/// kept open) is no "not reachable".
 pub(crate) fn retry_master_wait<T>(mut call: impl FnMut() -> Result<T, String>, mut beat: impl FnMut() -> bool) -> Result<T, String> {
     let mut told = None;
     loop {
         match call() {
             Ok(v) => return Ok(v),
             Err(e) if e.starts_with("no devhub master at ") || e.contains("link lost") || e.contains("hub connection ended") => {
-                if told.is_none() {
-                    eprintln!("master not reachable: waiting");
-                    told = Some(false);
-                }
                 let up = beat();
                 if told != Some(up) {
-                    eprintln!("{}", if up { "the master is back: asking again" } else { "master not reachable: waiting" });
+                    eprintln!("{}", match (told, up) {
+                        (_, false) => "master not reachable: waiting",
+                        (None, true) => "the master's link was cut: asking again",
+                        (Some(_), true) => "the master is back: asking again",
+                    });
                     told = Some(up);
                 }
             }
@@ -290,9 +292,14 @@ fn inspect(c: &Client, target: &str, words: &[String]) -> i32 {
         println!("{l}");
         true
     };
-    let r = if machine == local_name(c) {
+    // the app's AI tools (`tools`, `call <service>.<tool> ..`) are its `app` service, not a command
+    let request = makepad_remote::app::app_request_of(&line);
+    let r = if let Some(Err(usage)) = &request {
+        Err(usage.clone())
+    } else if machine == local_name(c) {
         // this machine: the JIT's own socket, exactly `makepad inspect`
         match Client::connect(app) {
+            Ok(j) if request.is_some() => makepad_remote::app::run(&j, words, &mut print).map(|_| ()).map_err(|e| e.to_string()),
             Ok(j) => j.cmd(&line).map_err(|e| e.to_string()).map(|lines| {
                 for l in lines {
                     match l {
@@ -308,6 +315,8 @@ fn inspect(c: &Client, target: &str, words: &[String]) -> i32 {
             }),
             Err(e) => Err(e.to_string()),
         }
+    } else if let Some(Ok(request)) = &request {
+        hub::ask_app(c, &format!("{machine}:{app}"), request, &mut print).map(|_| ())
     } else {
         hub::ask(c, &format!("{machine}:{app}"), "cmd", "", &line, &mut print).map(|_| ())
     };
@@ -822,7 +831,12 @@ fn bucket(c: &Client, args: &[&str]) -> i32 {
             .map(|l| text(l, "label")).collect::<Vec<_>>().join(", ")).unwrap_or_default();
         let still = since(v.get("still"));
         let still = if still.is_empty() { still } else { format!("; not rerun: {still}") };
-        println!("{} {tip} {} {failing}{}{still}", text(&v, "bucket"), if ok { "ok" } else { "FAILED" }, if labels.is_empty() { String::new() } else { format!(": {labels}") });
+        // new warnings (a WARN, the row green) and who brought them
+        let warns = match v.get("warns") {
+            Some(Value::Obj(w)) if !w.is_empty() => format!("; warns: {}", w.iter().map(|(u, who)| format!("{u} ({})", who.as_str().unwrap_or("?"))).collect::<Vec<_>>().join(", ")),
+            _ => String::new(),
+        };
+        println!("{} {tip} {} {failing}{}{still}{warns}", text(&v, "bucket"), if ok { "ok" } else { "FAILED" }, if labels.is_empty() { String::new() } else { format!(": {labels}") });
     }
     0
 }

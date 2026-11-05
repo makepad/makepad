@@ -422,6 +422,8 @@ pub struct CiRun {
     pub fleet: String,
     /// per box: `<node> <busy s> s, <n> shards`
     pub boxes: Vec<String>,
+    /// the slowest shards and what their time went to
+    pub slow: Vec<String>,
     /// the plan's rotation (a run that goes on keeps its plan)
     pub rotation: u64,
     /// the timings and marks its plan was made with (a run that goes on keeps its batches)
@@ -573,6 +575,7 @@ pub(crate) fn ci_run_value(r: &CiRun) -> Value {
         ("critical", s(&r.critical)),
         ("fleet", s(&r.fleet)),
         ("boxes", strs(&r.boxes)),
+        ("slow", strs(&r.slow)),
         ("rotation", int(r.rotation)),
         ("plan_timings", Value::Obj(r.plan_timings.iter().map(|(k, v)| (k.clone(), Value::F64(*v))).collect())),
         ("sweep", Value::Bool(r.sweep)),
@@ -596,6 +599,7 @@ fn ci_run_from(v: &Value) -> CiRun {
         critical: text(o, "critical"),
         fleet: text(o, "fleet"),
         boxes: strs_from(o, "boxes"),
+        slow: strs_from(o, "slow"),
         rotation: uint(o, "rotation"),
         sweep: flag(o, "sweep", false),
         own_tests: flag(o, "own_tests", false),
@@ -934,7 +938,7 @@ impl Doc {
         }
         compact.ci.runs = self.ci.runs.iter().map(|r| CiRun {
             id: r.id.clone(), pair: r.pair.clone(), dry: r.dry, checkout: r.checkout.clone(), lock_digest: r.lock_digest.clone(),
-            started_ms: r.started_ms, ended_ms: r.ended_ms, verdict: r.verdict.clone(), critical: r.critical.clone(), fleet: r.fleet.clone(),
+            started_ms: r.started_ms, ended_ms: r.ended_ms, verdict: r.verdict.clone(), critical: r.critical.clone(), fleet: r.fleet.clone(), slow: r.slow.clone(),
             rotation: r.rotation, sweep: r.sweep, own_tests: r.own_tests, stopping: r.stopping, ..Default::default()
         }).collect();
         for job in self.jobs.iter().filter(|j| j.done()) {
@@ -2462,7 +2466,7 @@ mod tests {
     #[test]
     fn ci_round_trip_and_timings_average() {
         let shard = CiShard { id: "smoke:apps/calc".into(), state: "fail".into(), node: "node-b".into(), lease: "L2".into(), secs: 12.5, summary: "exit 1".into(), errors: vec!["error: x".into()], log: "/l".into(), sig: "ab".into(), step: 1, run_n: 2, steps_ok: vec![0], failed: vec!["x".into()], kept: "k".into(), failed_on: "node-a".into(), failed_os: "linux".into(), failed_why: "exit 1".into(), asked_ms: 5, granted_ms: 6, at: pair('b'), spans: vec![CiSpan { node: "node-b".into(), asked_ms: 1, granted_ms: 2, ended_ms: 3 }], lost: vec![("node-d".into(), 1)] };
-        let run = CiRun { own_tests: true, lock_digest: "lock".into(), checkout: String::new(), id: "R1".into(), pair: pair('a'), dry: true, started_ms: 1, ended_ms: 2, verdict: "fail".into(), shards: vec![shard], critical: "node-b ends at 12 s".into(), fleet: "wall 12 s".into(), boxes: vec!["node-b 12 s busy, 1 shards".into()], rotation: 2, plan_timings: vec![("test:x".into(), 7.0)], sweep: true, stopping: true };
+        let run = CiRun { own_tests: true, lock_digest: "lock".into(), checkout: String::new(), id: "R1".into(), pair: pair('a'), dry: true, started_ms: 1, ended_ms: 2, verdict: "fail".into(), shards: vec![shard], critical: "node-b ends at 12 s".into(), fleet: "wall 12 s".into(), boxes: vec!["node-b 12 s busy, 1 shards".into()], slow: vec!["test:x 12 s on node-b: no step times in its log".into()], rotation: 2, plan_timings: vec![("test:x".into(), 7.0)], sweep: true, stopping: true };
         let mut ci = Ci { timings: vec![("jit:01".into(), 40.0)], run: None, sweep_run: Some(run.clone()), runs: vec![run].into(), rotation: 3 };
         ci.measured("jit:01", 20.0);
         ci.measured("test:x:lib", 5.0);

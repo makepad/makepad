@@ -67,6 +67,10 @@ pub(crate) fn legs(arm: bool) -> Vec<LegDef> {
     let mut legs = vec![
         LegDef::new("full-a", Kind::Test, "arch=x64,os=linux,role=pool", "NODEGATE", &["bash", "tools/run/fixture/land_gate.sh", "full-a"]),
         LegDef::new("full-b", Kind::Test, "arch=x64,os=linux,role=pool", "NODEGATE", &["bash", "tools/run/fixture/land_gate.sh", "full-b"]),
+        // the steps whose verdicts are times (a JIT spinner, first compiles, UI blocked ms): a timed
+        // lease, a bench box to itself. On a shared pool box beside 8 other leases (32-44 of its 32
+        // cores granted) full-a's warm_after_app_edit failed, every session twice as slow (11-05)
+        LegDef::new("warm", Kind::Timed, "arch=x64,os=linux", "NODEGATE", &["bash", "tools/run/fixture/land_gate.sh", "full-t"]),
         LegDef::new("arm64", Kind::Test, "arch=arm64,os=macos,rustc=1.97", "ARM64", &["bash", "tools/run/fixture/arm64_leg.sh", "--diff-fast"]),
         // makepad run's no-codegen mode (iOS's constraint: every function interpreted) on an arm64
         // Mac: diff_fast's nocodegen tier, agree.sh, app boots. Report-only until the Macs'
@@ -839,6 +843,27 @@ pub fn render(v: &makepad_strict_json::Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A leg whose verdict is a time runs where nothing else does: a timed lease (a bench box,
+    /// exclusive); the shared legs take none of its steps, and the three halves are full's steps.
+    #[test]
+    fn the_legs_whose_verdicts_are_times_run_timed() {
+        let defs = legs(false);
+        let warm = defs.iter().find(|d| d.argv.last().map(String::as_str) == Some("full-t")).expect("a full-t leg");
+        assert_eq!(warm.kind, Kind::Timed);
+        assert!(!warm.needs.contains("role="), "a bench box meets it: {}", warm.needs);
+        let gate = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/run/fixture/land_gate.sh")).unwrap();
+        let steps = |name: &str| gate.lines().find_map(|l| l.strip_prefix(&format!("{name}=\""))).map(|s| s.trim_end_matches('"').split_whitespace().map(str::to_string).collect::<Vec<_>>()).unwrap_or_else(|| panic!("no {name}"));
+        let (a, b, t) = (steps("STEPS_A"), steps("STEPS_B"), steps("STEPS_T"));
+        for timed in ["step_warm_app_edit", "step_warm_zero", "step_warm_hal", "step_inspect_cold", "step_relaunch"] {
+            assert!(t.iter().any(|s| s == timed) && !a.iter().chain(&b).any(|s| s == timed), "{timed} runs timed only");
+        }
+        let mut split: Vec<String> = a.into_iter().chain(b).chain(t).collect();
+        let mut full = steps("STEPS_FULL");
+        split.sort();
+        full.sort();
+        assert_eq!(split, full, "the three halves are full's steps");
+    }
 
     #[test]
     fn verdicts_follow_the_last_marker_line() {

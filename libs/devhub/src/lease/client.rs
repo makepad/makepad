@@ -23,7 +23,7 @@ fn eta(ms: u64) -> String {
 
 /// [`eta`] of a queued lease's row.
 fn eta_of(v: &Value) -> String {
-    if v.get("eta_late").and_then(Value::as_bool).unwrap_or(false) { return "; no expected start: what it waits on is past its estimate".into(); }
+    if v.get("eta_late").and_then(Value::as_bool).unwrap_or(false) { return format!("; no expected start: {}", s(v, "eta_late_by")); }
     eta(n(v, "eta_ms") as u64)
 }
 
@@ -43,7 +43,7 @@ fn timed_boxes(leases: &[Value]) -> Vec<String> {
             "queued" => {
                 let at = s(v, "eta_box");
                 let ms = n(v, "eta_ms") as u64;
-                let when = if v.get("eta_late").and_then(Value::as_bool).unwrap_or(false) { "behind a run past its estimate".to_string() } else if ms == 0 { "next".to_string() } else { format!("in ~{} min", eta_min(ms)) };
+                let when = if v.get("eta_late").and_then(Value::as_bool).unwrap_or(false) { s(v, "eta_late_by") } else if ms == 0 { "next".to_string() } else { format!("in ~{} min", eta_min(ms)) };
                 boxes.entry(if at.is_empty() { "(no box yet)".into() } else { at }).or_default().1.push((ms, format!("{who} {when}")));
             }
             "ended" => {}
@@ -68,7 +68,10 @@ pub const HELP: &str = "  lease <kind> [--node N|--needs k=v,..] [--lane L] [--p
                                           with a cmd: run it there and exit with its code. --node N: N or wait for
                                           it, never another box (refused, saying why, when N can never take it);
                                           --keep <dir>: what the cmd put in $DEVHUB_KEEP (a failed step's logs) is
-                                          copied into <dir> before the lease ends
+                                          copied into <dir> before the lease ends. $DEVHUB_YIELD: a file that appears
+                                          when a timed run is past twice its estimate while a timed ask waits on its
+                                          box (it says who); a timed series or bench checks it between steps and, once
+                                          it exists, stops after the current step with its partial results and releases
   run <lane> <kind> [--node N|--needs ..] [--with-uncommitted] [--tree]
         [--cost small|medium|large] [--est-min N] [--cores N] [--ram-gb N] [--whole]
         [--class name] [--priority interactive|background] [--jit key] [--native <reason>] -- cmd...
@@ -216,6 +219,9 @@ fn through_restarts<T>(id: &str, c: &mut Client, mut f: impl FnMut(&Client) -> R
         }
         match up() {
             Ok(fresh) => {
+                // the master's own link was cut and it answers at once: its restart in place (the
+                // dial waited on the socket it kept open), not the node
+                let cut = c.link_ended();
                 *c = fresh;
                 if down.is_some() && back.is_none() {
                     down = Some(Instant::now());
@@ -223,6 +229,11 @@ fn through_restarts<T>(id: &str, c: &mut Client, mut f: impl FnMut(&Client) -> R
                     continue;
                 }
                 match (down, back) {
+                    (None, _) if cut => {
+                        eprintln!("{id}: the master's link was cut; re-attaching");
+                        down = Some(Instant::now());
+                        back = Some(Instant::now());
+                    }
                     (None, _) if node_restarting(&e) => {
                         eprintln!("{id}: its node does not answer ({e}); its hub restarts? re-attaching when it is back");
                         down = Some(Instant::now());
@@ -536,6 +547,9 @@ fn acquire(c: &Client, req: &Req) -> Result<Held, i32> {
                 if req.kind == Kind::Timed && !deployment.is_empty() {
                     let short = deployment.split(',').map(|sha| &sha[..sha.len().min(10)]).collect::<Vec<_>>().join(",");
                     eprintln!("{id} timed@{}: runs on deployment {short}", s(&v, "node"));
+                }
+                if req.kind == Kind::Timed {
+                    eprintln!("{id}: between steps, check $DEVHUB_YIELD: it appears when this run is past twice its estimate while a timed ask waits on its box; then stop after the current step with what you have and release");
                 }
                 let start = v.get("start");
                 let env = match start.and_then(|st| st.get("env")) {

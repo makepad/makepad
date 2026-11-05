@@ -144,7 +144,8 @@ impl Master {
     pub fn start(name: &str, hitch_ms: f64, trust: Option<Arc<dyn Trust>>, on_record: OnRecord) -> Result<Arc<Master>, String> {
         // a second master stops before it starts anything (its landing train, its jobs): one
         // already serves the control socket
-        if Client::new(Target::Unix(proto::control_socket()), "probe").conn().is_ok() {
+        // (one this master's previous image kept open for it answers no probe: it queues the dial)
+        if !crate::node::control_kept() && Client::new(Target::Unix(proto::control_socket()), "probe").conn().is_ok() {
             return Err(format!("a devhub already serves {}", proto::control_socket().display()));
         }
         let niced = start_level()?;
@@ -273,21 +274,22 @@ impl Master {
             let proofs = Arc::new(crate::gateproof::Store::open(&home));
             let run = crate::bucket::fast(repo.clone(), home.clone(), proofs);
             let (s, o) = (sink.clone(), on_record.clone());
-            let timing = crate::bucket::Timing { every: Duration::ZERO, quiet: Duration::from_secs(60), cap: Duration::from_secs(10 * 60) };
+            let timing = crate::bucket::Timing::after(Duration::from_secs(60), Duration::from_secs(10 * 60));
             crate::bucket::spawn("fast", timing, repo.clone(), home.clone(), Arc::new(move |r: Record| {
                 s.emit(&r.to_json());
                 o(&r);
             }), run, |_| None);
             let run = crate::bucket::hot(repo.clone(), home.clone());
             let (s, o) = (sink.clone(), on_record.clone());
-            let timing = crate::bucket::Timing { every: Duration::ZERO, quiet: Duration::ZERO, cap: Duration::ZERO };
+            let timing = crate::bucket::Timing::after(Duration::ZERO, Duration::ZERO);
             crate::bucket::spawn("hot", timing, repo.clone(), home.clone(), Arc::new(move |r: Record| {
                 s.emit(&r.to_json());
                 o(&r);
             }), run, |_| None);
             let run = crate::orch::ci::regression(repo.clone());
             let (s, o) = (sink.clone(), on_record.clone());
-            let timing = crate::bucket::Timing { every: Duration::ZERO, quiet: Duration::from_secs(15 * 60), cap: Duration::from_secs(3 * 3600) };
+            // once a night, 02:00 on this Mac's clock, of the tip then (user, 11-05)
+            let timing = crate::bucket::Timing { every: Duration::ZERO, quiet: Duration::ZERO, cap: Duration::ZERO, daily: Some(2) };
             crate::bucket::spawn("ci", timing, repo, home.clone(), Arc::new(move |r: Record| {
                 s.emit(&r.to_json());
                 o(&r);
@@ -542,6 +544,85 @@ mod tests {
         };
         let names: Vec<String> = merge(&seeds, &heard, &identity).hosts.into_iter().map(|h| h.name).collect();
         assert_eq!(names, vec!["n1", "n2", "node-c"]);
+    }
+
+    /// The role of [`a_dial_during_the_masters_exec_waits_for_the_next_build`]: a master's control
+    /// socket whose "ping" names the image that answers. "before" execs into "after" as
+    /// `restart_master` does; "after" listens only once the test has dialed.
+    #[cfg(unix)]
+    #[test]
+    fn exec_role_master() {
+        let Ok(role) = std::env::var("DEVHUB_EXEC_ROLE") else { return };
+        let base = std::path::PathBuf::from(std::env::var_os("DEVHUB_EXEC_BASE").unwrap());
+        let wait_for = |f: &str| {
+            while !base.join(f).exists() {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        };
+        let hub = Hub::new(&Hosts::default());
+        let ep = hub.client_endpoint();
+        let me = role.clone();
+        ep.register("ping", 1, makepad_remote::lines::service("ping", Arc::new(move |_, out: &mut Vec<String>| out.push(me.clone()))));
+        if role == "after" {
+            std::fs::write(base.join("kept"), crate::node::control_kept().to_string()).unwrap();
+            std::fs::write(base.join("execd"), "").unwrap();
+            wait_for("dialed");
+        }
+        crate::node::listen_control(&ep).unwrap();
+        std::fs::write(base.join(format!("{role} listens")), "").unwrap();
+        if role == "before" {
+            wait_for("exec");
+            assert!(!crate::node::control_kept());
+            let mut cmd = crate::testenv::role("master::tests::exec_role_master", &base);
+            cmd.args(["--nocapture", "--test-threads=1"]).env("DEVHUB_EXEC_ROLE", "after");
+            crate::node::keep_control_over_exec(&mut cmd);
+            panic!("exec: {}", std::os::unix::process::CommandExt::exec(&mut cmd));
+        }
+        wait_for("done");
+    }
+
+    /// The control socket's listener stays open over the master's exec into its next build: a dial
+    /// while that build starts queues and is answered by it, where the closed socket refused it
+    /// and every lease holder said "master not reachable: waiting" (11-05).
+    #[cfg(unix)]
+    #[test]
+    fn a_dial_during_the_masters_exec_waits_for_the_next_build() {
+        let base = std::env::temp_dir().join(format!("devhub-exec-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let log = base.join("role.log");
+        let mut role = crate::testenv::role("master::tests::exec_role_master", &base);
+        role.args(["--nocapture", "--test-threads=1"]).env("DEVHUB_EXEC_ROLE", "before").env("DEVHUB_EXEC_BASE", &base).env("MAKEPAD_HOME", base.join("home")).env_remove("DEVHUB_CONTROL_FD");
+        let mut child = role.stdin(std::process::Stdio::null()).stdout(std::fs::File::create(&log).unwrap()).stderr(std::process::Stdio::from(std::fs::File::options().append(true).open(&log).unwrap())).spawn().unwrap();
+        let mut wait_for = |f: &str| {
+            while !base.join(f).exists() {
+                if let Some(st) = child.try_wait().unwrap() {
+                    panic!("the role ended ({st}) before {f}: {}", std::fs::read_to_string(&log).unwrap_or_default());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        };
+        let sock = base.join("home/devhub/devhub.sock");
+        let ask = {
+            let sock = sock.clone();
+            move || crate::cli::ask(&Client::new(Target::Unix(sock.clone()), "exec-test"), None, "ping", "ping")
+        };
+        wait_for("before listens");
+        assert_eq!(ask().unwrap(), vec!["before".to_string()]);
+        std::fs::write(base.join("exec"), "").unwrap();
+        // the next build runs and does not listen yet: it waits for "dialed"
+        wait_for("execd");
+        let queued = std::os::unix::net::UnixStream::connect(&sock);
+        assert!(queued.is_ok(), "a dial during the exec was refused: {:?}", queued.err());
+        assert_eq!(std::fs::read_to_string(base.join("kept")).unwrap(), "true", "the next build has the listener");
+        let answer = std::thread::spawn(ask.clone());
+        std::fs::write(base.join("dialed"), "").unwrap();
+        assert_eq!(answer.join().unwrap().unwrap(), vec!["after".to_string()]);
+        wait_for("after listens");
+        std::fs::write(base.join("done"), "").unwrap();
+        drop(queued);
+        assert!(child.wait().unwrap().success(), "{}", std::fs::read_to_string(&log).unwrap_or_default());
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// The open fds of this process.

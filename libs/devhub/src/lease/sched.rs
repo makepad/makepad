@@ -108,6 +108,8 @@ const BOX_IDLE_LOAD: f64 = 0.5;
 
 /// How long a box stays near idle under a lease, with someone queued on it, before that is said.
 const HOLDER_IDLE_MS: u64 = 600_000;
+/// A timed run is told to yield ([`Sched::say_overruns`]) a minute in at the earliest.
+const OVERRUN_MIN_MS: u64 = 60_000;
 /// The idle verdict as its reader sees it: the inbox and the lease's owner read the same words.
 fn idle_line(l: &Lease, node: &str, quiet_ms: u64) -> String {
     format!("{} of {} on {node}: every process idle (under {}% of a core, no I/O) for {}: hung? `devhub cancel {}` frees the box", l.tag(), l.req.lane, super::exec::IDLE_CPU_PCT, dur(quiet_ms), l.id)
@@ -518,6 +520,11 @@ fn wall_measure(walls: &VecDeque<u64>) -> Option<u64> {
     Some(median.max((p90 as u128 * 7 / 10) as u64))
 }
 
+/// How long a run of `cost` is taken to run when nothing else says ([`Sched::run_ms`]).
+fn guess_ms(cost: CostClass) -> u64 {
+    match cost { CostClass::Small => 30_000, CostClass::Medium => 300_000, CostClass::Large => 1_200_000 }
+}
+
 /// The evidence used at placement; retained with the grant.
 #[derive(Clone, Copy, Debug)]
 pub enum CostSource { Measured(u64), Asked, Kind }
@@ -546,6 +553,8 @@ pub struct Lease {
     pub cost_class: CostClass,
     pub cost_source: CostSource,
     class_notified: bool,
+    /// What a timed ask is told when nothing says how long it runs ([`Sched::guess_note`])
+    guess_note: String,
     /// Effective priority, frozen when granted.
     pub priority: Priority,
     pub asked_ms: u64,
@@ -560,6 +569,8 @@ pub struct Lease {
     pub eta_ms: u64,
     /// It waits behind a run past its estimate: no start can be told ([`Sched::behind_overrun`]).
     pub eta_late: bool,
+    /// that run, said: who, how far into what estimate (empty: not late)
+    pub eta_late_by: String,
     /// the box that wait is for
     pub eta_box: Option<String>,
     warned: bool,
@@ -575,7 +586,8 @@ pub struct Lease {
     /// what its runs wrote so far (`info`'s `out_bytes`), and when a beat last found it grown
     out_bytes: u64,
     out_grew_ms: Option<u64>,
-    /// since when a granted gate lease runs nothing (`info`'s `running` empty)
+    /// since when a granted gate lease runs nothing (`info`'s `running` empty): the last tick it
+    /// ran something, else its grant
     idle_since: Option<u64>,
     hold_until: Option<u64>,
     /// since when it first waited for a busy box that holds its dev JIT while a box without it
@@ -604,7 +616,9 @@ pub struct Lease {
 
 impl Lease {
     fn class_note(&self) -> String {
-        if matches!(self.cost_source, CostSource::Measured(_)) && self.cost_class != self.req.asked_cost() {
+        if !self.guess_note.is_empty() {
+            self.guess_note.clone()
+        } else if matches!(self.cost_source, CostSource::Measured(_)) && self.cost_class != self.req.asked_cost() {
             format!("class {} {}: {}", self.req.class(), self.cost_source.label(), self.cost_class.as_str())
         } else { String::new() }
     }
@@ -637,7 +651,7 @@ impl Lease {
             _ => "null".into(),
         };
         format!(
-            "{{\"id\":{},\"deployment\":{},\"lane\":{},\"kind\":\"{}\",\"cost\":\"{}\",\"cost_source\":{},\"measured_ms\":{},\"class_note\":{},\"src\":\"{}\",\"class\":{},\"state\":\"{}\",\"node\":{},\"addr\":{},\"pos\":{},\"reason\":{},\"eta_ms\":{},\"eta_late\":{},\"eta_box\":{},\"prio\":{},\"priority\":\"{}\",\"wait_s\":{},\"how\":{},\"jit\":{},\"loader\":{},\"agent\":{},\"beat_s\":{},\"granted_s\":{},\"info\":{},\"start\":{}}}",
+            "{{\"id\":{},\"deployment\":{},\"lane\":{},\"kind\":\"{}\",\"cost\":\"{}\",\"cost_source\":{},\"measured_ms\":{},\"class_note\":{},\"src\":\"{}\",\"class\":{},\"state\":\"{}\",\"node\":{},\"addr\":{},\"pos\":{},\"reason\":{},\"eta_ms\":{},\"eta_late\":{},\"eta_late_by\":{},\"eta_box\":{},\"prio\":{},\"priority\":\"{}\",\"wait_s\":{},\"how\":{},\"jit\":{},\"loader\":{},\"agent\":{},\"beat_s\":{},\"granted_s\":{},\"info\":{},\"start\":{}}}",
             json_str(&self.id),
             json_str(&self.deployment),
             json_str(&self.req.lane),
@@ -655,6 +669,7 @@ impl Lease {
             json_str(&self.reason),
             self.eta_ms,
             self.eta_late,
+            json_str(&self.eta_late_by),
             opt(&self.eta_box),
             self.req.prio,
             self.priority.as_str(),
@@ -755,6 +770,8 @@ pub enum Action {
     /// a stalled lease's JITs capture their state on its node (`lease-jits`, then each one's
     /// `capture why=..`): the cause and the report's path go to the inbox
     Capture { id: String, node: String, why: String },
+    /// its node makes the lease's `$DEVHUB_YIELD` file, `why` in it (`lease-yield`)
+    Yield { id: String, node: String, why: String },
     Event(Record),
     /// Box state is sampled every tick; equal samples extend the durable live interval.
     Profile { closed: String, live: String, seq: u64 },
@@ -1119,6 +1136,8 @@ pub struct Sched {
     box_idle_since: HashMap<String, u64>,
     /// Running leases already said to hold a near idle box someone waits on ([`Sched::say_idle_holders`]).
     idle_said: HashSet<String>,
+    /// Running timed leases told to yield their box ([`Sched::say_overruns`]): what they were told
+    yielded: HashMap<String, String>,
     out: Vec<Action>,
     pub lane_cap: u32,
     /// lanes and agents the user evicted: no new leases until unblocked
@@ -1277,6 +1296,7 @@ impl Sched {
             stalled: HashMap::new(),
             box_idle_since: HashMap::new(),
             idle_said: HashSet::new(),
+            yielded: HashMap::new(),
             out: Vec::new(),
             lane_cap: LANE_CAP,
             blocked: Vec::new(),
@@ -1360,7 +1380,18 @@ impl Sched {
     /// makepad-foo` that declared 25 min, its row at 11m50s, was called stalled against 1m23s of
     /// smaller runs on its box, and the lease behind it read "~2 min" for 11 min (11-04).
     fn run_ms(&self, l: &Lease) -> u64 {
-        l.req.declared_ms().or_else(|| self.measured_ms(l)).unwrap_or(match l.req.asked_cost() { CostClass::Small => 30_000, CostClass::Medium => 300_000, CostClass::Large => 1_200_000 })
+        l.req.declared_ms().or_else(|| self.measured_ms(l)).unwrap_or_else(|| guess_ms(l.req.asked_cost()))
+    }
+
+    /// What a timed ask is told at its ask when nothing says how long it runs (no --est-min, its
+    /// class not measured yet): the asks behind it count on its cost's guess, and the queue calls
+    /// it late only past that. Said, never refused: 184 of 505 timed runs (11-03..05) ran on that
+    /// guess, and 7 of the 11 that ran past twice their estimate.
+    fn guess_note(&self, req: &Req) -> String {
+        let measured = self.walls.get(&(req.class().to_string(), req.kind.as_str().to_string())).and_then(|w| wall_measure(w)).is_some();
+        if req.kind != Kind::Timed || req.live || req.declared_ms().is_some() || measured { return String::new(); }
+        let cost = req.asked_cost();
+        format!("no --est-min and class {} not measured yet: the asks behind it count on {} (its cost {}'s guess); --est-min N tells them", req.class(), dur(guess_ms(cost)), cost.as_str())
     }
 
     /// The same run when choosing between boxes: a box's own walls say which is faster for it.
@@ -1568,6 +1599,7 @@ impl Sched {
         self.seq += 1;
         let running = self.leases.iter().filter(|l| l.state.live() && l.req.lane == req.lane && l.req.kind == req.kind).count() as u32;
         let (cost_class, cost_source) = self.classify(&req);
+        let guess_note = self.guess_note(&req);
         let asked_ms = req.since_ms.map_or(now, |t| t.min(now));
         let l = Lease {
             id: id.clone(),
@@ -1575,6 +1607,7 @@ impl Sched {
             cost_class,
             cost_source,
             class_notified: false,
+            guess_note,
             priority: req.priority,
             asked_ms,
             req,
@@ -1587,6 +1620,7 @@ impl Sched {
             reason: String::new(),
             eta_ms: 0,
             eta_late: false,
+            eta_late_by: String::new(),
             eta_box: None,
             warned: false,
             start: String::new(),
@@ -1997,6 +2031,7 @@ impl Sched {
             cost_class: v.get("cost").and_then(|v| v.as_str()).and_then(CostClass::parse).unwrap_or_else(|| req.asked_cost()),
             cost_source: v.get("measured_ms").and_then(|v| v.as_u64()).map(CostSource::Measured).unwrap_or_else(|| CostSource::fallback(&req)),
             class_notified: true,
+            guess_note: String::new(),
             asked_ms: v.get("asked_ms").and_then(|v| v.as_u64()).or(req.since_ms).unwrap_or_else(|| v.get("granted_ms").and_then(|v| v.as_u64()).unwrap_or(now)),
             priority: req.priority,
             req,
@@ -2009,6 +2044,7 @@ impl Sched {
             reason: String::new(),
             eta_ms: 0,
             eta_late: false,
+            eta_late_by: String::new(),
             eta_box: None,
             warned: false,
             start: v.get("start").and_then(|x| x.as_str()).unwrap_or("").to_string(),
@@ -2570,6 +2606,31 @@ impl Sched {
         }
     }
 
+    /// A running timed lease past twice its estimate (a minute at least) while a timed ask waits on
+    /// its box is told to yield, once: an inbox warning, its owner's `job wait` woken and its beat
+    /// told ([`Self::owner_word`]), and its node makes its `$DEVHUB_YIELD` file
+    /// ([`super::YIELD_FILE`]), so a series or bench that checks it between steps stops after the
+    /// current one with what it has and releases. Its output may grow: a bench at twice its
+    /// guessed 20 min wrote on while two timed asks waited 21 min behind it and its owner sat in
+    /// `job wait` (11-05). Never a kill: only the run knows where its steps end.
+    fn say_overruns(&mut self, now: u64) {
+        let said: Vec<(String, String, String)> = self.leases.iter().filter(|h| h.state == State::Granted && h.req.kind == Kind::Timed && !self.yielded.contains_key(&h.id) && !self.is_live_job(h)).filter_map(|h| {
+            let node = h.node.as_deref()?;
+            let ran = now.saturating_sub(h.granted_ms?);
+            if ran < (2 * self.run_ms(h)).max(OVERRUN_MIN_MS) { return None; }
+            let on_it = |q: &&Lease| q.state == State::Queued && q.req.kind == Kind::Timed && (names_lease(&q.reason, &h.id) || q.eta_box.as_deref() == Some(node) || q.req.node.as_deref() == Some(node));
+            let waiting: Vec<String> = self.leases.iter().filter(on_it).map(|q| format!("{} of {}", q.id, q.req.lane)).collect();
+            if waiting.is_empty() { return None; }
+            Some((h.id.clone(), node.to_string(), format!("{} of {} on {node}: {} into its {}, while timed {} wait{} on its box: its $DEVHUB_YIELD file now exists; stop after the current step with what you have and release, or `devhub cancel {}`", h.tag(), h.req.lane, dur(ran), self.estimate_said(h), waiting.join(", "), if waiting.len() == 1 { "s" } else { "" }, h.id)))
+        }).collect();
+        for (id, node, word) in said {
+            let l = self.get(&id).cloned();
+            self.event(Sev::Warn, word.clone(), l.as_ref());
+            self.out.push(Action::Yield { id: id.clone(), node, why: word.clone() });
+            self.yielded.insert(id, word);
+        }
+    }
+
     /// A CI leg whose every process did nothing for [`QUIET_STALL_MS`] ends as a failure once its
     /// stall's capture had its time: nobody drives a leg, nothing wakes a parked JIT, and it holds
     /// its tree's one lease (one hung test held all of Windows CI for 30 min, 11-04). The verdict
@@ -2667,7 +2728,14 @@ impl Sched {
             cores += hub.cores;
             ram += hub.ram_gb;
         }
-        if cores > c.cores as f64 { return Err(format!("{name}: budget cores {}, in use {:.0}, asked {:.0}", c.cores, cores - l.cost.cores, l.cost.cores)); }
+        // its own idle use is in the box's measure: what it is charged comes off it
+        let others = self.live_on_node(name, id).next().is_some();
+        let (in_use, measured) = self.cores_in_use(name, cores - l.cost.cores + self.charged(l).cores, others);
+        let in_use = in_use - self.charged(l).cores;
+        if in_use + l.cost.cores > c.cores as f64 {
+            let how = if measured { " (the box measured busy)" } else { "" };
+            return Err(format!("{name}: budget cores {}, in use {in_use:.0}{how}, asked {:.0}", c.cores, l.cost.cores));
+        }
         let budget = l.req.ram_budget(c);
         if ram > budget { return Err(format!("{name}: budget ram {budget:.1} GB, in use {:.1} GB, asked {:.1} GB ({})", ram - l.cost.ram_gb, l.cost.ram_gb, l.req.ram_budget_why(c))); }
         Ok(())
@@ -2823,10 +2891,15 @@ impl Sched {
         }
         let hub = hub.map_or(String::new(), |h| format!("; its hub builds: {:.0} cores, {:.1} GB", h.cores, h.ram_gb));
         let blockers = || { let mut ids: Vec<_> = held.iter().map(|(id, _)| (*id).clone()).collect(); ids.sort(); ids };
-        for (what, have, total, add) in [("cores", used.cores, c.cores as f64, cost.cores), ("ram", used.ram_gb, l.req.ram_budget(c), cost.ram_gb), ("gpu", used.gpus as f64, c.gpus.len() as f64, cost.gpus as f64)] {
+        // (parking `removed` frees what they were charged: the box's measure still holds their use)
+        let (in_use, measured) = self.cores_in_use(name, used.cores, running && removed.is_empty() && !held.is_empty());
+        let measured = if measured { format!(" (the box measured busy; charged {:.0})", used.cores) } else { String::new() };
+        for (what, have, total, add) in [("cores", in_use, c.cores as f64, cost.cores), ("ram", used.ram_gb, l.req.ram_budget(c), cost.ram_gb), ("gpu", used.gpus as f64, c.gpus.len() as f64, cost.gpus as f64)] {
             if have + add > total {
                 let reason = if what == "ram" {
                     format!("budget ram {total:.1} GB, in use {have:.1} GB, asked {add:.1} GB ({}){hub}", l.req.ram_budget_why(c))
+                } else if what == "cores" {
+                    format!("budget cores {total:.0}, in use {have:.0}{measured}, asked {add:.0}{hub}")
                 } else {
                     format!("budget {what} {total:.0}, in use {have:.0}, asked {add:.0}{hub}")
                 };
@@ -2838,6 +2911,22 @@ impl Sched {
             return Err(Block { reason: format!("disk floor: {free:.0} GB free, needs {:.0}, floor {:.0}", cost.disk_gb, c.disk_floor_gb), blockers: blockers(), disk: true });
         }
         Ok(())
+    }
+
+    /// The cores a box's running work takes: what it was charged, or what the box measured busy
+    /// (its CPU use at its last look) when that is more: a live session charged its idle share and
+    /// busy all the same, a build past its -j, the box's own services. No box is granted past its
+    /// cores: oversubscribing adds no throughput, slows every lease there and makes a timing
+    /// verdict flaky (a jitlegs leg failed beside 44 granted cores of 32, charged 31 with three
+    /// live sessions at their idle share, 11-05). `others`: work runs there; an empty box takes
+    /// what fits its cores whatever its own services use, or a box whose resident runs hot never
+    /// takes a lease. Whether the measure decided it.
+    fn cores_in_use(&self, name: &str, charged: f64, others: bool) -> (f64, bool) {
+        let measured = self.nodes[name].caps.as_ref().filter(|_| others).and_then(|c| c.cpu_pct.map(|p| p / 100.0 * c.cores as f64));
+        match measured {
+            Some(m) if m > charged => (m, true),
+            _ => (charged, false),
+        }
     }
 
     /// Exclusive requests drain in this order: bumped first, then interactive before background,
@@ -2860,12 +2949,31 @@ impl Sched {
         Some((name, wait))
     }
 
-    /// Whether `l` waits on `name` behind a run past its estimate. [`Self::remaining_ms`] counts
-    /// such a run as starting over, which serves placing work; told to the asker, the same "~20
-    /// min" stood for 2 h behind a hung lease (11-05).
-    fn behind_overrun(&self, name: &str, l: &Lease) -> bool {
-        let Some(c) = self.nodes[name].caps.as_ref() else { return false };
-        self.live_on_node(name, &l.id).any(|r| !self.is_live_job(r) && l.req.conflicts_on(&r.req, c.role()) && self.clock.saturating_sub(r.granted_ms.unwrap_or(self.clock)) >= self.run_ms(r))
+    /// What `l` waits behind on `name` past its estimate, said: the run furthest past it, who
+    /// holds it, how far into which estimate (`behind L1 timed@node-c of lane (AGENT), 41m30s into
+    /// its 20m00s (a guess from its cost large: ...)`). [`Self::remaining_ms`] counts such a run as
+    /// starting over, which serves placing work; told to the asker, the same "~20 min" stood for
+    /// 2 h behind a hung lease (11-05), and "past its estimate" alone named no one while two timed
+    /// leases waited 21 min behind a benchmark that ran twice its guessed 20 (11-05).
+    fn behind_overrun(&self, name: &str, l: &Lease) -> Option<String> {
+        let c = self.nodes[name].caps.as_ref()?;
+        let ran = |r: &Lease| self.clock.saturating_sub(r.granted_ms.unwrap_or(self.clock));
+        let r = self.live_on_node(name, &l.id).filter(|r| !self.is_live_job(r) && l.req.conflicts_on(&r.req, c.role()) && ran(r) >= self.run_ms(r)).max_by_key(|r| ran(r) - self.run_ms(r))?;
+        let agent = r.req.agent.as_deref().map_or(String::new(), |a| format!(" ({a})"));
+        Some(format!("behind {} of {}{agent}, {} into its {}", r.tag(), r.req.lane, dur(ran(r)), self.estimate_said(r)))
+    }
+
+    /// [`Self::run_ms`] and where it comes from, said: `20m00s (a guess from its cost large: no
+    /// --est-min, its class not measured yet)`.
+    fn estimate_said(&self, l: &Lease) -> String {
+        let from = if l.req.declared_ms().is_some() {
+            "its --est-min".to_string()
+        } else if self.measured_ms(l).is_some() {
+            "its class's measure".to_string()
+        } else {
+            format!("a guess from its cost {}: no --est-min, its class not measured yet", l.req.asked_cost().as_str())
+        };
+        format!("{} ({from})", dur(self.run_ms(l)))
     }
 
     /// Work that can coexist with the reservation's owner never waits for that reservation.
@@ -3108,10 +3216,11 @@ impl Sched {
         })
     }
 
-    /// The idle verdict on a running lease as it stands now, for whoever owns it.
-    pub fn idle_word(&self, id: &str) -> Option<String> {
+    /// What a running lease's owner is to hear as it stands now: its idle verdict, else its yield
+    /// ([`Self::say_overruns`]).
+    pub fn owner_word(&self, id: &str) -> Option<String> {
         let l = self.get(id).filter(|l| l.state == State::Granted)?;
-        Some(idle_line(l, l.node.as_deref()?, self.quiet_ms(l)?))
+        self.quiet_ms(l).and_then(|q| Some(idle_line(l, l.node.as_deref()?, q))).or_else(|| self.yielded.get(id).cloned())
     }
 
     fn park_live(&self, l: &Lease) -> Option<Action> {
@@ -3423,10 +3532,11 @@ impl Sched {
     /// Expires silent holders, places what fits, recomputes positions and reasons; the actions
     /// for the master (grants, ends, reclaims, one event per change).
     pub fn tick(&mut self, now: u64) -> Vec<Action> {
-        { let live: HashSet<&String> = self.leases.iter().filter(|l| l.state.live()).map(|l| &l.id).collect(); self.live_idle.retain(|id| live.contains(id)); self.idle_said.retain(|id| live.contains(id)); self.parking_ram.retain(|id| live.contains(id)); self.stalled.retain(|id, _| live.contains(id)); }
+        { let live: HashSet<&String> = self.leases.iter().filter(|l| l.state.live()).map(|l| &l.id).collect(); self.live_idle.retain(|id| live.contains(id)); self.idle_said.retain(|id| live.contains(id)); self.yielded.retain(|id, _| live.contains(id)); self.parking_ram.retain(|id| live.contains(id)); self.stalled.retain(|id, _| live.contains(id)); }
         self.end_hung_legs(now);
         self.say_stalled(now);
         self.say_idle_holders(now);
+        self.say_overruns(now);
         // Close the previous tick's wait interval once, before placement can grant or end it.
         for l in &mut self.leases { l.sample_queue(now); }
         self.clock = now;
@@ -3442,8 +3552,10 @@ impl Sched {
         let mut idle = Vec::new();
         for l in self.leases.iter_mut().filter(|l| l.req.kind == Kind::Gate && l.state.live()) {
             let running = makepad_strict_json::parse(l.info.as_bytes()).ok().and_then(|v| v.get("running").and_then(|r| r.as_str()).map(|r| !r.is_empty())).unwrap_or(false);
+            // from the last tick it ran something: a 21 min run counted from its grant was "10 min
+            // idle" the moment it ended, and its lease went before its holder could release it (11-05)
             if running {
-                l.idle_since = None;
+                l.idle_since = Some(now);
                 continue;
             }
             let since = *l.idle_since.get_or_insert(l.granted_ms.unwrap_or(now));
@@ -3590,10 +3702,11 @@ impl Sched {
             let p = per_kind.entry(self.leases[i].req.kind).or_insert(0);
             *p += 1;
             let (eta_box, eta) = if self.leases[i].req.exclusive() { self.eta(&self.leases[i]).map_or((None, 0), |(n, ms)| (Some(n), ms)) } else { (None, 0) };
-            let late = eta_box.as_deref().is_some_and(|n| self.behind_overrun(n, &self.leases[i]));
+            let late = eta_box.as_deref().and_then(|n| self.behind_overrun(n, &self.leases[i]));
             let l = &mut self.leases[i];
-            l.eta_ms = if late { 0 } else { eta };
-            l.eta_late = late;
+            l.eta_ms = if late.is_some() { 0 } else { eta };
+            l.eta_late = late.is_some();
+            l.eta_late_by = late.unwrap_or_default();
             l.eta_box = eta_box;
             // Keep attribution from the final pass, even when the displayed reason is unchanged.
             l.queue_boxes = boxes;
@@ -3617,7 +3730,8 @@ impl Sched {
             let line = if warn && upkeep {
                 format!("{} for {} waiting {}, the box's next JIT, a background build; a lease that needs it sooner builds it: {} in queue ({})", l.tag(), l.req.lane, dur(now.saturating_sub(l.asked_ms)), ordinal(l.pos), l.reason)
             } else if warn {
-                format!("{} for {} waiting {}: {} in queue ({})", l.tag(), l.req.lane, dur(now.saturating_sub(l.asked_ms)), ordinal(l.pos), l.reason)
+                let late = if l.eta_late { format!("; no expected start: {}", l.eta_late_by) } else { String::new() };
+                format!("{} for {} waiting {}: {} in queue ({}){late}", l.tag(), l.req.lane, dur(now.saturating_sub(l.asked_ms)), ordinal(l.pos), l.reason)
             } else {
                 format!("{} for {}: {} in queue ({})", l.tag(), l.req.lane, ordinal(l.pos), l.reason)
             };
@@ -4285,7 +4399,50 @@ mod tests {
         s.tick(past);
         let waits = s.get(&timed).unwrap();
         assert!(waits.eta_late && waits.eta_ms == 0, "past it: none is ({}, {})", waits.eta_late, waits.eta_ms);
+        assert_eq!(waits.eta_late_by, format!("behind {running} timed@node-c of holder, {} into its {} (a guess from its cost large: no --est-min, its class not measured yet)", dur(past), dur(past - 1)), "the run past its estimate is named, with how far and what estimate");
+        assert!(waits.state_line(past, "").contains(&format!("\"eta_late_by\":{}", json_str(&waits.eta_late_by))), "its row carries it to the asker");
         assert_eq!(super::super::prof::blocker("the box fell over 30 min behind and catches up first (its deployment moves to abc): timed work starts after it"), "box catches up");
+    }
+
+    #[test]
+    fn a_timed_ask_nothing_estimates_is_told_its_costs_guess_at_its_ask() {
+        let mut s = sched(&[("node-c", caps(16, 64.0, Role::Bench))]);
+        let guessed = s.request(req("bench", Kind::Timed, Some("node-c")), 0);
+        let l = s.get(&guessed).unwrap();
+        assert_eq!(l.class_note(), format!("no --est-min and class timed not measured yet: the asks behind it count on {} (its cost large's guess); --est-min N tells them", dur(s.run_ms(l))));
+        assert!(l.state_line(0, "").contains("--est-min N tells them"), "its row carries it to the asker");
+        let mut declared = req("bench", Kind::Timed, Some("node-c"));
+        declared.est_min = Some(5.0);
+        let declared = s.request(declared, 0);
+        s.walls.entry(("timed".into(), "timed".into())).or_default().push_back(60_000);
+        let measured = s.request(req("bench", Kind::Timed, Some("node-c")), 0);
+        let test = s.request(req("t", Kind::Test, Some("node-c")), 0);
+        for id in [declared, measured, test] {
+            assert_eq!(s.get(&id).unwrap().class_note(), "", "{id}: a declared or measured run, or no timed one, is told nothing");
+        }
+    }
+
+    #[test]
+    fn a_timed_run_past_twice_its_estimate_with_a_timed_ask_on_its_box_is_told_to_yield_once() {
+        let mut s = sched(&[("node-c", caps(16, 64.0, Role::Bench))]);
+        let mut r = req("bench", Kind::Timed, Some("node-c"));
+        r.est_min = Some(5.0);
+        let running = s.request(r, 0);
+        grants(&s.tick(0));
+        s.started(&running, "{}");
+        let yields = |a: &[Action]| a.iter().filter_map(|a| match a { Action::Yield { id, node, why } => Some((id.clone(), node.clone(), why.clone())), _ => None }).collect::<Vec<_>>();
+        let twice = 10 * 60_000;
+        beat_all(&mut s, twice);
+        assert!(yields(&s.tick(twice)).is_empty(), "nobody waits on its box: its run is its own business");
+        let waiting = s.request(req("other", Kind::Timed, Some("node-c")), twice);
+        beat_all(&mut s, twice + 1);
+        let a = s.tick(twice + 1);
+        let y = yields(&a);
+        assert_eq!(y.iter().map(|(id, node, _)| (id.as_str(), node.as_str())).collect::<Vec<_>>(), vec![(running.as_str(), "node-c")], "{a:?}");
+        assert!(y[0].2.contains(&format!("10m00s into its 5m00s (its --est-min), while timed {waiting} of other waits on its box: its $DEVHUB_YIELD file now exists")), "{}", y[0].2);
+        assert_eq!(s.owner_word(&running).as_deref(), Some(y[0].2.as_str()), "its job wait and its beat hear it");
+        beat_all(&mut s, twice + 2);
+        assert!(yields(&s.tick(twice + 2)).is_empty(), "said once");
     }
 
     #[test]
@@ -4871,9 +5028,9 @@ mod tests {
         beat_all(&mut s, 659_000);
         s.tick(659_000);
         assert_eq!(state(&s, &leg).0, "granted", "the capture has its minute");
-        assert!(s.idle_word(&lane).is_some_and(|w| w.contains("every process idle") && w.contains("10m00s")), "its owner hears it");
+        assert!(s.owner_word(&lane).is_some_and(|w| w.contains("every process idle") && w.contains("10m00s")), "its owner hears it");
         s.set_info(&woke, r#"{"idle_s":0}"#, 0);
-        assert_eq!(s.idle_word(&woke), None, "it works again");
+        assert_eq!(s.owner_word(&woke), None, "it works again");
         beat_all(&mut s, 660_000);
         s.tick(660_000);
         assert_eq!(state(&s, &leg), ("ended hung".to_string(), "every process idle (under 5% of a core, no I/O) for 10m00s".to_string()));
@@ -5229,6 +5386,14 @@ mod tests {
         s.tick(GATE_IDLE_MS + 6);
         assert_eq!(state(&s, &land).0, "starting", "the landing takes the freed box first");
         assert_eq!(state(&s, &late).0, "queued");
+        // a run longer than the idle limit: idle from its end, not from the grant
+        s.set_info(&lanes[0], r#"{"running":""}"#, 0);
+        beat_all(&mut s, GATE_IDLE_MS + 7);
+        s.tick(GATE_IDLE_MS + 7);
+        assert_eq!(state(&s, &lanes[0]).0, "starting", "its run just ended");
+        beat_all(&mut s, 2 * GATE_IDLE_MS + 8);
+        s.tick(2 * GATE_IDLE_MS + 8);
+        assert_eq!(state(&s, &lanes[0]).0, "ended idle", "idle for the limit since its run");
     }
     /// `--needs gui`: a test lease that opens windows goes only to nodes that present (screen
     /// slots above 0); a box at slots.screen=0 takes none, plain test leases still go there.
@@ -6162,6 +6327,32 @@ mod tests {
         let timed = s.request(req("bench", Kind::Timed, None), 3);
         s.tick(3);
         assert_eq!(node_of(&s, &timed).as_deref(), Some("b"));
+    }
+
+    /// No box is granted past its cores: what its running work was charged, or what the box
+    /// measured busy when that is more (live sessions at their idle share, busy all the same). A
+    /// lease that finds every box full queues and says why; an empty box takes a lease whatever
+    /// its own services use.
+    #[test]
+    fn a_box_is_never_granted_past_its_cores_as_measured() {
+        let mut busy = caps(16, 64.0, Role::Pool);
+        busy.cpu_pct = Some(90.0);
+        let mut s = sched(&[("a", busy.clone())]);
+        let overlay = |lane: &str| {
+            let mut r = req(lane, Kind::Test, None);
+            r.src = Src::Overlay;
+            r.rev = Some(format!("work@{}", "a".repeat(40)));
+            r
+        };
+        let first = s.request(overlay("one"), 0);
+        assert_eq!(grants(&s.tick(0)), vec![first.clone()], "an empty box: its own use is no lease's");
+        // charged 4 of 16, measured 14.4: one more test's 4 would pass its 16
+        let second = s.request(overlay("two"), 1);
+        assert!(grants(&s.tick(1)).is_empty());
+        assert_eq!(state(&s, &second), ("queued".to_string(), "budget cores 16, in use 14 (the box measured busy; charged 4), asked 4".to_string()));
+        busy.cpu_pct = Some(50.0);
+        s.set_caps("a", busy, 2);
+        assert_eq!(grants(&s.tick(2)), vec![second], "8 measured and 4 asked fit");
     }
 
     /// Busy nodes wait; after pressure clears the warm and longest-idle preferences apply.

@@ -61,7 +61,7 @@ fn with_load(answer: String, load: impl FnOnce() -> Option<(f64, f64)>) -> Strin
     }
 }
 
-pub const WORDS: &[&str] = &["overlay-selftest", "overlay-status", "overlay-why", "lease-start", "lease-run", "lease-log", "lease-end", "lease-beat", "lease-jits", "lease-kill", "lease-why", "ship-have", "ship-put", "ship-link", "ship-done", "lease-owns", "hub-restart", "service-restart", "service-health", "get-ls", "get-read", "policy", "lease-conf", "caps", "disk", "heap", "recover-get", "recover-del"];
+pub const WORDS: &[&str] = &["overlay-selftest", "overlay-status", "overlay-why", "lease-start", "lease-run", "lease-log", "lease-end", "lease-beat", "lease-jits", "lease-yield", "lease-kill", "lease-why", "ship-have", "ship-put", "ship-link", "ship-done", "lease-owns", "hub-restart", "service-restart", "service-health", "get-ls", "get-read", "policy", "lease-conf", "caps", "disk", "heap", "recover-get", "recover-del"];
 
 /// Marks every process a lease's runs start ([`lease_mark`]): a process that moved to its own session (a
 /// WM's apps, a detached helper) is still stopped with the lease. One that outlives its lease on
@@ -112,6 +112,17 @@ impl Default for Opts {
     }
 }
 
+/// A launch started as a lease's run ([`Exec::launch`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Launched {
+    /// its run's number in the lease
+    pub n: u32,
+    /// its process group's leader: the run's wrapper, what its stop signals
+    pub leader: u32,
+    /// the app's process (a JIT announces itself with it)
+    pub app: u32,
+}
+
 struct Run {
     request: String,
     started_ms: u64,
@@ -136,6 +147,8 @@ struct Run {
     /// Protect overlay caches until the waiter sees this run exit, not until lease release.
     cache: Mutex<Option<std::fs::File>>,
     usage: Mutex<Usage>,
+    /// stopped on purpose, on its own (a launch's `stop`): its end is no abnormal one
+    stopped: AtomicBool,
 }
 
 #[derive(Default)]
@@ -391,7 +404,7 @@ impl Lease {
         }
         let runs = v.get("runs").and_then(|x| x.as_arr()).map_or_else(Vec::new, |a| {
             a.iter()
-                .filter_map(|r| Some(Arc::new(Run { request: s(r, "request_id").unwrap_or_default(), started_ms: n(r, "started_ms"), spawned_ms: n(r, "spawned_ms").max(n(r, "started_ms")), ended_ms: AtomicU64::new(0), n: n(r, "n") as u32, pid: n(r, "pid") as u32, start: n(r, "start"), unit: s(r, "unit"), log: s(r, "log")?.into(), exit: Mutex::new(None), ours: false, detachable: r.get("detachable").and_then(|v| v.as_bool()).unwrap_or(false), hold: os::Hold::none(), exit_file: PathBuf::new(), cache: Mutex::new(None), usage: Mutex::new(Usage::default()) })))
+                .filter_map(|r| Some(Arc::new(Run { request: s(r, "request_id").unwrap_or_default(), started_ms: n(r, "started_ms"), spawned_ms: n(r, "spawned_ms").max(n(r, "started_ms")), ended_ms: AtomicU64::new(0), n: n(r, "n") as u32, pid: n(r, "pid") as u32, start: n(r, "start"), unit: s(r, "unit"), log: s(r, "log")?.into(), exit: Mutex::new(None), ours: false, detachable: r.get("detachable").and_then(|v| v.as_bool()).unwrap_or(false), hold: os::Hold::none(), exit_file: PathBuf::new(), cache: Mutex::new(None), usage: Mutex::new(Usage::default()), stopped: AtomicBool::new(false) })))
                 .collect()
         });
         Some(Lease {
@@ -608,13 +621,14 @@ const TAIL_LINES: usize = 20;
 const WHY_LINES: usize = 12;
 
 /// How a run ended when that was not its normal end: a signal, an exit nobody saw, or a test run
-/// whose output ends without libtest's summary. (its line, whether it is more than a failure, the
-/// log's last lines)
+/// whose output ends without libtest's summary; a run stopped on purpose on its own (a launch's
+/// stop) ended as asked. (its line, whether it is more than a failure, the log's last lines)
 fn abnormal_end(id: &str, kind: Kind, r: &Run, exit: i32) -> Option<(String, bool, String)> {
+    if r.stopped.load(Ordering::Acquire) { return None; }
     let tail = log_tail(&r.log, TAIL_LINES);
     let summary = kind != Kind::Test || tail.lines().any(|l| l.starts_with("test result:"));
     if exit == 0 || exit == -2 || (exit > 0 && exit <= 128 && summary) { return None; }
-    let (line, serious) = ended_how(id, r.n, r.unit.as_deref(), exit, kernel_log(r.started_ms, crate::proto::wall_ms()).as_deref());
+    let (line, serious) = ended_how(id, r.n, r.unit.as_deref(), exit, !r.ours, kernel_log(r.started_ms, crate::proto::wall_ms()).as_deref());
     Some((line, serious, tail))
 }
 
@@ -678,13 +692,15 @@ fn kernel_log(from_ms: u64, to_ms: u64) -> Option<String> {
 fn kernel_log(_from_ms: u64, _to_ms: u64) -> Option<String> { None }
 
 /// The abnormal end's line: the exit, the OOM kill of the run's scope (`unit`) and a GPU fault
-/// the kernel logged in its time; and whether it is more than a plain failure.
-fn ended_how(id: &str, n: u32, unit: Option<&str>, exit: i32, kernel: Option<&str>) -> (String, bool) {
+/// the kernel logged in its time; and whether it is more than a plain failure. `taken_back`: the
+/// run is one an earlier hub started (an unknown exit is then one its wrapper never wrote).
+fn ended_how(id: &str, n: u32, unit: Option<&str>, exit: i32, taken_back: bool, kernel: Option<&str>) -> (String, bool) {
     const SIGNALS: [&str; 16] = ["", "SIGHUP", "SIGINT", "SIGQUIT", "SIGILL", "SIGTRAP", "SIGABRT", "SIGBUS", "SIGFPE", "SIGKILL", "SIGUSR1", "SIGSEGV", "SIGUSR2", "SIGPIPE", "SIGALRM", "SIGTERM"];
     let mut serious = exit > 128 || exit < 0;
     let mut out = format!("{id} run {n} ended without its summary: {}", match exit {
         e if e > 128 => format!("killed by signal {} ({})", e - 128, SIGNALS.get((e - 128) as usize).copied().filter(|s| !s.is_empty()).unwrap_or("?")),
-        e if e < 0 => "its exit is unknown (its hub restarted while it ran)".to_string(),
+        e if e < 0 && taken_back => "its exit is unknown (its hub restarted while it ran, and its wrapper wrote no exit: it was killed too)".to_string(),
+        e if e < 0 => "its exit is unknown (its hub could not reap it)".to_string(),
         e => format!("exit {e}"),
     });
     let Some(kernel) = kernel else {
@@ -786,9 +802,13 @@ exec "$@"
 }
 
 impl Run {
+    /// The pid of what its wrapper started, once the wrapper wrote it.
+    fn app_pid(&self) -> Option<u32> {
+        read_whole(&self.exit_file.with_extension("usage.pid")).and_then(|s| s.trim().parse().ok())
+    }
+
     fn work_pid(&self) -> u32 {
-        std::fs::read_to_string(self.exit_file.with_extension("usage.pid")).ok().and_then(|s| s.trim().parse().ok())
-            .filter(|pid| os::in_group(*pid, self.pid, &self.hold)).unwrap_or(self.pid)
+        self.app_pid().filter(|pid| os::in_group(*pid, self.pid, &self.hold)).unwrap_or(self.pid)
     }
 
     /// What its waiter read as it reaped the run: its CPU, and the largest resident set one of its
@@ -1372,6 +1392,7 @@ impl Exec {
             "lease-end" => vec![with_load(self.end_cmd(rest), super::caps::load_now)],
             "lease-beat" => vec![self.beat(rest)],
             "lease-jits" => vec![lease_jits_of(self, rest)],
+            "lease-yield" => vec![lease_yield(self, rest)],
             "lease-kill" => vec![lease_kill(self, rest)],
             "lease-why" => vec![lease_why(self, rest)],
             "overlay-status" | "overlay-why" => self.overlay_inspect(word, rest),
@@ -1593,6 +1614,9 @@ impl Exec {
             ("TMPDIR", tmp.to_string_lossy().into_owned()),
             // a failed step's logs go here: its holder keeps them before the tmp goes (KEEP_DIR)
             ("DEVHUB_KEEP", keep.to_string_lossy().into_owned()),
+            // made when a timed ask waits on this box behind this run past twice its estimate
+            // (`lease-yield`): a series or bench stops at its next step
+            ("DEVHUB_YIELD", tmp.join(crate::lease::YIELD_FILE).to_string_lossy().into_owned()),
             ("CARGO_INCREMENTAL", "0".into()),
             ("MAKEPAD_HIDE_WINDOWS", "1".into()),
             ("SANDBOX_MUTE", "1".into()),
@@ -1912,15 +1936,21 @@ impl Exec {
             Ok(f) => f,
             Err(e) => return Err(e.to_string()),
         };
+        // the holder's place in its worktree: one the lease's tree lacks is said as that (a spawn
+        // into it failed as "systemd-run: No such file or directory", 11-05)
+        let dir = if l.src == Src::Overlay { l.work.clone() } else { l.work.join(rel) };
+        if !dir.is_dir() {
+            return Err(format!("lease-run {id}: the lease's tree has no {} (the directory the run was asked from: run it from inside the lane's worktree, at a tracked path)", rel.display()));
+        }
         let mut cmd = std::process::Command::new(&full[0]);
-        cmd.args(&full[1..]).current_dir(if l.src == Src::Overlay { l.work.clone() } else { l.work.join(rel) }).stdin(std::process::Stdio::null()).stdout(out).stderr(err_out);
+        cmd.args(&full[1..]).current_dir(dir).stdin(std::process::Stdio::null()).stdout(out).stderr(err_out);
         self.run_env(&mut cmd, l, run_env, unset, overlay_loader.as_deref().or_else(|| loader.as_ref().map(|(_, p)| p.as_path())));
         let (mut child, hold) = match os::lease_spawn(&mut cmd, Some(&exit_file(&self.state, &id, n))) {
             Ok(c) => c,
             Err(e) => return Err(format!("lease-run {id}: {}: {e}", full[0])),
         };
         let pid = child.id();
-        let run = Arc::new(Run { request: request.to_string(), started_ms: crate::proto::wall_ms(), spawned_ms: crate::proto::wall_ms(), ended_ms: AtomicU64::new(0), n, pid, start: os::proc_start(pid).unwrap_or(0), unit, log, exit: Mutex::new(None), ours: true, detachable, hold, exit_file: exit_file(&self.state, &id, n), cache: Mutex::new(cache), usage: Mutex::new(Usage::default()) });
+        let run = Arc::new(Run { request: request.to_string(), started_ms: crate::proto::wall_ms(), spawned_ms: crate::proto::wall_ms(), ended_ms: AtomicU64::new(0), n, pid, start: os::proc_start(pid).unwrap_or(0), unit, log, exit: Mutex::new(None), ours: true, detachable, hold, exit_file: exit_file(&self.state, &id, n), cache: Mutex::new(cache), usage: Mutex::new(Usage::default()), stopped: AtomicBool::new(false) });
         l.runs.push(run.clone());
         // it runs whatever the ledger says, so its holder hears that it runs (a refusal here left
         // it running unseen: 0 GB free, 11-04); the lease's next save writes it down
@@ -2011,7 +2041,7 @@ impl Exec {
         active()?;
         let (child, hold) = os::lease_spawn(&mut cmd, Some(&tmp.join("cargo.exit"))).map_err(|e| format!("dev JIT build: {e}"))?;
         let pid = child.id();
-        let run = Arc::new(Run { request: String::new(), started_ms: 0, spawned_ms: crate::proto::wall_ms(), ended_ms: AtomicU64::new(0), n: 0, pid, start: os::proc_start(pid).unwrap_or(0), unit, log: log.clone(), exit: Mutex::new(None), ours: true, detachable: false, hold, exit_file: tmp.join("cargo.exit"), cache: Mutex::new(None), usage: Mutex::new(Usage::default()) });
+        let run = Arc::new(Run { request: String::new(), started_ms: 0, spawned_ms: crate::proto::wall_ms(), ended_ms: AtomicU64::new(0), n: 0, pid, start: os::proc_start(pid).unwrap_or(0), unit, log: log.clone(), exit: Mutex::new(None), ours: true, detachable: false, hold, exit_file: tmp.join("cargo.exit"), cache: Mutex::new(None), usage: Mutex::new(Usage::default()), stopped: AtomicBool::new(false) });
         let mut process = WorkerRun { child, run, pid_file: Some(pid_file.clone()) };
         std::fs::write(&pid_file, format!("{pid} {}\n", process.run.start)).map_err(|e| format!("{}: {e}", pid_file.display()))?;
         loop {
@@ -2051,11 +2081,85 @@ impl Exec {
         }
         let (child, hold) = os::lease_spawn(&mut cmd, Some(&exit_file(&self.state, id, n))).map_err(|e| format!("lease worker process: {e}"))?;
         let pid = child.id();
-        let run = Arc::new(Run { request: String::new(), started_ms: 0, spawned_ms: crate::proto::wall_ms(), ended_ms: AtomicU64::new(0), n, pid, start: os::proc_start(pid).unwrap_or(0), unit, log: log.clone(), exit: Mutex::new(None), ours: true, detachable: false, hold, exit_file: exit_file(&self.state, id, n), cache: Mutex::new(None), usage: Mutex::new(Usage::default()) });
+        let run = Arc::new(Run { request: String::new(), started_ms: 0, spawned_ms: crate::proto::wall_ms(), ended_ms: AtomicU64::new(0), n, pid, start: os::proc_start(pid).unwrap_or(0), unit, log: log.clone(), exit: Mutex::new(None), ours: true, detachable: false, hold, exit_file: exit_file(&self.state, id, n), cache: Mutex::new(None), usage: Mutex::new(Usage::default()), stopped: AtomicBool::new(false) });
         l.runs.push(run.clone());
         self.save(l);
         drop(leases);
         Ok(WorkerRun { child, run, pid_file: None })
+    }
+
+    /// [`launch_stopped`] here.
+    fn launch_stopped(&self, leader: u32) {
+        for r in self.leases.lock().unwrap().values().flat_map(|l| l.runs.iter()).filter(|r| r.pid == leader) {
+            r.stopped.store(true, Ordering::Release);
+        }
+    }
+
+    /// A sync launch's command (`cmd`, the WM's launch of an app in the deployment checkout:
+    /// [`crate::sync`]'s `launch`) as the next run of lease `id`, the way a `lease-run` runs: its
+    /// own session and scope, the lease kind's nice level and pinning, the run wrapper, its output
+    /// in `log`. The wrapper writes its exit beside the ledger, so the lease's end says how it
+    /// ended and a restarted hub takes it back with that exit. (A launch was a pid put under the
+    /// lease: its exit was never known, and every launch that ended before its lease said "its
+    /// hub restarted while it ran", a timed run's lane queued its whole series again for it,
+    /// 11-05; and in the hub's own scope it kept the WM from starting the hub again under that
+    /// scope's name until it ended.) `cmd`'s environment changes and directory are kept. The
+    /// answer waits for the wrapper to start the command: its pid is the app's. `ended`: the
+    /// app's pid (0: never started) and the run's exit, once it ends under this hub.
+    pub fn launch(&self, id: &str, cmd: &std::process::Command, log: &Path, ended: Box<dyn FnOnce(u32, i32) + Send>) -> Result<Launched, String> {
+        let out = std::fs::File::create(log).map_err(|e| format!("{}: {e}", log.display()))?;
+        let mut leases = self.leases.lock().unwrap();
+        let l = leases.get_mut(id).ok_or_else(|| format!("no live lease {id} on {}", self.machine))?;
+        if !l.kind.writes() {
+            return Err(format!("{id} is an {} lease: launches need a write lease", l.kind.as_str()));
+        }
+        if self.restarting.load(Ordering::Acquire) { return Err(format!("restarting: {}'s hub restarts for its self-update; try again", self.machine)); }
+        let n = l.runs.len() as u32 + 1;
+        let exit = exit_file(&self.state, id, n);
+        let unit = self.scopes.then(|| format!("devhub-lease-{id}-{n}"));
+        let conf = self.conf();
+        let cpus = if l.kind == Kind::Timed { &conf.cpus_timed } else { &conf.cpus_shared };
+        let argv = std::iter::once(cmd.get_program()).chain(cmd.get_args()).map(|s| s.to_string_lossy().into_owned()).collect();
+        let argv = os::metered_argv(argv, unit.as_deref(), &exit.with_extension("usage"));
+        let full = os::lease_argv(argv, unit.as_deref(), l.kind.nice(), cpus, l.kind.shared().then_some(l.cost), l.ram_max_gb);
+        let mut run_cmd = std::process::Command::new(&full[0]);
+        run_cmd.args(&full[1..]).stdin(std::process::Stdio::null()).stdout(out.try_clone().map_err(|e| e.to_string())?).stderr(out);
+        if let Some(dir) = cmd.get_current_dir() { run_cmd.current_dir(dir); }
+        for (k, v) in cmd.get_envs() {
+            match v { Some(v) => { run_cmd.env(k, v); }, None => { run_cmd.env_remove(k); } }
+        }
+        // what it starts carries the lease's mark, as a run's processes do ([`Exec::run_env`])
+        run_cmd.env(LEASE_ENV, lease_mark(&self.state, id));
+        if let Some(outer) = std::env::var_os(LEASE_OUTER_ENV).or_else(|| std::env::var_os(LEASE_ENV)) {
+            run_cmd.env(LEASE_OUTER_ENV, outer);
+        }
+        let (mut child, hold) = os::lease_spawn(&mut run_cmd, Some(&exit)).map_err(|e| format!("launch under {id}: {}: {e}", full[0]))?;
+        let pid = child.id();
+        let now = crate::proto::wall_ms();
+        let run = Arc::new(Run { request: String::new(), started_ms: now, spawned_ms: now, ended_ms: AtomicU64::new(0), n, pid, start: os::proc_start(pid).unwrap_or(0), unit, log: log.to_path_buf(), exit: Mutex::new(None), ours: true, detachable: false, hold, exit_file: exit, cache: Mutex::new(None), usage: Mutex::new(Usage::default()), stopped: AtomicBool::new(false) });
+        l.runs.push(run.clone());
+        self.save(l);
+        drop(leases);
+        let waited = run.clone();
+        let _ = std::thread::Builder::new().name("devhub-launch-wait".into()).spawn(move || {
+            let code = match os::wait_usage(&mut child) {
+                Ok((status, cpu, maxrss)) => { waited.reaped(cpu, maxrss); os::exit_code(status) }
+                Err(_) => -1,
+            };
+            waited.ended_ms.store(crate::proto::wall_ms(), Ordering::Release);
+            waited.finished(code);
+            ended(waited.app_pid().unwrap_or(0), code);
+        });
+        // the wrapper writes the pid of what it started at once (Linux: after systemd-run made its scope)
+        loop {
+            if let Some(app) = run.app_pid() {
+                return Ok(Launched { n, leader: pid, app });
+            }
+            if let Some(code) = *run.exit.lock().unwrap() {
+                return Err(format!("launch under {id}: its run ended (exit {code}) before it started the app; its log: {}", log.display()));
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 
     /// `hub-restart`: the self-update, at once. A restart ends nothing: every run lives in its
@@ -2298,6 +2402,11 @@ impl Exec {
     /// it does not name ends now, and every other one's no-beat count starts again. Counted from
     /// any first call instead (its caps poll), a restarted master whose first beat came more than
     /// the limit later lost leases it held (a loaded gate box, 11-04).
+    ///
+    /// The leases it names are beaten here, with the contact: the beat's look at their runs comes
+    /// after it and takes a while (process walks on a loaded box, the lock behind a teardown), and
+    /// a watchdog tick in between saw the master there and its leases unbeaten past the limit. It
+    /// ended three live leases of a master restart test that way (11-05).
     fn master_contact(&self, now: Instant, claimed: &[&str]) {
         let mut leases = self.leases.lock().unwrap();
         let (away, last) = {
@@ -2306,6 +2415,11 @@ impl Exec {
             *seen = last.max(now);
             (now.saturating_duration_since(last), last)
         };
+        for id in claimed {
+            if let Some(l) = leases.get_mut(*id) {
+                l.beat = l.beat.max(now);
+            }
+        }
         if away < self.opts.no_beat {
             return;
         }
@@ -2536,7 +2650,7 @@ impl Exec {
         // a lease something else ended keeps how far its last run got: a cancelled hung test left
         // nothing that named it (11-05)
         let cut = l.runs.last().filter(|_| keep_tail).map_or("null".into(), |r| json_str(&got_to(r, usize::MAX)));
-        note_stopping(&l.id, &l.tmp, job_pids(&l.runs));
+        note_stopping(&l.id, &lease_mark(&self.state, &l.id), job_pids(&l.runs));
         let (mut killed, mut leak) = stop_runs(&l.runs, &makepad_remote::discovery::registry_dir(), false);
         let (strays, stray_leak) = stop_strays(&lease_mark(&self.state, &l.id), self.opts.grace);
         if !strays.is_empty() {
@@ -2843,7 +2957,7 @@ impl Exec {
             if let Err(e) = std::fs::write(&spec, format!("{{\"case\":{},\"n\":{n}}}", json_str(case))) { return err(e.to_string()); }
             // A pid of zero is the in-hub summary, not a process group. The actual JITs
             // and any Cargo build have their own registered runs and cancellation handling.
-            let summary = Arc::new(Run { request: String::new(), started_ms: crate::proto::wall_ms(), spawned_ms: crate::proto::wall_ms(), ended_ms: AtomicU64::new(0), n, pid: 0, start: 0, unit: None, log, exit: Mutex::new(None), ours: true, detachable: false, hold: os::Hold::none(), exit_file: exit_file(&self.state, id, n), cache: Mutex::new(None), usage: Mutex::new(Usage::default()) });
+            let summary = Arc::new(Run { request: String::new(), started_ms: crate::proto::wall_ms(), spawned_ms: crate::proto::wall_ms(), ended_ms: AtomicU64::new(0), n, pid: 0, start: 0, unit: None, log, exit: Mutex::new(None), ours: true, detachable: false, hold: os::Hold::none(), exit_file: exit_file(&self.state, id, n), cache: Mutex::new(None), usage: Mutex::new(Usage::default()), stopped: AtomicBool::new(false) });
             l.runs.push(summary.clone());
             l.first_run = "overlay-selftest".into();
             self.save(l);
@@ -3438,14 +3552,17 @@ pub fn request_dev(on: bool) {
     }
 }
 
-/// The leases here whose work a WM restart would cut: a landing's (gate), and those on the WM:
-/// a screen or CI lease, one given the WM session (`needs.gui`). Their lines, for the WM
-/// restart's wait. A headless lease (live test sessions among them) runs on through it: a node's
-/// old-wire WM waited on those while their apps could not have used it (11-02).
+/// The leases here whose work a WM restart would cut: a landing's (gate) while it runs, and those
+/// on the WM: a screen or CI lease, one given the WM session (`needs.gui`). Their lines, for the
+/// WM restart's wait. A headless lease (live test sessions among them) runs on through it: a
+/// node's old-wire WM waited on those while their apps could not have used it (11-02). A gate
+/// between runs has nothing there to cut: one whose holder had not released it yet held a WM
+/// restart until the master took it back (11-05).
 pub fn on_the_wm() -> Vec<String> {
     let Some(x) = EXEC.get() else { return Vec::new() };
     x.leases.lock().unwrap().values().filter_map(|l| {
         let what = if l.kind == Kind::Gate || l.lane.starts_with("land") {
+            if !l.runs.iter().any(|r| r.live()) { return None; }
             "a landing"
         } else if !uses_wm(l) {
             return None;
@@ -3474,6 +3591,17 @@ fn lease_jits_of(x: &Exec, id: &str) -> String {
     let jits: Vec<u32> = Vec::new();
     let pids: Vec<String> = jits.into_iter().filter(|pid| runs.iter().any(|r| r.pid != 0 && os::in_group(*pid, r.pid, &r.hold))).map(|pid| pid.to_string()).collect();
     format!("{{\"pids\":[{}]}}", pids.join(","))
+}
+
+/// `lease-yield <id> <why>`: the lease's `$DEVHUB_YIELD` file, why in it ([`crate::lease::YIELD_FILE`]).
+fn lease_yield(x: &Exec, rest: &str) -> String {
+    let (id, why) = rest.split_once(' ').unwrap_or((rest, ""));
+    let Some(tmp) = x.leases.lock().unwrap().get(id).map(|l| l.tmp.clone()) else { return err(format!("no lease {id} on {}", x.machine)) };
+    let file = tmp.join(crate::lease::YIELD_FILE);
+    match std::fs::write(&file, format!("{why}\n")) {
+        Ok(()) => "{}".into(),
+        Err(e) => err(format!("{}: {e}", file.display())),
+    }
 }
 
 /// `lease-kill <id> <pid>`: KILL one process of the lease's runs (a live session's JIT restart).
@@ -3509,7 +3637,8 @@ fn lease_why(x: &Exec, id: &str) -> String {
 
 /// Whether `pid` (a JIT app) runs in a headless lease here, which a WM restart leaves alone: in
 /// the process group of a run of a lease not on the WM ([`on_the_wm`]), with no WM socket in its
-/// environment. A launch adopted into a lease, or an app a shell started, gets no such pass.
+/// environment. A launch (a run whose app has the WM's socket), or an app a shell started, gets
+/// no such pass.
 pub fn in_headless_lease(pid: u32) -> bool {
     let Some(x) = EXEC.get() else { return false };
     // no process walks under the lease table lock
@@ -3533,76 +3662,94 @@ pub fn held() -> Vec<(String, String, &'static str)> {
     EXEC.get().map_or_else(Vec::new, |x| x.leases.lock().unwrap().values().map(|l| (l.id.clone(), l.lane.clone(), l.kind.as_str())).collect())
 }
 
-/// Puts a process started for lease `id` (a sync launch) under that lease: its end stops it.
-pub fn adopt(id: &str, pid: u32, log: PathBuf) -> Result<(), String> {
-    let x = EXEC.get().ok_or("this process runs no lease executor")?;
-    let mut leases = x.leases.lock().unwrap();
-    let l = leases.get_mut(id).ok_or_else(|| format!("no live lease {id} on {}", x.machine))?;
-    if !l.kind.writes() {
-        return Err(format!("{id} is an {} lease: launches need a write lease", l.kind.as_str()));
-    }
-    let n = l.runs.iter().map(|r| r.n).max().unwrap_or(0) + 1;
-    l.runs.push(Arc::new(Run { request: String::new(), started_ms: crate::proto::wall_ms(), spawned_ms: crate::proto::wall_ms(), ended_ms: AtomicU64::new(0), n, pid, start: os::proc_start(pid).unwrap_or(0), unit: None, log, exit: Mutex::new(None), ours: false, detachable: false, hold: os::Hold::none(), exit_file: exit_file(&x.state, id, n), cache: Mutex::new(None), usage: Mutex::new(Usage::default()) }));
-    x.save(l);
-    Ok(())
+/// A sync launch's command as the next run of live lease `id` here ([`Exec::launch`]).
+pub fn launch(id: &str, cmd: &std::process::Command, log: &Path, ended: Box<dyn FnOnce(u32, i32) + Send>) -> Result<Launched, String> {
+    EXEC.get().ok_or("this process runs no lease executor")?.launch(id, cmd, log, ended)
 }
 
-/// Whether lease `id` is live here and may launch.
+/// The launch run led by `leader` is stopped on purpose, on its own (`sync::launch::stop`): how it
+/// ends is no abnormal end of its lease.
+pub fn launch_stopped(leader: u32) {
+    if let Some(x) = EXEC.get() { x.launch_stopped(leader); }
+}
+
 /// The lane lease `id` belongs to.
 pub fn lease_lane(id: &str) -> Option<String> {
     EXEC.get().and_then(|x| x.leases.lock().unwrap().get(id).map(|l| l.lane.clone()))
 }
 
-/// What this hub stopped in the last minute: (by what, the dir or socket of what it stopped, the
-/// processes it stopped that no dir names, when). A JIT whose socket is under that path, or that
-/// is one of those processes, and ends then was stopped, not crashed: a lease's end stops what
-/// runs under its scratch dir (a CI box's calculator, hosted by a CI smoke's WM, "crashed" as
-/// its lease ended, 11-03) and on Windows what is in its jobs (a JIT there announces a loopback
-/// port, no socket under the dir), a prewarm's stop the JIT it started (each landing's prewarm of
-/// stage "crashed" on three Linux nodes, 11-04).
-static STOPPED: Mutex<Vec<(String, PathBuf, Vec<u32>, u64)>> = Mutex::new(Vec::new());
+/// What this hub stopped in the last minute. A JIT it names that ends then was stopped, not
+/// crashed: a lease's end stops what runs in the lease (a CI box's calculator, hosted by a CI
+/// smoke's WM, "crashed" as its lease ended, 11-03), each JIT's discovery file naming its lease
+/// mark, and on Windows what is in its jobs too; a prewarm's stop the JIT it started, by its
+/// socket (each landing's prewarm of stage "crashed" on three Linux nodes, 11-04).
+static STOPPED: Mutex<Vec<Stopped>> = Mutex::new(Vec::new());
 const STOPPED_FOR_MS: u64 = 60_000;
 
-fn note_stopping(id: &str, tmp: &Path, pids: Vec<u32>) {
-    note_stopped(&format!("with its lease {id}"), tmp, pids);
+struct Stopped {
+    /// `with its lease L1`, `by prewarm`
+    by: String,
+    /// the socket of the JIT it stopped
+    socket: Option<PathBuf>,
+    /// the lease mark ([`lease_mark`]) of what it stopped
+    lease: Option<String>,
+    /// the processes it stopped that nothing else names
+    pids: Vec<u32>,
+    at: u64,
 }
 
-/// The processes in the runs' jobs (Windows: what a lease's end stops beside its scratch dir).
+fn note_stopping(id: &str, mark: &str, pids: Vec<u32>) {
+    note(Stopped { by: format!("with its lease {id}"), socket: None, lease: Some(mark.to_string()), pids, at: 0 });
+}
+
+/// The processes in the runs' jobs (Windows: what a lease's end stops beside what its mark names).
 #[cfg(windows)]
 fn job_pids(runs: &[Arc<Run>]) -> Vec<u32> {
     runs.iter().flat_map(|r| os::job_pids(&r.hold)).collect()
 }
 
-/// Elsewhere a JIT's socket lies under its lease's scratch dir: the dir names them all.
+/// Elsewhere each JIT's discovery file names its lease: the lease's mark names them all.
 #[cfg(not(windows))]
 fn job_pids(_runs: &[Arc<Run>]) -> Vec<u32> {
     Vec::new()
 }
 
-/// Says that `by` (`by prewarm`, `with its lease L1`) stops the JIT whose socket is `path`, or
-/// every JIT whose socket is under it, and the processes `pids`.
-pub fn note_stopped(by: &str, path: &Path, pids: Vec<u32>) {
-    let now = crate::proto::wall_ms();
-    let mut stopped = STOPPED.lock().unwrap();
-    stopped.retain(|(_, _, _, at)| now.saturating_sub(*at) < STOPPED_FOR_MS);
-    stopped.push((by.to_string(), path.to_path_buf(), pids, now));
+/// Says that `by` (`by prewarm`) stops the JIT whose socket is `socket`.
+pub fn note_stopped(by: &str, socket: &Path) {
+    note(Stopped { by: by.to_string(), socket: Some(socket.to_path_buf()), lease: None, pids: Vec::new(), at: 0 });
 }
 
-/// What stopped the process `pid` whose socket or log is `path` ([`note_stopped`]), when it
-/// ended in the last minute: `with its lease L1`, `by prewarm`.
-pub fn stopped_with(pid: u32, path: &str) -> Option<String> {
+fn note(mut s: Stopped) {
+    s.at = crate::proto::wall_ms();
+    let mut stopped = STOPPED.lock().unwrap();
+    stopped.retain(|x| s.at.saturating_sub(x.at) < STOPPED_FOR_MS);
+    stopped.push(s);
+}
+
+/// What stopped the JIT `pid` of lease mark `lease` (its discovery file's) and socket `socket`
+/// ([`note_stopped`], a lease's end), when it ended in the last minute: `with its lease L1`, `by
+/// prewarm`.
+pub fn stopped_with(pid: u32, lease: Option<&str>, socket: &str) -> Option<String> {
     let now = crate::proto::wall_ms();
     let stopped = STOPPED.lock().unwrap();
     stopped.iter().rev()
-        .find(|(_, at_path, pids, at)| now.saturating_sub(*at) < STOPPED_FOR_MS && ((!path.is_empty() && Path::new(path).starts_with(at_path)) || pids.contains(&pid)))
-        .map(|(by, ..)| by.clone())
+        .find(|s| now.saturating_sub(s.at) < STOPPED_FOR_MS && ((lease.is_some() && s.lease.as_deref() == lease) || (!socket.is_empty() && s.socket.as_deref() == Some(Path::new(socket))) || s.pids.contains(&pid)))
+        .map(|s| s.by.clone())
 }
 
-/// Whether `path` (a JIT's socket) lies in the directory of a live test or CI lease here.
-pub fn in_test_lease(path: &str) -> bool {
+/// Whether lease mark `lease` (a JIT's, its discovery file's) is that of a live test or CI lease
+/// of this hub.
+pub fn in_test_lease(lease: Option<&str>) -> bool {
     let Some(x) = EXEC.get() else { return false };
-    let leases = x.leases.lock().unwrap();
-    Path::new(path).components().filter_map(|c| c.as_os_str().to_str()).any(|c| leases.get(c).is_some_and(|l| matches!(l.kind, Kind::Test | Kind::Ci)))
+    let Some(id) = lease.and_then(|m| mark_id(&x.state, m)) else { return false };
+    x.leases.lock().unwrap().get(id).is_some_and(|l| matches!(l.kind, Kind::Test | Kind::Ci))
+}
+
+/// The lease of mark `mark` when that is one of this hub's (its ledger dir `state`): a hub run
+/// in a lease marks its own runs with the same ids.
+fn mark_id<'a>(state: &Path, mark: &'a str) -> Option<&'a str> {
+    let (_, id) = mark.rsplit_once('/')?;
+    (lease_mark(state, id) == mark).then_some(id)
 }
 
 pub fn lease_live(id: &str) -> bool {
@@ -3672,7 +3819,7 @@ const HUB_BUILD_LOOK: Duration = Duration::from_secs(5);
 pub(crate) fn build_hub(root: &Path) -> Result<(), String> {
     #[cfg(windows)]
     let aside = image_aside();
-    let mut cmd = os::niced(makepad_app_registry::cargo_bin().as_os_str());
+    let mut cmd = os::background(makepad_app_registry::cargo_bin().as_os_str());
     // (rustup counts nested proxies in RUST_RECURSION_COUNT and refuses past 20)
     cmd.args(["build", "--release", "-p", "makepad-app-devhub"]).current_dir(root).env_remove("RUST_RECURSION_COUNT").stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped());
     let since = crate::proto::wall_ms();
@@ -3796,15 +3943,21 @@ mod tests {
     }
 
     #[test]
-    fn a_jit_under_a_stopped_leases_scratch_dir_or_in_its_job_was_stopped_with_it() {
-        note_stopping("L248709", Path::new("/h/devhub/tmp/L248709"), vec![4242]);
-        assert_eq!(stopped_with(1, "/h/devhub/tmp/L248709/makepad-remote-2703620.sock").as_deref(), Some("with its lease L248709"));
-        assert_eq!(stopped_with(1, "/h/devhub/tmp/L2487090/makepad-remote-1.sock"), None, "another lease's dir");
-        assert_eq!(stopped_with(1, "/run/user/1000/makepad-remote-5.sock"), None, "no lease: a crash stays a crash");
-        assert_eq!(stopped_with(1, ""), None);
-        // a Windows JIT: a loopback port, no socket under the dir; its job says it was the lease's
-        assert_eq!(stopped_with(4242, "tcp:127.0.0.1:64033").as_deref(), Some("with its lease L248709"));
-        assert_eq!(stopped_with(4243, "tcp:127.0.0.1:64034"), None, "not in its job");
+    fn a_jit_of_a_stopped_lease_or_in_its_job_was_stopped_with_it() {
+        note_stopping("L248709", "/h/devhub/leases/L248709", vec![4242]);
+        let sock = "/tmp/makepad-1000/makepad-remote-2703620.sock";
+        assert_eq!(stopped_with(1, Some("/h/devhub/leases/L248709"), sock).as_deref(), Some("with its lease L248709"));
+        assert_eq!(stopped_with(1, Some("/h/devhub/leases/L2487090"), sock), None, "another lease");
+        assert_eq!(stopped_with(1, Some("/other/devhub/leases/L248709"), sock), None, "another hub's lease of that id");
+        assert_eq!(stopped_with(1, None, sock), None, "no lease: a crash stays a crash");
+        assert_eq!(stopped_with(1, None, ""), None);
+        // a Windows JIT: its job says it was the lease's
+        assert_eq!(stopped_with(4242, None, "tcp:127.0.0.1:64033").as_deref(), Some("with its lease L248709"));
+        assert_eq!(stopped_with(4243, None, "tcp:127.0.0.1:64034"), None, "not in its job");
+        let state = Path::new("/h/devhub/leases");
+        assert_eq!(mark_id(state, "/h/devhub/leases/L248709"), Some("L248709"));
+        assert_eq!(mark_id(state, "/other/devhub/leases/L248709"), None, "another hub's");
+        assert_eq!(mark_id(state, "L248709"), None);
     }
 
     /// A Windows run's processes are its job's: the run's leader and what that started (a JIT
@@ -4262,6 +4415,9 @@ mod tests {
         let r = x.handle("lease-run", &format!("L1 . {}", b64(FAIL)));
         assert_eq!(log_until_exit(&x, "L1", field(&r[0], "n").and_then(|v| super::super::num(&v)).unwrap() as u32).1, 1);
         assert!(x.handle("lease-run", &format!("L1 ../x {}", b64(&["true"])))[0].contains("err"));
+        // asked from a directory the tree lacks (a shell in an ignored folder): that, not the program
+        let missing = x.handle("lease-run", &format!("L1 local/shots {}", b64(&["true"])));
+        assert!(missing[0].contains("has no local/shots") && !missing[0].contains("No such file"), "{missing:?}");
 
         // a sleeping child (and its own child) is stopped on end
         let r = x.handle("lease-run", &format!("L1 . {}", b64(SLEEP)));
@@ -4294,6 +4450,11 @@ mod tests {
         // a stalled lease's JITs: none under a plain run
         assert_eq!(x.handle("lease-jits", "L1"), vec![r#"{"pids":[]}"#.to_string()]);
         assert!(x.handle("lease-jits", "L404")[0].contains("no lease L404"));
+        // its yield: the file its env names, why in it
+        assert_eq!(x.handle("lease-yield", "L1 a timed ask waits"), vec!["{}".to_string()]);
+        let named = field(&a[0], "env").and_then(|e| e.get("DEVHUB_YIELD").and_then(|v| v.as_str()).map(PathBuf::from)).expect(&a[0]);
+        assert_eq!(std::fs::read_to_string(&named).unwrap(), "a timed ask waits\n");
+        assert!(x.handle("lease-yield", "L404 x")[0].contains("no lease L404"));
         // only a process of the lease's own runs is killed
         assert!(x.handle("lease-kill", "L1 1")[0].contains("is no process of lease L1"));
         let e = x.handle("lease-end", "L1 released");
@@ -4598,10 +4759,11 @@ mod tests {
     #[test]
     fn an_abnormal_end_says_how_it_ended() {
         let kernel = "memory: usage 2729056kB, limit 2729056kB, failcnt 56383\noom-kill:constraint=CONSTRAINT_MEMCG,nodemask=(null),oom_memcg=/app.slice/devhub-lease-L7-1.scope,task_memcg=/app.slice/devhub-lease-L7-1.scope,task=makepad.jit-256,pid=42\nMemory cgroup out of memory: Killed process 42 (makepad.jit-256) total-vm:401088916kB, anon-rss:2455836kB, file-rss:573996kB, UID:1000\nNVRM: Xid (PCI:0000:01:00): 79, GPU has fallen off the bus.";
-        assert_eq!(ended_how("L7", 1, Some("devhub-lease-L7-1"), 137, Some(kernel)), ("L7 run 1 ended without its summary: killed by signal 9 (SIGKILL); the kernel's OOM killer killed 42 (makepad.jit-256), 2.3 GB resident, at the lease's memory cap of 2.6 GB; GPU: NVRM: Xid (PCI:0000:01:00): 79, GPU has fallen off the bus.".to_string(), true));
+        assert_eq!(ended_how("L7", 1, Some("devhub-lease-L7-1"), 137, false, Some(kernel)), ("L7 run 1 ended without its summary: killed by signal 9 (SIGKILL); the kernel's OOM killer killed 42 (makepad.jit-256), 2.3 GB resident, at the lease's memory cap of 2.6 GB; GPU: NVRM: Xid (PCI:0000:01:00): 79, GPU has fallen off the bus.".to_string(), true));
         // another lease's OOM kill is not this run's; a plain exit is no more than a failure
-        assert_eq!(ended_how("L8", 2, Some("devhub-lease-L8-2"), 101, Some(&kernel[..kernel.find("NVRM").unwrap()])), ("L8 run 2 ended without its summary: exit 101; no OOM kill".to_string(), false));
-        assert_eq!(ended_how("L9", 1, None, -1, None).0, "L9 run 1 ended without its summary: its exit is unknown (its hub restarted while it ran); the kernel log was not read here");
+        assert_eq!(ended_how("L8", 2, Some("devhub-lease-L8-2"), 101, false, Some(&kernel[..kernel.find("NVRM").unwrap()])), ("L8 run 2 ended without its summary: exit 101; no OOM kill".to_string(), false));
+        assert_eq!(ended_how("L9", 1, None, -1, true, None).0, "L9 run 1 ended without its summary: its exit is unknown (its hub restarted while it ran, and its wrapper wrote no exit: it was killed too); the kernel log was not read here");
+        assert_eq!(ended_how("L9", 2, None, -1, false, None).0, "L9 run 2 ended without its summary: its exit is unknown (its hub could not reap it); the kernel log was not read here", "a run of this hub's never says its hub restarted");
         let log = std::env::temp_dir().join(format!("devhub-tail-{}.log", std::process::id()));
         std::fs::write(&log, (1..=30).map(|i| format!("line {i}\n")).collect::<String>()).unwrap();
         let tail = log_tail(&log, TAIL_LINES);
@@ -4757,6 +4919,23 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// A beat's contact beats the leases it names: its look at their runs comes after and takes a
+    /// while on a loaded box, and a watchdog tick in between must not find the master there and
+    /// them unbeaten (a master restart test lost three live leases so, 11-05).
+    #[test]
+    fn a_beat_beats_its_leases_before_its_look() {
+        let (x, base, _) = test_exec("bl", Opts { tick: Duration::from_secs(3600), ..Opts::default() });
+        assert!(x.handle("lease-start", r#"{"id":"L5","lane":"a","kind":"long","rev":null}"#)[0].contains("\"ok\":1"));
+        let t = x.leases.lock().unwrap()["L5"].beat;
+        let no_beat = x.opts.no_beat;
+        x.master_contact(t, &["L5"]);
+        // the next beat's contact, its look still going when the tick comes
+        x.master_contact(t + no_beat * 9 / 10, &["L5"]);
+        x.expire_at(t + no_beat + no_beat / 2);
+        assert!(x.leases.lock().unwrap().contains_key("L5"), "beaten by its contact");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     #[test]
     fn watchdog_ends_a_lease_without_beats() {
         // the test's clock: the watchdog thread never ticks here, `expire_at` says what time it is
@@ -4804,7 +4983,6 @@ mod tests {
         assert_eq!(said("lease: the master is back on t after 600 s away; 2 lease(s) kept for it; L10 it no longer holds end"), 1);
         assert_eq!(said("lease: L10 long of kept ended by t itself: the master, back, no longer holds it"), 1);
         x.master_contact(back + no_beat / 2, &["L8"]);
-        x.leases.lock().unwrap().get_mut("L8").unwrap().beat = back + no_beat / 2;
         x.expire_at(back + no_beat);
         assert!(x.leases.lock().unwrap().contains_key("L8"), "beaten");
         assert!(!x.leases.lock().unwrap().contains_key("L12"), "started while it was away, not beaten since it is back");
@@ -4896,7 +5074,7 @@ mod tests {
         let (child, hold) = os::lease_spawn(&mut c, Some(&exit)).unwrap();
         let pid = child.id();
         let start = os::proc_start(pid).unwrap();
-        let run = Arc::new(Run { request: String::new(), started_ms: 0, spawned_ms: 0, ended_ms: AtomicU64::new(0), n: 1, pid, start, unit: None, log: base.join("run-1.log"), exit: Mutex::new(None), ours: true, detachable: false, hold, exit_file: exit, cache: Mutex::new(None), usage: Mutex::new(Usage::default()) });
+        let run = Arc::new(Run { request: String::new(), started_ms: 0, spawned_ms: 0, ended_ms: AtomicU64::new(0), n: 1, pid, start, unit: None, log: base.join("run-1.log"), exit: Mutex::new(None), ours: true, detachable: false, hold, exit_file: exit, cache: Mutex::new(None), usage: Mutex::new(Usage::default()), stopped: AtomicBool::new(false) });
         let t = Instant::now();
         while !file.with_extension("ready").exists() {
             assert!(t.elapsed() < Duration::from_secs(60), "the app did not start");
@@ -5116,6 +5294,49 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// A launch is a run of its lease, under its wrapper: its pid is the app's, its environment the
+    /// launch's, and its end is its lease's to tell. One that quit by itself ends its lease with no
+    /// abnormal line (a timed lease's launch that quit ended as "its exit is unknown (its hub
+    /// restarted while it ran)", no hub having restarted, and its lane ran its whole timed series
+    /// again, 11-05); a hub restart under one loses nothing (the new hub reads its exit and log);
+    /// one stopped on purpose ended as asked.
+    #[cfg(unix)]
+    #[test]
+    fn a_launch_is_a_run_its_hub_restart_keeps() {
+        let (x, base, _) = test_exec("launch", Opts { scopes: Some(false), ..Opts::default() });
+        std::fs::create_dir_all(&base).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let launch = |x: &Exec, id: &str, script: &str| {
+            let mut cmd = std::process::Command::new("sh");
+            cmd.args(["-c", script]).env("LAUNCHED", "yes").current_dir(&base);
+            let tx = tx.clone();
+            x.handle("lease-start", &format!(r#"{{"id":"{id}","lane":"b","kind":"{}","rev":null}}"#, if id == "T2" { "test" } else { "timed" }));
+            x.launch(id, &cmd, &base.join(format!("{id}.log")), Box::new(move |app, code| { let _ = tx.send((app, code)); })).unwrap()
+        };
+        let quit = launch(&x, "T1", "echo $$; echo $LAUNCHED; exit 0");
+        assert_eq!(rx.recv().unwrap(), (quit.app, 0), "its end is said with the app's pid");
+        let (out, code) = log_until_exit(&x, "T1", quit.n);
+        assert_eq!((out, code), (format!("{}\nyes\n", quit.app), 0), "the app's own pid and the launch's environment");
+        let e = x.handle("lease-end", "T1 released");
+        assert!(e[0].contains("\"abnormal\":null"), "a launch that quit by itself ended normally: {e:?}");
+
+        let runs_on = launch(&x, "T2", "sleep 1; echo up; exit 3");
+        assert_ne!(runs_on.app, runs_on.leader, "the wrapper leads its group");
+        assert!(x.restart_blocker(&x.leases.lock().unwrap()).is_none(), "a restart waits for no launch");
+        let y = x.restart(Opts { scopes: Some(false), ..Opts::default() });
+        assert_eq!(log_until_exit(&y, "T2", runs_on.n), ("up\n".to_string(), 3), "the new hub reads its log and exit");
+        let e = y.handle("lease-end", "T2 released");
+        assert!(e[0].contains("T2 run 1 ended without its summary: exit 3"), "its lease's end says how it ended: {e:?}");
+
+        let stopped = launch(&y, "T3", "exec sleep 300");
+        y.launch_stopped(stopped.leader);
+        assert!(makepad_remote::group::signal(stopped.leader, false));
+        assert_eq!(log_until_exit(&y, "T3", stopped.n).1, 143);
+        let e = y.handle("lease-end", "T3 released");
+        assert!(e[0].contains("\"abnormal\":null"), "a launch stopped on purpose ended as asked: {e:?}");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     /// A Windows run's job outlives its hub's handle to it (the hub's exit: its wrapper holds it
     /// open), and a hub takes it back by its run's exit file: its processes are counted and ended
     /// through it. A run whose processes all ended has no job left to take back.
@@ -5159,7 +5380,7 @@ mod tests {
     fn a_rewritten_exit_is_never_read_empty() {
         let base = std::env::temp_dir().join(format!("devhub-exec-exit-rewrite-{}", std::process::id()));
         std::fs::create_dir_all(&base).unwrap();
-        let run = Arc::new(Run { request: String::new(), started_ms: 0, spawned_ms: 0, ended_ms: AtomicU64::new(0), n: 1, pid: 0, start: 0, unit: None, log: base.join("run-1.log"), exit: Mutex::new(None), ours: true, detachable: false, hold: os::Hold::none(), exit_file: exit_file(&base, "L1", 1), cache: Mutex::new(None), usage: Mutex::new(Usage::default()) });
+        let run = Arc::new(Run { request: String::new(), started_ms: 0, spawned_ms: 0, ended_ms: AtomicU64::new(0), n: 1, pid: 0, start: 0, unit: None, log: base.join("run-1.log"), exit: Mutex::new(None), ours: true, detachable: false, hold: os::Hold::none(), exit_file: exit_file(&base, "L1", 1), cache: Mutex::new(None), usage: Mutex::new(Usage::default()), stopped: AtomicBool::new(false) });
         run.finished(7);
         let writer = { let run = run.clone(); std::thread::spawn(move || for _ in 0..2000 { run.finished(7) }) };
         let mut failed: BTreeMap<String, u32> = BTreeMap::new();

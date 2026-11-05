@@ -163,14 +163,93 @@ pub fn peer_endpoint(name: &str, peers: &Arc<Mutex<Peers>>) -> Endpoint {
     ep
 }
 
-/// Listens on the control socket unless a live hub already serves it.
+/// The control socket's listener, kept open over the master's exec into its next build
+/// ([`keep_control_over_exec`]): a client that dials meanwhile queues on it and is served once the
+/// new build listens, where the closed socket refused it and every holder said "master not
+/// reachable" (11-05). `<pid>:<fd>`: an exec keeps the pid, so a child, which inherits the
+/// environment but not the descriptor, takes nothing.
+#[cfg(unix)]
+const CONTROL_FD: &str = "DEVHUB_CONTROL_FD";
+/// The control socket's listener in this process, once [`listen_control`] has it.
+#[cfg(unix)]
+static CONTROL: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
+
+/// The descriptor of the control socket's listener at `path` that this process's previous image
+/// kept open for it, if there is one.
+#[cfg(unix)]
+fn kept_control(path: &std::path::Path) -> Option<i32> {
+    use std::os::unix::io::FromRawFd;
+    let kept = std::env::var(CONTROL_FD).ok()?;
+    let (pid, fd) = kept.split_once(':')?;
+    let fd: i32 = fd.parse().ok().filter(|_| pid.parse() == Ok(std::process::id()))?;
+    // only looked at: ManuallyDrop leaves the descriptor as it is, whatever it turns out to be
+    // SAFETY: a socket call on a descriptor number; one that is no socket fails (ENOTSOCK, EBADF)
+    let listener = std::mem::ManuallyDrop::new(unsafe { std::os::unix::net::UnixListener::from_raw_fd(fd) });
+    (listener.local_addr().ok()?.as_pathname() == Some(path)).then_some(fd)
+}
+
+/// This process holds the control socket's listener from its previous image: no other hub
+/// serves it, however a dial to it goes now (it queues until this one listens).
+pub fn control_kept() -> bool {
+    #[cfg(unix)]
+    {
+        kept_control(&proto::control_socket()).is_some()
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
+/// Keeps the control socket's listener open over `cmd`'s exec of this process: [`listen_control`]
+/// in the new image serves it.
+#[cfg(unix)]
+pub fn keep_control_over_exec(cmd: &mut std::process::Command) {
+    use std::os::unix::process::CommandExt;
+    extern "C" {
+        fn fcntl(fd: i32, cmd: i32, ...) -> i32;
+    }
+    let fd = CONTROL.load(std::sync::atomic::Ordering::Relaxed);
+    if fd < 0 {
+        cmd.env_remove(CONTROL_FD);
+        return;
+    }
+    cmd.env(CONTROL_FD, format!("{}:{fd}", std::process::id()));
+    // close-on-exec off at the exec itself (an exec runs these hooks in place, last), so no child
+    // started before it gets the listener
+    // SAFETY: fcntl only (F_GETFD 1, F_SETFD 2, FD_CLOEXEC 1 on Linux and macOS)
+    unsafe {
+        cmd.pre_exec(move || {
+            let flags = fcntl(fd, 1);
+            if flags < 0 || fcntl(fd, 2, flags & !1) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+/// Listens on the control socket unless a live hub already serves it; the listener this
+/// process's previous image kept open for it ([`keep_control_over_exec`]) is served as it is.
 pub fn listen_control(ep: &Endpoint) -> Result<PathBuf, String> {
     let path = proto::control_socket();
+    #[cfg(unix)]
+    if let Some(fd) = kept_control(&path) {
+        use std::os::unix::io::FromRawFd;
+        // SAFETY: kept_control found the listening socket at `path` there, and nothing else owns it
+        makepad_remote::carrier::unix::serve_listener(ep, unsafe { std::os::unix::net::UnixListener::from_raw_fd(fd) });
+        CONTROL.store(fd, std::sync::atomic::Ordering::Relaxed);
+        return Ok(path);
+    }
     if makepad_remote::link::Client::new(makepad_remote::link::Target::Unix(path.clone()), "probe").conn().is_ok() {
         return Err(format!("a devhub already serves {}", path.display()));
     }
     std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| format!("{}: {e}", path.display()))?;
-    makepad_remote::carrier::unix::listen_at(ep, &path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let listening = makepad_remote::carrier::unix::listen_at(ep, &path).map_err(|e| format!("{}: {e}", path.display()))?;
+    #[cfg(unix)]
+    CONTROL.store(listening, std::sync::atomic::Ordering::Relaxed);
+    #[cfg(not(unix))]
+    let () = listening;
     Ok(path)
 }
 

@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 /// The first two are the CI boxes (their lease.conf opts in).
 const NODES: [&str; 6] = ["c1", "c2", "n3", "n4", "n5", "n6"];
 /// The nodes' no-beat limit here (60 s on a box), five of the master's beats ([`PACE`]); it is
-/// gone for longer, past several checks of theirs.
+/// gone until each box holding its leases has said it is away.
 const NO_BEAT: Duration = Duration::from_secs(1);
 const PACE: crate::lease::master::Pace = crate::lease::master::Pace { beat: Duration::from_millis(200), caps: Duration::from_millis(500) };
 
@@ -206,7 +206,9 @@ fn a_master_restart_ends_nothing() {
     // CARGO_HOME keeps the box's rustup toolchain from going ahead of them in the runs' PATH)
     let release = base.join("release");
     let once = |name: &str, body: &str| format!("#!/bin/sh\necho \"$*\" >> {}/{name}\necho before\nwhile [ ! -e \"{}\" ]; do sleep 0.02; done\n{body}\n", ran.display(), release.display());
-    script(&bin.join("cargo"), &once("cargo", "echo 0 errors\necho \"test result: ok. 1 passed; 0 failed\"\nexit 0"));
+    // (the JIT stage before a box's shards, `makepad --version`: the box keeps that binary)
+    let version = "#!/bin/sh\ncase \"$*\" in *' -- --version') echo makepad; exit 0;; esac\n";
+    script(&bin.join("cargo"), &once("cargo", "echo 0 errors\necho \"test result: ok. 1 passed; 0 failed\"\nexit 0").replacen("#!/bin/sh\n", version, 1));
     script(&bin.join("git"), &format!("#!/bin/sh\nif [ \"$1\" = -C ]; then echo {main}; else echo {work}; fi\n"));
     script(&bin.join("leg"), &once("leg", "echo TESTLEG-OK\nexit 0"));
     script(&bin.join("job"), &once("job", "echo after\nexit 7"));
@@ -269,6 +271,11 @@ fn a_master_restart_ends_nothing() {
     let (job_lease, leg_lease, shard) = (text(&job0(&s).unwrap(), "lease"), text(&leg0(&s).unwrap(), "lease"), shard_running(&s).unwrap());
     let allapps_lease = text(&allapps_running(&s).unwrap(), "lease");
     let (shard_id, shard_lease) = (text(&shard, "id"), text(&shard, "lease"));
+    // the boxes those leases are on
+    let mut held: Vec<String> = [job0(&s).unwrap(), leg0(&s).unwrap(), allapps_running(&s).unwrap()].iter().chain(shards_of(&s).iter().filter(|x| !text(x, "lease").is_empty())).map(|x| text(x, "node")).collect();
+    held.sort();
+    held.dedup();
+    assert!(!held.is_empty() && held.iter().all(|n| NODES.contains(&n.as_str())), "{held:?}: {}", s.to_json());
 
     // a client waits for the job: the kill cuts its call, and it asks again until it has the result
     let socket = home.join("devhub/devhub.sock");
@@ -291,9 +298,14 @@ fn a_master_restart_ends_nothing() {
     // the master dies under all three, and comes back on its state
     let _ = master.kill();
     let _ = master.wait();
-    // gone past the nodes' no-beat limit: they keep its leases for it; readiness below, not elapsed
-    // time, releases the tools
-    std::thread::sleep(NO_BEAT + NO_BEAT / 2);
+    // gone past the nodes' no-beat limit: each box holding its leases says it keeps them for it.
+    // Their word, not a time: when a box's watchdog sees it gone depends on the box's load.
+    // Readiness below, not elapsed time either, releases the tools
+    let away = |n: &String| format!(": no call from it on {n};");
+    until("every box holding its leases saw the master away", &|_| {
+        let log = std::fs::read_to_string(base.join("nodes.log")).unwrap_or_default();
+        held.iter().all(|n| log.contains(&away(n)))
+    });
     let ready = base.join("master.log");
     roles.0.push(role("master", "orch::restart_tests::restart_role_master").stderr(std::fs::File::create(&ready).unwrap()).spawn().unwrap());
     // only the new master writes this log, after restoring leases and starting every workflow
@@ -337,9 +349,6 @@ fn a_master_restart_ends_nothing() {
     let last = state().unwrap().get("allapps").and_then(|a| a.get("last")).cloned().unwrap();
     assert_eq!((text(&last, "verdict").as_str(), text(&last, "lease")), ("ok", allapps_lease.clone()), "{}", last.to_json());
     assert_eq!(count("allapps"), 1, "allapps ran once");
-    // (the nodes did go past their no-beat limit without it)
-    let nodes_log = std::fs::read_to_string(base.join("nodes.log")).unwrap_or_default();
-    assert!(nodes_log.contains("devhub: lease: master away "), "{nodes_log}");
     let ended = std::fs::read_to_string(home.join("devhub/leases.jsonl")).unwrap_or_default();
     assert!(ended.lines().any(|l| l.contains(&format!("\"id\":\"{leg_lease}\""))), "the leg kept its lease {leg_lease}: {ended}");
     drop(roles);

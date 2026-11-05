@@ -231,7 +231,7 @@ pub mod tests {
             let key = id::generate_key().unwrap();
             id::Me::new(key, root.issue(name, role, now + 3600, from, &id::point_of(&key)).unwrap()).unwrap()
         };
-        (fleet, mk("mac", Role::Device, Some([10, 0, 0, 222].into())), mk("quest", Role::Paired, None))
+        (fleet, mk("mac", Role::Device, Some([192, 0, 2, 1].into())), mk("quest", Role::Paired, None))
     }
 
     fn order(me: &id::Me, words: &str) -> String {

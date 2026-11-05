@@ -183,6 +183,22 @@ mod tests {
         assert!(hits[2].starts_with("private: 2 hit(s)"), "{hits:?}");
     }
 
+    /// An address written as Rust's byte array or with Ipv4Addr::new is an address too: a test's
+    /// `[10, 0, 0, N].into()` went public unseen (11-05). The documentation and test ranges, and
+    /// arrays that are no address, stay fine.
+    #[cfg(unix)]
+    #[test]
+    fn an_address_as_a_byte_array_or_an_ipv4addr_is_one() {
+        let hit = |s: &str| private_check(&root(), &format!("+++ b/a.rs\n@@ -0,0 +1 @@\n+{s}\n"), &[]).err().is_some_and(|h| h[0] == "a.rs:1: lan-address");
+        // built at run time, so this file never holds the shapes it tests
+        for s in [format!("Some([{}, 0, 0, 222].into())", 10), format!("Ipv4Addr::new({}, 1, 2, 3)", 10), format!("Ipv4Addr::new({},0,0,9)", 10), format!("[{}, 168, 1, 20]", 192), format!("Ipv4Addr::new(172, {}, 0, 1)", 20), format!("[172, {}, 4, 5]", 16)] {
+            assert!(hit(&s), "{s}");
+        }
+        for s in ["Some([192, 0, 2, 1].into())", "Ipv4Addr::new(127, 0, 0, 1)", "[10, 20, 30, 40]", "Ipv4Addr::new(10, 77, 0, 3)", "[192, 168, 77, 1]", "[172, 16, 77, 2]", "[172, 15, 0, 1]"] {
+            assert!(!hit(s), "{s}");
+        }
+    }
+
     /// A lane's commit with a private shape in its message is refused as it is written, in both
     /// repositories; a clean one goes in, and the hook stays as it is when installed again.
     #[test]

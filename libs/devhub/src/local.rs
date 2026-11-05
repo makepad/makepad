@@ -53,6 +53,8 @@ pub struct Jit {
     pub observe: bool,
     /// `makepad test`'s run: its result is its verdict
     pub test_run: bool,
+    /// the mark of the lease it runs in (its discovery file's `lease`)
+    pub lease: Option<String>,
     client: Client,
 }
 
@@ -251,6 +253,7 @@ impl Local {
                     session_log: app.text("session_log"),
                     observe: app.serves("observe"),
                     test_run: app.fields.iter().any(|f| f.0 == "test_run" && f.1 == "true"),
+                    lease: app.text("lease"),
                     client,
                 };
                 st.jits.insert(app.pid, jit.clone());
@@ -333,19 +336,24 @@ impl Local {
         let up = proto::wall_ms().saturating_sub(jit.started_ms) / 1000;
         // the hub stopped it (its lease ended, a prewarm got what it wanted): no exit cleanup, and
         // no crash either
-        let stopped = crashed.then(|| crate::lease::exec::stopped_with(jit.pid, &jit.socket)).flatten();
+        let stopped = crashed.then(|| crate::lease::exec::stopped_with(jit.pid, jit.lease.as_deref(), &jit.socket)).flatten();
         // a test's program: some end on purpose (crash injection kills its writers at each durable
         // write, a CI leg kills the app it checks), and the test's result is the verdict: 56 such
         // "crashes" of one passing test in 8 min buried the real ones in the inbox (11-04)
-        let tested = crashed && (jit.test_run || crate::lease::exec::in_test_lease(&jit.socket));
-        let rec = if let Some(by) = stopped {
+        let tested = crashed && (jit.test_run || crate::lease::exec::in_test_lease(jit.lease.as_deref()));
+        if crashed {
+            // what its exit cleanup did not remove: its discovery file, and its socket in the
+            // user's socket dir (a lease's scratch dir no longer takes it along)
             let _ = std::fs::remove_file(registry_file(jit.pid));
+            if jit.socket.ends_with(&format!("makepad-remote-{}.sock", jit.pid)) {
+                let _ = std::fs::remove_file(&jit.socket);
+            }
+        }
+        let rec = if let Some(by) = stopped {
             hub_record(&self.machine, &jit.app, jit.pid, "exit", Sev::Info, format!("stopped {by} after {up} s"), String::new())
         } else if tested {
-            let _ = std::fs::remove_file(registry_file(jit.pid));
             hub_record(&self.machine, &jit.app, jit.pid, "exit", Sev::Info, format!("ended without its exit cleanup after {up} s: a test's program, its result says"), String::new())
         } else if crashed {
-            let _ = std::fs::remove_file(registry_file(jit.pid));
             let tail = jit.session_log.as_deref().map(log_tail).unwrap_or_default();
             let last = tail.lines().rev().find(|l| !l.trim().is_empty()).map(|l| proto::clean(l, 200)).unwrap_or_default();
             let detail = format!("{{\"socket\":{},\"session_log\":{},\"log_tail\":{}}}", json_str(&jit.socket), json_str(jit.session_log.as_deref().unwrap_or("")), json_str(&tail));

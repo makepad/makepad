@@ -191,7 +191,7 @@ pub fn start_autosync(sock: std::path::PathBuf, say_waits: Box<dyn Fn(&str, Opti
 /// The log of a running launch of this node (None: not one of its launches).
 pub fn launch_log(pid: u32) -> Option<std::path::PathBuf> {
     #[cfg(feature = "checkout")]
-    return launch::ledger(pid).map(|(_, _, log)| log);
+    return launch::ledger(pid).map(|(_, _, log, _)| log);
     #[cfg(not(feature = "checkout"))]
     {
         let _ = pid;

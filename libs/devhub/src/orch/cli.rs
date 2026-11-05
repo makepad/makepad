@@ -529,7 +529,8 @@ fn job(c: &Client, words: &[&str], json: bool) -> i32 {
                     }
                     return if shown.iter().all(|j| j.state == "ok") { 0 } else { 1 };
                 }
-                // an idle lease wakes its waiter, once; the job runs on and the next wait sits it out
+                // an idle lease, or a timed one told to yield its box, wakes its waiter, once; the job
+                // runs on and the next wait sits it out
                 let told = one(c, "job", &format!("job idle {}", ids.join(" "))).unwrap_or(Value::Null);
                 let told = told.as_arr().unwrap_or(&[]);
                 for t in told {
@@ -751,8 +752,9 @@ fn look(c: &Client, lv: &str, id: &str, timeout: &str) -> i32 {
         Err(e) => return fail(e),
     };
     if x.test { return fail(format!("{id} runs tests: live wait {id} verdict")); }
-    let waits: &[&str] = if x.patch.is_some() { &["patched", "frame"] } else { &["frame"] };
-    for what in waits {
+    // "patched" with no edit yet too: a save just made may not be heard yet (its first edit's
+    // look grabbed the frame from before it, 11-05)
+    for what in ["patched", "frame"] {
         x = match retry_master(|| one(c, "live", &format!("{lv} wait {id} {what} {timeout}"))) {
             Ok(v) => crate::state::live_from(&v),
             Err(e) => return fail(e),
@@ -783,6 +785,10 @@ fn look(c: &Client, lv: &str, id: &str, timeout: &str) -> i32 {
     let png = dir.join(format!("{id}-{}{drawn}.png", n + 1));
     if let Err(e) = std::fs::rename(&got[0].0, &png) { return fail(format!("{}: {e}", png.display())); }
     print!("{}", super::live::render(&x));
+    // what the grab says about its frame: one from before an edit, or one it cannot vouch for
+    for l in v.get("lines").and_then(Value::as_arr).unwrap_or(&[]).iter().filter_map(Value::as_str).filter(|l| l.starts_with("STALE:") || l.starts_with("unverified:")) {
+        println!("{l}");
+    }
     println!("look: {}", png.display());
     0
 }

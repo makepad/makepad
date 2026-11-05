@@ -52,6 +52,12 @@ pub const PREBUILD_LANE_PREFIX: &str = "prebuild-";
 /// lease ends and the tmp goes ([`client::kept`]).
 pub const KEEP_DIR: &str = "keep";
 
+/// The file in a lease's tmp its node makes when its run is to stop at its next step
+/// (`DEVHUB_YIELD`: a timed run past twice its estimate while a timed ask waits on its box,
+/// [`sched::Sched::say_overruns`]). It holds why. A timed series or bench checks it between steps
+/// and, once it exists, stops after the current step with its partial results and releases.
+pub const YIELD_FILE: &str = "yield";
+
 /// What a lease guards (DESIGN.md §10.1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Kind {

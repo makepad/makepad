@@ -101,6 +101,9 @@ pub fn start(ep: &makepad_remote::Endpoint, machine: &str, leases: Arc<LeaseMast
     if let Err(e) = roll::keep_started_binary(&repo) {
         store.event("update", crate::proto::Sev::Warn, format!("{e}: a rollback goes back to the file a restart finds"), None);
     }
+    // a lane's lease comes from the worktree the lane registry holds for it
+    let lanes = store.clone();
+    leases.set_lane_trees(Arc::new(move |lane: &str| lanes.read(|d| d.lanes.iter().rev().find(|l| l.name == lane && l.state == "live").map(|l| l.path.clone()))));
     let ctx = Arc::new(Ctx { store, leases, machine: machine.to_string(), repo, home: crate::proto::home(), monitor });
     for svc in SERVICES {
         let c = ctx.clone();
