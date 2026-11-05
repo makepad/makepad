@@ -11,7 +11,7 @@ use crate::{
 use std::sync::Arc;
 
 // Demand certificates belong to the graph; crate records keep only their own selection.
-pub const VERSION: u32 = 22;
+pub const VERSION: u32 = 25;
 
 pub(crate) mod strings;
 
@@ -202,12 +202,12 @@ fields!(MTok, kind, text, pos);
 // RuleInput is only a parse cache; keep the image format and semantic hashes unchanged.
 impl Codec for MacroDef {
     fn put(&self, w: &mut Vec<u8>) {
-        self.name.put(w); self.krate.put(w); self.exported.put(w); self.arms.put(w);
-        self.builtin.put(w); self.def_file.put(w); self.def_pos.put(w); self.def_mod.put(w);
+        self.name.put(w); self.krate.put(w); self.exported.put(w); self.edition.put(w); self.arms.put(w);
+        self.builtin.put(w); self.def_file.put(w); self.def_pos.put(w); self.scope_pos.put(w); self.def_mod.put(w);
     }
     fn get(r: &mut Decode<'_>) -> Option<Self> {
-        Some(Self { name: Codec::get(r)?, krate: Codec::get(r)?, exported: Codec::get(r)?, arms: Codec::get(r)?,
-            builtin: Codec::get(r)?, def_file: Codec::get(r)?, def_pos: Codec::get(r)?, def_mod: Codec::get(r)?, input: None })
+        Some(Self { name: Codec::get(r)?, krate: Codec::get(r)?, exported: Codec::get(r)?, edition: Codec::get(r)?, arms: Codec::get(r)?,
+            builtin: Codec::get(r)?, def_file: Codec::get(r)?, def_pos: Codec::get(r)?, scope_pos: Codec::get(r)?, def_mod: Codec::get(r)?, input: None })
     }
 }
 fields!(UseItem, module, path, bind, is_pub);

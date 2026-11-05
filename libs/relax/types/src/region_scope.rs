@@ -87,9 +87,17 @@ impl ScopeTree {
     }
 }
 
-/// The sole edition hook. Frontend expansion contexts will replace this file-level input.
-/// rustc_hir_analysis/src/check/region.rs:146,357 uses the node's span edition.
-pub fn node_edition(file: &ParsedFile, _node: Node) -> u16 { file.edition }
+/// rustc_hir_analysis/src/check/region.rs:146,357 uses the node's span edition,
+/// including the definition-site edition of macro-generated block delimiters.
+pub fn node_edition(file: &ParsedFile, node: Node) -> u16 {
+    let pos = match node {
+        Node::Expr(e) | Node::Synthetic(e, _) => file.ast.expr(ExprId(e)).lo,
+        Node::Block(b) => file.ast.block(BlockId(b)).hi.saturating_sub(1),
+        // Only expression and block scopes have edition-dependent destruction rules.
+        Node::Statement(_) | Node::Pattern(_) | Node::Arm(_) => return file.edition,
+    };
+    file.edition_at(pos)
+}
 
 /// Read-only provider for a typechecked item and its nested bodies. No consumer switches here.
 /// A query owner can cache this alongside the parsed body and its resolved constructor identities.

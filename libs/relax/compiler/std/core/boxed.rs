@@ -405,6 +405,9 @@ impl<'a, 'b> From<&'b str> for Box<dyn Error + 'a> {
 // library/alloc/src/boxed.rs:2420: `E: Error` is Sized, so Box<dyn Error> is not an Error and
 // `From<E: Error> for Box<dyn Error>` does not overlap the reflexive `From<T> for T`
 impl<E: Error> Error for Box<E> {
+    fn provide<'a>(&'a self, request: &mut crate::error::Request<'a>) {
+        Error::provide(&**self, request);
+    }
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         Error::source(&**self)
     }
@@ -414,6 +417,28 @@ impl Box<dyn Error> {
     pub fn downcast<T: Error + 'static>(self) -> Result<Box<T>, Box<dyn Error>> {
         if self.is::<T>() {
             let raw: *mut dyn Error = Box::into_raw(self);
+            Ok(unsafe { Box::from_raw(raw as *mut T) })
+        } else {
+            Err(self)
+        }
+    }
+}
+
+impl Box<dyn Error + Send> {
+    pub fn downcast<T: Error + Send + 'static>(self) -> Result<Box<T>, Box<dyn Error + Send>> {
+        if self.type_id_internal() == crate::any::TypeId::of::<T>() {
+            let raw: *mut (dyn Error + Send) = Box::into_raw(self);
+            Ok(unsafe { Box::from_raw(raw as *mut T) })
+        } else {
+            Err(self)
+        }
+    }
+}
+
+impl Box<dyn Error + Send + Sync> {
+    pub fn downcast<T: Error + Send + Sync + 'static>(self) -> Result<Box<T>, Box<dyn Error + Send + Sync>> {
+        if self.is::<T>() {
+            let raw: *mut (dyn Error + Send + Sync) = Box::into_raw(self);
             Ok(unsafe { Box::from_raw(raw as *mut T) })
         } else {
             Err(self)

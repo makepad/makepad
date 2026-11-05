@@ -65,7 +65,7 @@ pub fn key(p: &crate::parser::Parser, kind: &str, lo: u32, hi: u32, contextual: 
     if lowered {
         key.push(0);
         for o in p.token_origins.iter().filter(|o| o.lo < hi && o.hi > lo) {
-            for v in [o.lo.wrapping_sub(lo), o.hi.wrapping_sub(lo), o.source.file, o.source.lo, o.source.hi] { key.extend_from_slice(&v.to_le_bytes()); }
+            for v in [o.lo.wrapping_sub(lo), o.hi.wrapping_sub(lo), o.source.file, o.source.lo, o.source.hi, o.edition] { key.extend_from_slice(&v.to_le_bytes()); }
         }
     }
     Some(key)
@@ -85,6 +85,7 @@ pub fn key_tokens(p: &crate::parser::Parser, kind: &str, lo: u32, hi: u32, toks:
     // spans keeps its key.
     let mut file: Option<(u32, std::sync::Arc<crate::source::SourceFile>)> = None;
     let mut span = |key: &mut Vec<u8>, at: u32| -> Option<()> {
+        key.extend_from_slice(&p.edition_at(at).to_le_bytes());
         let mut s = p.source_span(at);
         if s.file == 0 { s.file = own; }
         if file.as_ref().is_none_or(|f| f.0 != s.file) {
@@ -152,7 +153,7 @@ pub fn rules_key(p: &crate::parser::Parser, def: &crate::macros::MacroDef, lo: u
     k.extend_from_slice(format!("{lo}:{:?}:{local}", p.krate).as_bytes());
     // Resolve the macro BEFORE looking up its expansion. Definition text AND definition
     // positions participate: an edit or a moved definition invalidates hygiene origins too.
-    k.extend_from_slice(format!("{:?}:{:?}:{:?}:{}:{:?}", def.name, def.krate, if local { "" } else { &def.def_file }, def.def_pos, def.arms).as_bytes());
+    k.extend_from_slice(format!("{:?}:{:?}:{}:{:?}:{}:{:?}", def.name, def.krate, def.edition, if local { "" } else { &def.def_file }, def.def_pos, def.arms).as_bytes());
     Some(k)
 }
 pub fn get_rules(key: &Option<Vec<u8>>) -> Option<Rules> {

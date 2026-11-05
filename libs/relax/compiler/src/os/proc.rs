@@ -177,6 +177,8 @@ mod unix {
     extern "C" {
         pub fn dlopen(name: *const u8, flags: i32) -> *mut u8;
         pub fn dlsym(handle: *mut u8, name: *const u8) -> *mut u8;
+        #[cfg(target_os = "linux")]
+        pub fn dlclose(handle: *mut u8) -> i32;
     }
 
     pub unsafe fn lookup(handle: *mut u8, name: *const u8) -> *mut u8 {
@@ -268,7 +270,37 @@ mod unix {
 #[cfg(target_os = "linux")]
 mod imp {
     pub use super::unix::{program_atexit, os_args_bytes, create_private, ensure_private_dir, exit, last_error, lookup, set_last_error};
-    use super::unix::{dlopen, dlsym};
+    use super::unix::{dlclose, dlopen, dlsym};
+
+    type NativeLookup = unsafe extern "C" fn(*const u8) -> *mut u8;
+    // load_path retains every dlopen handle for the process lifetime.
+    static NATIVE_LOOKUPS: std::sync::Mutex<Vec<NativeLookup>> = std::sync::Mutex::new(Vec::new());
+
+    thread_local! {
+        // glibc has not added a library to the global scope while its constructors run.
+        static LOADING: std::cell::RefCell<Vec<Vec<u8>>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    struct Loading;
+    impl Drop for Loading {
+        fn drop(&mut self) {
+            let _ = LOADING.try_with(|paths| paths.borrow_mut().pop());
+        }
+    }
+
+    unsafe fn find_loading(name: *const u8) -> *mut u8 {
+        // Do not hold the TLS borrow across loader calls: a constructor can reenter us.
+        let paths = LOADING.try_with(|paths| paths.borrow().clone()).unwrap_or_default();
+        for path in paths.iter().rev() {
+            // RTLD_LAZY | RTLD_NOLOAD obtains the initializing DSO's own lookup scope.
+            let handle = dlopen(path.as_ptr(), 1 | 4);
+            if handle.is_null() { continue; }
+            let p = dlsym(handle, name);
+            dlclose(handle);
+            if !p.is_null() { return p; }
+        }
+        std::ptr::null_mut()
+    }
 
     #[cfg(target_env = "gnu")]
     extern "C" {
@@ -292,7 +324,15 @@ mod imp {
                 }
             }
         }
-        dlsym(std::ptr::null_mut(), name)
+        let p = dlsym(std::ptr::null_mut(), name);
+        if !p.is_null() { return p; }
+        let p = find_loading(name);
+        if !p.is_null() { return p; }
+        for lookup in NATIVE_LOOKUPS.lock().unwrap_or_else(|e| e.into_inner()).iter() {
+            let p = lookup(name);
+            if !p.is_null() { return p; }
+        }
+        std::ptr::null_mut()
     }
 
     /// The C math library is not necessarily loaded into the host.
@@ -311,8 +351,35 @@ mod imp {
 
     /// A shared library by absolute path (--allow-c's native library), its symbols global.
     pub fn load_path(path: &str) -> bool {
-        // RTLD_NOW | RTLD_GLOBAL
-        unsafe { !dlopen(format!("{}\0", path).as_ptr(), 2 | 0x100).is_null() }
+        // RTLD_LAZY | RTLD_GLOBAL: the bridge exports archive functions before
+        // knowing which the JIT will call. Resolve function relocations on use,
+        // as native archive extraction would leave uncalled functions unlinked.
+        // Data relocations still resolve at load time; called missing symbols
+        // remain loader errors rather than being replaced with stubs.
+        unsafe {
+            let path_c = format!("{}\0", path).into_bytes();
+            LOADING.with(|paths| paths.borrow_mut().push(path_c.clone()));
+            let loading = Loading;
+            let handle = dlopen(path_c.as_ptr(), 1 | 0x100);
+            drop(loading);
+            if !handle.is_null() {
+                let resolver = dlsym(handle, b"__makepad_relax_native_lookup_v1\0".as_ptr());
+                if !resolver.is_null() {
+                    let lookup: NativeLookup = std::mem::transmute(resolver);
+                    let mut lookups = NATIVE_LOOKUPS.lock().unwrap_or_else(|e| e.into_inner());
+                    if !lookups.iter().any(|f| *f as usize == lookup as usize) { lookups.push(lookup); }
+                }
+                return true;
+            }
+            extern "C" {
+                fn dlerror() -> *const std::ffi::c_char;
+            }
+            let error = dlerror();
+            if !error.is_null() {
+                eprintln!("makepad: cannot load {}: {}", path, std::ffi::CStr::from_ptr(error).to_string_lossy());
+            }
+            false
+        }
     }
 
     pub fn load_library(name: &str, framework: bool) -> bool {

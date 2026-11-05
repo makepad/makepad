@@ -590,7 +590,7 @@ impl Layouts {
     /// edits may give fields in place -- named fields, no repr other than Rust's, not Copy (a
     /// bitwise copy would share the extension block).
     pub fn live_editable(&self, lcx: &LayoutCx<'_>, tcx: &Tcx, d: crate::program::DefId, adt: &crate::tcx::AdtT, t: TyId) -> bool {
-        if !LIVE_SESSION.load(std::sync::atomic::Ordering::Relaxed) {
+        if !LIVE_SESSION.load(std::sync::atomic::Ordering::Relaxed) || lcx.prog.session.options.fixed_layouts {
             return false;
         }
         let prog = lcx.prog;
@@ -612,7 +612,7 @@ impl Layouts {
     /// Live sessions (M10): an enum of the program's own crate with Rust's repr, which variants
     /// may be added to in place (tagged layout, no niche).
     pub fn live_editable_enum(&self, lcx: &LayoutCx<'_>, d: crate::program::DefId, adt: &crate::tcx::AdtT) -> bool {
-        if !LIVE_SESSION.load(std::sync::atomic::Ordering::Relaxed) || !adt.is_enum {
+        if !LIVE_SESSION.load(std::sync::atomic::Ordering::Relaxed) || lcx.prog.session.options.fixed_layouts || !adt.is_enum {
             return false;
         }
         let prog = lcx.prog;
@@ -1335,7 +1335,10 @@ impl Layouts {
                         if !self.decl_maybe_unsized(lcx, tcx, d2, depth + 1) {
                             return false;
                         }
-                        let s = self.field_ty(lcx, tcx, d2, 0, adt2.variants[0].fields.len() as u32 - 1, tcx.tys.list(a2));
+                        // This is the declaration's generic sizedness, not a concrete layout.
+                        // Substitute its tail without normalizing projections in unrelated
+                        // generic arguments (e.g. RefCell<Vec<Rc<C::Node>>> is always Sized).
+                        let s = tcx.tys.subst(lt, tcx.tys.list(a2));
                         self.ty_maybe_unsized(lcx, tcx, s, params, depth + 1)
                     }
                 }

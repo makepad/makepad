@@ -195,7 +195,7 @@ pub fn load(g: &Units, check_all_bins: bool) -> Result<Graph, String> {
         if let Some(i) = crate_paths.iter().position(|p| *p == norm) {
             map[ui] = i;
             if u.host {
-                crates[i].host = Some(HostUnit { features, deps: udeps });
+                crates[i].host = Some(HostUnit { features, deps: udeps, build_outputs: None });
             }
             if is_root_bin || (root == usize::MAX && roots.contains(&ui)) { root = i; }
             continue;
@@ -449,6 +449,12 @@ pub fn run_build_scripts(sess: &std::sync::Arc<crate::Session>, g: &mut Graph, t
     // an error naming the flag without it; Relax runs the other scripts
     let mut native_seeds: Vec<usize> = Vec::new();
     let mut check_skipped: Vec<usize> = Vec::new();
+    // An opt-in host build for scripts whose dependencies are not yet supported
+    // by the JIT. Application libraries still compile through Relax.
+    let cargo_scripts = std::env::var("MAKEPAD_RUN_NATIVE_BUILD_SCRIPTS").is_ok_and(|v| v == "1");
+    if cargo_scripts && native.is_none() {
+        return Err("MAKEPAD_RUN_NATIVE_BUILD_SCRIPTS=1 requires --allow-c".to_string());
+    }
     for (i, bs) in g.build_scripts.iter().enumerate() {
         let (_, pname, _) = &g.pkg[bs.krate];
         // A kept GPU-kernel script (`Artefact`) that links native code (makepad-ai-cuda's nvcc
@@ -458,7 +464,7 @@ pub fn run_build_scripts(sess: &std::sync::Arc<crate::Session>, g: &mut Graph, t
         if noop::script(bs, &g.raw) || !(kept_native || matches!(script_role(pname, &bs.features), ScriptRole::ToRemove)) {
             continue;
         }
-        if let Some(why) = crate::native::native_reason(g, bs) {
+        if let Some(why) = crate::native::native_reason(g, bs).or_else(|| cargo_scripts.then(|| format!("{pname}: host build script requested"))) {
             if native.is_none() {
                 // a script that runs a C compiler cannot work without one; `links =` / DEP_
                 // metadata alone run under Relax as before
@@ -544,6 +550,18 @@ pub fn run_build_scripts(sess: &std::sync::Arc<crate::Session>, g: &mut Graph, t
         for n in built.scripts {
             let also = g.build_scripts.iter().find(|b| b.krate == n.krate).map(|b| b.also.clone()).unwrap_or_default();
             for &k in std::iter::once(&n.krate).chain(&also) {
+                if n.host {
+                    if g.crates[k].host.is_some() {
+                        let (dir, name, ver) = &g.pkg[k];
+                        let mut env = pkg_env(dir, name, ver);
+                        env.push(("CARGO_CRATE_NAME".into(), g.crates[k].name.clone()));
+                        env.extend(n.env.iter().cloned());
+                        env.push(("OUT_DIR".into(), n.out_dir.clone()));
+                        // Keep host-feature cfgs out of the application crate.
+                        g.crates[k].host.as_mut().unwrap().build_outputs = Some((n.cfgs.clone(), env));
+                    }
+                    continue;
+                }
                 g.cfgs[k].extend(n.cfgs.iter().cloned());
                 g.env[k].extend(n.env.iter().cloned());
                 g.env[k].push(("OUT_DIR".to_string(), n.out_dir.clone()));

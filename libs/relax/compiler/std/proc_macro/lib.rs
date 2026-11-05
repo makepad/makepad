@@ -50,11 +50,12 @@ pub struct Span {
     el: u32,
     ec: u32,
     file: u32,
+    edition: u32,
 }
 
 // per thread: the host runs expansions on every parse worker at once
 std::thread_local! {
-    static CALL_SITE: std::cell::Cell<Span> = const { std::cell::Cell::new(Span { lo: 0, hi: 0, sl: 1, sc: 1, el: 1, ec: 1, file: 0 }) };
+    static CALL_SITE: std::cell::Cell<Span> = const { std::cell::Cell::new(Span { lo: 0, hi: 0, sl: 1, sc: 1, el: 1, ec: 1, file: 0, edition: 0 }) };
     // a macro call is running on this thread (bridge): rustc's bridge state is per thread too
     // (library/proc_macro/src/bridge/client.rs is_available: `state::with(|s| s.is_some())`)
     static IN_MACRO: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -70,11 +71,13 @@ impl Span {
     pub fn def_site() -> Span {
         Span::call_site()
     }
-    pub fn start(&self) -> LineColumn {
-        LineColumn { line: self.sl as usize, column: self.sc as usize }
+    /// A zero-width span immediately before this span, retaining its source context.
+    pub fn start(&self) -> Span {
+        Span { hi: self.lo, el: self.sl, ec: self.sc, ..*self }
     }
-    pub fn end(&self) -> LineColumn {
-        LineColumn { line: self.el as usize, column: self.ec as usize }
+    /// A zero-width span immediately after this span, retaining its source context.
+    pub fn end(&self) -> Span {
+        Span { lo: self.hi, sl: self.el, sc: self.ec, ..*self }
     }
     pub fn line(&self) -> usize {
         self.sl as usize
@@ -93,11 +96,11 @@ impl Span {
             Some(a)
         }
     }
-    pub fn resolved_at(&self, _other: Span) -> Span {
-        *self
+    pub fn resolved_at(&self, other: Span) -> Span {
+        Span { edition: other.edition, ..*self }
     }
     pub fn located_at(&self, other: Span) -> Span {
-        other
+        Span { edition: self.edition, ..other }
     }
     /// The source text is not kept with a span here (rustc may also answer None).
     pub fn source_text(&self) -> Option<String> {
@@ -889,7 +892,8 @@ pub mod __relax {
             let el = self.u32();
             let ec = self.u32();
             let file = self.u32();
-            Span { lo, hi, sl, sc, el, ec, file }
+            let edition = self.u32();
+            Span { lo, hi, sl, sc, el, ec, file, edition }
         }
         fn text(&mut self) -> String {
             let n = self.u32() as usize;
@@ -952,6 +956,7 @@ pub mod __relax {
         w32(w, s.el);
         w32(w, s.ec);
         w32(w, s.file);
+        w32(w, s.edition);
     }
 
     fn wtext(w: &mut Vec<u8>, s: &str) {

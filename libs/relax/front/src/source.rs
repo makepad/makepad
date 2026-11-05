@@ -30,9 +30,11 @@ pub struct TokenOrigin {
     pub lo: u32,
     pub hi: u32,
     pub source: SourceSpan,
+    /// Syntax-context edition, separate from the diagnostic source location.
+    pub edition: u32,
 }
 
-// SAFETY: repr(C), five u32s, no padding, pointers or invalid bit patterns.
+// SAFETY: repr(C), six u32s, no padding, pointers or invalid bit patterns.
 unsafe impl crate::image::Pod for TokenOrigin {}
 
 impl TokenOrigin {
@@ -113,7 +115,7 @@ impl SourceFile {
             let column = self.src[lo..hi].iter().filter(|b| **b & 0xc0 != 0x80).count() + 1;
             crate::pm_tokens::LineColumn { line, column }
         };
-        crate::pm_tokens::Span { file: span.file, lo: span.lo, hi: span.hi, start: lc(span.lo), end: lc(span.hi) }
+        crate::pm_tokens::Span { file: span.file, lo: span.lo, hi: span.hi, start: lc(span.lo), end: lc(span.hi), edition: 0 }
     }
 }
 
@@ -365,6 +367,6 @@ mod tests {
         assert_eq!(&*sources.get(id).unwrap().src, "é value\n".as_bytes());
         assert_eq!(source.hash(), crate::crate_image::file_hash(&source.path, &source.src));
         assert_ne!(edit.get(id).unwrap().hash(), source.hash());
-        assert_eq!(std::mem::size_of::<TokenOrigin>(), 20);
+        assert_eq!(std::mem::size_of::<TokenOrigin>(), 24);
     }
 }

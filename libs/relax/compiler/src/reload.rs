@@ -3074,17 +3074,62 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
     if errs.is_empty() {
         let rebuilt: Vec<u32> = slots.iter().chain(fresh.iter()).copied().collect();
         let new_files: Vec<u32> = news.iter().map(|x| x.1).collect();
+        // A stored fn item can keep calling the removed constructor. Rebuilding
+        // its caller does not necessarily instantiate the replacement async fn:
+        // the caller's old future may still be running. Prepare matching
+        // constructors so their poll bodies participate in compatibility checks.
+        let replacements: Vec<(DefId, Vec<TyId>)> = {
+            let u = &*up;
+            let signature = |d: DefId| -> Option<Vec<Vec<u8>>> {
+                let d = u.prog.def(d);
+                let pf = &u.prog.files[d.file as usize];
+                let item = pf.ast.item(d.item);
+                let crate::ast::ItemKind::Fn(sig, body, _) = &item.kind else { return None };
+                let sig = pf.ast.fn_sig(*sig);
+                if !sig.asyncness { return None; }
+                let end = body.map(|b| pf.ast.block(b).lo)
+                    .or_else(|| sig.lazy_body.map(|r| pf.tok(r.lo - 1).lo))?;
+                Some(toks_norm(pf, item.lo, end, &[]))
+            };
+            u.slots_of_defs(removed_defs.iter().copied()).into_iter().filter_map(|id| {
+                let FnKey::Inst(old, args) = &u.fns[id as usize].key else { return None };
+                if !u.closures_of_slots([id]).iter().any(|&c| u.fns[c as usize].compiled
+                    && matches!(u.fns[c as usize].key, FnKey::Closure(_, ce, _) if ce & crate::tcx::ASYNC_FN_BODY != 0)) {
+                    return None;
+                }
+                let sig = signature(*old)?;
+                added_defs.iter().copied().find(|&d| u.prog.def_path(d) == u.prog.def_path(*old)
+                    && signature(d).as_ref() == Some(&sig)).map(|d| (d, args.clone()))
+            }).collect()
+        };
+        for (d, args) in replacements {
+            let id = (&*up).fn_id(FnKey::Inst(d, args));
+            if !pre.iter().any(|(s, r)| *s == id && r.is_ok()) && !staged.iter().any(|(s, _)| *s == id) {
+                if let Ok(code) = compile_guarded(up, id) { pre.push((id, Ok(code))); }
+            }
+        }
         let pairs: Vec<(u32, u32)> = {
             let u = &*up;
             let is_body = |k: &FnKey| matches!(k, FnKey::Closure(_, ce, _) if *ce & crate::tcx::ASYNC_FN_BODY != 0);
             let mut v = Vec::new();
             let parents = rebuilt.iter().copied().chain(u.slots_of_defs(removed_defs.iter().copied()));
             let new_closures = u.closures_of_files(&new_files);
-            for o in u.closures_of_slots(parents) {
+            // Values can retain any earlier constructor, including one rebound
+            // by a previous edit. Compare those original states to this version
+            // too, rather than leaving them on the first replacement's code.
+            let old_files: Vec<u32> = u.prog.file_paths.iter().enumerate().filter_map(|(i, path)| {
+                (!new_files.contains(&(i as u32)) && news.iter().any(|(old, _)| &u.prog.file_paths[*old as usize] == path)).then_some(i as u32)
+            }).collect();
+            let replaced_paths: Vec<String> = removed_defs.iter().map(|&d| u.prog.def_path(d)).collect();
+            let mut old_closures = u.closures_of_slots(parents);
+            old_closures.extend(u.closures_of_files(&old_files));
+            old_closures.sort_unstable();
+            old_closures.dedup();
+            for o in old_closures {
                 let fo = &u.fns[o as usize];
                 trace_count("slot_visits", 1);
                 let (FnKey::Closure(of, oce, op), true) = (&fo.key, is_body(&fo.key) && fo.compiled) else { continue };
-                let replaced = matches!(&u.fns[*op as usize].key, FnKey::Inst(d, _) if removed_defs.contains(d));
+                let replaced = matches!(&u.fns[*op as usize].key, FnKey::Inst(d, _) if removed_defs.contains(d) || replaced_paths.contains(&u.prog.def_path(*d)));
                 if !(rebuilt.contains(op) || replaced) || new_files.contains(of) {
                     continue;
                 }
@@ -3109,19 +3154,28 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
             }
             let u = &*up;
             let shape = |id: u32| u.tcx.coro_slot_ty.get(&id).and_then(|t| u.tcx.coro_shapes.get(&t));
+            // Equal frame sizes do not make outputs or owned captures interchangeable:
+            // an old caller still uses its original output ABI and drop glue.
+            let interface = |id: u32| -> Option<(TyId, Vec<TyId>)> {
+                let ty = u.tcx.coro_slot_ty.get(&id)?;
+                let crate::types::TyKind::Closure(_, _, args) = u.tcx.tys.kind(ty) else { return None };
+                Some((args.closure_sig_as_fn_ptr_ty, u.closure_storage(ty).fields))
+            };
             let prefix = |id: u32| -> Option<Vec<Vec<u8>>> {
                 let FnKey::Closure(file, ce, _) = &u.fns[id as usize].key else { return None };
                 let pf = &u.prog.files[*file as usize];
                 let blk = pf.ast.block(crate::ast::BlockId(*ce & !crate::tcx::ASYNC_FN_BODY));
-                let last = pf.toks.iter().filter(|t| t.lo >= blk.lo && t.hi <= blk.hi && &pf.src[t.lo as usize..t.hi as usize] == b"await").map(|t| t.hi).max()?;
+                // A future with no await has no suspended body state. Its captured
+                // arguments and output still have to match, as checked above.
+                let last = pf.toks.iter().filter(|t| t.lo >= blk.lo && t.hi <= blk.hi && &pf.src[t.lo as usize..t.hi as usize] == b"await").map(|t| t.hi).max().unwrap_or(blk.lo);
                 Some(toks_norm(pf, blk.lo, last, &[]))
             };
             match (shape(o), shape(n), prefix(o), prefix(n)) {
-                (Some(a), Some(b), Some(pa), Some(pb)) if a == b && pa == pb => {
+                (Some(a), Some(b), Some(pa), Some(pb)) if a == b && pa == pb && interface(o).is_some() && interface(o) == interface(n) => {
                     rebind.push((o, n));
                     out.lines.push(format!("suspended `{}` values resume in the new code (same state up to the last await)", u.fns[o as usize].name));
                 }
-                _ => out.lines.push(format!("kept: suspended `{}` values finish on their old code (its code before an await or its saved state changed)", u.fns[o as usize].name)),
+                _ => out.lines.push(format!("kept: suspended `{}` values finish on their old code (its code before an await, saved state, captures or output changed)", u.fns[o as usize].name)),
             }
         }
     }

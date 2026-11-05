@@ -22,6 +22,8 @@ pub type Result = crate::result::Result<(), Error>;
 #[derive(Copy, Clone, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct Error;
 
+impl crate::error::Error for Error {}
+
 impl Display for Error {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
         Display::fmt("an error occurred when formatting an argument", f)

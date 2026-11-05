@@ -5,7 +5,7 @@ pub use crate::pm_tokens::*;
 
 // ---------------------------------------------------------------- bridge encoding
 // The byte form a macro's input/output crosses the JIT boundary in; mirrored by
-// std/proc_macro (`__relax`). span = 7 x u32 (lo, hi, start line/col, end line/col, file);
+// std/proc_macro (`__relax`). span = 8 x u32 (lo, hi, start line/col, end line/col, file, edition);
 // stream = u32 count + trees; tree = u8 tag (0 group, 1 ident, 2 punct, 3 literal) + span +
 // group: u8 delim (0 paren, 1 brace, 2 bracket, 3 none) + stream | ident: u8 raw + text |
 // punct: u32 char + u8 spacing (0 joint, 1 alone) | literal: text; text = u32 len + bytes.
@@ -15,7 +15,7 @@ fn w32(w: &mut Vec<u8>, v: u32) {
 }
 
 fn wspan(w: &mut Vec<u8>, s: &Span) {
-    for v in [s.lo, s.hi, s.start.line as u32, s.start.column as u32, s.end.line as u32, s.end.column as u32, s.file] {
+    for v in [s.lo, s.hi, s.start.line as u32, s.start.column as u32, s.end.line as u32, s.end.column as u32, s.file, s.edition] {
         w32(w, v);
     }
 }
@@ -88,7 +88,8 @@ impl<'a> Rd<'a> {
     fn span(&mut self) -> Option<Span> {
         let (lo, hi, sl, sc, el, ec) = (self.u32()?, self.u32()?, self.u32()?, self.u32()?, self.u32()?, self.u32()?);
         let file = self.u32()?;
-        Some(Span { lo, hi, start: LineColumn { line: sl as usize, column: sc as usize }, end: LineColumn { line: el as usize, column: ec as usize }, file })
+        let edition = self.u32()?;
+        Some(Span { lo, hi, start: LineColumn { line: sl as usize, column: sc as usize }, end: LineColumn { line: el as usize, column: ec as usize }, file, edition })
     }
     fn text(&mut self) -> Option<String> {
         let n = self.u32()? as usize;

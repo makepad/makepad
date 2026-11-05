@@ -109,8 +109,9 @@ impl Fcx<'_> {
     }
 
     /// :880-1203: collect candidates before testing receiver adjustments. Bounds on
-    /// a parameter and object methods have inherent priority; alias bounds extend
-    /// the trait candidates. All predicates retain their binders and lifetime args.
+    /// a parameter or projection and object methods have inherent priority;
+    /// declaration-site alias bounds extend the trait candidates. All predicates
+    /// retain their binders and lifetime args.
     fn assemble_probe_candidates(&self, steps: &[CandidateStep], name: Sym) -> (Vec<Candidate>, Vec<Candidate>) {
         let mut inherent = Vec::new();
         let mut extension = Vec::new();
@@ -128,7 +129,7 @@ impl Fcx<'_> {
                 }
             }
             match self.tcx.tys.kind(ty) {
-                TyKind::Param(_) => {
+                TyKind::Param(_) | TyKind::Alias(..) => {
                     let mut clauses = Vec::new();
                     for p in self.tcx.param_env_by_id(self.param_env).clauses.iter() {
                         if let PredicateKind::Clause(ClauseKind::Trait(tr)) = &p.kind {
@@ -136,6 +137,9 @@ impl Fcx<'_> {
                         }
                     }
                     self.assemble_candidates_for_bounds(clauses, name, 0, &mut inherent);
+                    if matches!(self.tcx.tys.kind(ty), TyKind::Alias(..)) {
+                        self.assemble_candidates_for_bounds(self.alias_bound_clauses(ty), name, 2, &mut extension);
+                    }
                 }
                 TyKind::Dyn(td, args, _, regions, _, bound, _) if *td != NO_DEF => {
                     let mut compact = vec![ty]; compact.extend_from_slice(self.tcx.tys.list(*args));
@@ -143,7 +147,6 @@ impl Fcx<'_> {
                     p.bound_vars = vec![crate::next_solver::BoundVariableKind::Region(crate::types::BoundRegionKind::Anon); *bound as usize].into();
                     self.assemble_candidates_for_bounds(self.tcx.supertraits(self.prog, p), name, 1, &mut inherent);
                 }
-                TyKind::Alias(..) => self.assemble_candidates_for_bounds(self.alias_bound_clauses(ty), name, 2, &mut extension),
                 _ => {}
             }
         }
@@ -198,7 +201,7 @@ impl Fcx<'_> {
                 let GenericArg::Type(self_ty) = tr.trait_ref.args[0] else { unreachable!() };
                 if matches!(candidate.kind, CandidateKind::WhereClauseCandidate(_)) {
                     let self_ty = ocx.normalize_ty(&self.param_env, self_ty);
-                    if !matches!(self.tcx.tys.kind(self.infcx.shallow_resolve(self_ty)), TyKind::Param(_)) { return None; }
+                    if !matches!(self.tcx.tys.kind(self.infcx.shallow_resolve(self_ty)), TyKind::Param(_) | TyKind::Alias(..)) { return None; }
                 }
                 (self_ty, tr.trait_ref.args, tr.trait_ref.def_id)
             }

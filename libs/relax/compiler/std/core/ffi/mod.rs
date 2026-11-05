@@ -6,7 +6,7 @@ use crate::fmt;
 use crate::fmt::Write as _;
 
 mod c_string;
-pub use self::c_string::{CString, IntoStringError, NulError};
+pub use self::c_string::{CString, FromVecWithNulError, IntoStringError, NulError};
 
 pub type c_schar = i8;
 pub type c_uchar = u8;

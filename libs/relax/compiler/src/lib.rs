@@ -182,10 +182,10 @@ pub const RUSTC_VERSION: &str = "1.98.0";
 /// --filter-platform` runs) answer from Relax's own target model (print_as_rustc). Returns whether
 /// it answered.
 pub fn relax_as_rustc() -> bool {
-    if std::env::var_os("MAKEPAD_RUN_AS_RUSTC").is_none() {
+    let args: Vec<String> = os::proc::args_bytes().iter().skip(1).map(|a| String::from_utf8_lossy(a).into_owned()).collect();
+    if std::env::var_os("MAKEPAD_RUN_AS_RUSTC").is_none() && !native::is_target_rustc_probe(&args) {
         return false;
     }
-    let args: Vec<String> = os::proc::args_bytes().iter().skip(1).map(|a| String::from_utf8_lossy(a).into_owned()).collect();
     // the script's own run (and a nested script's) is a Relax command, not a RUSTC question
     if args.first().is_some_and(|a| a == "run") {
         return false;
@@ -193,7 +193,7 @@ pub fn relax_as_rustc() -> bool {
     let sess = &session_from_env(&args);
     match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
         ["--version"] | ["-V"] => println!("rustc {} (makepad run {})", RUSTC_VERSION, PROVENANCE),
-        ["-vV"] | ["--version", "--verbose"] => {
+        ["-vV"] | ["--version", "--verbose"] | ["--verbose", "--version"] | ["-V", "--verbose"] | ["--verbose", "-V"] => {
             println!("rustc {} (makepad run {})", RUSTC_VERSION, PROVENANCE);
             println!("binary: rustc");
             println!("commit-hash: unknown");

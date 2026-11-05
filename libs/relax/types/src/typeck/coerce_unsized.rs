@@ -48,7 +48,10 @@ impl Fcx<'_> {
         let snapshot = self.start_snapshot();
         // The `CoerceUnsized` target is a fresh variable related to the expected type.
         let coerce_target = self.fresh(0);
-        if !self.eq(coerce_target, target) { self.rollback_to(snapshot); return None; }
+        // coercion.rs:unify_and/unify_raw: settle lazy normalization obligations
+        // before inspecting the unsizing proof. An unevaluated projection leaves
+        // the Unsize target unconstrained and looks like an unnecessary coercion.
+        if self.unify_coercion(coerce_target, target, false, false).is_none() { self.rollback_to(snapshot); return None; }
         let goal = self.trait_goal(coerce_unsized, source, &[coerce_target]);
         let mut visitor = CoerceVisitor { errored: false };
         if self.visit_coerce_goal(&mut visitor, goal.clone(), 0, unsize, coerce_unsized) {
@@ -82,6 +85,10 @@ impl Fcx<'_> {
     fn pointee_pair_could_unsize(&mut self, a: TyId, d: TyId) -> bool {
         let (a, d) = (self.shallow(a), self.shallow(d));
         match self.tcx.tys.kind(d).clone() {
+            TyKind::Ref(_, target, _) | TyKind::Ptr(_, target) => match self.tcx.tys.kind(a).clone() {
+                TyKind::Ref(_, source, _) | TyKind::Ptr(_, source) => self.pointee_pair_could_unsize(source, target),
+                _ => false,
+            },
             TyKind::Dyn(..) => true,
             TyKind::Slice(_) => matches!(self.tcx.tys.kind(a), TyKind::Array(..) | TyKind::Adt(..) | TyKind::Infer(_)),
             TyKind::Adt(d2, ys, _) => match self.tcx.tys.kind(a).clone() {
@@ -170,6 +177,10 @@ impl Fcx<'_> {
             let (ss, dd) = (self.shallow(s), self.shallow(d));
             if matches!(self.tcx.tys.kind(dd), TyKind::Dyn(..) | TyKind::Slice(_)) { return Some((ss, dd)); }
             match (self.tcx.tys.kind(ss).clone(), self.tcx.tys.kind(dd).clone()) {
+                (TyKind::Ref(_, source, _) | TyKind::Ptr(_, source), TyKind::Ref(_, target, _) | TyKind::Ptr(_, target)) => {
+                    s = source;
+                    d = target;
+                }
                 (TyKind::Adt(a1, xa, _), TyKind::Adt(a2, ya, _)) if a1 == a2 && self.prog.def(a1).kind == DefKind::Struct && self.tcx.tys.list(xa).len() == self.tcx.tys.list(ya).len() => {
                     let (xa, ya) = (self.tcx.tys.list(xa).to_vec(), self.tcx.tys.list(ya).to_vec());
                     let mut next = None;

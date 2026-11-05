@@ -363,13 +363,21 @@ pub fn lookup(name: &str) -> Builtin {
 }
 
 /// A `macro_rules!` definition Relax replaces with a native expansion: the bitflags crate's
-/// `bitflags!` (MAKEPAD_RUN_NATIVE_BITFLAGS=0 keeps the crate's macro_rules, for A/B measurement).
+/// 2.x `bitflags!` (MAKEPAD_RUN_NATIVE_BITFLAGS=0 keeps the crate's macro_rules, for A/B measurement).
 pub fn override_rules(options: &crate::options::Options, d: crate::macros::MacroRef) -> crate::macros::MacroRef {
-    if d.name == "bitflags" && crate::crates::base_crate_name(&d.krate) == "bitflags" && options.native_bitflags {
+    // Match the implementation the native expander replaces. Version 1 declares a named
+    // `bits` field and supplies implicit derives; substituting the 2.x tuple breaks its API.
+    // Parsed transcribers also survive images, unlike cold-parse input tokens or source paths.
+    let bitflags_v2 = || d.arms.iter().any(|(_, body)| body.windows(4).any(|nodes| {
+        use crate::macros::TNode;
+        matches!(nodes, [TNode::Crate, TNode::Tok(path), TNode::Tok(helper), TNode::Tok(bang)]
+            if path.text == "::" && helper.text == "__declare_public_bitflags" && bang.text == "!")
+    }));
+    if d.name == "bitflags" && crate::crates::base_crate_name(&d.krate) == "bitflags" && options.native_bitflags && bitflags_v2() {
         crate::memo_local! {
             static BF: std::cell::OnceCell<crate::macros::MacroRef>;
         }
-        return BF.with(|b| b.get_or_init(|| std::sync::Arc::new(crate::macros::MacroDef { name: "bitflags".to_string(), krate: "bitflags".to_string(), exported: true, arms: Vec::new(), builtin: Builtin::Bitflags as u16, def_file: String::new(), def_pos: 0, def_mod: String::new(), input: None })).clone());
+        return BF.with(|b| b.get_or_init(|| std::sync::Arc::new(crate::macros::MacroDef { name: "bitflags".to_string(), krate: "bitflags".to_string(), exported: true, edition: 2021, arms: Vec::new(), builtin: Builtin::Bitflags as u16, def_file: String::new(), def_pos: 0, scope_pos: None, def_mod: String::new(), input: None })).clone());
     }
     d
 }
@@ -415,7 +423,7 @@ fn def_for_id(name: &str, id: u16) -> crate::macros::MacroRef {
             d.resize(i + 1, None);
         }
         if d[i].is_none() {
-            d[i] = Some(std::sync::Arc::new(crate::macros::MacroDef { name: name.to_string(), krate: String::new(), exported: true, arms: Vec::new(), builtin: id, def_file: String::new(), def_pos: 0, def_mod: String::new(), input: None }));
+            d[i] = Some(std::sync::Arc::new(crate::macros::MacroDef { name: name.to_string(), krate: String::new(), exported: true, edition: 2021, arms: Vec::new(), builtin: id, def_file: String::new(), def_pos: 0, scope_pos: None, def_mod: String::new(), input: None }));
         }
         d[i].clone().unwrap()
     })
@@ -760,7 +768,7 @@ pub fn expand(p: &crate::parser::Parser, id: u16, lo: usize, hi: usize, call_lo:
         lexed.map_err(|e| format!("`{path}`: {}", e.msg))?;
         toks.retain(|t| t.kind != T::Eof);
         let mut origins = Vec::new();
-        let mut origin = |lo, hi| origins.push(TokenOrigin { lo, hi, source: SourceSpan { file, lo, hi } });
+        let mut origin = |lo, hi| origins.push(TokenOrigin { lo, hi, source: SourceSpan { file, lo, hi }, edition: 0 });
         for t in &toks {
             // Proc macros split joint punctuation into smaller source ranges. Lifetimes
             // deliberately keep one full span for both the apostrophe and name, like rustc.
@@ -793,7 +801,7 @@ pub fn expand(p: &crate::parser::Parser, id: u16, lo: usize, hi: usize, call_lo:
             Some(&&(off, o, _)) if off == t.lo => { at.next(); p.source_span(o) }
             _ => call,
         };
-        origins.push(TokenOrigin { lo: t.lo, hi: t.hi, source });
+        origins.push(TokenOrigin { lo: t.lo, hi: t.hi, source, edition: 0 });
     }
     let mut x = Expansion::from_buf(g);
     x.origins = origins;
@@ -885,6 +893,27 @@ fn expand_buf(p: &crate::parser::Parser, id: u16, lo: usize, hi: usize, call_lo:
             return Ok(one_str(&m));
         }
         Builtin::Stringify => {
+            // rustc's token printer omits invisible delimiters around forwarded
+            // expressions. Keep authored parentheses, including those inside an
+            // invisible group; only the transcriber's matching pair disappears.
+            if !p.synth_parens.is_empty() {
+                let mut visible = Vec::new();
+                let mut groups = Vec::new();
+                for i in lo..hi {
+                    let t = toks.at(i);
+                    let invisible = match t.kind {
+                        T::OpenParen | T::OpenBracket | T::OpenBrace => {
+                            let invisible = p.synth_parens.contains(&{ t.lo });
+                            groups.push(invisible);
+                            invisible
+                        }
+                        T::CloseParen | T::CloseBracket | T::CloseBrace => groups.pop().unwrap_or(false),
+                        _ => false,
+                    };
+                    if !invisible { visible.push(t); }
+                }
+                return Ok(one_str(&stringify_o(buf, &visible, 0, visible.len(), p.tok_origin.view(), p.src.len() as u32)));
+            }
             return Ok(one_str(&stringify_o(buf, toks, lo, hi, p.tok_origin.view(), p.src.len() as u32)));
         }
         Builtin::Env | Builtin::OptionEnv => {
@@ -1024,7 +1053,7 @@ fn expand_buf(p: &crate::parser::Parser, id: u16, lo: usize, hi: usize, call_lo:
         _ => {}
     }
     // native bitflags!
-    let span_of = |a: u32, z: u32| Span { file: 0, lo: a, hi: z, start: LineColumn { line: 1, column: 1 }, end: LineColumn { line: 1, column: 1 } };
+    let span_of = |a: u32, z: u32| Span { file: 0, lo: a, hi: z, start: LineColumn { line: 1, column: 1 }, end: LineColumn { line: 1, column: 1 }, edition: 0 };
     let input = to_stream_buf(buf, toks, lo, hi, &span_of).ok_or_else(|| "unbalanced delimiters in macro input".to_string())?;
     if b == Builtin::Bitflags {
         return crate::bitflags_native::expand(&input, crate::crates::base_crate_name(&p.krate) == "bitflags", p.bctx.as_ref().map(|x| &x.cfg), p.edition);
@@ -1081,17 +1110,17 @@ fn legacy_pm_input(p: &crate::parser::Parser, span_needed: bool, lo: usize, hi: 
     let span_of = |a: u32, z: u32| {
         if profile { queries.borrow_mut().push((a, z)); }
         if let Some(span) = p.input_span(a, z) { return span; }
-        if !span_needed { return Span { lo: a, hi: z, ..Span::DUMMY }; }
+        if !span_needed { return Span { lo: a, hi: z, edition: p.edition_at(a) as u32, ..Span::DUMMY }; }
         let base = src.len() as u32;
         if a >= base {
             let o = src_origin(p, a);
             if o < base {
                 let e = src_origin_end(p, z).unwrap_or(o).min(base);
-                return Span { file: 0, lo: a, hi: z, start: line_col(src, &ls, o), end: line_col(src, &ls, e) };
+                return Span { file: 0, lo: a, hi: z, start: line_col(src, &ls, o), end: line_col(src, &ls, e), edition: p.edition_at(a) as u32 };
             }
-            Span { file: 0, lo: a, hi: z, start: line_col(ext, &ext_ls, a - base), end: line_col(ext, &ext_ls, z.saturating_sub(base)) }
+            Span { file: 0, lo: a, hi: z, start: line_col(ext, &ext_ls, a - base), end: line_col(ext, &ext_ls, z.saturating_sub(base)), edition: p.edition_at(a) as u32 }
         } else {
-            Span { file: 0, lo: a, hi: z, start: line_col(src, &ls, a), end: line_col(src, &ls, z.min(base)) }
+            Span { file: 0, lo: a, hi: z, start: line_col(src, &ls, a), end: line_col(src, &ls, z.min(base)), edition: p.edition_at(a) as u32 }
         }
     };
     let input = to_stream_buf(Buf { src, ext: ext_view }, &p.toks, lo, hi, &span_of).expect("legacy macro input");
@@ -1177,7 +1206,7 @@ fn expand_pm_ts(p: &crate::parser::Parser, span_needed: bool, lo: usize, hi: usi
     let span_of = |a: u32, z: u32| -> Span {
         if let Some(span) = p.input_span(a, z) { return span; }
         if !span_needed {
-            return Span { file: 0, lo: a, hi: z, start: LineColumn { line: 1, column: 1 }, end: LineColumn { line: 1, column: 1 } };
+            return Span { file: 0, lo: a, hi: z, start: LineColumn { line: 1, column: 1 }, end: LineColumn { line: 1, column: 1 }, edition: p.edition_at(a) as u32 };
         }
         let base = src.len() as u32;
         if a >= base {
@@ -1188,16 +1217,16 @@ fn expand_pm_ts(p: &crate::parser::Parser, span_needed: bool, lo: usize, hi: usi
             if o < base {
                 // the end: after the last substituted token before `z` (a verbatim copy)
                 let e = src_origin_end(p, z).unwrap_or(o).min(base);
-                return Span { file: 0, lo: a, hi: z, start: indexed_line_col(src, ls, cs, &src_cursor, o), end: indexed_line_col(src, ls, cs, &src_cursor, e) };
+                return Span { file: 0, lo: a, hi: z, start: indexed_line_col(src, ls, cs, &src_cursor, o), end: indexed_line_col(src, ls, cs, &src_cursor, e), edition: p.edition_at(a) as u32 };
             }
             let (ext, ext_ls, ext_cs) = ext_index.get_or_init(|| {
                 let ext = p.ext.view().contiguous();
                 let (ls, cs) = (line_starts(&ext), continuation_bytes(&ext));
                 (ext, ls, cs)
             });
-            Span { file: 0, lo: a, hi: z, start: indexed_line_col(ext, ext_ls, ext_cs, &ext_cursor, a - base), end: indexed_line_col(ext, ext_ls, ext_cs, &ext_cursor, z.saturating_sub(base)) }
+            Span { file: 0, lo: a, hi: z, start: indexed_line_col(ext, ext_ls, ext_cs, &ext_cursor, a - base), end: indexed_line_col(ext, ext_ls, ext_cs, &ext_cursor, z.saturating_sub(base)), edition: p.edition_at(a) as u32 }
         } else {
-            Span { file: 0, lo: a, hi: z, start: indexed_line_col(src, ls, cs, &src_cursor, a), end: indexed_line_col(src, ls, cs, &src_cursor, z.min(base)) }
+            Span { file: 0, lo: a, hi: z, start: indexed_line_col(src, ls, cs, &src_cursor, a), end: indexed_line_col(src, ls, cs, &src_cursor, z.min(base)), edition: p.edition_at(a) as u32 }
         }
     };
     let input = to_stream_buf(buf, &p.toks, lo, hi, &span_of).ok_or_else(|| "unbalanced delimiters in macro input".to_string())?;
@@ -1375,6 +1404,8 @@ pub struct Expansion {
 enum ItemOut {
     /// no derive to run (none named, or the item is cfg-disabled)
     Nothing,
+    /// Resolution depends on the parser's lexical scope, unavailable to prescan.
+    Deferred,
     Done(Expansion),
 }
 
@@ -1447,8 +1478,8 @@ fn item_tokens(p: &crate::parser::Parser, buf: &Buf, lo: usize, hi: usize, item_
 
 /// Derives of one item, from its source bytes (`item_lo`: its position, for diagnostics).
 /// Linked derives run natively, the rest through the JIT host (pmhost.rs; any thread).
-fn expand_item(sess: &std::sync::Arc<crate::Session>, krate: &str, path: &str, item: &[u8], fresh: Vec<Tok>, item_lo: u32, location: (usize, usize), cfg: Option<&CfgSet>, edition: u16, authored: Option<&dyn Fn(u32, u32) -> Option<Span>>) -> Result<ItemOut, (u32, String)> {
-    let span_of = |a: u32, z: u32| authored.and_then(|f| f(item_lo + a, item_lo + z)).unwrap_or(Span { file: 0, lo: item_lo + a, hi: item_lo + z, start: LineColumn { line: 1, column: 1 }, end: LineColumn { line: 1, column: 1 } });
+fn expand_item(sess: &std::sync::Arc<crate::Session>, krate: &str, path: &str, item: &[u8], fresh: Vec<Tok>, item_lo: u32, location: (usize, usize), cfg: Option<&CfgSet>, edition: u16, authored: Option<&dyn Fn(u32, u32) -> Option<Span>>, resolve: Option<&dyn Fn(&str) -> Option<crate::macro_reg::Entry>>) -> Result<ItemOut, (u32, String)> {
+    let span_of = |a: u32, z: u32| authored.and_then(|f| f(item_lo + a, item_lo + z)).unwrap_or(Span { file: 0, lo: item_lo + a, hi: item_lo + z, start: LineColumn { line: 1, column: 1 }, end: LineColumn { line: 1, column: 1 }, edition: edition as u32 });
     // the item's own tokens (parsing rewrites tokens in place, `>>` closing two generic lists
     // becomes `>`: callers hand over the tokens as the source spelled them)
     if crate::parser::verify_tokens() {
@@ -1461,11 +1492,19 @@ fn expand_item(sess: &std::sync::Arc<crate::Session>, krate: &str, path: &str, i
         Some(s) => s,
         None => return Err((item_lo, "unbalanced delimiters in derive input".to_string())),
     };
-    let (names, item_ts) = prepare_derive_input(input, cfg);
+    let (mut names, item_ts) = prepare_derive_input(input, cfg);
+    // A spelling absent from the registry may be an imported alias. The
+    // parallel prescan has no lexical scope, so leave that item to the parser.
+    if resolve.is_none() && names.iter().any(|name| !is_derive(name)
+        && crate::parser::derive::trait_path(name.rsplit("::").next().unwrap_or(name)).is_none()) {
+        return Ok(ItemOut::Deferred);
+    }
+    names.retain(|name| is_derive(name) || resolve.is_some_and(|resolve| resolve(name).is_some()));
     // a `#[cfg]`-disabled item is gone before derives run (rustc strips it first)
     if names.is_empty() || !item_cfg_on(&item_ts.trees, cfg) {
         return Ok(ItemOut::Nothing);
     }
+    if resolve.is_none() && names.iter().any(|name| scoped_derive(name)) { return Ok(ItemOut::Deferred); }
     if trace_on("pmhost") {
         eprintln!("pmhost: derive({}) on `{}`", names.join(", "), item_ts);
     }
@@ -1474,13 +1513,19 @@ fn expand_item(sess: &std::sync::Arc<crate::Session>, krate: &str, path: &str, i
     // expansions must not share an endpoint
     let mut out = Expansion { text: String::from(" "), toks: Vec::new(), origins: Vec::new() };
     let mut scratch = Vec::new();
+    let mut expanded = false;
     for name in names {
         // The host selects a source-matched linked library or the sandboxed JIT.
-        let r = match crate::macro_reg::run_derive_in(sess, krate, &name, &item_ts, call) {
+        let result = if scoped_derive(&name) {
+            resolve.and_then(|resolve| resolve(&name)).map(|entry| crate::macro_reg::run_derive_entry(sess, krate, &name, &entry, &item_ts, call))
+        } else { crate::macro_reg::run_derive_in(sess, krate, &name, &item_ts, call) };
+        let r = match result {
             Some(r) => r,
-            // no host for this derive: leave the item as it is
-            None => return Ok(ItemOut::Nothing),
+            // A builtin or an unrelated crate's same-named derive has no host
+            // here. It must not prevent later derives of this item from running.
+            None => continue,
         };
+        expanded = true;
         let ts = match r {
             Ok(ts) => ts,
             // the error stays at the item (`compile_error!` item); the file still loads
@@ -1502,17 +1547,17 @@ fn expand_item(sess: &std::sync::Arc<crate::Session>, krate: &str, path: &str, i
         }
         out.text.push('\n');
     }
-    Ok(ItemOut::Done(out))
+    Ok(if expanded { ItemOut::Done(out) } else { ItemOut::Nothing })
 }
 
 /// Appends lexed `text` (its tokens `toks`, Eof dropped) to an expansion.
-fn emit_lexed(text: &str, toks: &[Tok], source: SourceSpan, out: &mut Expansion) {
+fn emit_lexed(text: &str, toks: &[Tok], span: Span, out: &mut Expansion) {
     let base = out.text.len() as u32;
     out.text.push_str(text);
     for t in toks {
         if t.kind != T::Eof {
             out.toks.push(Tok { kind: t.kind, lo: t.lo + base, hi: t.hi + base });
-            out.origins.push(TokenOrigin { lo: t.lo + base, hi: t.hi + base, source });
+            out.origins.push(TokenOrigin { lo: t.lo + base, hi: t.hi + base, source: span.into(), edition: span.edition });
         }
     }
     out.text.push(' ');
@@ -1533,11 +1578,11 @@ fn emit_tokens(trees: &[TokenTree], edition: u16, out: &mut Expansion, scratch: 
                     Delimiter::None => ("", "", T::Eof, T::Eof),
                 };
                 if ko != T::Eof {
-                    push_tok(out, o, ko, g.span.into());
+                    push_tok(out, o, ko, g.span);
                 }
                 emit_tokens(&g.stream.trees, edition, out, scratch)?;
                 if kc != T::Eof {
-                    push_tok(out, c, kc, g.span.into());
+                    push_tok(out, c, kc, g.span);
                 }
             }
             TokenTree::Ident(id) => {
@@ -1550,13 +1595,13 @@ fn emit_tokens(trees: &[TokenTree], edition: u16, out: &mut Expansion, scratch: 
                 };
                 out.text.push_str(&id.name);
                 out.toks.push(Tok { kind, lo, hi: out.text.len() as u32 });
-                out.origins.push(TokenOrigin { lo, hi: out.text.len() as u32, source: id.span.into() });
+                out.origins.push(TokenOrigin { lo, hi: out.text.len() as u32, source: id.span.into(), edition: id.span.edition });
                 out.text.push(' ');
             }
             TokenTree::Literal(l) => {
                 scratch.clear();
                 crate::lexer::lex(l.text.as_bytes(), edition, scratch).map_err(|e| format!("invalid token literal: {}", e.msg))?;
-                emit_lexed(&l.text, scratch, l.span.into(), out);
+                emit_lexed(&l.text, scratch, l.span, out);
             }
             TokenTree::Punct(p) => {
                 // lifetime: `'` (Joint) + ident
@@ -1569,10 +1614,10 @@ fn emit_tokens(trees: &[TokenTree], edition: u16, out: &mut Expansion, scratch: 
                         let first = SourceSpan::from(p.span);
                         let last = SourceSpan::from(id.span);
                         if first.file == last.file {
-                            out.origins.push(TokenOrigin { lo, hi: out.text.len() as u32, source: first.join(last) });
+                            out.origins.push(TokenOrigin { lo, hi: out.text.len() as u32, source: first.join(last), edition: p.span.edition });
                         } else {
-                            out.origins.push(TokenOrigin { lo, hi: lo + 1, source: first });
-                            out.origins.push(TokenOrigin { lo: lo + 1, hi: out.text.len() as u32, source: last });
+                            out.origins.push(TokenOrigin { lo, hi: lo + 1, source: first, edition: p.span.edition });
+                            out.origins.push(TokenOrigin { lo: lo + 1, hi: out.text.len() as u32, source: last, edition: id.span.edition });
                         }
                         out.text.push(' ');
                         i += 2;
@@ -1592,7 +1637,7 @@ fn emit_tokens(trees: &[TokenTree], edition: u16, out: &mut Expansion, scratch: 
                 if j == i || p.ch == '#' {
                     if let Some(k) = single_punct(p.ch) {
                         let mut b = [0u8; 4];
-                        push_tok(out, p.ch.encode_utf8(&mut b), k, p.span.into());
+                        push_tok(out, p.ch.encode_utf8(&mut b), k, p.span);
                         i += 1;
                         continue;
                     }
@@ -1603,7 +1648,7 @@ fn emit_tokens(trees: &[TokenTree], edition: u16, out: &mut Expansion, scratch: 
                     if let TokenTree::Punct(q) = t {
                         let lo = run.len() as u32;
                         run.push(q.ch);
-                        spans.push(TokenOrigin { lo, hi: run.len() as u32, source: q.span.into() });
+                        spans.push(TokenOrigin { lo, hi: run.len() as u32, source: q.span.into(), edition: q.span.edition });
                     }
                 }
                 scratch.clear();
@@ -1614,9 +1659,9 @@ fn emit_tokens(trees: &[TokenTree], edition: u16, out: &mut Expansion, scratch: 
                     out.toks.push(Tok { kind: t.kind, lo: base + t.lo, hi: base + t.hi });
                     let mut parts = spans.iter().filter(|s| s.lo < t.hi && t.lo < s.hi);
                     let first = *parts.next().expect("punctuation has an input span");
-                    let mut origin = TokenOrigin { lo: base + t.lo, hi: base + first.hi.min(t.hi), source: first.source };
+                    let mut origin = TokenOrigin { lo: base + t.lo, hi: base + first.hi.min(t.hi), source: first.source, edition: first.edition };
                     for part in parts {
-                        if part.source.file == origin.source.file {
+                        if part.source.file == origin.source.file && part.edition == origin.edition {
                             origin.hi = base + part.hi.min(t.hi);
                             origin.source = origin.source.join(part.source);
                         } else {
@@ -1643,11 +1688,11 @@ pub fn trees_to_buf(trees: &[TokenTree], edition: u16) -> Result<TokBuf, String>
     Ok(TokBuf::from_parts(edition, out.text, out.toks))
 }
 
-fn push_tok(out: &mut Expansion, s: &str, kind: T, source: SourceSpan) {
+fn push_tok(out: &mut Expansion, s: &str, kind: T, span: Span) {
     let lo = out.text.len() as u32;
     out.text.push_str(s);
     out.toks.push(Tok { kind, lo, hi: out.text.len() as u32 });
-    out.origins.push(TokenOrigin { lo, hi: out.text.len() as u32, source });
+    out.origins.push(TokenOrigin { lo, hi: out.text.len() as u32, source: span.into(), edition: span.edition });
     out.text.push(' ');
 }
 
@@ -1722,7 +1767,7 @@ fn derive_items_inner(p: &crate::parser::Parser, attrs: &[crate::ast::Attr], lo:
         for i in alo..ahi {
             if toks.at(i).kind == T::Ident {
                 let w = buf.get(toks.at(i).lo, toks.at(i).hi);
-                if std::str::from_utf8(w).map_or(false, is_derive) {
+                if std::str::from_utf8(w).is_ok_and(|name| is_derive(name) || derive_entry(p, lo, name).is_some()) {
                     any = true;
                     reusable &= crate::macro_reg::reusable_derive(std::str::from_utf8(w).unwrap());
                 }
@@ -1751,7 +1796,7 @@ fn derive_items_inner(p: &crate::parser::Parser, attrs: &[crate::ast::Attr], lo:
         v
     };
     let cfg = p.bctx.as_ref().map(|c| &c.cfg);
-    let r = expand_item(sess, &p.krate, p.bctx.as_ref().map_or("", |c| c.path.as_str()), buf.get(item_lo, item_hi), fresh, item_lo, item_location(p,item_lo), cfg, p.edition, Some(&|lo, hi| p.input_span(lo, hi)));
+    let r = expand_item(sess, &p.krate, p.bctx.as_ref().map_or("", |c| c.path.as_str()), buf.get(item_lo, item_hi), fresh, item_lo, item_location(p,item_lo), cfg, p.edition, Some(&|lo, hi| p.input_span(lo, hi)), Some(&|name| derive_entry(p, lo, name)));
     match r? {
         ItemOut::Done(x) => {
             if let Some(reused) = reused {
@@ -1796,10 +1841,14 @@ pub fn attr_macro_at(p: &crate::parser::Parser, attrs: &[crate::ast::Attr]) -> O
         // the path: idents joined by `::`
         let mut i = lo;
         let mut last = String::new();
+        let mut path = Vec::new();
         while i < hi {
             match toks.at(i).kind {
-                T::Ident | T::RawIdent | T::KwCrate | T::KwSelfValue | T::KwSuper => last = text(i),
-                T::PathSep => {}
+                T::Ident | T::RawIdent | T::KwCrate | T::KwSelfValue | T::KwSuper => {
+                    last = text(i);
+                    path.push(last.clone());
+                }
+                T::PathSep => { if i == lo { path.push(String::new()); } }
                 _ => break,
             }
             i += 1;
@@ -1810,10 +1859,18 @@ pub fn attr_macro_at(p: &crate::parser::Parser, attrs: &[crate::ast::Attr]) -> O
         if last == "relax" && (relax_level_toks(&text, toks, i, hi).is_some() || relax_keep_toks(&text, toks, i, hi)) {
             continue;
         }
-        let entry = if i == lo + 1 && matches!(last.as_str(), "test" | "bench" | "test_case") {
-            test_attr_entry(p, lo, &last)
+        let entry = if i != lo + 1 {
+            // Qualified attributes resolve in their actual module. In particular, the
+            // builtin emitted by a test proc macro must not call that macro again.
+            p.macros.as_ref().and_then(|scope| scope.attr_path(&p.krate, &p.cur_module(), &path, &mut Default::default()))
+        } else if crate::builtin_attrs::is_builtin_attr(&last) {
+            // Builtin attributes are not imports from a dependency that happens to
+            // export the same name (for example utoipa::path on a module). Only
+            // lexical resolution may select a same-name proc macro here.
+            scoped_proc_macro_entry(p, lo, &last, crate::macro_reg::Kind::Attr)
         } else {
-            crate::macro_reg::attr_entry_for(&p.krate, &last)
+            scoped_proc_macro_entry(p, lo, &last, crate::macro_reg::Kind::Attr)
+                .or_else(|| crate::macro_reg::attr_entry_for(&p.krate, &last))
         };
         if let Some(entry) = entry {
             cand = Some((k, last, entry));
@@ -1829,9 +1886,18 @@ pub fn attr_macro_at(p: &crate::parser::Parser, attrs: &[crate::ast::Attr]) -> O
 /// compiler/rustc_resolve/src/ident.rs `visit_scopes` / `hygienic_lexical_parent`:
 /// module/block imports, then macro_use, then the std prelude. library/core/src/macros/mod.rs
 /// defines test, bench and test_case as builtins; library/core/src/prelude/v1.rs exports them.
-fn test_attr_entry(p: &crate::parser::Parser, mut at: usize, name: &str) -> Option<crate::macro_reg::Entry> {
+fn scoped_proc_macro_entry(p: &crate::parser::Parser, at: usize, name: &str, kind: crate::macro_reg::Kind) -> Option<crate::macro_reg::Entry> {
     if crate::macro_reg::in_world() { return None; }
     let scope = p.macros.as_ref()?;
+    let module = p.cur_module();
+    for uses in scoped_imports(p, at)? {
+        if let Some(entry) = scope.proc_macro_import(&p.krate, &module, &uses, name, kind) { return entry; }
+    }
+    scope.proc_macro_use(&p.krate, name, kind)
+}
+
+/// Imports visible at a token, ordered from the innermost item scope outward.
+pub(crate) fn scoped_imports(p: &crate::parser::Parser, mut at: usize) -> Option<Vec<Vec<crate::macros::UseItem>>> {
     let module = p.cur_module();
     // The prescan's CrateMods flattens block imports into modules. Scan the enclosing
     // ranges instead, including later uses (Reference names/scopes.md: item scopes),
@@ -1868,6 +1934,7 @@ fn test_attr_entry(p: &crate::parser::Parser, mut at: usize, name: &str) -> Opti
         at = call_at;
     }
     let view = crate::parser::lazy_bodies::TokView::new(p.src, &p.toks, &p.ext);
+    let mut imports = Vec::new();
     for (start, end) in ranges {
         let mut uses = Vec::new();
         let mut i = start;
@@ -1890,9 +1957,9 @@ fn test_attr_entry(p: &crate::parser::Parser, mut at: usize, name: &str) -> Opti
                 _ => i += 1,
             }
         }
-        if let Some(entry) = scope.attr_import(&p.krate, &module, &uses, name) { return entry; }
+        imports.push(uses);
     }
-    scope.attr_macro_use(&p.krate, name)
+    Some(imports)
 }
 
 /// Optimisation level of a `relax(..)` attribute's arguments at tokens [i, hi) (i at the `(`):
@@ -1949,7 +2016,7 @@ pub fn expand_attr_macro(p: &crate::parser::Parser, attrs: &[crate::ast::Attr], 
     let reused = crate::parse_work::get(&key);
     // MAKEPAD_RUN_REUSE_VERIFY=1: every reused expansion is recomputed and must be identical.
     if reused.is_some() && std::env::var_os("MAKEPAD_RUN_REUSE_VERIFY").is_none() { return Ok(reused.unwrap()); }
-    let span_of = |a: u32, z: u32| p.input_span(a, z).unwrap_or(Span { file: 0, lo: a, hi: z, start: LineColumn { line: 1, column: 1 }, end: LineColumn { line: 1, column: 1 } });
+    let span_of = |a: u32, z: u32| p.input_span(a, z).unwrap_or(Span { file: 0, lo: a, hi: z, start: LineColumn { line: 1, column: 1 }, end: LineColumn { line: 1, column: 1 }, edition: p.edition_at(a) as u32 });
     let stream = |text: &[u8], offset: u32| -> Result<TokenStream, (u32, String)> {
         let mut t = Vec::new();
         if crate::lexer::lex(text, 2021, &mut t).is_err() {
@@ -2067,7 +2134,7 @@ pub fn pre_expand_derives(krate: &str, files: &[(&str, &[u8], &[Tok])], cfg: &Cf
                     }
                     let (fi, lo, hi) = sites[k];
                     let src = files[fi].1;
-                    out.push((k, expand_item(sess, krate, files[fi].0, &src[lo as usize..hi as usize], site_tokens(files[fi].2, lo, hi), lo, crate::lexer::line_col_at(&lines[fi], src.len(), lo), Some(cfg), edition, None)));
+                    out.push((k, expand_item(sess, krate, files[fi].0, &src[lo as usize..hi as usize], site_tokens(files[fi].2, lo, hi), lo, crate::lexer::line_col_at(&lines[fi], src.len(), lo), Some(cfg), edition, None, None)));
                 }
                 out
             }));
@@ -2088,6 +2155,7 @@ pub fn pre_expand_derives(krate: &str, files: &[(&str, &[u8], &[Tok])], cfg: &Cf
                 let r = match r {
                     Ok(ItemOut::Done(x)) => Ok(Some(x)),
                     Ok(ItemOut::Nothing) => Ok(None),
+                    Ok(ItemOut::Deferred) => continue,
                     Err(e) => Err(e),
                 };
                 m.insert((files[fi].0.to_string(), lo, hi), r);
@@ -2208,7 +2276,21 @@ fn match_close(toks: &[Tok], open: usize) -> Option<usize> {
 
 /// A derive Relax can run (through the JIT host).
 fn is_derive(name: &str) -> bool {
-    crate::macro_reg::has_derive(name)
+    crate::macro_reg::has_derive(name.rsplit("::").next().unwrap_or(name))
+}
+
+fn scoped_derive(name: &str) -> bool {
+    name.contains("::") || crate::parser::derive::EXPANDED.contains(&name) || crate::macro_reg::has_derive_collision(name) || !is_derive(name)
+}
+
+/// rustc_resolve resolves compiler and hosted derives in the same macro namespace.
+/// A dependency exporting `Debug` does not put that macro in the caller's scope.
+pub(crate) fn derive_entry(p: &crate::parser::Parser, at: usize, name: &str) -> Option<crate::macro_reg::Entry> {
+    if crate::macro_reg::in_world() { return None; }
+    let path: Vec<String> = name.split("::").map(str::to_owned).collect();
+    if path.len() > 1 {
+        p.macros.as_ref()?.proc_macro_path(&p.krate, &p.cur_module(), &path, crate::macro_reg::Kind::Derive, &mut Default::default())
+    } else { scoped_proc_macro_entry(p, at, name, crate::macro_reg::Kind::Derive) }
 }
 
 /// Do the item's own leading `#[cfg(..)]` attributes hold?
@@ -2232,7 +2314,7 @@ fn item_cfg_on(trees: &[TokenTree], cfg: Option<&CfgSet>) -> bool {
 }
 
 /// rustc's derive input: `cfg_attr` expanded, `#[cfg]`-false fields/variants removed (cfg_eval),
-/// the `#[derive]` attributes taken off. Returns the native derive names in order and the item.
+/// the `#[derive]` attributes taken off. Returns all derive paths in order and the item.
 fn prepare_derive_input(input: TokenStream, cfg: Option<&CfgSet>) -> (Vec<String>, TokenStream) {
     let mut names = Vec::new();
     let trees = expand_cfg_attrs(input.trees, cfg);
@@ -2246,23 +2328,20 @@ fn prepare_derive_input(input: TokenStream, cfg: Option<&CfgSet>) -> (Vec<String
                 if let Some(TokenTree::Ident(id)) = inner.first() {
                     if id.to_string() == "derive" {
                         if let Some(TokenTree::Group(args)) = inner.get(1) {
-                            // last path segment of each derive
-                            let mut last = String::new();
+                            // Keep qualification until macro-namespace resolution.
+                            let mut path = String::new();
                             for t in &args.stream().trees {
                                 match t {
-                                    TokenTree::Ident(x) => last = x.to_string(),
+                                    TokenTree::Ident(x) => path.push_str(&x.to_string()),
+                                    TokenTree::Punct(p) if p.as_char() == ':' => path.push(':'),
                                     TokenTree::Punct(p) if p.as_char() == ',' => {
-                                        if is_derive(&last) {
-                                            names.push(std::mem::take(&mut last));
-                                        }
-                                        last.clear();
+                                        if !path.is_empty() { names.push(std::mem::take(&mut path)); }
+                                        path.clear();
                                     }
                                     _ => {}
                                 }
                             }
-                            if is_derive(&last) {
-                                names.push(last);
-                            }
+                            if !path.is_empty() { names.push(path); }
                         }
                         i += 2;
                         continue;
@@ -2478,7 +2557,7 @@ pub fn prescan_defs(cfg: &CfgSet, name: &str, arg_src: &[u8], krate: &str) -> Ve
     if crate::lexer::lex(arg_src, 2021, &mut toks).is_err() {
         return v;
     }
-    let span_of = |a: u32, z: u32| Span { file: 0, lo: a, hi: z, start: LineColumn { line: 1, column: 1 }, end: LineColumn { line: 1, column: 1 } };
+    let span_of = |a: u32, z: u32| Span { file: 0, lo: a, hi: z, start: LineColumn { line: 1, column: 1 }, end: LineColumn { line: 1, column: 1 }, edition: 0 };
     let input = match to_stream(arg_src, &toks, 0, toks.len() - 1, &span_of) {
         Some(s) => s,
         None => return v,

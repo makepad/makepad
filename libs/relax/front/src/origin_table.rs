@@ -87,8 +87,10 @@ fn get_key(prev: u32, sorted: bool, r: &mut Cur) -> u32 {
 }
 
 /// `(lo, hi, call)`-shaped rows keyed by `lo` (`exp_map`: an expansion's text range and its call
-/// site; `rules_exp`: a macro_rules expansion's range and its definition position).
+/// site).
 pub struct Regions;
+/// Macro-rules regions also retain their definition-site edition.
+pub struct Rules;
 /// `(position, origin, length)` rows keyed by position (`tok_origin`, `body_origin`).
 pub struct Maps;
 /// A token's whole authored span (`token_origins`), keyed by `lo`.
@@ -109,6 +111,19 @@ impl Kind for Regions {
         let hi = key.wrapping_add(unzz(r.varint()));
         let call = prev.2.wrapping_add(unzz(r.varint()));
         (key, hi, call)
+    }
+}
+
+impl Kind for Rules {
+    type Item = (u32, u32, u32, u16);
+    fn key(r: &Self::Item) -> u32 { r.0 }
+    fn put(prev: &Self::Item, c: &Self::Item, first: bool, sorted: bool, out: &mut Vec<u8>) {
+        Regions::put(&(prev.0, prev.1, prev.2), &(c.0, c.1, c.2), first, sorted, out);
+        put_varint(out, c.3 as u64);
+    }
+    fn get(prev: &Self::Item, first_key: Option<u32>, sorted: bool, r: &mut Cur) -> Self::Item {
+        let (lo, hi, def) = Regions::get(&(prev.0, prev.1, prev.2), first_key, sorted, r);
+        (lo, hi, def, r.u32() as u16)
     }
 }
 
@@ -133,9 +148,9 @@ impl Kind for Origins {
     type Item = TokenOrigin;
     #[inline]
     fn key(r: &Self::Item) -> u32 { r.lo }
-    /// head = len << 4 | adjacent (lo is the previous row's hi) << 3 | span length equals the
+    /// head = len << 5 | edition changed << 4 | adjacent (lo is the previous row's hi) << 3 | span length equals the
     /// token's << 2 | same authored span as the previous row << 1 | file changed; then, only
-    /// when set: the gap, the file, the span's start delta, the span length difference.
+    /// when set: the edition, the gap, the file, the span's start delta, the span length difference.
     fn put(prev: &Self::Item, c: &Self::Item, first: bool, _sorted: bool, out: &mut Vec<u8>) {
         let len = c.hi.wrapping_sub(c.lo);
         let gap = c.lo.wrapping_sub(prev.hi);
@@ -144,7 +159,8 @@ impl Kind for Origins {
         let slen = c.source.hi.wrapping_sub(c.source.lo);
         let flat = !same && slen == len;
         let file = !same && c.source.file != prev.source.file;
-        put_varint(out, (len as u64) << 4 | (adjacent as u64) << 3 | (flat as u64) << 2 | (same as u64) << 1 | file as u64);
+        put_varint(out, (len as u64) << 5 | ((c.edition != prev.edition) as u64) << 4 | (adjacent as u64) << 3 | (flat as u64) << 2 | (same as u64) << 1 | file as u64);
+        if c.edition != prev.edition { put_varint(out, c.edition as u64); }
         if !adjacent { put_varint(out, zz(gap)); }
         if file { put_varint(out, c.source.file as u64); }
         if !same {
@@ -155,19 +171,20 @@ impl Kind for Origins {
     #[inline]
     fn get(prev: &Self::Item, first_key: Option<u32>, _sorted: bool, r: &mut Cur) -> Self::Item {
         let head = r.varint();
-        let len = (head >> 4) as u32;
+        let len = (head >> 5) as u32;
+        let edition = if head & 16 != 0 { r.u32() } else { prev.edition };
         let lo = match first_key {
             Some(k) => k,
             None if head & 8 != 0 => prev.hi,
             None => prev.hi.wrapping_add(unzz(r.varint())),
         };
         if head & 2 != 0 {
-            return TokenOrigin { lo, hi: lo.wrapping_add(len), source: prev.source };
+            return TokenOrigin { lo, hi: lo.wrapping_add(len), source: prev.source, edition };
         }
         let file = if head & 1 != 0 { r.u32() } else { prev.source.file };
         let slo = prev.source.lo.wrapping_add(unzz(r.varint()));
         let slen = if head & 4 != 0 { len } else { len.wrapping_add(unzz(r.varint())) };
-        TokenOrigin { lo, hi: lo.wrapping_add(len), source: SourceSpan { file, lo: slo, hi: slo.wrapping_add(slen) } }
+        TokenOrigin { lo, hi: lo.wrapping_add(len), source: SourceSpan { file, lo: slo, hi: slo.wrapping_add(slen) }, edition }
     }
 }
 
@@ -553,7 +570,7 @@ mod tests {
             if sorted { lo += rng.next() % 6; } else { lo = rng.next() % 5000; }
             let len = rng.next() % 12;
             let slo = rng.next() % 100_000;
-            TokenOrigin { lo, hi: lo + len, source: SourceSpan { file: rng.next() % 3, lo: slo, hi: slo + rng.next() % 12 } }
+            TokenOrigin { lo, hi: lo + len, source: SourceSpan { file: rng.next() % 3, lo: slo, hi: slo + rng.next() % 12 }, edition: if rng.next() % 2 == 0 { 2021 } else { 2024 } }
         }).collect()
     }
 
@@ -649,7 +666,7 @@ mod tests {
             let len = rng.next() % 9 + 1;
             if rng.next() % 5 == 0 { slo = rng.next() % 3_000_000; }
             slo += len + rng.next() % 2;
-            rows.push(TokenOrigin { lo, hi: lo + len, source: SourceSpan { file: 0, lo: slo, hi: slo + len } });
+            rows.push(TokenOrigin { lo, hi: lo + len, source: SourceSpan { file: 0, lo: slo, hi: slo + len }, edition: 0 });
             lo += len + rng.next() % 2;
         }
         let t = Table::<Origins>::from_rows(&rows);

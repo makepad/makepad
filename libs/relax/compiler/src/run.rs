@@ -138,7 +138,7 @@ extern "C" {
 }
 
 fn usage() -> i32 {
-    eprintln!("usage: makepad run [--units <unit-graph.json>] [--ahead=minimal|balanced|aot-max|aot-min] [--quiet] [--verbose] [--no-asm] [--allow-c] <package> [cargo flags] [-- program args]");
+    eprintln!("usage: makepad run [--units <unit-graph.json>] [--ahead=minimal|balanced|aot-max|aot-min] [--quiet] [--verbose] [--no-asm] [--allow-c] [--fixed-layouts] <package> [cargo flags] [-- program args]");
     2
 }
 
@@ -592,6 +592,7 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
             "--selftest" => selftest = true,
             "--workspace" => workspace_check = true,
             "--verbose" => driver_options.verbose = true,
+            "--fixed-layouts" => driver_options.fixed_layouts = true,
             // read into the session (session_from_env)
             "--no-asm" | "--allow-c" => {}
             "--report-to" if i + 1 < args.len() => {
@@ -1441,16 +1442,6 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
         }
     }
 
-    // ---- the libraries the build scripts link (#[link] blocks load on the first miss)
-    let t = Instant::now();
-    let (n_link, missing) = link_libraries(&prog, &g.link_libs, g.native.as_ref(), 0);
-    phase(&format!("link libraries ({})", n_link), t);
-    // a library that is not there only matters when one of its symbols is used: that miss is
-    // reported where it happens (the #[link] block's lazy load); here only with --verbose
-    if !missing.is_empty() {
-        verbose!("makepad-run: libraries not found: {:?}", missing);
-    }
-
     let t = Instant::now();
     let ahead = jit::ahead_policy().last_run;
     let fn_defs = if ahead { startup_defs(&prog, &format!("{}/startup/{}.startup", target_dir, package)) } else { Vec::new() };
@@ -1481,6 +1472,26 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
         saved_tcx.verify_collected(&saved_prog, &u.prog, &u.tcx);
         eprintln!("makepad-run collected: verified restored graph against rebuilt graph");
     }
+    if let Some(native) = &g.native {
+        if let Err(e) = crate::global_asm::link_native_exports(&mut u, &native.path) {
+            eprintln!("makepad-run: {e}");
+            return 1;
+        }
+    }
+    // ---- the libraries the build scripts link (#[link] blocks load on the first miss)
+    let t_link = Instant::now();
+    // A native constructor may call a lazy Rust export. Keep dlopen on the owner:
+    // dispatching its compilation to another thread would wait on the loader lock.
+    let (n_link, missing) = crate::owner::call(crate::owner::Class::Program, || {
+        link_libraries(&u.prog, &g.link_libs, g.native.as_ref(), 0)
+    });
+    phase(&format!("link libraries ({})", n_link), t_link);
+    // a library that is not there only matters when one of its symbols is used: that miss is
+    // reported where it happens (the #[link] block's lazy load); here only with --verbose
+    if !missing.is_empty() {
+        verbose!("makepad-run: libraries not found: {:?}", missing);
+    }
+
     let enum_errors = u.tcx.check_enum_discriminants(&u.prog, root_crate);
     if !enum_errors.is_empty() {
         for error in enum_errors {
@@ -1868,6 +1879,14 @@ pub fn progress() -> (String, u32, u32) {
 /// symbol starts with one of `prefixes`. A symbol defined twice is an error: the host would bind
 /// one of the two silently.
 pub(crate) fn exported_fns(prog: &crate::program::Program, prefixes: &[String]) -> Result<Vec<(String, DefId)>, String> {
+    let out = exported_fns_matching(prog, |symbol| prefixes.iter().any(|p| symbol.starts_with(p.as_str())))?;
+    if out.is_empty() {
+        return Err(format!("no exported fn starts with {}", prefixes.join(" or ")));
+    }
+    Ok(out)
+}
+
+pub(crate) fn exported_fns_matching(prog: &crate::program::Program, matches: impl Fn(&str) -> bool) -> Result<Vec<(String, DefId)>, String> {
     let mut out: Vec<(String, DefId)> = Vec::new();
     for (di, d) in prog.defs.iter().enumerate() {
         if d.kind != DefKind::Fn {
@@ -1882,21 +1901,18 @@ pub(crate) fn exported_fns(prog: &crate::program::Program, prefixes: &[String]) 
                 symbol = Some(prog.name(DefId(di as u32)).to_string());
             } else if let Some(k) = toks.iter().position(|t| *t == "export_name") {
                 if let (Some(&"="), Some(lit)) = (toks.get(k + 1), toks.get(k + 2)) {
-                    symbol = Some(lit.trim_matches('"').to_string());
+                    symbol = Some(crate::lit::unescape_str(lit));
                 }
             }
         }
         let Some(symbol) = symbol else { continue };
-        if !prefixes.iter().any(|p| symbol.starts_with(p.as_str())) {
+        if !matches(&symbol) {
             continue;
         }
         if let Some((_, other)) = out.iter().find(|(s, _)| *s == symbol) {
             return Err(format!("`{symbol}` is defined twice ({} and {})", prog.def_path(*other), prog.def_path(DefId(di as u32))));
         }
         out.push((symbol, DefId(di as u32)));
-    }
-    if out.is_empty() {
-        return Err(format!("no exported fn starts with {}", prefixes.join(" or ")));
     }
     Ok(out)
 }

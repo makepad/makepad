@@ -504,9 +504,10 @@ fn main() {
         assert!(f.name.ends_with("natbin_outer") && f.size > 0, "{:?}", f);
         assert_eq!(nb.code(f).len() as u64, f.size);
         assert!(nb.fn_at(f.addr + 1).map(|g| g.addr) == Some(f.addr));
-        // the same bytes through the system disassembler's section dump
+        // The fixture's code is in .text. Debug sections can have overlapping
+        // virtual addresses in PIE binaries; do not append their bytes too.
         #[cfg(target_os = "linux")]
-        if let Ok(o) = Command::new("objdump").args(["-s", &format!("--start-address={}", f.addr), &format!("--stop-address={}", f.addr + f.size), bin.to_str().unwrap()]).output() {
+        if let Ok(o) = Command::new("objdump").args(["-s", "--section=.text", &format!("--start-address={}", f.addr), &format!("--stop-address={}", f.addr + f.size), bin.to_str().unwrap()]).output() {
             let mut hex = Vec::new();
             for l in String::from_utf8_lossy(&o.stdout).lines() {
                 // " 401120 f30f1efa 4889f8 ...  text"

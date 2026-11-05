@@ -1213,8 +1213,17 @@ fn start_prepared(up: *mut Unit, spec: AppSpec, id: DomainId) -> Result<DomainId
     if crate::preload::trace() { eprintln!("boot-trace: domain {id} loaded ({load_ms:.1} ms) at t={:.1} ms", crate::clock::ms_since_start()); }
     if compile_phase(id, "link").is_err() { return Ok(id); }
     let t2 = std::time::Instant::now();
+    // Publish Rust callbacks before the native loader resolves the new libraries.
+    if let Some(native) = &g.native {
+        let result = crate::owner::call(crate::owner::Class::Program, || unsafe {
+            crate::global_asm::link_native_exports(&mut *up, &native.path)
+        });
+        if let Err(e) = result { return fail(id, vec![e]); }
+    }
     // the libraries the new crates link
-    let (_, missing) = crate::run::link_libraries(unsafe { &(*up).prog }, &g.link_libs, g.native.as_ref(), first_file);
+    let (_, missing) = crate::owner::call(crate::owner::Class::Program, || {
+        crate::run::link_libraries(unsafe { &(*up).prog }, &g.link_libs, g.native.as_ref(), first_file)
+    });
     if !missing.is_empty() && crate::run::VERBOSE.load(std::sync::atomic::Ordering::Relaxed) {
         eprintln!("makepad-run domain: libraries not found: {:?}", missing);
     }

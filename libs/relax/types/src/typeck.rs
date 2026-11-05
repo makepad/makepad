@@ -2882,19 +2882,21 @@ impl<'a> Fcx<'a> {
     /// The type a struct literal / struct pattern path names: explicit generic args
     /// (`S::<u16> { .. }`) and type aliases (`type S4<U> = S3<U, char>; S4::<u8> { .. }`) fix
     /// args; the rest are fresh (rustc instantiates the path's type, alias substituted).
-    /// `T::A { a, b }` / `Self::Out { .. }`: a struct named through an associated type of a
-    /// param (rustc resolves the path as a type, then takes its ADT and args).
+    /// `T::A { a, b }`, `Self::Out { .. }` or a type alias to a projection: resolve the
+    /// written path as a type, normalize it, then take its ADT and arguments.
     fn assoc_struct_path(&mut self, path: &Path) -> Option<TyId> {
         let n = path.segs.len();
-        if n < 2 || path.has_qself() {
+        if n == 0 || path.has_qself() {
             return None;
         }
         let s0 = self.ast().segs(path.segs)[0].clone();
-        if s0.kind() != SegKind::SelfType && !self.env.names.contains(&self.sym(s0.name)) {
-            return None;
-        }
-        if let Some(d) = self.tcx.resolve_type_path_def(self.prog, self.file, self.module, path) {
-            if matches!(self.prog.def(d).kind, DefKind::Struct | DefKind::Union | DefKind::Variant | DefKind::TypeAlias) {
+        let resolved = self.tcx.resolve_type_path_def(self.prog, self.file, self.module, path);
+        let alias = resolved.is_some_and(|d| self.prog.def(d).kind == DefKind::TypeAlias);
+        if !alias {
+            if n < 2 || (s0.kind() != SegKind::SelfType && !self.env.names.contains(&self.sym(s0.name))) {
+                return None;
+            }
+            if resolved.is_some_and(|d| matches!(self.prog.def(d).kind, DefKind::Struct | DefKind::Union | DefKind::Variant)) {
                 return None;
             }
         }
@@ -4259,7 +4261,7 @@ impl<'a> Fcx<'a> {
             // `D: DerefMut<Target = DrawVars>`)
             // (an opaque type derefs through its item bounds: `impl Deref<Target = Path>`,
             // rustc autoderef.rs overloaded_deref_ty selects the bound's candidate)
-            TyKind::Adt(..) | TyKind::Param(_) | TyKind::Alias(_, AliasTy { kind: AliasTyKind::Projection { .. }, .. }) | TyKind::Alias(_, AliasTy { kind: AliasTyKind::Opaque { .. }, .. }) => {
+            TyKind::Dyn(..) | TyKind::Adt(..) | TyKind::Param(_) | TyKind::Alias(_, AliasTy { kind: AliasTyKind::Projection { .. }, .. }) | TyKind::Alias(_, AliasTy { kind: AliasTyKind::Opaque { .. }, .. }) => {
                 let td = self.tcx.lang_items.get(crate::lang_items::LangItem::Deref)?;
                 let dt = self.infcx.deeply_resolve_ignoring_regions(t);
                 match self.select_trait(td, dt, &[]) {
@@ -5997,7 +5999,7 @@ impl<'a> Fcx<'a> {
             }
             ExprKind::Closure(row) => { let crate::ast::ClosureRow { params, ret, body, .. } = self.ast().row(*row); self.check_closure(e, self.ast().list(*params), *ret, *body, expected) }
             ExprKind::Mac(m) => self.check_mac(e, self.ast().row(*m), expected, lo),
-            ExprKind::Try(x) => self.check_try(e, *x, lo),
+            ExprKind::Try(x) => self.check_try(e, *x, expected, lo),
             ExprKind::Async(mode, b) => self.check_async_block(e, *mode, *b),
             ExprKind::Await(x) => {
                 let out = self.check_await(*x, lo);
@@ -6103,7 +6105,7 @@ impl<'a> Fcx<'a> {
     /// rustc_ast_lowering/src/expr.rs:1945-2033 @8d1a764: call Try::branch,
     /// match the ControlFlow lang-item variants, and return FromResidual on Break.
     /// The typed AST records the two desugared calls for its lowering consumers.
-    fn check_try(&mut self, e: ExprId, x: ExprId, lo: u32) -> TyId {
+    fn check_try(&mut self, e: ExprId, x: ExprId, expected: Option<TyId>, lo: u32) -> TyId {
         use crate::lang_items::LangItem;
         let t = self.check_expr(x, None);
         let Some(branch) = self.tcx.lang_items.get(LangItem::TryTraitBranch) else {
@@ -6140,6 +6142,12 @@ impl<'a> Fcx<'a> {
         self.b.dependencies.push(from_residual);
         self.b.try_branch.insert(e.0, (branch, self.tcx.tys.mk_list(&[t]), flow));
         self.b.try_from_residual.insert(e.0, (from_residual, self.tcx.tys.mk_list(&[ret, residual])));
+        // rustc checks the desugared match's Continue arm against the expected
+        // type. Feed that constraint back before operator lookup or fallback,
+        // as in `let n: i64 = -text.parse()?`.
+        // An unsized rvalue expectation is only a hint, as for calls and
+        // blocks; the enclosing pointer performs the eventual unsizing.
+        if let Some(expected) = expected.filter(|t| !self.is_unsized_ty(*t)) { self.coerce_or_unify(output, expected, Some(e), lo); }
         output
     }
 
@@ -6257,12 +6265,12 @@ impl<'a> Fcx<'a> {
                 // non-primitive operands compare through PartialEq / PartialOrd (`v == w` on
                 // Vecs calls Vec's eq, `s == "x"` with s: String uses PartialEq<&str>)
                 let sa = self.shallow(ta);
-                // (`&str` orders through str's PartialOrd: only its equality is built in)
-                let ordering = !matches!(op, BinOp::Eq | BinOp::Ne);
+                // References to scalar primitives retain the built-in path.
+                // String slices compare through their potentially heterogeneous traits.
                 let prim_ref = match self.tcx.tys.kind(sa).clone() {
                     TyKind::Ref(_, i, _) => {
                         let i = self.shallow(i);
-                        self.is_numeric(i) || matches!(self.tcx.tys.kind(i), TyKind::Bool | TyKind::Char | TyKind::FnPtr(..)) || (!ordering && matches!(self.tcx.tys.kind(i), TyKind::Str))
+                        self.is_numeric(i) || matches!(self.tcx.tys.kind(i), TyKind::Bool | TyKind::Char | TyKind::FnPtr(..))
                     }
                     _ => false,
                 };
@@ -6284,6 +6292,16 @@ impl<'a> Fcx<'a> {
                     }
                 }
                 let tb = self.check_expr(b, Some(ta));
+                // A scalar left operand can implement a comparison against a local
+                // non-scalar right operand (for example u16: PartialEq<StatusCode>).
+                // Built-in scalar comparison requires scalar operands on both sides.
+                let sb = self.shallow(tb);
+                if matches!(self.tcx.tys.kind(sa), TyKind::Int(_) | TyKind::Float(_) | TyKind::Bool | TyKind::Char)
+                    && !matches!(self.tcx.tys.kind(sb), TyKind::Int(_) | TyKind::Float(_) | TyKind::Bool | TyKind::Char | TyKind::Infer(_) | TyKind::Never | TyKind::Error) {
+                    if let Some(r) = self.check_cmp_trait(e, op, sa, b, lo, Some(tb)) {
+                        return r;
+                    }
+                }
                 // `&str != String`, `&u8 == u8`: not the built-in comparison of equal types but
                 // `<&str as PartialEq<String>>` (rustc op.rs: an operator trait lookup with the
                 // operand types as written)

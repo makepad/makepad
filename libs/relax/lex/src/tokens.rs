@@ -50,6 +50,8 @@ pub struct Span {
     /// The source file, as an id its producer's host assigns . 0 is "the current file":
     /// Relax's own spans are positions in its parser's position space and keep 0.
     pub file: u32,
+    /// Syntax-context edition; zero denotes an unspecified builtin span.
+    pub edition: u32,
 }
 
 thread_local! {
@@ -58,7 +60,7 @@ thread_local! {
 }
 
 impl Span {
-    pub const DUMMY: Span = Span { lo: 0, hi: 0, start: LineColumn { line: 1, column: 1 }, end: LineColumn { line: 1, column: 1 }, file: 0 };
+    pub const DUMMY: Span = Span { lo: 0, hi: 0, start: LineColumn { line: 1, column: 1 }, end: LineColumn { line: 1, column: 1 }, file: 0, edition: 0 };
 
     pub fn call_site() -> Span {
         CALL_SITE.with(|c| c.get())
@@ -83,13 +85,13 @@ impl Span {
             return None;
         }
         let (a, b) = if self.lo <= other.lo { (*self, other) } else { (other, *self) };
-        Some(Span { lo: a.lo, hi: b.hi.max(a.hi), start: a.start, end: if b.hi >= a.hi { b.end } else { a.end }, file: a.file })
+        Some(Span { lo: a.lo, hi: b.hi.max(a.hi), start: a.start, end: if b.hi >= a.hi { b.end } else { a.end }, file: a.file, edition: a.edition })
     }
-    pub fn resolved_at(&self, _other: Span) -> Span {
-        *self
+    pub fn resolved_at(&self, other: Span) -> Span {
+        Span { edition: other.edition, ..*self }
     }
     pub fn located_at(&self, other: Span) -> Span {
-        other
+        Span { edition: self.edition, ..other }
     }
     pub fn unwrap(self) -> Span {
         self

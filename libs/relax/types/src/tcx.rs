@@ -484,7 +484,6 @@ impl Tcx {
     }
 
     pub fn orphan_errors_of(&self, prog: &Program, crates: Option<&[u32]>) -> Vec<(DefId, u32, String)> {
-        let typing_env = TypingEnv::fully_monomorphized(prog);
         let mut errors = Vec::new();
         for im in &prog.impls {
             let krate = prog.def(im.def).krate;
@@ -502,7 +501,14 @@ impl Tcx {
                 continue;
             }
             // (a projection self type is checked as what it normalizes to)
-            let st = if self.tys.has_assoc(st) { self.try_normalize_erasing_regions(prog, typing_env, st).unwrap_or(st) } else { st };
+            let st = if self.tys.has_assoc(st) {
+                // This is still an identity-generic impl, not codegen. Its const
+                // parameters obtain their types from the impl's environment.
+                // The orphan verdict below separately uses fresh inference
+                // arguments and the empty environment required by orphanck.
+                let typing_env = TypingEnv { limit: RecursionLimit::for_item(prog, im.def), param_env: self.param_env_id(prog, im.def), mode: TypingMode::non_body_analysis() };
+                self.try_normalize_erasing_regions(prog, typing_env, st).unwrap_or(st)
+            } else { st };
             let item = prog.files[im.file as usize].ast.item(im.item);
             let pos = item.lo;
             let is_trait_impl = prog.files[im.file as usize].ast.as_impl(&item.kind).is_some_and(|i| i.trait_.is_some());

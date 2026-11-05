@@ -26,6 +26,13 @@ pub const fn without_provenance<T>(addr: usize) -> *const T {
 pub const fn without_provenance_mut<T>(addr: usize) -> *mut T {
     addr as *mut T
 }
+/// Reconstitute a pointer using provenance exposed by an earlier pointer-to-integer cast.
+pub const fn with_exposed_provenance<T>(addr: usize) -> *const T {
+    addr as *const T
+}
+pub const fn with_exposed_provenance_mut<T>(addr: usize) -> *mut T {
+    addr as *mut T
+}
 #[rustc_diagnostic_item = "ptr_read"]
 pub unsafe fn read<T>(src: *const T) -> T {
     im::ptr_read(src)

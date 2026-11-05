@@ -225,7 +225,7 @@ fn place_all(u: &Unit) -> Result<HashMap<String, u64>, String> {
 
 /// The C name of an assembly symbol: Mach-O prefixes C names with `_` (dlsym, extern blocks and
 /// `#[no_mangle]` know them without it).
-fn c_name(n: &str) -> &str {
+pub(crate) fn c_name(n: &str) -> &str {
     if cfg!(target_vendor = "apple") {
         n.strip_prefix('_').unwrap_or(n)
     } else {
@@ -316,4 +316,60 @@ fn const_int(f: &crate::parser::ParsedFile, x: ExprId) -> Result<i128, String> {
     let v = if let Some(h) = t.strip_prefix("0x") { i128::from_str_radix(h, 16) } else if let Some(b) = t.strip_prefix("0b") { i128::from_str_radix(b, 2) } else if let Some(o) = t.strip_prefix("0o") { i128::from_str_radix(o, 8) } else { t.parse::<i128>() };
     let v = v.map_err(|_| format!("global_asm!: a `const` operand must be an integer literal here, found `{}`", text))?;
     Ok(if neg { -v } else { v })
+}
+
+/// Publish native archive imports supplied by JIT Rust functions. The dynamic loader cannot
+/// see anonymous JIT code; a tiny ELF library exports tail jumps to the permanent slot entries.
+/// No Rust body is compiled natively, and source patches keep the same callable addresses.
+pub(crate) fn link_native_exports(u: &mut Unit, native: &str) -> Result<(), String> {
+    if !cfg!(target_os = "linux") || u.prog.session.options.no_codegen { return Ok(()); }
+    let out = std::process::Command::new("nm").args(["-D", "--undefined-only", "-P", native])
+        .output().map_err(|e| format!("native exports: cannot read {native}: {e}"))?;
+    if !out.status.success() {
+        return Err(format!("native exports: nm failed for {native}: {}", String::from_utf8_lossy(&out.stderr)));
+    }
+    let imports: std::collections::BTreeSet<_> = String::from_utf8_lossy(&out.stdout).lines()
+        .filter_map(|line| line.split_whitespace().next().map(str::to_string)).collect();
+    let exports = crate::run::exported_fns_matching(&u.prog, |name| imports.contains(name))?;
+    if exports.is_empty() { return Ok(()); }
+    static PUBLISHED: std::sync::Mutex<std::collections::BTreeMap<String, u64>> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+    let mut published = PUBLISHED.lock().unwrap_or_else(|e| e.into_inner());
+    let mut addrs = Vec::new();
+    for (name, def) in exports {
+        let instance = crate::instance::Instance::resolve_for_fn_ptr(&u.tcx, &u.prog, def, &[])
+            .map_err(|_| format!("native export `{name}` is generic"))?;
+        let id = u.instance_fn_id(instance);
+        let addr = u.entry(id);
+        if let Some(old) = published.get(&name) {
+            if *old != addr { return Err(format!("native export `{name}` is already bound to another JIT function")); }
+        } else {
+            addrs.push((name, addr));
+        }
+    }
+    if addrs.is_empty() { return Ok(()); }
+    let mut asm = String::from(".text\n");
+    for (name, addr) in &addrs {
+        if name.contains(['\n', '\r', '\0']) { return Err("native export contains an invalid symbol name".into()); }
+        let quoted = format!("\"{}\"", name.replace('\\', "\\\\").replace('\"', "\\\""));
+        asm.push_str(&format!(".balign 16\n.globl {quoted}\n.type {quoted},%function\n{quoted}:\n.byte "));
+        let code = match Arch::host() {
+            Arch::X64 => relax_backend::x64::jump_to(*addr),
+            Arch::Arm64 => relax_backend::arm64::jump_to(*addr),
+        };
+        asm.push_str(&code.iter().map(|b| format!("{b}")).collect::<Vec<_>>().join(","));
+        asm.push_str(&format!("\n.size {quoted},.-{quoted}\n"));
+    }
+    asm.push_str(".section .note.GNU-stack,\"\",%progbits\n");
+    let lib = format!("{native}.exports-{}-{}.so", std::process::id(), published.len());
+    let source = format!("{lib}.s");
+    std::fs::write(&source, asm).map_err(|e| format!("native exports: {source}: {e}"))?;
+    let cc = std::env::var("CC").ok().filter(|c| !c.is_empty()).unwrap_or_else(|| "cc".into());
+    let linked = std::process::Command::new(cc).args(["-shared", "-fPIC", "-Wl,-z,noexecstack", "-o", &lib, &source])
+        .output().map_err(|e| format!("native exports: cannot run linker: {e}"))?;
+    if !linked.status.success() { return Err(format!("native exports: link failed: {}", String::from_utf8_lossy(&linked.stderr))); }
+    // Constructors in the native bridge may call a callback while dlopen is still running.
+    unsafe { crate::jit::set_runtime_unit(u as *mut Unit); }
+    if !crate::os::proc::load_path(&lib) { return Err(format!("native exports: cannot load {lib}")); }
+    published.extend(addrs);
+    Ok(())
 }

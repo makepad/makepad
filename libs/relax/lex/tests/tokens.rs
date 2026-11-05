@@ -5,7 +5,7 @@ fn span(index: &LineIndex, lo: u32, hi: u32) -> Span {
     let (line, column) = index.line_col(lo);
     let start = LineColumn { line, column };
     let (line, column) = index.line_col(hi);
-    Span { lo, hi, start, end: LineColumn { line, column }, file: 42 }
+    Span { lo, hi, start, end: LineColumn { line, column }, file: 42, edition: 2021 }
 }
 
 fn stream(source: &str, trivia: bool) -> TokenStream {

@@ -772,9 +772,15 @@ fn call(sess: &std::sync::Arc<crate::Session>, entry: &Entry, attr: Option<&Toke
     };
     let mut io = BridgeIo { f: f as usize, kind, inp: bytes.as_ptr(), inp_len: bytes.len(), attr: ap, attr_len: al, out: std::ptr::null_mut(), out_len: 0 };
     let tj = std::time::Instant::now();
+    if trace() {
+        eprintln!("pmhost: enter {:?} unit={} fn={} crate={} input={}", std::thread::current().id(), entry.unit, entry.fname, call_krate, bytes.len());
+    }
     let slot = watch_begin();
     let r = unsafe { crate::jit::call_jit(w.u, w.bridge, &mut io as *mut BridgeIo as u64) };
     slot.start.store(0, std::sync::atomic::Ordering::Release);
+    if trace() {
+        eprintln!("pmhost: leave {:?} unit={} fn={} elapsed={:.1}ms", std::thread::current().id(), entry.unit, entry.fname, tj.elapsed().as_secs_f64() * 1e3);
+    }
     PH[1].fetch_add(tj.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
     match r {
         Ok(_) => {}

@@ -14,7 +14,7 @@ fn echo_with_call_site(input: macro_side::TokenStream) -> macro_side::TokenStrea
 
 #[test]
 fn file_spans_survive_the_proc_macro_bridge() {
-    let call = Span { file: 17, lo: 11, hi: 19, start: LineColumn { line: 3, column: 5 }, end: LineColumn { line: 3, column: 13 } };
+    let call = Span { file: 17, lo: 11, hi: 19, start: LineColumn { line: 3, column: 5 }, end: LineColumn { line: 3, column: 13 }, edition: 2021 };
     let ident_span = Span { file: 23, ..call };
     let literal_span = Span { file: 42, ..call };
     let stream = TokenStream { trees: vec![

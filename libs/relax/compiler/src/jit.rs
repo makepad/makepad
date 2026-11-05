@@ -5701,7 +5701,13 @@ impl Unit {
         let f = &self.prog.files[def.file as usize];
         for a in f.ast.list(f.ast.item(def.item).attrs) {
             if a.toks.hi >= a.toks.lo + 3 && f.tok_text(a.toks.lo) == "link_name" && f.tok_text(a.toks.lo + 1) == "=" {
-                return f.tok_text(a.toks.lo + 2).trim_matches('"').to_string();
+                let name = crate::lit::unescape_str(f.tok_text(a.toks.lo + 2));
+                // LLVM's leading SOH requests an exact object-file symbol. Our lookups use
+                // C names, so undo Mach-O's ABI prefix only for these exact names.
+                if let Some(exact) = name.strip_prefix('\u{1}') {
+                    return crate::global_asm::c_name(exact).to_string();
+                }
+                return name;
             }
         }
         self.prog.name(d).to_string()
@@ -5949,7 +5955,11 @@ impl Unit {
         }
         // a constant whose initializer needs its own value (directly or through other constants):
         // rustc's E0391 (the query cycle of const evaluation), not unbounded recursion
-        if CONST_STACK.try_with(|s| s.borrow().iter().any(|(sd, sa)| *sd == d && *sa == args)).unwrap_or(false) {
+        let frame_start = CONST_FRAME_START.with(|s| s.get());
+        if let Some(index) = CONST_STACK.with(|s| s.borrow().iter().position(|(sd, sa)| *sd == d && *sa == args)) {
+            // An earlier request's initializer cannot finish until this nested request
+            // returns. Retry the nested request rather than recording a program cycle.
+            if index < frame_start { owner::busy_if_nested(); }
             let def = self.prog.def(d);
             let at = self.pos_str(def.file, self.prog.files[def.file as usize].ast.item(def.item).lo);
             self.note_error(format!("{}: E0391: cycle detected when evaluating the initializer of `{}`", at, self.prog.def_path(d)));
@@ -5959,7 +5969,7 @@ impl Unit {
         // rustc's query depth limit (#![recursion_limit], 128 by default): a constant whose
         // evaluation needs the same item at ever deeper arguments
         let limit = self.prog.crates[self.prog.def(d).krate as usize].recursion_limit as usize;
-        if CONST_STACK.try_with(|s| s.borrow().len()).unwrap_or(0) > limit {
+        if CONST_STACK.try_with(|s| s.borrow().len().saturating_sub(frame_start)).unwrap_or(0) > limit {
             let def = self.prog.def(d);
             let at = self.pos_str(def.file, self.prog.files[def.file as usize].ast.item(def.item).lo);
             self.note_error(format!("{}: queries overflow the depth limit! [in {}]", at, self.prog.def_path(d)));
@@ -10241,6 +10251,7 @@ unsafe fn end_build(up: *mut Unit, id: u32) {
 /// another request's wait, also when the request panics).
 pub(crate) struct Frame {
     build_stack: Vec<u32>,
+    const_start: usize,
     build_child: Vec<u64>,
     build_depth: u32,
     deferred: bool,
@@ -10274,6 +10285,7 @@ thread_local! {
 pub(crate) fn frame_enter(rec: *const ()) -> Frame {
     Frame {
         build_stack: BUILD_STACK.with(|s| std::mem::take(&mut *s.borrow_mut())),
+        const_start: CONST_FRAME_START.with(|c| c.replace(CONST_STACK.with(|s| s.borrow().len()))),
         build_child: BUILD_CHILD.with(|c| std::mem::take(&mut *c.borrow_mut())),
         build_depth: BUILD_DEPTH.with(|d| d.replace(0)),
         deferred: DEFERRED_ABORT.with(|a| a.replace(false)),
@@ -10301,6 +10313,7 @@ pub(crate) fn frame_leave(f: Frame) -> bool {
         }
     }
     BUILD_STACK.with(|s| *s.borrow_mut() = f.build_stack);
+    CONST_FRAME_START.with(|c| c.set(f.const_start));
     BUILD_CHILD.with(|c| *c.borrow_mut() = f.build_child);
     BUILD_DEPTH.with(|d| d.set(f.build_depth));
     DEFERRED_ABORT.with(|a| a.set(f.deferred));
@@ -12670,50 +12683,9 @@ unsafe fn build_rir_lowered_as(up: *mut Unit, id: u32) -> Result<relax_backend::
     }
     // This is a codegen-owned body, after type checking. Borrowck/typeck results
     // retain their regions; lowering, constants and the closure codegen cache do not.
-    // evaluate constants used by the body before lowering (may run JIT code)
-    let mut const_uses = Vec::new();
-    for (k, r) in &body.res {
-        if let Res::Def(d) = r {
-            let kind = (&*up).prog.def(*d).kind;
-            if matches!(kind, DefKind::Const | DefKind::AssocConst | DefKind::Static) {
-                let args = body.res_args.get(k).map_or_else(Vec::new, |&l| (&*up).tcx.tys.list(l).to_vec());
-                const_uses.push((*d, args, kind));
-            }
-        }
-    }
-    for (k, r) in &body.pat_res {
-        if let Res::Def(d) = r {
-            let kind = (&*up).prog.def(*d).kind;
-            if matches!(kind, DefKind::Const | DefKind::AssocConst) {
-                let args = body.res_args.get(&(k | crate::typeck::PAT_KEY)).map_or_else(Vec::new, |&l| (&*up).tcx.tys.list(l).to_vec());
-                const_uses.push((*d, args, kind));
-            }
-        }
-    }
-    for r in body.fmt_named.values() {
-        if let Res::Def(d) = r {
-            let kind = (&*up).prog.def(*d).kind;
-            if matches!(kind, DefKind::Const | DefKind::AssocConst) {
-                const_uses.push((*d, Vec::new(), kind));
-            }
-        }
-    }
-    // (a check evaluates a constant where the lowering reaches its use: one named only in a branch
-    // that is never taken is not collected, as in rustc's monomorphization)
-    if (&*up).prog.session.options.const_fuel { const_uses.clear(); }
-    for (d, args, kind) in const_uses {
-        // a const used inside its own initializer is an error rustc already reports
-        if let FnKey::Inst(me, _) = &key {
-            if *me == d {
-                continue;
-            }
-        }
-        if kind == DefKind::Static {
-            (&mut *up).static_addr(d);
-        } else {
-            (&mut *up).const_addr(d, args);
-        }
-    }
+    // Lowering evaluates each constant when it reaches that use. The body's
+    // resolution table also includes deferred closure bodies: pre-evaluating all
+    // its entries here can manufacture cycles through callbacks in initializers.
     let u = &mut *up;
     let goals0 = crate::solver_work::get(crate::solver_work::SEARCH_GOALS);
     let (func, closures) = lower_checked_body(u, id, &key, &body)?;
@@ -20867,6 +20839,8 @@ pub(crate) fn cert_take_in(cert: &ConstCert) {
 thread_local! {
     /// the constants (and their arguments) whose initializers this thread is evaluating, outermost first
     static CONST_STACK: std::cell::RefCell<Vec<(DefId, Vec<TyId>)>> = Default::default();
+    /// Initializers below this index belong to an earlier owner request, not this one's cycle.
+    static CONST_FRAME_START: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 thread_local! {
     /// const/static initializers this thread is evaluating (run_init_code)

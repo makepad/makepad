@@ -11,7 +11,7 @@ use crate::image::{Reader, Writer};
 use crate::packed::PackedToks;
 use crate::parser::ParsedFile;
 use crate::source::SourceRegistry;
-use crate::origin_table::{Table, Regions, Maps, Origins};
+use crate::origin_table::{Table, Regions, Rules, Maps, Origins};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const S_SRC: u32 = 1;
@@ -111,7 +111,7 @@ pub fn apply(path: &str, pf: &mut ParsedFile, img: &'static [u8]) -> bool {
     let Some(toks) = PackedToks::mapped(read!(u32, 1, S_TOKS, "toks")) else { return mismatch(path, "toks") };
     let Some(em) = Table::<Regions>::mapped(read!(u8, 2, S_EXP_MAP, "exp_map")) else { return mismatch(path, "exp_map") };
     let Some(to) = Table::<Maps>::mapped(read!(u8, 3, S_TOK_ORIGIN, "tok_origin")) else { return mismatch(path, "tok_origin") };
-    let Some(re) = Table::<Regions>::mapped(read!(u8, 4, S_RULES_EXP, "rules_exp")) else { return mismatch(path, "rules_exp") };
+    let Some(re) = Table::<Rules>::mapped(read!(u8, 4, S_RULES_EXP, "rules_exp")) else { return mismatch(path, "rules_exp") };
     let Some(bo) = Table::<Maps>::mapped(read!(u8, 5, S_BODY_ORIGIN, "body_origin")) else { return mismatch(path, "body_origin") };
     let origins = read!(u8, 6, S_TOKEN_ORIGINS, "token_origins");
     let sources = read!(u8, 7, S_SOURCES, "sources");
@@ -259,7 +259,7 @@ fn part_from_image(path: &str, ends: [u32; crate::ast::ARENAS], (src, toks, rule
         };
     }
     ast_arrays!(get);
-    let (Some(rules_exp), Some(body_origin)) = (r.slice::<u8>(8 + k, P_RULES_EXP).and_then(Table::<Regions>::mapped), r.slice::<u8>(9 + k, P_BODY_ORIGIN).and_then(Table::<Maps>::mapped)) else {
+    let (Some(rules_exp), Some(body_origin)) = (r.slice::<u8>(8 + k, P_RULES_EXP).and_then(Table::<Rules>::mapped), r.slice::<u8>(9 + k, P_BODY_ORIGIN).and_then(Table::<Maps>::mapped)) else {
         mismatch(path, "part.rules");
         return None;
     };

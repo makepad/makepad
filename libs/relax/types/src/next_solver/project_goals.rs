@@ -92,7 +92,13 @@ impl EvalCtxt<'_, '_> {
                 }
                 return self.instantiate_normalizes_to_term(env, p, self.rigid_alias_term(&p.alias));
             }
-            self.delegate.errors.delayed_bug(self.delegate.cause, "missing associated item definition".into());
+            // This is a missing definition in the impl, independent of the
+            // body whose projection caused us to discover it. Retain the
+            // associated declaration's location so repeated consumers dedup.
+            let declaration = self.solver.prog.def(def);
+            let span = self.solver.prog.files[declaration.file as usize].ast.item(declaration.item).lo;
+            let cause = super::fulfill::ObligationCause { body_id: imp, span };
+            self.delegate.errors.delayed_bug(cause, "missing associated item definition".into());
             return self.instantiate_normalizes_to_error(env, p);
         }
         let target = if self.solver.prog.def(item).parent == trait_def { args.clone() } else {

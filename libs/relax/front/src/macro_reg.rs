@@ -91,9 +91,18 @@ pub struct Reg {
     /// function-like and attribute macros
     pub macros: Vec<(String, Entry)>,
     /// derive name -> its helper attributes (`attributes(..)` of proc_macro_derive)
-    pub helpers: Vec<(String, Vec<String>)>,
+    pub helpers: Vec<(usize, String, Vec<String>)>,
+    /// Application dependency edges for caller-side macro lookup. `units` keeps
+    /// the distinct host graph used to compile and execute the macros themselves.
+    pub target_deps: std::collections::HashMap<usize, Vec<(usize, String)>>,
     /// crate name -> the units its unit(s) reach through `deps` (transitively; memoised)
     pub reach: std::collections::HashMap<String, Vec<bool>>,
+}
+
+impl Reg {
+    fn caller_deps(&self, unit: usize) -> &[(usize, String)] {
+        self.target_deps.get(&unit).map_or(&self.units[unit].deps, Vec::as_slice)
+    }
 }
 
 /// The units in the dependency closure of the unit(s) named `krate`, themselves included. A
@@ -106,7 +115,7 @@ fn reach<'a>(reg: &'a mut Reg, krate: &str) -> &'a [bool] {
             if std::mem::replace(&mut seen[i], true) {
                 continue;
             }
-            stack.extend(reg.units[i].deps.iter().map(|d| d.0));
+            stack.extend(reg.caller_deps(i).iter().map(|d| d.0));
         }
         reg.reach.insert(krate.to_string(), seen);
     }
@@ -131,12 +140,14 @@ fn resolve_entry(reg: &mut Reg, krate: &str, name: &str, kind: Kind) -> Option<E
         (0..reg.units.len()).filter(|&i| reg.units[i].name == krate).collect()
     };
     if u_idxs.is_empty() {
-        return if kind == Kind::Attr { None } else { hits.into_iter().next() };
+        // Only callers without a crate context use the global registry. A
+        // sysroot crate absent from this graph has no proc-macro dependencies.
+        return if krate.is_empty() && kind != Kind::Attr { hits.into_iter().next() } else { None };
     }
-    if let Some(e) = hits.iter().find(|e| u_idxs.contains(&e.unit) || u_idxs.iter().any(|&u| reg.units[u].deps.iter().any(|&(d, _)| d == e.unit))) {
+    if let Some(e) = hits.iter().find(|e| u_idxs.contains(&e.unit) || u_idxs.iter().any(|&u| reg.caller_deps(u).iter().any(|&(d, _)| d == e.unit))) {
         return Some(e.clone());
     }
-    if let Some(e) = hits.iter().find(|e| u_idxs.iter().any(|&u| reg.units[u].deps.iter().any(|&(d, _)| reg.units[d].deps.iter().any(|&(dd, _)| dd == e.unit)))) {
+    if let Some(e) = hits.iter().find(|e| u_idxs.iter().any(|&u| reg.caller_deps(u).iter().any(|&(d, _)| reg.caller_deps(d).iter().any(|&(dd, _)| dd == e.unit)))) {
         return Some(e.clone());
     }
     let rc = reach(reg, krate);
@@ -156,13 +167,13 @@ pub(crate) fn attr_entry_for(krate: &str, name: &str) -> Option<Entry> {
     })
 }
 
-/// An attribute exported by this crate itself, not by one of its dependencies.
-pub(crate) fn exported_attr(krate: &str, name: &str) -> Option<Entry> {
+/// A proc macro exported by this crate itself, rather than by a dependency.
+pub(crate) fn exported_proc_macro(krate: &str, name: &str, kind: Kind) -> Option<Entry> {
     if in_world() { return None; }
     REG.with(|r| {
         let r = r.borrow();
         let r = r.as_ref()?;
-        r.macros.iter().find(|(n, e)| n == name && e.kind == Kind::Attr && r.units[e.unit].name == krate).map(|(_, e)| e.clone())
+        r.derives.iter().chain(&r.macros).find(|(n, e)| n == name && e.kind == kind && r.units[e.unit].name == krate).map(|(_, e)| e.clone())
     })
 }
 
@@ -404,6 +415,17 @@ pub fn reusable_attr(entry: &Entry) -> bool {
     pure || RUNNER.get().is_some_and(|r| r.reusable(entry))
 }
 
+/// Proc-macro call-site hygiene carries the defining crate's edition, while
+/// tokens copied from the input retain their original syntax contexts.
+fn definition_span(entry: &Entry, mut span: Span) -> Span {
+    REG.with(|r| {
+        if let Some(unit) = r.borrow().as_ref().and_then(|r| r.units.get(entry.unit)) {
+            span.edition = unit.edition as u32;
+        }
+    });
+    span
+}
+
 /// Runs function-like proc macro `i` (bang_index) on `input` in crate `krate`.
 pub fn run_bang_in(sess: &std::sync::Arc<crate::Session>, krate: &str, i: usize, input: TokenStream, call_span: Span) -> Result<TokenStream, String> {
     let e = REG.with(|r| r.borrow().as_ref().and_then(|r| r.macros.get(i).map(|x| x.1.clone()))).ok_or("unknown proc macro")?;
@@ -411,6 +433,7 @@ pub fn run_bang_in(sess: &std::sync::Arc<crate::Session>, krate: &str, i: usize,
         return Err("a proc macro used while the macro world itself is being built".to_string());
     }
     let _krate = with_call_krate(krate);
+    let call_span = definition_span(&e, call_span);
     match RUNNER.get() {
         Some(r) if declaring() => r.declare(sess, &e, None, &input, call_span),
         Some(r) => r.call(sess, &e, &input, call_span),
@@ -461,6 +484,13 @@ fn register(sess: &std::sync::Arc<crate::Session>, units: &[CrateUnit], std_dir:
         let u = &units[i];
         let (features, deps) = u.host.as_ref().map_or((&u.features, &u.deps), |h| (&h.features, &h.deps));
         reg.units[map[i]] = UnitInfo { name: u.name.clone(), src_path: u.src_path.clone(), edition: u.edition, features: features.clone(), deps: deps.iter().map(|(d, n)| (map[*d], n.clone())).collect(), proc_macro: u.proc_macro, registry: u.registry, cfgs: Vec::new(), env: Vec::new() };
+    }
+    for (i, u) in units.iter().enumerate() {
+        let deps = reg.target_deps.entry(map[i]).or_default();
+        for (d, name) in &u.deps {
+            let edge = (map[*d], name.clone());
+            if !deps.contains(&edge) { deps.push(edge); }
+        }
     }
     for &i in &fresh {
         let u = reg.units[map[i]].clone();
@@ -555,7 +585,8 @@ pub fn set_build_outputs(sess: &std::sync::Arc<crate::Session>, units: &[CrateUn
             }
             for (ui, u) in reg.units.iter_mut().enumerate() {
                 if u.name == c.name {
-                    if let Some(cs) = cfgs.get(ci) {
+                    let host_outputs = c.host.as_ref().and_then(|h| h.build_outputs.as_ref());
+                    if let Some(cs) = host_outputs.map(|o| &o.0).or_else(|| cfgs.get(ci)) {
                         if u.cfgs != *cs {
                             u.cfgs = cs.clone();
                             if u.proc_macro {
@@ -563,7 +594,7 @@ pub fn set_build_outputs(sess: &std::sync::Arc<crate::Session>, units: &[CrateUn
                             }
                         }
                     }
-                    if let Some(ev) = env.get(ci) {
+                    if let Some(ev) = host_outputs.map(|o| &o.1).or_else(|| env.get(ci)) {
                         u.env = ev.clone();
                     }
                 }
@@ -661,6 +692,12 @@ pub fn has_macro(name: &str) -> bool {
     REG.with(|r| r.borrow().as_ref().map_or(false, |r| r.derives.iter().chain(r.macros.iter()).any(|(n, _)| n == name)))
 }
 
+/// A bare derive shared by different graph entries needs invocation-site
+/// resolution; dependency distance cannot identify the imported macro.
+pub(crate) fn has_derive_collision(name: &str) -> bool {
+    REG.with(|r| r.borrow().as_ref().is_some_and(|r| r.derives.iter().filter(|(n, _)| n == name).take(2).count() > 1))
+}
+
 /// Is `name` an attribute macro of a registered proc-macro crate?
 pub fn has_attr(name: &str) -> bool {
     REG.with(|r| r.borrow().as_ref().map_or(false, |r| r.macros.iter().any(|(n, e)| n == name && e.kind == Kind::Attr)))
@@ -686,23 +723,33 @@ pub fn outline_identity() -> u128 {
     let (entries, helpers) = REG.with(|r| r.borrow().as_ref().map(|r| (
         r.derives.iter().chain(&r.macros).map(|(name, entry)|
             (name.clone(), entry.clone(), r.units[entry.unit].src_path.clone())).collect::<Vec<_>>(),
-        r.helpers.clone(),
+        r.helpers.iter().map(|(unit, name, attrs)| (r.units[*unit].src_path.clone(), name.clone(), attrs.clone())).collect::<Vec<_>>(),
     )).unwrap_or_default());
     let mut hash = crate::sip::Sip128::new();
     for (name, entry, source) in entries {
         hash.str(&name); hash.str(&source); hash.str(&entry.fname); hash.u8(entry.kind as u8);
         hash.u8(RUNNER.get().is_some_and(|r| r.native(&entry)) as u8);
     }
-    for (name, attributes) in helpers {
-        hash.str(&name); hash.u32(attributes.len() as u32);
+    for (source, name, attributes) in helpers {
+        hash.str(&source); hash.str(&name); hash.u32(attributes.len() as u32);
         for attribute in attributes { hash.str(&attribute); }
     }
     hash.finish128()
 }
 
+/// Helpers declared by the resolved derive, including one that shadows a builtin.
+pub(crate) fn derive_helpers(entry: &Entry) -> Vec<String> {
+    REG.with(|r| {
+        let r = r.borrow();
+        let Some(r) = r.as_ref() else { return Vec::new(); };
+        let Some((name, _)) = r.derives.iter().find(|(_, e)| e.unit == entry.unit && e.fname == entry.fname) else { return Vec::new(); };
+        r.helpers.iter().filter(|(unit, n, _)| *unit == entry.unit && n == name).flat_map(|(_, _, hs)| hs.iter().cloned()).collect()
+    })
+}
+
 /// Is `name` a helper attribute of one of `derives` (then `#[name]` is inert there, not a macro)?
 pub fn is_derive_helper(name: &str, derives: &[String]) -> bool {
-    REG.with(|r| r.borrow().as_ref().map_or(false, |r| r.helpers.iter().any(|(d, hs)| derives.contains(d) && hs.iter().any(|h| h == name))))
+    REG.with(|r| r.borrow().as_ref().map_or(false, |r| r.helpers.iter().any(|(_, d, hs)| derives.contains(d) && hs.iter().any(|h| h == name))))
 }
 
 /// Runs the resolved attribute macro, with `krate` as the calling crate, on its arguments
@@ -712,6 +759,7 @@ pub fn run_attr(sess: &std::sync::Arc<crate::Session>, krate: &str, e: &Entry, a
         return Err("an attribute macro used while the macro world itself is being built".to_string());
     }
     let _krate = with_call_krate(krate);
+    let call_span = definition_span(e, call_span);
     match RUNNER.get() {
         Some(r) if declaring() => r.declare(sess, e, Some(attr), item, call_span),
         Some(r) => r.call_attr(sess, e, attr, item, call_span),
@@ -864,79 +912,59 @@ fn scan_tokens_for_entries(
                     }
                 }
             }
-            T::Pound if i + 2 < toks.len() && toks[i + 1].kind == T::OpenBracket => {
-                let a = text(i + 2);
-                let kind = match a {
-                    b"proc_macro_derive" => Some(Kind::Derive),
-                    b"proc_macro" => Some(Kind::Bang),
-                    b"proc_macro_attribute" => Some(Kind::Attr),
-                    _ => None,
-                };
-                if let Some(kind) = kind {
-                    // derive name: first ident inside `(..)`
-                    let mut name = String::new();
-                    let mut helpers: Vec<String> = Vec::new();
-                    let mut j = i + 3;
-                    if kind == Kind::Derive && j < toks.len() && toks[j].kind == T::OpenParen && j + 1 < toks.len() && matches!(toks[j + 1].kind, T::Ident | T::RawIdent) {
-                        name = String::from_utf8_lossy(text(j + 1)).trim_start_matches("r#").to_string();
-                        // `attributes(a, b)`: the derive's helper attributes
-                        let mut k = j + 2;
-                        while k + 1 < toks.len() && toks[k].kind != T::CloseBracket {
-                            if text(k) == b"attributes" && toks[k + 1].kind == T::OpenParen {
-                                let mut m = k + 2;
-                                while m < toks.len() && toks[m].kind != T::CloseParen {
-                                    if matches!(toks[m].kind, T::Ident | T::RawIdent) {
-                                        helpers.push(String::from_utf8_lossy(text(m)).trim_start_matches("r#").to_string());
+            T::KwFn if i + 1 < toks.len() => {
+                // Entry attributes may be emitted by nested cfg_attr. Use the
+                // parser's configured view before publishing names or helpers.
+                let attrs = crate::cfg::attrs_before(p_src, i, cfg);
+                if crate::cfg::active(p_src, &attrs, cfg) {
+                    for attr in &attrs {
+                        let lo = attr.toks.lo as usize;
+                        let hi = attr.toks.hi as usize;
+                        if lo >= hi { continue; }
+                        let kind = match text(lo) {
+                            b"proc_macro_derive" => Kind::Derive,
+                            b"proc_macro" => Kind::Bang,
+                            b"proc_macro_attribute" => Kind::Attr,
+                            _ => continue,
+                        };
+                        let mut name = String::new();
+                        let mut helpers = Vec::new();
+                        if kind == Kind::Derive {
+                            if lo + 2 >= hi || toks[lo + 1].kind != T::OpenParen || !matches!(toks[lo + 2].kind, T::Ident | T::RawIdent) { continue; }
+                            name = String::from_utf8_lossy(text(lo + 2)).trim_start_matches("r#").to_string();
+                            let mut k = lo + 3;
+                            while k + 1 < hi {
+                                if text(k) == b"attributes" && toks[k + 1].kind == T::OpenParen {
+                                    k += 2;
+                                    while k < hi && toks[k].kind != T::CloseParen {
+                                        if matches!(toks[k].kind, T::Ident | T::RawIdent) {
+                                            helpers.push(String::from_utf8_lossy(text(k)).trim_start_matches("r#").to_string());
+                                        }
+                                        k += 1;
                                     }
-                                    m += 1;
-                                }
-                                break;
-                            }
-                            k += 1;
-                        }
-                    }
-                    // skip to the end of the attribute, then to `fn name`
-                    let mut d = 0i32;
-                    j = i + 1;
-                    while j < toks.len() {
-                        match toks[j].kind {
-                            T::OpenBracket | T::OpenParen | T::OpenBrace => d += 1,
-                            T::CloseBracket | T::CloseParen | T::CloseBrace => {
-                                d -= 1;
-                                if d == 0 {
                                     break;
                                 }
+                                k += 1;
                             }
-                            _ => {}
                         }
-                        j += 1;
-                    }
-                    while j < toks.len() && toks[j].kind != T::KwFn {
-                        j += 1;
-                    }
-                    if j + 1 < toks.len() && (kind != Kind::Derive || !name.is_empty()) {
-                        let item_attrs = crate::cfg::attrs_before(p_src, j, cfg);
-                        if crate::cfg::active(p_src, &item_attrs, cfg) {
-                            let fname = String::from_utf8_lossy(text(j + 1)).trim_start_matches("r#").to_string();
-                            let e = Entry { unit, fname: fname.clone(), kind };
-                            match kind {
-                                Kind::Derive => {
-                                    if !helpers.is_empty() && !reg.helpers.iter().any(|(n, hs)| n == &name && hs == &helpers) {
-                                        reg.helpers.push((name.clone(), helpers));
-                                    }
-                                    if !reg.derives.iter().any(|(n, ex)| n == &name && ex.unit == unit && ex.fname == e.fname) {
-                                        reg.derives.push((name, e));
-                                    }
+                        let fname = String::from_utf8_lossy(text(i + 1)).trim_start_matches("r#").to_string();
+                        let e = Entry { unit, fname: fname.clone(), kind };
+                        match kind {
+                            Kind::Derive => {
+                                if !helpers.is_empty() && !reg.helpers.iter().any(|(u, n, hs)| *u == unit && n == &name && hs == &helpers) {
+                                    reg.helpers.push((unit, name.clone(), helpers));
                                 }
-                                _ => {
-                                    if !reg.macros.iter().any(|(n, ex)| n == &fname && ex.unit == unit && ex.kind == kind) {
-                                        reg.macros.push((fname, e));
-                                    }
+                                if !reg.derives.iter().any(|(n, ex)| n == &name && ex.unit == unit && ex.fname == e.fname) {
+                                    reg.derives.push((name, e));
+                                }
+                            }
+                            _ => {
+                                if !reg.macros.iter().any(|(n, ex)| n == &fname && ex.unit == unit && ex.kind == kind) {
+                                    reg.macros.push((fname, e));
                                 }
                             }
                         }
                     }
-                    i = j;
                 }
             }
             T::Ident if brace_depth == 0 && depth < 8 && !local_defs.is_empty() => {
@@ -995,14 +1023,19 @@ pub fn run_derive_in(sess: &std::sync::Arc<crate::Session>, krate: &str, name: &
         let mut b = r.borrow_mut();
         resolve_entry(b.as_mut()?, krate, name, Kind::Derive)
     })?;
-    let native = RUNNER.get().map_or(false, |r| r.native(&e));
+    Some(run_derive_entry(sess, krate, name, &e, item, call_span))
+}
+
+pub(crate) fn run_derive_entry(sess: &std::sync::Arc<crate::Session>, krate: &str, name: &str, e: &Entry, item: &TokenStream, call_span: Span) -> Result<TokenStream, String> {
+    let native = RUNNER.get().map_or(false, |r| r.native(e));
     let _profile = crate::load_profile::span(sess.runtime.profile, if native { "derive-native" } else { "derive-jit" }, name);
     let _krate = with_call_krate(krate);
-    Some(match RUNNER.get() {
-        Some(r) if declaring() => r.declare(sess, &e, None, item, call_span),
-        Some(r) => r.call(sess, &e, item, call_span),
-        None => Err(no_runner(&e)),
-    })
+    let call_span = definition_span(e, call_span);
+    match RUNNER.get() {
+        Some(r) if declaring() => r.declare(sess, e, None, item, call_span),
+        Some(r) => r.call(sess, e, item, call_span),
+        None => Err(no_runner(e)),
+    }
 }
 
 /// Runs derive `name` on `item` (any thread).

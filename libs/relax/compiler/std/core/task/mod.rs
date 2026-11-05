@@ -63,6 +63,25 @@ impl<T, E> Poll<Result<T, E>> {
     }
 }
 
+impl<T, E> Poll<Option<Result<T, E>>> {
+    pub fn map_ok<U, F: FnOnce(T) -> U>(self, f: F) -> Poll<Option<Result<U, E>>> {
+        match self {
+            Poll::Ready(Some(Ok(t))) => Poll::Ready(Some(Ok(f(t)))),
+            Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e))),
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+    pub fn map_err<U, F: FnOnce(E) -> U>(self, f: F) -> Poll<Option<Result<T, U>>> {
+        match self {
+            Poll::Ready(Some(Ok(t))) => Poll::Ready(Some(Ok(t))),
+            Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(f(e)))),
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
 impl<T> From<T> for Poll<T> {
     fn from(t: T) -> Poll<T> {
         Poll::Ready(t)

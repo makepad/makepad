@@ -204,6 +204,9 @@ enum Work {
 }
 
 impl Pool {
+    pub(crate) fn publish_macros(&self, ci: u32, table: &mut MacroTable) -> bool {
+        self.demand_plan.as_ref().is_some_and(|plan| plan.publish_macros(ci as usize + self.plan_offset, table))
+    }
     /// Start this crate's parses only once the sequential loader has the macro environment
     /// its dependencies produced (including imports emitted by macro expansions).
     pub fn start_parsing(&self, ci: u32, table: Arc<MacroTable>) {
@@ -523,8 +526,7 @@ impl Pool {
                         if u.path.len() == 1 && u.path[0] == "crate" {
                             cmods.externs.insert(b.clone(), c.name.clone());
                         } else if u.path.len() == 2 && u.path[0].is_empty() {
-                            let target = cmods.externs.get(&u.path[1]).cloned().unwrap_or_else(|| u.path[1].clone());
-                            cmods.externs.insert(b.clone(), target);
+                            if let Some(target) = crate::macros::extern_target(&cmods.externs, &u.path[1]) { cmods.externs.insert(b.clone(), target); }
                         }
                     }
                 }
@@ -1197,17 +1199,14 @@ fn scan_tokens(path: &str, dir: &str, mpath: &str, krate: &str, edition: u16, cf
                 T::Ident
                     if i + 2 < toks.len()
                         && toks[i + 1].kind == T::Not
-                        && toks[i + 2].kind == T::OpenParen
+                        && matches!(toks[i + 2].kind, T::OpenParen | T::OpenBracket | T::OpenBrace)
                         && dirs.last().map_or(false, |l| l.0 == depth && l.3)
                         && crate::builtins::prescan_hosted(&String::from_utf8_lossy(text(i))) =>
                 {
                     // item macros that may define macro_rules!: function-like proc macros of
                     // the JIT host called at item position (run here, their macro_rules! kept;
                     // builtins.rs prescan_defs)
-                    let mut close = i + 2;
-                    while close < toks.len() && toks[close].kind != T::CloseParen {
-                        close += 1;
-                    }
+                    let close = lazy::demand::close(&toks, i + 2);
                     if close < toks.len() && macro_surface && decl_attrs(&src, &toks, i, cfg).active {
                         let arg = &src[toks[i + 2].hi as usize..toks[close].lo as usize];
                         defs.extend(crate::builtins::prescan_defs(cfg, &String::from_utf8_lossy(text(i)), arg, krate));
@@ -1490,8 +1489,7 @@ pub fn check_macros(prog: &mut crate::program::Program, krate: u32, files: &[(u3
                         if u.path.len() == 1 && u.path[0] == "crate" {
                             mods.externs.insert(b.clone(), name.clone());
                         } else if u.path.len() == 2 && u.path[0].is_empty() {
-                            let target = mods.externs.get(&u.path[1]).cloned().unwrap_or_else(|| u.path[1].clone());
-                            mods.externs.insert(b.clone(), target);
+                            if let Some(target) = crate::macros::extern_target(&mods.externs, &u.path[1]) { mods.externs.insert(b.clone(), target); }
                         }
                     }
                 }

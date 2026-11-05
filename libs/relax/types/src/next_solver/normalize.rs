@@ -37,6 +37,10 @@ impl NormalizationFolder<'_, '_, '_> {
     fn normalize_alias_term(&mut self, alias: AliasTerm) -> Result<(Term, bool), NoSolutionOrRerunNonErased> {
         let term = self.ecx.next_term_infer_of_alias_kind(&alias);
         let goal = Goal { param_env: self.env.clone(), predicate: Predicate::dummy(PredicateKind::Clause(ClauseKind::Projection(ProjectionClause { projection_term: alias, term }))) };
+        // Selection replays the proof's nested goals after the candidate probe
+        // rolls back. Keep the projection tying this fresh term to its alias,
+        // even when normalization must wait for more type information.
+        self.ecx.inspect.add_goal(self.ecx.delegate, self.ecx.max_input_universe, self.normalization_goal_source, goal.clone());
         let evaluation = self.ecx.evaluate_goal(self.normalization_goal_source, goal.clone())?;
         if !evaluation.certainty.is_yes() { self.ecx.nested_goals.push((self.normalization_goal_source, goal, evaluation.stalled_on)); }
         let mut resolver = crate::infer::resolve::DeepResolverIgnoringRegions::new(self.ecx.delegate);
