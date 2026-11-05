@@ -136,7 +136,7 @@ fn anonymisation_checklist() {
         ("Reported by jane.doe@gmail.com", EMAIL),
         ("// ask Bob <bob.smith@acme-corp.io> first", EMAIL),
         ("path = \"/Users/janedoe/Projects/notes\"", HOME_PATH),
-        ("cd /home/me/makepad-builder && ./makepad-builder.sh build scope", HOME_PATH),
+        ("cd /home/me/makepad-runner && ./makepad.sh", HOME_PATH),
         ("let root = \"C:\\\\Users\\\\me\\\\makepad\";", HOME_PATH),
         ("logs in D:/work/makepad", HOME_PATH),
         ("copy \\\\fileserver\\share\\report", HOME_PATH),

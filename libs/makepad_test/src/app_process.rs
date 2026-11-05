@@ -465,9 +465,9 @@ fn launch_command(
 
     // The service is up once `help` answers; a window follows on the first
     // frame. Waiting here keeps `snap` from answering an empty tree to the
-    // test's first locator. Under the JIT, the first window still has lazy
-    // compiles ahead of it: wait for the host's compile queues and owner too,
-    // without applying the native startup deadline.
+    // test's first locator. Under the JIT, the window exists before its first
+    // frame has been compiled: wait for that frame and for the program not to be
+    // waiting on the JIT, without applying the native startup deadline.
     let mut help_seen = false;
     loop {
         if let Some(status) = app.poll_exit() {
@@ -481,8 +481,10 @@ fn launch_command(
         if !help_seen {
             help_seen = app.client.help().is_ok();
         }
-        if help_seen && app.client.windows().is_ok_and(|windows| !windows.is_empty()) {
-            if !jit || !app.client.jit_busy()? {
+        if help_seen {
+            let windows = app.client.windows().unwrap_or_default();
+            let up = if jit { windows.iter().any(|window| window.pass_dpi > 0.0) } else { !windows.is_empty() };
+            if up && (!jit || !app.client.jit_foreground()?) {
                 return Ok(app);
             }
         }

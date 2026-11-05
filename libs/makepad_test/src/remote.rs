@@ -26,6 +26,8 @@ pub struct WindowInfo {
     pub width: f64,
     pub height: f64,
     pub dpi: f64,
+    /// The scale its main pass last rasterised at; 0 before it first drew.
+    pub pass_dpi: f64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -134,9 +136,16 @@ impl RemoteClient {
         Ok(Self { socket, client, jit: false })
     }
 
-    pub(crate) fn jit_busy(&self) -> TestResult<bool> {
-        makepad_remote::jit::busy(&self.client)
-            .map_err(|err| TestError::new(format!("app remote JIT state: {err}")))
+    /// The program is waiting on the JIT right now. Background work (the queues ahead of the
+    /// program, tier-ups, the cache's writes) goes on beside a test and is not a reason to wait.
+    pub(crate) fn jit_foreground(&self) -> TestResult<bool> {
+        let fail = |what: &str| TestError::new(format!("app remote JIT state: {what}"));
+        let reply = self.get_text("owner", &[])?;
+        let json = reply.lines().find(|line| line.contains("\"queued\"")).ok_or_else(|| fail("the owner's reply carries no queue state"))?;
+        let json = parse_json(json)?;
+        let queued = json.key("queued");
+        let count = |key: &str| json_f64(queued.and_then(|queued| queued.key(key))).ok_or_else(|| fail("the owner's queue state is not a count"));
+        Ok(count("foreground")? + count("main")? > 0.0)
     }
 
     /// Under the JIT, the app's state captured before teardown (the host's `capture`: stacks
@@ -454,6 +463,7 @@ pub fn parse_windows(json: &JsonValue) -> TestResult<Vec<WindowInfo>> {
             width: json_f64(size.first()).unwrap_or(0.0),
             height: json_f64(size.get(1)).unwrap_or(0.0),
             dpi: json_f64(item.key("dpi")).unwrap_or(1.0),
+            pass_dpi: json_f64(item.key("pass_dpi")).unwrap_or(0.0),
         });
     }
     Ok(windows)
@@ -615,7 +625,8 @@ mod tests {
                 title: "Counter [remote]".to_string(),
                 width: 800.0,
                 height: 600.0,
-                dpi: 2.0
+                dpi: 2.0,
+                pass_dpi: 0.0,
             }]
         );
         let json = parse_json(r#"{"n":7,"pool":"","l":["a","b"]}"#).unwrap();

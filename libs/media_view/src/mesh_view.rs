@@ -2001,11 +2001,11 @@ impl Widget for MeshView {
                 })
                 .collect();
             let mut draws = SceneDraws {
-                cube: &mut self.draw_cube,
-                alpha: &mut self.draw_alpha,
+                cube: Some(&mut self.draw_cube),
+                alpha: Some(&mut self.draw_alpha),
                 sky: &mut self.draw_sky,
                 sky_analytic: None,
-                terrain: &mut self.draw_terrain,
+                terrain: Some(&mut self.draw_terrain),
                 shadow: if self.shadows_enabled {
                     Some(&mut self.draw_shadow)
                 } else {

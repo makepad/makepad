@@ -5,11 +5,10 @@
 //!
 //! A report is a zip of at most [`MAX_ZIP_BYTES`] holding exactly
 //! `report.json` (the list, checked here field by field), `REPORT.md` (the
-//! same list for people; what the Builder shows before sending) and, only
+//! same list for people; what the person reads before sending) and, only
 //! when the person chose to include it, a trimmed `changes.diff`. Everything
 //! is UTF-8 text. [`open`] checks a zip completely, the anonymisation scan
-//! included, and is what both the Builder (before it sends) and the
-//! server (when it receives) run; [`pack`] makes the zip from a folder
+//! included; [`pack`] makes the zip from a folder
 //! holding those files. Nothing here does I/O beyond reading that folder.
 
 use makepad_strict_json::{self as json, Value};

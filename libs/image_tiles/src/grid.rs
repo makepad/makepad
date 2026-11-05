@@ -810,6 +810,12 @@ impl TileGrid {
         true
     }
 
+    /// The host looked and has no library to show: the grid stays empty instead of
+    /// trying its default root when it first runs. A later [`open`](Self::open) still opens one.
+    pub fn stay_empty(&mut self) {
+        self.opened = true;
+    }
+
     fn ensure_open(&mut self, cx: &mut Cx) {
         if self.opened {
             return;

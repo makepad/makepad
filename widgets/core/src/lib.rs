@@ -1063,35 +1063,18 @@ mod module_rebuild_tests {
         let mut steps = Vec::new();
         for _ in 0..5 {
             let (now, roots_now) = live_after(&mut cx);
-            // Every root but the pod types holds still. Those still grow, by
-            // the vertex structs a run spells out, and the obvious fix -- an
-            // equal slot taking the new definition over -- is not open: a
-            // compiled shader holds a pod type INDEX, so handing a slot back
-            // to the free list hands a later struct an index some shader is
-            // still reading its geometry through, and a quad stops finding
-            // its own `pos`. It waits for a way to retire a slot that knows
-            // who is still holding it.
+            // Every root holds still, the pod types too: a run's vertex
+            // structs go with the objects that own them once nothing reaches
+            // them (a compiled shader keeps copies of the types it read).
             for (i, name) in named.iter().enumerate() {
-                if i == 2 {
-                    continue;
-                }
                 assert_eq!(roots_now[i], roots[i], "a rebuild grew a collector root: {name}");
             }
             steps.push(now as i64 - live as i64);
             live = now;
         }
-        // Not zero, for the reason above: a run's pod definitions stay rooted
-        // by the slots they were filed under. What matters is that the cost
-        // is the SAME every rebuild and small -- a leak accelerates, and this
-        // is what a leak of some 2,970 objects a rebuild was brought down to.
-        let worst = *steps.iter().max().unwrap();
         assert!(
-            worst <= 192,
-            "a rebuild left {worst} more live objects than the one before it; per-rebuild steps were {steps:?}"
-        );
-        assert!(
-            steps.iter().all(|s| (s - steps[0]).abs() <= 32),
-            "the cost of a rebuild is not settling: {steps:?}"
+            steps.iter().all(|&s| s == 0),
+            "a rebuild left more live objects than the one before it; per-rebuild steps were {steps:?}"
         );
     }
 }

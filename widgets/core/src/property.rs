@@ -1,5 +1,5 @@
-//! Property-panel rows on a 20 pt field / 22 pt row scale, with a capped
-//! label column and reserved trailing actions. Stacks join fields at 1 pt gaps.
+//! Property-panel rows on an 18 pt field / 20 pt row scale with one 11 px type size, a capped
+//! label column and a trailing slot a host can reserve for actions. Stacks join fields at 1 pt gaps.
 
 use crate::{
     makepad_derive_widget::*,
@@ -29,17 +29,52 @@ script_mod! {
             draw_text +: {
                 ink_centered: true
                 color: theme.prop_ink_dim
-                text_style: theme.font_regular{font_size: theme.font_size_p line_spacing: 1.0}
+                text_style: theme.font_regular{font_size: theme.prop_font_size line_spacing: 1.0}
             }
         }
         gap := View{width: theme.prop_label_gap height: Fill}
         value := View{width: Fill height: Fill}
-        trail := View{width: theme.prop_trail_width height: Fill align: Center}
+        // No room is kept for trailing actions unless a host reserves it (`trail +: {width: theme.prop_trail_width}`)
+        // on every row of its list, so a panel without them gives the width to its values.
+        trail := View{width: 0 height: Fill align: Center}
     }
     mod.widgets.PropNumberRow = mod.widgets.PropRow{
         value +: {
             // The row sets the height: a sheet's taller field minimum would put the text below the field's middle.
             num := ValueInput{width: Fill height: Fill min_height: 0}
+        }
+    }
+    // A text field on the property scale, in the number field's well: no border at rest, a
+    // one-device-pixel focus ring, edges on device pixels, the text at the property size.
+    mod.widgets.PropTextInput = TextInput{
+        width: Fill height: theme.prop_row_height min_height: 0
+        margin: Inset{}
+        padding: Inset{left: theme.prop_pad + 2.0 right: theme.prop_pad + 2.0}
+        draw_bg +: {
+            color: theme.prop_field
+            color_hover: theme.prop_field_hover
+            color_focus: theme.prop_field_active
+            color_down: theme.prop_field_active
+            color_empty: theme.prop_field
+            border_color_focus: theme.color_focus
+            border_radius: theme.prop_radius
+            pixel: fn() {
+                let dpi = self.draw_pass.dpi_factor
+                let px = 1.0 / dpi
+                let lo = floor(self.rect_pos * dpi + 0.5) / dpi - self.rect_pos
+                let hi = floor((self.rect_pos + self.rect_size) * dpi + 0.5) / dpi - self.rect_pos
+                let sdf = Sdf2d.viewport_px(self.pos * self.rect_size, dpi)
+                let face = self.color.mix(self.color_hover, self.hover).mix(self.color_focus, self.focus)
+                sdf.box(lo.x + px * 0.5, lo.y + px * 0.5, hi.x - lo.x - px, hi.y - lo.y - px, self.border_radius)
+                sdf.fill_keep(face.mix(self.color_disabled, self.disabled))
+                // SDF strokes take a half-width.
+                sdf.stroke(vec4(self.border_color_focus.rgb, self.border_color_focus.a * self.focus), px * 0.5)
+                return sdf.result
+            }
+        }
+        draw_text +: {
+            ink_centered: true
+            text_style: theme.font_regular{font_size: theme.prop_font_size line_spacing: 1.0}
         }
     }
     mod.widgets.PropStackBase = #(PropStack::register_widget(vm))

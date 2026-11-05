@@ -227,8 +227,8 @@ mod tests {
 
     #[test]
     fn an_app_conf_gives_lan_and_named_settings_only() {
-        let env = parse_app_conf("# 104's Fab\nlan = on\nenv FAB_PRINTER_CONF=h2d\nenv CARGO_TARGET_DIR=/x\nenv MAKEPAD_TEST_LANE=x\nnonsense\n");
-        assert_eq!(env, vec![("MAKEPAD_LAN".to_string(), "1".to_string()), ("FAB_PRINTER_CONF".to_string(), "h2d".to_string())]);
+        let env = parse_app_conf("# a node's app\nlan = on\nenv APP_SETTING=x\nenv CARGO_TARGET_DIR=/x\nenv MAKEPAD_TEST_LANE=x\nnonsense\n");
+        assert_eq!(env, vec![("MAKEPAD_LAN".to_string(), "1".to_string()), ("APP_SETTING".to_string(), "x".to_string())]);
         assert_eq!(parse_app_conf("lan = off"), vec![("MAKEPAD_LAN".to_string(), "0".to_string())]);
     }
 

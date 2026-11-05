@@ -26,25 +26,27 @@ script_mod! {
     mod.widgets.TokenColorsBase = #(TokenColors::script_component(vm))
     mod.widgets.TokenColors = set_type_default() do mod.widgets.TokenColorsBase {
         whitespace: #6E6E6E
-        delimiter: #a
-        delimiter_highlight: #f
+        delimiter: theme.color_syntax_punctuation
+        delimiter_highlight: theme.color_text
         error_decoration: #f00
         warning_decoration: #0f0
 
-        unknown: #C0C0C0
-        branch_keyword: #C485BE
-        constant: #CC917B
-        identifier: #D4D4D4
-        macro_identifier: #C485BE
-        attribute: #C485BE
-        loop_keyword: #FF8C00
-        number: #B6CEAA
-        other_keyword: #5B9BD3
-        punctuator: #D4D4D4
-        string: #CC917B
-        function: #fffcc9
-        typename: #56C9B1
-        comment: #638D54
+        // The theme's syntax colours, set for its ground: a light theme's are dark enough to read
+        // on white, a dark theme's light enough on its editor.
+        unknown: theme.color_syntax_ident
+        branch_keyword: theme.color_syntax_keyword_branch
+        constant: theme.color_syntax_constant
+        identifier: theme.color_syntax_ident
+        macro_identifier: theme.color_syntax_macro
+        attribute: theme.color_syntax_attribute
+        loop_keyword: theme.color_syntax_keyword_loop
+        number: theme.color_syntax_literal
+        other_keyword: theme.color_syntax_keyword
+        punctuator: theme.color_syntax_punctuation
+        string: theme.color_syntax_string
+        function: theme.color_syntax_fn
+        typename: theme.color_syntax_type
+        comment: theme.color_syntax_comment
     }
 
     set_type_default() do #(DrawIndentGuide::script_shader(vm)) {

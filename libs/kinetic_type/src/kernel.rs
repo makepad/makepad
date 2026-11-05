@@ -109,7 +109,7 @@ pub fn compile(vm: &ScriptVm, kit: &Kit, which: Which, out: &LayoutView<'_>) -> 
     for (name, d) in dials {
         decls.push(param(name, *d, 1000.0));
     }
-    let k = VmKernel { decls, entry, entry_fn, math: MathMode::Fast, uses: vec!["kinetic".into()], bind: vec![(bind.0.to_string(), bind.1)] };
+    let k = VmKernel { decls, entry, entry_fn, math: MathMode::Fast, whole_ranges: false, uses: vec!["kinetic".into()], bind: vec![(bind.0.to_string(), bind.1)] };
     register_layouts();
     let layouts = [GLYPH, *out, CAMERA, CURVE_POINT];
     let modules = [Module { path: "kinetic", source: KINETIC_MODULE }];

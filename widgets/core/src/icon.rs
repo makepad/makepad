@@ -176,6 +176,10 @@ pub struct Icon {
     /// so the presets and their hosts size an icon without touching the walk.
     #[live]
     size: f64,
+    /// Hidden, the icon takes no room: a slot a host fills only sometimes.
+    #[live(true)]
+    #[visible]
+    visible: bool,
     #[walk]
     walk: Walk,
     #[layout]
@@ -192,6 +196,9 @@ impl Widget for Icon {
     fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope) {}
 
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        if !self.visible {
+            return DrawStep::done();
+        }
         self.draw_bg.begin(cx, walk, self.layout);
         let icon_walk = if self.size > 0.0 {
             Walk {

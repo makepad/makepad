@@ -1,13 +1,12 @@
 //! The shared app registry: one table (`apps.json`) of every Makepad app,
-//! read by the WM (its menu and launch table), Builder and Stage (an app run
+//! read by the WM (its menu and launch table) and Stage (an app run
 //! names its app by registry id).
 //!
 //! The table is embedded (`apps.json`, read at first use by table.rs), so
 //! `apps()` is a static slice and the lookups never allocate. The rest of the crate answers the checkout
 //! questions every reader asks, the one way the WM always answered them:
-//! where the sources are (a developer's clone, or the snapshot a Makepad
-//! Builder downloaded), whether an app's release binary is there, and the
-//! command that builds it (in a Builder installation: the Builder's own).
+//! where the sources are, whether an app's release binary is there, and the
+//! command that builds it.
 //!
 //! Notes the JSON cannot carry:
 //! - code is the local coding agent: a chat window over the AI Hub's model
@@ -25,13 +24,13 @@
 //!   row or a tile; splash and counter are the WM's pacing/protocol rigs.
 //! - scope and stage come from the optional private checkout of
 //!   makepad/commercial at apps/commercial (Scope at scope/, Stage's app at
-//!   stage/app, or a Builder's slice of it holding
+//!   stage/app, or a release's slice of it holding
 //!   only the licensed app): present, they are members of this workspace and
 //!   build into its target/; absent, `is_available` is false and the WM
 //!   drops the row.
 //! - studio (apps/studio) is absent in this checkout today; its row stays
 //!   and is filtered out the same way.
-//! - wm, wm-all and ai-hub are built by Builder but are not
+//! - wm, wm-all and ai-hub are in the Runner's list (`runner_apps.json`) but are not
 //!   windows the WM hosts (`wm_launchable: false`).
 
 use std::ffi::OsStr;
@@ -50,7 +49,7 @@ pub enum LaunchPolicy {
 /// One app of the registry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AppEntry {
-    /// Registry id: what the WM, Builder and Stage name the app by.
+    /// Registry id: what the WM, the Runner and Stage name the app by.
     pub id: &'static str,
     /// The name a human reads in a menu or picker.
     pub label: &'static str,
@@ -69,11 +68,11 @@ pub struct AppEntry {
     /// A row of the WM's app menu; a hidden app (the viewers, the
     /// assistant, test rigs) opens only by id.
     pub menu_visible: bool,
-    /// A window the WM hosts as a client. Builder-only rows (the WM itself,
+    /// A window the WM hosts as a client. Runner-only rows (the WM itself,
     /// the AI hub, Stage) are not runnable windows: an app picker filters
     /// on this.
     pub wm_launchable: bool,
-    /// Builder's release feature set for it (Builder builds with
+    /// The Runner's release feature set for it (it builds with
     /// `--no-default-features --features <these>`; `build_argv` builds
     /// with the package's default features).
     pub features: &'static [&'static str],
@@ -136,8 +135,7 @@ pub fn find_by_bin(bin: &str) -> Option<&'static AppEntry> {
 // The checkout
 // ----------------------------------------------------------------------
 
-/// The checkout root: `MAKEPAD_WM_ROOT`, else the sources of the Builder
-/// installation this executable belongs to, else (under the JIT) the checkout this
+/// The checkout root: `MAKEPAD_WM_ROOT`, else (under the JIT) the checkout this
 /// program's sources are in, else the checkout above the running exe (`target/<profile>/<bin>`), else the checkout at or above the
 /// current directory — started from the repo root with its target dir
 /// elsewhere (CARGO_TARGET_DIR) is still running out of a checkout. None:
@@ -145,12 +143,6 @@ pub fn find_by_bin(bin: &str) -> Option<&'static AppEntry> {
 pub fn repo_root() -> Option<PathBuf> {
     if let Ok(root) = std::env::var("MAKEPAD_WM_ROOT") {
         return Some(PathBuf::from(root));
-    }
-    // A binary the Makepad Builder published: its sources are in the
-    // Builder's folder, whether the Builder started it (in them) or it was
-    // opened on its own (wm.exe, the Dock, the wm command).
-    if let Some(install) = builder_install() {
-        return install.checkout();
     }
     // Under the JIT the executable is the loader, whose checkout need not be the one this
     // program was compiled from (a CI tree run by a box's loader): the program's own sources are.
@@ -165,79 +157,9 @@ pub fn repo_root() -> Option<PathBuf> {
     from_exe.or_else(|| std::env::current_dir().ok().and_then(|cwd| checkout_at_or_above(&cwd)))
 }
 
-/// The Makepad Builder installation a published binary runs from: `home` is
-/// the folder people see (makepad-builder.exe or the `makepad` command, and
-/// the apps), `state` the Builder's own `builder/` folder in it (sources,
-/// toolchains, the Unix `<app>.bin`s). Found from the executable: Windows
-/// `home/makepad-app-wm.exe`, Unix `builder/makepad-app-wm.bin`, a macOS bundle's `installation`
-/// link. Apps build through the Builder there (`build_argv`), so they get its
-/// compiler, flags, features and target however the reader was started.
-pub struct BuilderInstall {
-    pub home: PathBuf,
-    pub state: PathBuf,
-}
-
-impl BuilderInstall {
-    /// The Builder's command that builds one app offline.
-    pub fn command(&self) -> Option<PathBuf> {
-        let command = if cfg!(windows) { self.home.join("makepad-builder.exe") } else { self.home.join("makepad-builder.sh") };
-        command.is_file().then_some(command)
-    }
-    /// Where the Builder publishes `bin`.
-    pub fn published(&self, bin: &str) -> PathBuf {
-        if cfg!(windows) {
-            self.home.join(format!("{bin}.exe"))
-        } else {
-            self.state.join(format!("{bin}.bin"))
-        }
-    }
-    /// The Makepad source to build from: the snapshot the working directory
-    /// is in (the Builder starts its apps there), else the newest one with
-    /// the WM in it.
-    pub fn checkout(&self) -> Option<PathBuf> {
-        let sources = self.state.join("sources");
-        if let Some(cwd) = std::env::current_dir().ok().and_then(|cwd| checkout_at_or_above(&cwd)) {
-            if cwd.starts_with(&sources) {
-                return Some(cwd);
-            }
-        }
-        std::fs::read_dir(&sources)
-            .ok()?
-            .flatten()
-            .map(|snapshot| snapshot.path().join("makepad"))
-            .filter(|root| root.join("apps/wm/Cargo.toml").is_file())
-            .max_by_key(|root| std::fs::metadata(root.join("Cargo.toml")).and_then(|m| m.modified()).ok())
-    }
-}
-
-/// The Builder installation the running executable belongs to, if any.
-pub fn builder_install() -> Option<BuilderInstall> {
-    let exe = std::env::current_exe().ok()?;
-    let dir = exe.parent()?;
-    for state in [dir.join("builder"), dir.to_path_buf(), dir.join("installation")] {
-        // Its downloaded sources and its compiler (the email record is
-        // missing in a folder nobody logged into).
-        if state.join("sources").is_dir() && state.join("toolchain").is_dir() {
-            let state = state.canonicalize().unwrap_or(state);
-            // An installation from before the builder/ folder keeps
-            // everything in the folder itself.
-            let home = if state.file_name().is_some_and(|name| name == "builder") {
-                state.parent()?.to_path_buf()
-            } else {
-                state.clone()
-            };
-            return Some(BuilderInstall { home, state });
-        }
-    }
-    None
-}
-
 /// The nearest directory at or above `start` that is a makepad checkout: the
 /// workspace `Cargo.toml` with the WM's crate in it. Every ancestor is
-/// checked (crates sit as deep as apps/commercial/story/libs/app_run). A
-/// developer's clone and the source a Makepad Builder downloaded (which
-/// starts its apps in it, with its compiler environment) both are; the
-/// Builder's has no `local/`.
+/// checked (crates sit as deep as apps/commercial/story/libs/app_run).
 pub fn checkout_at_or_above(start: &Path) -> Option<PathBuf> {
     start.ancestors().find(|dir| dir.join("Cargo.toml").exists() && dir.join("apps/wm/Cargo.toml").exists()).map(Path::to_path_buf)
 }
@@ -253,8 +175,7 @@ pub fn has_sources(app: &AppTarget, root: &Path) -> bool {
 }
 
 /// The release binary a checkout's cargo builds for `app`: under
-/// `CARGO_TARGET_DIR` when set (the Makepad Builder points it at its one
-/// shared target), else the workspace's own `target/`.
+/// `CARGO_TARGET_DIR` when set, else the workspace's own `target/`.
 pub fn checkout_binary(app: &AppTarget, root: &Path, target_dir: Option<&OsStr>) -> PathBuf {
     let workspace = app
         .manifest
@@ -334,13 +255,9 @@ pub fn installed_binary(bin: &str) -> Option<PathBuf> {
     path.exists().then_some(path)
 }
 
-/// The binary that starts `app` without compiling anything: the Builder's
-/// published one in a Builder installation, else a sibling of the running
-/// executable, else the checkout's release build (`root`). None: not built.
+/// The binary that starts `app` without compiling anything: a sibling of the
+/// running executable, else the checkout's release build (`root`). None: not built.
 pub fn built_binary(app: &AppTarget, root: Option<&Path>) -> Option<PathBuf> {
-    if let Some(install) = builder_install() {
-        return Some(install.published(app.bin)).filter(|path| path.is_file());
-    }
     // Beside the running executable first: whatever target directory this
     // build used, its sibling binaries are right there.
     if let Some(path) = installed_binary(app.bin) {
@@ -369,22 +286,13 @@ pub fn cargo_bin() -> PathBuf {
 /// The build of `app` in the checkout at `root`: `cargo build --release`
 /// of exactly its package and binary, with the package's default features
 /// (children are ALWAYS release builds, never debug). `--manifest-path`
-/// keeps it independent of the cwd. In a Builder installation the Builder
-/// builds it — the same command, flags, features and target as its own
-/// builds, so nothing it compiled compiles again (`makepad-builder build
-/// APP`, Unix `makepad-builder.sh build APP`).
+/// keeps it independent of the cwd.
 pub fn build_argv(app: &AppTarget, root: &Path) -> (PathBuf, Vec<String>) {
     build_argv_features(app, root, "")
 }
 
-/// [`build_argv`] with cargo features (`--features a,b`; empty: the package's defaults). A
-/// Builder installation builds its own feature sets, so a feature list always builds with cargo.
+/// [`build_argv`] with cargo features (`--features a,b`; empty: the package's defaults).
 pub fn build_argv_features(app: &AppTarget, root: &Path, features: &str) -> (PathBuf, Vec<String>) {
-    if features.trim().is_empty() {
-        if let Some(command) = builder_install().and_then(|install| install.command()) {
-            return (command, vec!["build".to_string(), app.id.to_string()]);
-        }
-    }
     cargo_argv(app, root, features)
 }
 
@@ -485,12 +393,9 @@ fn cargo_argv(app: &AppTarget, root: &Path, features: &str) -> (PathBuf, Vec<Str
 // Per entry, against the current checkout
 // ----------------------------------------------------------------------
 
-/// Where its binary is or will be: the Builder's published path, the
-/// checkout's release path, or an installed sibling (None: none there).
+/// Where its binary is or will be: the checkout's release path, or an
+/// installed sibling (None: none there).
 pub fn binary_path(entry: &AppEntry) -> Option<PathBuf> {
-    if let Some(install) = builder_install() {
-        return Some(install.published(entry.bin));
-    }
     match repo_root() {
         Some(root) => Some(checkout_binary(&entry.target(), &root, std::env::var_os("CARGO_TARGET_DIR").as_deref())),
         None => installed_binary(entry.bin),
@@ -526,11 +431,6 @@ mod tests {
     use super::*;
     use makepad_strict_json::Value;
 
-    /// Builder ids that are deliberately not registry apps, with the reason.
-    /// Every other app Builder builds is in the registry (the ones the WM
-    /// does not host are `wm_launchable: false`).
-    const BUILDER_ONLY: &[(&str, &str)] = &[];
-
     #[test]
     fn a_program_is_the_same_file_or_the_same_bytes() {
         let dir = std::env::temp_dir().join(format!("app-registry-program-{}", std::process::id()));
@@ -555,29 +455,22 @@ mod tests {
         checkout_at_or_above(Path::new(env!("CARGO_MANIFEST_DIR"))).expect("tests run in a checkout")
     }
 
-    fn builder_apps() -> Vec<Value> {
-        let bytes = std::fs::read(test_root().join("tools/makepad_builder/apps.json")).expect("Builder's apps.json");
-        match makepad_strict_json::parse(&bytes).expect("Builder's apps.json parses") {
+    fn runner_apps() -> Vec<Value> {
+        match makepad_strict_json::parse(include_bytes!("../runner_apps.json")).expect("runner_apps.json parses") {
             Value::Arr(rows) => rows,
-            _ => panic!("Builder's apps.json is not an array"),
+            _ => panic!("runner_apps.json is not an array"),
         }
     }
 
     fn field<'a>(row: &'a Value, key: &str) -> &'a str {
-        row.get(key).and_then(Value::as_str).unwrap_or_else(|| panic!("Builder row without {key}: {row:?}"))
+        row.get(key).and_then(Value::as_str).unwrap_or_else(|| panic!("Runner row without {key}: {row:?}"))
     }
 
     #[test]
-    fn every_builder_app_is_in_the_registry_and_agrees_with_it() {
-        for row in builder_apps() {
+    fn every_runner_app_is_in_the_registry_and_agrees_with_it() {
+        for row in runner_apps() {
             let id = field(&row, "id");
-            let Some(entry) = find(id) else {
-                assert!(
-                    BUILDER_ONLY.iter().any(|(only, _)| *only == id),
-                    "Builder's {id} is neither in the registry nor in BUILDER_ONLY"
-                );
-                continue;
-            };
+            let entry = find(id).unwrap_or_else(|| panic!("the Runner's {id} is not in the registry"));
             assert_eq!(entry.package, field(&row, "package"), "{id}: package");
             assert_eq!(entry.bin, field(&row, "binary"), "{id}: binary");
             assert_eq!(field(&row, "workspace"), format!("makepad/{}", entry.dir), "{id}: dir");
@@ -588,12 +481,8 @@ mod tests {
             assert_eq!(
                 entry.features,
                 features.as_slice(),
-                "{id}: features differ from Builder's (order included: a drift alarm)"
+                "{id}: features differ from the Runner's (order included: a drift alarm)"
             );
-        }
-        for (id, reason) in BUILDER_ONLY {
-            assert!(!reason.is_empty(), "{id}: BUILDER_ONLY needs a reason");
-            assert!(find(id).is_none(), "{id} is in the registry, drop it from BUILDER_ONLY");
         }
     }
 

@@ -1318,13 +1318,18 @@ impl Window {
         let room = cx.caption_badge_room();
         // a direct child of the bar: no tree walk
         let gap = self.view.child(id!(caption_bar)).child(id!(jit_ring_gap));
-        let visible = has_content && room > 0.0;
-        if gap.visible() != visible {
-            if let Some(mut view) = gap.borrow_mut::<View>() {
-                view.walk.width = Size::Fixed(room);
-            }
-            gap.set_visible(cx, visible);
+        // A re-apply of the window's template (a sheet, a live edit) puts back its zero
+        // width and can leave the gap visible, so the width is checked on its own.
+        let width = Size::Fixed(room);
+        let resized = gap.borrow_mut::<View>().is_some_and(|mut view| {
+            let resized = view.walk.width != width;
+            view.walk.width = width;
+            resized
+        });
+        if resized {
+            gap.redraw(cx);
         }
+        gap.set_visible(cx, has_content && room > 0.0);
     }
 
     /// Shows or hides an app's `caption_window_gap`, anywhere in its caption bar.
@@ -1957,7 +1962,7 @@ impl Window {
         // Only the direct display owner draws a cursor, above every child.
         if let OsType::LinuxDirect = cx.os_type() {
             let shape = cx.mouse_cursor();
-            self.draw_cursor.draw_vars.set_dyn_instance(cx, id!(shape), &[crate::cursor::shape_value(shape)]);
+            crate::cursor::set_shape(&mut self.draw_cursor, cx, shape);
             self.cursor_draw_list.begin_overlay_last(cx);
             self.draw_cursor.draw_abs(cx, Rect {
                 pos: self.last_mouse_pos - crate::cursor::hotspot(shape, self.mouse_cursor_size),
@@ -2102,11 +2107,7 @@ impl Window {
             );
             self.synthetic_cursor_frame = cx.new_next_frame();
         }
-        self.draw_synthetic_cursor.draw_vars.set_dyn_instance(
-            cx,
-            id!(shape),
-            &[crate::cursor::shape_value(shape)],
-        );
+        crate::cursor::set_shape(&mut self.draw_synthetic_cursor, cx, shape);
         self.draw_synthetic_cursor.draw_abs(
             cx,
             Rect {

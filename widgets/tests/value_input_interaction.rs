@@ -424,9 +424,9 @@ fn stacked_rows_align_columns_reserve_trails_and_join_only_outer_corners() {
                 use mod.prelude.widgets.*
                 PropStack{
                     width: 400
-                    x := PropNumberRow{label +: {text: "Location X"}}
-                    y := PropNumberRow{label +: {text: "Y"} trail +: {reset := PropTrailButton{}}}
-                    z := PropNumberRow{label +: {text: "Z"}}
+                    x := PropNumberRow{label +: {text: "Location X"} trail +: {width: theme.prop_trail_width}}
+                    y := PropNumberRow{label +: {text: "Y"} trail +: {width: theme.prop_trail_width reset := PropTrailButton{}}}
+                    z := PropNumberRow{label +: {text: "Z"} trail +: {width: theme.prop_trail_width}}
                 }
             });
             WidgetRef::script_from_value(vm, value)
@@ -444,13 +444,13 @@ fn stacked_rows_align_columns_reserve_trails_and_join_only_outer_corners() {
             assert_eq!(label.size.x, 120.0, "a wide row gets the full label column");
             assert_eq!(value.pos.x - label.pos.x - label.size.x, 6.0);
             assert_eq!(trail.size.x, 16.0);
-            assert_eq!(value.size.y, 20.0);
+            assert_eq!(value.size.y, 18.0);
             assert_eq!(number.borrow().unwrap().join, join);
             positions.push((value.pos.x, value.size.x, value.pos.y));
         }
         assert_eq!(positions[0].0, positions[1].0);
         assert_eq!(positions[0].1, positions[1].1, "the reset button cannot move the value column");
-        assert_eq!(positions[1].2 - positions[0].2, 21.0);
-        assert_eq!(positions[2].2 - positions[1].2, 21.0);
+        assert_eq!(positions[1].2 - positions[0].2, 19.0);
+        assert_eq!(positions[2].2 - positions[1].2, 19.0);
     });
 }

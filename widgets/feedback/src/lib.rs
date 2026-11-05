@@ -27,8 +27,8 @@
 //! The request is one `POST` of JSON (see [`FeedbackPanel::payload`]) to
 //! `https://makepad.nl/api/feedback`, or to `MAKEPAD_FEEDBACK_URL` when it
 //! is set (for testing against a local server). The sender's email is known
-//! only when whoever launched the app says so in `MAKEPAD_FEEDBACK_EMAIL`
-//! (the Makepad Builder does); without it the feedback is anonymous.
+//! only when whoever launched the app says so in `MAKEPAD_FEEDBACK_EMAIL`;
+//! without it the feedback is anonymous.
 
 use makepad_widgets_core::makepad_platform::screen_capture::{
     add_screen_capture, remove_screen_capture, ScreenCaptureOptions,

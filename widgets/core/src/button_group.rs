@@ -809,17 +809,19 @@ impl SegmentedControl {
         }
     }
 
-    /// The width every segment needs for its word.
-    fn segment_widths(&mut self, cx: &mut Cx2d) -> Vec<f64> {
+    /// The width each segment needs for its own word.
+    fn natural_widths(&mut self, cx: &mut Cx2d) -> Vec<f64> {
         let pad = self.segment_padding * 2.0;
-        let mut widths: Vec<f64> = self
-            .options
+        self.options
             .iter()
-            .map(|option| {
-                let text = option.clone();
-                measure(&self.draw_text_selected, cx, &text) + pad
-            })
-            .collect();
+            .map(|option| measure(&self.draw_text_selected, cx, option) + pad)
+            .collect()
+    }
+
+    /// The width each segment takes when the row sizes itself: every one as wide as the
+    /// widest with `equal_width`.
+    fn segment_widths(&mut self, cx: &mut Cx2d) -> Vec<f64> {
+        let mut widths = self.natural_widths(cx);
         if self.equal_width {
             let widest = widths.iter().cloned().fold(0.0f64, f64::max);
             widths.iter_mut().for_each(|w| *w = widest);
@@ -827,8 +829,9 @@ impl SegmentedControl {
         widths
     }
 
+    /// The narrowest row that shows every word whole: each segment at its own word's width.
     pub fn required_width(&mut self, cx: &mut Cx2d) -> f64 {
-        self.segment_widths(cx).iter().sum::<f64>() + self.inset * 2.0
+        self.natural_widths(cx).iter().sum::<f64>() + self.inset * 2.0
     }
 
     pub fn set_selected(&mut self, cx: &mut Cx, index: usize) {
@@ -958,8 +961,17 @@ impl Widget for SegmentedControl {
         self.drawn_at = rect.pos;
 
         if self.equal_width && !self.vertical && !widths.is_empty() {
-            let width = (rect.size.x - gap * 2.0).max(0.0) / widths.len() as f64;
-            widths.fill(width);
+            // Equal shares when the widest word fits in one; else each word's own width and the
+            // room left over shared out evenly, so no word is cut while the row can hold them all.
+            let room = (rect.size.x - gap * 2.0).max(0.0);
+            let share = room / widths.len() as f64;
+            if widths[0] > share {
+                let natural = self.natural_widths(cx);
+                let spare = (room - natural.iter().sum::<f64>()) / natural.len() as f64;
+                widths = natural.iter().map(|w| (w + spare).max(0.0)).collect();
+            } else {
+                widths.fill(share);
+            }
         }
         let segment_height = if self.vertical {
             self.segment_height

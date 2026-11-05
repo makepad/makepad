@@ -26,19 +26,21 @@ script_mod! {
         space_3: 1.5 * theme.space_factor
 
         // Property panels: compact rows and a capped label/value/trail grid.
-        prop_row_height: 20.
+        prop_row_height: 18.
         prop_row_gap: 2.
         prop_join_gap: 1.
         prop_label_width: 120.
         prop_label_gap: 6.
         prop_trail_width: 16.
-        prop_section_height: 24.
+        prop_section_height: 22.
         prop_section_gap: 2.
         prop_radius: 1.0
         prop_radius_section: 2.0
         prop_chevron: 8.
+        prop_icon_size: 16. // icons are drawn on a 16-unit grid: shown at 16, their strokes cover whole pixels
         prop_arrow_zone: 14.
         prop_pad: 4.
+        prop_font_size: 8.25 // 11 px: labels, values, choices and section titles alike.
 
         mspace_1: Inset{top: theme.space_1, right: theme.space_1, bottom: theme.space_1, left: theme.space_1}
         mspace_h_1: Inset{top: 0., right: theme.space_1, bottom: 0., left: theme.space_1}
@@ -541,8 +543,8 @@ script_mod! {
         prop_field: mix(theme.prop_section_bg, theme.color_text, 0.11)
         prop_field_hover: mix(theme.prop_section_bg, theme.color_text, 0.15)
         prop_field_active: mix(theme.prop_section_bg, theme.color_text, 0.07)
-        prop_choice: mix(theme.prop_section_bg, #0, 0.3)
-        prop_choice_hover: mix(theme.prop_section_bg, #0, 0.18)
+        prop_choice_on: mix(theme.prop_section_bg, theme.color_text, 0.24)
+        prop_fill: mix(theme.prop_field, theme.color_ctrl_selected, 0.2)
         prop_ink_dim: theme.color_text_meta // Contrast-fitted at theme load.
 
         // Elevation shadow colours, one per step.

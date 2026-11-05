@@ -3207,9 +3207,13 @@ pub fn build(params: &BuilderParams) -> BuiltTheme {
     }
 
     // A pin lands after the theme has derived, so the tokens made from a
-    // pinned ink must be rebuilt against the colours it will actually wear.
-    let pinned = |key: &str| inks.iter().any(|(ink, _, pin)| *pin && *ink == key);
-    for key in INK_DERIVED_TOKENS {
+    // pinned ink or accent must be rebuilt against the colours it will
+    // actually wear, and so must the ones made from those in turn.
+    let mut rebuilt: Vec<&str> = Vec::new();
+    for key in REBUILT_TOKENS {
+        let pinned = |key: &str| {
+            inks.iter().any(|(ink, _, pin)| *pin && *ink == key) || accents.pins.iter().any(|(pin, _)| pin == key) || rebuilt.contains(&key)
+        };
         let value = if *key == "prop_ink_dim" {
             if !pinned("color_text_meta") && !pinned("color_text") {
                 continue;
@@ -3235,6 +3239,7 @@ pub fn build(params: &BuilderParams) -> BuiltTheme {
         if let Some(rgba) = value {
             colors.insert(key.to_string(), rgba);
             overrides.push((key.to_string(), TokenValue::Color(rgba)));
+            rebuilt.push(key);
         }
     }
 
@@ -3300,12 +3305,15 @@ const TEXT_INKS: &[&str] = &[
     "color_on_surface_variant",
 ];
 
-/// The tokens made from text inks, pinned after those inks so their fields
-/// and quiet labels do not keep the values derived before the pins landed.
-const INK_DERIVED_TOKENS: &[&str] = &[
+/// The tokens made from text inks and accents, pinned after those so their
+/// fields, chosen faces, value fills and quiet labels do not keep the values
+/// derived before the pins landed. In order: each is made from those before it.
+const REBUILT_TOKENS: &[&str] = &[
     "prop_field",
     "prop_field_hover",
     "prop_field_active",
+    "prop_choice_on",
+    "prop_fill",
     "prop_ink_dim",
 ];
 
@@ -6345,7 +6353,7 @@ mod theme_builder_tests {
     /// the file's own words.
     #[test]
     fn nothing_the_mapping_leaves_alone_is_derived_from_a_token_it_pins() {
-        let pinned: Vec<&str> = ACCENTED.iter().flat_map(|row| row.tokens.iter().copied()).collect();
+        let pinned: Vec<&str> = ACCENTED.iter().flat_map(|row| row.tokens.iter().copied()).chain(REBUILT_TOKENS.iter().copied()).collect();
         for scheme in [Scheme::Dark, Scheme::Light] {
             let mut owner = "";
             for line in scheme.source().lines() {
@@ -6503,7 +6511,7 @@ mod theme_builder_tests {
             assert!(!palette_moved(&moved.params));
             assert!(moved.globals.iter().any(|(key, _)| key == "color_bg_app"));
             for (key, _) in moved.overrides.iter().skip(27) {
-                assert!(TEXT_INKS.contains(&key.as_str()) || INK_DERIVED_TOKENS.contains(&key.as_str()), "{key} moved with the page");
+                assert!(TEXT_INKS.contains(&key.as_str()) || REBUILT_TOKENS.contains(&key.as_str()), "{key} moved with the page");
             }
             // An alpha on the favourite is not a colour setting: `seed`
             // ignores it, so a build that pinned on it would pin on nothing.
@@ -6848,7 +6856,7 @@ mod theme_builder_tests {
                 assert_eq!(low.overrides.len(), high.overrides.len());
                 assert!(!differ.is_empty());
                 for key in differ {
-                    assert!(TEXT_INKS.contains(&key.as_str()) || INK_DERIVED_TOKENS.contains(&key.as_str()), "{key} moved with the text contrast");
+                    assert!(TEXT_INKS.contains(&key.as_str()) || REBUILT_TOKENS.contains(&key.as_str()), "{key} moved with the text contrast");
                 }
                 assert_eq!(low.globals, high.globals);
             }
@@ -7068,7 +7076,7 @@ mod theme_builder_tests {
                 assert!(keys.contains(key), "{key} is not a key of {}", scheme.theme_name());
                 assert!(file_value(scheme, key, &BTreeMap::new()).is_some(), "{key} has no value");
             }
-            let pinned: Vec<&str> = TEXT_INKS.iter().chain(INK_DERIVED_TOKENS).copied()
+            let pinned: Vec<&str> = TEXT_INKS.iter().chain(REBUILT_TOKENS).copied()
                 .chain(ACCENTED.iter().flat_map(|row| row.tokens.iter().copied())).collect();
             for line in scheme.source().lines() {
                 let Some((owner, value)) = line.strip_prefix("        ").and_then(|rest| rest.split_once(": ")) else {

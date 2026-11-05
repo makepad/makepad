@@ -22,19 +22,21 @@ script_mod! {
         space_3: 9.
 
         // Property panels: compact rows and a capped label/value/trail grid.
-        prop_row_height: 20.
+        prop_row_height: 18.
         prop_row_gap: 2.
         prop_join_gap: 1.
         prop_label_width: 120.
         prop_label_gap: 6.
         prop_trail_width: 16.
-        prop_section_height: 24.
+        prop_section_height: 22.
         prop_section_gap: 2.
         prop_radius: 1.0
         prop_radius_section: 2.0
         prop_chevron: 8.
+        prop_icon_size: 16. // icons are drawn on a 16-unit grid: shown at 16, their strokes cover whole pixels
         prop_arrow_zone: 14.
         prop_pad: 4.
+        prop_font_size: 8.25 // 11 px: labels, values, choices and section titles alike.
 
         mspace_1: Inset{top: 3., right: 3., bottom: 3., left: 3.}
         mspace_h_1: Inset{top: 0., right: 3., bottom: 0., left: 3.}
@@ -502,8 +504,8 @@ script_mod! {
         prop_field: mix(theme.prop_section_bg, theme.color_text, 0.11)
         prop_field_hover: mix(theme.prop_section_bg, theme.color_text, 0.15)
         prop_field_active: mix(theme.prop_section_bg, theme.color_text, 0.07)
-        prop_choice: mix(theme.prop_section_bg, #0, 0.3)
-        prop_choice_hover: mix(theme.prop_section_bg, #0, 0.18)
+        prop_choice_on: mix(theme.prop_section_bg, #F, 0.85)
+        prop_fill: mix(theme.prop_field, theme.color_ctrl_selected, 0.2)
         prop_ink_dim: theme.color_text_meta // Contrast-fitted at theme load.
 
         // Elevation shadow colours, one per step.
@@ -520,6 +522,21 @@ script_mod! {
         color_placeholder: #xCACACAFF
         color_placeholder_hl: #xB3B3B3FF
         // END DESIGN TOKENS
+
+        color_syntax_keyword: #x3d688a
+        color_syntax_ident: #x242426
+        color_syntax_type: #x36615a
+        color_syntax_fn: #x504326
+        color_syntax_literal: #x425f3e
+        color_syntax_string: #x6e483b
+        color_syntax_comment: #x4b5c47
+        color_syntax_macro: #x674b6d
+        color_syntax_attribute: #x755635
+        color_syntax_punctuation: #x242426
+        color_syntax_keyword_branch: #x674b6d
+        color_syntax_keyword_loop: #x755635
+        color_syntax_constant: #x6e483b
+        color_syntax_bg: #xffffff
 
         // TYPOGRAPHY
         font_size_code: 9.0

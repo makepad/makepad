@@ -1246,3 +1246,46 @@ fn a_wrapped_fit_editor_draws_every_line_on_its_first_frame() {
     assert_eq!(editor.line_end, line_count);
     assert!((editor.area().rect(&cx).size.y - session.layout().height() * editor.cell_size.y).abs() < 0.5);
 }
+
+/// The syntax colours are the theme's, so code reads on either ground: colours made for a
+/// dark editor would all but vanish on a light theme's white.
+#[test]
+fn syntax_colours_are_the_themes_and_read_on_its_ground() {
+    use makepad_widgets_core::{set_base_theme, theme_tokens::contrast, BaseTheme};
+    let rgba = |c: Vec4f| [c.x, c.y, c.z, c.w].iter().fold(0u32, |v, c| v << 8 | (c * 255.0).round() as u32);
+    for base in [BaseTheme::Dark, BaseTheme::Light] {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            set_base_theme(vm.cx_mut(), base);
+            makepad_widgets_core::script_mod(vm);
+            crate::script_mod(vm);
+            vm.capture_errors();
+            let value = script_eval!(vm, { use mod.widgets.* CodeEditor{} });
+            let editor = CodeEditor::script_from_value(vm, value);
+            assert!(vm.take_errors().is_empty());
+            let theme = vm.module(id!(theme));
+            let token = |key: LiveId| vm.value(theme, key).as_color().unwrap();
+            let ground = token(id!(color_syntax_bg));
+            let c = &editor.token_colors;
+            for (what, colour, key) in [
+                ("identifier", c.identifier, id!(color_syntax_ident)),
+                ("function", c.function, id!(color_syntax_fn)),
+                ("type", c.typename, id!(color_syntax_type)),
+                ("keyword", c.other_keyword, id!(color_syntax_keyword)),
+                ("branch keyword", c.branch_keyword, id!(color_syntax_keyword_branch)),
+                ("loop keyword", c.loop_keyword, id!(color_syntax_keyword_loop)),
+                ("number", c.number, id!(color_syntax_literal)),
+                ("string", c.string, id!(color_syntax_string)),
+                ("constant", c.constant, id!(color_syntax_constant)),
+                ("comment", c.comment, id!(color_syntax_comment)),
+                ("macro", c.macro_identifier, id!(color_syntax_macro)),
+                ("attribute", c.attribute, id!(color_syntax_attribute)),
+                ("punctuation", c.punctuator, id!(color_syntax_punctuation)),
+            ] {
+                assert_eq!(rgba(colour) | 0xff, token(key) | 0xff, "{base:?}: {what} is the theme's");
+                let ratio = contrast(rgba(colour), ground);
+                assert!(ratio >= 4.5, "{base:?}: {what} {:08x} on {ground:08x} is {ratio:.1}:1", rgba(colour));
+            }
+        });
+    }
+}

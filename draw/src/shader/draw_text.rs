@@ -106,16 +106,22 @@ script_mod! {
         vertex: fn() {
             let use_slug = if self.texture_index > 2.5 {1.0} else {0.0}
 
-            let p_raster = mix(self.rect_pos, self.rect_pos + self.rect_size, self.geom.pos)
+            // The baseline on a device pixel, where it lands after layout and scrolling: the
+            // glyph moves by less than half a device pixel, and a row's glyphs all alike.
+            let dpi = max(self.draw_pass.dpi_factor, 0.0001)
+            let baseline = self.rect_pos.y + self.baseline_y + self.draw_list.view_shift.y
+            let quad_pos = vec2(self.rect_pos.x, self.rect_pos.y + floor(baseline * dpi + 0.5) / dpi - baseline)
+
+            let p_raster = mix(quad_pos, quad_pos + self.rect_size, self.geom.pos)
             let p_clipped_raster = clamp(
                 clamp(p_raster, self.draw_clip.xy, self.draw_clip.zw) + self.draw_list.view_shift,
                 self.draw_list.view_clip.xy,
                 self.draw_list.view_clip.zw
             )
-            let p_normalized_raster = (p_clipped_raster - self.draw_list.view_shift - self.rect_pos) / self.rect_size
+            let p_normalized_raster = (p_clipped_raster - self.draw_list.view_shift - quad_pos) / self.rect_size
 
-            let pad_lpx = self.aa_pad_px / max(self.draw_pass.dpi_factor, 0.0001)
-            let content_rect_pos = self.rect_pos + vec2(pad_lpx, pad_lpx)
+            let pad_lpx = self.aa_pad_px / dpi
+            let content_rect_pos = quad_pos + vec2(pad_lpx, pad_lpx)
             let content_rect_size = vec2(
                 max(self.rect_size.x - 2.0 * pad_lpx, 0.0001),
                 max(self.rect_size.y - 2.0 * pad_lpx, 0.0001)
@@ -419,8 +425,10 @@ pub struct DrawText {
     pub t_max: Vec2f,
     #[live]
     pub atlas_plane: f32,
+    /// The glyph's baseline below `rect_pos.y`: the vertex shader puts the baseline on a
+    /// device pixel, so a row's glyphs meet the same pixel rows wherever layout put it.
     #[live]
-    pub pad1: f32,
+    pub baseline_y: f32,
     #[live(0.0)]
     pub aa_2x2: f32,
     #[live(0.0)]
@@ -1798,6 +1806,7 @@ impl DrawText {
             bounds_in_lpxs.origin.x - aa_pad_in_lpxs,
             bounds_in_lpxs.origin.y - aa_pad_in_lpxs,
         ) + vec2(0.0, self.temp_y_shift * font_size_in_lpxs);
+        self.baseline_y = origin_in_lpxs.y + self.temp_y_shift * font_size_in_lpxs - self.rect_pos.y;
         self.rect_size = vec2(
             bounds_in_lpxs.size.width + aa_pad_in_lpxs * 2.0,
             bounds_in_lpxs.size.height + aa_pad_in_lpxs * 2.0,
@@ -1876,6 +1885,7 @@ impl DrawText {
 
         self.rect_pos = vec2(bounds_in_lpxs.origin.x, bounds_in_lpxs.origin.y)
             + vec2(0.0, self.temp_y_shift * font_size_in_lpxs);
+        self.baseline_y = origin_in_lpxs.y + self.temp_y_shift * font_size_in_lpxs - self.rect_pos.y;
         self.rect_size = vec2(bounds_in_lpxs.size.width, bounds_in_lpxs.size.height);
         if let Some(color) = color {
             self.color = vec4(

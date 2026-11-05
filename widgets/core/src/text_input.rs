@@ -1393,16 +1393,17 @@ impl TextInput {
         }
     }
 
-    fn layout_text(&mut self, cx: &mut Cx2d) {
+    /// The width the text lays out in and whether it wraps. A single-line field's text keeps
+    /// its natural width, so it can overflow and scroll horizontally; a multiline field's
+    /// wraps at the field's inner width.
+    fn text_layout_bounds(&self, cx: &mut Cx2d) -> (Option<f32>, bool) {
         let turtle_rect = cx.turtle().inner_rect();
-        // For single-line mode, don't constrain the max width so the text lays out
-        // at its natural width. This allows us to detect overflow and scroll horizontally.
-        // For multiline mode, constrain to the available width for proper wrapping.
-        let max_width_in_lpxs = if self.is_multiline && !turtle_rect.size.x.is_nan() {
-            Some(turtle_rect.size.x as f32)
-        } else {
-            None
-        };
+        let max_width_in_lpxs = (self.is_multiline && !turtle_rect.size.x.is_nan()).then(|| turtle_rect.size.x as f32);
+        (max_width_in_lpxs, self.is_multiline && cx.turtle().layout().flow == Flow::right_wrap())
+    }
+
+    fn layout_text(&mut self, cx: &mut Cx2d) {
+        let (max_width_in_lpxs, wrap) = self.text_layout_bounds(cx);
         if self.laidout_text.is_some()
             && self.laidout_width == max_width_in_lpxs
             && self.laidout_max_lines == self.draw_text.max_lines
@@ -1421,7 +1422,6 @@ impl TextInput {
             &self.text
         };
 
-        let wrap = self.is_multiline && cx.turtle().layout().flow == Flow::right_wrap();
         self.laidout_width = max_width_in_lpxs;
         self.laidout_max_lines = self.draw_text.max_lines;
         self.laidout_font_size = self.draw_text.text_style.font_size;
@@ -1439,8 +1439,12 @@ impl TextInput {
     fn draw_text(&mut self, cx: &mut Cx2d) -> Rect {
         let inner_walk = self.inner_walk();
         let text_rect = if self.text.is_empty() {
-            self.draw_text
-                .draw_walk(cx, inner_walk, self.label_align, &self.empty_text)
+            // The placeholder lays out as the text does. Wrapped in a single-line field, its
+            // second line would make the field two lines tall while the centring takes one,
+            // and push the first line out of the box.
+            let (max_width_in_lpxs, wrap) = self.text_layout_bounds(cx);
+            let placeholder = self.draw_text.layout(cx, 0.0, 0.0, max_width_in_lpxs, wrap, self.label_align, &self.empty_text);
+            self.draw_text.draw_walk_laidout(cx, inner_walk, &placeholder)
         } else {
             let laidout_text = self.laidout_text.as_ref().unwrap();
             self.draw_text
@@ -5064,5 +5068,62 @@ mod mark_tests {
         marks.set([TextMark::note(6, 9)]);
         assert_eq!(marks.len(), 1);
         assert_eq!(marks.as_slice()[0].kind, TextMarkKind::Note);
+    }
+}
+
+#[cfg(test)]
+mod placeholder_tests {
+    use super::*;
+    use crate::makepad_draw::cx_draw::CxDraw;
+    use crate::makepad_script::script;
+
+    const SIZE: Vec2d = Vec2d { x: 320.0, y: 200.0 };
+
+    fn draw(cx: &mut Cx, pass: &DrawPass, list: &mut DrawList2d, root: &WidgetRef) {
+        let event = DrawEvent::default();
+        let mut draw = CxDraw::new(cx, &event);
+        let mut cx2d = Cx2d::new(&mut draw);
+        cx2d.begin_pass(pass, None);
+        list.begin_always(&mut cx2d);
+        cx2d.begin_root_turtle(SIZE, Layout::flow_down());
+        root.draw_all(&mut cx2d, &mut Scope::empty());
+        cx2d.end_pass_sized_turtle();
+        list.end(&mut cx2d);
+        cx2d.end_pass(pass);
+    }
+
+    /// A single-line field's placeholder stays on one line, as its text would: wrapped, it made
+    /// the field two lines tall and the line centring pushed its first line out of the box.
+    #[test]
+    fn a_single_line_placeholder_stays_on_one_line_inside_its_field() {
+        crate::on_test_cx(|| {
+            let mut cx_pool = crate::checkout_test_cx();
+            let cx: &mut Cx = &mut cx_pool;
+            let root = cx.with_vm(|vm| {
+                let value = vm.eval(script! {
+                    use mod.prelude.widgets.*
+                    View{
+                        width: Fill height: Fill flow: Down
+                        short := TextInput{width: 120 empty_text: "filter"}
+                        long := TextInput{width: 120 empty_text: "filter the chats by their names and what they say"}
+                    }
+                });
+                WidgetRef::script_from_value(vm, value)
+            });
+            let pass = DrawPass::new(cx);
+            pass.set_size(cx, SIZE);
+            let mut list = DrawList2d::new(cx);
+            draw(cx, &pass, &mut list, &root);
+            let field = |cx: &Cx, id: LiveId| root.widget(cx, &[id]).area().rect(cx);
+            let (short, long) = (field(cx, id!(short)), field(cx, id!(long)));
+            assert!(short.size.y > 0.0);
+            assert_eq!(long.size.y, short.size.y, "one line tall, however long the placeholder");
+            let input = root.widget(cx, &[id!(long)]);
+            let text = input.borrow::<TextInput>().unwrap().text_area.rect(cx);
+            assert!(
+                text.pos.y >= long.pos.y - 0.5 && text.pos.y + text.size.y <= long.pos.y + long.size.y + 0.5,
+                "the placeholder's line {text:?} sits inside the field {long:?}"
+            );
+        });
     }
 }

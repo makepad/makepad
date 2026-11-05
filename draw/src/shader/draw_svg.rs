@@ -223,6 +223,15 @@ pub struct DrawSvg {
     pub opacity: f32,
 }
 
+/// The content offset from `pos` that puts the content's origin on a device pixel. An icon
+/// drawn on its own grid (a 16-unit icon at 16 points) then keeps its edges on device pixels
+/// and its 1-unit strokes on half units crisp at every whole scale, wherever its box lands.
+fn device_anchor(pos: f64, offset: f32, dpi: f32) -> f32 {
+    let dpi = dpi.max(0.0001) as f64;
+    let origin = pos + offset as f64;
+    (offset as f64 + (origin * dpi).round() / dpi - origin) as f32
+}
+
 impl DrawSvg {
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) -> Rect {
         self.load_svg(cx);
@@ -386,8 +395,8 @@ impl DrawSvg {
             };
 
             // Keep geometry local; rect_pos is the final anchor applied in the shader.
-            let offset_x = (tw - bw * sx) * 0.5 - bmin_x * sx;
-            let offset_y = (th - bh * sy) * 0.5 - bmin_y * sy;
+            let offset_x = device_anchor(rect.pos.x, (tw - bw * sx) * 0.5 - bmin_x * sx, dpi);
+            let offset_y = device_anchor(rect.pos.y, (th - bh * sy) * 0.5 - bmin_y * sy, dpi);
 
             // svg_scale at uniform offset 0..1, svg_offset at 2..3, svg_time
             // at 4, svg_rotation at 5
@@ -597,6 +606,25 @@ impl DrawSvg {
         match self.resolve_walk(walk) {
             Walk { width: Size::Fixed(w), height: Size::Fixed(h), .. } => Some(dvec2(w, h)),
             _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::device_anchor;
+
+    /// Wherever an icon's box lands, its content origin is on a device pixel, moved by at most
+    /// half of one.
+    #[test]
+    fn an_icon_origin_lands_on_a_device_pixel() {
+        for dpi in [1.0f32, 1.5, 2.0, 3.0] {
+            for (pos, offset) in [(10.25, 3.0f32), (7.7, 0.0), (0.0, 1.33), (101.49, -2.6)] {
+                let snapped = device_anchor(pos, offset, dpi);
+                let origin = (pos + snapped as f64) * dpi as f64;
+                assert!((origin - origin.round()).abs() < 1e-3, "dpi {dpi} pos {pos}: origin at {origin} device px");
+                assert!(((snapped - offset) * dpi).abs() <= 0.5 + 1e-4);
+            }
         }
     }
 }

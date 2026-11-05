@@ -1363,8 +1363,8 @@ pub const DERIVED_ROLES: &[(&str, RoleSource, RoleSource)] = {
         ("prop_field", B("prop_section_bg", "color_text", 0.11), B("prop_section_bg", "color_text", 0.11)),
         ("prop_field_hover", B("prop_section_bg", "color_text", 0.15), B("prop_section_bg", "color_text", 0.15)),
         ("prop_field_active", B("prop_section_bg", "color_text", 0.07), B("prop_section_bg", "color_text", 0.07)),
-        ("prop_choice", X("prop_section_bg", BLACK, 0.3), X("prop_section_bg", BLACK, 0.3)),
-        ("prop_choice_hover", X("prop_section_bg", BLACK, 0.18), X("prop_section_bg", BLACK, 0.18)),
+        ("prop_choice_on", X("prop_section_bg", WHITE, 0.85), B("prop_section_bg", "color_text", 0.24)),
+        ("prop_fill", B("prop_field", "color_ctrl_selected", 0.2), B("prop_field", "color_ctrl_selected", 0.2)),
     ]
 };
 
@@ -1397,7 +1397,7 @@ pub enum RoleGrowth {
 pub fn property_dim_ink(read: &mut dyn FnMut(&str) -> Option<u32>) -> Option<u32> {
     let dim = read("color_text_meta").or_else(|| read("color_on_surface_variant"))?;
     let mut text = read("color_text")?;
-    let grounds = [read("prop_section_bg")?, read("prop_field")?, read("prop_choice")?];
+    let grounds = [read("prop_section_bg")?, read("prop_field")?, read("prop_choice_on")?];
     let readable = |ink| grounds.iter().all(|ground| reads_on(*ground, ink) >= READABLE);
     if readable(dim) {
         return Some(dim);

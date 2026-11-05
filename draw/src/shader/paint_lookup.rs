@@ -1,5 +1,5 @@
-//! `mod.draw.PaintLookup`: the one paint lookup every renderer spreads, over the atlas built by
-//! `libs/paint_field` (`bake::Atlas`). The host gives the texels: it defines
+//! `mod.draw.PaintLookup`: the one paint lookup every renderer spreads, over a paint atlas its
+//! host bakes. The host gives the texels: it defines
 //! `paint_texel(i: f32) -> vec4` over whatever texture holds the atlas (its own, or rows after
 //! another table in a texture it already binds), so the lookup costs no texture slot of its own.
 //!
@@ -8,6 +8,12 @@
 //! Slot 0 is unpainted. The eight lattice corners round `p` are read; each corner's distance is
 //! signed by whether it shows the nearest corner's slot, so the interpolated value crosses zero
 //! on the boundary between the two slots, a pixel wide at any zoom.
+//!
+//! A header may instead be an overlay (`bake::Overlay`, first value -1): a host's values over a
+//! regular lattice, read trilinear where the surface is and coloured through its palette, and its
+//! marks per lattice cell, over the part's own paint. Refining the lattice sharpens the colour;
+//! the surface is whatever the renderer drew. The host's normal (either sign, any length, in `p`'s
+//! frame) keeps a mark to the surface it was made on: it stops at a crease, not at a cell's side.
 //!
 //! SHADER LAW: unary minus has the lowest precedence; write `(0.0 - a) - b`.
 
@@ -63,17 +69,113 @@ script_mod! {
             return self.paint_texel(bases.z + slot).xyz
         }
 
-        // a point of the shader's frame into volume `hdr`'s
-        paint_frame: fn(hdr: f32, p: vec3) -> vec3 {
-            let r0 = self.paint_texel(hdr + 3.0)
-            let r1 = self.paint_texel(hdr + 4.0)
-            let r2 = self.paint_texel(hdr + 5.0)
+        // a point through the three affine rows at texel `at`
+        paint_rows: fn(at: f32, p: vec3) -> vec3 {
+            let r0 = self.paint_texel(at)
+            let r1 = self.paint_texel(at + 1.0)
+            let r2 = self.paint_texel(at + 2.0)
             return vec3(dot(r0.xyz, p) + r0.w, dot(r1.xyz, p) + r1.w, dot(r2.xyz, p) + r2.w)
         }
 
-        // `albedo` with volume `hdr`'s paint at frame point p (footprint px mm)
-        paint_albedo: fn(hdr: f32, p: vec3, px: f32, albedo: vec3) -> vec3 {
+        // a direction through them
+        paint_turn: fn(at: f32, v: vec3) -> vec3 {
+            return vec3(dot(self.paint_texel(at).xyz, v), dot(self.paint_texel(at + 1.0).xyz, v), dot(self.paint_texel(at + 2.0).xyz, v))
+        }
+
+        // a point of the shader's frame into volume `hdr`'s
+        paint_frame: fn(hdr: f32, p: vec3) -> vec3 {
+            return self.paint_rows(hdr + 3.0, p)
+        }
+
+        // node g of an overlay's lattice with weight w in the blend: (w v, w), nothing where it
+        // has no value
+        overlay_node: fn(g: vec3, w: f32, dim: vec3, base: f32) -> vec2 {
+            let i = (g.z * dim.y + g.y) * dim.x + g.x
+            let v = self.paint_pick(self.paint_texel(base + floor(i / 4.0)), modf(i, 4.0))
+            return vec2(v, 1.0) * (w * step(0.0, v))
+        }
+
+        // `albedo` under an overlay's value at q, through its palette (`dim.w`): where no node
+        // near has a value, `albedo` as it is
+        overlay_value: fn(q: vec3, cell: vec4, dim: vec4, base: f32, albedo: vec3) -> vec3 {
+            let one = vec3(1.0, 1.0, 1.0)
+            let f = (q - cell.xyz) / cell.w
+            let g = clamp(floor(f), vec3(0.0, 0.0, 0.0), dim.xyz - one)
+            let t = clamp(f - g, vec3(0.0, 0.0, 0.0), one)
+            let u = one - t
+            let d = dim.xyz + one
+            var s = self.overlay_node(g, u.x * u.y * u.z, d, base)
+            s = s + self.overlay_node(g + vec3(1.0, 0.0, 0.0), t.x * u.y * u.z, d, base)
+            s = s + self.overlay_node(g + vec3(0.0, 1.0, 0.0), u.x * t.y * u.z, d, base)
+            s = s + self.overlay_node(g + vec3(1.0, 1.0, 0.0), t.x * t.y * u.z, d, base)
+            s = s + self.overlay_node(g + vec3(0.0, 0.0, 1.0), u.x * u.y * t.z, d, base)
+            s = s + self.overlay_node(g + vec3(1.0, 0.0, 1.0), t.x * u.y * t.z, d, base)
+            s = s + self.overlay_node(g + vec3(0.0, 1.0, 1.0), u.x * t.y * t.z, d, base)
+            s = s + self.overlay_node(g + vec3(1.0, 1.0, 1.0), t.x * t.y * t.z, d, base)
+            if s.y <= 0.0 { return albedo }
+            let x = s.x / s.y
+            let over = self.paint_texel(dim.w + 33.0)
+            if x > 1.0 && over.w > 0.5 { return over.xyz }
+            let k = clamp(x, 0.0, 1.0) * 32.0
+            let k0 = min(floor(k), 31.0)
+            return mix(self.paint_texel(dim.w + k0).xyz, self.paint_texel(dim.w + k0 + 1.0).xyz, k - k0)
+        }
+
+        // `albedo` under the mark of an overlay's cell at q, where the surface (normal n in q's
+        // frame) runs along the one marked: each kind's colour after the palette's ramp, a
+        // picked one's (kinds 5 up) solid, the others striped
+        overlay_mark: fn(q: vec3, n: vec3, cell: vec4, dim: vec4, at: f32, albedo: vec3) -> vec3 {
+            let g = clamp(floor((q - cell.xyz) / cell.w), vec3(0.0, 0.0, 0.0), dim.xyz - vec3(1.0, 1.0, 1.0))
+            let i = (g.z * dim.y + g.y) * dim.x + g.x
+            let m = self.paint_pick(self.paint_texel(at + floor(i / 4.0)), modf(i, 4.0))
+            if m < 0.5 { return albedo }
+            let r = floor(m / 16.0)
+            let c = vec2(modf(r, 128.0), floor(r / 128.0)) * (2.0 / 127.0) - vec2(1.0, 1.0)
+            let marked = vec3(c.x, c.y, sqrt(max(1.0 - dot(c, c), 0.0)))
+            if abs(dot(normalize(n), marked)) < 0.6 { return albedo }
+            let kind = modf(m, 16.0)
+            let stripe = step(0.5, fract((q.x + q.y + q.z) * 0.6))
+            if kind > 4.5 {
+                return mix(albedo, self.paint_texel(dim.w + 33.0 + kind - 4.0).xyz, 0.8 + 0.2 * stripe)
+            }
+            return mix(albedo, self.paint_texel(dim.w + 33.0 + kind).xyz, 0.35 + 0.4 * stripe)
+        }
+
+        // `albedo` at frame point p of a part (normal n in that frame): the paint of volume `hdr`
+        // (footprint px mm); an overlay's header shows its colours and marks over its part's paint
+        paint_albedo: fn(hdr: f32, p: vec3, n: vec3, px: f32, albedo: vec3) -> vec3 {
             if hdr < 0.0 { return albedo }
+            let h0 = self.paint_texel(hdr)
+            var under = hdr
+            var pv = p
+            if h0.x < 0.0 {
+                under = h0.y
+                pv = self.paint_rows(hdr + 11.0, p)
+            }
+            var base = albedo
+            if under >= 0.0 { base = self.paint_volume(under, pv, px, albedo) }
+            if h0.x >= 0.0 { return base }
+            let q = self.paint_rows(hdr + 6.0, p)
+            let dim = self.paint_texel(hdr + 2.0)
+            if h0.z >= 0.0 { base = self.overlay_value(q, self.paint_texel(hdr + 1.0), dim, h0.z, base) }
+            if h0.w >= 0.0 {
+                let marks = vec4(self.paint_texel(hdr + 10.0).xyz, dim.w)
+                base = self.overlay_mark(q, self.paint_turn(hdr + 6.0, n), self.paint_texel(hdr + 9.0), marks, h0.w, base)
+            }
+            return base
+        }
+
+        // A surface an overlay's values colour reads alike on any material: a metal has no
+        // diffuse lobe to show them, so none is metal under them.
+        paint_metal: fn(hdr: f32, metal: f32) -> f32 {
+            if hdr < 0.0 { return metal }
+            let h0 = self.paint_texel(hdr)
+            if h0.x < 0.0 && h0.z >= 0.0 { return 0.0 }
+            return metal
+        }
+
+        // `albedo` with volume `hdr`'s paint at frame point p (footprint px mm)
+        paint_volume: fn(hdr: f32, p: vec3, px: f32, albedo: vec3) -> vec3 {
             let h0 = self.paint_texel(hdr)
             let h1 = self.paint_texel(hdr + 1.0)
             let bases = self.paint_texel(hdr + 2.0)

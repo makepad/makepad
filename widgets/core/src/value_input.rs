@@ -61,7 +61,7 @@ script_mod! {
             color_focus: uniform(theme.color_focus)
             color_invalid: uniform(theme.color_error)
             color_marked: uniform(theme.color_focus)
-            fill_color: uniform(theme.color_u_3)
+            fill_color: uniform(theme.prop_fill)
             radius: uniform(theme.prop_radius)
             vertex: fn() {
                 let dpi = self.draw_pass.dpi_factor
@@ -83,7 +83,8 @@ script_mod! {
                 let reveal = mix(1.0, max(self.hover, max(self.drag, self.focus)), self.flat)
                 sdf.fill_keep(vec4(base.rgb, base.a * reveal))
                 if self.fill >= 0.0 {
-                    let fill_x = 1.0 + (w - 2.0) * self.fill
+                    // The fill's edge on a device pixel: a crisp line at any scale, never a soft column.
+                    let fill_x = floor((1.0 + (w - 2.0) * self.fill) * self.draw_pass.dpi_factor + 0.5) / self.draw_pass.dpi_factor
                     let wash = vec4(self.fill_color.xyz, self.fill_color.w * step(self.pos.x * w, fill_x))
                     sdf.fill_keep(wash)
                 }
@@ -126,11 +127,11 @@ script_mod! {
         }
         draw_text +: {
             color: theme.color_text
-            text_style: theme.font_regular{font_size: theme.font_size_p line_spacing: 1.0}
+            text_style: theme.font_regular{font_size: theme.prop_font_size line_spacing: 1.0}
         }
         draw_label +: {
             color: theme.prop_ink_dim
-            text_style: theme.font_regular{font_size: theme.font_size_p line_spacing: 1.0}
+            text_style: theme.font_regular{font_size: theme.prop_font_size line_spacing: 1.0}
         }
         text_input: TextInput{
             width: Fill height: Fill min_height: 0
@@ -157,7 +158,7 @@ script_mod! {
                 color: theme.color_text
                 color_hover: theme.color_text color_focus: theme.color_text
                 color_down: theme.color_text color_disabled: theme.color_text
-                text_style: theme.font_regular{font_size: theme.font_size_p line_spacing: 1.0}
+                text_style: theme.font_regular{font_size: theme.prop_font_size line_spacing: 1.0}
                 get_color: fn() { return self.color }
             }
             draw_selection +: {

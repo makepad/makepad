@@ -9068,17 +9068,17 @@ impl MapView {
         }
     }
 
-    /// Hand staged tile jobs over as workers free up: after every request
-    /// pass and on the UI signal each pool completion raises.
-    /// Bakes in flight at once: the idle workers, capped by the memory
-    /// budget's bake slots so a burst of arrivals cannot park seven bakes'
-    /// working sets in memory at the same time on a small heap.
+    /// Bakes in flight at once: a window of the pool's width, capped by the
+    /// memory budget's bake slots so a burst of arrivals cannot park seven
+    /// bakes' working sets in memory at the same time on a small heap.
     fn bake_window(&self, cx: &Cx, pool: &TaskPool) -> usize {
         pool_window(pool, self.tile_queue.in_flight())
             .min(MapMemoryBudgets::from_cx(cx).bake_slots)
             .max(1)
     }
 
+    /// Hand staged tile jobs over as workers free up: after every request
+    /// pass and on the UI signal each pool completion raises.
     fn pump_tile_queue(&mut self, cx: &mut Cx) {
         if self.tile_queue.staged_len() == 0 {
             return;
@@ -13684,6 +13684,33 @@ mod tests {
             .copied()
             .collect::<HashSet<_>>();
         assert!(!requested_before.is_empty());
+        // Builds the queue still holds, however wide the pool's window: tiles
+        // far from both views.
+        let staged = [TileKey { z: 3, x: 0, y: 0 }, TileKey { z: 3, x: 1, y: 0 }];
+        map.tile_queue.set_in_flight_limit(map.tile_queue.in_flight());
+        for key in staged {
+            map.tile_queue.push(&pool, key, true, QueueOrder::Lifo, || {}).unwrap();
+            map.local_requested_tiles.insert(key, 0.0);
+            map.tiles.insert(
+                key,
+                TileEntry {
+                    state: TileLoadState::LoadingLocal,
+                    last_used: 0,
+                    attempts: 0,
+                    retry_after: 0,
+                    bytes: 0,
+                    bucket: 3,
+                    baked_3d: false,
+                    baked_fringe: true,
+                    road_core_cached: false,
+                    road_icon_indices: Vec::new(),
+                    road_icon_vertices: Vec::new(),
+                    fade: None,
+                    draw: TileDrawLists::default(),
+                },
+            );
+        }
+        assert_eq!(map.tile_queue.staged_len(), staged.len());
 
         map.set_center(&mut cx, 0.0, 0.0);
         map.ensure_visible_tiles(&mut cx, rect);
@@ -13692,10 +13719,15 @@ mod tests {
             .filter(|key| !map.visible_tiles.contains(key))
             .collect::<Vec<_>>();
         assert!(!stale.is_empty());
-        // With every worker parked the queue hands over at most one job (its
-        // window never closes below one); everything staged is pruned.
+        // The queue hands one window over whatever the pool is doing, and that
+        // much is out of reach; everything staged is pruned.
+        for key in staged {
+            assert!(!map.local_requested_tiles.contains_key(&key));
+            assert!(!map.tiles.contains_key(&key));
+        }
         let handed_over = map.tile_queue.in_flight();
-        assert!(handed_over <= 1, "saturated pool, yet {handed_over} tile jobs were handed over");
+        let window = map.bake_window(&cx, &pool);
+        assert!(handed_over <= window, "a window of {window}, yet {handed_over} tile jobs were handed over");
         let leaked = stale
             .iter()
             .filter(|key| map.local_requested_tiles.contains_key(key))

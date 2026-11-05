@@ -2,9 +2,9 @@
 //! hub environment; this module chooses the command. From a checkout an app starts as
 //! `cargo run --release` (cargo recompiles what changed, nothing when fresh, then runs
 //! it), so a host never starts a binary older than its sources; an installation (no
-//! checkout, or the Builder's) starts the built binary, building it first when allowed.
+//! checkout) starts the built binary, building it first when allowed.
 
-use crate::{build_argv, builder_install, built_binary, has_sources, run_argv, AppEntry, AppTarget, MAKEPAD_RUN};
+use crate::{build_argv, built_binary, has_sources, run_argv, AppEntry, AppTarget, MAKEPAD_RUN};
 use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus};
@@ -35,7 +35,7 @@ pub enum Runner {
 /// What a spawned process is, for the host's environment and output handling.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LaunchKind {
-    /// A build only (an installation's Builder or `cargo build`): no app environment.
+    /// A build only (`cargo build`): no app environment.
     Build,
     /// The app's binary.
     App,
@@ -105,7 +105,7 @@ impl AppLaunch {
     ) -> Result<(Self, Child), String> {
         let policy = if held { BuildPolicy::Rebuild } else { policy };
         let target = Self::target_of(app, runner);
-        let run = !held && builder_install().is_none()
+        let run = !held
             && root.as_deref().is_some_and(|root| has_sources(&target, root));
         let building = run || root.is_some() && match policy {
             BuildPolicy::IfMissing => built_binary(&target, root.as_deref()).is_none(),
@@ -250,10 +250,8 @@ impl AppLaunch {
         }
         // The registry's launch, whatever its launcher's environment: a lane shell's target dir
         // and test switches reach neither the app nor a checkout's cargo (which builds into the
-        // checkout's own target/, as the prebuild did). A Builder build keeps its shared target.
-        if !self.building || self.run || crate::builder_install().is_none() {
-            crate::child_env::scrub_lane(&mut command);
-        }
+        // checkout's own target/, as the prebuild did).
+        crate::child_env::scrub_lane(&mut command);
         // The app itself gets this machine's settings for it (`machine::launch_env`); a host
         // adds its own after this.
         if !self.building || self.run {
@@ -483,7 +481,7 @@ mod tests {
 
     /// A deploy's prebuild is the launch's own cargo command with `build` for `run` and the same
     /// environment, so the launch finds every artifact fresh (a different CARGO_INCREMENTAL or
-    /// MAKEPAD is another profile/fingerprint: 165 recompiled 97 crates at a JIT launch).
+    /// MAKEPAD is another profile/fingerprint: a node recompiled 97 crates at a JIT launch).
     /// A host already under a JIT loader launches it directly, without cargo's build environment.
     #[test]
     fn the_prebuild_is_the_launch_with_build_for_run() {

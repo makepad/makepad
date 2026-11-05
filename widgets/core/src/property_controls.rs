@@ -1,7 +1,10 @@
-//! Property choices: a folding section, dropdown, connected segments and checkbox.
+//! Property choices: a folding section, dropdown, connected segments (a dropdown when they do
+//! not fit, PropChoice) and checkbox.
 //! Row presets place each choice in PropRow's value slot and reserve its trail.
 use crate::{
     animator::Animate,
+    button_group::SegmentedControlWidgetRefExt,
+    drop_down::DropDownWidgetRefExt,
     fold_header::{FoldHeader, FoldHeaderAction},
     makepad_derive_widget::*,
     makepad_draw::*,
@@ -83,6 +86,8 @@ script_mod! {
                         return sdf.result
                     }
                 }
+                // A small filled disclosure triangle, right when shut and down when open,
+                // turning with the fold; its centre on a device pixel at every scale.
                 chevron := View{
                     width: theme.prop_chevron
                     height: theme.prop_chevron
@@ -92,25 +97,28 @@ script_mod! {
                         color: uniform(theme.prop_ink_dim)
                         pixel: fn() {
                             let dpi = self.draw_pass.dpi_factor
-                            let c = self.rect_size * 0.5
-                            let r = (self.rect_size.y - 1.25) * 0.5
-                            let a = self.opened * PI * 0.5
-                            let cs = cos(a)
-                            let sn = sin(a)
-                            let p0 = c + vec2(-r * 0.5 * cs + r * sn, -r * 0.5 * sn - r * cs)
-                            let p1 = c + vec2(r * 0.5 * cs, r * 0.5 * sn)
-                            let p2 = c + vec2(-r * 0.5 * cs - r * sn, -r * 0.5 * sn + r * cs)
-                            let q0 = (floor((self.rect_pos + p0) * dpi) + 0.5) / dpi - self.rect_pos
-                            let q1 = (floor((self.rect_pos + p1) * dpi) + 0.5) / dpi - self.rect_pos
-                            let q2 = (floor((self.rect_pos + p2) * dpi) + 0.5) / dpi - self.rect_pos
-                            let sdf = Sdf2d.viewport(self.pos * self.rect_size)
-                            sdf.move_to(q0.x, q0.y)
-                            sdf.line_to(q1.x, q1.y)
-                            sdf.line_to(q2.x, q2.y)
-                            sdf.stroke(self.color, 0.625)
+                            let c = (floor((self.rect_pos + self.rect_size * 0.5) * dpi) + 0.5) / dpi - self.rect_pos
+                            let b = self.rect_size.y * 0.35
+                            let h = b * 1.6
+                            let sdf = Sdf2d.viewport_px(self.pos * self.rect_size, dpi)
+                            sdf.rotate(self.opened * PI * 0.5, c.x, c.y)
+                            sdf.move_to(c.x - h * 0.4, c.y - b)
+                            sdf.line_to(c.x + h * 0.6, c.y)
+                            sdf.line_to(c.x - h * 0.4, c.y + b)
+                            sdf.close_path()
+                            sdf.fill(self.color)
                             return sdf.result
                         }
                     }
+                }
+                // An optional glyph before the title in the quiet ink; a host shows it with
+                // `icon +: {visible: true draw_icon +: {svg: ..}}`.
+                icon := Icon{
+                    visible: false
+                    width: theme.prop_icon_size
+                    height: theme.prop_icon_size
+                    icon_walk: Walk{width: theme.prop_icon_size height: theme.prop_icon_size}
+                    draw_icon +: {color: theme.prop_ink_dim}
                 }
                 title := Label{
                     width: Fill
@@ -122,20 +130,7 @@ script_mod! {
                     draw_text +: {
                         ink_centered: true
                         color: theme.color_text
-                        text_style: theme.font_regular{font_size: theme.font_size_p}
-                    }
-                }
-                // Shown by the owner once it has a count to say: an empty one would
-                // still take a slot in the row and the semantic tree.
-                count := Label{
-                    visible: false
-                    height: Fit
-                    padding: Inset{}
-                    text: ""
-                    draw_text +: {
-                        ink_centered: true
-                        color: theme.prop_ink_dim
-                        text_style: theme.font_regular{font_size: theme.type_label_s_size}
+                        text_style: theme.font_regular{font_size: theme.prop_font_size}
                     }
                 }
                 trail := View{width: Fit height: Fit flow: Right}
@@ -176,9 +171,12 @@ script_mod! {
 
     mod.widgets.PropDropDown = DropDown{
         width: Fill
+        // The row sets the height: a sheet's taller field minimum and its vertical padding would
+        // set the word below the field's middle.
         height: theme.prop_row_height
+        min_height: 0
         margin: Inset{}
-        padding: Inset{left: 6 right: theme.prop_chevron + 12}
+        padding: Inset{left: theme.prop_pad + 2.0 right: theme.prop_chevron + 12 top: 0 bottom: 0}
         align: Align{x: 0.0 y: 0.5}
         marked: false
         draw_text +: {
@@ -187,7 +185,7 @@ script_mod! {
             color_disabled: theme.prop_ink_dim
             color_dim: uniform(theme.prop_ink_dim)
             mixed: instance(0.0)
-            text_style: theme.font_regular{font_size: theme.font_size_p}
+            text_style: theme.font_regular{font_size: theme.prop_font_size}
             max_lines: 1
             text_overflow: TextOverflow.Ellipsis
             get_color: fn() {return self.color.mix(self.color_dim, self.mixed).mix(self.color_disabled, self.disabled)}
@@ -195,8 +193,8 @@ script_mod! {
         draw_bg +: {
             marked: instance(0.0)
             keyboard_focus: instance(0.0)
-            color: uniform(theme.prop_choice)
-            color_hover: uniform(theme.prop_choice_hover)
+            color: uniform(theme.prop_field)
+            color_hover: uniform(theme.prop_field_hover)
             color_disabled: uniform(theme.color_outset_disabled)
             accent: uniform(theme.color_ctrl_selected)
             focus_color: uniform(theme.color_focus)
@@ -208,7 +206,7 @@ script_mod! {
                 let px = 1.0 / dpi
                 let lo = floor(self.rect_pos * dpi + 0.5) / dpi - self.rect_pos
                 let hi = floor((self.rect_pos + self.rect_size) * dpi + 0.5) / dpi - self.rect_pos
-                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                let sdf = Sdf2d.viewport_px(self.pos * self.rect_size, dpi)
                 let face = self.color.mix(self.color_hover, self.hover).mix(self.color_disabled, self.disabled)
                 sdf.box(lo.x, lo.y, hi.x - lo.x, hi.y - lo.y, self.border_radius)
                 sdf.fill(face.mix(self.accent, self.marked * 0.18))
@@ -224,7 +222,8 @@ script_mod! {
                 sdf.move_to(p0.x, p0.y)
                 sdf.line_to(p1.x, p1.y)
                 sdf.line_to(p2.x, p2.y)
-                sdf.stroke(self.arrow_color, px * 0.5)
+                // One point wide (SDF strokes take a half-width): one device pixel at 1x, two at 2x.
+                sdf.stroke(self.arrow_color, 0.5)
                 return sdf.result
             }
         }
@@ -238,6 +237,10 @@ script_mod! {
         }
     }
 
+    // Connected segments in a field-coloured track: the answer is a lighter face inset one
+    // point in the track with the full ink on it, the others are the track itself with the
+    // quiet ink and no dividers. Labels are centred; a row that cannot fit them
+    // whole is a PropChoice's dropdown instead (see below), never a truncated segment.
     mod.widgets.PropSegmented = SegmentedControl{
         radio: true
         width: Fill
@@ -246,11 +249,11 @@ script_mod! {
         segment_padding: theme.prop_pad
         equal_width: true
         join: Connected
-        inset: 0.0
+        inset: 1.0
         glide_secs: 0.0
         marked: false
         draw_bg +: {
-            color: theme.prop_choice
+            color: theme.prop_field
             accent: uniform(theme.color_ctrl_selected)
             radius: theme.prop_radius
             border_size: 0.0
@@ -258,54 +261,39 @@ script_mod! {
                 let dpi = self.draw_pass.dpi_factor
                 let lo = floor(self.rect_pos * dpi + 0.5) / dpi - self.rect_pos
                 let hi = floor((self.rect_pos + self.rect_size) * dpi + 0.5) / dpi - self.rect_pos
-                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                let sdf = Sdf2d.viewport_px(self.pos * self.rect_size, dpi)
                 sdf.box(lo.x, lo.y, hi.x - lo.x, hi.y - lo.y, self.radius)
                 sdf.fill(self.color.mix(self.accent, self.marked * 0.18))
                 return sdf.result
             }
         }
         draw_pill +: {
-            color: theme.prop_choice
-            color_hover: uniform(theme.prop_choice_hover)
-            color_selected: uniform(theme.color_ctrl_selected)
-            separator_color: uniform(theme.color_bevel_inset_2)
+            color: theme.prop_choice_on
+            color_hover: uniform(theme.prop_field_hover)
             radius: theme.prop_radius
             border_size: 0.0
             pixel: fn() {
                 let dpi = self.draw_pass.dpi_factor
-                let px = 1.0 / dpi
                 let lo = floor(self.rect_pos * dpi + 0.5) / dpi - self.rect_pos
                 let hi = floor((self.rect_pos + self.rect_size) * dpi + 0.5) / dpi - self.rect_pos
-                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
-                if self.vertical > 0.5 {
-                    sdf.box_y(lo.x, lo.y, hi.x - lo.x, hi.y - lo.y, self.radius * self.first, self.radius * self.last)
-                } else {
-                    sdf.box_x(lo.x, lo.y, hi.x - lo.x, hi.y - lo.y, self.radius * self.first, self.radius * self.last)
-                }
-                let face = self.color.mix(self.color_hover, self.hover).mix(self.color_selected, self.active)
-                sdf.fill(face.mix(self.color_selected, self.marked * 0.18))
-                if self.separator > 0.5 {
-                    if self.vertical > 0.5 {
-                        sdf.rect(lo.x, lo.y, hi.x - lo.x, px)
-                    } else {
-                        sdf.rect(lo.x, lo.y, px, hi.y - lo.y)
-                    }
-                    sdf.fill(self.separator_color)
-                }
+                let sdf = Sdf2d.viewport_px(self.pos * self.rect_size, dpi)
+                sdf.box(lo.x, lo.y, hi.x - lo.x, hi.y - lo.y, self.radius)
+                let face = vec4(self.color_hover.rgb, self.color_hover.a * self.hover).mix(self.color, self.active)
+                sdf.fill(face)
                 return sdf.result
             }
         }
         draw_text +: {
             ink_centered: true
-            color: theme.color_text
-            text_style: theme.font_regular{font_size: theme.font_size_p}
+            color: theme.prop_ink_dim
+            text_style: theme.font_regular{font_size: theme.prop_font_size}
             max_lines: 1
             text_overflow: TextOverflow.Ellipsis
         }
         draw_text_selected +: {
             ink_centered: true
-            color: on_accent
-            text_style: theme.font_regular{font_size: theme.font_size_p}
+            color: theme.color_text
+            text_style: theme.font_regular{font_size: theme.prop_font_size}
             max_lines: 1
             text_overflow: TextOverflow.Ellipsis
         }
@@ -322,7 +310,7 @@ script_mod! {
             ink_centered: true
             color: theme.color_text
             color_disabled: theme.prop_ink_dim
-            text_style: theme.font_regular{font_size: theme.font_size_p}
+            text_style: theme.font_regular{font_size: theme.prop_font_size}
             max_lines: 1
             text_overflow: TextOverflow.Ellipsis
             get_color: fn() {return self.color.mix(self.color_disabled, self.disabled)}
@@ -331,8 +319,8 @@ script_mod! {
             marked: instance(0.0)
             size: uniform(12.0)
             border_radius: uniform(theme.prop_radius)
-            color: uniform(theme.prop_choice)
-            color_hover: uniform(theme.prop_choice_hover)
+            color: uniform(theme.prop_field)
+            color_hover: uniform(theme.prop_field_hover)
             hairline_color: uniform(theme.color_bevel_inset_2)
             color_active: uniform(theme.color_ctrl_selected)
             mark_color_active: uniform(on_accent)
@@ -386,8 +374,61 @@ script_mod! {
     }
 
     mod.widgets.PropDropDownRow = PropRow{value +: {pick := mod.widgets.PropDropDown{}}}
-    mod.widgets.PropSegmentedRow = PropRow{value +: {seg := mod.widgets.PropSegmented{}}}
+    // Segments while every answer fits whole at the width the row gives, else a dropdown of the
+    // same answers. The host sets the segments' options and answer; the dropdown mirrors them.
+    mod.widgets.PropChoiceBase = #(PropChoice::register_widget(vm))
+    mod.widgets.PropChoice = set_type_default() do mod.widgets.PropChoiceBase{
+        width: Fill height: theme.prop_row_height flow: Overlay
+        seg := mod.widgets.PropSegmented{}
+        pick := mod.widgets.PropDropDown{visible: false}
+    }
+    mod.widgets.PropSegmentedRow = PropRow{value +: {choice := mod.widgets.PropChoice{}}}
     mod.widgets.PropCheckRow = PropRow{value +: {check := mod.widgets.PropCheckBox{}}}
+}
+
+/// A choice that never truncates: its segments while every answer fits whole at the width
+/// the row gives it, else a dropdown of the same answers. The host sets the segments'
+/// options and answer and reads either child's selection; the dropdown's words and answer
+/// follow the segments' when they change.
+#[derive(Script, ScriptHook, Widget)]
+pub struct PropChoice {
+    #[deref]
+    view: View,
+    /// The words last handed to the dropdown.
+    #[rust]
+    mirrored: Vec<String>,
+    /// Whether the dropdown stands in for the segments, as last set on both.
+    #[rust]
+    compact: Option<bool>,
+}
+
+impl Widget for PropChoice {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        self.view.handle_event(cx, event, scope);
+    }
+
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        let room = cx.turtle().next_walk_width(walk.width, walk.margin);
+        let seg_widget = self.view.widget(cx, ids!(seg));
+        let pick_widget = self.view.widget(cx, ids!(pick));
+        let seg = seg_widget.as_segmented_control();
+        let pick = pick_widget.as_drop_down();
+        let (compact, options, selected) = match seg.borrow_mut() {
+            Some(mut seg) => (room.is_finite() && seg.required_width(cx) > room, seg.options.clone(), seg.selected),
+            None => (false, Vec::new(), 0),
+        };
+        if options != self.mirrored {
+            pick.set_labels(cx, options.clone());
+            self.mirrored = options;
+        }
+        pick.set_selected_item(cx, selected);
+        if self.compact != Some(compact) {
+            seg_widget.set_visible(cx, !compact);
+            pick_widget.set_visible(cx, compact);
+            self.compact = Some(compact);
+        }
+        self.view.draw_walk(cx, scope, walk)
+    }
 }
 
 #[derive(Script, ScriptHook, Widget)]
