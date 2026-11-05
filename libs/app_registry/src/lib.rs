@@ -105,7 +105,7 @@ pub struct AppTarget<'a> {
     pub bin: &'a str,
     pub manifest: Option<&'a str>,
     /// The cargo profile it is built with: `release` for an app, `host` for the JIT tool (the
-    /// workspace's thin-LTO native profile every launcher of `makepad run` uses).
+    /// workspace's native-CPU profile every launcher of `makepad run` uses).
     pub profile: &'a str,
 }
 

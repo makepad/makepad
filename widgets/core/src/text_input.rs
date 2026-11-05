@@ -1035,7 +1035,7 @@ impl TextInput {
             cx.with_script_vm_id(vm_id, |vm| {
                 let str_val = vm.new_string(&text);
                 vm.with_instruction_limit(
-                    crate::widget_async::WIDGET_SCRIPT_INSTRUCTION_LIMIT,
+                    crate::widget_async::WIDGET_SCRIPT_INSTRUCTION_LIMIT as u64,
                     |vm| {
                         vm.call(ScriptValue::from(handler), &[ScriptValue::from(str_val)]);
                     },
@@ -1056,7 +1056,7 @@ impl TextInput {
             cx.with_script_vm_id(vm_id, |vm| {
                 let str_val = vm.new_string(&text);
                 vm.with_instruction_limit(
-                    crate::widget_async::WIDGET_SCRIPT_INSTRUCTION_LIMIT,
+                    crate::widget_async::WIDGET_SCRIPT_INSTRUCTION_LIMIT as u64,
                     |vm| {
                         vm.call(ScriptValue::from(handler), &[ScriptValue::from(str_val)]);
                     },

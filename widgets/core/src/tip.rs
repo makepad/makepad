@@ -772,7 +772,9 @@ impl Widget for TipLayer {
     fn semantics(&self, cx: &Cx, node: &mut a11y_tree::Node) {
         let _ = cx;
         node.role = a11y_tree::Role::Tooltip;
-        makepad_platform::a11y::set_string(&mut node.name, &self.text());
+        // the tip on screen, by its text (the Widget trait's `text()` is empty here); nothing
+        // shown, no name
+        makepad_platform::a11y::set_string(&mut node.name, self.showing.as_ref().map_or("", |tip| tip.text.as_str()));
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {

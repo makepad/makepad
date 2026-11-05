@@ -778,7 +778,7 @@ fn call_closure(cx: &mut Cx, vm_id: SplashVmId, f: &ScriptFnRef) {
             if key != 0 && vm.heap_key() != key {
                 return;
             }
-            vm.with_instruction_limit(WIDGET_SCRIPT_INSTRUCTION_LIMIT, |vm| {
+            vm.with_instruction_limit(WIDGET_SCRIPT_INSTRUCTION_LIMIT as u64, |vm| {
                 vm.call(f.as_object().into(), &[]);
             });
             for err in vm.take_errors() {

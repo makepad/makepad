@@ -975,8 +975,8 @@ pub fn caption_look(vm: &mut ScriptVm) -> CaptionLook {
 pub fn caption_look_of(cx: &mut Cx, sheet: &StyleSheet) -> CaptionLook {
     use crate::widget_async::CxSplashVmExt;
     let sheet = sheet.clone();
-    let vm_id = cx.alloc_splash_vm_with_ui(false, Box::new(move |vm: &mut ScriptVm| {
-        install(vm, sheet);
+    let vm_id = cx.alloc_splash_vm_with_ui(false, std::rc::Rc::new(move |vm: &mut ScriptVm| {
+        install(vm, sheet.clone());
         crate::theme_mod(vm);
         crate::isolate_widgets_mod_with(vm, &[]);
         apply_widgets(vm);

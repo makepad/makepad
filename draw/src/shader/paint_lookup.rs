@@ -10,6 +10,13 @@
 //! on the boundary between the two slots, a pixel wide at any zoom. A point past the volume reads
 //! its nearest face: a part that has grown shows the paint there is until its host bakes again.
 //!
+//! `paint_shade(hdr, p, n, px, albedo)`: `paint_albedo`'s colour and, in `.w`, its light floor
+//! over the pixel: the volume's header texel 2 `.w` (0 for none) times the share of the pixel
+//! its paint covers. A lane keeps the paint at that share of its colour, as its exposure shows
+//! it, wherever the scene's light falls short. Marks that must read on a face no light reaches
+//! (a support block's tint under an overhang) set it; colour paint leaves it 0 and keeps its
+//! lit look.
+//!
 //! A header may instead be an overlay (`bake::Overlay`, first value -1): a host's values over a
 //! regular lattice, read trilinear where the surface is and coloured through its palette, and its
 //! marks per lattice cell, over the part's own paint. Refining the lattice sharpens the colour;
@@ -142,7 +149,13 @@ script_mod! {
         // `albedo` at frame point p of a part (normal n in that frame): the paint of volume `hdr`
         // (footprint px mm); an overlay's header shows its colours and marks over its part's paint
         paint_albedo: fn(hdr: f32, p: vec3, n: vec3, px: f32, albedo: vec3) -> vec3 {
-            if hdr < 0.0 { return albedo }
+            return self.paint_shade(hdr, p, n, px, albedo).xyz
+        }
+
+        // `paint_albedo` and, in w, the share of the pixel at its volume's light floor (an
+        // overlay's colours and marks are lit as they are: none)
+        paint_shade: fn(hdr: f32, p: vec3, n: vec3, px: f32, albedo: vec3) -> vec4 {
+            if hdr < 0.0 { return vec4(albedo, 0.0) }
             let h0 = self.paint_texel(hdr)
             var under = hdr
             var pv = p
@@ -150,9 +163,10 @@ script_mod! {
                 under = h0.y
                 pv = self.paint_rows(hdr + 11.0, p)
             }
-            var base = albedo
-            if under >= 0.0 { base = self.paint_volume(under, pv, px, albedo) }
-            if h0.x >= 0.0 { return base }
+            var shaded = vec4(albedo, 0.0)
+            if under >= 0.0 { shaded = self.paint_volume(under, pv, px, albedo) }
+            if h0.x >= 0.0 { return shaded }
+            var base = shaded.xyz
             let q = self.paint_rows(hdr + 6.0, p)
             let dim = self.paint_texel(hdr + 2.0)
             if h0.z >= 0.0 { base = self.overlay_value(q, self.paint_texel(hdr + 1.0), dim, h0.z, base) }
@@ -160,7 +174,7 @@ script_mod! {
                 let marks = vec4(self.paint_texel(hdr + 10.0).xyz, dim.w)
                 base = self.overlay_mark(q, self.paint_turn(hdr + 6.0, n), self.paint_texel(hdr + 9.0), marks, h0.w, base)
             }
-            return base
+            return vec4(base, 0.0)
         }
 
         // A surface an overlay's values colour reads alike on any material: a metal has no
@@ -172,8 +186,9 @@ script_mod! {
             return metal
         }
 
-        // `albedo` with volume `hdr`'s paint at frame point p (footprint px mm)
-        paint_volume: fn(hdr: f32, p: vec3, px: f32, albedo: vec3) -> vec3 {
+        // `albedo` with volume `hdr`'s paint at frame point p (footprint px mm), and in w the
+        // share of the pixel its paint covers times the volume's light floor
+        paint_volume: fn(hdr: f32, p: vec3, px: f32, albedo: vec3) -> vec4 {
             let h0 = self.paint_texel(hdr)
             let h1 = self.paint_texel(hdr + 1.0)
             let bases = self.paint_texel(hdr + 2.0)
@@ -226,7 +241,7 @@ script_mod! {
             if abs(c101.x - a) > 0.5 { b = c101.x }
             if abs(c011.x - a) > 0.5 { b = c011.x }
             if abs(c111.x - a) > 0.5 { b = c111.x }
-            if a < 0.5 && b < 0.5 { return albedo }
+            if a < 0.5 && b < 0.5 { return vec4(albedo, 0.0) }
             let x0 = mix(self.paint_sign(c000, a), self.paint_sign(c100, a), t.x)
             let x1 = mix(self.paint_sign(c010, a), self.paint_sign(c110, a), t.x)
             let x2 = mix(self.paint_sign(c001, a), self.paint_sign(c101, a), t.x)
@@ -237,7 +252,8 @@ script_mod! {
             if a > 0.5 { ca = self.paint_color(bases, a) }
             var cb = albedo
             if b > 0.5 { cb = self.paint_color(bases, b) }
-            return mix(cb, ca, cov)
+            let painted = mix(step(0.5, b), step(0.5, a), cov)
+            return vec4(mix(cb, ca, cov), painted * bases.w)
         }
     }
 }

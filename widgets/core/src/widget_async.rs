@@ -275,6 +275,9 @@ pub fn gc_dead_splash_isolates(cx: &mut Cx) {
     crate::tween_script::gc_vms(cx, &dead);
     crate::desktop_style::gc_heaps(cx,&dead_heaps);
     crate::cached_widget::gc_heaps(cx, &dead_heaps);
+    for heap in &dead_heaps {
+        cx.forget_kept_for_reload(*heap);
+    }
     // And the resource cache, which is keyed by heap ADDRESS: dropping a heap
     // frees that address for the next isolate, and a leftover entry would hand
     // the newcomer a dead heap's handle. See `CxScriptResources::gc_heaps`.
@@ -424,8 +427,9 @@ struct IsolateUi {
     loader: Option<ScriptObjectRef>,
     /// the host's isolate mods as they were at allocation
     host_mods: Vec<fn(&mut ScriptVm)>,
-    /// the host's registration instead of the stock one (`alloc_splash_vm_with_ui`)
-    custom: Option<Box<dyn FnOnce(&mut ScriptVm)>>,
+    /// the host's registration instead of the stock one (`alloc_splash_vm_with_ui`), kept for
+    /// the isolate's reload passes ([`reload_isolate`])
+    custom: Option<std::rc::Rc<dyn Fn(&mut ScriptVm)>>,
     /// the sheet was set by a restyle before the expansion: its widget half goes over the library
     apply_sheet_widgets: bool,
 }
@@ -465,7 +469,7 @@ unsafe extern "C-unwind" fn expand_isolate_ui_lazily(vm: *mut ScriptVm) {
 fn expand_isolate_ui(vm: &mut ScriptVm) {
     let heap_key = vm.heap_key();
     let (sheet, host_io_only, theme, script, loader, host_mods, custom, apply_sheet_widgets) = match vm.cx_mut().global::<CxWidgetAsync>().isolate_ui.get_mut(&heap_key) {
-        Some(ui) => (ui.sheet.clone(), ui.host_io_only, ui.theme, ui.script.clone(), ui.loader.clone(), ui.host_mods.clone(), ui.custom.take(), ui.apply_sheet_widgets),
+        Some(ui) => (ui.sheet.clone(), ui.host_io_only, ui.theme, ui.script.clone(), ui.loader.clone(), ui.host_mods.clone(), ui.custom.clone(), ui.apply_sheet_widgets),
         None => (None, true, splash_theme(), None, None, Vec::new(), None, false),
     };
     // The registration is the host's own code: it loads the library's fonts like before the
@@ -486,7 +490,7 @@ fn expand_isolate_ui_modules(
     script: Option<std::rc::Rc<SplashThemeScript>>,
     loader: Option<ScriptObjectRef>,
     host_mods: Vec<fn(&mut ScriptVm)>,
-    custom: Option<Box<dyn FnOnce(&mut ScriptVm)>>,
+    custom: Option<std::rc::Rc<dyn Fn(&mut ScriptVm)>>,
     apply_sheet_widgets: bool,
 ) {
     with_loader(vm, loader.as_ref(), |vm| {
@@ -516,10 +520,64 @@ fn expand_isolate_ui_modules(
     });
 }
 
+/// A live edit's reload pass in the installed isolate, as the main VM's runs its app's
+/// `script_mod` again: its UI registration again in reload mode (the host's own, or the theme,
+/// the Splash theme, the library and the installed sheet's widget half, as a restyle does),
+/// unless its UI is still lazy (the coming expansion registers the edited code), then the
+/// host's isolate mods and what the host and libraries kept for the pass
+/// (`ScriptVmReload::keep_for_reload`). The base platform modules are left alone, as the main
+/// VM's are: the strip took ambient authority out of them. Runs where the isolate is first
+/// entered after the edit ([`with_isolate_installed`]); the trees built on the old
+/// registration are their hosts' to apply again (a Splash runs its body again).
+fn reload_isolate(vm: &mut ScriptVm) {
+    let heap_key = vm.heap_key();
+    let lazy = vm.has_lazy_modules();
+    let ui = vm.cx_mut().global::<CxWidgetAsync>().isolate_ui.get(&heap_key).map(|ui| (ui.host_io_only, ui.theme, ui.script.clone(), ui.loader.clone(), ui.host_mods.clone(), ui.custom.clone()));
+    let restricted = vm.cx_mut().script_data.std.set_host_io_only_for_host_code(false);
+    let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        vm.with_reload(|vm| {
+            if let Some((host_io_only, theme, script, loader, host_mods, custom)) = ui.filter(|_| !lazy) {
+                with_loader(vm, loader.as_ref(), |vm| {
+                    match custom {
+                        Some(custom) => custom(vm),
+                        None => {
+                            crate::theme_mod(vm);
+                            style_isolate(vm, theme, script.as_deref(), host_io_only);
+                            crate::desktop_style::apply_widgets(vm);
+                        }
+                    }
+                    for install in host_mods {
+                        install(vm);
+                    }
+                });
+            }
+            vm.run_kept_for_reload();
+        })
+    }));
+    vm.cx_mut().script_data.std.set_host_io_only_for_host_code(restricted);
+    if let Err(payload) = out {
+        std::panic::resume_unwind(payload);
+    }
+}
+
 struct IsolatedSplashVm {
     network_enabled: bool,
     std: ScriptStd,
     vm: Option<Box<ScriptVmBase>>,
+    /// The reload pass (`Cx::reload_generation`) its registration last followed.
+    reloaded_at: u64,
+    /// Its host follows live edits itself ([`isolate_reloads_with_host`]).
+    host_reloads: bool,
+}
+
+/// The host of isolate `vm_id` follows live edits itself: it registers the isolate's UI again
+/// and rebases its trees onto it in one restyle (flow's faces take a live edit as an
+/// appearance change, indexing the old prototypes first), so the isolate's first entry after
+/// an edit runs no reload pass of its own ([`reload_isolate`]).
+pub fn isolate_reloads_with_host(cx: &mut Cx, vm_id: SplashVmId) {
+    if let Some(isolated) = cx.global::<CxWidgetAsync>().isolated_vms.vms.get_mut(&vm_id) {
+        isolated.host_reloads = true;
+    }
 }
 
 #[derive(Default)]
@@ -607,6 +665,9 @@ fn with_isolate_installed<R>(cx: &mut Cx, vm_id: SplashVmId, f: impl FnOnce(&mut
 
     let previous_vm_id = cx.global::<CxWidgetAsync>().current_vm_id;
     cx.global::<CxWidgetAsync>().current_vm_id = vm_id;
+    // The first entry after a live edit runs the isolate's reload pass before its work.
+    let reload = isolated.reloaded_at != cx.reload_generation && !isolated.host_reloads;
+    isolated.reloaded_at = cx.reload_generation;
 
     let outer_std = std::mem::replace(&mut cx.script_data.std, isolated.std);
     let outer_vm = cx.script_vm.take();
@@ -617,7 +678,12 @@ fn with_isolate_installed<R>(cx: &mut Cx, vm_id: SplashVmId, f: impl FnOnce(&mut
     // platform's event catcher, a host isolating a guest) must not cost the
     // app its VM and the table its isolate. Catch, restore, then let the
     // panic continue to the containment layer at the entry funnel.
-    let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(cx)));
+    let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if reload {
+            contain_isolate_panic("live edit reload", || cx.with_vm(reload_isolate));
+        }
+        f(cx)
+    }));
 
     isolated.vm = cx.script_vm.take();
     cx.script_vm = outer_vm;
@@ -686,8 +752,10 @@ pub trait CxSplashVmExt {
     /// An isolate whose UI registration is the host's own `ui` (a WM sheet, an appearance)
     /// instead of the stock theme + widgets, run once, at allocation: so a host that restyles a
     /// fresh isolate does not register the library twice. `ui` runs as host code (the isolate's
-    /// loader on `mod.res`, no host-io restriction); the host's isolate mods follow it.
-    fn alloc_splash_vm_with_ui(&mut self, network_enabled: bool, ui: Box<dyn FnOnce(&mut ScriptVm)>) -> SplashVmId;
+    /// loader on `mod.res`, no host-io restriction); the host's isolate mods follow it. It runs
+    /// again in reload mode on each of the isolate's live-edit reload passes, so what it takes
+    /// from the host it reads as it is then (a sheet restyled since stays).
+    fn alloc_splash_vm_with_ui(&mut self, network_enabled: bool, ui: std::rc::Rc<dyn Fn(&mut ScriptVm)>) -> SplashVmId;
     /// Like [`alloc_splash_vm_with_io`](Self::alloc_splash_vm_with_io), but
     /// `Some(theme)` pins the isolate to that stock theme, without the host's
     /// [`SplashThemeScript`]. `None` takes the host's theme and script.
@@ -727,7 +795,7 @@ pub trait CxSplashVmExt {
 /// The body of `alloc_splash_vm_with_io` / `alloc_splash_vm_with_ui`.
 /// `pin`: a stock theme the isolate keeps, without the host's [`SplashThemeScript`];
 /// `None` takes the host's theme and script.
-fn alloc_splash_vm_impl(cx: &mut Cx, network_enabled: bool, host_io_only: bool, custom_ui: Option<Box<dyn FnOnce(&mut ScriptVm)>>, pin: Option<SplashTheme>) -> SplashVmId {
+fn alloc_splash_vm_impl(cx: &mut Cx, network_enabled: bool, host_io_only: bool, custom_ui: Option<std::rc::Rc<dyn Fn(&mut ScriptVm)>>, pin: Option<SplashTheme>) -> SplashVmId {
 
     // A nested Splash cannot acquire authority its parent does not have.
     let host_io_only = host_io_only || cx.script_data.std.host_io_only();
@@ -842,6 +910,7 @@ fn alloc_splash_vm_impl(cx: &mut Cx, network_enabled: bool, host_io_only: bool, 
     // Record this isolate's heap identity so any ref minted here (widget
     // sources, templates, on_click fns) routes back to this VM.
     let heap_key = bx.heap_ref().heap_key();
+    let reloaded_at = cx.reload_generation;
     let state = cx.global::<CxWidgetAsync>();
     // A heap key is an allocation address, so a fresh heap can land on one
     // a dead isolate used to own. Live registration wins over the memory of
@@ -860,6 +929,8 @@ fn alloc_splash_vm_impl(cx: &mut Cx, network_enabled: bool, host_io_only: bool, 
             network_enabled,
             std,
             vm: Some(bx),
+            reloaded_at,
+            host_reloads: false,
         },
     );
     if crate::makepad_script::makepad_error_log::trace_enabled("script.heaps") {
@@ -939,7 +1010,7 @@ impl CxSplashVmExt for Cx {
         alloc_splash_vm_impl(self, network_enabled, host_io_only, None, None)
     }
 
-    fn alloc_splash_vm_with_ui(&mut self, network_enabled: bool, ui: Box<dyn FnOnce(&mut ScriptVm)>) -> SplashVmId {
+    fn alloc_splash_vm_with_ui(&mut self, network_enabled: bool, ui: std::rc::Rc<dyn Fn(&mut ScriptVm)>) -> SplashVmId {
         alloc_splash_vm_impl(self, network_enabled, false, Some(ui), None)
     }
 
@@ -1255,7 +1326,7 @@ impl<'a> WidgetToScriptCallExt for ScriptVm<'a> {
         let ui_handle = self.build_ui_handle_for_uid(target_uid);
         let call_args =
             self.make_call_args_object_with_context(source.as_object(), ui_handle, args);
-        let result = self.with_instruction_limit(WIDGET_SCRIPT_INSTRUCTION_LIMIT, |vm| {
+        let result = self.with_instruction_limit(WIDGET_SCRIPT_INSTRUCTION_LIMIT as u64, |vm| {
             vm.call_with_args_object_with_me(script_fn.clone().into(), call_args, me)
         });
 
@@ -1766,7 +1837,7 @@ fn pump_widget_async(cx: &mut Cx) -> bool {
                             ui_handle,
                             req.args.get(),
                         );
-                        let _ = vm.with_instruction_limit(WIDGET_SCRIPT_INSTRUCTION_LIMIT, |vm| {
+                        let _ = vm.with_instruction_limit(WIDGET_SCRIPT_INSTRUCTION_LIMIT as u64, |vm| {
                             vm.call_with_args_object_with_me(
                                 req.script_fn.clone().into(),
                                 call_args,
@@ -1893,6 +1964,27 @@ fn register_task_hooks(cx: &mut Cx) {
         ));
     }
     cx.add_script_timer_dispatch_hook(script_timer_dispatch_hook);
+    cx.set_script_heap_route(script_heap_route);
+    cx.set_script_vms_any(script_vms_any);
+}
+
+/// Whether `f` holds for an isolate's VM (`Cx::set_script_vms_any`): those not running now.
+fn script_vms_any(cx: &mut Cx, f: &mut dyn FnMut(&ScriptVmBase) -> bool) -> bool {
+    cx.global::<CxWidgetAsync>().isolated_vms.vms.values().filter_map(|isolated| isolated.vm.as_deref()).any(|vm| f(vm))
+}
+
+/// Enters the isolate that owns heap `heap_key` for `f` (`Cx::with_vm_of_heap`): a draw made
+/// in an isolate takes a live edit there. Not a live isolate's heap (a dead one's, or the main
+/// VM's from inside an isolate, which `with_script_vm_id` must not run), or an isolate that is
+/// running further up the stack: false, nothing runs.
+fn script_heap_route(cx: &mut Cx, heap_key: usize, f: &mut dyn FnMut(&mut ScriptVm)) -> bool {
+    let state = cx.global::<CxWidgetAsync>();
+    let Some(vm_id) = state.heap_to_vm.get(&heap_key).copied() else { return false };
+    if state.current_vm_id != vm_id && !state.isolated_vms.vms.contains_key(&vm_id) {
+        return false;
+    }
+    with_script_vm_id_dyn(cx, vm_id, f);
+    true
 }
 
 /// Routes a firing script timer to the isolate VM that owns its callback. Without this,
@@ -1914,7 +2006,7 @@ fn script_timer_dispatch_hook(cx: &mut Cx, timer: &CxScriptTimer, time: ScriptVa
             // timer callback can't hang the host.
             contain_isolate_panic("timer callback", || {
                 cx.with_script_vm_id(vm_id, |vm| {
-                    vm.with_instruction_limit(WIDGET_SCRIPT_INSTRUCTION_LIMIT, |vm| {
+                    vm.with_instruction_limit(WIDGET_SCRIPT_INSTRUCTION_LIMIT as u64, |vm| {
                         vm.call(timer.callback.as_object().into(), &[time]);
                     });
                 });
@@ -1962,6 +2054,8 @@ pub struct IsolateEntry {
     vm_id: SplashVmId,
     previous_vm_id: SplashVmId,
     network_enabled: bool,
+    reloaded_at: u64,
+    host_reloads: bool,
     outer_std: Option<ScriptStd>,
     outer_vm: Option<Box<ScriptVmBase>>,
 }
@@ -2026,7 +2120,7 @@ pub fn with_isolate<C: IsolateCx, R>(cx: &mut C, vm_id: SplashVmId, f: impl FnOn
 pub fn enter_isolate(cx: &mut Cx, vm_id: SplashVmId) -> IsolateEntry {
     let previous_vm_id = cx.global::<CxWidgetAsync>().current_vm_id;
     if vm_id == MAIN_SPLASH_VM_ID || previous_vm_id == vm_id {
-        return IsolateEntry { vm_id: MAIN_SPLASH_VM_ID, previous_vm_id, network_enabled: false, outer_std: None, outer_vm: None };
+        return IsolateEntry { vm_id: MAIN_SPLASH_VM_ID, previous_vm_id, network_enabled: false, reloaded_at: 0, host_reloads: false, outer_std: None, outer_vm: None };
     }
     // Out of the table while installed, exactly as `with_isolate_installed`
     // keeps it: a nested entry by id takes the "already current" path.
@@ -2040,7 +2134,12 @@ pub fn enter_isolate(cx: &mut Cx, vm_id: SplashVmId) -> IsolateEntry {
     let outer_std = std::mem::replace(&mut cx.script_data.std, isolated.std);
     let outer_vm = cx.script_vm.take();
     cx.script_vm = isolated.vm;
-    IsolateEntry { vm_id, previous_vm_id, network_enabled: isolated.network_enabled, outer_std: Some(outer_std), outer_vm }
+    // The first entry after a live edit, as in `with_isolate_installed`.
+    let reloaded_at = cx.reload_generation;
+    if isolated.reloaded_at != reloaded_at && !isolated.host_reloads {
+        contain_isolate_panic("live edit reload", || cx.with_vm(reload_isolate));
+    }
+    IsolateEntry { vm_id, previous_vm_id, network_enabled: isolated.network_enabled, reloaded_at, host_reloads: isolated.host_reloads, outer_std: Some(outer_std), outer_vm }
 }
 
 /// Put the outer VM back. See [`enter_isolate`].
@@ -2048,7 +2147,7 @@ pub fn leave_isolate(cx: &mut Cx, entry: IsolateEntry) {
     if entry.vm_id == MAIN_SPLASH_VM_ID {
         return;
     }
-    let IsolateEntry { vm_id, previous_vm_id, network_enabled, outer_std, outer_vm } = entry;
+    let IsolateEntry { vm_id, previous_vm_id, network_enabled, reloaded_at, host_reloads, outer_std, outer_vm } = entry;
     let isolate_vm = cx.script_vm.take();
     cx.script_vm = outer_vm;
     let isolate_std = std::mem::replace(&mut cx.script_data.std, outer_std.expect("an entered isolate has an outer std"));
@@ -2056,7 +2155,7 @@ pub fn leave_isolate(cx: &mut Cx, entry: IsolateEntry) {
     cx.global::<CxWidgetAsync>()
         .isolated_vms
         .vms
-        .insert(vm_id, IsolatedSplashVm { network_enabled, std: isolate_std, vm: isolate_vm });
+        .insert(vm_id, IsolatedSplashVm { network_enabled, std: isolate_std, vm: isolate_vm, reloaded_at, host_reloads });
 }
 
 #[cfg(test)]
@@ -2070,6 +2169,50 @@ mod isolate_entry_tests {
     /// `with_script_vm_id` (a host's own entry): the main VM is
     /// back on `Cx`, the isolate is back in the table with its heap, and
     /// both keep working.
+    /// A live edit's reload pass (a later `Cx::reload_generation`) reaches an
+    /// isolate at its first entry after the edit: its UI library is registered
+    /// again (fresh widget prototypes) and what its host kept for the pass runs
+    /// again, in reload mode, once. An isolate whose host follows edits itself
+    /// is left to it. A draw made in an isolate is routed back to its heap.
+    #[test]
+    fn an_isolate_registers_again_on_a_live_edits_reload_pass() {
+        thread_local! {
+            static RUNS: std::cell::Cell<(u32, u32)> = const { std::cell::Cell::new((0, 0)) };
+        }
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        let (vm_id, by_host) = (cx.alloc_splash_vm(), cx.alloc_splash_vm());
+        isolate_reloads_with_host(&mut cx, by_host);
+        let button = |cx: &mut Cx, vm_id| cx.with_script_vm_id(vm_id, |vm| {
+            let widgets = vm.module(id!(widgets));
+            vm.value(widgets, id!(Button)).as_object().expect("premise: the isolate has the library")
+        });
+        let (before, by_host_before) = (button(&mut cx, vm_id), button(&mut cx, by_host));
+        cx.with_script_vm_id(vm_id, |vm| {
+            vm.keep_for_reload(live_id!(probe), |vm| RUNS.with(|runs| {
+                let (n, in_reload) = runs.get();
+                runs.set((n + 1, in_reload + vm.is_reload() as u32));
+            }));
+        });
+        assert_eq!(button(&mut cx, vm_id), before, "no edit: the library it had");
+        assert_eq!(RUNS.with(|r| r.get()), (0, 0), "kept, not run");
+        cx.reload_generation += 1;
+        let after = button(&mut cx, vm_id);
+        assert_ne!(after, before, "the pass registered the library again");
+        assert_eq!(RUNS.with(|r| r.get()), (1, 1), "the kept registration ran, in reload mode");
+        assert_eq!(button(&mut cx, vm_id), after, "once per pass");
+        assert_eq!(RUNS.with(|r| r.get()), (1, 1));
+        assert_eq!(button(&mut cx, by_host), by_host_before, "its host's to follow");
+
+        let heap = cx.with_script_vm_id(vm_id, |vm| vm.heap_key());
+        let mut seen = 0;
+        assert!(cx.with_vm_of_heap(heap, &mut |vm| seen = vm.heap_key()));
+        assert_eq!(seen, heap, "the isolate's own VM");
+        cx.free_splash_vm(vm_id);
+        assert!(!cx.with_vm_of_heap(heap, &mut |_| panic!("a freed isolate runs nothing")));
+        cx.free_splash_vm(by_host);
+    }
+
     #[test]
     fn a_panic_inside_an_installed_isolate_restores_the_outer_vm_and_the_table() {
         let mut cx = Cx::new(Box::new(|_, _| {}));

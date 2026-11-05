@@ -184,7 +184,7 @@ pub fn splash_host_respond(
         vm.set_value_trap(obj, id!(is_ok), ok);
         vm.set_value_trap(obj, id!(data), data);
         vm.set_value_trap(obj, id!(error), error);
-        vm.with_instruction_limit(WIDGET_SCRIPT_INSTRUCTION_LIMIT, |vm| {
+        vm.with_instruction_limit(WIDGET_SCRIPT_INSTRUCTION_LIMIT as u64, |vm| {
             vm.call(callback.as_object().into(), &[obj.into()]);
         });
         // A callback that errors (or pauses and errors later on its own

@@ -436,6 +436,19 @@ impl TestApp {
         Ok(())
     }
 
+    /// Move the mouse to a point of the first window, no button down: what is there is hovered.
+    pub fn move_to(&self, x: f64, y: f64) {
+        self.client().mouse(&MouseInput::at(MouseKind::Move, Some(0), x, y)).unwrap_or_else(|err| panic_for_error(err));
+    }
+
+    /// Press the mouse at a point of the first window and hold it, for what has no node of its own
+    /// to press (a dock's splitter bar): [`PointerDrag::move_by`], then [`PointerDrag::release`].
+    pub fn press_at(&self, x: f64, y: f64) -> PointerDrag {
+        let window = Some(0);
+        self.client().mouse(&MouseInput::at(MouseKind::Down, window, x, y)).unwrap_or_else(|err| panic_for_error(err));
+        PointerDrag { app: self.clone(), window, start: (x, y), at: (x, y) }
+    }
+
     /// Scrolls at a point in the focused window: a mouse wheel when `phase` is `None`, else one step of
     /// a trackpad gesture (`"began"`, `"changed"`, `"ended"`, `"momentum"`, `"momentum_ended"`, `"touched"`).
     pub fn scroll_at(&self, x: f64, y: f64, sx: f64, sy: f64, phase: Option<&'static str>) {

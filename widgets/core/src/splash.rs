@@ -100,6 +100,10 @@ pub struct Splash {
     theme: Option<SplashTheme>,
     #[rust]
     styled: StyledTheme,
+    /// The live-edit reload pass (`Cx::reload_generation`) the body last ran after: a later
+    /// one runs it again on the isolate's registration as the pass left it.
+    #[rust]
+    reloaded_at: u64,
 }
 
 /// What an isolate was last styled with, and the host-theme generation it last checked.
@@ -260,6 +264,7 @@ impl Splash {
         if body.is_empty() {
             return;
         }
+        self.reloaded_at = cx.reload_generation;
 
         if self.vm_id == MAIN_SPLASH_VM_ID {
             self.host_io_only |= cx.script_data.std.host_io_only();
@@ -331,7 +336,7 @@ impl Splash {
                 known.retain(|key| !body_modules.contains(key));
                 let saved = if preserve { snapshot_modules(vm, &body_modules) } else { Vec::new() };
                 vm.capture_errors();
-                let value = vm.with_instruction_limit(SPLASH_EVAL_INSTRUCTION_LIMIT, |vm| {
+                let value = vm.with_instruction_limit(SPLASH_EVAL_INSTRUCTION_LIMIT as u64, |vm| {
                     if preserve {
                         vm.with_reload(|vm| vm.eval_with_append_source(script_mod, &code, NIL.into()))
                     } else {
@@ -547,7 +552,7 @@ fn validate_splash_body_with_io(cx: &mut Cx, body: &str, allow_net: bool, host_i
         // Capture instead of logging: mid-eval errors otherwise go straight to
         // the error log (see `ScriptVm::take_errors`) and can't be returned.
         vm.capture_errors();
-        let value = vm.with_instruction_limit(SPLASH_EVAL_INSTRUCTION_LIMIT, |vm| {
+        let value = vm.with_instruction_limit(SPLASH_EVAL_INSTRUCTION_LIMIT as u64, |vm| {
             vm.eval_with_append_source(script_mod, &code, NIL.into())
         });
         let mut errors = vm.take_errors();
@@ -687,6 +692,11 @@ impl Widget for Splash {
             self.restyle_theme(cx);
         }
         if self.style_pending && self.vm_id!=MAIN_SPLASH_VM_ID && !self.host_io_only {self.eval_styled_body(cx,true);}
+        // A live edit: the isolate registers its UI again (its reload pass, on this first entry)
+        // and the body runs again on it, as a restyle runs it, so the edited widgets draw.
+        if self.vm_id != MAIN_SPLASH_VM_ID && self.reloaded_at != cx.reload_generation {
+            self.eval_styled_body(cx, true);
+        }
         //let tree = self.view.widget_tree();
         //cx.with_vm(|vm| {
         //    log!("{}", tree.display(vm.heap()));
@@ -744,7 +754,7 @@ impl Splash {
             if fnval.is_nil() || fnval.is_err() {
                 return false;
             }
-            vm.with_instruction_limit(WIDGET_SCRIPT_INSTRUCTION_LIMIT, |vm| {
+            vm.with_instruction_limit(WIDGET_SCRIPT_INSTRUCTION_LIMIT as u64, |vm| {
                 vm.call(fnval, args);
             });
             true
@@ -772,7 +782,7 @@ impl Splash {
                 .iter()
                 .map(|s| vm.new_string_with(|_vm, out| out.push_str(s)))
                 .collect();
-            vm.with_instruction_limit(WIDGET_SCRIPT_INSTRUCTION_LIMIT, |vm| {
+            vm.with_instruction_limit(WIDGET_SCRIPT_INSTRUCTION_LIMIT as u64, |vm| {
                 vm.call(fnval, &vals);
             });
             true

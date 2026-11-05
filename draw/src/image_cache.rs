@@ -2334,6 +2334,7 @@ where
 {
     ensure_image_cache_inner(cx);
     let image_size_bytes = (*data).as_ref().len();
+    #[cfg(not(all(target_arch = "wasm32", not(target_feature = "atomics"))))]
     let task_key = image_path.clone();
     let job = move || {
             let start = decode_timing_start();

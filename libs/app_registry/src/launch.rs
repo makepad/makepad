@@ -93,16 +93,17 @@ impl AppLaunch {
     /// and feeds its events to `output`. App I/O is the host's choice.
     /// `held`: the host compiles now and starts the app later (`poll` waits until it
     /// polls again: DECK's next slides), so the build runs on its own (`cargo build`)
-    /// and the fresh binary starts when released.
-    pub fn start(
+    /// and the fresh binary starts when released. What `spawn` makes of the command is the host's
+    /// (`C`: its child, or the run a host starts the command as, under a wrapper of its own).
+    pub fn start<C>(
         app: &'static AppEntry,
         runner: Runner,
         root: Option<PathBuf>,
         extra: Vec<String>,
         policy: BuildPolicy,
         held: bool,
-        mut spawn: impl FnMut(Command, LaunchKind) -> Result<Child, String>,
-    ) -> Result<(Self, Child), String> {
+        mut spawn: impl FnMut(Command, LaunchKind) -> Result<C, String>,
+    ) -> Result<(Self, C), String> {
         let policy = if held { BuildPolicy::Rebuild } else { policy };
         let target = Self::target_of(app, runner);
         let run = !held
@@ -427,7 +428,7 @@ mod tests {
     fn started(id: &str, runner: Runner, root: &Path) -> (Vec<String>, LaunchKind) {
         let mut seen = None;
         let entry = crate::find(id).unwrap();
-        let _ = AppLaunch::start(entry, runner, Some(root.to_path_buf()), vec!["--x".into()], BuildPolicy::IfMissing, false, |cmd, kind| {
+        let _ = AppLaunch::start::<()>(entry, runner, Some(root.to_path_buf()), vec!["--x".into()], BuildPolicy::IfMissing, false, |cmd, kind| {
             seen = Some((cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect(), kind));
             Err("captured".into())
         });
@@ -467,7 +468,7 @@ mod tests {
         let gate = |root: &Path| {
             let mut env = None;
             let entry = crate::find("calculator").unwrap();
-            let _ = AppLaunch::start(entry, Runner::Jit, Some(root.to_path_buf()), Vec::new(), BuildPolicy::IfMissing, false, |cmd, _| {
+            let _ = AppLaunch::start::<()>(entry, Runner::Jit, Some(root.to_path_buf()), Vec::new(), BuildPolicy::IfMissing, false, |cmd, _| {
                 env = cmd.get_envs().find(|(k, _)| *k == "MAKEPAD_RUN_DOCK_REVISION").and_then(|(_, v)| v.map(|v| v.to_os_string()));
                 Err("captured".into())
             });
@@ -489,7 +490,7 @@ mod tests {
         for (id, runner) in [("sandbox", Runner::Jit), ("terminal", Runner::Native)] {
             let entry = crate::find(id).unwrap();
             let mut run = None;
-            let _ = AppLaunch::start(entry, runner, Some(root.clone()), Vec::new(), BuildPolicy::IfMissing, false, |cmd, _| {
+            let _ = AppLaunch::start::<()>(entry, runner, Some(root.clone()), Vec::new(), BuildPolicy::IfMissing, false, |cmd, _| {
                 run = Some(cmd);
                 Err("captured".into())
             });

@@ -223,6 +223,11 @@ pub(crate) fn register() {
         "draws",
         "start [s=30] | [n=20] [by=self|incl|calls] | stop",
         "CPU time of each widget's draw per frame since `draws start`: frames drawn, calls, self and inclusive ms per frame, worst frame",
+        |words| match words.get(1).map(String::as_str) {
+            Some("start") => r#""s":{"type":"integer"}"#,
+            None => r#""n":{"type":"integer"},"by":{"type":"string"}"#,
+            _ => "",
+        },
         query,
     );
 }
