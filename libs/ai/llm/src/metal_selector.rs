@@ -1737,6 +1737,7 @@ fn program_flash_attn_ext(tensors: &[Tensor], op: &Tensor) -> Result<MetalOpProg
                 usize::try_from(dk).map_err(|_| "flash_attn dk overflow".to_string())?,
                 usize::try_from(dv).map_err(|_| "flash_attn dv overflow".to_string())?,
                 nsg,
+                k.desc.ty.is_quantized(),
             ),
             0,
             0,
@@ -2055,10 +2056,13 @@ fn pad_to(v: usize, align: usize) -> usize {
     }
 }
 
-fn flash_attn_smem_bytes(dk: usize, dv: usize, _nsg: i32) -> usize {
+/// ggml-metal FATTN_SMEM: quantized K/V also need each simdgroup's 16x32
+/// scratch, where the kernel dequantizes a K or V block before its matmul.
+fn flash_attn_smem_bytes(dk: usize, dv: usize, nsg: i32, kv_quantized: bool) -> usize {
     let nqptg = OP_FLASH_ATTN_EXT_NQPSG as usize;
     let ncpsg = OP_FLASH_ATTN_EXT_NCPSG as usize;
-    let words = nqptg.saturating_mul(dk + 2 * pad_to(dv, 64) + 2 * (2 * ncpsg));
+    let scratch = if kv_quantized { 16 * 32 * nsg.max(1) as usize } else { 0 };
+    let words = nqptg.saturating_mul(dk + 2 * pad_to(dv, 64) + 2 * (2 * ncpsg)) + scratch;
     pad_to(words.saturating_mul(std::mem::size_of::<f32>() / 2), 16)
 }
 

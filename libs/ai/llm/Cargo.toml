@@ -78,6 +78,12 @@ path = "src/bin/llama_batch_probe.rs"
 name = "llama-batch-bench"
 path = "src/bin/llama_batch_bench.rs"
 
+# The serving shape, timed and fingerprinted: N lanes with MTP at a chosen KV
+# precision and fill; decode rate plus a hash of every lane's token stream.
+[[bin]]
+name = "llama-decode-bench"
+path = "src/bin/llama_decode_bench.rs"
+
 [[bin]]
 name = "vlm-vision-probe"
 path = "src/bin/vlm_vision_probe.rs"

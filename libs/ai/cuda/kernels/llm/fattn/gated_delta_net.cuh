@@ -9,7 +9,9 @@
 #pragma once
 // Copied from llama.cpp ggml/src/ggml-cuda/gated_delta_net.cu:3-201
 // (kernel + launch_gated_delta_net). Host ggml_cuda_info trimmed to
-// warp_size=32. No chunked kernel — they have none (cu:159).
+// warp_size=32. No chunked kernel — they have none (cu:159). Added here:
+// per-token state checkpoints (`state_ckpt_stride`) and the state-cache mode
+// (`state_cache`), which reads and writes the recurrent state in its cache rows.
 #include "common.cuh"
 
 template <int S_v, bool KDA>
@@ -36,7 +38,11 @@ gated_delta_net_cuda(const float * q,
                                      const uint3   neqk1_magic,
                                      const uint3   rq3_magic,
                                      float         scale,
-                                     int64_t       state_ckpt_stride) {
+                                     int64_t       state_ckpt_stride,
+                                     float *       state_cache,
+                                     const int *   state_read_rows,
+                                     const int *   state_write_rows,
+                                     int64_t       state_row_stride) {
     const uint32_t h_idx    = blockIdx.x;
     const uint32_t sequence = blockIdx.y;
     const int      lane     = threadIdx.x;
@@ -51,7 +57,18 @@ gated_delta_net_cuda(const float * q,
 
     const int64_t state_offset = (sequence * H + h_idx) * S_v * S_v;
     state += state_offset;
-    curr_state += state_offset + col * S_v;
+    // With a state cache the scan never moves a plane through an activation:
+    // it resumes from its sequence's cache row and writes every state it
+    // emits straight into the row that keeps it. Each thread reads its own
+    // elements before it writes any, and no other thread touches them, so a
+    // resume row that is also a write row is safe.
+    const int64_t head_offset = (int64_t) h_idx * S_v * S_v;
+    if (state_cache != nullptr) {
+        curr_state = state_cache + (int64_t) state_read_rows[sequence] * state_row_stride
+            + head_offset + col * S_v;
+    } else {
+        curr_state += state_offset + col * S_v;
+    }
     attn_data += (sequence * n_tokens * H + h_idx) * S_v;
 
     constexpr int warp_size = ggml_cuda_get_physical_warp_size() < S_v ? ggml_cuda_get_physical_warp_size() : S_v;
@@ -141,10 +158,13 @@ gated_delta_net_cuda(const float * q,
         // from an earlier row. Emitting them from this one call keeps the
         // checkpointed graph at the node count of an ordinary decode.
         if (state_ckpt_stride != 0) {
+            float * plane = state_cache != nullptr
+                ? state_cache + (int64_t) state_write_rows[t * n_seqs + sequence] * state_row_stride + head_offset
+                : state + t * state_ckpt_stride;
 #pragma unroll
             for (int r = 0; r < rows_per_lane; r++) {
                 const int i = r * warp_size + lane;
-                state[t * state_ckpt_stride + col * S_v + i] = s_shard[r];
+                plane[col * S_v + i] = s_shard[r];
             }
         }
 
@@ -152,10 +172,13 @@ gated_delta_net_cuda(const float * q,
     }
 
     if (state_ckpt_stride == 0) {
+        float * plane = state_cache != nullptr
+            ? state_cache + (int64_t) state_write_rows[sequence] * state_row_stride + head_offset
+            : state;
 #pragma unroll
         for (int r = 0; r < rows_per_lane; r++) {
             const int i          = r * warp_size + lane;
-            state[col * S_v + i] = s_shard[r];
+            plane[col * S_v + i] = s_shard[r];
         }
     }
 }
@@ -170,7 +193,9 @@ static void launch_gated_delta_net(
         int64_t sv1,   int64_t sv2, int64_t sv3,
         int64_t sb1,   int64_t sb2, int64_t sb3,
         int64_t neqk1, int64_t rq3,
-        float scale, int64_t state_ckpt_stride, cudaStream_t stream) {
+        float scale, int64_t state_ckpt_stride,
+        float * state_cache, const int * state_read_rows, const int * state_write_rows,
+        int64_t state_row_stride, cudaStream_t stream) {
     const int warp_size = 32;
     const int num_warps = 4;
     dim3      grid_dims((unsigned) H, (unsigned) n_seqs, (unsigned) ((S_v + num_warps - 1) / num_warps));
@@ -184,25 +209,29 @@ static void launch_gated_delta_net(
             gated_delta_net_cuda<16, KDA><<<grid_dims, block_dims, 0, stream>>>(
                 q_d, k_d, v_d, g_d, b_d, s_d, dst_d, H,
                 n_tokens, n_seqs, sq1, sq2, sq3, sv1, sv2, sv3,
-                sb1, sb2, sb3, neqk1_magic, rq3_magic, scale, state_ckpt_stride);
+                sb1, sb2, sb3, neqk1_magic, rq3_magic, scale, state_ckpt_stride,
+                state_cache, state_read_rows, state_write_rows, state_row_stride);
             break;
         case 32:
             gated_delta_net_cuda<32, KDA><<<grid_dims, block_dims, 0, stream>>>(
                 q_d, k_d, v_d, g_d, b_d, s_d, dst_d, H,
                 n_tokens, n_seqs, sq1, sq2, sq3, sv1, sv2, sv3,
-                sb1, sb2, sb3, neqk1_magic, rq3_magic, scale, state_ckpt_stride);
+                sb1, sb2, sb3, neqk1_magic, rq3_magic, scale, state_ckpt_stride,
+                state_cache, state_read_rows, state_write_rows, state_row_stride);
             break;
         case 64:
             gated_delta_net_cuda<64, KDA><<<grid_dims, block_dims, 0, stream>>>(
                 q_d, k_d, v_d, g_d, b_d, s_d, dst_d, H,
                 n_tokens, n_seqs, sq1, sq2, sq3, sv1, sv2, sv3,
-                sb1, sb2, sb3, neqk1_magic, rq3_magic, scale, state_ckpt_stride);
+                sb1, sb2, sb3, neqk1_magic, rq3_magic, scale, state_ckpt_stride,
+                state_cache, state_read_rows, state_write_rows, state_row_stride);
             break;
         case 128:
             gated_delta_net_cuda<128, KDA><<<grid_dims, block_dims, 0, stream>>>(
                 q_d, k_d, v_d, g_d, b_d, s_d, dst_d, H,
                 n_tokens, n_seqs, sq1, sq2, sq3, sv1, sv2, sv3,
-                sb1, sb2, sb3, neqk1_magic, rq3_magic, scale, state_ckpt_stride);
+                sb1, sb2, sb3, neqk1_magic, rq3_magic, scale, state_ckpt_stride,
+                state_cache, state_read_rows, state_write_rows, state_row_stride);
             break;
         default:
             GGML_ABORT("unsupported GDN S_v");

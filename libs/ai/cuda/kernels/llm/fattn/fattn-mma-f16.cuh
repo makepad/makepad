@@ -381,6 +381,129 @@ static __device__ __forceinline__ void flash_attn_ext_f16_load_tile(
     }
 }
 
+// q8_0 K/V tiles. A q8_0 tile arrives as raw blocks and leaves for the MMA as
+// the very f16 tile the f16 path loads, so nothing downstream changes:
+//
+//   * the raw rows are cp.async'd into the tail of the tile's own shared
+//     buffer (they are about half its size), where the 2-stage pipeline
+//     overlaps them with compute exactly as it does the f16 rows, and no shared
+//     memory (so no occupancy) is added;
+//   * after the wait, every thread reads its raw blocks into registers, the
+//     block syncs, and the f16 rows are written over the buffer: each value is
+//     q8_0_as_f16, the exact f16 the dequant kernel used to write to global
+//     memory for this kernel to read, which makes a q8_0 cache bit-identical
+//     to the f16 cast it replaces at half the bytes per key.
+template <int D>
+struct fattn_q8_0_row {
+    static constexpr int blocks = D / QK8_0;
+    static constexpr int bytes  = blocks * (int) sizeof(block_q8_0);
+    // cp.async granule: 16 bytes when a row is a whole number of them (D=256
+    // rows are 272 bytes), else 8 (D=128 rows are 136).
+    static constexpr int chunk  = bytes % 16 == 0 ? 16 : 8;
+    static_assert(D % (2*QK8_0) == 0, "a q8_0 row is an even number of blocks");
+};
+
+// Where a tile's raw q8_0 rows land: the tail of the tile, 16-byte aligned.
+template <int D, int stride_tile, int nbatch_fa>
+static __device__ __forceinline__ char * fattn_q8_0_raw(half2 * tile) {
+    constexpr int tile_bytes = nbatch_fa * stride_tile * (int) sizeof(half2);
+    constexpr int raw_bytes  = nbatch_fa * fattn_q8_0_row<D>::bytes;
+    constexpr int offset     = (tile_bytes - raw_bytes) & ~15;
+    static_assert(offset >= 0 && offset + raw_bytes <= tile_bytes, "q8_0 rows fit their tile");
+    return (char *) tile + offset;
+}
+
+// Issue the cp.async of `nbatch_fa` raw q8_0 rows, `stride_KV` bytes apart.
+template <int D, int stride_tile, int nwarps, int nbatch_fa>
+static __device__ __forceinline__ void flash_attn_ext_q8_0_load_raw(
+        const char * const __restrict__ KV, half2 * const __restrict__ tile_KV, const int stride_KV) {
+    using row = fattn_q8_0_row<D>;
+    constexpr int warp_size      = ggml_cuda_get_physical_warp_size();
+    constexpr int nthreads       = nwarps * warp_size;
+    constexpr int chunks_per_row = row::bytes / row::chunk;
+    const unsigned int raw_32 = ggml_cuda_cvta_generic_to_shared(fattn_q8_0_raw<D, stride_tile, nbatch_fa>(tile_KV));
+    const int tid = threadIdx.y * warp_size + threadIdx.x;
+#pragma unroll
+    for (int c0 = 0; c0 < nbatch_fa * chunks_per_row; c0 += nthreads) {
+        const int c = c0 + tid;
+        if (c0 + nthreads > nbatch_fa * chunks_per_row && c >= nbatch_fa * chunks_per_row) {
+            break;
+        }
+        const int i = c / chunks_per_row;
+        const int k = c % chunks_per_row;
+        const unsigned int dst = raw_32 + i * row::bytes + k * row::chunk;
+        const char * src = KV + (int64_t) i * stride_KV + k * row::chunk;
+        if constexpr (row::chunk == 16) {
+            cp_async_cg_16<0>(dst, src);
+        } else {
+            cp_async_ca_8(dst, src);
+        }
+    }
+}
+
+// Expand the landed raw rows of a tile into its f16 rows, in place. Call after
+// the cp.async wait and a __syncthreads; it ends with one, so the MMA may read
+// the tile straight after.
+//
+// Each thread takes two adjacent blocks: 68 bytes at a 4-byte aligned offset,
+// read as 17 words (17 is odd, so a warp's reads hit 32 distinct banks).
+template <int D, int stride_tile, int nwarps, int nbatch_fa>
+static __device__ __forceinline__ void flash_attn_ext_q8_0_expand(half2 * const __restrict__ tile_KV) {
+    using row = fattn_q8_0_row<D>;
+    constexpr int warp_size = ggml_cuda_get_physical_warp_size();
+    constexpr int nthreads  = nwarps * warp_size;
+    constexpr int npairs    = nbatch_fa * row::blocks / 2;
+    constexpr int pairs_per_thread = (npairs + nthreads - 1) / nthreads;
+    static_assert(2 * (int) sizeof(block_q8_0) == 17 * (int) sizeof(uint32_t), "a block pair is 17 words");
+    const uint32_t * raw = (const uint32_t *) fattn_q8_0_raw<D, stride_tile, nbatch_fa>(tile_KV);
+    const int tid = threadIdx.y * warp_size + threadIdx.x;
+
+    uint32_t words[pairs_per_thread][17];
+#pragma unroll
+    for (int p = 0; p < pairs_per_thread; ++p) {
+        const int pair = p * nthreads + tid;
+        if (pair < npairs) {
+#pragma unroll
+            for (int w = 0; w < 17; ++w) {
+                words[p][w] = raw[pair * 17 + w];
+            }
+        }
+    }
+    __syncthreads();
+#pragma unroll
+    for (int p = 0; p < pairs_per_thread; ++p) {
+        const int pair = p * nthreads + tid;
+        if (pair >= npairs) {
+            continue;
+        }
+        const int blk = 2 * pair;
+        const int i   = blk / row::blocks;         // key row of the tile
+        const int e0  = (blk % row::blocks) * QK8_0; // first element of the pair
+        auto byte_at = [&](const int b) -> int8_t {
+            return (int8_t) ((words[p][b / 4] >> (8 * (b % 4))) & 0xFF);
+        };
+        __align__(16) half2 out[QK8_0];
+#pragma unroll
+        for (int half_block = 0; half_block < 2; ++half_block) {
+            const int base = half_block * (int) sizeof(block_q8_0);
+            const uint16_t d_bits = (uint16_t) ((words[p][base / 4] >> (8 * (base % 4))) & 0xFFFF);
+            const float d = __half2float(__ushort_as_half(d_bits));
+#pragma unroll
+            for (int l = 0; l < QK8_0 / 2; ++l) {
+                out[half_block * (QK8_0 / 2) + l] = __halves2half2(
+                    q8_0_as_f16(d, byte_at(base + 2 + 2*l + 0)),
+                    q8_0_as_f16(d, byte_at(base + 2 + 2*l + 1)));
+            }
+        }
+        int4 * dst = (int4 *) (tile_KV + i * stride_tile + e0 / 2);
+#pragma unroll
+        for (int c = 0; c < (int) (sizeof(out) / sizeof(int4)); ++c) {
+            dst[c] = ((const int4 *) out)[c];
+        }
+    }
+    __syncthreads();
+}
+
 template<int ncols1, int nwarps, int nbatch_fa, bool use_cp_async, bool oob_check>
 static __device__ __forceinline__ void flash_attn_ext_f16_load_mask(
         const half * const __restrict__ mask_h, half * const __restrict__ tile_mask,
@@ -462,7 +585,7 @@ static __device__ __forceinline__ void flash_attn_ext_f16_load_mask(
 }
 
 template<int DKQ, int DV, int ncols1, int ncols2, int nwarps,
-    bool use_logit_softcap, bool V_is_K_view, bool needs_fixup, bool is_fixup, bool last_iter, bool oob_check,
+    bool use_logit_softcap, bool V_is_K_view, bool kv_q8, bool needs_fixup, bool is_fixup, bool last_iter, bool oob_check,
     typename T_A_KQ, typename T_B_KQ, typename T_C_KQ, typename T_A_VKQ, typename T_B_VKQ, typename T_C_VKQ>
 static __device__ __forceinline__ void flash_attn_ext_f16_iter(
         const float2 * const __restrict__ Q_f2,
@@ -516,6 +639,11 @@ static __device__ __forceinline__ void flash_attn_ext_f16_iter(
     T_C_KQ KQ_C[nbatch_fa/(np*T_C_KQ::J)];
 #endif // defined(TURING_MMA_AVAILABLE)
 
+    // q8_0 K/V tiles are whole rows on the 2-stage cp.async pipeline; the
+    // host launches them nowhere else.
+    static_assert(!kv_q8 || nstages <= 1 || (nbatch_K2 == DKQ/2 && nbatch_V2 == DV/2 && !V_is_K_view),
+        "q8_0 K/V tiles are whole rows");
+
     if constexpr (nstages > 1) {
         static_assert(!oob_check, "OOB check incompatible with multi-stage pipeline");
         static_assert(!V_is_K_view, "K data reuse not implemented multi-stage loading");
@@ -523,9 +651,19 @@ static __device__ __forceinline__ void flash_attn_ext_f16_iter(
         constexpr bool use_cp_async = true;
         cp_async_wait_all();
         __syncthreads();
-        flash_attn_ext_f16_load_tile<stride_tile_V, nwarps, nbatch_fa, use_cp_async, oob_check>
-            (V_h2 + int64_t(k_VKQ_0)*stride_V, tile_V, nbatch_V2, stride_V, k_VKQ_sup);
+        if constexpr (kv_q8) {
+            // K landed raw; V's raw rows go into flight before K expands.
+            flash_attn_ext_q8_0_load_raw<DV, stride_tile_V, nwarps, nbatch_fa>
+                ((const char *) V_h2 + int64_t(k_VKQ_0)*stride_V*(int64_t) sizeof(half2), tile_V, stride_V*(int) sizeof(half2));
+            flash_attn_ext_q8_0_expand<DKQ, stride_tile_K, nwarps, nbatch_fa>(tile_K);
+        } else {
+            flash_attn_ext_f16_load_tile<stride_tile_V, nwarps, nbatch_fa, use_cp_async, oob_check>
+                (V_h2 + int64_t(k_VKQ_0)*stride_V, tile_V, nbatch_V2, stride_V, k_VKQ_sup);
+        }
     } else {
+        if constexpr (kv_q8) {
+            NO_DEVICE_CODE;
+        }
         constexpr bool use_cp_async = nstages == 1;
         if (ncols2 > 1 || mask_h) {
             flash_attn_ext_f16_load_mask<ncols1, nwarps, nbatch_fa, use_cp_async, oob_check>
@@ -854,8 +992,17 @@ static __device__ __forceinline__ void flash_attn_ext_f16_iter(
                 flash_attn_ext_f16_load_mask<ncols1, nwarps, nbatch_fa, use_cp_async, oob_check>
                     (mask_h + k_VKQ_0 + nbatch_fa, tile_mask, stride_mask, k_VKQ_sup, jt*ncols1, ne01);
             }
-            flash_attn_ext_f16_load_tile<stride_tile_K, nwarps, nbatch_fa, use_cp_async, oob_check>
-                (K_h2 + int64_t(k_VKQ_0 + nbatch_fa)*stride_K, tile_K, nbatch_K2, stride_K, k_VKQ_sup);
+            if constexpr (kv_q8) {
+                flash_attn_ext_q8_0_load_raw<DKQ, stride_tile_K, nwarps, nbatch_fa>
+                    ((const char *) K_h2 + int64_t(k_VKQ_0 + nbatch_fa)*stride_K*(int64_t) sizeof(half2), tile_K, stride_K*(int) sizeof(half2));
+            } else {
+                flash_attn_ext_f16_load_tile<stride_tile_K, nwarps, nbatch_fa, use_cp_async, oob_check>
+                    (K_h2 + int64_t(k_VKQ_0 + nbatch_fa)*stride_K, tile_K, nbatch_K2, stride_K, k_VKQ_sup);
+            }
+        }
+        if constexpr (kv_q8) {
+            // V landed raw (the wait above); the next K is in flight.
+            flash_attn_ext_q8_0_expand<DV, stride_tile_V, nwarps, nbatch_fa>(tile_V);
         }
     }
 
@@ -1000,7 +1147,7 @@ template<int ncols> struct mma_tile_sizes {
 };
 #endif // defined(TURING_MMA_AVAILABLE)
 
-template<int DKQ, int DV, int ncols1, int ncols2, int nwarps, bool use_logit_softcap, bool V_is_K_view, bool needs_fixup, bool is_fixup>
+template<int DKQ, int DV, int ncols1, int ncols2, int nwarps, bool use_logit_softcap, bool V_is_K_view, bool kv_q8, bool needs_fixup, bool is_fixup>
 static __device__ __forceinline__ void flash_attn_ext_f16_process_tile(
         const float2 * const __restrict__ Q_f2,
         const half2  * const __restrict__ K_h2,
@@ -1150,8 +1297,13 @@ static __device__ __forceinline__ void flash_attn_ext_f16_process_tile(
             flash_attn_ext_f16_load_mask<ncols1, nwarps, nbatch_fa, use_cp_async, oob_check>
                 (mask_h + kb0*nbatch_fa, tile_mask, stride_mask, k_VKQ_sup, jt*ncols1, ne01);
         }
-        flash_attn_ext_f16_load_tile<stride_tile_K, nwarps, nbatch_fa, use_cp_async, oob_check>
-            (K_h2 + int64_t(kb0)*nbatch_fa*stride_K, tile_K, nbatch_K2, stride_K, k_VKQ_sup);
+        if constexpr (kv_q8) {
+            flash_attn_ext_q8_0_load_raw<DKQ, stride_tile_K, nwarps, nbatch_fa>
+                ((const char *) K_h2 + int64_t(kb0)*nbatch_fa*stride_K*(int64_t) sizeof(half2), tile_K, stride_K*(int) sizeof(half2));
+        } else {
+            flash_attn_ext_f16_load_tile<stride_tile_K, nwarps, nbatch_fa, use_cp_async, oob_check>
+                (K_h2 + int64_t(kb0)*nbatch_fa*stride_K, tile_K, nbatch_K2, stride_K, k_VKQ_sup);
+        }
     }
 
     // kb0_start is always < kb0_stop so the last iter can be executed unconditionally.
@@ -1161,7 +1313,7 @@ static __device__ __forceinline__ void flash_attn_ext_f16_process_tile(
             constexpr bool last_iter = false;
             constexpr int  k_VKQ_sup = nbatch_fa;
             flash_attn_ext_f16_iter
-                <DKQ, DV, ncols1, ncols2, nwarps, use_logit_softcap, V_is_K_view, needs_fixup, is_fixup, last_iter, oob_check,
+                <DKQ, DV, ncols1, ncols2, nwarps, use_logit_softcap, V_is_K_view, kv_q8, needs_fixup, is_fixup, last_iter, oob_check,
                  T_A_KQ, T_B_KQ, T_C_KQ, T_A_VKQ, T_B_VKQ, T_C_VKQ>
                 (Q_f2, K_h2, V_h2, mask_h, dstk, dstk_fixup, scale, slope, logit_softcap,
                  ne01, ne02, stride_K, stride_V, stride_mask, tile_Q, tile_K, tile_V, tile_mask, Q_B, VKQ_C,
@@ -1170,7 +1322,7 @@ static __device__ __forceinline__ void flash_attn_ext_f16_process_tile(
         constexpr bool last_iter = true;
         const     int  k_VKQ_sup = ne11 - kb0*nbatch_fa;
         flash_attn_ext_f16_iter
-            <DKQ, DV, ncols1, ncols2, nwarps, use_logit_softcap, V_is_K_view, needs_fixup, is_fixup, last_iter, oob_check,
+            <DKQ, DV, ncols1, ncols2, nwarps, use_logit_softcap, V_is_K_view, kv_q8, needs_fixup, is_fixup, last_iter, oob_check,
               T_A_KQ, T_B_KQ, T_C_KQ, T_A_VKQ, T_B_VKQ, T_C_VKQ>
             (Q_f2, K_h2, V_h2, mask_h, dstk, dstk_fixup, scale, slope, logit_softcap,
              ne01, ne02, stride_K, stride_V, stride_mask, tile_Q, tile_K, tile_V, tile_mask, Q_B, VKQ_C,
@@ -1181,7 +1333,7 @@ static __device__ __forceinline__ void flash_attn_ext_f16_process_tile(
             constexpr bool last_iter = false;
             constexpr int  k_VKQ_sup = nbatch_fa;
             flash_attn_ext_f16_iter
-                <DKQ, DV, ncols1, ncols2, nwarps, use_logit_softcap, V_is_K_view, needs_fixup, is_fixup, last_iter, oob_check,
+                <DKQ, DV, ncols1, ncols2, nwarps, use_logit_softcap, V_is_K_view, kv_q8, needs_fixup, is_fixup, last_iter, oob_check,
                  T_A_KQ, T_B_KQ, T_C_KQ, T_A_VKQ, T_B_VKQ, T_C_VKQ>
                 (Q_f2, K_h2, V_h2, mask_h, dstk, dstk_fixup, scale, slope, logit_softcap,
                  ne01, ne02, stride_K, stride_V, stride_mask, tile_Q, tile_K, tile_V, tile_mask, Q_B, VKQ_C,
@@ -1190,7 +1342,7 @@ static __device__ __forceinline__ void flash_attn_ext_f16_process_tile(
         constexpr bool last_iter = true;
         constexpr int  k_VKQ_sup = nbatch_fa;
         flash_attn_ext_f16_iter
-            <DKQ, DV, ncols1, ncols2, nwarps, use_logit_softcap, V_is_K_view, needs_fixup, is_fixup, last_iter, oob_check,
+            <DKQ, DV, ncols1, ncols2, nwarps, use_logit_softcap, V_is_K_view, kv_q8, needs_fixup, is_fixup, last_iter, oob_check,
              T_A_KQ, T_B_KQ, T_C_KQ, T_A_VKQ, T_B_VKQ, T_C_VKQ>
             (Q_f2, K_h2, V_h2, mask_h, dstk, dstk_fixup, scale, slope, logit_softcap,
              ne01, ne02, stride_K, stride_V, stride_mask, tile_Q, tile_K, tile_V, tile_mask, Q_B, VKQ_C,
@@ -1542,7 +1694,7 @@ static __device__ __forceinline__ void flash_attn_ext_f16_process_tile(
 #endif // defined(VOLTA_MMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || (defined(AMD_WMMA_AVAILABLE) && defined(RDNA4)) || defined(AMD_MFMA_AVAILABLE)
 }
 
-template<int DKQ, int DV, int ncols1, int ncols2, bool use_logit_softcap, bool V_is_K_view>
+template<int DKQ, int DV, int ncols1, int ncols2, bool use_logit_softcap, bool V_is_K_view, bool kv_q8>
 __launch_bounds__(ggml_cuda_fattn_mma_get_nthreads(DKQ, DV, ncols1*ncols2), ggml_cuda_fattn_mma_get_occupancy(DKQ, DV, ncols1*ncols2))
 static __global__ void flash_attn_ext_f16(
         const char * __restrict__ Q,
@@ -1658,12 +1810,12 @@ static __global__ void flash_attn_ext_f16(
         constexpr bool is_fixup = false; // All but (potentially) the last iterations write their data to dst rather than the fixup buffer.
         if (kb0_start == 0) {
             constexpr bool needs_fixup = false; // CUDA block is working on an entire tile.
-            flash_attn_ext_f16_process_tile<DKQ, DV, ncols1, ncols2, nwarps, use_logit_softcap, V_is_K_view, needs_fixup, is_fixup>
+            flash_attn_ext_f16_process_tile<DKQ, DV, ncols1, ncols2, nwarps, use_logit_softcap, V_is_K_view, kv_q8, needs_fixup, is_fixup>
                 (Q_f2, K_h2, V_h2, mask_h, sinks_f, dstk, dst_meta, scale, slope, logit_softcap,
                  ne01, ne02, gqa_ratio, ne11, stride_Q1, stride_Q2, stride_K, stride_V, stride_mask, jt, zt_gqa, kb0_start, kb0_stop);
         } else {
             constexpr bool needs_fixup = true; // CUDA block is missing the beginning of a tile.
-            flash_attn_ext_f16_process_tile<DKQ, DV, ncols1, ncols2, nwarps, use_logit_softcap, V_is_K_view, needs_fixup, is_fixup>
+            flash_attn_ext_f16_process_tile<DKQ, DV, ncols1, ncols2, nwarps, use_logit_softcap, V_is_K_view, kv_q8, needs_fixup, is_fixup>
                 (Q_f2, K_h2, V_h2, mask_h, sinks_f, dstk, dst_meta, scale, slope, logit_softcap,
                  ne01, ne02, gqa_ratio, ne11, stride_Q1, stride_Q2, stride_K, stride_V, stride_mask, jt, zt_gqa, kb0_start, kb0_stop);
         }
@@ -1704,7 +1856,7 @@ static __global__ void flash_attn_ext_f16(
 
     constexpr bool is_fixup = true; // Last index writes its data to fixup buffer to avoid data races with other blocks.
     constexpr bool needs_fixup = false;
-    flash_attn_ext_f16_process_tile<DKQ, DV, ncols1, ncols2, nwarps, use_logit_softcap, V_is_K_view, needs_fixup, is_fixup>
+    flash_attn_ext_f16_process_tile<DKQ, DV, ncols1, ncols2, nwarps, use_logit_softcap, V_is_K_view, kv_q8, needs_fixup, is_fixup>
         (Q_f2, K_h2, V_h2, mask_h, sinks_f, dstk, dst_meta, scale, slope, logit_softcap,
          ne01, ne02, gqa_ratio, ne11, stride_Q1, stride_Q2, stride_K, stride_V, stride_mask, jt, zt_gqa, kb0_start, kb0_stop);
 #else

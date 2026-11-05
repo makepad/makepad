@@ -221,7 +221,7 @@ fn os_class(class: Class) -> String {
 /// and the node's CPU weight while the session ran ("-": none it can set).
 fn steer(stream: &Arc<KernelStream>, class: Class, views: &[[f64; 3]], res: usize, iter: u32, reference: &[Vec<u32>]) -> Result<(Vec<f64>, String), String> {
     let program = Program::new("fractal.splash", FRACTAL);
-    let limits = Limits { fuel: usize::MAX, work: u64::MAX, ..Limits::default() };
+    let limits = Limits { fuel: u64::MAX, work: u64::MAX, ..Limits::default() };
     let session = RemoteSession::open(stream, &program, RemoteConfig { limits, class, ..RemoteConfig::default() }).map_err(|e| format!("{e:?}"))?;
     let weight = match session.device().get("weight") {
         Some(Value::Number(w)) => format!("{w}"),

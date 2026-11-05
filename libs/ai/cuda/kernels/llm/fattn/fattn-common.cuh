@@ -37,7 +37,8 @@ typedef void (* fattn_kernel_t)(
                             const int32_t ne31, const int32_t ne32, const int32_t ne33,
                             const int32_t nb31, const int32_t nb32, const int64_t nb33);
 
-// llama.cpp fattn-common.cuh F16 vec-dot / V dequant (fattn-vec.cuh D=256).
+// llama.cpp fattn-common.cuh F16 vec-dot / V dequant (fattn-vec.cuh D=256),
+// plus q8_0 readers that keep the F16 kernel's arithmetic (below).
 typedef float (*vec_dot_KQ_t)(
     const char * __restrict__ K_c, const void * __restrict__ Q_v,
     const int * __restrict__ Q_q8, const void * __restrict__ Q_ds);
@@ -68,10 +69,75 @@ static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_f16(
     return sum;
 }
 
+// A q8_0 cache element exactly as the q8_0 -> f16 dequant kernel stores it
+// (mkllm_dequant_q8_0_f16): the f32 product of the block scale and the quant,
+// rounded once to f16. The attention kernels read q8_0 K/V through this and
+// nothing else, so every value they compute with is bit-identical to the f16
+// copy the graph used to cast for them, and so is every result.
+static __device__ __forceinline__ half q8_0_as_f16(const float d, const int8_t q) {
+    return __float2half(d * (float) q);
+}
+
+// `ne` consecutive elements of one q8_0 row as ne/2 half2, starting at element
+// `i0` (a multiple of `ne`, which divides 32, so they never straddle a block).
+// The quants sit at an even address only (blocks are 34 bytes): 2-byte loads.
+template <int ne>
+static __device__ __forceinline__ void q8_0_load_as_f16(
+        const block_q8_0 * __restrict__ row, const int i0, half2 * __restrict__ out) {
+    static_assert(ne % 2 == 0 && QK8_0 % ne == 0, "a q8_0 read stays inside one block");
+    const block_q8_0 * blk = row + i0 / QK8_0;
+    const float d = __half2float(blk->d);
+    __align__(16) int8_t qs[ne];
+    ggml_cuda_memcpy_1<ne, 2>(qs, blk->qs + i0 % QK8_0);
+#pragma unroll
+    for (int l = 0; l < ne / 2; ++l) {
+        out[l] = __halves2half2(q8_0_as_f16(d, qs[2*l + 0]), q8_0_as_f16(d, qs[2*l + 1]));
+    }
+}
+
+// The F16 K dot above with K read from q8_0: the same threads, the same element
+// order and the same f32 arithmetic on the same f16 values.
+template <int D, int nthreads>
+static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_q8_0_as_f16(
+    const char * __restrict__ K_c, const void * __restrict__ Q_v,
+    const int * __restrict__ Q_q8, const void * __restrict__ Q_ds_v) {
+    const block_q8_0 * K_q8 = (const block_q8_0 *) K_c;
+    GGML_UNUSED(Q_q8);
+    GGML_UNUSED(Q_ds_v);
+    constexpr int cpy_nb = ggml_cuda_get_max_cpy_bytes();
+    constexpr int cpy_ne = cpy_nb / 4;
+    float sum = 0.0f;
+#pragma unroll
+    for (int k_KQ_0 = 0; k_KQ_0 < D / 2; k_KQ_0 += nthreads * cpy_ne) {
+        __align__(16) half2 tmp[cpy_ne];
+        q8_0_load_as_f16<2*cpy_ne>(K_q8, 2*(k_KQ_0 + (threadIdx.x % nthreads) * cpy_ne), tmp);
+#pragma unroll
+        for (int k_KQ_1 = 0; k_KQ_1 < cpy_ne; ++k_KQ_1) {
+#ifdef V_DOT2_F32_F16_AVAILABLE
+            ggml_cuda_mad(sum, tmp[k_KQ_1], ((const half2 *) Q_v)[k_KQ_0 / nthreads + k_KQ_1]);
+#else
+            ggml_cuda_mad(sum, __half22float2(tmp[k_KQ_1]), ((const float2 *) Q_v)[k_KQ_0 / nthreads + k_KQ_1]);
+#endif
+        }
+    }
+    return sum;
+}
+
+// K and V types whose vec-kernel arithmetic is the F16 kernel's: their values
+// are f16 by construction, whatever bytes they are stored in.
+constexpr __host__ __device__ bool fattn_vec_f16_math(const ggml_type type) {
+    return type == GGML_TYPE_F16 || type == GGML_TYPE_BF16 || type == GGML_TYPE_Q8_0;
+}
+
 template <ggml_type type_K, int D, int nthreads>
 constexpr __device__ vec_dot_KQ_t get_vec_dot_KQ() {
-    static_assert(type_K == GGML_TYPE_F16, "fattn-vec executor path is F16 K");
-    return vec_dot_fattn_vec_KQ_f16<D, nthreads>;
+    static_assert(type_K == GGML_TYPE_F16 || type_K == GGML_TYPE_Q8_0,
+        "fattn-vec executor path is F16 or Q8_0 K");
+    if constexpr (type_K == GGML_TYPE_Q8_0) {
+        return vec_dot_fattn_vec_KQ_q8_0_as_f16<D, nthreads>;
+    } else {
+        return vec_dot_fattn_vec_KQ_f16<D, nthreads>;
+    }
 }
 
 typedef void (*dequantize_V_t)(const void *, void *, const int64_t);
@@ -94,10 +160,33 @@ static __device__ __forceinline__ void dequantize_V_f16(const void * __restrict_
     }
 }
 
+// The F16 V read above with V read from q8_0 (`ne` elements from element i0).
+template <typename T, int ne>
+static __device__ __forceinline__ void dequantize_V_q8_0_as_f16(const void * __restrict__ vx, void * __restrict__ dst, const int64_t i0) {
+    __align__(16) half2 tmp[ne / 2];
+    q8_0_load_as_f16<ne>((const block_q8_0 *) vx, (int) i0, tmp);
+    if constexpr (std::is_same_v<T, half>) {
+        ggml_cuda_memcpy_1<ne * sizeof(half)>(dst, tmp);
+    } else if constexpr (std::is_same_v<T, float>) {
+        float2 * dst_f2 = (float2 *) dst;
+#pragma unroll
+        for (int l = 0; l < ne / 2; ++l) {
+            dst_f2[l] = __half22float2(tmp[l]);
+        }
+    } else {
+        static_assert(std::is_same_v<T, void>, "unsupported type");
+    }
+}
+
 template <ggml_type type_V, typename T, int ne>
 constexpr __device__ dequantize_V_t get_dequantize_V() {
-    static_assert(type_V == GGML_TYPE_F16, "fattn-vec executor path is F16 V");
-    return dequantize_V_f16<T, ne>;
+    static_assert(type_V == GGML_TYPE_F16 || type_V == GGML_TYPE_Q8_0,
+        "fattn-vec executor path is F16 or Q8_0 V");
+    if constexpr (type_V == GGML_TYPE_Q8_0) {
+        return dequantize_V_q8_0_as_f16<T, ne>;
+    } else {
+        return dequantize_V_f16<T, ne>;
+    }
 }
 
 // llama.cpp fattn-common.cuh flash_attn_combine_results

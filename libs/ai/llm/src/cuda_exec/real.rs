@@ -26,8 +26,8 @@ use makepad_ai_cuda::{
     CUDA_R_16F, CUDA_R_32F, CUDA_STREAM_CAPTURE_MODE_RELAXED, CUDA_STREAM_NON_BLOCKING, CUDA_SUCCESS,
 };
 use makepad_ai_cuda::llm_ops::{
-    binary, cast_contiguous, cast_f32_bf16, cast_f32_f16_split, copy_strided, dequant_rows_bf16, device_info, fattn_mma_f16,
-    fattn_mma_fixup_bytes, fattn_vec_f16, fattn_vec_tmp_bytes, flash_decode, gated_delta_net,
+    binary, cast_contiguous, cast_f32_bf16, cast_f32_f16_split, copy_strided, dequant_rows_bf16, device_info, fattn_mma,
+    fattn_mma_fixup_bytes, fattn_vec, fattn_vec_tmp_bytes, flash_decode, gated_delta_net,
     get_rows_16, get_rows_f32, get_rows_quant, glu, mmq_kind_j128, mmq_quant, mmq_quant_q81, mmv_f32,
     mmv_quant, mmv_quant_q81, mmv_quant_q81_swiglu, mul_mat_batched, norm, quant_kind_block_bytes,
     quant_kind_bytes_per_256, quant_kind_is_official_only, quant_kind_mmq_ds4, quant_kind_routes,
@@ -45,7 +45,7 @@ use makepad_ai_cuda::roformer_ops::{
     roformer_rope_normal_f32, ATTN_TILED_MIN_KEYS,
 };
 use crate::{
-    ggml_row_size_for_type, Context, Op, Tensor, TensorId, TensorType, GGML_ROPE_TYPE_IMROPE,
+    ggml_row_size_for_type, ggml_type_size_for_type, Context, Op, Tensor, TensorId, TensorType, GGML_ROPE_TYPE_IMROPE,
     GGML_ROPE_TYPE_MROPE, GGML_ROPE_TYPE_NEOX, GGML_ROPE_TYPE_NORMAL, GGML_ROPE_TYPE_VISION,
 };
 
@@ -67,6 +67,16 @@ const COMPILED_ARCH: &str = match option_env!("MAKEPAD_LLAMA_CUDA_ARCH") {
     Some(arch) => arch,
     None => "unknown",
 };
+
+/// The kernels were built for Ampere or newer, so the MMA attention can
+/// stream q8_0 K/V tiles through cp.async (the device gate in
+/// `Runtime::new` keeps the device on the same major).
+fn compiled_arch_has_cp_async() -> bool {
+    COMPILED_ARCH
+        .trim_end_matches(|c: char| c.is_ascii_alphabetic())
+        .parse::<u32>()
+        .is_ok_and(|arch| arch >= 80)
+}
 /// Mat-vec kernels handle this many activation columns; larger M takes the
 /// slab-dequant cuBLAS GEMM path (prefill).
 ///
@@ -1079,6 +1089,10 @@ enum KernelSel {
     // llama.cpp ggml-cuda.cu:4006 SSM_CONV + SILU
     SsmConvSilu,
     GatedDeltaNet,
+    // The recurrent state never leaves its cache: the scan resumes from the
+    // rows `get` gathers and writes its states (one per token when
+    // checkpointing) into the rows `set` scatters them to. Both are Skip.
+    GatedDeltaNetInCache { get: TensorId, set: TensorId },
 }
 
 struct PlannedNode {
@@ -1094,6 +1108,7 @@ struct GraphPlan {
     fused_rms: usize,
     fused_unary: usize,
     fused_ssm: usize,
+    fused_gdn_state: usize,
     options: super::CudaGraphOptions,
 }
 
@@ -1305,8 +1320,17 @@ fn select_kernel(
                 }
                 return Ok(KernelSel::RoformerAttn);
             }
-            if k.desc.ty != TensorType::F16 || v.desc.ty != TensorType::F16 {
-                return Err(unsupported_node(t, "non-f16 flash K/V"));
+            // A q8_0 cache is attended in place: every kernel below reads
+            // the blocks and works on the f16 values a q8_0 -> f16 copy
+            // would hold, with the f16 kernel's own arithmetic.
+            let kv_q8 = match (k.desc.ty, v.desc.ty) {
+                (TensorType::F16, TensorType::F16) => false,
+                (TensorType::Q8_0, TensorType::Q8_0) => true,
+                _ => return Err(unsupported_node(t, "flash K/V must both be f16 or both q8_0")),
+            };
+            let q8_block = ggml_type_size_for_type(TensorType::Q8_0);
+            if kv_q8 && (k.nb[0] != q8_block || v.nb[0] != q8_block) {
+                return Err(unsupported_node(t, "q8_0 flash K/V split inside a head row"));
             }
             if q.ne[3] != 1 {
                 return Err(unsupported_node(t, "multi-stream flash attention"));
@@ -1318,20 +1342,25 @@ fn select_kernel(
             // K.ne[1] must be the live padded n_kv (llama-kv-cache.cpp:1121),
             // not the 8192 allocation, or this falls through to FlashDecode.
             let gqa = q.ne[2] / k.ne[2];
+            // The tile loaders copy K/V rows in 16-byte granules; a q8_0
+            // row of D=128 (4 blocks, 136 bytes) only keeps 8.
+            let kv_row = ggml_row_size_for_type(k.desc.ty, k.ne[0])
+                .map_err(|why| unsupported_node(t, &why))?;
+            let kv_granule = if kv_q8 && kv_row % 16 != 0 { 8 } else { 16 };
             let aligned = k.ne[1] % 256 == 0
                 && q.nb[1] % 16 == 0
                 && q.nb[2] % 16 == 0
-                && k.nb[1] % 16 == 0
-                && k.nb[2] % 16 == 0
-                && v.nb[1] % 16 == 0
-                && v.nb[2] % 16 == 0;
+                && k.nb[1] % kv_granule == 0
+                && k.nb[2] % kv_granule == 0
+                && v.nb[1] % kv_granule == 0
+                && v.nb[2] % kv_granule == 0;
             if matches!(q.ne[0], 128 | 256) && v.ne[0] == q.ne[0] && aligned {
                 if q.ne[1] == 1
                     && q.ne[3] == 1
                     && !(gqa > 4 && k.ne[1] >= 8192)
                 {
                     KernelSel::FlashVec
-                } else if gqa % 2 == 0 {
+                } else if gqa % 2 == 0 && (!kv_q8 || compiled_arch_has_cp_async()) {
                     // llama.cpp fattn.cu get_best_fattn_kernel: for D=256 on
                     // Turing+ everything that is not the n_q==1 VEC case goes
                     // to MMA_F16. The old `q.ne[1] >= 20` threshold sent two
@@ -1357,6 +1386,9 @@ fn select_kernel(
                     // 4, ratio 6): its every prefill chunk and long-context
                     // decode step fell to FlashDecode, measured 11-20x
                     // slower past 8k tokens with word-identical output.
+                    //
+                    // A q8_0 cache expands its tiles in shared memory behind
+                    // the cp.async pipeline, which pre-Ampere parts lack.
                     KernelSel::FlashMma
                 } else {
                     KernelSel::FlashDecode
@@ -1952,6 +1984,182 @@ fn fuse_ssm_conv_silu(tensors: &[Tensor], graph_nodes: &[TensorId], nodes: &mut 
     fused
 }
 
+/// Whether two tensors can share bytes: the same root storage with
+/// overlapping extents, or two resident tensors whose context offsets overlap.
+/// An alias it cannot rule out counts as an overlap.
+fn tensors_overlap(tensors: &[Tensor], a: TensorId, b: TensorId) -> bool {
+    let (Ok((ar, ao)), Ok((br, bo))) = (resolve_root(tensors, a), resolve_root(tensors, b)) else {
+        return true;
+    };
+    let (a0, b0) = if ar == br {
+        (ao, bo)
+    } else if let (Some(ap), Some(bp)) = (tensors[ar].data_offset, tensors[br].data_offset) {
+        (ap + ao, bp + bo)
+    } else {
+        return false;
+    };
+    a0 < b0 + tensors[b].nbytes() && b0 < a0 + tensors[a].nbytes()
+}
+
+/// A node that only re-describes bytes. Every other node counts as touching
+/// its sources, launched or not: a fused-away node's reads happen in its
+/// partner.
+fn metadata_only(t: &Tensor) -> bool {
+    matches!(t.op, Op::None | Op::View | Op::Reshape | Op::Permute | Op::Transpose)
+}
+
+/// Whether nothing but `allowed` reads bytes of `id`: no other node's
+/// source and no pinned output overlaps it.
+fn read_only_by(
+    tensors: &[Tensor],
+    nodes: &[PlannedNode],
+    pinned: &[TensorId],
+    id: TensorId,
+    allowed: &[TensorId],
+) -> bool {
+    pinned
+        .iter()
+        .all(|&p| allowed.contains(&p) || !tensors_overlap(tensors, id, p))
+        && nodes.iter().all(|node| {
+            let t = &tensors[node.node_id];
+            allowed.contains(&node.node_id)
+                || metadata_only(t)
+                || !t.src.iter().flatten().any(|&src| tensors_overlap(tensors, id, src))
+        })
+}
+
+/// The layout the official scan kernel takes (`mkllm_gated_delta_net`'s
+/// `official_ok`); only it works in the state cache.
+fn gated_delta_net_official(q: &Tensor, k: &Tensor, g: &Tensor, sv: i64) -> bool {
+    matches!(sv, 16 | 32 | 64 | 128)
+        && q.ne[1] == k.ne[1]
+        && q.nb[1..4] == k.nb[1..4]
+        && (g.ne[0] == 1 || g.ne[0] == sv)
+}
+
+/// A delta-net scan whose state goes get_rows -> scan -> set_rows on one
+/// cache becomes one kernel that reads and writes the cache rows itself.
+///
+/// The graph moves every state plane through an activation and back: the
+/// gather copies the resume rows out, the scan writes its planes, and the
+/// scatter reads them again to write the cache. At a width-4 verify that is
+/// four planes per token written twice and read once per recurrent layer,
+/// ~1.2 GB a round on the production model; in the cache it is written once.
+///
+/// Fused only when nothing else can see the difference: the gathered rows
+/// feed only the scan, the planes feed only the scatter, nothing else touches
+/// the cache, and the row selectors are inputs. Each thread reads its own
+/// state elements before writing any, so a resume row may also be a write row.
+fn fuse_gated_delta_state(
+    tensors: &[Tensor],
+    pinned: &[TensorId],
+    nodes: &mut [PlannedNode],
+) -> Result<usize> {
+    let mut fused = 0usize;
+    for i in 0..nodes.len() {
+        if !matches!(nodes[i].kernel, KernelSel::GatedDeltaNet) {
+            continue;
+        }
+        let scan_id = nodes[i].node_id;
+        let scan = &tensors[scan_id];
+        let (Some(q), Some(k), Some(v), Some(g), Some(state)) =
+            (scan.src[0], scan.src[1], scan.src[2], scan.src[3], scan.src[5])
+        else {
+            continue;
+        };
+        let (q, k, v, g, state_t) = (&tensors[q], &tensors[k], &tensors[v], &tensors[g], &tensors[state]);
+        let [sv, h, n_tokens, n_seqs] = v.ne;
+        if !gated_delta_net_official(q, k, g, sv) {
+            continue;
+        }
+        let s_width = sv * sv * h;
+        let planes = if scan.op_param_i32(0) != 0 { n_tokens * n_seqs } else { n_seqs };
+        let outputs_bytes = (sv * h * n_tokens * n_seqs) as usize * 4;
+
+        let (get, state_offset) = resolve_root(tensors, state)?;
+        let Some(gi) = (0..i).find(|&j| nodes[j].node_id == get) else {
+            continue;
+        };
+        let get_t = &tensors[get];
+        let (Some(cache), Some(read_rows)) = (get_t.src[0], get_t.src[1]) else {
+            continue;
+        };
+        let cache_t = &tensors[cache];
+        let rows_ok = |rows: TensorId, n: i64| {
+            let t = &tensors[rows];
+            t.desc.ty == TensorType::I32
+                && t.ne == [n, 1, 1, 1]
+                && t.is_contiguous()
+                && resolve_root(tensors, rows).is_ok_and(|(root, _)| tensors[root].op == Op::None)
+        };
+        if !matches!(nodes[gi].kernel, KernelSel::GetRowsF32)
+            || get_t.op != Op::GetRows
+            || state_offset != 0
+            || state_t.ne != [sv, sv, h, n_seqs]
+            || !state_t.is_contiguous()
+            || get_t.ne != [s_width, n_seqs, 1, 1]
+            || !get_t.is_contiguous()
+            || cache_t.desc.ty != TensorType::F32
+            || cache_t.ne[0] != s_width
+            || cache_t.ne[2..] != [1, 1]
+            || cache_t.nb[0] != 4
+            || cache_t.nb[1] % 4 != 0
+            || !rows_ok(read_rows, n_seqs)
+            || !resolve_root(tensors, cache).is_ok_and(|(root, _)| tensors[root].op == Op::None)
+            || !read_only_by(tensors, nodes, pinned, get, &[scan_id])
+        {
+            continue;
+        }
+
+        let set = (i + 1..nodes.len()).find(|&j| {
+            let set = &tensors[nodes[j].node_id];
+            matches!(nodes[j].kernel, KernelSel::SetRows { f16: false })
+                && set.src[0].is_some_and(|src| {
+                    resolve_root(tensors, src).ok() == Some((scan_id, outputs_bytes))
+                })
+        });
+        let Some(si) = set else {
+            continue;
+        };
+        let set_id = nodes[si].node_id;
+        let set_t = &tensors[set_id];
+        let (Some(planes_id), Some(write_rows), Some(dst)) = (set_t.src[0], set_t.src[1], set_t.src[2]) else {
+            continue;
+        };
+        let planes_t = &tensors[planes_id];
+        if planes_t.ne != [s_width, planes, 1, 1]
+            || !planes_t.is_contiguous()
+            || !rows_ok(write_rows, planes)
+            || resolve_root(tensors, dst).ok() != resolve_root(tensors, cache).ok()
+            || resolve_root(tensors, set_id).ok() != resolve_root(tensors, cache).ok()
+            || set_t.ne != cache_t.ne
+            || set_t.nb != cache_t.nb
+            || !read_only_by(tensors, nodes, pinned, planes_id, &[set_id])
+        {
+            continue;
+        }
+        // Nothing but the gather and the scatter may touch the cache: the
+        // scan now reads it where the gather ran and writes it where the
+        // scatter would have.
+        let cache_private = nodes.iter().all(|node| {
+            let id = node.node_id;
+            id == get
+                || id == set_id
+                || metadata_only(&tensors[id])
+                || (!tensors_overlap(tensors, cache, id)
+                    && !tensors[id].src.iter().flatten().any(|&src| tensors_overlap(tensors, cache, src)))
+        });
+        if !cache_private {
+            continue;
+        }
+        nodes[gi].kernel = KernelSel::Skip;
+        nodes[si].kernel = KernelSel::Skip;
+        nodes[i].kernel = KernelSel::GatedDeltaNetInCache { get, set: set_id };
+        fused += 1;
+    }
+    Ok(fused)
+}
+
 // llama.cpp writes recurrent conv state with one CPY into a cache view
 // (qwen35.cpp:267-276, ggml-cuda.cu:2520). We still build CONT+SET_ROWS;
 // collapse that pair to the same single strided copy.
@@ -2054,6 +2262,7 @@ fn plan_raw_graph(
     let fused_rms = fuse_rms_norm_mul(tensors, &graph.nodes, &mut nodes);
     let fused_unary = fuse_unary_mul(tensors, &graph.nodes, &mut nodes);
     let fused_ssm = fuse_ssm_conv_silu(tensors, &graph.nodes, &mut nodes);
+    let fused_gdn_state = fuse_gated_delta_state(tensors, pinned, &mut nodes)?;
     fuse_cont_set_rows(tensors, &graph.nodes, &mut nodes);
     fuse_set_rows_cpy(tensors, &mut nodes);
 
@@ -2218,6 +2427,7 @@ fn plan_raw_graph(
         fused_rms,
         fused_unary,
         fused_ssm,
+        fused_gdn_state,
         options,
     })
 }
@@ -2561,13 +2771,14 @@ impl Compiled {
                         eprintln!(
                             "cuda.graph: captured launched={} plan_nodes={} \
                              fused_mmvq={} fused_rms={} fused_unary={} fused_ssm={} \
-                             extras={:?} glu_prev={:?}",
+                             fused_gdn_state={} extras={:?} glu_prev={:?}",
                             launched,
                             self.plan.nodes.len(),
                             self.plan.fused_mmvq,
                             self.plan.fused_rms,
                             self.plan.fused_unary,
                             self.plan.fused_ssm,
+                            self.plan.fused_gdn_state,
                             extras,
                             glu_prev
                         );
@@ -3140,7 +3351,7 @@ impl ExecView<'_> {
                     .ensure(fixup_bytes.max(1), "fattn mma fixup")?;
                 check(
                     unsafe {
-                        fattn_mma_f16(
+                        fattn_mma(
                             self.ptr_of(q_id)?,
                             self.ptr_of(k_id)?,
                             self.ptr_of(v_id)?,
@@ -3164,6 +3375,7 @@ impl ExecView<'_> {
                             t.nb[2],
                             nsm,
                             cc,
+                            (k.desc.ty == TensorType::Q8_0) as i32,
                             scratch as *mut f32,
                             stream,
                         )
@@ -3192,7 +3404,7 @@ impl ExecView<'_> {
                     .ensure(tmp_bytes.max(1), "fattn vec tmp")?;
                 check(
                     unsafe {
-                        fattn_vec_f16(
+                        fattn_vec(
                             self.ptr_of(q_id)?,
                             self.ptr_of(k_id)?,
                             self.ptr_of(v_id)?,
@@ -3215,6 +3427,7 @@ impl ExecView<'_> {
                             t.nb[1],
                             t.nb[2],
                             nsm,
+                            (k.desc.ty == TensorType::Q8_0) as i32,
                             scratch as *mut f32,
                             stream,
                         )
@@ -3256,6 +3469,7 @@ impl ExecView<'_> {
                             mask.nb[1],
                             t.nb[1],
                             t.nb[2],
+                            (k.desc.ty == TensorType::Q8_0) as i32,
                             stream,
                         )
                     },
@@ -3990,7 +4204,7 @@ impl ExecView<'_> {
             KernelSel::SsmConv | KernelSel::SsmConvSilu => {
                 self.ssm_conv(&t, tensors, matches!(kernel, KernelSel::SsmConvSilu))
             }
-            KernelSel::GatedDeltaNet => {
+            KernelSel::GatedDeltaNet | KernelSel::GatedDeltaNetInCache { .. } => {
                 let q_id = self.src_id(&t, 0)?;
                 let k_id = self.src_id(&t, 1)?;
                 let v_id = self.src_id(&t, 2)?;
@@ -4007,6 +4221,26 @@ impl ExecView<'_> {
                         "gated_delta_net value dim {sv} is unsupported (needs 32..=256, /32)"
                     )));
                 }
+                let (state, cache, read_rows, write_rows, row_stride) = match kernel {
+                    KernelSel::GatedDeltaNetInCache { get, set } => {
+                        let set_t = self.tensor(set)?;
+                        let get_t = self.tensor(get)?;
+                        (
+                            std::ptr::null_mut(),
+                            self.ptr_of(set)?,
+                            self.ptr_of(self.src_id(get_t, 1)?)? as *const c_void,
+                            self.ptr_of(self.src_id(set_t, 1)?)? as *const c_void,
+                            (set_t.nb[1] / 4) as i64,
+                        )
+                    }
+                    _ => (
+                        self.ptr_of(state_id)?,
+                        std::ptr::null_mut(),
+                        std::ptr::null(),
+                        std::ptr::null(),
+                        0,
+                    ),
+                };
                 check(
                     unsafe {
                         gated_delta_net(
@@ -4015,7 +4249,7 @@ impl ExecView<'_> {
                             self.ptr_of(v_id)?,
                             self.ptr_of(g_id)?,
                             self.ptr_of(beta_id)?,
-                            self.ptr_of(state_id)?,
+                            state,
                             self.ptr_of(node_id)?,
                             sv as i32,
                             v.ne[1] as i32,
@@ -4034,6 +4268,10 @@ impl ExecView<'_> {
                             v.nb[2] / 4,
                             v.nb[3] / 4,
                             t.op_param_i32(0),
+                            cache,
+                            read_rows,
+                            write_rows,
+                            row_stride,
                             stream,
                         )
                     },
@@ -4662,5 +4900,404 @@ impl ExecView<'_> {
             r0 += rc;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod q8_kv_attention_tests {
+    //! A q8_0 KV cache is attended in place. Each attention kernel the
+    //! selector picks for one must return exactly the bits the f16 kernel
+    //! returns on the cache's f16 dequant, which is the copy the graph used to
+    //! cast for it, so greedy and seeded streams cannot move.
+    use super::{select_kernel, KernelSel};
+    use crate::cuda_exec::{CudaExecRuntime, CudaGraphOptions};
+    use crate::{BufferUsage, Context, Graph, InitParams, Prec, TensorId, TensorType};
+
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+    }
+
+    struct Case {
+        what: &'static str,
+        d: i64,
+        kc: i64,
+        n_q: i64,
+        h: i64,
+        hkv: i64,
+        kernel: fn(&KernelSel) -> bool,
+    }
+
+    fn input(ctx: &mut Context, name: &str, ty: TensorType, dims: &[i64], bytes: &[u8]) -> TensorId {
+        let id = ctx
+            .new_named_tensor(name.to_string(), ty, dims.len(), dims, BufferUsage::Weights)
+            .expect("input tensor");
+        ctx.tensor_data_mut(id).expect("input bytes")[..bytes.len()].copy_from_slice(bytes);
+        id
+    }
+
+    /// Cache rows as the runtime keeps them, `[D, Hkv, keys]`: random block
+    /// scales between 2^-8 and 2^-5 and random quants.
+    fn q8_cache(rng: &mut Rng, d: i64, hkv: i64, kc: i64) -> Vec<u8> {
+        let blocks = (d / 32 * hkv * kc) as usize;
+        let mut bytes = Vec::with_capacity(blocks * 34);
+        for _ in 0..blocks {
+            let scale = 0x1C00 + (rng.next() % 0x0C00) as u16;
+            bytes.extend_from_slice(&scale.to_le_bytes());
+            for _ in 0..32 {
+                bytes.push(((rng.next() % 255) as i32 - 127) as i8 as u8);
+            }
+        }
+        bytes
+    }
+
+    /// Run `case` on the q8_0 cache and on its f16 dequant in one graph;
+    /// `None` when both kernels agree on every bit.
+    fn run(runtime: &CudaExecRuntime, case: &Case, seed: u64) -> Option<String> {
+        let Case { what, d, kc, n_q, h, hkv, kernel } = *case;
+        let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+        let mut ctx = Context::new(InitParams {
+            mem_size: 160 << 20,
+            mem_buffer: None,
+            no_alloc: false,
+        });
+        let q_bytes: Vec<u8> = (0..d * n_q * h)
+            .flat_map(|_| (((rng.next() >> 40) as f32 / (1u64 << 23) as f32) * 2.0 - 1.0).to_le_bytes())
+            .collect();
+        let q = input(&mut ctx, "q", TensorType::F32, &[d, n_q, h], &q_bytes);
+        let k_bytes = q8_cache(&mut rng, d, hkv, kc);
+        let v_bytes = q8_cache(&mut rng, d, hkv, kc);
+        let k_cache = input(&mut ctx, "k_cache", TensorType::Q8_0, &[d, hkv, kc], &k_bytes);
+        let v_cache = input(&mut ctx, "v_cache", TensorType::Q8_0, &[d, hkv, kc], &v_bytes);
+        // A causal tail plus scattered holes, f16 -inf / 0.
+        let mut mask_bytes = Vec::with_capacity((kc * n_q * 2) as usize);
+        for iq in 0..n_q {
+            for c in 0..kc {
+                let hidden = c > kc - n_q + iq || rng.next() % 9 == 0;
+                mask_bytes.extend_from_slice(&if hidden { 0xFC00u16 } else { 0 }.to_le_bytes());
+            }
+        }
+        let mask = input(&mut ctx, "mask", TensorType::F16, &[kc, n_q], &mask_bytes);
+
+        let k = ctx.permute(k_cache, [0, 2, 1, 3]).unwrap();
+        let v = ctx.permute(v_cache, [0, 2, 1, 3]).unwrap();
+        let f16_copy = |ctx: &mut Context, src: TensorId| {
+            let dst = ctx
+                .new_tensor(TensorType::F16, 3, &[d, kc, hkv], BufferUsage::Activations)
+                .unwrap();
+            ctx.cpy(src, dst, BufferUsage::Activations).unwrap()
+        };
+        let k16 = f16_copy(&mut ctx, k);
+        let v16 = f16_copy(&mut ctx, v);
+        let scale = 1.0 / (d as f32).sqrt();
+        let attend = |ctx: &mut Context, k: TensorId, v: TensorId| {
+            let out = ctx
+                .flash_attn_ext(q, k, v, Some(mask), scale, 0.0, 0.0, BufferUsage::Activations)
+                .unwrap();
+            ctx.flash_attn_ext_set_prec(out, Prec::F32).unwrap();
+            out
+        };
+        let want = attend(&mut ctx, k16, v16);
+        let got = attend(&mut ctx, k, v);
+
+        let options = CudaGraphOptions::default();
+        let tensors = ctx.tensors();
+        let sel_got = select_kernel(tensors, &tensors[got], options).expect("q8_0 K/V selection");
+        let sel_want = select_kernel(tensors, &tensors[want], options).expect("f16 K/V selection");
+        if !kernel(&sel_got) || std::mem::discriminant(&sel_got) != std::mem::discriminant(&sel_want) {
+            return Some(format!("{what}: q8_0 K/V took {sel_got:?}, f16 took {sel_want:?}"));
+        }
+
+        let mut graph = Graph::new();
+        graph.build_forward_expand(&ctx, want).unwrap();
+        graph.build_forward_expand(&ctx, got).unwrap();
+        let out = runtime
+            .execute_raw_graph(&ctx, &graph, &[want, got], &[], &[want, got])
+            .expect("attention graph");
+        let (want, got) = (&out[&want], &out[&got]);
+        let words = |b: &[u8]| -> Vec<u32> {
+            b.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect()
+        };
+        let (want, got) = (words(want), words(got));
+        assert!(
+            want.iter().any(|&w| w != 0) && want.iter().all(|&w| f32::from_bits(w).is_finite()),
+            "{what}: the f16 reference is degenerate"
+        );
+        let differ = want.iter().zip(&got).filter(|(a, b)| a != b).count();
+        (differ != 0 || want.len() != got.len()).then(|| {
+            let first = want.iter().zip(&got).position(|(a, b)| a != b).unwrap_or(0);
+            format!(
+                "{what}: {differ} of {} outputs differ from the f16 dequant's, first at {first}: {} vs {}",
+                want.len(),
+                f32::from_bits(got[first]),
+                f32::from_bits(want[first])
+            )
+        })
+    }
+
+    #[test]
+    fn q8_0_kv_attention_matches_its_f16_dequant_bit_for_bit() {
+        let runtime = CudaExecRuntime::new().expect("a CUDA device");
+        let vec = |k: &KernelSel| matches!(k, KernelSel::FlashVec);
+        let mma = |k: &KernelSel| matches!(k, KernelSel::FlashMma);
+        let decode = |k: &KernelSel| matches!(k, KernelSel::FlashDecode);
+        // 24 query heads over 4 KV heads with D=256 is the production model.
+        let cases = [
+            Case { what: "decode step, vec", d: 256, kc: 1024, n_q: 1, h: 24, hkv: 4, kernel: vec },
+            Case { what: "decode step past 8k, MMA 32x2", d: 256, kc: 8192, n_q: 1, h: 24, hkv: 4, kernel: mma },
+            Case { what: "verify width 4, MMA 32x2", d: 256, kc: 1024, n_q: 4, h: 24, hkv: 4, kernel: mma },
+            Case { what: "prefill chunk, MMA 8x8", d: 256, kc: 512, n_q: 24, h: 32, hkv: 4, kernel: mma },
+            Case { what: "D=128 rows of 136 bytes, MMA 16x4", d: 128, kc: 512, n_q: 8, h: 16, hkv: 4, kernel: mma },
+            Case { what: "D=128 decode step, vec", d: 128, kc: 512, n_q: 1, h: 16, hkv: 4, kernel: vec },
+            Case { what: "odd GQA, flash decode", d: 256, kc: 512, n_q: 4, h: 12, hkv: 4, kernel: decode },
+        ];
+        let failures: Vec<String> = cases
+            .iter()
+            .enumerate()
+            .filter_map(|(i, case)| run(&runtime, case, 0x51ab + i as u64))
+            .collect();
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn q8_0_attention_needs_both_k_and_v_in_q8_0() {
+        let mut ctx = Context::new(InitParams {
+            mem_size: 8 << 20,
+            mem_buffer: None,
+            no_alloc: false,
+        });
+        let q = ctx.new_tensor(TensorType::F32, 3, &[256, 1, 24], BufferUsage::Weights).unwrap();
+        let k = ctx.new_tensor(TensorType::Q8_0, 3, &[256, 256, 4], BufferUsage::Weights).unwrap();
+        let v = ctx.new_tensor(TensorType::F16, 3, &[256, 256, 4], BufferUsage::Weights).unwrap();
+        let mask = ctx.new_tensor(TensorType::F16, 2, &[256, 1], BufferUsage::Weights).unwrap();
+        let out = ctx
+            .flash_attn_ext(q, k, v, Some(mask), 1.0, 0.0, 0.0, BufferUsage::Activations)
+            .unwrap();
+        let tensors = ctx.tensors();
+        assert!(select_kernel(tensors, &tensors[out], CudaGraphOptions::default()).is_err());
+    }
+}
+
+#[cfg(test)]
+mod gated_delta_state_tests {
+    //! The delta-net scan reads and writes its recurrent state in the cache
+    //! rows. Every cache byte and every output must be the bits the graph's
+    //! own gather -> scan -> scatter produces, or a stream moves.
+    use super::{plan_raw_graph, KernelSel};
+    use crate::cuda_exec::{CudaExecRuntime, CudaGraphOptions};
+    use crate::{BufferUsage, Context, Graph, InitParams, TensorId, TensorType};
+
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+
+        /// Uniform in `[lo, hi)`.
+        fn uniform(&mut self, lo: f32, hi: f32) -> f32 {
+            lo + (hi - lo) * ((self.next() >> 40) as f32 / (1u64 << 24) as f32)
+        }
+    }
+
+    struct Case {
+        what: &'static str,
+        sv: i64,
+        h_k: i64,
+        h_v: i64,
+        n_seq_tokens: i64,
+        checkpoints: bool,
+        cache_rows: i64,
+        /// One resume row per sequence, then the write rows: one per
+        /// sequence, or one per (token, sequence) in checkpoint-plane order
+        /// `t * n_seqs + s` when checkpointing.
+        resume: &'static [i32],
+        write: &'static [i32],
+    }
+
+    fn filled(ctx: &mut Context, name: &str, ty: TensorType, dims: &[i64], usage: BufferUsage, bytes: &[u8]) -> TensorId {
+        let id = ctx
+            .new_named_tensor(name.to_string(), ty, dims.len(), dims, usage)
+            .expect("test tensor");
+        ctx.tensor_data_mut(id).expect("test bytes")[..bytes.len()].copy_from_slice(bytes);
+        id
+    }
+
+    fn floats(rng: &mut Rng, n: i64, lo: f32, hi: f32) -> Vec<u8> {
+        (0..n).flat_map(|_| rng.uniform(lo, hi).to_le_bytes()).collect()
+    }
+
+    struct Scan {
+        scan: TensorId,
+        get: TensorId,
+        set: TensorId,
+        outputs: TensorId,
+        planes: TensorId,
+    }
+
+    /// The graph the runtime builds for one recurrent layer's state:
+    /// gather the resume rows, scan, scatter the planes to their rows.
+    #[allow(clippy::too_many_arguments)]
+    fn scan(
+        ctx: &mut Context,
+        case: &Case,
+        n_seqs: i64,
+        inputs: [TensorId; 5],
+        cache: TensorId,
+        rows: TensorId,
+    ) -> Scan {
+        let Case { sv, h_v, n_seq_tokens, checkpoints, .. } = *case;
+        let s_width = sv * sv * h_v;
+        let [q, k, v, g, beta] = inputs;
+        let read_rows = ctx.view_1d(rows, n_seqs, 0).unwrap();
+        let get = ctx.get_rows(cache, read_rows, BufferUsage::State).unwrap();
+        let state = ctx
+            .view_4d(get, sv, sv, h_v, n_seqs, sv as usize * 4, (sv * sv) as usize * 4, s_width as usize * 4, 0)
+            .unwrap();
+        let scan = ctx
+            .gated_delta_net_with_checkpoints(q, k, v, g, beta, state, checkpoints, BufferUsage::Activations)
+            .unwrap();
+        let n_tokens = n_seq_tokens * n_seqs;
+        let outputs_bytes = (sv * h_v * n_tokens) as usize * 4;
+        let outputs = ctx.view_2d(scan, sv * h_v, n_tokens, (sv * h_v) as usize * 4, 0).unwrap();
+        let outputs = ctx.cont(outputs).unwrap();
+        let planes_n = if checkpoints { n_tokens } else { n_seqs };
+        let planes = ctx.view_2d(scan, s_width, planes_n, s_width as usize * 4, outputs_bytes).unwrap();
+        let write_rows = ctx.view_1d(rows, planes_n, n_seqs as usize * 4).unwrap();
+        let set = ctx.set_rows(cache, planes, write_rows, BufferUsage::State).unwrap();
+        Scan { scan, get, set, outputs, planes }
+    }
+
+    /// `None` when the in-cache scan and the graph's own agree on every bit.
+    fn run(runtime: &CudaExecRuntime, case: &Case, seed: u64) -> Option<String> {
+        let Case { what, sv, h_k, h_v, n_seq_tokens, cache_rows, resume, write, .. } = *case;
+        let n_seqs = resume.len() as i64;
+        let s_width = sv * sv * h_v;
+        let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+        let mut ctx = Context::new(InitParams {
+            mem_size: 64 << 20,
+            mem_buffer: None,
+            no_alloc: false,
+        });
+        let qk_dims = [sv, h_k, n_seq_tokens, n_seqs];
+        let q_bytes = floats(&mut rng, qk_dims.iter().product(), -0.2, 0.2);
+        let k_bytes = floats(&mut rng, qk_dims.iter().product(), -0.2, 0.2);
+        let v_dims = [sv, h_v, n_seq_tokens, n_seqs];
+        let v_bytes = floats(&mut rng, v_dims.iter().product(), -1.0, 1.0);
+        let gb_dims = [1, h_v, n_seq_tokens, n_seqs];
+        let g_bytes = floats(&mut rng, gb_dims.iter().product(), -1.5, -0.01);
+        let beta_bytes = floats(&mut rng, gb_dims.iter().product(), 0.05, 0.95);
+        let q = filled(&mut ctx, "q", TensorType::F32, &qk_dims, BufferUsage::Weights, &q_bytes);
+        let k = filled(&mut ctx, "k", TensorType::F32, &qk_dims, BufferUsage::Weights, &k_bytes);
+        let v = filled(&mut ctx, "v", TensorType::F32, &v_dims, BufferUsage::Weights, &v_bytes);
+        let g = filled(&mut ctx, "g", TensorType::F32, &gb_dims, BufferUsage::Weights, &g_bytes);
+        let beta = filled(&mut ctx, "beta", TensorType::F32, &gb_dims, BufferUsage::Weights, &beta_bytes);
+        let cache_bytes = floats(&mut rng, s_width * cache_rows, -0.5, 0.5);
+        let in_cache = filled(&mut ctx, "in_cache", TensorType::F32, &[s_width, cache_rows], BufferUsage::State, &cache_bytes);
+        let graph_cache = filled(&mut ctx, "graph_cache", TensorType::F32, &[s_width, cache_rows], BufferUsage::State, &cache_bytes);
+        let row_bytes: Vec<u8> = resume.iter().chain(write).flat_map(|row| row.to_le_bytes()).collect();
+        let rows = filled(&mut ctx, "rows", TensorType::I32, &[row_bytes.len() as i64 / 4], BufferUsage::Weights, &row_bytes);
+
+        let inputs = [q, k, v, g, beta];
+        let fused = scan(&mut ctx, case, n_seqs, inputs, in_cache, rows);
+        let reference = scan(&mut ctx, case, n_seqs, inputs, graph_cache, rows);
+        // Pinning the reference's planes keeps its scatter: they are read
+        // outside the scan, so its state goes through the activation.
+        let wanted = [fused.outputs, fused.set, reference.outputs, reference.set, reference.planes];
+        let mut graph = Graph::new();
+        for &id in &wanted {
+            graph.build_forward_expand(&ctx, id).unwrap();
+        }
+        let plan = plan_raw_graph(&ctx, &graph, &wanted, CudaGraphOptions::default()).expect("plan");
+        let kernel = |id: TensorId| plan.nodes.iter().find(|n| n.node_id == id).map(|n| n.kernel);
+        match (kernel(fused.scan), kernel(fused.get), kernel(fused.set)) {
+            (Some(KernelSel::GatedDeltaNetInCache { get, set }), Some(KernelSel::Skip), Some(KernelSel::Skip))
+                if get == fused.get && set == fused.set => {}
+            other => return Some(format!("{what}: the scan did not move into the cache: {other:?}")),
+        }
+        if !matches!(kernel(reference.scan), Some(KernelSel::GatedDeltaNet)) {
+            return Some(format!("{what}: the reference scan was fused: {:?}", kernel(reference.scan)));
+        }
+
+        let out = runtime
+            .execute_raw_graph(&ctx, &graph, &wanted, &[], &wanted)
+            .expect("scan graph");
+        let words = |b: &[u8]| -> Vec<u32> {
+            b.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect()
+        };
+        let initial = words(&cache_bytes);
+        let reference_cache = words(&out[&reference.set]);
+        let row_changed = |row: i32| {
+            let range = row as usize * s_width as usize..(row as usize + 1) * s_width as usize;
+            reference_cache[range.clone()] != initial[range]
+        };
+        if !write.iter().all(|&row| row_changed(row)) {
+            return Some(format!("{what}: the reference left a write row untouched"));
+        }
+        for (part, fused_id, reference_id) in [
+            ("outputs", fused.outputs, reference.outputs),
+            ("cache", fused.set, reference.set),
+        ] {
+            let (got, want) = (words(&out[&fused_id]), words(&out[&reference_id]));
+            let differ = got.iter().zip(&want).filter(|(a, b)| a != b).count();
+            if differ != 0 || got.len() != want.len() {
+                let first = got.iter().zip(&want).position(|(a, b)| a != b).unwrap_or(0);
+                return Some(format!(
+                    "{what}: {differ} of {} {part} words differ, first at {first}: {} vs {}",
+                    want.len(),
+                    f32::from_bits(got[first]),
+                    f32::from_bits(want[first])
+                ));
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn the_scan_reads_and_writes_its_state_in_the_cache_rows() {
+        let runtime = CudaExecRuntime::new().expect("a CUDA device");
+        // 128-wide state planes and 3 value heads per key head as in the
+        // production model, at fewer heads.
+        let cases = [
+            Case {
+                what: "solo verify of 4, resuming from a row it also writes",
+                sv: 128, h_k: 2, h_v: 6, n_seq_tokens: 4, checkpoints: true, cache_rows: 5,
+                resume: &[2], write: &[0, 1, 2, 3],
+            },
+            Case {
+                what: "4 lanes verifying 3 each, checkpoint-plane order",
+                sv: 128, h_k: 2, h_v: 6, n_seq_tokens: 3, checkpoints: true, cache_rows: 20,
+                resume: &[1, 5, 13, 18], write: &[0, 5, 10, 15, 1, 6, 11, 16, 2, 7, 12, 17],
+            },
+            Case {
+                what: "3 lanes decoding one token in place",
+                sv: 128, h_k: 2, h_v: 6, n_seq_tokens: 1, checkpoints: false, cache_rows: 6,
+                resume: &[4, 0, 2], write: &[4, 0, 2],
+            },
+            Case {
+                what: "prefill chunk of 7 into another row",
+                sv: 64, h_k: 4, h_v: 4, n_seq_tokens: 7, checkpoints: false, cache_rows: 3,
+                resume: &[1], write: &[2],
+            },
+        ];
+        let failures: Vec<String> = cases
+            .iter()
+            .enumerate()
+            .filter_map(|(i, case)| run(&runtime, case, 0x6d17 + i as u64))
+            .collect();
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 }

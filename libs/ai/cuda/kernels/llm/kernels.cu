@@ -3453,10 +3453,27 @@ extern "C" cudaError_t mkllm_softmax_mask(
 
 // ---------------------------------------------------------------------------
 // Flash-attention decode (small n_q): one block per (head, query).
-// q f32 [D, nq, H], k f16 [D, kc, Hkv], v f16 [Dv, kc, Hkv], mask f16
-// [kc, nq_pad], dst f32 [Dv, H, nq]. Online softmax, f32 accumulation.
+// q f32 [D, nq, H], k [D, kc, Hkv], v [Dv, kc, Hkv] (f16, or q8_0 read as the
+// f16 its dequant would store), mask f16 [kc, nq_pad], dst f32 [Dv, H, nq].
+// Online softmax, f32 accumulation.
 // ---------------------------------------------------------------------------
 
+// Element `i` of one K/V row as f32. A q8_0 row yields exactly the f16 value
+// mkllm_dequant_q8_0_f16 would have written for it, so both storage types give
+// bit-identical attention.
+template <bool q8>
+static __device__ __forceinline__ float mkllm_kv_elem(const uint8_t * row, int i) {
+    if constexpr (q8) {
+        const uint8_t * blk = row + (size_t) (i / 32) * 34;
+        const float d = __half2float(*(const __half *) blk);
+        const int q = ((const int8_t *) (blk + 2))[i % 32];
+        return __half2float(__float2half(d * (float) q));
+    } else {
+        return __half2float(((const __half *) row)[i]);
+    }
+}
+
+template <bool kv_q8>
 static __global__ void mkllm_flash_decode_kernel(
         const uint8_t * __restrict__ q, const uint8_t * __restrict__ k,
         const uint8_t * __restrict__ v, const uint8_t * __restrict__ mask,
@@ -3497,10 +3514,10 @@ static __global__ void mkllm_flash_decode_kernel(
         if (mval == -INFINITY || mval < -65500.0f) {
             s = -INFINITY;
         } else {
-            const __half * krow = (const __half *) (kh + (size_t) key * k_nb1);
+            const uint8_t * krow = kh + (size_t) key * k_nb1;
             float partial = 0.0f;
             for (int i = lane; i < D; i += blockDim.x) {
-                partial += qs[i] * __half2float(krow[i]);
+                partial += qs[i] * mkllm_kv_elem<kv_q8>(krow, i);
             }
             red[lane] = partial;
             __syncthreads();
@@ -3518,9 +3535,9 @@ static __global__ void mkllm_flash_decode_kernel(
             const float corr = expf(m_running - m_new);
             const float p = expf(s - m_new);
             __syncthreads();
-            const __half * vrow = (const __half *) (vh + (size_t) key * v_nb1);
+            const uint8_t * vrow = vh + (size_t) key * v_nb1;
             for (int i = lane; i < Dv; i += blockDim.x) {
-                acc[i] = acc[i] * corr + p * __half2float(vrow[i]);
+                acc[i] = acc[i] * corr + p * mkllm_kv_elem<kv_q8>(vrow, i);
             }
             if (lane == 0) {
                 l_running = l_running * corr + p;
@@ -3537,20 +3554,33 @@ static __global__ void mkllm_flash_decode_kernel(
     }
 }
 
+// `kv_q8`: K and V are q8_0 (both or neither; a q8_0 head dim is a multiple
+// of 32).
 extern "C" cudaError_t mkllm_flash_decode(
         const void * q, const void * k, const void * v, const void * mask, void * dst,
         int D, int Dv, int kc, int n_q, int H, int Hkv, float scale,
         size_t q_nb1, size_t q_nb2, size_t k_nb1, size_t k_nb2,
         size_t v_nb1, size_t v_nb2, size_t m_nb1, size_t d_nb1, size_t d_nb2,
-        cudaStream_t stream) {
+        int kv_q8, cudaStream_t stream) {
+    if (kv_q8 && (D % 32 != 0 || Dv % 32 != 0)) {
+        return cudaErrorInvalidValue;
+    }
     dim3 block(128);
     dim3 grid(H, n_q);
     const size_t shared = (size_t) (D + 128 + Dv) * sizeof(float);
-    mkllm_flash_decode_kernel<<<grid, block, shared, stream>>>(
-        (const uint8_t *) q, (const uint8_t *) k, (const uint8_t *) v,
-        (const uint8_t *) mask, (uint8_t *) dst,
-        D, Dv, kc, n_q, H, Hkv, scale,
-        q_nb1, q_nb2, k_nb1, k_nb2, v_nb1, v_nb2, m_nb1, d_nb1, d_nb2);
+    if (kv_q8) {
+        mkllm_flash_decode_kernel<true><<<grid, block, shared, stream>>>(
+            (const uint8_t *) q, (const uint8_t *) k, (const uint8_t *) v,
+            (const uint8_t *) mask, (uint8_t *) dst,
+            D, Dv, kc, n_q, H, Hkv, scale,
+            q_nb1, q_nb2, k_nb1, k_nb2, v_nb1, v_nb2, m_nb1, d_nb1, d_nb2);
+    } else {
+        mkllm_flash_decode_kernel<false><<<grid, block, shared, stream>>>(
+            (const uint8_t *) q, (const uint8_t *) k, (const uint8_t *) v,
+            (const uint8_t *) mask, (uint8_t *) dst,
+            D, Dv, kc, n_q, H, Hkv, scale,
+            q_nb1, q_nb2, k_nb1, k_nb2, v_nb1, v_nb2, m_nb1, d_nb1, d_nb2);
+    }
     return cudaGetLastError();
 }
 
@@ -4401,8 +4431,18 @@ extern "C" cudaError_t mkllm_gated_delta_net(
         size_t k_h_elems, size_t k_t_elems, size_t k_s_elems,
         size_t v_h_elems, size_t v_t_elems, size_t v_s_elems,
         int state_checkpoints,
+        void * state_cache, const void * state_read_rows, const void * state_write_rows,
+        int64_t state_row_stride,
         cudaStream_t stream) {
     if (sv % 32 != 0 || sv > 256) {
+        return cudaErrorInvalidValue;
+    }
+    // `state_cache` non-null: `s` is unused, sequence `i` resumes from cache
+    // row `state_read_rows[i]`, and each state lands in the row
+    // `state_write_rows` names for it (`t * n_seqs + i` with checkpoints, `i`
+    // without), `state_row_stride` floats apart. `dst` keeps only the outputs.
+    if (state_cache != nullptr && (state_read_rows == nullptr || state_write_rows == nullptr
+            || state_row_stride < (int64_t) sv * sv * h)) {
         return cudaErrorInvalidValue;
     }
     // Non-zero => write one state per token, `sv*sv*h*n_seqs` floats apart.
@@ -4427,7 +4467,9 @@ extern "C" cudaError_t mkllm_gated_delta_net(
                 (float *) dst, sv, h, n_tokens, n_seqs,
                 (int64_t) q_h_elems, (int64_t) q_t_elems, (int64_t) q_s_elems,
                 (int64_t) v_h_elems, (int64_t) v_t_elems, (int64_t) v_s_elems,
-                sb1, sb2, sb3, q_heads, rq3, scale, state_ckpt_stride, stream);
+                sb1, sb2, sb3, q_heads, rq3, scale, state_ckpt_stride,
+                (float *) state_cache, (const int *) state_read_rows,
+                (const int *) state_write_rows, state_row_stride, stream);
         } else {
             launch_gated_delta_net<false>(
                 (const float *) q, (const float *) k, (const float *) v,
@@ -4435,13 +4477,15 @@ extern "C" cudaError_t mkllm_gated_delta_net(
                 (float *) dst, sv, h, n_tokens, n_seqs,
                 (int64_t) q_h_elems, (int64_t) q_t_elems, (int64_t) q_s_elems,
                 (int64_t) v_h_elems, (int64_t) v_t_elems, (int64_t) v_s_elems,
-                sb1, sb2, sb3, q_heads, rq3, scale, state_ckpt_stride, stream);
+                sb1, sb2, sb3, q_heads, rq3, scale, state_ckpt_stride,
+                (float *) state_cache, (const int *) state_read_rows,
+                (const int *) state_write_rows, state_row_stride, stream);
         }
         return cudaGetLastError();
     }
-    if (state_checkpoints) {
-        // Only the official kernel emits per-token states; fail closed rather
-        // than silently leaving the checkpoint rows unwritten.
+    if (state_checkpoints || state_cache != nullptr) {
+        // Only the official kernel emits per-token states or works in the
+        // state cache; fail closed rather than leaving cache rows unwritten.
         return cudaErrorInvalidValue;
     }
     const int cols_per_block = 4;
@@ -4597,31 +4641,49 @@ extern "C" cudaError_t mkllm_copy_strided(
 
 #include "fattn/fattn-mma-f16.cuh"
 
+// First few host launches only.
+static int mkllm_fattn_trace_prints = 0;
+
+static bool mkllm_fattn_tracing() {
+    return mkllm_fattn_trace_prints < 8;
+}
+
+// `occ` sizes the split; `occ_own` is the launched kernel's own occupancy
+// (they differ only for q8_0 K/V, whose split follows the f16 kernel).
 static void mkllm_fattn_trace_launch(
         const char * kind, int D, int n_q, int kc, int H, int Hkv,
-        int nsm, int max_blocks_per_sm, int parallel_blocks, int ntiles_dst,
+        int nsm, int max_blocks_per_sm, int own_blocks_per_sm, int parallel_blocks, int ntiles_dst,
         int ntiles_KV, int stream_k, unsigned gx, unsigned gy, unsigned gz) {
-    // First few host launches only. Official launch_fattn (fattn-common.cuh:990)
-    // for VEC is stream_k=false; pb is occupancy-capped then efficiency-swept.
-    static int prints = 0;
-    if (prints >= 8) {
+    // Official launch_fattn (fattn-common.cuh:990) for VEC is stream_k=false;
+    // pb is occupancy-capped then efficiency-swept.
+    if (!mkllm_fattn_tracing()) {
         return;
     }
     fprintf(stderr,
-        "fattn.launch: kind=%s D=%d n_q=%d n_kv=%d H=%d Hkv=%d nsm=%d occ=%d "
+        "fattn.launch: kind=%s D=%d n_q=%d n_kv=%d H=%d Hkv=%d nsm=%d occ=%d occ_own=%d "
         "pb=%d ntiles_dst=%d ntiles_KV=%d stream_k=%d grid=(%u,%u,%u) "
         "pad256=%d\n",
-        kind, D, n_q, kc, H, Hkv, nsm, max_blocks_per_sm, parallel_blocks,
+        kind, D, n_q, kc, H, Hkv, nsm, max_blocks_per_sm, own_blocks_per_sm, parallel_blocks,
         ntiles_dst, ntiles_KV, stream_k, gx, gy, gz,
         (kc + 255) & ~255);
-    ++prints;
+    ++mkllm_fattn_trace_prints;
+}
+
+static int mkllm_fattn_own_occupancy(
+        bool differs, fattn_kernel_t kernel, int threads, size_t shared, int split_occ) {
+    int occ = split_occ;
+    if (differs && mkllm_fattn_tracing()
+            && cudaOccupancyMaxActiveBlocksPerMultiprocessor(&occ, kernel, threads, shared) != cudaSuccess) {
+        occ = -1;
+    }
+    return occ;
 }
 
 // The MMA launcher, templated on the tile shape so the GQA ratio can pick
 // it. `ncols2` is how many query heads of one KV head a tile covers, and
 // `ncols1` how many tokens; their product is the 64-column tile every size
 // below is derived from, so a different split costs nothing in shared memory.
-template <int D, int ncols1, int ncols2>
+template <int D, int ncols1, int ncols2, bool kv_q8>
 static cudaError_t mkllm_fattn_mma_launch(
         const void * q, const void * k, const void * v, const void * mask, void * dst,
         int kc, int n_q, int H, int Hkv, float scale,
@@ -4661,10 +4723,23 @@ static cudaError_t mkllm_fattn_mma_launch(
                 ? nbytes_shared_Q : nbytes_shared_KV + nbytes_shared_mask)
             : nbytes_shared_Q + nbytes_shared_KV + nbytes_shared_mask);
 
+    if (kv_q8 && (nstages <= 1 || nbatch_K2 != DKQ / 2 || nbatch_V2 != DV / 2)) {
+        // q8_0 tiles are whole rows on the cp.async pipeline (Ampere and newer).
+        return cudaErrorInvalidValue;
+    }
     fattn_kernel_t fattn_kernel =
-        flash_attn_ext_f16<DKQ, DV, ncols1, ncols2, use_logit_softcap, V_is_K_view>;
+        flash_attn_ext_f16<DKQ, DV, ncols1, ncols2, use_logit_softcap, V_is_K_view, kv_q8>;
+    // The split over SMs is sized from the f16 kernel for q8_0 K/V too: a
+    // q8_0 cache then reduces in the same order as its f16 dequant would,
+    // which is what keeps the two bit-identical.
+    fattn_kernel_t split_kernel =
+        flash_attn_ext_f16<DKQ, DV, ncols1, ncols2, use_logit_softcap, V_is_K_view, false>;
     cudaError_t err = cudaFuncSetAttribute(
         fattn_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) nbytes_shared_total);
+    if (err == cudaSuccess && kv_q8) {
+        err = cudaFuncSetAttribute(
+            split_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) nbytes_shared_total);
+    }
     if (err != cudaSuccess) {
         return err;
     }
@@ -4677,7 +4752,7 @@ static cudaError_t mkllm_fattn_mma_launch(
     dim3 block_dim(32, nwarps, 1);
     int max_blocks_per_sm = 1;
     err = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-        &max_blocks_per_sm, fattn_kernel, block_dim.x * block_dim.y, nbytes_shared_total);
+        &max_blocks_per_sm, split_kernel, block_dim.x * block_dim.y, nbytes_shared_total);
     if (err != cudaSuccess || max_blocks_per_sm <= 0) {
         max_blocks_per_sm = 1;
     }
@@ -4697,9 +4772,11 @@ static cudaError_t mkllm_fattn_mma_launch(
         blocks_num = dim3(ntiles_x, 1, ntiles_z_gqa * Hkv);
     }
     char kind[16];
-    snprintf(kind, sizeof(kind), "mma%dx%d", ncols1, ncols2);
+    snprintf(kind, sizeof(kind), "mma%dx%d%s", ncols1, ncols2, kv_q8 ? "q8" : "");
     mkllm_fattn_trace_launch(
         kind, DKQ, n_q, kc, H, Hkv, nsm, max_blocks_per_sm,
+        mkllm_fattn_own_occupancy(kv_q8, fattn_kernel, block_dim.x * block_dim.y,
+            nbytes_shared_total, max_blocks_per_sm),
         use_stream_k ? nblocks_stream_k : 1, ntiles_dst, ntiles_KV,
         use_stream_k ? 1 : 0, blocks_num.x, blocks_num.y, blocks_num.z);
 
@@ -4732,18 +4809,27 @@ static cudaError_t mkllm_fattn_mma_launch(
     return cudaSuccess;
 }
 
-extern "C" cudaError_t mkllm_fattn_mma_f16(
+// `kv_q8`: K and V are q8_0 views of the cache, read in place (both or
+// neither). Their rows must start on the cp.async granule of their length.
+extern "C" cudaError_t mkllm_fattn_mma(
         const void * q, const void * k, const void * v, const void * mask, void * dst,
         int D, int Dv, int kc, int n_q, int H, int Hkv, float scale,
         size_t q_nb1, size_t q_nb2, size_t k_nb1, size_t k_nb2,
         size_t v_nb1, size_t v_nb2, size_t m_nb1, size_t d_nb1, size_t d_nb2,
-        int nsm, int cc, float * tmp_fixup, cudaStream_t stream) {
+        int nsm, int cc, int kv_q8, float * tmp_fixup, cudaStream_t stream) {
     (void) d_nb1;
     (void) d_nb2;
     if ((D != 128 && D != 256) || Dv != D || n_q <= 0 || kc <= 0 || H <= 0 || Hkv <= 0
             || H % Hkv != 0 || q == nullptr || k == nullptr || v == nullptr
             || mask == nullptr || dst == nullptr) {
         return cudaErrorInvalidValue;
+    }
+    if (kv_q8) {
+        const size_t granule = D == 256 ? 16 : 8;
+        if (k_nb1 % granule || k_nb2 % granule || v_nb1 % granule || v_nb2 % granule
+                || (uintptr_t) k % granule || (uintptr_t) v % granule) {
+            return cudaErrorInvalidValue;
+        }
     }
     // llama.cpp fattn.cu switch_ncols2: the GQA ratio decides how many query
     // heads share a tile. Getting this wrong is not slow, it is wrong — a
@@ -4755,19 +4841,22 @@ extern "C" cudaError_t mkllm_fattn_mma_f16(
 #define MKLLM_FATTN_MMA_ARGS                                                   \
     q, k, v, mask, dst, kc, n_q, H, Hkv, scale,                                \
     q_nb1, q_nb2, k_nb1, k_nb2, v_nb1, v_nb2, m_nb1, nsm, cc, tmp_fixup, stream
+#define MKLLM_FATTN_MMA_TILE(D_, c1, c2)                                         \
+    return kv_q8 ? mkllm_fattn_mma_launch<D_, c1, c2, true>(MKLLM_FATTN_MMA_ARGS) \
+                 : mkllm_fattn_mma_launch<D_, c1, c2, false>(MKLLM_FATTN_MMA_ARGS)
     const int gqa_ratio = H / Hkv;
     if (D == 128) {
         // The same official MMA template, with its D=128 launch geometry.
-        if (gqa_ratio % 8 == 0) return mkllm_fattn_mma_launch<128, 8, 8>(MKLLM_FATTN_MMA_ARGS);
-        if (gqa_ratio % 4 == 0) return mkllm_fattn_mma_launch<128, 16, 4>(MKLLM_FATTN_MMA_ARGS);
-        if (gqa_ratio % 2 == 0) return mkllm_fattn_mma_launch<128, 32, 2>(MKLLM_FATTN_MMA_ARGS);
+        if (gqa_ratio % 8 == 0) MKLLM_FATTN_MMA_TILE(128, 8, 8);
+        if (gqa_ratio % 4 == 0) MKLLM_FATTN_MMA_TILE(128, 16, 4);
+        if (gqa_ratio % 2 == 0) MKLLM_FATTN_MMA_TILE(128, 32, 2);
         return cudaErrorInvalidValue;
     }
     if (gqa_ratio % 8 == 0) {
-        return mkllm_fattn_mma_launch<256, 8, 8>(MKLLM_FATTN_MMA_ARGS);
+        MKLLM_FATTN_MMA_TILE(256, 8, 8);
     }
     if (gqa_ratio % 4 == 0) {
-        return mkllm_fattn_mma_launch<256, 16, 4>(MKLLM_FATTN_MMA_ARGS);
+        MKLLM_FATTN_MMA_TILE(256, 16, 4);
     }
     if (gqa_ratio % 2 == 0) {
         // The rung llama.cpp's switch_ncols2 ladder has and this port was
@@ -4776,9 +4865,10 @@ extern "C" cudaError_t mkllm_fattn_mma_f16(
         // Without it the caller's gate sent that model to the generic
         // FlashDecode kernel: measured 11-20x slower past 8k context, flat
         // 85-91 tok/s restored with the tile.
-        return mkllm_fattn_mma_launch<256, 32, 2>(MKLLM_FATTN_MMA_ARGS);
+        MKLLM_FATTN_MMA_TILE(256, 32, 2);
     }
     return cudaErrorInvalidValue;
+#undef MKLLM_FATTN_MMA_TILE
 #undef MKLLM_FATTN_MMA_ARGS
 }
 
@@ -4795,6 +4885,7 @@ extern "C" size_t mkllm_fattn_mma_fixup_bytes(int nsm) {
 // llama.cpp fattn.cu:402-404 + fattn-vec.cuh:522-532:
 // Ada+ decode, F16 K/V, n_q==1, not (GQA>4 && KV>=8192) ->
 // flash_attn_ext_vec<256, 1, F16, F16, false>, launch_fattn stream_k=false.
+// A q8_0 cache runs the same kernel on Q8_0 views (see fattn_vec_f16_math).
 #include "fattn/fattn-vec.cuh"
 
 extern "C" size_t mkllm_fattn_vec_tmp_bytes(int n_q, int H, int kc) {
@@ -4810,7 +4901,7 @@ extern "C" size_t mkllm_fattn_vec_tmp_bytes(int n_q, int H, int kc) {
     return (bytes128 > bytes256 ? bytes128 : bytes256) * (size_t) n_q * (size_t) H;
 }
 
-template <int DKQ>
+template <int DKQ, ggml_type type_KV>
 static cudaError_t mkllm_fattn_vec_launch(
         const void * q, const void * k, const void * v, const void * mask, void * dst,
         int D, int Dv, int kc, int n_q, int H, int Hkv, float scale,
@@ -4831,11 +4922,15 @@ static cudaError_t mkllm_fattn_vec_launch(
     constexpr int nwarps = nthreads / 32;
     constexpr int nbatch_fa = DKQ;
     fattn_kernel_t fattn_kernel =
+        flash_attn_ext_vec<DKQ, ncols1, type_KV, type_KV, false>;
+    // Split sized from the f16 kernel whatever the storage, as in the MMA
+    // launcher: the same split is the same reduction order.
+    fattn_kernel_t split_kernel =
         flash_attn_ext_vec<DKQ, ncols1, GGML_TYPE_F16, GGML_TYPE_F16, false>;
     dim3 block_dim(32, nwarps, 1);
     int max_blocks_per_sm = 1;
     cudaError_t err = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-        &max_blocks_per_sm, fattn_kernel, block_dim.x * block_dim.y, 0);
+        &max_blocks_per_sm, split_kernel, block_dim.x * block_dim.y, 0);
     if (err != cudaSuccess || max_blocks_per_sm <= 0) {
         max_blocks_per_sm = 1;
     }
@@ -4864,7 +4959,10 @@ static cudaError_t mkllm_fattn_vec_launch(
     dim3 blocks_num((unsigned) ntiles_x, (unsigned) parallel_blocks,
         (unsigned) (ntiles_z_gqa * Hkv));
     mkllm_fattn_trace_launch(
-        "vec", D, n_q, kc, H, Hkv, nsm, max_blocks_per_sm, parallel_blocks,
+        type_KV == GGML_TYPE_Q8_0 ? "vecq8" : "vec", D, n_q, kc, H, Hkv, nsm, max_blocks_per_sm,
+        mkllm_fattn_own_occupancy(type_KV != GGML_TYPE_F16, fattn_kernel, block_dim.x * block_dim.y,
+            0, max_blocks_per_sm),
+        parallel_blocks,
         ntiles_dst, ntiles_KV, 0, blocks_num.x, blocks_num.y, blocks_num.z);
     float * dst_ptr = (float *) dst;
     float2 * meta_ptr = nullptr;
@@ -4901,17 +4999,25 @@ static cudaError_t mkllm_fattn_vec_launch(
     return cudaSuccess;
 }
 
-extern "C" cudaError_t mkllm_fattn_vec_f16(
+// `kv_q8`: K and V are q8_0 views of the cache, read in place (both or
+// neither), with the F16 kernel's arithmetic on the values their dequant
+// would produce.
+extern "C" cudaError_t mkllm_fattn_vec(
         const void * q, const void * k, const void * v, const void * mask, void * dst,
         int D, int Dv, int kc, int n_q, int H, int Hkv, float scale,
         size_t q_nb1, size_t q_nb2, size_t k_nb1, size_t k_nb2,
         size_t v_nb1, size_t v_nb2, size_t m_nb1, size_t d_nb1, size_t d_nb2,
-        int nsm, float * tmp, cudaStream_t stream) {
+        int nsm, int kv_q8, float * tmp, cudaStream_t stream) {
 #define MKLLM_FATTN_VEC_ARGS \
     q, k, v, mask, dst, D, Dv, kc, n_q, H, Hkv, scale, \
     q_nb1, q_nb2, k_nb1, k_nb2, v_nb1, v_nb2, m_nb1, d_nb1, d_nb2, nsm, tmp, stream
-    if (D == 128) return mkllm_fattn_vec_launch<128>(MKLLM_FATTN_VEC_ARGS);
-    if (D == 256) return mkllm_fattn_vec_launch<256>(MKLLM_FATTN_VEC_ARGS);
+    if (kv_q8) {
+        if (D == 128) return mkllm_fattn_vec_launch<128, GGML_TYPE_Q8_0>(MKLLM_FATTN_VEC_ARGS);
+        if (D == 256) return mkllm_fattn_vec_launch<256, GGML_TYPE_Q8_0>(MKLLM_FATTN_VEC_ARGS);
+        return cudaErrorInvalidValue;
+    }
+    if (D == 128) return mkllm_fattn_vec_launch<128, GGML_TYPE_F16>(MKLLM_FATTN_VEC_ARGS);
+    if (D == 256) return mkllm_fattn_vec_launch<256, GGML_TYPE_F16>(MKLLM_FATTN_VEC_ARGS);
     return cudaErrorInvalidValue;
 #undef MKLLM_FATTN_VEC_ARGS
 }

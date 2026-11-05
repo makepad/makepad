@@ -9,7 +9,7 @@
 use makepad_ai_llm::metal_compiled::{
     execute_compiled_graph, prepare_graph, MetalGraphSession,
 };
-use makepad_ai_llm::{BufferUsage, Context, Graph, InitParams, TensorId, TensorType};
+use makepad_ai_llm::{BufferUsage, Context, Graph, InitParams, Prec, TensorId, TensorType};
 use makepad_ai_metal::{BufferStorageMode, MetalRuntime};
 
 struct Rng(u64);
@@ -248,4 +248,114 @@ fn metal_ssm_conv_matches_shared_cpu_reference() {
         }
     }
     assert_close("metal_ssm_conv", &got, &want, 1e-5, 0.0);
+}
+
+/// A q8_0 KV cache is attended in place (the graph no longer casts it to
+/// f16 first). The q8_0 flash-attention kernels must return exactly the bits
+/// the f16 kernels return on the cache's f16 dequant, for the vec kernel
+/// (decode, verify) and the simdgroup kernel (prefill chunks).
+#[test]
+fn metal_q8_0_kv_attention_matches_its_f16_dequant_bit_for_bit() {
+    // (what, D, keys, queries, heads, KV heads); 24 over 4 at D=256 is the
+    // production model.
+    let cases = [
+        ("decode step", 256i64, 1024i64, 1i64, 24i64, 4i64),
+        ("decode step past 8k", 256, 8192, 1, 24, 4),
+        ("verify width 4", 256, 1024, 4, 24, 4),
+        ("prefill chunk", 256, 512, 32, 24, 4),
+        ("D=128 decode step", 128, 512, 1, 16, 4),
+        ("D=128 prefill chunk", 128, 512, 24, 16, 4),
+    ];
+    let runtime = MetalRuntime::new().expect("Metal runtime for op parity");
+    let mut failures = Vec::new();
+    for (index, &(what, d, kc, n_q, h, hkv)) in cases.iter().enumerate() {
+        let mut rng = Rng::new(0x51ab + index as u64);
+        let mut bench = MetalBench::new(160 << 20);
+        let q_data = f32s(&mut rng, (d * n_q * h) as usize);
+        let q = bench.tensor("q", TensorType::F32, &[d, n_q, h], &as_bytes_f32(&q_data));
+        // Cache rows as the runtime keeps them, [D, Hkv, keys]: block scales
+        // between 2^-8 and 2^-5 and random quants.
+        let q8_cache = |rng: &mut Rng| -> Vec<u8> {
+            let blocks = (d / 32 * hkv * kc) as usize;
+            let mut bytes = Vec::with_capacity(blocks * 34);
+            for _ in 0..blocks {
+                let scale = 0x1C00 + (rng.next_u64() % 0x0C00) as u16;
+                bytes.extend_from_slice(&scale.to_le_bytes());
+                for _ in 0..32 {
+                    bytes.push(((rng.next_u64() % 255) as i32 - 127) as i8 as u8);
+                }
+            }
+            bytes
+        };
+        let k_bytes = q8_cache(&mut rng);
+        let v_bytes = q8_cache(&mut rng);
+        let k_cache = bench.tensor("k_cache", TensorType::Q8_0, &[d, hkv, kc], &k_bytes);
+        let v_cache = bench.tensor("v_cache", TensorType::Q8_0, &[d, hkv, kc], &v_bytes);
+        let mut mask_bytes = Vec::with_capacity((kc * n_q * 2) as usize);
+        for iq in 0..n_q {
+            for c in 0..kc {
+                let hidden = c > kc - n_q + iq || rng.next_u64() % 9 == 0;
+                mask_bytes.extend_from_slice(&if hidden { 0xFC00u16 } else { 0 }.to_le_bytes());
+            }
+        }
+        let mask = bench.tensor("mask", TensorType::F16, &[kc, n_q], &mask_bytes);
+
+        let ctx = &mut bench.ctx;
+        let k = ctx.permute(k_cache, [0, 2, 1, 3]).unwrap();
+        let v = ctx.permute(v_cache, [0, 2, 1, 3]).unwrap();
+        let f16_copy = |ctx: &mut Context, src: TensorId| {
+            let dst = ctx
+                .new_tensor(TensorType::F16, 3, &[d, kc, hkv], BufferUsage::Activations)
+                .unwrap();
+            ctx.cpy(src, dst, BufferUsage::Activations).unwrap()
+        };
+        let k16 = f16_copy(ctx, k);
+        let v16 = f16_copy(ctx, v);
+        let scale = 1.0 / (d as f32).sqrt();
+        let attend = |ctx: &mut Context, k: TensorId, v: TensorId| {
+            let out = ctx
+                .flash_attn_ext(q, k, v, Some(mask), scale, 0.0, 0.0, BufferUsage::Activations)
+                .unwrap();
+            ctx.flash_attn_ext_set_prec(out, Prec::F32).unwrap();
+            out
+        };
+        let want = attend(ctx, k16, v16);
+        let got = attend(ctx, k, v);
+
+        let mut graph = Graph::new();
+        graph.build_forward_expand(&bench.ctx, want).expect("graph build");
+        graph.build_forward_expand(&bench.ctx, got).expect("graph build");
+        let prepared = prepare_graph(&bench.ctx, &graph, runtime.features()).expect("prepare");
+        let session = MetalGraphSession::from_runtime(
+            runtime.clone(),
+            &bench.ctx,
+            &prepared,
+            BufferStorageMode::Private,
+            BufferStorageMode::Private,
+        )
+        .expect("session");
+        let execution =
+            execute_compiled_graph(&runtime, &bench.ctx, session.compiled(), &[], &[want, got])
+                .expect("execute");
+        let words = |b: &[u8]| -> Vec<u32> {
+            b.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect()
+        };
+        let want = words(&execution.outputs[&want]);
+        let got = words(&execution.outputs[&got]);
+        assert!(
+            want.iter().any(|&w| w != 0) && want.iter().all(|&w| f32::from_bits(w).is_finite()),
+            "{what}: the f16 reference is degenerate"
+        );
+        let differ = want.iter().zip(&got).filter(|(a, b)| a != b).count();
+        if differ != 0 || want.len() != got.len() {
+            let first = want.iter().zip(&got).position(|(a, b)| a != b).unwrap_or(0);
+            failures.push(format!(
+                "{what}: {differ} of {} outputs differ from the f16 dequant's, first at {first}: {} vs {}",
+                want.len(),
+                f32::from_bits(got[first]),
+                f32::from_bits(want[first])
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

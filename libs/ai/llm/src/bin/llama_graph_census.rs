@@ -7,7 +7,7 @@
 //!
 //! Usage:
 //!   llama-graph-census <model.gguf> [--n-tokens N] [--n-outputs N]
-//!       [--key-count N] [--max-context N] [--summary-only]
+//!       [--key-count N] [--max-context N] [--kv f16|q8] [--summary-only]
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -24,6 +24,7 @@ struct Args {
     n_outputs: usize,
     key_count: Option<usize>,
     max_context: Option<u32>,
+    kv: Option<TensorType>,
     summary_only: bool,
 }
 
@@ -36,6 +37,7 @@ fn parse_args() -> Result<Args, String> {
         n_outputs: 1,
         key_count: None,
         max_context: Some(8192),
+        kv: None,
         summary_only: false,
     };
     while let Some(arg) = args.next() {
@@ -52,6 +54,13 @@ fn parse_args() -> Result<Args, String> {
             }
             "--max-context" => {
                 out.max_context = Some(take("--max-context")?.parse().map_err(|e| format!("{e}"))?)
+            }
+            "--kv" => {
+                out.kv = Some(match take("--kv")?.as_str() {
+                    "f16" => TensorType::F16,
+                    "q8" => TensorType::Q8_0,
+                    other => return Err(format!("--kv takes f16 or q8, not {other}")),
+                })
             }
             "--summary-only" => out.summary_only = true,
             other => return Err(format!("unknown argument {other}")),
@@ -75,7 +84,11 @@ fn run() -> Result<(), String> {
     let args = parse_args()?;
     let model = LlamaModel::load(&args.model_path).map_err(|e| format!("{e:?}"))?;
     let plan = model.execution_plan().map_err(|e| format!("{e:?}"))?;
-    let config = LlamaSessionConfig::default();
+    let mut config = LlamaSessionConfig::default();
+    if let Some(kv) = args.kv {
+        config.attention_k_type = kv;
+        config.attention_v_type = kv;
+    }
     let max_context = args
         .max_context
         .unwrap_or_else(|| model.context_length().unwrap_or(8192));
