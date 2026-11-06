@@ -10,22 +10,27 @@
 //!    ([`Solid::lower`]) or to fields ([`Solid::to_node`]).
 //! 2. [`check_joints`]: on the final parts' fields (design meshes, or the
 //!    slicer's beads near each joint: [`bead::BeadField`]).
-//! 3. [`assembly`]: bodies, joints and anchors for [`sim::simulate`] or a live
+//! 3. [`flex::measure_all`]: where parts bonded to a flexible part bend, on
+//!    the final parts (the host keeps them in [`Plan::flexes`]).
+//! 4. [`assembly`]: bodies, joints and anchors for [`sim::simulate`] or a live
 //!    [`sim::MechWorld`].
 
 pub mod bead;
 pub mod check;
+pub mod flex;
 pub mod geom;
 pub mod joint;
 mod keep_out;
 pub mod mass;
 pub mod runner;
 pub mod sim;
+pub mod way;
 pub mod weave;
 
 pub use check::{Found, Gap, LayerReport, Risk, Tack, Turned};
+pub use flex::{BondDecl, Flex};
 pub use geom::{Prim, Solid, P3};
-pub use joint::{AnchorDecl, BallDecl, Extent, HingeDecl, JointDecl, JointGeom, Material, Measured, Note, PartBox, Profile};
+pub use joint::{AnchorDecl, BallDecl, BearingDecl, Brake, BrakeDecl, Extent, BRAKE_SQUEEZE, HingeDecl, JointDecl, JointGeom, Material, Measured, Note, PartBox, Profile, Seat, SliderDecl};
 
 use geom::*;
 use makepad_csg_sdf::Sdf3;
@@ -40,6 +45,10 @@ pub struct Plan {
     /// Per part: its solid (`Solid::Part(i)` when no joint touches it).
     pub solids: Vec<Solid>,
     pub anchors: Vec<AnchorDecl>,
+    /// Parts bonded to others as they print, and the soft joints of those bonded to a flexible
+    /// part as measured on the final parts ([`flex::measure_all`]; empty until the host does).
+    pub bonds: Vec<BondDecl>,
+    pub flexes: Vec<Flex>,
     pub profile: Profile,
 }
 
@@ -50,7 +59,16 @@ pub struct PlanError {
     pub message: String,
 }
 
-pub fn plan(parts: &[PartBox], decls: &[JointDecl], anchors: &[AnchorDecl], profile: &Profile) -> Result<Plan, PlanError> {
+/// A bond that cannot be: the bond (index) and why.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BondError {
+    pub bond: usize,
+    pub message: String,
+}
+
+/// Plan the joints; `bonds` must name parts in range, each bond a part and others than it (see
+/// [`check_bonds`]).
+pub fn plan(parts: &[PartBox], decls: &[JointDecl], bonds: &[BondDecl], anchors: &[AnchorDecl], profile: &Profile) -> Result<Plan, PlanError> {
     let mut joints = Vec::new();
     let mut notes = Vec::new();
     for (i, d) in decls.iter().enumerate() {
@@ -58,10 +76,28 @@ pub fn plan(parts: &[PartBox], decls: &[JointDecl], anchors: &[AnchorDecl], prof
         if a == b || a >= parts.len() || b >= parts.len() {
             return Err(PlanError { joint: i, message: "a joint needs two different parts".into() });
         }
+        if let Some(s) = d.shoe() {
+            let fail = |message: &str| Err(PlanError { joint: i, message: message.into() });
+            if s >= parts.len() || s == a || s == b {
+                return fail("a brake's shoe is a part of its own, not one the hinge joins");
+            }
+            if decls.iter().any(|o| o.parts().0 == s || o.parts().1 == s) {
+                return fail("a brake's shoe cannot be a part a joint joins");
+            }
+            if decls[..i].iter().any(|o| o.shoe() == Some(s)) {
+                return fail("each brake needs a shoe part of its own");
+            }
+        }
+    }
+    let ground = grounds(parts, decls, bonds, norm(profile.up));
+    for (i, d) in decls.iter().enumerate() {
+        let (a, b) = d.parts();
         let mut n = Vec::new();
         let g = match d {
             JointDecl::Hinge(h) => joint::size_hinge(h, &parts[a], &parts[b], profile, &mut n),
-            JointDecl::Ball(bd) => joint::size_ball(bd, &parts[a], &parts[b], profile, &mut n),
+            JointDecl::Ball(bd) => joint::size_ball(bd, &parts[a], &parts[b], ground[a], profile, &mut n),
+            JointDecl::Slider(sd) => way::size_slider(sd, &parts[a], &parts[b], ground[a], profile, &mut n).map(JointGeom::Slider),
+            JointDecl::Bearing(rd) => way::size_bearing(rd, &parts[a], &parts[b], ground[a], profile, &mut n).map(JointGeom::Bearing),
         }
         .map_err(|message| PlanError { joint: i, message })?;
         joints.push(g);
@@ -74,8 +110,61 @@ pub fn plan(parts: &[PartBox], decls: &[JointDecl], anchors: &[AnchorDecl], prof
             (a.clone(), parts[a.part].extent(a.at, norm(axis)))
         })
         .collect();
-    let solids = joint::assemble(parts.len(), &joints, decls, &anchor_ext);
-    Ok(Plan { joints, decls: decls.to_vec(), notes, solids, anchors: anchors.to_vec(), profile: profile.clone() })
+    let mut solids = joint::assemble(parts.len(), &joints, decls, &anchor_ext);
+    // a bonded part has the part it is bonded to cut out of it, exactly: they print touching
+    for bond in bonds {
+        for &p in &bond.parts {
+            let s = std::mem::replace(&mut solids[p], Solid::Part(p));
+            solids[p] = Solid::diff(s, vec![Solid::Part(bond.to)]);
+        }
+    }
+    Ok(Plan { joints, decls: decls.to_vec(), notes, solids, anchors: anchors.to_vec(), bonds: bonds.to_vec(), flexes: Vec::new(), profile: profile.clone() })
+}
+
+/// Why these bonds cannot be, the first that cannot: each names its part and at least one other,
+/// all in range and none twice in it.
+pub fn check_bonds(parts: usize, bonds: &[BondDecl]) -> Result<(), BondError> {
+    for (i, b) in bonds.iter().enumerate() {
+        let fail = |message: &str| Err(BondError { bond: i, message: message.into() });
+        if b.parts.is_empty() {
+            return fail("a bond needs parts to bond");
+        }
+        if b.to >= parts || b.parts.iter().any(|p| *p >= parts) {
+            return fail("a bond names a part that is not there");
+        }
+        if b.parts.contains(&b.to) {
+            return fail("a part cannot be bonded to itself");
+        }
+        if b.parts.iter().enumerate().any(|(k, p)| b.parts[..k].contains(p)) {
+            return fail("a part is bonded twice in one bond");
+        }
+    }
+    Ok(())
+}
+
+/// Per part: the bed under it along `up`, the lowest point of the parts its joints connect it to
+/// (they print in place together, dropped as one; a brake's shoes with the part they print in).
+fn grounds(parts: &[PartBox], decls: &[JointDecl], bonds: &[BondDecl], up: P3) -> Vec<f64> {
+    let mut group: Vec<usize> = (0..parts.len()).collect();
+    fn root(g: &mut [usize], mut i: usize) -> usize {
+        while g[i] != i {
+            g[i] = g[g[i]];
+            i = g[i];
+        }
+        i
+    }
+    let shoes = decls.iter().filter_map(|d| d.shoe().map(|s| (d.parts().1, s)));
+    let pairs = decls.iter().map(|d| d.parts()).chain(shoes).chain(bonds.iter().flat_map(|b| b.parts.iter().map(|p| (b.to, *p))));
+    for (a, b) in pairs {
+        let (ra, rb) = (root(&mut group, a), root(&mut group, b));
+        group[ra.max(rb)] = ra.min(rb);
+    }
+    let mut low = vec![f64::INFINITY; parts.len()];
+    for (i, p) in parts.iter().enumerate() {
+        let r = root(&mut group, i);
+        low[r] = low[r].min(p.extent([0.0; 3], up).lo);
+    }
+    (0..parts.len()).map(|i| low[root(&mut group, i)]).collect()
 }
 
 /// A part's design field: its solid over the original parts' fields (joint primitives exact).
@@ -88,8 +177,8 @@ impl<'a> Sdf3 for SolidField<'a> {
     fn distance(&self, p: makepad_csg_math::Vec3d) -> f64 {
         self.solid.distance(&self.parts, p3(p))
     }
-    fn distance_bounded(&self, p: makepad_csg_math::Vec3d, lower: f64, upper: f64, _hint: Option<(makepad_csg_math::Vec3d, f64)>) -> f64 {
-        self.solid.distance_bounded(&self.parts, p3(p), lower, upper)
+    fn distance_bounded(&self, p: makepad_csg_math::Vec3d, lower: f64, upper: f64, hints: &mut makepad_csg_sdf::Hints) -> f64 {
+        self.solid.distance_bounded(&self.parts, p3(p), lower, upper, hints)
     }
 }
 
@@ -152,14 +241,27 @@ pub struct JointCheck {
 impl JointCheck {
     /// Free to move as printed: no fused verdict and a positive range.
     pub fn ok(&self) -> bool {
-        self.risk < Risk::High && self.gap.gap >= GAP_TOL && self.gap.gap > 0.5 * self.clearance && self.effective.1 - self.effective.0 > 2f64.to_radians() && self.retention.map_or(true, |r| r >= 0.2)
+        self.risk < Risk::High && self.gap.gap >= GAP_TOL && self.gap.gap > 0.5 * self.clearance && self.effective.1 - self.effective.0 > min_range(self.kind) && self.retention.map_or(true, |r| r >= 0.2)
     }
+}
+
+/// The least range a joint of this kind moves through to be free: two degrees, a slider's half a
+/// millimetre.
+pub fn min_range(kind: &str) -> f64 {
+    if kind == "slider" { 0.5 } else { 2f64.to_radians() }
+}
+
+/// The range a joint of `kind` moves through (`effective`), when too short to be free.
+pub fn short_range(kind: &str, effective: (f64, f64)) -> Option<f64> {
+    let range = effective.1 - effective.0;
+    (range <= min_range(kind)).then_some(range)
 }
 
 /// What keeps a joint from moving as printed (see [`JointCheck::binds`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Bind {
-    /// The parts overlap (or touch) at `at`: the gap there, mm.
+    /// The parts overlap (or touch) at `at`: the gap there, mm (negative: they overlap by at
+    /// least that much).
     Fused { gap: f64, at: P3 },
     /// They come closer than half the clearance the joint was built with, at `at`.
     Tight { gap: f64, at: P3 },
@@ -169,7 +271,8 @@ pub enum Bind {
     /// In the layer at height `z` the two parts' sections come this close (mm): too close for
     /// the slicer to keep them apart.
     Sections { gap: f64, z: f64 },
-    /// It turns through less than two degrees (radians).
+    /// It turns through less than two degrees (radians; a slider: slides less than half a
+    /// millimetre, mm).
     Range { range: f64 },
     /// The pin holds the parts by this little (mm).
     Loose { retention: f64 },
@@ -185,7 +288,8 @@ pub const LAYERS_AHEAD: usize = 3;
 
 /// Why a joint checked like this is not free, by the same tests as [`JointCheck::ok`] (a check
 /// as printed adds [`Bind::Supports`] where support bridges the parts).
-pub fn binds(gap: &Gap, layers: &LayerReport, score: f64, clearance: f64, c_xy: f64, effective: (f64, f64), retention: Option<f64>) -> Vec<Bind> {
+/// `short`: the range it moves through, when under its kind's [`min_range`] ([`short_range`]).
+pub fn binds(gap: &Gap, layers: &LayerReport, score: f64, clearance: f64, c_xy: f64, short: Option<f64>, retention: Option<f64>) -> Vec<Bind> {
     let mut out = Vec::new();
     if gap.gap < GAP_TOL {
         out.push(Bind::Fused { gap: gap.gap, at: gap.at });
@@ -203,8 +307,8 @@ pub fn binds(gap: &Gap, layers: &LayerReport, score: f64, clearance: f64, c_xy: 
     if layers.layer_gap < 0.7 * c_xy {
         out.push(Bind::Sections { gap: layers.layer_gap, z: layers.layer_gap_at });
     }
-    if effective.1 - effective.0 <= 2f64.to_radians() {
-        out.push(Bind::Range { range: effective.1 - effective.0 });
+    if let Some(range) = short {
+        out.push(Bind::Range { range });
     }
     if let Some(r) = retention.filter(|r| *r < 0.2) {
         out.push(Bind::Loose { retention: r });
@@ -234,6 +338,58 @@ pub fn bed_level(parts: &[FinalPart], up: P3) -> f64 {
     parts.iter().flat_map(|p| p.vertices.iter()).map(|v| dot(*v, up)).fold(f64::INFINITY, f64::min)
 }
 
+/// What a joint's sweeps found: its kind, its declared range, where the parts touch each way
+/// (positive amounts back and on), the range the sim takes, and each sweep's stop.
+pub struct Swept {
+    pub kind: &'static str,
+    pub declared: Option<(f64, f64)>,
+    pub field: (f64, f64),
+    pub effective: (f64, f64),
+    pub turns: Vec<Turned>,
+}
+
+/// Sweep a joint's moving part about (or along) `axis` through `pivot` inside `region`, every
+/// way its kind moves, by `sweep` (the fields it runs on are the caller's): a hinge's and a
+/// bearing's two turns, a ball's four tilts, a slider's two slides a millimetre past its travel
+/// (where it stops is its end stop). None when `sweep` is stopped.
+pub fn sweep_joint(g: &JointGeom, pivot: P3, axis: P3, region: (P3, P3), contact: f64, sweep: &mut dyn FnMut(check::Sweep) -> Option<Turned>) -> Option<Swept> {
+    let pi = std::f64::consts::PI;
+    let (lo, hi) = region;
+    let mut turns = Vec::new();
+    let mut run = |turns: &mut Vec<Turned>, axis: P3, dir: f64, max: f64, turn: (usize, usize), slide: bool| -> Option<f64> {
+        let t = sweep(check::Sweep { pivot, axis, dir, lo, hi, contact, max, turn, slide })?;
+        turns.push(t);
+        Some(t.angle.abs())
+    };
+    let (kind, declared, field, effective) = match g {
+        JointGeom::Hinge { limits, .. } => {
+            let up = run(&mut turns, axis, 1.0, pi, (0, 2), false)?;
+            let dn = run(&mut turns, axis, -1.0, pi, (1, 2), false)?;
+            let (l, u) = limits.unwrap_or((-pi, pi));
+            ("hinge", *limits, (dn, up), (l.max(-dn), u.min(up)))
+        }
+        JointGeom::Ball { cone, .. } => {
+            let (u, v) = basis(axis);
+            let mut m = pi;
+            for (k, (t, dir)) in [(u, 1.0), (u, -1.0), (v, 1.0), (v, -1.0)].into_iter().enumerate() {
+                m = m.min(run(&mut turns, t, dir, pi * 0.5, (k, 4), false)?);
+            }
+            ("ball", Some((0.0, *cone)), (0.0, m), (0.0, cone.min(m)))
+        }
+        JointGeom::Slider(w) => {
+            let on = run(&mut turns, axis, 1.0, w.travel.1 + 1.0, (0, 2), true)?;
+            let back = run(&mut turns, axis, -1.0, -w.travel.0 + 1.0, (1, 2), true)?;
+            ("slider", Some(w.travel), (back, on), (w.travel.0.max(-back), w.travel.1.min(on)))
+        }
+        JointGeom::Bearing(_) => {
+            let on = run(&mut turns, axis, 1.0, pi, (0, 2), false)?;
+            let back = run(&mut turns, axis, -1.0, pi, (1, 2), false)?;
+            ("bearing", None, (back, on), (-back, on))
+        }
+    };
+    Some(Swept { kind, declared, field, effective, turns })
+}
+
 /// Check every joint on the parts' fields (in parallel), telling `sink` every step and stopping
 /// within one once it cancels: a cancelled joint is left out. A closure `|| false` checks them
 /// all and reports nothing.
@@ -253,38 +409,26 @@ pub fn check_joints(plan: &Plan, parts: &[FinalPart], geometry: Geometry, sink: 
         let g = &plan.joints[i];
         let (a, b) = plan.decls[i].parts();
         let (fa, fb) = (parts[a].field, parts[b].field);
+        // a brake's shoes print in B: they keep clear of A as it prints, as B does, but give as
+        // it turns (the sweep turns B alone)
+        let welded = g.shoe().map(|s| Welded(fb, parts[s].field));
+        let fbs: &(dyn Sdf3 + Sync) = match &welded {
+            Some(w) => w,
+            None => fb,
+        };
         let (lo, hi) = g.region();
         // a few layers first, so a bar knows the layer check's time while the gap search runs
-        let slicer = check::Slicer::new(fa, fb, lo, hi, up, plan.profile.layer, 0.05, bed);
+        let slicer = check::Slicer::new(fa, fbs, check::LayerSetup { lo, hi, up, layer: plan.profile.layer, res: 0.05, bed });
         let ahead = slicer.ahead(LAYERS_AHEAD, step)?;
         let t_ahead = started.elapsed().as_secs_f64() * 1000.0;
-        let gap = check::min_gap_steps(fa, fb, lo, hi, GAP_TOL, step)?;
+        let gap = check::min_gap_steps(fa, fbs, lo, hi, GAP_TOL, step)?;
         let t_gap = started.elapsed().as_secs_f64() * 1000.0 - t_ahead;
         let layers = slicer.check(ahead, step)?;
         let t_layers = started.elapsed().as_secs_f64() * 1000.0 - t_gap;
         let (risk, risk_score) = check::risk(gap.gap, layers.layer_gap, &layers.tack, c_xy);
         let (pivot, axis) = g.pivot();
-        let pi = std::f64::consts::PI;
-        let mut turns = Vec::new();
-        let (kind, declared, field, effective) = match g {
-            JointGeom::Hinge { limits, .. } => {
-                for (k, dir) in [1.0, -1.0].into_iter().enumerate() {
-                    turns.push(check::sweep_steps(fa, fb, pivot, axis, dir, lo, hi, 0.02, pi, (k, 2), step)?);
-                }
-                let (up_lim, dn_lim) = (turns[0].angle.abs(), turns[1].angle.abs());
-                let (l, u) = limits.unwrap_or((-pi, pi));
-                ("hinge", *limits, (dn_lim, up_lim), (l.max(-dn_lim), u.min(up_lim)))
-            }
-            JointGeom::Ball { cone, .. } => {
-                let (u, v) = basis(axis);
-                for (k, (t, dir)) in [(u, 1.0), (u, -1.0), (v, 1.0), (v, -1.0)].into_iter().enumerate() {
-                    turns.push(check::sweep_steps(fa, fb, pivot, t, dir, lo, hi, 0.02, pi * 0.5, (k, 4), step)?);
-                }
-                let m = turns.iter().map(|t| t.angle.abs()).fold(pi, f64::min);
-                ("ball", Some((0.0, *cone)), (0.0, m), (0.0, cone.min(m)))
-            }
-        };
-        let binds = binds(&gap, &layers, risk_score, g.clearance(), c_xy, effective, g.retention());
+        let Swept { kind, declared, field, effective, turns } = sweep_joint(g, pivot, axis, (lo, hi), 0.02, &mut |s| check::sweep_steps(fa, fb, s, step))?;
+        let binds = binds(&gap, &layers, risk_score, g.clearance(), c_xy, short_range(kind, effective), g.retention());
         Some(JointCheck {
             joint: i,
             kind,
@@ -327,6 +471,22 @@ pub fn check_joints(plan: &Plan, parts: &[FinalPart], geometry: Geometry, sink: 
     let mut v = out.into_inner().unwrap();
     v.sort_by_key(|c| c.joint);
     v
+}
+
+/// A part with a brake's shoes printed in it, as one field.
+struct Welded<'a>(&'a (dyn Sdf3 + Sync), &'a (dyn Sdf3 + Sync));
+
+impl Sdf3 for Welded<'_> {
+    fn distance(&self, p: makepad_csg_math::Vec3d) -> f64 {
+        self.0.distance(p).min(self.1.distance(p))
+    }
+    fn distance_bounded(&self, p: makepad_csg_math::Vec3d, lower: f64, upper: f64, hints: &mut makepad_csg_sdf::Hints) -> f64 {
+        let d = self.0.distance_bounded(p, lower, upper, hints.part(0));
+        if d <= lower {
+            return d;
+        }
+        self.1.distance_bounded(p, lower, d, hints.part(1))
+    }
 }
 
 /// Convex hulls of a part away from its joints: its vertices outside every keep-out sphere, cut into slabs along
@@ -381,7 +541,10 @@ pub fn proxy_hulls(vertices: &[P3], keep_out: &[(P3, f64)]) -> Vec<Vec<P3>> {
 }
 
 /// The sim's view of the piece: a body per part (mass from its mesh at `fill`), a joint per joint with its
-/// effective limits and pin friction, the anchors.
+/// effective limits and pin friction, then each bond's: a part bonded to a rigid part welded to it; parts
+/// bonded to a flexible part bent each to the next by their [`Plan::flexes`], the flexible part itself
+/// riding the first of them (it weighs nothing and meets nothing: the host shows it bent with them, and its
+/// own weight, a few percent of theirs, is left out). The anchors.
 pub fn assembly(plan: &Plan, parts: &[FinalPart], checks: &[JointCheck], fill: f64) -> sim::Assembly {
     let density = plan.profile.material.density;
     let mu = plan.profile.measured.mu.unwrap_or(plan.profile.material.mu);
@@ -389,13 +552,29 @@ pub fn assembly(plan: &Plan, parts: &[FinalPart], checks: &[JointCheck], fill: f
     for (g, d) in plan.joints.iter().zip(&plan.decls) {
         let (a, b) = d.parts();
         let k = g.keep_out();
-        keep[a].push(k);
-        keep[b].push(k);
+        keep[a].extend(k.iter().copied());
+        if let Some(s) = g.shoe() {
+            keep[s].extend(k.iter().copied());
+        }
+        keep[b].extend(k);
     }
+    for f in &plan.flexes {
+        keep[f.a].push(f.keep_out());
+        keep[f.b].push(f.keep_out());
+    }
+    let riders: Vec<usize> = plan.bonds.iter().filter(|b| b.flexible).map(|b| b.to).collect();
     let bodies = parts
         .iter()
         .enumerate()
-        .map(|(i, p)| mesh_body(p.name, p.vertices, p.triangles, density, fill, &keep[i]))
+        .map(|(i, p)| {
+            let mut body = mesh_body(p.name, p.vertices, p.triangles, density, fill, &keep[i]);
+            if riders.contains(&i) {
+                body.hulls.clear();
+                body.mass.mass *= RIDER_WEIGHT;
+                body.mass.inertia = body.mass.inertia.map(|r| r.map(|x| x * RIDER_WEIGHT));
+            }
+            body
+        })
         .collect();
     let joints = plan
         .joints
@@ -411,13 +590,22 @@ pub fn assembly(plan: &Plan, parts: &[FinalPart], checks: &[JointCheck], fill: f
                     sim::JointKind::Revolute { lower: l, upper: u }
                 }
                 JointGeom::Ball { cone, twist, .. } => sim::JointKind::Spherical { cone: *cone, twist: *twist },
+                JointGeom::Slider(w) => sim::JointKind::Prismatic { lower: w.travel.0, upper: w.travel.1 },
+                JointGeom::Bearing(_) => sim::JointKind::Revolute { lower: -std::f64::consts::PI, upper: std::f64::consts::PI },
             };
             let kind = match checks.iter().find(|c| c.joint == i) {
                 Some(c) => declared.measured(c.effective),
                 None => declared,
             };
-            sim::JointSpec { name: format!("{}-{}", parts[a].name, parts[b].name), a, b, pivot, axis, kind, friction: sim::Friction { mu, radius: g.bearing_radius(), torque: 0.0 } }
+            let collide = matches!(g, JointGeom::Hinge { .. } | JointGeom::Ball { .. });
+            let brake = match g {
+                JointGeom::Hinge { brake: Some(bk), .. } => Some(sim::BrakeSpec { torque: (0..=sim::BRAKE_SAMPLES).map(|k| bk.torque(k as f64 * sim::BRAKE_STEP) * N_MM).collect() }),
+                _ => None,
+            };
+            sim::JointSpec { name: format!("{}-{}", parts[a].name, parts[b].name), a, b, pivot, axis, kind, friction: sim::Friction { mu, radius: g.bearing_radius(), torque: 0.0 }, collide, brake }
         })
+        .chain(bond_joints(plan, parts))
+        .chain(plan.joints.iter().zip(&plan.decls).filter_map(|(g, d)| g.shoe().map(|s| shoe_weld(plan, parts, d.parts().1, s))))
         .collect();
     let anchors = plan
         .anchors
@@ -432,7 +620,62 @@ pub fn assembly(plan: &Plan, parts: &[FinalPart], checks: &[JointCheck], fill: f
             friction: sim::Friction { mu, radius: a.hole.map_or(0.0, |h| h.1), torque: 0.0 },
         })
         .collect();
-    sim::Assembly { bodies, joints, anchors, up: plan.profile.up, sleep: sim::SLEEP_SPEED, workers: 1, contact_margin: 0.0, max_speed: 0.0, contact_hertz: 0.0, substeps: 0, ball: None, shake_about: [0.0; 3], shake_tempo: 0.0, lift: 0.0 }
+    sim::Assembly { bodies, joints, anchors, up: plan.profile.up, sleep: sim::SLEEP_SPEED, workers: 1, contact_margin: 0.0, max_speed: 0.0, contact_hertz: 0.0, substeps: sim::JOINT_SUBSTEPS, ball: None, shake_about: [0.0; 3], shake_tempo: 0.0, lift: 0.0 }
+}
+
+/// A newton millimetre in the sim's units (g mm^2 / s^2).
+const N_MM: f64 = 1e6;
+
+/// A brake's shoes ride the part they print in.
+fn shoe_weld(plan: &Plan, parts: &[FinalPart], b: usize, shoe: usize) -> sim::JointSpec {
+    sim::JointSpec {
+        name: format!("{}+{}", parts[b].name, parts[shoe].name),
+        a: b,
+        b: shoe,
+        pivot: flex::centre(&parts[shoe]),
+        axis: plan.profile.up,
+        kind: sim::JointKind::Weld,
+        friction: sim::Friction::default(),
+        collide: false,
+        brake: None,
+    }
+}
+
+/// What a flexible part a row of parts is bonded to weighs in the sim, of what it would: it rides the
+/// first of them and the soft joints between them carry its stiffness.
+const RIDER_WEIGHT: f64 = 1e-4;
+
+/// The bonds' joints: welds to rigid parts, a flexible part's weld to the first part on it and the
+/// soft joints between the parts along it.
+fn bond_joints<'a>(plan: &'a Plan, parts: &'a [FinalPart]) -> impl Iterator<Item = sim::JointSpec> + 'a {
+    let weld = move |a: usize, b: usize| sim::JointSpec {
+        name: format!("{}+{}", parts[a].name, parts[b].name),
+        a,
+        b,
+        pivot: flex::centre(&parts[b]),
+        axis: plan.profile.up,
+        kind: sim::JointKind::Weld,
+        friction: sim::Friction::default(),
+        collide: false,
+        brake: None,
+    };
+    let welds = plan.bonds.iter().flat_map(move |b| if b.flexible { vec![weld(b.parts[0], b.to)] } else { b.parts.iter().map(|p| weld(b.to, *p)).collect() });
+    let flexes = plan.flexes.iter().map(move |f| {
+        let (soft, stiff) = f.stiffness(flex::FLEX_MODULUS);
+        let one_way = f.one_way();
+        sim::JointSpec {
+            name: format!("{}-{}", parts[f.a].name, parts[f.b].name),
+            a: f.a,
+            b: f.b,
+            pivot: f.pivot,
+            axis: if one_way { f.section.soft_axis } else { f.axis },
+            kind: sim::JointKind::Flex { stiffness: if one_way { soft } else { (soft * stiff).sqrt() }, damping: flex::FLEX_DAMPING, one_way },
+            friction: sim::Friction::default(),
+            collide: true,
+            brake: None,
+        }
+    });
+    flexes.chain(welds)
 }
 
 /// A rigid part from its final mesh: the same mass and collision proxies for free and jointed

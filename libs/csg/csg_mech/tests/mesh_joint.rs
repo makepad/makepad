@@ -1,7 +1,7 @@
 use makepad_csg_math::Vec3d;
-use makepad_csg_mech::check::{closer_than, min_gap, risk, sweep_limit, Risk};
+use makepad_csg_mech::check::{closer_than, min_gap, risk, sweep_limit, Risk, Sweep};
 use makepad_csg_sdf::mesh_field::{MeshData, MeshField};
-use makepad_csg_sdf::Sdf3;
+use makepad_csg_sdf::{Hints, Sdf3};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
@@ -15,9 +15,9 @@ impl Sdf3 for Counted {
         self.calls.fetch_add(1, Ordering::Relaxed);
         self.field.distance(p)
     }
-    fn distance_bounded(&self, p: Vec3d, lower: f64, upper: f64, hint: Option<(Vec3d, f64)>) -> f64 {
+    fn distance_bounded(&self, p: Vec3d, lower: f64, upper: f64, hints: &mut Hints) -> f64 {
         self.calls.fetch_add(1, Ordering::Relaxed);
-        self.field.distance_bounded(p, lower, upper, hint)
+        self.field.distance_bounded(p, lower, upper, hints)
     }
 }
 
@@ -79,7 +79,8 @@ fn mesh_pin_and_knuckles() {
     let (lo, hi) = ([-1.0; 3], [1.0; 3]);
     let start = Instant::now();
     let gap = min_gap(&a, &b, lo, hi, 0.02);
-    println!("min_gap: {:.9} mm, {} cells, {} field calls, {:.3} ms", gap.gap, gap.evals, counts(), start.elapsed().as_secs_f64() * 1000.0);
+    let found = if gap.gap < 0.0 { format!("overlap at least {:.9} mm", -gap.gap) } else { format!("{:.9} mm", gap.gap) };
+    println!("min_gap: {found}, {} cells, {} field calls, {:.3} ms", gap.evals, counts(), start.elapsed().as_secs_f64() * 1000.0);
     assert!((gap.gap - 0.2).abs() < 0.036, "{gap:?}");
     for contact in [0.05, 0.25] {
         let start = Instant::now();
@@ -88,7 +89,7 @@ fn mesh_pin_and_knuckles() {
         assert_eq!(hit, contact > 0.2);
     }
     let start = Instant::now();
-    let limit = sweep_limit(&a, &b, [0.0; 3], [0.0, 0.0, 1.0], 1.0, lo, hi, 0.05, std::f64::consts::PI);
+    let limit = sweep_limit(&a, &b, Sweep { pivot: [0.0; 3], axis: [0.0, 0.0, 1.0], dir: 1.0, lo, hi, contact: 0.05, max: std::f64::consts::PI, turn: (0, 1), slide: false });
     println!("sweep_limit: {:.9} rad, {} field calls, {:.3} ms", limit, counts(), start.elapsed().as_secs_f64() * 1000.0);
     assert_eq!(limit, std::f64::consts::PI, "a clear hinge rotates through 180 degrees");
     assert_eq!(risk(gap.gap, 0.2, &[0.0; 4], 0.2).0, Risk::Low);

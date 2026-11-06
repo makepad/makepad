@@ -15,9 +15,9 @@
 
 use std::sync::Arc;
 
-use crate::aabb_tree::AabbTree;
+use crate::aabb_tree::{ray_intersects_triangle, AabbTree};
 use crate::thread_pool;
-use makepad_csg_math::{dvec3, Vec3d};
+use makepad_csg_math::{dvec3, BBox3d, Vec3d};
 use makepad_csg_mesh::mesh::TriMesh;
 
 /// Classification of a triangle relative to another solid.
@@ -81,15 +81,79 @@ pub fn classify_triangles_in(mesh_to_classify: &TriMesh, other: &MeshAccel, on_b
     }
     let origins: Vec<_> = (0..source.len() as u32).collect();
     let coplanar = crate::corefine::coplanar_regions(mesh_to_classify, &origins, &pairs, source, target);
-    classify_triangles_with_coplanar(mesh_to_classify, other, on_boundary, &coplanar)
+    classify_triangles_with_coplanar(mesh_to_classify, &InsideTest::whole(other), on_boundary, &coplanar)
 }
 
-pub(crate) fn classify_triangles_with_coplanar(mesh_to_classify: &TriMesh, other: &MeshAccel, on_boundary: &[bool], coplanar: &[Option<bool>]) -> Vec<TriLocation> {
+/// The solid a closed mesh bounds, as the classification queries it: by rays to infinity against the whole mesh,
+/// or, for points of a region, by segments within it against the mesh's triangles that meet it.
+#[derive(Clone)]
+pub(crate) struct InsideTest {
+    ctx: Arc<ClassifyContext>,
+    /// Three points of the region and whether each is inside: a point's side is a reference's, flipped by each
+    /// crossing of the segment between them.
+    refs: Option<[(Vec3d, bool); 3]>,
+}
+
+impl InsideTest {
+    /// Rays against `accel`, the whole mesh ([`point_inside_bvh`]).
+    pub(crate) fn whole(accel: &MeshAccel) -> Self {
+        InsideTest { ctx: accel.ctx.clone(), refs: None }
+    }
+
+    /// Points of `region` against the solid `mesh` bounds, with `near` the accelerator of every triangle of
+    /// `mesh` that meets `region`. Inside the (convex) region the surface is those triangles, so the crossings of
+    /// a segment from a point to a reference point of the region flip the reference's side. Each of the three
+    /// references is classified once, against the whole mesh by the three rays of [`point_inside_bvh`]; a point
+    /// takes the majority of its three segments, as a whole query takes the majority of its rays.
+    pub(crate) fn local(near: &MeshAccel, region: BBox3d, mesh: &TriMesh) -> Self {
+        // Fixed points at irrational fractions of the region: off the axis-aligned planes a model's faces lie in.
+        let (lo, size) = (region.min, region.size());
+        let at = |f: [f64; 3]| dvec3(lo.x + size.x * f[0], lo.y + size.y * f[1], lo.z + size.z * f[2]);
+        let points = [at([0.3183, 0.5772, 0.6931]), at([0.7071, 0.3679, 0.4142]), at([0.4472, 0.8284, 0.2361])];
+        let dirs = RAY_DIRECTIONS;
+        let inv = dirs.map(|d| dvec3(1.0 / d.x, 1.0 / d.y, 1.0 / d.z));
+        // One pass over the whole mesh for the nine rays, each hit test as the tree's leaf test.
+        let mut counts = [[0u32; 3]; 3];
+        for ti in 0..mesh.triangle_count() {
+            if ti % 4096 == 0 && thread_pool::cancelled() {
+                break;
+            }
+            let (a, b, c) = mesh.triangle_vertices(ti);
+            let bbox = BBox3d::from_triangle(a, b, c);
+            for (k, &p) in points.iter().enumerate() {
+                for j in 0..3 {
+                    if bbox.ray_intersects(p, inv[j]) && ray_intersects_triangle(p, dirs[j], a, b, c) {
+                        counts[k][j] += 1;
+                    }
+                }
+            }
+        }
+        let refs = std::array::from_fn(|k| (points[k], counts[k].iter().filter(|&&c| c % 2 == 1).count() >= 2));
+        InsideTest { ctx: near.ctx.clone(), refs: Some(refs) }
+    }
+
+    fn inside(&self, point: Vec3d) -> bool {
+        let Some(refs) = &self.refs else { return point_inside_bvh(point, &self.ctx.tree, &self.ctx.tris) };
+        let mut inside_votes = 0u32;
+        for &(r, r_inside) in refs {
+            if thread_pool::cancelled() {
+                return false;
+            }
+            let odd = self.ctx.tree.segment_cross_count(point, r, &self.ctx.tris) % 2 == 1;
+            if odd != r_inside {
+                inside_votes += 1;
+            }
+        }
+        inside_votes >= 2
+    }
+}
+
+pub(crate) fn classify_triangles_with_coplanar(mesh_to_classify: &TriMesh, other: &InsideTest, on_boundary: &[bool], coplanar: &[Option<bool>]) -> Vec<TriLocation> {
     let n = mesh_to_classify.triangle_count();
     if n == 0 {
         return Vec::new();
     }
-    let ctx = other.ctx.clone();
+    let ctx = other.clone();
 
     // A connected patch of non-boundary triangles (joined across shared
     // edges) does not cross the other mesh's surface, so it lies wholly
@@ -208,8 +272,8 @@ fn non_boundary_patches(mesh: &TriMesh, on_boundary: &[bool]) -> (Vec<u32>, usiz
 
 /// A corefined region not covered by a coplanar face lies wholly inside or
 /// outside. Query the region itself: an offset may cross a nearby surface.
-fn classify_one(centroid: Vec3d, ctx: &ClassifyContext) -> TriLocation {
-    if point_inside_bvh(centroid, &ctx.tree, &ctx.tris) {
+fn classify_one(centroid: Vec3d, ctx: &InsideTest) -> TriLocation {
+    if ctx.inside(centroid) {
         TriLocation::Inside
     } else {
         TriLocation::Outside
@@ -255,16 +319,17 @@ pub fn point_inside_mesh(point: Vec3d, mesh: &TriMesh) -> bool {
     MeshAccel::build(mesh).point_inside(point)
 }
 
+/// The rays of a point query: off the axes, so axis-aligned faces and edges are not grazed.
+const RAY_DIRECTIONS: [Vec3d; 3] = [
+    dvec3(0.8726, 0.3517, 0.1943),
+    dvec3(-0.4123, 0.7891, 0.2345),
+    dvec3(0.1234, -0.5678, 0.8901),
+];
+
 /// Test if a point is inside a mesh using AABB tree traversal with majority vote.
 fn point_inside_bvh(point: Vec3d, tree: &AabbTree, tris: &[(Vec3d, Vec3d, Vec3d)]) -> bool {
-    let directions = [
-        dvec3(0.8726, 0.3517, 0.1943),
-        dvec3(-0.4123, 0.7891, 0.2345),
-        dvec3(0.1234, -0.5678, 0.8901),
-    ];
-
     let mut inside_votes = 0u32;
-    for &ray_dir in &directions {
+    for ray_dir in RAY_DIRECTIONS {
         if thread_pool::cancelled() {
             return false;
         }

@@ -106,12 +106,33 @@ pub fn tri_tri_intersection_indexed(
     b_vi: [u32; 3],
     b_ti: u32,
 ) -> TriTriResult {
+    tri_tri_intersection_indexed_with_tolerance(
+        a0, a1, a2, a_vi, a_ti, b0, b1, b2, b_vi, b_ti,
+        plane_tolerance(a0, a1, a2, b0, b1, b2),
+    )
+}
+
+/// Corefinement supplies one operation scale to broad phase, plane tests and
+/// finishing. A distant corner must not enlarge only the final weld and join
+/// opposite walls that the face-pair predicates classified as disjoint.
+pub(crate) fn tri_tri_intersection_indexed_with_tolerance(
+    a0: Vec3d,
+    a1: Vec3d,
+    a2: Vec3d,
+    a_vi: [u32; 3],
+    a_ti: u32,
+    b0: Vec3d,
+    b1: Vec3d,
+    b2: Vec3d,
+    b_vi: [u32; 3],
+    b_ti: u32,
+    tol: f64,
+) -> TriTriResult {
     let db = [orient3d(b0, b1, b2, a0), orient3d(b0, b1, b2, a1), orient3d(b0, b1, b2, a2)];
     let da = [orient3d(a0, a1, a2, b0), orient3d(a0, a1, a2, b1), orient3d(a0, a1, a2, b2)];
     // Keep the existing recognition of whole faces that coincide up to
     // transform rounding. Never snap individual vertices of a crossing
     // triangle: doing so erases a real interval next to a shared cap.
-    let tol = plane_tolerance(a0, a1, a2, b0, b1, b2);
     let na_len = (a1 - a0).cross(a2 - a0).length();
     let nb_len = (b1 - b0).cross(b2 - b0).length();
     if db.iter().all(|d| snap_to_plane(*d, nb_len, tol) == 0.0)
@@ -333,7 +354,7 @@ fn project_onto(p: Vec3d, _dir: Vec3d, axis: usize) -> f64 {
 /// The distance (model units) within which a vertex counts as lying on the
 /// other triangle's plane: far below any feature a mesh models, far above the
 /// rounding of coordinates that went through different transforms.
-pub(crate) fn plane_tolerance(a0: Vec3d, a1: Vec3d, a2: Vec3d, b0: Vec3d, b1: Vec3d, b2: Vec3d) -> f64 {
+pub fn plane_tolerance(a0: Vec3d, a1: Vec3d, a2: Vec3d, b0: Vec3d, b1: Vec3d, b2: Vec3d) -> f64 {
     let scale = [a0, a1, a2, b0, b1, b2]
         .iter()
         .fold(1.0f64, |m, v| m.max(v.x.abs()).max(v.y.abs()).max(v.z.abs()));

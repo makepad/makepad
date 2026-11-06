@@ -16,7 +16,7 @@
 // Everything is std-only with a local xorshift64* PRNG, so a given seed always
 // produces the same geometry.
 //
-// The volume oracle is a Monte-Carlo estimate that uses an INDEPENDENT
+// Thin recipes carry exact overlap volumes; other recipes use a Monte-Carlo estimate that uses an INDEPENDENT
 // +X-ray parity point-in-mesh test against the operand meshes (not the
 // library's own BVH). Sampling the operand meshes rather than the analytic
 // primitives is deliberate: an 8-segment UV sphere has ~15% less volume than
@@ -295,9 +295,11 @@ impl Operand {
 #[derive(Clone, Debug)]
 enum Recipe {
     /// One operand pair evaluated under one or more ops.
-    Pair { a: Operand, b: Operand, ops: Vec<Op>, note: String },
+    Pair { a: Operand, b: Operand, ops: Vec<Op>, note: String, exact_overlap: Option<f64> },
     /// Start from `base`, apply `steps` booleans in sequence.
     Cascade { base: Operand, steps: Vec<(Operand, Op)> },
+    /// Slabs with independently rounded placements, touching up to a few ulps.
+    TwistedStack { outline: Vec<[f64; 2]>, n: usize, height: f64, twist: f64 },
     /// A = merge(a1, a2) (a deliberately self-intersecting, non-manifold operand).
     Merge { a1: Operand, a2: Operand, b: Operand, op: Op },
 }
@@ -305,7 +307,7 @@ enum Recipe {
 impl Recipe {
     fn code(&self) -> String {
         match self {
-            Recipe::Pair { a, b, ops, note } => {
+            Recipe::Pair { a, b, ops, note, .. } => {
                 let mut s = format!("// {}\nlet a = {};\nlet b = {};\n", note, a.code(), b.code());
                 for op in ops {
                     s.push_str(&format!("let r_{} = a.{}(&b);\n", op.name(), op.name()));
@@ -324,6 +326,14 @@ impl Recipe {
                 }
                 s
             }
+            Recipe::TwistedStack { outline, n, height, twist } => format!(
+                "let outline = {outline:?};\nlet n = {n};\nlet height = {height:?};\nlet twist = {twist:?};\n\
+                 let slab = Solid::extrude(&outline, (height / n as f64) * 1000.0);\n\
+                 let mut r = Solid::empty();\nfor k in 0..n {{\n\
+                 let next = slab.rotate(dvec3(0.0, 1.0, 0.0), k as f64 * twist)\n\
+                 .translate(0.0, (k as f64 * height / n as f64) * 1000.0, 0.0);\n\
+                 r = r.union(&next);\n}}\n"
+            ),
             Recipe::Merge { a1, a2, b, op } => format!(
                 "// self-intersecting operand built with merge() (no boolean)\n\
                  let a = ({}).merge(&({}));\nlet b = {};\nlet r = a.{}(&b);\n",
@@ -528,13 +538,20 @@ fn mc_volume(
     }
     let frac = hits as f64 / valid as f64;
     let vol = frac * bbox_vol;
-    let sigma = bbox_vol * (frac * (1.0 - frac) / valid as f64).sqrt();
+    // At either endpoint the empirical variance is zero, not the uncertainty.
+    // Make 3*sigma include the rule-of-three bound on unseen probability mass.
+    let sigma = if hits == 0 || hits == valid {
+        bbox_vol / valid as f64
+    } else {
+        bbox_vol * (frac * (1.0 - frac) / valid as f64).sqrt()
+    };
     (vol, sigma, valid, skipped)
 }
 
 // ---------------------------------------------------------------- topology
 
 struct Topo {
+    non_manifold_vertices: usize,
     euler: i64,
     components: usize,
 }
@@ -577,6 +594,25 @@ fn topology(mesh: &TriMesh) -> Topo {
             }
         }
     }
+    let mut corners: Vec<usize> = (0..3 * n).collect();
+    for (&(u, v), group) in &edge_tris {
+        for w in group.windows(2) {
+            for vi in [u, v] {
+                let a = 3 * w[0] + mesh.triangles[w[0]].iter().position(|&x| x == vi).unwrap();
+                let b = 3 * w[1] + mesh.triangles[w[1]].iter().position(|&x| x == vi).unwrap();
+                let (a, b) = (find(&mut corners, a), find(&mut corners, b));
+                corners[a] = b;
+            }
+        }
+    }
+    let mut fans = HashMap::new();
+    let mut bad_vertices = std::collections::HashSet::new();
+    for (ti, tri) in mesh.triangles.iter().enumerate() {
+        for (k, &vi) in tri.iter().enumerate() {
+            let r = find(&mut corners, 3 * ti + k);
+            if *fans.entry(vi).or_insert(r) != r { bad_vertices.insert(vi); }
+        }
+    }
     let mut roots: HashMap<usize, ()> = HashMap::new();
     for i in 0..n {
         let r = find(&mut parent, i);
@@ -586,9 +622,55 @@ fn topology(mesh: &TriMesh) -> Topo {
     let e = edges.len();
     let f = mesh.triangles.len();
     Topo {
+        non_manifold_vertices: bad_vertices.len(),
         euler: v as i64 - e as i64 + f as i64,
         components: roots.len(),
     }
+}
+
+/// Count positive-area overlaps between opposite-facing coplanar triangles.
+/// This is independent of indexing and triangulation, so duplicated vertices
+/// or different diagonals cannot hide a sheet. Roundoff-scale coplanarity is
+/// intentional: two real faces a plane-predicate tolerance apart are a plate.
+fn lamina_pairs(mesh: &TriMesh) -> usize {
+    let bounds = mesh.bounding_box();
+    let scale = [bounds.min, bounds.max].iter().fold(1.0_f64,
+        |m, v| m.max(v.x.abs()).max(v.y.abs()).max(v.z.abs()));
+    let eps = 64.0 * f64::EPSILON * scale;
+    let mut faces: Vec<_> = (0..mesh.triangle_count()).filter_map(|i| {
+        let (a, b, c) = mesh.triangle_vertices(i);
+        let normal = (b - a).cross(c - a);
+        if normal.length() == 0.0 { return None; }
+        Some(([a, b, c], normal.normalize(), a.min(b).min(c), a.max(b).max(c)))
+    }).collect();
+    faces.sort_by(|a, b| a.2.x.total_cmp(&b.2.x));
+    let mut pairs = 0;
+    for (i, &(a, na, amin, amax)) in faces.iter().enumerate() {
+        for &(b, nb, bmin, bmax) in &faces[i + 1..] {
+            if bmin.x > amax.x + eps { break; }
+            if bmin.y > amax.y + eps || bmax.y < amin.y - eps
+                || bmin.z > amax.z + eps || bmax.z < amin.z - eps
+                || na.dot(nb) >= 0.0 || na.cross(nb).length() > 64.0 * f64::EPSILON {
+                continue;
+            }
+            if b.iter().any(|&p| (p - a[0]).dot(na).abs() > eps) { continue; }
+            // Separating-axis test in the common plane. Strict interval overlap
+            // excludes shared edges and points, even with different diagonals.
+            let overlap = [a, b].iter().all(|tri| (0..3).all(|k| {
+                let axis = na.cross(tri[(k + 1) % 3] - tri[k]).normalize();
+                let interval = |t: [Vec3d; 3]| {
+                    t.iter().map(|&p| (p - a[0]).dot(axis)).fold(
+                        (f64::INFINITY, f64::NEG_INFINITY),
+                        |(lo, hi), x| (lo.min(x), hi.max(x)))
+                };
+                let (alo, ahi) = interval(a);
+                let (blo, bhi) = interval(b);
+                ahi.min(bhi) - alo.max(blo) > eps
+            }));
+            if overlap { pairs += 1; }
+        }
+    }
+    pairs
 }
 
 // ---------------------------------------------------------------- checks
@@ -612,7 +694,7 @@ struct CheckOut {
 
 fn check_bool(label: &str, a: &Solid, b: &Solid, op: Op, seed: u64) -> CheckOut {
     let res = op.apply(a, b);
-    check_result(label, a, b, op, &res, seed)
+    check_result(label, a, b, op, &res, seed, None)
 }
 
 fn check_result(
@@ -622,18 +704,26 @@ fn check_result(
     op: Op,
     res: &Solid,
     seed: u64,
+    expected: Option<f64>,
 ) -> CheckOut {
     let ba = a.bounding_box();
     let bb = b.bounding_box();
     let mut bmin = ba.min.min(bb.min);
     let mut bmax = ba.max.max(bb.max);
-    let pad = (bmax - bmin).length() * 0.01 + 1e-12;
-    bmin = bmin - dvec3(pad, pad, pad);
-    bmax = bmax + dvec3(pad, pad, pad);
+    // Pad each axis relative to its own extent: a wide plate must not get
+    // a sampling box thousands of times thicker than the plate.
+    let pad = (bmax - bmin) * 0.01;
+    bmin = bmin - pad;
+    bmax = bmax + pad;
 
-    let oa = Oracle::build(a.mesh());
-    let ob = Oracle::build(b.mesh());
-    let (oracle, sigma, _valid, skipped) = mc_volume(&oa, &ob, bmin, bmax, op, seed);
+    let (oracle, sigma, skipped) = if let Some(exact) = expected {
+        (exact, 0.0, 0)
+    } else {
+        let oa = Oracle::build(a.mesh());
+        let ob = Oracle::build(b.mesh());
+        let (v, s, _, skipped) = mc_volume(&oa, &ob, bmin, bmax, op, seed);
+        (v, s, skipped)
+    };
 
     let rep = res.validate();
     let topo = topology(res.mesh());
@@ -641,7 +731,16 @@ fn check_result(
     let vol_a = a.volume().abs();
     let vol_b = b.volume().abs();
     let bigger = vol_a.max(vol_b).max(1e-300);
-    let tol = (0.02 * bigger).max(3.0 * sigma);
+    let tol = if expected.is_some() {
+        let scale = [ba.min, ba.max, bb.min, bb.max].iter().fold(1.0_f64,
+            |m, v| m.max(v.x.abs()).max(v.y.abs()).max(v.z.abs()));
+        let area: f64 = [a.mesh(), b.mesh()].iter().map(|m|
+            (0..m.triangle_count()).map(|i| m.triangle_area(i)).sum::<f64>()
+        ).sum();
+        area * (1e-9 * scale) + 1e-12 * bigger
+    } else {
+        (0.02 * bigger).max(3.0 * sigma)
+    };
 
     let mut flags: Vec<&'static str> = Vec::new();
     let nan = res.mesh().vertices.iter().any(|v| !v.is_finite());
@@ -655,7 +754,7 @@ fn check_result(
         if rep.boundary_edges > 0 {
             flags.push("NOT_CLOSED");
         }
-        if rep.non_manifold_edges > 0 {
+        if rep.non_manifold_edges > 0 || topo.non_manifold_vertices > 0 {
             flags.push("NON_MANIFOLD");
         }
         if !rep.is_consistently_oriented || vol < -tol {
@@ -667,6 +766,9 @@ fn check_result(
         if topo.euler % 2 != 0 {
             flags.push("ODD_EULER");
         }
+    }
+    if lamina_pairs(res.mesh()) > 0 {
+        flags.push("LAMINA");
     }
     if !nan && (vol - oracle).abs() > tol {
         flags.push("WRONG_VOLUME");
@@ -726,7 +828,7 @@ impl CheckOut {
 // ---------------------------------------------------------------- categories
 
 const CATEGORIES: &[&str] = &[
-    "generic", "coplanar", "touching", "tiny", "scale", "cascade", "nested", "selfint", "thin",
+    "generic", "coplanar", "touching", "tiny", "scale", "cascade", "nested", "selfint", "thin", "twisted_stack",
 ];
 
 fn make_recipe(cat: &str, seed: u64) -> Recipe {
@@ -744,6 +846,20 @@ fn make_recipe(cat: &str, seed: u64) -> Recipe {
         "nested" => nested_recipe(&mut rng, seed),
         "selfint" => selfint_recipe(&mut rng),
         "thin" => thin_recipe(&mut rng, seed),
+        "twisted_stack" => {
+            let n = 3 + rng.below(10);
+            let points = 2 * (4 + rng.below(5));
+            let radius = rng.range(2.0, 5.0);
+            let inner = radius * rng.range(0.6, 0.85);
+            let outline = (0..points).map(|i| {
+                let angle = i as f64 * std::f64::consts::TAU / points as f64;
+                let r = if i % 2 == 0 { radius } else { inner };
+                [r * angle.cos(), r * angle.sin()]
+            }).collect();
+            Recipe::TwistedStack {
+                outline, n, height: rng.range(0.005, 0.02), twist: rng.range(0.8, 4.0),
+            }
+        }
         _ => panic!("unknown category {}", cat),
     }
 }
@@ -769,6 +885,7 @@ fn generic_recipe(rng: &mut Rng, scale: f64) -> Recipe {
         b: Operand { prim: pb, xf: xb },
         ops: vec![Op::Union, Op::Intersection, Op::Difference],
         note: format!("generic overlapping pair (scale {:e})", scale),
+        exact_overlap: None,
     }
 }
 
@@ -807,6 +924,7 @@ fn coplanar_recipe(rng: &mut Rng, seed: u64) -> Recipe {
         b: Operand { prim: b, xf: Xform::translated(bx) },
         ops: vec![Op::pick(rng)],
         note: note.to_string(),
+        exact_overlap: None,
     }
 }
 
@@ -823,6 +941,7 @@ fn touching_recipe(rng: &mut Rng, seed: u64) -> Recipe {
             },
             ops: vec![Op::pick(rng)],
             note: "sphere externally tangent to a cube face".to_string(),
+            exact_overlap: None,
         },
         1 => Recipe::Pair {
             a: Operand::plain(Prim::Cube { x: 2.0, y: 2.0, z: 2.0, center: true }),
@@ -832,6 +951,7 @@ fn touching_recipe(rng: &mut Rng, seed: u64) -> Recipe {
             },
             ops: vec![Op::pick(rng)],
             note: "cylinder flat cap exactly on a cube face".to_string(),
+            exact_overlap: None,
         },
         2 => Recipe::Pair {
             a: Operand::plain(Prim::Cube { x: 2.0, y: 2.0, z: 2.0, center: true }),
@@ -841,12 +961,14 @@ fn touching_recipe(rng: &mut Rng, seed: u64) -> Recipe {
             },
             ops: vec![Op::pick(rng)],
             note: "cylinder cap on cube face, overhanging the edge".to_string(),
+            exact_overlap: None,
         },
         _ => Recipe::Pair {
             a: Operand::plain(Prim::Cube { x: 2.0, y: 2.0, z: 2.0, center: true }),
             b: Operand::plain(Prim::Sphere { r: 1.0, seg, rings }),
             ops: vec![Op::pick(rng)],
             note: "sphere internally tangent to all 6 cube faces".to_string(),
+            exact_overlap: None,
         },
     }
 }
@@ -880,6 +1002,7 @@ fn tiny_recipe(rng: &mut Rng, seed: u64) -> Recipe {
         },
         ops: vec![Op::pick(rng)],
         note: format!("{} perturbed by {:e}", note, sign * eps),
+        exact_overlap: None,
     }
 }
 
@@ -937,6 +1060,7 @@ fn nested_recipe(rng: &mut Rng, seed: u64) -> Recipe {
             },
             ops: vec![Op::Difference],
             note: "cube minus fully-enclosed sphere (should be a closed cavity)".to_string(),
+            exact_overlap: None,
         },
         1 => Recipe::Pair {
             a: Operand::plain(big),
@@ -946,6 +1070,7 @@ fn nested_recipe(rng: &mut Rng, seed: u64) -> Recipe {
             },
             ops: vec![Op::pick(rng)],
             note: "sphere entirely outside the cube".to_string(),
+            exact_overlap: None,
         },
         2 => Recipe::Pair {
             a: Operand::plain(big),
@@ -955,6 +1080,7 @@ fn nested_recipe(rng: &mut Rng, seed: u64) -> Recipe {
             },
             ops: vec![Op::Intersection],
             note: "cube AND fully-enclosed sphere (should be the sphere)".to_string(),
+            exact_overlap: None,
         },
         _ => Recipe::Pair {
             a: Operand::plain(big),
@@ -964,6 +1090,7 @@ fn nested_recipe(rng: &mut Rng, seed: u64) -> Recipe {
             },
             ops: vec![Op::Union],
             note: "cube OR fully-enclosed sphere (should be the cube)".to_string(),
+            exact_overlap: None,
         },
     }
 }
@@ -990,7 +1117,7 @@ fn thin_recipe(rng: &mut Rng, seed: u64) -> Recipe {
         _ => 1e-6,
     };
     let cfg = (seed % 4) as usize;
-    match cfg {
+    let mut recipe = match cfg {
         0 => Recipe::Pair {
             a: Operand::plain(Prim::Cube { x: 1.0, y: t, z: 1.0, center: false }),
             b: Operand {
@@ -999,6 +1126,7 @@ fn thin_recipe(rng: &mut Rng, seed: u64) -> Recipe {
             },
             ops: vec![Op::pick(rng)],
             note: format!("two overlapping {:e}-thick plates", t),
+            exact_overlap: None,
         },
         1 => Recipe::Pair {
             a: Operand::plain(Prim::Cube { x: 1.0, y: 1.0, z: 1.0, center: false }),
@@ -1008,6 +1136,7 @@ fn thin_recipe(rng: &mut Rng, seed: u64) -> Recipe {
             },
             ops: vec![Op::Difference],
             note: format!("difference leaving a {:e}-thick wall", t),
+            exact_overlap: None,
         },
         2 => Recipe::Pair {
             a: Operand::plain(Prim::Cube { x: 1.0, y: 1.0, z: 1.0, center: true }),
@@ -1017,6 +1146,7 @@ fn thin_recipe(rng: &mut Rng, seed: u64) -> Recipe {
             },
             ops: vec![Op::pick(rng)],
             note: format!("cube vs {:e}-tall cylinder disc", t),
+            exact_overlap: None,
         },
         _ => Recipe::Pair {
             a: Operand::plain(Prim::Cube { x: 1.0, y: 1.0, z: 1.0, center: true }),
@@ -1026,8 +1156,24 @@ fn thin_recipe(rng: &mut Rng, seed: u64) -> Recipe {
             },
             ops: vec![Op::Difference],
             note: format!("hollow-out leaving {:e}-thick side walls", t),
+            exact_overlap: None,
         },
+    };
+    if let Recipe::Pair { a, b, exact_overlap, .. } = &mut recipe {
+        // All thin operands are axis-aligned boxes, except cfg 2's polygonal
+        // disc, which is wholly inside the cube (including tangent vertices).
+        let sa = a.solid();
+        let sb = b.solid();
+        *exact_overlap = Some(if cfg == 2 {
+            sb.volume()
+        } else {
+            let ba = sa.bounding_box();
+            let bb = sb.bounding_box();
+            let d = ba.max.min(bb.max) - ba.min.max(bb.min);
+            d.x.max(0.0) * d.y.max(0.0) * d.z.max(0.0)
+        });
     }
+    recipe
 }
 
 // ---------------------------------------------------------------- single case
@@ -1040,12 +1186,18 @@ fn run_case(cat: &str, seed: u64) -> i32 {
     let mut break_step: i64 = -1;
 
     match &recipe {
-        Recipe::Pair { a, b, ops, .. } => {
+        Recipe::Pair { a, b, ops, exact_overlap, .. } => {
             let sa = a.solid();
             let sb = b.solid();
             let mut vols: HashMap<&'static str, f64> = HashMap::new();
             for op in ops {
-                let o = check_bool(op.name(), &sa, &sb, *op, seed);
+                let expected = exact_overlap.map(|overlap| match op {
+                    Op::Union => sa.volume() + sb.volume() - overlap,
+                    Op::Difference => sa.volume() - overlap,
+                    Op::Intersection => overlap,
+                });
+                let res = op.apply(&sa, &sb);
+                let o = check_result(op.name(), &sa, &sb, *op, &res, seed, expected);
                 vols.insert(op.name(), o.vol);
                 outs.push(o);
             }
@@ -1077,6 +1229,7 @@ fn run_case(cat: &str, seed: u64) -> i32 {
                     *op,
                     &res,
                     seed.wrapping_add(i as u64),
+                    None,
                 );
                 let bad = !out.flags.is_empty();
                 outs.push(out);
@@ -1087,6 +1240,38 @@ fn run_case(cat: &str, seed: u64) -> i32 {
                 if cur.triangle_count() == 0 {
                     break;
                 }
+            }
+        }
+        Recipe::TwistedStack { outline, n, height, twist } => {
+            let slab = Solid::extrude(outline, (height / *n as f64) * 1000.0);
+            let mut cur = slab.clone();
+            let mut expected = cur.volume();
+            for k in 1..*n {
+                // Keep this arithmetic separate from the extrusion height:
+                // adjacent caps can have ulp gaps or overlaps after conversion.
+                let next = slab.rotate(dvec3(0.0, 1.0, 0.0), k as f64 * twist)
+                    .translate(0.0, (k as f64 * height / *n as f64) * 1000.0, 0.0);
+                expected += next.volume();
+                let res = cur.union(&next);
+                let mut out = check_result(
+                    &format!("slab{k}"), &cur, &next, Op::Union, &res,
+                    seed.wrapping_add(k as u64),
+                    None,
+                );
+                if out.components != 1 {
+                    out.flags.push("MULTIPLE_SHELLS");
+                }
+                // An analytic sum is tighter than the general Monte Carlo oracle.
+                if (res.volume() - expected).abs() > expected.abs() * 1e-9
+                    && !out.flags.contains(&"WRONG_VOLUME")
+                {
+                    out.flags.push("WRONG_VOLUME");
+                }
+                if !out.flags.is_empty() && break_step < 0 {
+                    break_step = k as i64;
+                }
+                outs.push(out);
+                cur = res;
             }
         }
         Recipe::Merge { a1, a2, b, op } => {
@@ -1125,7 +1310,9 @@ fn run_case(cat: &str, seed: u64) -> i32 {
 // ---------------------------------------------------------------- driver
 
 const FLAG_COLS: &[&str] = &[
+    "LAMINA",
     "WRONG_VOLUME",
+    "MULTIPLE_SHELLS",
     "NOT_CLOSED",
     "NON_MANIFOLD",
     "BAD_ORIENTATION",

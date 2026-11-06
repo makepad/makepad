@@ -14,6 +14,8 @@
 //! lie in the XY plane and extrude along +Z.
 
 pub mod bool3;
+#[cfg(test)]
+mod bool3_tests;
 pub mod constrain;
 pub mod edges;
 pub mod measure;

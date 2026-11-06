@@ -17,6 +17,7 @@ use makepad_box3d::id::{BodyId, JointId};
 use makepad_box3d::joint::*;
 use makepad_box3d::math_functions::{conjugate, length, make_quat_from_axis_angle, mul_quat, rotate_vector, to_pos, to_vec3, vec3, Matrix3, Quat, Transform, Vec3, WorldTransform, AABB};
 use makepad_box3d::physics_world::*;
+use makepad_box3d::prismatic_joint::*;
 use makepad_box3d::revolute_joint::*;
 use makepad_box3d::shape::{create_capsule_shape, create_field_shape, create_hull_shape, create_sphere_shape, create_tube_shape, shape_get_body};
 use makepad_box3d::spherical_joint::*;
@@ -54,6 +55,16 @@ pub const CONTACT_MARGIN: f64 = 3.0;
 /// clearance. 240 Hz (a quarter of 240 Hz times 4 substeps, what a weave's hanging cloth runs at) sinks
 /// a stack of parts a few hundredths.
 pub const CONTACT_HERTZ: f64 = 240.0;
+/// Joint stiffness (Hz): box3d's default 60 Hz lets a firm grab pull a slider 2.7 mm past its end
+/// stop and a hinge past its limit; box3d takes this as a quarter of the substep rate (it clamps any
+/// higher to that), as stiff as it holds steadily: at [`JOINT_SUBSTEPS`] a slider's end stop holds
+/// a firm grab within a print gap.
+pub const JOINT_HERTZ: f64 = f32::MAX as f64;
+/// Solver substeps of a jointed assembly's step: its joints are as stiff as a quarter of the substep
+/// rate, 960 Hz at a 240 Hz step. At half that a firm grab pulled a hinge 2 degrees past its limit
+/// and a head swinging on a light collar 4 past, more than a hinge's clearance gives; at this they
+/// hold within it (`a_hinge_holds_its_limits_hung_and_pulled`).
+pub const JOINT_SUBSTEPS: u32 = 16;
 /// Parts slower than this (mm/s) for half a second fall asleep and stop completely.
 pub const SLEEP_SPEED: f64 = 2.0;
 /// A grab's spring follows the cursor critically damped: no overshoot.
@@ -165,6 +176,15 @@ pub enum JointKind {
     Revolute { lower: f64, upper: f64 },
     /// Cone about `axis` (the opening direction); twist about the neck.
     Spherical { cone: f64, twist: Option<(f64, f64)> },
+    /// Along `axis`; limits millimetres (B relative to A, from where it printed).
+    Prismatic { lower: f64, upper: f64 },
+    /// A soft joint where a flexible part runs free between two parts bonded to it
+    /// ([`crate::flex`]): a spring of `stiffness` (N mm per radian) bending it back to how it
+    /// printed, damped by `damping` (of critical); `one_way`, it bends only about `axis` (as a
+    /// hinge), else every way about the pivot.
+    Flex { stiffness: f64, damping: f64, one_way: bool },
+    /// Two parts held as one (bonded to a rigid part, or a flexible part held by its first).
+    Weld,
 }
 
 impl JointKind {
@@ -180,17 +200,35 @@ impl JointKind {
         match self {
             JointKind::Revolute { .. } => JointKind::Revolute { lower: effective.0, upper: effective.1 },
             JointKind::Spherical { twist, .. } => JointKind::Spherical { cone: effective.1, twist: *twist },
+            JointKind::Prismatic { .. } => JointKind::Prismatic { lower: effective.0, upper: effective.1 },
+            JointKind::Flex { .. } | JointKind::Weld => self.clone(),
         }
     }
 
-    /// Within a degree of a limit at this angle (a revolute angle, a ball's cone angle).
+    /// Within a degree of a limit at this angle (a revolute angle, a ball's cone angle), a
+    /// slider within a fifth of a millimetre of an end.
     pub fn near_limit(&self, angle: f64) -> bool {
         let d = 1f64.to_radians();
         match self {
             _ if self.turns_freely() => false,
             JointKind::Revolute { lower, upper } => angle < lower + d || angle > upper - d,
             JointKind::Spherical { cone, .. } => angle > cone - d,
+            JointKind::Prismatic { lower, upper } => angle < lower + 0.2 || angle > upper - 0.2,
+            JointKind::Flex { .. } | JointKind::Weld => false,
         }
+    }
+
+    /// How far it must move to have moved: three degrees, a slider half a millimetre.
+    pub fn moves(&self) -> f64 {
+        match self {
+            JointKind::Prismatic { .. } => 0.5,
+            _ => 3f64.to_radians(),
+        }
+    }
+
+    /// It holds two parts as one: it never moves, and is no joint to move.
+    pub fn holds(&self) -> bool {
+        matches!(self, JointKind::Weld)
     }
 }
 
@@ -203,6 +241,41 @@ pub struct JointSpec {
     pub axis: P3,
     pub kind: JointKind,
     pub friction: Friction,
+    /// Whether the two parts collide away from the joint: a hinge's and a ball's fold onto each
+    /// other; a slider's and a bearing's are clear of each other all through their travel, which
+    /// their limits hold (and a carriage round its rail has one proxy hull across it).
+    pub collide: bool,
+    /// A hinge's brake: the friction it adds by how far it is turned.
+    pub brake: Option<BrakeSpec>,
+}
+
+/// The angle between a brake's samples (radians): half a degree.
+pub const BRAKE_STEP: f64 = std::f64::consts::PI / 360.0;
+/// A brake's samples past the first, through a quarter turn.
+pub const BRAKE_SAMPLES: usize = 180;
+
+/// A hinge's brake: the torque it holds (g mm^2 / s^2) turned off its printed angle, at every
+/// [`BRAKE_STEP`] through a quarter turn. It holds alike either way and each half turn (its two
+/// teeth are half a turn apart).
+#[derive(Clone, Debug, PartialEq)]
+pub struct BrakeSpec {
+    pub torque: Vec<f64>,
+}
+
+impl BrakeSpec {
+    /// The torque it holds turned `ang` (radians) off its printed angle.
+    pub fn at(&self, ang: f64) -> f64 {
+        let pi = std::f64::consts::PI;
+        let a = ang.rem_euclid(pi);
+        let a = if a > 0.5 * pi { pi - a } else { a };
+        let x = a / BRAKE_STEP;
+        let k = (x.floor() as usize).min(self.torque.len().saturating_sub(2));
+        match (self.torque.get(k), self.torque.get(k + 1)) {
+            (Some(t0), Some(t1)) => t0 + (t1 - t0) * (x - k as f64).clamp(0.0, 1.0),
+            (Some(t0), None) => *t0,
+            _ => 0.0,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -269,28 +342,11 @@ impl Assembly {
     }
 
     /// The gravity of a held hanging test. Hung on a pin: across the print up and across the line from the pin
-    /// to the centroid, so the piece swings down from how it was printed. Held fixed: from the held part's
-    /// centre of mass toward the rest (it dangles from the held part). Straight down (-up) without an anchor.
+    /// to the centroid, so the piece swings down from how it was printed. Held fixed (welded where it
+    /// printed, as a car by its chassis) or not held: straight down (-up).
     pub fn hang_gravity(&self) -> P3 {
         let up = norm(self.up);
-        let Some(anchor) = self.anchors.first() else { return scale(up, -1.0) };
-        if anchor.kind == AnchorKind::Fixed {
-            let held: Vec<usize> = self.anchors.iter().map(|a| a.body).collect();
-            let (mut m, mut c) = (0.0, [0.0; 3]);
-            for (i, b) in self.bodies.iter().enumerate() {
-                if !held.contains(&i) {
-                    m += b.mass.mass;
-                    c = madd(c, b.mass.com, b.mass.mass);
-                }
-            }
-            if m > 0.0 {
-                let d = sub(scale(c, 1.0 / m), self.bodies[anchor.body].mass.com);
-                if len(d) > 1e-6 {
-                    return norm(d);
-                }
-            }
-            return scale(up, -1.0);
-        }
+        let Some(anchor) = self.anchors.first().filter(|a| a.kind != AnchorKind::Fixed) else { return scale(up, -1.0) };
         let d = sub(self.centroid(), anchor.pivot);
         let side = cross(up, d);
         if len(side) < 1e-6 * len(d).max(1.0) {
@@ -306,6 +362,32 @@ fn vf(p: P3) -> Vec3 {
 }
 fn pf(v: Vec3) -> P3 {
     [v.x as f64, v.y as f64, v.z as f64]
+}
+
+/// A body's moment of inertia about `n` through its centre of mass (g mm^2).
+fn inertia_about(m: &crate::mass::MassProps, n: P3) -> f64 {
+    (0..3).map(|a| (0..3).map(|b| n[a] * m.inertia[a][b] * n[b]).sum::<f64>()).sum::<f64>().max(1e-9)
+}
+
+/// The hertz of a box3d spring as stiff as `stiffness` (N mm per radian) over `inertia` (g mm^2):
+/// the sim's torques are g mm^2 / s^2, a millionth of a N mm.
+pub fn spring_hertz(stiffness: f64, inertia: f64) -> f64 {
+    (stiffness * 1e6 / inertia).sqrt() / (2.0 * std::f64::consts::PI)
+}
+
+/// A quaternion turning +X onto `axis` (a prismatic joint's frame: box3d slides along its x).
+fn quat_x_to(axis: P3) -> Quat {
+    let a = norm(axis);
+    let x = [1.0, 0.0, 0.0];
+    let c = dot(x, a);
+    if c > 1.0 - 1e-9 {
+        return Quat::IDENTITY;
+    }
+    if c < -1.0 + 1e-9 {
+        return make_quat_from_axis_angle(vec3(0.0, 0.0, 1.0), std::f32::consts::PI);
+    }
+    let k = norm(cross(x, a));
+    make_quat_from_axis_angle(vf(k), c.clamp(-1.0, 1.0).acos() as f32)
 }
 
 /// A quaternion turning +Z onto `axis`.
@@ -431,6 +513,9 @@ pub struct MechWorld {
     /// Balls kept out of fields (none without both).
     keep_out: Option<crate::keep_out::KeepOut>,
     kept_out: usize,
+    /// The braked hinges: the joint, its brake, its own friction and the torque it was last set to
+    /// (g mm^2 / s^2).
+    brakes: Vec<(JointId, BrakeSpec, JointFriction, f32)>,
 }
 
 /// How near the hand the held ground counts as there (mm).
@@ -526,9 +611,10 @@ impl MechWorld {
         }
         let local = |rest: &[P3], i: usize, p: P3| vf(sub(p, rest[i]));
         let mut joints = Vec::new();
+        let mut brakes = Vec::new();
         for j in &asm.joints {
             let q = quat_z_to(j.axis);
-            let base = JointDefBase { a: bodies[j.a], b: bodies[j.b], fa: Transform { p: local(&rest, j.a, j.pivot), q }, fb: Transform { p: local(&rest, j.b, j.pivot), q } };
+            let base = JointDefBase { a: bodies[j.a], b: bodies[j.b], fa: Transform { p: local(&rest, j.a, j.pivot), q }, fb: Transform { p: local(&rest, j.b, j.pivot), q }, collide: j.collide };
             let friction = JointFriction { coefficient: j.friction.mu as f32, radius: j.friction.radius as f32, torque: j.friction.torque as f32 };
             let id = match &j.kind {
                 JointKind::Revolute { lower, upper } => {
@@ -538,7 +624,11 @@ impl MechWorld {
                     d.enable_limit = !j.kind.turns_freely();
                     d.lower_angle = *lower as f32;
                     d.upper_angle = *upper as f32;
-                    create_revolute_joint(&mut world, &d)
+                    let id = create_revolute_joint(&mut world, &d);
+                    if let Some(b) = &j.brake {
+                        brakes.push((id, b.clone(), friction, friction.torque));
+                    }
+                    id
                 }
                 JointKind::Spherical { cone, twist } => {
                     let mut d = default_spherical_joint_def();
@@ -553,6 +643,51 @@ impl MechWorld {
                     }
                     create_spherical_joint(&mut world, &d)
                 }
+                JointKind::Prismatic { lower, upper } => {
+                    // box3d slides along its frame's x
+                    let q = quat_x_to(j.axis);
+                    let mut d = default_prismatic_joint_def();
+                    base.fill(&mut d.base);
+                    d.base.local_frame_a.q = q;
+                    d.base.local_frame_b.q = q;
+                    d.base.friction = friction;
+                    d.enable_limit = true;
+                    d.lower_translation = *lower as f32;
+                    d.upper_translation = *upper as f32;
+                    create_prismatic_joint(&mut world, &d)
+                }
+                JointKind::Flex { stiffness, damping, one_way } => {
+                    // box3d's springs are in hertz over the two bodies' inertia about the bend
+                    let about = |n: P3| 1.0 / (1.0 / inertia_about(&asm.bodies[j.a].mass, n) + 1.0 / inertia_about(&asm.bodies[j.b].mass, n));
+                    let axis = norm(j.axis);
+                    let inertia = if *one_way {
+                        about(axis)
+                    } else {
+                        let (u, v) = basis(axis);
+                        0.5 * (about(u) + about(v))
+                    };
+                    let hertz = spring_hertz(*stiffness, inertia) as f32;
+                    if *one_way {
+                        let mut d = default_revolute_joint_def();
+                        base.fill(&mut d.base);
+                        d.enable_spring = true;
+                        d.hertz = hertz;
+                        d.damping_ratio = *damping as f32;
+                        create_revolute_joint(&mut world, &d)
+                    } else {
+                        let mut d = default_spherical_joint_def();
+                        base.fill(&mut d.base);
+                        d.enable_spring = true;
+                        d.hertz = hertz;
+                        d.damping_ratio = *damping as f32;
+                        create_spherical_joint(&mut world, &d)
+                    }
+                }
+                JointKind::Weld => {
+                    let mut d = default_weld_joint_def();
+                    base.fill(&mut d.base);
+                    makepad_box3d::joint::create_weld_joint(&mut world, &d)
+                }
             };
             joints.push(id);
         }
@@ -565,6 +700,7 @@ impl MechWorld {
                     d.base.body_id_b = bodies[a.body];
                     d.base.local_frame_a = Transform { p: vf(a.pivot), q: Quat::IDENTITY };
                     d.base.local_frame_b = Transform { p: local(&rest, a.body, a.pivot), q: Quat::IDENTITY };
+                    d.base.constraint_hertz = JOINT_HERTZ as f32;
                     anchors.push((a.body, makepad_box3d::joint::create_weld_joint(&mut world, &d), true));
                 }
                 AnchorKind::Pin(axis) => {
@@ -574,6 +710,7 @@ impl MechWorld {
                     d.base.body_id_b = bodies[a.body];
                     d.base.local_frame_a = Transform { p: vf(a.pivot), q };
                     d.base.local_frame_b = Transform { p: local(&rest, a.body, a.pivot), q };
+                    d.base.constraint_hertz = JOINT_HERTZ as f32;
                     d.base.friction = JointFriction { coefficient: a.friction.mu as f32, radius: a.friction.radius as f32, torque: a.friction.torque as f32 };
                     anchors.push((a.body, create_revolute_joint(&mut world, &d), false));
                 }
@@ -598,7 +735,7 @@ impl MechWorld {
             neighbours[j.b].push(j.a);
         }
         let sliding = vec![false; bodies.len()];
-        let mut mw = MechWorld { world, ground, bodies, joints, rest, grab: None, pins: Vec::new(), neighbours, floor: floor_id, anchors, frozen: Vec::new(), gravity, time: 0.0, substeps: if asm.substeps > 0 { asm.substeps as i32 } else { 4 }, shapes, reach, sliding, sleeps: asm.sleep > 0.0, max_speed: asm.max_speed, keep_out: crate::keep_out::KeepOut::new(fields, balled), kept_out: 0 };
+        let mut mw = MechWorld { world, ground, bodies, joints, rest, grab: None, pins: Vec::new(), neighbours, floor: floor_id, anchors, frozen: Vec::new(), gravity, time: 0.0, substeps: if asm.substeps > 0 { asm.substeps as i32 } else { 4 }, shapes, reach, sliding, sleeps: asm.sleep > 0.0, max_speed: asm.max_speed, keep_out: crate::keep_out::KeepOut::new(fields, balled), kept_out: 0, brakes };
         if let Some((c, r)) = asm.ball {
             mw.add_ball(c, r);
         }
@@ -612,6 +749,7 @@ impl MechWorld {
     /// One fixed step (`dt` seconds, always `substeps` solver substeps).
     pub fn step(&mut self, dt: f64) {
         self.update_sliding();
+        self.update_brakes();
         self.damp_grip(dt);
         if let Some(k) = &mut self.keep_out {
             k.start(&self.world, &self.bodies);
@@ -636,6 +774,19 @@ impl MechWorld {
         let keep = 1.0 / (1.0 + dt * g.linear_damping);
         let damped = add(g.velocity, scale(sub(v, g.velocity), keep));
         body_set_linear_velocity(&mut self.world, b, vf(damped));
+    }
+
+    /// Each braked hinge holds what its brake holds where it is turned now. Only a change of more
+    /// than a hundredth of the most it holds touches the joint.
+    fn update_brakes(&mut self) {
+        for (id, brake, own, set) in &mut self.brakes {
+            let most = brake.torque.iter().copied().fold(0.0, f64::max);
+            let torque = (own.torque as f64 + brake.at(revolute_joint_get_angle(&mut self.world, *id) as f64)) as f32;
+            if ((torque - *set) as f64).abs() > 0.01 * most {
+                *set = torque;
+                joint_set_friction(&mut self.world, *id, JointFriction { torque, ..*own });
+            }
+        }
     }
 
     /// Each awake body's contacts stick or slide by its speed (a sleeping body sticks). Only a change
@@ -687,11 +838,14 @@ impl MechWorld {
             }
             // as a joint is built with one: up to a quarter turn
             JointKind::Spherical { cone, .. } => spherical_joint_set_cone_limit(&mut self.world, id, cone.clamp(0.0, 0.5 * std::f64::consts::PI) as f32),
+            JointKind::Prismatic { lower, upper } => prismatic_joint_set_limits(&mut self.world, id, *lower as f32, *upper as f32),
+            JointKind::Flex { .. } | JointKind::Weld => {}
         }
         joint_wake_bodies(&mut self.world, id);
     }
 
-    /// Joint angles: revolute angle, or a spherical joint's cone angle (radians).
+    /// Joint angles: revolute angle, or a spherical joint's cone angle (radians); a slider's
+    /// travel (mm); a flex joint's bend (radians: about its axis one way, else every way).
     pub fn angles(&mut self, asm: &Assembly) -> Vec<f64> {
         asm.joints
             .iter()
@@ -699,6 +853,10 @@ impl MechWorld {
             .map(|(j, id)| match j.kind {
                 JointKind::Revolute { .. } => revolute_joint_get_angle(&mut self.world, id) as f64,
                 JointKind::Spherical { .. } => spherical_joint_get_cone_angle(&mut self.world, id) as f64,
+                JointKind::Prismatic { .. } => prismatic_joint_get_translation(&mut self.world, id) as f64,
+                JointKind::Flex { one_way: true, .. } => revolute_joint_get_angle(&mut self.world, id) as f64,
+                JointKind::Flex { one_way: false, .. } => spherical_joint_get_cone_angle(&mut self.world, id) as f64,
+                JointKind::Weld => 0.0,
             })
             .collect()
     }
@@ -1048,6 +1206,7 @@ struct JointDefBase {
     b: BodyId,
     fa: Transform,
     fb: Transform,
+    collide: bool,
 }
 
 impl JointDefBase {
@@ -1057,7 +1216,8 @@ impl JointDefBase {
         d.local_frame_a = self.fa;
         d.local_frame_b = self.fb;
         // Collision proxies leave the joint regions out, so the connected parts may collide elsewhere.
-        d.collide_connected = true;
+        d.collide_connected = self.collide;
+        d.constraint_hertz = JOINT_HERTZ as f32;
     }
 }
 
@@ -1104,6 +1264,10 @@ impl Default for SimOptions {
 #[derive(Clone, Debug, PartialEq)]
 pub struct JointReport {
     pub name: String,
+    /// A slider's: its amounts are millimetres along its way (the others' radians).
+    pub slide: bool,
+    /// A weld's: it holds two parts as one and never moves ([`JointKind::holds`]).
+    pub holds: bool,
     pub min: f64,
     pub max: f64,
     pub last: f64,
@@ -1111,9 +1275,11 @@ pub struct JointReport {
     pub limits: (f64, f64),
     /// Times it ran into a limit.
     pub limit_hits: u32,
-    /// It turned by more than 3 degrees at some point.
+    /// It turned by more than 3 degrees (slid by more than 0.5 mm) at some point.
     pub moved: bool,
-    /// Predicted stick angle off hanging: asin(mu r / l), l = pivot to the moving side's centre of mass.
+    /// Predicted stick angle off hanging: asin((mu r + T / (m g)) / l), l = pivot to the moving side's
+    /// centre of mass, T its brake's torque where it ended (none: 0); a half turn when that holds its
+    /// weight at any angle.
     pub dead_band: f64,
     /// At the end: the angle between gravity and the pivot-to-centre-of-mass line of the moving side (in the
     /// joint's free plane for a hinge). Hanging right: within the dead band.
@@ -1181,13 +1347,33 @@ fn pose_bodies(asm: &Assembly, angles: &[f64]) -> Vec<(P3, [[f64; 3]; 3])> {
     let mut out: Vec<(P3, [[f64; 3]; 3])> = asm.bodies.iter().map(|b| (b.mass.com, [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])).collect();
     for (j, ang) in angles.iter().enumerate().take(asm.joints.len()) {
         let js = &asm.joints[j];
-        // the pivot and axis move with side A
+        // the pivot and axis move with the side that stays (a joint further along a limb turns
+        // about where the joints before it have put it, in whatever order they come)
         let mv = moving_side(asm, j);
-        let axis = norm(js.axis);
+        let fixed = if mv.contains(&js.b) { js.a } else { js.b };
+        let (fc, fr) = out[fixed];
+        let at = |p: P3| {
+            let q = sub(p, asm.bodies[fixed].mass.com);
+            add(fc, std::array::from_fn(|r| fr[r][0] * q[0] + fr[r][1] * q[1] + fr[r][2] * q[2]))
+        };
+        let pivot = at(js.pivot);
+        let axis = norm(sub(at(add(js.pivot, norm(js.axis))), pivot));
         // a spherical joint tilts about the axis perpendicular to its cone axis and the print up
+        let sign = if mv.contains(&js.b) { 1.0 } else { -1.0 };
+        // a slider's moving side moves along it; a weld never moves
+        match js.kind {
+            JointKind::Prismatic { .. } => {
+                for &i in &mv {
+                    out[i].0 = madd(out[i].0, axis, ang * sign);
+                }
+                continue;
+            }
+            JointKind::Weld => continue,
+            _ => {}
+        }
         let turn_axis = match js.kind {
-            JointKind::Revolute { .. } => axis,
-            JointKind::Spherical { .. } => {
+            JointKind::Revolute { .. } | JointKind::Prismatic { .. } | JointKind::Flex { one_way: true, .. } | JointKind::Weld => axis,
+            JointKind::Spherical { .. } | JointKind::Flex { one_way: false, .. } => {
                 let t = cross(axis, norm(asm.up));
                 if len(t) > 1e-6 {
                     norm(t)
@@ -1196,10 +1382,9 @@ fn pose_bodies(asm: &Assembly, angles: &[f64]) -> Vec<(P3, [[f64; 3]; 3])> {
                 }
             }
         };
-        let sign = if mv.contains(&js.b) { 1.0 } else { -1.0 };
         for &i in &mv {
             let (c, r) = out[i];
-            let nc = add(js.pivot, rotate(sub(c, js.pivot), turn_axis, ang * sign));
+            let nc = add(pivot, rotate(sub(c, pivot), turn_axis, ang * sign));
             let cols: [P3; 3] = std::array::from_fn(|k| rotate([r[0][k], r[1][k], r[2][k]], turn_axis, ang * sign));
             out[i] = (nc, std::array::from_fn(|a| std::array::from_fn(|b| cols[b][a])));
         }
@@ -1354,7 +1539,11 @@ pub fn simulate(asm: &Assembly, opts: &SimOptions, cancelled: &dyn Fn() -> bool)
             c = madd(c, asm.bodies[i].mass.com, asm.bodies[i].mass.mass);
         }
         let lever = if m > 0.0 { len(sub(scale(c, 1.0 / m), js.pivot)) } else { 0.0 };
-        let dead_band = if lever > 0.0 { (js.friction.mu * js.friction.radius / lever).min(1.0).asin() } else { 0.0 };
+        // a brake holds its torque besides: as far again as that turns the moving side's weight
+        // about the pin; past its weight at any angle, it holds wherever it is let go
+        let braked = js.brake.as_ref().map_or(0.0, |b| b.at(last[j]) / (m * len(gravity)).max(1e-9));
+        let stick = if lever > 0.0 { (js.friction.mu * js.friction.radius + braked) / lever } else { 0.0 };
+        let dead_band = if stick >= 1.0 { std::f64::consts::PI } else { stick.asin() };
         // where the moving side's centre of mass is now, against gravity
         let (mut mm, mut cc) = (0.0, [0.0; 3]);
         for &i in &side {
@@ -1370,6 +1559,9 @@ pub fn simulate(asm: &Assembly, opts: &SimOptions, cancelled: &dyn Fn() -> bool)
             let (r, g) = match js.kind {
                 JointKind::Revolute { .. } => (sub(r, scale(axis_now, dot(r, axis_now))), sub(gdir, scale(axis_now, dot(gdir, axis_now)))),
                 JointKind::Spherical { .. } => (r, gdir),
+                // a slide hangs no way, a weld never moves, and a flex joint hangs as far as its
+                // stiffness lets it, not straight
+                JointKind::Prismatic { .. } | JointKind::Flex { .. } | JointKind::Weld => ([0.0; 3], gdir),
             };
             if len(r) < 1e-6 || len(g) < 1e-6 {
                 0.0
@@ -1381,18 +1573,20 @@ pub fn simulate(asm: &Assembly, opts: &SimOptions, cancelled: &dyn Fn() -> bool)
         };
         joints.push(JointReport {
             name: js.name.clone(),
+            slide: matches!(js.kind, JointKind::Prismatic { .. }),
+            holds: js.kind.holds(),
             min: lo[j],
             max: hi[j],
             last: last[j],
             limits: limits_of(&js.kind),
             limit_hits: hits[j],
-            moved: hi[j] - lo[j] > 3f64.to_radians(),
+            moved: hi[j] - lo[j] > js.kind.moves(),
             dead_band,
             hang_error,
             peak_force: peak[j] * 1e-6,
         });
     }
-    let binding: Vec<String> = joints.iter().filter(|j| !j.moved).map(|j| j.name.clone()).collect();
+    let binding: Vec<String> = joints.iter().filter(|j| !j.moved && !j.holds).map(|j| j.name.clone()).collect();
     let drift = match &opts.scenario {
         Scenario::Pose(_) => Some(joints.iter().zip(&start).map(|(j, s)| (j.last - s).abs()).fold(0.0, f64::max)),
         _ => None,
@@ -1431,6 +1625,9 @@ fn limits_of(k: &JointKind) -> (f64, f64) {
     match k {
         JointKind::Revolute { lower, upper } => (*lower, *upper),
         JointKind::Spherical { cone, .. } => (0.0, *cone),
+        JointKind::Prismatic { lower, upper } => (*lower, *upper),
+        JointKind::Flex { .. } => (-std::f64::consts::PI, std::f64::consts::PI),
+        JointKind::Weld => (0.0, 0.0),
     }
 }
 

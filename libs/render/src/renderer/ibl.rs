@@ -33,7 +33,7 @@
 use super::*;
 
 use crate::env_map::prepare::{prepare_ibl_until, KeyRemoval, PrepareSizes, PreparedIbl, ATLAS_WIDTH, DOME_MAX_WIDTH, LIGHTING_MAX_WIDTH};
-use makepad_draw::makepad_platform::thread::{CancellationToken, Class, SubmitError, TaskHandle};
+use makepad_draw::makepad_platform::thread::{checkpoint, CancellationToken, Class, SubmitError, TaskHandle};
 use makepad_render_material::ibl::{EnvMap, EnvPreset};
 use makepad_scene::{Background, EnvSun, Environment, IblSource, TextureRef};
 use std::collections::HashMap;
@@ -406,7 +406,8 @@ fn build_ibl(
     intensity: f32,
     rotation_deg: f32,
     sizes: PrepareSizes,
-    stop: &dyn Fn() -> bool,
+    stop: &(dyn Fn() -> bool + Sync),
+    run: &dyn Fn(usize, &(dyn Fn(usize) + Sync)),
 ) -> Option<IblJobResult> {
     // The keyless copy is the map without the key the host declares for the
     // copy it registered.
@@ -430,7 +431,7 @@ fn build_ibl(
         (Some(sun), None) => KeyRemoval::Fill(sun),
         (None, _) => KeyRemoval::Nothing,
     };
-    let prepared = prepare_ibl_until(&map, removal, intensity, rotation_deg, sizes, stop)?;
+    let prepared = prepare_ibl_until(&map, removal, intensity, rotation_deg, sizes, stop, run)?;
     Some(IblJobResult { generation, key, intensity, rotation_deg, prepared })
 }
 
@@ -808,16 +809,18 @@ impl Renderer {
         let token = cancel.clone();
         let job_map = map.clone();
         let work_map = map.clone();
+        let work_pool = pool.clone();
         let submitted = pool.submit(Class::Background, move || {
-            // Inside a Background job: the stages poll the token.
-            let stop = || token.is_cancelled();
-            build_ibl(generation, wanted, work_map, intensity, rotation_deg, JOB_SIZES, &stop)
+            // Stage and row boundaries yield the permit when higher-class work waits.
+            let stop = || token.is_cancelled() || checkpoint().is_err();
+            let run = |n, f: &(dyn Fn(usize) + Sync)| work_pool.fan_out(n, f);
+            build_ibl(generation, wanted, work_map, intensity, rotation_deg, JOB_SIZES, &stop, &run)
         });
         match submitted {
             Ok(handle) => self.ibl.job = Some(IblJob { handle, key: wanted, map: job_map, cancel }),
             Err(SubmitError::Closed) => {
                 let map = map.map(|r| RegisteredMap { map: shrunk_for_sync(r.map), keyless: r.keyless.map(shrunk_for_sync), bakes: r.bakes });
-                let result = build_ibl(self.ibl.generation, wanted, map, intensity, rotation_deg, SYNC_SIZES, &|| false);
+                let result = build_ibl(self.ibl.generation, wanted, map, intensity, rotation_deg, SYNC_SIZES, &|| false, &|n, f| (0..n).for_each(f));
                 match result {
                     Some(r) => self.adopt_ibl(cx, r),
                     None => self.ibl.failed_for = Some(wanted),
@@ -1856,20 +1859,21 @@ mod tests {
     #[test]
     fn a_build_asks_to_stop_after_its_map() {
         let key = PrepareKey { source: IblSource::Procedural(0), sun: None, daylight_sun: None };
-        let asked = std::cell::Cell::new(0usize);
+        let asked = std::sync::atomic::AtomicUsize::new(0);
+        use std::sync::atomic::Ordering;
         let at_once = || {
-            asked.set(asked.get() + 1);
+            asked.fetch_add(1, Ordering::Relaxed);
             true
         };
-        assert!(build_ibl(1, key, None, 1.0, 0.0, SYNC_SIZES, &at_once).is_none());
-        assert_eq!(asked.get(), 1, "asked once, right after the map");
-        asked.set(0);
+        assert!(build_ibl(1, key, None, 1.0, 0.0, SYNC_SIZES, &at_once, &|n, f| (0..n).for_each(f)).is_none());
+        assert_eq!(asked.load(Ordering::Relaxed), 1, "asked once, right after the map");
+        asked.store(0, Ordering::Relaxed);
         let never = || {
-            asked.set(asked.get() + 1);
+            asked.fetch_add(1, Ordering::Relaxed);
             false
         };
-        assert!(build_ibl(1, key, None, 1.0, 0.0, SYNC_SIZES, &never).is_some());
-        assert!(asked.get() > 1, "and again inside the preparation");
+        assert!(build_ibl(1, key, None, 1.0, 0.0, SYNC_SIZES, &never, &|n, f| (0..n).for_each(f)).is_some());
+        assert!(asked.load(Ordering::Relaxed) > 1, "and again inside the preparation");
     }
 
     /// N1: the sky's own sun the world reports for the daylight switches
@@ -1880,11 +1884,11 @@ mod tests {
         let mut renderer = Renderer::default();
         assert_eq!(renderer.ibl_daylight_sun(), None, "nothing bound");
         let look = PrepareKey { source: IblSource::Procedural(0), sun: None, daylight_sun: None };
-        renderer.adopt_ibl(&mut cx, build_ibl(1, look, None, 1.0, 0.0, SYNC_SIZES, &|| false).unwrap());
+        renderer.adopt_ibl(&mut cx, build_ibl(1, look, None, 1.0, 0.0, SYNC_SIZES, &|| false, &|n, f| (0..n).for_each(f)).unwrap());
         assert_eq!(renderer.ibl_daylight_sun(), None, "a look reports no sun");
         let reported = vec3f(0.0, -1.0, 0.0);
         let key = PrepareKey { daylight_sun: Some(reported), ..look };
-        renderer.adopt_ibl(&mut cx, build_ibl(2, key, None, 1.0, 0.0, SYNC_SIZES, &|| false).unwrap());
+        renderer.adopt_ibl(&mut cx, build_ibl(2, key, None, 1.0, 0.0, SYNC_SIZES, &|| false, &|n, f| (0..n).for_each(f)).unwrap());
         assert_eq!(renderer.ibl_daylight_sun(), Some(reported), "the world's report binds");
         renderer.unbind_ibl();
         assert_eq!(renderer.ibl_daylight_sun(), None);
@@ -1922,7 +1926,7 @@ mod tests {
         let mut filled = map.clone();
         remove_sun(&mut filled, &sun);
         assert!(sh9(&filled) != sh9(&keyless), "premise: the cone fill takes more than the key");
-        let build = |key: PrepareKey, map: Option<RegisteredMap>| build_ibl(1, key, map, 1.0, 0.0, SYNC_SIZES, &|| false).expect("built").prepared;
+        let build = |key: PrepareKey, map: Option<RegisteredMap>| build_ibl(1, key, map, 1.0, 0.0, SYNC_SIZES, &|| false, &|n, f| (0..n).for_each(f)).expect("built").prepared;
 
         // A registered generated map: the keyless copy while a key is declared.
         let hdri = PrepareKey { source: IblSource::Hdri(TextureRef(5)), sun: Some(sun), daylight_sun: None };

@@ -21,6 +21,7 @@
 
 use makepad_draw::makepad_platform::resource_resolver::DecodeBudget;
 use std::f32::consts::{PI, TAU};
+use std::sync::{atomic::{AtomicBool, Ordering}, Mutex};
 
 fn hash64(mut x: u64) -> u64 {
     x = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
@@ -50,6 +51,18 @@ fn normalize_or_up(a: [f32; 3]) -> [f32; 3] {
 fn any_perpendicular(n: [f32; 3]) -> [f32; 3] {
     let helper = if n[1].abs() < 0.9 { [0.0, 1.0, 0.0] } else { [1.0, 0.0, 0.0] };
     normalize_or_up(cross3(helper, n))
+}
+
+/// Hand each row to at most one invocation, releasing its lock before work.
+/// `run` joins all invocations before the borrowed output is used again.
+fn spread_rows<T: Send>(data: &mut [T], width: usize, run: &dyn Fn(usize, &(dyn Fn(usize) + Sync)), row: &(dyn Fn(usize, &mut [T]) + Sync)) {
+    let rows: Vec<_> = data.chunks_mut(width).map(|slice| Mutex::new(Some(slice))).collect();
+    run(rows.len(), &|y| {
+        let slice = rows[y].lock().unwrap().take();
+        if let Some(slice) = slice {
+            row(y, slice);
+        }
+    });
 }
 
 /// A linear HDR equirectangular environment (`height = width / 2` for maps
@@ -183,18 +196,25 @@ impl EnvMap {
     /// Area-averaged resample to `width` x `width / 2` (box filter when
     /// shrinking, bilinear when growing).
     pub fn resized(&self, width: usize) -> EnvMap {
+        self.resized_spread(width, &|n, f| (0..n).for_each(f))
+    }
+
+    /// [`Self::resized`] with independent output rows assigned by `run`.
+    /// The runner must finish all rows before returning. Per-texel sums keep
+    /// their serial order, so scheduling never changes the result's bits.
+    pub fn resized_spread(&self, width: usize, run: &dyn Fn(usize, &(dyn Fn(usize) + Sync))) -> EnvMap {
         let width = width.max(2);
         let height = (width / 2).max(1);
         if width == self.width && height == self.height {
             return self.clone();
         }
-        let mut data = Vec::with_capacity(width * height);
+        let mut data = vec![[0.0; 4]; width * height];
         let sx = self.width as f32 / width as f32;
         let sy = self.height as f32 / height as f32;
-        for y in 0..height {
-            for x in 0..width {
+        spread_rows(&mut data, width, run, &|y, row| {
+            for (x, out) in row.iter_mut().enumerate() {
                 if sx <= 1.0 && sy <= 1.0 {
-                    data.push(self.sample_uv([(x as f32 + 0.5) / width as f32, (y as f32 + 0.5) / height as f32]));
+                    *out = self.sample_uv([(x as f32 + 0.5) / width as f32, (y as f32 + 0.5) / height as f32]);
                     continue;
                 }
                 let x0 = (x as f32 * sx).floor() as usize;
@@ -214,9 +234,9 @@ impl EnvMap {
                         n += w;
                     }
                 }
-                data.push([acc[0] / n, acc[1] / n, acc[2] / n, acc[3] / n]);
+                *out = [acc[0] / n, acc[1] / n, acc[2] / n, acc[3] / n];
             }
-        }
+        });
         EnvMap { width, height, data }
     }
 
@@ -750,7 +770,22 @@ pub fn prefilter(env: &EnvMap, base_width: usize, levels: usize) -> EnvAtlas {
 /// once it says so: a background preparation whose environment was replaced
 /// stops within a level instead of finishing an atlas nobody will use. The
 /// same atlas as [`prefilter`] while `stop` says no.
-pub fn prefilter_until(env: &EnvMap, base_width: usize, levels: usize, stop: &dyn Fn() -> bool) -> Option<EnvAtlas> {
+pub fn prefilter_until(env: &EnvMap, base_width: usize, levels: usize, stop: &(dyn Fn() -> bool + Sync)) -> Option<EnvAtlas> {
+    prefilter_spread(env, base_width, levels, stop, &|n, f| (0..n).for_each(f))
+}
+
+/// [`prefilter`] with each level's rows assigned by `run`, which must run
+/// every row and join before returning. Rows write disjoint output slices;
+/// the per-texel arithmetic and sample order are identical to the serial
+/// prefilter. `stop` is shared by workers and asked before each level and
+/// row. Once any call says yes, no further rows start and no atlas is returned.
+pub fn prefilter_spread(
+    env: &EnvMap,
+    base_width: usize,
+    levels: usize,
+    stop: &(dyn Fn() -> bool + Sync),
+    run: &dyn Fn(usize, &(dyn Fn(usize) + Sync)),
+) -> Option<EnvAtlas> {
     let width = base_width.max(8);
     let level_height = width / 2;
     let levels = levels.clamp(1, 10);
@@ -758,7 +793,7 @@ pub fn prefilter_until(env: &EnvMap, base_width: usize, levels: usize, stop: &dy
     let w0 = pyr.levels[0].width as f32;
     let texel_sa = 4.0 * PI / (w0 * w0 * 0.5);
     let base_lod = (w0 / width as f32).log2().max(0.0);
-    let mut data = Vec::with_capacity(width * level_height * levels);
+    let mut data = vec![[0.0; 4]; width * level_height * levels];
     // Per-texel directions and tangent frames, shared by every level.
     let mut frames = Vec::with_capacity(width * level_height);
     for y in 0..level_height {
@@ -770,35 +805,47 @@ pub fn prefilter_until(env: &EnvMap, base_width: usize, levels: usize, stop: &dy
             frames.push((uv, n, t, b));
         }
     }
+    let cancelled = AtomicBool::new(false);
     for k in 0..levels {
         if stop() {
             return None;
         }
         let r = if levels == 1 { 0.0 } else { k as f32 / (levels - 1) as f32 };
-        if k == 0 || r <= 0.0 {
-            for (uv, ..) in &frames {
-                data.push(pyr.sample(*uv, base_lod));
+        let samples = if k == 0 || r <= 0.0 { Vec::new() } else { ggx_samples(r, 64, texel_sa) };
+        let level = &mut data[k * width * level_height..(k + 1) * width * level_height];
+        spread_rows(level, width, run, &|y, row| {
+            if cancelled.load(Ordering::Relaxed) {
+                return;
             }
-            continue;
-        }
-        let samples = ggx_samples(r, 64, texel_sa);
-        for (_, n, t, b) in &frames {
-            let mut acc = [0.0f32; 3];
-            let mut wsum = 0.0f32;
-            for (l, w, lod) in &samples {
-                let d = [
-                    t[0] * l[0] + b[0] * l[1] + n[0] * l[2],
-                    t[1] * l[0] + b[1] * l[1] + n[1] * l[2],
-                    t[2] * l[0] + b[2] * l[1] + n[2] * l[2],
-                ];
-                let c = pyr.sample(dir_to_equirect_uv(d), lod.max(base_lod));
-                acc[0] += c[0] * w;
-                acc[1] += c[1] * w;
-                acc[2] += c[2] * w;
-                wsum += w;
+            if stop() {
+                cancelled.store(true, Ordering::Relaxed);
+                return;
             }
-            let inv = 1.0 / wsum.max(1e-8);
-            data.push([acc[0] * inv, acc[1] * inv, acc[2] * inv, 1.0]);
+            for (out, (uv, n, t, b)) in row.iter_mut().zip(&frames[y * width..(y + 1) * width]) {
+                if k == 0 || r <= 0.0 {
+                    *out = pyr.sample(*uv, base_lod);
+                    continue;
+                }
+                let mut acc = [0.0f32; 3];
+                let mut wsum = 0.0f32;
+                for (l, w, lod) in &samples {
+                    let d = [
+                        t[0] * l[0] + b[0] * l[1] + n[0] * l[2],
+                        t[1] * l[0] + b[1] * l[1] + n[1] * l[2],
+                        t[2] * l[0] + b[2] * l[1] + n[2] * l[2],
+                    ];
+                    let c = pyr.sample(dir_to_equirect_uv(d), lod.max(base_lod));
+                    acc[0] += c[0] * w;
+                    acc[1] += c[1] * w;
+                    acc[2] += c[2] * w;
+                    wsum += w;
+                }
+                let inv = 1.0 / wsum.max(1e-8);
+                *out = [acc[0] * inv, acc[1] * inv, acc[2] * inv, 1.0];
+            }
+        });
+        if cancelled.load(Ordering::Relaxed) {
+            return None;
         }
     }
     Some(EnvAtlas { width, height: level_height * levels, levels, level_height, data })
@@ -1137,28 +1184,52 @@ mod tests {
         assert_eq!(atlas, prefilter(&env, 128, 6));
     }
 
-    /// `prefilter_until` asks before every level: told to stop before
-    /// level k it gives up there (k + 1 questions, no atlas), and while it
-    /// is never told to stop it returns exactly `prefilter`'s atlas after
-    /// one question per level.
+    /// Cancellation at every level and row boundary returns no atlas;
+    /// an uninterrupted serial preparation retains the same result.
     #[test]
     fn prefilter_until_asks_before_every_level() {
         let env = EnvMap::procedural(&EnvPreset::Sunset, 32, 1.0, 0.0);
-        let asked = std::cell::Cell::new(0usize);
+        let asked = std::sync::atomic::AtomicUsize::new(0);
         let never = || {
-            asked.set(asked.get() + 1);
+            asked.fetch_add(1, Ordering::Relaxed);
             false
         };
         assert_eq!(prefilter_until(&env, 16, 6, &never), Some(prefilter(&env, 16, 6)));
-        assert_eq!(asked.get(), 6, "one question per level");
-        for k in 0..6 {
-            asked.set(0);
+        assert_eq!(asked.load(Ordering::Relaxed), 6 * (1 + 8), "one question per level and row");
+        for k in 0..6 * (1 + 8) {
+            asked.store(0, Ordering::Relaxed);
             let before_k = || {
-                asked.set(asked.get() + 1);
-                asked.get() > k
+                asked.fetch_add(1, Ordering::Relaxed);
+                asked.load(Ordering::Relaxed) > k
             };
-            assert_eq!(prefilter_until(&env, 16, 6, &before_k), None, "stopped before level {k}");
-            assert_eq!(asked.get(), k + 1, "nothing asked after the stop");
+            assert_eq!(prefilter_until(&env, 16, 6, &before_k), None, "stopped at boundary {k}");
+            assert_eq!(asked.load(Ordering::Relaxed), k + 1, "nothing asked after the stop");
+        }
+    }
+
+    #[test]
+    fn spread_rows_preserve_bits_and_cancel_within_a_level() {
+        use std::sync::atomic::AtomicUsize;
+        let env = EnvMap::procedural(&EnvPreset::Sunset, 32, 1.0, 0.0);
+        let serial = prefilter(&env, 16, 4);
+        let reverse = |n, f: &(dyn Fn(usize) + Sync)| (0..n).rev().for_each(f);
+        let threaded = |n, f: &(dyn Fn(usize) + Sync)| {
+            std::thread::scope(|scope| {
+                for worker in 0..2 {
+                    scope.spawn(move || (worker..n).step_by(2).for_each(f));
+                }
+            });
+        };
+        for run in [&reverse as &dyn Fn(usize, &(dyn Fn(usize) + Sync)), &threaded] {
+            assert_eq!(prefilter_spread(&env, 16, 4, &|| false, run).unwrap().data, serial.data, "row scheduling preserves every texel");
+            for width in [16, 32, 48] {
+                assert_eq!(env.resized_spread(width, run), env.resized(width), "resize preserves bits at width {width}");
+            }
+            let asked = AtomicUsize::new(0);
+            // The first level has eight rows: stop after some have started,
+            // even if workers finish in a different order.
+            let stop = || asked.fetch_add(1, Ordering::Relaxed) >= 4;
+            assert!(prefilter_spread(&env, 16, 4, &stop, run).is_none(), "a mid-level stop discards the atlas");
         }
     }
 

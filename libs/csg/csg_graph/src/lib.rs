@@ -17,6 +17,7 @@ mod hash;
 
 pub use eval::{Evaluator, Failure};
 pub use makepad_csg_cad::{Seg, Shape, Sketch, Tolerance};
+pub use makepad_csg_cad::bool3::disjoint_tool_bounds;
 pub use makepad_csg_mesh::mesh::TriMesh;
 
 use hash::Hasher;

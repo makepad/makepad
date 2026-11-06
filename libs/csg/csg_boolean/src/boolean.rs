@@ -10,11 +10,12 @@ use makepad_csg_math::portable::PortableFloat;
 // 2. Classify each triangle as inside/outside the other mesh
 // 3. Select faces based on the boolean operation
 
-use crate::classify::{classify_triangles_with_coplanar, MeshAccel, TriLocation};
+use crate::classify::{classify_triangles_with_coplanar, InsideTest, MeshAccel, TriLocation};
 use crate::corefine::corefine_in;
 use crate::thread_pool;
-use makepad_csg_math::{dvec3, Vec3d};
+use makepad_csg_math::{dvec3, BBox3d, Vec3d};
 use makepad_csg_mesh::mesh::TriMesh;
+use std::borrow::Cow;
 
 /// Boolean operation type.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -34,7 +35,8 @@ pub enum BoolOp {
 /// the final authority.
 #[derive(Clone, Copy, Debug)]
 pub struct FinishParams {
-    /// Weld / T-junction snapping tolerance for the intersection region.
+    /// Upper bound on weld / T-junction snapping, and the sliver altitude cutoff.
+    /// Snapping is also bounded by the numerical plane-coincidence tolerance.
     pub tolerance: f64,
 }
 
@@ -50,21 +52,32 @@ pub fn mesh_boolean(mesh_a: &TriMesh, mesh_b: &TriMesh, op: BoolOp) -> TriMesh {
 }
 
 /// Perform a boolean operation with explicit finishing parameters.
+///
+/// Only what the other operand can reach takes part: each operand's triangles outside the other's box, grown by
+/// every distance the boolean treats as coincident, lie outside the other solid and pass through as they are,
+/// on the vertices they had. The rest is corefined, classified and finished, its seam with the passed-through
+/// triangles kept: a cutter at one end of a large mesh costs what it cuts.
 pub fn mesh_boolean_with(
     mesh_a: &TriMesh,
     mesh_b: &TriMesh,
     op: BoolOp,
     finish: FinishParams,
 ) -> TriMesh {
-    let (prep_a, prep_b) = (MeshAccel::build(mesh_a), MeshAccel::build(mesh_b));
-    mesh_boolean_in(mesh_a, &prep_a, mesh_b, &prep_b, op, finish)
+    let (box_a, box_b) = (mesh_a.bounding_box(), mesh_b.bounding_box());
+    let all = box_a.union(box_b);
+    // The broad phase admits pairs within the plane tolerance, the weld and the T-junction repair snap within
+    // the finishing tolerance: past both, nothing of one operand can touch the other.
+    let reach = finish.tolerance.max(crate::tri_tri::plane_tolerance(all.min, all.max, all.min, all.max, all.min, all.max));
+    let a = Operand::within(mesh_a, box_b.grow(reach));
+    let b = Operand::within(mesh_b, box_a.grow(reach));
+    boolean_of(&a, &b, op, finish)
 }
 
 /// [`mesh_boolean_with`] of prepared meshes: each operand's triangles and
 /// tree serve the overlap search, the classification of the other operand's
 /// triangles (against the operand as given: the same surface as its
 /// corefined copy) and the coplanar checks, so a mesh used in several
-/// booleans is prepared once.
+/// booleans is prepared once. Every triangle takes part.
 pub fn mesh_boolean_in(
     mesh_a: &TriMesh,
     prep_a: &MeshAccel,
@@ -73,15 +86,92 @@ pub fn mesh_boolean_in(
     op: BoolOp,
     finish: FinishParams,
 ) -> TriMesh {
+    boolean_of(&Operand::whole(mesh_a, prep_a), &Operand::whole(mesh_b, prep_b), op, finish)
+}
+
+/// An operand as a boolean sees it: the triangles the other operand can reach, and the rest.
+struct Operand<'a> {
+    mesh: &'a TriMesh,
+    /// The triangles that take part, on all of `mesh`'s vertices (the same indices and bounds); `mesh` itself
+    /// when every triangle does.
+    near: Cow<'a, TriMesh>,
+    near_accel: Cow<'a, MeshAccel>,
+    /// The others: outside the other operand's box, so outside its solid. They pass through as they are.
+    far: Vec<[u32; 3]>,
+    /// The solid `mesh` bounds, for the other operand's points.
+    inside: InsideTest,
+}
+
+impl<'a> Operand<'a> {
+    fn whole(mesh: &'a TriMesh, accel: &'a MeshAccel) -> Self {
+        Operand { mesh, near: Cow::Borrowed(mesh), near_accel: Cow::Borrowed(accel), far: Vec::new(), inside: InsideTest::whole(accel) }
+    }
+
+    /// The triangles of `mesh` that meet `reach` (the other operand's grown box) take part. The other operand's
+    /// points all lie in its own box, inside `reach`, where `mesh`'s surface is those triangles: they are tested
+    /// against them alone (with three reference points of `reach`).
+    fn within(mesh: &'a TriMesh, reach: BBox3d) -> Self {
+        let mut near = Vec::new();
+        let mut far = Vec::new();
+        for (ti, &t) in mesh.triangles.iter().enumerate() {
+            let (a, b, c) = mesh.triangle_vertices(ti);
+            if BBox3d::from_triangle(a, b, c).intersects(reach) { near.push(t) } else { far.push(t) }
+        }
+        if far.is_empty() {
+            let accel = MeshAccel::build(mesh);
+            let inside = InsideTest::whole(&accel);
+            return Operand { mesh, near: Cow::Borrowed(mesh), near_accel: Cow::Owned(accel), far, inside };
+        }
+        let mut part = TriMesh::with_capacity(mesh.vertex_count(), near.len());
+        part.vertices.extend_from_slice(&mesh.vertices);
+        part.triangles = near;
+        let accel = MeshAccel::build(&part);
+        let inside = InsideTest::local(&accel, reach, mesh);
+        Operand { mesh, near: Cow::Owned(part), near_accel: Cow::Owned(accel), far, inside }
+    }
+
+    /// The vertices the passed-through triangles share with the ones that take part, in index order.
+    fn seam(&self) -> Vec<u32> {
+        if self.far.is_empty() {
+            return Vec::new();
+        }
+        let mut far = vec![false; self.mesh.vertex_count()];
+        for t in &self.far {
+            for &v in t {
+                far[v as usize] = true;
+            }
+        }
+        let mut seam = vec![false; self.mesh.vertex_count()];
+        for t in &self.near.triangles {
+            for &v in t {
+                seam[v as usize] = far[v as usize];
+            }
+        }
+        (0..seam.len() as u32).filter(|&v| seam[v as usize]).collect()
+    }
+}
+
+/// The boolean of the operands' parts that take part, with their passed-through triangles joined back on.
+///
+/// The seam between the two keeps every vertex and edge: the passed-through triangles lie outside the other
+/// operand's grown box, where the corefinement splits nothing. The seam vertices go into the result first and the
+/// weld leaves them as they are (they keep their positions for the passed-through triangles, and coincident copies
+/// there, an earlier boolean's contact fans, stay apart); the T-junction repair splits no seam edge, and the
+/// contact separation keeps their indices (their fans are partly passed through).
+/// What changes against finishing the whole mesh: coincident vertices, slivers, duplicates, T-junctions and open
+/// edges among the passed-through triangles stay as they were (the finishing of the boolean that made them saw
+/// them already).
+fn boolean_of(a: &Operand, b: &Operand, op: BoolOp, finish: FinishParams) -> TriMesh {
+    let (mesh_a, mesh_b) = (a.mesh, b.mesh);
     // Step 1: Corefine both meshes
-    let coref = corefine_in(mesh_a, prep_a, mesh_b, prep_b);
+    let coref = corefine_in(&a.near, &a.near_accel, &b.near, &b.near_accel);
     if thread_pool::cancelled() {
         return TriMesh::new();
     }
 
     // Step 2: Classify triangles
-    let class_a = classify_triangles_with_coplanar(&coref.mesh_a, prep_b, &coref.on_boundary_a, &coref.coplanar_a);
-    let class_b = classify_triangles_with_coplanar(&coref.mesh_b, prep_a, &coref.on_boundary_b, &coref.coplanar_b);
+    let class_a = classify_triangles_with_coplanar(&coref.mesh_a, &b.inside, &coref.on_boundary_a, &coref.coplanar_a);
+    let class_b = classify_triangles_with_coplanar(&coref.mesh_b, &a.inside, &coref.on_boundary_b, &coref.coplanar_b);
     if thread_pool::cancelled()
         || class_a.len() != coref.mesh_a.triangle_count()
         || class_b.len() != coref.mesh_b.triangle_count()
@@ -103,6 +193,35 @@ pub fn mesh_boolean_in(
     // verbatim indexed subset of its inputs, not an unindexed triangle soup.
     let mut remap_a: Vec<u32> = vec![u32::MAX; coref.mesh_a.vertex_count()];
     let mut remap_b: Vec<u32> = vec![u32::MAX; coref.mesh_b.vertex_count()];
+
+    // The passed-through triangles a result keeps: those of A (outside B) in a union and a difference, those of
+    // B (outside A) in a union. Their seam vertices come first (`locked`: the result's first `locked` vertices).
+    let keep_far = [op != BoolOp::Intersection, op == BoolOp::Union];
+    for (operand, remap, keep) in [(a, &mut remap_a, keep_far[0]), (b, &mut remap_b, keep_far[1])] {
+        if keep {
+            for v in operand.seam() {
+                remap[v as usize] = result.add_vertex(operand.mesh.vertices[v as usize]);
+                active.push(false);
+            }
+        }
+    }
+    let locked = result.vertex_count();
+    // The seam's edges, which the passed-through triangles share: never split here.
+    let mut seam_edges: Vec<u64> = Vec::new();
+    for (operand, remap, keep) in [(a, &remap_a, keep_far[0]), (b, &remap_b, keep_far[1])] {
+        if keep {
+            for t in &operand.far {
+                for k in 0..3 {
+                    let (u, v) = (remap[t[k] as usize], remap[t[(k + 1) % 3] as usize]);
+                    if u != u32::MAX && v != u32::MAX {
+                        seam_edges.push(edge_key(u, v));
+                    }
+                }
+            }
+        }
+    }
+    seam_edges.sort_unstable();
+    seam_edges.dedup();
 
     fn emit_tri(
         result: &mut TriMesh,
@@ -188,12 +307,19 @@ pub fn mesh_boolean_in(
         );
     }
 
-    // Weld near-coincident vertices from independent intersection computations.
-    // Only vertices of the intersection region can be near-coincident, but the
-    // weld is a cheap single hash pass on the (now indexed) result, and running
-    // it over the whole mesh keeps behavior identical to the historical
-    // pipeline for touching-but-not-intersecting geometry.
-    let weld_remap = result.weld_vertices_remap(finish.tolerance);
+    // Join numerically coincident constructions, not distinct short edges.
+    // The finishing tolerance can exceed genuine cap detail: merging those
+    // vertices moves the surface, and independent copies can even choose
+    // different representatives as the weld's spatial grid fills, opening a
+    // previously matching seam. Use the same coincidence scale as the plane
+    // predicates, with the caller's tolerance as an upper bound.
+    let bounds = mesh_a.bounding_box().union(mesh_b.bounding_box());
+    let coincidence = crate::tri_tri::plane_tolerance(
+        bounds.min, bounds.max, bounds.min, bounds.max, bounds.min, bounds.max,
+    ).min(finish.tolerance);
+    // The seam vertices are fixed: they keep their positions for the passed-through triangles, and coincident
+    // copies there (an earlier boolean's contact fans) stay apart as those triangles have them.
+    let weld_remap = result.weld_vertices_remap_after(locked, coincidence);
 
     // Translate boundary-activity flags across the weld, and mark every vertex
     // that survived a merge (its position now stands in for a moved neighbor).
@@ -215,7 +341,7 @@ pub fn mesh_boolean_in(
     // Slivers (a triangle thinner than the tolerance: a corner within it of
     // its longest edge) go by flipping that edge with the triangle across, the
     // triangles the weld collapsed with them: the mesh stays as closed as it was.
-    remove_slivers(&mut result, finish.tolerance);
+    remove_slivers(&mut result, finish.tolerance, &mut active);
 
     // A boundary vertex from an earlier boolean becomes an ordinary source
     // vertex in the next boolean, so restricting repair to the *latest*
@@ -227,13 +353,39 @@ pub fn mesh_boolean_in(
     mark_open_edge_endpoints(&result, &mut active);
 
     // Close the seams: split every edge at the active vertices lying on it,
-    // all of them at once (one pass, not a pass per inserted vertex).
-    fix_mesh_t_junctions(&mut result, finish.tolerance, &active);
+    // all of them at once (one pass, not a pass per inserted vertex). As with
+    // welding, a merely nearby vertex belongs to real thin geometry: inserting
+    // it would bend the edge and change the surface instead of subdividing it.
+    fix_mesh_t_junctions(&mut result, coincidence, &active, &seam_edges);
 
     // Final cleanup: the triangles the repair collapsed.
     remove_collapsed_triangles(&mut result);
     remove_duplicate_triangles(&mut result);
 
+    // A seam vertex's fan is partly in the passed-through triangles: it keeps its index.
+    active[..locked].fill(false);
+    crate::contact::separate_contact_fans(&mut result, &active);
+
+    // The passed-through triangles, on the seam vertices (as welded) and their own.
+    for (operand, remap, keep) in [(a, &remap_a, keep_far[0]), (b, &remap_b, keep_far[1])] {
+        if !keep || operand.far.is_empty() {
+            continue;
+        }
+        let mut own = vec![u32::MAX; operand.mesh.vertex_count()];
+        for t in &operand.far {
+            let t = t.map(|v| match remap[v as usize] {
+                u32::MAX => {
+                    let o = &mut own[v as usize];
+                    if *o == u32::MAX {
+                        *o = result.add_vertex(operand.mesh.vertices[v as usize]);
+                    }
+                    *o
+                }
+                seam => seam,
+            });
+            result.add_triangle(t[0], t[1], t[2]);
+        }
+    }
     result
 }
 
@@ -338,7 +490,7 @@ pub fn intersection(mesh_a: &TriMesh, mesh_b: &TriMesh) -> TriMesh {
 
 /// Fix T-junctions in a welded mesh by splitting triangles at the active
 /// vertices that lie on their edges.
-fn fix_mesh_t_junctions(mesh: &mut TriMesh, tol: f64, active: &[bool]) {
+fn fix_mesh_t_junctions(mesh: &mut TriMesh, tol: f64, active: &[bool], fixed_edges: &[u64]) {
     // A split inserts no vertex and every active vertex on a split edge
     // becomes a corner, so a later round can only find one on a new fan
     // diagonal (degenerate input): it looks at the new triangles only.
@@ -347,7 +499,7 @@ fn fix_mesh_t_junctions(mesh: &mut TriMesh, tol: f64, active: &[bool]) {
         if thread_pool::cancelled() {
             return;
         }
-        match fix_t_junctions_pass(mesh, tol, active, from) {
+        match fix_t_junctions_pass(mesh, tol, active, fixed_edges, from) {
             Some(first_new) => from = first_new,
             None => return,
         }
@@ -361,7 +513,8 @@ fn edge_key(u: u32, v: u32) -> u64 {
 
 /// One pass over the triangles from index `from` on: returns, if any was
 /// split, the index of the first new triangle (they go at the end).
-fn fix_t_junctions_pass(mesh: &mut TriMesh, tol: f64, active: &[bool], from: usize) -> Option<usize> {
+/// `fixed_edges` (sorted [`edge_key`]s) are never split: the other triangles on them are not in `mesh`.
+fn fix_t_junctions_pass(mesh: &mut TriMesh, tol: f64, active: &[bool], fixed_edges: &[u64], from: usize) -> Option<usize> {
     let num_tris = mesh.triangles.len();
     let seam: Vec<u32> = (0..mesh.vertices.len() as u32).filter(|&v| active.get(v as usize).copied().unwrap_or(true)).collect();
     if num_tris <= from || seam.is_empty() {
@@ -410,7 +563,10 @@ fn fix_t_junctions_pass(mesh: &mut TriMesh, tol: f64, active: &[bool], from: usi
         let t = ti as u32 * 3;
         for (k, (u, v)) in [(a, b), (b, c), (c, a)].into_iter().enumerate() {
             if active.get(u as usize).copied().unwrap_or(true) && active.get(v as usize).copied().unwrap_or(true) {
-                half.push((edge_key(u, v), t + k as u32));
+                let key = edge_key(u, v);
+                if fixed_edges.binary_search(&key).is_err() {
+                    half.push((key, t + k as u32));
+                }
             }
         }
     }
@@ -589,7 +745,7 @@ fn point_on_edge(p: Vec3d, a: Vec3d, b: Vec3d, tol: f64) -> bool {
 /// leave, so a closed mesh stays closed. A sliver with no single triangle across (an open
 /// or non-manifold edge) stays for the T-junction repair. Triangles with a repeated corner
 /// (an edge the weld collapsed) go first.
-fn remove_slivers(mesh: &mut TriMesh, tol: f64) {
+fn remove_slivers(mesh: &mut TriMesh, tol: f64, active: &mut [bool]) {
     use makepad_csg_math::fast_hash::FastMap;
     mesh.clear_normals();
     let altitude = |m: &TriMesh, t: [u32; 3]| -> (usize, f64) {
@@ -601,25 +757,47 @@ fn remove_slivers(mesh: &mut TriMesh, tol: f64) {
         (k, if len[k] > 0.0 { area2 / len[k] } else { 0.0 })
     };
     mesh.triangles.retain(|&[a, b, c]| a != b && b != c && c != a);
+    // Vertices never move here. Only a flipped triangle needs its altitude
+    // recomputed; the sentinel invalidates both replacements for the next round.
+    let mut heights: Vec<(usize, f64)> = mesh.triangles.iter().map(|&t| altitude(mesh, t)).collect();
     for _round in 0..8 {
-        let mut half: FastMap<(u32, u32), Vec<usize>> = FastMap::default();
+        let mut candidates = Vec::new();
+        let mut half: FastMap<(u32, u32), (usize, usize)> = FastMap::default();
+        for (ti, t) in mesh.triangles.iter().enumerate() {
+            if heights[ti].0 == usize::MAX {
+                heights[ti] = altitude(mesh, *t);
+            }
+            let (k, height) = heights[ti];
+            // Keep the original comparison: NaN heights/tolerances also proceed.
+            if height >= tol { continue; }
+            candidates.push(ti);
+            half.entry((t[(k + 1) % 3], t[k])).or_default();
+        }
+        if candidates.is_empty() {
+            break;
+        }
+        // The original round-start map is consulted only for these reverse
+        // edges. Count all their occurrences, keeping the sole triangle index.
         for (ti, t) in mesh.triangles.iter().enumerate() {
             for k in 0..3 {
-                half.entry((t[k], t[(k + 1) % 3])).or_default().push(ti);
+                if let Some((count, across)) = half.get_mut(&(t[k], t[(k + 1) % 3])) {
+                    *count += 1;
+                    *across = ti;
+                }
             }
         }
         let mut done = vec![false; mesh.triangles.len()];
         let mut drop = vec![false; mesh.triangles.len()];
         let mut changed = false;
-        for ti in 0..mesh.triangles.len() {
+        for ti in candidates {
             if done[ti] {
                 continue;
             }
             let t = mesh.triangles[ti];
-            let (k, height) = altitude(mesh, t);
+            let (k, height) = heights[ti];
             if height >= tol { continue; }
             let (a, b, c) = (t[k], t[(k + 1) % 3], t[(k + 2) % 3]);
-            let Some(across) = half.get(&(b, a)).filter(|n| n.len() == 1).map(|n| n[0]) else { continue };
+            let Some(across) = half.get(&(b, a)).filter(|n| n.0 == 1).map(|n| n.1) else { continue };
             if across == ti || done[across] {
                 continue;
             }
@@ -627,6 +805,24 @@ fn remove_slivers(mesh: &mut TriMesh, tol: f64) {
             let Some(j) = (0..3).find(|&j| n[j] == b && n[(j + 1) % 3] == a) else { continue };
             let d = n[(j + 2) % 3];
             if d != c {
+                // A diagonal flip preserves the surface only in a plane.
+                // A thin exposed cap may meet a side wall at its longest
+                // edge; flipping across that crease changes solid volume.
+                // Use the larger face's normal so a nearly collinear sliver
+                // cannot make the plane test ill-conditioned.
+                let p = t.map(|v| mesh.vertices[v as usize]);
+                let q = n.map(|v| mesh.vertices[v as usize]);
+                let normal_t = (p[1] - p[0]).cross(p[2] - p[0]);
+                let normal_n = (q[1] - q[0]).cross(q[2] - q[0]);
+                let plane_tol = crate::tri_tri::plane_tolerance(p[0], p[1], p[2], q[0], q[1], q[2]);
+                let coplanar = if normal_t.length_sq() >= normal_n.length_sq() {
+                    (mesh.vertices[d as usize] - p[0]).dot(normal_t).abs() <= plane_tol * normal_t.length()
+                } else {
+                    (mesh.vertices[c as usize] - q[0]).dot(normal_n).abs() <= plane_tol * normal_n.length()
+                };
+                if !coplanar {
+                    continue;
+                }
                 // A flip must improve the thin face and preserve winding.
                 // Flipping a non-convex or collinear quad creates a zero-area
                 // closing face, which disappears when a consumer emits it.
@@ -649,6 +845,7 @@ fn remove_slivers(mesh: &mut TriMesh, tol: f64) {
                 };
                 if !preserves(t, replacements[0]) || !preserves(n, replacements[1]) { continue; }
             }
+            for v in [a, b, c, d] { active[v as usize] = true; }
             done[ti] = true;
             done[across] = true;
             changed = true;
@@ -659,11 +856,18 @@ fn remove_slivers(mesh: &mut TriMesh, tol: f64) {
             } else {
                 mesh.triangles[ti] = [a, d, c];
                 mesh.triangles[across] = [d, b, c];
+                heights[ti].0 = usize::MAX;
+                heights[across].0 = usize::MAX;
             }
         }
         if !changed {
             break;
         }
+        let mut i = 0;
+        heights.retain(|_| {
+            i += 1;
+            !drop[i - 1]
+        });
         let mut i = 0;
         mesh.triangles.retain(|_| {
             i += 1;

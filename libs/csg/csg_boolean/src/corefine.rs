@@ -13,7 +13,7 @@
 use crate::aabb_tree::AabbTree;
 use crate::classify::MeshAccel;
 use crate::cdt::{Point2, CDT};
-use crate::tri_tri::{construct_edge_plane_intersection, tri_tri_intersection_indexed, EdgeIsect};
+use crate::tri_tri::{construct_edge_plane_intersection, tri_tri_intersection_indexed_with_tolerance, EdgeIsect};
 use makepad_csg_math::{orient2d, thread_pool, Vec3d};
 use makepad_csg_mesh::mesh::TriMesh;
 use makepad_csg_math::fast_hash::FastMap as HashMap;
@@ -83,7 +83,11 @@ pub fn corefine_in(mesh_a: &TriMesh, prep_a: &MeshAccel, mesh_b: &TriMesh, prep_
     let (tree_a, tree_b): (&AabbTree, &AabbTree) = (prep_a.tree(), prep_b.tree());
 
     // Step 2: Find candidate pairs
-    let pairs = tree_a.find_overlaps(tree_b);
+    let bounds = mesh_a.bounding_box().union(mesh_b.bounding_box());
+    let coincidence = crate::tri_tri::plane_tolerance(
+        bounds.min, bounds.max, bounds.min, bounds.max, bounds.min, bounds.max,
+    );
+    let pairs = tree_a.find_overlaps_with_tolerance(tree_b, coincidence);
 
     // Step 3: Compute intersection segments for each pair.
     //
@@ -108,7 +112,7 @@ pub fn corefine_in(mesh_a: &TriMesh, prep_a: &MeshAccel, mesh_b: &TriMesh, prep_
         let a_vi = mesh_a.triangles[ai as usize];
         let b_vi = mesh_b.triangles[bi as usize];
 
-        let result = tri_tri_intersection_indexed(a0, a1, a2, a_vi, ai, b0, b1, b2, b_vi, bi);
+        let result = tri_tri_intersection_indexed_with_tolerance(a0, a1, a2, a_vi, ai, b0, b1, b2, b_vi, bi, coincidence);
         if result.intersects {
             if result.coplanar {
                 coplanar_a[ai as usize].push(bi);
@@ -650,6 +654,29 @@ fn coplanar_intersection_edges(
     let bp2 = project(b2);
     let b_orient = orient2d(bp0[0], bp0[1], bp1[0], bp1[1], bp2[0], bp2[1]);
     // sign > 0 means CCW; for each clip edge, "inside" is the left side
+
+    // A half-plane that leaves just one vertex on its boundary and the
+    // other two strictly outside can intersect this triangle only at that
+    // vertex. There is no constraint segment to construct. This avoids
+    // repeatedly clipping point contacts between coplanar triangle fans.
+    let original = [project(a0), project(a1), project(a2)];
+    for &(ce0, ce1) in &clip_edges {
+        let e0 = project(ce0);
+        let e1 = project(ce1);
+        let sides = original.map(|p| {
+            if p == e0 || p == e1 {
+                0.0
+            } else {
+                orient2d(e0[0], e0[1], e1[0], e1[1], p[0], p[1])
+                    * b_orient.signum()
+            }
+        });
+        if sides.iter().filter(|&&d| d < 0.0).count() == 2
+            && sides.iter().filter(|&&d| d == 0.0).count() == 1
+        {
+            return Vec::new();
+        }
+    }
 
     for &(ce0, ce1) in &clip_edges {
         if polygon.is_empty() {

@@ -8,7 +8,7 @@
 
 use makepad_csg_graph::{BoolMode, Graph, NodeId, Op};
 use makepad_csg_math::Vec3d;
-use makepad_csg_sdf::{Sdf3, SdfNode, SdfOp};
+use makepad_csg_sdf::{Hints, Sdf3, SdfNode, SdfOp};
 
 pub type P3 = [f64; 3];
 
@@ -230,6 +230,49 @@ pub enum Solid {
 }
 
 impl Solid {
+    /// Conservative bounds for joint tools, which do not read an original part.
+    pub(crate) fn tool_bounds(&self) -> Option<makepad_csg_math::BBox3d> {
+        use makepad_csg_math::BBox3d;
+        match self {
+            Solid::Part(_) => None,
+            Solid::Prim(Prim::Sphere { c, r }) => {
+                Some(BBox3d::from_min_max(v3(sub(*c, [*r; 3])), v3(add(*c, [*r; 3]))))
+            }
+            Solid::Prim(Prim::Frustum { a, b, ra, rb }) => {
+                let r = Vec3d::new(ra.max(*rb), ra.max(*rb), ra.max(*rb));
+                Some(BBox3d::from_min_max(v3(*a).min(v3(*b)) - r, v3(*a).max(v3(*b)) + r))
+            }
+            Solid::Prim(Prim::Slab { n, lo, hi, c, half }) => {
+                let frame = slab_frame(*n);
+                let center = slab_center(*n, *lo, *hi, *c);
+                let extent = [*half, (hi - lo) * 0.5, *half];
+                let radius: P3 = std::array::from_fn(|i| (0..3).map(|j| frame[i][j].abs() * extent[j]).sum());
+                Some(BBox3d::from_min_max(v3(sub(center, radius)), v3(add(center, radius))))
+            }
+            Solid::Union(list) => {
+                let mut bounds = BBox3d::empty();
+                for s in list { bounds = bounds.union(s.tool_bounds()?); }
+                Some(bounds)
+            }
+            // The minuend and every intersection operand are upper bounds.
+            Solid::Diff(a, _) => a.tool_bounds(),
+            Solid::Inter(list) => list.iter().find_map(Solid::tool_bounds),
+        }
+    }
+
+    pub(crate) fn separate_tools(&self, other: &Solid) -> bool {
+        if let (Some(a), Some(b)) = (self.tool_bounds(), other.tool_bounds()) {
+            if makepad_csg_graph::disjoint_tool_bounds(a, b) { return true; }
+        }
+        // A union's box can span the space between distant tools. Prove each
+        // component separately before declaring that this is an overlap.
+        match (self, other) {
+            (Solid::Union(list), _) => list.iter().all(|s| s.separate_tools(other)),
+            (_, Solid::Union(list)) => list.iter().all(|s| self.separate_tools(s)),
+            _ => false,
+        }
+    }
+
     pub fn diff(a: Solid, cuts: Vec<Solid>) -> Solid {
         Solid::Diff(Box::new(a), cuts)
     }
@@ -249,17 +292,18 @@ impl Solid {
         }
     }
 
-    /// The same solid distance, restricted to the interval the caller needs.
-    pub fn distance_bounded(&self, parts: &[&(dyn Sdf3 + Sync)], p: P3, lower: f64, upper: f64) -> f64 {
+    /// The same solid distance, restricted to the interval the caller needs; `hints`, the query
+    /// stream's, holds part `i`'s in its slot `i`.
+    pub fn distance_bounded(&self, parts: &[&(dyn Sdf3 + Sync)], p: P3, lower: f64, upper: f64, hints: &mut Hints) -> f64 {
         match self {
-            Solid::Part(i) => parts[*i].distance_bounded(v3(p), lower, upper, None),
+            Solid::Part(i) => parts[*i].distance_bounded(v3(p), lower, upper, hints.part(*i)),
             Solid::Prim(q) => q.distance(p).clamp(lower, upper),
             Solid::Union(l) => {
                 let mut best = upper;
                 // Added joint primitives follow the original part. They are
                 // cheap and often already establish the union's distance.
                 for s in l.iter().rev() {
-                    best = s.distance_bounded(parts, p, lower, best);
+                    best = s.distance_bounded(parts, p, lower, best, hints);
                     if best == lower { break; }
                 }
                 best
@@ -267,7 +311,7 @@ impl Solid {
             Solid::Inter(l) => {
                 let mut best = lower;
                 for s in l.iter().rev() {
-                    best = s.distance_bounded(parts, p, best, upper);
+                    best = s.distance_bounded(parts, p, best, upper, hints);
                     if best == upper { break; }
                 }
                 best
@@ -277,10 +321,10 @@ impl Solid {
                 // original mesh at all. Negation also reverses the interval.
                 let mut best = lower;
                 for s in cuts {
-                    best = -s.distance_bounded(parts, p, -upper, -best);
+                    best = -s.distance_bounded(parts, p, -upper, -best, hints);
                     if best == upper { return best; }
                 }
-                a.distance_bounded(parts, p, best, upper)
+                a.distance_bounded(parts, p, best, upper, hints)
             }
         }
     }
@@ -297,8 +341,70 @@ impl Solid {
         }
     }
 
+    /// Whether it reads an original part.
+    fn has_part(&self) -> bool {
+        match self {
+            Solid::Part(_) => true,
+            Solid::Prim(_) => false,
+            Solid::Union(l) | Solid::Inter(l) => l.iter().any(Solid::has_part),
+            Solid::Diff(a, l) => a.has_part() || l.iter().any(Solid::has_part),
+        }
+    }
+
+    /// The solid a chain of joint edits starts from and its tools in the order they apply
+    /// (`true`: cut away). Only tools that read no part count: a union of two parts ends it.
+    fn chain(&self) -> (&Solid, Vec<(bool, &Solid)>) {
+        let mut ops = Vec::new();
+        let mut s = self;
+        loop {
+            match s {
+                Solid::Diff(a, cuts) if a.has_part() && !cuts.iter().any(Solid::has_part) => {
+                    ops.extend(cuts.iter().rev().map(|c| (true, c)));
+                    s = a;
+                }
+                Solid::Union(l) if l.len() > 1 && l[0].has_part() && !l[1..].iter().any(Solid::has_part) => {
+                    ops.extend(l[1..].iter().rev().map(|t| (false, t)));
+                    s = &l[0];
+                }
+                _ => break,
+            }
+        }
+        ops.reverse();
+        (s, ops)
+    }
+
     /// csg_graph nodes with `parts[i]` the original parts' nodes.
+    ///
+    /// A part's joint edits cross its whole mesh once per group, not once per tool: cuts in a
+    /// row are one difference by their union and additions in a row one union, and an edit moves
+    /// back past the other kind's group before it when it misses every tool there (a cut that
+    /// misses an addition takes nothing from it). The solid is the same; only the mesh Booleans
+    /// are grouped. Distances (`to_node`, `distance_bounded`) keep the tree as built.
     pub fn lower(&self, g: &mut Graph, parts: &[NodeId], segments: u32) -> Result<NodeId, String> {
+        let (base, ops) = self.chain();
+        if ops.len() > 1 {
+            let mut groups: Vec<(bool, Vec<&Solid>)> = Vec::new();
+            for (cut, tool) in ops {
+                let n = groups.len();
+                if n > 0 && groups[n - 1].0 == cut {
+                    groups[n - 1].1.push(tool);
+                } else if n > 1 && groups[n - 2].0 == cut && groups[n - 1].1.iter().all(|t| t.separate_tools(tool)) {
+                    groups[n - 2].1.push(tool);
+                } else {
+                    groups.push((cut, vec![tool]));
+                }
+            }
+            let mut acc = base.lower(g, parts, segments)?;
+            for (cut, tools) in groups {
+                let tool = match tools.as_slice() {
+                    [one] => one.lower(g, parts, segments)?,
+                    _ => Solid::Union(tools.into_iter().cloned().collect()).lower(g, parts, segments)?,
+                };
+                let mode = if cut { BoolMode::Difference } else { BoolMode::Union };
+                acc = g.push(Op::Boolean { mode, a: acc, b: vec![tool] })?;
+            }
+            return Ok(acc);
+        }
         let many = |g: &mut Graph, l: &[Solid]| -> Result<Vec<NodeId>, String> { l.iter().map(|s| s.lower(g, parts, segments)).collect() };
         match self {
             Solid::Part(i) => Ok(parts[*i]),
@@ -392,7 +498,7 @@ mod tests {
         let parts: &[&(dyn Sdf3 + Sync)] = &[&original];
         for p in [[0.0; 3], [0.3, 0.2, 0.1], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0], [3.1, 0.0, 0.0]] {
             for (lo, hi) in [(f64::NEG_INFINITY, f64::INFINITY), (-0.2, 0.2), (-0.4, -0.1), (0.01, 0.04)] {
-                assert_eq!(solid.distance_bounded(parts, p, lo, hi), solid.distance(parts, p).clamp(lo, hi), "{p:?}, {lo}..{hi}");
+                assert_eq!(solid.distance_bounded(parts, p, lo, hi, &mut Hints::default()), solid.distance(parts, p).clamp(lo, hi), "{p:?}, {lo}..{hi}");
             }
         }
     }

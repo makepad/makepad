@@ -124,6 +124,12 @@ impl TriMesh {
     /// Same as `weld_vertices`, but returns the old-index -> new-index remap
     /// so callers can translate per-vertex data across the weld.
     pub fn weld_vertices_remap(&mut self, tolerance: f64) -> Vec<u32> {
+        self.weld_vertices_remap_after(0, tolerance)
+    }
+
+    /// [`TriMesh::weld_vertices_remap`] of the vertices from `fixed` on: the first `fixed` keep their indices
+    /// and positions and join nothing (nor does anything join them).
+    pub fn weld_vertices_remap_after(&mut self, fixed: usize, tolerance: f64) -> Vec<u32> {
         self.clear_normals();
         let n = self.vertices.len();
         if n == 0 {
@@ -137,10 +143,10 @@ impl TriMesh {
 
         // Spatial hash grid: maps cell coordinate to list of (new_vert_index, position).
         let mut grid: makepad_csg_math::fast_hash::FastMap<(i64, i64, i64), Vec<(u32, Vec3d)>> = Default::default();
-        let mut remap = vec![0u32; n];
-        let mut new_verts: Vec<Vec3d> = Vec::new();
+        let mut remap: Vec<u32> = (0..n as u32).collect();
+        let mut new_verts: Vec<Vec3d> = self.vertices[..fixed].to_vec();
 
-        for i in 0..n {
+        for i in fixed..n {
             let vi = self.vertices[i];
             let cx = (vi.x * inv_cell).floor() as i64;
             let cy = (vi.y * inv_cell).floor() as i64;

@@ -71,11 +71,15 @@ impl AabbTree {
     /// Find all pairs of overlapping triangles between this tree and another.
     /// Returns pairs (tri_idx_from_self, tri_idx_from_other).
     pub fn find_overlaps(&self, other: &AabbTree) -> Vec<(u32, u32)> {
+        self.find_overlaps_with_tolerance(other, 0.0)
+    }
+
+    pub(crate) fn find_overlaps_with_tolerance(&self, other: &AabbTree, tolerance: f64) -> Vec<(u32, u32)> {
         let mut pairs = Vec::new();
         if self.root == u32::MAX || other.root == u32::MAX {
             return pairs;
         }
-        find_overlaps_recursive(&self.nodes, self.root, &other.nodes, other.root, &mut pairs);
+        find_overlaps_recursive(&self.nodes, self.root, &other.nodes, other.root, tolerance, &mut pairs);
         pairs
     }
 
@@ -126,12 +130,70 @@ impl AabbTree {
         }
         count
     }
+
+    /// Count the triangles the segment `p`..`q` crosses: `p` and `q` strictly on opposite sides of a triangle's
+    /// plane, with the same exact edge sidedness as [`AabbTree::ray_cast_count`]. Within a region holding every
+    /// triangle of a closed mesh that meets it, the count's parity tells whether `p` and `q` lie on the same side
+    /// of the mesh's surface.
+    pub fn segment_cross_count(&self, p: Vec3d, q: Vec3d, triangles: &[(Vec3d, Vec3d, Vec3d)]) -> u32 {
+        if self.root == u32::MAX {
+            return 0;
+        }
+        let d = q - p;
+        let inv_dir = Vec3d::new(1.0 / d.x, 1.0 / d.y, 1.0 / d.z);
+        let mut count = 0u32;
+        let mut stack = Vec::with_capacity(64);
+        stack.push(self.root);
+        while let Some(idx) = stack.pop() {
+            if thread_pool::cancelled() {
+                return count;
+            }
+            let node = &self.nodes[idx as usize];
+            if !segment_meets_box(node.bbox, p, inv_dir) {
+                continue;
+            }
+            if node.is_leaf() {
+                let (v0, v1, v2) = triangles[node.tri_idx as usize];
+                if segment_crosses_triangle(p, q, v0, v1, v2) {
+                    count += 1;
+                }
+            } else {
+                stack.push(node.left);
+                stack.push(node.right);
+            }
+        }
+        count
+    }
+}
+
+/// The slab test of [`BBox3d::ray_intersects`] for `p + t * (q - p)`, `t` in 0..=1 (`inv_dir` = 1 / (q - p)).
+#[inline]
+fn segment_meets_box(b: BBox3d, p: Vec3d, inv_dir: Vec3d) -> bool {
+    let t1x = (b.min.x - p.x) * inv_dir.x;
+    let t2x = (b.max.x - p.x) * inv_dir.x;
+    let t1y = (b.min.y - p.y) * inv_dir.y;
+    let t2y = (b.max.y - p.y) * inv_dir.y;
+    let t1z = (b.min.z - p.z) * inv_dir.z;
+    let t2z = (b.max.z - p.z) * inv_dir.z;
+    let tmin = t1x.min(t2x).max(t1y.min(t2y)).max(t1z.min(t2z));
+    let tmax = t1x.max(t2x).min(t1y.max(t2y)).min(t1z.max(t2z));
+    tmax.min(1.0) >= tmin.max(0.0)
+}
+
+/// `p`..`q` crosses the triangle: its ends strictly on opposite sides of the plane, its line through the
+/// triangle (an edge or corner hit counts, as for a ray).
+#[inline]
+fn segment_crosses_triangle(p: Vec3d, q: Vec3d, v0: Vec3d, v1: Vec3d, v2: Vec3d) -> bool {
+    let (sp, sq) = (orient3d(v0, v1, v2, p), orient3d(v0, v1, v2, q));
+    if sp == 0.0 || sq == 0.0 || (sp > 0.0) == (sq > 0.0) { return false; }
+    let sides = [orient3d(p, q, v0, v1), orient3d(p, q, v1, v2), orient3d(p, q, v2, v0)];
+    !sides.iter().any(|&s| s < 0.0) || !sides.iter().any(|&s| s > 0.0)
 }
 
 /// Forward ray hits with exact plane/edge sidedness. A positive hit must
 /// not be discarded just because the origin is very close to the surface.
 #[inline]
-fn ray_intersects_triangle(origin: Vec3d, dir: Vec3d, v0: Vec3d, v1: Vec3d, v2: Vec3d) -> bool {
+pub(crate) fn ray_intersects_triangle(origin: Vec3d, dir: Vec3d, v0: Vec3d, v1: Vec3d, v2: Vec3d) -> bool {
     let edge1 = v1 - v0;
     let edge2 = v2 - v0;
     let h = dir.cross(edge2);
@@ -218,6 +280,7 @@ fn find_overlaps_recursive(
     a_idx: u32,
     b_nodes: &[AabbNode],
     b_idx: u32,
+    tolerance: f64,
     pairs: &mut Vec<(u32, u32)>,
 ) {
     if a_idx == u32::MAX || b_idx == u32::MAX || thread_pool::cancelled() {
@@ -233,7 +296,7 @@ fn find_overlaps_recursive(
         let tol = crate::tri_tri::plane_tolerance(
             a.bbox.min, a.bbox.max, a.bbox.min,
             b.bbox.min, b.bbox.max, b.bbox.min,
-        );
+        ).max(tolerance);
         if a.bbox.min.x - b.bbox.max.x > tol || b.bbox.min.x - a.bbox.max.x > tol
             || a.bbox.min.y - b.bbox.max.y > tol || b.bbox.min.y - a.bbox.max.y > tol
             || a.bbox.min.z - b.bbox.max.z > tol || b.bbox.min.z - a.bbox.max.z > tol
@@ -249,11 +312,11 @@ fn find_overlaps_recursive(
 
     // Descend into the larger node (heuristic for balance)
     if a.is_leaf() || (!b.is_leaf() && a.bbox.surface_area() <= b.bbox.surface_area()) {
-        find_overlaps_recursive(a_nodes, a_idx, b_nodes, b.left, pairs);
-        find_overlaps_recursive(a_nodes, a_idx, b_nodes, b.right, pairs);
+        find_overlaps_recursive(a_nodes, a_idx, b_nodes, b.left, tolerance, pairs);
+        find_overlaps_recursive(a_nodes, a_idx, b_nodes, b.right, tolerance, pairs);
     } else {
-        find_overlaps_recursive(a_nodes, a.left, b_nodes, b_idx, pairs);
-        find_overlaps_recursive(a_nodes, a.right, b_nodes, b_idx, pairs);
+        find_overlaps_recursive(a_nodes, a.left, b_nodes, b_idx, tolerance, pairs);
+        find_overlaps_recursive(a_nodes, a.right, b_nodes, b_idx, tolerance, pairs);
     }
 }
 

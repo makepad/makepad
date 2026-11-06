@@ -5,6 +5,10 @@
 //! the shell's largest radius, the ball's opening is the neck swept over the
 //! cone limit), so the gap holds in every pose, not only the printed one.
 //!
+//! A ball prints standing on something ([`Seat`]): cut flat on the bed in a socket
+//! open underneath, or on its neck coming up from below. A ball over a socket
+//! floor would float a clearance above it, so a joint that has neither is refused.
+//!
 //! Model frame, millimetres, radians. `up` is the print direction in the model
 //! frame (the model's +Y unless a placement turns the part).
 
@@ -140,6 +144,183 @@ pub struct HingeDecl {
     pub plate: Option<f64>,
     pub clearance: Option<f64>,
     pub clearance_axial: Option<f64>,
+    /// Shoes that hold the pose ([`BrakeDecl`]); none: it turns free.
+    pub brake: Option<BrakeDecl>,
+}
+
+/// A brake on a hinge: a part of a flexible filament (`shoe`) the hinge shapes into two shoes set
+/// in B's eye either side of the pin, each with a tooth in a groove of the pin as it prints, a
+/// clearance clear of it. Turned off its printed angle, the pin's round comes under the teeth and
+/// presses them in: the shoes hold the pose by friction. Near its printed angle it turns free.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BrakeDecl {
+    /// The shoes' part. What of it lies outside the shoes is cut away; they print fused to B's eye.
+    pub shoe: usize,
+    /// The torque it holds once turned (N mm); none: the teeth run the eye's length.
+    pub hold: Option<f64>,
+}
+
+/// How far a brake's teeth press into the pin once it has turned off its grooves (mm).
+pub const BRAKE_SQUEEZE: f64 = 0.3;
+/// A shoe's flexible filament beside its tooth, and behind it (mm).
+const SHOE_SIDE: f64 = 1.2;
+const SHOE_BACK: f64 = 1.6;
+/// The eye's wall round its shoes (mm).
+const SHOE_EYE_WALL: f64 = 1.2;
+
+/// A sized brake ([`BrakeDecl`]), in the hinge's frame: the pin's axis through `at` along `axis`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Brake {
+    pub shoe: usize,
+    /// Unit, across the pin: the first tooth's way from the axis as it prints (the second's is
+    /// the opposite way).
+    pub dir: P3,
+    pub r_pin: f64,
+    /// The pin's grooves' depth, and how far from the axis the teeth's tips are.
+    pub groove: f64,
+    pub tip: f64,
+    /// The bore's radius, the shoes' outer radius, and their half angle about `dir` (radians).
+    pub bore: f64,
+    pub outer: f64,
+    pub half: f64,
+    /// Along the axis from `at`: the eye's span, which the shoes fill, and the teeth's.
+    pub eye: (f64, f64),
+    pub teeth: (f64, f64),
+    /// The shoes' filament: its Young's modulus (MPa) and its friction on the pin.
+    pub modulus: f64,
+    pub mu: f64,
+}
+
+impl Brake {
+    /// How far each tooth is pressed in with the joint turned `ang` from its printed angle (mm):
+    /// across the pin, the deepest point of a tooth's flanks inside the turned pin (round, less
+    /// its two grooves).
+    pub fn squeeze(&self, ang: f64) -> f64 {
+        let r2 = std::f64::consts::FRAC_1_SQRT_2;
+        // the plane across the pin: x along the first tooth, y across it
+        let wedge_out = |q: [f64; 2], theta: f64, apex: f64| {
+            let (s, c) = theta.sin_cos();
+            let a = [apex * c, apex * s];
+            let n1 = [r2 * (c - s), r2 * (s + c)];
+            let n2 = [r2 * (c + s), r2 * (s - c)];
+            let d = [q[0] - a[0], q[1] - a[1]];
+            let (h1, h2) = (d[0] * n1[0] + d[1] * n1[1], d[0] * n2[0] + d[1] * n2[1]);
+            (h1.min(0.0).powi(2) + h2.min(0.0).powi(2)).sqrt()
+        };
+        let groove_apex = self.r_pin - self.groove;
+        let inside = |q: [f64; 2]| {
+            let round = self.r_pin - (q[0] * q[0] + q[1] * q[1]).sqrt();
+            round.min(wedge_out(q, ang, groove_apex)).min(wedge_out(q, ang + std::f64::consts::PI, groove_apex))
+        };
+        let reach = (self.bore - self.tip) * std::f64::consts::SQRT_2;
+        let mut deepest: f64 = 0.0;
+        for k in 0..=96 {
+            let s = reach * k as f64 / 96.0;
+            for side in [1.0, -1.0] {
+                deepest = deepest.max(inside([self.tip + s * r2, side * s * r2]));
+            }
+        }
+        deepest
+    }
+
+    /// The torque the two shoes hold there (N mm): each tooth pressed in `s` along its length,
+    /// over its width there (`2 s`: its flanks are square), the shoe behind its tip giving at the
+    /// filament's modulus; each rubs on the pin's round.
+    pub fn torque(&self, ang: f64) -> f64 {
+        let s = self.squeeze(ang);
+        let press = self.modulus * (self.teeth.1 - self.teeth.0) * 2.0 * s * s / (self.outer - self.tip);
+        2.0 * self.mu * press * self.r_pin
+    }
+
+    /// The torque it holds turned well off its grooves (N mm).
+    pub fn hold(&self) -> f64 {
+        self.torque(0.5 * std::f64::consts::PI)
+    }
+
+    /// Up to which angle off its printed one it turns free, and from which it holds fully (radians).
+    pub fn band(&self) -> (f64, f64) {
+        let full = self.squeeze(0.5 * std::f64::consts::PI);
+        let mut free = 0.0;
+        let mut whole = 0.5 * std::f64::consts::PI;
+        for k in 0..=900 {
+            let a = k as f64 * 0.1f64.to_radians();
+            let s = self.squeeze(a);
+            if s <= 1e-6 {
+                free = a;
+            }
+            if s >= full - 1e-6 {
+                whole = a;
+                break;
+            }
+        }
+        (free, whole)
+    }
+
+    fn across(&self, axis: P3, way: f64) -> (P3, P3) {
+        let u = scale(self.dir, way);
+        (u, cross(axis, u))
+    }
+
+    /// The pin's two grooves, along the eye, across the gaps past it (`gap` long) and on into
+    /// the plates, which fill them back: the teeth's ends are the gaps' width from the round.
+    fn grooves(&self, at: P3, axis: P3, gap: f64) -> Vec<Solid> {
+        let r2 = std::f64::consts::FRAC_1_SQRT_2;
+        let (s0, s1) = (self.eye.0 - gap - 0.5, self.eye.1 + gap + 0.5);
+        let mid = madd(at, axis, 0.5 * (s0 + s1));
+        let half = 0.5 * (s1 - s0) + self.r_pin + 2.0;
+        [1.0, -1.0]
+            .iter()
+            .map(|&way| {
+                let (u, t) = self.across(axis, way);
+                let apex = madd(mid, u, self.r_pin - self.groove);
+                let side = |n: P3| Solid::Prim(Prim::Slab { n, lo: dot(n, apex), hi: dot(n, apex) + 2.0 * self.r_pin + 2.0, c: apex, half });
+                Solid::Inter(vec![
+                    side(norm(add(scale(u, r2), scale(t, r2)))),
+                    side(norm(sub(scale(u, r2), scale(t, r2)))),
+                    Solid::Prim(Prim::Slab { n: axis, lo: dot(axis, at) + s0, hi: dot(axis, at) + s1, c: mid, half }),
+                ])
+            })
+            .collect()
+    }
+
+    /// The two pockets in B's eye the shoes fill, as far as `out` from the axis.
+    fn pockets(&self, at: P3, axis: P3, out: f64, ends: (f64, f64)) -> Vec<Solid> {
+        let mid = madd(at, axis, 0.5 * (ends.0 + ends.1));
+        let half = 0.5 * (ends.1 - ends.0) + out + 2.0;
+        let (sh, ch) = self.half.sin_cos();
+        [1.0, -1.0]
+            .iter()
+            .map(|&way| {
+                let (u, t) = self.across(axis, way);
+                let side = |n: P3| Solid::Prim(Prim::Slab { n, lo: dot(n, mid), hi: dot(n, mid) + 2.0 * out + 2.0, c: mid, half });
+                Solid::Inter(vec![
+                    Solid::Prim(Prim::cyl(madd(at, axis, ends.0), madd(at, axis, ends.1), out)),
+                    side(add(scale(u, sh), scale(t, ch))),
+                    side(sub(scale(u, sh), scale(t, ch))),
+                ])
+            })
+            .collect()
+    }
+
+    /// The shoes: each pocket clear of the bore, and its tooth reaching in from the bore.
+    pub fn shoes(&self, at: P3, axis: P3) -> Solid {
+        let r2 = std::f64::consts::FRAC_1_SQRT_2;
+        let p = |s: f64| madd(at, axis, s);
+        let bodies = Solid::diff(Solid::Union(self.pockets(at, axis, self.outer, self.eye)), vec![Solid::Prim(Prim::cyl(p(self.eye.0 - 1.0), p(self.eye.1 + 1.0), self.bore))]);
+        let mid = p(0.5 * (self.teeth.0 + self.teeth.1));
+        let half = 0.5 * (self.teeth.1 - self.teeth.0) + self.bore + 2.0;
+        let teeth = [1.0, -1.0].iter().map(|&way| {
+            let (u, t) = self.across(axis, way);
+            let apex = madd(mid, u, self.tip);
+            let side = |n: P3| Solid::Prim(Prim::Slab { n, lo: dot(n, apex), hi: dot(n, apex) + 2.0 * self.bore + 2.0, c: apex, half });
+            Solid::Inter(vec![
+                side(norm(add(scale(u, r2), scale(t, r2)))),
+                side(norm(sub(scale(u, r2), scale(t, r2)))),
+                Solid::Prim(Prim::cyl(p(self.teeth.0), p(self.teeth.1), self.bore + EPS)),
+            ])
+        });
+        Solid::Union(std::iter::once(bodies).chain(teeth).collect())
+    }
 }
 
 /// A declared ball joint: A gets the socket, B the ball and its neck.
@@ -160,10 +341,48 @@ pub struct BallDecl {
     pub wall: Option<f64>,
 }
 
+/// A declared slider: A is the rail, B the carriage that slides along it. Both stand on the bed;
+/// a chevron way (a ridge on the carriage in a groove of the rail) keeps the carriage in, up and
+/// down, and both print as they stand.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SliderDecl {
+    pub a: usize,
+    pub b: usize,
+    /// A point on the way's centre line (its height does not matter).
+    pub at: P3,
+    /// Along the bed (unit).
+    pub axis: P3,
+    /// How far the carriage slides back and on from where it prints (mm, back <= 0 <= on);
+    /// either not given: to the rail's end stop that way.
+    pub travel: (Option<f64>, Option<f64>),
+    /// The carriage's neck through the rail's slot, across (mm).
+    pub width: Option<f64>,
+    /// How far its ridge reaches past the neck each side (mm).
+    pub depth: Option<f64>,
+    pub clearance: Option<f64>,
+}
+
+/// A declared bearing: A is the outer race, B the inner that turns in it about the print's up.
+/// Both stand on the bed; a chevron race (the inner's ridge in a groove of the outer) keeps the
+/// inner in, and both print as they stand.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BearingDecl {
+    pub a: usize,
+    pub b: usize,
+    /// A point on the turning axis (its height does not matter).
+    pub at: P3,
+    /// The inner's radius at the bed and at the race's top (mm); its ridge reaches `depth` past it.
+    pub radius: Option<f64>,
+    pub depth: Option<f64>,
+    pub clearance: Option<f64>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum JointDecl {
     Hinge(HingeDecl),
     Ball(BallDecl),
+    Slider(SliderDecl),
+    Bearing(BearingDecl),
 }
 
 impl JointDecl {
@@ -171,6 +390,16 @@ impl JointDecl {
         match self {
             JointDecl::Hinge(h) => (h.a, h.b),
             JointDecl::Ball(b) => (b.a, b.b),
+            JointDecl::Slider(s) => (s.a, s.b),
+            JointDecl::Bearing(r) => (r.a, r.b),
+        }
+    }
+
+    /// Its brake's shoe part, when it has one.
+    pub fn shoe(&self) -> Option<usize> {
+        match self {
+            JointDecl::Hinge(HingeDecl { brake: Some(b), .. }) => Some(b.shoe),
+            _ => None,
         }
     }
 }
@@ -190,6 +419,7 @@ pub enum JointGeom {
         c_r: f64,
         c_z: f64,
         limits: Option<(f64, f64)>,
+        brake: Option<Brake>,
     },
     Ball {
         c: P3,
@@ -204,7 +434,22 @@ pub enum JointGeom {
         /// A's extent along `up` from the centre (the shell is clipped to it).
         up_lo: f64,
         up_hi: f64,
+        seat: Seat,
     },
+    /// A chevron way along `axis` ([`crate::way`]): the rail's groove, the carriage's ridge.
+    Slider(crate::way::Way),
+    /// A chevron race about `up` ([`crate::way`]): the outer's groove, the inner's ridge.
+    Bearing(crate::way::Race),
+}
+
+/// What a ball stands on while it prints.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Seat {
+    /// Cut flat on the bed (`ground`: the bed along `up`), in a socket open underneath that
+    /// comes down to the bed round it and holds it by more than its opening there.
+    Bed { ground: f64 },
+    /// On its neck, which comes up to it from below.
+    Neck,
 }
 
 /// A note on how a joint was sized (shown to the user and the AI).
@@ -241,7 +486,7 @@ pub fn size_hinge(d: &HingeDecl, a: &PartBox, b: &PartBox, p: &Profile, notes: &
     let t_plate = d.plate.unwrap_or_else(|| quant((0.2 * t).max(4.0 * p.layer)));
     let w = a.width_across(axis).min(b.width_across(axis));
     let r_pin = d.pin.unwrap_or_else(|| (0.24 * t.min(w)).clamp(3.0 * p.nozzle, 3.0));
-    let r_plate = r_pin + (5.0 * p.nozzle).max(1.6) + c_r;
+    let mut r_plate = r_pin + (5.0 * p.nozzle).max(1.6) + c_r;
     let eye = t - 2.0 * t_plate - 2.0 * c_z;
     if t <= 0.0 {
         return Err(format!("the parts do not overlap along the pin axis at [{:.2} {:.2} {:.2}]", d.at[0], d.at[1], d.at[2]));
@@ -252,11 +497,67 @@ pub fn size_hinge(d: &HingeDecl, a: &PartBox, b: &PartBox, p: &Profile, notes: &
     if r_pin < 2.0 * p.nozzle {
         notes.push(Note { warn: true, text: format!("pin radius {r_pin:.2} mm is under 2 nozzle widths: weak") });
     }
-    Ok(JointGeom::Hinge { at: d.at, axis, s0, s1, r_pin, r_plate, t_plate, c_r, c_z, limits: d.limits })
+    let brake = match &d.brake {
+        Some(bd) => {
+            // the teeth's flanks are square to each other, at 45 degrees to the bed with the pin
+            // across it: apart by the clearance square to them, they are apart by 1.41 times it
+            // along the bed and up, as the rules ask
+            let c_t = if along_up { c_r } else { c_r.min(p.c_xy().max(p.c_z()) * std::f64::consts::FRAC_1_SQRT_2) };
+            let b = size_brake(bd, sub(b.center(), d.at), axis, (s0 + t_plate + c_z, s1 - t_plate - c_z), (r_pin, c_r, c_t), p, notes)?;
+            r_plate = r_plate.max(b.outer + SHOE_EYE_WALL);
+            Some(b)
+        }
+        None => None,
+    };
+    Ok(JointGeom::Hinge { at: d.at, axis, s0, s1, r_pin, r_plate, t_plate, c_r, c_z, limits: d.limits, brake })
 }
 
-/// Size a ball joint for the profile.
-pub fn size_ball(d: &BallDecl, a: &PartBox, b: &PartBox, p: &Profile, notes: &mut Vec<Note>) -> Result<JointGeom, String> {
+/// Size a hinge's brake: grooves a squeeze plus a clearance (along the flanks) deep, the teeth's
+/// tips a squeeze inside the pin's round, their shoes in pockets either side of the bore. Across
+/// the layers (a pin along up) the teeth face B; a pin in the bed plane has them along the bed,
+/// across it, so their flanks and the grooves' lean 45 degrees.
+/// `to_b`: from the pin's point toward B's centre; `eye`: the eye's span along the axis; `pin`:
+/// its radius and the clearance round it.
+/// Size a hinge's brake: `eye` the eye's span along the axis, `pin` the pin's radius, the bore's
+/// clearance round it and the teeth's from the grooves' flanks.
+fn size_brake(bd: &BrakeDecl, to_b: P3, axis: P3, eye: (f64, f64), pin: (f64, f64, f64), p: &Profile, notes: &mut Vec<Note>) -> Result<Brake, String> {
+    let (r_pin, c_r, c_t) = pin;
+    let groove = BRAKE_SQUEEZE + c_t * std::f64::consts::SQRT_2;
+    if r_pin < 2.5 * groove {
+        return Err(format!("a brake needs a pin of at least {:.1} mm radius (its grooves are {groove:.2} mm deep); give pin:", 2.5 * groove));
+    }
+    let up = norm(p.up);
+    let dir = if dot(axis, up).abs() > 10f64.to_radians().cos() {
+        let across = sub(to_b, scale(axis, dot(to_b, axis)));
+        if len(across) > 1e-6 { norm(across) } else { basis(axis).0 }
+    } else {
+        norm(cross(axis, up))
+    };
+    let tip = r_pin - BRAKE_SQUEEZE;
+    let bore = r_pin + c_r;
+    // no steeper than 45 degrees off the shoe's middle: its inner face prints on its own over the
+    // pin with the pin across the bed
+    let half = ((bore - tip + SHOE_SIDE) / bore).min(45f64.to_radians());
+    let tpu = Material::named("TPU");
+    let mut brake = Brake { shoe: bd.shoe, dir, r_pin, groove, tip, bore, outer: bore + SHOE_BACK, half, eye, teeth: eye, modulus: crate::flex::FLEX_MODULUS, mu: tpu.mu };
+    if let Some(hold) = bd.hold {
+        let most = brake.hold();
+        let length = (eye.1 - eye.0) * (hold / most).min(1.0);
+        let length = length.max(1.0f64.min(eye.1 - eye.0));
+        let mid = 0.5 * (eye.0 + eye.1);
+        brake.teeth = (mid - 0.5 * length, mid + 0.5 * length);
+        if hold > most * 1.001 {
+            notes.push(Note { warn: true, text: format!("the brake holds at most {most:.0} N mm here (its teeth run the eye's length); asked {hold:.0}") });
+        }
+    }
+    let (free, whole) = brake.band();
+    notes.push(Note { warn: false, text: format!("brake: two shoes hold {:.0} N mm from {:.0} degrees off its printed angle (free within {:.0})", brake.hold(), whole.to_degrees(), free.to_degrees()) });
+    Ok(brake)
+}
+
+/// Size a ball joint for the profile. `ground` is the bed along the print direction: the lowest
+/// point of the parts printed in place with it.
+pub fn size_ball(d: &BallDecl, a: &PartBox, b: &PartBox, ground: f64, p: &Profile, notes: &mut Vec<Note>) -> Result<JointGeom, String> {
     let up = norm(p.up);
     let axis = norm(d.axis.unwrap_or_else(|| sub(b.center(), d.at)));
     let ea = a.extent(d.at, up);
@@ -281,19 +582,57 @@ pub fn size_ball(d: &BallDecl, a: &PartBox, b: &PartBox, p: &Profile, notes: &mu
     }
     let up_lo = ea.lo;
     let up_hi = ea.hi;
-    let floor = -up_lo - rc;
-    if floor < 2.0 * p.layer {
-        return Err(format!("the socket part is too thin under the ball: {floor:.2} mm of floor; move the ball up or make the part thicker"));
-    }
-    if floor < 4.0 * p.layer {
-        notes.push(Note { warn: true, text: format!("socket floor is only {floor:.2} mm under the ball") });
-    }
+    let seat = if on_the_bed(dot(d.at, up) - ground, -dot(axis, up), r, clr, rn, p, notes)? { Seat::Bed { ground } } else { Seat::Neck };
     // The top: the teardrop roof may open through the part's top face; that hole must stay smaller than the ball.
     let top_hole = if up_hi >= rc * S2 { 0.0 } else if up_hi >= rc / S2 { rc * S2 - up_hi } else { (rc * rc - up_hi.max(0.0).powi(2)).max(0.0).sqrt() };
     if top_hole > r - 0.3 {
         return Err(format!("the socket part is too thin over the ball: its top opens {:.2} mm wide; move the ball down or make the part thicker", 2.0 * top_hole));
     }
-    Ok(JointGeom::Ball { c: d.at, r, clr, wall, axis, rn, cone, twist: d.twist, up, up_lo, up_hi })
+    Ok(JointGeom::Ball { c: d.at, r, clr, wall, axis, rn, cone, twist: d.twist, up, up_lo, up_hi, seat })
+}
+
+/// The narrowest a ball's flat on the bed may be, as a radius in nozzle widths: four lines across.
+const BED_FLAT: f64 = 2.0;
+
+/// Whether a ball of radius `r` whose centre is `h` over the bed stands on the bed (true) or on
+/// its neck (false; `down`: how far its neck's axis points down, the cosine). It stands on the bed
+/// when it reaches it, else on its neck when that comes up from below. Neither: it would print over
+/// its socket's floor with nothing under it, and the joint is refused with where it would print.
+fn on_the_bed(h: f64, down: f64, r: f64, clr: f64, rn: f64, p: &Profile, notes: &mut Vec<Note>) -> Result<bool, String> {
+    let rc = r + clr;
+    // On the bed: the socket comes down to the bed, so its opening there is the cavity's section
+    // at the bed, which must stay 0.3 mm inside the ball; the ball's flat must hold lines.
+    let lowest = (rc * rc - (r - 0.3).powi(2)).max(0.0).sqrt();
+    let highest = (r * r - (BED_FLAT * p.nozzle).powi(2)).max(0.0).sqrt();
+    if h < r {
+        if h < lowest {
+            return Err(format!(
+                "the ball sits too low to stay in: its socket's opening on the bed is {:.2} mm wide; raise its centre to {lowest:.2} mm above the bed or more (it is {h:.2})",
+                2.0 * (rc * rc - h * h).max(0.0).sqrt()
+            ));
+        }
+        if h > highest {
+            return Err(format!(
+                "the ball only grazes the bed: its flat there is {:.2} mm wide; lower its centre to {highest:.2} mm above the bed or less (it is {h:.2}), or to {:.2} for a ball whose underside needs no support",
+                2.0 * (r * r - h * h).max(0.0).sqrt(),
+                r / S2
+            ));
+        }
+        if h > r / S2 + 0.5 * p.layer {
+            notes.push(Note { warn: true, text: format!("the ball's underside overhangs past 45 degrees for {:.2} mm over the bed; a centre {:.2} mm above the bed needs no support", h - r / S2, r / S2) });
+        }
+        return Ok(true);
+    }
+    // On its neck: the ball's lowest point lies inside the neck, a line in from its side.
+    if down > 0.0 && r * (1.0 - down * down).max(0.0).sqrt() <= rn - p.nozzle {
+        return Ok(false);
+    }
+    let tilt = ((rn - p.nozzle).max(0.0) / r).min(1.0).asin().to_degrees();
+    Err(format!(
+        "the ball would print in mid-air: its lowest point is {:.2} mm above the bed, over nothing but its socket's floor. Put its centre {lowest:.2} to {highest:.2} mm above the bed ({:.2} needs no support) so it prints flat on the bed in a socket open underneath, or point its neck down (axis: within {tilt:.0} degrees of straight down) so the neck carries it",
+        h - r,
+        r / S2
+    ))
 }
 
 impl JointGeom {
@@ -306,6 +645,8 @@ impl JointGeom {
         match self {
             JointGeom::Hinge { c_r, c_z, .. } => c_r.min(*c_z),
             JointGeom::Ball { clr, .. } => *clr,
+            JointGeom::Slider(w) => w.chevron.clearance(),
+            JointGeom::Bearing(r) => r.chevron.clearance(),
         }
     }
 
@@ -314,14 +655,18 @@ impl JointGeom {
         match self {
             JointGeom::Hinge { r_pin, .. } => *r_pin,
             JointGeom::Ball { r, .. } => *r,
+            JointGeom::Slider(w) => w.chevron.neck + w.chevron.depth,
+            JointGeom::Bearing(r) => r.chevron.neck + 0.5 * r.chevron.depth,
         }
     }
 
-    /// The sim pivot and axis (revolute: the pin; spherical: the cone axis).
+    /// The sim pivot and axis (revolute: the pin; spherical: the cone axis; a slider: its way).
     pub fn pivot(&self) -> (P3, P3) {
         match self {
             JointGeom::Hinge { at, axis, s0, s1, .. } => (Self::p(*at, *axis, 0.5 * (s0 + s1)), *axis),
             JointGeom::Ball { c, axis, .. } => (*c, *axis),
+            JointGeom::Slider(w) => w.pivot(),
+            JointGeom::Bearing(r) => r.pivot(),
         }
     }
 
@@ -333,17 +678,19 @@ impl JointGeom {
         shell.max(rs) + clr
     }
 
-    /// Where joint-internal contact can happen: a centre and a radius. The checks look here; the sim's collision
-    /// proxies leave it out (the joint constraint owns it).
-    pub fn keep_out(&self) -> (P3, f64) {
+    /// Where joint-internal contact can happen: balls (a centre and a radius). The sim's collision
+    /// proxies leave them out (the joint constraint owns it).
+    pub fn keep_out(&self) -> Vec<(P3, f64)> {
         match self {
             JointGeom::Hinge { at, axis, s0, s1, r_plate, c_r, .. } => {
                 let mid = Self::p(*at, *axis, 0.5 * (s0 + s1));
                 let half = 0.5 * (s1 - s0) + 0.5;
                 let rad = r_plate + c_r + 1.0;
-                (mid, (half * half + rad * rad).sqrt())
+                vec![(mid, (half * half + rad * rad).sqrt())]
             }
-            JointGeom::Ball { c, r, clr, wall, up_hi, .. } => (*c, Self::ball_reach(*r, *clr, *wall, *up_hi) + 1.0),
+            JointGeom::Ball { c, r, clr, wall, up_hi, .. } => vec![(*c, Self::ball_reach(*r, *clr, *wall, *up_hi) + 1.0)],
+            JointGeom::Slider(w) => w.keep_out(),
+            JointGeom::Bearing(r) => r.keep_out(),
         }
     }
 
@@ -357,26 +704,34 @@ impl JointGeom {
                 (std::array::from_fn(|i| a[i].min(b[i]) - r), std::array::from_fn(|i| a[i].max(b[i]) + r))
             }
             JointGeom::Ball { .. } => {
-                let (c, r) = self.keep_out();
+                let (c, r) = self.keep_out()[0];
                 (sub(c, [r; 3]), add(c, [r; 3]))
             }
+            JointGeom::Slider(w) => w.region(),
+            JointGeom::Bearing(r) => r.region(),
         }
     }
 
     /// A's solid with this joint's half.
     pub fn apply_a(&self, a: Solid) -> Solid {
         match *self {
-            JointGeom::Hinge { at, axis, s0, s1, r_pin, r_plate, t_plate, c_r, .. } => {
+            JointGeom::Hinge { at, axis, s0, s1, r_pin, r_plate, t_plate, c_r, c_z, ref brake, .. } => {
                 let p = |s: f64| Self::p(at, axis, s);
+                // a braked pin is grooved where the teeth print
+                let pin = Solid::Prim(Prim::cyl(p(s0), p(s1), r_pin));
+                let pin = match brake {
+                    Some(b) => Solid::diff(pin, b.grooves(at, axis, c_z)),
+                    None => pin,
+                };
                 Solid::Union(vec![
                     Solid::diff(a, vec![Solid::Prim(Prim::cyl(p(s0 + t_plate - EPS), p(s1 - t_plate + EPS), r_plate + c_r))]),
                     // flush with the parts' outer faces (a hair inset leaves the mesh boolean slivers it cannot close)
                     Solid::Prim(Prim::cyl(p(s0), p(s0 + t_plate), r_plate)),
                     Solid::Prim(Prim::cyl(p(s1 - t_plate), p(s1), r_plate)),
-                    Solid::Prim(Prim::cyl(p(s0), p(s1), r_pin)),
+                    pin,
                 ])
             }
-            JointGeom::Ball { c, r, clr, wall, axis, rn, cone, up, up_lo, up_hi, .. } => {
+            JointGeom::Ball { c, r, clr, wall, axis, rn, cone, up, up_lo, up_hi, seat, .. } => {
                 // A sphere with a 45 degree roof. The roof cone starts a little inside the sphere (not on the
                 // tangent circle, which leaves the mesh boolean a degenerate seam), so it leans 44.5 degrees.
                 let teardrop = |rad: f64| {
@@ -393,49 +748,89 @@ impl JointGeom {
                 let length = Self::ball_reach(r, clr, wall, up_hi) + 2.0;
                 let opening = Prim::Frustum { a: madd(c, axis, -back), b: madd(c, axis, length), ra: 0.0, rb: (length + back) * cone.tan() };
                 let c_up = dot(c, up);
-                // the shell is clipped to A's own extent along up (it never pokes under the bed or over A's top)
+                // The shell is clipped to A's own extent along up (it never pokes under the bed or over A's
+                // top); on the bed it comes down to the bed, round the ball's flat, whatever A's own bottom.
+                let lo = match seat {
+                    Seat::Bed { ground } => ground,
+                    Seat::Neck => c_up + up_lo,
+                };
                 let shell = Solid::Inter(vec![
                     teardrop(rc + wall),
-                    Solid::Prim(Prim::Slab { n: up, lo: c_up + up_lo + 5.0 * EPS, hi: c_up + up_hi - 5.0 * EPS, c, half: Self::ball_reach(r, clr, wall, up_hi) + 2.0 }),
+                    Solid::Prim(Prim::Slab { n: up, lo: lo + 5.0 * EPS, hi: c_up + up_hi - 5.0 * EPS, c, half: Self::ball_reach(r, clr, wall, up_hi) + 2.0 }),
                 ]);
                 Solid::diff(Solid::Union(vec![a, shell]), vec![teardrop(rc), Solid::Prim(opening)])
             }
+            JointGeom::Slider(ref w) => w.apply_a(a),
+            JointGeom::Bearing(ref r) => r.apply_a(a),
         }
     }
 
     /// B's solid with this joint's half.
     pub fn apply_b(&self, b: Solid) -> Solid {
         match *self {
-            JointGeom::Hinge { at, axis, s0, s1, r_pin, r_plate, t_plate, c_r, c_z, .. } => {
+            JointGeom::Hinge { at, axis, s0, s1, r_pin, r_plate, t_plate, c_r, c_z, ref brake, .. } => {
                 let p = |s: f64| Self::p(at, axis, s);
                 let (e0, e1) = (s0 + t_plate + c_z, s1 - t_plate - c_z);
                 let rr = r_plate + c_r;
                 let body = Solid::diff(b, vec![Solid::Prim(Prim::cyl(p(s0 - 1.0), p(e0 + EPS), rr)), Solid::Prim(Prim::cyl(p(e1 - EPS), p(s1 + 1.0), rr))]);
-                Solid::diff(
-                    Solid::Union(vec![body, Solid::Prim(Prim::cyl(p(e0), p(e1), r_plate))]),
-                    vec![Solid::Prim(Prim::cyl(p(s0 - 1.0), p(s1 + 1.0), r_pin + c_r))],
-                )
+                let mut cuts = vec![Solid::Prim(Prim::cyl(p(s0 - 1.0), p(s1 + 1.0), r_pin + c_r))];
+                // the shoes print in pockets of the eye, fused to it
+                if let Some(b) = brake {
+                    cuts.extend(b.pockets(at, axis, b.outer, (e0 - EPS, e1 + EPS)));
+                }
+                Solid::diff(Solid::Union(vec![body, Solid::Prim(Prim::cyl(p(e0), p(e1), r_plate))]), cuts)
             }
-            JointGeom::Ball { c, r, clr, wall, axis, rn, up_hi, .. } => {
+            JointGeom::Ball { c, r, clr, wall, axis, rn, up, up_hi, seat, .. } => {
                 let reach = Self::ball_reach(r, clr, wall, up_hi);
-                Solid::Union(vec![
-                    Solid::diff(b, vec![Solid::Prim(Prim::Sphere { c, r: reach })]),
-                    Solid::Prim(Prim::Sphere { c, r }),
-                    Solid::Prim(Prim::cyl(c, madd(c, axis, reach + 0.5), rn)),
-                ])
+                let ball = Solid::Union(vec![Solid::Prim(Prim::Sphere { c, r }), Solid::Prim(Prim::cyl(c, madd(c, axis, reach + 0.5), rn))]);
+                // on the bed the ball and its neck are cut flat there
+                let ball = match seat {
+                    Seat::Bed { ground } => {
+                        Solid::Inter(vec![ball, Solid::Prim(Prim::Slab { n: up, lo: ground, hi: dot(c, up) + reach + 1.0, c, half: reach + 1.0 })])
+                    }
+                    Seat::Neck => ball,
+                };
+                Solid::Union(vec![Solid::diff(b, vec![Solid::Prim(Prim::Sphere { c, r: reach })]), ball])
             }
+            JointGeom::Slider(ref w) => w.apply_b(b),
+            JointGeom::Bearing(ref r) => r.apply_b(b),
         }
     }
 
-    /// Ball joints: how far the ball reaches under the opening's edge (>= 0.3 mm keeps it captive).
+    /// A brake's shoe part with this joint's shoes: what of it lies in them.
+    pub fn apply_shoe(&self, shoe: Solid) -> Solid {
+        match self {
+            JointGeom::Hinge { at, axis, brake: Some(b), .. } => Solid::Inter(vec![shoe, b.shoes(*at, *axis)]),
+            _ => shoe,
+        }
+    }
+
+    /// The brake's shoe part, when it has one.
+    pub fn shoe(&self) -> Option<usize> {
+        match self {
+            JointGeom::Hinge { brake: Some(b), .. } => Some(b.shoe),
+            _ => None,
+        }
+    }
+
+    /// Ball joints: how far the ball reaches under the narrower opening's edge, the neck's or the
+    /// bed's (>= 0.3 mm keeps it captive).
     pub fn retention(&self) -> Option<f64> {
         match *self {
-            JointGeom::Ball { r, clr, rn, cone, .. } => {
+            JointGeom::Ball { c, r, clr, rn, cone, up, seat, .. } => {
                 let rc = r + clr;
                 let open = (cone + ((rn + clr) / rc).asin()).min(std::f64::consts::FRAC_PI_2);
-                Some(r - rc * open.sin())
+                let neck = r - rc * open.sin();
+                // on the bed it also passes the socket's opening there
+                let bed = match seat {
+                    Seat::Bed { ground } => r - (rc * rc - (dot(c, up) - ground).powi(2)).max(0.0).sqrt(),
+                    Seat::Neck => f64::INFINITY,
+                };
+                Some(neck.min(bed))
             }
-            _ => None,
+            JointGeom::Slider(ref w) => Some(w.chevron.retention()),
+            JointGeom::Bearing(ref r) => Some(r.chevron.retention()),
+            JointGeom::Hinge { .. } => None,
         }
     }
 }
@@ -471,6 +866,10 @@ pub fn assemble(parts: usize, joints: &[JointGeom], decls: &[JointDecl], anchors
         out[a] = g.apply_a(sa);
         let sb = std::mem::replace(&mut out[b], Solid::Part(b));
         out[b] = g.apply_b(sb);
+        if let Some(s) = g.shoe() {
+            let ss = std::mem::replace(&mut out[s], Solid::Part(s));
+            out[s] = g.apply_shoe(ss);
+        }
     }
     for (anchor, extent) in anchors {
         let s = std::mem::replace(&mut out[anchor.part], Solid::Part(anchor.part));

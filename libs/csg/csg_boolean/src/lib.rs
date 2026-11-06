@@ -8,6 +8,7 @@ pub mod boolean;
 pub mod cdt;
 pub mod classify;
 pub mod corefine;
+mod contact;
 pub mod thread_pool;
 pub mod tri_tri;
 
@@ -22,7 +23,13 @@ pub use tri_tri::{tri_tri_intersection, TriTriResult};
 mod star_prism_tests;
 
 #[cfg(test)]
+mod twisted_contact_tests;
+
+#[cfg(test)]
 mod coplanar_tests;
 
 #[cfg(test)]
 mod rounding_tests;
+
+#[cfg(test)]
+mod zero_contact_tests;
