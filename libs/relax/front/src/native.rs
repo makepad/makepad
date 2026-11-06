@@ -63,6 +63,12 @@ pub struct Built {
 
 const BUILD_DEPS: [&str; 6] = ["cc", "cmake", "pkg_config", "bindgen", "vcpkg", "nasm_rs"];
 
+/// Packages that keep `cc` as a build-dependency but compile nothing with it under a feature:
+/// (package, feature). blake3's `pure` leaves every C and assembly implementation out (its
+/// build.rs then only emits cfgs), so a build script that depends on it (OctoSense's app build
+/// scripts hash their assets) needs no C compiler and runs under Relax like any other.
+const C_FREE_WITH_FEATURE: [(&str, &str); 1] = [("blake3", "pure")];
+
 /// Why a package's build script is native, if it is.
 pub fn native_reason(g: &Graph, bs: &BuildScript) -> Option<String> {
     let (dir, name, _) = &g.pkg[bs.krate];
@@ -74,8 +80,9 @@ pub fn native_reason(g: &Graph, bs: &BuildScript) -> Option<String> {
     if links {
         return Some(format!("{}: links =", name));
     }
+    let c_free = C_FREE_WITH_FEATURE.iter().any(|(p, f)| p == name && bs.features.iter().any(|x| x == f));
     for (_, ext) in &bs.build_deps {
-        if BUILD_DEPS.contains(&ext.as_str()) {
+        if BUILD_DEPS.contains(&ext.as_str()) && !c_free {
             return Some(format!("{}: build-dependency {}", name, ext));
         }
     }
