@@ -54,6 +54,7 @@ pub const KHR_DISPLAY_NAME: &CStr = c"VK_KHR_display";
 pub const KHR_DRIVER_PROPERTIES_NAME: &CStr = c"VK_KHR_driver_properties";
 pub const KHR_EXTERNAL_MEMORY_FD_NAME: &CStr = c"VK_KHR_external_memory_fd";
 pub const KHR_EXTERNAL_SEMAPHORE_FD_NAME: &CStr = c"VK_KHR_external_semaphore_fd";
+pub const KHR_FORMAT_FEATURE_FLAGS_2_NAME: &CStr = c"VK_KHR_format_feature_flags2";
 pub const KHR_IMAGE_FORMAT_LIST_NAME: &CStr = c"VK_KHR_image_format_list";
 pub const KHR_PRESENT_ID_NAME: &CStr = c"VK_KHR_present_id";
 pub const KHR_PRESENT_WAIT_NAME: &CStr = c"VK_KHR_present_wait";
