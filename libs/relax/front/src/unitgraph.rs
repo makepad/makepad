@@ -847,12 +847,20 @@ fn run_one(sess: &std::sync::Arc<crate::Session>, bs: &BuildScript, raw: &[RawUn
         Ok(e) => e,
         Err(e) => return (Err(format!("this executable: {e}")), out_dir),
     };
-    // nesting: a build-dependency's own script runs inside a script's run (depth 2); anything
-    // deeper is a loop (MAKEPAD_RUN_SCRIPT_DEPTH counts the levels)
+    // nesting: a build-dependency's own script runs inside a script's run, and its
+    // build-dependencies' scripts inside that (an app's script hashes with blake3, whose script
+    // depends on libc's: three deep is ordinary). MAKEPAD_RUN_SCRIPT_DEPTH counts the levels and
+    // MAKEPAD_RUN_SCRIPT_CHAIN names the packages; a package already in the chain is a script
+    // running itself again, and a chain past eight is one nobody meant.
     let depth: u32 = std::env::var("MAKEPAD_RUN_SCRIPT_DEPTH").ok().and_then(|d| d.parse().ok()).unwrap_or(0) + 1;
-    if depth > 2 {
-        return (Err(format!("{}: build scripts nest {} deep (a script that runs itself again?); refused", bs.src_path, depth)), out_dir);
+    let chain = std::env::var("MAKEPAD_RUN_SCRIPT_CHAIN").unwrap_or_default();
+    if chain.split('>').any(|p| p == pname) {
+        return (Err(format!("{}: the build script of `{}` runs inside its own run ({} > {}); refused", bs.src_path, pname, chain, pname)), out_dir);
     }
+    if depth > 8 {
+        return (Err(format!("{}: build scripts nest {} deep ({}); refused", bs.src_path, depth, chain)), out_dir);
+    }
+    let chain = if chain.is_empty() { pname.to_string() } else { format!("{chain}>{pname}") };
     let mut cmd = std::process::Command::new(&exe);
     cmd.args(["run", "--quiet", "--silent", "--run-dir", target_dir, "--units", &units_path, "build-script-build"]);
     cmd.env("OUT_DIR", &out_dir)
@@ -875,6 +883,7 @@ fn run_one(sess: &std::sync::Arc<crate::Session>, bs: &BuildScript, raw: &[RawUn
         .env("RUSTDOC", "rustdoc")
         .env("MAKEPAD_RUN_AS_RUSTC", "1")
         .env("MAKEPAD_RUN_SCRIPT_DEPTH", depth.to_string())
+        .env("MAKEPAD_RUN_SCRIPT_CHAIN", &chain)
         .env_remove("MAKEPAD_RUN_SELF_EXEC")
         // the script is compiled and run for the machine (cargo: build scripts are host
         // artifacts); the target it builds for reaches it only as TARGET / CARGO_CFG_TARGET_*
